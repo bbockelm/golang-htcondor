@@ -1205,6 +1205,34 @@ stay right and only the detail stops. An unknown tool is recorded under
 the name the caller sent, truncated to 64 characters, which is why this
 bound exists at all.
 
+### The admin Usage page
+
+The web UI's **Usage** page (`/admin/usage`, admin only) shows the same
+counts with real user and client names: totals, then calls per tool, per
+user and per client, each split by outcome with distinct users or
+clients, mean duration, an approximate p95 and the time of the last
+call. Clicking a row, or choosing from the selectors, narrows every
+table to that tool, user or client.
+
+It reads `GET /api/v1/admin/usage`, which answers from the live
+in-memory counts, so it includes calls not yet written to the database.
+On a server with no application database it returns
+`{"enabled": false}`. Rows look like:
+
+```json
+{"name": "query_jobs", "calls": 412, "ok": 400, "error": 9, "refused": 0,
+ "unknown_tool": 3, "users": 7, "clients": 2, "avg_seconds": 0.21,
+ "p95_seconds": 0.5, "last_call": "2026-10-08T14:02:11Z"}
+```
+
+`p95_seconds` is the upper edge of the duration bucket holding the 95th
+percentile. When that lies past the last edge (300 s), it is `null` and
+`p95_over_seconds` gives the edge instead. `users` and `clients` do not
+count calls that carried no identity (`unknown`) or the overflow bucket
+(`other`). The response also carries `totals`, `by_tool`, `by_user`,
+`by_client`, the `filter` in force, and `options` (every tool, user
+and client, unfiltered).
+
 ### Usernames on /metrics
 
 The `user` label puts real account names on `/metrics`, alongside what
@@ -1225,6 +1253,9 @@ metrics key.
 - `/api/v1/admin/oauth2/clients`, `/api/v1/admin/oauth2/tokens`
 - `/api/v1/admin/api-keys`, `/api/v1/admin/api-keys/{key_id}`
 - `/api/v1/admin/logs`, `/api/v1/admin/condor-config`
+- `GET /api/v1/admin/usage` — MCP tool-call statistics by tool, user and
+  client (`?tool=`, `?user=`, `?client=` narrow them); see
+  [MCP tool-call statistics](#mcp-tool-call-statistics)
 
 **Placement** (admin-gated; only when a `condor_placementd` is reachable)
 - `GET /api/v1/placement/status` — feature probe; answers even with no

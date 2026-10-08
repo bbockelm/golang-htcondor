@@ -1044,6 +1044,46 @@ export interface AdminLogsResponse {
   entries: LogEntry[] | null;
 }
 
+// One aggregate of MCP tool calls: per tool, per user, per client, or
+// (with no name) the totals.
+export interface UsageRow {
+  name?: string;
+  calls: number;
+  ok: number;
+  error: number;
+  refused: number;
+  unknown_tool: number;
+  // Distinct identities behind the row, not counting calls that carried
+  // none.
+  users: number;
+  clients: number;
+  avg_seconds: number;
+  // Upper boundary of the histogram bucket holding the 95th percentile.
+  // null with p95_over_seconds set means "longer than that"; both
+  // absent means no call carried a duration distribution.
+  p95_seconds: number | null;
+  p95_over_seconds?: number;
+  last_call: string | null;
+}
+
+export interface UsageFilter {
+  tool?: string;
+  user?: string;
+  client?: string;
+}
+
+export interface AdminUsageResponse {
+  enabled: boolean;
+  // The rest is present only when enabled.
+  filter?: UsageFilter;
+  totals?: UsageRow;
+  by_tool?: UsageRow[];
+  by_user?: UsageRow[];
+  by_client?: UsageRow[];
+  // Every tool, user and client, unaffected by the filter.
+  options?: { tools: string[]; users: string[]; clients: string[] };
+}
+
 export interface AdminCondorConfigEntry {
   key: string;
   // Empty string when redacted=true (server scrubbed an apparent secret).
@@ -1704,6 +1744,16 @@ export const api = {
       }),
     logs: (limit?: number): Promise<AdminLogsResponse> =>
       fetchJSON(`${BASE}/admin/logs${limit ? `?limit=${limit}` : ""}`),
+    // MCP tool-call statistics, optionally narrowed to one tool, user
+    // and/or client. Aggregated server-side, including the filtered view.
+    usage: (filter?: UsageFilter): Promise<AdminUsageResponse> => {
+      const qs = new URLSearchParams();
+      if (filter?.tool) qs.set("tool", filter.tool);
+      if (filter?.user) qs.set("user", filter.user);
+      if (filter?.client) qs.set("client", filter.client);
+      const q = qs.toString();
+      return fetchJSON(`${BASE}/admin/usage${q ? "?" + q : ""}`);
+    },
     // Read the running HTCondor config (admin only). The backend
     // sorts keys case-insensitively and redacts password/secret/api-
     // key/etc.-named values with `redacted:true`. Filtering is
