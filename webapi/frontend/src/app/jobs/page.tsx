@@ -46,7 +46,11 @@ import {
   num,
   summarizeJobs,
   BATCH_PROJECTION,
+  type BatchKey,
 } from '@/lib/batches';
+import { useMultiAP } from '@/lib/multiap';
+import { ScheddFilter } from '@/components/ScheddFilter';
+import { SourcesBanner } from '@/components/SourcesBanner';
 
 // How many job ads to pull per request. The queue can be far larger than
 // this -- an access point with 30k queued jobs is ordinary -- so the
@@ -72,6 +76,10 @@ export default function JobsPage() {
   const isAdmin = !!session?.is_admin;
   // A project lead's "Everyone" is their own jobs plus their projects'.
   const isLead = (session?.project_lead_of?.length ?? 0) > 0;
+  // Several access points behind one server: an access point column and
+  // filter, and no actions.
+  const multiAP = useMultiAP();
+  const [schedd, setSchedd] = useState(searchParams.get('schedd') ?? '');
 
   // Shared with the dashboard and /archive; see lib/scope.ts.
   const [scope] = useScope();
@@ -135,7 +143,7 @@ export default function JobsPage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery<JobListResponse, Error>({
-    queryKey: ['jobs', scope, loadAll, constraint],
+    queryKey: ['jobs', scope, loadAll, constraint, schedd],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       api.jobs.list({
@@ -146,6 +154,7 @@ export default function JobsPage() {
         limit: loadAll ? '*' : PAGE_SIZE,
         page_token: pageParam as string | undefined,
         owned_by_me: ownedByMe,
+        schedd: multiAP && schedd ? schedd : undefined,
       }),
     // A token is only ever present when an htcondordb mirror served the
     // query; a live schedd cannot be paged through.
@@ -239,7 +248,7 @@ export default function JobsPage() {
   // Lifted state so the chat's client-side tools can drive the
   // table view: expanded-batch set and a brief highlight on a
   // specific job row. (The filter is lifted for the same reason.)
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [expanded, setExpanded] = useState<Set<BatchKey>>(new Set());
   const [highlighted, setHighlighted] = useState<string | null>(null); // "cluster.proc"
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -345,14 +354,22 @@ export default function JobsPage() {
         <span className="text-sm text-gray-500">
           One row per batch. Click a row to see the jobs in it.
         </span>
-        {(isAdmin || isLead) && <ScopeToggle />}
-        <Link
-          href="/submit"
-          className="ml-auto rounded-sm bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
-        >
-          + Submit a batch
-        </Link>
+        {(isAdmin || isLead) && !multiAP && <ScopeToggle />}
+        {multiAP ? (
+          <div className="ml-auto">
+            <ScheddFilter value={schedd} onChange={setSchedd} />
+          </div>
+        ) : (
+          <Link
+            href="/submit"
+            className="ml-auto rounded-sm bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
+          >
+            + Submit a batch
+          </Link>
+        )}
       </div>
+
+      <SourcesBanner sources={lastPage?.sources} />
 
       {/* Chat sits directly under the title, above the table. It's the
           primary affordance for "why is X held?" / "release my idle
@@ -379,11 +396,16 @@ export default function JobsPage() {
 
       {data && data.jobs.length === 0 && !constraint && (
         <p className="text-gray-500 text-sm">
-          No batches in the queue.{' '}
-          <Link href="/submit" className="text-brand-700 hover:underline">
-            Submit one
-          </Link>{' '}
-          to get started.
+          No batches in the queue.
+          {!multiAP && (
+            <>
+              {' '}
+              <Link href="/submit" className="text-brand-700 hover:underline">
+                Submit one
+              </Link>{' '}
+              to get started.
+            </>
+          )}
         </p>
       )}
 
@@ -473,6 +495,7 @@ export default function JobsPage() {
               setExpanded={setExpanded}
               highlighted={highlighted}
               onChange={() => refetch()}
+              multiAP={multiAP}
             />
           )}
         </>

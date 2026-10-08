@@ -13,6 +13,9 @@ interface SidebarProps {
   // privileges gated on separate groups.
   superuserAllowed?: boolean;
   superuserActive?: boolean;
+  // Several access points behind this server, read-only: the pages that
+  // submit or act on jobs are not offered.
+  multiAP?: boolean;
   // Mobile drawer state. On lg+ the sidebar is always visible and these
   // are ignored.
   open: boolean;
@@ -30,6 +33,14 @@ const NAV = [
   { href: '/info', label: 'Info' },
 ];
 
+// Multi-AP mode serves job and history reads only.
+const MULTI_AP_NAV = [
+  { href: '/', label: 'Dashboard' },
+  { href: '/jobs', label: 'Jobs' },
+  { href: '/archive', label: 'Archive' },
+  { href: '/aps', label: 'Access Points' },
+];
+
 const ADMIN_NAV = [
   { href: '/admin/placement', label: 'Placement' },
   { href: '/admin/clients', label: 'OAuth2 Clients' },
@@ -44,6 +55,7 @@ export function Sidebar({
   isAdmin,
   superuserAllowed,
   superuserActive,
+  multiAP,
   open,
   onClose,
 }: SidebarProps) {
@@ -94,7 +106,7 @@ export function Sidebar({
         </div>
 
         <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
-          {NAV.map((item) => (
+          {(multiAP ? MULTI_AP_NAV : NAV).map((item) => (
             <NavLink
               key={item.href}
               href={item.href}
@@ -110,7 +122,7 @@ export function Sidebar({
               <div className="mb-1 mt-5 px-3 text-[10px] uppercase tracking-wider text-gray-500">
                 Admin
               </div>
-              {ADMIN_NAV.map((item) => (
+              {ADMIN_NAV.filter((item) => !multiAP || item.href !== '/admin/placement').map((item) => (
                 <NavLink
                   key={item.href}
                   href={item.href}

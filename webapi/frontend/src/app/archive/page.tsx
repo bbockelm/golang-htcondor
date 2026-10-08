@@ -34,9 +34,15 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import {
   api,
   ApiError,
+  jobIdOf,
+  scheddOf,
   type ClassAd,
   type HistoryListResponse,
+  type Sources,
 } from '@/lib/api';
+import { useMultiAP } from '@/lib/multiap';
+import { ScheddFilter } from '@/components/ScheddFilter';
+import { SourcesBanner } from '@/components/SourcesBanner';
 import { ChatPanel } from '@/components/ChatPanel';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 import { FilterControls, type FilterMode } from '@/components/FilterControls';
@@ -73,6 +79,9 @@ const PAGE_SIZE = LISTING_PAGE_SIZE;
 interface PageCursor {
   beforeCluster?: number;
   beforeProc?: number;
+  // Multi-AP mode: the server's page token. A cluster.proc keyset does
+  // not identify a position across access points.
+  pageToken?: string;
 }
 
 // PageData: what each useInfiniteQuery page returns. Carries the
@@ -81,6 +90,7 @@ interface PageCursor {
 interface PageData {
   ads: ClassAd[];
   nextCursor: PageCursor | null;
+  sources?: Sources;
 }
 
 export default function ArchivePage() {
@@ -110,6 +120,7 @@ export default function ArchivePage() {
     queryFn: api.auth.me,
   });
   const isAdmin = !!session?.is_admin;
+  const multiAP = useMultiAP();
   const [scope] = useScope();
   const ownedByMe = scope === 'mine';
 
@@ -120,6 +131,7 @@ export default function ArchivePage() {
   const searchParams = useSearchParams();
   const urlConstraint = searchParams.get('constraint') ?? undefined;
   const why = searchParams.get('why') ?? undefined;
+  const [schedd, setSchedd] = useState(searchParams.get('schedd') ?? '');
 
   // The drill-in constraint and a user expression both narrow; ANDing
   // them keeps the banner's promise true while the user refines inside
@@ -139,10 +151,24 @@ export default function ArchivePage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery<PageData, Error>({
-    queryKey: ['jobs', 'archive', scope, constraint],
+    queryKey: ['jobs', 'archive', scope, constraint, multiAP, schedd],
     initialPageParam: { beforeCluster: undefined, beforeProc: undefined } as PageCursor,
     queryFn: async ({ pageParam }) => {
       const cursor = pageParam as PageCursor;
+      if (multiAP) {
+        const resp: HistoryListResponse = await api.jobs.archive({
+          constraint,
+          projection: PROJECTION,
+          limit: PAGE_SIZE,
+          page_token: cursor.pageToken,
+          schedd: schedd || undefined,
+        });
+        return {
+          ads: resp.ads ?? [],
+          nextCursor: resp.next_page_token ? { pageToken: resp.next_page_token } : null,
+          sources: resp.sources,
+        };
+      }
       const resp: HistoryListResponse = await api.jobs.archive({
         constraint,
         projection: PROJECTION,
@@ -273,7 +299,8 @@ export default function ArchivePage() {
         <span className="text-sm text-gray-500">
           Completed and removed jobs from the schedd&apos;s history.
         </span>
-        {isAdmin && <ScopeToggle />}
+        {isAdmin && !multiAP && <ScopeToggle />}
+        {multiAP && <ScheddFilter value={schedd} onChange={setSchedd} />}
         <Link
           href="/jobs"
           className="ml-auto text-sm text-brand-700 hover:underline"
@@ -281,6 +308,8 @@ export default function ArchivePage() {
           ← Back to live jobs
         </Link>
       </div>
+
+      <SourcesBanner sources={data?.pages[data.pages.length - 1]?.sources} />
 
       <ChatPanel
         visible={chatVisible}
@@ -374,7 +403,7 @@ export default function ArchivePage() {
 
       {ads.length > 0 && (
         <>
-          <ArchiveTable ads={filteredAds} onOwner={setOwner} />
+          <ArchiveTable ads={filteredAds} onOwner={setOwner} multiAP={multiAP} />
           <div className="flex items-center justify-between gap-3 text-xs text-gray-500">
             <span>
               Showing {filteredAds.length.toLocaleString()}
@@ -415,9 +444,11 @@ export default function ArchivePage() {
 function ArchiveTable({
   ads,
   onOwner,
+  multiAP,
 }: {
   ads: ClassAd[];
   onOwner: (owner: string) => void;
+  multiAP?: boolean;
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
@@ -425,6 +456,7 @@ function ArchiveTable({
         <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
           <tr>
             <th className="px-3 py-2">Job</th>
+            {multiAP && <th className="px-3 py-2">Access point</th>}
             <th className="px-3 py-2">Status</th>
             <th className="px-3 py-2">Owner</th>
             <th className="px-3 py-2">Batch</th>
@@ -438,7 +470,7 @@ function ArchiveTable({
           {ads.length === 0 ? (
             <tr>
               <td
-                colSpan={8}
+                colSpan={multiAP ? 9 : 8}
                 className="px-3 py-4 text-center text-xs text-gray-500"
               >
                 No matches.
@@ -446,7 +478,7 @@ function ArchiveTable({
             </tr>
           ) : (
             ads.map((ad) => (
-              <ArchiveRow key={archiveKey(ad)} ad={ad} onOwner={onOwner} />
+              <ArchiveRow key={archiveKey(ad)} ad={ad} onOwner={onOwner} multiAP={multiAP} />
             ))
           )}
         </tbody>
@@ -458,14 +490,17 @@ function ArchiveTable({
 function ArchiveRow({
   ad,
   onOwner,
+  multiAP,
 }: {
   ad: ClassAd;
   onOwner: (owner: string) => void;
+  multiAP?: boolean;
 }) {
   const router = useRouter();
   const cluster = num(ad.ClusterId);
   const proc = num(ad.ProcId);
-  const id = `${cluster ?? '?'}.${proc ?? 0}`;
+  // Multi-AP rows carry the complete id the server rendered.
+  const id = jobIdOf(ad) ?? `${cluster ?? '?'}.${proc ?? 0}`;
   const status = archiveStatus(ad);
   const owner = str(ad.Owner);
   const batch = str(ad.JobBatchName);
@@ -479,7 +514,7 @@ function ArchiveRow({
   // expanded-batch row pattern: clicking anywhere outside a nested
   // link opens the detail page.
   const navigable = cluster !== undefined;
-  const href = `/archive/${id}`;
+  const href = `/archive/${encodeURIComponent(id)}`;
 
   return (
     <tr
@@ -502,6 +537,9 @@ function ArchiveRow({
           id
         )}
       </td>
+      {multiAP && (
+        <td className="px-3 py-2 font-mono text-xs text-gray-700">{scheddOf(ad) ?? '—'}</td>
+      )}
       <td className="px-3 py-2">
         <span
           className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${status.cls}`}
@@ -578,7 +616,9 @@ function humanRuntime(secs: number | undefined): string {
 // is stable across reorders, AND a job that ran twice (epoch
 // re-entry) shows two rows with distinct keys.
 function archiveKey(ad: ClassAd): string {
-  return `${num(ad.ClusterId) ?? '?'}.${num(ad.ProcId) ?? '?'}@${num(ad.CompletionDate) ?? 0}`;
+  const base = `${num(ad.ClusterId) ?? '?'}.${num(ad.ProcId) ?? '?'}@${num(ad.CompletionDate) ?? 0}`;
+  const schedd = scheddOf(ad);
+  return schedd ? `${schedd}\u0000${base}` : base;
 }
 
 function num(v: unknown): number | undefined {

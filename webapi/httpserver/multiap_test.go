@@ -258,6 +258,10 @@ func TestMultiAPAPsAndReadyz(t *testing.T) {
 		t.Errorf("aps = %+v", aps)
 	}
 
+	if rec := doAs(t, srv, "", http.MethodGet, "/api/v1/auth/me"); !strings.Contains(rec.Body.String(), `"multi_ap":true`) {
+		t.Errorf("auth/me does not tell the web UI it is in multi-AP mode: %s", rec.Body.String())
+	}
+
 	rec = doAs(t, srv, "", http.MethodGet, "/readyz")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ap3.example.org"`) {
 		t.Errorf("readyz with one AP absent must stay ready: %d %s", rec.Code, rec.Body.String())

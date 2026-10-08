@@ -6,7 +6,14 @@
 // group them, filter them, total their resources -- so the answers live
 // here rather than in either page.
 
-import { displayJobStatus, type ClassAd, type DisplayStatus, type DisplayStatusInfo } from '@/lib/api';
+import {
+  displayJobStatus,
+  jobIdOf,
+  scheddOf,
+  type ClassAd,
+  type DisplayStatus,
+  type DisplayStatusInfo,
+} from '@/lib/api';
 
 // Attributes every batch listing needs. QDate has to be asked for
 // explicitly: the schedd does not backfill it, and the submit path sets it
@@ -24,6 +31,9 @@ export interface Batch {
   // cluster (the `+N` in JobBatchName), which is stable across the whole
   // workflow; for anything else it is the group's (smallest) ClusterId.
   batchID: number;
+  // The access point the batch is on, in multi-AP mode. Cluster ids are
+  // per access point, so two access points' cluster 12 are two batches.
+  schedd?: string;
   // Display name: for a DAG the dag file name with the `+<root>` suffix
   // stripped, else JobBatchName if set, else the batch id.
   name: string;
@@ -59,8 +69,10 @@ export interface Batch {
 }
 
 export interface BatchJob {
-  // Display id used in URLs ("3.0").
+  // Display id used in URLs: "3.0", or in multi-AP mode the server's
+  // job_id ("3.0@ap1.example.org").
   id: string;
+  schedd?: string;
   cluster: number; // ClusterId
   jobIdx: number; // ProcId
   display: DisplayStatusInfo;
@@ -84,6 +96,7 @@ function escapeClassAdString(s: string): string {
 
 // One group's running accumulator before we finalize it into a Batch.
 interface BatchAcc {
+  schedd?: string;
   batchName?: string;
   owner?: string;
   cmd?: string;
@@ -111,13 +124,18 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
     if (cluster === undefined) continue;
     const owner = str(j.Owner);
     const batchName = str(j.JobBatchName);
-    const key = batchName
+    const schedd = scheddOf(j);
+    const base = batchName
       ? `${owner ?? ''}\u0000${batchName}`
       : `cluster\u0000${cluster}`;
+    // Batches never span access points: a cluster id, and a batch name,
+    // is only unique within one.
+    const key = schedd ? `${schedd}\u0001${base}` : base;
 
     let a = map.get(key);
     if (!a) {
       a = {
+        schedd,
         batchName,
         owner,
         cmd: str(j.Cmd),
@@ -149,7 +167,8 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
     if (!a.args) a.args = str(j.Args);
 
     a.jobs.push({
-      id: `${cluster}.${proc ?? 0}`,
+      id: jobIdOf(j) ?? `${cluster}.${proc ?? 0}`,
+      schedd,
       cluster,
       jobIdx: proc ?? 0,
       display,
@@ -198,6 +217,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
 
     batches.push({
       batchID,
+      schedd: a.schedd,
       name,
       owner: a.owner,
       cmd: a.cmd,
@@ -217,6 +237,14 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
   return batches.sort((a, b) => b.batchID - a.batchID);
 }
 
+// BatchKey identifies a batch row: its cluster id, or in multi-AP mode
+// the access point and cluster id together.
+export type BatchKey = number | string;
+
+export function batchKey(b: Batch): BatchKey {
+  return b.schedd ? `${b.schedd}\u0000${b.batchID}` : b.batchID;
+}
+
 // applyBatchFilter does the user-facing substring filter. Both the
 // filter input and the chat's `set_filter` tool drive this. We match
 // against a flat string built per batch — every field a user might
@@ -234,6 +262,7 @@ export function applyBatchFilter(batches: Batch[], query: string): Batch[] {
     const haystack = [
       b.name,
       String(b.batchID),
+      b.schedd ?? '',
       b.owner ?? '',
       b.cmd ?? '',
       b.args ?? '',

@@ -33,7 +33,7 @@ function watchForErrors(page: import('@playwright/test').Page) {
   return errors;
 }
 
-for (const path of ['/', '/jobs', '/issues', '/submit', '/interactive']) {
+for (const path of ['/', '/jobs', '/issues', '/submit', '/interactive', '/aps']) {
   test(`renders ${path} without page errors`, async ({ page }) => {
     const errors = watchForErrors(page);
     const res = await page.goto(path);

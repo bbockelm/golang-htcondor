@@ -27,6 +27,7 @@ import {
   num,
   summarizeJobs,
   BATCH_PROJECTION,
+  type BatchKey,
 } from '@/lib/batches';
 
 const PAGE_SIZE = LISTING_PAGE_SIZE;
@@ -51,7 +52,7 @@ export default function UserDetailClient() {
 
   const [filter, setFilter] = useState('');
   const [statuses, setStatuses] = useState<Set<DisplayStatus>>(new Set());
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [expanded, setExpanded] = useState<Set<BatchKey>>(new Set());
 
   const toggleStatus = useCallback((key: DisplayStatus) => {
     setStatuses((prev) => {

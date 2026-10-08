@@ -15,6 +15,7 @@ import {
   type DisplayStatus,
 } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
+import { useMultiAPMode } from '@/lib/multiap';
 import { summarizeRequirements, standardLabels } from '@/lib/requirements';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
@@ -36,13 +37,15 @@ export default function JobDetailClient(_props: {
   // via useResolvedParams instead — see frontend/src/lib/useResolvedParams.ts.
 }) {
   const { id } = useResolvedParams<{ id: string }>('/jobs/[id]');
+  const mode = useMultiAPMode();
   const { data, isLoading, error } = useQuery({
     queryKey: ['job', id],
     queryFn: () => api.jobs.get(id),
     refetchInterval: 10_000,
     // id is "" briefly during initial client hydration if the pathname
-    // hasn't been read yet; skip those calls.
-    enabled: !!id && id !== '_',
+    // hasn't been read yet; skip those calls. Multi-AP mode reads the
+    // job in MultiAPJobView.
+    enabled: !!id && id !== '_' && mode === false,
     // A 404 is an answer, not a failure to get one. Retrying it three
     // times with backoff would spend seconds re-asking a question the
     // schedd has already answered, and this page has somewhere to go
@@ -65,7 +68,7 @@ export default function JobDetailClient(_props: {
     // Existence is the whole question here; the archive page it
     // redirects to fetches the full ad for itself.
     queryFn: () => api.jobs.archiveOne(id, 'ClusterId,ProcId'),
-    enabled: goneFromQueue && !!id && id !== '_',
+    enabled: goneFromQueue && !!id && id !== '_' && mode === false,
     staleTime: Infinity,
     retry: false,
   });
@@ -118,6 +121,13 @@ export default function JobDetailClient(_props: {
   // Split "<batch>.<job>" — id is e.g. "3.0" where 3 is the batch
   // (cluster) id and 0 is the job (proc) index inside it.
   const [batchID, jobIdx] = id.split('.');
+
+  if (mode === undefined) {
+    return <p className="text-gray-400">Loading...</p>;
+  }
+  if (mode) {
+    return <MultiAPJobView id={id} archivedView={false} />;
+  }
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -217,6 +227,137 @@ export default function JobDetailClient(_props: {
       )}
 
       {data && <JobDetail jobID={id} job={data} />}
+    </div>
+  );
+}
+
+// MultiAPJobView is the job page in multi-AP mode, for both /jobs/[id]
+// and /archive/[id]. The id segment is the server's job_id ("12.0@ap1");
+// an incomplete "12.0" is resolved by the server, and the URL is then
+// completed. The server serves reads only here, so the page shows the
+// job's ad and nothing that acts on the job or reaches into it.
+export function MultiAPJobView({ id, archivedView }: { id: string; archivedView: boolean }) {
+  const router = useRouter();
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['job', id],
+    queryFn: () => api.jobs.get(id),
+    refetchInterval: archivedView ? false : 10_000,
+    enabled: !!id && id !== '_',
+    retry: (count, err) =>
+      !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 3,
+  });
+  const jobID = typeof data?.job_id === 'string' ? data.job_id : id;
+  const archived = data?.archived === true;
+
+  // A queued job belongs on /jobs and a finished one on /archive; either
+  // way the URL carries the complete id.
+  useEffect(() => {
+    if (!data) return;
+    const want = archived ? '/archive' : '/jobs';
+    if (archived !== archivedView || jobID !== id) {
+      router.replace(`${want}/${encodeURIComponent(jobID)}`);
+    }
+  }, [data, archived, archivedView, jobID, id, router]);
+
+  const now = useNowTick(60_000);
+  const candidates = error instanceof ApiError ? error.candidates : undefined;
+  const schedd = typeof data?.schedd === 'string' ? data.schedd : undefined;
+  const degraded = data?.degraded as { state?: string; staleness_seconds?: number } | undefined;
+
+  return (
+    <div className="space-y-6 max-w-4xl">
+      <div className="flex items-center gap-3 flex-wrap">
+        <Link
+          href={archivedView ? '/archive' : '/jobs'}
+          className="text-sm text-gray-500 hover:text-gray-700"
+        >
+          {archivedView ? '← Archive' : '← All batches'}
+        </Link>
+        <h1 className="text-2xl font-bold text-gray-900">
+          Job {data ? String(data.proc) : '…'}
+          <span className="ml-2 text-base font-normal text-gray-500">
+            in batch {data ? String(data.cluster) : '…'}
+            {schedd && <> on {schedd}</>}
+          </span>
+        </h1>
+        {archived && (
+          <span className="ml-2 inline-flex items-center rounded-full bg-gray-200 px-2 py-0.5 text-xs font-medium text-gray-700">
+            archived
+          </span>
+        )}
+      </div>
+
+      {isLoading && <p className="text-gray-400">Loading...</p>}
+
+      {candidates && candidates.length > 0 ? (
+        <div className="rounded-sm border border-gray-200 bg-white p-3 text-sm text-gray-700">
+          <p>Job {id} exists on more than one access point:</p>
+          <ul className="mt-2 list-disc pl-5">
+            {candidates.map((c) => (
+              <li key={c.job_id}>
+                <Link
+                  href={`/${c.archived ? 'archive' : 'jobs'}/${encodeURIComponent(c.job_id)}`}
+                  className="font-mono text-brand-700 hover:underline"
+                >
+                  {c.job_id}
+                </Link>
+                {c.archived && <span className="ml-2 text-gray-500">archived</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        error && (
+          <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {(error as Error).message}
+          </div>
+        )
+      )}
+
+      {degraded && (
+        <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          Data from {schedd} may be out of date ({degraded.state}
+          {degraded.staleness_seconds !== undefined && `, ${degraded.staleness_seconds} s behind`}).
+        </div>
+      )}
+
+      {data && (
+        <>
+          <div className="rounded-sm border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
+            <Field
+              label="Status"
+              value={
+                <StatusBadge
+                  display={displayJobStatus({
+                    status: data.JobStatus as number | string | null | undefined,
+                    holdReasonCode: data.HoldReasonCode as number | string | null | undefined,
+                  })}
+                />
+              }
+            />
+            <Field label="Access point" value={schedd ?? '—'} mono />
+            <Field label="Owner" value={str(data.Owner) ?? '—'} />
+            <Field
+              label="Submitted"
+              value={num(data.QDate) ? new Date(num(data.QDate)! * 1000).toLocaleString() : '—'}
+              sub={num(data.QDate) ? `${humanDuration(now - num(data.QDate)!)} ago` : undefined}
+            />
+            <Field
+              label="Completed"
+              value={
+                num(data.CompletionDate)
+                  ? new Date(num(data.CompletionDate)! * 1000).toLocaleString()
+                  : '—'
+              }
+            />
+            <Field label="Command" value={str(data.Cmd) ?? '—'} mono full />
+            {str(data.Args) && <Field label="Arguments" value={str(data.Args)!} mono full />}
+            {str(data.HoldReason) && <Field label="Hold Reason" value={str(data.HoldReason)!} full warn />}
+          </div>
+          <RequirementsSection job={data} />
+          <JobDetailsSection jobID={jobID} job={data} editable={false} />
+        </>
+      )}
     </div>
   );
 }

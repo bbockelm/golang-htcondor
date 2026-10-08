@@ -55,6 +55,9 @@ type AuthMeResponse struct {
 	// Leads may list their projects' jobs without arming, the way admins
 	// may list everyone's, so the UI offers them the same scope toggle.
 	ProjectLeadOf []string `json:"project_lead_of,omitempty"`
+	// MultiAP reports that this server fronts several access points and
+	// serves reads only; the SPA shows the AP column and hides actions.
+	MultiAP bool `json:"multi_ap,omitempty"`
 }
 
 // handleAuthMe handles GET /api/v1/auth/me. Resolves the browser session
@@ -67,7 +70,7 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := AuthMeResponse{Authenticated: false}
+	resp := AuthMeResponse{Authenticated: false, MultiAP: s.multi != nil}
 
 	if session, ok := s.getSessionFromRequest(r); ok {
 		resp.Authenticated = true

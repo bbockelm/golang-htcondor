@@ -15,6 +15,7 @@ import {
 import { useActivityStream } from '@/lib/useActivityStream';
 import { jobsDrilldown, statusConstraint } from '@/lib/drilldown';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
+import { AccessPointsTable } from '@/components/AccessPointsTable';
 
 export default function Dashboard() {
   const { data: session, isLoading: sessionLoading } = useQuery({
@@ -30,11 +31,38 @@ export default function Dashboard() {
     return <LandingPage />;
   }
 
+  if (session.multi_ap) {
+    return <MultiAPDashboard />;
+  }
+
   return (
     <AuthenticatedDashboard
       username={session.username ?? ''}
       isAdmin={!!session.is_admin}
     />
+  );
+}
+
+// MultiAPDashboard is the home page when this server fronts several
+// access points: where your jobs are, and how current each one is.
+function MultiAPDashboard() {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-baseline gap-3 flex-wrap">
+        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+        <span className="text-sm text-gray-500">
+          Your jobs on every access point.{' '}
+          <Link href="/jobs" className="text-brand-700 hover:underline">
+            Jobs
+          </Link>{' '}
+          ·{' '}
+          <Link href="/archive" className="text-brand-700 hover:underline">
+            Archive
+          </Link>
+        </span>
+      </div>
+      <AccessPointsTable />
+    </div>
   );
 }
 
