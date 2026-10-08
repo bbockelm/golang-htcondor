@@ -86,16 +86,16 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 
 	// --- read-only, closed world: static docs, skills, and this server's
 	// own version and watch bookkeeping ---
-	"condor_doc_job_attributes":     readOnlyAnn(false),
-	"condor_doc_machine_attributes": readOnlyAnn(false),
-	"condor_doc_submit_syntax":      readOnlyAnn(false),
-	"condor_doc_config_variables":   readOnlyAnn(false),
-	"condor_doc_search":             readOnlyAnn(false),
-	"skills_list":                   readOnlyAnn(false),
-	"skills_get":                    readOnlyAnn(false),
-	"get_version":                   readOnlyAnn(false),
-	"whoami":                        readOnlyAnn(false),
-	"check_watches":                 readOnlyAnn(false),
+	"doc_job_attributes":     readOnlyAnn(false),
+	"doc_machine_attributes": readOnlyAnn(false),
+	"doc_submit_syntax":      readOnlyAnn(false),
+	"doc_config_variables":   readOnlyAnn(false),
+	"doc_search":             readOnlyAnn(false),
+	"skills_list":            readOnlyAnn(false),
+	"skills_get":             readOnlyAnn(false),
+	"get_version":            readOnlyAnn(false),
+	"whoami":                 readOnlyAnn(false),
+	"check_watches":          readOnlyAnn(false),
 	// analyze_issues reads the queue and run-attempt history and groups
 	// what it finds. Open-world: what it reports depends on what the
 	// access point is doing, so two calls a minute apart legitimately

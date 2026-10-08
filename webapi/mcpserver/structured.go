@@ -369,13 +369,13 @@ var outputSchemas = map[string]map[string]interface{}{
 	}, "service", "deleted"),
 
 	// --- documentation & skills --------------------------------------
-	// Every condor_doc_* tool funnels through toolCondorDocSearch and
+	// Every doc_* tool funnels through toolCondorDocSearch and
 	// returns the same snippet-search shape.
-	"condor_doc_search":             docSearchSchema(),
-	"condor_doc_job_attributes":     docSearchSchema(),
-	"condor_doc_machine_attributes": docSearchSchema(),
-	"condor_doc_submit_syntax":      docSearchSchema(),
-	"condor_doc_config_variables":   docSearchSchema(),
+	"doc_search":             docSearchSchema(),
+	"doc_job_attributes":     docSearchSchema(),
+	"doc_machine_attributes": docSearchSchema(),
+	"doc_submit_syntax":      docSearchSchema(),
+	"doc_config_variables":   docSearchSchema(),
 	"skills_list": obj(map[string]interface{}{
 		"skills": arr(obj(map[string]interface{}{
 			"name":        strSchema,
@@ -501,7 +501,7 @@ func jobOutputStreamSchema() map[string]interface{} {
 	}, "job_id", "output_type")
 }
 
-// docSearchSchema is the result shape shared by every condor_doc_* tool:
+// docSearchSchema is the result shape shared by every doc_* tool:
 // a set of snippet hits, each carrying page/source/line provenance.
 func docSearchSchema() map[string]interface{} {
 	return obj(map[string]interface{}{

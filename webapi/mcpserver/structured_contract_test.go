@@ -523,11 +523,11 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"delete_service_credential", map[string]interface{}{
 			"service": "s", "handle": "", "deleted": true}},
 
-		{"condor_doc_search", docEmpty()},
-		{"condor_doc_job_attributes", docEmpty()},
-		{"condor_doc_machine_attributes", docEmpty()},
-		{"condor_doc_submit_syntax", docEmpty()},
-		{"condor_doc_config_variables", docEmpty()},
+		{"doc_search", docEmpty()},
+		{"doc_job_attributes", docEmpty()},
+		{"doc_machine_attributes", docEmpty()},
+		{"doc_submit_syntax", docEmpty()},
+		{"doc_config_variables", docEmpty()},
 		{"skills_list", map[string]interface{}{"skills": []interface{}(nil), "count": 0}},
 		{"skills_get", map[string]interface{}{"name": "n", "description": "", "content": ""}},
 
@@ -557,7 +557,7 @@ func emptyCases(t *testing.T) []emptyCase {
 	}
 }
 
-// docEmpty is the no-hits payload every condor_doc_* tool shares.
+// docEmpty is the no-hits payload every doc_* tool shares.
 func docEmpty() map[string]interface{} {
 	return map[string]interface{}{"query": "x", "results": []interface{}{}, "count": 0}
 }
