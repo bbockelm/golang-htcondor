@@ -814,6 +814,57 @@ func loadInteractiveRequirements(cfg *config.Config, logger *logging.Logger) str
 }
 
 // firstConfigValue returns a config value, or "" when unset.
+// resolveJobQueueLog finds the schedd's job_queue.log for the job
+// change stream, or returns "" to leave the stream switched off.
+//
+// /api/v1/jobs/watch needs to tail that file. The field carrying its
+// path existed and was plumbed all the way to the handler, but nothing
+// ever set it -- so the mirror was nil everywhere, and the endpoint
+// answered 503 "job queue mirror not configured" on every deployment
+// there has ever been. Nothing said so: the message reads like a
+// missing setting, and the setting it names did not exist.
+//
+// HTTP_API_JOB_QUEUE_LOG is the explicit knob, and "none" switches the
+// stream off. Without it, JOB_QUEUE_LOG is used when the file is
+// actually there, which is the case where this server shares a host
+// with its schedd. Where it does not -- an API server in its own
+// container, which is the usual deployment -- there is nothing to
+// tail, and that is not a misconfiguration to warn about on every
+// start.
+func resolveJobQueueLog(cfg *config.Config, logger *logging.Logger) string {
+	if configured := strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_JOB_QUEUE_LOG")); configured != "" {
+		if strings.EqualFold(configured, "none") {
+			logger.Info(logging.DestinationHTTP, "The job change stream is switched off by configuration")
+			return ""
+		}
+		// Named explicitly, so a path that is not there is an operator
+		// error and worth saying out loud rather than passing over.
+		if _, err := os.Stat(configured); err != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"HTTP_API_JOB_QUEUE_LOG names a file that cannot be read; the job change stream will be unavailable",
+				"path", configured, "error", err)
+			return ""
+		}
+		return configured
+	}
+
+	fallback := strings.TrimSpace(firstConfigValue(cfg, "JOB_QUEUE_LOG"))
+	if fallback == "" {
+		return ""
+	}
+	if _, err := os.Stat(fallback); err != nil {
+		// The ordinary case for an API server that does not share a
+		// host with its schedd. Logged at debug: it is a fact about
+		// the deployment, not a fault in it.
+		logger.Debug(logging.DestinationHTTP,
+			"No readable job_queue.log, so the job change stream is unavailable",
+			"path", fallback, "error", err)
+		return ""
+	}
+	logger.Info(logging.DestinationHTTP, "Following the job queue for the change stream", "path", fallback)
+	return fallback
+}
+
 func firstConfigValue(cfg *config.Config, knob string) string {
 	if v, ok := cfg.Get(knob); ok {
 		return v
@@ -1912,6 +1963,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	tokenRetention := loadTokenRetention(cfg, logger)
 	mcpUseSDKTransport := loadMCPUseSDKTransport(cfg, logger)
 	requiredCredentials := loadRequiredCredentials(cfg, logger)
+	jobQueueLogPath := resolveJobQueueLog(cfg, logger)
 	creddAddress := firstConfigValue(cfg, "HTTP_API_CREDD_ADDRESS")
 	if creddAddress != "" {
 		logger.Info(logging.DestinationHTTP, "HTTP_API_CREDD_ADDRESS configured", "address", creddAddress)
@@ -2002,6 +2054,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		JupyterKernelIdleSec:       loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_KERNEL_IDLE_SEC", defaultJupyterKernelIdleSec),
 		InteractiveExtraSubmit:     loadInteractiveExtraSubmit(cfg),
 		DagmanPath:                 firstConfigValue(cfg, "HTTP_API_DAGMAN_PATH"),
+		JobQueueLogPath:            jobQueueLogPath,
 		DagmanEnvironment:          loadDagmanEnvironment(cfg, logger),
 		InteractiveRequirements:    loadInteractiveRequirements(cfg, logger),
 		VSCodeImage:                firstConfigValue(cfg, "HTTP_API_VSCODE_IMAGE"),
