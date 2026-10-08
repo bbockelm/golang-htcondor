@@ -371,8 +371,7 @@ export default function JupyterDetailClient() {
 
       {status === 'gone' && (
         <Banner kind="info">
-          No such session. It may have been closed or the API server may
-          have restarted (sessions don&apos;t survive restarts).{' '}
+          No such session. It may have ended or been closed.{' '}
           <Link href="/interactive" className="underline">
             Back to sessions
           </Link>

@@ -83,11 +83,13 @@ type Instance struct {
 	// Used by the proxy handler for ACL checks.
 	Owner string
 
-	// Free-form metadata the submitter wants to remember (e.g. cluster id,
-	// docker image). The registry never reads this.
-	Meta map[string]string
-
-	mu      sync.Mutex
+	mu sync.Mutex
+	// meta is free-form metadata the submitter wants to remember (e.g.
+	// cluster id, docker image); the registry never interprets it. Guarded
+	// by mu: the creator stamps the cluster id on an instance the registry
+	// has already published, while list and detail requests read it. Use
+	// MetaValue and SetMeta.
+	meta    map[string]string
 	tunnel  *yamux.Session // nil until helper connects back
 	pending *signedToken   // bookkeeping copy for token expiry
 	// nextToken is the token this session will accept on its next dial,
@@ -175,7 +177,9 @@ func (i *Instance) Subscribe(bufSize int) (<-chan Event, func()) {
 func (i *Instance) publish(kind EventKind) {
 	ev := Event{Kind: kind, At: time.Now()}
 	if kind == EventTunnelConnected {
-		ev.Meta = copyMeta(i.Meta) // snapshot at moment of connect
+		i.mu.Lock()
+		ev.Meta = copyMeta(i.meta) // snapshot at moment of connect
+		i.mu.Unlock()
 	}
 	i.subscribersMu.Lock()
 	if i.lastEvents == nil {
@@ -370,6 +374,23 @@ func (r *Registry) PendingNonce(instanceID string) ([]byte, bool) {
 	return nonce, true
 }
 
+// MetaValue returns one metadata value, or "".
+func (i *Instance) MetaValue(key string) string {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.meta[key]
+}
+
+// SetMeta records one metadata value.
+func (i *Instance) SetMeta(key, value string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.meta == nil {
+		i.meta = make(map[string]string)
+	}
+	i.meta[key] = value
+}
+
 // NextToken is the token this instance will accept on its next dial, or "".
 func (i *Instance) NextToken() string {
 	i.mu.Lock()
@@ -417,7 +438,7 @@ func (r *Registry) CreateInstance(opts CreateInstanceOptions) (id string, token 
 		ID:      formatInstanceID(rawID),
 		Created: time.Now(),
 		Owner:   opts.Owner,
-		Meta:    copyMeta(opts.Meta),
+		meta:    copyMeta(opts.Meta),
 		pending: &parsed,
 	}
 
@@ -457,7 +478,7 @@ func (r *Registry) AdoptInstance(id, owner string, created time.Time, meta map[s
 		ID:      id,
 		Created: created,
 		Owner:   owner,
-		Meta:    copyMeta(meta),
+		meta:    copyMeta(meta),
 	}
 	r.instances[id] = inst
 	return inst, nil

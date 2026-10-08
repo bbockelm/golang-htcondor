@@ -503,3 +503,49 @@ func proxyThrough(t *testing.T, h *Handler, instanceID string) string {
 	}
 	return w.Body.String()
 }
+
+// Create stamps the cluster id on an instance the registry has already
+// published, so list and GET can be reading it at that moment. Run with
+// -race: the cluster id was written to a bare map, unsynchronized.
+func TestJupyterCreateCompletesWhileListAndGetRead(t *testing.T) {
+	stubJupyterHelper(t)
+	schedd := newJupyterFakeSchedd()
+	h := newJupyterRestartHandler(t, filepath.Join(t.TempDir(), "app.db"), schedd)
+	reg, err := h.getOrCreateJupyterRegistry()
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+
+	const creates = 20
+	done := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 2 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				_ = jupyterRequest(t, h, http.MethodGet, "/api/v1/jupyter/instances", nil)
+				for _, inst := range reg.ListByOwner("alice") {
+					_ = jupyterRequest(t, h, http.MethodGet, "/api/v1/jupyter/instances/"+inst.ID, nil)
+				}
+			}
+		}()
+	}
+	for range creates {
+		w := jupyterRequest(t, h, http.MethodPost, "/api/v1/jupyter/instances", strings.NewReader(`{}`))
+		if w.Code != http.StatusCreated {
+			t.Errorf("create: %d %s", w.Code, w.Body.String())
+		}
+	}
+	close(done)
+	readers.Wait()
+
+	if got := len(listJupyterSessions(t, h)); got != creates {
+		t.Errorf("listed %d sessions, want %d", got, creates)
+	}
+}

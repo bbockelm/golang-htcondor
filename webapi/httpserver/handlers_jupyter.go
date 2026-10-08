@@ -349,17 +349,26 @@ func (s *Handler) handleJupyterListInstances(w http.ResponseWriter, r *http.Requ
 	// know whether the job is gone or the schedd is just unreachable):
 	//   - job ad missing from the queue        → instance is dead, close it
 	//   - JobStatus 3 (Removed) / 4 (Completed) → instance is dead, close it
-	jobAdsByCluster, queriedOK := s.queryJupyterClusterAds(ctx, insts)
+	//
+	// Each instance's cluster id is read once, before the query. A create
+	// can finish in between, and an id that appeared after the query was
+	// built has no ad in its answer -- which reads as a job that has gone.
+	summaries := make([]JupyterInstanceSummary, len(insts))
+	clusters := make([]int, 0, len(insts))
+	for i, inst := range insts {
+		summaries[i] = instanceToSummary(inst)
+		if cid, ok := jupyterClusterID(summaries[i].ClusterID); ok {
+			clusters = append(clusters, cid)
+		}
+	}
+	jobAdsByCluster, queriedOK := s.queryJupyterClusterAds(ctx, clusters)
 	out := make([]JupyterInstanceSummary, 0, len(insts))
-	for _, inst := range insts {
-		summary := instanceToSummary(inst)
+	for i, inst := range insts {
+		summary := summaries[i]
 		var ad *classad.ClassAd
-		var cidInt int
-		var haveCluster bool
-		if v, ok := jupyterClusterID(inst); ok {
-			cidInt = v
-			haveCluster = true
-			ad = jobAdsByCluster[v]
+		cidInt, haveCluster := jupyterClusterID(summary.ClusterID)
+		if haveCluster {
+			ad = jobAdsByCluster[cidInt]
 		}
 		if ad != nil {
 			enrichJupyterSummaryFromAd(&summary, ad)
@@ -376,15 +385,15 @@ func (s *Handler) handleJupyterListInstances(w http.ResponseWriter, r *http.Requ
 	s.writeJSON(w, http.StatusOK, map[string]any{"instances": out})
 }
 
-// jupyterClusterID is the cluster serving an instance, or false when it has
-// none yet: the submit has not returned, or the id is not a real one.
+// jupyterClusterID parses an instance's cluster_id, or reports false when it
+// has none yet: the submit has not returned, or the id is not a real one.
 //
 // Zero is not a cluster. Asking the schedd about it finds nothing, and the
 // list and detail handlers read "nothing" as a job that has gone and reap the
 // session -- which is how every session adopted after a restart was closed on
 // the first page load, back when the stored row never learned its cluster.
-func jupyterClusterID(inst *jupytertunnel.Instance) (int, bool) {
-	cid, err := strconv.Atoi(inst.Meta["cluster_id"])
+func jupyterClusterID(s string) (int, bool) {
+	cid, err := strconv.Atoi(s)
 	if err != nil || cid <= 0 {
 		return 0, false
 	}
@@ -418,34 +427,27 @@ func jupyterInstanceIsDead(ad *classad.ClassAd) bool {
 	return false
 }
 
-// queryJupyterClusterAds fetches the proc.0 ad of every cluster the
-// supplied instances reference, in one schedd query. Returns a map
+// queryJupyterClusterAds fetches the proc.0 ad of every listed cluster, in
+// one schedd query. Returns a map
 // keyed by ClusterId plus a bool indicating whether the query
 // itself succeeded — callers use that to distinguish "this cluster
 // isn't in the queue (so the instance is dead)" from "the schedd
 // query failed (so we don't know yet, leave instances alone)".
 func (s *Handler) queryJupyterClusterAds(
 	ctx context.Context,
-	insts []*jupytertunnel.Instance,
+	clusters []int,
 ) (map[int]*classad.ClassAd, bool) {
 	out := map[int]*classad.ClassAd{}
-	if len(insts) == 0 {
+	if len(clusters) == 0 {
 		return out, true
 	}
 
 	// Build "ClusterId == 1 || ClusterId == 2 || ..." rather than a
 	// regexp / IN — older schedds and ClassAd dialects all understand
 	// equality + boolean OR.
-	parts := make([]string, 0, len(insts))
-	for _, inst := range insts {
-		cid, ok := jupyterClusterID(inst)
-		if !ok {
-			continue
-		}
+	parts := make([]string, 0, len(clusters))
+	for _, cid := range clusters {
 		parts = append(parts, fmt.Sprintf("ClusterId == %d", cid))
-	}
-	if len(parts) == 0 {
-		return out, true
 	}
 	constraint := "(" + strings.Join(parts, " || ") + ") && ProcId == 0"
 
@@ -522,9 +524,8 @@ func (s *Handler) handleJupyterGetInstance(w http.ResponseWriter, r *http.Reques
 	// registry entry is just stale state — close it and tell the SPA
 	// 404 so it transitions to a "gone" view instead of perpetually
 	// showing "launching".
-	if cidInt, ok := jupyterClusterID(inst); ok {
-		adsByCluster, queriedOK := s.queryJupyterClusterAds(ctx,
-			[]*jupytertunnel.Instance{inst})
+	if cidInt, ok := jupyterClusterID(summary.ClusterID); ok {
+		adsByCluster, queriedOK := s.queryJupyterClusterAds(ctx, []int{cidInt})
 		ad := adsByCluster[cidInt]
 		if ad != nil {
 			enrichJupyterSummaryFromAd(&summary, ad)
@@ -546,8 +547,8 @@ func (s *Handler) handleJupyterGetInstance(w http.ResponseWriter, r *http.Reques
 func instanceToSummary(inst *jupytertunnel.Instance) JupyterInstanceSummary {
 	return JupyterInstanceSummary{
 		InstanceID: inst.ID,
-		ClusterID:  inst.Meta["cluster_id"],
-		Image:      inst.Meta["image"],
+		ClusterID:  inst.MetaValue("cluster_id"),
+		Image:      inst.MetaValue("image"),
 		Owner:      inst.Owner,
 		CreatedAt:  inst.Created.UTC().Format(time.RFC3339),
 		Connected:  inst.HasTunnel(),
@@ -936,7 +937,7 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 	// Stash cluster id on the instance so callers (and SSE in Phase 3)
 	// can correlate without holding the request open.
 	if inst, ok := reg.Lookup(instID); ok {
-		inst.Meta["cluster_id"] = clusterIDStr
+		inst.SetMeta("cluster_id", clusterIDStr)
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "jupyter instance created",
