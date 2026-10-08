@@ -1,6 +1,8 @@
 package httpserver
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -16,6 +18,10 @@ func TestJobActionRefusalMapsTheScheddsReason(t *testing.T) {
 		{"already held", &htcondor.JobActionResults{AlreadyDone: 1}, http.StatusConflict},
 		{"wrong state for the action", &htcondor.JobActionResults{BadStatus: 1}, http.StatusConflict},
 		{"no such job", &htcondor.JobActionResults{NotFound: 1}, http.StatusNotFound},
+		// What the schedd sends for a constraint that matches nothing --
+		// every action here is by constraint, even for one job: every
+		// count zero. It reports NotFound only for an ID it was named.
+		{"nothing matched", &htcondor.JobActionResults{}, http.StatusNotFound},
 		{"not allowed", &htcondor.JobActionResults{PermissionDenied: 1}, http.StatusForbidden},
 		{"schedd limit", &htcondor.JobActionResults{LimitExceeded: 1}, http.StatusTooManyRequests},
 	}
@@ -44,7 +50,6 @@ func TestJobActionRefusalLeavesUnexplainedFailuresAlone(t *testing.T) {
 		results *htcondor.JobActionResults
 	}{
 		{"no results at all", nil},
-		{"results that explain nothing", &htcondor.JobActionResults{}},
 		{"only a generic error", &htcondor.JobActionResults{Error: 1}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -62,5 +67,19 @@ func TestJobActionRefusalIgnoresPartialSuccess(t *testing.T) {
 	r := &htcondor.JobActionResults{Success: 2, AlreadyDone: 1}
 	if _, _, ok := jobActionRefusal(r, "hold"); ok {
 		t.Error("a partly successful action must not be reported as a refusal")
+	}
+}
+
+// TestRefusedResultsUnwrapsOnlyRefusals: a refusal carries the schedd's
+// per-job answer; any other error -- the schedd unreachable -- does not, and
+// must stay an error.
+func TestRefusedResultsUnwrapsOnlyRefusals(t *testing.T) {
+	want := &htcondor.JobActionResults{AlreadyDone: 2, TotalJobs: 2}
+	got, ok := refusedResults(fmt.Errorf("bulk: %w", &htcondor.JobActionRefusedError{Results: want}))
+	if !ok || got != want {
+		t.Errorf("refusal: got (%v, %v), want its results", got, ok)
+	}
+	if _, ok := refusedResults(errors.New("connection refused")); ok {
+		t.Error("a connection failure was read as the schedd's answer")
 	}
 }

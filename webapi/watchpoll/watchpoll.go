@@ -69,7 +69,11 @@ type Answer struct {
 	// OpenSeconds is how long the watch itself has been open -- its age
 	// while waiting, its time-to-answer once fired. Distinct from
 	// WaitedSeconds, which is only about this call.
-	OpenSeconds   int               `json:"open_seconds,omitempty"`
+	OpenSeconds int `json:"open_seconds,omitempty"`
+	// Selected is the jobs the watch is following; MatchedTotal is how
+	// many of them reached the event. Zero selected is a constraint that
+	// matches nothing; zero matched is only "not yet".
+	Selected      int               `json:"selected"`
 	MatchedTotal  int               `json:"matched_total,omitempty"`
 	Matched       []jobwatch.JobRef `json:"matched,omitempty"`
 	Unsatisfiable bool              `json:"unsatisfiable,omitempty"`
@@ -96,6 +100,7 @@ func From(w *jobwatch.Watch, waited int, now time.Time) Answer {
 		WaitedSeconds: waited,
 		Label:         w.Label,
 		Event:         string(w.Event),
+		Selected:      len(w.Tracked),
 		MatchedTotal:  w.MatchedTotal,
 		Incomplete:    w.Incomplete,
 	}

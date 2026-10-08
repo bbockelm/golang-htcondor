@@ -2,9 +2,9 @@ package htcondor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 )
@@ -447,10 +447,9 @@ func TestScheddRemoveNonExistentJob(t *testing.T) {
 	// Try to remove non-existent job
 	constraint := "ClusterId == 999999"
 	results, err := schedd.RemoveJobs(ctx, constraint, "Test non-existent removal")
-	// When no jobs match, schedd may return an error with ActionResult=0
-	// This is expected behavior - the results will still be valid
-	if err != nil && !strings.Contains(err.Error(), "action failed: result=0") {
-		t.Fatalf("Unexpected error from RemoveJobs: %v", err)
+	// A constraint that matches nothing is refused with every count zero.
+	if !errors.Is(err, ErrNoJobsMatched) {
+		t.Fatalf("RemoveJobs on a constraint matching nothing: got %v, want ErrNoJobsMatched", err)
 	}
 
 	t.Logf("Remove results for non-existent job: Total=%d, Success=%d, NotFound=%d",
