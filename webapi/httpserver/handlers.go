@@ -817,6 +817,12 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
+		// The schedd says why it removed nothing; say that instead of
+		// blaming the server. See jobActionRefusal.
+		if code, msg, ok := jobActionRefusal(results, "remove"); ok {
+			s.writeError(w, code, msg)
+			return
+		}
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job removal failed: %v", err))
 		return
 	}
@@ -1150,6 +1156,11 @@ func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 
 	// Remove jobs by constraint
 	results, err := s.getSchedd().RemoveJobs(ctx, constraint, req.Reason)
+	if refused, ok := refusedResults(err); ok {
+		// Removed nothing, and the schedd said why: nothing matched (404
+		// below), or every match was refused (reported in the counts).
+		results, err = refused, nil
+	}
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
@@ -1450,6 +1461,11 @@ func (s *Handler) handleBulkJobAction(w http.ResponseWriter, r *http.Request, ac
 				s.auditSuperuserAction(r, plan.Imp, actionVerb,
 					fmt.Sprintf("%d job(s) matching %s", plan.Jobs, plan.Constraint), actErr)
 			}
+			// One owner's jobs all already held, or gone since the plan was
+			// made, is an outcome to count, not a failure to stop on.
+			if refused, ok := refusedResults(actErr); ok {
+				res, actErr = refused, nil
+			}
 			if actErr != nil {
 				// Report the failure rather than continuing: a partially
 				// applied bulk action across several people's jobs is
@@ -1477,6 +1493,12 @@ func (s *Handler) handleBulkJobAction(w http.ResponseWriter, r *http.Request, ac
 
 	// Perform action
 	results, err := actionFunc(ctx, constraint, reason)
+	if refused, ok := refusedResults(err); ok {
+		// Acted on nothing, and the schedd said why: nothing matched (404
+		// in handleBulkActionResults), or every match was refused
+		// (reported in the counts).
+		results, err = refused, nil
+	}
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {

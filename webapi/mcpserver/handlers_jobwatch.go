@@ -348,10 +348,15 @@ func (s *Server) toolCheckWatches(ctx context.Context, args map[string]interface
 	}
 	watchEntry := func(w *jobwatch.Watch, fired bool) map[string]interface{} {
 		e := map[string]interface{}{
-			"watch_id":      w.ID,
-			"event":         string(w.Event),
-			"constraint":    w.Constraint,
-			"fired":         fired,
+			"watch_id":   w.ID,
+			"event":      string(w.Event),
+			"constraint": w.Constraint,
+			"fired":      fired,
+			// selected is the jobs the watch is following; matched_total
+			// is how many of them reached the event. A watch on a running
+			// job reads selected=1, matched_total=0. With matched_total
+			// alone, 0 looked like a constraint that matched nothing.
+			"selected":      len(w.Tracked),
 			"matched_total": w.MatchedTotal,
 		}
 		// Age for a watch still waiting, time-to-answer for one that

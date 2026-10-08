@@ -1621,17 +1621,14 @@ func performJobAction(ctx context.Context, args map[string]interface{}, actionFu
 	}
 
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	results, err := actionFunc(ctx, constraint, reason)
+	_, err = actionFunc(ctx, constraint, reason)
+	if errors.Is(err, htcondor.ErrNoJobsMatched) {
+		return nil, fmt.Errorf("job %s not found: it is not in the queue (it may have finished and left)", jobID)
+	}
 	if err != nil {
+		// A refusal's own text carries the schedd's reason ("1 already in
+		// that state"); see htcondor.JobActionRefusedError.
 		return nil, fmt.Errorf("job %s failed: %w", actionName, err)
-	}
-
-	if results.NotFound > 0 {
-		return nil, fmt.Errorf("job %s not found", jobID)
-	}
-
-	if results.Success == 0 {
-		return nil, fmt.Errorf("failed to %s job %s", actionName, jobID)
 	}
 
 	return structuredTextResult(
@@ -1667,14 +1664,21 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 		return nil, fmt.Errorf("authentication required")
 	}
 	results, err := s.getSchedd().RemoveJobs(ctx, constraint, reason)
+	if errors.Is(err, htcondor.ErrNoJobsMatched) {
+		return nil, fmt.Errorf("no jobs matched constraint '%s'", llmConstraint)
+	}
+	var refused *htcondor.JobActionRefusedError
+	if errors.As(err, &refused) {
+		// Every match was refused; report it with the counts like any
+		// other outcome rather than as a failure to reach the schedd.
+		results, err = refused.Results, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("bulk job removal failed: %w", err)
 	}
 
-	if results.TotalJobs == 0 {
-		return nil, fmt.Errorf("no jobs matched constraint '%s'", llmConstraint)
-	}
-
+	// total is the jobs the removal was attempted on -- each has exactly
+	// one outcome below -- not the size of the queue.
 	structured := map[string]interface{}{
 		"action":            "remove",
 		"constraint":        llmConstraint,
@@ -1682,13 +1686,19 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 		"success":           results.Success,
 		"permission_denied": results.PermissionDenied,
 		"not_found":         results.NotFound,
+		"already_done":      results.AlreadyDone,
+		"bad_status":        results.BadStatus,
+	}
+	text := fmt.Sprintf("Removed %d of %d job(s) matching constraint '%s'",
+		results.Success, results.TotalJobs, llmConstraint)
+	if summary := results.Summary(); summary != "" {
+		text += " (" + summary + ")"
 	}
 	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
-				"text": fmt.Sprintf("Removed %d of %d job(s) matching constraint '%s'",
-					results.Success, results.TotalJobs, llmConstraint),
+				"text": text,
 			},
 		},
 		"metadata": structured,

@@ -253,6 +253,8 @@ var outputSchemas = map[string]map[string]interface{}{
 		"success":           intSchema,
 		"permission_denied": intSchema,
 		"not_found":         intSchema,
+		"already_done":      intSchema,
+		"bad_status":        intSchema,
 	}, "action"),
 	"edit_job": obj(map[string]interface{}{
 		"job_id":     strSchema,

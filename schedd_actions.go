@@ -2,6 +2,7 @@ package htcondor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -234,8 +235,12 @@ func (s *Schedd) actOnJobs(
 	// Check if action failed
 	actionResult, ok := resultAd.EvaluateAttrInt("ActionResult")
 	if !ok || actionResult != 1 { // OK = 1
-		// Action failed, return results anyway so caller can see what went wrong
-		return parseJobActionResults(resultAd), fmt.Errorf("action failed: result=%d", actionResult)
+		// The schedd acted on nothing and says why, job by job. A constraint
+		// that matches nothing lands here too, with every count zero: the
+		// schedd reports AR_NOT_FOUND only for an ID it was named, never for
+		// a constraint.
+		results := parseJobActionResults(resultAd)
+		return results, &JobActionRefusedError{Results: results}
 	}
 
 	// Phase 2 of the ACT_ON_JOBS handshake. The schedd only reaches this point
@@ -288,42 +293,89 @@ func parseJobActionResults(resultAd *classad.ClassAd) *JobActionResults {
 	// AR_ERROR = 0, AR_SUCCESS = 1, AR_NOT_FOUND = 2, AR_BAD_STATUS = 3,
 	// AR_ALREADY_DONE = 4, AR_PERMISSION_DENIED = 5, AR_LIMIT_EXCEEDED = 6
 	// (JobActionResults::publishResults, src/condor_daemon_client/dc_schedd.cpp:1524)
-
-	// Extract indexed results
-	if val, ok := resultAd.EvaluateAttrInt("result_total_0"); ok {
-		results.Error = int(val)
-	}
-	if val, ok := resultAd.EvaluateAttrInt("result_total_1"); ok {
-		results.Success = int(val)
-	}
-	if val, ok := resultAd.EvaluateAttrInt("result_total_2"); ok {
-		results.NotFound = int(val)
-	}
-	if val, ok := resultAd.EvaluateAttrInt("result_total_3"); ok {
-		results.BadStatus = int(val)
-	}
-	if val, ok := resultAd.EvaluateAttrInt("result_total_4"); ok {
-		results.AlreadyDone = int(val)
-	}
-	if val, ok := resultAd.EvaluateAttrInt("result_total_5"); ok {
-		results.PermissionDenied = int(val)
-	}
-	if val, ok := resultAd.EvaluateAttrInt("result_total_6"); ok {
-		results.LimitExceeded = int(val)
-	}
-
-	// Calculate total jobs acted on
-	results.TotalJobs = results.Error + results.Success + results.NotFound +
-		results.BadStatus + results.AlreadyDone + results.PermissionDenied +
-		results.LimitExceeded
-
-	// Also check for TotalJobAds attribute which gives total jobs considered
-	if val, ok := resultAd.EvaluateAttrInt("TotalJobAds"); ok {
-		// Use this as the total if it's available and larger
-		if int(val) > results.TotalJobs {
-			results.TotalJobs = int(val)
+	//
+	// A count below zero is not a count. Schedds built between 2025-02-24
+	// and 2026-04-14 publish result_total_6 from an uninitialized field
+	// (HTCONDOR-2926, fixed by HTCONDOR-3665), and the garbage is as often
+	// hugely negative as not; summed in, it makes TotalJobs negative.
+	count := func(index int) int {
+		val, ok := resultAd.EvaluateAttrInt(fmt.Sprintf("result_total_%d", index))
+		if !ok || val < 0 {
+			return 0
 		}
+		return int(val)
 	}
+	results.Error = count(int(AR_ERROR))
+	results.Success = count(int(AR_SUCCESS))
+	results.NotFound = count(int(AR_NOT_FOUND))
+	results.BadStatus = count(int(AR_BAD_STATUS))
+	results.AlreadyDone = count(int(AR_ALREADY_DONE))
+	results.PermissionDenied = count(int(AR_PERMISSION_DENIED))
+	results.LimitExceeded = count(int(AR_LIMIT_EXCEEDED))
+
+	// The jobs the action was attempted on: every job has exactly one
+	// outcome. The reply also carries TotalJobAds, which an earlier version
+	// substituted here when it was larger -- but that is the number of jobs
+	// in the whole queue (Scheduler::actOnJobs publishes getJobsTotalAds()),
+	// so removing two jobs reported a total of 52926.
+	results.TotalJobs = results.Attempted()
 
 	return results
+}
+
+// Attempted is the number of jobs the action reached: every one has exactly
+// one outcome, so it is the sum of the outcome counts. Zero means nothing
+// matched.
+func (r *JobActionResults) Attempted() int {
+	return r.Error + r.Success + r.NotFound + r.BadStatus + r.AlreadyDone +
+		r.PermissionDenied + r.LimitExceeded
+}
+
+// Summary describes the outcomes other than success, e.g. "2 already in that
+// state, 1 permission denied". Empty when every job succeeded.
+func (r *JobActionResults) Summary() string {
+	var parts []string
+	for _, p := range []struct {
+		n    int
+		what string
+	}{
+		{r.NotFound, "not found"},
+		{r.AlreadyDone, "already in that state"},
+		{r.BadStatus, "in a state the action does not apply to"},
+		{r.PermissionDenied, "permission denied"},
+		{r.LimitExceeded, "over a schedd limit"},
+		{r.Error, "failed"},
+	} {
+		if p.n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", p.n, p.what))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ErrNoJobsMatched reports a job action whose constraint or IDs matched no
+// job in the queue. Test for it with errors.Is; the error itself is a
+// *JobActionRefusedError.
+var ErrNoJobsMatched = errors.New("no jobs matched")
+
+// JobActionRefusedError is a job action the schedd carried out on none of the
+// jobs it was aimed at. It is an answer, not a failure to get one: Results
+// says why, job by job -- nothing matched, the jobs were already in that
+// state, permission was denied. Callers usually want to report that reason
+// rather than a server error.
+type JobActionRefusedError struct {
+	Results *JobActionResults
+}
+
+func (e *JobActionRefusedError) Error() string {
+	if e.Results.Attempted() == 0 {
+		return ErrNoJobsMatched.Error()
+	}
+	return fmt.Sprintf("the schedd acted on none of the %d matching job(s): %s",
+		e.Results.Attempted(), e.Results.Summary())
+}
+
+// Is makes errors.Is(err, ErrNoJobsMatched) true when nothing matched.
+func (e *JobActionRefusedError) Is(target error) bool {
+	return target == ErrNoJobsMatched && e.Results.Attempted() == 0
 }
