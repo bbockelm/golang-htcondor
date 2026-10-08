@@ -1055,6 +1055,14 @@ catalogue is inlined rather than merely pointed at, because an agent reads
 the instructions before deciding anything -- a bare "call `skills_list`"
 is advice it has no reason to take until it has already guessed.
 
+**Order and length.** The `initialize` text is the access point's name,
+then `MCP_INSTRUCTIONS`, then the Site skills section, then under 2 KB of
+built-in guidance on submitting and monitoring jobs. Site text comes first
+because some clients pass only the beginning to the model (Claude Code
+keeps about the first 2 KB), so keep `MCP_INSTRUCTIONS` and skill
+descriptions short. The longer built-in guidance is served by the
+`doc_guide` tool, one topic at a time.
+
 **Reloading.** Two paths, and the difference between them matters if you
 are automating around it.
 

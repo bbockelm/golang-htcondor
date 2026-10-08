@@ -72,7 +72,7 @@ func TestSetInstructionsChangesInitializeResponse(t *testing.T) {
 		t.Errorf("instructions still carry the replaced text: %q", after)
 	}
 	// The generic guidance is rebuilt around the new text, not dropped.
-	if !strings.Contains(after, "## Job states") {
+	if !strings.Contains(after, "## Submitting") {
 		t.Errorf("instructions lost the generic HTCondor guidance: %q", after)
 	}
 }
@@ -80,12 +80,12 @@ func TestSetInstructionsChangesInitializeResponse(t *testing.T) {
 // TestSiteInstructionsPrecedeGenericGuidance pins the order of the initialize
 // text. Clients may pass only its beginning to the model (Claude Code keeps
 // about 2 KB), so the operator's notes and the site skills have to come before
-// the generic guidance, which is over 12 KB on its own.
+// the generic guidance, which follows them.
 func TestSiteInstructionsPrecedeGenericGuidance(t *testing.T) {
 	const note = "Store a scitokens credential before submitting."
 	text := buildInstructions("ap.example.org", note, "## Site skills\n\n- `gpus` -- GPUs\n")
 
-	generic := strings.Index(text, "## Job states")
+	generic := strings.Index(text, "## Submitting")
 	if generic < 0 {
 		t.Fatalf("generic guidance missing: %q", text)
 	}
