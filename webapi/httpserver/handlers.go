@@ -195,6 +195,10 @@ func (s *Handler) handleJobs(w http.ResponseWriter, r *http.Request) {
 //
 //nolint:gocyclo // Complex function for handling job streaming with error cases
 func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	if s.multi != nil {
+		s.handleMultiListJobs(w, r)
+		return
+	}
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -554,6 +558,16 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jobID := parts[0]
+
+	if s.multi != nil {
+		// The allowlist admits only GET of a bare id here.
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			s.handleMultiGetJob(w, r, jobID)
+		} else {
+			s.refuseMultiAP(w, r)
+		}
+		return
+	}
 
 	// Check for bulk operations at /api/v1/jobs/hold or /api/v1/jobs/release
 	if len(parts) == 1 {
@@ -2296,6 +2310,16 @@ func (s *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 func (s *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if s.multi != nil {
+		ready, body := s.multiAPReadiness()
+		status := http.StatusOK
+		if !ready {
+			status = http.StatusServiceUnavailable
+		}
+		s.writeJSON(w, status, body)
 		return
 	}
 

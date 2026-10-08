@@ -1624,6 +1624,27 @@ func getScheddConfig(cfg *config.Config) (scheddNameValue, scheddAddrValue, sche
 	return scheddNameValue, scheddAddrValue, scheddHostValue
 }
 
+// loadMultiAPConfig reads the multi-AP knobs. HTTP_API_SCHEDD_CONSTRAINT
+// set selects multi-AP mode, in which naming one schedd is a
+// contradiction: it is refused rather than silently winning.
+func loadMultiAPConfig(cfg *config.Config, scheddName, scheddAddr string) (httpserver.MultiAPConfig, error) {
+	mc := httpserver.MultiAPConfig{
+		ScheddConstraint: strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_SCHEDD_CONSTRAINT")),
+		HubName:          strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_HUB_NAME")),
+		HubAddress:       strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_HUB_ADDRESS")),
+		Stale:            strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_MULTI_AP_STALE")),
+		JobIDCodec:       strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_JOB_ID_CODEC")),
+	}
+	if !mc.Enabled() {
+		return mc, nil
+	}
+	if scheddName != "" || scheddAddr != "" {
+		return mc, fmt.Errorf("HTTP_API_SCHEDD_CONSTRAINT selects multi-AP mode, which serves many schedds; "+
+			"it cannot be combined with one named schedd (-schedd/SCHEDD_NAME %q, -schedd-addr %q)", scheddName, scheddAddr)
+	}
+	return mc, nil
+}
+
 // getHTTPConfig extracts HTTP API configuration from config
 func getHTTPConfig(cfg *config.Config) (listenAddrResult, mcpListenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile string) {
 	listenAddrResult = *listenAddr
@@ -1881,7 +1902,18 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// to a new one. They are indistinguishable by the time the server
 	// sees them, so say which it was.
 	scheddAddrDiscovered := false
-	if scheddAddrValue == "" {
+	multiAP, err := loadMultiAPConfig(cfg, scheddNameValue, scheddAddrValue)
+	if err != nil {
+		return err
+	}
+	if multiAP.Enabled() {
+		logger.Info(logging.DestinationSchedd, "Multi-AP mode: serving every schedd matching HTTP_API_SCHEDD_CONSTRAINT",
+			"constraint", multiAP.ScheddConstraint)
+		if scheddHostValue != "" {
+			logger.Warn(logging.DestinationSchedd, "SCHEDD_HOST is ignored in multi-AP mode", "schedd_host", scheddHostValue)
+			scheddHostValue = ""
+		}
+	} else if scheddAddrValue == "" {
 		if scheddNameValue != "" {
 			logger.Info(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd from collector...", "name", scheddNameValue)
 		}
@@ -2013,6 +2045,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		CCB:                      ccbDialer,
 		ScheddName:               scheddNameValue,
 		ScheddAddr:               scheddAddrValue,
+		MultiAP:                  multiAP,
 		ScheddAddrDiscovered:     scheddAddrDiscovered,
 		ScheddHost:               scheddHostValue,
 		UserHeader:               userHeaderFromConfig,

@@ -32,6 +32,10 @@ func (s *Handler) handleJobHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.multi != nil {
+		s.handleMultiHistory(w, r)
+		return
+	}
 	opts := &htcondor.HistoryQueryOptions{
 		Source: htcondor.HistorySourceJobHistory,
 	}

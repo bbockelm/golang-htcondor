@@ -389,7 +389,7 @@ func (h *Handler) buildRevocationOracles(names []string) []RevocationOracle {
 			})
 		case OracleScheddACL:
 			oracles = append(oracles, &ScheddACLOracle{
-				Schedd:    h.getSchedd,
+				Schedd:    h.identitySchedd,
 				UIDDomain: h.uidDomain,
 				Logger:    h.logger,
 				MintToken: h.generateHTCondorTokenWithScopes,
@@ -420,7 +420,7 @@ func (h *Handler) buildRevocationOracles(names []string) []RevocationOracle {
 }
 
 // userRecordLookup adapts the handler's schedd accessor to UserRecordLookup.
-func (h *Handler) userRecordLookup() UserRecordLookup { return h.getSchedd() }
+func (h *Handler) userRecordLookup() UserRecordLookup { return h.identitySchedd() }
 
 // scheddACLOracle returns the configured schedd-ACL oracle, or nil.
 //

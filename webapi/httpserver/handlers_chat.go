@@ -152,6 +152,13 @@ func (s *Handler) handleChatInfo(w http.ResponseWriter, r *http.Request) {
 	// user data and the SPA needs to hit it before showing any
 	// post-login UI. requireAuthentication adds latency we don't
 	// need here.
+	if s.multi != nil {
+		s.writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"enabled": false,
+			"reason":  "not available in multi-AP mode yet",
+		})
+		return
+	}
 	if s.chatEngine == nil {
 		s.writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"enabled": false,

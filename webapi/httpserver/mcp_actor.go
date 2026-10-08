@@ -225,7 +225,7 @@ func (h *Handler) actorForSession(ctx context.Context, cacheKey string) string {
 		return actor
 	}
 
-	result, err := h.getSchedd().Ping(ctx)
+	result, err := h.pingAsCaller(ctx)
 	if err != nil {
 		h.logger.Warn(logging.DestinationHTTP, "Could not resolve the caller's identity with the schedd; owner-scoped MCP tools will refuse this call", "error", err)
 		h.mcpActors.put(cacheKey, "", mcpActorFailTTL)

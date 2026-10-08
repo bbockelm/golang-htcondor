@@ -217,6 +217,14 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_DBMIRROR_NAME"},
 	{name: "HTTP_API_DBMIRROR_ADDRESS"},
 	{name: "HTTP_API_DBMIRROR_REQUIRED"},
+
+	// Multi-AP mode: which mode the server runs in, and what it reads
+	// from, are decided when the handler is built.
+	{name: "HTTP_API_SCHEDD_CONSTRAINT"},
+	{name: "HTTP_API_HUB_NAME"},
+	{name: "HTTP_API_HUB_ADDRESS"},
+	{name: "HTTP_API_MULTI_AP_STALE"},
+	{name: "HTTP_API_JOB_ID_CODEC"},
 }
 
 // reconfigWatcher remembers what each known parameter was set to, so a
