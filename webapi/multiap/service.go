@@ -108,20 +108,31 @@ func StatusOf(err error) int {
 }
 
 // UserFor returns the value of the User job attribute for an
-// authenticated actor: the bare owner (everything before the LAST "@",
-// since "@" is legal in a Linux username) and this pool's UID_DOMAIN.
-// Multi-AP v1 requires every member to share one UID_DOMAIN, so the
-// attribute is the same on every AP.
+// authenticated actor. Multi-AP v1 requires every member to share one
+// UID_DOMAIN, so the attribute is the same on every AP.
+//
+// The actor's domain is everything after the LAST "@" ("@" is legal in a
+// Linux username), as HTCondor's domain_of_user splits it. A bare name, or
+// HTCondor's "name@." spelling of the local domain, gets UID_DOMAIN. A
+// qualified name must be in UID_DOMAIN, compared as HTCondor compares
+// domains (is_same_domain with COMPARE_DOMAIN_FULL: case-insensitive,
+// whole string); any other domain is refused rather than rewritten,
+// because alice@elsewhere is not alice@UID_DOMAIN and must not read her
+// jobs.
 func (s *Service) UserFor(actor string) (string, error) {
-	owner := actor
+	if s.UIDDomain == "" {
+		return "", errorf(http.StatusInternalServerError, "UID_DOMAIN is not configured")
+	}
+	owner, domain, qualified := actor, "", false
 	if i := strings.LastIndex(actor, "@"); i >= 0 {
-		owner = actor[:i]
+		owner, domain, qualified = actor[:i], actor[i+1:], true
 	}
 	if owner == "" {
 		return "", errorf(http.StatusUnauthorized, "the caller's identity could not be established")
 	}
-	if s.UIDDomain == "" {
-		return "", errorf(http.StatusInternalServerError, "UID_DOMAIN is not configured")
+	if qualified && domain != "." && !strings.EqualFold(domain, s.UIDDomain) {
+		return "", errorf(http.StatusForbidden,
+			"%q is in the domain %q, but the access points behind this server use UID_DOMAIN %q", actor, domain, s.UIDDomain)
 	}
 	return owner + "@" + s.UIDDomain, nil
 }

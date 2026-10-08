@@ -469,14 +469,52 @@ func TestRowJSON(t *testing.T) {
 }
 
 func TestUserFor(t *testing.T) {
-	s := &Service{UIDDomain: "d"}
-	for actor, want := range map[string]string{"alice": "alice@d", "alice@other": "alice@d", "foo@bar@d": "foo@bar@d"} {
+	s := &Service{UIDDomain: "uid.example"}
+	for actor, want := range map[string]string{
+		"alice":             "alice@uid.example",
+		"alice@uid.example": "alice@uid.example",
+		// Domains compare case-insensitively, as in HTCondor.
+		"alice@UID.Example": "alice@uid.example",
+		// HTCondor's spelling of "the local domain".
+		"alice@.": "alice@uid.example",
+		// The domain is after the LAST "@".
+		"foo@bar@uid.example": "foo@bar@uid.example",
+	} {
 		if got, err := s.UserFor(actor); err != nil || got != want {
 			t.Errorf("UserFor(%q) = %q, %v; want %q", actor, got, err, want)
 		}
 	}
-	if _, err := s.UserFor(""); err == nil {
-		t.Error("an empty actor must not map to a user")
+}
+
+// TestUserForRefusesAnotherDomain: an identity in another domain is
+// somebody else; it must not be rewritten onto UID_DOMAIN's user of the
+// same name.
+func TestUserForRefusesAnotherDomain(t *testing.T) {
+	s := &Service{UIDDomain: "uid.example"}
+	for _, actor := range []string{
+		"alice@other.example",
+		"alice@uid.example.evil",
+		"alice@uid", // HTCondor's default compare allows a prefix; the full compare does not
+		"alice@",
+		"foo@uid.example@other",
+	} {
+		got, err := s.UserFor(actor)
+		if err == nil || StatusOf(err) != http.StatusForbidden {
+			t.Errorf("UserFor(%q) = %q, %v; want a 403", actor, got, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "uid.example") {
+			t.Errorf("UserFor(%q): the refusal does not name UID_DOMAIN: %v", actor, err)
+		}
+	}
+	if _, err := s.UserFor(""); StatusOf(err) != http.StatusUnauthorized {
+		t.Errorf("empty actor: %v, want 401", err)
+	}
+	if _, err := s.UserFor("@uid.example"); StatusOf(err) != http.StatusUnauthorized {
+		t.Errorf("empty owner: %v, want 401", err)
+	}
+	if _, err := (&Service{}).UserFor("alice"); StatusOf(err) != http.StatusInternalServerError {
+		t.Errorf("no UID_DOMAIN: %v, want 500", err)
 	}
 }
 

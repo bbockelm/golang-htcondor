@@ -168,6 +168,12 @@ func TestMultiAPListJobsREST(t *testing.T) {
 		t.Errorf("hub1: token on jobs: %d", rec.Code)
 	}
 
+	// An identity in another domain is somebody else: refused, never
+	// rewritten onto alice@d.
+	if rec := doAs(t, srv, "alice@other.example", http.MethodGet, "/api/v1/jobs"); rec.Code != http.StatusForbidden {
+		t.Errorf("alice@other.example: %d %s, want 403", rec.Code, rec.Body.String())
+	}
+
 	// No identity, no rows.
 	if rec := doAs(t, srv, "", http.MethodGet, "/api/v1/jobs"); rec.Code != http.StatusUnauthorized {
 		t.Errorf("anonymous: %d", rec.Code)

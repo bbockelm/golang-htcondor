@@ -131,6 +131,9 @@ func TestMultiAPQueryJobsTool(t *testing.T) {
 	if jobs, _ := sc["jobs"].([]map[string]interface{}); len(jobs) != 1 || jobs[0]["schedd"] != mAP2 {
 		t.Errorf("schedd filter = %v", sc["jobs"])
 	}
+	if _, err := callAs(t, s, "alice@other.example", "query_jobs", nil); err == nil {
+		t.Error("an identity in another domain must be refused, not read as alice@d")
+	}
 	if _, err := callAs(t, s, "", "query_jobs", nil); err == nil {
 		t.Error("an unidentified caller must be refused")
 	}

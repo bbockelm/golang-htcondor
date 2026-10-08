@@ -1600,7 +1600,9 @@ says which (`source`: `hub`, `spoke` or `schedd`).
 
 **Scope.** Every read is confined to your own jobs on the `User`
 attribute (`owner@UID_DOMAIN`), whatever constraint you pass; there is no
-admin view in this mode. The access points must share one `UID_DOMAIN`,
+admin view in this mode. An identity in a domain other than `UID_DOMAIN`
+(compared case-insensitively, as HTCondor does) is refused with a 403
+rather than read as the same name in `UID_DOMAIN`. The access points must share one `UID_DOMAIN`,
 `TRUST_DOMAIN` and pool signing key: a bearer token's identity is
 confirmed by asking an access point's schedd, and any one of them can
 answer.
