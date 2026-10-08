@@ -27,6 +27,20 @@ var ErrCredentialNotFound = errors.New("credential not found")
 type CredentialStatus struct {
 	Exists    bool       `json:"exists"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+	// Pending reports a credential that has been requested or stored but
+	// is not usable yet: the credd holds its request (.top) file and a
+	// credmon has not written the token (.use) from it. Exists is false
+	// while this is true.
+	Pending bool `json:"pending,omitempty"`
+}
+
+// CredRequest names one OAuth service credential a job needs, as sent to
+// CheckCreds.
+type CredRequest struct {
+	Service  string
+	Handle   string
+	Scopes   string
+	Audience string
 }
 
 // ServiceStatus describes the state of a service credential.
@@ -50,6 +64,18 @@ type CreddClient interface {
 	ListServiceCreds(ctx context.Context, credType CredType, user string) ([]ServiceStatus, error)
 
 	GetCredential(ctx context.Context, credType CredType, service string, handle string, user string) ([]byte, error)
+
+	// CheckCreds makes the request condor_submit makes before it submits a
+	// job: it asks the credd to make sure the caller holds every OAuth
+	// credential in requests, and the credd adds the services its own
+	// local credmons provide (SUBMIT_ADD_LOCAL_CREDMON_PROVIDERS, on by
+	// default). For a local credmon's service a missing credential is
+	// created on the spot, which is how an access point that requires one
+	// on every job gets it -- so an empty request list is meaningful.
+	//
+	// It returns "" when everything is in place, or a URL the user must
+	// visit to grant a credential the credd cannot create itself.
+	CheckCreds(ctx context.Context, requests []CredRequest) (string, error)
 }
 
 // InMemoryCredd provides a lightweight, non-persistent credd implementation useful for testing
@@ -172,6 +198,22 @@ func (c *InMemoryCredd) GetCredential(ctx context.Context, credType CredType, se
 		return nil, ErrCredentialNotFound
 	}
 	return stored.payload, nil
+}
+
+// CheckCreds reports whether every requested service credential is stored.
+// There is no credmon here to create a missing one, so a missing credential
+// is an error, as the credd reports a service it has no credmon for.
+func (c *InMemoryCredd) CheckCreds(ctx context.Context, requests []CredRequest) (string, error) {
+	user := GetAuthenticatedUserFromContext(ctx)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, req := range requests {
+		key := credentialKey{user: user, credType: CredTypeOAuth, service: req.Service, handle: req.Handle}
+		if _, ok := c.creds[key]; !ok {
+			return "", &CheckCredsRefusal{Reason: fmt.Sprintf("ERROR: Credential '%s' of unknown type is missing", req.Service)}
+		}
+	}
+	return "", nil
 }
 
 // GetUserCredStatus reports credential status for the specified user credential type.

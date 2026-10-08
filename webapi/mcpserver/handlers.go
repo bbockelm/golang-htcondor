@@ -2815,7 +2815,9 @@ func (s *Server) toolGetCredentialStatus(ctx context.Context, args map[string]in
 				label += "/" + handle
 			}
 			return structuredTextResult(
-				fmt.Sprintf("No credential found for service '%s'. You may need to store one using store_service_credential.", label),
+				fmt.Sprintf("No credential found for service '%s'. Submitting a job asks the credd for the "+
+					"credentials this access point requires, so store one with store_service_credential "+
+					"only if the job itself needs it.", label),
 				map[string]interface{}{"service": service, "handle": handle, "exists": false},
 			), nil
 		}
@@ -2828,6 +2830,12 @@ func (s *Server) toolGetCredentialStatus(ctx context.Context, args map[string]in
 	}
 	text := fmt.Sprintf("Credential for service '%s': exists=%v", label, status.Exists)
 	structured := map[string]interface{}{"service": service, "handle": handle, "exists": status.Exists}
+	if status.Pending {
+		// Requested and waiting for its credmon. Storing over it would
+		// replace the request the credmon is about to act on.
+		text += ", pending (requested; a credmon has not written the token yet -- do not store over it)"
+		structured["pending"] = true
+	}
 	if status.UpdatedAt != nil {
 		text += fmt.Sprintf(", updated_at=%s", status.UpdatedAt.Format(time.RFC3339))
 		structured["updated_at"] = status.UpdatedAt.Format(time.RFC3339)

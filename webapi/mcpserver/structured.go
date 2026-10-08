@@ -355,6 +355,7 @@ var outputSchemas = map[string]map[string]interface{}{
 		"service":    strSchema,
 		"handle":     strSchema,
 		"exists":     boolSchema,
+		"pending":    boolSchema,
 		"updated_at": strSchema,
 	}, "service", "exists"),
 	"store_service_credential": obj(map[string]interface{}{

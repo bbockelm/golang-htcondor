@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -143,7 +144,12 @@ LOCAL_CREDMON_LOG = $(LOG)/LocalCredmonLog
 LOCAL_CREDMON_DEBUG = D_FULLDEBUG
 
 # Local credmon configuration parameters (shared by all providers)
-LOCAL_CREDMON_PROVIDERS = github,gitlab
+LOCAL_CREDMON_PROVIDERS = github,gitlab,localtok
+# localtok is the credd's own local-credmon service: the credd adds it to every
+# check-creds request and creates it when missing, as ap2001 does for
+# scitokens. It is not github or gitlab so the steps above that store those
+# by hand see the credd classify them as before.
+LOCAL_CREDMON_PROVIDER_NAMES = localtok
 LOCAL_CREDMON_KEY_FILE = %s
 LOCAL_CREDMON_ISSUER = https://test.htcondor.org
 LOCAL_CREDMON_AUDIENCE = https://github.com https://gitlab.com
@@ -220,6 +226,14 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 		t.Fatalf("LOCAL_CREDMON daemon failed to become ready: %v", err)
 	}
 	t.Logf("✅ LOCAL_CREDMON daemon is ready")
+
+	// A user with no credentials: the credd answers the listing with "not
+	// found", which has to come back as an empty list, not an error.
+	userCtx := htcondor.WithAuthenticatedUser(ctx, currentUsername)
+	if creds, err := creddClient.ListServiceCreds(userCtx, htcondor.CredTypeOAuth, ""); err != nil || len(creds) != 0 {
+		t.Fatalf("listing with no credentials: got (%+v, %v), want an empty list", creds, err)
+	}
+	t.Logf("✅ Listing with no credentials is empty, not an error")
 
 	// Add service credential with refresh=true to create .top file for credmon
 	addBody := map[string]any{
@@ -443,6 +457,39 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 	if status.Exists {
 		t.Fatalf("expected credential to be deleted")
 	}
+
+	// Issue #576. The request condor_submit makes before every submit. Named
+	// or not -- a credd from HTCondor 25.13.2 on adds its local-credmon
+	// services to a request that names none, an older one only creates what
+	// is named -- the credd writes the request (.top, holding only the
+	// user's name) and holds its reply until the credmon has written the
+	// token.
+	checkCtx, checkCancel := context.WithTimeout(userCtx, 40*time.Second)
+	defer checkCancel()
+	for _, requests := range [][]htcondor.CredRequest{nil, {{Service: "localtok"}}} {
+		url, err := creddClient.CheckCreds(checkCtx, requests)
+		if err != nil || url != "" {
+			t.Fatalf("check-creds %+v: got (%q, %v), want (\"\", nil)", requests, url, err)
+		}
+	}
+	t.Logf("✅ check-creds created the local-credmon credential")
+
+	// A service the credd has no credmon for is refused, not created: that is
+	// the answer the bootstrap falls back to a placeholder on.
+	_, err = creddClient.CheckCreds(checkCtx, []htcondor.CredRequest{{Service: "nosuchservice"}})
+	var refusal *htcondor.CheckCredsRefusal
+	if !errors.As(err, &refusal) {
+		t.Fatalf("check-creds for a service with no credmon: got %v, want a CheckCredsRefusal", err)
+	}
+	t.Logf("✅ check-creds refuses a service with no credmon: %s", refusal.Reason)
+
+	// The .top the credd wrote is not JSON. A status query that names the
+	// service re-reads it as JSON and fails; this one must not.
+	localStatus, err := creddClient.GetServiceCredStatus(userCtx, htcondor.CredTypeOAuth, "localtok", "", "")
+	if err != nil || !localStatus.Exists {
+		t.Fatalf("status of the credd-created credential: got (%+v, %v), want it to exist", localStatus, err)
+	}
+	t.Logf("✅ Status reads a local-credmon credential without parsing its request file")
 }
 
 // waitForLocalCredmonReady waits for LOCAL_CREDMON daemon to signal readiness to condor_master
