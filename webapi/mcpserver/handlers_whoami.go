@@ -63,6 +63,8 @@ type whoamiReport struct {
 	Owner string `json:"confined_to_owner,omitempty"`
 	// AccessPoint is the schedd this server submits to.
 	AccessPoint string `json:"access_point,omitempty"`
+	// AccessPoints is how many access points a multi-AP server fronts.
+	AccessPoints int `json:"access_points,omitempty"`
 	// Scopes are the OAuth scopes the caller's token carries, when the
 	// transport supplied them.
 	Scopes []string `json:"oauth_scopes,omitempty"`
@@ -79,7 +81,9 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 		Superuser:     s.allowsAllUsers(ctx, actor, tierMutate),
 	}
 	rep.AdminVia, rep.SuperuserVia = s.privilegeProvenance(ctx, actor)
-	if sc := s.getSchedd(); sc != nil {
+	if s.multi != nil {
+		rep.AccessPoints = len(s.multi.Registry.Members())
+	} else if sc := s.getSchedd(); sc != nil {
 		rep.AccessPoint = sc.Name()
 	}
 	if g := grantFromContext(ctx); g.scoped {

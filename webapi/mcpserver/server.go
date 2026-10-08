@@ -21,6 +21,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/skills"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -28,7 +29,13 @@ import (
 
 // Server represents the MCP server
 type Server struct {
-	schedd *htcondor.Schedd
+	// multi is non-nil in multi-AP mode; see multiap.go.
+	multi           *multiap.Service
+	multiConstraint string
+	// multiScheddCalls counts calls to getSchedd in multi-AP mode, where
+	// it has no answer. Non-zero is a tool that escaped the allowlist.
+	multiScheddCalls atomic.Int64
+	schedd           *htcondor.Schedd
 	// scheddProvider, when set, is consulted for every schedd call
 	// instead of the snapshot above. The HTTP server replaces its
 	// schedd handle when the collector reports a new address, and a
@@ -200,6 +207,13 @@ func (s *Server) submitRemote(ctx context.Context, submitFile string) (int, []*c
 
 // Config holds server configuration
 type Config struct {
+	// MultiAP, when set, puts the server in multi-AP mode: it fronts every
+	// access point the service knows, serves only the read tools, and has
+	// no single schedd. MultiAPConstraint is the AP set's constraint, for
+	// the instructions. See multiap.go.
+	MultiAP           *multiap.Service
+	MultiAPConstraint string
+
 	ScheddName string // Schedd name
 	ScheddAddr string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
 	// ScheddHost is the SCHEDD_HOST setting: the host (optionally
@@ -391,6 +405,8 @@ func NewServer(cfg Config) (*Server, error) {
 	// Use provided schedd or create new one
 	var schedd *htcondor.Schedd
 	switch {
+	case cfg.MultiAP != nil:
+		// No single schedd in multi-AP mode.
 	case cfg.ScheddProvider != nil:
 		// A provider supersedes any snapshot: it is consulted per call,
 		// so it also answers "was a schedd supplied" here. Falling
@@ -442,33 +458,35 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		stats:          cfg.ToolStats,
-		clients:        newClientRegistry(),
-		schedd:         schedd,
-		scheddProvider: cfg.ScheddProvider,
-		collector:      cfg.Collector,
-		credd:          cfg.Credd,
-		creddProvider:  cfg.CreddProvider,
-		trustDomain:    cfg.TrustDomain,
-		uidDomain:      cfg.UIDDomain,
-		signingKeyPath: cfg.SigningKeyPath,
-		httpBaseURL:    cfg.HTTPBaseURL,
-		logger:         logger,
-		stdin:          stdin,
-		stdout:         stdout,
-		adminUsers:     adminUsers,
-		htcondorConfig: cfg.HTCondorConfig,
-		ccbDialer:      cfg.CCB,
-		delegated:      cfg.Delegated,
-		submitPolicy:   cfg.SubmitPolicy,
-		ensureCreds:    cfg.EnsureCredentials,
-		dagmanPath:     cfg.DagmanPath,
-		dagmanEnv:      cfg.DagmanEnvironment,
-		dbMirror:       cfg.DBMirror,
-		jobWatch:       cfg.JobWatch,
-		jobWatchEval:   cfg.JobWatchEval,
-		watchMaxWait:   cfg.WatchMaxWait,
-		build:          buildSettingsFromConfig(cfg),
+		multi:           cfg.MultiAP,
+		multiConstraint: cfg.MultiAPConstraint,
+		stats:           cfg.ToolStats,
+		clients:         newClientRegistry(),
+		schedd:          schedd,
+		scheddProvider:  cfg.ScheddProvider,
+		collector:       cfg.Collector,
+		credd:           cfg.Credd,
+		creddProvider:   cfg.CreddProvider,
+		trustDomain:     cfg.TrustDomain,
+		uidDomain:       cfg.UIDDomain,
+		signingKeyPath:  cfg.SigningKeyPath,
+		httpBaseURL:     cfg.HTTPBaseURL,
+		logger:          logger,
+		stdin:           stdin,
+		stdout:          stdout,
+		adminUsers:      adminUsers,
+		htcondorConfig:  cfg.HTCondorConfig,
+		ccbDialer:       cfg.CCB,
+		delegated:       cfg.Delegated,
+		submitPolicy:    cfg.SubmitPolicy,
+		ensureCreds:     cfg.EnsureCredentials,
+		dagmanPath:      cfg.DagmanPath,
+		dagmanEnv:       cfg.DagmanEnvironment,
+		dbMirror:        cfg.DBMirror,
+		jobWatch:        cfg.JobWatch,
+		jobWatchEval:    cfg.JobWatchEval,
+		watchMaxWait:    cfg.WatchMaxWait,
+		build:           buildSettingsFromConfig(cfg),
 	}
 	// A missing or unreadable signing key is not fatal: it disables the
 	// one tool that needs it, and that tool says so when called.
@@ -493,7 +511,9 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	s.SetDisabledTools(cfg.DisabledTools)
 	s.SetInstructions(cfg.Instructions)
-	if s.dbMirror == nil {
+	if s.dbMirror == nil && schedd == nil {
+		s.dbMirror = dbmirror.NewLocator(nil, nil)
+	} else if s.dbMirror == nil {
 		s.dbMirror = dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
 			Name:     cfg.DBMirrorName,
 			Address:  cfg.DBMirrorAddress,
@@ -825,6 +845,11 @@ func (s *Server) getCredd() htcondor.CreddClient {
 }
 
 func (s *Server) getSchedd() *htcondor.Schedd {
+	if s.multi != nil {
+		s.multiScheddCalls.Add(1)
+		s.logger.Error(logging.DestinationMCP, "BUG: the single-schedd accessor was called in multi-AP mode; refusing")
+		return multiap.NoSchedd
+	}
 	if s.scheddProvider != nil {
 		if sc := s.scheddProvider(); sc != nil {
 			return sc

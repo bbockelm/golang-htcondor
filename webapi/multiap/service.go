@@ -63,6 +63,11 @@ type ScheddQuerier interface {
 	QueryWithOptions(ctx context.Context, constraint string, opts *htcondor.QueryOptions) ([]*classad.ClassAd, *htcondor.PageInfo, error)
 }
 
+// NoSchedd is what the single-schedd accessors return in multi-AP mode,
+// where there is no single schedd. Its address does not parse, so any
+// call through it fails at dial time without touching the network.
+var NoSchedd = htcondor.NewSchedd("multi-ap-mode", "multi-AP mode has no single schedd")
+
 // Service answers multi-AP reads.
 type Service struct {
 	Registry Registry

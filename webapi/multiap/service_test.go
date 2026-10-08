@@ -23,13 +23,13 @@ import (
 // ap1. Both APs are fresh.
 func seededHub(t *testing.T) *testDB {
 	hub := hubDB(t)
-	hub.putJob("ap1.example.org", "alice@d", 1, 0, `Marker = "alice-ap1-1"`)
-	hub.putJob("ap1.example.org", "alice@d", 2, 0, `Marker = "alice-ap1-2"`)
-	hub.putJob("ap2.example.org", "alice@d", 1, 0, `Marker = "alice-ap2-1"`)
-	hub.putJob("ap1.example.org", "bob@d", 1, 0, `Marker = "bob-ap1-1"`)
-	hub.putJob("ap1.example.org", "bob@d", 5, 0, `Marker = "bob-ap1-5"`)
-	hub.putSource("ap1.example.org", StateFresh, 3)
-	hub.putSource("ap2.example.org", StateFresh, 4)
+	hub.PutJob("ap1.example.org", "alice@d", 1, 0, `Marker = "alice-ap1-1"`)
+	hub.PutJob("ap1.example.org", "alice@d", 2, 0, `Marker = "alice-ap1-2"`)
+	hub.PutJob("ap2.example.org", "alice@d", 1, 0, `Marker = "alice-ap2-1"`)
+	hub.PutJob("ap1.example.org", "bob@d", 1, 0, `Marker = "bob-ap1-1"`)
+	hub.PutJob("ap1.example.org", "bob@d", 5, 0, `Marker = "bob-ap1-5"`)
+	hub.PutSource("ap1.example.org", StateFresh, 3)
+	hub.PutSource("ap2.example.org", StateFresh, 4)
 	return hub
 }
 
@@ -133,7 +133,7 @@ func TestListJobsOutsideAPSetNotServed(t *testing.T) {
 
 func TestListJobsDegraded(t *testing.T) {
 	hub := seededHub(t)
-	hub.putSource("ap2.example.org", StateStale, 412)
+	hub.PutSource("ap2.example.org", StateStale, 412)
 	reg := newFakeRegistry("ap1.example.org", "ap2.example.org", "ap3.example.org")
 	s := newService(t, hub, reg)
 
@@ -173,8 +173,8 @@ func TestListJobsDegraded(t *testing.T) {
 func TestListJobsPagesExactlyOnce(t *testing.T) {
 	hub := seededHub(t)
 	for c := 10; c < 17; c++ {
-		hub.putJob("ap2.example.org", "alice@d", c, 0, "")
-		hub.putJob("ap1.example.org", "alice@d", c, c%2, "")
+		hub.PutJob("ap2.example.org", "alice@d", c, 0, "")
+		hub.PutJob("ap1.example.org", "alice@d", c, c%2, "")
 	}
 	s := newService(t, hub, newFakeRegistry("ap1.example.org", "ap2.example.org"))
 
@@ -222,11 +222,11 @@ func TestListJobsPagesExactlyOnce(t *testing.T) {
 // order, at every page size.
 func TestHistoryPagesExactlyOnce(t *testing.T) {
 	hub := hubDB(t)
-	hub.putSource("ap1.example.org", StateFresh, 1)
-	hub.putSource("AP2.example.org", StateFresh, 1)
+	hub.PutSource("ap1.example.org", StateFresh, 1)
+	hub.PutSource("AP2.example.org", StateFresh, 1)
 	want := map[string]bool{}
 	add := func(schedd, user string, c, p int, entered int64) {
-		hub.putHistory(schedd, user, c, p, entered)
+		hub.PutHistory(schedd, user, c, p, entered)
 		if user == "alice@d" {
 			want[fmt.Sprintf("%d.%d@%s", c, p, schedd)] = true
 		}
@@ -337,7 +337,7 @@ func TestGetJobComplete(t *testing.T) {
 
 func TestGetJobIncomplete(t *testing.T) {
 	hub := seededHub(t)
-	hub.putHistory("ap2.example.org", "alice@d", 8, 0, 1000)
+	hub.PutHistory("ap2.example.org", "alice@d", 8, 0, 1000)
 	s := newService(t, hub, newFakeRegistry("ap1.example.org", "ap2.example.org"))
 	ctx := context.Background()
 
@@ -380,10 +380,10 @@ func TestGetJobIncomplete(t *testing.T) {
 // when it is not.
 func TestGetJobStaleAPFallsBack(t *testing.T) {
 	hub := seededHub(t)
-	hub.putSource("ap2.example.org", StateStale, 600)
+	hub.PutSource("ap2.example.org", StateStale, 600)
 	spoke := newTestDB(t)
-	spoke.putSpokeJob("alice@d", 1, 0, `Marker = "from-spoke"`)
-	spoke.putSpokeJob("bob@d", 3, 0, `Marker = "bob-spoke"`)
+	spoke.PutSpokeJob("alice@d", 1, 0, `Marker = "from-spoke"`)
+	spoke.PutSpokeJob("bob@d", 3, 0, `Marker = "bob-spoke"`)
 
 	reg := newFakeRegistry("ap1.example.org", "ap2.example.org")
 	s := newService(t, hub, reg)
@@ -489,5 +489,35 @@ func TestHubSourcesAndAPs(t *testing.T) {
 	}
 	if st := s.Hub.Status(); !st.Reachable || st.Sources != 2 {
 		t.Errorf("hub status = %+v", st)
+	}
+}
+
+func TestAggregateSelfScoped(t *testing.T) {
+	hub := seededHub(t)
+	hub.PutHistory("ap2.example.org", "alice@d", 8, 0, 1000)
+	hub.PutHistory("ap1.example.org", "bob@d", 8, 0, 1000)
+	s := newService(t, hub, newFakeRegistry("ap1.example.org", "ap2.example.org"))
+	ctx := context.Background()
+
+	rows, _, err := s.Aggregate(ctx, "alice@d", "jobs", "", []string{AttrScheddName}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[strings.Join(r.Group, "/")] = strings.Join(r.Values, ",")
+	}
+	if got["ap1.example.org"] != "2" || got["ap2.example.org"] != "1" || len(got) != 2 {
+		t.Errorf("alice's jobs per AP = %v, want ap1=2 ap2=1", got)
+	}
+	rows, _, err = s.Aggregate(ctx, "alice@d", "history", "true || true", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Values[0] != "1" {
+		t.Errorf("alice's history count = %+v, want 1", rows)
+	}
+	if _, _, err := s.Aggregate(ctx, "alice@d", "users", "", nil, ""); StatusOf(err) != http.StatusBadRequest {
+		t.Errorf("unknown table: err = %v", err)
 	}
 }
