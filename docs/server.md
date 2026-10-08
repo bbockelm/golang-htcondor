@@ -1529,6 +1529,100 @@ does not work:
 HTCondor shared port open for CCB connection reversal listen=9618 advertised=htcondor-api.example.org:9618
 ```
 
+## Multi-AP mode
+
+One server can front every access point whose schedd ad matches a
+collector constraint, instead of one schedd:
+
+```
+HTTP_API_SCHEDD_CONSTRAINT = regexp("^ap[0-9]+\\.example\\.org$", Name)
+```
+
+This mode is **read-only** for now. It reads from a federation hub: an
+htcondordb running with `HTCONDORDB_FEDERATE_SCHEDD_CONSTRAINT` that fans
+every access point's own htcondordb (its spoke) into one catalog. See the
+htcondordb federation documentation for running one; give it the same
+constraint.
+
+What it serves:
+
+| Request | Answer |
+| --- | --- |
+| `GET /api/v1/jobs`, MCP `query_jobs` | Your queued jobs on every access point, from the hub. `?schedd=` (MCP `schedd`) limits it to one. Pages continue with `next_page_token`. |
+| `GET /api/v1/jobs/archive`, MCP `query_job_archive` | Your completed jobs, newest first by `EnteredHistoryTime`. Pages continue with `next_page_token`; `before_cluster`/`before_proc` are refused, because a cluster id is unique only within one access point. |
+| `GET /api/v1/jobs/{id}`, MCP `get_job` | One of your jobs, queued or completed (`archived`). |
+| MCP `aggregate_jobs` | Counts over `jobs` or `history`; group by `ScheddName` for a per-access-point count. |
+| `GET /api/v1/aps`, MCP `list_access_points` | The access points, whether each is in the collector, and how current the hub's copy of each is. |
+
+Everything else -- submit, hold/release/remove, edit, sandboxes, output,
+SSH, interactive sessions, Jupyter, credentials, watches, the dashboard,
+the pool pages and chat -- answers **501** ("not available in multi-AP mode
+yet"), and the MCP catalogue offers only the read tools above plus
+`whoami`, `get_version`, `doc_*` and `skills_*`. Superuser mode and the SSH
+gateway are not available; configuring the gateway together with multi-AP
+mode refuses to start.
+
+**Job ids.** A job is identified by schedd, cluster and proc together: two
+access points each have a `123.0`. Every job in a response carries
+`schedd`, `cluster` and `proc` as separate members, plus `job_id`, the
+single-token form used in URLs (`123.0@ap40.example.org`; the text before
+the first `@` is `cluster.proc`, the rest is the schedd name). An
+incomplete id such as `123.0` is accepted by `GET /api/v1/jobs/{id}` and
+`get_job` when exactly one of your jobs, queued or completed, has it; the
+answer carries the complete id. Several matches are a **409** whose body
+lists them:
+
+```json
+{"error": "Conflict", "code": 409,
+ "message": "job 123.0 exists on 2 access points; name one",
+ "candidates": [
+   {"schedd": "ap1.example.org", "cluster": 123, "proc": 0, "job_id": "123.0@ap1.example.org", "archived": false},
+   {"schedd": "ap2.example.org", "cluster": 123, "proc": 0, "job_id": "123.0@ap2.example.org", "archived": true}]}
+```
+
+**Freshness.** Every list response carries a `sources` block naming each
+access point whose rows are not known to be current:
+
+```json
+"sources": {"aps": 52, "fresh": 50, "degraded": [
+  {"schedd": "ap17.example.org", "state": "stale", "staleness_seconds": 412},
+  {"schedd": "ap31.example.org", "state": "absent", "reason": "the federation hub does not hold this access point"}]}
+```
+
+`state` is the hub's (`stale`, `absent`, `untrusted`, `retiring`), or
+`absent` for an access point the hub does not list. By default a degraded
+access point's rows are included as the hub holds them;
+`HTTP_API_MULTI_AP_STALE = exclude` leaves them out, and the access point is
+still listed in `degraded`. Nothing is omitted silently. A single job on an
+access point the hub does not hold fresh is read from that access point's
+own htcondordb if it is current, else from its schedd as you; the response
+says which (`source`: `hub`, `spoke` or `schedd`).
+
+**Scope.** Every read is confined to your own jobs on the `User`
+attribute (`owner@UID_DOMAIN`), whatever constraint you pass; there is no
+admin view in this mode. The access points must share one `UID_DOMAIN`,
+`TRUST_DOMAIN` and pool signing key: a bearer token's identity is
+confirmed by asking an access point's schedd, and any one of them can
+answer.
+
+**The access point set** is polled from the collector every 60 seconds. An
+access point whose ad disappears stays listed (`in_collector: false`)
+with its last address; nothing is removed because the collector stopped
+mentioning it.
+
+**Health.** `/readyz` is ready when the hub answers and at least one
+access point matches, and lists every access point's state; one access
+point being down never makes the server unready. The collector ad carries
+`ScheddConstraint` and `ScheddCount` instead of `ScheddName`.
+
+The web UI shows an access point column and filter on the job and
+archive lists, which access points are behind, and an Access Points page;
+it offers no actions.
+
+`HTTP_API_SCHEDD_CONSTRAINT` together with `-schedd`, `-schedd-addr` or
+`SCHEDD_NAME` is a startup error. `UID_DOMAIN` and a collector are
+required.
+
 ## Configuration
 
 Settings live in HTCondor config (`condor_config_val`-readable) and
@@ -1574,6 +1668,10 @@ Frequently-used knobs:
 | `HTTP_API_DBMIRROR_NAME` | Pin job-queue routing to the htcondordb mirror advertising this `Name`. Set it when more than one mirror advertises to the pool: nothing in the ad says which schedd each one mirrors, so without a pin the freshest is chosen, which is a guess. |
 | `HTTP_API_DBMIRROR_ADDRESS` | Dial this sinful string instead of the mirror's advertised `MyAddress`, for one reachable only over NAT, a tunnel, or a Kubernetes Service. Freshness still comes from the collector ad — this changes where to connect, not whether the mirror is current enough to trust — and it applies whether the mirror was found through the collector or not. |
 | `HTTP_API_DBMIRROR_REQUIRED` | Never fall back to the schedd. A read the mirror cannot serve fails instead of becoming load on the access point you were trying to protect. See [the routing notes](../webapi/httpserver/README.md#configuration) for which failures are 503 and which are 400. |
+| `HTTP_API_SCHEDD_CONSTRAINT` | ScheddAd constraint selecting the access points of [multi-AP mode](#multi-ap-mode). Unset = one schedd. Read at startup. |
+| `HTTP_API_HUB_NAME` / `HTTP_API_HUB_ADDRESS` | Pin the federation hub by `Name`, or dial this sinful string, instead of discovering the `HTCondorDB` ad that carries `FederationConstraint`. Multi-AP mode only. |
+| `HTTP_API_MULTI_AP_STALE` | `include` (default) or `exclude` a degraded access point's rows in list reads. Either way it is named in `sources.degraded`. |
+| `HTTP_API_JOB_ID_CODEC` | Text form of a job id in URLs. Default and only built-in: `at` (`123.0@ap40.example.org`). |
 | `HTTP_API_DBMIRROR_TOKEN_SUBJECT` | Identity the token this server presents to the mirror asserts. Default `condor@<trust domain>`. Set it when the mirror authorizes a different name. |
 | `HTTP_API_IDENTITY_MAP` | Map the token subject to a local account (`gecos,username`). See [Local identity mapping](#local-identity-mapping). |
 | `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | Account file backing the mapping index. Default `/etc/passwd`. |
