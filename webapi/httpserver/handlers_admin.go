@@ -40,6 +40,28 @@ func (s *Handler) isWebUIAdmin(r *http.Request) bool {
 	return s.webuiAdminGroups.allows(session.Groups)
 }
 
+// projectLeadReadProjects returns the projects whose jobs this browser
+// session may read beyond its own, because it leads them. Nil for a session
+// that leads nothing, for an admin session (which already reads everyone's),
+// and for a bearer-token caller (which is not owner-scoped to begin with).
+//
+// Not gated on superuser mode being armed, following the admin read path,
+// which is not armed-gated either: seeing a project's jobs is the
+// prerequisite for deciding whether to act on one, and arming is the step
+// that changes what an action does. Read visibility also does not depend on
+// superuser mode being usable at all (no signing key needed), only on leads
+// being configured.
+func (s *Handler) projectLeadReadProjects(r *http.Request) []string {
+	if !s.projectLeads.configured() {
+		return nil
+	}
+	session, ok := s.getSessionFromRequest(r)
+	if !ok || s.isWebUIAdmin(r) {
+		return nil
+	}
+	return s.projectLeads.LedProjects(session.Username, session.Groups)
+}
+
 // resolveOwnerScope settles whether a request asking for other people's
 // records may have them, given the owned_by_me it asked for. It is this
 // daemon's UI policy, not the schedd's: a browser session outside the

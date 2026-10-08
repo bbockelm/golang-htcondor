@@ -142,6 +142,14 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		s.writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	// Except for project leads: the app is served on this origin, so it
+	// would run owner-controlled code in the lead's session. See
+	// refuseProjectLeadInteractiveApp.
+	if refusal := refuseProjectLeadInteractiveApp(imp); refusal != nil {
+		s.auditSuperuserAction(r, imp, "job-proxy", fmt.Sprintf("%d.%d", cluster, proc), refusal)
+		s.writeError(w, http.StatusForbidden, refusal.Error())
+		return
+	}
 	if imp != nil {
 		s.auditSuperuserAction(r, imp, "job-proxy", fmt.Sprintf("%d.%d", cluster, proc), nil)
 	}

@@ -182,8 +182,11 @@ func (p *superuserPolicy) Status() (count int, fetchedAt time.Time, lastErr erro
 //
 // The feature needs two independent things and refuses to run on one of them:
 //
-//   - a group to gate it on, so that "may act as anyone" is a decision an
-//     operator made rather than a side effect of admin-UI access;
+//   - somebody it is gated on, so that "may act as another user" is a
+//     decision an operator made rather than a side effect of admin-UI
+//     access: HTTP_API_SUPERUSER_GROUP for global scope, or project leads
+//     (HTTP_API_PROJECT_LEADS_FILE / HTTP_API_PROJECT_LEADS_GROUP) for
+//     project scope. Either alone is enough;
 //   - a pool signing key, because acting as another identity means minting a
 //     credential for it. Without the key there is nothing to mint and the
 //     feature cannot work, so a deployment that sets the group but has no key
@@ -193,21 +196,33 @@ func (p *superuserPolicy) Status() (count int, fetchedAt time.Time, lastErr erro
 // who set the group wondering why the UI never offers the mode.
 func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 	group := strings.TrimSpace(cfg.SuperuserGroup)
-	if group == "" {
+	// Always present, so a reconfigure can install a list without a nil
+	// check, but empty until the feature is known to be usable: an
+	// installed group is what the rest of the server reads as "superuser
+	// mode is on".
+	h.superuserGroups = newGroupSet("")
+	// The leads are kept even when the mode cannot run. They also widen
+	// what a lead may READ (projectLeadReadProjects), which needs no
+	// signing key.
+	h.projectLeads = newProjectLeads(cfg.ProjectLeadsFile, cfg.ProjectLeadsGroup, logger)
+	leads := h.projectLeads.configured()
+
+	if group == "" && !leads {
 		logger.Info(logging.DestinationHTTP,
-			"Superuser mode disabled (HTTP_API_SUPERUSER_GROUP is unset)")
+			"Superuser mode disabled (HTTP_API_SUPERUSER_GROUP and project leads are unset)")
 		return
 	}
 	if h.signingKeyPath == "" || h.trustDomain == "" {
 		logger.Warn(logging.DestinationHTTP,
 			"Superuser mode is configured but cannot run: it needs a pool signing key and trust domain to mint the identity it acts under",
 			"superuser_group", group,
+			"project_leads", leads,
 			"signing_key_path", h.signingKeyPath,
 			"trust_domain", h.trustDomain)
 		return
 	}
 
-	h.superuserGroups = newGroupSet(group)
+	h.superuserGroups.set(group)
 	h.superuserArmed = newSuperuserSessions(cfg.SuperuserArmTTL)
 	h.superuserPolicy = newSuperuserPolicy(
 		scheddSuperUserSource{get: h.getSchedd},
@@ -218,6 +233,8 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 	)
 	logger.Info(logging.DestinationHTTP, "Superuser mode enabled",
 		"superuser_group", group,
+		"project_leads_file", strings.TrimSpace(cfg.ProjectLeadsFile),
+		"project_leads_group", strings.TrimSpace(cfg.ProjectLeadsGroup),
 		"fallback_identity", h.superuserPolicy.fallback,
 		"queue_superuser_refresh", h.superuserPolicy.refresh,
 		"arm_ttl", h.superuserArmed.ttl)
@@ -226,11 +243,49 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 // superuserModeAvailable reports whether the feature is configured at all.
 // It says nothing about whether a given caller may use it.
 func (h *Handler) superuserModeAvailable() bool {
-	return h.superuserGroups.configured() && h.superuserPolicy != nil && h.superuserArmed != nil
+	return h.superuserPolicy != nil && h.superuserArmed != nil &&
+		(h.superuserGroups.configured() || h.projectLeads.configured())
+}
+
+// globalSuperuser reports whether groups grant global superuser scope.
+//
+// The configured() check is load-bearing. groupSet.allows treats an empty
+// list as "no requirement" and admits everybody, which is right for access
+// groups and catastrophically wrong here: with only project leads
+// configured, HTTP_API_SUPERUSER_GROUP is empty, and allows() alone would
+// make every session a global superuser.
+func (h *Handler) globalSuperuser(groups []string) bool {
+	return h.superuserGroups.configured() && h.superuserGroups.allows(groups)
+}
+
+// superuserScopeFor works out what a session may act on, from the
+// configuration as it stands now. Never cached: this is what makes removing
+// someone from the leads file, or from the group, take effect on their next
+// action rather than when their arm expires.
+func (h *Handler) superuserScopeFor(session *SessionData) superuserScope {
+	if session == nil {
+		return superuserScope{}
+	}
+	return superuserScope{
+		Global:   h.globalSuperuser(session.Groups),
+		Projects: h.projectLeads.LedProjects(session.Username, session.Groups),
+	}
+}
+
+// effectiveSuperuserScope is what an armed session may do right now: the
+// current scope, capped by how the session was armed. A session armed as a
+// project lead stays project-scoped even if its user has since become a
+// global superuser; a session armed globally drops to project scope (or to
+// nothing) if its user has since lost the group.
+func effectiveSuperuserScope(armed armedSession, current superuserScope) superuserScope {
+	if current.Global && !armed.projectScoped {
+		return current
+	}
+	return superuserScope{Projects: current.Projects}
 }
 
 // mayUseSuperuserMode reports whether this request's session is allowed to act
-// as other users.
+// as other users, in either scope.
 //
 // Session-based only, deliberately. Superuser mode is an interactive posture
 // an operator turns on and sees a banner for; letting a bearer token carry it
@@ -243,7 +298,7 @@ func (h *Handler) mayUseSuperuserMode(r *http.Request) bool {
 	if !ok {
 		return false
 	}
-	return h.superuserGroups.allows(session.Groups)
+	return h.superuserScopeFor(session).allowed()
 }
 
 // scheddSuperUserSource adapts the handler's schedd accessor to the narrow

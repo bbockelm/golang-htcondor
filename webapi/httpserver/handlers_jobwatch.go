@@ -87,8 +87,9 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 
 	// The same owner scope a plain GET of this job gets. A watch reads
 	// job state continuously, so it is the last place to be laxer than
-	// the one-shot read.
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	// the one-shot read -- or stricter, which would break the detail
+	// page for a project lead the GET lets in.
+	constraint, err := s.jobReadScope(ctx, r, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return

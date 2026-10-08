@@ -160,6 +160,11 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 	// change: the schedd gates GET_JOB_CONNECT_INFO with UserCheck2, which
 	// a queue superuser satisfies, and the starter then builds the session
 	// as the job owner rather than as the caller.
+	//
+	// A project lead's project is checked, then acted on: unlike hold and
+	// release, GET_JOB_CONNECT_INFO names a job rather than taking a
+	// constraint, so the schedd cannot re-check the project atomically.
+	// The window is the time between that check and the connect.
 	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusForbidden, err.Error())

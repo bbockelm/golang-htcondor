@@ -112,10 +112,35 @@ func (h *Handler) SetWebUIAdminGroups(raw string) { h.webuiAdminGroups.set(raw) 
 // check goes through the group list.
 func (h *Handler) SetSuperuserGroups(raw string) {
 	h.superuserGroups.set(raw)
-	if h.superuserPolicy == nil && h.superuserGroups.configured() {
+	h.warnIfSuperuserNeedsRestart("HTTP_API_SUPERUSER_GROUP")
+}
+
+// SetProjectLeadsFile installs HTTP_API_PROJECT_LEADS_FILE and re-reads it.
+//
+// Called on every reconfigure, not only when the path changes: the usual
+// reason to reconfigure is that the file was edited. (The file is also
+// re-checked for changes on its own every few seconds, so an edit takes
+// effect without a reconfigure; this makes it immediate.)
+//
+// Like SetSuperuserGroups, this cannot switch superuser mode ON in a running
+// daemon that started without it.
+func (h *Handler) SetProjectLeadsFile(path string) {
+	h.projectLeads.SetFile(path)
+	h.warnIfSuperuserNeedsRestart("HTTP_API_PROJECT_LEADS_FILE")
+}
+
+// SetProjectLeadsGroup installs HTTP_API_PROJECT_LEADS_GROUP.
+func (h *Handler) SetProjectLeadsGroup(pattern string) {
+	h.projectLeads.SetPattern(pattern)
+	h.warnIfSuperuserNeedsRestart("HTTP_API_PROJECT_LEADS_GROUP")
+}
+
+// warnIfSuperuserNeedsRestart says so when a reconfigure configured somebody
+// to use superuser mode on a daemon that started with it off.
+func (h *Handler) warnIfSuperuserNeedsRestart(param string) {
+	if h.superuserPolicy == nil && (h.superuserGroups.configured() || h.projectLeads.configured()) {
 		h.logger.Warn(logging.DestinationHTTP,
-			"HTTP_API_SUPERUSER_GROUP now names a group, but superuser mode was not started; "+
-				"it is built at startup and needs a restart to enable",
-			"groups", h.superuserGroups.String())
+			param+" now configures superuser mode, but it was not started; "+
+				"it is built at startup and needs a restart to enable")
 	}
 }

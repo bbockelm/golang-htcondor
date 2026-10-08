@@ -70,6 +70,8 @@ export default function JobsPage() {
     queryFn: api.auth.me,
   });
   const isAdmin = !!session?.is_admin;
+  // A project lead's "Everyone" is their own jobs plus their projects'.
+  const isLead = (session?.project_lead_of?.length ?? 0) > 0;
 
   // Shared with the dashboard and /archive; see lib/scope.ts.
   const [scope] = useScope();
@@ -338,12 +340,12 @@ export default function JobsPage() {
     <div className="space-y-4">
       <div className="flex items-baseline gap-3 flex-wrap">
         <h1 className="text-2xl font-bold text-gray-900">
-          {ownedByMe ? 'My Batches' : 'All Batches'}
+          {ownedByMe ? 'My Batches' : isAdmin || !isLead ? 'All Batches' : 'My and Project Batches'}
         </h1>
         <span className="text-sm text-gray-500">
           One row per batch. Click a row to see the jobs in it.
         </span>
-        {isAdmin && <ScopeToggle />}
+        {(isAdmin || isLead) && <ScopeToggle />}
         <Link
           href="/submit"
           className="ml-auto rounded-sm bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"

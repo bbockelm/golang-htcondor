@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 // fakeTarget records what a reconfigure applied to the running server.
@@ -36,6 +37,8 @@ func (f *fakeTarget) SetWebUIAdminGroups(v string)   { f.record("webui_admin", v
 func (f *fakeTarget) SetSuperuserGroups(v string)    { f.record("superuser", v) }
 func (f *fakeTarget) SetMCPSkillsDir(v string)       { f.record("skills_dir", v) }
 func (f *fakeTarget) SetMCPDisabledTools(v string)   { f.record("disabled_tools", v) }
+func (f *fakeTarget) SetProjectLeadsFile(v string)   { f.record("project_leads_file", v) }
+func (f *fakeTarget) SetProjectLeadsGroup(v string)  { f.record("project_leads_group", v) }
 
 // configFrom builds a Config from literal file contents, the way the daemon
 // builds one from CONDOR_CONFIG on reconfigure.
@@ -230,5 +233,28 @@ func TestReconfigAppliesDisabledTools(t *testing.T) {
 	}
 	if want := []string{"exec_in_job interactive_session_*"}; !reflect.DeepEqual(target.groups["disabled_tools"], want) {
 		t.Errorf("server received %v, want %v", target.groups["disabled_tools"], want)
+	}
+}
+
+// TestReconfigRereadsProjectLeadsFile: editing the leads file is the usual
+// reason to reconfigure, and the path itself does not change when it is
+// edited, so the file must be re-read on every reconfigure -- and a changed
+// pattern must reach the server too.
+func TestReconfigRereadsProjectLeadsFile(t *testing.T) {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	body := "HTTP_API_PROJECT_LEADS_FILE = /etc/condor/project-leads\n"
+	target := &fakeTarget{}
+	w := newReconfigWatcher(configFrom(t, body), target, logger)
+
+	w.reconfigure(configFrom(t, body+"HTTP_API_PROJECT_LEADS_GROUP = {project}-leads\n"))
+
+	if got, want := target.groups["project_leads_file"], []string{"/etc/condor/project-leads"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("leads file reloads = %v, want %v", got, want)
+	}
+	if got, want := target.groups["project_leads_group"], []string{"{project}-leads"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("leads pattern = %v, want %v", got, want)
 	}
 }

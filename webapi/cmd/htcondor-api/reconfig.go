@@ -47,6 +47,8 @@ type reconfigTarget interface {
 	SetWebUIAccessGroups(string)
 	SetWebUIAdminGroups(string)
 	SetSuperuserGroups(string)
+	SetProjectLeadsFile(string)
+	SetProjectLeadsGroup(string)
 	SetMCPSkillsDir(string)
 	SetMCPDisabledTools(string)
 }
@@ -134,6 +136,18 @@ var reconfigParams = []reconfigParam{
 	{
 		name:  "HTTP_API_SUPERUSER_GROUP",
 		apply: func(s reconfigTarget, v string) { s.SetSuperuserGroups(v) },
+	},
+	// Project leads. Membership tests only, like the groups above, with
+	// the same limit: they cannot switch superuser mode on in a daemon
+	// that started without it. The file is also re-read unconditionally
+	// in reconfigure(), since editing it is the usual reason to send one.
+	{
+		name:  "HTTP_API_PROJECT_LEADS_FILE",
+		apply: func(s reconfigTarget, v string) { s.SetProjectLeadsFile(v) },
+	},
+	{
+		name:  "HTTP_API_PROJECT_LEADS_GROUP",
+		apply: func(s reconfigTarget, v string) { s.SetProjectLeadsGroup(v) },
 	},
 
 	// --- Restart required (read once at startup) ---
@@ -244,6 +258,15 @@ func (w *reconfigWatcher) reconfigure(cfg *config.Config) {
 		w.srv.SetMCPSkillsDir(dir)
 		if !slices.Contains(applied, "HTTP_API_MCP_SKILLS_DIR") {
 			applied = append(applied, "HTTP_API_MCP_SKILLS_DIR")
+		}
+	}
+
+	// Same for the project leads file: its contents live outside the
+	// configuration, so a diff of the path cannot see an edit to it.
+	if path := configValue(cfg, "HTTP_API_PROJECT_LEADS_FILE"); path != "" {
+		if !slices.Contains(applied, "HTTP_API_PROJECT_LEADS_FILE") {
+			w.srv.SetProjectLeadsFile(path)
+			applied = append(applied, "HTTP_API_PROJECT_LEADS_FILE")
 		}
 	}
 

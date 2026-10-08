@@ -330,6 +330,10 @@ type Config struct {
 	// SuperuserGroup gates superuser mode. Empty disables it. See
 	// HandlerConfig.SuperuserGroup -- notably, it is NOT WebUIAdminGroup.
 	SuperuserGroup string
+	// ProjectLeadsFile and ProjectLeadsGroup configure project leads. See
+	// HandlerConfig.
+	ProjectLeadsFile  string
+	ProjectLeadsGroup string
 	// SuperuserFallbackIdentity overrides the identity used when the
 	// operator is not themselves a usable queue superuser. Empty selects
 	// condor@$(UID_DOMAIN). See HandlerConfig.
@@ -504,6 +508,8 @@ func NewServer(cfg Config) (*Server, error) {
 		WebUIAccessGroup:            cfg.WebUIAccessGroup,
 		SpoolBufferDir:              cfg.SpoolBufferDir,
 		SuperuserGroup:              cfg.SuperuserGroup,
+		ProjectLeadsFile:            cfg.ProjectLeadsFile,
+		ProjectLeadsGroup:           cfg.ProjectLeadsGroup,
 		SuperuserFallbackIdentity:   cfg.SuperuserFallbackIdentity,
 		EnableIDP:                   cfg.EnableIDP,
 		SeedDemoUser:                cfg.SeedDemoUser,

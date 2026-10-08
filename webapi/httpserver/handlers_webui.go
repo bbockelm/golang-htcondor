@@ -45,6 +45,16 @@ type AuthMeResponse struct {
 	// the operator themselves.
 	SuperuserIdentity string `json:"superuser_identity,omitempty"`
 	SuperuserNote     string `json:"superuser_note,omitempty"`
+	// SuperuserScope is "global" or "project" while the mode is armed, and
+	// SuperuserProjects the projects a project-scoped session may act in,
+	// so the banner can say which. Re-read on every request, as the
+	// actions themselves are.
+	SuperuserScope    string   `json:"superuser_scope,omitempty"`
+	SuperuserProjects []string `json:"superuser_projects,omitempty"`
+	// ProjectLeadOf lists the projects this session leads, armed or not.
+	// Leads may list their projects' jobs without arming, the way admins
+	// may list everyone's, so the UI offers them the same scope toggle.
+	ProjectLeadOf []string `json:"project_lead_of,omitempty"`
 }
 
 // handleAuthMe handles GET /api/v1/auth/me. Resolves the browser session
@@ -66,15 +76,22 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		if s.webuiAdminGroups.configured() {
 			resp.IsAdmin = s.webuiAdminGroups.allows(session.Groups)
 		}
+		resp.ProjectLeadOf = s.projectLeads.LedProjects(session.Username, session.Groups)
 		resp.SuperuserAllowed = s.mayUseSuperuserMode(r)
 		if resp.SuperuserAllowed {
 			if sessionID, err := getSessionCookie(r); err == nil {
 				if armed, ok := s.superuserArmed.Armed(sessionID); ok {
-					resp.SuperuserActive = true
-					until := armed.until
-					resp.SuperuserExpiresAt = &until
-					resp.SuperuserIdentity = armed.identity
-					resp.SuperuserNote = armed.note
+					// Reported as the actions will see it, so the
+					// banner never claims more than the server grants.
+					scope := effectiveSuperuserScope(armed, s.superuserScopeFor(session))
+					if scope.allowed() {
+						resp.SuperuserActive = true
+						until := armed.until
+						resp.SuperuserExpiresAt = &until
+						resp.SuperuserIdentity = armed.identity
+						resp.SuperuserNote = armed.note
+						resp.SuperuserScope, resp.SuperuserProjects = scopeForResponse(scope)
+					}
 				}
 			}
 		}
@@ -102,6 +119,18 @@ type SuperuserModeResponse struct {
 	// Note explains a fallback when one happened, including how to fix it.
 	// Empty when the operator is acting as themselves.
 	Note string `json:"note,omitempty"`
+	// Scope is "global" or "project"; Projects lists the projects a
+	// project-scoped session may act in.
+	Scope    string   `json:"scope,omitempty"`
+	Projects []string `json:"projects,omitempty"`
+}
+
+// scopeForResponse renders a scope for the status endpoints.
+func scopeForResponse(scope superuserScope) (string, []string) {
+	if scope.Global {
+		return "global", nil
+	}
+	return "project", scope.Projects
 }
 
 // handleSuperuserMode handles POST /api/v1/admin/superuser.
@@ -118,7 +147,7 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.superuserModeAvailable() {
 		s.writeError(w, http.StatusServiceUnavailable,
-			"Superuser mode is not enabled on this server. It requires HTTP_API_SUPERUSER_GROUP and a pool signing key.")
+			"Superuser mode is not enabled on this server. It requires HTTP_API_SUPERUSER_GROUP or project leads, and a pool signing key.")
 		return
 	}
 	session, ok := s.getSessionFromRequest(r)
@@ -126,9 +155,13 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if !s.mayUseSuperuserMode(r) {
-		s.writeError(w, http.StatusForbidden,
-			fmt.Sprintf("Superuser mode requires membership in one of: %s", s.superuserGroups))
+	scope := s.superuserScopeFor(session)
+	if !scope.allowed() {
+		msg := "Superuser mode requires leading a project"
+		if s.superuserGroups.configured() {
+			msg = fmt.Sprintf("Superuser mode requires membership in one of: %s, or leading a project", s.superuserGroups)
+		}
+		s.writeError(w, http.StatusForbidden, msg)
 		return
 	}
 	sessionID, err := getSessionCookie(r)
@@ -147,12 +180,16 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 	resp := SuperuserModeResponse{}
 	if req.Enabled {
 		armed := s.resolveImpersonationIdentity(r.Context(), session.Username)
+		// Global wins when the session holds both: it is the broader
+		// grant and the one the operator was given explicitly.
+		armed.projectScoped = !scope.Global
 		until := s.superuserArmed.Arm(sessionID, armed)
 		resp.Active = true
 		resp.ExpiresAt = &until
 		resp.Identity = armed.identity
 		resp.ActorIsQueueSuperUser = armed.actorIsSuperUser
 		resp.Note = armed.note
+		resp.Scope, resp.Projects = scopeForResponse(scope)
 		identity, isSuper := armed.identity, armed.actorIsSuperUser
 		// Arming is itself worth an audit record: it is the moment an
 		// operator took on the ability to act as anyone, and it may be
@@ -161,6 +198,8 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 			"actor", session.Username,
 			"authenticated_as", identity,
 			"actor_is_queue_superuser", isSuper,
+			"scope", resp.Scope,
+			"projects", resp.Projects,
 			"expires_at", until,
 			"remote_addr", r.RemoteAddr)
 	} else {

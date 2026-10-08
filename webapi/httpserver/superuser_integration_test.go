@@ -45,6 +45,10 @@ const (
 	jobOwnerUser   = "jobowner"
 	superAdminUser = "superadmin"
 	plainAdminUser = "plainadmin"
+	// projectLeadUser leads project "Physics" through the leads file. Not
+	// in the superuser group, not an admin, not a queue superuser: the
+	// project-lead grant is the only thing that lets them act.
+	projectLeadUser = "projlead"
 )
 
 func TestSuperuserModeEndToEnd(t *testing.T) {
@@ -192,6 +196,13 @@ func runSuperuserEndToEnd(t *testing.T, opts superuserPoolOpts) {
 		t.Fatalf("Failed to write signing key: %v", err)
 	}
 
+	// The project-lead grant, from a file, so the run also covers the file
+	// being read at startup.
+	leadsFile := filepath.Join(tempDir, "project-leads")
+	if err := os.WriteFile(leadsFile, []byte("Physics "+projectLeadUser+"\n"), 0o644); err != nil {
+		t.Fatalf("Failed to write the project leads file: %v", err)
+	}
+
 	configFile := filepath.Join(tempDir, "condor_config")
 	if err := writeMiniCondorConfig(configFile, tempDir, socketDir, passwordsDir, trustDomain, t); err != nil {
 		t.Fatalf("Failed to write config: %v", err)
@@ -292,6 +303,7 @@ QUEUE_SUPER_USERS = root, condor, %s
 		// could only be tested as root, i.e. nowhere: CI's integration
 		// container runs as "vscode".
 		SuperuserFallbackIdentity: opts.fallbackIdentity,
+		ProjectLeadsFile:          leadsFile,
 		OAuth2DBPath:              filepath.Join(tempDir, "sessions.db"),
 	})
 	if err != nil {
@@ -489,6 +501,90 @@ queue`
 			jobID, jobStatusOf(t, client, baseURL, ownerSID, jobID))
 	})
 
+	// Project leads. The lead is in no group at all, so these also show the
+	// mode working with nothing but the leads file.
+	physicsJob := strings.Replace(submitFile, "queue", "+ProjectName = \"Physics\"\nqueue", 1)
+	chemJob := strings.Replace(submitFile, "queue", "+ProjectName = \"Chem\"\nqueue", 1)
+
+	t.Run("armed, a project lead holds and releases a job in their project", func(t *testing.T) {
+		jobID := submitIdleJob(t, client, baseURL, ownerSID, physicsJob)
+		sid := newAdminSession(t, server, projectLeadUser, "no-groups")
+		armSuperuser(t, client, baseURL, sid, true)
+
+		status, body := holdAsSession(t, client, baseURL, sid, jobID, "ignored")
+		t.Logf("hold returned %d: %s", status, truncate(body, 160))
+		if st := waitJobStatus(t, client, baseURL, ownerSID, jobID, 5, 15*time.Second); st != 5 {
+			t.Fatalf("job %s not held (JobStatus=%d) -- the project lead could not act", jobID, st)
+		}
+		reason := holdReasonOf(t, client, baseURL, ownerSID, jobID)
+		t.Logf("HoldReason: %s", reason)
+		for _, want := range []string{projectLeadUser, jobOwner, "project lead for Physics", "by user " + poolUser} {
+			if !strings.Contains(reason, want) {
+				t.Errorf("HoldReason does not mention %q: %s", want, reason)
+			}
+		}
+
+		status, body = actionAsSession(t, client, baseURL, sid, jobID, "release")
+		t.Logf("release returned %d: %s", status, truncate(body, 160))
+		if st := waitJobStatus(t, client, baseURL, ownerSID, jobID, 1, 15*time.Second); st != 1 {
+			t.Errorf("job %s not released (JobStatus=%d)", jobID, st)
+		}
+	})
+
+	t.Run("armed, a project lead is refused a job in another project", func(t *testing.T) {
+		jobID := submitIdleJob(t, client, baseURL, ownerSID, chemJob)
+		sid := newAdminSession(t, server, projectLeadUser, "no-groups")
+		armSuperuser(t, client, baseURL, sid, true)
+
+		status, body := holdAsSession(t, client, baseURL, sid, jobID, "should not work")
+		t.Logf("hold returned %d: %s", status, truncate(body, 200))
+		if status != http.StatusForbidden {
+			t.Errorf("hold returned %d, want 403", status)
+		}
+		if st := waitJobStatus(t, client, baseURL, ownerSID, jobID, 5, 3*time.Second); st == 5 {
+			t.Errorf("job %s in another project was held by a project lead", jobID)
+		}
+	})
+
+	t.Run("a project lead lists their projects' jobs and no others", func(t *testing.T) {
+		physics := submitIdleJob(t, client, baseURL, ownerSID, physicsJob)
+		chem := submitIdleJob(t, client, baseURL, ownerSID, chemJob)
+		sid := newAdminSession(t, server, projectLeadUser, "no-groups")
+
+		// The schedd does not filter reads, so this server's constraint is
+		// the whole of the enforcement; a trailing "|| true" must not
+		// widen it.
+		req, _ := http.NewRequest("GET", baseURL+"/api/v1/jobs?owned_by_me=false&limit=*"+
+			"&projection=ClusterId,ProcId,Owner,ProjectName&constraint="+urlQueryEscape("JobStatus == 1 || true"), nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid})
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("list failed: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var parsed struct {
+			Jobs []map[string]any `json:"jobs"`
+		}
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			t.Fatalf("list returned %d, unparseable: %s", resp.StatusCode, truncate(string(body), 300))
+		}
+		seen := map[string]bool{}
+		for _, j := range parsed.Jobs {
+			id := fmt.Sprintf("%v.%v", j["ClusterId"], j["ProcId"])
+			seen[id] = true
+			if p, _ := j["ProjectName"].(string); !strings.EqualFold(p, "Physics") && j["Owner"] != projectLeadUser {
+				t.Errorf("lead listing returned job %s in project %q owned by %v", id, p, j["Owner"])
+			}
+		}
+		if !seen[physics] {
+			t.Errorf("lead listing does not include %s, a job in their project (got %d jobs)", physics, len(parsed.Jobs))
+		}
+		if seen[chem] {
+			t.Errorf("lead listing includes %s, a job in another project", chem)
+		}
+	})
+
 	t.Run("disarming stops it again", func(t *testing.T) {
 		jobID := submitIdleJob(t, client, baseURL, ownerSID, submitFile)
 		sid := newAdminSession(t, server, plainAdmin, suGroup)
@@ -543,6 +639,22 @@ func holdAsSession(t *testing.T, client *http.Client, baseURL, sid, jobID, reaso
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("hold request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(respBody)
+}
+
+// actionAsSession performs a single-job action (hold, release) using a
+// browser session.
+func actionAsSession(t *testing.T, client *http.Client, baseURL, sid, jobID, action string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/v1/jobs/%s/%s", baseURL, jobID, action), bytes.NewReader([]byte("{}")))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid})
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s request failed: %v", action, err)
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)

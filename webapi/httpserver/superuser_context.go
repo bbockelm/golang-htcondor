@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
@@ -39,7 +41,15 @@ type Impersonation struct {
 	// shared identity and this server's audit record is the only place the
 	// actor appears.
 	ActorIsSuperUser bool
+	// Project is set when the actor is acting as a project lead rather
+	// than as a global superuser: the project, as configured, that grants
+	// this impersonation. Empty for global scope.
+	Project string
 }
+
+// projectScoped reports whether this impersonation rests on project
+// leadership rather than global superuser membership.
+func (i *Impersonation) projectScoped() bool { return i != nil && i.Project != "" }
 
 // Reason renders the actor and target into a string suitable for a
 // HoldReason / RemoveReason / ReleaseReason.
@@ -54,7 +64,14 @@ type Impersonation struct {
 // The result lands in the job ad, so it outlives this server's logs, follows
 // the job into history, and is visible to the job's owner -- who is entitled
 // to know that somebody else touched their job, and which somebody.
+//
+// A project lead's reason names the project, so the owner can tell which
+// grant was used and whom to ask about it.
 func (i Impersonation) Reason(what string) string {
+	if i.Project != "" {
+		return fmt.Sprintf("%s by %s via the web UI (project lead for %s, acting for %s)",
+			what, i.Actor, i.Project, i.Target)
+	}
 	return fmt.Sprintf("%s by %s via the web UI (superuser mode, acting for %s)",
 		what, i.Actor, i.Target)
 }
@@ -150,6 +167,8 @@ func (h *Handler) auditSuperuserAction(r *http.Request, imp *Impersonation, acti
 		"target", imp.Target,
 		"authenticated_as", imp.Identity,
 		"actor_is_queue_superuser", imp.ActorIsSuperUser,
+		"scope", imp.scopeName(),
+		"project", imp.Project,
 		"action", action,
 		"subject", subject,
 		"remote_addr", r.RemoteAddr,
@@ -162,32 +181,118 @@ func (h *Handler) auditSuperuserAction(r *http.Request, imp *Impersonation, acti
 	h.logger.Info(logging.DestinationSecurity, "Superuser action", fields...)
 }
 
-// jobOwner looks up the Owner of a single job.
+// scopeName is "project" or "global", for audit records.
+func (i *Impersonation) scopeName() string {
+	if i.projectScoped() {
+		return "project"
+	}
+	return "global"
+}
+
+// superuserJobProjection is what superuser mode reads off a job to decide
+// whether, and as whom, it may act on it.
+var superuserJobProjection = []string{"Owner", "User", "ProjectName", "ClusterId", "ProcId"}
+
+// querySuperuserJobs reads jobs for superuser-mode decisions. A seam so the
+// authorization rules can be tested against ads evaluated in-process
+// rather than a live schedd; production always goes to the schedd.
+func (h *Handler) querySuperuserJobs(ctx context.Context, constraint string, limit int) ([]*classad.ClassAd, error) {
+	if h.superuserJobQuery != nil {
+		return h.superuserJobQuery(ctx, constraint, superuserJobProjection, limit)
+	}
+	schedd := h.getSchedd()
+	if schedd == nil {
+		return nil, fmt.Errorf("no schedd configured")
+	}
+	ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Limit:      limit,
+		Projection: superuserJobProjection,
+	})
+	return ads, err
+}
+
+// adOwner reads a job's owner, falling back to the User attribute older ads
+// may carry alone ("owner@domain").
+func adOwner(ad *classad.ClassAd) string {
+	if owner, ok := ad.EvaluateAttrString("Owner"); ok && owner != "" {
+		return owner
+	}
+	if user, ok := ad.EvaluateAttrString("User"); ok && user != "" {
+		return ownerFromActor(user)
+	}
+	return ""
+}
+
+// adProject reads a job's ProjectName. Empty when it is missing or is not a
+// string, which project scope treats as "in no project".
+func adProject(ad *classad.ClassAd) string {
+	project, ok := ad.EvaluateAttrString("ProjectName")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(project)
+}
+
+// jobOwnerAndProject looks up the Owner and ProjectName of a single job, in
+// one query.
 //
 // The target of an impersonation is derived from the job, never from the
 // request: a caller-supplied target would let an admin name any identity they
 // liked and have the server authenticate as a superuser on its behalf, which
-// is a different and much larger capability than "fix this job".
-func (h *Handler) jobOwner(ctx context.Context, cluster, proc int) (string, error) {
+// is a different and much larger capability than "fix this job". The same
+// goes for the project a lead's authority is checked against.
+func (h *Handler) jobOwnerAndProject(ctx context.Context, cluster, proc int) (owner, project string, err error) {
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	ads, _, err := h.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Limit:      1,
-		Projection: []string{"Owner", "User", "ClusterId", "ProcId"},
-	})
+	ads, err := h.querySuperuserJobs(ctx, constraint, 1)
 	if err != nil {
-		return "", fmt.Errorf("looking up job %d.%d: %w", cluster, proc, err)
+		return "", "", fmt.Errorf("looking up job %d.%d: %w", cluster, proc, err)
 	}
 	if len(ads) == 0 {
-		return "", fmt.Errorf("job %d.%d not found", cluster, proc)
+		return "", "", fmt.Errorf("job %d.%d not found", cluster, proc)
 	}
-	if owner, ok := ads[0].EvaluateAttrString("Owner"); ok && owner != "" {
-		return owner, nil
+	owner = adOwner(ads[0])
+	if owner == "" {
+		return "", "", fmt.Errorf("job %d.%d has no owner attribute", cluster, proc)
 	}
-	// Older ads may only carry User ("owner@domain").
-	if user, ok := ads[0].EvaluateAttrString("User"); ok && user != "" {
-		return ownerFromActor(user), nil
+	return owner, adProject(ads[0]), nil
+}
+
+// armedSuperuser is the shared prologue of every superuser-mode decision:
+// is the feature on, is this a session, is it armed, and what may it do now.
+//
+// ok=false means superuser mode is not engaged and the request should
+// proceed normally. A non-nil error means it WAS engaged and the session has
+// since lost the right to use it -- removed from the leads file or the
+// group after arming. That disarms the session and fails the request rather
+// than quietly proceeding as the caller: the operator believes the mode is
+// on, and an action that silently ran as themselves instead would be a
+// surprise in one direction or the other.
+func (h *Handler) armedSuperuser(r *http.Request) (armedSession, superuserScope, *SessionData, bool, error) {
+	if !h.superuserModeAvailable() {
+		return armedSession{}, superuserScope{}, nil, false, nil
 	}
-	return "", fmt.Errorf("job %d.%d has no owner attribute", cluster, proc)
+	sessionID, err := getSessionCookie(r)
+	if err != nil {
+		return armedSession{}, superuserScope{}, nil, false, nil
+	}
+	armed, isArmed := h.superuserArmed.Armed(sessionID)
+	if !isArmed {
+		return armedSession{}, superuserScope{}, nil, false, nil
+	}
+	session, ok := h.getSessionFromRequest(r)
+	if !ok {
+		return armedSession{}, superuserScope{}, nil, false, nil
+	}
+	scope := effectiveSuperuserScope(armed, h.superuserScopeFor(session))
+	if !scope.allowed() {
+		h.superuserArmed.Disarm(sessionID)
+		h.logger.Info(logging.DestinationSecurity,
+			"Superuser mode disarmed: the session is no longer permitted to use it",
+			"actor", session.Username, "remote_addr", r.RemoteAddr)
+		return armedSession{}, superuserScope{}, nil, false, fmt.Errorf(
+			"superuser mode has been turned off: you are no longer permitted to use it")
+	}
+	return armed, scope, session, true, nil
 }
 
 // superuserActionContext decides whether a single-job action should run as
@@ -203,24 +308,23 @@ func (h *Handler) jobOwner(ctx context.Context, cluster, proc int) (string, erro
 // determine the owner is fatal rather than a fallback to acting as the
 // caller, because "we could not tell whose job this is" is not a good reason
 // to try it as somebody.
+//
+// Project scope adds one rule: another user's job must carry a ProjectName
+// the actor leads, re-checked against the configuration now rather than at
+// arming. A job in some other project, or in none, is refused outright.
+// Falling back to acting as the caller would be the wrong failure: the
+// operator is in a mode where their clicks reach other people's jobs, and an
+// action that quietly ran as themselves would look like it had worked.
 func (h *Handler) superuserActionContext(ctx context.Context, r *http.Request, cluster, proc int) (context.Context, *Impersonation, error) {
-	if !h.superuserModeAvailable() || !h.mayUseSuperuserMode(r) {
-		return ctx, nil, nil
-	}
-	sessionID, err := getSessionCookie(r)
+	armed, scope, session, ok, err := h.armedSuperuser(r)
 	if err != nil {
-		return ctx, nil, nil
+		return nil, nil, err
 	}
-	armed, isArmed := h.superuserArmed.Armed(sessionID)
-	if !isArmed {
-		return ctx, nil, nil
-	}
-	session, ok := h.getSessionFromRequest(r)
 	if !ok {
 		return ctx, nil, nil
 	}
 
-	owner, err := h.jobOwner(ctx, cluster, proc)
+	owner, project, err := h.jobOwnerAndProject(ctx, cluster, proc)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -229,10 +333,29 @@ func (h *Handler) superuserActionContext(ctx context.Context, r *http.Request, c
 		return ctx, nil, nil
 	}
 
+	ledProject := ""
+	if !scope.Global {
+		// Neither the owner nor the project is named in the refusal: a
+		// lead has no business learning either for a job outside their
+		// projects, and probing job ids one by one should not tell them.
+		if project == "" {
+			return nil, nil, fmt.Errorf(
+				"job %d.%d is not in a project you lead; as a project lead you may act only on other users' jobs in your projects",
+				cluster, proc)
+		}
+		var leads bool
+		if ledProject, leads = scope.leads(project); !leads {
+			return nil, nil, fmt.Errorf(
+				"job %d.%d is not in a project you lead; as a project lead you may act only on other users' jobs in your projects",
+				cluster, proc)
+		}
+	}
+
 	impCtx, imp, err := h.impersonate(ctx, armed, session.Username, owner)
 	if err != nil {
 		return nil, nil, err
 	}
+	imp.Project = ledProject
 	return impCtx, imp, nil
 }
 
@@ -283,35 +406,39 @@ type superuserBulkPlan struct {
 // server authenticated as. The alternative, acting once as a superuser across
 // everything, would be a single unbounded grant with one audit line.
 //
+// Project scope narrows the constraint BEFORE owners are resolved, to the
+// caller's own jobs plus the jobs in projects they lead, so a job outside
+// those is never read, never planned and never acted on. Other users' jobs
+// are then batched per (owner, project) rather than per owner, and each
+// batch's constraint carries its project clause: the schedd re-applies it
+// when it acts, so a job moved out of the project after planning is not
+// touched, and each batch's reason names the one project that granted it.
+//
 // Returns a nil plan when superuser mode is not engaged, in which case the
 // caller proceeds normally.
 func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, constraint string) ([]superuserBulkPlan, error) {
-	if !h.superuserModeAvailable() || !h.mayUseSuperuserMode(r) {
-		return nil, nil
-	}
-	sessionID, err := getSessionCookie(r)
+	armed, scope, session, ok, err := h.armedSuperuser(r)
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
-	armed, isArmed := h.superuserArmed.Armed(sessionID)
-	if !isArmed {
-		return nil, nil
-	}
-	session, ok := h.getSessionFromRequest(r)
 	if !ok {
 		return nil, nil
+	}
+	actorOwner := ownerFromActor(session.Username)
+
+	planConstraint := constraint
+	if !scope.Global {
+		if planConstraint, err = scopeToOwnerOrProjects(actorOwner, scope.Projects, constraint); err != nil {
+			return nil, err
+		}
 	}
 
 	// Bounded deliberately. Resolving owners means reading every matching
 	// job, and a bulk constraint on a busy access point can match a great
 	// many; an unlimited read here would be the most expensive thing in the
-	// request. The limit is one job past what the owner cap could possibly
-	// need, so hitting it always means the constraint is too broad to plan
-	// safely rather than that the answer was silently truncated.
-	ads, _, err := h.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Limit:      maxSuperuserBulkJobsScanned,
-		Projection: []string{"Owner", "User", "ClusterId", "ProcId"},
-	})
+	// request. Hitting the bound always means the constraint is too broad
+	// to plan safely rather than that the answer was silently truncated.
+	ads, err := h.querySuperuserJobs(ctx, planConstraint, maxSuperuserBulkJobsScanned)
 	if err != nil {
 		return nil, fmt.Errorf("resolving the owners of the matching jobs: %w", err)
 	}
@@ -321,52 +448,70 @@ func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, 
 			maxSuperuserBulkJobsScanned)
 	}
 	if len(ads) == 0 {
-		// Nothing matches. Let the normal path run and report zero.
+		// Nothing this mode could act on matches. Let the normal path
+		// run: it acts as the caller, so the schedd confines it to their
+		// own jobs exactly as it would with the mode off.
 		return nil, nil
 	}
 
-	counts := make(map[string]int)
-	var order []string
+	// One batch per owner, and for project scope per (owner, project).
+	type batchKey struct{ owner, project string }
+	counts := make(map[batchKey]int)
+	var order []batchKey
+	owners := make(map[string]bool)
 	for _, ad := range ads {
-		owner, ok := ad.EvaluateAttrString("Owner")
-		if !ok || owner == "" {
-			if user, ok := ad.EvaluateAttrString("User"); ok && user != "" {
-				owner = ownerFromActor(user)
-			}
-		}
+		owner := adOwner(ad)
 		if owner == "" {
 			return nil, fmt.Errorf("a matching job has no owner attribute; narrow the constraint")
 		}
-		if _, seen := counts[owner]; !seen {
-			order = append(order, owner)
+		key := batchKey{owner: owner}
+		if !scope.Global && !strings.EqualFold(owner, actorOwner) {
+			led, leads := scope.leads(adProject(ad))
+			if !leads {
+				// The query was confined to these projects, so this
+				// is a schedd that did not apply the constraint.
+				// Refuse rather than act on a job nobody granted.
+				return nil, fmt.Errorf("a matching job is outside the projects you lead; refusing the bulk action")
+			}
+			key.project = led
 		}
-		counts[owner]++
+		if _, seen := counts[key]; !seen {
+			order = append(order, key)
+		}
+		counts[key]++
+		owners[strings.ToLower(owner)] = true
 	}
 
-	if len(order) > maxSuperuserBulkOwners {
+	if len(owners) > maxSuperuserBulkOwners {
 		return nil, fmt.Errorf(
 			"this constraint spans %d job owners, more than the limit of %d for a superuser bulk action; narrow it",
-			len(order), maxSuperuserBulkOwners)
+			len(owners), maxSuperuserBulkOwners)
 	}
 
-	actorOwner := ownerFromActor(session.Username)
 	plans := make([]superuserBulkPlan, 0, len(order))
-	for _, owner := range order {
-		scoped, err := scopeToOwner(owner, constraint)
-		if err != nil {
-			return nil, fmt.Errorf("scoping the constraint to %s: %w", owner, err)
+	for _, key := range order {
+		batch := constraint
+		if key.project != "" {
+			if batch, err = scopeToProjects([]string{key.project}, constraint); err != nil {
+				return nil, err
+			}
 		}
-		if strings.EqualFold(owner, actorOwner) {
+		scoped, err := scopeToOwner(key.owner, batch)
+		if err != nil {
+			return nil, fmt.Errorf("scoping the constraint to %s: %w", key.owner, err)
+		}
+		if strings.EqualFold(key.owner, actorOwner) {
 			// The operator's own jobs. No impersonation and no audit
 			// entry -- acting on your own work is not a use of privilege.
-			plans = append(plans, superuserBulkPlan{Constraint: scoped, Jobs: counts[owner]})
+			plans = append(plans, superuserBulkPlan{Constraint: scoped, Jobs: counts[key]})
 			continue
 		}
-		_, imp, err := h.impersonate(ctx, armed, session.Username, owner)
+		_, imp, err := h.impersonate(ctx, armed, session.Username, key.owner)
 		if err != nil {
 			return nil, err
 		}
-		plans = append(plans, superuserBulkPlan{Imp: imp, Constraint: scoped, Jobs: counts[owner]})
+		imp.Project = key.project
+		plans = append(plans, superuserBulkPlan{Imp: imp, Constraint: scoped, Jobs: counts[key]})
 	}
 	return plans, nil
 }
@@ -385,9 +530,43 @@ func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, 
 // Re-scoping to the target rather than dropping the clause keeps the second
 // layer: we act only on jobs belonging to the identity we resolved off the job
 // and authenticated for.
+//
+// For a project lead the project clause goes in too. The lead's authority was
+// checked against the job's ProjectName a moment ago, but the owner can change
+// that attribute at any time; with the clause in the constraint the schedd
+// re-checks it atomically as it acts, so a job moved out of the project in
+// between matches nothing instead of being acted on.
 func (h *Handler) scopeForImpersonation(imp *Impersonation, cluster, proc int) (string, error) {
-	return scopeToOwner(ownerFromActor(imp.Target),
-		fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
+	job := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	if imp.projectScoped() {
+		var err error
+		if job, err = scopeToProjects([]string{imp.Project}, job); err != nil {
+			return "", err
+		}
+	}
+	return scopeToOwner(ownerFromActor(imp.Target), job)
+}
+
+// refuseProjectLeadInteractiveApp is the policy that keeps project leads out
+// of other users' browser-proxied apps (code-server and anything else served
+// through the job proxy). Returns a non-nil error when imp must be refused.
+//
+// The proxied app is served on this server's own origin, so whatever the job
+// sends back -- and the job owner controls all of it -- runs in the lead's
+// browser with the lead's session cookie and can call this API as them. For
+// a project lead that is an escalation path from project member to project
+// lead. A global superuser is not given anything by the same trick that they
+// did not already hold, so they keep access.
+//
+// One function on purpose: once apps are served from an isolated origin this
+// is the single check to lift.
+func refuseProjectLeadInteractiveApp(imp *Impersonation) error {
+	if !imp.projectScoped() {
+		return nil
+	}
+	return fmt.Errorf(
+		"project leads cannot open another user's interactive app: it is served from this site's own origin, " +
+			"so the job's owner would control code running in your browser session. Use the terminal or output tail instead")
 }
 
 // resolveImpersonationIdentity works out which identity this operator's
