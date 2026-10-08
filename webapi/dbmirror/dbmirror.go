@@ -192,6 +192,17 @@ type Info struct {
 	// "the live queue is caught up with 0s of lag" are the same false/0,
 	// and the panel renders the second when it means the first.
 	JobQueueReported bool
+
+	// Syncing is whether the daemon reports any schedd-sync source.
+	Syncing bool
+	// MirroredScheddName and MirroredScheddAddress name the schedd a
+	// spoke's schedd-sync mirrors. Empty when the daemon does not say
+	// (schedd-sync off, or a daemon too old to advertise it).
+	MirroredScheddName    string
+	MirroredScheddAddress string
+	// FederationConstraint is set only on a federation hub's ad: the
+	// ScheddAd constraint defining the AP set it fans in.
+	FederationConstraint string
 }
 
 // mirrorAdAttrs is every attribute ParseAd reads, for callers that fetch
@@ -204,6 +215,7 @@ func mirrorAdAttrs() []string {
 		"HistoryCaughtUp", "HistoryGapDetected", "HistoryLastSyncTime", "HistorySecondsSinceSync", "HistoryLagBytes",
 		"JobQueueCaughtUp", "JobQueueLastSyncTime", "JobQueueSecondsSinceSync", "JobQueueLagBytes",
 		"EpochCaughtUp", "EpochGapDetected", "EpochLastSyncTime", "EpochSecondsSinceSync", "EpochLagBytes",
+		"Syncing", "MirroredScheddName", "MirroredScheddAddress", "FederationConstraint",
 	}
 }
 
@@ -239,6 +251,11 @@ func ParseAd(ad *classad.ClassAd) *Info {
 	info.EpochLagBytes, info.EpochLagReported = ad.EvaluateAttrInt("EpochLagBytes")
 
 	info.HistoryLagBytes, info.HistoryLagReported = ad.EvaluateAttrInt("HistoryLagBytes")
+
+	info.Syncing, _ = ad.EvaluateAttrBool("Syncing")
+	info.MirroredScheddName, _ = ad.EvaluateAttrString("MirroredScheddName")
+	info.MirroredScheddAddress, _ = ad.EvaluateAttrString("MirroredScheddAddress")
+	info.FederationConstraint, _ = ad.EvaluateAttrString("FederationConstraint")
 	return info
 }
 
@@ -308,6 +325,17 @@ type Options struct {
 	//
 	// Optional. Nil keeps the previous behaviour exactly.
 	TokenSource func(ctx context.Context) (string, error)
+
+	// Constraint is ANDed into the collector query for the database's ad.
+	// Set, it selects a kind of database rather than a particular one
+	// (a federation hub: HubConstraint), so the host match below does not
+	// apply: one advertiser is taken, several are refused.
+	Constraint string
+
+	// NoLocalFallback skips asking the database on this host when the
+	// collector has no answer. A locator looking for a federation hub
+	// sets it: the database on this host is a spoke, not the hub.
+	NoLocalFallback bool
 }
 
 // Locator discovers the mirror through the collector and dials it. Safe
@@ -338,6 +366,12 @@ type Locator struct {
 	lastDialErr string
 	lastDialAt  time.Time
 	lastDialOK  time.Time
+
+	// spokes caches Spokes for InfoTTL, and spokesErr why the last
+	// refresh failed.
+	spokes    *SpokeSet
+	spokesAt  time.Time
+	spokesErr string
 }
 
 // NewLocator returns a Locator with default options.
@@ -554,6 +588,9 @@ func (l *Locator) discover(ctx context.Context) (*Info, error) {
 	// reachable whenever it is co-located (or pinned) even if its
 	// advertisement is not getting through -- a denied UPDATE_AD_GENERIC,
 	// a collector that is down, an ad that aged out.
+	if l.opts.NoLocalFallback {
+		return nil, err
+	}
 	local, localErr := l.discoverLocal(ctx)
 	if localErr == nil {
 		return local, nil
@@ -580,6 +617,13 @@ func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
 	if l.opts.Name != "" {
 		constraint = fmt.Sprintf("Name == %s", classadStringLit(l.opts.Name))
 	}
+	if c := strings.TrimSpace(l.opts.Constraint); c != "" {
+		if constraint == "" {
+			constraint = c
+		} else {
+			constraint = fmt.Sprintf("(%s) && (%s)", constraint, c)
+		}
+	}
 	ads, _, err := l.collector.QueryAdsWithOptions(ctx, AdType, constraint, mirrorQueryOptions())
 	if err != nil {
 		return nil, fmt.Errorf("querying collector for the htcondordb ad: %w", err)
@@ -591,13 +635,16 @@ func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
 		return nil, fmt.Errorf("no htcondordb database is advertising to the collector")
 	}
 
+	if l.opts.Constraint != "" && l.opts.Name == "" && len(ads) > 1 {
+		return nil, fmt.Errorf("%d htcondordb databases match %s; name the one to use", len(ads), l.opts.Constraint)
+	}
 	var scheddHost string
 	if l.opts.ScheddAddress != nil {
 		scheddHost = hostOfSinful(l.opts.ScheddAddress())
 	}
 	// A pinned name is the operator overriding discovery; their choice
 	// wins over the host heuristic below.
-	info, err := pickMirror(ads, scheddHost, l.opts.Name != "")
+	info, err := pickMirror(ads, scheddHost, l.opts.Name != "" || l.opts.Constraint != "")
 	if err != nil {
 		return nil, err
 	}
