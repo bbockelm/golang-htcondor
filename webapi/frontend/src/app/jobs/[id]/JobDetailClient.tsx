@@ -43,9 +43,13 @@ export default function JobDetailClient(_props: {
     queryFn: () => api.jobs.get(id),
     refetchInterval: 10_000,
     // id is "" briefly during initial client hydration if the pathname
-    // hasn't been read yet; skip those calls. Multi-AP mode reads the
-    // job in MultiAPJobView.
-    enabled: !!id && id !== '_' && mode === false,
+    // hasn't been read yet; skip those calls.
+    //
+    // Not gated on the session: the route answers the bare id and the
+    // multi-AP text form alike, so the job is fetched while the mode is
+    // still being learned. MultiAPJobView reads the same cache entry
+    // (same key, same fetch), so multi-AP mode pays no second request.
+    enabled: !!id && id !== '_',
     // A 404 is an answer, not a failure to get one. Retrying it three
     // times with backoff would spend seconds re-asking a question the
     // schedd has already answered, and this page has somewhere to go
@@ -243,6 +247,11 @@ export function MultiAPJobView({ id, archivedView }: { id: string; archivedView:
     queryFn: () => api.jobs.get(id),
     refetchInterval: archivedView ? false : 10_000,
     enabled: !!id && id !== '_',
+    // On /jobs/[id] the page has already fetched this key while it was
+    // learning the mode; take that answer, including a 404 or 409,
+    // rather than asking again on mount.
+    refetchOnMount: false,
+    retryOnMount: false,
     retry: (count, err) =>
       !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 3,
   });
