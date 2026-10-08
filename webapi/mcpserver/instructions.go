@@ -9,9 +9,12 @@ import (
 // always included, regardless of per-deployment configuration. The
 // scheddName (access point hostname) is inserted when available.
 func defaultInstructions(scheddName string) string {
-	var b strings.Builder
+	return identityInstructions(scheddName) + genericInstructions()
+}
 
-	// Identity
+// identityInstructions names the access point and says what one is.
+func identityInstructions(scheddName string) string {
+	var b strings.Builder
 	if scheddName != "" {
 		fmt.Fprintf(&b, "This is the HTCondor access point %q.\n\n", scheddName)
 	} else {
@@ -22,6 +25,13 @@ func defaultInstructions(scheddName string) string {
 		`Users submit batch jobs that are matched to available compute resources and ` +
 		`executed remotely. An "access point" (AP) is the server through which users ` +
 		`submit and manage their jobs.` + "\n\n")
+	return b.String()
+}
+
+// genericInstructions is the HTCondor guidance every deployment serves: job
+// states, the tools and the order to use them in, and submit-file pitfalls.
+func genericInstructions() string {
+	var b strings.Builder
 
 	// Job lifecycle
 	b.WriteString("## Job states\n\n")
@@ -239,14 +249,31 @@ func defaultInstructions(scheddName string) string {
 	return b.String()
 }
 
-// buildInstructions combines the default HTCondor instructions with any
-// additional deployment-specific instructions from configuration.
-func buildInstructions(scheddName, customInstructions string) string {
-	base := defaultInstructions(scheddName)
-	if customInstructions == "" {
-		return base
+// buildInstructions assembles the initialize text: which access point this
+// is, then what is specific to this site (the operator's MCP_INSTRUCTIONS and
+// the site skills catalogue), then the generic HTCondor guidance.
+//
+// The site-specific parts go first because clients do not always pass the
+// whole text to the model. Claude Code keeps only about the first 2 KB, and
+// the generic guidance alone is over 12 KB, so anything after it is never
+// read -- which is how an agent on an access point that holds jobs without a
+// credential never saw the note telling it to store one. The generic guidance
+// is the part an agent can do without: the tool descriptions repeat most of
+// it.
+func buildInstructions(scheddName, customInstructions, skillsSection string) string {
+	var b strings.Builder
+	b.WriteString(identityInstructions(scheddName))
+	if custom := strings.TrimSpace(customInstructions); custom != "" {
+		b.WriteString("## Deployment-specific notes\n\n")
+		b.WriteString(custom)
+		b.WriteString("\n\n")
 	}
-	return base + "\n## Deployment-specific notes\n\n" + customInstructions
+	if skillsSection != "" {
+		b.WriteString(skillsSection)
+		b.WriteString("\n")
+	}
+	b.WriteString(genericInstructions())
+	return b.String()
 }
 
 // SetInstructions installs the deployment-specific instructions, combining them
@@ -278,7 +305,7 @@ func (s *Server) rebuildInstructions() {
 	if p := s.customInstructions.Load(); p != nil {
 		custom = *p
 	}
-	built := buildInstructions(name, custom) + skillsInstructions(s.skillsLibrary())
+	built := buildInstructions(name, custom, skillsInstructions(s.skillsLibrary()))
 	s.instructions.Store(&built)
 	// The SDK transport bakes this text, and the catalogue it is built
 	// from, into servers it caches per scope set. Bumping the generation
