@@ -286,13 +286,25 @@ func validProjectName(s string) bool {
 	return true
 }
 
-// sameUser compares a configured lead with the authenticated user the way the
-// rest of the server compares a caller with a job's Owner: bare names,
-// case-insensitively. See ownerFromActor.
+// sameUser compares a configured lead with the authenticated user,
+// case-insensitively.
+//
+// A bare entry ("bob") is compared the way the rest of the server compares a
+// caller with a job's Owner: against the bare form of the actor, so it
+// matches bob in any domain. An entry that names a domain ("bob@other.org")
+// is compared with the full authenticated username and matches only that
+// exact identity: an operator who wrote the domain meant that one, and
+// stripping it would grant the lead to every bob in every domain.
 func sameUser(configured, actor string) bool {
-	a := ownerFromActor(strings.TrimSpace(configured))
-	b := ownerFromActor(strings.TrimSpace(actor))
-	return a != "" && strings.EqualFold(a, b)
+	configured = strings.TrimSpace(configured)
+	actor = strings.TrimSpace(actor)
+	if configured == "" {
+		return false
+	}
+	if strings.Contains(configured, "@") {
+		return strings.EqualFold(configured, actor)
+	}
+	return strings.EqualFold(configured, ownerFromActor(actor))
 }
 
 func hasGroup(groups []string, want string) bool {

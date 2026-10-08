@@ -123,6 +123,35 @@ func TestProjectLeadsFromFile(t *testing.T) {
 	}
 }
 
+// TestProjectLeadUserEntryDomain: an entry that names a domain matches only
+// that identity, while a bare entry matches the name in any domain.
+func TestProjectLeadUserEntryDomain(t *testing.T) {
+	p := newProjectLeads(writeLeadsFile(t, "Qualified bob@other.org\nBare bob\n"), "", nil)
+
+	for _, tc := range []struct {
+		project, user string
+		want          bool
+	}{
+		{"Qualified", "bob@other.org", true},
+		{"Qualified", "BOB@Other.ORG", true},
+		{"Qualified", "bob@example.org", false},
+		{"Qualified", "bob", false},
+		{"Bare", "bob@example.org", true},
+		{"Bare", "bob@other.org", true},
+		{"Bare", "bob", true},
+	} {
+		if got := p.Leads(tc.project, tc.user, nil); got != tc.want {
+			t.Errorf("Leads(%q, %q) = %v, want %v", tc.project, tc.user, got, tc.want)
+		}
+	}
+	if got := p.LedProjects("bob@example.org", nil); !reflect.DeepEqual(got, []string{"Bare"}) {
+		t.Errorf("LedProjects(bob@example.org) = %v, want [Bare]", got)
+	}
+	if got := p.LedProjects("bob@other.org", nil); !reflect.DeepEqual(got, []string{"Bare", "Qualified"}) {
+		t.Errorf("LedProjects(bob@other.org) = %v, want [Bare Qualified]", got)
+	}
+}
+
 // TestProjectLeadsGroupPattern covers HTTP_API_PROJECT_LEADS_GROUP in both
 // directions -- "is this caller a lead of P" and "which projects does this
 // caller lead" -- and that the two agree.

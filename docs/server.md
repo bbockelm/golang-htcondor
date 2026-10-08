@@ -476,9 +476,10 @@ With `HTTP_API_PROJECT_LEADS_GROUP = {project}-leads`, members of
 `Physics-leads` lead `Physics`, with no file entry needed. Both sources can be
 used together; a session leads the union.
 
-Project names compare case-insensitively, as ClassAd `==` does. Usernames
-compare the way the server compares a caller with a job's `Owner` (the bare
-name, case-insensitively). Groups are the session's, from
+Project names compare case-insensitively, as ClassAd `==` does. A bare
+username (`bob`) matches that name in any domain, while one with a domain
+(`bob@other.org`) matches only that exact identity; both compare
+case-insensitively. Groups are the session's, from
 `HTTP_API_GROUP_SOURCE`, matched case-insensitively. A project name containing
 a quote, a backslash or a control character is ignored.
 
