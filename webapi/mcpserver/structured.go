@@ -376,6 +376,14 @@ var outputSchemas = map[string]map[string]interface{}{
 	"doc_machine_attributes": docSearchSchema(),
 	"doc_submit_syntax":      docSearchSchema(),
 	"doc_config_variables":   docSearchSchema(),
+	"doc_guide": obj(map[string]interface{}{
+		"topic":   strSchema,
+		"content": strSchema,
+		"topics": arr(obj(map[string]interface{}{
+			"name":    strSchema,
+			"summary": strSchema,
+		})),
+	}, "content"),
 	"skills_list": obj(map[string]interface{}{
 		"skills": arr(obj(map[string]interface{}{
 			"name":        strSchema,

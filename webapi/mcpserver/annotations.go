@@ -91,6 +91,7 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	"doc_submit_syntax":      readOnlyAnn(false),
 	"doc_config_variables":   readOnlyAnn(false),
 	"doc_search":             readOnlyAnn(false),
+	"doc_guide":              readOnlyAnn(false),
 	"skills_list":            readOnlyAnn(false),
 	"skills_get":             readOnlyAnn(false),
 	"get_version":            readOnlyAnn(false),

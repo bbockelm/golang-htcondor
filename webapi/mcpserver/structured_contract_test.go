@@ -528,6 +528,7 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"doc_machine_attributes", docEmpty()},
 		{"doc_submit_syntax", docEmpty()},
 		{"doc_config_variables", docEmpty()},
+		{"doc_guide", map[string]interface{}{"topic": "", "content": "", "topics": []interface{}(nil)}},
 		{"skills_list", map[string]interface{}{"skills": []interface{}(nil), "count": 0}},
 		{"skills_get", map[string]interface{}{"name": "n", "description": "", "content": ""}},
 

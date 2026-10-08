@@ -254,7 +254,7 @@ func skillsInstructions(lib *skills.Library) string {
 	}
 
 	var b strings.Builder
-	b.WriteString("\n## Site skills\n\n")
+	b.WriteString("## Site skills\n\n")
 	fmt.Fprintf(&b, "This access point publishes %d site-authored skill(s): its own "+
 		"documentation for how work is done here -- local conventions, queue policy, "+
 		"which resources to request, worked procedures.\n\n", lib.Len())

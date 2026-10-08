@@ -141,6 +141,7 @@ var readOnlyMCPTools = map[string]bool{
 	"doc_submit_syntax":        true,
 	"doc_config_variables":     true,
 	"doc_search":               true,
+	"doc_guide":                true,
 	"query_history_db":         true,
 	"query_jobs_as_of":         true,
 	"aggregate_jobs":           true,
@@ -698,6 +699,10 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	// always offered.
 	tools = append(tools, whoamiTool())
 
+	// The agent guide is compiled into every build, unlike the manual
+	// pages below, so it is always offered.
+	tools = append(tools, docGuideTool())
+
 	// Add HTCondor documentation tools if the docs are embedded.
 	// These are read-only, side-effect-free reference lookups; we
 	// register them under the read-only OAuth2 allowlist.
@@ -1036,6 +1041,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 			result, err = s.toolSkillsList(ctx, request.Arguments)
 		case request.Name == "skills_get":
 			result, err = s.toolSkillsGet(ctx, request.Arguments)
+		case request.Name == "doc_guide":
+			result, err = s.toolDocGuide(ctx, request.Arguments)
 		case isCondorDocTool(request.Name):
 			result, err = s.toolCondorDocSearch(ctx, request.Name, request.Arguments)
 		default:
