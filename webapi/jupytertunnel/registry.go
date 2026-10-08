@@ -60,6 +60,10 @@ type Registry struct {
 	// the helper must request a new instance. Default 30 minutes.
 	tokenTTL time.Duration
 
+	// reconnectTTL bounds the token handed to a connected helper for its
+	// next dial. Zero means tokenTTL. See SetReconnectTokenTTL.
+	reconnectTTL time.Duration
+
 	// idleTTL bounds how long an instance can sit in "pending" (created but
 	// helper hasn't connected back) before garbage collection. Default
 	// 15 minutes.
@@ -302,7 +306,11 @@ func (i *Instance) releaseConnecting() {
 // was waiting for -- a replay, or a second helper that lost the race -- and
 // the connection is refused.
 func (r *Registry) rollToken(instanceID string, spent signedToken) (string, error) {
-	next, nextParsed, err := mintToken(r.secret, spent.ID, r.tokenTTL)
+	ttl := r.reconnectTTL
+	if ttl <= 0 {
+		ttl = r.tokenTTL
+	}
+	next, nextParsed, err := mintToken(r.secret, spent.ID, ttl)
 	if err != nil {
 		return "", err
 	}
@@ -319,6 +327,20 @@ func (r *Registry) rollToken(instanceID string, spent signedToken) (string, erro
 		return "", ErrTokenInvalid
 	}
 	return next, nil
+}
+
+// SetReconnectTokenTTL sets how long the token handed to a connected helper
+// stays usable. Call it before the registry is shared.
+//
+// That token is held until the tunnel next drops, which for a healthy session
+// is the next server restart -- hours or days away, not minutes. Minted with
+// the first-dial TTL it expired thirty minutes after the helper connected, so
+// a restart refused every session older than that, and the helper, refused,
+// ended its job. The token is still single-use: only the nonce the store holds
+// is accepted, so a long lifetime does not revive a spent one. Callers pass
+// the session's own horizon, past which the store has dropped the row anyway.
+func (r *Registry) SetReconnectTokenTTL(d time.Duration) {
+	r.reconnectTTL = d
 }
 
 // rollTimeout bounds the nonce swap. Short: it is one indexed UPDATE, and a

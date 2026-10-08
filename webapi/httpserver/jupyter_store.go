@@ -99,9 +99,13 @@ func (s *jupyterStore) loadSecret(ctx context.Context) ([]byte, error) {
 type jupyterSessionRow struct {
 	InstanceID string
 	Owner      string
-	ClusterID  int
-	ProcID     int
-	NextNonce  []byte
+	// ClusterID and ProcID are the session's job, zero until the submit
+	// that creates it returns. See SetJob.
+	ClusterID int
+	ProcID    int
+	// Image is what the session was launched with. Display only.
+	Image     string
+	NextNonce []byte
 	// PrevNonce is the nonce the session moved away from, acceptable for
 	// one more dial. Nil once that grace has been used or never needed.
 	PrevNonce []byte
@@ -116,17 +120,44 @@ func (s *jupyterStore) Put(ctx context.Context, row jupyterSessionRow) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO jupyter_sessions
-		    (instance_id, owner, cluster_id, proc_id, next_nonce, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		    (instance_id, owner, cluster_id, proc_id, image, next_nonce, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(instance_id) DO UPDATE SET
 		    owner = excluded.owner,
 		    cluster_id = excluded.cluster_id,
 		    proc_id = excluded.proc_id,
+		    image = excluded.image,
 		    next_nonce = excluded.next_nonce,
 		    expires_at = excluded.expires_at`,
-		row.InstanceID, row.Owner, row.ClusterID, row.ProcID,
+		row.InstanceID, row.Owner, row.ClusterID, row.ProcID, row.Image,
 		row.NextNonce, row.CreatedAt.UTC(), row.ExpiresAt.UTC())
 	return err
+}
+
+// SetJob records which job serves a session.
+//
+// A separate write because the row has to exist before the job does -- the
+// job carries the token whose nonce the row holds -- and the cluster id is
+// only known once the submit returns. Without it every row said cluster 0,
+// and a restarted server asked the schedd about a job that does not exist and
+// reaped every session it had just adopted.
+//
+// Only the job columns: the nonce may already have rolled by the time this
+// runs, and a re-Put would put the spent one back.
+func (s *jupyterStore) SetJob(ctx context.Context, instanceID string, clusterID, procID int) error {
+	if s == nil {
+		return nil
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE jupyter_sessions SET cluster_id = ?, proc_id = ? WHERE instance_id = ?`,
+		clusterID, procID, instanceID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // RollNonce records the token a session will accept next.
@@ -174,9 +205,9 @@ func (s *jupyterStore) Get(ctx context.Context, instanceID string) (jupyterSessi
 		return row, sql.ErrNoRows
 	}
 	err := s.db.QueryRowContext(ctx, `
-		SELECT instance_id, owner, cluster_id, proc_id, next_nonce, prev_nonce, created_at, expires_at
+		SELECT instance_id, owner, cluster_id, proc_id, image, next_nonce, prev_nonce, created_at, expires_at
 		  FROM jupyter_sessions WHERE instance_id = ?`, instanceID).
-		Scan(&row.InstanceID, &row.Owner, &row.ClusterID, &row.ProcID,
+		Scan(&row.InstanceID, &row.Owner, &row.ClusterID, &row.ProcID, &row.Image,
 			&row.NextNonce, &row.PrevNonce, &row.CreatedAt, &row.ExpiresAt)
 	return row, err
 }
@@ -187,7 +218,7 @@ func (s *jupyterStore) Live(ctx context.Context, now time.Time) ([]jupyterSessio
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT instance_id, owner, cluster_id, proc_id, next_nonce, created_at, expires_at
+		SELECT instance_id, owner, cluster_id, proc_id, image, next_nonce, created_at, expires_at
 		  FROM jupyter_sessions WHERE expires_at > ? ORDER BY created_at`, now.UTC())
 	if err != nil {
 		return nil, err
@@ -196,7 +227,7 @@ func (s *jupyterStore) Live(ctx context.Context, now time.Time) ([]jupyterSessio
 	var out []jupyterSessionRow
 	for rows.Next() {
 		var row jupyterSessionRow
-		if err := rows.Scan(&row.InstanceID, &row.Owner, &row.ClusterID, &row.ProcID,
+		if err := rows.Scan(&row.InstanceID, &row.Owner, &row.ClusterID, &row.ProcID, &row.Image,
 			&row.NextNonce, &row.CreatedAt, &row.ExpiresAt); err != nil {
 			return nil, err
 		}

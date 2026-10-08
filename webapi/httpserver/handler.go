@@ -402,6 +402,9 @@ type Handler struct {
 	// don't enable Jupyter pay no startup cost.
 	jupyterRegistry   *jupytertunnel.Registry
 	jupyterRegistryMu sync.Mutex
+	// jupyterScheddOverride, when set, stands in for the schedd in the
+	// JupyterLab handlers. Tests only; see jupyterSchedd.
+	jupyterScheddOverride jupyterScheddOps
 
 	// interactiveTerminals counts live browser terminals per job, so
 	// that the last one to leave is the one that tears the job down.

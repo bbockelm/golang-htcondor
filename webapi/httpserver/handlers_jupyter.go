@@ -83,6 +83,7 @@ func (s *Handler) getOrCreateJupyterRegistry() (*jupytertunnel.Registry, error) 
 		if err == nil {
 			reg, rerr := jupytertunnel.NewRegistryWithSecret(secret, store)
 			if rerr == nil {
+				reg.SetReconnectTokenTTL(s.jupyterSessionTTL())
 				s.jupyterRegistry = reg
 				s.adoptJupyterSessions(context.Background(), reg, store)
 				return reg, nil
@@ -100,6 +101,53 @@ func (s *Handler) getOrCreateJupyterRegistry() (*jupytertunnel.Registry, error) 
 	}
 	s.jupyterRegistry = reg
 	return reg, nil
+}
+
+// jupyterSessionTTL is how long a stored session stays valid: the job's
+// ceiling, or a day where the operator turned the ceiling off.
+func (s *Handler) jupyterSessionTTL() time.Duration {
+	if s.jupyterMaxLifetimeSec > 0 {
+		return time.Duration(s.jupyterMaxLifetimeSec) * time.Second
+	}
+	return time.Duration(defaultJupyterSessionTTLSec) * time.Second
+}
+
+// forgetJupyterSession drops a session that never got a working job, from
+// both the registry and the store.
+//
+// The store half matters as much as the registry half: a row left behind is
+// re-adopted by the next process, which lists a session nobody can reach until
+// the row expires. Detached from the request, which may already be gone.
+func (s *Handler) forgetJupyterSession(ctx context.Context, reg *jupytertunnel.Registry, instID string) {
+	reg.CloseInstance(instID)
+	store := s.jupyterSessionStore()
+	if store == nil {
+		return
+	}
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := store.Delete(dctx, instID); err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "jupyter: could not delete the stored session",
+			"instance", instID, "error", err)
+	}
+}
+
+// jupyterSchedd is the schedd, or the stand-in a unit test installed.
+func (s *Handler) jupyterSchedd() jupyterScheddOps {
+	if s.jupyterScheddOverride != nil {
+		return s.jupyterScheddOverride
+	}
+	return s.getSchedd()
+}
+
+// submitJupyterJob submits through submitJob, which applies the submit
+// policy and checks required credentials. A unit test's stand-in schedd
+// still gets the policy applied; only the credential check is skipped.
+func (s *Handler) submitJupyterJob(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
+	if s.jupyterScheddOverride != nil {
+		return s.jupyterScheddOverride.SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
+	}
+	return s.submitJob(ctx, submitFile)
 }
 
 // jupyterSessionStore is the durable session store, or nil when this
@@ -128,10 +176,33 @@ func (s *Handler) adoptJupyterSessions(ctx context.Context, reg *jupytertunnel.R
 	}
 	var adopted int
 	for _, row := range rows {
-		if _, err := reg.AdoptInstance(row.InstanceID, row.Owner, row.CreatedAt, map[string]string{
+		if row.ClusterID <= 0 {
+			// No job was ever recorded for this session, and none ever will
+			// be: create records the cluster id before it spools the helper
+			// and its token into the job, so a row still at zero is one
+			// whose job never got a helper -- the submit failed, or this
+			// server died between submitting and spooling. Nothing can dial
+			// back for it.
+			//
+			// Dropped rather than adopted. Adopted, it would list as a
+			// session that never connects until its row expires (a day by
+			// default), and there is no job to ask the schedd about, so
+			// nothing would reap it sooner. Rows written by versions that
+			// never recorded the cluster id land here too.
+			if err := store.Delete(ctx, row.InstanceID); err != nil {
+				s.logger.Warn(logging.DestinationHTTP, "jupyter: could not drop a stored session with no job",
+					"instance", row.InstanceID, "error", err)
+			}
+			continue
+		}
+		meta := map[string]string{
 			"cluster_id": strconv.Itoa(row.ClusterID),
 			"proc_id":    strconv.Itoa(row.ProcID),
-		}); err != nil {
+		}
+		if row.Image != "" {
+			meta["image"] = row.Image
+		}
+		if _, err := reg.AdoptInstance(row.InstanceID, row.Owner, row.CreatedAt, meta); err != nil {
 			s.logger.Warn(logging.DestinationHTTP, "jupyter: could not adopt a stored session",
 				"instance", row.InstanceID, "error", err)
 			continue
@@ -244,9 +315,9 @@ type JupyterInstanceSummary struct {
 }
 
 // handleJupyterListInstances handles GET /api/v1/jupyter/instances and
-// returns the caller's live instances. Instances live in process memory,
-// so this list resets on every API server restart — that's documented
-// in the SPA so users aren't surprised.
+// returns the caller's live instances. Where there is an application
+// database, sessions whose jobs outlived the last process are re-adopted
+// from it (adoptJupyterSessions); without one the list resets on restart.
 func (s *Handler) handleJupyterListInstances(w http.ResponseWriter, r *http.Request) {
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -285,12 +356,10 @@ func (s *Handler) handleJupyterListInstances(w http.ResponseWriter, r *http.Requ
 		var ad *classad.ClassAd
 		var cidInt int
 		var haveCluster bool
-		if cid := summary.ClusterID; cid != "" {
-			if v, perr := strconv.Atoi(cid); perr == nil {
-				cidInt = v
-				haveCluster = true
-				ad = jobAdsByCluster[v]
-			}
+		if v, ok := jupyterClusterID(inst); ok {
+			cidInt = v
+			haveCluster = true
+			ad = jobAdsByCluster[v]
 		}
 		if ad != nil {
 			enrichJupyterSummaryFromAd(&summary, ad)
@@ -305,6 +374,21 @@ func (s *Handler) handleJupyterListInstances(w http.ResponseWriter, r *http.Requ
 		out = append(out, summary)
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"instances": out})
+}
+
+// jupyterClusterID is the cluster serving an instance, or false when it has
+// none yet: the submit has not returned, or the id is not a real one.
+//
+// Zero is not a cluster. Asking the schedd about it finds nothing, and the
+// list and detail handlers read "nothing" as a job that has gone and reap the
+// session -- which is how every session adopted after a restart was closed on
+// the first page load, back when the stored row never learned its cluster.
+func jupyterClusterID(inst *jupytertunnel.Instance) (int, bool) {
+	cid, err := strconv.Atoi(inst.Meta["cluster_id"])
+	if err != nil || cid <= 0 {
+		return 0, false
+	}
+	return cid, true
 }
 
 // jupyterInstanceIsDead is the predicate that drives registry reaping
@@ -354,21 +438,18 @@ func (s *Handler) queryJupyterClusterAds(
 	// equality + boolean OR.
 	parts := make([]string, 0, len(insts))
 	for _, inst := range insts {
-		cid := inst.Meta["cluster_id"]
-		if cid == "" {
+		cid, ok := jupyterClusterID(inst)
+		if !ok {
 			continue
 		}
-		if _, perr := strconv.Atoi(cid); perr != nil {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("ClusterId == %s", cid))
+		parts = append(parts, fmt.Sprintf("ClusterId == %d", cid))
 	}
 	if len(parts) == 0 {
 		return out, true
 	}
 	constraint := "(" + strings.Join(parts, " || ") + ") && ProcId == 0"
 
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+	ads, _, err := s.jupyterSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Projection: []string{
 			"ClusterId", "ProcId", "JobStatus",
 			"JobCurrentStartExecutingDate",
@@ -441,22 +522,20 @@ func (s *Handler) handleJupyterGetInstance(w http.ResponseWriter, r *http.Reques
 	// registry entry is just stale state — close it and tell the SPA
 	// 404 so it transitions to a "gone" view instead of perpetually
 	// showing "launching".
-	if cid := summary.ClusterID; cid != "" {
-		if cidInt, perr := strconv.Atoi(cid); perr == nil {
-			adsByCluster, queriedOK := s.queryJupyterClusterAds(ctx,
-				[]*jupytertunnel.Instance{inst})
-			ad := adsByCluster[cidInt]
-			if ad != nil {
-				enrichJupyterSummaryFromAd(&summary, ad)
-			}
-			if queriedOK && jupyterInstanceIsDead(ad) {
-				s.logger.Info(logging.DestinationHTTP, "jupyter detail: reaping instance with terminal/missing job",
-					"instance", inst.ID, "cluster", cidInt,
-					"job_status", summary.JobStatus)
-				reg.CloseInstance(inst.ID)
-				s.writeError(w, http.StatusNotFound, "Jupyter instance has ended")
-				return
-			}
+	if cidInt, ok := jupyterClusterID(inst); ok {
+		adsByCluster, queriedOK := s.queryJupyterClusterAds(ctx,
+			[]*jupytertunnel.Instance{inst})
+		ad := adsByCluster[cidInt]
+		if ad != nil {
+			enrichJupyterSummaryFromAd(&summary, ad)
+		}
+		if queriedOK && jupyterInstanceIsDead(ad) {
+			s.logger.Info(logging.DestinationHTTP, "jupyter detail: reaping instance with terminal/missing job",
+				"instance", inst.ID, "cluster", cidInt,
+				"job_status", summary.JobStatus)
+			reg.CloseInstance(inst.ID)
+			s.writeError(w, http.StatusNotFound, "Jupyter instance has ended")
+			return
 		}
 	}
 	s.writeJSON(w, http.StatusOK, summary)
@@ -627,10 +706,10 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 	// can drive this from a Linux API server toward a macOS schedd by
 	// setting `JUPYTER_FORCE_VANILLA=1` in the env if that ever
 	// matters; not exposed yet.)
-	universe := jupyterUniverseForGOOS(runtimeGOOS())
+	universe := jupyterUniverse()
 	helperGOOS := jupyterHelperGOOSForUniverse(universe)
 	helperGOARCH := runtimeGOARCH()
-	helperBytes, err := jupyterhelperbin.BytesFor(helperGOOS, helperGOARCH)
+	helperBytes, err := jupyterHelperBytesFor(helperGOOS, helperGOARCH)
 	if err != nil {
 		if errors.Is(err, jupyterhelperbin.ErrNotEmbedded) {
 			s.writeError(w, http.StatusServiceUnavailable,
@@ -681,19 +760,18 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 	}
 
 	// Record the session before the job exists. A row with no job is
-	// swept; a job with no row is a session nobody can ever re-adopt,
-	// because the nonce it will present is only known here.
+	// dropped (on a failed submit below, or at adoption); a job with no
+	// row is a session nobody can ever re-adopt, because the nonce it will
+	// present is only known here. The cluster id is added once the submit
+	// returns.
 	if store := s.jupyterSessionStore(); store != nil {
 		if nonce, ok := reg.PendingNonce(instID); ok {
-			ttl := time.Duration(s.jupyterMaxLifetimeSec) * time.Second
-			if ttl <= 0 {
-				ttl = time.Duration(defaultJupyterSessionTTLSec) * time.Second
-			}
 			if err := store.Put(r.Context(), jupyterSessionRow{
 				InstanceID: instID,
 				Owner:      username,
+				Image:      req.Image,
 				CreatedAt:  time.Now(),
-				ExpiresAt:  time.Now().Add(ttl),
+				ExpiresAt:  time.Now().Add(s.jupyterSessionTTL()),
 				NextNonce:  nonce,
 			}); err != nil {
 				// Not fatal: the session works, it just will not come
@@ -794,13 +872,30 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 
 	// Remote-submit + spool from an in-memory fs.FS. No on-disk state
 	// to clean up if the request fails partway through.
-	clusterID, procAds, err := s.submitJob(ctx, submitFile)
+	clusterID, procAds, err := s.submitJupyterJob(ctx, submitFile)
 	if err != nil {
-		reg.CloseInstance(instID)
+		s.forgetJupyterSession(ctx, reg, instID)
 		s.logger.Error(logging.DestinationHTTP, "jupyter submit failed",
 			"instance", instID, "owner", username, "error", err)
 		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("schedd submit failed: %v", err))
 		return
+	}
+
+	// Record the job before spooling: the spool is what delivers the helper
+	// and its token, so once it is done a helper may dial in at any moment,
+	// and a restart after that has to know which job to ask the schedd
+	// about. Detached from the request so a client that hangs up now does
+	// not leave a running job with an anonymous row.
+	if store := s.jupyterSessionStore(); store != nil {
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		if err := store.SetJob(sctx, instID, clusterID, 0); err != nil {
+			// Same footing as a failed Put above: the session works, it
+			// just will not be re-adopted after a restart.
+			s.logger.Warn(logging.DestinationHTTP,
+				"jupyter: could not record the session's job; it will not survive a restart",
+				"instance", instID, "cluster", clusterID, "error", err)
+		}
+		cancel()
 	}
 
 	stage := fstest.MapFS{
@@ -823,12 +918,12 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 			Mode: 0o644,
 		}
 	}
-	if err := s.getSchedd().SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
+	if err := s.jupyterSchedd().SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
 		// Submission succeeded but spooling failed; the jobs are stuck
 		// in HELD with SpoolingInput. Best we can do is log and return
 		// — the schedd will eventually time them out, and the user
 		// can resubmit.
-		reg.CloseInstance(instID)
+		s.forgetJupyterSession(ctx, reg, instID)
 		s.logger.Error(logging.DestinationHTTP, "jupyter spool failed",
 			"instance", instID, "cluster", clusterID, "owner", username, "error", err)
 		s.writeError(w, http.StatusBadGateway,
@@ -1193,6 +1288,15 @@ func jupyterIdleFlags(idleSec int) string {
     --MappingKernelManager.cull_connected=True \
     --ServerApp.shutdown_no_activity_timeout=%d`, idleSec, interval, idleSec)
 }
+
+// jupyterUniverse and jupyterHelperBytesFor are seams for the end-to-end
+// test, which runs the job on whatever execute node the test pool has (so
+// vanilla, even on Linux) with a helper it built itself (so without the
+// embed_jupyter_helper build).
+var (
+	jupyterUniverse       = func() string { return jupyterUniverseForGOOS(runtimeGOOS()) }
+	jupyterHelperBytesFor = jupyterhelperbin.BytesFor
+)
 
 // runtimeGOARCH / runtimeGOOS are broken out so a test can override
 // them. We use atomic.Value rather than reading runtime.* directly so
