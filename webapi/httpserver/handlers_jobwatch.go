@@ -387,7 +387,16 @@ func (s *Handler) watchLeadAccess(ctx context.Context, r *http.Request, cluster,
 // jobWatchStillReadable re-runs the read scope that admitted a watch and asks
 // whether the job still falls inside it. A query error keeps the stream:
 // a schedd blip is not lost access, and the next recheck will ask again.
+//
+// A session that has gone -- logged out, expired, deleted -- is lost access.
+// It has to be checked here rather than left to jobReadScope: with no
+// session that falls back to bulkOwnerScope, which treats a request without
+// one as an API-token caller and returns the bare job constraint, i.e. the
+// widest scope there is.
 func (s *Handler) jobWatchStillReadable(ctx context.Context, r *http.Request, cluster, proc int) bool {
+	if _, ok := s.getSessionFromRequest(r); !ok {
+		return false
+	}
 	constraint, err := s.jobReadScope(ctx, r, cluster, proc)
 	if err != nil {
 		return false

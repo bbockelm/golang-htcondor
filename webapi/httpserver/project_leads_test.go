@@ -1348,3 +1348,32 @@ func TestImpersonatedTransportNotSharedWithPlainLookup(t *testing.T) {
 		t.Errorf("a plain lookup by the same operator got the impersonated transport (reused=%v err=%v)", reused, err)
 	}
 }
+
+// TestJobWatchEndsWhenSessionGoes: a lead's watch ends when their session
+// does, rather than falling back to the scope of a caller with no session --
+// which is the whole job.
+func TestJobWatchEndsWhenSessionGoes(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{leadJobAd(2, "bob", "Physics", 1)}
+	env.h.jobWatchRecheck = 10 * time.Millisecond
+	env.h.jobPolls = newJobPollHub(time.Hour, env.h.logger, env.h.scheddJobQuery)
+	sid := env.session("alice")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := env.request(http.MethodGet, "/api/v1/jobs/2.0/watch", sid, nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		env.h.handleJobWatch(w, r, "2.0")
+	}()
+	waitRechecking(t, env, 0, done, w)
+
+	env.h.sessionStore.Delete(sid)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the watch kept streaming after the session was deleted")
+	}
+}
