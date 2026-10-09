@@ -1094,6 +1094,30 @@ func TestJobListLeadScope(t *testing.T) {
 	}
 }
 
+// waitRechecking waits until a watch is open and re-checking -- its queries
+// keep arriving -- so a change lands on a live stream rather than on the
+// request that opens it. A stream that ends first fails the test at once,
+// with what it wrote, rather than waiting out the deadline.
+func waitRechecking(t *testing.T, env *leadTestEnv, before int, done <-chan struct{}, w *httptest.ResponseRecorder) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		env.mu.Lock()
+		n := len(env.constraints)
+		env.mu.Unlock()
+		if n >= before+3 {
+			return
+		}
+		select {
+		case <-done:
+			t.Fatalf("the watch ended before it started re-checking: %d %s", w.Code, w.Body.String())
+		case <-deadline:
+			t.Fatalf("the watch never started re-checking")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 // TestJobWatchEndsWhenLeadAccessLost: a watch opened through a lead's read
 // scope ends once the lead no longer leads the job's project, rather than
 // streaming for its full lifetime on the decision that admitted it.
@@ -1132,21 +1156,9 @@ func TestJobWatchEndsWhenLeadAccessLost(t *testing.T) {
 	env.mu.Lock()
 	before := len(env.constraints)
 	env.mu.Unlock()
-	done, cancel, _ = watch()
+	done, cancel, w = watch()
 	defer cancel()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		env.mu.Lock()
-		n := len(env.constraints)
-		env.mu.Unlock()
-		if n >= before+3 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the second watch never started re-checking")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitRechecking(t, env, before, done, w)
 	if err := os.WriteFile(env.leadsPath, []byte("Physics carol, dave\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
