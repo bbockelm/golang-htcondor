@@ -302,6 +302,10 @@ type Handler struct {
 	// so a test can evaluate the constraint and honor the projection.
 	// Tests only.
 	jobQueryOverride func(ctx context.Context, constraint string, opts *htcondor.QueryOptions) ([]*classad.ClassAd, error)
+	// jobWatchRecheck overrides how often a project lead's job watch
+	// re-checks that they may still read the job. Zero selects
+	// jobWatchRecheckInterval. Tests only.
+	jobWatchRecheck time.Duration
 
 	// oauth2MaxGrantLifetime caps how long a single consent can be
 	// stretched by refreshing. Every refresh resets the refresh token's

@@ -517,7 +517,9 @@ an admin may list all jobs. That read scope needs no signing key.
 **Revoking.** Leadership is re-checked on every action, not when the mode was
 turned on: removing a lead from the file takes effect within a few seconds, or
 immediately on `condor_reconfig`, and a lead who loses all their projects has
-the mode turned off on their next action. A session that turned the mode on as
+the mode turned off on their next action. A job watch a lead opened on a
+project's job is re-checked every minute and ends once they can no longer read
+the job. A session that turned the mode on as
 a lead stays project-scoped for that arm even if its user is later added to
 `HTTP_API_SUPERUSER_GROUP`. Group membership is the session's as of login,
 for leads as for `HTTP_API_SUPERUSER_GROUP`.

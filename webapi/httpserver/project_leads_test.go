@@ -1093,3 +1093,69 @@ func TestJobListLeadScope(t *testing.T) {
 		t.Errorf("admin's everyone listing reaches %v via %q", visible(sent), sent)
 	}
 }
+
+// TestJobWatchEndsWhenLeadAccessLost: a watch opened through a lead's read
+// scope ends once the lead no longer leads the job's project, rather than
+// streaming for its full lifetime on the decision that admitted it.
+func TestJobWatchEndsWhenLeadAccessLost(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{leadJobAd(2, "bob", "Physics", 1)}
+	env.h.jobWatchRecheck = 10 * time.Millisecond
+	env.h.jobPolls = newJobPollHub(time.Hour, env.h.logger, env.h.scheddJobQuery)
+	sid := env.session("alice")
+
+	watch := func() (chan struct{}, context.CancelFunc, *httptest.ResponseRecorder) {
+		ctx, cancel := context.WithCancel(context.Background())
+		r := env.request(http.MethodGet, "/api/v1/jobs/2.0/watch", sid, nil).WithContext(ctx)
+		w := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			env.h.handleJobWatch(w, r, "2.0")
+		}()
+		return done, cancel, w
+	}
+
+	// Still a lead: the stream stays open across many rechecks.
+	done, cancel, w := watch()
+	select {
+	case <-done:
+		t.Fatalf("the watch ended while the lead still had access: %d %s", w.Code, w.Body.String())
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	<-done
+
+	// Removed from the file: the open stream ends. Wait until the stream
+	// is open and re-checking -- its queries keep arriving -- so the edit
+	// lands on a live stream rather than on the request that opens it.
+	env.mu.Lock()
+	before := len(env.constraints)
+	env.mu.Unlock()
+	done, cancel, _ = watch()
+	defer cancel()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		env.mu.Lock()
+		n := len(env.constraints)
+		env.mu.Unlock()
+		if n >= before+3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the second watch never started re-checking")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := os.WriteFile(env.leadsPath, []byte("Physics carol, dave\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the watch kept streaming after the lead lost access")
+	}
+	if !strings.Contains(env.auditLog(), "Ending a job watch") {
+		t.Errorf("the ended watch was not logged")
+	}
+}
