@@ -144,8 +144,11 @@ func TestJupyterSubmitRemovesAJobThatDoesNotStartInTime(t *testing.T) {
 	}
 	// The reason is chosen in order: interrupted, then not started, then
 	// the ceiling.
-	reasonLine := got[strings.Index(got, "+PeriodicRemoveReason"):]
-	reasonLine = reasonLine[:strings.Index(reasonLine, "\n")]
+	_, reasonLine, found := strings.Cut(got, "+PeriodicRemoveReason")
+	if !found {
+		t.Fatalf("no PeriodicRemoveReason:\n%s", got)
+	}
+	reasonLine, _, _ = strings.Cut(reasonLine, "\n")
 	iInt := strings.Index(reasonLine, "interrupted")
 	iStart := strings.Index(reasonLine, "did not start")
 	iLife := strings.Index(reasonLine, "reached its")

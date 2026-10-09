@@ -359,7 +359,7 @@ func (m *memNonces) RollNonce(_ context.Context, id string, from, to []byte) (bo
 // The claim is what serialises two helpers arriving at once, and what keeps
 // a dial that will be refused from having any effect on the session's state.
 // It is held only for the length of the dial.
-func (r *Registry) reserve(instanceID string, parsed signedToken) (*Instance, error) {
+func (r *Registry) reserve(instanceID string) (*Instance, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -709,7 +709,7 @@ func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (
 	// connected helper's next token stopped being the one expected. A
 	// replay could end a working session that way. Nothing is spent now
 	// until the caller is the one that will get the tunnel.
-	inst, err := r.reserve(instanceID, parsed)
+	inst, err := r.reserve(instanceID)
 	if err != nil {
 		return nil, err
 	}
