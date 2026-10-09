@@ -91,7 +91,7 @@ func writeLeadsFile(t *testing.T, body string) string {
 
 func TestProjectLeadsFromFile(t *testing.T) {
 	path := writeLeadsFile(t, "Physics alice %physics-leads\nChem bob\n")
-	p := newProjectLeads(path, "", nil)
+	p := newProjectLeads(path, "", "example.org", nil)
 
 	for _, tc := range []struct {
 		name    string
@@ -123,10 +123,24 @@ func TestProjectLeadsFromFile(t *testing.T) {
 	}
 }
 
+// leadsProject reports whether project is among the user's led projects,
+// through LedProjects -- the call production makes.
+func leadsProject(p *projectLeads, project, user string, groups []string) bool {
+	for _, led := range p.LedProjects(user, groups) {
+		if strings.EqualFold(led, project) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestProjectLeadUserEntryDomain: an entry that names a domain matches only
-// that identity, while a bare entry matches the name in any domain.
+// that identity -- or a bare session name that becomes it once qualified with
+// UID_DOMAIN, as after local identity mapping -- while a bare entry matches
+// the name in any domain.
 func TestProjectLeadUserEntryDomain(t *testing.T) {
-	p := newProjectLeads(writeLeadsFile(t, "Qualified bob@other.org\nBare bob\n"), "", nil)
+	p := newProjectLeads(writeLeadsFile(t,
+		"Qualified bob@other.org\nBare bob\nLocal alice@example.org\n"), "", "example.org", nil)
 
 	for _, tc := range []struct {
 		project, user string
@@ -135,13 +149,19 @@ func TestProjectLeadUserEntryDomain(t *testing.T) {
 		{"Qualified", "bob@other.org", true},
 		{"Qualified", "BOB@Other.ORG", true},
 		{"Qualified", "bob@example.org", false},
+		// Bare bob qualifies to bob@example.org, which is not the entry.
 		{"Qualified", "bob", false},
 		{"Bare", "bob@example.org", true},
 		{"Bare", "bob@other.org", true},
 		{"Bare", "bob", true},
+		// After local identity mapping the session name is bare.
+		{"Local", "alice", true},
+		{"Local", "ALICE", true},
+		{"Local", "alice@example.org", true},
+		{"Local", "alice@other.org", false},
 	} {
-		if got := p.Leads(tc.project, tc.user, nil); got != tc.want {
-			t.Errorf("Leads(%q, %q) = %v, want %v", tc.project, tc.user, got, tc.want)
+		if got := leadsProject(p, tc.project, tc.user, nil); got != tc.want {
+			t.Errorf("leads(%q, %q) = %v, want %v", tc.project, tc.user, got, tc.want)
 		}
 	}
 	if got := p.LedProjects("bob@example.org", nil); !reflect.DeepEqual(got, []string{"Bare"}) {
@@ -150,13 +170,35 @@ func TestProjectLeadUserEntryDomain(t *testing.T) {
 	if got := p.LedProjects("bob@other.org", nil); !reflect.DeepEqual(got, []string{"Bare", "Qualified"}) {
 		t.Errorf("LedProjects(bob@other.org) = %v, want [Bare Qualified]", got)
 	}
+
+	// With no UID_DOMAIN a bare name cannot be qualified, so it never
+	// matches a domain entry.
+	noDomain := newProjectLeads(writeLeadsFile(t, "Local alice@example.org\n"), "", "", nil)
+	if leadsProject(noDomain, "Local", "alice", nil) {
+		t.Errorf("a bare name matched a domain entry with no UID_DOMAIN to qualify it")
+	}
+}
+
+// TestProjectLeadsGroupPatternRefused: patterns that cannot be made safe are
+// ignored. A bare "{project}" is the dangerous one: every group the caller
+// holds would become a project they lead.
+func TestProjectLeadsGroupPatternRefused(t *testing.T) {
+	for _, bad := range []string{"leads", "{project}-{project}", "{project}", "  {project}  "} {
+		p := newProjectLeads("", bad, "", nil)
+		if p.configured() {
+			t.Errorf("pattern %q should be refused", bad)
+		}
+		if got := p.LedProjects("anyone", []string{"users", "physics"}); len(got) != 0 {
+			t.Errorf("pattern %q granted %v", bad, got)
+		}
+	}
 }
 
 // TestProjectLeadsGroupPattern covers HTTP_API_PROJECT_LEADS_GROUP in both
 // directions -- "is this caller a lead of P" and "which projects does this
 // caller lead" -- and that the two agree.
 func TestProjectLeadsGroupPattern(t *testing.T) {
-	p := newProjectLeads("", "{project}-leads", nil)
+	p := newProjectLeads("", "{project}-leads", "", nil)
 	groups := []string{"users", "Physics-LEADS", "cs101-leads", "-leads", "leads"}
 
 	got := p.LedProjects("anyone", groups)
@@ -176,7 +218,7 @@ func TestProjectLeadsGroupPattern(t *testing.T) {
 	}
 
 	// A prefix pattern works the same way.
-	pre := newProjectLeads("", "lead_{project}", nil)
+	pre := newProjectLeads("", "lead_{project}", "", nil)
 	if got := pre.LedProjects("x", []string{"LEAD_bio", "leadbio"}); !reflect.DeepEqual(got, []string{"bio"}) {
 		t.Errorf("prefix pattern: LedProjects = %v, want [bio]", got)
 	}
@@ -185,7 +227,7 @@ func TestProjectLeadsGroupPattern(t *testing.T) {
 	}
 
 	for _, bad := range []string{"leads", "{project}-{project}"} {
-		if newProjectLeads("", bad, nil).configured() {
+		if newProjectLeads("", bad, "", nil).configured() {
 			t.Errorf("pattern %q should be refused", bad)
 		}
 	}
@@ -196,7 +238,7 @@ func TestProjectLeadsGroupPattern(t *testing.T) {
 // nothing rather than keep the last copy.
 func TestProjectLeadsFileReloads(t *testing.T) {
 	path := writeLeadsFile(t, "Physics alice\n")
-	p := newProjectLeads(path, "", nil)
+	p := newProjectLeads(path, "", "", nil)
 	p.reloadEvery = time.Nanosecond
 	if !p.Leads("Physics", "alice", nil) {
 		t.Fatalf("alice should lead Physics")
@@ -222,7 +264,7 @@ func TestProjectLeadsFileReloads(t *testing.T) {
 	}
 
 	// A file that was never there is the same: no leads, and no panic.
-	missing := newProjectLeads(filepath.Join(t.TempDir(), "absent"), "", nil)
+	missing := newProjectLeads(filepath.Join(t.TempDir(), "absent"), "", "", nil)
 	if !missing.configured() {
 		t.Errorf("a configured path should count as configured even when unreadable")
 	}

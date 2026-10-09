@@ -474,11 +474,19 @@ CS101         %cs101-tas carol
 
 With `HTTP_API_PROJECT_LEADS_GROUP = {project}-leads`, members of
 `Physics-leads` lead `Physics`, with no file entry needed. Both sources can be
-used together; a session leads the union.
+used together; a session leads the union. The pattern needs fixed text around
+`{project}`; a bare `{project}` is refused.
+
+> **The pattern trusts whoever names groups.** Anyone who can create a group
+> called `<P>-leads` in your identity provider (or `HTTP_API_GROUP_SOURCE`)
+> becomes a lead of project P. Where users can create their own groups, use
+> the file instead.
 
 Project names compare case-insensitively, as ClassAd `==` does. A bare
-username (`bob`) matches that name in any domain, while one with a domain
-(`bob@other.org`) matches only that exact identity; both compare
+username (`bob`) matches that name in any domain; one with a domain
+(`bob@other.org`) matches only that identity, which includes a bare session
+name that becomes it once `UID_DOMAIN` is appended (as after local identity
+mapping), and never the same name in another domain. Both compare
 case-insensitively. Groups are the session's, from
 `HTTP_API_GROUP_SOURCE`, matched case-insensitively. A project name containing
 a quote, a backslash or a control character is ignored.

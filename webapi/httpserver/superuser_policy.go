@@ -204,7 +204,7 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 	// The leads are kept even when the mode cannot run. They also widen
 	// what a lead may READ (projectLeadReadProjects), which needs no
 	// signing key.
-	h.projectLeads = newProjectLeads(cfg.ProjectLeadsFile, cfg.ProjectLeadsGroup, logger)
+	h.projectLeads = newProjectLeads(cfg.ProjectLeadsFile, cfg.ProjectLeadsGroup, h.uidDomain, logger)
 	leads := h.projectLeads.configured()
 
 	if group == "" && !leads {
@@ -249,13 +249,13 @@ func (h *Handler) superuserModeAvailable() bool {
 
 // globalSuperuser reports whether groups grant global superuser scope.
 //
-// The configured() check is load-bearing. groupSet.allows treats an empty
-// list as "no requirement" and admits everybody, which is right for access
-// groups and catastrophically wrong here: with only project leads
-// configured, HTTP_API_SUPERUSER_GROUP is empty, and allows() alone would
-// make every session a global superuser.
+// grants, not allows, is load-bearing. groupSet.allows treats an empty list
+// as "no requirement" and admits everybody, which is right for access groups
+// and catastrophically wrong here: with only project leads configured,
+// HTTP_API_SUPERUSER_GROUP is empty, and allows() would make every session a
+// global superuser.
 func (h *Handler) globalSuperuser(groups []string) bool {
-	return h.superuserGroups.configured() && h.superuserGroups.allows(groups)
+	return h.superuserGroups.grants(groups)
 }
 
 // superuserScopeFor works out what a session may act on, from the

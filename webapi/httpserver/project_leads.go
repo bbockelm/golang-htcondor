@@ -55,6 +55,9 @@ type projectLeadEntry struct {
 // replaces the path and pattern while requests are reading.
 type projectLeads struct {
 	logger *logging.Logger
+	// uidDomain qualifies a bare authenticated username for comparison
+	// with a domain-qualified lead entry. See entryNamesUser.
+	uidDomain string
 	// reloadEvery overrides projectLeadsReloadInterval; tests shorten it.
 	reloadEvery time.Duration
 
@@ -75,8 +78,8 @@ type projectLeads struct {
 // file is logged and treated as "no leads from that source" rather than
 // failing startup: nothing else about the server depends on them, and
 // failing closed -- nobody is a lead -- is the safe direction.
-func newProjectLeads(path, pattern string, logger *logging.Logger) *projectLeads {
-	p := &projectLeads{logger: logger}
+func newProjectLeads(path, pattern, uidDomain string, logger *logging.Logger) *projectLeads {
+	p := &projectLeads{logger: logger, uidDomain: uidDomain}
 	p.SetPattern(pattern)
 	p.SetFile(path)
 	return p
@@ -115,23 +118,35 @@ func (p *projectLeads) SetFile(path string) {
 	p.reloadLocked(true)
 }
 
-// SetPattern installs HTTP_API_PROJECT_LEADS_GROUP. A pattern without
-// exactly one "{project}" is refused -- with no placeholder every member of
-// that one group would lead every project, and with two the project name
-// cannot be recovered from a group name -- and logged, leaving the pattern
-// source off.
+// SetPattern installs HTTP_API_PROJECT_LEADS_GROUP. A refused pattern is
+// logged and leaves the pattern source off:
+//
+//   - without exactly one "{project}" -- with none every member of that one
+//     group would lead every project, and with two the project name cannot
+//     be recovered from a group name;
+//   - with nothing around the placeholder -- a bare "{project}" makes every
+//     group the caller holds a project they lead, so "users" would lead
+//     project "users".
 func (p *projectLeads) SetPattern(pattern string) {
 	if p == nil {
 		return
 	}
 	pattern = strings.TrimSpace(pattern)
-	if pattern != "" && strings.Count(pattern, projectPlaceholder) != 1 {
-		if p.logger != nil {
-			p.logger.Error(logging.DestinationSecurity,
-				"HTTP_API_PROJECT_LEADS_GROUP must contain \"{project}\" exactly once; ignoring it",
-				"pattern", pattern)
+	if pattern != "" {
+		msg := ""
+		switch {
+		case strings.Count(pattern, projectPlaceholder) != 1:
+			msg = "HTTP_API_PROJECT_LEADS_GROUP must contain \"{project}\" exactly once; ignoring it"
+		case pattern == projectPlaceholder:
+			msg = "HTTP_API_PROJECT_LEADS_GROUP needs a fixed prefix or suffix around \"{project}\", " +
+				"or every group would name a project; ignoring it"
 		}
-		pattern = ""
+		if msg != "" {
+			if p.logger != nil {
+				p.logger.Error(logging.DestinationSecurity, msg, "pattern", pattern)
+			}
+			pattern = ""
+		}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -286,25 +301,34 @@ func validProjectName(s string) bool {
 	return true
 }
 
-// sameUser compares a configured lead with the authenticated user,
+// entryNamesUser compares a configured lead with the authenticated user,
 // case-insensitively.
 //
 // A bare entry ("bob") is compared the way the rest of the server compares a
 // caller with a job's Owner: against the bare form of the actor, so it
 // matches bob in any domain. An entry that names a domain ("bob@other.org")
-// is compared with the full authenticated username and matches only that
-// exact identity: an operator who wrote the domain meant that one, and
-// stripping it would grant the lead to every bob in every domain.
-func sameUser(configured, actor string) bool {
+// matches only that identity: the full authenticated username, or a bare one
+// that becomes it once qualified with UID_DOMAIN -- which is what a session
+// looks like after local identity mapping. An operator who wrote the domain
+// meant that one, and stripping it would grant the lead to every bob in
+// every domain.
+func entryNamesUser(configured, actor, uidDomain string) bool {
 	configured = strings.TrimSpace(configured)
 	actor = strings.TrimSpace(actor)
-	if configured == "" {
+	if configured == "" || actor == "" {
 		return false
 	}
-	if strings.Contains(configured, "@") {
-		return strings.EqualFold(configured, actor)
+	if !strings.Contains(configured, "@") {
+		return strings.EqualFold(configured, ownerFromActor(actor))
 	}
-	return strings.EqualFold(configured, ownerFromActor(actor))
+	if strings.EqualFold(configured, actor) {
+		return true
+	}
+	if strings.Contains(actor, "@") {
+		return false
+	}
+	qualified := qualifyUser(actor, uidDomain)
+	return qualified != "" && strings.EqualFold(configured, qualified)
 }
 
 func hasGroup(groups []string, want string) bool {
@@ -343,9 +367,9 @@ func groupForProject(pattern, project string) string {
 
 // names reports whether this entry names the user, directly or through one
 // of their groups.
-func (e *projectLeadEntry) names(username string, groups []string) bool {
+func (e *projectLeadEntry) names(username, uidDomain string, groups []string) bool {
 	for _, u := range e.users {
-		if sameUser(u, username) {
+		if entryNamesUser(u, username, uidDomain) {
 			return true
 		}
 	}
@@ -364,7 +388,7 @@ func (p *projectLeads) Leads(project, username string, groups []string) bool {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e := p.snapshotLocked()[strings.ToLower(project)]; e != nil && e.names(username, groups) {
+	if e := p.snapshotLocked()[strings.ToLower(project)]; e != nil && e.names(username, p.uidDomain, groups) {
 		return true
 	}
 	if p.pattern != "" && hasGroup(groups, groupForProject(p.pattern, project)) {
@@ -392,7 +416,7 @@ func (p *projectLeads) LedProjects(username string, groups []string) []string {
 		}
 	}
 	for _, e := range p.snapshotLocked() {
-		if e.names(username, groups) {
+		if e.names(username, p.uidDomain, groups) {
 			add(e.project)
 		}
 	}
