@@ -16,7 +16,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -899,6 +901,10 @@ func startCondorMaster(ctx context.Context, configFile, localDir string) (*exec.
 	// Redirect output for debugging
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// On ctx cancellation, ask for a fast shutdown rather than SIGKILL:
+	// the master's daemons are not in its process group and would outlive it.
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGQUIT) }
+	cmd.WaitDelay = 30 * time.Second
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start condor_master: %w", err)
@@ -907,33 +913,65 @@ func startCondorMaster(ctx context.Context, configFile, localDir string) (*exec.
 	return cmd, nil
 }
 
-// stopCondorMaster gracefully stops condor_master
+// stopCondorMaster stops condor_master and the daemons it started.
+//
+// SIGQUIT is DaemonCore's fast shutdown: the master stops its daemons and
+// exits once they are gone. The master does not handle SIGINT, so SIGINT
+// (or SIGKILL) ends it at once and leaves its daemons -- each in its own
+// session -- running with no parent.
 func stopCondorMaster(cmd *exec.Cmd, t *testing.T) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
 
 	t.Log("Stopping condor_master...")
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
-		t.Logf("Warning: failed to send interrupt: %v", err)
-		cmd.Process.Kill()
+	if err := cmd.Process.Signal(syscall.SIGQUIT); err != nil {
+		t.Logf("Warning: failed to send SIGQUIT: %v", err)
 		return
 	}
 
-	// Wait for process to exit with timeout
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
 	}()
 
 	select {
-	case <-time.After(10 * time.Second):
-		t.Log("condor_master did not stop gracefully, forcing kill")
+	case <-time.After(30 * time.Second):
+		t.Log("condor_master did not stop, killing the pool")
+		killMasterDaemons(cmd, t)
 		cmd.Process.Kill()
 		<-done
 	case err := <-done:
 		if err != nil {
 			t.Logf("condor_master exited with error: %v", err)
+		}
+	}
+}
+
+// killMasterDaemons SIGKILLs the daemons the master logged starting. Each
+// leads its own process group, so they are killed by group.
+func killMasterDaemons(cmd *exec.Cmd, t *testing.T) {
+	var localDir string
+	for _, kv := range cmd.Env {
+		if v, ok := strings.CutPrefix(kv, "_CONDOR_LOCAL_DIR="); ok {
+			localDir = v
+		}
+	}
+	if localDir == "" {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, "log", "MasterLog"))
+	if err != nil {
+		t.Logf("cannot read MasterLog to find daemons: %v", err)
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		_, rest, ok := strings.Cut(line, "pid and pgroup = ")
+		if !ok {
+			continue
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && pid > 1 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
 		}
 	}
 }

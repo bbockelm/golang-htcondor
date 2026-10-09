@@ -45,6 +45,7 @@ type CondorTestHarness struct {
 	// (the shared-port test) deliberately run without one, and must not
 	// be made to wait for an ad that will never appear.
 	expectSchedd bool
+	shutdownDone bool
 	t            TestingT
 }
 
@@ -672,51 +673,79 @@ func (h *CondorTestHarness) Shutdown() {
 	if h.masterCmd == nil || h.masterCmd.Process == nil {
 		return
 	}
+	if h.shutdownDone {
+		return
+	}
+	h.shutdownDone = true
 	h.t.Log("Shutting down HTCondor master")
 
 	// Capture the process-group id before the process is reaped (Getpgid fails once
 	// it's gone); the master was started as a group leader, so pgid == the master pid.
 	pgid, pgidErr := syscall.Getpgid(h.masterCmd.Process.Pid)
 
-	// Try graceful shutdown first.
-	if err := h.masterCmd.Process.Signal(os.Interrupt); err != nil {
-		h.t.Logf("Failed to send interrupt to master: %v", err)
+	// SIGQUIT is DaemonCore's fast shutdown: the master stops every daemon it
+	// started and exits once they are gone. The master does not handle SIGINT,
+	// so SIGINT kills it outright, and its daemons -- each in its own session
+	// and process group, so out of reach of the group kill below -- live on.
+	if err := h.masterCmd.Process.Signal(syscall.SIGQUIT); err != nil {
+		h.t.Logf("Failed to send SIGQUIT to master: %v", err)
 	}
 
-	// Wait a bit for graceful shutdown.
 	done := make(chan error, 1)
 	go func() {
 		done <- h.masterCmd.Wait()
 	}()
 
 	select {
-	case <-time.After(5 * time.Second):
-		// Force kill if graceful shutdown times out.
+	case <-time.After(30 * time.Second):
+		// The master did not finish stopping its daemons. Kill them by the
+		// pids it logged, since they are not in its process group, then it.
+		h.t.Logf("condor_master did not exit after SIGQUIT; killing the pool")
+		for _, pid := range h.masterDaemonPids() {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
 		if err := h.masterCmd.Process.Kill(); err != nil {
 			h.t.Logf("Failed to kill master: %v", err)
 		}
-		<-done // Wait for process to finish
+		<-done
 	case <-done:
-		// Graceful shutdown succeeded.
 	}
 
-	// Backstop: SIGKILL the whole process group so no orphaned child (condor_procd,
-	// schedd, shared_port) survives the master still holding open / writing files
-	// under the t.TempDir tree -- otherwise TempDir's RemoveAll races them and fails
-	// with "directory not empty". Harmless if the group is already gone (ESRCH).
+	// Backstop: SIGKILL whatever is left in the master's own process group
+	// (anything it forked without a new group) so nothing keeps writing under
+	// the temp tree while it is removed. Harmless if the group is gone (ESRCH).
 	if pgidErr == nil {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		// Wait for the group to drain so the kernel has released the children's file
-		// handles before the caller's TempDir RemoveAll runs. kill(-pgid, 0) returns
-		// ESRCH once no process in the group remains.
+		// kill(-pgid, 0) returns ESRCH once no process in the group remains.
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
 			if err := syscall.Kill(-pgid, 0); err != nil {
-				break // ESRCH: the process group is gone
+				break
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
+}
+
+// masterDaemonPids returns the pids of the daemons the master logged starting.
+// Each is the leader of its own process group.
+func (h *CondorTestHarness) masterDaemonPids() []int {
+	data, err := os.ReadFile(filepath.Join(h.logDir, "MasterLog")) //nolint:gosec // Test code reading test logs
+	if err != nil {
+		return nil
+	}
+	const marker = "pid and pgroup = "
+	var pids []int
+	for _, line := range strings.Split(string(data), "\n") {
+		_, rest, ok := strings.Cut(line, marker)
+		if !ok {
+			continue
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && pid > 1 {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 // GetCollectorAddr returns the collector address

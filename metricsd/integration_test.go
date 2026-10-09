@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -265,20 +266,21 @@ func (h *condorTestHarness) Shutdown() {
 	if h.masterCmd != nil && h.masterCmd.Process != nil {
 		h.t.Log("Shutting down HTCondor master")
 
-		// Try graceful shutdown first
-		if err := h.masterCmd.Process.Signal(os.Interrupt); err != nil {
-			h.t.Logf("Failed to send interrupt to master: %v", err)
+		// SIGQUIT is DaemonCore's fast shutdown: the master stops its daemons
+		// and exits once they are gone. The master does not handle SIGINT, so
+		// SIGINT ends it at once and leaves its daemons (each in its own
+		// session) running with no parent.
+		if err := h.masterCmd.Process.Signal(syscall.SIGQUIT); err != nil {
+			h.t.Logf("Failed to send SIGQUIT to master: %v", err)
 		}
 
-		// Wait a bit for graceful shutdown
 		done := make(chan error, 1)
 		go func() {
 			done <- h.masterCmd.Wait()
 		}()
 
 		select {
-		case <-time.After(5 * time.Second):
-			// Force kill if graceful shutdown times out
+		case <-time.After(30 * time.Second):
 			if err := h.masterCmd.Process.Kill(); err != nil {
 				h.t.Logf("Failed to kill master: %v", err)
 			}
