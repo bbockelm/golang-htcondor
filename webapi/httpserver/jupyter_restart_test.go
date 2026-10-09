@@ -143,7 +143,7 @@ func newJupyterRestartHandler(t *testing.T, dbPath string, schedd *jupyterFakeSc
 	if err := appdb.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	h, _ := taggingHandler(t)
+	h := taggingHandler(t)
 	h.db = db
 	h.jupyterScheddOverride = schedd
 	return h
