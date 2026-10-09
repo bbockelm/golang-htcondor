@@ -850,6 +850,25 @@ func GetSecurityConfigOrDefault(ctx context.Context, cfg *config.Config, command
 		if secConfig.PeerName == "" {
 			secConfig.PeerName = peerName
 		}
+		// A credential carried for somebody else is the only one this
+		// connection may present. Without this, CEDAR treats the
+		// caller's token as the first candidate in a search: if the
+		// peer will not accept it -- an issuer that does not match its
+		// trust domain, a key it does not know, an expiry -- discovery
+		// moves on to this host's own token files and the handshake
+		// succeeds as this daemon. The caller's request then runs with
+		// an identity they never had.
+		//
+		// Decided here, from how the context was already classified at
+		// the transport, rather than asked of each place that builds a
+		// config. That is the whole point: a per-config field is a
+		// thing to remember at every call site and every new route,
+		// and the evidence is that it does not get remembered. There
+		// is nothing to forget if the answer is derived from the
+		// origin that is already marked.
+		if origin, _ := CredentialOriginFromContext(ctx); origin == OriginUser {
+			secConfig.DelegatedCredential = true
+		}
 		return secConfig, nil
 	}
 

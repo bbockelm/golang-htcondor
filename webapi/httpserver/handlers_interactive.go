@@ -567,7 +567,17 @@ func (s *Handler) removeJobOnDisconnect(jobIDStr string) {
 	// after the user's session has expired. The schedd verifies that
 	// the requester owns the job; the API server token is daemon-level
 	// so it can act on any job.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	//
+	// Said out loud, because it is the one place here that acts as this
+	// daemon for something a user asked for. Unmarked it was
+	// indistinguishable from the accidents -- a context that reached
+	// CEDAR without a caller credential and was promoted silently --
+	// and an audit cannot tell a deliberate choice from an oversight
+	// unless the deliberate ones say so.
+	ctx, cancel := context.WithTimeout(
+		htcondor.WithDaemonCredential(context.Background(),
+			"interactive session cleanup: acts on any job, schedd checks ownership"),
+		10*time.Second)
 	defer cancel()
 	if s.token != "" {
 		ctx = WithToken(ctx, s.token)
