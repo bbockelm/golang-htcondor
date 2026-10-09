@@ -109,6 +109,8 @@ type jupyterSessionRow struct {
 	// PrevNonce is the nonce the session moved away from, acceptable for
 	// one more dial. Nil once that grace has been used or never needed.
 	PrevNonce []byte
+	// Connected is whether the session's helper has ever been accepted.
+	Connected bool
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
@@ -187,7 +189,8 @@ func (s *jupyterStore) RollNonce(ctx context.Context, instanceID string, from, t
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE jupyter_sessions
 		   SET prev_nonce = CASE WHEN next_nonce = ? THEN next_nonce ELSE NULL END,
-		       next_nonce = ?
+		       next_nonce = ?,
+		       connected = 1
 		 WHERE instance_id = ?
 		   AND (next_nonce = ? OR (prev_nonce IS NOT NULL AND prev_nonce = ?))`,
 		from, to, instanceID, from, from)
@@ -205,10 +208,10 @@ func (s *jupyterStore) Get(ctx context.Context, instanceID string) (jupyterSessi
 		return row, sql.ErrNoRows
 	}
 	err := s.db.QueryRowContext(ctx, `
-		SELECT instance_id, owner, cluster_id, proc_id, image, next_nonce, prev_nonce, created_at, expires_at
+		SELECT instance_id, owner, cluster_id, proc_id, image, next_nonce, prev_nonce, connected, created_at, expires_at
 		  FROM jupyter_sessions WHERE instance_id = ?`, instanceID).
 		Scan(&row.InstanceID, &row.Owner, &row.ClusterID, &row.ProcID, &row.Image,
-			&row.NextNonce, &row.PrevNonce, &row.CreatedAt, &row.ExpiresAt)
+			&row.NextNonce, &row.PrevNonce, &row.Connected, &row.CreatedAt, &row.ExpiresAt)
 	return row, err
 }
 
@@ -218,7 +221,7 @@ func (s *jupyterStore) Live(ctx context.Context, now time.Time) ([]jupyterSessio
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT instance_id, owner, cluster_id, proc_id, image, next_nonce, created_at, expires_at
+		SELECT instance_id, owner, cluster_id, proc_id, image, next_nonce, connected, created_at, expires_at
 		  FROM jupyter_sessions WHERE expires_at > ? ORDER BY created_at`, now.UTC())
 	if err != nil {
 		return nil, err
@@ -228,7 +231,7 @@ func (s *jupyterStore) Live(ctx context.Context, now time.Time) ([]jupyterSessio
 	for rows.Next() {
 		var row jupyterSessionRow
 		if err := rows.Scan(&row.InstanceID, &row.Owner, &row.ClusterID, &row.ProcID, &row.Image,
-			&row.NextNonce, &row.CreatedAt, &row.ExpiresAt); err != nil {
+			&row.NextNonce, &row.Connected, &row.CreatedAt, &row.ExpiresAt); err != nil {
 			return nil, err
 		}
 		out = append(out, row)

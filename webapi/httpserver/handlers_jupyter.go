@@ -267,7 +267,7 @@ func (s *Handler) adoptJupyterSessions(ctx context.Context, reg *jupytertunnel.R
 		if row.Image != "" {
 			meta["image"] = row.Image
 		}
-		if _, err := reg.AdoptInstance(row.InstanceID, row.Owner, row.CreatedAt, meta); err != nil {
+		if _, err := reg.AdoptInstance(row.InstanceID, row.Owner, row.CreatedAt, meta, row.Connected); err != nil {
 			s.logger.Warn(logging.DestinationHTTP, "jupyter: could not adopt a stored session",
 				"instance", row.InstanceID, "error", err)
 			continue

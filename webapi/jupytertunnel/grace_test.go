@@ -469,3 +469,90 @@ func TestTunnelWaitIsBoundToItsOwnDial(t *testing.T) {
 		t.Error("both dials report the same next token; one was read off the instance")
 	}
 }
+
+// A session adopted from the last process whose helper had connected is
+// reconnecting, and gets the same grace period as a drop in this one: a
+// helper that never dials back no longer leaves it listed as reconnecting
+// until its job is found gone or its row expires.
+func TestAdoptedSessionThatNeverRedialsIsClosed(t *testing.T) {
+	reg, _ := newGraceRegistry(t, 200*time.Millisecond)
+	inst, err := reg.AdoptInstance("aa", "alice", time.Now(), nil, true)
+	if err != nil {
+		t.Fatalf("AdoptInstance: %v", err)
+	}
+	if !inst.Reconnecting() {
+		t.Error("an adopted session whose helper had connected is not reported reconnecting")
+	}
+	if !waitFor(3*time.Second, func() bool { _, ok := reg.Lookup("aa"); return !ok }) {
+		t.Error("the adopted session outlived its reconnect grace period")
+	}
+}
+
+// One whose job has not started yet is not reconnecting, and is not closed
+// on the reconnect grace: it may wait hours for a slot, and closing it would
+// refuse its first dial and end the job.
+func TestAdoptedSessionNotYetConnectedIsKept(t *testing.T) {
+	reg, _ := newGraceRegistry(t, 100*time.Millisecond)
+	inst, err := reg.AdoptInstance("bb", "alice", time.Now(), nil, false)
+	if err != nil {
+		t.Fatalf("AdoptInstance: %v", err)
+	}
+	if inst.Reconnecting() {
+		t.Error("a session that never connected is reported reconnecting")
+	}
+	time.Sleep(400 * time.Millisecond)
+	if _, ok := reg.Lookup("bb"); !ok {
+		t.Error("a session still waiting for its job to start was closed on the reconnect grace")
+	}
+}
+
+// The expiry does not close a session out from under a dial in flight.
+func TestAdoptedSessionExpiryWaitsForADialInFlight(t *testing.T) {
+	reg, _ := newGraceRegistry(t, 100*time.Millisecond)
+	reg.expireRecheck = 50 * time.Millisecond
+	inst, err := reg.AdoptInstance("cc", "alice", time.Now(), nil, true)
+	if err != nil {
+		t.Fatalf("AdoptInstance: %v", err)
+	}
+	inst.mu.Lock()
+	inst.connecting = true
+	inst.mu.Unlock()
+	time.Sleep(400 * time.Millisecond)
+	if _, ok := reg.Lookup("cc"); !ok {
+		t.Fatal("the session was closed while a dial was in flight")
+	}
+	inst.releaseConnecting()
+	if !waitFor(2*time.Second, func() bool { _, ok := reg.Lookup("cc"); return !ok }) {
+		t.Error("the session was never closed after the dial in flight failed")
+	}
+}
+
+// A helper that does dial back within the grace period keeps the session.
+func TestAdoptedSessionRedialWithinGraceIsKept(t *testing.T) {
+	secret := make([]byte, 32)
+	roller := newMemRoller()
+	first, err := NewRegistryWithSecret(secret, roller)
+	if err != nil {
+		t.Fatalf("NewRegistryWithSecret: %v", err)
+	}
+	id, token := createForDial(t, first, roller)
+
+	// --- restart ---
+	second, err := NewRegistryWithSecret(secret, roller)
+	if err != nil {
+		t.Fatalf("NewRegistryWithSecret: %v", err)
+	}
+	second.SetReconnectGrace(300 * time.Millisecond)
+	if _, err := second.AdoptInstance(id, "alice", time.Now(), nil, true); err != nil {
+		t.Fatalf("AdoptInstance: %v", err)
+	}
+	h := newTunnelHarness(t, second)
+	if _, err := h.dial(t, id, token); err != nil {
+		t.Fatalf("redial within the grace period: %v", err)
+	}
+	time.Sleep(600 * time.Millisecond)
+	inst, ok := second.Lookup(id)
+	if !ok || !inst.HasTunnel() {
+		t.Error("the grace expiry closed a session whose helper had dialed back")
+	}
+}

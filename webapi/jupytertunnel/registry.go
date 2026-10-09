@@ -72,6 +72,10 @@ type Registry struct {
 	// now is the clock tokens are verified against. A seam for tests.
 	now func() time.Time
 
+	// expireRecheck is how soon an expiry that found a dial in flight looks
+	// again. A seam for tests.
+	expireRecheck time.Duration
+
 	// reconnectTTL bounds the token handed to a connected helper for its
 	// next dial. Zero means tokenTTL. See SetReconnectTokenTTL.
 	reconnectTTL time.Duration
@@ -290,6 +294,8 @@ func newRegistry(secret []byte) *Registry {
 		idleTTL:   15 * time.Minute,
 		now:       time.Now,
 		instances: make(map[string]*Instance),
+
+		expireRecheck: time.Second,
 	}
 }
 
@@ -582,7 +588,14 @@ func (r *Registry) CreateInstance(opts CreateInstanceOptions) (id string, token 
 // Deliberately not minting a token. The helper already holds the only one
 // that will be accepted, and issuing another here would put a second live
 // credential into a session whose whole design is that exactly one exists.
-func (r *Registry) AdoptInstance(id, owner string, created time.Time, meta map[string]string) (*Instance, error) {
+//
+// wasConnected says whether the session's helper had connected before. One
+// that had lost its tunnel with the last process, so it is reconnecting, and
+// it gets the same reconnect grace period as a tunnel that drops in this one:
+// a helper that does not dial back within it is not coming. One that had not
+// is still waiting for its job to start -- possibly for hours -- and is left
+// to the start grace and the job's own fate.
+func (r *Registry) AdoptInstance(id, owner string, created time.Time, meta map[string]string, wasConnected bool) (*Instance, error) {
 	if id == "" || owner == "" {
 		return nil, errors.New("jupytertunnel: adopting an instance needs an id and an owner")
 	}
@@ -599,9 +612,12 @@ func (r *Registry) AdoptInstance(id, owner string, created time.Time, meta map[s
 		Created: created,
 		Owner:   owner,
 		meta:    copyMeta(meta),
-		adopted: true,
+		adopted: wasConnected,
 	}
 	r.instances[id] = inst
+	if wasConnected && r.reconnectGrace > 0 {
+		r.expireAfterGrace(inst, nil)
+	}
 	return inst, nil
 }
 
@@ -795,12 +811,18 @@ func (r *Registry) tunnelLost(inst *Instance, session *yamux.Session) {
 	inst.lostAt = r.now()
 	inst.mu.Unlock()
 	inst.publish(EventTunnelLost)
+	r.expireAfterGrace(inst, session)
+}
 
+// expireAfterGrace closes inst once the reconnect grace period has passed,
+// unless by then a dial has replaced lost -- the tunnel that dropped, or nil
+// for a session adopted from the last process, which arrives with none.
+func (r *Registry) expireAfterGrace(inst *Instance, lost *yamux.Session) {
 	var expire func()
 	expire = func() {
 		inst.mu.Lock()
 		switch {
-		case inst.closed || inst.tunnel != session:
+		case inst.closed || inst.tunnel != lost:
 			// Closed, or the helper came back.
 			inst.mu.Unlock()
 			return
@@ -808,13 +830,13 @@ func (r *Registry) tunnelLost(inst *Instance, session *yamux.Session) {
 			// A redial is in flight. Let it finish rather than close the
 			// session out from under it; look again shortly.
 			inst.mu.Unlock()
-			time.AfterFunc(time.Second, expire)
+			time.AfterFunc(r.expireRecheck, expire)
 			return
 		}
 		inst.mu.Unlock()
 		r.CloseInstance(inst.ID)
 	}
-	time.AfterFunc(grace, expire)
+	time.AfterFunc(r.reconnectGrace, expire)
 }
 
 // CloseInstance forcibly tears down an instance. Subsequent Lookup returns

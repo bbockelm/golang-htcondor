@@ -345,7 +345,7 @@ func TestJupyterInstanceWithoutAClusterIsNotReaped(t *testing.T) {
 		t.Fatalf("registry: %v", err)
 	}
 	if _, err := reg.AdoptInstance("00112233445566778899aabbccddeeff", "alice", time.Now(),
-		map[string]string{"cluster_id": "0"}); err != nil {
+		map[string]string{"cluster_id": "0"}, false); err != nil {
 		t.Fatalf("AdoptInstance: %v", err)
 	}
 
