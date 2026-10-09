@@ -362,7 +362,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
+	resultCh, err := s.streamJobs(ctx, constraint, opts, streamOpts)
 	if err != nil {
 		// Pre-request error - check type and set appropriate status
 		switch {

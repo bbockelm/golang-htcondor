@@ -482,12 +482,13 @@ used together; a session leads the union. The pattern needs fixed text around
 > becomes a lead of project P. Where users can create their own groups, use
 > the file instead.
 
-Project names compare case-insensitively, as ClassAd `==` does. A bare
-username (`bob`) matches that name in any domain; one with a domain
-(`bob@other.org`) matches only that identity, which includes a bare session
-name that becomes it once `UID_DOMAIN` is appended (as after local identity
-mapping), and never the same name in another domain. Both compare
-case-insensitively. Groups are the session's, from
+Whether a job is in a project is decided by the schedd, evaluating
+`ProjectName == "<project>"` against the whole job ad; ClassAd `==` ignores
+case for ASCII letters only. A bare username (`bob`) matches that name in any
+domain; one with a domain (`bob@other.org`) matches only that identity, which
+includes a bare session name that becomes it once `UID_DOMAIN` is appended (as
+after local identity mapping), and never the same name in another domain. Both
+compare case-insensitively. Groups are the session's, from
 `HTTP_API_GROUP_SOURCE`, matched case-insensitively. A project name containing
 a quote, a backslash or a control character is ignored.
 
@@ -495,7 +496,10 @@ a quote, a backslash or a control character is ignored.
 user's job in a project they lead, tail its output, and ssh to it. Bulk hold
 and release reach the lead's own jobs plus their projects' jobs, whatever the
 constraint says. A job with no `ProjectName`, or one in another project, is
-refused with a 403. Hold and release reasons name the project:
+refused with a 403, and so is a job owned by a queue superuser
+(`QUEUE_SUPER_USERS`) or by the fallback identity; each refusal is logged to
+the security log. ssh-to-job gives the lead the member's sandbox, including any
+credentials in it. Hold and release reasons name the project:
 
 ```
 Held by alice@example.org via the web UI (project lead for Physics, acting for bob@example.org) (by user condor@example.org)

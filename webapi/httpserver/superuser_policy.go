@@ -170,6 +170,35 @@ func (p *superuserPolicy) ImpersonationIdentity(actor string) (identity string, 
 	return p.fallback, false
 }
 
+// privilegedTarget reports whether owner is an identity a project lead must
+// not act for -- a queue superuser, or the fallback identity this server acts
+// under -- and whether the answer is known at all.
+//
+// Acting "for" such an owner would put a lead's action behind the authority
+// the queue grants that identity over everybody's jobs. Comparisons are on
+// both the qualified and the bare name and are case-insensitive, so they err
+// towards calling an owner privileged. Before the queue-superuser set has
+// ever been read the answer is unknown, and callers refuse.
+func (p *superuserPolicy) privilegedTarget(owner string) (privileged, known bool) {
+	bare := strings.ToLower(ownerFromActor(strings.TrimSpace(owner)))
+	if bare == "" {
+		return true, true
+	}
+	qualified := strings.ToLower(qualifyUser(owner, p.uidDomain))
+	if strings.EqualFold(bare, ownerFromActor(p.fallback)) {
+		return true, true
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.users == nil {
+		return false, false
+	}
+	if p.users[bare] || (qualified != "" && p.users[qualified]) {
+		return true, true
+	}
+	return false, true
+}
+
 // Status reports what the policy currently knows, for the admin UI and for
 // answering "why is this being done as condor?".
 func (p *superuserPolicy) Status() (count int, fetchedAt time.Time, lastErr error) {

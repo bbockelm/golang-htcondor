@@ -190,25 +190,48 @@ func (i *Impersonation) scopeName() string {
 }
 
 // superuserJobProjection is what superuser mode reads off a job to decide
-// whether, and as whom, it may act on it.
-var superuserJobProjection = []string{"Owner", "User", "ProjectName", "ClusterId", "ProcId"}
+// whose it is. Deliberately not ProjectName: project membership is decided
+// by the schedd evaluating a constraint against the whole ad (see
+// jobLedProject), never by this server reading a projected copy.
+var superuserJobProjection = []string{"Owner", "User", "ClusterId", "ProcId"}
 
-// querySuperuserJobs reads jobs for superuser-mode decisions. A seam so the
-// authorization rules can be tested against ads evaluated in-process
-// rather than a live schedd; production always goes to the schedd.
-func (h *Handler) querySuperuserJobs(ctx context.Context, constraint string, limit int) ([]*classad.ClassAd, error) {
-	if h.superuserJobQuery != nil {
-		return h.superuserJobQuery(ctx, constraint, superuserJobProjection, limit)
+// queryJobs reads job ads from the schedd, or from jobQueryOverride in tests.
+func (h *Handler) queryJobs(ctx context.Context, constraint string, opts *htcondor.QueryOptions) ([]*classad.ClassAd, error) {
+	if h.jobQueryOverride != nil {
+		return h.jobQueryOverride(ctx, constraint, opts)
 	}
 	schedd := h.getSchedd()
 	if schedd == nil {
 		return nil, fmt.Errorf("no schedd configured")
 	}
-	ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+	ads, _, err := schedd.QueryWithOptions(ctx, constraint, opts)
+	return ads, err
+}
+
+// streamJobs is the job listing's schedd stream, or jobQueryOverride's
+// answer delivered the same way in tests.
+func (h *Handler) streamJobs(ctx context.Context, constraint string, opts *htcondor.QueryOptions, streamOpts *htcondor.StreamOptions) (<-chan htcondor.JobAdResult, error) {
+	if h.jobQueryOverride == nil {
+		return h.getSchedd().QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
+	}
+	ads, err := h.jobQueryOverride(ctx, constraint, opts)
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan htcondor.JobAdResult, len(ads))
+	for _, ad := range ads {
+		ch <- htcondor.JobAdResult{Ad: ad}
+	}
+	close(ch)
+	return ch, nil
+}
+
+// querySuperuserJobs reads jobs for superuser-mode decisions.
+func (h *Handler) querySuperuserJobs(ctx context.Context, constraint string, limit int) ([]*classad.ClassAd, error) {
+	return h.queryJobs(ctx, constraint, &htcondor.QueryOptions{
 		Limit:      limit,
 		Projection: superuserJobProjection,
 	})
-	return ads, err
 }
 
 // adOwner reads a job's owner, falling back to the User attribute older ads
@@ -223,38 +246,103 @@ func adOwner(ad *classad.ClassAd) string {
 	return ""
 }
 
-// adProject reads a job's ProjectName. Empty when it is missing or is not a
-// string, which project scope treats as "in no project".
-func adProject(ad *classad.ClassAd) string {
-	project, ok := ad.EvaluateAttrString("ProjectName")
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(project)
-}
-
-// jobOwnerAndProject looks up the Owner and ProjectName of a single job, in
-// one query.
+// jobOwner looks up the Owner of a single job.
 //
 // The target of an impersonation is derived from the job, never from the
 // request: a caller-supplied target would let an admin name any identity they
 // liked and have the server authenticate as a superuser on its behalf, which
-// is a different and much larger capability than "fix this job". The same
-// goes for the project a lead's authority is checked against.
-func (h *Handler) jobOwnerAndProject(ctx context.Context, cluster, proc int) (owner, project string, err error) {
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	ads, err := h.querySuperuserJobs(ctx, constraint, 1)
+// is a different and much larger capability than "fix this job".
+func (h *Handler) jobOwner(ctx context.Context, cluster, proc int) (string, error) {
+	ads, err := h.querySuperuserJobs(ctx, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc), 1)
 	if err != nil {
-		return "", "", fmt.Errorf("looking up job %d.%d: %w", cluster, proc, err)
+		return "", fmt.Errorf("looking up job %d.%d: %w", cluster, proc, err)
 	}
 	if len(ads) == 0 {
-		return "", "", fmt.Errorf("job %d.%d not found", cluster, proc)
+		return "", fmt.Errorf("job %d.%d not found", cluster, proc)
 	}
-	owner = adOwner(ads[0])
+	owner := adOwner(ads[0])
 	if owner == "" {
-		return "", "", fmt.Errorf("job %d.%d has no owner attribute", cluster, proc)
+		return "", fmt.Errorf("job %d.%d has no owner attribute", cluster, proc)
 	}
-	return owner, adProject(ads[0]), nil
+	return owner, nil
+}
+
+// jobLedProject returns which of projects the job is in, as the schedd
+// evaluates it, or "" when it is in none of them.
+//
+// The schedd decides, not this server. ProjectName is an expression like any
+// other attribute and may refer to others; evaluating it here would mean
+// evaluating a projected copy, where those references are missing, and
+// trusting a decision the schedd could make differently. Asking the schedd
+// to match the clause is the same decision hold, release and remove then
+// re-make atomically in their constraint, and it covers ssh and tail, which
+// have no constraint of their own.
+//
+// One query decides membership; when several projects are led, one more per
+// project finds which, for the reason text and the TOCTOU clause.
+func (h *Handler) jobLedProject(ctx context.Context, cluster, proc int, projects []string) (string, error) {
+	if len(projects) == 0 {
+		return "", nil
+	}
+	job := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	match := func(candidates []string) (bool, error) {
+		c, err := andScope(projectClause(candidates), job)
+		if err != nil {
+			return false, err
+		}
+		ads, err := h.queryJobs(ctx, c, &htcondor.QueryOptions{
+			Limit:      1,
+			Projection: []string{"ClusterId", "ProcId"},
+		})
+		if err != nil {
+			return false, fmt.Errorf("checking the project of job %d.%d: %w", cluster, proc, err)
+		}
+		return len(ads) > 0, nil
+	}
+	in, err := match(projects)
+	if err != nil || !in {
+		return "", err
+	}
+	if len(projects) == 1 {
+		return projects[0], nil
+	}
+	for _, p := range projects {
+		in, err := match([]string{p})
+		if err != nil {
+			return "", err
+		}
+		if in {
+			return p, nil
+		}
+	}
+	// In the set but in none of its members: the job moved between the
+	// queries. Treat it as outside.
+	return "", nil
+}
+
+// auditProjectLeadRefusal records a project lead being refused, at Info and
+// unconditionally, like a superuser action: an attempt on a job outside the
+// lead's grant is the event an audit most needs to show.
+func (h *Handler) auditProjectLeadRefusal(r *http.Request, actor, subject, reason string) {
+	h.logger.Info(logging.DestinationSecurity, "Project lead refused",
+		"actor", actor,
+		"subject", subject,
+		"reason", reason,
+		"remote_addr", r.RemoteAddr)
+}
+
+// refuseProjectLeadTarget is the check a project lead's impersonation of
+// owner must pass beyond project membership: owner must not be a queue
+// superuser or the fallback identity. Returns the refusal, or nil.
+func (h *Handler) refuseProjectLeadTarget(owner string) error {
+	privileged, known := h.superuserPolicy.privilegedTarget(owner)
+	switch {
+	case !known:
+		return fmt.Errorf("cannot act as a project lead yet: the schedd's queue superusers have not been read, so it is not known whether this job's owner is one")
+	case privileged:
+		return fmt.Errorf("project leads cannot act on jobs owned by a queue superuser or by this server's own identity")
+	}
+	return nil
 }
 
 // armedSuperuser is the shared prologue of every superuser-mode decision:
@@ -324,7 +412,7 @@ func (h *Handler) superuserActionContext(ctx context.Context, r *http.Request, c
 		return ctx, nil, nil
 	}
 
-	owner, project, err := h.jobOwnerAndProject(ctx, cluster, proc)
+	owner, err := h.jobOwner(ctx, cluster, proc)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -335,19 +423,24 @@ func (h *Handler) superuserActionContext(ctx context.Context, r *http.Request, c
 
 	ledProject := ""
 	if !scope.Global {
-		// Neither the owner nor the project is named in the refusal: a
-		// lead has no business learning either for a job outside their
-		// projects, and probing job ids one by one should not tell them.
-		if project == "" {
+		subject := fmt.Sprintf("%d.%d", cluster, proc)
+		ledProject, err = h.jobLedProject(ctx, cluster, proc, scope.Projects)
+		if err != nil {
+			return nil, nil, err
+		}
+		if ledProject == "" {
+			// Neither the owner nor the project is named in the
+			// refusal: a lead has no business learning either for a
+			// job outside their projects, and probing job ids one by
+			// one should not tell them.
+			h.auditProjectLeadRefusal(r, session.Username, subject, "job is not in a project the actor leads")
 			return nil, nil, fmt.Errorf(
 				"job %d.%d is not in a project you lead; as a project lead you may act only on other users' jobs in your projects",
 				cluster, proc)
 		}
-		var leads bool
-		if ledProject, leads = scope.leads(project); !leads {
-			return nil, nil, fmt.Errorf(
-				"job %d.%d is not in a project you lead; as a project lead you may act only on other users' jobs in your projects",
-				cluster, proc)
+		if refusal := h.refuseProjectLeadTarget(owner); refusal != nil {
+			h.auditProjectLeadRefusal(r, session.Username, subject, refusal.Error())
+			return nil, nil, refusal
 		}
 	}
 
@@ -406,13 +499,14 @@ type superuserBulkPlan struct {
 // server authenticated as. The alternative, acting once as a superuser across
 // everything, would be a single unbounded grant with one audit line.
 //
-// Project scope narrows the constraint BEFORE owners are resolved, to the
-// caller's own jobs plus the jobs in projects they lead, so a job outside
-// those is never read, never planned and never acted on. Other users' jobs
-// are then batched per (owner, project) rather than per owner, and each
-// batch's constraint carries its project clause: the schedd re-applies it
-// when it acts, so a job moved out of the project after planning is not
-// touched, and each batch's reason names the one project that granted it.
+// Project scope never reads the caller's constraint unscoped. It plans from
+// one query for the caller's own jobs and one per led project, each with the
+// scoping clause ANDed in front, so the schedd decides which jobs are in
+// which project and a job outside them is never read, planned or acted on.
+// Other users' jobs are batched per (owner, project), and each batch's
+// constraint carries its project clause: the schedd re-applies it when it
+// acts, so a job moved out of the project after planning is not touched, and
+// each batch's reason names the one project that granted it.
 //
 // Returns a nil plan when superuser mode is not engaged, in which case the
 // caller proceeds normally.
@@ -426,62 +520,82 @@ func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, 
 	}
 	actorOwner := ownerFromActor(session.Username)
 
-	planConstraint := constraint
-	if !scope.Global {
-		if planConstraint, err = scopeToOwnerOrProjects(actorOwner, scope.Projects, constraint); err != nil {
-			return nil, err
-		}
-	}
-
-	// Bounded deliberately. Resolving owners means reading every matching
-	// job, and a bulk constraint on a busy access point can match a great
-	// many; an unlimited read here would be the most expensive thing in the
-	// request. Hitting the bound always means the constraint is too broad
-	// to plan safely rather than that the answer was silently truncated.
-	ads, err := h.querySuperuserJobs(ctx, planConstraint, maxSuperuserBulkJobsScanned)
-	if err != nil {
-		return nil, fmt.Errorf("resolving the owners of the matching jobs: %w", err)
-	}
-	if len(ads) >= maxSuperuserBulkJobsScanned {
-		return nil, fmt.Errorf(
-			"this constraint matches at least %d jobs, too many to plan a superuser bulk action over; narrow it",
-			maxSuperuserBulkJobsScanned)
-	}
-	if len(ads) == 0 {
-		// Nothing this mode could act on matches. Let the normal path
-		// run: it acts as the caller, so the schedd confines it to their
-		// own jobs exactly as it would with the mode off.
-		return nil, nil
-	}
-
 	// One batch per owner, and for project scope per (owner, project).
 	type batchKey struct{ owner, project string }
 	counts := make(map[batchKey]int)
 	var order []batchKey
 	owners := make(map[string]bool)
-	for _, ad := range ads {
-		owner := adOwner(ad)
-		if owner == "" {
-			return nil, fmt.Errorf("a matching job has no owner attribute; narrow the constraint")
+	scanned := 0
+
+	// collect reads one planning query into batches. project is "" for
+	// the caller's own jobs and for global scope.
+	collect := func(planConstraint, project string) error {
+		// Bounded deliberately. Resolving owners means reading every
+		// matching job, and a bulk constraint on a busy access point can
+		// match a great many. Hitting the bound always means the
+		// constraint is too broad to plan safely rather than that the
+		// answer was silently truncated.
+		ads, err := h.querySuperuserJobs(ctx, planConstraint, maxSuperuserBulkJobsScanned)
+		if err != nil {
+			return fmt.Errorf("resolving the owners of the matching jobs: %w", err)
 		}
-		key := batchKey{owner: owner}
-		if !scope.Global && !strings.EqualFold(owner, actorOwner) {
-			led, leads := scope.leads(adProject(ad))
-			if !leads {
-				// The query was confined to these projects, so this
-				// is a schedd that did not apply the constraint.
-				// Refuse rather than act on a job nobody granted.
-				return nil, fmt.Errorf("a matching job is outside the projects you lead; refusing the bulk action")
+		scanned += len(ads)
+		if len(ads) >= maxSuperuserBulkJobsScanned || scanned >= maxSuperuserBulkJobsScanned {
+			return fmt.Errorf(
+				"this constraint matches at least %d jobs, too many to plan a superuser bulk action over; narrow it",
+				maxSuperuserBulkJobsScanned)
+		}
+		for _, ad := range ads {
+			owner := adOwner(ad)
+			if owner == "" {
+				return fmt.Errorf("a matching job has no owner attribute; narrow the constraint")
 			}
-			key.project = led
+			key := batchKey{owner: owner}
+			if project != "" {
+				if strings.EqualFold(owner, actorOwner) {
+					// Planned already, by the own-jobs query.
+					continue
+				}
+				key.project = project
+			}
+			if _, seen := counts[key]; !seen {
+				order = append(order, key)
+			}
+			counts[key]++
+			owners[strings.ToLower(owner)] = true
 		}
-		if _, seen := counts[key]; !seen {
-			order = append(order, key)
-		}
-		counts[key]++
-		owners[strings.ToLower(owner)] = true
+		return nil
 	}
 
+	if scope.Global {
+		if err := collect(constraint, ""); err != nil {
+			return nil, err
+		}
+	} else {
+		own, err := scopeToOwner(actorOwner, constraint)
+		if err != nil {
+			return nil, err
+		}
+		if err := collect(own, ""); err != nil {
+			return nil, err
+		}
+		for _, project := range scope.Projects {
+			inProject, err := scopeToProjects([]string{project}, constraint)
+			if err != nil {
+				return nil, err
+			}
+			if err := collect(inProject, project); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if len(order) == 0 {
+		// Nothing this mode could act on matches. Let the normal path
+		// run: it acts as the caller, so the schedd confines it to their
+		// own jobs exactly as it would with the mode off.
+		return nil, nil
+	}
 	if len(owners) > maxSuperuserBulkOwners {
 		return nil, fmt.Errorf(
 			"this constraint spans %d job owners, more than the limit of %d for a superuser bulk action; narrow it",
@@ -492,6 +606,10 @@ func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, 
 	for _, key := range order {
 		batch := constraint
 		if key.project != "" {
+			if refusal := h.refuseProjectLeadTarget(key.owner); refusal != nil {
+				h.auditProjectLeadRefusal(r, session.Username, constraint, refusal.Error())
+				return nil, refusal
+			}
 			if batch, err = scopeToProjects([]string{key.project}, constraint); err != nil {
 				return nil, err
 			}

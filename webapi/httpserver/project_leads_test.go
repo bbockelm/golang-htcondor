@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -89,6 +90,17 @@ func writeLeadsFile(t *testing.T, body string) string {
 	return path
 }
 
+// leadsProject reports whether project is among the user's led projects,
+// through LedProjects -- the call production makes.
+func leadsProject(p *projectLeads, project, user string, groups []string) bool {
+	for _, led := range p.LedProjects(user, groups) {
+		if strings.EqualFold(led, project) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestProjectLeadsFromFile(t *testing.T) {
 	path := writeLeadsFile(t, "Physics alice %physics-leads\nChem bob\n")
 	p := newProjectLeads(path, "", "example.org", nil)
@@ -109,8 +121,8 @@ func TestProjectLeadsFromFile(t *testing.T) {
 		{"unknown project", "alice", nil, "Biology", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := p.Leads(tc.project, tc.user, tc.groups); got != tc.want {
-				t.Errorf("Leads(%q, %q, %v) = %v, want %v", tc.project, tc.user, tc.groups, got, tc.want)
+			if got := leadsProject(p, tc.project, tc.user, tc.groups); got != tc.want {
+				t.Errorf("leads(%q, %q, %v) = %v, want %v", tc.project, tc.user, tc.groups, got, tc.want)
 			}
 		})
 	}
@@ -121,17 +133,6 @@ func TestProjectLeadsFromFile(t *testing.T) {
 	if got := p.LedProjects("mallory", nil); len(got) != 0 {
 		t.Errorf("LedProjects(mallory) = %v, want none", got)
 	}
-}
-
-// leadsProject reports whether project is among the user's led projects,
-// through LedProjects -- the call production makes.
-func leadsProject(p *projectLeads, project, user string, groups []string) bool {
-	for _, led := range p.LedProjects(user, groups) {
-		if strings.EqualFold(led, project) {
-			return true
-		}
-	}
-	return false
 }
 
 // TestProjectLeadUserEntryDomain: an entry that names a domain matches only
@@ -179,6 +180,27 @@ func TestProjectLeadUserEntryDomain(t *testing.T) {
 	}
 }
 
+// TestProjectLeadsGroupPattern covers HTTP_API_PROJECT_LEADS_GROUP: which
+// projects a caller's groups make them lead, and which patterns are refused.
+func TestProjectLeadsGroupPattern(t *testing.T) {
+	p := newProjectLeads("", "{project}-leads", "", nil)
+	groups := []string{"users", "Physics-LEADS", "cs101-leads", "-leads", "leads"}
+
+	got := p.LedProjects("anyone", groups)
+	if want := []string{"cs101", "Physics"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("LedProjects = %v, want %v", got, want)
+	}
+	if leadsProject(p, "users", "anyone", groups) {
+		t.Errorf("a group that does not match the pattern granted a project")
+	}
+
+	// A prefix pattern works the same way.
+	pre := newProjectLeads("", "lead_{project}", "", nil)
+	if got := pre.LedProjects("x", []string{"LEAD_bio", "leadbio"}); !reflect.DeepEqual(got, []string{"bio"}) {
+		t.Errorf("prefix pattern: LedProjects = %v, want [bio]", got)
+	}
+}
+
 // TestProjectLeadsGroupPatternRefused: patterns that cannot be made safe are
 // ignored. A bare "{project}" is the dangerous one: every group the caller
 // holds would become a project they lead.
@@ -194,45 +216,6 @@ func TestProjectLeadsGroupPatternRefused(t *testing.T) {
 	}
 }
 
-// TestProjectLeadsGroupPattern covers HTTP_API_PROJECT_LEADS_GROUP in both
-// directions -- "is this caller a lead of P" and "which projects does this
-// caller lead" -- and that the two agree.
-func TestProjectLeadsGroupPattern(t *testing.T) {
-	p := newProjectLeads("", "{project}-leads", "", nil)
-	groups := []string{"users", "Physics-LEADS", "cs101-leads", "-leads", "leads"}
-
-	got := p.LedProjects("anyone", groups)
-	if want := []string{"cs101", "Physics"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("LedProjects = %v, want %v", got, want)
-	}
-	for _, project := range got {
-		if !p.Leads(project, "anyone", groups) {
-			t.Errorf("LedProjects says %q but Leads disagrees", project)
-		}
-	}
-	if !p.Leads("PHYSICS", "anyone", groups) {
-		t.Errorf("project names should compare case-insensitively")
-	}
-	if p.Leads("users", "anyone", groups) {
-		t.Errorf("a group that does not match the pattern granted a project")
-	}
-
-	// A prefix pattern works the same way.
-	pre := newProjectLeads("", "lead_{project}", "", nil)
-	if got := pre.LedProjects("x", []string{"LEAD_bio", "leadbio"}); !reflect.DeepEqual(got, []string{"bio"}) {
-		t.Errorf("prefix pattern: LedProjects = %v, want [bio]", got)
-	}
-	if !pre.Leads("bio", "x", []string{"lead_BIO"}) {
-		t.Errorf("prefix pattern: Leads(bio) = false")
-	}
-
-	for _, bad := range []string{"leads", "{project}-{project}"} {
-		if newProjectLeads("", bad, "", nil).configured() {
-			t.Errorf("pattern %q should be refused", bad)
-		}
-	}
-}
-
 // TestProjectLeadsFileReloads: the file is the revocation path, so an edit
 // must take effect without a restart, and an unreadable file must grant
 // nothing rather than keep the last copy.
@@ -240,7 +223,7 @@ func TestProjectLeadsFileReloads(t *testing.T) {
 	path := writeLeadsFile(t, "Physics alice\n")
 	p := newProjectLeads(path, "", "", nil)
 	p.reloadEvery = time.Nanosecond
-	if !p.Leads("Physics", "alice", nil) {
+	if !leadsProject(p, "Physics", "alice", nil) {
 		t.Fatalf("alice should lead Physics")
 	}
 
@@ -249,17 +232,17 @@ func TestProjectLeadsFileReloads(t *testing.T) {
 	if err := os.WriteFile(path, []byte("Physics bob, carol\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if p.Leads("Physics", "alice", nil) {
+	if leadsProject(p, "Physics", "alice", nil) {
 		t.Errorf("alice still leads Physics after being removed from the file")
 	}
-	if !p.Leads("Physics", "carol", nil) {
+	if !leadsProject(p, "Physics", "carol", nil) {
 		t.Errorf("carol was added but does not lead Physics")
 	}
 
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if p.Leads("Physics", "carol", nil) {
+	if leadsProject(p, "Physics", "carol", nil) {
 		t.Errorf("a missing file still granted leadership")
 	}
 
@@ -368,19 +351,25 @@ type leadTestEnv struct {
 	t         *testing.T
 	h         *Handler
 	leadsPath string
+	logPath   string
 
 	mu          sync.Mutex
 	ads         []*classad.ClassAd
 	constraints []string
+	opts        []*htcondor.QueryOptions
 }
 
 func newLeadTestEnv(t *testing.T, superuserGroup, leadsFile, leadsPattern string) *leadTestEnv {
 	t.Helper()
-	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	env := &leadTestEnv{t: t, logPath: filepath.Join(t.TempDir(), "audit.log")}
+	logger, err := logging.New(&logging.Config{
+		OutputPath:        env.logPath,
+		DefaultLevel:      logging.VerbosityInfo,
+		SkipGlobalInstall: true,
+	})
 	if err != nil {
 		t.Fatalf("logger: %v", err)
 	}
-	env := &leadTestEnv{t: t}
 	if leadsFile != "" {
 		env.leadsPath = writeLeadsFile(t, leadsFile)
 	}
@@ -400,31 +389,70 @@ func newLeadTestEnv(t *testing.T, superuserGroup, leadsFile, leadsPattern string
 	if !h.superuserModeAvailable() {
 		t.Fatalf("superuser mode did not enable")
 	}
-	// Nobody is a queue superuser: leads act via the fallback identity.
-	h.superuserPolicy.source = &fakeSuperUsers{users: []string{"condor@example.org"}}
+	// The leads are not queue superusers, so they act via the fallback
+	// identity. root is, so a lead may not act for root.
+	h.superuserPolicy.source = &fakeSuperUsers{users: []string{"condor@example.org", "root"}}
 	if err := h.superuserPolicy.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
 	h.projectLeads.reloadEvery = time.Nanosecond
-	h.superuserJobQuery = env.query
+	h.jobQueryOverride = env.query
 	env.h = h
 	return env
 }
 
-func (e *leadTestEnv) query(_ context.Context, constraint string, _ []string, limit int) ([]*classad.ClassAd, error) {
+// query stands in for the schedd: it evaluates the constraint against the
+// whole ad, as the schedd does, and returns only the projected attributes,
+// unevaluated, as the schedd does. A decision made by reading the returned
+// ad therefore sees exactly what it would in production -- in particular
+// not the attributes an expression in it refers to.
+func (e *leadTestEnv) query(_ context.Context, constraint string, opts *htcondor.QueryOptions) ([]*classad.ClassAd, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.constraints = append(e.constraints, constraint)
+	e.opts = append(e.opts, opts)
+	limit := 0
+	var projection []string
+	if opts != nil {
+		limit = opts.Limit
+		projection = opts.Projection
+	}
 	var out []*classad.ClassAd
 	for _, ad := range e.ads {
-		if evalConstraint(e.t, constraint, ad) {
-			out = append(out, ad)
-			if limit > 0 && len(out) >= limit {
-				break
-			}
+		if !evalConstraint(e.t, constraint, ad) {
+			continue
+		}
+		out = append(out, projectAd(ad, projection))
+		if limit > 0 && len(out) >= limit {
+			break
 		}
 	}
 	return out, nil
+}
+
+// projectAd copies the named attributes of ad, as unevaluated expressions.
+// An empty projection, or "*", is the whole ad.
+func projectAd(ad *classad.ClassAd, projection []string) *classad.ClassAd {
+	if len(projection) == 0 || (len(projection) == 1 && projection[0] == "*") {
+		return ad
+	}
+	out := classad.New()
+	for _, name := range projection {
+		if expr, ok := ad.Lookup(name); ok {
+			out.InsertExpr(name, expr)
+		}
+	}
+	return out
+}
+
+// auditLog returns what the handler has logged so far.
+func (e *leadTestEnv) auditLog() string {
+	e.t.Helper()
+	b, err := os.ReadFile(e.logPath)
+	if err != nil {
+		e.t.Fatalf("reading the log: %v", err)
+	}
+	return string(b)
 }
 
 func (e *leadTestEnv) session(user string, groups ...string) string {
@@ -741,10 +769,19 @@ func TestProjectLeadBulkCannotWiden(t *testing.T) {
 			if got, want := act.actedOn(), []int64{1, 2, 5}; !reflect.DeepEqual(got, want) {
 				t.Errorf("acted on %v, want %v (own job plus Physics)", got, want)
 			}
-			// The planning read itself was confined, not just the
-			// batches: jobs outside the scope are never read.
-			if len(env.constraints) == 0 || !strings.HasPrefix(env.constraints[0], "((Owner == \"alice\") || ") {
-				t.Errorf("the planning query was not scoped first: %v", env.constraints)
+			// The planning reads themselves were confined, not just the
+			// batches: no query this mode sent could match a job outside
+			// the scope.
+			if len(env.constraints) == 0 {
+				t.Fatalf("no planning query was made")
+			}
+			for _, c := range env.constraints {
+				for _, outside := range []int{2, 3, 5} { // jobs 3, 4, 6
+					if evalConstraint(t, c, env.ads[outside]) {
+						id, _ := env.ads[outside].EvaluateAttrInt("ClusterId")
+						t.Errorf("planning query %q reads job %d, outside the lead's scope", c, id)
+					}
+				}
 			}
 			for _, c := range act.calls {
 				if strings.Contains(c.reason, "acting for") && !strings.Contains(c.reason, "project lead for Physics") {
@@ -775,8 +812,11 @@ func TestJobProxyRefusesProjectLead(t *testing.T) {
 	h.superuserPolicy.source = &fakeSuperUsers{users: []string{"condor@test.htcondor.org"}}
 	_ = h.superuserPolicy.Refresh(context.Background())
 	ad := leadJobAd(12, "bob", "Physics", 2)
-	h.superuserJobQuery = func(context.Context, string, []string, int) ([]*classad.ClassAd, error) {
-		return []*classad.ClassAd{ad}, nil
+	h.jobQueryOverride = func(_ context.Context, constraint string, _ *htcondor.QueryOptions) ([]*classad.ClassAd, error) {
+		if evalConstraint(t, constraint, ad) {
+			return []*classad.ClassAd{ad}, nil
+		}
+		return nil, nil
 	}
 
 	proxy := func(user string, groups ...string) *httptest.ResponseRecorder {
@@ -871,5 +911,185 @@ func TestReconfigureOnServerWithoutSuperuserMode(t *testing.T) {
 	// Read visibility needs no signing key, so it does follow the file.
 	if got := h.projectLeads.LedProjects("alice", nil); !reflect.DeepEqual(got, []string{"Physics"}) {
 		t.Errorf("leads after reconfigure = %v", got)
+	}
+}
+
+// TestProjectLeadRefusalIsAudited: a lead refused for a job outside their
+// projects leaves a security record naming them and the job.
+func TestProjectLeadRefusalIsAudited(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{leadJobAd(2, "bob", "Chem", 1)}
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+	if w, _ := holdOne(env, sid, "2.0"); w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	log := env.auditLog()
+	for _, want := range []string{"Project lead refused", "actor=alice", "subject=2.0", "not in a project"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("audit log lacks %q:\n%s", want, log)
+		}
+	}
+}
+
+// TestProjectLeadMembershipIsDecidedByTheSchedd: whether a job is in a led
+// project is the schedd's evaluation of the whole ad, not this server's
+// reading of a projected copy. A ProjectName that is an expression over
+// another attribute is the case where the two differ: the projected copy has
+// the reference but not what it refers to.
+func TestProjectLeadMembershipIsDecidedByTheSchedd(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\nChem alice\n", "")
+	byRef, err := classad.Parse(`[ClusterId = 1; ProcId = 0; Owner = "bob"; JobStatus = 1;
+		MyGroup = "physics"; ProjectName = MyGroup]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.ads = []*classad.ClassAd{byRef, leadJobAd(2, "bob", "chem", 1)}
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+
+	for _, tc := range []struct{ job, project string }{
+		{"1.0", "Physics"}, // through an attribute reference
+		{"2.0", "Chem"},    // the second of two led projects
+	} {
+		w, act := holdOne(env, sid, tc.job)
+		if len(act.calls) != 1 {
+			t.Fatalf("job %s: not acted on: %d %s", tc.job, w.Code, w.Body.String())
+		}
+		if want := "project lead for " + tc.project; !strings.Contains(act.calls[0].reason, want) {
+			t.Errorf("job %s: reason %q does not name %s", tc.job, act.calls[0].reason, tc.project)
+		}
+	}
+	// And nothing this mode asked the schedd for carried ProjectName back
+	// to be judged here.
+	for i, o := range env.opts {
+		if o != nil && slices.Contains(o.Projection, "ProjectName") {
+			t.Errorf("query %q projected ProjectName", env.constraints[i])
+		}
+	}
+}
+
+// TestProjectLeadRefusesPrivilegedOwner: a lead may not act for a queue
+// superuser or for the identity this server acts under, even in their own
+// project, and the refusal is audited. Nor before the queue-superuser set has
+// been read, when nobody can say.
+func TestProjectLeadRefusesPrivilegedOwner(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{
+		leadJobAd(1, "root", "Physics", 1),   // in QUEUE_SUPER_USERS
+		leadJobAd(2, "condor", "Physics", 1), // the fallback identity
+		leadJobAd(3, "bob", "Physics", 1),
+	}
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+
+	for _, job := range []string{"1.0", "2.0"} {
+		w, act := holdOne(env, sid, job)
+		if w.Code != http.StatusForbidden || len(act.calls) != 0 {
+			t.Errorf("job %s: lead acted for a privileged owner: %d %+v", job, w.Code, act.calls)
+		}
+	}
+	if log := env.auditLog(); !strings.Contains(log, "subject=1.0") || !strings.Contains(log, "queue superuser") {
+		t.Errorf("privileged-owner refusal not audited:\n%s", log)
+	}
+
+	// Bulk refuses the whole plan rather than skipping the job.
+	act := &recordedAction{env: env}
+	w := httptest.NewRecorder()
+	env.h.handleBulkJobAction(w, env.request(http.MethodPost, "/api/v1/jobs/hold", sid,
+		map[string]string{"constraint": "true"}), "Held", "hold", act.fn)
+	if w.Code != http.StatusForbidden || len(act.calls) != 0 {
+		t.Errorf("bulk acted with a privileged owner in scope: %d %+v", w.Code, act.calls)
+	}
+
+	// An ordinary member is still fine.
+	if _, act := holdOne(env, sid, "3.0"); len(act.calls) != 1 {
+		t.Errorf("lead was refused an ordinary member's job")
+	}
+
+	// Unknown queue superusers: refuse.
+	env.h.superuserPolicy.mu.Lock()
+	env.h.superuserPolicy.users = nil
+	env.h.superuserPolicy.mu.Unlock()
+	if w, act := holdOne(env, sid, "3.0"); w.Code != http.StatusForbidden || len(act.calls) != 0 {
+		t.Errorf("lead acted before the queue superusers were known: %d", w.Code)
+	}
+}
+
+// listAs calls GET /api/v1/jobs as a session and returns the constraint the
+// schedd was asked for, or "" when the request never reached it.
+func (e *leadTestEnv) listAs(sid, query string) (int, string) {
+	e.t.Helper()
+	e.constraints = nil
+	w := httptest.NewRecorder()
+	e.h.handleListJobs(w, e.request(http.MethodGet, "/api/v1/jobs?"+query, sid, nil))
+	if len(e.constraints) == 0 {
+		return w.Code, ""
+	}
+	return w.Code, e.constraints[len(e.constraints)-1]
+}
+
+// TestJobListLeadScope drives the listing handler itself: what a lead, a
+// non-lead and an admin asking for everyone's jobs actually send to the
+// schedd -- which applies no owner filter of its own, so this constraint is
+// the whole of the enforcement.
+func TestJobListLeadScope(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.h.webuiAdminGroups = newGroupSet("web-admins")
+	own := leadJobAd(1, "alice", "Chem", 1)
+	inProject := leadJobAd(2, "bob", "physics", 1)
+	outside := leadJobAd(3, "bob", "Chem", 1)
+	noProject := leadJobAd(4, "bob", "", 1)
+	env.ads = []*classad.ClassAd{own, inProject, outside, noProject}
+
+	visible := func(constraint string) []int64 {
+		var ids []int64
+		for _, ad := range env.ads {
+			if evalConstraint(t, constraint, ad) {
+				id, _ := ad.EvaluateAttrInt("ClusterId")
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	}
+
+	lead := env.session("alice")
+	for _, c := range []string{"", "true", "JobStatus == 1 || true", "(true) || (true)", `ProjectName =!= "Physics" || true`} {
+		q := "owned_by_me=false"
+		if c != "" {
+			q += "&constraint=" + url.QueryEscape(c)
+		}
+		code, sent := env.listAs(lead, q)
+		if code != http.StatusOK {
+			t.Errorf("lead list with constraint %q = %d", c, code)
+			continue
+		}
+		if got := visible(sent); !reflect.DeepEqual(got, []int64{1, 2}) {
+			t.Errorf("lead list with constraint %q reaches %v via %q, want [1 2]", c, got, sent)
+		}
+	}
+	// An unbalanced constraint is refused, never spliced in.
+	if code, sent := env.listAs(lead, "owned_by_me=false&constraint="+url.QueryEscape("true) || (true")); code != http.StatusBadRequest || sent != "" {
+		t.Errorf("unbalanced constraint: %d, sent %q", code, sent)
+	}
+	// Asking for only their own jobs is unchanged.
+	if _, sent := env.listAs(lead, "owned_by_me=true"); !reflect.DeepEqual(visible(sent), []int64{1}) {
+		t.Errorf("lead's own listing reaches %v via %q", visible(sent), sent)
+	}
+
+	nonLead := env.session("mallory")
+	if _, sent := env.listAs(nonLead, "owned_by_me=false&constraint="+url.QueryEscape("true || true")); len(visible(sent)) != 0 {
+		t.Errorf("non-lead's everyone listing reaches %v via %q", visible(sent), sent)
+	}
+
+	admin := env.session("root", "web-admins")
+	if _, sent := env.listAs(admin, "owned_by_me=false"); !reflect.DeepEqual(visible(sent), []int64{1, 2, 3, 4}) {
+		t.Errorf("admin's everyone listing reaches %v via %q", visible(sent), sent)
 	}
 }

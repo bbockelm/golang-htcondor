@@ -1008,10 +1008,16 @@ func toolHighlightJob() chat.Tool {
 // this function never produces a `Owner == ""` constraint that
 // matches everything.
 func scopeToOwner(actor, llmConstraint string) (string, error) {
-	owner := fmt.Sprintf("Owner == %s", classadStringLit(actor))
-	c := strings.TrimSpace(llmConstraint)
+	return andScope(fmt.Sprintf("Owner == %s", classadStringLit(actor)), llmConstraint)
+}
+
+// andScope ANDs an untrusted constraint onto a trusted scoping clause, as
+// "(clause) && (constraint)", so that the result can only ever be
+// narrower than clause. An empty constraint returns clause alone.
+func andScope(clause, constraint string) (string, error) {
+	c := strings.TrimSpace(constraint)
 	if c == "" {
-		return owner, nil
+		return clause, nil
 	}
 	// The AND-wrapper only confines the LLM constraint if the constraint cannot
 	// escape it. Raw concatenation does NOT: because ClassAd `||` binds looser
@@ -1028,7 +1034,7 @@ func scopeToOwner(actor, llmConstraint string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("constraint is not a valid ClassAd expression: %w", err)
 	}
-	return fmt.Sprintf("(%s) && (%s)", owner, safe), nil
+	return fmt.Sprintf("(%s) && (%s)", clause, safe), nil
 }
 
 // classadBalanced parses an untrusted ClassAd boolean expression and returns its

@@ -359,12 +359,6 @@ func projectFromGroup(pattern, group string) string {
 	return project
 }
 
-// groupForProject is projectFromGroup's inverse: the group whose members
-// lead project under pattern.
-func groupForProject(pattern, project string) string {
-	return strings.Replace(pattern, projectPlaceholder, project, 1)
-}
-
 // names reports whether this entry names the user, directly or through one
 // of their groups.
 func (e *projectLeadEntry) names(username, uidDomain string, groups []string) bool {
@@ -377,22 +371,6 @@ func (e *projectLeadEntry) names(username, uidDomain string, groups []string) bo
 		if hasGroup(groups, g) {
 			return true
 		}
-	}
-	return false
-}
-
-// Leads reports whether the user, holding groups, leads project.
-func (p *projectLeads) Leads(project, username string, groups []string) bool {
-	if p == nil || !validProjectName(project) {
-		return false
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if e := p.snapshotLocked()[strings.ToLower(project)]; e != nil && e.names(username, p.uidDomain, groups) {
-		return true
-	}
-	if p.pattern != "" && hasGroup(groups, groupForProject(p.pattern, project)) {
-		return true
 	}
 	return false
 }
@@ -434,8 +412,9 @@ func (p *projectLeads) LedProjects(username string, groups []string) []string {
 // projectClause is a ClassAd expression matching jobs whose ProjectName is
 // one of projects.
 //
-// Compared with ClassAd "==", which is case-insensitive on strings -- the
-// same rule the Go side applies with EqualFold -- and wrapped in "=?= true"
+// Compared with ClassAd "==", which ignores case for ASCII letters, and is
+// the only place project membership is decided: the schedd evaluates it
+// against the whole ad (see jobLedProject). Wrapped in "=?= true"
 // so a job with no ProjectName (undefined) or a non-string one (error)
 // yields false rather than undefined. That matters once the clause is
 // combined: "undefined || true" is true, so an undefined here must never
@@ -454,39 +433,18 @@ func projectClause(projects []string) string {
 }
 
 // scopeToProjects confines a caller-supplied constraint to jobs in projects,
-// on the same terms scopeToOwner confines one to an owner: the constraint is
-// parsed and re-serialized before it is ANDed in, so an unbalanced ")" or a
-// trailing "|| true" cannot escape the leading clause.
+// on the same terms scopeToOwner confines one to an owner. See andScope.
 func scopeToProjects(projects []string, constraint string) (string, error) {
-	clause := projectClause(projects)
-	c := strings.TrimSpace(constraint)
-	if c == "" {
-		return clause, nil
-	}
-	safe, err := classadBalanced(c)
-	if err != nil {
-		return "", fmt.Errorf("constraint is not a valid ClassAd expression: %w", err)
-	}
-	return fmt.Sprintf("%s && (%s)", clause, safe), nil
+	return andScope(projectClause(projects), constraint)
 }
 
 // scopeToOwnerOrProjects confines a constraint to the caller's own jobs plus
-// the jobs in the projects they lead. This is a project lead's read scope,
-// and the set a project-scoped bulk action is planned over.
+// the jobs in the projects they lead. This is a project lead's read scope.
 func scopeToOwnerOrProjects(owner string, projects []string, constraint string) (string, error) {
 	if owner == "" {
 		return "", fmt.Errorf("no owner to scope to")
 	}
-	clause := fmt.Sprintf("((Owner == %s) || %s)", classadStringLit(owner), projectClause(projects))
-	c := strings.TrimSpace(constraint)
-	if c == "" {
-		return clause, nil
-	}
-	safe, err := classadBalanced(c)
-	if err != nil {
-		return "", fmt.Errorf("constraint is not a valid ClassAd expression: %w", err)
-	}
-	return fmt.Sprintf("%s && (%s)", clause, safe), nil
+	return andScope(fmt.Sprintf("((Owner == %s) || %s)", classadStringLit(owner), projectClause(projects)), constraint)
 }
 
 // superuserScope is what an armed session may act on.
@@ -500,15 +458,3 @@ type superuserScope struct {
 
 // allowed reports whether this scope permits arming at all.
 func (s superuserScope) allowed() bool { return s.Global || len(s.Projects) > 0 }
-
-// leads reports whether project is one of the scope's projects, and returns
-// the scope's own spelling of it -- the configured name, which is what
-// constraints are built from, rather than whatever the job ad carried.
-func (s superuserScope) leads(project string) (string, bool) {
-	for _, p := range s.Projects {
-		if strings.EqualFold(p, project) {
-			return p, true
-		}
-	}
-	return "", false
-}

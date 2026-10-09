@@ -295,10 +295,13 @@ type Handler struct {
 	// to the jobs of projects a session leads. See project_leads.go.
 	// Never nil once the handler is built.
 	projectLeads *projectLeads
-	// superuserJobQuery, when set, replaces the schedd for the reads
-	// superuser mode makes to decide whose job it is and which project it
-	// is in. Tests only.
-	superuserJobQuery func(ctx context.Context, constraint string, projection []string, limit int) ([]*classad.ClassAd, error)
+	// jobQueryOverride, when set, replaces the schedd for job-queue reads:
+	// the ones superuser mode makes to decide whose job it is and which
+	// project it is in, the job watch's, and the job listing's. It is
+	// handed the constraint and options exactly as the schedd would be,
+	// so a test can evaluate the constraint and honor the projection.
+	// Tests only.
+	jobQueryOverride func(ctx context.Context, constraint string, opts *htcondor.QueryOptions) ([]*classad.ClassAd, error)
 
 	// oauth2MaxGrantLifetime caps how long a single consent can be
 	// stretched by refreshing. Every refresh resets the refresh token's
