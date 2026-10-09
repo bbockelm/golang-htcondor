@@ -855,6 +855,9 @@ MEMORY = 2048
 # Run jobs quickly in test mode
 SCHEDD_INTERVAL = 2
 NEGOTIATOR_INTERVAL = 3
+# The default NEGOTIATOR_CYCLE_DELAY (20s) is a floor between cycles
+# that RESCHEDULE does not bypass.
+NEGOTIATOR_CYCLE_DELAY = 1
 STARTER_UPDATE_INTERVAL = 5
 
 # Disable unwanted features for testing
@@ -1972,6 +1975,9 @@ NEGOTIATOR_DEBUG = D_FULLDEBUG
 # Fast polling for testing
 POLLING_INTERVAL = 5
 NEGOTIATOR_INTERVAL = 10
+# The default NEGOTIATOR_CYCLE_DELAY (20s) is a floor between cycles
+# that RESCHEDULE does not bypass.
+NEGOTIATOR_CYCLE_DELAY = 1
 UPDATE_INTERVAL = 5
 
 # Use only local system resources

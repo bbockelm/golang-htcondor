@@ -205,6 +205,9 @@ SCHEDD_INTERVAL = 5
 # Negotiator configuration - run frequently for testing
 NEGOTIATOR_INTERVAL = 2
 NEGOTIATOR_MIN_INTERVAL = 1
+# HTCondor's default NEGOTIATOR_CYCLE_DELAY (20s) is a floor between
+# cycles that RESCHEDULE does not bypass.
+NEGOTIATOR_CYCLE_DELAY = 1
 
 # Startd configuration
 STARTD_NAME = test_startd@$(FULL_HOSTNAME)
@@ -265,7 +268,6 @@ STARTER_DEBUG = D_FULLDEBUG
 
 # Fast polling for testing
 POLLING_INTERVAL = 5
-NEGOTIATOR_INTERVAL = 10
 UPDATE_INTERVAL = 5
 
 # Disable unwanted features for testing
