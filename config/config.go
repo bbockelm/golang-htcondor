@@ -83,6 +83,14 @@ type ConfigOptions struct {
 	// against; it is also useful for parsing standalone snippets whose meaning
 	// must not depend on host state.
 	SkipDefaults bool
+
+	// ConfigFile, when non-empty, is the root configuration file to read in
+	// place of $CONDOR_CONFIG and the default locations. The local
+	// configuration chain it names is read as usual, _CONDOR_* environment
+	// overrides still apply, and CONFIG_ROOT is its directory. It lets one
+	// process hold the configurations of several pools without touching the
+	// process environment.
+	ConfigFile string
 }
 
 // Config represents an HTCondor configuration with key-value pairs
@@ -434,7 +442,11 @@ func (c *Config) initBuiltins() {
 	}
 
 	// Config root directory
-	c.Set("CONFIG_ROOT", getConfigRoot())
+	if c.options.ConfigFile != "" {
+		c.Set("CONFIG_ROOT", filepath.Dir(c.options.ConfigFile))
+	} else {
+		c.Set("CONFIG_ROOT", getConfigRoot())
+	}
 
 	// CPU and memory detection (Priority 2)
 	logicalCPUs, physicalCPUs := detectCPUs()
@@ -1286,6 +1298,15 @@ func (c *Config) applyNetworkHostname() {
 // when CONDOR_CONFIG is "ONLY_ENV" or no root config file can be found; in both
 // cases the caller still applies the environment overrides afterward.
 func (c *Config) loadConfigFileChain() error {
+	// An explicit root file (ConfigOptions.ConfigFile) is read and nothing
+	// else is searched for.
+	if c.options.ConfigFile != "" {
+		if err := c.parseConfigFile(c.options.ConfigFile); err != nil {
+			return err
+		}
+		return c.loadLocalConfigChain()
+	}
+
 	// Locate the root configuration file: CONDOR_CONFIG, or a default location.
 	rootPath := os.Getenv("CONDOR_CONFIG")
 	if rootPath == "ONLY_ENV" {
@@ -1308,7 +1329,12 @@ func (c *Config) loadConfigFileChain() error {
 	if err := c.parseConfigFile(rootPath); err != nil {
 		return err
 	}
+	return c.loadLocalConfigChain()
+}
 
+// loadLocalConfigChain reads the local configuration chain that follows the
+// root configuration file.
+func (c *Config) loadLocalConfigChain() error {
 	// HTCondor then reads the local configuration chain, with later sources
 	// overriding earlier ones: the LOCAL_CONFIG_DIR directories (config.d, files
 	// in lexicographic order) followed by the LOCAL_CONFIG_FILE list. Without

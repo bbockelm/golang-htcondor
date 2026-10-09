@@ -59,7 +59,7 @@ func (s *Handler) apiKeySecurityContext(ctx context.Context, row *apiKeyRow) (co
 		return nil, fmt.Errorf("mint IDTOKEN for %s: %w", row.Creator, err)
 	}
 
-	secConfig, err := htcondor.NewClientSecurityConfig(ctx, token, "", 0, "CLIENT", nil)
+	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, s.clientConfig, token, "", 0, "CLIENT", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build security config: %w", err)
 	}

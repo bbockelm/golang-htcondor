@@ -69,7 +69,7 @@ type UserRecordQueryOptions struct {
 // what makes these records usable as a revocation signal by an unprivileged
 // service: an admin disables a user, and everything else can only observe it.
 func (s *Schedd) QueryUserRecords(ctx context.Context, opts *UserRecordQueryOptions) (records []UserRecord, err error) {
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.QUERY_USERREC_ADS, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, commands.QUERY_USERREC_ADS, "CLIENT", s.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}

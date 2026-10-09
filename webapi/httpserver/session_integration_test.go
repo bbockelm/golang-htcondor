@@ -21,6 +21,7 @@ import (
 
 // TestHTTPSessionIntegration tests that session cookies work with HTCondor daemon
 func TestHTTPSessionIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -66,10 +67,7 @@ func TestHTTPSessionIntegration(t *testing.T) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	// Set CONDOR_CONFIG environment variable and reload configuration
-	// This ensures we don't inherit rate limits from other tests
-	t.Setenv("CONDOR_CONFIG", configFile)
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	t.Log("Starting condor_master...")
@@ -108,8 +106,9 @@ func TestHTTPSessionIntegration(t *testing.T) {
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	// Create HTTP server with session support and signing key for token generation
-	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
+	collector := htcondor.NewCollector(scheddAddr).WithConfig(htcCfg) // Use schedd address (shared port)
 	serverCfg := Config{
+		ClientConfig:   htcCfg,
 		ListenAddr:     serverAddr,
 		ScheddAddr:     scheddAddr,
 		ScheddName:     "local",

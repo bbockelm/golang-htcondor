@@ -13,6 +13,7 @@ import (
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // DC command identifiers used by the master for daemon lifecycle signaling.
@@ -33,6 +34,9 @@ type Master struct {
 	daemonName string
 	parentPID  int
 	sender     masterSender
+	// cfg is the HTCondor configuration the CEDAR sender authenticates
+	// with; nil means the process-wide default. See WithConfig.
+	cfg *config.Config
 }
 
 // KeepAliveOptions controls keepalive payload and timing.
@@ -311,7 +315,11 @@ func parseCondorInherit(value string) (int, string, error) {
 }
 
 // cedarMasterSender implements the child->master control plane over CEDAR.
-type cedarMasterSender struct{}
+type cedarMasterSender struct {
+	// cfg is the owning Master's configuration (nil: the process-wide
+	// default).
+	cfg *config.Config
+}
 
 // hasInheritedSessionForCommand reports whether the global cedar
 // session cache has an entry that resumes for the given (peer, command)
@@ -340,8 +348,8 @@ func hasInheritedSessionForCommand(peerAddr string, command int) bool {
 // drop back to the historical Authentication=REQUIRED path, which
 // matches what callers got before this file learned about inherited
 // sessions.
-func secConfigForMasterCommand(ctx context.Context, command int, peerAddr string) (*security.SecurityConfig, error) {
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, command, "DAEMON", peerAddr)
+func secConfigForMasterCommand(ctx context.Context, cfg *config.Config, command int, peerAddr string) (*security.SecurityConfig, error) {
+	secConfig, err := GetSecurityConfigOrDefault(ctx, cfg, command, "DAEMON", peerAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -354,7 +362,7 @@ func secConfigForMasterCommand(ctx context.Context, command int, peerAddr string
 }
 
 func (s *cedarMasterSender) sendKeepAlive(ctx context.Context, req keepAliveRequest) error {
-	secConfig, err := secConfigForMasterCommand(ctx, DCChildAlive, req.Address)
+	secConfig, err := secConfigForMasterCommand(ctx, s.cfg, DCChildAlive, req.Address)
 	if err != nil {
 		return err
 	}
@@ -383,7 +391,7 @@ func (s *cedarMasterSender) sendKeepAlive(ctx context.Context, req keepAliveRequ
 }
 
 func (s *cedarMasterSender) sendReady(ctx context.Context, req readyRequest) error {
-	secConfig, err := secConfigForMasterCommand(ctx, DCSetReady, req.Address)
+	secConfig, err := secConfigForMasterCommand(ctx, s.cfg, DCSetReady, req.Address)
 	if err != nil {
 		return err
 	}

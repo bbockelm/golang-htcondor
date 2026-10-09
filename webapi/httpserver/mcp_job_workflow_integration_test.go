@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
@@ -30,6 +29,7 @@ import (
 // 3. Wait for job to complete
 // 4. Retrieve output files
 func TestMCPJobWorkflowIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -81,9 +81,7 @@ func TestMCPJobWorkflowIntegration(t *testing.T) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	// Set CONDOR_CONFIG environment variable and reload configuration
-	t.Setenv("CONDOR_CONFIG", configFile)
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	t.Log("Starting condor_master...")
@@ -119,6 +117,7 @@ func TestMCPJobWorkflowIntegration(t *testing.T) {
 	// Create HTTP server with MCP enabled
 	// Note: We'll update HTTPBaseURL after getting the actual port
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,

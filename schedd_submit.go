@@ -8,6 +8,7 @@ import (
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/stream"
+	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/qmgmt"
 )
 
@@ -71,8 +72,15 @@ type QmgmtConnection struct {
 // Uses FS authentication from cedar package
 // address can be a hostname:port or a sinful string like "<IP:PORT?addrs=...>"
 func NewQmgmtConnection(ctx context.Context, address string) (*QmgmtConnection, error) {
+	return newQmgmtConnection(ctx, nil, address)
+}
+
+// newQmgmtConnection is NewQmgmtConnection reading the security settings from
+// cfg (nil: the process-wide default), so a Schedd's queue connections use
+// that Schedd's configuration.
+func newQmgmtConnection(ctx context.Context, cfg *config.Config, address string) (*QmgmtConnection, error) {
 	// Get SecurityConfig from context, HTCondor config, or defaults
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, QMGMT_WRITE_CMD, "CLIENT", address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, cfg, QMGMT_WRITE_CMD, "CLIENT", address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}

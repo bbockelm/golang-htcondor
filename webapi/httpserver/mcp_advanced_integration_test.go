@@ -29,6 +29,7 @@ import (
 
 // TestDynamicClientRegistration tests OAuth2 dynamic client registration
 func TestDynamicClientRegistration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -107,6 +108,7 @@ func TestDynamicClientRegistration(t *testing.T) {
 
 // TestMCPWithSSO tests MCP access via SSO (mock SSO server with authorization code flow)
 func TestMCPWithSSO(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -303,6 +305,7 @@ func TestMCPWithSSO(t *testing.T) {
 
 // TestMCPGroupMembership tests various group membership scenarios
 func TestMCPGroupMembership(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -620,8 +623,7 @@ func setupTestServerWithSSOAndGroups(t *testing.T, ssoBaseURL, accessGroup, read
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	os.Setenv("CONDOR_CONFIG", configFile)
-	t.Cleanup(func() { os.Unsetenv("CONDOR_CONFIG") })
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	ctx, cancel := context.WithCancel(context.Background())
@@ -648,6 +650,7 @@ func setupTestServerWithSSOAndGroups(t *testing.T, ssoBaseURL, accessGroup, read
 
 	// Create server with SSO integration and group configuration
 	server, err := NewServer(Config{
+		ClientConfig:       htcCfg,
 		ListenAddr:         serverAddr,
 		ScheddName:         "local",
 		ScheddAddr:         "127.0.0.1:9618",
@@ -748,8 +751,7 @@ func setupTestServerWithSSO(t *testing.T, ssoBaseURL string) (string, *Server, s
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	os.Setenv("CONDOR_CONFIG", configFile)
-	t.Cleanup(func() { os.Unsetenv("CONDOR_CONFIG") })
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	ctx, cancel := context.WithCancel(context.Background())
@@ -778,6 +780,7 @@ func setupTestServerWithSSO(t *testing.T, ssoBaseURL string) (string, *Server, s
 	// The actual baseURL is computed after server starts
 	placeholderBaseURL := "http://127.0.0.1:0"
 	server, err := NewServer(Config{
+		ClientConfig:       htcCfg,
 		ListenAddr:         serverAddr,
 		ScheddName:         "local",
 		ScheddAddr:         "127.0.0.1:9618",
@@ -880,8 +883,7 @@ func setupTestServer(t *testing.T) (string, *Server, string) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	os.Setenv("CONDOR_CONFIG", configFile)
-	t.Cleanup(func() { os.Unsetenv("CONDOR_CONFIG") })
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	ctx, cancel := context.WithCancel(context.Background())
@@ -906,6 +908,7 @@ func setupTestServer(t *testing.T) (string, *Server, string) {
 	// OAuth2Issuer will use placeholder, actual baseURL computed after server starts
 	placeholderBaseURL := "http://127.0.0.1:0"
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               "127.0.0.1:9618",

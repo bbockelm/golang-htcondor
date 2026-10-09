@@ -10,6 +10,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/message"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // Command codes for credd daemon (from condor_commands.h)
@@ -55,6 +56,9 @@ const (
 // CedarCredd provides a CEDAR-based credd client implementation
 type CedarCredd struct {
 	address string
+	// cfg is the HTCondor configuration this client authenticates and
+	// rate-limits with; nil means the process-wide default. See WithConfig.
+	cfg *config.Config
 }
 
 // NewCedarCredd creates a new CEDAR-based credd client
@@ -294,7 +298,7 @@ func (c *CedarCredd) ListServiceCreds(ctx context.Context, credType CredType, us
 // The credd may hold the reply while a local credmon writes a token it has
 // just asked for, up to about 20 seconds, so ctx should allow for that.
 func (c *CedarCredd) CheckCreds(ctx context.Context, requests []CredRequest) (string, error) {
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, CreddCheckCreds, "CLIENT", c.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, c.cfg, CreddCheckCreds, "CLIENT", c.address)
 	if err != nil {
 		return "", fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -385,7 +389,7 @@ func (c *CedarCredd) GetCredential(ctx context.Context, credType CredType, servi
 // storeCredential implements the StoreCred wire protocol
 func (c *CedarCredd) storeCredential(ctx context.Context, user string, mode int, credential []byte, ad *classad.ClassAd) error {
 	// Get security config
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, StoreCred, "CLIENT", c.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, c.cfg, StoreCred, "CLIENT", c.address)
 	if err != nil {
 		return fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -485,7 +489,7 @@ func (c *CedarCredd) storeCredential(ctx context.Context, user string, mode int,
 // queryCredential implements the StoreCred query protocol
 func (c *CedarCredd) queryCredential(ctx context.Context, user string, mode int, ad *classad.ClassAd) (*classad.ClassAd, error) {
 	// Get security config
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, StoreCred, "CLIENT", c.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, c.cfg, StoreCred, "CLIENT", c.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -561,7 +565,7 @@ func (c *CedarCredd) queryCredential(ctx context.Context, user string, mode int,
 // getToken implements the CreddGetToken protocol
 func (c *CedarCredd) getToken(ctx context.Context, _ string, commandAd *classad.ClassAd) ([]byte, error) {
 	// Get security config
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, CreddGetToken, "CLIENT", c.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, c.cfg, CreddGetToken, "CLIENT", c.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}

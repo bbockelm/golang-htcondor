@@ -157,7 +157,7 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 		// is offered alongside TOKEN when the pool's auth methods include
 		// it). HTCondor still validates the token itself; we just don't lock
 		// the wire to TOKEN-only.
-		secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
+		secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, htcToken, "", 0, "CLIENT", nil)
 		if err != nil {
 			h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
 			h.writeError(w, http.StatusInternalServerError, "Failed to build security config")

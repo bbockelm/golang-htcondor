@@ -24,11 +24,13 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // TestCreddHTTPIntegration exercises the credential endpoints against a running HTTP server
 // with a live mini-HTCondor instance. Uses the CEDAR-based credd client.
 func TestCreddHTTPIntegration(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
 	}
@@ -170,8 +172,7 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 	}
 	f.Close()
 
-	t.Setenv("CONDOR_CONFIG", configFile)
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -199,9 +200,9 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 	t.Logf("Credd address: %s", creddAddr)
 
 	// Create CedarCredd client
-	creddClient := htcondor.NewCedarCredd(creddAddr)
+	creddClient := htcondor.NewCedarCredd(creddAddr).WithConfig(htcCfg)
 
-	server, baseURL := startTestHTTPServerWithCredd(ctx, tempDir, scheddAddr, passwordsDir, creddClient, t)
+	server, baseURL := startTestHTTPServerWithCredd(ctx, htcCfg, tempDir, scheddAddr, passwordsDir, creddClient, t)
 	defer func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
@@ -549,7 +550,7 @@ func getCreddAddress(tempDir string, timeout time.Duration) (string, error) {
 }
 
 // startTestHTTPServerWithCredd starts HTTP server with custom credd client
-func startTestHTTPServerWithCredd(ctx context.Context, tempDir, scheddAddr, passwordsDir string, creddClient htcondor.CreddClient, t *testing.T) (*Server, string) {
+func startTestHTTPServerWithCredd(ctx context.Context, htcCfg *config.Config, tempDir, scheddAddr, passwordsDir string, creddClient htcondor.CreddClient, t *testing.T) (*Server, string) {
 	t.Helper()
 
 	signingKeyPath := filepath.Join(passwordsDir, "POOL")
@@ -559,7 +560,7 @@ func startTestHTTPServerWithCredd(ctx context.Context, tempDir, scheddAddr, pass
 	serverAddr := "127.0.0.1:0"
 
 	// Create HTTP server with collector for collector tests
-	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
+	collector := htcondor.NewCollector(scheddAddr).WithConfig(htcCfg) // Use schedd address (shared port)
 
 	// Create a directory for the DB to avoid any interference from Condor
 	dbDir := filepath.Join(tempDir, "db")
@@ -570,6 +571,7 @@ func startTestHTTPServerWithCredd(ctx context.Context, tempDir, scheddAddr, pass
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,

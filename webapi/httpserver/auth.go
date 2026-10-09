@@ -9,6 +9,7 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 	jwt "github.com/golang-jwt/jwt/v5"
 )
 
@@ -81,6 +82,13 @@ func ConfigureSecurityForTokenWithCache(token string, sessionCache *security.Ses
 // allowFSFallback knob lives here so we don't drag it into the root
 // package's API.
 func ConfigureSecurityForTokenWithCacheAndFallback(token string, sessionCache *security.SessionCache, allowFSFallback bool) (*security.SecurityConfig, error) {
+	return configureSecurityForToken(nil, token, sessionCache, allowFSFallback)
+}
+
+// configureSecurityForToken is ConfigureSecurityForTokenWithCacheAndFallback
+// reading the configured base from cfg (nil: the process-wide default). The
+// Handler calls it with its ClientConfig.
+func configureSecurityForToken(cfg *config.Config, token string, sessionCache *security.SessionCache, allowFSFallback bool) (*security.SecurityConfig, error) {
 	if token == "" {
 		return nil, fmt.Errorf("empty token provided")
 	}
@@ -89,7 +97,7 @@ func ConfigureSecurityForTokenWithCacheAndFallback(token string, sessionCache *s
 	// generic builder used to seed a request ctx; the actual command
 	// and peer are filled in by GetSecurityConfigOrDefault on the
 	// down-stream call site.
-	secConfig, err := htcondor.NewClientSecurityConfig(context.Background(), token, "", 0, "CLIENT", sessionCache)
+	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(context.Background(), cfg, token, "", 0, "CLIENT", sessionCache)
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +186,13 @@ func stripAuthMethod(list []security.AuthMethod, m security.AuthMethod) []securi
 //
 // `token` may be empty; in that case only SSL is offered.
 func ConfigureSecurityForCollectorPing(token, serverName string) (*security.SecurityConfig, error) {
+	return configureSecurityForCollectorPing(nil, token, serverName)
+}
+
+// configureSecurityForCollectorPing is ConfigureSecurityForCollectorPing
+// reading the SSL client credentials from cfg (nil: the process-wide
+// default).
+func configureSecurityForCollectorPing(cfg *config.Config, token, serverName string) (*security.SecurityConfig, error) {
 	methods := []security.AuthMethod{security.AuthSSL}
 	if token != "" {
 		// TOKEN first so cedar prefers it when both work — token
@@ -188,7 +203,7 @@ func ConfigureSecurityForCollectorPing(token, serverName string) (*security.Secu
 
 	// Best-effort credential lookup. Empty values are fine: cedar
 	// treats them as "no client cert" / "system trust store".
-	certFile, keyFile, caFile, _ := htcondor.LookupSSLClientCredentials()
+	certFile, keyFile, caFile, _ := htcondor.LookupSSLClientCredentialsWithConfig(cfg)
 
 	return &security.SecurityConfig{
 		AuthMethods:    methods,

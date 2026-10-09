@@ -328,6 +328,10 @@ type Handler struct {
 	toolStatsOmitUser      bool
 
 	htcondorConfig *config.Config // HTCondor config snapshot, surfaced read-only on the admin info page
+	// clientConfig is the configuration this server's HTCondor clients
+	// and caller security configs read; nil is the process-wide default.
+	// See Config.ClientConfig.
+	clientConfig *config.Config
 
 	// The application master key, opened once and shared by every
 	// purpose that derives a subkey from it. See masterSubkey.
@@ -893,6 +897,8 @@ type HandlerConfig struct {
 	IDPRefreshTokenLifespan time.Duration
 	SessionTTL              time.Duration  // HTTP session TTL (default: 24h)
 	HTCondorConfig          *config.Config // HTCondor configuration (optional, used for LOCAL_DIR default)
+	// ClientConfig: see Config.ClientConfig.
+	ClientConfig *config.Config
 	// PingInterval is the cadence of the periodic collector/schedd ping
 	// that feeds /readyz. Zero or negative disables it, which is what a
 	// deployment with no local HTCondor credential wants: the ping has
@@ -1024,7 +1030,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	}
 
 	// Create schedd with the address as-is (can be host:port or sinful string)
-	schedd := htcondor.NewSchedd(cfg.ScheddName, scheddAddr)
+	schedd := htcondor.NewSchedd(cfg.ScheddName, scheddAddr).WithConfig(cfg.ClientConfig)
 
 	// Set session TTL
 	sessionTTL := cfg.SessionTTL
@@ -1098,6 +1104,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		streamWriteTimeout:   streamWriteTimeout,
 		metricsPublic:        cfg.MetricsPublic,
 		htcondorConfig:       cfg.HTCondorConfig,
+		clientConfig:         cfg.ClientConfig,
 		dbMirror: dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
 			Name:     cfg.DBMirrorName,
 			Address:  cfg.DBMirrorAddress,
@@ -1315,7 +1322,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			h.creddDiscovered = true // Mark for periodic discovery attempts
 		} else {
 			logger.Info(logging.DestinationHTTP, "Discovered credd", "address", creddAddr)
-			h.setCredd(htcondor.NewCedarCredd(creddAddr))
+			h.setCredd(htcondor.NewCedarCredd(creddAddr).WithConfig(h.clientConfig))
 			h.creddAvailable.Store(true)
 			h.creddDiscovered = true // Mark for periodic updates
 		}
@@ -1348,7 +1355,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			logger.Info(logging.DestinationHTTP, "No placementd found; placement endpoints disabled", "reason", err)
 		} else {
 			logger.Info(logging.DestinationHTTP, "Discovered placementd", "address", placementAddr)
-			h.placementd = htcondor.NewPlacementd(placementAddr)
+			h.placementd = htcondor.NewPlacementd(placementAddr).WithConfig(h.clientConfig)
 			h.placementdAvailable.Store(true)
 		}
 	} else {
@@ -3061,7 +3068,7 @@ func (h *Handler) applyScheddConfirmationLocked(newAddress string, allowSwap boo
 		)
 	}
 	h.logger.Info(logging.DestinationSchedd, "Updating schedd address", fields...)
-	h.schedd = htcondor.NewSchedd(h.scheddName, newAddress)
+	h.schedd = htcondor.NewSchedd(h.scheddName, newAddress).WithConfig(h.clientConfig)
 	h.scheddAddrSetAt = now
 }
 
@@ -3189,7 +3196,7 @@ func (h *Handler) startCreddAddressUpdater(ctx context.Context) {
 				// Update credd if it became available
 				if !h.creddAvailable.Load() {
 					h.logger.Info(logging.DestinationHTTP, "Credd became available", "address", creddAddr)
-					h.setCredd(htcondor.NewCedarCredd(creddAddr))
+					h.setCredd(htcondor.NewCedarCredd(creddAddr).WithConfig(h.clientConfig))
 					h.creddAvailable.Store(true)
 					// The MCP tool catalogue offers the credential tools
 					// only when a credd is present, and it is cached per
@@ -3278,7 +3285,7 @@ func (h *Handler) performPeriodicPing() {
 
 	// If we have a static token, use it directly
 	if h.token != "" {
-		secConfig, err := ConfigureSecurityForToken(h.token)
+		secConfig, err := configureSecurityForToken(h.clientConfig, h.token, nil, false)
 		if err != nil {
 			h.logger.Error(logging.DestinationHTTP, "Failed to configure security for periodic ping", "error", err)
 		} else {
@@ -3291,7 +3298,7 @@ func (h *Handler) performPeriodicPing() {
 		if err != nil {
 			h.logger.Warn(logging.DestinationHTTP, "Failed to generate token for periodic ping", "error", err)
 		} else {
-			secConfig, err := ConfigureSecurityForToken(token)
+			secConfig, err := configureSecurityForToken(h.clientConfig, token, nil, false)
 			if err != nil {
 				h.logger.Error(logging.DestinationHTTP, "Failed to configure security for periodic ping", "error", err)
 			} else {
@@ -3317,7 +3324,7 @@ func (h *Handler) performPeriodicPing() {
 
 		collectorCtx := ctx
 		collectorSecForLog := secConfigForLog
-		if pingSec, perr := ConfigureSecurityForCollectorPing(h.token, collectorHost); perr == nil {
+		if pingSec, perr := configureSecurityForCollectorPing(h.clientConfig, h.token, collectorHost); perr == nil {
 			collectorCtx = htcondor.WithSecurityConfig(ctx, pingSec)
 			collectorSecForLog = pingSec
 		}

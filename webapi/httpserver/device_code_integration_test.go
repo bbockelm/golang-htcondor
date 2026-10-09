@@ -26,6 +26,7 @@ import (
 
 // TestDeviceCodeFlowIntegration tests the OAuth2 device code authorization flow
 func TestDeviceCodeFlowIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -77,9 +78,7 @@ func TestDeviceCodeFlowIntegration(t *testing.T) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	// Set CONDOR_CONFIG environment variable
-	os.Setenv("CONDOR_CONFIG", configFile)
-	defer os.Unsetenv("CONDOR_CONFIG")
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	t.Log("Starting condor_master...")
@@ -114,6 +113,7 @@ func TestDeviceCodeFlowIntegration(t *testing.T) {
 
 	// Create HTTP server with MCP enabled (we'll update the URL after getting the actual port)
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,

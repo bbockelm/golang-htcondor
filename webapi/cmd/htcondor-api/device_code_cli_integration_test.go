@@ -54,6 +54,7 @@ import (
 
 // TestDeviceCodeCLIFlow tests the end-to-end device code flow with the CLI
 func TestDeviceCodeCLIFlow(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -90,10 +91,6 @@ SEC_PASSWORD_DIRECTORY = %s
 	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}
-
-	// Set CONDOR_CONFIG environment variable
-	os.Setenv("CONDOR_CONFIG", configFile)
-	defer os.Unsetenv("CONDOR_CONFIG")
 
 	// Step 1: Build the htcondor-api CLI tool
 	t.Log("Step 1: Building htcondor-api CLI tool...")

@@ -265,7 +265,8 @@ type Config struct {
 	// HTCondorConfig is the ambient HTCondor configuration. When set (together with a
 	// Collector), the htcondordb-backed tools are enabled: the server discovers the database
 	// via the collector and authenticates to it using this config's SEC_* knobs. nil disables
-	// those tools.
+	// those tools. A schedd this server creates itself (no Schedd or ScheddProvider given)
+	// authenticates with it too; nil there means the process-wide default.
 	HTCondorConfig *config.Config
 
 	// Delegated marks a server that acts on behalf of remote callers
@@ -419,7 +420,7 @@ func NewServer(cfg Config) (*Server, error) {
 		}
 
 		// Create schedd with the address as-is (can be host:port or sinful string)
-		schedd = htcondor.NewSchedd(cfg.ScheddName, scheddAddr)
+		schedd = htcondor.NewSchedd(cfg.ScheddName, scheddAddr).WithConfig(cfg.HTCondorConfig)
 	}
 
 	// Default I/O streams

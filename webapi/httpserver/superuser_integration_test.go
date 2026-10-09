@@ -48,6 +48,7 @@ const (
 )
 
 func TestSuperuserModeEndToEnd(t *testing.T) {
+	t.Parallel()
 	// Personal condor only. Started by root the pool's daemons drop to the
 	// condor account and this arrangement stops making sense -- directory
 	// ownership, the OS accounts submitters resolve to, and which identity
@@ -245,8 +246,7 @@ QUEUE_SUPER_USERS = root, condor, %s
 		}
 	}
 
-	os.Setenv("CONDOR_CONFIG", configFile)
-	defer os.Unsetenv("CONDOR_CONFIG")
+	htcCfg := loadPoolConfig(t, configFile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -268,6 +268,7 @@ QUEUE_SUPER_USERS = root, condor, %s
 	t.Logf("Schedd at %s", scheddAddr)
 
 	server, err := NewServer(Config{
+		ClientConfig:   htcCfg,
 		ListenAddr:     "127.0.0.1:0",
 		ScheddName:     "local",
 		ScheddAddr:     scheddAddr,

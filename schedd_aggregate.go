@@ -54,7 +54,7 @@ func (s *Schedd) AggregateJobs(ctx context.Context, constraint string, groupBy [
 		cmd = commands.QUERY_JOB_ADS_WITH_AUTH
 	}
 
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, cmd, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, cmd, "CLIENT", s.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
