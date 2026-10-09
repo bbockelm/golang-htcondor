@@ -131,7 +131,22 @@ jobs:
       with:
         go-version: '1.27'
         cache: true
-        cache-dependency-path: ${{ matrix.module }}/go.sum
+        cache-dependency-path: |
+          ${{ matrix.module }}/go.sum
+          .github/tools/go.sum
+
+    # Built from .github/tools rather than downloaded prebuilt. golangci-lint
+    # reads the standard library's export data through golang.org/x/tools,
+    # and a binary whose x/tools predates the Go release in use cannot decode
+    # it ("export data version 5 is greater than maximum supported version
+    # 4", on Go 1.27.2 with the v2.13.2 release binary). The tools module
+    # pins both golangci-lint and a new enough x/tools, and Dependabot bumps
+    # them there.
+    - name: Build golangci-lint (version pinned in .github/tools)
+      run: |
+        mkdir -p "$RUNNER_TEMP/bin"
+        (cd .github/tools && GOWORK=off go build -o "$RUNNER_TEMP/bin/golangci-lint" github.com/golangci/golangci-lint/v2/cmd/golangci-lint)
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
     - name: Run golangci-lint (${{ matrix.label }})
       uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
@@ -140,11 +155,7 @@ jobs:
         # therefore linted.
         CGO_ENABLED: ${{ matrix.cgo }}
       with:
-        # Must be built with a Go at least as new as the modules target:
-        # golangci-lint refuses to run otherwise ("the Go language version
-        # used to build golangci-lint is lower than the targeted Go
-        # version"). v2.13.2 is built with go1.27.0.
-        version: v2.13.2
+        install-mode: none
         working-directory: ${{ matrix.module }}
         args: --timeout=5m
         # Skip `golangci-lint config verify`, which fetches a JSON schema from
