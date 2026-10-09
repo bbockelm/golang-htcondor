@@ -197,3 +197,25 @@ func TestWatchdogKillsOnlyThisJobsSshd(t *testing.T) {
 		t.Error("no hard kill; a wedged sshd would hold the slot")
 	}
 }
+
+// The schedd-side limits on a session are not the caller's to lift. Any
+// later periodic_remove replaced the generated one, so a single line made a
+// JupyterLab or VS Code session unbounded.
+func TestCallerSubmitLinesCannotLiftTheSessionLimits(t *testing.T) {
+	for _, bad := range []string{
+		"periodic_remove = false",
+		"Periodic_Remove = false",
+		"+PeriodicRemove = false",
+		"MY.PeriodicRemove = false",
+		`+PeriodicRemoveReason = "nope"`,
+		`my.periodicremovereason = "nope"`,
+	} {
+		if err := ValidateCallerSubmitLines(bad); err == nil {
+			t.Errorf("%q was accepted; it overrides the session's time limits", bad)
+		}
+	}
+	// Other policy expressions are still the caller's.
+	if err := ValidateCallerSubmitLines("periodic_hold = false\non_exit_remove = true\n"); err != nil {
+		t.Errorf("unrelated policy lines were refused: %v", err)
+	}
+}

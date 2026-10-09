@@ -215,3 +215,34 @@ func TestJupyterReconnectGraceIsBounded(t *testing.T) {
 		}
 	}
 }
+
+// Both session types that carry a generated periodic_remove refuse a
+// caller line that would replace it.
+func TestSessionLimitsCannotBeOverriddenBySubmitLines(t *testing.T) {
+	const override = "periodic_remove = false"
+
+	jr := JupyterCreateRequest{SubmitLines: override}
+	jr.applyDefaults()
+	if err := jr.validate(); err == nil {
+		t.Error("a JupyterLab session accepted a caller periodic_remove")
+	}
+
+	ar := AppCreateRequest{Type: AppTypeCodeServer, SubmitLines: override}
+	ar.applyDefaults()
+	if err := ar.validate(); err == nil {
+		t.Error("a VS Code session accepted a caller periodic_remove")
+	}
+
+	// Through the handler: refused before anything is submitted.
+	stubJupyterHelper(t)
+	schedd := newJupyterFakeSchedd()
+	h := newJupyterRestartHandler(t, filepath.Join(t.TempDir(), "app.db"), schedd)
+	w := jupyterRequest(t, h, http.MethodPost, "/api/v1/jupyter/instances",
+		strings.NewReader(`{"submit_lines":"+PeriodicRemove = false"}`))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("create with an overriding submit line: %d %s, want 400", w.Code, w.Body.String())
+	}
+	if len(schedd.submitted) != 0 {
+		t.Error("a job was submitted anyway")
+	}
+}
