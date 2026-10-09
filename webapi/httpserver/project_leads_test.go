@@ -391,7 +391,7 @@ func newLeadTestEnv(t *testing.T, superuserGroup, leadsFile, leadsPattern string
 	}
 	// The leads are not queue superusers, so they act via the fallback
 	// identity. root is, so a lead may not act for root.
-	h.superuserPolicy.source = &fakeSuperUsers{users: []string{"condor@example.org", "root"}}
+	h.superuserPolicy.source = &fakeSuperUsers{users: []string{"condor@example.org", "root", "dana@other.org"}}
 	if err := h.superuserPolicy.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -983,13 +983,17 @@ func TestProjectLeadRefusesPrivilegedOwner(t *testing.T) {
 		leadJobAd(1, "root", "Physics", 1),   // in QUEUE_SUPER_USERS
 		leadJobAd(2, "condor", "Physics", 1), // the fallback identity
 		leadJobAd(3, "bob", "Physics", 1),
+		// QUEUE_SUPER_USERS names dana with a domain; her jobs carry
+		// Owner "dana" and User "dana@other.org".
+		leadJobAd(4, "dana", "Physics", 1),
 	}
+	env.ads[3].InsertAttrString("User", "dana@other.org")
 	sid := env.session("alice")
 	if code, _ := env.arm(sid); code != http.StatusOK {
 		t.Fatalf("arm: %d", code)
 	}
 
-	for _, job := range []string{"1.0", "2.0"} {
+	for _, job := range []string{"1.0", "2.0", "4.0"} {
 		w, act := holdOne(env, sid, job)
 		if w.Code != http.StatusForbidden || len(act.calls) != 0 {
 			t.Errorf("job %s: lead acted for a privileged owner: %d %+v", job, w.Code, act.calls)
@@ -1169,5 +1173,124 @@ func TestJobWatchEndsWhenLeadAccessLost(t *testing.T) {
 	}
 	if !strings.Contains(env.auditLog(), "Ending a job watch") {
 		t.Errorf("the ended watch was not logged")
+	}
+}
+
+// TestPrivilegedTargetMatching covers the queue-superuser comparison itself:
+// domain-qualified entries, the job's User, and the schedd's compiled-in
+// default when QUEUE_SUPER_USERS is unset.
+func TestPrivilegedTargetMatching(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		set         []string
+		owner, user string
+		want        bool
+	}{
+		{"bare entry", []string{"root"}, "root", "", true},
+		{"qualified entry, bare owner", []string{"alice@other.org"}, "alice", "", true},
+		{"qualified entry, matching User", []string{"alice@other.org"}, "alice", "alice@other.org", true},
+		{"qualified entry, owner differs from User", []string{"alice@other.org"}, "x", "ALICE@other.org", true},
+		{"ordinary member", []string{"alice@other.org", "root"}, "bob", "bob@example.org", false},
+		{"fallback identity", []string{"alice"}, "condor", "", true},
+		{"unset: compiled-in root", nil, "root", "", true},
+		{"unset: compiled-in condor", nil, "condor", "condor@example.org", true},
+		{"unset: ordinary member", nil, "bob", "", false},
+		{"configured set replaces the default", []string{"alice"}, "root", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newSuperuserPolicy(&fakeSuperUsers{users: tc.set}, "example.org", "condor", time.Hour, nil)
+			if err := p.Refresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			got, known := p.privilegedTarget(tc.owner, tc.user)
+			if !known {
+				t.Fatalf("answer unknown after a successful read")
+			}
+			if got != tc.want {
+				t.Errorf("privilegedTarget(%q, %q) with %v = %v, want %v", tc.owner, tc.user, tc.set, got, tc.want)
+			}
+		})
+	}
+
+	// The compiled-in default is for this check only; it does not make
+	// anyone an impersonation identity.
+	p := newSuperuserPolicy(&fakeSuperUsers{}, "example.org", "", time.Hour, nil)
+	_ = p.Refresh(context.Background())
+	if _, isSuper := p.ImpersonationIdentity("root"); isSuper {
+		t.Errorf("the compiled-in default leaked into ImpersonationIdentity")
+	}
+}
+
+// flakySuperUsers fails its first failures reads.
+type flakySuperUsers struct {
+	mu       sync.Mutex
+	failures int
+	calls    int
+}
+
+func (f *flakySuperUsers) QueueSuperUsers(context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.calls <= f.failures {
+		return nil, fmt.Errorf("schedd not up yet")
+	}
+	return []string{"root"}, nil
+}
+
+// TestSuperuserPolicyRetriesUntilFirstRead: an API server that starts before
+// its schedd must not wait a whole refresh interval to learn the queue
+// superusers, because until it does every project-lead action is refused.
+func TestSuperuserPolicyRetriesUntilFirstRead(t *testing.T) {
+	src := &flakySuperUsers{failures: 3}
+	p := newSuperuserPolicy(src, "example.org", "", time.Hour, nil)
+	p.retryInitial = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !p.known() {
+		if time.Now().After(deadline) {
+			t.Fatalf("still unknown after %d reads; the policy is waiting out its refresh interval", src.calls)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, known := p.privilegedTarget("bob", ""); !known {
+		t.Errorf("privilegedTarget still unknown after the first successful read")
+	}
+}
+
+// TestProjectLeadRefusalDoesNotRevealJobs: a lead gets the same refusal for a
+// job that does not exist as for another user's job outside their projects,
+// so probing ids tells them nothing. The audit log keeps the difference.
+func TestProjectLeadRefusalDoesNotRevealJobs(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{leadJobAd(2, "bob", "Chem", 1)}
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+	outside, _ := holdOne(env, sid, "2.0")
+	missing, _ := holdOne(env, sid, "9.0")
+	if outside.Code != http.StatusForbidden || missing.Code != http.StatusForbidden {
+		t.Fatalf("status = %d / %d, want 403 for both", outside.Code, missing.Code)
+	}
+	strip := func(body string) string { return strings.NewReplacer("2.0", "N", "9.0", "N").Replace(body) }
+	if a, b := strip(outside.Body.String()), strip(missing.Body.String()); a != b {
+		t.Errorf("refusals differ:\n outside:  %s\n missing: %s", a, b)
+	}
+	if log := env.auditLog(); !strings.Contains(log, "subject=9.0") || !strings.Contains(log, "not found") {
+		t.Errorf("the missing job's refusal was not audited with its reason:\n%s", log)
+	}
+
+	// A global superuser is not narrowed: they still learn the job is missing.
+	g := newLeadTestEnv(t, "admins", "", "")
+	gsid := g.session("root", "admins")
+	if code, _ := g.arm(gsid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+	if w, _ := holdOne(g, gsid, "9.0"); !strings.Contains(w.Body.String(), "not found") {
+		t.Errorf("global superuser's refusal for a missing job = %s", w.Body.String())
 	}
 }

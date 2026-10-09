@@ -496,10 +496,19 @@ a quote, a backslash or a control character is ignored.
 user's job in a project they lead, tail its output, and ssh to it. Bulk hold
 and release reach the lead's own jobs plus their projects' jobs, whatever the
 constraint says. A job with no `ProjectName`, or one in another project, is
-refused with a 403, and so is a job owned by a queue superuser
-(`QUEUE_SUPER_USERS`) or by the fallback identity; each refusal is logged to
-the security log. ssh-to-job gives the lead the member's sandbox, including any
-credentials in it. Hold and release reasons name the project:
+refused with a 403, and so is a job that does not exist (with the same
+message, so a lead cannot probe for jobs) and a job owned by a queue superuser
+or by the fallback identity. Queue superusers are matched by name without the
+domain, against both the job's `Owner` and its `User`, so
+`alice@other.org` in `QUEUE_SUPER_USERS` protects every job owned by `alice`;
+with `QUEUE_SUPER_USERS` unset, the schedd's default of `root` and `condor`
+counts. Until the server has read `QUEUE_SUPER_USERS` from the schedd at
+least once, every action a lead takes on another user's job is refused ("the
+schedd's queue superusers have not been read"); the read is retried every few
+seconds until it succeeds, so this lasts only while the schedd is
+unreachable. Each refusal is logged to the security log. ssh-to-job gives the
+lead the member's sandbox, including any credentials in it. Hold and release
+reasons name the project:
 
 ```
 Held by alice@example.org via the web UI (project lead for Physics, acting for bob@example.org) (by user condor@example.org)

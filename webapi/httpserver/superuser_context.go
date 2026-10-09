@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -252,19 +253,40 @@ func adOwner(ad *classad.ClassAd) string {
 // request: a caller-supplied target would let an admin name any identity they
 // liked and have the server authenticate as a superuser on its behalf, which
 // is a different and much larger capability than "fix this job".
-func (h *Handler) jobOwner(ctx context.Context, cluster, proc int) (string, error) {
+//
+// It returns the Owner and, when the ad has one, the User ("owner@domain").
+// errNoSuchOwnedJob marks the two answers that say something about the job
+// itself -- there is no such job, or it has no owner -- as opposed to a
+// failure to ask.
+func (h *Handler) jobOwner(ctx context.Context, cluster, proc int) (owner, user string, err error) {
 	ads, err := h.querySuperuserJobs(ctx, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc), 1)
 	if err != nil {
-		return "", fmt.Errorf("looking up job %d.%d: %w", cluster, proc, err)
+		return "", "", fmt.Errorf("looking up job %d.%d: %w", cluster, proc, err)
 	}
 	if len(ads) == 0 {
-		return "", fmt.Errorf("job %d.%d not found", cluster, proc)
+		return "", "", fmt.Errorf("job %d.%d not found: %w", cluster, proc, errNoSuchOwnedJob)
 	}
-	owner := adOwner(ads[0])
+	owner = adOwner(ads[0])
 	if owner == "" {
-		return "", fmt.Errorf("job %d.%d has no owner attribute", cluster, proc)
+		return "", "", fmt.Errorf("job %d.%d has no owner attribute: %w", cluster, proc, errNoSuchOwnedJob)
 	}
-	return owner, nil
+	user, _ = ads[0].EvaluateAttrString("User")
+	return owner, user, nil
+}
+
+// errNoSuchOwnedJob is wrapped by jobOwner when the job does not exist or has
+// no owner.
+var errNoSuchOwnedJob = errors.New("no such job with an owner")
+
+// errNotInLedProject is the one refusal a project lead gets for a job they
+// may not act on, whatever the reason: it does not exist, or it is someone
+// else's job outside their projects. One message for both, so probing job
+// ids cannot tell a lead which jobs exist or whose they are. The reason
+// itself goes to the audit log.
+func errNotInLedProject(cluster, proc int) error {
+	return fmt.Errorf(
+		"job %d.%d is not in a project you lead; as a project lead you may act only on other users' jobs in your projects",
+		cluster, proc)
 }
 
 // jobLedProject returns which of projects the job is in, as the schedd
@@ -334,8 +356,8 @@ func (h *Handler) auditProjectLeadRefusal(r *http.Request, actor, subject, reaso
 // refuseProjectLeadTarget is the check a project lead's impersonation of
 // owner must pass beyond project membership: owner must not be a queue
 // superuser or the fallback identity. Returns the refusal, or nil.
-func (h *Handler) refuseProjectLeadTarget(owner string) error {
-	privileged, known := h.superuserPolicy.privilegedTarget(owner)
+func (h *Handler) refuseProjectLeadTarget(owner, user string) error {
+	privileged, known := h.superuserPolicy.privilegedTarget(owner, user)
 	switch {
 	case !known:
 		return fmt.Errorf("cannot act as a project lead yet: the schedd's queue superusers have not been read, so it is not known whether this job's owner is one")
@@ -412,8 +434,13 @@ func (h *Handler) superuserActionContext(ctx context.Context, r *http.Request, c
 		return ctx, nil, nil
 	}
 
-	owner, err := h.jobOwner(ctx, cluster, proc)
+	subject := fmt.Sprintf("%d.%d", cluster, proc)
+	owner, user, err := h.jobOwner(ctx, cluster, proc)
 	if err != nil {
+		if !scope.Global && errors.Is(err, errNoSuchOwnedJob) {
+			h.auditProjectLeadRefusal(r, session.Username, subject, err.Error())
+			return nil, nil, errNotInLedProject(cluster, proc)
+		}
 		return nil, nil, err
 	}
 	if strings.EqualFold(ownerFromActor(owner), ownerFromActor(session.Username)) {
@@ -423,7 +450,6 @@ func (h *Handler) superuserActionContext(ctx context.Context, r *http.Request, c
 
 	ledProject := ""
 	if !scope.Global {
-		subject := fmt.Sprintf("%d.%d", cluster, proc)
 		ledProject, err = h.jobLedProject(ctx, cluster, proc, scope.Projects)
 		if err != nil {
 			return nil, nil, err
@@ -434,11 +460,9 @@ func (h *Handler) superuserActionContext(ctx context.Context, r *http.Request, c
 			// job outside their projects, and probing job ids one by
 			// one should not tell them.
 			h.auditProjectLeadRefusal(r, session.Username, subject, "job is not in a project the actor leads")
-			return nil, nil, fmt.Errorf(
-				"job %d.%d is not in a project you lead; as a project lead you may act only on other users' jobs in your projects",
-				cluster, proc)
+			return nil, nil, errNotInLedProject(cluster, proc)
 		}
-		if refusal := h.refuseProjectLeadTarget(owner); refusal != nil {
+		if refusal := h.refuseProjectLeadTarget(owner, user); refusal != nil {
 			h.auditProjectLeadRefusal(r, session.Username, subject, refusal.Error())
 			return nil, nil, refusal
 		}
@@ -557,6 +581,15 @@ func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, 
 					continue
 				}
 				key.project = project
+				// Checked per job rather than per batch: User is read
+				// off each ad, and a privileged owner anywhere in scope
+				// refuses the whole action rather than quietly
+				// skipping their jobs.
+				user, _ := ad.EvaluateAttrString("User")
+				if refusal := h.refuseProjectLeadTarget(owner, user); refusal != nil {
+					h.auditProjectLeadRefusal(r, session.Username, planConstraint, refusal.Error())
+					return refusal
+				}
 			}
 			if _, seen := counts[key]; !seen {
 				order = append(order, key)
@@ -606,10 +639,6 @@ func (h *Handler) planSuperuserBulkAction(ctx context.Context, r *http.Request, 
 	for _, key := range order {
 		batch := constraint
 		if key.project != "" {
-			if refusal := h.refuseProjectLeadTarget(key.owner); refusal != nil {
-				h.auditProjectLeadRefusal(r, session.Username, constraint, refusal.Error())
-				return nil, refusal
-			}
 			if batch, err = scopeToProjects([]string{key.project}, constraint); err != nil {
 				return nil, err
 			}

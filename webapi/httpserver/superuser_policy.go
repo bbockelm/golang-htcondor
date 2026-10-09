@@ -58,11 +58,33 @@ type superuserPolicy struct {
 	refresh  time.Duration
 	logger   *logging.Logger
 
-	mu        sync.RWMutex
-	users     map[string]bool
+	// retryInitial is the first retry delay while the set has never been
+	// read; it doubles up to refresh. Zero selects
+	// defaultSuperuserRetryInitial. See Run.
+	retryInitial time.Duration
+
+	mu    sync.RWMutex
+	users map[string]bool
+	// usersBare holds the local part of every entry in users, for
+	// privilegedTarget, which errs towards "privileged".
+	usersBare map[string]bool
 	fetchedAt time.Time
 	lastErr   error
 }
+
+// defaultSuperuserRetryInitial is how soon a policy that has never read the
+// queue-superuser set tries again. Short, because until the first read
+// succeeds every project-lead action is refused (privilegedTarget cannot
+// answer), and an API server routinely starts before its schedd.
+const defaultSuperuserRetryInitial = 5 * time.Second
+
+// compiledInSuperUsers is what the schedd treats as queue superusers when
+// QUEUE_SUPER_USERS is unset or empty: the param table's default, "root,
+// condor" (param_info.in), and failing that InitQmgmt's default_super_user,
+// "root" (qmgmt.cpp). Schedd.QueueSuperUsers returns nothing in either case
+// rather than guess, so the policy supplies them -- for privilegedTarget
+// only, where assuming too many superusers is the safe direction.
+var compiledInSuperUsers = []string{"root", "condor"}
 
 // newSuperuserPolicy builds a policy. A zero refresh interval selects
 // defaultSuperuserRefresh.
@@ -101,12 +123,20 @@ func (p *superuserPolicy) Refresh(ctx context.Context) error {
 		return err
 	}
 	set := make(map[string]bool, len(users))
+	bare := make(map[string]bool, len(users))
 	for _, u := range users {
 		if u = strings.TrimSpace(u); u != "" {
 			set[strings.ToLower(u)] = true
+			bare[strings.ToLower(ownerFromActor(u))] = true
+		}
+	}
+	if len(set) == 0 {
+		for _, u := range compiledInSuperUsers {
+			bare[u] = true
 		}
 	}
 	p.users = set
+	p.usersBare = bare
 	p.fetchedAt = time.Now()
 	if p.logger != nil {
 		p.logger.Info(logging.DestinationHTTP, "Refreshed the schedd's queue superusers",
@@ -118,18 +148,39 @@ func (p *superuserPolicy) Refresh(ctx context.Context) error {
 // Run polls until ctx is cancelled. The first poll happens immediately so a
 // server that has just started does not spend a whole interval with no idea
 // who the superusers are.
+//
+// Until the first read succeeds it retries on a short, doubling backoff
+// rather than the refresh interval: the set being unknown refuses every
+// project-lead action, and an API server that came up before its schedd
+// should not lock leads out for a quarter of an hour.
 func (p *superuserPolicy) Run(ctx context.Context) {
 	_ = p.Refresh(ctx)
-	ticker := time.NewTicker(p.refresh)
-	defer ticker.Stop()
+	retry := p.retryInitial
+	if retry <= 0 {
+		retry = defaultSuperuserRetryInitial
+	}
 	for {
+		wait := p.refresh
+		if !p.known() {
+			wait = min(retry, p.refresh)
+			retry *= 2
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			_ = p.Refresh(ctx)
 		}
 	}
+}
+
+// known reports whether the set has ever been read.
+func (p *superuserPolicy) known() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.users != nil
 }
 
 // ImpersonationIdentity returns the identity this server should authenticate
@@ -170,31 +221,41 @@ func (p *superuserPolicy) ImpersonationIdentity(actor string) (identity string, 
 	return p.fallback, false
 }
 
-// privilegedTarget reports whether owner is an identity a project lead must
-// not act for -- a queue superuser, or the fallback identity this server acts
-// under -- and whether the answer is known at all.
+// privilegedTarget reports whether a job's owner is an identity a project
+// lead must not act for -- a queue superuser, or the fallback identity this
+// server acts under -- and whether the answer is known at all. owner is the
+// job's Owner and user its User ("owner@domain"), when it has one.
 //
 // Acting "for" such an owner would put a lead's action behind the authority
-// the queue grants that identity over everybody's jobs. Comparisons are on
-// both the qualified and the bare name and are case-insensitive, so they err
-// towards calling an owner privileged. Before the queue-superuser set has
-// ever been read the answer is unknown, and callers refuse.
-func (p *superuserPolicy) privilegedTarget(owner string) (privileged, known bool) {
-	bare := strings.ToLower(ownerFromActor(strings.TrimSpace(owner)))
-	if bare == "" {
+// the queue grants that identity over everybody's jobs. Matching is on local
+// parts, case-insensitively, so it errs towards calling an owner privileged:
+// "alice@other.org" in QUEUE_SUPER_USERS makes every job owned by "alice"
+// privileged, whatever its domain. With QUEUE_SUPER_USERS unset or empty the
+// schedd's compiled-in default counts (see compiledInSuperUsers). Before the
+// set has ever been read the answer is unknown, and callers refuse.
+func (p *superuserPolicy) privilegedTarget(owner, user string) (privileged, known bool) {
+	names := []string{
+		strings.ToLower(ownerFromActor(strings.TrimSpace(owner))),
+		strings.ToLower(ownerFromActor(strings.TrimSpace(user))),
+	}
+	if names[0] == "" {
 		return true, true
 	}
-	qualified := strings.ToLower(qualifyUser(owner, p.uidDomain))
-	if strings.EqualFold(bare, ownerFromActor(p.fallback)) {
-		return true, true
+	fallback := strings.ToLower(ownerFromActor(p.fallback))
+	for _, n := range names {
+		if n != "" && n == fallback {
+			return true, true
+		}
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.users == nil {
 		return false, false
 	}
-	if p.users[bare] || (qualified != "" && p.users[qualified]) {
-		return true, true
+	for _, n := range names {
+		if n != "" && p.usersBare[n] {
+			return true, true
+		}
 	}
 	return false, true
 }
