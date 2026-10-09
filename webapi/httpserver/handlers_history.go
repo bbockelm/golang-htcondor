@@ -336,7 +336,7 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 			}
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
-			errorMsg = result.Err.Error()
+			errorMsg = streamErrorMessage(result.Err)
 			break
 		}
 

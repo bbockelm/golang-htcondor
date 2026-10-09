@@ -161,6 +161,12 @@ func SetUnmarkedOriginReporter(fn func(command int, secContext, peerName string)
 // ErrDaemonFallbackRefused is returned when a context that is not this
 // daemon's own work reaches the point where the daemon's credential would
 // have been used.
+//
+// It always means a bug in this server: some code path reached CEDAR without
+// attaching the caller's credential (htcondor.WithSecurityConfig), or did the
+// daemon's own work without saying so (htcondor.WithDaemonCredential). That
+// advice is for whoever fixes the code, so it lives here rather than in the
+// message, which reaches log readers and, through the HTTP handlers, users.
 type ErrDaemonFallbackRefused struct {
 	// Origin is how the context was classified: OriginUser for a refused
 	// caller, OriginUnset when the policy refuses unclassified contexts.
@@ -180,10 +186,9 @@ func (e *ErrDaemonFallbackRefused) Error() string {
 		peer = "an HTCondor daemon"
 	}
 	return fmt.Sprintf(
-		"refusing to authenticate as this daemon for a %s context (%s): command %d to %s "+
-			"has no caller credential. Attach one with htcondor.WithSecurityConfig, or, if this "+
-			"really is the daemon's own work, mark the context with htcondor.WithDaemonCredential",
-		e.Origin, e.Reason, e.Command, peer)
+		"%s had no credential to present to %s, and the server will not use its own "+
+			"in the caller's place; this is a bug in the server",
+		e.Reason, peer)
 }
 
 // IsDaemonFallbackRefused reports whether err is a refusal of the daemon

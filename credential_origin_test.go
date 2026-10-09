@@ -57,11 +57,18 @@ func TestUserRequestCannotBecomeTheDaemon(t *testing.T) {
 	if !IsDaemonFallbackRefused(err) {
 		t.Fatalf("refused, but not as a daemon-fallback refusal, so no transport can map it to 401: %v", err)
 	}
-	// The refusal has to say which door the context came in through and how
-	// to fix it, or it is just a 401 with no lead.
-	for _, want := range []string{"HTTP request GET /api/v1/jobs", "WithSecurityConfig", "WithDaemonCredential"} {
+	// The refusal has to say which door the context came in through and
+	// which daemon it was headed for, or it is just a 401 with no lead.
+	for _, want := range []string{"HTTP request GET /api/v1/jobs", "<127.0.0.1:9618>"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal message does not mention %q: %v", want, err)
+		}
+	}
+	// And it says nothing a reader of the message could not act on. The
+	// handlers put it in front of users, who cannot attach a context value.
+	for _, unwanted := range []string{"WithSecurityConfig", "WithDaemonCredential", "htcondor."} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("refusal message names Go API %q, which only a developer can use: %v", unwanted, err)
 		}
 	}
 }
