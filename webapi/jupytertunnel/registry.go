@@ -675,8 +675,8 @@ func (i *Instance) Reconnecting() bool {
 // The handler that called this function should then block until the yamux
 // session reports "closed" so it can clean up the upgraded HTTP request.
 // AcceptTunnel returns once the tunnel is registered; the caller waits via
-// inst.Wait() for teardown.
-func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (*Instance, error) {
+// the returned Tunnel's Wait for teardown.
+func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (*Tunnel, error) {
 	parsed, err := parseAndVerify(r.secret, bearer, r.now())
 	if err != nil {
 		return nil, err
@@ -740,8 +740,33 @@ func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (
 		<-session.CloseChan()
 		r.tunnelLost(inst, session)
 	}()
-	return inst, nil
+	return &Tunnel{Instance: inst, session: session, nextToken: nextToken}, nil
 }
+
+// Tunnel is one accepted connection of an instance: the instance, plus the
+// session and next token this particular dial produced.
+//
+// Bound to its own session rather than read off the instance. Once a drop
+// can be followed by a redial, the instance's tunnel is whichever dial came
+// last, and a handler that read it late -- to wait on, or to send the next
+// token down -- could find a newer connection than its own: it then held its
+// request open for the other dial's lifetime, or handed that dial a token.
+type Tunnel struct {
+	*Instance
+	session   *yamux.Session
+	nextToken string
+}
+
+// NextToken is the token this dial's helper should use for its next one.
+func (t *Tunnel) NextToken() string { return t.nextToken }
+
+// SendNextToken hands this dial's helper its next token. Best-effort; see
+// sendNextToken.
+func (t *Tunnel) SendNextToken() error { return sendNextToken(t.session, t.nextToken) }
+
+// Wait blocks until this dial's session has closed (helper hung up, the
+// connection dropped, CloseInstance called).
+func (t *Tunnel) Wait() { <-t.session.CloseChan() }
 
 // tunnelLost handles a tunnel that has dropped.
 //
@@ -937,18 +962,6 @@ func (i *Instance) isClosed() bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return i.closed
-}
-
-// Wait blocks until the instance's tunnel is closed (helper hung up,
-// CloseInstance called, etc). Returns immediately if already closed or never
-// connected.
-func (i *Instance) Wait() {
-	i.mu.Lock()
-	tun := i.tunnel
-	i.mu.Unlock()
-	if tun != nil {
-		<-tun.CloseChan()
-	}
 }
 
 func copyMeta(m map[string]string) map[string]string {

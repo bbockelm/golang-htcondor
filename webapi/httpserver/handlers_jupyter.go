@@ -1736,8 +1736,8 @@ func (s *Handler) handleJupyterTunnel(w http.ResponseWriter, r *http.Request, id
 	// until the next reconnect would turn a future inconvenience into a
 	// present outage. It is logged because a session that cannot come
 	// back is worth knowing about before the restart that proves it.
-	if next := inst.NextToken(); next != "" {
-		if err := jupytertunnel.SendNextToken(inst, next); err != nil {
+	if inst.NextToken() != "" {
+		if err := inst.SendNextToken(); err != nil {
 			s.logger.Warn(logging.DestinationHTTP,
 				"jupyter: could not hand the helper its next token; this session will not survive a restart",
 				"instance", id, "error", err)

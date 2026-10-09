@@ -30,8 +30,9 @@ type tunnelHarness struct {
 	sock string
 	dir  string
 
-	mu    sync.Mutex
-	conns []net.Conn
+	mu       sync.Mutex
+	conns    []net.Conn
+	accepted []*Tunnel
 }
 
 func newTunnelHarness(t *testing.T, reg *Registry) *tunnelHarness {
@@ -73,8 +74,11 @@ func newTunnelHarness(t *testing.T, reg *Registry) *tunnelHarness {
 			_ = ws.Close()
 			return
 		}
-		if next := inst.NextToken(); next != "" {
-			_ = SendNextToken(inst, next)
+		h.mu.Lock()
+		h.accepted = append(h.accepted, inst)
+		h.mu.Unlock()
+		if inst.NextToken() != "" {
+			_ = inst.SendNextToken()
 		}
 		inst.Wait()
 	})
@@ -421,5 +425,47 @@ func TestMemNoncesMatchTheStoreContract(t *testing.T) {
 	m.forget("s")
 	if roll("f", "g") {
 		t.Error("a forgotten session still rolls")
+	}
+}
+
+// A dial's Wait is bound to its own session. Once a redial can replace a
+// dropped tunnel, the instance's tunnel is whichever dial came last; reading
+// it at Wait time made a handler that got there late wait on the NEW dial,
+// holding its dead request open for that connection's whole lifetime.
+func TestTunnelWaitIsBoundToItsOwnDial(t *testing.T) {
+	reg, roller := newGraceRegistry(t, 30*time.Second)
+	h := newTunnelHarness(t, reg)
+	id, token := createForDial(t, reg, roller)
+
+	if _, err := h.dial(t, id, token); err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	next := h.nextToken(t, id)
+	h.sever()
+	waitFor(5*time.Second, func() bool {
+		inst, ok := reg.Lookup(id)
+		return ok && !inst.HasTunnel()
+	})
+	if _, err := h.dial(t, id, next); err != nil {
+		t.Fatalf("redial: %v", err)
+	}
+
+	h.mu.Lock()
+	tunnels := append([]*Tunnel(nil), h.accepted...)
+	h.mu.Unlock()
+	if len(tunnels) != 2 {
+		t.Fatalf("accepted %d dials, want 2", len(tunnels))
+	}
+	first, second := tunnels[0], tunnels[1]
+
+	done := make(chan struct{})
+	go func() { first.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first dial's Wait is blocked on the second dial's session")
+	}
+	if first.NextToken() == second.NextToken() {
+		t.Error("both dials report the same next token; one was read off the instance")
 	}
 }
