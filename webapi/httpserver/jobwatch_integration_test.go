@@ -266,8 +266,13 @@ func TestMirrorRawWatchDelivers(t *testing.T) {
 	defer stop()
 
 	// Write on a second connection, the way the feed and the sync are
-	// separate processes in production.
+	// separate processes in production. The watch can deliver the upsert
+	// before Commit returns, so wait for the writer before the deferred
+	// cancel and closes run under it.
+	writerDone := make(chan struct{})
+	defer func() { <-writerDone }()
 	go func() {
+		defer close(writerDone)
 		time.Sleep(2 * time.Second)
 		wc, wcloser, _, werr := locator.Client(ctx)
 		if werr != nil {
