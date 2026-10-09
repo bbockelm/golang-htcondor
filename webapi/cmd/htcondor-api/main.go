@@ -627,10 +627,12 @@ func loadJupyterLimitSec(cfg *config.Config, logger *logging.Logger, name string
 	return n
 }
 
-// loadJupyterGraceSec reads a JupyterLab grace period, in seconds.
+// loadJupyterGraceSec reads one of the JupyterLab grace periods, in seconds.
 //
-// Unlike the limits above it cannot be turned off: an unbounded reconnect
-// grace is a session nobody can reach that never leaves the list. Zero, negative or unreadable falls back to the default and a
+// Unlike the limits above these cannot be turned off: an unbounded start
+// grace is a token for an unstarted job that never expires, and an
+// unbounded reconnect grace a session nobody can reach that never leaves
+// the list. Zero, negative or unreadable falls back to the default and a
 // value past the ceiling is clamped, each with a warning.
 func loadJupyterGraceSec(cfg *config.Config, logger *logging.Logger, name string, def, ceiling int) int {
 	v, ok := cfg.Get(name)
@@ -2082,6 +2084,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
 		JupyterMaxLifetimeSec:      loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_MAX_LIFETIME_SEC", defaultJupyterMaxLifetimeSec),
 		JupyterKernelIdleSec:       loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_KERNEL_IDLE_SEC", defaultJupyterKernelIdleSec),
+		JupyterStartGraceSec: loadJupyterGraceSec(cfg, logger, "HTTP_API_JUPYTER_START_GRACE_SEC",
+			httpserver.DefaultJupyterStartGraceSec, httpserver.MaxJupyterStartGraceSec),
 		JupyterReconnectGraceSec: loadJupyterGraceSec(cfg, logger, "HTTP_API_JUPYTER_RECONNECT_GRACE_SEC",
 			httpserver.DefaultJupyterReconnectGraceSec, httpserver.MaxJupyterReconnectGraceSec),
 		InteractiveExtraSubmit:  loadInteractiveExtraSubmit(cfg),
@@ -2465,6 +2469,8 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		JupyterWorkDir:        loadJupyterWorkDir(cfg),
 		JupyterMaxLifetimeSec: loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_MAX_LIFETIME_SEC", defaultJupyterMaxLifetimeSec),
 		JupyterKernelIdleSec:  loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_KERNEL_IDLE_SEC", defaultJupyterKernelIdleSec),
+		JupyterStartGraceSec: loadJupyterGraceSec(cfg, logger, "HTTP_API_JUPYTER_START_GRACE_SEC",
+			httpserver.DefaultJupyterStartGraceSec, httpserver.MaxJupyterStartGraceSec),
 		JupyterReconnectGraceSec: loadJupyterGraceSec(cfg, logger, "HTTP_API_JUPYTER_RECONNECT_GRACE_SEC",
 			httpserver.DefaultJupyterReconnectGraceSec, httpserver.MaxJupyterReconnectGraceSec),
 		InteractiveExtraSubmit: loadInteractiveExtraSubmit(cfg),

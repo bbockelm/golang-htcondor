@@ -109,15 +109,26 @@ func (s *Handler) getOrCreateJupyterRegistry() (*jupytertunnel.Registry, error) 
 // whether or not it has a database behind it.
 func (s *Handler) configureJupyterRegistry(reg *jupytertunnel.Registry) {
 	reg.SetReconnectGrace(time.Duration(s.jupyterReconnectGrace()) * time.Second)
+	reg.SetStartTokenTTL(s.jupyterStartTokenTTL())
 }
 
-// Default and ceiling for the JupyterLab reconnect grace period. The
-// ceiling keeps it from being effectively unbounded: it is how long a
-// session nobody can reach stays listed.
+// Defaults and ceilings for the two JupyterLab grace periods. The ceilings
+// keep either from being effectively unbounded: the start grace is how long
+// a token for an unstarted job stays live, and the reconnect grace how long
+// a session nobody can reach stays listed.
 const (
+	DefaultJupyterStartGraceSec     = 4 * 60 * 60
+	MaxJupyterStartGraceSec         = 7 * 24 * 60 * 60
 	DefaultJupyterReconnectGraceSec = 5 * 60
 	MaxJupyterReconnectGraceSec     = 60 * 60
 )
+
+// jupyterStartDialSlack is how much longer than the start grace the first
+// token lives. periodic_remove takes away a job that has not started
+// executing by the end of the grace, but one that starts just inside it
+// still has to launch the helper and dial, and the API server's clock and
+// the schedd's need not agree to the second.
+const jupyterStartDialSlack = 10 * time.Minute
 
 // boundJupyterGraceSec applies a grace period's default and ceiling. The
 // configuration loader warns about values it changes; this is the backstop
@@ -132,17 +143,35 @@ func boundJupyterGraceSec(v, def, ceiling int) int {
 	return v
 }
 
+func (s *Handler) jupyterStartGrace() int {
+	return boundJupyterGraceSec(s.jupyterStartGraceSec, DefaultJupyterStartGraceSec, MaxJupyterStartGraceSec)
+}
+
 func (s *Handler) jupyterReconnectGrace() int {
 	return boundJupyterGraceSec(s.jupyterReconnectGraceSec, DefaultJupyterReconnectGraceSec, MaxJupyterReconnectGraceSec)
 }
 
-// jupyterSessionTTL is how long a stored session stays valid: the job's
-// ceiling, or a day where the operator turned the ceiling off.
+// jupyterStartTokenTTL is the lifetime of the token a new session's job
+// carries: the start grace plus jupyterStartDialSlack.
+func (s *Handler) jupyterStartTokenTTL() time.Duration {
+	return time.Duration(s.jupyterStartGrace())*time.Second + jupyterStartDialSlack
+}
+
+// jupyterSessionTTL is how long a stored session stays valid, from when it
+// is created: the time its job may wait to start, plus the time it may then
+// run (the job's ceiling, or a day where the operator turned the ceiling
+// off).
+//
+// Both, because the ceiling runs from when the job starts and the row from
+// when it is written. Sized to the ceiling alone, the row of a session that
+// queued for an hour expired an hour before its job did, and for that last
+// hour the session could neither reconnect nor survive a restart.
 func (s *Handler) jupyterSessionTTL() time.Duration {
+	run := time.Duration(defaultJupyterSessionTTLSec) * time.Second
 	if s.jupyterMaxLifetimeSec > 0 {
-		return time.Duration(s.jupyterMaxLifetimeSec) * time.Second
+		run = time.Duration(s.jupyterMaxLifetimeSec) * time.Second
 	}
-	return time.Duration(defaultJupyterSessionTTLSec) * time.Second
+	return s.jupyterStartTokenTTL() + run
 }
 
 // forgetJupyterSession drops a session that never got a working job, from
@@ -889,6 +918,7 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 	submitFile := buildJupyterSubmitFile(jupyterSubmitArgs{
 		InstanceID:            instID,
 		MaxLifetimeSec:        s.jupyterMaxLifetimeSec,
+		StartGraceSec:         s.jupyterStartGrace(),
 		Image:                 req.Image,
 		Cpus:                  req.Cpus,
 		MemoryMB:              req.MemoryMB,
@@ -1130,6 +1160,10 @@ type jupyterSubmitArgs struct {
 	// session, enforced by the schedd rather than by anything inside
 	// the sandbox. See jupyterPeriodicRemove.
 	MaxLifetimeSec int
+
+	// StartGraceSec, when > 0, is how long the job may go without starting
+	// before the schedd removes it. See jupyterPeriodicRemove.
+	StartGraceSec int
 }
 
 // buildJupyterSubmitFile produces the HTCondor submit file for a Jupyter
@@ -1206,7 +1240,7 @@ func buildJupyterSubmitFile(a jupyterSubmitArgs) string {
 	//
 	// periodic_remove is evaluated by the schedd, so it holds whatever
 	// the sandbox, the helper or the browser are doing.
-	if expr := jupyterPeriodicRemove(a.MaxLifetimeSec); expr != "" {
+	if expr := jupyterPeriodicRemove(a.MaxLifetimeSec, a.StartGraceSec); expr != "" {
 		fmt.Fprintf(&sb, "%s\n", expr)
 	}
 
@@ -1281,23 +1315,72 @@ func jupyterBatchName(instanceID string) string {
 	return jupyterBatchPrefix + short
 }
 
-// jupyterPeriodicRemove is the schedd-side ceiling on a session.
+// jupyterPeriodicRemove is the schedd-side bound on a session: how long it
+// may run, and how long it may take to start.
 //
-// Measured from JobStartDate rather than QDate: the ceiling is on how
-// long a session runs, and time spent idle in the queue waiting for a
-// slot is not the user's session. Guarded on JobStartDate being set,
-// because the expression is evaluated for a job that has not started
-// and "time() - undefined" is undefined, not false.
+// The ceiling is measured from JobStartDate rather than QDate: it is on how
+// long a session runs, and time spent idle in the queue waiting for a slot
+// is not the user's session. Guarded on JobStartDate being set, because the
+// expression is evaluated for a job that has not started and
+// "time() - undefined" is undefined, not false.
 //
-// Returns "" for a non-positive limit, which is how an operator turns
-// the ceiling off.
-func jupyterPeriodicRemove(maxLifetimeSec int) string {
-	if maxLifetimeSec <= 0 {
-		return ""
+// The start grace is measured from QDate, because that is when the job's
+// token was minted and its lifetime started running. A job that has not
+// started executing by then is removed rather than left to start later with
+// a dead token, take a slot, have its helper refused, and end itself. Not
+// started executing rather than idle: a job still transferring input or
+// pulling its image is no closer to dialing in.
+//
+// PeriodicRemoveReason, which the schedd puts in RemoveReason, says which
+// bound it was in words rather than as the expression.
+//
+// Returns "" when both are off (non-positive).
+func jupyterPeriodicRemove(maxLifetimeSec, startGraceSec int) string {
+	var clauses []string
+	var lifetimeReason, startReason string
+	if maxLifetimeSec > 0 {
+		clauses = append(clauses, fmt.Sprintf(
+			"((JobStatus == 2) && (JobStartDate =!= UNDEFINED) && ((time() - JobStartDate) > %d))",
+			maxLifetimeSec))
+		lifetimeReason = fmt.Sprintf("JupyterLab session reached its %s limit", humanJupyterDuration(maxLifetimeSec))
 	}
-	return fmt.Sprintf(
-		"periodic_remove = (JobStatus == 2) && (JobStartDate =!= UNDEFINED) && ((time() - JobStartDate) > %d)",
-		maxLifetimeSec)
+	if startGraceSec > 0 {
+		clauses = append(clauses, fmt.Sprintf(
+			"((JobCurrentStartExecutingDate =?= UNDEFINED) && ((time() - QDate) > %d))",
+			startGraceSec))
+		startReason = fmt.Sprintf("JupyterLab session did not start within %s", humanJupyterDuration(startGraceSec))
+	}
+	var reason string
+	switch {
+	case len(clauses) == 0:
+		return ""
+	case lifetimeReason != "" && startReason != "":
+		reason = fmt.Sprintf("ifThenElse(JobCurrentStartExecutingDate =?= UNDEFINED, %q, %q)", startReason, lifetimeReason)
+	case startReason != "":
+		reason = fmt.Sprintf("%q", startReason)
+	default:
+		reason = fmt.Sprintf("%q", lifetimeReason)
+	}
+	return fmt.Sprintf("periodic_remove = %s\n+PeriodicRemoveReason = %s",
+		strings.Join(clauses, " || "), reason)
+}
+
+// humanJupyterDuration renders a limit for a removal reason: "4 hours",
+// "90 minutes", "45 seconds".
+func humanJupyterDuration(sec int) string {
+	unit := func(n int, one string) string {
+		if n == 1 {
+			return "1 " + one
+		}
+		return fmt.Sprintf("%d %ss", n, one)
+	}
+	switch {
+	case sec%3600 == 0:
+		return unit(sec/3600, "hour")
+	case sec%60 == 0:
+		return unit(sec/60, "minute")
+	}
+	return unit(sec, "second")
 }
 
 // jupyterIdleFlags are the JupyterLab options that make an abandoned

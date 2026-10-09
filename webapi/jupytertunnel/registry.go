@@ -57,7 +57,8 @@ type Registry struct {
 	roller NonceRoller
 
 	// tokenTTL bounds how long a minted token stays usable. After expiry
-	// the helper must request a new instance. Default 30 minutes.
+	// the helper must request a new instance. Default 30 minutes; see
+	// SetStartTokenTTL.
 	tokenTTL time.Duration
 
 	// reconnectGrace is how long a session whose tunnel dropped waits for
@@ -393,6 +394,15 @@ func (r *Registry) SetReconnectTokenTTL(d time.Duration) {
 // drops. Call it before the registry is shared.
 func (r *Registry) SetReconnectGrace(d time.Duration) {
 	r.reconnectGrace = d
+}
+
+// SetStartTokenTTL sets how long the token a new session is created with
+// stays usable: the time its job has to get through the queue and dial in.
+// Call it before the registry is shared.
+func (r *Registry) SetStartTokenTTL(d time.Duration) {
+	if d > 0 {
+		r.tokenTTL = d
+	}
 }
 
 // rollTimeout bounds the nonce swap. Short: it is one indexed UPDATE, and a

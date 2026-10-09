@@ -448,9 +448,11 @@ type Handler struct {
 	// Both zero mean the operator turned that limit off.
 	jupyterMaxLifetimeSec int
 	jupyterKernelIdleSec  int
-	// jupyterReconnectGraceSec is how long a session whose tunnel dropped
+	// jupyterStartGraceSec is how long a JupyterLab job may wait to start,
+	// and jupyterReconnectGraceSec how long a session whose tunnel dropped
 	// waits for its helper. Zero means the default; see
 	// boundJupyterGraceSec.
+	jupyterStartGraceSec     int
 	jupyterReconnectGraceSec int
 
 	// templateLibrary serves the batch-submission template catalog
@@ -984,8 +986,9 @@ type HandlerConfig struct {
 	// session; see handlers_jupyter.go. Zero disables that limit.
 	JupyterMaxLifetimeSec int
 	JupyterKernelIdleSec  int
-	// JupyterReconnectGraceSec: see Handler.jupyterReconnectGraceSec. Zero
-	// means the default.
+	// JupyterStartGraceSec / JupyterReconnectGraceSec: see
+	// Handler.jupyterStartGraceSec. Zero means the default.
+	JupyterStartGraceSec     int
 	JupyterReconnectGraceSec int
 
 	// TemplateGlobalPath is an optional YAML file with operator-curated
@@ -1096,6 +1099,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		jupyterWorkDir:            cfg.JupyterWorkDir,
 		jupyterMaxLifetimeSec:     cfg.JupyterMaxLifetimeSec,
 		jupyterKernelIdleSec:      cfg.JupyterKernelIdleSec,
+		jupyterStartGraceSec:      cfg.JupyterStartGraceSec,
 		jupyterReconnectGraceSec:  cfg.JupyterReconnectGraceSec,
 		// templateLibrary is filled in after the unified DB is open;
 		// see below. Leaving it nil here makes it obvious that the

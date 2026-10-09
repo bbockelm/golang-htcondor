@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -273,6 +274,32 @@ func TestTunnelRedialAfterGraceIsRefused(t *testing.T) {
 	}
 	if !IsRejection(err) {
 		t.Errorf("the late redial failed with %v; the helper would keep retrying a session that is gone", err)
+	}
+}
+
+// The first token lives exactly as long as it was minted for.
+func TestFirstDialAtTheStartGraceBoundary(t *testing.T) {
+	reg, roller := newGraceRegistry(t, time.Minute)
+	reg.SetStartTokenTTL(time.Hour)
+	var offset atomic.Int64
+	reg.now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+	h := newTunnelHarness(t, reg)
+
+	early, earlyToken := createForDial(t, reg, roller)
+	late, lateToken := createForDial(t, reg, roller)
+
+	offset.Store(int64(time.Hour - time.Minute))
+	if _, err := h.dial(t, early, earlyToken); err != nil {
+		t.Errorf("a first dial a minute inside the start grace was refused: %v", err)
+	}
+
+	offset.Store(int64(time.Hour + time.Minute))
+	_, err := h.dial(t, late, lateToken)
+	if err == nil {
+		t.Fatal("a first dial a minute past the start grace was accepted")
+	}
+	if !IsRejection(err) {
+		t.Errorf("an expired first token failed with %v, want a rejection", err)
 	}
 }
 

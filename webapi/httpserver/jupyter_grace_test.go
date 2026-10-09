@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -116,6 +117,85 @@ func TestJupyterRedialWithThePreviousTokenIsAcceptedOnce(t *testing.T) {
 	}
 	if !jupytertunnel.IsRejection(err) {
 		t.Errorf("the replay failed with %v, want a rejection", err)
+	}
+}
+
+// The job carries the start grace as well as the ceiling, so it is removed
+// rather than started once its token is dead, and says why.
+func TestJupyterSubmitRemovesAJobThatDoesNotStartInTime(t *testing.T) {
+	got := buildJupyterSubmitFile(jupyterSubmitArgs{InstanceID: "x", MaxLifetimeSec: 28800, StartGraceSec: 14400})
+	for _, want := range []string{
+		"((time() - QDate) > 14400)",
+		"JobCurrentStartExecutingDate =?= UNDEFINED",
+		"((time() - JobStartDate) > 28800)",
+		" || ",
+		"+PeriodicRemoveReason = ifThenElse(JobCurrentStartExecutingDate =?= UNDEFINED",
+		`"JupyterLab session did not start within 4 hours"`,
+		`"JupyterLab session reached its 8 hours limit"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("submit file lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, "periodic_remove") != 1 {
+		t.Errorf("want exactly one periodic_remove (a second replaces the first):\n%s", got)
+	}
+
+	// And the handler always sends one.
+	stubJupyterHelper(t)
+	schedd := newJupyterFakeSchedd()
+	h := newJupyterRestartHandler(t, filepath.Join(t.TempDir(), "app.db"), schedd)
+	_ = createJupyterSession(t, h)
+	if len(schedd.submitted) != 1 || !strings.Contains(schedd.submitted[0],
+		"((time() - QDate) > "+strconv.Itoa(DefaultJupyterStartGraceSec)+")") {
+		t.Errorf("create submitted no start grace:\n%v", schedd.submitted)
+	}
+}
+
+// The stored session lasts as long as its job can: the time to start plus
+// the time to run. Sized to the ceiling alone it expired early by however
+// long the job had queued.
+func TestJupyterSessionRowCoversTheStartGraceAndTheCeiling(t *testing.T) {
+	stubJupyterHelper(t)
+	schedd := newJupyterFakeSchedd()
+	h := newJupyterRestartHandler(t, filepath.Join(t.TempDir(), "app.db"), schedd)
+	h.jupyterStartGraceSec = 7200
+	h.jupyterMaxLifetimeSec = 3600
+	created := createJupyterSession(t, h)
+
+	row, err := h.jupyterSessionStore().Get(context.Background(), created.InstanceID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := 7200*time.Second + jupyterStartDialSlack + 3600*time.Second
+	if got := row.ExpiresAt.Sub(row.CreatedAt); got < want-5*time.Second || got > want+5*time.Second {
+		t.Errorf("row lives %s, want start grace + dial slack + ceiling = %s", got, want)
+	}
+
+	// The token in the job lives through the start grace, not thirty
+	// minutes.
+	cluster, _ := strconv.Atoi(created.ClusterID)
+	exp := jupyterTokenExpiry(t, schedd.token(t, cluster))
+	wantExp := time.Now().Add(7200*time.Second + jupyterStartDialSlack)
+	if d := exp.Sub(wantExp); d < -time.Minute || d > time.Minute {
+		t.Errorf("the job's token expires at %s, want about %s", exp, wantExp)
+	}
+}
+
+// Zero, negative and past-the-ceiling values never make the start grace
+// absent or unbounded.
+func TestJupyterStartGraceIsBounded(t *testing.T) {
+	cases := []struct{ in, want int }{
+		{0, DefaultJupyterStartGraceSec},
+		{-1, DefaultJupyterStartGraceSec},
+		{60, 60},
+		{MaxJupyterStartGraceSec + 1, MaxJupyterStartGraceSec},
+	}
+	for _, c := range cases {
+		h := &Handler{jupyterStartGraceSec: c.in}
+		if got := h.jupyterStartGrace(); got != c.want {
+			t.Errorf("start grace %d -> %d, want %d", c.in, got, c.want)
+		}
 	}
 }
 

@@ -225,6 +225,22 @@ func TestJupyterSessionSurvivesATunnelDrop(t *testing.T) {
 	ji := setupJupyterIntegration(t)
 	client, baseURL, created := ji.client, ji.baseURL, ji.created
 
+	// The job carries the start grace with a readable reason, which only
+	// a real submit can show reaches the ad.
+	uctx, err := contextAsUser(context.Background(), ji.harness, testUser)
+	if err != nil {
+		t.Fatalf("user context: %v", err)
+	}
+	schedd := htcondor.NewSchedd(ji.location.Name, ji.location.Address)
+	ads, _, err := schedd.QueryWithOptions(uctx, "ClusterId == "+created.ClusterID,
+		&htcondor.QueryOptions{Projection: []string{"PeriodicRemove", "PeriodicRemoveReason"}})
+	if err != nil || len(ads) != 1 {
+		t.Fatalf("query the job: %v (%d ads)", err, len(ads))
+	}
+	if expr, ok := ads[0].Lookup("PeriodicRemoveReason"); !ok || !strings.Contains(expr.String(), "did not start within") {
+		t.Errorf("the job has no start-grace remove reason: %v", expr)
+	}
+
 	// Cut every connection the server holds -- the tunnel among them --
 	// and leave the server up.
 	ji.server.ln.closeAll()
