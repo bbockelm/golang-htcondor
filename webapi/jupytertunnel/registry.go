@@ -60,6 +60,14 @@ type Registry struct {
 	// the helper must request a new instance. Default 30 minutes.
 	tokenTTL time.Duration
 
+	// reconnectGrace is how long a session whose tunnel dropped waits for
+	// its helper to dial back before it is closed. Zero closes it at once.
+	// See SetReconnectGrace.
+	reconnectGrace time.Duration
+
+	// now is the clock tokens are verified against. A seam for tests.
+	now func() time.Time
+
 	// reconnectTTL bounds the token handed to a connected helper for its
 	// next dial. Zero means tokenTTL. See SetReconnectTokenTTL.
 	reconnectTTL time.Duration
@@ -101,6 +109,12 @@ type Instance struct {
 	// do not both get as far as spending a token.
 	connecting bool
 	closed     bool
+	// lostAt is when the tunnel last dropped, zero while it is up or if
+	// it never was. adopted marks a session this process inherited from
+	// the last one, whose tunnel went with it. Either makes an instance
+	// with no live tunnel one that is reconnecting rather than starting.
+	lostAt  time.Time
+	adopted bool
 
 	// Event subscribers receive lifecycle events as they happen. Each
 	// subscriber gets a buffered channel; if it falls behind we drop
@@ -124,6 +138,10 @@ const (
 	// AcceptTunnel has registered the yamux session. The browser should
 	// switch from "submitting…" to "ready".
 	EventTunnelConnected EventKind = "tunnel-connected"
+	// EventTunnelLost fires when a connected helper's tunnel drops. The
+	// instance stays for the reconnect grace period; EventTunnelConnected
+	// follows if the helper dials back, EventClosed if it does not.
+	EventTunnelLost EventKind = "tunnel-lost"
 	// EventClosed fires when the instance is torn down for any reason
 	// (helper hung up, CloseInstance called, etc).
 	EventClosed EventKind = "closed"
@@ -186,6 +204,15 @@ func (i *Instance) publish(kind EventKind) {
 		i.lastEvents = make(map[EventKind]Event)
 	}
 	i.lastEvents[kind] = ev
+	// Connected and lost replace each other: a subscriber arriving later
+	// gets the sticky events in map order, and both at once would leave
+	// it guessing which is current.
+	switch kind {
+	case EventTunnelConnected:
+		delete(i.lastEvents, EventTunnelLost)
+	case EventTunnelLost:
+		delete(i.lastEvents, EventTunnelConnected)
+	}
 	for ch := range i.subscribers {
 		select {
 		case ch <- ev:
@@ -253,6 +280,7 @@ func newRegistry(secret []byte) *Registry {
 		secret:    secret,
 		tokenTTL:  30 * time.Minute,
 		idleTTL:   15 * time.Minute,
+		now:       time.Now,
 		instances: make(map[string]*Instance),
 		burned:    make(map[[tokenNonceLen]byte]struct{}),
 	}
@@ -267,7 +295,12 @@ func (r *Registry) reserve(instanceID string, parsed signedToken) (*Instance, er
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, burned := r.burned[parsed.Nonce]; burned {
+	// The in-memory burned set is the single-use record only without a
+	// roller. With one, the roll is the record -- durable, and with the one
+	// step of grace a helper needs when a drop races delivery of its next
+	// token. Consulting the burned set too would refuse exactly that
+	// helper: the token it still holds is the one this process just saw.
+	if _, burned := r.burned[parsed.Nonce]; burned && r.roller == nil {
 		return nil, ErrTokenInvalid
 	}
 	inst, ok := r.instances[instanceID]
@@ -278,20 +311,28 @@ func (r *Registry) reserve(instanceID string, parsed signedToken) (*Instance, er
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
 	if inst.connecting {
-		return nil, errors.New("jupytertunnel: another helper is already connecting to this instance")
+		return nil, fmt.Errorf("%w: another helper is already connecting to this instance", ErrBusy)
 	}
 	if inst.tunnel != nil && !tunnelDead(inst.tunnel) {
 		// Already connected and still carrying traffic. Refuse so a
 		// helper-restart inside the job doesn't blow up an active session.
-		return nil, errors.New("jupytertunnel: instance already has an active tunnel")
+		//
+		// Busy rather than invalid: the usual way here is a helper that
+		// saw its connection drop before this side did, and it has to
+		// keep trying until the keepalive notices the old tunnel is dead.
+		return nil, fmt.Errorf("%w: instance already has an active tunnel", ErrBusy)
 	}
 	if inst.tunnel != nil {
-		// The old tunnel is gone -- this server restarted, or the socket
-		// broke -- and the helper is dialing back. Replacing it is the
-		// whole point of the redial: refusing here would leave a live
-		// JupyterLab permanently unreachable behind a dead session.
+		// The old tunnel is gone -- the socket broke -- and the helper is
+		// dialing back within the grace period. Replacing it is the whole
+		// point of the redial: refusing here would leave a live JupyterLab
+		// permanently unreachable behind a dead session.
+		//
+		// Left in place until the new one is installed: the grace timer
+		// closes the instance if the tunnel is still this dead one, and a
+		// redial that fails part-way must not leave a session that neither
+		// connects nor expires.
 		_ = inst.tunnel.Close()
-		inst.tunnel = nil
 	}
 	inst.connecting = true
 	return inst, nil
@@ -345,6 +386,13 @@ func (r *Registry) rollToken(instanceID string, spent signedToken) (string, erro
 // the session's own horizon, past which the store has dropped the row anyway.
 func (r *Registry) SetReconnectTokenTTL(d time.Duration) {
 	r.reconnectTTL = d
+}
+
+// SetReconnectGrace sets how long a session whose tunnel dropped is kept
+// for its helper to dial back. Zero or less closes it as soon as the tunnel
+// drops. Call it before the registry is shared.
+func (r *Registry) SetReconnectGrace(d time.Duration) {
+	r.reconnectGrace = d
 }
 
 // rollTimeout bounds the nonce swap. Short: it is one indexed UPDATE, and a
@@ -479,6 +527,7 @@ func (r *Registry) AdoptInstance(id, owner string, created time.Time, meta map[s
 		Created: created,
 		Owner:   owner,
 		meta:    copyMeta(meta),
+		adopted: true,
 	}
 	r.instances[id] = inst
 	return inst, nil
@@ -524,7 +573,19 @@ func (r *Registry) ListByOwner(owner string) []*Instance {
 func (i *Instance) HasTunnel() bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return i.tunnel != nil
+	return i.tunnel != nil && !i.tunnel.IsClosed()
+}
+
+// Reconnecting reports whether this session had a tunnel and is waiting for
+// its helper to dial back: one dropped in this process, or one inherited
+// from the last.
+func (i *Instance) Reconnecting() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.closed || (i.tunnel != nil && !i.tunnel.IsClosed()) {
+		return false
+	}
+	return !i.lostAt.IsZero() || i.adopted
 }
 
 // AcceptTunnel hands a websocket-upgraded connection to the registry. The
@@ -537,7 +598,7 @@ func (i *Instance) HasTunnel() bool {
 // AcceptTunnel returns once the tunnel is registered; the caller waits via
 // inst.Wait() for teardown.
 func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (*Instance, error) {
-	parsed, err := parseAndVerify(r.secret, bearer, time.Now())
+	parsed, err := parseAndVerify(r.secret, bearer, r.now())
 	if err != nil {
 		return nil, err
 	}
@@ -583,20 +644,78 @@ func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (
 	}
 
 	inst.mu.Lock()
+	if inst.closed {
+		// The grace period ran out while this dial was in flight.
+		inst.mu.Unlock()
+		_ = session.Close()
+		return nil, ErrTokenInvalid
+	}
 	inst.tunnel = session
 	inst.pending = nil
 	inst.nextToken = nextToken
+	inst.lostAt = time.Time{}
+	inst.adopted = false
 	inst.mu.Unlock()
 
-	r.burned[parsed.Nonce] = struct{}{}
+	if r.roller == nil {
+		r.burned[parsed.Nonce] = struct{}{}
+	}
 	inst.publish(EventTunnelConnected)
 
-	// Reap when the underlying yamux session closes (helper hung up, etc).
 	go func() {
 		<-session.CloseChan()
-		r.CloseInstance(instanceID)
+		r.tunnelLost(inst, session)
 	}()
 	return inst, nil
+}
+
+// tunnelLost handles a tunnel that has dropped.
+//
+// A drop is not the end of a session. The job and JupyterLab are still
+// running, the helper holds a token for exactly this, and it dials back
+// within seconds. Closing the instance here -- as this once did -- left
+// that redial nothing to attach to: it was refused, and a refused helper
+// ends its job, so a network blip of any length ended the session.
+//
+// The instance stays, without a tunnel, for the grace period. A redial in
+// that time replaces the dead tunnel (reserve); past it, the session is
+// closed as before.
+func (r *Registry) tunnelLost(inst *Instance, session *yamux.Session) {
+	inst.mu.Lock()
+	if inst.closed || inst.tunnel != session {
+		// Closed deliberately, or already replaced by a redial.
+		inst.mu.Unlock()
+		return
+	}
+	grace := r.reconnectGrace
+	if grace <= 0 {
+		inst.mu.Unlock()
+		r.CloseInstance(inst.ID)
+		return
+	}
+	inst.lostAt = r.now()
+	inst.mu.Unlock()
+	inst.publish(EventTunnelLost)
+
+	var expire func()
+	expire = func() {
+		inst.mu.Lock()
+		switch {
+		case inst.closed || inst.tunnel != session:
+			// Closed, or the helper came back.
+			inst.mu.Unlock()
+			return
+		case inst.connecting:
+			// A redial is in flight. Let it finish rather than close the
+			// session out from under it; look again shortly.
+			inst.mu.Unlock()
+			time.AfterFunc(time.Second, expire)
+			return
+		}
+		inst.mu.Unlock()
+		r.CloseInstance(inst.ID)
+	}
+	time.AfterFunc(grace, expire)
 }
 
 // CloseInstance forcibly tears down an instance. Subsequent Lookup returns
@@ -638,7 +757,16 @@ func (r *Registry) Proxy(inst *Instance, upstreamPath string, w http.ResponseWri
 	tun := inst.tunnel
 	inst.mu.Unlock()
 	if tun == nil || tun.IsClosed() {
-		http.Error(w, "tunnel not connected", http.StatusBadGateway)
+		// 503, not 404 or 502: the session exists and is expected back,
+		// and Retry-After says when to look again. A drop inside the
+		// reconnect grace period lands here, as does a session whose
+		// helper has not dialed in yet.
+		msg := "JupyterLab has not connected yet"
+		if inst.Reconnecting() {
+			msg = "JupyterLab is reconnecting"
+		}
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, msg, http.StatusServiceUnavailable)
 		return
 	}
 

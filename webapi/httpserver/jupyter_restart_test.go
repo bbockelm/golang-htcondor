@@ -37,6 +37,7 @@ type jupyterFakeSchedd struct {
 	status      map[int]int // cluster -> JobStatus
 	spooled     map[int]fs.FS
 	constraints []string
+	submitted   []string
 	submitErr   error
 	spoolErr    error
 }
@@ -45,12 +46,13 @@ func newJupyterFakeSchedd() *jupyterFakeSchedd {
 	return &jupyterFakeSchedd{nextCluster: 4242, status: map[int]int{}, spooled: map[int]fs.FS{}}
 }
 
-func (f *jupyterFakeSchedd) SubmitRemote(_ context.Context, _ string) (int, []*classad.ClassAd, error) {
+func (f *jupyterFakeSchedd) SubmitRemote(_ context.Context, submitFile string) (int, []*classad.ClassAd, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.submitErr != nil {
 		return 0, nil, f.submitErr
 	}
+	f.submitted = append(f.submitted, submitFile)
 	cluster := f.nextCluster
 	f.nextCluster++
 	f.status[cluster] = 1
@@ -439,6 +441,16 @@ func startJupyterTestHelper(t *testing.T, instanceID, token string) *jupyterTest
 // Returns that next token.
 func (h *jupyterTestHelper) connect(t *testing.T, baseURL string) string {
 	t.Helper()
+	next, err := h.tryConnect(t, baseURL)
+	if err != nil {
+		t.Fatalf("the helper's dial ended before it was handed a token: %v", err)
+	}
+	return next
+}
+
+// tryConnect is connect, returning the error of a dial that was refused.
+func (h *jupyterTestHelper) tryConnect(t *testing.T, baseURL string) (string, error) {
+	t.Helper()
 	tok, err := os.ReadFile(h.tokenPath)
 	if err != nil {
 		t.Fatalf("read token: %v", err)
@@ -462,13 +474,24 @@ func (h *jupyterTestHelper) connect(t *testing.T, baseURL string) string {
 	}()
 	select {
 	case tok := <-next:
-		return tok
+		return tok, nil
 	case err := <-done:
-		t.Fatalf("the helper's dial ended before it was handed a token: %v", err)
+		if err == nil {
+			err = errors.New("the tunnel closed before a token was handed over")
+		}
+		return "", err
 	case <-time.After(10 * time.Second):
 		t.Fatal("the helper was never handed its next token")
 	}
-	return ""
+	return "", nil
+}
+
+// useToken puts tok on file as the token the helper dials with next.
+func (h *jupyterTestHelper) useToken(t *testing.T, tok string) {
+	t.Helper()
+	if err := os.WriteFile(h.tokenPath, []byte(tok), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
 }
 
 // jupyterTokenExpiry reads the expiry out of a tunnel token: base64url of

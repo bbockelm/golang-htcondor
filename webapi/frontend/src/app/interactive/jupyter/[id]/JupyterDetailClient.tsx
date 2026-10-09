@@ -253,8 +253,14 @@ export default function JupyterDetailClient() {
 
       {status === 'executing' && (
         <Banner kind="info">
-          The executable is running on the worker; waiting for the helper
-          to dial back over the websocket tunnel…
+          {data?.reconnecting ? (
+            <>Connection to the session was lost. Reconnecting…</>
+          ) : (
+            <>
+              The executable is running on the worker; waiting for the helper
+              to dial back over the websocket tunnel…
+            </>
+          )}
         </Banner>
       )}
 

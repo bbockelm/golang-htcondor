@@ -448,6 +448,10 @@ type Handler struct {
 	// Both zero mean the operator turned that limit off.
 	jupyterMaxLifetimeSec int
 	jupyterKernelIdleSec  int
+	// jupyterReconnectGraceSec is how long a session whose tunnel dropped
+	// waits for its helper. Zero means the default; see
+	// boundJupyterGraceSec.
+	jupyterReconnectGraceSec int
 
 	// templateLibrary serves the batch-submission template catalog
 	// (built-in + global YAML + user-saved JSON). nil = the
@@ -980,6 +984,9 @@ type HandlerConfig struct {
 	// session; see handlers_jupyter.go. Zero disables that limit.
 	JupyterMaxLifetimeSec int
 	JupyterKernelIdleSec  int
+	// JupyterReconnectGraceSec: see Handler.jupyterReconnectGraceSec. Zero
+	// means the default.
+	JupyterReconnectGraceSec int
 
 	// TemplateGlobalPath is an optional YAML file with operator-curated
 	// batch-submission templates. Empty disables. Built-in templates
@@ -1089,6 +1096,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		jupyterWorkDir:            cfg.JupyterWorkDir,
 		jupyterMaxLifetimeSec:     cfg.JupyterMaxLifetimeSec,
 		jupyterKernelIdleSec:      cfg.JupyterKernelIdleSec,
+		jupyterReconnectGraceSec:  cfg.JupyterReconnectGraceSec,
 		// templateLibrary is filled in after the unified DB is open;
 		// see below. Leaving it nil here makes it obvious that the
 		// catalog isn't available until the post-DB path runs.

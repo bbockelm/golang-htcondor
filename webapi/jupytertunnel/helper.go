@@ -72,6 +72,80 @@ type HelperConfig struct {
 	// after it has been persisted. A seam for tests, which have no
 	// business reading the helper's token file.
 	OnNextToken func(token string)
+
+	// IdleClock, when set, carries the idle measurement across calls, so a
+	// caller that reconnects keeps one clock for the whole session. Nil
+	// gives each call a fresh one.
+	IdleClock *IdleClock
+
+	// OnConnected, when set, is called once the tunnel is up.
+	OnConnected func()
+}
+
+// IdleClock measures how long a session has gone without a proxied request,
+// counting only time the tunnel was up.
+//
+// Both halves matter once the helper reconnects. A disconnect is not
+// idleness -- nobody could reach the session to use it -- so time spent
+// down is not counted, and a server outage does not end a session the moment
+// it comes back. Nor is a reconnect activity: restarting the clock on every
+// dial would let a flapping tunnel keep an abandoned session alive forever.
+// So the clock pauses while the tunnel is down and resumes where it was.
+type IdleClock struct {
+	mu        sync.Mutex
+	last      time.Time // last activity, shifted forward by time spent down
+	downSince time.Time // zero while the tunnel is up
+}
+
+// Touch records activity.
+func (c *IdleClock) Touch() { c.touch(time.Now()) }
+
+func (c *IdleClock) touch(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.last = now
+}
+
+// Up records that the tunnel is (re)established.
+func (c *IdleClock) Up() { c.up(time.Now()) }
+
+func (c *IdleClock) up(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.last.IsZero():
+		c.last = now
+	case !c.downSince.IsZero():
+		c.last = c.last.Add(now.Sub(c.downSince))
+	}
+	c.downSince = time.Time{}
+}
+
+// Down records that the tunnel has dropped.
+func (c *IdleClock) Down() { c.down(time.Now()) }
+
+func (c *IdleClock) down(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.downSince.IsZero() {
+		c.downSince = now
+	}
+}
+
+// IdleFor is how long the session has been idle while connected.
+func (c *IdleClock) IdleFor() time.Duration { return c.idleFor(time.Now()) }
+
+func (c *IdleClock) idleFor(now time.Time) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.last.IsZero() {
+		return 0
+	}
+	end := now
+	if !c.downSince.IsZero() {
+		end = c.downSince
+	}
+	return end.Sub(c.last)
 }
 
 // RunHelperTunnel dials the upstream websocket, wraps it with yamux as the
@@ -155,14 +229,23 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 		_ = session.Close()
 	}()
 
-	// Idle-shutdown watcher: if no stream is accepted within
-	// cfg.IdleTimeout, close the session. Each successful Accept
-	// updates lastActivity (atomically) so a busy session is never
-	// reaped. We tick at IdleTimeout/4 so the worst-case overshoot is
-	// 25% — small enough that "30 minutes" really means 30–37
-	// minutes, not 60.
-	var lastActivity atomic.Int64
-	lastActivity.Store(time.Now().UnixNano())
+	// Idle-shutdown watcher: if no proxied stream arrives within
+	// cfg.IdleTimeout of connected time, close the session. Each proxied
+	// stream touches the clock (handleOrControl) so a busy session is never
+	// reaped; the control stream the server opens on every connect does
+	// not, or a reconnect would count as use. We tick at IdleTimeout/4 so
+	// the worst-case overshoot is 25% — small enough that "30 minutes"
+	// really means 30–37 minutes, not 60.
+	clock := cfg.IdleClock
+	if clock == nil {
+		clock = &IdleClock{}
+		cfg.IdleClock = clock
+	}
+	clock.Up()
+	defer clock.Down()
+	if cfg.OnConnected != nil {
+		cfg.OnConnected()
+	}
 	// Set when the watcher below gave up, so the caller can tell an idle
 	// session from a lost one. They look identical at the accept loop --
 	// both are a closed session -- and a reconnect loop that cannot tell
@@ -180,9 +263,12 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 				select {
 				case <-ctx.Done():
 					return
+				case <-session.CloseChan():
+					// This tunnel is gone; the next one runs its own
+					// watcher over the same clock.
+					return
 				case <-t.C:
-					last := time.Unix(0, lastActivity.Load())
-					if time.Since(last) > cfg.IdleTimeout {
+					if clock.IdleFor() > cfg.IdleTimeout {
 						logf("helper: idle timeout (%s with no streams); closing session",
 							cfg.IdleTimeout)
 						idledOut.Store(true)
@@ -206,7 +292,6 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 			}
 			return fmt.Errorf("helper: accept stream: %w", err)
 		}
-		lastActivity.Store(time.Now().UnixNano())
 		// Pass the request-scoped context so the UDS dial inherits the
 		// helper's lifetime (gosec G118): cancelling ctx — which
 		// happens when the parent stops the tunnel — must also abort
@@ -223,6 +308,9 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 func handleOrControl(ctx context.Context, stream net.Conn, cfg HelperConfig, logf func(string, ...any)) {
 	br, isControl := peekControl(stream)
 	if !isControl {
+		if cfg.IdleClock != nil {
+			cfg.IdleClock.Touch()
+		}
 		handleBufferedStream(ctx, stream, br, cfg.SocketPath, logf)
 		return
 	}

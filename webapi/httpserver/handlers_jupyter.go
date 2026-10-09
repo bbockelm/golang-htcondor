@@ -83,6 +83,7 @@ func (s *Handler) getOrCreateJupyterRegistry() (*jupytertunnel.Registry, error) 
 		if err == nil {
 			reg, rerr := jupytertunnel.NewRegistryWithSecret(secret, store)
 			if rerr == nil {
+				s.configureJupyterRegistry(reg)
 				reg.SetReconnectTokenTTL(s.jupyterSessionTTL())
 				s.jupyterRegistry = reg
 				s.adoptJupyterSessions(context.Background(), reg, store)
@@ -99,8 +100,40 @@ func (s *Handler) getOrCreateJupyterRegistry() (*jupytertunnel.Registry, error) 
 	if err != nil {
 		return nil, err
 	}
+	s.configureJupyterRegistry(reg)
 	s.jupyterRegistry = reg
 	return reg, nil
+}
+
+// configureJupyterRegistry applies the session timing a registry needs
+// whether or not it has a database behind it.
+func (s *Handler) configureJupyterRegistry(reg *jupytertunnel.Registry) {
+	reg.SetReconnectGrace(time.Duration(s.jupyterReconnectGrace()) * time.Second)
+}
+
+// Default and ceiling for the JupyterLab reconnect grace period. The
+// ceiling keeps it from being effectively unbounded: it is how long a
+// session nobody can reach stays listed.
+const (
+	DefaultJupyterReconnectGraceSec = 5 * 60
+	MaxJupyterReconnectGraceSec     = 60 * 60
+)
+
+// boundJupyterGraceSec applies a grace period's default and ceiling. The
+// configuration loader warns about values it changes; this is the backstop
+// for callers that build a Handler directly.
+func boundJupyterGraceSec(v, def, ceiling int) int {
+	switch {
+	case v <= 0:
+		return def
+	case v > ceiling:
+		return ceiling
+	}
+	return v
+}
+
+func (s *Handler) jupyterReconnectGrace() int {
+	return boundJupyterGraceSec(s.jupyterReconnectGraceSec, DefaultJupyterReconnectGraceSec, MaxJupyterReconnectGraceSec)
 }
 
 // jupyterSessionTTL is how long a stored session stays valid: the job's
@@ -300,12 +333,15 @@ func (s *Handler) handleJupyterPath(w http.ResponseWriter, r *http.Request) {
 // cluster is gone — the SPA falls back to a "loading"/"connected only"
 // view in that case.
 type JupyterInstanceSummary struct {
-	InstanceID                   string `json:"instance_id"`
-	ClusterID                    string `json:"cluster_id,omitempty"`
-	Image                        string `json:"image,omitempty"`
-	Owner                        string `json:"owner"`
-	CreatedAt                    string `json:"created_at"`
-	Connected                    bool   `json:"connected"` // helper has dialed back
+	InstanceID string `json:"instance_id"`
+	ClusterID  string `json:"cluster_id,omitempty"`
+	Image      string `json:"image,omitempty"`
+	Owner      string `json:"owner"`
+	CreatedAt  string `json:"created_at"`
+	Connected  bool   `json:"connected"` // helper has dialed back
+	// Reconnecting: the helper was connected and its tunnel dropped (or
+	// went with the last server process); it is expected to dial back.
+	Reconnecting                 bool   `json:"reconnecting,omitempty"`
 	ProxyPath                    string `json:"proxy_path"`
 	EventsPath                   string `json:"events_path"`
 	JobStatus                    int    `json:"job_status,omitempty"`
@@ -546,14 +582,15 @@ func (s *Handler) handleJupyterGetInstance(w http.ResponseWriter, r *http.Reques
 // Pulled out so list + single-get share the conversion.
 func instanceToSummary(inst *jupytertunnel.Instance) JupyterInstanceSummary {
 	return JupyterInstanceSummary{
-		InstanceID: inst.ID,
-		ClusterID:  inst.MetaValue("cluster_id"),
-		Image:      inst.MetaValue("image"),
-		Owner:      inst.Owner,
-		CreatedAt:  inst.Created.UTC().Format(time.RFC3339),
-		Connected:  inst.HasTunnel(),
-		ProxyPath:  fmt.Sprintf("/api/v1/jupyter/instances/%s/proxy/", inst.ID),
-		EventsPath: fmt.Sprintf("/api/v1/jupyter/instances/%s/events", inst.ID),
+		InstanceID:   inst.ID,
+		ClusterID:    inst.MetaValue("cluster_id"),
+		Image:        inst.MetaValue("image"),
+		Owner:        inst.Owner,
+		CreatedAt:    inst.Created.UTC().Format(time.RFC3339),
+		Connected:    inst.HasTunnel(),
+		Reconnecting: inst.Reconnecting(),
+		ProxyPath:    fmt.Sprintf("/api/v1/jupyter/instances/%s/proxy/", inst.ID),
+		EventsPath:   fmt.Sprintf("/api/v1/jupyter/instances/%s/events", inst.ID),
 	}
 }
 
@@ -1596,8 +1633,12 @@ func (s *Handler) handleJupyterTunnel(w http.ResponseWriter, r *http.Request, id
 	if err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "jupyter tunnel rejected",
 			"instance", id, "error", err)
-		_ = ws.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "tunnel auth failed"))
+		reason := "tunnel auth failed"
+		code := jupytertunnel.RefusalCloseCode(err)
+		if code != websocket.ClosePolicyViolation {
+			reason = "try again"
+		}
+		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
 		_ = ws.Close()
 		return
 	}

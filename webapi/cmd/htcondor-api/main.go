@@ -627,6 +627,36 @@ func loadJupyterLimitSec(cfg *config.Config, logger *logging.Logger, name string
 	return n
 }
 
+// loadJupyterGraceSec reads a JupyterLab grace period, in seconds.
+//
+// Unlike the limits above it cannot be turned off: an unbounded reconnect
+// grace is a session nobody can reach that never leaves the list. Zero, negative or unreadable falls back to the default and a
+// value past the ceiling is clamped, each with a warning.
+func loadJupyterGraceSec(cfg *config.Config, logger *logging.Logger, name string, def, ceiling int) int {
+	v, ok := cfg.Get(name)
+	if !ok || strings.TrimSpace(v) == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		if logger != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"Ignoring a JupyterLab grace period that is not a positive number of seconds; using the default",
+				"parameter", name, "value", v, "default_seconds", def)
+		}
+		return def
+	}
+	if n > ceiling {
+		if logger != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"Clamping a JupyterLab grace period to its maximum",
+				"parameter", name, "value", n, "max_seconds", ceiling)
+		}
+		return ceiling
+	}
+	return n
+}
+
 // loadTemplateGlobalPath resolves the YAML file (if any) the operator
 // has populated with shared batch-submission templates. Empty disables.
 func loadTemplateGlobalPath(cfg *config.Config) string {
@@ -2052,18 +2082,20 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
 		JupyterMaxLifetimeSec:      loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_MAX_LIFETIME_SEC", defaultJupyterMaxLifetimeSec),
 		JupyterKernelIdleSec:       loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_KERNEL_IDLE_SEC", defaultJupyterKernelIdleSec),
-		InteractiveExtraSubmit:     loadInteractiveExtraSubmit(cfg),
-		DagmanPath:                 firstConfigValue(cfg, "HTTP_API_DAGMAN_PATH"),
-		JobQueueLogPath:            jobQueueLogPath,
-		DagmanEnvironment:          loadDagmanEnvironment(cfg, logger),
-		InteractiveRequirements:    loadInteractiveRequirements(cfg, logger),
-		VSCodeImage:                firstConfigValue(cfg, "HTTP_API_VSCODE_IMAGE"),
-		Build:                      loadBuildConfig(cfg, logger),
-		DBMirrorTokenSubject:       firstConfigValue(cfg, "HTTP_API_DBMIRROR_TOKEN_SUBJECT"),
-		SubmitFileDefaults:         loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_DEFAULTS"),
-		SubmitFileOverrides:        loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_OVERRIDES"),
-		TemplateGlobalPath:         loadTemplateGlobalPath(cfg),
-		HTCondorConfig:             cfg,
+		JupyterReconnectGraceSec: loadJupyterGraceSec(cfg, logger, "HTTP_API_JUPYTER_RECONNECT_GRACE_SEC",
+			httpserver.DefaultJupyterReconnectGraceSec, httpserver.MaxJupyterReconnectGraceSec),
+		InteractiveExtraSubmit:  loadInteractiveExtraSubmit(cfg),
+		DagmanPath:              firstConfigValue(cfg, "HTTP_API_DAGMAN_PATH"),
+		JobQueueLogPath:         jobQueueLogPath,
+		DagmanEnvironment:       loadDagmanEnvironment(cfg, logger),
+		InteractiveRequirements: loadInteractiveRequirements(cfg, logger),
+		VSCodeImage:             firstConfigValue(cfg, "HTTP_API_VSCODE_IMAGE"),
+		Build:                   loadBuildConfig(cfg, logger),
+		DBMirrorTokenSubject:    firstConfigValue(cfg, "HTTP_API_DBMIRROR_TOKEN_SUBJECT"),
+		SubmitFileDefaults:      loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_DEFAULTS"),
+		SubmitFileOverrides:     loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_OVERRIDES"),
+		TemplateGlobalPath:      loadTemplateGlobalPath(cfg),
+		HTCondorConfig:          cfg,
 		// LLM/chat configuration. Optional; the chat endpoint
 		// returns 503 unless all three (key file, MCP enabled, key
 		// readable) line up. The values are zero-strings when
@@ -2428,11 +2460,13 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		EnableIDP:          true,
 		// Demo mode only: gives the browser tests a non-admin identity
 		// to check authorization boundaries against.
-		SeedDemoUser:           true,
-		IDPIssuer:              httpBaseURL,
-		JupyterWorkDir:         loadJupyterWorkDir(cfg),
-		JupyterMaxLifetimeSec:  loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_MAX_LIFETIME_SEC", defaultJupyterMaxLifetimeSec),
-		JupyterKernelIdleSec:   loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_KERNEL_IDLE_SEC", defaultJupyterKernelIdleSec),
+		SeedDemoUser:          true,
+		IDPIssuer:             httpBaseURL,
+		JupyterWorkDir:        loadJupyterWorkDir(cfg),
+		JupyterMaxLifetimeSec: loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_MAX_LIFETIME_SEC", defaultJupyterMaxLifetimeSec),
+		JupyterKernelIdleSec:  loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_KERNEL_IDLE_SEC", defaultJupyterKernelIdleSec),
+		JupyterReconnectGraceSec: loadJupyterGraceSec(cfg, logger, "HTTP_API_JUPYTER_RECONNECT_GRACE_SEC",
+			httpserver.DefaultJupyterReconnectGraceSec, httpserver.MaxJupyterReconnectGraceSec),
 		InteractiveExtraSubmit: loadInteractiveExtraSubmit(cfg),
 		TemplateGlobalPath:     loadTemplateGlobalPath(cfg),
 		HTCondorConfig:         cfg,

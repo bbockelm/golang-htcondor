@@ -147,6 +147,9 @@ type Config struct {
 	// which JupyterLab culls and shuts down. Zero disables either.
 	JupyterMaxLifetimeSec int
 	JupyterKernelIdleSec  int
+	// JupyterReconnectGraceSec is how long a session whose tunnel dropped
+	// is kept for its helper to dial back. Zero means the default.
+	JupyterReconnectGraceSec int
 
 	// InteractiveExtraSubmit is an optional verbatim block of extra
 	// HTCondor submit-file directives merged into every
@@ -442,6 +445,7 @@ func NewServer(cfg Config) (*Server, error) {
 		JupyterWorkDir:              cfg.JupyterWorkDir,
 		JupyterMaxLifetimeSec:       cfg.JupyterMaxLifetimeSec,
 		JupyterKernelIdleSec:        cfg.JupyterKernelIdleSec,
+		JupyterReconnectGraceSec:    cfg.JupyterReconnectGraceSec,
 		InteractiveExtraSubmit:      cfg.InteractiveExtraSubmit,
 		DagmanPath:                  cfg.DagmanPath,
 		DagmanEnvironment:           cfg.DagmanEnvironment,

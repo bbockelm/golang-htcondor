@@ -39,117 +39,14 @@ import (
 // process adopted it as cluster 0, found no such job, and reaped it on the
 // first list -- (a) fails.
 func TestJupyterSessionSurvivesAPIServerRestart(t *testing.T) {
-	if testing.Short() {
-		t.Skip("integration test skipped in short mode")
-	}
-	if _, err := exec.LookPath("condor_master"); err != nil {
-		t.Skip("condor_master not in PATH; skipping")
-	}
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 not in PATH; the stand-in JupyterLab needs it")
-	}
-	goTool, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("go not in PATH; the helper is built by this test")
-	}
-
-	// --- the helper, built for this host, and a stand-in JupyterLab ---
-	work := t.TempDir()
-	helperBytes := buildJupyterHelperForTest(t, goTool, work)
-	prevBytes, prevUniverse := jupyterHelperBytesFor, jupyterUniverse
-	jupyterHelperBytesFor = func(goos, goarch string) ([]byte, error) {
-		if goos != runtime.GOOS || goarch != runtime.GOARCH {
-			return nil, fmt.Errorf("test helper is %s/%s, asked for %s/%s", runtime.GOOS, runtime.GOARCH, goos, goarch)
-		}
-		return helperBytes, nil
-	}
-	// Vanilla on every host: the test pool's execute node is this machine,
-	// with no container runtime to speak of.
-	jupyterUniverse = func() string { return "vanilla" }
-	t.Cleanup(func() { jupyterHelperBytesFor, jupyterUniverse = prevBytes, prevUniverse })
-
-	fakeBin := filepath.Join(work, "fakebin")
-	if err := os.MkdirAll(fakeBin, 0o750); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	//nolint:gosec // G306: the job runs it, so it has to be executable
-	if err := os.WriteFile(filepath.Join(fakeBin, "jupyter"),
-		[]byte("#!"+python+"\n"+fakeJupyterPy), 0o700); err != nil {
-		t.Fatalf("write fake jupyter: %v", err)
-	}
-
-	// --- the pool ---
-	harness := htcondor.SetupCondorHarness(t)
-	if err := harness.WaitForDaemons(); err != nil {
-		t.Fatalf("daemons: %v", err)
-	}
-	if err := harness.WaitForStartd(45 * time.Second); err != nil {
-		t.Fatalf("startd: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-	defer cancel()
-	collector := htcondor.NewCollector(harness.GetCollectorAddr())
-	location, err := collector.LocateDaemon(ctx, "Schedd", "")
-	if err != nil {
-		t.Fatalf("locate schedd: %v", err)
-	}
-
-	// --- the first API server ---
-	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	baseURL := "http://" + addr
-	cfg := Config{
-		ListenAddr:               addr,
-		ScheddName:               location.Name,
-		ScheddAddr:               location.Address,
-		UserHeader:               "X-Test-User",
-		UserHeaderTrustAnyUnsafe: true,
-		SigningKeyPath:           harness.GetSigningKeyPath(),
-		TrustDomain:              harness.GetTrustDomain(),
-		UIDDomain:                harness.GetTrustDomain(),
-		// The durable application database both processes share.
-		OAuth2DBPath: filepath.Join(work, "app.db"),
-		// Puts the stand-in JupyterLab first on the job's PATH. The
-		// launcher uses a jupyter it finds there rather than building one.
-		InteractiveExtraSubmit: fmt.Sprintf("environment = \"PATH=%s:/usr/bin:/bin\"\n", fakeBin),
-	}
-	first := startJupyterTestServer(t, cfg, ln)
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	created := jupyterIntegrationCreate(t, client, baseURL)
-	t.Logf("created instance %s, cluster %s", created.InstanceID, created.ClusterID)
-	defer func() {
-		cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer ccancel()
-		if uctx, err := contextAsUser(cctx, harness, testUser); err == nil {
-			schedd := htcondor.NewSchedd(location.Name, location.Address)
-			_, _ = schedd.RemoveJobs(uctx, "ClusterId == "+created.ClusterID, "test cleanup")
-		}
-	}()
-	defer func() {
-		if t.Failed() {
-			harness.PrintScheddLog()
-			harness.PrintStarterLogs()
-		}
-	}()
-
-	// The job runs, the helper dials in, and a request reaches "JupyterLab".
-	waitJupyterConnected(t, client, baseURL, created.InstanceID, 150*time.Second)
-	if err := retryFor(30*time.Second, func() error {
-		return jupyterProxyWorks(client, baseURL, created.InstanceID)
-	}); err != nil {
-		t.Fatalf("precondition: a proxied request does not work before the restart: %v", err)
-	}
+	ji := setupJupyterIntegration(t)
+	client, baseURL, created := ji.client, ji.baseURL, ji.created
 
 	// --- the restart ---
-	first.crash(t)
+	ji.server.crash(t)
 	t.Log("first API server is gone; starting the second over the same database")
-	ln2 := relisten(t, addr, 15*time.Second)
-	second := startJupyterTestServer(t, cfg, ln2)
+	ln2 := relisten(t, ji.cfg.ListenAddr, 15*time.Second)
+	second := startJupyterTestServer(t, ji.cfg, ln2)
 	defer second.crash(t)
 
 	// (a) Still listed, under its job.
@@ -189,6 +86,169 @@ func TestJupyterSessionSurvivesAPIServerRestart(t *testing.T) {
 		return jupyterProxyWorks(client, baseURL, created.InstanceID)
 	}); err != nil {
 		t.Errorf("a proxied request does not work after the restart: %v", err)
+	}
+}
+
+// jupyterIntegration is a pool, an API server, and a JupyterLab session
+// running in it with its helper connected and a proxied request working.
+type jupyterIntegration struct {
+	harness  *htcondor.CondorTestHarness
+	location *htcondor.DaemonLocation
+	cfg      Config
+	server   *jupyterTestServer
+	client   *http.Client
+	baseURL  string
+	created  JupyterCreateResponse
+}
+
+func setupJupyterIntegration(t *testing.T) *jupyterIntegration {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("integration test skipped in short mode")
+	}
+	if _, err := exec.LookPath("condor_master"); err != nil {
+		t.Skip("condor_master not in PATH; skipping")
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not in PATH; the stand-in JupyterLab needs it")
+	}
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go not in PATH; the helper is built by this test")
+	}
+	// --- the helper, built for this host, and a stand-in JupyterLab ---
+	work := t.TempDir()
+	helperBytes := buildJupyterHelperForTest(t, goTool, work)
+	prevBytes, prevUniverse := jupyterHelperBytesFor, jupyterUniverse
+	jupyterHelperBytesFor = func(goos, goarch string) ([]byte, error) {
+		if goos != runtime.GOOS || goarch != runtime.GOARCH {
+			return nil, fmt.Errorf("test helper is %s/%s, asked for %s/%s", runtime.GOOS, runtime.GOARCH, goos, goarch)
+		}
+		return helperBytes, nil
+	}
+	// Vanilla on every host: the test pool's execute node is this machine,
+	// with no container runtime to speak of.
+	jupyterUniverse = func() string { return "vanilla" }
+	t.Cleanup(func() { jupyterHelperBytesFor, jupyterUniverse = prevBytes, prevUniverse })
+
+	fakeBin := filepath.Join(work, "fakebin")
+	if err := os.MkdirAll(fakeBin, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	//nolint:gosec // G306: the job runs it, so it has to be executable
+	if err := os.WriteFile(filepath.Join(fakeBin, "jupyter"),
+		[]byte("#!"+python+"\n"+fakeJupyterPy), 0o700); err != nil {
+		t.Fatalf("write fake jupyter: %v", err)
+	}
+
+	// --- the pool ---
+	harness := htcondor.SetupCondorHarness(t)
+	if err := harness.WaitForDaemons(); err != nil {
+		t.Fatalf("daemons: %v", err)
+	}
+	if err := harness.WaitForStartd(45 * time.Second); err != nil {
+		t.Fatalf("startd: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	t.Cleanup(cancel)
+	collector := htcondor.NewCollector(harness.GetCollectorAddr())
+	location, err := collector.LocateDaemon(ctx, "Schedd", "")
+	if err != nil {
+		t.Fatalf("locate schedd: %v", err)
+	}
+
+	// --- the first API server ---
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	baseURL := "http://" + addr
+	cfg := Config{
+		ListenAddr:               addr,
+		ScheddName:               location.Name,
+		ScheddAddr:               location.Address,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true,
+		SigningKeyPath:           harness.GetSigningKeyPath(),
+		TrustDomain:              harness.GetTrustDomain(),
+		UIDDomain:                harness.GetTrustDomain(),
+		// The durable application database both processes share.
+		OAuth2DBPath: filepath.Join(work, "app.db"),
+		// Puts the stand-in JupyterLab first on the job's PATH. The
+		// launcher uses a jupyter it finds there rather than building one.
+		InteractiveExtraSubmit: fmt.Sprintf("environment = \"PATH=%s:/usr/bin:/bin\"\n", fakeBin),
+	}
+	first := startJupyterTestServer(t, cfg, ln)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	created := jupyterIntegrationCreate(t, client, baseURL)
+	t.Logf("created instance %s, cluster %s", created.InstanceID, created.ClusterID)
+	t.Cleanup(func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer ccancel()
+		if uctx, err := contextAsUser(cctx, harness, testUser); err == nil {
+			schedd := htcondor.NewSchedd(location.Name, location.Address)
+			_, _ = schedd.RemoveJobs(uctx, "ClusterId == "+created.ClusterID, "test cleanup")
+		}
+	})
+	t.Cleanup(func() {
+		if t.Failed() {
+			harness.PrintScheddLog()
+			harness.PrintStarterLogs()
+		}
+	})
+
+	// The job runs, the helper dials in, and a request reaches "JupyterLab".
+	waitJupyterConnected(t, client, baseURL, created.InstanceID, 150*time.Second)
+	if err := retryFor(30*time.Second, func() error {
+		return jupyterProxyWorks(client, baseURL, created.InstanceID)
+	}); err != nil {
+		t.Fatalf("precondition: a proxied request does not work: %v", err)
+	}
+	return &jupyterIntegration{
+		harness: harness, location: location, cfg: cfg, server: first,
+		client: client, baseURL: baseURL, created: created,
+	}
+}
+
+// TestJupyterSessionSurvivesATunnelDrop cuts the helper's tunnel connection
+// with the API server still running -- a network drop rather than a
+// restart -- and checks the session waits for the helper and works again
+// once it has dialed back.
+//
+// Before the reconnect grace period the drop closed the session on the
+// spot: the helper's redial was refused, the refused helper ended its job,
+// and the session was gone from the list.
+func TestJupyterSessionSurvivesATunnelDrop(t *testing.T) {
+	ji := setupJupyterIntegration(t)
+	client, baseURL, created := ji.client, ji.baseURL, ji.created
+
+	// Cut every connection the server holds -- the tunnel among them --
+	// and leave the server up.
+	ji.server.ln.closeAll()
+	t.Log("cut the tunnel; the server is still up")
+
+	// Still listed: the session waits for its helper.
+	list, err := jupyterIntegrationList(client, baseURL)
+	if err != nil {
+		t.Fatalf("list after the drop: %v", err)
+	}
+	found := false
+	for _, s := range list {
+		found = found || s.InstanceID == created.InstanceID
+	}
+	if !found {
+		t.Fatalf("the session is not listed after its tunnel dropped (listed %d others)", len(list))
+	}
+
+	// And works again once the helper is back.
+	waitJupyterConnected(t, client, baseURL, created.InstanceID, 60*time.Second)
+	if err := retryFor(30*time.Second, func() error {
+		return jupyterProxyWorks(client, baseURL, created.InstanceID)
+	}); err != nil {
+		t.Errorf("a proxied request does not work after the reconnect: %v", err)
 	}
 }
 
