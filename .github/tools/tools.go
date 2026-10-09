@@ -18,6 +18,12 @@ import (
 	// workflow's `go install ...@version` happened to name.
 	_ "github.com/goreleaser/nfpm/v2/cmd/nfpm"
 
+	// golangci-lint: CI's linter. Built here with the job's own Go rather
+	// than downloaded prebuilt: a prebuilt binary cannot read the export
+	// data of a newer Go patch release, so every lint job broke the day
+	// setup-go picked one up.
+	_ "github.com/golangci/golangci-lint/v2/cmd/golangci-lint"
+
 	// gotestsum: CI's test runner, for JUnit output and coverage
 	// profiles. Pinned here rather than `go install ...@latest` in a
 	// workflow, so the version is recorded in this module's go.sum,
