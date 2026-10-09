@@ -21,10 +21,12 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // TestHTTPAPIIntegration tests the full lifecycle of job submission via HTTP API in demo mode
 func TestHTTPAPIIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -70,10 +72,7 @@ func TestHTTPAPIIntegration(t *testing.T) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	// Set CONDOR_CONFIG environment variable and reload configuration
-	// This ensures we don't inherit rate limits from other tests
-	t.Setenv("CONDOR_CONFIG", configFile)
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	t.Log("Starting condor_master...")
@@ -104,7 +103,7 @@ func TestHTTPAPIIntegration(t *testing.T) {
 	serverAddr := "127.0.0.1:0"
 
 	// Create HTTP server with collector for collector tests
-	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
+	collector := htcondor.NewCollector(scheddAddr).WithConfig(htcCfg) // Use schedd address (shared port)
 
 	// Create a directory for the DB to avoid any interference from Condor
 	dbDir := filepath.Join(tempDir, "db")
@@ -115,6 +114,7 @@ func TestHTTPAPIIntegration(t *testing.T) {
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,
@@ -223,6 +223,7 @@ queue`
 
 // TestHTTPAPIMultipartUploadIntegration tests the multipart form-data upload endpoint
 func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -268,9 +269,7 @@ func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	// Set CONDOR_CONFIG environment variable and reload configuration
-	t.Setenv("CONDOR_CONFIG", configFile)
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	t.Log("Starting condor_master...")
@@ -301,7 +300,7 @@ func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
 	serverAddr := "127.0.0.1:0"
 
 	// Create HTTP server with collector for collector tests
-	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
+	collector := htcondor.NewCollector(scheddAddr).WithConfig(htcCfg) // Use schedd address (shared port)
 
 	// Create a directory for the DB to avoid any interference from Condor
 	dbDir := filepath.Join(tempDir, "db")
@@ -312,6 +311,7 @@ func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,
@@ -1132,6 +1132,7 @@ func waitForServer(baseURL string, timeout time.Duration) error {
 
 // TestJobHoldReleaseIntegration tests job hold and release functionality
 func TestJobHoldReleaseIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -1251,6 +1252,7 @@ queue`
 
 // TestBulkJobOperationsIntegration tests bulk hold and release by constraint
 func TestBulkJobOperationsIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -1354,6 +1356,7 @@ queue 3`
 
 // TestCollectorQueryIntegration tests collector query APIs
 func TestCollectorQueryIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -1464,6 +1467,7 @@ func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL
 		os.RemoveAll(tempDir)
 		t.Fatalf("Failed to write config: %v", err)
 	}
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1502,12 +1506,13 @@ func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL
 	serverAddr := "127.0.0.1:0"
 
 	// Create collector pointing to local mini condor
-	collector := htcondor.NewCollector(collectorAddr)
+	collector := htcondor.NewCollector(collectorAddr).WithConfig(htcCfg)
 
 	// Set OAuth2DBPath to tempDir to avoid permission issues
 	oauth2DBPath := filepath.Join(tempDir, "sessions.db")
 
 	server, err = NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,
@@ -1988,6 +1993,7 @@ ENABLE_WEB_SERVER = False
 
 // TestFileFetchIntegration tests fetching individual files from job output sandbox
 func TestFileFetchIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -2032,9 +2038,7 @@ func TestFileFetchIntegration(t *testing.T) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	// Set CONDOR_CONFIG environment variable
-	t.Setenv("CONDOR_CONFIG", configFile)
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	t.Log("Starting condor_master...")
@@ -2062,7 +2066,7 @@ func TestFileFetchIntegration(t *testing.T) {
 	t.Logf("Using schedd address: %s", scheddAddr)
 
 	// Start HTTP server
-	server, baseURL := startTestHTTPServer(ctx, tempDir, scheddAddr, passwordsDir, t)
+	server, baseURL := startTestHTTPServer(ctx, htcCfg, tempDir, scheddAddr, passwordsDir, t)
 	defer server.Shutdown(ctx)
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -2208,7 +2212,7 @@ queue
 	})
 }
 
-func startTestHTTPServer(ctx context.Context, tempDir, scheddAddr, passwordsDir string, t *testing.T) (*Server, string) {
+func startTestHTTPServer(ctx context.Context, htcCfg *config.Config, tempDir, scheddAddr, passwordsDir string, t *testing.T) (*Server, string) {
 	t.Helper()
 
 	signingKeyPath := filepath.Join(passwordsDir, "POOL")
@@ -2218,7 +2222,7 @@ func startTestHTTPServer(ctx context.Context, tempDir, scheddAddr, passwordsDir 
 	serverAddr := "127.0.0.1:0"
 
 	// Create HTTP server with collector for collector tests
-	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
+	collector := htcondor.NewCollector(scheddAddr).WithConfig(htcCfg) // Use schedd address (shared port)
 
 	// Create a directory for the DB to avoid any interference from Condor
 	dbDir := filepath.Join(tempDir, "db")
@@ -2229,6 +2233,7 @@ func startTestHTTPServer(ctx context.Context, tempDir, scheddAddr, passwordsDir 
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,

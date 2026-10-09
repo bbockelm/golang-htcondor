@@ -28,6 +28,7 @@ import (
 // per group carrying JobCount. The assertion that matters is that those
 // counts are right; that no ads crossed the wire is the reason to care.
 func TestScheddAggregateCounts(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH")
 	}
@@ -58,10 +59,7 @@ func TestScheddAggregateCounts(t *testing.T) {
 	fmt.Fprintf(cf, "\nUID_DOMAIN = %s\nTRUST_DOMAIN = %s\nQUEUE_ALL_USERS_TRUSTED = True\n", trustDomain, trustDomain)
 	cf.Close()
 
-	os.Setenv("CONDOR_CONFIG", configFile)
-	defer htcondor.ReloadDefaultConfig()
-	defer os.Unsetenv("CONDOR_CONFIG")
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -85,7 +83,7 @@ func TestScheddAggregateCounts(t *testing.T) {
 	}
 	_ = owner
 
-	schedd := htcondor.NewSchedd("local", scheddAddr)
+	schedd := htcondor.NewSchedd("local", scheddAddr).WithConfig(htcCfg)
 
 	// Ungrouped: one total.
 	rows, err := schedd.AggregateJobs(ctx, "true", nil, nil)

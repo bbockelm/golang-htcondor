@@ -44,6 +44,7 @@ import (
 // response says what to do instead. Pagination lives on the htcondordb
 // mirror, which resumes a storage cursor against a snapshot.
 func TestMCPQueryJobsRefusesToPageTheSchedd(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
 	}
@@ -99,14 +100,7 @@ TRUST_DOMAIN = %s
 	}
 	cf.Close()
 
-	os.Setenv("CONDOR_CONFIG", configFile)
-	// Bind the process-global rate limiter to THIS test's config rather
-	// than inheriting whatever a previously-run test left cached. The
-	// reload defer is registered first so LIFO runs it after the
-	// environment is restored.
-	defer htcondor.ReloadDefaultConfig()
-	defer os.Unsetenv("CONDOR_CONFIG")
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -138,6 +132,7 @@ TRUST_DOMAIN = %s
 
 	listener, baseURL := listenLocal(t)
 	server, err := NewServer(Config{
+		ClientConfig:   htcCfg,
 		ListenAddr:     listener.Addr().String(),
 		ScheddName:     "local",
 		ScheddAddr:     scheddAddr,
