@@ -246,3 +246,40 @@ func TestSessionLimitsCannotBeOverriddenBySubmitLines(t *testing.T) {
 		t.Error("a job was submitted anyway")
 	}
 }
+
+// Without an application database a session cannot survive a restart, but
+// it should still survive a tunnel drop. It could not: no reconnect token
+// was ever minted, so the helper's redial carried the token it had already
+// spent and was refused. And the reconnect token's lifetime was set only on
+// the database path, so it would have lapsed with the first-dial TTL.
+func TestJupyterSessionWithoutADatabaseSurvivesATunnelDrop(t *testing.T) {
+	stubJupyterHelper(t)
+	schedd := newJupyterFakeSchedd()
+	h := taggingHandler(t)
+	h.jupyterScheddOverride = schedd
+	if h.jupyterSessionStore() != nil {
+		t.Fatal("the handler has a session store; this test is about running without one")
+	}
+
+	created := createJupyterSession(t, h)
+	cluster, _ := strconv.Atoi(created.ClusterID)
+	schedd.setStatus(cluster, 2)
+
+	srv := newJupyterSeverableServer(t, h)
+	helper := startJupyterTestHelper(t, created.InstanceID, schedd.token(t, cluster))
+	next := helper.connect(t, srv.URL)
+	if exp := jupyterTokenExpiry(t, next); time.Until(exp) < h.jupyterSessionTTL()-time.Minute {
+		t.Errorf("the reconnect token expires in %s, want the session's %s",
+			time.Until(exp).Round(time.Minute), h.jupyterSessionTTL())
+	}
+
+	srv.sever()
+	helper.waitDisconnected(t)
+	waitJupyterDisconnected(t, h, created.InstanceID)
+	if _, err := helper.tryConnect(t, srv.URL); err != nil {
+		t.Fatalf("redial after the drop was refused: %v", err)
+	}
+	if got := proxyThrough(t, h, created.InstanceID); !strings.Contains(got, jupyterTestSentinel) {
+		t.Errorf("proxied request after the redial: %q", got)
+	}
+}

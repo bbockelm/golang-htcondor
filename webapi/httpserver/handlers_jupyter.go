@@ -84,7 +84,6 @@ func (s *Handler) getOrCreateJupyterRegistry() (*jupytertunnel.Registry, error) 
 			reg, rerr := jupytertunnel.NewRegistryWithSecret(secret, store)
 			if rerr == nil {
 				s.configureJupyterRegistry(reg)
-				reg.SetReconnectTokenTTL(s.jupyterSessionTTL())
 				s.jupyterRegistry = reg
 				s.adoptJupyterSessions(context.Background(), reg, store)
 				return reg, nil
@@ -110,6 +109,10 @@ func (s *Handler) getOrCreateJupyterRegistry() (*jupytertunnel.Registry, error) 
 func (s *Handler) configureJupyterRegistry(reg *jupytertunnel.Registry) {
 	reg.SetReconnectGrace(time.Duration(s.jupyterReconnectGrace()) * time.Second)
 	reg.SetStartTokenTTL(s.jupyterStartTokenTTL())
+	// With or without a database: either way a connected helper holds a
+	// token for its next dial, and it has to last until that dial, not
+	// lapse with the first-dial TTL a few hours in.
+	reg.SetReconnectTokenTTL(s.jupyterSessionTTL())
 }
 
 // Defaults and ceilings for the two JupyterLab grace periods. The ceilings

@@ -389,3 +389,37 @@ func TestRefusedDialDoesNotCountAsConnected(t *testing.T) {
 		t.Error("a refused dial reported itself connected; the helper would reset its backoff and redial at the floor rate")
 	}
 }
+
+// The in-memory roller keeps the database one's contract: roll from the
+// next nonce, or once from the previous one, and nothing else.
+func TestMemNoncesMatchTheStoreContract(t *testing.T) {
+	m := newMemNonces()
+	ctx := context.Background()
+	m.set("s", []byte("a"))
+	roll := func(from, to string) bool {
+		ok, err := m.RollNonce(ctx, "s", []byte(from), []byte(to))
+		if err != nil {
+			t.Fatalf("RollNonce: %v", err)
+		}
+		return ok
+	}
+	if !roll("a", "b") {
+		t.Fatal("rolling from the next nonce was refused")
+	}
+	if !roll("a", "c") {
+		t.Error("the previous nonce was refused its one step of grace")
+	}
+	if roll("a", "d") {
+		t.Error("the previous nonce was accepted twice")
+	}
+	if roll("b", "e") {
+		t.Error("a nonce rolled past was accepted")
+	}
+	if !roll("c", "f") {
+		t.Error("the current next nonce was refused")
+	}
+	m.forget("s")
+	if roll("f", "g") {
+		t.Error("a forgotten session still rolls")
+	}
+}

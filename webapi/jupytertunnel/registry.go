@@ -1,6 +1,7 @@
 package jupytertunnel
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -51,10 +52,12 @@ func defaultYamuxConfig() *yamux.Config {
 // All Registry methods are safe to call from multiple goroutines.
 type Registry struct {
 	secret []byte
-	// roller, when set, is where spent nonces are recorded so single-use
-	// survives a restart. Nil keeps the in-memory burned set alone, which
-	// is right for a registry whose secret is per-process anyway.
+	// roller records which token each session accepts next. A durable one
+	// is what keeps tokens single-use across a restart; without one the
+	// registry keeps that record in memory (mem), which is right for a
+	// registry whose secret is per-process anyway.
 	roller NonceRoller
+	mem    *memNonces
 
 	// tokenTTL bounds how long a minted token stays usable. After expiry
 	// the helper must request a new instance. Default 30 minutes; see
@@ -80,7 +83,6 @@ type Registry struct {
 
 	mu        sync.Mutex
 	instances map[string]*Instance // keyed by hex(id)
-	burned    map[[tokenNonceLen]byte]struct{}
 }
 
 // Instance is the registry's view of a single Jupyter session.
@@ -272,19 +274,78 @@ func NewRegistryWithSecret(secret []byte, roller NonceRoller) (*Registry, error)
 		return nil, errors.New("jupytertunnel: signing secret must be at least 32 bytes")
 	}
 	r := newRegistry(secret)
-	r.roller = roller
+	if roller != nil {
+		r.roller, r.mem = roller, nil
+	}
 	return r, nil
 }
 
 func newRegistry(secret []byte) *Registry {
+	mem := newMemNonces()
 	return &Registry{
 		secret:    secret,
+		roller:    mem,
+		mem:       mem,
 		tokenTTL:  30 * time.Minute,
 		idleTTL:   15 * time.Minute,
 		now:       time.Now,
 		instances: make(map[string]*Instance),
-		burned:    make(map[[tokenNonceLen]byte]struct{}),
 	}
+}
+
+// memNonces is the NonceRoller a registry with no session store uses: the
+// same conditional roll, with the same one step of grace, as the database
+// one, kept in memory.
+//
+// It replaced a set of spent nonces. That set made a token single-use but
+// had no notion of a next one, so no reconnect token was ever minted: after
+// a tunnel drop the helper could only redial with the token it had already
+// spent, and was refused -- a deployment without an application database
+// lost a session to any blip, whatever the reconnect grace period said.
+type memNonces struct {
+	mu   sync.Mutex
+	next map[string][]byte
+	prev map[string][]byte
+}
+
+func newMemNonces() *memNonces {
+	return &memNonces{next: map[string][]byte{}, prev: map[string][]byte{}}
+}
+
+func (m *memNonces) set(id string, nonce []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.next[id] = append([]byte(nil), nonce...)
+	delete(m.prev, id)
+}
+
+func (m *memNonces) forget(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.next, id)
+	delete(m.prev, id)
+}
+
+// RollNonce mirrors jupyterStore.RollNonce: from must be the next nonce, or
+// the previous one while its grace is unspent; rolling from the previous one
+// spends the grace.
+func (m *memNonces) RollNonce(_ context.Context, id string, from, to []byte) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	next, ok := m.next[id]
+	if !ok {
+		return false, nil
+	}
+	switch prev, hasPrev := m.prev[id]; {
+	case bytes.Equal(next, from):
+		m.prev[id] = next
+	case hasPrev && bytes.Equal(prev, from):
+		delete(m.prev, id)
+	default:
+		return false, nil
+	}
+	m.next[id] = append([]byte(nil), to...)
+	return true, nil
 }
 
 // reserve claims the session's single connection slot for this dial.
@@ -296,14 +357,10 @@ func (r *Registry) reserve(instanceID string, parsed signedToken) (*Instance, er
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// The in-memory burned set is the single-use record only without a
-	// roller. With one, the roll is the record -- durable, and with the one
-	// step of grace a helper needs when a drop races delivery of its next
-	// token. Consulting the burned set too would refuse exactly that
+	// Single use is the roll's to enforce (rollToken), with the one step
+	// of grace a helper needs when a drop races delivery of its next token.
+	// An in-memory set of spent nonces checked here refused exactly that
 	// helper: the token it still holds is the one this process just saw.
-	if _, burned := r.burned[parsed.Nonce]; burned && r.roller == nil {
-		return nil, ErrTokenInvalid
-	}
 	inst, ok := r.instances[instanceID]
 	if !ok || inst.isClosed() {
 		return nil, ErrTokenInvalid
@@ -503,6 +560,11 @@ func (r *Registry) CreateInstance(opts CreateInstanceOptions) (id string, token 
 	r.mu.Lock()
 	r.instances[inst.ID] = inst
 	r.mu.Unlock()
+	if r.mem != nil {
+		// With a durable roller the caller records this nonce (it
+		// persists PendingNonce); in memory there is no caller to.
+		r.mem.set(inst.ID, parsed.Nonce[:])
+	}
 
 	inst.publish(EventCreated)
 	return inst.ID, tokenStr, nil
@@ -639,14 +701,12 @@ func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (
 	// out of reconnecting for the rest of the job.
 	defer inst.releaseConnecting()
 
-	var nextToken string
-	if r.roller != nil {
-		// Outside the registry lock: it is a database write, and holding
-		// the lock across it would stall every proxied request behind one
-		// dial. The claim above is what makes that safe.
-		if nextToken, err = r.rollToken(instanceID, parsed); err != nil {
-			return nil, err
-		}
+	// Outside the registry lock: it may be a database write, and holding
+	// the lock across it would stall every proxied request behind one
+	// dial. The claim above is what makes that safe.
+	nextToken, err := r.rollToken(instanceID, parsed)
+	if err != nil {
+		return nil, err
 	}
 
 	r.mu.Lock()
@@ -674,9 +734,6 @@ func (r *Registry) AcceptTunnel(instanceID, bearer string, ws *websocket.Conn) (
 	inst.adopted = false
 	inst.mu.Unlock()
 
-	if r.roller == nil {
-		r.burned[parsed.Nonce] = struct{}{}
-	}
 	inst.publish(EventTunnelConnected)
 
 	go func() {
@@ -746,6 +803,9 @@ func (r *Registry) CloseInstance(id string) {
 	}
 	delete(r.instances, id)
 	r.mu.Unlock()
+	if r.mem != nil {
+		r.mem.forget(id)
+	}
 
 	inst.mu.Lock()
 	if inst.closed {
