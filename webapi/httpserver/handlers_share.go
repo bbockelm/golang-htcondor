@@ -291,7 +291,7 @@ func (s *Handler) redeemContext(r *http.Request, owner string) (context.Context,
 	if err != nil {
 		return nil, fmt.Errorf("failed to authorize share token")
 	}
-	secConfig, err := ConfigureSecurityForTokenWithCacheAndFallback(jwt, entry.SessionCache, false)
+	secConfig, err := configureSecurityForToken(s.clientConfig, jwt, entry.SessionCache, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to authorize share token")
 	}

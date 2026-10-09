@@ -346,6 +346,18 @@ type Config struct {
 	IDPRefreshTokenLifespan time.Duration
 	SessionTTL              time.Duration  // HTTP session TTL (default: 24h)
 	HTCondorConfig          *config.Config // HTCondor configuration (optional, used for LOCAL_DIR default)
+	// ClientConfig is the HTCondor configuration this server's own
+	// connections to HTCondor daemons are built from: the schedd, credd
+	// and placementd clients it creates, and the security configs it
+	// builds around callers' tokens (SEC_* methods and levels, token and
+	// SSL client credential locations, query rate limits). nil means the
+	// process-wide default that htcondor.GetDefaultConfig loads from
+	// $CONDOR_CONFIG, which is what htcondor-api uses. It is separate from
+	// HTCondorConfig because htcondor-api loads that one with HTTP_API
+	// subsystem and local-name scoping, so pointing the clients at it would
+	// change which SEC_* values an existing deployment authenticates with.
+	// A Collector passed in above is the caller's to configure.
+	ClientConfig *config.Config
 	// PingInterval is the periodic collector/schedd ping cadence; zero
 	// or negative disables it. See HandlerConfig.PingInterval.
 	PingInterval time.Duration
@@ -512,6 +524,7 @@ func NewServer(cfg Config) (*Server, error) {
 		IDPRefreshTokenLifespan:     cfg.IDPRefreshTokenLifespan,
 		SessionTTL:                  cfg.SessionTTL,
 		HTCondorConfig:              cfg.HTCondorConfig,
+		ClientConfig:                cfg.ClientConfig,
 		PingInterval:                cfg.PingInterval,
 		MCPWatchMaxWait:             cfg.MCPWatchMaxWait,
 		StreamBufferSize:            cfg.StreamBufferSize,
@@ -1382,7 +1395,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// instead of the header identity. A caller then could not see, hold
 	// or remove the job they had just submitted, because every
 	// owner-scoped query filters on an Owner that is not theirs.
-	secConfig, err := ConfigureSecurityForTokenWithCacheAndFallback(condorCredential, sessionCache, false)
+	secConfig, err := configureSecurityForToken(s.clientConfig, condorCredential, sessionCache, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure security: %w", err)
 	}
@@ -1579,9 +1592,17 @@ func discoverSchedd(collector *htcondor.Collector, scheddName, scheddHost string
 	return "", fmt.Errorf("timeout after %v: no schedds found in collector", timeout)
 }
 
-func findCreddAddressFile(logger *logging.Logger) string {
+// findCreddAddressFile locates this host's credd address file. htcConfig is
+// the server's HTCondor configuration; when it is nil the configuration is
+// loaded from $CONDOR_CONFIG.
+func findCreddAddressFile(htcConfig *config.Config, logger *logging.Logger) string {
 	// First, try to get the configured path from HTCondor config
-	if htcConfig, err := config.New(); err == nil {
+	if htcConfig == nil {
+		if loaded, err := config.New(); err == nil {
+			htcConfig = loaded
+		}
+	}
+	if htcConfig != nil {
 		if creddAddressFile, ok := htcConfig.Get("CREDD_ADDRESS_FILE"); ok {
 			if _, err := os.Stat(creddAddressFile); err == nil {
 				logger.Info(logging.DestinationHTTP, "Found credd address file from config", "path", creddAddressFile)

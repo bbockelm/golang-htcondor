@@ -109,7 +109,7 @@ func (h *Handler) impersonate(ctx context.Context, armed armedSession, actor, ta
 		return nil, nil, fmt.Errorf("minting the impersonation credential: %w", err)
 	}
 
-	secConfig, err := htcondor.NewClientSecurityConfig(ctx, token, "", 0, "CLIENT", nil)
+	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, token, "", 0, "CLIENT", nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("building the impersonation security config: %w", err)
 	}

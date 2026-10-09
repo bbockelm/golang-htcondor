@@ -84,7 +84,7 @@ func (h *Handler) withCondorCredential(ctx context.Context, username string, sco
 	if err != nil {
 		return ctx, fmt.Errorf("minting an HTCondor token for %q: %w", username, err)
 	}
-	secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
+	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, htcToken, "", 0, "CLIENT", nil)
 	if err != nil {
 		return ctx, fmt.Errorf("building a security config for %q: %w", username, err)
 	}

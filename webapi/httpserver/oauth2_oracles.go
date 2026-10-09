@@ -7,6 +7,7 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -166,6 +167,9 @@ type ScheddACLOracle struct {
 	// handler's minter; Check passes nil so the probe token carries no
 	// limit_authz narrowing (see Check for why).
 	MintToken func(username string, scopes []string) (string, error)
+	// Config is the HTCondor configuration the probe's security config is
+	// built from; nil is the process-wide default.
+	Config *config.Config
 }
 
 // Name implements RevocationOracle.
@@ -204,7 +208,7 @@ func (o *ScheddACLOracle) Check(ctx context.Context, username string, scopes []s
 	if err != nil {
 		return ReauthDecision{}, fmt.Errorf("minting probe token for %s: %w", username, err)
 	}
-	secConfig, err := htcondor.NewClientSecurityConfig(ctx, probeToken, "", 0, "CLIENT", nil)
+	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, o.Config, probeToken, "", 0, "CLIENT", nil)
 	if err != nil {
 		return ReauthDecision{}, fmt.Errorf("building probe security config: %w", err)
 	}
@@ -389,6 +393,7 @@ func (h *Handler) buildRevocationOracles(names []string) []RevocationOracle {
 				UIDDomain: h.uidDomain,
 				Logger:    h.logger,
 				MintToken: h.generateHTCondorTokenWithScopes,
+				Config:    h.clientConfig,
 			})
 		default:
 			h.logger.Warn(logging.DestinationHTTP,
