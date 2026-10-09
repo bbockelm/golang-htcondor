@@ -371,7 +371,18 @@ func (s *Handler) handlePoolSummary(w http.ResponseWriter, r *http.Request) {
 		constraint = fmt.Sprintf(`(%s) && (%s)`, constraint, userExpr)
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	// Under the caller's credential: the bare request context has none, so
+	// the query would be refused before it reached the collector.
+	ctx, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	// Stream with no limit and accumulate: the aggregated result is small

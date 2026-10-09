@@ -1365,59 +1365,57 @@ func TestCollectorQueryIntegration(t *testing.T) {
 
 	client := &http.Client{Timeout: 30 * time.Second}
 
-	// Test: Query all collector ads
-	t.Log("Testing collector ads query...")
-	resp, err := client.Get(fmt.Sprintf("%s/api/v1/collector/ads", baseURL))
-	if err != nil {
-		t.Fatalf("Failed to query collector ads: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
+	// query fetches a collector route as an authenticated user and fails
+	// on any error the response reports.
+	//
+	// The ads routes stream, so they answer 200 before the collector has
+	// said anything and report a failure in the body's "error" field. This
+	// test used to check only the status, and passed for as long as every
+	// one of these queries was refused for lack of a credential.
+	query := func(path string) CollectorAdsResponse {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, baseURL+path, nil)
+		if err != nil {
+			t.Fatalf("building %s: %v", path, err)
+		}
+		req.Header.Set("X-Test-User", "testuser")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("Collector query failed with status %d: %s", resp.StatusCode, string(body))
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s answered %d: %s", path, resp.StatusCode, body)
+		}
+		var got struct {
+			CollectorAdsResponse
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("GET %s: decoding %s: %v", path, body, err)
+		}
+		if got.Error != "" {
+			t.Fatalf("GET %s answered 200 but the query failed: %s", path, got.Error)
+		}
+		return got.CollectorAdsResponse
 	}
 
-	var adsResp CollectorAdsResponse
-	json.NewDecoder(resp.Body).Decode(&adsResp)
+	adsResp := query("/api/v1/collector/ads")
 	t.Logf("Found %d ads", len(adsResp.Ads))
 
-	// Test: Query schedd ads
-	t.Log("Testing schedd ads query...")
-	resp, err = client.Get(fmt.Sprintf("%s/api/v1/collector/ads/schedd", baseURL))
-	if err != nil {
-		t.Fatalf("Failed to query schedd ads: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("Schedd query failed with status %d: %s", resp.StatusCode, string(body))
+	// The mini condor runs a schedd, so its ad is there to be found: an
+	// empty answer here is a failure, not a quiet pool.
+	adsResp = query("/api/v1/collector/ads/schedd")
+	if len(adsResp.Ads) == 0 {
+		t.Fatal("no schedd ads, though the test pool runs a schedd")
 	}
 
-	json.NewDecoder(resp.Body).Decode(&adsResp)
-	t.Logf("Found %d schedd ads", len(adsResp.Ads))
-
-	// Test: Query with projection
-	t.Log("Testing collector query with projection...")
-	resp, err = client.Get(fmt.Sprintf("%s/api/v1/collector/ads/schedd?projection=Name,MyAddress", baseURL))
-	if err != nil {
-		t.Fatalf("Failed to query with projection: %v", err)
+	adsResp = query("/api/v1/collector/ads/schedd?projection=Name,MyAddress")
+	if len(adsResp.Ads) == 0 {
+		t.Fatal("no schedd ads with a projection, though the test pool runs a schedd")
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("Projection query failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	json.NewDecoder(resp.Body).Decode(&adsResp)
-	t.Logf("Found %d ads with projection", len(adsResp.Ads))
-	if len(adsResp.Ads) > 0 {
-		t.Logf("First ad attributes: %+v", adsResp.Ads[0])
-	}
-
-	t.Log("Collector query test completed successfully")
+	t.Logf("First ad attributes: %+v", adsResp.Ads[0])
 
 	_ = tempDir
 	_ = server

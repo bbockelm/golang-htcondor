@@ -93,6 +93,22 @@ func (s *Handler) requireAuthentication(r *http.Request) (context.Context, bool,
 	return ctx, false, nil
 }
 
+// streamErrorMessage is what a streamed query puts in its "error" field,
+// which the web UI shows as is.
+//
+// A refused daemon fallback is reported by its own message, not under the
+// wrappers that every connection layer adds on the way out ("failed to
+// connect and authenticate ...: failed to create security config: ..."):
+// those describe where in this server the refusal surfaced, which is for the
+// log line, not for the person looking at the page.
+func streamErrorMessage(err error) string {
+	var refusal *htcondor.ErrDaemonFallbackRefused
+	if errors.As(err, &refusal) {
+		return refusal.Error()
+	}
+	return err.Error()
+}
+
 // isAuthenticationError checks if an error is a genuine authentication/authorization error
 // vs a connection error that happens to mention "security" or "authentication"
 func isAuthenticationError(err error) bool {
@@ -376,7 +392,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			}
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
-			errorMsg = result.Err.Error()
+			errorMsg = streamErrorMessage(result.Err)
 			break
 		}
 
@@ -2476,7 +2492,18 @@ func (s *Handler) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
+	// The query goes out under the caller's credential, as ping and watch
+	// do. A collector read is not this server's own work, and the bare
+	// request context carries no credential at all.
+	ctx, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
 
 	// Get query parameters
 	constraint := r.URL.Query().Get("constraint")
@@ -2556,7 +2583,7 @@ func (s *Handler) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		if result.Err != nil {
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
-			errorMsg = result.Err.Error()
+			errorMsg = streamErrorMessage(result.Err)
 			break
 		}
 
@@ -2634,7 +2661,15 @@ func (s *Handler) handleCollectorAdsByType(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	ctx := r.Context()
+	ctx, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
 
 	// Get query parameters
 	constraint := r.URL.Query().Get("constraint")
@@ -2738,7 +2773,7 @@ func (s *Handler) handleCollectorAdsByType(w http.ResponseWriter, r *http.Reques
 		if result.Err != nil {
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err, "adType", adType)
-			errorMsg = result.Err.Error()
+			errorMsg = streamErrorMessage(result.Err)
 			break
 		}
 
@@ -2814,7 +2849,15 @@ func (s *Handler) handleCollectorAdByName(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	ctx := r.Context()
+	ctx, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
 
 	// Map ad type
 	var queryAdType string
