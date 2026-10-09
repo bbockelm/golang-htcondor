@@ -1339,34 +1339,54 @@ func jupyterBatchName(instanceID string) string {
 //
 // Returns "" when both are off (non-positive).
 func jupyterPeriodicRemove(maxLifetimeSec, startGraceSec int) string {
-	var clauses []string
-	var lifetimeReason, startReason string
-	if maxLifetimeSec > 0 {
-		clauses = append(clauses, fmt.Sprintf(
-			"((JobStatus == 2) && (JobStartDate =!= UNDEFINED) && ((time() - JobStartDate) > %d))",
-			maxLifetimeSec))
-		lifetimeReason = fmt.Sprintf("JupyterLab session reached its %s limit", humanJupyterDuration(maxLifetimeSec))
+	type bound struct{ expr, reason string }
+	// In the order the reason is chosen: the first whose condition holds
+	// names the removal.
+	var bounds []bound
+	if startGraceSec > 0 {
+		bounds = append(bounds, bound{jupyterInterruptedExpr, "JupyterLab session was interrupted and cannot restart"})
 	}
 	if startGraceSec > 0 {
-		clauses = append(clauses, fmt.Sprintf(
-			"((JobCurrentStartExecutingDate =?= UNDEFINED) && ((time() - QDate) > %d))",
-			startGraceSec))
-		startReason = fmt.Sprintf("JupyterLab session did not start within %s", humanJupyterDuration(startGraceSec))
+		bounds = append(bounds, bound{
+			fmt.Sprintf("((JobCurrentStartExecutingDate =?= UNDEFINED) && ((time() - QDate) > %d))", startGraceSec),
+			fmt.Sprintf("JupyterLab session did not start within %s", humanJupyterDuration(startGraceSec)),
+		})
 	}
-	var reason string
-	switch {
-	case len(clauses) == 0:
+	if maxLifetimeSec > 0 {
+		bounds = append(bounds, bound{
+			fmt.Sprintf("((JobStatus == 2) && (JobStartDate =!= UNDEFINED) && ((time() - JobStartDate) > %d))", maxLifetimeSec),
+			fmt.Sprintf("JupyterLab session reached its %s limit", humanJupyterDuration(maxLifetimeSec)),
+		})
+	}
+	if len(bounds) == 0 {
 		return ""
-	case lifetimeReason != "" && startReason != "":
-		reason = fmt.Sprintf("ifThenElse(JobCurrentStartExecutingDate =?= UNDEFINED, %q, %q)", startReason, lifetimeReason)
-	case startReason != "":
-		reason = fmt.Sprintf("%q", startReason)
-	default:
-		reason = fmt.Sprintf("%q", lifetimeReason)
+	}
+	exprs := make([]string, len(bounds))
+	for i, b := range bounds {
+		exprs[i] = b.expr
+	}
+	// ifThenElse(first, r1, ifThenElse(second, r2, r3)): the last bound
+	// needs no test of its own, since the expression only fires when one
+	// of them holds.
+	reason := fmt.Sprintf("%q", bounds[len(bounds)-1].reason)
+	for i := len(bounds) - 2; i >= 0; i-- {
+		reason = fmt.Sprintf("ifThenElse(%s, %q, %s)", bounds[i].expr, bounds[i].reason, reason)
 	}
 	return fmt.Sprintf("periodic_remove = %s\n+PeriodicRemoveReason = %s",
-		strings.Join(clauses, " || "), reason)
+		strings.Join(exprs, " || "), reason)
 }
+
+// jupyterInterruptedExpr matches a session's job that ran and is back in
+// the queue: evicted, or held and released. It cannot work again. A rerun
+// executes the launcher with the token spooled at submit, which the first
+// run spent, so its helper would be refused and end the job -- after
+// waiting for, and holding, a slot. And JobCurrentStartExecutingDate
+// survives the eviction, so the start-grace bound never catches it.
+//
+// NumJobStarts is the shadow's count of runs whose executable actually began
+// (BaseShadow::resourceBeganExecution), so a job that matched but never got
+// as far as running its launcher is not caught here.
+const jupyterInterruptedExpr = "((JobStatus == 1) && (NumJobStarts =!= UNDEFINED) && (NumJobStarts > 0))"
 
 // humanJupyterDuration renders a limit for a removal reason: "4 hours",
 // "90 minutes", "45 seconds".

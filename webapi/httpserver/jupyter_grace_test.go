@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/PelicanPlatform/classad/classad"
 
 	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 )
@@ -129,13 +132,25 @@ func TestJupyterSubmitRemovesAJobThatDoesNotStartInTime(t *testing.T) {
 		"JobCurrentStartExecutingDate =?= UNDEFINED",
 		"((time() - JobStartDate) > 28800)",
 		" || ",
-		"+PeriodicRemoveReason = ifThenElse(JobCurrentStartExecutingDate =?= UNDEFINED",
 		`"JupyterLab session did not start within 4 hours"`,
 		`"JupyterLab session reached its 8 hours limit"`,
+		// A job that ran and was requeued reruns with a spent token.
+		"((JobStatus == 1) && (NumJobStarts =!= UNDEFINED) && (NumJobStarts > 0))",
+		`"JupyterLab session was interrupted and cannot restart"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("submit file lacks %q:\n%s", want, got)
 		}
+	}
+	// The reason is chosen in order: interrupted, then not started, then
+	// the ceiling.
+	reasonLine := got[strings.Index(got, "+PeriodicRemoveReason"):]
+	reasonLine = reasonLine[:strings.Index(reasonLine, "\n")]
+	iInt := strings.Index(reasonLine, "interrupted")
+	iStart := strings.Index(reasonLine, "did not start")
+	iLife := strings.Index(reasonLine, "reached its")
+	if iInt < 0 || iStart < 0 || iLife < 0 || iInt >= iStart || iStart >= iLife {
+		t.Errorf("remove reasons out of order:\n%s", reasonLine)
 	}
 	if strings.Count(got, "periodic_remove") != 1 {
 		t.Errorf("want exactly one periodic_remove (a second replaces the first):\n%s", got)
@@ -282,4 +297,82 @@ func TestJupyterSessionWithoutADatabaseSurvivesATunnelDrop(t *testing.T) {
 	if got := proxyThrough(t, h, created.InstanceID); !strings.Contains(got, jupyterTestSentinel) {
 		t.Errorf("proxied request after the redial: %q", got)
 	}
+}
+
+// The removal policy, evaluated by a ClassAd engine against the job states
+// it has to tell apart, rather than read as text.
+func TestJupyterRemovalPolicyEvaluates(t *testing.T) {
+	block := jupyterPeriodicRemove(8*3600, 4*3600)
+	var removeExpr, reasonExpr string
+	for _, line := range strings.Split(block, "\n") {
+		name, value, _ := strings.Cut(line, " = ")
+		switch strings.TrimSpace(name) {
+		case "periodic_remove":
+			removeExpr = value
+		case "+PeriodicRemoveReason":
+			reasonExpr = value
+		}
+	}
+	if removeExpr == "" || reasonExpr == "" {
+		t.Fatalf("no policy in:\n%s", block)
+	}
+
+	now := time.Now().Unix()
+	hour := int64(3600)
+	cases := []struct {
+		name       string
+		ad         string
+		remove     bool
+		reasonPart string
+	}{
+		{"queued within the grace",
+			fmt.Sprintf("[JobStatus = 1; QDate = %d]", now-hour), false, ""},
+		{"queued past the grace",
+			fmt.Sprintf("[JobStatus = 1; QDate = %d]", now-5*hour), true, "did not start within 4 hours"},
+		{"running within the ceiling",
+			fmt.Sprintf("[JobStatus = 2; QDate = %d; JobStartDate = %d; JobCurrentStartExecutingDate = %d; NumJobStarts = 1]",
+				now-5*hour, now-hour, now-hour), false, ""},
+		{"running past the ceiling",
+			fmt.Sprintf("[JobStatus = 2; QDate = %d; JobStartDate = %d; JobCurrentStartExecutingDate = %d; NumJobStarts = 1]",
+				now-10*hour, now-9*hour, now-9*hour), true, "reached its 8 hours limit"},
+		{"evicted and requeued",
+			fmt.Sprintf("[JobStatus = 1; QDate = %d; JobStartDate = %d; JobCurrentStartExecutingDate = %d; NumJobStarts = 1]",
+				now-hour, now-hour, now-hour), true, "interrupted and cannot restart"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ad, err := classad.Parse(c.ad)
+			if err != nil {
+				t.Fatalf("parse ad: %v", err)
+			}
+			if err := ad.Set("PeriodicRemove", mustParseExpr(t, removeExpr)); err != nil {
+				t.Fatalf("set PeriodicRemove: %v", err)
+			}
+			if err := ad.Set("PeriodicRemoveReason", mustParseExpr(t, reasonExpr)); err != nil {
+				t.Fatalf("set PeriodicRemoveReason: %v", err)
+			}
+			got, ok := ad.EvaluateAttrBool("PeriodicRemove")
+			if !ok {
+				got = false // undefined does not fire
+			}
+			if got != c.remove {
+				t.Errorf("PeriodicRemove = %v, want %v", got, c.remove)
+			}
+			if c.remove {
+				reason, _ := ad.EvaluateAttrString("PeriodicRemoveReason")
+				if !strings.Contains(reason, c.reasonPart) {
+					t.Errorf("PeriodicRemoveReason = %q, want it to say %q", reason, c.reasonPart)
+				}
+			}
+		})
+	}
+}
+
+func mustParseExpr(t *testing.T, s string) *classad.Expr {
+	t.Helper()
+	e, err := classad.ParseExpr(s)
+	if err != nil {
+		t.Fatalf("parse %q: %v", s, err)
+	}
+	return e
 }
