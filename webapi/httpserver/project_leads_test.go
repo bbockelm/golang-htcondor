@@ -1018,6 +1018,23 @@ func TestProjectLeadRefusesPrivilegedOwner(t *testing.T) {
 		t.Errorf("lead was refused an ordinary member's job")
 	}
 
+	// A job whose User names a queue superuser is privileged even when its
+	// Owner does not, in single-job and in bulk -- where it is the only
+	// privileged job in scope.
+	odd := leadJobAd(5, "erin", "Physics", 1)
+	odd.InsertAttrString("User", "dana@other.org")
+	env.ads = []*classad.ClassAd{env.ads[2], odd}
+	if w, act := holdOne(env, sid, "5.0"); w.Code != http.StatusForbidden || len(act.calls) != 0 {
+		t.Errorf("lead acted on a job whose User is a queue superuser: %d", w.Code)
+	}
+	act = &recordedAction{env: env}
+	w = httptest.NewRecorder()
+	env.h.handleBulkJobAction(w, env.request(http.MethodPost, "/api/v1/jobs/hold", sid,
+		map[string]string{"constraint": "true"}), "Held", "hold", act.fn)
+	if w.Code != http.StatusForbidden || len(act.calls) != 0 {
+		t.Errorf("bulk acted with a superuser's User in scope: %d %+v", w.Code, act.calls)
+	}
+
 	// Unknown queue superusers: refuse.
 	env.h.superuserPolicy.mu.Lock()
 	env.h.superuserPolicy.users = nil
