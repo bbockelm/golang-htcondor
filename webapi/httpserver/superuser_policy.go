@@ -161,8 +161,10 @@ func (p *superuserPolicy) Run(ctx context.Context) {
 	}
 	for {
 		wait := p.refresh
-		if !p.known() {
-			wait = min(retry, p.refresh)
+		if !p.known() && retry < wait {
+			// Not the min builtin: an integration-test file in this
+			// package declares its own min(int, int).
+			wait = retry
 			retry *= 2
 		}
 		timer := time.NewTimer(wait)
