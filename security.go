@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"weak"
 
 	"github.com/bbockelm/cedar/security"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -97,6 +100,23 @@ func NewClientSecurityConfig(
 	secContext string,
 	sessionCache *security.SessionCache,
 ) (*security.SecurityConfig, error) {
+	return NewClientSecurityConfigWithConfig(ctx, nil, token, peerName, command, secContext, sessionCache)
+}
+
+// NewClientSecurityConfigWithConfig is NewClientSecurityConfig reading the
+// SEC_* settings from cfg instead of the process-wide default configuration.
+// A nil cfg is exactly NewClientSecurityConfig. cfg decides only where the
+// configuration comes from; which credential is presented is decided the same
+// way for either.
+func NewClientSecurityConfigWithConfig(
+	ctx context.Context,
+	cfg *config.Config,
+	token string,
+	peerName string,
+	command int,
+	secContext string,
+	sessionCache *security.SessionCache,
+) (*security.SecurityConfig, error) {
 	if secContext == "" {
 		secContext = "CLIENT"
 	}
@@ -119,9 +139,9 @@ func NewClientSecurityConfig(
 	var secConfig *security.SecurityConfig
 	var err error
 	if token != "" {
-		secConfig, err = loadClientSecurityDefaults(nil, command, secContext, peerName)
+		secConfig, err = loadClientSecurityDefaults(cfg, command, secContext, peerName)
 	} else {
-		secConfig, err = GetSecurityConfigOrDefault(ctx, nil, command, secContext, peerName)
+		secConfig, err = GetSecurityConfigOrDefault(ctx, cfg, command, secContext, peerName)
 	}
 	if err != nil {
 		return nil, err
@@ -208,7 +228,16 @@ func GetDefaultConfig() *config.Config {
 // GetSecurityConfig path (which only loads SSL credentials when the
 // configured AuthenticationMethods list already names SSL).
 func LookupSSLClientCredentials() (certFile, keyFile, caFile string, ok bool) {
-	cfg := getDefaultConfig()
+	return LookupSSLClientCredentialsWithConfig(nil)
+}
+
+// LookupSSLClientCredentialsWithConfig is LookupSSLClientCredentials reading
+// cfg instead of the process-wide default configuration. A nil cfg is exactly
+// LookupSSLClientCredentials.
+func LookupSSLClientCredentialsWithConfig(cfg *config.Config) (certFile, keyFile, caFile string, ok bool) {
+	if cfg == nil {
+		cfg = getDefaultConfig()
+	}
 	if cfg == nil {
 		return "", "", "", false
 	}
@@ -253,6 +282,36 @@ func getRateLimitManager() *ratelimit.Manager {
 		}
 	}
 	return manager
+}
+
+// configRateLimitManagers holds the rate limiter built for each explicit
+// configuration a client object was given (see rateLimitManagerFor), keyed by
+// a weak pointer so that an entry goes away with its configuration.
+var configRateLimitManagers sync.Map // weak.Pointer[config.Config] -> *ratelimit.Manager
+
+// rateLimitManagerFor returns the rate limiter for a client object whose
+// configuration is cfg. A nil cfg is the process-wide limiter
+// (getRateLimitManager). An explicit cfg gets a limiter built from that
+// configuration's *_QUERY_RATE_LIMIT knobs, never the global one, and shared by
+// every object carrying the same *config.Config, so that -- like the global
+// limiter -- it limits the traffic of everything using that configuration
+// rather than of one object (a Schedd recreated after a restart keeps its
+// budget).
+func rateLimitManagerFor(cfg *config.Config) *ratelimit.Manager {
+	if cfg == nil {
+		return getRateLimitManager()
+	}
+	key := weak.Make(cfg)
+	if m, ok := configRateLimitManagers.Load(key); ok {
+		return m.(*ratelimit.Manager)
+	}
+	m, loaded := configRateLimitManagers.LoadOrStore(key, ratelimit.ConfigFromHTCondor(cfg))
+	if !loaded {
+		runtime.AddCleanup(cfg, func(k weak.Pointer[config.Config]) {
+			configRateLimitManagers.Delete(k)
+		}, key)
+	}
+	return m.(*ratelimit.Manager)
 }
 
 // daemonCredentialCache is the process-wide privileged credential reader shared by every

@@ -11,6 +11,7 @@ import (
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // securityConfigContextKey is the type for the security configuration context key
@@ -78,6 +79,9 @@ func GetAuthenticatedUserFromContext(ctx context.Context) string {
 type Schedd struct {
 	name    string
 	address string
+	// cfg is the HTCondor configuration this client authenticates and
+	// rate-limits with; nil means the process-wide default. See WithConfig.
+	cfg *config.Config
 }
 
 // NewSchedd creates a new Schedd instance
@@ -189,7 +193,7 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 
 	// Apply rate limiting if configured
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(s.cfg)
 	if rateLimitManager != nil {
 		rateLimitCtx, cancelRateLimit := context.WithTimeout(ctx, 1000*time.Millisecond)
 		defer cancelRateLimit()
@@ -233,7 +237,7 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 		}
 
 		// Get security config
-		secConfig, err := GetSecurityConfigOrDefault(ctx, nil, cmd, "CLIENT", s.address)
+		secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, cmd, "CLIENT", s.address)
 		if err != nil {
 			ch <- JobAdResult{Err: fmt.Errorf("failed to create security config: %w", err)}
 			return
@@ -352,7 +356,7 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, useAuth b
 	// Use a short timeout context for rate limiting to avoid blocking HTTP requests
 	// If rate limit is exceeded, we want to return 429 immediately, not block
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(s.cfg)
 	if rateLimitManager != nil {
 		rateLimitCtx, cancelRateLimit := context.WithTimeout(ctx, 1000*time.Millisecond)
 		defer cancelRateLimit()
@@ -368,7 +372,7 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, useAuth b
 	}
 
 	// Get SecurityConfig from context, HTCondor config, or defaults
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, cmd, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, cmd, "CLIENT", s.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -548,7 +552,7 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 	// authenticate to schedd at <addr>: …", so re-wrapping with
 	// "failed to connect to schedd at <addr>: …" here just produces
 	// the same address in two adjacent prefixes of the chain.
-	qmgmt, err := NewQmgmtConnection(ctx, s.address)
+	qmgmt, err := newQmgmtConnection(ctx, s.cfg, s.address)
 	if err != nil {
 		return "", err
 	}
@@ -640,7 +644,7 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 	// inner error verbatim; see the comment in Submit for why we
 	// don't re-wrap with another "failed to connect to schedd at ..."
 	// prefix.
-	qmgmt, err := NewQmgmtConnection(ctx, s.address)
+	qmgmt, err := newQmgmtConnection(ctx, s.cfg, s.address)
 	if err != nil {
 		return 0, nil, err
 	}

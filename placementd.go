@@ -11,6 +11,7 @@ import (
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // Command codes for the placement daemon (condor_placementd), from
@@ -216,6 +217,9 @@ type PlacementdClient interface {
 // every connection rather than letting configuration weaken them.
 type Placementd struct {
 	address string
+	// cfg is the HTCondor configuration this client authenticates and
+	// rate-limits with; nil means the process-wide default. See WithConfig.
+	cfg *config.Config
 }
 
 // Compile-time check that Placementd satisfies the interface.
@@ -237,7 +241,7 @@ const summaryAdType = "Summary"
 
 // connect dials the placementd and authenticates for one command.
 func (p *Placementd) connect(ctx context.Context, cmd int) (*client.HTCondorClient, error) {
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, cmd, "CLIENT", p.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, p.cfg, cmd, "CLIENT", p.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}

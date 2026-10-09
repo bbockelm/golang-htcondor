@@ -121,7 +121,7 @@ func (s *Schedd) CreateStartupLimit(ctx context.Context, req *StartupLimitReques
 
 	// Apply rate limiting if configured
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(s.cfg)
 	if rateLimitManager != nil {
 		if err := rateLimitManager.WaitSchedd(ctx, username); err != nil {
 			return "", fmt.Errorf("rate limit exceeded: %w", err)
@@ -129,7 +129,7 @@ func (s *Schedd) CreateStartupLimit(ctx context.Context, req *StartupLimitReques
 	}
 
 	// Get SecurityConfig
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, cmdCreateStartupLimit, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, cmdCreateStartupLimit, "CLIENT", s.address)
 	if err != nil {
 		return "", fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -247,7 +247,7 @@ func (s *Schedd) CreateStartupLimit(ctx context.Context, req *StartupLimitReques
 func (s *Schedd) QueryStartupLimits(ctx context.Context, uuid, tag string) ([]*StartupLimit, error) {
 	// Apply rate limiting if configured
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(s.cfg)
 	if rateLimitManager != nil {
 		if err := rateLimitManager.WaitSchedd(ctx, username); err != nil {
 			return nil, fmt.Errorf("rate limit exceeded: %w", err)
@@ -255,7 +255,7 @@ func (s *Schedd) QueryStartupLimits(ctx context.Context, uuid, tag string) ([]*S
 	}
 
 	// Get SecurityConfig
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, cmdQueryStartupLimits, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, cmdQueryStartupLimits, "CLIENT", s.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}

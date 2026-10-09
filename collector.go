@@ -13,6 +13,7 @@ import (
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 const (
@@ -60,6 +61,10 @@ type Collector struct {
 	// raceStagger overrides the default per-attempt delay between
 	// concurrent connects. Zero = use DefaultCollectorRaceStagger.
 	raceStagger time.Duration
+
+	// cfg is the HTCondor configuration this client authenticates and
+	// rate-limits with; nil means the process-wide default. See WithConfig.
+	cfg *config.Config
 
 	// mu guards the sticky-winner state below. dialAndAuthenticate
 	// reads `preferred` while building the per-attempt order and
@@ -286,7 +291,7 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 
 	// Apply rate limiting if configured
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(c.cfg)
 	if rateLimitManager != nil {
 		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
 			return nil, fmt.Errorf("rate limit exceeded: %w", err)
@@ -442,7 +447,7 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constraint string, projection []string, opts *QueryOptions) ([]*classad.ClassAd, error) {
 	// Apply rate limiting if configured
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(c.cfg)
 	if rateLimitManager != nil {
 		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
 			return nil, fmt.Errorf("rate limit exceeded: %w", err)
@@ -729,7 +734,7 @@ func (c *Collector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *Ad
 
 	// Apply rate limiting if configured
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(c.cfg)
 	if rateLimitManager != nil {
 		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
 			return fmt.Errorf("rate limit exceeded: %w", err)
@@ -936,7 +941,7 @@ func (c *Collector) advertiseMultipleTo(ctx context.Context, addr string, ads []
 		return errs
 	}
 
-	rlm := getRateLimitManager()
+	rlm := rateLimitManagerFor(c.cfg)
 	username := GetAuthenticatedUserFromContext(ctx)
 
 	var conn *client.HTCondorClient

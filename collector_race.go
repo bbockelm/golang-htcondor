@@ -249,7 +249,7 @@ func raceDial[T raceCloseable](
 // The advertise path needs this: an update goes to every collector, so
 // it addresses them one at a time rather than racing for a winner.
 func (c *Collector) dialAddress(ctx context.Context, addr string, cmd commands.CommandType) (*client.HTCondorClient, error) {
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(cmd), "CLIENT", addr)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, c.cfg, int(cmd), "CLIENT", addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -297,7 +297,7 @@ func (c *Collector) dialAndAuthenticate(ctx context.Context, cmd commands.Comman
 	}
 	cl, winner, err := raceDial(ctx, addrs, stagger,
 		func(actx context.Context, addr string) (*client.HTCondorClient, error) {
-			secConfig, err := GetSecurityConfigOrDefault(actx, nil, int(cmd), "CLIENT", addr)
+			secConfig, err := GetSecurityConfigOrDefault(actx, c.cfg, int(cmd), "CLIENT", addr)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create security config: %w", err)
 			}

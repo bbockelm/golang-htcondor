@@ -43,6 +43,7 @@ import (
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/golang-htcondor/config"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -69,6 +70,9 @@ type JobConnectInfo struct {
 	// Embedded for downstream calls; we keep the schedd's address around so
 	// callers can retry or report errors that mention the originating schedd.
 	scheddAddr string
+	// cfg is the originating Schedd's HTCondor configuration, used for the
+	// starter leg's configured methods and daemon credential.
+	cfg *config.Config
 }
 
 // GetJobConnectInfo invokes the schedd's GET_JOB_CONNECT_INFO RPC for
@@ -76,7 +80,7 @@ type JobConnectInfo struct {
 // for an on-demand session. The schedd authenticates the caller and verifies
 // they own the job before minting the session.
 func (s *Schedd) GetJobConnectInfo(ctx context.Context, clusterID, procID int) (*JobConnectInfo, error) {
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.GET_JOB_CONNECT_INFO, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, commands.GET_JOB_CONNECT_INFO, "CLIENT", s.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -122,7 +126,7 @@ func (s *Schedd) GetJobConnectInfo(ctx context.Context, clusterID, procID int) (
 		}
 	}
 
-	info := &JobConnectInfo{scheddAddr: s.address}
+	info := &JobConnectInfo{scheddAddr: s.address, cfg: s.cfg}
 	info.StarterAddr, _ = respAd.EvaluateAttrString("StarterIpAddr")
 	info.ClaimID, _ = respAd.EvaluateAttrString("ClaimId")
 	info.StarterVersion, _ = respAd.EvaluateAttrString("Version")
@@ -153,7 +157,7 @@ type sshKeyPair struct {
 // Split out from startSSHDOnStarter so the credential it ends up with can be
 // asserted directly. Which credential that is has been wrong before, and the
 // symptom appeared two hops away, on a machine behind a firewall.
-func starterSecurityConfig(ctx context.Context, starterAddr string, command int, cache *security.SessionCache) (*security.SecurityConfig, error) {
+func starterSecurityConfig(ctx context.Context, cfg *config.Config, starterAddr string, command int, cache *security.SessionCache) (*security.SecurityConfig, error) {
 	// Build the SecurityConfig from the configured CLIENT auth methods
 	// (so SSL/Kerberos/etc. are offered when configured) but keep the
 	// AES pin and the REQUIRED encryption/integrity levels — those
@@ -184,7 +188,7 @@ func starterSecurityConfig(ctx context.Context, starterAddr string, command int,
 	// execute node. Authenticating as the daemon uses the pool credential
 	// the broker does recognise, and does not widen what the caller can
 	// reach: the ClaimID is the capability, and it names one job.
-	secConfig, err := NewClientSecurityConfig(WithoutSecurityConfig(ctx), "", starterAddr, command, "CLIENT", cache)
+	secConfig, err := NewClientSecurityConfigWithConfig(WithoutSecurityConfig(ctx), cfg, "", starterAddr, command, "CLIENT", cache)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build starter security config: %w", err)
 	}
@@ -234,7 +238,7 @@ func (info *JobConnectInfo) dialStarter(ctx context.Context, command int, ccbDia
 	cache.Store(entry)
 	cache.MapCommand("", info.StarterAddr, fmt.Sprintf("%d", command), claim.SecSessionID())
 
-	secConfig, err := starterSecurityConfig(ctx, info.StarterAddr, command, cache)
+	secConfig, err := starterSecurityConfig(ctx, info.cfg, info.StarterAddr, command, cache)
 	if err != nil {
 		return nil, err
 	}

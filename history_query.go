@@ -10,6 +10,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/message"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // historyEndpoint is the daemon a history query is sent to. The schedd and the startd speak the
@@ -18,6 +19,9 @@ import (
 // work below is shared and only the endpoint differs.
 type historyEndpoint struct {
 	address string
+	// cfg is the owning client's HTCondor configuration (nil: the
+	// process-wide default).
+	cfg     *config.Config
 	command int
 	// daemon names the peer in errors ("schedd", "startd").
 	daemon string
@@ -44,7 +48,7 @@ func (e historyEndpoint) await(ctx context.Context) error {
 // connect dials the endpoint, authenticates, and sends the query ad. It returns the authenticated
 // client (the caller closes it) ready to be read for response ads.
 func (e historyEndpoint) connect(ctx context.Context, requestAd *classad.ClassAd) (*client.HTCondorClient, error) {
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, e.command, "CLIENT", e.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, e.cfg, e.command, "CLIENT", e.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}

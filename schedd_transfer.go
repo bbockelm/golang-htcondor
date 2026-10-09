@@ -74,7 +74,7 @@ func (s *Schedd) ReceiveJobSandbox(ctx context.Context, constraint string, w io.
 // doReceiveJobSandbox implements the actual transfer logic
 func (s *Schedd) doReceiveJobSandbox(ctx context.Context, constraint string, w io.Writer) error {
 	// Get SecurityConfig from context, HTCondor config, or defaults
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.TRANSFER_DATA_WITH_PERMS, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, commands.TRANSFER_DATA_WITH_PERMS, "CLIENT", s.address)
 	if err != nil {
 		return fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -432,7 +432,7 @@ func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.Clas
 	// path at the top of this file) do the same; spooling without it
 	// makes the schedd reject the auth handshake with "no compatible
 	// tokens available".
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.SPOOL_JOB_FILES_WITH_PERMS, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, commands.SPOOL_JOB_FILES_WITH_PERMS, "CLIENT", s.address)
 	if err != nil {
 		return fmt.Errorf("failed to build security config: %w", err)
 	}
@@ -577,7 +577,7 @@ func (s *Schedd) SpoolJobFilesFromTar(ctx context.Context, jobAds []*classad.Cla
 
 	// Prepare security config from context (see SpoolJobFilesFromFS for
 	// the same rationale).
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.SPOOL_JOB_FILES_WITH_PERMS, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, commands.SPOOL_JOB_FILES_WITH_PERMS, "CLIENT", s.address)
 	if err != nil {
 		return fmt.Errorf("failed to build security config: %w", err)
 	}

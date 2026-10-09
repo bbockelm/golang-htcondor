@@ -96,7 +96,7 @@ func (s *Schedd) EditJob(ctx context.Context, clusterID, procID int, attributes 
 
 	// Open QMGMT connection
 	// Note: NewQmgmtConnection automatically starts a transaction via GetCapabilities
-	qmgmt, err := NewQmgmtConnection(ctx, s.address)
+	qmgmt, err := newQmgmtConnection(ctx, s.cfg, s.address)
 	if err != nil {
 		return fmt.Errorf("failed to open QMGMT connection: %w", err)
 	}
@@ -171,7 +171,7 @@ func (s *Schedd) EditJobs(ctx context.Context, constraint string, attributes map
 
 	// Open QMGMT connection
 	// Note: NewQmgmtConnection automatically starts a transaction via GetCapabilities
-	qmgmt, err := NewQmgmtConnection(ctx, s.address)
+	qmgmt, err := newQmgmtConnection(ctx, s.cfg, s.address)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open QMGMT connection: %w", err)
 	}

@@ -95,7 +95,7 @@ func (c *Collector) PingWithOptions(ctx context.Context, opts *PingOptions) (*Pi
 	}
 
 	// Get SecurityConfig
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, command, "CLIENT", c.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, c.cfg, command, "CLIENT", c.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -170,7 +170,7 @@ func (s *Schedd) PingWithOptions(ctx context.Context, opts *PingOptions) (*PingR
 	}
 
 	// Get SecurityConfig
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, command, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, command, "CLIENT", s.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
