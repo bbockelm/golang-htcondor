@@ -242,15 +242,18 @@ func TestScheddQueryJobEpochsIntegration(t *testing.T) {
 	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit a simple test job
-	submitFile := `
+	// initialdir keeps the job's output out of the package directory; the
+	// harness removes its own tree after the pool has stopped.
+	submitFile := fmt.Sprintf(`
 universe = vanilla
+initialdir = %s
 executable = /bin/echo
 arguments = "Epoch test"
 output = test_epoch.out
 error = test_epoch.err
 log = test_epoch.log
 queue
-`
+`, harness.tmpDir)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -317,8 +320,11 @@ func TestScheddQueryTransferHistoryIntegration(t *testing.T) {
 	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit a job with file transfer
-	submitFile := `
+	// initialdir keeps the job's output out of the package directory; the
+	// harness removes its own tree after the pool has stopped.
+	submitFile := fmt.Sprintf(`
 universe = vanilla
+initialdir = %s
 executable = /bin/cat
 arguments = input.txt
 output = test_transfer.out
@@ -328,7 +334,7 @@ transfer_input_files = input.txt
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 queue
-`
+`, harness.tmpDir)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
