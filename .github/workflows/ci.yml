@@ -22,17 +22,21 @@ on:
 
 jobs:
   test:
-    name: Test
+    name: Test (${{ matrix.label }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # First entry is the floor named in every go.mod (currently
-        # 1.26) -- testing there is what makes that floor a real claim
-        # rather than an aspiration, since it catches accidental use of
-        # newer language features. Last entry is the toolchain we build
-        # and release with. Shift both when Go drops a release: the
-        # floor tracks the oldest version upstream still supports.
-        go-version: ['1.26', '1.27']
+        # "floor" is the minimum named in every go.mod (currently 1.26) --
+        # testing there is what makes that floor a real claim rather than
+        # an aspiration, since it catches accidental use of newer language
+        # features. It tracks the oldest Go upstream still supports, so it
+        # moves with the go.mod `go` lines, not with .go-version.
+        #
+        # "build" is the toolchain we build and release with: the minor in
+        # .go-version, latest patch, like every other job.
+        include:
+          - {label: floor, go-version: '1.26'}
+          - {label: build, go-version-file: .go-version}
 
     steps:
     - name: Checkout code
@@ -42,6 +46,7 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ matrix.go-version }}
+        go-version-file: ${{ matrix.go-version-file }}
         cache: true
 
     - name: Install HTCondor
@@ -90,7 +95,7 @@ jobs:
         (cd localcredmon && gotestsum --junitfile="$GITHUB_WORKSPACE/test-results-localcredmon.xml" -- -race ./...)
 
     - name: Upload coverage to Codecov
-      if: matrix.go-version == '1.27'
+      if: matrix.label == 'build'
       uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
       with:
         files: ./coverage.out
@@ -129,7 +134,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.27'
+        go-version-file: .go-version
         cache: true
         cache-dependency-path: |
           ${{ matrix.module }}/go.sum
@@ -174,7 +179,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.27'
+        go-version-file: .go-version
         cache: true
 
     - name: Build
@@ -194,7 +199,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.27'
+        go-version-file: .go-version
         cache: true
 
     # Fails when a PR leaves any module's go.mod/go.sum stale — notably the

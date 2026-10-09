@@ -119,7 +119,7 @@ jobs:
     - name: Derive the image cache key
       id: imgcache
       run: |
-        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
+        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore', '.go-version') }}" >> "$GITHUB_OUTPUT"
 
     # Reads the layers docker-test.yml deposited on main. This job used
     # to read a bare `type=gha`, which is a DIFFERENT scope from the one

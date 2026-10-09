@@ -65,6 +65,7 @@ jobs:
             # mistakes the image for one.
             echo "version=0.0.0-${GITHUB_REF_NAME}-$(date -u +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
           fi
+          echo "go=$(tr -d '[:space:]' < .go-version)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -80,6 +81,7 @@ jobs:
           # omits the stamps silently. Passed in from the ref that is
           # being released.
           build-args: |
+            GO_VERSION=${{ steps.ver.outputs.go }}
             VERSION=${{ steps.ver.outputs.version }}
             COMMIT=${{ github.sha }}
           cache-from: type=gha
