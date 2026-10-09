@@ -93,6 +93,7 @@ func setupRESTUpload(t *testing.T) *restUploadEnv {
 }
 
 func TestRESTClusterUpload(t *testing.T) {
+	t.Parallel()
 	env := setupRESTUpload(t)
 
 	// POST multipart/form-data, the browser and SPA path.

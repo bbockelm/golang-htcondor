@@ -140,6 +140,7 @@ func (r *sseReader) nothingWithin(d time.Duration) (activityStreamEvent, bool) {
 }
 
 func TestActivityStreamEndToEnd(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -240,6 +241,7 @@ func TestActivityStreamEndToEnd(t *testing.T) {
 // here and not only in the unit tests because "the mirror emits one
 // watch event per attribute written" is a property of the round trip.
 func TestActivityStreamIgnoresAttributeChurn(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -283,6 +285,7 @@ func TestActivityStreamIgnoresAttributeChurn(t *testing.T) {
 // The end-to-end test above proves authentication WORKS; this proves it
 // is REQUIRED, which is a different claim and the one that matters.
 func TestActivityStreamRefusesUnauthenticated(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}

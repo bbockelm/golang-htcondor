@@ -89,6 +89,7 @@ func mirrorFeed(t *testing.T, ctx context.Context) (*Handler, *jobwatch.Feed, fu
 }
 
 func TestMirrorFeedDeliversAJobsChanges(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -133,6 +134,7 @@ func TestMirrorFeedDeliversAJobsChanges(t *testing.T) {
 }
 
 func TestMirrorFeedReportsAJobLeavingTheQueue(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -220,6 +222,7 @@ func (w *txWriter) destroy(key string) {
 // channel rather than going through the Feed, so a failure says which
 // side is at fault.
 func TestMirrorRawWatchDelivers(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -318,6 +321,7 @@ func TestMirrorRawWatchDelivers(t *testing.T) {
 // proves the source actually feeds it one the way the live mirror does, which is
 // the coverage that was missing when the bug shipped.
 func TestWatchDoneFiresForCompletedJobStillInQueue(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}

@@ -137,6 +137,7 @@ func waitFor(t *testing.T, what string, limit time.Duration, ok func() bool) {
 // TestMirrorRoundTrip is the test the unit suite structurally cannot be:
 // a real collector, a real database, and a real authenticated read.
 func TestMirrorRoundTrip(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -219,6 +220,7 @@ func TestMirrorRoundTrip(t *testing.T) {
 // against a real database, so the stages it reports are the stages that
 // actually happen rather than the ones I assumed.
 func TestMirrorProbeReportsEachStage(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}

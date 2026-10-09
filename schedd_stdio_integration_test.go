@@ -24,6 +24,7 @@ import (
 //
 //nolint:gocyclo // Integration test requires complex setup and verification logic
 func TestStdioFilesIntegration(t *testing.T) {
+	t.Parallel()
 	// Setup HTCondor test harness
 	harness := SetupCondorHarness(t)
 
@@ -108,7 +109,8 @@ queue
 	t.Logf("Waiting for job to complete...")
 	jobCompleted := false
 	startTime := time.Now()
-	maxWait := 30 * time.Second
+	// A ceiling only a failure pays; pools run in parallel share the CPU.
+	maxWait := 2 * time.Minute
 	var lastStatus int64 = -1
 
 	for time.Since(startTime) < maxWait {
@@ -241,6 +243,7 @@ queue
 //
 //nolint:gocyclo // Integration test requires complex setup and verification logic
 func TestStdioFilesFromTarIntegration(t *testing.T) {
+	t.Parallel()
 	// Setup HTCondor test harness
 	harness := SetupCondorHarness(t)
 
@@ -368,7 +371,8 @@ echo 'stderr message' >&2
 	t.Logf("Waiting for job to complete...")
 	jobCompleted := false
 	startTime := time.Now()
-	maxWait := 30 * time.Second
+	// A ceiling only a failure pays; pools run in parallel share the CPU.
+	maxWait := 2 * time.Minute
 	var lastStatus int64 = -1
 
 	for time.Since(startTime) < maxWait {

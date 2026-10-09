@@ -45,6 +45,7 @@ func waitForLog(t *testing.T, path, want string, timeout time.Duration) bool {
 // the master (DC_SET_READY), adopts the inherited shared-port listener, reloads
 // on condor_reconfig (SIGHUP), and shuts down on condor_off (SIGTERM).
 func TestGoDaemonUnderCondorMaster(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping condor_master integration test in -short mode")
 	}

@@ -48,6 +48,7 @@ import (
 //
 //	go test -tags=integration -run TestJobDag -timeout 20m -v ./httpserver/
 func TestJobDagIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

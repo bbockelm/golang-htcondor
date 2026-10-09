@@ -10,6 +10,7 @@ import (
 
 // TestScheddQueryJobHistoryIntegration tests the QueryHistory functionality
 func TestScheddQueryJobHistoryIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -65,7 +66,8 @@ queue
 	// Wait for job to leave the queue (completed or removed)
 	// In CI environments, the job might not actually run if there's no startd,
 	// but it should at least get removed from the queue eventually
-	maxWait := 30 * time.Second
+	// A ceiling only a failure pays; pools run in parallel share the CPU.
+	maxWait := 2 * time.Minute
 	deadline := time.Now().Add(maxWait)
 	var leftQueue bool
 	for time.Now().Before(deadline) {
@@ -210,6 +212,7 @@ queue
 
 // TestScheddQueryJobEpochsIntegration tests the job epoch history functionality
 func TestScheddQueryJobEpochsIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -284,6 +287,7 @@ queue
 
 // TestScheddQueryTransferHistoryIntegration tests the transfer history functionality
 func TestScheddQueryTransferHistoryIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

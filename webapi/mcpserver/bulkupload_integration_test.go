@@ -47,6 +47,7 @@ func locateSchedd(t *testing.T, harness *htcondor.CondorTestHarness) *htcondor.S
 }
 
 func TestBulkUploadReleasesEveryProcOfACluster(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real HTCondor)")
 	}
@@ -169,6 +170,7 @@ queue %d
 // A second call on an already-spooled cluster must be a no-op rather than
 // an error: an agent that retries should not be told its request failed.
 func TestBulkUploadOnASpooledClusterIsANoOp(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real HTCondor)")
 	}
@@ -328,6 +330,7 @@ func waitForAnyProcToSucceed(t *testing.T, ctx context.Context, schedd *htcondor
 // or not. This submission has no transfer_input_files, so the upload
 // lands only if the cluster attributes reached the fan-out.
 func TestBulkUploadWorksWhenOnlyTheExecutableIsTransferred(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real HTCondor)")
 	}

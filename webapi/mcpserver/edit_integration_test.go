@@ -17,6 +17,7 @@ import (
 
 // TestMCPEditJobIntegration tests editing a job via MCP tool
 func TestMCPEditJobIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -218,6 +219,7 @@ queue
 
 // TestMCPEditJobToolListedInTools tests that edit_job tool is listed in available tools
 func TestMCPEditJobToolListedInTools(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

@@ -13,6 +13,7 @@ import (
 
 // TestEditJobIntegration tests editing a single job's attributes
 func TestEditJobIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -173,6 +174,7 @@ queue
 
 // TestEditJobsIntegration tests bulk editing multiple jobs
 func TestEditJobsIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

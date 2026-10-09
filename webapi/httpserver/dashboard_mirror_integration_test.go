@@ -205,6 +205,7 @@ func (s *Handler) dashboardFromMirror(ctx context.Context, owner string, ownedBy
 // TestDashboardFromMirrorCountsRealRows runs the dashboard's own query
 // path against a real database holding a known population.
 func TestDashboardFromMirrorCountsRealRows(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -252,6 +253,7 @@ func TestDashboardFromMirrorCountsRealRows(t *testing.T) {
 // TestDashboardFromMirrorBreaksDownHolds checks the hold panel, which
 // needs both the GROUP BY and a follow-up row read for the message.
 func TestDashboardFromMirrorBreaksDownHolds(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -311,6 +313,7 @@ func TestDashboardFromMirrorBreaksDownHolds(t *testing.T) {
 // TestDashboardFromMirrorReadsRecentActivity covers the windowed range
 // reads, including the one that must come back newest-first.
 func TestDashboardFromMirrorReadsRecentActivity(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -370,6 +373,7 @@ func TestDashboardFromMirrorReadsRecentActivity(t *testing.T) {
 // filters at the database rather than being dropped into a constraint
 // the database ignores.
 func TestDashboardFromMirrorScopesToOwner(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -408,6 +412,7 @@ func TestDashboardFromMirrorScopesToOwner(t *testing.T) {
 // most rows have and some do not, and checks the classification that
 // rides on the answer.
 func TestDashboardGoodputFromRealHistory(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -501,6 +506,7 @@ func TestDashboardGoodputFromRealHistory(t *testing.T) {
 // only happens against a real archive, so it cannot be covered
 // anywhere but here.
 func TestDashboardMergesArchivedCompletions(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}

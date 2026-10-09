@@ -9,6 +9,7 @@ import (
 
 // TestCollectorPingIntegration tests the Collector.Ping method against a real HTCondor instance
 func TestCollectorPingIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -69,6 +70,7 @@ func TestCollectorPingIntegration(t *testing.T) {
 
 // TestScheddPingIntegration tests the Schedd.Ping method against a real HTCondor instance
 func TestScheddPingIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
