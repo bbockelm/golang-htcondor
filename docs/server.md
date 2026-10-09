@@ -404,7 +404,9 @@ a decision rather than a side effect.
 confirms. A red banner then appears on every page, cannot be dismissed, and
 counts down; the mode turns itself off after 30 minutes, and a server restart
 turns it off for everyone. Actions on the operator's *own* jobs are unaffected
-and are not treated as impersonation.
+and are not treated as impersonation. Membership is re-checked on every action:
+an armed operator who has since left `HTTP_API_SUPERUSER_GROUP` (and leads no
+project) gets a 403 on their next action, and the mode is turned off.
 
 **Which identity acts.** If the operator is themselves listed in the schedd's
 `QUEUE_SUPER_USERS`, the server authenticates as them, and the schedd's own
@@ -464,7 +466,8 @@ does, and while it is on may act on other users' jobs whose `ProjectName` is P
 
 The file has one project per line, then its leads, separated by whitespace or
 commas. A lead starting with `%` is a group (the sudoers convention); anything
-else is a username. `#` starts a comment.
+else is a username. `#` starts a comment anywhere on a line, so a project or
+lead whose name contains `#` cannot be configured.
 
 ```
 # project     leads
@@ -493,7 +496,8 @@ compare case-insensitively. Groups are the session's, from
 a quote, a backslash or a control character is ignored.
 
 **What a lead can do**, while the mode is on: hold, release and remove another
-user's job in a project they lead, tail its output, and ssh to it. Bulk hold
+user's job in a project they lead, tail its output, ssh to it, and warm its
+connection ahead of time (`/warm`). Bulk hold
 and release reach the lead's own jobs plus their projects' jobs, whatever the
 constraint says. A job with no `ProjectName`, or one in another project, is
 refused with a 403, and so is a job that does not exist (with the same
@@ -521,7 +525,10 @@ with the lead's session. Global superusers keep that access.
 
 **Reading.** Without turning the mode on, a lead may list (and open) their own
 jobs plus their projects' jobs by choosing *Everyone* on the jobs page, the way
-an admin may list all jobs. That read scope needs no signing key.
+an admin may list all jobs. The same scope covers the job's live status and its
+match analysis, including `?source=archive` for a finished job. That read
+scope needs no signing key. For now the job log, DAG, sandbox and output
+panels stay owner-only for leads.
 
 **Revoking.** Leadership is re-checked on every action, not when the mode was
 turned on: removing a lead from the file takes effect within a few seconds, or
