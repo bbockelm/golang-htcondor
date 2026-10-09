@@ -21,6 +21,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
 )
 
 // --- leads file and pattern ------------------------------------------------
@@ -1292,5 +1293,58 @@ func TestProjectLeadRefusalDoesNotRevealJobs(t *testing.T) {
 	}
 	if w, _ := holdOne(g, gsid, "9.0"); !strings.Contains(w.Body.String(), "not found") {
 		t.Errorf("global superuser's refusal for a missing job = %s", w.Body.String())
+	}
+}
+
+// TestImpersonatedTransportNotSharedWithPlainLookup: a transport opened under
+// superuser impersonation is cached apart from the operator's own. A plain
+// lookup by the same operator -- the SSH gateway's -- must not get it, or it
+// would outlive the arm with no superuser check and no audit.
+func TestImpersonatedTransportNotSharedWithPlainLookup(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, "hello from the job")
+	}))
+	defer backend.Close()
+
+	h := newProxyTestHandler(t, strings.TrimPrefix(backend.URL, "http://"))
+	h.userHeader = ""
+	h.userHeaderUnsafeAllowAll = false
+	h.sessionStore = createTestSessionStore(t, time.Hour)
+	h.initSuperuserMode(HandlerConfig{SuperuserGroup: "admins"}, h.logger)
+	h.superuserPolicy.source = &fakeSuperUsers{users: []string{"condor@test.htcondor.org"}}
+	_ = h.superuserPolicy.Refresh(context.Background())
+	ad := leadJobAd(12, "bob", "", 2)
+	h.jobQueryOverride = func(_ context.Context, constraint string, _ *htcondor.QueryOptions) ([]*classad.ClassAd, error) {
+		if evalConstraint(t, constraint, ad) {
+			return []*classad.ClassAd{ad}, nil
+		}
+		return nil, nil
+	}
+
+	sid, _, err := h.sessionStore.Create("root", []string{"admins"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.superuserArmed.Arm(sid, h.resolveImpersonationIdentity(context.Background(), "root"))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/jobs/12.0/proxy/8080/", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec
+	w := httptest.NewRecorder()
+	h.handleJobProxy(w, r, 12, 0, jobProxyTarget{Port: 8080}, "/")
+	if w.Code != http.StatusOK {
+		t.Fatalf("impersonated proxy = %d %s", w.Code, w.Body.String())
+	}
+
+	cache, err := h.getOrCreateJobSSHCache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	imp := &Impersonation{Actor: "root@test.htcondor.org", Target: "bob@test.htcondor.org", Identity: "condor@test.htcondor.org"}
+	if reused, err := cache.Warm(context.Background(), jobssh.Key{
+		Owner: "root", Cluster: 12, Proc: 0, Impersonation: imp.sessionTag(),
+	}); err != nil || !reused {
+		t.Fatalf("the impersonated transport is not where it was cached (reused=%v err=%v)", reused, err)
+	}
+	if reused, err := cache.Warm(context.Background(), jobssh.Key{Owner: "root", Cluster: 12, Proc: 0}); err != nil || reused {
+		t.Errorf("a plain lookup by the same operator got the impersonated transport (reused=%v err=%v)", reused, err)
 	}
 }

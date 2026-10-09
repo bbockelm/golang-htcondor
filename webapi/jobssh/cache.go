@@ -41,13 +41,25 @@ const DefaultIdleTimeout = 10 * time.Minute
 // cache had exactly this bug -- keyed by {address, command} alone, so
 // one user's request could resume a session another user had
 // authenticated and run as them. Same reasoning here, different cache.
+//
+// Impersonation is part of it for the same reason. A transport opened under
+// superuser impersonation authenticated as somebody other than Owner, on the
+// job owner's behalf; it must never be handed to a plain lookup by the same
+// Owner -- which would let it outlive the grant that opened it, with no
+// superuser check and no audit. Empty for an ordinary transport.
 type Key struct {
-	Owner   string
-	Cluster int
-	Proc    int
+	Owner         string
+	Cluster       int
+	Proc          int
+	Impersonation string
 }
 
-func (k Key) String() string { return fmt.Sprintf("%s/%d.%d", k.Owner, k.Cluster, k.Proc) }
+func (k Key) String() string {
+	if k.Impersonation != "" {
+		return fmt.Sprintf("%s[%s]/%d.%d", k.Owner, k.Impersonation, k.Cluster, k.Proc)
+	}
+	return fmt.Sprintf("%s/%d.%d", k.Owner, k.Cluster, k.Proc)
+}
 
 // Conn is the slice of *ssh.Client this package needs: open a TCP
 // connection inside the sandbox, notice when the transport dies, and

@@ -86,16 +86,11 @@ func (s *Handler) handleJobWarm(w http.ResponseWriter, r *http.Request, jobID st
 		return
 	}
 
-	// Keyed by the identity the transport will authenticate as, never
-	// by the job alone -- the same reasoning as the job proxy. Warming
-	// under the wrong key would warm a transport the connection that
+	// The same key the job proxy will use (jobTransportKey). Warming
+	// under any other would warm a transport the connection that
 	// follows cannot use, which is worse than not warming at all: it
 	// pays the cost twice and looks like it worked.
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
-	if owner == "" {
-		owner = username
-	}
-	key := jobssh.Key{Owner: owner, Cluster: cluster, Proc: proc}
+	key := jobTransportKey(ctx, imp, username, cluster, proc)
 
 	started := time.Now()
 	reused, err := cache.Warm(ctx, key)
