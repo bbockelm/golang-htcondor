@@ -392,7 +392,8 @@ func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte
 		connected = false
 		err := jupytertunnel.RunHelperTunnel(ctx, cfg)
 		if connected {
-			// The tunnel was up, so this is a fresh drop rather than the
+			// The server accepted this helper (see OnConnected: a refused
+			// dial does not count), so this is a fresh drop rather than the
 			// latest of a run of failed dials. Start the backoff over:
 			// carried on from earlier drops it sat at the ceiling, and the
 			// server keeps a dropped session only for its reconnect grace

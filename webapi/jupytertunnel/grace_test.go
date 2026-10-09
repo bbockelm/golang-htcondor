@@ -337,3 +337,55 @@ func TestIdleClockPausesWhileDisconnected(t *testing.T) {
 		t.Errorf("idle after reconnecting = %s, want 15s: the reconnect reset the clock or the outage was counted", got)
 	}
 }
+
+// A dial the server refuses is not a connection. The helper resets its
+// reconnect backoff on OnConnected, and OnConnected used to fire as soon as
+// the websocket and yamux were up -- before the server had looked at the
+// token -- so a helper refused with "try again later" (a busy session, a
+// database it could not write) redialed at the 2-second floor for the whole
+// grace period.
+func TestRefusedDialDoesNotCountAsConnected(t *testing.T) {
+	reg, roller := newGraceRegistry(t, 30*time.Second)
+	h := newTunnelHarness(t, reg)
+	id, token := createForDial(t, reg, roller)
+
+	// start runs the helper with tok and reports, through the returned
+	// flag, whether it counted itself connected.
+	start := func(ctx context.Context, tok string) (*atomic.Bool, <-chan error) {
+		var connected atomic.Bool
+		done := make(chan error, 1)
+		go func() {
+			done <- RunHelperTunnel(ctx, HelperConfig{
+				UpstreamURL: strings.Replace(h.srv.URL, "http://", "ws://", 1) + "/tunnel/" + id,
+				Token:       tok,
+				SocketPath:  h.sock,
+				TokenPath:   filepath.Join(h.dir, "token-"+id),
+				OnConnected: func() { connected.Store(true) },
+			})
+		}()
+		return &connected, done
+	}
+
+	// Accepted: the server sends the next token, and that counts. This
+	// helper stays connected for the rest of the test.
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	connectedA, _ := start(ctxA, token)
+	next := h.nextToken(t, id)
+	if !waitFor(5*time.Second, connectedA.Load) {
+		t.Fatal("an accepted dial never reported itself connected")
+	}
+
+	// A second dial while that tunnel is live is refused with
+	// try-again-later.
+	ctxB, cancelB := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelB()
+	connectedB, doneB := start(ctxB, next)
+	err := <-doneB
+	if err == nil || IsRejection(err) {
+		t.Fatalf("wanted a try-again-later refusal, got %v", err)
+	}
+	if connectedB.Load() {
+		t.Error("a refused dial reported itself connected; the helper would reset its backoff and redial at the floor rate")
+	}
+}

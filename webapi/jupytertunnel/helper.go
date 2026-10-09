@@ -78,7 +78,17 @@ type HelperConfig struct {
 	// gives each call a fresh one.
 	IdleClock *IdleClock
 
-	// OnConnected, when set, is called once the tunnel is up.
+	// OnConnected, when set, is called once the server has accepted this
+	// helper: when the first stream arrives over the tunnel, on the
+	// goroutine that called RunHelperTunnel.
+	//
+	// Not when the websocket and yamux are up. The server upgrades the
+	// connection before it checks the token, so a dial it then refuses --
+	// a busy session, a database it could not write -- gets that far too,
+	// and a caller resetting its backoff on it redials a refusing server
+	// at the floor rate for as long as the refusals last. An accepted
+	// helper is sent its next token on a control stream at once (with a
+	// session store), or a proxied request when the browser next asks.
 	OnConnected func()
 }
 
@@ -243,9 +253,6 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 	}
 	clock.Up()
 	defer clock.Down()
-	if cfg.OnConnected != nil {
-		cfg.OnConnected()
-	}
 	// Set when the watcher below gave up, so the caller can tell an idle
 	// session from a lost one. They look identical at the accept loop --
 	// both are a closed session -- and a reconnect loop that cannot tell
@@ -280,6 +287,7 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 		}()
 	}
 
+	accepted := false
 	for {
 		stream, err := session.Accept()
 		if err != nil {
@@ -291,6 +299,12 @@ func RunHelperTunnel(ctx context.Context, cfg HelperConfig) error {
 				return nil
 			}
 			return fmt.Errorf("helper: accept stream: %w", err)
+		}
+		if !accepted {
+			accepted = true
+			if cfg.OnConnected != nil {
+				cfg.OnConnected()
+			}
 		}
 		// Pass the request-scoped context so the UDS dial inherits the
 		// helper's lifetime (gosec G118): cancelling ctx — which
