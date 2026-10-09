@@ -589,11 +589,18 @@ func (i *Instance) HasTunnel() bool {
 // Reconnecting reports whether this session had a tunnel and is waiting for
 // its helper to dial back: one dropped in this process, or one inherited
 // from the last.
+//
+// A tunnel that is still installed but closed counts as dropped: yamux
+// marks the session closed before tunnelLost runs and records lostAt, and
+// in that gap the session is reconnecting, not starting.
 func (i *Instance) Reconnecting() bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.closed || (i.tunnel != nil && !i.tunnel.IsClosed()) {
+	if i.closed {
 		return false
+	}
+	if i.tunnel != nil {
+		return i.tunnel.IsClosed()
 	}
 	return !i.lostAt.IsZero() || i.adopted
 }

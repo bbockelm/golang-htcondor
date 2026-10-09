@@ -309,7 +309,7 @@ func buildJupyterHelperForTest(t *testing.T, goTool, dir string) []byte {
 	}
 	out := filepath.Join(dir, "htcondor-jupyter-helper")
 	//nolint:gosec // G204: the go found on PATH, building this module's own helper
-	cmd := exec.CommandContext(context.Background(), goTool, "build", "-o", out, "./cmd/htcondor-jupyter-helper")
+	cmd := exec.CommandContext(context.Background(), goTool, "build", "-buildvcs=false", "-o", out, "./cmd/htcondor-jupyter-helper")
 	cmd.Dir = filepath.Dir(wd) // the webapi module root
 	cmd.Env = append(os.Environ(), "GOWORK=off", "CGO_ENABLED=0")
 	if b, err := cmd.CombinedOutput(); err != nil {
