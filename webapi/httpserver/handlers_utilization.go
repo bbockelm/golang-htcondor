@@ -168,6 +168,7 @@ func (s *Handler) computeUtilization(ctx context.Context, scope string, days int
 	readTime := time.Since(start)
 	resp := utilization.Analyze(jobs, utilization.Options{
 		Since: since, Until: now, Days: days, Truncated: truncated, ShowOwner: showOwner,
+		Machines: s.utilizationMachines(ctx),
 	})
 	s.logger.Info(logging.DestinationHTTP, "utilization analysed",
 		"source", source, "jobs", len(jobs), "truncated", truncated, "days", days,
@@ -375,51 +376,59 @@ func (s *Handler) writeUtilizationError(w http.ResponseWriter, err error) {
 // window and access point.
 const maxUtilizationCacheEntries = 256
 
-// utilizationCache single-flights and keeps analyses, the same shape as
-// issueCache: concurrent identical requests cost one read, and the read
-// runs on a context of its own so the request that triggered it can go
-// away without taking the answer with it.
-type utilizationCache struct {
+// sharedCache single-flights and keeps one kind of result per key, the
+// same shape as issueCache: concurrent identical requests cost one read,
+// and the read runs on a context of its own so the request that
+// triggered it can go away without taking the answer with it.
+type sharedCache[T any] struct {
 	mu    sync.Mutex
-	byKey map[string]*cachedUtilization
+	byKey map[string]*sharedEntry[T]
 	now   func() time.Time
 	ttl   time.Duration
 	// timeout bounds one computation.
 	timeout time.Duration
 }
 
-type cachedUtilization struct {
+type sharedEntry[T any] struct {
 	// A channel rather than a sync.Mutex, so a waiter can give up when
 	// its own caller goes away instead of blocking on a computation it no
 	// longer needs.
 	lock chan struct{}
-	resp *utilization.Response
+	val  T
+	has  bool
 	at   time.Time
 }
 
-func newUtilizationCache() *utilizationCache {
-	return &utilizationCache{
-		byKey:   make(map[string]*cachedUtilization),
+func newSharedCache[T any](ttl, timeout time.Duration) *sharedCache[T] {
+	return &sharedCache[T]{
+		byKey:   make(map[string]*sharedEntry[T]),
 		now:     time.Now,
-		ttl:     utilizationRefresh,
-		timeout: utilizationComputeTimeout,
+		ttl:     ttl,
+		timeout: timeout,
 	}
 }
 
-// get returns the analysis for key, computing it if there is no fresh
-// one.
+// utilizationCache holds analyses.
+type utilizationCache = sharedCache[*utilization.Response]
+
+func newUtilizationCache() *utilizationCache {
+	return newSharedCache[*utilization.Response](utilizationRefresh, utilizationComputeTimeout)
+}
+
+// get returns the value for key, computing it if there is no fresh one.
 //
 // ctx bounds the WAIT, not the computation. The computation gets a
 // context detached from ctx's cancellation (sharedComputeContext), so a
 // first request that is cancelled part way -- a reload, a tab closed --
 // still leaves a whole answer in the cache for the next one, rather than
 // an error or, worse, half an answer. A failure is never cached.
-func (c *utilizationCache) get(ctx context.Context, key string, compute func(context.Context) (*utilization.Response, error)) (*utilization.Response, error) {
+func (c *sharedCache[T]) get(ctx context.Context, key string, compute func(context.Context) (T, error)) (T, error) {
+	var zero T
 	c.mu.Lock()
 	entry := c.byKey[key]
 	if entry == nil {
 		c.makeRoom()
-		entry = &cachedUtilization{lock: make(chan struct{}, 1)}
+		entry = &sharedEntry[T]{lock: make(chan struct{}, 1)}
 		c.byKey[key] = entry
 	}
 	c.mu.Unlock()
@@ -428,44 +437,44 @@ func (c *utilizationCache) get(ctx context.Context, key string, compute func(con
 	case entry.lock <- struct{}{}:
 		defer func() { <-entry.lock }()
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return zero, ctx.Err()
 	}
 
-	if entry.resp != nil && c.now().Sub(entry.at) < c.ttl {
-		return entry.resp, nil
+	if entry.has && c.now().Sub(entry.at) < c.ttl {
+		return entry.val, nil
 	}
 	computeCtx, cancel := sharedComputeContext(ctx, c.timeout)
 	defer cancel()
-	resp, err := compute(computeCtx)
+	val, err := compute(computeCtx)
 	if err != nil {
 		// The last good answer beats an error page when the schedd or
 		// the mirror hiccups; it is at most a refresh or two old.
-		if entry.resp != nil {
-			return entry.resp, nil
+		if entry.has {
+			return entry.val, nil
 		}
-		return nil, err
+		return zero, err
 	}
-	entry.resp, entry.at = resp, c.now()
-	return resp, nil
+	entry.val, entry.has, entry.at = val, true, c.now()
+	return val, nil
 }
 
 // makeRoom keeps the cache under maxUtilizationCacheEntries. Called with
 // c.mu held, before adding an entry. Expired entries go first, then the
 // oldest; one being computed or waited on is left alone.
-func (c *utilizationCache) makeRoom() {
+func (c *sharedCache[T]) makeRoom() {
 	if len(c.byKey) < maxUtilizationCacheEntries {
 		return
 	}
 	now := c.now()
-	busy := func(e *cachedUtilization) bool { return len(e.lock) > 0 }
+	busy := func(e *sharedEntry[T]) bool { return len(e.lock) > 0 }
 	for k, e := range c.byKey {
-		if !busy(e) && (e.resp == nil || now.Sub(e.at) >= c.ttl) {
+		if !busy(e) && (!e.has || now.Sub(e.at) >= c.ttl) {
 			delete(c.byKey, k)
 		}
 	}
 	for len(c.byKey) >= maxUtilizationCacheEntries {
 		var oldestKey string
-		var oldest *cachedUtilization
+		var oldest *sharedEntry[T]
 		for k, e := range c.byKey {
 			if !busy(e) && (oldest == nil || e.at.Before(oldest.at)) {
 				oldestKey, oldest = k, e
@@ -481,4 +490,70 @@ func (c *utilizationCache) makeRoom() {
 func (s *Handler) utilizationResults() *utilizationCache {
 	s.utilizationCacheOnce.Do(func() { s.utilizationCacheVal = newUtilizationCache() })
 	return s.utilizationCacheVal
+}
+
+// poolShapeRefresh is how long the pool's machine shapes are reused.
+// Machines come and go far more slowly than a page is reloaded.
+const poolShapeRefresh = 10 * time.Minute
+
+// poolShapeTimeout bounds one read of the pool.
+const poolShapeTimeout = time.Minute
+
+// poolShapeCache holds the pool's machine shapes.
+type poolShapeCache = sharedCache[[]utilization.Machine]
+
+func (s *Handler) poolShapes() *poolShapeCache {
+	s.poolShapeCacheOnce.Do(func() {
+		s.poolShapeCacheVal = newSharedCache[[]utilization.Machine](poolShapeRefresh, poolShapeTimeout)
+	})
+	return s.poolShapeCacheVal
+}
+
+// utilizationMachines is the pool's execute capacity for the throughput
+// estimate, or nil when it cannot be had. Never an error: the estimate is
+// an extra, and the rest of the analysis stands without it.
+//
+// One read serves everyone. The shapes of the pool's machines are not
+// the caller's; a startd ad is READ-level on the collector, the same
+// read /api/v1/collector/pool-summary makes for any signed-in user.
+func (s *Handler) utilizationMachines(ctx context.Context) []utilization.Machine {
+	if s.collector == nil {
+		return nil
+	}
+	machines, err := s.poolShapes().get(ctx, "pool", s.readPoolShapes)
+	if err != nil {
+		s.logger.Info(logging.DestinationHTTP, "utilization: the pool's machines could not be read; no throughput estimate", "error", err)
+		return nil
+	}
+	return machines
+}
+
+// readPoolShapes reads every slot that holds jobs from the collector.
+// Dynamic slots are excluded in the query, as the pool summary does --
+// they are carved from partitionable slots counted at full size -- and
+// MachineFromAd drops anything else that adds no capacity.
+func (s *Handler) readPoolShapes(ctx context.Context) ([]utilization.Machine, error) {
+	results, err := s.collector.QueryAdsStream(ctx, "StartdAd", `SlotType =!= "Dynamic"`,
+		utilization.MachineProjection(), 0, &htcondor.StreamOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var machines []utilization.Machine
+	var readErr error
+	for res := range results {
+		if res.Err != nil {
+			readErr = res.Err
+			continue
+		}
+		if m, ok := utilization.MachineFromAd(res.Ad); ok {
+			machines = append(machines, m)
+		}
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	if len(machines) == 0 {
+		return nil, errors.New("the collector reported no execute slots")
+	}
+	return machines, nil
 }

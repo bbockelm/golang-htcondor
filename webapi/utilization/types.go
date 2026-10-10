@@ -58,6 +58,10 @@ type Overall struct {
 	// eventually succeeded.
 	BadputHours float64           `json:"badput_hours"`
 	Resources   []ResourceSummary `json:"resources"`
+	// ThroughputGain is every workflow together: the pool occupancy of
+	// the same work at the current requests over that at the suggested
+	// ones. Nil when no workflow has a throughput estimate.
+	ThroughputGain *float64 `json:"throughput_gain"`
 }
 
 // ResourceSummary is time-weighted: of what was reserved, how much was
@@ -157,6 +161,10 @@ type Advice struct {
 	Submit     []string `json:"submit"`
 	Saves      *Savings `json:"saves"`
 	Confidence string   `json:"confidence"`
+
+	// request is the new request the advice asks for, in the resource's
+	// own units (cores, MiB, KiB); zero when it changes no request.
+	request float64
 }
 
 // Restarts is wall clock lost to runs that were thrown away.
@@ -226,4 +234,49 @@ type Workflow struct {
 	Advice      []Advice           `json:"advice"`
 	Batches     []BatchPoint       `json:"batches"`
 	Samples     []Sample           `json:"samples"`
+	// Throughput is nil when no advice changes the request, there are
+	// too few jobs to size memory from, or nothing is known about the
+	// pool.
+	Throughput *Throughput `json:"throughput"`
+}
+
+// Shape is one job's request.
+type Shape struct {
+	Cpus      float64 `json:"cpus"`
+	MemoryMiB float64 `json:"memory_mib"`
+	DiskKiB   float64 `json:"disk_kib"`
+	GPUs      float64 `json:"gpus"`
+}
+
+// Throughput estimates how many more of a workflow's jobs could run at
+// once with the suggested requests.
+type Throughput struct {
+	Current        Shape    `json:"current"`
+	Suggested      Shape    `json:"suggested"`
+	RetryMemoryMiB *float64 `json:"retry_memory_mib"`
+	// FitCurrent and FitSuggested are how many copies of each shape the
+	// pool's execute machines could hold at once.
+	FitCurrent   int `json:"fit_current"`
+	FitSuggested int `json:"fit_suggested"`
+	// Gain is pool occupancy per unit of work, current over suggested,
+	// reruns included.
+	Gain float64 `json:"gain"`
+	// LimitedBy is the resource that caps the current shape on the most
+	// machines.
+	LimitedBy string `json:"limited_by"`
+	// WaitP50 is the median seconds from submission to first start.
+	WaitP50      float64    `json:"wait_p50"`
+	SlotsLimited bool       `json:"slots_limited"`
+	LastBatch    *LastBatch `json:"last_batch"`
+}
+
+// LastBatch turns the gain into time for the most recent sizeable batch.
+type LastBatch struct {
+	ID   int64 `json:"id"`
+	Jobs int   `json:"jobs"`
+	// Elapsed is first submission to last completion, seconds.
+	Elapsed float64 `json:"elapsed"`
+	// Estimated is the same at the suggested requests: never shorter
+	// than its longest job.
+	Estimated float64 `json:"estimated"`
 }

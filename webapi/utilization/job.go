@@ -65,6 +65,7 @@ func Projection() []string {
 	return []string{
 		"ClusterId", "ProcId", "Owner", "JobBatchName", "DAGManJobId", "DAGNodeName",
 		"Cmd", "JobUniverse", "QDate", "CompletionDate", "EnteredHistoryTime",
+		"JobStartDate", "JobCurrentStartDate",
 		"JobStatus", "ExitCode", "ExitBySignal",
 		"RequestMemory", "RequestCpus", "RequestDisk", "RequestGPUs",
 		"MemoryUsage", "ResidentSetSize", "DiskUsage",
@@ -85,14 +86,18 @@ type Job struct {
 	Cluster, Proc int64
 	Owner         string
 	// Schedd is the access point that ran the job, in multi-AP mode.
-	Schedd       string
-	BatchName    string
-	DAGManJobID  int64
-	DAGNodeName  string
-	Cmd          string
-	Universe     int64
-	QDate        int64
-	Entered      int64
+	Schedd      string
+	BatchName   string
+	DAGManJobID int64
+	DAGNodeName string
+	Cmd         string
+	Universe    int64
+	QDate       int64
+	Entered     int64
+	// Completion is CompletionDate; zero for a removed job.
+	Completion int64
+	// FirstStart is when the job first began running, zero if unknown.
+	FirstStart   int64
 	Status       int64
 	ExitCode     *int64
 	ExitBySignal bool
@@ -150,6 +155,7 @@ func FromAd(ad *classad.ClassAd, schedd string) Job {
 	j.Universe = intAttr(ad, "JobUniverse")
 	j.QDate = intAttr(ad, "QDate")
 	j.Entered = intAttr(ad, "EnteredHistoryTime")
+	j.Completion = intAttr(ad, "CompletionDate")
 	j.Status = intAttr(ad, "JobStatus")
 	if v, ok := ad.EvaluateAttrNumber("ExitCode"); ok {
 		code := int64(v)
@@ -168,6 +174,12 @@ func FromAd(ad *classad.ClassAd, schedd string) Job {
 	}
 	j.CommittedTime = numAttr(ad, "CommittedTime")
 	j.NumJobStarts = intAttr(ad, "NumJobStarts")
+	// JobStartDate is the first start. JobCurrentStartDate is the latest,
+	// which is the same thing only for a job that started once.
+	j.FirstStart = intAttr(ad, "JobStartDate")
+	if j.FirstStart == 0 && j.NumJobStarts <= 1 {
+		j.FirstStart = intAttr(ad, "JobCurrentStartDate")
+	}
 
 	// CPU time has to cover the same runs as the wall clock it is divided
 	// by. RemoteWallClockTime sums every run, but RemoteUserCpu and

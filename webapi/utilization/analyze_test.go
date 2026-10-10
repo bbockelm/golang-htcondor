@@ -349,9 +349,11 @@ func TestEmptyResponseMarshalsAsArrays(t *testing.T) {
 			t.Errorf("%s missing %s", s, want)
 		}
 	}
-	// used_hours is the one field that is null by contract when nothing
-	// was measured.
-	if strings.Contains(strings.ReplaceAll(s, `"used_hours":null`, ""), "null") {
+	// used_hours and throughput_gain are null by contract when there is
+	// nothing to report; no list is.
+	s = strings.ReplaceAll(s, `"used_hours":null`, "")
+	s = strings.ReplaceAll(s, `"throughput_gain":null`, "")
+	if strings.Contains(s, "null") {
 		t.Errorf("empty response contains a null list: %s", s)
 	}
 }

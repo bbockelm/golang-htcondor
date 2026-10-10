@@ -20,6 +20,9 @@ type Options struct {
 	// ShowOwner names each workflow's owner, for a scope that covers
 	// more than one person's jobs.
 	ShowOwner bool
+	// Machines is the pool's execute capacity, for the throughput
+	// estimate; nil when it is not known.
+	Machines []Machine
 }
 
 // Output bounds per workflow.
@@ -80,8 +83,17 @@ func Analyze(jobs []Job, opts Options) *Response {
 	resp.Overall.BadputHours = round(resp.Overall.BadputHours, 3)
 	resp.Overall.Resources = resourceSummaries(all)
 
+	var occCurrent, occSuggested float64
+	anyThroughput := false
 	for _, g := range groups {
-		resp.Workflows = append(resp.Workflows, buildWorkflow(g, opts))
+		w, occ := buildWorkflow(g, opts)
+		resp.Workflows = append(resp.Workflows, w)
+		occCurrent += occ.current
+		occSuggested += occ.suggested
+		anyThroughput = anyThroughput || w.Throughput != nil
+	}
+	if anyThroughput && occSuggested > 0 {
+		resp.Overall.ThroughputGain = ptr(occCurrent/occSuggested, 3)
 	}
 	slices.SortFunc(resp.Workflows, func(a, b Workflow) int {
 		if c := cmp.Compare(b.WallHours, a.WallHours); c != 0 {
@@ -253,8 +265,9 @@ func resourceSummaries(jobs []*Job) []ResourceSummary {
 	return out
 }
 
-// buildWorkflow analyses one workflow's jobs.
-func buildWorkflow(g *group, opts Options) Workflow {
+// buildWorkflow analyses one workflow's jobs. It also returns the pool
+// occupancy of its work, for the overall throughput figure.
+func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	// A stable order, so samples and batches do not reshuffle between
 	// two reads of the same history.
 	slices.SortFunc(g.jobs, func(a, b *Job) int {
@@ -357,7 +370,9 @@ func buildWorkflow(g *group, opts Options) Workflow {
 	w.Advice = adviseWorkflow(&w, g.jobs, plan, walls)
 	w.Batches = batches(g)
 	w.Samples = samples(g.jobs)
-	return w
+	var occ occupancyPair
+	w.Throughput, occ = workflowThroughput(&w, g.jobs, plan, memJobs, opts.Machines)
+	return w, occ
 }
 
 // memorySample is the job as memory sizing sees it, if it should see it

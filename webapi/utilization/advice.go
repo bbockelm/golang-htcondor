@@ -103,6 +103,7 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 	hasRetry := plan.retry > 0
 	a := &Advice{
 		Resource:   ResourceMemory,
+		request:    plan.recommended,
 		Confidence: confidence(plan.n),
 		Submit:     []string{"request_memory = " + submitSize(plan.recommended)},
 	}
@@ -151,6 +152,7 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 		a.Detail = fmt.Sprintf("%s Most jobs requested %s, close to what they need.", evidence, sizeMiB(plan.typical))
 		a.Submit = []string{}
 		a.Saves = nil
+		a.request = 0
 		// Every job fits the current request (the case above catches any
 		// that did not), so it is what the curve marks: a page showing
 		// "fits" beside a different recommended point contradicts itself.
@@ -191,6 +193,7 @@ func cpuAdvice(w *Workflow, jobs []*Job) []Advice {
 			Submit:     []string{"request_cpus = " + number(rec)},
 			Saves:      &Savings{Unit: UnitCoreHours, Amount: round(saved, 1)},
 			Confidence: confidence(used.N),
+			request:    rec,
 		}}
 	case used.P50 > cpuRaiseUse*typical:
 		rec := math.Max(math.Round(used.P75), typical+1)
@@ -203,6 +206,7 @@ func cpuAdvice(w *Workflow, jobs []*Job) []Advice {
 				count(used.N), number(round(used.P50, 1)), number(typical)),
 			Submit:     []string{"request_cpus = " + number(rec)},
 			Confidence: confidence(used.N),
+			request:    rec,
 		}}
 	}
 	return nil
@@ -241,6 +245,7 @@ func diskAdvice(w *Workflow, jobs []*Job) *Advice {
 				count(w.Holds.Disk), jobsWere(w.Holds.Disk), sizeMiB(largest/1024)),
 			Submit:     []string{"request_disk = " + submitSize(rec/1024)},
 			Confidence: confidence(n),
+			request:    rec,
 		}
 	}
 	if rec < diskLowerShare*req.Typical {
@@ -253,6 +258,7 @@ func diskAdvice(w *Workflow, jobs []*Job) *Advice {
 				count(n), sizeMiB(largest/1024), sizeMiB(req.Typical/1024)),
 			Submit:     []string{"request_disk = " + submitSize(rec/1024)},
 			Confidence: confidence(n),
+			request:    rec,
 		}
 	}
 	return nil

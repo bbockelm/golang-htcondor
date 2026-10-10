@@ -15,6 +15,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
 	"github.com/bbockelm/golang-htcondor/webapi/utilization"
 )
@@ -372,5 +373,127 @@ func TestUtilizationIsDocumented(t *testing.T) {
 	}
 	if _, ok := doc.Paths["/utilization"]; !ok {
 		t.Error("/utilization missing from the OpenAPI paths")
+	}
+}
+
+// slotAd is a startd slot ad.
+func slotAd(t *testing.T, text string) *classad.ClassAd {
+	t.Helper()
+	ad, err := classad.ParseOld(text)
+	if err != nil {
+		t.Fatalf("parsing slot ad: %v", err)
+	}
+	return ad
+}
+
+// throughputFixture is the utilization fixture plus 25 of carol's jobs
+// asking for 1 core and 8 GB and peaking at 900 MB, and a collector -- the
+// fake schedd's address answers startd queries -- holding ten 4-core/
+// 16 GB partitionable slots, dynamic slots carved from them (which the
+// query excludes), and a dynamic slot that does not say so in SlotType
+// (which the parse must drop). Counted wrongly, the dynamic slots would
+// inflate the fit.
+func throughputFixture(t *testing.T) *twoOwnerFixture {
+	t.Helper()
+	f := utilizationFixture(t)
+	for i := range 25 {
+		f.schedd.AddHistory(historyAd(t, 400+i, "carol", "/home/carol/big", 900, 8192, 3600))
+	}
+	for i := range 10 {
+		f.schedd.AddStartds(slotAd(t, fmt.Sprintf(`Name = "slot1@ep%d"
+SlotType = "Partitionable"
+PartitionableSlot = true
+Cpus = 2
+Memory = 8192
+Disk = 50000000
+TotalSlotCpus = 4
+TotalSlotMemory = 16384
+TotalSlotDisk = 100000000`, i)))
+		f.schedd.AddStartds(slotAd(t, fmt.Sprintf(`Name = "slot1_1@ep%d"
+SlotType = "Dynamic"
+DynamicSlot = true
+Cpus = 2
+Memory = 8192
+Disk = 50000000`, i)))
+	}
+	f.schedd.AddStartds(slotAd(t, `Name = "slot1_9@ep0"
+DynamicSlot = true
+Cpus = 4
+Memory = 16384
+Disk = 100000000`))
+	f.s.collector = htcondor.NewCollector(f.schedd.Addr())
+	return f
+}
+
+func workflowByExecutable(t *testing.T, resp utilization.Response, exe string) utilization.Workflow {
+	t.Helper()
+	for _, w := range resp.Workflows {
+		if w.Executable == exe {
+			return w
+		}
+	}
+	t.Fatalf("no %s workflow in %v", exe, workflowExecutables(resp))
+	return utilization.Workflow{}
+}
+
+// The estimate reads the pool's machines from the collector: ten
+// 4-core/16 GB machines hold 20 one-core 8 GB jobs today and 40 at the
+// suggested 1 GB, a gain of 2. Dynamic slots add nothing. The pool is
+// read once for every request that follows.
+func TestUtilizationThroughputFromCollector(t *testing.T) {
+	f := throughputFixture(t)
+	carol := f.bearer(t, "carol")
+	resp := f.utilization(t, "/api/v1/utilization", carol)
+	tp := workflowByExecutable(t, resp, "big").Throughput
+	if tp == nil {
+		t.Fatal("no throughput estimate")
+	}
+	if tp.FitCurrent != 20 || tp.FitSuggested != 40 || tp.Gain != 2 || tp.LimitedBy != utilization.ResourceMemory {
+		t.Errorf("throughput = %+v, want 20 -> 40 on the ten partitionable slots, gain 2", tp)
+	}
+	if resp.Overall.ThroughputGain == nil || *resp.Overall.ThroughputGain != 2 {
+		t.Errorf("overall gain = %v", resp.Overall.ThroughputGain)
+	}
+
+	_ = f.utilization(t, "/api/v1/utilization?days=30", carol)
+	_ = f.utilization(t, "/api/v1/utilization", f.bearer(t, "alice"))
+	if n := f.schedd.StartdQueries(); n != 1 {
+		t.Errorf("the pool was read %d times for three analyses, want once", n)
+	}
+}
+
+// A collector that cannot be read costs the estimate, not the answer.
+func TestUtilizationThroughputWithoutCollector(t *testing.T) {
+	f := throughputFixture(t)
+	f.s.collector = htcondor.NewCollector("127.0.0.1:1")
+	resp := f.utilization(t, "/api/v1/utilization", f.bearer(t, "carol"))
+	if w := workflowByExecutable(t, resp, "big"); w.Throughput != nil || resp.Overall.ThroughputGain != nil {
+		t.Errorf("throughput = %+v, overall %v; want null without a pool", w.Throughput, resp.Overall.ThroughputGain)
+	}
+	if resp.JobsConsidered != 25 {
+		t.Errorf("jobs = %d", resp.JobsConsidered)
+	}
+}
+
+// Multi-AP mode has no one pool to measure: no estimate, even for a
+// workflow whose advice changes its request.
+func TestUtilizationMultiAPHasNoThroughput(t *testing.T) {
+	hub := multiaptest.NewHub(t)
+	for i := range 22 {
+		putHubHistory(t, hub, ap1, "alice@d", 10+i, "/home/alice/sim")
+	}
+	hub.PutSource(ap1, "fresh", 2)
+	srv := newMultiAPServer(t, multiAPService(t, hub, multiaptest.NewRegistry(ap1)))
+	rec := doAs(t, srv, "alice", http.MethodGet, "/api/v1/utilization")
+	var resp utilization.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	w := workflowByExecutable(t, resp, "sim")
+	if a := w.Advice; len(a) == 0 || a[0].Resource != utilization.ResourceMemory || len(a[0].Submit) == 0 {
+		t.Fatalf("advice = %+v; the fixture should change the memory request", a)
+	}
+	if w.Throughput != nil || resp.Overall.ThroughputGain != nil {
+		t.Errorf("throughput = %+v, overall %v; want null in multi-AP mode", w.Throughput, resp.Overall.ThroughputGain)
 	}
 }

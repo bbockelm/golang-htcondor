@@ -442,6 +442,10 @@ type Handler struct {
 	// everyone asking the same question for five minutes.
 	utilizationCacheOnce sync.Once
 	utilizationCacheVal  *utilizationCache
+	// poolShapeCache holds the pool's machine shapes for the throughput
+	// estimate.
+	poolShapeCacheOnce sync.Once
+	poolShapeCacheVal  *poolShapeCache
 
 	// jupyterRegistry tracks pending and live JupyterLab tunnel instances.
 	// Created lazily on first /api/v1/jupyter use so older deployments that
