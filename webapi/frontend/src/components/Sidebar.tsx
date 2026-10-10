@@ -27,6 +27,7 @@ const NAV = [
   { href: '/jobs', label: 'Jobs' },
   { href: '/issues', label: 'Issues' },
   { href: '/archive', label: 'Archive' },
+  { href: '/utilization', label: 'Utilization' },
   { href: '/submit', label: 'Submit' },
   { href: '/interactive', label: 'Interactive' },
   { href: '/pool', label: 'Pool' },
@@ -38,6 +39,7 @@ const MULTI_AP_NAV = [
   { href: '/', label: 'Dashboard' },
   { href: '/jobs', label: 'Jobs' },
   { href: '/archive', label: 'Archive' },
+  { href: '/utilization', label: 'Utilization' },
   { href: '/aps', label: 'Access Points' },
 ];
 

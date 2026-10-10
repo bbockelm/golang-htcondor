@@ -33,7 +33,7 @@ function watchForErrors(page: import('@playwright/test').Page) {
   return errors;
 }
 
-for (const path of ['/', '/jobs', '/issues', '/submit', '/interactive', '/aps']) {
+for (const path of ['/', '/jobs', '/issues', '/utilization', '/submit', '/interactive', '/aps']) {
   test(`renders ${path} without page errors`, async ({ page }) => {
     const errors = watchForErrors(page);
     const res = await page.goto(path);
@@ -788,4 +788,15 @@ test('a ready VS Code session offers the proxy URL', async ({ page }) => {
   const open = page.getByRole('link', { name: 'Open', exact: true });
   await expect(open).toBeVisible();
   await expect(open).toHaveAttribute('href', '/interactive/vscode/abc123');
+});
+
+// The utilization page binds when it names a workflow from the fixture,
+// and its drill-in is a query parameter, which only works in the static
+// export if the page reads it on the client.
+test('utilization page binds workflows and opens one', async ({ page }) => {
+  await page.goto('/utilization');
+  await expect(page.getByRole('row', { name: /^blast-search/ })).toBeVisible();
+  await page.getByRole('row', { name: /^blast-search/ }).click();
+  await expect(page).toHaveURL(/\?w=wf-blast/);
+  await expect(page.getByText('What each memory request would have reserved')).toBeVisible();
 });
