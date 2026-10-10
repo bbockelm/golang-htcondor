@@ -193,20 +193,34 @@ func TestAdminScopeWorksForAListedUserToo(t *testing.T) {
 // and that set is empty. Only a transport that states no set at all --
 // stdio -- falls back to the list. Without this the distinction would be
 // "is the slice empty", which an empty grant would satisfy.
+//
+// A nil set from an OAuth2 token is the same empty grant: what a token
+// whose groups refused every scope carries.
 func TestAnEmptyGrantIsStillAScopeBearingToken(t *testing.T) {
+	for name, scopes := range map[string][]string{"empty": {}, "nil": nil} {
+		t.Run(name, func(t *testing.T) {
+			s := tierServer("root@uid.domain")
+			ctx := htcondor.WithAuthenticatedUser(context.Background(), "root@uid.domain")
+			ctx = WithGrantedScopes(ctx, scopes) // present, and empty
+
+			if !scopedTransport(ctx) {
+				t.Fatal("an empty-but-present scope set must count as scope-bearing")
+			}
+			got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead)
+			if !ok {
+				t.Fatal("the caller is authenticated; scoping must succeed")
+			}
+			if !strings.Contains(got, `Owner == "root"`) {
+				t.Errorf("an empty grant was treated as stdio; got %q", got)
+			}
+		})
+	}
+
+	// And the list still applies where there is no grant at all.
 	s := tierServer("root@uid.domain")
 	ctx := htcondor.WithAuthenticatedUser(context.Background(), "root@uid.domain")
-	ctx = WithGrantedScopes(ctx, []string{}) // present, and empty
-
-	if !scopedTransport(ctx) {
-		t.Fatal("an empty-but-present scope set must count as scope-bearing")
-	}
-	got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead)
-	if !ok {
-		t.Fatal("the caller is authenticated; scoping must succeed")
-	}
-	if !strings.Contains(got, `Owner == "root"`) {
-		t.Errorf("an empty grant was treated as stdio; got %q", got)
+	if got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead); !ok || got != "JobStatus == 5" {
+		t.Errorf("an unscoped MCP_ADMIN_USERS member should be unconfined: got %q ok=%v", got, ok)
 	}
 }
 

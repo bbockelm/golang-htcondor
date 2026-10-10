@@ -19,7 +19,7 @@ func postMCPWith(t *testing.T, s *Server, body, sessionID, userAgent string) *ht
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+forwardedHTCondorToken(t, testTrustDomain))
+	req.Header.Set("Authorization", "Bearer "+forwardedHTCondorToken(t))
 	if sessionID != "" {
 		req.Header.Set("Mcp-Session-Id", sessionID)
 	}

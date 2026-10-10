@@ -193,6 +193,18 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	}
 	h.logger.Info(logging.DestinationHTTP, "Received MCP message with OAuth2 token", "username", username)
 
+	// A token granted neither MCP scope may do nothing here, on either
+	// transport. Refused before a credential is minted for it, and here
+	// rather than in each transport's gate: the SDK transport's gate is its
+	// catalogue, and a check that lives in only one of the two is a check
+	// the other can lose.
+	if !grantsMCPScope(token.GetGrantedScopes()) {
+		h.logger.Warn(logging.DestinationHTTP, "MCP request refused: token grants no MCP scope",
+			"username", username, "scopes", token.GetGrantedScopes())
+		h.writeOAuthError(w, http.StatusForbidden, "insufficient_scope", "Token grants no MCP scope")
+		return nil, nil, false
+	}
+
 	// Shared with the SSH gateway, which needs exactly this and must
 	// not grow its own copy -- see withCondorCredential for what a
 	// second copy would be free to forget.
@@ -2592,6 +2604,17 @@ func (h *Handler) writeHTMLError(w http.ResponseWriter, message string) {
 		"Error",
 		message,
 		"")
+}
+
+// grantsMCPScope reports whether a token's scopes include mcp:read or
+// mcp:write, without which no MCP method is permitted.
+func grantsMCPScope(scopes []string) bool {
+	for _, scope := range scopes {
+		if scope == "mcp:read" || scope == "mcp:write" {
+			return true
+		}
+	}
+	return false
 }
 
 // isMethodAllowedByScopes checks if an MCP method is allowed based on OAuth2 scopes
