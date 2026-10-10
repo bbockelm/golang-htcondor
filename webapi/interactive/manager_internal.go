@@ -525,7 +525,15 @@ func (m *Manager) expire(sess *session) {
 	// condor_rm as well as the sentinel: the sentinel only works if we
 	// are still attached, and an expired session is exactly the case
 	// where we might not be.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Built from Background because the lease outlives whatever request
+	// created the session, and marked as the caller's work because that
+	// is whose it is: the credential below is the one they signed in
+	// with. Without the mark a credential that has gone stale in the
+	// meantime would fall through to this daemon's own, and the job
+	// would be removed by the access point rather than by its owner.
+	ctx, cancel := context.WithTimeout(
+		htcondor.WithUserRequest(context.Background(), "interactive session lease expiry"),
+		30*time.Second)
 	defer cancel()
 	if secConfig != nil {
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
