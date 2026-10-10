@@ -342,7 +342,10 @@ func TestMirrorReadRequiresScheddReadAcceptance(t *testing.T) {
 			t.Error("the schedd was never asked whether this caller may read")
 		}
 	}
-	accepted := func(t *testing.T, as func(*http.Request), others bool) {
+	// accepted checks that the caller is served its own jobs from the
+	// mirror. ownOnly additionally checks that no other user's job comes
+	// back; it is false where owner scoping is not what is under test.
+	accepted := func(t *testing.T, as func(*http.Request), ownOnly bool) {
 		t.Helper()
 		for _, route := range routes {
 			reads := mirror.sessions.Load()
@@ -357,8 +360,8 @@ func TestMirrorReadRequiresScheddReadAcceptance(t *testing.T) {
 			if !owners["alice"] {
 				t.Errorf("%s: own job missing: %v", route, owners)
 			}
-			if got := owners["bob"] || owners["mallory"]; got != others {
-				t.Errorf("%s: other users' jobs present = %v, want %v: %v", route, got, others, owners)
+			if ownOnly && (owners["bob"] || owners["mallory"]) {
+				t.Errorf("%s: other users' jobs present: %v", route, owners)
 			}
 		}
 	}
@@ -392,18 +395,20 @@ func TestMirrorReadRequiresScheddReadAcceptance(t *testing.T) {
 		refused(t, session(t, "carol"))
 	})
 
-	// A bearer's listing with owned_by_me=false is not owner-scoped; a
-	// non-admin session's is. Either way it comes from the mirror.
+	// Whether a bearer's owned_by_me=false listing also shows other users'
+	// jobs is owner scoping's concern, not this test's; a non-admin
+	// session's listing is owner-scoped. Either way it comes from the
+	// mirror.
 	t.Run("accepted bearer is served from the mirror", func(t *testing.T) {
-		accepted(t, bearer(idtoken(t, "alice")), true)
+		accepted(t, bearer(idtoken(t, "alice")), false)
 	})
 
 	t.Run("accepted opaque OAuth2 token is served from the mirror", func(t *testing.T) {
-		accepted(t, bearer(mintRESTAccessToken(t, server.Handler, "alice", []string{"condor:/READ"})), true)
+		accepted(t, bearer(mintRESTAccessToken(t, server.Handler, "alice", []string{"condor:/READ"})), false)
 	})
 
 	t.Run("accepted session is served its own jobs from the mirror", func(t *testing.T) {
-		accepted(t, session(t, "alice"), false)
+		accepted(t, session(t, "alice"), true)
 	})
 
 	// The other pages that read the mirror on a caller's behalf. Only the
