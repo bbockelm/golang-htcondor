@@ -559,6 +559,11 @@ export function ThroughputLead({ throughput }: { throughput: UtilThroughput | nu
   );
 }
 
+// jobsNoun agrees the noun with its count: "1 job", "21 jobs".
+function jobsNoun(n: number): string {
+  return `${n.toLocaleString()} ${n === 1 ? 'job' : 'jobs'}`;
+}
+
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div>
@@ -629,14 +634,14 @@ export function WorkflowDetail({
           {w.restarts.jobs > 0 && (
             <Stat
               label="Restarted"
-              value={`${w.restarts.jobs.toLocaleString()} jobs`}
+              value={jobsNoun(w.restarts.jobs)}
               sub={`${formatHours(w.restarts.lost_hours)} lost`}
             />
           )}
           {(w.holds.memory > 0 || w.holds.disk > 0) && (
             <Stat
               label="Held for going over"
-              value={`${(w.holds.memory + w.holds.disk).toLocaleString()} jobs`}
+              value={jobsNoun(w.holds.memory + w.holds.disk)}
               sub={[w.holds.memory ? `${w.holds.memory} memory` : '', w.holds.disk ? `${w.holds.disk} disk` : '']
                 .filter(Boolean)
                 .join(', ')}

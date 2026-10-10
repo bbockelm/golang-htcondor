@@ -800,3 +800,42 @@ test('utilization page binds workflows and opens one', async ({ page }) => {
   await expect(page).toHaveURL(/\?w=wf-blast/);
   await expect(page.getByText('What each memory request would have reserved')).toBeVisible();
 });
+
+// The throughput estimate, in the cases the fixture holds: the pool-wide
+// headline, a workflow slots held back (multiplier and batch time), and
+// one whose jobs started promptly (no multiplier at all).
+test('utilization headline states the pool-wide throughput gain', async ({ page }) => {
+  await page.goto('/utilization');
+  const headline = page.getByTestId('throughput-headline');
+  await expect(headline).toContainText(/With all of these changes: up to \d+\.\d× as many jobs running at once\./);
+  await expect(headline).toContainText('Estimated from the machines currently in the pool.');
+});
+
+test('a slots-limited workflow leads with the multiplier and its last batch', async ({ page }) => {
+  await page.goto('/utilization?w=wf-blast');
+  const lead = page.getByTestId('throughput-lead');
+  await expect(lead).toContainText(/Up to \d+\.\d× as many of these jobs could run at once\./);
+  await expect(lead).toContainText(
+    /Your last batch of \d+ jobs took 14 h from submission to the last result; with these settings, about [\d.]+ h\./,
+  );
+  // One suggestion card carries the line, not every one.
+  await expect(page.getByTestId('advice-throughput')).toHaveCount(1);
+});
+
+test('a workflow whose jobs started promptly gets no multiplier', async ({ page }) => {
+  await page.goto('/utilization?w=wf-train');
+  const lead = page.getByTestId('throughput-lead');
+  await expect(lead).toHaveText('Your jobs started within 4 minutes, so this mainly frees the pool for others.');
+  await expect(page.getByTestId('advice-throughput')).toHaveCount(0);
+});
+
+test('a suggestion copies its submit lines', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto('/utilization?w=wf-blast');
+  const card = page.getByTestId('advice').filter({ hasText: 'request_memory' }).first();
+  const lines = (await card.locator('pre').innerText()).trim();
+  expect(lines).toMatch(/^request_memory = \S+ MB\nretry_request_memory = \S+ MB$/);
+  await card.getByRole('button', { name: 'Copy' }).click();
+  await expect(card.getByRole('button', { name: 'Copied' })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(lines);
+});
