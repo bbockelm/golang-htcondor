@@ -38,6 +38,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -55,8 +56,11 @@ type Handler struct {
 	// server came up. Fixed for the process lifetime and reported by
 	// /api/v1/version so the Info page can show how long the access
 	// point has been running.
-	startTime        time.Time
-	ccbDialer        *htcondor.CCBDialer // how to traverse CCB; see HandlerConfig.CCB
+	startTime time.Time
+	ccbDialer *htcondor.CCBDialer // how to traverse CCB; see HandlerConfig.CCB
+	// multi is non-nil in multi-AP mode, where schedd is nil and every
+	// route outside the multi-AP allowlist answers 501. See multiap.go.
+	multi            *multiAPMode
 	schedd           *htcondor.Schedd
 	scheddMu         sync.RWMutex // Protects schedd instance, scheddAddrSetAt, and scheddAddrLastConfirmedAt
 	scheddName       string       // Schedd name for discovery
@@ -418,6 +422,7 @@ type Handler struct {
 	issueCacheVal  *issueCache
 	token          string             // Token for daemon authentication
 	mux            *http.ServeMux     // HTTP request multiplexer
+	routePatterns  []string           // every pattern setupRoutes registered
 	ctx            context.Context    // Context for background goroutines
 	cancelFunc     context.CancelFunc // Function to cancel background goroutines
 
@@ -507,6 +512,9 @@ type HandlerConfig struct {
 	// that host's schedd rather than whichever one the collector
 	// happens to list first.
 	ScheddHost string
+	// MultiAP, when its ScheddConstraint is set, serves every access point
+	// matching that constraint instead of one schedd. See multiap.go.
+	MultiAP MultiAPConfig
 	// InteractiveExtraSubmit holds extra HTCondor submit-file
 	// directives merged into the submit file produced for each
 	// interactive-terminal and JupyterLab job. The string value is
@@ -1052,26 +1060,36 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		}
 	}
 
-	// Discover schedd address if not provided
-	scheddAddr := cfg.ScheddAddr
+	// Multi-AP mode has no single schedd: the AP registry replaces it.
+	var schedd *htcondor.Schedd
+	var multi *multiAPMode
 	scheddDiscovered := cfg.ScheddAddrDiscovered
-	if scheddAddr == "" {
-		if cfg.Collector == nil {
-			return nil, fmt.Errorf("ScheddAddr not provided and Collector not configured for discovery")
-		}
-
-		logger.Infof(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
+	if cfg.MultiAP.Enabled() {
 		var err error
-		scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, cfg.ScheddHost, 10*time.Second, logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to discover schedd: %w", err)
+		if multi, err = newMultiAPMode(cfg, logger); err != nil {
+			return nil, err
 		}
-		logger.Info(logging.DestinationSchedd, "Discovered schedd", "address", scheddAddr)
-		scheddDiscovered = true
-	}
+	} else {
+		// Discover schedd address if not provided
+		scheddAddr := cfg.ScheddAddr
+		if scheddAddr == "" {
+			if cfg.Collector == nil {
+				return nil, fmt.Errorf("ScheddAddr not provided and Collector not configured for discovery")
+			}
 
-	// Create schedd with the address as-is (can be host:port or sinful string)
-	schedd := htcondor.NewSchedd(cfg.ScheddName, scheddAddr).WithConfig(cfg.ClientConfig)
+			logger.Infof(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
+			var err error
+			scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, cfg.ScheddHost, 10*time.Second, logger)
+			if err != nil {
+				return nil, fmt.Errorf("failed to discover schedd: %w", err)
+			}
+			logger.Info(logging.DestinationSchedd, "Discovered schedd", "address", scheddAddr)
+			scheddDiscovered = true
+		}
+
+		// Create schedd with the address as-is (can be host:port or sinful string)
+		schedd = htcondor.NewSchedd(cfg.ScheddName, scheddAddr).WithConfig(cfg.ClientConfig)
+	}
 
 	// Set session TTL
 	sessionTTL := cfg.SessionTTL
@@ -1111,6 +1129,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 	h := &Handler{
 		startTime:                 now,
+		multi:                     multi,
 		schedd:                    schedd,
 		scheddName:                cfg.ScheddName,
 		scheddHost:                cfg.ScheddHost,
@@ -1150,15 +1169,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		metricsPublic:        cfg.MetricsPublic,
 		htcondorConfig:       cfg.HTCondorConfig,
 		clientConfig:         cfg.ClientConfig,
-		dbMirror: dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
-			Name:     cfg.DBMirrorName,
-			Address:  cfg.DBMirrorAddress,
-			Required: cfg.DBMirrorRequired,
-			// Which schedd this daemon serves, so discovery can tell
-			// this access point's mirror from another's.
-			ScheddAddress: schedd.Address,
-		}),
-		token: cfg.Token,
+		dbMirror:             singleAPMirror(cfg, schedd),
+		token:                cfg.Token,
 	}
 
 	if h.webuiAdminGroups.configured() {
@@ -1167,7 +1179,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 	// Superuser mode. Runs after the signing key and domains are set,
 	// because it refuses to enable without them.
-	h.initSuperuserMode(cfg, logger)
+	if multi == nil {
+		h.initSuperuserMode(cfg, logger)
+	} else if strings.TrimSpace(cfg.SuperuserGroup) != "" {
+		logger.Warn(logging.DestinationHTTP, "Superuser mode is not available in multi-AP mode; HTTP_API_SUPERUSER_GROUP is ignored")
+	}
 
 	// Operator-supplied extra submit-file directives. The value is
 	// inserted verbatim into every interactive-terminal / Jupyter
@@ -1358,9 +1374,14 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"services", h.requiredCredentials)
 	}
 
-	if h.getCredd() == nil {
+	switch {
+	case multi != nil:
+		// Credentials follow the AP; per-AP credd discovery is not part of
+		// the read-only multi-AP mode.
+		h.creddAvailable.Store(false)
+	case h.getCredd() == nil:
 		logger.Info(logging.DestinationHTTP, "Credd not provided, attempting discovery...")
-		creddAddr, err := discoverCredd(context.Background(), h.creddLookupFor(scheddAddr), logger)
+		creddAddr, err := discoverCredd(context.Background(), h.creddLookupFor(schedd.Address()), logger)
 		if err != nil {
 			logger.Warn(logging.DestinationHTTP, "Failed to discover credd, credential endpoints will be disabled", "error", err)
 			h.creddAvailable.Store(false)
@@ -1371,7 +1392,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			h.creddAvailable.Store(true)
 			h.creddDiscovered = true // Mark for periodic updates
 		}
-	} else {
+	default:
 		h.creddAvailable.Store(true)
 		h.creddDiscovered = false // Explicitly provided, no need for updates
 	}
@@ -1381,6 +1402,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// the Locator is built inside. A daemon with no signing key gets no
 	// source at all, which the Locator reads as "not configured" and
 	// stays quiet about.
+	if multi != nil {
+		multi.setTokenSource(h.mirrorTokenSource())
+	}
 	if src := h.mirrorTokenSource(); src != nil {
 		h.dbMirror.SetTokenSource(src)
 		logger.Info(logging.DestinationHTTP, "htcondordb mirror will authenticate with an IDTOKEN",
@@ -1942,7 +1966,16 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.jobWatchEval = jobwatch.NewEvaluator(h.jobWatch, watchSource{h: h, feed: h.jobWatchFeed},
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
 
+	var mcpMulti *multiap.Service
+	mcpMultiConstraint := ""
+	if h.multi != nil {
+		mcpMulti, mcpMultiConstraint = h.multi.svc, h.multi.constraint
+	}
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
+		// Multi-AP mode: the read tools over the hub, and nothing that
+		// needs a single schedd.
+		MultiAP:              mcpMulti,
+		MultiAPConstraint:    mcpMultiConstraint,
 		ToolStats:            h.toolStats,
 		SkillsDir:            h.mcpSkillsDir,
 		SkillsReloadInterval: h.mcpSkillsReloadInterval,
@@ -2112,11 +2145,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var next http.Handler = h.mux
+	if h.multi != nil {
+		// Multi-AP mode serves an allowlist; see multiap.go.
+		next = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !multiAPAllowed(r.Method, r.URL.Path) {
+				h.refuseMultiAP(w, r)
+				return
+			}
+			h.mux.ServeHTTP(w, r)
+		})
+	}
 	if h.httpMetricsState != nil {
-		h.httpMetricsState.middleware(h.mux).ServeHTTP(w, r)
+		h.httpMetricsState.middleware(next).ServeHTTP(w, r)
 		return
 	}
-	h.mux.ServeHTTP(w, r)
+	next.ServeHTTP(w, r)
 }
 
 // isTransparentProxyPath reports whether the given request path is
@@ -2341,6 +2385,10 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	h.setupRoutes()
 
 	h.ctx, h.cancelFunc = context.WithCancel(ctx) //nolint:gosec // G118: cancelFunc is stored and called during shutdown
+
+	if h.multi != nil {
+		return h.startMultiAPHandler(ctx, ln, protocol)
+	}
 
 	// Tail the schedd's job_queue.log into the watch collection, if configured.
 	if h.jobMirror != nil {
@@ -2917,6 +2965,9 @@ func (h *Handler) UpdateOAuth2RedirectURL(redirectURL string) {
 
 // getSchedd returns the current schedd instance (thread-safe)
 func (h *Handler) getSchedd() *htcondor.Schedd {
+	if h.multi != nil {
+		return h.multiAPScheddMisuse()
+	}
 	h.scheddMu.RLock()
 	defer h.scheddMu.RUnlock()
 	return h.schedd
@@ -2924,6 +2975,9 @@ func (h *Handler) getSchedd() *htcondor.Schedd {
 
 // GetSchedd returns the current schedd instance (thread-safe)
 func (h *Handler) GetSchedd() *htcondor.Schedd {
+	if h.multi != nil {
+		return h.multiAPScheddMisuse()
+	}
 	h.scheddMu.RLock()
 	defer h.scheddMu.RUnlock()
 	return h.schedd

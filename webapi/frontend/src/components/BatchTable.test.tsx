@@ -88,3 +88,31 @@ describe('BatchTable', () => {
     expect(batchNames()[0]).toContain('sim');
   });
 });
+
+describe('BatchTable in multi-AP mode', () => {
+  const multi: ClassAd[] = [
+    { ClusterId: 1, ProcId: 0, JobStatus: 5, Owner: 'alice', schedd: 'ap1.example.org', job_id: '1.0@ap1.example.org' },
+    { ClusterId: 1, ProcId: 0, JobStatus: 5, Owner: 'alice', schedd: 'ap2.example.org', job_id: '1.0@ap2.example.org' },
+  ];
+
+  it('shows the access point and offers no actions', () => {
+    table({ batches: groupIntoBatches(multi), multiAP: true });
+    expect(screen.getByRole('button', { name: /Access point/ })).toBeTruthy();
+    expect(screen.getByText('ap1.example.org')).toBeTruthy();
+    expect(screen.getByText('ap2.example.org')).toBeTruthy();
+    expect(screen.queryByText('Actions')).toBeNull();
+    expect(screen.queryByTitle(/Remove batch/)).toBeNull();
+  });
+
+  it('links each job by its complete id', () => {
+    table({
+      batches: groupIntoBatches(multi),
+      multiAP: true,
+      expanded: new Set(groupIntoBatches(multi).map((b) => `${b.schedd}\u0000${b.batchID}`)),
+    });
+    const link = screen.getByRole('link', { name: '1.0@ap2.example.org' });
+    expect(link.getAttribute('href')).toBe('/jobs/1.0%40ap2.example.org');
+    // Held jobs: the single-AP table would offer Release.
+    expect(screen.queryByText('Release')).toBeNull();
+  });
+});

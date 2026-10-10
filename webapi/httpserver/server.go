@@ -57,6 +57,9 @@ type Config struct {
 	MCPListenAddr string
 	ScheddName    string // Schedd name
 	ScheddAddr    string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	// MultiAP serves every access point matching a ScheddAd constraint;
+	// see HandlerConfig.MultiAP.
+	MultiAP MultiAPConfig
 
 	// ScheddAddrDiscovered says ScheddAddr was resolved from the collector
 	// rather than set by an operator.
@@ -433,6 +436,7 @@ func NewServer(cfg Config) (*Server, error) {
 		ScheddHost:                  cfg.ScheddHost,
 		ScheddAddr:                  cfg.ScheddAddr,
 		ScheddAddrDiscovered:        cfg.ScheddAddrDiscovered,
+		MultiAP:                     cfg.MultiAP,
 		UserHeader:                  cfg.UserHeader,
 		UserHeaderTrustedProxies:    cfg.UserHeaderTrustedProxies,
 		TrustedProxies:              cfg.TrustedProxies,

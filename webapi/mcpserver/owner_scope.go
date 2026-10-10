@@ -8,6 +8,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/ownerscope"
 )
 
 // OwnerScope is what a tool call was confined to, so a handler can both
@@ -320,23 +321,9 @@ func classadStringLit(s string) string {
 // reinterpreted that way. FetchMyJobs stays set alongside this as
 // defense in depth.
 func ownerScopedConstraint(owner, constraint string) (string, error) {
-	if owner == "" {
-		return "", fmt.Errorf("no authenticated owner to scope to")
-	}
-	scope := fmt.Sprintf("Owner == %s", classadStringLit(owner))
-	c := strings.TrimSpace(constraint)
-	if c == "" || strings.EqualFold(c, "true") {
-		return scope, nil
-	}
-	// Re-serialize the caller's constraint before splicing it in: raw
-	// concatenation does not confine it, since `||` binds looser than
-	// `&&` and an unbalanced input like `true) || (true` escapes the
-	// enclosing AND and matches every job.
-	safe, err := classadBalanced(c)
-	if err != nil {
-		return "", fmt.Errorf("constraint is not a valid ClassAd expression: %w", err)
-	}
-	return fmt.Sprintf("(%s) && (%s)", scope, safe), nil
+	// The parse-and-reserialize AND lives in one place, shared with the
+	// multi-AP reads that scope on User instead of Owner.
+	return ownerscope.Constrain("Owner", owner, constraint)
 }
 
 // fetchOptsFor keeps the schedd-side hint aligned with the constraint.

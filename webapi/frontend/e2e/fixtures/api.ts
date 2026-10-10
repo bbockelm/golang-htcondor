@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test';
 import type {
+  AccessPointsResponse,
   AdminLogsResponse,
   DashboardActivityResponse,
   DashboardStats,
@@ -226,7 +227,60 @@ export const adminLogsFixture: AdminLogsResponse = {
 // loudly on anything unmapped rather than returning an empty 200 -- a
 // silent {} is how a fixture suite quietly stops testing the page it
 // was written for.
-export async function installApiFixtures(page: Page) {
+// Multi-AP mode: one server in front of two access points, one of which
+// is behind. The same cluster.proc exists on both, as it does in
+// practice: cluster ids are per access point.
+export const multiAPSources = {
+  aps: 2,
+  fresh: 1,
+  degraded: [{ schedd: 'ap2.smoke.example', state: 'stale', staleness_seconds: 412 }],
+};
+
+export const multiAPJobsFixture: JobListResponse = {
+  jobs: [
+    {
+      schedd: 'ap1.smoke.example',
+      cluster: 12,
+      proc: 0,
+      job_id: '12.0@ap1.smoke.example',
+      ClusterId: 12,
+      ProcId: 0,
+      JobStatus: 2,
+      Owner: 'e2e',
+      Cmd: '/bin/sleep',
+      JobBatchName: 'smoke-ap1-batch',
+      QDate: 1757000000,
+    },
+    {
+      schedd: 'ap2.smoke.example',
+      cluster: 12,
+      proc: 0,
+      job_id: '12.0@ap2.smoke.example',
+      ClusterId: 12,
+      ProcId: 0,
+      JobStatus: 5,
+      Owner: 'e2e',
+      Cmd: '/bin/false',
+      JobBatchName: 'smoke-ap2-batch',
+      QDate: 1757000100,
+    },
+  ],
+  total_returned: 2,
+  has_more: false,
+  sources: multiAPSources,
+};
+
+export const multiAPAccessPointsFixture: AccessPointsResponse = {
+  constraint: 'regexp("smoke", Name)',
+  aps: [
+    { schedd: 'ap1.smoke.example', in_collector: true, hub: { state: 'fresh', staleness_seconds: 3 } },
+    { schedd: 'ap2.smoke.example', in_collector: true, hub: { state: 'stale', staleness_seconds: 412 } },
+  ],
+  sources: multiAPSources,
+  hub: { reachable: true },
+};
+
+export async function installApiFixtures(page: Page, opts: { multiAP?: boolean } = {}) {
   const table: Record<string, unknown> = {
     '/api/v1/whoami': { authenticated: true, user: 'e2e@test.htcondor.org' },
     '/api/v1/auth/me': sessionFixture,
@@ -265,6 +319,36 @@ export async function installApiFixtures(page: Page) {
     '/api/v1/interactive/terminal': { terminals: [] },
     '/api/v1/apps': { apps: [] },
   };
+  if (opts.multiAP) {
+    table['/api/v1/auth/me'] = { ...sessionFixture, is_admin: false, multi_ap: true };
+    table['/api/v1/jobs'] = multiAPJobsFixture;
+    table['/api/v1/aps'] = multiAPAccessPointsFixture;
+    table['/api/v1/jobs/archive'] = {
+      ads: [
+        {
+          schedd: 'ap1.smoke.example',
+          cluster: 39,
+          proc: 0,
+          job_id: '39.0@ap1.smoke.example',
+          archived: true,
+          ClusterId: 39,
+          ProcId: 0,
+          Owner: 'e2e',
+          JobStatus: 4,
+          ExitCode: 0,
+          CompletionDate: Math.floor(Date.now() / 1000) - 600,
+          JobBatchName: 'smoke-ap1-archived',
+        },
+      ],
+      has_more: false,
+      sources: multiAPSources,
+    };
+    table['/api/v1/chat/info'] = { enabled: false };
+    // Everything else is what a multi-AP server answers for routes it
+    // does not serve.
+    delete table['/api/v1/dashboard'];
+    delete table['/api/v1/dashboard/activity'];
+  }
 
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;

@@ -24,11 +24,13 @@ import {
   BATCH_USAGE_PROJECTION,
   DISPLAY_STATUS_LABEL,
   DISPLAY_STATUS_ORDER,
+  batchKey,
   type Batch,
   type BatchJob,
+  type BatchKey,
 } from '@/lib/batches';
 
-type BatchSortKey = 'batch' | 'owner' | 'jobs' | 'status' | 'submitted' | 'cmd';
+type BatchSortKey = 'batch' | 'schedd' | 'owner' | 'jobs' | 'status' | 'submitted' | 'cmd';
 
 // Sorting reads a comparable value off the batch rather than the rendered
 // cell: sorting "Submitted" by its formatted text would put April before
@@ -37,6 +39,8 @@ function batchSortValue(b: Batch, key: BatchSortKey): string | number | undefine
   switch (key) {
     case 'batch':
       return b.name;
+    case 'schedd':
+      return b.schedd;
     case 'owner':
       return b.owner;
     case 'jobs':
@@ -58,6 +62,7 @@ export function BatchTable({
   setExpanded,
   highlighted,
   onChange,
+  multiAP,
 }: {
   // Already grouped and filtered by the page: which jobs are in scope is
   // a page-level question (status chips, text filter, server constraint),
@@ -70,10 +75,13 @@ export function BatchTable({
   // Render the submitting user as a column. Off in the "Mine" view,
   // where every row would carry the same name.
   showOwner?: boolean;
-  expanded: Set<number>;
-  setExpanded: React.Dispatch<React.SetStateAction<Set<number>>>;
+  expanded: Set<BatchKey>;
+  setExpanded: React.Dispatch<React.SetStateAction<Set<BatchKey>>>;
   highlighted: string | null; // "cluster.proc" of the chat-highlighted job
   onChange: () => void;
+  // Multi-AP mode: show the access point column, and no actions -- the
+  // server serves reads only.
+  multiAP?: boolean;
 }) {
   const queryClient = useQueryClient();
 
@@ -93,7 +101,7 @@ export function BatchTable({
     shown: shownBatches,
   } = useInfiniteList(sorted, 20, resetKey);
 
-  const toggle = (id: number) =>
+  const toggle = (id: BatchKey) =>
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -132,6 +140,7 @@ export function BatchTable({
   const removeError =
     removeBatchMut.error ?? removeJobMut.error ?? releaseJobMut.error;
 
+  // Multi-AP mode trades the Actions column for the Access point one.
   const columns = showOwner ? 8 : 7;
 
   return (
@@ -156,6 +165,9 @@ export function BatchTable({
               {/* The submitting user sits next to the batch name rather
                   than out past the command: on a pool-wide view it is the
                   first thing being scanned for. */}
+              {multiAP && (
+                <BatchHeader label="Access point" sortKey="schedd" sort={sort} onSort={setSort} />
+              )}
               {showOwner && (
                 <BatchHeader label="User" sortKey="owner" sort={sort} onSort={setSort} />
               )}
@@ -163,24 +175,26 @@ export function BatchTable({
               <BatchHeader label="Status" sortKey="status" sort={sort} onSort={setSort} />
               <BatchHeader label="Submitted" sortKey="submitted" sort={sort} onSort={setSort} />
               <BatchHeader label="Command" sortKey="cmd" sort={sort} onSort={setSort} />
-              <th className="px-3 py-2 w-1 text-right">Actions</th>
+              {!multiAP && <th className="px-3 py-2 w-1 text-right">Actions</th>}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {visibleBatches.map((b) => (
               <BatchRow
-                key={b.batchID}
+                key={batchKey(b)}
                 batch={b}
                 showOwner={showOwner}
-                expanded={expanded.has(b.batchID)}
+                multiAP={multiAP}
+                expanded={expanded.has(batchKey(b))}
                 highlighted={highlighted}
-                onToggle={() => toggle(b.batchID)}
+                onToggle={() => toggle(batchKey(b))}
                 onRemoveBatch={() => removeBatchMut.mutate(b)}
                 onRemoveJob={(jobID) => removeJobMut.mutate(jobID)}
                 onReleaseJob={(jobID) => releaseJobMut.mutate(jobID)}
                 pendingBatch={
                   removeBatchMut.isPending &&
-                  removeBatchMut.variables?.batchID === b.batchID
+                  !!removeBatchMut.variables &&
+                  batchKey(removeBatchMut.variables) === batchKey(b)
                 }
                 pendingJob={removeJobMut.variables}
                 pendingJobActive={removeJobMut.isPending}
@@ -264,6 +278,7 @@ export function UserPill({ owner }: { owner: string }) {
 function BatchRow({
   batch,
   showOwner,
+  multiAP,
   expanded,
   highlighted,
   onToggle,
@@ -278,6 +293,7 @@ function BatchRow({
 }: {
   batch: Batch;
   showOwner?: boolean;
+  multiAP?: boolean;
   expanded: boolean;
   highlighted: string | null;
   onToggle: () => void;
@@ -314,6 +330,9 @@ function BatchRow({
             <span className="ml-2 text-gray-400">#{batch.batchID}</span>
           )}
         </td>
+        {multiAP && (
+          <td className="px-3 py-2 font-mono text-xs text-gray-700">{batch.schedd ?? '—'}</td>
+        )}
         {showOwner && (
           <td className="px-3 py-2">
             {batch.owner ? <UserPill owner={batch.owner} /> : <span className="text-gray-400">—</span>}
@@ -340,26 +359,29 @@ function BatchRow({
             '—'
           )}
         </td>
-        <td
-          className="px-3 py-2 whitespace-nowrap text-right"
-          // Stop the row's click handler from firing when the user
-          // interacts with the action buttons.
-          onClick={(e) => e.stopPropagation()}
-        >
-          <ConfirmButton
-            compact
-            onConfirm={onRemoveBatch}
-            pending={pendingBatch}
-            title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
-          />
-        </td>
+        {!multiAP && (
+          <td
+            className="px-3 py-2 whitespace-nowrap text-right"
+            // Stop the row's click handler from firing when the user
+            // interacts with the action buttons.
+            onClick={(e) => e.stopPropagation()}
+          >
+            <ConfirmButton
+              compact
+              onConfirm={onRemoveBatch}
+              pending={pendingBatch}
+              title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
+            />
+          </td>
+        )}
       </tr>
       {expanded && (
         <tr>
           <td className="px-3 py-2 bg-gray-50" />
-          <td colSpan={showOwner ? 7 : 6} className="bg-gray-50 p-0">
-            <BatchUsage batchID={batch.batchID} constraint={batch.removeConstraint} />
+          <td colSpan={6 + (showOwner ? 1 : 0)} className="bg-gray-50 p-0">
+            <BatchUsage batchID={batch.batchID} schedd={batch.schedd} constraint={batch.removeConstraint} />
             <JobsSubTable
+              multiAP={multiAP}
               jobs={batch.jobs}
               highlighted={highlighted}
               onRemoveJob={onRemoveJob}
@@ -382,11 +404,22 @@ function BatchRow({
 // usage attributes are worth real bytes per job on a 30k queue, and they
 // are only ever read for the one batch somebody opened. Same shape as
 // the pool page's per-node slot query.
-function BatchUsage({ batchID, constraint }: { batchID: number; constraint: string }) {
+function BatchUsage({
+  batchID,
+  schedd,
+  constraint,
+}: {
+  batchID: number;
+  schedd?: string;
+  constraint: string;
+}) {
   const { data, isFetching, error } = useQuery({
-    queryKey: ['batch-usage', batchID, constraint],
+    queryKey: ['batch-usage', batchID, schedd, constraint],
     queryFn: () =>
       api.jobs.list({
+        // The batch's access point: its constraint names a cluster id,
+        // which is unique only within one.
+        schedd,
         // The batch's own constraint, so a DAG's usage covers every node
         // and sub-DAG, not just the representative (root DAGMan) cluster.
         constraint,
@@ -422,6 +455,7 @@ function BatchUsage({ batchID, constraint }: { batchID: number; constraint: stri
 }
 
 function JobsSubTable({
+  multiAP,
   jobs,
   highlighted,
   onRemoveJob,
@@ -431,6 +465,7 @@ function JobsSubTable({
   pendingRelease,
   pendingReleaseActive,
 }: {
+  multiAP?: boolean;
   jobs: BatchJob[];
   highlighted: string | null;
   onRemoveJob: (id: string) => void;
@@ -462,7 +497,7 @@ function JobsSubTable({
             <th className="px-3 py-1.5">Status</th>
             <th className="px-3 py-1.5">Submitted</th>
             <th className="px-3 py-1.5">Command</th>
-            <th className="px-3 py-1.5 w-1 text-right">Actions</th>
+            {!multiAP && <th className="px-3 py-1.5 w-1 text-right">Actions</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-200">
@@ -476,7 +511,7 @@ function JobsSubTable({
               // <td> doesn't need to because the inner <Link> does
               // its own navigation and Next's router.push to the
               // same href is a no-op.
-              onClick={() => router.push(`/jobs/${j.id}`)}
+              onClick={() => router.push(`/jobs/${encodeURIComponent(j.id)}`)}
               className={
                 'cursor-pointer ' +
                 (j.id === highlighted
@@ -491,7 +526,7 @@ function JobsSubTable({
               }>
               <td className="px-3 py-1.5 font-mono">
                 <Link
-                  href={`/jobs/${j.id}`}
+                  href={`/jobs/${encodeURIComponent(j.id)}`}
                   className="text-brand-700 hover:underline"
                 >
                   {j.id}
@@ -523,34 +558,36 @@ function JobsSubTable({
                   '—'
                 )}
               </td>
-              <td
-                className="px-3 py-1.5 text-right whitespace-nowrap"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="inline-flex items-center gap-1.5">
-                  {j.display.key === 'held' && (
-                    <button
-                      type="button"
-                      onClick={() => onReleaseJob(j.id)}
-                      disabled={
-                        pendingReleaseActive && pendingRelease === j.id
-                      }
-                      className="rounded-sm border border-brand-600 bg-white px-2 py-0.5 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
-                      title={`Release held job ${j.id}`}
-                    >
-                      {pendingReleaseActive && pendingRelease === j.id
-                        ? '…'
-                        : 'Release'}
-                    </button>
-                  )}
-                  <ConfirmButton
-                    compact
-                    onConfirm={() => onRemoveJob(j.id)}
-                    pending={pendingJobActive && pendingJob === j.id}
-                    title={`Remove job ${j.id}`}
-                  />
-                </div>
-              </td>
+              {!multiAP && (
+                <td
+                  className="px-3 py-1.5 text-right whitespace-nowrap"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="inline-flex items-center gap-1.5">
+                    {j.display.key === 'held' && (
+                      <button
+                        type="button"
+                        onClick={() => onReleaseJob(j.id)}
+                        disabled={
+                          pendingReleaseActive && pendingRelease === j.id
+                        }
+                        className="rounded-sm border border-brand-600 bg-white px-2 py-0.5 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
+                        title={`Release held job ${j.id}`}
+                      >
+                        {pendingReleaseActive && pendingRelease === j.id
+                          ? '…'
+                          : 'Release'}
+                      </button>
+                    )}
+                    <ConfirmButton
+                      compact
+                      onConfirm={() => onRemoveJob(j.id)}
+                      pending={pendingJobActive && pendingJob === j.id}
+                      title={`Remove job ${j.id}`}
+                    />
+                  </div>
+                </td>
+              )}
             </tr>
           ))}
           {/* Same sentinel + show-all pattern as the batch table.
@@ -560,7 +597,7 @@ function JobsSubTable({
               window scroll. */}
           {totalJobs > 0 && (
             <tr ref={jobSentinelRef as unknown as React.Ref<HTMLTableRowElement>}>
-              <td colSpan={5} className="px-3 py-1.5 text-[11px] text-gray-500">
+              <td colSpan={multiAP ? 4 : 5} className="px-3 py-1.5 text-[11px] text-gray-500">
                 Showing {shownJobs.toLocaleString()} of {totalJobs.toLocaleString()} jobs
                 {hasMoreJobs && (
                   <>

@@ -158,6 +158,7 @@ func IsReadOnlyTool(name string) bool {
 // without updating this map silently classifies it as write-only.
 var readOnlyMCPTools = map[string]bool{
 	"query_jobs":               true,
+	"list_access_points":       true, // multi-AP mode
 	"get_job":                  true,
 	"analyze_job_match":        true,
 	"query_job_archive":        true,
@@ -898,6 +899,10 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	// submit_job.
 	tools = append(tools, dagTools()...)
 
+	if s.multi != nil {
+		tools = multiAPCatalog(tools)
+	}
+
 	grant := grantFromContext(ctx)
 	filtered := tools[:0:0]
 	for _, t := range tools {
@@ -981,6 +986,20 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 			"tool", request.Name, "trace_id", traceID)
 		s.recordToolCall(ctx, request.Name, toolstatsOutcomeRefused, time.Since(started))
 		return nil, fmt.Errorf("the %q tool is not permitted by the scopes this token was granted", request.Name)
+	}
+
+	if s.multi != nil {
+		// An allowlist, enforced on the one path every transport shares.
+		result, handled, err := s.callMultiAPTool(ctx, request.Name, request.Arguments)
+		if handled && err != nil && !multiAPToolAllowed(request.Name) {
+			s.logger.Info(logging.DestinationMCP, "MCP tool call refused: not served in multi-AP mode",
+				"tool", request.Name, "trace_id", traceID)
+			s.recordToolCall(ctx, request.Name, toolstatsOutcomeRefused, time.Since(started))
+			return nil, err
+		}
+		if handled {
+			return s.finishToolCall(ctx, request.Name, traceID, started, result, err)
+		}
 	}
 
 	// Route to appropriate handler
@@ -1098,13 +1117,19 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		}
 	}
 
+	return s.finishToolCall(ctx, request.Name, traceID, started, result, err)
+}
+
+// finishToolCall brings a tool's result up to its published contract, and
+// records and logs the outcome.
+func (s *Server) finishToolCall(ctx context.Context, name, traceID string, started time.Time, result interface{}, err error) (interface{}, error) {
 	// Bring the result up to the contract its published outputSchema
 	// states, before either transport marshals it. See
 	// structured_contract.go: a client rejects the whole result when a
 	// schematised tool returns no structuredContent, or returns one where
 	// an empty collection came out as JSON null.
 	if err == nil {
-		result = s.finalizeToolResult(request.Name, result)
+		result = s.finalizeToolResult(name, result)
 	}
 
 	// Log the outcome either way. A failing tool used to produce no log
@@ -1116,11 +1141,11 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 	if err != nil {
 		outcome = toolstatsOutcomeError
 	}
-	s.recordToolCall(ctx, request.Name, outcome, time.Since(started))
+	s.recordToolCall(ctx, name, outcome, time.Since(started))
 
 	if err != nil {
 		s.logger.Error(logging.DestinationMCP, "MCP tool call failed",
-			"tool", request.Name,
+			"tool", name,
 			"trace_id", traceID,
 			"session_id", SessionIDFromContext(ctx),
 			"actor", htcondor.GetAuthenticatedUserFromContext(ctx),
@@ -1128,7 +1153,7 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 			"error", err)
 	} else {
 		s.logger.Info(logging.DestinationMCP, "MCP tool call succeeded",
-			"tool", request.Name,
+			"tool", name,
 			"trace_id", traceID,
 			"duration_ms", time.Since(started).Milliseconds())
 	}

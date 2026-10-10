@@ -10,10 +10,22 @@ const BASE = "/api/v1";
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  // Multi-AP mode: a 409 for a job id that exists on several access
+  // points lists them.
+  candidates?: JobCandidate[];
+  constructor(status: number, message: string, candidates?: JobCandidate[]) {
     super(message);
     this.status = status;
+    this.candidates = candidates;
   }
+}
+
+export interface JobCandidate {
+  schedd: string;
+  cluster: number;
+  proc: number;
+  job_id: string;
+  archived: boolean;
 }
 
 // fetchTextWithCap streams a text/plain endpoint and stops after `cap`
@@ -103,7 +115,11 @@ async function fetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
     // text and finally to the HTTP status line so the user always sees
     // *something* more specific than "500".
     const detail = body.message || body.error || res.statusText;
-    throw new ApiError(res.status, detail);
+    throw new ApiError(
+      res.status,
+      detail,
+      Array.isArray(body.candidates) ? body.candidates : undefined,
+    );
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -135,6 +151,9 @@ export interface Session {
   // Projects this session leads, armed or not. A lead may list their
   // projects' jobs with the Everyone scope, as an admin may list all jobs.
   project_lead_of?: string[];
+  // This server fronts several access points (schedds) and serves reads
+  // only: job rows carry `schedd` and `job_id`, and actions are not offered.
+  multi_ap?: boolean;
 }
 
 export interface SuperuserModeState {
@@ -442,6 +461,60 @@ export interface JobListResponse {
   source_note?: string;
   // A partial-result error; the ads before it are still valid.
   error?: string;
+  // Multi-AP mode only: which access points' data is not current.
+  sources?: Sources;
+}
+
+// Sources is the freshness of each access point behind a multi-AP read.
+// `degraded` lists every access point whose rows are not known to be
+// current: included as the hub holds them, or left out, by server policy.
+export interface Sources {
+  aps: number;
+  fresh: number;
+  degraded: DegradedSource[];
+}
+
+export interface DegradedSource {
+  schedd: string;
+  state: string; // stale | absent | untrusted | retiring
+  staleness_seconds?: number;
+  last_seen?: string;
+  reason?: string;
+}
+
+// One access point, as GET /api/v1/aps reports it.
+export interface AccessPoint {
+  schedd: string;
+  in_collector: boolean;
+  address?: string;
+  first_seen?: string;
+  last_seen?: string;
+  hub: {
+    state: string;
+    reason?: string;
+    staleness_seconds?: number;
+    last_seen?: string;
+    last_reset?: string;
+  };
+}
+
+export interface AccessPointsResponse {
+  constraint: string;
+  aps: AccessPoint[];
+  sources: Sources;
+  registry?: { last_success?: string; last_error?: string };
+  hub: { reachable: boolean; last_success?: string; last_error?: string };
+}
+
+// In multi-AP mode every job row names its job completely: `schedd`,
+// `cluster`, `proc`, and `job_id` -- the text form to put in a URL.
+// Single-AP rows carry none of these.
+export function jobIdOf(ad: ClassAd): string | undefined {
+  return typeof ad.job_id === 'string' && ad.job_id !== '' ? ad.job_id : undefined;
+}
+
+export function scheddOf(ad: ClassAd): string | undefined {
+  return typeof ad.schedd === 'string' && ad.schedd !== '' ? ad.schedd : undefined;
 }
 
 // HistoryListResponse mirrors the Go HistoryListResponse struct in
@@ -449,6 +522,10 @@ export interface JobListResponse {
 // variant of /api/v1/jobs/archive returns this shape.
 export interface HistoryListResponse {
   ads: ClassAd[];
+  // Multi-AP mode pages history with a token instead of before_cluster.
+  has_more?: boolean;
+  next_page_token?: string;
+  sources?: Sources;
 }
 
 export interface VersionInfo {
@@ -1205,6 +1282,9 @@ export const api = {
 
   version: (): Promise<VersionInfo> => fetchJSON(`${BASE}/version`),
 
+  // Multi-AP mode: the access points this server fronts.
+  aps: (): Promise<AccessPointsResponse> => fetchJSON(`${BASE}/aps`),
+
   // The SSH gateway's certificate authority and certificate issuer.
   //
   // Both need a session; the CA answers 503 when no CA key is
@@ -1261,12 +1341,15 @@ export const api = {
       projection?: string;
       page_token?: string;
       owned_by_me?: boolean;
+      // Multi-AP mode: one access point only.
+      schedd?: string;
     }): Promise<JobListResponse> => {
       const qs = new URLSearchParams();
       if (params?.constraint) qs.set("constraint", params.constraint);
       if (params?.limit !== undefined) qs.set("limit", String(params.limit));
       if (params?.projection) qs.set("projection", params.projection);
       if (params?.page_token) qs.set("page_token", params.page_token);
+      if (params?.schedd) qs.set("schedd", params.schedd);
       if (params?.owned_by_me !== undefined)
         qs.set("owned_by_me", String(params.owned_by_me));
       const query = qs.toString();
@@ -1329,6 +1412,10 @@ export const api = {
       // `limit` — bumping limit re-scans records you already have.
       before_cluster?: number;
       before_proc?: number;
+      // Multi-AP mode: the previous page's next_page_token, and one
+      // access point only.
+      page_token?: string;
+      schedd?: string;
     }): Promise<HistoryListResponse> => {
       const qs = new URLSearchParams();
       if (params?.constraint) qs.set("constraint", params.constraint);
@@ -1341,6 +1428,8 @@ export const api = {
         qs.set("before_cluster", String(params.before_cluster));
       if (params?.before_proc !== undefined)
         qs.set("before_proc", String(params.before_proc));
+      if (params?.page_token) qs.set("page_token", params.page_token);
+      if (params?.schedd) qs.set("schedd", params.schedd);
       qs.set("stream_results", "false");
       return fetchJSON(`${BASE}/jobs/archive?${qs.toString()}`);
     },

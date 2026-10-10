@@ -42,8 +42,26 @@ const (
 	wellKnownProtectedResource = "/.well-known/oauth-protected-resource"
 )
 
+// recordingMux registers on the handler's ServeMux and remembers each
+// pattern, so a test can walk every route that exists rather than a list
+// someone remembered to update.
+type recordingMux struct {
+	*http.ServeMux
+	patterns *[]string
+}
+
+func (m recordingMux) Handle(pattern string, handler http.Handler) {
+	*m.patterns = append(*m.patterns, pattern)
+	m.ServeMux.Handle(pattern, handler)
+}
+
+func (m recordingMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	*m.patterns = append(*m.patterns, pattern)
+	m.ServeMux.HandleFunc(pattern, handler)
+}
+
 func (h *Handler) setupRoutes() {
-	mux := h.mux
+	mux := recordingMux{ServeMux: h.mux, patterns: &h.routePatterns}
 	cors := func(handler http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
@@ -91,6 +109,11 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/openapi.json", cors(http.HandlerFunc(h.handleOpenAPISchema)))
 	mux.HandleFunc("/docs", h.handleSwaggerUI)
 	mux.HandleFunc("/docs/oauth2-redirect", h.handleSwaggerOAuth2Redirect)
+
+	// The access points this server fronts, in multi-AP mode only.
+	if h.multi != nil {
+		mux.Handle("/api/v1/aps", cors(h.requireCondorScope(http.HandlerFunc(h.handleAPs))))
+	}
 
 	// Job management endpoints
 	mux.Handle("/api/v1/jobs/watch", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobsWatch)))) // SSE job-ad change stream (more specific than /api/v1/jobs/ below)

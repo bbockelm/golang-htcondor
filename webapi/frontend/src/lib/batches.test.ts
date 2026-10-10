@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { ClassAd } from '@/lib/api';
 import {
+  adsInBatches,
   applyBatchFilter,
+  batchKey,
   filterAdsByStatus,
   groupIntoBatches,
   statusRank,
@@ -378,5 +380,58 @@ describe('summarizeBatchUsage', () => {
     ]);
     expect(u.running).toBe(1);
     expect(row(u, 'CPUs').allocated).toBe(3);
+  });
+});
+
+describe('groupIntoBatches across access points', () => {
+  // The same cluster id on two access points is two batches: cluster ids
+  // are per access point.
+  const multi: ClassAd[] = [
+    { ClusterId: 1, ProcId: 0, JobStatus: 1, Owner: 'alice', schedd: 'ap1', job_id: '1.0@ap1' },
+    { ClusterId: 1, ProcId: 0, JobStatus: 2, Owner: 'alice', schedd: 'ap2', job_id: '1.0@ap2' },
+    { ClusterId: 1, ProcId: 1, JobStatus: 2, Owner: 'alice', schedd: 'ap2', job_id: '1.1@ap2' },
+    { ClusterId: 7, ProcId: 0, JobStatus: 1, Owner: 'alice', JobBatchName: 'run', schedd: 'ap1', job_id: '7.0@ap1' },
+    { ClusterId: 8, ProcId: 0, JobStatus: 1, Owner: 'alice', JobBatchName: 'run', schedd: 'ap2', job_id: '8.0@ap2' },
+  ];
+
+  it('keeps each access point\'s batches apart', () => {
+    const batches = groupIntoBatches(multi);
+    expect(batches).toHaveLength(4);
+    const one = batches.filter((b) => b.batchID === 1);
+    expect(one.map((b) => b.schedd).sort()).toEqual(['ap1', 'ap2']);
+    expect(one.find((b) => b.schedd === 'ap2')?.jobs.map((j) => j.id)).toEqual(['1.0@ap2', '1.1@ap2']);
+    expect(batches.filter((b) => b.name === 'run')).toHaveLength(2);
+  });
+
+  it('gives each row a distinct key', () => {
+    const keys = groupIntoBatches(multi).map(batchKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    // Single-AP keys stay the cluster id.
+    expect(batchKey(groupIntoBatches([{ ClusterId: 3, ProcId: 0 }])[0])).toBe(3);
+  });
+
+  it('matches the access point in the text filter', () => {
+    expect(applyBatchFilter(groupIntoBatches(multi), 'ap2').every((b) => b.schedd === 'ap2')).toBe(true);
+  });
+});
+
+describe('adsInBatches', () => {
+  it('matches a cluster together with its access point', () => {
+    const ads: ClassAd[] = [
+      { ClusterId: 12, ProcId: 0, JobStatus: 2, JobBatchName: 'keep', schedd: 'ap1', job_id: '12.0@ap1' },
+      { ClusterId: 12, ProcId: 0, JobStatus: 5, JobBatchName: 'drop', schedd: 'ap2', job_id: '12.0@ap2' },
+    ];
+    const kept = applyBatchFilter(groupIntoBatches(ads), 'keep');
+    expect(kept).toHaveLength(1);
+    expect(adsInBatches(ads, kept).map((a) => a.job_id)).toEqual(['12.0@ap1']);
+    expect(summarizeJobs(adsInBatches(ads, kept)).counts.held ?? 0).toBe(0);
+  });
+
+  it('keys on the cluster alone in single-AP mode', () => {
+    const ads: ClassAd[] = [
+      { ClusterId: 12, ProcId: 0, JobBatchName: 'keep' },
+      { ClusterId: 13, ProcId: 0, JobBatchName: 'drop' },
+    ];
+    expect(adsInBatches(ads, applyBatchFilter(groupIntoBatches(ads), 'keep'))).toEqual([ads[0]]);
   });
 });

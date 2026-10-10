@@ -58,5 +58,7 @@ manager, a job history database, site skills, embedded documentation).
 
 ## Server
 - get_version -- this server's build.
+- list_access_points -- where one server fronts several access points: each
+  one, and how fresh its data is.
 - whoami -- who you are authenticated as and what you can see.
 - advertise_to_collector -- publish a ClassAd to the HTCondor collector.
