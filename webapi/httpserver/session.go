@@ -109,6 +109,13 @@ func sessionKey(sessionID string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// sessionLogID identifies a session in log lines: a prefix of its
+// stored sessionKey, which matches the http_sessions row without
+// putting any part of the cookie value in the log.
+func sessionLogID(sessionID string) string {
+	return sessionKey(sessionID)[:12]
+}
+
 // Create creates a new session for the given username and groups
 func (s *SessionStore) Create(username string, groups ...[]string) (string, *SessionData, error) {
 	sessionID, err := generateSessionID()

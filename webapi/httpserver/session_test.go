@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -333,6 +334,11 @@ func TestSessionStoredAsHash(t *testing.T) {
 	sum := sha256.Sum256([]byte(cookie))
 	if want := hex.EncodeToString(sum[:]); len(stored) != 1 || stored[0] != want {
 		t.Fatalf("stored session_id = %q, want [sha256(cookie)] = [%q]", stored, want)
+	}
+	// Log lines name the session by a prefix of the stored key, never
+	// by a prefix of the cookie value.
+	if logID := sessionLogID(cookie); !strings.HasPrefix(stored[0], logID) || strings.HasPrefix(cookie, logID[:8]) {
+		t.Fatalf("sessionLogID = %q: want a prefix of the stored key %q and not of the cookie", logID, stored[0])
 	}
 
 	withCookie := func(method, path, value string) *http.Request {

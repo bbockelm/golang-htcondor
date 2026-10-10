@@ -459,7 +459,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		}
 		s.setSessionCookie(w, sessionID, sessionData.ExpiresAt)
 		s.logger.Info(logging.DestinationHTTP, "Created HTTP session cookie for browser flow",
-			"subject", subject, "session_id", sessionID[:8]+"...",
+			"subject", subject, "session_key", sessionLogID(sessionID),
 			"expires_at", sessionData.ExpiresAt)
 
 		// Redirect back to original URL or default to root.
