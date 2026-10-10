@@ -40,11 +40,12 @@ import (
 //
 // The one thing the mirror path does bypass is the schedd handshake
 // itself, and that is the invariant these functions enforce: a read is
-// routed only when the caller's identity is established, which here
-// means the schedd accepted their credential — either a prior request
-// got a 2xx with it (tokenCache.MarkValidated) or actorForSession
+// routed only when the caller's identity is established: actorForSession
 // pinged the schedd with that very credential and was told who they
-// are. Without that, a caller the schedd would have refused outright
+// are, or this server verified the bearer itself (tokenCache.AddValidated).
+// A 2xx response to an earlier request is not such evidence -- many
+// endpoints answer one without presenting the credential to a daemon.
+// Without that, a caller the schedd would have refused outright
 // could read the queue out of the mirror instead. An unauthenticated
 // request therefore falls back to the schedd, which is exactly where it
 // gets refused.

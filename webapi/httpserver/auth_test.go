@@ -93,10 +93,11 @@ func createExpiredTestJWTToken(subject, issuer string) string {
 func TestParseJWTExpiration(t *testing.T) {
 	t.Run("ValidToken", func(t *testing.T) {
 		token := createTestJWTToken(3600)
-		_, exp, err := parseJWTClaims(token)
+		claims, err := parseJWTClaims(token)
 		if err != nil {
 			t.Fatalf("Failed to parse JWT expiration: %v", err)
 		}
+		exp := claims.ExpiresAt.Time
 
 		// Should expire approximately 1 hour from now
 		expectedExp := time.Now().Add(3600 * time.Second)
@@ -108,10 +109,11 @@ func TestParseJWTExpiration(t *testing.T) {
 
 	t.Run("ExpiredToken", func(t *testing.T) {
 		token := createExpiredTestJWTToken("alice@test.domain", "test.domain")
-		_, exp, err := parseJWTClaims(token)
+		claims, err := parseJWTClaims(token)
 		if err != nil {
 			t.Fatalf("Failed to parse JWT expiration: %v", err)
 		}
+		exp := claims.ExpiresAt.Time
 
 		// Should be in the past
 		if !exp.Before(time.Now()) {
@@ -120,7 +122,7 @@ func TestParseJWTExpiration(t *testing.T) {
 	})
 
 	t.Run("InvalidFormat", func(t *testing.T) {
-		_, _, err := parseJWTClaims("invalid.token")
+		_, err := parseJWTClaims("invalid.token")
 		if err == nil {
 			t.Error("Expected error for invalid token format")
 		}
@@ -137,7 +139,7 @@ func TestParseJWTExpiration(t *testing.T) {
 		payloadB64 := base64.RawURLEncoding.EncodeToString(payloadBytes)
 
 		token := headerB64 + "." + payloadB64 + ".signature"
-		_, _, err := parseJWTClaims(token)
+		_, err := parseJWTClaims(token)
 		if err == nil {
 			t.Error("Expected error for missing exp claim")
 		}
@@ -272,22 +274,15 @@ func TestTokenCache(t *testing.T) {
 
 	t.Run("AutomaticExpiration", func(t *testing.T) {
 		cache := NewTokenCache()
+		clock := &fakeClock{t: time.Now()}
+		cache.now = clock.now
 
 		// The expiration is passed in rather than parsed out of a
-		// token, because a JWT's exp is whole seconds: exp is stamped
-		// as time.Now().Unix()+n, and Unix() truncates, so a token
-		// minted at .998 of a second and asked to live "1 second" lives
-		// 2ms. On a loaded CI runner even a few milliseconds between
-		// minting and adding it are enough for Add to reject it as
-		// "token is already expired" -- which is what failed on the
-		// arm64 job, and reproduces locally by minting just before a
-		// second boundary and pausing 3ms.
-		//
-		// AddValidated takes the expiration directly, so this asks for
-		// exactly the window it wants and is done in under a second.
-		const validity = 300 * time.Millisecond
+		// token, because a JWT's exp is whole seconds. AddValidated
+		// takes it directly, and the cache's clock is moved by hand.
+		const validity = 5 * time.Minute
 		if _, err := cache.AddValidated(createTestJWTToken(3600), "alice@test.domain",
-			time.Now().Add(validity)); err != nil {
+			clock.t.Add(validity)); err != nil {
 			t.Fatalf("Failed to add token: %v", err)
 		}
 
@@ -295,8 +290,7 @@ func TestTokenCache(t *testing.T) {
 			t.Errorf("Expected cache size 1, got %d", cache.Size())
 		}
 
-		// Removal is an exact time.AfterFunc, so a modest margin does.
-		time.Sleep(validity + 300*time.Millisecond)
+		clock.advance(validity + time.Second)
 
 		if cache.Size() != 0 {
 			t.Errorf("Expected cache size 0 after expiration, got %d", cache.Size())
