@@ -46,7 +46,7 @@ const ADMIN_NAV = [
   { href: '/admin/clients', label: 'OAuth2 Clients' },
   { href: '/admin/tokens', label: 'OAuth2 Tokens' },
   { href: '/admin/api-keys', label: 'API Keys' },
-  { href: '/admin/usage', label: 'Usage' },
+  { href: '/admin/usage', label: 'MCP Usage' },
   { href: '/admin/logs', label: 'Logs' },
 ];
 
