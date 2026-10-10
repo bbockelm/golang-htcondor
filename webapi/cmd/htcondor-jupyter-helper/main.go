@@ -367,6 +367,13 @@ func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte
 
 	cfg.TokenPath = tokenPath
 
+	// One idle clock for the whole session rather than one per connection:
+	// time spent disconnected is not idleness, and reconnecting is not use.
+	// See jupytertunnel.IdleClock.
+	cfg.IdleClock = &jupytertunnel.IdleClock{}
+	connected := false
+	cfg.OnConnected = func() { connected = true }
+
 	// Reconnect rather than exit.
 	//
 	// The helper used to dial once and return, so an API server restart
@@ -382,7 +389,17 @@ func runTunnel(token, upstream, socketPath string, insecure bool, caBytes []byte
 	// reaped with the job rather than spinning forever.
 	backoff := reconnectMinBackoff
 	for {
+		connected = false
 		err := jupytertunnel.RunHelperTunnel(ctx, cfg)
+		if connected {
+			// The server accepted this helper (see OnConnected: a refused
+			// dial does not count), so this is a fresh drop rather than the
+			// latest of a run of failed dials. Start the backoff over:
+			// carried on from earlier drops it sat at the ceiling, and the
+			// server keeps a dropped session only for its reconnect grace
+			// period (HTTP_API_JUPYTER_RECONNECT_GRACE_SEC).
+			backoff = reconnectMinBackoff
+		}
 		if ctx.Err() != nil {
 			// Asked to stop. Not a failure.
 			return

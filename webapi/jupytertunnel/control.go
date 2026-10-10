@@ -40,17 +40,6 @@ const controlNextToken = "next-token "
 // working session to get on with.
 const controlDeadline = 10 * time.Second
 
-// SendNextToken hands an instance's helper the token for its next dial.
-func SendNextToken(inst *Instance, token string) error {
-	if inst == nil {
-		return errors.New("jupytertunnel: no instance")
-	}
-	inst.mu.Lock()
-	session := inst.tunnel
-	inst.mu.Unlock()
-	return sendNextToken(session, token)
-}
-
 // sendNextToken hands the helper the token for its next dial.
 //
 // Best-effort by contract: the session it was just given is working, and

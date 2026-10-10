@@ -496,7 +496,7 @@ func TestUserHeaderModeDoesNotOfferFS(t *testing.T) {
 // taggingHandler is the TestUserHeaderModeDoesNotOfferFS setup, reused
 // because the thing under test is what createAuthenticatedContext puts
 // on the context rather than anything about a particular route.
-func taggingHandler(t *testing.T) (*Handler, string) {
+func taggingHandler(t *testing.T) *Handler {
 	t.Helper()
 	keyDir := t.TempDir()
 	raw := []byte("session-tag-test-key")
@@ -523,12 +523,12 @@ func taggingHandler(t *testing.T) (*Handler, string) {
 		// The bearer path reaches for this; without it the branch
 		// under test panics before it runs.
 		tokenCache: NewTokenCache(),
-	}, keyDir
+	}
 }
 
 // A request with no bearer still gets one, by username.
 func TestUserHeaderRequestCarriesASessionTag(t *testing.T) {
-	h, _ := taggingHandler(t)
+	h := taggingHandler(t)
 	r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs", nil)
 	r.Header.Set("X-Test-User", "alice")
 	ctx, err := h.createAuthenticatedContext(r)

@@ -406,6 +406,9 @@ type Handler struct {
 	// don't enable Jupyter pay no startup cost.
 	jupyterRegistry   *jupytertunnel.Registry
 	jupyterRegistryMu sync.Mutex
+	// jupyterScheddOverride, when set, stands in for the schedd in the
+	// JupyterLab handlers. Tests only; see jupyterSchedd.
+	jupyterScheddOverride jupyterScheddOps
 
 	// interactiveTerminals counts live browser terminals per job, so
 	// that the last one to leave is the one that tears the job down.
@@ -449,6 +452,12 @@ type Handler struct {
 	// Both zero mean the operator turned that limit off.
 	jupyterMaxLifetimeSec int
 	jupyterKernelIdleSec  int
+	// jupyterStartGraceSec is how long a JupyterLab job may wait to start,
+	// and jupyterReconnectGraceSec how long a session whose tunnel dropped
+	// waits for its helper. Zero means the default; see
+	// boundJupyterGraceSec.
+	jupyterStartGraceSec     int
+	jupyterReconnectGraceSec int
 
 	// templateLibrary serves the batch-submission template catalog
 	// (built-in + global YAML + user-saved JSON). nil = the
@@ -983,6 +992,10 @@ type HandlerConfig struct {
 	// session; see handlers_jupyter.go. Zero disables that limit.
 	JupyterMaxLifetimeSec int
 	JupyterKernelIdleSec  int
+	// JupyterStartGraceSec / JupyterReconnectGraceSec: see
+	// Handler.jupyterStartGraceSec. Zero means the default.
+	JupyterStartGraceSec     int
+	JupyterReconnectGraceSec int
 
 	// TemplateGlobalPath is an optional YAML file with operator-curated
 	// batch-submission templates. Empty disables. Built-in templates
@@ -1092,6 +1105,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		jupyterWorkDir:            cfg.JupyterWorkDir,
 		jupyterMaxLifetimeSec:     cfg.JupyterMaxLifetimeSec,
 		jupyterKernelIdleSec:      cfg.JupyterKernelIdleSec,
+		jupyterStartGraceSec:      cfg.JupyterStartGraceSec,
+		jupyterReconnectGraceSec:  cfg.JupyterReconnectGraceSec,
 		// templateLibrary is filled in after the unified DB is open;
 		// see below. Leaving it nil here makes it obvious that the
 		// catalog isn't available until the post-DB path runs.

@@ -558,6 +558,8 @@ export interface JupyterInstanceSummary {
   owner: string;
   created_at: string;
   connected: boolean;
+  // The helper was connected and its tunnel dropped; it is expected back.
+  reconnecting?: boolean;
   proxy_path: string;
   events_path: string;
   job_status?: number;
