@@ -772,7 +772,11 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
       legend={
         <>
           <LegendKey color={UTIL_COLOR.used} shape="line">GB-hours reserved</LegendKey>
-          {current && <LegendKey color={UTIL_COLOR.request} shape="dot">current request</LegendKey>}
+          {current && current === recommended ? (
+            <LegendKey color={UTIL_COLOR.recommended} shape="dot">current request, also the suggestion</LegendKey>
+          ) : (
+            current && <LegendKey color={UTIL_COLOR.request} shape="dot">current request</LegendKey>
+          )}
           {recommended && recommended !== current && (
             <LegendKey color={UTIL_COLOR.recommended} shape="dot">suggested request</LegendKey>
           )}
@@ -850,7 +854,10 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
             key={i}
             x={r.x0 + (i > 0 ? 1 : 0)}
             y={stripY}
-            width={Math.max(1, r.x1 - r.x0 - (i > 0 ? 1 : 0) - (i < strip.length - 1 ? 1 : 0))}
+            // A 3px floor: candidates crowded below the suggestion can own
+            // less than a pixel each, and a step that cannot be seen is
+            // a step the reader is told about in the legend for nothing.
+            width={Math.max(3, r.x1 - r.x0 - (i > 0 ? 1 : 0) - (i < strip.length - 1 ? 1 : 0))}
             height={8}
             rx={2}
             fill={RERUN_STEPS[r.step].color}
