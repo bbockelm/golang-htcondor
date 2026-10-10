@@ -136,7 +136,7 @@ func (s *Handler) handleAdminCreateAPIKey(w http.ResponseWriter, r *http.Request
 	}
 
 	var req adminAPIKeyCreateRequest
-	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	setBodyLimit(w, r, 4096)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {

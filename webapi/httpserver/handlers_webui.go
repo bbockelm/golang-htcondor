@@ -170,7 +170,7 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	setBodyLimit(w, r, 1<<16)
 	var req SuperuserModeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid request body")

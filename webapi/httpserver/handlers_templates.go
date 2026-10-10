@@ -150,7 +150,7 @@ type templateSaveRequest struct {
 func (s *Handler) handleSaveTemplate(w http.ResponseWriter, r *http.Request) {
 	// Bound the request body so a hostile client can't OOM the server
 	// by streaming a giant JSON. Per-file 1 MiB × 5 + envelope slack.
-	r.Body = http.MaxBytesReader(w, r.Body, 8*1024*1024)
+	setBodyLimit(w, r, 8*1024*1024)
 
 	ctx, _, err := s.requireAuthentication(r)
 	if err != nil {

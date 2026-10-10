@@ -191,7 +191,7 @@ func (s *Handler) handleSSHCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req sshCertRequest
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	setBodyLimit(w, r, 1<<16)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Could not read the request body")
 		return

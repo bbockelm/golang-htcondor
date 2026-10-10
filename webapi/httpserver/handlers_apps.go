@@ -206,7 +206,8 @@ func (s *Handler) handleAppCreate(w http.ResponseWriter, r *http.Request) {
 
 	var req AppCreateRequest
 	if r.Body != nil {
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil && err.Error() != "EOF" {
+		setBodyLimit(w, r, 1<<20)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
 			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 			return
 		}

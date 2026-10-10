@@ -1802,5 +1802,6 @@ func (s *Handler) handleJupyterProxy(w http.ResponseWriter, r *http.Request, id,
 		return
 	}
 
+	removeBodyLimit(r)
 	reg.Proxy(inst, upstreamPath, w, r, s.jobProxyScrubber())
 }

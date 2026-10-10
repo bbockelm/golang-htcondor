@@ -2063,6 +2063,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !isTransparentProxyPath(r.URL.Path) {
 		applySecurityHeaders(w)
 	}
+	// Bound every request body, for the same reason again: a route added
+	// later inherits it. Routes that need more (uploads, MCP) or less say
+	// so with setBodyLimit. The writer sees the overflow so it can answer
+	// 413 however the handler describes the failed read.
+	body := &requestBodyLimit{}
+	limitRequestBody(w, r, body)
+	w = &bodyLimitWriter{ResponseWriter: w, body: body}
 	// Every request is somebody else's, marked here for the same reason
 	// applySecurityHeaders is: no route can opt out by accident, and a route
 	// added later inherits it. What it buys is downstream, in
@@ -2726,6 +2733,12 @@ type ErrorResponse struct {
 
 // writeError writes an error response
 func (h *Handler) writeError(w http.ResponseWriter, statusCode int, message string) {
+	if limit := bodyLimitExceeded(w); limit > 0 && statusCode >= 400 {
+		// Whatever the handler made of the failed read, the reason is
+		// the size; say that, in the body as well as the status.
+		statusCode = http.StatusRequestEntityTooLarge
+		message = fmt.Sprintf("Request body is larger than this endpoint accepts (%d bytes).", limit)
+	}
 	// Add WWW-Authenticate header for 401 Unauthorized responses per RFC 6750
 	if statusCode == http.StatusUnauthorized {
 		h.addWWWAuthenticateHeader(w, "", "")
