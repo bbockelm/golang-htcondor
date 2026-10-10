@@ -22,6 +22,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/version"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
+	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -518,6 +519,11 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 				"user", htcondor.GetAuthenticatedUserFromContext(ctx),
 				"error", err)
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+			return
+		}
+		var controlled *submitpolicy.ControlledAttributeError
+		if errors.As(err, &controlled) {
+			s.writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		// Surface submission failures explicitly. Without this the only

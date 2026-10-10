@@ -210,7 +210,11 @@ func (s *Handler) jupyterSchedd() jupyterScheddOps {
 // still gets the policy applied; only the credential check is skipped.
 func (s *Handler) submitJupyterJob(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
 	if s.jupyterScheddOverride != nil {
-		return s.jupyterScheddOverride.SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
+		applied, err := s.submitPolicy.Apply(submitFile)
+		if err != nil {
+			return 0, nil, err
+		}
+		return s.jupyterScheddOverride.SubmitRemote(ctx, applied)
 	}
 	return s.submitJob(ctx, submitFile)
 }

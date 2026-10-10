@@ -30,7 +30,10 @@ func TestEverySubmitSiteAppliesThePolicy(t *testing.T) {
 			if strings.Contains(line, "//") {
 				continue // a mention in a comment
 			}
-			if !strings.Contains(line, "submitPolicy.Apply(") {
+			// The policy is applied either inline or into `applied` just
+			// above, so that a refusal is returned before anything is sent.
+			if !strings.Contains(line, "submitPolicy.Apply(") &&
+				(!strings.Contains(line, "(ctx, applied)") || !strings.Contains(src, "applied, err := s.submitPolicy.Apply(")) {
 				t.Errorf("%s submits without applying the site policy:\n\t%s\n"+
 					"every submit path must go through submitPolicy.Apply, or a site's "+
 					"requirements silently do not apply to it", name, strings.TrimSpace(line))
@@ -53,7 +56,7 @@ func TestMCPServerInheritsTheSubmitPolicy(t *testing.T) {
 func TestHandlerWithNoPolicyLeavesSubmitFilesAlone(t *testing.T) {
 	h := &Handler{}
 	const file = "executable = /bin/true\nlog = job.log\nqueue\n"
-	if got := h.submitPolicy.Apply(file); got != file {
+	if got, err := h.submitPolicy.Apply(file); err != nil || got != file {
 		t.Errorf("a handler with no configured policy changed the submit file:\n%s", got)
 	}
 }
@@ -65,7 +68,10 @@ func TestHandlerPolicyAppliesBothHalves(t *testing.T) {
 		Defaults:  "request_memory = 512",
 		Overrides: "log = /home/alice/forced.log",
 	}}
-	got := h.submitPolicy.Apply("executable = /bin/true\nrequest_memory = 2048\nlog = /tmp/nope.log\nqueue\n")
+	got, err := h.submitPolicy.Apply("executable = /bin/true\nrequest_memory = 2048\nlog = /tmp/nope.log\nqueue\n")
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
 
 	if !strings.Contains(got, "request_memory = 2048") {
 		t.Error("the user's request_memory was lost")
