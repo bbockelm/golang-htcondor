@@ -154,6 +154,8 @@ func (p *superuserPolicy) Refresh(ctx context.Context) error {
 // project-lead action, and an API server that came up before its schedd
 // should not lock leads out for a quarter of an hour.
 func (p *superuserPolicy) Run(ctx context.Context) {
+	// Reading the schedd's configuration is this daemon's own work.
+	ctx = htcondor.WithDaemonCredential(ctx, "queue superuser refresh")
 	_ = p.Refresh(ctx)
 	retry := p.retryInitial
 	if retry <= 0 {

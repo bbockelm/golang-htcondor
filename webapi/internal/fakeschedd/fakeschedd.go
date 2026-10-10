@@ -46,6 +46,8 @@ type Schedd struct {
 	// constraint of the latest one.
 	jobQueries     int
 	lastConstraint string
+	// transfers is every sandbox download request.
+	transfers []Transfer
 
 	// refuseRead makes the schedd refuse every READ-level command; see
 	// RefuseRead.
@@ -303,6 +305,21 @@ func (f *Schedd) actOnJobs(ctx context.Context, c *cedarserver.Conn) error {
 	return m.FinishMessage(ctx)
 }
 
+// Transfer is one sandbox download (TRANSFER_DATA_WITH_PERMS) request:
+// who asked, with what authorization limits, and for which jobs.
+type Transfer struct {
+	User       string
+	Limits     []string
+	Constraint string
+}
+
+// Transfers returns the sandbox download requests made so far.
+func (f *Schedd) Transfers() []Transfer {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Transfer(nil), f.transfers...)
+}
+
 // transferData answers TRANSFER_DATA_WITH_PERMS the way the schedd does
 // for a tool fetching output: the count of matching jobs, then each job's
 // ad followed by a file-transfer upload of its sandbox, then the tool's
@@ -322,6 +339,7 @@ func (f *Schedd) transferData(ctx context.Context, c *cedarserver.Conn) error {
 	}
 	f.mu.Lock()
 	ads := matching(f.jobs, constraint)
+	f.transfers = append(f.transfers, Transfer{User: c.AuthorizationUser(), Limits: c.AuthorizationLimits(), Constraint: text})
 	f.mu.Unlock()
 
 	out := message.NewMessageForStream(c.Stream)

@@ -65,6 +65,10 @@ func (s *Server) toolCreateOutputDownloadURL(ctx context.Context, args map[strin
 	}
 
 	ttl := shareurl.ClampTTL(shareurl.KindOutput, ttlSecondsArg(args))
+	authz, err := shareurl.GrantAuthz(shareurl.KindOutput, callerToken(ctx))
+	if err != nil {
+		return nil, err
+	}
 
 	procAds, remaining, err := s.procAdsForDownload(ctx, target, ownerScope)
 	if err != nil {
@@ -89,7 +93,7 @@ func (s *Server) toolCreateOutputDownloadURL(ctx context.Context, args map[strin
 		if !ok {
 			continue
 		}
-		u, terr := mintOutputURL(s.shareSigner, base, cluster, proc, caller.Owner, exp)
+		u, terr := mintOutputURL(s.shareSigner, base, cluster, proc, caller.Owner, exp, authz)
 		if terr != nil {
 			return nil, terr
 		}
@@ -158,6 +162,7 @@ func mintOutputURL(
 	cluster, proc int,
 	owner string,
 	exp time.Time,
+	authz []string,
 ) (string, error) {
 	tok, err := signer.Sign(shareurl.Payload{
 		Cluster: cluster,
@@ -165,6 +170,7 @@ func mintOutputURL(
 		Owner:   owner,
 		Exp:     exp.Unix(),
 		Kind:    shareurl.KindOutput,
+		Authz:   authz,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to sign download URL: %w", err)
@@ -219,4 +225,15 @@ func (s *Server) procAdsForDownload(
 		return ads[:maxMintedURLs], len(ads) - maxMintedURLs, nil
 	}
 	return ads, 0, nil
+}
+
+// callerToken is the credential a call presents to HTCondor, which bounds
+// what a URL it mints may authorize. Empty when the server presents its own,
+// running as the user.
+func callerToken(ctx context.Context) string {
+	sec, ok := htcondor.GetSecurityConfigFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return sec.Token
 }

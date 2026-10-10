@@ -21,10 +21,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/cedar/security"
 	"github.com/ory/fosite"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -89,12 +91,30 @@ func (h *Handler) withCondorCredential(ctx context.Context, username string, sco
 	// authorization -- the session a READ+WRITE grant negotiates must not
 	// carry a READ-only grant's request.
 	tag := mintedCredentialSessionTag("user", htcToken)
-	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, htcToken, "", 0, "CLIENT", h.credentialSessions.sessionCacheFor(tag))
-	if err != nil {
-		return ctx, fmt.Errorf("building a security config for %q: %w", username, err)
+	cache := h.credentialSessions.sessionCacheFor(tag)
+	build := func(tok string) (*security.SecurityConfig, error) {
+		sc, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, tok, "", 0, "CLIENT", cache)
+		if err != nil {
+			return nil, fmt.Errorf("building a security config for %q: %w", username, err)
+		}
+		sc.SecurityTag = tag
+		return sc, nil
 	}
-	secConfig.SecurityTag = tag
-	return htcondor.WithSecurityConfig(ctx, secConfig), nil
+	secConfig, err := build(htcToken)
+	if err != nil {
+		return ctx, err
+	}
+	// Minted again from the same grant when work this call starts -- an
+	// interactive session's lease, say -- outlasts the token.
+	scopes = slices.Clone(scopes)
+	renew := func(context.Context) (*security.SecurityConfig, error) {
+		tok, err := h.generateHTCondorTokenWithScopes(username, scopes)
+		if err != nil {
+			return nil, fmt.Errorf("minting an HTCondor token for %q: %w", username, err)
+		}
+		return build(tok)
+	}
+	return htcondor.WithRenewableSecurityConfig(ctx, secConfig, renew), nil
 }
 
 // startSSHGateway brings up the SSH gateway when one is configured.

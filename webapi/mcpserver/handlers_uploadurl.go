@@ -66,6 +66,10 @@ func (s *Server) toolCreateInputUploadURL(ctx context.Context, args map[string]i
 	}
 
 	ttl := shareurl.ClampTTL(shareurl.KindInput, ttlSecondsArg(args))
+	authz, err := shareurl.GrantAuthz(shareurl.KindInput, callerToken(ctx))
+	if err != nil {
+		return nil, err
+	}
 
 	procAds, remaining, err := s.procAdsToMintFor(ctx, target, ownerScope)
 	if err != nil {
@@ -96,6 +100,7 @@ func (s *Server) toolCreateInputUploadURL(ctx context.Context, args map[string]i
 			Owner:   caller.Owner,
 			Exp:     exp.Unix(),
 			Kind:    shareurl.KindInput,
+			Authz:   authz,
 		})
 		if terr != nil {
 			return nil, fmt.Errorf("failed to sign upload URL: %w", terr)

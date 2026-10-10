@@ -175,6 +175,9 @@ func singleAPMirror(cfg HandlerConfig, schedd *htcondor.Schedd) *dbmirror.Locato
 
 // startMultiAP runs the registry and hub pollers.
 func (h *Handler) startMultiAP(ctx context.Context) {
+	// Finding the access points and following their mirrors is this
+	// daemon's own work.
+	ctx = htcondor.WithDaemonCredential(ctx, "multi-AP discovery")
 	m := h.multi
 	if m.registry != nil {
 		h.wg.Add(1)

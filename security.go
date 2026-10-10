@@ -884,6 +884,17 @@ func mapCryptoMethods(methods string) []security.CryptoMethod {
 func GetSecurityConfigOrDefault(ctx context.Context, cfg *config.Config, command int, secContext string, peerName string) (*security.SecurityConfig, error) {
 	// 1. Check if SecurityConfig is provided in context
 	if ctxSecConfig, ok := GetSecurityConfigFromContext(ctx); ok {
+		// A credential minted for the caller and about to expire is
+		// minted again rather than presented; see
+		// WithRenewableSecurityConfig. A refused renewal is the end of
+		// the caller's grant, and fails the connection.
+		fresh, err := renewSecurityConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if fresh != nil {
+			ctxSecConfig = *fresh
+		}
 		// Make a copy to avoid modifying the original
 		secConfig := &ctxSecConfig
 		// Update command for the specific operation

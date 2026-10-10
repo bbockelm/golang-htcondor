@@ -161,12 +161,11 @@ func starterSecurityConfig(ctx context.Context, cfg *config.Config, starterAddr 
 	// Build the SecurityConfig from the configured CLIENT auth methods
 	// (so SSL/Kerberos/etc. are offered when configured) but keep the
 	// AES pin and the REQUIRED encryption/integrity levels — those
-	// matter for the session-resume happy path where ExportSecSessionInfo
+	// matter for the session-resume path where ExportSecSessionInfo
 	// emits a legacy CryptoMethods preferred order that cedar would
-	// otherwise misinterpret. Auth methods only kick in if the resume
-	// fails and ClientHandshake falls back to fresh authentication;
-	// in that fallback path we want the same configured methods every
-	// other client uses.
+	// otherwise misinterpret. The auth methods are used only by the CCB
+	// broker leg: dialStarter names the ClaimID session explicitly, so
+	// the starter itself is never offered a fresh handshake.
 	//
 	// Token is empty here: the schedd-minted ClaimID seeded in `cache`
 	// IS the credential, and we want NewClientSecurityConfig to leave
@@ -219,8 +218,7 @@ func (info *JobConnectInfo) dialStarter(ctx context.Context, command int, ccbDia
 	}
 
 	// A one-shot session cache pre-populated with the schedd-minted starter
-	// session, so cedar's ClientHandshake resumes it by command code rather
-	// than performing a full DC_AUTHENTICATE round-trip.
+	// session, which the handshake below resumes by name.
 	//
 	// The SessionEntry is built by hand instead of with cedar's
 	// CreateNonNegotiatedSession. HTCondor's ExportSecSessionInfo emits
@@ -236,10 +234,20 @@ func (info *JobConnectInfo) dialStarter(ctx context.Context, command int, ccbDia
 	}
 	cache := security.NewSessionCache()
 	cache.Store(entry)
-	cache.MapCommand("", info.StarterAddr, fmt.Sprintf("%d", command), claim.SecSessionID())
 
 	secConfig, err := starterSecurityConfig(ctx, info.cfg, info.StarterAddr, command, cache)
 	if err != nil {
+		return nil, err
+	}
+	// Resume exactly this session, or fail. Found by command code instead,
+	// a resumption the starter refused fell back to a full handshake on
+	// the retry, authenticating as this daemon to an address the execute
+	// node chose. With the session named, cedar has nothing to fall back
+	// to: a refused resumption is an error. The CCB broker leg clears the
+	// id and authenticates on its own, to a broker checked below.
+	secConfig.SessionID = claim.SecSessionID()
+
+	if err := checkStarterBrokers(ctx, info.cfg, info.StarterAddr); err != nil {
 		return nil, err
 	}
 

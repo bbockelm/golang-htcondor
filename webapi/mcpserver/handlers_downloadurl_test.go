@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +76,7 @@ func TestMintOutputURLSignsAnOutputTokenForTheOutputEndpoint(t *testing.T) {
 	s := uploadURLServer(t)
 	exp := time.Now().Add(10 * time.Minute)
 
-	u, err := mintOutputURL(s.shareSigner, "https://ap.example.org", 42, 3, "alice", exp)
+	u, err := mintOutputURL(s.shareSigner, "https://ap.example.org", 42, 3, "alice", exp, []string{"READ", "WRITE"})
 	if err != nil {
 		t.Fatalf("mintOutputURL: %v", err)
 	}
@@ -93,6 +94,9 @@ func TestMintOutputURLSignsAnOutputTokenForTheOutputEndpoint(t *testing.T) {
 	}
 	if payload.Owner != "alice" {
 		t.Errorf("token owner = %q, want alice", payload.Owner)
+	}
+	if !slices.Equal(payload.Authz, []string{"READ", "WRITE"}) {
+		t.Errorf("token authz = %v, want the granted READ WRITE", payload.Authz)
 	}
 
 	// And it must NOT be usable to upload into the same job. An output

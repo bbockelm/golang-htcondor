@@ -553,9 +553,9 @@ func (s *Handler) startInteractiveHeartbeat(
 // expect immediate slot release. Best-effort: errors are logged and
 // swallowed since the bridge is already gone.
 //
-// Uses a fresh background context with a short timeout — the bridge's
-// own ctx is being canceled when this runs.
-func (s *Handler) removeJobOnDisconnect(jobIDStr string) {
+// ctx is the bridge's request context, which is being cancelled when this
+// runs: its values are kept and its cancellation is not.
+func (s *Handler) removeJobOnDisconnect(ctx context.Context, jobIDStr string) {
 	cluster, proc, err := parseJobID(jobIDStr)
 	if err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "interactive disconnect: bad job id",
@@ -563,28 +563,32 @@ func (s *Handler) removeJobOnDisconnect(jobIDStr string) {
 		return
 	}
 
-	// Use the server's own token (if available) so this works even
-	// after the user's session has expired. The schedd verifies that
-	// the requester owns the job; the API server token is daemon-level
-	// so it can act on any job.
-	//
-	// Said out loud, because it is the one place here that acts as this
-	// daemon for something a user asked for. Unmarked it was
-	// indistinguishable from the accidents -- a context that reached
-	// CEDAR without a caller credential and was promoted silently --
-	// and an audit cannot tell a deliberate choice from an oversight
-	// unless the deliberate ones say so.
-	ctx, cancel := context.WithTimeout(
-		htcondor.WithDaemonCredential(context.Background(),
-			"interactive session cleanup: acts on any job, schedd checks ownership"),
-		10*time.Second)
-	defer cancel()
-	if s.token != "" {
-		ctx = WithToken(ctx, s.token)
+	// Confined to the caller's own job whichever credential carries it.
+	// The job id came from a shell the schedd authorized, but the daemon
+	// credential below can act on any job, and the constraint is what
+	// keeps it to this caller's.
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
+	if owner == "" {
+		s.logger.Warn(logging.DestinationHTTP, "interactive disconnect: no caller identity; leaving the job to its watchdog",
+			"job_id", jobIDStr)
+		return
 	}
 
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	results, err := s.getSchedd().RemoveJobs(ctx, constraint, "Interactive session ended")
+	// As the caller, when the request carried their credential: it is
+	// their job, and the credential renews itself where it was minted
+	// here. Otherwise as this daemon, which still works after the
+	// caller's own credential has lapsed, said out loud so an audit can
+	// tell the choice from an accident.
+	rmCtx := context.WithoutCancel(ctx)
+	if _, ok := htcondor.GetSecurityConfigFromContext(ctx); !ok {
+		rmCtx = htcondor.WithDaemonCredential(rmCtx,
+			"interactive session cleanup: the caller's request carried no credential; confined to their jobs")
+	}
+	rmCtx, cancel := context.WithTimeout(rmCtx, 10*time.Second)
+	defer cancel()
+
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s", cluster, proc, classadStringLit(owner))
+	results, err := s.getSchedd().RemoveJobs(rmCtx, constraint, "Interactive session ended")
 	if err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "interactive disconnect: condor_rm failed",
 			"job_id", jobIDStr, "error", err)

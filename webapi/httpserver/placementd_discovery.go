@@ -28,6 +28,7 @@ import (
 //     not the schedd's — so we take the first ad and, when several exist,
 //     leave the choice to the operator via an explicit configuration.
 func discoverPlacementd(ctx context.Context, htcConfig *config.Config, collector *htcondor.Collector, logger *logging.Logger) (string, error) {
+	ctx = htcondor.WithDaemonCredential(ctx, "placementd discovery")
 	if htcConfig != nil {
 		if path := htcondor.AddressFilePath(htcConfig, "PLACEMENTD"); path != "" {
 			if addr, err := htcondor.ReadAddressFile(path); err == nil && !strings.Contains(addr, "(null)") {
