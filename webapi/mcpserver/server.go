@@ -614,7 +614,8 @@ func discoverSchedd(collector *htcondor.Collector, scheddName, scheddHost string
 		return target.Address(), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(
+		htcondor.WithDaemonCredential(context.Background(), "schedd discovery"), timeout)
 	defer cancel()
 
 	constraint := "true"

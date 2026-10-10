@@ -12,7 +12,8 @@
 # without running any of them.
 set -euo pipefail
 
-# Build the htcondordb the mirror integration test runs against. The
+# Build the htcondordb the mirror and multi-AP integration tests run
+# against (the multi-AP test runs two spokes and a federation hub). The
 # version comes from .github/tools, an isolated module that exists so
 # Dependabot has something to bump -- a pin in a shell script here would
 # age silently, and the test would go on passing against a release

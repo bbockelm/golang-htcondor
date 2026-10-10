@@ -7,8 +7,10 @@ import type {
   IssuesResponse,
   JobListResponse,
   Session,
+  ClassAd,
 } from '../../src/lib/api';
 import { utilizationFixture } from '../../src/lib/utilization.fixture';
+import type { MetricsResponse } from '../../src/lib/metrics';
 
 // Frozen sample responses for the smoke suite.
 //
@@ -378,4 +380,126 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
       json: { error: `smoke suite has no fixture for ${path}` },
     });
   });
+}
+
+// --- The /jobs Progress, Held and Running views ---
+//
+// One queue with each case the views distinguish: a plain batch of which
+// most jobs have finished and left the queue, a max_materialize factory
+// with most of its jobs not yet queued, and a DAG whose count lives in its
+// root DAGMan job. Hold reasons are real-shaped: the "Error from <slot>:"
+// prefix is what the Held view strips.
+const qdate = 1757000000;
+
+function progressQueue(): ClassAd[] {
+  const jobs: ClassAd[] = [];
+  // sweep: 100 submitted, 12 still queued -- 88 done.
+  [2, 2, 2, 2, 2, 1, 1, 1, 1, 5, 5, 5].forEach((status, i) =>
+    jobs.push({
+      ClusterId: 500, ProcId: i, JobStatus: status, Owner: 'e2e', QDate: qdate,
+      Cmd: '/home/e2e/bin/train', JobBatchName: 'smoke-sweep', TotalSubmitProcs: 100,
+      RequestMemory: 2048, RequestCpus: 1,
+      ...(status === 5
+        ? {
+            HoldReasonCode: 34,
+            HoldReason:
+              i === 11
+                ? 'Transfer input files failure at access point smoke-ap: reading from file /home/e2e/in.dat: (errno 2) No such file or directory'
+                : `Error from slot1_${i}@glidein_${i}@node${i}.smoke.example.edu: memory usage exceeded request_memory`,
+          }
+        : {}),
+    }),
+  );
+  // factory: 1000 total, procs 0..39 queued so far, 30..39 still here.
+  for (let i = 30; i < 40; i++) {
+    jobs.push({
+      ClusterId: 510, ProcId: i, JobStatus: i < 36 ? 2 : 1, Owner: 'e2e', QDate: qdate + 10,
+      Cmd: '/bin/sim', JobBatchName: 'smoke-factory', TotalSubmitProcs: 1000,
+      JobMaterializeNextProcId: 40, RequestMemory: 4096, RequestCpus: 4,
+    });
+  }
+  // A DAG: the root DAGMan job and two node jobs.
+  jobs.push({
+    ClusterId: 600, ProcId: 0, JobStatus: 2, Owner: 'e2e', QDate: qdate + 20,
+    Cmd: '/usr/bin/condor_dagman', JobBatchName: 'smoke-pipeline.dag+600',
+    DAG_NodesTotal: 40, DAG_NodesDone: 17, DAG_NodesFailed: 3, DAG_NodesQueued: 2,
+    TotalSubmitProcs: 1,
+  });
+  for (let i = 0; i < 2; i++) {
+    jobs.push({
+      ClusterId: 601 + i, ProcId: 0, JobStatus: 2, Owner: 'e2e', QDate: qdate + 30,
+      Cmd: '/bin/step', JobBatchName: 'smoke-pipeline.dag+600', DAGManJobId: 600,
+      DAGNodeName: `step${i}`, TotalSubmitProcs: 1, RequestMemory: 1024, RequestCpus: 1,
+    });
+  }
+  return jobs;
+}
+
+// What the running view's narrow query answers: memory and CPU per
+// running job. 500.4 has not reported anything yet.
+function usageOf(j: ClassAd): ClassAd {
+  const u: ClassAd = {
+    ClusterId: j.ClusterId, ProcId: j.ProcId, JobStatus: 2,
+    RequestMemory: j.RequestMemory, RequestCpus: j.RequestCpus,
+  };
+  if (j.ClusterId === 500 && j.ProcId === 4) return u;
+  const frac = j.ClusterId === 500 && j.ProcId === 2 ? 1.15 : 0.5;
+  u.MemoryUsage = Math.round(Number(j.RequestMemory) * frac);
+  u.CpusUsage = Number(j.RequestCpus) * 0.9;
+  return u;
+}
+
+const recentCpuFixture: MetricsResponse = {
+  enabled: true,
+  table: 'job_metrics',
+  columns: [
+    { name: 'ClusterId', kind: 'group' },
+    { name: 'ProcId', kind: 'group' },
+    { name: 'avg_CpuUtil', kind: 'metric', func: 'avg', attr: 'CpuUtil' },
+  ],
+  rows: [['500', '0', '0.2']],
+};
+
+// installJobsProgressFixtures answers /api/v1/jobs the way the three
+// queries the page makes need: the listing, the running view's usage
+// query (asked for CpusUsage), and the exact count for a partial listing
+// (a member(ClusterId, ...) constraint). Installed after
+// installApiFixtures, whose routes it overrides.
+//
+// `partial` makes the listing a first page that leaves out two of the
+// sweep's queued jobs, the case where counting what was listed would
+// call them finished. `exactQueries` collects the constraints of the
+// exact-count queries so a test can see they were made.
+export async function installJobsProgressFixtures(
+  page: Page,
+  opts: { partial?: boolean; exactQueries?: string[] } = {},
+) {
+  const queue = progressQueue();
+  await page.route('**/api/v1/jobs?**', async (route) => {
+    const url = new URL(route.request().url());
+    const projection = url.searchParams.get('projection') ?? '';
+    const constraint = url.searchParams.get('constraint') ?? '';
+    let body: JobListResponse;
+    if (projection.includes('CpusUsage')) {
+      body = { jobs: queue.filter((j) => j.JobStatus === 2).map(usageOf), has_more: false };
+    } else if (constraint.startsWith('member(ClusterId')) {
+      opts.exactQueries?.push(constraint);
+      const ids = new Set((constraint.match(/\{([^}]*)\}/)?.[1] ?? '').split(',').map((x) => Number(x.trim())));
+      body = { jobs: queue.filter((j) => ids.has(Number(j.ClusterId))), has_more: false };
+    } else if (opts.partial) {
+      const listed = queue.filter((j) => !(j.ClusterId === 500 && (j.ProcId === 7 || j.ProcId === 8)));
+      body = {
+        jobs: listed,
+        total_returned: listed.length,
+        has_more: true,
+        pagination_unavailable: 'smoke: no cursor',
+      };
+    } else {
+      body = { jobs: queue, total_returned: queue.length, has_more: false };
+    }
+    await route.fulfill({ json: body });
+  });
+  await page.route('**/api/v1/metrics/job_metrics?**', (route) =>
+    route.fulfill({ json: recentCpuFixture }),
+  );
 }

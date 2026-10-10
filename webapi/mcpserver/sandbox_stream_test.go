@@ -90,14 +90,30 @@ func heapPeak(t *testing.T) (stop func() uint64) {
 }
 
 const (
-	hugeSandboxFile = 1 << 30
-	bigSandboxFile  = 128 << 20
-	heapCeiling     = 10 << 20
+	// smallSandboxFile and the larger sizes below are the two points a
+	// memory measurement compares. A single reading against a fixed
+	// ceiling was noise: both ends of the transfer run in this process,
+	// so the heap also carries cedar's in-flight buffers and whatever
+	// garbage GC pacing leaves, which differ by machine and run (10-12
+	// MiB on arm64 CI against a 10 MiB ceiling). That noise does not
+	// depend on the file's size; holding the file does.
+	smallSandboxFile = 16 << 20
+	hugeSandboxFile  = 1 << 30
+	bigSandboxFile   = 256 << 20
 )
 
-// get_job_stdout returns the head of a 1 GiB stdout, marked truncated,
-// without holding the file, and abandons the transfer once it has it.
-func TestGetJobStdoutStreamsAHugeFile(t *testing.T) {
+// sandboxRun is one call of an output tool over a sandbox holding a
+// file of some size between two small ones.
+type sandboxRun struct {
+	text string
+	// peak is the heap growth during the call; sent is how much of the
+	// sandbox the fake schedd sent.
+	peak uint64
+	sent int64
+}
+
+func runSandboxTool(t *testing.T, tool string, size int64) sandboxRun {
+	t.Helper()
 	f := newActionScopeFixture(t)
 	ad := fakeschedd.JobAd(3, 0, "alice", 4)
 	ad.InsertAttrString("Out", "big.out")
@@ -105,67 +121,71 @@ func TestGetJobStdoutStreamsAHugeFile(t *testing.T) {
 	var sent atomic.Int64
 	f.schedd.AddSandbox(3, 0,
 		sandboxFile("before.txt", 10, 'b', &sent),
-		sandboxFile("big.out", hugeSandboxFile, 'x', &sent),
+		sandboxFile("big.out", size, 'x', &sent),
 		sandboxFile("after.txt", 10, 'a', &sent))
 	alice := f.as(t, "alice", "mcp:read")
 
 	stop := heapPeak(t)
-	text, isErr := f.call(alice, t, "get_job_stdout", map[string]interface{}{"job_id": "3.0"})
-	peak := stop()
-	t.Logf("peak heap growth %d KiB, %d KiB sent", peak>>10, sent.Load()>>10)
-
+	text, isErr := f.call(alice, t, tool, map[string]interface{}{"job_id": "3.0"})
+	run := sandboxRun{text: text, peak: stop(), sent: sent.Load()}
+	t.Logf("%s over a %d MiB file: peak heap growth %d KiB, %d KiB sent", tool, size>>20, run.peak>>10, run.sent>>10)
 	if isErr {
-		t.Fatalf("get_job_stdout failed: %.300s", text)
+		t.Fatalf("%s failed: %.300s", tool, text)
 	}
-	if !strings.Contains(text, strings.Repeat("x", maxFileSize)) || strings.Contains(text, strings.Repeat("x", maxFileSize+1)) {
+	return run
+}
+
+// assertDoesNotScale fails when the heap grew with the file. A tool
+// that buffers the sandbox holds at least the whole file, so the larger
+// run's peak exceeds the smaller's by at least the size difference; one
+// that streams differs only by noise. Half the difference splits the
+// two: single peaks were seen anywhere from 2 to 35 MiB at either size,
+// so a tighter bound would be measuring the noise again.
+func assertDoesNotScale(t *testing.T, small, large sandboxRun, smallSize, largeSize uint64) {
+	t.Helper()
+	var growth uint64
+	if large.peak > small.peak {
+		growth = large.peak - small.peak
+	}
+	if limit := (largeSize - smallSize) / 2; growth > limit {
+		t.Errorf("heap grew %d MiB more for a %d MiB file than for a %d MiB one; want under %d MiB -- memory scales with the sandbox",
+			growth>>20, largeSize>>20, smallSize>>20, limit>>20)
+	}
+}
+
+// get_job_stdout returns the head of a 1 GiB stdout, marked truncated,
+// using no more memory than for a 16 MiB one, and abandons the transfer
+// once it has it.
+func TestGetJobStdoutStreamsAHugeFile(t *testing.T) {
+	small := runSandboxTool(t, "get_job_stdout", smallSandboxFile)
+	large := runSandboxTool(t, "get_job_stdout", hugeSandboxFile)
+
+	if !strings.Contains(large.text, strings.Repeat("x", maxFileSize)) || strings.Contains(large.text, strings.Repeat("x", maxFileSize+1)) {
 		t.Errorf("the output is not the file's first %d bytes", maxFileSize)
 	}
-	if want := fmt.Sprintf("showing the first %d of %d bytes", maxFileSize, hugeSandboxFile); !strings.Contains(text, want) {
+	if want := fmt.Sprintf("showing the first %d of %d bytes", maxFileSize, hugeSandboxFile); !strings.Contains(large.text, want) {
 		t.Errorf("the output does not say it was truncated (%q)", want)
 	}
-	if peak > heapCeiling {
-		t.Errorf("heap grew by %d MiB reading a 1 GiB stdout; want under %d MiB", peak>>20, heapCeiling>>20)
-	}
-	if n := sent.Load(); n > 64<<20 {
-		t.Errorf("the schedd sent %d MiB of the sandbox; the transfer should stop once stdout is read", n>>20)
+	assertDoesNotScale(t, small, large, smallSandboxFile, hugeSandboxFile)
+	if large.sent > 64<<20 {
+		t.Errorf("the schedd sent %d MiB of the sandbox; the transfer should stop once stdout is read", large.sent>>20)
 	}
 }
 
 // get_job_output lists every file, past the big one, with bounded
-// content, and never holds the big one. It has to read the whole sandbox
-// to list it, so the file is smaller than the stdout case's -- still many
-// times the heap ceiling.
+// content, using no more memory for a 256 MiB file than for a 16 MiB
+// one. It has to read the whole sandbox to list it, so the file is
+// smaller than the stdout case's.
 func TestGetJobOutputStreamsABigFile(t *testing.T) {
-	f := newActionScopeFixture(t)
-	f.schedd.AddJobs(fakeschedd.JobAd(3, 0, "alice", 4))
-	var sent atomic.Int64
-	f.schedd.AddSandbox(3, 0,
-		sandboxFile("before.txt", 10, 'b', &sent),
-		sandboxFile("big.out", bigSandboxFile, 'x', &sent),
-		sandboxFile("after.txt", 10, 'a', &sent))
-	alice := f.as(t, "alice", "mcp:read")
+	small := runSandboxTool(t, "get_job_output", smallSandboxFile)
+	large := runSandboxTool(t, "get_job_output", bigSandboxFile)
 
-	stop := heapPeak(t)
-	text, isErr := f.call(alice, t, "get_job_output", map[string]interface{}{"job_id": "3.0"})
-	peak := stop()
-	t.Logf("peak heap growth %d KiB", peak>>10)
-
-	if isErr {
-		t.Fatalf("get_job_output failed: %.300s", text)
-	}
 	for _, want := range []string{"before.txt", "after.txt", fmt.Sprintf("big.out (%d bytes", bigSandboxFile), "truncated"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("the summary is missing %q: %.500s", want, text)
+		if !strings.Contains(large.text, want) {
+			t.Errorf("the summary is missing %q: %.500s", want, large.text)
 		}
 	}
-	// A looser ceiling than the stdout case's: this one carries the
-	// whole 128 MiB through cedar, encrypted, with both ends in this
-	// process, and the in-flight buffers and garbage that leaves between
-	// collections vary by machine (11 MiB on arm64 CI). A tool holding
-	// the file holds all of it.
-	if peak > bigSandboxFile/4 {
-		t.Errorf("heap grew by %d MiB reading a %d MiB sandbox; want under %d MiB", peak>>20, bigSandboxFile>>20, bigSandboxFile/4>>20)
-	}
+	assertDoesNotScale(t, small, large, smallSandboxFile, bigSandboxFile)
 }
 
 // Many files that are each under the per-file cap still add up; the

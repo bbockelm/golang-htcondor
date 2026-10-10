@@ -45,15 +45,15 @@ export default function AdminUsagePage() {
   return (
     <div className="space-y-4 max-w-6xl">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Usage</h1>
-        <p className="text-sm text-gray-500">MCP tool calls on this server.</p>
+        <h1 className="text-2xl font-bold text-gray-900">MCP Usage</h1>
+        <p className="text-sm text-gray-500">Tool calls on this server.</p>
       </div>
 
       {isLoading && <p className="text-gray-400">Loading…</p>}
       {error && <p className="text-red-600 text-sm">{(error as Error).message}</p>}
 
       {data && !data.enabled && (
-        <p className="text-sm text-gray-600">Usage is not being recorded on this server.</p>
+        <p className="text-sm text-gray-600">MCP usage is not being recorded on this server.</p>
       )}
 
       {data?.enabled && data.totals && (

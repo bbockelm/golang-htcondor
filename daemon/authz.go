@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"sync/atomic"
 
 	"github.com/bbockelm/cedar/commands"
+	"github.com/bbockelm/cedar/security"
 	cedarserver "github.com/bbockelm/cedar/server"
 	"github.com/bbockelm/golang-htcondor/authz"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -121,15 +123,22 @@ func (a *Authz) Holes() *authz.Holes { return a.holes }
 // dcCommandNames names the DaemonCore commands RegisterDefaultCommands serves
 // that cedar's command table does not.
 var dcCommandNames = map[int]string{
-	commands.DC_NOP:            "DC_NOP",
-	commands.DC_NOP_READ:       "DC_NOP_READ",
-	commands.DC_NOP_WRITE:      "DC_NOP_WRITE",
-	commands.DC_NOP_NEGOTIATOR: "DC_NOP_NEGOTIATOR",
-	commands.DC_RECONFIG:       "DC_RECONFIG",
-	commands.DC_RECONFIG_FULL:  "DC_RECONFIG_FULL",
-	commands.DC_OFF_GRACEFUL:   "DC_OFF_GRACEFUL",
-	commands.DC_OFF_PEACEFUL:   "DC_OFF_PEACEFUL",
-	commands.DC_OFF_FAST:       "DC_OFF_FAST",
+	commands.DC_NOP:                  "DC_NOP",
+	commands.DC_NOP_READ:             "DC_NOP_READ",
+	commands.DC_NOP_WRITE:            "DC_NOP_WRITE",
+	commands.DC_NOP_NEGOTIATOR:       "DC_NOP_NEGOTIATOR",
+	commands.DC_NOP_ADMINISTRATOR:    "DC_NOP_ADMINISTRATOR",
+	commands.DC_NOP_OWNER:            "DC_NOP_OWNER",
+	commands.DC_NOP_CONFIG:           "DC_NOP_CONFIG",
+	commands.DC_NOP_DAEMON:           "DC_NOP_DAEMON",
+	commands.DC_NOP_ADVERTISE_STARTD: "DC_NOP_ADVERTISE_STARTD",
+	commands.DC_NOP_ADVERTISE_SCHEDD: "DC_NOP_ADVERTISE_SCHEDD",
+	commands.DC_NOP_ADVERTISE_MASTER: "DC_NOP_ADVERTISE_MASTER",
+	commands.DC_RECONFIG:             "DC_RECONFIG",
+	commands.DC_RECONFIG_FULL:        "DC_RECONFIG_FULL",
+	commands.DC_OFF_GRACEFUL:         "DC_OFF_GRACEFUL",
+	commands.DC_OFF_PEACEFUL:         "DC_OFF_PEACEFUL",
+	commands.DC_OFF_FAST:             "DC_OFF_FAST",
 }
 
 // CommandName returns cmd's HTCondor name, or its number if it has none.
@@ -152,20 +161,38 @@ func (a *Authz) CommandName(cmd int) string {
 // limitedRE matches the one it returns when the command's levels are outside
 // the authorization limits of the peer's credential (an IDTOKEN's
 // condor:/<LEVEL> scopes), which cedar checks before the Authorizer. The
-// tests fail if cedar changes either wording.
+// tests fail if cedar changes either wording. cedar answers the peer DENIED
+// for both. notFoundRE matches the error for a command the server has no
+// handler for, which cedar answers CMD_NOT_FOUND and marks with
+// security.ErrCommandNotFound.
 var (
-	refusedRE = regexp.MustCompile(`command (\d+) \([^)]*\) refused: identity ("(?:[^"\\]|\\.)*") is not authorized`)
-	limitedRE = regexp.MustCompile(`command (\d+) \([^)]*\) refused: authorization levels \[([^\]]*)\] are outside the session's authorization limits \[([^\]]*)\]`)
+	refusedRE  = regexp.MustCompile(`command (\d+) \([^)]*\) refused: identity ("(?:[^"\\]|\\.)*") is not authorized`)
+	limitedRE  = regexp.MustCompile(`command (\d+) \([^)]*\) refused: authorization levels \[([^\]]*)\] are outside the session's authorization limits \[([^\]]*)\]`)
+	notFoundRE = regexp.MustCompile(`no authenticated handler for command (\d+)`)
 )
 
 // LogDenial logs err as PERMISSION DENIED if it is a command refused for
 // authorization: by the ALLOW_/DENY_ policy, with the command, its
 // authorization levels, the peer, the identity and the settings that decide
 // those levels; or by the peer's authorization limits, with the command,
-// levels, peer and those limits. It reports whether err was such a refusal.
-// srv is the server that refused the command, for its registered levels.
+// levels, peer and those limits. A command the server has no handler for is
+// logged as an unregistered command, as DaemonCore logs one. It reports
+// whether err was one of these refusals. srv is the server that refused the
+// command, for its registered levels.
 func (a *Authz) LogDenial(log *slog.Logger, srv *cedarserver.Server, peerAddr string, err error) bool {
 	msg := err.Error()
+	if errors.Is(err, security.ErrCommandNotFound) {
+		cmd := -1
+		if m := notFoundRE.FindStringSubmatch(msg); m != nil {
+			cmd, _ = strconv.Atoi(m[1])
+		}
+		log.Error("UNREGISTERED COMMAND",
+			"command", a.CommandName(cmd),
+			"command_id", cmd,
+			"peer", peerAddr,
+			"destination", "security")
+		return true
+	}
 	if m := limitedRE.FindStringSubmatch(msg); m != nil {
 		cmd, convErr := strconv.Atoi(m[1])
 		if convErr != nil {

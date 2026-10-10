@@ -89,7 +89,11 @@ func TestDeviceCodeHandler(t *testing.T) {
 			t.Fatalf("Failed to approve device: %v", err)
 		}
 
-		// Test polling after authorization (should succeed)
+		// Test polling after authorization (should succeed), one
+		// interval after the first poll.
+		later := time.Now().Add(deviceCodePollInterval)
+		handler.now = func() time.Time { return later }
+		defer func() { handler.now = time.Now }()
 		request, err := handler.HandleDeviceAccessRequest(ctx, resp.DeviceCode, session)
 		if err != nil {
 			t.Fatalf("Device access request failed after approval: %v", err)

@@ -53,6 +53,9 @@ import (
 
 // Handler represents the HTTP API handler that can be embedded in any HTTP server
 type Handler struct {
+	// grantReauth rate-limits re-running a grant's authorization policy
+	// when a credential minted from it is renewed.
+	grantReauth grantReauthLimiter
 	// startTime is when this handler was constructed, i.e. when the
 	// server came up. Fixed for the process lifetime and reported by
 	// /api/v1/version so the Info page can show how long the access
@@ -225,6 +228,9 @@ type Handler struct {
 	// OAuth2 discovery document (the resolver itself lives in the provider's
 	// storage). See oauth2_cimd.go.
 	mcpCIMDEnabled bool
+	// mcpDCRDisabled refuses dynamic client registration. See
+	// Config.MCPDCRDisabled.
+	mcpDCRDisabled bool
 	// extIssuers verifies external trusted-issuer subject tokens for RFC 8693
 	// token exchange. Nil when no issuers are configured. See
 	// oauth2_token_exchange_ext.go.
@@ -403,7 +409,8 @@ type Handler struct {
 	watchHeartbeatEvery time.Duration
 	logBuffer           *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
 	idpProvider         *IDPProvider      // Built-in IDP provider
-	idpLoginLimiter     *LoginRateLimiter // Rate limiter for IDP login attempts
+	idpLoginLimiter     *LoginRateLimiter // IDP login attempts per source address
+	idpLoginByUser      *LoginRateLimiter // IDP login attempts per username
 	seedDemoUser        bool              // Seed the non-admin "user" account (demo mode only)
 	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
 	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
@@ -415,6 +422,11 @@ type Handler struct {
 	// its per-process CSRF key, all built on first use. See
 	// handlers_ssh_consent.go.
 	sshConsentState
+
+	// oauth2LimitState holds the per-source limits on the OAuth2
+	// endpoints that create state for an unauthenticated caller. See
+	// oauth2_rate_limits.go.
+	oauth2LimitState
 
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by /api/v1/jobs/{id}/match-analysis.
@@ -729,6 +741,10 @@ type HandlerConfig struct {
 	// when set, restricts which hosts such a client_id may point at.
 	MCPCIMDEnabled      bool
 	MCPCIMDAllowedHosts []string
+	// MCPDCRDisabled refuses dynamic client registration (RFC 7591) and
+	// stops advertising its endpoint, for a deployment whose clients are
+	// all seeded, operator-provisioned or CIMD. HTTP_API_MCP_DCR=false.
+	MCPDCRDisabled bool
 	// MCPTokenExchangeIssuers is the JSON list of trusted external issuers for
 	// RFC 8693 token exchange (HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS). Empty = off.
 	MCPTokenExchangeIssuers string
@@ -1167,6 +1183,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		httpBaseURL:               cfg.HTTPBaseURL,
 		mcpBaseURL:                strings.TrimSpace(cfg.MCPBaseURL),
 		mcpCIMDEnabled:            cfg.MCPCIMDEnabled,
+		mcpDCRDisabled:            cfg.MCPDCRDisabled,
 		ccbDialer:                 cfg.CCB,
 		userHeader:                cfg.UserHeader,
 		userHeaderUnsafeAllowAll:  cfg.UserHeaderTrustAnyUnsafe,
@@ -1862,7 +1879,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"refresh_token_lifespan", idpRefreshLifespan)
 		h.idpProvider = idpProvider
 		h.seedDemoUser = cfg.SeedDemoUser
-		h.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5) // 5 attempts per minute with burst of 5
+		// Failed logins: 5 a minute per source address, and 10 per
+		// username so a guesser spreading attempts across many
+		// addresses still meets a limit. See handleIDPLoginSubmit.
+		h.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5)
+		h.idpLoginByUser = NewLoginRateLimiter(rate.Limit(10.0/60.0), 10)
 		logger.Info(logging.DestinationHTTP, "IDP provider enabled", "issuer", idpIssuer)
 
 		// Ensure OAuth2 state store is initialized if we might use SSO (which IDP enables)
@@ -2466,9 +2487,11 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	}
 
 	// Delete token rows once they are dead and old enough to be of no use
-	// to anybody. Negative retention is the operator asking to keep them
-	// forever, which is a policy some deployments have.
-	if h.oauth2Provider != nil && h.tokenRetentionFor >= 0 {
+	// to anybody, along with expired authorization state and clients
+	// that registered and never came back. Negative retention is the
+	// operator asking to keep token rows forever, which is a policy some
+	// deployments have; runTokenRetention honours it.
+	if h.oauth2Provider != nil {
 		go h.runTokenRetention(ctx)
 	}
 
@@ -2534,7 +2557,7 @@ func (h *Handler) startJobWatchFeed(ctx context.Context) {
 		// cannot be inferred from the absence of the other -- "enabled but
 		// never connected" and "not enabled" would otherwise look alike.
 		h.logger.Info(logging.DestinationHTTP, "Job watch feed enabled; connecting to the htcondordb mirror")
-		_ = h.jobWatchFeed.Run(ctx, h.watchJobsTable)
+		_ = h.jobWatchFeed.Run(htcondor.WithDaemonCredential(ctx, "job watch feed"), h.watchJobsTable)
 	}()
 }
 
@@ -2600,6 +2623,7 @@ func (h *Handler) startJobWatchNudge(ctx context.Context) {
 	if h.jobWatchFeed == nil || h.jobWatchEval == nil || !h.dbMirror.Enabled() {
 		return
 	}
+	ctx = htcondor.WithDaemonCredential(ctx, "job watch evaluation")
 	nudger := jobwatch.NewNudger(h.jobWatchFeed, h.jobWatchEval.CheckOwner,
 		func(format string, args ...any) {
 			h.logger.Debug(logging.DestinationHTTP, fmt.Sprintf(format, args...))
@@ -2687,6 +2711,9 @@ func (h *Handler) startJobWatchEvaluator(ctx context.Context) {
 	if h.jobWatchEval == nil {
 		return
 	}
+	// The periodic sweep over every user's watches: owner-scoped by the
+	// evaluator's own constraints, run as this daemon.
+	ctx = htcondor.WithDaemonCredential(ctx, "job watch evaluation")
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -2705,6 +2732,7 @@ func (h *Handler) startDBMirrorPoll(ctx context.Context) {
 	if !h.dbMirror.Enabled() {
 		return
 	}
+	ctx = htcondor.WithDaemonCredential(ctx, "htcondordb mirror discovery")
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -3334,7 +3362,8 @@ func (h *Handler) periodicPing(ctx context.Context) {
 // 60-second updater tick — that's the failure mode where the cached sock=
 // has just gone stale and the next ping should use a fresh address.
 func (h *Handler) performPeriodicPing() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(
+		htcondor.WithDaemonCredential(context.Background(), "periodic health ping"), 10*time.Second)
 	defer cancel()
 
 	// secConfigForLog tracks the SecurityConfig actually attached to ctx so we

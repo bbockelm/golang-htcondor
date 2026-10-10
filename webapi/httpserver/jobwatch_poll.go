@@ -152,7 +152,9 @@ func newJobPollHub(interval time.Duration, logger *logging.Logger,
 // onto a fresh background context instead, which means the poll keeps
 // running on the authority the subscriber had when it joined, and does
 // not re-check it. That is deliberate -- a watch is a stream the caller
-// already opened, not a fresh act of authorization each tick.
+// already opened, not a fresh act of authorization each tick. The token
+// itself is minted again from that authority when it runs out, where this
+// server minted it; see keyFor.
 func (h *jobPollHub) Subscribe(ctx context.Context, constraint string) jobWatchSource {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -200,19 +202,26 @@ func (h *jobPollHub) Subscribe(ctx context.Context, constraint string) jobWatchS
 // The poll context is built from Background rather than from the request,
 // because the group outlives the request that created it and a cancelled
 // parent would stop it for every other subscriber. It carries the
-// caller's security config so the query reaches the schedd as them, and
-// is marked as a caller's request so that a missing credential is refused
+// caller's credential so the query reaches the schedd as them, and is
+// marked as a caller's request so that a missing credential is refused
 // rather than falling through to this daemon's own.
+//
+// The credential goes with its renewer. The token a request carries is
+// minted for that request and lasts a minute or five; the group lasts as
+// long as anyone is watching. Carried alone it expires under the poll,
+// which then fails every tick. With the renewer each tick that finds it
+// about to expire mints it again, from the identity and authorization it
+// was minted for. A token the caller presented themselves has no renewer
+// and lasts as long as it says.
 func (h *jobPollHub) keyFor(ctx context.Context, constraint string) (pollKey, context.Context) {
 	pollCtx := htcondor.WithUserRequest(context.Background(), "job watch poll")
 
-	// GetSecurityConfigFromContext hands back a copy, so the group holds
-	// its own and cannot be disturbed by whatever the request does next.
-	secCfg, ok := htcondor.GetSecurityConfigFromContext(ctx)
-	if ok {
-		cfg := secCfg
-		pollCtx = htcondor.WithSecurityConfig(pollCtx, &cfg)
+	// A copy, so the group holds its own and cannot be disturbed by
+	// whatever the request does next.
+	if cred, ok := htcondor.CallerCredentialFromContext(ctx); ok {
+		pollCtx = cred.Attach(pollCtx)
 	}
+	secCfg, ok := htcondor.GetSecurityConfigFromContext(ctx)
 	if user := htcondor.GetAuthenticatedUserFromContext(ctx); user != "" {
 		pollCtx = htcondor.WithAuthenticatedUser(pollCtx, user)
 	}

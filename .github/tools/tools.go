@@ -6,10 +6,10 @@
 package tools
 
 import (
-	// htcondordb: the database the webapi's mirror routing talks to.
-	// Built by CI so webapi/httpserver's integration test can run
-	// against a real one instead of a stub. See ../../webapi/httpserver
-	// (dbmirror_integration_test.go).
+	// htcondordb: the database the webapi's mirror routing and multi-AP
+	// mode talk to. Built by CI so webapi/httpserver's integration tests
+	// can run against real ones instead of stubs. See ../../webapi/httpserver
+	// (htcondordb_harness_integration_test.go).
 	_ "github.com/bbockelm/htcondordb/cmd/htcondordb"
 
 	// nfpm: builds the release RPM. Same reason as gotestsum -- the

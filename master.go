@@ -349,6 +349,9 @@ func hasInheritedSessionForCommand(peerAddr string, command int) bool {
 // matches what callers got before this file learned about inherited
 // sessions.
 func secConfigForMasterCommand(ctx context.Context, cfg *config.Config, command int, peerAddr string) (*security.SecurityConfig, error) {
+	// A command to our own condor_master is this daemon speaking, whatever
+	// context it was started from.
+	ctx = WithDaemonCredential(ctx, "command to condor_master")
 	secConfig, err := GetSecurityConfigOrDefault(ctx, cfg, command, "DAEMON", peerAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)

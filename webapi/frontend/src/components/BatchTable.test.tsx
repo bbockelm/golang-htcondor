@@ -3,7 +3,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
 import { BatchTable } from './BatchTable';
 import { groupIntoBatches } from '@/lib/batches';
-import type { ClassAd } from '@/lib/api';
+import { batchView } from '@/lib/batchView';
+import { PROGRESS_WHY } from '@/lib/batchProgress';
+import type { JobUsage } from '@/lib/runningUsage';
+import type { ClassAd, DisplayStatus } from '@/lib/api';
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -114,5 +117,130 @@ describe('BatchTable in multi-AP mode', () => {
     expect(link.getAttribute('href')).toBe('/jobs/1.0%40ap2.example.org');
     // Held jobs: the single-AP table would offer Release.
     expect(screen.queryByText('Release')).toBeNull();
+  });
+});
+
+describe('BatchTable progress', () => {
+  const queue: ClassAd[] = [
+    // 10 submitted, 3 finished: 5 running, 2 held left.
+    ...[2, 2, 2, 2, 2, 5, 5].map((s, i) => ({
+      ClusterId: 20, ProcId: i, JobStatus: s, Owner: 'alice', QDate: 100,
+      JobBatchName: 'sweep', TotalSubmitProcs: 10,
+    })),
+    // 4 submitted, 3 finished.
+    { ClusterId: 21, ProcId: 0, JobStatus: 1, Owner: 'alice', QDate: 200, JobBatchName: 'quick', TotalSubmitProcs: 4 },
+  ];
+
+  it('shows how many jobs are done, from every job rather than the filtered ones', () => {
+    const view = batchView(queue, new Set<DisplayStatus>(['held']), '', true);
+    table({ batches: view.batches, progress: view.progress });
+    expect(screen.getByRole('button', { name: /Progress/ })).toBeTruthy();
+    const cell = screen.getByText('3 / 10');
+    expect(cell.closest('[title]')?.getAttribute('title')).toMatch(/^3 of 10 jobs done/);
+  });
+
+  it('sorts by the share done', () => {
+    const view = batchView(queue, new Set(), '', true);
+    table({ batches: view.batches, progress: view.progress });
+    fireEvent.click(screen.getByRole('button', { name: /Progress/ }));
+    // 3/10 before 3/4 ascending.
+    expect(batchNames()[0]).toContain('sweep');
+    fireEvent.click(screen.getByRole('button', { name: /Progress/ }));
+    expect(batchNames()[0]).toContain('quick');
+  });
+
+  it('shows a dash, with the reason, when the count is unknown', () => {
+    const view = batchView(queue, new Set(), '', false);
+    table({ batches: view.batches, progress: view.progress });
+    const dashes = screen.getAllByTitle(PROGRESS_WHY.partial);
+    expect(dashes).toHaveLength(2);
+  });
+
+  it('leaves the column out when not given progress', () => {
+    table();
+    expect(screen.queryByRole('button', { name: /Progress/ })).toBeNull();
+  });
+});
+
+describe('BatchTable held view', () => {
+  const held: ClassAd[] = [
+    { ClusterId: 30, ProcId: 0, JobStatus: 5, Owner: 'alice', Cmd: '/bin/a', HoldReason: 'Job exceeded 2048 MB on node-1' },
+    { ClusterId: 30, ProcId: 1, JobStatus: 5, Owner: 'alice', Cmd: '/bin/a', HoldReason: 'Job exceeded 2048 MB on node-7' },
+    { ClusterId: 30, ProcId: 2, JobStatus: 5, Owner: 'alice', Cmd: '/bin/a', HoldReason: 'Transfer of /home/alice/x failed' },
+    { ClusterId: 31, ProcId: 0, JobStatus: 5, Owner: 'alice', Cmd: '/bin/b', HoldReason: 'Another reason' },
+  ];
+
+  it('shows the hold reason instead of the command', () => {
+    table({ batches: groupIntoBatches(held), detail: 'hold' });
+    expect(screen.getByRole('button', { name: /Hold reason/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Command/ })).toBeNull();
+    expect(screen.queryByText('/bin/a')).toBeNull();
+    // The most common kind, as a real message, with its count and the
+    // number of other kinds.
+    expect(screen.getByText('Job exceeded 2048 MB on node-1')).toBeTruthy();
+    expect(screen.getByText('×2')).toBeTruthy();
+    expect(screen.getByText('+1 other reason')).toBeTruthy();
+  });
+
+  it('shows each job\'s own reason in the expanded jobs', () => {
+    const batches = groupIntoBatches(held);
+    table({ batches, detail: 'hold', expanded: new Set(batches.map((b) => b.batchID)) });
+    // The batch table's header, plus one in each expanded jobs table.
+    expect(screen.getAllByRole('columnheader', { name: /Hold reason/ })).toHaveLength(3);
+    expect(screen.getByText('Transfer of /home/alice/x failed')).toBeTruthy();
+    expect(screen.getAllByText('Job exceeded 2048 MB on node-7')).toHaveLength(1);
+  });
+
+  it('shows the problem first and the whole message on hover', () => {
+    const fromNode: ClassAd[] = [
+      {
+        ClusterId: 32, ProcId: 0, JobStatus: 5, Owner: 'alice',
+        HoldReason: 'Error from slot1_27@glidein_18169@node9.anvil.rcac.purdue.edu: memory usage exceeded request_memory',
+      },
+    ];
+    const batches = groupIntoBatches(fromNode);
+    table({ batches, detail: 'hold', expanded: new Set(batches.map((b) => b.batchID)) });
+    const cells = screen.getAllByText('memory usage exceeded request_memory');
+    // The batch row and the job row.
+    expect(cells).toHaveLength(2);
+    for (const c of cells) {
+      expect(c.getAttribute('title')).toMatch(/^Error from slot1_27@glidein_18169@node9/);
+    }
+  });
+
+  it('sorts by the reason shown', () => {
+    table({ batches: groupIntoBatches(held), detail: 'hold' });
+    fireEvent.click(screen.getByRole('button', { name: /Hold reason/ }));
+    // "Another reason" < "Job exceeded…"
+    expect(batchNames()[0]).toContain('31');
+  });
+});
+
+describe('BatchTable running view', () => {
+  const running: ClassAd[] = [
+    { ClusterId: 40, ProcId: 0, JobStatus: 2, Owner: 'alice', Cmd: '/bin/a' },
+    { ClusterId: 40, ProcId: 1, JobStatus: 2, Owner: 'alice', Cmd: '/bin/a' },
+  ];
+  const byJob = new Map<string, JobUsage>([
+    ['40.0', { memUsedMiB: 2400, memReqMiB: 2048, cpuUsed: 0.9, cpuReq: 1, cpuSource: 'recent' }],
+  ]);
+
+  it('replaces the command with memory and CPU bars', () => {
+    const batches = groupIntoBatches(running);
+    table({
+      batches,
+      detail: 'usage',
+      usage: { byJob, loading: false },
+      expanded: new Set(batches.map((b) => b.batchID)),
+    });
+    expect(screen.getByRole('button', { name: /Memory \(peak\)/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /CPU \(recent\)/ })).toBeTruthy();
+    expect(screen.queryByText('/bin/a')).toBeNull();
+    // Submitted makes room for the second bar.
+    expect(screen.queryByRole('button', { name: /Submitted/ })).toBeNull();
+    // The job over its request is flagged, with the percentage in words.
+    expect(screen.getByText('2.3 / 2.0 GB · 117%').closest('[data-tone]')?.getAttribute('data-tone')).toBe('critical');
+    // The job with nothing measured says so rather than showing zero.
+    expect(screen.getAllByText('not reported yet').length).toBeGreaterThanOrEqual(2);
   });
 });

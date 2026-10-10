@@ -3,6 +3,7 @@ package shareurl
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -18,7 +19,8 @@ func testSigner(t *testing.T) *Signer {
 
 func TestSignVerifyRoundTrip(t *testing.T) {
 	s := testSigner(t)
-	want := Payload{Cluster: 12, Proc: 3, Owner: "alice", Exp: time.Now().Add(time.Hour).Unix(), Kind: KindInput}
+	want := Payload{Cluster: 12, Proc: 3, Owner: "alice", Exp: time.Now().Add(time.Hour).Unix(), Kind: KindInput,
+		Authz: []string{"READ", "WRITE"}}
 	tok, err := s.Sign(want)
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
@@ -27,7 +29,7 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if *got != want {
+	if !reflect.DeepEqual(*got, want) {
 		t.Fatalf("round trip changed the payload: got %+v want %+v", *got, want)
 	}
 }
