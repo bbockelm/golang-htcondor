@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http/httptest"
@@ -113,8 +114,9 @@ func newPoolTokenDaemon(t *testing.T, keyDir string) string {
 // SSL client certificate, no method that identifies the process, and
 // authentication REQUIRED rather than the configured OPTIONAL. The
 // request's identity, which createAuthenticatedContext resolves by asking
-// the schedd who the connection is, must then be nobody for the foreign
-// bearer and the bearer's subject for one the schedd accepts.
+// the schedd who the connection is, must then be the bearer's subject for
+// one the schedd accepts, and the foreign bearer must be refused as
+// unidentified -- not authenticated as the server.
 func TestBearerAuthenticatesOnlyAsTheBearer(t *testing.T) {
 	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
 	if err != nil {
@@ -146,7 +148,7 @@ AUTH_SSL_CLIENT_CERTFILE = /etc/condor/hostcert.pem
 AUTH_SSL_CLIENT_KEYFILE = /etc/condor/hostkey.pem
 `)
 
-	identify := func(bearer string) string {
+	authenticate := func(bearer string) (context.Context, error) {
 		t.Helper()
 		// A fresh daemon per request, so no session is resumed.
 		addr := newPoolTokenDaemon(t, keyDir)
@@ -158,37 +160,46 @@ AUTH_SSL_CLIENT_KEYFILE = /etc/condor/hostkey.pem
 		}
 		r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs", nil)
 		r.Header.Set("Authorization", "Bearer "+bearer)
-		ctx, err := h.createAuthenticatedContext(r)
-		if err != nil {
-			t.Fatalf("createAuthenticatedContext: %v", err)
-		}
-		got, ok := htcondor.GetSecurityConfigFromContext(ctx)
-		if !ok {
-			t.Fatal("no SecurityConfig on the authenticated context")
-		}
-		if got.Token != bearer {
-			t.Error("the bearer is not the token on the SecurityConfig")
-		}
-		if got.TokenDir != "" || got.TokenFile != "" {
-			t.Errorf("TokenDir = %q, TokenFile = %q; the server's token store is reachable from a bearer request", got.TokenDir, got.TokenFile)
-		}
-		if got.CertFile != "" || got.KeyFile != "" {
-			t.Errorf("CertFile = %q, KeyFile = %q; the server's certificate is presented on a bearer request", got.CertFile, got.KeyFile)
-		}
-		if want := []security.AuthMethod{security.AuthToken, security.AuthSSL}; !slices.Equal(got.AuthMethods, want) {
-			t.Errorf("AuthMethods = %v, want %v", got.AuthMethods, want)
-		}
-		if got.Authentication != security.SecurityRequired {
-			t.Errorf("Authentication = %q, want REQUIRED", got.Authentication)
-		}
-		return htcondor.GetAuthenticatedUserFromContext(ctx)
+		return h.createAuthenticatedContext(r)
 	}
 
-	// createTestJWTToken's issuer is test.domain, not this pool's.
-	if user := identify(createTestJWTToken(3600)); user != "" {
-		t.Errorf("a bearer from another issuer authenticated as %q", user)
+	// createTestJWTToken's issuer is test.domain, not this pool's. The
+	// schedd is asked who the connection is and names nobody, so the
+	// request is refused; had cedar fallen back to the token directory,
+	// the connection would have authenticated as condor.
+	ctx, err := authenticate(createTestJWTToken(3600))
+	if !errors.Is(err, errUnidentifiedCaller) {
+		t.Errorf("a bearer from another issuer: err = %v, want errUnidentifiedCaller", err)
 	}
-	if user := identify(mint("alice@pool.example")); user != "alice" {
+	if ctx != nil {
+		t.Errorf("a bearer from another issuer authenticated as %q", htcondor.GetAuthenticatedUserFromContext(ctx))
+	}
+
+	alice := mint("alice@pool.example")
+	ctx, err = authenticate(alice)
+	if err != nil {
+		t.Fatalf("createAuthenticatedContext: %v", err)
+	}
+	if user := htcondor.GetAuthenticatedUserFromContext(ctx); user != "alice" {
 		t.Errorf("a bearer the schedd accepts authenticated as %q, want alice", user)
+	}
+	got, ok := htcondor.GetSecurityConfigFromContext(ctx)
+	if !ok {
+		t.Fatal("no SecurityConfig on the authenticated context")
+	}
+	if got.Token != alice {
+		t.Error("the bearer is not the token on the SecurityConfig")
+	}
+	if got.TokenDir != "" || got.TokenFile != "" {
+		t.Errorf("TokenDir = %q, TokenFile = %q; the server's token store is reachable from a bearer request", got.TokenDir, got.TokenFile)
+	}
+	if got.CertFile != "" || got.KeyFile != "" {
+		t.Errorf("CertFile = %q, KeyFile = %q; the server's certificate is presented on a bearer request", got.CertFile, got.KeyFile)
+	}
+	if want := []security.AuthMethod{security.AuthToken, security.AuthSSL}; !slices.Equal(got.AuthMethods, want) {
+		t.Errorf("AuthMethods = %v, want %v", got.AuthMethods, want)
+	}
+	if got.Authentication != security.SecurityRequired {
+		t.Errorf("Authentication = %q, want REQUIRED", got.Authentication)
 	}
 }
