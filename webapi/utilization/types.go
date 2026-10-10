@@ -129,8 +129,10 @@ type Sample struct {
 // request_memory.
 type MemoryCurvePoint struct {
 	RequestMiB float64 `json:"request_mib"`
-	// RetryMiB is the retry_request_memory paired with RequestMiB; nil
-	// when no job would exceed RequestMiB.
+	// RetryMiB is the retry_request_memory paired with RequestMiB: the
+	// request that fits every job, for any request below it. Nil at and
+	// above that request, and at the current request when the advice is
+	// to keep it.
 	RetryMiB         *float64 `json:"retry_mib"`
 	ReservedMiBHours float64  `json:"reserved_mib_hours"`
 	RetryFraction    float64  `json:"retry_fraction"`

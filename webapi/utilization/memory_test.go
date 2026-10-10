@@ -1,6 +1,7 @@
 package utilization
 
 import (
+	"fmt"
 	"math"
 	"slices"
 	"testing"
@@ -206,13 +207,15 @@ func TestExpectedCostChargesTheFullFailedAttempt(t *testing.T) {
 // A retry that saves under 15% over one request that fits everything is
 // not worth the reruns.
 //
-// 20 jobs, an hour each: 18 at 900 MiB, 2 at 1100. One request of 1280
-// reserves 25,600 MiB-h; 1024 with a retry at 1280 reserves 20*1024 +
-// 2*1280 = 23,040, a 10% saving.
+// 20 jobs, an hour each, asking for 4 GiB: 18 peak at 900 MiB, 2 at 1100.
+// One request of 1280 reserves 25,600 MiB-h; 1024 with a retry at 1280
+// reserves 20*1024 + 2*1280 = 23,040, only a 10% saving -- so the advice
+// is 1280 alone, saving (81,920 - 25,600)/1024 = 55 GiB-h over the 4 GiB
+// requests.
 func TestMemorySmallRetrySavingIsNotRecommended(t *testing.T) {
 	var jobs []Job
-	jobs = append(jobs, jobsAt(18, 1, 900, 1280)...)
-	jobs = append(jobs, jobsAt(2, 100, 1100, 1280)...)
+	jobs = append(jobs, jobsAt(18, 1, 900, 4096)...)
+	jobs = append(jobs, jobsAt(2, 100, 1100, 4096)...)
 	w := onlyWorkflow(t, jobs)
 
 	p := recommendedPoint(t, w)
@@ -228,8 +231,12 @@ func TestMemorySmallRetrySavingIsNotRecommended(t *testing.T) {
 	if at1024 == nil || at1024.ReservedMiBHours != 23040 || at1024.RetryMiB == nil || *at1024.RetryMiB != 1280 {
 		t.Errorf("1024 point = %+v, want 23040 MiB-h retrying at 1280", at1024)
 	}
-	if a := adviceByResource(w, ResourceMemory); a == nil || a.ID != "memory-ok" {
-		t.Errorf("advice = %+v, want memory-ok (the jobs already ask for 1280)", a)
+	a := adviceByResource(w, ResourceMemory)
+	if a == nil || a.ID != "memory-lower" || !slices.Equal(a.Submit, []string{"request_memory = 1280 MB"}) {
+		t.Fatalf("advice = %+v, want memory-lower to 1280 MB alone", a)
+	}
+	if a.Saves == nil || a.Saves.Amount != 55 {
+		t.Errorf("saves = %+v, want 55 GiB-h", a.Saves)
 	}
 }
 
@@ -379,4 +386,214 @@ func TestMemoryPeakAboveRequestWarns(t *testing.T) {
 	if math.IsNaN(recommendedPoint(t, w).ReservedMiBHours) {
 		t.Error("NaN cost")
 	}
+}
+
+// The grid is every round request between the bounds while that is few
+// enough to plot, and an even-ratio sample of them otherwise.
+func TestRequestGrid(t *testing.T) {
+	// 896 and 1024, then 256 MiB steps to 4 GiB (12), then 512 MiB steps
+	// to 7 GiB (6).
+	g := requestGrid(800, 7168)
+	if len(g) != 20 || g[0] != 896 || g[1] != 1024 || g[2] != 1280 || g[len(g)-1] != 7168 {
+		t.Errorf("grid(800, 7168) = %v", g)
+	}
+	wide := requestGrid(100, 64*1024)
+	if len(wide) > maxCurvePoints || len(wide) < 20 || wide[0] != 128 || wide[len(wide)-1] != 64*1024 {
+		t.Errorf("grid(100, 64 GiB) has %d points: %v", len(wide), wide)
+	}
+	for _, grid := range [][]float64{g, wide, requestGrid(5000, 1000)} {
+		if !slices.IsSorted(grid) || len(slices.Compact(slices.Clone(grid))) != len(grid) {
+			t.Errorf("grid not ascending and distinct: %v", grid)
+		}
+		for _, r := range grid {
+			if niceMiB(r) != r {
+				t.Errorf("grid value %v is not a round request", r)
+			}
+		}
+	}
+	// Even ratios: no step on the sampled grid is more than a few times
+	// the size of the others in relative terms.
+	for i := 1; i < len(wide); i++ {
+		if ratio := wide[i] / wide[i-1]; ratio > 2.01 {
+			t.Errorf("step %v -> %v is too coarse", wide[i-1], wide[i])
+		}
+	}
+}
+
+// The long-tail curve is dense: every round request from just above the
+// 5th-percentile peak (896) to the one that fits everything (7 GiB) --
+// twenty -- and on to the current 8 GiB (7.5 and 8). Two points off the recommendation,
+// hand-checked: 1024 reruns the same five jobs, 102,400 + 5*7168 =
+// 138,240 MiB-h; 1536 fits the two 1500 MiB jobs, 153,600 + 3*7168 =
+// 175,104.
+func TestMemoryCurveIsDense(t *testing.T) {
+	var jobs []Job
+	jobs = append(jobs, jobsAt(95, 1, 800, 8192)...)
+	jobs = append(jobs, jobsAt(2, 200, 1500, 8192)...)
+	jobs = append(jobs, jobsAt(3, 300, 6144, 8192)...)
+	w := onlyWorkflow(t, jobs)
+	if len(w.MemoryCurve) != 22 {
+		t.Errorf("curve has %d points, want 22", len(w.MemoryCurve))
+	}
+	at := map[float64]MemoryCurvePoint{}
+	for _, p := range w.MemoryCurve {
+		at[p.RequestMiB] = p
+	}
+	if p := at[1024]; p.ReservedMiBHours != 138240 || p.RetryFraction != 0.05 {
+		t.Errorf("1024 point = %+v", p)
+	}
+	if p := at[1536]; p.ReservedMiBHours != 175104 || p.RetryFraction != 0.03 {
+		t.Errorf("1536 point = %+v", p)
+	}
+	// Above the request that fits everything, cost is just request times
+	// wall: 8192 * 100.
+	if p := at[8192]; !p.IsCurrent || p.RetryMiB != nil || p.ReservedMiBHours != 819200 {
+		t.Errorf("current point = %+v", p)
+	}
+}
+
+// The dense grid finds requests the old percentile-plus-10% candidates
+// stepped over. 95 jobs peak at exactly 1000 MiB and 5 at 3000, an hour
+// each, all asking for 4 GiB. Fitting everything takes nice(3300) = 3328.
+// 1024 covers the 95 and reruns 5 at 3328: 102,400 + 16,640 = 119,040
+// MiB-h, against 332,800 for 3328 alone. (1000 * 1.1 rounds up to 1280,
+// which would reserve 144,640.) Saved against the 409,600 the jobs
+// reserved: 283.75 GiB-h.
+func TestMemoryDenseGridFindsTheCheaperRequest(t *testing.T) {
+	var jobs []Job
+	jobs = append(jobs, jobsAt(95, 1, 1000, 4096)...)
+	jobs = append(jobs, jobsAt(5, 200, 3000, 4096)...)
+	w := onlyWorkflow(t, jobs)
+	p := recommendedPoint(t, w)
+	if p.RequestMiB != 1024 || p.RetryMiB == nil || *p.RetryMiB != 3328 || p.ReservedMiBHours != 119040 {
+		t.Errorf("recommended = %+v, want 1024 retrying at 3328, 119040 MiB-h", p)
+	}
+	a := adviceByResource(w, ResourceMemory)
+	if a == nil || a.ID != "memory-retry" || !slices.Equal(a.Submit, []string{"request_memory = 1 GB", "retry_request_memory = 3328 MB"}) {
+		t.Fatalf("advice = %+v", a)
+	}
+	if a.Saves == nil || a.Saves.Amount != 283.8 {
+		t.Errorf("saves = %+v, want 283.8 GiB-h", a.Saves)
+	}
+}
+
+// When the advice is to keep the current request, the curve marks the
+// current request -- not a cheaper point the advice declined to push --
+// with no retry beside it.
+func TestMemoryOKMarksTheCurrentRequest(t *testing.T) {
+	// 25 jobs peaking at 1000 MiB asking for 1 GiB: the grid offers
+	// nothing cheaper by enough to bother, so the advice is "fits".
+	w := onlyWorkflow(t, jobsAt(25, 1, 1000, 1024))
+	a := adviceByResource(w, ResourceMemory)
+	if a == nil || a.ID != "memory-ok" {
+		t.Fatalf("advice = %+v, want memory-ok", a)
+	}
+	p := recommendedPoint(t, w)
+	if p.RequestMiB != 1024 || !p.IsCurrent || p.RetryMiB != nil {
+		t.Errorf("recommended = %+v, want the current 1024 with no retry", p)
+	}
+}
+
+// assertCurveMatchesAdvice is the invariant the page relies on: the
+// point marked recommended is the request (and retry) the memory advice
+// tells the user to submit, or the current request when the advice is to
+// keep it.
+func assertCurveMatchesAdvice(t *testing.T, name string, w Workflow) {
+	t.Helper()
+	a := adviceByResource(w, ResourceMemory)
+	if len(w.MemoryCurve) == 0 {
+		if a != nil {
+			t.Errorf("%s: memory advice %q with no curve", name, a.ID)
+		}
+		return
+	}
+	var rec []MemoryCurvePoint
+	for _, p := range w.MemoryCurve {
+		if p.IsRecommended {
+			rec = append(rec, p)
+		}
+	}
+	if len(rec) != 1 {
+		t.Errorf("%s: %d recommended points", name, len(rec))
+		return
+	}
+	p := rec[0]
+	if a == nil {
+		t.Errorf("%s: a curve but no memory advice", name)
+		return
+	}
+	if a.ID == "memory-ok" {
+		if !p.IsCurrent || p.RetryMiB != nil || len(a.Submit) != 0 {
+			t.Errorf("%s: memory-ok but recommended point %+v, submit %q", name, p, a.Submit)
+		}
+		return
+	}
+	want := []string{"request_memory = " + submitSize(p.RequestMiB)}
+	if p.RetryMiB != nil {
+		want = append(want, "retry_request_memory = "+submitSize(*p.RetryMiB))
+	}
+	if !slices.Equal(a.Submit, want) {
+		t.Errorf("%s: advice %s submits %q, recommended point says %q", name, a.ID, a.Submit, want)
+	}
+}
+
+func TestMemoryCurveMatchesAdvice(t *testing.T) {
+	fixtures := map[string][]Job{
+		"tight":  jobsAt(30, 1, 920, 4096),
+		"ok":     jobsAt(25, 1, 1000, 1024),
+		"fits":   jobsAt(25, 1, 900, 1024),
+		"small":  append(jobsAt(18, 1, 900, 1280), jobsAt(2, 100, 1100, 1280)...),
+		"dense":  append(jobsAt(95, 1, 1000, 4096), jobsAt(5, 200, 3000, 4096)...),
+		"capped": append(jobsAt(80, 1, 500, 8192), jobsAt(20, 100, 6000, 8192)...),
+		"under":  append(jobsAt(24, 1, 900, 1024), completed(100, 1500, 1024, 3600)),
+		"longtail": append(append(jobsAt(95, 1, 800, 8192), jobsAt(2, 200, 1500, 8192)...),
+			jobsAt(3, 300, 6144, 8192)...),
+	}
+	held := Job{Cluster: 99, Owner: "alice", Cmd: "/home/alice/sim", Universe: 5, QDate: 2000,
+		Status: statusRemoved, RequestMemory: f(1024), Wall: 3600, HeldForMemory: true, ExceededMemory: true}
+	fixtures["held"] = append(jobsAt(25, 1, 900, 1024), held)
+
+	// And a spread of shapes from a fixed pseudo-random sequence: peaks
+	// from a few hundred MiB to tens of GiB, ragged walls and requests.
+	seed := uint64(1)
+	next := func() float64 {
+		seed = seed*6364136223846793005 + 1442695040888963407
+		return float64(seed>>11) / float64(1<<53)
+	}
+	for k := range 200 {
+		base := 200 + next()*20000
+		tail := 1 + next()*6
+		request := niceMiB(base * (0.8 + next()*2))
+		var jobs []Job
+		for i := range 20 + int(next()*200) {
+			peak := base * (0.7 + next()*0.4)
+			if next() < 0.06 {
+				peak *= tail
+			}
+			jobs = append(jobs, completed(int64(i+1), math.Round(peak), request, 60+next()*20000))
+		}
+		fixtures[fmt.Sprintf("random-%d", k)] = jobs
+	}
+
+	for name, jobs := range fixtures {
+		for _, w := range Analyze(jobs, Options{}).Workflows {
+			assertCurveMatchesAdvice(t, name, w)
+		}
+	}
+}
+
+// A job evicted for memory by a retry policy and then removed was never
+// held, but it still outgrew its request; the advice warns all the same.
+func TestMemoryEvictedJobWarns(t *testing.T) {
+	evicted := Job{Cluster: 99, Owner: "alice", Cmd: "/home/alice/sim", Universe: 5, QDate: 2000,
+		Status: statusRemoved, RequestMemory: f(1024), Wall: 3600, ExceededMemory: true}
+	w := onlyWorkflow(t, append(jobsAt(25, 1, 900, 1024), evicted))
+	if w.Holds.Memory != 0 {
+		t.Fatalf("holds = %+v", w.Holds)
+	}
+	a := adviceByResource(w, ResourceMemory)
+	if a == nil || a.ID != "memory-retry" || a.Severity != SeverityWarn {
+		t.Errorf("advice = %+v, want memory-retry/warn", a)
+	}
+	assertCurveMatchesAdvice(t, "evicted", w)
 }

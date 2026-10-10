@@ -1,6 +1,7 @@
 package utilization
 
 import (
+	"math"
 	"slices"
 )
 
@@ -46,9 +47,6 @@ const minRetrySaving = 0.15
 // memory.
 const headroom = 1.1
 
-// candidatePercentiles are the observed peaks a request is tried at.
-var candidatePercentiles = []float64{50, 60, 70, 75, 80, 85, 90, 95, 99}
-
 // memoryJob is one finished job as the sizing sees it.
 type memoryJob struct {
 	// peak in MiB.
@@ -89,7 +87,9 @@ type memoryPlan struct {
 	retryFraction float64
 	// p95 and maxPeak describe the peaks, for the advice text.
 	p95, maxPeak float64
-	curve        []MemoryCurvePoint
+	// exceeded counts jobs stopped for outgrowing their request.
+	exceeded int
+	curve    []MemoryCurvePoint
 }
 
 // expectedCost is the memory reserved, in MiB-hours, if every job asked
@@ -129,6 +129,9 @@ func planMemory(jobs []memoryJob) *memoryPlan {
 		peaks[i] = j.peak
 		requests[i] = j.request
 		plan.currentCost += j.request * j.wallHours
+		if j.atLeast {
+			plan.exceeded++
+		}
 	}
 	slices.Sort(peaks)
 	plan.maxPeak = peaks[len(peaks)-1]
@@ -136,28 +139,27 @@ func planMemory(jobs []memoryJob) *memoryPlan {
 	plan.typical = summarizeRequest(requests).Typical
 	plan.single = niceMiB(plan.maxPeak * headroom)
 
-	// The candidates: a request just above each of several observed
-	// peaks, the one that fits everything, and what the jobs ask for now
-	// so the curve can show where they stand.
-	seen := map[float64]bool{}
-	var candidates []float64
-	add := func(r float64) {
-		if r > 0 && !seen[r] {
-			seen[r] = true
-			candidates = append(candidates, r)
-		}
+	// The candidates: every request on a dense grid from about the
+	// smallest peaks up to the request that fits everything -- or up to
+	// what the jobs ask for now, if that is more, so the curve also shows
+	// what the over-request costs -- plus the current request itself.
+	// Dense, because the curve is how a person sees the trade-off: a
+	// handful of points plots as a straight line and hides the knee where
+	// the retries stop paying for themselves.
+	candidates := requestGrid(percentile(peaks, 5), max(plan.single, plan.typical))
+	if !slices.Contains(candidates, plan.typical) && plan.typical > 0 {
+		candidates = append(candidates, plan.typical)
+		slices.Sort(candidates)
 	}
-	for _, p := range candidatePercentiles {
-		add(niceMiB(percentile(peaks, p) * headroom))
-	}
-	add(plan.single)
-	add(plan.typical)
-	slices.Sort(candidates)
 
 	singleCost, _ := expectedCost(jobs, plan.single, 0)
 	best := -1
 	var bestCost, bestFrac float64
 	for i, r := range candidates {
+		// Below the request that fits everything, a request is always
+		// paired with a retry at that request: even where no job in the
+		// history outgrew it, the next one may, and the retry is what
+		// keeps that from being a hold.
 		retry := 0.0
 		if r < plan.single {
 			retry = plan.single
@@ -169,7 +171,7 @@ func planMemory(jobs []memoryJob) *memoryPlan {
 			RetryFraction:    round(frac, 4),
 			IsCurrent:        r == plan.typical,
 		}
-		if frac > 0 {
+		if retry > 0 {
 			point.RetryMiB = ptr(retry, 0)
 		}
 		plan.curve = append(plan.curve, point)
@@ -196,8 +198,69 @@ func planMemory(jobs []memoryJob) *memoryPlan {
 		plan.retry = plan.single
 		_, plan.retryFraction = expectedCost(jobs, plan.recommended, plan.retry)
 	}
-	for i := range plan.curve {
-		plan.curve[i].IsRecommended = plan.curve[i].RequestMiB == plan.recommended
-	}
+	plan.mark(plan.recommended)
 	return plan
+}
+
+// keepCurrent makes the jobs' current request the recommendation, for
+// when the advice is to leave it alone. The curve then marks the request
+// the advice names rather than a cheaper one the advice declined to push.
+//
+// It is only used when every job fit the current request, so no retry
+// goes with it, and the curve's point for it drops the retry it would
+// otherwise be paired with.
+func (p *memoryPlan) keepCurrent() {
+	p.recommended, p.retry = p.typical, 0
+	p.recommendedCost, p.retryFraction = p.currentCost, 0
+	for i := range p.curve {
+		if p.curve[i].RequestMiB == p.typical {
+			p.curve[i].RetryMiB = nil
+		}
+	}
+	p.mark(p.typical)
+}
+
+// mark flags the curve point at request as the recommendation.
+func (p *memoryPlan) mark(request float64) {
+	for i := range p.curve {
+		p.curve[i].IsRecommended = p.curve[i].RequestMiB == request
+	}
+}
+
+// maxCurvePoints bounds the memory curve.
+const maxCurvePoints = 40
+
+// curveSamples is how many log-spaced requests a range too wide for
+// every round value is sampled at.
+const curveSamples = 32
+
+// requestGrid is the requests memory is costed at: every round request
+// (see niceMiB) from the one just above lo through hi, or, when that is
+// more than maxCurvePoints, round requests at roughly log-spaced steps --
+// even ratios, so the curve is as detailed at 1 GB as at 20. hi is always
+// included.
+func requestGrid(lo, hi float64) []float64 {
+	hi = niceMiB(hi)
+	lo = min(niceMiB(lo), hi)
+	var grid []float64
+	for r := lo; r <= hi; r = niceMiB(r + 1) {
+		grid = append(grid, r)
+		if len(grid) > maxCurvePoints {
+			break
+		}
+	}
+	if len(grid) <= maxCurvePoints {
+		return grid
+	}
+	grid = grid[:0]
+	for k := range curveSamples {
+		r := hi
+		if k < curveSamples-1 {
+			r = min(niceMiB(lo*math.Pow(hi/lo, float64(k)/float64(curveSamples-1))), hi)
+		}
+		if len(grid) == 0 || grid[len(grid)-1] != r {
+			grid = append(grid, r)
+		}
+	}
+	return grid
 }

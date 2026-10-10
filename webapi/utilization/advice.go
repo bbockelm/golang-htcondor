@@ -125,7 +125,7 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 	}
 
 	switch {
-	case holds > 0 || plan.maxPeak > plan.typical:
+	case holds > 0 || plan.exceeded > 0 || plan.maxPeak > plan.typical:
 		// Some jobs did not fit. That is the urgent case: those jobs were
 		// held or restarted, and everything they had done was lost.
 		a.ID, a.Severity, a.Title = "memory-raise", SeverityWarn, title
@@ -151,6 +151,10 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 		a.Detail = fmt.Sprintf("%s Most jobs requested %s, close to what they need.", evidence, sizeMiB(plan.typical))
 		a.Submit = []string{}
 		a.Saves = nil
+		// Every job fits the current request (the case above catches any
+		// that did not), so it is what the curve marks: a page showing
+		// "fits" beside a different recommended point contradicts itself.
+		plan.keepCurrent()
 	}
 	return a
 }
