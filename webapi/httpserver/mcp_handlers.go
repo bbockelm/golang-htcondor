@@ -670,8 +670,15 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 
+			binding, err := h.bindLoginToBrowser(w, r)
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to bind login to browser", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
+				return
+			}
+
 			// Store authorize request for later retrieval
-			h.oauth2StateStore.Store(state, ar)
+			h.oauth2StateStore.StoreForBrowser(state, ar, "", binding)
 
 			// Build authorization URL
 			authURL := h.oauth2Config.AuthCodeURL(state)
@@ -1866,9 +1873,16 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 				return
 			}
 
+			binding, err := h.bindLoginToBrowser(w, r)
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to bind login to browser", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+				return
+			}
+
 			// Store the return URL (current device verification URL)
 			returnURL := r.URL.String()
-			h.oauth2StateStore.StoreWithUsername(state, nil, returnURL, "")
+			h.oauth2StateStore.StoreForBrowser(state, nil, returnURL, binding)
 
 			// Build authorization URL
 			authURL := h.oauth2Config.AuthCodeURL(state)
@@ -2915,7 +2929,6 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 		"exp", exp,
 		"authz", authz,
 		"scopes", scopes,
-		"signing_key_path", h.signingKeyPath,
 	)
 	// Mint via the local generator (NOT cedar's security.GenerateJWT)
 	// so we can backdate the `nbf` claim to absorb clock skew between

@@ -1168,8 +1168,7 @@ func (s *Handler) extractOrGenerateToken(r *http.Request) (string, error) {
 			// debug logging first. The "trust domain mismatch" class of
 			// errors is otherwise opaque from the server log alone.
 			s.logger.Info(logging.DestinationSecurity, "Minted JWT for session user",
-				"subject", username, "issuer", issuer, "kid", kid,
-				"signing_key_path", s.signingKeyPath)
+				"subject", username, "issuer", issuer, "kid", kid)
 			token, err := security.GenerateJWT(filepath.Dir(s.signingKeyPath), kid, username, issuer, iat, exp, nil)
 			if err != nil {
 				return "", fmt.Errorf("failed to generate token for session user %s: %w", username, err)

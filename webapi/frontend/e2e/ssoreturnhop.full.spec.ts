@@ -19,10 +19,13 @@ import { serverLog } from "./fixtures/serverlog";
 //
 // So this test makes the chain genuinely cross-site. The harness serves
 // on localhost; 127.0.0.1 reaches the same server and is a DIFFERENT
-// site as far as SameSite is concerned. Rewriting the one hop into the
-// callback to the other name reproduces production's shape exactly: a
-// chain begun cross-site, with the callback and its destination
-// same-site with each other.
+// site as far as SameSite is concerned. Running the IdP's leg under the
+// other name reproduces production's shape exactly: a chain begun
+// cross-site, with the callback and its destination same-site with each
+// other. The login itself starts on localhost, as it does in production
+// on the host the callback names: the callback accepts only the browser
+// holding the cookie set when the login began, and a cookie set on
+// 127.0.0.1 is not sent to localhost.
 //
 // Two things only a browser can check, which is why this is not just the
 // Go test again: that Strict really is applied to the chain, and that
@@ -78,26 +81,29 @@ test("the session survives coming back from a cross-site identity provider", asy
     }
   });
 
-  // Start on the OTHER name for this same server, which is what makes
-  // the chain cross-site -- and makes this test able to fail.
+  // Start on this server's own name. This sets the cookie that binds
+  // the login to this browser, and sends it to the IdP.
+  await page.goto(`${baseURL}/oauth2/device/verify?user_code=${userCode}`, {
+    waitUntil: "domcontentloaded",
+  });
+  const username = page.locator('input[name="username"]');
+  await expect(username).toBeVisible();
+
+  // Move the IdP's leg to the OTHER name for this same server, which is
+  // what makes the chain cross-site -- and makes this test able to fail.
   //
-  // The server builds its OAuth redirect_uri from the base URL it was
-  // configured with, so the IdP sends the browser to an ABSOLUTE
-  // localhost callback while the chain so far has been on 127.0.0.1.
-  // That hop is cross-site, exactly as the hop back from CILogon is. No
-  // request interception is involved: the server's own configuration
-  // produces the shape.
+  // The IdP's own redirects are relative, so from here it stays on
+  // 127.0.0.1. The server builds its OAuth redirect_uri from the base URL
+  // it was configured with, so the IdP sends the browser to an ABSOLUTE
+  // localhost callback: that hop is cross-site, exactly as the hop back
+  // from CILogon is. No request interception is involved.
   //
   // The return URL is stored as a path, so it resolves against the
   // callback's own host -- callback and destination stay same-site with
   // each other, as in production.
-  await page.goto(
-    `${otherSite(baseURL!)}/oauth2/device/verify?user_code=${userCode}`,
-    { waitUntil: "domcontentloaded" },
-  );
+  await page.goto(otherSite(page.url()), { waitUntil: "domcontentloaded" });
 
-  // The IdP form, on the original site.
-  const username = page.locator('input[name="username"]');
+  // The IdP form, on the other site.
   await expect(username).toBeVisible();
   await username.fill("admin");
   await page.locator('input[name="password"]').fill(adminPw);

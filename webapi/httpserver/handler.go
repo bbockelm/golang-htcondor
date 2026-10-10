@@ -2941,8 +2941,15 @@ func (h *Handler) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	binding, err := h.bindLoginToBrowser(w, r)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to bind login to browser", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+		return
+	}
+
 	// Store the state with the original URL (no authorize request for browser flow)
-	h.oauth2StateStore.StoreWithURL(state, nil, originalURL)
+	h.oauth2StateStore.StoreForBrowser(state, nil, originalURL, binding)
 
 	// Build authorization URL
 	authURL := h.oauth2Config.AuthCodeURL(state)

@@ -24,12 +24,16 @@ const (
 	SessionCookie    = "htcondor_session"
 	IDPSessionCookie = "idp_session"
 	IdentityCookie   = "htcondor_api_last_account"
+	// LoginCookie binds a pending SSO login to the browser that started
+	// it; a job that could read or set it could complete someone else's.
+	LoginCookie = "__Host-htcondor_login"
 )
 
 var ownCookies = map[string]bool{
 	SessionCookie:    true,
 	IDPSessionCookie: true,
 	IdentityCookie:   true,
+	LoginCookie:      true,
 }
 
 // Request headers that carry a credential or say who the caller is.
