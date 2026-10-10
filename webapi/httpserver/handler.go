@@ -329,6 +329,11 @@ type Handler struct {
 	// per-request input (authenticated actor, granted scopes, security
 	// config) travels on the context instead.
 	mcpServer *mcpserver.Server
+	// credentialSessions holds a private cedar session cache per session
+	// tag for credentials minted or forwarded for a caller, so none of
+	// them uses the process-global cache: the counterpart, keyed by
+	// grant, of cookieSessionCaches. See credential_sessions.go.
+	credentialSessions *TokenCache
 	// mcpActors caches the schedd-verified identity of forwarded
 	// HTCondor IDTOKENs presented to /mcp/message.
 	mcpActors        mcpActorCache
@@ -1139,6 +1144,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger:               logger,
 		tokenCache:           newTokenCache(cfg.TrustDomain), // Initialize token cache (includes username for rate limiting)
 		cookieSessionCaches:  newTokenCache(""),
+		credentialSessions:   newTokenCache(""),
 		streamBufferSize:     streamBufferSize,
 		streamWriteTimeout:   streamWriteTimeout,
 		metricsPublic:        cfg.MetricsPublic,

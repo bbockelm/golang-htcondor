@@ -314,11 +314,13 @@ func shortTag(tag string) string {
 // Every REST caller reaches the same schedd with the same commands, so
 // an untagged config shares one cache entry across callers.
 //
-// userTag is the username, and is set only in user-header mode: there
-// the token is regenerated per request -- new jti, new iat -- so a
-// digest of it would differ every time and no session would ever be
-// reused. Everywhere else the tag is a digest of the credential rather
-// than a claim read out of it, because a claim is attacker-chosen.
+// userTag is set only in user-header mode, where the token is
+// regenerated per request -- new jti, new iat -- so a digest of it
+// would differ every time and no session would ever be reused; it is
+// derived from what this server minted the token for (see
+// mintedCredentialSessionTag). Everywhere else the tag is a digest of
+// the credential rather than a claim read out of it, because a claim
+// is attacker-chosen.
 func sessionTagFor(userTag, credential string) string {
 	if userTag != "" {
 		return userTag

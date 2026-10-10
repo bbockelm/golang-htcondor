@@ -59,7 +59,10 @@ func (s *Handler) apiKeySecurityContext(ctx context.Context, row *apiKeyRow) (co
 		return nil, fmt.Errorf("mint IDTOKEN for %s: %w", row.Creator, err)
 	}
 
-	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, s.clientConfig, token, "", 0, "CLIENT", nil)
+	// A key's scopes never change after it is minted, so the key id
+	// fixes the authorization the tag stands for.
+	tag := apiKeySessionTag(row.KeyID)
+	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, s.clientConfig, token, "", 0, "CLIENT", s.credentialSessions.sessionCacheFor(tag))
 	if err != nil {
 		return nil, fmt.Errorf("build security config: %w", err)
 	}
@@ -69,7 +72,7 @@ func (s *Handler) apiKeySecurityContext(ctx context.Context, row *apiKeyRow) (co
 	// resume a session another key authenticated -- and run with that
 	// key's authorizations, defeating the per-key limits above. Key the
 	// tag on the key id so each key gets its own session.
-	secConfig.SecurityTag = apiKeySessionTag(row.KeyID)
+	secConfig.SecurityTag = tag
 	return htcondor.WithSecurityConfig(ctx, secConfig), nil
 }
 

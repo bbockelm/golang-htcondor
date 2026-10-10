@@ -1286,17 +1286,17 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 		// Try to extract bearer token to see if this is a real JWT
 		_, bearerErr := extractBearerToken(r)
 		if bearerErr != nil {
-			// No bearer token, so we generated one from user header.
-			// In user header mode, tokens are regenerated per request
-			// (new jti, iat), so the token cannot be the cache key: use
-			// the global cache, tagged with the user so one caller's
-			// sessions are not reachable by another's request. cedar
-			// keys the global cache by {SecurityTag, address, command}
-			// and, with no tag, by {address, command} alone — which
-			// every user of this mode would share.
-			sessionTag = r.Header.Get(s.userHeader)
-			sessionCache = nil // nil means use global cache
-			s.logger.Debug(logging.DestinationSecurity, "Using global session cache for user header mode", "username", sessionTag)
+			// No bearer token, so extractOrGenerateToken minted one --
+			// for the session cookie's user if there is one, otherwise
+			// the header's. Tokens are regenerated per request (new jti,
+			// iat), so the token itself cannot be the key. Key on what
+			// it was minted for, read back from the token: the header
+			// names the wrong user whenever a cookie supplied the
+			// identity. The cache is private to that key, never the
+			// global one, which also holds this daemon's own sessions.
+			sessionTag = mintedCredentialSessionTag("rest", token)
+			sessionCache = s.credentialSessions.sessionCacheFor(sessionTag)
+			s.logger.Debug(logging.DestinationSecurity, "Using private session cache for user header mode", "security_tag", shortTag(sessionTag))
 		} else {
 			// Real bearer token provided even though user header is configured
 			// Use per-token cache
@@ -1452,13 +1452,14 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// has tagged for this reason for a while; this is the same tag on
 	// the same cache.
 	//
-	// In user-header mode the tag is the username, because the token is
-	// regenerated per request -- new jti, new iat -- so a digest of it
-	// would differ every time and no session would ever be reused.
-	// Everywhere else the tag is a digest of the credential rather than
-	// a claim read out of it: a claim is attacker-chosen, and a forged
-	// one would select somebody else's session, which is the thing
-	// being prevented.
+	// In user-header mode the token is regenerated per request -- new
+	// jti, new iat -- so a digest of it would differ every time and no
+	// session would ever be reused; the tag is derived instead from the
+	// identity and authorization this server minted it with. Everywhere
+	// else the tag is a digest of the credential rather than a claim read
+	// out of it: a claim is attacker-chosen, and a forged one would
+	// select somebody else's session, which is the thing being
+	// prevented.
 	secConfig.SecurityTag = sessionTagFor(sessionTag, condorCredential)
 	if privateUserCache {
 		// The cache holds only this user's sessions, so there is nothing
@@ -1478,7 +1479,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 			"path", r.URL.Path,
 			"credential", describeCredentialSubject(condorCredential),
 			"security_tag", shortTag(secConfig.SecurityTag),
-			"session_cache", map[bool]string{true: "per-token", false: "global"}[sessionCache != nil])
+			"session_cache", map[bool]string{true: "private", false: "global"}[sessionCache != nil])
 	}
 
 	// Extract username for rate limiting - only use from tokens that have been cached (validated)

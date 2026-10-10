@@ -170,6 +170,9 @@ type ScheddACLOracle struct {
 	// Config is the HTCondor configuration the probe's security config is
 	// built from; nil is the process-wide default.
 	Config *config.Config
+	// Sessions holds the probe's cedar session caches. Nil gives each
+	// probe a fresh cache; it never uses the process-global one.
+	Sessions *TokenCache
 }
 
 // Name implements RevocationOracle.
@@ -208,14 +211,16 @@ func (o *ScheddACLOracle) Check(ctx context.Context, username string, scopes []s
 	if err != nil {
 		return ReauthDecision{}, fmt.Errorf("minting probe token for %s: %w", username, err)
 	}
-	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, o.Config, probeToken, "", 0, "CLIENT", nil)
+	// Keep probe sessions out of the MCP data path's session cache: these
+	// are negotiated with an AuthCommand set and should not be resumed for
+	// ordinary schedd traffic. The tag is derived from the probe token's
+	// grant, not the bare username, and the cache is private.
+	tag := mintedCredentialSessionTag("authz-probe", probeToken)
+	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, o.Config, probeToken, "", 0, "CLIENT", o.Sessions.sessionCacheFor(tag))
 	if err != nil {
 		return ReauthDecision{}, fmt.Errorf("building probe security config: %w", err)
 	}
-	// Keep probe sessions out of the MCP data path's session cache: these
-	// are negotiated with an AuthCommand set and should not be resumed for
-	// ordinary schedd traffic.
-	secConfig.SecurityTag = "authz-probe:" + username
+	secConfig.SecurityTag = tag
 
 	ctx, cancel := context.WithTimeout(ctx, oracleTimeout)
 	defer cancel()
@@ -394,6 +399,7 @@ func (h *Handler) buildRevocationOracles(names []string) []RevocationOracle {
 				Logger:    h.logger,
 				MintToken: h.generateHTCondorTokenWithScopes,
 				Config:    h.clientConfig,
+				Sessions:  h.credentialSessions,
 			})
 		default:
 			h.logger.Warn(logging.DestinationHTTP,
