@@ -25,6 +25,21 @@ type APInfo struct {
 	// Hub is the hub's state for the AP; state "absent" when the hub
 	// does not hold it.
 	Hub APHubState `json:"hub"`
+	// Trust is whether the AP accepts this server's tokens, from the
+	// registry's trust probe.
+	Trust APTrust `json:"trust"`
+}
+
+// APTrust is the trust probe's view of one AP.
+type APTrust struct {
+	// State is "trusted", "untrusted" or "unknown" (not probed yet, or
+	// the AP did not answer the probe).
+	State     string `json:"state"`
+	Reason    string `json:"reason,omitempty"`
+	CheckedAt string `json:"checked_at,omitempty"`
+	// Actions is whether actions on the AP's jobs are attempted now:
+	// false when it is untrusted or not advertised in the collector.
+	Actions bool `json:"actions"`
 }
 
 func rfc3339(t time.Time) string {
@@ -44,6 +59,12 @@ func (s *Service) APs() []APInfo {
 			Schedd: m.Name, InCollector: m.Present, Address: m.Address,
 			FirstSeen: rfc3339(m.FirstSeen), LastSeen: rfc3339(m.LastSeen),
 		}
+		state := m.Trust.State
+		if state == "" {
+			state = "unknown"
+		}
+		info.Trust = APTrust{State: state, Reason: m.Trust.Reason, CheckedAt: rfc3339(m.Trust.CheckedAt),
+			Actions: m.Present && !m.Untrusted() && m.Schedd != nil}
 		src, ok := s.Hub.Source(m.Name)
 		switch {
 		case ok:

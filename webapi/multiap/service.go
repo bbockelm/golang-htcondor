@@ -88,9 +88,15 @@ type Service struct {
 type Error struct {
 	Status int
 	Msg    string
-	// Candidates is set on an ambiguous incomplete job id (409).
+	// Reason is a machine-readable cause (Reason* constants), when one
+	// applies.
+	Reason string
+	// Candidates is set on an ambiguous incomplete job id (409), and on
+	// an incomplete one given to a mutation (400).
 	Candidates []JobRef
 }
+
+func asError(err error, target **Error) bool { return errors.As(err, target) }
 
 func (e *Error) Error() string { return e.Msg }
 
@@ -176,6 +182,16 @@ func (s *Service) snapshot() view {
 		v.members[key] = m
 		v.sources.APs++
 		src, ok := s.Hub.Source(m.Name)
+		if m.Untrusted() {
+			// The hub's copy may well be current, and reads still serve
+			// it; but nothing can be done on this AP, and a caller
+			// looking at its jobs must be told that.
+			v.fresh[key] = ok && src.State == StateFresh
+			v.sources.Degraded = append(v.sources.Degraded, Degraded{
+				Schedd: m.Name, State: StateUntrusted, Reason: untrustedReason(m),
+			})
+			continue
+		}
 		switch {
 		case ok && src.State == StateFresh:
 			v.fresh[key] = true
@@ -202,6 +218,15 @@ func (s *Service) snapshot() view {
 		}
 	}
 	return v
+}
+
+// untrustedReason is the sources-block reason for an AP that failed its
+// trust probe.
+func untrustedReason(m apregistry.Member) string {
+	if m.Trust.Reason == "" {
+		return untrustedMessage
+	}
+	return untrustedMessage + ": " + m.Trust.Reason
 }
 
 // Sources reports the AP set's freshness, for a response that serves no
