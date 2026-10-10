@@ -91,6 +91,9 @@ type multiAPMode struct {
 	queueSuperUser func(ap, actor string) bool
 	// bulkFresh is HTTP_API_BULK_FRESH_SECONDS.
 	bulkFresh time.Duration
+	// observeBulkLeg, when set, sees the AP and scoped constraint of each
+	// bulk leg before it runs. Tests only.
+	observeBulkLeg func(ap, constraint string)
 }
 
 // DefaultBulkFresh is HTTP_API_BULK_FRESH_SECONDS's default.
@@ -347,6 +350,10 @@ func multiAPAllowed(method, path string) bool {
 		return true
 	}
 	read := method == http.MethodGet || method == http.MethodHead
+	if path == "/api/v1/jobs" && (method == http.MethodDelete || method == http.MethodPatch) {
+		// Bulk remove and edit fan out to every member.
+		return true
+	}
 	if multiAPReadPaths[path] {
 		return read
 	}
@@ -363,8 +370,8 @@ func multiAPAllowed(method, path string) bool {
 			return !multiAPJobSubroutes[first] && first != "hold" && first != "release" &&
 				multiAPJobActionAllowed(method, rest)
 		case first == "hold" || first == "release":
-			// Bulk hold and release: not yet.
-			return false
+			// Bulk hold and release.
+			return method == http.MethodPost
 		case multiAPJobSubroutes[first]:
 			return false
 		}

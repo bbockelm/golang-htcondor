@@ -136,7 +136,7 @@ func (h *Handler) handleMultiJobByID(w http.ResponseWriter, r *http.Request, par
 				h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 				return
 			}
-			h.refuseMultiAP(w, r)
+			h.handleMultiBulkAction(w, r, first)
 			return
 		}
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {

@@ -185,8 +185,16 @@ func (s *Handler) handleJobs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleSubmitJob(w, r)
 	case http.MethodDelete:
+		if s.multi != nil {
+			s.handleMultiBulkDelete(w, r)
+			return
+		}
 		s.handleBulkDeleteJobs(w, r)
 	case http.MethodPatch:
+		if s.multi != nil {
+			s.handleMultiBulkEdit(w, r)
+			return
+		}
 		s.handleBulkEditJobs(w, r)
 	default:
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
