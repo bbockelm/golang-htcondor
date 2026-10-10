@@ -96,6 +96,12 @@ func TestCollectorQueryIntegration(t *testing.T) {
 		}
 	})
 
+	// The harness waits for the collector and schedd only; the startd
+	// advertises later.
+	if err := harness.WaitForStartd(60 * time.Second); err != nil {
+		t.Fatalf("Startd never advertised: %v", err)
+	}
+
 	// Test 3: Query for startd daemon ads
 	t.Run("QueryStartdAd", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -107,7 +113,7 @@ func TestCollectorQueryIntegration(t *testing.T) {
 		}
 
 		if len(ads) == 0 {
-			t.Skip("No startd ads found - startd may not have started successfully")
+			t.Fatal("Expected at least one startd ad, got none")
 		}
 
 		t.Logf("Found %d startd ad(s)", len(ads))
@@ -151,7 +157,7 @@ func TestCollectorQueryIntegration(t *testing.T) {
 		}
 
 		if len(ads) == 0 {
-			t.Skip("No startd ads found - startd may not have started successfully")
+			t.Fatal("Expected at least one machine matching Cpus >= 1, got none")
 		}
 
 		t.Logf("Found %d machine(s) matching constraint", len(ads))

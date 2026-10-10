@@ -18,18 +18,6 @@ func TestNewCollector(t *testing.T) {
 	}
 }
 
-func TestCollectorQueryAds(t *testing.T) {
-	t.Skip("Skipping integration test - requires live collector")
-	collector := NewCollector("collector.example.com:9618")
-	ctx := context.Background()
-
-	// This would require a live collector to test
-	_, err := collector.QueryAds(ctx, "ScheddAd", "")
-	if err != nil {
-		t.Logf("Query failed (expected without live collector): %v", err)
-	}
-}
-
 func TestCollectorAdvertise(t *testing.T) {
 	// This test verifies that Advertise can be called with valid parameters
 	// It won't succeed without a real collector, but should not panic
