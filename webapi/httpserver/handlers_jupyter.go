@@ -1550,5 +1550,5 @@ func (s *Handler) handleJupyterProxy(w http.ResponseWriter, r *http.Request, id,
 		return
 	}
 
-	reg.Proxy(inst, upstreamPath, w, r)
+	reg.Proxy(inst, upstreamPath, w, r, s.jobProxyScrubber())
 }

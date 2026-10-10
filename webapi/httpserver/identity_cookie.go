@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
 )
 
 // The identity cookie remembers which local account a subject mapped to
@@ -48,7 +50,7 @@ import (
 // complete index, and accepting only cookies we issued, means the
 // ambiguity question was answered when the cookie was minted.
 const (
-	identityCookieName = "htcondor_api_last_account"
+	identityCookieName = proxyscrub.IdentityCookie
 
 	// Long enough to span the restarts and redeploys this exists for,
 	// short enough that "it was unambiguous when issued" is a claim about

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
 	"github.com/ory/fosite"
 )
 
@@ -175,7 +176,7 @@ func (h *Handler) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Store session ID in cookie
 	http.SetCookie(w, &http.Cookie{
-		Name:     "idp_session",
+		Name:     proxyscrub.IDPSessionCookie,
 		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
@@ -214,7 +215,7 @@ func (h *Handler) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Check if user is authenticated via session cookie
-	cookie, err := r.Cookie("idp_session")
+	cookie, err := r.Cookie(proxyscrub.IDPSessionCookie)
 	if err != nil || cookie.Value == "" {
 		// User not authenticated, redirect to login with return URL
 		loginURL := "/idp/login?redirect_uri=" + url.QueryEscape(r.URL.String())
@@ -235,7 +236,7 @@ func (h *Handler) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 		// Session not found or expired
 		// Clear invalid cookie
 		http.SetCookie(w, &http.Cookie{
-			Name:     "idp_session",
+			Name:     proxyscrub.IDPSessionCookie,
 			Value:    "",
 			Path:     "/",
 			MaxAge:   -1,
@@ -261,7 +262,7 @@ func (h *Handler) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn(logging.DestinationHTTP, "User from session cookie not found in DB", "username", username)
 		// Clear invalid cookie
 		http.SetCookie(w, &http.Cookie{
-			Name:     "idp_session",
+			Name:     proxyscrub.IDPSessionCookie,
 			Value:    "",
 			Path:     "/",
 			MaxAge:   -1,

@@ -15,6 +15,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
+
+	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
 )
 
 // defaultYamuxConfig returns a yamux config with logging silenced. yamux
@@ -588,9 +590,10 @@ func (r *Registry) CloseInstance(id string) {
 // full browser-facing path (/api/v1/jupyter/.../proxy/lab) so it lines
 // up with Jupyter's --ServerApp.base_url; stripping the prefix here
 // would make Jupyter 404 on its own self-generated URLs. Headers and
-// method are forwarded as-is. WebSocket upgrades are handled by Go's
-// httputil.ReverseProxy automatically (since Go 1.20+).
-func (r *Registry) Proxy(inst *Instance, upstreamPath string, w http.ResponseWriter, req *http.Request) {
+// method are forwarded as-is, less this server's credentials, which scrub
+// removes (nil removes the fixed set). WebSocket upgrades are handled by
+// Go's httputil.ReverseProxy automatically (since Go 1.20+).
+func (r *Registry) Proxy(inst *Instance, upstreamPath string, w http.ResponseWriter, req *http.Request, scrub *proxyscrub.Scrubber) {
 	inst.mu.Lock()
 	tun := inst.tunnel
 	inst.mu.Unlock()
@@ -641,6 +644,9 @@ func (r *Registry) Proxy(inst *Instance, upstreamPath string, w http.ResponseWri
 		Director: func(r *http.Request) {
 			r.URL = &target
 			r.Host = target.Host
+			// The caller's session and bearer stop here: whatever the
+			// notebook runs could read them and act as the caller.
+			scrub.Request(r)
 			// Do NOT strip Connection here. httputil.ReverseProxy
 			// (Go ≥1.13) already removes hop-by-hop headers per
 			// RFC 7230 in its own outbound code path. More importantly,
@@ -652,7 +658,8 @@ func (r *Registry) Proxy(inst *Instance, upstreamPath string, w http.ResponseWri
 			// WebSocket attempt into a plain GET that Jupyter rejected
 			// with 400.
 		},
-		Transport: &yamuxRoundTripper{session: tun},
+		ModifyResponse: scrub.Response,
+		Transport:      &yamuxRoundTripper{session: tun},
 		// Allow long-lived websocket / SSE connections (Jupyter kernels).
 		FlushInterval: 100 * time.Millisecond,
 	}
