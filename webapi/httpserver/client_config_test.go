@@ -81,7 +81,7 @@ func TestFindCreddAddressFileUsesServerConfig(t *testing.T) {
 
 // newPoolTokenDaemon starts a CEDAR server for trust domain "pool.example"
 // that accepts only TOKEN, verified with the pool signing key in keyDir,
-// and answers DC_NOP.
+// and answers DC_NOP and DC_NOP_READ.
 func newPoolTokenDaemon(t *testing.T, keyDir string) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0") //nolint:noctx // test-only loopback listener
@@ -98,7 +98,11 @@ func newPoolTokenDaemon(t *testing.T, keyDir string) string {
 		TokenPoolSigningKeyFile: filepath.Join(keyDir, "POOL"),
 		SessionCache:            security.NewSessionCache(),
 	})
-	srv.Handle(int(commands.DC_NOP), func(context.Context, *cedarserver.Conn) error { return nil }, "READ")
+	nop := func(context.Context, *cedarserver.Conn) error { return nil }
+	srv.Handle(int(commands.DC_NOP), nop, "READ")
+	// The identity ping (pingAsCaller) sends DC_NOP_READ, which DaemonCore
+	// registers at READ; an unregistered command is refused CMD_NOT_FOUND.
+	srv.Handle(int(commands.DC_NOP_READ), nop, "READ")
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Serve(ctx, ln) }()
 	t.Cleanup(func() { cancel(); _ = ln.Close() })
