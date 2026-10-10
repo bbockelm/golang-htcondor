@@ -7,6 +7,8 @@ import type {
   UtilResourceSummary,
   UtilSample,
   UtilWorkflow,
+  UtilShape,
+  UtilThroughput,
   UtilizationResponse,
 } from './utilization';
 
@@ -399,6 +401,7 @@ function buildWorkflow(spec: WorkflowSpec): UtilWorkflow {
     }),
     batches: batches.slice(-50),
     samples,
+    throughput: null, // filled in by withThroughput
   };
 }
 
@@ -642,8 +645,112 @@ function combine(ws: UtilWorkflow[]): UtilResourceSummary[] {
   return [...by.values()];
 }
 
+// --- Throughput ---
+//
+// A pool of two machine types, and for each workflow the shape its advice
+// leads to, how long its jobs waited, and how long its last batch took.
+// The arithmetic follows the contract: copies of a shape per machine,
+// gain = fit ratio with reruns charged against the suggestion.
+
+const CPU_MACHINE: UtilShape = { cpus: 32, memory_mib: 128 * MIB_PER_GIB, disk_kib: 500 * KIB_PER_GIB, gpus: 0 };
+const GPU_MACHINE: UtilShape = { cpus: 64, memory_mib: 512 * MIB_PER_GIB, disk_kib: 2000 * KIB_PER_GIB, gpus: 4 };
+
+interface ThroughputSpec {
+  suggested: (w: UtilWorkflow) => Partial<UtilShape>;
+  waitP50: number; // seconds
+  lastBatchHours: number;
+}
+
+const THROUGHPUT: Record<string, ThroughputSpec> = {
+  'wf-blast': {
+    suggested: (w) => ({ memory_mib: w.memory_curve.find((p) => p.is_recommended)?.request_mib, disk_kib: 3 * KIB_PER_GIB }),
+    waitP50: 2.5 * 3600,
+    lastBatchHours: 14,
+  },
+  // Started within minutes: the estimate frees the pool, it does not
+  // speed these jobs up.
+  'wf-train': { suggested: () => ({ cpus: 3 }), waitP50: 4 * 60, lastBatchHours: 9 },
+  // Raising memory: fewer run at once.
+  'wf-assemble': {
+    suggested: (w) => ({ memory_mib: w.memory_curve.find((p) => p.is_recommended)?.request_mib, disk_kib: 10 * KIB_PER_GIB }),
+    waitP50: 40 * 60,
+    lastBatchHours: 6,
+  },
+};
+
+function fit(shape: UtilShape, m: UtilShape): { n: number; by: UtilThroughput['limited_by'] } {
+  const caps: [UtilThroughput['limited_by'], number][] = [
+    ['cpu', m.cpus / shape.cpus],
+    ['memory', m.memory_mib / shape.memory_mib],
+    ['disk', m.disk_kib / shape.disk_kib],
+  ];
+  if (shape.gpus > 0) caps.push(['gpu', m.gpus / shape.gpus]);
+  caps.sort((a, b) => a[1] - b[1]);
+  return { n: Math.floor(caps[0][1]), by: caps[0][0] };
+}
+
+function withThroughput(w: UtilWorkflow): UtilWorkflow {
+  const spec = THROUGHPUT[w.key];
+  if (!spec || !w.memory.request || !w.cpu.request || !w.disk.request) return w;
+  const current: UtilShape = {
+    cpus: w.cpu.request.typical,
+    memory_mib: w.memory.request.typical,
+    disk_kib: w.disk.request.typical,
+    gpus: w.gpu?.request?.typical ?? 0,
+  };
+  const over = spec.suggested(w);
+  const suggested: UtilShape = {
+    cpus: over.cpus ?? current.cpus,
+    memory_mib: over.memory_mib ?? current.memory_mib,
+    disk_kib: over.disk_kib ?? current.disk_kib,
+    gpus: current.gpus,
+  };
+  const machine = current.gpus > 0 ? GPU_MACHINE : CPU_MACHINE;
+  const fc = fit(current, machine);
+  const fs = fit(suggested, machine);
+  const at = w.memory_curve.find((p) => p.request_mib === suggested.memory_mib);
+  const reruns = at?.retry_fraction ?? 0;
+  const gain = fs.n / fc.n / (1 + reruns);
+  const batch = [...w.batches].reverse().find((b) => b.jobs >= 20);
+  const elapsed = spec.lastBatchHours * 3600;
+  return {
+    ...w,
+    throughput: {
+      current,
+      suggested,
+      retry_memory_mib: at?.retry_mib ?? null,
+      fit_current: fc.n,
+      fit_suggested: fs.n,
+      gain,
+      limited_by: fc.by,
+      wait_p50: spec.waitP50,
+      slots_limited: spec.waitP50 >= 900,
+      last_batch: batch
+        ? { id: batch.id, jobs: batch.jobs, elapsed, estimated: Math.max(w.wall?.max ?? 0, elapsed / gain) }
+        : null,
+    },
+  };
+}
+
+// throughputGain is the pool-wide figure: occupancy per unit of work,
+// summed, before over after. Workflows with no estimate count the same
+// on both sides.
+function throughputGain(ws: UtilWorkflow[]): number | null {
+  let before = 0;
+  let after = 0;
+  for (const w of ws) {
+    const t = w.throughput;
+    const occ = t ? w.wall_hours / t.fit_current : w.wall_hours / 32;
+    before += occ;
+    after += t ? occ / t.gain : occ;
+  }
+  return after > 0 ? before / after : null;
+}
+
 export function buildUtilizationFixture(): UtilizationResponse {
-  const workflows = SPECS.map(buildWorkflow).sort((a, b) => b.wall_hours - a.wall_hours);
+  const workflows = SPECS.map(buildWorkflow)
+    .map(withThroughput)
+    .sort((a, b) => b.wall_hours - a.wall_hours);
   const jobs = workflows.reduce((a, w) => a + w.jobs, 0);
   const wallHours = workflows.reduce((a, w) => a + w.wall_hours, 0);
   // Failed runs' whole wall time plus the part of restarted runs that was
@@ -663,6 +770,7 @@ export function buildUtilizationFixture(): UtilizationResponse {
       wall_hours: wallHours,
       badput_hours: badput,
       resources: combine(workflows),
+      throughput_gain: throughputGain(workflows),
     },
     workflows,
   };

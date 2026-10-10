@@ -1,12 +1,14 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { UtilAdvice, UtilMemoryCurvePoint, UtilWorkflow } from '@/lib/utilization';
+import type { UtilAdvice, UtilMemoryCurvePoint, UtilThroughput, UtilWorkflow } from '@/lib/utilization';
 import { utilizationFixture } from '@/lib/utilization.fixture';
 import {
   AdviceCard,
   EmptyState,
   ResourceCard,
   Suggestions,
+  ThroughputHeadline,
+  ThroughputLead,
   TruncatedNotice,
   WorkflowDetail,
   WorkflowsTable,
@@ -291,5 +293,99 @@ describe('mergeBins', () => {
   it('keeps the jobs past the suggested request in bars of their own', () => {
     const out = mergeBins(bins, 25, 20);
     expect(out.map((b) => [b.lo, b.hi])).toEqual([[0, 20], [20, 50], [50, 60]]);
+  });
+});
+
+describe('throughput', () => {
+  const t: UtilThroughput = {
+    current: { cpus: 1, memory_mib: 8192, disk_kib: 1024 * 1024, gpus: 0 },
+    suggested: { cpus: 1, memory_mib: 2048, disk_kib: 1024 * 1024, gpus: 0 },
+    retry_memory_mib: null,
+    fit_current: 16,
+    fit_suggested: 32,
+    gain: 2.1,
+    limited_by: 'memory',
+    wait_p50: 2 * 3600,
+    slots_limited: true,
+    last_batch: { id: 1, jobs: 300, elapsed: 14 * 3600, estimated: 6 * 3600 },
+  };
+
+  it('leads the headline with the pool-wide gain, with its one reading aid', () => {
+    render(<ThroughputHeadline gain={1.84} />);
+    expect(screen.getByTestId('throughput-headline')).toHaveTextContent(
+      'With all of these changes: up to 1.8× as many jobs running at once.',
+    );
+    expect(screen.getByText('Estimated from the machines currently in the pool.')).toBeInTheDocument();
+  });
+
+  it('hides a pool-wide gain below 1.1×, and a missing one', () => {
+    const { container, rerender } = render(<ThroughputHeadline gain={1.07} />);
+    expect(container).toBeEmptyDOMElement();
+    rerender(<ThroughputHeadline gain={null} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('puts the multiplier on a request-changing card when slots limited the jobs', () => {
+    render(<AdviceCard advice={advice({})} throughput={t} />);
+    expect(screen.getByTestId('advice-throughput')).toHaveTextContent('Up to 2.1× as many of these jobs could run at once.');
+  });
+
+  it('claims nothing on the card when the jobs started promptly', () => {
+    render(<AdviceCard advice={advice({})} throughput={{ ...t, slots_limited: false, wait_p50: 300 }} />);
+    expect(screen.queryByTestId('advice-throughput')).not.toBeInTheDocument();
+    expect(screen.queryByText(/×/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the line off cards that change no request', () => {
+    render(<AdviceCard advice={advice({ resource: 'runtime', submit: [] })} throughput={t} />);
+    expect(screen.queryByTestId('advice-throughput')).not.toBeInTheDocument();
+  });
+
+  it('states a loss plainly on the card', () => {
+    render(
+      <AdviceCard
+        advice={advice({ resource: 'cpu', submit: ['request_cpus = 4'] })}
+        throughput={{ ...t, suggested: { ...t.current, cpus: 4 }, gain: 0.6 }}
+      />,
+    );
+    expect(screen.getByTestId('advice-throughput')).toHaveTextContent('fewer run at once (0.6×)');
+  });
+
+  it('opens a workflow with the gain and what it would have meant for the last batch', () => {
+    render(<ThroughputLead throughput={t} />);
+    const lead = screen.getByTestId('throughput-lead');
+    expect(lead).toHaveTextContent('Up to 2.1× as many of these jobs could run at once.');
+    expect(lead).toHaveTextContent(
+      'Your last batch of 300 jobs took 14 h from submission to the last result; with these settings, about 6 h.',
+    );
+  });
+
+  it('opens a promptly-started workflow with what the change is for instead', () => {
+    render(<ThroughputLead throughput={{ ...t, slots_limited: false, wait_p50: 420 }} />);
+    expect(screen.getByTestId('throughput-lead')).toHaveTextContent(
+      'Your jobs started within 7 minutes, so this mainly frees the pool for others.',
+    );
+  });
+
+  it('has no lead without an estimate', () => {
+    const { container } = render(<ThroughputLead throughput={null} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('sorts the workflows table by throughput, blanks last', () => {
+    const ws = [
+      workflow({ key: 'a', name: 'alpha', throughput: { ...t, gain: 1.5 } }),
+      workflow({ key: 'b', name: 'beta', throughput: null }),
+      workflow({ key: 'c', name: 'gamma', throughput: { ...t, gain: 3.2 } }),
+      workflow({ key: 'd', name: 'delta', throughput: { ...t, gain: 4, slots_limited: false } }),
+    ];
+    render(<WorkflowsTable workflows={ws} hrefFor={hrefFor} onOpen={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /Throughput/ }));
+    const names = () => screen.getAllByRole('row').slice(1).map((r) => r.getAttribute('aria-label')?.split(':')[0]);
+    expect(names().slice(0, 2)).toEqual(['alpha', 'gamma']);
+    fireEvent.click(screen.getByRole('button', { name: /Throughput/ }));
+    expect(names().slice(0, 2)).toEqual(['gamma', 'alpha']);
+    const cells = screen.getAllByTestId('throughput-cell').map((c) => c.textContent);
+    expect(cells).toEqual(['up to 3.2×', 'up to 1.5×', '', '']);
   });
 });

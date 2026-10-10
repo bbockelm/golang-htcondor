@@ -25,6 +25,9 @@ export interface UtilOverall {
   wall_hours: number; // Σ RemoteWallClockTime / 3600
   badput_hours: number; // wall spent on runs that did not count: failed exits + evicted/restarted runs
   resources: UtilResourceSummary[]; // cpu, memory, disk always; gpu only if any job requested GPUs
+  // All workflows together: Σ occupancy_current / Σ occupancy_suggested
+  // (unchanged workflows count in both sums).
+  throughput_gain: number | null;
 }
 
 // Time-weighted: "of what you reserved, how much did you use".
@@ -125,6 +128,37 @@ export interface UtilWorkflow {
   advice: UtilAdvice[];
   batches: UtilBatchPoint[];
   samples: UtilSample[];
+  // null: no advice changes the request, n < 20, or no pool data (multi-AP)
+  throughput: UtilThroughput | null;
+}
+
+export interface UtilShape {
+  cpus: number;
+  memory_mib: number;
+  disk_kib: number;
+  gpus: number;
+}
+
+export interface UtilThroughput {
+  current: UtilShape; // the workflow's typical request
+  suggested: UtilShape; // the same with every request-changing advice applied (memory, cpus, disk)
+  retry_memory_mib: number | null; // the suggested retry_request_memory, if any
+  // How many copies of each shape the execute machines in the pool could hold at once.
+  fit_current: number;
+  fit_suggested: number;
+  // Up-to estimate of how many more of these jobs could run at once:
+  // pool occupancy per unit of work, current / suggested, reruns included.
+  gain: number;
+  limited_by: 'cpu' | 'memory' | 'disk' | 'gpu'; // the resource that caps the CURRENT shape on most machines
+  wait_p50: number; // seconds, median wait from submission to first start
+  slots_limited: boolean; // wait_p50 >= 900
+  // The most recent batch with >= 20 jobs, to turn the gain into time.
+  last_batch: {
+    id: number;
+    jobs: number;
+    elapsed: number; // seconds, first QDate -> last CompletionDate
+    estimated: number; // seconds, max(longest job wall, elapsed / gain)
+  } | null;
 }
 
 export type UtilDays = 1 | 7 | 30;
@@ -404,4 +438,141 @@ export function fitRatio(w: UtilWorkflow, r: Exclude<UtilResource, 'gpu'>): numb
   const { request, dist } = workflowUse(w, r);
   if (!request || !dist || !(request.typical > 0)) return undefined;
   return dist.p50 / request.typical;
+}
+
+// --- Throughput ---
+
+// THROUGHPUT_SHOWN is the smallest gain worth a headline: below it the
+// estimate is inside its own error and "1.0x as many" says nothing.
+export const THROUGHPUT_SHOWN = 1.1;
+
+/** formatGain renders a multiplier to one decimal: "2.1×". */
+export function formatGain(g: number): string {
+  return `${g.toLocaleString('en-US', { maximumFractionDigits: 1, minimumFractionDigits: 1 })}×`;
+}
+
+/**
+ * formatDuration renders an elapsed time at the precision a reader plans
+ * with: minutes under an hour and a half, hours under two days (one
+ * decimal below ten), days beyond.
+ */
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  const min = seconds / 60;
+  if (min < 90) {
+    const m = Math.max(1, Math.round(min));
+    return `${m} min`;
+  }
+  const h = seconds / 3600;
+  if (h < 48) return `${fixed(h, h < 10 ? 1 : 0)} h`;
+  const d = h / 24;
+  return `${fixed(d, d < 10 ? 1 : 0)} days`;
+}
+
+// waitPhrase says how soon jobs started: "within a minute", "within 4 minutes".
+function waitPhrase(seconds: number): string {
+  if (seconds < 60) return 'within a minute';
+  const m = Math.round(seconds / 60);
+  return `within ${m} minute${m === 1 ? '' : 's'}`;
+}
+
+// raisedNoun names what a gain below one comes from: the request that
+// went up between the current shape and the suggested one.
+function raisedNoun(t: UtilThroughput): string {
+  if (t.suggested.cpus > t.current.cpus) return 'cores';
+  if (t.suggested.memory_mib > t.current.memory_mib) return 'memory';
+  if (t.suggested.disk_kib > t.current.disk_kib) return 'disk';
+  return 'resources';
+}
+
+export interface ThroughputStatement {
+  kind: 'gain' | 'loss' | 'unlimited';
+  // The one line for a suggestion card and the lead of a workflow's page.
+  line: string;
+  // Only for a gain with a recent batch to measure it against.
+  batch?: string;
+}
+
+/**
+ * throughputStatement turns a workflow's throughput estimate into what
+ * to tell the user, or null when there is nothing worth saying.
+ *
+ * The multiplier is only claimed when slots limited the workflow: jobs
+ * that started within minutes would not have finished sooner with a
+ * smaller request, and promising "2x faster" to them would be false.
+ */
+export function throughputStatement(t: UtilThroughput | null | undefined): ThroughputStatement | null {
+  if (!t) return null;
+  const loss = t.gain < 0.95;
+  if (!t.slots_limited) {
+    const wait = waitPhrase(t.wait_p50);
+    return {
+      kind: 'unlimited',
+      line: loss
+        ? `Your jobs started ${wait}, so requesting the ${raisedNoun(t)} they use should cost little waiting.`
+        : `Your jobs started ${wait}, so this mainly frees the pool for others.`,
+    };
+  }
+  if (loss) {
+    const noun = raisedNoun(t);
+    return {
+      kind: 'loss',
+      line: `Requesting the ${noun} your jobs use means fewer run at once (${formatGain(t.gain)}), but each job stops competing for ${noun} it didn't ask for.`,
+    };
+  }
+  if (t.gain < THROUGHPUT_SHOWN) return null;
+  const out: ThroughputStatement = {
+    kind: 'gain',
+    line: `Up to ${formatGain(t.gain)} as many of these jobs could run at once.`,
+  };
+  const b = t.last_batch;
+  if (b && b.estimated < b.elapsed) {
+    out.batch =
+      `Your last batch of ${b.jobs.toLocaleString('en-US')} jobs took ${formatDuration(b.elapsed)} ` +
+      `from submission to the last result; with these settings, about ${formatDuration(b.estimated)}.`;
+  }
+  return out;
+}
+
+/**
+ * throughputColumn is the workflows table's figure: the multiplier when
+ * it may be claimed, nothing otherwise.
+ */
+export function throughputColumn(w: UtilWorkflow): number | undefined {
+  const t = w.throughput;
+  if (!t || !t.slots_limited) return undefined;
+  if (t.gain >= 0.95 && t.gain < THROUGHPUT_SHOWN) return undefined;
+  return t.gain;
+}
+
+/**
+ * throughputAdviceId picks the one suggestion card that carries the
+ * workflow's throughput line. The estimate is for every change together,
+ * so repeating it on each card would credit the disk suggestion with what
+ * the memory one does. A gain goes on the change to the resource that
+ * caps how many jobs fit now; a loss on the change that raises a request.
+ */
+export function throughputAdviceId(w: UtilWorkflow): string | null {
+  const t = w.throughput;
+  if (!t) return null;
+  const cards = w.advice.filter(changesRequest);
+  if (cards.length === 0) return null;
+  const byResource = (r: string) => cards.find((a) => a.resource === r);
+  if (t.gain < 0.95) {
+    const raised =
+      t.suggested.cpus > t.current.cpus
+        ? 'cpu'
+        : t.suggested.memory_mib > t.current.memory_mib
+          ? 'memory'
+          : t.suggested.disk_kib > t.current.disk_kib
+            ? 'disk'
+            : null;
+    return (raised && byResource(raised)?.id) || cards[0].id;
+  }
+  return byResource(t.limited_by)?.id ?? cards[0].id;
+}
+
+/** changesRequest says whether an advice card is one the estimate covers. */
+export function changesRequest(a: UtilAdvice): boolean {
+  return (a.resource === 'memory' || a.resource === 'cpu' || a.resource === 'disk') && a.submit.length > 0;
 }

@@ -12,7 +12,11 @@ import {
   rankAdvice,
   stripGeometry,
   usedFraction,
+  throughputStatement,
+  throughputAdviceId,
+  formatDuration,
   type UtilAdvice,
+  type UtilThroughput,
   type UtilDistribution,
   type UtilWorkflow,
 } from './utilization';
@@ -186,5 +190,87 @@ describe('fixture', () => {
       if (w.memory_curve.length === 0) continue;
       expect(w.memory_curve.filter((p) => p.is_recommended)).toHaveLength(1);
     }
+  });
+});
+
+describe('throughputStatement', () => {
+  const base: UtilThroughput = {
+    current: { cpus: 1, memory_mib: 8192, disk_kib: 10 * 1024 * 1024, gpus: 0 },
+    suggested: { cpus: 1, memory_mib: 2048, disk_kib: 10 * 1024 * 1024, gpus: 0 },
+    retry_memory_mib: 6144,
+    fit_current: 16,
+    fit_suggested: 32,
+    gain: 2.13,
+    limited_by: 'memory',
+    wait_p50: 3 * 3600,
+    slots_limited: true,
+    last_batch: { id: 81291, jobs: 300, elapsed: 14 * 3600, estimated: 6.2 * 3600 },
+  };
+
+  it('claims the multiplier, and the batch time, when slots held the jobs back', () => {
+    const st = throughputStatement(base)!;
+    expect(st.kind).toBe('gain');
+    expect(st.line).toBe('Up to 2.1× as many of these jobs could run at once.');
+    expect(st.batch).toBe(
+      'Your last batch of 300 jobs took 14 h from submission to the last result; with these settings, about 6.2 h.',
+    );
+  });
+
+  it('claims no multiplier for jobs that started within minutes', () => {
+    const st = throughputStatement({ ...base, slots_limited: false, wait_p50: 240 })!;
+    expect(st.kind).toBe('unlimited');
+    expect(st.line).toBe('Your jobs started within 4 minutes, so this mainly frees the pool for others.');
+    expect(st.line).not.toMatch(/×/);
+    expect(st.batch).toBeUndefined();
+  });
+
+  it('says plainly when the change means fewer at once', () => {
+    const st = throughputStatement({
+      ...base,
+      suggested: { ...base.current, cpus: 4 },
+      gain: 0.6,
+    })!;
+    expect(st.kind).toBe('loss');
+    expect(st.line).toBe(
+      "Requesting the cores your jobs use means fewer run at once (0.6×), but each job stops competing for cores it didn't ask for.",
+    );
+  });
+
+  it('says nothing for a gain inside the noise, or no estimate', () => {
+    expect(throughputStatement({ ...base, gain: 1.04 })).toBeNull();
+    expect(throughputStatement(null)).toBeNull();
+  });
+
+  it('leaves out the batch sentence when there is no batch to measure', () => {
+    expect(throughputStatement({ ...base, last_batch: null })!.batch).toBeUndefined();
+  });
+});
+
+describe('formatDuration', () => {
+  it('rounds to what a reader plans with', () => {
+    expect(formatDuration(45 * 60)).toBe('45 min');
+    expect(formatDuration(6.24 * 3600)).toBe('6.2 h');
+    expect(formatDuration(14.4 * 3600)).toBe('14 h');
+    expect(formatDuration(3.5 * 86400)).toBe('3.5 days');
+  });
+});
+
+describe('throughputAdviceId', () => {
+  const w = utilizationFixture.workflows.find((x) => x.key === 'wf-blast')!;
+  const assemble = utilizationFixture.workflows.find((x) => x.key === 'wf-assemble')!;
+
+  it('puts a gain on the change to the resource that caps the jobs now', () => {
+    // Memory caps blast at 8 GB per job; the disk change rides along.
+    expect(w.throughput!.limited_by).toBe('memory');
+    expect(throughputAdviceId(w)).toMatch(/^memory-/);
+  });
+
+  it('puts a loss on the change that raises a request', () => {
+    expect(assemble.throughput!.gain).toBeLessThan(1);
+    expect(throughputAdviceId(assemble)).toBe('memory-raise');
+  });
+
+  it('has no card without an estimate', () => {
+    expect(throughputAdviceId({ ...w, throughput: null })).toBeNull();
   });
 });

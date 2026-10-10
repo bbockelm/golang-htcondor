@@ -28,7 +28,14 @@ import {
   sortResources,
   usedFraction,
   windowPhrase,
+  THROUGHPUT_SHOWN,
+  changesRequest,
+  formatGain,
+  throughputColumn,
+  throughputStatement,
+  throughputAdviceId,
   type RankedAdvice,
+  type UtilThroughput,
   type UtilAdvice,
   type UtilOverall,
   type UtilResourceSummary,
@@ -168,12 +175,28 @@ export function BadputCard({ overall }: { overall: { wall_hours: number; badput_
   );
 }
 
+// ThroughputHeadline is the figure people act on: not "you wasted 60% of
+// your memory" but "you could have run this many more jobs".
+export function ThroughputHeadline({ gain }: { gain: number | null | undefined }) {
+  if (gain === null || gain === undefined || gain < THROUGHPUT_SHOWN) return null;
+  return (
+    <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3" data-testid="throughput-headline">
+      <p className="text-gray-900">
+        With all of these changes: <span className="text-xl font-semibold">up to {formatGain(gain)}</span> as many
+        jobs running at once.
+      </p>
+      <p className="mt-0.5 text-xs text-gray-600">Estimated from the machines currently in the pool.</p>
+    </div>
+  );
+}
+
 export function Headline({ overall, mine = true }: { overall: UtilOverall; mine?: boolean }) {
   return (
-    <section aria-labelledby="util-headline">
+    <section aria-labelledby="util-headline" className="space-y-3">
       <h2 id="util-headline" className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">
         Of what {mine ? 'your' : 'these'} jobs reserved, how much they used
       </h2>
+      <ThroughputHeadline gain={overall.throughput_gain} />
       <div className="grid grid-cols-[repeat(auto-fit,minmax(13rem,1fr))] gap-3">
         {sortResources(overall.resources).map((r) => (
           <ResourceCard key={r.resource} summary={r} jobs={overall.jobs} />
@@ -228,14 +251,22 @@ export function AdviceCard({
   advice,
   workflow,
   hrefFor,
+  throughput,
 }: {
   advice: UtilAdvice;
   // Set when the card is listed away from its workflow, so it can say
   // which workflow it is about.
   workflow?: UtilWorkflow;
   hrefFor?: (key: string) => string;
+  // The workflow's estimate, passed only to the one card that carries it
+  // (see throughputAdviceId).
+  throughput?: UtilThroughput | null;
 }) {
   const sev = SEVERITY[advice.severity];
+  const st = changesRequest(advice) ? throughputStatement(throughput) : null;
+  // The pool-freeing note belongs on the workflow's page, once; on every
+  // card it would repeat without saying anything about the card.
+  const runLine = st && st.kind !== 'unlimited' ? st.line : null;
   const saves = formatSaves(advice.saves);
   const low = advice.confidence === 'low';
   return (
@@ -260,6 +291,11 @@ export function AdviceCard({
       </div>
       <h3 className="mt-2 font-semibold text-gray-900">{advice.title}</h3>
       <p className="mt-1 text-sm text-gray-600">{advice.detail}</p>
+      {runLine && (
+        <p className="mt-1 text-sm font-medium text-gray-900" data-testid="advice-throughput">
+          {runLine}
+        </p>
+      )}
       {(workflow || saves) && (
         <p className="mt-2 text-xs text-gray-500">
           {workflow && hrefFor && (
@@ -318,6 +354,7 @@ export function Suggestions({
                 advice={r.advice}
                 workflow={r.workflow}
                 hrefFor={hrefFor}
+                throughput={throughputAdviceId(r.workflow) === r.advice.id ? r.workflow.throughput : null}
               />
             ))}
           </div>
@@ -338,7 +375,7 @@ export function Suggestions({
 
 // --- Workflows table ---
 
-type SortKey = 'name' | 'jobs' | 'wall' | 'cpu' | 'memory' | 'disk' | 'advice';
+type SortKey = 'name' | 'jobs' | 'wall' | 'cpu' | 'memory' | 'disk' | 'throughput' | 'advice';
 
 function actionable(w: UtilWorkflow): number {
   return w.advice.filter((a) => a.severity !== 'info').length;
@@ -354,6 +391,8 @@ function sortValue(w: UtilWorkflow, key: SortKey): string | number | undefined {
       return w.wall_hours;
     case 'advice':
       return actionable(w);
+    case 'throughput':
+      return throughputColumn(w);
     default:
       return fitRatio(w, key);
   }
@@ -372,6 +411,8 @@ export function WorkflowsTable({
   const rows = useSortedRows(workflows, sort, sortValue);
   const showOwner = workflows.some((w) => w.owner);
   const showSchedd = workflows.some((w) => w.schedd);
+  // A column of blanks is noise: only when some workflow has a figure.
+  const showThroughput = workflows.some((w) => throughputColumn(w) !== undefined);
   return (
     <section aria-labelledby="util-workflows">
       <h2 id="util-workflows" className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">
@@ -387,6 +428,9 @@ export function WorkflowsTable({
               <SortableHeader label="CPU cores" sortKey="cpu" sort={sort} onSort={setSort} />
               <SortableHeader label="Peak memory" sortKey="memory" sort={sort} onSort={setSort} />
               <SortableHeader label="Disk" sortKey="disk" sort={sort} onSort={setSort} />
+              {showThroughput && (
+                <SortableHeader label="Throughput" sortKey="throughput" sort={sort} onSort={setSort} className="text-right" />
+              )}
               <SortableHeader label="Advice" sortKey="advice" sort={sort} onSort={setSort} />
             </tr>
           </thead>
@@ -449,9 +493,18 @@ export function WorkflowsTable({
                   <td className="px-3 py-2">
                     <RangeStrip request={w.disk.request} dist={w.disk.used_kib} format={formatKiB} label="Disk" />
                   </td>
+                  {showThroughput && (
+                    <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap" data-testid="throughput-cell">
+                      {(() => {
+                        const g = throughputColumn(w);
+                        if (g === undefined) return null;
+                        return g >= 1 ? `up to ${formatGain(g)}` : formatGain(g);
+                      })()}
+                    </td>
+                  )}
                   <td className="px-3 py-2">
                     {n > 0 ? (
-                      <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 tabular-nums">
+                      <span className="inline-flex whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 tabular-nums">
                         {n} {n === 1 ? 'suggestion' : 'suggestions'}
                       </span>
                     ) : (
@@ -492,6 +545,20 @@ export function TruncatedNotice({ data }: { data: Pick<UtilizationResponse, 'tru
 
 // --- Workflow detail ---
 
+// ThroughputLead opens a workflow's page with what its suggestions would
+// change in practice.
+export function ThroughputLead({ throughput }: { throughput: UtilThroughput | null | undefined }) {
+  const st = throughputStatement(throughput);
+  if (!st) return null;
+  const tone = st.kind === 'gain' ? 'border-green-200 bg-green-50' : 'border-gray-200 bg-white';
+  return (
+    <div className={`rounded-lg border px-4 py-3 ${tone}`} data-testid="throughput-lead">
+      <p className={st.kind === 'gain' ? 'font-semibold text-gray-900' : 'text-gray-800'}>{st.line}</p>
+      {st.batch && <p className="mt-0.5 text-sm text-gray-700">{st.batch}</p>}
+    </div>
+  );
+}
+
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div>
@@ -522,6 +589,7 @@ export function WorkflowDetail({
   }
   if (rec?.retry_mib) memMarkers.push({ value: rec.retry_mib, label: `retry ${formatMiB(rec.retry_mib)}`, kind: 'retry' });
 
+  const tpCard = throughputAdviceId(w);
   const cpuReq = w.cpu.request;
   const diskReq = w.disk.request;
   const gpu = w.gpu;
@@ -577,6 +645,8 @@ export function WorkflowDetail({
         </div>
       </div>
 
+      <ThroughputLead throughput={w.throughput} />
+
       <div className="grid grid-cols-[repeat(auto-fit,minmax(13rem,1fr))] gap-3">
         {sortResources(w.resources).map((r) => (
           <ResourceCard key={r.resource} summary={r} jobs={w.jobs} />
@@ -590,7 +660,7 @@ export function WorkflowDetail({
           </h3>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
             {w.advice.map((a, i) => (
-              <AdviceCard key={`${a.id}-${i}`} advice={a} />
+              <AdviceCard key={`${a.id}-${i}`} advice={a} throughput={a.id === tpCard ? w.throughput : null} />
             ))}
           </div>
         </section>
