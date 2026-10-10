@@ -62,7 +62,7 @@ jobs:
       # image, and everything after it -- including every pull request
       # -- reads the result.
       run: |
-        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
+        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore', '.go-version') }}" >> "$GITHUB_OUTPUT"
 
     - name: Build Docker image
       uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -257,7 +257,7 @@ jobs:
       # image, and everything after it -- including every pull request
       # -- reads the result.
       run: |
-        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
+        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore', '.go-version') }}" >> "$GITHUB_OUTPUT"
 
     - name: Build Docker image
       uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -335,7 +335,7 @@ jobs:
       # image, and everything after it -- including every pull request
       # -- reads the result.
       run: |
-        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
+        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore', '.go-version') }}" >> "$GITHUB_OUTPUT"
 
     - name: Build Docker image
       uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -415,7 +415,7 @@ jobs:
       # Same derivation as the other two jobs. It has to be, or the scope
       # below names a cache entry nobody writes.
       run: |
-        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore') }}" >> "$GITHUB_OUTPUT"
+        echo "key=$(date -u +%Y-%m-%d)-${{ hashFiles('Dockerfile', '.dockerignore', '.go-version') }}" >> "$GITHUB_OUTPUT"
 
     - name: Build Docker image
       uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0

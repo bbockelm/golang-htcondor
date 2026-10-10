@@ -2,8 +2,7 @@
 FROM rockylinux:9
 
 # Set environment variables
-ENV GO_VERSION=1.27.1 \
-    GOPATH=/go \
+ENV GOPATH=/go \
     PATH=/usr/local/go/bin:/go/bin:$PATH \
     CONDOR_CONFIG=/etc/condor/condor_config
 
@@ -32,8 +31,16 @@ RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - && \
     dnf clean all && \
     node --version && npm --version
 
-# Install Go
-RUN ARCH=$(uname -m) && \
+# Install Go: the newest stable patch of the minor named in .go-version, the
+# same version CI's setup-go resolves for that file.
+COPY .go-version /tmp/go-version
+RUN GO_MINOR=$(tr -d '[:space:]' < /tmp/go-version) && \
+    GO_MINOR_RE=$(printf '%s' "$GO_MINOR" | sed 's/\./\\./g') && \
+    GO_VERSION=$(curl -fsSL 'https://go.dev/dl/?mode=json&include=all' | \
+        grep -oE "\"go${GO_MINOR_RE}(\\.[0-9]+)?\"" | tr -d '"' | sed 's/^go//' | sort -V | tail -n 1) && \
+    test -n "$GO_VERSION" && \
+    echo "Installing Go ${GO_VERSION} for .go-version ${GO_MINOR}" && \
+    ARCH=$(uname -m) && \
     if [ "$ARCH" = "aarch64" ]; then GOARCH="arm64"; else GOARCH="amd64"; fi && \
     wget -q https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz && \
     tar -C /usr/local -xzf go${GO_VERSION}.linux-${GOARCH}.tar.gz && \
