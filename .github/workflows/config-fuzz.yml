@@ -1,0 +1,118 @@
+name: Config fuzz
+
+# Differential fuzzing of the Go config parser against HTCondor's own C++
+# parser (libcondor_utils), built from source. See fuzz/config/README.md.
+#
+# The token needs nothing beyond reading the checkout.
+# One in-flight run per pull request; pushes to main and scheduled runs
+# are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'config/**'
+      - 'fuzz/config/**'
+      - 'hack/config-fuzz*'
+      - '.github/workflows/config-fuzz.yml'
+      - '.github/scripts/build-condor-utils.sh'
+      - '.github/scripts/config-fuzz-ci.sh'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'config/**'
+      - 'fuzz/config/**'
+      - 'hack/config-fuzz*'
+      - '.github/workflows/config-fuzz.yml'
+      - '.github/scripts/build-condor-utils.sh'
+      - '.github/scripts/config-fuzz-ci.sh'
+  # Weekly, so the corpus keeps growing and HTCondor-side drift shows up
+  # even when nothing here changes.
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: 'go test -fuzztime for the fuzzing step'
+        required: false
+        default: '2m'
+
+env:
+  # The HTCondor release the oracle is built from. To bump: change this
+  # to a newer release tag and run the workflow (workflow_dispatch). The
+  # ccache key includes it, so the first run after a bump builds cold.
+  HTCONDOR_REF: v25.14.1
+
+jobs:
+  config-fuzz:
+    name: Config fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: .go-version
+        cache: true
+
+    - name: Set HTCondor tree locations
+      run: |
+        {
+          echo "HTCONDOR_SRC=$RUNNER_TEMP/htcondor"
+          echo "HTCONDOR_BUILD=$RUNNER_TEMP/htcondor-build"
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache"
+        } >> "$GITHUB_ENV"
+
+    # The HTCondor ref is pinned, so the compiled objects do not change
+    # between runs: one entry per (ref, build script) is all there is to
+    # save.
+    - name: Restore ccache
+      id: ccache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/ccache
+        key: condor-utils-ccache-${{ runner.os }}-${{ env.HTCONDOR_REF }}-${{ hashFiles('.github/scripts/build-condor-utils.sh') }}
+        restore-keys: |
+          condor-utils-ccache-${{ runner.os }}-${{ env.HTCONDOR_REF }}-
+          condor-utils-ccache-${{ runner.os }}-
+
+    - name: Build libcondor_utils
+      env:
+        INSTALL_DEPS: '1'
+      run: .github/scripts/build-condor-utils.sh
+
+    # Saved from main only (pushes and the scheduled run). A pull
+    # request's cache entry is readable by that pull request alone, and
+    # this repository has hit GitHub's 10 GB cache budget before.
+    - name: Save ccache
+      if: steps.ccache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/ccache
+        key: ${{ steps.ccache.outputs.cache-primary-key }}
+
+    - name: Seeds and committed corpus
+      run: .github/scripts/config-fuzz-ci.sh seeds
+
+    - name: Fuzz
+      env:
+        FUZZTIME: ${{ inputs.fuzztime || '2m' }}
+      run: .github/scripts/config-fuzz-ci.sh fuzz "$FUZZTIME"
+
+    - name: Upload failing inputs
+      if: failure()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: config-fuzz-failing-inputs
+        path: fuzz/config/testdata/fuzz/
+        if-no-files-found: ignore
