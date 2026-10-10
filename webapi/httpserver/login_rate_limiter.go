@@ -93,6 +93,20 @@ func (l *LoginRateLimiter) Allow(key string) bool {
 	return e.limiter.AllowN(now, 1)
 }
 
+// Exhausted reports whether key has no attempt left to spend, without
+// spending one. For a limit charged only on failure: check this first,
+// then call Allow once the attempt has failed.
+func (l *LoginRateLimiter) Exhausted(key string) bool {
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	elem, ok := l.keys[key]
+	if !ok {
+		return false
+	}
+	return elem.Value.(*loginLimiterEntry).limiter.TokensAt(now) < 1
+}
+
 // size is the number of keys currently tracked.
 func (l *LoginRateLimiter) size() int {
 	l.mu.Lock()

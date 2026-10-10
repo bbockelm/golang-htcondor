@@ -37,6 +37,15 @@ func idpBadLogin(t *testing.T, server *Server, addr, username string) int {
 	return w.Code
 }
 
+// freezeLimiters stops the limiters' buckets refilling, so a slow run
+// cannot hand budget back partway through a test.
+func freezeLimiters(ls ...*LoginRateLimiter) {
+	now := time.Now()
+	for _, l := range ls {
+		l.now = func() time.Time { return now }
+	}
+}
+
 func newIDPTestServer(t *testing.T) *Server {
 	t.Helper()
 	cfg := newTestConfig(t)
@@ -50,7 +59,31 @@ func newIDPTestServer(t *testing.T) *Server {
 	if err := server.idpProvider.storage.CreateUser(context.Background(), "idpuser", "idppassword", "active"); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
+	freezeLimiters(server.idpLoginLimiter, server.idpLoginByUser)
 	return server
+}
+
+// idpGoodLogin posts one correct login from addr and returns the status.
+func idpGoodLogin(t *testing.T, server *Server, addr string) int {
+	t.Helper()
+	form := url.Values{"username": {"idpuser"}, "password": {"idppassword"}}
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/idp/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = addr
+	w := httptest.NewRecorder()
+	server.handleIDPLogin(w, req)
+	return w.Code
+}
+
+// Only failures are charged: a site whose users all sign in from behind
+// one address is not limited to a few logins a minute between them.
+func TestIDPSuccessfulLoginsAreNotLimited(t *testing.T) {
+	server := newIDPTestServer(t)
+	for i := range 12 {
+		if got := idpGoodLogin(t, server, fmt.Sprintf("192.0.2.8:%d", 40000+i)); got != http.StatusOK {
+			t.Fatalf("successful login %d from one address: status %d, want 200", i+1, got)
+		}
+	}
 }
 
 // A new connection is a new source port, not a new client: the sixth
@@ -145,6 +178,7 @@ func postRegister(t *testing.T, srv *Server, addr string) *httptest.ResponseReco
 
 func TestDynamicRegistrationRateLimitedPerAddress(t *testing.T) {
 	srv := startDeviceVerifyServer(t)
+	freezeLimiters(srv.oauth2Limiters())
 
 	created, refused := 0, 0
 	for i := range 1000 {
@@ -257,6 +291,7 @@ func postRegisterBody(t *testing.T, srv *Server, body string) string {
 func TestDeviceAuthorizeRateLimitedPerAddress(t *testing.T) {
 	srv := startDeviceVerifyServer(t)
 	client := registerDeviceVerifyClient(t, srv)
+	freezeLimiters(srv.oauth2Limiters())
 
 	for i := range deviceAuthorizationBurst {
 		if w := postDeviceAuthorize(t, srv, fmt.Sprintf("192.0.2.61:%d", 1024+i), client); w.Code != http.StatusOK {
@@ -354,6 +389,7 @@ func TestDeviceVerifyLookupsRateLimitedPerAddress(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		t.Run(method, func(t *testing.T) {
 			srv := startDeviceConsentServer(t)
+			freezeLimiters(srv.sshConsentLimiters())
 			for i := range sshConsentBurst {
 				w := deviceVerifyAs(t, srv, method, "192.0.2.63:1", fmt.Sprintf("user%d", i), fmt.Sprintf("BAD%d-CODE", i))
 				if w.Code == http.StatusTooManyRequests {
@@ -587,6 +623,7 @@ func TestCIMDFetchesLimitedPerSource(t *testing.T) {
 	startServer(t, srv)
 	transport := &countingTransport{}
 	srv.oauth2Provider.GetStorage().cimd.client = &http.Client{Transport: transport}
+	freezeLimiters(srv.oauth2Provider.GetStorage().cimd.bySource)
 
 	authorize := func(addr string, i int) {
 		q := url.Values{

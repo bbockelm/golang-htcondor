@@ -1867,10 +1867,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"refresh_token_lifespan", idpRefreshLifespan)
 		h.idpProvider = idpProvider
 		h.seedDemoUser = cfg.SeedDemoUser
-		h.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5) // 5 attempts per minute with burst of 5
-		// Per username as well, so a guesser spreading attempts across
-		// many addresses still meets a limit. Looser than the per-address
-		// one: a single source reaches its own limit first.
+		// Failed logins: 5 a minute per source address, and 10 per
+		// username so a guesser spreading attempts across many
+		// addresses still meets a limit. See handleIDPLoginSubmit.
+		h.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5)
 		h.idpLoginByUser = NewLoginRateLimiter(rate.Limit(10.0/60.0), 10)
 		logger.Info(logging.DestinationHTTP, "IDP provider enabled", "issuer", idpIssuer)
 
