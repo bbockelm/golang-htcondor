@@ -5,6 +5,7 @@ import { BatchTable } from './BatchTable';
 import { groupIntoBatches } from '@/lib/batches';
 import { batchView } from '@/lib/batchView';
 import { PROGRESS_WHY } from '@/lib/batchProgress';
+import type { JobUsage } from '@/lib/runningUsage';
 import type { ClassAd, DisplayStatus } from '@/lib/api';
 
 vi.mock('next/navigation', () => ({
@@ -212,5 +213,34 @@ describe('BatchTable held view', () => {
     fireEvent.click(screen.getByRole('button', { name: /Hold reason/ }));
     // "Another reason" < "Job exceeded…"
     expect(batchNames()[0]).toContain('31');
+  });
+});
+
+describe('BatchTable running view', () => {
+  const running: ClassAd[] = [
+    { ClusterId: 40, ProcId: 0, JobStatus: 2, Owner: 'alice', Cmd: '/bin/a' },
+    { ClusterId: 40, ProcId: 1, JobStatus: 2, Owner: 'alice', Cmd: '/bin/a' },
+  ];
+  const byJob = new Map<string, JobUsage>([
+    ['40.0', { memUsedMiB: 2400, memReqMiB: 2048, cpuUsed: 0.9, cpuReq: 1, cpuSource: 'recent' }],
+  ]);
+
+  it('replaces the command with memory and CPU bars', () => {
+    const batches = groupIntoBatches(running);
+    table({
+      batches,
+      detail: 'usage',
+      usage: { byJob, loading: false },
+      expanded: new Set(batches.map((b) => b.batchID)),
+    });
+    expect(screen.getByRole('button', { name: /Memory \(peak\)/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /CPU \(recent\)/ })).toBeTruthy();
+    expect(screen.queryByText('/bin/a')).toBeNull();
+    // Submitted makes room for the second bar.
+    expect(screen.queryByRole('button', { name: /Submitted/ })).toBeNull();
+    // The job over its request is flagged, with the percentage in words.
+    expect(screen.getByText('2.3 / 2.0 GB · 117%').closest('[data-tone]')?.getAttribute('data-tone')).toBe('critical');
+    // The job with nothing measured says so rather than showing zero.
+    expect(screen.getAllByText('not reported yet').length).toBeGreaterThanOrEqual(2);
   });
 });

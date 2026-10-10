@@ -256,6 +256,7 @@ describe('progressFraction', () => {
 describe('batchDetailFor', () => {
   it('asks why only when the view is exactly the held jobs', () => {
     expect(batchDetailFor(new Set<DisplayStatus>(['held']))).toBe('hold');
+    expect(batchDetailFor(new Set<DisplayStatus>(['running']))).toBe('usage');
     expect(batchDetailFor(new Set<DisplayStatus>(['held', 'running']))).toBe('command');
     expect(batchDetailFor(new Set<DisplayStatus>())).toBe('command');
     // Uploading inputs is a hold on the wire and not a problem.

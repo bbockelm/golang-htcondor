@@ -19,6 +19,7 @@ import {
 } from '@/components/SortableTable';
 import { BatchUsagePanel } from '@/components/BatchUsagePanel';
 import { BatchProgressBar } from '@/components/BatchProgressBar';
+import { UsageBar } from '@/components/UsageBar';
 import {
   progressFraction,
   type BatchProgressResult,
@@ -30,6 +31,14 @@ import {
   type HoldSummary,
 } from '@/lib/holdReasons';
 import type { BatchDetail } from '@/lib/batchView';
+import {
+  batchCpuReading,
+  batchMemoryReading,
+  jobCpuReading,
+  jobMemoryReading,
+  type JobUsage,
+  type UsageReading,
+} from '@/lib/runningUsage';
 import {
   statusRank,
   summarizeBatchUsage,
@@ -51,13 +60,23 @@ type BatchSortKey =
   | 'status'
   | 'submitted'
   | 'cmd'
-  | 'reason';
+  | 'reason'
+  | 'memory'
+  | 'cpu';
+
+// Live usage for the 'usage' detail, keyed by BatchJob.id.
+export interface RunningUsage {
+  byJob: ReadonlyMap<string, JobUsage>;
+  loading: boolean;
+}
 
 // Per-row values computed once per render of the table, for both the
 // cells and the sort.
 interface RowExtras {
   progress?: BatchProgressResult;
   hold?: HoldSummary;
+  memory?: UsageReading;
+  cpu?: UsageReading;
 }
 
 // Sorting reads a comparable value off the batch rather than the rendered
@@ -73,6 +92,10 @@ function batchSortValue(
       return progressFraction(x?.progress);
     case 'reason':
       return x?.hold ? displayHoldReason(x.hold.top.example) : undefined;
+    case 'memory':
+      return x?.memory?.sortValue;
+    case 'cpu':
+      return x?.cpu?.sortValue;
     case 'batch':
       return b.name;
     case 'schedd':
@@ -101,6 +124,7 @@ export function BatchTable({
   multiAP,
   progress,
   detail = 'command',
+  usage,
 }: {
   // Already grouped and filtered by the page: which jobs are in scope is
   // a page-level question (status chips, text filter, server constraint),
@@ -126,6 +150,8 @@ export function BatchTable({
   progress?: ReadonlyMap<string, BatchProgressResult>;
   // What the last column shows; see BatchDetail.
   detail?: BatchDetail;
+  // Required for detail="usage".
+  usage?: RunningUsage;
 }) {
   const queryClient = useQueryClient();
 
@@ -137,11 +163,15 @@ export function BatchTable({
         x.hold = summarizeHoldReasons(
           b.jobs.filter((j) => j.display.key === 'held').map((j) => j.holdReason),
         );
+      } else if (detail === 'usage' && usage) {
+        const running = b.jobs.filter((j) => j.display.key === 'running');
+        x.memory = batchMemoryReading(running, usage.byJob);
+        x.cpu = batchCpuReading(running, usage.byJob);
       }
       m.set(batchKey(b), x);
     }
     return m;
-  }, [batches, progress, detail]);
+  }, [batches, progress, detail, usage]);
 
   const sortValue = useCallback(
     (b: Batch, key: BatchSortKey) => batchSortValue(b, key, extras.get(batchKey(b))),
@@ -203,9 +233,12 @@ export function BatchTable({
   const removeError =
     removeBatchMut.error ?? removeJobMut.error ?? releaseJobMut.error;
 
-  // Multi-AP mode trades the Actions column for the Access point one.
-  const columns =
-    7 + (showOwner ? 1 : 0) + (progress ? 1 : 0);
+  // Multi-AP mode trades the Actions column for the Access point one. The
+  // running view trades Submitted for its second bar: two bars and their
+  // text do not fit beside it, and when a running batch was submitted is
+  // the least of what that view is for.
+  const showSubmitted = detail !== 'usage';
+  const columns = 7 + (showOwner ? 1 : 0) + (progress ? 1 : 0);
 
   return (
     <div className="space-y-2">
@@ -240,9 +273,16 @@ export function BatchTable({
                 <BatchHeader label="Progress" sortKey="progress" sort={sort} onSort={setSort} />
               )}
               <BatchHeader label="Status" sortKey="status" sort={sort} onSort={setSort} />
-              <BatchHeader label="Submitted" sortKey="submitted" sort={sort} onSort={setSort} />
+              {showSubmitted && (
+                <BatchHeader label="Submitted" sortKey="submitted" sort={sort} onSort={setSort} />
+              )}
               {detail === 'hold' ? (
                 <BatchHeader label="Hold reason" sortKey="reason" sort={sort} onSort={setSort} />
+              ) : detail === 'usage' ? (
+                <>
+                  <BatchHeader label="Memory (peak)" sortKey="memory" sort={sort} onSort={setSort} />
+                  <BatchHeader label="CPU (recent)" sortKey="cpu" sort={sort} onSort={setSort} />
+                </>
               ) : (
                 <BatchHeader label="Command" sortKey="cmd" sort={sort} onSort={setSort} />
               )}
@@ -257,6 +297,7 @@ export function BatchTable({
                 extras={extras.get(batchKey(b))}
                 showProgress={!!progress}
                 detail={detail}
+                usage={usage}
                 columns={columns}
                 showOwner={showOwner}
                 multiAP={multiAP}
@@ -355,6 +396,7 @@ function BatchRow({
   extras,
   showProgress,
   detail,
+  usage,
   columns,
   showOwner,
   multiAP,
@@ -374,6 +416,7 @@ function BatchRow({
   extras: RowExtras | undefined;
   showProgress: boolean;
   detail: BatchDetail;
+  usage: RunningUsage | undefined;
   columns: number;
   showOwner?: boolean;
   multiAP?: boolean;
@@ -432,15 +475,26 @@ function BatchRow({
         <td className="px-3 py-2">
           <StatusBreakdown counts={batch.statusCounts} />
         </td>
-        <td className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap">
-          {batch.submittedUnix
-            ? new Date(batch.submittedUnix * 1000).toLocaleString()
-            : '—'}
-        </td>
+        {detail !== 'usage' && (
+          <td className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap">
+            {batch.submittedUnix
+              ? new Date(batch.submittedUnix * 1000).toLocaleString()
+              : '—'}
+          </td>
+        )}
         {detail === 'hold' ? (
           <td className="px-3 py-2 text-gray-700">
             <HoldSummaryCell summary={extras?.hold} />
           </td>
+        ) : detail === 'usage' ? (
+          <>
+            <td className="px-3 py-2">
+              <UsageBar reading={extras?.memory} loading={usage?.loading} stacked />
+            </td>
+            <td className="px-3 py-2">
+              <UsageBar reading={extras?.cpu} loading={usage?.loading} stacked />
+            </td>
+          </>
         ) : (
           <td className="px-3 py-2 text-gray-700 max-w-md truncate">
             {batch.cmd ? (
@@ -477,6 +531,7 @@ function BatchRow({
             <JobsSubTable
               multiAP={multiAP}
               detail={detail}
+              usage={usage}
               jobs={batch.jobs}
               highlighted={highlighted}
               onRemoveJob={onRemoveJob}
@@ -552,6 +607,7 @@ function BatchUsage({
 function JobsSubTable({
   multiAP,
   detail,
+  usage,
   jobs,
   highlighted,
   onRemoveJob,
@@ -563,6 +619,7 @@ function JobsSubTable({
 }: {
   multiAP?: boolean;
   detail: BatchDetail;
+  usage: RunningUsage | undefined;
   jobs: BatchJob[];
   highlighted: string | null;
   onRemoveJob: (id: string) => void;
@@ -592,9 +649,14 @@ function JobsSubTable({
           <tr>
             <th className="px-3 py-1.5">Job</th>
             <th className="px-3 py-1.5">Status</th>
-            <th className="px-3 py-1.5">Submitted</th>
+            {detail !== 'usage' && <th className="px-3 py-1.5">Submitted</th>}
             {detail === 'hold' ? (
               <th className="px-3 py-1.5">Hold reason</th>
+            ) : detail === 'usage' ? (
+              <>
+                <th className="px-3 py-1.5">Memory (peak)</th>
+                <th className="px-3 py-1.5">CPU (recent)</th>
+              </>
             ) : (
               <th className="px-3 py-1.5">Command</th>
             )}
@@ -644,11 +706,13 @@ function JobsSubTable({
               <td className="px-3 py-1.5">
                 <JobStatusPill display={j.display} />
               </td>
-              <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap">
-                {j.submittedUnix
-                  ? new Date(j.submittedUnix * 1000).toLocaleString()
-                  : '—'}
-              </td>
+              {detail !== 'usage' && (
+                <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap">
+                  {j.submittedUnix
+                    ? new Date(j.submittedUnix * 1000).toLocaleString()
+                    : '—'}
+                </td>
+              )}
               {detail === 'hold' ? (
                 <td className="px-3 py-1.5 text-gray-700">
                   <div className="max-w-sm truncate" title={j.holdReason}>
@@ -659,6 +723,15 @@ function JobsSubTable({
                     )}
                   </div>
                 </td>
+              ) : detail === 'usage' ? (
+                <>
+                  <td className="px-3 py-1.5">
+                    <JobUsageCell job={j} usage={usage} read={jobMemoryReading} />
+                  </td>
+                  <td className="px-3 py-1.5">
+                    <JobUsageCell job={j} usage={usage} read={jobCpuReading} />
+                  </td>
+                </>
               ) : (
                 <td className="px-3 py-1.5 text-gray-700 max-w-md truncate">
                   {j.cmd ? (
@@ -763,6 +836,23 @@ function HoldSummaryCell({ summary }: { summary: HoldSummary | undefined }) {
       )}
     </div>
   );
+}
+
+// JobUsageCell is one job's bar. A job the usage answer has not covered
+// yet reads as loading while the answer is on its way, and otherwise as
+// not reported -- never as a zero.
+function JobUsageCell({
+  job,
+  usage,
+  read,
+}: {
+  job: BatchJob;
+  usage: RunningUsage | undefined;
+  read: (u: JobUsage | undefined) => UsageReading;
+}) {
+  const u = usage?.byJob.get(job.id);
+  if (!u && usage?.loading) return <UsageBar reading={undefined} loading />;
+  return <UsageBar reading={read(u)} />;
 }
 
 // DisclosureCaret rotates 90° when the row is expanded.

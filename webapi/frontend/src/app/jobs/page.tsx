@@ -28,6 +28,7 @@ import { useSearchParams } from 'next/navigation';
 import {
   api,
   ApiError,
+  type ClassAd,
   type DisplayStatus,
   type JobListResponse,
 } from '@/lib/api';
@@ -36,7 +37,7 @@ import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 import { FilterControls, type FilterMode } from '@/components/FilterControls';
 import { JobStatusStrip } from '@/components/JobStatusStrip';
 import { JobsSummaryPanel } from '@/components/JobsSummaryPanel';
-import { BatchTable } from '@/components/BatchTable';
+import { BatchTable, type RunningUsage } from '@/components/BatchTable';
 import { MAX_AUTO_PAGES, useAutoLoadAll, useLoadAllJobs } from '@/lib/loadAll';
 import { LISTING_PAGE_SIZE } from '@/lib/paging';
 import {
@@ -46,6 +47,15 @@ import {
   type BatchKey,
 } from '@/lib/batches';
 import { batchDetailFor, batchView } from '@/lib/batchView';
+import {
+  jobUsageByJob,
+  recentCpuByJob,
+  recentCpuConstraint,
+  RECENT_CPU_AGG,
+  RECENT_CPU_GROUP_BY,
+  RECENT_CPU_WINDOW_SECONDS,
+  RUNNING_USAGE_PROJECTION,
+} from '@/lib/runningUsage';
 import { useMultiAP } from '@/lib/multiap';
 import { clustersNeedingCounts, withExactCounts } from '@/lib/exactCounts';
 import { useExactCounts } from '@/lib/useExactCounts';
@@ -63,6 +73,10 @@ const PAGE_SIZE = LISTING_PAGE_SIZE;
 // decidedly not for thirty.
 const REFRESH_MS = 15_000;
 const REFRESH_MS_FULL = 60_000;
+
+// The running view's usage moves slowly -- execute nodes report every few
+// minutes -- so it refreshes at half the listing's pace.
+const USAGE_REFRESH_MS = 30_000;
 
 export default function JobsPage() {
   const searchParams = useSearchParams();
@@ -217,6 +231,15 @@ export default function JobsPage() {
   );
 
   const detail = batchDetailFor(statuses);
+
+  const usage = useRunningUsage({
+    enabled: detail === 'usage',
+    constraint,
+    scope,
+    ownedByMe,
+    schedd: multiAP && schedd ? schedd : undefined,
+    multiAP,
+  });
 
   // Where the listing holds only part of a batch, a second query counts
   // that batch's clusters exactly (see exactCounts.ts).
@@ -510,6 +533,7 @@ export default function JobsPage() {
               multiAP={multiAP}
               progress={progress}
               detail={detail}
+              usage={usage}
             />
           )}
         </>
@@ -532,6 +556,97 @@ export default function JobsPage() {
         </p>
       )}
     </div>
+  );
+}
+
+// useRunningUsage fetches the running jobs' memory and CPU for the running
+// view.
+//
+// A query of its own rather than more attributes on the listing: the
+// listing can be thirty thousand jobs, and these numbers are only read
+// while the running view is open. Recent CPU comes from the per-job
+// samples when they are kept; the answer says {enabled:false} when not,
+// and every job then keeps the CPU figure from its own ad.
+function useRunningUsage({
+  enabled,
+  constraint,
+  scope,
+  ownedByMe,
+  schedd,
+  multiAP,
+}: {
+  enabled: boolean;
+  constraint: string | undefined;
+  scope: string;
+  ownedByMe: boolean;
+  schedd: string | undefined;
+  multiAP: boolean;
+}): RunningUsage | undefined {
+  const runningConstraint = constraint ? `(${constraint}) && (JobStatus == 2)` : 'JobStatus == 2';
+  const ads = useQuery({
+    queryKey: ['running-usage', scope, runningConstraint, schedd],
+    enabled,
+    queryFn: async () => {
+      // A paginated answer has to be walked: a limit of "*" is still
+      // clamped per request there. Bounded like the listing's own walk.
+      const out: ClassAd[] = [];
+      let token: string | undefined;
+      for (let i = 0; i < MAX_AUTO_PAGES; i++) {
+        const page = await api.jobs.list({
+          constraint: runningConstraint,
+          projection: RUNNING_USAGE_PROJECTION,
+          limit: '*',
+          page_token: token,
+          owned_by_me: ownedByMe,
+          schedd,
+        });
+        out.push(...(page.jobs ?? []));
+        token = page.next_page_token ?? undefined;
+        if (!token) break;
+      }
+      return out;
+    },
+    refetchInterval: USAGE_REFRESH_MS,
+    retry: false,
+  });
+
+  // Samples are keyed by cluster and proc, which two access points can
+  // share, so the multi-AP view keeps to the job ads' own figures.
+  const metricsConstraint = useMemo(
+    () => (ads.data ? recentCpuConstraint(ads.data) : undefined),
+    [ads.data],
+  );
+  const recent = useQuery({
+    queryKey: ['running-usage-recent-cpu', metricsConstraint],
+    enabled: enabled && !multiAP && !!metricsConstraint,
+    queryFn: () =>
+      api.metrics.query('job_metrics', {
+        constraint: metricsConstraint,
+        group_by: RECENT_CPU_GROUP_BY,
+        agg: RECENT_CPU_AGG,
+        since: Math.floor(Date.now() / 1000) - RECENT_CPU_WINDOW_SECONDS,
+      }),
+    refetchInterval: USAGE_REFRESH_MS,
+    retry: false,
+  });
+
+  // A failed samples query is treated like samples not being kept: every
+  // job still gets a CPU figure, labelled for what it is.
+  const recentByJob = useMemo(
+    () => (recent.data && !recent.error ? recentCpuByJob(recent.data) : undefined),
+    [recent.data, recent.error],
+  );
+  const byJob = useMemo(
+    () => jobUsageByJob(ads.data ?? [], recentByJob),
+    [ads.data, recentByJob],
+  );
+  // Waiting on the samples too, so a bar does not flip from "since start"
+  // to "last hour" a moment after it first appears.
+  const loading = ads.isLoading || recent.isLoading;
+
+  return useMemo(
+    () => (enabled ? { byJob, loading } : undefined),
+    [enabled, byJob, loading],
   );
 }
 

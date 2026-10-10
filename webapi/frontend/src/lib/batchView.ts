@@ -43,15 +43,16 @@ export function batchView(
 // What the table's last column describes. The command is what a batch
 // IS; once the view is narrowed to one status, there is a better answer
 // to "what about these jobs".
-export type BatchDetail = 'command' | 'hold';
+export type BatchDetail = 'command' | 'hold' | 'usage';
 
 // batchDetailFor: what the table's last column describes under a status
-// selection. With exactly "Held" selected, the question becomes why the
-// held jobs are held. Exactly "Held" --
+// selection. One status selected changes the question: why the held jobs
+// are held, or how hard the running ones are working. Exactly "Held" --
 // jobs held while their input uploads are a separate chip, and are not
 // stuck.
 export function batchDetailFor(statuses: Set<DisplayStatus>): BatchDetail {
   if (statuses.size !== 1) return 'command';
   if (statuses.has('held')) return 'hold';
+  if (statuses.has('running')) return 'usage';
   return 'command';
 }
