@@ -146,7 +146,8 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 //
 // The unmatched-allowlist case is the one worth spelling out. An
 // MCP_ADMIN_USERS entry is compared verbatim against the identity the
-// schedd reports, so a value written with the wrong domain -- the schedd
+// schedd reports, which is the full user@domain with the domain in lower
+// case, so a value written bare or with the wrong domain -- the schedd
 // name rather than UID_DOMAIN, say -- never matches, and the result is
 // indistinguishable from not being listed at all.
 func (s *Server) privilegeProvenance(ctx context.Context, actor string) (adminVia, superVia string) {

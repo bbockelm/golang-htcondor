@@ -180,8 +180,8 @@ AUTH_SSL_CLIENT_KEYFILE = /etc/condor/hostkey.pem
 	if err != nil {
 		t.Fatalf("createAuthenticatedContext: %v", err)
 	}
-	if user := htcondor.GetAuthenticatedUserFromContext(ctx); user != "alice" {
-		t.Errorf("a bearer the schedd accepts authenticated as %q, want alice", user)
+	if user := htcondor.GetAuthenticatedUserFromContext(ctx); user != "alice@pool.example" {
+		t.Errorf("a bearer the schedd accepts authenticated as %q, want alice@pool.example", user)
 	}
 	got, ok := htcondor.GetSecurityConfigFromContext(ctx)
 	if !ok {

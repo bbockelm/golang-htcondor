@@ -125,7 +125,7 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 	// Owner = authenticated user without "@uidDomain" — schedd's Owner
 	// attribute uses the bare username; we re-add the suffix at redeem
 	// time when minting the JWT.
-	owner := strings.SplitN(htcondor.GetAuthenticatedUserFromContext(ctx), "@", 2)[0]
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
 	if owner == "" {
 		s.writeError(w, http.StatusUnauthorized, "Could not determine authenticated user")
 		return
@@ -373,7 +373,7 @@ func (s *Handler) handleJobInputShare(w http.ResponseWriter, r *http.Request, jo
 
 	// Owner without "@uidDomain" -- the schedd's Owner attribute uses
 	// the bare username; redeemContext re-adds the suffix.
-	owner := strings.SplitN(htcondor.GetAuthenticatedUserFromContext(ctx), "@", 2)[0]
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
 	if owner == "" {
 		s.writeError(w, http.StatusUnauthorized, "Could not determine authenticated user")
 		return

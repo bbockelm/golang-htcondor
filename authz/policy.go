@@ -246,10 +246,14 @@ func (p *Policy) Authorize(perm, peerAddr, user string) bool {
 	return p.Verify(Perm(perm), net.ParseIP(host), user)
 }
 
-// Verify reports whether the authenticated user connecting from addr is allowed
-// at the given permission level. user may be "" (anonymous/unauthenticated), in
-// which case it is treated as the totally-wild "*". This is a port of
-// IpVerify::Verify (without the result cache, which is a performance detail).
+// Verify reports whether the user connecting from addr is allowed at the given
+// permission level. user is the peer's fully-qualified user ("user@domain"), the
+// string ALLOW_*/DENY_* entries are matched against; a cedar server passes that
+// for an authenticated peer and "unauthenticated@unmapped" for one that did not
+// authenticate, as C++ DaemonCore does, so only an entry matching that string
+// (e.g. "*", "*@unmapped") admits an unauthenticated peer. "" is treated as the
+// totally-wild "*", as in C++. This is a port of IpVerify::Verify (without the
+// result cache, which is a performance detail).
 func (p *Policy) Verify(perm Perm, addr net.IP, user string) bool {
 	if perm == PermAllow {
 		return true

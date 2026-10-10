@@ -394,6 +394,16 @@ func fsAuthDir(cfg *config.Config, key string) string {
 	return ""
 }
 
+// configUIDDomain reads UID_DOMAIN, trimmed, or "" when unset.
+func configUIDDomain(cfg *config.Config) string {
+	if cfg != nil {
+		if v, ok := cfg.Get("UID_DOMAIN"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
 // fsRootToCondor reads FS_ROOT_TO_CONDOR as a tri-state: nil (unset) leaves cedar's
 // default (enabled, matching HTCondor); an explicit value overrides it.
 func fsRootToCondor(cfg *config.Config) *bool {
@@ -471,6 +481,11 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 		// path and the client rejects anything not under /tmp.
 		FSLocalDir:  fsAuthDir(cfg, "FS_LOCAL_DIR"),
 		FSRemoteDir: fsAuthDir(cfg, "FS_REMOTE_DIR"),
+		// UID_DOMAIN: the domain of an FS or CLAIMTOBE identity (user@UID_DOMAIN),
+		// on the server for the peer it authenticates and on the client for the
+		// name CLAIMTOBE claims, and of a mapped name without one. Empty leaves
+		// cedar's fallback, the host name, which is what UID_DOMAIN defaults to.
+		UIDDomain: configUIDDomain(cfg),
 	}
 
 	// Get authentication level
@@ -548,6 +563,10 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 //     (SEC_TOKEN_POOL_SIGNING_KEY_FILE for the pool key, SEC_PASSWORD_DIRECTORY
 //     for named issuer keys), the trust domain (TRUST_DOMAIN, defaulting to
 //     UID_DOMAIN), and the maximum token age (SEC_TOKEN_MAX_AGE).
+//
+// UID_DOMAIN (set by GetSecurityConfig) is the domain of an FS peer's identity,
+// user@UID_DOMAIN. A daemon behind a shared port should build its configs with
+// daemon.Daemon.ServerSecurityConfig, which also sets the shared-port id.
 //
 // This is what a Go HTCondor daemon (e.g. a CCB server) should use so it
 // authenticates clients with the same policy and keys as the C++ daemons.
