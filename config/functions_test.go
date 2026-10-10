@@ -14,8 +14,7 @@ func TestFunctionENV(t *testing.T) {
 	defer func() { _ = os.Unsetenv("TEST_VAR") }()
 
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	result, err := cfg.evaluateFunctionMacro("ENV(TEST_VAR)")
@@ -30,8 +29,7 @@ func TestFunctionENV(t *testing.T) {
 
 func TestFunctionINT(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	tests := []struct {
@@ -59,8 +57,7 @@ func TestFunctionINT(t *testing.T) {
 
 func TestFunctionSTRING(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	result, err := cfg.evaluateFunctionMacro("STRING(hello world)")
@@ -75,8 +72,7 @@ func TestFunctionSTRING(t *testing.T) {
 
 func TestFunctionRANDOM_INTEGER(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	// Test with min, max
@@ -112,8 +108,7 @@ func TestFunctionRANDOM_INTEGER(t *testing.T) {
 
 func TestFunctionSUBSTR(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	tests := []struct {
@@ -141,8 +136,7 @@ func TestFunctionSUBSTR(t *testing.T) {
 
 func TestFunctionREAL(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	tests := []struct {
@@ -176,7 +170,6 @@ func TestExpandMacrosWithFunctions(t *testing.T) {
 			"FOO": "bar",
 			"NUM": "42",
 		},
-		evaluating: make(map[string]bool),
 	}
 
 	tests := []struct {
@@ -205,8 +198,7 @@ func TestExpandMacrosWithFunctions(t *testing.T) {
 
 func TestFunctionRANDOM_CHOICE(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	// Test that RANDOM_CHOICE returns one of the provided options
@@ -232,8 +224,7 @@ func TestFunctionRANDOM_CHOICE(t *testing.T) {
 
 func TestFunctionCHOICE(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	tests := []struct {
@@ -269,8 +260,7 @@ func TestFunctionCHOICE(t *testing.T) {
 
 func TestFunctionDIRNAME(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	tests := []struct {
@@ -298,8 +288,7 @@ func TestFunctionDIRNAME(t *testing.T) {
 
 func TestFunctionBASENAME(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	tests := []struct {
@@ -329,8 +318,7 @@ func TestFunctionBASENAME(t *testing.T) {
 
 func TestFilenameFunc(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	tests := []struct {
@@ -364,32 +352,6 @@ func TestFilenameFunc(t *testing.T) {
 
 		if result != tt.expected {
 			t.Errorf("%s: expected %q, got %q", tt.input, tt.expected, result)
-		}
-	}
-}
-
-func TestSplitArgs(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected []string
-	}{
-		{"a,b,c", []string{"a", "b", "c"}},
-		{"a, b, c", []string{"a", "b", "c"}},
-		{"a", []string{"a"}},
-		{"func(a,b),c,d", []string{"func(a,b)", "c", "d"}},
-		{"nested(func(a,b),c),d", []string{"nested(func(a,b),c)", "d"}},
-	}
-
-	for _, tt := range tests {
-		result := splitArgs(tt.input)
-		if len(result) != len(tt.expected) {
-			t.Errorf("splitArgs(%q): expected %d parts, got %d", tt.input, len(tt.expected), len(result))
-			continue
-		}
-		for i := range result {
-			if result[i] != tt.expected[i] {
-				t.Errorf("splitArgs(%q): part %d expected %q, got %q", tt.input, i, tt.expected[i], result[i])
-			}
 		}
 	}
 }

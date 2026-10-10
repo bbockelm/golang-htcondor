@@ -54,13 +54,12 @@ type ConfigOptions struct {
 
 	// HTCondorCompat restricts the parser to HTCondor's exact grammar,
 	// disabling Go-only extensions so a config behaves the same here as under
-	// condor_config. Currently this gates the richer `if` conditions: HTCondor
-	// accepts only a bare boolean, `defined X`, or `version <op> x`, whereas Go
-	// also allows numeric/string comparisons and && / ||. Default (false) keeps
-	// the extensions; the differential config fuzzer sets this so it compares Go
-	// against HTCondor faithfully. (Other extensions — $DIRNAME/$BASENAME,
-	// nested-macro re-expansion — remain on even in compat for now and are
-	// tracked as intentional divergences.)
+	// condor_config. It gates the richer `if` conditions (HTCondor accepts
+	// only a bare boolean or number, `defined X` and `version <op> x`; Go
+	// also allows comparisons and && / ||) and the stripping of quotes
+	// around an include path, and makes a line ending in '+', which HTCondor
+	// reads past the end of, an ErrHTCondorUndefined error. The differential
+	// config fuzzer sets it.
 	HTCondorCompat bool
 
 	// NoLocalAccess, when true, refuses every parse-time construct that
@@ -73,6 +72,14 @@ type ConfigOptions struct {
 	// user. Off by default: loading a real configuration chain needs
 	// all three.
 	NoLocalAccess bool
+
+	// NoInclude, when true, refuses `include` and `include command`
+	// directives -- the half of NoLocalAccess that reads files and runs
+	// commands -- while still letting $ENV() read the environment. The
+	// differential config fuzzer uses it, with HTCondor's
+	// CONFIG_OPT_NO_INCLUDE_FILE on the C++ side, so a fuzz input never
+	// touches the host.
+	NoInclude bool
 
 	// SkipDefaults, when true, suppresses initBuiltins(): no param_info
 	// defaults, no param overrides, no time constants (SECOND/MINUTE/...), and
@@ -99,14 +106,10 @@ type Config struct {
 	// folded maps an upper-cased key to the spelling actually stored in values,
 	// so a lookup can match the way HTCondor does: case-insensitively.
 	folded map[string]string
-	// Track macro evaluation depth to detect loops
-	evaluating map[string]bool
 	// Track included files to prevent cycles
 	includedFiles map[string]bool
 	// Configuration options
 	options ConfigOptions
-	// Track if we're executing inside a metaknob template
-	inMetaknob bool
 	// builtinDefaults is a snapshot of values as they stood at the end of
 	// initBuiltins — HTCondor's compiled-in param defaults plus the
 	// auto-detected macros. Anything differing from it afterwards came
@@ -132,7 +135,6 @@ func NewEmpty() *Config {
 func NewEmptyWithOptions(opts ConfigOptions) *Config {
 	cfg := &Config{
 		values:        make(map[string]string),
-		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 		options:       opts,
 	}
@@ -153,7 +155,6 @@ func NewWithOptions(opts ConfigOptions) (*Config, error) {
 	cfg := &Config{
 		values:        make(map[string]string),
 		folded:        make(map[string]string),
-		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 		options:       opts,
 	}
@@ -176,7 +177,6 @@ func NewFromReader(r io.Reader) (*Config, error) {
 func NewFromReaderWithOptions(r io.Reader, opts ConfigOptions) (*Config, error) {
 	cfg := &Config{
 		values:        make(map[string]string),
-		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 		options:       opts,
 	}
@@ -204,7 +204,7 @@ func (c *Config) putValue(key, value string) {
 	if c.folded == nil {
 		c.folded = make(map[string]string, len(c.values))
 	}
-	upper := strings.ToUpper(key)
+	upper := asciiUpper(key)
 	if previous, ok := c.folded[upper]; ok && previous != key {
 		delete(c.values, previous)
 	}
@@ -222,7 +222,7 @@ func (c *Config) resolveKey(key string) (string, bool) {
 	if _, ok := c.values[key]; ok {
 		return key, true
 	}
-	if actual, ok := c.folded[strings.ToUpper(key)]; ok {
+	if actual, ok := c.folded[asciiUpper(key)]; ok {
 		return actual, true
 	}
 	return "", false
@@ -250,35 +250,6 @@ func (c *Config) lookupValue(key string) (string, bool) {
 func (c *Config) hasKey(key string) bool {
 	_, ok := c.resolveKey(key)
 	return ok
-}
-
-// forExpansion returns a Config that shares this one's parsed values but
-// carries its own cycle-detection state.
-//
-// Macro expansion records the variables it is part-way through
-// resolving so it can spot a circular reference. That bookkeeping used
-// to live on the shared Config, which made Get — a read, called
-// per-connection from whatever goroutine is dialing — a concurrent
-// writer. Two callers expanding at once produced
-// "fatal error: concurrent map writes": not a panic, so nothing
-// recovers and the daemon simply dies. It was reported from a collector
-// after a dependency upgrade, and the same path is reachable from any
-// daemon that builds a security config per request.
-//
-// Locking would fix the crash and introduce a subtler bug: one
-// goroutine's in-progress marks would look like circular references to
-// another's unrelated expansion. The state has to be per-resolution,
-// not merely serialized.
-//
-// The copy is shallow on purpose. Expansion only ever writes
-// `evaluating`; `values` and the rest are read-only for its duration,
-// so sharing them costs nothing and the maps are pointers. Recursion
-// then inherits the fresh state for free, because every nested call is
-// a method on this copy.
-func (c *Config) forExpansion() *Config {
-	ec := *c
-	ec.evaluating = make(map[string]bool, 4)
-	return &ec
 }
 
 // Get retrieves a configuration value, honoring HTCondor's subsystem and
@@ -309,15 +280,29 @@ func (c *Config) Get(key string) (string, bool) {
 	}
 	val := c.values[actual]
 
-	// Expand macros and function macros in the value. Started from a
-	// per-call copy so concurrent Gets do not share cycle-detection
-	// state; see forExpansion.
-	expanded, err := c.forExpansion().expandMacrosWithFunctions(val)
+	// Expand macros and function macros in the value. Expansion keeps
+	// its state per call, so concurrent Gets are safe.
+	expanded, err := c.expandMacro(val)
 	if err != nil {
 		return val, true // Return unexpanded on error
 	}
 
 	return expanded, true
+}
+
+// GetChecked is Get, but reports an expansion that fails -- a reference
+// cycle (ErrMacroLoop) or a refused $ENV() -- instead of returning the raw
+// value.
+func (c *Config) GetChecked(key string) (string, bool, error) {
+	actual, ok := c.resolveKey(c.scopedLookupKey(key))
+	if !ok {
+		return "", false, nil
+	}
+	expanded, err := c.expandMacro(c.values[actual])
+	if err != nil {
+		return "", true, err
+	}
+	return expanded, true, nil
 }
 
 // scopedLookupKey returns the most specific map key that exists for the bare
@@ -350,21 +335,17 @@ func (c *Config) scopedLookupKey(key string) string {
 	return key
 }
 
-// Set sets a configuration value
+// Set sets a configuration value, as a `key = value` line in a config file
+// would: references to key itself ($(key), $(key:default)) are replaced by
+// its previous value (empty when it had none), and the rest of the value is
+// stored unexpanded.
 func (c *Config) Set(key, value string) {
-	// Check if this is a self-referential definition
-	if strings.Contains(value, "$("+key+")") {
-		// Expand the self-reference immediately
-		if actual, ok := c.resolveKey(key); ok {
-			oldVal := c.values[actual]
-			value = strings.ReplaceAll(value, "$("+key+")", oldVal)
-		} else {
-			// First definition, just remove the self-reference
-			value = strings.ReplaceAll(value, "$("+key+")", "")
-		}
+	if v, err := c.expandSelfMacro(value, key); err == nil {
+		value = v
 	}
-
-	c.putValue(key, value)
+	if err := c.insertMacro(key, value); err != nil {
+		c.putValue(key, value)
+	}
 }
 
 // Keys returns all configuration keys
@@ -1038,208 +1019,6 @@ func detectWindowsVersion() string {
 		}
 	}
 	return ""
-}
-
-// expandMacros expands $(VAR) references in a value
-//
-//nolint:unused // Reserved for future use
-func (c *Config) expandMacros(value string) (string, error) {
-	result := value
-	maxDepth := 100
-	depth := 0
-
-	for depth < maxDepth {
-		// Look for the next macro
-		dollarIdx := strings.Index(result, "$(")
-		if dollarIdx == -1 {
-			break // No more macros
-		}
-
-		// Find the matching closing paren (handling nested parens)
-		parenDepth := 1
-		endIdx := -1
-		for i := dollarIdx + 2; i < len(result); i++ {
-			if result[i] == '(' {
-				parenDepth++
-			} else if result[i] == ')' {
-				parenDepth--
-				if parenDepth == 0 {
-					endIdx = i
-					break
-				}
-			}
-		}
-
-		if endIdx == -1 {
-			return value, fmt.Errorf("unmatched parentheses in macro: %s", result[dollarIdx:])
-		}
-
-		// Extract the macro content
-		varName := result[dollarIdx+2 : endIdx]
-
-		// If varName contains a macro itself, recursively expand it first
-		if strings.Contains(varName, "$(") {
-			expanded, err := c.expandMacros(varName)
-			if err != nil {
-				return value, err
-			}
-			varName = expanded
-		}
-
-		// Handle metaknob parameter special syntax
-		// $(0), $(0?), $(0#), $(1), $(1?), $(1+), etc.
-		if len(varName) > 0 && varName[0] >= '0' && varName[0] <= '9' {
-			replacement := c.expandMetaknobParam(varName)
-			result = result[:dollarIdx] + replacement + result[endIdx+1:]
-			depth++
-			continue
-		}
-
-		// Handle default values VAR:default
-		parts := strings.SplitN(varName, ":", 2)
-		varName = parts[0]
-		defaultVal := ""
-		if len(parts) > 1 {
-			defaultVal = parts[1]
-		}
-
-		// $(DOLLAR) is a predefined macro that expands to a literal '$'.
-		// HTCondor handles it in expand_macro itself, independent of the
-		// defaults table, so it must resolve even in a defaults-free parse.
-		if strings.EqualFold(varName, "DOLLAR") {
-			result = result[:dollarIdx] + "$" + result[endIdx+1:]
-			depth++
-			continue
-		}
-
-		// Check for circular reference
-		if c.evaluating[strings.ToUpper(varName)] {
-			// Skip this macro to avoid infinite loop
-			result = result[:dollarIdx] + "$(" + varName + ")" + result[endIdx+1:]
-			break
-		}
-
-		c.evaluating[strings.ToUpper(varName)] = true
-
-		// Get value. Resolve through the subsystem/local-name scoping that Get()
-		// uses, so `$(IsMaster)` under SUBSYSTEM=MASTER expands via MASTER.IsMaster,
-		// and any `$(KNOB)` picks up a `SUBSYS.KNOB` override -- matching HTCondor,
-		// where macro expansion is subsystem-scoped.
-		replacement := defaultVal
-		if val, ok := c.lookupValue(varName); ok {
-			replacement = val
-		}
-
-		delete(c.evaluating, strings.ToUpper(varName))
-
-		// Replace the macro with its value
-		result = result[:dollarIdx] + replacement + result[endIdx+1:]
-		depth++
-	}
-
-	if depth >= maxDepth {
-		return value, fmt.Errorf("macro expansion depth exceeded")
-	}
-
-	return result, nil
-}
-
-// expandMetaknobParam expands metaknob parameter references
-// Supports: $(0), $(0?), $(0#), $(N), $(N?), $(N+) where N is 1-9
-func (c *Config) expandMetaknobParam(param string) string {
-	// Parse the parameter specification
-	// Format: N[?|#|+][:default]
-
-	// Check for default value
-	parts := strings.SplitN(param, ":", 2)
-	paramSpec := parts[0]
-	defaultVal := ""
-	if len(parts) > 1 {
-		defaultVal = parts[1]
-	}
-
-	if len(paramSpec) == 0 {
-		return defaultVal
-	}
-
-	// Extract the digit and any suffix
-	digit := paramSpec[0]
-	suffix := ""
-	if len(paramSpec) > 1 {
-		suffix = paramSpec[1:]
-	}
-
-	// Get the parameter number
-	paramNum := int(digit - '0')
-	if paramNum < 0 || paramNum > 9 {
-		// Not a valid metaknob parameter
-		if val, ok := c.values[param]; ok {
-			return val
-		}
-		return defaultVal
-	}
-
-	// Collect all available parameters (1-9)
-	// Note: We collect ALL parameters up to 9, including empty ones
-	// This is needed for cases like: use FEATURE : Knob(arg1, , arg3)
-	var allParams []string
-	maxParam := 0
-	for i := 1; i <= 9; i++ {
-		if val, ok := c.values[fmt.Sprintf("%d", i)]; ok {
-			allParams = append(allParams, val)
-			maxParam = i
-		} else {
-			// Still append empty to maintain indexing, but don't update maxParam
-			allParams = append(allParams, "")
-		}
-	}
-	// Trim to actual number of parameters passed
-	if maxParam > 0 {
-		allParams = allParams[:maxParam]
-	} else {
-		allParams = []string{}
-	}
-
-	// Handle special cases for $(0...)
-	if paramNum == 0 {
-		switch suffix {
-		case "?": // $(0?) - returns "1" if any args exist, "0" otherwise
-			if len(allParams) > 0 {
-				return "1"
-			}
-			return "0"
-
-		case "#": // $(0#) - returns the number of arguments
-			return fmt.Sprintf("%d", len(allParams))
-
-		default: // $(0) or $(0:default) - returns all arguments joined by ", "
-			if len(allParams) > 0 {
-				return strings.Join(allParams, ", ")
-			}
-			return defaultVal
-		}
-	}
-
-	// Handle $(N?), $(N+), $(N) for N = 1-9
-	switch suffix {
-	case "?": // $(N?) - returns "1" if parameter N exists and is non-empty, "0" otherwise
-		if paramNum <= len(allParams) && allParams[paramNum-1] != "" {
-			return "1"
-		}
-		return "0"
-
-	case "+": // $(N+) - returns parameters from N onwards, joined by ", "
-		if paramNum <= len(allParams) {
-			return strings.Join(allParams[paramNum-1:], ", ")
-		}
-		return defaultVal
-
-	default: // $(N) or $(N:default) - returns parameter N
-		if paramNum <= len(allParams) {
-			return allParams[paramNum-1]
-		}
-		return defaultVal
-	}
 }
 
 // LoadFromEnvironment loads configuration from the process environment.

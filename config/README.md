@@ -4,23 +4,37 @@ This package implements parsing and management of HTCondor configuration files i
 
 ## Architecture
 
-The configuration parser consists of three main components:
+Configuration files are read by a port of HTCondor's own reader and macro
+expansion (`config.cpp`, v25.14.1), so a file means here what it means to
+condor_config_val:
 
-1. **Lexer** (`lexer.go`) - Tokenizes HTCondor configuration syntax
-   - Character-by-character scanning with buffered lookahead
-   - Automatic value reading after assignment operators
-   - Support for all HTCondor token types
-   - Line continuation and comment handling
+1. **Reader** (`reader.go`) - `getline_implementation` and `Parse_macros`:
+   logical lines (trimming, `\` continuation), then one line at a time, in
+   order: `if`/`elif`/`else`/`endif`, `NAME = value`, `NAME : value`,
+   `NAME += value`, `NAME @=tag` blocks, `use`, `include`, `error`,
+   `warning`. A line HTCondor rejects fails the whole source.
 
-2. **Parser** (`parser.y`, `parser.go`) - goyacc-based grammar parser
-   - BNF grammar for HTCondor configuration language
-   - AST generation for assignments, conditionals, includes
-   - Graceful error handling with partial parse recovery
+2. **Expansion** (`expand.go`, `printf.go`) - the `expand_macro` that
+   `param()` uses: `$(NAME)`, `$(NAME:default)`, `$(DOLLAR)` and the special
+   functions (`$ENV`, `$INT`, `$REAL`, `$STRING`, `$EVAL`, `$SUBSTR`,
+   `$CHOICE`, `$RANDOM_*`, `$DIRNAME`, `$BASENAME`, `$F...`), with glibc's
+   printf behavior for their formats. A reference cycle, on which HTCondor
+   loops forever, is reported as `ErrMacroLoop`; a construct on which
+   HTCondor crashes as `ErrHTCondorUndefined`.
 
-3. **Config Manager** (`config.go`) - Configuration storage and evaluation
-   - Macro expansion engine with loop detection
-   - Built-in macro support
-   - Environment and file loading
+3. **Metaknobs** (`metaknob.go`) - `use CATEGORY : Knob(args)` from the
+   vendored param_info table, with HTCondor's argument substitution and its
+   metaknob-body parser.
+
+4. **Lexer and parser** (`lexer.go`, `parser.y`) - a goyacc grammar that
+   parses a source into statements (`Parse`, `ParseStrict`). Submit files
+   use it (they carry `queue` statements and `+Attr`); config files do not.
+
+5. **Config Manager** (`config.go`) - storage, case-insensitive lookup,
+   subsystem/local-name scoping, defaults and the file chain.
+
+The differential fuzzer in `fuzz/config` compares the reader and expansion
+against libcondor_utils.
 
 ## Current Implementation Status
 
