@@ -1434,7 +1434,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// which made a stuck migration look identical to a stuck
 	// post-credd RPC.
 	logger.Info(logging.DestinationHTTP, "Opening application database", "path", dbPath)
-	appDB, err := appdb.Open(dbPath)
+	appDB, err := appdb.OpenWithWarnings(dbPath, func(msg string, args ...any) {
+		logger.Warn(logging.DestinationHTTP, msg, args...)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open application database: %w", err)
 	}
