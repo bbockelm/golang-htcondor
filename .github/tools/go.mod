@@ -5,7 +5,7 @@ module github.com/bbockelm/golang-htcondor/citools
 go 1.26.0
 
 require (
-	github.com/bbockelm/htcondordb v0.18.9
+	github.com/bbockelm/htcondordb v0.21.1
 	github.com/golangci/golangci-lint/v2 v2.13.2
 	github.com/goreleaser/nfpm/v2 v2.43.1
 	gotest.tools/gotestsum v1.13.0
@@ -38,13 +38,13 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/MirrexOne/unqueryvet v1.5.4 // indirect
 	github.com/OpenPeeDeeP/depguard/v2 v2.2.1 // indirect
-	github.com/PelicanPlatform/classad v0.29.11 // indirect
-	github.com/PelicanPlatform/classad/changefeed v0.29.9 // indirect
-	github.com/PelicanPlatform/classad/collections v0.29.9 // indirect
-	github.com/PelicanPlatform/classad/db v0.29.9 // indirect
-	github.com/PelicanPlatform/classad/dbrpc v0.29.9 // indirect
+	github.com/PelicanPlatform/classad v0.31.3 // indirect
+	github.com/PelicanPlatform/classad/changefeed v0.31.3 // indirect
+	github.com/PelicanPlatform/classad/collections v0.31.3 // indirect
+	github.com/PelicanPlatform/classad/db v0.31.3 // indirect
+	github.com/PelicanPlatform/classad/dbrpc v0.31.3 // indirect
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
-	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
+	github.com/RoaringBitmap/roaring/v2 v2.29.0 // indirect
 	github.com/alecthomas/chroma/v2 v2.27.0 // indirect
 	github.com/alecthomas/go-check-sumtype v0.3.1 // indirect
 	github.com/alexkohler/nakedret/v2 v2.0.6 // indirect
@@ -56,9 +56,9 @@ require (
 	github.com/ashanbrown/forbidigo/v2 v2.3.1 // indirect
 	github.com/ashanbrown/makezero/v2 v2.2.1 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
-	github.com/bbockelm/cedar v0.6.17 // indirect
-	github.com/bbockelm/golang-htcondor v0.13.1 // indirect
-	github.com/bbockelm/gosssd v0.0.1 // indirect
+	github.com/bbockelm/cedar v0.7.2 // indirect
+	github.com/bbockelm/golang-htcondor v0.16.4-0.20260926032345-41c11247a087 // indirect
+	github.com/bbockelm/gosssd v0.0.4 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bitfield/gotestdox v0.2.2 // indirect
 	github.com/bits-and-blooms/bitset v1.24.6 // indirect
@@ -177,7 +177,7 @@ require (
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
 	github.com/kisielk/errcheck v1.20.0 // indirect
 	github.com/kkHAIKE/contextcheck v1.1.6 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/kulti/thelper v0.7.1 // indirect
 	github.com/kunwardeep/paralleltest v1.0.15 // indirect

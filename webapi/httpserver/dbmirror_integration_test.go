@@ -4,10 +4,6 @@ package httpserver
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,113 +22,8 @@ import (
 // and a freshness gate reading an attribute that meant something else.
 // Each was invisible to unit tests because each lives in the round trip.
 //
-// This runs the real thing. It needs an htcondordb binary, which CI
-// builds from the version pinned in .github/tools (so Dependabot bumps
-// it and the test starts exercising each new release); without one it
-// skips, because a developer without htcondordb checked out should not
-// be blocked by it.
-
-// htcondordbBinary locates the daemon, or skips.
-func htcondordbBinary(t *testing.T) string {
-	t.Helper()
-	if bin := os.Getenv("HTCONDORDB_BINARY"); bin != "" {
-		if _, err := os.Stat(bin); err != nil {
-			// Set but wrong is a mistake worth failing on: a CI job that
-			// meant to run this must not silently skip it.
-			t.Fatalf("HTCONDORDB_BINARY=%s is not usable: %v", bin, err)
-		}
-		return bin
-	}
-	bin, err := exec.LookPath("htcondordb")
-	if err != nil {
-		t.Skip("htcondordb not found (set HTCONDORDB_BINARY or put it on PATH); skipping the mirror integration test")
-	}
-	return bin
-}
-
-// startMirror runs an htcondordb advertising to the harness collector,
-// and returns once it has published an address.
-func startMirror(t *testing.T, h *htcondor.CondorTestHarness, bin, dir string) {
-	t.Helper()
-
-	addrFile := filepath.Join(dir, "addr")
-	logDir := filepath.Join(dir, "log")
-	for _, d := range []string{logDir, filepath.Join(dir, "db")} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// FS authentication throughout: both processes are this test user, so
-	// there is no token to mint and nothing to distribute. What is being
-	// tested is the mirror round trip, not the security handshake.
-	cfg := fmt.Sprintf(`
-CONDOR_HOST = 127.0.0.1
-COLLECTOR_HOST = %s
-UID_DOMAIN = %s
-TRUST_DOMAIN = %s
-SEC_DEFAULT_AUTHENTICATION = REQUIRED
-SEC_DEFAULT_AUTHENTICATION_METHODS = FS
-SEC_DEFAULT_INTEGRITY = REQUIRED
-SEC_DEFAULT_ENCRYPTION = OPTIONAL
-ALLOW_DAEMON = *
-ALLOW_WRITE = *
-ALLOW_READ = *
-ALLOW_ADMINISTRATOR = *
-LOG = %s
-HTCONDORDB_DIR = %s
-HTCONDORDB_ADDRESS_FILE = %s
-HTCONDORDB_ADVERTISE = true
-UPDATE_INTERVAL = 5
-`, h.GetCollectorAddr(), h.GetTrustDomain(), h.GetTrustDomain(),
-		logDir, filepath.Join(dir, "db"), addrFile)
-
-	cfgPath := filepath.Join(dir, "condor_config")
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	stderr, err := os.Create(filepath.Join(dir, "stderr.log"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, bin)
-	cmd.Env = append(os.Environ(), "CONDOR_CONFIG="+cfgPath)
-	cmd.Stderr, cmd.Stdout = stderr, stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("starting htcondordb: %v", err)
-	}
-	t.Cleanup(func() {
-		cancel()
-		_ = cmd.Wait()
-		_ = stderr.Close()
-		// The daemon's own log is the only account of why a failure
-		// happened on the far side of the connection.
-		if t.Failed() {
-			if b, rerr := os.ReadFile(filepath.Join(dir, "stderr.log")); rerr == nil && len(b) > 0 {
-				t.Logf("=== htcondordb stderr ===\n%s", b)
-			}
-		}
-	})
-
-	waitFor(t, "htcondordb to publish its address", 30*time.Second, func() bool {
-		b, rerr := os.ReadFile(addrFile)
-		return rerr == nil && len(strings.TrimSpace(string(b))) > 0
-	})
-}
-
-func waitFor(t *testing.T, what string, limit time.Duration, ok func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(limit)
-	for time.Now().Before(deadline) {
-		if ok() {
-			return
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	t.Fatalf("timed out after %s waiting for %s", limit, what)
-}
+// This runs the real thing. The daemon helpers, and how the binary is
+// found, are in htcondordb_harness_integration_test.go.
 
 // TestMirrorRoundTrip is the test the unit suite structurally cannot be:
 // a real collector, a real database, and a real authenticated read.
@@ -266,6 +157,57 @@ func TestMirrorProbeReportsEachStage(t *testing.T) {
 		}
 		if !got.Stages[i].OK {
 			t.Errorf("stage %q failed against a working mirror: %s", name, got.Stages[i].Error)
+		}
+	}
+}
+
+// TestMirrorTxnSetAttributeAfterNewAdKeepsTheAd pins a storage
+// regression a real htcondordb showed and the in-process catalogs here
+// (an older classad) do not: a transaction that creates an ad and then
+// sets one more attribute on it must commit the whole ad.
+//
+// From classad v0.30.0 until v0.31.3 (htcondordb v0.21.1) the server
+// stored the ad through Txn.NewClassAdOld, which did not mark the key as
+// wholly written in this transaction the way Txn.NewClassAd does, so the
+// following SetAttribute was taken as a patch over the (absent) stored
+// ad and replaced the buffered one: the committed row was the one
+// attribute that was set. Any dbrpc client that creates an ad and
+// amended it in one transaction -- the shape of a job_queue.log
+// transaction -- lost the ad. htcondordb's own schedd sync writes in
+// process through Txn.NewClassAd and is not affected (the multi-AP
+// end-to-end test reads full job ads through it).
+func TestMirrorTxnSetAttributeAfterNewAdKeepsTheAd(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("integration test (forks a real htcondordb)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	h, _, write := mirrorFeed(t, ctx)
+
+	write(ctx, func(tx *txWriter) {
+		tx.newJob("7001.0", 7001, 0, 4)
+		tx.set("7001.0", "ExitCode", "0")
+	})
+
+	dbc, closer, _, err := h.dbMirror.Client(ctx)
+	if err != nil {
+		t.Fatalf("connecting to the mirror: %v", err)
+	}
+	defer closer()
+	var rows []string
+	if err := dbc.QueryRawProjectStream(ctx, "jobs", "true", nil, 10, func(row string) bool {
+		rows = append(rows, row)
+		return true
+	}); err != nil {
+		t.Fatalf("reading the jobs table: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("jobs table holds %d rows, want 1: %q", len(rows), rows)
+	}
+	for _, want := range []string{"ClusterId = 7001", "ProcId = 0", "JobStatus = 4", `Owner = "tester"`, "ExitCode = 0"} {
+		if !strings.Contains(rows[0], want) {
+			t.Errorf("committed row lacks %q: %q", want, rows[0])
 		}
 	}
 }

@@ -70,6 +70,13 @@ const (
 	// InfoTTL is how long a discovered mirror ad is reused before the
 	// collector is asked again.
 	InfoTTL = 30 * time.Second
+	// RediscoverAfterDialFailure is how soon after a failed connection
+	// the cached ad is replaced by asking the collector again, instead of
+	// waiting out InfoTTL. A database that restarts comes back on a new
+	// address (a new port, or a new shared-port endpoint), and until the
+	// cache let go every read was sent to the old one. The floor bounds
+	// how often a database that stays down costs a collector query.
+	RediscoverAfterDialFailure = 5 * time.Second
 	// PollInterval is how often Poll re-discovers the mirror. It matches
 	// InfoTTL, so a polled Locator asks the collector exactly as often as
 	// a busy on-demand one did -- polling moves that query off the read
@@ -348,6 +355,10 @@ type Locator struct {
 	mu     sync.Mutex
 	info   *Info
 	infoAt time.Time
+	// infoRefused is set when a connection to the cached ad's address
+	// failed, so Discover asks the collector again rather than handing
+	// out the same address for the rest of InfoTTL.
+	infoRefused bool
 	// lastErr is why the most recent discovery failed, for the
 	// readiness snapshot. Operators debugging "why is nothing routing"
 	// need the error, and it is otherwise only visible at debug level.
@@ -499,7 +510,8 @@ func (l *Locator) Discover(ctx context.Context) (*Info, error) {
 		return nil, fmt.Errorf("no collector configured for htcondordb discovery")
 	}
 	l.mu.Lock()
-	if l.info != nil && time.Since(l.infoAt) < InfoTTL {
+	if l.info != nil && time.Since(l.infoAt) < InfoTTL &&
+		(!l.infoRefused || time.Since(l.lastTry) < rediscoverAfterDialFailure) {
 		info := l.info
 		l.mu.Unlock()
 		return info, nil
@@ -508,6 +520,10 @@ func (l *Locator) Discover(ctx context.Context) (*Info, error) {
 
 	return l.refresh(ctx)
 }
+
+// rediscoverAfterDialFailure is RediscoverAfterDialFailure, a variable
+// so tests need not wait it out.
+var rediscoverAfterDialFailure = RediscoverAfterDialFailure
 
 // refresh queries the collector unconditionally, bypassing the InfoTTL
 // cache, and records the outcome. Discover uses it on a cache miss and
@@ -528,6 +544,7 @@ func (l *Locator) refresh(ctx context.Context) (*Info, error) {
 		return nil, err
 	}
 	l.info, l.infoAt, l.lastErr, l.lastOK = info, time.Now(), "", time.Now()
+	l.infoRefused = false
 	return info, nil
 }
 
@@ -776,6 +793,11 @@ func (l *Locator) Client(ctx context.Context) (*dbrpc.Client, func(), *Info, err
 	if err != nil {
 		err = fmt.Errorf("connecting to htcondordb at %s: %w", info.Address, err)
 		l.recordDial(err)
+		l.mu.Lock()
+		if l.info == info {
+			l.infoRefused = true
+		}
+		l.mu.Unlock()
 		return nil, nil, nil, err
 	}
 	l.recordDial(nil)
