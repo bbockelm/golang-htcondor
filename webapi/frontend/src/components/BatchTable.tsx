@@ -24,6 +24,13 @@ import {
   type BatchProgressResult,
 } from '@/lib/batchProgress';
 import {
+  displayHoldReason,
+  NO_REASON,
+  summarizeHoldReasons,
+  type HoldSummary,
+} from '@/lib/holdReasons';
+import type { BatchDetail } from '@/lib/batchView';
+import {
   statusRank,
   summarizeBatchUsage,
   BATCH_USAGE_PROJECTION,
@@ -43,12 +50,14 @@ type BatchSortKey =
   | 'progress'
   | 'status'
   | 'submitted'
-  | 'cmd';
+  | 'cmd'
+  | 'reason';
 
 // Per-row values computed once per render of the table, for both the
 // cells and the sort.
 interface RowExtras {
   progress?: BatchProgressResult;
+  hold?: HoldSummary;
 }
 
 // Sorting reads a comparable value off the batch rather than the rendered
@@ -62,6 +71,8 @@ function batchSortValue(
   switch (key) {
     case 'progress':
       return progressFraction(x?.progress);
+    case 'reason':
+      return x?.hold ? displayHoldReason(x.hold.top.example) : undefined;
     case 'batch':
       return b.name;
     case 'schedd':
@@ -89,6 +100,7 @@ export function BatchTable({
   onChange,
   multiAP,
   progress,
+  detail = 'command',
 }: {
   // Already grouped and filtered by the page: which jobs are in scope is
   // a page-level question (status chips, text filter, server constraint),
@@ -112,16 +124,24 @@ export function BatchTable({
   // page from every job it loaded, not from `batches`, which may be
   // status-filtered (see batchProgress.ts). Omit to leave the column out.
   progress?: ReadonlyMap<string, BatchProgressResult>;
+  // What the last column shows; see BatchDetail.
+  detail?: BatchDetail;
 }) {
   const queryClient = useQueryClient();
 
   const extras = useMemo(() => {
     const m = new Map<BatchKey, RowExtras>();
     for (const b of batches) {
-      m.set(batchKey(b), { progress: progress?.get(b.groupKey) });
+      const x: RowExtras = { progress: progress?.get(b.groupKey) };
+      if (detail === 'hold') {
+        x.hold = summarizeHoldReasons(
+          b.jobs.filter((j) => j.display.key === 'held').map((j) => j.holdReason),
+        );
+      }
+      m.set(batchKey(b), x);
     }
     return m;
-  }, [batches, progress]);
+  }, [batches, progress, detail]);
 
   const sortValue = useCallback(
     (b: Batch, key: BatchSortKey) => batchSortValue(b, key, extras.get(batchKey(b))),
@@ -221,7 +241,11 @@ export function BatchTable({
               )}
               <BatchHeader label="Status" sortKey="status" sort={sort} onSort={setSort} />
               <BatchHeader label="Submitted" sortKey="submitted" sort={sort} onSort={setSort} />
-              <BatchHeader label="Command" sortKey="cmd" sort={sort} onSort={setSort} />
+              {detail === 'hold' ? (
+                <BatchHeader label="Hold reason" sortKey="reason" sort={sort} onSort={setSort} />
+              ) : (
+                <BatchHeader label="Command" sortKey="cmd" sort={sort} onSort={setSort} />
+              )}
               {!multiAP && <th className="px-3 py-2 w-1 text-right">Actions</th>}
             </tr>
           </thead>
@@ -232,6 +256,7 @@ export function BatchTable({
                 batch={b}
                 extras={extras.get(batchKey(b))}
                 showProgress={!!progress}
+                detail={detail}
                 columns={columns}
                 showOwner={showOwner}
                 multiAP={multiAP}
@@ -329,6 +354,7 @@ function BatchRow({
   batch,
   extras,
   showProgress,
+  detail,
   columns,
   showOwner,
   multiAP,
@@ -347,6 +373,7 @@ function BatchRow({
   batch: Batch;
   extras: RowExtras | undefined;
   showProgress: boolean;
+  detail: BatchDetail;
   columns: number;
   showOwner?: boolean;
   multiAP?: boolean;
@@ -410,16 +437,22 @@ function BatchRow({
             ? new Date(batch.submittedUnix * 1000).toLocaleString()
             : '—'}
         </td>
-        <td className="px-3 py-2 text-gray-700 max-w-md truncate">
-          {batch.cmd ? (
-            <span className="font-mono text-xs">
-              {batch.cmd}
-              {batch.args ? ' ' + batch.args : ''}
-            </span>
-          ) : (
-            '—'
-          )}
-        </td>
+        {detail === 'hold' ? (
+          <td className="px-3 py-2 text-gray-700">
+            <HoldSummaryCell summary={extras?.hold} />
+          </td>
+        ) : (
+          <td className="px-3 py-2 text-gray-700 max-w-md truncate">
+            {batch.cmd ? (
+              <span className="font-mono text-xs">
+                {batch.cmd}
+                {batch.args ? ' ' + batch.args : ''}
+              </span>
+            ) : (
+              '—'
+            )}
+          </td>
+        )}
         {!multiAP && (
           <td
             className="px-3 py-2 whitespace-nowrap text-right"
@@ -443,6 +476,7 @@ function BatchRow({
             <BatchUsage batchID={batch.batchID} schedd={batch.schedd} constraint={batch.removeConstraint} />
             <JobsSubTable
               multiAP={multiAP}
+              detail={detail}
               jobs={batch.jobs}
               highlighted={highlighted}
               onRemoveJob={onRemoveJob}
@@ -517,6 +551,7 @@ function BatchUsage({
 
 function JobsSubTable({
   multiAP,
+  detail,
   jobs,
   highlighted,
   onRemoveJob,
@@ -527,6 +562,7 @@ function JobsSubTable({
   pendingReleaseActive,
 }: {
   multiAP?: boolean;
+  detail: BatchDetail;
   jobs: BatchJob[];
   highlighted: string | null;
   onRemoveJob: (id: string) => void;
@@ -557,7 +593,11 @@ function JobsSubTable({
             <th className="px-3 py-1.5">Job</th>
             <th className="px-3 py-1.5">Status</th>
             <th className="px-3 py-1.5">Submitted</th>
-            <th className="px-3 py-1.5">Command</th>
+            {detail === 'hold' ? (
+              <th className="px-3 py-1.5">Hold reason</th>
+            ) : (
+              <th className="px-3 py-1.5">Command</th>
+            )}
             {!multiAP && <th className="px-3 py-1.5 w-1 text-right">Actions</th>}
           </tr>
         </thead>
@@ -609,16 +649,28 @@ function JobsSubTable({
                   ? new Date(j.submittedUnix * 1000).toLocaleString()
                   : '—'}
               </td>
-              <td className="px-3 py-1.5 text-gray-700 max-w-md truncate">
-                {j.cmd ? (
-                  <span className="font-mono">
-                    {j.cmd}
-                    {j.args ? ' ' + j.args : ''}
-                  </span>
-                ) : (
-                  '—'
-                )}
-              </td>
+              {detail === 'hold' ? (
+                <td className="px-3 py-1.5 text-gray-700">
+                  <div className="max-w-sm truncate" title={j.holdReason}>
+                    {j.holdReason ? (
+                      displayHoldReason(j.holdReason)
+                    ) : (
+                      <span className="text-gray-400">{NO_REASON}</span>
+                    )}
+                  </div>
+                </td>
+              ) : (
+                <td className="px-3 py-1.5 text-gray-700 max-w-md truncate">
+                  {j.cmd ? (
+                    <span className="font-mono">
+                      {j.cmd}
+                      {j.args ? ' ' + j.args : ''}
+                    </span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+              )}
               {!multiAP && (
                 <td
                   className="px-3 py-1.5 text-right whitespace-nowrap"
@@ -677,6 +729,38 @@ function JobsSubTable({
           )}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// HoldSummaryCell is a batch's hold reasons in one line: a real message
+// from the most common kind, how many jobs it covers, and how many other
+// kinds there are. The message is truncated to the cell and whole in the
+// tooltip.
+function HoldSummaryCell({ summary }: { summary: HoldSummary | undefined }) {
+  if (!summary) return <span className="text-gray-400">—</span>;
+  const others = summary.otherReasons;
+  return (
+    <div className="flex items-baseline gap-1.5 whitespace-nowrap text-xs">
+      {/* A width on the message, not the cell: a table cell grows to fit
+          its content whatever its max-width says, and a hold message is
+          longer than the rest of the row put together. */}
+      <span className="max-w-[13rem] truncate" title={summary.top.example}>
+        {displayHoldReason(summary.top.example)}
+      </span>
+      {summary.held > 1 && (
+        <span
+          className="shrink-0 tabular-nums text-gray-500"
+          title={`${summary.top.count.toLocaleString()} of ${summary.held.toLocaleString()} held jobs`}
+        >
+          ×{summary.top.count.toLocaleString()}
+        </span>
+      )}
+      {others > 0 && (
+        <span className="shrink-0 text-gray-500">
+          +{others.toLocaleString()} other reason{others === 1 ? '' : 's'}
+        </span>
+      )}
     </div>
   );
 }

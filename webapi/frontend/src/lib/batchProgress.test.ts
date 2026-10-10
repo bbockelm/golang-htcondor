@@ -8,7 +8,7 @@ import {
   type BatchProgress,
   type BatchProgressResult,
 } from './batchProgress';
-import { batchView } from './batchView';
+import { batchDetailFor, batchView } from './batchView';
 import { groupIntoBatches } from './batches';
 
 // n jobs of one cluster with the given statuses, all carrying the
@@ -250,5 +250,15 @@ describe('progressFraction', () => {
   it('sorts unknown batches as missing', () => {
     expect(progressFraction({ known: false, why: 'x' })).toBeUndefined();
     expect(progressFraction(undefined)).toBeUndefined();
+  });
+});
+
+describe('batchDetailFor', () => {
+  it('asks why only when the view is exactly the held jobs', () => {
+    expect(batchDetailFor(new Set<DisplayStatus>(['held']))).toBe('hold');
+    expect(batchDetailFor(new Set<DisplayStatus>(['held', 'running']))).toBe('command');
+    expect(batchDetailFor(new Set<DisplayStatus>())).toBe('command');
+    // Uploading inputs is a hold on the wire and not a problem.
+    expect(batchDetailFor(new Set<DisplayStatus>(['uploading']))).toBe('command');
   });
 });

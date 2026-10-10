@@ -90,6 +90,7 @@ export interface BatchJob {
   submittedUnix?: number;
   // DAG node name, when this job is a node of a DAG workflow.
   nodeName?: string;
+  holdReason?: string;
 }
 
 // The trailing `+<rootDagmanCluster>` HTCondor appends to a DAG's
@@ -195,6 +196,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       args: str(j.Args),
       submittedUnix: q,
       nodeName: str(j.DAGNodeName),
+      holdReason: str(j.HoldReason),
     });
   }
 

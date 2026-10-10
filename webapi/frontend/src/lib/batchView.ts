@@ -39,3 +39,19 @@ export function batchView(
     progress: progressByBatch(ads, allLoaded),
   };
 }
+
+// What the table's last column describes. The command is what a batch
+// IS; once the view is narrowed to one status, there is a better answer
+// to "what about these jobs".
+export type BatchDetail = 'command' | 'hold';
+
+// batchDetailFor: what the table's last column describes under a status
+// selection. With exactly "Held" selected, the question becomes why the
+// held jobs are held. Exactly "Held" --
+// jobs held while their input uploads are a separate chip, and are not
+// stuck.
+export function batchDetailFor(statuses: Set<DisplayStatus>): BatchDetail {
+  if (statuses.size !== 1) return 'command';
+  if (statuses.has('held')) return 'hold';
+  return 'command';
+}

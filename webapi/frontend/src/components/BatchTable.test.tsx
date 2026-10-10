@@ -160,3 +160,57 @@ describe('BatchTable progress', () => {
     expect(screen.queryByRole('button', { name: /Progress/ })).toBeNull();
   });
 });
+
+describe('BatchTable held view', () => {
+  const held: ClassAd[] = [
+    { ClusterId: 30, ProcId: 0, JobStatus: 5, Owner: 'alice', Cmd: '/bin/a', HoldReason: 'Job exceeded 2048 MB on node-1' },
+    { ClusterId: 30, ProcId: 1, JobStatus: 5, Owner: 'alice', Cmd: '/bin/a', HoldReason: 'Job exceeded 2048 MB on node-7' },
+    { ClusterId: 30, ProcId: 2, JobStatus: 5, Owner: 'alice', Cmd: '/bin/a', HoldReason: 'Transfer of /home/alice/x failed' },
+    { ClusterId: 31, ProcId: 0, JobStatus: 5, Owner: 'alice', Cmd: '/bin/b', HoldReason: 'Another reason' },
+  ];
+
+  it('shows the hold reason instead of the command', () => {
+    table({ batches: groupIntoBatches(held), detail: 'hold' });
+    expect(screen.getByRole('button', { name: /Hold reason/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Command/ })).toBeNull();
+    expect(screen.queryByText('/bin/a')).toBeNull();
+    // The most common kind, as a real message, with its count and the
+    // number of other kinds.
+    expect(screen.getByText('Job exceeded 2048 MB on node-1')).toBeTruthy();
+    expect(screen.getByText('×2')).toBeTruthy();
+    expect(screen.getByText('+1 other reason')).toBeTruthy();
+  });
+
+  it('shows each job\'s own reason in the expanded jobs', () => {
+    const batches = groupIntoBatches(held);
+    table({ batches, detail: 'hold', expanded: new Set(batches.map((b) => b.batchID)) });
+    // The batch table's header, plus one in each expanded jobs table.
+    expect(screen.getAllByRole('columnheader', { name: /Hold reason/ })).toHaveLength(3);
+    expect(screen.getByText('Transfer of /home/alice/x failed')).toBeTruthy();
+    expect(screen.getAllByText('Job exceeded 2048 MB on node-7')).toHaveLength(1);
+  });
+
+  it('shows the problem first and the whole message on hover', () => {
+    const fromNode: ClassAd[] = [
+      {
+        ClusterId: 32, ProcId: 0, JobStatus: 5, Owner: 'alice',
+        HoldReason: 'Error from slot1_27@glidein_18169@node9.anvil.rcac.purdue.edu: memory usage exceeded request_memory',
+      },
+    ];
+    const batches = groupIntoBatches(fromNode);
+    table({ batches, detail: 'hold', expanded: new Set(batches.map((b) => b.batchID)) });
+    const cells = screen.getAllByText('memory usage exceeded request_memory');
+    // The batch row and the job row.
+    expect(cells).toHaveLength(2);
+    for (const c of cells) {
+      expect(c.getAttribute('title')).toMatch(/^Error from slot1_27@glidein_18169@node9/);
+    }
+  });
+
+  it('sorts by the reason shown', () => {
+    table({ batches: groupIntoBatches(held), detail: 'hold' });
+    fireEvent.click(screen.getByRole('button', { name: /Hold reason/ }));
+    // "Another reason" < "Job exceeded…"
+    expect(batchNames()[0]).toContain('31');
+  });
+});

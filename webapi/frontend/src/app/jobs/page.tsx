@@ -45,7 +45,7 @@ import {
   BATCH_PROJECTION,
   type BatchKey,
 } from '@/lib/batches';
-import { batchView } from '@/lib/batchView';
+import { batchDetailFor, batchView } from '@/lib/batchView';
 import { useMultiAP } from '@/lib/multiap';
 import { clustersNeedingCounts, withExactCounts } from '@/lib/exactCounts';
 import { useExactCounts } from '@/lib/useExactCounts';
@@ -215,6 +215,8 @@ export default function JobsPage() {
     () => batchView(jobs, statuses, textFilter, allLoaded),
     [jobs, statuses, textFilter, allLoaded],
   );
+
+  const detail = batchDetailFor(statuses);
 
   // Where the listing holds only part of a batch, a second query counts
   // that batch's clusters exactly (see exactCounts.ts).
@@ -507,6 +509,7 @@ export default function JobsPage() {
               onChange={() => refetch()}
               multiAP={multiAP}
               progress={progress}
+              detail={detail}
             />
           )}
         </>
