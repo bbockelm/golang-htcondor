@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,8 +49,9 @@ type jobWatchSource interface {
 
 // --- schedd polling fallback ---
 
-// jobPollHub runs one poll loop per distinct caller and constraint,
-// however many watchers that pair has.
+// jobPollHub keeps one poll group per distinct caller and constraint,
+// however many watchers that pair has, and one poll loop per caller,
+// however many groups that caller has.
 //
 // Keyed on the CALLER's credential as well as the constraint. An earlier
 // version keyed on the constraint alone, reasoning that the constraint
@@ -67,17 +69,40 @@ type jobWatchSource interface {
 //
 // The sharing that remains is the case it was built for: several viewers
 // of the same job, as the same person, collapsing to one query per
-// interval.
+// interval. And one caller watching several jobs costs one query per
+// interval too, when queryMany is set: the caller's loop asks for all of
+// its groups' jobs at once (see credPoll.pollOnce). Without that, each
+// job a caller watched was its own query every interval.
 type jobPollHub struct {
 	interval time.Duration
 	query    func(ctx context.Context, constraint string) (*classad.ClassAd, error)
-	logger   *logging.Logger
+	// queryMany, when set, answers up to limit ads for constraint in one
+	// query. Nil means each group is polled with query on its own.
+	queryMany func(ctx context.Context, constraint string, limit int) ([]*classad.ClassAd, error)
+	logger    *logging.Logger
 
 	mu     sync.Mutex
 	groups map[pollKey]*jobPollGroup
+	// creds holds each caller's poll loop, by pollKey.cred.
+	creds map[string]*credPoll
 	// untagged numbers the groups that cannot be keyed by a credential,
 	// so each gets its own rather than colliding on the empty tag.
 	untagged uint64
+}
+
+// credPoll is one caller's poll loop, over every group on their
+// credential.
+type credPoll struct {
+	hub    *jobPollHub
+	cred   string
+	cancel context.CancelFunc
+
+	// Guarded by hub.mu. queryCtx carries the credential the polls run
+	// on, refreshed by each new subscriber so a loop that outlives the
+	// subscriber who started it does not keep polling on a token that
+	// has since expired.
+	groups   map[*jobPollGroup]struct{}
+	queryCtx context.Context
 }
 
 // pollKey identifies a poll group: whose credential it runs on, and what
@@ -91,7 +116,11 @@ type jobPollGroup struct {
 	hub        *jobPollHub
 	key        pollKey
 	constraint string
-	cancel     context.CancelFunc
+	// expr is constraint parsed, for picking this group's ad out of a
+	// coalesced answer; nil if it does not parse here, in which case the
+	// group is polled on its own.
+	expr *classad.Expr
+	poll *credPoll
 
 	mu   sync.Mutex
 	subs map[*jobPollSub]struct{}
@@ -110,6 +139,7 @@ func newJobPollHub(interval time.Duration, logger *logging.Logger,
 		query:    query,
 		logger:   logger,
 		groups:   map[pollKey]*jobPollGroup{},
+		creds:    map[string]*credPoll{},
 	}
 }
 
@@ -129,18 +159,29 @@ func (h *jobPollHub) Subscribe(ctx context.Context, constraint string) jobWatchS
 
 	key, pollCtx := h.keyFor(ctx, constraint)
 
+	cp := h.creds[key.cred]
+	if cp == nil {
+		loopCtx, cancel := context.WithCancel(context.Background())
+		cp = &credPoll{hub: h, cred: key.cred, cancel: cancel, groups: map[*jobPollGroup]struct{}{}}
+		h.creds[key.cred] = cp
+		go cp.run(loopCtx)
+	}
+	cp.queryCtx = pollCtx
+
 	g := h.groups[key]
 	if g == nil {
-		gctx, cancel := context.WithCancel(pollCtx)
 		g = &jobPollGroup{
 			hub:        h,
 			key:        key,
 			constraint: constraint,
-			cancel:     cancel,
+			poll:       cp,
 			subs:       map[*jobPollSub]struct{}{},
 		}
+		if expr, err := classad.ParseExpr(constraint); err == nil {
+			g.expr = expr
+		}
 		h.groups[key] = g
-		go g.run(gctx)
+		cp.groups[g] = struct{}{}
 	}
 
 	// Buffered: a subscriber that is slow to read must not stall the poll
@@ -187,20 +228,90 @@ func (h *jobPollHub) keyFor(ctx context.Context, constraint string) (pollKey, co
 	return pollKey{cred: fmt.Sprintf("\x00untagged-%d", h.untagged), constraint: constraint}, pollCtx
 }
 
-func (g *jobPollGroup) run(ctx context.Context) {
-	ticker := time.NewTicker(g.hub.interval)
+func (cp *credPoll) run(ctx context.Context) {
+	ticker := time.NewTicker(cp.hub.interval)
 	defer ticker.Stop()
 
 	// Poll once immediately so a subscriber does not wait a full interval
 	// for its first look at the job.
-	g.pollOnce(ctx)
+	cp.pollOnce(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			g.pollOnce(ctx)
+			cp.pollOnce(ctx)
 		}
+	}
+}
+
+// pollOnce answers every group on this credential: with one query for
+// all of them when the hub has queryMany, each group then taking the ad
+// its own constraint matches; otherwise one query per group.
+//
+// Each group's constraint names one job, so the coalesced query asks for
+// at most one ad per group. Should one match more, the answer can fill
+// up before every group's job is in it; a group without an ad in a full
+// answer is then asked about on its own rather than told its job is
+// gone.
+func (cp *credPoll) pollOnce(ctx context.Context) {
+	h := cp.hub
+	h.mu.Lock()
+	groups := make([]*jobPollGroup, 0, len(cp.groups))
+	for g := range cp.groups {
+		groups = append(groups, g)
+	}
+	queryCtx := cp.queryCtx
+	h.mu.Unlock()
+	if len(groups) == 0 || queryCtx == nil {
+		return
+	}
+	queryCtx, cancel := context.WithCancel(queryCtx)
+	defer cancel()
+	defer context.AfterFunc(ctx, cancel)()
+
+	var batch []*jobPollGroup
+	parts := make([]string, 0, len(groups))
+	for _, g := range groups {
+		if h.queryMany == nil || g.expr == nil {
+			g.pollOnce(queryCtx)
+			continue
+		}
+		batch = append(batch, g)
+		parts = append(parts, "("+g.constraint+")")
+	}
+	switch len(batch) {
+	case 0:
+		return
+	case 1:
+		batch[0].pollOnce(queryCtx)
+		return
+	}
+
+	ads, err := h.queryMany(queryCtx, strings.Join(parts, " || "), len(batch))
+	if err != nil {
+		// As in jobPollGroup.pollOnce: a failed poll is not evidence the
+		// jobs are gone.
+		if h.logger != nil {
+			h.logger.Debug(logging.DestinationHTTP, "job watch poll failed",
+				"groups", len(batch), "error", err)
+		}
+		return
+	}
+	full := len(ads) >= len(batch)
+	for _, g := range batch {
+		var match *classad.ClassAd
+		for _, ad := range ads {
+			if ok, _ := g.expr.Eval(ad).BoolValue(); ok {
+				match = ad
+				break
+			}
+		}
+		if match == nil && full {
+			g.pollOnce(queryCtx)
+			continue
+		}
+		g.broadcast(jobWatchUpdate{Ad: match})
 	}
 }
 
@@ -253,15 +364,23 @@ func (s *jobPollSub) Close() {
 		if !last {
 			return
 		}
-		// Last one out stops the poll and drops the group, so an idle
-		// server runs no job queries at all.
+		// Last one out drops the group, and the last group out stops
+		// its caller's poll, so an idle server runs no job queries at
+		// all.
 		h := g.hub
 		h.mu.Lock()
+		defer h.mu.Unlock()
 		if h.groups[g.key] == g {
 			delete(h.groups, g.key)
 		}
-		h.mu.Unlock()
-		g.cancel()
+		cp := g.poll
+		delete(cp.groups, g)
+		if len(cp.groups) == 0 {
+			if h.creds[cp.cred] == cp {
+				delete(h.creds, cp.cred)
+			}
+			cp.cancel()
+		}
 	})
 }
 
@@ -269,7 +388,7 @@ func (s *jobPollSub) Close() {
 // returns (nil, nil) when nothing matches, which the caller reads as "the
 // job has left the queue".
 func (s *Handler) scheddJobQuery(ctx context.Context, constraint string) (*classad.ClassAd, error) {
-	ads, err := s.queryJobs(ctx, constraint, &htcondor.QueryOptions{Limit: 1})
+	ads, err := s.scheddJobsQuery(ctx, constraint, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -277,4 +396,10 @@ func (s *Handler) scheddJobQuery(ctx context.Context, constraint string) (*class
 		return nil, nil
 	}
 	return ads[0], nil
+}
+
+// scheddJobsQuery is the hub's coalesced query function: up to limit
+// ads matching constraint.
+func (s *Handler) scheddJobsQuery(ctx context.Context, constraint string, limit int) ([]*classad.ClassAd, error) {
+	return s.queryJobs(ctx, constraint, &htcondor.QueryOptions{Limit: limit})
 }

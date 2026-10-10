@@ -2190,41 +2190,45 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 	sandboxCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	var sandboxBuf bytes.Buffer
-	errChan := s.getSchedd().ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
-
-	if err := <-errChan; err != nil {
-		return nil, fmt.Errorf("failed to download job sandbox: %w", err)
-	}
-
-	// Extract the output file from the tar archive
-	outputContent, found, entries, err := extractSandboxFile(&sandboxBuf, outputFile)
+	// Streamed, and abandoned once the file is found: the sandbox can be
+	// far larger than anything this process should hold.
+	var match sandboxMatch
+	err = s.streamSandbox(sandboxCtx, constraint, func(r io.Reader) (bool, error) {
+		var rerr error
+		match, rerr = extractSandboxFile(r, outputFile, maxFileSize)
+		return match.found, rerr
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to read job sandbox: %w", err)
+		return nil, err
 	}
-	if !found {
+	if !match.found {
 		// Say what was there. Previously this named only what was
 		// wanted, which left "the transfer returned nothing" and "the
 		// file is called something else" looking identical from the
 		// outside.
 		return nil, fmt.Errorf("%s file %q not found in the job sandbox; the sandbox contains: %s",
-			outputType, filepath.Base(outputFile), describeSandboxEntries(entries))
+			outputType, filepath.Base(outputFile), describeSandboxEntries(match.entries, match.total))
 	}
+	outputContent := match.content
 
 	structured := map[string]interface{}{
 		"job_id":      jobID,
 		"output_type": outputType,
 		"filename":    outputFile,
-		"size":        len(outputContent),
+		"size":        match.size,
 		"empty":       outputContent == "",
+		"truncated":   match.truncated,
 		"content":     outputContent,
+	}
+	text := describeJobOutput(outputContent, outputType)
+	if match.truncated {
+		text += fmt.Sprintf("\n\n(truncated: showing the first %d of %d bytes)", len(outputContent), match.size)
 	}
 	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
-				"text": fmt.Sprintf("Job %s %s:\n%s", jobID, outputType,
-					describeJobOutput(outputContent, outputType)),
+				"text": fmt.Sprintf("Job %s %s:\n%s", jobID, outputType, text),
 			},
 		},
 		"metadata": structured,
@@ -2496,6 +2500,14 @@ type OutputFile struct {
 // maxFileSize is the maximum size of file content to include in response (100KB)
 const maxFileSize = 100 * 1024
 
+// maxOutputTotalSize bounds the content get_job_output returns across all
+// files. Past it, files are still listed but carry no more content.
+const maxOutputTotalSize = 1024 * 1024
+
+// maxOutputFiles bounds how many files get_job_output lists; the rest are
+// counted.
+const maxOutputFiles = 1000
+
 // toolUploadJobInput handles uploading input files to a job's sandbox
 func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	jobID, ok := args["job_id"].(string)
@@ -2695,69 +2707,74 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 		return nil, fmt.Errorf("authentication required")
 	}
 
-	// Download the job sandbox into a buffer
+	// Streamed rather than buffered: the sandbox can be far larger than
+	// anything this process should hold, and only maxFileSize of each
+	// file -- maxOutputTotalSize of them all -- is returned.
 	sandboxCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	var sandboxBuf bytes.Buffer
-	errChan := s.getSchedd().ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
-
-	if err := <-errChan; err != nil {
-		return nil, fmt.Errorf("failed to download job sandbox: %w", err)
-	}
-
-	// Parse the tar archive and extract files
-	tarReader := tar.NewReader(&sandboxBuf)
 	var outputFiles []OutputFile
+	omitted := 0
+	budget := int64(maxOutputTotalSize)
+	err = s.streamSandbox(sandboxCtx, constraint, func(r io.Reader) (bool, error) {
+		tarReader := tar.NewReader(r)
+		for {
+			header, err := tarReader.Next()
+			if errors.Is(err, io.EOF) {
+				return false, nil
+			}
+			if err != nil {
+				return false, fmt.Errorf("failed to read tar archive: %w", err)
+			}
 
-	for {
-		header, err := tarReader.Next()
-		if errors.Is(err, io.EOF) {
-			break
+			// Skip directories
+			if header.Typeflag == tar.TypeDir {
+				continue
+			}
+			if len(outputFiles) >= maxOutputFiles {
+				omitted++
+				continue
+			}
+
+			// Read file content (up to the limit + 1 to detect truncation)
+			limit := min(int64(maxFileSize), budget)
+			content, err := io.ReadAll(io.LimitReader(tarReader, limit+1))
+			if err != nil {
+				return false, fmt.Errorf("failed to read file %s: %w", header.Name, err)
+			}
+
+			isTruncated := int64(len(content)) > limit
+			if isTruncated {
+				content = content[:limit]
+			}
+			budget -= int64(len(content))
+
+			// Determine if content is valid UTF-8 text or binary
+			isText := utf8.Valid(content) && !containsNullBytes(content)
+
+			file := OutputFile{
+				Filename:    header.Name,
+				IsTruncated: isTruncated,
+				Size:        header.Size,
+				IsBase64:    !isText,
+			}
+
+			if isText {
+				file.Data = string(content)
+			} else {
+				file.Data = base64.StdEncoding.EncodeToString(content)
+			}
+
+			// Generate HTTP URL if base URL is configured
+			if s.httpBaseURL != "" {
+				file.URL = s.buildFileDownloadURL(jobID, header.Name)
+			}
+
+			outputFiles = append(outputFiles, file)
 		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to read tar archive: %w", err)
-		}
-
-		// Skip directories
-		if header.Typeflag == tar.TypeDir {
-			continue
-		}
-
-		// Read file content (up to maxFileSize + 1 to detect truncation)
-		limitedReader := io.LimitReader(tarReader, maxFileSize+1)
-		content, err := io.ReadAll(limitedReader)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read file %s: %w", header.Name, err)
-		}
-
-		isTruncated := len(content) > maxFileSize
-		if isTruncated {
-			content = content[:maxFileSize]
-		}
-
-		// Determine if content is valid UTF-8 text or binary
-		isText := utf8.Valid(content) && !containsNullBytes(content)
-
-		file := OutputFile{
-			Filename:    header.Name,
-			IsTruncated: isTruncated,
-			Size:        header.Size,
-			IsBase64:    !isText,
-		}
-
-		if isText {
-			file.Data = string(content)
-		} else {
-			file.Data = base64.StdEncoding.EncodeToString(content)
-		}
-
-		// Generate HTTP URL if base URL is configured
-		if s.httpBaseURL != "" {
-			file.URL = s.buildFileDownloadURL(jobID, header.Name)
-		}
-
-		outputFiles = append(outputFiles, file)
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	if len(outputFiles) == 0 {
@@ -2789,9 +2806,13 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 
 	summaryText := fmt.Sprintf("Retrieved %d output file(s) from job %s:\n%s",
 		len(outputFiles), jobID, strings.Join(summaryParts, "\n"))
+	if omitted > 0 {
+		summaryText += fmt.Sprintf("\n(and %d more file(s) not listed)", omitted)
+	}
 
 	if len(truncatedFiles) > 0 {
-		summaryText += fmt.Sprintf("\n\nWARNING: The following files were truncated to 100KB: %s",
+		summaryText += fmt.Sprintf("\n\nWARNING: The following files were truncated "+
+			"(each file is capped at 100KB, and all files together at 1MB): %s",
 			strings.Join(truncatedFiles, ", "))
 		if s.httpBaseURL != "" {
 			summaryText += "\nUse the provided URLs to download the complete files."
@@ -2799,9 +2820,10 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 	}
 
 	structured := map[string]interface{}{
-		"job_id":     jobID,
-		"file_count": len(outputFiles),
-		"files":      outputFiles,
+		"job_id":        jobID,
+		"file_count":    len(outputFiles),
+		"files":         outputFiles,
+		"omitted_files": omitted,
 	}
 	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
@@ -3042,6 +3064,57 @@ func (s *Server) toolDeleteServiceCredential(ctx context.Context, args map[strin
 	), nil
 }
 
+// streamSandbox downloads the job sandbox matching constraint and hands it
+// to read as a tar stream, without holding the archive in memory.
+//
+// read may stop before the end of the archive by returning stopped=true;
+// the transfer is then abandoned -- closing the pipe fails its next write
+// and it unwinds -- and its resulting error is ours, so it is not
+// reported. Otherwise a failed transfer is reported in preference to the
+// read error it caused.
+func (s *Server) streamSandbox(ctx context.Context, constraint string, read func(io.Reader) (stopped bool, err error)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	pr, pw := io.Pipe()
+	errChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, pw)
+	transferErr := make(chan error, 1)
+	go func() {
+		err := <-errChan
+		_ = pw.CloseWithError(err)
+		transferErr <- err
+	}()
+
+	stopped, readErr := read(pr)
+	_ = pr.Close()
+	cancel()
+	if err := <-transferErr; err != nil && !stopped {
+		return fmt.Errorf("failed to download job sandbox: %w", err)
+	}
+	if readErr != nil {
+		return fmt.Errorf("failed to read job sandbox: %w", readErr)
+	}
+	return nil
+}
+
+// maxListedEntries is how many sandbox file names extractSandboxFile
+// keeps for explaining a miss; the rest are only counted.
+const maxListedEntries = 25
+
+// sandboxMatch is what extractSandboxFile found.
+type sandboxMatch struct {
+	content   string
+	found     bool
+	truncated bool
+	// size is the file's full size, which exceeds len(content) when
+	// truncated.
+	size int64
+	// entries names the archive's files, up to maxListedEntries; total
+	// counts all of them.
+	entries []string
+	total   int
+}
+
 // extractSandboxFile pulls one file out of a job-sandbox tar, matching on
 // base name, and returns what else the archive held so a miss can be
 // explained.
@@ -3056,48 +3129,60 @@ func (s *Server) toolDeleteServiceCredential(ctx context.Context, args map[strin
 // found is returned separately from content because an empty file is a
 // real answer. Reporting "not found" for a job whose stdout was empty
 // sends the caller looking for a transfer problem that does not exist.
-func extractSandboxFile(r io.Reader, want string) (content string, found bool, entries []string, err error) {
+//
+// At most maxBytes of the file are read, and reading stops at the match:
+// the listing is only needed to explain a miss, and a miss reads the
+// whole archive anyway.
+func extractSandboxFile(r io.Reader, want string, maxBytes int64) (sandboxMatch, error) {
+	var m sandboxMatch
 	wantBase := filepath.Base(want)
 	tr := tar.NewReader(r)
 	for {
 		header, terr := tr.Next()
 		if errors.Is(terr, io.EOF) {
-			break
+			return m, nil
 		}
 		if terr != nil {
-			return "", false, entries, terr
+			return m, terr
 		}
 		if header.Typeflag == tar.TypeDir {
 			continue
 		}
 		name := filepath.Base(header.Name)
-		entries = append(entries, name)
-		if found || name != wantBase {
+		m.total++
+		if len(m.entries) < maxListedEntries {
+			m.entries = append(m.entries, name)
+		}
+		if name != wantBase {
 			continue
 		}
-		b, rerr := io.ReadAll(tr)
+		b, rerr := io.ReadAll(io.LimitReader(tr, maxBytes+1))
 		if rerr != nil {
-			return "", false, entries, rerr
+			return m, rerr
 		}
-		// Keep reading so entries lists the whole sandbox even after a
-		// hit; the listing is what makes a later miss diagnosable.
-		content, found = string(b), true
+		if int64(len(b)) > maxBytes {
+			b, m.truncated = b[:maxBytes], true
+		}
+		m.content, m.found, m.size = string(b), true, header.Size
+		return m, nil
 	}
-	return content, found, entries, nil
 }
 
 // describeSandboxEntries renders a sandbox listing for an error message,
 // distinguishing an empty archive from one whose contents simply did not
-// include what was asked for.
-func describeSandboxEntries(entries []string) string {
-	if len(entries) == 0 {
+// include what was asked for. total counts every file, of which entries
+// names the first few.
+func describeSandboxEntries(entries []string, total int) string {
+	if total == 0 {
 		return "nothing at all -- the schedd returned an empty sandbox, so the output was " +
 			"probably never transferred back"
 	}
-	const maxListed = 25
-	if len(entries) > maxListed {
-		return strings.Join(entries[:maxListed], ", ") +
-			fmt.Sprintf(", and %d more", len(entries)-maxListed)
+	if len(entries) > maxListedEntries {
+		entries = entries[:maxListedEntries]
+	}
+	if total > len(entries) {
+		return strings.Join(entries, ", ") +
+			fmt.Sprintf(", and %d more", total-len(entries))
 	}
 	return strings.Join(entries, ", ")
 }

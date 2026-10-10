@@ -59,15 +59,11 @@ func (s *Handler) handleDashboardActivityStream(w http.ResponseWriter, r *http.R
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	ctx, needsRedirect, err := s.requireAuthentication(r)
-	if err != nil {
-		if needsRedirect {
-			s.redirectToLogin(w, r)
-			return
-		}
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+	ctx, release, ok := s.authenticateStream(w, r)
+	if !ok {
 		return
 	}
+	defer release()
 
 	if s.jobWatchFeed == nil {
 		// Not an error the caller can fix, and not a failure: this
@@ -97,6 +93,7 @@ func (s *Handler) handleDashboardActivityStream(w http.ResponseWriter, r *http.R
 		s.writeError(w, http.StatusInternalServerError, "Streaming unsupported")
 		return
 	}
+	defer s.streamOpened()()
 
 	// The feed goes cold across a reconnect to the mirror, and warm once
 	// it is following again. Saying which lets the page show that the

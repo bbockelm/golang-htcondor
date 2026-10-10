@@ -30,7 +30,8 @@ func tarOf(t *testing.T, files map[string]string) *bytes.Buffer {
 func TestExtractSandboxFileFindsByBaseName(t *testing.T) {
 	arc := tarOf(t, map[string]string{"test.1.0.out": "hello\n"})
 
-	got, found, _, err := extractSandboxFile(arc, "test.1.0.out")
+	m, err := extractSandboxFile(arc, "test.1.0.out", maxFileSize)
+	got, found := m.content, m.found
 	if err != nil || !found {
 		t.Fatalf("found=%v err=%v", found, err)
 	}
@@ -47,7 +48,8 @@ func TestExtractSandboxFileFindsByBaseName(t *testing.T) {
 func TestExtractSandboxFileMatchesAPathQualifiedName(t *testing.T) {
 	arc := tarOf(t, map[string]string{"test.14996085.0.out": "output\n"})
 
-	got, found, _, err := extractSandboxFile(arc, "/test.14996085.0.out")
+	m, err := extractSandboxFile(arc, "/test.14996085.0.out", maxFileSize)
+	got, found := m.content, m.found
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -63,7 +65,8 @@ func TestExtractSandboxFileMatchesAPathQualifiedName(t *testing.T) {
 func TestExtractSandboxFileMatchesAPathQualifiedEntry(t *testing.T) {
 	arc := tarOf(t, map[string]string{"./cluster1.proc0.subproc0/test.1.0.err": "boom\n"})
 
-	got, found, _, err := extractSandboxFile(arc, "test.1.0.err")
+	m, err := extractSandboxFile(arc, "test.1.0.err", maxFileSize)
+	got, found := m.content, m.found
 	if err != nil || !found {
 		t.Fatalf("found=%v err=%v", found, err)
 	}
@@ -77,7 +80,8 @@ func TestExtractSandboxFileMatchesAPathQualifiedEntry(t *testing.T) {
 func TestExtractSandboxFileDistinguishesEmptyFromMissing(t *testing.T) {
 	arc := tarOf(t, map[string]string{"test.1.0.out": ""})
 
-	got, found, _, err := extractSandboxFile(arc, "test.1.0.out")
+	m, err := extractSandboxFile(arc, "test.1.0.out", maxFileSize)
+	got, found := m.content, m.found
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -96,7 +100,8 @@ func TestExtractSandboxFileListsWhatWasThere(t *testing.T) {
 		"job.log": "...", "test.1.0.out": "x", "test.1.0.err": "y",
 	})
 
-	_, found, entries, err := extractSandboxFile(arc, "wanted.out")
+	m, err := extractSandboxFile(arc, "wanted.out", maxFileSize)
+	found, entries := m.found, m.entries
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -106,7 +111,7 @@ func TestExtractSandboxFileListsWhatWasThere(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("entries = %v, want all three", entries)
 	}
-	desc := describeSandboxEntries(entries)
+	desc := describeSandboxEntries(entries, m.total)
 	for _, want := range []string{"job.log", "test.1.0.out", "test.1.0.err"} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("the description omits %q: %s", want, desc)
@@ -118,11 +123,11 @@ func TestExtractSandboxFileListsWhatWasThere(t *testing.T) {
 // back, which is a different problem from a name mismatch.
 func TestDescribeSandboxEntriesOnEmptyArchive(t *testing.T) {
 	arc := tarOf(t, map[string]string{})
-	_, found, entries, err := extractSandboxFile(arc, "test.1.0.out")
-	if err != nil || found {
-		t.Fatalf("found=%v err=%v", found, err)
+	m, err := extractSandboxFile(arc, "test.1.0.out", maxFileSize)
+	if err != nil || m.found {
+		t.Fatalf("found=%v err=%v", m.found, err)
 	}
-	desc := describeSandboxEntries(entries)
+	desc := describeSandboxEntries(m.entries, m.total)
 	if !strings.Contains(desc, "empty sandbox") || !strings.Contains(desc, "never transferred") {
 		t.Errorf("an empty sandbox is not explained: %s", desc)
 	}
@@ -134,7 +139,7 @@ func TestDescribeSandboxEntriesTruncates(t *testing.T) {
 	for i := range many {
 		many[i] = "f"
 	}
-	desc := describeSandboxEntries(many)
+	desc := describeSandboxEntries(many, len(many))
 	if !strings.Contains(desc, "and 35 more") {
 		t.Errorf("listing is not bounded: %s", desc)
 	}
@@ -149,7 +154,8 @@ func TestExtractSandboxFileSkipsDirectories(t *testing.T) {
 	_, _ = tw.Write([]byte("z"))
 	_ = tw.Close()
 
-	_, _, entries, err := extractSandboxFile(&buf, "nope")
+	m, err := extractSandboxFile(&buf, "nope", maxFileSize)
+	entries := m.entries
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -182,5 +188,19 @@ func TestDescribeJobOutputPassesContentThrough(t *testing.T) {
 	const body = "line one\nline two\n"
 	if got := describeJobOutput(body, "stdout"); got != body {
 		t.Errorf("content was altered: %q", got)
+	}
+}
+
+// A file over the limit comes back cut to it, marked truncated, with its
+// full size alongside.
+func TestExtractSandboxFileTruncatesAtTheLimit(t *testing.T) {
+	arc := tarOf(t, map[string]string{"test.1.0.out": "0123456789"})
+
+	m, err := extractSandboxFile(arc, "test.1.0.out", 4)
+	if err != nil || !m.found {
+		t.Fatalf("found=%v err=%v", m.found, err)
+	}
+	if m.content != "0123" || !m.truncated || m.size != 10 {
+		t.Errorf("content=%q truncated=%v size=%d, want \"0123\" true 10", m.content, m.truncated, m.size)
 	}
 }

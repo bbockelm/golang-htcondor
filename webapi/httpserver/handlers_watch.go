@@ -35,15 +35,11 @@ func (h *Handler) handleCollectorWatch(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	ctx, needsRedirect, err := h.requireAuthentication(r)
-	if err != nil {
-		if needsRedirect {
-			h.redirectToLogin(w, r)
-			return
-		}
-		h.writeError(w, http.StatusUnauthorized, fmt.Sprintf("authentication failed: %v", err))
+	ctx, release, ok := h.authenticateStream(w, r)
+	if !ok {
 		return
 	}
+	defer release()
 	col := h.getCollector()
 	if col == nil {
 		h.writeError(w, http.StatusServiceUnavailable, "no collector configured")
@@ -208,15 +204,12 @@ func (h *Handler) handleJobsWatch(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	ctx, needsRedirect, err := h.requireAuthentication(r)
-	if err != nil {
-		if needsRedirect {
-			h.redirectToLogin(w, r)
-			return
-		}
-		h.writeError(w, http.StatusUnauthorized, fmt.Sprintf("authentication failed: %v", err))
+	// Both branches below hold a stream.
+	ctx, release, ok := h.authenticateStream(w, r)
+	if !ok {
 		return
 	}
+	defer release()
 	if h.jobMirror == nil {
 		// No local job_queue.log to tail, but this access point may
 		// still be following its queue through the htcondordb mirror.

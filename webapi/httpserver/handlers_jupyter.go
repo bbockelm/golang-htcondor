@@ -636,15 +636,11 @@ func (s *Handler) handleJupyterEvents(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	ctx, needsRedirect, err := s.requireAuthentication(r)
-	if err != nil {
-		if needsRedirect {
-			s.redirectToLogin(w, r)
-			return
-		}
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+	ctx, release, ok := s.authenticateStream(w, r)
+	if !ok {
 		return
 	}
+	defer release()
 	username := htcondor.GetAuthenticatedUserFromContext(ctx)
 
 	reg, err := s.getOrCreateJupyterRegistry()
