@@ -639,7 +639,9 @@ HTTP_API_MCP_SUPERUSER_GROUP = mcp-superusers
 #
 # Matched exactly against the authenticated actor: the OAuth2 username claim
 # for an OAuth2 caller, or the identity the schedd maps the caller to for a
-# forwarded HTCondor IDTOKEN (typically user@uid.domain).
+# forwarded HTCondor IDTOKEN or the stdio server. That is the full user@domain
+# (e.g. alice@uid.domain for FS, the token's sub for an IDTOKEN), with the
+# domain in lower case, from C++ and Go schedds alike; a bare name never matches.
 # Unset = every caller is scoped to their own jobs.
 #
 # `whoami` reports which of these applied, and why, for a given caller.

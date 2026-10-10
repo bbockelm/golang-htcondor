@@ -217,7 +217,7 @@ func (p *superuserPolicy) ImpersonationIdentity(actor string) (identity string, 
 	// the actor authenticated as "bob@domain", and QueueSuperUsers returns
 	// both forms, but an actor who authenticated bare should still match a
 	// qualified entry.
-	if bare := strings.SplitN(qualified, "@", 2)[0]; p.users[strings.ToLower(bare)] {
+	if bare := ownerFromActor(qualified); p.users[strings.ToLower(bare)] {
 		return qualified, true
 	}
 	return p.fallback, false

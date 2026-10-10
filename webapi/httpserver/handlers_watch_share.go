@@ -66,7 +66,7 @@ func (h *Handler) handleWatchShare(w http.ResponseWriter, r *http.Request, watch
 		return
 	}
 
-	owner := strings.SplitN(htcondor.GetAuthenticatedUserFromContext(ctx), "@", 2)[0]
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
 	if owner == "" {
 		h.writeError(w, http.StatusUnauthorized, "Could not determine authenticated user")
 		return

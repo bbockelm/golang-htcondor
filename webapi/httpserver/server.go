@@ -1463,10 +1463,10 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	secConfig.SecurityTag = sessionTagFor(sessionTag, condorCredential)
 	if privateUserCache {
 		// The cache holds only this user's sessions, so there is nothing
-		// to isolate them from -- and the tag has to be the one cedar
-		// stores client sessions under, which is empty, or no request
-		// would resume a session another of this user's requests set up.
-		// A digest of the credential would differ every request.
+		// to isolate them from, and the untagged slot of a cache the
+		// caller supplied is the caller's own: every request of this user
+		// resumes the session another set up. A digest of the credential
+		// would differ every request, and no session would be reused.
 		secConfig.SecurityTag = ""
 	}
 	ctx = htcondor.WithSecurityConfig(ctx, secConfig)

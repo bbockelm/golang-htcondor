@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/addresses"
+	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -319,6 +320,25 @@ func (d *Daemon) SharedPortName() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.sharedPortName
+}
+
+// ServerSecurityConfig builds the server-side security config for commands
+// served on this daemon's command socket: htcondor.GetServerSecurityConfig
+// from the daemon's current config, plus what only the daemon knows. Behind a
+// shared port that is its sock id (SecurityConfig.SharedPortID), which FS
+// authentication requires an HTCondor 25.14+ client's channel binding to name,
+// as a C++ daemon checks it against its own command sinful; without it any id
+// the client reports is accepted on the ip:port check alone.
+//
+// Call it after Listener, once for the base config and once for each
+// per-command config (cedar/server's SecurityConfigForCommand).
+func (d *Daemon) ServerSecurityConfig(command int, secContext string) (*security.SecurityConfig, error) {
+	sc, err := htcondor.GetServerSecurityConfig(d.Config(), command, secContext)
+	if err != nil {
+		return nil, err
+	}
+	sc.SharedPortID = d.SharedPortName()
+	return sc, nil
 }
 
 // AdvertisedSinful derives this daemon's externally reachable command address
