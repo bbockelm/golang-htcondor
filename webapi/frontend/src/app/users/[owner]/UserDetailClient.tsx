@@ -20,10 +20,10 @@ import { LISTING_PAGE_SIZE } from '@/lib/paging';
 import { JobStatusStrip } from '@/components/JobStatusStrip';
 import { JobsSummaryPanel } from '@/components/JobsSummaryPanel';
 import { BatchTable } from '@/components/BatchTable';
+import { batchView } from '@/lib/batchView';
+import { clustersNeedingCounts, withExactCounts } from '@/lib/exactCounts';
+import { useExactCounts } from '@/lib/useExactCounts';
 import {
-  applyBatchFilter,
-  filterAdsByStatus,
-  groupIntoBatches,
   adsInBatches,
   summarizeJobs,
   BATCH_PROJECTION,
@@ -121,13 +121,23 @@ export default function UserDetailClient() {
   const lastPage = pages?.pages[pages.pages.length - 1];
 
   const statusCounts = useMemo(() => summarizeJobs(jobs).counts, [jobs]);
-  const statusFiltered = useMemo(
-    () => filterAdsByStatus(jobs, statuses),
-    [jobs, statuses],
+  // The Owner constraint keeps or drops whole batches, so unlike an
+  // arbitrary expression it cannot leave a batch's count partial; only a
+  // cut-off listing can.
+  const allLoaded = !!lastPage && !lastPage.has_more && !lastPage.error && !hasNextPage;
+  const { statusFiltered, batches, progress: listedProgress } = useMemo(
+    () => batchView(jobs, statuses, filter, allLoaded),
+    [jobs, statuses, filter, allLoaded],
   );
-  const batches = useMemo(
-    () => applyBatchFilter(groupIntoBatches(statusFiltered), filter),
-    [statusFiltered, filter],
+  // A cut-off listing gets its batches counted exactly; see /jobs.
+  const countClusters = useMemo(
+    () => (allLoaded ? [] : clustersNeedingCounts(batches, listedProgress)),
+    [allLoaded, batches, listedProgress],
+  );
+  const exactCounts = useExactCounts({ clusters: countClusters, ownedByMe: false });
+  const progress = useMemo(
+    () => (exactCounts ? withExactCounts(listedProgress, batches, exactCounts) : listedProgress),
+    [listedProgress, batches, exactCounts],
   );
   const summary = useMemo(() => {
     if (!filter) return summarizeJobs(statusFiltered);
@@ -239,6 +249,7 @@ export default function UserDetailClient() {
               setExpanded={setExpanded}
               highlighted={null}
               onChange={() => refetch()}
+              progress={progress}
             />
           )}
         </>

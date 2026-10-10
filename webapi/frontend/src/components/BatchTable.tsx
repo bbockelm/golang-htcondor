@@ -18,6 +18,11 @@ import {
   type SortState,
 } from '@/components/SortableTable';
 import { BatchUsagePanel } from '@/components/BatchUsagePanel';
+import { BatchProgressBar } from '@/components/BatchProgressBar';
+import {
+  progressFraction,
+  type BatchProgressResult,
+} from '@/lib/batchProgress';
 import {
   statusRank,
   summarizeBatchUsage,
@@ -30,13 +35,33 @@ import {
   type BatchKey,
 } from '@/lib/batches';
 
-type BatchSortKey = 'batch' | 'schedd' | 'owner' | 'jobs' | 'status' | 'submitted' | 'cmd';
+type BatchSortKey =
+  | 'batch'
+  | 'schedd'
+  | 'owner'
+  | 'jobs'
+  | 'progress'
+  | 'status'
+  | 'submitted'
+  | 'cmd';
+
+// Per-row values computed once per render of the table, for both the
+// cells and the sort.
+interface RowExtras {
+  progress?: BatchProgressResult;
+}
 
 // Sorting reads a comparable value off the batch rather than the rendered
 // cell: sorting "Submitted" by its formatted text would put April before
 // January, and "Jobs" by its text would put 9 after 10.
-function batchSortValue(b: Batch, key: BatchSortKey): string | number | undefined {
+function batchSortValue(
+  b: Batch,
+  key: BatchSortKey,
+  x: RowExtras | undefined,
+): string | number | undefined {
   switch (key) {
+    case 'progress':
+      return progressFraction(x?.progress);
     case 'batch':
       return b.name;
     case 'schedd':
@@ -63,6 +88,7 @@ export function BatchTable({
   highlighted,
   onChange,
   multiAP,
+  progress,
 }: {
   // Already grouped and filtered by the page: which jobs are in scope is
   // a page-level question (status chips, text filter, server constraint),
@@ -82,13 +108,30 @@ export function BatchTable({
   // Multi-AP mode: show the access point column, and no actions -- the
   // server serves reads only.
   multiAP?: boolean;
+  // How far along each batch is, keyed by Batch.groupKey. Computed by the
+  // page from every job it loaded, not from `batches`, which may be
+  // status-filtered (see batchProgress.ts). Omit to leave the column out.
+  progress?: ReadonlyMap<string, BatchProgressResult>;
 }) {
   const queryClient = useQueryClient();
+
+  const extras = useMemo(() => {
+    const m = new Map<BatchKey, RowExtras>();
+    for (const b of batches) {
+      m.set(batchKey(b), { progress: progress?.get(b.groupKey) });
+    }
+    return m;
+  }, [batches, progress]);
+
+  const sortValue = useCallback(
+    (b: Batch, key: BatchSortKey) => batchSortValue(b, key, extras.get(batchKey(b))),
+    [extras],
+  );
 
   // Newest first by default, which is what the page used to do
   // unconditionally and is still the order people expect to land in.
   const [sort, setSort] = useSortState<BatchSortKey>('submitted', 'desc');
-  const sorted = useSortedRows(batches, sort, batchSortValue);
+  const sorted = useSortedRows(batches, sort, sortValue);
 
   // Cap the initial render at 20 batches; the sentinel below the
   // table reveals the next 20 each time it scrolls into view.
@@ -141,7 +184,8 @@ export function BatchTable({
     removeBatchMut.error ?? removeJobMut.error ?? releaseJobMut.error;
 
   // Multi-AP mode trades the Actions column for the Access point one.
-  const columns = showOwner ? 8 : 7;
+  const columns =
+    7 + (showOwner ? 1 : 0) + (progress ? 1 : 0);
 
   return (
     <div className="space-y-2">
@@ -172,6 +216,9 @@ export function BatchTable({
                 <BatchHeader label="User" sortKey="owner" sort={sort} onSort={setSort} />
               )}
               <BatchHeader label="Jobs" sortKey="jobs" sort={sort} onSort={setSort} />
+              {progress && (
+                <BatchHeader label="Progress" sortKey="progress" sort={sort} onSort={setSort} />
+              )}
               <BatchHeader label="Status" sortKey="status" sort={sort} onSort={setSort} />
               <BatchHeader label="Submitted" sortKey="submitted" sort={sort} onSort={setSort} />
               <BatchHeader label="Command" sortKey="cmd" sort={sort} onSort={setSort} />
@@ -183,6 +230,9 @@ export function BatchTable({
               <BatchRow
                 key={batchKey(b)}
                 batch={b}
+                extras={extras.get(batchKey(b))}
+                showProgress={!!progress}
+                columns={columns}
                 showOwner={showOwner}
                 multiAP={multiAP}
                 expanded={expanded.has(batchKey(b))}
@@ -277,6 +327,9 @@ export function UserPill({ owner }: { owner: string }) {
 
 function BatchRow({
   batch,
+  extras,
+  showProgress,
+  columns,
   showOwner,
   multiAP,
   expanded,
@@ -292,6 +345,9 @@ function BatchRow({
   pendingReleaseActive,
 }: {
   batch: Batch;
+  extras: RowExtras | undefined;
+  showProgress: boolean;
+  columns: number;
   showOwner?: boolean;
   multiAP?: boolean;
   expanded: boolean;
@@ -341,6 +397,11 @@ function BatchRow({
         <td className="px-3 py-2 text-gray-700 tabular-nums">
           {batch.jobCount}
         </td>
+        {showProgress && (
+          <td className="px-3 py-2">
+            <BatchProgressBar progress={extras?.progress} />
+          </td>
+        )}
         <td className="px-3 py-2">
           <StatusBreakdown counts={batch.statusCounts} />
         </td>
@@ -378,7 +439,7 @@ function BatchRow({
       {expanded && (
         <tr>
           <td className="px-3 py-2 bg-gray-50" />
-          <td colSpan={6 + (showOwner ? 1 : 0)} className="bg-gray-50 p-0">
+          <td colSpan={columns - 1} className="bg-gray-50 p-0">
             <BatchUsage batchID={batch.batchID} schedd={batch.schedd} constraint={batch.removeConstraint} />
             <JobsSubTable
               multiAP={multiAP}
@@ -660,7 +721,7 @@ function StatusPill({
   const label = DISPLAY_STATUS_LABEL[statusKey];
   return (
     <span
-      className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium tabular-nums ${statusPillCls(statusKey)}`}
+      className={`inline-flex whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium tabular-nums ${statusPillCls(statusKey)}`}
     >
       {count > 1 ? `${count} ` : ''}
       {label}

@@ -3,7 +3,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
 import { BatchTable } from './BatchTable';
 import { groupIntoBatches } from '@/lib/batches';
-import type { ClassAd } from '@/lib/api';
+import { batchView } from '@/lib/batchView';
+import { PROGRESS_WHY } from '@/lib/batchProgress';
+import type { ClassAd, DisplayStatus } from '@/lib/api';
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -114,5 +116,47 @@ describe('BatchTable in multi-AP mode', () => {
     expect(link.getAttribute('href')).toBe('/jobs/1.0%40ap2.example.org');
     // Held jobs: the single-AP table would offer Release.
     expect(screen.queryByText('Release')).toBeNull();
+  });
+});
+
+describe('BatchTable progress', () => {
+  const queue: ClassAd[] = [
+    // 10 submitted, 3 finished: 5 running, 2 held left.
+    ...[2, 2, 2, 2, 2, 5, 5].map((s, i) => ({
+      ClusterId: 20, ProcId: i, JobStatus: s, Owner: 'alice', QDate: 100,
+      JobBatchName: 'sweep', TotalSubmitProcs: 10,
+    })),
+    // 4 submitted, 3 finished.
+    { ClusterId: 21, ProcId: 0, JobStatus: 1, Owner: 'alice', QDate: 200, JobBatchName: 'quick', TotalSubmitProcs: 4 },
+  ];
+
+  it('shows how many jobs are done, from every job rather than the filtered ones', () => {
+    const view = batchView(queue, new Set<DisplayStatus>(['held']), '', true);
+    table({ batches: view.batches, progress: view.progress });
+    expect(screen.getByRole('button', { name: /Progress/ })).toBeTruthy();
+    const cell = screen.getByText('3 / 10');
+    expect(cell.closest('[title]')?.getAttribute('title')).toMatch(/^3 of 10 jobs done/);
+  });
+
+  it('sorts by the share done', () => {
+    const view = batchView(queue, new Set(), '', true);
+    table({ batches: view.batches, progress: view.progress });
+    fireEvent.click(screen.getByRole('button', { name: /Progress/ }));
+    // 3/10 before 3/4 ascending.
+    expect(batchNames()[0]).toContain('sweep');
+    fireEvent.click(screen.getByRole('button', { name: /Progress/ }));
+    expect(batchNames()[0]).toContain('quick');
+  });
+
+  it('shows a dash, with the reason, when the count is unknown', () => {
+    const view = batchView(queue, new Set(), '', false);
+    table({ batches: view.batches, progress: view.progress });
+    const dashes = screen.getAllByTitle(PROGRESS_WHY.partial);
+    expect(dashes).toHaveLength(2);
+  });
+
+  it('leaves the column out when not given progress', () => {
+    table();
+    expect(screen.queryByRole('button', { name: /Progress/ })).toBeNull();
   });
 });

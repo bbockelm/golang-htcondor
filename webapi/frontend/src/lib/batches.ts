@@ -20,9 +20,12 @@ import {
 // at submit time (see submit.go). The Request* attributes drive the
 // resource totals in the summary panel. DAGManJobId/DAGNodeName mark a job
 // as a DAG node so a whole workflow folds into one batch (see
-// groupIntoBatches).
+// groupIntoBatches). The last six are what the Progress column counts
+// with (see batchProgress.ts): finished jobs leave the queue, so "how many
+// are done" has to be worked out from how many there were to begin with.
 export const BATCH_PROJECTION =
-  'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,DAGManJobId,DAGNodeName,Iwd,RequestCpus,RequestMemory,RequestGpus';
+  'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,DAGManJobId,DAGNodeName,Iwd,RequestCpus,RequestMemory,RequestGpus,' +
+  'TotalSubmitProcs,JobMaterializeNextProcId,DAG_NodesTotal,DAG_NodesDone,DAG_NodesFailed,DAG_NodesQueued';
 
 // Batch is what we render: one batch's worth of jobs aggregated.
 export interface Batch {
@@ -47,6 +50,12 @@ export interface Batch {
   args?: string;
   // QDate of the oldest job (= when the batch was submitted).
   submittedUnix?: number;
+  // The grouping key (see batchGroupKey). Unlike batchID it does not
+  // depend on which of the batch's jobs survived a filter -- a named batch
+  // spanning clusters 10 and 11 is batch 11 when only 11's jobs are held --
+  // so it is what joins a filtered row to anything computed over the whole
+  // queue.
+  groupKey: string;
   // Per-status counts — keyed by DisplayStatus so spool-held shows
   // up as "Uploading Inputs" instead of being lumped under "Held".
   statusCounts: Record<DisplayStatus, number>;
@@ -109,28 +118,38 @@ interface BatchAcc {
   minCluster: number;
 }
 
+// batchGroupKey is the key groupIntoBatches folds a job ad under, or
+// undefined for an ad with no ClusterId (which belongs to no batch).
+//
+// A named submission (JobBatchName set) folds together by
+// `${Owner}\u0000${JobBatchName}`. Because a whole DAG tree — every node
+// job and every nested sub-DAG — shares ONE JobBatchName, this collapses
+// an entire workflow into a single batch, matching `condor_q -batch`.
+// Scoping by Owner keeps two users who reused a batch name apart in the
+// pool-wide view. Unnamed submissions fall back to per-cluster grouping.
+// Batches never span access points: a cluster id, and a batch name, is
+// only unique within one.
+export function batchGroupKey(j: ClassAd): string | undefined {
+  const cluster = num(j.ClusterId);
+  if (cluster === undefined) return undefined;
+  const batchName = str(j.JobBatchName);
+  const base = batchName
+    ? `${str(j.Owner) ?? ''}\u0000${batchName}`
+    : `cluster\u0000${cluster}`;
+  const schedd = scheddOf(j);
+  return schedd ? `${schedd}\u0001${base}` : base;
+}
+
 export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
-  // Grouping key: a named submission (JobBatchName set) folds together by
-  // `${Owner}\u0000${JobBatchName}`. Because a whole DAG tree — every node
-  // job and every nested sub-DAG — shares ONE JobBatchName, this collapses
-  // an entire workflow into a single batch, matching `condor_q -batch`.
-  // Scoping by Owner keeps two users who reused a batch name apart in the
-  // pool-wide view. Unnamed submissions fall back to per-cluster grouping,
-  // unchanged.
   const map = new Map<string, BatchAcc>();
   for (const j of jobs) {
-    const cluster = num(j.ClusterId);
+    const key = batchGroupKey(j);
+    if (key === undefined) continue;
+    const cluster = num(j.ClusterId)!;
     const proc = num(j.ProcId);
-    if (cluster === undefined) continue;
     const owner = str(j.Owner);
     const batchName = str(j.JobBatchName);
     const schedd = scheddOf(j);
-    const base = batchName
-      ? `${owner ?? ''}\u0000${batchName}`
-      : `cluster\u0000${cluster}`;
-    // Batches never span access points: a cluster id, and a batch name,
-    // is only unique within one.
-    const key = schedd ? `${schedd}\u0001${base}` : base;
 
     let a = map.get(key);
     if (!a) {
@@ -180,7 +199,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
   }
 
   const batches: Batch[] = [];
-  for (const a of map.values()) {
+  for (const [groupKey, a] of map) {
     // Stable order within the batch: by cluster, then proc. A DAG spans
     // many clusters, so job index alone is not enough.
     a.jobs.sort((x, y) => x.cluster - y.cluster || x.jobIdx - y.jobIdx);
@@ -223,6 +242,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       cmd: a.cmd,
       args: a.args,
       submittedUnix: a.submittedUnix,
+      groupKey,
       statusCounts: a.statusCounts,
       jobCount: a.jobCount,
       jobs: a.jobs,
@@ -437,6 +457,19 @@ function addRequest(into: ResourceTotals, j: ClassAd) {
   into.cpus += cpus ?? 0;
   into.memoryMB += mem ?? 0;
   into.gpus += gpus ?? 0;
+}
+
+// attr reads a job attribute case-insensitively. ClassAd attribute names
+// are, and a JSON object's keys are not: the schedd spells DAG_NodesTotal
+// the way DAGMan published it, which need not be the way it is written
+// here.
+export function attr(ad: ClassAd, name: string): unknown {
+  if (name in ad) return ad[name];
+  const lc = name.toLowerCase();
+  for (const k of Object.keys(ad)) {
+    if (k.toLowerCase() === lc) return ad[k];
+  }
+  return undefined;
 }
 
 export function num(v: unknown): number | undefined {

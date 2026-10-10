@@ -40,15 +40,15 @@ import { BatchTable } from '@/components/BatchTable';
 import { MAX_AUTO_PAGES, useAutoLoadAll, useLoadAllJobs } from '@/lib/loadAll';
 import { LISTING_PAGE_SIZE } from '@/lib/paging';
 import {
-  applyBatchFilter,
-  filterAdsByStatus,
-  groupIntoBatches,
   adsInBatches,
   summarizeJobs,
   BATCH_PROJECTION,
   type BatchKey,
 } from '@/lib/batches';
+import { batchView } from '@/lib/batchView';
 import { useMultiAP } from '@/lib/multiap';
+import { clustersNeedingCounts, withExactCounts } from '@/lib/exactCounts';
+import { useExactCounts } from '@/lib/useExactCounts';
 import { ScheddFilter } from '@/components/ScheddFilter';
 import { SourcesBanner } from '@/components/SourcesBanner';
 
@@ -203,14 +203,33 @@ export default function JobsPage() {
   // are held, and the chip is how you get to them.
   const statusCounts = useMemo(() => summarizeJobs(jobs).counts, [jobs]);
 
-  const statusFiltered = useMemo(
-    () => filterAdsByStatus(jobs, statuses),
-    [jobs, statuses],
+  // The count of finished jobs in a batch is "submitted minus still
+  // queued", which is only right when every queued job of the batch is in
+  // hand. A listing cut short, or narrowed by an expression that may keep
+  // some of a batch's jobs and not others, cannot promise that; those
+  // batches are counted again below.
+  const allLoaded =
+    !constraint && !!lastPage && !lastPage.has_more && !lastPage.error && !hasNextPage;
+
+  const { statusFiltered, batches, progress: listedProgress } = useMemo(
+    () => batchView(jobs, statuses, textFilter, allLoaded),
+    [jobs, statuses, textFilter, allLoaded],
   );
 
-  const batches = useMemo(
-    () => applyBatchFilter(groupIntoBatches(statusFiltered), textFilter),
-    [statusFiltered, textFilter],
+  // Where the listing holds only part of a batch, a second query counts
+  // that batch's clusters exactly (see exactCounts.ts).
+  const countClusters = useMemo(
+    () => (allLoaded ? [] : clustersNeedingCounts(batches, listedProgress)),
+    [allLoaded, batches, listedProgress],
+  );
+  const exactCounts = useExactCounts({
+    clusters: countClusters,
+    ownedByMe,
+    schedd: multiAP && schedd ? schedd : undefined,
+  });
+  const progress = useMemo(
+    () => (exactCounts ? withExactCounts(listedProgress, batches, exactCounts) : listedProgress),
+    [listedProgress, batches, exactCounts],
   );
 
   // The summary totals exactly the jobs the table is showing. The text
@@ -487,6 +506,7 @@ export default function JobsPage() {
               highlighted={highlighted}
               onChange={() => refetch()}
               multiAP={multiAP}
+              progress={progress}
             />
           )}
         </>
