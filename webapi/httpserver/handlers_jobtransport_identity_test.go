@@ -184,12 +184,20 @@ func TestJobWarmRefusesEmptyIdentity(t *testing.T) {
 }
 
 // mintedContext is a request context carrying a credential this server
-// minted for owner, with authz as its scope (nil for unrestricted).
+// minted for owner, with authz as its scope. nil mints the way session
+// and user-header mode do, with no scope claim; anything else mints the
+// way an OAuth2 grant, an API key or an impersonation does.
 func mintedContext(t *testing.T, owner string, authz []string) context.Context {
 	t.Helper()
 	key := writeSigningKey(t)
 	now := time.Now().Unix()
-	tok, err := generateMCPAccessJWT(filepath.Dir(key), filepath.Base(key), owner, "test.htcondor.org", now, now+300, authz)
+	var tok string
+	var err error
+	if authz == nil {
+		tok, err = security.GenerateJWT(filepath.Dir(key), filepath.Base(key), owner, "test.htcondor.org", now, now+300, nil)
+	} else {
+		tok, err = generateMCPAccessJWT(filepath.Dir(key), filepath.Base(key), owner, "test.htcondor.org", now, now+300, authz)
+	}
 	if err != nil {
 		t.Fatalf("minting: %v", err)
 	}
@@ -201,7 +209,7 @@ func mintedContext(t *testing.T, owner string, authz []string) context.Context {
 // impersonation's, and the same operator with the mode disarmed must
 // not find it: their ordinary requests carry their own credential.
 func TestJobTransportArmedIsNotReusedDisarmed(t *testing.T) {
-	ctx := mintedContext(t, "admin@test.htcondor.org", nil)
+	ctx := mintedContext(t, "admin@test.htcondor.org", superuserAuthz)
 	imp := &Impersonation{
 		Actor: "admin@test.htcondor.org", Target: "alice@test.htcondor.org",
 		Identity: "condor@test.htcondor.org",
@@ -249,18 +257,18 @@ func TestJobTransportArmedIsNotReusedDisarmed(t *testing.T) {
 // without WRITE -- which could not open a transport -- does not share
 // one that could.
 func TestJobTransportCredentialForMintedCredentials(t *testing.T) {
-	full1 := jobTransportCredential(mintedContext(t, "alice", nil), "")
-	full2 := jobTransportCredential(mintedContext(t, "alice", nil), "")
-	write := jobTransportCredential(mintedContext(t, "alice", []string{"READ", "WRITE"}), "")
+	write1 := jobTransportCredential(mintedContext(t, "alice", []string{"READ", "WRITE"}), "")
+	write2 := jobTransportCredential(mintedContext(t, "alice", []string{"READ", "WRITE"}), "")
+	full := jobTransportCredential(mintedContext(t, "alice", nil), "")
 	readOnly := jobTransportCredential(mintedContext(t, "alice", []string{"READ"}), "")
 
-	if full1 == "" || full1 != full2 {
-		t.Errorf("two mints of the same authority differ: %q, %q", full1, full2)
+	if write1 == "" || write1 != write2 {
+		t.Errorf("two mints of the same authority differ: %q, %q", write1, write2)
 	}
-	if write != full1 {
-		t.Errorf("a WRITE credential (%q) and an unrestricted one (%q) differ; both could open the transport", write, full1)
+	if write1 != full {
+		t.Errorf("a WRITE credential (%q) and an unrestricted one (%q) differ; both could open the transport", write1, full)
 	}
-	if readOnly == write {
+	if readOnly == write1 {
 		t.Errorf("a READ-only credential shares the WRITE credential's slot (%q)", readOnly)
 	}
 	if got := jobTransportCredential(context.Background(), ""); got != "" {
