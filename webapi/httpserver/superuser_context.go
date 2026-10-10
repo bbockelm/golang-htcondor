@@ -139,11 +139,14 @@ func (h *Handler) impersonate(ctx context.Context, armed armedSession, actor, ta
 		return nil, nil, fmt.Errorf("minting the impersonation credential: %w", err)
 	}
 
-	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, token, "", 0, "CLIENT", nil)
+	// The token always carries superuserAuthz, so identity and target fix
+	// what the tag stands for.
+	tag := imp.sessionTag()
+	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, token, "", 0, "CLIENT", h.credentialSessions.sessionCacheFor(tag))
 	if err != nil {
 		return nil, nil, fmt.Errorf("building the impersonation security config: %w", err)
 	}
-	secConfig.SecurityTag = imp.sessionTag()
+	secConfig.SecurityTag = tag
 
 	return htcondor.WithSecurityConfig(ctx, secConfig), imp, nil
 }

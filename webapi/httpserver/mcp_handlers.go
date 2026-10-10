@@ -158,7 +158,8 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 		// is offered alongside TOKEN when the pool's auth methods include
 		// it). HTCondor still validates the token itself; we just don't lock
 		// the wire to TOKEN-only.
-		secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, htcToken, "", 0, "CLIENT", nil)
+		tag := mcpActorKey(htcToken)
+		secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, htcToken, "", 0, "CLIENT", h.credentialSessions.sessionCacheFor(tag))
 		if err != nil {
 			h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
 			h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
@@ -172,8 +173,10 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 		// session another user authenticated, and runs as them. The tag is a
 		// digest of the bearer rather than a claim out of it: a claim is
 		// attacker-chosen, so a forged `sub` would let an attacker land on a
-		// victim's session, which is the very thing being prevented.
-		secConfig.SecurityTag = mcpActorKey(htcToken)
+		// victim's session, which is the very thing being prevented. The
+		// bearer carries its own authorization limits, so its digest also
+		// changes whenever they do.
+		secConfig.SecurityTag = tag
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 
 		// Owner-scoped tools need to know who the caller is. Ask the schedd

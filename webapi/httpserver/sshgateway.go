@@ -84,11 +84,16 @@ func (h *Handler) withCondorCredential(ctx context.Context, username string, sco
 	if err != nil {
 		return ctx, fmt.Errorf("minting an HTCondor token for %q: %w", username, err)
 	}
-	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, htcToken, "", 0, "CLIENT", nil)
+	// Keyed by the grant, not the person: the token is minted afresh for
+	// every call, and two grants of one user can carry different
+	// authorization -- the session a READ+WRITE grant negotiates must not
+	// carry a READ-only grant's request.
+	tag := mintedCredentialSessionTag("user", htcToken)
+	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, htcToken, "", 0, "CLIENT", h.credentialSessions.sessionCacheFor(tag))
 	if err != nil {
 		return ctx, fmt.Errorf("building a security config for %q: %w", username, err)
 	}
-	secConfig.SecurityTag = username
+	secConfig.SecurityTag = tag
 	return htcondor.WithSecurityConfig(ctx, secConfig), nil
 }
 

@@ -524,11 +524,12 @@ func (tc *TokenCache) AddValidated(token, username string, expiration time.Time)
 }
 
 // sessionCacheFor returns the session cache kept for user, creating it
-// if there is none. Only for a user this server authenticated itself (a
-// session cookie), on a TokenCache used for nothing else: the key is a
-// username, not a token, and must not share a keyspace with bearers.
-// The entry is bounded and expires like a verified one; a new one only
-// means new CEDAR handshakes.
+// if there is none. user names a private partition this server chose --
+// a user it authenticated itself (a session cookie), or a credential's
+// session tag (see mintedCredentialSessionTag) -- on a TokenCache used
+// for that keyspace alone: the key is not a token and must not share a
+// keyspace with bearers. The entry is bounded and expires like a
+// verified one; a new one only means new CEDAR handshakes.
 func (tc *TokenCache) sessionCacheFor(user string) *security.SessionCache {
 	if tc == nil {
 		return security.NewSessionCache()
