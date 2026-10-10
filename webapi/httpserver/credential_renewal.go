@@ -65,3 +65,27 @@ func (s *Handler) grantReminter(bearer, username string, scopes []string, notAft
 		return tok, nil
 	}
 }
+
+// requestReminter mints a session-cookie or user-header request's token
+// again for subject. Nil for a request whose token was presented, not
+// minted (subject empty).
+func (s *Handler) requestReminter(subject string) func() (string, error) {
+	if subject == "" {
+		return nil
+	}
+	return func() (string, error) {
+		tok, _, err := s.mintRequestToken(subject, "renewal")
+		return tok, err
+	}
+}
+
+// cachedGrantReminter is grantReminter for a bearer whose credential was
+// minted from an opaque grant on its first request and cached: it expires
+// long before the grant does. Nil when the cached credential is the bearer
+// itself.
+func (s *Handler) cachedGrantReminter(entry *TokenCacheEntry, bearer, credential string) func() (string, error) {
+	if entry == nil || credential == bearer {
+		return nil
+	}
+	return s.grantReminter(bearer, entry.Username, entry.Scopes, entry.Expiration)
+}

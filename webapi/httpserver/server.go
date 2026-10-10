@@ -1276,13 +1276,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// remint mints condorCredential again, when this server minted it:
 	// work this request starts may outlast it. Nil for a bearer the
 	// caller presented, which lasts exactly as long as it says it does.
-	var remint func() (string, error)
-	if mintedFor != "" {
-		remint = func() (string, error) {
-			tok, _, err := s.mintRequestToken(mintedFor, "renewal")
-			return tok, err
-		}
-	}
+	remint := s.requestReminter(mintedFor)
 
 	// condorCredential is what cedar authenticates with, which is not
 	// always the bearer we were handed. For a HTCondor IDTOKEN the two
@@ -1360,11 +1354,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 			var cachedScopes []string
 			var scoped bool
 			condorCredential, cachedScopes, scoped = resolveCachedBearer(entry, token)
-			if condorCredential != token {
-				// Minted from an opaque grant on its first request, and
-				// it expires long before the grant does.
-				remint = s.grantReminter(token, entry.Username, cachedScopes, entry.Expiration)
-			}
+			remint = s.cachedGrantReminter(entry, token, condorCredential)
 			if scoped {
 				// Same reasoning: a handler that gates on scopes would
 				// otherwise see an approved-for-less grant -- or one
