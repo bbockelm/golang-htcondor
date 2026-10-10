@@ -69,12 +69,16 @@ func getDefaultConfig() *config.Config {
 //     the context already carries -- when none was.
 //   - When a non-empty token is supplied, guarantees TOKEN appears in
 //     the method list — prepended if absent — so the supplied token is
-//     actually offered to the peer. AuthIDTokens already counts as
-//     TOKEN at the wire level, so we don't duplicate.
+//     actually offered to the peer, and drops every method that would
+//     identify this process instead (FS, KERBEROS, PASSWORD) or no one
+//     (ANONYMOUS). AuthIDTokens already counts as TOKEN at the wire
+//     level, so we don't duplicate.
 //
 // Field overlays:
 //
-//   - Token: set when token != "".
+//   - Token: set when token != "". TokenFile, TokenDir, CertFile and
+//     KeyFile are then cleared and Authentication is REQUIRED, so the
+//     token is the only credential the connection can present.
 //   - SessionCache: set when sessionCache != nil; otherwise cedar uses
 //     its global cache.
 //   - PeerName: populated from the argument, used for session-cache
@@ -164,11 +168,16 @@ func NewClientSecurityConfigWithConfig(
 		// the schedd drops owner filtering entirely and a "my jobs"
 		// query returns every user's jobs.
 		//
-		// So FS — the method that identifies us by the OS process — is
-		// removed outright, and TOKEN moved to the front of what is
-		// left. SSL stays: some pools need it alongside IDTOKENS (a
-		// collector query whose token kid does not match), and unlike
-		// FS it is not a silent same-host shortcut.
+		// So the offered list keeps only methods that present the
+		// caller's token or nothing of ours: TOKEN, moved to the front,
+		// then SCITOKENS and SSL if configured. Everything else
+		// identifies the process -- FS and CLAIMTOBE by its OS user,
+		// KERBEROS by its credential cache, PASSWORD by the pool
+		// password -- and ANONYMOUS (AuthNone) would let the connection
+		// complete with no identity at all. SSL stays because some pools
+		// need it alongside IDTOKENS (a collector query whose token kid
+		// does not match), but only as an anonymous client that checks
+		// the server's certificate: the client cert is cleared below.
 		//
 		// webapi/httpserver has carried this same rule for its session
 		// path since jobs submitted through a session cookie came out
@@ -178,12 +187,28 @@ func NewClientSecurityConfigWithConfig(
 		filtered := make([]security.AuthMethod, 0, len(secConfig.AuthMethods)+1)
 		filtered = append(filtered, security.AuthToken)
 		for _, m := range secConfig.AuthMethods {
-			if m != security.AuthToken && m != security.AuthFS {
+			if m == security.AuthSciTokens || m == security.AuthSSL {
 				filtered = append(filtered, m)
 			}
 		}
 		secConfig.AuthMethods = filtered
 		secConfig.Token = token
+		// The configuration's own credentials belong to this process.
+		// Cedar treats Token as the first candidate, not the only one:
+		// when it is incompatible with the peer (another issuer, an
+		// unknown kid) or expired, it goes on to TokenFile and TokenDir
+		// -- for a daemon, SEC_TOKEN_SYSTEM_DIRECTORY -- and sends
+		// whatever compatible token it finds there, and the SSL
+		// handshake presents CertFile/KeyFile. Either way the peer would
+		// see this process rather than the caller.
+		secConfig.TokenFile = ""
+		secConfig.TokenDir = ""
+		secConfig.CertFile = ""
+		secConfig.KeyFile = ""
+		// The caller brought a credential to be identified by, so the
+		// connection must authenticate; at the configured default of
+		// OPTIONAL a peer that also says OPTIONAL skips authentication.
+		secConfig.Authentication = security.SecurityRequired
 	}
 	if sessionCache != nil {
 		secConfig.SessionCache = sessionCache
