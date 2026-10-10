@@ -20,9 +20,12 @@ import {
 // at submit time (see submit.go). The Request* attributes drive the
 // resource totals in the summary panel. DAGManJobId/DAGNodeName mark a job
 // as a DAG node so a whole workflow folds into one batch (see
-// groupIntoBatches).
+// groupIntoBatches). The last six are what the Progress column counts
+// with (see batchProgress.ts): finished jobs leave the queue, so "how many
+// are done" has to be worked out from how many there were to begin with.
 export const BATCH_PROJECTION =
-  'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,DAGManJobId,DAGNodeName,Iwd,RequestCpus,RequestMemory,RequestGpus';
+  'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,DAGManJobId,DAGNodeName,Iwd,RequestCpus,RequestMemory,RequestGpus,' +
+  'TotalSubmitProcs,JobMaterializeNextProcId,DAG_NodesTotal,DAG_NodesDone,DAG_NodesFailed,DAG_NodesQueued';
 
 // Batch is what we render: one batch's worth of jobs aggregated.
 export interface Batch {
@@ -47,6 +50,12 @@ export interface Batch {
   args?: string;
   // QDate of the oldest job (= when the batch was submitted).
   submittedUnix?: number;
+  // The grouping key (see batchGroupKey). Unlike batchID it does not
+  // depend on which of the batch's jobs survived a filter -- a named batch
+  // spanning clusters 10 and 11 is batch 11 when only 11's jobs are held --
+  // so it is what joins a filtered row to anything computed over the whole
+  // queue.
+  groupKey: string;
   // Per-status counts — keyed by DisplayStatus so spool-held shows
   // up as "Uploading Inputs" instead of being lumped under "Held".
   statusCounts: Record<DisplayStatus, number>;
@@ -81,6 +90,7 @@ export interface BatchJob {
   submittedUnix?: number;
   // DAG node name, when this job is a node of a DAG workflow.
   nodeName?: string;
+  holdReason?: string;
 }
 
 // The trailing `+<rootDagmanCluster>` HTCondor appends to a DAG's
@@ -109,28 +119,38 @@ interface BatchAcc {
   minCluster: number;
 }
 
+// batchGroupKey is the key groupIntoBatches folds a job ad under, or
+// undefined for an ad with no ClusterId (which belongs to no batch).
+//
+// A named submission (JobBatchName set) folds together by
+// `${Owner}\u0000${JobBatchName}`. Because a whole DAG tree — every node
+// job and every nested sub-DAG — shares ONE JobBatchName, this collapses
+// an entire workflow into a single batch, matching `condor_q -batch`.
+// Scoping by Owner keeps two users who reused a batch name apart in the
+// pool-wide view. Unnamed submissions fall back to per-cluster grouping.
+// Batches never span access points: a cluster id, and a batch name, is
+// only unique within one.
+export function batchGroupKey(j: ClassAd): string | undefined {
+  const cluster = num(j.ClusterId);
+  if (cluster === undefined) return undefined;
+  const batchName = str(j.JobBatchName);
+  const base = batchName
+    ? `${str(j.Owner) ?? ''}\u0000${batchName}`
+    : `cluster\u0000${cluster}`;
+  const schedd = scheddOf(j);
+  return schedd ? `${schedd}\u0001${base}` : base;
+}
+
 export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
-  // Grouping key: a named submission (JobBatchName set) folds together by
-  // `${Owner}\u0000${JobBatchName}`. Because a whole DAG tree — every node
-  // job and every nested sub-DAG — shares ONE JobBatchName, this collapses
-  // an entire workflow into a single batch, matching `condor_q -batch`.
-  // Scoping by Owner keeps two users who reused a batch name apart in the
-  // pool-wide view. Unnamed submissions fall back to per-cluster grouping,
-  // unchanged.
   const map = new Map<string, BatchAcc>();
   for (const j of jobs) {
-    const cluster = num(j.ClusterId);
+    const key = batchGroupKey(j);
+    if (key === undefined) continue;
+    const cluster = num(j.ClusterId)!;
     const proc = num(j.ProcId);
-    if (cluster === undefined) continue;
     const owner = str(j.Owner);
     const batchName = str(j.JobBatchName);
     const schedd = scheddOf(j);
-    const base = batchName
-      ? `${owner ?? ''}\u0000${batchName}`
-      : `cluster\u0000${cluster}`;
-    // Batches never span access points: a cluster id, and a batch name,
-    // is only unique within one.
-    const key = schedd ? `${schedd}\u0001${base}` : base;
 
     let a = map.get(key);
     if (!a) {
@@ -176,11 +196,12 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       args: str(j.Args),
       submittedUnix: q,
       nodeName: str(j.DAGNodeName),
+      holdReason: str(j.HoldReason),
     });
   }
 
   const batches: Batch[] = [];
-  for (const a of map.values()) {
+  for (const [groupKey, a] of map) {
     // Stable order within the batch: by cluster, then proc. A DAG spans
     // many clusters, so job index alone is not enough.
     a.jobs.sort((x, y) => x.cluster - y.cluster || x.jobIdx - y.jobIdx);
@@ -223,6 +244,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       cmd: a.cmd,
       args: a.args,
       submittedUnix: a.submittedUnix,
+      groupKey,
       statusCounts: a.statusCounts,
       jobCount: a.jobCount,
       jobs: a.jobs,
@@ -439,6 +461,19 @@ function addRequest(into: ResourceTotals, j: ClassAd) {
   into.gpus += gpus ?? 0;
 }
 
+// attr reads a job attribute case-insensitively. ClassAd attribute names
+// are, and a JSON object's keys are not: the schedd spells DAG_NodesTotal
+// the way DAGMan published it, which need not be the way it is written
+// here.
+export function attr(ad: ClassAd, name: string): unknown {
+  if (name in ad) return ad[name];
+  const lc = name.toLowerCase();
+  for (const k of Object.keys(ad)) {
+    if (k.toLowerCase() === lc) return ad[k];
+  }
+  return undefined;
+}
+
 export function num(v: unknown): number | undefined {
   if (typeof v === 'number') return v;
   if (typeof v === 'string') {
@@ -462,7 +497,7 @@ export function str(v: unknown): string | undefined {
 // on a queue of 30k, and they are only ever read for the one batch
 // somebody opened.
 export const BATCH_USAGE_PROJECTION =
-  'ClusterId,ProcId,JobStatus,HoldReasonCode,RequestCpus,RequestMemory,RequestDisk,RequestGpus,CPUsUsage,MemoryUsage,ResidentSetSize,DiskUsage';
+  'ClusterId,ProcId,JobStatus,HoldReasonCode,RequestCpus,RequestMemory,RequestDisk,RequestGpus,CpusUsage,MemoryUsage,ResidentSetSize,DiskUsage';
 
 // How a row's numbers should be read. The lib keeps HTCondor's own
 // units -- MiB for memory, KiB for disk -- and the panel formats them.
@@ -543,13 +578,15 @@ export function summarizeBatchUsage(ads: ClassAd[]): BatchUsage {
 
     if (isRunning) {
       running++;
-      const cpus = num(j.CPUsUsage);
+      // Read case-insensitively: the ad spells it CpusUsage, and a lookup
+      // spelled CPUsUsage found nothing, so the panel never showed CPU.
+      const cpus = num(attr(j, 'CpusUsage'));
       // MemoryUsage is an expression in the job ad more often than not,
       // so ResidentSetSize -- which the starter writes as a literal in
       // KiB -- is the one that can be trusted to be a number.
-      const rss = num(j.ResidentSetSize);
-      const mem = num(j.MemoryUsage) ?? (rss !== undefined ? rss / 1024 : undefined);
-      const disk = num(j.DiskUsage);
+      const rss = num(attr(j, 'ResidentSetSize'));
+      const mem = num(attr(j, 'MemoryUsage')) ?? (rss !== undefined ? rss / 1024 : undefined);
+      const disk = num(attr(j, 'DiskUsage'));
       let any = false;
       if (cpus !== undefined) {
         used.cpus += cpus;

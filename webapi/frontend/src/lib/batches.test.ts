@@ -317,12 +317,12 @@ describe('summarizeBatchUsage', () => {
     {
       ClusterId: 7, ProcId: 0, JobStatus: 2,
       RequestCpus: 4, RequestMemory: 4096, RequestDisk: 1048576, RequestGpus: 1,
-      CPUsUsage: 3.5, MemoryUsage: 1024, DiskUsage: 262144,
+      CpusUsage: 3.5, MemoryUsage: 1024, DiskUsage: 262144,
     },
     {
       ClusterId: 7, ProcId: 1, JobStatus: 2,
       RequestCpus: 4, RequestMemory: 4096, RequestDisk: 1048576, RequestGpus: 1,
-      CPUsUsage: 0.5, ResidentSetSize: 524288, DiskUsage: 262144,
+      CpusUsage: 0.5, ResidentSetSize: 524288, DiskUsage: 262144,
     },
     {
       ClusterId: 7, ProcId: 2, JobStatus: 1,
@@ -343,6 +343,16 @@ describe('summarizeBatchUsage', () => {
     expect(row(u, 'CPUs').allocated).toBe(8);
     expect(row(u, 'CPUs').used).toBe(4);
     expect(row(u, 'CPUs').waiting).toBe(4);
+  });
+
+  it('reads CPU under the spelling the job ad uses', () => {
+    // The ad says CpusUsage; ClassAd names are case-insensitive and a
+    // JSON key is not, so any other spelling of the lookup finds nothing.
+    const u = summarizeBatchUsage([
+      { ClusterId: 9, ProcId: 0, JobStatus: 2, RequestCpus: 2, RequestMemory: 1024, CpusUsage: 1.5 },
+      { ClusterId: 9, ProcId: 1, JobStatus: 2, RequestCpus: 2, RequestMemory: 1024, cpususage: 0.5 },
+    ]);
+    expect(row(u, 'CPUs').used).toBe(2);
   });
 
   it('falls back to ResidentSetSize when MemoryUsage is not a number', () => {
@@ -376,7 +386,7 @@ describe('summarizeBatchUsage', () => {
 
   it('counts output transfer as still holding the allocation', () => {
     const u = summarizeBatchUsage([
-      { ClusterId: 9, ProcId: 0, JobStatus: 6, RequestCpus: 3, RequestMemory: 1024, CPUsUsage: 0.1 },
+      { ClusterId: 9, ProcId: 0, JobStatus: 6, RequestCpus: 3, RequestMemory: 1024, CpusUsage: 0.1 },
     ]);
     expect(u.running).toBe(1);
     expect(row(u, 'CPUs').allocated).toBe(3);
