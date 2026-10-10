@@ -438,6 +438,11 @@ type Handler struct {
 	ctx            context.Context    // Context for background goroutines
 	cancelFunc     context.CancelFunc // Function to cancel background goroutines
 
+	// utilizationCache holds the Utilization page's analyses, shared by
+	// everyone asking the same question for five minutes.
+	utilizationCacheOnce sync.Once
+	utilizationCacheVal  *utilizationCache
+
 	// jupyterRegistry tracks pending and live JupyterLab tunnel instances.
 	// Created lazily on first /api/v1/jupyter use so older deployments that
 	// don't enable Jupyter pay no startup cost.
