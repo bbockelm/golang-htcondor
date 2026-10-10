@@ -106,19 +106,23 @@ func TestFunctionRANDOM_INTEGER(t *testing.T) {
 	}
 }
 
+// $SUBSTR's first argument is a macro NAME, not a string: in condor 25.14.1
+// `H = hello` / `$SUBSTR(H,1,3)` is "ell", and `$SUBSTR(hello,1,3)` is empty.
 func TestFunctionSUBSTR(t *testing.T) {
 	cfg := &Config{
-		values: make(map[string]string),
+		values: map[string]string{"H": "hello"},
 	}
 
 	tests := []struct {
 		input    string
 		expected string
 	}{
-		{"SUBSTR(hello, 0, 5)", "hello"},
-		{"SUBSTR(hello, 1, 3)", "ell"},
-		{"SUBSTR(hello, 2)", "llo"},
-		{"SUBSTR(hello, 10)", ""},
+		{"SUBSTR(H, 0, 5)", "hello"},
+		{"SUBSTR(H, 1, 3)", "ell"},
+		{"SUBSTR(H, 2)", "llo"},
+		{"SUBSTR(H, -2)", "lo"},
+		{"SUBSTR(H, 10)", ""},
+		{"SUBSTR(hello, 1, 3)", ""}, // not a macro name
 	}
 
 	for _, tt := range tests {
@@ -180,7 +184,10 @@ func TestExpandMacrosWithFunctions(t *testing.T) {
 		{"$ENV(MY_VAR)", "from_env"},
 		{"$INT(3.14)", "3"},
 		{"prefix_$(FOO)_suffix", "prefix_bar_suffix"},
-		{"$INT($(NUM))", "42"},
+		{"$INT(NUM)", "42"},
+		// A special function's body runs to the first ')', so a nested
+		// $(NUM) is cut short; condor 25.14.1 yields ")" here too.
+		{"$INT($(NUM))", ")"},
 	}
 
 	for _, tt := range tests {
@@ -227,6 +234,10 @@ func TestFunctionCHOICE(t *testing.T) {
 		values: make(map[string]string),
 	}
 
+	// Matching condor 25.14.1: a single list item is the NAME of a list
+	// macro, an out-of-range index yields "" and an invalid one is 0 (both
+	// with an error message, never a failure).
+	cfg.values["L"] = "a,b,c"
 	tests := []struct {
 		input       string
 		expected    string
@@ -235,9 +246,10 @@ func TestFunctionCHOICE(t *testing.T) {
 		{"CHOICE(0, first, second, third)", "first", false},
 		{"CHOICE(1, first, second, third)", "second", false},
 		{"CHOICE(2, first, second, third)", "third", false},
-		{"CHOICE(0, only)", "only", false},
-		{"CHOICE(3, a, b, c)", "", true},  // index out of bounds
-		{"CHOICE(-1, a, b, c)", "", true}, // negative index
+		{"CHOICE(1,L)", "b", false},
+		{"CHOICE(0, only)", "", false},      // no list macro named "only"
+		{"CHOICE(3, a, b, c)", "", false},   // index out of bounds
+		{"CHOICE(-1, a, b, c)", "a", false}, // invalid index reads as 0
 	}
 
 	for _, tt := range tests {

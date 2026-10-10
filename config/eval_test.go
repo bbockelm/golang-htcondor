@@ -8,11 +8,13 @@ import (
 // TestEvalFunction tests the $EVAL() function with various expressions
 func TestEvalFunction(t *testing.T) {
 	// Based on HTCondor manual examples, but adapted for available ClassAd functions
+	// The expression is evaluated in an empty ClassAd, so config values
+	// reach it through $(...), not as attribute names.
 	input := `slist = "a,B,c"
 X = 10
 Y = 20
-PRODUCT = X * Y
-SUM_EXPR = X + Y
+PRODUCT = $(X) * $(Y)
+SUM_EXPR = $(X) + $(Y)
 
 EVAL_SLIST = $EVAL(slist)
 EVAL_PRODUCT = $EVAL(PRODUCT)
@@ -77,13 +79,19 @@ func TestEvalWithUndefined(t *testing.T) {
 	}
 }
 
-// TestEvalWithArithmetic tests $EVAL with simple arithmetic
+// TestEvalWithArithmetic tests $EVAL with simple arithmetic. A config name
+// is not a ClassAd attribute: condor 25.14.1 expands `$EVAL(X * Y)` to
+// "undefined", and `P = $(X) * $(Y)` / `$EVAL(P)` to 200.
 func TestEvalWithArithmetic(t *testing.T) {
 	input := `X = 10
 Y = 20
-SUM = $EVAL(X + Y)
-PRODUCT = $EVAL(X * Y)
-COMPARE = $EVAL(X > 5)
+S = $(X) + $(Y)
+P = $(X) * $(Y)
+C = $(X) > 5
+SUM = $EVAL(S)
+PRODUCT = $EVAL(P)
+COMPARE = $EVAL(C)
+BARE = $EVAL(X * Y)
 `
 
 	cfg, err := NewFromReader(strings.NewReader(input))
@@ -98,6 +106,7 @@ COMPARE = $EVAL(X > 5)
 		{"SUM", "30"},
 		{"PRODUCT", "200"},
 		{"COMPARE", "true"},
+		{"BARE", "undefined"},
 	}
 
 	for _, tt := range tests {
@@ -117,7 +126,8 @@ COMPARE = $EVAL(X > 5)
 // TestEvalWithConditional tests $EVAL with conditional expressions
 func TestEvalWithConditional(t *testing.T) {
 	input := `X = 10
-RESULT = $EVAL(X > 5 ? "high" : "low")
+SC = $(X) > 5 ? "high" : "low"
+RESULT = $EVAL(SC)
 `
 
 	cfg, err := NewFromReader(strings.NewReader(input))
@@ -136,7 +146,7 @@ RESULT = $EVAL(X > 5 ? "high" : "low")
 // TestEvalWithMacroVariable tests that expressions with parentheses
 // must use a variable (as per HTCondor documentation)
 func TestEvalWithMacroVariable(t *testing.T) {
-	input := `EXPR = X > 5 ? 100 : 0
+	input := `EXPR = $(X) > 5 ? 100 : 0
 X = 10
 RESULT = $EVAL(EXPR)
 `

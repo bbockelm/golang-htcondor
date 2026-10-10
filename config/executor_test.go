@@ -251,14 +251,14 @@ func TestExecuteCircularInclude(t *testing.T) {
 
 	// config1 includes config2
 	content1 := fmt.Sprintf(`VAR1 = value1
-include "%s"`, config2)
+include : %s`, config2)
 	if err := os.WriteFile(config1, []byte(content1), 0600); err != nil {
 		t.Fatalf("Failed to create config1: %v", err)
 	}
 
 	// config2 includes config1 (circular)
 	content2 := fmt.Sprintf(`VAR2 = value2
-include "%s"`, config1)
+include : %s`, config1)
 	if err := os.WriteFile(config2, []byte(content2), 0600); err != nil {
 		t.Fatalf("Failed to create config2: %v", err)
 	}
