@@ -54,7 +54,8 @@ type MultiAPConfig struct {
 	JobIDCodec string
 	// BulkFresh is HTTP_API_BULK_FRESH_SECONDS: how fresh the hub's copy
 	// of an AP must be for a bulk action to skip that AP on the hub's
-	// word that nothing there matches. Zero selects the default.
+	// word that nothing there matches. Zero selects the default; a
+	// negative value never skips.
 	BulkFresh time.Duration
 
 	// service replaces the hub, registry and spokes built from the
@@ -117,7 +118,7 @@ func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, er
 		return nil, err
 	}
 	m := &multiAPMode{constraint: strings.TrimSpace(mc.ScheddConstraint), codec: codec, bulkFresh: mc.BulkFresh}
-	if m.bulkFresh <= 0 {
+	if m.bulkFresh == 0 {
 		m.bulkFresh = DefaultBulkFresh
 	}
 	if mc.service != nil {

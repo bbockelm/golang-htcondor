@@ -229,6 +229,7 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_HUB_ADDRESS"},
 	{name: "HTTP_API_MULTI_AP_STALE"},
 	{name: "HTTP_API_JOB_ID_CODEC"},
+	{name: "HTTP_API_BULK_FRESH_SECONDS"},
 }
 
 // reconfigWatcher remembers what each known parameter was set to, so a

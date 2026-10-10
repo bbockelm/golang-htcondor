@@ -1636,6 +1636,17 @@ func loadMultiAPConfig(cfg *config.Config, scheddName, scheddAddr string) (https
 	if !mc.Enabled() {
 		return mc, nil
 	}
+	if v := strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_BULK_FRESH_SECONDS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return mc, fmt.Errorf("HTTP_API_BULK_FRESH_SECONDS must be a whole number of seconds, not %q", v)
+		}
+		// Zero is a valid choice: never skip an AP on the hub's word.
+		mc.BulkFresh = time.Duration(n) * time.Second
+		if n == 0 {
+			mc.BulkFresh = -1
+		}
+	}
 	if scheddName != "" || scheddAddr != "" {
 		return mc, fmt.Errorf("HTTP_API_SCHEDD_CONSTRAINT selects multi-AP mode, which serves many schedds; "+
 			"it cannot be combined with one named schedd (-schedd/SCHEDD_NAME %q, -schedd-addr %q)", scheddName, scheddAddr)

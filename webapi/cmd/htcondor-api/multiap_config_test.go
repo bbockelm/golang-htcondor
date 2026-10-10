@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bbockelm/golang-htcondor/config"
 )
@@ -23,6 +24,23 @@ func TestLoadMultiAPConfig(t *testing.T) {
 		mc.HubName != "hub@db" || mc.Stale != "exclude" || mc.JobIDCodec != "at" {
 		t.Fatalf("multi: %+v, %v", mc, err)
 	}
+
+	if mc.BulkFresh != 0 {
+		t.Errorf("BulkFresh unset = %v, want 0 (the server's default)", mc.BulkFresh)
+	}
+	for v, want := range map[string]time.Duration{"30": 30 * time.Second, "0": -1} {
+		cfg.Set("HTTP_API_BULK_FRESH_SECONDS", v)
+		if mc, err = loadMultiAPConfig(cfg, "", ""); err != nil || mc.BulkFresh != want {
+			t.Errorf("HTTP_API_BULK_FRESH_SECONDS=%s: %v, %v; want %v", v, mc.BulkFresh, err, want)
+		}
+	}
+	for _, bad := range []string{"-5", "soon"} {
+		cfg.Set("HTTP_API_BULK_FRESH_SECONDS", bad)
+		if _, err = loadMultiAPConfig(cfg, "", ""); err == nil {
+			t.Errorf("HTTP_API_BULK_FRESH_SECONDS=%s accepted", bad)
+		}
+	}
+	cfg.Set("HTTP_API_BULK_FRESH_SECONDS", "")
 
 	// A named schedd contradicts the constraint: refused, never silently
 	// preferred.
