@@ -235,6 +235,8 @@ func (j jobsReply) owners() map[string]bool {
 // token (identified by this server's authorization server), or a browser
 // session (identified by its cookie). A caller the schedd accepts is
 // still served from the mirror.
+//
+//nolint:gocyclo // One server shared by subtests for each kind of caller and page.
 func TestMirrorReadRequiresScheddReadAcceptance(t *testing.T) {
 	signingKey := writeSigningKey(t)
 	keyDir := filepath.Dir(signingKey)
