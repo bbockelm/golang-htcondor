@@ -215,6 +215,13 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 		return nil, ErrPaginationUnsupported
 	}
 
+	// Built before the goroutine so a constraint that does not parse is
+	// this call's error, not a result on the channel after a connection.
+	requestAd, err := createJobQueryAd(constraint, effectiveOpts)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create channel for results
 	ch := make(chan JobAdResult, streamOptsApplied.BufferSize)
 
@@ -261,9 +268,6 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 		if username == "" && negotiation != nil && negotiation.User != "" {
 			ctx = WithAuthenticatedUser(ctx, negotiation.User)
 		}
-
-		// Create query request ClassAd with options
-		requestAd := createJobQueryAd(constraint, effectiveOpts)
 
 		// Send query
 		queryMsg := message.NewMessageForStream(cedarStream)
@@ -352,6 +356,13 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 
 // queryWithAuth performs the actual query with optional authentication and query options
 func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, useAuth bool, opts *QueryOptions) ([]*classad.ClassAd, error) {
+	// Built first so a constraint that does not parse is refused before
+	// anything is sent.
+	requestAd, err := createJobQueryAd(constraint, opts)
+	if err != nil {
+		return nil, err
+	}
+
 	// Apply rate limiting if configured
 	// Use a short timeout context for rate limiting to avoid blocking HTTP requests
 	// If rate limit is exceeded, we want to return 429 immediately, not block
@@ -394,9 +405,6 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, useAuth b
 
 	// Note: ConnectAndAuthenticate doesn't expose negotiation details, so we can't get
 	// the authenticated user here. Username should be provided in the context if needed.
-
-	// Create query request ClassAd with options
-	requestAd := createJobQueryAd(constraint, opts)
 
 	// Send query
 	queryMsg := message.NewMessageForStream(cedarStream)
@@ -462,19 +470,21 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, useAuth b
 	return jobAds, nil
 }
 
-// createJobQueryAd creates a request ClassAd for querying jobs with options
-func createJobQueryAd(constraint string, opts *QueryOptions) *classad.ClassAd {
+// createJobQueryAd creates a request ClassAd for querying jobs with options.
+//
+// A constraint that does not parse is an error, as it is for actions and
+// history. Substituting `true` would turn a typo into "every job the
+// schedd lets the caller read" -- and, through EditJobs, edit.
+func createJobQueryAd(constraint string, opts *QueryOptions) (*classad.ClassAd, error) {
 	ad := classad.New()
 
 	// Set constraint (use "true" if empty)
 	if constraint == "" {
 		constraint = "true"
 	}
-	// Parse constraint as an expression
 	constraintExpr, err := classad.ParseExpr(constraint)
 	if err != nil {
-		// If parsing fails, use a simple "true" expression
-		constraintExpr, _ = classad.ParseExpr("true")
+		return nil, fmt.Errorf("invalid constraint expression: %w", err)
 	}
 	ad.InsertExpr("Requirements", constraintExpr)
 
@@ -534,7 +544,7 @@ func createJobQueryAd(constraint string, opts *QueryOptions) *classad.ClassAd {
 		}
 	}
 
-	return ad
+	return ad, nil
 }
 
 // Submit submits a job to the schedd using an HTCondor submit file
