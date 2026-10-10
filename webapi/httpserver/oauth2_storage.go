@@ -688,7 +688,10 @@ func (s *OAuth2Storage) DeleteOpenIDConnectSession(ctx context.Context, signatur
 
 // Device Code Flow Storage Methods
 
-// CreateDeviceCodeSession creates a new device code session
+// CreateDeviceCodeSession creates a new device code session. The device
+// code is what the client presents to the token endpoint, so
+// oauth2_device_codes.device_code stores its sessionKey, not the code;
+// every query on that column hashes first.
 func (s *OAuth2Storage) CreateDeviceCodeSession(ctx context.Context, deviceCode string, userCode string, request fosite.Requester, expiresAt time.Time) error {
 	scopes, err := json.Marshal(request.GetRequestedScopes())
 	if err != nil {
@@ -706,7 +709,7 @@ func (s *OAuth2Storage) CreateDeviceCodeSession(ctx context.Context, deviceCode 
 		INSERT INTO oauth2_device_codes (device_code, user_code, request_id, requested_at, client_id,
 			scopes, granted_scopes, form_data, expires_at, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-	`, deviceCode, userCode, request.GetID(), request.GetRequestedAt(), request.GetClient().GetID(),
+	`, sessionKey(deviceCode), userCode, request.GetID(), request.GetRequestedAt(), request.GetClient().GetID(),
 		string(scopes), string(grantedScopes), string(formData), expiresAt)
 
 	return err
@@ -732,7 +735,7 @@ func (s *OAuth2Storage) GetDeviceCodeSession(ctx context.Context, deviceCode str
 		SELECT user_code, request_id, requested_at, client_id, scopes, granted_scopes,
 			form_data, session_data, subject, status, expires_at
 		FROM oauth2_device_codes WHERE device_code = ?
-	`, deviceCode).Scan(&userCode, &requestID, &requestedAt, &clientID, &scopes, &grantedScopes,
+	`, sessionKey(deviceCode)).Scan(&userCode, &requestID, &requestedAt, &clientID, &scopes, &grantedScopes,
 		&formData, &sessionData, &subject, &status, &expiresAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -791,7 +794,9 @@ func (s *OAuth2Storage) GetDeviceCodeSession(ctx context.Context, deviceCode str
 	return request, nil
 }
 
-// GetDeviceCodeSessionByUserCode retrieves a device code session by user code
+// GetDeviceCodeSessionByUserCode retrieves a device code session by user
+// code. The string it returns is the stored key (sessionKey of the device
+// code), not the device code itself.
 func (s *OAuth2Storage) GetDeviceCodeSessionByUserCode(ctx context.Context, userCode string) (string, fosite.Requester, error) {
 	var (
 		deviceCode    string
@@ -984,7 +989,7 @@ func (s *OAuth2Storage) UpdateDeviceCodePolling(ctx context.Context, deviceCode 
 		UPDATE oauth2_device_codes
 		SET last_polled_at = ?
 		WHERE device_code = ?
-	`, time.Now(), deviceCode)
+	`, time.Now(), sessionKey(deviceCode))
 	return err
 }
 
@@ -994,7 +999,7 @@ func (s *OAuth2Storage) InvalidateDeviceCodeSession(ctx context.Context, deviceC
 		UPDATE oauth2_device_codes
 		SET status = 'used'
 		WHERE device_code = ?
-	`, deviceCode)
+	`, sessionKey(deviceCode))
 	return err
 }
 

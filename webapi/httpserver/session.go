@@ -3,8 +3,10 @@ package httpserver
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -97,6 +99,25 @@ func generateSessionID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// sessionKey is what http_sessions.session_id and idp_sessions.session_id
+// store for a session ID, and oauth2_device_codes.device_code for a
+// device code: its SHA-256, hex-encoded. Each is a bearer value the
+// client presents (a cookie, a token-endpoint parameter), so storing it
+// as is would let anyone who can read the database (a backup, a copy, a
+// file left world-readable) present it. Every query on those columns
+// goes through this.
+func sessionKey(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:])
+}
+
+// sessionLogID identifies a session in log lines: a prefix of its
+// stored sessionKey, which matches the http_sessions row without
+// putting any part of the cookie value in the log.
+func sessionLogID(sessionID string) string {
+	return sessionKey(sessionID)[:12]
+}
+
 // Create creates a new session for the given username and groups
 func (s *SessionStore) Create(username string, groups ...[]string) (string, *SessionData, error) {
 	sessionID, err := generateSessionID()
@@ -131,7 +152,7 @@ func (s *SessionStore) Create(username string, groups ...[]string) (string, *Ses
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO http_sessions (session_id, username, created_at, expires_at, groups_json)
 		 VALUES (?, ?, ?, ?, ?)`,
-		sessionID, session.Username, session.CreatedAt, session.ExpiresAt, groupsJSON)
+		sessionKey(sessionID), session.Username, session.CreatedAt, session.ExpiresAt, groupsJSON)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to store session in database: %w", err)
 	}
@@ -151,7 +172,7 @@ func (s *SessionStore) Get(sessionID string) *SessionData {
 		`SELECT username, created_at, expires_at, groups_json
 		 FROM http_sessions
 		 WHERE session_id = ? AND expires_at > ?`,
-		sessionID, time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &groupsJSON)
+		sessionKey(sessionID), time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &groupsJSON)
 
 	if err != nil {
 		// Session not found or expired
@@ -168,7 +189,7 @@ func (s *SessionStore) Get(sessionID string) *SessionData {
 // Delete removes a session
 func (s *SessionStore) Delete(sessionID string) {
 	ctx := context.Background()
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM http_sessions WHERE session_id = ?`, sessionID)
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM http_sessions WHERE session_id = ?`, sessionKey(sessionID))
 }
 
 // Cleanup removes expired sessions

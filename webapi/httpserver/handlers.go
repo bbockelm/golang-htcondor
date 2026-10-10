@@ -2350,7 +2350,7 @@ func (s *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 				s.superuserArmed.Disarm(sessionID)
 			}
 			if s.logger != nil {
-				s.logger.Info(logging.DestinationHTTP, "Session deleted on logout", "session_id", sessionID[:8]+"...")
+				s.logger.Info(logging.DestinationHTTP, "Session deleted on logout", "session_key", sessionLogID(sessionID))
 			}
 		}
 	}

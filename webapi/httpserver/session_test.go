@@ -2,9 +2,12 @@ package httpserver
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -295,5 +298,79 @@ func TestClearSessionCookie(t *testing.T) {
 	}
 	if cookie.MaxAge != -1 {
 		t.Errorf("Expected MaxAge=-1, got %d", cookie.MaxAge)
+	}
+}
+
+// TestSessionStoredAsHash verifies http_sessions.session_id holds the
+// SHA-256 of the cookie value, not the value: a cookie still resolves
+// to its session, the stored column does not work as a cookie, and
+// logout removes the row. Runs against a migrated application DB
+// through the request-level entry points.
+func TestSessionStoredAsHash(t *testing.T) {
+	server, err := NewServer(newTestConfig(t))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ctx := context.Background()
+
+	cookie, _, err := server.sessionStore.Create("alice", []string{"g1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	rows, err := server.db.QueryContext(ctx, `SELECT session_id FROM http_sessions`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	var stored []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		stored = append(stored, id)
+	}
+	_ = rows.Close()
+	sum := sha256.Sum256([]byte(cookie))
+	if want := hex.EncodeToString(sum[:]); len(stored) != 1 || stored[0] != want {
+		t.Fatalf("stored session_id = %q, want [sha256(cookie)] = [%q]", stored, want)
+	}
+	// Log lines name the session by a prefix of the stored key, never
+	// by a prefix of the cookie value.
+	if logID := sessionLogID(cookie); !strings.HasPrefix(stored[0], logID) || strings.HasPrefix(cookie, logID[:8]) {
+		t.Fatalf("sessionLogID = %q: want a prefix of the stored key %q and not of the cookie", logID, stored[0])
+	}
+
+	withCookie := func(method, path, value string) *http.Request {
+		req := httptest.NewRequestWithContext(ctx, method, path, nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: value}) //nolint:gosec // client-side cookie
+		return req
+	}
+
+	// The cookie resolves to its session.
+	got, ok := server.getSessionFromRequest(withCookie(http.MethodGet, "/", cookie))
+	if !ok || got.Username != "alice" {
+		t.Fatalf("cookie did not resolve to alice's session: ok=%v got=%+v", ok, got)
+	}
+	// The stored value is not itself a usable cookie.
+	if _, ok := server.getSessionFromRequest(withCookie(http.MethodGet, "/", stored[0])); ok {
+		t.Fatal("stored session_id was accepted as a session cookie")
+	}
+
+	// Logout deletes the row.
+	w := httptest.NewRecorder()
+	server.handleLogout(w, withCookie(http.MethodPost, "/logout", cookie))
+	if w.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, want 200", w.Code)
+	}
+	var n int
+	if err := server.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM http_sessions`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("http_sessions has %d rows after logout, want 0", n)
+	}
+	if _, ok := server.getSessionFromRequest(withCookie(http.MethodGet, "/", cookie)); ok {
+		t.Fatal("cookie still resolves after logout")
 	}
 }

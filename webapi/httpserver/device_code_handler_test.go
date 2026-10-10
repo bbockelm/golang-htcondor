@@ -2,6 +2,8 @@ package httpserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -134,7 +136,7 @@ func TestDeviceCodeHandler(t *testing.T) {
 			UPDATE oauth2_device_codes
 			SET expires_at = ?
 			WHERE device_code = ?
-		`, time.Now().Add(-1*time.Minute), resp.DeviceCode)
+		`, time.Now().Add(-1*time.Minute), sessionKey(resp.DeviceCode))
 		if err != nil {
 			t.Fatalf("Failed to expire device code: %v", err)
 		}
@@ -230,5 +232,56 @@ func TestDeviceCodeInvalidation(t *testing.T) {
 	_, err = handler.HandleDeviceAccessRequest(ctx, resp.DeviceCode, session2)
 	if err == nil {
 		t.Error("Expected error when reusing device code, but got none")
+	}
+}
+
+// TestDeviceCodeStoredAsHash verifies oauth2_device_codes.device_code
+// holds the SHA-256 of the device code handed to the client: the code
+// still redeems after approval, and the stored value does not.
+func TestDeviceCodeStoredAsHash(t *testing.T) {
+	storage := NewOAuth2Storage(newTestDB(t, filepath.Join(t.TempDir(), "device.db")))
+	ctx := context.Background()
+	client := &fosite.DefaultClient{
+		ID:         "device-hash-client",
+		GrantTypes: []string{"urn:ietf:params:oauth:grant-type:device_code"},
+		Scopes:     []string{"openid"},
+		Public:     true,
+	}
+	if err := storage.CreateClient(ctx, client); err != nil {
+		t.Fatalf("CreateClient: %v", err)
+	}
+	handler := NewDeviceCodeHandler(storage, &fosite.Config{AccessTokenIssuer: "http://localhost:8080"}) //nolint:gosec // G101: test issuer URL
+
+	resp, err := handler.HandleDeviceAuthorizationRequest(ctx, client, []string{"openid"}, "")
+	if err != nil {
+		t.Fatalf("device authorization: %v", err)
+	}
+	var stored string
+	if err := storage.db.QueryRowContext(ctx,
+		`SELECT device_code FROM oauth2_device_codes WHERE user_code = ?`, resp.UserCode).Scan(&stored); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	sum := sha256.Sum256([]byte(resp.DeviceCode))
+	if want := hex.EncodeToString(sum[:]); stored != want {
+		t.Fatalf("stored device_code = %q, want sha256(device code) = %q", stored, want)
+	}
+
+	if err := storage.ApproveDeviceCodeSession(ctx, resp.UserCode, "alice", &fosite.DefaultSession{Subject: "alice"}); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	// The stored value is not itself a redeemable device code.
+	if _, err := handler.HandleDeviceAccessRequest(ctx, stored, &fosite.DefaultSession{}); err == nil {
+		t.Fatal("stored device_code was redeemed as a device code")
+	}
+	req, err := handler.HandleDeviceAccessRequest(ctx, resp.DeviceCode, &fosite.DefaultSession{})
+	if err != nil {
+		t.Fatalf("device code did not redeem after approval: %v", err)
+	}
+	if got := req.GetSession().GetSubject(); got != "alice" {
+		t.Fatalf("subject = %q, want alice", got)
+	}
+	// Redeeming marks the row used, which also goes through the hash.
+	if _, err := handler.HandleDeviceAccessRequest(ctx, resp.DeviceCode, &fosite.DefaultSession{}); err == nil {
+		t.Fatal("device code redeemed twice")
 	}
 }
