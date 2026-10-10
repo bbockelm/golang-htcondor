@@ -216,6 +216,10 @@ type Handler struct {
 	// and to the collector ad (ActiveWatchStreams). streamOpened() is the
 	// single inc/dec choke point.
 	activeStreams atomic.Int64
+	// streamLimiterVal caps those streams per identity and in all; see
+	// stream_limit.go. Built on first use by streamLimits.
+	streamLimiterOnce sync.Once
+	streamLimiterVal  *streamLimiter
 	// mcpCIMDEnabled advertises Client ID Metadata Document support in the MCP
 	// OAuth2 discovery document (the resolver itself lives in the provider's
 	// storage). See oauth2_cimd.go.
@@ -1966,6 +1970,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// none runs when nobody is watching.
 	h.spoolBufferDir = cfg.SpoolBufferDir
 	h.jobPolls = newJobPollHub(2*time.Second, h.logger, h.scheddJobQuery)
+	h.jobPolls.queryMany = h.scheddJobsQuery
 	h.jobWatchEval = jobwatch.NewEvaluator(h.jobWatch, watchSource{h: h, feed: h.jobWatchFeed},
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
 

@@ -6,6 +6,7 @@ package fakeschedd
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -16,10 +17,12 @@ import (
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
 	cedarserver "github.com/bbockelm/cedar/server"
+
+	"github.com/bbockelm/golang-htcondor/filetransfer"
 )
 
-// Schedd answers QUERY_JOB_ADS(_WITH_AUTH), QUERY_SCHEDD_HISTORY and
-// ACT_ON_JOBS by evaluating the request's constraint against its ads the
+// Schedd answers QUERY_JOB_ADS(_WITH_AUTH), QUERY_SCHEDD_HISTORY,
+// ACT_ON_JOBS and TRANSFER_DATA_WITH_PERMS by evaluating the request's constraint against its ads the
 // way the real schedd does, and DC_NOP / DC_NOP_READ, which identity
 // resolution pings. It applies NO owner filter of its own, which
 // is the property that matters to an owner-scoping test: a real schedd
@@ -37,6 +40,12 @@ type Schedd struct {
 	epochs  []*classad.ClassAd
 	// actedOn is every job id an ACT_ON_JOBS request matched.
 	actedOn []string
+	// sandboxes holds each job's output files, by "cluster.proc".
+	sandboxes map[string][]SandboxFile
+	// jobQueries counts QUERY_JOB_ADS requests and lastConstraint is the
+	// constraint of the latest one.
+	jobQueries     int
+	lastConstraint string
 
 	// refuseRead makes the schedd refuse every READ-level command; see
 	// RefuseRead.
@@ -94,6 +103,7 @@ func Start(t testing.TB, keyFile, trustDomain string) *Schedd {
 	srv.Handle(commands.QUERY_JOB_ADS_WITH_AUTH, f.queryJobs, "READ")
 	srv.Handle(commands.QUERY_SCHEDD_HISTORY, f.queryHistory, "READ")
 	srv.Handle(commands.ACT_ON_JOBS, f.actOnJobs, "WRITE")
+	srv.Handle(commands.TRANSFER_DATA_WITH_PERMS, f.transferData, "WRITE")
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Serve(ctx, ln) }()
 	t.Cleanup(func() { cancel(); _ = ln.Close() })
@@ -141,6 +151,33 @@ func (f *Schedd) AddEpochs(ads ...*classad.ClassAd) {
 	f.epochs = append(f.epochs, ads...)
 }
 
+// SandboxFile is one file in a job's output sandbox. Open supplies its
+// Size bytes each time the sandbox is transferred.
+type SandboxFile struct {
+	Name string
+	Size int64
+	Open func() io.ReadCloser
+}
+
+// AddSandbox sets the output files TRANSFER_DATA_WITH_PERMS sends for job
+// cluster.proc.
+func (f *Schedd) AddSandbox(cluster, proc int, files ...SandboxFile) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sandboxes == nil {
+		f.sandboxes = map[string][]SandboxFile{}
+	}
+	f.sandboxes[fmt.Sprintf("%d.%d", cluster, proc)] = files
+}
+
+// JobQueries reports how many job-ad queries the schedd has answered and
+// the constraint of the latest.
+func (f *Schedd) JobQueries() (int, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.jobQueries, f.lastConstraint
+}
+
 // ActedOn returns the "cluster.proc" ids ACT_ON_JOBS has acted on so far.
 func (f *Schedd) ActedOn() []string {
 	f.mu.Lock()
@@ -183,6 +220,10 @@ func (f *Schedd) queryJobs(ctx context.Context, c *cedarserver.Conn) error {
 	constraint, _ := req.Lookup("Requirements")
 	f.mu.Lock()
 	ads := matching(f.jobs, constraint)
+	f.jobQueries++
+	if constraint != nil {
+		f.lastConstraint = constraint.String()
+	}
 	f.mu.Unlock()
 	for _, ad := range ads {
 		if err := sendAd(ctx, c, ad); err != nil {
@@ -260,4 +301,76 @@ func (f *Schedd) actOnJobs(ctx context.Context, c *cedarserver.Conn) error {
 		return err
 	}
 	return m.FinishMessage(ctx)
+}
+
+// transferData answers TRANSFER_DATA_WITH_PERMS the way the schedd does
+// for a tool fetching output: the count of matching jobs, then each job's
+// ad followed by a file-transfer upload of its sandbox, then the tool's
+// OK reply.
+func (f *Schedd) transferData(ctx context.Context, c *cedarserver.Conn) error {
+	in := message.NewMessageFromStream(c.Stream)
+	if _, err := in.GetString(ctx); err != nil { // version
+		return err
+	}
+	text, err := in.GetString(ctx)
+	if err != nil {
+		return err
+	}
+	constraint, err := classad.ParseExpr(text)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	ads := matching(f.jobs, constraint)
+	f.mu.Unlock()
+
+	out := message.NewMessageForStream(c.Stream)
+	if err := out.PutInt32(ctx, int32(len(ads))); err != nil { //nolint:gosec // a test queue is small
+		return err
+	}
+	if err := out.FinishMessage(ctx); err != nil {
+		return err
+	}
+	opts := filetransfer.Options{}
+	for _, ad := range ads {
+		if err := sendAd(ctx, c, ad); err != nil {
+			return err
+		}
+		cluster, _ := ad.EvaluateAttrInt("ClusterId")
+		proc, _ := ad.EvaluateAttrInt("ProcId")
+		f.mu.Lock()
+		files := f.sandboxes[fmt.Sprintf("%d.%d", cluster, proc)]
+		f.mu.Unlock()
+		var size int64
+		for _, sf := range files {
+			size += sf.Size
+		}
+		if err := filetransfer.SendPreamble(ctx, c.Stream, size, false, opts); err != nil {
+			return err
+		}
+		state := &filetransfer.SendState{}
+		for _, sf := range files {
+			open := sf.Open
+			spec := filetransfer.FileSpec{
+				WireName: sf.Name,
+				Mode:     0o644,
+				Size:     sf.Size,
+				Open:     func() (io.ReadCloser, error) { return open(), nil },
+			}
+			if err := filetransfer.SendFile(ctx, c.Stream, spec, state, opts); err != nil {
+				return err
+			}
+		}
+		// The tool's receiver performs no TransferAck exchange, so
+		// CommandFinished alone ends this job's files.
+		done := message.NewMessageForStream(c.Stream)
+		if err := done.PutInt32(ctx, int32(filetransfer.CmdFinished)); err != nil {
+			return err
+		}
+		if err := done.FinishMessage(ctx); err != nil {
+			return err
+		}
+	}
+	_, err = message.NewMessageFromStream(c.Stream).GetInt32(ctx)
+	return err
 }

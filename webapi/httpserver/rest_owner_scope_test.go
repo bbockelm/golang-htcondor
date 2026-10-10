@@ -310,3 +310,14 @@ func TestSeesAllJobsRule(t *testing.T) {
 		})
 	}
 }
+
+// doCtx is a GET through ServeHTTP that ends when ctx does, for a path
+// that may hold the response open as a stream.
+func (f *twoOwnerFixture) doCtx(ctx context.Context, t *testing.T, path string, auth func(*http.Request)) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	auth(req)
+	w := httptest.NewRecorder()
+	f.s.ServeHTTP(w, req)
+	return w
+}

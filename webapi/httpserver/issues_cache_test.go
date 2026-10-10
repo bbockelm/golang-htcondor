@@ -2,7 +2,10 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -276,4 +279,38 @@ func TestADashboardViewerGivesUpWhenItsOwnCallerLeaves(t *testing.T) {
 		t.Fatal("the viewer blocked on a walk it no longer needed")
 	}
 	close(release)
+}
+
+// The window is part of the cache key, so one caller stepping through
+// windows used to leave a collected set behind for each, for good. The
+// cache stays bounded -- and still serves the latest of them from cache.
+func TestIssuesCacheIsBoundedAcrossWindows(t *testing.T) {
+	f := twoOwnerScheddServer(t)
+	alice := f.bearer(t, "alice")
+	get := func(window int) IssuesResponse {
+		t.Helper()
+		w := f.do(t, http.MethodGet, fmt.Sprintf("/api/v1/issues?window_seconds=%d&include_ended=false", window), "", alice)
+		if w.Code != http.StatusOK {
+			t.Fatalf("window %d: status %d: %.200s", window, w.Code, w.Body.String())
+		}
+		var resp IssuesResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	const windows = maxIssueCacheEntries + 64
+	for i := 0; i < windows; i++ {
+		get(3600 + i)
+	}
+	c := f.s.issueSets()
+	c.mu.Lock()
+	n := len(c.byKey)
+	c.mu.Unlock()
+	if n > maxIssueCacheEntries {
+		t.Errorf("%d cached sets after %d windows, want at most %d", n, windows, maxIssueCacheEntries)
+	}
+	if resp := get(3600 + windows - 1); resp.Timings == nil || !resp.Timings.Cached {
+		t.Error("the most recent window was not served from the cache")
+	}
 }

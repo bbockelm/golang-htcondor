@@ -141,6 +141,12 @@ const (
 	// makes it count for more.
 	WeightUnlikelyUser = 3
 
+	// WeightStalled is a connection that never asked to authenticate
+	// before the pre-authentication deadline. Light, like an abandoned
+	// login, because a bad network can produce it; but a source that
+	// keeps doing it is holding connection slots open on purpose.
+	WeightStalled = 1
+
 	// WeightForged is a certificate this deployment's CA did not sign,
 	// or one whose signature does not check out.
 	//

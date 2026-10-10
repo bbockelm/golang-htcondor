@@ -184,6 +184,15 @@ func (h *Handler) handleSharedWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Either form holds the connection for the whole wait. Counted
+	// against the watch's owner, apart from their own sessions, since
+	// whoever holds the URL is not necessarily them.
+	release, ok := h.admitStream(w, "share:"+payload.Owner)
+	if !ok {
+		return
+	}
+	defer release()
+
 	wait := watchpoll.ClampWait(r.URL.Query().Get("wait"))
 	start := time.Now()
 	deadline := start.Add(wait)

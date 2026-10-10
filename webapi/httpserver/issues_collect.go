@@ -117,6 +117,12 @@ func (s *Handler) mirrorRows(ctx context.Context, table, constraint string, proj
 	return out, nil
 }
 
+// maxIssueCacheEntries bounds the cache. The key carries the caller's
+// window in seconds, so one caller stepping through windows would
+// otherwise leave a collected set behind for each, for the life of the
+// process.
+const maxIssueCacheEntries = 256
+
 // issueCache serializes collection per scope, so a room full of
 // facilitators with the page open costs one read rather than one each --
 // and so that moving the granularity slider re-clusters a set that is
@@ -163,6 +169,7 @@ func (c *issueCache) get(ctx context.Context, key string, compute func(context.C
 	c.mu.Lock()
 	entry := c.byKey[key]
 	if entry == nil {
+		c.makeRoom()
 		entry = &cachedIssues{lock: make(chan struct{}, 1)}
 		c.byKey[key] = entry
 	}
@@ -192,6 +199,40 @@ func (c *issueCache) get(ctx context.Context, key string, compute func(context.C
 	}
 	entry.set, entry.at = set, c.now()
 	return set, false, nil
+}
+
+// makeRoom keeps the cache under maxIssueCacheEntries. Called with c.mu
+// held, before adding an entry.
+//
+// Entries past their lifetime go first, then the oldest. One being
+// collected or waited on is left alone; it is the cheapest to keep and
+// the costliest to lose. An expired set is only the fallback for a
+// failed refresh, so dropping it under pressure costs that fallback and
+// nothing else.
+func (c *issueCache) makeRoom() {
+	if len(c.byKey) < maxIssueCacheEntries {
+		return
+	}
+	now := c.now()
+	busy := func(e *cachedIssues) bool { return len(e.lock) > 0 }
+	for k, e := range c.byKey {
+		if !busy(e) && (e.set == nil || now.Sub(e.at) >= c.ttl(e.set)) {
+			delete(c.byKey, k)
+		}
+	}
+	for len(c.byKey) >= maxIssueCacheEntries {
+		var oldestKey string
+		var oldest *cachedIssues
+		for k, e := range c.byKey {
+			if !busy(e) && (oldest == nil || e.at.Before(oldest.at)) {
+				oldestKey, oldest = k, e
+			}
+		}
+		if oldest == nil {
+			return
+		}
+		delete(c.byKey, oldestKey)
+	}
 }
 
 func (s *Handler) issueSets() *issueCache {
