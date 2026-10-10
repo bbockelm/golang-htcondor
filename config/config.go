@@ -78,7 +78,7 @@ type ConfigOptions struct {
 	// defaults, no param overrides, no time constants (SECOND/MINUTE/...), and
 	// no auto-detected macros (FULL_HOSTNAME, DETECTED_CPUS, TILDE, ...). The
 	// resulting Config contains only what the parsed source defines. This
-	// mirrors HTCondor's Parse_config_string on a fresh MACRO_SET with a NULL
+	// mirrors HTCondor reading a config file into a fresh MACRO_SET with a NULL
 	// defaults table, which is what the differential config fuzzer compares
 	// against; it is also useful for parsing standalone snippets whose meaning
 	// must not depend on host state.

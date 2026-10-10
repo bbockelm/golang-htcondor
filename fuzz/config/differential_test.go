@@ -18,7 +18,8 @@ func requireOracle(t testing.TB) {
 
 // seedCase is a hand-written config source. When reason is empty, the Go and
 // C++ engines are expected to AGREE (parity). When reason is non-empty, the
-// case is a KNOWN divergence the fuzzer already surfaced (see FINDINGS.md): the
+// case is a KNOWN divergence the fuzzer already surfaced (see
+// design_notes/CONFIG_FUZZ_FINDINGS.md): the
 // test asserts it still diverges, so if the Go side is fixed to match HTCondor
 // the case flips and we get told to promote it to parity.
 type seedCase struct {
@@ -44,10 +45,11 @@ var seeds = []seedCase{
 	{input: "D = a$(DOLLAR)b\n"},                   // fixed: $(DOLLAR) -> literal '$'
 	{input: "# a comment\n\nK = v   # trailing\n"}, // fixed: '#' inside a value is literal
 	{input: "C : colonval\n"},                      // fixed: colon is an assignment operator
-	{input: "LONG = a \\\n b \\\n c\n"},            // fixed oracle: it now joins continuations like getline
+	{input: "LONG = a \\\n b \\\n c\n"},            // continuation, joined by HTCondor's own file reader
 	{input: "if 1 > 0\n  Y = t\nendif\n"},          // parity in HTCondorCompat: Go rejects it too
 	{input: "0\n"},                                 // fuzzer finding: bare non-assignment line; compat rejects it like HTCondor
 	{input: "FOO = bar\n0\n"},                      // a bad line among good ones fails the whole parse in compat
+	{input: "foo bar\n"},                           // no operator: a config file rejects it (Parse_macros), as Go does
 
 	// --- intentional Go extensions (will always diverge; NOT bugs) ---
 	{input: "DN = $DIRNAME(/a/b/c)\n",
@@ -59,36 +61,53 @@ var seeds = []seedCase{
 
 	// --- known divergences still to resolve (findings) ---
 	{input: "FOO = 1\nfoo = 2\nUSE = $(Foo)\n",
-		reason: "reserved 'use' keyword: HTCondor reads 'USE = ...' as a metaknob ('use needs a keyword before :') and errors; Go treats USE as an ordinary name. Exotic."},
+		reason: "'use' keyword: HTCondor's file reader takes 'use' as the metaknob keyword only before ':', so 'USE = $(Foo)' is an ordinary assignment (USE=2); Go's lexer always takes it as the keyword and runs a role directive (sets ROLE='= 2')."},
 	{input: "I = $INT(0x10)\n",
 		reason: "$INT: HTCondor evaluates the arg as a ClassAd expression ($INT(0x10)->0) and EXCEPTs (aborts) on non-integers like 5x3; Go leaves it literal. Not worth replicating the abort."},
-	{input: "foo bar\n",
-		reason: "whitespace assignment: HTCondor treats the first whitespace as an assignment operator, so 'foo bar' means 'foo = bar' (and '0 0', 'x y' parse); Go requires '='/':'. A real HTCondor leniency, like colon — could be added to the lexer later."},
+	{input: "foo bar = baz\n",
+		reason: "extra words before the operator: HTCondor's file reader ignores words between the name and '='/':' ('foo bar = baz' sets foo=baz; '0 0=' sets 0=''); Go rejects the line."},
+	{input: "0 = 1\n",
+		reason: "digit-leading name: HTCondor accepts any run of identifier characters as a name ('0 = 1' sets 0=1); Go's lexer requires a letter or '_' first and rejects the line."},
+	{input: "E = $ENV(CFG_FUZZ_UNSET_VAR:dflt)\n",
+		reason: "$ENV default: HTCondor's $ENV(NAME:default) yields default when NAME is unset; Go looks up the literal 'NAME:default' and yields empty."},
+	{input: "T = v ",
+		reason: "last line without a newline: HTCondor's reader keeps its trailing whitespace (T='v '); Go trims it."},
+	{input: "B = \xff\n",
+		reason: "non-UTF-8 byte: HTCondor stores the byte as is; Go's rune lexer replaces it with U+FFFD."},
+	{input: "H@=end\nx\n@end\n",
+		reason: "'@=' needs whitespace before it: HTCondor reads the name as 'H@' and rejects it (Illegal Identifier); Go accepts it as a here-doc."},
+	{input: "S = $(s)\n",
+		reason: "self-reference with no prior value: HTCondor expands $(S) inside S's own definition to the previous value, empty here (S=''); Go leaves '$(s)' unexpanded."},
 }
 
 // divergence runs both engines on the same preluded source and returns a
 // non-empty description if they disagree (in parse acceptance or expanded
-// table), or "" if they agree. cppExc reports a C++ exception (uncomparable).
-func divergence(input string) (desc string, cppExc bool) {
+// table), or "" if they agree. skip is non-empty when the input cannot be
+// compared: it would make the Go engine touch the host, or a C++ exception
+// escaped.
+func divergence(input string) (desc, skip string) {
 	full := Prelude(input)
+	if ReadsHost(full) {
+		return "", "include directive (would read a host file or run a command)"
+	}
 	cppRes := oracle.ParseExpand(full)
 	if cppRes.Panic {
-		return "", true // uncomparable; skip the Go work
+		return "", "C++ oracle exception"
 	}
 	goRes := GoParseExpand(full)
 
 	if goRes.Parsed != cppRes.Parsed {
-		return fmt.Sprintf("parse-acceptance: go.parsed=%v cpp.parsed=%v", goRes.Parsed, cppRes.Parsed), false
+		return fmt.Sprintf("parse-acceptance: go.parsed=%v cpp.parsed=%v", goRes.Parsed, cppRes.Parsed), ""
 	}
 	if !goRes.Parsed {
-		return "", false // both rejected — agree
+		return "", "" // both rejected — agree
 	}
 	g := StripRefEnv(Canon(goRes.Table))
 	c := StripRefEnv(Canon(cppRes.Table))
 	if g != c {
-		return "expanded-table:\n--- go ---\n" + g + "--- cpp ---\n" + c + "--- first diff ---\n" + firstDiff(g, c), false
+		return "expanded-table:\n--- go ---\n" + g + "--- cpp ---\n" + c + "--- first diff ---\n" + firstDiff(g, c), ""
 	}
-	return "", false
+	return "", ""
 }
 
 func firstDiff(a, b string) string {
@@ -121,9 +140,9 @@ func TestConfigSeeds(t *testing.T) {
 	for i, sc := range seeds {
 		sc := sc
 		t.Run(fmt.Sprintf("seed%02d", i), func(t *testing.T) {
-			desc, cppExc := divergence(sc.input)
-			if cppExc {
-				t.Skipf("C++ oracle exception on:\n%s", indent(sc.input))
+			desc, skip := divergence(sc.input)
+			if skip != "" {
+				t.Errorf("seed is not comparable (%s):\n%s", skip, indent(sc.input))
 			}
 			switch {
 			case sc.reason == "" && desc != "":
@@ -164,8 +183,8 @@ func FuzzConfigParseExpand(f *testing.F) {
 		if len(input) > 8192 || knownDivergentInputs[input] {
 			t.Skip()
 		}
-		desc, cppExc := divergence(input)
-		if cppExc || desc == "" {
+		desc, skip := divergence(input)
+		if skip != "" || desc == "" {
 			return
 		}
 		t.Errorf("Go vs HTCondor config divergence:\ninput:\n%s\n%s", indent(input), desc)

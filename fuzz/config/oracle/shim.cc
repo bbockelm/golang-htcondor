@@ -6,6 +6,7 @@
 
 #include "condor_common.h"
 #include "condor_config.h"
+#include "CondorError.h"
 
 #include "shim.h"
 
@@ -16,55 +17,6 @@
 #include <utility>
 #include <vector>
 
-namespace {
-
-// join_continuations replicates HTCondor's getline_implementation
-// (config.cpp): the config file/line reader trims leading and trailing
-// whitespace from each physical line and joins lines ending in a backslash
-// onto the next, producing the logical lines that Parse_config_string then
-// parses. Parse_config_string itself does NOT do this (it just splits on
-// '\n'), so calling it directly on raw text mishandles continuations and
-// indented lines. We reproduce the reader here so the oracle matches the real
-// config parse. (The rare '#'-in-continuation special cases are not modeled.)
-std::string join_continuations(const char *config) {
-	std::string result;
-	std::string logical;
-	const char *p = config;
-	while (*p) {
-		const char *nl = strchr(p, '\n');
-		std::string line = nl ? std::string(p, nl - p) : std::string(p);
-
-		const char ws[] = " \t\r";
-		size_t b = line.find_first_not_of(ws);
-		std::string trimmed;
-		if (b != std::string::npos) {
-			size_t e = line.find_last_not_of(ws);
-			trimmed = line.substr(b, e - b + 1);
-		}
-
-		if (!trimmed.empty() && trimmed.back() == '\\') {
-			trimmed.pop_back();
-			logical += trimmed; // keep accumulating the logical line
-		} else {
-			logical += trimmed;
-			result += logical;
-			result += '\n';
-			logical.clear();
-		}
-		if (!nl) {
-			break;
-		}
-		p = nl + 1;
-	}
-	if (!logical.empty()) {
-		result += logical;
-		result += '\n';
-	}
-	return result;
-}
-
-} // namespace
-
 extern "C" int config_parse_expand(const char *text, char **out) {
 	*out = nullptr;
 	try {
@@ -73,10 +25,11 @@ extern "C" int config_parse_expand(const char *text, char **out) {
 		// side. All members are C++ default-initialized (0/nullptr).
 		MACRO_SET set;
 		// Match the option flags production real_config() applies to the config
-		// macro set (condor_config.cpp): colon is not an assignment operator,
-		// smart comment/line-continuation handling, and keep values even when
-		// they equal a built-in default (otherwise insert elides e.g. MINUTE=60
-		// via the global param_info table, and later references resolve empty).
+		// macro set (condor_config.cpp): colon assignment is accepted with a
+		// warning, smart comment/line-continuation handling, and keep values
+		// even when they equal a built-in default (otherwise insert elides e.g.
+		// MINUTE=60 via the global param_info table, and later references
+		// resolve empty).
 		// We deliberately do NOT set CONFIG_OPT_DEFAULTS_ARE_PARAM_INFO, and we
 		// leave defaults NULL, so no param_info.in defaults leak in (mode #1).
 		set.options = CONFIG_OPT_COLON_IS_META_ONLY | CONFIG_OPT_SMART_COM_IN_CONT |
@@ -84,20 +37,35 @@ extern "C" int config_parse_expand(const char *text, char **out) {
 		set.defaults = nullptr;
 
 		MACRO_EVAL_CONTEXT ctx;
-		ctx.init(nullptr, 2); // no subsystem; matches Go's empty Subsystem
+		ctx.init(nullptr, MACRO_EVAL_CONTEXT::um_COUNT_REFS); // no subsystem, as Go
+
+		// Errors go to this stack instead of stderr (the set owns and frees it).
+		set.errors = new CondorError();
 
 		MACRO_SOURCE src = {false, false, 0, 0, 0, 0};
 		insert_source("fuzz", set, src);
 
-		// Join backslash-continuations and trim lines exactly as the real
-		// config reader (getline_implementation) does before Parse_config_string
-		// sees them.
-		std::string joined = join_continuations(text);
-		int rc = Parse_config_string(src, 0, joined.c_str(), set, ctx);
-		if (rc != 0) {
-			// Parse error (rc is the offending line, or negative). The table may
-			// be partial; we do not compare it — the caller only needs to see
-			// that the C++ parser rejected this input.
+		// Read the text the way HTCondor reads a config FILE: Parse_macros fed
+		// by a MacroStreamMemoryFile, which shares getline_implementation with
+		// the FILE* stream production uses (process_config_source), so
+		// whitespace trimming and backslash continuation are HTCondor's own.
+		// Parse_config_string is NOT that path: it is the lenient parser for
+		// metaknob bodies, and accepts lines (e.g. "foo bar") that a config
+		// file rejects.
+		//
+		// Production passes options = 0. We add CONFIG_OPT_NO_INCLUDE_FILE so a
+		// fuzz input can never read a host file or run a command through
+		// `include [command] : ...`; every include form is then a parse error,
+		// matching the Go side's ConfigOptions{NoLocalAccess: true}.
+		MacroStreamMemoryFile ms(text, (ssize_t)strlen(text), src);
+		std::string errmsg;
+		int rc = Parse_macros(ms, 0, set, CONFIG_OPT_NO_INCLUDE_FILE, &ctx, errmsg, nullptr, nullptr);
+		if (rc < 0) {
+			// Parse error. Production (process_config_source) treats only a
+			// negative return as fatal; a positive `error N :` code stops the
+			// read without failing it, so it falls through as a success. The
+			// table may be partial; we do not compare it — the caller only needs
+			// to see that the C++ parser rejected this input.
 			return 0;
 		}
 

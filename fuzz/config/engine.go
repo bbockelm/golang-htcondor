@@ -86,6 +86,41 @@ func StripRefEnv(canonTable string) string {
 	return b.String()
 }
 
+// ReadsHost reports whether the Go engine would execute an include directive
+// for text: `include : file` reads a host file and `include command : cmd`
+// runs a shell command. A fuzz input must never do either, so the harness
+// treats such inputs as uncomparable and runs neither engine on them. The check
+// uses the Go parser itself (no execution), so it sees exactly the directives
+// the Go executor would act on. The C++ side refuses every include form on its
+// own (CONFIG_OPT_NO_INCLUDE_FILE in the shim), covering forms only HTCondor's
+// grammar recognizes.
+func ReadsHost(text string) bool {
+	stmts, err := config.ParseStrict(config.NewLexer(strings.NewReader(text)))
+	if err != nil {
+		return false // compat mode rejects it before executing anything
+	}
+	return hasInclude(stmts)
+}
+
+func hasInclude(stmts []config.Statement) bool {
+	for _, s := range stmts {
+		switch s := s.(type) {
+		case *config.IncludeDirective:
+			return true
+		case *config.Conditional:
+			if hasInclude(s.ThenBlock) || hasInclude(s.ElseBlock) {
+				return true
+			}
+			for _, ei := range s.ElseIfBlock {
+				if hasInclude(ei.Block) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // GoParseExpand parses text with the native Go engine (no defaults) and returns
 // the canonical expanded table. text is expected to already include RefEnv (see
 // Prelude); pass the identical string to oracle.ParseExpand.
