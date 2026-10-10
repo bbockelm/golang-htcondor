@@ -3,6 +3,7 @@ package httpserver
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -189,41 +190,45 @@ func TestGenerateHTCondorTokenWithCondorScopes(t *testing.T) {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
+	// want is the token's scope claim as a set. condor:/* scopes map one
+	// to one -- WRITE does not bring READ, and a level this server never
+	// grants is dropped -- while a grant without them falls back to the
+	// mcp:* mapping.
 	tests := []struct {
-		name          string
-		username      string
-		scopes        []string
-		shouldContain []string
+		name     string
+		username string
+		scopes   []string
+		want     []string
 	}{
 		{
-			name:          "condor READ scope",
-			username:      "testuser",
-			scopes:        []string{"condor:/READ"},
-			shouldContain: []string{"READ"},
+			name:     "condor READ scope",
+			username: "testuser",
+			scopes:   []string{"condor:/READ"},
+			want:     []string{"condor:/READ"},
 		},
 		{
-			name:          "condor WRITE scope",
-			username:      "testuser",
-			scopes:        []string{"condor:/WRITE"},
-			shouldContain: []string{"WRITE", "READ"},
+			name:     "condor WRITE scope",
+			username: "testuser",
+			scopes:   []string{"condor:/WRITE"},
+			want:     []string{"condor:/WRITE"},
 		},
 		{
-			name:          "multiple condor scopes",
-			username:      "testuser",
-			scopes:        []string{"condor:/READ", "condor:/ADVERTISE_STARTD"},
-			shouldContain: []string{"READ", "ADVERTISE_STARTD"},
+			name:     "multiple condor scopes",
+			username: "testuser",
+			scopes:   []string{"condor:/READ", "condor:/ADVERTISE_STARTD"},
+			want:     []string{"condor:/READ"},
 		},
 		{
-			name:          "legacy mcp:write scope",
-			username:      "testuser",
-			scopes:        []string{"mcp:write"},
-			shouldContain: []string{"WRITE", "READ"},
+			name:     "legacy mcp:write scope",
+			username: "testuser",
+			scopes:   []string{"mcp:write"},
+			want:     []string{"condor:/READ", "condor:/WRITE"},
 		},
 		{
-			name:          "legacy mcp:read scope",
-			username:      "testuser",
-			scopes:        []string{"mcp:read"},
-			shouldContain: []string{"READ"},
+			name:     "legacy mcp:read scope",
+			username: "testuser",
+			scopes:   []string{"mcp:read"},
+			want:     []string{"condor:/READ"},
 		},
 	}
 
@@ -233,21 +238,17 @@ func TestGenerateHTCondorTokenWithCondorScopes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("generateHTCondorTokenWithScopes() error = %v", err)
 			}
-
-			if token == "" {
-				t.Error("generateHTCondorTokenWithScopes() returned empty token")
+			claim, ok := condorTokenScope(t, token)
+			if !ok {
+				t.Fatal("the minted token has no scope claim, which HTCondor reads as no limit at all")
 			}
-
-			// Basic JWT structure check (should have 3 parts separated by dots)
-			parts := strings.Split(token, ".")
-			if len(parts) != 3 {
-				t.Errorf("Token should have 3 parts (header.payload.signature), got %d parts", len(parts))
+			got := strings.Fields(claim)
+			slices.Sort(got)
+			want := slices.Clone(tt.want)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Errorf("scope claim = %q, want %q", got, want)
 			}
-
-			// The token should be a JWT that HTCondor can validate
-			// We can't easily decode it without bringing in JWT libraries,
-			// but we can at least verify it's not empty and has the right structure
-			t.Logf("Generated token: %s...", token[:min(50, len(token))])
 		})
 	}
 }

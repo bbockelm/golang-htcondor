@@ -21,6 +21,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 	"github.com/bbockelm/golang-htcondor/version"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -2229,15 +2230,24 @@ func (s *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	//      pre-API-key behavior for environments where the metrics
 	//      endpoint is already isolated by network ACLs.
 	//   2. Bearer token presented (and a chat-style API key is
-	//      detected). The shared createAuthenticatedContext path
-	//      handles parsing + scope attachment; we then check that
-	//      the `metrics` scope is present.
+	//      detected). authenticateAPIKey handles parsing + scope
+	//      attachment; we then check that the `metrics` scope is
+	//      present.
 	//   3. Anything else: 401. Unlike most endpoints, /metrics does
 	//      NOT support cookie-based browser sessions — Prometheus
 	//      doesn't have a cookie jar, and admin browser users have
 	//      no business hitting /metrics directly.
 	if !s.metricsPublic {
-		ctx, err := s.createAuthenticatedContext(r)
+		// An API key is authenticated directly: createAuthenticatedContext
+		// refuses one that cannot act as its creator, and a metrics-only
+		// key, which is what this endpoint is for, cannot.
+		var ctx context.Context
+		var err error
+		if raw, berr := extractBearerToken(r); berr == nil && apikey.LooksLikeKey(raw) {
+			ctx, err = s.authenticateAPIKey(r, raw)
+		} else {
+			ctx, err = s.createAuthenticatedContext(r)
+		}
 		if err != nil {
 			s.writeError(w, http.StatusUnauthorized,
 				"Metrics endpoint requires an API key with the 'metrics' scope. "+
@@ -2305,19 +2315,24 @@ func (s *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // Returning 200 for "warning" rather than 503 is a deliberate choice: a stale
 // collector ping shouldn't pull the MCP out of load-balancer rotation when
 // the actual user-facing schedd connections might still work. The body
-// always carries the structured snapshot so callers (or kubectl get pods)
-// can see exactly which daemon is in trouble.
+// always carries each daemon's status so callers (or kubectl get pods)
+// can see which daemon is in trouble; the details behind it -- names,
+// addresses, error text -- only when readyzDetail admits the caller.
 func (s *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	detail := s.readyzDetail(r)
 
 	if s.multi != nil {
 		ready, body := s.multiAPReadiness()
 		status := http.StatusOK
 		if !ready {
 			status = http.StatusServiceUnavailable
+		}
+		if !detail {
+			body = publicMultiAPReadiness(body)
 		}
 		s.writeJSON(w, status, body)
 		return
@@ -2366,7 +2381,52 @@ func (s *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusServiceUnavailable
 	}
 
+	if !detail {
+		s.writeJSON(w, statusCode, snap.public())
+		return
+	}
 	s.writeJSON(w, statusCode, snap)
+}
+
+// readyzDetail reports whether the caller may see /readyz in full.
+//
+// /readyz answers anybody, because a load balancer or a kubelet asks it
+// with no credential. What it answers them is a status per daemon. The
+// detail behind those -- the mirror's name and address, the configured
+// pins, the error text of a failed dial, which names auth methods and
+// the trust domain -- describes this deployment's internals to whoever
+// asks, so it goes to the two callers that are meant to see it: an admin
+// session, as on /api/v1/dbmirror/status, and an API key with the
+// metrics scope, the monitoring credential.
+func (s *Handler) readyzDetail(r *http.Request) bool {
+	if s.webuiAdminGroups.configured() {
+		if session, ok := s.getSessionFromRequest(r); ok && s.webuiAdminGroups.allows(session.Groups) {
+			return true
+		}
+	}
+	raw, err := extractBearerToken(r)
+	if err != nil || !apikey.LooksLikeKey(raw) {
+		return false
+	}
+	ctx, err := s.authenticateAPIKey(r, raw)
+	return err == nil && ContainsScope(ctx, "metrics")
+}
+
+// publicMultiAPReadiness is multi-AP /readyz without the per-AP names
+// and the hub's error text: whether the hub answers, how many access
+// points there are, and why the server is not ready when it is not.
+func publicMultiAPReadiness(body map[string]any) map[string]any {
+	out := map[string]any{
+		"mode":     body["mode"],
+		"ap_count": body["ap_count"],
+	}
+	if hub, ok := body["hub"].(map[string]any); ok {
+		out["hub"] = map[string]any{"reachable": hub["reachable"]}
+	}
+	if reason, ok := body["reason"]; ok {
+		out["reason"] = reason
+	}
+	return out
 }
 
 // handleLogout handles POST /logout endpoint to clear session cookies.

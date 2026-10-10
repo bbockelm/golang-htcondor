@@ -217,6 +217,15 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	// not grow its own copy -- see withCondorCredential for what a
 	// second copy would be free to forget.
 	ctx, err = h.withCondorCredential(ctx, username, token.GetGrantedScopes())
+	if errors.Is(err, errNoAuthorizationLimits) {
+		// The grant's condor:/* scopes map to no authorization this
+		// server issues. That is the token's doing, not the server's.
+		h.logger.Warn(logging.DestinationHTTP, "MCP request refused: token grants no HTCondor authorization",
+			"username", username, "scopes", token.GetGrantedScopes())
+		h.writeOAuthError(w, http.StatusForbidden, "insufficient_scope",
+			"Token grants no HTCondor authorization this server issues")
+		return nil, nil, false
+	}
 	if err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Failed to prepare the caller's HTCondor credential",
 			"error", err, "username", username)
@@ -756,6 +765,11 @@ func (h *Handler) grantableScopes(userGroups, requested []string) []string {
 // weigh a line that means nothing -- and re-granting it would keep it
 // alive for another refresh cycle. Dropped here, a deprecated scope
 // disappears from the grant the moment its client authorizes again.
+//
+// So does every other condor level but READ and WRITE, for the same
+// reason: mapCondorScopesToAuthz grants none of them, and a client
+// registered before registration refused them could still ask, and have
+// them shown pre-ticked.
 func withoutDeprecatedScopes(requested []string) []string {
 	deprecated := make(map[string]bool, len(oauth2DeprecatedScopes))
 	for _, scope := range oauth2DeprecatedScopes {
@@ -763,9 +777,13 @@ func withoutDeprecatedScopes(requested []string) []string {
 	}
 	out := make([]string, 0, len(requested))
 	for _, scope := range requested {
-		if !deprecated[scope] {
-			out = append(out, scope)
+		if deprecated[scope] {
+			continue
 		}
+		if strings.HasPrefix(scope, "condor:/") && len(mapCondorScopesToAuthz([]string{scope})) == 0 {
+			continue
+		}
+		out = append(out, scope)
 	}
 	return out
 }
@@ -1406,12 +1424,14 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		// without the group membership simply does not receive them.
 		"mcp:admin":     true,
 		"mcp:superuser": true,
+		// READ and WRITE only: they are the condor levels a token from
+		// this server can carry (mapCondorScopesToAuthz). Any other was
+		// accepted here, shown pre-ticked on the consent page, and
+		// granted nothing.
+		condorScopeRead:  true,
+		condorScopeWrite: true,
 	}
 	for _, scope := range regReq.Scopes {
-		// Allow condor:/* scopes
-		if strings.HasPrefix(scope, "condor:/") {
-			continue
-		}
 		if !supportedScopes[scope] {
 			h.writeError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported scope: %s", scope))
 			return

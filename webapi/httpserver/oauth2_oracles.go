@@ -2,9 +2,12 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/bbockelm/cedar/security"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -164,8 +167,8 @@ type ScheddACLOracle struct {
 	Logger    *logging.Logger
 	// MintToken produces an HTCondor IDTOKEN asserting username, used as
 	// the probe credential. The scopes argument is passed through to the
-	// handler's minter; Check passes nil so the probe token carries no
-	// limit_authz narrowing (see Check for why).
+	// handler's minter; Check asks for every level it probes (see Check
+	// for why).
 	MintToken func(username string, scopes []string) (string, error)
 	// Config is the HTCondor configuration the probe's security config is
 	// built from; nil is the process-wide default.
@@ -203,11 +206,14 @@ func (o *ScheddACLOracle) Check(ctx context.Context, username string, scopes []s
 	// carrying the server's own credentials would answer a question about
 	// the server. Mint the same kind of IDTOKEN the MCP data path uses.
 	//
-	// The authz levels are deliberately left off the minted token: a token
-	// narrowed with limit_authz would fail the probe because we asked for a
-	// narrower token, not because the ACL refuses the user, which is the
-	// opposite of what is being measured.
-	probeToken, err := o.MintToken(username, nil)
+	// The token carries every level probed. One narrowed below a probe
+	// fails that probe because we asked for a narrower token, not because
+	// the ACL refuses the user, which is the opposite of what is being
+	// measured. Asking for no scopes is not "no narrowing": the minter
+	// refuses an unlimited token and maps an empty request to READ, so a
+	// probe minted that way failed every WRITE check and stripped
+	// mcp:write and condor:/WRITE from every grant the ACL allowed them.
+	probeToken, err := o.MintToken(username, []string{condorScopeRead, condorScopeWrite})
 	if err != nil {
 		return ReauthDecision{}, fmt.Errorf("minting probe token for %s: %w", username, err)
 	}
@@ -231,6 +237,16 @@ func (o *ScheddACLOracle) Check(ctx context.Context, username string, scopes []s
 		result, err := schedd.PingWithOptions(ctx, &htcondor.PingOptions{
 			CheckPermission: probe.permission,
 		})
+		// A schedd refuses the probe's handshake outright for an
+		// identity its ACL denies at that level, rather than answering
+		// the query with "not authorized". That refusal is the answer,
+		// not a failed probe: read as one, the oracle failed open on
+		// exactly the users it exists to catch.
+		var refused *security.AuthorizationError
+		if errors.As(err, &refused) && refused.ReturnCode == "DENIED" {
+			denied = append(denied, probe.scopes...)
+			continue
+		}
 		if err != nil {
 			// One failed probe fails the whole check, which the caller
 			// turns into "no opinion". Reporting a partial answer would

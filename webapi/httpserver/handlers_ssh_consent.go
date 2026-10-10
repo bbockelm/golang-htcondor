@@ -684,14 +684,20 @@ func csrfSafeMethod(method string) bool {
 	}
 }
 
-// hasBearerCredential reports whether the request carries an
-// Authorization header, which exempts it from the cross-site check.
+// hasBearerCredential reports whether the request carries a Bearer
+// token, which exempts it from the cross-site check.
 //
 // Not "is it valid" -- that is the handler's job and happens later.
 // The question here is only whether a browser could have attached this
-// by itself, and it could not: cookies and proxy-set headers ride along
-// automatically, an Authorization header is put there by whoever built
-// the request. A forged one simply fails to authenticate.
+// by itself, and for a Bearer token it could not: cookies and proxy-set
+// headers ride along automatically, a Bearer token is put there by
+// whoever built the request. A forged one simply fails to authenticate.
+//
+// Any other Authorization scheme is not exempt. A browser does attach
+// Basic credentials by itself once the user has entered them, cross-site
+// included, and a reverse proxy that authenticates with Basic and sets
+// the trusted user header is exactly the deployment this check protects.
 func hasBearerCredential(r *http.Request) bool {
-	return r.Header.Get("Authorization") != ""
+	token, err := extractBearerToken(r)
+	return err == nil && token != ""
 }

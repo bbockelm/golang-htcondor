@@ -122,12 +122,21 @@ Three authentication channels, in precedence order:
 
 1. **API key** — `Authorization: Bearer htca-v1-{key_id}-{secret}`.
    Admin-mintable bearer tokens for non-interactive callers
-   (Prometheus, scripts, CI). Scopes gate access — currently just
-   `metrics` for `/metrics`. Mint via the admin UI at
+   (Prometheus, scripts, CI). Scopes gate access: `metrics` for
+   `/metrics`, `condor:/READ` and `condor:/WRITE` for the routes that
+   reach HTCondor. A key acts as its creator only if it carries a
+   `condor:/*` scope; a `metrics`-only key is refused everywhere but
+   `/metrics` and `/readyz`. Mint via the admin UI at
    `/admin/api-keys`, or `POST /api/v1/admin/api-keys`.
 2. **OAuth2 / OIDC** — for browsers and MCP clients. The server
    embeds its own IDP (`/idp/*`) and also accepts upstream OIDC
-   providers via `HTTP_API_OAUTH2_*` config.
+   providers via `HTTP_API_OAUTH2_*` config. An access token this
+   server issued is held to its granted scopes on the REST routes that
+   reach HTCondor, as an API key is: `condor:/READ` for reads and
+   `condor:/WRITE` for writes, or, on a grant with no `condor:/*`
+   scope, `mcp:read` / `mcp:write`. The job and Jupyter proxies, job
+   SSH and `/warm` run code in the job and need WRITE whatever the
+   method. A token granted none of these is refused.
 3. **Schedd JWT / pool token** — for `condor_*`-tool–style clients
    that already hold a valid HTCondor token.
 
@@ -360,7 +369,8 @@ Matching is case-insensitive.
 | `HTTP_API_SUPERUSER_GROUP` | Superuser mode (see below). Unset disables the feature. |
 
 `HTTP_API_MCP_READ_GROUP` and `HTTP_API_MCP_WRITE_GROUP` narrow MCP
-further, and take lists on the same terms.
+further, and take lists on the same terms. The write group also decides
+`condor:/WRITE`: a user it denies `mcp:write` is denied that too.
 
 Web interface access and MCP access are **separate**. They were one knob,
 so granting somebody the browser necessarily granted them MCP; a site can
@@ -1273,7 +1283,10 @@ at `/openapi.json`.
   authentication method, a session id and the daemon's valid commands, and
   unauthenticated it answered for the service account. Use `/readyz` for an
   unauthenticated health check — it reads the periodic pinger's cached
-  result and is what the Kubernetes probes use.
+  result and is what the Kubernetes probes use. Without a credential it
+  reports each daemon's status only; an admin session or an API key with
+  the `metrics` scope also gets the names, addresses and error text behind
+  them.
 - `GET /api/v1/schedd/ping`, `GET /api/v1/collector/ping` — the same, one
   daemon each
 - `GET /metrics` — Prometheus exposition (requires the `metrics`
@@ -1661,7 +1674,8 @@ with its last address; nothing is removed because the collector stopped
 mentioning it.
 
 **Health.** `/readyz` is ready when the hub answers and at least one
-access point matches, and lists every access point's state; one access
+access point matches, and lists every access point's state to an admin
+session or a `metrics` API key (anyone else gets the count); one access
 point being down never makes the server unready. The collector ad carries
 `ScheddConstraint` and `ScheddCount` instead of `ScheddName`.
 
