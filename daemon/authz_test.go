@@ -186,6 +186,13 @@ func (as *authzServer) reconfig(sec *security.SecurityConfig) bool {
 // and checks the attributes that explain it.
 func (as *authzServer) expectDenial(want map[string]string) {
 	as.t.Helper()
+	as.expectRecord("PERMISSION DENIED", want)
+}
+
+// expectRecord waits for the next record logged, which must be msg with
+// the attributes in want.
+func (as *authzServer) expectRecord(msg string, want map[string]string) {
+	as.t.Helper()
 	select {
 	case r := <-as.records:
 		got := map[string]string{}
@@ -193,8 +200,8 @@ func (as *authzServer) expectDenial(want map[string]string) {
 			got[a.Key] = a.Value.String()
 			return true
 		})
-		if r.Message != "PERMISSION DENIED" {
-			as.t.Fatalf("logged %q, want PERMISSION DENIED", r.Message)
+		if r.Message != msg {
+			as.t.Fatalf("logged %q, want %q", r.Message, msg)
 		}
 		for k, v := range want {
 			if got[k] != v {
@@ -202,7 +209,7 @@ func (as *authzServer) expectDenial(want map[string]string) {
 			}
 		}
 	case <-time.After(5 * time.Second):
-		as.t.Fatal("no PERMISSION DENIED logged")
+		as.t.Fatalf("no %s logged", msg)
 	}
 }
 
@@ -304,8 +311,21 @@ func TestAuthzMatchSessionHoleFollowsKnob(t *testing.T) {
 	}
 }
 
-// TestAuthzLogDenial: both of cedar's authorization refusals are logged, and
-// nothing else is.
+// TestAuthzUnregisteredCommand: a command the daemon does not serve is
+// refused, even for condor@family, and logged as unregistered.
+func TestAuthzUnregisteredCommand(t *testing.T) {
+	as := startAuthzServer(t, map[string]string{"ALLOW_READ": "*"}, nil)
+	if as.run(as.as(authz.FamilyFQU), 81199) {
+		t.Fatal("unregistered command 81199 ran")
+	}
+	as.expectRecord("UNREGISTERED COMMAND", map[string]string{"command_id": "81199"})
+	if !as.run(as.as(authz.FamilyFQU), authzReadCmd) {
+		t.Fatal("READ command as condor@family refused")
+	}
+}
+
+// TestAuthzLogDenial: both of cedar's authorization refusals and its
+// refusal of an unregistered command are logged, and nothing else is.
 func TestAuthzLogDenial(t *testing.T) {
 	a, err := NewAuthz(config.NewEmpty(), AuthzOptions{CommandNames: map[int]string{81103: "TEST_CMD"}})
 	if err != nil {
@@ -323,8 +343,14 @@ func TestAuthzLogDenial(t *testing.T) {
 	if !a.LogDenial(log, nil, "127.0.0.1:1", errors.New("cedar/server: command 60004 (DC_RECONFIG) refused: authorization levels [ADMINISTRATOR] are outside the session's authorization limits [READ WRITE]")) {
 		t.Fatal("authorization-limits refusal not logged")
 	}
-	if len(records) != 2 {
-		t.Fatalf("logged %d records, want 2", len(records))
+	if !a.LogDenial(log, nil, "127.0.0.1:1", fmt.Errorf("cedar/server: no authenticated handler for command 81104 (): %w", security.ErrCommandNotFound)) {
+		t.Fatal("unregistered-command refusal not logged")
+	}
+	if a.LogDenial(log, nil, "127.0.0.1:1", errors.New("cedar/server: no authenticated handler for command 81104 ()")) {
+		t.Error("an error not marked ErrCommandNotFound reported as a refusal")
+	}
+	if len(records) != 3 {
+		t.Fatalf("logged %d records, want 3", len(records))
 	}
 	attrs := func(r slog.Record) map[string]string {
 		m := map[string]string{}
@@ -336,6 +362,9 @@ func TestAuthzLogDenial(t *testing.T) {
 	}
 	if got := attrs(<-records); got["command"] != "DC_RECONFIG" || got["level"] != "ADMINISTRATOR" || got["authorization_limits"] != "READ,WRITE" {
 		t.Errorf("limits denial = %v", got)
+	}
+	if r := <-records; r.Message != "UNREGISTERED COMMAND" || attrs(r)["command_id"] != "81104" {
+		t.Errorf("unregistered command record = %q %v", r.Message, attrs(r))
 	}
 }
 
@@ -352,3 +381,56 @@ func (h *recordHandler) Handle(_ context.Context, r slog.Record) error {
 }
 func (h *recordHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *recordHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestDefaultCommandLevelsMatchCxx: RegisterDefaultCommands serves every
+// DaemonCore default at the level daemon_core_main.cpp registers it, so a
+// level-specific condor_ping is answered rather than refused CMD_NOT_FOUND.
+func TestDefaultCommandLevelsMatchCxx(t *testing.T) {
+	as := startAuthzServer(t, map[string]string{"ALLOW_DAEMON": "*"}, nil)
+	for _, tc := range []struct {
+		cmd   int
+		level string
+	}{
+		{commands.DC_NOP, "ALLOW"},
+		{commands.DC_NOP_READ, "READ"},
+		{commands.DC_NOP_WRITE, "WRITE"},
+		{commands.DC_NOP_NEGOTIATOR, "NEGOTIATOR"},
+		{commands.DC_NOP_ADMINISTRATOR, "ADMINISTRATOR"},
+		{commands.DC_NOP_OWNER, "ADMINISTRATOR"},
+		{commands.DC_NOP_CONFIG, "CONFIG"},
+		{commands.DC_NOP_DAEMON, "DAEMON"},
+		{commands.DC_NOP_ADVERTISE_STARTD, "ADVERTISE_STARTD"},
+		{commands.DC_NOP_ADVERTISE_SCHEDD, "ADVERTISE_SCHEDD"},
+		{commands.DC_NOP_ADVERTISE_MASTER, "ADVERTISE_MASTER"},
+		{commands.DC_RECONFIG, "ADMINISTRATOR"},
+		{commands.DC_RECONFIG_FULL, "ADMINISTRATOR"},
+		{commands.DC_OFF_GRACEFUL, "ADMINISTRATOR"},
+		{commands.DC_OFF_PEACEFUL, "ADMINISTRATOR"},
+		{commands.DC_OFF_FAST, "ADMINISTRATOR"},
+	} {
+		if got := as.srv.CommandPerms(tc.cmd); len(got) != 1 || got[0] != tc.level {
+			t.Errorf("%s registered at %v, want [%s]", as.az.CommandName(tc.cmd), got, tc.level)
+		}
+	}
+
+	// A DAEMON-level ping by a peer ALLOW_DAEMON admits completes its
+	// handshake; were the command unregistered, the post-auth reply would
+	// say CMD_NOT_FOUND and the client would fail. The peer does not
+	// authenticate, so the handshake is a full one with that reply.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cs := security.SecurityConfig{
+		AuthMethods:    []security.AuthMethod{security.AuthFS},
+		Authentication: security.SecurityNever,
+		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+		Encryption:     security.SecurityOptional,
+		Integrity:      security.SecurityOptional,
+		SessionCache:   security.NewSessionCache(),
+		Command:        commands.DC_NOP_DAEMON,
+	}
+	cl, err := client.ConnectAndAuthenticate(ctx, as.addr, &cs)
+	if err != nil {
+		t.Fatalf("DC_NOP_DAEMON: %v", err)
+	}
+	_ = cl.Close()
+}
