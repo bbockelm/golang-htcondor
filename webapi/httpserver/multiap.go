@@ -707,7 +707,7 @@ func (h *Handler) startMultiAPHandler(ctx context.Context, ln net.Listener, prot
 	if h.oauth2StateStore != nil {
 		h.oauth2StateStore.Start(ctx)
 	}
-	if h.oauth2Provider != nil && h.tokenRetentionFor >= 0 {
+	if h.oauth2Provider != nil {
 		go h.runTokenRetention(ctx)
 	}
 	h.startSessionCleanup(ctx)

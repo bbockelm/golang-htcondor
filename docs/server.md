@@ -639,6 +639,10 @@ identity); other fields are read-only.
   grants and the `code` response type; anything else is refused with
   `invalid_client_metadata`. `client_credentials` and token exchange are
   enabled by an operator in the admin UI, never by self-registration.
+  Registration is unauthenticated, so it is limited to 30 per hour from one
+  address, and a registered client that has obtained no token within a week
+  is deleted unless an operator has annotated it or changed its grants.
+  `HTTP_API_MCP_DCR=false` turns registration off.
 - **Client ID Metadata Document (CIMD)** — instead of registering, a client
   identifies itself by an `https://` URL as its `client_id`; the server fetches
   a client-metadata document from that URL and treats it as a **public** client
@@ -646,7 +650,10 @@ identity); other fields are read-only.
   DCR. The fetch is hardened against SSRF (https-only, private/link-local/cloud-
   metadata addresses refused, no redirects, timeout + size cap), and the
   document must be self-consistent (its `client_id` equals the URL). On by
-  default; see the knobs below to disable or restrict it.
+  default; see the knobs below to disable or restrict it. **In production,
+  set `HTTP_API_MCP_CIMD_ALLOWED_HOSTS`** to the hosts of the clients you
+  expect: unset, any caller can make this server fetch from any public host
+  (each source address is limited to 20 uncached lookups a minute).
 - **`client_credentials`** — a confidential client acting as itself, with no end
   user. Enable the grant in the admin UI and set a **service identity**: that
   identity becomes the subject of the short-lived HTCondor IDTOKEN minted for
@@ -1722,7 +1729,8 @@ Frequently-used knobs:
 | `HTTP_API_ENABLE_MCP` | Enable the `/mcp/*` endpoints. Required by the chat assistant. |
 | `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` | JSON array of trusted external issuers for RFC 8693 token exchange (see [Token exchange](#token-exchange-rfc-8693)). Unset disables external exchange. |
 | `HTTP_API_MCP_CIMD` | Resolve an `https://` MCP `client_id` as a Client ID Metadata Document (a public client). Default `true`; set `false` to require DCR. See [MCP OAuth2 clients](#mcp-oauth2-clients). |
-| `HTTP_API_MCP_CIMD_ALLOWED_HOSTS` | Optional comma/space list of host or `.domain` patterns a CIMD `client_id` may point at. Empty = any host (SSRF guards still apply). |
+| `HTTP_API_MCP_CIMD_ALLOWED_HOSTS` | Comma/space list of host or `.domain` patterns a CIMD `client_id` may point at. Empty = any host (SSRF guards still apply). Recommended for production: without it, unauthenticated callers choose which public hosts this server fetches from. |
+| `HTTP_API_MCP_DCR` | Accept dynamic client registration (RFC 7591) at `/mcp/oauth2/register`. Default `true`; set `false` when every client is seeded, operator-provisioned or CIMD. Registrations are then refused with 403 and the endpoint is not advertised. See [MCP OAuth2 clients](#mcp-oauth2-clients). |
 | `HTTP_API_MCP_WATCH_MAX_WAIT` | Cap on how long the MCP `check_watches`/`watch_jobs` tools may block in-call before returning (a duration, e.g. `15s`). This number is advertised to the agent in the tool schema, so it has to be one the whole path can deliver, not just this server. Unset = `45s`, or the value derived from `HTTP_API_MCP_MAX_REQUEST_DURATION` where that is tighter. 45s is not a server limit — the server will hold a request for 14m30s by default — it is what an MCP client is observed to wait for before abandoning the call, which returns *nothing at all* to the agent rather than a timeout it could act on. **Set this lower when a gateway or proxy with a tighter timeout sits in front of this server**; set it higher only when you know the clients reaching this deployment are configured for a longer tool timeout. |
 | `HTTP_API_OAUTH2_REDIRECT_URL` | The redirect URI registered with the identity provider. Unset = derived from the issuer plus this server's callback path, which is `/oauth2/callback` when the web UI is compiled in and `/mcp/oauth2/callback` on an MCP-only build. Both paths are always served, so an authorization started before an upgrade still lands; but the URI the server *sends* must be registered at the IdP, so a build that gains the web UI needs `/oauth2/callback` added there (or this knob set to keep the old one). |
 | `HTTP_API_CREDD_ADDRESS` | Pins the credd this server talks to (a sinful, e.g. `<10.0.0.5:9618?sock=credd>`), overriding discovery. Normally unnecessary: the credd is read from the schedd itself, which publishes its own credd as `CredDIpAddr` in its ad and address file — the same binding `DCSchedd::getCreddAddress` uses. Set this when fronting a remote schedd that does not advertise it, since a credd that is not the submitting schedd's accepts credentials and leaves jobs held anyway. |

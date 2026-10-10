@@ -983,14 +983,41 @@ func (s *OAuth2Storage) DenyDeviceCodeSession(ctx context.Context, userCode stri
 	return nil
 }
 
-// UpdateDeviceCodePolling updates the last polled timestamp for rate limiting
-func (s *OAuth2Storage) UpdateDeviceCodePolling(ctx context.Context, deviceCode string) error {
-	_, err := s.db.ExecContext(ctx, `
+// MarkDeviceCodePolled records a poll of deviceCode at now, unless the
+// previous recorded poll was less than minGap before it, and reports
+// whether it did. One test-and-set, so two polls racing each other
+// cannot both pass. A device code that does not exist reports true: the
+// lookup that follows answers for it.
+//
+// Times are compared with julianday rather than as text, since the
+// driver writes each one in the zone it carries.
+func (s *OAuth2Storage) MarkDeviceCodePolled(ctx context.Context, deviceCode string, now time.Time, minGap time.Duration) (bool, error) {
+	key := sessionKey(deviceCode)
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE oauth2_device_codes
 		SET last_polled_at = ?
 		WHERE device_code = ?
-	`, time.Now(), sessionKey(deviceCode))
-	return err
+			AND (last_polled_at IS NULL OR julianday(last_polled_at) <= julianday(?))
+	`, now.UTC(), key, now.Add(-minGap).UTC())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return true, nil
+	}
+	var one int
+	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM oauth2_device_codes WHERE device_code = ?`, key).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // InvalidateDeviceCodeSession invalidates a device code after it's been used

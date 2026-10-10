@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -1201,6 +1202,10 @@ func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Re
 			h.writeOAuthError(w, http.StatusBadRequest, "authorization_pending", "Authorization pending")
 			return
 		}
+		if errors.Is(err, ErrSlowDown) {
+			h.writeOAuthError(w, http.StatusBadRequest, "slow_down", "Polling too frequently; increase the interval by 5 seconds")
+			return
+		}
 		if errors.Is(err, fosite.ErrAccessDenied) {
 			h.writeOAuthError(w, http.StatusBadRequest, "access_denied", "Authorization denied by user")
 			return
@@ -1325,6 +1330,18 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.mcpDCRDisabled {
+		h.writeError(w, http.StatusForbidden, "Dynamic client registration is disabled on this server")
+		return
+	}
+	// Each registration is a row that lasts until the retention sweep
+	// finds it unused, and a bcrypt hash; see oauth2_rate_limits.go.
+	if !h.allowRegistration(r) {
+		h.writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable",
+			"Too many client registrations from this address; try again later")
+		return
+	}
+
 	ctx := r.Context()
 
 	// Parse registration request
@@ -1381,8 +1398,9 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate client ID and secret
-	clientID := fmt.Sprintf("client_%d", time.Now().UnixNano())
+	// Generate client ID and secret. The id is random rather than a
+	// timestamp, so one client's id says nothing about another's.
+	clientID := "client_" + generateRandomString(16)
 	clientSecret := generateRandomString(32)
 
 	// Hash the client secret with bcrypt (fosite expects bcrypt-hashed secrets)
@@ -1566,7 +1584,6 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		// and keeps them.
 		"authorization_endpoint":        issuer + OAuth2EndpointPath("authorize"),
 		"token_endpoint":                issuer + OAuth2EndpointPath("token"),
-		"registration_endpoint":         issuer + OAuth2EndpointPath("register"),
 		"introspection_endpoint":        issuer + OAuth2EndpointPath("introspect"),
 		"revocation_endpoint":           issuer + OAuth2EndpointPath("revoke"),
 		"device_authorization_endpoint": issuer + OAuth2EndpointPath("device/authorize"),
@@ -1590,6 +1607,10 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		"scopes_supported":                      oauth2AdvertisedScopes,
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"code_challenge_methods_supported":      []string{"plain", "S256"},
+	}
+
+	if !h.mcpDCRDisabled {
+		metadata["registration_endpoint"] = issuer + OAuth2EndpointPath("register")
 	}
 
 	// Advertise Client ID Metadata Document support (an https:// client_id is
@@ -1697,6 +1718,14 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 	// Limit request body size for form parsing
 	setBodyLimit(w, r, 1<<20)
 
+	// Every authorization stores a device-code row, and this endpoint
+	// authenticates no client; see oauth2_rate_limits.go.
+	if !h.allowDeviceAuthorization(r) {
+		h.writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable",
+			"Too many device authorizations from this address; try again later")
+		return
+	}
+
 	ctx := r.Context()
 
 	// Parse client credentials from request
@@ -1711,6 +1740,14 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Failed to get client", "error", err, "client_id", clientID)
 		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "Client not found")
+		return
+	}
+	// RFC 8628 section 3.1: the client must be one allowed this grant.
+	// The token endpoint never checks it for this flow, so a client
+	// registered for the browser flow alone could otherwise start one.
+	if !slices.Contains(client.GetGrantTypes(), deviceCodeGrant) {
+		h.writeOAuthError(w, http.StatusBadRequest, "unauthorized_client",
+			"This client is not permitted to use the device authorization grant")
 		return
 	}
 
@@ -1930,6 +1967,16 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 		if userCode != "" {
 			userCode = strings.ToUpper(strings.TrimSpace(userCode))
 
+			// Each lookup is a guess at a user code, so it spends the
+			// same budgets as the SSH approval screen's.
+			if !h.sshConsentAllow(r, username) {
+				h.logger.Warn(logging.DestinationSecurity,
+					"Rate-limiting device code lookups", "username", username)
+				h.writeError(w, http.StatusTooManyRequests,
+					"Too many attempts. Wait a moment and try again.")
+				return
+			}
+
 			// Get device code session by user code
 			_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
 			if err != nil {
@@ -2024,20 +2071,30 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		// Get device code session by user code
-		_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
-		if err != nil {
-			h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
-			h.writeHTMLError(w, "Invalid or expired user code")
-			return
-		}
-
+		// Who is approving comes first: looking the code up before
+		// that would tell anybody at all whether a code exists.
 		username, userGroups := h.deviceApprovalIdentity(ctx, r)
 
 		// If still no username, authentication is required
 		if username == "" {
 			h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
 			h.writeHTMLError(w, "Authentication required")
+			return
+		}
+
+		if !h.sshConsentAllow(r, username) {
+			h.logger.Warn(logging.DestinationSecurity,
+				"Rate-limiting device code lookups", "username", username)
+			h.writeError(w, http.StatusTooManyRequests,
+				"Too many attempts. Wait a moment and try again.")
+			return
+		}
+
+		// Get device code session by user code
+		_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+			h.writeHTMLError(w, "Invalid or expired user code")
 			return
 		}
 

@@ -333,8 +333,8 @@ func pollForTokenWithRefresh(t *testing.T, httpClient *http.Client, baseURL, cli
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err == nil {
 			resp.Body.Close()
-			if errorResp.Error == "authorization_pending" {
-				t.Logf("Attempt %d: Still pending, will retry...", i+1)
+			if errorResp.Error == "authorization_pending" || errorResp.Error == "slow_down" {
+				t.Logf("Attempt %d: %s, will retry...", i+1, errorResp.Error)
 				continue
 			}
 		}
