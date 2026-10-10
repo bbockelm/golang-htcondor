@@ -12,7 +12,8 @@ import (
 func (s *Schedd) historyEndpoint() historyEndpoint {
 	e := historyEndpoint{address: s.address, cfg: s.cfg, command: commands.QUERY_SCHEDD_HISTORY, daemon: "schedd"}
 	if m := rateLimitManagerFor(s.cfg); m != nil {
-		e.rateLimit = m.WaitSchedd
+		key := s.rateLimitKey
+		e.rateLimit = func(ctx context.Context, username string) error { return m.WaitScheddFor(ctx, key, username) }
 	}
 	return e
 }
