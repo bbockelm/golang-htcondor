@@ -218,7 +218,7 @@ func TestOneCallersWatchesShareOneQueryPerTick(t *testing.T) {
 
 	before := len(seen())
 	h.mu.Lock()
-	cp := h.creds["alice"]
+	cp := h.groups[pollKey{cred: "alice", constraint: job(1)}].poll
 	h.mu.Unlock()
 	cp.pollOnce(context.Background())
 
