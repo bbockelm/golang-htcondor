@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -19,7 +20,8 @@ import (
 
 // Schedd answers QUERY_JOB_ADS(_WITH_AUTH), QUERY_SCHEDD_HISTORY and
 // ACT_ON_JOBS by evaluating the request's constraint against its ads the
-// way the real schedd does. It applies NO owner filter of its own, which
+// way the real schedd does, and DC_NOP / DC_NOP_READ, which identity
+// resolution pings. It applies NO owner filter of its own, which
 // is the property that matters to an owner-scoping test: a real schedd
 // does not filter job-ad reads by owner either, so whatever this returns
 // is exactly what the constraint the client sent admits.
@@ -35,6 +37,10 @@ type Schedd struct {
 	epochs  []*classad.ClassAd
 	// actedOn is every job id an ACT_ON_JOBS request matched.
 	actedOn []string
+
+	// refuseRead makes the schedd refuse every READ-level command; see
+	// RefuseRead.
+	refuseRead atomic.Bool
 }
 
 // JobAd builds a minimal job ad.
@@ -57,7 +63,7 @@ func Start(t testing.TB, keyFile, trustDomain string) *Schedd {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := cedarserver.New(&security.SecurityConfig{
+	sec := &security.SecurityConfig{
 		AuthMethods:             []security.AuthMethod{security.AuthToken},
 		Authentication:          security.SecurityRequired,
 		CryptoMethods:           []security.CryptoMethod{security.CryptoAES},
@@ -66,7 +72,24 @@ func Start(t testing.TB, keyFile, trustDomain string) *Schedd {
 		TrustDomain:             trustDomain,
 		TokenPoolSigningKeyFile: keyFile,
 		SessionCache:            security.NewSessionCache(),
-	})
+	}
+	srv := cedarserver.New(sec)
+	// A refusal at negotiation: cedar's server answers every
+	// authenticated handshake AUTHORIZED and refuses a command only by
+	// closing the connection afterwards, which a client that reads
+	// nothing back -- a ping -- cannot see. A real schedd says DENIED in
+	// the post-auth reply; both reach the client as a failed handshake.
+	refused := *sec
+	refused.AuthMethods = []security.AuthMethod{security.AuthKerberos}
+	srv.SecurityConfigForCommand = func(cmd int) *security.SecurityConfig {
+		if f.refuseRead.Load() && readLevel(cmd) {
+			return &refused
+		}
+		return nil
+	}
+	nop := func(context.Context, *cedarserver.Conn) error { return nil }
+	srv.Handle(commands.DC_NOP, nop, "ALLOW")
+	srv.Handle(commands.DC_NOP_READ, nop, "READ")
 	srv.Handle(commands.QUERY_JOB_ADS, f.queryJobs, "READ")
 	srv.Handle(commands.QUERY_JOB_ADS_WITH_AUTH, f.queryJobs, "READ")
 	srv.Handle(commands.QUERY_SCHEDD_HISTORY, f.queryHistory, "READ")
@@ -80,6 +103,22 @@ func Start(t testing.TB, keyFile, trustDomain string) *Schedd {
 
 // Addr is the schedd's sinful string.
 func (f *Schedd) Addr() string { return f.addr }
+
+// RefuseRead makes the schedd refuse every READ-level command (DC_NOP_READ
+// and the job and history queries) while still authenticating callers
+// and answering DC_NOP, as a schedd whose READ authorization excludes the
+// caller does. It applies to every caller.
+func (f *Schedd) RefuseRead(refuse bool) { f.refuseRead.Store(refuse) }
+
+// readLevel reports whether cmd is one of the READ-level commands this
+// schedd answers.
+func readLevel(cmd int) bool {
+	switch cmd {
+	case commands.DC_NOP_READ, commands.QUERY_JOB_ADS, commands.QUERY_JOB_ADS_WITH_AUTH, commands.QUERY_SCHEDD_HISTORY:
+		return true
+	}
+	return false
+}
 
 // AddJobs adds ads to the queue.
 func (f *Schedd) AddJobs(ads ...*classad.ClassAd) {
