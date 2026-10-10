@@ -70,17 +70,18 @@ func (s *Handler) handleJobWarm(w http.ResponseWriter, r *http.Request, jobID st
 		return
 	}
 
+	// Warming exists to serve the job proxy, which refuses an armed
+	// session; a transport warmed for one would be one nothing may use.
+	if refusal := s.refuseJobAppWhileArmed(r, "warm"); refusal != nil {
+		s.writeError(w, http.StatusForbidden, refusal.Error())
+		return
+	}
+
 	// Same refusal as ssh-to-job, and for the same reason: a universe
 	// with no starter has nothing to connect to, and saying so here is
 	// better than a transport error later.
 	if msg, refuse := s.refuseRemoteAccessByUniverse(ctx, "warm", cluster, proc); refuse {
 		s.writeError(w, http.StatusConflict, msg)
-		return
-	}
-
-	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
-	if err != nil {
-		s.writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -94,7 +95,7 @@ func (s *Handler) handleJobWarm(w http.ResponseWriter, r *http.Request, jobID st
 	// under any other would warm a transport the connection that
 	// follows cannot use, which is worse than not warming at all: it
 	// pays the cost twice and looks like it worked.
-	key, err := jobTransportKey(ctx, bearerFromRequest(r), imp, cluster, proc)
+	key, err := jobTransportKey(ctx, bearerFromRequest(r), nil, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
@@ -114,10 +115,6 @@ func (s *Handler) handleJobWarm(w http.ResponseWriter, r *http.Request, jobID st
 		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("%s: %s", label, detail))
 		return
 	}
-	if imp != nil {
-		s.auditSuperuserAction(r, imp, "warm", fmt.Sprintf("%d.%d", cluster, proc), nil)
-	}
-
 	s.logger.Info(logging.DestinationHTTP, "Warmed a job transport",
 		"user", username, "cluster", cluster, "proc", proc,
 		"reused", reused, "elapsed_ms", elapsed.Milliseconds())

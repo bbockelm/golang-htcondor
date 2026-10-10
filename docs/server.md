@@ -408,6 +408,18 @@ and are not treated as impersonation. Membership is re-checked on every action:
 an armed operator who has since left `HTTP_API_SUPERUSER_GROUP` (and leads no
 project) gets a 403 on their next action, and the mode is turned off.
 
+**Job applications are closed while the mode is on.** VS Code, JupyterLab and
+anything else served through `/api/v1/jobs/{id}/proxy/` or
+`/api/v1/jupyter/instances/{id}/proxy/` are served from this server's own
+origin, so script the job sends back runs in the browser with the viewer's
+session. While the session is armed -- as a superuser or as a project lead --
+those routes, and `/api/v1/jobs/{id}/warm`, answer 403 for every job,
+including the operator's own. Every request is checked, so turning the mode on
+with an app already open refuses that app's next request and its next
+WebSocket upgrade. A connection already established before the mode was
+turned on is not closed, and script already loaded in an open app tab keeps
+running: close app tabs before turning the mode on.
+
 **Which identity acts.** If the operator is themselves listed in the schedd's
 `QUEUE_SUPER_USERS`, the server authenticates as them, and the schedd's own
 log records
@@ -496,8 +508,7 @@ compare case-insensitively. Groups are the session's, from
 a quote, a backslash or a control character is ignored.
 
 **What a lead can do**, while the mode is on: hold, release and remove another
-user's job in a project they lead, tail its output, ssh to it, and warm its
-connection ahead of time (`/warm`). Bulk hold
+user's job in a project they lead, tail its output, and ssh to it. Bulk hold
 and release reach the lead's own jobs plus their projects' jobs, whatever the
 constraint says. A job with no `ProjectName`, or one in another project, is
 refused with a 403, and so is a job that does not exist (with the same
@@ -518,10 +529,8 @@ reasons name the project:
 Held by alice@example.org via the web UI (project lead for Physics, acting for bob@example.org) (by user condor@example.org)
 ```
 
-**What a lead cannot do:** open another user's interactive app through the job
-proxy (VS Code and other proxied ports). The app is served from this server's
-own origin, so code the job's owner controls would run in the lead's browser
-with the lead's session. Global superusers keep that access.
+**What a lead cannot do:** open any job application while the mode is on,
+the same as a superuser (see [Superuser mode](#superuser-mode)).
 
 **Reading.** Without turning the mode on, a lead may list (and open) their own
 jobs plus their projects' jobs by choosing *Everyone* on the jobs page, the way

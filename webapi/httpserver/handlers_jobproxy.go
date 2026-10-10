@@ -247,24 +247,13 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		return
 	}
 
-	// Superuser reach, on the same terms as the terminal: the session
-	// is the grant, and what travels inside it is between the operator
-	// and the job. Audited at the point the transport is opened.
-	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
-	if err != nil {
-		s.writeError(w, http.StatusForbidden, err.Error())
-		return
-	}
-	// Except for project leads: the app is served on this origin, so it
-	// would run owner-controlled code in the lead's session. See
-	// refuseProjectLeadInteractiveApp.
-	if refusal := refuseProjectLeadInteractiveApp(imp); refusal != nil {
-		s.auditSuperuserAction(r, imp, "job-proxy", fmt.Sprintf("%d.%d", cluster, proc), refusal)
+	// Never while superuser mode is armed: the app is served on this
+	// origin, so it would run job-controlled code in an elevated
+	// session. See refuseJobAppWhileArmed. With that refused there is
+	// no impersonation here: the proxy always runs as the caller.
+	if refusal := s.refuseJobAppWhileArmed(r, "job-proxy"); refusal != nil {
 		s.writeError(w, http.StatusForbidden, refusal.Error())
 		return
-	}
-	if imp != nil {
-		s.auditSuperuserAction(r, imp, "job-proxy", fmt.Sprintf("%d.%d", cluster, proc), nil)
 	}
 
 	// A universe with no starter can never be reached, however long we
@@ -313,9 +302,9 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		return
 	}
 
-	// Keyed by caller, credential and impersonation, never by the job
-	// alone -- see jobTransportKey.
-	key, err := jobTransportKey(ctx, bearerFromRequest(r), imp, cluster, proc)
+	// Keyed by caller and credential, never by the job alone -- see
+	// jobTransportKey.
+	key, err := jobTransportKey(ctx, bearerFromRequest(r), nil, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return

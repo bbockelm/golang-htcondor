@@ -706,26 +706,51 @@ func (h *Handler) scopeForImpersonation(imp *Impersonation, cluster, proc int) (
 	return scopeToOwner(ownerFromActor(imp.Target), job)
 }
 
-// refuseProjectLeadInteractiveApp is the policy that keeps project leads out
-// of other users' browser-proxied apps (code-server and anything else served
-// through the job proxy). Returns a non-nil error when imp must be refused.
+// errJobAppWhileArmed is the refusal refuseJobAppWhileArmed returns. The
+// web UI shows its text as is.
+var errJobAppWhileArmed = errors.New(
+	"job applications cannot be opened while superuser mode is on: they are served from this site's own origin, " +
+		"so code from the job would run in your elevated session. Turn off superuser mode to open job applications")
+
+// refuseJobAppWhileArmed is the policy that keeps an elevated browser session
+// away from content a job serves: the job proxy, the Jupyter proxy and the
+// warming that exists only to serve them. Returns a non-nil error when the
+// request must be refused.
 //
-// The proxied app is served on this server's own origin, so whatever the job
-// sends back -- and the job owner controls all of it -- runs in the lead's
-// browser with the lead's session cookie and can call this API as them. For
-// a project lead that is an escalation path from project member to project
-// lead. A global superuser is not given anything by the same trick that they
-// did not already hold, so they keep access.
+// Proxied content is served on this server's own origin, so whatever the job
+// sends back -- and the job owner controls all of it -- runs in the viewer's
+// browser and can call this API with their session cookie. While the session
+// is armed that cookie carries superuser or project-lead authority, which is
+// far more than the job's owner should be handed. Scrubbing the cookie from
+// the proxied request does not help: the script calls this API directly.
+//
+// The refusal is by session, not by job. An operator opening their own app
+// while armed is refused too, because what matters is what the session can
+// do, not whose job served the script. Every proxied request passes through
+// here, so arming while an app is open refuses that app's next request and
+// its next WebSocket upgrade.
 //
 // One function on purpose: once apps are served from an isolated origin this
 // is the single check to lift.
-func refuseProjectLeadInteractiveApp(imp *Impersonation) error {
-	if !imp.projectScoped() {
+func (h *Handler) refuseJobAppWhileArmed(r *http.Request, what string) error {
+	_, scope, session, ok, err := h.armedSuperuser(r)
+	if err != nil {
+		return err
+	}
+	if !ok {
 		return nil
 	}
-	return fmt.Errorf(
-		"project leads cannot open another user's interactive app: it is served from this site's own origin, " +
-			"so the job's owner would control code running in your browser session. Use the terminal or output tail instead")
+	scopeName := "global"
+	if !scope.Global {
+		scopeName = "project"
+	}
+	h.logger.Info(logging.DestinationSecurity, "Job application refused: superuser mode is armed",
+		"actor", session.Username,
+		"scope", scopeName,
+		"action", what,
+		"path", r.URL.Path,
+		"remote_addr", r.RemoteAddr)
+	return errJobAppWhileArmed
 }
 
 // resolveImpersonationIdentity works out which identity this operator's
