@@ -2068,6 +2068,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2Issuer:               mcpCfg.oauth2Issuer,
 		MCPCIMDEnabled:             mcpCIMDEnabled(cfg),
 		MCPCIMDAllowedHosts:        config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_MCP_CIMD_ALLOWED_HOSTS")),
+		MCPDCRDisabled:             !mcpDCREnabled(cfg),
 		MCPTokenExchangeIssuers:    firstConfigValue(cfg, "HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS"),
 		OAuth2ClientID:             mcpCfg.oauth2ClientID,
 		OAuth2ClientSecret:         mcpCfg.oauth2ClientSecret,
@@ -3131,6 +3132,21 @@ func mcpCIMDEnabled(cfg *config.Config) bool {
 	v, err := strconv.ParseBool(strings.TrimSpace(raw))
 	if err != nil {
 		log.Fatalf("invalid HTTP_API_MCP_CIMD=%q: must be a boolean", raw)
+	}
+	return v
+}
+
+// mcpDCREnabled reports whether dynamic client registration (RFC 7591) is
+// on. Default true; HTTP_API_MCP_DCR=false refuses it, for a deployment
+// whose clients are all seeded, operator-provisioned or CIMD.
+func mcpDCREnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_MCP_DCR")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return true
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_MCP_DCR=%q: must be a boolean", raw)
 	}
 	return v
 }

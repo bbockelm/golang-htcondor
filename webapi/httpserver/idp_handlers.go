@@ -131,10 +131,12 @@ func (h *Handler) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	// Limit request body size for form parsing
 	setBodyLimit(w, r, 1<<20)
 
-	// Rate limit login attempts by IP address
-	ip := r.RemoteAddr
-	if !h.idpLoginLimiter.Allow(ip) {
-		h.logger.Warn(logging.DestinationHTTP, "IDP login rate limit exceeded", "ip", ip)
+	// Rate limit login attempts by the client's address, not the
+	// connection's: RemoteAddr carries the source port, so every new
+	// connection would otherwise start with a fresh budget.
+	source := actorResolveSource(r, h.trustedProxies)
+	if !h.idpLoginLimiter.Allow(source) {
+		h.logger.Warn(logging.DestinationHTTP, "IDP login rate limit exceeded", "source", source)
 		h.writeError(w, http.StatusTooManyRequests, "Too many login attempts. Please try again later.")
 		return
 	}
@@ -153,6 +155,11 @@ func (h *Handler) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 
 	if username == "" || password == "" {
 		h.writeError(w, http.StatusBadRequest, "Username and password required")
+		return
+	}
+	if !h.idpLoginByUser.Allow(strings.ToLower(username)) {
+		h.logger.Warn(logging.DestinationHTTP, "IDP login rate limit exceeded", "username", username)
+		h.writeError(w, http.StatusTooManyRequests, "Too many login attempts. Please try again later.")
 		return
 	}
 

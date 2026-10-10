@@ -225,6 +225,9 @@ type Handler struct {
 	// OAuth2 discovery document (the resolver itself lives in the provider's
 	// storage). See oauth2_cimd.go.
 	mcpCIMDEnabled bool
+	// mcpDCRDisabled refuses dynamic client registration. See
+	// Config.MCPDCRDisabled.
+	mcpDCRDisabled bool
 	// extIssuers verifies external trusted-issuer subject tokens for RFC 8693
 	// token exchange. Nil when no issuers are configured. See
 	// oauth2_token_exchange_ext.go.
@@ -403,7 +406,8 @@ type Handler struct {
 	watchHeartbeatEvery time.Duration
 	logBuffer           *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
 	idpProvider         *IDPProvider      // Built-in IDP provider
-	idpLoginLimiter     *LoginRateLimiter // Rate limiter for IDP login attempts
+	idpLoginLimiter     *LoginRateLimiter // IDP login attempts per source address
+	idpLoginByUser      *LoginRateLimiter // IDP login attempts per username
 	seedDemoUser        bool              // Seed the non-admin "user" account (demo mode only)
 	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
 	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
@@ -415,6 +419,11 @@ type Handler struct {
 	// its per-process CSRF key, all built on first use. See
 	// handlers_ssh_consent.go.
 	sshConsentState
+
+	// oauth2LimitState holds the per-source limits on the OAuth2
+	// endpoints that create state for an unauthenticated caller. See
+	// oauth2_rate_limits.go.
+	oauth2LimitState
 
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by /api/v1/jobs/{id}/match-analysis.
@@ -720,6 +729,10 @@ type HandlerConfig struct {
 	// when set, restricts which hosts such a client_id may point at.
 	MCPCIMDEnabled      bool
 	MCPCIMDAllowedHosts []string
+	// MCPDCRDisabled refuses dynamic client registration (RFC 7591) and
+	// stops advertising its endpoint, for a deployment whose clients are
+	// all seeded, operator-provisioned or CIMD. HTTP_API_MCP_DCR=false.
+	MCPDCRDisabled bool
 	// MCPTokenExchangeIssuers is the JSON list of trusted external issuers for
 	// RFC 8693 token exchange (HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS). Empty = off.
 	MCPTokenExchangeIssuers string
@@ -1158,6 +1171,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		httpBaseURL:               cfg.HTTPBaseURL,
 		mcpBaseURL:                strings.TrimSpace(cfg.MCPBaseURL),
 		mcpCIMDEnabled:            cfg.MCPCIMDEnabled,
+		mcpDCRDisabled:            cfg.MCPDCRDisabled,
 		ccbDialer:                 cfg.CCB,
 		userHeader:                cfg.UserHeader,
 		userHeaderUnsafeAllowAll:  cfg.UserHeaderTrustAnyUnsafe,
@@ -1854,6 +1868,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.idpProvider = idpProvider
 		h.seedDemoUser = cfg.SeedDemoUser
 		h.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5) // 5 attempts per minute with burst of 5
+		// Per username as well, so a guesser spreading attempts across
+		// many addresses still meets a limit. Looser than the per-address
+		// one: a single source reaches its own limit first.
+		h.idpLoginByUser = NewLoginRateLimiter(rate.Limit(10.0/60.0), 10)
 		logger.Info(logging.DestinationHTTP, "IDP provider enabled", "issuer", idpIssuer)
 
 		// Ensure OAuth2 state store is initialized if we might use SSO (which IDP enables)
@@ -2457,9 +2475,11 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	}
 
 	// Delete token rows once they are dead and old enough to be of no use
-	// to anybody. Negative retention is the operator asking to keep them
-	// forever, which is a policy some deployments have.
-	if h.oauth2Provider != nil && h.tokenRetentionFor >= 0 {
+	// to anybody, along with expired authorization state and clients
+	// that registered and never came back. Negative retention is the
+	// operator asking to keep token rows forever, which is a policy some
+	// deployments have; runTokenRetention honours it.
+	if h.oauth2Provider != nil {
 		go h.runTokenRetention(ctx)
 	}
 

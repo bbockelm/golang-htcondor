@@ -144,7 +144,8 @@ func (c *mcpActorCache) sweepSourcesLocked(now time.Time) {
 // actorResolveSource is the address a resolution is charged to: the
 // client as clientIP resolves it, with an IPv6 address reduced to its
 // /64, since one host commonly holds a whole /64 and would otherwise
-// have a budget per address.
+// have a budget per address. The other per-source limits on
+// unauthenticated endpoints key on it for the same reason.
 func actorResolveSource(r *http.Request, trusted []*net.IPNet) string {
 	addr := clientIP(r, trusted)
 	ip := net.ParseIP(addr)

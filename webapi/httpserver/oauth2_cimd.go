@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ory/fosite"
+	"golang.org/x/time/rate"
 )
 
 // CIMD (Client ID Metadata Document) lets an MCP client identify itself by an
@@ -35,6 +37,16 @@ const (
 	cimdMaxBodyBytes = 64 * 1024
 	cimdCacheTTL     = 10 * time.Minute
 	cimdNegCacheTTL  = 1 * time.Minute
+
+	// cimdCacheMax bounds the resolved documents kept. The client_id is
+	// chosen by whoever sends the request, so without a bound every
+	// distinct URL anybody ever named would stay in memory.
+	cimdCacheMax = 1024
+	// cimdFetchesPerMinute is how many cache misses one source may turn
+	// into outbound fetches. A real client needs one per document per
+	// cimdCacheTTL.
+	cimdFetchesPerMinute = 20
+	cimdFetchBurst       = 20
 )
 
 // isCIMDClientID reports whether a client_id should be resolved as a Client ID
@@ -57,9 +69,10 @@ type cimdMetadataDocument struct {
 }
 
 type cimdCacheEntry struct {
-	client *fosite.DefaultClient
-	err    error
-	expiry time.Time
+	clientID string
+	client   *fosite.DefaultClient
+	err      error
+	expiry   time.Time
 }
 
 // cimdResolver fetches and caches CIMD documents, turning a URL client_id into a
@@ -71,9 +84,15 @@ type cimdResolver struct {
 	allowedHosts []string
 	client       *http.Client
 	now          func() time.Time
+	// bySource limits cache misses per caller. See WithCIMDSource.
+	bySource *LoginRateLimiter
 
-	mu    sync.Mutex
-	cache map[string]cimdCacheEntry
+	mu sync.Mutex
+	// cache maps a client_id to its element in lru, which holds
+	// *cimdCacheEntry, most recently used first, at most cimdCacheMax.
+	cache     map[string]*list.Element
+	lru       *list.List
+	lastSweep time.Time
 }
 
 // newCIMDResolver builds a resolver. client is injected so production can pass an
@@ -83,8 +102,65 @@ func newCIMDResolver(allowedHosts []string, client *http.Client) *cimdResolver {
 		allowedHosts: allowedHosts,
 		client:       client,
 		now:          time.Now,
-		cache:        make(map[string]cimdCacheEntry),
+		bySource:     NewLoginRateLimiter(rate.Limit(cimdFetchesPerMinute/60.0), cimdFetchBurst),
+		cache:        make(map[string]*list.Element),
+		lru:          list.New(),
 	}
+}
+
+// cimdSourceKey carries who a client metadata fetch is charged to.
+type cimdSourceKey struct{}
+
+// WithCIMDSource notes the source address of the request being handled,
+// so a cache miss it causes is charged to that source's fetch budget. A
+// context without one -- a lookup made for a token this server already
+// issued, say -- is not limited.
+func WithCIMDSource(ctx context.Context, source string) context.Context {
+	return context.WithValue(ctx, cimdSourceKey{}, source)
+}
+
+// lookupLocked returns the live cache entry for clientID, dropping an
+// expired one. Called with r.mu held.
+func (r *cimdResolver) lookupLocked(clientID string, now time.Time) (*cimdCacheEntry, bool) {
+	elem, ok := r.cache[clientID]
+	if !ok {
+		return nil, false
+	}
+	e := elem.Value.(*cimdCacheEntry)
+	if !now.Before(e.expiry) {
+		r.lru.Remove(elem)
+		delete(r.cache, clientID)
+		return nil, false
+	}
+	r.lru.MoveToFront(elem)
+	return e, true
+}
+
+// storeLocked caches a result, making room by dropping expired entries
+// (at most once a minute, since that walks the whole cache) and then the
+// least recently used. Called with r.mu held.
+func (r *cimdResolver) storeLocked(e *cimdCacheEntry, now time.Time) {
+	if elem, ok := r.cache[e.clientID]; ok {
+		r.lru.Remove(elem)
+		delete(r.cache, e.clientID)
+	}
+	if r.lru.Len() >= cimdCacheMax && now.Sub(r.lastSweep) >= cimdNegCacheTTL {
+		r.lastSweep = now
+		for elem := r.lru.Front(); elem != nil; {
+			next := elem.Next()
+			if old := elem.Value.(*cimdCacheEntry); !now.Before(old.expiry) {
+				r.lru.Remove(elem)
+				delete(r.cache, old.clientID)
+			}
+			elem = next
+		}
+	}
+	for r.lru.Len() >= cimdCacheMax {
+		back := r.lru.Back()
+		r.lru.Remove(back)
+		delete(r.cache, back.Value.(*cimdCacheEntry).clientID)
+	}
+	r.cache[e.clientID] = r.lru.PushFront(e)
 }
 
 // cimdHTTPClient is the production HTTP client for CIMD fetches: it refuses to
@@ -257,7 +333,7 @@ func withLoopbackRedirect(base *fosite.DefaultClient, requested string) fosite.C
 func (r *cimdResolver) resolve(ctx context.Context, clientID string) (fosite.Client, error) {
 	now := r.now()
 	r.mu.Lock()
-	if e, ok := r.cache[clientID]; ok && now.Before(e.expiry) {
+	if e, ok := r.lookupLocked(clientID, now); ok {
 		r.mu.Unlock()
 		if e.err != nil {
 			return nil, e.err
@@ -266,6 +342,13 @@ func (r *cimdResolver) resolve(ctx context.Context, clientID string) (fosite.Cli
 	}
 	r.mu.Unlock()
 
+	// A miss costs an outbound request, so it is charged to whoever
+	// asked. The refusal is not cached: it says nothing about the
+	// document, and caching it would refuse the next caller too.
+	if source, ok := ctx.Value(cimdSourceKey{}).(string); ok && !r.bySource.Allow(source) {
+		return nil, fosite.ErrInvalidClient.WithHint("too many client metadata lookups; try again later")
+	}
+
 	client, err := r.fetch(ctx, clientID)
 
 	r.mu.Lock()
@@ -273,7 +356,7 @@ func (r *cimdResolver) resolve(ctx context.Context, clientID string) (fosite.Cli
 	if err != nil {
 		ttl = cimdNegCacheTTL
 	}
-	r.cache[clientID] = cimdCacheEntry{client: client, err: err, expiry: now.Add(ttl)}
+	r.storeLocked(&cimdCacheEntry{clientID: clientID, client: client, err: err, expiry: now.Add(ttl)}, now)
 	r.mu.Unlock()
 	if err != nil {
 		return nil, err

@@ -325,6 +325,9 @@ func (h *Handler) setupRoutes() {
 			if !ok {
 				continue
 			}
+			// Any of these can name a client_id that is a metadata
+			// document URL, so each charges the fetch to its caller.
+			handler = h.withCIMDSource(handler)
 			mux.HandleFunc(oauth2EndpointPathFor(false, name), handler)
 			mux.HandleFunc(oauth2EndpointPathFor(true, name), handler)
 		}

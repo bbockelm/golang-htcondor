@@ -510,7 +510,8 @@ func (h *Handler) sshConsentLookup(w http.ResponseWriter, r *http.Request, usern
 // account could sweep from a botnet. A user code is eight characters
 // of a 32-symbol alphabet and lives ten minutes, so the space is far
 // too large to walk at these rates -- the limits exist so that stays
-// true however many codes are outstanding.
+// true however many codes are outstanding. The server-rendered device
+// verification page spends the same budgets.
 const (
 	sshConsentAttemptsPerMinute = 20
 	sshConsentBurst             = 20

@@ -217,6 +217,8 @@ type Config struct {
 	// Document (public client); MCPCIMDAllowedHosts optionally restricts it.
 	MCPCIMDEnabled      bool
 	MCPCIMDAllowedHosts []string
+	// MCPDCRDisabled turns off dynamic client registration (HTTP_API_MCP_DCR).
+	MCPDCRDisabled bool
 	// MCPTokenExchangeIssuers: JSON list of trusted external issuers for token
 	// exchange (HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS).
 	MCPTokenExchangeIssuers string
@@ -483,6 +485,7 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2Issuer:                cfg.OAuth2Issuer,
 		MCPCIMDEnabled:              cfg.MCPCIMDEnabled,
 		MCPCIMDAllowedHosts:         cfg.MCPCIMDAllowedHosts,
+		MCPDCRDisabled:              cfg.MCPDCRDisabled,
 		MCPTokenExchangeIssuers:     cfg.MCPTokenExchangeIssuers,
 		OAuth2ClientID:              cfg.OAuth2ClientID,
 		OAuth2ClientSecret:          cfg.OAuth2ClientSecret,
