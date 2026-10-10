@@ -17,6 +17,7 @@ import (
 	"github.com/ory/fosite"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/authz"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -144,7 +145,7 @@ func (s *Handler) seesAllJobs(ctx context.Context, r *http.Request, tier jobScop
 		_, ok := scopes[scopeMCPAdmin]
 		return ok
 	}
-	return slices.Contains(s.mcpAdminUsers, actor)
+	return slices.ContainsFunc(s.mcpAdminUsers, func(u string) bool { return authz.SameUser(u, actor) })
 }
 
 // identityIsWebUIAdmin reports whether actor's groups, as the system

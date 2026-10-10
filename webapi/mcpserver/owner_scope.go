@@ -8,6 +8,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/authz"
 	"github.com/bbockelm/golang-htcondor/webapi/ownerscope"
 )
 
@@ -215,9 +216,10 @@ const (
 // jobs at the given tier.
 //
 // MCP_ADMIN_USERS grants the read tier only, and only where the caller's
-// transport supplied no scopes at all. Its entries are compared verbatim
-// with the authenticated identity, the full user@domain a schedd reports
-// (C++ or cedar-based), so an entry must name the domain too. It used to grant both tiers, and
+// transport supplied no scopes at all. Its entries are compared with the
+// authenticated identity, the full user@domain a schedd reports (C++ or
+// cedar-based), user part exactly and domain in any case (isAdminUser), so
+// an entry must name the domain too. It used to grant both tiers, and
 // narrowing it is a real reduction for a deployment that relied on the
 // old behaviour -- which is why the server logs a warning at startup
 // when the list is configured and no superuser group is, rather than
@@ -248,9 +250,21 @@ func (s *Server) allowsAllUsers(ctx context.Context, authenticatedUser string, t
 		if scopedTransport(ctx) {
 			return false
 		}
-		_, ok := s.adminUsers[authenticatedUser]
-		return ok
+		return s.isAdminUser(authenticatedUser)
 	}
+}
+
+// isAdminUser reports whether actor is listed in MCP_ADMIN_USERS. An entry
+// names the same user as actor if the user parts are equal and the domains
+// equal in any case (authz.SameUser): a schedd reports the domain in lower
+// case, while an operator may write it as UID_DOMAIN is spelled.
+func (s *Server) isAdminUser(actor string) bool {
+	for u := range s.adminUsers {
+		if authz.SameUser(u, actor) {
+			return true
+		}
+	}
+	return false
 }
 
 // scopedTransport reports whether the caller arrived over a transport
