@@ -57,11 +57,23 @@ const nbfClockSkewLeeway = 10 * time.Second
 // Any deviation here would produce a token the schedd refuses to
 // verify; this function is tested against cedar's reference output
 // in TestGenerateMCPAccessJWTMatchesCedarShape.
+//
+// authzLimits must be non-empty. An IDTOKEN with no scope claim is not
+// a token with no authorization: HTCondor reads the absence as "every
+// level the subject is allowed". Every caller here means to bound the
+// token, and the usual way to arrive at an empty list is a scope set
+// whose condor:/* entries all map to nothing, so an empty list is
+// refused rather than minted as an unrestricted token.
 func generateMCPAccessJWT(
 	keyDir, keyID, subject, issuer string,
 	issuedAt, expiration int64,
 	authzLimits []string,
 ) (string, error) {
+	if len(authzLimits) == 0 {
+		return "", fmt.Errorf("refusing to mint an IDTOKEN for %s with no authorization limits; "+
+			"it would carry every authorization %s holds", subject, subject)
+	}
+
 	// Read and unscramble the signing key — same on-disk format as
 	// HTCondor's passwords.d/ entries. The pool signing keys are
 	// root-owned mode 0600, and this server runs with privileges

@@ -1369,6 +1369,12 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 						// the scopes this grant actually carries.
 						condorCredential, err = s.generateHTCondorTokenWithScopes(username, ar.GetGrantedScopes())
 						if err != nil {
+							// Drop the entry AddValidated just made.
+							// Left in place, the next request with this
+							// bearer takes the cached branch above and
+							// proceeds with the opaque bearer as its
+							// credential instead of being refused again.
+							s.tokenCache.Remove(token)
 							return nil, fmt.Errorf("failed to mint HTCondor token for %s: %w", username, err)
 						}
 						// Carry the grant's scopes so a handler can gate

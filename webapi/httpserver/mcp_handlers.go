@@ -2836,7 +2836,11 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 	// Check if condor:/* scopes are present
 	var authz []string
 	if hasCondorScopes(scopes) {
-		// Map condor:/* scopes to HTCondor authorization levels
+		// Map condor:/* scopes to HTCondor authorization levels. When
+		// none of them maps -- only deprecated or dropped levels, with
+		// or without mcp:* beside them -- authz is empty and
+		// generateMCPAccessJWT refuses, rather than this falling back
+		// to the mcp:* mapping or minting a token with no limits.
 		authz = mapCondorScopesToAuthz(scopes)
 	} else {
 		// Map MCP scopes to HTCondor authorization levels (legacy behavior)
