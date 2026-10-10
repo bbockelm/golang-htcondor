@@ -21,6 +21,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/ory/fosite"
@@ -1771,7 +1772,7 @@ func (h *Handler) deviceApprovalIdentity(ctx context.Context, r *http.Request) (
 	if h.idpProvider == nil {
 		return "", nil
 	}
-	cookie, err := r.Cookie("idp_session")
+	cookie, err := r.Cookie(proxyscrub.IDPSessionCookie)
 	if err != nil || cookie.Value == "" {
 		return "", nil
 	}

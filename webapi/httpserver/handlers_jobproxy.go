@@ -27,6 +27,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
+	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
 )
 
 // jobProxyDialTimeout bounds establishing the transport plus the
@@ -243,6 +244,7 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		outURL.Path = "/"
 	}
 
+	scrub := s.jobProxyScrubber()
 	proxy := &httputil.ReverseProxy{
 		// Director rather than Rewrite, matching the Jupyter proxy.
 		// Rewrite is not a drop-in: ReverseProxy strips
@@ -255,6 +257,9 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		Director: func(req *http.Request) {
 			req.URL = &outURL
 			req.Host = outURL.Host
+			// The caller's session and bearer stop here: whatever the
+			// job runs could read them and act as the caller.
+			scrub.Request(req)
 			// Do NOT delete Connection here. ReverseProxy inspects it
 			// AFTER the Director runs to decide whether this is a
 			// protocol upgrade (upgradeType() in
@@ -263,6 +268,7 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 			// answers with 400 -- which for an editor means it loads
 			// and then never connects.
 		},
+		ModifyResponse: scrub.Response,
 		Transport: &http.Transport{
 			DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
 				dialCtx, cancel := context.WithTimeout(dialCtx, jobProxyDialTimeout)
@@ -297,6 +303,12 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		"user", username, "cluster", cluster, "proc", proc,
 		"target", target.describe(), "path", upstreamPath)
 	proxy.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// jobProxyScrubber removes this server's credentials from requests
+// proxied into a job, including the header it reads a username from.
+func (s *Handler) jobProxyScrubber() *proxyscrub.Scrubber {
+	return proxyscrub.New(s.userHeader)
 }
 
 // jobProxyPrefix is the canonical, trailing-slash URL for a target

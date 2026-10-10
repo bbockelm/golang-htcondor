@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
 )
 
 // SessionData represents the data stored in a session.
@@ -188,8 +190,9 @@ func (s *SessionStore) Size() int {
 	return count
 }
 
-// sessionCookieName is the name of the HTTP session cookie
-const sessionCookieName = "htcondor_session"
+// sessionCookieName is the name of the HTTP session cookie. Defined in
+// proxyscrub so the job proxies strip exactly this name.
+const sessionCookieName = proxyscrub.SessionCookie
 
 // setSessionCookie sets an HTTP session cookie.
 //
