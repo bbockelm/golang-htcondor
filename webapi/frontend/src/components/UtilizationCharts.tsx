@@ -238,7 +238,10 @@ export function niceTicks(max: number, unit: AxisUnit, count = 4): number[] {
   const raw = m / count;
   const mag = Math.pow(10, Math.floor(Math.log10(raw)));
   const n = raw / mag;
-  const step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag;
+  let step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag;
+  // Below a GB, steps of a fifth make "409.6 MB"; quarters and halves
+  // make "256 MB" and "512 MB", which are numbers people request.
+  if (scale > 1 && step < 1) step = step <= 0.25 ? 0.25 : 0.5;
   const top = Math.ceil(m / step - 1e-9) * step;
   const out: number[] = [];
   for (let v = 0; v <= top + step / 2; v += step) out.push(v * scale);
@@ -287,6 +290,33 @@ function svgPoint(e: PointerEvent<SVGElement>, width: number, height: number): {
 }
 
 // --- Histogram ---
+
+/**
+ * mergeBins joins neighbouring histogram bins until each is at least
+ * `minWidth` wide. A distribution whose jobs all sit near one value comes
+ * with bins far narrower than an axis stretched to reach the request;
+ * drawn as they are, a tall stack of jobs looks like a few hairlines and
+ * every count looks small. Summing neighbours is exact. A merged bin never
+ * spans `boundary`, so the jobs that would rerun stay their own bars.
+ */
+export function mergeBins(
+  bins: UtilDistribution['histogram'],
+  minWidth: number,
+  boundary?: number,
+): UtilDistribution['histogram'] {
+  const out: UtilDistribution['histogram'] = [];
+  for (const b of bins) {
+    const cur = out[out.length - 1];
+    const crosses = boundary !== undefined && cur !== undefined && cur.lo < boundary && b.lo >= boundary;
+    if (cur && cur.hi - cur.lo < minWidth && !crosses) {
+      cur.hi = b.hi;
+      cur.count += b.count;
+    } else {
+      out.push({ ...b });
+    }
+  }
+  return out;
+}
 
 export interface ChartMarker {
   value: number;
@@ -360,10 +390,12 @@ export function Histogram({
 }) {
   const titleId = useId();
   const [tip, setTip] = useState<Tip | null>(null);
-  const bins = dist.histogram;
-  const lastHi = bins.length ? bins[bins.length - 1].hi : dist.max;
+  const rawBins = dist.histogram;
+  const lastHi = rawBins.length ? rawBins[rawBins.length - 1].hi : dist.max;
   const xTicks = niceTicks(Math.max(lastHi, ...markers.map((m) => m.value)) * 1.02, unit, 5);
   const xMax = xTicks[xTicks.length - 1];
+  // Ten pixels of axis is the narrowest bar worth drawing.
+  const bins = mergeBins(rawBins, (10 / (HW - HPAD.left - HPAD.right)) * xMax, shadeFrom);
   const maxCount = Math.max(1, ...bins.map((b) => b.count));
   const yTicks = niceTicks(maxCount, 'plain', 3);
   const yMax = yTicks[yTicks.length - 1];
@@ -415,7 +447,7 @@ export function Histogram({
             </tr>
           </thead>
           <tbody>
-            {bins.map((b, i) => (
+            {rawBins.map((b, i) => (
               <tr key={i}>
                 <td className="py-0.5 pr-3">
                   {formatAxis(b.lo, unit)} – {formatAxis(b.hi, unit)}
@@ -437,8 +469,8 @@ export function Histogram({
             </text>
           </g>
         ))}
-        {xTicks.map((v) => (
-          <text key={v} x={xs0(v)} y={plotBottom + 18} textAnchor="middle" className="fill-gray-500 text-[12px] tabular-nums">
+        {xTicks.map((v, i) => (
+          <text key={v} x={xs0(v)} y={plotBottom + 18} textAnchor={i === xTicks.length - 1 ? 'end' : 'middle'} className="fill-gray-500 text-[12px] tabular-nums">
             {formatAxis(v, unit)}
           </text>
         ))}
@@ -447,7 +479,11 @@ export function Histogram({
           const x1 = xs0(b.hi);
           // The 2px surface gap between neighbours, and the 24px cap on
           // a bar's width so a sparse histogram does not turn into slabs.
-          const w = Math.min(24, Math.max(1, x1 - x0 - 2));
+          // Bins far narrower than the axis (every job near one value, on
+          // an axis stretched to reach the request) keep a 4px floor and
+          // drop the gap, so they read as one shape rather than hairlines.
+          const span = x1 - x0;
+          const w = span >= 6 ? Math.min(24, span - 2) : Math.max(4, span);
           const x = (x0 + x1) / 2 - w / 2;
           const y = ys(b.count);
           const fill = shaded(b) ? UTIL_COLOR.retry : UTIL_COLOR.used;
@@ -508,7 +544,8 @@ const CPAD = { top: 34, right: 24, bottom: 36, left: 60 };
  * MemoryCurve plots, for each request_memory a workflow could have used,
  * the memory it would have reserved over the same work -- retries
  * included. Too low and the reruns cost more than they save; too high
- * and the reservation sits unused. The lowest point is the suggestion.
+ * and the reservation sits unused. The suggestion is marked on it; it
+ * need not be the lowest point, since it also weighs how many jobs rerun.
  */
 export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
   const titleId = useId();
@@ -522,11 +559,19 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
   const xMin = pts[0].request_mib;
   const xMaxRaw = pts[pts.length - 1].request_mib;
   const xSpan = xMaxRaw > xMin ? xMaxRaw - xMin : 1;
-  const yTicks = niceTicks(Math.max(...pts.map(gib)), 'plain', 4);
+  // Headroom above the highest point, so its label has somewhere to go.
+  const yTicks = niceTicks(Math.max(...pts.map(gib)) * 1.15, 'plain', 4);
   const yMax = yTicks[yTicks.length - 1];
   const xs = (v: number) => CPAD.left + ((v - xMin) / xSpan) * (CW - CPAD.left - CPAD.right);
   const ys = (v: number) => CH - CPAD.bottom - (v / yMax) * (CH - CPAD.top - CPAD.bottom);
-  const xTicks = niceTicks(xMaxRaw, 'mib', 6).filter((v) => v >= xMin - 1e-6);
+  // Ticks across the candidates' own range: the axis does not start at
+  // zero, and ticks counted from zero can leave one label on it.
+  const tickStep = (() => {
+    const t = niceTicks(xSpan, 'mib', 4);
+    return t.length > 1 ? t[1] - t[0] : xSpan;
+  })();
+  const xTicks: number[] = [];
+  for (let v = Math.ceil(xMin / tickStep - 1e-9) * tickStep; v <= xMaxRaw + 1e-6; v += tickStep) xTicks.push(v);
 
   // Where reruns start: every request below the first one no job
   // outgrows. Shading it shows which side of the curve retries cost.
@@ -571,20 +616,54 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
       ? ` Suggested ${formatMiB(recommended.request_mib)}: ${formatNumber(gib(recommended))} GB-hours, ${formatPercent(recommended.retry_fraction)} of jobs rerun.`
       : '');
 
+  // lineTopBetween is the highest the curve reaches between two x
+  // positions (the smallest y), sampled at its points and at both ends.
+  const lineTopBetween = (xa: number, xb: number) => {
+    const yAt = (x: number) => {
+      for (let i = 1; i < pts.length; i++) {
+        const xl = xs(pts[i - 1].request_mib);
+        const xr = xs(pts[i].request_mib);
+        if (x >= xl && x <= xr) {
+          const f = xr > xl ? (x - xl) / (xr - xl) : 0;
+          return ys(gib(pts[i - 1])) + f * (ys(gib(pts[i])) - ys(gib(pts[i - 1])));
+        }
+      }
+      return Infinity;
+    };
+    let top = Math.min(yAt(xa), yAt(xb));
+    for (const p of pts) {
+      const x = xs(p.request_mib);
+      if (x >= xa && x <= xb) top = Math.min(top, ys(gib(p)));
+    }
+    return top;
+  };
+
   const callout = (p: UtilMemoryCurvePoint, kind: 'current' | 'recommended', i: number) => {
     const x = xs(p.request_mib);
     const y = ys(gib(p));
     const right = x > CW * 0.6;
     const color = kind === 'current' ? UTIL_COLOR.request : UTIL_COLOR.recommended;
-    // The suggestion is the curve's lowest point, so the space under it
-    // is free and its label goes there; the current request's goes above.
-    const below = kind === 'recommended' && y + 38 < CH - CPAD.bottom;
-    const ty = below ? y + 20 : y - 22;
+    // A label sits on the side of its point away from the line: under a
+    // dip, over anything else. The suggestion is often at the bottom of
+    // the curve, but not always.
+    const idx = pts.indexOf(p);
+    const lower = (j: number) => j < 0 || j >= pts.length || gib(pts[j]) >= gib(p);
+    const below = lower(idx - 1) && lower(idx + 1) && y + 38 < CH - CPAD.bottom;
+    // Above, the label must clear the line wherever it runs under the
+    // text -- a point at the foot of a steep rise would otherwise have its
+    // label struck through.
+    const labelW = 130;
+    const ty = below
+      ? y + 20
+      : Math.max(CPAD.top - 8, Math.min(y - 22, lineTopBetween(right ? x - labelW : x, right ? x : x + labelW) - 32));
     return (
       <g key={`${kind}-${i}`} pointerEvents="none">
+        {!below && y - ty > 30 && (
+          <line x1={x} x2={x} y1={y - 7} y2={ty + 18} stroke={UTIL_COLOR.axis} strokeWidth={1} />
+        )}
         <circle cx={x} cy={y} r={6} fill={color} stroke="#ffffff" strokeWidth={2} />
         <text x={right ? x - 8 : x + 8} y={ty} textAnchor={right ? 'end' : 'start'} className="fill-gray-900 text-[13px] font-semibold">
-          {kind === 'current' ? (p.is_recommended ? 'now, and the lowest' : 'now') : 'suggested'}{' '}
+          {kind === 'current' ? (p.is_recommended ? 'now, and suggested' : 'now') : 'suggested'}{' '}
           {formatMiB(p.request_mib)}
         </text>
         <text x={right ? x - 8 : x + 8} y={ty + 14} textAnchor={right ? 'end' : 'start'} className="fill-gray-500 text-[12px] tabular-nums">
@@ -612,9 +691,13 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
         </>
       }
       note={
-        saving !== null && saving > 0 && recommended && current
-          ? `Requesting ${formatMiB(recommended.request_mib)} instead of ${formatMiB(current.request_mib)} would have reserved ${formatPercent(saving)} less memory.`
-          : undefined
+        saving === null || !recommended || !current
+          ? undefined
+          : saving > 0
+            ? `Requesting ${formatMiB(recommended.request_mib)} instead of ${formatMiB(current.request_mib)} would have reserved ${formatPercent(saving)} less memory.`
+            : // A suggestion that costs memory is one that buys fewer reruns;
+              // say what it buys.
+              `Requesting ${formatMiB(recommended.request_mib)} instead of ${formatMiB(current.request_mib)} reserves ${formatPercent(-saving)} more memory, and ${formatPercent(recommended.retry_fraction)} of jobs rerun instead of ${formatPercent(current.retry_fraction)}.`
       }
       table={
         <table className="w-full tabular-nums">
@@ -673,7 +756,7 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
           GB-hours
         </text>
         {xTicks.map((v) => (
-          <text key={v} x={xs(v)} y={CH - CPAD.bottom + 16} textAnchor="middle" className="fill-gray-500 text-[12px] tabular-nums">
+          <text key={v} x={xs(v)} y={CH - CPAD.bottom + 16} textAnchor={xs(v) > CW - CPAD.right - 24 ? 'end' : 'middle'} className="fill-gray-500 text-[12px] tabular-nums">
             {formatAxis(v, 'mib')}
           </text>
         ))}
@@ -846,8 +929,8 @@ export function OutcomeScatter({ samples, request }: { samples: UtilSample[]; re
             </text>
           </g>
         ))}
-        {xTicks.map((v) => (
-          <text key={v} x={xs(v)} y={SH - SPAD.bottom + 16} textAnchor="middle" className="fill-gray-500 text-[12px] tabular-nums">
+        {xTicks.map((v, i) => (
+          <text key={v} x={xs(v)} y={SH - SPAD.bottom + 16} textAnchor={i === xTicks.length - 1 ? 'end' : 'middle'} className="fill-gray-500 text-[12px] tabular-nums">
             {formatAxis(v, tUnit)}
           </text>
         ))}

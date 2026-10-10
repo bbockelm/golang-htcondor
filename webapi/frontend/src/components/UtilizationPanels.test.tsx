@@ -11,7 +11,7 @@ import {
   WorkflowDetail,
   WorkflowsTable,
 } from './UtilizationPanels';
-import { MemoryCurve, RangeStrip, UTIL_COLOR } from './UtilizationCharts';
+import { MemoryCurve, RangeStrip, UTIL_COLOR, mergeBins } from './UtilizationCharts';
 
 // The page's states and its few rules that are easy to get subtly wrong:
 // which denominator the headline uses, which suggestions lead, what the
@@ -208,9 +208,18 @@ describe('MemoryCurve', () => {
     expect(screen.getByText(/would have reserved 71% less memory/)).toBeInTheDocument();
   });
 
-  it('says when the current request is already the lowest', () => {
+  it('says what a suggestion that reserves more memory buys', () => {
+    // Raising the request from 1 GB to 2 GB: more memory, fewer reruns.
+    const raise = pts.map((p) =>
+      p.request_mib === 1024 ? { ...p, is_current: true, reserved_mib_hours: 100 * 1024 } : { ...p, is_current: false },
+    );
+    render(<MemoryCurve points={raise} />);
+    expect(screen.getByText(/reserves 100% more memory, and 5% of jobs rerun instead of 40%/)).toBeInTheDocument();
+  });
+
+  it('says when the current request is already the suggestion', () => {
     render(<MemoryCurve points={pts.map((p) => ({ ...p, is_current: p.request_mib === 2048 }))} />);
-    expect(screen.getByText('now, and the lowest 2 GB')).toBeInTheDocument();
+    expect(screen.getByText('now, and suggested 2 GB')).toBeInTheDocument();
     expect(screen.queryByText(/^suggested/)).not.toBeInTheDocument();
   });
 
@@ -252,5 +261,20 @@ describe('WorkflowDetail', () => {
     const w = utilizationFixture.workflows.find((x) => x.key === 'wf-post')!;
     render(<WorkflowDetail workflow={w} days={7} backHref="/utilization" />);
     expect(screen.getByText('Too few jobs to weigh one memory request against another.')).toBeInTheDocument();
+  });
+});
+
+describe('mergeBins', () => {
+  const bins = [0, 1, 2, 3, 4, 5].map((i) => ({ lo: i * 10, hi: (i + 1) * 10, count: i + 1 }));
+
+  it('joins narrow neighbours without losing a job', () => {
+    const out = mergeBins(bins, 25);
+    expect(out.map((b) => [b.lo, b.hi])).toEqual([[0, 30], [30, 60]]);
+    expect(out.reduce((a, b) => a + b.count, 0)).toBe(21);
+  });
+
+  it('keeps the jobs past the suggested request in bars of their own', () => {
+    const out = mergeBins(bins, 25, 20);
+    expect(out.map((b) => [b.lo, b.hi])).toEqual([[0, 20], [20, 50], [50, 60]]);
   });
 });

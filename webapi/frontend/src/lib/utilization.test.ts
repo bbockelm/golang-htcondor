@@ -54,8 +54,10 @@ describe('formatting', () => {
     expect(formatMiB(512)).toBe('512 MB');
     expect(formatMiB(1536)).toBe('1.5 GB');
     expect(formatMiB(2048)).toBe('2 GB');
-    // Big enough that a decimal is noise.
     expect(formatMiB(32 * 1024)).toBe('32 GB');
+    expect(formatMiB(13824)).toBe('13.5 GB');
+    // Big enough that a decimal is noise.
+    expect(formatMiB(250.4 * 1024)).toBe('250 GB');
     expect(formatMiB(3 * 1024 * 1024)).toBe('3 TB');
   });
 

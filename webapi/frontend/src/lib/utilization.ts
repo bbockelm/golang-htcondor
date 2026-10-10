@@ -173,7 +173,8 @@ export function formatMiB(mib: number): string {
   if (!Number.isFinite(mib)) return '—';
   const a = Math.abs(mib);
   if (a >= 1024 * 1024) return `${fixed(mib / (1024 * 1024), digitsFor(mib / (1024 * 1024)))} TB`;
-  if (a >= 1024) return `${fixed(mib / 1024, digitsFor(mib / 1024))} GB`;
+  // One decimal up to 100 GB: a suggested 13.5 GB must not read as 14.
+  if (a >= 1024) return `${fixed(mib / 1024, a < 100 * 1024 ? 1 : 0)} GB`;
   if (a >= 1 || a === 0) return `${fixed(mib, 0)} MB`;
   return `${fixed(mib * 1024, 0)} KB`;
 }
