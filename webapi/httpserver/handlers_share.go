@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -576,6 +577,10 @@ func (s *Handler) handleSharedInput(w http.ResponseWriter, r *http.Request) {
 	if err := s.getSchedd().SpoolJobFilesFromTar(ctx, []*classad.ClassAd{procAd}, body); err != nil {
 		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+			return
+		}
+		if errors.Is(err, htcondor.ErrInvalidTarEntry) {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid upload: %v", err))
 			return
 		}
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to spool job files: %v", err))

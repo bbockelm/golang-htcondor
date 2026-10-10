@@ -1739,6 +1739,10 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
+		if errors.Is(err, htcondor.ErrInvalidTarEntry) {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid upload: %v", err))
+			return
+		}
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to spool job files: %v", err))
 		return
 	}
@@ -1758,6 +1762,8 @@ func (s *Handler) writeSpoolError(w http.ResponseWriter, err error) {
 		s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
 	case isAuthenticationError(err):
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+	case errors.Is(err, htcondor.ErrInvalidTarEntry):
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid upload: %v", err))
 	default:
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 	}
