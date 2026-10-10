@@ -11,7 +11,7 @@ import (
 
 // reportUnmarked switches the process to UnmarkedWarn for one test and
 // collects every context that reaches the daemon fallback without saying
-// whose work it is. TestMain's UnmarkedDeny is restored afterwards. The
+// whose work it is. TestMain's policy is restored afterwards. The
 // policy is process-wide, so tests using this must not call t.Parallel.
 func reportUnmarked(t *testing.T) func() []string {
 	t.Helper()
@@ -24,7 +24,7 @@ func reportUnmarked(t *testing.T) func() []string {
 	})
 	htcondor.SetUnmarkedOriginPolicy(htcondor.UnmarkedWarn)
 	t.Cleanup(func() {
-		htcondor.SetUnmarkedOriginPolicy(htcondor.UnmarkedDeny)
+		htcondor.SetUnmarkedOriginPolicy(testOriginPolicy)
 		htcondor.SetUnmarkedOriginReporter(nil)
 	})
 	return func() []string {
