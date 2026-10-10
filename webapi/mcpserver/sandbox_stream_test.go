@@ -141,13 +141,13 @@ func runSandboxTool(t *testing.T, tool string, size int64) sandboxRun {
 // that streams differs only by noise. Half the difference splits the
 // two: single peaks were seen anywhere from 2 to 35 MiB at either size,
 // so a tighter bound would be measuring the noise again.
-func assertDoesNotScale(t *testing.T, small, large sandboxRun, smallSize, largeSize int64) {
+func assertDoesNotScale(t *testing.T, small, large sandboxRun, smallSize, largeSize uint64) {
 	t.Helper()
 	var growth uint64
 	if large.peak > small.peak {
 		growth = large.peak - small.peak
 	}
-	if limit := uint64(largeSize-smallSize) / 2; growth > limit {
+	if limit := (largeSize - smallSize) / 2; growth > limit {
 		t.Errorf("heap grew %d MiB more for a %d MiB file than for a %d MiB one; want under %d MiB -- memory scales with the sandbox",
 			growth>>20, largeSize>>20, smallSize>>20, limit>>20)
 	}
