@@ -30,6 +30,35 @@ var confidentialOnlyGrants = map[string]bool{
 	tokenExchangeGrantType: true,
 }
 
+// selfRegistrableGrantTypes is what a dynamic client registration (RFC 7591)
+// may declare: the flows with a person on the other end, who consents before
+// anything is issued. client_credentials acts with no user and token exchange
+// acts on another principal's behalf, so a client holding either is
+// provisioned by an operator through the admin client policy, never by an
+// unauthenticated registration.
+var selfRegistrableGrantTypes = map[string]bool{
+	authorizationCodeGrant: true,
+	"refresh_token":        true,
+	deviceCodeGrant:        true,
+}
+
+// validateRegistrationMetadata checks the grant and response types of a
+// dynamic registration, after defaults have been applied. The only response
+// type this server issues is "code".
+func validateRegistrationMetadata(grants, responseTypes []string) error {
+	for _, g := range grants {
+		if !selfRegistrableGrantTypes[g] {
+			return fmt.Errorf("grant type %q cannot be registered dynamically", g)
+		}
+	}
+	for _, rt := range responseTypes {
+		if rt != "code" {
+			return fmt.Errorf("unsupported response type %q", rt)
+		}
+	}
+	return nil
+}
+
 // validateGrantTypes checks a requested grant set against what the server
 // supports and what makes sense for the client. A public client may not hold
 // client_credentials (it has no secret to authenticate the grant).

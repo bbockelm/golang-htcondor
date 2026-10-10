@@ -503,7 +503,11 @@ its permitted grant types (and, for `client_credentials`, its service
 identity); other fields are read-only.
 
 - **Dynamic Client Registration (DCR, RFC 7591)** — `POST /mcp/oauth2/register`.
-  A client registers itself and gets a confidential `client_id` + secret.
+  A client registers itself and gets a confidential `client_id` + secret. It
+  may declare only the `authorization_code`, `refresh_token` and device-code
+  grants and the `code` response type; anything else is refused with
+  `invalid_client_metadata`. `client_credentials` and token exchange are
+  enabled by an operator in the admin UI, never by self-registration.
 - **Client ID Metadata Document (CIMD)** — instead of registering, a client
   identifies itself by an `https://` URL as its `client_id`; the server fetches
   a client-metadata document from that URL and treats it as a **public** client
@@ -536,7 +540,12 @@ Two kinds of `subject_token` are accepted:
 - **A token this server issued** (`subject_token_type` =
   `urn:ietf:params:oauth:token-type:access_token`): the result acts as that
   token's subject, bounded by that token's granted scopes. No configuration
-  needed.
+  needed. The subject's grant is re-checked first exactly as a refresh would
+  be (lifetime cap, group policy, revocation oracles), and the result stays
+  bound to it: revoking or narrowing that grant, or its ending, applies to
+  the exchanged token too, and the exchanged token expires no later than the
+  grant's lifetime cap. A token that was itself obtained by exchange cannot
+  be exchanged again.
 - **A JWT from a trusted external issuer** (`subject_token_type` =
   `urn:ietf:params:oauth:token-type:jwt` or `…:id_token`): accepted only when
   the issuer is listed in `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS`. The token's
@@ -544,7 +553,9 @@ Two kinds of `subject_token` are accepted:
   `iss`/`aud`/`exp`/`nbf` are checked. The local identity is namespaced as
   `<sub>@<identity_domain>` (so two issuers cannot collide), and the result is
   bounded by the issuer's `allowed_scopes` **and** the exchanging client's own
-  scopes.
+  scopes, then by the same group policy and revocation oracles a login gets
+  (with `HTTP_API_GROUP_SOURCE=system`, groups come from the mapped account,
+  not the token).
 
 `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` is a JSON array; unset disables external
 exchange (the our-own-token path still works). Each entry:

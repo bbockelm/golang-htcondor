@@ -1349,6 +1349,10 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 	if len(regReq.Scopes) == 0 {
 		regReq.Scopes = []string{"openid", "profile", "email", "offline_access", "mcp:read", "mcp:write"}
 	}
+	if err := validateRegistrationMetadata(regReq.GrantTypes, regReq.ResponseTypes); err != nil {
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", err.Error())
+		return
+	}
 
 	// Validate requested scopes against supported scopes. offline_access
 	// must be accepted and registered on the client; without it in the
