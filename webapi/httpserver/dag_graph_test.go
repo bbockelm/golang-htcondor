@@ -238,8 +238,8 @@ func TestDagStructureCacheHit(t *testing.T) {
 // A miss ends in a whole-sandbox transfer, and the schedd is what
 // refuses a transfer to a non-owner (UserCheck2, per job, on a
 // WRITE-registered command). The ad read in front of it is not
-// owner-checked for a token caller, because bulkOwnerScope only scopes a
-// browser session. So a hit does not save work, it removes the check.
+// owner-checked for an administrator. So a hit does not save work, it
+// removes the check.
 func TestDagCacheEntryIsRefusedToAnotherUser(t *testing.T) {
 	entry := ownedBy("1234.0|w.dot", "w.dag")
 

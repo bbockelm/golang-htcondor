@@ -239,7 +239,7 @@ func (h *Handler) handleJobsWatch(w http.ResponseWriter, r *http.Request) {
 	// another. Own jobs unless an administrator asks for everyone's,
 	// as on the mirror branch.
 	_, all := activityStreamScope(htcondor.GetAuthenticatedUserFromContext(ctx),
-		r.URL.Query().Get("owned_by_me"), h.isWebUIAdmin(r))
+		r.URL.Query().Get("owned_by_me"), h.seesAllJobs(ctx, r, jobScopeRead))
 	constraint, scopeErr := localReadOwnerScope(ctx, r.URL.Query().Get("constraint"), all)
 	if errors.Is(scopeErr, errUnidentifiedCaller) {
 		h.writeError(w, http.StatusUnauthorized, "authentication failed: "+scopeErr.Error())

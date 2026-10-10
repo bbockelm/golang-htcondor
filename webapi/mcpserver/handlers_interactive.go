@@ -159,7 +159,13 @@ func (s *Server) liveJobCaller(ctx context.Context) (interactive.Caller, error) 
 		}
 		return interactive.Caller{Actor: me.Username, Owner: me.Username}, nil
 	}
-	return interactive.Caller{Actor: actor, Owner: ownerFromActor(actor)}, nil
+	owner := ownerFromActor(actor)
+	if owner == "" {
+		// An actor such as "@domain" names nobody, and an Owner == ""
+		// clause is not a confinement anybody should rely on.
+		return interactive.Caller{}, fmt.Errorf("authentication required")
+	}
+	return interactive.Caller{Actor: actor, Owner: owner}, nil
 }
 
 // interactiveManager returns the session manager, or an error naming

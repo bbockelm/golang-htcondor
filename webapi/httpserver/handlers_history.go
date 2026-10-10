@@ -412,12 +412,11 @@ func (s *Handler) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter,
 // when it must be, returning the constraint to use and whether it ended
 // up scoped.
 //
-// A browser session that is not in the admin group must not be able to
-// read every user's history — the same enforcement /api/v1/jobs applies
-// to the live queue, which the archive endpoint was missing. The default
-// is unscoped, which preserves the behavior bearer-token API callers
-// have today; they can opt in with owned_by_me=true. A non-admin browser
-// session is scoped regardless of the parameter.
+// A caller that is not an administrator (seesAllJobs), bearer or browser
+// session, must not be able to read every user's history — the same
+// enforcement /api/v1/jobs applies to the live queue. It is scoped
+// regardless of the parameter. An administrator is unscoped by default
+// and can opt in with owned_by_me=true.
 //
 // Whether the result may come from the htcondordb mirror is a separate
 // question, decided on the caller's identity rather than on scoping;
@@ -431,7 +430,7 @@ func (s *Handler) historyOwnerScope(ctx context.Context, r *http.Request, constr
 		}
 		ownedByMe = parsed
 	}
-	if !s.resolveOwnerScope(r, ownedByMe) {
+	if !s.resolveOwnerScope(ctx, r, ownedByMe) {
 		return constraint, false, nil
 	}
 

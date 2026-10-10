@@ -54,11 +54,10 @@ func recordingHubEvery(t *testing.T, interval time.Duration) (*jobPollHub, func(
 
 // Two different people watching the same job must not share a poll.
 //
-// They produce byte-identical constraints whenever bulkOwnerScope leaves
-// the constraint unscoped -- which it does both for a web UI admin and
-// for any caller with no session -- so keying on the constraint alone put
-// strangers on one subscription, running on whichever of them arrived
-// first.
+// They produce byte-identical constraints whenever the owner scope leaves
+// the constraint unscoped -- which it does for every administrator -- so
+// keying on the constraint alone put strangers on one subscription,
+// running on whichever of them arrived first.
 func TestTwoCallersDoNotShareAPoll(t *testing.T) {
 	h, _ := recordingHub(t)
 

@@ -340,7 +340,7 @@ func (s *Handler) handleJobDag(w http.ResponseWriter, r *http.Request, cluster, 
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeRead)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -563,14 +563,12 @@ func (st *dagStructure) stateIsFinal() bool {
 // The key is not enough to make a hit SAFE, and an earlier version of
 // this comment claimed that it was -- that "nothing reaches the cache
 // before the caller has passed the same owner-scoped ad lookup the rest
-// of the per-job endpoints use". The ad lookup is not that check. For a
-// bearer-token, API-key or UserHeader caller, bulkOwnerScope returns the
-// constraint UNSCOPED (it only scopes a browser session), deliberately,
-// because the schedd is supposed to be the backstop -- and the schedd
+// of the per-job endpoints use". The ad lookup is not that check. For an
+// administrator the lookup is UNSCOPED (seesAllJobs), and the schedd
 // backstops a SANDBOX TRANSFER (UserCheck2, per job, on a
 // WRITE-registered command), not an ad read. A cache hit skips the
-// transfer, so a hit does not merely save work: it removes the only
-// authorization check on the path, and hands one user's node names,
+// transfer, so a hit does not merely save work: it can remove the only
+// authorization check on the path, and hand one user's node names,
 // edges and DAGMan status details to another.
 //
 // So every entry records the manager job's owner, and dagCacheAccess
@@ -614,8 +612,8 @@ type dagCacheAccess struct {
 	// caller is the authenticated actor reduced to the bare username
 	// that Owner is stored as (ownerFromActor).
 	caller string
-	// admin is the Web UI admin path the neighbouring handlers define
-	// (isWebUIAdmin). An admin may read any user's job, so an admin may
+	// admin is the read-tier administrator the neighbouring handlers
+	// define (seesAllJobs). An admin may read any user's job, so an admin may
 	// be served any user's entry -- the cache must not be the one place
 	// that breaks the admin view.
 	admin bool
@@ -783,7 +781,7 @@ func (s *Handler) dagStructureFor(ctx context.Context, r *http.Request, constrai
 	access := dagCacheAccess{
 		owner:  strings.TrimSpace(owner),
 		caller: ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx)),
-		admin:  s.isWebUIAdmin(r),
+		admin:  s.seesAllJobs(ctx, r, jobScopeRead),
 	}
 	structure, err := cachedDagStructure(dagStructures, dagCacheKey(cluster, proc, dotFile),
 		access, refresh,
@@ -1772,7 +1770,7 @@ var dagNodeProjection = []string{"ClusterId", "ProcId", "JobStatus", "DAGNodeNam
 func (s *Handler) dagQueueStates(ctx context.Context, r *http.Request, cluster int,
 	out map[string]dagNodeState) (int, error) {
 
-	constraint, err := s.bulkOwnerScope(ctx, r, fmt.Sprintf("DAGManJobId == %d", cluster))
+	constraint, err := s.jobsOwnerScope(ctx, r, fmt.Sprintf("DAGManJobId == %d", cluster), jobScopeRead)
 	if err != nil {
 		return 0, err
 	}
@@ -1810,7 +1808,7 @@ func (s *Handler) dagQueueStates(ctx context.Context, r *http.Request, cluster i
 func (s *Handler) dagArchiveStates(ctx context.Context, r *http.Request, cluster, nodeCount int,
 	out map[string]dagNodeState) (n, scanned int, err error) {
 
-	constraint, err := s.bulkOwnerScope(ctx, r, fmt.Sprintf("DAGManJobId == %d", cluster))
+	constraint, err := s.jobsOwnerScope(ctx, r, fmt.Sprintf("DAGManJobId == %d", cluster), jobScopeRead)
 	if err != nil {
 		return 0, 0, err
 	}

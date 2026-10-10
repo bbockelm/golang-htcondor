@@ -251,10 +251,10 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// listing from the top (handlers_dbroute.go returns the 400).
 
 	// Parse owned_by_me parameter (defaults to true).
-	// Server-side enforcement: a browser session that isn't in the
-	// admin group cannot escape the my-jobs filter — overriding any
-	// client param. Bearer-token API callers (no session cookie)
-	// are trusted; the schedd's own ACLs are the backstop there.
+	// Server-side enforcement: a caller that is not an administrator
+	// (seesAllJobs), bearer or browser session alike, cannot escape the
+	// my-jobs filter — overriding any client param. The schedd is no
+	// backstop: it does not filter job-ad reads by owner.
 	ownedByMe := true
 	if ownedByMeStr := r.URL.Query().Get("owned_by_me"); ownedByMeStr != "" {
 		ownedByMe, err = strconv.ParseBool(ownedByMeStr)
@@ -264,7 +264,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	requestedEveryone := !ownedByMe
-	ownedByMe = s.resolveOwnerScope(r, ownedByMe)
+	ownedByMe = s.resolveOwnerScope(ctx, r, ownedByMe)
 
 	// A project lead asking for everyone's jobs gets their own plus their
 	// projects'. See projectLeadReadProjects.
@@ -763,7 +763,7 @@ func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID str
 	}
 
 	// Build constraint for specific job, confined to the caller's own
-	// unless they are an API-token caller or a Web UI admin (or, for a
+	// unless they are an administrator (seesAllJobs) (or, for a
 	// project lead, their projects' jobs too). Job ad reads are gated
 	// only by the pool's READ policy, which is broad on most pools, so
 	// the schedd is not a backstop here.
@@ -834,7 +834,7 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 	}
 
 	// Build constraint for specific job, confined to the caller's own.
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeMutate)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1062,6 +1062,16 @@ func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID st
 		attributes[key] = encoded
 	}
 
+	// Confine the edit to the caller's own job. The schedd checks
+	// ownership on SetAttribute too, but an edit is applied to whatever
+	// the constraint matches, and another user's job should be "not
+	// found" here rather than left to a queue superuser's credential.
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeMutate)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Edit the job attributes
 	opts := &htcondor.EditJobOptions{
 		// Don't allow protected attributes by default - user would need superuser privileges
@@ -1069,7 +1079,12 @@ func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID st
 		Force:               false,
 	}
 
-	if err := s.getSchedd().EditJob(ctx, cluster, proc, attributes, opts); err != nil {
+	edited, err := s.getSchedd().EditJobs(ctx, constraint, attributes, opts)
+	if err == nil && edited == 0 {
+		s.writeError(w, http.StatusNotFound, "Job not found")
+		return
+	}
+	if err != nil {
 		// Check if it's a validation error (immutable/protected attribute)
 		if strings.Contains(err.Error(), "immutable") || strings.Contains(err.Error(), "protected") {
 			s.writeError(w, http.StatusForbidden, fmt.Sprintf("Cannot edit job: %v", err))
@@ -1102,28 +1117,27 @@ func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID st
 }
 
 // handleBulkDeleteJobs handles DELETE /api/v1/jobs with constraint-based bulk removal
-// bulkOwnerScope owner-scopes a destructive bulk operation's constraint so a
-// caller can only remove/edit their OWN jobs, unless they are a Web UI admin
-// (who may operate cross-user). This mirrors the read path's ownedByMe logic
-// (a Web UI session that is not an admin is confined to its own jobs), and uses
-// the same injection-safe wrapper as the chat tools (scopeToOwner: the untrusted
-// constraint is parsed and re-serialized before being AND-ed with the owner
-// clause, and rejected if it will not parse). The schedd ACL is still the
-// ultimate backstop; this just removes the footgun of a bulk delete/edit that
-// silently trusts an arbitrary caller-supplied constraint.
+// jobsOwnerScope owner-scopes a job request's constraint so a caller reads
+// or acts on only their OWN jobs, unless seesAllJobs grants them the tier
+// the request needs. It uses the same injection-safe wrapper as the chat
+// tools (scopeToOwner: the untrusted constraint is parsed and
+// re-serialized before being AND-ed with the owner clause, and rejected if
+// it will not parse).
 //
-// Non-session (API-token) callers are left to the schedd ACL exactly as the read
-// path leaves them, so existing service integrations are unaffected.
-func (s *Handler) bulkOwnerScope(ctx context.Context, r *http.Request, raw string) (string, error) {
-	_, hasSession := s.getSessionFromRequest(r)
-	if !hasSession || s.isWebUIAdmin(r) {
+// Every caller is scoped this way, bearer or session. Job-ad reads are
+// governed only by the pool's READ policy, so for them this clause is the
+// whole of the confinement; for actions and sandbox transfers the schedd
+// also checks ownership, and the clause turns an attempt on somebody
+// else's job into "not found" before it gets there.
+func (s *Handler) jobsOwnerScope(ctx context.Context, r *http.Request, raw string, tier jobScopeTier) (string, error) {
+	if s.seesAllJobs(ctx, r, tier) {
 		return raw, nil
 	}
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
 	if owner == "" {
 		return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")
 	}
-	return scopeToOwner(ownerFromActor(owner), raw)
+	return scopeToOwner(owner, raw)
 }
 
 // ownerFromActor maps an authenticated actor to the value HTCondor
@@ -1146,12 +1160,10 @@ func ownerFromActor(actor string) string {
 // copy of the queue -- the tailed job_queue.log, the htcondordb mirror
 // -- to the caller's own jobs.
 //
-// It differs from bulkOwnerScope in who is scoped. That one leaves a
-// caller without a browser session to the schedd's ACL; no schedd sees
-// these reads, which this daemon makes on its own authority, so this
-// clause is all there is. Every caller, bearer or session, is confined
-// to its own Owner unless all is set, which a handler sets only for a
-// Web UI administrator.
+// No schedd sees these reads, which this daemon makes on its own
+// authority, so this clause is all there is. Every caller, bearer or
+// session, is confined to its own Owner unless all is set, which a
+// handler sets only for an administrator (seesAllJobs).
 //
 // A context that names nobody is an error even with all set: an owner
 // clause built from it would be Owner == "", and leaving it off would be
@@ -1168,10 +1180,9 @@ func localReadOwnerScope(ctx context.Context, raw string, all bool) (string, err
 }
 
 // jobOwnerScope confines a single-job request to the caller's own job,
-// under the same rule bulkOwnerScope applies to the bulk endpoints: a
-// browser session that is not a Web UI admin is scoped, an API-token
-// caller is left to the schedd's ACL, and an unparseable owner is an
-// error rather than a widening.
+// under the rule jobsOwnerScope applies: a caller that seesAllJobs at
+// tier is left alone, everyone else is scoped, and an unparseable owner
+// is an error rather than a widening.
 //
 // How much this is doing depends on the endpoint, and it is worth being
 // precise because "we scope it" reads like a guarantee:
@@ -1183,12 +1194,12 @@ func localReadOwnerScope(ctx context.Context, raw string, all bool) (string, err
 //   - Job-ad reads are NOT ownership-checked by the schedd — READ
 //     authz governs them and most pools allow anyone — so for those
 //     this clause, plus FetchMyJobs where the caller uses it, is what
-//     keeps a non-admin session out of another user's ad.
+//     keeps a non-admin caller out of another user's ad.
 //
 // Either way the by-id endpoints now match the listing endpoint, which
 // has always applied the filter.
-func (s *Handler) jobOwnerScope(ctx context.Context, r *http.Request, cluster, proc int) (string, error) {
-	return s.bulkOwnerScope(ctx, r, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
+func (s *Handler) jobOwnerScope(ctx context.Context, r *http.Request, cluster, proc int, tier jobScopeTier) (string, error) {
+	return s.jobsOwnerScope(ctx, r, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc), tier)
 }
 
 // jobReadScope is jobOwnerScope for endpoints that only READ a job ad, widened
@@ -1206,7 +1217,7 @@ func (s *Handler) jobReadScope(ctx context.Context, r *http.Request, cluster, pr
 		}
 		return scopeToOwnerOrProjects(ownerFromActor(owner), projects, job)
 	}
-	return s.bulkOwnerScope(ctx, r, job)
+	return s.jobsOwnerScope(ctx, r, job, jobScopeRead)
 }
 
 func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
@@ -1243,7 +1254,7 @@ func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 
 	// Owner-scope the constraint (non-admin Web UI callers can only remove their
 	// own jobs); rejects a constraint that will not parse.
-	constraint, err := s.bulkOwnerScope(ctx, r, req.Constraint)
+	constraint, err := s.jobsOwnerScope(ctx, r, req.Constraint, jobScopeMutate)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1337,19 +1348,26 @@ func (s *Handler) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 		attributes[key] = encoded
 	}
 
-	// Set up options
+	// Set up options. Lifting the protected-attribute check is an
+	// administrator's call, not the request body's: for anyone else it
+	// is refused, as MCP edit_job never offers it.
 	opts := &htcondor.EditJobOptions{
 		AllowProtectedAttrs: false,
 		Force:               false,
 	}
-	if req.Options != nil {
+	if req.Options != nil && (req.Options.AllowProtectedAttrs || req.Options.Force) {
+		if !s.seesAllJobs(ctx, r, jobScopeMutate) {
+			s.writeError(w, http.StatusForbidden,
+				"options.allow_protected_attrs and options.force are available only to administrators")
+			return
+		}
 		opts.AllowProtectedAttrs = req.Options.AllowProtectedAttrs
 		opts.Force = req.Options.Force
 	}
 
 	// Owner-scope the constraint (non-admin Web UI callers can only edit their
 	// own jobs); rejects a constraint that will not parse.
-	constraint, err := s.bulkOwnerScope(ctx, r, req.Constraint)
+	constraint, err := s.jobsOwnerScope(ctx, r, req.Constraint, jobScopeMutate)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1586,6 +1604,15 @@ func (s *Handler) handleBulkJobAction(w http.ResponseWriter, r *http.Request, ac
 		return
 	}
 
+	// Not in superuser mode: confine the action to the caller's own jobs
+	// unless they are an administrator. The plans above carry their own
+	// per-owner constraints.
+	constraint, err = s.jobsOwnerScope(ctx, r, constraint, jobScopeMutate)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Perform action
 	results, err := actionFunc(ctx, constraint, reason)
 	if refused, ok := refusedResults(err); ok {
@@ -1674,7 +1701,7 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 
 	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), target.Cluster, target.Proc,
 		func(c string) (string, error) {
-			return s.bulkOwnerScope(ctx, r, c)
+			return s.jobsOwnerScope(ctx, r, c, jobScopeMutate)
 		})
 	if err != nil {
 		s.writeSpoolError(w, err)
@@ -1845,7 +1872,7 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	// TransferExecutable live on the cluster ad and the proc-only
 	// query strips them).
 	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc, func(c string) (string, error) {
-		return s.bulkOwnerScope(ctx, r, c)
+		return s.jobsOwnerScope(ctx, r, c, jobScopeMutate)
 	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
@@ -1989,7 +2016,7 @@ func (s *Handler) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID 
 	// Build constraint for specific job, confined to the caller's own.
 	// The schedd refuses a sandbox transfer to anyone but the owner;
 	// this keeps us from asking on someone else's behalf.
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeRead)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -2491,7 +2518,7 @@ func (s *Handler) handleSingleJobAction(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Build constraint for specific job
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeMutate)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -3050,7 +3077,7 @@ func (s *Handler) handleJobFile(w http.ResponseWriter, r *http.Request, cluster,
 	// As with the whole-sandbox download, the schedd is what refuses a
 	// non-owner; this is the layer in front of it. Needs the actor, so
 	// it follows authentication.
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeRead)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -3092,7 +3119,7 @@ func (s *Handler) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cl
 	}
 
 	// Query the job to get the output filename
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeRead)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -3888,7 +3915,7 @@ func (s *Handler) spoolClusterFromStream(
 	lim := spool.DefaultLimits()
 
 	ads, err := fetchProcAdsAwaitingInput(ctx, s.getSchedd(), cluster, lim.MaxProcs,
-		func(c string) (string, error) { return s.bulkOwnerScope(ctx, r, c) })
+		func(c string) (string, error) { return s.jobsOwnerScope(ctx, r, c, jobScopeMutate) })
 	if err != nil {
 		return nil, err
 	}

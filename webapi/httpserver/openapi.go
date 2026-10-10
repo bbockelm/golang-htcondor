@@ -929,7 +929,7 @@ const openAPISchema = `{
           {
             "name": "owned_by_me",
             "in": "query",
-            "description": "Filter jobs to only those owned by the authenticated user. Default: true for security. Set to false to see all jobs (requires appropriate permissions).",
+            "description": "Filter jobs to only those owned by the authenticated user. Default: true. Set to false to see all jobs; honoured only for an administrator, and every other caller, bearer token or browser session, gets its own jobs.",
             "required": false,
             "schema": {
               "type": "boolean",
@@ -2080,7 +2080,7 @@ const openAPISchema = `{
           {
             "name": "owned_by_me",
             "in": "query",
-            "description": "Restrict the query to the authenticated user's own records. Default: false for API callers; always applied to a browser session that is not a Web UI admin. It does not affect whether an htcondordb mirror may answer \u2014 that turns on the schedd having identified the caller, and a mirror read is confined exactly as the request was.",
+            "description": "Restrict the query to the authenticated user's own records. Default: false; always applied to a caller that is not an administrator, bearer token or browser session alike. It does not affect whether an htcondordb mirror may answer \u2014 that turns on the schedd having identified the caller, and a mirror read is confined exactly as the request was.",
             "required": false,
             "schema": {
               "type": "boolean",

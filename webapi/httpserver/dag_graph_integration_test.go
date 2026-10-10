@@ -498,12 +498,13 @@ queue
 
 	// The authorization regression. A cache hit skips the sandbox
 	// transfer, and the transfer is where the schedd checks the job's
-	// owner (UserCheck2, per job, on a WRITE-registered command); the ad
-	// read in front of it is NOT owner-checked for a token or
-	// UserHeader caller, because bulkOwnerScope only scopes a browser
-	// session. So before this was fixed, the second user here was handed
-	// the first user's node names, edges, group labels and DAGMan status
-	// details straight out of the cache, for up to the full hour.
+	// owner (UserCheck2, per job, on a WRITE-registered command). Before
+	// this was fixed, the second user here was handed the first user's
+	// node names, edges, group labels and DAGMan status details straight
+	// out of the cache, for up to the full hour. The ad read in front of
+	// the cache is now owner-scoped for a UserHeader caller too, so the
+	// second user is refused there; failing that, it must reach the
+	// schedd rather than the cache.
 	t.Run("AnotherUserIsNotServedTheCachedWorkflow", func(t *testing.T) {
 		if got.NodeCount == 0 {
 			t.Skip("the structure never came back")
@@ -522,9 +523,18 @@ queue
 		status, resp, body := getAs(t, other, visible, "")
 		spent := dagSandboxFetches.Load() - before
 
-		// The assertion is that the second user REACHED the schedd. A
-		// cache hit is the whole bug: it answers without a transfer, and
-		// the transfer is the only owner check on this path.
+		if status == http.StatusNotFound {
+			for _, name := range []string{"produce_1", "produce_2", "COMBINE"} {
+				if strings.Contains(body, name) {
+					t.Errorf("the refusal leaks the workflow's node names (%q): %s", name, body)
+				}
+			}
+			return
+		}
+
+		// Otherwise the assertion is that the second user REACHED the
+		// schedd. A cache hit is the whole bug: it answers without a
+		// transfer, and the transfer is an owner check on this path.
 		if spent == 0 {
 			t.Fatalf("a second user was served the first user's workflow out of the cache, with no "+
 				"sandbox transfer and therefore no owner check: %d nodes, %d groups, dot file %q",

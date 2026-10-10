@@ -31,7 +31,7 @@ func TestSingleJobActionReportsTheScheddsReason(t *testing.T) {
 		{"not allowed", &htcondor.JobActionResults{PermissionDenied: 1}, "permission denied"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := performJobAction(context.Background(), map[string]interface{}{"job_id": "12.0"},
+			_, err := (&Server{}).performJobAction(htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.domain"), map[string]interface{}{"job_id": "12.0"},
 				refusingAction(tc.results), "Held via MCP", "hold")
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("got %v, want an error saying %q", err, tc.want)
@@ -44,7 +44,7 @@ func TestSingleJobActionReportsTheScheddsReason(t *testing.T) {
 }
 
 func TestSingleJobActionStillFailsOnTransportErrors(t *testing.T) {
-	_, err := performJobAction(context.Background(), map[string]interface{}{"job_id": "12.0"},
+	_, err := (&Server{}).performJobAction(htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.domain"), map[string]interface{}{"job_id": "12.0"},
 		func(context.Context, string, string) (*htcondor.JobActionResults, error) {
 			return nil, errors.New("connection refused")
 		}, "Held via MCP", "hold")

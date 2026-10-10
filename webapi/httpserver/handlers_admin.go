@@ -1,12 +1,14 @@
 package httpserver
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/ory/fosite"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -43,7 +46,8 @@ func (s *Handler) isWebUIAdmin(r *http.Request) bool {
 // projectLeadReadProjects returns the projects whose jobs this browser
 // session may read beyond its own, because it leads them. Nil for a session
 // that leads nothing, for an admin session (which already reads everyone's),
-// and for a bearer-token caller (which is not owner-scoped to begin with).
+// and for a bearer-token caller (lead read scope is a browser-session
+// feature; a bearer is confined to its own jobs, see seesAllJobs).
 //
 // Not gated on superuser mode being armed, following the admin read path,
 // which is not armed-gated either: seeing a project's jobs is the
@@ -62,11 +66,121 @@ func (s *Handler) projectLeadReadProjects(r *http.Request) []string {
 	return s.projectLeads.LedProjects(session.Username, session.Groups)
 }
 
+// jobScopeTier is which cross-user power a job request needs. Reading
+// other users' jobs and changing them are different powers, as they are
+// on MCP (mcpserver.privTier), and every caller of seesAllJobs names one.
+type jobScopeTier int
+
+const (
+	// jobScopeRead covers reading other users' job ads, history, logs
+	// and sandboxes.
+	jobScopeRead jobScopeTier = iota
+	// jobScopeMutate covers acting on other users' jobs: remove, hold,
+	// release, edit, spool.
+	jobScopeMutate
+)
+
+// MCP scopes that carry the two tiers. An OAuth2 grant this server
+// issued carries its scopes onto REST requests too (withAPIKeyScopes),
+// and honouring them here is what makes one bearer see the same jobs
+// through /api/v1 and through /mcp.
+const (
+	scopeMCPAdmin     = "mcp:admin"
+	scopeMCPSuperuser = "mcp:superuser"
+)
+
+// seesAllJobs reports whether the caller of r may read (jobScopeRead) or
+// act on (jobScopeMutate) other users' jobs through the REST API. Every
+// owner-scoping decision on a job route comes here, so this is the rule:
+//
+// It is decided by who the caller is, never by how the credential
+// arrived. A browser session and a bearer token for the same person get
+// the same answer.
+//
+//   - A browser session whose groups include HTTP_API_WEBUI_ADMIN_GROUP:
+//     both tiers.
+//   - A browser session armed as a global superuser: the read tier. Its
+//     actions on other users' jobs go through impersonation
+//     (superuserActionContext, planSuperuserBulkAction), which re-scopes
+//     and audits each one itself.
+//   - Any other caller -- an IDTOKEN, an OAuth2 access token, an API
+//     key, a user-header request -- by the identity it authenticated as:
+//   - its groups, read from the system (HTTP_API_GROUP_SOURCE), include
+//     HTTP_API_WEBUI_ADMIN_GROUP: both tiers. Only an identity in this
+//     server's UID_DOMAIN is looked up, so a user of another realm
+//     never borrows a local account's groups.
+//   - its credential was granted mcp:admin: the read tier; mcp:superuser:
+//     the mutate tier. These are the grants MCP honours.
+//   - its credential states no scopes at all and it is listed in
+//     MCP_ADMIN_USERS: the read tier, MCP's rule for an unscoped caller.
+//
+// Everyone else is confined to their own jobs: Owner == ownerFromActor of
+// the authenticated identity.
+func (s *Handler) seesAllJobs(ctx context.Context, r *http.Request, tier jobScopeTier) bool {
+	if session, ok := s.getSessionFromRequest(r); ok {
+		if s.webuiAdminGroups.grants(session.Groups) {
+			return true
+		}
+		if tier != jobScopeRead {
+			return false
+		}
+		_, scope, _, armed, err := s.armedSuperuser(r)
+		return err == nil && armed && scope.Global
+	}
+
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" {
+		return false
+	}
+	if s.identityIsWebUIAdmin(ctx, actor) {
+		return true
+	}
+	scopes, scoped := scopedCredential(ctx)
+	if tier == jobScopeMutate {
+		_, ok := scopes[scopeMCPSuperuser]
+		return ok
+	}
+	if scoped {
+		_, ok := scopes[scopeMCPAdmin]
+		return ok
+	}
+	return slices.Contains(s.mcpAdminUsers, actor)
+}
+
+// identityIsWebUIAdmin reports whether actor's groups, as the system
+// reports them, include the Web UI admin group. It is the bearer-side
+// counterpart of the session check, which reads the groups stored at
+// login: a bearer carries no groups this server can trust, but where
+// groups come from the account database they can be read for anybody.
+//
+// A failed lookup is "not an admin". The cost is an admin confined to
+// their own jobs while the account database is unreachable; the
+// alternative is guessing.
+func (s *Handler) identityIsWebUIAdmin(ctx context.Context, actor string) bool {
+	if !s.webuiAdminGroups.configured() || !s.localIdentity.sourcesGroups() {
+		return false
+	}
+	account := actor
+	if i := strings.LastIndex(actor, "@"); i >= 0 {
+		if s.uidDomain == "" || !strings.EqualFold(actor[i+1:], s.uidDomain) {
+			return false
+		}
+		account = actor[:i]
+	}
+	if account == "" {
+		return false
+	}
+	groups, err := s.localIdentity.groups.LookupGroups(ctx, account)
+	if err != nil {
+		return false
+	}
+	return s.webuiAdminGroups.grants(groups)
+}
+
 // resolveOwnerScope settles whether a request asking for other people's
-// records may have them, given the owned_by_me it asked for. It is this
-// daemon's UI policy, not the schedd's: a browser session outside the
-// admin group is confined to its own records whatever it asked for,
-// while an admin session and a bearer-token caller are left alone.
+// records may have them, given the owned_by_me it asked for: a caller
+// that may not read everyone's jobs (seesAllJobs) is confined to its own
+// whatever it asked for.
 //
 // It says nothing about whether a read may be served from the htcondordb
 // mirror. That question is about identity, not group membership, and is
@@ -74,15 +188,8 @@ func (s *Handler) projectLeadReadProjects(r *http.Request) []string {
 //
 // Both endpoints that offer a Mine/Everyone choice call this, so they
 // cannot drift on who is allowed what.
-func (s *Handler) resolveOwnerScope(r *http.Request, ownedByMe bool) bool {
-	if ownedByMe {
-		return true
-	}
-	if s.isWebUIAdmin(r) {
-		return false
-	}
-	_, hasSession := s.getSessionFromRequest(r)
-	return hasSession
+func (s *Handler) resolveOwnerScope(ctx context.Context, r *http.Request, ownedByMe bool) bool {
+	return ownedByMe || !s.seesAllJobs(ctx, r, jobScopeRead)
 }
 
 // confusing than helpful.

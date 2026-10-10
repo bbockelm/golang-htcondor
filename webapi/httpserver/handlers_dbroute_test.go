@@ -144,9 +144,9 @@ func TestMirrorDeclineWritesNothing(t *testing.T) {
 }
 
 // TestResolveOwnerScope pins this daemon's Mine/Everyone policy, which
-// is stricter than the schedd's: a browser session outside the admin
-// group is confined to its own records however it asks, while an admin
-// session and a bearer-token caller are left alone. It says nothing
+// is stricter than the schedd's: a caller outside the admin group,
+// browser session or bearer token, is confined to its own records however
+// it asks, while an admin session is left alone. It says nothing
 // about mirror routing -- that turns on identity, not on group
 // membership (see TestMirrorRoutingRequiresAScheddIdentity).
 func TestResolveOwnerScope(t *testing.T) {
@@ -185,12 +185,13 @@ func TestResolveOwnerScope(t *testing.T) {
 		{"non-admin asking for mine", req([]string{"users"}), true, true},
 		{"admin asking for everyone", req([]string{"condor-admins"}), false, false},
 		{"admin opting into mine", req([]string{"condor-admins"}), true, true},
-		{"bearer asking for everyone", req(), false, false},
+		{"bearer asking for everyone is forced back", req(), false, true},
 		{"bearer asking for mine", req(), true, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := server.resolveOwnerScope(c.r, c.ownedByMe); got != c.wantScoped {
+			ctx := htcondor.WithAuthenticatedUser(context.Background(), "someone@uid.domain")
+			if got := server.resolveOwnerScope(ctx, c.r, c.ownedByMe); got != c.wantScoped {
 				t.Errorf("resolveOwnerScope = %v, want %v", got, c.wantScoped)
 			}
 		})
@@ -198,10 +199,9 @@ func TestResolveOwnerScope(t *testing.T) {
 }
 
 // TestHistoryOwnerScopeEnforcement covers the scoping the archive
-// endpoint applies before any routing decision: a browser session that
-// is not an admin is confined to its own records regardless of the
-// parameter, while a bearer-token caller (no session) keeps the
-// unscoped behavior it has today.
+// endpoint applies before any routing decision: a caller that is not an
+// admin, browser session or bearer token, is confined to its own records
+// regardless of the parameter.
 func TestHistoryOwnerScopeEnforcement(t *testing.T) {
 	server, err := NewServer(Config{
 		ListenAddr:   "127.0.0.1:0",
@@ -266,10 +266,17 @@ func TestHistoryOwnerScopeEnforcement(t *testing.T) {
 		}
 	})
 
-	t.Run("bearer caller is not scoped by default", func(t *testing.T) {
-		r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs/archive", nil)
-		if _, ok, err := server.historyOwnerScope(htcondor.WithAuthenticatedUser(context.Background(), "alice"), r, "JobStatus == 5"); ok || err != nil {
-			t.Errorf("a bearer-token caller must keep today's unscoped behavior by default (ok=%v err=%v)", ok, err)
+	t.Run("bearer caller is scoped by default", func(t *testing.T) {
+		r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs/archive?owned_by_me=false", nil)
+		scoped, ok, err := server.historyOwnerScope(htcondor.WithAuthenticatedUser(context.Background(), "alice"), r, "JobStatus == 5")
+		if err != nil || !ok {
+			t.Fatalf("a bearer-token caller must be scoped, got (%q, %v, %v)", scoped, ok, err)
+		}
+		if scopeAdmits(t, scoped, "bob") {
+			t.Errorf("BYPASS: scope admits bob: %q", scoped)
+		}
+		if !scopeAdmits(t, scoped, "alice") {
+			t.Errorf("owner wrongly excluded: %q", scoped)
 		}
 	})
 
