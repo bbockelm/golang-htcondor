@@ -252,6 +252,23 @@ jobs:
       env:
         NODE_ENV: production
 
+    # For the embedded-assets tests below. In this job rather than its own
+    # so they test the export the step above just built, not a second
+    # build of the frontend handed over as an artifact.
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: .go-version
+        cache: true
+        cache-dependency-path: webapi/go.sum
+
+    # TestIconIsServed skips and the condordocs TestEmbedded_* tests do not
+    # compile unless the frontend export and HTCondor's RST docs are staged
+    # and the release build tags are set, so no other job ran them. The
+    # script stages both as the release build does and fails on any skip.
+    - name: Test embedded assets
+      run: bash .github/scripts/embedded-assets-tests.sh
+
     # A gate as of #240, which cleared the 10 errors main used to carry
     # (eight of them react-hooks "setState synchronously within an effect").
     # It ran advisory until then because failing every PR on a pre-existing
