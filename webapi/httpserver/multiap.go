@@ -665,6 +665,12 @@ func (h *Handler) multiAPReadiness() (bool, map[string]any) {
 // as. In multi-AP mode any member can answer -- every member trusts the
 // same signing key in v1 -- so an unreachable member is skipped; a
 // refusal is the answer and is not retried elsewhere.
+//
+// The ping is DC_NOP_READ, which DaemonCore registers at READ, so the
+// schedd refuses the handshake for a credential it would not let run
+// QUERY_JOB_ADS: an identity resolved here is one the schedd accepts at
+// READ. DC_NOP is registered at ALLOW and would answer for anything the
+// schedd can authenticate. ctx must carry the request's SecurityConfig.
 func (h *Handler) pingAsCaller(ctx context.Context) (*htcondor.PingResult, error) {
 	schedds := h.identitySchedds()
 	if len(schedds) == 0 {
@@ -672,7 +678,7 @@ func (h *Handler) pingAsCaller(ctx context.Context) (*htcondor.PingResult, error
 	}
 	var lastErr error
 	for _, s := range schedds {
-		res, err := s.Ping(ctx)
+		res, err := s.PingWithOptions(ctx, &htcondor.PingOptions{Command: htcondor.DCNopRead})
 		if err == nil {
 			return res, nil
 		}

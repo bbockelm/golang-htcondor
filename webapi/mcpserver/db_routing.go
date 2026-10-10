@@ -35,9 +35,12 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 	// Routing is what skips the schedd handshake, so a delegated server
 	// must know the schedd accepted this caller before answering out of
 	// the mirror -- otherwise a token the schedd would refuse still gets
-	// history. Over stdio the process is the user and its own credential
-	// is what would have been used either way, so there is nothing to
-	// establish (the same split toolQueryJobs makes).
+	// history. The HTTP transport sets the identity only from a
+	// DC_NOP_READ ping the schedd accepted with the caller's own
+	// credential, so an identity here means READ was granted. Over stdio
+	// the process is the user and its own credential is what would have
+	// been used either way, so there is nothing to establish (the same
+	// split toolQueryJobs makes).
 	if s.delegated && htcondor.GetAuthenticatedUserFromContext(ctx) == "" {
 		return nil, false, decline(dbmirror.ReasonNoOwnerScope,
 			"the schedd has not identified this caller, so the mirror must not answer on its behalf")

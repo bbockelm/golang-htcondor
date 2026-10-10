@@ -353,15 +353,15 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// qualifies as readily as a scoped one: reading the queue is
 	// READ-level on the schedd with no owner filter of its own, so the
 	// mirror returns what the schedd would have. What jobsFromMirror
-	// insists on is that the schedd has identified this caller, since
-	// routing is what skips asking it. Any miss falls through to the
+	// insists on is that the schedd has accepted this caller at READ,
+	// since routing is what skips asking it. Any miss falls through to the
 	// schedd below with no visible difference beyond the "source" field.
 	//
 	// Pagination stays with whichever backend started the walk: each
 	// issues a page token only it can read, and each declines the
 	// other's, so a resumed page is never silently restarted from the
 	// beginning of a different scan.
-	served, decision := s.jobsFromMirror(ctx, w, constraint, projection, limit, pageToken, actor, ownedByMe)
+	served, decision := s.jobsFromMirror(ctx, w, r, constraint, projection, limit, pageToken, actor, ownedByMe)
 	if served {
 		return
 	}

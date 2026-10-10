@@ -202,9 +202,12 @@ func mcpActorKey(token string) string {
 // caller's bearer, used only to key the answer.
 //
 // The answer comes from the schedd, not from any token claim: ctx
-// already carries the request's SecurityConfig, so a DC_NOP ping
+// already carries the request's SecurityConfig, so the ping
 // authenticates exactly as the subsequent tool call will and the schedd
-// reports back the identity it mapped the caller to. That matters for
+// reports back the identity it mapped the caller to. The ping is
+// DC_NOP_READ rather than DC_NOP, which is registered at ALLOW: an
+// identity is only resolved for a credential the schedd accepts at
+// READ, the level of every query it stands in for. That matters for
 // both kinds of bearer. For a forwarded IDTOKEN, the claim is unverified
 // here — trusting it would be the mistake the REST path's token cache
 // exists to avoid. For an OAuth2 bearer the username claim is verified,

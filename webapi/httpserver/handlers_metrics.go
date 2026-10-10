@@ -153,6 +153,13 @@ func (s *Handler) handleMetricsQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The mirror is read with this daemon's credential, so it answers
+	// only a caller the schedd accepts at READ. There is no schedd to
+	// fall back to here.
+	if !s.mirrorReadVerified(ctx, r) {
+		s.writeError(w, http.StatusForbidden, errMirrorNotVerified.Error())
+		return
+	}
 	dbc, closer, _, err := s.dbMirror.Client(ctx)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("mirror unavailable: %v", err))
