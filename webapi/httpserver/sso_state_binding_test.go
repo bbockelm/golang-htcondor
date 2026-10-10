@@ -308,3 +308,34 @@ func TestOAuth2StateStoreIsBounded(t *testing.T) {
 		t.Error("stored binding does not match the cookie")
 	}
 }
+
+// Entry count alone does not bound memory: an authorize request keeps its
+// whole query. The store also evicts the oldest entries to stay within
+// its byte budget.
+func TestOAuth2StateStoreByteBudget(t *testing.T) {
+	store := NewOAuth2StateStore()
+	store.maxBytes = 64 << 10
+	big := strings.Repeat("u", 8<<10)
+	for i := 0; i < 32; i++ {
+		store.StoreWithUsername(fmt.Sprintf("state-%02d", i), nil, "", big)
+	}
+	store.mu.RLock()
+	used := store.bytes
+	store.mu.RUnlock()
+	if used > store.maxBytes {
+		t.Errorf("store holds %d bytes, budget is %d", used, store.maxBytes)
+	}
+	if _, _, _, ok := store.GetWithUsername("state-00"); ok {
+		t.Error("the oldest entry survived past the byte budget")
+	}
+	if _, _, _, ok := store.GetWithUsername("state-31"); !ok {
+		t.Error("the newest entry was evicted")
+	}
+	// Removal returns the bytes it held.
+	store.Remove("state-31")
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if store.bytes >= used {
+		t.Errorf("removing an entry left the byte count at %d", store.bytes)
+	}
+}
