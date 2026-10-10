@@ -140,7 +140,9 @@ func TestMCPWithSSO(t *testing.T) {
 		t.Fatalf("Failed to create test client in MCP: %v", err)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	// A jar, as a browser has: the callback requires the login cookie
+	// set when the flow began.
+	client := &http.Client{Jar: secureCookieJar(t), Timeout: 30 * time.Second}
 	testUser := "ssouser"
 	testPassword := "ssopassword"
 
@@ -443,7 +445,7 @@ func TestMCPGroupMembership(t *testing.T) {
 				t.Fatalf("Failed to create test client: %v", err)
 			}
 
-			client := &http.Client{Timeout: 30 * time.Second}
+			client := &http.Client{Jar: secureCookieJar(t), Timeout: 30 * time.Second}
 
 			t.Logf("Testing: %s", tc.description)
 
