@@ -7,6 +7,7 @@
 #include "condor_common.h"
 #include "condor_config.h"
 #include "CondorError.h"
+#include "condor_classad.h"
 
 #include "shim.h"
 
@@ -19,6 +20,12 @@
 
 extern "C" int config_parse_expand(const char *text, char **out) {
 	*out = nullptr;
+	// Production config() runs ClassAdReconfig, which turns on old ClassAd
+	// semantics unless STRICT_CLASSAD_EVALUATION is set. $INT/$REAL/$STRING/
+	// $EVAL parse their argument as a ClassAd expression, so do the same:
+	// under new semantics "0x10" lexes as 0, under old it is an error.
+	static const bool old_semantics = (classad::SetOldClassAdSemantics(true), true);
+	(void)old_semantics;
 	try {
 		// A fresh, empty macro set with NO defaults table: a pure parse of the
 		// input, matching config.ConfigOptions{SkipDefaults: true} on the Go
@@ -76,9 +83,13 @@ extern "C" int config_parse_expand(const char *text, char **out) {
 			if (!k) {
 				continue;
 			}
+			// Expand the way param() does (expand_param -> the char* overload
+			// of expand_macro), not with the std::string overload: the two
+			// differ ($DIRNAME/$BASENAME, re-scanning an expansion's result).
 			const char *raw = hash_iter_value(it);
-			std::string v = raw ? raw : "";
-			expand_macro(v, 0, set, ctx);
+			char *expanded = expand_macro(raw ? raw : "", set, ctx);
+			std::string v = expanded ? expanded : "";
+			free(expanded);
 			items.emplace_back(k, std::move(v));
 		}
 		std::sort(items.begin(), items.end());

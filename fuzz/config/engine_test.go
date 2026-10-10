@@ -1,24 +1,30 @@
 package fuzzconfig
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
-// TestReadsHost pins the guard that keeps fuzz inputs from making the Go
-// engine read host files or run commands. It needs no oracle.
-func TestReadsHost(t *testing.T) {
-	for _, tc := range []struct {
-		in   string
-		want bool
-	}{
-		{"FOO = bar\n", false},
-		{"INCLUDE_DIR = /etc\n", false},
-		{"include : /etc/passwd\n", true},
-		{"include ifexist : /nonexistent\n", true},
-		{"include command : /bin/true\n", true},
-		{"if true\n  include : /etc/passwd\nendif\n", true},
-		{"if false\nelse\n  include : /etc/passwd\nendif\n", true},
+// TestGoSideNeverRunsInclude pins the guard that keeps a fuzz input from
+// making the Go engine read a host file or run a command: GoParseExpand
+// parses with ConfigOptions{NoInclude: true}, so every include form is a
+// parse error and nothing runs. It needs no oracle.
+func TestGoSideNeverRunsInclude(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	for _, in := range []string{
+		"include command : touch " + marker + "\n",
+		"include ifexist command : touch " + marker + "\n",
+		"include : touch " + marker + " |\n",
+		"if true\ninclude command : touch " + marker + "\nendif\n",
+		"@include output : touch " + marker + "\n",
 	} {
-		if got := ReadsHost(Prelude(tc.in)); got != tc.want {
-			t.Errorf("ReadsHost(%q) = %v, want %v", tc.in, got, tc.want)
+		res := GoParseExpand(Prelude(in))
+		if res.Parsed {
+			t.Errorf("%q parsed; want the include refused", in)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatalf("%q ran the include command", in)
 		}
 	}
 }

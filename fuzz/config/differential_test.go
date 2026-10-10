@@ -51,50 +51,61 @@ var seeds = []seedCase{
 	{input: "FOO = bar\n0\n"},                      // a bad line among good ones fails the whole parse in compat
 	{input: "foo bar\n"},                           // no operator: a config file rejects it (Parse_macros), as Go does
 
-	// --- intentional Go extensions (will always diverge; NOT bugs) ---
-	{input: "DN = $DIRNAME(/a/b/c)\n",
-		reason: "INTENTIONAL: Go adds $DIRNAME (-> /a/b/); HTCondor has no $DIRNAME (uses $Fp). Kept as an extension."},
-	{input: "BN = $BASENAME(/a/b/c)\n",
-		reason: "INTENTIONAL: Go adds $BASENAME (-> c); HTCondor has no $BASENAME (uses $Fn). Kept as an extension."},
-	{input: "NAME = MINUTE\nVAL = $($(NAME))\n",
-		reason: "INTENTIONAL: nested $($(NAME)) — Go re-expands the inner macro's result (-> 60); HTCondor is single-pass and leaves $(MINUTE). Kept as an extension."},
+	// --- former divergences, fixed; each checked against condor 25.14.1 ---
+	{input: "DN = $DIRNAME(/a/b/c)\n"},             // -> /a/b/ (param()'s expand_macro has $DIRNAME)
+	{input: "BN = $BASENAME(/a/b/c)\n"},            // -> c
+	{input: "NAME = MINUTE\nVAL = $($(NAME))\n"},   // the result of an expansion is expanded again -> 60
+	{input: "FOO = 1\nfoo = 2\nUSE = $(Foo)\n"},    // 'use' is a keyword only before ':' -> USE=2
+	{input: "I = $INT(0x10)\n"},                    // old ClassAd semantics: not an integer -> ""
+	{input: "foo bar = baz\n"},                     // words before the operator are ignored -> foo=baz
+	{input: "0 = 1\n"},                             // a name is any run of identifier characters
+	{input: "E = $ENV(CFG_FUZZ_UNSET_VAR:dflt)\n"}, // $ENV default -> dflt
+	{input: "T = v "},                              // last line without a newline keeps its whitespace
+	{input: "B = \xff\n"},                          // bytes are kept as is
+	{input: "H@=end\nx\n@end\n"},                   // illegal identifier H@
+	{input: "S = $(s)\n"},                          // self-reference with no prior value -> ""
+	{input: "A = x\\\ny\n"},                        // continuation joins without a space -> xy
+	{input: "A = x \\\n# c\nB = 2\n"},              // a commented continuation line leaves its last character -> "x c"
+	{input: "SUM = 1\nSUM += 2\nL = a\nL +,= b\n"}, // += appends with a space, +,= with a comma
+	{input: "if defined MINUTE\n  X = $(MINUTE)\nelif true\n  X = 0\nendif\n"},
 
-	// --- known divergences still to resolve (findings) ---
-	{input: "FOO = 1\nfoo = 2\nUSE = $(Foo)\n",
-		reason: "'use' keyword: HTCondor's file reader takes 'use' as the metaknob keyword only before ':', so 'USE = $(Foo)' is an ordinary assignment (USE=2); Go's lexer always takes it as the keyword and runs a role directive (sets ROLE='= 2')."},
-	{input: "I = $INT(0x10)\n",
-		reason: "$INT: HTCondor evaluates the arg as a ClassAd expression ($INT(0x10)->0) and EXCEPTs (aborts) on non-integers like 5x3; Go leaves it literal. Not worth replicating the abort."},
-	{input: "foo bar = baz\n",
-		reason: "extra words before the operator: HTCondor's file reader ignores words between the name and '='/':' ('foo bar = baz' sets foo=baz; '0 0=' sets 0=''); Go rejects the line."},
-	{input: "0 = 1\n",
-		reason: "digit-leading name: HTCondor accepts any run of identifier characters as a name ('0 = 1' sets 0=1); Go's lexer requires a letter or '_' first and rejects the line."},
-	{input: "E = $ENV(CFG_FUZZ_UNSET_VAR:dflt)\n",
-		reason: "$ENV default: HTCondor's $ENV(NAME:default) yields default when NAME is unset; Go looks up the literal 'NAME:default' and yields empty."},
-	{input: "T = v ",
-		reason: "last line without a newline: HTCondor's reader keeps its trailing whitespace (T='v '); Go trims it."},
-	{input: "B = \xff\n",
-		reason: "non-UTF-8 byte: HTCondor stores the byte as is; Go's rune lexer replaces it with U+FFFD."},
-	{input: "H@=end\nx\n@end\n",
-		reason: "'@=' needs whitespace before it: HTCondor reads the name as 'H@' and rejects it (Illegal Identifier); Go accepts it as a here-doc."},
-	{input: "S = $(s)\n",
-		reason: "self-reference with no prior value: HTCondor expands $(S) inside S's own definition to the previous value, empty here (S=''); Go leaves '$(s)' unexpanded."},
+	// --- known divergences in the ClassAd library (github.com/PelicanPlatform/classad),
+	// which $INT/$REAL/$STRING/$EVAL use to evaluate their argument; condor 25.14.1
+	// results checked with condor_config_val ---
+	{input: "I = $INT(0//)\n",
+		reason: "classad: libclassad's lexer takes // as a comment ($INT(0//) -> 0); the Go parser rejects it (-> \"\")."},
+	{input: "I = $INT(!-00)\n",
+		reason: "classad: libclassad lexes -00 as a negative real under old semantics (!-00 -> true -> 1); the Go parser rejects 00 (-> \"\")."},
+	{input: "R = $REAL(10000000000000000000%1)\n",
+		reason: "classad: libclassad turns an out-of-range integer literal into 0 (0%1 -> 0); the Go parser rejects it (-> \"\")."},
+	{input: "I = $INT(\"\x7f\xb4\" > \"\x7f\x84\")\n",
+		reason: "classad: libclassad compares string bytes (-> 1); the Go library replaces invalid UTF-8 with U+FFFD, so the strings are equal (-> 0)."},
 }
 
 // divergence runs both engines on the same preluded source and returns a
 // non-empty description if they disagree (in parse acceptance or expanded
 // table), or "" if they agree. skip is non-empty when the input cannot be
-// compared: it would make the Go engine touch the host, or a C++ exception
-// escaped.
+// compared:
+//   - it holds a NUL byte, which the oracle's C-string interface cannot carry;
+//   - the Go engine found a construct on which HTCondor's own code has no
+//     defined result: an expansion that never terminates (a reference cycle;
+//     HTCondor loops forever or overflows its stack), or one where HTCondor
+//     reads out of bounds or crashes (config.ErrHTCondorUndefined). The Go
+//     engine runs first to find these, so the oracle never sees them;
+//   - a C++ exception escaped.
 func divergence(input string) (desc, skip string) {
+	if strings.IndexByte(input, 0) >= 0 {
+		return "", "NUL byte (the oracle takes a C string)"
+	}
 	full := Prelude(input)
-	if ReadsHost(full) {
-		return "", "include directive (would read a host file or run a command)"
+	goRes := GoParseExpand(full)
+	if goRes.Uncomparable != "" {
+		return "", goRes.Uncomparable
 	}
 	cppRes := oracle.ParseExpand(full)
 	if cppRes.Panic {
 		return "", "C++ oracle exception"
 	}
-	goRes := GoParseExpand(full)
 
 	if goRes.Parsed != cppRes.Parsed {
 		return fmt.Sprintf("parse-acceptance: go.parsed=%v cpp.parsed=%v", goRes.Parsed, cppRes.Parsed), ""

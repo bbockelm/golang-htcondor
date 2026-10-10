@@ -10,8 +10,10 @@ a fresh `MACRO_SET` with a NULL defaults table and production option flags:
 `COLON_IS_META_ONLY | SMART_COM_IN_CONT | KEEP_DEFAULTS`). The C++ side reads
 the input as a config file: `Parse_macros` over an in-memory
 `MacroStreamMemoryFile`, the same reader (trimming, `\` continuation) that
-`process_config_source` runs on a `FILE*`. (Not `Parse_config_string`: that is
-the more lenient parser for metaknob bodies.) A fixed reference
+`process_config_source` runs on a `FILE*`, and expands values with the
+`expand_macro` that `param()` uses, under old ClassAd semantics as production
+`config()` sets them. (Not `Parse_config_string`: that is the more lenient
+parser for metaknob bodies.) A fixed reference
 environment (`RefEnv` in `engine.go` — time constants, `FULL_HOSTNAME`,
 `DETECTED_*`, …) is prepended to every input so realistic sources resolve, and
 is stripped from the compared output. Comparing the `param_info.in` defaults
@@ -19,8 +21,16 @@ table itself is a separate axis (mode #2), handled by a defaults-sync script.
 
 **No host access:** `include` and `include command` would read a host file or
 run a command. The shim refuses every include form
-(`CONFIG_OPT_NO_INCLUDE_FILE`), and the harness skips any input whose Go parse
-contains an include directive (`ReadsHost`), so neither engine ever runs one.
+(`CONFIG_OPT_NO_INCLUDE_FILE`) and the Go side parses with
+`ConfigOptions{NoInclude: true}`, so for both every include is a parse error
+(`TestGoSideNeverRunsInclude`).
+
+**Not compared:** inputs with a NUL byte, and inputs on which the Go side
+reports that HTCondor has no defined result (`config.ErrMacroLoop`,
+`config.ErrHTCondorUndefined`): reference cycles HTCondor never finishes
+expanding, and constructs on which it crashes or reads out of bounds. The Go
+engine runs first, so the oracle never sees them. See
+`design_notes/CONFIG_FUZZ_FINDINGS.md`.
 
 ## Layout
 
