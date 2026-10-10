@@ -497,7 +497,7 @@ export function str(v: unknown): string | undefined {
 // on a queue of 30k, and they are only ever read for the one batch
 // somebody opened.
 export const BATCH_USAGE_PROJECTION =
-  'ClusterId,ProcId,JobStatus,HoldReasonCode,RequestCpus,RequestMemory,RequestDisk,RequestGpus,CPUsUsage,MemoryUsage,ResidentSetSize,DiskUsage';
+  'ClusterId,ProcId,JobStatus,HoldReasonCode,RequestCpus,RequestMemory,RequestDisk,RequestGpus,CpusUsage,MemoryUsage,ResidentSetSize,DiskUsage';
 
 // How a row's numbers should be read. The lib keeps HTCondor's own
 // units -- MiB for memory, KiB for disk -- and the panel formats them.
@@ -578,13 +578,15 @@ export function summarizeBatchUsage(ads: ClassAd[]): BatchUsage {
 
     if (isRunning) {
       running++;
-      const cpus = num(j.CPUsUsage);
+      // Read case-insensitively: the ad spells it CpusUsage, and a lookup
+      // spelled CPUsUsage found nothing, so the panel never showed CPU.
+      const cpus = num(attr(j, 'CpusUsage'));
       // MemoryUsage is an expression in the job ad more often than not,
       // so ResidentSetSize -- which the starter writes as a literal in
       // KiB -- is the one that can be trusted to be a number.
-      const rss = num(j.ResidentSetSize);
-      const mem = num(j.MemoryUsage) ?? (rss !== undefined ? rss / 1024 : undefined);
-      const disk = num(j.DiskUsage);
+      const rss = num(attr(j, 'ResidentSetSize'));
+      const mem = num(attr(j, 'MemoryUsage')) ?? (rss !== undefined ? rss / 1024 : undefined);
+      const disk = num(attr(j, 'DiskUsage'));
       let any = false;
       if (cpus !== undefined) {
         used.cpus += cpus;
