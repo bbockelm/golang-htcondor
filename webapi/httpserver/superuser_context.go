@@ -89,6 +89,18 @@ func (i Impersonation) sessionTag() string {
 	return "superuser:" + i.Identity + "->" + i.Target
 }
 
+// transportTag marks a job transport opened under this impersonation
+// (jobssh.Key.Impersonation). It is the session tag plus the project a
+// lead's grant rests on, so a transport opened under one project's
+// leadership is not found under another grant -- another project, or
+// global scope -- that happens to resolve to the same identity.
+func (i Impersonation) transportTag() string {
+	if i.Project != "" {
+		return i.sessionTag() + " project:" + i.Project
+	}
+	return i.sessionTag()
+}
+
 // impersonate prepares a context that will authenticate to the schedd as the
 // identity resolved for this actor, for the purpose of acting on target's job.
 //
