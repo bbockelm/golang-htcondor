@@ -99,11 +99,11 @@ func generateSessionID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// sessionKey is what http_sessions.session_id stores for a session ID:
-// its SHA-256, hex-encoded. The session ID is the browser cookie value,
-// so storing it as is would let anyone who can read the database (a
-// backup, a copy, a file left world-readable) present it as a cookie.
-// Every query on the column goes through this.
+// sessionKey is what http_sessions.session_id and idp_sessions.session_id
+// store for a session ID: its SHA-256, hex-encoded. The session ID is
+// the browser cookie value, so storing it as is would let anyone who can
+// read the database (a backup, a copy, a file left world-readable)
+// present it as a cookie. Every query on those columns goes through this.
 func sessionKey(sessionID string) string {
 	sum := sha256.Sum256([]byte(sessionID))
 	return hex.EncodeToString(sum[:])
