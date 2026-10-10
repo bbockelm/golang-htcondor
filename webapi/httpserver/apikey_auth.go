@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -22,7 +23,9 @@ import (
 //
 // What an API key DOES authenticate:
 //   - HTTP-layer identity: the request's effective user becomes the
-//     key's creator (the admin who minted it).
+//     key's creator (the admin who minted it) -- for a key carrying a
+//     condor:/* scope only. Any other key is good for the one endpoint
+//     its scope names and acts as nobody elsewhere (apiKeyGrantsIdentity).
 //   - Scopes: a set of capability strings the request can use.
 //     /metrics checks for the `metrics` scope; other endpoints can
 //     opt in similarly.
@@ -47,13 +50,16 @@ import (
 // "no scopes attached" as "scope not present".
 type scopesContextKey struct{}
 
-// withAPIKeyScopes attaches the API key's authorized scopes to the
-// context. Stored as a `map[string]struct{}` for O(1) membership
-// checks; the public read API uses ContainsScope.
+// withAPIKeyScopes attaches a scoped credential's scopes to the
+// context: an API key's, or an OAuth2 grant's. Stored as a
+// `map[string]struct{}` for O(1) membership checks; the public read API
+// uses ContainsScope.
+//
+// Stored even when the list is empty. Being called at all is what marks
+// the credential as scoped, and a credential granted nothing has to read
+// as granted nothing -- not as one with no scope model, which is what a
+// missing value means (see scopedCredential).
 func withAPIKeyScopes(ctx context.Context, scopes []string) context.Context {
-	if len(scopes) == 0 {
-		return ctx
-	}
 	set := make(map[string]struct{}, len(scopes))
 	for _, s := range scopes {
 		set[s] = struct{}{}
@@ -62,17 +68,19 @@ func withAPIKeyScopes(ctx context.Context, scopes []string) context.Context {
 }
 
 // scopedCredential returns the scopes attached to this request, and
-// whether any were.
+// whether the credential is a scoped one.
 //
 // The second return is the point: "no scopes attached" means the
 // caller authenticated by a route that has no scope model at all --
 // a browser session, a trusted user header -- which is a different
 // thing from a scoped credential that was granted nothing. A handler
 // gating on a scope has to tell those apart or it either refuses
-// every interactive user or admits every under-scoped key.
+// every interactive user or admits every under-scoped key. So the
+// answer is whether scopes were attached, never how many: an empty
+// grant is scoped, and grants nothing.
 func scopedCredential(ctx context.Context) (map[string]struct{}, bool) {
 	v, ok := ctx.Value(scopesContextKey{}).(map[string]struct{})
-	return v, ok && len(v) > 0
+	return v, ok
 }
 
 // ContainsScope reports whether the request's API key was minted
@@ -107,6 +115,25 @@ func withAPIKeyMarker(ctx context.Context) context.Context {
 func AuthenticatedViaAPIKey(ctx context.Context) bool {
 	v, _ := ctx.Value(apiKeyMarkerKey{}).(bool)
 	return v
+}
+
+// errAPIKeyNoIdentity is an API key used where it would act as its
+// creator, without a scope that lets it.
+var errAPIKeyNoIdentity = errors.New("this API key carries no condor:/* scope, so it " +
+	"cannot act as its creator here; it is good only for the endpoints its scopes name")
+
+// apiKeyGrantsIdentity reports whether an API key authenticated into ctx
+// may act as its creator: whether it carries a condor:/* scope. The
+// other scopes name one endpoint each (metrics is /metrics) and need no
+// identity there.
+func apiKeyGrantsIdentity(ctx context.Context) bool {
+	set, _ := scopedCredential(ctx)
+	for scope := range set {
+		if strings.HasPrefix(scope, "condor:/") {
+			return true
+		}
+	}
+	return false
 }
 
 // authenticateAPIKey is the API-key arm of the Bearer-token auth

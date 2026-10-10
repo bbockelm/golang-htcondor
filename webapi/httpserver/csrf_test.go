@@ -92,6 +92,43 @@ func TestBearerCredentialIsExemptFromTheOriginCheck(t *testing.T) {
 	}
 }
 
+// Only a Bearer token is exempt. A browser attaches Basic credentials by
+// itself once they have been entered, cross-site included, and a proxy that
+// authenticates with Basic and sets the trusted user header is exactly the
+// deployment the check protects. An empty Bearer is not a credential either.
+func TestNonBearerAuthorizationIsNotExempt(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.Logger = testLogger(t)
+	cfg.HTTPBaseURL = "https://ap.example.edu"
+	cfg.UserHeader = "X-Remote-User"
+	cfg.UserHeaderTrustAnyUnsafe = true
+	cfg.SigningKeyPath = writeTestSigningKey(t)
+	cfg.TrustDomain = testTrustDomain
+	s, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	s.setupRoutes()
+
+	for _, authz := range []string{"Basic YWxpY2U6cGFzc3dvcmQ=", "Bearer ", "bearer some.token"} {
+		t.Run(authz, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/jobs/hold",
+				strings.NewReader(`{"constraint":"true"}`))
+			req.Host = "ap.example.edu"
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", "https://evil.example.com")
+			req.Header.Set("Authorization", authz)
+			req.Header.Set("X-Remote-User", "alice")
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, req)
+			if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "did not come from this site") {
+				t.Fatalf("a cross-site POST with Authorization %q was answered %d, want the origin check's 403: %s",
+					authz, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 // Reads are not state changes, and a CORS preflight is by definition a
 // cross-origin OPTIONS -- refusing it would refuse the request it
 // precedes before the real check ever ran.

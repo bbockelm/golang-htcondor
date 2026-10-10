@@ -1255,6 +1255,16 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 		if kerr != nil {
 			return nil, kerr
 		}
+		// A key acts as its creator only where one of its scopes says
+		// it may act at all. Without this a metrics-only key -- the
+		// scrape credential handed to a monitoring system -- was its
+		// creator on every route that needs nothing but an identity:
+		// it could read, overwrite and delete the creator's templates.
+		// /metrics, the one route such a key is for, authenticates it
+		// with authenticateAPIKey directly.
+		if !apiKeyGrantsIdentity(ctx) {
+			return nil, errAPIKeyNoIdentity
+		}
 		return ctx, nil
 	}
 
@@ -1341,11 +1351,12 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 			// the first request after a sign-in behaved differently
 			// from every one after it.
 			var cachedScopes []string
-			condorCredential, cachedScopes = resolveCachedBearer(entry, token)
-			if len(cachedScopes) > 0 {
+			var scoped bool
+			condorCredential, cachedScopes, scoped = resolveCachedBearer(entry, token)
+			if scoped {
 				// Same reasoning: a handler that gates on scopes would
-				// otherwise see an approved-for-less grant as carrying
-				// no restriction at all.
+				// otherwise see an approved-for-less grant -- or one
+				// approved for nothing -- as carrying no restriction.
 				ctx = withAPIKeyScopes(ctx, cachedScopes)
 			}
 			s.logger.Debug(logging.DestinationSecurity, "Using cached session cache for token")

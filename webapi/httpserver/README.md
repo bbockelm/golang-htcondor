@@ -389,7 +389,9 @@ Three answers, in increasing order of how much history they carry.
 **Right now.** `GET /readyz` grows a `dbmirror` block whenever routing is
 configured. `status` is `ok` only when reads are actually routing — a mirror
 that is up but too far behind the tolerance is `warning`, because it is running
-without doing its job:
+without doing its job. Without a credential the block is `status` and
+`required` only; an admin session or an API key with the `metrics` scope gets
+the rest:
 
 ```json
 { "status": "ok",

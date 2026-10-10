@@ -269,8 +269,20 @@ func TestMultiAPAPsAndReadyz(t *testing.T) {
 	}
 
 	rec = doAs(t, srv, "", http.MethodGet, "/readyz")
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ap3.example.org"`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ap_count":3`) {
 		t.Errorf("readyz with one AP absent must stay ready: %d %s", rec.Code, rec.Body.String())
+	}
+	// Which access points there are is for the monitoring credential,
+	// not for anybody who asks.
+	if strings.Contains(rec.Body.String(), "example.org") {
+		t.Errorf("unauthenticated readyz names the access points: %s", rec.Body.String())
+	}
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
+	req.Header.Set("Authorization", "Bearer "+gateTestKey(t, srv.Handler, []string{"metrics"}))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ap3.example.org"`) {
+		t.Errorf("readyz to a metrics key does not list the access points: %d %s", rec.Code, rec.Body.String())
 	}
 
 	empty := newMultiAPServer(t, multiAPService(t, multiAPHub(t), multiaptest.NewRegistry()))

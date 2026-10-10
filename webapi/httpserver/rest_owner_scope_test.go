@@ -302,8 +302,13 @@ func TestSeesAllJobsRule(t *testing.T) {
 	h := f.s.Handler
 	h.mcpAdminUsers = []string{"lister@test.domain"}
 
+	// No scopes is an unscoped credential; an empty list is a scoped one
+	// granted nothing.
 	bearerCtx := func(actor string, scopes ...string) context.Context {
 		ctx := htcondor.WithAuthenticatedUser(context.Background(), actor)
+		if scopes == nil {
+			return ctx
+		}
 		return withAPIKeyScopes(ctx, scopes)
 	}
 	bare := func() *http.Request {
@@ -321,6 +326,7 @@ func TestSeesAllJobsRule(t *testing.T) {
 		{"mcp:superuser grant", bearerCtx("carol@test.domain", "mcp:write", "mcp:superuser"), false, true},
 		{"MCP_ADMIN_USERS, unscoped credential", bearerCtx("lister@test.domain"), true, false},
 		{"MCP_ADMIN_USERS, scoped credential withholding mcp:admin", bearerCtx("lister@test.domain", "mcp:read"), false, false},
+		{"MCP_ADMIN_USERS, scoped credential granted nothing", bearerCtx("lister@test.domain", []string{}...), false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := h.seesAllJobs(tc.ctx, bare(), jobScopeRead); got != tc.read {

@@ -153,19 +153,7 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 				grantedScopes = append(grantedScopes, scope)
 			}
 		case "mcp:write":
-			switch {
-			case s.mcpWriteGroups.configured():
-				// Specific write group configured — user must be in it
-				if s.mcpWriteGroups.allows(userGroups) {
-					grantedScopes = append(grantedScopes, scope)
-				}
-			case s.mcpAccessGroups.configured():
-				// No specific write group; fall back to access group (already validated)
-				if s.mcpAccessGroups.allows(userGroups) {
-					grantedScopes = append(grantedScopes, scope)
-				}
-			default:
-				// No groups configured — grant to any authenticated user
+			if s.writeScopeAllowed(userGroups) {
 				grantedScopes = append(grantedScopes, scope)
 			}
 		case "mcp:admin":
@@ -191,6 +179,18 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 				grantedScopes = append(grantedScopes, scope)
 			}
 		default:
+			// condor:/WRITE is the same authorization as mcp:write --
+			// both mint an IDTOKEN carrying WRITE -- so it follows the
+			// same group policy. Granted unconditionally, it handed a
+			// user the write group denies mcp:write the same power
+			// under the other name. Case-insensitive because the
+			// mapping to an authorization level is.
+			if strings.EqualFold(scope, condorScopeWrite) {
+				if s.writeScopeAllowed(userGroups) {
+					grantedScopes = append(grantedScopes, scope)
+				}
+				continue
+			}
 			// Grant other scopes if requested (profile, email, condor:/*, etc.).
 			//
 			// Re: condor:/* scopes — these grant *narrowing* claims on
@@ -200,10 +200,10 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 			// they're in ALLOW_WRITE on the schedd side. See
 			// mapCondorScopesToAuthz for the full security model.
 			//
-			// Because of that narrowing semantics, granting condor:/*
-			// here without an explicit per-user group check is safe in
-			// today's deployment: a non-submitter who somehow obtains
-			// `condor:/WRITE` still can't submit. The audit-style
+			// The schedd's ACL is not this server's group policy,
+			// though, which is why condor:/WRITE is checked above.
+			// The other levels pass through: READ is left to the
+			// schedd's ACL, and the rest map to nothing. The audit-style
 			// concern ("user clicks Authorize on a malicious client
 			// asking for condor:/ADMINISTRATOR → admin token") is
 			// also addressed defensively in mapCondorScopesToAuthz,
@@ -214,6 +214,23 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 	}
 
 	return grantedScopes
+}
+
+// writeScopeAllowed is the group policy for a scope that grants WRITE:
+// the write group when one is configured, otherwise the access group,
+// otherwise any authenticated user.
+func (s *Handler) writeScopeAllowed(userGroups []string) bool {
+	switch {
+	case s.mcpWriteGroups.configured():
+		// Specific write group configured — user must be in it
+		return s.mcpWriteGroups.allows(userGroups)
+	case s.mcpAccessGroups.configured():
+		// No specific write group; fall back to access group (already validated)
+		return s.mcpAccessGroups.allows(userGroups)
+	default:
+		// No groups configured — grant to any authenticated user
+		return true
+	}
 }
 
 // fetchUserInfo fetches user information from the IDP user info endpoint
