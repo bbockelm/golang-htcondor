@@ -6,32 +6,37 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 )
 
 // An administrator's listing is not owner-scoped, so nothing in the
 // handler re-parses its constraint; one that does not parse must still be
-// a 400 before the schedd is contacted, not a query for every job.
+// refused before the schedd is contacted, not sent as a query for every
+// job.
 func TestUnscopedListingRefusesUnparseableConstraint(t *testing.T) {
 	addr, accepted := fakeScheddListener(t)
 	cfg := newTestConfig(t)
 	cfg.ScheddAddr = addr
-	cfg.UserHeader = "X-Test-User"
-	cfg.UserHeaderTrustAnyUnsafe = true // single-host test, no proxy in front
 	cfg.SigningKeyPath = writeTestSigningKey(t)
 	cfg.TrustDomain = "test.domain"
 	cfg.UIDDomain = "test.domain"
-	cfg.MCPAdminUsers = []string{"admin"}
+	cfg.SessionTTL = time.Hour
 	s, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
 	s.setupRoutes()
+	s.webuiAdminGroups = newGroupSet("condor-admins")
+	sid, _, err := s.sessionStore.Create("root", []string{"condor-admins"})
+	if err != nil {
+		t.Fatalf("session create: %v", err)
+	}
 
 	list := func(constraint string) *httptest.ResponseRecorder {
 		q := url.Values{"owned_by_me": {"false"}, "constraint": {constraint}}
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
 			"/api/v1/jobs?"+q.Encode(), nil)
-		req.Header.Set("X-Test-User", "admin")
+		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec // test cookie
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, req)
 		return w
