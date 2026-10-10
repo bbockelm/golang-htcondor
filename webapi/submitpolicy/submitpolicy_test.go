@@ -287,7 +287,10 @@ func TestControlledAttributeEdges(t *testing.T) {
 func TestOverridesPrecedeEveryQueue(t *testing.T) {
 	p := Policy{Overrides: "accounting_group = grp_site"}
 	got := mustApply(t, p, "executable = /bin/a\nqueue\naccounting_group = evil\nqueue\n")
-	second := got[strings.Index(got, "accounting_group = evil"):]
+	_, second, ok := strings.Cut(got, "accounting_group = evil")
+	if !ok {
+		t.Fatalf("the reassignment is missing:\n%s", got)
+	}
 	if v, _ := commandValue(t, second, "accounting_group"); v != "grp_site" {
 		t.Errorf("accounting_group in force for the second queue = %q, want the override\n%s", v, got)
 	}
