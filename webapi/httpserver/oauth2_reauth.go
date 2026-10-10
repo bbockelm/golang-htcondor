@@ -111,6 +111,41 @@ func grantRevokedError(reason string) error {
 // A non-nil error means the caller must abandon the request; the grant has
 // already been revoked in storage by then.
 func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessRequester) error {
+	granted, err := h.reauthorizeGrant(ctx, ar)
+	if err != nil {
+		return err
+	}
+
+	// --- apply -----------------------------------------------------------
+	// fosite exposes no way to un-grant a scope through the AccessRequester
+	// interface, so reach the concrete request to replace the set. If the
+	// type ever changes upstream, the assertion fails closed-ish: the grant
+	// is not narrowed, which we log rather than silently accept.
+	if len(granted) != len(ar.GetGrantedScopes()) {
+		username := ar.GetSession().GetSubject()
+		req, ok := ar.(*fosite.AccessRequest)
+		if !ok {
+			h.logger.Error(logging.DestinationHTTP,
+				"Cannot narrow refreshed grant: unexpected AccessRequester type",
+				"username", username, "request_id", ar.GetID(),
+				"type", fmt.Sprintf("%T", ar))
+			reason := "unable to apply current authorization policy to this grant"
+			h.revokeGrant(ctx, ar.GetID(), username, reason)
+			return grantRevokedError(reason)
+		}
+		req.GrantedScope = fosite.Arguments(granted)
+	}
+
+	return nil
+}
+
+// reauthorizeGrant runs the checks reauthorizeRefreshGrant describes against
+// a stored grant and returns the scopes it may still carry, without applying
+// them. Token exchange mints from an existing grant just as refresh does, so
+// it runs the same checks against the grant behind its subject token.
+//
+// A non-nil error means the grant has been revoked in storage.
+func (h *Handler) reauthorizeGrant(ctx context.Context, ar fosite.Requester) ([]string, error) {
 	username := ar.GetSession().GetSubject()
 	granted := []string(ar.GetGrantedScopes())
 
@@ -123,7 +158,7 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 		h.logger.Warn(logging.DestinationHTTP,
 			"Refresh grant has a legacy session; reauthorization limited to the lifetime cap",
 			"username", username, "request_id", ar.GetID())
-		return nil
+		return granted, nil
 	}
 
 	// --- absolute lifetime cap ------------------------------------------
@@ -142,12 +177,28 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 			"username", username, "request_id", ar.GetID(),
 			"auth_time", sess.AuthTime, "age", age.Round(time.Minute))
 		h.revokeGrant(ctx, ar.GetID(), username, reason)
-		return grantRevokedError(reason)
+		return nil, grantRevokedError(reason)
 	}
 
+	granted, reason := h.reevaluateSubject(ctx, username, sess.Groups, granted, ar.GetID())
+	if reason != "" {
+		h.revokeGrant(ctx, ar.GetID(), username, reason)
+		return nil, grantRevokedError(reason)
+	}
+	return granted, nil
+}
+
+// reevaluateSubject applies the current group policy and the revocation
+// oracles to username, holding groups, and returns what is left of granted.
+// A non-empty refusal means the subject may hold nothing at all.
+//
+// It revokes nothing: a refresh or exchange from a stored grant revokes that
+// grant on refusal, while an exchange of an external issuer's token has no
+// grant here to revoke. requestID is for the log only and may be empty.
+func (h *Handler) reevaluateSubject(ctx context.Context, username string, groups, granted []string, requestID string) (scopes []string, refusal string) {
 	// --- group policy re-evaluation -------------------------------------
-	// IMPORTANT: sess.Groups is the membership list as of consent, not a
-	// live reading. Re-running the policy against it therefore catches
+	// IMPORTANT: for a stored grant, groups is the session's membership
+	// list as of consent, not a live reading. Re-running the policy against it therefore catches
 	// POLICY drift — an operator changing MCP_WRITE_GROUP, or adding an
 	// MCP_ACCESS_GROUP where there was none — but NOT MEMBERSHIP drift.
 	// A user removed from condor-writers upstream still carries
@@ -158,7 +209,7 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 	// refresh token) or a separate directory binding, neither of which
 	// this server has. Membership changes are covered instead by the
 	// revocation oracles below, by the admin revoke endpoint, and
-	// ultimately by the lifetime cap above — which is the only mechanism
+	// ultimately by the lifetime cap in reauthorizeGrant — which is the only mechanism
 	// that bounds exposure with no cooperation from anything else.
 	//
 	// That future live-membership source now exists, where the
@@ -173,18 +224,16 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 	// A nil list means the user authenticated by a path that asserts no
 	// groups (the trusted user header, say), so there is no policy to
 	// re-run at all.
-	if sess.Groups != nil {
-		if err := h.validateGroupAccess(sess.Groups); err != nil {
-			reason := fmt.Sprintf("user no longer has required group membership: %v", err)
-			h.logger.Info(logging.DestinationHTTP, "Revoking refresh grant on lost group access",
-				"username", username, "request_id", ar.GetID(), "groups", sess.Groups)
-			h.revokeGrant(ctx, ar.GetID(), username, reason)
-			return grantRevokedError(reason)
+	if groups != nil {
+		if err := h.validateGroupAccess(groups); err != nil {
+			h.logger.Info(logging.DestinationHTTP, "Refusing grant on lost group access",
+				"username", username, "request_id", requestID, "groups", groups)
+			return nil, fmt.Sprintf("user no longer has required group membership: %v", err)
 		}
-		allowed := h.getScopesForGroups(sess.Groups, granted)
+		allowed := h.getScopesForGroups(groups, granted)
 		if narrowed := intersectScopes(granted, allowed); len(narrowed) != len(granted) {
-			h.logger.Info(logging.DestinationHTTP, "Narrowing refreshed grant to current group policy",
-				"username", username, "request_id", ar.GetID(),
+			h.logger.Info(logging.DestinationHTTP, "Narrowing grant to current group policy",
+				"username", username, "request_id", requestID,
 				"was", granted, "now", narrowed,
 				"dropped", subtractScopes(granted, narrowed))
 			granted = narrowed
@@ -207,20 +256,19 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 			if reason == "" {
 				reason = fmt.Sprintf("access revoked by %s", oracle.Name())
 			}
-			h.logger.Info(logging.DestinationHTTP, "Revoking refresh grant on oracle verdict",
+			h.logger.Info(logging.DestinationHTTP, "Refusing grant on oracle verdict",
 				"oracle", oracle.Name(), "username", username,
-				"request_id", ar.GetID(), "reason", reason)
-			h.revokeGrant(ctx, ar.GetID(), username, reason)
-			return grantRevokedError(reason)
+				"request_id", requestID, "reason", reason)
+			return nil, reason
 		case UserStatusActive, UserStatusUnknown:
 			// Fall through to the per-scope denials below; an oracle may
 			// vouch for the user while still stripping individual scopes.
 		}
 		if len(decision.DeniedScopes) > 0 {
 			if narrowed := subtractScopes(granted, decision.DeniedScopes); len(narrowed) != len(granted) {
-				h.logger.Info(logging.DestinationHTTP, "Narrowing refreshed grant on oracle verdict",
+				h.logger.Info(logging.DestinationHTTP, "Narrowing grant on oracle verdict",
 					"oracle", oracle.Name(), "username", username,
-					"request_id", ar.GetID(),
+					"request_id", requestID,
 					"denied", decision.DeniedScopes, "now", narrowed,
 					"reason", decision.Reason)
 				granted = narrowed
@@ -228,26 +276,7 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 		}
 	}
 
-	// --- apply -----------------------------------------------------------
-	// fosite exposes no way to un-grant a scope through the AccessRequester
-	// interface, so reach the concrete request to replace the set. If the
-	// type ever changes upstream, the assertion fails closed-ish: the grant
-	// is not narrowed, which we log rather than silently accept.
-	if len(granted) != len(ar.GetGrantedScopes()) {
-		req, ok := ar.(*fosite.AccessRequest)
-		if !ok {
-			h.logger.Error(logging.DestinationHTTP,
-				"Cannot narrow refreshed grant: unexpected AccessRequester type",
-				"username", username, "request_id", ar.GetID(),
-				"type", fmt.Sprintf("%T", ar))
-			reason := "unable to apply current authorization policy to this grant"
-			h.revokeGrant(ctx, ar.GetID(), username, reason)
-			return grantRevokedError(reason)
-		}
-		req.GrantedScope = fosite.Arguments(granted)
-	}
-
-	return nil
+	return granted, ""
 }
 
 // revokeGrant kills every token in a refresh chain. fosite preserves the

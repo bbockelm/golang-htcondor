@@ -453,7 +453,64 @@ func (s *OAuth2Storage) getTokenSession(ctx context.Context, table string, signa
 		return request, fosite.ErrInactiveToken
 	}
 
+	// A token obtained by exchange is bound to the grant it came from.
+	// Checked here, where every introspection, bearer check and
+	// revocation lands, so revoking, narrowing or outliving that grant
+	// reaches the exchanged token too.
+	if table == "oauth2_access_tokens" {
+		var link struct {
+			ParentGrant string `json:"parentGrant"`
+		}
+		if sessionData != "" {
+			if err := json.Unmarshal([]byte(sessionData), &link); err != nil {
+				return nil, err
+			}
+		}
+		if link.ParentGrant != "" {
+			parentScopes, live, err := s.parentGrantScopes(ctx, link.ParentGrant)
+			if err != nil {
+				return nil, err
+			}
+			if !live {
+				return request, fosite.ErrInactiveToken
+			}
+			request.GrantedScope = intersectScopes(request.GrantedScope, parentScopes)
+		}
+	}
+
 	return request, nil
+}
+
+// parentGrantScopes reports whether a grant still has a live token -- an
+// active, unexpired refresh or access token under requestID -- and the
+// scopes it currently carries.
+//
+// Every way a grant ends deactivates its rows by request id (refresh-token
+// reuse, RFC 7009 revocation, reauthorization, the admin pages) or lets
+// them expire, so "no live row" is exactly "this grant is over". The scopes
+// are read from the live row because an operator narrowing the grant
+// rewrites them there.
+func (s *OAuth2Storage) parentGrantScopes(ctx context.Context, requestID string) ([]string, bool, error) {
+	now := time.Now().UTC()
+	for _, table := range []string{"oauth2_refresh_tokens", "oauth2_access_tokens"} {
+		var raw string
+		err := s.db.QueryRowContext(ctx,
+			"SELECT granted_scopes FROM "+table+ //nolint:gosec // G202: table is from a fixed literal list
+				" WHERE request_id = ? AND active = 1 AND (expires_at IS NULL OR expires_at > ?) LIMIT 1",
+			requestID, now).Scan(&raw)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("reading parent grant %s from %s: %w", requestID, table, err)
+		}
+		var scopes []string
+		if err := json.Unmarshal([]byte(raw), &scopes); err != nil {
+			return nil, false, fmt.Errorf("decoding scopes of parent grant %s: %w", requestID, err)
+		}
+		return scopes, true, nil
+	}
+	return nil, false, nil
 }
 
 func (s *OAuth2Storage) deleteTokenSession(ctx context.Context, table string, signature string) error {

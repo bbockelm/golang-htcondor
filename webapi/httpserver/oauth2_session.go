@@ -61,6 +61,14 @@ type Session struct {
 	// the `act.sub` an exchanged token records, and is surfaced for audit and
 	// on the HTCondor IDTOKEN minted downstream.
 	Actor string `json:"actor,omitempty"`
+
+	// ParentGrant is the request id of the grant whose access token was
+	// exchanged for this one. An exchanged token is only as good as that
+	// grant: storage reports it inactive once no live token remains under
+	// ParentGrant, and never grants it a scope the parent no longer holds
+	// (see OAuth2Storage.parentGrantScopes). Empty for tokens obtained
+	// directly and for those exchanged from an external issuer's token.
+	ParentGrant string `json:"parentGrant,omitempty"`
 }
 
 // Clone deep-copies the session, including the fields declared above.
@@ -80,7 +88,7 @@ func (s *Session) Clone() fosite.Session {
 	if s == nil {
 		return nil
 	}
-	clone := &Session{AuthTime: s.AuthTime, Actor: s.Actor}
+	clone := &Session{AuthTime: s.AuthTime, Actor: s.Actor, ParentGrant: s.ParentGrant}
 	if s.DefaultSession != nil {
 		// DefaultSession.Clone returns a fosite.Session whose concrete
 		// type is *openid.DefaultSession.

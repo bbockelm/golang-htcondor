@@ -70,7 +70,7 @@ func (h *Handler) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	// Resolve the subject token to its subject and the ceiling of scopes it may
 	// obtain. Access tokens this server issued and (when configured) JWTs from
 	// trusted external issuers are both accepted.
-	subject, subjectScopes, subjectGroups, err := h.resolveSubjectToken(ctx, subjectToken, subjectTokenType, client)
+	subj, err := h.resolveSubjectToken(ctx, subjectToken, subjectTokenType, client)
 	if err != nil {
 		// Deliberately terse: never echo token contents or introspection
 		// internals back to the caller.
@@ -80,11 +80,13 @@ func (h *Handler) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	subject := subj.subject
+
 	// Scope-down: the result may only narrow the subject's authorization.
 	requested := strings.Fields(r.FormValue("scope"))
-	granted := subjectScopes
+	granted := subj.scopes
 	if len(requested) > 0 {
-		granted = intersectScopes(requested, subjectScopes)
+		granted = intersectScopes(requested, subj.scopes)
 		if len(granted) == 0 {
 			h.writeOAuthError(w, http.StatusBadRequest, "invalid_scope",
 				"requested scope is not within the subject token's grant")
@@ -95,7 +97,17 @@ func (h *Handler) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	// The result acts AS the subject and records the actor client (delegation).
 	session := DefaultOpenIDConnectSession(subject)
 	session.Actor = client.GetID()
-	session.Groups = subjectGroups
+	session.Groups = subj.groups
+	if subj.grant != nil {
+		// Bound to the subject's grant: storage refuses this token once that
+		// grant is revoked or over, and caps its scopes at the grant's. The
+		// grant's auth time carries over so the lifetime cap measures from
+		// the original authorization, not from this exchange.
+		session.ParentGrant = subj.grant.GetID()
+		if ps, ok := sessionFrom(subj.grant); ok && !ps.AuthTime.IsZero() {
+			session.AuthTime = ps.AuthTime
+		}
+	}
 	// An exchanged token holds no refresh credential and so is never
 	// narrowed and restored. The field is set anyway: an empty one reads
 	// to the admin page as "authorized nothing", which is a different
@@ -112,6 +124,11 @@ func (h *Handler) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		ar.GrantScope(s)
 	}
 	setStandardTokenExpiries(ctx, h.oauth2Provider.config, session)
+	if subj.grant != nil {
+		if deadline := session.AuthTime.Add(h.maxGrantLifetime()); session.GetExpiresAt(fosite.AccessToken).After(deadline) {
+			session.SetExpiresAt(fosite.AccessToken, deadline)
+		}
+	}
 
 	strategy := h.oauth2Provider.GetStrategy()
 	accessToken, _, err := strategy.GenerateAccessToken(ctx, ar)
@@ -135,7 +152,7 @@ func (h *Handler) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		"access_token":      accessToken,
 		"issued_token_type": tokenTypeAccessToken,
 		"token_type":        "Bearer",
-		"expires_in":        int(h.oauth2Provider.config.GetAccessTokenLifespan(ctx).Seconds()),
+		"expires_in":        int(time.Until(session.GetExpiresAt(fosite.AccessToken)).Round(time.Second).Seconds()),
 		"scope":             strings.Join(granted, " "),
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -147,40 +164,62 @@ func (h *Handler) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// exchangeSubject is what a validated subject token yields: who the exchanged
+// token acts as, the most it may be granted, and the groups behind that.
+type exchangeSubject struct {
+	subject string
+	scopes  []string
+	groups  []string
+	// grant is the stored grant behind a subject token this server issued,
+	// after reauthorization; nil for an external issuer's token.
+	grant fosite.Requester
+}
+
 // resolveSubjectToken validates the subject token and returns the subject, the
 // ceiling of scopes the exchanged token may obtain, and any group list.
 //
 //   - An access token this server issued: the ceiling is the subject's own
-//     granted scopes.
+//     granted scopes, after the same reauthorization a refresh of that grant
+//     would get. A token that was itself obtained by exchange is refused, so
+//     an exchanged token cannot be renewed by exchanging it again.
 //   - A JWT from a configured trusted external issuer (subject_token_type jwt or
 //     id_token): the ceiling is the issuer's allowed scopes, further bounded by
-//     the exchanging (actor) client's own scopes, and the subject is namespaced
-//     to the issuer's identity domain. Only available when issuers are
-//     configured (stage C2).
-func (h *Handler) resolveSubjectToken(ctx context.Context, token, tokenType string, actor fosite.Client) (string, []string, []string, error) {
+//     the exchanging (actor) client's own scopes and the current group
+//     policy, and the subject is namespaced to the issuer's identity domain.
+//     Only available when issuers are configured (stage C2).
+func (h *Handler) resolveSubjectToken(ctx context.Context, token, tokenType string, actor fosite.Client) (exchangeSubject, error) {
 	switch tokenType {
 	case tokenTypeAccessToken:
 		ar, err := h.oauth2Provider.IntrospectAccessToken(ctx, token)
 		if err != nil {
-			return "", nil, nil, fmt.Errorf("subject_token introspection failed: %w", err)
+			return exchangeSubject{}, fmt.Errorf("subject_token introspection failed: %w", err)
 		}
 		subject := ar.GetSession().GetSubject()
 		if subject == "" {
-			return "", nil, nil, fmt.Errorf("subject_token has no subject")
+			return exchangeSubject{}, fmt.Errorf("subject_token has no subject")
 		}
 		var groups []string
 		if s, ok := ar.GetSession().(*Session); ok {
+			if s.Actor != "" || s.ParentGrant != "" {
+				return exchangeSubject{}, fmt.Errorf("subject_token was itself obtained by token exchange")
+			}
 			groups = s.Groups
 		}
-		return subject, ar.GetGrantedScopes(), groups, nil
+		// Exchange mints from this grant as a refresh would, so it passes
+		// the same checks: lifetime cap, group policy, revocation oracles.
+		scopes, err := h.reauthorizeGrant(ctx, ar)
+		if err != nil {
+			return exchangeSubject{}, fmt.Errorf("subject grant failed reauthorization: %w", err)
+		}
+		return exchangeSubject{subject: subject, scopes: scopes, groups: groups, grant: ar}, nil
 
 	case tokenTypeJWT, tokenTypeIDToken:
 		if h.extIssuers == nil {
-			return "", nil, nil, fmt.Errorf("external subject tokens are not accepted")
+			return exchangeSubject{}, fmt.Errorf("external subject tokens are not accepted")
 		}
 		identity, groups, issuerAllowed, err := h.extIssuers.validate(ctx, token)
 		if err != nil {
-			return "", nil, nil, err
+			return exchangeSubject{}, err
 		}
 		// The external token carries no authorization in our system: bound it by
 		// the issuer's declared ceiling AND the actor client's own scopes.
@@ -194,11 +233,17 @@ func (h *Handler) resolveSubjectToken(ctx context.Context, token, tokenType stri
 		// second, unmapped route to a session.
 		mapped, mappedGroups, err := h.mapAssertedIdentity(ctx, identity, groups)
 		if err != nil {
-			return "", nil, nil, fmt.Errorf("external subject %q does not resolve to a local account: %w", identity, err)
+			return exchangeSubject{}, fmt.Errorf("external subject %q does not resolve to a local account: %w", identity, err)
 		}
-		return mapped, ceiling, mappedGroups, nil
+		// And the same policy: group-gated scopes such as mcp:admin are
+		// decided by the groups just resolved, and the oracles get a say.
+		ceiling, refusal := h.reevaluateSubject(ctx, mapped, mappedGroups, ceiling, "")
+		if refusal != "" {
+			return exchangeSubject{}, fmt.Errorf("external subject %q refused: %s", mapped, refusal)
+		}
+		return exchangeSubject{subject: mapped, scopes: ceiling, groups: mappedGroups}, nil
 
 	default:
-		return "", nil, nil, fmt.Errorf("unsupported subject_token_type %q", tokenType)
+		return exchangeSubject{}, fmt.Errorf("unsupported subject_token_type %q", tokenType)
 	}
 }
