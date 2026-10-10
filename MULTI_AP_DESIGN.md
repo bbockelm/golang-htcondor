@@ -154,10 +154,12 @@ from `SCHEDD_NAME` / the address file, resolved against the collector the
 same way the API server does it today. This fixes the host-match heuristic in
 `dbmirror.pickMirror` for single-AP mode too.
 
-The hub does not take the claim on faith. A spoke whose `MirroredScheddName`
-host differs from its own `MyAddress` host is rejected. That check is the
-current heuristic, demoted from "how we pair" to "how we validate". Without it,
-a misconfigured or hostile spoke could publish rows under another AP's name.
+Trust in the claim is HTCondor's usual trust in collector ads: a daemon the
+collector lets advertise is trusted for what it advertises. On top of that, a
+spoke whose `MirroredScheddName` host differs from its own `MyAddress` host is
+rejected, which catches misconfiguration such as a spoke copied to another host
+still claiming its old AP. That check is the current heuristic, demoted from
+"how we pair" to "how we validate".
 A static spoke entry (`HTCONDORDB_FEDERATE_SPOKE_<NAME>_ADDRESS` and `_SCHEDD`)
 covers sites whose spoke runs on a different host. The admin has asserted the
 pairing, so host validation is skipped.
