@@ -89,7 +89,7 @@ func newTunnelHarness(t *testing.T, reg *Registry) *tunnelHarness {
 			http.NotFound(w, r)
 			return
 		}
-		reg.Proxy(inst, "/", w, r)
+		reg.Proxy(inst, "/", w, r, nil)
 	})
 	h.srv = httptest.NewUnstartedServer(mux)
 	h.srv.Config.ConnState = func(c net.Conn, st http.ConnState) {
