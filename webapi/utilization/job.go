@@ -65,7 +65,7 @@ func Projection() []string {
 	return []string{
 		"ClusterId", "ProcId", "Owner", "JobBatchName", "DAGManJobId", "DAGNodeName",
 		"Cmd", "JobUniverse", "QDate", "CompletionDate", "EnteredHistoryTime",
-		"JobStartDate", "JobCurrentStartDate",
+		"EnteredCurrentStatus", "JobStartDate", "JobCurrentStartDate",
 		"JobStatus", "ExitCode", "ExitBySignal",
 		"RequestMemory", "RequestCpus", "RequestDisk", "RequestGPUs",
 		"MemoryUsage", "ResidentSetSize", "DiskUsage",
@@ -93,7 +93,8 @@ type Job struct {
 	Cmd         string
 	Universe    int64
 	QDate       int64
-	Entered     int64
+	// Entered is when the job entered history (see FromAd).
+	Entered int64
 	// Completion is CompletionDate; zero for a removed job.
 	Completion int64
 	// FirstStart is when the job first began running, zero if unknown.
@@ -154,7 +155,16 @@ func FromAd(ad *classad.ClassAd, schedd string) Job {
 	j.Cmd, _ = ad.EvaluateAttrString("Cmd")
 	j.Universe = intAttr(ad, "JobUniverse")
 	j.QDate = intAttr(ad, "QDate")
+	// A schedd need not record EnteredHistoryTime (HTCondor 25.8 does
+	// not). The fallback is the one htcondordb stamps it from: the
+	// transition to completed or removed, then CompletionDate.
 	j.Entered = intAttr(ad, "EnteredHistoryTime")
+	if j.Entered <= 0 {
+		j.Entered = intAttr(ad, "EnteredCurrentStatus")
+	}
+	if j.Entered <= 0 {
+		j.Entered = intAttr(ad, "CompletionDate")
+	}
 	j.Completion = intAttr(ad, "CompletionDate")
 	j.Status = intAttr(ad, "JobStatus")
 	if v, ok := ad.EvaluateAttrNumber("ExitCode"); ok {

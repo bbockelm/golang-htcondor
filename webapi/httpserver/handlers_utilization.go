@@ -155,13 +155,9 @@ func (s *Handler) utilizationScope(ctx context.Context, r *http.Request, ownedBy
 func (s *Handler) computeUtilization(ctx context.Context, scope string, days int, showOwner, mirror bool) (*utilization.Response, error) {
 	now := time.Now().Unix()
 	since := now - int64(days)*24*3600
-	// EnteredHistoryTime rather than CompletionDate: a removed job has a
-	// CompletionDate of 0, and removed jobs -- especially ones removed
-	// after being held for memory -- are part of the answer.
-	constraint := fmt.Sprintf("(%s) && EnteredHistoryTime >= %d", scope, since)
 
 	start := time.Now()
-	jobs, truncated, source, err := s.utilizationJobs(ctx, constraint, since, mirror)
+	jobs, truncated, source, err := s.utilizationJobs(ctx, scope, since, mirror)
 	if err != nil {
 		return nil, err
 	}
@@ -176,11 +172,36 @@ func (s *Handler) computeUtilization(ctx context.Context, scope string, days int
 	return resp, nil
 }
 
-// utilizationJobs reads up to utilizationJobCap finished jobs matching
-// constraint, most recent first, preferring the mirror.
-func (s *Handler) utilizationJobs(ctx context.Context, constraint string, since int64, mirror bool) ([]utilization.Job, bool, string, error) {
+// scheddEnteredHistory is when a schedd history record entered history.
+//
+// The window is on the time a job LEFT the queue rather than on
+// CompletionDate, because a removed job has a CompletionDate of 0 and
+// removed jobs -- especially ones removed after being held for memory --
+// are part of the answer. But a schedd does not necessarily write
+// EnteredHistoryTime: HTCondor 25.8's history records have none, and a
+// bare "EnteredHistoryTime >= since" matched nothing there. So the time
+// falls back the way htcondordb derives the value it stamps on every
+// record it mirrors (scheddsync's historyEventTime): EnteredCurrentStatus
+// -- the transition to completed or removed -- then CompletionDate.
+const scheddEnteredHistory = `ifThenElse(isUndefined(EnteredHistoryTime), ` +
+	`ifThenElse(isUndefined(EnteredCurrentStatus) || EnteredCurrentStatus <= 0, CompletionDate, EnteredCurrentStatus), ` +
+	`EnteredHistoryTime)`
+
+// utilizationJobs reads up to utilizationJobCap of scope's jobs that
+// entered history at or after since, most recent first, preferring the
+// mirror.
+//
+// The two backends get different constraints for the same window. The
+// mirror stamps EnteredHistoryTime on every record it archives (from the
+// same fallback as scheddEnteredHistory), and its history archive is
+// zone-mapped on that attribute -- but the pruner only reads top-level
+// "attribute op literal" conjuncts, so the plain comparison skips whole
+// segments outside the window while an ifThenElse would scan the entire
+// archive. The schedd has no such index, and needs the fallback.
+func (s *Handler) utilizationJobs(ctx context.Context, scope string, since int64, mirror bool) ([]utilization.Job, bool, string, error) {
+	mirrorConstraint, scheddConstraint := utilizationWindow(scope, since)
 	if mirror {
-		jobs, truncated, err := s.utilizationFromMirror(ctx, constraint, utilizationJobCap)
+		jobs, truncated, err := s.utilizationFromMirror(ctx, mirrorConstraint, utilizationJobCap)
 		if err == nil {
 			return jobs, truncated, "htcondordb", nil
 		}
@@ -189,8 +210,15 @@ func (s *Handler) utilizationJobs(ctx context.Context, constraint string, since 
 	if s.dbMirror.Required() {
 		return nil, false, "", errMirrorRequiredUtilization
 	}
-	jobs, truncated, err := s.utilizationFromSchedd(ctx, constraint, since, utilizationJobCap)
+	jobs, truncated, err := s.utilizationFromSchedd(ctx, scheddConstraint, since, utilizationJobCap)
 	return jobs, truncated, "schedd", err
+}
+
+// utilizationWindow is the history constraint for scope's jobs since a
+// time, for the mirror and for the schedd. See utilizationJobs.
+func utilizationWindow(scope string, since int64) (mirror, schedd string) {
+	return fmt.Sprintf("(%s) && EnteredHistoryTime >= %d", scope, since),
+		fmt.Sprintf("(%s) && %s >= %d", scope, scheddEnteredHistory, since)
 }
 
 // utilizationFromMirror reads the jobs from the mirror's history archive,
@@ -260,7 +288,7 @@ func (s *Handler) utilizationFromSchedd(ctx context.Context, constraint string, 
 		Projection:    utilization.Projection(),
 		Backwards:     true,
 		StreamResults: true,
-		Since:         fmt.Sprintf("EnteredHistoryTime < %d", since),
+		Since:         fmt.Sprintf("%s < %d", scheddEnteredHistory, since),
 	}
 	results, err := s.getSchedd().QueryHistoryStream(ctx, constraint, opts, &htcondor.StreamOptions{
 		BufferSize:   s.streamBufferSize,

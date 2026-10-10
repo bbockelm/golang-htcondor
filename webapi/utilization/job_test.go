@@ -188,3 +188,21 @@ func TestReservesNothing(t *testing.T) {
 		}
 	}
 }
+
+// A schedd need not write EnteredHistoryTime -- HTCondor 25.8 does not --
+// so when the job entered history falls back to its last status change,
+// then to CompletionDate.
+func TestFromAdEnteredFallback(t *testing.T) {
+	for _, tc := range []struct {
+		ad   string
+		want int64
+	}{
+		{"JobStatus = 4\nEnteredHistoryTime = 300\nEnteredCurrentStatus = 200\nCompletionDate = 100", 300},
+		{"JobStatus = 3\nEnteredCurrentStatus = 200\nCompletionDate = 0", 200},
+		{"JobStatus = 4\nCompletionDate = 100", 100},
+	} {
+		if got := FromAd(parseAd(t, tc.ad), "").Entered; got != tc.want {
+			t.Errorf("%q: entered %d, want %d", tc.ad, got, tc.want)
+		}
+	}
+}

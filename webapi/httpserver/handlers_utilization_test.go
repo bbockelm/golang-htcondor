@@ -497,3 +497,66 @@ func TestUtilizationMultiAPHasNoThroughput(t *testing.T) {
 		t.Errorf("throughput = %+v, overall %v; want null in multi-AP mode", w.Throughput, resp.Overall.ThroughputGain)
 	}
 }
+
+// HTCondor 25.8 writes no EnteredHistoryTime into history, and a window on
+// it alone matched nothing. A record without it falls back to its last
+// status change, then to CompletionDate; one that left the queue before
+// the window stays out.
+func TestUtilizationHistoryWithoutEnteredHistoryTime(t *testing.T) {
+	f := utilizationFixture(t)
+	now := time.Now().Unix()
+	ad := func(cluster int, extra string) *classad.ClassAd {
+		text := fmt.Sprintf(`ClusterId = %d
+ProcId = 0
+Owner = "dave"
+Cmd = "/home/dave/run"
+JobUniverse = 5
+QDate = %d
+RequestCpus = 1
+RequestMemory = 1024
+ResidentSetSize = 512000
+MemoryUsage = ((ResidentSetSize + 1023) / 1024)
+RemoteWallClockTime = 600.0
+%s`, cluster, now-7200, extra)
+		parsed, err := classad.ParseOld(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsed
+	}
+	f.schedd.AddHistory(
+		// Completed, both times recorded.
+		ad(501, fmt.Sprintf("JobStatus = 4\nExitCode = 0\nCompletionDate = %d\nEnteredCurrentStatus = %d", now-100, now-100)),
+		// Removed: no CompletionDate, only the status change.
+		ad(502, fmt.Sprintf("JobStatus = 3\nCompletionDate = 0\nEnteredCurrentStatus = %d", now-200)),
+		// Completed, CompletionDate only.
+		ad(503, fmt.Sprintf("JobStatus = 4\nExitCode = 0\nCompletionDate = %d", now-300)),
+		// Left the queue three days ago: outside a one-day window.
+		ad(504, fmt.Sprintf("JobStatus = 4\nExitCode = 0\nCompletionDate = %d\nEnteredCurrentStatus = %d", now-3*86400, now-3*86400)),
+	)
+	resp := f.utilization(t, "/api/v1/utilization?days=1", f.bearer(t, "dave"))
+	if resp.JobsConsidered != 3 {
+		t.Errorf("jobs_considered = %d, want the 3 that entered history today", resp.JobsConsidered)
+	}
+	if len(resp.Workflows) == 1 && resp.Workflows[0].Removed != 1 {
+		t.Errorf("removed = %d, want the removed job counted", resp.Workflows[0].Removed)
+	}
+}
+
+// The mirror stamps EnteredHistoryTime on every record and zone-maps it,
+// but prunes only on a top-level "attribute op literal" conjunct, so its
+// window must stay a plain comparison; the schedd's carries the fallback.
+func TestUtilizationWindowPerBackend(t *testing.T) {
+	mirror, schedd := utilizationWindow(`Owner == "dave"`, 1000)
+	if mirror != `(Owner == "dave") && EnteredHistoryTime >= 1000` {
+		t.Errorf("mirror window = %q; it must stay prunable", mirror)
+	}
+	if !strings.Contains(schedd, "EnteredCurrentStatus") || !strings.Contains(schedd, ">= 1000") {
+		t.Errorf("schedd window = %q; it needs the fallback", schedd)
+	}
+	for _, c := range []string{mirror, schedd} {
+		if _, err := classad.ParseExpr(c); err != nil {
+			t.Errorf("%q does not parse: %v", c, err)
+		}
+	}
+}
