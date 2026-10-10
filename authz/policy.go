@@ -29,17 +29,24 @@ type permEntry struct {
 	behavior   behavior
 	allowUsers map[string][]string // host key -> user patterns
 	denyUsers  map[string][]string
+
+	// allowKnob and denyKnob name the settings that supplied the tables
+	// (e.g. "ALLOW_READ_SCHEDD", "DENY_DEFAULT"), "" if none is set.
+	allowKnob, denyKnob string
 }
 
 // Policy is a port of HTCondor's IpVerify: it answers per-command authorization
 // questions (Verify) using the ALLOW_<perm>/DENY_<perm> configuration, with the
 // same permission hierarchy, glob/network matching, and parent implication as
-// the C++ daemons.
+// the C++ daemons, and the authorization holes (PunchHole) C++ daemons open for
+// the sessions they trust whatever the configuration says.
 //
-// Not safe for concurrent Init; Verify is read-only after Init.
+// Not safe for concurrent Init; Verify is read-only after Init (the holes are
+// safe to change concurrently).
 type Policy struct {
 	subsys  string
 	entries map[Perm]*permEntry
+	holes   *Holes
 
 	usePoolUsernameEquiv bool
 
@@ -62,6 +69,7 @@ func NewPolicy(cfg ConfigGetter, subsys string) (*Policy, error) {
 	p := &Policy{
 		subsys:               subsys,
 		entries:              make(map[Perm]*permEntry),
+		holes:                NewHoles(),
 		usePoolUsernameEquiv: configBool(cfg, "USE_POOL_USERNAME_EQUIVALENT", true),
 		forwardResolve:       defaultForwardResolve,
 		reverseResolve:       defaultReverseResolve,
@@ -87,8 +95,9 @@ func (p *Policy) buildEntry(cfg ConfigGetter, perm Perm) *permEntry {
 		allowUsers: make(map[string][]string),
 		denyUsers:  make(map[string][]string),
 	}
-	pAllow, hasAllow := p.getSecSetting(cfg, "ALLOW_%s", perm)
-	pDeny, hasDeny := p.getSecSetting(cfg, "DENY_%s", perm)
+	pAllow, allowKnob, hasAllow := p.getSecSetting(cfg, "ALLOW_%s", perm)
+	pDeny, denyKnob, hasDeny := p.getSecSetting(cfg, "DENY_%s", perm)
+	e.allowKnob, e.denyKnob = allowKnob, denyKnob
 
 	allowAllv := hasAllow && (pAllow == "*" || pAllow == "*/*")
 	denyAllv := hasDeny && (pDeny == "*" || pDeny == "*/*")
@@ -119,21 +128,49 @@ func (p *Policy) buildEntry(cfg ConfigGetter, perm Perm) *permEntry {
 
 // getSecSetting walks the config-fallback chain (perm, configNext..., DEFAULT),
 // trying "<key>_<subsys>" before "<key>" at each level, returning the first set
-// value (mirrors SecMan::getSecSetting). fmt is "ALLOW_%s" / "DENY_%s".
-func (p *Policy) getSecSetting(cfg ConfigGetter, format string, perm Perm) (string, bool) {
+// value and the knob that set it (mirrors SecMan::getSecSetting). fmt is
+// "ALLOW_%s" / "DENY_%s".
+func (p *Policy) getSecSetting(cfg ConfigGetter, format string, perm Perm) (value, knob string, ok bool) {
 	for _, pp := range configChain(perm) {
 		base := fmt.Sprintf(format, string(pp))
 		if p.subsys != "" {
-			if v, ok := cfg.Get(base + "_" + strings.ToUpper(p.subsys)); ok {
-				return v, true
+			k := base + "_" + strings.ToUpper(p.subsys)
+			if v, ok := cfg.Get(k); ok {
+				return v, k, true
 			}
 		}
 		if v, ok := cfg.Get(base); ok {
-			return v, true
+			return v, base, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
+
+// Knobs returns the settings that decide perm: the ALLOW_ and DENY_ knobs
+// (with any _<SUBSYS> suffix, or those of the level perm falls back to) that
+// are set, "" for one that is not.
+func (p *Policy) Knobs(perm Perm) (allow, deny string) {
+	if e := p.entries[perm]; e != nil {
+		return e.allowKnob, e.denyKnob
+	}
+	return "", ""
+}
+
+// PunchHole opens perm, and every level it implies, to id whatever the
+// ALLOW_/DENY_ settings say, as IpVerify::PunchHole does. id is a full
+// user@domain, "user@domain/ip" or a bare IP address, matched exactly.
+func (p *Policy) PunchHole(perm Perm, id string) { p.holes.Punch(perm, id) }
+
+// FillHole closes one opening PunchHole made, as IpVerify::FillHole does. It
+// reports whether perm was open to id.
+func (p *Policy) FillHole(perm Perm, id string) bool { return p.holes.Fill(perm, id) }
+
+// Holes returns the holes p consults.
+func (p *Policy) Holes() *Holes { return p.holes }
+
+// SetHoles makes p consult h, so holes punched before a reconfig still apply
+// to the Policy rebuilt by it.
+func (p *Policy) SetHoles(h *Holes) { p.holes = h }
 
 // fillTable parses a comma/space-separated ALLOW/DENY list into e's host->user
 // table, expanding hostnames to their IPs and adding condor@/condor_pool@
@@ -252,10 +289,15 @@ func (p *Policy) Authorize(perm, peerAddr, user string) bool {
 // for an authenticated peer and "unauthenticated@unmapped" for one that did not
 // authenticate, as C++ DaemonCore does, so only an entry matching that string
 // (e.g. "*", "*@unmapped") admits an unauthenticated peer. "" is treated as the
-// totally-wild "*", as in C++. This is a port of IpVerify::Verify (without the
-// result cache, which is a performance detail).
+// totally-wild "*", as in C++. A hole open to the peer (PunchHole) grants perm
+// before the tables are consulted, so DENY_<perm> does not close it. This is a
+// port of IpVerify::Verify (without the result cache, which is a performance
+// detail).
 func (p *Policy) Verify(perm Perm, addr net.IP, user string) bool {
 	if perm == PermAllow {
+		return true
+	}
+	if p.holes.Allows(perm, addr, user) {
 		return true
 	}
 	if user == "" {

@@ -145,10 +145,10 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 // useful reason it was not granted.
 //
 // The unmatched-allowlist case is the one worth spelling out. An
-// MCP_ADMIN_USERS entry is compared verbatim against the identity the
-// schedd reports, which is the full user@domain with the domain in lower
-// case, so a value written bare or with the wrong domain -- the schedd
-// name rather than UID_DOMAIN, say -- never matches, and the result is
+// MCP_ADMIN_USERS entry is compared against the identity the schedd
+// reports, which is the full user@domain (the domain in any case), so a
+// value written bare or with the wrong domain -- the schedd name rather
+// than UID_DOMAIN, say -- never matches, and the result is
 // indistinguishable from not being listed at all.
 func (s *Server) privilegeProvenance(ctx context.Context, actor string) (adminVia, superVia string) {
 	switch {
@@ -157,7 +157,7 @@ func (s *Server) privilegeProvenance(ctx context.Context, actor string) (adminVi
 	case hasScope(ctx, scopeMCPAdmin):
 		adminVia = "granted by the " + scopeMCPAdmin + " scope"
 	default:
-		_, listed := s.adminUsers[actor]
+		listed := s.isAdminUser(actor)
 		switch {
 		case listed && !scopedTransport(ctx):
 			adminVia = "listed in MCP_ADMIN_USERS"
