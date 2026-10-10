@@ -19,9 +19,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/bbockelm/cedar/security"
 	"github.com/bbockelm/golang-htcondor/droppriv"
 	"golang.org/x/crypto/hkdf"
 )
@@ -110,6 +112,11 @@ type Payload struct {
 	// Watch is the watch id a KindWatch token names. Empty for the job
 	// kinds, which address their subject with Cluster and Proc instead.
 	Watch string `json:"w,omitempty"`
+	// Authz is the HTCondor authorization the redeemed URL acts with, as
+	// granted by GrantAuthz when it was minted: never more than the
+	// minter's own credential carried, nor more than the kind needs.
+	// Empty for KindWatch, which reaches no daemon.
+	Authz []string `json:"a,omitempty"`
 }
 
 // Expired reports whether the payload's expiry has passed.
@@ -227,4 +234,93 @@ func (s *Signer) Verify(tok string, want Kind) (*Payload, error) {
 		return nil, fmt.Errorf("token does not name a subject for its kind")
 	}
 	return &p, nil
+}
+
+// NeededAuthz is the HTCondor authorization a share of kind k needs at the
+// schedd. Both job kinds need WRITE: the schedd registers the sandbox
+// download (TRANSFER_DATA_WITH_PERMS) and the input spool
+// (SPOOL_JOB_FILES_WITH_PERMS) at WRITE. READ covers the job lookups around
+// them. KindWatch reaches no daemon and needs nothing.
+func NeededAuthz(k Kind) []string {
+	switch k {
+	case KindOutput, KindInput:
+		return []string{"READ", "WRITE"}
+	}
+	return nil
+}
+
+// GrantAuthz is the authorization to put in a share of kind k minted by a
+// caller whose credential is token: the levels the kind needs, provided the
+// caller's credential grants every one of them. A URL is a capability that
+// outlives the call that minted it and works for whoever holds it, so it
+// must not do anything its minter could not have done with their own
+// credential.
+//
+// An empty token is a caller with no credential of its own to limit it --
+// a server acting as the local user -- and is granted what the kind needs.
+// A token with no condor:/<LEVEL> scope carries every level its subject
+// holds. A token whose claims cannot be read grants nothing.
+func GrantAuthz(k Kind, token string) ([]string, error) {
+	need := NeededAuthz(k)
+	if len(need) == 0 || token == "" {
+		return need, nil
+	}
+	held, limited, ok := tokenAuthz(token)
+	if !ok {
+		return nil, fmt.Errorf("the caller's credential cannot be read to bound the URL's authorization")
+	}
+	if !limited {
+		return need, nil
+	}
+	for _, level := range need {
+		if !security.AuthorizationLimitsPermit(held, []string{level}) {
+			return nil, fmt.Errorf("the caller's credential does not carry %s authorization, which this URL needs; "+
+				"a share URL cannot grant more than its minter holds", level)
+		}
+	}
+	return need, nil
+}
+
+// RedeemAuthz is the authorization a redeemed payload acts with: what it was
+// minted with, cut to what its kind needs. It fails for a payload that does
+// not carry every level the kind needs, including one minted before
+// payloads carried any.
+func RedeemAuthz(p *Payload) ([]string, error) {
+	need := NeededAuthz(p.Kind)
+	for _, level := range need {
+		if !slices.Contains(p.Authz, level) {
+			return nil, fmt.Errorf("token does not carry the %s authorization this operation needs", level)
+		}
+	}
+	return need, nil
+}
+
+// tokenAuthz reads an IDTOKEN's authorization limits from its scope claim:
+// the condor:/<LEVEL> entries, and whether it is limited at all.
+func tokenAuthz(token string) (levels []string, limited, ok bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, false, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, false, false
+	}
+	var claims struct {
+		Scope *string `json:"scope"`
+	}
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		return nil, false, false
+	}
+	if claims.Scope == nil {
+		return nil, false, true
+	}
+	for _, sc := range strings.Fields(*claims.Scope) {
+		if level, found := strings.CutPrefix(sc, "condor:/"); found {
+			levels = append(levels, strings.ToUpper(level))
+		}
+	}
+	// As HTCondor reads it: scopes other than condor:/<LEVEL> limit
+	// nothing, so a claim with none of those is no limit at all.
+	return levels, len(levels) > 0, true
 }

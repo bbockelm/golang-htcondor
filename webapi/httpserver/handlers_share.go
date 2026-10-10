@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
@@ -160,6 +159,12 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 		return
 	}
 
+	authz, err := shareurl.GrantAuthz(shareurl.KindOutput, callerToken(ctx))
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	exp := time.Now().Add(ttl)
 	tok, err := s.signShareToken(shareurl.Payload{
 		Cluster: cluster,
@@ -167,6 +172,7 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 		Owner:   owner,
 		Exp:     exp.Unix(),
 		Kind:    shareurl.KindOutput,
+		Authz:   authz,
 	})
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to sign token: %v", err))
@@ -209,7 +215,13 @@ func (s *Handler) handleSharedOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, err := s.redeemContext(r, payload.Owner)
+	authz, err := shareurl.RedeemAuthz(payload)
+	if err != nil {
+		s.logger.Info(logging.DestinationHTTP, "Share token refused", "job_id", payload.JobID(), "error", err)
+		s.writeError(w, http.StatusForbidden, "This URL does not authorize this operation")
+		return
+	}
+	ctx, err := s.redeemContext(r, payload.Owner, authz)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to build redeem context", "error", err)
 		s.writeError(w, http.StatusInternalServerError, err.Error())
@@ -253,7 +265,7 @@ func requestedTTL(r *http.Request) time.Duration {
 
 // redeemContext builds the schedd-facing context a redeemed share token
 // acts under: a freshly minted, short-lived JWT for the token's owner,
-// cached and wrapped in a TOKEN-only SecurityConfig.
+// limited to authz, cached and wrapped in a TOKEN-only SecurityConfig.
 //
 // WithToken alone is not enough -- every schedd path reads the
 // SecurityConfig directly from ctx (see schedd_transfer.go,
@@ -262,7 +274,7 @@ func requestedTTL(r *http.Request) time.Duration {
 //
 // The returned errors are safe to show a caller: they name missing
 // server configuration, not anything about the token.
-func (s *Handler) redeemContext(r *http.Request, owner string) (context.Context, error) {
+func (s *Handler) redeemContext(r *http.Request, owner string, authz []string) (context.Context, error) {
 	// Re-add the @uidDomain suffix the schedd's Owner attribute lacks.
 	username := owner
 	if !strings.Contains(username, "@") {
@@ -275,15 +287,18 @@ func (s *Handler) redeemContext(r *http.Request, owner string) (context.Context,
 		return nil, fmt.Errorf("TRUST_DOMAIN not configured; cannot redeem share token")
 	}
 
+	// Limited to authz, which generateMCPAccessJWT refuses to leave
+	// empty: a token with no limits carries everything its subject may
+	// do, which is more than any share URL is for.
 	now := time.Now()
-	jwt, err := security.GenerateJWT(
+	jwt, err := generateMCPAccessJWT(
 		filepath.Dir(s.signingKeyPath),
 		filepath.Base(s.signingKeyPath),
 		username,
 		s.trustDomain,
 		now.Unix(),
 		now.Add(2*time.Minute).Unix(),
-		nil,
+		authz,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to authorize share token")
@@ -387,6 +402,12 @@ func (s *Handler) handleJobInputShare(w http.ResponseWriter, r *http.Request, jo
 		return fmt.Sprintf("(%s) && Owner == %s", c, classadStringLit(owner)), nil
 	}
 
+	authz, err := shareurl.GrantAuthz(shareurl.KindInput, callerToken(ctx))
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	procAds, remaining, err := s.procAdsToMintFor(ctx, target, ownerScope)
 	if err != nil {
 		s.writeSpoolError(w, err)
@@ -422,6 +443,7 @@ func (s *Handler) handleJobInputShare(w http.ResponseWriter, r *http.Request, jo
 			Owner:   owner,
 			Exp:     exp.Unix(),
 			Kind:    shareurl.KindInput,
+			Authz:   authz,
 		})
 		if terr != nil {
 			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to sign token: %v", terr))
@@ -531,7 +553,13 @@ func (s *Handler) handleSharedInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, err := s.redeemContext(r, payload.Owner)
+	authz, err := shareurl.RedeemAuthz(payload)
+	if err != nil {
+		s.logger.Info(logging.DestinationHTTP, "Share token refused", "job_id", payload.JobID(), "error", err)
+		s.writeError(w, http.StatusForbidden, "This URL does not authorize this operation")
+		return
+	}
+	ctx, err := s.redeemContext(r, payload.Owner, authz)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to build redeem context", "error", err)
 		s.writeError(w, http.StatusInternalServerError, err.Error())
@@ -601,4 +629,14 @@ func (s *Handler) handleSharedInput(w http.ResponseWriter, r *http.Request) {
 			"job_id", jobID, "ignored", ignored, "expected", expected)
 	}
 	s.writeJSON(w, http.StatusOK, result)
+}
+
+// callerToken is the credential a request presents to HTCondor, which
+// bounds what a URL it mints may authorize. Empty when it presents none.
+func callerToken(ctx context.Context) string {
+	sec, ok := htcondor.GetSecurityConfigFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return sec.Token
 }

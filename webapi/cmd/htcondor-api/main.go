@@ -406,7 +406,8 @@ func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *l
 // not-found log line; an empty want means "any schedd", which is not an
 // error worth logging as one.
 func scheddFromCollector(collector *htcondor.Collector, logger *logging.Logger, constraint, want string) (addr, name string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(
+		htcondor.WithDaemonCredential(context.Background(), "schedd discovery"), 10*time.Second)
 	defer cancel()
 
 	schedds, _, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
@@ -1876,6 +1877,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
+	reportUnmarkedOrigins(logger)
 	// Drain everything stdlib log emitted before this point into the
 	// structured logger (so the early daemon-core diagnostic, the
 	// UID_DOMAIN/TRUST_DOMAIN trace, etc. show up in
@@ -2273,6 +2275,20 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 }
 
 // runDemoMode runs the server with a mini condor setup
+// reportUnmarkedOrigins reports, rather than silently allows, a context
+// that reaches CEDAR as this daemon without saying whether it is a caller's
+// request or this daemon's own work. Each of this server's daemon paths is
+// marked; one that is not is a path nobody has classified, and the log line
+// names the command and peer so it can be found. The step after this one
+// refuses them (UnmarkedDeny), which the test suite already runs under.
+func reportUnmarkedOrigins(logger *logging.Logger) {
+	htcondor.SetUnmarkedOriginReporter(func(command int, secContext, peerName string) {
+		logger.Warn(logging.DestinationSecurity, "An unclassified context authenticated as this daemon",
+			"command", command, "context", secContext, "peer", peerName)
+	})
+	htcondor.SetUnmarkedOriginPolicy(htcondor.UnmarkedWarn)
+}
+
 func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	// Create logger for demo mode (stdout for access logs)
 	logger, err := logging.New(&logging.Config{
@@ -2287,6 +2303,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
+	reportUnmarkedOrigins(logger)
 
 	// Same as runNormalMode: drain anything stdlib log captured
 	// before the structured logger existed.

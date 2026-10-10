@@ -9,7 +9,6 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -228,13 +227,16 @@ type session struct {
 	heartbeatOn   bool
 	stopHeartbeat chan struct{}
 
-	// secConfig is the credential the session was last reached with,
+	// credential is the credential the session was last reached with,
 	// kept so the manager can redial the job or remove it from a
 	// background goroutine that has no request context of its own.
 	// This is the same trust the WebSocket bridge takes by holding an
 	// authenticated ssh.Client open for the life of a terminal; the
-	// lease is what bounds how long it is held.
-	secConfig *security.SecurityConfig
+	// lease is what bounds how long it is held. It is kept with its
+	// renewer: the token itself lasts minutes and a lease runs for half
+	// an hour or more, so a copy of the token alone would be expired by
+	// the time the lease ran out.
+	credential *htcondor.CallerCredential
 }
 
 // Info is the caller-facing view of a session.
@@ -606,7 +608,7 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		proc:          procID,
 		leaseExpires:  m.opts.Now().Add(lease),
 		leaseDuration: lease,
-		secConfig:     securityConfigFrom(ctx),
+		credential:    callerCredentialFrom(ctx),
 	}
 
 	key := sessionKey(caller.Owner, spec.Name)

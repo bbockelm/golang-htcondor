@@ -61,7 +61,9 @@ func TestScheddAggregateCounts(t *testing.T) {
 
 	htcCfg := loadPoolConfig(t, configFile)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// The test talks to its pool as itself, which to this package is the
+	// daemon's own identity.
+	ctx, cancel := context.WithCancel(htcondor.WithDaemonCredential(context.Background(), "integration test setup"))
 	defer cancel()
 	m, err := startCondorMaster(ctx, configFile, tempDir)
 	if err != nil {

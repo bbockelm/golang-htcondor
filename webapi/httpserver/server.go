@@ -1133,51 +1133,27 @@ func extractBearerToken(r *http.Request) (string, error) {
 // checks for a session cookie, or if userHeader is set and no auth token is present,
 // generates a token for the username from the specified header.
 // Priority: Bearer token → Session cookie → User header
-func (s *Handler) extractOrGenerateToken(r *http.Request) (string, error) {
+//
+// mintedFor is the subject a token was minted for, and empty for a bearer
+// the caller presented.
+func (s *Handler) extractOrGenerateToken(r *http.Request) (token, mintedFor string, err error) {
 	// Try to extract bearer token first
-	token, err := extractBearerToken(r)
+	token, err = extractBearerToken(r)
 	if err == nil {
-		return token, nil
+		return token, "", nil
 	}
 
 	// Try to get username from session cookie
 	if sessionData, ok := s.getSessionFromRequest(r); ok {
-		username := sessionData.Username
 		// SessionData no longer carries a per-session HTCondor token —
 		// the http_sessions.token column was dropped in migration
 		// 0002 (it was reserved but never written). Tokens are
 		// generated below from the signing key on each call.
-
-		// Generate a token for the session username if signing key is available
-		if s.signingKeyPath != "" {
-			iat := time.Now().Unix()
-			exp := time.Now().Add(1 * time.Minute).Unix()
-			issuer := s.trustDomain
-			if issuer == "" {
-				return "", fmt.Errorf("TRUST_DOMAIN not configured for server; cannot generate token")
-			}
-			if !strings.Contains(username, "@") {
-				if s.uidDomain == "" {
-					return "", fmt.Errorf("UID_DOMAIN not configured for server; cannot create username %s", username)
-				}
-				username = username + "@" + s.uidDomain
-			}
-			kid := filepath.Base(s.signingKeyPath)
-			// Logged at Info so demo failures surface the iss/kid the
-			// schedd will see, without needing the operator to flip on
-			// debug logging first. The "trust domain mismatch" class of
-			// errors is otherwise opaque from the server log alone.
-			s.logger.Info(logging.DestinationSecurity, "Minted JWT for session user",
-				"subject", username, "issuer", issuer, "kid", kid)
-			token, err := security.GenerateJWT(filepath.Dir(s.signingKeyPath), kid, username, issuer, iat, exp, nil)
-			if err != nil {
-				return "", fmt.Errorf("failed to generate token for session user %s: %w", username, err)
-			}
-			return token, nil
+		if s.signingKeyPath == "" {
+			// No signing key configured, cannot generate token from session
+			return "", "", fmt.Errorf("session cookie found but token generation not configured")
 		}
-
-		// No signing key configured, cannot generate token from session
-		return "", fmt.Errorf("session cookie found but token generation not configured")
+		return s.mintRequestToken(sessionData.Username, "session")
 	}
 
 	// If userHeader is configured and signing key is available, try to generate token.
@@ -1191,38 +1167,58 @@ func (s *Handler) extractOrGenerateToken(r *http.Request) (string, error) {
 			s.logger.Warn(logging.DestinationSecurity,
 				"Refusing user-header authentication from untrusted source",
 				"remote_addr", r.RemoteAddr, "header", s.userHeader)
-			return "", fmt.Errorf("user header authentication not permitted from this source")
+			return "", "", fmt.Errorf("user header authentication not permitted from this source")
 		}
 		username := r.Header.Get(s.userHeader)
 		if username == "" {
-			return "", fmt.Errorf("no authorization token and %s header is empty", s.userHeader)
+			return "", "", fmt.Errorf("no authorization token and %s header is empty", s.userHeader)
 		}
-
-		// Generate token for this user
-		iat := time.Now().Unix()
-		exp := time.Now().Add(1 * time.Minute).Unix()
-		issuer := s.trustDomain
-		if issuer == "" {
-			return "", fmt.Errorf("TRUST_DOMAIN not configured for server; cannot generate token")
-		}
-		if !strings.Contains(username, "@") {
-			if s.uidDomain == "" {
-				return "", fmt.Errorf("UID_DOMAIN not configured for server; cannot create username %s", username)
-			}
-			username = username + "@" + s.uidDomain
-		}
-		kid := filepath.Base(s.signingKeyPath)
-		s.logger.Debug(logging.DestinationSecurity, "Generating token for user", "username", username, "header", s.userHeader, "issuer", issuer, "key", kid)
-		token, err := security.GenerateJWT(filepath.Dir(s.signingKeyPath), kid, username, issuer, iat, exp, nil)
-		if err != nil {
-			return "", fmt.Errorf("failed to generate token for user %s: %w", username, err)
-		}
-
-		return token, nil
+		return s.mintRequestToken(username, "header")
 	}
 
 	// No token and can't generate one
-	return "", fmt.Errorf("no authorization token and user header not configured")
+	return "", "", fmt.Errorf("no authorization token and user header not configured")
+}
+
+// requestTokenLifetime is how long a token minted for one request from a
+// session cookie or a trusted user header is valid. Work that outlives the
+// request renews it (see createAuthenticatedContext) rather than holding
+// on to this one.
+const requestTokenLifetime = 1 * time.Minute
+
+// mintRequestToken mints the IDTOKEN a session-cookie or user-header
+// request presents to HTCondor, for username qualified with UID_DOMAIN.
+// source names where the identity came from, for the log.
+func (s *Handler) mintRequestToken(username, source string) (token, subject string, err error) {
+	issuer := s.trustDomain
+	if issuer == "" {
+		return "", "", fmt.Errorf("TRUST_DOMAIN not configured for server; cannot generate token")
+	}
+	if !strings.Contains(username, "@") {
+		if s.uidDomain == "" {
+			return "", "", fmt.Errorf("UID_DOMAIN not configured for server; cannot create username %s", username)
+		}
+		username = username + "@" + s.uidDomain
+	}
+	now := time.Now()
+	kid := filepath.Base(s.signingKeyPath)
+	if source == "session" {
+		// Logged at Info so demo failures surface the iss/kid the
+		// schedd will see, without needing the operator to flip on
+		// debug logging first. The "trust domain mismatch" class of
+		// errors is otherwise opaque from the server log alone.
+		s.logger.Info(logging.DestinationSecurity, "Minted JWT for session user",
+			"subject", username, "issuer", issuer, "kid", kid)
+	} else {
+		s.logger.Debug(logging.DestinationSecurity, "Generating token for user", "username", username,
+			"source", source, "issuer", issuer, "key", kid)
+	}
+	token, err = security.GenerateJWT(filepath.Dir(s.signingKeyPath), kid, username, issuer,
+		now.Unix(), now.Add(requestTokenLifetime).Unix(), nil)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate token for %s user %s: %w", source, username, err)
+	}
+	return token, username, nil
 }
 
 // sessionCookieUser reports the session user extractOrGenerateToken
@@ -1269,13 +1265,24 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	}
 
 	// Extract bearer token or generate from user header
-	token, err := s.extractOrGenerateToken(r)
+	token, mintedFor, err := s.extractOrGenerateToken(r)
 	if err != nil {
 		return nil, err
 	}
 
 	// Create context with token
 	ctx := WithToken(r.Context(), token)
+
+	// remint mints condorCredential again, when this server minted it:
+	// work this request starts may outlast it. Nil for a bearer the
+	// caller presented, which lasts exactly as long as it says it does.
+	var remint func() (string, error)
+	if mintedFor != "" {
+		remint = func() (string, error) {
+			tok, _, err := s.mintRequestToken(mintedFor, "renewal")
+			return tok, err
+		}
+	}
 
 	// condorCredential is what cedar authenticates with, which is not
 	// always the bearer we were handed. For a HTCondor IDTOKEN the two
@@ -1353,6 +1360,11 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 			var cachedScopes []string
 			var scoped bool
 			condorCredential, cachedScopes, scoped = resolveCachedBearer(entry, token)
+			if condorCredential != token {
+				// Minted from an opaque grant on its first request, and
+				// it expires long before the grant does.
+				remint = s.grantReminter(token, entry.Username, cachedScopes, entry.Expiration)
+			}
 			if scoped {
 				// Same reasoning: a handler that gates on scopes would
 				// otherwise see an approved-for-less grant -- or one
@@ -1404,6 +1416,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 						// Mint the IDTOKEN the schedd can verify, the
 						// same way the MCP data path does, bounded by
 						// the scopes this grant actually carries.
+						remint = s.grantReminter(token, username, ar.GetGrantedScopes(), expiration)
 						condorCredential, err = s.generateHTCondorTokenWithScopes(username, ar.GetGrantedScopes())
 						if err != nil {
 							// Drop the entry AddValidated just made.
@@ -1483,7 +1496,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 		// would differ every request, and no session would be reused.
 		secConfig.SecurityTag = ""
 	}
-	ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+	ctx = htcondor.WithRenewableSecurityConfig(ctx, secConfig, renewWith(s.clientConfig, secConfig, remint))
 
 	// What this request will present to HTCondor, for correlating a
 	// refusal with the credential that caused it. Debug level: it is
@@ -1576,7 +1589,8 @@ func discoverSchedd(collector *htcondor.Collector, scheddName, scheddHost string
 	pollInterval := 1 * time.Second
 
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(
+			htcondor.WithDaemonCredential(context.Background(), "schedd discovery"), 5*time.Second)
 
 		// Query collector for schedd ads
 		constraint := ""

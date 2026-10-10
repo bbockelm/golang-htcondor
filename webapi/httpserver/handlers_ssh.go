@@ -403,9 +403,9 @@ func bridgeSSHToWebSocket(
 		// Note what it depends on: sshClient must still be alive when
 		// the sentinel is sent, which holds because the close-all
 		// defer is declared at the top of the function and so runs
-		// after this one. removeJobOnDisconnect uses a fresh context
-		// rather than `ctx`, which is dying by then, and treats its
-		// schedd I/O as best effort.
+		// after this one. removeJobOnDisconnect keeps ctx's credential
+		// but not its cancellation -- ctx is dying by then -- and treats
+		// its schedd I/O as best effort.
 		s.interactiveTerminals.attach(opts.JobID)
 		defer func() {
 			if !s.interactiveTerminals.detach(opts.JobID) {
@@ -415,7 +415,7 @@ func bridgeSSHToWebSocket(
 				return
 			}
 			s.sendInteractiveShutdownSignal(sshClient, opts.JobID)
-			s.removeJobOnDisconnect(opts.JobID)
+			s.removeJobOnDisconnect(ctx, opts.JobID)
 		}()
 	}
 

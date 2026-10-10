@@ -2525,7 +2525,7 @@ func (h *Handler) startJobWatchFeed(ctx context.Context) {
 		// cannot be inferred from the absence of the other -- "enabled but
 		// never connected" and "not enabled" would otherwise look alike.
 		h.logger.Info(logging.DestinationHTTP, "Job watch feed enabled; connecting to the htcondordb mirror")
-		_ = h.jobWatchFeed.Run(ctx, h.watchJobsTable)
+		_ = h.jobWatchFeed.Run(htcondor.WithDaemonCredential(ctx, "job watch feed"), h.watchJobsTable)
 	}()
 }
 
@@ -2591,6 +2591,7 @@ func (h *Handler) startJobWatchNudge(ctx context.Context) {
 	if h.jobWatchFeed == nil || h.jobWatchEval == nil || !h.dbMirror.Enabled() {
 		return
 	}
+	ctx = htcondor.WithDaemonCredential(ctx, "job watch evaluation")
 	nudger := jobwatch.NewNudger(h.jobWatchFeed, h.jobWatchEval.CheckOwner,
 		func(format string, args ...any) {
 			h.logger.Debug(logging.DestinationHTTP, fmt.Sprintf(format, args...))
@@ -2678,6 +2679,9 @@ func (h *Handler) startJobWatchEvaluator(ctx context.Context) {
 	if h.jobWatchEval == nil {
 		return
 	}
+	// The periodic sweep over every user's watches: owner-scoped by the
+	// evaluator's own constraints, run as this daemon.
+	ctx = htcondor.WithDaemonCredential(ctx, "job watch evaluation")
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -2696,6 +2700,7 @@ func (h *Handler) startDBMirrorPoll(ctx context.Context) {
 	if !h.dbMirror.Enabled() {
 		return
 	}
+	ctx = htcondor.WithDaemonCredential(ctx, "htcondordb mirror discovery")
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -3325,7 +3330,8 @@ func (h *Handler) periodicPing(ctx context.Context) {
 // 60-second updater tick — that's the failure mode where the cached sock=
 // has just gone stale and the next ping should use a fresh address.
 func (h *Handler) performPeriodicPing() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(
+		htcondor.WithDaemonCredential(context.Background(), "periodic health ping"), 10*time.Second)
 	defer cancel()
 
 	// secConfigForLog tracks the SecurityConfig actually attached to ctx so we

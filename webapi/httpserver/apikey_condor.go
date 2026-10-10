@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
@@ -44,36 +45,51 @@ func (s *Handler) apiKeySecurityContext(ctx context.Context, row *apiKeyRow) (co
 		return nil, fmt.Errorf("SIGNING_KEY and TRUST_DOMAIN must both be configured to issue schedd credentials for API keys")
 	}
 
-	iat := time.Now().Unix()
-	exp := time.Now().Add(condorIDTokenLifetime).Unix()
-	token, err := generateMCPAccessJWT(
-		filepath.Dir(s.signingKeyPath),
-		filepath.Base(s.signingKeyPath),
-		row.Creator,
-		s.trustDomain,
-		iat,
-		exp,
-		authz,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("mint IDTOKEN for %s: %w", row.Creator, err)
-	}
-
 	// A key's scopes never change after it is minted, so the key id
 	// fixes the authorization the tag stands for.
 	tag := apiKeySessionTag(row.KeyID)
-	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, s.clientConfig, token, "", 0, "CLIENT", s.credentialSessions.sessionCacheFor(tag))
-	if err != nil {
-		return nil, fmt.Errorf("build security config: %w", err)
+	cache := s.credentialSessions.sessionCacheFor(tag)
+	build := func(creator string) (*security.SecurityConfig, error) {
+		now := time.Now()
+		token, err := generateMCPAccessJWT(
+			filepath.Dir(s.signingKeyPath),
+			filepath.Base(s.signingKeyPath),
+			creator,
+			s.trustDomain,
+			now.Unix(),
+			now.Add(condorIDTokenLifetime).Unix(),
+			authz,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("mint IDTOKEN for %s: %w", creator, err)
+		}
+		secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, s.clientConfig, token, "", 0, "CLIENT", cache)
+		if err != nil {
+			return nil, fmt.Errorf("build security config: %w", err)
+		}
+		// cedar caches client sessions keyed {SecurityTag, address,
+		// command}. With an empty tag every API-key caller shares one
+		// entry for the same schedd and command, so one key's request
+		// could resume a session another key authenticated -- and run
+		// with that key's authorizations, defeating the per-key limits
+		// above. Key the tag on the key id so each key gets its own
+		// session.
+		secConfig.SecurityTag = tag
+		return secConfig, nil
 	}
-	// cedar caches client sessions keyed {SecurityTag, address,
-	// command}. With an empty tag every API-key caller shares one entry
-	// for the same schedd and command, so one key's request could
-	// resume a session another key authenticated -- and run with that
-	// key's authorizations, defeating the per-key limits above. Key the
-	// tag on the key id so each key gets its own session.
-	secConfig.SecurityTag = tag
-	return htcondor.WithSecurityConfig(ctx, secConfig), nil
+	secConfig, err := build(row.Creator)
+	if err != nil {
+		return nil, err
+	}
+	// Minted again, for work this request starts that outlasts the token,
+	// only while the key is still active: a revoked key renews nothing.
+	renew := func(rctx context.Context) (*security.SecurityConfig, error) {
+		if _, err := s.apiKeyStore.LookupActive(rctx, row.KeyID); err != nil {
+			return nil, fmt.Errorf("api key %s is no longer active: %w", row.KeyID, err)
+		}
+		return build(row.Creator)
+	}
+	return htcondor.WithRenewableSecurityConfig(ctx, secConfig, renew), nil
 }
 
 // apiKeySessionTag derives a cedar session-cache tag for an API key.
