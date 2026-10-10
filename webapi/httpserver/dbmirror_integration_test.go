@@ -166,14 +166,14 @@ func TestMirrorProbeReportsEachStage(t *testing.T) {
 // (an older classad) do not: a transaction that creates an ad and then
 // sets one more attribute on it must commit the whole ad.
 //
-// From classad v0.30.0 (htcondordb v0.21.0 ships v0.31.2) the server
-// stores the ad through Txn.NewClassAdOld, which does not mark the key
-// as wholly written in this transaction the way Txn.NewClassAd does, so
-// the following SetAttribute is taken as a patch over the (absent)
-// stored ad and replaces the buffered one: the committed row is the one
+// From classad v0.30.0 until v0.31.3 (htcondordb v0.21.1) the server
+// stored the ad through Txn.NewClassAdOld, which did not mark the key as
+// wholly written in this transaction the way Txn.NewClassAd does, so the
+// following SetAttribute was taken as a patch over the (absent) stored
+// ad and replaced the buffered one: the committed row was the one
 // attribute that was set. Any dbrpc client that creates an ad and
-// amends it in one transaction -- the shape of a job_queue.log
-// transaction -- loses the ad. htcondordb's own schedd sync writes in
+// amended it in one transaction -- the shape of a job_queue.log
+// transaction -- lost the ad. htcondordb's own schedd sync writes in
 // process through Txn.NewClassAd and is not affected (the multi-AP
 // end-to-end test reads full job ads through it).
 func TestMirrorTxnSetAttributeAfterNewAdKeepsTheAd(t *testing.T) {

@@ -5,7 +5,7 @@ module github.com/bbockelm/golang-htcondor/citools
 go 1.26.0
 
 require (
-	github.com/bbockelm/htcondordb v0.21.0
+	github.com/bbockelm/htcondordb v0.21.1
 	github.com/golangci/golangci-lint/v2 v2.13.2
 	github.com/goreleaser/nfpm/v2 v2.43.1
 	gotest.tools/gotestsum v1.13.0
@@ -38,11 +38,11 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/MirrexOne/unqueryvet v1.5.4 // indirect
 	github.com/OpenPeeDeeP/depguard/v2 v2.2.1 // indirect
-	github.com/PelicanPlatform/classad v0.31.2 // indirect
-	github.com/PelicanPlatform/classad/changefeed v0.31.2 // indirect
-	github.com/PelicanPlatform/classad/collections v0.31.2 // indirect
-	github.com/PelicanPlatform/classad/db v0.31.2 // indirect
-	github.com/PelicanPlatform/classad/dbrpc v0.31.2 // indirect
+	github.com/PelicanPlatform/classad v0.31.3 // indirect
+	github.com/PelicanPlatform/classad/changefeed v0.31.3 // indirect
+	github.com/PelicanPlatform/classad/collections v0.31.3 // indirect
+	github.com/PelicanPlatform/classad/db v0.31.3 // indirect
+	github.com/PelicanPlatform/classad/dbrpc v0.31.3 // indirect
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.29.0 // indirect
 	github.com/alecthomas/chroma/v2 v2.27.0 // indirect
