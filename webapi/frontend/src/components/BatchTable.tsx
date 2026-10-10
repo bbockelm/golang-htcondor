@@ -384,7 +384,7 @@ export function UserPill({ owner }: { owner: string }) {
       // destination and must not do both.
       onClick={(e) => e.stopPropagation()}
       title={`Everything ${owner} is running`}
-      className="inline-flex max-w-[14rem] truncate rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800 hover:bg-indigo-200"
+      className="inline-block max-w-32 truncate rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800 hover:bg-indigo-200"
     >
       {owner}
     </Link>
@@ -443,7 +443,14 @@ function BatchRow({
           <DisclosureCaret expanded={expanded} />
         </td>
         <td className="px-3 py-2 font-mono text-xs">
-          <span className="text-gray-900">{batch.name}</span>
+          {/* A long batch name would otherwise wrap at every hyphen and
+              squeeze the status pills into a column. */}
+          <span
+            className="inline-block max-w-44 truncate align-bottom text-gray-900"
+            title={batch.name}
+          >
+            {batch.name}
+          </span>
           {batch.isDag && (
             <span
               className="ml-2 rounded-sm bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700"
@@ -476,10 +483,11 @@ function BatchRow({
           <StatusBreakdown counts={batch.statusCounts} />
         </td>
         {detail !== 'usage' && (
-          <td className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap">
-            {batch.submittedUnix
-              ? new Date(batch.submittedUnix * 1000).toLocaleString()
-              : '—'}
+          <td
+            className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap"
+            title={batch.submittedUnix ? new Date(batch.submittedUnix * 1000).toLocaleString() : undefined}
+          >
+            {batch.submittedUnix ? formatSubmitted(batch.submittedUnix) : '—'}
           </td>
         )}
         {detail === 'hold' ? (
@@ -496,12 +504,20 @@ function BatchRow({
             </td>
           </>
         ) : (
-          <td className="px-3 py-2 text-gray-700 max-w-md truncate">
+          <td className="px-3 py-2 text-gray-700">
             {batch.cmd ? (
-              <span className="font-mono text-xs">
+              // The width is on a block inside the cell, not the cell: a
+              // table cell grows to fit its content whatever its
+              // max-width says, and a real command is an absolute path
+              // plus arguments, long enough on its own to push the
+              // Actions column off the page.
+              <div
+                className="max-w-56 truncate font-mono text-xs"
+                title={batch.args ? `${batch.cmd} ${batch.args}` : batch.cmd}
+              >
                 {batch.cmd}
                 {batch.args ? ' ' + batch.args : ''}
-              </span>
+              </div>
             ) : (
               '—'
             )}
@@ -707,10 +723,11 @@ function JobsSubTable({
                 <JobStatusPill display={j.display} />
               </td>
               {detail !== 'usage' && (
-                <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap">
-                  {j.submittedUnix
-                    ? new Date(j.submittedUnix * 1000).toLocaleString()
-                    : '—'}
+                <td
+                  className="px-3 py-1.5 text-gray-500 whitespace-nowrap"
+                  title={j.submittedUnix ? new Date(j.submittedUnix * 1000).toLocaleString() : undefined}
+                >
+                  {j.submittedUnix ? formatSubmitted(j.submittedUnix) : '—'}
                 </td>
               )}
               {detail === 'hold' ? (
@@ -853,6 +870,16 @@ function JobUsageCell({
   const u = usage?.byJob.get(job.id);
   if (!u && usage?.loading) return <UsageBar reading={undefined} loading />;
   return <UsageBar reading={read(u)} />;
+}
+
+// formatSubmitted is a submit time to the minute: seconds are noise in a
+// queue listing, and dropping them is what lets the row fit beside the
+// Progress and User columns. The cell's tooltip has the full time.
+function formatSubmitted(unix: number): string {
+  return new Date(unix * 1000).toLocaleString(undefined, {
+    dateStyle: 'short',
+    timeStyle: 'short',
+  });
 }
 
 // DisclosureCaret rotates 90° when the row is expanded.
