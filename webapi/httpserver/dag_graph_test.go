@@ -648,11 +648,15 @@ func TestCachedDagStructureCachesARefusal(t *testing.T) {
 
 func TestDagCacheKeyIncludesDotFile(t *testing.T) {
 	// A recycled cluster id that names a different workflow must not hit.
-	if dagCacheKey(1, 0, "a.dag") == dagCacheKey(1, 0, "b.dag") {
+	if dagCacheKey("", 1, 0, "a.dag") == dagCacheKey("", 1, 0, "b.dag") {
 		t.Errorf("the cache key ignores the dag file name")
 	}
-	if dagCacheKey(1, 0, "a.dag") == dagCacheKey(1, 1, "a.dag") {
+	if dagCacheKey("", 1, 0, "a.dag") == dagCacheKey("", 1, 1, "a.dag") {
 		t.Errorf("the cache key ignores the proc id")
+	}
+	// The same cluster.proc on two access points is two workflows.
+	if dagCacheKey("ap1", 1, 0, "a.dag") == dagCacheKey("ap2", 1, 0, "a.dag") {
+		t.Errorf("the cache key ignores the access point")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
 // Watching one job for changes.
@@ -107,9 +108,24 @@ type credPoll struct {
 
 // pollKey identifies a poll group: whose credential it runs on, and what
 // it asks for.
+//
+// cred also carries the access point in multi-AP mode (pollCred), so a
+// caller's loop -- which coalesces all its groups into one query --
+// never asks one schedd about another AP's job: the same cluster.proc
+// on two APs is two groups on two loops.
 type pollKey struct {
 	cred       string
 	constraint string
+}
+
+// pollCred joins the access point and the credential tag into the key a
+// caller's poll loop is found by. ap is "" in single-AP mode, which
+// leaves the key exactly the tag.
+func pollCred(ap, tag string) string {
+	if ap == "" {
+		return tag
+	}
+	return strings.ToLower(ap) + "\x00" + tag
 }
 
 type jobPollGroup struct {
@@ -215,6 +231,13 @@ func (h *jobPollHub) Subscribe(ctx context.Context, constraint string) jobWatchS
 // and lasts as long as it says.
 func (h *jobPollHub) keyFor(ctx context.Context, constraint string) (pollKey, context.Context) {
 	pollCtx := htcondor.WithUserRequest(context.Background(), "job watch poll")
+	// The access point the watch was routed to, in multi-AP mode: the
+	// polls run against its schedd, and nobody else's.
+	ap := ""
+	if t, ok := multiap.TargetFrom(ctx); ok {
+		pollCtx = multiap.WithTarget(pollCtx, t)
+		ap = t.Member.Name
+	}
 
 	// A copy, so the group holds its own and cannot be disturbed by
 	// whatever the request does next.
@@ -227,14 +250,14 @@ func (h *jobPollHub) keyFor(ctx context.Context, constraint string) (pollKey, co
 	}
 
 	if ok && secCfg.SecurityTag != "" {
-		return pollKey{cred: secCfg.SecurityTag, constraint: constraint}, pollCtx
+		return pollKey{cred: pollCred(ap, secCfg.SecurityTag), constraint: constraint}, pollCtx
 	}
 
 	// No credential to key on. Give this subscriber a group of its own:
 	// an empty tag is the absence of an identity, and treating it as one
 	// would put every such caller on a single shared poll.
 	h.untagged++
-	return pollKey{cred: fmt.Sprintf("\x00untagged-%d", h.untagged), constraint: constraint}, pollCtx
+	return pollKey{cred: pollCred(ap, fmt.Sprintf("\x00untagged-%d", h.untagged)), constraint: constraint}, pollCtx
 }
 
 func (cp *credPoll) run(ctx context.Context) {

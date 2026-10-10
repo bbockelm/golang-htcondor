@@ -349,7 +349,7 @@ func (s *Handler) handleJobDag(w http.ResponseWriter, r *http.Request, cluster, 
 	started := time.Now()
 	timings := &dagTimings{}
 	phase := time.Now()
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint,
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint,
 		&htcondor.QueryOptions{Projection: dagManagerProjection})
 	timings.manager = time.Since(phase)
 	if err != nil {
@@ -677,8 +677,11 @@ func (c *dagStructureCache) put(e dagCacheEntry) {
 	}
 }
 
-func dagCacheKey(cluster, proc int, dotFile string) string {
-	return fmt.Sprintf("%d.%d|%s", cluster, proc, dotFile)
+// dagCacheKey names a workflow's cached structure. The access point is
+// part of it: in multi-AP mode the same cluster.proc on two APs is two
+// workflows. Empty in single-AP mode.
+func dagCacheKey(schedd string, cluster, proc int, dotFile string) string {
+	return fmt.Sprintf("%s|%d.%d|%s", strings.ToLower(schedd), cluster, proc, dotFile)
 }
 
 // dagSandboxSem caps concurrent whole-sandbox transfers process-wide.
@@ -783,7 +786,7 @@ func (s *Handler) dagStructureFor(ctx context.Context, r *http.Request, constrai
 		caller: ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx)),
 		admin:  s.seesAllJobs(ctx, r, jobScopeRead),
 	}
-	structure, err := cachedDagStructure(dagStructures, dagCacheKey(cluster, proc, dotFile),
+	structure, err := cachedDagStructure(dagStructures, dagCacheKey(routedSchedd(ctx), cluster, proc, dotFile),
 		access, refresh,
 		func() (*dagStructure, error) {
 			fetchCtx, cancel := context.WithTimeout(ctx, dagSandboxTimeout)
@@ -1115,7 +1118,7 @@ func (s *Handler) fetchSandboxTextFiles(ctx context.Context, constraint string,
 	big func(string) bool) (map[string]string, error) {
 
 	return sandboxTextFiles(big, defaultDagFileLimits(), func(w io.Writer) <-chan error {
-		return s.getSchedd().ReceiveJobSandbox(ctx, constraint, w)
+		return s.scheddFor(ctx).ReceiveJobSandbox(ctx, constraint, w)
 	})
 }
 
@@ -1774,7 +1777,7 @@ func (s *Handler) dagQueueStates(ctx context.Context, r *http.Request, cluster i
 	if err != nil {
 		return 0, err
 	}
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint,
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint,
 		&htcondor.QueryOptions{Projection: dagNodeProjection})
 	if err != nil {
 		return 0, err
@@ -1786,7 +1789,7 @@ func (s *Handler) dagQueueStates(ctx context.Context, r *http.Request, cluster i
 			continue
 		}
 		status, _ := ad.EvaluateAttrInt("JobStatus")
-		st := dagNodeState{state: queueJobState(status), jobID: adJobID(ad), source: dagSourceQueue}
+		st := dagNodeState{state: queueJobState(status), jobID: s.nodeJobID(ctx, ad), source: dagSourceQueue}
 		if status == 5 {
 			st.holdReason, _ = ad.EvaluateAttrString("HoldReason")
 		}
@@ -1813,7 +1816,7 @@ func (s *Handler) dagArchiveStates(ctx context.Context, r *http.Request, cluster
 		return 0, 0, err
 	}
 	limit, scanLimit := dagArchiveBounds(nodeCount)
-	ads, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
+	ads, err := s.scheddFor(ctx).QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
 		Source:     htcondor.HistorySourceJobHistory,
 		Projection: append(append([]string{}, dagNodeProjection...), "ExitCode", "ExitBySignal"),
 		// A workflow's nodes are contiguous and recent in the history
@@ -1838,7 +1841,7 @@ func (s *Handler) dagArchiveStates(ctx context.Context, r *http.Request, cluster
 			// has already spoken for this node.
 			continue
 		}
-		st := dagNodeState{state: archiveJobState(ad), jobID: adJobID(ad), source: dagSourceArchive}
+		st := dagNodeState{state: archiveJobState(ad), jobID: s.nodeJobID(ctx, ad), source: dagSourceArchive}
 		if code, ok := ad.EvaluateAttrInt("ExitCode"); ok {
 			c := int(code)
 			st.exitCode = &c
@@ -1933,13 +1936,15 @@ const (
 	dagArchiveScanFloor   = 5000
 )
 
-func adJobID(ad *classad.ClassAd) string {
+// nodeJobID is a node job's id as the response carries it: complete in
+// multi-AP mode, where a node runs on its DAGMan job's access point.
+func (s *Handler) nodeJobID(ctx context.Context, ad *classad.ClassAd) string {
 	cluster, ok := ad.EvaluateAttrInt("ClusterId")
 	if !ok {
 		return ""
 	}
 	proc, _ := ad.EvaluateAttrInt("ProcId")
-	return fmt.Sprintf("%d.%d", cluster, proc)
+	return s.jobPathID(ctx, int(cluster), int(proc))
 }
 
 // queueJobState maps JobStatus to the response's vocabulary.

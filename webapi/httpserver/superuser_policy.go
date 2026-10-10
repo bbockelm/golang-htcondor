@@ -336,7 +336,18 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 
 // superuserModeAvailable reports whether the feature is configured at all.
 // It says nothing about whether a given caller may use it.
+//
+// Never in multi-AP mode. Arming acts as a queue superuser identity read
+// from "the" schedd's QUEUE_SUPER_USERS and minted for whichever AP an
+// action names; doing that per AP -- an identity, a user record and an
+// audit trail on each of fifty schedds -- is a feature of its own. Until
+// it exists the mode is off, so armedSuperuser reports nothing armed and
+// every action runs as its caller; the arming endpoint is outside the
+// multi-AP allowlist.
 func (h *Handler) superuserModeAvailable() bool {
+	if h.multi != nil {
+		return false
+	}
 	return h.superuserPolicy != nil && h.superuserArmed != nil &&
 		(h.superuserGroups.configured() || h.projectLeads.configured())
 }

@@ -104,6 +104,11 @@ func ClampTTL(k Kind, requested time.Duration) time.Duration {
 // already in circulation, so they keep their original one-letter
 // spellings.
 type Payload struct {
+	// Schedd is the access point the job is on, for a server fronting
+	// several. It is inside the HMAC like every other member, so a URL
+	// cannot be re-aimed at another AP's same-numbered job. Empty for a
+	// server with one schedd, whose tokens are unchanged.
+	Schedd  string `json:"s,omitempty"`
 	Cluster int    `json:"c"`
 	Proc    int    `json:"p"`
 	Owner   string `json:"o"`

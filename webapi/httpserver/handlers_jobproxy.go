@@ -54,7 +54,7 @@ func (s *Handler) getOrCreateJobSSHCache() (*jobssh.Cache, error) {
 		return s.jobSSHCache, nil
 	}
 	cache, err := jobssh.NewCache(jobssh.Options{
-		Dial:   jobssh.ScheddDialer(s.getSchedd, s.ccbDialer),
+		Dial:   jobssh.ScheddDialer(s.scheddForTransport, s.ccbDialer),
 		Logger: s.logger,
 	})
 	if err != nil {
@@ -62,6 +62,24 @@ func (s *Handler) getOrCreateJobSSHCache() (*jobssh.Cache, error) {
 	}
 	s.jobSSHCache = cache
 	return cache, nil
+}
+
+// scheddForTransport is the schedd a cached job transport is opened
+// through: the one schedd, or in multi-AP mode the member key.Schedd
+// names. A transport keyed to no AP has no schedd in multi-AP mode --
+// the dial fails rather than going anywhere.
+func (s *Handler) scheddForTransport(key jobssh.Key) *htcondor.Schedd {
+	if s.multi == nil {
+		return s.getSchedd()
+	}
+	if key.Schedd == "" {
+		return nil
+	}
+	m, err := s.multi.svc.Member(key.Schedd)
+	if err != nil {
+		return nil
+	}
+	return m.Schedd
 }
 
 // closeJobSSHCache releases every cached transport. Called from the
@@ -108,7 +126,8 @@ func jobTransportKey(ctx context.Context, bearer string, imp *Impersonation, clu
 	if cred == "" {
 		return jobssh.Key{}, fmt.Errorf("no HTCondor credential to reach the job with")
 	}
-	key := jobssh.Key{Owner: owner, Credential: cred, Cluster: cluster, Proc: proc}
+	// The access point the request was routed to: "" in single-AP mode.
+	key := jobssh.Key{Owner: owner, Credential: cred, Schedd: routedSchedd(ctx), Cluster: cluster, Proc: proc}
 	if imp != nil {
 		key.Impersonation = imp.transportTag()
 	}
@@ -291,7 +310,7 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		// Every part below is ours: cluster and proc are ints, the port
 		// is an int, and the socket name was held to [A-Za-z0-9._-] in
 		// parseProxyTarget.
-		redirect := url.URL{Path: jobProxyPrefix(cluster, proc, target), RawQuery: r.URL.RawQuery}
+		redirect := url.URL{Path: jobProxyPrefix(s.jobPathID(ctx, cluster, proc), target), RawQuery: r.URL.RawQuery}
 		http.Redirect(w, r, redirect.String(), http.StatusTemporaryRedirect)
 		return
 	}
@@ -398,11 +417,15 @@ func (s *Handler) jobProxyScrubber() *proxyscrub.Scrubber {
 // jobProxyPrefix is the canonical, trailing-slash URL for a target
 // inside a job: what a browser must be at for the app's relative URLs
 // to resolve.
-func jobProxyPrefix(cluster, proc int, t jobProxyTarget) string {
+//
+// job is the id as the browser addresses it: cluster.proc, or in
+// multi-AP mode the codec's complete form, which the codec keeps free of
+// anything a path segment would have to escape.
+func jobProxyPrefix(job string, t jobProxyTarget) string {
 	if t.Socket != "" {
-		return fmt.Sprintf("/api/v1/jobs/%d.%d/proxy/unix/%s/", cluster, proc, t.Socket)
+		return fmt.Sprintf("/api/v1/jobs/%s/proxy/unix/%s/", job, t.Socket)
 	}
-	return fmt.Sprintf("/api/v1/jobs/%d.%d/proxy/%d/", cluster, proc, t.Port)
+	return fmt.Sprintf("/api/v1/jobs/%s/proxy/%d/", job, t.Port)
 }
 
 // parseProxyTarget reads the segment after /proxy/ as either the

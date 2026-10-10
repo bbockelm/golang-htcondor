@@ -197,6 +197,15 @@ func New(q Querier, constraint string, opts Options) (*Registry, error) {
 	return r, nil
 }
 
+// SetProbe installs the trust probe, for a caller that can only build
+// it after the registry (it needs credentials the registry's owner holds).
+// Call it before Run.
+func (r *Registry) SetProbe(p ProbeFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.probe = p
+}
+
 // Constraint is the ScheddAd constraint defining the set.
 func (r *Registry) Constraint() string { return r.constraint }
 
@@ -355,18 +364,25 @@ func (r *Registry) due(m *Member, now time.Time) bool {
 	if m.Trust.State == TrustUnknown || m.Trust.Address != m.Address {
 		return true
 	}
+	if m.Trust.State == TrustUntrusted && now.Sub(m.Trust.CheckedAt) >= r.interval {
+		// Re-checked every poll: a refusal can be transient (a schedd
+		// mid-reconfig), and every action on the AP fails fast until
+		// the next probe says otherwise.
+		return true
+	}
 	return now.Sub(m.Trust.CheckedAt) >= r.probeInterval
 }
 
 // startProbes launches the probes that are due, at most
 // maxConcurrentProbes at a time, and returns without waiting.
 func (r *Registry) startProbes(ctx context.Context) {
-	if r.probe == nil {
-		return
-	}
 	now := r.now()
 	var todo []Member
 	r.mu.Lock()
+	if r.probe == nil {
+		r.mu.Unlock()
+		return
+	}
 	for key, m := range r.members {
 		if r.probing[key] || !r.due(m, now) {
 			continue
@@ -392,7 +408,10 @@ func (r *Registry) startProbes(ctx context.Context) {
 // ProbeAll probes every member now and waits for the results. For tests
 // and for an operator-triggered recheck.
 func (r *Registry) ProbeAll(ctx context.Context) {
-	if r.probe == nil {
+	r.mu.RLock()
+	probe := r.probe
+	r.mu.RUnlock()
+	if probe == nil {
 		return
 	}
 	var wg sync.WaitGroup
@@ -429,7 +448,10 @@ func (r *Registry) runProbe(ctx context.Context, m Member) (err error) {
 			err = fmt.Errorf("trust probe panicked: %v", p)
 		}
 	}()
-	return r.probe(ctx, m)
+	r.mu.RLock()
+	probe := r.probe
+	r.mu.RUnlock()
+	return probe(ctx, m)
 }
 
 // finishProbe records a probe's outcome, unless the member's address

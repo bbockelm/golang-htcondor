@@ -82,6 +82,15 @@ type Service struct {
 	Stale  StaleMode
 	// UIDDomain completes a bare owner into the User attribute value.
 	UIDDomain string
+	// QueueSuperUser reports whether actor is in schedd's
+	// QUEUE_SUPER_USERS, as read from that AP. Cross-user power is per
+	// AP: nil means nobody is a superuser anywhere.
+	QueueSuperUser func(schedd, actor string) bool
+}
+
+// IsQueueSuperUser reports whether actor is a queue superuser on schedd.
+func (s *Service) IsQueueSuperUser(schedd, actor string) bool {
+	return s != nil && s.QueueSuperUser != nil && schedd != "" && actor != "" && s.QueueSuperUser(schedd, actor)
 }
 
 // Error is a failure with the HTTP status it maps to.

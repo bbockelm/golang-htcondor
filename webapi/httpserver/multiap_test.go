@@ -308,9 +308,12 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 			paths = append(paths, p+"x", p+"1.0@"+ap1+"/stdout")
 		}
 	}
-	// The job sub-resources every action lives under.
-	for _, sub := range []string{"input", "output", "stdout", "stderr", "hold", "release", "files", "ssh", "peek", "log", "watch", "proxy/x"} {
-		paths = append(paths, "/api/v1/jobs/1.0@"+ap1+"/"+sub)
+	// The job sub-resources every action lives under, and some that are
+	// not served.
+	for _, sub := range []string{"input", "input/multipart", "input/share", "output", "output/share", "stdout", "stderr",
+		"hold", "release", "files", "files/x", "ssh", "peek", "log", "watch", "warm", "dag", "proxy/x",
+		"match-analysis", "nonesuch", "hold/x"} {
+		paths = append(paths, "/api/v1/jobs/1.0@"+ap1+"/"+sub, "/api/v1/jobs/1.0/"+sub)
 	}
 	refused := 0
 	for _, path := range paths {
@@ -348,14 +351,22 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 		t.Errorf("the MCP server's schedd accessor was called %d times in multi-AP mode", n)
 	}
 
-	// Named explicitly, so a regression reads as what it is.
+	// Named explicitly, so a regression reads as what it is. Submit,
+	// DAGs, interactive sessions, Jupyter, apps, credentials, watches,
+	// the dashboard and the collector are not served yet.
 	for _, c := range []struct{ method, path string }{
 		{http.MethodPost, "/api/v1/jobs"},
-		{http.MethodDelete, "/api/v1/jobs"},
-		{http.MethodPatch, "/api/v1/jobs"},
-		{http.MethodDelete, "/api/v1/jobs/1.0@" + ap1},
-		{http.MethodPost, "/api/v1/jobs/1.0@" + ap1 + "/hold"},
-		{http.MethodGet, "/api/v1/jobs/1.0@" + ap1 + "/stdout"},
+		{http.MethodPost, "/api/v1/jobs/1.0@" + ap1 + "/hold/extra"},
+		{http.MethodGet, "/api/v1/jobs/1.0@" + ap1 + "/match-analysis"},
+		{http.MethodDelete, "/api/v1/jobs/1.0@" + ap1 + "/stdout"},
+		{http.MethodGet, "/api/v1/jobs/watch"},
+		{http.MethodGet, "/api/v1/share/watch"},
+		{http.MethodGet, "/api/v1/watches/x/share"},
+		{http.MethodPost, "/api/v1/admin/superuser"},
+		{http.MethodGet, "/api/v1/jupyter/x"},
+		{http.MethodPost, "/api/v1/apps"},
+		{http.MethodPost, "/api/v1/collector/advertise"},
+		{http.MethodPost, "/api/v1/creds/service"},
 		{http.MethodGet, "/api/v1/dashboard"},
 		{http.MethodGet, "/api/v1/jobs/epochs"},
 		{http.MethodGet, "/api/v1/creds/user"},

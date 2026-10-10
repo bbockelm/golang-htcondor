@@ -26,14 +26,16 @@ import (
 // Multi-AP mode: one API server in front of every access point whose
 // schedd ad matches HTTP_API_SCHEDD_CONSTRAINT.
 //
-// This is the read-only first step. Reads of the caller's own jobs and
-// history are served from the federation hub; everything else -- every
-// action, submit, credentials, watches, the SSH gateway -- answers 501
-// until it has been taught which AP it is about. The refusal is an
-// ALLOWLIST (multiAPAllowed): a route nobody has looked at is refused,
-// not served against whichever schedd happens to be handy. There is no
-// such schedd: Handler.schedd is nil in this mode, and getSchedd counts
-// and logs any call that reaches it.
+// Reads of the caller's own jobs and history are served from the
+// federation hub. Actions on one job are routed to the schedd of the AP
+// its complete id names (multiap_actions.go); bulk actions fan out to
+// every member (multiap_bulk.go). Everything else -- submit,
+// credentials, watches, interactive sessions -- answers 501 until it has
+// been taught which AP it is about. The refusal is an ALLOWLIST
+// (multiAPAllowed): a route nobody has looked at is refused, not served
+// against whichever schedd happens to be handy. There is no such schedd:
+// Handler.schedd is nil in this mode, and getSchedd counts and logs any
+// call that reaches it.
 
 // MultiAPConfig configures multi-AP mode. ScheddConstraint set enables it.
 type MultiAPConfig struct {
@@ -50,6 +52,10 @@ type MultiAPConfig struct {
 	Stale string
 	// JobIDCodec is HTTP_API_JOB_ID_CODEC; empty selects jobid's default.
 	JobIDCodec string
+	// BulkFresh is HTTP_API_BULK_FRESH_SECONDS: how fresh the hub's copy
+	// of an AP must be for a bulk action to skip that AP on the hub's
+	// word that nothing there matches. Zero selects the default.
+	BulkFresh time.Duration
 
 	// service replaces the hub, registry and spokes built from the
 	// collector. Tests only.
@@ -57,6 +63,9 @@ type MultiAPConfig struct {
 	// registry is the registry behind service, for the readiness and AP
 	// endpoints. Tests only.
 	registry *apregistry.Registry
+	// queueSuperUser replaces the per-AP QUEUE_SUPER_USERS polled from
+	// each member. Tests only.
+	queueSuperUser func(ap, actor string) bool
 }
 
 // Enabled reports whether multi-AP mode is configured.
@@ -76,7 +85,16 @@ type multiAPMode struct {
 	// no answer in this mode. Any non-zero value is a route or background
 	// task that escaped the allowlist.
 	scheddCalls atomic.Int64
+	// superusers is each member's QUEUE_SUPER_USERS; queueSuperUser,
+	// when set, replaces it (tests).
+	superusers     *apSuperusers
+	queueSuperUser func(ap, actor string) bool
+	// bulkFresh is HTTP_API_BULK_FRESH_SECONDS.
+	bulkFresh time.Duration
 }
+
+// DefaultBulkFresh is HTTP_API_BULK_FRESH_SECONDS's default.
+const DefaultBulkFresh = 60 * time.Second
 
 func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, error) {
 	mc := cfg.MultiAP
@@ -95,12 +113,17 @@ func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, er
 	if err != nil {
 		return nil, err
 	}
-	m := &multiAPMode{constraint: strings.TrimSpace(mc.ScheddConstraint), codec: codec}
+	m := &multiAPMode{constraint: strings.TrimSpace(mc.ScheddConstraint), codec: codec, bulkFresh: mc.BulkFresh}
+	if m.bulkFresh <= 0 {
+		m.bulkFresh = DefaultBulkFresh
+	}
 	if mc.service != nil {
-		m.svc, m.registry = mc.service, mc.registry
+		m.svc, m.registry, m.queueSuperUser = mc.service, mc.registry, mc.queueSuperUser
 		if m.svc.Codec == nil {
 			m.svc.Codec = codec
 		}
+		m.superusers = newAPSuperusers(m.svc.Registry, cfg.UIDDomain, logger)
+		m.svc.QueueSuperUser = m.apQueueSuperUser
 		return m, nil
 	}
 	if cfg.Collector == nil {
@@ -136,9 +159,12 @@ func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, er
 		Stale:     stale,
 		UIDDomain: cfg.UIDDomain,
 	}
+	m.superusers = newAPSuperusers(reg, cfg.UIDDomain, logger)
+	m.svc.QueueSuperUser = m.apQueueSuperUser
 	logger.Info(logging.DestinationHTTP, "Multi-AP mode enabled",
 		"schedd_constraint", m.constraint, "hub_name", mc.HubName, "hub_address", mc.HubAddress,
-		"stale", string(stale), "job_id_codec", strings.ToLower(strings.TrimSpace(mc.JobIDCodec)))
+		"stale", string(stale), "job_id_codec", strings.ToLower(strings.TrimSpace(mc.JobIDCodec)),
+		"bulk_fresh", m.bulkFresh)
 	return m, nil
 }
 
@@ -179,7 +205,17 @@ func (h *Handler) startMultiAP(ctx context.Context) {
 	// daemon's own work.
 	ctx = htcondor.WithDaemonCredential(ctx, "multi-AP discovery")
 	m := h.multi
+	if m.superusers != nil && m.queueSuperUser == nil {
+		h.wg.Add(1)
+		go func() {
+			defer h.wg.Done()
+			// Reading each AP's QUEUE_SUPER_USERS is this daemon's own work.
+			m.superusers.run(htcondor.WithDaemonCredential(ctx, "per-AP queue superuser refresh"))
+		}()
+	}
 	if m.registry != nil {
+		// Each member is probed for trust as it joins, and periodically.
+		m.registry.SetProbe(h.probeMemberTrust)
 		h.wg.Add(1)
 		go func() {
 			defer h.wg.Done()
@@ -282,6 +318,13 @@ var multiAPReadPaths = map[string]bool{
 // are NOT a job id.
 var multiAPJobSubroutes = map[string]bool{"archive": true, "epochs": true, "transfers": true, "watch": true}
 
+// multiAPSharePaths are the share-URL redemption routes multi-AP mode
+// serves. /api/v1/share/watch is not one: watches are not served yet.
+var multiAPSharePaths = map[string]bool{
+	"/api/v1/share/output": true,
+	"/api/v1/share/input":  true,
+}
+
 // multiAPAdminPaths are admin pages that read and write only this
 // server's own database (OAuth2 clients and tokens, API keys, logs,
 // usage, configuration) and never a schedd. Admin-gated in the handlers.
@@ -311,7 +354,26 @@ func multiAPAllowed(method, path string) bool {
 		return true
 	}
 	if seg, ok := strings.CutPrefix(path, "/api/v1/jobs/"); ok {
-		return read && seg != "" && !strings.Contains(seg, "/") && !multiAPJobSubroutes[seg]
+		first, rest, sub := strings.Cut(seg, "/")
+		switch {
+		case first == "":
+			return false
+		case sub:
+			// /api/v1/jobs/{id}/...: an action on one job.
+			return !multiAPJobSubroutes[first] && first != "hold" && first != "release" &&
+				multiAPJobActionAllowed(method, rest)
+		case first == "hold" || first == "release":
+			// Bulk hold and release: not yet.
+			return false
+		case multiAPJobSubroutes[first]:
+			return false
+		}
+		// One job: read, remove, edit.
+		return read || method == http.MethodDelete || method == http.MethodPatch
+	}
+	if multiAPSharePaths[path] {
+		// Redeeming a share URL acts on the AP the URL names.
+		return true
 	}
 	for _, p := range multiAPAdminPaths {
 		if path == p || strings.HasPrefix(path, strings.TrimSuffix(p, "/")+"/") {
@@ -327,20 +389,35 @@ func (h *Handler) refuseMultiAP(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("%s %s is not available in multi-AP mode yet", r.Method, r.URL.Path))
 }
 
-// multiAPError writes a multiap error with its status, adding the
-// candidate ids to a 409.
+// multiAPError writes a multiap error with its status, adding its
+// machine-readable reason and, for an ambiguous or incomplete job id,
+// the candidate jobs.
 func (h *Handler) multiAPError(w http.ResponseWriter, err error) {
 	status := multiap.StatusOf(err)
-	if cands, ok := multiap.IsAmbiguous(err); ok {
-		h.writeJSON(w, status, map[string]any{
-			"error":      http.StatusText(status),
-			"message":    err.Error(),
-			"code":       status,
-			"candidates": cands,
-		})
+	reason := multiap.ReasonOf(err)
+	cands, ambiguous := multiap.IsAmbiguous(err)
+	if !ambiguous {
+		cands = multiap.CandidatesOf(err)
+	}
+	if reason == "" && !ambiguous && cands == nil {
+		h.writeError(w, status, err.Error())
 		return
 	}
-	h.writeError(w, status, err.Error())
+	body := map[string]any{
+		"error":   http.StatusText(status),
+		"message": err.Error(),
+		"code":    status,
+	}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	if ambiguous || reason == multiap.ReasonIncompleteID {
+		if cands == nil {
+			cands = []multiap.JobRef{}
+		}
+		body["candidates"] = cands
+	}
+	h.writeJSON(w, status, body)
 }
 
 // multiAPCaller authenticates the request and returns its context and
@@ -642,6 +719,7 @@ func (h *Handler) multiAPReadiness() (bool, map[string]any) {
 		aps[info.Schedd] = map[string]any{
 			"in_collector": info.InCollector,
 			"hub_state":    info.Hub.State,
+			"trust":        info.Trust.State,
 		}
 	}
 	body := map[string]any{
