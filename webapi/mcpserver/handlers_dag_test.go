@@ -298,6 +298,28 @@ func TestSubmitDagRefusesCustomAttributeAnOverrideControls(t *testing.T) {
 	}
 }
 
+// batch_name is written inside a quoted string on one submit-file line;
+// a line break would start a command of the caller's choosing.
+func TestSubmitDagRefusesBatchNameThatBreaksTheLine(t *testing.T) {
+	s := &Server{}
+	for _, name := range []string{"wf\nrequirements = false", "wf\r+Foo = 1", `wf" + "x`} {
+		args := submitDagArgs("JOB A {\n  executable = /bin/true\n}\n")
+		args["batch_name"] = name
+		if _, _, err := dryRun(t, s, args); err == nil {
+			t.Errorf("batch_name %q was accepted", name)
+		}
+	}
+	args := submitDagArgs("JOB A {\n  executable = /bin/true\n}\n")
+	args["batch_name"] = "nightly run"
+	_, structured, err := dryRun(t, s, args)
+	if err != nil {
+		t.Fatalf("an ordinary batch_name was refused: %v", err)
+	}
+	if sub, _ := structured["submit_file"].(string); !strings.Contains(sub, `My.JobBatchName = "nightly run"`) {
+		t.Errorf("the batch name is not on the manager job:\n%s", sub)
+	}
+}
+
 // TestSubmitDagDryRunShowsTheSitePolicy: a dry run that showed a submit
 // file the site would then rewrite is showing the wrong job. The point
 // of the mode is to see what would be submitted.

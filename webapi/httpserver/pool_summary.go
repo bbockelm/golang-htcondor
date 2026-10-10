@@ -27,7 +27,6 @@ import (
 	"math"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -366,9 +365,12 @@ func (s *Handler) handlePoolSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	constraint := `SlotType =!= "Dynamic"`
-	if userExpr := strings.TrimSpace(r.URL.Query().Get("constraint")); userExpr != "" {
-		constraint = fmt.Sprintf(`(%s) && (%s)`, constraint, userExpr)
+	// andScope re-serializes the caller's expression, so unbalanced
+	// parentheses cannot reach past the dynamic-slot exclusion.
+	constraint, err := andScope(`SlotType =!= "Dynamic"`, r.URL.Query().Get("constraint"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid constraint: %v", err))
+		return
 	}
 
 	// Under the caller's credential: the bare request context has none, so

@@ -823,7 +823,14 @@ func validateSpec(spec CreateSpec) error {
 	// does not parse takes them down with it. Parsing here also names
 	// the offending expression instead of leaving a schedd transaction
 	// failure to interpret.
+	//
+	// It is also spliced onto one submit-file line, and a ClassAd
+	// expression may span lines (`true ||<newline>x =?= y` parses), so a
+	// line break is refused as it is in the GPU fields below.
 	if req := strings.TrimSpace(spec.Requirements); req != "" {
+		if strings.ContainsAny(req, "\n\r") {
+			return fmt.Errorf("requirements may not contain line breaks")
+		}
 		if _, err := classad.ParseExpr(req); err != nil {
 			return fmt.Errorf("requirements %q is not a valid ClassAd expression: %w", req, err)
 		}
