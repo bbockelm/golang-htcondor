@@ -81,7 +81,8 @@ func TestMintedCredentialsAreRenewable(t *testing.T) {
 	})
 
 	t.Run("MCP grant", func(t *testing.T) {
-		ctx, err := h.withCondorCredential(context.Background(), "alice", []string{"condor:/READ"})
+		ctx, err := h.withCondorCredential(context.Background(), "alice", []string{"condor:/READ"},
+			func(context.Context) error { return nil })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -137,14 +138,21 @@ func TestCredentialRenewalEndsWithItsSource(t *testing.T) {
 	})
 
 	t.Run("opaque grant", func(t *testing.T) {
-		h := twoOwnerScheddServer(t).s.Handler
-		live := h.grantReminter("opaque-a", "alice", []string{"condor:/READ"}, time.Now().Add(time.Hour))
-		if tok, err := live(); err != nil || claimsOf(t, tok).Scope != "condor:/READ" {
+		h := newRESTOAuth2Handler(t)
+		scopes := []string{"condor:/READ"}
+		opaque := mintRESTAccessToken(t, h, "alice", scopes)
+		live := h.grantReminter(opaque, "alice", scopes, time.Now().Add(time.Hour))
+		if tok, err := live(context.Background()); err != nil || claimsOf(t, tok).Scope != "condor:/READ" {
 			t.Errorf("renewing within the grant: token %q, err %v", tok, err)
 		}
-		over := h.grantReminter("opaque-b", "alice", []string{"condor:/READ"}, time.Now().Add(-time.Second))
-		if _, err := over(); !errors.Is(err, errGrantExpired) {
+		over := h.grantReminter(opaque, "alice", scopes, time.Now().Add(-time.Second))
+		if _, err := over(context.Background()); !errors.Is(err, errGrantExpired) {
 			t.Errorf("renewing past the grant's expiry: err = %v, want errGrantExpired", err)
+		}
+		// Minted for other scopes than the grant now carries.
+		wider := h.grantReminter(opaque, "alice", []string{"condor:/READ", "condor:/WRITE"}, time.Now().Add(time.Hour))
+		if _, err := wider(context.Background()); !errors.Is(err, errGrantChanged) {
+			t.Errorf("renewing for scopes the grant does not carry: err = %v, want errGrantChanged", err)
 		}
 	})
 }

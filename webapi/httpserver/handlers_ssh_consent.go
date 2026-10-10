@@ -201,7 +201,7 @@ func (h *Handler) handleSSHConsentRead(w http.ResponseWriter, r *http.Request) {
 	view.CanCreate = mgr != nil
 	if mgr != nil {
 		owner := ownerFromActor(username)
-		cctx, err := h.withCondorCredential(ctx, owner, sshGatewayScopes)
+		cctx, err := h.withCondorCredential(ctx, owner, sshGatewayScopes, nil)
 		if err != nil {
 			// Not fatal to the page. The login half of this screen
 			// works without ever reaching the queue, and refusing to
@@ -375,7 +375,7 @@ func (h *Handler) sshConsentCreateSession(ctx context.Context, username, session
 
 	owner := ownerFromActor(username)
 	caller := interactive.Caller{Actor: owner, Owner: owner}
-	cctx, err := h.withCondorCredential(ctx, owner, sshGatewayScopes)
+	cctx, err := h.withCondorCredential(ctx, owner, sshGatewayScopes, nil)
 	if err != nil {
 		return nil, false, fmt.Errorf("could not act as %s: %w", owner, err)
 	}

@@ -217,7 +217,11 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	// Shared with the SSH gateway, which needs exactly this and must
 	// not grow its own copy -- see withCondorCredential for what a
 	// second copy would be free to forget.
-	ctx, err = h.withCondorCredential(ctx, username, token.GetGrantedScopes())
+	// Renewable while the access token behind this call is still active.
+	bearer, granted := bearerFromRequest(r), token.GetGrantedScopes()
+	ctx, err = h.withCondorCredential(ctx, username, granted, func(rctx context.Context) error {
+		return h.checkOAuth2Grant(rctx, bearer, granted)
+	})
 	if errors.Is(err, errNoAuthorizationLimits) {
 		// The grant's condor:/* scopes map to no authorization this
 		// server issues. That is the token's doing, not the server's.

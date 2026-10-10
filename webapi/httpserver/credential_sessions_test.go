@@ -97,7 +97,7 @@ func TestCondorCredentialSessionsKeyedByGrant(t *testing.T) {
 	ctx := context.Background()
 
 	mcp := func(user string, scopes ...string) security.SecurityConfig {
-		c, err := h.withCondorCredential(ctx, user, scopes)
+		c, err := h.withCondorCredential(ctx, user, scopes, nil)
 		if err != nil {
 			t.Fatalf("withCondorCredential(%s, %v): %v", user, scopes, err)
 		}

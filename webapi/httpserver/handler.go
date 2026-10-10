@@ -53,6 +53,9 @@ import (
 
 // Handler represents the HTTP API handler that can be embedded in any HTTP server
 type Handler struct {
+	// grantReauth rate-limits re-running a grant's authorization policy
+	// when a credential minted from it is renewed.
+	grantReauth grantReauthLimiter
 	// startTime is when this handler was constructed, i.e. when the
 	// server came up. Fixed for the process lifetime and reported by
 	// /api/v1/version so the Info page can show how long the access
