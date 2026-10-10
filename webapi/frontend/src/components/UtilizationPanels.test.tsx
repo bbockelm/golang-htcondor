@@ -223,11 +223,26 @@ describe('MemoryCurve', () => {
     expect(screen.queryByText(/^suggested/)).not.toBeInTheDocument();
   });
 
-  it('shows retries for a request on hover', () => {
-    const { container } = render(<MemoryCurve points={pts} />);
-    const dot = container.querySelector('circle[aria-label^="request_memory 1 GB"]')!;
-    fireEvent.focus(dot);
+  it('steps through requests from the keyboard, starting at the suggestion', () => {
+    render(<MemoryCurve points={pts} />);
+    const target = screen.getByLabelText(/arrow keys/);
+    fireEvent.focus(target);
+    expect(screen.getByRole('status')).toHaveTextContent('request_memory = 2 GB (suggested)');
+    fireEvent.keyDown(target, { key: 'ArrowLeft' });
     expect(screen.getByRole('status')).toHaveTextContent('40%of jobs rerun');
+  });
+
+  it('marks only the current and suggested requests', () => {
+    const { container } = render(<MemoryCurve points={pts} />);
+    // Two callout dots; the other candidates are reached by hover.
+    expect(container.querySelectorAll('svg[role="img"] circle')).toHaveLength(2);
+  });
+
+  it('shades the rerun strip by share of jobs, merging equal neighbours', () => {
+    const { container } = render(<MemoryCurve points={pts} />);
+    const steps = [...container.querySelectorAll('[data-testid="rerun-strip"]')].map((r) => r.getAttribute('data-step'));
+    // 40% -> over 10%; 5% -> 2-5%; then two candidates with none, as one bar.
+    expect(steps).toEqual(['4', '2', '0']);
   });
 });
 

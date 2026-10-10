@@ -27,14 +27,15 @@ import { formatSeconds } from '@/lib/usage';
 // Colours. The data hues are the dataviz palette's, the same ones the job
 // page's metric charts use (lib/metrics.ts RUN_COLORS), validated for
 // colour-blind separation as the sets each chart actually puts side by
-// side. References -- what was requested, what to request -- are not data
-// and use ink and the brand colour, always with a text label.
+// side. References -- what was requested, what to request -- are not data:
+// the current request is ink, the suggestion green (validated against the
+// blue, the amber and the ink it sits beside), always with a text label.
 export const UTIL_COLOR = {
   used: '#2a78d6', // palette blue: what jobs used
   usedSoft: '#86b6ef', // blue 250: the middle half of jobs on a range strip
   track: '#cde2fb', // blue 100: reserved but unused, the meter's track
   request: '#5d5d5d', // ink-600: the current request
-  recommended: '#b61f24', // brand-600: the suggested request
+  recommended: '#008300', // palette green: the suggested request, a good thing
   retry: '#eda100', // palette yellow: jobs that would rerun
   retryLine: '#c98500', // a step darker so the line shows over its own bars
   over: '#d03b3b', // status critical: a job above its request
@@ -537,15 +538,46 @@ export function Histogram({
 // --- The memory request curve ---
 
 const CW = 560;
-const CH = 280;
-const CPAD = { top: 34, right: 24, bottom: 36, left: 60 };
+const CH = 304;
+const CPAD = { top: 34, right: 24, bottom: 56, left: 60 };
+
+// The rerun strip under the curve: one ordinal amber ramp, light to dark
+// with the share of jobs that would rerun, and neutral grey for none.
+// Validated as an ordinal ramp against the chart surface.
+export const RERUN_STEPS: { upTo: number; label: string; color: string }[] = [
+  { upTo: 0, label: 'none', color: '#e7e7e7' },
+  { upTo: 0.02, label: 'up to 2%', color: '#e9a93a' },
+  { upTo: 0.05, label: '2–5%', color: '#d08a10' },
+  { upTo: 0.1, label: '5–10%', color: '#a96708' },
+  { upTo: Infinity, label: 'over 10%', color: '#7a4a05' },
+];
+
+/** rerunStep picks the strip colour for a share of jobs rerunning. */
+export function rerunStep(fraction: number): number {
+  return RERUN_STEPS.findIndex((s) => fraction <= s.upTo);
+}
+
+interface Callout {
+  kind: 'current' | 'recommended';
+  p: UtilMemoryCurvePoint;
+  x: number;
+  y: number;
+  ty: number; // baseline of the first label line
+  right: boolean; // label hangs to the left of the point
+  below: boolean;
+}
 
 /**
  * MemoryCurve plots, for each request_memory a workflow could have used,
  * the memory it would have reserved over the same work -- retries
- * included. Too low and the reruns cost more than they save; too high
- * and the reservation sits unused. The suggestion is marked on it; it
- * need not be the lowest point, since it also weighs how many jobs rerun.
+ * included -- with a strip under the axis for how many jobs would rerun
+ * at each request. Too low and the reruns cost more than they save; too
+ * high and the reservation sits unused. The suggestion is marked on it;
+ * it need not be the lowest point, since it also weighs how many rerun.
+ *
+ * Only the current and suggested requests get a marker. The curve may
+ * have dozens of candidates, and a dot on each turns the line into beads;
+ * the rest are reached by pointer (nearest candidate) or by arrow keys.
  */
 export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
   const titleId = useId();
@@ -559,11 +591,12 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
   const xMin = pts[0].request_mib;
   const xMaxRaw = pts[pts.length - 1].request_mib;
   const xSpan = xMaxRaw > xMin ? xMaxRaw - xMin : 1;
+  const plotBottom = CH - CPAD.bottom;
   // Headroom above the highest point, so its label has somewhere to go.
   const yTicks = niceTicks(Math.max(...pts.map(gib)) * 1.15, 'plain', 4);
   const yMax = yTicks[yTicks.length - 1];
   const xs = (v: number) => CPAD.left + ((v - xMin) / xSpan) * (CW - CPAD.left - CPAD.right);
-  const ys = (v: number) => CH - CPAD.bottom - (v / yMax) * (CH - CPAD.top - CPAD.bottom);
+  const ys = (v: number) => plotBottom - (v / yMax) * (plotBottom - CPAD.top);
   // Ticks across the candidates' own range: the axis does not start at
   // zero, and ticks counted from zero can leave one label on it.
   const tickStep = (() => {
@@ -573,10 +606,21 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
   const xTicks: number[] = [];
   for (let v = Math.ceil(xMin / tickStep - 1e-9) * tickStep; v <= xMaxRaw + 1e-6; v += tickStep) xTicks.push(v);
 
-  // Where reruns start: every request below the first one no job
-  // outgrows. Shading it shows which side of the curve retries cost.
-  const firstClean = pts.find((p) => p.retry_fraction === 0);
-  const retryEdge = firstClean ? xs(firstClean.request_mib) : xs(xMaxRaw);
+  // The strip: each candidate owns the span halfway to its neighbours,
+  // and runs of the same step merge into one bar with a 2px surface gap
+  // between steps.
+  const stripY = plotBottom + 6;
+  const strip: { x0: number; x1: number; step: number }[] = [];
+  pts.forEach((p, i) => {
+    const x = xs(p.request_mib);
+    const x0 = i === 0 ? CPAD.left : (xs(pts[i - 1].request_mib) + x) / 2;
+    const x1 = i === pts.length - 1 ? CW - CPAD.right : (x + xs(pts[i + 1].request_mib)) / 2;
+    const step = rerunStep(p.retry_fraction);
+    const last = strip[strip.length - 1];
+    if (last && last.step === step) last.x1 = x1;
+    else strip.push({ x0, x1, step });
+  });
+  const stepsShown = [...new Set(strip.map((r) => r.step))].sort((a, b) => a - b);
 
   const line = pts.map((p) => `${xs(p.request_mib)},${ys(gib(p))}`).join(' ');
   const tip: Tip | null =
@@ -587,7 +631,7 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
           return {
             x: xs(p.request_mib),
             y: ys(gib(p)),
-            title: `request_memory = ${formatMiB(p.request_mib)}`,
+            title: `request_memory = ${formatMiB(p.request_mib)}${p.is_current ? ' (now)' : ''}${p.is_recommended ? ' (suggested)' : ''}`,
             rows: [
               { label: 'GB-hours reserved', value: formatNumber(gib(p)), color: UTIL_COLOR.used },
               { label: 'of jobs rerun', value: formatPercent(p.retry_fraction) },
@@ -610,9 +654,11 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
       : null;
 
   const describe =
-    `Memory reserved for each possible request.` +
-    (current ? ` Current request ${formatMiB(current.request_mib)}: ${formatNumber(gib(current))} GB-hours.` : '') +
-    (recommended
+    `Memory reserved for each of ${pts.length} possible requests.` +
+    (current
+      ? ` Current request ${formatMiB(current.request_mib)}: ${formatNumber(gib(current))} GB-hours, ${formatPercent(current.retry_fraction)} of jobs rerun.`
+      : '') +
+    (recommended && recommended !== current
       ? ` Suggested ${formatMiB(recommended.request_mib)}: ${formatNumber(gib(recommended))} GB-hours, ${formatPercent(recommended.retry_fraction)} of jobs rerun.`
       : '');
 
@@ -638,40 +684,83 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
     return top;
   };
 
-  const callout = (p: UtilMemoryCurvePoint, kind: 'current' | 'recommended', i: number) => {
+  const LABEL_W = 136;
+  const place = (p: UtilMemoryCurvePoint, kind: Callout['kind']): Callout => {
     const x = xs(p.request_mib);
     const y = ys(gib(p));
     const right = x > CW * 0.6;
-    const color = kind === 'current' ? UTIL_COLOR.request : UTIL_COLOR.recommended;
     // A label sits on the side of its point away from the line: under a
-    // dip, over anything else. The suggestion is often at the bottom of
-    // the curve, but not always.
+    // dip, over anything else.
+    const lowerAt = (j: number) => j < 0 || j >= pts.length || gib(pts[j]) >= gib(p);
     const idx = pts.indexOf(p);
-    const lower = (j: number) => j < 0 || j >= pts.length || gib(pts[j]) >= gib(p);
-    const below = lower(idx - 1) && lower(idx + 1) && y + 38 < CH - CPAD.bottom;
+    // Neighbours a few candidates out, not just the adjacent ones: on a
+    // dense curve the adjacent points are a pixel away.
+    const below = [1, 2, 3].every((d) => lowerAt(idx - d) && lowerAt(idx + d)) && y + 38 < plotBottom;
     // Above, the label must clear the line wherever it runs under the
     // text -- a point at the foot of a steep rise would otherwise have its
     // label struck through.
-    const labelW = 130;
     const ty = below
       ? y + 20
-      : Math.max(CPAD.top - 8, Math.min(y - 22, lineTopBetween(right ? x - labelW : x, right ? x : x + labelW) - 32));
+      : Math.max(CPAD.top - 8, Math.min(y - 22, lineTopBetween(right ? x - LABEL_W : x, right ? x : x + LABEL_W) - 32));
+    return { kind, p, x, y, ty, right, below };
+  };
+  const callouts: Callout[] = [];
+  if (recommended) callouts.push(place(recommended, 'recommended'));
+  if (current && current !== recommended) {
+    const c = place(current, 'current');
+    // Two labels whose boxes overlap: the current request's moves to the
+    // other side of the suggestion's, keeping clear of the plot's top.
+    const r = callouts[0];
+    if (r) {
+      const box = (k: Callout) => ({
+        x0: k.right ? k.x - LABEL_W : k.x,
+        x1: k.right ? k.x : k.x + LABEL_W,
+        y0: k.ty - 12,
+        y1: k.ty + 18,
+      });
+      const a = box(c);
+      const bb = box(r);
+      if (a.x0 < bb.x1 && bb.x0 < a.x1 && a.y0 < bb.y1 && bb.y0 < a.y1) {
+        const up = bb.y0 - 34;
+        c.ty = up >= CPAD.top - 8 ? up : bb.y1 + 14;
+        c.below = false;
+      }
+    }
+    callouts.push(c);
+  }
+
+  const renderCallout = (k: Callout) => {
+    const color = k.kind === 'current' ? UTIL_COLOR.request : UTIL_COLOR.recommended;
+    const lx = k.right ? k.x - 8 : k.x + 8;
+    const leader = Math.abs(k.y - k.ty) > 30;
     return (
-      <g key={`${kind}-${i}`} pointerEvents="none">
-        {!below && y - ty > 30 && (
-          <line x1={x} x2={x} y1={y - 7} y2={ty + 18} stroke={UTIL_COLOR.axis} strokeWidth={1} />
+      <g key={k.kind} pointerEvents="none">
+        {leader && (
+          <line
+            x1={k.x}
+            x2={k.x}
+            y1={k.ty < k.y ? k.y - 7 : k.y + 7}
+            y2={k.ty < k.y ? k.ty + 18 : k.ty - 12}
+            stroke={UTIL_COLOR.axis}
+            strokeWidth={1}
+          />
         )}
-        <circle cx={x} cy={y} r={6} fill={color} stroke="#ffffff" strokeWidth={2} />
-        <text x={right ? x - 8 : x + 8} y={ty} textAnchor={right ? 'end' : 'start'} className="fill-gray-900 text-[13px] font-semibold">
-          {kind === 'current' ? (p.is_recommended ? 'now, and suggested' : 'now') : 'suggested'}{' '}
-          {formatMiB(p.request_mib)}
+        <circle cx={k.x} cy={k.y} r={6} fill={color} stroke="#ffffff" strokeWidth={2} />
+        <text x={lx} y={k.ty} textAnchor={k.right ? 'end' : 'start'} className="fill-gray-900 text-[13px] font-semibold">
+          {k.kind === 'current' ? 'now' : k.p.is_current ? 'now, and suggested' : 'suggested'} {formatMiB(k.p.request_mib)}
         </text>
-        <text x={right ? x - 8 : x + 8} y={ty + 14} textAnchor={right ? 'end' : 'start'} className="fill-gray-500 text-[12px] tabular-nums">
-          {formatNumber(gib(p))} GB-h{p.retry_fraction > 0 ? `, ${formatPercent(p.retry_fraction)} rerun` : ''}
+        <text x={lx} y={k.ty + 14} textAnchor={k.right ? 'end' : 'start'} className="fill-gray-500 text-[12px] tabular-nums">
+          {formatNumber(gib(k.p))} GB-h, {formatPercent(k.p.retry_fraction)} rerun
         </text>
       </g>
     );
   };
+
+  const move = (delta: number) =>
+    setActive((a) => {
+      const from = a ?? pts.indexOf(recommended ?? current ?? pts[0]);
+      return Math.max(0, Math.min(pts.length - 1, from + delta));
+    });
 
   return (
     <ChartFrame
@@ -687,7 +776,14 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
           {recommended && recommended !== current && (
             <LegendKey color={UTIL_COLOR.recommended} shape="dot">suggested request</LegendKey>
           )}
-          {firstClean !== pts[0] && <LegendKey color="#fdf0d0">some jobs rerun</LegendKey>}
+          <span className="inline-flex flex-wrap items-center gap-1.5">
+            jobs rerun:
+            {stepsShown.map((i) => (
+              <LegendKey key={i} color={RERUN_STEPS[i].color}>
+                {RERUN_STEPS[i].label}
+              </LegendKey>
+            ))}
+          </span>
         </>
       }
       note={
@@ -734,16 +830,6 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
         onPointerLeave={() => setActive(null)}
       >
         <title id={titleId}>{describe}</title>
-        {retryEdge > CPAD.left && (
-          <rect
-            x={CPAD.left}
-            y={CPAD.top - 6}
-            width={retryEdge - CPAD.left}
-            height={CH - CPAD.bottom - CPAD.top + 6}
-            fill="#fdf0d0"
-            opacity={0.7}
-          />
-        )}
         {yTicks.map((v) => (
           <g key={v}>
             <line x1={CPAD.left} x2={CW - CPAD.right} y1={ys(v)} y2={ys(v)} stroke={UTIL_COLOR.grid} strokeWidth={1} />
@@ -755,53 +841,75 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
         <text x={14} y={CPAD.top - 14} className="fill-gray-500 text-[12px]">
           GB-hours
         </text>
+        <line x1={CPAD.left} x2={CW - CPAD.right} y1={plotBottom} y2={plotBottom} stroke={UTIL_COLOR.axis} strokeWidth={1} />
+        <text x={CPAD.left - 6} y={stripY + 4} textAnchor="end" dominantBaseline="middle" className="fill-gray-500 text-[11px]">
+          rerun
+        </text>
+        {strip.map((r, i) => (
+          <rect
+            key={i}
+            x={r.x0 + (i > 0 ? 1 : 0)}
+            y={stripY}
+            width={Math.max(1, r.x1 - r.x0 - (i > 0 ? 1 : 0) - (i < strip.length - 1 ? 1 : 0))}
+            height={8}
+            rx={2}
+            fill={RERUN_STEPS[r.step].color}
+            data-testid="rerun-strip"
+            data-step={r.step}
+          />
+        ))}
         {xTicks.map((v) => (
-          <text key={v} x={xs(v)} y={CH - CPAD.bottom + 16} textAnchor={xs(v) > CW - CPAD.right - 24 ? 'end' : 'middle'} className="fill-gray-500 text-[12px] tabular-nums">
+          <text
+            key={v}
+            x={xs(v)}
+            y={stripY + 26}
+            textAnchor={xs(v) > CW - CPAD.right - 24 ? 'end' : 'middle'}
+            className="fill-gray-500 text-[12px] tabular-nums"
+          >
             {formatAxis(v, 'mib')}
           </text>
         ))}
-        <text x={CW - CPAD.right} y={CH - 4} textAnchor="end" className="fill-gray-500 text-[12px]">
+        <text x={CW - CPAD.right} y={CH - 2} textAnchor="end" className="fill-gray-500 text-[12px]">
           request_memory
         </text>
-        <line x1={CPAD.left} x2={CW - CPAD.right} y1={CH - CPAD.bottom} y2={CH - CPAD.bottom} stroke={UTIL_COLOR.axis} strokeWidth={1} />
         <polyline points={line} fill="none" stroke={UTIL_COLOR.used} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
         {active !== null && (
-          <line
-            x1={xs(pts[active].request_mib)}
-            x2={xs(pts[active].request_mib)}
-            y1={CPAD.top - 6}
-            y2={CH - CPAD.bottom}
-            stroke={UTIL_COLOR.axis}
-            strokeWidth={1}
-          />
+          <g pointerEvents="none">
+            <line
+              x1={xs(pts[active].request_mib)}
+              x2={xs(pts[active].request_mib)}
+              y1={CPAD.top - 6}
+              y2={stripY + 8}
+              stroke={UTIL_COLOR.axis}
+              strokeWidth={1}
+            />
+            <circle cx={xs(pts[active].request_mib)} cy={ys(gib(pts[active]))} r={4} fill={UTIL_COLOR.used} stroke="#ffffff" strokeWidth={2} />
+          </g>
         )}
-        {pts.map((p, i) => (
-          <circle
-            key={p.request_mib}
-            cx={xs(p.request_mib)}
-            cy={ys(gib(p))}
-            r={4}
-            fill={UTIL_COLOR.used}
-            stroke="#ffffff"
-            strokeWidth={2}
-            tabIndex={0}
-            aria-label={`request_memory ${formatMiB(p.request_mib)}: ${formatNumber(gib(p))} GB-hours, ${formatPercent(p.retry_fraction)} rerun`}
-            onFocus={() => setActive(i)}
-            onBlur={() => setActive(null)}
-            className="outline-none focus:stroke-gray-900"
-          />
-        ))}
-        {current && callout(current, 'current', 0)}
-        {recommended && recommended !== current && callout(recommended, 'recommended', 1)}
+        {callouts.map(renderCallout)}
         {/* The hit layer: the pointer only has to be nearest a request,
-            not on an 8px dot. */}
+            and the arrow keys step through them from the suggestion. */}
         <rect
           x={CPAD.left}
           y={CPAD.top - 6}
           width={CW - CPAD.left - CPAD.right}
-          height={CH - CPAD.bottom - CPAD.top + 6}
+          height={stripY + 8 - (CPAD.top - 6)}
           fill="transparent"
+          tabIndex={0}
+          aria-label="Memory requests: use the left and right arrow keys to step through them"
+          className="outline-none focus:stroke-gray-400"
           onPointerMove={(e) => setActive(nearest(svgPoint(e, CW, CH).x))}
+          onFocus={() => move(0)}
+          onBlur={() => setActive(null)}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowLeft') {
+              e.preventDefault();
+              move(-1);
+            } else if (e.key === 'ArrowRight') {
+              e.preventDefault();
+              move(1);
+            }
+          }}
         />
       </svg>
     </ChartFrame>
@@ -824,7 +932,7 @@ const OUTCOMES: {
 
 const SW = 560;
 const SH = 280;
-const SPAD = { top: 14, right: 18, bottom: 36, left: 56 };
+const SPAD = { top: 14, right: 26, bottom: 36, left: 56 };
 
 /**
  * OutcomeScatter answers "do the long jobs need more memory?": one dot
