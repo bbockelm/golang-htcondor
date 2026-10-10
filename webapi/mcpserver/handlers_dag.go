@@ -203,12 +203,19 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 	if err != nil {
 		return nil, err
 	}
+	appliedSubmitFile, err := s.submitPolicy.Apply(submitFile)
+	if err != nil {
+		return nil, fmt.Errorf("the DAGMan job: %w", err)
+	}
+	if err := s.checkNodePolicy(parsed, files); err != nil {
+		return nil, err
+	}
 
 	if boolFlag(args, "dry_run") {
 		// A dry run reports rather than refuses, fatal findings
 		// included: the caller asked what is wrong with this workflow,
 		// and answering with one error hides the other four.
-		return dagDryRunResult(dagName, s.submitPolicy.Apply(submitFile), report, notes), nil
+		return dagDryRunResult(dagName, appliedSubmitFile, report, notes), nil
 	}
 	if report.Fatal() {
 		return nil, fmt.Errorf("this workflow cannot start:\n  - %s",
@@ -248,8 +255,12 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 	}
 	execSet := executableStagedNames(parsed, files)
 	for name, body := range files {
+		data, err := s.policyForStagedFile(name, body)
+		if err != nil {
+			return nil, fmt.Errorf("file %q: %w", name, err)
+		}
 		staged[name] = &fstest.MapFile{
-			Data: []byte(s.policyForStagedFile(name, body)),
+			Data: []byte(data),
 			Mode: stagedMode(name, execSet),
 		}
 	}
@@ -576,11 +587,29 @@ func spoolFailureMessage(clusterID int, removed bool, cause error) string {
 // a wrong guess would splice submit-file text into a shell script. So the
 // test is deliberately narrow: the name ends in .sub, which is the
 // convention DAGMan itself assumes (DAG_SUBMIT_FILE_SUFFIX).
-func (s *Server) policyForStagedFile(name, body string) string {
+func (s *Server) policyForStagedFile(name, body string) (string, error) {
 	if s.submitPolicy.IsZero() || !strings.HasSuffix(name, ".sub") {
-		return body
+		return body, nil
 	}
 	return s.submitPolicy.Apply(body)
+}
+
+// checkNodePolicy refuses a workflow whose node descriptions set, as a
+// custom attribute, a job attribute the site's overrides control. The
+// inline descriptions get the overrides from policyForInlineDescriptions,
+// which splices rather than calling Apply, so they are checked here; the
+// staged .sub files are checked here too so the refusal names the first
+// offending description whichever kind it is.
+func (s *Server) checkNodePolicy(parsed *dagman.DAG, files map[string]string) error {
+	if s.submitPolicy.IsZero() {
+		return nil
+	}
+	for _, d := range namedSubmitDescriptions(parsed, files) {
+		if err := s.submitPolicy.Check(d.body); err != nil {
+			return fmt.Errorf("%s: %w", d.name, err)
+		}
+	}
+	return nil
 }
 
 // policyForInlineDescriptions splices the site's submit policy into every

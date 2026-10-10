@@ -1,6 +1,7 @@
 package submitpolicy
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -35,14 +36,24 @@ func commandValue(t *testing.T, submitFile, command string) (string, bool) {
 	return value, found
 }
 
+// mustApply applies p and fails the test on a refusal.
+func mustApply(t *testing.T, p Policy, submitFile string) string {
+	t.Helper()
+	got, err := p.Apply(submitFile)
+	if err != nil {
+		t.Fatalf("Apply refused %q: %v", submitFile, err)
+	}
+	return got
+}
+
 // An unconfigured policy must be byte-for-byte inert. A deployment that
 // sets neither knob should not be able to tell this code exists.
 func TestZeroPolicyIsInert(t *testing.T) {
 	const file = "executable = /bin/true\nlog = job.log\nqueue\n"
-	if got := (Policy{}).Apply(file); got != file {
+	if got := mustApply(t, Policy{}, file); got != file {
 		t.Errorf("zero policy changed the submit file:\n%s", got)
 	}
-	if got := (Policy{Defaults: "  \n\t", Overrides: ""}).Apply(file); got != file {
+	if got := mustApply(t, Policy{Defaults: "  \n\t", Overrides: ""}, file); got != file {
 		t.Errorf("whitespace-only policy changed the submit file:\n%s", got)
 	}
 	if !(Policy{}).IsZero() {
@@ -53,7 +64,7 @@ func TestZeroPolicyIsInert(t *testing.T) {
 // A default fills a gap...
 func TestDefaultAppliesWhenTheFileIsSilent(t *testing.T) {
 	p := Policy{Defaults: "log = /home/alice/jobs.log"}
-	got := p.Apply("executable = /bin/true\nqueue\n")
+	got := mustApply(t, p, "executable = /bin/true\nqueue\n")
 
 	value, ok := commandValue(t, got, "log")
 	if !ok {
@@ -68,7 +79,7 @@ func TestDefaultAppliesWhenTheFileIsSilent(t *testing.T) {
 // property that separates a default from an override.
 func TestDefaultLosesToTheUsersOwnValue(t *testing.T) {
 	p := Policy{Defaults: "log = /home/alice/default.log"}
-	got := p.Apply("executable = /bin/true\nlog = mine.log\nqueue\n")
+	got := mustApply(t, p, "executable = /bin/true\nlog = mine.log\nqueue\n")
 
 	value, _ := commandValue(t, got, "log")
 	if value != "mine.log" {
@@ -81,7 +92,7 @@ func TestDefaultLosesToTheUsersOwnValue(t *testing.T) {
 // user's to opt out of.
 func TestOverrideBeatsTheUsersValue(t *testing.T) {
 	p := Policy{Overrides: "log = /home/alice/forced.log"}
-	got := p.Apply("executable = /bin/true\nlog = /tmp/nope.log\nqueue\n")
+	got := mustApply(t, p, "executable = /bin/true\nlog = /tmp/nope.log\nqueue\n")
 
 	value, _ := commandValue(t, got, "log")
 	if value != "/home/alice/forced.log" {
@@ -95,7 +106,7 @@ func TestDefaultsAndOverridesTogether(t *testing.T) {
 		Defaults:  "log = /home/alice/default.log\nrequest_memory = 512",
 		Overrides: "accounting_group = grp_ap40",
 	}
-	got := p.Apply("executable = /bin/true\nrequest_memory = 2048\nqueue\n")
+	got := mustApply(t, p, "executable = /bin/true\nrequest_memory = 2048\nqueue\n")
 
 	if v, _ := commandValue(t, got, "log"); v != "/home/alice/default.log" {
 		t.Errorf("log = %q, want the default (file was silent)", v)
@@ -112,7 +123,7 @@ func TestDefaultsAndOverridesTogether(t *testing.T) {
 // apply to nothing at all -- the job is already described by then.
 func TestOverridesLandAboveQueue(t *testing.T) {
 	p := Policy{Overrides: "accounting_group = grp_ap40"}
-	got := p.Apply("executable = /bin/true\nqueue 5\n")
+	got := mustApply(t, p, "executable = /bin/true\nqueue 5\n")
 
 	overrideAt := strings.Index(got, "accounting_group")
 	queueAt := strings.Index(got, "queue 5")
@@ -128,7 +139,7 @@ func TestOverridesLandAboveQueue(t *testing.T) {
 // in force for all of them.
 func TestOverridesLandAboveTheFirstOfSeveralQueues(t *testing.T) {
 	p := Policy{Overrides: "accounting_group = grp_ap40"}
-	got := p.Apply("executable = /bin/a\nqueue\nexecutable = /bin/b\nqueue\n")
+	got := mustApply(t, p, "executable = /bin/a\nqueue\nexecutable = /bin/b\nqueue\n")
 
 	if strings.Index(got, "accounting_group") > strings.Index(got, "queue") {
 		t.Errorf("override is not above the first queue:\n%s", got)
@@ -143,7 +154,7 @@ func TestOverridesLandAboveTheFirstOfSeveralQueues(t *testing.T) {
 // override still lands above it.
 func TestNoQueueStatementAppends(t *testing.T) {
 	p := Policy{Overrides: "accounting_group = grp_ap40"}
-	got := p.Apply("executable = /bin/true\nlog = job.log\n")
+	got := mustApply(t, p, "executable = /bin/true\nlog = job.log\n")
 
 	if !strings.Contains(got, "accounting_group = grp_ap40") {
 		t.Fatalf("override missing:\n%s", got)
@@ -180,7 +191,7 @@ func TestQueueDetectionIsExact(t *testing.T) {
 // first line welded onto its last one.
 func TestNoTrailingNewlineIsHandled(t *testing.T) {
 	p := Policy{Overrides: "accounting_group = grp_ap40"}
-	got := p.Apply("executable = /bin/true")
+	got := mustApply(t, p, "executable = /bin/true")
 
 	if strings.Contains(got, "/bin/trueaccounting_group") ||
 		strings.Contains(got, "/bin/true# ---") {
@@ -197,8 +208,8 @@ func TestNoTrailingNewlineIsHandled(t *testing.T) {
 // The markers say where the lines came from, so an operator reading a
 // generated submit file is not left guessing.
 func TestBlocksAreLabelled(t *testing.T) {
-	got := Policy{Defaults: "log = a.log", Overrides: "accounting_group = g"}.
-		Apply("executable = /bin/true\nqueue\n")
+	got := mustApply(t, Policy{Defaults: "log = a.log", Overrides: "accounting_group = g"},
+		"executable = /bin/true\nqueue\n")
 
 	for _, want := range []string{
 		"HTTP_API_SUBMIT_FILE_DEFAULTS",
@@ -207,5 +218,80 @@ func TestBlocksAreLabelled(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("the generated file does not name %s:\n%s", want, got)
 		}
+	}
+}
+
+// jobAd runs submitText through the submit engine the API submits with.
+func jobAd(t *testing.T, submitText string) map[string]string {
+	t.Helper()
+	ad, err := probeJobAd(submitText)
+	if err != nil {
+		t.Fatalf("building a job ad from %q: %v", submitText, err)
+	}
+	return ad
+}
+
+// A custom attribute is applied after every submit command, so `+Attr`
+// for an attribute an override sets would beat the override. Every
+// spelling of it is refused; a file that does not try gets the
+// override's value in the job ad itself.
+func TestCustomAttributeCannotBeatAnOverride(t *testing.T) {
+	p := Policy{Overrides: "accounting_group = grp_site\nconcurrency_limits = site_limit"}
+
+	for _, file := range []string{
+		"executable = /bin/true\n+AccountingGroup = \"evil\"\nqueue\n",
+		"executable = /bin/true\nMY.AccountingGroup = \"evil\"\nqueue\n",
+		"executable = /bin/true\n  my.accountinggroup=\"evil\"\nqueue\n",
+		"executable = /bin/true\n+ConcurrencyLimits = \"none\"\nqueue\n",
+		// condor_submit honours an assignment between two queue
+		// statements for the second; position does not matter.
+		"executable = /bin/true\nqueue\n+AccountingGroup = \"evil\"\nqueue\n",
+	} {
+		_, err := p.Apply(file)
+		var controlled *ControlledAttributeError
+		if !errors.As(err, &controlled) {
+			t.Errorf("Apply(%q) = %v, want a ControlledAttributeError", file, err)
+		}
+	}
+
+	got := mustApply(t, p, "executable = /bin/true\naccounting_group = evil\n+ProjectName = \"mine\"\nqueue\n")
+	ad := jobAd(t, got)
+	if ad["accountinggroup"] != `"grp_site"` {
+		t.Errorf("AccountingGroup = %s, want the override's value\n%s", ad["accountinggroup"], got)
+	}
+	if ad["projectname"] != `"mine"` {
+		t.Errorf("an unrelated custom attribute was lost: ProjectName = %q", ad["projectname"])
+	}
+}
+
+// An override written as a custom attribute controls that attribute too,
+// and a continued value that happens to start with "+" on its own line
+// is not an assignment.
+func TestControlledAttributeEdges(t *testing.T) {
+	p := Policy{Overrides: "+ProjectName = \"site\""}
+	if _, err := p.Apply("executable = /bin/true\n+projectname = \"mine\"\nqueue\n"); err == nil {
+		t.Error("a custom attribute the override sets as a custom attribute was accepted")
+	}
+	got := mustApply(t, p, "executable = /bin/true\narguments = a \\\n+ProjectName\nqueue\n")
+	if ad := jobAd(t, got); ad["projectname"] != `"site"` {
+		t.Errorf("ProjectName = %s, want the override's value", ad["projectname"])
+	}
+	if _, err := (Policy{Defaults: "accounting_group = d"}).Apply(
+		"executable = /bin/true\n+AccountingGroup = \"mine\"\nqueue\n"); err != nil {
+		t.Errorf("a default, unlike an override, must not refuse a custom attribute: %v", err)
+	}
+}
+
+// The overrides precede every queue statement, so a command reassigned
+// between two of them does not escape the override for the second.
+func TestOverridesPrecedeEveryQueue(t *testing.T) {
+	p := Policy{Overrides: "accounting_group = grp_site"}
+	got := mustApply(t, p, "executable = /bin/a\nqueue\naccounting_group = evil\nqueue\n")
+	_, second, ok := strings.Cut(got, "accounting_group = evil")
+	if !ok {
+		t.Fatalf("the reassignment is missing:\n%s", got)
+	}
+	if v, _ := commandValue(t, second, "accounting_group"); v != "grp_site" {
+		t.Errorf("accounting_group in force for the second queue = %q, want the override\n%s", v, got)
 	}
 }

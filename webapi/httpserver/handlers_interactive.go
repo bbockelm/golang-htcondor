@@ -665,7 +665,7 @@ const requirementsProbeAttr = "HtcondorApiRequirementsProbe"
 // whether the probe came out the other end.
 func verifyInteractiveRequirementsSurvive(extraSubmit string, policy submitpolicy.Policy) error {
 	probe := fmt.Sprintf("%s =!= undefined", requirementsProbeAttr)
-	submitText := policy.Apply(buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
+	submitText, err := policy.Apply(buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
 		InstanceID:       "probe",
 		BatchName:        "probe",
 		Cpus:             1,
@@ -674,6 +674,9 @@ func verifyInteractiveRequirementsSurvive(extraSubmit string, policy submitpolic
 		Requirements:     probe,
 		ExtraSubmitLines: extraSubmit,
 	}))
+	if err != nil {
+		return fmt.Errorf("the generated interactive submit file conflicts with HTTP_API_SUBMIT_FILE_OVERRIDES: %w", err)
+	}
 
 	sf, err := htcondor.ParseSubmitFile(strings.NewReader(submitText))
 	if err != nil {

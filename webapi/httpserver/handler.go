@@ -1206,6 +1206,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		Defaults:  cfg.SubmitFileDefaults,
 		Overrides: cfg.SubmitFileOverrides,
 	}
+	if err := h.submitPolicy.Check(""); err != nil {
+		// Every submission would be refused with this; say so now.
+		logger.Error(logging.DestinationHTTP, "Site submit-file overrides cannot be evaluated", "error", err)
+	}
 	if !h.submitPolicy.IsZero() {
 		logger.Info(logging.DestinationHTTP, "Site submit-file policy loaded",
 			"defaults_bytes", len(cfg.SubmitFileDefaults),

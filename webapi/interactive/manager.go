@@ -557,6 +557,11 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		ExtraSubmitLines:      m.opts.ExtraSubmit,
 	})
 
+	applied, err := m.opts.SubmitPolicy.Apply(submitFile)
+	if err != nil {
+		return nil, err
+	}
+
 	schedd := m.opts.Schedd()
 	if schedd == nil {
 		return nil, fmt.Errorf("no schedd configured")
@@ -568,7 +573,7 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		m.opts.BeforeSubmit(ctx)
 	}
 
-	clusterID, procAds, err := schedd.SubmitRemote(ctx, m.opts.SubmitPolicy.Apply(submitFile))
+	clusterID, procAds, err := schedd.SubmitRemote(ctx, applied)
 	if err != nil {
 		return nil, fmt.Errorf("schedd submit failed: %w", err)
 	}

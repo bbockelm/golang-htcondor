@@ -3,6 +3,7 @@ package htcondor
 import (
 	"archive/tar"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -776,6 +777,52 @@ func SpoolInputAllowSet(ad *classad.ClassAd) []string {
 	return names
 }
 
+// ErrInvalidTarEntry is returned (wrapped) by SpoolJobFilesFromTar when an
+// entry's name is not a canonical path inside the sandbox. The upload is
+// abandoned before that entry is sent and without the final command, so
+// the schedd does not release the job.
+var ErrInvalidTarEntry = errors.New("invalid tar entry name")
+
+// validateSpoolEntryName refuses a tar entry name (a directory's without
+// its trailing "/") that is empty, absolute, not in canonical form
+// ("foo/../bar", "./x", "a//b"), contains a ".." segment, a backslash or
+// a NUL. The schedd refuses traversal itself; checking here means every
+// upload route refuses the same names, before the name is sent at all.
+func validateSpoolEntryName(name string) error {
+	var reason string
+	switch {
+	case name == "":
+		reason = "empty name"
+	case strings.ContainsRune(name, 0):
+		reason = "contains NUL byte"
+	case strings.ContainsRune(name, '\\'):
+		reason = "contains backslash"
+	case strings.HasPrefix(name, "/"):
+		reason = "absolute path"
+	case path.Clean(name) != name:
+		reason = fmt.Sprintf("not in canonical form (cleans to %q)", path.Clean(name))
+	case name == ".." || strings.HasPrefix(name, "../"):
+		reason = "contains '..' segment"
+	default:
+		return nil
+	}
+	return fmt.Errorf("%w %q: %s", ErrInvalidTarEntry, name, reason)
+}
+
+// dirInAllowSet reports whether dir is an allowed input or the parent of
+// one, which is the only reason to create it in the spool.
+func dirInAllowSet(allowed map[string]bool, dir string) bool {
+	if allowed[dir] {
+		return true
+	}
+	for name := range allowed {
+		if strings.HasPrefix(name, dir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // sendJobFilesFromTar processes the tar archive and sends files to schedd
 //
 //nolint:gocyclo // Complex function handling tar streaming, job switching, and file transfer protocol
@@ -806,6 +853,12 @@ func (s *Schedd) sendJobFilesFromTar(ctx context.Context, cedarStream *stream.St
 		}
 		if err != nil {
 			return fmt.Errorf("error reading tar: %w", err)
+		}
+
+		// Every name is checked, whatever its type and whether or not
+		// it would be sent: a bad name refuses the whole upload.
+		if err := validateSpoolEntryName(strings.TrimSuffix(header.Name, "/")); err != nil {
+			return err
 		}
 
 		// Handle directories - send mkdir command
@@ -876,8 +929,11 @@ func (s *Schedd) sendJobFilesFromTar(ctx context.Context, cedarStream *stream.St
 				}
 			}
 
-			// Send CommandMkdir
-			if dirName != "" && dirName != "." {
+			// Send CommandMkdir, for a directory an allowed input needs;
+			// files outside the allow-set are skipped below, and so are
+			// directories.
+			if dirName != "" && dirName != "." && currentJobInfo != nil &&
+				dirInAllowSet(currentJobInfo.inputFiles, dirName) {
 				log.Printf("Sending mkdir command for: %s", dirName)
 				msg := message.NewMessageForStream(cedarStream)
 				if err := msg.PutInt32(ctx, int32(CommandMkdir)); err != nil {

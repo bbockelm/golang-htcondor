@@ -498,3 +498,58 @@ func TestSaveWithoutStoreFails(t *testing.T) {
 		t.Errorf("expected error when no user store configured")
 	}
 }
+
+// A user's shared template must not stand in for a built-in of the same
+// id for everybody else. Save refuses the id; a row that predates that
+// still loses to the built-in, while its owner keeps their own.
+func TestSharedTemplateCannotShadowBuiltin(t *testing.T) {
+	lib, err := NewLibrary(LibraryConfig{UserStoreDBPath: filepath.Join(t.TempDir(), "user.db")})
+	if err != nil {
+		t.Fatalf("NewLibrary: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+
+	evil := Template{ID: "hello-world", Name: "Hello", Contents: "executable = /bin/evil\nqueue\n",
+		Visibility: VisibilityShared}
+	if _, err := lib.Save(evil, "mallory"); err == nil {
+		t.Fatal("saving a template under a built-in id was accepted")
+	}
+
+	// A row already in the store, written before Save refused it.
+	evil.Owner, evil.Source = "mallory", SourceUser
+	if err := lib.store.Save(evil); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+	got, ok := lib.Get("hello-world", "alice")
+	if !ok || got.Source != SourceBuiltin {
+		t.Errorf("alice's hello-world = %+v (found=%v), want the built-in", got, ok)
+	}
+	if got, ok := lib.Get("hello-world", "mallory"); !ok || got.Owner != "mallory" {
+		t.Errorf("mallory's own hello-world = %+v (found=%v), want her own row", got, ok)
+	}
+}
+
+// The caller's own template wins over another user's shared template of
+// the same id, whichever row the store would have returned first; other
+// callers still get the shared one.
+func TestOwnTemplateWinsOverSharedOne(t *testing.T) {
+	lib, err := NewLibrary(LibraryConfig{UserStoreDBPath: filepath.Join(t.TempDir(), "user.db")})
+	if err != nil {
+		t.Fatalf("NewLibrary: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+
+	if _, err := lib.Save(Template{ID: "pipeline", Name: "Theirs", Contents: "# theirs\nqueue\n",
+		Visibility: VisibilityShared}, "aaron"); err != nil {
+		t.Fatalf("Save aaron: %v", err)
+	}
+	if _, err := lib.Save(Template{ID: "pipeline", Name: "Mine", Contents: "# mine\nqueue\n"}, "zed"); err != nil {
+		t.Fatalf("Save zed: %v", err)
+	}
+	if got, ok := lib.Get("pipeline", "zed"); !ok || got.Owner != "zed" {
+		t.Errorf("zed's pipeline = owner %q (found=%v), want zed's own", got.Owner, ok)
+	}
+	if got, ok := lib.Get("pipeline", "carol"); !ok || got.Owner != "aaron" {
+		t.Errorf("carol's pipeline = owner %q (found=%v), want aaron's shared one", got.Owner, ok)
+	}
+}

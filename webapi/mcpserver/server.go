@@ -201,8 +201,12 @@ func (s *Server) ensureCredentials(ctx context.Context) {
 // gets the same preparation injected (Options.BeforeSubmit) for the
 // same reason.
 func (s *Server) submitRemote(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
+	applied, err := s.submitPolicy.Apply(submitFile)
+	if err != nil {
+		return 0, nil, err
+	}
 	s.ensureCredentials(ctx)
-	return s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
+	return s.getSchedd().SubmitRemote(ctx, applied)
 }
 
 // Config holds server configuration

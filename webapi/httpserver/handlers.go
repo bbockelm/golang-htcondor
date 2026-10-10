@@ -22,6 +22,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/version"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
+	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -518,6 +519,11 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 				"user", htcondor.GetAuthenticatedUserFromContext(ctx),
 				"error", err)
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+			return
+		}
+		var controlled *submitpolicy.ControlledAttributeError
+		if errors.As(err, &controlled) {
+			s.writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		// Surface submission failures explicitly. Without this the only
@@ -1733,6 +1739,10 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
+		if errors.Is(err, htcondor.ErrInvalidTarEntry) {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid upload: %v", err))
+			return
+		}
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to spool job files: %v", err))
 		return
 	}
@@ -1752,6 +1762,8 @@ func (s *Handler) writeSpoolError(w http.ResponseWriter, err error) {
 		s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
 	case isAuthenticationError(err):
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+	case errors.Is(err, htcondor.ErrInvalidTarEntry):
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid upload: %v", err))
 	default:
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 	}
