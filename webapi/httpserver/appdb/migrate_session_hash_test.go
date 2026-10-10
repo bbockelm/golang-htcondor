@@ -9,9 +9,10 @@ import (
 	"github.com/pressly/goose/v3"
 )
 
-// Browser and IdP sessions written before session IDs were hashed hold
-// raw cookie values. The upgrade drops them (users sign in again) rather than
-// keeping sessions whose cookie values may already have been read.
+// Browser sessions, IdP sessions and device codes written before they
+// were hashed hold raw bearer values. The upgrade drops them (users sign
+// in again) rather than keeping ones whose values may already have been
+// read.
 func TestSessionHashMigrationDropsRawSessions(t *testing.T) {
 	ctx := context.Background()
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "t.db"))
@@ -36,6 +37,9 @@ func TestSessionHashMigrationDropsRawSessions(t *testing.T) {
 		{"idp_sessions",
 			`INSERT INTO idp_sessions (session_id, username, created_at, expires_at) VALUES ('raw-cookie-value', 'alice', CURRENT_TIMESTAMP, datetime('now', '+1 day'))`,
 			`SELECT COUNT(*) FROM idp_sessions`},
+		{"oauth2_device_codes",
+			`INSERT INTO oauth2_device_codes (device_code, user_code, request_id, requested_at, client_id, scopes, granted_scopes, form_data, expires_at) VALUES ('raw-device-code', 'ABCD-EFGH', 'r', CURRENT_TIMESTAMP, 'c', '[]', '[]', '{}', datetime('now', '+10 minutes'))`,
+			`SELECT COUNT(*) FROM oauth2_device_codes`},
 	}
 	for _, tb := range tables {
 		if _, err := db.ExecContext(ctx, tb.seed); err != nil {

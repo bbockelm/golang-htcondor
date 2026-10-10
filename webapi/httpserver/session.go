@@ -100,10 +100,12 @@ func generateSessionID() (string, error) {
 }
 
 // sessionKey is what http_sessions.session_id and idp_sessions.session_id
-// store for a session ID: its SHA-256, hex-encoded. The session ID is
-// the browser cookie value, so storing it as is would let anyone who can
-// read the database (a backup, a copy, a file left world-readable)
-// present it as a cookie. Every query on those columns goes through this.
+// store for a session ID, and oauth2_device_codes.device_code for a
+// device code: its SHA-256, hex-encoded. Each is a bearer value the
+// client presents (a cookie, a token-endpoint parameter), so storing it
+// as is would let anyone who can read the database (a backup, a copy, a
+// file left world-readable) present it. Every query on those columns
+// goes through this.
 func sessionKey(sessionID string) string {
 	sum := sha256.Sum256([]byte(sessionID))
 	return hex.EncodeToString(sum[:])
