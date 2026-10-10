@@ -38,7 +38,7 @@ func TestJobWatchPollRenewsTheCallersCredential(t *testing.T) {
 
 	callerConfig := func(ttl time.Duration) *security.SecurityConfig {
 		t.Helper()
-		sc, err := configureSecurityForToken(pool.cfg, pool.mint(t, "alice@pool.example", ttl, nil), security.NewSessionCache(), false)
+		sc, err := configureSecurityForToken(pool.cfg, pool.mint(t, "alice@pool.example", ttl), security.NewSessionCache(), false)
 		if err != nil {
 			t.Fatal(err)
 		}

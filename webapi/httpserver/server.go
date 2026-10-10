@@ -1279,7 +1279,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// remint mints condorCredential again, when this server minted it:
 	// work this request starts may outlast it. Nil for a bearer the
 	// caller presented, which lasts exactly as long as it says it does.
-	remint := s.requestReminter(mintedFor)
+	remint := s.requestReminter(r, mintedFor)
 
 	// condorCredential is what cedar authenticates with, which is not
 	// always the bearer we were handed. For a HTCondor IDTOKEN the two

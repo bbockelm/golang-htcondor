@@ -36,7 +36,7 @@ func newTokenPool(t *testing.T) *tokenPool {
 		t.Fatal(err)
 	}
 	tokenDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tokenDir, "condor"), []byte(p.mint(t, "condor@pool.example", time.Hour, nil)+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(tokenDir, "condor"), []byte(p.mint(t, "condor@pool.example", time.Hour)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	p.cfg = clientConfigFrom(t, `
@@ -51,11 +51,11 @@ UID_DOMAIN = pool.example
 }
 
 // mint signs an IDTOKEN for sub, valid for ttl from now (negative: already
-// expired), limited to authz when it is non-nil.
-func (p *tokenPool) mint(t *testing.T, sub string, ttl time.Duration, authz []string) string {
+// expired).
+func (p *tokenPool) mint(t *testing.T, sub string, ttl time.Duration) string {
 	t.Helper()
 	now := time.Now()
-	tok, err := security.GenerateJWT(p.keyDir, "POOL", sub, "pool.example", now.Add(-time.Hour).Unix(), now.Add(ttl).Unix(), authz)
+	tok, err := security.GenerateJWT(p.keyDir, "POOL", sub, "pool.example", now.Add(-time.Hour).Unix(), now.Add(ttl).Unix(), nil)
 	if err != nil {
 		t.Fatalf("GenerateJWT: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestInteractiveDisconnectRemovesOnlyTheCallersJob(t *testing.T) {
 		ctx := htcondor.WithUserRequest(context.Background(), "test request")
 		ctx = htcondor.WithAuthenticatedUser(ctx, "alice@pool.example")
 		if withCredential {
-			sec, err := configureSecurityForToken(pool.cfg, pool.mint(t, "alice@pool.example", time.Hour, nil), nil, false)
+			sec, err := configureSecurityForToken(pool.cfg, pool.mint(t, "alice@pool.example", time.Hour), nil, false)
 			if err != nil {
 				t.Fatal(err)
 			}

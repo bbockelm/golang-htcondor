@@ -66,7 +66,13 @@ var sshGatewayScopes = []string{"openid", "condor:/READ", "condor:/WRITE"}
 // is keyed {SecurityTag, address, command}, so with an empty tag one
 // caller's request resumes a session another caller authenticated and
 // runs as them.
-func (h *Handler) withCondorCredential(ctx context.Context, username string, scopes []string) (context.Context, error) {
+//
+// stillValid re-checks whatever authorized the caller -- for MCP, the
+// OAuth2 access token behind the call -- and is consulted before every
+// renewal of the minted credential. Nil means there is nothing revocable to
+// re-check, and the credential is not renewed: it lasts the one token
+// lifetime it was minted with.
+func (h *Handler) withCondorCredential(ctx context.Context, username string, scopes []string, stillValid func(context.Context) error) (context.Context, error) {
 	if h.signingKeyPath == "" || h.trustDomain == "" {
 		// Nothing to mint with, so there is nothing safe to return.
 		//
@@ -104,10 +110,17 @@ func (h *Handler) withCondorCredential(ctx context.Context, username string, sco
 	if err != nil {
 		return ctx, err
 	}
+	if stillValid == nil {
+		return htcondor.WithSecurityConfig(ctx, secConfig), nil
+	}
 	// Minted again from the same grant when work this call starts -- an
-	// interactive session's lease, say -- outlasts the token.
+	// interactive session's lease, say -- outlasts the token, and only
+	// while that grant is still good.
 	scopes = slices.Clone(scopes)
-	renew := func(context.Context) (*security.SecurityConfig, error) {
+	renew := func(rctx context.Context) (*security.SecurityConfig, error) {
+		if err := stillValid(rctx); err != nil {
+			return nil, err
+		}
 		tok, err := h.generateHTCondorTokenWithScopes(username, scopes)
 		if err != nil {
 			return nil, fmt.Errorf("minting an HTCondor token for %q: %w", username, err)
@@ -441,7 +454,10 @@ func (h *Handler) sshGatewayCredential(ctx context.Context, account string, scop
 	if account == "" {
 		return nil, errors.New("no account to mint a credential for")
 	}
-	cctx, err := h.withCondorCredential(ctx, account, scopes)
+	// Not renewable: the session keeps no handle on the device-flow grant
+	// (or, for a certificate, has none), so there is nothing to re-check.
+	// It is minted per channel instead.
+	cctx, err := h.withCondorCredential(ctx, account, scopes, nil)
 	if err != nil {
 		return nil, err
 	}
