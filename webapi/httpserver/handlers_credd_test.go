@@ -30,7 +30,7 @@ func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {
 	}
 	s.creddAvailable.Store(true) // Mark credd as available for testing
 
-	token := createTestJWTToken(3600)
+	token := identifiedBearer(t, s.Handler)
 
 	// Add first service credential (github)
 	addReq := serviceCredentialRequest{ //nolint:gosec // G101: test data

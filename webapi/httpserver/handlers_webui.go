@@ -309,7 +309,10 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	// The Owner value of the caller's jobs. A bearer's actor is
+	// qualified ("alice@domain") and a job's Owner is not.
+	owner := ownerFromActor(actor)
 
 	// Admins may opt into a pool-wide view via ?owned_by_me=false.
 	// Non-admins (and the default for everyone) get the my-jobs view.
@@ -345,7 +348,7 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// on the panels. See countsFromMirror.
 	if snap, merr := s.countsFromMirror(ctx, owner, ownedByMe); merr == nil {
 		s.writeJSON(w, http.StatusOK, DashboardResponse{
-			Username:     owner,
+			Username:     actor,
 			JobsByStatus: snap.Counts,
 			JobsTotal:    snap.Total,
 		})
@@ -366,7 +369,7 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, DashboardResponse{
-		Username:     owner,
+		Username:     actor,
 		JobsByStatus: snap.Counts,
 		JobsTotal:    snap.Total,
 	})
@@ -457,7 +460,7 @@ func (s *Handler) handleDashboardActivity(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
 	ownedByMe := true
 	if v := r.URL.Query().Get("owned_by_me"); v != "" {
 		if parsed, perr := strconv.ParseBool(v); perr == nil {

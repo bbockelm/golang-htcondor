@@ -62,7 +62,7 @@ func TestJobSSHRejectsNonWebSocketWithoutDoingTheWork(t *testing.T) {
 	// Authenticated on purpose. Without a token this is refused at the
 	// door with a 401 and never reaches the check under test, so the
 	// assertions below would hold no matter what this handler did.
-	req.Header.Set("Authorization", "Bearer "+createTestJWTToken(3600))
+	req.Header.Set("Authorization", "Bearer "+identifiedBearer(t, s.Handler))
 	w := httptest.NewRecorder()
 
 	start := time.Now()

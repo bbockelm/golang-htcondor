@@ -45,3 +45,19 @@ func writeTestSigningKey(t *testing.T) string {
 	}
 	return path
 }
+
+// identifiedBearer returns a bearer the server already knows as
+// alice@test.domain -- the sub createTestJWTToken writes -- which is the
+// state a real request reaches once the schedd has accepted the token.
+// A bare test JWT names nobody and is refused before any handler logic
+// runs, so a test that means to get past authentication needs this
+// rather than createTestJWTToken alone.
+func identifiedBearer(t *testing.T, h *Handler) string {
+	t.Helper()
+	token := createTestJWTToken(3600)
+	if _, err := h.tokenCache.Add(token); err != nil {
+		t.Fatalf("caching the test token: %v", err)
+	}
+	h.tokenCache.MarkValidated(token, "alice@test.domain")
+	return token
+}

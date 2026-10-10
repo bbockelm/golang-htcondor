@@ -11,19 +11,17 @@ import (
 
 // TestHandleWhoAmI tests the whoami endpoint handler
 func TestHandleWhoAmI(t *testing.T) {
-	// A bearer token authenticates the REQUEST; it does not by itself
-	// name the caller.
+	// A bearer token does not by itself name the caller.
 	//
 	// This server verifies no JWT signatures -- the schedd is the trust
 	// root -- so the sub claim is not an identity until a schedd op has
 	// succeeded with the token or the schedd has been asked who the
-	// caller is. With no schedd reachable here, the honest answer is a
-	// request that carried a credential and a user we cannot name.
+	// caller is. With no schedd reachable here, nobody is named, and a
+	// caller nobody named is not authenticated.
 	//
-	// This subtest used to assert the sub WAS the identity, which held
-	// only because TokenCache.Add marked every freshly parsed token
-	// validated -- the behaviour that let a forged signature resolve to
-	// its own sub.
+	// This subtest used to assert authenticated=true with an empty user,
+	// a combination that let a client believe it was signed in when
+	// every endpoint that needs to know who it is would refuse it.
 	t.Run("Authenticated with Bearer token", func(t *testing.T) {
 		// Create a server with token cache
 		s, err := NewServer(newTestConfig(t))
@@ -61,14 +59,35 @@ func TestHandleWhoAmI(t *testing.T) {
 			t.Fatalf("Failed to decode response: %v", err)
 		}
 
-		// Verify response
-		if !whoamiResp.Authenticated {
-			t.Error("Expected authenticated to be true")
+		if whoamiResp.Authenticated {
+			t.Error("authenticated = true for a token that names nobody")
 		}
-
 		if whoamiResp.User != "" {
 			t.Errorf("User = %q, want empty: the sub of an unvalidated token is not an identity",
 				whoamiResp.User)
+		}
+	})
+
+	// The other direction: once the token is known to belong to
+	// someone, whoami says so.
+	t.Run("Authenticated with an identified Bearer token", func(t *testing.T) {
+		s, err := NewServer(newTestConfig(t))
+		if err != nil {
+			t.Fatalf("Failed to create server: %v", err)
+		}
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/whoami", nil)
+		req.Header.Set("Authorization", "Bearer "+identifiedBearer(t, s.Handler))
+		w := httptest.NewRecorder()
+		s.handleWhoAmI(w, req)
+
+		resp := w.Result()
+		defer func() { _ = resp.Body.Close() }()
+		var whoamiResp WhoAmIResponse
+		if err := json.NewDecoder(resp.Body).Decode(&whoamiResp); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+		if !whoamiResp.Authenticated || whoamiResp.User != "alice@test.domain" {
+			t.Errorf("whoami = %+v, want authenticated as alice@test.domain", whoamiResp)
 		}
 	})
 

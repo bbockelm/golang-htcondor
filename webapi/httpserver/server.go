@@ -1527,11 +1527,15 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 		}
 	}
 
-	// Set username in context for rate limiting only if from validated token
-	// Otherwise treated as "unauthenticated"
-	if username != "" {
-		ctx = htcondor.WithAuthenticatedUser(ctx, username)
+	// A request nobody could name is refused here, once, rather than
+	// passed on as "unauthenticated" for each handler to remember to
+	// check. Several handlers answer from this daemon's own copy of
+	// the queue with no schedd behind them to refuse the caller, and
+	// to an owner scope an empty owner means everyone.
+	if username == "" {
+		return nil, errUnidentifiedCaller
 	}
+	ctx = htcondor.WithAuthenticatedUser(ctx, username)
 
 	return ctx, nil
 }

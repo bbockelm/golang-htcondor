@@ -53,14 +53,14 @@ func TestJobsWatchKeyIsTheUsualJobID(t *testing.T) {
 // only an administrator gets it. Shared with the dashboard stream so
 // the two cannot drift apart.
 func TestJobsWatchScopeFollowsTheSameRuleAsTheDashboard(t *testing.T) {
-	if got := activityStreamScope("alice", "", false); got != "alice" {
-		t.Errorf("default scope = %q, want alice", got)
+	if owner, all := activityStreamScope("alice", "", false); owner != "alice" || all {
+		t.Errorf("default scope = (%q, %t), want alice", owner, all)
 	}
-	if got := activityStreamScope("alice", "false", false); got != "alice" {
-		t.Errorf("a non-admin asking for everything got %q, want their own jobs", got)
+	if owner, all := activityStreamScope("alice", "false", false); owner != "alice" || all {
+		t.Errorf("a non-admin asking for everything got (%q, %t), want their own jobs", owner, all)
 	}
-	if got := activityStreamScope("alice", "false", true); got != "" {
-		t.Errorf("an admin asking for everything got %q, want the whole access point", got)
+	if _, all := activityStreamScope("alice", "false", true); !all {
+		t.Error("an admin asking for everything did not get the whole access point")
 	}
 }
 
