@@ -1785,6 +1785,13 @@ func (s *Handler) handleJupyterProxy(w http.ResponseWriter, r *http.Request, id,
 	}
 	username := htcondor.GetAuthenticatedUserFromContext(ctx)
 
+	// Never while superuser mode is armed, the caller's own notebook
+	// included. See refuseJobAppWhileArmed.
+	if refusal := s.refuseJobAppWhileArmed(r, "jupyter-proxy"); refusal != nil {
+		s.writeError(w, http.StatusForbidden, refusal.Error())
+		return
+	}
+
 	reg, err := s.getOrCreateJupyterRegistry()
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "registry unavailable")
