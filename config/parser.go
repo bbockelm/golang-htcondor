@@ -248,9 +248,9 @@ func Parse(lexer *Lexer) ([]Statement, error) {
 }
 
 // ParseStrict is like Parse but surfaces any syntax error even when a partial
-// result was produced. HTCondor rejects a config source outright if any line is
-// invalid (e.g. a bare "0" with no assignment operator, which the lenient Parse
-// silently drops), so the HTCondor-compat path uses this.
+// result was produced (e.g. a bare "0" with no assignment operator, which the
+// lenient Parse silently drops). Config files do not go through this grammar;
+// see reader.go.
 func ParseStrict(lexer *Lexer) ([]Statement, error) {
 	return parseInternal(lexer, true)
 }

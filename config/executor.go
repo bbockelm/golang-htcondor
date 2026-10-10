@@ -3,7 +3,6 @@ package config
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,17 +58,6 @@ const CustomAttrPrefix = "MY."
 func (c *Config) executeAssignment(a *Assignment) error {
 	value := a.Value
 
-	// If we're in a metaknob, expand parameters before storing
-	// This is necessary because metaknob parameters ($(1), $(2), etc.)
-	// are deleted after the metaknob template finishes executing
-	if c.inMetaknob {
-		var err error
-		value, err = c.expandMacrosWithFunctions(value)
-		if err != nil {
-			return fmt.Errorf("error expanding value in metaknob: %w", err)
-		}
-	}
-
 	// The NAME may itself contain a macro reference, which HTCondor
 	// expands before storing:
 	//
@@ -97,8 +85,8 @@ func (c *Config) executeAssignment(a *Assignment) error {
 		name = CustomAttrPrefix + name
 	}
 
-	// Use Set() which handles self-references and stores unexpanded values
-	// This preserves lazy evaluation semantics (except in metaknobs)
+	// Set expands references to the name itself and stores the rest
+	// unexpanded, for lazy evaluation.
 	c.Set(name, value)
 	return nil
 }
@@ -285,158 +273,22 @@ func (c *Config) includeCommand(command string) error {
 	return c.parseAndExecute(strings.NewReader(string(output)))
 }
 
-// parseAndExecute parses and executes configuration from a reader
-func (c *Config) parseAndExecute(r io.Reader) error {
-	lex := NewLexer(r)
-	// HTCondor rejects a config with any invalid line; the Go default is
-	// lenient (drops unparseable lines). Use the strict parse in compat mode.
-	parse := Parse
-	if c.options.HTCondorCompat {
-		parse = ParseStrict
+// executeUse executes a use directive from a parsed statement list (the
+// submit-file path; config files go through parseMacros). Role is the text
+// after "use", e.g. "FEATURE : GPUs".
+func (c *Config) executeUse(use *UseDirective) error {
+	category, rhs, ok := strings.Cut(use.Role, ":")
+	category = strings.TrimSpace(category)
+	if !ok || metaknobCategory(category) == nil {
+		// Not a known metaknob: record the role, as this path always has.
+		c.values["ROLE"] = use.Role
+		return nil
 	}
-	stmts, err := parse(lex)
+	expanded, err := c.expandMacro(category)
 	if err != nil {
 		return err
 	}
-
-	// If no statements were parsed, that's okay (empty config)
-	if len(stmts) == 0 {
-		return nil
-	}
-
-	return c.executeStatements(stmts)
-}
-
-// executeUse executes a use directive (role-based configuration)
-func (c *Config) executeUse(use *UseDirective) error {
-	// Parse the use directive: "FEATURE : NAME" or "POLICY : NAME(args)"
-	// The Role field contains the full string after "use"
-
-	// First, expand any macros in the role string
-	roleStr, _ := c.expandMacrosWithFunctions(use.Role) // Parse: TYPE : NAME or TYPE : NAME(args)
-	parts := strings.SplitN(roleStr, ":", 2)
-	if len(parts) != 2 {
-		// Old-style "use ROLE" - just set the ROLE variable
-		c.values["ROLE"] = roleStr
-		return nil
-	}
-
-	roleType := strings.TrimSpace(parts[0])
-	roleSpec := strings.TrimSpace(parts[1])
-
-	// Extract name and parameters from roleSpec
-	// e.g., "NAME" or "NAME(arg1, arg2, arg3)"
-	var roleName string
-	var params []string
-
-	if idx := strings.Index(roleSpec, "("); idx >= 0 {
-		roleName = strings.TrimSpace(roleSpec[:idx])
-		// Extract parameters
-		endIdx := strings.LastIndex(roleSpec, ")")
-		if endIdx < 0 {
-			return fmt.Errorf("use directive: mismatched parentheses in %q", roleSpec)
-		}
-		paramStr := roleSpec[idx+1 : endIdx]
-		if paramStr != "" {
-			// Split by commas, but be careful with nested function calls
-			params = splitParams(paramStr)
-		}
-	} else {
-		roleName = roleSpec
-	}
-
-	// Look up the metaknob: $TYPE.NAME
-	// Use raw value access to avoid premature macro expansion
-	metaknobKey := fmt.Sprintf("$%s.%s", strings.ToUpper(roleType), roleName)
-	metaknobValue, ok := c.values[metaknobKey]
-	if !ok {
-		// Not found - this might be OK for some use cases
-		// Just set ROLE variable for compatibility
-		c.values["ROLE"] = roleStr
-		return nil
-	}
-
-	// Now we need to execute the metaknob template
-	// First, set up numbered parameter variables $(1), $(2), etc.
-	oldParams := make(map[string]string)
-	for i, param := range params {
-		paramNum := fmt.Sprintf("%d", i+1)
-		oldVal, hadOld := c.values[paramNum]
-		if hadOld {
-			oldParams[paramNum] = oldVal
-		}
-		// Expand macros in the parameter value before storing
-		expandedParam, _ := c.expandMacrosWithFunctions(param)
-		c.values[paramNum] = expandedParam
-	}
-
-	// Also set "1+", "2+", etc. for the $(1+) syntax (remaining params)
-	// But we need to handle this in expandMacrosWithFunctions
-
-	// Parse and execute the metaknob template as if it were a config file
-	lex := NewLexer(strings.NewReader(metaknobValue))
-	stmts, err := Parse(lex)
-	if err != nil {
-		return fmt.Errorf("use directive: failed to parse metaknob %s: %w", metaknobKey, err)
-	}
-
-	// Set flag to expand parameters during assignment
-	c.inMetaknob = true
-	defer func() { c.inMetaknob = false }()
-
-	// Execute the statements from the metaknob
-	for _, stmt := range stmts {
-		if err := c.executeStatement(stmt); err != nil {
-			return fmt.Errorf("use directive: error executing metaknob %s: %w", metaknobKey, err)
-		}
-	}
-
-	// Restore old parameter values
-	for paramNum, oldVal := range oldParams {
-		c.values[paramNum] = oldVal
-	}
-	// Clean up new parameter values that didn't exist before
-	for i := range params {
-		paramNum := fmt.Sprintf("%d", i+1)
-		if _, hadOld := oldParams[paramNum]; !hadOld {
-			delete(c.values, paramNum)
-		}
-	}
-
-	return nil
-}
-
-// splitParams splits a parameter list by commas, respecting nested parentheses
-func splitParams(paramStr string) []string {
-	var params []string
-	var current strings.Builder
-	depth := 0
-
-	for _, ch := range paramStr {
-		switch ch {
-		case '(':
-			depth++
-			current.WriteRune(ch)
-		case ')':
-			depth--
-			current.WriteRune(ch)
-		case ',':
-			if depth == 0 {
-				params = append(params, strings.TrimSpace(current.String()))
-				current.Reset()
-			} else {
-				current.WriteRune(ch)
-			}
-		default:
-			current.WriteRune(ch)
-		}
-	}
-
-	if current.Len() > 0 {
-		params = append(params, strings.TrimSpace(current.String()))
-	}
-
-	return params
+	return c.readMetaConfig(1, expanded, strings.TrimLeft(rhs, " \t"))
 }
 
 // executeError executes an error directive

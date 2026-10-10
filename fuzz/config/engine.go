@@ -12,6 +12,7 @@
 package fuzzconfig
 
 import (
+	"errors"
 	"sort"
 	"strings"
 
@@ -42,6 +43,9 @@ const RefEnv = "SECOND = 1\n" +
 type Result struct {
 	Parsed bool   // false when the parser rejected the input
 	Table  string // canonical "KEY\x1Fvalue\n" lines (only when Parsed)
+	// Uncomparable says why HTCondor has no defined result for this input
+	// (Go side only): see uncomparable.
+	Uncomparable string
 }
 
 // Prelude returns the full source handed to both engines: the reference
@@ -89,27 +93,44 @@ func StripRefEnv(canonTable string) string {
 // GoParseExpand parses text with the native Go engine (no defaults) and returns
 // the canonical expanded table. text is expected to already include RefEnv (see
 // Prelude); pass the identical string to oracle.ParseExpand.
+//
+// Uncomparable is set when the Go engine reports that HTCondor itself has no
+// defined result: a non-terminating expansion (config.ErrMacroLoop) or an
+// out-of-bounds read or crash (config.ErrHTCondorUndefined).
 func GoParseExpand(text string) Result {
-	// HTCondorCompat: compare Go against HTCondor faithfully — disable Go-only
-	// grammar extensions (e.g. the richer `if` conditions) so those show up as
-	// parity, not noise. Remaining intentional extensions ($DIRNAME/$BASENAME,
-	// nested re-expansion) are tracked as known divergences in the seed table.
+	// HTCondorCompat: HTCondor's exact grammar, without the Go leniencies.
+	// NoInclude: never read a host file or run a command for a fuzz input; the
+	// shim refuses includes the same way (CONFIG_OPT_NO_INCLUDE_FILE).
 	c, err := config.NewFromReaderWithOptions(strings.NewReader(text), config.ConfigOptions{
 		SkipDefaults:   true,
 		HTCondorCompat: true,
+		NoInclude:      true,
 	})
 	if err != nil {
-		return Result{Parsed: false}
+		return Result{Parsed: false, Uncomparable: uncomparable(err)}
 	}
 	keys := c.Keys()
 	sort.Strings(keys)
 	var b strings.Builder
 	for _, k := range keys {
-		v, _ := c.Get(k)
+		v, _, err := c.GetChecked(k)
+		if err != nil {
+			return Result{Uncomparable: uncomparable(err)}
+		}
 		b.WriteString(k)
 		b.WriteByte(0x1f)
 		b.WriteString(v)
 		b.WriteByte('\n')
 	}
 	return Result{Parsed: true, Table: b.String()}
+}
+
+func uncomparable(err error) string {
+	switch {
+	case errors.Is(err, config.ErrMacroLoop):
+		return "macro expansion does not terminate (HTCondor would hang or overflow its stack)"
+	case errors.Is(err, config.ErrHTCondorUndefined):
+		return err.Error()
+	}
+	return ""
 }

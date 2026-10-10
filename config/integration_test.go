@@ -11,7 +11,6 @@ package config
 //
 // Syntax supported:
 // - 'include : <file>' - HTCondor standard syntax with colon
-// - 'include "<file>"' - Alternative syntax without colon (backward compatibility)
 // - 'include ifexist : <file>' - Optional include with colon
 // - 'include command : <cmdline>' - Command execution with colon
 // - 'include : <cmdline>|' - Command execution with pipe syntax

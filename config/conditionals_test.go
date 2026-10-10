@@ -12,7 +12,6 @@ func TestEvaluateConditionDefined(t *testing.T) {
 		values: map[string]string{
 			"FOO": "bar",
 		},
-		evaluating: make(map[string]bool),
 	}
 
 	tests := []struct {
@@ -39,8 +38,7 @@ func TestEvaluateConditionDefined(t *testing.T) {
 
 func TestEvaluateConditionTruthy(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 
 	tests := []struct {
@@ -77,7 +75,6 @@ func TestEvaluateConditionComparison(t *testing.T) {
 			"NUM": "42",
 			"STR": "hello",
 		},
-		evaluating: make(map[string]bool),
 	}
 
 	tests := []struct {
@@ -113,7 +110,6 @@ func TestEvaluateConditionLogical(t *testing.T) {
 			"FOO": "bar",
 			"NUM": "42",
 		},
-		evaluating: make(map[string]bool),
 	}
 
 	tests := []struct {
@@ -148,7 +144,6 @@ func TestEvaluateVersionCondition(t *testing.T) {
 		values: map[string]string{
 			"CONDOR_VERSION": "9.0.0",
 		},
-		evaluating: make(map[string]bool),
 	}
 
 	tests := []struct {
