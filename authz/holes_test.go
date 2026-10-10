@@ -61,16 +61,24 @@ func TestHoleSetsMatchCxx(t *testing.T) {
 				t.Errorf("punched %v, want %v (%s)", punched, tc.punched, tc.source)
 			}
 
-			// No ALLOW_ settings: only a hole grants anything.
-			p := newTestPolicy(t, mapConfig{}, nil, nil)
-			p.Holes().Apply([]HoleSet{tc.set}, everyone)
+			// With no ALLOW_ settings, and with DENY_<level> = * for every
+			// level (so no level is reached through one it implies), only a
+			// hole grants anything.
+			denyAll := mapConfig{}
 			for _, perm := range allPerms {
-				want := slices.Contains(tc.granted, perm)
-				if got := p.Verify(perm, ip("10.0.0.1"), tc.id); got != want {
-					t.Errorf("Verify(%s, %s) = %v, want %v (%s)", perm, tc.id, got, want, tc.source)
-				}
-				if p.Verify(perm, ip("10.0.0.1"), "condor@pool") {
-					t.Errorf("Verify(%s, condor@pool) = true through %s's holes", perm, tc.id)
+				denyAll["DENY_"+string(perm)] = "*"
+			}
+			for _, cfg := range []mapConfig{{}, denyAll} {
+				p := newTestPolicy(t, cfg, nil, nil)
+				p.Holes().Apply([]HoleSet{tc.set}, everyone)
+				for _, perm := range allPerms {
+					want := slices.Contains(tc.granted, perm)
+					if got := p.Verify(perm, ip("10.0.0.1"), tc.id); got != want {
+						t.Errorf("%d DENY_ settings: Verify(%s, %s) = %v, want %v (%s)", len(cfg), perm, tc.id, got, want, tc.source)
+					}
+					if p.Verify(perm, ip("10.0.0.1"), "condor@pool") {
+						t.Errorf("%d DENY_ settings: Verify(%s, condor@pool) = true through %s's holes", len(cfg), perm, tc.id)
+					}
 				}
 			}
 		})
