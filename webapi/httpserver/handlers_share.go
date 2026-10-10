@@ -569,7 +569,7 @@ func (s *Handler) handleSharedInput(w http.ResponseWriter, r *http.Request) {
 	// MaxBytesReader, not io.LimitReader: a LimitReader reports its cap
 	// as io.EOF, indistinguishable from the end of the upload, so an
 	// oversized body would spool as a silently truncated tar.
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	setBodyLimit(w, r, maxUploadBytes)
 	names := newTarNameRecorder()
 	body := io.TeeReader(r.Body, names)
 

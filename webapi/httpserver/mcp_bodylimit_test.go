@@ -40,7 +40,7 @@ func TestMCPBodyBoundIsAppliedBeforeAnyRead(t *testing.T) {
 		body = body[:end]
 	}
 
-	bound := strings.Index(body, "http.MaxBytesReader")
+	bound := strings.Index(body, "setBodyLimit(w, r, maxMCPBody)")
 	if bound < 0 {
 		t.Fatal("handleMCPMessage does not bound the request body: " +
 			"io.ReadAll on an unbounded body lets one caller decide how much " +
@@ -48,7 +48,7 @@ func TestMCPBodyBoundIsAppliedBeforeAnyRead(t *testing.T) {
 	}
 	firstRead := strings.Index(body, "io.ReadAll(r.Body)")
 	if firstRead >= 0 && bound > firstRead {
-		t.Error("the body is read before it is bounded; MaxBytesReader has to come first")
+		t.Error("the body is read before it is bounded; setBodyLimit has to come first")
 	}
 }
 

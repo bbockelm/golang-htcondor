@@ -396,6 +396,7 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 	s.logger.Debug(logging.DestinationHTTP, "proxying into job",
 		"user", username, "cluster", cluster, "proc", proc,
 		"target", target.describe(), "path", upstreamPath)
+	removeBodyLimit(r)
 	proxy.ServeHTTP(w, r.WithContext(ctx))
 }
 

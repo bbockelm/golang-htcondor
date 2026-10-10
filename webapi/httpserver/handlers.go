@@ -1657,7 +1657,7 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 	// and release the jobs with files missing. Today spool's own,
 	// smaller per-proc ceiling always fires first, but that is an
 	// accident of the two numbers and not something to rely on.
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	setBodyLimit(w, r, maxUploadBytes)
 	limitedReader := r.Body
 
 	if target.AllProcs {
@@ -1866,15 +1866,15 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	jobAds := []*classad.ClassAd{procAd}
 
 	// Bound the request body before parsing so a hostile client can't
-	// stream gigabytes through ParseMultipartForm. MaxBytesReader caps
+	// stream gigabytes through ParseMultipartForm. setBodyLimit caps
 	// the total request size; ParseMultipartForm's argument is the
 	// in-memory threshold above which parts spill to temp files.
 	// gosec G120 still flags the ParseMultipartForm call because its
-	// taint tracker doesn't see through MaxBytesReader's wrapping;
+	// taint tracker doesn't see through setBodyLimit;
 	// the cap above is the real defense.
 	const maxInputBytes = 100 * 1024 * 1024 // 100 MiB
-	r.Body = http.MaxBytesReader(w, r.Body, maxInputBytes)
-	err = r.ParseMultipartForm(maxInputBytes) //nolint:gosec // body bounded by MaxBytesReader above
+	setBodyLimit(w, r, maxInputBytes)
+	err = r.ParseMultipartForm(maxInputBytes) //nolint:gosec // body bounded by setBodyLimit above
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse multipart form: %v", err))
 		return
@@ -3763,15 +3763,15 @@ func (s *Handler) handleCollectorAdvertise(w http.ResponseWriter, r *http.Reques
 // parseAdvertiseMultipart parses multipart form data containing ClassAds
 // Returns ads, withAck flag, command, and error.
 //
-// Bounds the request body via http.MaxBytesReader before parsing so a
+// Bounds the request body via setBodyLimit before parsing so a
 // hostile client can't stream gigabytes through ParseMultipartForm.
 // The argument to ParseMultipartForm is the in-memory threshold; the
-// MaxBytesReader cap is the absolute body-size ceiling. We use the
+// setBodyLimit cap is the absolute body-size ceiling. We use the
 // same value for both: 10 MiB is the documented ceiling.
 func (s *Handler) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, bool, string, error) {
 	const maxMultipartFormSize = 10 * 1024 * 1024
-	r.Body = http.MaxBytesReader(nil, r.Body, maxMultipartFormSize)
-	// gosec G120: body is bounded by MaxBytesReader above; the
+	setBodyLimit(nil, r, maxMultipartFormSize)
+	// gosec G120: body is bounded by setBodyLimit above; the
 	// taint tracker doesn't see through the wrapping.
 	err := r.ParseMultipartForm(maxMultipartFormSize) //nolint:gosec
 	if err != nil {

@@ -97,7 +97,7 @@ func (s *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	// over a few hundred KiB. 1 MiB is comfortable headroom while
 	// blocking a hostile client from streaming gigabytes of fake
 	// history at us.
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 	var req chat.Request
 	// AI-SDK v6 posts extra top-level fields (id, trigger, messageId,
 	// …) that we ignore but the SDK may add to in any minor release.

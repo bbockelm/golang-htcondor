@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,6 +110,74 @@ func TestRESTClusterUpload(t *testing.T) {
 		env.uploadCluster(t, "restput.sh", http.MethodPut, "/input", "application/x-tar",
 			tarBody(t, "restput.sh", "#!/bin/sh\nexit 0\n"))
 	})
+}
+
+// Upload bodies are larger than the server's default request limit, and
+// these routes raise it for themselves. Both framings, each with a body
+// past the default: an override that did not take effect answers 413.
+func TestRESTUploadAboveDefaultBodyLimit(t *testing.T) {
+	env := setupRESTUpload(t)
+
+	// A shell script padded with comments: still runnable, and big.
+	script := "#!/bin/sh\nexit 0\n" + strings.Repeat("#"+strings.Repeat("x", 1023)+"\n", 2048)
+	if len(script) <= defaultMaxRequestBody {
+		t.Fatalf("test script is only %d bytes", len(script))
+	}
+
+	t.Run("multipart", func(t *testing.T) {
+		body, contentType := multipartBody(t, "executable", "bigmp.sh", script)
+		env.uploadOneProc(t, "bigmp.sh", http.MethodPost, "/input/multipart", contentType, body)
+	})
+	t.Run("put_raw_tar", func(t *testing.T) {
+		env.uploadOneProc(t, "bigput.sh", http.MethodPut, "/input", "application/x-tar",
+			tarBody(t, "bigput.sh", script))
+	})
+}
+
+// uploadOneProc submits a single job, uploads its input addressed to the
+// proc, and requires the upload to be accepted and the spool hold to
+// clear.
+func (env *restUploadEnv) uploadOneProc(
+	t *testing.T,
+	executable string,
+	method string,
+	suffix string,
+	contentType string,
+	body io.Reader,
+) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	cluster, _, err := env.schedd.SubmitRemote(ctx, fmt.Sprintf(`
+universe = vanilla
+executable = %s
+transfer_executable = true
+request_memory = 64
+queue
+`, executable))
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	waitHeld(t, ctx, env.schedd, cluster, 1)
+
+	req, err := http.NewRequestWithContext(ctx, method,
+		fmt.Sprintf("%s/api/v1/jobs/%d.0%s", env.base, cluster, suffix), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("X-Test-User", currentUser(t))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upload returned %d: %s", resp.StatusCode, raw)
+	}
+	waitNoneHeld(t, ctx, env.schedd, cluster)
 }
 
 // uploadCluster submits a multi-proc cluster, uploads its input in one

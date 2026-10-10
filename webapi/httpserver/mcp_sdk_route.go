@@ -77,7 +77,7 @@ func sdkTokenInfoFor(token fosite.AccessRequester) *auth.TokenInfo {
 // tools those scopes allow, so an unpermitted tool does not exist to call.
 func (h *Handler) mcpSDKAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxMCPBody)
+		setBodyLimit(w, r, maxMCPBody)
 
 		ctx, token, ok := h.mcpAuthContext(w, r)
 		if !ok {

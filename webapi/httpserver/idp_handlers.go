@@ -129,7 +129,7 @@ func (h *Handler) serveIDPLoginForm(w http.ResponseWriter, r *http.Request) {
 // handleIDPLoginSubmit handles login form submission
 func (h *Handler) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	// Limit request body size for form parsing
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 
 	// Rate limit login attempts by IP address
 	ip := r.RemoteAddr
@@ -321,7 +321,7 @@ func (h *Handler) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleIDPToken(w http.ResponseWriter, r *http.Request) {
 	// Bound the request body before anything parses the form, matching
 	// handleOAuth2Token. fosite parses it inside NewAccessRequest below.
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 
 	ctx := r.Context()
 

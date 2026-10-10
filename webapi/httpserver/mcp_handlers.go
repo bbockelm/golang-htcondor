@@ -247,7 +247,7 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	// Before anything reads it. The body is consumed whole below, and on
 	// the OAuth path it is read, buffered and re-read, so the limit has
 	// to be in place ahead of the first read rather than at each.
-	r.Body = http.MaxBytesReader(w, r.Body, maxMCPBody)
+	setBodyLimit(w, r, maxMCPBody)
 
 	ctx, token, ok := h.mcpAuthContext(w, r)
 	if !ok {
@@ -824,7 +824,7 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Limit request body size for form parsing
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 
 	ctx := r.Context()
 
@@ -1010,7 +1010,7 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Limit request body size for form parsing
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 
 	// The token request repeats redirect_uri, and fosite resolves the
 	// client again to validate it, so the same loopback allowance the
@@ -1310,6 +1310,9 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		ClientName    string          `json:"client_name"`
 	}
 
+	// Unauthenticated, so smaller than the default: a registration is a
+	// handful of URIs and names.
+	setBodyLimit(w, r, 64<<10)
 	if err := json.NewDecoder(r.Body).Decode(&rawReq); err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid registration request")
 		return
@@ -1661,7 +1664,7 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 	}
 
 	// Limit request body size for form parsing
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 
 	ctx := r.Context()
 
@@ -1825,7 +1828,7 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Limit request body size for form parsing
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 
 	ctx := r.Context()
 

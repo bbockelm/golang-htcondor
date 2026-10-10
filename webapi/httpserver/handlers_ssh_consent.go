@@ -261,7 +261,7 @@ func (h *Handler) handleSSHConsentApprove(w http.ResponseWriter, r *http.Request
 	}
 
 	var decision sshConsentDecision
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	setBodyLimit(w, r, 1<<16)
 	if err := json.NewDecoder(r.Body).Decode(&decision); err != nil {
 		h.writeError(w, http.StatusBadRequest, "Could not read the request body")
 		return
