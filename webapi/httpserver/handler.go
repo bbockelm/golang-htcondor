@@ -1813,7 +1813,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger.Info(logging.DestinationHTTP, "OAuth2 maximum grant lifetime configured",
 			"max_grant_lifetime", h.oauth2MaxGrantLifetime)
 
-		h.revocationOracles = h.buildRevocationOracles(cfg.OAuth2RevocationOracles)
+		// In multi-AP mode each schedd-backed oracle consults every
+		// member rather than whichever one is first.
+		h.revocationOracles = h.multiAPOracles(h.buildRevocationOracles(cfg.OAuth2RevocationOracles))
 
 		// Where groups come from the system, membership can be re-read at
 		// refresh time -- which is the live-membership oracle the
