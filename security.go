@@ -782,17 +782,15 @@ func mapSecurityLevel(level string) security.SecurityLevel {
 //
 // Note on IDTOKENS vs TOKEN: in HTCondor's *config language* IDTOKENS
 // is the modern name for the same authentication mechanism whose
-// *wire-protocol name* is TOKEN. We want both config strings to
-// produce cedar's AuthToken, which serializes on the wire as "TOKEN"
-// — that's what every HTCondor schedd / collector recognizes. Mapping
-// IDTOKENS to cedar's AuthIDTokens (which serializes as the literal
-// "IDTOKENS") makes the schedd's SECMAN drop the offer and fall
-// through to whatever is left, typically SSL — see
-// cedar/security/auth.go where AuthIDTokens has the comment
-// `IDTokens not defined in HTCondor's condor_auth.h, map to
-// SciTokens for compatibility`. The C++ HTCondor client always
-// sends "TOKEN" regardless of what's in the config; this matches
-// that behavior.
+// *wire-protocol name* is TOKEN (SecMan::sec_char_to_auth_method maps
+// IDTOKENS, IDTOKEN and TOKENS to CAUTH_TOKEN). Every spelling maps to
+// cedar's AuthToken, which serializes on the wire as "TOKEN" -- what
+// every HTCondor schedd / collector recognizes, and what the C++
+// client sends whatever its config says. Since cedar v0.7.5,
+// AuthIDTokens is the same method too (the TOKEN bit, sent as
+// "TOKEN"); before it, cedar mapped AuthIDTokens to the SciTokens bit
+// and sent the literal "IDTOKENS", which an HTCondor peer does not
+// recognize. Mapping to AuthToken keeps one name for the method.
 func mapAuthMethods(methods string) []security.AuthMethod {
 	if methods == "" {
 		return []security.AuthMethod{}
