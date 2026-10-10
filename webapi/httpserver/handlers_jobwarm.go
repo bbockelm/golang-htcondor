@@ -65,6 +65,10 @@ func (s *Handler) handleJobWarm(w http.ResponseWriter, r *http.Request, jobID st
 		return
 	}
 	username := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if username == "" {
+		s.writeError(w, http.StatusUnauthorized, "Authentication failed: no authenticated identity")
+		return
+	}
 
 	// Same refusal as ssh-to-job, and for the same reason: a universe
 	// with no starter has nothing to connect to, and saying so here is
@@ -90,7 +94,11 @@ func (s *Handler) handleJobWarm(w http.ResponseWriter, r *http.Request, jobID st
 	// under any other would warm a transport the connection that
 	// follows cannot use, which is worse than not warming at all: it
 	// pays the cost twice and looks like it worked.
-	key := jobTransportKey(ctx, imp, username, cluster, proc)
+	key, err := jobTransportKey(ctx, bearerFromRequest(r), imp, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
 
 	started := time.Now()
 	reused, err := cache.Warm(ctx, key)

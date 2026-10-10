@@ -1487,7 +1487,12 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// Validated by a 2xx) and widening it.
 	if username == "" {
 		if bearer, err := extractBearerToken(r); err == nil && bearer != "" {
-			username = s.actorForSession(ctx, bearer)
+			// A throttled resolution fails the request. Carrying on
+			// would serve a caller who did present a credential as one
+			// who presented none.
+			if username, err = s.resolveActor(ctx, r, bearer); err != nil {
+				return nil, err
+			}
 		}
 	}
 

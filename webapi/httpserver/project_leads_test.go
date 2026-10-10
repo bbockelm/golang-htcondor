@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1357,12 +1358,90 @@ func TestImpersonatedTransportNotSharedWithPlainLookup(t *testing.T) {
 	}
 	imp := &Impersonation{Actor: "root@test.htcondor.org", Target: "bob@test.htcondor.org", Identity: "condor@test.htcondor.org"}
 	if reused, err := cache.Warm(context.Background(), jobssh.Key{
-		Owner: "root", Cluster: 12, Proc: 0, Impersonation: imp.sessionTag(),
+		Owner: "root", Credential: jobTransportMintedWrite, Cluster: 12, Proc: 0, Impersonation: imp.transportTag(),
 	}); err != nil || !reused {
 		t.Fatalf("the impersonated transport is not where it was cached (reused=%v err=%v)", reused, err)
 	}
-	if reused, err := cache.Warm(context.Background(), jobssh.Key{Owner: "root", Cluster: 12, Proc: 0}); err != nil || reused {
+	if reused, err := cache.Warm(context.Background(), jobssh.Key{
+		Owner: "root", Credential: jobTransportMintedWrite, Cluster: 12, Proc: 0,
+	}); err != nil || reused {
 		t.Errorf("a plain lookup by the same operator got the impersonated transport (reused=%v err=%v)", reused, err)
+	}
+}
+
+// TestProjectLeadTransportKeptToItsGrant: a lead may warm a transport into
+// a job in their project, and it is cached under that elevation alone. A
+// plain lookup by the same lead, a lookup under the same identity without
+// the project (global scope), and a second lead of the same project must
+// each miss it.
+func TestProjectLeadTransportKeptToItsGrant(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice carol\n", "")
+	env.ads = []*classad.ClassAd{leadJobAd(12, "bob", "Physics", 2)}
+
+	var dials atomic.Int32
+	cache, err := jobssh.NewCache(jobssh.Options{Dial: func(context.Context, jobssh.Key) (jobssh.Conn, error) {
+		dials.Add(1)
+		return &fakeJobConn{backend: "127.0.0.1:1", done: make(chan struct{})}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.h.jobSSHCache = cache
+	t.Cleanup(env.h.closeJobSSHCache)
+
+	warm := func(sid string) warmResponse {
+		t.Helper()
+		w := httptest.NewRecorder()
+		env.h.handleJobWarm(w, env.request(http.MethodPost, "/api/v1/jobs/12.0/warm", sid, nil), "12.0")
+		if w.Code != http.StatusOK {
+			t.Fatalf("lead warm = %d %s", w.Code, w.Body.String())
+		}
+		var resp warmResponse
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		return resp
+	}
+
+	alice := env.session("alice")
+	if code, _ := env.arm(alice); code != http.StatusOK {
+		t.Fatalf("arm alice: %d", code)
+	}
+	warm(alice)
+	if !warm(alice).Reused {
+		t.Fatal("the lead's own second warm did not reuse the transport")
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("precondition: %d transports, want 1", got)
+	}
+
+	led := Impersonation{Identity: "condor@example.org", Target: "bob@example.org", Project: "Physics"}
+	global := led
+	global.Project = ""
+	lookup := func(imp string) bool {
+		t.Helper()
+		reused, err := cache.Warm(context.Background(), jobssh.Key{
+			Owner: "alice", Credential: jobTransportMintedWrite, Cluster: 12, Proc: 0, Impersonation: imp,
+		})
+		if err != nil {
+			t.Fatalf("Warm: %v", err)
+		}
+		return reused
+	}
+	if !lookup(led.transportTag()) {
+		t.Fatal("precondition: the lead's transport is not under the key this test reconstructs")
+	}
+	if lookup("") {
+		t.Error("a plain lookup by the lead got the elevated transport")
+	}
+	if lookup(global.transportTag()) {
+		t.Error("a global-scope lookup under the same identity got the project lead's transport")
+	}
+
+	carol := env.session("carol")
+	if code, _ := env.arm(carol); code != http.StatusOK {
+		t.Fatalf("arm carol: %d", code)
+	}
+	if warm(carol).Reused {
+		t.Error("a second lead of the same project was handed the first lead's transport")
 	}
 }
 

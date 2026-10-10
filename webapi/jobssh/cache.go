@@ -42,24 +42,43 @@ const DefaultIdleTimeout = 10 * time.Minute
 // one user's request could resume a session another user had
 // authenticated and run as them. Same reasoning here, different cache.
 //
+// Credential is part of it because a name is not a credential. The
+// owner is what a caller was resolved to, and the transport was opened
+// with something specific: one bearer, or a credential carrying only
+// some authorizations. A caller resolved to the same name by other
+// means must not inherit what that credential was allowed to open. It
+// describes the credential, and must be stable across re-issues of an
+// equivalent one -- a credential minted per request would otherwise
+// never find its own transport again.
+//
 // Impersonation is part of it for the same reason. A transport opened under
 // superuser impersonation authenticated as somebody other than Owner, on the
 // job owner's behalf; it must never be handed to a plain lookup by the same
 // Owner -- which would let it outlive the grant that opened it, with no
 // superuser check and no audit. Empty for an ordinary transport.
+//
+// Owner and Credential are required: a transport is never cached under
+// an empty one.
 type Key struct {
 	Owner         string
+	Credential    string
 	Cluster       int
 	Proc          int
 	Impersonation string
 }
 
+// String names the transport for logs and errors. Credential is left
+// out: it can be a digest of a bearer, which says nothing a reader can
+// use.
 func (k Key) String() string {
 	if k.Impersonation != "" {
 		return fmt.Sprintf("%s[%s]/%d.%d", k.Owner, k.Impersonation, k.Cluster, k.Proc)
 	}
 	return fmt.Sprintf("%s/%d.%d", k.Owner, k.Cluster, k.Proc)
 }
+
+// ErrNoIdentity is returned for a Key with no Owner or no Credential.
+var ErrNoIdentity = errors.New("jobssh: a job transport needs an owner and a credential")
 
 // Conn is the slice of *ssh.Client this package needs: open a TCP
 // connection inside the sandbox, notice when the transport dies, and
@@ -305,7 +324,15 @@ func (c *Cache) Warm(ctx context.Context, key Key) (reused bool, err error) {
 }
 
 // acquire returns an entry with a reference already taken.
+//
+// Every way into a transport comes through here, so this is where an
+// anonymous key is refused. Every caller with no identity would
+// otherwise share the one entry an empty key names, whoever's
+// credential opened it.
 func (c *Cache) acquire(ctx context.Context, key Key) (*entry, error) {
+	if key.Owner == "" || key.Credential == "" {
+		return nil, ErrNoIdentity
+	}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()

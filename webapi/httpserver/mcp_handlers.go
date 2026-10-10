@@ -179,7 +179,12 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 		// rather than the token: this branch forwards the token precisely
 		// because the schedd is what verifies it, so the identity it maps the
 		// caller to is the only trustworthy answer available here.
-		if actor := h.actorForSession(ctx, htcToken); actor != "" {
+		actor, err := h.resolveActor(ctx, r, htcToken)
+		if err != nil {
+			h.writeActorThrottled(w, err)
+			return nil, nil, false
+		}
+		if actor != "" {
 			ctx = htcondor.WithAuthenticatedUser(ctx, actor)
 		}
 		return ctx, nil, true
@@ -212,7 +217,12 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	// prefers FS over TOKEN attributes it to the process user. Ask the schedd,
 	// keyed by this bearer. Falling back to the claim would scope queries by a
 	// name the schedd never uses, hiding the caller's own jobs.
-	if actor := h.actorForSession(ctx, bearerFromRequest(r)); actor != "" {
+	actor, err := h.resolveActor(ctx, r, bearerFromRequest(r))
+	if err != nil {
+		h.writeActorThrottled(w, err)
+		return nil, nil, false
+	}
+	if actor != "" {
 		ctx = htcondor.WithAuthenticatedUser(ctx, actor)
 	} else {
 		h.logger.Warn(logging.DestinationHTTP, "Could not resolve the caller's schedd identity; owner-scoped tools will refuse this call", "oauth2_user", username)

@@ -40,7 +40,6 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
-	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
 	"github.com/bbockelm/golang-htcondor/webapi/vscode"
 )
 
@@ -389,7 +388,7 @@ func (s *Handler) handleAppGet(w http.ResponseWriter, r *http.Request, id string
 	// it is where the distinction is worth paying for. The list would
 	// pay it once per app.
 	if sum.State == appStateRunning {
-		sum.State, sum.Detail = s.probeApp(ctx, owner, sum.JobID)
+		sum.State, sum.Detail = s.probeApp(ctx, r, sum.JobID)
 		if sum.State != appStateRunning {
 			sum.URL = ""
 		}
@@ -398,10 +397,19 @@ func (s *Handler) handleAppGet(w http.ResponseWriter, r *http.Request, id string
 }
 
 // probeApp reports whether the app is actually listening yet.
-func (s *Handler) probeApp(ctx context.Context, owner, jobID string) (state, detail string) {
+//
+// A request with no identity or no credential to key a transport by is
+// reported as still starting rather than probed: the transport cache
+// refuses such a key, and the caller has already been refused unless
+// it has an identity.
+func (s *Handler) probeApp(ctx context.Context, r *http.Request, jobID string) (state, detail string) {
 	cluster, proc, err := parseJobID(jobID)
 	if err != nil {
 		return appStateRunning, ""
+	}
+	key, err := jobTransportKey(ctx, bearerFromRequest(r), nil, cluster, proc)
+	if err != nil {
+		return appStateStarting, "the job is running; the editor is still starting up"
 	}
 	cache, err := s.getOrCreateJobSSHCache()
 	if err != nil {
@@ -409,7 +417,7 @@ func (s *Handler) probeApp(ctx context.Context, owner, jobID string) (state, det
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, appReadyProbeTimeout)
 	defer cancel()
-	conn, err := cache.DialJobUnix(probeCtx, jobssh.Key{Owner: owner, Cluster: cluster, Proc: proc}, vscode.SocketName)
+	conn, err := cache.DialJobUnix(probeCtx, key, vscode.SocketName)
 	if err != nil {
 		return appStateStarting, "the job is running; the editor is still starting up"
 	}

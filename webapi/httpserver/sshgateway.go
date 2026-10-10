@@ -438,9 +438,12 @@ func (h *Handler) sshGatewayCredential(ctx context.Context, account string, scop
 // and it is the only thing whose answer is authoritative. Repeating the
 // check here would add a second opinion that can only ever be wrong in
 // the direction of letting somebody in.
+//
+// The key's credential is the one ctx carries, minted for this channel
+// by sshGatewayCredential; with none the cache refuses the key.
 func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshgateway.Target, report func(string)) (jobssh.Key, error) {
 	if t.IsJob() {
-		return jobssh.Key{Owner: account, Cluster: t.Cluster, Proc: t.Proc}, nil
+		return jobssh.Key{Owner: account, Credential: jobTransportCredential(ctx, ""), Cluster: t.Cluster, Proc: t.Proc}, nil
 	}
 	return h.sshGatewaySession(ctx, account, t, report)
 }
@@ -547,7 +550,7 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 	for {
 		switch info.JobStatus {
 		case jobStatusRunning:
-			return jobssh.Key{Owner: caller.Owner, Cluster: info.ClusterID, Proc: info.ProcID}, nil
+			return jobssh.Key{Owner: caller.Owner, Credential: jobTransportCredential(ctx, ""), Cluster: info.ClusterID, Proc: info.ProcID}, nil
 		case jobStatusHeld:
 			reason := info.HoldReason
 			if reason == "" {
