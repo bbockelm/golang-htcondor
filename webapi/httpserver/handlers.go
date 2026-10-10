@@ -79,8 +79,14 @@ func isSafeLocalRedirect(u string) bool {
 	return true
 }
 
+// errUnidentifiedCaller is a request that presented a credential but
+// could not be resolved to an identity: a bearer the schedd did not
+// accept, or one that could not be checked at all.
+var errUnidentifiedCaller = errors.New("the credential presented could not be resolved to a user identity")
+
 // requireAuthentication wraps the createAuthenticatedContext call and handles
-// browser redirects for unauthenticated requests
+// browser redirects for unauthenticated requests. A context it returns
+// always names its caller.
 func (s *Handler) requireAuthentication(r *http.Request) (context.Context, bool, error) {
 	ctx, err := s.createAuthenticatedContext(r)
 	if err != nil {
@@ -1104,6 +1110,31 @@ func ownerFromActor(actor string) string {
 		return actor
 	}
 	return actor[:i]
+}
+
+// localReadOwnerScope confines a read this server answers from its own
+// copy of the queue -- the tailed job_queue.log, the htcondordb mirror
+// -- to the caller's own jobs.
+//
+// It differs from bulkOwnerScope in who is scoped. That one leaves a
+// caller without a browser session to the schedd's ACL; no schedd sees
+// these reads, which this daemon makes on its own authority, so this
+// clause is all there is. Every caller, bearer or session, is confined
+// to its own Owner unless all is set, which a handler sets only for a
+// Web UI administrator.
+//
+// A context that names nobody is an error even with all set: an owner
+// clause built from it would be Owner == "", and leaving it off would be
+// the whole queue.
+func localReadOwnerScope(ctx context.Context, raw string, all bool) (string, error) {
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" {
+		return "", errUnidentifiedCaller
+	}
+	if all {
+		return raw, nil
+	}
+	return scopeToOwner(ownerFromActor(actor), raw)
 }
 
 // jobOwnerScope confines a single-job request to the caller's own job,
@@ -3091,14 +3122,12 @@ func (s *Handler) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get authenticated username from context
-	// If createAuthenticatedContext succeeded, authentication is valid
+	// Authenticated means somebody was named. A credential that was
+	// accepted as well-formed but resolved to nobody is not an
+	// authenticated caller, whatever got it this far.
 	username := htcondor.GetAuthenticatedUserFromContext(ctx)
-
-	// Authentication succeeded - always return authenticated=true
-	// Username should always be non-empty but handle edge case gracefully
 	response := WhoAmIResponse{
-		Authenticated: true,
+		Authenticated: username != "",
 		User:          username,
 	}
 

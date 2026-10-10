@@ -110,7 +110,9 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+	// The Owner value of the caller's jobs: a bearer's actor is
+	// qualified ("alice@domain") and a job's Owner is not.
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
 	// Same rule as every other listing: a non-admin browser session is
 	// confined to its own jobs whatever it asks for.
 	ownedByMe := true

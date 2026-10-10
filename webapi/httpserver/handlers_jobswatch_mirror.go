@@ -38,12 +38,19 @@ const jobsWatchMirrorHeartbeat = 25 * time.Second
 // streamJobsWatchFromMirror answers GET /api/v1/jobs/watch out of the
 // htcondordb mirror's feed.
 func (h *Handler) streamJobsWatchFromMirror(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
 	// The same scoping rule as the dashboard stream and the jobs list:
 	// your own jobs unless you are an administrator and ask for more.
 	// Applied inside the feed rather than here, so there is no path on
-	// which a wider stream is opened and then narrowed.
-	scope := activityStreamScope(owner, r.URL.Query().Get("owned_by_me"), h.isWebUIAdmin(r))
+	// which a wider stream is opened and then narrowed. The feed
+	// refuses a caller nobody named.
+	owner, all := activityStreamScope(htcondor.GetAuthenticatedUserFromContext(ctx),
+		r.URL.Query().Get("owned_by_me"), h.isWebUIAdmin(r))
+	events, cancel, err := h.jobWatchFeed.SubscribeActivity(owner, all, jobsWatchMirrorBuffer)
+	if err != nil {
+		h.writeError(w, http.StatusUnauthorized, "authentication failed: "+errUnidentifiedCaller.Error())
+		return
+	}
+	defer cancel()
 
 	flusher, ok := sseSetup(w)
 	if !ok {
@@ -51,9 +58,6 @@ func (h *Handler) streamJobsWatchFromMirror(ctx context.Context, w http.Response
 		return
 	}
 	defer h.streamOpened()()
-
-	events, cancel := h.jobWatchFeed.SubscribeActivity(scope, jobsWatchMirrorBuffer)
-	defer cancel()
 
 	// Said once, up front. A client that has just connected has to
 	// know whether what it is looking at is current: warm means the

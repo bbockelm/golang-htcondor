@@ -139,11 +139,15 @@ func (s *Handler) handleMetricsQuery(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Owner-scope exactly as the bulk job endpoints do: a non-admin browser
-	// session is confined to its own Owner, an admin or API-token caller is
-	// left as-is. Archive reads are not ownership-checked downstream, so
-	// this clause is what keeps one user out of another's samples.
-	constraint, err = s.bulkOwnerScope(ctx, r, constraint)
+	// Every caller but a Web UI admin is confined to its own Owner,
+	// bearer or browser alike. The mirror is read with this daemon's
+	// credential and nothing downstream checks ownership, so this clause
+	// is what keeps one user out of another's samples.
+	constraint, err = localReadOwnerScope(ctx, constraint, s.isWebUIAdmin(r))
+	if errors.Is(err, errUnidentifiedCaller) {
+		s.writeError(w, http.StatusUnauthorized, "Authentication failed: "+err.Error())
+		return
+	}
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return

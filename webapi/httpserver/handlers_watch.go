@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/collections"
 	"github.com/PelicanPlatform/classad/collections/vm"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
 // handleCollectorWatch streams collector ad changes to the client as Server-Sent
@@ -231,10 +234,21 @@ func (h *Handler) handleJobsWatch(w http.ResponseWriter, r *http.Request) {
 				"(HTTP_API_JOB_QUEUE_LOG) nor an htcondordb mirror")
 		return
 	}
+	// This branch reads job_queue.log itself: no schedd sees the
+	// request, so nothing but this clause keeps one user's ads from
+	// another. Own jobs unless an administrator asks for everyone's,
+	// as on the mirror branch.
+	_, all := activityStreamScope(htcondor.GetAuthenticatedUserFromContext(ctx),
+		r.URL.Query().Get("owned_by_me"), h.isWebUIAdmin(r))
+	constraint, scopeErr := localReadOwnerScope(ctx, r.URL.Query().Get("constraint"), all)
+	if errors.Is(scopeErr, errUnidentifiedCaller) {
+		h.writeError(w, http.StatusUnauthorized, "authentication failed: "+scopeErr.Error())
+		return
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // stop the watch iterator when the handler returns
 
-	constraint := r.URL.Query().Get("constraint")
 	cursor := cursorFromRequest(r)
 
 	flusher, ok := sseSetup(w)
@@ -244,6 +258,10 @@ func (h *Handler) handleJobsWatch(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.streamOpened()()
 
+	if scopeErr != nil {
+		_ = writeWatchSSE(w, flusher, "error", "", nil, nil, fmt.Sprintf("bad constraint: %v", scopeErr))
+		return
+	}
 	seq, err := h.jobMirror.Collection().Watch(ctx, cursor)
 	if err != nil {
 		_ = writeWatchSSE(w, flusher, "error", "", nil, nil, err.Error())
