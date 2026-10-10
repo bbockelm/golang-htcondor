@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -365,6 +366,10 @@ type Handler struct {
 	masterKeyOnce  sync.Once
 	masterKeyBytes []byte
 	masterKeyErr   error
+	// The built-in IdP's own client secret, derived from the master key.
+	// See idpInternalClientSecret.
+	idpClientSecretOnce  sync.Once
+	idpClientSecretBytes []byte
 	// identityCookieKey signs the remembered-account hint. Derived from
 	// the application master key, which the pool signing keys wrap; empty
 	// when the deployment has no signing keys.
@@ -1304,6 +1309,16 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 				"header", h.userHeader,
 				"trusted_proxy_count", len(h.userHeaderTrustedProxies))
 		}
+	}
+
+	// Said once at startup because nothing else says it: an open
+	// /metrics answers every request, so the one sign it is open would
+	// otherwise be someone scraping it.
+	if h.metricsPublic {
+		logger.Warn(logging.DestinationSecurity,
+			"/metrics is served without authentication, to anyone who can reach this port",
+			"setting", "HTTP_API_METRICS_PUBLIC",
+			"hint", "restrict the port by network ACL, or unset this and give the scraper an API key with the metrics scope")
 	}
 
 	// HMAC key for short-lived signed URLs. Derived from the pool
@@ -3524,21 +3539,23 @@ func (h *Handler) initializeIDP(ln net.Listener, protocol string) error {
 		return fmt.Errorf("failed to initialize IDP users: %w", err)
 	}
 
-	// Initialize auto-generated client with redirect URI
-	redirectURI := issuer + "/idp/callback"
-	if err := h.initializeIDPClient(ctx, redirectURI); err != nil {
-		return fmt.Errorf("failed to initialize IDP client: %w", err)
-	}
-
 	// Configure internal IDP as the upstream OAuth2 provider for the server
 	// This allows the server to use its own IDP for authentication (SSO)
-	clientID := "internal-client"
-	clientSecret := "internal-secret"
+	clientID := idpInternalClientID
+	clientSecret := h.idpInternalClientSecret()
 	ssoRedirectURI := issuer + OAuth2CallbackPath()
 
 	// Check if client exists
-	_, err := h.idpProvider.storage.GetClient(ctx, clientID)
-	if err != nil {
+	existing, err := h.idpProvider.storage.GetClient(ctx, clientID)
+	if err == nil {
+		// Stored by an earlier start. Its secret is whatever that start
+		// used -- the fixed string releases before this one shared, or a
+		// key from a master that has since changed -- so bring it in line
+		// with the one this process will present.
+		if err := h.syncIDPClientSecret(ctx, existing, clientSecret); err != nil {
+			return err
+		}
+	} else {
 		// Create client if not found (or error)
 		// Hash the secret
 		hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
@@ -3778,55 +3795,34 @@ func (h *Handler) initializeDemoUser(ctx context.Context) error {
 	return nil
 }
 
-// initializeIDPClient creates an auto-generated OAuth2 client for the server
-func (h *Handler) initializeIDPClient(ctx context.Context, redirectURI string) error {
-	clientID := "htcondor-server"
+// idpInternalClientID is the client the server's own SSO presents to the
+// built-in IdP.
+const idpInternalClientID = "internal-client"
 
-	// Check if client already exists
-	_, err := h.idpProvider.storage.GetClient(ctx, clientID)
-	if err == nil {
-		// Client already exists, update redirect URI if needed
-		// For simplicity, we'll just return
-		h.logger.Info(logging.DestinationHTTP, "IDP client already exists", "client_id", clientID)
+// idpInternalClientSecret is the secret the server's own SSO presents to
+// the built-in IdP: a subkey of the application master, so it is the same
+// across restarts and replicas and is not known to anyone without the
+// pool signing keys. It used to be a fixed string, which made the client
+// anyone's: every installation shared it.
+func (h *Handler) idpInternalClientSecret() string {
+	return hex.EncodeToString(h.purposeKey(idpInternalClientInfo, &h.idpClientSecretOnce,
+		&h.idpClientSecretBytes, "the built-in IdP's client secret"))
+}
+
+// syncIDPClientSecret replaces the stored client's secret when it does not
+// match the one this process presents.
+func (h *Handler) syncIDPClientSecret(ctx context.Context, client fosite.Client, secret string) error {
+	if bcrypt.CompareHashAndPassword(client.GetHashedSecret(), []byte(secret)) == nil {
 		return nil
 	}
-
-	if !errors.Is(err, fosite.ErrNotFound) {
-		return fmt.Errorf("failed to check for existing client: %w", err)
-	}
-
-	// Generate client secret
-	secret, err := generateRandomPassword(32)
+	hashed, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
 	if err != nil {
-		return fmt.Errorf("failed to generate client secret: %w", err)
+		return fmt.Errorf("failed to hash client secret: %w", err)
 	}
-
-	// Create the client
-	client := &fosite.DefaultClient{
-		ID:     clientID,
-		Secret: []byte(secret),
-		RedirectURIs: []string{
-			redirectURI,
-		},
-		GrantTypes: []string{
-			"authorization_code",
-			"refresh_token",
-		},
-		ResponseTypes: []string{
-			"code",
-		},
-		Scopes: []string{
-			"openid",
-			"profile",
-			"email",
-		},
+	if err := h.idpProvider.storage.UpdateClientSecret(ctx, client.GetID(), hashed); err != nil {
+		return fmt.Errorf("failed to update the internal IDP client secret: %w", err)
 	}
-
-	if err := h.idpProvider.storage.CreateClient(ctx, client); err != nil {
-		return fmt.Errorf("failed to create client: %w", err)
-	}
-
-	h.logger.Info(logging.DestinationHTTP, "Created IDP client", "client_id", clientID)
+	h.logger.Info(logging.DestinationHTTP, "Replaced the internal IDP client secret", "client_id", client.GetID())
 	return nil
 }
 

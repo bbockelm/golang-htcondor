@@ -16,7 +16,9 @@ In demo mode (`htcondor-api --demo`), the IDP is **always enabled**. On first st
 
 1. An `admin` user is created with a randomly generated password
 2. Credentials are printed to the terminal
-3. An OAuth2 client is auto-generated with proper redirect URI
+3. Two OAuth2 clients are registered: `internal-client`, which the
+   server's own SSO uses, and `swagger-client`, a public client for the
+   API docs page
 
 Example output:
 ```
@@ -28,7 +30,10 @@ Password: YG12b45NsPqVfHronFmI
 ========================================
 ```
 
-Note: Client credentials are used internally and are not printed to the terminal.
+`internal-client`'s secret is derived from the application master key,
+which the pool signing keys protect, so it survives restarts and is the
+same on every replica. Without signing keys it is random per process. It
+is not printed and is not meant for anything but the server itself.
 
 ## Normal Mode
 
@@ -78,16 +83,24 @@ Navigate to `http://localhost:8080/idp/login` and log in with the admin credenti
 
 ### 3. OAuth2 Authorization Code Flow
 
+The public `swagger-client` is the one to experiment with; it has no
+secret, so it proves possession with PKCE instead.
+
 ```bash
+# 0. A PKCE verifier and its challenge
+VERIFIER=$(openssl rand -base64 48 | tr -d '=+/' | cut -c1-64)
+CHALLENGE=$(printf %s "$VERIFIER" | openssl dgst -sha256 -binary | openssl base64 | tr '+/' '-_' | tr -d '=')
+
 # 1. Get authorization code (will redirect to login if not authenticated)
-curl -L "http://localhost:8080/idp/authorize?client_id=htcondor-server&response_type=code&redirect_uri=http://localhost:8080/idp/callback&scope=openid+profile&state=random-state-string"
+curl -L "http://localhost:8080/idp/authorize?client_id=swagger-client&response_type=code&redirect_uri=http://localhost:8080/docs/oauth2-redirect&scope=openid+profile&state=random-state-string&code_challenge=$CHALLENGE&code_challenge_method=S256"
 
 # 2. Exchange code for tokens
 curl -X POST http://localhost:8080/idp/token \
   -d "grant_type=authorization_code" \
   -d "code=<authorization_code>" \
-  -d "redirect_uri=http://localhost:8080/idp/callback" \
-  -d "client_id=htcondor-server"
+  -d "redirect_uri=http://localhost:8080/docs/oauth2-redirect" \
+  -d "client_id=swagger-client" \
+  -d "code_verifier=$VERIFIER"
 
 # 3. Use the access token
 curl -H "Authorization: Bearer <access_token>" \

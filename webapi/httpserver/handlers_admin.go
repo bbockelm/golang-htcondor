@@ -788,10 +788,42 @@ type AdminCondorConfigResponse struct {
 // stash credentials in env-derived knobs; redact anything that looks
 // secret-named to keep the admin readout safe to leave on screen.
 //
-// Match is case-insensitive and substring-based against the key.
+// Match is case-insensitive and substring-based against the key. KEK and
+// SALT are here for the key-encryption keys and salts a deployment may
+// configure: neither word says "secret", and either one, dumped, is.
 var sensitiveCondorKeyPattern = regexp.MustCompile(
-	`(?i)(PASSWORD|SECRET|PRIVATE_?KEY|API_?KEY|TOKEN|BEARER|CLIENT_?SECRET)`,
+	`(?i)(PASSWORD|SECRET|PRIVATE_?KEY|API_?KEY|TOKEN|BEARER|CLIENT_?SECRET|KEK|SALT)`,
 )
+
+// sensitiveCondorValuePatterns match VALUES that look like key material
+// whatever the knob is called: a PEM block, a JWT, or a long unbroken run
+// of hex or base64. A name-based list only knows the names someone
+// thought of; a secret pasted into an oddly named knob is still a secret.
+//
+// Tuned against HTCondor's own defaults, none of which match: paths
+// contain separators and start with one, expressions contain spaces or
+// parentheses, and nothing else is forty characters of one alphabet.
+var sensitiveCondorValuePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`-----BEGIN [A-Z ]+-----`),
+	regexp.MustCompile(`^eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),
+	regexp.MustCompile(`^[0-9a-fA-F]{32,}$`),
+	regexp.MustCompile(`^[A-Za-z0-9+_-][A-Za-z0-9+/_-]{39,}={0,2}$`),
+}
+
+// sensitiveCondorEntry reports whether a config entry's value must not be
+// shown, by its key or by the look of its value.
+func sensitiveCondorEntry(key, value string) bool {
+	if sensitiveCondorKeyPattern.MatchString(key) {
+		return true
+	}
+	value = strings.TrimSpace(value)
+	for _, re := range sensitiveCondorValuePatterns {
+		if re.MatchString(value) {
+			return true
+		}
+	}
+	return false
+}
 
 // handleAdminCondorConfig handles GET /api/v1/admin/condor-config.
 // Returns every key the HTCondor config object knows about, sorted
@@ -829,7 +861,8 @@ func (s *Handler) handleAdminCondorConfig(w http.ResponseWriter, r *http.Request
 		if !isDefault {
 			modified++
 		}
-		if sensitiveCondorKeyPattern.MatchString(k) {
+		val, _ := s.htcondorConfig.Get(k)
+		if sensitiveCondorEntry(k, val) {
 			// Still report default-ness for a redacted key: knowing
 			// whether a password knob was set at all is useful and
 			// leaks nothing about its value.
@@ -838,7 +871,6 @@ func (s *Handler) handleAdminCondorConfig(w http.ResponseWriter, r *http.Request
 			})
 			continue
 		}
-		val, _ := s.htcondorConfig.Get(k)
 		entries = append(entries, AdminCondorConfigEntry{
 			Key: k, Value: val, IsDefault: isDefault,
 		})

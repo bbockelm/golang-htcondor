@@ -534,11 +534,15 @@ HTTP_API_IDLE_TIMEOUT = 2m       # Default: 120s
 # Session configuration (optional)
 HTTP_API_SESSION_TTL = 24h       # Default: 24h (session cookie lifetime)
 
-# User header for authentication (optional)
+# User header for authentication (optional). Honored only from the
+# reverse proxies listed here; with the header set and no list, the
+# server refuses to start.
 HTTP_API_USER_HEADER = X-Forwarded-User
+HTTP_API_USER_HEADER_TRUSTED_PROXIES = 10.0.0.0/8
 
-# JWT signing key path (optional, demo mode only)
-HTTP_API_SIGNING_KEY = /etc/condor/keys/jwt_signing.key
+# Pool signing key the server mints per-request HTCondor tokens with
+# (optional; defaults to SEC_TOKEN_POOL_SIGNING_KEY_FILE)
+HTTP_API_SIGNING_KEY = /etc/condor/passwords.d/POOL
 ```
 
 #### MCP OAuth2 Configuration
@@ -673,6 +677,9 @@ If `HTTP_API_USER_HEADER` is configured (e.g., from a reverse proxy), the user i
 ```bash
 # User identity from reverse proxy header
 HTTP_API_USER_HEADER = X-Remote-User
+# Only these proxies may set it. Required: with the header configured
+# and no list, the server refuses to start.
+HTTP_API_USER_HEADER_TRUSTED_PROXIES = 127.0.0.1/32
 
 # When both are configured:
 # - User identity comes from the header (e.g., X-Remote-User: alice)
@@ -840,6 +847,7 @@ UID_DOMAIN = example.com
 
 # Optional: Use user header from reverse proxy for identity
 # HTTP_API_USER_HEADER = X-Remote-User
+# HTTP_API_USER_HEADER_TRUSTED_PROXIES = 127.0.0.1/32
 ```
 
 Create the OAuth2 client secret file:
@@ -907,6 +915,7 @@ If running behind a reverse proxy that sets authentication headers:
 ```bash
 HTTP_API_LISTEN_ADDR = 127.0.0.1:8080
 HTTP_API_USER_HEADER = X-Forwarded-User
+HTTP_API_USER_HEADER_TRUSTED_PROXIES = 127.0.0.1/32
 HTTP_API_READ_TIMEOUT = 60s
 HTTP_API_WRITE_TIMEOUT = 60s
 ```

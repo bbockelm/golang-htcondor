@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/golang-htcondor/droppriv"
 )
 
 // TestCreateInputSandboxTar_Simple tests basic input sandbox creation
@@ -496,6 +497,11 @@ func TestExtractOutputSandbox_WithStdoutStderr(t *testing.T) {
 
 // TestExtractOutputSandbox_WithAbsoluteStdout tests absolute path for Out attribute
 func TestExtractOutputSandbox_WithAbsoluteStdout(t *testing.T) {
+	if os.Geteuid() == 0 && !droppriv.DefaultManager().Enabled() {
+		// The owner is "nobody" and the write would be root's: refused,
+		// as TestExtractOutputSandboxKeepsAdChosenPathsInIwd checks.
+		t.Skip("output outside Iwd is written only as the job's owner")
+	}
 	outputDir := t.TempDir()
 	altDir := t.TempDir()
 
@@ -1180,4 +1186,85 @@ func tarEntryNames(t *testing.T, r io.Reader) []string {
 		names = append(names, header.Name)
 	}
 	return names
+}
+
+// escapeFixture is a job whose ad sends output outside Iwd three ways
+// -- a relative remap target that climbs out, a relative Out that does,
+// and an absolute remap target elsewhere -- beside one file that
+// belongs in Iwd.
+type escapeFixture struct {
+	iwd                         string
+	remapEscape, outEscape, abs string
+}
+
+func extractEscapingAd(t *testing.T, owner string) escapeFixture {
+	t.Helper()
+	base := t.TempDir()
+	f := escapeFixture{
+		iwd:         filepath.Join(base, "job", "iwd"),
+		remapEscape: filepath.Join(base, "escape"),
+		outEscape:   filepath.Join(base, "job", "o"),
+		abs:         filepath.Join(base, "abs.txt"),
+	}
+	if err := os.MkdirAll(f.iwd, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	addTarFile(t, tw, "a", "remapped up and out")
+	addTarFile(t, tw, "c", "remapped to an absolute path")
+	addTarFile(t, tw, "b.txt", "stays in Iwd")
+	addTarFile(t, tw, "_condor_stdout", "stdout")
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", f.iwd)
+	_ = jobAd.Set("Owner", owner)
+	_ = jobAd.Set("TransferOutputRemaps", "a=../../escape;c="+f.abs)
+	_ = jobAd.Set("Out", "../o")
+	if err := ExtractOutputSandbox(context.Background(), jobAd, &buf); err != nil {
+		t.Fatalf("ExtractOutputSandbox failed: %v", err)
+	}
+	return f
+}
+
+// Output the job ad places outside Iwd is written with this process's
+// own authority when the process is not the job's owner, so it must not
+// be written at all. What belongs in Iwd still is.
+func TestExtractOutputSandboxKeepsAdChosenPathsInIwd(t *testing.T) {
+	if u, err := user.Current(); err == nil && u.Username == "nobody" {
+		t.Skip("the test needs an owner other than the current user")
+	}
+	if droppriv.DefaultManager().Enabled() {
+		t.Skip("an enabled manager writes as the owner, so the ad's paths are allowed")
+	}
+	f := extractEscapingAd(t, "nobody")
+
+	for _, p := range []string{f.remapEscape, f.outEscape, f.abs} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("output for another owner was written outside Iwd, to %s", p)
+		}
+	}
+	verifyFileContent(t, filepath.Join(f.iwd, "b.txt"), "stays in Iwd")
+}
+
+// When the process is the job's owner the ad's paths are the owner's
+// own choice, written with the owner's own authority, and are honored.
+func TestExtractOutputSandboxHonorsOwnersPathsOutsideIwd(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root is not a job owner")
+	}
+	u, err := user.Current()
+	if err != nil {
+		t.Skipf("no current user: %v", err)
+	}
+	f := extractEscapingAd(t, u.Username)
+
+	verifyFileContent(t, f.remapEscape, "remapped up and out")
+	verifyFileContent(t, f.outEscape, "stdout")
+	verifyFileContent(t, f.abs, "remapped to an absolute path")
+	verifyFileContent(t, filepath.Join(f.iwd, "b.txt"), "stays in Iwd")
 }

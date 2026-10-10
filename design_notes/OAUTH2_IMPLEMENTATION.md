@@ -71,7 +71,7 @@ For high-traffic deployments, consider:
 
 1. **Key Size**: Consider upgrading from 2048-bit to 4096-bit RSA keys
 2. **Token Lifetimes**: Adjust token lifetimes based on security requirements
-3. **Rate Limiting**: Add rate limiting to prevent abuse
+3. **Rate Limiting**: In-process rate limits cover only the built-in IdP login form and the SSH gateway's consent screen; the OAuth2 endpoints themselves are not rate limited, so front them with a reverse proxy that is
 4. **Audit Logging**: Log all OAuth2 operations for security auditing
 5. **Secret Management**: Consider using a key management service (KMS) for key storage
 
@@ -118,8 +118,9 @@ Potential improvements for future versions:
 
 1. **PostgreSQL/MySQL Support**: Add support for production-grade databases
 2. **Token Rotation**: Implement refresh token rotation
-3. **Device Flow**: Add OAuth2 device authorization flow
-4. **Client Credentials**: Add client credentials grant type
-5. **PKCE**: Add Proof Key for Code Exchange support
-6. **Metrics**: Export Prometheus metrics for monitoring
-7. **Background Cleanup**: Dedicated background job for cleanup operations
+3. **Metrics**: Export Prometheus metrics for monitoring
+4. **Background Cleanup**: Dedicated background job for cleanup operations
+
+Since implemented: the device authorization flow, the client credentials
+grant, and PKCE, which the authorization server requires of every public
+client.

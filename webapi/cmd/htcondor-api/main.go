@@ -1560,11 +1560,11 @@ func reportStartupFailureToLog(startupErr error) {
 // has already dropped to condor before exec'ing us, so euid is non-
 // zero on entry and this is a no-op.
 //
-// We honor CONDOR_USER / CONDOR_IDS / DROP_PRIVILEGES from the loaded
-// config (same knobs HTCondor's own daemons read), and tolerate the
-// condor user not existing — in that case we leave the binary
-// running as root with a warning, matching what HTCondor does in
-// containers where the user is missing.
+// We honor CONDOR_USER / CONDOR_IDS from the loaded config (same knobs
+// HTCondor's own daemons read). A drop target that cannot be resolved
+// is fatal, as it is for the core daemons: the server refuses to start
+// rather than run as root. Where there is no condor account (a dev
+// container), start the binary as an unprivileged user instead.
 //
 // Must be called before opening the log file, the unified app DB, or
 // any other persistent resource the daemon will own — otherwise
@@ -1589,12 +1589,9 @@ func dropPrivilegesIfRoot(cfg *config.Config) error {
 
 	mgr, err := droppriv.NewManager(conf)
 	if err != nil {
-		// Most likely cause: condor user doesn't exist in the
-		// host's nsswitch chain (dev containers, CI). Log loud
-		// and continue as root rather than refusing to start —
-		// the operator may be doing local testing.
-		log.Printf("WARNING: cannot resolve condor user identity (%v); continuing as root", err)
-		return nil //nolint:nilerr // intentional: log + continue
+		return fmt.Errorf("cannot resolve the user to drop privileges to "+
+			"(set CONDOR_USER or CONDOR_IDS, or create the condor user); "+
+			"refusing to run as root: %w", err)
 	}
 	if err := mgr.Start(); err != nil {
 		return fmt.Errorf("droppriv.Start: %w", err)
@@ -1824,8 +1821,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// Credentials that need root to read (pool signing key, KEK,
 	// TLS cert/key) are expected to be condor-readable per HTCondor
 	// convention (mode 0600 condor:condor or 0640 root:condor).
-	// dropPrivilegesIfRoot is a no-op when we're already non-root
-	// or when the condor user doesn't exist (dev/CI containers).
+	// dropPrivilegesIfRoot is a no-op when we're already non-root.
 	if err := dropPrivilegesIfRoot(cfg); err != nil {
 		return fmt.Errorf("failed to drop privileges: %w", err)
 	}
