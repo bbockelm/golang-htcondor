@@ -63,6 +63,12 @@ const (
 	// keeps one for the life of the process. The browser's EventSource
 	// reconnects on its own, so ending is cheap and bounds the leak.
 	jobWatchMaxAge = 30 * time.Minute
+	// jobWatchRecheckInterval is how often a watch opened through a
+	// project lead's read scope re-checks that the lead may still read
+	// the job. The stream otherwise outlives the decision that admitted
+	// it: the poller keeps the constraint it started with, and the mirror
+	// feed is keyed by job id alone.
+	jobWatchRecheckInterval = 60 * time.Second
 )
 
 func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID string) {
@@ -87,8 +93,9 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 
 	// The same owner scope a plain GET of this job gets. A watch reads
 	// job state continuously, so it is the last place to be laxer than
-	// the one-shot read.
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	// the one-shot read -- or stricter, which would break the detail
+	// page for a project lead the GET lets in.
+	constraint, err := s.jobReadScope(ctx, r, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -101,6 +108,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 
 	ctx, cancel := context.WithTimeout(ctx, jobWatchMaxAge)
 	defer cancel()
+	ctx = s.watchLeadAccess(ctx, r, cluster, proc)
 
 	// Subscribe before the first read, not after.
 	//
@@ -338,4 +346,64 @@ func subscribeFeed(s *Handler, cluster, proc int64) (<-chan jobWatchUpdateSource
 		}
 	}()
 	return out, cancel
+}
+
+// watchLeadAccess returns a context that is cancelled when the caller can no
+// longer read the job, for a watch admitted through a project lead's read
+// scope. Only a lead's access can lapse while the stream is open -- the leads
+// file is edited, or the job leaves the project -- so other callers get ctx
+// back unchanged and pay nothing. Cancelling is how the stream ends: its loop
+// already returns on ctx.Done.
+func (s *Handler) watchLeadAccess(ctx context.Context, r *http.Request, cluster, proc int) context.Context {
+	if len(s.projectLeadReadProjects(r)) == 0 {
+		return ctx
+	}
+	interval := s.jobWatchRecheck
+	if interval <= 0 {
+		interval = jobWatchRecheckInterval
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		defer cancel()
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if !s.jobWatchStillReadable(ctx, r, cluster, proc) {
+					s.logger.Info(logging.DestinationSecurity,
+						"Ending a job watch: the caller may no longer read the job",
+						"job", fmt.Sprintf("%d.%d", cluster, proc), "remote_addr", r.RemoteAddr)
+					return
+				}
+			}
+		}
+	}()
+	return ctx
+}
+
+// jobWatchStillReadable re-runs the read scope that admitted a watch and asks
+// whether the job still falls inside it. A query error keeps the stream:
+// a schedd blip is not lost access, and the next recheck will ask again.
+//
+// A session that has gone -- logged out, expired, deleted -- is lost access.
+// It has to be checked here rather than left to jobReadScope: with no
+// session that falls back to bulkOwnerScope, which treats a request without
+// one as an API-token caller and returns the bare job constraint, i.e. the
+// widest scope there is.
+func (s *Handler) jobWatchStillReadable(ctx context.Context, r *http.Request, cluster, proc int) bool {
+	if _, ok := s.getSessionFromRequest(r); !ok {
+		return false
+	}
+	constraint, err := s.jobReadScope(ctx, r, cluster, proc)
+	if err != nil {
+		return false
+	}
+	ad, err := s.scheddJobQuery(ctx, constraint)
+	if err != nil {
+		return true
+	}
+	return ad != nil
 }

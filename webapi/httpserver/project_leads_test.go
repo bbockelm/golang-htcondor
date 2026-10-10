@@ -1,0 +1,1396 @@
+package httpserver
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/PelicanPlatform/classad/classad"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
+)
+
+// --- leads file and pattern ------------------------------------------------
+
+func TestParseProjectLeads(t *testing.T) {
+	const file = `
+# project   leads
+CHTC_Staff  alice, bob %chtc-admins   # trailing comment
+cs101       %cs101-tas,carol
+cs101       dave                        # a second line for the same project
+CS101       erin                        # case-insensitive: same project
+
+lonely
+bad"name    mallory
+weird       %
+`
+	entries, warnings, err := parseProjectLeads(strings.NewReader(file))
+	if err != nil {
+		t.Fatalf("parseProjectLeads: %v", err)
+	}
+
+	staff := entries["chtc_staff"]
+	if staff == nil {
+		t.Fatalf("CHTC_Staff missing; got %v", entries)
+	}
+	if staff.project != "CHTC_Staff" {
+		t.Errorf("project spelling = %q, want the file's", staff.project)
+	}
+	if want := []string{"alice", "bob"}; !reflect.DeepEqual(staff.users, want) {
+		t.Errorf("users = %v, want %v", staff.users, want)
+	}
+	if want := []string{"chtc-admins"}; !reflect.DeepEqual(staff.groups, want) {
+		t.Errorf("groups = %v, want %v", staff.groups, want)
+	}
+
+	cs := entries["cs101"]
+	if cs == nil {
+		t.Fatalf("cs101 missing")
+	}
+	if want := []string{"carol", "dave", "erin"}; !reflect.DeepEqual(cs.users, want) {
+		t.Errorf("cs101 users = %v, want %v (lines merge, case-insensitively)", cs.users, want)
+	}
+	if want := []string{"cs101-tas"}; !reflect.DeepEqual(cs.groups, want) {
+		t.Errorf("cs101 groups = %v, want %v", cs.groups, want)
+	}
+
+	if _, ok := entries["lonely"]; ok {
+		t.Errorf("a project with no leads should not be an entry")
+	}
+	for key := range entries {
+		if strings.Contains(key, `"`) {
+			t.Errorf("a project name with a quote was accepted: %q", key)
+		}
+	}
+	// lonely, bad"name, and the bare %.
+	if len(warnings) != 3 {
+		t.Errorf("warnings = %v, want 3", warnings)
+	}
+}
+
+func writeLeadsFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "project-leads")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write leads file: %v", err)
+	}
+	return path
+}
+
+// leadsProject reports whether project is among the user's led projects,
+// through LedProjects -- the call production makes.
+func leadsProject(p *projectLeads, project, user string, groups []string) bool {
+	for _, led := range p.LedProjects(user, groups) {
+		if strings.EqualFold(led, project) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProjectLeadsFromFile(t *testing.T) {
+	path := writeLeadsFile(t, "Physics alice %physics-leads\nChem bob\n")
+	p := newProjectLeads(path, "", "example.org", nil)
+
+	for _, tc := range []struct {
+		name    string
+		user    string
+		groups  []string
+		project string
+		want    bool
+	}{
+		{"named user", "alice", nil, "Physics", true},
+		{"named user, qualified and in another case", "ALICE@example.org", nil, "physics", true},
+		{"named user, other project", "alice", nil, "Chem", false},
+		{"group member", "zed", []string{"Physics-Leads"}, "Physics", true},
+		{"group member, other project", "zed", []string{"physics-leads"}, "Chem", false},
+		{"nobody", "mallory", []string{"users"}, "Physics", false},
+		{"unknown project", "alice", nil, "Biology", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := leadsProject(p, tc.project, tc.user, tc.groups); got != tc.want {
+				t.Errorf("leads(%q, %q, %v) = %v, want %v", tc.project, tc.user, tc.groups, got, tc.want)
+			}
+		})
+	}
+
+	if got := p.LedProjects("alice", []string{"chem-x"}); !reflect.DeepEqual(got, []string{"Physics"}) {
+		t.Errorf("LedProjects(alice) = %v", got)
+	}
+	if got := p.LedProjects("mallory", nil); len(got) != 0 {
+		t.Errorf("LedProjects(mallory) = %v, want none", got)
+	}
+}
+
+// TestProjectLeadUserEntryDomain: an entry that names a domain matches only
+// that identity -- or a bare session name that becomes it once qualified with
+// UID_DOMAIN, as after local identity mapping -- while a bare entry matches
+// the name in any domain.
+func TestProjectLeadUserEntryDomain(t *testing.T) {
+	p := newProjectLeads(writeLeadsFile(t,
+		"Qualified bob@other.org\nBare bob\nLocal alice@example.org\n"), "", "example.org", nil)
+
+	for _, tc := range []struct {
+		project, user string
+		want          bool
+	}{
+		{"Qualified", "bob@other.org", true},
+		{"Qualified", "BOB@Other.ORG", true},
+		{"Qualified", "bob@example.org", false},
+		// Bare bob qualifies to bob@example.org, which is not the entry.
+		{"Qualified", "bob", false},
+		{"Bare", "bob@example.org", true},
+		{"Bare", "bob@other.org", true},
+		{"Bare", "bob", true},
+		// After local identity mapping the session name is bare.
+		{"Local", "alice", true},
+		{"Local", "ALICE", true},
+		{"Local", "alice@example.org", true},
+		{"Local", "alice@other.org", false},
+	} {
+		if got := leadsProject(p, tc.project, tc.user, nil); got != tc.want {
+			t.Errorf("leads(%q, %q) = %v, want %v", tc.project, tc.user, got, tc.want)
+		}
+	}
+	if got := p.LedProjects("bob@example.org", nil); !reflect.DeepEqual(got, []string{"Bare"}) {
+		t.Errorf("LedProjects(bob@example.org) = %v, want [Bare]", got)
+	}
+	if got := p.LedProjects("bob@other.org", nil); !reflect.DeepEqual(got, []string{"Bare", "Qualified"}) {
+		t.Errorf("LedProjects(bob@other.org) = %v, want [Bare Qualified]", got)
+	}
+
+	// With no UID_DOMAIN a bare name cannot be qualified, so it never
+	// matches a domain entry.
+	noDomain := newProjectLeads(writeLeadsFile(t, "Local alice@example.org\n"), "", "", nil)
+	if leadsProject(noDomain, "Local", "alice", nil) {
+		t.Errorf("a bare name matched a domain entry with no UID_DOMAIN to qualify it")
+	}
+}
+
+// TestProjectLeadsGroupPattern covers HTTP_API_PROJECT_LEADS_GROUP: which
+// projects a caller's groups make them lead, and which patterns are refused.
+func TestProjectLeadsGroupPattern(t *testing.T) {
+	p := newProjectLeads("", "{project}-leads", "", nil)
+	groups := []string{"users", "Physics-LEADS", "cs101-leads", "-leads", "leads"}
+
+	got := p.LedProjects("anyone", groups)
+	if want := []string{"cs101", "Physics"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("LedProjects = %v, want %v", got, want)
+	}
+	if leadsProject(p, "users", "anyone", groups) {
+		t.Errorf("a group that does not match the pattern granted a project")
+	}
+
+	// A prefix pattern works the same way.
+	pre := newProjectLeads("", "lead_{project}", "", nil)
+	if got := pre.LedProjects("x", []string{"LEAD_bio", "leadbio"}); !reflect.DeepEqual(got, []string{"bio"}) {
+		t.Errorf("prefix pattern: LedProjects = %v, want [bio]", got)
+	}
+}
+
+// TestProjectLeadsGroupPatternRefused: patterns that cannot be made safe are
+// ignored. A bare "{project}" is the dangerous one: every group the caller
+// holds would become a project they lead.
+func TestProjectLeadsGroupPatternRefused(t *testing.T) {
+	for _, bad := range []string{"leads", "{project}-{project}", "{project}", "  {project}  "} {
+		p := newProjectLeads("", bad, "", nil)
+		if p.configured() {
+			t.Errorf("pattern %q should be refused", bad)
+		}
+		if got := p.LedProjects("anyone", []string{"users", "physics"}); len(got) != 0 {
+			t.Errorf("pattern %q granted %v", bad, got)
+		}
+	}
+}
+
+// TestProjectLeadsFileReloads: the file is the revocation path, so an edit
+// must take effect without a restart, and an unreadable file must grant
+// nothing rather than keep the last copy.
+func TestProjectLeadsFileReloads(t *testing.T) {
+	path := writeLeadsFile(t, "Physics alice\n")
+	p := newProjectLeads(path, "", "", nil)
+	p.reloadEvery = time.Nanosecond
+	if !leadsProject(p, "Physics", "alice", nil) {
+		t.Fatalf("alice should lead Physics")
+	}
+
+	// A different size, so the change is seen whatever the mtime
+	// resolution of the filesystem.
+	if err := os.WriteFile(path, []byte("Physics bob, carol\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if leadsProject(p, "Physics", "alice", nil) {
+		t.Errorf("alice still leads Physics after being removed from the file")
+	}
+	if !leadsProject(p, "Physics", "carol", nil) {
+		t.Errorf("carol was added but does not lead Physics")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if leadsProject(p, "Physics", "carol", nil) {
+		t.Errorf("a missing file still granted leadership")
+	}
+
+	// A file that was never there is the same: no leads, and no panic.
+	missing := newProjectLeads(filepath.Join(t.TempDir(), "absent"), "", "", nil)
+	if !missing.configured() {
+		t.Errorf("a configured path should count as configured even when unreadable")
+	}
+	if got := missing.LedProjects("alice", nil); len(got) != 0 {
+		t.Errorf("missing file granted %v", got)
+	}
+}
+
+// --- constraint construction ----------------------------------------------
+
+// evalConstraint evaluates a constraint against an ad the way the schedd
+// would: only a boolean true matches.
+func evalConstraint(t *testing.T, constraint string, ad *classad.ClassAd) bool {
+	t.Helper()
+	expr, err := classad.ParseExpr(constraint)
+	if err != nil {
+		t.Fatalf("constraint %q does not parse: %v", constraint, err)
+	}
+	v := expr.Eval(ad)
+	if !v.IsBool() {
+		return false
+	}
+	b, _ := v.BoolValue()
+	return b
+}
+
+func leadJobAd(cluster int, owner, project string, status int) *classad.ClassAd {
+	ad := classad.New()
+	ad.InsertAttr("ClusterId", int64(cluster))
+	ad.InsertAttr("ProcId", 0)
+	ad.InsertAttrString("Owner", owner)
+	if project != "" {
+		ad.InsertAttrString("ProjectName", project)
+	}
+	ad.InsertAttr("JobStatus", int64(status))
+	return ad
+}
+
+func TestProjectClauseSemantics(t *testing.T) {
+	inPhysics := leadJobAd(1, "bob", "physics", 1) // differs in case from the lead's spelling
+	inChem := leadJobAd(2, "bob", "Chem", 1)
+	noProject := leadJobAd(3, "bob", "", 1)
+	intProject := classad.New()
+	intProject.InsertAttr("ProjectName", 7)
+	mine := leadJobAd(4, "alice", "Chem", 1)
+
+	clause := projectClause([]string{"Physics"})
+	if !evalConstraint(t, clause, inPhysics) {
+		t.Errorf("%s should match ProjectName \"physics\" (ClassAd == is case-insensitive)", clause)
+	}
+	if evalConstraint(t, clause, inChem) || evalConstraint(t, clause, noProject) || evalConstraint(t, clause, intProject) {
+		t.Errorf("%s matched a job outside the project", clause)
+	}
+	// The =?= true wrapper is what keeps an undefined ProjectName from
+	// leaking through an enclosing ||.
+	if evalConstraint(t, "("+clause+") || (ProjectName == \"nope\")", noProject) {
+		t.Errorf("an undefined ProjectName leaked through ||")
+	}
+
+	for _, user := range []string{"JobStatus == 1 || true", "true || false", "(JobStatus == 1) || (true)"} {
+		scoped, err := scopeToProjects([]string{"Physics"}, user)
+		if err != nil {
+			t.Fatalf("scopeToProjects(%q): %v", user, err)
+		}
+		if evalConstraint(t, scoped, inChem) || evalConstraint(t, scoped, noProject) {
+			t.Errorf("user constraint %q widened %q", user, scoped)
+		}
+		if !evalConstraint(t, scoped, inPhysics) {
+			t.Errorf("%q should still match the project's job", scoped)
+		}
+
+		read, err := scopeToOwnerOrProjects("alice", []string{"Physics"}, user)
+		if err != nil {
+			t.Fatalf("scopeToOwnerOrProjects(%q): %v", user, err)
+		}
+		if evalConstraint(t, read, inChem) || evalConstraint(t, read, noProject) {
+			t.Errorf("user constraint %q widened the read scope %q", user, read)
+		}
+		if !evalConstraint(t, read, inPhysics) || !evalConstraint(t, read, mine) {
+			t.Errorf("read scope %q should include the project's jobs and the caller's own", read)
+		}
+	}
+	// An unbalanced constraint is refused, not spliced.
+	if _, err := scopeToProjects([]string{"Physics"}, "true) || (true"); err == nil {
+		t.Errorf("an unbalanced constraint was accepted")
+	}
+	if _, err := scopeToOwnerOrProjects("alice", []string{"Physics"}, "true) || (true"); err == nil {
+		t.Errorf("an unbalanced constraint was accepted for the read scope")
+	}
+	if got := projectClause(nil); got != "false" {
+		t.Errorf("no projects should match nothing, got %q", got)
+	}
+}
+
+// --- superuser mode, project scope ----------------------------------------
+
+// leadTestEnv is a handler with superuser mode on, a session store, and the
+// schedd replaced by in-memory job ads that constraints are really evaluated
+// against.
+type leadTestEnv struct {
+	t         *testing.T
+	h         *Handler
+	leadsPath string
+	logPath   string
+
+	mu          sync.Mutex
+	ads         []*classad.ClassAd
+	constraints []string
+	opts        []*htcondor.QueryOptions
+}
+
+func newLeadTestEnv(t *testing.T, superuserGroup, leadsFile, leadsPattern string) *leadTestEnv {
+	t.Helper()
+	env := &leadTestEnv{t: t, logPath: filepath.Join(t.TempDir(), "audit.log")}
+	logger, err := logging.New(&logging.Config{
+		OutputPath:        env.logPath,
+		DefaultLevel:      logging.VerbosityInfo,
+		SkipGlobalInstall: true,
+	})
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	if leadsFile != "" {
+		env.leadsPath = writeLeadsFile(t, leadsFile)
+	}
+	h := &Handler{
+		logger:         logger,
+		uidDomain:      "example.org",
+		trustDomain:    "example.org",
+		signingKeyPath: writeSigningKey(t),
+		sessionStore:   createTestSessionStore(t, time.Hour),
+		tokenCache:     NewTokenCache(),
+	}
+	h.initSuperuserMode(HandlerConfig{
+		SuperuserGroup:    superuserGroup,
+		ProjectLeadsFile:  env.leadsPath,
+		ProjectLeadsGroup: leadsPattern,
+	}, logger)
+	if !h.superuserModeAvailable() {
+		t.Fatalf("superuser mode did not enable")
+	}
+	// The leads are not queue superusers, so they act via the fallback
+	// identity. root is, so a lead may not act for root.
+	h.superuserPolicy.source = &fakeSuperUsers{users: []string{"condor@example.org", "root", "dana@other.org"}}
+	if err := h.superuserPolicy.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	h.projectLeads.reloadEvery = time.Nanosecond
+	h.jobQueryOverride = env.query
+	env.h = h
+	return env
+}
+
+// query stands in for the schedd: it evaluates the constraint against the
+// whole ad, as the schedd does, and returns only the projected attributes,
+// unevaluated, as the schedd does. A decision made by reading the returned
+// ad therefore sees exactly what it would in production -- in particular
+// not the attributes an expression in it refers to.
+func (e *leadTestEnv) query(_ context.Context, constraint string, opts *htcondor.QueryOptions) ([]*classad.ClassAd, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.constraints = append(e.constraints, constraint)
+	e.opts = append(e.opts, opts)
+	limit := 0
+	var projection []string
+	if opts != nil {
+		limit = opts.Limit
+		projection = opts.Projection
+	}
+	var out []*classad.ClassAd
+	for _, ad := range e.ads {
+		if !evalConstraint(e.t, constraint, ad) {
+			continue
+		}
+		out = append(out, projectAd(ad, projection))
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// projectAd copies the named attributes of ad, as unevaluated expressions.
+// An empty projection, or "*", is the whole ad.
+func projectAd(ad *classad.ClassAd, projection []string) *classad.ClassAd {
+	if len(projection) == 0 || (len(projection) == 1 && projection[0] == "*") {
+		return ad
+	}
+	out := classad.New()
+	for _, name := range projection {
+		if expr, ok := ad.Lookup(name); ok {
+			out.InsertExpr(name, expr)
+		}
+	}
+	return out
+}
+
+// auditLog returns what the handler has logged so far.
+func (e *leadTestEnv) auditLog() string {
+	e.t.Helper()
+	b, err := os.ReadFile(e.logPath)
+	if err != nil {
+		e.t.Fatalf("reading the log: %v", err)
+	}
+	return string(b)
+}
+
+func (e *leadTestEnv) session(user string, groups ...string) string {
+	e.t.Helper()
+	sid, _, err := e.h.sessionStore.Create(user, groups)
+	if err != nil {
+		e.t.Fatalf("session for %s: %v", user, err)
+	}
+	return sid
+}
+
+func (e *leadTestEnv) request(method, target, sid string, body any) *http.Request {
+	var buf bytes.Buffer
+	if body != nil {
+		_ = json.NewEncoder(&buf).Encode(body)
+	}
+	r := httptest.NewRequestWithContext(context.Background(), method, target, &buf)
+	r.Header.Set("Content-Type", "application/json")
+	if sid != "" {
+		r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec
+	}
+	return r
+}
+
+// arm arms superuser mode through the endpoint and returns the response.
+func (e *leadTestEnv) arm(sid string) (int, SuperuserModeResponse) {
+	e.t.Helper()
+	w := httptest.NewRecorder()
+	e.h.handleSuperuserMode(w, e.request(http.MethodPost, "/api/v1/admin/superuser", sid, map[string]bool{"enabled": true}))
+	var resp SuperuserModeResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	return w.Code, resp
+}
+
+// recordedAction is a JobActionFunc that records what it was asked to do and
+// which identity it would have done it as, and reports that every job its
+// constraint matches was acted on.
+type recordedAction struct {
+	env   *leadTestEnv
+	calls []actionCall
+}
+
+type actionCall struct {
+	constraint string
+	reason     string
+	identity   string
+	matched    []int64
+}
+
+func (a *recordedAction) fn(ctx context.Context, constraint, reason string) (*htcondor.JobActionResults, error) {
+	call := actionCall{constraint: constraint, reason: reason}
+	if cfg, ok := htcondor.GetSecurityConfigFromContext(ctx); ok {
+		call.identity = cfg.SecurityTag
+	}
+	for _, ad := range a.env.ads {
+		if evalConstraint(a.env.t, constraint, ad) {
+			id, _ := ad.EvaluateAttrInt("ClusterId")
+			call.matched = append(call.matched, id)
+		}
+	}
+	a.calls = append(a.calls, call)
+	n := len(call.matched)
+	return &htcondor.JobActionResults{TotalJobs: n, Success: n}, nil
+}
+
+func (a *recordedAction) actedOn() []int64 {
+	var out []int64
+	for _, c := range a.calls {
+		out = append(out, c.matched...)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestProjectLeadArmsWithoutSuperuserGroup: project leads must work with
+// HTTP_API_SUPERUSER_GROUP unset -- and an unset group must not make
+// everybody a global superuser, which is what groupSet.allows would say about
+// an empty list.
+func TestProjectLeadArmsWithoutSuperuserGroup(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+
+	code, resp := env.arm(env.session("alice", "users"))
+	if code != http.StatusOK {
+		t.Fatalf("lead could not arm: %d", code)
+	}
+	if !resp.Active || resp.Scope != "project" || !reflect.DeepEqual(resp.Projects, []string{"Physics"}) {
+		t.Errorf("arm response = %+v, want project scope for [Physics]", resp)
+	}
+
+	code, _ = env.arm(env.session("mallory", "users"))
+	if code != http.StatusForbidden {
+		t.Errorf("a non-lead armed superuser mode: %d", code)
+	}
+	if env.h.globalSuperuser([]string{"users"}) {
+		t.Errorf("an empty HTTP_API_SUPERUSER_GROUP made a session a global superuser")
+	}
+
+	// The group pattern alone is enough too.
+	byGroup := newLeadTestEnv(t, "", "", "{project}-leads")
+	code, resp = byGroup.arm(byGroup.session("zed", "users", "CS101-leads"))
+	if code != http.StatusOK || resp.Scope != "project" || !reflect.DeepEqual(resp.Projects, []string{"CS101"}) {
+		t.Errorf("pattern lead arm = %d %+v, want project scope for [CS101]", code, resp)
+	}
+	if code, _ := byGroup.arm(byGroup.session("mallory", "users")); code != http.StatusForbidden {
+		t.Errorf("a session in no lead group armed: %d", code)
+	}
+}
+
+// TestProjectLeadAuthMeReportsScope covers what the banner reads.
+func TestProjectLeadAuthMeReportsScope(t *testing.T) {
+	env := newLeadTestEnv(t, "admins", "Physics alice\nChem alice\n", "")
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+	w := httptest.NewRecorder()
+	env.h.handleAuthMe(w, env.request(http.MethodGet, "/api/v1/auth/me", sid, nil))
+	var me AuthMeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if !me.SuperuserActive || me.SuperuserScope != "project" ||
+		!reflect.DeepEqual(me.SuperuserProjects, []string{"Chem", "Physics"}) {
+		t.Errorf("auth/me = %+v, want active project scope for [Chem Physics]", me)
+	}
+	if !reflect.DeepEqual(me.ProjectLeadOf, []string{"Chem", "Physics"}) {
+		t.Errorf("project_lead_of = %v", me.ProjectLeadOf)
+	}
+
+	admin := env.session("root", "admins")
+	if code, resp := env.arm(admin); code != http.StatusOK || resp.Scope != "global" {
+		t.Errorf("global arm = %d %+v, want global scope", code, resp)
+	}
+}
+
+func holdOne(env *leadTestEnv, sid, jobID string) (*httptest.ResponseRecorder, *recordedAction) {
+	act := &recordedAction{env: env}
+	w := httptest.NewRecorder()
+	env.h.handleSingleJobAction(w, env.request(http.MethodPost, "/api/v1/jobs/"+jobID+"/hold", sid,
+		map[string]string{"reason": "caller text"}), jobID, "Held", "hold", act.fn)
+	return w, act
+}
+
+// TestProjectLeadSingleJobAction is the core rule: a lead acts on another
+// user's job only when the job is in a project they lead.
+func TestProjectLeadSingleJobAction(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{
+		leadJobAd(1, "bob", "physics", 1), // led, different case
+		leadJobAd(2, "bob", "Chem", 1),    // another project
+		leadJobAd(3, "bob", "", 1),        // no project at all
+		leadJobAd(4, "alice", "Chem", 1),  // the lead's own job
+	}
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+
+	t.Run("led project is acted on as the fallback identity", func(t *testing.T) {
+		w, act := holdOne(env, sid, "1.0")
+		if len(act.calls) != 1 {
+			t.Fatalf("action not performed: %d %s", w.Code, w.Body.String())
+		}
+		call := act.calls[0]
+		if !reflect.DeepEqual(call.matched, []int64{1}) {
+			t.Errorf("acted on %v, want [1]", call.matched)
+		}
+		if !strings.Contains(call.constraint, "ProjectName") {
+			t.Errorf("constraint %q does not carry the project clause the schedd re-checks", call.constraint)
+		}
+		if want := "Held by alice@example.org via the web UI (project lead for Physics, acting for bob@example.org)"; call.reason != want {
+			t.Errorf("reason = %q, want %q", call.reason, want)
+		}
+		if !strings.Contains(call.identity, "condor@example.org->bob@example.org") {
+			t.Errorf("acted as %q, want the fallback identity for bob", call.identity)
+		}
+	})
+
+	for _, tc := range []struct{ name, job string }{
+		{"another project is refused", "2.0"},
+		{"no ProjectName is refused", "3.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, act := holdOne(env, sid, tc.job)
+			if w.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403 (%s)", w.Code, w.Body.String())
+			}
+			if len(act.calls) != 0 {
+				t.Errorf("the action ran anyway: %+v", act.calls)
+			}
+			if !strings.Contains(w.Body.String(), "project you lead") {
+				t.Errorf("refusal does not say why: %s", w.Body.String())
+			}
+		})
+	}
+
+	t.Run("the TOCTOU clause holds if the owner moves the job", func(t *testing.T) {
+		moved := leadJobAd(1, "bob", "Chem", 1)
+		imp := &Impersonation{Target: "bob@example.org", Project: "Physics"}
+		constraint, err := env.h.scopeForImpersonation(imp, 1, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if evalConstraint(t, constraint, moved) {
+			t.Errorf("%q still matches a job moved out of the project", constraint)
+		}
+		if !evalConstraint(t, constraint, env.ads[0]) {
+			t.Errorf("%q does not match the job in the project", constraint)
+		}
+	})
+
+	t.Run("own job is not an impersonation", func(t *testing.T) {
+		_, act := holdOne(env, sid, "4.0")
+		if len(act.calls) != 1 {
+			t.Fatalf("own-job action not performed")
+		}
+		if act.calls[0].reason != "caller text" {
+			t.Errorf("own job got reason %q, want the caller's", act.calls[0].reason)
+		}
+	})
+}
+
+// TestGlobalSuperuserUnchangedByProjects: a global superuser still reaches
+// jobs in any project, or none, with the original reason text.
+func TestGlobalSuperuserUnchangedByProjects(t *testing.T) {
+	env := newLeadTestEnv(t, "admins", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{leadJobAd(3, "bob", "", 1)}
+	sid := env.session("root", "admins")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+	_, act := holdOne(env, sid, "3.0")
+	if len(act.calls) != 1 {
+		t.Fatalf("global superuser was refused a job with no project")
+	}
+	if want := "Held by root@example.org via the web UI (superuser mode, acting for bob@example.org)"; act.calls[0].reason != want {
+		t.Errorf("reason = %q, want %q", act.calls[0].reason, want)
+	}
+	if strings.Contains(act.calls[0].constraint, "ProjectName") {
+		t.Errorf("global scope should not add a project clause: %q", act.calls[0].constraint)
+	}
+}
+
+// TestProjectLeadRevokedAfterArming: leadership is re-read on every action,
+// so editing the file takes effect before the arm expires.
+func TestProjectLeadRevokedAfterArming(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{leadJobAd(1, "bob", "Physics", 1)}
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+	if err := os.WriteFile(env.leadsPath, []byte("Physics carol, dave\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w, act := holdOne(env, sid, "1.0")
+	if w.Code != http.StatusForbidden || len(act.calls) != 0 {
+		t.Fatalf("revoked lead still acted: %d %+v", w.Code, act.calls)
+	}
+	if _, armed := env.h.superuserArmed.Armed(sid); armed {
+		t.Errorf("the revoked session was left armed")
+	}
+}
+
+// TestProjectLeadArmCapsScope: a session armed as a lead does not become
+// global because its user was added to the superuser group afterwards, and a
+// session armed globally falls back to its projects if the group is lost.
+func TestProjectLeadArmCapsScope(t *testing.T) {
+	env := newLeadTestEnv(t, "admins", "Physics alice\n", "")
+	both := &SessionData{Username: "alice", Groups: []string{"admins"}}
+	leadOnly := &SessionData{Username: "alice"}
+
+	if eff := effectiveSuperuserScope(armedSession{projectScoped: true}, env.h.superuserScopeFor(both)); eff.Global {
+		t.Errorf("a project-armed session became global")
+	}
+	eff := effectiveSuperuserScope(armedSession{}, env.h.superuserScopeFor(leadOnly))
+	if eff.Global || !reflect.DeepEqual(eff.Projects, []string{"Physics"}) {
+		t.Errorf("a globally armed session that lost the group = %+v, want project scope", eff)
+	}
+	if eff := effectiveSuperuserScope(armedSession{}, env.h.superuserScopeFor(both)); !eff.Global {
+		t.Errorf("a globally armed superuser lost global scope")
+	}
+}
+
+// TestProjectLeadBulkCannotWiden: a lead's bulk action reaches their own jobs
+// and their projects' jobs, and a constraint ending "|| true" does not reach
+// anything else.
+func TestProjectLeadBulkCannotWiden(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{
+		leadJobAd(1, "bob", "Physics", 1),
+		leadJobAd(2, "carol", "physics", 1),
+		leadJobAd(3, "bob", "Chem", 1),
+		leadJobAd(4, "bob", "", 1),
+		leadJobAd(5, "alice", "Chem", 1),
+		leadJobAd(6, "dave", "Chem", 1),
+	}
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+
+	for _, user := range []string{"JobStatus == 1 || true", "true"} {
+		t.Run(user, func(t *testing.T) {
+			env.constraints = nil
+			act := &recordedAction{env: env}
+			w := httptest.NewRecorder()
+			env.h.handleBulkJobAction(w, env.request(http.MethodPost, "/api/v1/jobs/hold", sid,
+				map[string]string{"constraint": user}), "Held", "hold", act.fn)
+			if w.Code != http.StatusOK {
+				t.Fatalf("bulk hold = %d: %s", w.Code, w.Body.String())
+			}
+			if got, want := act.actedOn(), []int64{1, 2, 5}; !reflect.DeepEqual(got, want) {
+				t.Errorf("acted on %v, want %v (own job plus Physics)", got, want)
+			}
+			// The planning reads themselves were confined, not just the
+			// batches: no query this mode sent could match a job outside
+			// the scope.
+			if len(env.constraints) == 0 {
+				t.Fatalf("no planning query was made")
+			}
+			for _, c := range env.constraints {
+				for _, outside := range []int{2, 3, 5} { // jobs 3, 4, 6
+					if evalConstraint(t, c, env.ads[outside]) {
+						id, _ := env.ads[outside].EvaluateAttrInt("ClusterId")
+						t.Errorf("planning query %q reads job %d, outside the lead's scope", c, id)
+					}
+				}
+			}
+			for _, c := range act.calls {
+				if strings.Contains(c.reason, "acting for") && !strings.Contains(c.reason, "project lead for Physics") {
+					t.Errorf("batch reason does not name the project: %q", c.reason)
+				}
+			}
+		})
+	}
+}
+
+// TestJobProxyRefusesProjectLead: the browser-proxied app path is the one
+// remote-access route project leads do not get, while a global superuser
+// keeps it.
+func TestJobProxyRefusesProjectLead(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, "hello from the job")
+	}))
+	defer backend.Close()
+
+	h := newProxyTestHandler(t, strings.TrimPrefix(backend.URL, "http://"))
+	h.userHeader = ""
+	h.userHeaderUnsafeAllowAll = false
+	h.sessionStore = createTestSessionStore(t, time.Hour)
+	h.initSuperuserMode(HandlerConfig{
+		SuperuserGroup:   "admins",
+		ProjectLeadsFile: writeLeadsFile(t, "Physics alice\n"),
+	}, h.logger)
+	h.superuserPolicy.source = &fakeSuperUsers{users: []string{"condor@test.htcondor.org"}}
+	_ = h.superuserPolicy.Refresh(context.Background())
+	ad := leadJobAd(12, "bob", "Physics", 2)
+	h.jobQueryOverride = func(_ context.Context, constraint string, _ *htcondor.QueryOptions) ([]*classad.ClassAd, error) {
+		if evalConstraint(t, constraint, ad) {
+			return []*classad.ClassAd{ad}, nil
+		}
+		return nil, nil
+	}
+
+	proxy := func(user string, groups ...string) *httptest.ResponseRecorder {
+		sid, _, err := h.sessionStore.Create(user, groups)
+		if err != nil {
+			t.Fatal(err)
+		}
+		armed := h.resolveImpersonationIdentity(context.Background(), user)
+		armed.projectScoped = !h.globalSuperuser(groups)
+		h.superuserArmed.Arm(sid, armed)
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/jobs/12.0/proxy/8080/", nil)
+		r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec
+		w := httptest.NewRecorder()
+		h.handleJobProxy(w, r, 12, 0, jobProxyTarget{Port: 8080}, "/")
+		return w
+	}
+
+	if w := proxy("alice"); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "interactive app") {
+		t.Errorf("project lead reached bob's app: %d %s", w.Code, w.Body.String())
+	}
+	if w := proxy("root", "admins"); w.Code != http.StatusOK {
+		t.Errorf("global superuser was refused the proxy: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestProjectLeadReadScope: a lead reading "everyone" sees their own jobs
+// and their projects' jobs, and an admin or non-lead is unaffected.
+func TestProjectLeadReadScope(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.h.webuiAdminGroups = newGroupSet("web-admins")
+	ads := map[string]*classad.ClassAd{
+		"own":     leadJobAd(1, "alice", "Chem", 1),
+		"project": leadJobAd(2, "bob", "physics", 1),
+		"other":   leadJobAd(3, "bob", "Chem", 1),
+		"none":    leadJobAd(4, "bob", "", 1),
+	}
+
+	read := func(sid string, cluster int) string {
+		r := env.request(http.MethodGet, "/api/v1/jobs", sid, nil)
+		ctx := htcondor.WithAuthenticatedUser(context.Background(), env.h.sessionStore.Get(sid).Username)
+		c, err := env.h.jobReadScope(ctx, r, cluster, 0)
+		if err != nil {
+			t.Fatalf("jobReadScope: %v", err)
+		}
+		return c
+	}
+
+	lead := env.session("alice")
+	if got := env.h.projectLeadReadProjects(env.request(http.MethodGet, "/", lead, nil)); !reflect.DeepEqual(got, []string{"Physics"}) {
+		t.Fatalf("projectLeadReadProjects = %v", got)
+	}
+	for name, want := range map[string]bool{"own": true, "project": true, "other": false, "none": false} {
+		ad := ads[name]
+		cluster, _ := ad.EvaluateAttrInt("ClusterId")
+		if got := evalConstraint(t, read(lead, int(cluster)), ad); got != want {
+			t.Errorf("lead reading %s job: visible = %v, want %v", name, got, want)
+		}
+	}
+
+	nonLead := env.session("mallory")
+	if got := env.h.projectLeadReadProjects(env.request(http.MethodGet, "/", nonLead, nil)); got != nil {
+		t.Errorf("non-lead got read projects %v", got)
+	}
+	if evalConstraint(t, read(nonLead, 2), ads["project"]) {
+		t.Errorf("a non-lead could read a project job")
+	}
+
+	admin := env.session("alice", "web-admins")
+	if got := env.h.projectLeadReadProjects(env.request(http.MethodGet, "/", admin, nil)); got != nil {
+		t.Errorf("an admin should not be narrowed to projects, got %v", got)
+	}
+}
+
+// TestReconfigureOnServerWithoutSuperuserMode: the reconfigure setters run
+// against a daemon that started with the mode off. They must not panic, and
+// must not switch the mode on (it is built at startup).
+func TestReconfigureOnServerWithoutSuperuserMode(t *testing.T) {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	h := &Handler{logger: logger, uidDomain: "example.org"}
+	h.initSuperuserMode(HandlerConfig{}, logger)
+
+	h.SetSuperuserGroups("admins")
+	h.SetProjectLeadsFile(writeLeadsFile(t, "Physics alice\n"))
+	h.SetProjectLeadsGroup("{project}-leads")
+
+	if h.superuserModeAvailable() {
+		t.Errorf("a reconfigure switched superuser mode on")
+	}
+	// Read visibility needs no signing key, so it does follow the file.
+	if got := h.projectLeads.LedProjects("alice", nil); !reflect.DeepEqual(got, []string{"Physics"}) {
+		t.Errorf("leads after reconfigure = %v", got)
+	}
+}
+
+// TestProjectLeadRefusalIsAudited: a lead refused for a job outside their
+// projects leaves a security record naming them and the job.
+func TestProjectLeadRefusalIsAudited(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{leadJobAd(2, "bob", "Chem", 1)}
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+	if w, _ := holdOne(env, sid, "2.0"); w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	log := env.auditLog()
+	for _, want := range []string{"Project lead refused", "actor=alice", "subject=2.0", "not in a project"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("audit log lacks %q:\n%s", want, log)
+		}
+	}
+}
+
+// TestProjectLeadMembershipIsDecidedByTheSchedd: whether a job is in a led
+// project is the schedd's evaluation of the whole ad, not this server's
+// reading of a projected copy. A ProjectName that is an expression over
+// another attribute is the case where the two differ: the projected copy has
+// the reference but not what it refers to.
+func TestProjectLeadMembershipIsDecidedByTheSchedd(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\nChem alice\n", "")
+	byRef, err := classad.Parse(`[ClusterId = 1; ProcId = 0; Owner = "bob"; JobStatus = 1;
+		MyGroup = "physics"; ProjectName = MyGroup]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.ads = []*classad.ClassAd{byRef, leadJobAd(2, "bob", "chem", 1)}
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+
+	for _, tc := range []struct{ job, project string }{
+		{"1.0", "Physics"}, // through an attribute reference
+		{"2.0", "Chem"},    // the second of two led projects
+	} {
+		w, act := holdOne(env, sid, tc.job)
+		if len(act.calls) != 1 {
+			t.Fatalf("job %s: not acted on: %d %s", tc.job, w.Code, w.Body.String())
+		}
+		if want := "project lead for " + tc.project; !strings.Contains(act.calls[0].reason, want) {
+			t.Errorf("job %s: reason %q does not name %s", tc.job, act.calls[0].reason, tc.project)
+		}
+	}
+	// And nothing this mode asked the schedd for carried ProjectName back
+	// to be judged here.
+	for i, o := range env.opts {
+		if o != nil && slices.Contains(o.Projection, "ProjectName") {
+			t.Errorf("query %q projected ProjectName", env.constraints[i])
+		}
+	}
+}
+
+// TestProjectLeadRefusesPrivilegedOwner: a lead may not act for a queue
+// superuser or for the identity this server acts under, even in their own
+// project, and the refusal is audited. Nor before the queue-superuser set has
+// been read, when nobody can say.
+func TestProjectLeadRefusesPrivilegedOwner(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{
+		leadJobAd(1, "root", "Physics", 1),   // in QUEUE_SUPER_USERS
+		leadJobAd(2, "condor", "Physics", 1), // the fallback identity
+		leadJobAd(3, "bob", "Physics", 1),
+		// QUEUE_SUPER_USERS names dana with a domain; her jobs carry
+		// Owner "dana" and User "dana@other.org".
+		leadJobAd(4, "dana", "Physics", 1),
+	}
+	env.ads[3].InsertAttrString("User", "dana@other.org")
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+
+	for _, job := range []string{"1.0", "2.0", "4.0"} {
+		w, act := holdOne(env, sid, job)
+		if w.Code != http.StatusForbidden || len(act.calls) != 0 {
+			t.Errorf("job %s: lead acted for a privileged owner: %d %+v", job, w.Code, act.calls)
+		}
+	}
+	if log := env.auditLog(); !strings.Contains(log, "subject=1.0") || !strings.Contains(log, "queue superuser") {
+		t.Errorf("privileged-owner refusal not audited:\n%s", log)
+	}
+
+	// Bulk refuses the whole plan rather than skipping the job.
+	act := &recordedAction{env: env}
+	w := httptest.NewRecorder()
+	env.h.handleBulkJobAction(w, env.request(http.MethodPost, "/api/v1/jobs/hold", sid,
+		map[string]string{"constraint": "true"}), "Held", "hold", act.fn)
+	if w.Code != http.StatusForbidden || len(act.calls) != 0 {
+		t.Errorf("bulk acted with a privileged owner in scope: %d %+v", w.Code, act.calls)
+	}
+
+	// An ordinary member is still fine.
+	if _, act := holdOne(env, sid, "3.0"); len(act.calls) != 1 {
+		t.Errorf("lead was refused an ordinary member's job")
+	}
+
+	// A job whose User names a queue superuser is privileged even when its
+	// Owner does not, in single-job and in bulk -- where it is the only
+	// privileged job in scope.
+	odd := leadJobAd(5, "erin", "Physics", 1)
+	odd.InsertAttrString("User", "dana@other.org")
+	env.ads = []*classad.ClassAd{env.ads[2], odd}
+	if w, act := holdOne(env, sid, "5.0"); w.Code != http.StatusForbidden || len(act.calls) != 0 {
+		t.Errorf("lead acted on a job whose User is a queue superuser: %d", w.Code)
+	}
+	act = &recordedAction{env: env}
+	w = httptest.NewRecorder()
+	env.h.handleBulkJobAction(w, env.request(http.MethodPost, "/api/v1/jobs/hold", sid,
+		map[string]string{"constraint": "true"}), "Held", "hold", act.fn)
+	if w.Code != http.StatusForbidden || len(act.calls) != 0 {
+		t.Errorf("bulk acted with a superuser's User in scope: %d %+v", w.Code, act.calls)
+	}
+
+	// Unknown queue superusers: refuse.
+	env.h.superuserPolicy.mu.Lock()
+	env.h.superuserPolicy.users = nil
+	env.h.superuserPolicy.mu.Unlock()
+	if w, act := holdOne(env, sid, "3.0"); w.Code != http.StatusForbidden || len(act.calls) != 0 {
+		t.Errorf("lead acted before the queue superusers were known: %d", w.Code)
+	}
+}
+
+// listAs calls GET /api/v1/jobs as a session and returns the constraint the
+// schedd was asked for, or "" when the request never reached it.
+func (e *leadTestEnv) listAs(sid, query string) (int, string) {
+	e.t.Helper()
+	e.constraints = nil
+	w := httptest.NewRecorder()
+	e.h.handleListJobs(w, e.request(http.MethodGet, "/api/v1/jobs?"+query, sid, nil))
+	if len(e.constraints) == 0 {
+		return w.Code, ""
+	}
+	return w.Code, e.constraints[len(e.constraints)-1]
+}
+
+// TestJobListLeadScope drives the listing handler itself: what a lead, a
+// non-lead and an admin asking for everyone's jobs actually send to the
+// schedd -- which applies no owner filter of its own, so this constraint is
+// the whole of the enforcement.
+func TestJobListLeadScope(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.h.webuiAdminGroups = newGroupSet("web-admins")
+	own := leadJobAd(1, "alice", "Chem", 1)
+	inProject := leadJobAd(2, "bob", "physics", 1)
+	outside := leadJobAd(3, "bob", "Chem", 1)
+	noProject := leadJobAd(4, "bob", "", 1)
+	env.ads = []*classad.ClassAd{own, inProject, outside, noProject}
+
+	visible := func(constraint string) []int64 {
+		var ids []int64
+		for _, ad := range env.ads {
+			if evalConstraint(t, constraint, ad) {
+				id, _ := ad.EvaluateAttrInt("ClusterId")
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	}
+
+	lead := env.session("alice")
+	for _, c := range []string{"", "true", "JobStatus == 1 || true", "(true) || (true)", `ProjectName =!= "Physics" || true`} {
+		q := "owned_by_me=false"
+		if c != "" {
+			q += "&constraint=" + url.QueryEscape(c)
+		}
+		code, sent := env.listAs(lead, q)
+		if code != http.StatusOK {
+			t.Errorf("lead list with constraint %q = %d", c, code)
+			continue
+		}
+		if got := visible(sent); !reflect.DeepEqual(got, []int64{1, 2}) {
+			t.Errorf("lead list with constraint %q reaches %v via %q, want [1 2]", c, got, sent)
+		}
+	}
+	// An unbalanced constraint is refused, never spliced in.
+	if code, sent := env.listAs(lead, "owned_by_me=false&constraint="+url.QueryEscape("true) || (true")); code != http.StatusBadRequest || sent != "" {
+		t.Errorf("unbalanced constraint: %d, sent %q", code, sent)
+	}
+	// Asking for only their own jobs is unchanged.
+	if _, sent := env.listAs(lead, "owned_by_me=true"); !reflect.DeepEqual(visible(sent), []int64{1}) {
+		t.Errorf("lead's own listing reaches %v via %q", visible(sent), sent)
+	}
+
+	nonLead := env.session("mallory")
+	if _, sent := env.listAs(nonLead, "owned_by_me=false&constraint="+url.QueryEscape("true || true")); len(visible(sent)) != 0 {
+		t.Errorf("non-lead's everyone listing reaches %v via %q", visible(sent), sent)
+	}
+
+	admin := env.session("root", "web-admins")
+	if _, sent := env.listAs(admin, "owned_by_me=false"); !reflect.DeepEqual(visible(sent), []int64{1, 2, 3, 4}) {
+		t.Errorf("admin's everyone listing reaches %v via %q", visible(sent), sent)
+	}
+}
+
+// waitRechecking waits until a watch is open and re-checking -- its queries
+// keep arriving -- so a change lands on a live stream rather than on the
+// request that opens it. A stream that ends first fails the test at once,
+// with what it wrote, rather than waiting out the deadline.
+func waitRechecking(t *testing.T, env *leadTestEnv, before int, done <-chan struct{}, w *httptest.ResponseRecorder) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		env.mu.Lock()
+		n := len(env.constraints)
+		env.mu.Unlock()
+		if n >= before+3 {
+			return
+		}
+		select {
+		case <-done:
+			t.Fatalf("the watch ended before it started re-checking: %d %s", w.Code, w.Body.String())
+		case <-deadline:
+			t.Fatalf("the watch never started re-checking")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// TestJobWatchEndsWhenLeadAccessLost: a watch opened through a lead's read
+// scope ends once the lead no longer leads the job's project, rather than
+// streaming for its full lifetime on the decision that admitted it.
+func TestJobWatchEndsWhenLeadAccessLost(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{leadJobAd(2, "bob", "Physics", 1)}
+	env.h.jobWatchRecheck = 10 * time.Millisecond
+	env.h.jobPolls = newJobPollHub(time.Hour, env.h.logger, env.h.scheddJobQuery)
+	sid := env.session("alice")
+
+	watch := func() (chan struct{}, context.CancelFunc, *httptest.ResponseRecorder) {
+		ctx, cancel := context.WithCancel(context.Background())
+		r := env.request(http.MethodGet, "/api/v1/jobs/2.0/watch", sid, nil).WithContext(ctx)
+		w := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			env.h.handleJobWatch(w, r, "2.0")
+		}()
+		return done, cancel, w
+	}
+
+	// Still a lead: the stream stays open across many rechecks.
+	done, cancel, w := watch()
+	select {
+	case <-done:
+		t.Fatalf("the watch ended while the lead still had access: %d %s", w.Code, w.Body.String())
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	<-done
+
+	// Removed from the file: the open stream ends. Wait until the stream
+	// is open and re-checking -- its queries keep arriving -- so the edit
+	// lands on a live stream rather than on the request that opens it.
+	env.mu.Lock()
+	before := len(env.constraints)
+	env.mu.Unlock()
+	done, cancel, w = watch()
+	defer cancel()
+	waitRechecking(t, env, before, done, w)
+	if err := os.WriteFile(env.leadsPath, []byte("Physics carol, dave\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the watch kept streaming after the lead lost access")
+	}
+	if !strings.Contains(env.auditLog(), "Ending a job watch") {
+		t.Errorf("the ended watch was not logged")
+	}
+}
+
+// TestPrivilegedTargetMatching covers the queue-superuser comparison itself:
+// domain-qualified entries, the job's User, and the schedd's compiled-in
+// default when QUEUE_SUPER_USERS is unset.
+func TestPrivilegedTargetMatching(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		set         []string
+		owner, user string
+		want        bool
+	}{
+		{"bare entry", []string{"root"}, "root", "", true},
+		{"qualified entry, bare owner", []string{"alice@other.org"}, "alice", "", true},
+		{"qualified entry, matching User", []string{"alice@other.org"}, "alice", "alice@other.org", true},
+		{"qualified entry, owner differs from User", []string{"alice@other.org"}, "x", "ALICE@other.org", true},
+		{"ordinary member", []string{"alice@other.org", "root"}, "bob", "bob@example.org", false},
+		{"fallback identity", []string{"alice"}, "condor", "", true},
+		{"unset: compiled-in root", nil, "root", "", true},
+		{"unset: compiled-in condor", nil, "condor", "condor@example.org", true},
+		{"unset: ordinary member", nil, "bob", "", false},
+		{"configured set replaces the default", []string{"alice"}, "root", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newSuperuserPolicy(&fakeSuperUsers{users: tc.set}, "example.org", "condor", time.Hour, nil)
+			if err := p.Refresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			got, known := p.privilegedTarget(tc.owner, tc.user)
+			if !known {
+				t.Fatalf("answer unknown after a successful read")
+			}
+			if got != tc.want {
+				t.Errorf("privilegedTarget(%q, %q) with %v = %v, want %v", tc.owner, tc.user, tc.set, got, tc.want)
+			}
+		})
+	}
+
+	// The compiled-in default is for this check only; it does not make
+	// anyone an impersonation identity.
+	p := newSuperuserPolicy(&fakeSuperUsers{}, "example.org", "", time.Hour, nil)
+	_ = p.Refresh(context.Background())
+	if _, isSuper := p.ImpersonationIdentity("root"); isSuper {
+		t.Errorf("the compiled-in default leaked into ImpersonationIdentity")
+	}
+}
+
+// flakySuperUsers fails its first failures reads.
+type flakySuperUsers struct {
+	mu       sync.Mutex
+	failures int
+	calls    int
+}
+
+func (f *flakySuperUsers) QueueSuperUsers(context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.calls <= f.failures {
+		return nil, fmt.Errorf("schedd not up yet")
+	}
+	return []string{"root"}, nil
+}
+
+// TestSuperuserPolicyRetriesUntilFirstRead: an API server that starts before
+// its schedd must not wait a whole refresh interval to learn the queue
+// superusers, because until it does every project-lead action is refused.
+func TestSuperuserPolicyRetriesUntilFirstRead(t *testing.T) {
+	src := &flakySuperUsers{failures: 3}
+	p := newSuperuserPolicy(src, "example.org", "", time.Hour, nil)
+	p.retryInitial = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !p.known() {
+		if time.Now().After(deadline) {
+			t.Fatalf("still unknown after %d reads; the policy is waiting out its refresh interval", src.calls)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, known := p.privilegedTarget("bob", ""); !known {
+		t.Errorf("privilegedTarget still unknown after the first successful read")
+	}
+}
+
+// TestProjectLeadRefusalDoesNotRevealJobs: a lead gets the same refusal for a
+// job that does not exist as for another user's job outside their projects,
+// so probing ids tells them nothing. The audit log keeps the difference.
+func TestProjectLeadRefusalDoesNotRevealJobs(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{leadJobAd(2, "bob", "Chem", 1)}
+	sid := env.session("alice")
+	if code, _ := env.arm(sid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+	outside, _ := holdOne(env, sid, "2.0")
+	missing, _ := holdOne(env, sid, "9.0")
+	if outside.Code != http.StatusForbidden || missing.Code != http.StatusForbidden {
+		t.Fatalf("status = %d / %d, want 403 for both", outside.Code, missing.Code)
+	}
+	strip := func(body string) string { return strings.NewReplacer("2.0", "N", "9.0", "N").Replace(body) }
+	if a, b := strip(outside.Body.String()), strip(missing.Body.String()); a != b {
+		t.Errorf("refusals differ:\n outside:  %s\n missing: %s", a, b)
+	}
+	if log := env.auditLog(); !strings.Contains(log, "subject=9.0") || !strings.Contains(log, "not found") {
+		t.Errorf("the missing job's refusal was not audited with its reason:\n%s", log)
+	}
+
+	// A global superuser is not narrowed: they still learn the job is missing.
+	g := newLeadTestEnv(t, "admins", "", "")
+	gsid := g.session("root", "admins")
+	if code, _ := g.arm(gsid); code != http.StatusOK {
+		t.Fatalf("arm: %d", code)
+	}
+	if w, _ := holdOne(g, gsid, "9.0"); !strings.Contains(w.Body.String(), "not found") {
+		t.Errorf("global superuser's refusal for a missing job = %s", w.Body.String())
+	}
+}
+
+// TestImpersonatedTransportNotSharedWithPlainLookup: a transport opened under
+// superuser impersonation is cached apart from the operator's own. A plain
+// lookup by the same operator -- the SSH gateway's -- must not get it, or it
+// would outlive the arm with no superuser check and no audit.
+func TestImpersonatedTransportNotSharedWithPlainLookup(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, "hello from the job")
+	}))
+	defer backend.Close()
+
+	h := newProxyTestHandler(t, strings.TrimPrefix(backend.URL, "http://"))
+	h.userHeader = ""
+	h.userHeaderUnsafeAllowAll = false
+	h.sessionStore = createTestSessionStore(t, time.Hour)
+	h.initSuperuserMode(HandlerConfig{SuperuserGroup: "admins"}, h.logger)
+	h.superuserPolicy.source = &fakeSuperUsers{users: []string{"condor@test.htcondor.org"}}
+	_ = h.superuserPolicy.Refresh(context.Background())
+	ad := leadJobAd(12, "bob", "", 2)
+	h.jobQueryOverride = func(_ context.Context, constraint string, _ *htcondor.QueryOptions) ([]*classad.ClassAd, error) {
+		if evalConstraint(t, constraint, ad) {
+			return []*classad.ClassAd{ad}, nil
+		}
+		return nil, nil
+	}
+
+	sid, _, err := h.sessionStore.Create("root", []string{"admins"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.superuserArmed.Arm(sid, h.resolveImpersonationIdentity(context.Background(), "root"))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/jobs/12.0/proxy/8080/", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec
+	w := httptest.NewRecorder()
+	h.handleJobProxy(w, r, 12, 0, jobProxyTarget{Port: 8080}, "/")
+	if w.Code != http.StatusOK {
+		t.Fatalf("impersonated proxy = %d %s", w.Code, w.Body.String())
+	}
+
+	cache, err := h.getOrCreateJobSSHCache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	imp := &Impersonation{Actor: "root@test.htcondor.org", Target: "bob@test.htcondor.org", Identity: "condor@test.htcondor.org"}
+	if reused, err := cache.Warm(context.Background(), jobssh.Key{
+		Owner: "root", Cluster: 12, Proc: 0, Impersonation: imp.sessionTag(),
+	}); err != nil || !reused {
+		t.Fatalf("the impersonated transport is not where it was cached (reused=%v err=%v)", reused, err)
+	}
+	if reused, err := cache.Warm(context.Background(), jobssh.Key{Owner: "root", Cluster: 12, Proc: 0}); err != nil || reused {
+		t.Errorf("a plain lookup by the same operator got the impersonated transport (reused=%v err=%v)", reused, err)
+	}
+}
+
+// TestJobWatchEndsWhenSessionGoes: a lead's watch ends when their session
+// does, rather than falling back to the scope of a caller with no session --
+// which is the whole job.
+func TestJobWatchEndsWhenSessionGoes(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.ads = []*classad.ClassAd{leadJobAd(2, "bob", "Physics", 1)}
+	env.h.jobWatchRecheck = 10 * time.Millisecond
+	env.h.jobPolls = newJobPollHub(time.Hour, env.h.logger, env.h.scheddJobQuery)
+	sid := env.session("alice")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := env.request(http.MethodGet, "/api/v1/jobs/2.0/watch", sid, nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		env.h.handleJobWatch(w, r, "2.0")
+	}()
+	waitRechecking(t, env, 0, done, w)
+
+	env.h.sessionStore.Delete(sid)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the watch kept streaming after the session was deleted")
+	}
+}

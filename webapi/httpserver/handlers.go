@@ -257,7 +257,15 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	requestedEveryone := !ownedByMe
 	ownedByMe = s.resolveOwnerScope(r, ownedByMe)
+
+	// A project lead asking for everyone's jobs gets their own plus their
+	// projects'. See projectLeadReadProjects.
+	var leadProjects []string
+	if requestedEveryone && ownedByMe {
+		leadProjects = s.projectLeadReadProjects(r)
+	}
 
 	// The identity the schedd attributes to this caller. Needed for the
 	// scoping below when the listing is confined, and for the mirror
@@ -268,7 +276,28 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Build fetch options
 	fetchOpts := htcondor.FetchNormal
 	owner := ""
-	if ownedByMe {
+	if len(leadProjects) > 0 {
+		if actor == "" {
+			s.writeError(w, http.StatusUnauthorized,
+				"Authentication required: the caller's identity could not be established")
+			return
+		}
+		// The constraint is the whole of the enforcement here: the
+		// schedd does not filter reads. scopeToOwnerOrProjects ANDs the
+		// caller's constraint in after re-serializing it, so it can
+		// narrow this set but never widen it. FetchMyJobs is NOT set --
+		// a schedd honoring it would drop every job but the caller's
+		// own -- so the listing is unscoped as far as the mirror and the
+		// schedd's own MyJobs filter are concerned, and confined by
+		// this constraint alone.
+		scoped, serr := scopeToOwnerOrProjects(ownerFromActor(actor), leadProjects, constraint)
+		if serr != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid constraint: %v", serr))
+			return
+		}
+		constraint = scoped
+		ownedByMe = false
+	} else if ownedByMe {
 		fetchOpts |= htcondor.FetchMyJobs
 		owner = actor
 
@@ -349,7 +378,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
+	resultCh, err := s.streamJobs(ctx, constraint, opts, streamOpts)
 	if err != nil {
 		// Pre-request error - check type and set appropriate status
 		switch {
@@ -728,10 +757,11 @@ func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID str
 	}
 
 	// Build constraint for specific job, confined to the caller's own
-	// unless they are an API-token caller or a Web UI admin. Job ad
-	// reads are gated only by the pool's READ policy, which is broad on
-	// most pools, so the schedd is not a backstop here.
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	// unless they are an API-token caller or a Web UI admin (or, for a
+	// project lead, their projects' jobs too). Job ad reads are gated
+	// only by the pool's READ policy, which is broad on most pools, so
+	// the schedd is not a backstop here.
+	constraint, err := s.jobReadScope(ctx, r, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1128,6 +1158,24 @@ func ownerFromActor(actor string) string {
 // has always applied the filter.
 func (s *Handler) jobOwnerScope(ctx context.Context, r *http.Request, cluster, proc int) (string, error) {
 	return s.bulkOwnerScope(ctx, r, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
+}
+
+// jobReadScope is jobOwnerScope for endpoints that only READ a job ad, widened
+// for a project lead to the jobs of the projects they lead -- the by-id
+// counterpart of the listing's lead scope, so a job a lead can see in the
+// list also opens. Write and sandbox endpoints keep jobOwnerScope: a lead
+// acts on other users' jobs only through armed superuser mode, which
+// re-scopes the constraint itself (scopeForImpersonation).
+func (s *Handler) jobReadScope(ctx context.Context, r *http.Request, cluster, proc int) (string, error) {
+	job := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	if projects := s.projectLeadReadProjects(r); len(projects) > 0 {
+		owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+		if owner == "" {
+			return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")
+		}
+		return scopeToOwnerOrProjects(ownerFromActor(owner), projects, job)
+	}
+	return s.bulkOwnerScope(ctx, r, job)
 }
 
 func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {

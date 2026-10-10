@@ -114,6 +114,11 @@ func (s *Handler) handleJobPeek(w http.ResponseWriter, r *http.Request, cluster,
 	// then mints the session with getJobOwnerFQUOrDummy -- as the JOB
 	// OWNER, not as whoever asked. So by the time peek checks, the
 	// session identity is the owner's by construction.
+	//
+	// For a project lead the project is checked and then acted on, not
+	// atomically: GET_JOB_CONNECT_INFO takes a job id, not a constraint,
+	// so there is nowhere to put the clause the hold/release paths give
+	// the schedd. The window is the time between the check and the peek.
 	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusForbidden, err.Error())

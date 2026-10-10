@@ -20,6 +20,11 @@ func createTestSessionStore(t *testing.T, ttl time.Duration) *SessionStore {
 	if err != nil {
 		t.Fatalf("Failed to open test database: %v", err)
 	}
+	// Every pooled connection to ":memory:" is its own empty database, so a
+	// second concurrent query -- a background goroutine reading a session
+	// while a request holds the first connection -- would find no tables
+	// and no sessions. One connection keeps it one database.
+	db.SetMaxOpenConns(1)
 
 	store, err := NewSessionStore(db, ttl)
 	if err != nil {

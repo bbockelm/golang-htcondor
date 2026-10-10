@@ -390,7 +390,7 @@ hold, release, tail output, and ssh-to-job. Off unless configured.
 Two things must both be true or the feature stays off, and the server logs
 which one is missing:
 
-- the group above is set, **and**
+- the group above is set, or [project leads](#project-leads) are configured, **and**
 - a pool signing key is configured — the server mints the credential it acts
   under, so without a key there is nothing to act with.
 
@@ -404,7 +404,9 @@ a decision rather than a side effect.
 confirms. A red banner then appears on every page, cannot be dismissed, and
 counts down; the mode turns itself off after 30 minutes, and a server restart
 turns it off for everyone. Actions on the operator's *own* jobs are unaffected
-and are not treated as impersonation.
+and are not treated as impersonation. Membership is re-checked on every action:
+an armed operator who has since left `HTTP_API_SUPERUSER_GROUP` (and leads no
+project) gets a 403 on their next action, and the mode is turned off.
 
 **Which identity acts.** If the operator is themselves listed in the schedd's
 `QUEUE_SUPER_USERS`, the server authenticates as them, and the schedd's own
@@ -449,6 +451,103 @@ job ad of which human acted.
 under its own impersonation, so every job acted on belongs to the identity the
 server authenticated as. A constraint spanning more than 25 owners is refused
 rather than fanned out.
+
+### Project leads
+
+Superuser mode confined to one project's jobs. A *project* is the job ad's
+`ProjectName`. A lead of project P may turn on the mode exactly as a superuser
+does, and while it is on may act on other users' jobs whose `ProjectName` is P
+-- and on no others. `HTTP_API_SUPERUSER_GROUP` does not need to be set.
+
+| Config | Default | Effect |
+| --- | --- | --- |
+| `HTTP_API_PROJECT_LEADS_FILE` | *(unset)* | File naming each project's leads (format below). |
+| `HTTP_API_PROJECT_LEADS_GROUP` | *(unset)* | Group-name pattern containing `{project}`: members of the group it names for P lead P. |
+
+The file has one project per line, then its leads, separated by whitespace or
+commas. A lead starting with `%` is a group (the sudoers convention); anything
+else is a username. `#` starts a comment anywhere on a line, so a project or
+lead whose name contains `#` cannot be configured.
+
+```
+# project     leads
+Physics       alice, bob
+CS101         %cs101-tas carol
+```
+
+With `HTTP_API_PROJECT_LEADS_GROUP = {project}-leads`, members of
+`Physics-leads` lead `Physics`, with no file entry needed. Both sources can be
+used together; a session leads the union. The pattern needs fixed text around
+`{project}`; a bare `{project}` is refused.
+
+> **The pattern trusts whoever names groups.** Anyone who can create a group
+> called `<P>-leads` in your identity provider (or `HTTP_API_GROUP_SOURCE`)
+> becomes a lead of project P. Where users can create their own groups, use
+> the file instead.
+
+Whether a job is in a project is decided by the schedd, evaluating
+`ProjectName == "<project>"` against the whole job ad; ClassAd `==` ignores
+case for ASCII letters only. A bare username (`bob`) matches that name in any
+domain; one with a domain (`bob@other.org`) matches only that identity, which
+includes a bare session name that becomes it once `UID_DOMAIN` is appended (as
+after local identity mapping), and never the same name in another domain. Both
+compare case-insensitively. Groups are the session's, from
+`HTTP_API_GROUP_SOURCE`, matched case-insensitively. A project name containing
+a quote, a backslash or a control character is ignored.
+
+**What a lead can do**, while the mode is on: hold, release and remove another
+user's job in a project they lead, tail its output, ssh to it, and warm its
+connection ahead of time (`/warm`). Bulk hold
+and release reach the lead's own jobs plus their projects' jobs, whatever the
+constraint says. A job with no `ProjectName`, or one in another project, is
+refused with a 403, and so is a job that does not exist (with the same
+message, so a lead cannot probe for jobs) and a job owned by a queue superuser
+or by the fallback identity. Queue superusers are matched by name without the
+domain, against both the job's `Owner` and its `User`, so
+`alice@other.org` in `QUEUE_SUPER_USERS` protects every job owned by `alice`;
+with `QUEUE_SUPER_USERS` unset, the schedd's default of `root` and `condor`
+counts. Until the server has read `QUEUE_SUPER_USERS` from the schedd at
+least once, every action a lead takes on another user's job is refused ("the
+schedd's queue superusers have not been read"); the read is retried every few
+seconds until it succeeds, so this lasts only while the schedd is
+unreachable. Each refusal is logged to the security log. ssh-to-job gives the
+lead the member's sandbox, including any credentials in it. Hold and release
+reasons name the project:
+
+```
+Held by alice@example.org via the web UI (project lead for Physics, acting for bob@example.org) (by user condor@example.org)
+```
+
+**What a lead cannot do:** open another user's interactive app through the job
+proxy (VS Code and other proxied ports). The app is served from this server's
+own origin, so code the job's owner controls would run in the lead's browser
+with the lead's session. Global superusers keep that access.
+
+**Reading.** Without turning the mode on, a lead may list (and open) their own
+jobs plus their projects' jobs by choosing *Everyone* on the jobs page, the way
+an admin may list all jobs. The same scope covers the job's live status and its
+match analysis, including `?source=archive` for a finished job. That read
+scope needs no signing key. For now the job log, DAG, sandbox and output
+panels stay owner-only for leads.
+
+**Revoking.** Leadership is re-checked on every action, not when the mode was
+turned on: removing a lead from the file takes effect within a few seconds, or
+immediately on `condor_reconfig`, and a lead who loses all their projects has
+the mode turned off on their next action. A job watch a lead opened on a
+project's job is re-checked every minute and ends once they can no longer read
+the job. A session that turned the mode on as
+a lead stays project-scoped for that arm even if its user is later added to
+`HTTP_API_SUPERUSER_GROUP`. Group membership is the session's as of login,
+for leads as for `HTTP_API_SUPERUSER_GROUP`.
+
+**Prerequisites** are superuser mode's: a pool signing key and, where the
+schedd does not run as `condor`, `HTTP_API_SUPERUSER_FALLBACK_IDENTITY`. Leads
+are normally not in `QUEUE_SUPER_USERS`, so they act through the fallback
+identity, and the reason text and this server's audit log are the record of
+which lead acted. An unreadable leads file is logged and grants nobody
+anything; it does not stop the server. Both settings are re-read on
+`condor_reconfig`, but like `HTTP_API_SUPERUSER_GROUP` they cannot switch
+superuser mode on in a daemon that started with it off.
 
 ### Refresh-grant re-authorization
 
@@ -1444,6 +1543,8 @@ Frequently-used knobs:
 | `HTTP_API_KEK_FILE` | Path to the master Key Encryption Key (32 raw bytes or 64-char hex; mode 0600/0400). Generate with `openssl rand -hex 32 > <path> && chmod 0600 <path>`. |
 | `HTTP_API_WEBUI_ACCESS_GROUP` | Comma-separated group(s) permitted to log in to the web interface. Unset falls back to `HTTP_API_MCP_ACCESS_GROUP`. Reloaded on SIGHUP. See [Authorization groups](#authorization-groups). |
 | `HTTP_API_WEBUI_ADMIN_GROUP` | Comma-separated group(s) whose members can reach the admin pages. Unset disables the admin UI. Reloaded on SIGHUP. |
+| `HTTP_API_PROJECT_LEADS_FILE` | File naming each project's leads, who may use superuser mode on jobs whose `ProjectName` they lead. Re-read when it changes and on SIGHUP. See [Project leads](#project-leads). |
+| `HTTP_API_PROJECT_LEADS_GROUP` | Group-name pattern containing `{project}`, e.g. `{project}-leads`; members of the group it names for a project lead that project. Reloaded on SIGHUP. See [Project leads](#project-leads). |
 | `HTTP_API_METRICS_PUBLIC` | `true` to disable the API-key gate on `/metrics`. Default off — Prometheus must present an API key with the `metrics` scope. |
 | `HTTP_API_TOOL_STATS_FLUSH_INTERVAL` | How often MCP tool-call counters are written to the application database (e.g. `5m`). Default `5m`; they are also written at shutdown. See [MCP tool-call statistics](#mcp-tool-call-statistics). |
 | `HTTP_API_TOOL_STATS_MAX_LABEL_VALUES` | Cap on distinct values per `/metrics` label for tool statistics. Default `1000`; past it the quietest values render as `other`, while the database keeps them all. |

@@ -58,11 +58,33 @@ type superuserPolicy struct {
 	refresh  time.Duration
 	logger   *logging.Logger
 
-	mu        sync.RWMutex
-	users     map[string]bool
+	// retryInitial is the first retry delay while the set has never been
+	// read; it doubles up to refresh. Zero selects
+	// defaultSuperuserRetryInitial. See Run.
+	retryInitial time.Duration
+
+	mu    sync.RWMutex
+	users map[string]bool
+	// usersBare holds the local part of every entry in users, for
+	// privilegedTarget, which errs towards "privileged".
+	usersBare map[string]bool
 	fetchedAt time.Time
 	lastErr   error
 }
+
+// defaultSuperuserRetryInitial is how soon a policy that has never read the
+// queue-superuser set tries again. Short, because until the first read
+// succeeds every project-lead action is refused (privilegedTarget cannot
+// answer), and an API server routinely starts before its schedd.
+const defaultSuperuserRetryInitial = 5 * time.Second
+
+// compiledInSuperUsers is what the schedd treats as queue superusers when
+// QUEUE_SUPER_USERS is unset or empty: the param table's default, "root,
+// condor" (param_info.in), and failing that InitQmgmt's default_super_user,
+// "root" (qmgmt.cpp). Schedd.QueueSuperUsers returns nothing in either case
+// rather than guess, so the policy supplies them -- for privilegedTarget
+// only, where assuming too many superusers is the safe direction.
+var compiledInSuperUsers = []string{"root", "condor"}
 
 // newSuperuserPolicy builds a policy. A zero refresh interval selects
 // defaultSuperuserRefresh.
@@ -101,12 +123,20 @@ func (p *superuserPolicy) Refresh(ctx context.Context) error {
 		return err
 	}
 	set := make(map[string]bool, len(users))
+	bare := make(map[string]bool, len(users))
 	for _, u := range users {
 		if u = strings.TrimSpace(u); u != "" {
 			set[strings.ToLower(u)] = true
+			bare[strings.ToLower(ownerFromActor(u))] = true
+		}
+	}
+	if len(set) == 0 {
+		for _, u := range compiledInSuperUsers {
+			bare[u] = true
 		}
 	}
 	p.users = set
+	p.usersBare = bare
 	p.fetchedAt = time.Now()
 	if p.logger != nil {
 		p.logger.Info(logging.DestinationHTTP, "Refreshed the schedd's queue superusers",
@@ -118,18 +148,41 @@ func (p *superuserPolicy) Refresh(ctx context.Context) error {
 // Run polls until ctx is cancelled. The first poll happens immediately so a
 // server that has just started does not spend a whole interval with no idea
 // who the superusers are.
+//
+// Until the first read succeeds it retries on a short, doubling backoff
+// rather than the refresh interval: the set being unknown refuses every
+// project-lead action, and an API server that came up before its schedd
+// should not lock leads out for a quarter of an hour.
 func (p *superuserPolicy) Run(ctx context.Context) {
 	_ = p.Refresh(ctx)
-	ticker := time.NewTicker(p.refresh)
-	defer ticker.Stop()
+	retry := p.retryInitial
+	if retry <= 0 {
+		retry = defaultSuperuserRetryInitial
+	}
 	for {
+		wait := p.refresh
+		if !p.known() && retry < wait {
+			// Not the min builtin: an integration-test file in this
+			// package declares its own min(int, int).
+			wait = retry
+			retry *= 2
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			_ = p.Refresh(ctx)
 		}
 	}
+}
+
+// known reports whether the set has ever been read.
+func (p *superuserPolicy) known() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.users != nil
 }
 
 // ImpersonationIdentity returns the identity this server should authenticate
@@ -170,6 +223,45 @@ func (p *superuserPolicy) ImpersonationIdentity(actor string) (identity string, 
 	return p.fallback, false
 }
 
+// privilegedTarget reports whether a job's owner is an identity a project
+// lead must not act for -- a queue superuser, or the fallback identity this
+// server acts under -- and whether the answer is known at all. owner is the
+// job's Owner and user its User ("owner@domain"), when it has one.
+//
+// Acting "for" such an owner would put a lead's action behind the authority
+// the queue grants that identity over everybody's jobs. Matching is on local
+// parts, case-insensitively, so it errs towards calling an owner privileged:
+// "alice@other.org" in QUEUE_SUPER_USERS makes every job owned by "alice"
+// privileged, whatever its domain. With QUEUE_SUPER_USERS unset or empty the
+// schedd's compiled-in default counts (see compiledInSuperUsers). Before the
+// set has ever been read the answer is unknown, and callers refuse.
+func (p *superuserPolicy) privilegedTarget(owner, user string) (privileged, known bool) {
+	names := []string{
+		strings.ToLower(ownerFromActor(strings.TrimSpace(owner))),
+		strings.ToLower(ownerFromActor(strings.TrimSpace(user))),
+	}
+	if names[0] == "" {
+		return true, true
+	}
+	fallback := strings.ToLower(ownerFromActor(p.fallback))
+	for _, n := range names {
+		if n != "" && n == fallback {
+			return true, true
+		}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.users == nil {
+		return false, false
+	}
+	for _, n := range names {
+		if n != "" && p.usersBare[n] {
+			return true, true
+		}
+	}
+	return false, true
+}
+
 // Status reports what the policy currently knows, for the admin UI and for
 // answering "why is this being done as condor?".
 func (p *superuserPolicy) Status() (count int, fetchedAt time.Time, lastErr error) {
@@ -182,8 +274,11 @@ func (p *superuserPolicy) Status() (count int, fetchedAt time.Time, lastErr erro
 //
 // The feature needs two independent things and refuses to run on one of them:
 //
-//   - a group to gate it on, so that "may act as anyone" is a decision an
-//     operator made rather than a side effect of admin-UI access;
+//   - somebody it is gated on, so that "may act as another user" is a
+//     decision an operator made rather than a side effect of admin-UI
+//     access: HTTP_API_SUPERUSER_GROUP for global scope, or project leads
+//     (HTTP_API_PROJECT_LEADS_FILE / HTTP_API_PROJECT_LEADS_GROUP) for
+//     project scope. Either alone is enough;
 //   - a pool signing key, because acting as another identity means minting a
 //     credential for it. Without the key there is nothing to mint and the
 //     feature cannot work, so a deployment that sets the group but has no key
@@ -193,21 +288,33 @@ func (p *superuserPolicy) Status() (count int, fetchedAt time.Time, lastErr erro
 // who set the group wondering why the UI never offers the mode.
 func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 	group := strings.TrimSpace(cfg.SuperuserGroup)
-	if group == "" {
+	// Always present, so a reconfigure can install a list without a nil
+	// check, but empty until the feature is known to be usable: an
+	// installed group is what the rest of the server reads as "superuser
+	// mode is on".
+	h.superuserGroups = newGroupSet("")
+	// The leads are kept even when the mode cannot run. They also widen
+	// what a lead may READ (projectLeadReadProjects), which needs no
+	// signing key.
+	h.projectLeads = newProjectLeads(cfg.ProjectLeadsFile, cfg.ProjectLeadsGroup, h.uidDomain, logger)
+	leads := h.projectLeads.configured()
+
+	if group == "" && !leads {
 		logger.Info(logging.DestinationHTTP,
-			"Superuser mode disabled (HTTP_API_SUPERUSER_GROUP is unset)")
+			"Superuser mode disabled (HTTP_API_SUPERUSER_GROUP and project leads are unset)")
 		return
 	}
 	if h.signingKeyPath == "" || h.trustDomain == "" {
 		logger.Warn(logging.DestinationHTTP,
 			"Superuser mode is configured but cannot run: it needs a pool signing key and trust domain to mint the identity it acts under",
 			"superuser_group", group,
+			"project_leads", leads,
 			"signing_key_path", h.signingKeyPath,
 			"trust_domain", h.trustDomain)
 		return
 	}
 
-	h.superuserGroups = newGroupSet(group)
+	h.superuserGroups.set(group)
 	h.superuserArmed = newSuperuserSessions(cfg.SuperuserArmTTL)
 	h.superuserPolicy = newSuperuserPolicy(
 		scheddSuperUserSource{get: h.getSchedd},
@@ -218,6 +325,8 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 	)
 	logger.Info(logging.DestinationHTTP, "Superuser mode enabled",
 		"superuser_group", group,
+		"project_leads_file", strings.TrimSpace(cfg.ProjectLeadsFile),
+		"project_leads_group", strings.TrimSpace(cfg.ProjectLeadsGroup),
 		"fallback_identity", h.superuserPolicy.fallback,
 		"queue_superuser_refresh", h.superuserPolicy.refresh,
 		"arm_ttl", h.superuserArmed.ttl)
@@ -226,11 +335,49 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 // superuserModeAvailable reports whether the feature is configured at all.
 // It says nothing about whether a given caller may use it.
 func (h *Handler) superuserModeAvailable() bool {
-	return h.superuserGroups.configured() && h.superuserPolicy != nil && h.superuserArmed != nil
+	return h.superuserPolicy != nil && h.superuserArmed != nil &&
+		(h.superuserGroups.configured() || h.projectLeads.configured())
+}
+
+// globalSuperuser reports whether groups grant global superuser scope.
+//
+// grants, not allows, is load-bearing. groupSet.allows treats an empty list
+// as "no requirement" and admits everybody, which is right for access groups
+// and catastrophically wrong here: with only project leads configured,
+// HTTP_API_SUPERUSER_GROUP is empty, and allows() would make every session a
+// global superuser.
+func (h *Handler) globalSuperuser(groups []string) bool {
+	return h.superuserGroups.grants(groups)
+}
+
+// superuserScopeFor works out what a session may act on, from the
+// configuration as it stands now. Never cached: this is what makes removing
+// someone from the leads file, or from the group, take effect on their next
+// action rather than when their arm expires.
+func (h *Handler) superuserScopeFor(session *SessionData) superuserScope {
+	if session == nil {
+		return superuserScope{}
+	}
+	return superuserScope{
+		Global:   h.globalSuperuser(session.Groups),
+		Projects: h.projectLeads.LedProjects(session.Username, session.Groups),
+	}
+}
+
+// effectiveSuperuserScope is what an armed session may do right now: the
+// current scope, capped by how the session was armed. A session armed as a
+// project lead stays project-scoped even if its user has since become a
+// global superuser; a session armed globally drops to project scope (or to
+// nothing) if its user has since lost the group.
+func effectiveSuperuserScope(armed armedSession, current superuserScope) superuserScope {
+	if current.Global && !armed.projectScoped {
+		return current
+	}
+	return superuserScope{Projects: current.Projects}
 }
 
 // mayUseSuperuserMode reports whether this request's session is allowed to act
-// as other users.
+// as other users, in either scope.
 //
 // Session-based only, deliberately. Superuser mode is an interactive posture
 // an operator turns on and sees a banner for; letting a bearer token carry it
@@ -243,7 +390,7 @@ func (h *Handler) mayUseSuperuserMode(r *http.Request) bool {
 	if !ok {
 		return false
 	}
-	return h.superuserGroups.allows(session.Groups)
+	return h.superuserScopeFor(session).allowed()
 }
 
 // scheddSuperUserSource adapts the handler's schedd accessor to the narrow

@@ -128,6 +128,13 @@ export interface Session {
   // explanation when that is not the operator themselves.
   superuser_identity?: string;
   superuser_note?: string;
+  // While armed: "global" (HTTP_API_SUPERUSER_GROUP) or "project" (a
+  // project lead), and for a project lead the projects actions may reach.
+  superuser_scope?: 'global' | 'project';
+  superuser_projects?: string[];
+  // Projects this session leads, armed or not. A lead may list their
+  // projects' jobs with the Everyone scope, as an admin may list all jobs.
+  project_lead_of?: string[];
 }
 
 export interface SuperuserModeState {
@@ -141,6 +148,8 @@ export interface SuperuserModeState {
   actor_is_queue_superuser?: boolean;
   // Explains a fallback and how to fix it. Empty when acting as yourself.
   note?: string;
+  scope?: 'global' | 'project';
+  projects?: string[];
 }
 
 export interface RecentJob {

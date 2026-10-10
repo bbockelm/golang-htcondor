@@ -115,6 +115,28 @@ func (t jobProxyTarget) dial(ctx context.Context, cache *jobssh.Cache, key jobss
 	return cache.DialJob(ctx, key, "tcp", fmt.Sprintf("127.0.0.1:%d", t.Port))
 }
 
+// jobTransportKey is the transport-cache key for a connection to
+// cluster.proc made with ctx.
+//
+// Owner is the caller. Under superuser impersonation ctx still names the
+// caller -- impersonate swaps only the credential -- so the impersonation
+// goes into the key as well: a transport opened as the fallback identity on
+// bob's behalf must never be returned to a plain lookup by the same caller,
+// such as the SSH gateway's, where it would outlive the arm and the leads
+// file with no superuser check and no audit. Two operators impersonating the
+// same owner differ by Owner, so they do not share one either.
+func jobTransportKey(ctx context.Context, imp *Impersonation, username string, cluster, proc int) jobssh.Key {
+	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if owner == "" {
+		owner = username
+	}
+	key := jobssh.Key{Owner: owner, Cluster: cluster, Proc: proc}
+	if imp != nil {
+		key.Impersonation = imp.sessionTag()
+	}
+	return key
+}
+
 // handleJobProxy proxies one request to a target inside the job.
 //
 // upstreamPath is what remains after /proxy/{port}, and is what the
@@ -140,6 +162,14 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	// Except for project leads: the app is served on this origin, so it
+	// would run owner-controlled code in the lead's session. See
+	// refuseProjectLeadInteractiveApp.
+	if refusal := refuseProjectLeadInteractiveApp(imp); refusal != nil {
+		s.auditSuperuserAction(r, imp, "job-proxy", fmt.Sprintf("%d.%d", cluster, proc), refusal)
+		s.writeError(w, http.StatusForbidden, refusal.Error())
 		return
 	}
 	if imp != nil {
@@ -192,16 +222,9 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		return
 	}
 
-	// The transport is keyed by the identity it will authenticate as,
-	// never by the job alone -- see jobssh.Key. Under superuser
-	// impersonation that is the job's owner, which is who the schedd
-	// builds the starter session as, so keying by the operator's own
-	// name would hand a second operator the first one's transport.
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
-	if owner == "" {
-		owner = username
-	}
-	key := jobssh.Key{Owner: owner, Cluster: cluster, Proc: proc}
+	// Keyed by caller and impersonation, never by the job alone -- see
+	// jobTransportKey.
+	key := jobTransportKey(ctx, imp, username, cluster, proc)
 
 	// Preserve the browser's Host. Our dialer ignores it -- the
 	// destination is decided by key and target, not by routing -- but

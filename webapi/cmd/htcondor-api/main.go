@@ -1844,6 +1844,11 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	if strings.TrimSpace(superuserGroup) != "" {
 		log.Printf("Superuser mode gated on group %q", strings.TrimSpace(superuserGroup))
 	}
+	// Project leads: superuser mode confined to the jobs of the projects a
+	// session leads. Either may be set without the other, and without
+	// HTTP_API_SUPERUSER_GROUP.
+	projectLeadsFile, _ := cfg.Get("HTTP_API_PROJECT_LEADS_FILE")
+	projectLeadsGroup, _ := cfg.Get("HTTP_API_PROJECT_LEADS_GROUP")
 
 	// Create logger with reasonable defaults for unprivileged operation.
 	// Assigning to the OUTER `logger` (declared at the top of the
@@ -2076,6 +2081,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		WebUIAdminGroup:            webuiAdminGroup,
 		WebUIAccessGroup:           webuiAccessGroup,
 		SuperuserGroup:             strings.TrimSpace(superuserGroup),
+		ProjectLeadsFile:           strings.TrimSpace(projectLeadsFile),
+		ProjectLeadsGroup:          strings.TrimSpace(projectLeadsGroup),
 		SuperuserFallbackIdentity:  strings.TrimSpace(superuserFallback),
 		EnableIDP:                  enableIDP,
 		IDPIssuer:                  idpIssuer,

@@ -291,6 +291,21 @@ type Handler struct {
 	// superuserArmed tracks which browser sessions currently have the mode
 	// on. Nil when superuser mode is disabled.
 	superuserArmed *superuserSessions
+	// projectLeads names who leads which project: superuser mode confined
+	// to the jobs of projects a session leads. See project_leads.go.
+	// Never nil once the handler is built.
+	projectLeads *projectLeads
+	// jobQueryOverride, when set, replaces the schedd for job-queue reads:
+	// the ones superuser mode makes to decide whose job it is and which
+	// project it is in, the job watch's, and the job listing's. It is
+	// handed the constraint and options exactly as the schedd would be,
+	// so a test can evaluate the constraint and honor the projection.
+	// Tests only.
+	jobQueryOverride func(ctx context.Context, constraint string, opts *htcondor.QueryOptions) ([]*classad.ClassAd, error)
+	// jobWatchRecheck overrides how often a project lead's job watch
+	// re-checks that they may still read the job. Zero selects
+	// jobWatchRecheckInterval. Tests only.
+	jobWatchRecheck time.Duration
 
 	// oauth2MaxGrantLifetime caps how long a single consent can be
 	// stretched by refreshing. Every refresh resets the refresh token's
@@ -822,6 +837,14 @@ type HandlerConfig struct {
 	//
 	// Configurable via HTTP_API_SUPERUSER_GROUP.
 	SuperuserGroup string
+	// ProjectLeadsFile names the project leads file: superuser mode
+	// confined to the jobs whose ProjectName the session leads. See
+	// project_leads.go for the format. HTTP_API_PROJECT_LEADS_FILE.
+	ProjectLeadsFile string
+	// ProjectLeadsGroup is a group-name pattern containing "{project}";
+	// members of the group it names for project P lead P.
+	// HTTP_API_PROJECT_LEADS_GROUP.
+	ProjectLeadsGroup string
 	// SuperuserRefreshInterval is how often the schedd's QUEUE_SUPER_USERS
 	// set is re-read. Zero selects defaultSuperuserRefresh.
 	SuperuserRefreshInterval time.Duration

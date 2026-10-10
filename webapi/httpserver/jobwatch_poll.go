@@ -270,7 +270,7 @@ func (s *jobPollSub) Close() {
 // returns (nil, nil) when nothing matches, which the caller reads as "the
 // job has left the queue".
 func (s *Handler) scheddJobQuery(ctx context.Context, constraint string) (*classad.ClassAd, error) {
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{Limit: 1})
+	ads, err := s.queryJobs(ctx, constraint, &htcondor.QueryOptions{Limit: 1})
 	if err != nil {
 		return nil, err
 	}

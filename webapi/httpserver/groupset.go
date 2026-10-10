@@ -105,5 +105,20 @@ func (g *groupSet) allows(userGroups []string) bool {
 	return false
 }
 
+// grants reports whether the user holds one of the configured groups, with
+// an EMPTY list granting nothing -- the opposite of allows. For privileges
+// where "unset" must mean "nobody". The list is read once, so a reconfigure
+// in between cannot make the two halves of the decision disagree.
+func (g *groupSet) grants(userGroups []string) bool {
+	for _, r := range g.list() {
+		for _, u := range userGroups {
+			if strings.EqualFold(u, r) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // String renders the list for logs and operator-facing messages.
 func (g *groupSet) String() string { return strings.Join(g.list(), ", ") }
