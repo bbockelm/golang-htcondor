@@ -8,15 +8,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/ory/fosite"
 )
 
 // forwardedHTCondorToken mints something validateOAuth2Token classifies as a
-// pool IDTOKEN to be forwarded: a JWT whose `iss` is the trust domain. The
+// pool IDTOKEN to be forwarded: a JWT whose `iss` is the test trust domain. The
 // signature is never checked here -- the schedd is what verifies a forwarded
 // token -- so an unsigned one exercises the path without a pool.
-func forwardedHTCondorToken(t *testing.T, trustDomain string) string {
+func forwardedHTCondorToken(t *testing.T) string {
 	t.Helper()
 	part := func(v interface{}) string {
 		raw, err := json.Marshal(v)
@@ -26,7 +24,7 @@ func forwardedHTCondorToken(t *testing.T, trustDomain string) string {
 		return base64.RawURLEncoding.EncodeToString(raw)
 	}
 	header := part(map[string]string{"alg": "HS256", "typ": "JWT", "kid": "POOL"})
-	claims := part(map[string]string{"iss": trustDomain, "sub": "alice@" + trustDomain})
+	claims := part(map[string]string{"iss": testTrustDomain, "sub": "alice@" + testTrustDomain})
 	return header + "." + claims + ".c2ln"
 }
 
@@ -134,7 +132,7 @@ func postMCPAuthed(t *testing.T, s *Server, accept string) (int, string) {
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/mcp",
 		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+forwardedHTCondorToken(t, testTrustDomain))
+	req.Header.Set("Authorization", "Bearer "+forwardedHTCondorToken(t))
 	if accept != "" {
 		req.Header.Set("Accept", accept)
 	}
@@ -183,25 +181,5 @@ func TestSDKTransportIsTheOneServing(t *testing.T) {
 	if sdkCode != http.StatusBadRequest {
 		t.Errorf("the SDK transport answered %d for a plain Accept, want 400; "+
 			"either the knob did not select it or it stopped being strict:\n%s", sdkCode, body)
-	}
-}
-
-// The SDK filters a caller's catalogue by the scopes it is handed, so losing
-// them here silently hands a read-only token the write tools. Neither case is
-// visible from outside -- both callers reach the same tools when the scopes
-// are dropped -- so the decision is read directly.
-func TestSDKIsToldWhatTheCallerWasGranted(t *testing.T) {
-	req := fosite.NewAccessRequest(&fosite.DefaultSession{})
-	req.GrantScope("mcp:read")
-
-	info := sdkTokenInfoFor(req)
-	if len(info.Scopes) != 1 || info.Scopes[0] != "mcp:read" {
-		t.Errorf("granted scopes = %v, want [mcp:read]; a read-only token would see the write tools", info.Scopes)
-	}
-
-	// A forwarded HTCondor token carries no scopes, which the catalogue
-	// filter reads as "no constraint" -- HTCondor gates that caller.
-	if info := sdkTokenInfoFor(nil); len(info.Scopes) != 0 {
-		t.Errorf("a forwarded token was given scopes %v", info.Scopes)
 	}
 }

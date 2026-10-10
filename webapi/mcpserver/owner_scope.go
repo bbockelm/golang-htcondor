@@ -241,11 +241,13 @@ func (s *Server) allowsAllUsers(ctx context.Context, authenticatedUser string, t
 // that stated a scope set.
 //
 // This is what separates "the token withheld mcp:admin" from "nothing
-// here has scopes to withhold". The HTTP MCP transport always attaches
-// the granted set, so a nil set means stdio, where the process IS the
-// user and MCP_ADMIN_USERS remains the only way to grant the read tier.
+// here has scopes to withhold". The HTTP MCP transport attaches a grant
+// for every OAuth2 token -- including one granted nothing, whose scope
+// slice may be nil -- so only stdio or a forwarded HTCondor token is
+// unscoped, and there MCP_ADMIN_USERS remains the only way to grant the
+// read tier.
 func scopedTransport(ctx context.Context) bool {
-	return grantedScopesFromContext(ctx) != nil
+	return grantFromContext(ctx).scoped
 }
 
 // hasScope reports whether the caller's granted scopes include name.

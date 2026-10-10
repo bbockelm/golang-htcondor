@@ -23,7 +23,7 @@ import (
 // scopedServers caches an SDK server per granted-scope set, per catalogue
 // generation.
 type scopedServers struct {
-	build func(scopes []string) *mcp.Server
+	build func(g scopeGrant) *mcp.Server
 	// gen reports the current catalogue generation. A reconfigure changes
 	// the instructions and can change the catalogue, and a cached server
 	// holds both -- so the cache is dropped rather than served stale.
@@ -34,19 +34,29 @@ type scopedServers struct {
 	by      map[string]*mcp.Server
 }
 
-func newScopedServers(build func([]string) *mcp.Server, gen func() uint64) *scopedServers {
+func newScopedServers(build func(scopeGrant) *mcp.Server, gen func() uint64) *scopedServers {
 	return &scopedServers{build: build, gen: gen, by: map[string]*mcp.Server{}}
 }
 
-// scopeKey is the cache key: the granted scopes, order-independent.
-func scopeKey(scopes []string) string {
-	c := append([]string(nil), scopes...)
+// scopeKey is the cache key: whether the caller is scoped, and the granted
+// scopes, order-independent.
+//
+// The flag is part of the key because the scopes alone do not say what the
+// catalogue is: an unscoped caller sees everything, and a token granted
+// nothing sees nothing, yet both carry no scopes. Keyed on the scopes alone
+// the two shared a server, and whichever arrived first decided what the
+// other was shown.
+func scopeKey(g scopeGrant) string {
+	if !g.scoped {
+		return "unscoped"
+	}
+	c := append([]string(nil), g.scopes...)
 	sort.Strings(c)
-	return strings.Join(c, " ")
+	return "scoped:" + strings.Join(c, " ")
 }
 
-func (c *scopedServers) get(scopes []string) *mcp.Server {
-	key := scopeKey(scopes)
+func (c *scopedServers) get(g scopeGrant) *mcp.Server {
+	key := scopeKey(g)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if gen := c.gen(); gen != c.builtAt {
@@ -56,9 +66,32 @@ func (c *scopedServers) get(scopes []string) *mcp.Server {
 	if srv, ok := c.by[key]; ok {
 		return srv
 	}
-	srv := c.build(scopes)
+	srv := c.build(g)
 	c.by[key] = srv
 	return srv
+}
+
+// unscopedMark marks, in TokenInfo.Extra, a caller with no scope
+// model. See UnscopedTokenInfo.
+const unscopedMark = "htcondor.unscoped"
+
+// UnscopedTokenInfo is what a verifier reports for a caller with no scope
+// model -- a forwarded HTCondor token, which HTCondor gates instead. Such a
+// caller sees the whole catalogue.
+//
+// Unscoped has to be said, not inferred from empty Scopes: a TokenInfo
+// without this mark is a scoped token, and with no scopes it sees nothing.
+// Inferring it is how a token granted nothing came to be shown everything.
+func UnscopedTokenInfo() *auth.TokenInfo {
+	return &auth.TokenInfo{Extra: map[string]any{unscopedMark: true}}
+}
+
+// grantFromTokenInfo is the grant a verified token carries.
+func grantFromTokenInfo(info *auth.TokenInfo) scopeGrant {
+	if unscoped, _ := info.Extra[unscopedMark].(bool); unscoped {
+		return unscopedGrant
+	}
+	return scopedGrant(info.Scopes)
 }
 
 // SDKHTTPHandler serves MCP over the SDK's streamable HTTP transport.
@@ -82,7 +115,7 @@ func (s *Server) SDKHTTPHandler(verify auth.TokenVerifier) http.Handler {
 			// which is the safe direction for a bug here.
 			return nil
 		}
-		return cache.get(info.Scopes)
+		return cache.get(grantFromTokenInfo(info))
 	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 
 	return auth.RequireBearerToken(verify, &auth.RequireBearerTokenOptions{

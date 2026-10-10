@@ -82,8 +82,8 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 	if sc := s.getSchedd(); sc != nil {
 		rep.AccessPoint = sc.Name()
 	}
-	if scopes := grantedScopesFromContext(ctx); scopes != nil {
-		rep.Scopes = append([]string(nil), scopes...)
+	if g := grantFromContext(ctx); g.scoped {
+		rep.Scopes = append([]string(nil), g.scopes...)
 		sort.Strings(rep.Scopes)
 	}
 

@@ -55,49 +55,78 @@ type Resource struct {
 // scopeContextKey carries the OAuth2 granted-scopes set into MCP
 // request handling so handleListTools can filter the catalog. The
 // HTTP transport populates this from fosite's
-// AccessRequester.GetGrantedScopes(); the stdio transport leaves it
-// nil, which is treated as "no filtering" — stdio is implicitly
-// trusted (it's the local process boundary).
+// AccessRequester.GetGrantedScopes(); the stdio transport and a
+// forwarded HTCondor token leave it absent, which is treated as "no
+// filtering" -- stdio is implicitly trusted (it's the local process
+// boundary), and HTCondor gates the forwarded token itself.
 type scopeContextKey struct{}
 
-// WithGrantedScopes attaches the OAuth2-granted scope set to a
-// context. Used by the HTTP MCP transport to feed the scope filter
-// in handleListTools.
-func WithGrantedScopes(ctx context.Context, scopes []string) context.Context {
-	if scopes == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, scopeContextKey{}, scopes)
+// scopeGrant is what a transport established about the caller's
+// scopes. scoped is the fact that matters: an OAuth2 token stated a
+// scope set even when that set is nil or empty, and must see nothing
+// it was not granted. Reading "no scopes" off a nil slice instead made
+// a token granted nothing indistinguishable from stdio, which sees
+// everything -- and a nil grant is what a token gets whose groups
+// refused every scope it asked for.
+type scopeGrant struct {
+	scopes []string
+	scoped bool
 }
 
-// grantedScopesFromContext returns the scope set previously attached
-// via WithGrantedScopes, or nil if the caller didn't set any. Callers
-// must treat nil as "no scope info available" and decide their
-// default policy — handleListTools defaults to "show everything"
-// because stdio is the unguarded use case.
-func grantedScopesFromContext(ctx context.Context) []string {
-	if v, ok := ctx.Value(scopeContextKey{}).([]string); ok {
+// unscopedGrant is the grant of a caller with no scope model: stdio, or
+// a forwarded HTCondor token.
+var unscopedGrant = scopeGrant{}
+
+// scopedGrant is the grant of an OAuth2 token, whatever it carries.
+func scopedGrant(scopes []string) scopeGrant {
+	return scopeGrant{scopes: scopes, scoped: true}
+}
+
+// WithGrantedScopes attaches an OAuth2-granted scope set to a context.
+// Used by the HTTP MCP transport for every OAuth2 caller; a nil or
+// empty set marks the caller as scoped and granted nothing, never as
+// unscoped.
+func WithGrantedScopes(ctx context.Context, scopes []string) context.Context {
+	return withGrant(ctx, scopedGrant(scopes))
+}
+
+func withGrant(ctx context.Context, g scopeGrant) context.Context {
+	return context.WithValue(ctx, scopeContextKey{}, g)
+}
+
+// grantFromContext returns the grant previously attached via
+// WithGrantedScopes, or the unscoped grant if the caller didn't set
+// any.
+func grantFromContext(ctx context.Context) scopeGrant {
+	if v, ok := ctx.Value(scopeContextKey{}).(scopeGrant); ok {
 		return v
 	}
-	return nil
+	return unscopedGrant
 }
 
-// scopesAllowTool reports whether the given scope set permits a tool
+// grantedScopesFromContext returns the scopes previously attached via
+// WithGrantedScopes. Use scopedTransport, not this slice's nil-ness, to
+// tell an unscoped caller from a token granted nothing.
+func grantedScopesFromContext(ctx context.Context) []string {
+	return grantFromContext(ctx).scopes
+}
+
+// scopesAllowTool reports whether the given grant permits a tool
 // with the given name. The classification uses the same allowlist
 // the HTTP transport's methodRequiresWrite consults — adding a tool
 // in one place without updating the other will cause the list to
 // either over- or under-expose. The shared constant
 // readOnlyMCPTools below is the single source of truth.
 //
-// Returns true when scopes is nil (no constraint info), so the stdio
-// path keeps showing everything.
-func scopesAllowTool(scopes []string, name string) bool {
-	if scopes == nil {
+// Returns true for an unscoped grant, so the stdio path keeps showing
+// everything.
+func scopesAllowTool(g scopeGrant, name string) bool {
+	if !g.scoped {
 		return true
 	}
 	hasRead := false
 	hasWrite := false
-	for _, s := range scopes {
+	for _, s := range g.scopes {
 		switch s {
 		case "mcp:read":
 			hasRead = true
@@ -869,7 +898,7 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	// submit_job.
 	tools = append(tools, dagTools()...)
 
-	scopes := grantedScopesFromContext(ctx)
+	grant := grantFromContext(ctx)
 	filtered := tools[:0:0]
 	for _, t := range tools {
 		// A tool the site has turned off is not offered to anyone, so
@@ -878,7 +907,7 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 		if s.toolDisabled(t.Name) {
 			continue
 		}
-		if scopesAllowTool(scopes, t.Name) {
+		if scopesAllowTool(grant, t.Name) {
 			filtered = append(filtered, t)
 		}
 	}
@@ -940,6 +969,18 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 			"tool", request.Name, "trace_id", traceID)
 		s.recordToolCall(ctx, request.Name, toolstatsOutcomeRefused, time.Since(started))
 		return nil, err
+	}
+
+	// The same check the catalogue makes, so listing and calling cannot
+	// disagree. The SDK transport gates by registering only the tools a
+	// grant may see, and the built-in one by checking the method before
+	// dispatch; both reach here, and neither is the place a scope rule
+	// should rest alone.
+	if !scopesAllowTool(grantFromContext(ctx), request.Name) {
+		s.logger.Info(logging.DestinationMCP, "MCP tool call refused: not allowed by the granted scopes",
+			"tool", request.Name, "trace_id", traceID)
+		s.recordToolCall(ctx, request.Name, toolstatsOutcomeRefused, time.Since(started))
+		return nil, fmt.Errorf("the %q tool is not permitted by the scopes this token was granted", request.Name)
 	}
 
 	// Route to appropriate handler

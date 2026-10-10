@@ -53,15 +53,15 @@ func (h *Handler) mcpSDKHandler() http.Handler {
 // caller both reach the same tools when the scopes are dropped, so nothing a
 // request can show distinguishes carrying them from losing them.
 //
-// Nil scopes for a forwarded HTCondor token is deliberate, not a gap: the
-// catalogue filter reads nil as "no scope constraint", and HTCondor gates
-// that caller -- the same division the built-in transport makes.
+// A forwarded HTCondor token is marked unscoped, deliberately: HTCondor gates
+// that caller -- the same division the built-in transport makes. Every
+// OAuth2 token is scoped, whatever it carries; one granted nothing sees
+// nothing, rather than being mistaken for the unscoped case.
 func sdkTokenInfoFor(token fosite.AccessRequester) *auth.TokenInfo {
-	info := &auth.TokenInfo{}
 	if token == nil {
-		return info
+		return mcpserver.UnscopedTokenInfo()
 	}
-	info.Scopes = token.GetGrantedScopes()
+	info := &auth.TokenInfo{Scopes: append([]string{}, token.GetGrantedScopes()...)}
 	if sess := token.GetSession(); sess != nil {
 		info.Expiration = sess.GetExpiresAt(fosite.AccessToken)
 	}

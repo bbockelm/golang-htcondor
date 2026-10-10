@@ -116,7 +116,13 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 	// rather than an OIDC provider, and the id_token that once implied
 	// it is gone. A client that wants openid asks, and a registration
 	// made without a scope list already defaults to including it.
-	var grantedScopes []string
+	//
+	// Non-nil even when nothing is granted, so the grant is stored as
+	// an empty list rather than JSON null. What a token may do is
+	// decided by the transport marking it scoped, not by whether its
+	// list is nil, but an empty grant should read as one everywhere it
+	// is stored.
+	grantedScopes := []string{}
 	for _, scope := range requestedScopes {
 		if scope == "openid" {
 			grantedScopes = append(grantedScopes, scope)

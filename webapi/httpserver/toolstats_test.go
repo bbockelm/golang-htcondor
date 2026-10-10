@@ -60,7 +60,7 @@ func TestARealMCPCallIsCounted(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+forwardedHTCondorToken(t, testTrustDomain))
+	req.Header.Set("Authorization", "Bearer "+forwardedHTCondorToken(t))
 	req.Header.Set("User-Agent", "integration-probe/1.0")
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, req)
