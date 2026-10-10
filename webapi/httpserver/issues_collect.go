@@ -41,10 +41,23 @@ const issueCollectTimeout = 2 * time.Minute
 
 // handlerIssueSource reads through the mirror when it can and the schedd
 // otherwise, which is the same preference every other listing has.
-type handlerIssueSource struct{ s *Handler }
+// mirror says whether this caller may be answered from the mirror at
+// all (mirrorAllowed).
+type handlerIssueSource struct {
+	s      *Handler
+	mirror bool
+}
+
+// mirrorRows is Handler.mirrorRows for a caller allowed the mirror.
+func (h handlerIssueSource) mirrorRows(ctx context.Context, table, constraint string, projection []string, limit int) ([]*classad.ClassAd, error) {
+	if !h.mirror {
+		return nil, errMirrorNotVerified
+	}
+	return h.s.mirrorRows(ctx, table, constraint, projection, limit)
+}
 
 func (h handlerIssueSource) JobAds(ctx context.Context, constraint string, projection []string, limit int) ([]*classad.ClassAd, string, error) {
-	if ads, err := h.s.mirrorRows(ctx, "jobs", constraint, projection, limit); err == nil {
+	if ads, err := h.mirrorRows(ctx, "jobs", constraint, projection, limit); err == nil {
 		return ads, "htcondordb mirror", nil
 	} else if h.s.dbMirror.Enabled() {
 		h.s.logger.Debug(logging.DestinationHTTP, "issues: mirror declined the queue read", "error", err)
@@ -60,7 +73,7 @@ func (h handlerIssueSource) JobAds(ctx context.Context, constraint string, proje
 }
 
 func (h handlerIssueSource) EpochAds(ctx context.Context, constraint string, projection []string, limit int) ([]*classad.ClassAd, string, error) {
-	if ads, err := h.s.mirrorRows(ctx, "epoch_history", constraint, projection, limit); err == nil {
+	if ads, err := h.mirrorRows(ctx, "epoch_history", constraint, projection, limit); err == nil {
 		return ads, "htcondordb mirror", nil
 	} else if h.s.dbMirror.Enabled() {
 		h.s.logger.Debug(logging.DestinationHTTP, "issues: mirror declined the epoch read", "error", err)

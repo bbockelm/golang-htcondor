@@ -1,11 +1,18 @@
 package htcondor
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
+
+	"github.com/bbockelm/cedar/commands"
+	"github.com/bbockelm/cedar/security"
+	cedarserver "github.com/bbockelm/cedar/server"
 )
 
 // TestPingResult tests the PingResult structure
@@ -160,6 +167,117 @@ func TestDCNopConstantsMatchWireValues(t *testing.T) {
 		}
 		if got := permissionName(tc.got); got != tc.name {
 			t.Errorf("permissionName(%d) = %q, want %q", tc.got, got, tc.name)
+		}
+	}
+}
+
+// TestPingCommandSelection pins which command each set of options puts
+// on the wire. A level-specific NOP is how a caller makes the ping
+// itself an operation at that level, so a regression that quietly fell
+// back to DC_NOP (registered at ALLOW) would turn an authorization check
+// back into an authentication one with nothing visibly different.
+func TestPingCommandSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		opts    PingOptions
+		want    int
+		wantErr bool
+	}{
+		{"default", PingOptions{}, int(commands.DC_NOP), false},
+		{"permission query", PingOptions{CheckPermission: DCNopRead}, int(commands.DC_SEC_QUERY), false},
+		{"read-level nop", PingOptions{Command: DCNopRead}, int(commands.DC_NOP_READ), false},
+		{"write-level nop", PingOptions{Command: DCNopWrite}, int(commands.DC_NOP_WRITE), false},
+		{"both set", PingOptions{CheckPermission: DCNopRead, Command: DCNopRead}, 0, true},
+		{"not a nop", PingOptions{Command: int(commands.QUERY_JOB_ADS)}, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.opts.pingCommand()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("pingCommand() = %d, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("pingCommand(): %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("pingCommand() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// newRecordingDaemon starts a CEDAR server that accepts FS and answers
+// DC_NOP and DC_NOP_READ, reporting each command it dispatches. Each call
+// gets its own address, so no session cached against one is resumed by
+// another.
+func newRecordingDaemon(t *testing.T) (string, <-chan int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0") //nolint:noctx // test-only loopback listener
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := cedarserver.New(&security.SecurityConfig{
+		AuthMethods:    []security.AuthMethod{security.AuthFS},
+		Authentication: security.SecurityRequired,
+		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+		Encryption:     security.SecurityOptional,
+		Integrity:      security.SecurityOptional,
+		SessionCache:   security.NewSessionCache(),
+	})
+	got := make(chan int, 4)
+	record := func(_ context.Context, c *cedarserver.Conn) error {
+		got <- c.Command
+		return nil
+	}
+	srv.Handle(int(commands.DC_NOP), record, "ALLOW")
+	srv.Handle(int(commands.DC_NOP_READ), record, "READ")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = srv.Serve(ctx, ln) }()
+	t.Cleanup(func() { cancel(); _ = ln.Close() })
+	return fmt.Sprintf("<%s>", ln.Addr().String()), got
+}
+
+// TestPingSendsRequestedNop drives a real handshake against a fake
+// daemon and checks the command it was asked to run, for both the
+// schedd and the collector client.
+func TestPingSendsRequestedNop(t *testing.T) {
+	type pinger interface {
+		PingWithOptions(context.Context, *PingOptions) (*PingResult, error)
+	}
+	clients := map[string]func(addr string) pinger{
+		"Schedd": func(addr string) pinger {
+			return NewSchedd("fake", addr).WithConfig(mustConfig(t, fsOnlyConfig))
+		},
+		"Collector": func(addr string) pinger {
+			return NewCollector(addr).WithConfig(mustConfig(t, fsOnlyConfig))
+		},
+	}
+	for name, newClient := range clients {
+		for _, opts := range []PingOptions{{Command: DCNopRead}, {}} {
+			want := int(commands.DC_NOP)
+			if opts.Command != 0 {
+				want = opts.Command
+			}
+			t.Run(fmt.Sprintf("%s/%d", name, want), func(t *testing.T) {
+				addr, got := newRecordingDaemon(t)
+				res, err := newClient(addr).PingWithOptions(daemonContext(t), &opts)
+				if err != nil {
+					t.Fatalf("PingWithOptions(%+v): %v", opts, err)
+				}
+				if res.User == "" {
+					t.Errorf("PingWithOptions(%+v) reported no identity", opts)
+				}
+				select {
+				case cmd := <-got:
+					if cmd != want {
+						t.Errorf("daemon ran command %d, want %d", cmd, want)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatalf("daemon never dispatched command %d", want)
+				}
+			})
 		}
 	}
 }

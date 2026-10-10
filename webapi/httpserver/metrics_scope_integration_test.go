@@ -8,14 +8,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/PelicanPlatform/classad/db"
+	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
 )
 
 // Reads answered from the htcondordb mirror are made with this daemon's
@@ -25,11 +28,37 @@ import (
 // whose identity is qualified the way a bearer's is ("alice@domain"
 // where a job's Owner is "alice"), as a browser session, and as an
 // administrator.
+//
+// The mirror answers only callers the schedd accepts at READ, so the
+// server talks to a schedd that answers the READ-level identity ping:
+// the fake schedd, holding no jobs of its own, so every row these read
+// came from the mirror.
+
+// twoOwnerMirrorFixture is a server reading a two-owner mirror, the
+// schedd it asks about its callers, and the key that schedd trusts.
+type twoOwnerMirrorFixture struct {
+	s       *Server
+	schedd  *fakeschedd.Schedd
+	keyFile string
+}
+
+// bearer returns an auth func presenting an IDTOKEN for user that the
+// schedd accepts; the server resolves who it is by asking the schedd.
+func (f *twoOwnerMirrorFixture) bearer(t *testing.T, user string) func(*http.Request) {
+	t.Helper()
+	now := time.Now().Unix()
+	tok, err := security.GenerateJWT(filepath.Dir(f.keyFile), filepath.Base(f.keyFile),
+		user+"@test.domain", "test.domain", now, now+3600, nil)
+	if err != nil {
+		t.Fatalf("GenerateJWT: %v", err)
+	}
+	return func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+tok) }
+}
 
 // twoOwnerMirror brings up a mirror whose jobs table holds seedJobs'
 // ten jobs for alice and one held job for bob, and whose job_metrics
 // archive holds samples for both, and returns a server reading it.
-func twoOwnerMirror(ctx context.Context, t *testing.T) *Server {
+func twoOwnerMirror(ctx context.Context, t *testing.T) *twoOwnerMirrorFixture {
 	t.Helper()
 	bin := htcondordbBinary(t)
 	harness := htcondor.SetupCondorHarnessWithConfig(t, "DAEMON_LIST = MASTER, COLLECTOR\n")
@@ -41,7 +70,19 @@ func twoOwnerMirror(ctx context.Context, t *testing.T) *Server {
 	cfg.Set("UID_DOMAIN", harness.GetTrustDomain())
 	cfg.Set("TRUST_DOMAIN", harness.GetTrustDomain())
 
-	s := unidentifiedReadsServer(t)
+	keyFile := writeTestSigningKey(t)
+	schedd := fakeschedd.Start(t, keyFile, "test.domain")
+	scfg := newTestConfig(t)
+	scfg.ScheddAddr = schedd.Addr()
+	scfg.SigningKeyPath = keyFile
+	scfg.TrustDomain = "test.domain"
+	scfg.UIDDomain = "test.domain"
+	s, err := NewServer(scfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	s.webuiAdminGroups = newGroupSet("condor-admins")
+	s.setupRoutes()
 	s.dbMirror = dbmirror.NewLocator(htcondor.NewCollector(harness.GetCollectorAddr()), cfg)
 
 	waitFor(t, "the mirror to accept a connection", 45*time.Second, func() bool {
@@ -87,7 +128,7 @@ func twoOwnerMirror(ctx context.Context, t *testing.T) *Server {
 			t.Fatalf("seeding a sample: %v", err)
 		}
 	}
-	return s
+	return &twoOwnerMirrorFixture{s: s, schedd: schedd, keyFile: keyFile}
 }
 
 // getJSON runs one GET through ServeHTTP and decodes a 200 into out.
@@ -111,11 +152,10 @@ func TestMirrorReadsAreOwnerScopedAgainstARealMirror(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	s := twoOwnerMirror(ctx, t)
+	f := twoOwnerMirror(ctx, t)
+	s := f.s
 
-	asAliceBearer := func(r *http.Request) {
-		r.Header.Set("Authorization", "Bearer "+identifiedBearer(t, s.Handler))
-	}
+	asAliceBearer := f.bearer(t, "alice")
 	asAliceSession := func(r *http.Request) { withSession(t, s, r, "alice") }
 	asAdmin := func(r *http.Request) { withSession(t, s, r, "root", "condor-admins") }
 
@@ -140,6 +180,20 @@ func TestMirrorReadsAreOwnerScopedAgainstARealMirror(t *testing.T) {
 		}
 		if got := owners(t, asAdmin); !got["alice"] || !got["bob"] {
 			t.Errorf("an administrator read owners %v, want both", got)
+		}
+
+		// A caller the schedd refuses at READ is not answered from the
+		// mirror, and metrics has no schedd to fall back to.
+		f.schedd.RefuseRead(true)
+		defer f.schedd.RefuseRead(false)
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet,
+			"/api/v1/metrics/job_metrics?group_by=Owner&agg=count:*", nil)
+		withSession(t, s, req, "mallory")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("a caller the schedd refuses at READ got status %d, want %d: %s",
+				w.Code, http.StatusForbidden, w.Body.String())
 		}
 	})
 

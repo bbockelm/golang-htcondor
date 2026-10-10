@@ -257,8 +257,8 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 	// job-history source is mirrored. An unscoped read routes as readily
 	// as a scoped one -- QUERY_SCHEDD_HISTORY is READ-level on the schedd
 	// and applies no owner filter of its own -- but only for a caller the
-	// schedd has identified, since routing is what skips asking it. Any
-	// miss falls through to the schedd.
+	// schedd has accepted at READ, since routing is what skips asking it.
+	// Any miss falls through to the schedd.
 	if baseOpts.Source == htcondor.HistorySourceJobHistory {
 		// scan_limit is a budget for the schedd's backwards scan of the
 		// history FILE; the archive prunes by zone map and has no
@@ -270,7 +270,7 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 		if !scanLimitExplicit {
 			mirrorOpts.ScanLimit = 0
 		}
-		served, decision := s.historyFromMirror(ctx, w, constraint, &mirrorOpts,
+		served, decision := s.historyFromMirror(ctx, w, r, constraint, &mirrorOpts,
 			htcondor.GetAuthenticatedUserFromContext(ctx))
 		if served {
 			return

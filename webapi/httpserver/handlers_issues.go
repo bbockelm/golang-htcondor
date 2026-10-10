@@ -171,11 +171,14 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 	if ownedByMe {
 		scope = fmt.Sprintf("Owner == %s", classadStringLit(owner))
 	}
-	key := fmt.Sprintf("%s|%t|%d|%t", owner, ownedByMe, int64(window/time.Second), includeEnded)
+	// Whether the mirror may answer is part of the key: a set read out of
+	// the mirror must not be handed to a caller who may not read it there.
+	mirror := s.mirrorAllowed(ctx, r) == nil
+	key := fmt.Sprintf("%s|%t|%d|%t|%t", owner, ownedByMe, int64(window/time.Second), includeEnded, mirror)
 	// collectCtx is the cache's, not this request's: see
 	// sharedComputeContext.
 	set, cached, err := s.issueSets().get(ctx, key, func(collectCtx context.Context) (*issues.Set, error) {
-		return issues.Collect(collectCtx, handlerIssueSource{s}, issues.Options{
+		return issues.Collect(collectCtx, handlerIssueSource{s: s, mirror: mirror}, issues.Options{
 			Scope:        scope,
 			Window:       window,
 			IncludeEnded: includeEnded,

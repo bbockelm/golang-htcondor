@@ -71,6 +71,39 @@ type PingOptions struct {
 	// If 0, only authentication is performed (DC_NOP).
 	// If set to one of DC_NOP_* constants, authorization is checked (DC_SEC_QUERY).
 	CheckPermission int
+
+	// Command, when set, is the DC_NOP_* command the ping sends in place of
+	// DC_NOP. DaemonCore registers DC_NOP at ALLOW, so a plain ping succeeds
+	// for any identity the daemon can authenticate; each DC_NOP_<LEVEL> is
+	// registered at its level, so the daemon refuses the handshake (post-auth
+	// ReturnCode DENIED) unless the identity is authorized there. The ping
+	// then fails rather than reporting a User.
+	//
+	// Unlike CheckPermission, which asks the daemon a question and reads its
+	// answer, this makes the ping itself an operation at that level. Mutually
+	// exclusive with CheckPermission.
+	Command int
+}
+
+// pingCommand reports the command a ping with these options sends.
+func (opts *PingOptions) pingCommand() (int, error) {
+	switch {
+	case opts.CheckPermission != 0 && opts.Command != 0:
+		return 0, fmt.Errorf("ping: CheckPermission and Command are mutually exclusive")
+	case opts.CheckPermission != 0:
+		return int(commands.DC_SEC_QUERY), nil
+	case opts.Command != 0:
+		// Only the NOPs: their handler reads nothing, so the connection can
+		// be closed straight after the handshake as a DC_NOP ping's is. Any
+		// other command would leave its handler waiting for a request. The
+		// level-specific NOPs are contiguous (TestDCNopConstantsMatchWireValues).
+		if opts.Command < DCNopRead || opts.Command > DCNopAdvertiseMaster {
+			return 0, fmt.Errorf("ping: command %d is not a DC_NOP_* command", opts.Command)
+		}
+		return opts.Command, nil
+	default:
+		return int(commands.DC_NOP), nil
+	}
 }
 
 // Ping performs a ping operation against the collector daemon
@@ -86,12 +119,11 @@ func (c *Collector) PingWithOptions(ctx context.Context, opts *PingOptions) (*Pi
 		opts = &PingOptions{}
 	}
 
-	// Determine command based on whether we're checking permissions
-	// For basic ping, use DC_NOP (no operation) command
-	// For permission checks, use DC_SEC_QUERY
-	command := int(commands.DC_NOP)
-	if opts.CheckPermission != 0 {
-		command = int(commands.DC_SEC_QUERY)
+	// DC_NOP for a basic ping, DC_SEC_QUERY for a permission check, or the
+	// level-specific NOP the caller asked for.
+	command, err := opts.pingCommand()
+	if err != nil {
+		return nil, err
 	}
 
 	// Get SecurityConfig
@@ -161,12 +193,11 @@ func (s *Schedd) PingWithOptions(ctx context.Context, opts *PingOptions) (*PingR
 		opts = &PingOptions{}
 	}
 
-	// Determine command based on whether we're checking permissions
-	// For basic ping, use DC_NOP (no operation) command
-	// For permission checks, use DC_SEC_QUERY
-	command := int(commands.DC_NOP)
-	if opts.CheckPermission != 0 {
-		command = int(commands.DC_SEC_QUERY)
+	// DC_NOP for a basic ping, DC_SEC_QUERY for a permission check, or the
+	// level-specific NOP the caller asked for.
+	command, err := opts.pingCommand()
+	if err != nil {
+		return nil, err
 	}
 
 	// Get SecurityConfig

@@ -343,6 +343,9 @@ type Handler struct {
 	mcpActors        mcpActorCache
 	webuiAdminGroups *groupSet // Required for Web UI admin pages (empty = no admin UI)
 	metricsPublic    bool      // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
+	// mirrorReaders caches, per username, whether the schedd accepts a
+	// session or user-header caller at READ. See mirrorReadVerified.
+	mirrorReaders mcpActorCache
 	// toolStats counts MCP tool calls for /metrics and for the durable
 	// table in the application database. See toolstats.go.
 	toolStats              *toolstats.Store
