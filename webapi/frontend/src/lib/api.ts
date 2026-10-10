@@ -5,6 +5,7 @@
 // credentials so the session cookie is sent with every request.
 
 import type { MetricsResponse } from "./metrics";
+import type { UtilizationResponse } from "./utilization";
 
 const BASE = "/api/v1";
 
@@ -1278,6 +1279,21 @@ export const api = {
     }
     const q = qs.toString();
     return fetchJSON(`${BASE}/dashboard/activity${q ? "?" + q : ""}`);
+  },
+
+  // How well finished jobs used what they reserved, per workflow, with
+  // suggestions for the next submission. See lib/utilization.ts.
+  utilization: (params: {
+    days: number;
+    owned_by_me?: boolean;
+    schedd?: string;
+  }): Promise<UtilizationResponse> => {
+    const qs = new URLSearchParams();
+    qs.set("days", String(params.days));
+    if (params.owned_by_me !== undefined)
+      qs.set("owned_by_me", String(params.owned_by_me));
+    if (params.schedd) qs.set("schedd", params.schedd);
+    return fetchJSON(`${BASE}/utilization?${qs.toString()}`);
   },
 
   version: (): Promise<VersionInfo> => fetchJSON(`${BASE}/version`),

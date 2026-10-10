@@ -289,6 +289,7 @@ var routePatterns = []routePattern{
 	{exact: "/api/v1/dashboard", template: "/api/v1/dashboard"},
 	{exact: "/api/v1/dashboard/activity", template: "/api/v1/dashboard/activity"},
 	{exact: "/api/v1/issues", template: "/api/v1/issues"},
+	{exact: "/api/v1/utilization", template: "/api/v1/utilization"},
 	{exact: "/api/v1/version", template: "/api/v1/version"},
 	{exact: "/healthz", template: "/healthz"},
 	{exact: "/readyz", template: "/readyz"},

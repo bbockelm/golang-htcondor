@@ -9,6 +9,7 @@ import type {
   Session,
   ClassAd,
 } from '../../src/lib/api';
+import { utilizationFixture } from '../../src/lib/utilization.fixture';
 import type { MetricsResponse } from '../../src/lib/metrics';
 
 // Frozen sample responses for the smoke suite.
@@ -305,6 +306,9 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
       ],
     },
     '/api/v1/admin/logs': adminLogsFixture,
+    // Generated from simulated jobs, so its figures agree with each other
+    // (see the fixture's header).
+    '/api/v1/utilization': utilizationFixture,
     '/api/v1/version': {
       version: 'e2e',
       commit: 'e2e',

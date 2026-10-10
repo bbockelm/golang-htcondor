@@ -19,7 +19,7 @@ function watchForErrors(page: import('@playwright/test').Page) {
   return errors;
 }
 
-for (const path of ['/', '/jobs', '/archive', '/aps']) {
+for (const path of ['/', '/jobs', '/archive', '/utilization', '/aps']) {
   test(`multi-AP: renders ${path} without page errors`, async ({ page }) => {
     const errors = watchForErrors(page);
     const res = await page.goto(path);

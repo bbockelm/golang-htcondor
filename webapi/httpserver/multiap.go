@@ -269,6 +269,7 @@ func (h *Handler) identitySchedd() *htcondor.Schedd {
 var multiAPReadPaths = map[string]bool{
 	"/api/v1/jobs":         true,
 	"/api/v1/jobs/archive": true,
+	"/api/v1/utilization":  true,
 	"/api/v1/aps":          true,
 	"/api/v1/whoami":       true,
 	"/api/v1/auth/me":      true,

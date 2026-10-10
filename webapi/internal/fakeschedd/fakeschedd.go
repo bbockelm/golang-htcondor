@@ -24,7 +24,9 @@ import (
 // Schedd answers QUERY_JOB_ADS(_WITH_AUTH), QUERY_SCHEDD_HISTORY,
 // ACT_ON_JOBS and TRANSFER_DATA_WITH_PERMS by evaluating the request's constraint against its ads the
 // way the real schedd does, and DC_NOP / DC_NOP_READ, which identity
-// resolution pings. It applies NO owner filter of its own, which
+// resolution pings. It also answers QUERY_STARTD_ADS from slot ads added
+// with AddStartds, so its address can stand in for a collector. It
+// applies NO owner filter of its own, which
 // is the property that matters to an owner-scoping test: a real schedd
 // does not filter job-ad reads by owner either, so whatever this returns
 // is exactly what the constraint the client sent admits.
@@ -38,6 +40,10 @@ type Schedd struct {
 	jobs    []*classad.ClassAd
 	history []*classad.ClassAd
 	epochs  []*classad.ClassAd
+	// startds are slot ads, for a test that points its collector here.
+	startds []*classad.ClassAd
+	// startdQueries counts QUERY_STARTD_ADS requests.
+	startdQueries int
 	// actedOn is every job id an ACT_ON_JOBS request matched.
 	actedOn []string
 	// sandboxes holds each job's output files, by "cluster.proc".
@@ -96,6 +102,7 @@ func Start(t testing.TB, keyFile, trustDomain string) *Schedd {
 	srv.Handle(commands.QUERY_JOB_ADS, f.queryJobs, "READ")
 	srv.Handle(commands.QUERY_JOB_ADS_WITH_AUTH, f.queryJobs, "READ")
 	srv.Handle(commands.QUERY_SCHEDD_HISTORY, f.queryHistory, "READ")
+	srv.Handle(commands.QUERY_STARTD_ADS, f.queryStartds, "READ")
 	srv.Handle(commands.ACT_ON_JOBS, f.actOnJobs, "WRITE")
 	srv.Handle(commands.TRANSFER_DATA_WITH_PERMS, f.transferData, "WRITE")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -217,6 +224,48 @@ func (f *Schedd) queryJobs(ctx context.Context, c *cedarserver.Conn) error {
 	final := classad.New()
 	final.InsertAttr("Owner", 0)
 	return sendAd(ctx, c, final)
+}
+
+// AddStartds adds slot ads, answered to QUERY_STARTD_ADS the way a
+// collector answers it, so the same address can stand in for a collector.
+func (f *Schedd) AddStartds(ads ...*classad.ClassAd) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.startds = append(f.startds, ads...)
+}
+
+// StartdQueries is how many QUERY_STARTD_ADS requests have arrived.
+func (f *Schedd) StartdQueries() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.startdQueries
+}
+
+// queryStartds answers as a collector does: every matching ad in ONE
+// message, each preceded by a non-zero "more" flag, then a zero.
+func (f *Schedd) queryStartds(ctx context.Context, c *cedarserver.Conn) error {
+	req, err := readRequest(ctx, c)
+	if err != nil {
+		return err
+	}
+	constraint, _ := req.Lookup("Requirements")
+	f.mu.Lock()
+	ads := matching(f.startds, constraint)
+	f.startdQueries++
+	f.mu.Unlock()
+	m := message.NewMessageForStream(c.Stream)
+	for _, ad := range ads {
+		if err := m.PutInt32(ctx, 1); err != nil {
+			return err
+		}
+		if err := m.PutClassAd(ctx, ad); err != nil {
+			return err
+		}
+	}
+	if err := m.PutInt32(ctx, 0); err != nil {
+		return err
+	}
+	return m.FinishMessage(ctx)
 }
 
 func (f *Schedd) queryHistory(ctx context.Context, c *cedarserver.Conn) error {

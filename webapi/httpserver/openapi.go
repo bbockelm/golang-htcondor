@@ -64,6 +64,124 @@ const openAPISchema = `{
       }
     },
     "schemas": {
+      "UtilDistribution": {
+        "type": "object",
+        "nullable": true,
+        "description": "Exact nearest-rank percentiles and a histogram of 12-30 contiguous bins (lo inclusive).",
+        "properties": {
+          "n": {"type": "integer"},
+          "min": {"type": "number"}, "p10": {"type": "number"}, "p25": {"type": "number"}, "p50": {"type": "number"},
+          "p75": {"type": "number"}, "p90": {"type": "number"}, "p95": {"type": "number"}, "p99": {"type": "number"}, "max": {"type": "number"},
+          "histogram": {"type": "array", "items": {"type": "object", "properties": {"lo": {"type": "number"}, "hi": {"type": "number"}, "count": {"type": "integer"}}}}
+        }
+      },
+      "UtilRequest": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "typical": {"type": "number", "description": "The most common requested value."},
+          "min": {"type": "number"}, "max": {"type": "number"},
+          "distinct": {"type": "integer"}
+        }
+      },
+      "UtilResourceSummary": {
+        "type": "object",
+        "description": "Time-weighted: request x wall hours reserved, usage x wall hours used. Units are core-hours, MiB-hours, KiB-hours or GPU-hours.",
+        "properties": {
+          "resource": {"type": "string", "enum": ["cpu", "memory", "disk", "gpu"]},
+          "allocated_hours": {"type": "number"},
+          "used_hours": {"type": "number", "nullable": true, "description": "Over jobs whose usage was measured; null when none was."},
+          "allocated_hours_measured": {"type": "number", "description": "allocated_hours over only the measured jobs: the denominator for used_hours."},
+          "jobs_measured": {"type": "integer"}
+        }
+      },
+      "UtilAdvice": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string", "enum": ["memory-lower", "memory-retry", "memory-raise", "memory-ok", "cpus-lower", "cpus-raise", "disk-lower", "disk-raise", "gpu-idle", "gpu-unused", "short-jobs", "restarts"]},
+          "resource": {"type": "string", "enum": ["cpu", "memory", "disk", "gpu", "runtime"]},
+          "severity": {"type": "string", "enum": ["info", "suggest", "warn"]},
+          "title": {"type": "string"},
+          "detail": {"type": "string"},
+          "submit": {"type": "array", "items": {"type": "string"}, "description": "Submit-file lines to paste."},
+          "saves": {"type": "object", "nullable": true, "properties": {"unit": {"type": "string", "enum": ["core_hours", "gib_hours", "gpu_hours"]}, "amount": {"type": "number"}}},
+          "confidence": {"type": "string", "enum": ["low", "medium", "high"]}
+        }
+      },
+      "UtilShape": {
+        "type": "object",
+        "properties": {"cpus": {"type": "number"}, "memory_mib": {"type": "number"}, "disk_kib": {"type": "number"}, "gpus": {"type": "number"}}
+      },
+      "UtilThroughput": {
+        "type": "object",
+        "nullable": true,
+        "description": "Up-to estimate of how many more of these jobs could run at once with the suggested requests, from the shapes of the pool's execute machines. Null when no advice changes the request, under 20 finished jobs, or without pool data (multi-AP, or the collector could not be read).",
+        "properties": {
+          "current": {"$ref": "#/components/schemas/UtilShape"},
+          "suggested": {"$ref": "#/components/schemas/UtilShape"},
+          "retry_memory_mib": {"type": "number", "nullable": true},
+          "fit_current": {"type": "integer", "description": "Copies of the current shape the pool's machines hold at once."},
+          "fit_suggested": {"type": "integer"},
+          "gain": {"type": "number", "description": "Pool occupancy per unit of work, current over suggested, reruns included."},
+          "limited_by": {"type": "string", "enum": ["cpu", "memory", "disk", "gpu"]},
+          "wait_p50": {"type": "number", "description": "Median seconds from submission to first start."},
+          "slots_limited": {"type": "boolean", "description": "wait_p50 >= 900"},
+          "last_batch": {"type": "object", "nullable": true, "properties": {
+            "id": {"type": "integer"}, "jobs": {"type": "integer"},
+            "elapsed": {"type": "number", "description": "Seconds, first QDate to last CompletionDate."},
+            "estimated": {"type": "number", "description": "Seconds: max(longest job wall, elapsed / gain)."}}}
+        }
+      },
+      "UtilWorkflow": {
+        "type": "object",
+        "description": "Jobs grouped by (owner, batch name without a DAG +N suffix or else executable, executable, access point).",
+        "properties": {
+          "key": {"type": "string"},
+          "name": {"type": "string"},
+          "executable": {"type": "string"},
+          "owner": {"type": "string", "description": "Set when the scope covers more than one owner."},
+          "schedd": {"type": "string", "description": "Multi-AP mode."},
+          "is_dag": {"type": "boolean"},
+          "jobs": {"type": "integer"}, "succeeded": {"type": "integer"}, "failed": {"type": "integer"}, "removed": {"type": "integer"},
+          "wall_hours": {"type": "number"},
+          "wall": {"$ref": "#/components/schemas/UtilDistribution"},
+          "short_jobs": {"type": "integer"},
+          "restarts": {"type": "object", "properties": {"jobs": {"type": "integer"}, "lost_hours": {"type": "number"}}},
+          "holds": {"type": "object", "properties": {"memory": {"type": "integer"}, "disk": {"type": "integer"}}},
+          "resources": {"type": "array", "items": {"$ref": "#/components/schemas/UtilResourceSummary"}},
+          "memory": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "peak_mib": {"$ref": "#/components/schemas/UtilDistribution"}}},
+          "cpu": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "cores_used": {"$ref": "#/components/schemas/UtilDistribution"}, "efficiency": {"$ref": "#/components/schemas/UtilDistribution"}}},
+          "disk": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "used_kib": {"$ref": "#/components/schemas/UtilDistribution"}}},
+          "gpu": {"type": "object", "nullable": true, "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "utilization": {"$ref": "#/components/schemas/UtilDistribution"}}},
+          "memory_curve": {"type": "array", "description": "Expected reserved MiB-hours at each candidate request_memory; empty under 20 finished jobs.", "items": {"type": "object", "properties": {
+            "request_mib": {"type": "number"}, "retry_mib": {"type": "number", "nullable": true}, "reserved_mib_hours": {"type": "number"},
+            "retry_fraction": {"type": "number"}, "is_current": {"type": "boolean"}, "is_recommended": {"type": "boolean"}}}},
+          "advice": {"type": "array", "items": {"$ref": "#/components/schemas/UtilAdvice"}},
+          "batches": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "integer"}, "submitted": {"type": "integer"}, "jobs": {"type": "integer"},
+            "memory_request_mib": {"type": "number", "nullable": true}, "memory_p95_mib": {"type": "number", "nullable": true},
+            "cpu_request": {"type": "number", "nullable": true}, "cpu_cores_p50": {"type": "number", "nullable": true}, "wall_p50": {"type": "number", "nullable": true}}}},
+          "samples": {"type": "array", "items": {"type": "object", "properties": {
+            "memory_mib": {"type": "number", "nullable": true}, "wall": {"type": "number"}, "cores": {"type": "number", "nullable": true},
+            "disk_kib": {"type": "number", "nullable": true}, "outcome": {"type": "string", "enum": ["ok", "failed", "removed", "memory_exceeded"]}}}},
+          "throughput": {"$ref": "#/components/schemas/UtilThroughput"}
+        }
+      },
+      "UtilizationResponse": {
+        "type": "object",
+        "properties": {
+          "since": {"type": "integer", "description": "Inclusive lower bound on EnteredHistoryTime, unix seconds."},
+          "until": {"type": "integer"},
+          "days": {"type": "integer"},
+          "jobs_considered": {"type": "integer"},
+          "truncated": {"type": "boolean", "description": "The 50,000-job cap was hit; the analysis covers the most recent jobs."},
+          "overall": {"type": "object", "properties": {
+            "jobs": {"type": "integer"}, "wall_hours": {"type": "number"}, "badput_hours": {"type": "number"},
+            "resources": {"type": "array", "items": {"$ref": "#/components/schemas/UtilResourceSummary"}},
+            "throughput_gain": {"type": "number", "nullable": true, "description": "All workflows: total occupancy at current requests over that at suggested ones; workflows left unchanged count on both sides."}}},
+          "workflows": {"type": "array", "items": {"$ref": "#/components/schemas/UtilWorkflow"}}
+        }
+      },
       "App": {
         "type": "object",
         "required": ["id", "type", "job_id", "state"],
@@ -607,6 +725,25 @@ const openAPISchema = `{
           "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "404": {"description": "Unknown metrics table", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "502": {"description": "The mirror could not be reached or the query failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/utilization": {
+      "get": {
+        "summary": "Resource utilization of finished jobs",
+        "description": "How well the caller's finished jobs (completed or removed, EnteredHistoryTime within the window) used the CPU, memory, disk and GPUs they reserved, grouped into workflows, with submit-file advice for the next submission. Read from a synchronized htcondordb mirror when one is current, else the schedd's history; at most the 50,000 most recent jobs. A non-admin caller is confined to its own jobs whatever owned_by_me says. Cached for five minutes per scope and window. Memory is MiB, disk KiB, time seconds unless a field name says hours.",
+        "operationId": "getUtilization",
+        "parameters": [
+          {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "enum": [1, 7, 30], "default": 7}, "description": "Analysis window."},
+          {"name": "owned_by_me", "in": "query", "required": false, "schema": {"type": "boolean", "default": true}, "description": "false asks for everyone's jobs; honored only for administrators (a project lead gets own plus projects')."},
+          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Multi-AP mode: restrict to one access point."}
+        ],
+        "responses": {
+          "200": {"description": "The analysis; jobs_considered is 0 when there is nothing to analyse.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UtilizationResponse"}}}},
+          "400": {"description": "Bad parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "Job history could not be read", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "The mirror is required and could not answer", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },
