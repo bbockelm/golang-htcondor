@@ -1499,10 +1499,11 @@ var oauth2AdvertisedScopes = []string{
 	// owner's ability to remove anybody's jobs.
 	"mcp:admin", "mcp:superuser",
 	// READ and WRITE only. The ADVERTISE_* levels were advertised as
-	// scopes but nothing in this server ever consulted them:
-	// advertise_to_collector publishes with the server's own collector
-	// client, not the caller's credential, so the scopes granted nothing
-	// and only lengthened the consent page.
+	// scopes and no tool checked them. advertise_to_collector sends the
+	// ad with the caller's own per-request credential, so whether that
+	// identity may advertise is the collector's ALLOW_ADVERTISE_*
+	// decision; the scopes only lengthened the consent page, and
+	// mapCondorScopesToAuthz no longer puts them in a minted token.
 	"condor:/READ", "condor:/WRITE",
 }
 

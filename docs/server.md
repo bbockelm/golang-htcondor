@@ -171,6 +171,19 @@ Three behaviours worth knowing before turning this on:
   platform. For `tannenba:x:20013:20013:tatannen:...` the value matched
   is `tatannen`; for `...:Tannenbaum, Todd,,:...` it is `Tannenbaum`.
 
+**GECOS can be user-writable.** `chfn` lets a user change their own
+full name where `/etc/login.defs` allows it (`CHFN_RESTRICT`; check the
+host, not the distribution's reputation). There, a local user who sets
+their name to someone else's subject either makes that subject
+ambiguous, so its owner cannot log in, or -- when the owner's account
+carries no matching GECOS -- becomes the account it maps to. On such a
+host set `CHFN_RESTRICT rwh` (room and phone numbers only) in
+`/etc/login.defs`. Accounts served by SSSD or another directory cannot
+be changed this way. Where token subjects are login names, put
+`username` first (`username,gecos`): a subject that is somebody's login
+name then never consults GECOS at all. The shadowed pairs in the
+startup log are worth watching either way.
+
 An ePPN is scoped (`bockelman@wisc.edu`) and a GECOS or login name
 usually is not, so the two cannot match without
 `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN`.
@@ -912,6 +925,27 @@ Put the office and the monitoring host in
 `HTTP_API_SSH_GATEWAY_LOCKOUT_TRUSTED` so testing the gateway cannot
 lock you out of it.
 
+### Behind a load balancer
+
+The gateway has to see each client's own address. It terminates the TCP
+connection itself and does not accept the PROXY protocol, so nothing
+upstream can tell it who the client is: pass the connection through at
+layer 4 with the source address intact (`externalTrafficPolicy: Local`
+on a Kubernetes Service, or no SNAT on the path). Behind anything that
+rewrites the source -- a TCP proxy, SNAT, a NAT gateway -- every client
+arrives from the same address, and everything counted per source is
+counted for the whole site at once:
+
+- At most four logins may be waiting at the approval prompt from one
+  address. The fifth person to connect is refused until one of those
+  finishes or its device code expires.
+- The failure budget is shared. One user's abandoned logins lock
+  everyone out, for `15m` the first time and up to a day.
+
+Listing the balancer in `HTTP_API_SSH_GATEWAY_LOCKOUT_TRUSTED` stops the
+lockouts by turning them off for every client behind it, and leaves the
+four-login limit in place.
+
 ### Certificates, for scripts and for not approving every connection
 
 `BatchMode=yes` refuses keyboard-interactive outright, so a script cannot use
@@ -1014,6 +1048,11 @@ certificates usually work:
   `MaxSessions`, and every terminal for one job shares it. Port and socket
   forwards do not count against it.
 - Each `ssh` is its own device authorization, so each asks for approval.
+- **Port forwards reach whatever the job can.** `ssh -L` and socket
+  forwards are dialled from inside the job, as `condor_ssh_to_job -L`
+  does, to any host and port or socket path the job could reach itself.
+  They carry the user's own authority over their own job, not the
+  server's.
 
 ## Disabling tools
 
