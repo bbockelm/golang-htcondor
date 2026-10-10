@@ -160,3 +160,54 @@ func TestMirrorProbeReportsEachStage(t *testing.T) {
 		}
 	}
 }
+
+// TestMirrorTxnSetAttributeAfterNewAdKeepsTheAd pins a storage
+// regression a real htcondordb showed and the in-process catalogs here
+// (an older classad) do not: a transaction that creates an ad and then
+// sets one more attribute on it must commit the whole ad.
+//
+// From classad v0.30.0 (htcondordb v0.21.0 ships v0.31.2) the server
+// stores the ad through Txn.NewClassAdOld, which does not mark the key
+// as wholly written in this transaction the way Txn.NewClassAd does, so
+// the following SetAttribute is taken as a patch over the (absent)
+// stored ad and replaces the buffered one: the committed row is the one
+// attribute that was set. Any dbrpc client that creates an ad and
+// amends it in one transaction -- the shape of a job_queue.log
+// transaction -- loses the ad. htcondordb's own schedd sync writes in
+// process through Txn.NewClassAd and is not affected (the multi-AP
+// end-to-end test reads full job ads through it).
+func TestMirrorTxnSetAttributeAfterNewAdKeepsTheAd(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("integration test (forks a real htcondordb)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	h, _, write := mirrorFeed(t, ctx)
+
+	write(ctx, func(tx *txWriter) {
+		tx.newJob("7001.0", 7001, 0, 4)
+		tx.set("7001.0", "ExitCode", "0")
+	})
+
+	dbc, closer, _, err := h.dbMirror.Client(ctx)
+	if err != nil {
+		t.Fatalf("connecting to the mirror: %v", err)
+	}
+	defer closer()
+	var rows []string
+	if err := dbc.QueryRawProjectStream(ctx, "jobs", "true", nil, 10, func(row string) bool {
+		rows = append(rows, row)
+		return true
+	}); err != nil {
+		t.Fatalf("reading the jobs table: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("jobs table holds %d rows, want 1: %q", len(rows), rows)
+	}
+	for _, want := range []string{"ClusterId = 7001", "ProcId = 0", "JobStatus = 4", `Owner = "tester"`, "ExitCode = 0"} {
+		if !strings.Contains(rows[0], want) {
+			t.Errorf("committed row lacks %q: %q", want, rows[0])
+		}
+	}
+}
