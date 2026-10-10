@@ -370,9 +370,15 @@ func TestWatchDoneFiresForCompletedJobStillInQueue(t *testing.T) {
 	}
 
 	// Seed a Completed job that stays in the jobs table (JobStatus 4) with a
-	// clean exit and no history row -- the LeaveJobInQueue state.
+	// clean exit and no history row -- the LeaveJobInQueue state. Two
+	// transactions, not one: creating an ad and amending it in the same
+	// transaction loses the ad on htcondordb v0.21.0, which is pinned by
+	// TestMirrorTxnSetAttributeAfterNewAdKeepsTheAd rather than left to
+	// fail here under a name that says nothing about it.
 	write(ctx, func(tx *txWriter) {
 		tx.newJob("9001.0", 9001, 0, 4)
+	})
+	write(ctx, func(tx *txWriter) {
 		tx.set("9001.0", "ExitCode", "0")
 	})
 
