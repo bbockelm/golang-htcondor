@@ -193,11 +193,13 @@ func TestCollectorQueryIntegration(t *testing.T) {
 			} else {
 				_ = os.Unsetenv("CONDOR_CONFIG")
 			}
+			// Reload only after CONDOR_CONFIG is restored; reloading
+			// before would re-cache this test's config globally.
+			ReloadDefaultConfig()
 		}()
 
 		// Reload global config to pick up the test harness configuration
 		ReloadDefaultConfig()
-		defer ReloadDefaultConfig() // Restore original config after test
 
 		// First, advertise a custom ad
 		customAd := classad.New()

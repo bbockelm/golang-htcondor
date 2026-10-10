@@ -13,6 +13,7 @@ import (
 
 // TestSpoolJobFilesFromTar_SingleJob tests spooling files from a tar archive for a single job
 func TestSpoolJobFilesFromTar_SingleJob(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -110,6 +111,7 @@ queue
 
 // TestSpoolJobFilesFromTar_MultipleJobs tests spooling files from a tar archive for multiple jobs
 func TestSpoolJobFilesFromTar_MultipleJobs(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -292,6 +294,7 @@ func TestSpoolJobFilesFromTar_EmptyJobAds(t *testing.T) {
 
 // TestSpoolJobFilesFromTar_FileFiltering tests that only files in TransferInput are processed
 func TestSpoolJobFilesFromTar_FileFiltering(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -389,6 +392,7 @@ queue
 
 // TestSpoolJobFilesFromTar_PathTraversal tests that files with path traversal are skipped
 func TestSpoolJobFilesFromTar_PathTraversal(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

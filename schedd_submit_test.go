@@ -10,6 +10,7 @@ import (
 
 // TestScheddSubmitIntegration tests job submission to a real schedd
 func TestScheddSubmitIntegration(t *testing.T) {
+	t.Parallel()
 	// Check if condor_master is available
 	masterPath, err := exec.LookPath("condor_master")
 	if err != nil {

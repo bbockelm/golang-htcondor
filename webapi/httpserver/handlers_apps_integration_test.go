@@ -135,6 +135,7 @@ func appsRequest(t *testing.T, method, url string, body any) (int, []byte) {
 // schedd accepting the submit and the launcher actually spooling) while
 // asserting the states stay honest about an app that has not started.
 func TestAppsLifecycleIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -255,6 +256,7 @@ func TestAppsLifecycleIntegration(t *testing.T) {
 // only worked with short paths would fail on exactly the pools this is
 // for.
 func TestAppProxyServesHTTPOverAUnixSocketIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}

@@ -40,6 +40,7 @@ import (
 //
 //nolint:gocyclo // Integration test; splitting the staging would obscure the protocol.
 func TestSharedPortHTTPForwardingAndKeepalive(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test; needs condor_master")
 	}

@@ -27,6 +27,7 @@ import (
 // 3. Create input sandbox tarball from job ad
 // 4. Compare job's actual filesystem with tarball contents
 func TestInputSandboxRoundtrip(t *testing.T) {
+	t.Parallel()
 	// Setup HTCondor test harness
 	harness := htcondor.SetupCondorHarness(t)
 
@@ -147,6 +148,7 @@ queue
 // blaming it sends anyone auditing those paths after a bug that is not
 // there.
 func TestOutputSandboxRoundtrip(t *testing.T) {
+	t.Parallel()
 	harness := htcondor.SetupCondorHarness(t)
 	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)
@@ -232,6 +234,7 @@ queue
 // remaps are applied by ExtractOutputSandbox on this side, so what the
 // test needs from the schedd is only that the files come back at all.
 func TestOutputSandboxWithRemaps(t *testing.T) {
+	t.Parallel()
 	harness := htcondor.SetupCondorHarness(t)
 	if err := harness.WaitForDaemons(); err != nil {
 		t.Fatalf("Daemons failed to start: %v", err)

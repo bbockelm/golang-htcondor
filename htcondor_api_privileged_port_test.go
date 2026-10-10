@@ -26,6 +26,7 @@ import (
 // bind would be attempted by whoever ran the test, and the privilege
 // question would never arise.
 func TestHTCondorAPIBindsPrivilegedPortUnderMaster(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping condor_master integration test in -short mode")
 	}

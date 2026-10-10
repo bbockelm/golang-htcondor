@@ -50,7 +50,8 @@ func connectLifecycleSchedd(t *testing.T) (*Schedd, context.Context, context.Can
 func waitForJobStatus(ctx context.Context, t *testing.T, schedd *Schedd, clusterID string, wantStatus int) {
 	t.Helper()
 	constraint := "ClusterId == " + clusterID
-	deadline := time.Now().Add(20 * time.Second)
+	// A ceiling only a failure pays; pools run in parallel share the CPU.
+	deadline := time.Now().Add(2 * time.Minute)
 	var last int64 = -1
 	for time.Now().Before(deadline) {
 		ads, err := schedd.Query(ctx, constraint, []string{"ClusterId", "ProcId", "JobStatus"})
@@ -91,6 +92,7 @@ func rawResultTotal(t *testing.T, results *JobActionResults, idx int) int64 {
 // integration tests only removed a job; this exercises hold and release too and
 // asserts the per-job AR_* results from the result ad, not just error codes.
 func TestScheddHoldReleaseRemoveLifecycleIntegration(t *testing.T) {
+	t.Parallel()
 	schedd, ctx, cancel := connectLifecycleSchedd(t)
 	defer cancel()
 
@@ -184,6 +186,7 @@ queue
 // totals. The by-ID path (schedd.cpp:7730-7749) skips that filter and reaches
 // the per-job AR_BAD_STATUS check.
 func TestScheddReleaseNonHeldReturnsBadStatusIntegration(t *testing.T) {
+	t.Parallel()
 	schedd, ctx, cancel := connectLifecycleSchedd(t)
 	defer cancel()
 
@@ -224,6 +227,7 @@ queue
 
 // TestScheddRemoveJobsIntegration tests the RemoveJobs functionality
 func TestScheddRemoveJobsIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -321,6 +325,7 @@ queue
 
 // TestScheddRemoveJobsByIDIntegration tests RemoveJobsByID
 func TestScheddRemoveJobsByIDIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -413,6 +418,7 @@ queue 3
 
 // TestScheddRemoveNonExistentJob tests removing a non-existent job
 func TestScheddRemoveNonExistentJob(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

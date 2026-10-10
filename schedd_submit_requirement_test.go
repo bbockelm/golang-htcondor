@@ -12,6 +12,7 @@ import (
 // TestCommitTransactionWithSubmitRequirement tests that job commit failures
 // due to submit requirements return the error reason from the schedd
 func TestCommitTransactionWithSubmitRequirement(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

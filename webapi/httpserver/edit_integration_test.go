@@ -21,6 +21,7 @@ import (
 
 // TestHTTPEditJobIntegration tests editing a job via HTTP API
 func TestHTTPEditJobIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -274,6 +275,7 @@ queue
 
 // TestHTTPBulkEditJobsIntegration tests bulk editing jobs via HTTP API
 func TestHTTPBulkEditJobsIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

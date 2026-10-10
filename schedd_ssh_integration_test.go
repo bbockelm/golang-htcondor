@@ -36,6 +36,7 @@ import (
 //
 //nolint:gocyclo // Integration test with several discrete verification stages.
 func TestSSHToJobIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -298,6 +299,20 @@ queue
 	const fwdSentinel = "DIRECT-TCPIP-OK"
 	port := 34000 + (os.Getpid() % 1000)
 
+	// The listeners below outlive their SSH sessions: closing a session
+	// without a PTY does not signal the remote command, and the pool's
+	// shutdown does not reach processes sshd started in their own
+	// sessions. Tag their command lines and pkill them before the client
+	// closes; the timer in each script is the backstop if that fails.
+	marker := fmt.Sprintf("ssh-to-job-test-listener-%d-%d", os.Getpid(), time.Now().UnixNano())
+	defer func() {
+		if ks, kerr := client.NewSession(); kerr == nil {
+			_ = ks.Run("pkill -f " + marker)
+			_ = ks.Close()
+		}
+	}()
+	const lifetimeGuard = "import os,threading\nthreading.Timer(600,lambda:os._exit(0)).start()\n"
+
 	// The payload goes over base64 because condor_ssh_to_job_shell_setup
 	// runs `eval ${SSH_ORIGINAL_COMMAND}` with the expansion UNQUOTED: the
 	// command is word-split on IFS -- newlines included -- and rejoined
@@ -317,8 +332,8 @@ while True:
 	// An absolute interpreter path: the job's PATH is the starter's plus
 	// /bin:/usr/bin (condor_ssh_to_job_shell_setup), which need not contain
 	// the python3 this machine's developer has.
-	listenerCmd := fmt.Sprintf(`%s -c "import base64;exec(base64.b64decode('%s'))"`,
-		python, base64.StdEncoding.EncodeToString([]byte(script)))
+	listenerCmd := fmt.Sprintf(`%s -c "import base64;exec(base64.b64decode('%s'))" %s`,
+		python, base64.StdEncoding.EncodeToString([]byte(lifetimeGuard+script)), marker)
 
 	// Run it in the foreground of a session we hold open, rather than
 	// backgrounding it. A nohup'd child is killed with the session's
@@ -419,8 +434,8 @@ serve(s)
 	}
 	var sockErr strings.Builder
 	sess4.Stderr = &sockErr
-	unixCmd := fmt.Sprintf(`%s -c "import base64;exec(base64.b64decode('%s'))"`,
-		python, base64.StdEncoding.EncodeToString([]byte(sockScript)))
+	unixCmd := fmt.Sprintf(`%s -c "import base64;exec(base64.b64decode('%s'))" %s`,
+		python, base64.StdEncoding.EncodeToString([]byte(lifetimeGuard+sockScript)), marker)
 	if err := sess4.Start(unixCmd); err != nil {
 		t.Fatalf("starting the unix listener failed: %v", err)
 	}

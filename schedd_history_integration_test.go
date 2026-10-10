@@ -10,6 +10,7 @@ import (
 
 // TestScheddQueryJobHistoryIntegration tests the QueryHistory functionality
 func TestScheddQueryJobHistoryIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -65,7 +66,8 @@ queue
 	// Wait for job to leave the queue (completed or removed)
 	// In CI environments, the job might not actually run if there's no startd,
 	// but it should at least get removed from the queue eventually
-	maxWait := 30 * time.Second
+	// A ceiling only a failure pays; pools run in parallel share the CPU.
+	maxWait := 2 * time.Minute
 	deadline := time.Now().Add(maxWait)
 	var leftQueue bool
 	for time.Now().Before(deadline) {
@@ -210,6 +212,7 @@ queue
 
 // TestScheddQueryJobEpochsIntegration tests the job epoch history functionality
 func TestScheddQueryJobEpochsIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -239,15 +242,18 @@ func TestScheddQueryJobEpochsIntegration(t *testing.T) {
 	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit a simple test job
-	submitFile := `
+	// initialdir keeps the job's output out of the package directory; the
+	// harness removes its own tree after the pool has stopped.
+	submitFile := fmt.Sprintf(`
 universe = vanilla
+initialdir = %s
 executable = /bin/echo
 arguments = "Epoch test"
 output = test_epoch.out
 error = test_epoch.err
 log = test_epoch.log
 queue
-`
+`, harness.tmpDir)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -284,6 +290,7 @@ queue
 
 // TestScheddQueryTransferHistoryIntegration tests the transfer history functionality
 func TestScheddQueryTransferHistoryIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -313,8 +320,11 @@ func TestScheddQueryTransferHistoryIntegration(t *testing.T) {
 	schedd := NewSchedd(location.Name, location.Address)
 
 	// Submit a job with file transfer
-	submitFile := `
+	// initialdir keeps the job's output out of the package directory; the
+	// harness removes its own tree after the pool has stopped.
+	submitFile := fmt.Sprintf(`
 universe = vanilla
+initialdir = %s
 executable = /bin/cat
 arguments = input.txt
 output = test_transfer.out
@@ -324,7 +334,7 @@ transfer_input_files = input.txt
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 queue
-`
+`, harness.tmpDir)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

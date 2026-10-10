@@ -33,6 +33,7 @@ import (
 // difference between "the signer works" and "the endpoint that hands out
 // signatures works".
 func TestWatchURLReportsARealFiring(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
