@@ -2,6 +2,7 @@
 package httpserver
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"sync"
@@ -254,14 +255,16 @@ func GetScheddWithToken(ctx context.Context, schedd *htcondor.Schedd) (*htcondor
 // (e.g. for filtering jobs to "owned by me", recording the Owner
 // when minting a share URL, or any other authorization decision).
 //
-// Validated reports whether at least one schedd op has succeeded with
-// this token. Code paths that need authoritative identity should
-// gate on Validated; code paths that only need a stable bucket key
-// (rate-limit per-token / per-username) can use Username directly.
+// Validated reports whether the identity has been established by
+// something other than the token's own claims: this server verified
+// the bearer itself (AddValidated), or a CEDAR handshake reported who
+// it is (MarkValidated). Code paths that need authoritative identity
+// should gate on Validated; code paths that only need a stable bucket
+// key (rate-limit per-token / per-username) can use Username directly.
 type TokenCacheEntry struct {
 	Token     string
 	Username  string // sub from the JWT — unverified until Validated == true
-	Validated bool   // true once a schedd op authenticated successfully with this token
+	Validated bool   // true once the identity was established other than from the token's claims
 
 	// CondorCredential is what CEDAR should authenticate with for this
 	// bearer, when that is not the bearer itself.
@@ -285,10 +288,15 @@ type TokenCacheEntry struct {
 	// carrying no restriction at all.
 	Scopes []string
 
-	Expiration    time.Time
-	SessionCache  *security.SessionCache
-	expiryTimer   *time.Timer
-	cancelCleanup func()
+	Expiration   time.Time
+	SessionCache *security.SessionCache
+
+	// evictAt is when the cache drops the entry: Expiration, or sooner
+	// (see tokenCacheUnvalidatedResidency).
+	evictAt time.Time
+	// elem is the entry's place in its recency list, lru the list.
+	elem *list.Element
+	lru  *list.List
 }
 
 // SetCondorCredential records the credential and scopes resolved for a
@@ -305,82 +313,150 @@ func (tc *TokenCache) SetCondorCredential(token, credential string, scopes []str
 	entry.Scopes = append([]string(nil), scopes...)
 }
 
-// TokenCache manages validated tokens and their associated session caches
+const (
+	// tokenCacheMaxEntries bounds the cache. Add accepts any
+	// well-formed JWT with a sub and a future exp -- the schedd, not
+	// this server, checks the signature -- so the number of entries is
+	// chosen by whoever sends requests, not by how many users there are.
+	tokenCacheMaxEntries = 4096
+
+	// tokenCacheUnvalidatedResidency is the longest an entry nobody has
+	// verified stays, whatever exp the token claims; that exp is the
+	// sender's choice. Dropping a legitimate bearer's entry costs it a
+	// new CEDAR handshake on its next request and nothing else: the
+	// entry holds the sessions it can resume, not its identity.
+	tokenCacheUnvalidatedResidency = 10 * time.Minute
+
+	// tokenCacheValidatedResidency is the longest a verified entry
+	// stays. Adding the bearer again repeats the verification that
+	// produced it (introspection, for an opaque access token).
+	tokenCacheValidatedResidency = time.Hour
+
+	// tokenCacheSweepInterval is how often an insert also drops every
+	// entry past its time. Lookups ignore such entries regardless.
+	tokenCacheSweepInterval = time.Minute
+)
+
+// TokenCache manages validated tokens and their associated session caches.
+//
+// Bounded: at most maxEntries, with entries nobody has verified evicted
+// first (least recently used) and kept at most
+// tokenCacheUnvalidatedResidency. A flood of unverified bearers
+// therefore displaces other unverified bearers -- each of which just
+// re-handshakes -- and not a verified one.
 type TokenCache struct {
-	mu      sync.RWMutex
+	mu      sync.Mutex
 	entries map[string]*TokenCacheEntry // key is the token string
+
+	// unvalidated and validated order the entries by last use, most
+	// recent at the front.
+	unvalidated *list.List
+	validated   *list.List
+
+	// trustDomain, when set, is the only issuer Add accepts. See
+	// checkIssuer.
+	trustDomain string
+
+	maxEntries int
+	now        func() time.Time
+	lastSweep  time.Time
 }
 
-// NewTokenCache creates a new token cache
+// NewTokenCache creates a new token cache that accepts a token from
+// any issuer.
 func NewTokenCache() *TokenCache {
+	return newTokenCache("")
+}
+
+// newTokenCache creates a token cache whose Add refuses a token
+// issued by anything but trustDomain ("" accepts any issuer).
+func newTokenCache(trustDomain string) *TokenCache {
 	return &TokenCache{
-		entries: make(map[string]*TokenCacheEntry),
+		entries:     make(map[string]*TokenCacheEntry),
+		unvalidated: list.New(),
+		validated:   list.New(),
+		trustDomain: trustDomain,
+		maxEntries:  tokenCacheMaxEntries,
+		now:         time.Now,
 	}
 }
 
-// parseJWTClaims extracts username and expiration from a JWT token using the JWT library
-// Returns the username, expiration time, or an error if parsing fails
-func parseJWTClaims(token string) (username string, expiration time.Time, err error) {
+// parseJWTClaims parses token without verifying it and returns its
+// registered claims, requiring sub and exp.
+func parseJWTClaims(token string) (*jwt.RegisteredClaims, error) {
 	// Parse the token without verification (we just need to read claims)
 	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
 	parsedToken, _, parseErr := parser.ParseUnverified(token, &jwt.RegisteredClaims{})
 	if parseErr != nil {
-		return "", time.Time{}, fmt.Errorf("failed to parse JWT: %w", parseErr)
+		return nil, fmt.Errorf("failed to parse JWT: %w", parseErr)
 	}
 
 	// Extract standard claims
 	claims, ok := parsedToken.Claims.(*jwt.RegisteredClaims)
 	if !ok {
-		return "", time.Time{}, fmt.Errorf("failed to extract JWT claims")
+		return nil, fmt.Errorf("failed to extract JWT claims")
 	}
 
 	// Check if subject is set
 	if claims.Subject == "" {
-		return "", time.Time{}, fmt.Errorf("JWT missing sub claim")
+		return nil, fmt.Errorf("JWT missing sub claim")
 	}
 
 	// Check if expiration is set
 	if claims.ExpiresAt == nil {
-		return "", time.Time{}, fmt.Errorf("JWT missing exp claim")
+		return nil, fmt.Errorf("JWT missing exp claim")
 	}
 
-	return claims.Subject, claims.ExpiresAt.Time, nil
+	return claims, nil
 }
 
-// Add adds a validated token to the cache with a session cache
-// If the token is already in the cache, returns the existing entry
-// Automatically schedules cleanup when the token expires
+// checkIssuer refuses a token issued outside this pool's trust domain.
+//
+// HTCondor presents an IDTOKEN only to a daemon whose trust domain is
+// the token's iss, so such a token can never authenticate the caller
+// here; handing it to CEDAR leaves CEDAR to look for some other
+// credential to present instead. It is refused before it is cached or
+// used.
+//
+// A SciToken (asymmetric signature) is exempt: its iss is an external
+// issuer by design, and the schedd checks it against its own SciTokens
+// configuration rather than TRUST_DOMAIN. With no trust domain
+// configured there is nothing to compare against.
+func (tc *TokenCache) checkIssuer(token, issuer string) error {
+	if tc.trustDomain == "" || issuer == tc.trustDomain {
+		return nil
+	}
+	if security.IsSciToken(token) {
+		return nil
+	}
+	return fmt.Errorf("token issuer %q is not this pool's trust domain", issuer)
+}
+
+// Add caches a token, with a session cache of its own, without
+// validating it. If the token is already cached, returns the existing
+// entry.
 func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
+	now := tc.now()
 
-	// Check if already cached
-	if entry, exists := tc.entries[token]; exists {
-		// Check if expired
-		if time.Now().After(entry.Expiration) {
-			// Remove expired entry
-			delete(tc.entries, token)
-		} else {
-			return entry, nil
-		}
+	if entry, ok := tc.lookupLocked(token, now); ok {
+		return entry, nil
 	}
 
-	// Parse token to get username and expiration
-	username, expiration, err := parseJWTClaims(token)
+	claims, err := parseJWTClaims(token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse token claims: %w", err)
 	}
+	expiration := claims.ExpiresAt.Time
 
 	// Check if already expired
-	if time.Now().After(expiration) {
+	if now.After(expiration) {
 		return nil, fmt.Errorf("token is already expired")
 	}
-
-	// Create a new session cache for this token
-	sessionCache := security.NewSessionCache()
-
-	//nolint:gosec // G118: cancel is stored in entry.cancelCleanup and called during Remove()
-	_, cancel := context.WithCancel(context.Background())
+	if err := tc.checkIssuer(token, claims.Issuer); err != nil {
+		return nil, err
+	}
 
 	entry := &TokenCacheEntry{
 		Token: token,
@@ -390,12 +466,10 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 		// authenticates the forwarded token over CEDAR.
 		//
 		// So Validated stays false here, and the entry's Username is
-		// not an identity yet: ValidatedUsername returns "" until
-		// MarkValidated records that a schedd op succeeded with this
-		// token, and createAuthenticatedContext falls back to asking
-		// the schedd who the caller is. That costs one round trip on a
-		// token's first request and is what makes a forged token
-		// resolve to nobody instead of to whatever it claims.
+		// not an identity: ValidatedUsername returns "" for it, and
+		// createAuthenticatedContext asks the schedd who the caller
+		// is instead. That is what makes a forged token resolve to
+		// nobody instead of to whatever it claims.
 		//
 		// This field carried Validated: true until 2026-09, which made
 		// an unverified sub the request identity from the first
@@ -406,73 +480,28 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 		// identity alone, without a schedd round trip to re-check it
 		// (saved templates, Jupyter sessions, chat history), answered
 		// for that user.
-		Username:      username,
-		Expiration:    expiration,
-		SessionCache:  sessionCache,
-		cancelCleanup: cancel,
+		Username:     claims.Subject,
+		Expiration:   expiration,
+		SessionCache: security.NewSessionCache(),
 	}
-
-	// Schedule automatic cleanup when token expires
-	duration := time.Until(expiration)
-	entry.expiryTimer = time.AfterFunc(duration, func() {
-		tc.Remove(token)
-	})
-
-	tc.entries[token] = entry
-
+	tc.insertLocked(entry, now, tokenCacheUnvalidatedResidency)
 	return entry, nil
-}
-
-// requestTokenContextKey carries the bearer token through the request
-// so the response-wrapping middleware in ServeHTTP can mark it
-// validated after a successful (2xx) response. See markValidatedOnSuccess
-// for the rationale.
-type requestTokenContextKey struct{}
-
-// withRequestToken stashes the token on the context so the
-// response-status middleware can find it.
-func withRequestToken(ctx context.Context, token string) context.Context {
-	if token == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, requestTokenContextKey{}, token)
-}
-
-// requestTokenFromContext retrieves the token previously stashed via
-// withRequestToken. Returns "" if none is set.
-func requestTokenFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(requestTokenContextKey{}).(string); ok {
-		return v
-	}
-	return ""
 }
 
 // AddValidated adds a pre-validated token (e.g. opaque token) to the cache
 func (tc *TokenCache) AddValidated(token, username string, expiration time.Time) (*TokenCacheEntry, error) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
+	now := tc.now()
 
-	// Check if already cached
-	if entry, exists := tc.entries[token]; exists {
-		// Check if expired
-		if time.Now().After(entry.Expiration) {
-			// Remove expired entry
-			delete(tc.entries, token)
-		} else {
-			return entry, nil
-		}
+	if entry, ok := tc.lookupLocked(token, now); ok {
+		return entry, nil
 	}
 
 	// Check if already expired
-	if time.Now().After(expiration) {
+	if now.After(expiration) {
 		return nil, fmt.Errorf("token is already expired")
 	}
-
-	// Create a new session cache for this token
-	sessionCache := security.NewSessionCache()
-
-	//nolint:gosec // G118: cancel is stored in entry.cancelCleanup and called during Remove()
-	_, cancel := context.WithCancel(context.Background())
 
 	entry := &TokenCacheEntry{
 		Token: token,
@@ -485,112 +514,142 @@ func (tc *TokenCache) AddValidated(token, username string, expiration time.Time)
 		// access token authenticated as nobody -- /api/v1/whoami
 		// answered {"authenticated":true,"user":""} and owner-scoped
 		// MCP tools refused the call.
-		Username:      username,
-		Validated:     true,
-		Expiration:    expiration,
-		SessionCache:  sessionCache,
-		cancelCleanup: cancel,
+		Username:     username,
+		Validated:    true,
+		Expiration:   expiration,
+		SessionCache: security.NewSessionCache(),
+	}
+	tc.insertLocked(entry, now, tokenCacheValidatedResidency)
+	return entry, nil
+}
+
+// lookupLocked returns the live entry for token, marking it used, and
+// drops one that is past its time. tc.mu must be held.
+func (tc *TokenCache) lookupLocked(token string, now time.Time) (*TokenCacheEntry, bool) {
+	entry, ok := tc.entries[token]
+	if !ok {
+		return nil, false
+	}
+	if now.After(entry.evictAt) {
+		tc.removeLocked(entry)
+		return nil, false
+	}
+	entry.lru.MoveToFront(entry.elem)
+	return entry, true
+}
+
+// insertLocked adds entry, to stay at most residency (and never past
+// its Expiration), making room first if the cache is full. tc.mu must
+// be held.
+func (tc *TokenCache) insertLocked(entry *TokenCacheEntry, now time.Time, residency time.Duration) {
+	if now.Sub(tc.lastSweep) >= tokenCacheSweepInterval || len(tc.entries) >= tc.maxEntries {
+		tc.sweepLocked(now)
+	}
+	for len(tc.entries) >= tc.maxEntries {
+		// Least recently used, unverified first.
+		victim := tc.unvalidated.Back()
+		if victim == nil {
+			victim = tc.validated.Back()
+		}
+		if victim == nil {
+			break
+		}
+		tc.removeLocked(victim.Value.(*TokenCacheEntry))
 	}
 
-	// Schedule automatic cleanup when token expires
-	duration := time.Until(expiration)
-	entry.expiryTimer = time.AfterFunc(duration, func() {
-		tc.Remove(token)
-	})
+	entry.evictAt = now.Add(residency)
+	if entry.Expiration.Before(entry.evictAt) {
+		entry.evictAt = entry.Expiration
+	}
+	entry.lru = tc.unvalidated
+	if entry.Validated {
+		entry.lru = tc.validated
+	}
+	entry.elem = entry.lru.PushFront(entry)
+	tc.entries[entry.Token] = entry
+}
 
-	tc.entries[token] = entry
+// sweepLocked drops every entry past its time. tc.mu must be held.
+func (tc *TokenCache) sweepLocked(now time.Time) {
+	tc.lastSweep = now
+	for _, entry := range tc.entries {
+		if now.After(entry.evictAt) {
+			tc.removeLocked(entry)
+		}
+	}
+}
 
-	return entry, nil
+// removeLocked drops entry. tc.mu must be held.
+func (tc *TokenCache) removeLocked(entry *TokenCacheEntry) {
+	entry.lru.Remove(entry.elem)
+	delete(tc.entries, entry.Token)
 }
 
 // Get retrieves a token cache entry if it exists and is not expired
 func (tc *TokenCache) Get(token string) (*TokenCacheEntry, bool) {
-	tc.mu.RLock()
-	defer tc.mu.RUnlock()
-
-	entry, exists := tc.entries[token]
-	if !exists {
-		return nil, false
-	}
-
-	// Check if expired
-	if time.Now().After(entry.Expiration) {
-		return nil, false
-	}
-
-	return entry, true
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.lookupLocked(token, tc.now())
 }
 
-// Remove removes a token from the cache and cancels its cleanup timer
+// Remove removes a token from the cache
 func (tc *TokenCache) Remove(token string) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-
-	entry, exists := tc.entries[token]
-	if !exists {
-		return
+	if entry, ok := tc.entries[token]; ok {
+		tc.removeLocked(entry)
 	}
-
-	// Cancel the expiry timer
-	if entry.expiryTimer != nil {
-		entry.expiryTimer.Stop()
-	}
-
-	// Cancel the cleanup goroutine context
-	if entry.cancelCleanup != nil {
-		entry.cancelCleanup()
-	}
-
-	delete(tc.entries, token)
 }
 
-// Size returns the number of cached tokens
+// Size returns the number of cached tokens that have not expired
 func (tc *TokenCache) Size() int {
-	tc.mu.RLock()
-	defer tc.mu.RUnlock()
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.sweepLocked(tc.now())
 	return len(tc.entries)
 }
 
-// MarkValidated promotes a cached token to "validated" status, meaning
-// a schedd op has authenticated successfully with it. Callers may
-// optionally pass an authoritativeUsername observed from the schedd
-// handshake — if non-empty and different from the JWT-claimed
-// username, the entry is updated to the schedd-authoritative value
-// (this protects against any case where the unverified sub claim
-// disagreed with the schedd's interpretation).
+// MarkValidated promotes a cached token to "validated" status, with
+// authoritativeUsername (if non-empty) replacing the JWT-claimed
+// username.
+//
+// The only acceptable evidence is an identity a CEDAR handshake
+// reported for a connection that authenticated with this token. A
+// successful HTTP response is not evidence: plenty of endpoints answer
+// 2xx without ever presenting the token to a daemon.
 //
 // Idempotent: safe to call repeatedly per request.
 func (tc *TokenCache) MarkValidated(token, authoritativeUsername string) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	entry, ok := tc.entries[token]
+	now := tc.now()
+	entry, ok := tc.lookupLocked(token, now)
 	if !ok {
 		return
 	}
 	if authoritativeUsername != "" && entry.Username != authoritativeUsername {
 		entry.Username = authoritativeUsername
 	}
+	if entry.Validated {
+		return
+	}
+	tc.removeLocked(entry)
 	entry.Validated = true
+	tc.insertLocked(entry, now, tokenCacheValidatedResidency)
 }
 
 // ValidatedUsername returns the username for a token only if it has
-// been marked validated via a successful schedd handshake. Use this
+// been validated (see TokenCacheEntry.Validated). Use this
 // in code paths that must rely on authoritative identity (job-owner
 // filtering, share-URL minting, audit logs). For loose use cases
 // (rate-limit bucket key) the Get-and-read-Username pattern is fine.
 //
 // Returns "" if the token is unknown, expired, or not yet validated.
 func (tc *TokenCache) ValidatedUsername(token string) string {
-	tc.mu.RLock()
-	defer tc.mu.RUnlock()
-	entry, ok := tc.entries[token]
-	if !ok {
-		return ""
-	}
-	if time.Now().After(entry.Expiration) {
-		return ""
-	}
-	if !entry.Validated {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	entry, ok := tc.lookupLocked(token, tc.now())
+	if !ok || !entry.Validated {
 		return ""
 	}
 	return entry.Username

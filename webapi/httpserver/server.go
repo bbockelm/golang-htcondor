@@ -84,7 +84,7 @@ type Config struct {
 	// HTTP_API_USER_HEADER_TRUST_ANY.
 	UserHeaderTrustAnyUnsafe bool
 	SigningKeyPath           string // Path to token signing key (optional, for token generation)
-	TrustDomain              string // Trust domain for token issuer (optional; only used if UserHeader is set)
+	TrustDomain              string // Trust domain: issuer of minted tokens, and the only issuer accepted for a bearer IDTOKEN (optional)
 	UIDDomain                string // UID domain for generated token username (optional; only used if UserHeader is set)
 	HTTPBaseURL              string // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
 
@@ -1208,6 +1208,20 @@ func (s *Handler) extractOrGenerateToken(r *http.Request) (string, error) {
 	return "", fmt.Errorf("no authorization token and user header not configured")
 }
 
+// sessionCookieUser reports the session user extractOrGenerateToken
+// minted this request's token for: the request carries no bearer token
+// and does carry a session cookie.
+func (s *Handler) sessionCookieUser(r *http.Request) (string, bool) {
+	if _, err := extractBearerToken(r); err == nil {
+		return "", false
+	}
+	sessionData, ok := s.getSessionFromRequest(r)
+	if !ok || sessionData.Username == "" {
+		return "", false
+	}
+	return sessionData.Username, true
+}
+
 // createAuthenticatedContext creates a context with both token and SecurityConfig set
 // This is a helper to avoid duplicating security setup code in every handler
 func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, error) {
@@ -1233,12 +1247,8 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 		return nil, err
 	}
 
-	// Create context with token. Stash the bearer token where the
-	// markValidatedOnSuccess middleware can find it after the
-	// handler returns — so a 2xx response promotes the token to
-	// validated and subsequent requests get authoritative identity.
-	ctx := withRequestToken(r.Context(), token)
-	ctx = WithToken(ctx, token)
+	// Create context with token
+	ctx := WithToken(r.Context(), token)
 
 	// condorCredential is what cedar authenticates with, which is not
 	// always the bearer we were handed. For a HTCondor IDTOKEN the two
@@ -1286,6 +1296,15 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 				s.logger.Debug(logging.DestinationSecurity, "Created new session cache for bearer token", "expiration", entry.Expiration)
 			}
 		}
+	} else if sessionUser, ok := s.sessionCookieUser(r); ok {
+		// Session-cookie mode: extractOrGenerateToken minted this token
+		// for the session's user, afresh on every request (new iat), so
+		// as a cache key it would add an entry per request that is never
+		// seen again -- and no request would resume another's sessions.
+		// Same as user-header mode: the global cache, tagged with the
+		// user this server authenticated.
+		sessionTag = "session:" + sessionUser
+		sessionCache = nil
 	} else {
 		// Not using user header mode - this is a real JWT token
 		// Check if token is already in cache

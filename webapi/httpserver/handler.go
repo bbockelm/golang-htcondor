@@ -1,7 +1,6 @@
 package httpserver
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -571,7 +570,7 @@ type HandlerConfig struct {
 	// at startup).
 	UserHeaderTrustAnyUnsafe bool
 	SigningKeyPath           string // Path to token signing key (optional, for token generation)
-	TrustDomain              string // Trust domain for token issuer (optional; only used if UserHeader is set)
+	TrustDomain              string // Trust domain: issuer of minted tokens, and the only issuer accepted for a bearer IDTOKEN (optional)
 	UIDDomain                string // UID domain for generated token username (optional; only used if UserHeader is set)
 	HTTPBaseURL              string // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
 
@@ -1099,7 +1098,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		interactiveTerminals: newInteractiveTerminals(),
 		tlsCACertFile:        cfg.TLSCACertFile,
 		logger:               logger,
-		tokenCache:           NewTokenCache(), // Initialize token cache (includes username for rate limiting)
+		tokenCache:           newTokenCache(cfg.TrustDomain), // Initialize token cache (includes username for rate limiting)
 		streamBufferSize:     streamBufferSize,
 		streamWriteTimeout:   streamWriteTimeout,
 		metricsPublic:        cfg.MetricsPublic,
@@ -2008,15 +2007,6 @@ func (h *Handler) ensureOAuth2ClientRegistered(clientID, _ /* clientSecret */, _
 // stack can still override (e.g. relaxing frame-ancestors for an
 // embeddable widget) but the secure defaults are present until
 // explicitly changed.
-//
-// The response is also wrapped in a status-capturing writer so we
-// can call tokenCache.MarkValidated when a request bearing a JWT
-// returns 2xx. This is the "lazy validation" pattern: there is no
-// local way to verify the JWT signature (the only authoritative
-// validator is the schedd's CEDAR handshake), so we defer to "the
-// handler completed successfully" as evidence that the schedd
-// accepted the token — and only at that point trust the token's
-// `sub` claim for identity decisions like ownedByMe filtering.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Don't impose our security headers on transparent reverse-proxy
 	// paths. JupyterLab in particular needs `script-src
@@ -2031,8 +2021,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !isTransparentProxyPath(r.URL.Path) {
 		applySecurityHeaders(w)
 	}
-	sw := &statusCapturingResponseWriter{ResponseWriter: w}
-	defer h.markValidatedOnSuccess(r, sw)
 	// Every request is somebody else's, marked here for the same reason
 	// applySecurityHeaders is: no route can opt out by accident, and a route
 	// added later inherits it. What it buys is downstream, in
@@ -2064,16 +2052,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"Refusing a state-changing request from another site",
 				"method", r.Method, "path", r.URL.Path,
 				"origin", r.Header.Get("Origin"), "host", r.Host)
-			h.writeError(sw, http.StatusForbidden,
+			h.writeError(w, http.StatusForbidden,
 				"That request did not come from this site.")
 			return
 		}
 	}
 	if h.httpMetricsState != nil {
-		h.httpMetricsState.middleware(h.mux).ServeHTTP(sw, r)
+		h.httpMetricsState.middleware(h.mux).ServeHTTP(w, r)
 		return
 	}
-	h.mux.ServeHTTP(sw, r)
+	h.mux.ServeHTTP(w, r)
 }
 
 // isTransparentProxyPath reports whether the given request path is
@@ -2104,92 +2092,6 @@ func isJobProxyPath(p string) bool {
 	}
 	parts := strings.Split(rest, "/")
 	return len(parts) >= 2 && parts[1] == "proxy"
-}
-
-// statusCapturingResponseWriter records the status code passed to
-// WriteHeader so post-handler middleware can see it. Defaults to 200
-// because handlers that call Write without an explicit WriteHeader
-// implicitly produce 200.
-//
-// Hijack/Flush/Unwrap forwarding: same hard-won lesson as
-// statusRecorder in metrics.go. Embedding http.ResponseWriter does
-// NOT promote Hijacker / Flusher etc. through the interface — Go's
-// method-set rules only contribute the named interface's methods.
-// We forward Hijack explicitly (gorilla/websocket asserts it on the
-// writer before upgrading SSH and Jupyter WebSockets) and expose
-// Unwrap so http.NewResponseController can reach Flush/Push.
-type statusCapturingResponseWriter struct {
-	http.ResponseWriter
-	statusCode int
-}
-
-func (s *statusCapturingResponseWriter) WriteHeader(code int) {
-	s.statusCode = code
-	s.ResponseWriter.WriteHeader(code)
-}
-
-// Status returns the captured status code (200 if WriteHeader was never called).
-func (s *statusCapturingResponseWriter) Status() int {
-	if s.statusCode == 0 {
-		return http.StatusOK
-	}
-	return s.statusCode
-}
-
-// Unwrap exposes the wrapped writer for http.NewResponseController
-// (Go 1.20+), which covers Flush/Push/etc. without one forwarding
-// method per interface here.
-func (s *statusCapturingResponseWriter) Unwrap() http.ResponseWriter {
-	return s.ResponseWriter
-}
-
-// Hijack forwards to the underlying ResponseWriter when it
-// implements http.Hijacker. Required for the SSH-to-job and Jupyter
-// WebSocket upgraders, which assert Hijacker on the writer before
-// taking over the TCP connection. Without this the upgrade fails
-// with "underlying ResponseWriter does not implement http.Hijacker"
-// and the WebSocket never connects.
-func (s *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	hj, ok := s.ResponseWriter.(http.Hijacker)
-	if !ok {
-		return nil, nil, fmt.Errorf("statusCapturingResponseWriter: underlying ResponseWriter (%T) does not implement http.Hijacker", s.ResponseWriter)
-	}
-	return hj.Hijack()
-}
-
-// Compile-time assertion: keep this wrapper Hijack-capable so
-// future refactors don't silently regress. (The metrics-layer
-// statusRecorder has the same assertion for the same reason.)
-var _ http.Hijacker = (*statusCapturingResponseWriter)(nil)
-
-// markValidatedOnSuccess promotes the request's bearer token to
-// "validated" when the handler returned a 2xx status. The token is
-// retrieved from the request context (placed there by
-// extractOrGenerateToken via withRequestToken). 4xx / 5xx responses
-// leave the token as-is — including the case where the schedd RPC
-// failed because the token was rejected by CEDAR.
-//
-// We deliberately mark validated only on 2xx (not just "no error"):
-// some handlers return 200 with a JSON error body, and we never
-// reach this point if WriteHeader hasn't been called at all (e.g.
-// the connection was reset before any header went out).
-func (h *Handler) markValidatedOnSuccess(r *http.Request, sw *statusCapturingResponseWriter) {
-	token := requestTokenFromContext(r.Context())
-	if token == "" || h.tokenCache == nil {
-		return
-	}
-	status := sw.Status()
-	if status < 200 || status >= 300 {
-		return
-	}
-	// The CEDAR handshake's authoritative username isn't easily
-	// surfaced here (the SessionCache is owned by cedar). For now
-	// we promote the existing JWT-claimed username to "validated";
-	// the assumption is that if the schedd accepted the token, it
-	// accepted the `sub` claim too. When cedar exposes the
-	// post-handshake identity we can pass it through as the
-	// authoritativeUsername arg.
-	h.tokenCache.MarkValidated(token, "")
 }
 
 // corsOriginAllowed reports whether the given Origin header value
