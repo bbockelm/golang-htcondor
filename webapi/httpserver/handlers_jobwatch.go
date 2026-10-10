@@ -389,10 +389,8 @@ func (s *Handler) watchLeadAccess(ctx context.Context, r *http.Request, cluster,
 // a schedd blip is not lost access, and the next recheck will ask again.
 //
 // A session that has gone -- logged out, expired, deleted -- is lost access.
-// It has to be checked here rather than left to jobReadScope: with no
-// session that falls back to bulkOwnerScope, which treats a request without
-// one as an API-token caller and returns the bare job constraint, i.e. the
-// widest scope there is.
+// It has to be checked here rather than left to jobReadScope, which would
+// answer for whatever identity the request context still carries.
 func (s *Handler) jobWatchStillReadable(ctx context.Context, r *http.Request, cluster, proc int) bool {
 	if _, ok := s.getSessionFromRequest(r); !ok {
 		return false

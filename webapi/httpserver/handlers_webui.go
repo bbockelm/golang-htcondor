@@ -325,7 +325,7 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			ownedByMe = parsed
 		}
 	}
-	if !ownedByMe && !s.isWebUIAdmin(r) {
+	if !ownedByMe && !s.seesAllJobs(ctx, r, jobScopeRead) {
 		ownedByMe = true
 	}
 
@@ -467,7 +467,7 @@ func (s *Handler) handleDashboardActivity(w http.ResponseWriter, r *http.Request
 			ownedByMe = parsed
 		}
 	}
-	if !ownedByMe && !s.isWebUIAdmin(r) {
+	if !ownedByMe && !s.seesAllJobs(ctx, r, jobScopeRead) {
 		ownedByMe = true
 	}
 

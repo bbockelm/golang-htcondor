@@ -377,7 +377,7 @@ Freshness rules (shared with the MCP tools, in `webapi/dbmirror`):
   behind it; confining the query to the caller's own records is what keeps
   routing from widening access. `/api/v1/jobs` is owner-scoped by default;
   `/api/v1/jobs/archive` takes `owned_by_me=true`, and always applies it to a
-  browser session that is not a Web UI admin.
+  caller that is not an administrator, bearer token or browser session alike.
 
 ### Is it working?
 

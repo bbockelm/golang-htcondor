@@ -1345,8 +1345,11 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	// any of it. Two tools cannot disagree about whose jobs a session is
 	// looking at; the answer that gets doubted is whichever one the
 	// model happens to read second.
+	// An identified caller that names no owner -- an actor such as
+	// "@domain" -- is refused too, stdio or not: skipping the owner
+	// clause for it would return the whole queue.
 	scope, ok := s.ownerScope(ctx, tierRead)
-	if !ok && s.delegated {
+	if !ok && (s.delegated || actor != "") {
 		return nil, fmt.Errorf("authentication required: the caller's identity could not be established")
 	}
 	owner := scope.Owner
@@ -1645,7 +1648,12 @@ func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interf
 }
 
 // performJobAction is a helper function for single job actions (hold/release/remove)
-func performJobAction(ctx context.Context, args map[string]interface{}, actionFunc func(context.Context, string, string) (*htcondor.JobActionResults, error), defaultReason, actionName string) (interface{}, error) {
+//
+// The job id is owner-scoped at the mutate tier, like remove_jobs: a
+// caller without mcp:superuser acts only on its own jobs, and another
+// user's job is "not found" -- the schedd is handed a constraint that
+// matches nothing rather than asked to refuse.
+func (s *Server) performJobAction(ctx context.Context, args map[string]interface{}, actionFunc func(context.Context, string, string) (*htcondor.JobActionResults, error), defaultReason, actionName string) (interface{}, error) {
 	jobID, ok := args["job_id"].(string)
 	if !ok || jobID == "" {
 		return nil, fmt.Errorf("job_id is required")
@@ -1661,9 +1669,16 @@ func performJobAction(ctx context.Context, args map[string]interface{}, actionFu
 		reason = defaultReason
 	}
 
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	constraint, err := s.singleJobMutateScope(ctx, idClause)
+	if err != nil {
+		return nil, err
+	}
 	_, err = actionFunc(ctx, constraint, reason)
 	if errors.Is(err, htcondor.ErrNoJobsMatched) {
+		if constraint != idClause {
+			return nil, fmt.Errorf("job %s not found among your jobs: it is not in the queue (it may have finished and left), or it is not yours", jobID)
+		}
 		return nil, fmt.Errorf("job %s not found: it is not in the queue (it may have finished and left)", jobID)
 	}
 	if err != nil {
@@ -1678,9 +1693,27 @@ func performJobAction(ctx context.Context, args map[string]interface{}, actionFu
 	), nil
 }
 
+// singleJobMutateScope owner-scopes a single-job action's id clause at
+// the mutate tier.
+//
+// Over stdio there is no actor on the context and none is needed: the
+// process is the user, the schedd authenticates it as them and checks
+// ownership itself, so the clause goes out as it is. Behind HTTP, or for
+// an actor that names no owner, the call is refused rather than sent
+// unconfined.
+func (s *Server) singleJobMutateScope(ctx context.Context, idClause string) (string, error) {
+	if constraint, ok := s.scopeToOwner(ctx, idClause, tierMutate); ok {
+		return constraint, nil
+	}
+	if s.delegated || htcondor.GetAuthenticatedUserFromContext(ctx) != "" {
+		return "", fmt.Errorf("authentication required")
+	}
+	return idClause, nil
+}
+
 // toolRemoveJob handles removing a specific job
 func (s *Server) toolRemoveJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return performJobAction(ctx, args, s.getSchedd().RemoveJobs, "Removed via MCP", "remove")
+	return s.performJobAction(ctx, args, s.getSchedd().RemoveJobs, "Removed via MCP", "remove")
 }
 
 // toolRemoveJobs handles removing multiple jobs
@@ -1763,12 +1796,19 @@ func (s *Server) toolEditJob(ctx context.Context, args map[string]interface{}) (
 		return nil, fmt.Errorf("attributes is required")
 	}
 
+	// Owner-scoped at the mutate tier, as remove_jobs is: without
+	// mcp:superuser the edit reaches only the caller's own job, and
+	// both the lookup and the edit below run on this constraint.
+	constraint, err := s.singleJobMutateScope(ctx, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
+	if err != nil {
+		return nil, err
+	}
+
 	// The job's current values decide how a JSON string is read; see
 	// classAdValues. A failed lookup is not fatal -- it only costs the
 	// numeric coercion, and the edit itself is the schedd's to authorize.
 	var current *classad.ClassAd
-	if ads, _, err := s.getSchedd().QueryWithOptions(ctx,
-		fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc),
+	if ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint,
 		&htcondor.QueryOptions{Projection: attrNames(updates), Limit: 1},
 	); err == nil && len(ads) > 0 {
 		current = ads[0]
@@ -1784,8 +1824,12 @@ func (s *Server) toolEditJob(ctx context.Context, args map[string]interface{}) (
 		Force:               false,
 	}
 
-	if err := s.getSchedd().EditJob(ctx, cluster, proc, attributes, opts); err != nil {
+	edited, err := s.getSchedd().EditJobs(ctx, constraint, attributes, opts)
+	if err != nil {
 		return nil, fmt.Errorf("failed to edit job: %w", err)
+	}
+	if edited == 0 {
+		return nil, fmt.Errorf("job %s not found: no job with that id that you may edit is in the queue", jobID)
 	}
 
 	text := fmt.Sprintf("Successfully edited job %s", jobID)
@@ -1908,12 +1952,12 @@ func sortedAttrNames(updates map[string]interface{}) []string {
 
 // toolHoldJob handles holding a job
 func (s *Server) toolHoldJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return performJobAction(ctx, args, s.getSchedd().HoldJobs, "Held via MCP", "hold")
+	return s.performJobAction(ctx, args, s.getSchedd().HoldJobs, "Held via MCP", "hold")
 }
 
 // toolReleaseJob handles releasing a job
 func (s *Server) toolReleaseJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return performJobAction(ctx, args, s.getSchedd().ReleaseJobs, "Released via MCP", "release")
+	return s.performJobAction(ctx, args, s.getSchedd().ReleaseJobs, "Released via MCP", "release")
 }
 
 // handleListResources returns the list of available resources

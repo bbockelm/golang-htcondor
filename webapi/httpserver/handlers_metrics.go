@@ -57,7 +57,7 @@ var metricsAggFuncs = map[string]dbrpc.AggFunc{
 
 // metricsIdent guards attribute names before they go into a group column or
 // an aggregate arg. Constraints are re-serialized by the ClassAd parser
-// (bulkOwnerScope), but group/agg attrs are passed as names, so keep them
+// (localReadOwnerScope), but group/agg attrs are passed as names, so keep them
 // to plain ClassAd identifiers.
 var metricsIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -139,11 +139,11 @@ func (s *Handler) handleMetricsQuery(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Every caller but a Web UI admin is confined to its own Owner,
+	// Every caller but an administrator is confined to its own Owner,
 	// bearer or browser alike. The mirror is read with this daemon's
 	// credential and nothing downstream checks ownership, so this clause
 	// is what keeps one user out of another's samples.
-	constraint, err = localReadOwnerScope(ctx, constraint, s.isWebUIAdmin(r))
+	constraint, err = localReadOwnerScope(ctx, constraint, s.seesAllJobs(ctx, r, jobScopeRead))
 	if errors.Is(err, errUnidentifiedCaller) {
 		s.writeError(w, http.StatusUnauthorized, "Authentication failed: "+err.Error())
 		return

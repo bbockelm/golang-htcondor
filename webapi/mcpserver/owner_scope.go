@@ -36,7 +36,8 @@ func (o OwnerScope) Note() string {
 }
 
 // ownerScope resolves who a call is for and whether it is confined.
-// ok==false means the caller could not be identified.
+// ok==false means the caller could not be identified, or names no owner
+// to confine it to (an actor such as "@domain").
 func (s *Server) ownerScope(ctx context.Context, tier privTier) (OwnerScope, bool) {
 	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
 	if actor == "" {
@@ -45,7 +46,11 @@ func (s *Server) ownerScope(ctx context.Context, tier privTier) (OwnerScope, boo
 	if s.allowsAllUsers(ctx, actor, tier) {
 		return OwnerScope{AllUsers: true}, true
 	}
-	return OwnerScope{Owner: ownerFromActor(actor)}, true
+	owner := ownerFromActor(actor)
+	if owner == "" {
+		return OwnerScope{}, false
+	}
+	return OwnerScope{Owner: owner}, true
 }
 
 // scopeToOwner wraps an LLM-supplied ClassAd constraint with an owner
@@ -54,7 +59,8 @@ func (s *Server) ownerScope(ctx context.Context, tier privTier) (OwnerScope, boo
 // LLM tools at httpserver/handlers_chat_tools.go:scopeToOwner.
 //
 // Returns (constraint, ok) where ok==false means the caller is
-// unauthenticated (no `actor` on context). Tool handlers should
+// unauthenticated (no `actor` on context), or is not an admin and its
+// actor names no owner (e.g. "@domain"). Tool handlers should
 // refuse the request in that case rather than fall back to "no
 // filter" — the server enforces "must be authenticated" at the
 // transport layer, but defense-in-depth here means a future
@@ -74,7 +80,11 @@ func (s *Server) scopeToOwner(ctx context.Context, llmConstraint string, tier pr
 	if s.allowsAllUsers(ctx, actor, tier) {
 		return strings.TrimSpace(llmConstraint), true
 	}
-	owner := fmt.Sprintf("Owner == %s", classadStringLit(ownerFromActor(actor)))
+	name := ownerFromActor(actor)
+	if name == "" {
+		return "", false
+	}
+	owner := fmt.Sprintf("Owner == %s", classadStringLit(name))
 	c := strings.TrimSpace(llmConstraint)
 	if c == "" {
 		return owner, true
@@ -135,8 +145,11 @@ func (s *Server) selfScopedQueryOptions(ctx context.Context, base *htcondor.Quer
 	if s.allowsAllUsers(ctx, actor, tierRead) {
 		return opts, true
 	}
-	opts.FetchOpts |= htcondor.FetchMyJobs
 	opts.Owner = ownerFromActor(actor)
+	if opts.Owner == "" {
+		return nil, false
+	}
+	opts.FetchOpts |= htcondor.FetchMyJobs
 	return opts, true
 }
 

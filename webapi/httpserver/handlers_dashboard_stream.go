@@ -84,7 +84,7 @@ func (s *Handler) handleDashboardActivityStream(w http.ResponseWriter, r *http.R
 	// is opened and narrowed afterwards. A caller nobody named gets no
 	// stream at all; the feed refuses an empty owner too.
 	owner, all := activityStreamScope(htcondor.GetAuthenticatedUserFromContext(ctx),
-		r.URL.Query().Get("owned_by_me"), s.isWebUIAdmin(r))
+		r.URL.Query().Get("owned_by_me"), s.seesAllJobs(ctx, r, jobScopeRead))
 	events, cancel, err := s.jobWatchFeed.SubscribeActivity(owner, all, activityStreamBuffer)
 	if err != nil {
 		s.writeError(w, http.StatusUnauthorized, "Authentication failed: "+errUnidentifiedCaller.Error())

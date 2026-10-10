@@ -44,7 +44,7 @@ func (h *Handler) streamJobsWatchFromMirror(ctx context.Context, w http.Response
 	// which a wider stream is opened and then narrowed. The feed
 	// refuses a caller nobody named.
 	owner, all := activityStreamScope(htcondor.GetAuthenticatedUserFromContext(ctx),
-		r.URL.Query().Get("owned_by_me"), h.isWebUIAdmin(r))
+		r.URL.Query().Get("owned_by_me"), h.seesAllJobs(ctx, r, jobScopeRead))
 	events, cancel, err := h.jobWatchFeed.SubscribeActivity(owner, all, jobsWatchMirrorBuffer)
 	if err != nil {
 		h.writeError(w, http.StatusUnauthorized, "authentication failed: "+errUnidentifiedCaller.Error())

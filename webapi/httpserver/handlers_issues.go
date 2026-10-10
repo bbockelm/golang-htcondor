@@ -113,15 +113,15 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 	// The Owner value of the caller's jobs: a bearer's actor is
 	// qualified ("alice@domain") and a job's Owner is not.
 	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
-	// Same rule as every other listing: a non-admin browser session is
-	// confined to its own jobs whatever it asks for.
+	// Same rule as every other listing: a caller that is not an
+	// administrator is confined to its own jobs whatever it asks for.
 	ownedByMe := true
 	if v := r.URL.Query().Get("owned_by_me"); v != "" {
 		if parsed, perr := strconv.ParseBool(v); perr == nil {
 			ownedByMe = parsed
 		}
 	}
-	if !ownedByMe && !s.isWebUIAdmin(r) {
+	if !ownedByMe && !s.seesAllJobs(ctx, r, jobScopeRead) {
 		ownedByMe = true
 	}
 

@@ -54,11 +54,10 @@ type jobWatchSource interface {
 // Keyed on the CALLER's credential as well as the constraint. An earlier
 // version keyed on the constraint alone, reasoning that the constraint
 // carries the caller's owner scope so two callers entitled to see
-// different things never share. That is not true: bulkOwnerScope returns
-// the constraint UNSCOPED both for a web UI admin and for any caller with
-// no session, so two such callers watching the same job produce byte-
-// identical constraints and shared one subscription -- and with it one
-// credential.
+// different things never share. That is not true: the owner scope returns
+// the constraint UNSCOPED for every administrator (seesAllJobs), so two
+// administrators watching the same job produce byte-identical
+// constraints and shared one subscription -- and with it one credential.
 //
 // The key is the credential's SecurityTag, which is what cedar already
 // partitions its own client sessions by, so this draws the boundary in

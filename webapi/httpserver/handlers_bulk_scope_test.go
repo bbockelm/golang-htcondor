@@ -12,10 +12,10 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
-// TestBulkOwnerScope covers the destructive bulk-endpoint owner scoping: a Web UI
-// session that is not an admin is confined to its own jobs (and an injection
-// constraint is rejected), while an admin session and a non-session API-token
-// caller pass through unchanged (schedd ACL is their boundary).
+// TestBulkOwnerScope covers the destructive bulk-endpoint owner scoping: a
+// caller that is not an admin, Web UI session or API token alike, is confined
+// to its own jobs (and an injection constraint is rejected), while an admin
+// session passes through unchanged.
 func TestBulkOwnerScope(t *testing.T) {
 	server, err := NewServer(Config{
 		ListenAddr:   "127.0.0.1:0",
@@ -39,17 +39,23 @@ func TestBulkOwnerScope(t *testing.T) {
 		return r
 	}
 
-	t.Run("no session passes through (API token -> schedd ACL)", func(t *testing.T) {
+	t.Run("no session is owner-scoped too", func(t *testing.T) {
 		r := httptest.NewRequestWithContext(context.Background(), "POST", "/", nil)
-		got, err := server.bulkOwnerScope(ctx, r, `JobStatus == 5`)
-		if err != nil || got != `JobStatus == 5` {
-			t.Errorf("got (%q, %v), want passthrough", got, err)
+		scoped, err := server.jobsOwnerScope(ctx, r, `JobStatus == 5`, jobScopeMutate)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if scopeAdmits(t, scoped, "bob") {
+			t.Errorf("BYPASS: a bearer caller's scope admits bob: %q", scoped)
+		}
+		if !scopeAdmits(t, scoped, "alice") {
+			t.Errorf("owner wrongly excluded: %q", scoped)
 		}
 	})
 
 	t.Run("non-admin session is owner-scoped", func(t *testing.T) {
 		r := reqWithSession("alice")
-		scoped, err := server.bulkOwnerScope(ctx, r, `JobStatus == 5`)
+		scoped, err := server.jobsOwnerScope(ctx, r, `JobStatus == 5`, jobScopeMutate)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -63,7 +69,7 @@ func TestBulkOwnerScope(t *testing.T) {
 
 	t.Run("non-admin session rejects an injection constraint", func(t *testing.T) {
 		r := reqWithSession("alice")
-		if _, err := server.bulkOwnerScope(ctx, r, `true) || (true`); err == nil {
+		if _, err := server.jobsOwnerScope(ctx, r, `true) || (true`, jobScopeMutate); err == nil {
 			t.Error("injection constraint must be rejected for a non-admin session")
 		}
 	})
@@ -71,7 +77,7 @@ func TestBulkOwnerScope(t *testing.T) {
 	t.Run("admin session bypasses scoping", func(t *testing.T) {
 		server.webuiAdminGroups = newGroupSet("condor-admins")
 		r := reqWithSession("root", []string{"condor-admins"})
-		got, err := server.bulkOwnerScope(ctx, r, `JobStatus == 5`)
+		got, err := server.jobsOwnerScope(ctx, r, `JobStatus == 5`, jobScopeMutate)
 		if err != nil || got != `JobStatus == 5` {
 			t.Errorf("admin: got (%q, %v), want passthrough", got, err)
 		}
@@ -81,7 +87,7 @@ func TestBulkOwnerScope(t *testing.T) {
 // TestJobOwnerScope covers the by-id endpoints' confinement. Every
 // endpoint that addresses a job by cluster.proc — the ad, the sandbox,
 // the log, the actions — routes through jobOwnerScope, so a non-admin
-// browser session cannot reach another user's job by guessing its id.
+// caller cannot reach another user's job by guessing its id.
 // The listing endpoint has always enforced that; the by-id ones did not
 // until this rule was applied to them.
 func TestJobOwnerScope(t *testing.T) {
@@ -108,7 +114,7 @@ func TestJobOwnerScope(t *testing.T) {
 	}
 
 	t.Run("non-admin session is confined to its own job", func(t *testing.T) {
-		scoped, err := server.jobOwnerScope(ctx, sessionReq("alice"), 7, 0)
+		scoped, err := server.jobOwnerScope(ctx, sessionReq("alice"), 7, 0, jobScopeRead)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -129,7 +135,7 @@ func TestJobOwnerScope(t *testing.T) {
 
 	t.Run("qualified actor maps to the bare owner", func(t *testing.T) {
 		// The actor is "alice@uid.domain"; a job's Owner is "alice".
-		scoped, err := server.jobOwnerScope(ctx, sessionReq("alice"), 7, 0)
+		scoped, err := server.jobOwnerScope(ctx, sessionReq("alice"), 7, 0, jobScopeRead)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -140,7 +146,7 @@ func TestJobOwnerScope(t *testing.T) {
 
 	t.Run("admin session is not confined", func(t *testing.T) {
 		server.webuiAdminGroups = newGroupSet("condor-admins")
-		scoped, err := server.jobOwnerScope(ctx, sessionReq("root", []string{"condor-admins"}), 7, 0)
+		scoped, err := server.jobOwnerScope(ctx, sessionReq("root", []string{"condor-admins"}), 7, 0, jobScopeMutate)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -149,14 +155,19 @@ func TestJobOwnerScope(t *testing.T) {
 		}
 	})
 
-	t.Run("API-token caller keeps the schedd ACL as its boundary", func(t *testing.T) {
+	t.Run("API-token caller is confined like a session", func(t *testing.T) {
 		r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs/7.0", nil)
-		scoped, err := server.jobOwnerScope(ctx, r, 7, 0)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !scopeAdmitsJob(t, scoped, "bob", 7, 0) {
-			t.Errorf("a bearer caller must pass through unscoped, as on the bulk endpoints: %q", scoped)
+		for _, tier := range []jobScopeTier{jobScopeRead, jobScopeMutate} {
+			scoped, err := server.jobOwnerScope(ctx, r, 7, 0, tier)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if scopeAdmitsJob(t, scoped, "bob", 7, 0) {
+				t.Errorf("BYPASS: a bearer caller reaches another user's job: %q", scoped)
+			}
+			if !scopeAdmitsJob(t, scoped, "alice", 7, 0) {
+				t.Errorf("a bearer caller lost its own job: %q", scoped)
+			}
 		}
 	})
 }
