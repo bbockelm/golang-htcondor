@@ -109,7 +109,7 @@ func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, er
 	if cfg.HTCondorConfig == nil {
 		return nil, errors.New("multi-AP mode needs the HTCondor configuration to authenticate to the federation hub")
 	}
-	reg, err := apregistry.New(cfg.Collector, m.constraint, apregistry.Options{})
+	reg, err := apregistry.New(cfg.Collector, m.constraint, apregistry.Options{ClientConfig: cfg.ClientConfig})
 	if err != nil {
 		return nil, err
 	}

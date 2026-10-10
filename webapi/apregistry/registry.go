@@ -21,6 +21,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // DefaultInterval is how often Run re-queries the collector.
@@ -74,6 +75,7 @@ type Registry struct {
 	constraint string
 	interval   time.Duration
 	now        func() time.Time
+	clientCfg  *config.Config
 
 	mu          sync.RWMutex
 	members     map[string]*Member // keyed by lower-cased name
@@ -82,12 +84,20 @@ type Registry struct {
 	lastErr     string
 }
 
+// newSchedd builds a member's schedd client from the registry's client config.
+func (r *Registry) newSchedd(name, addr string) *htcondor.Schedd {
+	return htcondor.NewSchedd(name, addr).WithConfig(r.clientCfg)
+}
+
 // Options tunes a Registry. The zero value is the default.
 type Options struct {
 	// Interval between polls; zero means DefaultInterval.
 	Interval time.Duration
 	// Now replaces the clock, for tests.
 	Now func() time.Time
+	// ClientConfig is the configuration each member's schedd client is built
+	// from (see htcondor.Schedd.WithConfig); nil uses the process default.
+	ClientConfig *config.Config
 }
 
 // New returns a registry of the schedds matching constraint. It holds no
@@ -104,6 +114,7 @@ func New(q Querier, constraint string, opts Options) (*Registry, error) {
 		constraint: constraint,
 		interval:   opts.Interval,
 		now:        opts.Now,
+		clientCfg:  opts.ClientConfig,
 		members:    map[string]*Member{},
 	}
 	if r.interval <= 0 {
@@ -154,7 +165,7 @@ func (r *Registry) Refresh(ctx context.Context) error {
 		m, ok := r.members[key]
 		if !ok {
 			r.members[key] = &Member{
-				Name: name, Address: addr, Schedd: htcondor.NewSchedd(name, addr),
+				Name: name, Address: addr, Schedd: r.newSchedd(name, addr),
 				Present: true, FirstSeen: now, LastSeen: now, LastConfirmed: now, AddressSince: now,
 			}
 			continue
@@ -162,7 +173,7 @@ func (r *Registry) Refresh(ctx context.Context) error {
 		next := *m
 		next.Present, next.LastSeen, next.LastConfirmed = true, now, now
 		if addr != m.Address {
-			next.Address, next.Schedd, next.AddressSince = addr, htcondor.NewSchedd(name, addr), now
+			next.Address, next.Schedd, next.AddressSince = addr, r.newSchedd(name, addr), now
 		}
 		r.members[key] = &next
 	}
