@@ -523,6 +523,34 @@ func (tc *TokenCache) AddValidated(token, username string, expiration time.Time)
 	return entry, nil
 }
 
+// sessionCacheFor returns the session cache kept for user, creating it
+// if there is none. Only for a user this server authenticated itself (a
+// session cookie), on a TokenCache used for nothing else: the key is a
+// username, not a token, and must not share a keyspace with bearers.
+// The entry is bounded and expires like a verified one; a new one only
+// means new CEDAR handshakes.
+func (tc *TokenCache) sessionCacheFor(user string) *security.SessionCache {
+	if tc == nil {
+		return security.NewSessionCache()
+	}
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	now := tc.now()
+	key := "session:" + user
+	if entry, ok := tc.lookupLocked(key, now); ok {
+		return entry.SessionCache
+	}
+	entry := &TokenCacheEntry{
+		Token:        key,
+		Username:     user,
+		Validated:    true,
+		Expiration:   now.Add(tokenCacheValidatedResidency),
+		SessionCache: security.NewSessionCache(),
+	}
+	tc.insertLocked(entry, now, tokenCacheValidatedResidency)
+	return entry.SessionCache
+}
+
 // lookupLocked returns the live entry for token, marking it used, and
 // drops one that is past its time. tc.mu must be held.
 func (tc *TokenCache) lookupLocked(token string, now time.Time) (*TokenCacheEntry, bool) {

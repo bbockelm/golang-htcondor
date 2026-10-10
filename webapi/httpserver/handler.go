@@ -221,6 +221,7 @@ type Handler struct {
 	// oauth2_token_exchange_ext.go.
 	extIssuers          *extIssuerValidator
 	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
+	cookieSessionCaches *TokenCache       // One private session cache per session-cookie user (see sessionCacheFor)
 	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
 	apiKeyStore         *apiKeyStore      // API-key store: admin-mintable bearer tokens for non-interactive callers
 	oauth2Provider      *OAuth2Provider   // OAuth2 provider for MCP endpoints
@@ -1099,6 +1100,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		tlsCACertFile:        cfg.TLSCACertFile,
 		logger:               logger,
 		tokenCache:           newTokenCache(cfg.TrustDomain), // Initialize token cache (includes username for rate limiting)
+		cookieSessionCaches:  newTokenCache(""),
 		streamBufferSize:     streamBufferSize,
 		streamWriteTimeout:   streamWriteTimeout,
 		metricsPublic:        cfg.MetricsPublic,

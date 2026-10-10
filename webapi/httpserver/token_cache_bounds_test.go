@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
@@ -252,48 +253,90 @@ func TestForgedTokenIsNotValidatedBySuccessfulResponses(t *testing.T) {
 }
 
 // Session-cookie mode mints a new token for every request. Those must
-// not each become a cache entry; the user's sessions are kept under
-// the user this server authenticated, as in user-header mode.
+// not each become a token-cache entry; each user's cedar sessions are
+// kept in a session cache private to that user -- never the global one,
+// which other identities resume from.
 func TestSessionCookieRequestsDoNotAddTokenCacheEntries(t *testing.T) {
 	cfg := newTestConfig(t)
 	cfg.SigningKeyPath = writeTestSigningKey(t)
 	cfg.TrustDomain = "test.domain"
 	cfg.UIDDomain = "test.domain"
 	s := newRoutedServer(t, cfg)
-	sid, _, err := s.sessionStore.Create("alice")
-	if err != nil {
-		t.Fatalf("creating a session: %v", err)
-	}
-	newRequest := func() *http.Request {
+
+	cookieRequest := func(user string) *http.Request {
+		t.Helper()
+		sid, _, err := s.sessionStore.Create(user)
+		if err != nil {
+			t.Fatalf("creating a session for %s: %v", user, err)
+		}
 		req := httptest.NewRequestWithContext(context.Background(),
 			http.MethodGet, "/api/v1/whoami", nil)
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec // test cookie
 		return req
 	}
+	secConfigFor := func(user string) (cache *security.SessionCache, tag string) {
+		t.Helper()
+		ctx, err := s.createAuthenticatedContext(cookieRequest(user))
+		if err != nil {
+			t.Fatalf("createAuthenticatedContext for %s: %v", user, err)
+		}
+		secConfig, ok := htcondor.GetSecurityConfigFromContext(ctx)
+		if !ok {
+			t.Fatalf("no security config on %s's request context", user)
+		}
+		// A nil cache is cedar's global one.
+		if secConfig.SessionCache == nil {
+			t.Fatalf("%s's request uses the global session cache", user)
+		}
+		return secConfig.SessionCache, secConfig.SecurityTag
+	}
 
 	for i := 0; i < 5; i++ {
 		w := httptest.NewRecorder()
-		s.ServeHTTP(w, newRequest())
+		s.ServeHTTP(w, cookieRequest("alice"))
 		if w.Code != http.StatusOK {
 			t.Fatalf("whoami status = %d", w.Code)
 		}
 	}
 	if got := s.tokenCache.Size(); got != 0 {
-		t.Errorf("Size = %d after session-cookie requests, want 0", got)
+		t.Errorf("token cache Size = %d after session-cookie requests, want 0", got)
 	}
 
-	ctx, err := s.createAuthenticatedContext(newRequest())
-	if err != nil {
-		t.Fatalf("createAuthenticatedContext: %v", err)
+	alice1, tag := secConfigFor("alice")
+	alice2, _ := secConfigFor("alice")
+	bob, _ := secConfigFor("bob")
+	if alice1 != alice2 {
+		t.Error("two of alice's requests got different session caches; neither can resume the other's sessions")
 	}
-	secConfig, ok := htcondor.GetSecurityConfigFromContext(ctx)
-	if !ok {
-		t.Fatal("no security config on the request context")
+	if alice1 == bob {
+		t.Error("alice and bob share a session cache")
 	}
-	if secConfig.SecurityTag != "session:alice" {
-		t.Errorf("SecurityTag = %q, want session:alice", secConfig.SecurityTag)
+	// cedar stores client sessions untagged; a tag here would stop
+	// every lookup from finding them.
+	if tag != "" {
+		t.Errorf("SecurityTag = %q, want empty for a cache private to one user", tag)
 	}
-	if secConfig.SessionCache != nil {
-		t.Error("a per-request session cache was attached; nothing could ever resume from it")
+}
+
+// The per-user caches are bounded and expire like the others.
+func TestCookieSessionCachesAreBounded(t *testing.T) {
+	tc := newTokenCache("")
+	clock := &fakeClock{t: time.Now()}
+	tc.now = clock.now
+	tc.maxEntries = 2
+
+	for _, user := range []string{"alice", "bob", "carol"} {
+		tc.sessionCacheFor(user)
+	}
+	if got := tc.Size(); got != 2 {
+		t.Errorf("Size = %d for three users with a cap of 2, want 2", got)
+	}
+	carol := tc.sessionCacheFor("carol")
+	clock.advance(tokenCacheValidatedResidency + time.Second)
+	if got := tc.Size(); got != 0 {
+		t.Errorf("Size = %d after the residency, want 0", got)
+	}
+	if tc.sessionCacheFor("carol") == carol {
+		t.Error("an expired user session cache was handed out again")
 	}
 }

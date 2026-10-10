@@ -1263,6 +1263,9 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// the process-wide cache. Left empty for a per-token cache, which is
 	// private to one credential already.
 	var sessionTag string
+	// privateUserCache is set when sessionCache belongs to one user
+	// rather than one credential (session-cookie mode).
+	var privateUserCache bool
 
 	// Check if we're using user header mode (generated token)
 	if s.userHeader != "" {
@@ -1300,11 +1303,12 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 		// Session-cookie mode: extractOrGenerateToken minted this token
 		// for the session's user, afresh on every request (new iat), so
 		// as a cache key it would add an entry per request that is never
-		// seen again -- and no request would resume another's sessions.
-		// Same as user-header mode: the global cache, tagged with the
-		// user this server authenticated.
-		sessionTag = "session:" + sessionUser
-		sessionCache = nil
+		// seen again. Key the session cache on the user this server
+		// authenticated instead: one private cache per user, never the
+		// global one, which also holds sessions other identities
+		// (this daemon's own among them) would resume.
+		sessionCache = s.cookieSessionCaches.sessionCacheFor(sessionUser)
+		privateUserCache = true
 	} else {
 		// Not using user header mode - this is a real JWT token
 		// Check if token is already in cache
@@ -1436,6 +1440,14 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// one would select somebody else's session, which is the thing
 	// being prevented.
 	secConfig.SecurityTag = sessionTagFor(sessionTag, condorCredential)
+	if privateUserCache {
+		// The cache holds only this user's sessions, so there is nothing
+		// to isolate them from -- and the tag has to be the one cedar
+		// stores client sessions under, which is empty, or no request
+		// would resume a session another of this user's requests set up.
+		// A digest of the credential would differ every request.
+		secConfig.SecurityTag = ""
+	}
 	ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 
 	// What this request will present to HTCondor, for correlating a
