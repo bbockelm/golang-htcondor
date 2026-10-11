@@ -13,7 +13,7 @@
 // because the app is a static export, where a dynamic route needs a page
 // per value at build time.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -69,11 +69,20 @@ export default function UtilizationPage() {
   const isAdmin = !!session?.is_admin;
   const isLead = (session?.project_lead_of?.length ?? 0) > 0;
   const multiAP = useMultiAP();
-  const [scope] = useScope();
+  const [scope, setScope] = useScope();
   // The stored scope is shared with /jobs and /archive and outlives a
   // session's privileges; only a session that can see other people's jobs
   // gets a pool-wide title and question.
   const canWiden = (isAdmin || isLead) && !multiAP;
+  // A link from someone else's job (an admin looking at it) asks for the
+  // pool-wide scope, so it lands on that user's workflow whatever this
+  // browser last chose; the toggle shows it and still changes it.
+  const wantsEveryone = searchParams.get('owned_by_me') === 'false';
+  useEffect(() => {
+    if (wantsEveryone && canWiden && scope === 'mine') setScope('all');
+    // Only when the link arrives, not each time the toggle is used.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantsEveryone, canWiden]);
   const ownedByMe = scope === 'mine' || !canWiden;
   // Narrowing to users only means something when the answer has others.
   const owners = ownedByMe ? [] : url.owners;

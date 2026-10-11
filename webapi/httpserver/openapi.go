@@ -1913,6 +1913,48 @@ const openAPISchema = `{
         }
       }
     },
+    "/jobs/{jobId}/similar": {
+      "get": {
+        "summary": "The finished jobs behind a runtime estimate",
+        "description": "The job's group at one level of the runtime estimator -- by default the level that answered its estimate -- as the estimator files it: the owner's finished jobs that completed normally within the estimator's recency window, grouped by its own features and keys, newest first and at most its per-group sample bound. runtimes summarizes what the estimator holds for the group right now, which is what an estimate uses. The global level spans every user and is answered with aggregates only (aggregate_only, no jobs). The job is read with the same scope as GET /jobs/{jobId}: someone else's job is a 404, and the list holds only jobs the caller may read. Not available in multi-AP mode.",
+        "operationId": "getJobSimilar",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "level", "in": "query", "required": false, "schema": {"type": "string", "enum": ["cluster", "exact", "template", "batch", "iwd", "cmd", "owner", "global"]}, "description": "A level that does not apply to the job is a 400."},
+          {"name": "offset", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 0, "default": 0}},
+          {"name": "page_size", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}}
+        ],
+        "responses": {
+          "200": {"description": "The group.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "job_id": {"type": "string"}, "level": {"type": "string"}, "description": {"type": "string"},
+            "estimate_level": {"type": "string", "nullable": true},
+            "levels": {"type": "array", "items": {"type": "object", "properties": {"level": {"type": "string"}, "description": {"type": "string"}, "applies": {"type": "boolean"}, "count": {"type": "integer", "nullable": true}}}},
+            "window": {"type": "object", "properties": {"days": {"type": "number"}, "max_jobs": {"type": "integer"}}},
+            "runtimes": {"type": "object", "nullable": true, "properties": {"count": {"type": "integer"}, "p10": {"type": "number"}, "p25": {"type": "number"}, "p50": {"type": "number"}, "p75": {"type": "number"}, "p90": {"type": "number"}}},
+            "aggregate_only": {"type": "boolean"}, "total": {"type": "integer"}, "offset": {"type": "integer"}, "next_offset": {"type": "integer", "nullable": true},
+            "jobs": {"type": "array", "items": {"type": "object", "properties": {
+              "id": {"type": "string"}, "cluster": {"type": "integer"}, "proc": {"type": "integer"}, "submitted": {"type": "integer", "nullable": true},
+              "completed": {"type": "integer"}, "runtime": {"type": "number"}, "exit_code": {"type": "integer"}}}}}}}}},
+          "400": {"description": "Bad parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Job not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/utilization/for-job/{jobId}": {
+      "get": {
+        "summary": "The Utilization workflow of a job",
+        "description": "The Utilization workflow a job -- waiting, running or finished -- belongs to, by the analysis's own identity and key, and whether that workflow has finished jobs in the last 30 days. Same scope as GET /jobs/{jobId}. Not available in multi-AP mode.",
+        "operationId": "getUtilizationForJob",
+        "parameters": [{"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The workflow.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "job_id": {"type": "string"}, "key": {"type": "string"}, "name": {"type": "string"}, "executable": {"type": "string"},
+            "owner": {"type": "string"}, "has_history": {"type": "boolean", "nullable": true}}}}}},
+          "400": {"description": "Bad job id", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Job not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
     "/jobs/runtime-estimates": {
       "post": {
         "summary": "Estimate how long many jobs will run",

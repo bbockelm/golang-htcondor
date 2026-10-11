@@ -248,3 +248,16 @@ func InWorkflow(j *Job, key string) bool {
 	id, _ := identify(j)
 	return id.hash() == key
 }
+
+// WorkflowOf is the workflow a job belongs to -- finished or not -- as
+// the analysis would name it: its key, name and program.
+func WorkflowOf(j *Job) (key, name, program string) {
+	id, _ := identify(j)
+	return id.hash(), id.name, id.exe
+}
+
+// Finished reports whether a job is one the analysis counts: completed or
+// removed, and run on an execute point.
+func Finished(j *Job) bool {
+	return j.finished() && !j.reservesNothing()
+}

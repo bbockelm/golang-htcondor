@@ -6,6 +6,7 @@
 
 import type { DrainEstimates } from "./drain";
 import type { MetricsResponse } from "./metrics";
+import type { SimilarJobsResponse, UtilizationForJob } from "./similar";
 import type {
   UtilApplyRequest,
   UtilApplyResponse,
@@ -1807,6 +1808,24 @@ export const api = {
     // caller can see; available is false when there is no estimate.
     runtimeEstimate: (id: string): Promise<RuntimeEstimate> =>
       fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/runtime-estimate`),
+
+    // The finished jobs a runtime estimate draws on, one group (level) at
+    // a time, newest first; see lib/similar.ts.
+    similar: (
+      id: string,
+      params: { level?: RuntimeEstimateLevel; offset?: number; page_size?: number } = {},
+    ): Promise<SimilarJobsResponse> => {
+      const qs = new URLSearchParams();
+      if (params.level) qs.set("level", params.level);
+      if (params.offset) qs.set("offset", String(params.offset));
+      if (params.page_size) qs.set("page_size", String(params.page_size));
+      const q = qs.toString();
+      return fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/similar${q ? "?" + q : ""}`);
+    },
+
+    // The Utilization workflow a job belongs to.
+    utilizationWorkflow: (id: string): Promise<UtilizationForJob> =>
+      fetchJSON(`${BASE}/utilization/for-job/${encodeURIComponent(id)}`),
 
     // Many jobs' estimates in one request, for the listing.
     runtimeEstimates: (ids: string[]): Promise<RuntimeEstimates> =>

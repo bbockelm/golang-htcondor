@@ -175,6 +175,8 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/utilization", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilization))))
 	// One workflow's jobs, a page at a time.
 	mux.Handle("/api/v1/utilization/jobs", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationJobs))))
+	// The Utilization workflow a job belongs to, for a link from its page.
+	mux.Handle("/api/v1/utilization/for-job/", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationForJob))))
 	// One workflow's full detail, and applying its advice to its waiting jobs.
 	mux.Handle("/api/v1/utilization/workflow", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationWorkflow))))
 	mux.Handle("/api/v1/utilization/apply", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationApply))))
