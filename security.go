@@ -12,6 +12,7 @@ import (
 	"weak"
 
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/golang-htcondor/authz"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 )
@@ -436,7 +437,10 @@ func fsRootToCondor(cfg *config.Config) *bool {
 //
 // The function follows HTCondor's security configuration pattern:
 //   - SEC_<context>_<feature> where context is CLIENT, READ, WRITE, etc.
-//   - Falls back to SEC_DEFAULT_* if context-specific settings are not found
+//   - Each setting falls back along the context's chain to SEC_DEFAULT_*, as
+//     HTCondor's SecMan::getSecSetting: an ADVERTISE_* context takes
+//     SEC_DAEMON_* first (and DAEMON takes SEC_WRITE_* under
+//     LEGACY_ALLOW_SEMANTICS)
 //   - Supports REQUIRED, PREFERRED, OPTIONAL, NEVER security levels
 //   - Supports multiple authentication methods (SSL, KERBEROS, TOKEN, etc.)
 //   - Supports multiple encryption methods (AES, BLOWFISH, 3DES)
@@ -452,7 +456,6 @@ func fsRootToCondor(cfg *config.Config) *bool {
 //
 // Deficiencies (to be addressed in follow-up):
 //   - Authorization settings (ALLOW_READ, DENY_WRITE, etc.) are separate from SecurityConfig
-//   - Context-specific overrides beyond CLIENT not yet fully implemented
 //   - NEGOTIATION security level not yet mapped
 func GetSecurityConfig(cfg *config.Config, command int, context string) (*security.SecurityConfig, error) {
 	if context == "" {
@@ -564,6 +567,13 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 //     for named issuer keys), the trust domain (TRUST_DOMAIN, defaulting to
 //     UID_DOMAIN), and the maximum token age (SEC_TOKEN_MAX_AGE).
 //
+// secContext is the authorization level whose SEC_<level>_* policy applies;
+// each setting falls back as GetSecurityConfig describes, so an unset
+// SEC_ADVERTISE_STARTD_AUTHENTICATION takes SEC_DAEMON_AUTHENTICATION before
+// SEC_DEFAULT_AUTHENTICATION. A daemon negotiates each command under the
+// policy of the level it is registered at with
+// daemon.Daemon.InstallSecurityLevels.
+//
 // UID_DOMAIN (set by GetSecurityConfig) is the domain of an FS peer's identity,
 // user@UID_DOMAIN. A daemon behind a shared port should build its configs with
 // daemon.Daemon.ServerSecurityConfig, which also sets the shared-port id.
@@ -641,18 +651,27 @@ type CredentialReloader interface {
 	Reload()
 }
 
-// getSecurityLevel retrieves a security level setting with context and default fallback
-// For example: SEC_CLIENT_AUTHENTICATION, falling back to SEC_DEFAULT_AUTHENTICATION
-func getSecurityLevel(cfg *config.Config, context, feature string) string {
-	// Try context-specific setting first
-	contextKey := fmt.Sprintf("SEC_%s_%s", context, feature)
-	if value, ok := cfg.Get(contextKey); ok {
-		return value
+// secSetting returns SEC_<level>_<feature> for the first level in secContext's
+// config-fallback chain that sets it (authz.ConfigChain: an ADVERTISE_* level
+// falls back to DAEMON, every level to DEFAULT), and the level that set it. As
+// SecMan::getSecSetting, it walks the chain one setting at a time, honours
+// LEGACY_ALLOW_SEMANTICS, and treats an empty value as unset.
+func secSetting(cfg authz.ConfigGetter, secContext, feature string) (value string, level authz.Perm, ok bool) {
+	legacyVal, _ := cfg.Get("LEGACY_ALLOW_SEMANTICS")
+	legacy := parseBool(legacyVal, false)
+	for _, lvl := range authz.ConfigChain(authz.Perm(strings.ToUpper(secContext)), legacy) {
+		if v, ok := cfg.Get(fmt.Sprintf("SEC_%s_%s", lvl, feature)); ok && strings.TrimSpace(v) != "" {
+			return v, lvl, true
+		}
 	}
+	return "", "", false
+}
 
-	// Fall back to DEFAULT setting
-	defaultKey := fmt.Sprintf("SEC_DEFAULT_%s", feature)
-	if value, ok := cfg.Get(defaultKey); ok {
+// getSecurityLevel retrieves a security level setting along secContext's
+// config-fallback chain (secSetting). For example: SEC_ADVERTISE_STARTD_AUTHENTICATION,
+// falling back to SEC_DAEMON_AUTHENTICATION, then to SEC_DEFAULT_AUTHENTICATION.
+func getSecurityLevel(cfg *config.Config, context, feature string) string {
+	if value, _, ok := secSetting(cfg, context, feature); ok {
 		return value
 	}
 
@@ -674,8 +693,9 @@ func getSecurityLevel(cfg *config.Config, context, feature string) string {
 // getSecurityMethods retrieves a comma-separated list of security methods
 // For example: SEC_CLIENT_AUTHENTICATION_METHODS, falling back to SEC_DEFAULT_AUTHENTICATION_METHODS
 func getSecurityMethods(cfg *config.Config, context, feature string) string {
-	// An operator's context-specific setting always wins.
-	if value, ok := cfg.Get(fmt.Sprintf("SEC_%s_%s", context, feature)); ok && value != "" {
+	// An operator's setting for the context, or a level it falls back to
+	// before DEFAULT (an ADVERTISE_* level's DAEMON), always wins.
+	if value, lvl, ok := secSetting(cfg, context, feature); ok && lvl != authz.PermDefault {
 		return value
 	}
 

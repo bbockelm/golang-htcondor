@@ -281,3 +281,93 @@ func TestPingSendsRequestedNop(t *testing.T) {
 		}
 	}
 }
+
+// TestPingCheckPermissionAnswersRefusal: a daemon refuses a DC_SEC_QUERY's
+// handshake (post-auth DENIED) for a level it does not authorize, so
+// PingWithOptions reports that as Authorized false with a reason rather than
+// an error; a permitted level is Authorized, and a level the daemon has no
+// command at is CommandNotFound. A ping that is not a permission query, and a
+// daemon that cannot be reached, still fail.
+func TestPingCheckPermissionAnswersRefusal(t *testing.T) {
+	type pinger interface {
+		PingWithOptions(context.Context, *PingOptions) (*PingResult, error)
+	}
+	clients := map[string]func(addr string) pinger{
+		"Schedd": func(addr string) pinger {
+			return NewSchedd("fake", addr).WithConfig(mustConfig(t, fsOnlyConfig))
+		},
+		"Collector": func(addr string) pinger {
+			return NewCollector(addr).WithConfig(mustConfig(t, fsOnlyConfig))
+		},
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0") //nolint:noctx // test-only loopback listener
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := cedarserver.New(&security.SecurityConfig{
+		AuthMethods:    []security.AuthMethod{security.AuthFS},
+		Authentication: security.SecurityRequired,
+		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+		Encryption:     security.SecurityOptional,
+		Integrity:      security.SecurityOptional,
+		SessionCache:   security.NewSessionCache(),
+	})
+	srv.Authorizer = func(perm, _, _ string) bool { return perm != "WRITE" }
+	nop := func(context.Context, *cedarserver.Conn) error { return nil }
+	srv.Handle(int(commands.DC_NOP), nop, "ALLOW")
+	srv.Handle(int(commands.DC_NOP_READ), nop, "READ")
+	srv.Handle(int(commands.DC_NOP_WRITE), nop, "WRITE")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = srv.Serve(ctx, ln) }()
+	t.Cleanup(func() { cancel(); _ = ln.Close() })
+	addr := fmt.Sprintf("<%s>", ln.Addr().String())
+
+	for name, newClient := range clients {
+		t.Run(name, func(t *testing.T) {
+			p := newClient(addr)
+			res, err := p.PingWithOptions(daemonContext(t), &PingOptions{CheckPermission: DCNopRead})
+			if err != nil {
+				t.Fatalf("READ query: %v", err)
+			}
+			if !res.Authorized || res.Permission != "READ" || res.Reason != "" || res.User == "" {
+				t.Errorf("READ query = %+v, want Authorized at READ for an authenticated identity", res)
+			}
+
+			res, err = p.PingWithOptions(daemonContext(t), &PingOptions{CheckPermission: DCNopWrite})
+			if err != nil {
+				t.Fatalf("WRITE query: %v, want Authorized false", err)
+			}
+			if res.Authorized || res.CommandNotFound || res.Permission != "WRITE" {
+				t.Errorf("WRITE query = %+v, want not Authorized at WRITE", res)
+			}
+			if res.User == "" || !strings.Contains(res.Reason, res.User) || !strings.Contains(res.Reason, "WRITE") {
+				t.Errorf("WRITE query reason %q, user %q: want both the identity and the level", res.Reason, res.User)
+			}
+
+			res, err = p.PingWithOptions(daemonContext(t), &PingOptions{CheckPermission: DCNopConfig})
+			if err != nil {
+				t.Fatalf("CONFIG query: %v, want CommandNotFound", err)
+			}
+			if res.Authorized || !res.CommandNotFound || !strings.Contains(res.Reason, "CONFIG") {
+				t.Errorf("CONFIG query = %+v, want CommandNotFound at CONFIG", res)
+			}
+
+			// The same refusal of a ping that runs the level's NOP is the
+			// ping failing.
+			if _, err := p.PingWithOptions(daemonContext(t), &PingOptions{Command: DCNopWrite}); err == nil {
+				t.Error("DC_NOP_WRITE ping succeeded although WRITE is refused")
+			}
+		})
+	}
+
+	// A connection failure is not an answer.
+	closed, err := net.Listen("tcp", "127.0.0.1:0") //nolint:noctx // test-only loopback listener
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closedAddr := fmt.Sprintf("<%s>", closed.Addr().String())
+	_ = closed.Close()
+	if res, err := clients["Schedd"](closedAddr).PingWithOptions(daemonContext(t), &PingOptions{CheckPermission: DCNopRead}); err == nil {
+		t.Errorf("query of an unreachable daemon = %+v, want an error", res)
+	}
+}

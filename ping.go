@@ -11,6 +11,7 @@ import (
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
+	"github.com/bbockelm/cedar/security"
 )
 
 // Permission levels for DC_SEC_QUERY authorization checking.
@@ -53,7 +54,10 @@ type PingResult struct {
 	// Authorized reports the daemon's answer to the DC_SEC_QUERY probe:
 	// whether the authenticated identity would be permitted to run a
 	// command at the requested level. Only meaningful when
-	// PingOptions.CheckPermission was set; false otherwise.
+	// PingOptions.CheckPermission was set; false otherwise. A daemon that
+	// refuses the level answers DENIED in the handshake itself (C++
+	// DaemonCore and cedar alike); that is reported here as false, with
+	// Reason, rather than as an error.
 	//
 	// Note this is an authorization answer, not an identity one. It says
 	// the daemon's ACLs admit whatever identity the connection presented;
@@ -63,6 +67,14 @@ type PingResult struct {
 	// Permission is the permission level that was checked (e.g., "READ", "WRITE")
 	// Only set when CheckPermission is specified
 	Permission string
+	// Reason says why Authorized is false after a CheckPermission query:
+	// the daemon refused the level, or registers no command at it.
+	Reason string
+	// CommandNotFound reports that the daemon registers no command at the
+	// level CheckPermission queried (it answered CMD_NOT_FOUND), so it
+	// could not say whether the identity is authorized there. Authorized
+	// is false.
+	CommandNotFound bool
 }
 
 // PingOptions configures the ping operation
@@ -143,6 +155,9 @@ func (c *Collector) PingWithOptions(ctx context.Context, opts *PingOptions) (*Pi
 	// Establish connection and authenticate
 	htcondorClient, err := client.ConnectAndAuthenticate(ctx, c.address, secConfig)
 	if err != nil {
+		if result := secQueryRefusal(opts, err); result != nil {
+			return result, nil
+		}
 		return nil, fmt.Errorf("failed to connect and authenticate to collector: %w", err)
 	}
 	defer func() {
@@ -175,6 +190,9 @@ func (c *Collector) PingWithOptions(ctx context.Context, opts *PingOptions) (*Pi
 			return nil, err
 		}
 		result.Authorized = authorized
+		if !authorized {
+			result.Reason = fmt.Sprintf("the daemon does not authorize %s at %s", identityName(result.User), result.Permission)
+		}
 	}
 
 	return result, nil
@@ -217,6 +235,9 @@ func (s *Schedd) PingWithOptions(ctx context.Context, opts *PingOptions) (*PingR
 	// Establish connection and authenticate
 	htcondorClient, err := client.ConnectAndAuthenticate(ctx, s.address, secConfig)
 	if err != nil {
+		if result := secQueryRefusal(opts, err); result != nil {
+			return result, nil
+		}
 		return nil, wrapScheddConnectError(s.address, err)
 	}
 	defer func() {
@@ -249,6 +270,9 @@ func (s *Schedd) PingWithOptions(ctx context.Context, opts *PingOptions) (*PingR
 			return nil, err
 		}
 		result.Authorized = authorized
+		if !authorized {
+			result.Reason = fmt.Sprintf("the daemon does not authorize %s at %s", identityName(result.User), result.Permission)
+		}
 	}
 
 	return result, nil
@@ -302,16 +326,64 @@ func looksLikeConnReset(err error) bool {
 	return strings.Contains(err.Error(), "connection reset by peer")
 }
 
+// secQueryRefusal returns the answer a DC_SEC_QUERY's refused handshake
+// gives, or nil if err is not one. A daemon authorizes the command a
+// DC_SEC_QUERY names (AuthCommand) before it replies to the handshake, as it
+// does any command, so an identity it does not authorize at that level gets
+// ReturnCode DENIED in the post-authentication reply rather than a reply ad
+// with AuthorizationSucceeded = false (daemon_command.cpp; cedar's server
+// likewise). That is the answer to the query, not a failed ping. CMD_NOT_FOUND
+// says the daemon registers no command at the level. Anything else -- a
+// connection or authentication failure, a ping that was not a
+// CheckPermission query -- is not an answer, and stays an error.
+func secQueryRefusal(opts *PingOptions, err error) *PingResult {
+	if opts.CheckPermission == 0 {
+		return nil
+	}
+	var refused *security.AuthorizationError
+	if !errors.As(err, &refused) {
+		return nil
+	}
+	result := &PingResult{
+		AuthMethod:     refused.Method,
+		User:           refused.User,
+		ValidCommands:  refused.ValidCommands,
+		Encryption:     refused.Encrypted,
+		Authentication: refused.TriedAuthentication || (!refused.TriedAuthKnown && refused.Method != ""),
+		Permission:     permissionName(opts.CheckPermission),
+	}
+	switch refused.ReturnCode {
+	case "DENIED":
+		result.Reason = fmt.Sprintf("the daemon does not authorize %s at %s", identityName(refused.User), result.Permission)
+		if refused.TriedAuthKnown && !refused.TriedAuthentication {
+			result.Reason += "; it did not authenticate the connection"
+		}
+	case "CMD_NOT_FOUND":
+		result.CommandNotFound = true
+		result.Reason = fmt.Sprintf("the daemon registers no command at %s", result.Permission)
+	default:
+		return nil
+	}
+	return result
+}
+
+// identityName quotes user for a Reason, or names its absence.
+func identityName(user string) string {
+	if user == "" {
+		return "the unauthenticated connection"
+	}
+	return fmt.Sprintf("%q", user)
+}
+
 // readSecQueryResult reads the DC_SEC_QUERY reply that daemon core sends
 // after the security handshake, and reports whether the authenticated
 // identity is authorized for the level named by AuthCommand.
 //
 // The reply is a single ClassAd carrying AuthorizationSucceeded (see
-// daemon_command.cpp: the DC_SEC_QUERY branch of ExecCommand). It is what
-// makes this a real authorization probe rather than an authentication one:
-// the handshake itself succeeds either way, and only this ad distinguishes
-// "authenticated but denied" from "authorized". condor_ping reads the same
-// field.
+// daemon_command.cpp: the DC_SEC_QUERY branch of ExecCommand); condor_ping
+// reads the same field. A daemon sends it once it has authorized the queried
+// level, so it is normally true: a refused level ends the handshake DENIED
+// instead (secQueryRefusal).
 //
 // A read failure is reported as an error rather than a denial. Callers that
 // gate access on the result must treat an unreadable answer as "unknown",

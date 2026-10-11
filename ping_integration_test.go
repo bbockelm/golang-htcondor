@@ -194,19 +194,13 @@ func TestScheddPingIntegration(t *testing.T) {
 
 		result, err := schedd.PingWithOptions(ctx, opts)
 
-		// We expect this to fail or return unauthorized
-		switch {
-		case err == nil && result != nil && result.Permission == "":
-			// If no error but no permission granted, that's expected
-			t.Logf("CONFIG permission correctly not granted")
-		case err != nil:
-			// Error is also acceptable for permission denied
-			t.Logf("CONFIG permission check failed as expected: %v", err)
-		case result != nil && result.Permission != "":
-			// If permission was granted, that's unexpected for a test user
-			t.Fatalf("WARNING: CONFIG permission was granted (unexpected in test environment)")
-		default:
-			t.Fatalf("Unexpected result for CONFIG permission check")
+		// The schedd refuses CONFIG to the test user (post-auth DENIED),
+		// which is the query's answer rather than an error.
+		if err != nil {
+			t.Fatalf("CONFIG permission query: %v", err)
+		}
+		if result.Authorized || result.Permission != "CONFIG" || result.Reason == "" {
+			t.Fatalf("CONFIG permission query = %+v, want not Authorized at CONFIG, with a reason", result)
 		}
 	})
 }
@@ -277,6 +271,25 @@ func TestScheddPingAtReadIntegration(t *testing.T) {
 	// example ADVERTISE_STARTD does), so they would pass.
 	t.Run("token limited to ALLOW", func(t *testing.T) {
 		refusedAtRead(t, asUser(t, "pilot", "ALLOW"), "pilot")
+	})
+
+	// A DC_SEC_QUERY about READ is refused the same way, post-auth DENIED;
+	// that is its answer, not a failed ping.
+	t.Run("permission query", func(t *testing.T) {
+		res, err := schedd.PingWithOptions(asUser(t, excluded), &PingOptions{CheckPermission: DCNopRead})
+		if err != nil {
+			t.Fatalf("READ query for %s: %v, want Authorized false", excluded, err)
+		}
+		if res.Authorized || res.CommandNotFound || res.Reason == "" || !strings.HasPrefix(res.User, excluded+"@") {
+			t.Errorf("READ query for %s = %+v, want not Authorized, with a reason", excluded, res)
+		}
+		res, err = schedd.PingWithOptions(asUser(t, "alice"), &PingOptions{CheckPermission: DCNopRead})
+		if err != nil {
+			t.Fatalf("READ query for alice: %v", err)
+		}
+		if !res.Authorized {
+			t.Errorf("READ query for alice = %+v, want Authorized", res)
+		}
 	})
 
 	t.Run("permitted identity", func(t *testing.T) {

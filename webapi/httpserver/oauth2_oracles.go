@@ -2,12 +2,9 @@ package httpserver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/bbockelm/cedar/security"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -237,22 +234,21 @@ func (o *ScheddACLOracle) Check(ctx context.Context, username string, scopes []s
 		result, err := schedd.PingWithOptions(ctx, &htcondor.PingOptions{
 			CheckPermission: probe.permission,
 		})
-		// A schedd refuses the probe's handshake outright for an
-		// identity its ACL denies at that level, rather than answering
-		// the query with "not authorized". That refusal is the answer,
-		// not a failed probe: read as one, the oracle failed open on
-		// exactly the users it exists to catch.
-		var refused *security.AuthorizationError
-		if errors.As(err, &refused) && refused.ReturnCode == "DENIED" {
-			denied = append(denied, probe.scopes...)
-			continue
-		}
 		if err != nil {
 			// One failed probe fails the whole check, which the caller
 			// turns into "no opinion". Reporting a partial answer would
 			// let a transient error strip a scope.
 			return ReauthDecision{}, fmt.Errorf("probing %s for %s: %w", probe.name, username, err)
 		}
+		if result.CommandNotFound {
+			// The schedd cannot say: it has no command at the level.
+			return ReauthDecision{}, fmt.Errorf("probing %s for %s: %s", probe.name, username, result.Reason)
+		}
+		// A schedd refuses the probe's handshake outright (DENIED) for an
+		// identity its ACL denies at that level, which PingWithOptions
+		// reports as Authorized false. That refusal is the answer, not a
+		// failed probe: read as one, the oracle failed open on exactly
+		// the users it exists to catch.
 		if !result.Authorized {
 			denied = append(denied, probe.scopes...)
 		}
