@@ -1695,12 +1695,25 @@ Project leads see their own jobs only.
 **Trust.** Every member is probed when it joins, when its address changes
 and every ten minutes (an untrusted one every minute): a token minted from
 the signing key for `htcondor-api-trust-probe@UID_DOMAIN` must be accepted
-and reported back as exactly that identity, and the member's `UID_DOMAIN`
-must match. A member that fails is `untrusted` in `/api/v1/aps` and in
-every `sources` block, actions on it fail fast, and bulk actions report it.
-A member that does not answer at all stays `unknown`. Revocation oracles
-consult every trusted member: a grant is revoked only when every member
-that answers says so.
+and reported back as exactly that identity, and the member must report a
+`UID_DOMAIN` equal to this server's. A member that refuses the token,
+reports another identity, or will not or cannot report a matching
+`UID_DOMAIN` is `untrusted` in `/api/v1/aps` and in every `sources` block;
+actions on it fail fast, and bulk actions report it. A member that does
+not answer at all stays `unknown`. Only trusted members identify callers
+(a bearer token's identity is asked of them); a request routed to an
+access point is identified by that access point alone.
+
+**Each access point's own verdict.** A refresh revokes a grant only when
+every trusted member's user record (`condor_qusers -disable`) says so. A
+user disabled on one access point is still refused there: requests routed
+to it -- actions, sandbox reads, SSH, share URLs, bulk legs -- answer 403
+`"reason": "access_point_denied"`, while the other access points serve
+them. Verdicts are reused for a minute.
+
+**Identity in queries.** Routed reads and actions are confined on the
+`User` attribute (`owner@UID_DOMAIN`), not the bare `Owner`, and an
+identity in another domain is refused.
 
 **Per-access-point state.** Rate limits (`SCHEDD_QUERY_RATE_LIMIT`,
 `SCHEDD_QUERY_PER_USER_RATE_LIMIT`) apply per access point, so one busy
@@ -1712,8 +1725,12 @@ point.
 **SSH gateway.** Connect to a job as its complete id:
 `ssh 123.0@ap1.example.org@gateway.example.org` (OpenSSH splits the user
 from the host at the last `@`). A bare `123.0` is refused with your
-candidates; interactive-session names are refused until submit is
-available here.
+candidates. Interactive-session names (and a bare `ssh gateway`) are
+refused before any login is started, until submit is available here.
+
+**Proc-less ids.** `123@ap1.example.org` names a whole cluster for an input
+upload (`PUT .../input`, `POST .../input/multipart`, `.../input/share`), as
+`123` does with one schedd, and is a 400 everywhere else.
 
 **Job ids.** A job is identified by schedd, cluster and proc together: two
 access points each have a `123.0`. Every job in a response carries
