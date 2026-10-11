@@ -356,7 +356,8 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 	}
 
 	// Named explicitly, so a regression reads as what it is.
-	// Watches, the dashboard and the collector are not served yet.
+	// Advertising to the collector, the single-schedd status routes and
+	// the routes below are not served.
 	for _, c := range []struct{ method, path string }{
 		{http.MethodPost, "/api/v1/jobs/1.0@" + ap1 + "/hold/extra"},
 		{http.MethodGet, "/api/v1/jobs/1.0@" + ap1 + "/match-analysis"},
@@ -366,7 +367,6 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 		{http.MethodPost, "/api/v1/admin/superuser"},
 		{http.MethodGet, "/api/v1/jupyter/x"},
 		{http.MethodPost, "/api/v1/collector/advertise"},
-		{http.MethodGet, "/api/v1/dashboard"},
 		{http.MethodGet, "/api/v1/jobs/epochs"},
 		{http.MethodPost, "/api/v1/interactive/sessions"},
 		{http.MethodPost, "/api/v1/jupyter/start"},

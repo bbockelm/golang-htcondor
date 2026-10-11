@@ -45,8 +45,10 @@ type activityStreamEvent struct {
 	Cluster int64  `json:"cluster_id"`
 	Proc    int64  `json:"proc_id"`
 	Owner   string `json:"owner,omitempty"`
-	At      int64  `json:"at"`
-	Detail  string `json:"detail,omitempty"`
+	// Schedd is the job's access point, in multi-AP mode.
+	Schedd string `json:"schedd,omitempty"`
+	At     int64  `json:"at"`
+	Detail string `json:"detail,omitempty"`
 	// Skipped says how many events were lost before this one because
 	// this browser was not reading fast enough. Reporting it keeps a
 	// gap from looking like a quiet minute.
@@ -164,6 +166,7 @@ func writeActivityEvent(w http.ResponseWriter, flusher *http.ResponseController,
 		Cluster: ev.Cluster,
 		Proc:    ev.Proc,
 		Owner:   ev.Owner,
+		Schedd:  ev.Schedd,
 		At:      ev.At,
 		Detail:  ev.Detail,
 		Skipped: ev.Skipped,

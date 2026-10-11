@@ -235,7 +235,9 @@ func mirrorRecent(ctx context.Context, dbc *dbrpc.Client, table, scope, attr, ex
 	if extra != "" {
 		constraint += " && (" + extra + ")"
 	}
-	project := append([]string{"ClusterId", "ProcId", "Owner", attr}, detail...)
+	// ScheddName names the job's access point on a federation hub; a
+	// single AP's mirror rows have none.
+	project := append([]string{"ClusterId", "ProcId", "Owner", "ScheddName", attr}, detail...)
 
 	// Over-fetch, then take the newest: a mutable table has no ordering
 	// to push the limit down into, so the window is what bounds this and
@@ -255,6 +257,7 @@ func mirrorRecent(ctx context.Context, dbc *dbrpc.Client, table, scope, attr, ex
 		e.ClusterID, _ = ad.EvaluateAttrInt("ClusterId")
 		e.ProcID, _ = ad.EvaluateAttrInt("ProcId")
 		e.Owner, _ = ad.EvaluateAttrString("Owner")
+		e.Schedd, _ = ad.EvaluateAttrString("ScheddName")
 		e.At, _ = ad.EvaluateAttrInt(attr)
 		e.Detail = recentDetail(ad, detail)
 		out = append(out, e)
