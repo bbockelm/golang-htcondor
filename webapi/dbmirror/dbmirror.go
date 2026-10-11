@@ -17,6 +17,7 @@ package dbmirror
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -857,6 +858,37 @@ func HistoryDecision(info *Info, opts *htcondor.HistoryQueryOptions) Decision {
 	return serve("served from the htcondordb mirror")
 }
 
+// HistoryNewestDecision decides whether the mirror may answer a history
+// read whose match set is larger than the limit, given the outcome of
+// asking it for the newest limit+1 matches ordered server-side by
+// HistoryOrderAttr (dbrpc TopK): err is that call's error and rows how
+// many rows it returned. Pure, so the policy is unit-tested without I/O.
+//
+// A client-side sort of a bounded read cannot answer such a query -- the
+// rows it fetched are an arbitrary subset, not the newest -- which is why
+// these reads used to go to the schedd. That made any time window with
+// more matches than the limit a schedd scan, and the schedd's scan budget
+// then turned an old window into zero records. Ordered server-side, the
+// mirror answers with the newest limit matches and says more matched.
+//
+// It still declines when it cannot do that faithfully: a mirror too old
+// for the TopK opcode, or one where fewer rows came back than the probe
+// already counted -- TopK skips a row with no numeric order key, so the
+// newest matches might be among the rows it could not rank.
+func HistoryNewestDecision(err error, rows, limit int) Decision {
+	switch {
+	case errors.Is(err, dbrpc.ErrTopKUnsupported):
+		return decline(ReasonOversized, fmt.Sprintf(
+			"more than %d matches, and this mirror cannot order them server-side; the schedd's backwards scan picks the newest", limit))
+	case err != nil:
+		return decline(ReasonQueryFailed, err.Error())
+	case rows <= limit:
+		return decline(ReasonOversized, fmt.Sprintf(
+			"more than %d matches, but not all carry %s to order by; the schedd's backwards scan picks the newest", limit, HistoryOrderAttr))
+	}
+	return serve(fmt.Sprintf("served from the htcondordb mirror; the newest %d of more matches, by %s", limit, HistoryOrderAttr))
+}
+
 // JobQueueStaleness is how far the mirror's job queue was behind the
 // schedd when it last advertised. See staleness.
 func JobQueueStaleness(info *Info) int64 {
@@ -999,10 +1031,22 @@ func EpochDecision(info *Info) Decision {
 	return serve("served from the htcondordb mirror (epoch history caught up)")
 }
 
+// HistoryOrderAttr is the attribute the mirror's history archive is
+// ordered by, newest first: the time the job entered the schedd's history
+// file. htcondordb stamps it on every archived record (from
+// EnteredCurrentStatus, falling back to CompletionDate, then the time it
+// read the record), so ordering by it reproduces the order of the
+// schedd's backwards scan of that file.
+const HistoryOrderAttr = "EnteredHistoryTime"
+
 // RecencyKey ranks a completed-job ad for reverse-chronological
-// ordering: the last status transition, falling back to the completion
-// time. Both are Unix seconds on a job ad; 0 sorts oldest.
+// ordering: HistoryOrderAttr when the ad carries it, otherwise the
+// values it is derived from -- the last status transition, then the
+// completion time. All are Unix seconds; 0 sorts oldest.
 func RecencyKey(ad *classad.ClassAd) int64 {
+	if v, ok := ad.EvaluateAttrInt(HistoryOrderAttr); ok && v > 0 {
+		return v
+	}
 	if v, ok := ad.EvaluateAttrInt("EnteredCurrentStatus"); ok && v > 0 {
 		return v
 	}

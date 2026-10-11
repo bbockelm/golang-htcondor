@@ -208,6 +208,13 @@ queue
 		}
 		t.Logf("✅ Limit respected: got %d record(s)", len(records))
 	})
+
+	// Test 5: the schedd's closing ad reports how far it scanned. A
+	// constraint nothing matches, under a scan limit of 1, examines one
+	// record and stops: that must read as a cut-off scan, not as "no such
+	// jobs". The unit tests use a fake daemon; this pins the real one's
+	// closing ad (AdCount) to what the library reads.
+	t.Run("QueryHistoryScanStats", func(t *testing.T) { checkScheddHistoryScanStats(ctx, t, schedd) })
 }
 
 // TestScheddQueryJobEpochsIntegration tests the job epoch history functionality
@@ -367,4 +374,38 @@ queue
 	}
 
 	t.Logf("✅ Found %d transfer history record(s)", len(records))
+}
+
+// checkScheddHistoryScanStats is TestScheddQueryJobHistoryIntegration's scan
+// statistics check, against a schedd whose history holds at least one record.
+func checkScheddHistoryScanStats(ctx context.Context, t *testing.T, schedd *Schedd) {
+	t.Helper()
+	var st HistoryScanStats
+	records, err := schedd.QueryHistoryWithOptions(ctx, "ClusterId == -1", &HistoryQueryOptions{
+		Limit:     5,
+		ScanLimit: 1,
+		Stats:     &st,
+	})
+	if err != nil {
+		t.Fatalf("Failed to query history: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("Expected no records, got %d", len(records))
+	}
+	if !st.Reported || st.RecordsScanned != 1 || !st.ScanLimitReached {
+		t.Errorf("stats = %+v, want AdCount reported, 1 record scanned, scan limit reached", st)
+	}
+
+	// Unlimited, the scan reaches the end of the history file instead.
+	st = HistoryScanStats{}
+	if _, err := schedd.QueryHistoryWithOptions(ctx, "ClusterId == -1", &HistoryQueryOptions{
+		Limit:     5,
+		ScanLimit: -1,
+		Stats:     &st,
+	}); err != nil {
+		t.Fatalf("Failed to query history: %v", err)
+	}
+	if !st.Reported || st.RecordsScanned < 1 || st.ScanLimitReached {
+		t.Errorf("unlimited scan: stats = %+v, want every record scanned and no cut-off", st)
+	}
 }

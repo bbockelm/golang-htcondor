@@ -523,6 +523,10 @@ export function scheddOf(ad: ClassAd): string | undefined {
 // variant of /api/v1/jobs/archive returns this shape.
 export interface HistoryListResponse {
   ads: ClassAd[];
+  // Set when the schedd stopped at its scan limit before finding as many
+  // records as asked for: older matches were not searched.
+  scan_limit_reached?: boolean;
+  records_scanned?: number;
   // Multi-AP mode pages history with a token instead of before_cluster.
   has_more?: boolean;
   next_page_token?: string;
