@@ -44,9 +44,23 @@ type Response struct {
 	JobsConsidered int   `json:"jobs_considered"`
 	// Truncated says the read stopped at the job cap, so the analysis
 	// covers only the most recent JobsConsidered jobs of the window.
-	Truncated bool       `json:"truncated"`
+	Truncated bool `json:"truncated"`
+	// Limit is the most jobs this analysis would read; MaxLimit is the
+	// most any analysis may.
+	Limit     int        `json:"limit"`
+	MaxLimit  int        `json:"max_limit"`
 	Overall   Overall    `json:"overall"`
 	Workflows []Workflow `json:"workflows"`
+	// Owners is everyone whose jobs were analysed, by wall clock, for a
+	// scope that covers more than one person's jobs.
+	Owners []OwnerSummary `json:"owners,omitempty"`
+}
+
+// OwnerSummary is one person's share of the analysed jobs.
+type OwnerSummary struct {
+	Owner     string  `json:"owner"`
+	Jobs      int     `json:"jobs"`
+	WallHours float64 `json:"wall_hours"`
 }
 
 // Overall summarizes every job in the window.
@@ -118,10 +132,16 @@ type BatchPoint struct {
 	CPURequest       *float64 `json:"cpu_request"`
 	CPUCoresP50      *float64 `json:"cpu_cores_p50"`
 	WallP50          *float64 `json:"wall_p50"`
+	// GPURequest is the typical request_gpus of the batch's GPU jobs, and
+	// GPUUtilP50 their median fraction of those GPUs kept busy.
+	GPURequest *float64 `json:"gpu_request"`
+	GPUUtilP50 *float64 `json:"gpu_util_p50"`
 }
 
 // Sample is one job, for scatter plots.
 type Sample struct {
+	// Job is "cluster.proc", as JobRow.ID.
+	Job       string   `json:"job"`
 	MemoryMiB *float64 `json:"memory_mib"`
 	Wall      float64  `json:"wall"`
 	Cores     *float64 `json:"cores"`
@@ -162,10 +182,20 @@ type Advice struct {
 	Saves      *Savings `json:"saves"`
 	Confidence string   `json:"confidence"`
 
-	// request is the new request the advice asks for, in the resource's
-	// own units (cores, MiB, KiB); zero when it changes no request.
+	// request is the new request the advice asks for, in the units of
+	// the request named by changes (cores, MiB, KiB, GPUs); zero when it
+	// changes no request.
 	request float64
+	changes string
 }
+
+// What a piece of advice changes, for the throughput estimate.
+const (
+	changesCpus   = "cpus"
+	changesMemory = "memory"
+	changesDisk   = "disk"
+	changesGPUs   = "gpus"
+)
 
 // Restarts is wall clock lost to runs that were thrown away.
 type Restarts struct {
@@ -200,10 +230,28 @@ type DiskStats struct {
 }
 
 // GPUStats is a workflow's GPU request and measured utilization.
+//
+// Jobs and Measured are always filled in, because GPU utilization is
+// often not recorded at all: only an execute point running HTCondor's
+// GPU monitor (use feature:GPUs, which includes GPUsMonitor) reports it,
+// and only for a run long enough to span two of its samples. A workflow
+// with no measurement still reserved its GPUs, and says so.
 type GPUStats struct {
 	Request *Request `json:"request"`
+	// Jobs requested at least one GPU; Measured of them have a
+	// utilization measurement.
+	Jobs     int `json:"jobs"`
+	Measured int `json:"measured"`
 	// Utilization is the fraction of the requested GPUs kept busy.
 	Utilization *Distribution `json:"utilization"`
+	// MemoryPeakMiB is each job's peak GPU memory (GPUsMemoryUsage).
+	MemoryPeakMiB *Distribution `json:"memory_peak_mib"`
+	// DeviceMemoryMiB is the typical memory of the GPUs the jobs ran on,
+	// when the pool records it in the job ad (see FromAd).
+	DeviceMemoryMiB *float64 `json:"device_memory_mib"`
+	// CoresUsedWhileGPU is the CPU cores the GPU jobs kept busy: a GPU
+	// job is often only as fast as the cores feeding it.
+	CoresUsedWhileGPU *Distribution `json:"cores_used_while_gpu"`
 }
 
 // Workflow is the unit advice is about: what the user will submit next.

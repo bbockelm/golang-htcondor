@@ -32,14 +32,14 @@ ResidentSetSize = 2097152
 MemoryUsage = ((ResidentSetSize + 1023) / 1024)
 RemoteWallClockTime = 3600.0`)
 	j := FromAd(ad, "")
-	if j.RequestMemory == nil || *j.RequestMemory != 2048 {
+	if !j.RequestMemory.OK() || j.RequestMemory.V() != 2048 {
 		t.Errorf("RequestMemory = %v, want 2048 (512 * RequestCpus)", j.RequestMemory)
 	}
-	if j.MemoryUsage == nil || *j.MemoryUsage != 2048 {
+	if !j.MemoryUsage.OK() || j.MemoryUsage.V() != 2048 {
 		t.Errorf("MemoryUsage = %v, want 2048 MiB from ResidentSetSize", j.MemoryUsage)
 	}
-	if j.RequestDisk != nil {
-		t.Errorf("RequestDisk = %v, want nil: it does not evaluate to a number", *j.RequestDisk)
+	if j.RequestDisk.OK() {
+		t.Errorf("RequestDisk = %v, want absent: it does not evaluate to a number", j.RequestDisk.V())
 	}
 	if j.Wall != 3600 || j.Cluster != 7 || j.Proc != 1 || !j.succeeded() {
 		t.Errorf("job = %+v", j)
@@ -52,7 +52,7 @@ func TestFromAdCPUCoversTheSameRunsAsWall(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		ad   string
-		want *float64
+		want Num
 	}{
 		{
 			// Two runs, 3600 s of wall between them. The cumulative pair
@@ -86,24 +86,24 @@ NumJobStarts = 3
 RemoteWallClockTime = 3600
 RemoteUserCpu = 600
 RemoteSysCpu = 0`,
-			want: nil,
+			want: 0,
 		},
 		{
 			name: "under a minute is not measured",
 			ad: `JobStatus = 4
 RemoteWallClockTime = 59
 CumulativeRemoteUserCpu = 59`,
-			want: nil,
+			want: 0,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			j := FromAd(parseAd(t, tc.ad), "")
-			got := j.coresUsed()
+			got, ok := j.coresUsed()
 			switch {
-			case tc.want == nil && got != nil:
-				t.Errorf("cores = %v, want unmeasured", *got)
-			case tc.want != nil && (got == nil || *got != *tc.want):
-				t.Errorf("cores = %v, want %v", got, *tc.want)
+			case !tc.want.OK() && ok:
+				t.Errorf("cores = %v, want unmeasured", got)
+			case tc.want.OK() && (!ok || got != tc.want.V()):
+				t.Errorf("cores = %v (measured %v), want %v", got, ok, tc.want.V())
 			}
 		})
 	}
@@ -168,7 +168,7 @@ func TestFromAdHolds(t *testing.T) {
 // requested.
 func TestGPUUtilizationIsPerRequestedGPU(t *testing.T) {
 	j := FromAd(parseAd(t, "JobStatus = 4\nRequestGPUs = 2\nGPUsAverageUsage = 1.5\nRemoteWallClockTime = 600"), "")
-	if u := j.GPUUtilization(); u == nil || *u != 0.75 {
+	if u, ok := j.GPUUtilization(); !ok || u != 0.75 {
 		t.Errorf("utilization = %v, want 0.75", u)
 	}
 }

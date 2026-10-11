@@ -10,6 +10,9 @@ import type {
   UtilShape,
   UtilThroughput,
   UtilizationResponse,
+  UtilJobRow,
+  UtilJobSort,
+  UtilJobsResponse,
 } from './utilization';
 
 // A realistic /api/v1/utilization answer for the component tests and the
@@ -120,6 +123,7 @@ interface SimJob {
   cores: number | null;
   disk: number | null;
   gpuUtil: number | null;
+  gpuMem: number | null; // MiB, peak GPU memory
   outcome: UtilSample['outcome'];
   restartLost: number; // seconds of wall lost to earlier, evicted runs
 }
@@ -149,6 +153,7 @@ interface WorkflowSpec {
   pRemoved: number;
   pRestart: number;
   gpuMedian?: number;
+  gpuMemMedian?: number; // MiB
   advice: (ctx: AdviceContext) => UtilAdvice[];
 }
 
@@ -209,7 +214,10 @@ function simulate(spec: WorkflowSpec): SimJob[] {
         ? Math.min(reqCpu * 1.1, Math.max(0.05, lognormal(r, spec.coresMedian * Math.min(1, reqCpu / spec.reqCpu(0)), 0.18)))
         : null,
       disk: measured ? Math.round(lognormal(r, spec.diskMedian, 0.35)) : null,
-      gpuUtil: spec.reqGpu ? Math.min(1, Math.max(0.01, lognormal(r, spec.gpuMedian ?? 0.5, 0.5))) : null,
+      // One GPU job in ten has no utilization measurement.
+      gpuUtil:
+        spec.reqGpu && r() > 0.1 ? Math.min(1, Math.max(0.01, lognormal(r, spec.gpuMedian ?? 0.5, 0.5))) : null,
+      gpuMem: spec.reqGpu ? Math.round(lognormal(r, spec.gpuMemMedian ?? 4096, 0.2)) : null,
       outcome,
       restartLost: r() < spec.pRestart ? Math.round(wall * (0.2 + r() * 0.6)) : 0,
     });
@@ -341,19 +349,30 @@ function buildWorkflow(spec: WorkflowSpec): UtilWorkflow {
         cpu_request: requestOf(js.map((j) => j.reqCpu))?.typical ?? null,
         cpu_cores_p50: c ? c.p50 : null,
         wall_p50: w ? Math.round(w.p50) : null,
+        gpu_request: js.some((j) => j.reqGpu > 0) ? requestOf(js.map((j) => j.reqGpu))!.typical : null,
+        gpu_util_p50: distribution(nonNull(js.map((j) => j.gpuUtil)))?.p50 ?? null,
       };
     });
 
   const step = Math.max(1, Math.floor(jobs.length / 400));
+  // Job ids the way jobRows numbers them: procs count up within a cluster.
+  const procs = new Map<number, number>();
+  const ids = jobs.map((j) => {
+    const proc = procs.get(j.cluster) ?? 0;
+    procs.set(j.cluster, proc + 1);
+    return `${j.cluster}.${proc}`;
+  });
   const samples: UtilSample[] = jobs
+    .map((j, i) => ({ j, id: ids[i] }))
     .filter((_, i) => i % step === 0)
     .slice(0, 400)
-    .map((j) => ({
+    .map(({ j, id }) => ({
       memory_mib: j.mem,
       wall: j.wall,
       cores: j.cores === null ? null : Math.round(j.cores * 100) / 100,
       disk_kib: j.disk,
       outcome: j.outcome,
+      job: id,
     }));
 
   const n = jobs.length;
@@ -383,7 +402,12 @@ function buildWorkflow(spec: WorkflowSpec): UtilWorkflow {
     gpu: spec.reqGpu
       ? {
           request: requestOf(jobs.map((j) => j.reqGpu)),
+          jobs: jobs.filter((j) => j.reqGpu > 0).length,
+          measured: jobs.filter((j) => j.gpuUtil !== null).length,
           utilization: distribution(nonNull(jobs.map((j) => j.gpuUtil))),
+          memory_peak_mib: distribution(nonNull(jobs.map((j) => j.gpuMem))),
+          device_memory_mib: 40 * MIB_PER_GIB, // an A100 40GB
+          cores_used_while_gpu: cores,
         }
       : null,
     memory_curve: curve,
@@ -484,6 +508,7 @@ const SPECS: WorkflowSpec[] = [
     reqDisk: 40 * KIB_PER_GIB,
     reqGpu: 1,
     gpuMedian: 0.34,
+    gpuMemMedian: 2.9 * MIB_PER_GIB,
     memMedian: 11.5 * MIB_PER_GIB,
     memSigma: 0.12,
     coresMedian: 2.1,
@@ -512,6 +537,16 @@ const SPECS: WorkflowSpec[] = [
         detail: 'Half of these jobs kept their GPU busy less than 35% of the time. Feeding it data faster, or fitting two runs on one GPU, would use it better.',
         submit: [],
         saves: { unit: 'gpu_hours', amount: ctx.wallHours * 0.6 },
+        confidence: ctx.confidence,
+      },
+      {
+        id: 'gpu-memory-small',
+        resource: 'gpu',
+        severity: 'suggest',
+        title: 'Your jobs fit GPUs with 8 GB of memory',
+        detail: 'The largest of 64 jobs used 4.1 GB of GPU memory; they all ran on 40 GB GPUs.',
+        submit: ['gpus_minimum_memory = 8192'],
+        saves: null,
         confidence: ctx.confidence,
       },
       {
@@ -622,6 +657,34 @@ const SPECS: WorkflowSpec[] = [
       },
     ],
   },
+  // One-off runs: a debugging job, an environment check, a probe. The
+  // table folds these into one row.
+  ...(['debug-run', 'check-env', 'probe-node'] as const).map(
+    (name, i): WorkflowSpec => ({
+      key: `wf-single-${i}`,
+      name,
+      executable: `${name}.sh`,
+      owner: ['carol', 'dave', 'alice'][i],
+      is_dag: false,
+      seed: 101 + i,
+      jobs: 1,
+      batches: 1,
+      clusterBase: 81400 + i * 3,
+      reqMem: () => 2048,
+      reqCpu: () => 1,
+      reqDisk: 1 * KIB_PER_GIB,
+      memMedian: 300 + i * 200,
+      memSigma: 0.1,
+      coresMedian: 0.6,
+      diskMedian: 0.1 * KIB_PER_GIB,
+      wallMedian: 300 + i * 900,
+      wallSigma: 0.2,
+      pFailed: 0,
+      pRemoved: 0,
+      pRestart: 0,
+      advice: () => [],
+    }),
+  ),
 ];
 
 function combine(ws: UtilWorkflow[]): UtilResourceSummary[] {
@@ -773,7 +836,115 @@ export function buildUtilizationFixture(): UtilizationResponse {
       throughput_gain: throughputGain(workflows),
     },
     workflows,
+    limit: 50_000,
+    max_limit: 1_000_000,
+    owners: ownersOf(workflows),
   };
 }
 
+// ownersOf is the owner list a pool-wide answer carries, by run time.
+export function ownersOf(ws: UtilWorkflow[]): NonNullable<UtilizationResponse['owners']> {
+  const by = new Map<string, { owner: string; jobs: number; wall_hours: number }>();
+  for (const w of ws) {
+    if (!w.owner) continue;
+    const o = by.get(w.owner) ?? { owner: w.owner, jobs: 0, wall_hours: 0 };
+    o.jobs += w.jobs;
+    o.wall_hours += w.wall_hours;
+    by.set(w.owner, o);
+  }
+  return [...by.values()].sort((a, b) => b.wall_hours - a.wall_hours);
+}
+
 export const utilizationFixture: UtilizationResponse = buildUtilizationFixture();
+
+// --- Jobs in a workflow ---
+
+// jobRows re-runs a workflow's simulation (it is seeded, so these are the
+// same jobs its figures came from) and lists them the way the jobs
+// endpoint does.
+export function jobRows(key: string): UtilJobRow[] | null {
+  const spec = SPECS.find((sp) => sp.key === key);
+  if (!spec) return null;
+  const procs = new Map<number, number>();
+  return simulate(spec).map((j) => {
+    const proc = procs.get(j.cluster) ?? 0;
+    procs.set(j.cluster, proc + 1);
+    const submitted = Math.round(j.qdate);
+    const started = submitted + 120;
+    return {
+      id: `${j.cluster}.${proc}`,
+      cluster: j.cluster,
+      proc,
+      owner: spec.owner,
+      submitted,
+      started,
+      completed: started + j.wall + j.restartLost,
+      outcome: j.outcome,
+      exit_code: j.outcome === 'failed' ? 1 : j.outcome === 'ok' ? 0 : null,
+      exit_by_signal: false,
+      wall: j.wall + j.restartLost,
+      request: {
+        memory_mib: j.reqMem,
+        cpus: j.reqCpu,
+        disk_kib: j.reqDisk,
+        gpus: j.reqGpu > 0 ? j.reqGpu : null,
+      },
+      memory_peak_mib: j.mem,
+      cores_used: j.cores === null || j.wall < 60 ? null : Math.round(j.cores * 100) / 100,
+      cpu_efficiency: j.cores === null || j.wall < 60 ? null : j.cores / j.reqCpu,
+      disk_used_kib: j.disk,
+      gpu_utilization: j.gpuUtil,
+      gpu_memory_peak_mib: j.gpuMem,
+      restarts: j.restartLost > 0 ? 1 : 0,
+      held_for_memory: j.outcome === 'memory_exceeded',
+      held_for_disk: false,
+    };
+  });
+}
+
+const SORT_VALUE: Record<UtilJobSort, (r: UtilJobRow) => number | null> = {
+  completed: (r) => r.completed,
+  submitted: (r) => r.submitted,
+  wall: (r) => r.wall,
+  memory: (r) => r.memory_peak_mib,
+  cores: (r) => r.cores_used,
+  efficiency: (r) => r.cpu_efficiency,
+  disk: (r) => r.disk_used_kib,
+  gpu: (r) => r.gpu_utilization,
+};
+
+/** utilizationJobsFixture answers GET /api/v1/utilization/jobs. */
+export function utilizationJobsFixture(
+  key: string,
+  opts: { sort?: UtilJobSort; order?: 'asc' | 'desc'; offset?: number; page_size?: number } = {},
+): UtilJobsResponse | null {
+  const rows = jobRows(key);
+  if (!rows) return null;
+  const sort = opts.sort ?? 'completed';
+  const order = opts.order ?? 'desc';
+  const v = SORT_VALUE[sort];
+  // Nulls last in either order; ties on (cluster, proc) ascending.
+  rows.sort((a, b) => {
+    const av = v(a);
+    const bv = v(b);
+    if (av === null || bv === null) {
+      if (av === bv) return a.cluster - b.cluster || a.proc - b.proc;
+      return av === null ? 1 : -1;
+    }
+    if (av !== bv) return order === 'asc' ? av - bv : bv - av;
+    return a.cluster - b.cluster || a.proc - b.proc;
+  });
+  const offset = opts.offset ?? 0;
+  const size = Math.min(opts.page_size ?? 100, 500);
+  const page = rows.slice(offset, offset + size);
+  return {
+    key,
+    total: rows.length,
+    offset,
+    next_offset: offset + size < rows.length ? offset + size : null,
+    sort,
+    order,
+    truncated: false,
+    jobs: page,
+  };
+}

@@ -7,14 +7,13 @@ import (
 	"testing"
 )
 
-func f(x float64) *float64 { return &x }
+func f(x float64) Num { return NumOf(x) }
 
 // completed is a finished, successful job of the "sim" workflow.
 func completed(cluster int64, peakMiB, requestMiB, wallSeconds float64) Job {
-	code := int64(0)
 	return Job{
 		Cluster: cluster, Owner: "alice", Cmd: "/home/alice/sim", Universe: 5,
-		QDate: 1000 + cluster, Status: statusCompleted, ExitCode: &code,
+		QDate: 1000 + cluster, Status: statusCompleted, ExitCode: f(0),
 		RequestMemory: f(requestMiB), RequestCpus: f(1), MemoryUsage: f(peakMiB),
 		Wall: wallSeconds,
 	}
@@ -311,7 +310,7 @@ func TestMemoryRemovedJobDoesNotSizeMemory(t *testing.T) {
 	base := jobsAt(25, 1, 900, 1024)
 	removed := completed(99, 5000, 1024, 3600)
 	removed.Status = statusRemoved
-	removed.ExitCode = nil
+	removed.ExitCode = 0
 	w := onlyWorkflow(t, append(base, removed))
 	if w.Memory.PeakMiB.N != 25 || w.Memory.PeakMiB.Max != 900 {
 		t.Errorf("peaks = %+v, want the 25 completed jobs only", w.Memory.PeakMiB)
@@ -326,7 +325,7 @@ func TestRunningJobsNeverReachTheAnalysis(t *testing.T) {
 	for i := range 5 {
 		running := completed(int64(500+i), 6000, 1024, 3600)
 		running.Status = 2
-		running.ExitCode = nil
+		running.ExitCode = 0
 		jobs = append(jobs, running)
 	}
 	idle := completed(600, 7000, 1024, 0)

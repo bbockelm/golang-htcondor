@@ -173,6 +173,8 @@ func (h *Handler) setupRoutes() {
 	// How well finished jobs used what they reserved, with submit-file
 	// advice. Owner-scoped like the archive it reads.
 	mux.Handle("/api/v1/utilization", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilization))))
+	// One workflow's jobs, a page at a time.
+	mux.Handle("/api/v1/utilization/jobs", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationJobs))))
 	mux.Handle("/api/v1/dashboard/activity", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboardActivity))))
 	mux.Handle("/api/v1/dashboard/activity/stream", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboardActivityStream))))
 

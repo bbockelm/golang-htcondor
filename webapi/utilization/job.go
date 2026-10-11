@@ -22,6 +22,7 @@
 package utilization
 
 import (
+	"math"
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -63,7 +64,7 @@ const (
 // reason for being stopped survives (see FromAd).
 func Projection() []string {
 	return []string{
-		"ClusterId", "ProcId", "Owner", "JobBatchName", "DAGManJobId", "DAGNodeName",
+		"ClusterId", "ProcId", "Owner", "JobBatchName", "DAGManJobId",
 		"Cmd", "JobUniverse", "QDate", "CompletionDate", "EnteredHistoryTime",
 		"EnteredCurrentStatus", "JobStartDate", "JobCurrentStartDate",
 		"JobStatus", "ExitCode", "ExitBySignal",
@@ -74,24 +75,24 @@ func Projection() []string {
 		"NumJobStarts", "NumHoldsByReason",
 		"HoldReasonCode", "HoldReasonSubCode", "LastHoldReasonCode", "LastHoldReasonSubCode",
 		"VacateReasonCode", "VacateReasonSubCode",
-		"GPUsAverageUsage", "GPUsMemoryUsage",
+		"GPUsAverageUsage", "GPUsMemoryUsage", "GPUsMinMemory", "MachineAttrGPUs_GlobalMemoryMb0",
 	}
 }
 
-// Job is the part of one history record the analysis uses. A nil pointer
-// is a value that was absent or did not evaluate to a number, which is
-// different from zero: a job that used no memory and a job whose memory
-// was never measured must not average together.
+// Job is the part of one history record the analysis uses.
+//
+// Kept small, because an analysis can hold a million of them: optional
+// numbers are a Num (8 bytes, no allocation) rather than a pointer to a
+// float, the strings are shared between jobs when read through a
+// JobReader, and nothing the analysis does not read is kept.
 type Job struct {
 	Cluster, Proc int64
 	Owner         string
 	// Schedd is the access point that ran the job, in multi-AP mode.
 	Schedd      string
 	BatchName   string
-	DAGManJobID int64
-	DAGNodeName string
 	Cmd         string
-	Universe    int64
+	DAGManJobID int64
 	QDate       int64
 	// Entered is when the job entered history (see FromAd).
 	Entered int64
@@ -99,42 +100,106 @@ type Job struct {
 	Completion int64
 	// FirstStart is when the job first began running, zero if unknown.
 	FirstStart   int64
-	Status       int64
-	ExitCode     *int64
-	ExitBySignal bool
-
-	// Requests, evaluated against the ad: RequestMemory MiB, RequestDisk
-	// KiB, RequestCpus and RequestGPUs counts.
-	RequestMemory *float64
-	RequestCpus   *float64
-	RequestDisk   *float64
-	RequestGPUs   *float64
-
-	// MemoryUsage is the peak in MiB -- a high-water mark, and the max
-	// across every run of the job. DiskUsage is KiB.
-	MemoryUsage *float64
-	DiskUsage   *float64
+	Universe     int16
+	Status       int16
+	NumJobStarts int32
+	ExitCode     Num
 
 	// Wall is RemoteWallClockTime: seconds on an execute point, summed
 	// over every run.
 	Wall float64
-	// CPUSeconds is user+system CPU over the same span as Wall, or nil
-	// when no such pair exists (see FromAd).
-	CPUSeconds    *float64
-	CommittedTime *float64
-	NumJobStarts  int64
 
+	// Requests, evaluated against the ad: RequestMemory MiB, RequestDisk
+	// KiB, RequestCpus and RequestGPUs counts.
+	RequestMemory Num
+	RequestCpus   Num
+	RequestDisk   Num
+	RequestGPUs   Num
+
+	// MemoryUsage is the peak in MiB -- a high-water mark, and the max
+	// across every run of the job. DiskUsage is KiB.
+	MemoryUsage Num
+	DiskUsage   Num
+
+	// CPUSeconds is user+system CPU over the same span as Wall, absent
+	// when no such pair exists (see FromAd).
+	CPUSeconds    Num
+	CommittedTime Num
+
+	// GPUsAverageUsage is GPU-seconds busy per second of the run, summed
+	// over the job's GPUs -- 2.0 is two GPUs fully busy. See GPUUtilization.
+	GPUsAverageUsage Num
+	// GPUsMemoryUsage is the peak GPU memory in MiB.
+	GPUsMemoryUsage Num
+	// GPUsMinMemory is the job's gpus_minimum_memory, MiB: how much memory
+	// a GPU must have to run it.
+	GPUsMinMemory Num
+	// GPUDeviceMemory is the memory of the GPU the job last ran on, MiB,
+	// when the pool records it in the job (see FromAd).
+	GPUDeviceMemory Num
+
+	ExitBySignal  bool
 	HeldForMemory bool
 	HeldForDisk   bool
 	// ExceededMemory is HeldForMemory, or evicted for memory by a
 	// retry_request_memory policy.
 	ExceededMemory bool
+}
 
-	// GPUsAverageUsage is GPU-seconds busy per second of the run, summed
-	// over the job's GPUs -- 2.0 is two GPUs fully busy. See GPUUtilization.
-	GPUsAverageUsage *float64
-	// GPUsMemoryUsage is the peak GPU memory in MiB.
-	GPUsMemoryUsage *float64
+// Num is an optional number: present with a value, or absent. Absent is
+// the zero value, so a Job literal that leaves a field out means "not
+// recorded", not "zero".
+//
+// It is a float64 whose bits are XORed with one particular quiet NaN.
+// That NaN is the only value that cannot be stored, and nothing HTCondor
+// records is a NaN.
+type Num uint64
+
+const numAbsentBits = 0x7ff8000000000001
+
+// NumOf is a present number.
+func NumOf(x float64) Num { return Num(math.Float64bits(x) ^ numAbsentBits) }
+
+// OK reports whether the number is present.
+func (n Num) OK() bool { return n != 0 }
+
+// V is the number's value; NaN when absent.
+func (n Num) V() float64 { return math.Float64frombits(uint64(n) ^ numAbsentBits) }
+
+// JobReader reads Jobs from ads, sharing equal strings between them. A
+// million jobs from a few workflows repeat the same owner, batch name and
+// executable a million times; read one at a time they would be a million
+// copies.
+type JobReader struct {
+	strs map[string]string
+}
+
+// FromAd is the package FromAd, with strings shared.
+func (r *JobReader) FromAd(ad *classad.ClassAd, schedd string) Job {
+	j := FromAd(ad, schedd)
+	j.Owner = r.intern(j.Owner)
+	j.Schedd = r.intern(j.Schedd)
+	j.BatchName = r.intern(j.BatchName)
+	j.Cmd = r.intern(j.Cmd)
+	return j
+}
+
+// maxInterned bounds the table: past it, strings are kept as they come,
+// so a pathological history of all-different names costs what it would
+// have without the table.
+const maxInterned = 100000
+
+func (r *JobReader) intern(s string) string {
+	if r.strs == nil {
+		r.strs = make(map[string]string)
+	}
+	if v, ok := r.strs[s]; ok {
+		return v
+	}
+	if len(r.strs) < maxInterned {
+		r.strs[s] = s
+	}
+	return s
 }
 
 // FromAd extracts a Job from a history ad. schedd names the access point
@@ -143,7 +208,7 @@ type Job struct {
 // Every numeric attribute is EVALUATED rather than looked up: a request
 // can be an expression (request_memory = 2048 * RequestCpus) and
 // MemoryUsage normally is one. One that does not evaluate to a number is
-// left nil and the job drops out of that resource's numbers only.
+// left absent and the job drops out of that resource's numbers only.
 func FromAd(ad *classad.ClassAd, schedd string) Job {
 	j := Job{Schedd: schedd}
 	j.Cluster = intAttr(ad, "ClusterId")
@@ -151,9 +216,8 @@ func FromAd(ad *classad.ClassAd, schedd string) Job {
 	j.Owner, _ = ad.EvaluateAttrString("Owner")
 	j.BatchName, _ = ad.EvaluateAttrString("JobBatchName")
 	j.DAGManJobID = intAttr(ad, "DAGManJobId")
-	j.DAGNodeName, _ = ad.EvaluateAttrString("DAGNodeName")
 	j.Cmd, _ = ad.EvaluateAttrString("Cmd")
-	j.Universe = intAttr(ad, "JobUniverse")
+	j.Universe = small[int16](intAttr(ad, "JobUniverse"))
 	j.QDate = intAttr(ad, "QDate")
 	// A schedd need not record EnteredHistoryTime (HTCondor 25.8 does
 	// not). The fallback is the one htcondordb stamps it from: the
@@ -166,11 +230,8 @@ func FromAd(ad *classad.ClassAd, schedd string) Job {
 		j.Entered = intAttr(ad, "CompletionDate")
 	}
 	j.Completion = intAttr(ad, "CompletionDate")
-	j.Status = intAttr(ad, "JobStatus")
-	if v, ok := ad.EvaluateAttrNumber("ExitCode"); ok {
-		code := int64(v)
-		j.ExitCode = &code
-	}
+	j.Status = small[int16](intAttr(ad, "JobStatus"))
+	j.ExitCode = numAttr(ad, "ExitCode")
 	j.ExitBySignal, _ = ad.EvaluateAttrBool("ExitBySignal")
 
 	j.RequestMemory = numAttr(ad, "RequestMemory")
@@ -179,11 +240,11 @@ func FromAd(ad *classad.ClassAd, schedd string) Job {
 	j.RequestGPUs = numAttr(ad, "RequestGPUs")
 	j.MemoryUsage = numAttr(ad, "MemoryUsage")
 	j.DiskUsage = numAttr(ad, "DiskUsage")
-	if w := numAttr(ad, "RemoteWallClockTime"); w != nil && *w > 0 {
-		j.Wall = *w
+	if w := numAttr(ad, "RemoteWallClockTime"); w.OK() && w.V() > 0 {
+		j.Wall = w.V()
 	}
 	j.CommittedTime = numAttr(ad, "CommittedTime")
-	j.NumJobStarts = intAttr(ad, "NumJobStarts")
+	j.NumJobStarts = small[int32](intAttr(ad, "NumJobStarts"))
 	// JobStartDate is the first start. JobCurrentStartDate is the latest,
 	// which is the same thing only for a job that started once.
 	j.FirstStart = intAttr(ad, "JobStartDate")
@@ -198,16 +259,22 @@ func FromAd(ad *classad.ClassAd, schedd string) Job {
 	// wall would report half the cores actually used. The Cumulative*
 	// pair spans every run like RemoteWallClockTime does. Without it, the
 	// per-run pair is only usable when there was only one run.
-	if user := numAttr(ad, "CumulativeRemoteUserCpu"); user != nil {
-		cpu := *user + orZero(numAttr(ad, "CumulativeRemoteSysCpu"))
-		j.CPUSeconds = &cpu
-	} else if user := numAttr(ad, "RemoteUserCpu"); user != nil && j.NumJobStarts <= 1 {
-		cpu := *user + orZero(numAttr(ad, "RemoteSysCpu"))
-		j.CPUSeconds = &cpu
+	if user := numAttr(ad, "CumulativeRemoteUserCpu"); user.OK() {
+		j.CPUSeconds = NumOf(user.V() + orZero(numAttr(ad, "CumulativeRemoteSysCpu")))
+	} else if user := numAttr(ad, "RemoteUserCpu"); user.OK() && j.NumJobStarts <= 1 {
+		j.CPUSeconds = NumOf(user.V() + orZero(numAttr(ad, "RemoteSysCpu")))
 	}
 
 	j.GPUsAverageUsage = numAttr(ad, "GPUsAverageUsage")
 	j.GPUsMemoryUsage = numAttr(ad, "GPUsMemoryUsage")
+	j.GPUsMinMemory = numAttr(ad, "GPUsMinMemory")
+	// A GPU's memory reaches the job ad only if the pool asks for it:
+	// SYSTEM_JOB_MACHINE_ATTRS (or the job's job_machine_attrs) naming
+	// GPUs_GlobalMemoryMb -- the property condor_gpu_discovery publishes
+	// for a machine whose GPUs all match -- records it as
+	// MachineAttrGPUs_GlobalMemoryMb0. The default records only Cpus and
+	// SlotWeight.
+	j.GPUDeviceMemory = numAttr(ad, "MachineAttrGPUs_GlobalMemoryMb0")
 
 	j.HeldForMemory, j.HeldForDisk = holdsFromAd(ad)
 	vacated := numAttr(ad, "VacateReasonCode")
@@ -250,21 +317,21 @@ func holdsFromAd(ad *classad.ClassAd) (memory, disk bool) {
 
 // outgrew reports whether a (code, subcode) pair records exceeding the
 // resource named by subcode.
-func outgrew(code, sub *float64, subcode int) bool {
-	if code == nil || sub == nil {
+func outgrew(code, sub Num, subcode int) bool {
+	if !code.OK() || !sub.OK() {
 		return false
 	}
-	c := int(*code)
-	return (c == holdOutOfResources || c == holdStartdHeldJob) && int(*sub) == subcode
+	c := int(code.V())
+	return (c == holdOutOfResources || c == holdStartdHeldJob) && int(sub.V()) == subcode
 }
 
-// numAttr evaluates an attribute to a number, or nil.
-func numAttr(ad *classad.ClassAd, name string) *float64 {
+// numAttr evaluates an attribute to a number, or absent.
+func numAttr(ad *classad.ClassAd, name string) Num {
 	v, ok := ad.EvaluateAttrNumber(name)
 	if !ok {
-		return nil
+		return 0
 	}
-	return &v
+	return NumOf(v)
 }
 
 // intAttr evaluates an attribute to an integer, or 0.
@@ -276,12 +343,24 @@ func intAttr(ad *classad.ClassAd, name string) int64 {
 	return int64(v)
 }
 
+// small narrows a count or code to a smaller integer, saturating rather
+// than wrapping: a universe, status or start count out of range is
+// nonsense either way, and saturating keeps it from aliasing a real one.
+func small[T int16 | int32](v int64) T {
+	lo, hi := int64(math.MinInt16), int64(math.MaxInt16)
+	var t T
+	if _, wide := any(t).(int32); wide {
+		lo, hi = math.MinInt32, math.MaxInt32
+	}
+	return T(min(max(v, lo), hi))
+}
+
 // orZero is the value, or 0 when there is none.
-func orZero(p *float64) float64 {
-	if p == nil {
+func orZero(n Num) float64 {
+	if !n.OK() {
 		return 0
 	}
-	return *p
+	return n.V()
 }
 
 // executableBase is the last path element of Cmd.
@@ -310,7 +389,7 @@ func (j *Job) finished() bool {
 
 // succeeded is JobStatus 4, no signal, exit 0.
 func (j *Job) succeeded() bool {
-	return j.Status == statusCompleted && !j.ExitBySignal && j.ExitCode != nil && *j.ExitCode == 0
+	return j.Status == statusCompleted && !j.ExitBySignal && j.ExitCode.OK() && j.ExitCode.V() == 0
 }
 
 // outcome classifies the job for a sample.
@@ -332,14 +411,13 @@ func (j *Job) outcome() string {
 // its cores-used figure says more about the sampling than the program.
 const minCPUWall = 60
 
-// coresUsed is CPU seconds per wall second, or nil when it cannot be
-// measured honestly.
-func (j *Job) coresUsed() *float64 {
-	if j.CPUSeconds == nil || j.Wall < minCPUWall {
-		return nil
+// coresUsed is CPU seconds per wall second; ok is false when it cannot
+// be measured honestly.
+func (j *Job) coresUsed() (float64, bool) {
+	if !j.CPUSeconds.OK() || j.Wall < minCPUWall {
+		return 0, false
 	}
-	c := *j.CPUSeconds / j.Wall
-	return &c
+	return j.CPUSeconds.V() / j.Wall, true
 }
 
 // GPUUtilization is the fraction of the requested GPUs kept busy.
@@ -351,10 +429,9 @@ func (j *Job) coresUsed() *float64 {
 // so it is divided by the request to get a fraction. It covers the job's
 // last run, which is a rate and so comparable across runs of different
 // lengths.
-func (j *Job) GPUUtilization() *float64 {
-	if j.GPUsAverageUsage == nil || j.RequestGPUs == nil || *j.RequestGPUs <= 0 || j.Wall < minCPUWall {
-		return nil
+func (j *Job) GPUUtilization() (float64, bool) {
+	if !j.GPUsAverageUsage.OK() || !j.RequestGPUs.OK() || j.RequestGPUs.V() <= 0 || j.Wall < minCPUWall {
+		return 0, false
 	}
-	u := *j.GPUsAverageUsage / *j.RequestGPUs
-	return &u
+	return j.GPUsAverageUsage.V() / j.RequestGPUs.V(), true
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/PelicanPlatform/classad/collections/vm"
+	"github.com/PelicanPlatform/classad/parser"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
@@ -371,8 +374,10 @@ func TestUtilizationIsDocumented(t *testing.T) {
 	if err := json.Unmarshal([]byte(openAPISchema), &doc); err != nil {
 		t.Fatalf("openapi does not parse: %v", err)
 	}
-	if _, ok := doc.Paths["/utilization"]; !ok {
-		t.Error("/utilization missing from the OpenAPI paths")
+	for _, path := range []string{"/utilization", "/utilization/jobs"} {
+		if _, ok := doc.Paths[path]; !ok {
+			t.Errorf("%s missing from the OpenAPI paths", path)
+		}
 	}
 }
 
@@ -558,5 +563,242 @@ func TestUtilizationWindowPerBackend(t *testing.T) {
 		if _, err := classad.ParseExpr(c); err != nil {
 			t.Errorf("%q does not parse: %v", c, err)
 		}
+	}
+}
+
+// A constraint narrows the analysis; one the parser rejects is a 400
+// carrying the parser's message. Each is its own cache entry.
+func TestUtilizationConstraint(t *testing.T) {
+	f := utilizationFixture(t)
+	alice := f.bearer(t, "alice")
+	if resp := f.utilization(t, "/api/v1/utilization", alice); resp.JobsConsidered != 3 {
+		t.Fatalf("unfiltered: %d jobs", resp.JobsConsidered)
+	}
+	resp := f.utilization(t, "/api/v1/utilization?constraint="+url.QueryEscape("ClusterId == 101 || ClusterId == 103"), alice)
+	if resp.JobsConsidered != 2 {
+		t.Errorf("filtered: %d jobs, want 2", resp.JobsConsidered)
+	}
+	// A constraint cannot reach past its parentheses into the scope.
+	resp = f.utilization(t, "/api/v1/utilization?owned_by_me=false&constraint="+url.QueryEscape("true || true"), f.bearer(t, "bob"))
+	if got := workflowExecutables(resp); !slices.Equal(got, []string{"bob_sim"}) {
+		t.Errorf("bob with a constraint of 'true || true': %v", got)
+	}
+	w := f.do(t, http.MethodGet, "/api/v1/utilization?constraint="+url.QueryEscape("ClusterId == == 3"), "", alice)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid constraint") {
+		t.Errorf("bad constraint: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// owners narrows an administrator's view and lists who is in it; for a
+// caller who may see only their own jobs it intersects, never widens.
+func TestUtilizationOwners(t *testing.T) {
+	f := utilizationFixture(t)
+	resp := f.utilization(t, "/api/v1/utilization?owners=alice", f.bearer(t, "root"))
+	if got := workflowExecutables(resp); !slices.Equal(got, []string{"alice_sim"}) {
+		t.Errorf("admin owners=alice: %v", got)
+	}
+	if len(resp.Owners) != 1 || resp.Owners[0].Owner != "alice" || resp.Owners[0].Jobs != 3 || resp.Owners[0].WallHours != 3 {
+		t.Errorf("owners list = %+v", resp.Owners)
+	}
+	everyone := f.utilization(t, "/api/v1/utilization?owned_by_me=false", f.bearer(t, "root"))
+	if len(everyone.Owners) != 2 || everyone.Owners[0].Owner != "alice" {
+		t.Errorf("admin owners list = %+v, want alice (3 h) then bob (1 h)", everyone.Owners)
+	}
+
+	bob := f.bearer(t, "bob")
+	for _, path := range []string{
+		"/api/v1/utilization?owners=alice",
+		"/api/v1/utilization?owners=alice&owned_by_me=false",
+		"/api/v1/utilization?owners=alice,bob&owned_by_me=false",
+	} {
+		resp := f.utilization(t, path, bob)
+		for _, w := range resp.Workflows {
+			if w.Executable == "alice_sim" {
+				t.Errorf("bob GET %s read alice's jobs", path)
+			}
+		}
+		if resp.Owners != nil {
+			t.Errorf("bob GET %s: an owners list in a personal scope: %+v", path, resp.Owners)
+		}
+	}
+	if resp := f.utilization(t, "/api/v1/utilization?owners=alice,bob&owned_by_me=false", bob); resp.JobsConsidered != 2 {
+		t.Errorf("bob naming himself among others: %d jobs, want his 2", resp.JobsConsidered)
+	}
+}
+
+func TestUtilizationLimit(t *testing.T) {
+	f := utilizationFixture(t)
+	f.s.utilizationMaxJobs = 10
+	alice := f.bearer(t, "alice")
+	resp := f.utilization(t, "/api/v1/utilization?limit=2", alice)
+	if resp.JobsConsidered != 2 || !resp.Truncated || resp.Limit != 2 || resp.MaxLimit != 10 {
+		t.Errorf("limit=2: %d jobs truncated=%v limit=%d max=%d", resp.JobsConsidered, resp.Truncated, resp.Limit, resp.MaxLimit)
+	}
+	if resp := f.utilization(t, "/api/v1/utilization?limit=5000000", alice); resp.Limit != 10 || resp.JobsConsidered != 3 || resp.Truncated {
+		t.Errorf("limit above the ceiling: limit=%d jobs=%d truncated=%v; want clamped to 10", resp.Limit, resp.JobsConsidered, resp.Truncated)
+	}
+	// The default is itself clamped to a lower ceiling.
+	if resp := f.utilization(t, "/api/v1/utilization", alice); resp.Limit != 10 {
+		t.Errorf("default limit under a ceiling of 10 = %d", resp.Limit)
+	}
+	f.s.utilizationMaxJobs = 0
+	if resp := f.utilization(t, "/api/v1/utilization?days=30", alice); resp.Limit != utilizationDefaultLimit || resp.MaxLimit != utilizationDefaultMaxLimit {
+		t.Errorf("defaults: limit %d max %d", resp.Limit, resp.MaxLimit)
+	}
+	for _, bad := range []string{"0", "-1", "lots"} {
+		if w := f.do(t, http.MethodGet, "/api/v1/utilization?limit="+bad, "", alice); w.Code != http.StatusBadRequest {
+			t.Errorf("limit=%s: %d", bad, w.Code)
+		}
+	}
+	if d := utilizationComputeTimeout(1000000); d != 13*time.Minute {
+		t.Errorf("timeout for a million = %v", d)
+	}
+}
+
+// The mirror prunes history segments on top-level "attribute op literal"
+// conjuncts. However the caller's owners and constraint are combined
+// with the scope, the window must survive as one of them -- and the
+// owner list as an "in" probe -- in the planner's own reading.
+func TestUtilizationWindowStaysPrunable(t *testing.T) {
+	uq := utilizationQuery{owners: []string{"alice", "bob"}, filter: `JobBatchName == "x" || ClusterId > 5`}
+	mirror, _ := utilizationWindow(uq.narrow(`Owner == "root"`), 1000)
+	expr, err := parser.ParseExpr(mirror)
+	if err != nil {
+		t.Fatalf("%q: %v", mirror, err)
+	}
+	var window, owners bool
+	for _, p := range vm.Compile(expr).Probes() {
+		if p.Attr == "EnteredHistoryTime" && p.Op == ">=" {
+			window = true
+		}
+		if p.Attr == "Owner" && p.Op == "in" && len(p.Vals) == 2 {
+			owners = true
+		}
+	}
+	if !window || !owners {
+		t.Errorf("probes of %q: window %v, owners %v", mirror, window, owners)
+	}
+}
+
+func (f *twoOwnerFixture) utilizationJobs(t *testing.T, path string, auth func(*http.Request)) (int, UtilizationJobsResponse) {
+	t.Helper()
+	w := f.do(t, http.MethodGet, path, "", auth)
+	var resp UtilizationJobsResponse
+	if w.Code == http.StatusOK {
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decoding %s: %v", w.Body.String(), err)
+		}
+	}
+	return w.Code, resp
+}
+
+// A workflow's jobs page through in the requested order, for the caller
+// who may see them and nobody else.
+func TestUtilizationJobs(t *testing.T) {
+	f := utilizationFixture(t)
+	alice := f.bearer(t, "alice")
+	key := f.utilization(t, "/api/v1/utilization", alice).Workflows[0].Key
+
+	code, page := f.utilizationJobs(t, "/api/v1/utilization/jobs?w="+key+"&sort=memory&page_size=2", alice)
+	if code != http.StatusOK || page.Total != 3 || len(page.Jobs) != 2 || page.NextOffset == nil || *page.NextOffset != 2 {
+		t.Fatalf("first page: %d %+v", code, page)
+	}
+	// Peaks 1000, 950, 900 MiB: largest first.
+	if page.Jobs[0].ID != "103.0" || page.Jobs[1].ID != "102.0" || *page.Jobs[0].MemoryPeakMiB != 1000 {
+		t.Errorf("first page = %+v", page.Jobs)
+	}
+	_, page = f.utilizationJobs(t, "/api/v1/utilization/jobs?w="+key+"&sort=memory&page_size=2&offset=2", alice)
+	if len(page.Jobs) != 1 || page.Jobs[0].ID != "101.0" || page.NextOffset != nil {
+		t.Errorf("second page = %+v", page)
+	}
+	r := page.Jobs[0]
+	if r.Owner != "alice" || r.Outcome != "ok" || *r.Request.MemoryMiB != 2048 || r.Wall != 3600 || *r.CoresUsed != 0.9 {
+		t.Errorf("row = %+v", r)
+	}
+
+	// Owner-scoped like the analysis: bob cannot list alice's workflow,
+	// whatever he asks for; an administrator can.
+	for _, path := range []string{
+		"/api/v1/utilization/jobs?w=" + key,
+		"/api/v1/utilization/jobs?owned_by_me=false&w=" + key,
+		"/api/v1/utilization/jobs?owners=alice&w=" + key,
+	} {
+		if code, page := f.utilizationJobs(t, path, f.bearer(t, "bob")); code != http.StatusNotFound {
+			t.Errorf("bob GET %s: %d %+v, want 404", path, code, page)
+		}
+	}
+	if code, page := f.utilizationJobs(t, "/api/v1/utilization/jobs?owned_by_me=false&w="+key, f.bearer(t, "root")); code != http.StatusOK || page.Total != 3 {
+		t.Errorf("admin: %d %+v", code, page)
+	}
+	// With the analysis cached, the read is narrowed to the workflow's
+	// owner; the jobs listed must not change.
+	root := f.bearer(t, "root")
+	_ = f.utilization(t, "/api/v1/utilization?owned_by_me=false&days=30", root)
+	if code, page := f.utilizationJobs(t, "/api/v1/utilization/jobs?owned_by_me=false&days=30&w="+key, root); code != http.StatusOK || page.Total != 3 {
+		t.Errorf("admin, narrowed by the cached analysis: %d %+v", code, page)
+	}
+
+	for _, bad := range []string{"", "&sort=colour", "&order=up", "&offset=-1", "&page_size=0"} {
+		path := "/api/v1/utilization/jobs?w=" + key + bad
+		if bad == "" {
+			path = "/api/v1/utilization/jobs"
+		}
+		if code, _ := f.utilizationJobs(t, path, alice); code != http.StatusBadRequest {
+			t.Errorf("GET %s: %d, want 400", path, code)
+		}
+	}
+}
+
+// The jobs cache is bounded by total jobs held: keeping a workflow evicts
+// the least recently paged ones until the total fits, and one bigger than
+// the whole bound is not kept at all.
+func TestJobSetCacheBoundedBySize(t *testing.T) {
+	c := newSharedCache[utilizationJobSet](time.Hour, time.Minute)
+	c.maxEntries = 10
+	c.sizeOf = func(s utilizationJobSet) int { return len(s.jobs) }
+	c.maxSize = 10
+	clock := time.Unix(1700000000, 0)
+	c.now = func() time.Time { clock = clock.Add(time.Second); return clock }
+
+	computed := map[string]int{}
+	get := func(key string, n int) {
+		t.Helper()
+		_, err := c.get(context.Background(), key, func(context.Context) (utilizationJobSet, error) {
+			computed[key]++
+			return utilizationJobSet{jobs: make([]utilization.Job, n)}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	get("a", 6)
+	get("b", 3)
+	get("a", 6) // a is now the more recently served
+	get("c", 5) // 6+3+5 > 10: b goes first (least recent), then 6+5 still > 10, a goes
+	if _, ok := c.peek("b"); ok {
+		t.Error("b survived; it was least recently served")
+	}
+	if _, ok := c.peek("c"); !ok {
+		t.Error("c was not kept")
+	}
+	total := 0
+	for _, e := range c.byKey {
+		total += e.size
+	}
+	if total > c.maxSize {
+		t.Errorf("cache holds %d jobs, bound %d", total, c.maxSize)
+	}
+
+	// Larger than the whole bound: served, never kept.
+	get("huge", 11)
+	get("huge", 11)
+	if computed["huge"] != 2 {
+		t.Errorf("an oversized set was computed %d times for two requests, want 2 (not cached)", computed["huge"])
+	}
+	if _, ok := c.peek("c"); !ok {
+		t.Error("an oversized set evicted c")
+	}
+	if computed["a"] != 1 || computed["c"] != 1 {
+		t.Errorf("computations = %v", computed)
 	}
 }

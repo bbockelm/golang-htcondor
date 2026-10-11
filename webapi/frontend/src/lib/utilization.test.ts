@@ -14,6 +14,12 @@ import {
   usedFraction,
   throughputStatement,
   throughputAdviceId,
+  filterWorkflows,
+  moreOptions,
+  parseLimit,
+  parseOwners,
+  sortResources,
+  splitSingles,
   formatDuration,
   type UtilAdvice,
   type UtilThroughput,
@@ -272,5 +278,47 @@ describe('throughputAdviceId', () => {
 
   it('has no card without an estimate', () => {
     expect(throughputAdviceId({ ...w, throughput: null })).toBeNull();
+  });
+});
+
+describe('filters', () => {
+  const ws = utilizationFixture.workflows;
+
+  it('matches name, executable and owner, ignoring case', () => {
+    expect(filterWorkflows(ws, 'BLAST').map((w) => w.key)).toEqual(['wf-blast']);
+    expect(filterWorkflows(ws, 'train.py').map((w) => w.key)).toEqual(['wf-train']);
+    expect(filterWorkflows(ws, 'bob').map((w) => w.key)).toEqual(['wf-assemble']);
+    expect(filterWorkflows(ws, '  ')).toBe(ws);
+  });
+
+  it('reads owners and the limit from the URL forgivingly', () => {
+    expect(parseOwners('alice, bob,,alice')).toEqual(['alice', 'bob']);
+    expect(parseOwners(null)).toEqual([]);
+    expect(parseLimit('250000')).toBe(250000);
+    expect(parseLimit('lots')).toBeUndefined();
+    expect(parseLimit('-5')).toBeUndefined();
+  });
+
+  it('offers five times as many jobs, then everything', () => {
+    expect(moreOptions(50000, 1000000).map((o) => o.label)).toEqual([
+      'Analyze up to 250,000 jobs',
+      'all, up to 1,000,000',
+    ]);
+    expect(moreOptions(250000, 1000000).map((o) => o.limit)).toEqual([1000000]);
+    expect(moreOptions(1000000, 1000000)).toEqual([]);
+  });
+
+  it('folds two or more single-job workflows, but not one', () => {
+    const { multi, singles } = splitSingles(ws);
+    expect(singles.map((w) => w.name).sort()).toEqual(['check-env', 'debug-run', 'probe-node']);
+    expect(multi.every((w) => w.jobs > 1)).toBe(true);
+    const one = ws.filter((w) => w.jobs > 1 || w.name === 'debug-run');
+    expect(splitSingles(one).singles).toEqual([]);
+  });
+
+  it('leads with GPUs only when a GPU was reserved', () => {
+    expect(sortResources(utilizationFixture.overall.resources)[0].resource).toBe('gpu');
+    const noGpu = utilizationFixture.overall.resources.map((r) => (r.resource === 'gpu' ? { ...r, allocated_hours: 0 } : r));
+    expect(sortResources(noGpu)[0].resource).toBe('cpu');
   });
 });

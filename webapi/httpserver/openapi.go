@@ -98,7 +98,7 @@ const openAPISchema = `{
       "UtilAdvice": {
         "type": "object",
         "properties": {
-          "id": {"type": "string", "enum": ["memory-lower", "memory-retry", "memory-raise", "memory-ok", "cpus-lower", "cpus-raise", "disk-lower", "disk-raise", "gpu-idle", "gpu-unused", "short-jobs", "restarts"]},
+          "id": {"type": "string", "enum": ["memory-lower", "memory-retry", "memory-raise", "memory-ok", "cpus-lower", "cpus-raise", "disk-lower", "disk-raise", "gpu-idle", "gpu-unused", "gpus-lower", "gpu-cpu-bound", "gpu-memory-small", "short-jobs", "restarts"]},
           "resource": {"type": "string", "enum": ["cpu", "memory", "disk", "gpu", "runtime"]},
           "severity": {"type": "string", "enum": ["info", "suggest", "warn"]},
           "title": {"type": "string"},
@@ -152,7 +152,14 @@ const openAPISchema = `{
           "memory": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "peak_mib": {"$ref": "#/components/schemas/UtilDistribution"}}},
           "cpu": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "cores_used": {"$ref": "#/components/schemas/UtilDistribution"}, "efficiency": {"$ref": "#/components/schemas/UtilDistribution"}}},
           "disk": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "used_kib": {"$ref": "#/components/schemas/UtilDistribution"}}},
-          "gpu": {"type": "object", "nullable": true, "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "utilization": {"$ref": "#/components/schemas/UtilDistribution"}}},
+          "gpu": {"type": "object", "nullable": true, "description": "Null when no job requested a GPU. Utilization is often unmeasured: only execute points running HTCondor's GPU monitor record it.", "properties": {
+            "request": {"$ref": "#/components/schemas/UtilRequest"},
+            "jobs": {"type": "integer", "description": "Jobs that requested at least one GPU."},
+            "measured": {"type": "integer", "description": "Of those, jobs with a utilization measurement."},
+            "utilization": {"$ref": "#/components/schemas/UtilDistribution"},
+            "memory_peak_mib": {"$ref": "#/components/schemas/UtilDistribution"},
+            "device_memory_mib": {"type": "number", "nullable": true, "description": "Typical memory of the GPUs the jobs ran on, when the pool records MachineAttrGPUs_GlobalMemoryMb0."},
+            "cores_used_while_gpu": {"$ref": "#/components/schemas/UtilDistribution"}}},
           "memory_curve": {"type": "array", "description": "Expected reserved MiB-hours at each candidate request_memory; empty under 20 finished jobs.", "items": {"type": "object", "properties": {
             "request_mib": {"type": "number"}, "retry_mib": {"type": "number", "nullable": true}, "reserved_mib_hours": {"type": "number"},
             "retry_fraction": {"type": "number"}, "is_current": {"type": "boolean"}, "is_recommended": {"type": "boolean"}}}},
@@ -160,8 +167,11 @@ const openAPISchema = `{
           "batches": {"type": "array", "items": {"type": "object", "properties": {
             "id": {"type": "integer"}, "submitted": {"type": "integer"}, "jobs": {"type": "integer"},
             "memory_request_mib": {"type": "number", "nullable": true}, "memory_p95_mib": {"type": "number", "nullable": true},
-            "cpu_request": {"type": "number", "nullable": true}, "cpu_cores_p50": {"type": "number", "nullable": true}, "wall_p50": {"type": "number", "nullable": true}}}},
+            "cpu_request": {"type": "number", "nullable": true}, "cpu_cores_p50": {"type": "number", "nullable": true}, "wall_p50": {"type": "number", "nullable": true},
+            "gpu_request": {"type": "number", "nullable": true, "description": "Typical request_gpus of the batch's GPU jobs."},
+            "gpu_util_p50": {"type": "number", "nullable": true, "description": "Median fraction of requested GPUs kept busy."}}}},
           "samples": {"type": "array", "items": {"type": "object", "properties": {
+            "job": {"type": "string", "description": "cluster.proc, as in /utilization/jobs rows."},
             "memory_mib": {"type": "number", "nullable": true}, "wall": {"type": "number"}, "cores": {"type": "number", "nullable": true},
             "disk_kib": {"type": "number", "nullable": true}, "outcome": {"type": "string", "enum": ["ok", "failed", "removed", "memory_exceeded"]}}}},
           "throughput": {"$ref": "#/components/schemas/UtilThroughput"}
@@ -174,7 +184,11 @@ const openAPISchema = `{
           "until": {"type": "integer"},
           "days": {"type": "integer"},
           "jobs_considered": {"type": "integer"},
-          "truncated": {"type": "boolean", "description": "The 50,000-job cap was hit; the analysis covers the most recent jobs."},
+          "truncated": {"type": "boolean", "description": "The limit was hit; the analysis covers the most recent jobs."},
+          "limit": {"type": "integer", "description": "The limit applied."},
+          "max_limit": {"type": "integer", "description": "The server's ceiling (HTTP_API_UTILIZATION_MAX_JOBS)."},
+          "owners": {"type": "array", "description": "Owners in the analysed jobs, most wall clock first; only for a scope that sees other users.", "items": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "jobs": {"type": "integer"}, "wall_hours": {"type": "number"}}}},
           "overall": {"type": "object", "properties": {
             "jobs": {"type": "integer"}, "wall_hours": {"type": "number"}, "badput_hours": {"type": "number"},
             "resources": {"type": "array", "items": {"$ref": "#/components/schemas/UtilResourceSummary"}},
@@ -739,12 +753,15 @@ const openAPISchema = `{
     "/utilization": {
       "get": {
         "summary": "Resource utilization of finished jobs",
-        "description": "How well the caller's finished jobs (completed or removed, EnteredHistoryTime within the window) used the CPU, memory, disk and GPUs they reserved, grouped into workflows, with submit-file advice for the next submission. Read from a synchronized htcondordb mirror when one is current, else the schedd's history; at most the 50,000 most recent jobs. A non-admin caller is confined to its own jobs whatever owned_by_me says. Cached for five minutes per scope and window. Memory is MiB, disk KiB, time seconds unless a field name says hours.",
+        "description": "How well the caller's finished jobs (completed or removed, EnteredHistoryTime within the window) used the CPU, memory, disk and GPUs they reserved, grouped into workflows, with submit-file advice for the next submission. Read from a synchronized htcondordb mirror when one is current, else the schedd's history; at most limit (default 50,000) most recent jobs. A non-admin caller is confined to its own jobs whatever owned_by_me says. Cached for five minutes per scope and window. Memory is MiB, disk KiB, time seconds unless a field name says hours.",
         "operationId": "getUtilization",
         "parameters": [
           {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "enum": [1, 7, 30], "default": 7}, "description": "Analysis window."},
           {"name": "owned_by_me", "in": "query", "required": false, "schema": {"type": "boolean", "default": true}, "description": "false asks for everyone's jobs; honored only for administrators (a project lead gets own plus projects')."},
-          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Multi-AP mode: restrict to one access point."}
+          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Multi-AP mode: restrict to one access point."},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}, "description": "ClassAd expression ANDed with the scope and the window. One that does not parse is a 400 carrying the parser's message."},
+          {"name": "owners", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Comma-separated user names to narrow to. Implies owned_by_me=false unless that is given; intersected with what the caller may see, never widening it."},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "default": 50000}, "description": "Most finished jobs to analyse, most recent first. Clamped to HTTP_API_UTILIZATION_MAX_JOBS (default 1,000,000); the response reports the value applied."}
         ],
         "responses": {
           "200": {"description": "The analysis; jobs_considered is 0 when there is nothing to analyse.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UtilizationResponse"}}}},
@@ -752,6 +769,48 @@ const openAPISchema = `{
           "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "502": {"description": "Job history could not be read", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "503": {"description": "The mirror is required and could not answer", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/utilization/jobs": {
+      "get": {
+        "summary": "Jobs of one utilization workflow",
+        "description": "The individual finished jobs of one workflow from /utilization, a page at a time. Pass the workflow key as w and the same days, owned_by_me, constraint, owners, limit and schedd the analysis used, so the jobs listed are the jobs analysed. Owner-scoped like /utilization: a key for someone else's workflow is a 404 for a caller who may not see it.",
+        "operationId": "getUtilizationJobs",
+        "parameters": [
+          {"name": "w", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Workflow key from /utilization."},
+          {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "enum": [1, 7, 30], "default": 7}},
+          {"name": "owned_by_me", "in": "query", "required": false, "schema": {"type": "boolean"}},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "owners", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1}},
+          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "sort", "in": "query", "required": false, "schema": {"type": "string", "enum": ["completed", "submitted", "wall", "memory", "cores", "efficiency", "disk", "gpu"], "default": "completed"}, "description": "Jobs without a value sort last in either order; ties go by cluster, proc."},
+          {"name": "order", "in": "query", "required": false, "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"}},
+          {"name": "offset", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 0, "default": 0}},
+          {"name": "page_size", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}}
+        ],
+        "responses": {
+          "200": {"description": "One page of rows.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "key": {"type": "string"}, "total": {"type": "integer"}, "offset": {"type": "integer"},
+            "next_offset": {"type": "integer", "nullable": true}, "sort": {"type": "string"}, "order": {"type": "string"},
+            "truncated": {"type": "boolean"},
+            "jobs": {"type": "array", "items": {"type": "object", "properties": {
+              "id": {"type": "string"}, "cluster": {"type": "integer"}, "proc": {"type": "integer"}, "schedd": {"type": "string"},
+              "owner": {"type": "string"}, "submitted": {"type": "integer", "nullable": true}, "started": {"type": "integer", "nullable": true},
+              "completed": {"type": "integer", "nullable": true},
+              "outcome": {"type": "string", "enum": ["ok", "failed", "removed", "memory_exceeded"]},
+              "exit_code": {"type": "integer", "nullable": true}, "exit_by_signal": {"type": "boolean"}, "wall": {"type": "number"},
+              "request": {"type": "object", "properties": {"memory_mib": {"type": "number", "nullable": true}, "cpus": {"type": "number", "nullable": true}, "disk_kib": {"type": "number", "nullable": true}, "gpus": {"type": "number", "nullable": true}}},
+              "memory_peak_mib": {"type": "number", "nullable": true}, "cores_used": {"type": "number", "nullable": true},
+              "cpu_efficiency": {"type": "number", "nullable": true}, "disk_used_kib": {"type": "number", "nullable": true},
+              "gpu_utilization": {"type": "number", "nullable": true}, "gpu_memory_peak_mib": {"type": "number", "nullable": true},
+              "restarts": {"type": "integer"}, "held_for_memory": {"type": "boolean"}, "held_for_disk": {"type": "boolean"}}}}
+          }}}}},
+          "400": {"description": "Bad parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No workflow with that key in this analysis", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "Job history could not be read", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },

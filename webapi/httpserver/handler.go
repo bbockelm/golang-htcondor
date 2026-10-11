@@ -454,6 +454,12 @@ type Handler struct {
 	// everyone asking the same question for five minutes.
 	utilizationCacheOnce sync.Once
 	utilizationCacheVal  *utilizationCache
+	// utilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS; zero means the
+	// default.
+	utilizationMaxJobs int
+	// jobSetCache holds one workflow's jobs at a time for paging.
+	jobSetCacheOnce sync.Once
+	jobSetCacheVal  *jobSetCache
 	// poolShapeCache holds the pool's machine shapes for the throughput
 	// estimate.
 	poolShapeCacheOnce sync.Once
@@ -694,6 +700,10 @@ type HandlerConfig struct {
 	// at all -- which bounds memory and the table, not just the scrape.
 	// Zero means toolstats.DefaultMaxSeries.
 	ToolStatsMaxSeries int
+	// UtilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS: the most jobs
+	// one utilization analysis may read. Zero means the default (a
+	// million).
+	UtilizationMaxJobs int
 
 	MetricsCacheTTL time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics. Use
@@ -1406,6 +1416,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.toolStats.SetMaxSeries(cfg.ToolStatsMaxSeries)
 	}
 	h.toolStatsOmitUser = cfg.ToolStatsOmitUser
+	h.utilizationMaxJobs = cfg.UtilizationMaxJobs
 	// The mirror's own state is exported at scrape time from whatever
 	// discovery last saw, so /metrics answers "is the htcondordb
 	// integration working?" without a request having to exercise it.

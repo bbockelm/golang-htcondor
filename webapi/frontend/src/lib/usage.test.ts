@@ -11,6 +11,10 @@ describe('formatSeconds', () => {
     expect(formatSeconds(30)).toBe('30 s');
     expect(formatSeconds(300)).toBe('5 min');
     expect(formatSeconds(90)).toBe('1 min 30 s');
+    // Rounding carries into the next unit rather than printing a 60.
+    expect(formatSeconds(299.7)).toBe('5 min');
+    expect(formatSeconds(3 * 3600 - 20)).toBe('3 h');
+    expect(formatSeconds(3600 - 0.2)).toBe('1 h');
     expect(formatSeconds(7200)).toBe('2 h');
   });
 });

@@ -11,7 +11,7 @@
 // evidence a suggestion rests on so it can be trusted or argued with.
 
 import Link from 'next/link';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   RESOURCE_LABEL,
   formatCores,
@@ -34,8 +34,15 @@ import {
   throughputColumn,
   throughputStatement,
   throughputAdviceId,
+  splitSingles,
   type RankedAdvice,
   type UtilThroughput,
+  type UtilGpu,
+  type UtilBatchPoint,
+  type UtilRequest,
+  type UtilOwner,
+  type JobFocus,
+  moreOptions,
   type UtilAdvice,
   type UtilOverall,
   type UtilResourceSummary,
@@ -43,6 +50,7 @@ import {
   type UtilizationResponse,
 } from '@/lib/utilization';
 import { SortableHeader, useSortedRows, useSortState } from '@/components/SortableTable';
+import { WorkflowJobs, type JobsQuery } from '@/components/UtilizationJobs';
 import {
   Histogram,
   MemoryCurve,
@@ -110,7 +118,20 @@ export function ResourceCard({ summary, jobs }: { summary: UtilResourceSummary; 
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4" data-testid={`resource-${summary.resource}`}>
       <div className="text-xs font-medium uppercase tracking-wide text-gray-500">{label}</div>
-      {f === null ? (
+      {f === null && summary.resource === 'gpu' ? (
+        // GPU-hours are the most expensive thing a job reserves; how many
+        // were reserved is worth stating even when how busy they were is
+        // not known.
+        <>
+          <div className="mt-1 flex items-baseline gap-1.5">
+            <span className="text-3xl font-semibold text-gray-900">
+              {formatNumber(summary.allocated_hours)}
+            </span>{' '}
+            <span className="text-sm text-gray-500">GPU-hours reserved</span>
+          </div>
+          <p className="mt-2 text-xs text-gray-600">Utilization not measured for these jobs.</p>
+        </>
+      ) : f === null ? (
         <p className="mt-2 text-sm text-gray-500">No usage was measured for these jobs.</p>
       ) : (
         <>
@@ -145,6 +166,9 @@ export function ResourceCard({ summary, jobs }: { summary: UtilResourceSummary; 
           </p>
           <p className="mt-0.5 text-xs text-gray-400 tabular-nums">
             of {formatResourceHours(summary.resource, summary.allocated_hours_measured)} reserved
+            {summary.resource === 'gpu' &&
+              summary.allocated_hours > summary.allocated_hours_measured * 1.005 &&
+              ` (${formatResourceHours('gpu', summary.allocated_hours)} in all)`}
             {/* Only GPU jobs have GPU usage, so "64 of 1,596 jobs" would
                 read as most going unmeasured; GPU says how many it covers. */}
             {summary.resource === 'gpu'
@@ -398,21 +422,70 @@ function sortValue(w: UtilWorkflow, key: SortKey): string | number | undefined {
   }
 }
 
+// A row of the table is a workflow or the group of single-job ones,
+// which sorts as one unit: its jobs and run time are the group's sums.
+type TableUnit = { kind: 'workflow'; w: UtilWorkflow } | { kind: 'singles'; ws: UtilWorkflow[] };
+
+function unitValue(u: TableUnit, key: SortKey): string | number | undefined {
+  if (u.kind === 'workflow') return sortValue(u.w, key);
+  switch (key) {
+    case 'name':
+      return 'single-job workflows';
+    case 'jobs':
+      return u.ws.reduce((a, w) => a + w.jobs, 0);
+    case 'wall':
+      return u.ws.reduce((a, w) => a + w.wall_hours, 0);
+    case 'advice':
+      return u.ws.reduce((a, w) => a + actionable(w), 0);
+    default:
+      // A fit ratio or throughput of a group of unrelated jobs means
+      // nothing; the group sorts last on those columns.
+      return undefined;
+  }
+}
+
 export function WorkflowsTable({
   workflows,
   hrefFor,
   onOpen,
+  onOwner,
 }: {
   workflows: UtilWorkflow[];
   hrefFor: (key: string) => string;
   onOpen: (key: string) => void;
+  // Set when the page can narrow to a user: owner names become buttons.
+  onOwner?: (owner: string) => void;
 }) {
   const [sort, setSort] = useSortState<SortKey>('wall', 'desc');
-  const rows = useSortedRows(workflows, sort, sortValue);
+  const [singlesOpen, setSinglesOpen] = useState(false);
+  const { multi, singles } = useMemo(() => splitSingles(workflows), [workflows]);
+  const units = useMemo<TableUnit[]>(
+    () => [
+      ...multi.map((w): TableUnit => ({ kind: 'workflow', w })),
+      ...(singles.length > 0 ? [{ kind: 'singles', ws: singles } as TableUnit] : []),
+    ],
+    [multi, singles],
+  );
+  const sortedUnits = useSortedRows(units, sort, unitValue);
+  const sortedSingles = useSortedRows(singles, sort, sortValue);
   const showOwner = workflows.some((w) => w.owner);
   const showSchedd = workflows.some((w) => w.schedd);
   // A column of blanks is noise: only when some workflow has a figure.
   const showThroughput = workflows.some((w) => throughputColumn(w) !== undefined);
+  const columns = 7 + (showThroughput ? 1 : 0);
+  const row = (w: UtilWorkflow, nested = false) => (
+    <WorkflowRow
+      key={w.key}
+      w={w}
+      nested={nested}
+      hrefFor={hrefFor}
+      onOpen={onOpen}
+      onOwner={onOwner}
+      showOwner={showOwner}
+      showSchedd={showSchedd}
+      showThroughput={showThroughput}
+    />
+  );
   return (
     <section aria-labelledby="util-workflows">
       <h2 id="util-workflows" className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">
@@ -435,85 +508,20 @@ export function WorkflowsTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {rows.map((w) => {
-              const n = actionable(w);
-              return (
-                <tr
-                  key={w.key}
-                  tabIndex={0}
-                  onClick={() => onOpen(w.key)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      onOpen(w.key);
-                    }
-                  }}
-                  aria-label={`${w.name}: ${w.jobs.toLocaleString()} jobs. Open details.`}
-                  className="cursor-pointer align-middle hover:bg-gray-50 focus:bg-brand-50 focus:outline-none"
-                >
-                  <td className="px-3 py-2">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <Link
-                        href={hrefFor(w.key)}
-                        tabIndex={-1}
-                        onClick={(e) => e.stopPropagation()}
-                        className="font-medium text-gray-900 hover:underline"
-                      >
-                        {w.name}
-                      </Link>
-                      {w.is_dag && (
-                        <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-800">
-                          DAG
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-0.5 text-xs text-gray-500">
-                      <span className="font-mono">{w.executable}</span>
-                      {showOwner && w.owner && <> · {w.owner}</>}
-                      {showSchedd && w.schedd && <> · {w.schedd}</>}
-                    </div>
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums">
-                    <div>{w.jobs.toLocaleString()}</div>
-                    {(w.failed > 0 || w.removed > 0) && (
-                      <div className="whitespace-nowrap text-xs text-gray-500">
-                        {w.failed > 0 && <span className="text-red-700">{w.failed.toLocaleString()} failed</span>}
-                        {w.failed > 0 && w.removed > 0 && ', '}
-                        {w.removed > 0 && <span>{w.removed.toLocaleString()} removed</span>}
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{formatHours(w.wall_hours)}</td>
-                  <td className="px-3 py-2">
-                    <RangeStrip request={w.cpu.request} dist={w.cpu.cores_used} format={formatCores} label="CPU cores" />
-                  </td>
-                  <td className="px-3 py-2">
-                    <RangeStrip request={w.memory.request} dist={w.memory.peak_mib} format={formatMiB} label="Peak memory" />
-                  </td>
-                  <td className="px-3 py-2">
-                    <RangeStrip request={w.disk.request} dist={w.disk.used_kib} format={formatKiB} label="Disk" />
-                  </td>
-                  {showThroughput && (
-                    <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap" data-testid="throughput-cell">
-                      {(() => {
-                        const g = throughputColumn(w);
-                        if (g === undefined) return null;
-                        return g >= 1 ? `up to ${formatGain(g)}` : formatGain(g);
-                      })()}
-                    </td>
-                  )}
-                  <td className="px-3 py-2">
-                    {n > 0 ? (
-                      <span className="inline-flex whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 tabular-nums">
-                        {n} {n === 1 ? 'suggestion' : 'suggestions'}
-                      </span>
-                    ) : (
-                      <span className="text-xs text-gray-400">fits</span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
+            {sortedUnits.map((u) =>
+              u.kind === 'workflow' ? (
+                row(u.w)
+              ) : (
+                <SinglesRows
+                  key="singles"
+                  ws={u.ws}
+                  open={singlesOpen}
+                  onToggle={() => setSinglesOpen((v) => !v)}
+                  columns={columns}
+                  rows={sortedSingles.map((w) => row(w, true))}
+                />
+              ),
+            )}
           </tbody>
         </table>
       </div>
@@ -521,6 +529,178 @@ export function WorkflowsTable({
         <RangeStripKey />
       </div>
     </section>
+  );
+}
+
+// SinglesRows is the folded group of one-job workflows and, when open,
+// the workflows themselves.
+function SinglesRows({
+  ws,
+  open,
+  onToggle,
+  columns,
+  rows,
+}: {
+  ws: UtilWorkflow[];
+  open: boolean;
+  onToggle: () => void;
+  columns: number;
+  rows: React.ReactNode[];
+}) {
+  const wall = ws.reduce((a, w) => a + w.wall_hours, 0);
+  const advice = ws.reduce((a, w) => a + actionable(w), 0);
+  return (
+    <>
+      <tr className="bg-gray-50/60" data-testid="singles-group">
+        <td className="px-3 py-2">
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={open}
+            className="inline-flex items-center gap-1.5 whitespace-nowrap font-medium text-gray-900 hover:underline"
+          >
+            <span aria-hidden className="inline-block w-3 text-gray-500">
+              {open ? '▾' : '▸'}
+            </span>
+            {ws.length.toLocaleString()} single-job workflows
+          </button>
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">{ws.length.toLocaleString()}</td>
+        <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{formatHours(wall)}</td>
+        <td colSpan={columns - 4} />
+        <td className="px-3 py-2">
+          {advice > 0 && (
+            <span className="inline-flex whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 tabular-nums">
+              {advice} {advice === 1 ? 'suggestion' : 'suggestions'}
+            </span>
+          )}
+        </td>
+      </tr>
+      {open && rows}
+    </>
+  );
+}
+
+function WorkflowRow({
+  w,
+  nested,
+  hrefFor,
+  onOpen,
+  onOwner,
+  showOwner,
+  showSchedd,
+  showThroughput,
+}: {
+  w: UtilWorkflow;
+  nested: boolean;
+  hrefFor: (key: string) => string;
+  onOpen: (key: string) => void;
+  onOwner?: (owner: string) => void;
+  showOwner: boolean;
+  showSchedd: boolean;
+  showThroughput: boolean;
+}) {
+  const n = actionable(w);
+  return (
+    <tr
+      tabIndex={0}
+      onClick={() => onOpen(w.key)}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpen(w.key);
+        }
+      }}
+      aria-label={`${w.name}: ${w.jobs.toLocaleString()} ${w.jobs === 1 ? 'job' : 'jobs'}. Open details.`}
+      className="cursor-pointer align-middle hover:bg-gray-50 focus:bg-brand-50 focus:outline-none"
+    >
+      <td className={`py-2 pr-3 ${nested ? 'pl-9' : 'pl-3'}`}>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Link
+            href={hrefFor(w.key)}
+            tabIndex={-1}
+            onClick={(e) => e.stopPropagation()}
+            className="font-medium text-gray-900 hover:underline"
+          >
+            {w.name}
+          </Link>
+          {w.is_dag && (
+            <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-800">DAG</span>
+          )}
+        </div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-1 text-xs text-gray-500">
+          <span className="font-mono">{w.executable}</span>
+          {showOwner && w.owner && (
+            <>
+              <span aria-hidden>·</span>
+              {onOwner ? (
+                <button
+                  type="button"
+                  // Narrows the page to this user rather than opening the
+                  // workflow the row belongs to.
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOwner(w.owner!);
+                  }}
+                  title={`Show only ${w.owner}'s workflows`}
+                  className="rounded-full bg-indigo-100 px-2 py-0.5 font-medium text-indigo-800 hover:bg-indigo-200"
+                  data-testid="owner-pill"
+                >
+                  {w.owner}
+                </button>
+              ) : (
+                <span>{w.owner}</span>
+              )}
+            </>
+          )}
+          {showSchedd && w.schedd && (
+            <>
+              <span aria-hidden>·</span>
+              <span>{w.schedd}</span>
+            </>
+          )}
+        </div>
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        <div>{w.jobs.toLocaleString()}</div>
+        {(w.failed > 0 || w.removed > 0) && (
+          <div className="whitespace-nowrap text-xs text-gray-500">
+            {w.failed > 0 && <span className="text-red-700">{w.failed.toLocaleString()} failed</span>}
+            {w.failed > 0 && w.removed > 0 && ', '}
+            {w.removed > 0 && <span>{w.removed.toLocaleString()} removed</span>}
+          </div>
+        )}
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{formatHours(w.wall_hours)}</td>
+      <td className="px-3 py-2">
+        <RangeStrip request={w.cpu.request} dist={w.cpu.cores_used} format={formatCores} label="CPU cores" />
+      </td>
+      <td className="px-3 py-2">
+        <RangeStrip request={w.memory.request} dist={w.memory.peak_mib} format={formatMiB} label="Peak memory" />
+      </td>
+      <td className="px-3 py-2">
+        <RangeStrip request={w.disk.request} dist={w.disk.used_kib} format={formatKiB} label="Disk" />
+      </td>
+      {showThroughput && (
+        <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap" data-testid="throughput-cell">
+          {(() => {
+            const g = throughputColumn(w);
+            if (g === undefined) return null;
+            return g >= 1 ? `up to ${formatGain(g)}` : formatGain(g);
+          })()}
+        </td>
+      )}
+      <td className="px-3 py-2">
+        {n > 0 ? (
+          <span className="inline-flex whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 tabular-nums">
+            {n} {n === 1 ? 'suggestion' : 'suggestions'}
+          </span>
+        ) : (
+          <span className="text-xs text-gray-400">fits</span>
+        )}
+      </td>
+    </tr>
   );
 }
 
@@ -534,12 +714,128 @@ export function EmptyState({ days }: { days: number }) {
   );
 }
 
-export function TruncatedNotice({ data }: { data: Pick<UtilizationResponse, 'truncated' | 'jobs_considered'> }) {
-  if (!data.truncated) return null;
+export function TruncatedNotice({
+  data,
+  requested,
+  onLimit,
+}: {
+  data: Pick<UtilizationResponse, 'truncated' | 'jobs_considered' | 'limit' | 'max_limit'>;
+  // The limit the URL asked for, if any: the way back is offered whenever
+  // the user chose a bigger analysis than the default.
+  requested?: number;
+  onLimit?: (limit: number | undefined) => void;
+}) {
+  const options = data.truncated && onLimit ? moreOptions(data.limit, data.max_limit) : [];
+  const back =
+    requested !== undefined && onLimit ? (
+      <button type="button" onClick={() => onLimit(undefined)} className="font-medium underline">
+        Back to the usual number
+      </button>
+    ) : null;
+  if (!data.truncated) {
+    if (!back) return null;
+    return (
+      <p className="text-xs text-gray-500">
+        This covers all {data.jobs_considered.toLocaleString()} jobs in the window. {back}
+      </p>
+    );
+  }
   return (
-    <p className="rounded-sm border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-      This covers your most recent {data.jobs_considered.toLocaleString()} jobs in the window, not all of them.
-    </p>
+    <div className="rounded-sm border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900" data-testid="truncated">
+      This covers your most recent {data.jobs_considered.toLocaleString()} jobs in the window, not all of them.{' '}
+      {options.map((o, i) => (
+        <span key={o.limit}>
+          {i > 0 && ' or '}
+          <button type="button" onClick={() => onLimit!(o.limit)} className="font-medium underline">
+            {o.label}
+          </button>
+        </span>
+      ))}
+      {options.length > 0 && <span className="text-amber-800"> — slower to answer.</span>}{' '}
+      {back}
+    </div>
+  );
+}
+
+// OwnerFilter narrows a pool-wide answer to some users: the chosen ones
+// as removable chips, and a list of everyone in the answer to pick from.
+export function OwnerFilter({
+  options,
+  selected,
+  onChange,
+}: {
+  options: UtilOwner[];
+  selected: string[];
+  onChange: (owners: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const toggle = (o: string) =>
+    onChange(selected.includes(o) ? selected.filter((x) => x !== o) : [...selected, o]);
+  return (
+    <div className="flex flex-wrap items-center gap-2" data-testid="owner-filter">
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          className="rounded-sm border border-gray-300 bg-white px-2 py-1 text-sm text-gray-700 hover:bg-gray-50"
+        >
+          Users{selected.length ? ` (${selected.length})` : ''} ▾
+        </button>
+        {open && (
+          <div
+            role="listbox"
+            aria-multiselectable="true"
+            aria-label="Users"
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setOpen(false);
+            }}
+            className="absolute z-20 mt-1 max-h-72 w-64 overflow-auto rounded-md border border-gray-200 bg-white py-1 shadow-lg"
+          >
+            {options.length === 0 && <p className="px-3 py-2 text-xs text-gray-500">No users in this answer.</p>}
+            {options.map((o) => (
+              <label
+                key={o.owner}
+                className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-gray-50"
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.includes(o.owner)}
+                  onChange={() => toggle(o.owner)}
+                />
+                <span className="flex-1 truncate">{o.owner}</span>
+                <span className="text-xs text-gray-500 tabular-nums">
+                  {o.jobs.toLocaleString()} {o.jobs === 1 ? 'job' : 'jobs'}
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+      {selected.map((o) => (
+        <span
+          key={o}
+          className="inline-flex items-center gap-1 rounded-full bg-indigo-100 py-0.5 pl-2 pr-1 text-xs font-medium text-indigo-800"
+          data-testid="owner-chip"
+        >
+          {o}
+          <button
+            type="button"
+            onClick={() => onChange(selected.filter((x) => x !== o))}
+            aria-label={`Remove ${o}`}
+            className="rounded-full px-1 text-indigo-700 hover:bg-indigo-200"
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      {selected.length > 1 && (
+        <button type="button" onClick={() => onChange([])} className="text-xs text-gray-500 underline">
+          clear
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -574,15 +870,109 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
   );
 }
 
+// GpuSection leads a GPU workflow's page: GPUs are the scarcest and most
+// expensive thing these jobs reserve, so they come before memory.
+export function GpuSection({
+  gpu,
+  cpuRequest,
+  batches = [],
+  onBin,
+  selected,
+}: {
+  gpu: UtilGpu;
+  cpuRequest: UtilRequest | null;
+  batches?: UtilBatchPoint[];
+  onBin?: (b: { lo: number; hi: number }) => void;
+  selected?: { lo: number; hi: number } | null;
+}) {
+  const requested = gpu.request?.typical;
+  const measured =
+    gpu.measured < gpu.jobs
+      ? `measured on ${gpu.measured.toLocaleString()} of ${gpu.jobs.toLocaleString()} GPU jobs`
+      : `${gpu.jobs.toLocaleString()} GPU ${gpu.jobs === 1 ? 'job' : 'jobs'}`;
+  return (
+    <section aria-labelledby="wf-gpu" className="space-y-3" data-testid="gpu-section">
+      <h3 id="wf-gpu" className="text-sm font-semibold uppercase tracking-wide text-gray-500">
+        GPUs
+      </h3>
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+        {gpu.utilization ? (
+          <Histogram
+            title="How busy each job kept its GPUs"
+            subtitle={`median ${formatPercent(gpu.utilization.p50)} busy · ${measured}${requested ? ` · ${formatNumber(requested)} GPU${requested === 1 ? '' : 's'} requested` : ''}`}
+            dist={gpu.utilization}
+            unit="fraction"
+            onBin={onBin}
+            selected={selected}
+          />
+        ) : (
+          <p className="rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-600">
+            GPU utilization was not measured for these {gpu.jobs.toLocaleString()} jobs.
+          </p>
+        )}
+        {gpu.memory_peak_mib && (
+          <Histogram
+            title="Peak GPU memory per job"
+            subtitle={`median ${formatMiB(gpu.memory_peak_mib.p50)}, largest ${formatMiB(gpu.memory_peak_mib.max)}${gpu.device_memory_mib ? ` · the GPUs had ${formatMiB(gpu.device_memory_mib)}` : ''}`}
+            dist={gpu.memory_peak_mib}
+            unit="mib"
+            markers={
+              gpu.device_memory_mib
+                ? [{ value: gpu.device_memory_mib, label: `GPU memory ${formatMiB(gpu.device_memory_mib)}`, kind: 'request' }]
+                : []
+            }
+          />
+        )}
+        {gpu.cores_used_while_gpu && (
+          <Histogram
+            title="CPU cores kept busy by GPU jobs"
+            subtitle={`median ${formatCores(gpu.cores_used_while_gpu.p50)} cores${cpuRequest ? ` of ${formatCores(cpuRequest.typical)} requested` : ''}`}
+            dist={gpu.cores_used_while_gpu}
+            unit="plain"
+            markers={
+              cpuRequest
+                ? [{ value: cpuRequest.typical, label: `requested ${formatCores(cpuRequest.typical)}`, kind: 'request' }]
+                : []
+            }
+            note="A GPU job that keeps every requested core busy may be holding its GPU back."
+          />
+        )}
+        {/* GPUs kept busy is the request times the share of it in use,
+            so both lines are counts of GPUs and share one axis. */}
+        <TrendChart
+          title="GPUs requested and kept busy, by submission"
+          batches={batches}
+          request={(b) => b.gpu_request}
+          used={(b) => (b.gpu_request !== null && b.gpu_util_p50 !== null ? b.gpu_request * b.gpu_util_p50 : null)}
+          usedLabel="median busy"
+          unit="plain"
+        />
+      </div>
+    </section>
+  );
+}
+
 export function WorkflowDetail({
   workflow: w,
   days,
   backHref,
+  jobsQuery,
 }: {
   workflow: UtilWorkflow;
   days: number;
   backHref: string;
+  // The analysis's parameters, for the list of this workflow's jobs.
+  // Without them there is no list (the component tests render without).
+  jobsQuery?: JobsQuery;
 }) {
+  const [focus, setFocus] = useState<JobFocus | null>(null);
+  // A bar picks its range of jobs in the list below, when there is one.
+  const pick = (sort: JobFocus['sort'], what: string, fmt: (v: number) => string) =>
+    jobsQuery
+      ? (b: { lo: number; hi: number }) =>
+          setFocus({ sort, lo: b.lo, hi: b.hi, label: `${what} ${fmt(b.lo)}–${fmt(b.hi)}` })
+      : undefined;
+  const selected = (sort: JobFocus['sort']) => (focus?.sort === sort ? focus : null);
   const memReq = w.memory.request;
   const rec = w.memory_curve.find((p) => p.is_recommended);
   const memMarkers: ChartMarker[] = [];
@@ -595,6 +985,9 @@ export function WorkflowDetail({
   if (rec?.retry_mib) memMarkers.push({ value: rec.retry_mib, label: `retry ${formatMiB(rec.retry_mib)}`, kind: 'retry' });
 
   const tpCard = throughputAdviceId(w);
+  // For a workflow of GPU jobs only, the GPU section already shows the
+  // cores histogram; the CPU section keeps only what it adds.
+  const cpuShownWithGpu = !!(w.gpu?.cores_used_while_gpu && w.gpu.jobs === w.jobs);
   const cpuReq = w.cpu.request;
   const diskReq = w.disk.request;
   const gpu = w.gpu;
@@ -671,6 +1064,16 @@ export function WorkflowDetail({
         </section>
       )}
 
+      {gpu && (
+        <GpuSection
+          gpu={gpu}
+          cpuRequest={cpuReq}
+          batches={w.batches}
+          onBin={pick('gpu', 'GPUs busy', formatPercent)}
+          selected={selected('gpu')}
+        />
+      )}
+
       {w.memory.peak_mib && (
         <section aria-labelledby="wf-memory" className="space-y-3">
           <h3 id="wf-memory" className="text-sm font-semibold uppercase tracking-wide text-gray-500">
@@ -681,6 +1084,8 @@ export function WorkflowDetail({
               title="Peak memory per job"
               subtitle={`${w.memory.peak_mib.n.toLocaleString()} jobs · median ${formatMiB(w.memory.peak_mib.p50)}, 95% under ${formatMiB(w.memory.peak_mib.p95)}, largest ${formatMiB(w.memory.peak_mib.max)}`}
               dist={w.memory.peak_mib}
+              onBin={pick('memory', 'peak memory', formatMiB)}
+              selected={selected('memory')}
               unit="mib"
               markers={memMarkers}
               shadeFrom={rec && rec.retry_fraction > 0 ? rec.request_mib : undefined}
@@ -698,7 +1103,23 @@ export function WorkflowDetail({
                 Too few jobs to weigh one memory request against another.
               </p>
             )}
-            <OutcomeScatter samples={w.samples} request={memReq} />
+            <OutcomeScatter
+            samples={w.samples}
+            request={memReq}
+            picked={focus?.job ?? null}
+            onPick={
+              jobsQuery
+                ? (sm) =>
+                    setFocus({
+                      sort: 'memory',
+                      lo: sm.memory_mib ?? 0,
+                      hi: sm.memory_mib ?? 0,
+                      label: `job ${sm.job}`,
+                      job: sm.job,
+                    })
+                : undefined
+            }
+          />
             <TrendChart
               title="Memory requested and 95th-percentile peak, by submission"
               batches={w.batches}
@@ -711,19 +1132,23 @@ export function WorkflowDetail({
         </section>
       )}
 
-      {w.cpu.cores_used && (
+      {w.cpu.cores_used && (!cpuShownWithGpu || w.batches.length >= 2) && (
         <section aria-labelledby="wf-cpu" className="space-y-3">
           <h3 id="wf-cpu" className="text-sm font-semibold uppercase tracking-wide text-gray-500">
             CPU
           </h3>
           <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-            <Histogram
-              title="CPU cores kept busy per job"
-              subtitle={`median ${formatCores(w.cpu.cores_used.p50)} cores${cpuReq ? ` of ${formatCores(cpuReq.typical)} requested` : ''}${w.cpu.efficiency ? ` · median efficiency ${formatPercent(w.cpu.efficiency.p50)}` : ''}`}
-              dist={w.cpu.cores_used}
-              unit="plain"
-              markers={cpuReq ? [{ value: cpuReq.typical, label: `requested ${formatCores(cpuReq.typical)}`, kind: 'request' }] : []}
-            />
+            {!cpuShownWithGpu && (
+              <Histogram
+                title="CPU cores kept busy per job"
+                subtitle={`median ${formatCores(w.cpu.cores_used.p50)} cores${cpuReq ? ` of ${formatCores(cpuReq.typical)} requested` : ''}${w.cpu.efficiency ? ` · median efficiency ${formatPercent(w.cpu.efficiency.p50)}` : ''}`}
+                dist={w.cpu.cores_used}
+                onBin={pick('cores', 'CPU cores busy', formatCores)}
+                selected={selected('cores')}
+                unit="plain"
+                markers={cpuReq ? [{ value: cpuReq.typical, label: `requested ${formatCores(cpuReq.typical)}`, kind: 'request' }] : []}
+              />
+            )}
             <TrendChart
               title="CPUs requested and median cores used, by submission"
               batches={w.batches}
@@ -736,10 +1161,10 @@ export function WorkflowDetail({
         </section>
       )}
 
-      {(w.disk.used_kib || gpu?.utilization) && (
+      {w.disk.used_kib && (
         <section aria-labelledby="wf-other" className="space-y-3">
           <h3 id="wf-other" className="text-sm font-semibold uppercase tracking-wide text-gray-500">
-            {gpu?.utilization ? 'Disk and GPU' : 'Disk'}
+            Disk
           </h3>
           <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
             {w.disk.used_kib && (
@@ -747,20 +1172,24 @@ export function WorkflowDetail({
                 title="Disk used per job"
                 subtitle={`median ${formatKiB(w.disk.used_kib.p50)}, largest ${formatKiB(w.disk.used_kib.max)}`}
                 dist={w.disk.used_kib}
+                onBin={pick('disk', 'disk use', formatKiB)}
+                selected={selected('disk')}
                 unit="kib"
                 markers={diskReq ? [{ value: diskReq.typical, label: `requested ${formatKiB(diskReq.typical)}`, kind: 'request' }] : []}
               />
             )}
-            {gpu?.utilization && (
-              <Histogram
-                title="How busy each job kept its GPUs"
-                subtitle={`median ${formatPercent(gpu.utilization.p50)} busy${gpu.request ? ` · ${formatNumber(gpu.request.typical)} GPU${gpu.request.typical === 1 ? '' : 's'} requested` : ''}`}
-                dist={gpu.utilization}
-                unit="fraction"
-              />
-            )}
           </div>
         </section>
+      )}
+
+      {jobsQuery && (
+        <WorkflowJobs
+          workflowKey={w.key}
+          query={jobsQuery}
+          hasGpu={!!gpu}
+          focus={focus}
+          onClearFocus={() => setFocus(null)}
+        />
       )}
     </div>
   );

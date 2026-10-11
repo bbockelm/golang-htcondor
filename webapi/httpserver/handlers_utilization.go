@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,24 +31,151 @@ import (
 // because a page of advice about last week does not change between two
 // clicks and the read behind it is the largest one this server makes.
 
-// utilizationJobCap bounds one analysis. Most recent first, so a busy
-// user's answer covers the latest of their work. An access point like
-// ap40 enters ~90k records into history a day, so for a heavy user over
-// thirty days this cap is real, and the response says when it was hit.
-const utilizationJobCap = 50000
+// utilizationDefaultLimit is how many jobs one analysis reads unless the
+// caller asks for more. Most recent first, so a busy user's answer covers
+// the latest of their work. An access point like ap40 enters ~90k
+// records into history a day, so for a heavy user over thirty days this
+// is a real bound, and the response says when it was hit.
+const utilizationDefaultLimit = 50000
 
-// utilizationScanLimit bounds the schedd's backwards walk of its history
-// file when the mirror cannot answer. The walk normally stops at the
-// window's start (HistoryQueryOptions.Since); this is the backstop for a
-// file whose records are out of order.
-const utilizationScanLimit = 3000000
+// utilizationDefaultMaxLimit is the most a caller may ask for when
+// HTTP_API_UTILIZATION_MAX_JOBS does not say. A Job held for analysis is
+// about 250 bytes (BenchmarkJobFootprint), so a million is a quarter of a
+// gigabyte while the analysis runs; the cached result is the answer, not
+// the jobs.
+const utilizationDefaultMaxLimit = 1000000
+
+// utilizationScanLimit is the schedd's backwards-walk budget for a limit:
+// the walk normally stops at the window's start (HistoryQueryOptions.
+// Since), and this is the backstop for a file whose records are out of
+// order -- three records scanned for every one wanted, at least three
+// million.
+func utilizationScanLimit(limit int) int {
+	return max(3000000, 3*limit)
+}
 
 // utilizationRefresh is how long an answer is reused.
 const utilizationRefresh = 5 * time.Minute
 
 // utilizationComputeTimeout bounds an analysis nobody may be waiting for
-// any more. See sharedComputeContext.
-const utilizationComputeTimeout = 3 * time.Minute
+// any more (see sharedComputeContext): three minutes, and a minute more
+// for each hundred thousand jobs the limit allows. Reading dominates --
+// parsing an ad is 20-30 microseconds, and a schedd walks its history file
+// far slower than the mirror answers -- while the analysis itself takes
+// about a second per million (BenchmarkAnalyze).
+func utilizationComputeTimeout(limit int) time.Duration {
+	return 3*time.Minute + time.Duration(limit/100000)*time.Minute
+}
+
+// utilizationQuery is one request's parameters, as normalized for the
+// cache key.
+type utilizationQuery struct {
+	days      int
+	ownedByMe bool
+	// filter is the caller's constraint, re-serialized by the parser, or
+	// empty.
+	filter string
+	// owners narrows to these users, sorted; empty for no narrowing.
+	owners []string
+	limit  int
+	// accessPoint is the schedd parameter: one AP, in multi-AP mode.
+	accessPoint string
+}
+
+// parseUtilizationQuery reads and validates the parameters. An error is
+// the caller's to fix and becomes a 400 with its text.
+func (s *Handler) parseUtilizationQuery(r *http.Request) (utilizationQuery, error) {
+	q := r.URL.Query()
+	uq := utilizationQuery{days: 7, ownedByMe: true, limit: utilizationDefaultLimit, accessPoint: q.Get("schedd")}
+	if v := q.Get("days"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || !utilizationDays[n] {
+			return uq, errors.New("invalid days parameter: must be 1, 7 or 30")
+		}
+		uq.days = n
+	}
+	if v := strings.TrimSpace(q.Get("constraint")); v != "" {
+		// Parsed here, before anything is read: an expression the
+		// parser rejects is the caller's mistake, with the parser's
+		// message to fix it by. The re-serialized form is what is
+		// spliced into the query, so it cannot reach past the
+		// parentheses around it (see andScope).
+		safe, err := classadBalanced(v)
+		if err != nil {
+			return uq, fmt.Errorf("invalid constraint: %w", err)
+		}
+		uq.filter = safe
+	}
+	if v := q.Get("owners"); v != "" {
+		seen := map[string]bool{}
+		for _, o := range strings.Split(v, ",") {
+			if o = strings.TrimSpace(o); o != "" && !seen[o] {
+				seen[o] = true
+				uq.owners = append(uq.owners, o)
+			}
+		}
+		slices.Sort(uq.owners)
+		// Naming users is asking about other people's jobs, so it
+		// implies owned_by_me=false unless that is given. Whether the
+		// caller may see them is still settled by the scope.
+		if len(uq.owners) > 0 && q.Get("owned_by_me") == "" {
+			uq.ownedByMe = false
+		}
+	}
+	if v := q.Get("owned_by_me"); v != "" {
+		parsed, err := strconv.ParseBool(v)
+		if err != nil {
+			return uq, fmt.Errorf("invalid owned_by_me parameter: %w", err)
+		}
+		uq.ownedByMe = parsed
+	}
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return uq, errors.New("invalid limit parameter: must be a positive number of jobs")
+		}
+		uq.limit = n
+	}
+	// Above the ceiling is clamped rather than refused: the page offers
+	// "analyze more" and the response says what was applied.
+	uq.limit = min(uq.limit, s.utilizationMaxLimit())
+	return uq, nil
+}
+
+// utilizationMaxLimit is HTTP_API_UTILIZATION_MAX_JOBS, or its default.
+func (s *Handler) utilizationMaxLimit() int {
+	if s.utilizationMaxJobs > 0 {
+		return s.utilizationMaxJobs
+	}
+	return utilizationDefaultMaxLimit
+}
+
+// narrow ANDs the caller's owner list and constraint onto a scope. It
+// can only remove jobs from the scope, never add any: a non-administrator
+// naming someone else's account gets the intersection of "mine" and
+// "theirs", which is nothing. Owners are an OR of equalities rather than
+// member(): the mirror's planner reads that form as one "Owner in {...}"
+// probe it can answer from an index, and the schedd evaluates it as
+// written.
+func (uq utilizationQuery) narrow(scope string) string {
+	out := "(" + scope + ")"
+	if len(uq.owners) > 0 {
+		parts := make([]string, len(uq.owners))
+		for i, o := range uq.owners {
+			parts[i] = "Owner == " + classadStringLit(o)
+		}
+		out += " && (" + strings.Join(parts, " || ") + ")"
+	}
+	if uq.filter != "" {
+		out += " && (" + uq.filter + ")"
+	}
+	return out
+}
+
+// key is the cache key for the query in a scope.
+func (uq utilizationQuery) key(scope string, mirror bool) string {
+	return fmt.Sprintf("%s|%d|%t|%q|%q|%d|%s", scope, uq.days, mirror, uq.filter, strings.Join(uq.owners, ","), uq.limit, uq.accessPoint)
+}
 
 // utilizationDays are the windows offered. Fixed rather than free-form:
 // each is a cache entry, and a slider would make every request its own.
@@ -62,28 +191,14 @@ func (s *Handler) handleUtilization(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	q := r.URL.Query()
-	days := 7
-	if v := q.Get("days"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || !utilizationDays[n] {
-			s.writeError(w, http.StatusBadRequest, "Invalid days parameter: must be 1, 7 or 30")
-			return
-		}
-		days = n
-	}
-	ownedByMe := true
-	if v := q.Get("owned_by_me"); v != "" {
-		parsed, err := strconv.ParseBool(v)
-		if err != nil {
-			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid owned_by_me parameter: %v", err))
-			return
-		}
-		ownedByMe = parsed
+	uq, err := s.parseUtilizationQuery(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	if s.multi != nil {
-		s.handleMultiUtilization(w, r, days)
+		s.handleMultiUtilization(w, r, uq)
 		return
 	}
 
@@ -97,7 +212,7 @@ func (s *Handler) handleUtilization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scope, showOwner, status, err := s.utilizationScope(ctx, r, ownedByMe)
+	scope, showOwner, status, err := s.utilizationScope(ctx, r, uq.ownedByMe)
 	if err != nil {
 		s.writeError(w, status, err.Error())
 		return
@@ -109,10 +224,10 @@ func (s *Handler) handleUtilization(w http.ResponseWriter, r *http.Request) {
 	// people never share an entry and two administrators asking for
 	// everyone do.
 	mirror := s.mirrorAllowed(ctx, r) == nil
-	key := fmt.Sprintf("%s|%d|%t", scope, days, mirror)
-	resp, err := s.utilizationResults().get(ctx, key, func(computeCtx context.Context) (*utilization.Response, error) {
-		return s.computeUtilization(computeCtx, scope, days, showOwner, mirror)
-	})
+	resp, err := s.utilizationResults().getWithin(ctx, uq.key(scope, mirror), utilizationComputeTimeout(uq.limit),
+		func(computeCtx context.Context) (*utilization.Response, error) {
+			return s.computeUtilization(computeCtx, uq, uq.narrow(scope), showOwner, mirror)
+		})
 	if err != nil {
 		s.writeUtilizationError(w, err)
 		return
@@ -152,22 +267,26 @@ func (s *Handler) utilizationScope(ctx context.Context, r *http.Request, ownedBy
 }
 
 // computeUtilization reads the window's finished jobs and analyses them.
-func (s *Handler) computeUtilization(ctx context.Context, scope string, days int, showOwner, mirror bool) (*utilization.Response, error) {
+//
+// selection is the scope narrowed by the caller's owners and constraint;
+// the window is added per backend (see utilizationJobs).
+func (s *Handler) computeUtilization(ctx context.Context, uq utilizationQuery, selection string, showOwner, mirror bool) (*utilization.Response, error) {
 	now := time.Now().Unix()
-	since := now - int64(days)*24*3600
+	since := now - int64(uq.days)*24*3600
 
 	start := time.Now()
-	jobs, truncated, source, err := s.utilizationJobs(ctx, scope, since, mirror)
+	jobs, truncated, source, err := s.utilizationJobs(ctx, selection, since, uq.limit, mirror)
 	if err != nil {
 		return nil, err
 	}
 	readTime := time.Since(start)
 	resp := utilization.Analyze(jobs, utilization.Options{
-		Since: since, Until: now, Days: days, Truncated: truncated, ShowOwner: showOwner,
+		Since: since, Until: now, Days: uq.days, Truncated: truncated, ShowOwner: showOwner,
+		Limit: uq.limit, MaxLimit: s.utilizationMaxLimit(),
 		Machines: s.utilizationMachines(ctx),
 	})
 	s.logger.Info(logging.DestinationHTTP, "utilization analysed",
-		"source", source, "jobs", len(jobs), "truncated", truncated, "days", days,
+		"source", source, "jobs", len(jobs), "truncated", truncated, "days", uq.days,
 		"read_ms", readTime.Milliseconds(), "analyse_ms", (time.Since(start) - readTime).Milliseconds())
 	return resp, nil
 }
@@ -187,7 +306,7 @@ const scheddEnteredHistory = `ifThenElse(isUndefined(EnteredHistoryTime), ` +
 	`ifThenElse(isUndefined(EnteredCurrentStatus) || EnteredCurrentStatus <= 0, CompletionDate, EnteredCurrentStatus), ` +
 	`EnteredHistoryTime)`
 
-// utilizationJobs reads up to utilizationJobCap of scope's jobs that
+// utilizationJobs reads up to limit of scope's jobs that
 // entered history at or after since, most recent first, preferring the
 // mirror.
 //
@@ -198,10 +317,10 @@ const scheddEnteredHistory = `ifThenElse(isUndefined(EnteredHistoryTime), ` +
 // "attribute op literal" conjuncts, so the plain comparison skips whole
 // segments outside the window while an ifThenElse would scan the entire
 // archive. The schedd has no such index, and needs the fallback.
-func (s *Handler) utilizationJobs(ctx context.Context, scope string, since int64, mirror bool) ([]utilization.Job, bool, string, error) {
+func (s *Handler) utilizationJobs(ctx context.Context, scope string, since int64, limit int, mirror bool) ([]utilization.Job, bool, string, error) {
 	mirrorConstraint, scheddConstraint := utilizationWindow(scope, since)
 	if mirror {
-		jobs, truncated, err := s.utilizationFromMirror(ctx, mirrorConstraint, utilizationJobCap)
+		jobs, truncated, err := s.utilizationFromMirror(ctx, mirrorConstraint, limit)
 		if err == nil {
 			return jobs, truncated, "htcondordb", nil
 		}
@@ -210,7 +329,7 @@ func (s *Handler) utilizationJobs(ctx context.Context, scope string, since int64
 	if s.dbMirror.Required() {
 		return nil, false, "", errMirrorRequiredUtilization
 	}
-	jobs, truncated, err := s.utilizationFromSchedd(ctx, scheddConstraint, since, utilizationJobCap)
+	jobs, truncated, err := s.utilizationFromSchedd(ctx, scheddConstraint, since, limit)
 	return jobs, truncated, "schedd", err
 }
 
@@ -246,6 +365,7 @@ func (s *Handler) utilizationFromMirror(ctx context.Context, constraint string, 
 	defer closer()
 
 	var jobs []utilization.Job
+	var reader utilization.JobReader
 	truncated := false
 	yield := func(row string) bool {
 		if len(jobs) >= limit {
@@ -256,7 +376,7 @@ func (s *Handler) utilizationFromMirror(ctx context.Context, constraint string, 
 		if perr != nil {
 			return true
 		}
-		jobs = append(jobs, utilization.FromAd(ad, ""))
+		jobs = append(jobs, reader.FromAd(ad, ""))
 		return true
 	}
 	proj := utilization.Projection()
@@ -284,7 +404,7 @@ func (s *Handler) utilizationFromSchedd(ctx context.Context, constraint string, 
 	opts := &htcondor.HistoryQueryOptions{
 		Source:        htcondor.HistorySourceJobHistory,
 		Limit:         limit + 1,
-		ScanLimit:     utilizationScanLimit,
+		ScanLimit:     utilizationScanLimit(limit),
 		Projection:    utilization.Projection(),
 		Backwards:     true,
 		StreamResults: true,
@@ -298,6 +418,7 @@ func (s *Handler) utilizationFromSchedd(ctx context.Context, constraint string, 
 		return nil, false, err
 	}
 	var jobs []utilization.Job
+	var reader utilization.JobReader
 	truncated := false
 	var streamErr error
 	// Drained to the end even past the cap, so the reader is never left
@@ -309,7 +430,7 @@ func (s *Handler) utilizationFromSchedd(ctx context.Context, constraint string, 
 		case len(jobs) >= limit:
 			truncated = true
 		case res.Ad != nil:
-			jobs = append(jobs, utilization.FromAd(res.Ad, ""))
+			jobs = append(jobs, reader.FromAd(res.Ad, ""))
 		}
 	}
 	if streamErr != nil {
@@ -322,24 +443,26 @@ func (s *Handler) utilizationFromSchedd(ctx context.Context, constraint string, 
 // the caller's own finished jobs on every AP (or the one named by
 // schedd), from the federation hub. Multi-AP reads are always the
 // caller's own, so owned_by_me has nothing to widen.
-func (s *Handler) handleMultiUtilization(w http.ResponseWriter, r *http.Request, days int) {
+func (s *Handler) handleMultiUtilization(w http.ResponseWriter, r *http.Request, uq utilizationQuery) {
 	ctx, user, ok := s.multiAPCaller(w, r)
 	if !ok {
 		return
 	}
-	schedd := r.URL.Query().Get("schedd")
-	key := fmt.Sprintf("multi|%s|%d|%s", user, days, schedd)
-	resp, err := s.utilizationResults().get(ctx, key, func(computeCtx context.Context) (*utilization.Response, error) {
-		now := time.Now().Unix()
-		since := now - int64(days)*24*3600
-		jobs, truncated, err := s.multiUtilizationJobs(computeCtx, user, schedd, since, utilizationJobCap)
-		if err != nil {
-			return nil, err
-		}
-		return utilization.Analyze(jobs, utilization.Options{
-			Since: since, Until: now, Days: days, Truncated: truncated,
-		}), nil
-	})
+	// The hub confines every read to the caller's User; the owner list
+	// and constraint narrow within that.
+	resp, err := s.utilizationResults().getWithin(ctx, uq.key("multi|"+user, false), utilizationComputeTimeout(uq.limit),
+		func(computeCtx context.Context) (*utilization.Response, error) {
+			now := time.Now().Unix()
+			since := now - int64(uq.days)*24*3600
+			jobs, truncated, err := s.multiUtilizationJobs(computeCtx, user, uq.narrow("true"), uq.accessPoint, since, uq.limit)
+			if err != nil {
+				return nil, err
+			}
+			return utilization.Analyze(jobs, utilization.Options{
+				Since: since, Until: now, Days: uq.days, Truncated: truncated,
+				Limit: uq.limit, MaxLimit: s.utilizationMaxLimit(),
+			}), nil
+		})
 	if err != nil {
 		var hubErr *multiap.Error
 		if errors.As(err, &hubErr) {
@@ -353,13 +476,14 @@ func (s *Handler) handleMultiUtilization(w http.ResponseWriter, r *http.Request,
 }
 
 // multiUtilizationJobs pages through the hub's history for one user.
-func (s *Handler) multiUtilizationJobs(ctx context.Context, user, schedd string, since int64, limit int) ([]utilization.Job, bool, error) {
+func (s *Handler) multiUtilizationJobs(ctx context.Context, user, selection, schedd string, since int64, limit int) ([]utilization.Job, bool, error) {
 	var jobs []utilization.Job
+	var reader utilization.JobReader
 	token := ""
 	for {
 		rows, res, err := s.multi.svc.ListHistory(ctx, multiap.ListRequest{
 			User:       user,
-			Constraint: fmt.Sprintf("EnteredHistoryTime >= %d", since),
+			Constraint: fmt.Sprintf("%s && EnteredHistoryTime >= %d", selection, since),
 			Projection: utilization.Projection(),
 			Limit:      dbmirror.MaxProjectedLimit,
 			PageToken:  token,
@@ -372,7 +496,7 @@ func (s *Handler) multiUtilizationJobs(ctx context.Context, user, schedd string,
 			if len(jobs) >= limit {
 				return jobs, true, nil
 			}
-			jobs = append(jobs, utilization.FromAd(row.Ad, row.ID.Schedd))
+			jobs = append(jobs, reader.FromAd(row.Ad, row.ID.Schedd))
 		}
 		if res == nil || !res.HasMore || res.NextPageToken == "" {
 			return jobs, false, nil
@@ -415,6 +539,12 @@ type sharedCache[T any] struct {
 	ttl   time.Duration
 	// timeout bounds one computation.
 	timeout time.Duration
+	// maxEntries bounds the cache; zero means maxUtilizationCacheEntries.
+	maxEntries int
+	// sizeOf and maxSize, when set, bound the cache by the total size of
+	// its values as well (see store).
+	sizeOf  func(T) int
+	maxSize int
 }
 
 type sharedEntry[T any] struct {
@@ -425,6 +555,10 @@ type sharedEntry[T any] struct {
 	val  T
 	has  bool
 	at   time.Time
+	// size and used are read and written under the cache's mu, for
+	// eviction by size: the value's sizeOf, and when it was last served.
+	size int
+	used time.Time
 }
 
 func newSharedCache[T any](ttl, timeout time.Duration) *sharedCache[T] {
@@ -440,7 +574,7 @@ func newSharedCache[T any](ttl, timeout time.Duration) *sharedCache[T] {
 type utilizationCache = sharedCache[*utilization.Response]
 
 func newUtilizationCache() *utilizationCache {
-	return newSharedCache[*utilization.Response](utilizationRefresh, utilizationComputeTimeout)
+	return newSharedCache[*utilization.Response](utilizationRefresh, utilizationComputeTimeout(utilizationDefaultLimit))
 }
 
 // get returns the value for key, computing it if there is no fresh one.
@@ -451,6 +585,34 @@ func newUtilizationCache() *utilizationCache {
 // still leaves a whole answer in the cache for the next one, rather than
 // an error or, worse, half an answer. A failure is never cached.
 func (c *sharedCache[T]) get(ctx context.Context, key string, compute func(context.Context) (T, error)) (T, error) {
+	return c.getWithin(ctx, key, c.timeout, compute)
+}
+
+// peek returns a fresh value for key if there is one, without computing
+// or waiting: an entry being computed right now is reported absent.
+func (c *sharedCache[T]) peek(key string) (T, bool) {
+	var zero T
+	c.mu.Lock()
+	entry := c.byKey[key]
+	c.mu.Unlock()
+	if entry == nil {
+		return zero, false
+	}
+	select {
+	case entry.lock <- struct{}{}:
+		defer func() { <-entry.lock }()
+	default:
+		return zero, false
+	}
+	if entry.has && c.now().Sub(entry.at) < c.ttl {
+		return entry.val, true
+	}
+	return zero, false
+}
+
+// getWithin is get with a computation bound of its own, for work whose
+// size the request decides.
+func (c *sharedCache[T]) getWithin(ctx context.Context, key string, timeout time.Duration, compute func(context.Context) (T, error)) (T, error) {
 	var zero T
 	c.mu.Lock()
 	entry := c.byKey[key]
@@ -469,9 +631,12 @@ func (c *sharedCache[T]) get(ctx context.Context, key string, compute func(conte
 	}
 
 	if entry.has && c.now().Sub(entry.at) < c.ttl {
+		c.mu.Lock()
+		entry.used = c.now()
+		c.mu.Unlock()
 		return entry.val, nil
 	}
-	computeCtx, cancel := sharedComputeContext(ctx, c.timeout)
+	computeCtx, cancel := sharedComputeContext(ctx, timeout)
 	defer cancel()
 	val, err := compute(computeCtx)
 	if err != nil {
@@ -482,15 +647,67 @@ func (c *sharedCache[T]) get(ctx context.Context, key string, compute func(conte
 		}
 		return zero, err
 	}
-	entry.val, entry.has, entry.at = val, true, c.now()
+	c.store(key, entry, val)
 	return val, nil
+}
+
+// store keeps a computed value. Called with entry's lock held.
+//
+// With a size bound, a value larger than the whole bound is not kept at
+// all -- the entry is dropped, so the next request computes it again --
+// and keeping one evicts the least recently served others until the
+// total fits. Entries being computed or waited on are left alone, so the
+// total can briefly exceed the bound by their size.
+func (c *sharedCache[T]) store(key string, entry *sharedEntry[T], val T) {
+	now := c.now()
+	if c.sizeOf == nil {
+		entry.val, entry.has, entry.at = val, true, now
+		return
+	}
+	size := c.sizeOf(val)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if size > c.maxSize {
+		var zero T
+		entry.val, entry.has, entry.size = zero, false, 0
+		if c.byKey[key] == entry {
+			delete(c.byKey, key)
+		}
+		return
+	}
+	entry.val, entry.has, entry.at, entry.size, entry.used = val, true, now, size, now
+	total := 0
+	for _, e := range c.byKey {
+		total += e.size
+	}
+	for total > c.maxSize {
+		var lruKey string
+		var lru *sharedEntry[T]
+		for k, e := range c.byKey {
+			if e == entry || e.size == 0 || len(e.lock) > 0 {
+				continue
+			}
+			if lru == nil || e.used.Before(lru.used) {
+				lruKey, lru = k, e
+			}
+		}
+		if lru == nil {
+			return
+		}
+		total -= lru.size
+		delete(c.byKey, lruKey)
+	}
 }
 
 // makeRoom keeps the cache under maxUtilizationCacheEntries. Called with
 // c.mu held, before adding an entry. Expired entries go first, then the
 // oldest; one being computed or waited on is left alone.
 func (c *sharedCache[T]) makeRoom() {
-	if len(c.byKey) < maxUtilizationCacheEntries {
+	limit := c.maxEntries
+	if limit <= 0 {
+		limit = maxUtilizationCacheEntries
+	}
+	if len(c.byKey) < limit {
 		return
 	}
 	now := c.now()
@@ -500,7 +717,7 @@ func (c *sharedCache[T]) makeRoom() {
 			delete(c.byKey, k)
 		}
 	}
-	for len(c.byKey) >= maxUtilizationCacheEntries {
+	for len(c.byKey) >= limit {
 		var oldestKey string
 		var oldest *sharedEntry[T]
 		for k, e := range c.byKey {

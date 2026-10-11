@@ -10,7 +10,7 @@
 // for the rest -- because a tooltip is unreachable from a keyboard and
 // from a screen reader.
 
-import { useId, useMemo, useState, type PointerEvent, type ReactNode } from 'react';
+import { useId, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
 import {
   formatMiB,
   formatNumber,
@@ -281,7 +281,7 @@ function barPath(x: number, y: number, w: number, h: number, r = 4): string {
 }
 
 // svgPoint converts a pointer event to viewBox coordinates.
-function svgPoint(e: PointerEvent<SVGElement>, width: number, height: number): { x: number; y: number } {
+function svgPoint(e: MouseEvent<SVGElement>, width: number, height: number): { x: number; y: number } {
   const svg = (e.currentTarget as SVGElement).ownerSVGElement ?? (e.currentTarget as SVGSVGElement);
   const r = svg.getBoundingClientRect();
   return {
@@ -378,6 +378,8 @@ export function Histogram({
   shadeLabel,
   barLabel = 'jobs',
   note,
+  onBin,
+  selected,
 }: {
   title: string;
   subtitle?: ReactNode;
@@ -388,6 +390,11 @@ export function Histogram({
   shadeLabel?: string;
   barLabel?: string;
   note?: ReactNode;
+  // Clicking a bar picks its range, e.g. to find those jobs in a list;
+  // `last` says the range is the final one, whose top is inclusive.
+  onBin?: (bin: { lo: number; hi: number; label: string; last: boolean }) => void;
+  // The range picked, drawn with the other bars dimmed.
+  selected?: { lo: number; hi: number } | null;
 }) {
   const titleId = useId();
   const [tip, setTip] = useState<Tip | null>(null);
@@ -488,20 +495,32 @@ export function Histogram({
           const x = (x0 + x1) / 2 - w / 2;
           const y = ys(b.count);
           const fill = shaded(b) ? UTIL_COLOR.retry : UTIL_COLOR.used;
+          const picked = selected ? b.lo >= selected.lo && b.hi <= selected.hi + 1e-9 : true;
+          const range = `${formatAxis(b.lo, unit)} – ${formatAxis(b.hi, unit)}`;
           return (
             <g key={i}>
-              <path d={barPath(x, y, w, plotBottom - y)} fill={fill} opacity={tip && tip.x === (x0 + x1) / 2 ? 0.8 : 1} />
+              <path
+                d={barPath(x, y, w, plotBottom - y)}
+                fill={fill}
+                opacity={!picked ? 0.3 : tip && tip.x === (x0 + x1) / 2 ? 0.8 : 1}
+              />
               <rect
                 x={x0}
                 y={top}
                 width={Math.max(1, x1 - x0)}
                 height={plotBottom - top}
                 fill="transparent"
+                className={onBin && b.count > 0 ? 'cursor-pointer' : undefined}
+                onClick={
+                  onBin && b.count > 0
+                    ? () => onBin({ lo: b.lo, hi: b.hi, label: range, last: i === bins.length - 1 })
+                    : undefined
+                }
                 onPointerEnter={() =>
                   setTip({
                     x: (x0 + x1) / 2,
                     y: Math.min(y, plotBottom - 8),
-                    title: `${formatAxis(b.lo, unit)} – ${formatAxis(b.hi, unit)}`,
+                    title: range,
                     rows: [{ label: barLabel, value: b.count.toLocaleString() }],
                   })
                 }
@@ -946,7 +965,18 @@ const SPAD = { top: 14, right: 26, bottom: 36, left: 56 };
  * per job, run time across, peak memory up, shaped and coloured by how it
  * ended. Shape carries the outcome too, so it reads without colour.
  */
-export function OutcomeScatter({ samples, request }: { samples: UtilSample[]; request: UtilRequest | null }) {
+export function OutcomeScatter({
+  samples,
+  request,
+  onPick,
+  picked,
+}: {
+  samples: UtilSample[];
+  request: UtilRequest | null;
+  // Clicking a mark picks its job, e.g. to find it in the job list.
+  onPick?: (s: UtilSample) => void;
+  picked?: string | null;
+}) {
   const titleId = useId();
   const [active, setActive] = useState<number | null>(null);
   const pts = useMemo(
@@ -985,7 +1015,7 @@ export function OutcomeScatter({ samples, request }: { samples: UtilSample[]; re
           return {
             x: xs(p.wall / tScale),
             y: ys(p.memory_mib),
-            title: o.label,
+            title: `${p.job} · ${o.label}`,
             rows: [
               { label: 'peak memory', value: formatMiB(p.memory_mib) },
               { label: 'run time', value: formatSeconds(p.wall) },
@@ -1011,7 +1041,7 @@ export function OutcomeScatter({ samples, request }: { samples: UtilSample[]; re
   return (
     <ChartFrame
       title="Run time and peak memory"
-      subtitle={`One mark per job${samples.length < 400 ? '' : ', for a sample of 400 jobs'}.`}
+      subtitle={`One mark per job${samples.length < 400 ? '' : ', for a sample of 400 jobs'}${onPick ? '; click one to find it in the list below' : ''}.`}
       width={SW}
       height={SH}
       tip={tip}
@@ -1072,16 +1102,42 @@ export function OutcomeScatter({ samples, request }: { samples: UtilSample[]; re
         {active !== null && (
           <circle cx={xs(pts[active].wall / tScale)} cy={ys(pts[active].memory_mib)} r={7} fill="none" stroke="#1a1a1a" strokeWidth={1.5} />
         )}
+        {pts
+          .filter((p) => picked && p.job === picked)
+          .map((p) => (
+            <circle
+              key={`picked-${p.job}`}
+              cx={xs(p.wall / tScale)}
+              cy={ys(p.memory_mib)}
+              r={8}
+              fill="none"
+              stroke={UTIL_COLOR.recommended}
+              strokeWidth={2}
+              data-testid="scatter-picked"
+              pointerEvents="none"
+            />
+          ))}
         <rect
           x={SPAD.left}
           y={SPAD.top}
           width={SW - SPAD.left - SPAD.right}
           height={SH - SPAD.top - SPAD.bottom}
           fill="transparent"
+          className={onPick ? 'cursor-pointer' : undefined}
           onPointerMove={(e) => {
             const pt = svgPoint(e, SW, SH);
             setActive(nearest(pt.x, pt.y));
           }}
+          onClick={
+            onPick
+              ? (e) => {
+                  const pt = svgPoint(e, SW, SH);
+                  const i = nearest(pt.x, pt.y);
+                  if (i !== null) onPick(pts[i]);
+                }
+              : undefined
+          }
+          data-testid="scatter-hit"
         />
       </svg>
     </ChartFrame>

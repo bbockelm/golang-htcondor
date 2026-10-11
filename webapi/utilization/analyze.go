@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,9 +16,11 @@ type Options struct {
 	Days         int
 	// Truncated says the read hit its cap.
 	Truncated bool
-	// ShowOwner names each workflow's owner, for a scope that covers
-	// more than one person's jobs.
+	// ShowOwner names each workflow's owner, and lists the owners, for a
+	// scope that covers more than one person's jobs.
 	ShowOwner bool
+	// Limit and MaxLimit are reported back as given.
+	Limit, MaxLimit int
 	// Machines is the pool's execute capacity, for the throughput
 	// estimate; nil when it is not known.
 	Machines []Machine
@@ -51,11 +52,15 @@ func Analyze(jobs []Job, opts Options) *Response {
 		Until:     opts.Until,
 		Days:      opts.Days,
 		Truncated: opts.Truncated,
+		Limit:     opts.Limit,
+		MaxLimit:  opts.MaxLimit,
 		Workflows: []Workflow{},
 		Overall:   Overall{Resources: []ResourceSummary{}},
 	}
 
-	groups := map[string]*group{}
+	// Keyed on the identity tuple itself; the opaque key is hashed once
+	// per workflow rather than once per job.
+	groups := map[identity]*group{}
 	var all []*Job
 	for i := range jobs {
 		j := &jobs[i]
@@ -63,14 +68,14 @@ func Analyze(jobs []Job, opts Options) *Response {
 			continue
 		}
 		all = append(all, j)
-		id := identify(j)
-		g := groups[id.key]
+		id, isDAG := identify(j)
+		g := groups[id]
 		if g == nil {
-			g = &group{id: id}
-			groups[id.key] = g
+			g = &group{id: id, key: id.hash()}
+			groups[id] = g
 		}
 		g.jobs = append(g.jobs, j)
-		g.isDAG = g.isDAG || id.isDAG
+		g.isDAG = g.isDAG || isDAG
 	}
 
 	resp.JobsConsidered = len(all)
@@ -82,6 +87,9 @@ func Analyze(jobs []Job, opts Options) *Response {
 	resp.Overall.WallHours = round(resp.Overall.WallHours, 3)
 	resp.Overall.BadputHours = round(resp.Overall.BadputHours, 3)
 	resp.Overall.Resources = resourceSummaries(all)
+	if opts.ShowOwner {
+		resp.Owners = ownerSummaries(all)
+	}
 
 	var occCurrent, occSuggested float64
 	anyThroughput := false
@@ -107,24 +115,66 @@ func Analyze(jobs []Job, opts Options) *Response {
 	return resp
 }
 
+// ownerSummaries is each owner's jobs and wall clock, most wall first.
+func ownerSummaries(jobs []*Job) []OwnerSummary {
+	index := map[string]int{}
+	out := []OwnerSummary{}
+	for _, j := range jobs {
+		k, ok := index[j.Owner]
+		if !ok {
+			k = len(out)
+			index[j.Owner] = k
+			out = append(out, OwnerSummary{Owner: j.Owner})
+		}
+		out[k].Jobs++
+		out[k].WallHours += hours(j.Wall)
+	}
+	for i := range out {
+		out[i].WallHours = round(out[i].WallHours, 3)
+	}
+	slices.SortFunc(out, func(a, b OwnerSummary) int {
+		if c := cmp.Compare(b.WallHours, a.WallHours); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Owner, b.Owner)
+	})
+	return out
+}
+
 // group is one workflow's jobs.
 type group struct {
 	id    identity
+	key   string
 	isDAG bool
 	jobs  []*Job
 }
 
 // identity is what makes two jobs the same workflow.
 type identity struct {
-	key, name, exe, owner, schedd string
-	isDAG                         bool
+	name, exe, owner, schedd string
 }
 
-// dagSuffix is what DAGMan appends to a node's JobBatchName: "+" and the
-// root DAG's cluster id. condor_submit_dag names the batch after the DAG
-// file and this suffix, so without stripping it every run of the same
-// DAG would be a different workflow.
-var dagSuffix = regexp.MustCompile(`\+(\d+)$`)
+// hash is the workflow's opaque, stable key.
+func (id identity) hash() string {
+	sum := sha256.Sum256([]byte(id.owner + "\x00" + id.name + "\x00" + id.exe + "\x00" + id.schedd))
+	return hex.EncodeToString(sum[:6])
+}
+
+// dagSuffix splits what DAGMan appends to a node's JobBatchName: "+" and
+// the root DAG's cluster id. condor_submit_dag names the batch after the
+// DAG file and this suffix, so without stripping it every run of the
+// same DAG would be a different workflow.
+func dagSuffix(batch string) (name string, root int64, ok bool) {
+	i := strings.LastIndexByte(batch, '+')
+	if i < 0 || i == len(batch)-1 {
+		return batch, 0, false
+	}
+	n, err := strconv.ParseInt(batch[i+1:], 10, 64)
+	if err != nil || n < 0 {
+		return batch, 0, false
+	}
+	return batch[:i], n, true
+}
 
 // identify works out which workflow a job belongs to.
 //
@@ -135,25 +185,18 @@ var dagSuffix = regexp.MustCompile(`\+(\d+)$`)
 // cluster is one workflow, and a DAG whose nodes run three executables is
 // three, because each node type has its own profile and its own submit
 // file to change.
-func identify(j *Job) identity {
-	id := identity{exe: executableBase(j.Cmd), owner: j.Owner, schedd: j.Schedd}
+func identify(j *Job) (id identity, isDAG bool) {
+	id = identity{exe: executableBase(j.Cmd), owner: j.Owner, schedd: j.Schedd}
 	if id.exe == "" {
 		id.exe = "(unknown)"
 	}
-	id.name = j.BatchName
-	if m := dagSuffix.FindStringIndex(j.BatchName); m != nil {
-		id.name = j.BatchName[:m[0]]
-		id.isDAG = true
-	}
-	if j.DAGManJobID > 0 {
-		id.isDAG = true
-	}
+	name, _, suffixed := dagSuffix(j.BatchName)
+	id.name = name
+	isDAG = suffixed || j.DAGManJobID > 0
 	if id.name == "" {
 		id.name = id.exe
 	}
-	sum := sha256.Sum256([]byte(id.owner + "\x00" + id.name + "\x00" + id.exe + "\x00" + id.schedd))
-	id.key = hex.EncodeToString(sum[:6])
-	return id
+	return id, isDAG
 }
 
 // batchOf is the submission a job belongs to: its cluster, or for a DAG
@@ -161,10 +204,8 @@ func identify(j *Job) identity {
 // suffix. A DAG submitted with its own batch name has no suffix; its
 // nodes are grouped by the DAGMan job that ran them.
 func batchOf(j *Job) int64 {
-	if m := dagSuffix.FindStringSubmatch(j.BatchName); m != nil {
-		if root, err := strconv.ParseInt(m[1], 10, 64); err == nil {
-			return root
-		}
+	if _, root, ok := dagSuffix(j.BatchName); ok {
+		return root
 	}
 	if j.DAGManJobID > 0 {
 		return j.DAGManJobID
@@ -187,10 +228,10 @@ func badput(j *Job) float64 {
 // CommittedTime is the wall clock of runs that counted, so the rest was
 // evicted without a checkpoint.
 func lostToRestarts(j *Job) float64 {
-	if j.CommittedTime == nil {
+	if !j.CommittedTime.OK() {
 		return 0
 	}
-	lost := j.Wall - *j.CommittedTime
+	lost := j.Wall - j.CommittedTime.V()
 	if lost < 1 {
 		return 0
 	}
@@ -208,36 +249,36 @@ func resourceSummaries(jobs []*Job) []ResourceSummary {
 	anyGPU := false
 	for _, j := range jobs {
 		wh := hours(j.Wall)
-		if j.RequestCpus != nil {
-			cpu.alloc += *j.RequestCpus * wh
-			if c := j.coresUsed(); c != nil {
-				cpu.used += *c * wh
-				cpu.allocMeasured += *j.RequestCpus * wh
+		if j.RequestCpus.OK() {
+			cpu.alloc += j.RequestCpus.V() * wh
+			if c, ok := j.coresUsed(); ok {
+				cpu.used += c * wh
+				cpu.allocMeasured += j.RequestCpus.V() * wh
 				cpu.measured++
 			}
 		}
-		if j.RequestMemory != nil {
-			mem.alloc += *j.RequestMemory * wh
-			if j.MemoryUsage != nil {
-				mem.used += *j.MemoryUsage * wh
-				mem.allocMeasured += *j.RequestMemory * wh
+		if j.RequestMemory.OK() {
+			mem.alloc += j.RequestMemory.V() * wh
+			if j.MemoryUsage.OK() {
+				mem.used += j.MemoryUsage.V() * wh
+				mem.allocMeasured += j.RequestMemory.V() * wh
 				mem.measured++
 			}
 		}
-		if j.RequestDisk != nil {
-			disk.alloc += *j.RequestDisk * wh
-			if j.DiskUsage != nil {
-				disk.used += *j.DiskUsage * wh
-				disk.allocMeasured += *j.RequestDisk * wh
+		if j.RequestDisk.OK() {
+			disk.alloc += j.RequestDisk.V() * wh
+			if j.DiskUsage.OK() {
+				disk.used += j.DiskUsage.V() * wh
+				disk.allocMeasured += j.RequestDisk.V() * wh
 				disk.measured++
 			}
 		}
-		if j.RequestGPUs != nil && *j.RequestGPUs > 0 {
+		if j.RequestGPUs.OK() && j.RequestGPUs.V() > 0 {
 			anyGPU = true
-			gpu.alloc += *j.RequestGPUs * wh
-			if j.GPUUtilization() != nil {
-				gpu.used += *j.GPUsAverageUsage * wh
-				gpu.allocMeasured += *j.RequestGPUs * wh
+			gpu.alloc += j.RequestGPUs.V() * wh
+			if _, ok := j.GPUUtilization(); ok {
+				gpu.used += j.GPUsAverageUsage.V() * wh
+				gpu.allocMeasured += j.RequestGPUs.V() * wh
 				gpu.measured++
 			}
 		}
@@ -281,7 +322,7 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	})
 
 	w := Workflow{
-		Key:        g.id.key,
+		Key:        g.key,
 		Name:       g.id.name,
 		Executable: g.id.exe,
 		Schedd:     g.id.schedd,
@@ -293,8 +334,13 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 		w.Owner = g.id.owner
 	}
 
-	var walls, memReq, peaks, cpuReq, cores, eff, diskReq, diskUsed, gpuReq, gpuUtil []float64
-	var memJobs []memoryJob
+	// Sized for the workflow up front: at a million jobs, growing a dozen
+	// slices by doubling is most of the garbage an analysis makes.
+	n := len(g.jobs)
+	walls, memReq, peaks := make([]float64, 0, n), make([]float64, 0, n), make([]float64, 0, n)
+	cpuReq, cores, eff := make([]float64, 0, n), make([]float64, 0, n), make([]float64, 0, n)
+	diskReq, diskUsed := make([]float64, 0, n), make([]float64, 0, n)
+	memJobs := make([]memoryJob, 0, n)
 	var restartLost float64
 	for _, j := range g.jobs {
 		w.WallHours += hours(j.Wall)
@@ -317,39 +363,33 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 			if j.Wall < shortJobWall {
 				w.ShortJobs++
 			}
-			if lost := lostToRestarts(j); lost > 0 || (j.CommittedTime == nil && j.NumJobStarts > 1) {
+			if lost := lostToRestarts(j); lost > 0 || (!j.CommittedTime.OK() && j.NumJobStarts > 1) {
 				w.Restarts.Jobs++
 				restartLost += lost
 			}
 		}
 
-		if j.RequestMemory != nil {
-			memReq = append(memReq, *j.RequestMemory)
+		if j.RequestMemory.OK() {
+			memReq = append(memReq, j.RequestMemory.V())
 		}
 		if mj, ok := memorySample(j); ok {
 			memJobs = append(memJobs, mj)
 			peaks = append(peaks, mj.peak)
 		}
-		if j.RequestCpus != nil {
-			cpuReq = append(cpuReq, *j.RequestCpus)
+		if j.RequestCpus.OK() {
+			cpuReq = append(cpuReq, j.RequestCpus.V())
 		}
-		if c := j.coresUsed(); c != nil {
-			cores = append(cores, *c)
-			if j.RequestCpus != nil && *j.RequestCpus > 0 {
-				eff = append(eff, *c / *j.RequestCpus)
+		if c, ok := j.coresUsed(); ok {
+			cores = append(cores, c)
+			if j.RequestCpus.OK() && j.RequestCpus.V() > 0 {
+				eff = append(eff, c/j.RequestCpus.V())
 			}
 		}
-		if j.RequestDisk != nil {
-			diskReq = append(diskReq, *j.RequestDisk)
+		if j.RequestDisk.OK() {
+			diskReq = append(diskReq, j.RequestDisk.V())
 		}
-		if j.DiskUsage != nil {
-			diskUsed = append(diskUsed, *j.DiskUsage)
-		}
-		if j.RequestGPUs != nil && *j.RequestGPUs > 0 {
-			gpuReq = append(gpuReq, *j.RequestGPUs)
-			if u := j.GPUUtilization(); u != nil {
-				gpuUtil = append(gpuUtil, *u)
-			}
+		if j.DiskUsage.OK() {
+			diskUsed = append(diskUsed, j.DiskUsage.V())
 		}
 	}
 	w.WallHours = round(w.WallHours, 3)
@@ -358,9 +398,7 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	w.Memory = MemoryStats{Request: summarizeRequest(memReq), PeakMiB: distribution(peaks)}
 	w.CPU = CPUStats{Request: summarizeRequest(cpuReq), CoresUsed: distribution(cores), Efficiency: distribution(eff)}
 	w.Disk = DiskStats{Request: summarizeRequest(diskReq), UsedKiB: distribution(diskUsed)}
-	if len(gpuReq) > 0 {
-		w.GPU = &GPUStats{Request: summarizeRequest(gpuReq), Utilization: distribution(gpuUtil)}
-	}
+	w.GPU = gpuStats(g.jobs)
 
 	plan := planMemory(memJobs)
 	w.MemoryCurve = []MemoryCurvePoint{}
@@ -375,6 +413,44 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	return w, occ
 }
 
+// gpuStats summarizes the jobs that requested GPUs; nil when none did.
+func gpuStats(jobs []*Job) *GPUStats {
+	var req, util, mem, device, cores []float64
+	for _, j := range jobs {
+		if !j.RequestGPUs.OK() || j.RequestGPUs.V() <= 0 {
+			continue
+		}
+		req = append(req, j.RequestGPUs.V())
+		if u, ok := j.GPUUtilization(); ok {
+			util = append(util, u)
+		}
+		if j.GPUsMemoryUsage.OK() {
+			mem = append(mem, j.GPUsMemoryUsage.V())
+		}
+		if j.GPUDeviceMemory.OK() {
+			device = append(device, j.GPUDeviceMemory.V())
+		}
+		if c, ok := j.coresUsed(); ok {
+			cores = append(cores, c)
+		}
+	}
+	if len(req) == 0 {
+		return nil
+	}
+	g := &GPUStats{
+		Request:           summarizeRequest(req),
+		Jobs:              len(req),
+		Measured:          len(util),
+		Utilization:       distribution(util),
+		MemoryPeakMiB:     distribution(mem),
+		CoresUsedWhileGPU: distribution(cores),
+	}
+	if r := summarizeRequest(device); r != nil {
+		g.DeviceMemoryMiB = ptr(r.Typical, 0)
+	}
+	return g
+}
+
 // memorySample is the job as memory sizing sees it, if it should see it
 // at all.
 //
@@ -387,15 +463,15 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 // size the next submission from the jobs that happened to fit, which is
 // exactly the mistake that got it stopped.
 func memorySample(j *Job) (memoryJob, bool) {
-	if j.RequestMemory == nil {
+	if !j.RequestMemory.OK() {
 		return memoryJob{}, false
 	}
-	mj := memoryJob{wallHours: hours(j.Wall), request: *j.RequestMemory}
+	mj := memoryJob{wallHours: hours(j.Wall), request: j.RequestMemory.V()}
 	switch {
-	case j.Status == statusCompleted && j.MemoryUsage != nil:
-		mj.peak = *j.MemoryUsage
+	case j.Status == statusCompleted && j.MemoryUsage.OK():
+		mj.peak = j.MemoryUsage.V()
 	case j.Status == statusRemoved && j.ExceededMemory:
-		mj.peak = max(orZero(j.MemoryUsage), *j.RequestMemory)
+		mj.peak = max(orZero(j.MemoryUsage), j.RequestMemory.V())
 		mj.atLeast = true
 	default:
 		return memoryJob{}, false
@@ -406,37 +482,85 @@ func memorySample(j *Job) (memoryJob, bool) {
 // batches is one point per submission, the most recent maxBatches,
 // oldest first.
 func batches(g *group) []BatchPoint {
-	byID := map[int64][]*Job{}
-	var order []int64
+	// Which batches: only the most recent maxBatches are reported, so
+	// their summaries are all that is computed. A workflow of a million
+	// jobs in ten thousand clusters would otherwise build ten thousand
+	// summaries to keep fifty.
+	type seen struct {
+		id        int64
+		submitted int64
+		jobs      int
+	}
+	index := map[int64]int{}
+	var all []seen
 	for _, j := range g.jobs {
 		id := batchOf(j)
-		if _, ok := byID[id]; !ok {
-			order = append(order, id)
+		k, ok := index[id]
+		if !ok {
+			k = len(all)
+			index[id] = k
+			all = append(all, seen{id: id, submitted: j.QDate})
 		}
-		byID[id] = append(byID[id], j)
+		b := &all[k]
+		b.jobs++
+		if j.QDate > 0 && (b.submitted <= 0 || j.QDate < b.submitted) {
+			b.submitted = j.QDate
+		}
 	}
-	out := make([]BatchPoint, 0, len(order))
-	for _, id := range order {
-		jobs := byID[id]
-		p := BatchPoint{ID: id, Jobs: len(jobs), Submitted: jobs[0].QDate}
-		var memReq, peaks, cpuReq, cores, walls []float64
+	slices.SortStableFunc(all, func(a, b seen) int {
+		if c := cmp.Compare(a.submitted, b.submitted); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.id, b.id)
+	})
+	if len(all) > maxBatches {
+		all = all[len(all)-maxBatches:]
+	}
+	keep := make(map[int64]int, len(all))
+	members := make([][]*Job, len(all))
+	for k, b := range all {
+		keep[b.id] = k
+		members[k] = make([]*Job, 0, b.jobs)
+	}
+	for _, j := range g.jobs {
+		if k, ok := keep[batchOf(j)]; ok {
+			members[k] = append(members[k], j)
+		}
+	}
+
+	out := make([]BatchPoint, 0, len(all))
+	for k, b := range all {
+		jobs := members[k]
+		p := BatchPoint{ID: b.id, Jobs: b.jobs, Submitted: b.submitted}
+		var memReq, peaks, cpuReq, cores, gpuReq, gpuUtil []float64
+		walls := make([]float64, 0, len(jobs))
 		for _, j := range jobs {
-			if j.QDate > 0 && (p.Submitted <= 0 || j.QDate < p.Submitted) {
-				p.Submitted = j.QDate
-			}
-			if j.RequestMemory != nil {
-				memReq = append(memReq, *j.RequestMemory)
+			if j.RequestMemory.OK() {
+				memReq = append(memReq, j.RequestMemory.V())
 			}
 			if mj, ok := memorySample(j); ok {
 				peaks = append(peaks, mj.peak)
 			}
-			if j.RequestCpus != nil {
-				cpuReq = append(cpuReq, *j.RequestCpus)
+			if j.RequestCpus.OK() {
+				cpuReq = append(cpuReq, j.RequestCpus.V())
 			}
-			if c := j.coresUsed(); c != nil {
-				cores = append(cores, *c)
+			if c, ok := j.coresUsed(); ok {
+				cores = append(cores, c)
 			}
 			walls = append(walls, j.Wall)
+			if j.RequestGPUs.OK() && j.RequestGPUs.V() > 0 {
+				gpuReq = append(gpuReq, j.RequestGPUs.V())
+				if u, ok := j.GPUUtilization(); ok {
+					gpuUtil = append(gpuUtil, u)
+				}
+			}
+		}
+		if r := summarizeRequest(gpuReq); r != nil {
+			p.GPURequest = ptr(r.Typical, 3)
+		}
+		if len(gpuUtil) > 0 {
+			slices.Sort(gpuUtil)
+			p.GPUUtilP50 = ptr(percentile(gpuUtil, 50), 3)
 		}
 		if r := summarizeRequest(memReq); r != nil {
 			p.MemoryRequestMiB = ptr(r.Typical, 3)
@@ -456,15 +580,6 @@ func batches(g *group) []BatchPoint {
 		p.WallP50 = ptr(percentile(walls, 50), 1)
 		out = append(out, p)
 	}
-	slices.SortStableFunc(out, func(a, b BatchPoint) int {
-		if c := cmp.Compare(a.Submitted, b.Submitted); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.ID, b.ID)
-	})
-	if len(out) > maxBatches {
-		out = out[len(out)-maxBatches:]
-	}
 	return out
 }
 
@@ -477,15 +592,15 @@ func samples(jobs []*Job) []Sample {
 	out := make([]Sample, 0, k)
 	for i := range k {
 		j := jobs[i*n/k]
-		s := Sample{Wall: round(j.Wall, 1), Outcome: j.outcome()}
-		if j.MemoryUsage != nil {
-			s.MemoryMiB = ptr(*j.MemoryUsage, 1)
+		s := Sample{Job: j.id(), Wall: round(j.Wall, 1), Outcome: j.outcome()}
+		if j.MemoryUsage.OK() {
+			s.MemoryMiB = ptr(j.MemoryUsage.V(), 1)
 		}
-		if c := j.coresUsed(); c != nil {
-			s.Cores = ptr(*c, 3)
+		if c, ok := j.coresUsed(); ok {
+			s.Cores = ptr(c, 3)
 		}
-		if j.DiskUsage != nil {
-			s.DiskKiB = ptr(*j.DiskUsage, 0)
+		if j.DiskUsage.OK() {
+			s.DiskKiB = ptr(j.DiskUsage.V(), 0)
 		}
 		out = append(out, s)
 	}

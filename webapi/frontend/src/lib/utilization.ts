@@ -18,6 +18,27 @@ export interface UtilizationResponse {
   truncated: boolean; // hit the server cap; analysis covers the most recent jobs_considered
   overall: UtilOverall;
   workflows: UtilWorkflow[]; // default order: wall_hours desc
+  limit: number; // the limit actually applied
+  max_limit: number; // the server's ceiling, so the page can offer "analyze more"
+  // Owners present in the analyzed jobs, by wall_hours desc; only when the
+  // scope can see other users.
+  owners?: UtilOwner[];
+}
+
+export interface UtilOwner {
+  owner: string;
+  jobs: number;
+  wall_hours: number;
+}
+
+export interface UtilGpu {
+  request: UtilRequest | null;
+  jobs: number; // jobs that requested >= 1 GPU
+  measured: number; // of those, jobs with a utilization measurement
+  utilization: UtilDistribution | null; // fraction of requested GPUs kept busy
+  memory_peak_mib: UtilDistribution | null; // peak GPU memory per job
+  device_memory_mib: number | null; // typical memory of the GPUs the jobs ran on, when known
+  cores_used_while_gpu: UtilDistribution | null; // CPU cores used by GPU jobs
 }
 
 export interface UtilOverall {
@@ -69,6 +90,8 @@ export interface UtilBatchPoint {
   cpu_request: number | null; // typical
   cpu_cores_p50: number | null;
   wall_p50: number | null; // seconds
+  gpu_request: number | null; // typical request_gpus of the batch's GPU jobs; null when none requested GPUs
+  gpu_util_p50: number | null; // median fraction of requested GPUs kept busy; null when unmeasured
 }
 
 export interface UtilSample {
@@ -77,6 +100,7 @@ export interface UtilSample {
   cores: number | null;
   disk_kib: number | null;
   outcome: 'ok' | 'failed' | 'removed' | 'memory_exceeded';
+  job: string; // "cluster.proc", the same form as UtilJobRow.id
 }
 
 export interface UtilMemoryCurvePoint {
@@ -123,7 +147,7 @@ export interface UtilWorkflow {
     efficiency: UtilDistribution | null;
   };
   disk: { request: UtilRequest | null; used_kib: UtilDistribution | null };
-  gpu: { request: UtilRequest | null; utilization: UtilDistribution | null } | null;
+  gpu: UtilGpu | null; // null when no job requested GPUs
   memory_curve: UtilMemoryCurvePoint[];
   advice: UtilAdvice[];
   batches: UtilBatchPoint[];
@@ -329,9 +353,15 @@ export function idleHours(s: UtilResourceSummary): number | null {
 export const RESOURCE_ORDER: UtilResource[] = ['cpu', 'memory', 'disk', 'gpu'];
 
 export function sortResources(rs: UtilResourceSummary[]): UtilResourceSummary[] {
-  return [...rs].sort(
-    (a, b) => RESOURCE_ORDER.indexOf(a.resource) - RESOURCE_ORDER.indexOf(b.resource),
-  );
+  // GPUs lead whenever any job reserved one: they are the most expensive
+  // thing a job can ask for, and the scarcest.
+  const order = gpuReserved(rs) ? (['gpu', 'cpu', 'memory', 'disk'] as UtilResource[]) : RESOURCE_ORDER;
+  return [...rs].sort((a, b) => order.indexOf(a.resource) - order.indexOf(b.resource));
+}
+
+/** gpuReserved says whether any job in the summary reserved a GPU. */
+export function gpuReserved(rs: UtilResourceSummary[]): boolean {
+  return rs.some((r) => r.resource === 'gpu' && r.allocated_hours > 0);
 }
 
 // --- Advice ---
@@ -345,15 +375,20 @@ export interface RankedAdvice {
 }
 
 /**
- * compareAdvice orders advice by severity, then by how much it saves,
- * then by how sure it is. Savings in different units are compared by
- * amount: there is no fair exchange rate between a core-hour and a
- * GB-hour, and within a severity the bigger number is usually the bigger
- * waste anyway.
+ * compareAdvice orders advice by severity, then GPU-hour savings ahead
+ * of any other, then by how much it saves, then by how sure it is. Core-
+ * and GB-hour savings are compared by amount: there is no fair exchange
+ * rate between them, and within a severity the bigger number is usually
+ * the bigger waste anyway.
  */
 export function compareAdvice(a: UtilAdvice, b: UtilAdvice): number {
   const s = SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity];
   if (s !== 0) return s;
+  // A GPU-hour outranks a core-hour or a GB-hour: it is the scarcest
+  // and most expensive thing in the pool.
+  const ag = a.saves?.unit === 'gpu_hours' ? 0 : 1;
+  const bg = b.saves?.unit === 'gpu_hours' ? 0 : 1;
+  if (ag !== bg) return ag - bg;
   const as = a.saves?.amount ?? -1;
   const bs = b.saves?.amount ?? -1;
   if (as !== bs) return bs - as;
@@ -575,4 +610,161 @@ export function throughputAdviceId(w: UtilWorkflow): string | null {
 /** changesRequest says whether an advice card is one the estimate covers. */
 export function changesRequest(a: UtilAdvice): boolean {
   return (a.resource === 'memory' || a.resource === 'cpu' || a.resource === 'disk') && a.submit.length > 0;
+}
+
+// --- Filters, owners, more jobs ---
+
+/**
+ * filterWorkflows narrows the workflows the page already has by a typed
+ * substring: name, executable, owner or access point, ignoring case.
+ */
+export function filterWorkflows(ws: UtilWorkflow[], text: string): UtilWorkflow[] {
+  const q = text.trim().toLowerCase();
+  if (!q) return ws;
+  return ws.filter((w) =>
+    [w.name, w.executable, w.owner, w.schedd].some((f) => f !== undefined && f.toLowerCase().includes(q)),
+  );
+}
+
+/** parseOwners reads the comma-separated owner list from the URL. */
+export function parseOwners(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  return [...new Set(raw.split(',').map((o) => o.trim()).filter(Boolean))];
+}
+
+/** parseLimit reads the job limit from the URL; nothing usable is no limit. */
+export function parseLimit(raw: string | null | undefined): number | undefined {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+export interface MoreOption {
+  limit: number;
+  label: string;
+}
+
+/**
+ * moreOptions offers bigger analyses after a truncated one: five times
+ * the current limit when that is short of the ceiling, and the ceiling.
+ */
+export function moreOptions(limit: number, max: number): MoreOption[] {
+  if (!(max > limit)) return [];
+  const out: MoreOption[] = [];
+  const next = limit * 5;
+  if (next < max) out.push({ limit: next, label: `Analyze up to ${next.toLocaleString('en-US')} jobs` });
+  out.push({
+    limit: max,
+    label: out.length ? `all, up to ${max.toLocaleString('en-US')}` : `Analyze all, up to ${max.toLocaleString('en-US')} jobs`,
+  });
+  return out;
+}
+
+/**
+ * splitSingles separates workflows of exactly one job, which the table
+ * folds into a single row: on a busy pool there can be hundreds of
+ * one-off test runs, each a row with nothing to compare.
+ */
+export function splitSingles(ws: UtilWorkflow[]): { multi: UtilWorkflow[]; singles: UtilWorkflow[] } {
+  const multi: UtilWorkflow[] = [];
+  const singles: UtilWorkflow[] = [];
+  for (const w of ws) (w.jobs === 1 ? singles : multi).push(w);
+  // One single is not worth a group row of its own.
+  if (singles.length < 2) return { multi: ws, singles: [] };
+  return { multi, singles };
+}
+
+// --- Jobs in a workflow (GET /api/v1/utilization/jobs) ---
+
+export type UtilJobSort =
+  | 'completed'
+  | 'submitted'
+  | 'wall'
+  | 'memory'
+  | 'cores'
+  | 'efficiency'
+  | 'disk'
+  | 'gpu';
+
+export interface UtilJobsResponse {
+  key: string; // the workflow key asked for
+  total: number; // jobs in this workflow within the analysed set
+  offset: number; // offset of jobs[0]
+  next_offset: number | null; // pass as `offset` for the next page; null at the end
+  sort: UtilJobSort;
+  order: 'asc' | 'desc';
+  truncated: boolean; // the analysis read hit `limit`
+  jobs: UtilJobRow[];
+}
+
+export interface UtilJobRow {
+  id: string; // "cluster.proc"
+  cluster: number;
+  proc: number;
+  schedd?: string; // multi-AP only
+  owner: string;
+  submitted: number | null; // unix seconds (QDate)
+  started: number | null; // unix seconds, first start (JobStartDate)
+  completed: number | null; // unix seconds: CompletionDate, or when a removed job left the queue
+  outcome: 'ok' | 'failed' | 'removed' | 'memory_exceeded';
+  exit_code: number | null;
+  exit_by_signal: boolean;
+  wall: number; // seconds, all runs (RemoteWallClockTime)
+  request: {
+    memory_mib: number | null;
+    cpus: number | null;
+    disk_kib: number | null;
+    gpus: number | null; // null when the job requested none
+  };
+  memory_peak_mib: number | null;
+  cores_used: number | null; // CPU seconds / wall seconds; null under 60 s of wall or unmeasured
+  cpu_efficiency: number | null; // cores_used / request.cpus, a fraction
+  disk_used_kib: number | null;
+  gpu_utilization: number | null; // fraction of the requested GPUs kept busy
+  gpu_memory_peak_mib: number | null;
+  restarts: number; // max(0, NumJobStarts - 1)
+  held_for_memory: boolean;
+  held_for_disk: boolean;
+}
+
+/**
+ * JobFocus is a range picked on one of the workflow's charts -- a bin of
+ * the peak-memory histogram, say -- that the job list highlights.
+ */
+export interface JobFocus {
+  sort: Extract<UtilJobSort, 'memory' | 'cores' | 'disk' | 'gpu'>;
+  lo: number; // inclusive
+  hi: number; // exclusive, except for the last bin
+  label: string; // "peak memory 1.5–1.8 GB"
+  // One job picked (a point of the scatter): only it is marked, and the
+  // range is its own value, so the list sorts it among its neighbours.
+  job?: string;
+}
+
+/** jobFocusValue is a job's value on the axis a focus was picked from. */
+export function jobFocusValue(row: UtilJobRow, sort: JobFocus['sort']): number | null {
+  switch (sort) {
+    case 'memory':
+      return row.memory_peak_mib;
+    case 'cores':
+      return row.cores_used;
+    case 'disk':
+      return row.disk_used_kib;
+    case 'gpu':
+      return row.gpu_utilization;
+  }
+}
+
+/** inFocus says whether a job falls in a picked range. */
+export function inFocus(row: UtilJobRow, focus: JobFocus | null, closed = false): boolean {
+  if (!focus) return false;
+  if (focus.job !== undefined) return row.id === focus.job;
+  const v = jobFocusValue(row, focus.sort);
+  if (v === null) return false;
+  return v >= focus.lo && (closed ? v <= focus.hi : v < focus.hi);
+}
+
+/** jobArchiveHref links a finished job to its record. */
+export function jobArchiveHref(row: Pick<UtilJobRow, 'id' | 'schedd'>): string {
+  const id = row.schedd ? `${row.id}@${row.schedd}` : row.id;
+  return `/archive/${encodeURIComponent(id)}`;
 }
