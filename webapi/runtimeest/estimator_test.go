@@ -46,29 +46,26 @@ func TestWarmingUpUntilFirstIngest(t *testing.T) {
 	}
 }
 
-// A level needs three samples to answer, and global thirty.
+// An owner-confined level answers from a single earlier run -- they are
+// the owner's own jobs -- while global needs thirty.
 func TestMinimumSamples(t *testing.T) {
 	e := New(Config{})
-	ingest(e, job{feat("alice", "x"), 100, t0}, job{feat("alice", "x"), 100, t0.Add(time.Second)})
-	if r := e.Estimate(Query{Features: feat("alice", "x")}); r.Available {
-		t.Fatalf("two samples answered: %+v", r)
-	}
-	ingest(e, job{feat("alice", "x"), 100, t0.Add(2 * time.Second)})
+	ingest(e, job{feat("alice", "x"), 100, t0})
 	r := e.Estimate(Query{Features: feat("alice", "x")})
-	if !r.Available || r.EstimateSeconds != 100 {
-		t.Fatalf("three samples: %+v", r)
+	if !r.Available || r.EstimateSeconds != 100 || r.Basis.SampleCount != 1 {
+		t.Fatalf("one earlier run: %+v", r)
 	}
-	// Bob has nothing of his own and global has only three jobs.
+	// Bob has nothing of his own and global has only one job.
 	if r := e.Estimate(Query{Features: feat("bob", "x")}); r.Available || r.Reason != ReasonInsufficientHistory {
 		t.Fatalf("bob with a thin global: %+v", r)
 	}
 	var more []job
-	for i := range 30 {
+	for i := range 29 {
 		more = append(more, job{feat("carol", "y"), 500, t0.Add(time.Duration(10+i) * time.Second)})
 	}
 	ingest(e, more...)
 	r = e.Estimate(Query{Features: feat("bob", "x")})
-	if !r.Available || r.Basis.Level != "global" {
+	if !r.Available || r.Basis.Level != "global" || r.Basis.SampleCount != 30 {
 		t.Fatalf("bob with a full global: %+v", r)
 	}
 }
@@ -76,25 +73,19 @@ func TestMinimumSamples(t *testing.T) {
 // With no track record the most specific available level answers.
 func TestMostSpecificLevelAnswersByDefault(t *testing.T) {
 	e := New(Config{})
-	var jobs []job
-	for i := range 3 {
-		// Same cluster, same command.
-		f := Features{Owner: "alice", ClusterID: 5, Cmd: "sim", Args: []string{"--n", "1"}}
-		jobs = append(jobs, job{f, 1000, t0.Add(time.Duration(i) * time.Second)})
-	}
-	for i := range 3 {
-		// Other runs of the same command, much shorter.
-		f := Features{Owner: "alice", ClusterID: int64(10 + i), Cmd: "sim", Args: []string{"--n", "2"}}
-		jobs = append(jobs, job{f, 10, t0.Add(time.Duration(10+i) * time.Second)})
-	}
-	ingest(e, jobs...)
+	// One job: nothing came before it, so nothing has been scored.
+	ingest(e, job{Features{Owner: "alice", ClusterID: 5, Cmd: "sim", Args: []string{"--n", "1"}}, 1000, t0})
 	r := e.Estimate(Query{Features: Features{Owner: "alice", ClusterID: 5, Cmd: "sim", Args: []string{"--n", "1"}}})
 	if r.Basis == nil || r.Basis.Level != "cluster" || r.EstimateSeconds != 1000 {
 		t.Fatalf("got %+v, want the cluster level", r)
 	}
-	r = e.Estimate(Query{Features: Features{Owner: "alice", ClusterID: 99, Cmd: "sim", Args: []string{"--n", "7"}}})
-	if r.Basis == nil || r.Basis.Level != "template" || r.Basis.SampleCount != 6 {
-		t.Fatalf("got %+v, want the template level over all six", r)
+	r = e.Estimate(Query{Features: Features{Owner: "alice", ClusterID: 6, Cmd: "sim", Args: []string{"--n", "1"}}})
+	if r.Basis == nil || r.Basis.Level != "exact" {
+		t.Fatalf("got %+v, want the exact level", r)
+	}
+	r = e.Estimate(Query{Features: Features{Owner: "alice", ClusterID: 6, Cmd: "sim", Args: []string{"--n", "7"}}})
+	if r.Basis == nil || r.Basis.Level != "template" {
+		t.Fatalf("got %+v, want the template level", r)
 	}
 }
 
@@ -166,8 +157,6 @@ func TestScoresMoveSelectionToTheBetterLevel(t *testing.T) {
 func TestPrequentialOrder(t *testing.T) {
 	e := New(Config{})
 	f := feat("alice", "x")
-	// The newest first: applied in batch order, the 1000s job would be
-	// scored against nothing, and the third 100s job against two.
 	ingest(e,
 		job{f, 1000, t0.Add(3 * time.Second)},
 		job{f, 100, t0},
@@ -175,23 +164,36 @@ func TestPrequentialOrder(t *testing.T) {
 		job{f, 100, t0.Add(time.Second)},
 	)
 	st := e.Stats()
-	if st.Scored != 1 {
-		t.Fatalf("scored = %d, want 1: only the last job had three before it", st.Scored)
+	if st.Scored != 3 {
+		t.Fatalf("scored = %d, want 3: every job but the first had one before it", st.Scored)
 	}
-	if st.Within2x != 0 {
-		t.Errorf("within2x = %d: 1000s against a median of 100s is not within 2x", st.Within2x)
+	// 100 against 100, 200 against 100 (exactly 2x), 1000 against 100.
+	if st.Within2x != 2 {
+		t.Errorf("within2x = %d, want 2", st.Within2x)
 	}
-	// The residual is against the median of the three before it (100),
-	// not of all four (150), which is what it would be had it seen itself.
+	// In completion order, each against the median of the ones before
+	// it -- the last against 100, not the 150 it would be had it seen
+	// itself.
 	res := e.st.owners["alice"].resid.ring
-	if len(res) != 1 {
+	want := []float64{0, math.Log(2), math.Log(10)}
+	if len(res) != len(want) {
 		t.Fatalf("residuals = %v", res)
 	}
-	if want := math.Log(1000.0 / 100); math.Abs(float64(res[0])-want) > 1e-5 {
-		t.Errorf("residual = %v, want log(1000/100) = %v", res[0], want)
+	for i, w := range want {
+		if math.Abs(float64(res[i])-w) > 1e-5 {
+			t.Errorf("residual %d = %v, want %v", i, res[i], w)
+		}
 	}
-	if st.ScoredByLevel["exact"] != 1 {
-		t.Errorf("scored by level = %v", st.ScoredByLevel)
+}
+
+// Within 2x is judged on the same floored error the scores use, so a 3s
+// job predicted as 1s is not a miss.
+func TestWithin2xUsesTheFlooredError(t *testing.T) {
+	e := New(Config{})
+	f := feat("alice", "x")
+	ingest(e, job{f, 1, t0}, job{f, 3, t0.Add(time.Second)})
+	if st := e.Stats(); st.Scored != 1 || st.Within2x != 1 {
+		t.Errorf("stats = %+v", st)
 	}
 }
 

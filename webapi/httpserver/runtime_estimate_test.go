@@ -504,9 +504,9 @@ htcondor_api_runtime_estimate_last_refresh_timestamp_seconds %d
 `, n)), "htcondor_api_runtime_estimate_last_refresh_timestamp_seconds"); err != nil {
 		t.Error(err)
 	}
-	// Jobs 4 and 5 had three before them in the exact group.
+	// Jobs 2-5 each had one or more before them in the exact group.
 	st := h.runtimeEst.Stats()
-	if st.ScoredByLevel["exact"] != 2 || st.Within2xByLevel["exact"] != 2 {
+	if st.ScoredByLevel["exact"] != 4 || st.Within2xByLevel["exact"] != 4 {
 		t.Errorf("self-evaluation: %+v", st)
 	}
 }

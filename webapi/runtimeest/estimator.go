@@ -51,12 +51,18 @@ const (
 )
 
 const (
-	// minSamples is the fewest runtimes a group needs before it may
-	// answer. Below it a median is one or two anecdotes.
-	minSamples = 3
+	// minSamples is the fewest runtimes an owner-confined group needs
+	// before it may answer. One: those are the owner's own jobs, so there
+	// is nothing to protect, and on the replayed history a single earlier
+	// run of the same command line was a far better guess than the
+	// owner's jobs as a whole, which a higher floor fell back to.
+	minSamples = 1
 	// minGlobalSamples is the same for LevelGlobal, which is a guess
 	// about a stranger's job and should at least be a well-founded one.
 	minGlobalSamples = 30
+	// minLonger is how many runs longer than a running job's elapsed time
+	// its group needs to re-estimate it once it has outlived the median.
+	minLonger = 3
 	// minResiduals is how many of an owner's own prediction errors the
 	// calibrated bounds need before they are used instead of the access
 	// point's.
@@ -298,7 +304,7 @@ func (s *state) ingest(r *record, cfg Config) {
 		chosen := preds[lvl]
 		s.scored++
 		s.scoredBy[lvl]++
-		if ratio := chosen / actual; ratio >= 0.5 && ratio <= 2 {
+		if logError(chosen, actual) <= 1 {
 			s.within2x++
 			s.withinBy[lvl]++
 		}
@@ -382,6 +388,8 @@ func choose(own *ownerState, preds *[numLevels]float64) (Level, bool) {
 	return Level(best), true
 }
 
+// logError is the absolute log2 error, with very short runtimes floored
+// (see errorFloor): 1 means off by a factor of two.
 func logError(pred, actual float64) float64 {
 	return math.Abs(math.Log2(math.Max(pred, errorFloor) / math.Max(actual, errorFloor)))
 }
@@ -419,7 +427,7 @@ func (e *Estimator) Estimate(q Query) Result {
 		if elapsed >= est {
 			// The job has outlived the typical run. What history says
 			// now is what the runs that lasted at least this long did.
-			if longer := w.above(elapsed); len(longer) >= minSamples {
+			if longer := w.above(elapsed); len(longer) >= minLonger {
 				est = quantileOf(longer, 0.5)
 				p90 = math.Max(quantileOf(longer, 0.9), est)
 				p10 = math.Min(quantileOf(longer, 0.1), est)
@@ -517,8 +525,9 @@ type Stats struct {
 	TrainedThrough time.Time
 	// Scored counts jobs that had an estimate when they finished, and
 	// Within2x those whose estimate was within a factor of two of what
-	// they actually ran. Each is also broken down by the level that
-	// answered, keyed by Level.String().
+	// they actually ran (by logError, so very short jobs are floored).
+	// Each is also broken down by the level that answered, keyed by
+	// Level.String().
 	Scored          int64
 	Within2x        int64
 	ScoredByLevel   map[string]int64

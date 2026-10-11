@@ -1484,8 +1484,9 @@ batch name less any run number, its submit directory, its program, and
 the owner's jobs as a whole; the access point's jobs as a whole are the
 last resort. For an interpreter (`python`, `bash -c`, `apptainer exec`,
 ...) the program is the script it runs. An estimate is the median of the
-most recent 64 runtimes in one group with at least three; which group
-answers is chosen per owner by how well each has predicted that owner's
+most recent 64 runtimes in one group -- a single earlier run is enough,
+since they are the owner's own jobs; the access point's group needs 30.
+Which group answers is chosen per owner by how well each has predicted that owner's
 jobs so far. The likely range (`p10_seconds` to `p90_seconds`) is
 calibrated against the owner's own past estimation errors. Only completed
 jobs that exited 0 count; DAGMan and other scheduler/local-universe jobs
