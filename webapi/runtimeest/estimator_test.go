@@ -658,7 +658,7 @@ func syntheticQueries(rng *rand.Rand, n int) []Query {
 func TestPoolCacheMatchesUncached(t *testing.T) {
 	cached := New(Config{})
 	uncached := New(Config{noPoolCache: true})
-	qs := syntheticQueries(rand.New(rand.NewPCG(7, 8)), 400)
+	qs := syntheticQueries(seeded(7, 8), 400)
 	check := func(stage string) {
 		t.Helper()
 		pooled := 0
@@ -678,7 +678,7 @@ func TestPoolCacheMatchesUncached(t *testing.T) {
 	start := t0
 	for round := range 6 {
 		// The same batch for both: Batch.sorted reorders in place.
-		rngA, rngB := rand.New(rand.NewPCG(uint64(round), 1)), rand.New(rand.NewPCG(uint64(round), 1))
+		rngA, rngB := seeded(uint64(round), 1), seeded(uint64(round), 1)
 		cached.Ingest(syntheticBatch(rngA, start, 300))
 		uncached.Ingest(syntheticBatch(rngB, start, 300))
 		start = start.Add(3 * time.Hour)
@@ -697,13 +697,13 @@ func TestPoolCacheMatchesUncached(t *testing.T) {
 // EstimateMany answers each job exactly as Estimate does, in any order.
 func TestEstimateManyMatchesEstimate(t *testing.T) {
 	e := New(Config{})
-	qs := syntheticQueries(rand.New(rand.NewPCG(3, 4)), 300)
+	qs := syntheticQueries(seeded(3, 4), 300)
 	for _, r := range e.EstimateMany(qs) {
 		if r.Reason != ReasonWarmingUp {
 			t.Fatalf("before any ingest: %+v", r)
 		}
 	}
-	e.Ingest(syntheticBatch(rand.New(rand.NewPCG(5, 6)), t0, 2000))
+	e.Ingest(syntheticBatch(seeded(5, 6), t0, 2000))
 	// Sorted, so neighbours share keys, and as given.
 	sorted := slices.Clone(qs)
 	slices.SortFunc(sorted, func(a, b Query) int {

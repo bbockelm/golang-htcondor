@@ -7,12 +7,17 @@ import (
 	"time"
 )
 
+// seeded is a reproducible random source for a test workload.
+func seeded(a, b uint64) *rand.Rand {
+	return rand.New(rand.NewPCG(a, b)) //nolint:gosec // G404: a seeded, reproducible test workload
+}
+
 // benchHistory is an estimator that has read a busy owner's week: many
 // clusters of a few programs with varying arguments, plus other owners,
 // so every level holds samples and the bounds are drawn from pooled
 // errors -- the path a listing exercises.
 func benchHistory() *Estimator {
-	rng := rand.New(rand.NewPCG(1, 2))
+	rng := seeded(1, 2)
 	e := New(Config{})
 	b := NewBatch()
 	at := t0
