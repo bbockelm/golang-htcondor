@@ -52,7 +52,8 @@ func (d *Daemon) SecurityLevelConfigs() (map[string]*security.SecurityConfig, er
 // one outside SecurityLevels, negotiates under srv.SecurityConfig. cedar gives
 // each per-level policy srv.SecurityConfig's post-authentication policy and
 // command levels, so every session maps identities and advertises its
-// commands as the base policy does.
+// commands as the base policy does; a per-level policy also advertises
+// srv.SecurityConfig's RemoteVersion.
 //
 // Call it after Listener (the policies carry the shared-port id) and
 // cedarserver.New.
@@ -83,12 +84,24 @@ func InstallSecurityLevels(srv *cedarserver.Server, byLevel map[string]*security
 	installSecurityLevels(srv, func() map[string]*security.SecurityConfig { return byLevel })
 }
 
+// installSecurityLevels gives each per-level policy srv.SecurityConfig's
+// RemoteVersion unless it sets its own: the policies are built from the
+// configuration, which does not carry the daemon's version, and cedar
+// advertises the negotiating policy's (or its built-in default) in the
+// handshake. A C++ peer gates wire features on that version, so every
+// command must advertise the one the daemon does.
 func installSecurityLevels(srv *cedarserver.Server, byLevel func() map[string]*security.SecurityConfig) {
 	srv.SecurityConfigForCommand = func(command int) *security.SecurityConfig {
 		perms := srv.CommandPerms(command)
 		if len(perms) == 0 {
 			return nil
 		}
-		return byLevel()[perms[0]]
+		sc := byLevel()[perms[0]]
+		if sc == nil || sc.RemoteVersion != "" || srv.SecurityConfig == nil || srv.SecurityConfig.RemoteVersion == "" {
+			return sc
+		}
+		c := *sc
+		c.RemoteVersion = srv.SecurityConfig.RemoteVersion
+		return &c
 	}
 }

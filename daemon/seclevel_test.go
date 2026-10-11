@@ -22,6 +22,9 @@ const (
 	seclevelReadCmd   = 81201 // registered at READ, after InstallSecurityLevels
 	seclevelWriteCmd  = 81202 // registered at WRITE, after InstallSecurityLevels
 	seclevelNoPermCmd = 81203 // registered at no level
+
+	// seclevelVersion is the base policy's RemoteVersion.
+	seclevelVersion = "$CondorVersion: 25.14.0 2026-08-14 BuildID: seclevel-test $"
 )
 
 // startSeclevelServer serves the DC_* defaults and the seclevel test commands
@@ -60,6 +63,7 @@ func startSeclevelServer(t *testing.T, knobs map[string]string) (addr string, d 
 		t.Fatal(err)
 	}
 	base.SessionCache = security.NewSessionCache()
+	base.RemoteVersion = seclevelVersion
 	srv := cedarserver.New(base)
 	if err := d.InstallSecurityLevels(srv); err != nil {
 		t.Fatal(err)
@@ -185,4 +189,36 @@ func TestInstallSecurityLevelsNegotiatesAtCommandLevel(t *testing.T) {
 	// Not the other ADVERTISE_* levels, which still take DAEMON's.
 	expect("DC_NOP_ADVERTISE_SCHEDD", commands.DC_NOP_ADVERTISE_SCHEDD, false, true)
 	expect("READ command", seclevelReadCmd, true, false)
+}
+
+// TestInstallSecurityLevelsAdvertisesDaemonVersion: a command negotiated under
+// a per-level policy advertises the base policy's RemoteVersion, as one
+// negotiated under the base policy does, not cedar's built-in default. A C++
+// peer gates wire features on the version.
+func TestInstallSecurityLevelsAdvertisesDaemonVersion(t *testing.T) {
+	addr, _, _ := startSeclevelServer(t, map[string]string{"SEC_DEFAULT_AUTHENTICATION": "OPTIONAL"})
+	for name, cmd := range map[string]int{
+		"DC_NOP_READ":         commands.DC_NOP_READ,
+		"WRITE command":       seclevelWriteCmd,
+		"command at no level": seclevelNoPermCmd,
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cl, err := client.ConnectAndAuthenticate(ctx, addr, &security.SecurityConfig{
+			Command:        cmd,
+			AuthMethods:    []security.AuthMethod{security.AuthFS},
+			Authentication: security.SecurityOptional,
+			CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+			Encryption:     security.SecurityOptional,
+			Integrity:      security.SecurityOptional,
+			SessionCache:   security.NewSessionCache(),
+		})
+		cancel()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := cl.GetSecurityNegotiation().ServerConfig.RemoteVersion; got != seclevelVersion {
+			t.Errorf("%s: server advertised version %q, want %q", name, got, seclevelVersion)
+		}
+		_ = cl.Close()
+	}
 }
