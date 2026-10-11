@@ -5,7 +5,7 @@
 // credentials so the session cookie is sent with every request.
 
 import type { MetricsResponse } from "./metrics";
-import type { UtilizationResponse } from "./utilization";
+import type { UtilJobSort, UtilJobsResponse, UtilizationResponse } from "./utilization";
 
 const BASE = "/api/v1";
 
@@ -1304,6 +1304,38 @@ export const api = {
       qs.set("owners", params.owners.join(","));
     if (params.limit !== undefined) qs.set("limit", String(params.limit));
     return fetchJSON(`${BASE}/utilization?${qs.toString()}`);
+  },
+
+  // One workflow's jobs, paged, from the same analysed set: pass the
+  // parameters the analysis used.
+  utilizationJobs: (params: {
+    w: string;
+    days: number;
+    owned_by_me?: boolean;
+    schedd?: string;
+    constraint?: string;
+    owners?: string[];
+    limit?: number;
+    sort?: UtilJobSort;
+    order?: "asc" | "desc";
+    offset?: number;
+    page_size?: number;
+  }): Promise<UtilJobsResponse> => {
+    const qs = new URLSearchParams();
+    qs.set("w", params.w);
+    qs.set("days", String(params.days));
+    if (params.owned_by_me !== undefined)
+      qs.set("owned_by_me", String(params.owned_by_me));
+    if (params.schedd) qs.set("schedd", params.schedd);
+    if (params.constraint) qs.set("constraint", params.constraint);
+    if (params.owners && params.owners.length > 0)
+      qs.set("owners", params.owners.join(","));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params.sort) qs.set("sort", params.sort);
+    if (params.order) qs.set("order", params.order);
+    if (params.offset) qs.set("offset", String(params.offset));
+    if (params.page_size) qs.set("page_size", String(params.page_size));
+    return fetchJSON(`${BASE}/utilization/jobs?${qs.toString()}`);
   },
 
   version: (): Promise<VersionInfo> => fetchJSON(`${BASE}/version`),

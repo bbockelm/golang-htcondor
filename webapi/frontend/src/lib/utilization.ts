@@ -669,3 +669,95 @@ export function splitSingles(ws: UtilWorkflow[]): { multi: UtilWorkflow[]; singl
   if (singles.length < 2) return { multi: ws, singles: [] };
   return { multi, singles };
 }
+
+// --- Jobs in a workflow (GET /api/v1/utilization/jobs) ---
+
+export type UtilJobSort =
+  | 'completed'
+  | 'submitted'
+  | 'wall'
+  | 'memory'
+  | 'cores'
+  | 'efficiency'
+  | 'disk'
+  | 'gpu';
+
+export interface UtilJobsResponse {
+  key: string; // the workflow key asked for
+  total: number; // jobs in this workflow within the analysed set
+  offset: number; // offset of jobs[0]
+  next_offset: number | null; // pass as `offset` for the next page; null at the end
+  sort: UtilJobSort;
+  order: 'asc' | 'desc';
+  truncated: boolean; // the analysis read hit `limit`
+  jobs: UtilJobRow[];
+}
+
+export interface UtilJobRow {
+  id: string; // "cluster.proc"
+  cluster: number;
+  proc: number;
+  schedd?: string; // multi-AP only
+  owner: string;
+  submitted: number | null; // unix seconds (QDate)
+  started: number | null; // unix seconds, first start (JobStartDate)
+  completed: number | null; // unix seconds: CompletionDate, or when a removed job left the queue
+  outcome: 'ok' | 'failed' | 'removed' | 'memory_exceeded';
+  exit_code: number | null;
+  exit_by_signal: boolean;
+  wall: number; // seconds, all runs (RemoteWallClockTime)
+  request: {
+    memory_mib: number | null;
+    cpus: number | null;
+    disk_kib: number | null;
+    gpus: number | null; // null when the job requested none
+  };
+  memory_peak_mib: number | null;
+  cores_used: number | null; // CPU seconds / wall seconds; null under 60 s of wall or unmeasured
+  cpu_efficiency: number | null; // cores_used / request.cpus, a fraction
+  disk_used_kib: number | null;
+  gpu_utilization: number | null; // fraction of the requested GPUs kept busy
+  gpu_memory_peak_mib: number | null;
+  restarts: number; // max(0, NumJobStarts - 1)
+  held_for_memory: boolean;
+  held_for_disk: boolean;
+}
+
+/**
+ * JobFocus is a range picked on one of the workflow's charts -- a bin of
+ * the peak-memory histogram, say -- that the job list highlights.
+ */
+export interface JobFocus {
+  sort: Extract<UtilJobSort, 'memory' | 'cores' | 'disk' | 'gpu'>;
+  lo: number; // inclusive
+  hi: number; // exclusive, except for the last bin
+  label: string; // "peak memory 1.5–1.8 GB"
+}
+
+/** jobFocusValue is a job's value on the axis a focus was picked from. */
+export function jobFocusValue(row: UtilJobRow, sort: JobFocus['sort']): number | null {
+  switch (sort) {
+    case 'memory':
+      return row.memory_peak_mib;
+    case 'cores':
+      return row.cores_used;
+    case 'disk':
+      return row.disk_used_kib;
+    case 'gpu':
+      return row.gpu_utilization;
+  }
+}
+
+/** inFocus says whether a job falls in a picked range. */
+export function inFocus(row: UtilJobRow, focus: JobFocus | null, closed = false): boolean {
+  if (!focus) return false;
+  const v = jobFocusValue(row, focus.sort);
+  if (v === null) return false;
+  return v >= focus.lo && (closed ? v <= focus.hi : v < focus.hi);
+}
+
+/** jobArchiveHref links a finished job to its record. */
+export function jobArchiveHref(row: UtilJobRow): string {
+  const id = row.schedd ? `${row.id}@${row.schedd}` : row.id;
+  return `/archive/${encodeURIComponent(id)}`;
+}

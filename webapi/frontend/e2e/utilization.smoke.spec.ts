@@ -158,3 +158,48 @@ test('the headline leads with GPUs when jobs reserved them', async ({ page }) =>
   await expect(first).toHaveAttribute('data-testid', 'resource-gpu');
   await expect(first).toContainText('GPU-hours');
 });
+
+// The /jobs page links a batch here as ?days=30&constraint=<the batch's
+// constraint>. Landing on it must apply the constraint and show it in
+// the box it applies through, so the user can see and edit what narrowed
+// the page.
+test('a link carrying a constraint lands filtered, with the expression in the box', async ({ page }) => {
+  const seen = await installUtilization(page);
+  await page.goto(`/utilization?days=30&constraint=${encodeURIComponent('JobBatchName == "summarize"')}`);
+  await expect(page.getByRole('button', { name: 'ClassAd expression' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByPlaceholder(/ClassAd, e\.g\./)).toHaveValue('JobBatchName == "summarize"');
+  await expect(page.getByRole('row', { name: /^summarize/ })).toBeVisible();
+  await expect(page.getByRole('row', { name: /^blast-search/ })).toHaveCount(0);
+  expect(lastQuery(seen).get('constraint')).toBe('JobBatchName == "summarize"');
+  expect(lastQuery(seen).get('days')).toBe('30');
+});
+
+test("a workflow's page lists its jobs, sorted by the server and loaded as it scrolls", async ({ page }) => {
+  await installUtilization(page);
+  await page.goto('/utilization?w=wf-assemble');
+  const list = page.getByTestId('workflow-jobs');
+  await expect(list).toContainText('100 of 310 shown');
+  await expect(list.getByRole('link').first()).toHaveAttribute('href', /^\/archive\/\d+\.\d+$/);
+
+  const sorted = page.waitForRequest((r) => r.url().includes('/api/v1/utilization/jobs') && r.url().includes('sort=wall'));
+  await list.getByRole('button', { name: /Run time/ }).click();
+  await sorted;
+
+  // The next page arrives as the end of the list scrolls into view.
+  await list.getByRole('row').last().scrollIntoViewIfNeeded();
+  await page.mouse.wheel(0, 4000);
+  await expect(list).toContainText('200 of 310 shown');
+});
+
+test('picking a bar of the memory histogram marks those jobs in the list', async ({ page }) => {
+  await installUtilization(page);
+  await page.goto('/utilization?w=wf-assemble');
+  const fig = page.locator('figure', { hasText: 'Peak memory per job' });
+  // The tallest values: the jobs that went over their request.
+  await fig.locator('rect.cursor-pointer').last().click();
+  const focus = page.getByTestId('job-focus');
+  await expect(focus).toContainText('Marking jobs with peak memory');
+  await expect(page.locator('[data-testid="workflow-jobs"] tr[data-marked="true"]').first()).toBeVisible();
+  await focus.getByRole('button', { name: 'clear' }).click();
+  await expect(focus).toHaveCount(0);
+});

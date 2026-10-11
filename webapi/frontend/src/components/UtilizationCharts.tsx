@@ -378,6 +378,8 @@ export function Histogram({
   shadeLabel,
   barLabel = 'jobs',
   note,
+  onBin,
+  selected,
 }: {
   title: string;
   subtitle?: ReactNode;
@@ -388,6 +390,11 @@ export function Histogram({
   shadeLabel?: string;
   barLabel?: string;
   note?: ReactNode;
+  // Clicking a bar picks its range, e.g. to find those jobs in a list;
+  // `last` says the range is the final one, whose top is inclusive.
+  onBin?: (bin: { lo: number; hi: number; label: string; last: boolean }) => void;
+  // The range picked, drawn with the other bars dimmed.
+  selected?: { lo: number; hi: number } | null;
 }) {
   const titleId = useId();
   const [tip, setTip] = useState<Tip | null>(null);
@@ -488,20 +495,32 @@ export function Histogram({
           const x = (x0 + x1) / 2 - w / 2;
           const y = ys(b.count);
           const fill = shaded(b) ? UTIL_COLOR.retry : UTIL_COLOR.used;
+          const picked = selected ? b.lo >= selected.lo && b.hi <= selected.hi + 1e-9 : true;
+          const range = `${formatAxis(b.lo, unit)} – ${formatAxis(b.hi, unit)}`;
           return (
             <g key={i}>
-              <path d={barPath(x, y, w, plotBottom - y)} fill={fill} opacity={tip && tip.x === (x0 + x1) / 2 ? 0.8 : 1} />
+              <path
+                d={barPath(x, y, w, plotBottom - y)}
+                fill={fill}
+                opacity={!picked ? 0.3 : tip && tip.x === (x0 + x1) / 2 ? 0.8 : 1}
+              />
               <rect
                 x={x0}
                 y={top}
                 width={Math.max(1, x1 - x0)}
                 height={plotBottom - top}
                 fill="transparent"
+                className={onBin && b.count > 0 ? 'cursor-pointer' : undefined}
+                onClick={
+                  onBin && b.count > 0
+                    ? () => onBin({ lo: b.lo, hi: b.hi, label: range, last: i === bins.length - 1 })
+                    : undefined
+                }
                 onPointerEnter={() =>
                   setTip({
                     x: (x0 + x1) / 2,
                     y: Math.min(y, plotBottom - 8),
-                    title: `${formatAxis(b.lo, unit)} – ${formatAxis(b.hi, unit)}`,
+                    title: range,
                     rows: [{ label: barLabel, value: b.count.toLocaleString() }],
                   })
                 }

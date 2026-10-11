@@ -101,6 +101,21 @@ export default function UtilizationPage() {
   const [mode, setMode] = useState<FilterMode>(constraint ? 'expr' : 'text');
   const [text, setText] = useState(url.q);
   const [exprInput, setExprInput] = useState(constraint);
+  // A constraint that arrives in the URL from elsewhere -- /jobs links
+  // here with a batch's constraint, or the back button restores one --
+  // shows in the box it applies through. Compared during render, so the
+  // box never paints a frame showing the old expression.
+  const [seenConstraint, setSeenConstraint] = useState(constraint);
+  if (seenConstraint !== constraint) {
+    setSeenConstraint(constraint);
+    setExprInput(constraint);
+    if (constraint) setMode('expr');
+  }
+  const [seenQ, setSeenQ] = useState(url.q);
+  if (seenQ !== url.q) {
+    setSeenQ(url.q);
+    setText(url.q);
+  }
 
   const queryFor = (ownersParam: string[]) => ({
     queryKey: ['utilization', days, ownedByMe, multiAP, schedd, constraint, ownersParam.join(','), limit ?? null],
@@ -226,7 +241,21 @@ export default function UtilizationPage() {
             <EmptyState days={days} />
           ) : workflowKey ? (
             workflow ? (
-              <WorkflowDetail workflow={workflow} days={days} backHref={hrefFor({ w: '' })} />
+              <WorkflowDetail
+                workflow={workflow}
+                days={days}
+                backHref={hrefFor({ w: '' })}
+                // The same parameters as the analysis, so the list is the
+                // jobs the figures above are about.
+                jobsQuery={{
+                  days,
+                  owned_by_me: ownedByMe,
+                  schedd: multiAP && schedd ? schedd : undefined,
+                  constraint: constraint || undefined,
+                  owners,
+                  limit,
+                }}
+              />
             ) : (
               <div className="space-y-2">
                 <Link href={hrefFor({ w: '' })} className="text-sm text-brand-700 hover:underline">

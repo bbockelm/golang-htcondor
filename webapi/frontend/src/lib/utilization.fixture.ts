@@ -10,6 +10,9 @@ import type {
   UtilShape,
   UtilThroughput,
   UtilizationResponse,
+  UtilJobRow,
+  UtilJobSort,
+  UtilJobsResponse,
 } from './utilization';
 
 // A realistic /api/v1/utilization answer for the component tests and the
@@ -842,3 +845,95 @@ export function ownersOf(ws: UtilWorkflow[]): NonNullable<UtilizationResponse['o
 }
 
 export const utilizationFixture: UtilizationResponse = buildUtilizationFixture();
+
+// --- Jobs in a workflow ---
+
+// jobRows re-runs a workflow's simulation (it is seeded, so these are the
+// same jobs its figures came from) and lists them the way the jobs
+// endpoint does.
+export function jobRows(key: string): UtilJobRow[] | null {
+  const spec = SPECS.find((sp) => sp.key === key);
+  if (!spec) return null;
+  const procs = new Map<number, number>();
+  return simulate(spec).map((j) => {
+    const proc = procs.get(j.cluster) ?? 0;
+    procs.set(j.cluster, proc + 1);
+    const submitted = Math.round(j.qdate);
+    const started = submitted + 120;
+    return {
+      id: `${j.cluster}.${proc}`,
+      cluster: j.cluster,
+      proc,
+      owner: spec.owner,
+      submitted,
+      started,
+      completed: started + j.wall + j.restartLost,
+      outcome: j.outcome,
+      exit_code: j.outcome === 'failed' ? 1 : j.outcome === 'ok' ? 0 : null,
+      exit_by_signal: false,
+      wall: j.wall + j.restartLost,
+      request: {
+        memory_mib: j.reqMem,
+        cpus: j.reqCpu,
+        disk_kib: j.reqDisk,
+        gpus: j.reqGpu > 0 ? j.reqGpu : null,
+      },
+      memory_peak_mib: j.mem,
+      cores_used: j.cores === null || j.wall < 60 ? null : Math.round(j.cores * 100) / 100,
+      cpu_efficiency: j.cores === null || j.wall < 60 ? null : j.cores / j.reqCpu,
+      disk_used_kib: j.disk,
+      gpu_utilization: j.gpuUtil,
+      gpu_memory_peak_mib: j.gpuMem,
+      restarts: j.restartLost > 0 ? 1 : 0,
+      held_for_memory: j.outcome === 'memory_exceeded',
+      held_for_disk: false,
+    };
+  });
+}
+
+const SORT_VALUE: Record<UtilJobSort, (r: UtilJobRow) => number | null> = {
+  completed: (r) => r.completed,
+  submitted: (r) => r.submitted,
+  wall: (r) => r.wall,
+  memory: (r) => r.memory_peak_mib,
+  cores: (r) => r.cores_used,
+  efficiency: (r) => r.cpu_efficiency,
+  disk: (r) => r.disk_used_kib,
+  gpu: (r) => r.gpu_utilization,
+};
+
+/** utilizationJobsFixture answers GET /api/v1/utilization/jobs. */
+export function utilizationJobsFixture(
+  key: string,
+  opts: { sort?: UtilJobSort; order?: 'asc' | 'desc'; offset?: number; page_size?: number } = {},
+): UtilJobsResponse | null {
+  const rows = jobRows(key);
+  if (!rows) return null;
+  const sort = opts.sort ?? 'completed';
+  const order = opts.order ?? 'desc';
+  const v = SORT_VALUE[sort];
+  // Nulls last in either order; ties on (cluster, proc) ascending.
+  rows.sort((a, b) => {
+    const av = v(a);
+    const bv = v(b);
+    if (av === null || bv === null) {
+      if (av === bv) return a.cluster - b.cluster || a.proc - b.proc;
+      return av === null ? 1 : -1;
+    }
+    if (av !== bv) return order === 'asc' ? av - bv : bv - av;
+    return a.cluster - b.cluster || a.proc - b.proc;
+  });
+  const offset = opts.offset ?? 0;
+  const size = Math.min(opts.page_size ?? 100, 500);
+  const page = rows.slice(offset, offset + size);
+  return {
+    key,
+    total: rows.length,
+    offset,
+    next_offset: offset + size < rows.length ? offset + size : null,
+    sort,
+    order,
+    truncated: false,
+    jobs: page,
+  };
+}

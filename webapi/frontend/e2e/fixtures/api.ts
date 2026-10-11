@@ -9,7 +9,8 @@ import type {
   Session,
   ClassAd,
 } from '../../src/lib/api';
-import { utilizationFixture } from '../../src/lib/utilization.fixture';
+import { utilizationFixture, utilizationJobsFixture } from '../../src/lib/utilization.fixture';
+import type { UtilJobSort } from '../../src/lib/utilization';
 import type { MetricsResponse } from '../../src/lib/metrics';
 
 // Frozen sample responses for the smoke suite.
@@ -369,6 +370,18 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
         headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
         body: activityStreamFixture(),
       });
+      return;
+    }
+    // A workflow's jobs, paged and sorted the way the server does it.
+    if (path === '/api/v1/utilization/jobs') {
+      const q = new URL(route.request().url()).searchParams;
+      const body = utilizationJobsFixture(q.get('w') ?? '', {
+        sort: (q.get('sort') ?? undefined) as UtilJobSort | undefined,
+        order: (q.get('order') ?? undefined) as 'asc' | 'desc' | undefined,
+        offset: Number(q.get('offset') ?? 0),
+        page_size: Number(q.get('page_size') ?? 100),
+      });
+      await route.fulfill(body ? { json: body } : { status: 404, json: { error: 'Not Found', message: 'no such workflow' } });
       return;
     }
     if (path in table) {

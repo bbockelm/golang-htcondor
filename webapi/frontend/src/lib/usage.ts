@@ -18,13 +18,17 @@ export function formatSeconds(s: number): string {
   if (!Number.isFinite(s) || s < 0) return "—";
   if (s < 1) return `${Math.round(s * 1000)} ms`;
   if (s < 60) return `${trim(s < 10 ? s.toFixed(1) : s.toFixed(0))} s`;
-  if (s < 3600) {
-    const m = Math.floor(s / 60);
-    const rem = Math.round(s - m * 60);
+  if (s < 3600 - 0.5) {
+    const total = Math.round(s);
+    const m = Math.floor(total / 60);
+    const rem = total - m * 60;
     return rem ? `${m} min ${rem} s` : `${m} min`;
   }
-  const h = Math.floor(s / 3600);
-  const m = Math.round((s - h * 3600) / 60);
+  // Round to the minute first, so 2 h 59 min 40 s reads "3 h", not
+  // "2 h 60 min".
+  const total = Math.round(s / 60);
+  const h = Math.floor(total / 60);
+  const m = total - h * 60;
   return m ? `${h} h ${m} min` : `${h} h`;
 }
 

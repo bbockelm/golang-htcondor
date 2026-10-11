@@ -75,6 +75,15 @@ test('finished jobs appear as a workflow on the Utilization page', async ({ page
   await expect(page.getByRole('heading', { level: 2, name: batch })).toBeVisible();
   await expect(page.getByText('Jobs finished in the last day')).toBeVisible();
 
+  // Its four jobs are listed, each linking to its record in history.
+  const jobs = page.getByTestId('workflow-jobs');
+  await expect(jobs).toContainText('4 of 4 shown');
+  const first = jobs.getByRole('link').first();
+  await expect(first).toHaveAttribute('href', new RegExp(`^/archive/${cluster}\\.\\d$`));
+  await first.click();
+  await expect(page).toHaveURL(new RegExp(`/archive/${cluster}\\.\\d`));
+  await expect(page.getByText('/bin/sleep').first()).toBeVisible();
+
   // A ClassAd filter reaches the server: narrowed to this batch, the
   // answer is this workflow and nothing else, and one that cannot parse
   // is reported by the input.

@@ -40,6 +40,7 @@ import {
   type UtilGpu,
   type UtilRequest,
   type UtilOwner,
+  type JobFocus,
   moreOptions,
   type UtilAdvice,
   type UtilOverall,
@@ -48,6 +49,7 @@ import {
   type UtilizationResponse,
 } from '@/lib/utilization';
 import { SortableHeader, useSortedRows, useSortState } from '@/components/SortableTable';
+import { WorkflowJobs, type JobsQuery } from '@/components/UtilizationJobs';
 import {
   Histogram,
   MemoryCurve,
@@ -869,7 +871,17 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
 
 // GpuSection leads a GPU workflow's page: GPUs are the scarcest and most
 // expensive thing these jobs reserve, so they come before memory.
-export function GpuSection({ gpu, cpuRequest }: { gpu: UtilGpu; cpuRequest: UtilRequest | null }) {
+export function GpuSection({
+  gpu,
+  cpuRequest,
+  onBin,
+  selected,
+}: {
+  gpu: UtilGpu;
+  cpuRequest: UtilRequest | null;
+  onBin?: (b: { lo: number; hi: number }) => void;
+  selected?: { lo: number; hi: number } | null;
+}) {
   const requested = gpu.request?.typical;
   const measured =
     gpu.measured < gpu.jobs
@@ -887,6 +899,8 @@ export function GpuSection({ gpu, cpuRequest }: { gpu: UtilGpu; cpuRequest: Util
             subtitle={`median ${formatPercent(gpu.utilization.p50)} busy · ${measured}${requested ? ` · ${formatNumber(requested)} GPU${requested === 1 ? '' : 's'} requested` : ''}`}
             dist={gpu.utilization}
             unit="fraction"
+            onBin={onBin}
+            selected={selected}
           />
         ) : (
           <p className="rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-600">
@@ -929,11 +943,23 @@ export function WorkflowDetail({
   workflow: w,
   days,
   backHref,
+  jobsQuery,
 }: {
   workflow: UtilWorkflow;
   days: number;
   backHref: string;
+  // The analysis's parameters, for the list of this workflow's jobs.
+  // Without them there is no list (the component tests render without).
+  jobsQuery?: JobsQuery;
 }) {
+  const [focus, setFocus] = useState<JobFocus | null>(null);
+  // A bar picks its range of jobs in the list below, when there is one.
+  const pick = (sort: JobFocus['sort'], what: string, fmt: (v: number) => string) =>
+    jobsQuery
+      ? (b: { lo: number; hi: number }) =>
+          setFocus({ sort, lo: b.lo, hi: b.hi, label: `${what} ${fmt(b.lo)}–${fmt(b.hi)}` })
+      : undefined;
+  const selected = (sort: JobFocus['sort']) => (focus?.sort === sort ? focus : null);
   const memReq = w.memory.request;
   const rec = w.memory_curve.find((p) => p.is_recommended);
   const memMarkers: ChartMarker[] = [];
@@ -1022,7 +1048,14 @@ export function WorkflowDetail({
         </section>
       )}
 
-      {gpu && <GpuSection gpu={gpu} cpuRequest={cpuReq} />}
+      {gpu && (
+        <GpuSection
+          gpu={gpu}
+          cpuRequest={cpuReq}
+          onBin={pick('gpu', 'GPUs busy', formatPercent)}
+          selected={selected('gpu')}
+        />
+      )}
 
       {w.memory.peak_mib && (
         <section aria-labelledby="wf-memory" className="space-y-3">
@@ -1034,6 +1067,8 @@ export function WorkflowDetail({
               title="Peak memory per job"
               subtitle={`${w.memory.peak_mib.n.toLocaleString()} jobs · median ${formatMiB(w.memory.peak_mib.p50)}, 95% under ${formatMiB(w.memory.peak_mib.p95)}, largest ${formatMiB(w.memory.peak_mib.max)}`}
               dist={w.memory.peak_mib}
+              onBin={pick('memory', 'peak memory', formatMiB)}
+              selected={selected('memory')}
               unit="mib"
               markers={memMarkers}
               shadeFrom={rec && rec.retry_fraction > 0 ? rec.request_mib : undefined}
@@ -1077,6 +1112,8 @@ export function WorkflowDetail({
                 title="CPU cores kept busy per job"
                 subtitle={`median ${formatCores(w.cpu.cores_used.p50)} cores${cpuReq ? ` of ${formatCores(cpuReq.typical)} requested` : ''}${w.cpu.efficiency ? ` · median efficiency ${formatPercent(w.cpu.efficiency.p50)}` : ''}`}
                 dist={w.cpu.cores_used}
+                onBin={pick('cores', 'CPU cores busy', formatCores)}
+                selected={selected('cores')}
                 unit="plain"
                 markers={cpuReq ? [{ value: cpuReq.typical, label: `requested ${formatCores(cpuReq.typical)}`, kind: 'request' }] : []}
               />
@@ -1104,12 +1141,24 @@ export function WorkflowDetail({
                 title="Disk used per job"
                 subtitle={`median ${formatKiB(w.disk.used_kib.p50)}, largest ${formatKiB(w.disk.used_kib.max)}`}
                 dist={w.disk.used_kib}
+                onBin={pick('disk', 'disk use', formatKiB)}
+                selected={selected('disk')}
                 unit="kib"
                 markers={diskReq ? [{ value: diskReq.typical, label: `requested ${formatKiB(diskReq.typical)}`, kind: 'request' }] : []}
               />
             )}
           </div>
         </section>
+      )}
+
+      {jobsQuery && (
+        <WorkflowJobs
+          workflowKey={w.key}
+          query={jobsQuery}
+          hasGpu={!!gpu}
+          focus={focus}
+          onClearFocus={() => setFocus(null)}
+        />
       )}
     </div>
   );
