@@ -664,6 +664,16 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 			}
 			s.handleJobMatchAnalysis(w, r, cluster, proc)
 			return
+		case "runtime-estimate":
+			// GET /api/v1/jobs/{id}/runtime-estimate — how long the job
+			// is likely to run, from its owner's similar finished jobs.
+			cluster, proc, err := parseJobID(jobID)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+				return
+			}
+			s.handleJobRuntimeEstimate(w, r, cluster, proc)
+			return
 		case "hold":
 			s.handleJobHold(w, r, jobID)
 			return

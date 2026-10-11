@@ -1764,6 +1764,78 @@ const openAPISchema = `{
         }
       }
     },
+    "/jobs/{jobId}/runtime-estimate": {
+      "get": {
+        "summary": "Estimate how long a job will run",
+        "description": "How long the job is likely to run in total, with a likely range, estimated from the runtimes of the same owner's similar jobs that have already completed (the same cluster, command line, batch name, submit directory or program, chosen by which has predicted that owner's jobs best). For a running job, also how long it has run and how long it likely has left. Built from the htcondordb mirror's job history, refreshed every few minutes; it never reveals another job's command, id or owner. Always 200 for a job the caller can see: when no estimate can be made, available is false and reason says why (disabled, model_warming_up, insufficient_history).",
+        "operationId": "getJobRuntimeEstimate",
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "description": "Job ID in cluster.proc format (e.g., 23.4)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The estimate, or why there is none",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["job_id", "available", "exceeded_history", "model"],
+                  "properties": {
+                    "job_id": {"type": "string"},
+                    "available": {"type": "boolean"},
+                    "reason": {"type": "string", "enum": ["disabled", "model_warming_up", "insufficient_history"], "description": "Why there is no estimate; absent when available."},
+                    "estimate_seconds": {"type": "number", "description": "Expected total runtime. For a running job that has outlived the typical run, re-estimated from the comparable runs that lasted at least as long."},
+                    "p10_seconds": {"type": "number", "description": "Lower end of the likely range: about 10% of comparable jobs finish sooner."},
+                    "p90_seconds": {"type": "number", "description": "Upper end of the likely range: about 90% of comparable jobs finish by then. Calibrated against the owner's own past estimation errors."},
+                    "basis": {
+                      "type": "object",
+                      "properties": {
+                        "level": {"type": "string", "enum": ["cluster", "exact", "template", "batch", "iwd", "cmd", "owner", "global"], "description": "Which group of completed jobs answered: the job's own cluster, the same command line, the same command line with numbers masked, the same batch name, the same submit directory, the same program, all the owner's jobs, or all jobs on the access point."},
+                        "sample_count": {"type": "integer", "description": "How many recent runtimes that group holds."}
+                      }
+                    },
+                    "elapsed_seconds": {"type": "number", "description": "How long the current execution has run. Present only while the job is running."},
+                    "remaining_seconds": {"type": "number", "description": "estimate_seconds less elapsed_seconds. Absent when the job is not running or has exceeded its history."},
+                    "exceeded_history": {"type": "boolean", "description": "The job has run longer than nearly every comparable job, so no remaining time is given; the estimate and range are what history said before it started."},
+                    "model": {
+                      "type": "object",
+                      "properties": {
+                        "trained_through": {"type": "string", "format": "date-time", "description": "Completion time of the newest job the estimator has read."},
+                        "jobs_ingested": {"type": "integer"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid job ID",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "404": {
+            "description": "Job not found, or not the caller's",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "500": {
+            "description": "Failed to query the job",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
     "/jobs/{jobId}/ssh": {
       "get": {
         "summary": "Open an interactive SSH session inside a running job",

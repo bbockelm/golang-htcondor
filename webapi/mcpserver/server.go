@@ -23,6 +23,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/skills"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -158,6 +159,8 @@ type Server struct {
 	dbMirror     *dbmirror.Locator
 	jobWatch     *jobwatch.Store
 	jobWatchEval *jobwatch.Evaluator
+	// runtimeEst adds a runtime estimate to get_job; nil leaves it out.
+	runtimeEst   *runtimeest.Estimator
 	watchMaxWait time.Duration
 
 	// build carries the site's container-build configuration, resolved
@@ -315,6 +318,12 @@ type Config struct {
 	// server cannot keep, and the agent would wait forever.
 	JobWatch     *jobwatch.Store
 	JobWatchEval *jobwatch.Evaluator
+
+	// RuntimeEstimator, when set, adds a runtime_estimate to get_job.
+	// The HTTP daemon passes the estimator its runtime-estimate endpoint
+	// answers from, which a background loop there keeps fed; nil (the
+	// standalone server, or the feature off) leaves the field out.
+	RuntimeEstimator *runtimeest.Estimator
 
 	// WatchMaxWait caps how long watch_jobs may block in-call before
 	// returning (HTTP_API_MCP_WATCH_MAX_WAIT). It must stay under the
@@ -497,6 +506,7 @@ func NewServer(cfg Config) (*Server, error) {
 		dbMirror:        cfg.DBMirror,
 		jobWatch:        cfg.JobWatch,
 		jobWatchEval:    cfg.JobWatchEval,
+		runtimeEst:      cfg.RuntimeEstimator,
 		watchMaxWait:    cfg.WatchMaxWait,
 		build:           buildSettingsFromConfig(cfg),
 	}
