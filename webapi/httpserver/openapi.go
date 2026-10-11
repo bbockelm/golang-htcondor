@@ -174,7 +174,11 @@ const openAPISchema = `{
           "until": {"type": "integer"},
           "days": {"type": "integer"},
           "jobs_considered": {"type": "integer"},
-          "truncated": {"type": "boolean", "description": "The 50,000-job cap was hit; the analysis covers the most recent jobs."},
+          "truncated": {"type": "boolean", "description": "The limit was hit; the analysis covers the most recent jobs."},
+          "limit": {"type": "integer", "description": "The limit applied."},
+          "max_limit": {"type": "integer", "description": "The server's ceiling (HTTP_API_UTILIZATION_MAX_JOBS)."},
+          "owners": {"type": "array", "description": "Owners in the analysed jobs, most wall clock first; only for a scope that sees other users.", "items": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "jobs": {"type": "integer"}, "wall_hours": {"type": "number"}}}},
           "overall": {"type": "object", "properties": {
             "jobs": {"type": "integer"}, "wall_hours": {"type": "number"}, "badput_hours": {"type": "number"},
             "resources": {"type": "array", "items": {"$ref": "#/components/schemas/UtilResourceSummary"}},
@@ -731,12 +735,15 @@ const openAPISchema = `{
     "/utilization": {
       "get": {
         "summary": "Resource utilization of finished jobs",
-        "description": "How well the caller's finished jobs (completed or removed, EnteredHistoryTime within the window) used the CPU, memory, disk and GPUs they reserved, grouped into workflows, with submit-file advice for the next submission. Read from a synchronized htcondordb mirror when one is current, else the schedd's history; at most the 50,000 most recent jobs. A non-admin caller is confined to its own jobs whatever owned_by_me says. Cached for five minutes per scope and window. Memory is MiB, disk KiB, time seconds unless a field name says hours.",
+        "description": "How well the caller's finished jobs (completed or removed, EnteredHistoryTime within the window) used the CPU, memory, disk and GPUs they reserved, grouped into workflows, with submit-file advice for the next submission. Read from a synchronized htcondordb mirror when one is current, else the schedd's history; at most limit (default 50,000) most recent jobs. A non-admin caller is confined to its own jobs whatever owned_by_me says. Cached for five minutes per scope and window. Memory is MiB, disk KiB, time seconds unless a field name says hours.",
         "operationId": "getUtilization",
         "parameters": [
           {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "enum": [1, 7, 30], "default": 7}, "description": "Analysis window."},
           {"name": "owned_by_me", "in": "query", "required": false, "schema": {"type": "boolean", "default": true}, "description": "false asks for everyone's jobs; honored only for administrators (a project lead gets own plus projects')."},
-          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Multi-AP mode: restrict to one access point."}
+          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Multi-AP mode: restrict to one access point."},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}, "description": "ClassAd expression ANDed with the scope and the window. One that does not parse is a 400 carrying the parser's message."},
+          {"name": "owners", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Comma-separated user names to narrow to. Implies owned_by_me=false unless that is given; intersected with what the caller may see, never widening it."},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "default": 50000}, "description": "Most finished jobs to analyse, most recent first. Clamped to HTTP_API_UTILIZATION_MAX_JOBS (default 1,000,000); the response reports the value applied."}
         ],
         "responses": {
           "200": {"description": "The analysis; jobs_considered is 0 when there is nothing to analyse.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UtilizationResponse"}}}},

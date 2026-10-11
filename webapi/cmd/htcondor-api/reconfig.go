@@ -213,6 +213,10 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_TOOL_STATS_MAX_SERIES"},
 	{name: "HTTP_API_TOOL_STATS_OMIT_USER"},
 
+	// The utilization page's ceiling on jobs per analysis, read when the
+	// handler is built.
+	{name: "HTTP_API_UTILIZATION_MAX_JOBS"},
+
 	// Mirror routing, resolved into a discovery locator at startup.
 	{name: "HTTP_API_DBMIRROR_NAME"},
 	{name: "HTTP_API_DBMIRROR_ADDRESS"},

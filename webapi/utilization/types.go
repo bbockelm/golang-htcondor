@@ -44,9 +44,23 @@ type Response struct {
 	JobsConsidered int   `json:"jobs_considered"`
 	// Truncated says the read stopped at the job cap, so the analysis
 	// covers only the most recent JobsConsidered jobs of the window.
-	Truncated bool       `json:"truncated"`
+	Truncated bool `json:"truncated"`
+	// Limit is the most jobs this analysis would read; MaxLimit is the
+	// most any analysis may.
+	Limit     int        `json:"limit"`
+	MaxLimit  int        `json:"max_limit"`
 	Overall   Overall    `json:"overall"`
 	Workflows []Workflow `json:"workflows"`
+	// Owners is everyone whose jobs were analysed, by wall clock, for a
+	// scope that covers more than one person's jobs.
+	Owners []OwnerSummary `json:"owners,omitempty"`
+}
+
+// OwnerSummary is one person's share of the analysed jobs.
+type OwnerSummary struct {
+	Owner     string  `json:"owner"`
+	Jobs      int     `json:"jobs"`
+	WallHours float64 `json:"wall_hours"`
 }
 
 // Overall summarizes every job in the window.

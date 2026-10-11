@@ -134,6 +134,9 @@ type Config struct {
 	// ToolStatsMaxSeries caps how many distinct tool-call series are
 	// held at all. Zero means the default.
 	ToolStatsMaxSeries int
+	// UtilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS: the most jobs
+	// one /api/v1/utilization analysis may read. Zero means the default.
+	UtilizationMaxJobs int
 	MetricsCacheTTL    time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics.
 	// Configurable via HTTP_API_METRICS_PUBLIC; see HandlerConfig.
@@ -458,6 +461,7 @@ func NewServer(cfg Config) (*Server, error) {
 		ToolStatsMaxLabelValues:     cfg.ToolStatsMaxLabelValues,
 		ToolStatsOmitUser:           cfg.ToolStatsOmitUser,
 		ToolStatsMaxSeries:          cfg.ToolStatsMaxSeries,
+		UtilizationMaxJobs:          cfg.UtilizationMaxJobs,
 		DBMirrorName:                cfg.DBMirrorName,
 		DBMirrorAddress:             cfg.DBMirrorAddress,
 		DBMirrorRequired:            cfg.DBMirrorRequired,

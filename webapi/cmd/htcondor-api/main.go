@@ -1998,6 +1998,17 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			toolStatsMaxSeries = n
 		}
 	}
+	utilizationMaxJobs := 0
+	if v, ok := cfg.Get("HTTP_API_UTILIZATION_MAX_JOBS"); ok {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n <= 0 {
+			logger.Warn(logging.DestinationHTTP,
+				"Ignoring HTTP_API_UTILIZATION_MAX_JOBS; expected a positive integer",
+				"value", v, "error", err)
+		} else {
+			utilizationMaxJobs = n
+		}
+	}
 	toolStatsMaxLabels := 0
 	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_MAX_LABEL_VALUES"); ok {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
@@ -2152,6 +2163,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		ToolStatsMaxLabelValues:     toolStatsMaxLabels,
 		ToolStatsOmitUser:           toolStatsOmitUser,
 		ToolStatsMaxSeries:          toolStatsMaxSeries,
+		UtilizationMaxJobs:          utilizationMaxJobs,
 		DBMirrorName:                dbMirrorName,
 		DBMirrorAddress:             dbMirrorAddress,
 		DBMirrorRequired:            dbMirrorRequired,

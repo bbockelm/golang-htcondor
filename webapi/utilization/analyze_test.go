@@ -108,7 +108,7 @@ func TestShowOwner(t *testing.T) {
 func withCores(j Job, requested, cores float64) Job {
 	j.RequestCpus = f(requested)
 	cpu := cores * j.Wall
-	j.CPUSeconds = &cpu
+	j.CPUSeconds = f(cpu)
 	return j
 }
 
@@ -193,12 +193,11 @@ func TestShortJobsAndRestarts(t *testing.T) {
 func TestOutcomesAndBadput(t *testing.T) {
 	ok := completed(1, 900, 1024, 3600)
 	failed := completed(2, 900, 1024, 3600)
-	code := int64(1)
-	failed.ExitCode = &code
+	failed.ExitCode = f(1)
 	signalled := completed(3, 900, 1024, 3600)
 	signalled.ExitBySignal = true
 	removed := completed(4, 900, 1024, 1800)
-	removed.Status, removed.ExitCode = statusRemoved, nil
+	removed.Status, removed.ExitCode = statusRemoved, 0
 
 	resp := Analyze([]Job{ok, failed, signalled, removed}, Options{})
 	w := resp.Workflows[0]
@@ -378,5 +377,46 @@ func TestAdviceTextIsPlain(t *testing.T) {
 	}
 	if a.Confidence != "high" {
 		t.Errorf("confidence = %q", a.Confidence)
+	}
+}
+
+// A scope over several people lists them, most wall clock first; a
+// personal one does not.
+func TestOwnersList(t *testing.T) {
+	jobs := jobsAt(3, 1, 900, 1024)
+	bob := jobsAt(2, 100, 900, 1024)
+	for i := range bob {
+		bob[i].Owner, bob[i].Wall = "bob", 7200
+	}
+	jobs = append(jobs, bob...)
+	resp := Analyze(jobs, Options{ShowOwner: true, Limit: 50000, MaxLimit: 1000000})
+	want := []OwnerSummary{{Owner: "bob", Jobs: 2, WallHours: 4}, {Owner: "alice", Jobs: 3, WallHours: 3}}
+	if !reflect.DeepEqual(resp.Owners, want) {
+		t.Errorf("owners = %+v, want %+v", resp.Owners, want)
+	}
+	if resp.Limit != 50000 || resp.MaxLimit != 1000000 {
+		t.Errorf("limit = %d / %d", resp.Limit, resp.MaxLimit)
+	}
+	if personal := Analyze(jobs, Options{}); personal.Owners != nil {
+		t.Errorf("owners listed for a personal scope: %+v", personal.Owners)
+	}
+}
+
+// A workflow of one job carries the same data as any other.
+func TestSingleJobWorkflow(t *testing.T) {
+	j := withCores(completed(1, 900, 4096, 3600), 2, 1.5)
+	j.RequestDisk, j.DiskUsage = f(1048576), f(204800)
+	w := onlyWorkflow(t, []Job{j})
+	if w.Jobs != 1 || w.Succeeded != 1 || w.WallHours != 1 || len(w.Samples) != 1 || len(w.Batches) != 1 {
+		t.Errorf("workflow = %+v", w)
+	}
+	if w.Memory.PeakMiB == nil || w.Memory.PeakMiB.N != 1 || w.Memory.PeakMiB.Max != 900 || len(w.Memory.PeakMiB.Histogram) < minBins {
+		t.Errorf("peak = %+v", w.Memory.PeakMiB)
+	}
+	if w.CPU.CoresUsed == nil || w.CPU.CoresUsed.P50 != 1.5 || w.Memory.Request.Typical != 4096 {
+		t.Errorf("cpu = %+v memory request = %+v", w.CPU.CoresUsed, w.Memory.Request)
+	}
+	if len(w.MemoryCurve) != 0 || w.Advice == nil || w.Throughput != nil {
+		t.Errorf("one job: curve %d, advice %v, throughput %v", len(w.MemoryCurve), w.Advice, w.Throughput)
 	}
 }

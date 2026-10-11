@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/PelicanPlatform/classad/collections/vm"
+	"github.com/PelicanPlatform/classad/parser"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
@@ -558,5 +561,119 @@ func TestUtilizationWindowPerBackend(t *testing.T) {
 		if _, err := classad.ParseExpr(c); err != nil {
 			t.Errorf("%q does not parse: %v", c, err)
 		}
+	}
+}
+
+// A constraint narrows the analysis; one the parser rejects is a 400
+// carrying the parser's message. Each is its own cache entry.
+func TestUtilizationConstraint(t *testing.T) {
+	f := utilizationFixture(t)
+	alice := f.bearer(t, "alice")
+	if resp := f.utilization(t, "/api/v1/utilization", alice); resp.JobsConsidered != 3 {
+		t.Fatalf("unfiltered: %d jobs", resp.JobsConsidered)
+	}
+	resp := f.utilization(t, "/api/v1/utilization?constraint="+url.QueryEscape("ClusterId == 101 || ClusterId == 103"), alice)
+	if resp.JobsConsidered != 2 {
+		t.Errorf("filtered: %d jobs, want 2", resp.JobsConsidered)
+	}
+	// A constraint cannot reach past its parentheses into the scope.
+	resp = f.utilization(t, "/api/v1/utilization?owned_by_me=false&constraint="+url.QueryEscape("true || true"), f.bearer(t, "bob"))
+	if got := workflowExecutables(resp); !slices.Equal(got, []string{"bob_sim"}) {
+		t.Errorf("bob with a constraint of 'true || true': %v", got)
+	}
+	w := f.do(t, http.MethodGet, "/api/v1/utilization?constraint="+url.QueryEscape("ClusterId == == 3"), "", alice)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid constraint") {
+		t.Errorf("bad constraint: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// owners narrows an administrator's view and lists who is in it; for a
+// caller who may see only their own jobs it intersects, never widens.
+func TestUtilizationOwners(t *testing.T) {
+	f := utilizationFixture(t)
+	resp := f.utilization(t, "/api/v1/utilization?owners=alice", f.bearer(t, "root"))
+	if got := workflowExecutables(resp); !slices.Equal(got, []string{"alice_sim"}) {
+		t.Errorf("admin owners=alice: %v", got)
+	}
+	if len(resp.Owners) != 1 || resp.Owners[0].Owner != "alice" || resp.Owners[0].Jobs != 3 || resp.Owners[0].WallHours != 3 {
+		t.Errorf("owners list = %+v", resp.Owners)
+	}
+	everyone := f.utilization(t, "/api/v1/utilization?owned_by_me=false", f.bearer(t, "root"))
+	if len(everyone.Owners) != 2 || everyone.Owners[0].Owner != "alice" {
+		t.Errorf("admin owners list = %+v, want alice (3 h) then bob (1 h)", everyone.Owners)
+	}
+
+	bob := f.bearer(t, "bob")
+	for _, path := range []string{
+		"/api/v1/utilization?owners=alice",
+		"/api/v1/utilization?owners=alice&owned_by_me=false",
+		"/api/v1/utilization?owners=alice,bob&owned_by_me=false",
+	} {
+		resp := f.utilization(t, path, bob)
+		for _, w := range resp.Workflows {
+			if w.Executable == "alice_sim" {
+				t.Errorf("bob GET %s read alice's jobs", path)
+			}
+		}
+		if resp.Owners != nil {
+			t.Errorf("bob GET %s: an owners list in a personal scope: %+v", path, resp.Owners)
+		}
+	}
+	if resp := f.utilization(t, "/api/v1/utilization?owners=alice,bob&owned_by_me=false", bob); resp.JobsConsidered != 2 {
+		t.Errorf("bob naming himself among others: %d jobs, want his 2", resp.JobsConsidered)
+	}
+}
+
+func TestUtilizationLimit(t *testing.T) {
+	f := utilizationFixture(t)
+	f.s.utilizationMaxJobs = 10
+	alice := f.bearer(t, "alice")
+	resp := f.utilization(t, "/api/v1/utilization?limit=2", alice)
+	if resp.JobsConsidered != 2 || !resp.Truncated || resp.Limit != 2 || resp.MaxLimit != 10 {
+		t.Errorf("limit=2: %d jobs truncated=%v limit=%d max=%d", resp.JobsConsidered, resp.Truncated, resp.Limit, resp.MaxLimit)
+	}
+	if resp := f.utilization(t, "/api/v1/utilization?limit=5000000", alice); resp.Limit != 10 || resp.JobsConsidered != 3 || resp.Truncated {
+		t.Errorf("limit above the ceiling: limit=%d jobs=%d truncated=%v; want clamped to 10", resp.Limit, resp.JobsConsidered, resp.Truncated)
+	}
+	// The default is itself clamped to a lower ceiling.
+	if resp := f.utilization(t, "/api/v1/utilization", alice); resp.Limit != 10 {
+		t.Errorf("default limit under a ceiling of 10 = %d", resp.Limit)
+	}
+	f.s.utilizationMaxJobs = 0
+	if resp := f.utilization(t, "/api/v1/utilization?days=30", alice); resp.Limit != utilizationDefaultLimit || resp.MaxLimit != utilizationDefaultMaxLimit {
+		t.Errorf("defaults: limit %d max %d", resp.Limit, resp.MaxLimit)
+	}
+	for _, bad := range []string{"0", "-1", "lots"} {
+		if w := f.do(t, http.MethodGet, "/api/v1/utilization?limit="+bad, "", alice); w.Code != http.StatusBadRequest {
+			t.Errorf("limit=%s: %d", bad, w.Code)
+		}
+	}
+	if d := utilizationComputeTimeout(1000000); d != 13*time.Minute {
+		t.Errorf("timeout for a million = %v", d)
+	}
+}
+
+// The mirror prunes history segments on top-level "attribute op literal"
+// conjuncts. However the caller's owners and constraint are combined
+// with the scope, the window must survive as one of them -- and the
+// owner list as an "in" probe -- in the planner's own reading.
+func TestUtilizationWindowStaysPrunable(t *testing.T) {
+	uq := utilizationQuery{owners: []string{"alice", "bob"}, filter: `JobBatchName == "x" || ClusterId > 5`}
+	mirror, _ := utilizationWindow(uq.narrow(`Owner == "root"`), 1000)
+	expr, err := parser.ParseExpr(mirror)
+	if err != nil {
+		t.Fatalf("%q: %v", mirror, err)
+	}
+	var window, owners bool
+	for _, p := range vm.Compile(expr).Probes() {
+		if p.Attr == "EnteredHistoryTime" && p.Op == ">=" {
+			window = true
+		}
+		if p.Attr == "Owner" && p.Op == "in" && len(p.Vals) == 2 {
+			owners = true
+		}
+	}
+	if !window || !owners {
+		t.Errorf("probes of %q: window %v, owners %v", mirror, window, owners)
 	}
 }

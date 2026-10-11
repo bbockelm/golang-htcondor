@@ -179,8 +179,8 @@ func cpuAdvice(w *Workflow, jobs []*Job) []Advice {
 		// request, over the same wall clock.
 		saved := 0.0
 		for _, j := range jobs {
-			if j.coresUsed() != nil && j.RequestCpus != nil && *j.RequestCpus > rec {
-				saved += (*j.RequestCpus - rec) * hours(j.Wall)
+			if _, ok := j.coresUsed(); ok && j.RequestCpus.OK() && j.RequestCpus.V() > rec {
+				saved += (j.RequestCpus.V() - rec) * hours(j.Wall)
 			}
 		}
 		return []Advice{{
@@ -223,11 +223,11 @@ func diskAdvice(w *Workflow, jobs []*Job) *Advice {
 	largest, n := 0.0, 0
 	for _, j := range jobs {
 		switch {
-		case j.HeldForDisk && j.RequestDisk != nil:
-			largest = math.Max(largest, math.Max(orZero(j.DiskUsage), *j.RequestDisk))
+		case j.HeldForDisk && j.RequestDisk.OK():
+			largest = math.Max(largest, math.Max(orZero(j.DiskUsage), j.RequestDisk.V()))
 			n++
-		case j.Status == statusCompleted && j.DiskUsage != nil:
-			largest = math.Max(largest, *j.DiskUsage)
+		case j.Status == statusCompleted && j.DiskUsage.OK():
+			largest = math.Max(largest, j.DiskUsage.V())
 			n++
 		}
 	}
@@ -273,14 +273,14 @@ func gpuAdvice(w *Workflow, jobs []*Job) *Advice {
 	idle, reserved := 0, 0.0
 	gpuMem := 0.0
 	for _, j := range jobs {
-		u := j.GPUUtilization()
-		if u == nil {
+		u, ok := j.GPUUtilization()
+		if !ok {
 			continue
 		}
-		if *u < gpuUnusedLevel {
+		if u < gpuUnusedLevel {
 			idle++
 		}
-		reserved += *j.RequestGPUs * hours(j.Wall)
+		reserved += j.RequestGPUs.V() * hours(j.Wall)
 		gpuMem = math.Max(gpuMem, orZero(j.GPUsMemoryUsage))
 	}
 	memNote := ""

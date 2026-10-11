@@ -1724,6 +1724,7 @@ Frequently-used knobs:
 | `HTTP_API_METRICS_PUBLIC` | `true` to disable the API-key gate on `/metrics`. Default off — Prometheus must present an API key with the `metrics` scope. |
 | `HTTP_API_TOOL_STATS_FLUSH_INTERVAL` | How often MCP tool-call counters are written to the application database (e.g. `5m`). Default `5m`; they are also written at shutdown. See [MCP tool-call statistics](#mcp-tool-call-statistics). |
 | `HTTP_API_TOOL_STATS_MAX_LABEL_VALUES` | Cap on distinct values per `/metrics` label for tool statistics. Default `1000`; past it the quietest values render as `other`, while the database keeps them all. |
+| `HTTP_API_UTILIZATION_MAX_JOBS` | Most finished jobs one Utilization analysis (`GET /api/v1/utilization`) may read; a larger `limit` is clamped to it. Default `1000000`. An analysis holds about 250 bytes per job while it runs, so the default is about a quarter of a gigabyte at peak; the cached result is the answer, not the jobs. Read at startup. |
 | `HTTP_API_TOOL_STATS_MAX_SERIES` | Cap on distinct tool-call combinations held in memory and in the database. Default `10000`; past it new combinations fold into `other`. This is what bounds memory and disk. |
 | `HTTP_API_TOOL_STATS_OMIT_USER` | `true` renders every `/metrics` user label as `omitted`, for a site that does not want account names on a scrapeable endpoint. The database still records them. See [Usernames on /metrics](#usernames-on-metrics). |
 | `HTTP_API_ENABLE_MCP` | Enable the `/mcp/*` endpoints. Required by the chat assistant. |
