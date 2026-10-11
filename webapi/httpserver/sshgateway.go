@@ -30,6 +30,7 @@ import (
 	"github.com/ory/fosite"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
@@ -130,6 +131,16 @@ func (h *Handler) withCondorCredential(ctx context.Context, username string, sco
 	return htcondor.WithRenewableSecurityConfig(ctx, secConfig, renew), nil
 }
 
+// gatewayJobIDCodec is how the gateway reads a username as a job on one
+// of several APs: the server's job id codec in multi-AP mode, nil with
+// one schedd.
+func (h *Handler) gatewayJobIDCodec() jobid.Codec {
+	if h.multi == nil {
+		return nil
+	}
+	return h.multi.codec
+}
+
 // startSSHGateway brings up the SSH gateway when one is configured.
 //
 // issuer is the OAuth2 issuer as finally resolved, which is why this
@@ -215,9 +226,10 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 			ClientID: sshGatewayClientID,
 			Scopes:   sshGatewayScopes,
 		},
-		Identity: h.sshGatewayIdentity,
-		Logger:   h.logger,
-		Prompt:   h.sshGatewayPromptName(issuer),
+		Identity:   h.sshGatewayIdentity,
+		Logger:     h.logger,
+		Prompt:     h.sshGatewayPromptName(issuer),
+		JobIDCodec: h.gatewayJobIDCodec(),
 	})
 	if err != nil {
 		return err
@@ -272,6 +284,7 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 			Resolve:    h.sshGatewayResolve,
 			Credential: h.sshGatewayCredential,
 			Diagnose:   h.sshGatewayDiagnose,
+			JobIDCodec: h.gatewayJobIDCodec(),
 			Logger:     h.logger,
 		},
 		Bans:   bans,
@@ -483,10 +496,39 @@ func (h *Handler) sshGatewayCredential(ctx context.Context, account string, scop
 // The key's credential is the one ctx carries, minted for this channel
 // by sshGatewayCredential; with none the cache refuses the key.
 func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshgateway.Target, report func(string)) (jobssh.Key, error) {
+	if h.multi != nil {
+		return h.sshGatewayResolveMultiAP(ctx, account, t)
+	}
 	if t.IsJob() {
 		return jobssh.Key{Owner: account, Credential: jobTransportCredential(ctx, ""), Cluster: t.Cluster, Proc: t.Proc}, nil
 	}
 	return h.sshGatewaySession(ctx, account, t, report)
+}
+
+// sshGatewayResolveMultiAP is sshGatewayResolve for a gateway in front
+// of several access points. The username must name the job's AP in the
+// codec's form -- ssh 123.0@ap1.example.org@gateway -- and the key
+// carries it, so the transport is opened through that AP's schedd.
+// A bare job id is refused with the caller's candidates rather than
+// guessed, as every other action is. Interactive sessions are not served
+// yet: creating one is a submission, and submissions need AP assignment.
+func (h *Handler) sshGatewayResolveMultiAP(ctx context.Context, account string, t sshgateway.Target) (jobssh.Key, error) {
+	if !t.IsJob() {
+		return jobssh.Key{}, fmt.Errorf("interactive sessions are not available through this gateway yet, which fronts "+
+			"several access points; connect to a job you have as its complete id, e.g. ssh %s@<gateway>",
+			h.multi.codec.Format(jobid.ID{Schedd: "ap.example.org", Cluster: 12345}))
+	}
+	user, err := h.multi.svc.UserFor(account)
+	if err != nil {
+		return jobssh.Key{}, err
+	}
+	id := jobid.ID{Schedd: t.Schedd, Cluster: int64(t.Cluster), Proc: int64(t.Proc)}
+	m, err := h.multi.svc.Route(ctx, user, id)
+	if err != nil {
+		return jobssh.Key{}, err
+	}
+	return jobssh.Key{Owner: account, Credential: jobTransportCredential(ctx, ""), Schedd: m.Name,
+		Cluster: t.Cluster, Proc: t.Proc}, nil
 }
 
 // sshGatewaySession attaches to the caller's named interactive session,
@@ -657,7 +699,13 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 // one worth showing) and a query that could not be answered.
 func (h *Handler) sshGatewayDiagnose(ctx context.Context, key jobssh.Key, _ error) error {
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", key.Cluster, key.Proc)
-	ads, _, err := h.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+	// The schedd the transport was opened through: the one schedd, or
+	// the AP the key names.
+	schedd := h.scheddForTransport(key)
+	if schedd == nil {
+		return nil
+	}
+	ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Limit:      1,
 		Projection: []string{"ClusterId", "ProcId", "JobStatus", "HoldReason", "HoldReasonCode"},
 		// Confined to the caller the same way every other query on this

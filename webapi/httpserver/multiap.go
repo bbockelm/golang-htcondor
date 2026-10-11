@@ -331,6 +331,15 @@ var multiAPSharePaths = map[string]bool{
 	"/api/v1/share/input":  true,
 }
 
+// multiAPSSHPaths serve the SSH gateway's device-flow approval screen
+// and its certificate authority. Neither reaches a schedd.
+var multiAPSSHPaths = map[string]bool{
+	sshConsentReadPath:        true,
+	sshConsentApprovePath:     true,
+	"/api/v1/ssh/ca":          true,
+	"/api/v1/ssh/certificate": true,
+}
+
 // multiAPAdminPaths are admin pages that read and write only this
 // server's own database (OAuth2 clients and tokens, API keys, logs,
 // usage, configuration) and never a schedd. Admin-gated in the handlers.
@@ -380,6 +389,9 @@ func multiAPAllowed(method, path string) bool {
 		}
 		// One job: read, remove, edit.
 		return read || method == http.MethodDelete || method == http.MethodPatch
+	}
+	if multiAPSSHPaths[path] {
+		return true
 	}
 	if multiAPSharePaths[path] {
 		// Redeeming a share URL acts on the AP the URL names.
@@ -789,14 +801,21 @@ func (h *Handler) pingAsCaller(ctx context.Context) (*htcondor.PingResult, error
 // pings, the queue-superuser poll, the job_queue.log tail, watches,
 // Jupyter -- does not start.
 func (h *Handler) startMultiAPHandler(ctx context.Context, ln net.Listener, protocol string) error {
-	if h.sshGatewayAddress != "" {
-		return errors.New("HTTP_API_SSH_GATEWAY_ADDRESS is set, but the SSH gateway is not available in multi-AP mode yet")
-	}
 	if err := h.initializeIDP(ln, protocol); err != nil {
 		return err
 	}
 	h.initializeOAuth2(ln, protocol)
 	h.warnIfMCPCannotMintCredentials()
+	// The gateway reaches jobs by complete id (sshGatewayResolveMultiAP);
+	// interactive-session targets are refused until submit is AP-aware.
+	if h.oauth2Provider != nil {
+		if err := h.startSSHGateway(h.ctx, h.oauth2Provider.config.AccessTokenIssuer); err != nil {
+			return fmt.Errorf("starting the SSH gateway: %w", err)
+		}
+	} else if h.sshGatewayAddress != "" {
+		return errors.New("HTTP_API_SSH_GATEWAY_ADDRESS is set but OAuth2 is not configured; " +
+			"the gateway authenticates with the device flow and cannot run without it")
+	}
 	if h.oauth2StateStore != nil {
 		h.oauth2StateStore.Start(ctx)
 	}

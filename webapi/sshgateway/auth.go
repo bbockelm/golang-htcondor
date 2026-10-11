@@ -25,6 +25,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -81,6 +82,10 @@ type Options struct {
 	// prompt and then go silent hold every slot for the full timeout,
 	// and nobody else can log in. Zero means DefaultMaxPerSource.
 	MaxPerSource int
+
+	// JobIDCodec reads a username as a job id on one of several access
+	// points; see Server.JobIDCodec. Nil for one schedd.
+	JobIDCodec jobid.Codec
 
 	// MaxConcurrent caps logins in flight. Every connection that
 	// reaches the prompt starts a device authorization and then waits
@@ -219,7 +224,7 @@ func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata,
 	// wrong place to refuse, because the resolver's refusal names the
 	// forms that would have worked and this one would only say
 	// "Permission denied".
-	target, _ := ParseTarget(conn.User())
+	target, _ := ParseTargetWith(a.opts.JobIDCodec, conn.User())
 
 	auth, err := a.opts.Flow.Authorize(ctx, target)
 	if err != nil {
