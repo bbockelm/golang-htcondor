@@ -53,7 +53,8 @@ func genericInstructions(docsEmbedded bool) string {
 	b.WriteString("- While a job runs: tail_job_output for stdout/stderr, exec_in_job for a command. " +
 		"After it finishes: get_job_stdout, get_job_stderr, get_job_output. Each pair is wrong at the other time.\n")
 	b.WriteString("- Held: read HoldReason, fix the cause, then release_job or resubmit. " +
-		"Idle too long: analyze_job_match. Many failures at once: analyze_issues.\n\n")
+		"Idle too long: analyze_job_match. Many failures at once: analyze_issues. " +
+		"What the pool has (slots, CPUs, GPUs, memory free): query_pool.\n\n")
 
 	b.WriteString("## More\n")
 	fmt.Fprintf(&b, "doc_guide(topic) has the details and every tool: %s.", strings.Join(guideTopicNames(), ", "))

@@ -59,6 +59,11 @@ var (
 	strSchema  = map[string]interface{}{"type": "string"}
 	intSchema  = map[string]interface{}{"type": "integer"}
 	boolSchema = map[string]interface{}{"type": "boolean"}
+	// numberSchema is a total that may not be an integer.
+	numberSchema = map[string]interface{}{"type": "number"}
+	// numberMapSchema / intMapSchema are objects keyed by attribute name.
+	numberMapSchema = map[string]interface{}{"type": "object", "additionalProperties": numberSchema}
+	intMapSchema    = map[string]interface{}{"type": "object", "additionalProperties": intSchema}
 	// adSchema is a single ClassAd: an object with an open attribute set.
 	adSchema = map[string]interface{}{"type": "object", "additionalProperties": true}
 	// anySchema is used where the payload is a nested structure this file
@@ -201,6 +206,42 @@ var outputSchemas = map[string]map[string]interface{}{
 		"result":       anySchema,
 		"slot_cache":   anySchema,
 	}, "job_id"),
+
+	// --- pool --------------------------------------------------------
+	// query_pool answers in one of two shapes, so the schema is their
+	// union: a listing carries ads/has_more, a summary carries the
+	// counts and totals. The totals are keyed by attribute name, which
+	// depends on the ad type, so those objects stay open.
+	"query_pool": obj(map[string]interface{}{
+		"ad_type":    strSchema,
+		"mode":       strSchema,
+		"constraint": strSchema,
+		"count":      intSchema,
+		"ads":        arr(adSchema),
+		"has_more":   boolSchema,
+		"machines":   intSchema,
+		"group_by":   arr(strSchema),
+		"groups": arr(obj(map[string]interface{}{
+			"key":    arr(strSchema),
+			"count":  intSchema,
+			"totals": numberMapSchema,
+		}, "key", "count")),
+		"groups_total":     intSchema,
+		"groups_truncated": boolSchema,
+		"totals":           numberMapSchema,
+		"missing":          intMapSchema,
+		"resources": map[string]interface{}{
+			"type": "object",
+			"additionalProperties": obj(map[string]interface{}{
+				"total":     numberSchema,
+				"claimed":   numberSchema,
+				"unclaimed": numberSchema,
+				"other":     numberSchema,
+			}, "total", "claimed", "unclaimed", "other"),
+		},
+		"slot_types": intMapSchema,
+		"truncated":  boolSchema,
+	}, "ad_type", "mode", "count"),
 
 	// --- submit / mutate ---------------------------------------------
 	// submit_dag reports what it staged and what the caller still owes,

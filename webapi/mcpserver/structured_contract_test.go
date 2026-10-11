@@ -466,6 +466,9 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"get_job", map[string]interface{}{"job_id": "1.0", "job": map[string]interface{}{}}},
 		{"analyze_job_match", map[string]interface{}{
 			"job_id": "1.0", "requirements": "", "result": nil, "slot_cache": nil}},
+		// A pool summary that matched nothing. The listing's empty shape
+		// is checked in TestPoolEmptyAnswers, through the dispatcher.
+		{"query_pool", newPoolAggregator(&poolAdKinds[0], nil).structured("true")},
 
 		{"submit_job", map[string]interface{}{
 			"cluster_id": 0, "job_ids": []string(nil), "proc_count": 0,

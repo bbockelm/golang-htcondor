@@ -17,7 +17,9 @@ difference between one person's broken submit file and a site problem.
 analyze_job_match explains why a job is or is not matching slots. It is the
 first stop for a job stuck idle: usually a resource request (memory, disk,
 GPUs) that no slot satisfies, or a Requirements expression that excludes
-every machine.
+every machine. query_pool shows what the pool offers -- for example
+whether any slot has the GPUs or memory the job asks for, and how much of it
+is unclaimed right now.
 
 ## A job that is Held (JobStatus 5)
 
