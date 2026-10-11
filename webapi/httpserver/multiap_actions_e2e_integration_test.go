@@ -201,8 +201,7 @@ func e2eSpoolAndShare(t *testing.T, s *multiAPStack) {
 
 // e2eBulkContactsStaleAP: with ap2's spoke stopped, a job submitted to
 // ap2 is invisible to the hub -- and a bulk hold still finds it, because
-// a stale AP is always contacted. ap1, fresh and with no match, is
-// skipped on the hub's word.
+// a stale AP is always contacted.
 func e2eBulkContactsStaleAP(t *testing.T, s *multiAPStack) {
 	s.submit(t, e2eAP2, `+E2ELate = true`+"\n")
 	late := s.lastCluster(t, e2eAP2)
@@ -215,9 +214,13 @@ func e2eBulkContactsStaleAP(t *testing.T, s *multiAPStack) {
 	for _, a := range rep.APs {
 		got[a.Schedd] = a.Status
 	}
-	if got[e2eAP2] != multiap.BulkActed || got[e2eAP1] != multiap.BulkSkipped {
-		t.Errorf("per-AP = %v, want %s acted (stale, contacted) and %s skipped (fresh, empty)", got, e2eAP2, e2eAP1)
+	// ap1 may be skipped on the hub's word, or contacted anyway if this
+	// server changed something there more recently than the hub's copy
+	// (the previous phase's DELETE) -- both are right; acting is not.
+	if got[e2eAP2] != multiap.BulkActed || (got[e2eAP1] != multiap.BulkSkipped && got[e2eAP1] != multiap.BulkNoMatch) {
+		t.Errorf("per-AP = %v, want %s acted (stale, contacted) and %s skipped or no_match", got, e2eAP2, e2eAP1)
 	}
+	t.Logf("with %s stale: %v", e2eAP2, got)
 	if st := s.scheddAttr(t, e2eAP2, late, "JobStatus"); st != "5" {
 		t.Errorf("the job the hub had not seen (%s) was not held: JobStatus %q", late, st)
 	}
