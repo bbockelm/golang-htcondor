@@ -769,6 +769,12 @@ func (e *expander) eval(body string) (string, error) {
 			s, _ := r.StringValue()
 			return s, nil
 		}
+		// HTCondor renders every other result with ClassAdUnParser (0.0,
+		// 1.500000000000000E+00, { 1,2 }). The classad package has no
+		// such form for a nested classad yet.
+		if s, ok := r.Unparse(); ok {
+			return s, nil
+		}
 		return r.String(), nil
 	}
 	if haveExpanded {
@@ -1371,13 +1377,7 @@ func asciiEqualFold(a, b string) bool {
 
 // parseConfigExpr parses a ClassAd expression the way HTCondor's config
 // functions do (ParseClassAdRvalExpr / ClassAd::AssignExpr): old ClassAd
-// syntax, and the whole text must be one expression. The classad package
-// parses an expression as the value of a one-attribute record, so it also
-// accepts a trailing ';' (the record's separator); HTCondor's parser does
-// not, and neither does this.
+// syntax, and the whole text must be one expression.
 func parseConfigExpr(s string) (*classad.Expr, error) {
-	if strings.HasSuffix(strings.TrimRight(s, " \t\n\v\f\r"), ";") {
-		return nil, errors.New("not a single expression")
-	}
 	return classad.ParseExprOld(s)
 }

@@ -84,20 +84,25 @@ and says to promote the case to parity.
 | 26 | `#!` line inside `@=` | kept | dropped | FIXED: a `#` line is a comment there too |
 | 27 | `$REAL(1,%A% )`, `$INT(7,%d%5.2lz)`, ... | Go fmt | glibc printf | FIXED: formats follow glibc (one length modifier, unknown conversions echoed in glibc's normalized form, output ends at a cut-short spec) |
 
-## Open: ClassAd library divergences
+## ClassAd library divergences (fixed in classad v0.31.4)
 
 `$INT`, `$REAL`, `$STRING` and `$EVAL` evaluate their argument as a ClassAd
-expression. The Go side uses github.com/PelicanPlatform/classad; where it
-differs from libclassad (old semantics) the config values differ. Found so far
-(each a known-divergence seed; condor 25.14.1 values):
+expression with github.com/PelicanPlatform/classad. These differed from
+libclassad (old semantics) and were fixed there (classad #291, #292); each
+is now a parity seed (condor 25.14.1 values):
 
-| Input | HTCondor | Go |
+| Input | HTCondor | Go before v0.31.4 |
 |---|---|---|
 | `$INT(0//)` | `0` (`//` is a comment) | `` (parse error) |
 | `$INT(!-00)` | `1` (`-00` lexes as a negative real) | `` (`00` rejected) |
 | `$REAL(10000000000000000000%1)` | `0` (out-of-range literal becomes 0) | `` |
 | `$INT("\x7f\xb4" > "\x7f\x84")` | `1` (bytes compared) | `0` (invalid UTF-8 normalized to U+FFFD) |
-| `$INT(0;)` | `` (trailing `;` rejected) | worked around in `parseConfigExpr` |
+| `$INT(0;)` | `` (trailing `;` rejected) | accepted; was worked around in `parseConfigExpr` |
+| `$EVAL(.0)`, `$EVAL(1.5)` | `0.0`, `1.500000000000000E+00` (ClassAdUnParser) | `0`, `1.5` (`Value.String`) |
 
-The coverage-guided fuzzer reaches these within seconds, so the CI fuzz step
-fails until the ClassAd library matches libclassad on them.
+Still open in the library, reachable through `$EVAL` but not yet hit by the
+fuzzer in CI-length runs: libclassad stops evaluating 400 levels deep (Go:
+2000), so deeply nested expressions differ; Go changes the case of non-ASCII
+letters in `toUpper`/`toLower`/`stricmp`/`stringListIMember` where libclassad
+does not; `regexps`/`replace`/`replaceAll` substitution rules; a bare `MY`
+evaluates to the ad in libclassad but to undefined in Go.

@@ -69,17 +69,14 @@ var seeds = []seedCase{
 	{input: "SUM = 1\nSUM += 2\nL = a\nL +,= b\n"}, // += appends with a space, +,= with a comma
 	{input: "if defined MINUTE\n  X = $(MINUTE)\nelif true\n  X = 0\nendif\n"},
 
-	// --- known divergences in the ClassAd library (github.com/PelicanPlatform/classad),
-	// which $INT/$REAL/$STRING/$EVAL use to evaluate their argument; condor 25.14.1
-	// results checked with condor_config_val ---
-	{input: "I = $INT(0//)\n",
-		reason: "classad: libclassad's lexer takes // as a comment ($INT(0//) -> 0); the Go parser rejects it (-> \"\")."},
-	{input: "I = $INT(!-00)\n",
-		reason: "classad: libclassad lexes -00 as a negative real under old semantics (!-00 -> true -> 1); the Go parser rejects 00 (-> \"\")."},
-	{input: "R = $REAL(10000000000000000000%1)\n",
-		reason: "classad: libclassad turns an out-of-range integer literal into 0 (0%1 -> 0); the Go parser rejects it (-> \"\")."},
-	{input: "I = $INT(\"\x7f\xb4\" > \"\x7f\x84\")\n",
-		reason: "classad: libclassad compares string bytes (-> 1); the Go library replaces invalid UTF-8 with U+FFFD, so the strings are equal (-> 0)."},
+	// --- ClassAd expressions inside $INT/$REAL/$STRING/$EVAL, which the Go side
+	// evaluates with github.com/PelicanPlatform/classad (parity as of v0.31.4) ---
+	{input: "I = $INT(0//)\n"},                                      // '//' starts a comment -> 0
+	{input: "I = $INT(!-00)\n"},                                     // -00 is a negative real under old semantics -> 1
+	{input: "R = $REAL(10000000000000000000%1)\n"},                  // out-of-range integer literal becomes 0
+	{input: "I = $INT(\"\x7f\xb4\" > \"\x7f\x84\")\n"},              // strings compare as bytes -> 1
+	{input: "I = $INT(0;)\n"},                                       // a trailing ';' is not one expression -> ""
+	{input: "Z = $EVAL(.0)\nR = $EVAL(1.5)\nL = $EVAL({1, 1+1})\n"}, // ClassAdUnParser forms: 0.0, 1.500000000000000E+00, { 1,1 + 1 }
 }
 
 // divergence runs both engines on the same preluded source and returns a

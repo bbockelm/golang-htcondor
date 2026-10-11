@@ -198,3 +198,15 @@ func TestMacroSearchCountsRescans(t *testing.T) {
 		t.Errorf("scanned=%d for %d bytes with every body rejected; rescanned bytes were not counted", pos.scanned, len(rejected))
 	}
 }
+
+// $INT/$REAL/$EVAL evaluate their argument as an old-syntax ClassAd
+// expression, and $EVAL renders a non-string result as ClassAdUnParser does.
+func TestParityClassAdArguments(t *testing.T) {
+	wantValues(t, "I = $INT(0//)\n", map[string]string{"I": "0"})
+	wantValues(t, "I = $INT(!-00)\n", map[string]string{"I": "1"})
+	wantValues(t, "R = $REAL(10000000000000000000%1)\n", map[string]string{"R": "0"})
+	wantValues(t, "I = $INT(\"\x7f\xb4\" > \"\x7f\x84\")\n", map[string]string{"I": "1"})
+	wantValues(t, "I = [$INT(0;)]\n", map[string]string{"I": "[]"})
+	wantValues(t, "Z = $EVAL(.0)\nR = $EVAL(1.5)\nN = $EVAL(-7)\nU = $EVAL(undefined)\nL = $EVAL({1, 1+1, \"a\"})\nS = $EVAL(\"a\")\n",
+		map[string]string{"Z": "0.0", "R": "1.500000000000000E+00", "N": "-7", "U": "undefined", "L": `{ 1,1 + 1,"a" }`, "S": "a"})
+}
