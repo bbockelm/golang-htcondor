@@ -11,7 +11,9 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/dagman"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 )
 
@@ -761,6 +763,23 @@ func TestDagmanLayoutPrecedence(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("the schedd was asked %d times; it should be asked once", calls)
+	}
+
+	// Once per access point: two APs' layouts are two discoveries, each
+	// memoised on its own.
+	asked := map[string]int{}
+	perAP := &Server{dagmanLayoutFn: func(ctx context.Context) (string, bool) {
+		asked[routedSchedd(ctx)]++
+		return "/bin/" + routedSchedd(ctx), false
+	}}
+	for _, ap := range []string{"ap1", "ap2", "ap1", "ap2"} {
+		ctx := multiap.WithTarget(context.Background(), multiap.Target{Member: apregistry.Member{Name: ap}})
+		if bin, _ := perAP.dagmanLayout(ctx); bin != "/bin/"+ap {
+			t.Errorf("%s's layout = %q", ap, bin)
+		}
+	}
+	if asked["ap1"] != 1 || asked["ap2"] != 1 {
+		t.Errorf("per-AP discovery counts = %v, want once each", asked)
 	}
 }
 

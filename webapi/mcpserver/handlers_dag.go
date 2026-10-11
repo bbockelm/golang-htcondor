@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing/fstest"
 	"unicode"
 
@@ -1259,20 +1260,39 @@ func checkDagNameLexes(dagName string) error {
 // daemon core sends is matched by content, and a reply that does not
 // match it exactly would otherwise be treated as a real directory.
 func (s *Server) dagmanLayout(ctx context.Context) (binDir string, disablePort bool) {
-	s.dagmanLayoutOnce.Do(func() {
+	key := strings.ToLower(routedSchedd(ctx))
+	s.dagmanLayoutMu.Lock()
+	if s.dagmanLayouts == nil {
+		s.dagmanLayouts = map[string]*dagmanLayoutEntry{}
+	}
+	e, ok := s.dagmanLayouts[key]
+	if !ok {
+		e = &dagmanLayoutEntry{}
+		s.dagmanLayouts[key] = e
+	}
+	s.dagmanLayoutMu.Unlock()
+	e.once.Do(func() {
 		discover := s.dagmanLayoutFn
 		if discover == nil {
 			discover = s.discoverDagmanLayout
 		}
-		s.dagmanLayoutBin, s.dagmanLayoutNoPort = discover(ctx)
+		e.bin, e.noPort = discover(ctx)
 	})
-	return s.dagmanLayoutBin, s.dagmanLayoutNoPort
+	return e.bin, e.noPort
 }
 
-// discoverDagmanLayout asks the schedd. Never fails a submission: a
-// refusal here costs the defaults, not the workflow.
+// dagmanLayoutEntry is one access point's memoised DAGMan layout.
+type dagmanLayoutEntry struct {
+	once   sync.Once
+	bin    string
+	noPort bool
+}
+
+// discoverDagmanLayout asks the schedd -- the routed AP's in multi-AP
+// mode. Never fails a submission: a refusal here costs the defaults, not
+// the workflow.
 func (s *Server) discoverDagmanLayout(ctx context.Context) (string, bool) {
-	schedd := s.getSchedd()
+	schedd := s.scheddFor(ctx)
 	if schedd == nil {
 		return "", false
 	}

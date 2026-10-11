@@ -114,9 +114,12 @@ type Server struct {
 	// most one extra DC_CONFIG_VAL round trip per process. It is never
 	// refreshed: an access point that moves its binaries is restarting
 	// its daemons anyway. See Server.dagmanLayout.
-	dagmanLayoutOnce   sync.Once
-	dagmanLayoutBin    string
-	dagmanLayoutNoPort bool
+	//
+	// Kept per access point: a multi-AP server's DAGMan jobs run on the
+	// AP they are submitted to, whose BIN may differ from any other's.
+	// The key is the routed AP, "" with one schedd.
+	dagmanLayoutMu sync.Mutex
+	dagmanLayouts  map[string]*dagmanLayoutEntry
 	// dagmanLayoutFn replaces that discovery, so the precedence between
 	// configuration, discovery and the package default can be tested
 	// without a schedd. nil uses discoverDagmanLayout.
