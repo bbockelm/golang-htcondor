@@ -456,6 +456,12 @@ func TestMirrorReadRequiresScheddReadAcceptance(t *testing.T) {
 	// used up its allowance is not verified, even for a credential the
 	// schedd would accept. Last, because it exhausts the test source.
 	t.Run("throttled resolution does not verify", func(t *testing.T) {
+		// Hold the cache's clock still: the budget refills with time, and on a
+		// slow runner it refilled between draining it and the second route.
+		frozen := time.Now()
+		server.mcpActors.mu.Lock()
+		server.mcpActors.now = func() time.Time { return frozen }
+		server.mcpActors.mu.Unlock()
 		probe := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 		source := actorResolveSource(probe, server.trustedProxies)
 		for server.mcpActors.allowResolve(source) {
