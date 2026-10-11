@@ -217,6 +217,7 @@ func (s *Service) FanOut(ctx context.Context, req BulkRequest, act BulkAction) (
 			results[i].Status = BulkNoMatch
 			if out.matched() {
 				results[i].Status = BulkActed
+				s.NoteWrite(m.Name)
 			}
 		}(i, m)
 	}
@@ -248,6 +249,13 @@ func (s *Service) provablyEmpty(ctx context.Context, req BulkRequest, balanced, 
 	if !ok || age > req.FreshWithin {
 		return "", false
 	}
+	if s.wroteSince(ap, age+writeMargin) {
+		// This server changed something on ap more recently than the
+		// hub's copy is known to reflect: "nothing matches there" may
+		// describe the queue from before that change. A bulk release
+		// right after a bulk hold is the case that shows it.
+		return "", false
+	}
 	scope := fmt.Sprintf("(User == %s || Owner == %s)", ownerscope.StringLit(req.User), ownerscope.StringLit(req.Owner))
 	if req.AllUsers != nil && req.AllUsers(ap) {
 		scope = "true"
@@ -266,6 +274,38 @@ func (s *Service) provablyEmpty(ctx context.Context, req BulkRequest, balanced, 
 	}
 	return fmt.Sprintf("the federation hub's copy of this access point is %ds behind (within %ds) and holds no matching job",
 		int64(age/time.Second), int64(req.FreshWithin/time.Second)), true
+}
+
+// writeMargin widens the window in which a write by this server
+// disqualifies the hub's word, for the time between the schedd applying
+// it and this server noting it.
+const writeMargin = 2 * time.Second
+
+// NoteWrite records that this server just changed something on ap (an
+// action, an edit, a spool). Until the hub's copy of ap is known to be
+// newer than that, a bulk action does not skip ap on the hub's word.
+func (s *Service) NoteWrite(ap string) {
+	s.writesMu.Lock()
+	defer s.writesMu.Unlock()
+	if s.writes == nil {
+		s.writes = map[string]time.Time{}
+	}
+	s.writes[strings.ToLower(ap)] = s.clock()
+}
+
+// wroteSince reports whether this server wrote to ap within the last d.
+func (s *Service) wroteSince(ap string, d time.Duration) bool {
+	s.writesMu.Lock()
+	defer s.writesMu.Unlock()
+	t, ok := s.writes[strings.ToLower(ap)]
+	return ok && s.clock().Sub(t) < d
+}
+
+func (s *Service) clock() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // Freshness is how far behind its AP the hub's copy of schedd is, bounded

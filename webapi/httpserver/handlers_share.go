@@ -674,6 +674,9 @@ func (s *Handler) shareRedeemTarget(ctx context.Context, p *shareurl.Payload) (c
 	if err != nil {
 		return nil, err
 	}
+	if p.Kind == shareurl.KindInput {
+		s.multi.svc.NoteWrite(m.Name)
+	}
 	id := jobid.ID{Schedd: m.Name, Cluster: int64(p.Cluster), Proc: int64(p.Proc)}
 	return multiap.WithTarget(ctx, multiap.Target{Member: m, ID: id}), nil
 }

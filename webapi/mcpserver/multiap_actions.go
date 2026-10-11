@@ -34,6 +34,18 @@ var multiAPActionTools = map[string]bool{
 	"exec_in_job":                true,
 }
 
+// multiAPReadOnlyActionTools change nothing on the AP; the rest of
+// multiAPActionTools do (create_input_upload_url only mints, but the
+// upload it enables lands through the share route, which notes it).
+var multiAPReadOnlyActionTools = map[string]bool{
+	"get_job_stdout":             true,
+	"get_job_stderr":             true,
+	"get_job_output":             true,
+	"tail_job_output":            true,
+	"create_output_download_url": true,
+	"create_input_upload_url":    true,
+}
+
 // multiAPClusterTools take a bare cluster ("123") to mean every proc of
 // it, as they do on a single-AP server.
 var multiAPClusterTools = map[string]bool{
@@ -138,6 +150,11 @@ func (s *Server) multiActionTool(ctx context.Context, name string, args map[stri
 	ctx, routed, id, err := s.routeJobArgs(ctx, name, args)
 	if err != nil {
 		return nil, err
+	}
+	if !multiAPReadOnlyActionTools[name] {
+		// Until the hub has seen this change, a bulk action must not skip
+		// the AP on the hub's word.
+		s.multi.NoteWrite(id.Schedd)
 	}
 	result, err := s.singleJobTool(name)(ctx, routed)
 	if err != nil {

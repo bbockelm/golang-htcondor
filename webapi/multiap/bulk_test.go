@@ -182,3 +182,39 @@ func TestFanOutReportsFailures(t *testing.T) {
 		t.Errorf("Contacted = %d ok, %d failed", ok, failed)
 	}
 }
+
+// A change this server made on an AP more recently than the hub's copy
+// is known to reflect voids the hub's "nothing matches": a bulk release
+// right after a bulk hold must reach the jobs the hub still shows idle.
+func TestFanOutDoesNotTrustTheHubAboutItsOwnWrites(t *testing.T) {
+	s := bulkService(t)
+	now := time.Now()
+	s.Now = func() time.Time { return now }
+	req := BulkRequest{User: "alice@d", Owner: "alice", Constraint: "JobStatus == 5", FreshWithin: time.Minute}
+
+	rec := &bulkRecorder{}
+	rep, err := s.FanOut(context.Background(), req, rec.act)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statusOf(rep, "ap1").Status != BulkSkipped {
+		t.Fatalf("before any write ap1 = %+v, want skipped", statusOf(rep, "ap1"))
+	}
+	s.NoteWrite("AP1")
+	rec = &bulkRecorder{}
+	if rep, err = s.FanOut(context.Background(), req, rec.act); err != nil {
+		t.Fatal(err)
+	}
+	if rec.contacted["ap1"] != 1 || statusOf(rep, "empty").Status != BulkSkipped {
+		t.Errorf("after a write to ap1: contacted %v, empty=%s", rec.contacted, statusOf(rep, "empty").Status)
+	}
+	// Once the hub's copy is newer than the write, its word counts again.
+	now = now.Add(time.Minute)
+	rec = &bulkRecorder{}
+	if rep, err = s.FanOut(context.Background(), req, rec.act); err != nil {
+		t.Fatal(err)
+	}
+	if rec.contacted["ap1"] != 0 {
+		t.Errorf("a write older than the hub's lag still voids the skip: %+v", statusOf(rep, "ap1"))
+	}
+}

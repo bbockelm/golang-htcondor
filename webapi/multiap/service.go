@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -89,6 +90,11 @@ type Service struct {
 	// BulkFresh is HTTP_API_BULK_FRESH_SECONDS, for bulk actions this
 	// service's callers fan out; zero or negative never skips an AP.
 	BulkFresh time.Duration
+	// Now replaces the clock, for tests.
+	Now func() time.Time
+
+	writesMu sync.Mutex
+	writes   map[string]time.Time // last write by this server, per lower-cased AP
 }
 
 // IsQueueSuperUser reports whether actor is a queue superuser on schedd.
