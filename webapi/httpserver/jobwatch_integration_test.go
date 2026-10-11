@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/PelicanPlatform/classad/db"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
@@ -335,14 +336,18 @@ func TestWatchDoneFiresForCompletedJobStillInQueue(t *testing.T) {
 
 	h, feed, write := mirrorFeed(t, ctx)
 
-	// An empty history table, so the archive read returns cleanly with zero
-	// rows: this job is only ever in the jobs table, as it is on AP40.
+	// An empty history archive, so the archive read returns cleanly with zero
+	// rows: this job is only ever in the jobs table, as it is on AP40. An
+	// archive and not a plain table, because that is what htcondordb creates
+	// and some ops reach one kind but not the other.
 	dbc, closer, _, err := h.dbMirror.Client(ctx)
 	if err != nil {
 		t.Fatalf("connecting to the mirror: %v", err)
 	}
-	if err := dbc.CreateTable(ctx, "history"); err != nil {
-		t.Fatalf("creating the history table: %v", err)
+	if err := dbc.CreateArchiveTable(ctx, "history", db.ArchiveConfig{
+		ZoneAttrs: []string{"CompletionDate", "EnteredHistoryTime"},
+	}); err != nil {
+		t.Fatalf("creating the history archive: %v", err)
 	}
 	closer()
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/PelicanPlatform/classad/dbrpc"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -117,8 +118,12 @@ type Server struct {
 	// configuration, discovery and the package default can be tested
 	// without a schedd. nil uses discoverDagmanLayout.
 	dagmanLayoutFn func(context.Context) (string, bool)
-	stdin          io.Reader
-	stdout         io.Writer
+	// dbClientFn replaces dialing the mirror through dbMirror, so the
+	// htcondordb tools can be tested against an in-process dbrpc server
+	// with production's table kinds. nil dials through dbMirror.
+	dbClientFn func(context.Context) (*dbrpc.Client, func(), *dbmirror.Info, error)
+	stdin      io.Reader
+	stdout     io.Writer
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by the analyze_job_match tool. Same
 	// motivation as the httpserver Handler equivalent: keep the slot

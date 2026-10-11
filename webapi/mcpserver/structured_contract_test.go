@@ -450,8 +450,8 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"query_job_archive", structuredOf(historyResult(nil, "job history", "true", "JOB_HISTORY", ""))},
 		{"query_job_epochs", structuredOf(historyResult(nil, "epoch", "true", "JOB_EPOCH_HISTORY", ""))},
 		{"query_transfer_history", structuredOf(historyResult(nil, "transfer", "true", "JOB_EPOCH_HISTORY", ""))},
-		{"query_history_db", structuredOf(dbTextResult("records", nil, 50, nil, OwnerScope{}))},
-		{"query_jobs_as_of", structuredOf(dbTextResult("records", nil, 50, nil, OwnerScope{}))},
+		{"query_history_db", structuredOf(dbTextResult("records", nil, 50, false, "", nil, OwnerScope{}))},
+		{"query_jobs_as_of", structuredOf(dbTextResult("records", nil, 50, false, "", nil, OwnerScope{}))},
 		{"aggregate_jobs", aggregateStructured(nil, nil, "jobs", "schedd", false)},
 		// An access point with nothing wrong is the normal case, and the
 		// one where a client's schema check would otherwise first run on

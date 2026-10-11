@@ -831,12 +831,13 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 		tools = append(tools,
 			Tool{
 				Name:        "query_history_db",
-				Description: "Query COMPLETED jobs from the htcondordb history archive (a durable mirror of the schedd's history), far more efficiently than scanning the schedd. Returns YOUR OWN jobs; MCP admins get every user's, and each answer states which scope it used. Constraint is a ClassAd expression, e.g. 'JobStatus == 4 && Owner == \"alice\"'.",
+				Description: "Query COMPLETED jobs from the htcondordb history archive (a durable mirror of the schedd's history), far more efficiently than scanning the schedd. Records come most recently archived first, so a limit returns the newest N matches; has_more says whether older matches were left out. Returns YOUR OWN jobs; MCP admins get every user's, and each answer states which scope it used. Constraint is a ClassAd expression, e.g. 'JobStatus == 4 && Owner == \"alice\"'.",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"constraint": map[string]interface{}{"type": "string", "description": "ClassAd constraint expression over completed-job attributes (e.g. 'ExitCode != 0'). Empty matches all your jobs."},
-						"limit":      map[string]interface{}{"type": "integer", "description": "Max records to return (default 200, max 2000)."},
+						"projection": map[string]interface{}{"type": "array", "description": describeProjection(defaultHistoryAttrs), "items": map[string]interface{}{"type": "string"}},
+						"limit":      map[string]interface{}{"type": "integer", "description": "Max records to return, newest first (default 200, max 2000)."},
 					},
 				},
 			},
