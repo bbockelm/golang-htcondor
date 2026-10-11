@@ -26,6 +26,8 @@ import { ConfirmButton } from '@/components/ConfirmButton';
 import { LogViewerPanel } from '@/components/LogViewerPanel';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
 import { RuntimeEstimateField } from './RuntimeEstimate';
+import { JobRelated } from '@/components/JobRelated';
+import { SimilarJobsSection } from '@/components/SimilarJobs';
 
 // xterm.js touches `window` at import time; load it client-only so the static
 // export doesn't try to render a terminal during build.
@@ -423,8 +425,22 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
   const canTail = status === 2 && remote;
   const canShell = (status === 2 || status === 6) && remote;
 
+  // The similar-jobs section, opened from the Related row or the run
+  // time card's basis line, both of which bring it into view.
+  const [similarOpen, setSimilarOpen] = useState(false);
+  const showSimilar = () => {
+    setSimilarOpen(true);
+    // After the section has rendered open.
+    setTimeout(() => document.getElementById('similar-jobs')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }), 0);
+  };
+  // This job on the group's spread: how long it has been running.
+  const similarMark =
+    status === 2 && startDate ? { seconds: Math.max(0, now - startDate), label: 'This job so far' } : undefined;
+
   return (
     <div className="space-y-6">
+      <JobRelated jobID={jobID} cluster={num(job.ClusterId)} archived={false} onSimilar={showSimilar} />
+
       {/* Chat sits at the top: it's the primary affordance for
           investigation ("why is this held?", "tail my stderr") and
           users don't scroll past two screens of panels to find a
@@ -499,6 +515,14 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
         status={status}
         onViewOutput={canTail ? () => setTailRequest((n) => n + 1) : undefined}
         onOpenShell={canShell ? () => setShellRequest((n) => n + 1) : undefined}
+        onShowSimilar={showSimilar}
+      />
+
+      <SimilarJobsSection
+        jobID={jobID}
+        open={similarOpen}
+        onToggle={() => setSimilarOpen((v) => !v)}
+        mark={similarMark}
       />
 
       <ResourceUsagePanel jobID={jobID} status={status} />

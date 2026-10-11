@@ -9,6 +9,8 @@ import type {
   Session,
   ClassAd,
 } from '../../src/lib/api';
+import type { RuntimeEstimateLevel } from '../../src/lib/api';
+import { forJobFixture, similarFixture } from '../../src/lib/similar.fixture';
 import {
   utilizationFixture,
   utilizationJobsFixture,
@@ -425,6 +427,26 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
     // dash; a test that wants some routes this itself.
     if (path === '/api/v1/jobs/runtime-estimates') {
       await route.fulfill({ json: { available: true, estimates: {}, model: { jobs_ingested: 0 } } });
+      return;
+    }
+    // Every job page asks which Utilization workflow the job belongs to,
+    // and the similar-jobs section for the jobs behind its estimate. By
+    // default the workflow has nothing to show, so no link appears.
+    const forJob = path.match(/^\/api\/v1\/utilization\/for-job\/([^/]+)$/);
+    if (forJob) {
+      await route.fulfill({ json: forJobFixture(decodeURIComponent(forJob[1]), { has_history: false }) });
+      return;
+    }
+    const similar = path.match(/^\/api\/v1\/jobs\/([^/]+)\/similar$/);
+    if (similar) {
+      const q = new URL(route.request().url()).searchParams;
+      await route.fulfill({
+        json: similarFixture(decodeURIComponent(similar[1]), {
+          level: (q.get('level') ?? undefined) as RuntimeEstimateLevel | undefined,
+          offset: Number(q.get('offset') ?? 0),
+          page_size: Number(q.get('page_size') ?? 50),
+        }),
+      });
       return;
     }
     // Every waiting or running job's page asks for its runtime estimate.

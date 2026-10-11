@@ -170,6 +170,8 @@ describe('runtimeCard', () => {
         'From 12 of your earlier jobs with the same command and argument pattern. Time spent waiting to start depends on the pool and is not included.',
       ],
       actions: false,
+      // The basis on its own, for the view to link to those jobs.
+      basis: 'From 12 of your earlier jobs with the same command and argument pattern.',
     });
   });
 

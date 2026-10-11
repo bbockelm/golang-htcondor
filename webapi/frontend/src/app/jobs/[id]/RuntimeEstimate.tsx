@@ -33,6 +33,8 @@ export function RoughChip() {
 export interface RuntimeEstimateActions {
   onViewOutput?: () => void;
   onOpenShell?: () => void;
+  // Opens the list of the jobs the estimate is based on.
+  onShowSimilar?: () => void;
 }
 
 const actionCls =
@@ -47,6 +49,7 @@ export function RuntimeEstimateView({
   locale,
   onViewOutput,
   onOpenShell,
+  onShowSimilar,
 }: {
   estimate: RuntimeEstimate | undefined;
   status: number | undefined;
@@ -87,11 +90,30 @@ export function RuntimeEstimateView({
           <span className="text-right">{card.axis.right}</span>
         </div>
       </div>
-      {card.lines.map((line) => (
-        <p key={line} className="text-sm text-gray-600">
-          {line}
-        </p>
-      ))}
+      {card.lines.map((line) => {
+        // The basis sentence names a group of jobs; it opens them.
+        const at = card.basis && onShowSimilar ? line.indexOf(card.basis) : -1;
+        return (
+          <p key={line} className="text-sm text-gray-600">
+            {at < 0 ? (
+              line
+            ) : (
+              <>
+                {line.slice(0, at)}
+                <button
+                  type="button"
+                  onClick={onShowSimilar}
+                  className="text-left text-brand-700 underline decoration-dotted underline-offset-2 hover:decoration-solid"
+                  data-testid="runtime-basis-link"
+                >
+                  {card.basis}
+                </button>
+                {line.slice(at + card.basis!.length)}
+              </>
+            )}
+          </p>
+        );
+      })}
       {showActions && (
         <div className="flex flex-wrap gap-2">
           {onViewOutput && (

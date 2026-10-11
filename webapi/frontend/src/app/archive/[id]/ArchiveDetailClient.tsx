@@ -22,7 +22,7 @@
 // carries the Requirements expression and the analyzer doesn't care
 // that the job no longer exists in the queue.
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { OwnerLink } from '@/components/OwnerLink';
 import Link from 'next/link';
@@ -44,6 +44,8 @@ import {
 import { useMultiAPMode } from '@/lib/multiap';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
+import { JobRelated } from '@/components/JobRelated';
+import { SimilarJobsSection } from '@/components/SimilarJobs';
 
 export default function ArchiveDetailClient() {
   const { id } = useResolvedParams<{ id: string }>('/archive/[id]');
@@ -159,8 +161,19 @@ function ArchiveJobDetail({
 
   const showExitCode = exitCode !== undefined || exitBySignal;
 
+  // The similar-jobs section, opened from the Related row.
+  const [similarOpen, setSimilarOpen] = useState(false);
+  const showSimilar = () => {
+    setSimilarOpen(true);
+    setTimeout(() => document.getElementById('similar-jobs')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }), 0);
+  };
+  // This job on the group's spread: how long it took.
+  const similarMark = wallClock !== undefined ? { seconds: wallClock, label: 'This job took' } : undefined;
+
   return (
     <div className="space-y-6">
+      <JobRelated jobID={jobID} cluster={num(job.ClusterId)} archived onSimilar={showSimilar} />
+
       <div className="rounded-sm border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
         <Field label="Status" value={<StatusBadge display={display} />} />
         <Field label="Owner" value={<OwnerLink owner={owner} />} />
@@ -223,6 +236,13 @@ function ArchiveJobDetail({
           out, which is why there is no empty-state here. The job's final
           status means it never polls for updates. */}
       <ResourceUsagePanel jobID={jobID} status={jobStatus} />
+
+      <SimilarJobsSection
+        jobID={jobID}
+        open={similarOpen}
+        onToggle={() => setSimilarOpen((v) => !v)}
+        mark={similarMark}
+      />
 
       {/* "Would this job match the current pool?" — uses the same
           analyzer the live page does, but pulls the ad from the

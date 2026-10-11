@@ -180,6 +180,9 @@ export interface RuntimeCard {
   axis: { left: string; middle?: string; right: string };
   // Sentences under the bar, in order.
   lines: string[];
+  // The basis sentence as it appears in lines, for the view to link to
+  // the jobs it names.
+  basis?: string;
   // Offer the live output and shell actions.
   actions: boolean;
 }
@@ -223,6 +226,7 @@ export function runtimeCard(
         ...(basis ? [basis] : []),
       ],
       actions: true,
+      basis,
     };
   }
 
@@ -249,6 +253,7 @@ export function runtimeCard(
       },
       lines: [basis ? `${spent} ${basis}` : spent],
       actions: false,
+      basis,
     };
   }
 
@@ -262,5 +267,6 @@ export function runtimeCard(
     axis: { left: '0', middle: range, right: approxDuration(max) },
     lines: running ? (basis ? [basis] : []) : [basis ? `${basis} ${waiting}` : waiting],
     actions: false,
+    basis,
   };
 }
