@@ -2,9 +2,13 @@ package apassign
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -54,8 +58,9 @@ type Options struct {
 	// Default is HTTP_API_AP_ASSIGNMENT_DEFAULT: the answer when every
 	// backend says ErrNoAnswer. Empty refuses such a user with 403.
 	Default string
-	// Stale is HTTP_API_AP_ASSIGNMENT_STALE_SECONDS; zero means
-	// DefaultStale, negative means a backend error is never covered.
+	// Stale is HTTP_API_AP_ASSIGNMENT_STALE_SECONDS: how long after an
+	// answer expires it is still used while the backend is failing. Zero
+	// means DefaultStale, negative means a backend error is never covered.
 	Stale time.Duration
 	// Timeout per backend; zero means DefaultTimeout.
 	Timeout time.Duration
@@ -93,11 +98,22 @@ type outcome struct {
 
 type entry struct {
 	out outcome
-	// at is when the answer was obtained: the last-known-good window
-	// runs from here.
-	at      time.Time
+	// expires is when the answer stops being fresh. The last-known-good
+	// window runs from here: an answer covers a failing backend for
+	// Options.Stale after its TTL ends, however long that TTL was.
 	expires time.Time
 	gen     uint64
+	// invalid marks an answer a reload made stale before its TTL ran
+	// out: not served as fresh, still a last known good answer.
+	invalid bool
+}
+
+// coversUntil is the end of e's last-known-good window.
+func (c *Chain) coversUntil(e *entry) time.Time {
+	if c.opts.Stale <= 0 {
+		return time.Time{}
+	}
+	return e.expires.Add(c.opts.Stale)
 }
 
 // Chain asks its backends in order; the first to answer wins.
@@ -106,8 +122,8 @@ type entry struct {
 //
 //   - Errors do not fall through. A broken backend must not silently send
 //     everyone to the next backend or the default. On error the user's
-//     last known good answer is used for up to Options.Stale, then the
-//     request is refused with 503.
+//     last known good answer is used for up to Options.Stale after it
+//     expired, then the request is refused with 503.
 //   - Each backend has a hard timeout.
 //   - Answers are cached per user and kind for their TTL, capped.
 //   - Answers are validated against the AP set: a typo or a remote
@@ -167,8 +183,11 @@ func (c *Chain) Backends() []string {
 func (c *Chain) Default() string { return c.opts.Default }
 
 // Reload re-reads every backend's state (a mapfile, a token file) and
-// drops cached answers. Called on reconfigure. A backend that fails to
-// reload keeps what it had; the first such error is returned.
+// makes every cached answer stale, so the next request asks again. Called
+// on reconfigure. The answers stay as last known good ones: a backend
+// that breaks right after a reconfigure is covered like one that breaks
+// at any other time. A backend that fails to reload keeps what it had;
+// the first such error is returned.
 func (c *Chain) Reload() error {
 	var first error
 	for _, b := range c.backends {
@@ -182,11 +201,32 @@ func (c *Chain) Reload() error {
 	return first
 }
 
-// Invalidate drops every cached answer, last known good ones included.
+// Invalidate makes every cached answer stale: the next request asks the
+// backends again, and the answers remain last known good ones.
 func (c *Chain) Invalidate() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.cache = map[string]*entry{}
+	for _, e := range c.cache {
+		e.invalid = true
+	}
+}
+
+// runner is a backend with background work (watching a file).
+type runner interface{ Run(ctx context.Context) }
+
+// Run runs the backends' background work until ctx ends.
+func (c *Chain) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, b := range c.backends {
+		if r, ok := b.Assigner.(runner); ok {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				r.Run(ctx)
+			}()
+		}
+	}
+	wg.Wait()
 }
 
 // generation is the sum of the backends' generations: it changes when
@@ -201,7 +241,21 @@ func (c *Chain) generation() uint64 {
 	return g
 }
 
-func cacheKey(req Request) string { return req.Kind + "\x00" + req.User }
+// cacheKey is the cache's key for a request: the kind, the user, and a
+// digest of the subject and the (sorted) groups. A GROUP or SUBJECT
+// answer depends on those, and the surfaces differ in what they carry --
+// a forwarded HTCondor token has no groups, a web session does -- so an
+// answer for one must not answer for the other.
+func cacheKey(req Request) string {
+	groups := append([]string(nil), req.Groups...)
+	sort.Strings(groups)
+	h := sha256.New()
+	_, _ = io.WriteString(h, req.Subject)
+	for _, g := range groups {
+		_, _ = io.WriteString(h, "\x00"+g)
+	}
+	return req.Kind + "\x00" + req.User + "\x00" + hex.EncodeToString(h.Sum(nil))
+}
 
 // Assign implements Assigner: the user's validated assignment.
 func (c *Chain) Assign(ctx context.Context, req Request) (Assignment, error) {
@@ -301,7 +355,7 @@ func (c *Chain) outcome(ctx context.Context, req Request) (outcome, error) {
 	now := c.opts.Now()
 	c.mu.Lock()
 	e, ok := c.cache[key]
-	if ok && e.gen == gen && now.Before(e.expires) {
+	if ok && !e.invalid && e.gen == gen && now.Before(e.expires) {
 		out := e.out
 		c.mu.Unlock()
 		return out, nil
@@ -310,11 +364,16 @@ func (c *Chain) outcome(ctx context.Context, req Request) (outcome, error) {
 
 	out, ttl, err := c.ask(ctx, req)
 	now = c.opts.Now()
+	if err != nil && ctx.Err() != nil {
+		// The caller went away. That says nothing about the backend,
+		// and there is nobody to hand an answer to.
+		return outcome{}, errorf(http.StatusServiceUnavailable, "", ctx.Err(), "the request ended before an access point was assigned")
+	}
 	if err != nil {
 		c.mu.Lock()
 		e, ok := c.cache[key]
 		var lkg *outcome
-		if ok && c.opts.Stale > 0 && now.Sub(e.at) <= c.opts.Stale {
+		if ok && !now.After(c.coversUntil(e)) {
 			o := e.out
 			lkg = &o
 		}
@@ -336,7 +395,7 @@ func (c *Chain) outcome(ctx context.Context, req Request) (outcome, error) {
 	}
 	c.mu.Lock()
 	c.lastErr = ""
-	c.put(key, &entry{out: out, at: now, expires: now.Add(ttl), gen: gen}, now)
+	c.put(key, &entry{out: out, expires: now.Add(ttl), gen: gen}, now)
 	c.mu.Unlock()
 	return out, nil
 }
@@ -410,25 +469,29 @@ func (c *Chain) call(ctx context.Context, b Backend, req Request) (Assignment, e
 	case r := <-ch:
 		return r.a, r.err
 	case <-tctx.Done():
+		if ctx.Err() != nil {
+			return Assignment{}, ctx.Err()
+		}
 		return Assignment{}, fmt.Errorf("no answer within %s: %w", c.opts.Timeout, tctx.Err())
 	}
 }
 
 // put stores an entry, evicting to stay within the cap: first entries
-// past both their TTL and the last-known-good window, then the oldest.
+// past both their TTL and the last-known-good window, then the one that
+// expires first.
 // c.mu is held.
 func (c *Chain) put(key string, e *entry, now time.Time) {
 	if _, ok := c.cache[key]; !ok && len(c.cache) >= c.opts.CacheSize {
 		for k, old := range c.cache {
-			if now.After(old.expires) && (c.opts.Stale <= 0 || now.Sub(old.at) > c.opts.Stale) {
+			if now.After(old.expires) && now.After(c.coversUntil(old)) {
 				delete(c.cache, k)
 			}
 		}
 		for len(c.cache) >= c.opts.CacheSize {
-			oldestKey, oldestAt := "", time.Time{}
+			oldestKey, oldest := "", time.Time{}
 			for k, old := range c.cache {
-				if oldestKey == "" || old.at.Before(oldestAt) {
-					oldestKey, oldestAt = k, old.at
+				if oldestKey == "" || old.expires.Before(oldest) {
+					oldestKey, oldest = k, old.expires
 				}
 			}
 			delete(c.cache, oldestKey)

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,7 +22,7 @@ import (
 //	USER       alice@example.org                  ap12.example.org  ap13.example.org
 //	GROUP      cms                                ap20.example.org
 //	USER       /^(.*)@physics\.example\.org$/     ap30.example.org
-//	SUBJECT    /^https:\/\/idp\.example\.org\//i  ap31.example.org
+//	SUBJECT    /^svc-/                            ap31.example.org
 //	*          /.*/                               ap01.example.org
 //
 // Fields are separated by spaces or tabs and parsed as HTCondor's
@@ -40,9 +41,11 @@ import (
 //   - A line whose first field starts with # is a comment; so is anything
 //     from a field starting with # to the end of a line.
 //
-// The match field is USER (the HTCondor identity, alice@example.org),
-// GROUP (any of the caller's groups), SUBJECT (the authenticated
-// principal before mapping), or * (any of the three).
+// The match field is USER (the HTCondor identity, alice@example.org; the
+// domain of a literal is compared without regard to case), GROUP (any of
+// the caller's groups), SUBJECT (the subject this server knows the caller
+// by: the session username or the OAuth2 grant's subject, after identity
+// mapping), or * (any of the three).
 //
 // HTCondor mapfiles also accept @include; this one does not, and refuses
 // a file that uses it rather than ignoring part of the assignment.
@@ -88,11 +91,25 @@ func (r Rule) matches(s string) bool {
 	return r.Principal == s
 }
 
+// matchesUser is matches for an HTCondor identity: a literal's domain
+// (after the last "@") is compared without regard to case, as HTCondor
+// compares domains; the user part exactly.
+func (r Rule) matchesUser(user string) bool {
+	if user == "" || r.Regexp != nil {
+		return r.matches(user)
+	}
+	pi, ui := strings.LastIndex(r.Principal, "@"), strings.LastIndex(user, "@")
+	if pi < 0 || ui < 0 {
+		return r.Principal == user
+	}
+	return r.Principal[:pi] == user[:ui] && strings.EqualFold(r.Principal[pi+1:], user[ui+1:])
+}
+
 // Match reports whether the rule matches req.
 func (r Rule) Match(req Request) bool {
 	switch r.Method {
 	case MethodUser:
-		return r.matches(req.User)
+		return r.matchesUser(req.User)
 	case MethodSubject:
 		return r.matches(req.Subject)
 	case MethodGroup:
@@ -103,7 +120,7 @@ func (r Rule) Match(req Request) bool {
 		}
 		return false
 	case MethodAny:
-		if r.matches(req.User) || r.matches(req.Subject) {
+		if r.matchesUser(req.User) || r.matches(req.Subject) {
 			return true
 		}
 		for _, g := range req.Groups {
@@ -292,24 +309,31 @@ func splitMapLine(line string) ([]mapField, error) {
 	}
 }
 
-// Mapfile is the mapfile backend. It re-reads the file when it changes
-// (checked at most every couple of seconds) and on Reload; a file that
-// stops parsing keeps the last good map, and says so in the log.
+// Mapfile is the mapfile backend. A background check (Run) re-reads the
+// file when it changes; Reload re-reads it now. A file that stops parsing
+// keeps the last good map, and says so in the log.
+//
+// Requests never touch the file: Assign and Generation read what the last
+// read installed. A read that hangs -- a stuck NFS mount -- delays only
+// the next map, never a submission.
 type Mapfile struct {
 	path   string
 	ttl    time.Duration
 	logger Logger
 	// checkEvery overrides mapfileCheckInterval; tests shorten it.
 	checkEvery time.Duration
-	now        func() time.Time
 
-	mu        sync.Mutex
-	rules     []Rule
-	gen       uint64
-	modTime   time.Time
-	size      int64
-	checkedAt time.Time
-	lastErr   string
+	// mu guards the map in force.
+	mu    sync.RWMutex
+	rules []Rule
+	gen   atomic.Uint64
+
+	// readMu serialises reads of the file, and guards what they compare
+	// against.
+	readMu  sync.Mutex
+	modTime time.Time
+	size    int64
+	lastErr string
 }
 
 // NewMapfile reads path. A file that cannot be read or parsed is an
@@ -319,7 +343,7 @@ func NewMapfile(path string, logger Logger) (*Mapfile, error) {
 	if path == "" {
 		return nil, errors.New("the mapfile access point assignment backend needs HTTP_API_AP_ASSIGNMENT_MAPFILE")
 	}
-	m := &Mapfile{path: path, ttl: DefaultMapfileTTL, logger: logger, now: time.Now}
+	m := &Mapfile{path: path, ttl: DefaultMapfileTTL, logger: logger}
 	info, rules, err := m.read()
 	if err != nil {
 		return nil, fmt.Errorf("HTTP_API_AP_ASSIGNMENT_MAPFILE %s: %w", path, err)
@@ -333,8 +357,8 @@ func (m *Mapfile) Path() string { return m.path }
 
 // Rules returns the map in force.
 func (m *Mapfile) Rules() []Rule {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return append([]Rule(nil), m.rules...)
 }
 
@@ -362,18 +386,32 @@ func (m *Mapfile) read() (os.FileInfo, []Rule, error) {
 	return info, rules, nil
 }
 
-// install replaces the map. m.mu is held, or m is not yet shared.
+// install puts a new map in force. m.readMu is held, or m is not yet
+// shared.
 func (m *Mapfile) install(info os.FileInfo, rules []Rule) {
+	m.mu.Lock()
 	m.rules = rules
+	m.mu.Unlock()
+	m.gen.Add(1)
 	m.modTime, m.size = info.ModTime(), info.Size()
-	m.gen++
 	m.lastErr = ""
+	if m.logger == nil {
+		return
+	}
+	for _, r := range rules {
+		if r.Regexp == nil && strings.ContainsAny(r.Principal, "^$*") {
+			m.logger.Warn("HTTP_API_AP_ASSIGNMENT_MAPFILE: a literal principal looks like a regular expression; "+
+				"it is compared exactly. Write /.../ for an expression",
+				"path", m.path, "line", r.Line, "principal", r.Principal)
+		}
+	}
 }
 
 // refresh re-reads the file when it has changed on disk, or always when
-// force is set. m.mu is held.
+// force is set.
 func (m *Mapfile) refresh(force bool) error {
-	m.checkedAt = m.now()
+	m.readMu.Lock()
+	defer m.readMu.Unlock()
 	if !force {
 		info, err := os.Stat(m.path)
 		if err == nil && info.ModTime().Equal(m.modTime) && info.Size() == m.size {
@@ -386,7 +424,7 @@ func (m *Mapfile) refresh(force bool) error {
 			m.lastErr = msg
 			if m.logger != nil {
 				m.logger.Error("Could not reload HTTP_API_AP_ASSIGNMENT_MAPFILE; keeping the last map that parsed",
-					"path", m.path, "error", err, "rules_in_force", len(m.rules))
+					"path", m.path, "error", err, "rules_in_force", len(m.Rules()))
 			}
 		}
 		return err
@@ -398,40 +436,37 @@ func (m *Mapfile) refresh(force bool) error {
 	return nil
 }
 
-// maybeRefresh is refresh, at most once per check interval.
-func (m *Mapfile) maybeRefresh() {
+// Run checks the file for changes until ctx ends.
+func (m *Mapfile) Run(ctx context.Context) {
 	every := m.checkEvery
 	if every <= 0 {
 		every = mapfileCheckInterval
 	}
-	if m.now().Sub(m.checkedAt) >= every {
-		_ = m.refresh(false)
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			_ = m.refresh(false)
+		}
 	}
 }
 
 // Reload re-reads the file now, changed or not. On a parse error the
 // last good map stays in force and the error is returned.
-func (m *Mapfile) Reload() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.refresh(true)
-}
+func (m *Mapfile) Reload() error { return m.refresh(true) }
 
-// Generation changes whenever a new map is installed. It checks the file
-// for changes first, so a cached answer from an edited map is not reused.
-func (m *Mapfile) Generation() uint64 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.maybeRefresh()
-	return m.gen
-}
+// Generation changes whenever a new map is installed, so a cached answer
+// from an older map is not reused. It reads a counter, nothing more.
+func (m *Mapfile) Generation() uint64 { return m.gen.Load() }
 
 // Assign implements Assigner: the first rule in file order that matches.
 func (m *Mapfile) Assign(_ context.Context, req Request) (Assignment, error) {
-	m.mu.Lock()
-	m.maybeRefresh()
+	m.mu.RLock()
 	rules := m.rules
-	m.mu.Unlock()
+	m.mu.RUnlock()
 	for _, r := range rules {
 		if r.Match(req) {
 			return Assignment{Schedd: r.Schedd, Alternates: append([]string(nil), r.Alternates...), TTL: m.ttl}, nil

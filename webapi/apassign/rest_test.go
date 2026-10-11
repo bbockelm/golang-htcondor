@@ -33,6 +33,9 @@ func (s *restService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *restService) last() (string, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.queries) == 0 {
+		return "", ""
+	}
 	return s.queries[len(s.queries)-1], s.auths[len(s.auths)-1]
 }
 
@@ -59,8 +62,10 @@ func TestRESTAnswers(t *testing.T) {
 			_, _ = w.Write([]byte(`{"schedd":"ap12.example.org","alternates":["ap13.example.org"],"ttl_seconds":120,"extra":1}`))
 		case "nobody@example.org":
 			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"result":"no_assignment"}`))
 		case "banned@example.org":
 			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"result":"denied"}`))
 		case "broken@example.org":
 			http.Error(w, "boom", http.StatusInternalServerError)
 		case "redirect@example.org":
@@ -150,6 +155,9 @@ func TestRESTInChain(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		w.WriteHeader(status)
+		if status == http.StatusNotFound {
+			_, _ = w.Write([]byte(`{"result":"no_assignment"}`))
+		}
 	}}
 	ts := httptest.NewServer(svc)
 	t.Cleanup(ts.Close)
@@ -206,7 +214,7 @@ func TestNewRESTValidation(t *testing.T) {
 			t.Errorf("%q: %v, want %q", tc.url, err, tc.err)
 		}
 	}
-	for _, ok := range []string{"https://assign.example.org/base", "http://127.0.0.1:8080", "http://localhost:1", "http://[::1]:2"} {
+	for _, ok := range []string{"https://assign.example.org/base", "http://127.0.0.1:8080", "http://[::1]:2"} {
 		if _, err := NewREST(ok, "", RESTOptions{}); err != nil {
 			t.Errorf("%q: %v", ok, err)
 		}

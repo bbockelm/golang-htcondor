@@ -21,18 +21,33 @@ import (
 //	Authorization: Bearer <contents of HTTP_API_AP_ASSIGNMENT_REST_TOKEN_FILE>
 //
 //	200 {"schedd":"ap12.example.org","alternates":["ap13.example.org"],"ttl_seconds":300}
-//	404 -> no answer (the next backend is asked)
-//	403 -> denied (the user may not submit)
+//	404 {"result":"no_assignment"} -> no answer (the next backend is asked)
+//	403 {"result":"denied"}        -> denied (the user may not submit)
 //
-// Anything else -- another status, a timeout, a body that is not that
-// JSON or is larger than RESTMaxBody -- is an error, which the chain does
-// not fall through.
+// Anything else -- another status, a 404 or 403 without that body, a
+// timeout, a body that is not the expected JSON or is larger than
+// RESTMaxBody -- is an error, which the chain does not fall through. The
+// body is required because a 404 page from a proxy or a mistyped path,
+// or a 403 for a bad bearer token, would otherwise send everyone to the
+// default or deny everyone. A service should answer a bad bearer with
+// 401.
 
 // DefaultRESTTTL is how long a rest answer that states no TTL is reused.
 const DefaultRESTTTL = 300 * time.Second
 
 // RESTMaxBody bounds the response read from the service.
 const RESTMaxBody = 64 << 10
+
+// Result values in a 404 or 403 body.
+const (
+	restResultNoAssignment = "no_assignment"
+	restResultDenied       = "denied"
+)
+
+// restResult is the 404 and 403 body.
+type restResult struct {
+	Result string `json:"result"`
+}
 
 // restAnswer is the 200 body.
 type restAnswer struct {
@@ -99,24 +114,25 @@ func NewREST(rawURL, tokenFile string, opts RESTOptions) (*REST, error) {
 
 	r := &REST{endpoint: u, tokenFile: strings.TrimSpace(tokenFile), client: &client}
 	if r.tokenFile != "" {
-		if _, err := r.bearer(); err != nil {
+		if _, err := r.bearer(false); err != nil {
 			return nil, fmt.Errorf("HTTP_API_AP_ASSIGNMENT_REST_TOKEN_FILE: %w", err)
 		}
 	}
 	return r, nil
 }
 
+// loopbackHost reports whether h is a literal loopback address. A name
+// such as localhost is not accepted: it resolves however this host's
+// resolver says, and the request carries a bearer token.
 func loopbackHost(h string) bool {
-	if strings.EqualFold(h, "localhost") {
-		return true
-	}
 	ip := net.ParseIP(h)
 	return ip != nil && ip.IsLoopback()
 }
 
 // bearer returns the token file's contents, re-read when the file
-// changes.
-func (r *REST) bearer() (string, error) {
+// changes, or always when force is set. A read that fails keeps the token
+// already read, if there is one, and returns the error with it.
+func (r *REST) bearer(force bool) (string, error) {
 	if r.tokenFile == "" {
 		return "", nil
 	}
@@ -124,29 +140,27 @@ func (r *REST) bearer() (string, error) {
 	defer r.mu.Unlock()
 	info, err := os.Stat(r.tokenFile)
 	if err != nil {
-		return "", err
+		return r.token, err
 	}
-	if r.token != "" && info.ModTime().Equal(r.tokenMod) && info.Size() == r.tokenSz {
+	if !force && r.token != "" && info.ModTime().Equal(r.tokenMod) && info.Size() == r.tokenSz {
 		return r.token, nil
 	}
 	b, err := os.ReadFile(r.tokenFile)
 	if err != nil {
-		return "", err
+		return r.token, err
 	}
 	tok := strings.TrimSpace(string(b))
 	if tok == "" {
-		return "", fmt.Errorf("%s is empty", r.tokenFile)
+		return r.token, fmt.Errorf("%s is empty", r.tokenFile)
 	}
 	r.token, r.tokenMod, r.tokenSz = tok, info.ModTime(), info.Size()
 	return tok, nil
 }
 
-// Reload forgets the cached token, so the next request re-reads it.
+// Reload re-reads the token file. A file that cannot be read keeps the
+// token already read.
 func (r *REST) Reload() error {
-	r.mu.Lock()
-	r.token = ""
-	r.mu.Unlock()
-	_, err := r.bearer()
+	_, err := r.bearer(true)
 	return err
 }
 
@@ -166,8 +180,8 @@ func (r *REST) Assign(ctx context.Context, req Request) (Assignment, error) {
 		return Assignment{}, err
 	}
 	hreq.Header.Set("Accept", "application/json")
-	tok, err := r.bearer()
-	if err != nil {
+	tok, err := r.bearer(false)
+	if err != nil && tok == "" {
 		return Assignment{}, fmt.Errorf("reading the token file: %w", err)
 	}
 	if tok != "" {
@@ -175,27 +189,39 @@ func (r *REST) Assign(ctx context.Context, req Request) (Assignment, error) {
 	}
 	resp, err := r.client.Do(hreq)
 	if err != nil {
+		// url.Error names the whole URL, query included -- the user,
+		// subject and groups -- and this error goes to the log.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return Assignment{}, fmt.Errorf("%s %s: %w", ue.Op, r.endpoint.Redacted(), ue.Err)
+		}
 		return Assignment{}, err
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, RESTMaxBody))
 		_ = resp.Body.Close()
 	}()
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusNotFound:
-		return Assignment{}, ErrNoAnswer
-	case http.StatusForbidden:
-		return Assignment{}, ErrDenied
-	default:
-		return Assignment{}, fmt.Errorf("the assignment service answered %s", resp.Status)
-	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, RESTMaxBody+1))
 	if err != nil {
 		return Assignment{}, fmt.Errorf("reading the assignment service's answer: %w", err)
 	}
 	if len(body) > RESTMaxBody {
 		return Assignment{}, fmt.Errorf("the assignment service's answer is over %d bytes", RESTMaxBody)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound, http.StatusForbidden:
+		var res restResult
+		_ = json.Unmarshal(body, &res)
+		switch {
+		case resp.StatusCode == http.StatusNotFound && res.Result == restResultNoAssignment:
+			return Assignment{}, ErrNoAnswer
+		case resp.StatusCode == http.StatusForbidden && res.Result == restResultDenied:
+			return Assignment{}, ErrDenied
+		}
+		return Assignment{}, fmt.Errorf("the assignment service answered %s without the contract's result body", resp.Status)
+	default:
+		return Assignment{}, fmt.Errorf("the assignment service answered %s", resp.Status)
 	}
 	var ans restAnswer
 	if err := json.Unmarshal(body, &ans); err != nil {

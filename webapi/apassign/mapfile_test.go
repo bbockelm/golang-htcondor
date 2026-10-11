@@ -202,23 +202,20 @@ func TestMapfileReloadsOnChangeAndKeepsLastGood(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clk := newClock()
-	m.now = clk.now
-	m.checkEvery = time.Second
-	m.checkedAt = clk.now()
 	ctx := context.Background()
 	gen0 := m.Generation()
 
-	// An edit is picked up once the check interval has passed.
+	// An edit is picked up by the next check, and not before: a request
+	// never reads the file.
 	writeMap(t, path, "USER alice@example.org ap2 ap3\n")
 	future := time.Now().Add(time.Minute)
 	if err := os.Chtimes(path, future, future); err != nil {
 		t.Fatal(err)
 	}
-	if a, _ := m.Assign(ctx, Request{User: "alice@example.org"}); a.Schedd != "ap1" {
-		t.Fatalf("re-read before the check interval: %s", a.Schedd)
+	if a, _ := m.Assign(ctx, Request{User: "alice@example.org"}); a.Schedd != "ap1" || m.Generation() != gen0 {
+		t.Fatalf("a request re-read the file: %s", a.Schedd)
 	}
-	clk.advance(2 * time.Second)
+	_ = m.refresh(false)
 	if a, _ := m.Assign(ctx, Request{User: "alice@example.org"}); a.Schedd != "ap2" {
 		t.Fatalf("after an edit: got %s, want ap2", a.Schedd)
 	}
@@ -234,7 +231,7 @@ func TestMapfileReloadsOnChangeAndKeepsLastGood(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		clk.advance(2 * time.Second)
+		_ = m.refresh(false)
 		if a, _ := m.Assign(ctx, Request{User: "alice@example.org"}); a.Schedd != "ap2" {
 			t.Fatalf("after a broken edit: got %s, want the last good ap2", a.Schedd)
 		}
@@ -262,14 +259,14 @@ func TestMapfileReloadsOnChangeAndKeepsLastGood(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	clk.advance(2 * time.Second)
+	_ = m.refresh(false)
 	if a, _ := m.Assign(ctx, Request{User: "alice@example.org"}); a.Schedd != "ap5" {
 		t.Fatalf("after the file vanished: got %s, want ap5", a.Schedd)
 	}
 }
 
-// Through a chain: an edit reaches the next request although the cached
-// answer's TTL has not run out.
+// Through a chain, with the background check running: an edit reaches the
+// next request although the cached answer's TTL has not run out.
 func TestMapfileEditBypassesChainCache(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "assign.map")
 	writeMap(t, path, "USER alice@example.org ap1\n")
@@ -278,7 +275,10 @@ func TestMapfileEditBypassesChainCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := ch.backends[0].Assigner.(*Mapfile)
-	m.checkEvery = time.Nanosecond
+	m.checkEvery = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ch.Run(ctx)
 	if a, _ := ch.Resolve(context.Background(), alice); a.Schedd != "ap1" {
 		t.Fatalf("got %s", a.Schedd)
 	}
@@ -287,8 +287,16 @@ func TestMapfileEditBypassesChainCache(t *testing.T) {
 	if err := os.Chtimes(path, future, future); err != nil {
 		t.Fatal(err)
 	}
-	if a, _ := ch.Resolve(context.Background(), alice); a.Schedd != "ap2" {
-		t.Fatalf("after an edit: got %s, want ap2", a.Schedd)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a, _ := ch.Resolve(context.Background(), alice)
+		if a.Schedd == "ap2" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after an edit: got %s, want ap2", a.Schedd)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

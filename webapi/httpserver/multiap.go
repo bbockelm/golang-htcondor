@@ -257,6 +257,15 @@ func (h *Handler) startMultiAP(ctx context.Context) {
 			m.superusers.run(htcondor.WithDaemonCredential(ctx, "per-AP queue superuser refresh"))
 		}()
 	}
+	if m.assign != nil {
+		// The assignment's files (the mapfile) are watched off the
+		// request path.
+		h.wg.Add(1)
+		go func() {
+			defer h.wg.Done()
+			m.assign.Run(ctx)
+		}()
+	}
 	if m.registry != nil {
 		// Each member is probed for trust as it joins, and periodically.
 		m.registry.SetProbe(h.probeMemberTrust)
