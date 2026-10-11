@@ -415,6 +415,14 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
   const exitBySignal = job.ExitBySignal === true || job.ExitBySignal === 'true';
   const showExitCode = exitCodeNum !== undefined || exitBySignal;
 
+  // Asks from the run time card to open the live tail or the terminal
+  // further down: each click bumps a count the panel watches.
+  const [tailRequest, setTailRequest] = useState(0);
+  const [shellRequest, setShellRequest] = useState(0);
+  const remote = supportsRemoteAccess(job);
+  const canTail = status === 2 && remote;
+  const canShell = (status === 2 || status === 6) && remote;
+
   return (
     <div className="space-y-6">
       {/* Chat sits at the top: it's the primary affordance for
@@ -434,9 +442,6 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
           }
         />
         <Field label="Owner" value={<OwnerLink owner={owner} />} />
-        {/* A full-width row under the status, for a waiting or running
-            job with an estimate; nothing at all otherwise. */}
-        <RuntimeEstimateField jobID={jobID} status={status} />
         <Field
           label="Submitted"
           value={qdate ? new Date(qdate * 1000).toLocaleString() : '—'}
@@ -484,6 +489,18 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
         )}
       </div>
 
+      {/* Straight under the summary, which already names the job and how
+          long it has run or waited: the card answers the next question,
+          "when will it be done?". Nothing at all without an estimate.
+          A job running longer than usual offers the page's own live
+          output and shell, which open below. */}
+      <RuntimeEstimateField
+        jobID={jobID}
+        status={status}
+        onViewOutput={canTail ? () => setTailRequest((n) => n + 1) : undefined}
+        onOpenShell={canShell ? () => setShellRequest((n) => n + 1) : undefined}
+      />
+
       <ResourceUsagePanel jobID={jobID} status={status} />
 
       <OutputFilesPanel jobID={jobID} status={status} job={job} />
@@ -492,9 +509,9 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
 
       <WorkflowGraphPanel jobID={jobID} job={job} />
 
-      <LiveTailPanel jobID={jobID} status={status} job={job} />
+      <LiveTailPanel jobID={jobID} status={status} job={job} openRequest={tailRequest} />
 
-      <TerminalPanel jobID={jobID} status={status} job={job} />
+      <TerminalPanel jobID={jobID} status={status} job={job} openRequest={shellRequest} />
 
       <LogViewerPanel jobID={jobID} />
 
@@ -931,16 +948,37 @@ function clampInt(
   return Math.floor(n);
 }
 
+// bringIntoView scrolls a panel opened from elsewhere on the page into
+// view and moves focus to it, so a keyboard user lands where the
+// output appears.
+function bringIntoView(el: HTMLElement | null) {
+  if (!el) return;
+  el.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  el.focus({ preventScroll: true });
+}
+
 function TerminalPanel({
   jobID,
   status,
   job,
+  openRequest = 0,
 }: {
   jobID: string;
   status: number | undefined;
   job: ClassAd;
+  // Bumped to open the shell from elsewhere on the page.
+  openRequest?: number;
 }) {
   const [open, setOpen] = useState(false);
+  const [seenRequest, setSeenRequest] = useState(openRequest);
+  if (openRequest !== seenRequest) {
+    setSeenRequest(openRequest);
+    setOpen(true);
+  }
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (openRequest > 0) bringIntoView(rootRef.current);
+  }, [openRequest]);
 
   // condor_ssh_to_job only works while the job is Running (2) or
   // Transferring Output (6). Anything else, surface a hint and don't even
@@ -954,7 +992,11 @@ function TerminalPanel({
   if (!supportsRemoteAccess(job)) return null;
 
   return (
-    <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-3">
+    <div
+      ref={rootRef}
+      tabIndex={-1}
+      className="rounded-sm border border-gray-200 bg-white p-4 space-y-3 focus:outline-none"
+    >
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-gray-900">Terminal</h2>
         {!canSSH && (
@@ -1141,10 +1183,13 @@ function LiveTailPanel({
   jobID,
   status,
   job,
+  openRequest = 0,
 }: {
   jobID: string;
   status: number | undefined;
   job: ClassAd;
+  // Bumped to start the tail from elsewhere on the page.
+  openRequest?: number;
 }) {
   const isRunning = status === 2;
 
@@ -1167,6 +1212,19 @@ function LiveTailPanel({
   const [active, setActive] = useState(false); // polling on?
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+
+  // A request from elsewhere on the page does what the "Live tail"
+  // button does, then brings the panel into view.
+  const [seenRequest, setSeenRequest] = useState(openRequest);
+  if (openRequest !== seenRequest) {
+    setSeenRequest(openRequest);
+    setEngaged(true);
+    setActive(true);
+  }
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (openRequest > 0) bringIntoView(rootRef.current);
+  }, [openRequest]);
 
   // Auto-scroll the textarea so the latest output stays visible.
   // useRef keeps us out of React's render cycle for what's a pure
@@ -1278,7 +1336,11 @@ function LiveTailPanel({
   // render).
   if (!engaged) {
     return (
-      <div className="rounded-sm border border-gray-200 bg-white p-3 flex items-center gap-3">
+      <div
+        ref={rootRef}
+        tabIndex={-1}
+        className="rounded-sm border border-gray-200 bg-white p-3 flex items-center gap-3 focus:outline-none"
+      >
         <h2 className="text-sm font-medium text-gray-900">Live Tail</h2>
         <span className="text-xs text-gray-500">
           Stream stdout / stderr from the running sandbox.
@@ -1298,7 +1360,11 @@ function LiveTailPanel({
   }
 
   return (
-    <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-3">
+    <div
+      ref={rootRef}
+      tabIndex={-1}
+      className="rounded-sm border border-gray-200 bg-white p-4 space-y-3 focus:outline-none"
+    >
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-sm font-medium text-gray-900">Live Tail</h2>
         <div className="inline-flex rounded-sm border border-gray-300 bg-white p-0.5 text-xs">

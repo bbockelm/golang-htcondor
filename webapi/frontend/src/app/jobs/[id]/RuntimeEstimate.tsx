@@ -1,6 +1,7 @@
 'use client';
 
-// How long a waiting or running job is likely to take, on the job page.
+// How long a waiting or running job is likely to take, on the job page:
+// a card of its own under the summary.
 //
 // It renders nothing at all unless there is an estimate: no placeholder
 // while the access point is still reading its history, nothing for a job
@@ -9,98 +10,12 @@
 
 import { useQuery } from '@tanstack/react-query';
 
-import { api, type RuntimeEstimate, type RuntimeEstimateLevel } from '@/lib/api';
-import { approxDuration } from '@/lib/duration';
+import { RuntimeRangeBar } from '@/components/RuntimeRangeBar';
+import { api, type RuntimeEstimate } from '@/lib/api';
 
-// What each basis compared the job with. [singular, plural]; null for a
-// basis that carries no count worth printing.
-const basisText: Record<RuntimeEstimateLevel, [string, string] | null> = {
-  cluster: ['from 1 finished job in this cluster', 'from N finished jobs in this cluster'],
-  exact: [
-    'from 1 earlier job with the same command and arguments',
-    'from N of your earlier jobs with the same command and arguments',
-  ],
-  template: [
-    'from 1 earlier job with the same command and argument pattern',
-    'from N of your earlier jobs with the same command and argument pattern',
-  ],
-  batch: ['from 1 earlier job in the same batch', 'from N of your earlier jobs in the same batch'],
-  iwd: [
-    'from 1 earlier job from the same submit directory',
-    'from N of your earlier jobs from the same submit directory',
-  ],
-  cmd: [
-    'from 1 earlier job running the same program',
-    'from N of your earlier jobs running the same program',
-  ],
-  owner: null,
-  global: null,
-};
+import { runtimeCard } from './runtimeCard';
 
-// basisLine says what the estimate was drawn from. The two broadest
-// bases say why nothing closer answered when that is known: a rough
-// guess should say what it is a guess from.
-export function basisLine(basis: RuntimeEstimate['basis']): string | undefined {
-  if (!basis) return undefined;
-  if (basis.level === 'owner') {
-    return basis.new_command
-      ? 'This command has not run recently. Based on your recent jobs in general.'
-      : 'Based on your recent jobs in general.';
-  }
-  if (basis.level === 'global') {
-    return 'You have no recently finished jobs to compare with. Based on recent jobs on this access point.';
-  }
-  const text = basisText[basis.level];
-  if (!text) return undefined;
-  return basis.sample_count === 1
-    ? text[0]
-    : text[1].replace('N', String(basis.sample_count));
-}
-
-// rangeText is the likely range, or undefined when it would read as a
-// single figure ("1h to 1h"). A rough guess's range is wide and says so.
-export function rangeText(
-  r: Pick<RuntimeEstimate, 'p10_seconds' | 'p90_seconds' | 'rough'>,
-): string | undefined {
-  if (r.p10_seconds === undefined || r.p90_seconds === undefined) return undefined;
-  const lo = approxDuration(r.p10_seconds);
-  const hi = approxDuration(r.p90_seconds);
-  if (lo === hi) return undefined;
-  return r.rough ? `anywhere from ${lo} to ${hi}` : `usually ${lo} to ${hi}`;
-}
-
-// runtimeEstimateText is what the page prints for an estimate, or null
-// when it prints nothing: no estimate, or a job that is neither waiting
-// (1) nor running (2).
-//
-// rough marks an estimate from one of the broad bases: it reads "Roughly"
-// rather than "About", and the view adds a "rough guess" chip.
-export function runtimeEstimateText(
-  r: RuntimeEstimate | undefined,
-  status: number | undefined,
-): { value: string; sub?: string; rough?: boolean } | null {
-  if (!r || !r.available || r.estimate_seconds === undefined) return null;
-  if (status !== 1 && status !== 2) return null;
-  const total = approxDuration(r.estimate_seconds);
-  const sub = basisLine(r.basis);
-  const rough = !!r.rough;
-  if (status === 2 && r.exceeded_history) {
-    return { value: `Running longer than similar jobs (they took about ${total})`, sub };
-  }
-  const range = rangeText(r);
-  const withRange = (s: string) => (range ? `${s} (${range})` : s);
-  const [About, about] = rough ? ['Roughly', 'roughly'] : ['About', 'about'];
-  if (status === 2 && r.remaining_seconds !== undefined && r.elapsed_seconds !== undefined) {
-    return {
-      value: withRange(
-        `${About} ${approxDuration(r.remaining_seconds)} left · running ${approxDuration(r.elapsed_seconds)} of ${about} ${total}`,
-      ),
-      sub,
-      rough,
-    };
-  }
-  return { value: withRange(`${About} ${total}`), sub, rough };
-}
+export { basisLine, rangeText } from './runtimeCard';
 
 // RoughChip marks an estimate that is only a rough guess: a dashed
 // outline, quieter than a status.
@@ -112,26 +27,86 @@ export function RoughChip() {
   );
 }
 
-// RuntimeEstimateView lays an estimate out as one full-width field of
-// the job page's summary card.
+// The page's own ways to look inside a running job, offered when the job
+// has run longer than usual. Each is absent when the page has no such
+// action for this job.
+export interface RuntimeEstimateActions {
+  onViewOutput?: () => void;
+  onOpenShell?: () => void;
+}
+
+const actionCls =
+  'rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50';
+
+// RuntimeEstimateView is the card for one estimate. fetchedAt is when the
+// estimate was read, in unix seconds.
 export function RuntimeEstimateView({
   estimate,
   status,
+  fetchedAt,
+  locale,
+  onViewOutput,
+  onOpenShell,
 }: {
   estimate: RuntimeEstimate | undefined;
   status: number | undefined;
-}) {
-  const text = runtimeEstimateText(estimate, status);
-  if (!text) return null;
+  fetchedAt: number;
+  locale?: string;
+} & RuntimeEstimateActions) {
+  const card = runtimeCard(estimate, status, fetchedAt, locale);
+  if (!card) return null;
+  const showActions = card.actions && (onViewOutput || onOpenShell);
   return (
-    <div className="col-span-2" data-testid="runtime-estimate">
-      <div className="text-xs uppercase tracking-wide text-gray-500">Expected run time</div>
-      <div className="mt-0.5 text-sm text-gray-900 wrap-break-word">
-        {text.value}
-        {text.rough && <RoughChip />}
+    <section
+      aria-labelledby="runtime-estimate-title"
+      data-testid="runtime-estimate"
+      className={`rounded-sm border bg-white p-4 space-y-3 ${card.longer ? 'border-amber-300' : 'border-gray-200'}`}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2
+          id="runtime-estimate-title"
+          className="text-xs font-semibold uppercase tracking-wide text-gray-500"
+        >
+          Expected run time
+        </h2>
+        {card.longer && (
+          <span className="inline-flex whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-900">
+            Longer than usual
+          </span>
+        )}
       </div>
-      {text.sub && <div className="mt-0.5 text-xs text-gray-500">{text.sub}</div>}
-    </div>
+      <p className={`text-lg font-medium ${card.rough ? 'text-gray-600' : 'text-gray-900'}`}>
+        {card.headline}
+        {card.rough && <RoughChip />}
+      </p>
+      <div>
+        <RuntimeRangeBar {...card.bar} rough={card.rough} longer={card.longer} />
+        <div className="flex justify-between gap-3 text-xs text-gray-600 tabular-nums">
+          <span>{card.axis.left}</span>
+          {card.axis.middle && <span className="text-center">{card.axis.middle}</span>}
+          <span className="text-right">{card.axis.right}</span>
+        </div>
+      </div>
+      {card.lines.map((line) => (
+        <p key={line} className="text-sm text-gray-600">
+          {line}
+        </p>
+      ))}
+      {showActions && (
+        <div className="flex flex-wrap gap-2">
+          {onViewOutput && (
+            <button type="button" onClick={onViewOutput} className={actionCls}>
+              View live output
+            </button>
+          )}
+          {onOpenShell && (
+            <button type="button" onClick={onOpenShell} className={actionCls}>
+              Open a shell in the job
+            </button>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -142,12 +117,13 @@ export function RuntimeEstimateView({
 export function RuntimeEstimateField({
   jobID,
   status,
+  ...actions
 }: {
   jobID: string;
   status: number | undefined;
-}) {
+} & RuntimeEstimateActions) {
   const live = status === 1 || status === 2;
-  const { data } = useQuery({
+  const { data, dataUpdatedAt } = useQuery({
     queryKey: ['runtime-estimate', jobID],
     enabled: live,
     retry: false,
@@ -155,5 +131,12 @@ export function RuntimeEstimateField({
     queryFn: () => api.jobs.runtimeEstimate(jobID),
   });
   if (!live) return null;
-  return <RuntimeEstimateView estimate={data} status={status} />;
+  return (
+    <RuntimeEstimateView
+      estimate={data}
+      status={status}
+      fetchedAt={Math.floor(dataUpdatedAt / 1000)}
+      {...actions}
+    />
+  );
 }
