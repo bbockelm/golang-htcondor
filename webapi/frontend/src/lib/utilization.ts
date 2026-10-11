@@ -17,7 +17,10 @@ export interface UtilizationResponse {
   jobs_considered: number; // finished jobs that fed the analysis
   truncated: boolean; // hit the server cap; analysis covers the most recent jobs_considered
   overall: UtilOverall;
-  workflows: UtilWorkflow[]; // default order: wall_hours desc
+  workflows: UtilWorkflowSummary[]; // every workflow, wall_hours desc
+  // Advice from every workflow, ranked by the server: severity, then
+  // GPU-hour savings ahead of any other, then larger savings; at most 500.
+  suggestions: UtilSuggestion[];
   limit: number; // the limit actually applied
   max_limit: number; // the server's ceiling, so the page can offer "analyze more"
   // Owners present in the analyzed jobs, by wall_hours desc; only when the
@@ -79,6 +82,10 @@ export interface UtilRequest {
   min: number;
   max: number;
   distinct: number; // number of distinct requested values
+  // The request is a formula over the job's own usage (e.g. memory that
+  // grows after a hold); typical/min/max are then the STARTING request.
+  adaptive?: boolean;
+  expression?: string; // the typical formula as written, when adaptive
 }
 
 export interface UtilBatchPoint {
@@ -121,6 +128,96 @@ export interface UtilAdvice {
   submit: string[];
   saves: { unit: 'core_hours' | 'gib_hours' | 'gpu_hours'; amount: number } | null;
   confidence: 'low' | 'medium' | 'high';
+  // POST /api/v1/utilization/apply can apply this advice to waiting jobs.
+  applies?: boolean;
+}
+
+export interface UtilSavings {
+  unit: 'core_hours' | 'gib_hours' | 'gpu_hours';
+  amount: number;
+}
+
+export type UtilAdaptiveResource = 'memory' | 'cpus' | 'disk' | 'gpus';
+
+// UtilWorkflowSummary is a workflow as the list carries it: enough for a
+// table row, with the histograms, samples and advice text left to the
+// workflow's own endpoint (an access point can have ten thousand).
+export interface UtilWorkflowSummary {
+  key: string;
+  name: string;
+  executable: string; // the program, not necessarily basename(Cmd)
+  owner?: string;
+  schedd?: string;
+  is_dag: boolean;
+  jobs: number;
+  succeeded: number;
+  failed: number;
+  removed: number;
+  wall_hours: number;
+  holds?: { memory: number; disk: number }; // omitted when both are 0
+  request: {
+    // Typical requests (the STARTING value when adaptive).
+    memory_mib: number | null;
+    cpus: number | null;
+    disk_kib: number | null;
+    gpus: number | null; // null when no job requested GPUs
+    adaptive?: UtilAdaptiveResource[]; // which of them are formulas
+  };
+  used: {
+    // used_hours / allocated_hours_measured, a fraction; null if unmeasured
+    cpu: number | null;
+    memory: number | null;
+    disk: number | null;
+    gpu: number | null;
+  };
+  gpu_hours?: number; // GPU-hours reserved, when any job requested GPUs
+  gain?: number; // throughput.gain, when there is an estimate
+  slots_limited?: boolean; // throughput.slots_limited, when there is an estimate
+  advice: { id: string; severity: UtilAdvice['severity']; saves: UtilSavings | null }[];
+}
+
+export interface UtilSuggestion {
+  key: string; // workflow key
+  name: string;
+  executable: string;
+  owner?: string;
+  id: string;
+  resource: UtilResource | 'runtime';
+  severity: UtilAdvice['severity'];
+  title: string;
+  saves: UtilSavings | null;
+  confidence: UtilAdvice['confidence'];
+}
+
+export interface UtilWorkflowDetail {
+  since: number;
+  until: number;
+  days: number;
+  truncated: boolean;
+  limit: number;
+  workflow: UtilWorkflow;
+  // The caller's idle queue jobs of this workflow right now; null in
+  // multi-AP mode or when the queue could not be read.
+  waiting_jobs: number | null;
+}
+
+export interface UtilApplyRequest {
+  w: string;
+  advice: string[]; // advice ids, never values: the server applies its own
+  days?: number;
+  owned_by_me?: boolean;
+  constraint?: string;
+  owners?: string; // comma-separated
+  limit?: number;
+  schedd?: string;
+}
+
+export interface UtilApplyResponse {
+  edited: number;
+  set: { RequestMemory?: number; RequestCpus?: number; RequestDisk?: number; RequestGPUs?: number };
+  declined: { advice: string; reason: string }[];
+  skipped: { job: string; reason: string }[];
+  failed: { job: string; reason: string }[];
 }
 
 export interface UtilWorkflow {
@@ -618,7 +715,10 @@ export function changesRequest(a: UtilAdvice): boolean {
  * filterWorkflows narrows the workflows the page already has by a typed
  * substring: name, executable, owner or access point, ignoring case.
  */
-export function filterWorkflows(ws: UtilWorkflow[], text: string): UtilWorkflow[] {
+export function filterWorkflows<T extends Pick<UtilWorkflowSummary, 'name' | 'executable' | 'owner' | 'schedd'>>(
+  ws: T[],
+  text: string,
+): T[] {
   const q = text.trim().toLowerCase();
   if (!q) return ws;
   return ws.filter((w) =>
@@ -664,9 +764,9 @@ export function moreOptions(limit: number, max: number): MoreOption[] {
  * folds into a single row: on a busy pool there can be hundreds of
  * one-off test runs, each a row with nothing to compare.
  */
-export function splitSingles(ws: UtilWorkflow[]): { multi: UtilWorkflow[]; singles: UtilWorkflow[] } {
-  const multi: UtilWorkflow[] = [];
-  const singles: UtilWorkflow[] = [];
+export function splitSingles<T extends { jobs: number }>(ws: T[]): { multi: T[]; singles: T[] } {
+  const multi: T[] = [];
+  const singles: T[] = [];
   for (const w of ws) (w.jobs === 1 ? singles : multi).push(w);
   // One single is not worth a group row of its own.
   if (singles.length < 2) return { multi: ws, singles: [] };
@@ -767,4 +867,145 @@ export function inFocus(row: UtilJobRow, focus: JobFocus | null, closed = false)
 export function jobArchiveHref(row: Pick<UtilJobRow, 'id' | 'schedd'>): string {
   const id = row.schedd ? `${row.id}@${row.schedd}` : row.id;
   return `/archive/${encodeURIComponent(id)}`;
+}
+
+// --- Summaries ---
+
+/** summaryGain is the table's throughput figure for a summary row. */
+export function summaryGain(w: UtilWorkflowSummary): number | undefined {
+  if (w.gain === undefined || w.slots_limited !== true) return undefined;
+  if (w.gain >= 0.95 && w.gain < THROUGHPUT_SHOWN) return undefined;
+  return w.gain;
+}
+
+/** actionableCount is how many of a summary's suggestions change something. */
+export function actionableCount(w: Pick<UtilWorkflowSummary, 'advice'>): number {
+  return w.advice.filter((a) => a.severity !== 'info').length;
+}
+
+// --- Requests that grow ---
+
+const ADAPTIVE_GROWS: Record<UtilAdaptiveResource, string> = {
+  memory: 'grows after a memory hold',
+  cpus: 'grows with the job',
+  disk: 'grows after a disk hold',
+  gpus: 'grows with the job',
+};
+
+/**
+ * requestPhrase says what a request is: "2 GB", or for one written as a
+ * formula, "starts at 2 GB, grows after a memory hold". The starting value
+ * alone would read as the request, which it is only until the first hold.
+ */
+export function requestPhrase(resource: UtilAdaptiveResource, value: string, adaptive: boolean | undefined): string {
+  return adaptive ? `starts at ${value}, ${ADAPTIVE_GROWS[resource]}` : value;
+}
+
+/** requestMarkerLabel is the short form for a chart's "requested" line. */
+export function requestMarkerLabel(value: string, adaptive: boolean | undefined): string {
+  return adaptive ? `requested ${value}, grows` : `requested ${value}`;
+}
+
+// --- Applying advice to waiting jobs ---
+
+export interface ApplyChange {
+  advice: UtilAdvice;
+  attr: 'request_memory' | 'request_cpus' | 'request_disk' | 'request_gpus';
+  from: string; // the typical request now, as the page shows it
+  to: string; // the value from the advice's submit line
+  adaptive: boolean; // the current request is a formula, which an edit leaves alone
+}
+
+const ATTR_RE = /^\s*(request_(memory|cpus|disk|gpus))\s*=\s*(.+?)\s*$/i;
+
+/**
+ * applyPlan lists what applying a workflow's advice would change on its
+ * waiting jobs -- attribute, from, to -- and the request-changing advice
+ * that cannot be applied, so the confirm step can say exactly what will
+ * and will not happen. The values shown come from the advice; the server
+ * writes its own, by advice id.
+ */
+export function applyPlan(w: UtilWorkflow): { changes: ApplyChange[]; blocked: UtilAdvice[] } {
+  const changes: ApplyChange[] = [];
+  const blocked: UtilAdvice[] = [];
+  for (const a of w.advice) {
+    const lines = a.submit.map((l) => l.match(ATTR_RE)).filter((m): m is RegExpMatchArray => m !== null);
+    if (lines.length === 0) continue;
+    if (!a.applies) {
+      blocked.push(a);
+      continue;
+    }
+    for (const m of lines) {
+      const kind = m[2].toLowerCase() as 'memory' | 'cpus' | 'disk' | 'gpus';
+      const req =
+        kind === 'memory' ? w.memory.request : kind === 'cpus' ? w.cpu.request : kind === 'disk' ? w.disk.request : w.gpu?.request ?? null;
+      const now = !req
+        ? '—'
+        : kind === 'memory'
+          ? formatMiB(req.typical)
+          : kind === 'disk'
+            ? formatKiB(req.typical)
+            : formatCores(req.typical);
+      changes.push({
+        advice: a,
+        attr: m[1].toLowerCase() as ApplyChange['attr'],
+        from: requestPhrase(kind, now, req?.adaptive),
+        to: m[3],
+        adaptive: !!req?.adaptive,
+      });
+    }
+  }
+  return { changes, blocked };
+}
+
+/** describeSet renders the values the server wrote. */
+export function describeSet(set: UtilApplyResponse['set']): string[] {
+  const out: string[] = [];
+  if (set.RequestMemory !== undefined) out.push(`memory ${formatMiB(set.RequestMemory)}`);
+  if (set.RequestCpus !== undefined) out.push(`${formatCores(set.RequestCpus)} ${set.RequestCpus === 1 ? 'CPU' : 'CPUs'}`);
+  if (set.RequestDisk !== undefined) out.push(`disk ${formatKiB(set.RequestDisk)}`);
+  if (set.RequestGPUs !== undefined) out.push(`${set.RequestGPUs} ${set.RequestGPUs === 1 ? 'GPU' : 'GPUs'}`);
+  return out;
+}
+
+// --- The list as it arrives ---
+
+/**
+ * The list leaves out fields that hold their usual value -- for a million
+ * jobs it is the difference between 5 MB and 56. These are the wire
+ * forms; normalizeUtilization fills the defaults back in once, so nothing
+ * downstream has to know.
+ */
+export type UtilWorkflowSummaryWire = Omit<
+  UtilWorkflowSummary,
+  'name' | 'is_dag' | 'failed' | 'removed' | 'request' | 'used' | 'advice'
+> & {
+  name?: string; // omitted when it equals executable
+  is_dag?: boolean;
+  failed?: number;
+  removed?: number;
+  request: Omit<UtilWorkflowSummary['request'], 'gpus'> & { gpus?: number | null };
+  used: Omit<UtilWorkflowSummary['used'], 'gpu'> & { gpu?: number | null };
+  advice: { id: string; severity: UtilAdvice['severity']; saves?: UtilSavings | null }[];
+};
+
+export type UtilizationResponseWire = Omit<UtilizationResponse, 'workflows'> & {
+  workflows: UtilWorkflowSummaryWire[];
+};
+
+export function normalizeSummary(w: UtilWorkflowSummaryWire): UtilWorkflowSummary {
+  return {
+    ...w,
+    name: w.name ?? w.executable,
+    is_dag: w.is_dag ?? false,
+    failed: w.failed ?? 0,
+    removed: w.removed ?? 0,
+    request: { ...w.request, gpus: w.request.gpus ?? null },
+    used: { ...w.used, gpu: w.used.gpu ?? null },
+    advice: w.advice.map((a) => ({ ...a, saves: a.saves ?? null })),
+  };
+}
+
+export function normalizeUtilization(r: UtilizationResponseWire): UtilizationResponse {
+  return { ...r, workflows: r.workflows.map(normalizeSummary), suggestions: r.suggestions ?? [] };
 }

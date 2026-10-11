@@ -6,7 +6,16 @@
 
 import type { DrainEstimates } from "./drain";
 import type { MetricsResponse } from "./metrics";
-import type { UtilJobSort, UtilJobsResponse, UtilizationResponse } from "./utilization";
+import type {
+  UtilApplyRequest,
+  UtilApplyResponse,
+  UtilJobSort,
+  UtilJobsResponse,
+  UtilizationResponse,
+  UtilWorkflowDetail,
+  UtilizationResponseWire,
+} from "./utilization";
+import { normalizeUtilization } from "./utilization";
 
 const BASE = "/api/v1";
 
@@ -1363,8 +1372,42 @@ export const api = {
     if (params.owners && params.owners.length > 0)
       qs.set("owners", params.owners.join(","));
     if (params.limit !== undefined) qs.set("limit", String(params.limit));
-    return fetchJSON(`${BASE}/utilization?${qs.toString()}`);
+    return fetchJSON<UtilizationResponseWire>(`${BASE}/utilization?${qs.toString()}`).then(
+      normalizeUtilization,
+    );
   },
+
+  // One workflow in full -- histograms, advice text, throughput -- from
+  // the same analysis as the list, which carries only summaries.
+  utilizationWorkflow: (params: {
+    w: string;
+    days: number;
+    owned_by_me?: boolean;
+    schedd?: string;
+    constraint?: string;
+    owners?: string[];
+    limit?: number;
+  }): Promise<UtilWorkflowDetail> => {
+    const qs = new URLSearchParams();
+    qs.set("w", params.w);
+    qs.set("days", String(params.days));
+    if (params.owned_by_me !== undefined)
+      qs.set("owned_by_me", String(params.owned_by_me));
+    if (params.schedd) qs.set("schedd", params.schedd);
+    if (params.constraint) qs.set("constraint", params.constraint);
+    if (params.owners && params.owners.length > 0)
+      qs.set("owners", params.owners.join(","));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    return fetchJSON(`${BASE}/utilization/workflow?${qs.toString()}`);
+  },
+
+  // Apply a workflow's request-changing advice to its waiting jobs. The
+  // body names advice by id; the server writes its own values.
+  utilizationApply: (body: UtilApplyRequest): Promise<UtilApplyResponse> =>
+    fetchJSON(`${BASE}/utilization/apply`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   // One workflow's jobs, paged, from the same analysed set: pass the
   // parameters the analysis used.

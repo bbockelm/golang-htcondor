@@ -10,6 +10,9 @@ import type {
   UtilShape,
   UtilThroughput,
   UtilizationResponse,
+  UtilWorkflowSummary,
+  UtilSuggestion,
+  UtilWorkflowDetail,
   UtilJobRow,
   UtilJobSort,
   UtilJobsResponse,
@@ -810,10 +813,138 @@ function throughputGain(ws: UtilWorkflow[]): number | null {
   return after > 0 ? before / after : null;
 }
 
+// Advice a queued job can take: a change to a plain request. A GPU
+// memory requirement lives in the job's requirements, not a request.
+function withApplies(w: UtilWorkflow): UtilWorkflow {
+  return {
+    ...w,
+    advice: w.advice.map((a) => ({
+      ...a,
+      applies: ['memory', 'cpu', 'disk'].includes(a.resource) && a.submit.some((l) => /^request_/.test(l)),
+    })),
+  };
+}
+
+// genome-assembly asks for memory with a formula that grows after a
+// hold, the way real workflows do: the summary and the charts must say
+// "starts at", not report the starting value as the request.
+function withAdaptive(w: UtilWorkflow): UtilWorkflow {
+  if (w.key !== 'wf-assemble' || !w.memory.request) return w;
+  return {
+    ...w,
+    memory: {
+      ...w.memory,
+      request: {
+        ...w.memory.request,
+        adaptive: true,
+        expression: 'ifThenElse(MemoryUsage isnt undefined, max({2048, 3 * MemoryUsage / 2}), 2048)',
+      },
+    },
+  };
+}
+
+/** fullWorkflows are the fixture's workflows with every detail. */
+export const fullWorkflows: UtilWorkflow[] = SPECS.map(buildWorkflow)
+  .map(withThroughput)
+  .map(withApplies)
+  .map(withAdaptive)
+  .sort((a, b) => b.wall_hours - a.wall_hours);
+
+function usedOf(w: UtilWorkflow, r: 'cpu' | 'memory' | 'disk' | 'gpu'): number | null {
+  const s = w.resources.find((x) => x.resource === r);
+  if (!s || s.used_hours === null || !(s.allocated_hours_measured > 0)) return null;
+  return s.used_hours / s.allocated_hours_measured;
+}
+
+/** summarize is a workflow as the list carries it. */
+export function summarize(w: UtilWorkflow): UtilWorkflowSummary {
+  const adaptive = (
+    [
+      ['memory', w.memory.request],
+      ['cpus', w.cpu.request],
+      ['disk', w.disk.request],
+      ['gpus', w.gpu?.request ?? null],
+    ] as const
+  )
+    .filter(([, r]) => r?.adaptive)
+    .map(([k]) => k);
+  return {
+    key: w.key,
+    name: w.name,
+    executable: w.executable,
+    owner: w.owner,
+    schedd: w.schedd,
+    is_dag: w.is_dag,
+    jobs: w.jobs,
+    succeeded: w.succeeded,
+    failed: w.failed,
+    removed: w.removed,
+    wall_hours: w.wall_hours,
+    ...(w.holds.memory || w.holds.disk ? { holds: w.holds } : {}),
+    request: {
+      memory_mib: w.memory.request?.typical ?? null,
+      cpus: w.cpu.request?.typical ?? null,
+      disk_kib: w.disk.request?.typical ?? null,
+      gpus: w.gpu?.request?.typical ?? null,
+      ...(adaptive.length ? { adaptive: [...adaptive] } : {}),
+    },
+    used: { cpu: usedOf(w, 'cpu'), memory: usedOf(w, 'memory'), disk: usedOf(w, 'disk'), gpu: usedOf(w, 'gpu') },
+    ...(w.gpu ? { gpu_hours: w.resources.find((r) => r.resource === 'gpu')?.allocated_hours } : {}),
+    ...(w.throughput ? { gain: w.throughput.gain, slots_limited: w.throughput.slots_limited } : {}),
+    advice: w.advice.map((a) => ({ id: a.id, severity: a.severity, saves: a.saves })),
+  };
+}
+
+// The server's ranking: severity, then GPU-hour savings first, then
+// larger savings.
+function rankSuggestions(ws: UtilWorkflow[]): UtilSuggestion[] {
+  const sev: Record<UtilAdvice['severity'], number> = { warn: 0, suggest: 1, info: 2 };
+  const out: UtilSuggestion[] = [];
+  for (const w of ws) {
+    for (const a of w.advice) {
+      if (a.severity === 'info') continue;
+      out.push({
+        key: w.key,
+        name: w.name,
+        executable: w.executable,
+        owner: w.owner,
+        id: a.id,
+        resource: a.resource,
+        severity: a.severity,
+        title: a.title,
+        saves: a.saves,
+        confidence: a.confidence,
+      });
+    }
+  }
+  return out.sort(
+    (x, y) =>
+      sev[x.severity] - sev[y.severity] ||
+      (x.saves?.unit === 'gpu_hours' ? 0 : 1) - (y.saves?.unit === 'gpu_hours' ? 0 : 1) ||
+      (y.saves?.amount ?? -1) - (x.saves?.amount ?? -1),
+  );
+}
+
+// Queued jobs per workflow, for the apply flow.
+const WAITING: Record<string, number> = { 'wf-blast': 120, 'wf-assemble': 40 };
+
+/** utilizationWorkflowFixture answers GET /api/v1/utilization/workflow. */
+export function utilizationWorkflowFixture(key: string): UtilWorkflowDetail | null {
+  const w = fullWorkflows.find((x) => x.key === key);
+  if (!w) return null;
+  return {
+    since: NOW - 7 * DAY,
+    until: NOW,
+    days: 7,
+    truncated: false,
+    limit: 50_000,
+    workflow: w,
+    waiting_jobs: WAITING[key] ?? 0,
+  };
+}
+
 export function buildUtilizationFixture(): UtilizationResponse {
-  const workflows = SPECS.map(buildWorkflow)
-    .map(withThroughput)
-    .sort((a, b) => b.wall_hours - a.wall_hours);
+  const workflows = fullWorkflows;
   const jobs = workflows.reduce((a, w) => a + w.jobs, 0);
   const wallHours = workflows.reduce((a, w) => a + w.wall_hours, 0);
   // Failed runs' whole wall time plus the part of restarted runs that was
@@ -835,7 +966,8 @@ export function buildUtilizationFixture(): UtilizationResponse {
       resources: combine(workflows),
       throughput_gain: throughputGain(workflows),
     },
-    workflows,
+    workflows: workflows.map(summarize),
+    suggestions: rankSuggestions(workflows),
     limit: 50_000,
     max_limit: 1_000_000,
     owners: ownersOf(workflows),
@@ -843,7 +975,7 @@ export function buildUtilizationFixture(): UtilizationResponse {
 }
 
 // ownersOf is the owner list a pool-wide answer carries, by run time.
-export function ownersOf(ws: UtilWorkflow[]): NonNullable<UtilizationResponse['owners']> {
+export function ownersOf(ws: Pick<UtilWorkflowSummary, 'owner' | 'jobs' | 'wall_hours'>[]): NonNullable<UtilizationResponse['owners']> {
   const by = new Map<string, { owner: string; jobs: number; wall_hours: number }>();
   for (const w of ws) {
     if (!w.owner) continue;

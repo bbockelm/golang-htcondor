@@ -21,12 +21,13 @@ import {
   sortResources,
   splitSingles,
   formatDuration,
+  normalizeUtilization,
   type UtilAdvice,
   type UtilThroughput,
   type UtilDistribution,
   type UtilWorkflow,
 } from './utilization';
-import { utilizationFixture } from './utilization.fixture';
+import { fullWorkflows, utilizationFixture } from './utilization.fixture';
 
 function dist(over: Partial<UtilDistribution>): UtilDistribution {
   return {
@@ -135,7 +136,7 @@ describe('usedFraction', () => {
 });
 
 describe('rankAdvice', () => {
-  const wf = (key: string, a: UtilAdvice[]) => ({ ...utilizationFixture.workflows[0], key, advice: a }) as UtilWorkflow;
+  const wf = (key: string, a: UtilAdvice[]) => ({ ...fullWorkflows[0], key, advice: a }) as UtilWorkflow;
 
   it('puts warnings first, then the biggest saving, and leaves notes out', () => {
     const ranked = rankAdvice([
@@ -185,14 +186,14 @@ describe('fixture', () => {
   // The fixture stands in for the server in the component tests and the
   // smoke suite; if it stops agreeing with itself it tests nothing.
   it('has histograms that account for every job', () => {
-    for (const w of utilizationFixture.workflows) {
+    for (const w of fullWorkflows) {
       const d = w.memory.peak_mib!;
       expect(d.histogram.reduce((a, b) => a + b.count, 0)).toBe(d.n);
     }
   });
 
   it('marks exactly one recommended request per curve', () => {
-    for (const w of utilizationFixture.workflows) {
+    for (const w of fullWorkflows) {
       if (w.memory_curve.length === 0) continue;
       expect(w.memory_curve.filter((p) => p.is_recommended)).toHaveLength(1);
     }
@@ -262,8 +263,8 @@ describe('formatDuration', () => {
 });
 
 describe('throughputAdviceId', () => {
-  const w = utilizationFixture.workflows.find((x) => x.key === 'wf-blast')!;
-  const assemble = utilizationFixture.workflows.find((x) => x.key === 'wf-assemble')!;
+  const w = fullWorkflows.find((x) => x.key === 'wf-blast')!;
+  const assemble = fullWorkflows.find((x) => x.key === 'wf-assemble')!;
 
   it('puts a gain on the change to the resource that caps the jobs now', () => {
     // Memory caps blast at 8 GB per job; the disk change rides along.
@@ -282,7 +283,7 @@ describe('throughputAdviceId', () => {
 });
 
 describe('filters', () => {
-  const ws = utilizationFixture.workflows;
+  const ws = fullWorkflows;
 
   it('matches name, executable and owner, ignoring case', () => {
     expect(filterWorkflows(ws, 'BLAST').map((w) => w.key)).toEqual(['wf-blast']);
@@ -320,5 +321,34 @@ describe('filters', () => {
     expect(sortResources(utilizationFixture.overall.resources)[0].resource).toBe('gpu');
     const noGpu = utilizationFixture.overall.resources.map((r) => (r.resource === 'gpu' ? { ...r, allocated_hours: 0 } : r));
     expect(sortResources(noGpu)[0].resource).toBe('cpu');
+  });
+});
+
+describe('normalizeUtilization', () => {
+  it('fills in what the list leaves out', () => {
+    const r = normalizeUtilization({
+      ...utilizationFixture,
+      workflows: [
+        {
+          key: 'k',
+          executable: 'run.sh',
+          jobs: 3,
+          succeeded: 3,
+          wall_hours: 1.5,
+          request: { memory_mib: 1024, cpus: 1, disk_kib: 1024 },
+          used: { cpu: 0.5, memory: 0.4, disk: 0.1 },
+          advice: [{ id: 'memory-lower', severity: 'suggest' }],
+        },
+      ],
+    });
+    expect(r.workflows[0]).toMatchObject({
+      name: 'run.sh',
+      is_dag: false,
+      failed: 0,
+      removed: 0,
+      request: { gpus: null },
+      used: { gpu: null },
+      advice: [{ id: 'memory-lower', saves: null }],
+    });
   });
 });

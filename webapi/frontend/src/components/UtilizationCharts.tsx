@@ -16,6 +16,7 @@ import {
   formatNumber,
   formatPercent,
   stripGeometry,
+  requestMarkerLabel,
   type UtilBatchPoint,
   type UtilDistribution,
   type UtilMemoryCurvePoint,
@@ -23,6 +24,7 @@ import {
   type UtilSample,
 } from '@/lib/utilization';
 import { formatSeconds } from '@/lib/usage';
+import { useNarrow } from '@/lib/useNarrow';
 
 // Colours. The data hues are the dataviz palette's, the same ones the job
 // page's metric charts use (lib/metrics.ts RUN_COLORS), validated for
@@ -359,8 +361,13 @@ function layoutMarkerLabels(xs: { x: number; text: string }[], maxX: number): { 
   });
 }
 
-const HW = 560;
-const HPAD = { right: 18, bottom: 30, left: 44 };
+// Each chart has a wide layout and a phone one. The phone viewBox is
+// about as wide as a phone draws it, so 12-unit text renders near 12px
+// instead of being scaled down to 7; the plot is taller for its width.
+const HIST_DIMS = {
+  wide: { HW: 560, HPAD: { right: 18, bottom: 30, left: 44 }, xTickCount: 5 },
+  narrow: { HW: 340, HPAD: { right: 14, bottom: 30, left: 38 }, xTickCount: 3 },
+};
 
 /**
  * Histogram draws a distribution of per-job values with vertical
@@ -398,9 +405,10 @@ export function Histogram({
 }) {
   const titleId = useId();
   const [tip, setTip] = useState<Tip | null>(null);
+  const { HW, HPAD, xTickCount } = HIST_DIMS[useNarrow() ? 'narrow' : 'wide'];
   const rawBins = dist.histogram;
   const lastHi = rawBins.length ? rawBins[rawBins.length - 1].hi : dist.max;
-  const xTicks = niceTicks(Math.max(lastHi, ...markers.map((m) => m.value)) * 1.02, unit, 5);
+  const xTicks = niceTicks(Math.max(lastHi, ...markers.map((m) => m.value)) * 1.02, unit, xTickCount);
   const xMax = xTicks[xTicks.length - 1];
   // Ten pixels of axis is the narrowest bar worth drawing.
   const bins = mergeBins(rawBins, (10 / (HW - HPAD.left - HPAD.right)) * xMax, shadeFrom);
@@ -556,9 +564,10 @@ export function Histogram({
 
 // --- The memory request curve ---
 
-const CW = 560;
-const CH = 304;
-const CPAD = { top: 34, right: 24, bottom: 56, left: 60 };
+const CURVE_DIMS = {
+  wide: { CW: 560, CH: 304, CPAD: { top: 34, right: 24, bottom: 56, left: 60 }, xTickCount: 4 },
+  narrow: { CW: 340, CH: 300, CPAD: { top: 34, right: 16, bottom: 56, left: 46 }, xTickCount: 2 },
+};
 
 // The rerun strip under the curve: one ordinal amber ramp, light to dark
 // with the share of jobs that would rerun, and neutral grey for none.
@@ -601,6 +610,7 @@ interface Callout {
 export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
   const titleId = useId();
   const [active, setActive] = useState<number | null>(null);
+  const { CW, CH, CPAD, xTickCount } = CURVE_DIMS[useNarrow() ? 'narrow' : 'wide'];
   const pts = useMemo(() => [...points].sort((a, b) => a.request_mib - b.request_mib), [points]);
   if (pts.length === 0) return null;
   const current = pts.find((p) => p.is_current);
@@ -619,7 +629,7 @@ export function MemoryCurve({ points }: { points: UtilMemoryCurvePoint[] }) {
   // Ticks across the candidates' own range: the axis does not start at
   // zero, and ticks counted from zero can leave one label on it.
   const tickStep = (() => {
-    const t = niceTicks(xSpan, 'mib', 4);
+    const t = niceTicks(xSpan, 'mib', xTickCount);
     return t.length > 1 ? t[1] - t[0] : xSpan;
   })();
   const xTicks: number[] = [];
@@ -956,9 +966,10 @@ const OUTCOMES: {
   { key: 'removed', label: 'removed', color: UTIL_COLOR.removed, shape: 'ring' },
 ];
 
-const SW = 560;
-const SH = 280;
-const SPAD = { top: 14, right: 26, bottom: 36, left: 56 };
+const SCATTER_DIMS = {
+  wide: { SW: 560, SH: 280, SPAD: { top: 14, right: 26, bottom: 36, left: 56 }, xTickCount: 5 },
+  narrow: { SW: 340, SH: 280, SPAD: { top: 14, right: 22, bottom: 36, left: 50 }, xTickCount: 3 },
+};
 
 /**
  * OutcomeScatter answers "do the long jobs need more memory?": one dot
@@ -979,6 +990,7 @@ export function OutcomeScatter({
 }) {
   const titleId = useId();
   const [active, setActive] = useState<number | null>(null);
+  const { SW, SH, SPAD, xTickCount } = SCATTER_DIMS[useNarrow() ? 'narrow' : 'wide'];
   const pts = useMemo(
     () => samples.filter((s): s is UtilSample & { memory_mib: number } => s.memory_mib !== null),
     [samples],
@@ -989,7 +1001,7 @@ export function OutcomeScatter({
   const maxWall = Math.max(...pts.map((p) => p.wall));
   const tUnit: AxisUnit = maxWall < 2 * 3600 ? 'minutes' : 'hours';
   const tScale = tUnit === 'minutes' ? 60 : 3600;
-  const xTicks = niceTicks(maxWall / tScale, 'plain', 5);
+  const xTicks = niceTicks(maxWall / tScale, 'plain', xTickCount);
   const xMax = xTicks[xTicks.length - 1];
   const yTicks = niceTicks(Math.max(request?.typical ?? 0, ...pts.map((p) => p.memory_mib)), 'mib', 4);
   const yMax = yTicks[yTicks.length - 1];
@@ -1054,7 +1066,7 @@ export function OutcomeScatter({
           ))}
           {request && (
             <LegendKey color={UTIL_COLOR.request} shape="line" dashed>
-              requested {formatMiB(request.typical)}
+              {requestMarkerLabel(formatMiB(request.typical), request.adaptive)}
             </LegendKey>
           )}
         </>
@@ -1146,9 +1158,12 @@ export function OutcomeScatter({
 
 // --- Request against use, submission by submission ---
 
-const TW = 560;
-const TH = 230;
-const TPAD = { top: 16, right: 92, bottom: 32, left: 56 };
+// On a phone the end labels give way to the legend: there is no room to
+// the right of the lines for them.
+const TREND_DIMS = {
+  wide: { TW: 560, TH: 230, TPAD: { top: 16, right: 92, bottom: 32, left: 56 }, endLabels: true },
+  narrow: { TW: 340, TH: 230, TPAD: { top: 16, right: 16, bottom: 32, left: 46 }, endLabels: false },
+};
 
 /**
  * TrendChart follows one resource across a workflow's submissions: what
@@ -1173,6 +1188,7 @@ export function TrendChart({
 }) {
   const titleId = useId();
   const [active, setActive] = useState<number | null>(null);
+  const { TW, TH, TPAD, endLabels } = TREND_DIMS[useNarrow() ? 'narrow' : 'wide'];
   const reqs = batches.map(request);
   const uses = batches.map(used);
   const all = [...reqs, ...uses].filter((v): v is number => v !== null);
@@ -1315,12 +1331,12 @@ export function TrendChart({
             <circle key={i} cx={xs(i)} cy={ys(v)} r={active === i ? 5 : 3} fill={UTIL_COLOR.used} stroke="#ffffff" strokeWidth={active === i ? 2 : 1} />
           ),
         )}
-        {lr >= 0 && (
+        {endLabels && lr >= 0 && (
           <text x={xs(lr) + 8} y={ry} dominantBaseline="middle" className="fill-gray-700 text-[12px]">
             requested
           </text>
         )}
-        {lu >= 0 && (
+        {endLabels && lu >= 0 && (
           <text x={xs(lu) + 8} y={uy} dominantBaseline="middle" className="fill-gray-700 text-[12px]">
             {usedLabel}
           </text>
@@ -1471,5 +1487,57 @@ export function UsageBar({ fraction, label }: { fraction: number; label: string 
         />
       )}
     </div>
+  );
+}
+
+// --- The fit meter (workflow list) ---
+
+/**
+ * FitMeter is a workflow's use of one resource in the list: the share of
+ * what it reserved that it used, over the window, against the typical
+ * request. Over the request (memory can be) the bar fills and turns red.
+ */
+export function FitMeter({
+  fraction,
+  request,
+  adaptive,
+  label,
+}: {
+  fraction: number | null;
+  request: string | null; // the typical request, formatted
+  adaptive?: boolean; // the request is a formula; `request` is where it starts
+  label: string;
+}) {
+  if (fraction === null) {
+    return <span className="text-xs text-gray-400">{request ? `${request} · not measured` : '—'}</span>;
+  }
+  const over = fraction > 1;
+  const reqText = request ? (adaptive ? `${request}+` : request) : null;
+  const title =
+    `${label}: ${formatPercent(fraction)} of the reservation used` +
+    (request ? (adaptive ? `; the request starts at ${request} and grows` : `; requested ${request}`) : '');
+  return (
+    <span className="flex items-center gap-2 whitespace-nowrap" title={title} data-testid="fit-meter" data-over={over}>
+      <span role="img" aria-label={title} className="relative inline-block h-2 w-16 shrink-0 overflow-hidden rounded-sm" style={{ backgroundColor: UTIL_COLOR.track }}>
+        <span
+          className="absolute inset-y-0 left-0 rounded-sm"
+          style={{ width: `max(2px, ${Math.min(1, fraction) * 100}%)`, backgroundColor: over ? UTIL_COLOR.over : UTIL_COLOR.used }}
+        />
+      </span>
+      <span className="text-xs tabular-nums text-gray-700">
+        {formatPercent(fraction)}
+        {reqText && <span className="text-gray-500"> of {reqText}</span>}
+      </span>
+    </span>
+  );
+}
+
+/** FitKey explains the list's meters once, under it. */
+export function FitKey() {
+  return (
+    <p className="text-xs text-gray-500">
+      Bars: the share of each reservation the workflow&apos;s jobs used, weighted by run time. A + marks a request that
+      grows after a hold.
+    </p>
   );
 }

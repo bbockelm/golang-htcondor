@@ -22,20 +22,18 @@ import {
   formatPercent,
   formatResourceHours,
   formatSaves,
-  fitRatio,
   idleHours,
-  rankAdvice,
   sortResources,
   usedFraction,
   windowPhrase,
   THROUGHPUT_SHOWN,
   changesRequest,
   formatGain,
-  throughputColumn,
+  summaryGain,
+  actionableCount,
   throughputStatement,
   throughputAdviceId,
   splitSingles,
-  type RankedAdvice,
   type UtilThroughput,
   type UtilGpu,
   type UtilBatchPoint,
@@ -46,17 +44,24 @@ import {
   type UtilAdvice,
   type UtilOverall,
   type UtilResourceSummary,
+  requestMarkerLabel,
+  requestPhrase,
   type UtilWorkflow,
+  type UtilWorkflowSummary,
+  type UtilSuggestion,
   type UtilizationResponse,
 } from '@/lib/utilization';
 import { SortableHeader, useSortedRows, useSortState } from '@/components/SortableTable';
 import { WorkflowJobs, type JobsQuery } from '@/components/UtilizationJobs';
+import { useInfiniteList } from '@/components/BatchTable';
+import { ApplyPanel } from '@/components/UtilizationApply';
+import { useNarrow } from '@/lib/useNarrow';
 import {
   Histogram,
   MemoryCurve,
   OutcomeScatter,
-  RangeStrip,
-  RangeStripKey,
+  FitKey,
+  FitMeter,
   TrendChart,
   UsageBar,
   type ChartMarker,
@@ -276,8 +281,12 @@ export function AdviceCard({
   workflow,
   hrefFor,
   throughput,
+  context,
 }: {
   advice: UtilAdvice;
+  // A fact about the request the advice changes, when it is not what it
+  // looks like -- a formula that grows after a hold.
+  context?: string;
   // Set when the card is listed away from its workflow, so it can say
   // which workflow it is about.
   workflow?: UtilWorkflow;
@@ -315,6 +324,7 @@ export function AdviceCard({
       </div>
       <h3 className="mt-2 font-semibold text-gray-900">{advice.title}</h3>
       <p className="mt-1 text-sm text-gray-600">{advice.detail}</p>
+      {context && <p className="mt-1 text-xs text-gray-500">{context}</p>}
       {runLine && (
         <p className="mt-1 text-sm font-medium text-gray-900" data-testid="advice-throughput">
           {runLine}
@@ -352,15 +362,65 @@ export function AdviceCard({
 
 const TOP_ADVICE = 5;
 
+// SuggestionCard is one suggestion in the ranked list across workflows.
+// The evidence and the submit lines are on the workflow's page, which is
+// one click away; the list carries what is needed to choose.
+export function SuggestionCard({ s, hrefFor }: { s: UtilSuggestion; hrefFor: (key: string) => string }) {
+  const sev = SEVERITY[s.severity];
+  const saves = formatSaves(s.saves);
+  const low = s.confidence === 'low';
+  return (
+    <article
+      className={`rounded-lg border bg-white p-4 ${low ? 'border-dashed border-gray-300' : 'border-gray-200'}`}
+      data-testid="advice"
+      data-advice-id={s.id}
+    >
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-medium ${sev.cls}`}>
+          <span aria-hidden className="font-bold">
+            {sev.icon}
+          </span>
+          {sev.label}
+        </span>
+        <span className="text-gray-500">{s.resource === 'runtime' ? 'Run time' : RESOURCE_LABEL[s.resource]}</span>
+        <span className={low ? 'rounded-full bg-gray-100 px-2 py-0.5 text-gray-700' : 'text-gray-400'}>
+          {CONFIDENCE_LABEL[s.confidence]}
+        </span>
+      </div>
+      <h3 className="mt-2 font-semibold text-gray-900">{s.title}</h3>
+      <p className="mt-2 text-xs text-gray-500">
+        For{' '}
+        <Link href={hrefFor(s.key)} className="font-medium text-brand-700 hover:underline">
+          {s.name}
+        </Link>
+        {s.owner && <> ({s.owner})</>}
+        {saves && (
+          <>
+            {' '}· Saves about <span className="font-semibold text-gray-900 tabular-nums">{saves}</span> for the same work
+          </>
+        )}
+      </p>
+      <p className="mt-2 text-xs">
+        <Link href={hrefFor(s.key)} className="text-brand-700 hover:underline">
+          Why, and the lines to submit →
+        </Link>
+      </p>
+    </article>
+  );
+}
+
 export function Suggestions({
-  workflows,
+  suggestions,
   hrefFor,
+  keys,
 }: {
-  workflows: UtilWorkflow[];
+  suggestions: UtilSuggestion[];
   hrefFor: (key: string) => string;
+  // Only these workflows' suggestions, when the list is filtered.
+  keys?: Set<string>;
 }) {
   const [all, setAll] = useState(false);
-  const ranked: RankedAdvice[] = rankAdvice(workflows);
+  const ranked = keys ? suggestions.filter((x) => keys.has(x.key)) : suggestions;
   const shown = all ? ranked : ranked.slice(0, TOP_ADVICE);
   return (
     <section aria-labelledby="util-suggestions">
@@ -372,14 +432,8 @@ export function Suggestions({
       ) : (
         <>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-            {shown.map((r) => (
-              <AdviceCard
-                key={`${r.workflow.key}/${r.advice.id}`}
-                advice={r.advice}
-                workflow={r.workflow}
-                hrefFor={hrefFor}
-                throughput={throughputAdviceId(r.workflow) === r.advice.id ? r.workflow.throughput : null}
-              />
+            {shown.map((x) => (
+              <SuggestionCard key={`${x.key}/${x.id}`} s={x} hrefFor={hrefFor} />
             ))}
           </div>
           {ranked.length > TOP_ADVICE && (
@@ -388,7 +442,7 @@ export function Suggestions({
               onClick={() => setAll((v) => !v)}
               className="mt-2 text-sm text-brand-700 hover:underline"
             >
-              {all ? 'Show fewer' : `Show all ${ranked.length} suggestions`}
+              {all ? 'Show fewer' : `Show all ${ranked.length.toLocaleString()} suggestions`}
             </button>
           )}
         </>
@@ -401,11 +455,9 @@ export function Suggestions({
 
 type SortKey = 'name' | 'jobs' | 'wall' | 'cpu' | 'memory' | 'disk' | 'throughput' | 'advice';
 
-function actionable(w: UtilWorkflow): number {
-  return w.advice.filter((a) => a.severity !== 'info').length;
-}
+const actionable = actionableCount;
 
-function sortValue(w: UtilWorkflow, key: SortKey): string | number | undefined {
+function sortValue(w: UtilWorkflowSummary, key: SortKey): string | number | undefined {
   switch (key) {
     case 'name':
       return w.name;
@@ -416,15 +468,15 @@ function sortValue(w: UtilWorkflow, key: SortKey): string | number | undefined {
     case 'advice':
       return actionable(w);
     case 'throughput':
-      return throughputColumn(w);
+      return summaryGain(w);
     default:
-      return fitRatio(w, key);
+      return w.used[key] ?? undefined;
   }
 }
 
 // A row of the table is a workflow or the group of single-job ones,
 // which sorts as one unit: its jobs and run time are the group's sums.
-type TableUnit = { kind: 'workflow'; w: UtilWorkflow } | { kind: 'singles'; ws: UtilWorkflow[] };
+type TableUnit = { kind: 'workflow'; w: UtilWorkflowSummary } | { kind: 'singles'; ws: UtilWorkflowSummary[] };
 
 function unitValue(u: TableUnit, key: SortKey): string | number | undefined {
   if (u.kind === 'workflow') return sortValue(u.w, key);
@@ -444,18 +496,40 @@ function unitValue(u: TableUnit, key: SortKey): string | number | undefined {
   }
 }
 
+// The table draws its rows a page at a time as it scrolls: an access
+// point can have ten thousand workflows in a month, and a table of all
+// of them at once takes seconds to appear. The group of single-job
+// workflows and, when open, its members are rows of the same list.
+type DisplayItem =
+  | { kind: 'workflow'; w: UtilWorkflowSummary; nested: boolean }
+  | { kind: 'group'; ws: UtilWorkflowSummary[] };
+
+const ROWS_PER_PAGE = 50;
+
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: 'wall', label: 'Run time' },
+  { key: 'jobs', label: 'Jobs' },
+  { key: 'name', label: 'Name' },
+  { key: 'advice', label: 'Suggestions' },
+  { key: 'throughput', label: 'Throughput' },
+  { key: 'cpu', label: 'CPU fit' },
+  { key: 'memory', label: 'Memory fit' },
+  { key: 'disk', label: 'Disk fit' },
+];
+
 export function WorkflowsTable({
   workflows,
   hrefFor,
   onOpen,
   onOwner,
 }: {
-  workflows: UtilWorkflow[];
+  workflows: UtilWorkflowSummary[];
   hrefFor: (key: string) => string;
   onOpen: (key: string) => void;
   // Set when the page can narrow to a user: owner names become buttons.
   onOwner?: (owner: string) => void;
 }) {
+  const narrow = useNarrow();
   const [sort, setSort] = useSortState<SortKey>('wall', 'desc');
   const [singlesOpen, setSinglesOpen] = useState(false);
   const { multi, singles } = useMemo(() => splitSingles(workflows), [workflows]);
@@ -468,116 +542,307 @@ export function WorkflowsTable({
   );
   const sortedUnits = useSortedRows(units, sort, unitValue);
   const sortedSingles = useSortedRows(singles, sort, sortValue);
+  const items = useMemo<DisplayItem[]>(() => {
+    const out: DisplayItem[] = [];
+    for (const u of sortedUnits) {
+      if (u.kind === 'workflow') {
+        out.push({ kind: 'workflow', w: u.w, nested: false });
+        continue;
+      }
+      out.push({ kind: 'group', ws: u.ws });
+      if (singlesOpen) for (const w of sortedSingles) out.push({ kind: 'workflow', w, nested: true });
+    }
+    return out;
+  }, [sortedUnits, sortedSingles, singlesOpen]);
+  // Back to the first page when the order or the set changes; opening
+  // the group keeps the rows already drawn.
+  const { visible, sentinelRef, showAll, hasMore, total, shown } = useInfiniteList(
+    items,
+    ROWS_PER_PAGE,
+    `${sort.key}/${sort.direction}/${workflows.length}`,
+  );
+
   const showOwner = workflows.some((w) => w.owner);
   const showSchedd = workflows.some((w) => w.schedd);
   // A column of blanks is noise: only when some workflow has a figure.
-  const showThroughput = workflows.some((w) => throughputColumn(w) !== undefined);
+  const showThroughput = workflows.some((w) => summaryGain(w) !== undefined);
   const columns = 7 + (showThroughput ? 1 : 0);
-  const row = (w: UtilWorkflow, nested = false) => (
-    <WorkflowRow
-      key={w.key}
-      w={w}
-      nested={nested}
-      hrefFor={hrefFor}
-      onOpen={onOpen}
-      onOwner={onOwner}
-      showOwner={showOwner}
-      showSchedd={showSchedd}
-      showThroughput={showThroughput}
-    />
+  const rowProps = { hrefFor, onOpen, onOwner, showOwner, showSchedd, showThroughput };
+  const toggleSingles = () => setSinglesOpen((v) => !v);
+
+  const footer = total > ROWS_PER_PAGE && (
+    <span className="text-xs text-gray-500">
+      Showing {shown.toLocaleString()} of {total.toLocaleString()} rows
+      {hasMore && (
+        <>
+          {' '}— scroll for more, or{' '}
+          <button type="button" onClick={showAll} className="text-brand-700 hover:underline">
+            show all
+          </button>
+        </>
+      )}
+    </span>
   );
+
   return (
     <section aria-labelledby="util-workflows">
       <h2 id="util-workflows" className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">
         Workflows
       </h2>
-      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table className="min-w-full text-sm">
-          <thead className="bg-gray-50 text-left text-xs text-gray-500">
-            <tr>
-              <SortableHeader label="Workflow" sortKey="name" sort={sort} onSort={setSort} />
-              <SortableHeader label="Jobs" sortKey="jobs" sort={sort} onSort={setSort} className="text-right" />
-              <SortableHeader label="Run time" sortKey="wall" sort={sort} onSort={setSort} className="text-right" />
-              <SortableHeader label="CPU cores" sortKey="cpu" sort={sort} onSort={setSort} />
-              <SortableHeader label="Peak memory" sortKey="memory" sort={sort} onSort={setSort} />
-              <SortableHeader label="Disk" sortKey="disk" sort={sort} onSort={setSort} />
-              {showThroughput && (
-                <SortableHeader label="Throughput" sortKey="throughput" sort={sort} onSort={setSort} className="text-right" />
-              )}
-              <SortableHeader label="Advice" sortKey="advice" sort={sort} onSort={setSort} />
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {sortedUnits.map((u) =>
-              u.kind === 'workflow' ? (
-                row(u.w)
+      {narrow ? (
+        <>
+          {/* No column headers to click on a phone: the order is picked
+              here instead. */}
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-gray-600">
+            <label className="flex items-center gap-1.5">
+              Sort by
+              <select
+                value={sort.key}
+                onChange={(e) => setSort({ key: e.target.value as SortKey, direction: 'desc' })}
+                className="rounded-sm border border-gray-300 bg-white px-2 py-1 text-sm"
+              >
+                {SORT_OPTIONS.filter((o) => o.key !== 'throughput' || showThroughput).map((o) => (
+                  <option key={o.key} value={o.key}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={() => setSort({ ...sort, direction: sort.direction === 'asc' ? 'desc' : 'asc' })}
+              className="rounded-sm border border-gray-300 bg-white px-2 py-1 text-sm"
+              aria-label={sort.direction === 'asc' ? 'Ascending; switch to descending' : 'Descending; switch to ascending'}
+            >
+              {sort.direction === 'asc' ? '▴' : '▾'}
+            </button>
+          </div>
+          <ul className="space-y-2" data-testid="workflow-cards">
+            {visible.map((it) =>
+              it.kind === 'group' ? (
+                <SinglesCard key="singles" ws={it.ws} open={singlesOpen} onToggle={toggleSingles} />
               ) : (
-                <SinglesRows
-                  key="singles"
-                  ws={u.ws}
-                  open={singlesOpen}
-                  onToggle={() => setSinglesOpen((v) => !v)}
-                  columns={columns}
-                  rows={sortedSingles.map((w) => row(w, true))}
-                />
+                <WorkflowCard key={it.w.key} w={it.w} nested={it.nested} {...rowProps} />
               ),
             )}
-          </tbody>
-        </table>
-      </div>
+          </ul>
+          {total > 0 && (
+            <div ref={sentinelRef} className="mt-2">
+              {footer}
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+          <table className="min-w-full text-sm">
+            <thead className="bg-gray-50 text-left text-xs text-gray-500">
+              <tr>
+                <SortableHeader label="Workflow" sortKey="name" sort={sort} onSort={setSort} />
+                <SortableHeader label="Jobs" sortKey="jobs" sort={sort} onSort={setSort} className="text-right" />
+                <SortableHeader label="Run time" sortKey="wall" sort={sort} onSort={setSort} className="text-right" />
+                <SortableHeader label="CPU cores" sortKey="cpu" sort={sort} onSort={setSort} />
+                <SortableHeader label="Peak memory" sortKey="memory" sort={sort} onSort={setSort} />
+                <SortableHeader label="Disk" sortKey="disk" sort={sort} onSort={setSort} />
+                {showThroughput && (
+                  <SortableHeader label="Throughput" sortKey="throughput" sort={sort} onSort={setSort} className="text-right" />
+                )}
+                <SortableHeader label="Advice" sortKey="advice" sort={sort} onSort={setSort} />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {visible.map((it) =>
+                it.kind === 'group' ? (
+                  <SinglesRow key="singles" ws={it.ws} open={singlesOpen} onToggle={toggleSingles} columns={columns} />
+                ) : (
+                  <WorkflowRow key={it.w.key} w={it.w} nested={it.nested} {...rowProps} />
+                ),
+              )}
+              {total > 0 && (
+                <tr ref={sentinelRef as unknown as React.Ref<HTMLTableRowElement>}>
+                  <td colSpan={columns} className="px-3 py-1.5">
+                    {footer}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
       <div className="mt-2">
-        <RangeStripKey />
+        <FitKey />
       </div>
     </section>
   );
 }
 
-// SinglesRows is the folded group of one-job workflows and, when open,
-// the workflows themselves.
-function SinglesRows({
+function singlesTotals(ws: UtilWorkflowSummary[]) {
+  return {
+    wall: ws.reduce((a, w) => a + w.wall_hours, 0),
+    advice: ws.reduce((a, w) => a + actionable(w), 0),
+  };
+}
+
+function AdviceBadge({ n }: { n: number }) {
+  return n > 0 ? (
+    <span className="inline-flex whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 tabular-nums">
+      {n} {n === 1 ? 'suggestion' : 'suggestions'}
+    </span>
+  ) : (
+    <span className="text-xs text-gray-400">fits</span>
+  );
+}
+
+// SinglesRow is the folded group of one-job workflows; its members are
+// rows of the same list, drawn after it when it is open.
+function SinglesRow({
   ws,
   open,
   onToggle,
   columns,
-  rows,
 }: {
-  ws: UtilWorkflow[];
+  ws: UtilWorkflowSummary[];
   open: boolean;
   onToggle: () => void;
   columns: number;
-  rows: React.ReactNode[];
 }) {
-  const wall = ws.reduce((a, w) => a + w.wall_hours, 0);
-  const advice = ws.reduce((a, w) => a + actionable(w), 0);
+  const { wall, advice } = singlesTotals(ws);
   return (
-    <>
-      <tr className="bg-gray-50/60" data-testid="singles-group">
-        <td className="px-3 py-2">
-          <button
-            type="button"
-            onClick={onToggle}
-            aria-expanded={open}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap font-medium text-gray-900 hover:underline"
-          >
-            <span aria-hidden className="inline-block w-3 text-gray-500">
-              {open ? '▾' : '▸'}
-            </span>
-            {ws.length.toLocaleString()} single-job workflows
-          </button>
-        </td>
-        <td className="px-3 py-2 text-right tabular-nums">{ws.length.toLocaleString()}</td>
-        <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{formatHours(wall)}</td>
-        <td colSpan={columns - 4} />
-        <td className="px-3 py-2">
-          {advice > 0 && (
-            <span className="inline-flex whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 tabular-nums">
-              {advice} {advice === 1 ? 'suggestion' : 'suggestions'}
-            </span>
-          )}
-        </td>
-      </tr>
-      {open && rows}
-    </>
+    <tr className="bg-gray-50/60" data-testid="singles-group">
+      <td className="px-3 py-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          className="inline-flex items-center gap-1.5 whitespace-nowrap font-medium text-gray-900 hover:underline"
+        >
+          <span aria-hidden className="inline-block w-3 text-gray-500">
+            {open ? '▾' : '▸'}
+          </span>
+          {ws.length.toLocaleString()} single-job workflows
+        </button>
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">{ws.length.toLocaleString()}</td>
+      <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{formatHours(wall)}</td>
+      <td colSpan={columns - 4} />
+      <td className="px-3 py-2">{advice > 0 && <AdviceBadge n={advice} />}</td>
+    </tr>
+  );
+}
+
+function SinglesCard({ ws, open, onToggle }: { ws: UtilWorkflowSummary[]; open: boolean; onToggle: () => void }) {
+  const { wall, advice } = singlesTotals(ws);
+  return (
+    <li className="rounded-lg border border-gray-200 bg-gray-50 p-3" data-testid="singles-group">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 text-left font-medium text-gray-900"
+      >
+        <span aria-hidden className="inline-block w-3 text-gray-500">
+          {open ? '▾' : '▸'}
+        </span>
+        {ws.length.toLocaleString()} single-job workflows
+      </button>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600 tabular-nums">
+        <span>{ws.length.toLocaleString()} jobs</span>
+        <span>{formatHours(wall)}</span>
+        {advice > 0 && <AdviceBadge n={advice} />}
+      </div>
+    </li>
+  );
+}
+
+// WorkflowCard is a workflow's row on a phone: the same facts stacked,
+// the three range strips each with its label.
+function WorkflowCard({
+  w,
+  nested,
+  hrefFor,
+  onOpen,
+  onOwner,
+  showOwner,
+  showSchedd,
+}: {
+  w: UtilWorkflowSummary;
+  nested: boolean;
+  hrefFor: (key: string) => string;
+  onOpen: (key: string) => void;
+  onOwner?: (owner: string) => void;
+  showOwner: boolean;
+  showSchedd: boolean;
+  showThroughput: boolean;
+}) {
+  const n = actionable(w);
+  const g = summaryGain(w);
+  return (
+    <li
+      className={`rounded-lg border border-gray-200 bg-white p-3 ${nested ? 'ml-4' : ''}`}
+      data-testid="workflow-card"
+    >
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Link href={hrefFor(w.key)} className="font-medium text-gray-900 hover:underline" onClick={(e) => {
+          e.preventDefault();
+          onOpen(w.key);
+        }}>
+          {w.name}
+        </Link>
+        {w.is_dag && (
+          <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-800">DAG</span>
+        )}
+        <span className="ml-auto">
+          <AdviceBadge n={n} />
+        </span>
+      </div>
+      <div className="mt-0.5 flex flex-wrap items-center gap-1 text-xs text-gray-500">
+        <span className="break-all font-mono">{w.executable}</span>
+        {showOwner && w.owner && (
+          <>
+            <span aria-hidden>·</span>
+            {onOwner ? (
+              <button
+                type="button"
+                onClick={() => onOwner(w.owner!)}
+                className="rounded-full bg-indigo-100 px-2 py-0.5 font-medium text-indigo-800"
+                data-testid="owner-pill"
+              >
+                {w.owner}
+              </button>
+            ) : (
+              <span>{w.owner}</span>
+            )}
+          </>
+        )}
+        {showSchedd && w.schedd && (
+          <>
+            <span aria-hidden>·</span>
+            <span>{w.schedd}</span>
+          </>
+        )}
+      </div>
+      <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-sm text-gray-700 tabular-nums">
+        <span>
+          {w.jobs.toLocaleString()} {w.jobs === 1 ? 'job' : 'jobs'}
+          {w.failed > 0 && <span className="text-xs text-red-700"> · {w.failed.toLocaleString()} failed</span>}
+        </span>
+        <span>{formatHours(w.wall_hours)}</span>
+        {g !== undefined && <span>{g >= 1 ? `up to ${formatGain(g)} at once` : `${formatGain(g)} at once`}</span>}
+      </div>
+      <dl className="mt-2 grid grid-cols-[5.5rem_1fr] items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+        <dt>CPU cores</dt>
+        <dd>
+          <FitMeter label="CPU cores" fraction={w.used.cpu} request={w.request.cpus === null ? null : `${formatCores(w.request.cpus)} ${w.request.cpus === 1 ? 'core' : 'cores'}`} adaptive={w.request.adaptive?.includes('cpus')} />
+        </dd>
+        <dt>Peak memory</dt>
+        <dd>
+          <FitMeter label="Peak memory" fraction={w.used.memory} request={w.request.memory_mib === null ? null : formatMiB(w.request.memory_mib)} adaptive={w.request.adaptive?.includes('memory')} />
+        </dd>
+        <dt>Disk</dt>
+        <dd>
+          <FitMeter label="Disk" fraction={w.used.disk} request={w.request.disk_kib === null ? null : formatKiB(w.request.disk_kib)} adaptive={w.request.adaptive?.includes('disk')} />
+        </dd>
+      </dl>
+    </li>
   );
 }
 
@@ -591,7 +856,7 @@ function WorkflowRow({
   showSchedd,
   showThroughput,
 }: {
-  w: UtilWorkflow;
+  w: UtilWorkflowSummary;
   nested: boolean;
   hrefFor: (key: string) => string;
   onOpen: (key: string) => void;
@@ -674,18 +939,18 @@ function WorkflowRow({
       </td>
       <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{formatHours(w.wall_hours)}</td>
       <td className="px-3 py-2">
-        <RangeStrip request={w.cpu.request} dist={w.cpu.cores_used} format={formatCores} label="CPU cores" />
+        <FitMeter label="CPU cores" fraction={w.used.cpu} request={w.request.cpus === null ? null : `${formatCores(w.request.cpus)} ${w.request.cpus === 1 ? 'core' : 'cores'}`} adaptive={w.request.adaptive?.includes('cpus')} />
       </td>
       <td className="px-3 py-2">
-        <RangeStrip request={w.memory.request} dist={w.memory.peak_mib} format={formatMiB} label="Peak memory" />
+        <FitMeter label="Peak memory" fraction={w.used.memory} request={w.request.memory_mib === null ? null : formatMiB(w.request.memory_mib)} adaptive={w.request.adaptive?.includes('memory')} />
       </td>
       <td className="px-3 py-2">
-        <RangeStrip request={w.disk.request} dist={w.disk.used_kib} format={formatKiB} label="Disk" />
+        <FitMeter label="Disk" fraction={w.used.disk} request={w.request.disk_kib === null ? null : formatKiB(w.request.disk_kib)} adaptive={w.request.adaptive?.includes('disk')} />
       </td>
       {showThroughput && (
         <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap" data-testid="throughput-cell">
           {(() => {
-            const g = throughputColumn(w);
+            const g = summaryGain(w);
             if (g === undefined) return null;
             return g >= 1 ? `up to ${formatGain(g)}` : formatGain(g);
           })()}
@@ -931,7 +1196,7 @@ export function GpuSection({
             unit="plain"
             markers={
               cpuRequest
-                ? [{ value: cpuRequest.typical, label: `requested ${formatCores(cpuRequest.typical)}`, kind: 'request' }]
+                ? [{ value: cpuRequest.typical, label: requestMarkerLabel(formatCores(cpuRequest.typical), cpuRequest.adaptive), kind: 'request' }]
                 : []
             }
             note="A GPU job that keeps every requested core busy may be holding its GPU back."
@@ -957,6 +1222,7 @@ export function WorkflowDetail({
   days,
   backHref,
   jobsQuery,
+  waitingJobs = null,
 }: {
   workflow: UtilWorkflow;
   days: number;
@@ -964,6 +1230,8 @@ export function WorkflowDetail({
   // The analysis's parameters, for the list of this workflow's jobs.
   // Without them there is no list (the component tests render without).
   jobsQuery?: JobsQuery;
+  // The workflow's jobs still in the queue, for applying its advice.
+  waitingJobs?: number | null;
 }) {
   const [focus, setFocus] = useState<JobFocus | null>(null);
   // A bar picks its range of jobs in the list below, when there is one.
@@ -976,7 +1244,7 @@ export function WorkflowDetail({
   const memReq = w.memory.request;
   const rec = w.memory_curve.find((p) => p.is_recommended);
   const memMarkers: ChartMarker[] = [];
-  if (memReq) memMarkers.push({ value: memReq.typical, label: `requested ${formatMiB(memReq.typical)}`, kind: 'request' });
+  if (memReq) memMarkers.push({ value: memReq.typical, label: requestMarkerLabel(formatMiB(memReq.typical), memReq.adaptive), kind: 'request' });
   // The suggestion only earns a marker when it differs from what was
   // asked for; a second line on top of the first says nothing.
   if (rec && (!memReq || rec.request_mib !== memReq.typical)) {
@@ -985,6 +1253,15 @@ export function WorkflowDetail({
   if (rec?.retry_mib) memMarkers.push({ value: rec.retry_mib, label: `retry ${formatMiB(rec.retry_mib)}`, kind: 'retry' });
 
   const tpCard = throughputAdviceId(w);
+  // A suggestion about a request that is a formula says so: "request
+  // 3 GB" reads differently against "starts at 2 GB, grows".
+  const adviceContext = (a: UtilAdvice): string | undefined => {
+    const req = a.resource === 'memory' ? w.memory.request : a.resource === 'cpu' ? w.cpu.request : a.resource === 'disk' ? w.disk.request : null;
+    if (!req?.adaptive) return undefined;
+    const kind = a.resource === 'cpu' ? 'cpus' : (a.resource as 'memory' | 'disk');
+    const now = kind === 'memory' ? formatMiB(req.typical) : kind === 'disk' ? formatKiB(req.typical) : formatCores(req.typical);
+    return `The ${kind === 'cpus' ? 'CPU' : kind} request today ${requestPhrase(kind, now, true)}.`;
+  };
   // For a workflow of GPU jobs only, the GPU section already shows the
   // cores histogram; the CPU section keeps only what it adds.
   const cpuShownWithGpu = !!(w.gpu?.cores_used_while_gpu && w.gpu.jobs === w.jobs);
@@ -1045,6 +1322,8 @@ export function WorkflowDetail({
 
       <ThroughputLead throughput={w.throughput} />
 
+      {jobsQuery && <ApplyPanel workflow={w} waitingJobs={waitingJobs} query={jobsQuery} />}
+
       <div className="grid grid-cols-[repeat(auto-fit,minmax(13rem,1fr))] gap-3">
         {sortResources(w.resources).map((r) => (
           <ResourceCard key={r.resource} summary={r} jobs={w.jobs} />
@@ -1058,7 +1337,12 @@ export function WorkflowDetail({
           </h3>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
             {w.advice.map((a, i) => (
-              <AdviceCard key={`${a.id}-${i}`} advice={a} throughput={a.id === tpCard ? w.throughput : null} />
+              <AdviceCard
+                key={`${a.id}-${i}`}
+                advice={a}
+                throughput={a.id === tpCard ? w.throughput : null}
+                context={adviceContext(a)}
+              />
             ))}
           </div>
         </section>
@@ -1091,9 +1375,11 @@ export function WorkflowDetail({
               shadeFrom={rec && rec.retry_fraction > 0 ? rec.request_mib : undefined}
               shadeLabel={rec?.retry_mib ? `would rerun at ${formatMiB(rec.retry_mib)}` : 'would rerun'}
               note={
-                memReq && memReq.distinct > 1
-                  ? `Requests ranged from ${formatMiB(memReq.min)} to ${formatMiB(memReq.max)}; the line is the most common.`
-                  : undefined
+                memReq?.adaptive
+                  ? `The memory request ${requestPhrase('memory', formatMiB(memReq.typical), true)}; the line is where it starts.`
+                  : memReq && memReq.distinct > 1
+                    ? `Requests ranged from ${formatMiB(memReq.min)} to ${formatMiB(memReq.max)}; the line is the most common.`
+                    : undefined
               }
             />
             {w.memory_curve.length > 0 ? (
@@ -1146,7 +1432,7 @@ export function WorkflowDetail({
                 onBin={pick('cores', 'CPU cores busy', formatCores)}
                 selected={selected('cores')}
                 unit="plain"
-                markers={cpuReq ? [{ value: cpuReq.typical, label: `requested ${formatCores(cpuReq.typical)}`, kind: 'request' }] : []}
+                markers={cpuReq ? [{ value: cpuReq.typical, label: requestMarkerLabel(formatCores(cpuReq.typical), cpuReq.adaptive), kind: 'request' }] : []}
               />
             )}
             <TrendChart
@@ -1175,7 +1461,7 @@ export function WorkflowDetail({
                 onBin={pick('disk', 'disk use', formatKiB)}
                 selected={selected('disk')}
                 unit="kib"
-                markers={diskReq ? [{ value: diskReq.typical, label: `requested ${formatKiB(diskReq.typical)}`, kind: 'request' }] : []}
+                markers={diskReq ? [{ value: diskReq.typical, label: requestMarkerLabel(formatKiB(diskReq.typical), diskReq.adaptive), kind: 'request' }] : []}
               />
             )}
           </div>

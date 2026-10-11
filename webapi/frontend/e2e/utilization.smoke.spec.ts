@@ -223,3 +223,86 @@ test('clicking a job on the run-time scatter finds it in the job list', async ({
   await expect(row).toBeInViewport();
   await expect(fig.getByTestId('scatter-picked')).toHaveCount(1);
 });
+
+// On a phone: nothing scrolls sideways, chart text stays readable, and
+// the workflows are cards.
+test.describe('on a phone', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  // The page scrolls inside the app shell, so both the document and the
+  // shell's scroll container are checked.
+  const sideways = (page: Page) =>
+    page.evaluate(() =>
+      [document.documentElement, ...document.querySelectorAll<HTMLElement>('.overflow-auto')]
+        .filter((e) => !e.closest('table') && !e.closest('[data-testid="workflow-jobs"]'))
+        .some((e) => e.scrollWidth > e.clientWidth + 1),
+    );
+
+  // The smallest chart text as drawn: its size in viewBox units times the
+  // SVG's scale.
+  const smallestChartText = (page: Page) =>
+    page.evaluate(() => {
+      let min = Infinity;
+      for (const svg of document.querySelectorAll<SVGSVGElement>('figure svg[role="img"]')) {
+        const vb = svg.viewBox.baseVal;
+        if (!vb?.width) continue;
+        const scale = svg.getBoundingClientRect().width / vb.width;
+        for (const t of svg.querySelectorAll('text')) {
+          const fs = parseFloat(getComputedStyle(t).fontSize);
+          if (fs) min = Math.min(min, fs * scale);
+        }
+      }
+      return min;
+    });
+
+  test('the overview fits the screen and lists workflows as cards', async ({ page }) => {
+    await installUtilization(page);
+    await page.goto('/utilization');
+    await expect(page.getByTestId('workflow-card').first()).toBeVisible();
+    await expect(page.locator('table')).toHaveCount(0);
+    expect(await sideways(page)).toBe(false);
+  });
+
+  test("a workflow's charts keep their text readable", async ({ page }) => {
+    await installUtilization(page);
+    await page.goto('/utilization?w=wf-assemble');
+    await expect(page.locator('figure', { hasText: 'Peak memory per job' }).first()).toBeVisible();
+    expect(await sideways(page)).toBe(false);
+    expect(await smallestChartText(page)).toBeGreaterThanOrEqual(10);
+  });
+});
+
+test('suggestions apply to waiting jobs after a review that lists every change', async ({ page }) => {
+  await installUtilization(page);
+  let body: unknown;
+  await page.route(
+    (u) => u.pathname === '/api/v1/utilization/apply',
+    async (route) => {
+      body = route.request().postDataJSON();
+      await route.fulfill({
+        json: {
+          edited: 118,
+          set: { RequestMemory: 1792, RequestDisk: 3 * 1024 * 1024 },
+          declined: [],
+          skipped: [{ job: '81291.4', reason: 'its memory request is a formula' }],
+          failed: [],
+        },
+      });
+    },
+  );
+  await page.goto('/utilization?w=wf-blast');
+  const panel = page.getByTestId('apply-panel');
+  await expect(panel).toContainText('120 jobs of this workflow are still waiting');
+  await panel.getByRole('button', { name: 'Review the changes' }).click();
+  const changes = panel.getByTestId('apply-changes');
+  await expect(changes).toContainText('request_memory');
+  await expect(changes).toContainText('1792 MB');
+  await expect(changes).toContainText('request_disk');
+  await panel.getByRole('button', { name: 'Apply to 120 waiting jobs' }).click();
+  const result = page.getByTestId('apply-result');
+  await expect(result).toContainText('Changed 118 waiting jobs: now requesting memory 1.8 GB, disk 3 GB.');
+  await expect(result).toContainText('1 job — its memory request is a formula');
+  // Ids, not values: the server writes what its own advice says.
+  expect(body).toMatchObject({ w: 'wf-blast', advice: ['memory-retry', 'disk-lower'], days: 7 });
+  expect(JSON.stringify(body)).not.toContain('1792');
+});

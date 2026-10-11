@@ -9,7 +9,11 @@ import type {
   Session,
   ClassAd,
 } from '../../src/lib/api';
-import { utilizationFixture, utilizationJobsFixture } from '../../src/lib/utilization.fixture';
+import {
+  utilizationFixture,
+  utilizationJobsFixture,
+  utilizationWorkflowFixture,
+} from '../../src/lib/utilization.fixture';
 import type { UtilJobSort } from '../../src/lib/utilization';
 import type { MetricsResponse } from '../../src/lib/metrics';
 import type { DrainEstimates } from '../../src/lib/drain';
@@ -392,6 +396,12 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
         headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
         body: activityStreamFixture(),
       });
+      return;
+    }
+    // One workflow in full, as the page fetches it when the workflow opens.
+    if (path === '/api/v1/utilization/workflow') {
+      const body = utilizationWorkflowFixture(new URL(route.request().url()).searchParams.get('w') ?? '');
+      await route.fulfill(body ? { json: body } : { status: 404, json: { error: 'Not Found', message: 'no such workflow' } });
       return;
     }
     // A workflow's jobs, paged and sorted the way the server does it.
