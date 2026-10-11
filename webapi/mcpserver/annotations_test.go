@@ -48,6 +48,8 @@ func TestToolAnnotationPolicyCoversConditionalTools(t *testing.T) {
 		"interactive_session_start", "interactive_session_exec",
 		"interactive_session_list", "interactive_session_stop",
 		"tail_job_output", "exec_in_job",
+		// collector
+		"query_pool",
 	}
 	for _, name := range conditional {
 		if annotationsFor(name) == nil {
@@ -90,7 +92,7 @@ func TestReadOnlyQueryAnnotations(t *testing.T) {
 		"get_job_stdout", "get_job_stderr", "get_job_output",
 		"query_job_archive", "query_job_epochs", "query_transfer_history",
 		"query_history_db", "query_jobs_as_of", "aggregate_jobs",
-		"doc_search", "get_version",
+		"query_pool", "doc_search", "get_version",
 	}
 	for _, name := range readOnly {
 		ann := annotationsFor(name)

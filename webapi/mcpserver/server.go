@@ -43,7 +43,10 @@ type Server struct {
 	// exists -- see getSchedd.
 	scheddProvider func() *htcondor.Schedd
 	collector      *htcondor.Collector
-	credd          htcondor.CreddClient
+	// poolAds, when set, replaces the collector as query_pool's source.
+	// Tests only; see poolSource.
+	poolAds poolAdSource
+	credd   htcondor.CreddClient
 	// creddProvider, when set, is consulted for every credd use instead
 	// of the snapshot above. An access point often discovers its credd
 	// after this server is built, and a snapshot taken then stays nil

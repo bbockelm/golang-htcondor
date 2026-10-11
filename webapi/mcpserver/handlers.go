@@ -161,6 +161,7 @@ var readOnlyMCPTools = map[string]bool{
 	"list_access_points":       true, // multi-AP mode
 	"get_job":                  true,
 	"analyze_job_match":        true,
+	"query_pool":               true,
 	"query_job_archive":        true,
 	"query_job_epochs":         true,
 	"query_transfer_history":   true,
@@ -894,6 +895,12 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	// listing the caller has to read and summarize itself.
 	tools = append(tools, analyzeIssuesTool())
 
+	// The pool as condor_status shows it. Offered only with a collector
+	// to ask: without one every call would fail.
+	if s.poolSource() != nil {
+		tools = append(tools, queryPoolTool())
+	}
+
 	// Workflows. A DAG is submitted and tracked differently enough from
 	// a job that it gets its own pair rather than more arguments on
 	// submit_job.
@@ -1016,6 +1023,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolGetJob(ctx, request.Arguments)
 	case "analyze_job_match":
 		result, err = s.toolAnalyzeJobMatch(ctx, request.Arguments)
+	case "query_pool":
+		result, err = s.toolQueryPool(ctx, request.Arguments)
 	case "remove_job":
 		result, err = s.toolRemoveJob(ctx, request.Arguments)
 	case "remove_jobs":

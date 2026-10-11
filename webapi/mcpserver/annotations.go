@@ -66,6 +66,7 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	"query_jobs":               readOnlyAnn(true),
 	"get_job":                  readOnlyAnn(true),
 	"analyze_job_match":        readOnlyAnn(true),
+	"query_pool":               readOnlyAnn(true),
 	"get_job_stdout":           readOnlyAnn(true),
 	"get_job_stderr":           readOnlyAnn(true),
 	"get_job_output":           readOnlyAnn(true),
