@@ -40,14 +40,14 @@ type apVerdicts struct {
 	m  map[string]apVerdict
 }
 
-func (v *apVerdicts) get(key string, now time.Time) (error, bool) {
+func (v *apVerdicts) get(key string, now time.Time) (bool, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	e, ok := v.m[key]
 	if !ok || now.After(e.expires) {
-		return nil, false
+		return false, nil
 	}
-	return e.err, true
+	return true, e.err
 }
 
 func (v *apVerdicts) put(key string, err error, now time.Time) {
@@ -79,7 +79,7 @@ func (h *Handler) admitToAP(ctx context.Context, m apregistry.Member, user strin
 	}
 	key := strings.ToLower(m.Name) + "\x00" + user
 	now := time.Now()
-	if err, ok := h.apVerdicts.get(key, now); ok {
+	if ok, err := h.apVerdicts.get(key, now); ok {
 		return err
 	}
 	var refusal error

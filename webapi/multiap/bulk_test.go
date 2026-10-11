@@ -308,7 +308,7 @@ func TestFanOutNeedsAConnectedJobsStream(t *testing.T) {
 	} {
 		hub := hubDB(t)
 		hub.PutSourceAd("ap1", row)
-		reg := newFakeRegistry("ap1").WithSchedds(func(n string) string { return "<10.0.0.1:9618>" })
+		reg := newFakeRegistry("ap1").WithSchedds(func(string) string { return "<10.0.0.1:9618>" })
 		s := newService(t, hub, reg)
 		if r := fanOutAP1(t, s, "true"); r.Status == BulkSkipped {
 			t.Errorf("row %q: skipped", row)
@@ -344,7 +344,7 @@ func TestFanOutOutlivesTheCaller(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sawCancel := false
 	rep, err := s.FanOut(ctx, BulkRequest{User: "alice@d", Owner: "alice", Constraint: "true"},
-		func(legCtx context.Context, m apregistry.Member) (BulkOutcome, error) {
+		func(legCtx context.Context, _ apregistry.Member) (BulkOutcome, error) {
 			cancel()
 			time.Sleep(10 * time.Millisecond)
 			sawCancel = legCtx.Err() != nil

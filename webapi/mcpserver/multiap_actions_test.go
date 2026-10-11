@@ -332,7 +332,7 @@ func TestMultiAPMCPScheddMustAgree(t *testing.T) {
 // every routed tool call.
 func TestMultiAPMCPRoutedChecks(t *testing.T) {
 	a := newMultiAPActionMCP(t, nil)
-	a.srv.multi.Admit = func(_ context.Context, m apregistry.Member, user string) error {
+	a.srv.multi.Admit = func(_ context.Context, m apregistry.Member, _ string) error {
 		if m.Name == mAP2 {
 			return errors.New("disabled there")
 		}

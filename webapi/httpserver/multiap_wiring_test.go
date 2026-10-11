@@ -146,7 +146,7 @@ func TestMultiAPShareMintCarriesTheAP(t *testing.T) {
 	aps := newActionAPs(t, ap1, ap2)
 	srv := newActionServer(t, aps, nil)
 	var askedOf string
-	srv.jobQueryOverride = func(ctx context.Context, constraint string, _ *htcondor.QueryOptions) ([]*classad.ClassAd, error) {
+	srv.jobQueryOverride = func(ctx context.Context, _ string, _ *htcondor.QueryOptions) ([]*classad.ClassAd, error) {
 		askedOf = routedSchedd(ctx)
 		ad := classad.New()
 		_ = ad.Set("ClusterId", 1)

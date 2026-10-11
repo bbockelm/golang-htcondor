@@ -137,8 +137,8 @@ func (s *Service) Route(ctx context.Context, user string, id jobid.ID) (apregist
 	return m, nil
 }
 
-// ReasonDenied: the AP's own records refuse the caller (an account
-// disabled there).
+// ReasonDenied is the reason when the AP's own records refuse the caller
+// (an account disabled there).
 const ReasonDenied = "access_point_denied"
 
 // AdmitTo asks the AP's own verdict on user (Service.Admit); nil when
