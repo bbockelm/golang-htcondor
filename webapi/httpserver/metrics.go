@@ -338,6 +338,7 @@ var routePatterns = []routePattern{
 	// label since the paths under /admin/ are operator-only and
 	// scaling per-route adds little).
 	{re: regexp.MustCompile(`^/api/v1/collector/.*$`), template: "/api/v1/collector/*"},
+	{exact: "/api/v1/pool/drain-estimates", template: "/api/v1/pool/drain-estimates"},
 	{exact: "/api/v1/ping", template: "/api/v1/ping"},
 	{exact: "/api/v1/schedd/ping", template: "/api/v1/schedd/ping"},
 	{exact: "/api/v1/share/output", template: "/api/v1/share/output"},

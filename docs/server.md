@@ -1280,6 +1280,10 @@ at `/openapi.json`.
 - `GET /api/v1/jobs/{id}/runtime-estimate` — how long the job is likely
   to run; see [Runtime estimates](#runtime-estimates)
 
+**Pool** (authenticated; every signed-in user)
+- `GET /api/v1/pool/drain-estimates` — when each execute node would be
+  empty if drained now; see [Drain estimates](#drain-estimates)
+
 **Templates** (browser-submission UI)
 - `GET /api/v1/templates` — list
 - `POST /api/v1/templates` — save a custom template
@@ -1534,6 +1538,75 @@ running record of itself, `scored_total{level}` and
 `within_2x_total{level}`: every completed job is first scored against the
 estimate it would have got when it was submitted, so
 `within_2x_total / scored_total` is live accuracy at submit.
+
+### Drain estimates
+
+`GET /api/v1/pool/drain-estimates` answers, for every execute node that is
+running jobs or draining, "if this node were drained now, when would it be
+empty?" A drain lets each job run until it finishes or its retirement limit
+runs out, whichever comes first, then evicts it. The web UI's Pool page
+shows it as the "Empty if drained now" column and in its summary cards.
+
+Two numbers go into each job's answer:
+
+- **Its retirement deadline**, known for every job: the startd publishes
+  `RetirementTimeRemaining` on each claimed slot, counted from the ad's
+  `MyCurrentTime`. A job with a minute or less left (a 30-second limit, or
+  one that has already run out — backfill slots have none) is counted in
+  `evicted_on_drain` and leaves at its deadline.
+- **When it would finish**, known only for jobs submitted from this access
+  point (matched by the schedd name in the slot's `GlobalJobId`), from the
+  [runtime estimates](#runtime-estimates). On a shared pool most jobs come
+  from elsewhere and have none.
+
+So a node whose jobs all have a known end gets `likely_empty_seconds`; one
+that also runs jobs nobody can estimate gets `at_least_seconds` (the
+estimated part) and `unknown_up_to_seconds` (the latest retirement deadline
+among the rest). `at_most_seconds` is the startd's own
+`ExpectedMachineGracefulDrainingCompletion` when it publishes one, else the
+latest deadline. `exceeded` counts jobs running longer than comparable jobs
+have. With runtime estimates off (`HTTP_API_RUNTIME_ESTIMATE_INTERVAL=0`, or
+no mirror), the response has the same shape with `estimates_available:
+false` and the retirement bounds alone.
+
+```json
+{
+  "generated_at": "2026-10-11T19:10:00Z",
+  "age_seconds": 12,
+  "stale": false,
+  "estimates_available": true,
+  "access_point": "ap2001.chtc.wisc.edu",
+  "summary": {"machines": 1, "jobs_running": 4, "jobs_estimated": 2, "jobs_from_this_ap": 2,
+              "cores_freeing_next_hour": 8, "draining_nodes": 0, "draining_likely_empty_within_2h": 0},
+  "machines": [{
+    "machine": "e2231.chtc.wisc.edu", "draining": false,
+    "jobs_total": 4, "jobs_estimated": 2, "jobs_from_this_ap": 2,
+    "jobs_unknown_end": 2, "jobs_unknown_from_other_aps": 2,
+    "likely_empty_seconds": 5400, "likely_empty_at": "2026-10-11T20:40:00Z",
+    "at_least_seconds": 5400, "at_most_seconds": 259200, "at_most_at": "2026-10-14T19:10:00Z",
+    "unknown_up_to_seconds": 233000, "evicted_on_drain": 0, "exceeded": 0,
+    "expected_ends": [{"seconds": 2700, "usually_by_seconds": 5400, "cpus": 4},
+                      {"seconds": 5400, "usually_by_seconds": 8100, "cpus": 4}]
+  }]
+}
+```
+
+`?machine=NAME` answers for one node and adds `slots`, one per running job:
+`name`, `owner` (`RemoteOwner`), `submitted_from` (the schedd in its
+`GlobalJobId`), `from_this_ap`, `running_seconds`, `expected_end` and
+`usually_by` (about 90% of comparable jobs are done by then) when estimated,
+`exceeded`, `retirement_deadline` and `evicted_on_drain`. Without it the
+slots are left out, since a large pool has one per running job.
+
+The answer covers every user's jobs and every signed-in user may read it,
+so it is not computed as any of them: one computation, run as this daemon,
+reads the claimed slots from the collector and this access point's running
+jobs (`JobStatus == 2`, from the htcondordb mirror when there is one, else
+one schedd query), and is served to everyone for a minute. A request only
+waits for that answer. If a refresh fails, the last good answer is served
+with `stale: true` and an `error`; if the running jobs cannot be read, the
+answer has the retirement bounds and an `error` saying the estimates are
+missing. Not available in multi-AP mode.
 
 ## Example calls
 

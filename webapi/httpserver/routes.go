@@ -281,6 +281,8 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/collector/pool-summary", cors(h.requireCondorScope(http.HandlerFunc(h.handlePoolSummary)))) // aggregated /pool overview (more specific than the dispatcher below)
 	mux.Handle("/api/v1/collector/watch", cors(h.requireCondorScope(http.HandlerFunc(h.handleCollectorWatch))))     // SSE ad-change stream (more specific than the dispatcher below)
 	mux.Handle("/api/v1/collector/", h.requireCondorScope(http.HandlerFunc(h.handleCollectorPath)))                 // Pattern with trailing slash catches /api/v1/collector/* paths
+	// When each execute node would be empty if drained now (pool_drain.go).
+	mux.Handle("/api/v1/pool/drain-estimates", cors(h.requireCondorScope(http.HandlerFunc(h.handlePoolDrainEstimates))))
 
 	// htcondordb mirror status (admin-gated inside the handler). The
 	// data is on /readyz and /metrics too, but both of those answer a
