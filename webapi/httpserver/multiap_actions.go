@@ -251,6 +251,12 @@ func (h *Handler) handleMultiJobByID(w http.ResponseWriter, r *http.Request, par
 // apSuperusers holds each member's QUEUE_SUPER_USERS, read from that
 // member. Cross-user power in multi-AP mode is per AP: being a queue
 // superuser on one AP must not reach the jobs of any other.
+//
+// One policy, and one polling goroutine, per member ever seen. Members
+// are never removed from the registry (membership is sticky; the hub,
+// not this server, retires APs), so this is bounded by the APs that have
+// ever matched HTTP_API_SCHEDD_CONSTRAINT; a policy for an AP that has
+// gone away polls it every refresh interval and keeps its last answer.
 type apSuperusers struct {
 	reg       multiap.Registry
 	uidDomain string

@@ -219,6 +219,13 @@ func NewManager(scheddGlobalRate, scheddPerUserRate, collectorGlobalRate, collec
 // never spends another's. That is what a server fronting many access
 // points needs: one shared budget makes a busy AP look like a hot user
 // on every other AP, and starves them.
+//
+// Partitions are never removed. That is bounded by what creates them: a
+// server keys them by its access points' names, and its AP registry only
+// ever holds the APs that have matched its constraint (it keeps them,
+// rather than forgetting an AP whose ad blinked out). Each partition's
+// per-user map grows with its users exactly as the shared limiter's
+// does; Reset or ResetAll clears them.
 func (m *Manager) scheddPartition(key string) *Limiter {
 	if key == "" {
 		return m.scheddLimiter
