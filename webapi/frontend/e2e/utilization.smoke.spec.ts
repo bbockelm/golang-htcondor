@@ -204,3 +204,22 @@ test('picking a bar of the memory histogram marks those jobs in the list', async
   await focus.getByRole('button', { name: 'clear' }).click();
   await expect(focus).toHaveCount(0);
 });
+
+test('clicking a job on the run-time scatter finds it in the job list', async ({ page }) => {
+  await installUtilization(page);
+  await page.goto('/utilization?w=wf-assemble');
+  const fig = page.locator('figure', { hasText: 'Run time and peak memory' });
+  // A "went over memory" mark: few of them, so the click lands on one.
+  await fig.scrollIntoViewIfNeeded();
+  const mark = fig.locator('svg[role="img"] path').first();
+  const box = (await mark.boundingBox())!;
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  const focus = page.getByTestId('job-focus');
+  await expect(focus).toContainText(/Job \d+\.\d+, marked below\./);
+  const id = (await focus.innerText()).match(/Job (\d+\.\d+)/)![1];
+  const row = page.locator('[data-testid="workflow-jobs"] tr[data-marked="true"]');
+  await expect(row).toHaveCount(1);
+  await expect(row.getByRole('link')).toHaveText(id);
+  await expect(row).toBeInViewport();
+  await expect(fig.getByTestId('scatter-picked')).toHaveCount(1);
+});

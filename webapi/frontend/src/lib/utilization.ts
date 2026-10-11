@@ -90,6 +90,8 @@ export interface UtilBatchPoint {
   cpu_request: number | null; // typical
   cpu_cores_p50: number | null;
   wall_p50: number | null; // seconds
+  gpu_request: number | null; // typical request_gpus of the batch's GPU jobs; null when none requested GPUs
+  gpu_util_p50: number | null; // median fraction of requested GPUs kept busy; null when unmeasured
 }
 
 export interface UtilSample {
@@ -98,6 +100,7 @@ export interface UtilSample {
   cores: number | null;
   disk_kib: number | null;
   outcome: 'ok' | 'failed' | 'removed' | 'memory_exceeded';
+  job: string; // "cluster.proc", the same form as UtilJobRow.id
 }
 
 export interface UtilMemoryCurvePoint {
@@ -732,6 +735,9 @@ export interface JobFocus {
   lo: number; // inclusive
   hi: number; // exclusive, except for the last bin
   label: string; // "peak memory 1.5–1.8 GB"
+  // One job picked (a point of the scatter): only it is marked, and the
+  // range is its own value, so the list sorts it among its neighbours.
+  job?: string;
 }
 
 /** jobFocusValue is a job's value on the axis a focus was picked from. */
@@ -751,13 +757,14 @@ export function jobFocusValue(row: UtilJobRow, sort: JobFocus['sort']): number |
 /** inFocus says whether a job falls in a picked range. */
 export function inFocus(row: UtilJobRow, focus: JobFocus | null, closed = false): boolean {
   if (!focus) return false;
+  if (focus.job !== undefined) return row.id === focus.job;
   const v = jobFocusValue(row, focus.sort);
   if (v === null) return false;
   return v >= focus.lo && (closed ? v <= focus.hi : v < focus.hi);
 }
 
 /** jobArchiveHref links a finished job to its record. */
-export function jobArchiveHref(row: UtilJobRow): string {
+export function jobArchiveHref(row: Pick<UtilJobRow, 'id' | 'schedd'>): string {
   const id = row.schedd ? `${row.id}@${row.schedd}` : row.id;
   return `/archive/${encodeURIComponent(id)}`;
 }

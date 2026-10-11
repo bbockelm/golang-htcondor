@@ -40,6 +40,8 @@ export interface JobsQuery {
 }
 
 const PAGE_SIZE = 100;
+// How far the list will load on its own to find a job picked on a chart.
+const MAX_SEARCH_PAGES = 20;
 
 // --- Readings: one job's use against its request ---
 
@@ -244,6 +246,17 @@ export function WorkflowJobs({
     }
   }, [focus, firstIdx]);
 
+  // A picked job that has not loaded yet: keep loading pages, sorted
+  // near it by its own measure, up to a bound -- a workflow of 50,000
+  // jobs should not be pulled in whole to find one.
+  const pages = data?.pages.length ?? 0;
+  const searching = !!focus?.job && firstIdx < 0 && !!hasNextPage && pages < MAX_SEARCH_PAGES;
+  // Keyed on the page count too: a page can arrive without a render
+  // ever seeing it in flight, and the search must go on regardless.
+  useEffect(() => {
+    if (searching && !isFetchingNextPage) void fetchNextPage();
+  }, [searching, isFetchingNextPage, fetchNextPage, pages]);
+
   const notFound = error instanceof ApiError && error.status === 404;
 
   return (
@@ -263,21 +276,39 @@ export function WorkflowJobs({
           className="flex flex-wrap items-center gap-2 rounded-sm border border-blue-200 bg-blue-50 px-3 py-1.5 text-sm text-blue-900"
           data-testid="job-focus"
         >
-          <span>
-            Marking jobs with {focus.label}
-            {rows.length > 0 && ` — ${marked.toLocaleString()} among those shown`}.
-          </span>
+          {focus.job === undefined ? (
+            <span>
+              Marking jobs with {focus.label}
+              {rows.length > 0 && ` — ${marked.toLocaleString()} among those shown`}.
+            </span>
+          ) : firstIdx >= 0 ? (
+            <span>Job {focus.job}, marked below.</span>
+          ) : searching ? (
+            <span>Finding job {focus.job}…</span>
+          ) : (
+            <span>
+              Job {focus.job} is further down the list.{' '}
+              <Link href={jobArchiveHref({ id: focus.job })} className="font-medium underline">
+                Open its record
+              </Link>
+            </span>
+          )}
           <button type="button" onClick={onClearFocus} className="text-xs font-medium underline">
             clear
           </button>
         </div>
       )}
       {isLoading && <p className="text-sm text-gray-400">Loading jobs…</p>}
-      {error && (
-        <p className="text-sm text-red-700">
-          {notFound ? 'These jobs are no longer in this answer.' : `Could not load the jobs: ${error.message}`}
+      {/* A 404 means this workflow has no jobs among the ones the
+          current window and filters select -- usually because they were
+          changed after the page loaded. Not an error: say what to do. */}
+      {notFound && (
+        <p className="text-sm text-gray-600">
+          This workflow has no finished jobs in the selected window and filters. Widen the window or clear a filter
+          to list them.
         </p>
       )}
+      {error && !notFound && <p className="text-sm text-red-700">Could not load the jobs: {error.message}</p>}
       {rows.length > 0 && (
         <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
           <table className="min-w-full text-sm">
@@ -301,7 +332,10 @@ export function WorkflowJobs({
                   <tr
                     key={`${r.schedd ?? ''}/${r.id}`}
                     ref={isFirst ? firstMarked : undefined}
-                    className={mark ? 'bg-blue-50' : undefined}
+                    // One picked job stands out more than a range of them.
+                    className={
+                      mark ? (focus?.job !== undefined ? 'bg-blue-100 outline-2 -outline-offset-2 outline-blue-500' : 'bg-blue-50') : undefined
+                    }
                     data-marked={mark ? 'true' : undefined}
                   >
                     <td className="px-3 py-1.5 font-mono text-xs">

@@ -92,9 +92,40 @@ describe('WorkflowJobs', () => {
     expect(screen.getByTestId('job-focus')).toHaveTextContent(`${marked.length} among those shown`);
   });
 
-  it('says so when the workflow is not in this answer', async () => {
+  it('says what to do, not that something failed, when the workflow has no jobs here', async () => {
     vi.spyOn(api, 'utilizationJobs').mockRejectedValue(new ApiError(404, 'no such workflow'));
     renderList();
-    expect(await screen.findByText('These jobs are no longer in this answer.')).toBeInTheDocument();
+    const msg = await screen.findByText(/no finished jobs in the selected window and filters/);
+    expect(msg).toHaveTextContent('Widen the window or clear a filter');
+    expect(msg).not.toHaveClass('text-red-700');
+  });
+});
+
+describe('a job picked on the scatter', () => {
+  it('is found even when it sorts onto a later page, and marked alone', async () => {
+    const spy = stubJobs();
+    // The job with the smallest peak memory sorts last by memory, on the
+    // fourth page of 310.
+    const all = utilizationJobsFixture('wf-assemble', { sort: 'memory', order: 'asc', page_size: 500 })!.jobs;
+    const target = all.find((r) => r.memory_peak_mib !== null)!;
+    renderList({
+      sort: 'memory',
+      lo: target.memory_peak_mib!,
+      hi: target.memory_peak_mib!,
+      label: `job ${target.id}`,
+      job: target.id,
+    });
+    expect(await screen.findByText(`Job ${target.id}, marked below.`, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(spy.mock.calls.length).toBeGreaterThan(1);
+    const marked = screen.getAllByRole('row').filter((r) => r.dataset.marked === 'true');
+    expect(marked).toHaveLength(1);
+    expect(within(marked[0]).getByRole('link')).toHaveTextContent(target.id);
+  });
+
+  it('stops looking after a bound and links the record instead', async () => {
+    stubJobs();
+    renderList({ sort: 'memory', lo: 0, hi: 0, label: 'job 1.0', job: '1.0' });
+    const link = await screen.findByRole('link', { name: 'Open its record' }, { timeout: 4000 });
+    expect(link).toHaveAttribute('href', '/archive/1.0');
   });
 });

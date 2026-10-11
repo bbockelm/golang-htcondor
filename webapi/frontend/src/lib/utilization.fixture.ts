@@ -349,19 +349,30 @@ function buildWorkflow(spec: WorkflowSpec): UtilWorkflow {
         cpu_request: requestOf(js.map((j) => j.reqCpu))?.typical ?? null,
         cpu_cores_p50: c ? c.p50 : null,
         wall_p50: w ? Math.round(w.p50) : null,
+        gpu_request: js.some((j) => j.reqGpu > 0) ? requestOf(js.map((j) => j.reqGpu))!.typical : null,
+        gpu_util_p50: distribution(nonNull(js.map((j) => j.gpuUtil)))?.p50 ?? null,
       };
     });
 
   const step = Math.max(1, Math.floor(jobs.length / 400));
+  // Job ids the way jobRows numbers them: procs count up within a cluster.
+  const procs = new Map<number, number>();
+  const ids = jobs.map((j) => {
+    const proc = procs.get(j.cluster) ?? 0;
+    procs.set(j.cluster, proc + 1);
+    return `${j.cluster}.${proc}`;
+  });
   const samples: UtilSample[] = jobs
+    .map((j, i) => ({ j, id: ids[i] }))
     .filter((_, i) => i % step === 0)
     .slice(0, 400)
-    .map((j) => ({
+    .map(({ j, id }) => ({
       memory_mib: j.mem,
       wall: j.wall,
       cores: j.cores === null ? null : Math.round(j.cores * 100) / 100,
       disk_kib: j.disk,
       outcome: j.outcome,
+      job: id,
     }));
 
   const n = jobs.length;

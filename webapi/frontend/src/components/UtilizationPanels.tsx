@@ -38,6 +38,7 @@ import {
   type RankedAdvice,
   type UtilThroughput,
   type UtilGpu,
+  type UtilBatchPoint,
   type UtilRequest,
   type UtilOwner,
   type JobFocus,
@@ -874,11 +875,13 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
 export function GpuSection({
   gpu,
   cpuRequest,
+  batches = [],
   onBin,
   selected,
 }: {
   gpu: UtilGpu;
   cpuRequest: UtilRequest | null;
+  batches?: UtilBatchPoint[];
   onBin?: (b: { lo: number; hi: number }) => void;
   selected?: { lo: number; hi: number } | null;
 }) {
@@ -934,6 +937,16 @@ export function GpuSection({
             note="A GPU job that keeps every requested core busy may be holding its GPU back."
           />
         )}
+        {/* GPUs kept busy is the request times the share of it in use,
+            so both lines are counts of GPUs and share one axis. */}
+        <TrendChart
+          title="GPUs requested and kept busy, by submission"
+          batches={batches}
+          request={(b) => b.gpu_request}
+          used={(b) => (b.gpu_request !== null && b.gpu_util_p50 !== null ? b.gpu_request * b.gpu_util_p50 : null)}
+          usedLabel="median busy"
+          unit="plain"
+        />
       </div>
     </section>
   );
@@ -1055,6 +1068,7 @@ export function WorkflowDetail({
         <GpuSection
           gpu={gpu}
           cpuRequest={cpuReq}
+          batches={w.batches}
           onBin={pick('gpu', 'GPUs busy', formatPercent)}
           selected={selected('gpu')}
         />
@@ -1089,7 +1103,23 @@ export function WorkflowDetail({
                 Too few jobs to weigh one memory request against another.
               </p>
             )}
-            <OutcomeScatter samples={w.samples} request={memReq} />
+            <OutcomeScatter
+            samples={w.samples}
+            request={memReq}
+            picked={focus?.job ?? null}
+            onPick={
+              jobsQuery
+                ? (sm) =>
+                    setFocus({
+                      sort: 'memory',
+                      lo: sm.memory_mib ?? 0,
+                      hi: sm.memory_mib ?? 0,
+                      label: `job ${sm.job}`,
+                      job: sm.job,
+                    })
+                : undefined
+            }
+          />
             <TrendChart
               title="Memory requested and 95th-percentile peak, by submission"
               batches={w.batches}

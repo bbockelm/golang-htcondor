@@ -420,6 +420,8 @@ describe('GPUs', () => {
     expect(within(gpu).getByText('How busy each job kept its GPUs')).toBeInTheDocument();
     expect(within(gpu).getByText(/the GPUs had 40 GB/)).toBeInTheDocument();
     expect(within(gpu).getByText('CPU cores kept busy by GPU jobs')).toBeInTheDocument();
+    // Request against use, by submission: GPUs on both lines.
+    expect(within(gpu).getByText('GPUs requested and kept busy, by submission')).toBeInTheDocument();
   });
 
   it('says when utilization was not measured instead of drawing an empty chart', () => {
