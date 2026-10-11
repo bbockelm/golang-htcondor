@@ -1287,12 +1287,22 @@ export const api = {
     days: number;
     owned_by_me?: boolean;
     schedd?: string;
+    // A ClassAd expression ANDed with the scope and the window.
+    constraint?: string;
+    // Narrow a pool-wide answer to these users.
+    owners?: string[];
+    // How many finished jobs to analyze; the server clamps to its ceiling.
+    limit?: number;
   }): Promise<UtilizationResponse> => {
     const qs = new URLSearchParams();
     qs.set("days", String(params.days));
     if (params.owned_by_me !== undefined)
       qs.set("owned_by_me", String(params.owned_by_me));
     if (params.schedd) qs.set("schedd", params.schedd);
+    if (params.constraint) qs.set("constraint", params.constraint);
+    if (params.owners && params.owners.length > 0)
+      qs.set("owners", params.owners.join(","));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
     return fetchJSON(`${BASE}/utilization?${qs.toString()}`);
   },
 

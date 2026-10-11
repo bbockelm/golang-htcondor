@@ -18,6 +18,27 @@ export interface UtilizationResponse {
   truncated: boolean; // hit the server cap; analysis covers the most recent jobs_considered
   overall: UtilOverall;
   workflows: UtilWorkflow[]; // default order: wall_hours desc
+  limit: number; // the limit actually applied
+  max_limit: number; // the server's ceiling, so the page can offer "analyze more"
+  // Owners present in the analyzed jobs, by wall_hours desc; only when the
+  // scope can see other users.
+  owners?: UtilOwner[];
+}
+
+export interface UtilOwner {
+  owner: string;
+  jobs: number;
+  wall_hours: number;
+}
+
+export interface UtilGpu {
+  request: UtilRequest | null;
+  jobs: number; // jobs that requested >= 1 GPU
+  measured: number; // of those, jobs with a utilization measurement
+  utilization: UtilDistribution | null; // fraction of requested GPUs kept busy
+  memory_peak_mib: UtilDistribution | null; // peak GPU memory per job
+  device_memory_mib: number | null; // typical memory of the GPUs the jobs ran on, when known
+  cores_used_while_gpu: UtilDistribution | null; // CPU cores used by GPU jobs
 }
 
 export interface UtilOverall {
@@ -123,7 +144,7 @@ export interface UtilWorkflow {
     efficiency: UtilDistribution | null;
   };
   disk: { request: UtilRequest | null; used_kib: UtilDistribution | null };
-  gpu: { request: UtilRequest | null; utilization: UtilDistribution | null } | null;
+  gpu: UtilGpu | null; // null when no job requested GPUs
   memory_curve: UtilMemoryCurvePoint[];
   advice: UtilAdvice[];
   batches: UtilBatchPoint[];
@@ -329,9 +350,15 @@ export function idleHours(s: UtilResourceSummary): number | null {
 export const RESOURCE_ORDER: UtilResource[] = ['cpu', 'memory', 'disk', 'gpu'];
 
 export function sortResources(rs: UtilResourceSummary[]): UtilResourceSummary[] {
-  return [...rs].sort(
-    (a, b) => RESOURCE_ORDER.indexOf(a.resource) - RESOURCE_ORDER.indexOf(b.resource),
-  );
+  // GPUs lead whenever any job reserved one: they are the most expensive
+  // thing a job can ask for, and the scarcest.
+  const order = gpuReserved(rs) ? (['gpu', 'cpu', 'memory', 'disk'] as UtilResource[]) : RESOURCE_ORDER;
+  return [...rs].sort((a, b) => order.indexOf(a.resource) - order.indexOf(b.resource));
+}
+
+/** gpuReserved says whether any job in the summary reserved a GPU. */
+export function gpuReserved(rs: UtilResourceSummary[]): boolean {
+  return rs.some((r) => r.resource === 'gpu' && r.allocated_hours > 0);
 }
 
 // --- Advice ---
@@ -345,15 +372,20 @@ export interface RankedAdvice {
 }
 
 /**
- * compareAdvice orders advice by severity, then by how much it saves,
- * then by how sure it is. Savings in different units are compared by
- * amount: there is no fair exchange rate between a core-hour and a
- * GB-hour, and within a severity the bigger number is usually the bigger
- * waste anyway.
+ * compareAdvice orders advice by severity, then GPU-hour savings ahead
+ * of any other, then by how much it saves, then by how sure it is. Core-
+ * and GB-hour savings are compared by amount: there is no fair exchange
+ * rate between them, and within a severity the bigger number is usually
+ * the bigger waste anyway.
  */
 export function compareAdvice(a: UtilAdvice, b: UtilAdvice): number {
   const s = SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity];
   if (s !== 0) return s;
+  // A GPU-hour outranks a core-hour or a GB-hour: it is the scarcest
+  // and most expensive thing in the pool.
+  const ag = a.saves?.unit === 'gpu_hours' ? 0 : 1;
+  const bg = b.saves?.unit === 'gpu_hours' ? 0 : 1;
+  if (ag !== bg) return ag - bg;
   const as = a.saves?.amount ?? -1;
   const bs = b.saves?.amount ?? -1;
   if (as !== bs) return bs - as;
@@ -575,4 +607,65 @@ export function throughputAdviceId(w: UtilWorkflow): string | null {
 /** changesRequest says whether an advice card is one the estimate covers. */
 export function changesRequest(a: UtilAdvice): boolean {
   return (a.resource === 'memory' || a.resource === 'cpu' || a.resource === 'disk') && a.submit.length > 0;
+}
+
+// --- Filters, owners, more jobs ---
+
+/**
+ * filterWorkflows narrows the workflows the page already has by a typed
+ * substring: name, executable, owner or access point, ignoring case.
+ */
+export function filterWorkflows(ws: UtilWorkflow[], text: string): UtilWorkflow[] {
+  const q = text.trim().toLowerCase();
+  if (!q) return ws;
+  return ws.filter((w) =>
+    [w.name, w.executable, w.owner, w.schedd].some((f) => f !== undefined && f.toLowerCase().includes(q)),
+  );
+}
+
+/** parseOwners reads the comma-separated owner list from the URL. */
+export function parseOwners(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  return [...new Set(raw.split(',').map((o) => o.trim()).filter(Boolean))];
+}
+
+/** parseLimit reads the job limit from the URL; nothing usable is no limit. */
+export function parseLimit(raw: string | null | undefined): number | undefined {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+export interface MoreOption {
+  limit: number;
+  label: string;
+}
+
+/**
+ * moreOptions offers bigger analyses after a truncated one: five times
+ * the current limit when that is short of the ceiling, and the ceiling.
+ */
+export function moreOptions(limit: number, max: number): MoreOption[] {
+  if (!(max > limit)) return [];
+  const out: MoreOption[] = [];
+  const next = limit * 5;
+  if (next < max) out.push({ limit: next, label: `Analyze up to ${next.toLocaleString('en-US')} jobs` });
+  out.push({
+    limit: max,
+    label: out.length ? `all, up to ${max.toLocaleString('en-US')}` : `Analyze all, up to ${max.toLocaleString('en-US')} jobs`,
+  });
+  return out;
+}
+
+/**
+ * splitSingles separates workflows of exactly one job, which the table
+ * folds into a single row: on a busy pool there can be hundreds of
+ * one-off test runs, each a row with nothing to compare.
+ */
+export function splitSingles(ws: UtilWorkflow[]): { multi: UtilWorkflow[]; singles: UtilWorkflow[] } {
+  const multi: UtilWorkflow[] = [];
+  const singles: UtilWorkflow[] = [];
+  for (const w of ws) (w.jobs === 1 ? singles : multi).push(w);
+  // One single is not worth a group row of its own.
+  if (singles.length < 2) return { multi: ws, singles: [] };
+  return { multi, singles };
 }

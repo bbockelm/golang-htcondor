@@ -74,4 +74,23 @@ test('finished jobs appear as a workflow on the Utilization page', async ({ page
   await expect(page).toHaveURL(/[?&]w=/);
   await expect(page.getByRole('heading', { level: 2, name: batch })).toBeVisible();
   await expect(page.getByText('Jobs finished in the last day')).toBeVisible();
+
+  // A ClassAd filter reaches the server: narrowed to this batch, the
+  // answer is this workflow and nothing else, and one that cannot parse
+  // is reported by the input.
+  await page.goto('/utilization?days=1');
+  await page.getByRole('button', { name: 'ClassAd expression' }).click();
+  const input = page.getByPlaceholder(/ClassAd, e\.g\./);
+  await input.fill(`JobBatchName == "${batch}"`);
+  await page.getByRole('button', { name: 'Apply' }).click();
+  await expect(page).toHaveURL(/constraint=/);
+  await expect(page.getByRole('row', { name: new RegExp(`^${batch}: 4 jobs`) })).toBeVisible();
+  await expect(page.locator('tbody tr[aria-label]')).toHaveCount(1);
+
+  await input.fill('JobBatchName == ');
+  await page.getByRole('button', { name: 'Apply' }).click();
+  // The parser's own message, whatever its wording, next to the input.
+  const err = page.locator('p[role="alert"]');
+  await expect(err).toBeVisible();
+  await expect(err).not.toBeEmpty();
 });

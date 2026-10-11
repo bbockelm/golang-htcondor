@@ -6,6 +6,9 @@ import {
   AdviceCard,
   EmptyState,
   ResourceCard,
+  GpuSection,
+  Headline,
+  OwnerFilter,
   Suggestions,
   ThroughputHeadline,
   ThroughputLead,
@@ -91,12 +94,12 @@ describe('states', () => {
   });
 
   it('says how many jobs a capped answer covers', () => {
-    render(<TruncatedNotice data={{ truncated: true, jobs_considered: 50000 }} />);
+    render(<TruncatedNotice data={{ truncated: true, jobs_considered: 50000, limit: 50000, max_limit: 1000000 }} />);
     expect(screen.getByText(/most recent 50,000 jobs/)).toBeInTheDocument();
   });
 
   it('says nothing about a complete answer', () => {
-    const { container } = render(<TruncatedNotice data={{ truncated: false, jobs_considered: 12 }} />);
+    const { container } = render(<TruncatedNotice data={{ truncated: false, jobs_considered: 12, limit: 50000, max_limit: 1000000 }} />);
     expect(container).toBeEmptyDOMElement();
   });
 });
@@ -266,7 +269,8 @@ describe('WorkflowDetail', () => {
       'Peak memory per job',
       'What each memory request would have reserved',
       'Run time and peak memory',
-      'CPU cores kept busy per job',
+      'CPU cores kept busy by GPU jobs',
+      'Peak GPU memory per job',
       'Disk used per job',
       'How busy each job kept its GPUs',
     ]) {
@@ -387,5 +391,156 @@ describe('throughput', () => {
     expect(names().slice(0, 2)).toEqual(['gamma', 'alpha']);
     const cells = screen.getAllByTestId('throughput-cell').map((c) => c.textContent);
     expect(cells).toEqual(['up to 3.2×', 'up to 1.5×', '', '']);
+  });
+});
+
+describe('GPUs', () => {
+  const gpuSummary = { resource: 'gpu' as const, allocated_hours: 412, allocated_hours_measured: 0, used_hours: null, jobs_measured: 0 };
+
+  it('states the GPU-hours reserved even when nothing measured how busy they were', () => {
+    render(<ResourceCard jobs={30} summary={gpuSummary} />);
+    const card = screen.getByTestId('resource-gpu');
+    expect(card).toHaveTextContent('412 GPU-hours reserved');
+    expect(card).toHaveTextContent('Utilization not measured for these jobs.');
+  });
+
+  it('puts the GPU card first when any job reserved a GPU', () => {
+    render(<Headline overall={{ ...utilizationFixture.overall }} />);
+    const cards = screen.getAllByTestId(/^resource-/).map((c) => c.getAttribute('data-testid'));
+    expect(cards[0]).toBe('resource-gpu');
+  });
+
+  it('leads a GPU workflow with utilization, GPU memory against the device, and the feeding check', () => {
+    const w = utilizationFixture.workflows.find((x) => x.key === 'wf-train')!;
+    render(<WorkflowDetail workflow={w} days={7} backHref="/utilization" />);
+    const sections = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
+    // After the advice, GPUs come before memory.
+    expect(sections.indexOf('GPUs')).toBeLessThan(sections.indexOf('Memory'));
+    const gpu = screen.getByTestId('gpu-section');
+    expect(within(gpu).getByText('How busy each job kept its GPUs')).toBeInTheDocument();
+    expect(within(gpu).getByText(/the GPUs had 40 GB/)).toBeInTheDocument();
+    expect(within(gpu).getByText('CPU cores kept busy by GPU jobs')).toBeInTheDocument();
+  });
+
+  it('says when utilization was not measured instead of drawing an empty chart', () => {
+    render(
+      <GpuSection
+        cpuRequest={null}
+        gpu={{ request: null, jobs: 12, measured: 0, utilization: null, memory_peak_mib: null, device_memory_mib: null, cores_used_while_gpu: null }}
+      />,
+    );
+    expect(screen.getByText('GPU utilization was not measured for these 12 jobs.')).toBeInTheDocument();
+  });
+
+  it('ranks a GPU-hour saving above a bigger core-hour one', () => {
+    render(
+      <Suggestions
+        hrefFor={hrefFor}
+        workflows={[
+          workflow({
+            advice: [
+              advice({ id: 'cpus-lower', title: 'Cores', saves: { unit: 'core_hours', amount: 5000 } }),
+              advice({ id: 'gpus-lower', resource: 'gpu', title: 'GPUs', saves: { unit: 'gpu_hours', amount: 40 } }),
+            ],
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['GPUs', 'Cores']);
+  });
+});
+
+describe('more jobs', () => {
+  it('offers a bigger analysis when the answer was cut short', () => {
+    const onLimit = vi.fn();
+    render(
+      <TruncatedNotice data={{ truncated: true, jobs_considered: 50000, limit: 50000, max_limit: 1000000 }} onLimit={onLimit} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze up to 250,000 jobs' }));
+    expect(onLimit).toHaveBeenCalledWith(250000);
+    fireEvent.click(screen.getByRole('button', { name: 'all, up to 1,000,000' }));
+    expect(onLimit).toHaveBeenLastCalledWith(1000000);
+  });
+
+  it('keeps a way back once a bigger analysis was asked for', () => {
+    const onLimit = vi.fn();
+    render(
+      <TruncatedNotice
+        data={{ truncated: false, jobs_considered: 180000, limit: 250000, max_limit: 1000000 }}
+        requested={250000}
+        onLimit={onLimit}
+      />,
+    );
+    expect(screen.getByText(/covers all 180,000 jobs/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the usual number' }));
+    expect(onLimit).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe('owners', () => {
+  const options = [
+    { owner: 'alice', jobs: 1286, wall_hours: 1300 },
+    { owner: 'bob', jobs: 310, wall_hours: 519 },
+  ];
+
+  it('lists the users with their job counts and adds the one ticked', () => {
+    const onChange = vi.fn();
+    render(<OwnerFilter options={options} selected={[]} onChange={onChange} />);
+    fireEvent.click(screen.getByRole('button', { name: /Users/ }));
+    expect(screen.getByText('1,286 jobs')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('checkbox', { name: /bob/ }));
+    expect(onChange).toHaveBeenCalledWith(['bob']);
+  });
+
+  it('shows the chosen users as chips that remove themselves', () => {
+    const onChange = vi.fn();
+    render(<OwnerFilter options={options} selected={['alice', 'bob']} onChange={onChange} />);
+    expect(screen.getAllByTestId('owner-chip').map((c) => c.textContent)).toEqual(['alice×', 'bob×']);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove alice' }));
+    expect(onChange).toHaveBeenCalledWith(['bob']);
+  });
+
+  it('turns an owner name into a filter, not a click on the row', () => {
+    const onOwner = vi.fn();
+    const onOpen = vi.fn();
+    render(<WorkflowsTable workflows={utilizationFixture.workflows} hrefFor={hrefFor} onOpen={onOpen} onOwner={onOwner} />);
+    fireEvent.click(screen.getAllByRole('button', { name: 'bob' })[0]);
+    expect(onOwner).toHaveBeenCalledWith('bob');
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+});
+
+describe('single-job workflows', () => {
+  it('fold into one row that sorts as a unit and opens to list them', () => {
+    render(<WorkflowsTable workflows={utilizationFixture.workflows} hrefFor={hrefFor} onOpen={() => {}} />);
+    const group = screen.getByTestId('singles-group');
+    expect(group).toHaveTextContent('3 single-job workflows');
+    expect(screen.queryByRole('row', { name: /^debug-run/ })).not.toBeInTheDocument();
+
+    // Sorted by jobs, ascending: the group counts as its 3 jobs, fewer
+    // than any other workflow's, so it comes first.
+    fireEvent.click(screen.getByRole('button', { name: /^Jobs/ }));
+    const firstBody = screen.getAllByRole('row')[1];
+    expect(firstBody).toBe(group);
+
+    fireEvent.click(within(group).getByRole('button', { name: /3 single-job workflows/ }));
+    const names = screen
+      .getAllByRole('row')
+      .map((r) => r.getAttribute('aria-label')?.split(':')[0])
+      .filter(Boolean);
+    // Opened, the three are listed straight after their group.
+    expect(names.slice(0, 3).sort()).toEqual(['check-env', 'debug-run', 'probe-node']);
+  });
+
+  it('sorts the opened list among itself', () => {
+    render(<WorkflowsTable workflows={utilizationFixture.workflows} hrefFor={hrefFor} onOpen={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /3 single-job workflows/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Workflow/ }));
+    const names = screen
+      .getAllByRole('row')
+      .map((r) => r.getAttribute('aria-label')?.split(':')[0])
+      .filter(Boolean);
+    const singles = names.filter((n) => ['check-env', 'debug-run', 'probe-node'].includes(n!));
+    expect(singles).toEqual(['check-env', 'debug-run', 'probe-node']);
   });
 });
