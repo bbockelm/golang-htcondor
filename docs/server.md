@@ -1951,26 +1951,40 @@ Backends:
   USER       alice@example.org                   ap12.example.org  ap13.example.org
   GROUP      cms                                 ap20.example.org
   USER       /@physics\.example\.org$/           ap30.example.org
-  SUBJECT    /^https:\/\/idp\.example\.org\//i   ap31.example.org
+  SUBJECT    /^svc-/                             ap31.example.org
   GROUP      "High Energy Physics"               ap32.example.org
   *          /.*/                                ap01.example.org
   ```
 
-  `USER` matches the HTCondor identity (`alice@UID_DOMAIN`); `GROUP` any of
-  the caller's groups as the login recorded them (the web session's groups,
-  or an OAuth2 grant's); `SUBJECT` the principal the caller authenticated
-  to this server as; `*` any of the three. A principal is a literal,
-  compared exactly; a double-quoted literal (which may contain spaces,
-  `\"` and `\\`); or a regular expression in slashes, optionally followed
-  by `i` (ignore case) and `U` (ungreedy) as HTCondor accepts. Inside
-  slashes `\/` is a slash and `\\` one backslash, exactly as HTCondor reads
-  it. An expression is searched for, not anchored: write `^` and `$`. Go's
-  RE2 syntax applies (PCRE's minus backreferences and lookaround). A line
-  or the rest of a line starting with `#` is a comment. `@include` is
-  refused. The file is re-read when it changes (checked every two seconds)
-  and on reconfigure; a file that does not parse refuses to start the
-  server, and an edit that does not parse keeps the last map that did and
-  is logged.
+  `USER` matches the HTCondor identity (`alice@UID_DOMAIN`), with the
+  domain compared without regard to case as HTCondor compares domains and
+  the user part exactly; `GROUP` any of the caller's groups as the login
+  recorded them (the web session's groups, or an OAuth2 grant's; a caller
+  presenting an HTCondor token has none); `SUBJECT` the subject this
+  server knows the caller by -- the web session's username or the OAuth2
+  grant's subject, which is the name *after* identity mapping, not the
+  upstream IdP's `sub`; `*` any of the three.
+
+  A principal is a literal, compared exactly; a double-quoted literal
+  (which may contain spaces, `\"` and `\\`); or a regular expression in
+  slashes, optionally followed by `i` (ignore case) and `U` (ungreedy) as
+  HTCondor accepts. This is HTCondor's *hash* mapfile convention
+  (`CLASSAD_USER_MAPFILE_*`): unlike a classic `CERTIFICATE_MAPFILE`,
+  where every principal is a regular expression, a principal here is an
+  expression only between slashes. A literal containing `^`, `$` or `*` is
+  logged as a probable mistake. Inside slashes `\/` is a slash and `\\`
+  one backslash, exactly as HTCondor reads it. An expression is searched
+  for, not anchored: write `^` and `$`. Go's RE2 syntax applies: PCRE2's
+  minus backreferences and lookaround, and with `i` RE2 folds case by
+  Unicode simple folding where PCRE2 without UTF mode folds ASCII only, so
+  a non-ASCII principal may match where HTCondor's would not. A line or
+  the rest of a line starting with `#` is a comment. `@include` is
+  refused.
+
+  The file is checked for changes every two seconds in the background,
+  never while answering a request, and re-read on reconfigure. A file that
+  does not parse refuses to start the server; an edit that does not parse
+  keeps the last map that did and is logged.
 - **`rest`** asks a site service:
 
   ```
@@ -1978,23 +1992,33 @@ Backends:
   Authorization: Bearer <contents of HTTP_API_AP_ASSIGNMENT_REST_TOKEN_FILE>
 
   200 {"schedd":"ap12.example.org","alternates":["ap13.example.org"],"ttl_seconds":300}
-  404 -> no answer: ask the next backend
-  403 -> this user may not submit
+  404 {"result":"no_assignment"}  -> no answer: ask the next backend
+  403 {"result":"denied"}         -> this user may not submit
   ```
 
-  `kind` is `job`, `dag` or `container_build`. Any other status, a body
-  that is not that JSON or is over 64 KiB, or no answer within 2 seconds
-  is an error. The URL must be `https`, except to a loopback address;
-  redirects are not followed. The token file is re-read when it changes.
+  `kind` is `job`, `dag` or `container_build`. A 404 or 403 counts only
+  with that body: a 404 page from a proxy or a mistyped path, or a 403 for
+  some other reason, is an error -- otherwise it would send everyone to the
+  default, or deny everyone. **Answer a bad or missing bearer token with
+  401**, which is an error. Any other status, a body that is not the
+  expected JSON or is over 64 KiB, a redirect (never followed), or no
+  answer within 2 seconds is an error. The URL must be `https`, except to
+  a literal loopback address (`127.0.0.1`, `[::1]`; not `localhost`).
+  The token file is re-read when it changes; one that cannot be read keeps
+  the token already read. Errors are logged without the query, which names
+  the user.
 
 Behavior common to every backend:
 
 - **Errors do not fall through.** A failing backend never sends anyone to
   the next backend or the default. The user's last known good answer is
-  used for up to `HTTP_API_AP_ASSIGNMENT_STALE_SECONDS` (default 3600) from
-  when it was obtained; after that, or with none, the answer is **503**
-  `"reason": "assignment_unavailable"`. Each backend has a hard 2-second
-  timeout.
+  used for up to `HTTP_API_AP_ASSIGNMENT_STALE_SECONDS` (default 3600)
+  after it *expired* (its TTL ran out), so an answer with a long TTL is
+  covered for the whole window too; after that, or with none, the answer
+  is **503** `"reason": "assignment_unavailable"`. A reconfigure makes
+  every answer stale but keeps it as last known good. Each backend has a
+  hard 2-second timeout. A request whose caller disconnected is not
+  counted as a backend failure.
 - **The default** (`HTTP_API_AP_ASSIGNMENT_DEFAULT`) is used only when
   every backend has no answer. Without one, that user gets **403** "no
   access point is assigned to you" (`no_access_point_assigned`).
@@ -2004,10 +2028,10 @@ Behavior common to every backend:
   the set. A target that is in the set but not in the collector right now,
   or untrusted, is a **503** (`target_unavailable`); an alternate still
   takes work while the home access point is down.
-- **Answers are cached** per user and kind for the answer's TTL (mapfile
-  60 s, rest 300 s unless `ttl_seconds` says otherwise; at most an hour),
-  up to 10000 users. An edited mapfile takes effect on the next
-  submission.
+- **Answers are cached** per user, kind, subject and groups for the
+  answer's TTL (mapfile 60 s, rest 300 s unless `ttl_seconds` says
+  otherwise; at most an hour), up to 10000 entries. An edited mapfile takes
+  effect within its two-second check.
 - **The access point's own verdict** applies as for actions: a user
   disabled on the target access point is refused there (403
   `access_point_denied`), and the job is owned by the identity that access
