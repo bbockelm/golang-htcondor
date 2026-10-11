@@ -4,6 +4,7 @@
 // the SPA; bearer tokens for programmatic use). All fetches include
 // credentials so the session cookie is sent with every request.
 
+import type { DrainEstimates } from "./drain";
 import type { MetricsResponse } from "./metrics";
 import type { UtilJobSort, UtilJobsResponse, UtilizationResponse } from "./utilization";
 
@@ -2035,6 +2036,16 @@ export const api = {
         )}?projection=${encodeURIComponent(proj)}`,
       );
     },
+  },
+
+  pool: {
+    // drainEstimates answers when each execute node would be empty if
+    // drained now; with a machine, for that node alone, with its jobs.
+    // 501 (ApiError) with no collector or in multi-AP mode.
+    drainEstimates: (machine?: string): Promise<DrainEstimates> =>
+      fetchJSON(
+        `${BASE}/pool/drain-estimates${machine ? `?machine=${encodeURIComponent(machine)}` : ""}`,
+      ),
   },
 
   placement: {
