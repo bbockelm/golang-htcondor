@@ -311,6 +311,9 @@ describe('RuntimeEstimateView', () => {
     const fill = screen.getByTestId('runtime-range-bar').querySelector('[data-part="elapsed"]');
     expect(fill).toHaveClass('bg-green-700');
     expect(fill).toHaveStyle({ width: '5.56%' });
+    const now = screen.getByTestId('runtime-range-bar').querySelector('[data-part="now"]');
+    expect(now).toHaveClass('bg-green-700');
+    expect(now).toHaveStyle({ left: '5.56%' });
   });
 
   it('marks a job running longer than usual and offers a look inside', () => {
@@ -323,11 +326,25 @@ describe('RuntimeEstimateView', () => {
     expect(within(c).getByText('Similar jobs took about 1h, nearly all under 2h30m')).toBeInTheDocument();
     expect(within(c).getByText('now: 3h12m')).toBeInTheDocument();
     expect(within(c).getByText('It may be stuck, or this input may need more work than usual.')).toBeInTheDocument();
-    expect(c.querySelector('[data-part="elapsed"]')).toHaveClass('bg-amber-600');
+    // Over the band, not under it: the comparison is where they overlap.
+    const band = c.querySelector('[data-part="band"]')!;
+    const fill = c.querySelector('[data-part="elapsed"]')!;
+    expect(fill).toHaveClass('bg-amber-600', 'z-10');
+    expect(band).not.toHaveClass('z-10');
+    expect(band.compareDocumentPosition(fill) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(c.querySelector('[data-part="now"]')).toHaveClass('bg-amber-600');
     fireEvent.click(screen.getByRole('button', { name: 'View live output' }));
     fireEvent.click(screen.getByRole('button', { name: 'Open a shell in the job' }));
     expect(onViewOutput).toHaveBeenCalledOnce();
     expect(onOpenShell).toHaveBeenCalledOnce();
+  });
+
+  it('ends a fill cut at the axis without a mark for now', () => {
+    view(longEstimate({ elapsed_seconds: 30 * 3600 }), 2);
+    const bar = screen.getByTestId('runtime-range-bar');
+    expect(bar.querySelector('[data-part="elapsed"]')).toHaveStyle({ width: '100.00%' });
+    expect(bar.querySelector('[data-part="now"]')).toBeNull();
+    expect(screen.getByText('now: 1d6h')).toBeInTheDocument();
   });
 
   it('offers only the actions the page has', () => {
