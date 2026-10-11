@@ -210,9 +210,10 @@ func TestPoolSummaryCountsPartitionableSlotsOnce(t *testing.T) {
 // not advertise an attribute is counted as not advertising it. The static
 // slots carry no GPUs attribute, which is what a GPU-less slot looks like;
 // a slot with no Cpus is something else, and either way the summary says
-// how many there were instead of quietly adding zero.
+// how many there were instead of quietly adding zero. The odd slot also
+// omits SlotType.
 func TestPoolSummaryReportsMissingAttributesRatherThanZero(t *testing.T) {
-	ads := append(mixedPool(t), mkAds(t, `[Name="slot1@odd"; Machine="odd"; SlotType="Static"; State="Unclaimed"; Activity="Idle"]`)...)
+	ads := append(mixedPool(t), mkAds(t, `[Name="slot1@odd"; Machine="odd"; State="Unclaimed"; Activity="Idle"]`)...)
 	s, _ := poolServer(t, ads...)
 	sc, text := callPool(t, s, nil)
 
@@ -225,6 +226,10 @@ func TestPoolSummaryReportsMissingAttributesRatherThanZero(t *testing.T) {
 	}
 	if !strings.Contains(text, "1 slot(s) do not advertise Cpus") {
 		t.Errorf("text does not say a slot lacks Cpus:\n%s", text)
+	}
+	// Nor is a slot that does not say what type it is assumed static.
+	if types, _ := sc["slot_types"].(map[string]interface{}); types["(not advertised)"] != 1.0 || types["Static"] != 2.0 {
+		t.Errorf("slot_types = %v, want the odd slot reported as not advertised", types)
 	}
 }
 
