@@ -15,6 +15,7 @@ import {
   type DisplayStatus,
 } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
+import { humanDuration } from '@/lib/duration';
 import { useMultiAPMode } from '@/lib/multiap';
 import { summarizeRequirements, standardLabels } from '@/lib/requirements';
 import { coresUsed, jobTiming } from '@/lib/batches';
@@ -24,6 +25,7 @@ import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { LogViewerPanel } from '@/components/LogViewerPanel';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
+import { RuntimeEstimateField } from './RuntimeEstimate';
 
 // xterm.js touches `window` at import time; load it client-only so the static
 // export doesn't try to render a terminal during build.
@@ -432,6 +434,9 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
           }
         />
         <Field label="Owner" value={<OwnerLink owner={owner} />} />
+        {/* A full-width row under the status, for a waiting or running
+            job with an estimate; nothing at all otherwise. */}
+        <RuntimeEstimateField jobID={jobID} status={status} />
         <Field
           label="Submitted"
           value={qdate ? new Date(qdate * 1000).toLocaleString() : '—'}
@@ -3682,26 +3687,9 @@ export function useNowTick(intervalMs: number): number {
   return now;
 }
 
-// humanDuration renders a non-negative number of seconds as a compact
-// "1d2h", "5h3m", "12m4s", or "30s" string. Negative inputs are
-// clamped to 0 so a slight clock skew between the client and the
-// schedd's wallclock doesn't produce nonsense like "-3s ago".
-export function humanDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
-  const s = Math.floor(seconds);
-  if (s < 60) return `${s}s`;
-
-  const days = Math.floor(s / 86400);
-  const hrs = Math.floor((s % 86400) / 3600);
-  const mins = Math.floor((s % 3600) / 60);
-  const secs = s % 60;
-
-  // Two most-significant non-zero units. Pick the right pair so a
-  // 3-day-2-hour-old job doesn't display "3d0h2h" or drop the hours.
-  if (days > 0) return hrs > 0 ? `${days}d${hrs}h` : `${days}d`;
-  if (hrs > 0) return mins > 0 ? `${hrs}h${mins}m` : `${hrs}h`;
-  return secs > 0 ? `${mins}m${secs}s` : `${mins}m`;
-}
+// humanDuration lives in lib/duration so components the page imports can
+// use it too; re-exported here for the importers that predate the move.
+export { humanDuration };
 
 function num(v: unknown): number | undefined {
   if (typeof v === 'number') return v;

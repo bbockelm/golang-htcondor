@@ -982,6 +982,39 @@ export interface DagGraphResponse {
   took_ms?: number;
 }
 
+// RuntimeEstimate is the JSON returned by
+// GET /api/v1/jobs/{id}/runtime-estimate: how long the job is likely to
+// run, from its owner's similar finished jobs. Mirrors runtimeest.Result
+// plus the job id; renames on the Go side must update this in lockstep.
+// The numbers are present only when available is true.
+export interface RuntimeEstimate {
+  job_id: string;
+  available: boolean;
+  reason?: "disabled" | "model_warming_up" | "insufficient_history";
+  estimate_seconds?: number;
+  p10_seconds?: number;
+  p90_seconds?: number;
+  basis?: { level: RuntimeEstimateLevel; sample_count: number };
+  // Only while the job runs; remaining_seconds is also absent once the
+  // job has run longer than its comparable jobs (exceeded_history).
+  elapsed_seconds?: number;
+  remaining_seconds?: number;
+  exceeded_history: boolean;
+  model: { trained_through?: string; jobs_ingested: number };
+}
+
+// RuntimeEstimateLevel is which group of finished jobs an estimate came
+// from, most specific first.
+export type RuntimeEstimateLevel =
+  | "cluster"
+  | "exact"
+  | "template"
+  | "batch"
+  | "iwd"
+  | "cmd"
+  | "owner"
+  | "global";
+
 // MatchAnalysisResponse is the JSON returned by
 // GET /api/v1/jobs/{id}/match-analysis. The Go side wraps the analyzer's
 // Result struct in an envelope that also surfaces the raw Requirements
@@ -1703,6 +1736,11 @@ export const api = {
         `${BASE}/jobs/${encodeURIComponent(id)}/match-analysis${qs}`,
       );
     },
+
+    // How long the job is likely to run. Always 200 for a job the
+    // caller can see; available is false when there is no estimate.
+    runtimeEstimate: (id: string): Promise<RuntimeEstimate> =>
+      fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/runtime-estimate`),
 
     // Mint a short-lived public URL to share with someone else.
     shareOutput: (

@@ -78,6 +78,22 @@ const chtcRequirements =
   '/Expr(((((((((((PoolName == "CHTC") || (substr(Machine, 0, 3) == "gzk")) && ((Machine != "txie-dsigpu4000.chtc.wisc.edu") && (Machine != "gpu4002.chtc.wisc.edu"))) && (Arch == "X86_64")) && HasContainer) && HasDockerURL) && (Memory >= RequestMemory)) && (Cpus >= RequestCpus)) && (countMatches(MY.RequireGPUs, AvailableGPUs) >= RequestGPUs)) && ((FileSystemDomain == MY.FileSystemDomain) || (HasFileTransfer && stringListIMember("osdf", HasFileTransferPluginMethods)))))/';
 
 test('the job page links the owner, times the run, and breaks down its requirements', async ({ page }) => {
+  await page.route('**/api/v1/jobs/71.0/runtime-estimate', (route) =>
+    route.fulfill({
+      json: {
+        job_id: '71.0',
+        available: true,
+        estimate_seconds: 3 * 3600,
+        p10_seconds: 2.5 * 3600,
+        p90_seconds: 5 * 3600,
+        basis: { level: 'template', sample_count: 12 },
+        elapsed_seconds: twoHours14 + 60,
+        remaining_seconds: 3 * 3600 - twoHours14 - 60,
+        exceeded_history: false,
+        model: { trained_through: '2026-10-10T12:00:00Z', jobs_ingested: 5000 },
+      },
+    }),
+  );
   await openJobPage(page, '71.0', {
     ClusterId: 71,
     ProcId: 0,
@@ -93,6 +109,10 @@ test('the job page links the owner, times the run, and breaks down its requireme
 
   await expect(page.getByRole('link', { name: 'alice' })).toHaveAttribute('href', '/users/alice');
   await expect(page.getByText('running for 2h14m')).toBeVisible();
+  await expect(page.getByText('About 45m left · running 2h15m of about 3h (usually 2h30m to 5h)')).toBeVisible();
+  await expect(
+    page.getByText('from 12 of your earlier jobs with the same command and argument pattern'),
+  ).toBeVisible();
 
   const reqs = page.locator('div').filter({ has: page.getByRole('heading', { name: 'Requirements' }) }).last();
   for (const clause of [

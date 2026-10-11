@@ -1514,6 +1514,10 @@ ever returned.
 }
 ```
 
+The web UI's job page shows it under the job's status, as "Expected run
+time", for a waiting or running job when there is an estimate, and
+nothing otherwise.
+
 `elapsed_seconds` and `remaining_seconds` appear only for a running job.
 A running job that has outlived the typical run is re-estimated from the
 runs in its group that lasted at least as long; once it has outlived
