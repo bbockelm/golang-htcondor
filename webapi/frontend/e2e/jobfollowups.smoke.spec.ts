@@ -143,10 +143,18 @@ test('the job page links the owner, times the run, and breaks down its requireme
 
   await expect(page.getByRole('link', { name: 'alice' })).toHaveAttribute('href', '/users/alice');
   await expect(page.getByText('running for 2h14m')).toBeVisible();
-  await expect(page.getByText('About 45m left · running 2h15m of about 3h (usually 2h30m to 5h)')).toBeVisible();
+  const runtime = page.getByTestId('runtime-estimate');
+  await expect(runtime.getByRole('heading', { name: 'Expected run time' })).toBeVisible();
+  await expect(runtime.getByText(/^About 45m left · likely done around \d{1,2}:\d{2}/)).toBeVisible();
+  await expect(runtime.getByText(/^started \d{1,2}:\d{2}/)).toBeVisible();
+  await expect(runtime.getByText(/^usually done /)).toBeVisible();
   await expect(
-    page.getByText('from 12 of your earlier jobs with the same command and argument pattern'),
+    runtime.getByText(
+      'Running 2h15m of about 3h. From 12 of your earlier jobs with the same command and argument pattern.',
+    ),
   ).toBeVisible();
+  // A job within its usual time has nothing to look into.
+  await expect(runtime.getByText('Longer than usual')).toHaveCount(0);
 
   const reqs = page.locator('div').filter({ has: page.getByRole('heading', { name: 'Requirements' }) }).last();
   for (const clause of [
@@ -163,4 +171,48 @@ test('the job page links the owner, times the run, and breaks down its requireme
   await expect(reqs.getByText('Standard resource requirements (CPUs, memory, GPUs)')).toBeVisible();
   // Not one opaque clause holding the whole wrapped expression.
   await expect(reqs.locator('li code').filter({ hasText: '/Expr(' })).toHaveCount(0);
+});
+
+test('a job running longer than usual says so and opens its live output and shell', async ({ page }) => {
+  await page.route('**/api/v1/jobs/73.0/runtime-estimate', (route) =>
+    route.fulfill({
+      json: {
+        job_id: '73.0',
+        available: true,
+        estimate_seconds: 3600,
+        p10_seconds: 1200,
+        p90_seconds: 9000,
+        basis: { level: 'cluster', sample_count: 64 },
+        elapsed_seconds: 3 * 3600 + 12 * 60,
+        exceeded_history: true,
+        model: { trained_through: '2026-10-10T12:00:00Z', jobs_ingested: 5000 },
+      },
+    }),
+  );
+  await page.route('**/api/v1/jobs/73.0/peek**', (route) =>
+    route.fulfill({ json: { stdout: { text: 'smoke-peek-line\n', offset: 16 } } }),
+  );
+  await openJobPage(page, '73.0', {
+    ClusterId: 73,
+    ProcId: 0,
+    JobStatus: 2,
+    JobUniverse: 5,
+    Owner: 'e2e',
+    Cmd: '/home/e2e/run.sh',
+    QDate: now - 90000,
+    JobCurrentStartDate: now - 3 * 3600 - 12 * 60,
+  });
+
+  const runtime = page.getByTestId('runtime-estimate');
+  await expect(runtime.getByText('Longer than usual')).toBeVisible();
+  await expect(runtime.getByText('Similar jobs took about 1h, nearly all under 2h30m')).toBeVisible();
+  await expect(runtime.getByText('now: 3h12m')).toBeVisible();
+  await expect(runtime.getByText('It may be stuck, or this input may need more work than usual.')).toBeVisible();
+
+  await runtime.getByRole('button', { name: 'View live output' }).click();
+  await expect(page.getByText('smoke-peek-line')).toBeVisible();
+
+  await expect(page.getByRole('button', { name: 'Open shell' })).toBeVisible();
+  await runtime.getByRole('button', { name: 'Open a shell in the job' }).click();
+  await expect(page.getByRole('button', { name: 'Open shell' })).toHaveCount(0);
 });
