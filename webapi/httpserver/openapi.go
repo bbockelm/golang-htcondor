@@ -81,7 +81,9 @@ const openAPISchema = `{
         "properties": {
           "typical": {"type": "number", "description": "The most common requested value."},
           "min": {"type": "number"}, "max": {"type": "number"},
-          "distinct": {"type": "integer"}
+          "distinct": {"type": "integer"},
+          "adaptive": {"type": "boolean", "description": "Most jobs wrote the request as a formula over their own usage; typical/min/max are then its starting value."},
+          "expression": {"type": "string", "description": "The most common formula, when adaptive (memory only)."}
         }
       },
       "UtilResourceSummary": {
@@ -105,7 +107,10 @@ const openAPISchema = `{
           "detail": {"type": "string"},
           "submit": {"type": "array", "items": {"type": "string"}, "description": "Submit-file lines to paste."},
           "saves": {"type": "object", "nullable": true, "properties": {"unit": {"type": "string", "enum": ["core_hours", "gib_hours", "gpu_hours"]}, "amount": {"type": "number"}}},
-          "confidence": {"type": "string", "enum": ["low", "medium", "high"]}
+          "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+          "applies": {"type": "boolean", "description": "POST /utilization/apply can apply this advice to waiting jobs."},
+          "change": {"type": "object", "description": "The edit apply would make, present exactly when applies.", "properties": {
+            "attribute": {"type": "string", "enum": ["RequestMemory", "RequestCpus", "RequestDisk", "RequestGPUs"]}, "value": {"type": "number"}}}
         }
       },
       "UtilShape": {
@@ -177,6 +182,25 @@ const openAPISchema = `{
           "throughput": {"$ref": "#/components/schemas/UtilThroughput"}
         }
       },
+      "UtilWorkflowSummary": {
+        "type": "object",
+        "description": "One row of the workflow list. Fields that are usually empty are omitted: name when it equals executable, is_dag when false, failed/removed when 0, the GPU request and use when no job requested GPUs, an advice brief's saves when none.",
+        "properties": {
+          "key": {"type": "string"}, "name": {"type": "string"}, "executable": {"type": "string", "description": "The program the jobs run: the script or command an interpreter or wrapper starts, not necessarily basename(Cmd)."},
+          "owner": {"type": "string"}, "schedd": {"type": "string"}, "is_dag": {"type": "boolean"},
+          "jobs": {"type": "integer"}, "succeeded": {"type": "integer"}, "failed": {"type": "integer"}, "removed": {"type": "integer"},
+          "wall_hours": {"type": "number"},
+          "holds": {"type": "object", "properties": {"memory": {"type": "integer"}, "disk": {"type": "integer"}}},
+          "request": {"type": "object", "properties": {"memory_mib": {"type": "number", "nullable": true}, "cpus": {"type": "number", "nullable": true},
+            "disk_kib": {"type": "number", "nullable": true}, "gpus": {"type": "number"},
+            "adaptive": {"type": "array", "items": {"type": "string", "enum": ["memory", "cpus", "disk", "gpus"]}}}},
+          "used": {"type": "object", "description": "used_hours / allocated_hours_measured per resource.", "properties": {
+            "cpu": {"type": "number", "nullable": true}, "memory": {"type": "number", "nullable": true}, "disk": {"type": "number", "nullable": true}, "gpu": {"type": "number", "nullable": true}}},
+          "gpu_hours": {"type": "number"}, "gain": {"type": "number"}, "slots_limited": {"type": "boolean"},
+          "advice": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "severity": {"type": "string"},
+            "saves": {"type": "object", "properties": {"unit": {"type": "string"}, "amount": {"type": "number"}}}}}}
+        }
+      },
       "UtilizationResponse": {
         "type": "object",
         "properties": {
@@ -193,7 +217,12 @@ const openAPISchema = `{
             "jobs": {"type": "integer"}, "wall_hours": {"type": "number"}, "badput_hours": {"type": "number"},
             "resources": {"type": "array", "items": {"$ref": "#/components/schemas/UtilResourceSummary"}},
             "throughput_gain": {"type": "number", "nullable": true, "description": "All workflows: total occupancy at current requests over that at suggested ones; workflows left unchanged count on both sides."}}},
-          "workflows": {"type": "array", "items": {"$ref": "#/components/schemas/UtilWorkflow"}}
+          "workflows": {"type": "array", "description": "Compact rows; one workflow's full detail is /utilization/workflow.", "items": {"$ref": "#/components/schemas/UtilWorkflowSummary"}},
+          "suggestions": {"type": "array", "description": "Advice from every workflow, ranked (severity, GPU-hour savings first, larger savings), at most 500.", "items": {"type": "object", "properties": {
+            "key": {"type": "string"}, "name": {"type": "string"}, "executable": {"type": "string"}, "owner": {"type": "string"},
+            "id": {"type": "string"}, "resource": {"type": "string"}, "severity": {"type": "string"}, "title": {"type": "string"},
+            "saves": {"type": "object", "nullable": true, "properties": {"unit": {"type": "string"}, "amount": {"type": "number"}}},
+            "confidence": {"type": "string"}}}}
         }
       },
       "App": {
@@ -769,6 +798,52 @@ const openAPISchema = `{
           "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "502": {"description": "Job history could not be read", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "503": {"description": "The mirror is required and could not answer", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/utilization/workflow": {
+      "get": {
+        "summary": "One utilization workflow in full",
+        "description": "One workflow's full detail -- distributions, samples, batches, memory curve, advice with text and submit lines, throughput -- from the cached analysis for the same days, owned_by_me, constraint, owners, limit and schedd, plus how many of the caller's jobs of it are idle in the queue now. Same scoping as /utilization; an unknown key is a 404.",
+        "operationId": "getUtilizationWorkflow",
+        "parameters": [
+          {"name": "w", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "enum": [1, 7, 30]}},
+          {"name": "owned_by_me", "in": "query", "required": false, "schema": {"type": "boolean"}},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "owners", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer"}},
+          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "The workflow.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "since": {"type": "integer"}, "until": {"type": "integer"}, "days": {"type": "integer"}, "truncated": {"type": "boolean"}, "limit": {"type": "integer"},
+            "workflow": {"$ref": "#/components/schemas/UtilWorkflow"},
+            "waiting_jobs": {"type": "integer", "nullable": true, "description": "The caller's idle jobs of this workflow; null in multi-AP mode or when the queue could not be read."}}}}}},
+          "400": {"description": "Bad parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No workflow with that key in this analysis", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/utilization/apply": {
+      "post": {
+        "summary": "Apply a workflow's suggestions to its waiting jobs",
+        "description": "Sets RequestMemory, RequestCpus, RequestDisk or RequestGPUs on the caller's idle jobs of the workflow, to the values in the server's own current advice (the body names advice ids, never values). Edits go through the job-edit path and its owner scope; an administrator's reach is the job-edit endpoints'. A request written as a formula over the job's usage is left as written and reported in skipped. memory-retry is declined: retry_request_memory is a submit-time on-evict transform that cannot be added to a queued job.",
+        "operationId": "applyUtilization",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["w", "advice"], "properties": {
+          "w": {"type": "string"}, "advice": {"type": "array", "items": {"type": "string"}},
+          "days": {"type": "integer"}, "owned_by_me": {"type": "boolean"}, "constraint": {"type": "string"}, "owners": {"type": "string"},
+          "limit": {"type": "integer"}, "schedd": {"type": "string"}}}}}},
+        "responses": {
+          "200": {"description": "What was done.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "edited": {"type": "integer"},
+            "set": {"type": "object", "additionalProperties": {"type": "number"}},
+            "declined": {"type": "array", "items": {"type": "object", "properties": {"advice": {"type": "string"}, "reason": {"type": "string"}}}},
+            "skipped": {"type": "array", "items": {"type": "object", "properties": {"job": {"type": "string"}, "reason": {"type": "string"}}}},
+            "failed": {"type": "array", "items": {"type": "object", "properties": {"job": {"type": "string"}, "reason": {"type": "string"}}}}}}}}},
+          "400": {"description": "Bad body, or an advice id not in the workflow's current advice", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No workflow with that key in this analysis", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "Multi-AP mode", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },

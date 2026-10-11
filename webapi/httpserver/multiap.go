@@ -309,15 +309,16 @@ func (h *Handler) identitySchedd() *htcondor.Schedd {
 
 // multiAPReadPaths are the API routes multi-AP mode serves to a GET.
 var multiAPReadPaths = map[string]bool{
-	"/api/v1/jobs":             true,
-	"/api/v1/jobs/archive":     true,
-	"/api/v1/utilization":      true,
-	"/api/v1/utilization/jobs": true,
-	"/api/v1/aps":              true,
-	"/api/v1/whoami":           true,
-	"/api/v1/auth/me":          true,
-	"/api/v1/version":          true,
-	"/api/v1/chat/info":        true,
+	"/api/v1/jobs":                 true,
+	"/api/v1/jobs/archive":         true,
+	"/api/v1/utilization":          true,
+	"/api/v1/utilization/jobs":     true,
+	"/api/v1/utilization/workflow": true,
+	"/api/v1/aps":                  true,
+	"/api/v1/whoami":               true,
+	"/api/v1/auth/me":              true,
+	"/api/v1/version":              true,
+	"/api/v1/chat/info":            true,
 }
 
 // multiAPJobSubroutes are the registered /api/v1/jobs/<name> routes that

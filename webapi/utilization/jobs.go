@@ -239,3 +239,12 @@ func numPtr(n Num, places int) *float64 {
 	}
 	return ptr(n.V(), places)
 }
+
+// InWorkflow reports whether a job -- finished or not -- belongs to the
+// workflow with the given key: the grouping WorkflowJobs and Analyze use,
+// without their finished-jobs filter, for finding a workflow's jobs still
+// in the queue.
+func InWorkflow(j *Job, key string) bool {
+	id, _ := identify(j)
+	return id.hash() == key
+}

@@ -82,10 +82,49 @@ func adviseWorkflow(w *Workflow, jobs []*Job, plan *memoryPlan, completedWalls [
 		}
 		return cmp.Compare(savedAmount(b), savedAmount(a))
 	})
+	for i := range out {
+		if attr, value, ok := out[i].RequestChange(); ok {
+			out[i].Applies = true
+			out[i].Change = &Change{Attribute: attr, Value: value}
+		}
+	}
 	if out == nil {
 		out = []Advice{}
 	}
 	return out
+}
+
+// appliesToQueue reports whether the advice is a new value for one of
+// the Request* attributes and nothing else. A memory recommendation that
+// comes with a retry_request_memory does not qualify: the retry is set
+// up by condor_submit as an on-evict transform, which cannot be added to
+// a job already in the queue, and the lower request without its retry
+// would hold the jobs it was sized to retry.
+func (a Advice) appliesToQueue() bool {
+	if a.request <= 0 || a.changes == "" {
+		return false
+	}
+	return a.ID != "memory-retry"
+}
+
+// RequestChange is the Request* attribute an advice changes and its new
+// value, in the attribute's own units; ok is false for advice that does
+// not apply to queued jobs (see Applies).
+func (a Advice) RequestChange() (attr string, value float64, ok bool) {
+	if !a.appliesToQueue() {
+		return "", 0, false
+	}
+	switch a.changes {
+	case changesMemory:
+		return "RequestMemory", a.request, true
+	case changesCpus:
+		return "RequestCpus", a.request, true
+	case changesDisk:
+		return "RequestDisk", a.request, true
+	case changesGPUs:
+		return "RequestGPUs", a.request, true
+	}
+	return "", 0, false
 }
 
 func severityRank(s string) int {

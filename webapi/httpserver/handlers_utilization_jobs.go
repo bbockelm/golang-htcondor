@@ -126,35 +126,15 @@ func (s *Handler) handleUtilizationJobs(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// The same scope as the analysis, settled the same way.
-	var scopeKey, selection, user string
-	var mirror bool
-	var ctx context.Context
-	if s.multi != nil {
-		var ok bool
-		if ctx, user, ok = s.multiAPCaller(w, r); !ok {
-			return
-		}
-		scopeKey, selection = "multi|"+user, uq.narrow("true")
-	} else {
-		var needsRedirect bool
-		ctx, needsRedirect, err = s.requireAuthentication(r)
-		if err != nil {
-			if needsRedirect {
-				s.redirectToLogin(w, r)
-				return
-			}
-			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
-			return
-		}
-		scope, _, status, serr := s.utilizationScope(ctx, r, uq.ownedByMe)
-		if serr != nil {
-			s.writeError(w, status, serr.Error())
-			return
-		}
-		mirror = s.mirrorAllowed(ctx, r) == nil
-		scopeKey, selection = scope, uq.narrow(scope)
+	c, ok := s.utilizationCall(w, r, uq)
+	if !ok {
+		return
 	}
-	analysisKey := uq.key(scopeKey, mirror)
+	ctx, user, mirror, analysisKey := c.ctx, c.user, c.mirror, c.key
+	selection := uq.narrow(c.scope)
+	if s.multi != nil {
+		selection = uq.narrow("true")
+	}
 
 	set, err := s.utilizationJobSets().getWithin(ctx, analysisKey+"|w="+page.key, utilizationComputeTimeout(uq.limit),
 		func(computeCtx context.Context) (utilizationJobSet, error) {
@@ -165,11 +145,8 @@ func (s *Handler) handleUtilizationJobs(w http.ResponseWriter, r *http.Request) 
 			// of everyone else's are read and thrown away. When it hit
 			// its limit, the cut is "most recent N of everyone", and
 			// only the same read reproduces it.
-			if resp, ok := s.utilizationResults().peek(analysisKey); ok && !resp.Truncated {
-				for _, wf := range resp.Workflows {
-					if wf.Key != page.key {
-						continue
-					}
+			if res, ok := s.utilizationResults().peek(analysisKey); ok && !res.summary.Truncated {
+				if wf, ok := res.workflowSummary(page.key); ok {
 					if wf.Owner != "" {
 						sel = "(" + sel + ") && Owner == " + classadStringLit(wf.Owner)
 					}

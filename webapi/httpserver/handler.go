@@ -473,6 +473,11 @@ type Handler struct {
 	// jobSetCache holds one workflow's jobs at a time for paging.
 	jobSetCacheOnce sync.Once
 	jobSetCacheVal  *jobSetCache
+	// waitingCache holds workflows' waiting-job counts briefly.
+	waitingCacheOnce sync.Once
+	waitingCacheVal  *sharedCache[int]
+	// utilizationEditHook replaces the schedd edit apply makes. Tests only.
+	utilizationEditHook func(ctx context.Context, constraint string, attrs map[string]string) (int, error)
 	// poolShapeCache holds the pool's machine shapes for the throughput
 	// estimate.
 	poolShapeCacheOnce sync.Once
