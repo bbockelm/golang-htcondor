@@ -13,8 +13,8 @@ interface SidebarProps {
   // privileges gated on separate groups.
   superuserAllowed?: boolean;
   superuserActive?: boolean;
-  // Several access points behind this server, read-only: the pages that
-  // submit or act on jobs are not offered.
+  // Several access points behind this server: only the pages that mode
+  // serves are offered.
   multiAP?: boolean;
   // Mobile drawer state. On lg+ the sidebar is always visible and these
   // are ignored.
@@ -34,12 +34,13 @@ const NAV = [
   { href: '/info', label: 'Info' },
 ];
 
-// Multi-AP mode serves job and history reads only.
+// Multi-AP mode serves job and history reads, job actions and submit.
 const MULTI_AP_NAV = [
   { href: '/', label: 'Dashboard' },
   { href: '/jobs', label: 'Jobs' },
   { href: '/archive', label: 'Archive' },
   { href: '/utilization', label: 'Utilization' },
+  { href: '/submit', label: 'Submit' },
   { href: '/aps', label: 'Access Points' },
 ];
 

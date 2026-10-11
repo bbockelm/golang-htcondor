@@ -279,14 +279,22 @@ export const multiAPJobsFixture: JobListResponse = {
   sources: multiAPSources,
 };
 
+// The smoke user's home access point is ap1, and ap2 is an alternate.
+export const multiAPAssignment = {
+  schedd: 'ap1.smoke.example',
+  alternates: ['ap2.smoke.example'],
+  source: 'mapfile',
+};
+
 export const multiAPAccessPointsFixture: AccessPointsResponse = {
   constraint: 'regexp("smoke", Name)',
   aps: [
-    { schedd: 'ap1.smoke.example', in_collector: true, hub: { state: 'fresh', staleness_seconds: 3 } },
-    { schedd: 'ap2.smoke.example', in_collector: true, hub: { state: 'stale', staleness_seconds: 412 } },
+    { schedd: 'ap1.smoke.example', in_collector: true, hub: { state: 'fresh', staleness_seconds: 3 }, submit: true, home: true },
+    { schedd: 'ap2.smoke.example', in_collector: true, hub: { state: 'stale', staleness_seconds: 412 }, submit: true },
   ],
   sources: multiAPSources,
   hub: { reachable: true },
+  assignment: multiAPAssignment,
 };
 
 // The pool's drain estimates with nothing running anywhere: the neutral
@@ -353,7 +361,7 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
     '/api/v1/pool/drain-estimates': emptyDrainFixture,
   };
   if (opts.multiAP) {
-    table['/api/v1/auth/me'] = { ...sessionFixture, is_admin: false, multi_ap: true };
+    table['/api/v1/auth/me'] = { ...sessionFixture, is_admin: false, multi_ap: true, assignment: multiAPAssignment };
     table['/api/v1/jobs'] = multiAPJobsFixture;
     table['/api/v1/aps'] = multiAPAccessPointsFixture;
     table['/api/v1/jobs/archive'] = {
