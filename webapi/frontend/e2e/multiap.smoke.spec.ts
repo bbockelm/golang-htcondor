@@ -56,6 +56,51 @@ test('multi-AP: the submit page names the access point and offers the alternates
   await expect(select).toHaveValue('ap2.smoke.example');
 });
 
+test('multi-AP: submitting sends the chosen access point and the job ids that come back', async ({ page }) => {
+  const posted: string[] = [];
+  await page.route('**/api/v1/jobs?schedd=*', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    posted.push(route.request().url());
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        cluster_id: 7,
+        job_ids: ['7.0@ap2.smoke.example'],
+        schedd: 'ap2.smoke.example',
+      }),
+    });
+  });
+  await page.route('**/api/v1/templates', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        templates: [
+          {
+            id: 'smoke-true',
+            name: 'Smoke true',
+            columns: [],
+            contents: 'executable = /bin/true\ntransfer_executable = false\n',
+            source: 'builtin',
+          },
+        ],
+      }),
+    }),
+  );
+  await page.goto('/submit');
+  await page.getByRole('combobox', { name: 'Access point' }).selectOption('ap2.smoke.example');
+  // A template with no columns is submitted as copies: its one table
+  // row is empty, which the manual table refuses.
+  await page.getByRole('button', { name: 'Run N copies' }).click();
+  const button = page.getByRole('button', { name: /^Submit batch/ });
+  await expect(button).toBeEnabled();
+  await button.click();
+  await expect.poll(() => posted.length).toBe(1);
+  expect(new URL(posted[0]).searchParams.get('schedd')).toBe('ap2.smoke.example');
+  await expect(page).toHaveURL(/\/jobs\/7\.0(%40|@)ap2\.smoke\.example/);
+});
+
 test('multi-AP: the access points page marks where the caller may submit', async ({ page }) => {
   await page.goto('/aps');
   await expect(page.getByText('your home')).toBeVisible();
