@@ -167,8 +167,11 @@ const openAPISchema = `{
           "batches": {"type": "array", "items": {"type": "object", "properties": {
             "id": {"type": "integer"}, "submitted": {"type": "integer"}, "jobs": {"type": "integer"},
             "memory_request_mib": {"type": "number", "nullable": true}, "memory_p95_mib": {"type": "number", "nullable": true},
-            "cpu_request": {"type": "number", "nullable": true}, "cpu_cores_p50": {"type": "number", "nullable": true}, "wall_p50": {"type": "number", "nullable": true}}}},
+            "cpu_request": {"type": "number", "nullable": true}, "cpu_cores_p50": {"type": "number", "nullable": true}, "wall_p50": {"type": "number", "nullable": true},
+            "gpu_request": {"type": "number", "nullable": true, "description": "Typical request_gpus of the batch's GPU jobs."},
+            "gpu_util_p50": {"type": "number", "nullable": true, "description": "Median fraction of requested GPUs kept busy."}}}},
           "samples": {"type": "array", "items": {"type": "object", "properties": {
+            "job": {"type": "string", "description": "cluster.proc, as in /utilization/jobs rows."},
             "memory_mib": {"type": "number", "nullable": true}, "wall": {"type": "number"}, "cores": {"type": "number", "nullable": true},
             "disk_kib": {"type": "number", "nullable": true}, "outcome": {"type": "string", "enum": ["ok", "failed", "removed", "memory_exceeded"]}}}},
           "throughput": {"$ref": "#/components/schemas/UtilThroughput"}

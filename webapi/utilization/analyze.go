@@ -532,7 +532,7 @@ func batches(g *group) []BatchPoint {
 	for k, b := range all {
 		jobs := members[k]
 		p := BatchPoint{ID: b.id, Jobs: b.jobs, Submitted: b.submitted}
-		var memReq, peaks, cpuReq, cores []float64
+		var memReq, peaks, cpuReq, cores, gpuReq, gpuUtil []float64
 		walls := make([]float64, 0, len(jobs))
 		for _, j := range jobs {
 			if j.RequestMemory.OK() {
@@ -548,6 +548,19 @@ func batches(g *group) []BatchPoint {
 				cores = append(cores, c)
 			}
 			walls = append(walls, j.Wall)
+			if j.RequestGPUs.OK() && j.RequestGPUs.V() > 0 {
+				gpuReq = append(gpuReq, j.RequestGPUs.V())
+				if u, ok := j.GPUUtilization(); ok {
+					gpuUtil = append(gpuUtil, u)
+				}
+			}
+		}
+		if r := summarizeRequest(gpuReq); r != nil {
+			p.GPURequest = ptr(r.Typical, 3)
+		}
+		if len(gpuUtil) > 0 {
+			slices.Sort(gpuUtil)
+			p.GPUUtilP50 = ptr(percentile(gpuUtil, 50), 3)
 		}
 		if r := summarizeRequest(memReq); r != nil {
 			p.MemoryRequestMiB = ptr(r.Typical, 3)
@@ -579,7 +592,7 @@ func samples(jobs []*Job) []Sample {
 	out := make([]Sample, 0, k)
 	for i := range k {
 		j := jobs[i*n/k]
-		s := Sample{Wall: round(j.Wall, 1), Outcome: j.outcome()}
+		s := Sample{Job: j.id(), Wall: round(j.Wall, 1), Outcome: j.outcome()}
 		if j.MemoryUsage.OK() {
 			s.MemoryMiB = ptr(j.MemoryUsage.V(), 1)
 		}

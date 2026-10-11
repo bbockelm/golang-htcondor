@@ -78,14 +78,15 @@ type utilizationQuery struct {
 	// owners narrows to these users, sorted; empty for no narrowing.
 	owners []string
 	limit  int
-	schedd string
+	// accessPoint is the schedd parameter: one AP, in multi-AP mode.
+	accessPoint string
 }
 
 // parseUtilizationQuery reads and validates the parameters. An error is
 // the caller's to fix and becomes a 400 with its text.
 func (s *Handler) parseUtilizationQuery(r *http.Request) (utilizationQuery, error) {
 	q := r.URL.Query()
-	uq := utilizationQuery{days: 7, ownedByMe: true, limit: utilizationDefaultLimit, schedd: q.Get("schedd")}
+	uq := utilizationQuery{days: 7, ownedByMe: true, limit: utilizationDefaultLimit, accessPoint: q.Get("schedd")}
 	if v := q.Get("days"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || !utilizationDays[n] {
@@ -173,7 +174,7 @@ func (uq utilizationQuery) narrow(scope string) string {
 
 // key is the cache key for the query in a scope.
 func (uq utilizationQuery) key(scope string, mirror bool) string {
-	return fmt.Sprintf("%s|%d|%t|%q|%q|%d|%s", scope, uq.days, mirror, uq.filter, strings.Join(uq.owners, ","), uq.limit, uq.schedd)
+	return fmt.Sprintf("%s|%d|%t|%q|%q|%d|%s", scope, uq.days, mirror, uq.filter, strings.Join(uq.owners, ","), uq.limit, uq.accessPoint)
 }
 
 // utilizationDays are the windows offered. Fixed rather than free-form:
@@ -453,7 +454,7 @@ func (s *Handler) handleMultiUtilization(w http.ResponseWriter, r *http.Request,
 		func(computeCtx context.Context) (*utilization.Response, error) {
 			now := time.Now().Unix()
 			since := now - int64(uq.days)*24*3600
-			jobs, truncated, err := s.multiUtilizationJobs(computeCtx, user, uq.narrow("true"), uq.schedd, since, uq.limit)
+			jobs, truncated, err := s.multiUtilizationJobs(computeCtx, user, uq.narrow("true"), uq.accessPoint, since, uq.limit)
 			if err != nil {
 				return nil, err
 			}

@@ -132,10 +132,16 @@ type BatchPoint struct {
 	CPURequest       *float64 `json:"cpu_request"`
 	CPUCoresP50      *float64 `json:"cpu_cores_p50"`
 	WallP50          *float64 `json:"wall_p50"`
+	// GPURequest is the typical request_gpus of the batch's GPU jobs, and
+	// GPUUtilP50 their median fraction of those GPUs kept busy.
+	GPURequest *float64 `json:"gpu_request"`
+	GPUUtilP50 *float64 `json:"gpu_util_p50"`
 }
 
 // Sample is one job, for scatter plots.
 type Sample struct {
+	// Job is "cluster.proc", as JobRow.ID.
+	Job       string   `json:"job"`
 	MemoryMiB *float64 `json:"memory_mib"`
 	Wall      float64  `json:"wall"`
 	Cores     *float64 `json:"cores"`

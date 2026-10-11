@@ -148,3 +148,31 @@ func TestFromAdGPUAttributes(t *testing.T) {
 		t.Errorf("utilization = %v %v", u, ok)
 	}
 }
+
+// Each submission reports its GPU request and median utilization, and
+// each scatter point names its job.
+func TestBatchGPUAndSampleJob(t *testing.T) {
+	jobs := gpuJobs(4, 2, 1024)
+	for i := range jobs {
+		jobs[i].Cluster, jobs[i].Proc = 900, int64(i)
+		jobs[i].GPUsAverageUsage = f(float64(i+1) * 0.2) // 0.1 .. 0.4 of two GPUs
+	}
+	w := onlyWorkflow(t, jobs)
+	if len(w.Batches) != 1 {
+		t.Fatalf("batches = %+v", w.Batches)
+	}
+	b := w.Batches[0]
+	if b.GPURequest == nil || *b.GPURequest != 2 || b.GPUUtilP50 == nil || *b.GPUUtilP50 != 0.2 {
+		t.Errorf("batch gpu = %v / %v, want 2 and 0.2", b.GPURequest, b.GPUUtilP50)
+	}
+	var ids []string
+	for _, s := range w.Samples {
+		ids = append(ids, s.Job)
+	}
+	if !slices.Equal(ids, []string{"900.0", "900.1", "900.2", "900.3"}) {
+		t.Errorf("sample jobs = %v", ids)
+	}
+	if nb := onlyWorkflow(t, jobsAt(2, 1, 900, 1024)).Batches[0]; nb.GPURequest != nil || nb.GPUUtilP50 != nil {
+		t.Errorf("a CPU batch reports GPUs: %+v", nb)
+	}
+}

@@ -153,7 +153,7 @@ func (s *Handler) handleUtilizationJobs(w http.ResponseWriter, r *http.Request) 
 
 	set, err := s.utilizationJobSets().getWithin(ctx, analysisKey+"|w="+page.key, utilizationComputeTimeout(uq.limit),
 		func(computeCtx context.Context) (utilizationJobSet, error) {
-			sel, schedd := selection, uq.schedd
+			sel, schedd := selection, uq.accessPoint
 			// When the cached analysis read the whole window, narrowing
 			// the read to this workflow's owner (and access point)
 			// cannot change which of its jobs come back -- only how many

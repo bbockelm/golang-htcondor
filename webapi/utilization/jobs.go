@@ -161,7 +161,7 @@ func PageJobs(jobs []Job, sort string, desc bool, offset, size int) ([]JobRow, e
 // Row is one job's row.
 func Row(j *Job) JobRow {
 	r := JobRow{
-		ID:            strconv.FormatInt(j.Cluster, 10) + "." + strconv.FormatInt(j.Proc, 10),
+		ID:            j.id(),
 		Cluster:       j.Cluster,
 		Proc:          j.Proc,
 		Schedd:        j.Schedd,
@@ -201,6 +201,11 @@ func Row(j *Job) JobRow {
 		r.GPUUtilization = ptr(u, 3)
 	}
 	return r
+}
+
+// id is "cluster.proc".
+func (j *Job) id() string {
+	return strconv.FormatInt(j.Cluster, 10) + "." + strconv.FormatInt(j.Proc, 10)
 }
 
 // leftQueue is when the job left the queue: its CompletionDate, or for a
