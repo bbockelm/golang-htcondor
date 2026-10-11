@@ -2043,6 +2043,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 
 	dbMirrorName, dbMirrorAddress, dbMirrorRequired := loadDBMirrorConfig(cfg, logger)
 	pingInterval := loadPingInterval(cfg, logger)
+	runtimeEstimateInterval, runtimeEstimateBackfill := loadRuntimeEstimateConfig(cfg, logger)
 	mcpWatchMaxWait := loadMCPWatchMaxWait(cfg, logger)
 	mcpMaxRequestDuration := loadMCPMaxRequestDuration(cfg, logger)
 	upstreamRefresh := loadUpstreamRefresh(cfg, logger)
@@ -2172,6 +2173,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		ToolStatsOmitUser:           toolStatsOmitUser,
 		ToolStatsMaxSeries:          toolStatsMaxSeries,
 		UtilizationMaxJobs:          utilizationMaxJobs,
+		RuntimeEstimateInterval:     runtimeEstimateInterval,
+		RuntimeEstimateBackfill:     runtimeEstimateBackfill,
 		DBMirrorName:                dbMirrorName,
 		DBMirrorAddress:             dbMirrorAddress,
 		DBMirrorRequired:            dbMirrorRequired,
@@ -3375,6 +3378,40 @@ func loadDBMirrorConfig(cfg *config.Config, logger *logging.Logger) (name, addre
 // not set. Passed explicitly rather than left to the library so the
 // library's zero value can mean "disabled", as its field documents.
 const defaultPingInterval = 1 * time.Minute
+
+// defaultRuntimeEstimateInterval and defaultRuntimeEstimateBackfill
+// apply when HTTP_API_RUNTIME_ESTIMATE_INTERVAL and _BACKFILL are unset.
+const (
+	defaultRuntimeEstimateInterval = 5 * time.Minute
+	defaultRuntimeEstimateBackfill = 168 * time.Hour
+)
+
+// loadRuntimeEstimateConfig reads HTTP_API_RUNTIME_ESTIMATE_INTERVAL,
+// how often the runtime estimator reads newly finished jobs from the
+// htcondordb mirror, and HTTP_API_RUNTIME_ESTIMATE_BACKFILL, how much
+// history it reads at startup.
+//
+//	interval unset   the default, 5m
+//	interval 0       runtime estimates off entirely
+//	backfill unset   the default, 168h
+//
+// A malformed value refuses to start, as HTTP_API_PING_INTERVAL does: a
+// bare number is ambiguous by a factor of sixty.
+func loadRuntimeEstimateConfig(cfg *config.Config, logger *logging.Logger) (interval, backfill time.Duration) {
+	interval = defaultRuntimeEstimateInterval
+	if raw, ok := cfg.Get("HTTP_API_RUNTIME_ESTIMATE_INTERVAL"); ok && strings.TrimSpace(raw) != "" {
+		if strings.TrimSpace(raw) == "0" {
+			interval = 0
+		} else {
+			interval = configDurationSetting(cfg, "HTTP_API_RUNTIME_ESTIMATE_INTERVAL", logger)
+		}
+	}
+	backfill = configDurationSetting(cfg, "HTTP_API_RUNTIME_ESTIMATE_BACKFILL", logger)
+	if backfill == 0 {
+		backfill = defaultRuntimeEstimateBackfill
+	}
+	return interval, backfill
+}
 
 // loadRequiredCredentials reads HTTP_API_REQUIRED_CREDENTIALS, the OAuth
 // service credentials that must be on file before a job may be submitted.

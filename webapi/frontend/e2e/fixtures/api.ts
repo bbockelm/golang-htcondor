@@ -388,6 +388,22 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
       await route.fulfill({ json: table[path] as object });
       return;
     }
+    // Every waiting or running job's page asks for its runtime estimate.
+    // By default there is none, which the page shows as nothing at all;
+    // a test that wants one routes it for its job.
+    const estimate = path.match(/^\/api\/v1\/jobs\/([^/]+)\/runtime-estimate$/);
+    if (estimate) {
+      await route.fulfill({
+        json: {
+          job_id: decodeURIComponent(estimate[1]),
+          available: false,
+          reason: 'insufficient_history',
+          exceeded_history: false,
+          model: { jobs_ingested: 0 },
+        },
+      });
+      return;
+    }
     await route.fulfill({
       status: 501,
       json: { error: `smoke suite has no fixture for ${path}` },

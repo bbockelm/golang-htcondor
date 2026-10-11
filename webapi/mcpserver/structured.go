@@ -140,6 +140,8 @@ var outputSchemas = map[string]map[string]interface{}{
 		// releases, and a client that rejected a result carrying a new
 		// one would break on a pool upgrade.
 		"dag": dagSchema,
+		// Present only when this server runs the runtime estimator.
+		"runtime_estimate": runtimeEstimateSchema,
 	}, "job_id"),
 
 	// --- aggregate ----------------------------------------------------

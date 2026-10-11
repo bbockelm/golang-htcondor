@@ -23,6 +23,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -1570,6 +1571,14 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 	// HoldReasonCode, Cmd, Arguments/Args), or the section will silently
 	// stop appearing on the workflows it exists for.
 	text = appendDagSection(text, structured, cluster, jobAds[0])
+
+	// How long it is likely to run. The whole ad is in hand, so the
+	// features and the start time are too.
+	if s.runtimeEst != nil {
+		est := s.runtimeEst.Estimate(runtimeest.QueryFromAd(jobAds[0], time.Now()))
+		structured["runtime_estimate"] = est
+		text += renderRuntimeEstimate(est)
+	}
 
 	// Both keys carry the same map. structuredContent is what a modern
 	// client validates against the published outputSchema; metadata is

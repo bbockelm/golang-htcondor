@@ -137,7 +137,12 @@ type Config struct {
 	// UtilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS: the most jobs
 	// one /api/v1/utilization analysis may read. Zero means the default.
 	UtilizationMaxJobs int
-	MetricsCacheTTL    time.Duration // Metrics cache TTL (default: 10s)
+	// RuntimeEstimateInterval and RuntimeEstimateBackfill are
+	// HTTP_API_RUNTIME_ESTIMATE_INTERVAL and _BACKFILL. See the
+	// HandlerConfig fields of the same names.
+	RuntimeEstimateInterval time.Duration
+	RuntimeEstimateBackfill time.Duration
+	MetricsCacheTTL         time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics.
 	// Configurable via HTTP_API_METRICS_PUBLIC; see HandlerConfig.
 	MetricsPublic bool
@@ -462,6 +467,8 @@ func NewServer(cfg Config) (*Server, error) {
 		ToolStatsOmitUser:           cfg.ToolStatsOmitUser,
 		ToolStatsMaxSeries:          cfg.ToolStatsMaxSeries,
 		UtilizationMaxJobs:          cfg.UtilizationMaxJobs,
+		RuntimeEstimateInterval:     cfg.RuntimeEstimateInterval,
+		RuntimeEstimateBackfill:     cfg.RuntimeEstimateBackfill,
 		DBMirrorName:                cfg.DBMirrorName,
 		DBMirrorAddress:             cfg.DBMirrorAddress,
 		DBMirrorRequired:            cfg.DBMirrorRequired,

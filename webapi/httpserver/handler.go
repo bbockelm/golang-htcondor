@@ -40,6 +40,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -400,6 +401,11 @@ type Handler struct {
 	jobWatch     *jobwatch.Store
 	jobWatchEval *jobwatch.Evaluator
 	jobWatchFeed *jobwatch.Feed
+	// runtimeEst answers runtime estimates and runtimeRefresher keeps it
+	// fed from the mirror's history; both nil when the feature is off.
+	// See runtime_estimate.go.
+	runtimeEst       *runtimeest.Estimator
+	runtimeRefresher *runtimeRefresher
 	// jobPolls backs GET /api/v1/jobs/{id}/watch on a pool with no usable
 	// mirror feed: one schedd poll per distinct owner-scoped constraint,
 	// however many browsers are watching that job.
@@ -711,6 +717,16 @@ type HandlerConfig struct {
 	// one utilization analysis may read. Zero means the default (a
 	// million).
 	UtilizationMaxJobs int
+	// RuntimeEstimateInterval is how often the runtime estimator reads
+	// newly finished jobs from the htcondordb mirror
+	// (HTTP_API_RUNTIME_ESTIMATE_INTERVAL). Zero or negative disables
+	// runtime estimates entirely; there is no implicit default here, the
+	// shipped daemon sets 5m.
+	RuntimeEstimateInterval time.Duration
+	// RuntimeEstimateBackfill is how much history the estimator reads at
+	// startup, and how long a group of jobs is remembered without a new
+	// completion (HTTP_API_RUNTIME_ESTIMATE_BACKFILL). Zero means 168h.
+	RuntimeEstimateBackfill time.Duration
 
 	MetricsCacheTTL time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics. Use
@@ -1431,6 +1447,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// Live count of open watch/SSE streams, exposed to /metrics from the same
 	// atomic the collector ad reads (one source of truth).
 	h.registerStreamGauge()
+	// Registered whether or not the feature is on; see the collector.
+	h.httpMetricsState.registry.MustRegister(newRuntimeEstimateCollector(h))
 
 	// Discover credd if not provided
 	// Services this access point wants on file before a job is submitted.
@@ -2046,6 +2064,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.jobWatchEval = jobwatch.NewEvaluator(h.jobWatch, watchSource{h: h, feed: h.jobWatchFeed},
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
 
+	h.initRuntimeEstimates(cfg)
+
 	var mcpMulti *multiap.Service
 	mcpMultiConstraint := ""
 	if h.multi != nil {
@@ -2111,6 +2131,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// registered through one surface is visible from the other.
 		JobWatch:     h.jobWatch,
 		JobWatchEval: h.jobWatchEval,
+		// The same estimator the REST endpoint answers from; nil when
+		// runtime estimates are off, which leaves get_job without them.
+		RuntimeEstimator: h.runtimeEst,
 		// How long watch_jobs may block in-call. An explicit
 		// HTTP_API_MCP_WATCH_MAX_WAIT wins, because only the operator
 		// knows the gateway timeout in front of this daemon; otherwise it
@@ -2554,6 +2577,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	h.startJobWatchFeed(ctx)
 	h.startJobWatchNudge(ctx)
 	h.startJupyterSweeper(ctx)
+	h.startRuntimeEstimates(ctx)
 
 	return nil
 }

@@ -18,6 +18,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/dagman"
+	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
 )
 
 // A DAGMan workflow submitted from here is an ordinary scheduler-universe
@@ -878,50 +879,13 @@ func dagFileFromAd(ad *classad.ClassAd) string {
 			return ""
 		}
 	}
-	tokens := splitV2Args(raw)
+	tokens := jobargs.SplitV2(raw)
 	for i, tok := range tokens {
 		if strings.EqualFold(tok, "-Dag") && i+1 < len(tokens) {
 			return tokens[i+1]
 		}
 	}
 	return ""
-}
-
-// splitV2Args undoes HTCondor's "new syntax" argument quoting as it
-// reaches the job ad: arguments are separated by whitespace outside
-// single quotes, whitespace inside them is literal, and a doubled single
-// quote is one literal quote. The outer double quotes belong to the
-// SUBMIT FILE and are gone by the time the value is an attribute.
-func splitV2Args(s string) []string {
-	var out []string
-	var cur strings.Builder
-	inQuote, started := false, false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '\'':
-			if inQuote && i+1 < len(s) && s[i+1] == '\'' {
-				cur.WriteByte('\'')
-				i++
-				continue
-			}
-			inQuote = !inQuote
-			started = true
-		case !inQuote && (c == ' ' || c == '\t'):
-			if started {
-				out = append(out, cur.String())
-				cur.Reset()
-				started = false
-			}
-		default:
-			cur.WriteByte(c)
-			started = true
-		}
-	}
-	if started {
-		out = append(out, cur.String())
-	}
-	return out
 }
 
 // writeDagNotes renders the analysis.

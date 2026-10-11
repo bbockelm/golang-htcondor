@@ -1277,6 +1277,8 @@ at `/openapi.json`.
 - `GET /api/v1/jobs/{id}` — retrieve one
 - `PUT /api/v1/jobs/{id}/input` — upload input tarball
 - `GET /api/v1/jobs/{id}/output` — download output tarball
+- `GET /api/v1/jobs/{id}/runtime-estimate` — how long the job is likely
+  to run; see [Runtime estimates](#runtime-estimates)
 
 **Templates** (browser-submission UI)
 - `GET /api/v1/templates` — list
@@ -1461,6 +1463,77 @@ metrics key.
 - The full MCP surface is exposed at `/mcp/*` for cooperative
   agents. The standalone `htcondor-mcp` binary speaks the same MCP
   protocol over stdio. See [mcpserver/README.md](../webapi/mcpserver/README.md).
+
+### Runtime estimates
+
+`GET /api/v1/jobs/{id}/runtime-estimate` estimates how long a job will run
+from the runtimes of **the same owner's** similar jobs that have already
+completed, and the MCP `get_job` tool carries the same answer as
+`runtime_estimate`. It needs the [htcondordb](#further-reading) mirror:
+history is read from the mirror's archive every
+`HTTP_API_RUNTIME_ESTIMATE_INTERVAL` (default `5m`), never from the
+schedd, because a background `condor_history` scan would cost the access
+point more than the estimates are worth. Without a mirror the feature is
+off; with a mirror that is stale or has a history gap, the estimates in
+memory keep answering and the read is retried next interval.
+
+Each completed job is filed under a ladder of groups, from most to least
+specific: its cluster, its exact command line (directories, URLs and
+hashes dropped), the same command line with every number masked, its
+batch name less any run number, its submit directory, its program, and
+the owner's jobs as a whole; the access point's jobs as a whole are the
+last resort. For an interpreter (`python`, `bash -c`, `apptainer exec`,
+...) the program is the script it runs. An estimate is the median of the
+most recent 100 runtimes in one group — a single earlier run is enough,
+since they are the owner's own jobs; the access point's group needs 30.
+Which group answers is chosen per owner by how well each has predicted
+that owner's jobs so far. Each completed job is scored as it would have
+been estimated when it was submitted and when it started, from only the
+jobs that had finished by then, so the record matches the moment a
+question is actually asked. The likely range (`p10_seconds` to
+`p90_seconds`) comes from those past estimation errors — the owner's,
+pooled with the access point's for the same group level, at the same
+point in a job's life (waiting or running) — widened to the group's own
+spread when that is larger. Only completed
+jobs that exited 0 count; DAGMan and other scheduler/local-universe jobs
+are left out. Nothing about another job — its command, id or owner — is
+ever returned.
+
+```json
+{
+  "job_id": "1234.0",
+  "available": true,
+  "estimate_seconds": 2710,
+  "p10_seconds": 1840,
+  "p90_seconds": 5120,
+  "basis": {"level": "template", "sample_count": 64},
+  "elapsed_seconds": 900,
+  "remaining_seconds": 1810,
+  "exceeded_history": false,
+  "model": {"trained_through": "2026-10-10T17:42:11Z", "jobs_ingested": 48213}
+}
+```
+
+The web UI's job page shows it under the job's status, as "Expected run
+time", for a waiting or running job when there is an estimate, and
+nothing otherwise.
+
+`elapsed_seconds` and `remaining_seconds` appear only for a running job.
+A running job that has outlived the typical run is re-estimated from the
+runs in its group that lasted at least as long; once it has outlived
+nearly all of them, `exceeded_history` is true and no remaining time is
+given. When there is no estimate the response is still 200, with
+`available: false` and a `reason`: `disabled`, `model_warming_up` (the
+history has not been read yet) or `insufficient_history`.
+
+Metrics, all prefixed `htcondor_api_runtime_estimate_`: `enabled`,
+`jobs_ingested_total`, `last_refresh_timestamp_seconds`,
+`trained_through_timestamp_seconds`, `refresh_errors_total`,
+`refresh_truncations_total`, `keys{level}`, `owners`, and the estimator's
+running record of itself, `scored_total{level}` and
+`within_2x_total{level}`: every completed job is first scored against the
+estimate it would have got when it was submitted, so
+`within_2x_total / scored_total` is live accuracy at submit.
 
 ## Example calls
 
@@ -1826,6 +1899,8 @@ Frequently-used knobs:
 | `HTTP_API_TOOL_STATS_FLUSH_INTERVAL` | How often MCP tool-call counters are written to the application database (e.g. `5m`). Default `5m`; they are also written at shutdown. See [MCP tool-call statistics](#mcp-tool-call-statistics). |
 | `HTTP_API_TOOL_STATS_MAX_LABEL_VALUES` | Cap on distinct values per `/metrics` label for tool statistics. Default `1000`; past it the quietest values render as `other`, while the database keeps them all. |
 | `HTTP_API_UTILIZATION_MAX_JOBS` | Most finished jobs one Utilization analysis (`GET /api/v1/utilization`) may read; a larger `limit` is clamped to it. Default `1000000`. An analysis holds about 250 bytes per job while it runs, so the default is about a quarter of a gigabyte at peak; the cached result is the answer, not the jobs. Read at startup. |
+| `HTTP_API_RUNTIME_ESTIMATE_INTERVAL` | How often [runtime estimates](#runtime-estimates) read newly completed jobs from the htcondordb mirror (a duration, e.g. `5m`). Default `5m`; `0` turns runtime estimates off entirely. Without a mirror they are off whatever this says. Read at startup. |
+| `HTTP_API_RUNTIME_ESTIMATE_BACKFILL` | How much job history runtime estimates read at startup, and how long a group of similar jobs is remembered without a new completion. Default `168h`. At most 500,000 of the newest records are read; the log says when that cap is hit. Read at startup. |
 | `HTTP_API_TOOL_STATS_MAX_SERIES` | Cap on distinct tool-call combinations held in memory and in the database. Default `10000`; past it new combinations fold into `other`. This is what bounds memory and disk. |
 | `HTTP_API_TOOL_STATS_OMIT_USER` | `true` renders every `/metrics` user label as `omitted`, for a site that does not want account names on a scrapeable endpoint. The database still records them. See [Usernames on /metrics](#usernames-on-metrics). |
 | `HTTP_API_ENABLE_MCP` | Enable the `/mcp/*` endpoints. Required by the chat assistant. |
