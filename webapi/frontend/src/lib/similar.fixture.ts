@@ -5,13 +5,13 @@ import type { EstimateLevel, SimilarJob, SimilarJobsResponse, UtilizationForJob 
 // suite and a dev mock. Only type imports, so Node can load it directly.
 
 const LEVELS: { level: EstimateLevel; description: string; count: number | null; median: number }[] = [
-  { level: 'exact', description: 'same command and arguments', count: 12, median: 2400 },
+  { level: 'exact', description: 'same command and arguments, directories and hashes ignored', count: 12, median: 2400 },
   { level: 'template', description: 'same command, numbers ignored', count: 41, median: 2700 },
-  { level: 'batch', description: 'same batch name', count: 64, median: 3000 },
-  { level: 'iwd', description: 'same submit directory', count: 80, median: 3300 },
-  { level: 'cmd', description: 'same program', count: 150, median: 3600 },
-  { level: 'owner', description: 'all your jobs', count: 400, median: 1800 },
-  { level: 'global', description: 'all jobs on this access point', count: 5000, median: 1200 },
+  { level: 'batch', description: 'same batch name, run number ignored', count: 64, median: 3000 },
+  { level: 'iwd', description: 'same submit directory, numbers ignored', count: 80, median: 3300 },
+  { level: 'cmd', description: 'same program, any arguments', count: 150, median: 3600 },
+  { level: 'owner', description: 'all your jobs of this kind', count: 400, median: 1800 },
+  { level: 'global', description: 'every job of this kind on this access point', count: 5000, median: 1200 },
 ];
 
 const NOW = 1_760_100_000;

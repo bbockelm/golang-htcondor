@@ -147,7 +147,7 @@ export function SimilarJobs({
       <div className={q.isFetching && !q.isFetchingNextPage ? 'opacity-60' : undefined}>
         <p className="text-sm text-gray-600">
           <span className="font-medium text-gray-900">{first.description.charAt(0).toUpperCase() + first.description.slice(1)}</span>
-          {': '}finished in the last {first.window.days} days
+          {': '}finished in the last {Math.round(first.window.days)} days
           {first.total > 0 && !first.aggregate_only ? `, ${first.total.toLocaleString()} found` : ''}.
         </p>
         {first.runtimes ? (
@@ -155,7 +155,7 @@ export function SimilarJobs({
             <RuntimeSpread runtimes={first.runtimes} mark={mark} />
           </div>
         ) : (
-          <p className="mt-2 text-sm text-gray-500">No run times are held for this group right now.</p>
+          <p className="mt-2 text-sm text-gray-500">Run times for this group are not available yet.</p>
         )}
         {first.aggregate_only ? (
           <p className="mt-2 text-sm text-gray-600" data-testid="aggregate-only">

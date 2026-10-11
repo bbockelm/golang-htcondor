@@ -58,7 +58,7 @@ describe('SimilarJobs', () => {
     expect(chosen).toHaveTextContent('same command, numbers ignored · 41 (used for the estimate)');
     // A level that does not apply to this job is not offered.
     expect(within(levels).queryByText(/same cluster/)).not.toBeInTheDocument();
-    expect(within(levels).getByRole('radio', { name: /same program · 150/ })).toBeInTheDocument();
+    expect(within(levels).getByRole('radio', { name: /same program, any arguments · 150/ })).toBeInTheDocument();
     // The jobs, newest first, each linking to its record.
     const rows = screen.getAllByRole('row').slice(1);
     expect(rows).toHaveLength(41);

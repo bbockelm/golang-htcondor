@@ -74,11 +74,11 @@ test("a job's page links its batch, its workflow and the jobs its estimate is ba
 
   // Wider: every job running the same program.
   await similar.getByRole('radio', { name: /same program/ }).click();
-  await expect(similar.getByRole('radio', { checked: true })).toContainText('same program · 150');
+  await expect(similar.getByRole('radio', { checked: true })).toContainText('same program, any arguments · 150');
   await expect(similar.getByRole('button', { name: /Show more \(50 of 150\)/ })).toBeVisible();
 
   // The whole access point: its spread, not other people's jobs.
-  await similar.getByRole('radio', { name: /all jobs on this access point/ }).click();
+  await similar.getByRole('radio', { name: /every job of this kind on this access point/ }).click();
   await expect(similar.getByTestId('aggregate-only')).toBeVisible();
   await expect(similar.locator('table')).toHaveCount(0);
 });
