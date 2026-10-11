@@ -43,7 +43,7 @@ func TestTrackedSetIsRangeEncoded(t *testing.T) {
 // a job wrongly in the set is one whose disappearance will be read as
 // having finished.
 func TestTrackedEncodingHandlesGapsAndClusters(t *testing.T) {
-	ids := []JobID{{417, 0}, {417, 1}, {417, 5}, {418, 0}, {417, 2}}
+	ids := []JobID{{417, 0, ""}, {417, 1, ""}, {417, 5, ""}, {418, 0, ""}, {417, 2, ""}}
 	blob, err := encodeTracked(ids)
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestTrackedEncodingHandlesGapsAndClusters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[JobID]bool{{417, 0}: true, {417, 1}: true, {417, 2}: true, {417, 5}: true, {418, 0}: true}
+	want := map[JobID]bool{{417, 0, ""}: true, {417, 1, ""}: true, {417, 2, ""}: true, {417, 5, ""}: true, {418, 0, ""}: true}
 	if len(back) != len(want) {
 		t.Fatalf("decoded %d jobs, want %d: %+v", len(back), len(want), back)
 	}
@@ -75,7 +75,7 @@ func TestTrackedDecodesTheOldEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the previous encoding must still decode: %v", err)
 	}
-	if len(back) != 2 || back[0] != (JobID{417, 0}) || back[1] != (JobID{417, 1}) {
+	if len(back) != 2 || back[0] != (JobID{417, 0, ""}) || back[1] != (JobID{417, 1, ""}) {
 		t.Errorf("old encoding decoded wrong: %+v", back)
 	}
 	if empty, err := decodeTracked("[]"); err != nil || len(empty) != 0 {
@@ -92,7 +92,7 @@ func TestUnchangedProgressIsNotWritten(t *testing.T) {
 	ctx := context.Background()
 	w := register(t, s, "alice", EventDone, ModeAll)
 
-	tracked := []JobID{{42, 0}, {42, 1}}
+	tracked := []JobID{{42, 0, ""}, {42, 1, ""}}
 	if err := s.SaveProgress(ctx, w, Outcome{Tracked: tracked}); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestUnchangedProgressIsNotWritten(t *testing.T) {
 	}
 
 	// A job appears: that is worth recording.
-	if err := s.SaveProgress(ctx, w, Outcome{Tracked: append(tracked, JobID{42, 2})}); err != nil {
+	if err := s.SaveProgress(ctx, w, Outcome{Tracked: append(tracked, JobID{42, 2, ""})}); err != nil {
 		t.Fatal(err)
 	}
 	if w.trackedBlob == first {
@@ -164,7 +164,7 @@ func TestOldTrackedEncodingStillDecodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0] != (JobID{42, 0}) || got[1] != (JobID{42, 1}) {
+	if len(got) != 2 || got[0] != (JobID{42, 0, ""}) || got[1] != (JobID{42, 1, ""}) {
 		t.Errorf("old-format tracked set decoded to %v", got)
 	}
 }

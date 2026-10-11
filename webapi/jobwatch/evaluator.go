@@ -3,6 +3,7 @@ package jobwatch
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -73,6 +74,15 @@ type Evaluator struct {
 	logf   func(msg string, args ...any)
 	now    func() time.Time
 	Period time.Duration
+
+	mu sync.Mutex
+	// owners serializes passes per owner: the sweep, a nudge and a
+	// caller's wait may all evaluate one owner's watches, and the
+	// absence memory below is only meaningful in pass order.
+	owners map[string]*sync.Mutex
+	// memory is per watch id; see absenceMemory. Used only with a
+	// CoveredSource.
+	memory map[string]*absenceMemory
 }
 
 // NewEvaluator wires an evaluator. logf may be nil.
@@ -80,7 +90,48 @@ func NewEvaluator(store *Store, src Source, logf func(string, ...any)) *Evaluato
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Evaluator{store: store, src: src, logf: logf, now: time.Now, Period: DefaultInterval}
+	return &Evaluator{store: store, src: src, logf: logf, now: time.Now, Period: DefaultInterval,
+		owners: map[string]*sync.Mutex{}, memory: map[string]*absenceMemory{}}
+}
+
+// ownerLock returns the mutex serializing owner's passes.
+func (e *Evaluator) ownerLock(owner string) *sync.Mutex {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	m := e.owners[owner]
+	if m == nil {
+		m = &sync.Mutex{}
+		e.owners[owner] = m
+	}
+	return m
+}
+
+// memoryFor returns a watch's absence memory, creating it.
+func (e *Evaluator) memoryFor(id string) *absenceMemory {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	m := e.memory[id]
+	if m == nil {
+		m = &absenceMemory{since: map[JobID]time.Time{}}
+		e.memory[id] = m
+	}
+	return m
+}
+
+// forget drops the absence memory of watches not in live, which have
+// fired, expired or been cancelled.
+func (e *Evaluator) forget(live []*Watch) {
+	keep := make(map[string]bool, len(live))
+	for _, w := range live {
+		keep[w.ID] = true
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for id := range e.memory {
+		if !keep[id] {
+			delete(e.memory, id)
+		}
+	}
 }
 
 // Stats is what one pass did, for logging and tests.
@@ -136,6 +187,7 @@ func (e *Evaluator) Pass(ctx context.Context) (Stats, error) {
 		return st, fmt.Errorf("listing live watches: %w", err)
 	}
 	st.Watches = len(live)
+	e.forget(live)
 	if len(live) == 0 {
 		return st, nil
 	}
@@ -161,6 +213,10 @@ func (e *Evaluator) Pass(ctx context.Context) (Stats, error) {
 }
 
 func (e *Evaluator) passOwner(ctx context.Context, owner string, watches []*Watch) (int, error) {
+	lock := e.ownerLock(owner)
+	lock.Lock()
+	defer lock.Unlock()
+
 	// The oldest watch decides how far back to look, so a watch
 	// registered after its jobs finished still sees them.
 	since := e.now().Add(-HistoryLookback)
@@ -175,24 +231,40 @@ func (e *Evaluator) passOwner(ctx context.Context, owner string, watches []*Watc
 	// One fold per watch, all fed from a single pass over the owner's
 	// jobs. This is why the queue is read once per owner rather than
 	// once per watch, and why none of it is kept.
+	covered, perAP := e.src.(CoveredSource)
 	folds := make([]*Fold, len(watches))
 	for i, w := range watches {
-		folds[i] = w.Fold(e.now(), false)
+		folds[i] = w.fold(e.now(), false, perAP)
 	}
 
-	truncated, err := e.src.Queue(ctx, owner, attrs, QueueLimit, func(ad *classad.ClassAd) {
+	queued := func(ad *classad.ClassAd) {
 		for _, f := range folds {
 			f.Queued(ad)
 		}
-	})
+	}
+	var truncated bool
+	var cov *Coverage
+	var err error
+	if perAP {
+		truncated, cov, err = covered.QueueCovered(ctx, owner, attrs, QueueLimit, queued)
+		if cov == nil {
+			cov = NewCoverage()
+		}
+	} else {
+		truncated, err = e.src.Queue(ctx, owner, attrs, QueueLimit, queued)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("reading the queue: %w", err)
 	}
-	if truncated {
-		// Discovered only at the end of the read, so it is applied to
-		// the folds now rather than at construction.
-		for _, f := range folds {
+	readAt := e.now()
+	for i, f := range folds {
+		if truncated {
+			// Discovered only at the end of the read, so it is applied
+			// to the folds now rather than at construction.
 			f.Truncated()
+		}
+		if perAP {
+			f.cov, f.mem, f.readAt = cov, e.memoryFor(watches[i].ID), readAt
 		}
 	}
 

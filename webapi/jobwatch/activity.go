@@ -50,7 +50,10 @@ type ActivityEvent struct {
 	Kind    ActivityKind
 	Cluster int64
 	Proc    int64
-	Owner   string
+	// Schedd is the job's access point, from ScheddName, on a feed that
+	// follows several; empty with one schedd.
+	Schedd string
+	Owner  string
 	// At is when the transition was observed, not when the job says it
 	// happened. The two differ by the mirror's lag, and the observed
 	// time is the honest one for a live ticker.
@@ -178,7 +181,8 @@ func (f *Feed) activityFor(prev, next *classad.ClassAd) (ActivityEvent, bool) {
 	}
 	now := f.now()
 	ev := ActivityEvent{Cluster: id.cluster, Proc: id.proc, At: now.Unix()}
-	ev.Owner, _ = next.EvaluateAttrString("Owner")
+	ev.Owner = f.ownerOf(next)
+	ev.Schedd, _ = next.EvaluateAttrString("ScheddName")
 
 	recent := func(attr string) bool {
 		at, ok := next.EvaluateAttrInt(attr)
@@ -250,7 +254,8 @@ func (f *Feed) activityForDelete(last *classad.ClassAd) (ActivityEvent, bool) {
 		return ActivityEvent{}, false
 	}
 	ev := ActivityEvent{Cluster: id.cluster, Proc: id.proc, At: f.now().Unix()}
-	ev.Owner, _ = last.EvaluateAttrString("Owner")
+	ev.Owner = f.ownerOf(last)
+	ev.Schedd, _ = last.EvaluateAttrString("ScheddName")
 	switch status {
 	case 4:
 		ev.Kind, ev.Detail = ActivityCompleted, outcome(last)

@@ -3,8 +3,8 @@ package jobwatch
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,6 +78,24 @@ type Feed struct {
 	now  func() time.Time
 	logf func(string, ...any)
 
+	// cursor is the position of the last event applied, for a resumable
+	// stream (RunResumable); nil before the first.
+	cursor []byte
+
+	// OwnerOf names the owner a job ad belongs to, for owner-scoped
+	// reads and the activity stream. Nil reads the Owner attribute. A
+	// server fronting several access points keys on User instead (see
+	// webapi/multiap), and must set this before Run.
+	OwnerOf func(*classad.ClassAd) string
+	// VouchDeparture, when set, is asked as each delete arrives whether
+	// the job's leaving the queue is evidence that it finished: on a
+	// federation hub a delete is also what retiring an access point, or
+	// reconciling one that was replayed, looks like. A departure it does
+	// not vouch for is still recorded (subscribers are told the job is
+	// gone) but counts in Departures only if the job's last ad already
+	// said it had finished.
+	VouchDeparture func(*classad.ClassAd) bool
+
 	// MaxEnded bounds memory; oldest out first.
 	MaxEnded int
 	// EndedTTL is how long a terminal record stays useful. It only has
@@ -107,12 +125,22 @@ type endedJob struct {
 	// records needs no evaluation at all.
 	owner string
 	at    time.Time
+	// schedd, cluster, proc and status are the job's ScheddName
+	// (lower-cased), id and last JobStatus, for Departures.
+	schedd        string
+	cluster, proc int64
+	status        int64
+	// vouched is VouchDeparture's verdict when the delete arrived; true
+	// where there is no such hook.
+	vouched bool
 }
 
 // freezeEnded records ad as a job's final state. The caller holds f.mu
 // and owns ad: AST sorts the ad's attribute slice in place.
-func freezeEnded(ad *classad.ClassAd, at time.Time) endedJob {
-	owner, _ := ad.EvaluateAttrString("Owner")
+func (f *Feed) freezeEnded(ad *classad.ClassAd, at time.Time) endedJob {
+	owner := f.ownerOf(ad)
+	schedd, _ := ad.EvaluateAttrString("ScheddName")
+	id, _ := identOf(ad)
 	src := ad.AST().Attributes
 	attrs := make([]ast.AttributeAssignment, 0, len(src))
 	for _, a := range src {
@@ -120,7 +148,8 @@ func freezeEnded(ad *classad.ClassAd, at time.Time) endedJob {
 			attrs = append(attrs, *a)
 		}
 	}
-	return endedJob{attrs: attrs, owner: owner, at: at}
+	return endedJob{attrs: attrs, owner: owner, at: at, schedd: strings.ToLower(schedd),
+		cluster: id.cluster, proc: id.proc, status: statusOf(ad)}
 }
 
 // ad builds a ClassAd over the frozen attributes for one caller. It is
@@ -160,6 +189,9 @@ type WatchEvent struct {
 	Kind   uint8 // 0 upsert, 1 delete, 2 reset (db.WatchKind)
 	Key    string
 	AdText string
+	// Cursor is the stream position after this event, for resuming a
+	// stream (RunResumable). Empty where the transport gives none.
+	Cursor []byte
 }
 
 // Event kinds, matching db.WatchKind.
@@ -223,10 +255,78 @@ func (f *Feed) Run(ctx context.Context, dial Dialer) error {
 	return nil
 }
 
+// ResumeDialer opens a watch on a jobs table from a cursor: nil for the
+// head of the change log (changes from now on), else the position after
+// the last event this feed applied.
+type ResumeDialer func(ctx context.Context, cursor []byte) (events <-chan WatchEvent, stop func(), err error)
+
+// RunResumable follows a jobs table until ctx is done, like Run, but
+// resumes from where it left off after a dropped stream instead of
+// starting over: what it holds survives the gap, and the deletes that
+// happened during it arrive on resume carrying the outcomes it kept.
+//
+// The source decides whether it can resume. When it cannot -- its change
+// log no longer reaches back that far, or it restarted -- it says so with
+// a Reset, which clears this feed, followed by its whole table. A resume
+// that cannot even be opened starts over from the head, cleared: the
+// cursor may be the reason.
+//
+// A federation hub's jobs table is what this follows in multi-AP mode:
+// one stream for every access point.
+func (f *Feed) RunResumable(ctx context.Context, dial ResumeDialer) error {
+	backoff := time.Second
+	for ctx.Err() == nil {
+		f.mu.Lock()
+		cursor := append([]byte(nil), f.cursor...)
+		f.mu.Unlock()
+		if len(cursor) == 0 {
+			cursor = nil
+		}
+		err := f.follow(ctx, func(ctx context.Context) (<-chan WatchEvent, func(), error) {
+			return dial(ctx, cursor)
+		})
+		if ctx.Err() != nil {
+			return nil
+		}
+		var openErr *followOpenError
+		if errors.As(err, &openErr) && cursor != nil {
+			// Nothing was resumed, and the cursor may be why.
+			f.Reset()
+			f.mu.Lock()
+			f.cursor = nil
+			f.mu.Unlock()
+		} else {
+			// Cold while away, but what is held stays: the resume
+			// brings the gap's changes, or a Reset if it cannot.
+			f.setWarm(false)
+		}
+		if err != nil {
+			f.logf("htcondordb job watch stream ended; resuming", "error", err)
+		} else {
+			backoff = time.Second
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > time.Minute {
+			backoff = time.Minute
+		}
+	}
+	return nil
+}
+
+// followOpenError is a stream that could not be opened at all.
+type followOpenError struct{ err error }
+
+func (e *followOpenError) Error() string { return "opening the change stream: " + e.err.Error() }
+func (e *followOpenError) Unwrap() error { return e.err }
+
 func (f *Feed) follow(ctx context.Context, dial Dialer) error {
 	events, stop, err := dial(ctx)
 	if err != nil {
-		return fmt.Errorf("opening the change stream: %w", err)
+		return &followOpenError{err: err}
 	}
 	defer stop()
 
@@ -252,6 +352,9 @@ func (f *Feed) follow(ctx context.Context, dial Dialer) error {
 func (f *Feed) Apply(ev WatchEvent) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(ev.Cursor) > 0 {
+		f.cursor = append(f.cursor[:0], ev.Cursor...)
+	}
 
 	switch ev.Kind {
 	case WatchUpsert:
@@ -291,7 +394,9 @@ func (f *Feed) Apply(ev WatchEvent) {
 		// The delete says only that the key is gone. What it was doing
 		// when it went is in the upsert we kept.
 		if ad, ok := f.live[ev.Key]; ok {
-			f.ended[ev.Key] = freezeEnded(ad, f.now())
+			e := f.freezeEnded(ad, f.now())
+			e.vouched = f.VouchDeparture == nil || f.VouchDeparture(ad)
+			f.ended[ev.Key] = e
 			delete(f.live, ev.Key)
 			if act, aok := f.activityForDelete(ad); aok && f.announced[ev.Key] != act.Kind {
 				f.publishActivityLocked(act)
@@ -402,6 +507,39 @@ func (f *Feed) EachTerminal(owner string, since time.Time, yield func(*classad.C
 	for _, e := range mine {
 		yield(e.ad())
 	}
+}
+
+// ownerOf is OwnerOf, defaulting to the Owner attribute.
+func (f *Feed) ownerOf(ad *classad.ClassAd) string {
+	if f.OwnerOf != nil {
+		return f.OwnerOf(ad)
+	}
+	v, _ := ad.EvaluateAttrString("Owner")
+	return v
+}
+
+// Departures counts, per access point (lower-cased ScheddName, "" for a
+// row without one), one owner's jobs that left the queue at or after
+// since: those whose last ad said they had finished, and those whose
+// delete VouchDeparture vouched for. Nil from a cold feed, which has no
+// picture to count from.
+func (f *Feed) Departures(owner string, since time.Time) map[string]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.warm {
+		return nil
+	}
+	out := map[string]int{}
+	for _, e := range f.ended {
+		if e.at.Before(since) || e.owner != owner {
+			continue
+		}
+		if !e.vouched && !isTerminalStatus(e.status) {
+			continue
+		}
+		out[e.schedd]++
+	}
+	return out
 }
 
 // evictLocked bounds memory: age first, then oldest-out if still over.

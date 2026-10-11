@@ -20,36 +20,36 @@ import (
 // the ones where a job appeared or finished, and those are rare compared
 // with the passes that just confirm nothing moved.
 
-// jobRange is an inclusive run of procs in one cluster.
+// jobRange is an inclusive run of procs in one cluster on one access
+// point. S is the access point (multi-AP mode); a range stored without
+// it, by a server with one schedd or before access points were recorded,
+// decodes with none.
 type jobRange struct {
-	Cluster int64 `json:"c"`
-	From    int64 `json:"f"`
-	To      int64 `json:"t"`
+	Cluster int64  `json:"c"`
+	From    int64  `json:"f"`
+	To      int64  `json:"t"`
+	S       string `json:"s,omitempty"`
 }
 
 // encodeTracked renders a job set as coalesced ranges.
 func encodeTracked(ids []JobID) (string, error) {
 	sorted := append([]JobID(nil), ids...)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Cluster != sorted[j].Cluster {
-			return sorted[i].Cluster < sorted[j].Cluster
-		}
-		return sorted[i].Proc < sorted[j].Proc
-	})
+	sort.Slice(sorted, func(i, j int) bool { return jobIDLess(sorted[i], sorted[j]) })
 
 	ranges := make([]jobRange, 0, 8)
 	for _, id := range sorted {
 		if n := len(ranges); n > 0 {
 			last := &ranges[n-1]
+			same := last.S == id.Schedd && last.Cluster == id.Cluster
 			switch {
-			case last.Cluster == id.Cluster && id.Proc == last.To:
+			case same && id.Proc == last.To:
 				continue // duplicate
-			case last.Cluster == id.Cluster && id.Proc == last.To+1:
+			case same && id.Proc == last.To+1:
 				last.To = id.Proc
 				continue
 			}
 		}
-		ranges = append(ranges, jobRange{Cluster: id.Cluster, From: id.Proc, To: id.Proc})
+		ranges = append(ranges, jobRange{Cluster: id.Cluster, From: id.Proc, To: id.Proc, S: id.Schedd})
 	}
 	blob, err := json.Marshal(ranges)
 	if err != nil {
@@ -75,7 +75,7 @@ func decodeTracked(blob string) ([]JobID, error) {
 				return nil, fmt.Errorf("decoding the tracked set: range %d.%d-%d is inverted", r.Cluster, r.From, r.To)
 			}
 			for proc := r.From; proc <= r.To; proc++ {
-				out = append(out, JobID{Cluster: r.Cluster, Proc: proc})
+				out = append(out, JobID{Cluster: r.Cluster, Proc: proc, Schedd: r.S})
 			}
 		}
 		return out, nil
