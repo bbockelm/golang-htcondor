@@ -1517,8 +1517,8 @@ export function FitMeter({
     `${label}: ${formatPercent(fraction)} of the reservation used` +
     (request ? (adaptive ? `; the request starts at ${request} and grows` : `; requested ${request}`) : '');
   return (
-    <span className="flex items-center gap-2 whitespace-nowrap" title={title} data-testid="fit-meter" data-over={over}>
-      <span role="img" aria-label={title} className="relative inline-block h-2 w-16 shrink-0 overflow-hidden rounded-sm" style={{ backgroundColor: UTIL_COLOR.track }}>
+    <span className="flex items-center gap-1.5 whitespace-nowrap" title={title} data-testid="fit-meter" data-over={over}>
+      <span role="img" aria-label={title} className="relative inline-block h-2 w-12 shrink-0 overflow-hidden rounded-sm" style={{ backgroundColor: UTIL_COLOR.track }}>
         <span
           className="absolute inset-y-0 left-0 rounded-sm"
           style={{ width: `max(2px, ${Math.min(1, fraction) * 100}%)`, backgroundColor: over ? UTIL_COLOR.over : UTIL_COLOR.used }}

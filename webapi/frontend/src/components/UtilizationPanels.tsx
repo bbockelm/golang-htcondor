@@ -55,7 +55,7 @@ import { SortableHeader, useSortedRows, useSortState } from '@/components/Sortab
 import { WorkflowJobs, type JobsQuery } from '@/components/UtilizationJobs';
 import { useInfiniteList } from '@/components/BatchTable';
 import { ApplyPanel } from '@/components/UtilizationApply';
-import { useNarrow } from '@/lib/useNarrow';
+import { useCards } from '@/lib/useNarrow';
 import {
   Histogram,
   MemoryCurve,
@@ -529,7 +529,7 @@ export function WorkflowsTable({
   // Set when the page can narrow to a user: owner names become buttons.
   onOwner?: (owner: string) => void;
 }) {
-  const narrow = useNarrow();
+  const narrow = useCards();
   const [sort, setSort] = useSortState<SortKey>('wall', 'desc');
   const [singlesOpen, setSinglesOpen] = useState(false);
   const { multi, singles } = useMemo(() => splitSingles(workflows), [workflows]);
@@ -591,7 +591,7 @@ export function WorkflowsTable({
       </h2>
       {narrow ? (
         <>
-          {/* No column headers to click on a phone: the order is picked
+          {/* No column headers to click as cards: the order is picked
               here instead. */}
           <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-gray-600">
             <label className="flex items-center gap-1.5">
@@ -617,7 +617,7 @@ export function WorkflowsTable({
               {sort.direction === 'asc' ? '▴' : '▾'}
             </button>
           </div>
-          <ul className="space-y-2" data-testid="workflow-cards">
+          <ul className="grid grid-cols-1 gap-2 md:grid-cols-2" data-testid="workflow-cards">
             {visible.map((it) =>
               it.kind === 'group' ? (
                 <SinglesCard key="singles" ws={it.ws} open={singlesOpen} onToggle={toggleSingles} />
@@ -880,7 +880,7 @@ function WorkflowRow({
       aria-label={`${w.name}: ${w.jobs.toLocaleString()} ${w.jobs === 1 ? 'job' : 'jobs'}. Open details.`}
       className="cursor-pointer align-middle hover:bg-gray-50 focus:bg-brand-50 focus:outline-none"
     >
-      <td className={`py-2 pr-3 ${nested ? 'pl-9' : 'pl-3'}`}>
+      <td className={`py-2 pr-2 ${nested ? 'pl-9' : 'pl-2'}`}>
         <div className="flex flex-wrap items-center gap-1.5">
           <Link
             href={hrefFor(w.key)}
@@ -927,28 +927,28 @@ function WorkflowRow({
           )}
         </div>
       </td>
-      <td className="px-3 py-2 text-right tabular-nums">
+      <td className="px-2 py-2 text-right tabular-nums">
         <div>{w.jobs.toLocaleString()}</div>
         {(w.failed > 0 || w.removed > 0) && (
-          <div className="whitespace-nowrap text-xs text-gray-500">
+          <div className="text-xs text-gray-500">
             {w.failed > 0 && <span className="text-red-700">{w.failed.toLocaleString()} failed</span>}
             {w.failed > 0 && w.removed > 0 && ', '}
             {w.removed > 0 && <span>{w.removed.toLocaleString()} removed</span>}
           </div>
         )}
       </td>
-      <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{formatHours(w.wall_hours)}</td>
-      <td className="px-3 py-2">
+      <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap">{formatHours(w.wall_hours)}</td>
+      <td className="px-2 py-2">
         <FitMeter label="CPU cores" fraction={w.used.cpu} request={w.request.cpus === null ? null : `${formatCores(w.request.cpus)} ${w.request.cpus === 1 ? 'core' : 'cores'}`} adaptive={w.request.adaptive?.includes('cpus')} />
       </td>
-      <td className="px-3 py-2">
+      <td className="px-2 py-2">
         <FitMeter label="Peak memory" fraction={w.used.memory} request={w.request.memory_mib === null ? null : formatMiB(w.request.memory_mib)} adaptive={w.request.adaptive?.includes('memory')} />
       </td>
-      <td className="px-3 py-2">
+      <td className="px-2 py-2">
         <FitMeter label="Disk" fraction={w.used.disk} request={w.request.disk_kib === null ? null : formatKiB(w.request.disk_kib)} adaptive={w.request.adaptive?.includes('disk')} />
       </td>
       {showThroughput && (
-        <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap" data-testid="throughput-cell">
+        <td className="px-2 py-2 text-right tabular-nums whitespace-nowrap" data-testid="throughput-cell">
           {(() => {
             const g = summaryGain(w);
             if (g === undefined) return null;
@@ -956,7 +956,7 @@ function WorkflowRow({
           })()}
         </td>
       )}
-      <td className="px-3 py-2">
+      <td className="px-2 py-2">
         {n > 0 ? (
           <span className="inline-flex whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 tabular-nums">
             {n} {n === 1 ? 'suggestion' : 'suggestions'}

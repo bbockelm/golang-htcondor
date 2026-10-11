@@ -567,7 +567,7 @@ describe('on a phone', () => {
   // jsdom has no matchMedia: give it one that says the screen is narrow.
   beforeEach(() => {
     vi.stubGlobal('matchMedia', (q: string) => ({
-      matches: q.includes('max-width: 639px'),
+      matches: q.includes('max-width'),
       media: q,
       addEventListener: () => {},
       removeEventListener: () => {},
