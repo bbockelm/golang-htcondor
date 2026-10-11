@@ -18,6 +18,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
@@ -29,9 +30,11 @@ import (
 // Reads of the caller's own jobs and history are served from the
 // federation hub. Actions on one job are routed to the schedd of the AP
 // its complete id names (multiap_actions.go); bulk actions fan out to
-// every member (multiap_bulk.go). Everything else -- submit,
-// credentials, watches, interactive sessions -- answers 501 until it has
-// been taught which AP it is about. The refusal is an ALLOWLIST
+// every member (multiap_bulk.go). A submission goes to the AP the
+// caller's assignment names, and credentials to that AP's credd
+// (multiap_submit.go). Everything else -- watches, interactive sessions,
+// Jupyter, apps -- answers 501 until it has been taught which AP it is
+// about. The refusal is an ALLOWLIST
 // (multiAPAllowed): a route nobody has looked at is refused, not served
 // against whichever schedd happens to be handy. There is no such schedd:
 // Handler.schedd is nil in this mode, and getSchedd counts and logs any
@@ -57,6 +60,9 @@ type MultiAPConfig struct {
 	// word that nothing there matches. Zero (the default) or negative
 	// never skips: every usable AP is contacted.
 	BulkFresh time.Duration
+	// Assignment is HTTP_API_AP_ASSIGNMENT and its knobs: which AP a
+	// user's new work goes to.
+	Assignment apassign.Config
 
 	// service replaces the hub, registry and spokes built from the
 	// collector. Tests only.
@@ -67,6 +73,9 @@ type MultiAPConfig struct {
 	// queueSuperUser replaces the per-AP QUEUE_SUPER_USERS polled from
 	// each member. Tests only.
 	queueSuperUser func(ap, actor string) bool
+	// creddFor replaces per-AP credd discovery: the credd for an AP.
+	// Tests only.
+	creddFor func(ap string) htcondor.CreddClient
 }
 
 // Enabled reports whether multi-AP mode is configured.
@@ -95,6 +104,10 @@ type multiAPMode struct {
 	// observeBulkLeg, when set, sees the AP and scoped constraint of each
 	// bulk leg before it runs. Tests only.
 	observeBulkLeg func(ap, constraint string)
+	// assign is the AP assignment chain (also svc.Assign).
+	assign *apassign.Chain
+	// credds is each AP's credd.
+	credds *apCredds
 }
 
 func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, error) {
@@ -102,6 +115,10 @@ func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, er
 	if cfg.ScheddName != "" || cfg.ScheddAddr != "" {
 		return nil, errors.New("HTTP_API_SCHEDD_CONSTRAINT selects multi-AP mode and cannot be combined with a single schedd " +
 			"(-schedd, -schedd-addr or SCHEDD_NAME); unset one of them")
+	}
+	if strings.TrimSpace(cfg.CreddAddress) != "" {
+		return nil, errors.New("HTTP_API_CREDD_ADDRESS names one credd, and in multi-AP mode each access point uses its own " +
+			"(the CredDIpAddr its schedd advertises); a credential stored in another AP's credd is accepted and never used. Unset it")
 	}
 	if strings.TrimSpace(cfg.UIDDomain) == "" {
 		return nil, errors.New("multi-AP mode needs UID_DOMAIN: jobs are matched to their owner on the User attribute, owner@UID_DOMAIN")
@@ -114,7 +131,8 @@ func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, er
 	if err != nil {
 		return nil, err
 	}
-	m := &multiAPMode{constraint: strings.TrimSpace(mc.ScheddConstraint), codec: codec, bulkFresh: mc.BulkFresh}
+	m := &multiAPMode{constraint: strings.TrimSpace(mc.ScheddConstraint), codec: codec, bulkFresh: mc.BulkFresh,
+		credds: &apCredds{clientConfig: cfg.ClientConfig, override: mc.creddFor}}
 	if mc.service != nil {
 		m.svc, m.registry, m.queueSuperUser = mc.service, mc.registry, mc.queueSuperUser
 		if m.svc.Codec == nil {
@@ -123,6 +141,9 @@ func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, er
 		m.superusers = newAPSuperusers(m.svc.Registry, cfg.UIDDomain, logger)
 		m.svc.QueueSuperUser = m.apQueueSuperUser
 		m.svc.BulkFresh = m.bulkFresh
+		if err := m.setupAssignment(mc.Assignment, logger); err != nil {
+			return nil, err
+		}
 		return m, nil
 	}
 	if cfg.Collector == nil {
@@ -161,11 +182,34 @@ func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, er
 	m.superusers = newAPSuperusers(reg, cfg.UIDDomain, logger)
 	m.svc.QueueSuperUser = m.apQueueSuperUser
 	m.svc.BulkFresh = m.bulkFresh
+	if err := m.setupAssignment(mc.Assignment, logger); err != nil {
+		return nil, err
+	}
 	logger.Info(logging.DestinationHTTP, "Multi-AP mode enabled",
 		"schedd_constraint", m.constraint, "hub_name", mc.HubName, "hub_address", mc.HubAddress,
 		"stale", string(stale), "job_id_codec", strings.ToLower(strings.TrimSpace(mc.JobIDCodec)),
 		"bulk_fresh", m.bulkFresh)
 	return m, nil
+}
+
+// setupAssignment builds the AP assignment chain, unless a test service
+// brought its own. A chain that cannot be built -- an unknown backend, a
+// mapfile that does not parse -- refuses to start the server.
+func (m *multiAPMode) setupAssignment(cfg apassign.Config, logger *logging.Logger) error {
+	if m.svc.Assign != nil {
+		if c, ok := m.svc.Assign.(*apassign.Chain); ok {
+			m.assign = c
+		}
+		return nil
+	}
+	chain, err := newAssignment(cfg, m.svc, logger)
+	if err != nil {
+		return err
+	}
+	m.assign, m.svc.Assign = chain, chain
+	logger.Info(logging.DestinationHTTP, "Access point assignment configured",
+		"backends", chain.Backends(), "default", chain.Default())
+	return nil
 }
 
 // setTokenSource gives the hub and spoke connections the IDTOKEN the
@@ -371,6 +415,14 @@ func multiAPAllowed(method, path string) bool {
 		// Bulk remove and edit fan out to every member.
 		return true
 	}
+	if path == "/api/v1/jobs" && method == http.MethodPost {
+		// Submit, to the AP the caller's assignment names.
+		return true
+	}
+	if multiAPCredentialPath(path) {
+		// The credd of the caller's home AP, or of ?schedd=.
+		return true
+	}
 	if multiAPReadPaths[path] {
 		return read
 	}
@@ -402,12 +454,23 @@ func multiAPAllowed(method, path string) bool {
 		// Redeeming a share URL acts on the AP the URL names.
 		return true
 	}
+	if path == "/api/v1/templates" || strings.HasPrefix(path, "/api/v1/templates/") {
+		// Submit templates: each user's own, in this server's database,
+		// never a schedd. The submit page reads and saves them.
+		return true
+	}
 	for _, p := range multiAPAdminPaths {
 		if path == p || strings.HasPrefix(path, strings.TrimSuffix(p, "/")+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+// multiAPCredentialPath reports whether path is a credential endpoint.
+func multiAPCredentialPath(path string) bool {
+	return path == "/api/v1/creds/user" || path == "/api/v1/creds/service" ||
+		strings.HasPrefix(path, "/api/v1/creds/service/")
 }
 
 // refuseMultiAP writes the 501 for a route multi-AP mode does not serve.
@@ -685,6 +748,9 @@ type APsResponse struct {
 	Sources    multiap.Sources  `json:"sources"`
 	Registry   *APRegistryState `json:"registry,omitempty"`
 	Hub        APHubReach       `json:"hub"`
+	// Assignment is where the caller's new work goes; each AP's submit
+	// says whether the caller may submit there.
+	Assignment *APAssignmentInfo `json:"assignment,omitempty"`
 }
 
 // APRegistryState is the AP registry's polling state.
@@ -718,7 +784,8 @@ func (h *Handler) handleAPs(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	if _, _, ok := h.multiAPCaller(w, r); !ok {
+	ctx, user, ok := h.multiAPCaller(w, r)
+	if !ok {
 		return
 	}
 	hs := h.multi.svc.Hub.Status()
@@ -731,6 +798,14 @@ func (h *Handler) handleAPs(w http.ResponseWriter, r *http.Request) {
 	if h.multi.registry != nil {
 		st := h.multi.registry.Status()
 		resp.Registry = &APRegistryState{LastSuccess: timeOrEmpty(st.LastSuccess), LastError: st.LastError}
+	}
+	resp.Assignment = h.assignmentInfo(ctx, h.jobAssignRequest(ctx, r, user))
+	if a := resp.Assignment; a != nil && a.Schedd != "" {
+		allowed := apassign.Assignment{Schedd: a.Schedd, Alternates: a.Alternates}
+		for i := range resp.APs {
+			_, resp.APs[i].Submit = allowed.Allows(resp.APs[i].Schedd)
+			resp.APs[i].Home = strings.EqualFold(resp.APs[i].Schedd, a.Schedd)
+		}
 	}
 	h.writeJSON(w, http.StatusOK, resp)
 }

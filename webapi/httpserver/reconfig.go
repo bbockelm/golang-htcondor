@@ -129,6 +129,24 @@ func (h *Handler) SetProjectLeadsFile(path string) {
 	h.warnIfSuperuserNeedsRestart("HTTP_API_PROJECT_LEADS_FILE")
 }
 
+// ReloadAPAssignment re-reads the access point assignment's files -- the
+// mapfile, the REST token file -- and drops cached answers, so an edited
+// mapfile places the next submission. A mapfile that no longer parses
+// keeps the last good map, and says so in the log. A no-op outside
+// multi-AP mode.
+func (h *Handler) ReloadAPAssignment() {
+	if h.multi == nil || h.multi.assign == nil {
+		return
+	}
+	if err := h.multi.assign.Reload(); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Reconfigure: could not reload the access point assignment; keeping what was loaded",
+			"error", err)
+		return
+	}
+	h.logger.Info(logging.DestinationHTTP, "Reconfigure: reloaded the access point assignment",
+		"backends", h.multi.assign.Backends())
+}
+
 // SetProjectLeadsGroup installs HTTP_API_PROJECT_LEADS_GROUP.
 func (h *Handler) SetProjectLeadsGroup(pattern string) {
 	h.projectLeads.SetPattern(pattern)

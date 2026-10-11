@@ -90,15 +90,22 @@ func TestMultiAPCatalogIsAnAllowlist(t *testing.T) {
 			t.Errorf("%s: err = %v, want a multi-AP refusal", n, err)
 		}
 	}
-	if refused < 10 {
+	if refused < 8 {
 		t.Errorf("only %d tools refused", refused)
 	}
 	// Named, so a regression reads as what it is.
-	for _, n := range []string{"submit_job", "submit_dag", "build_container", "interactive_session_start",
-		"interactive_session_exec", "store_service_credential", "watch_jobs", "create_watch_url",
+	for _, n := range []string{"interactive_session_start",
+		"interactive_session_exec", "watch_jobs", "create_watch_url",
 		"analyze_job_match", "advertise_to_collector", "query_job_epochs"} {
 		if multiAPToolAllowed(n) {
 			t.Errorf("%s is served in multi-AP mode", n)
+		}
+	}
+	// Submission follows the AP assignment, and credentials the AP.
+	for _, n := range []string{"submit_job", "submit_dag", "build_container", "list_service_credentials",
+		"get_credential_status", "store_service_credential", "delete_service_credential"} {
+		if !multiAPToolAllowed(n) {
+			t.Errorf("%s is not served in multi-AP mode", n)
 		}
 	}
 	if n := s.MultiAPScheddCalls(); n != 0 {

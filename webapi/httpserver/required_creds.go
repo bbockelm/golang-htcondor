@@ -51,8 +51,10 @@ var placeholderCredential = []byte(`{"access_token":"placeholder"}`)
 // submissions does not become a burst of credd round trips.
 const requiredCredentialTTL = 5 * time.Minute
 
-// requiredCredCache remembers which (user, service) pairs were present, so a
-// submit does not ask the credd about every required service every time.
+// requiredCredCache remembers which (credd, user, service) triples were
+// present, so a submit does not ask the credd about every required service
+// every time. The credd is part of the key because in multi-AP mode each
+// AP has its own: a credential present in one says nothing about another.
 //
 // Only presence is cached, never absence: a service that was missing has just
 // been created, and the next submit should find it. Caching the miss would
@@ -67,6 +69,9 @@ type requiredCredCache struct {
 }
 
 type requiredCredKey struct {
+	// scope names the credd: "" for the one credd of a single-AP
+	// server, the AP's credd address in multi-AP mode.
+	scope   string
 	user    string
 	service string
 }
@@ -77,7 +82,7 @@ func newRequiredCredCache(ttl time.Duration) *requiredCredCache {
 
 // fresh reports whether this user's service was seen recently enough to skip
 // the check.
-func (c *requiredCredCache) fresh(user, service string) bool {
+func (c *requiredCredCache) fresh(scope, user, service string) bool {
 	// An unidentified caller gets no cache entry at all rather than sharing
 	// one: the cache is keyed by identity because credentials are per-user,
 	// and a blank key would let one caller's result answer for another's.
@@ -86,24 +91,24 @@ func (c *requiredCredCache) fresh(user, service string) bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	at, ok := c.seen[requiredCredKey{user: user, service: service}]
+	at, ok := c.seen[requiredCredKey{scope: scope, user: user, service: service}]
 	return ok && c.now().Sub(at) < c.ttl
 }
 
-func (c *requiredCredCache) record(user, service string) {
+func (c *requiredCredCache) record(scope, user, service string) {
 	if user == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.seen[requiredCredKey{user: user, service: service}] = c.now()
+	c.seen[requiredCredKey{scope: scope, user: user, service: service}] = c.now()
 }
 
 // forget drops a user's entry, so the next submit re-checks it.
-func (c *requiredCredCache) forget(user, service string) {
+func (c *requiredCredCache) forget(scope, user, service string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.seen, requiredCredKey{user: user, service: service})
+	delete(c.seen, requiredCredKey{scope: scope, user: user, service: service})
 }
 
 // checkCredsKey is the requiredCredCache entry for the check-creds request,
@@ -126,16 +131,20 @@ const checkCredsTimeout = 30 * time.Second
 // job that may go on hold -- whereas refusing to submit would turn a
 // best-effort convenience into a new way for submission to break. The reason
 // is logged instead.
+//
+// The credd is the one the submission's AP uses (creddFor): in multi-AP
+// mode the credd of the AP the submission was routed to, which is the only
+// one whose credentials that AP's jobs will see.
 func (s *Handler) ensureRequiredCredentials(ctx context.Context) {
 	// One handle for the whole call: the address updater can replace it
 	// between the nil check and the use, and a check that guarded a
 	// different value than the one used guards nothing.
-	credd := s.getCredd()
-	if credd == nil || !s.creddAvailable.Load() {
+	credd, scope := s.creddFor(ctx)
+	if credd == nil {
 		if len(s.requiredCredentials) > 0 {
 			s.logger.Warn(logging.DestinationHTTP,
 				"cannot bootstrap the required credentials: no credd is available",
-				"services", s.requiredCredentials)
+				"services", s.requiredCredentials, "access_point", routedSchedd(ctx))
 		}
 		return
 	}
@@ -144,10 +153,10 @@ func (s *Handler) ensureRequiredCredentials(ctx context.Context) {
 
 	// First, so that a service a local credmon provides exists by the time
 	// the loop below looks for it, and is never given a placeholder.
-	s.checkSubmitCredentials(ctx, credd, user)
+	s.checkSubmitCredentials(ctx, credd, scope, user)
 
 	for _, service := range s.requiredCredentials {
-		if s.requiredCredCache.fresh(user, service) {
+		if s.requiredCredCache.fresh(scope, user, service) {
 			continue
 		}
 
@@ -164,7 +173,7 @@ func (s *Handler) ensureRequiredCredentials(ctx context.Context) {
 		// Pending is a credential stored and waiting for its credmon. Storing
 		// a placeholder over it would replace the request it is acting on.
 		if status.Exists || status.Pending {
-			s.requiredCredCache.record(user, service)
+			s.requiredCredCache.record(scope, user, service)
 			continue
 		}
 
@@ -174,7 +183,7 @@ func (s *Handler) ensureRequiredCredentials(ctx context.Context) {
 		// creates the credential the way condor_submit has it do. Only a
 		// service no credmon there provides gets a placeholder.
 		if s.requestFromCredd(ctx, credd, user, service) {
-			s.requiredCredCache.record(user, service)
+			s.requiredCredCache.record(scope, user, service)
 			continue
 		}
 
@@ -182,12 +191,12 @@ func (s *Handler) ensureRequiredCredentials(ctx context.Context) {
 			s.logger.Warn(logging.DestinationHTTP, "could not bootstrap a required credential",
 				"service", service, "user", user, "error", err)
 			// Not cached: the next submit tries again.
-			s.requiredCredCache.forget(user, service)
+			s.requiredCredCache.forget(scope, user, service)
 			continue
 		}
 		s.logger.Info(logging.DestinationHTTP, "bootstrapped a required credential before submit",
 			"service", service, "user", user)
-		s.requiredCredCache.record(user, service)
+		s.requiredCredCache.record(scope, user, service)
 	}
 }
 
@@ -225,8 +234,8 @@ func (s *Handler) requestFromCredd(ctx context.Context, credd htcondor.CreddClie
 // on the access point changes, and a credd without OAuth configured would
 // otherwise log the same refusal on every submit. Failing to reach it is not
 // cached, so the next submit tries again.
-func (s *Handler) checkSubmitCredentials(ctx context.Context, credd htcondor.CreddClient, user string) {
-	if s.requiredCredCache.fresh(user, checkCredsKey) {
+func (s *Handler) checkSubmitCredentials(ctx context.Context, credd htcondor.CreddClient, scope, user string) {
+	if s.requiredCredCache.fresh(scope, user, checkCredsKey) {
 		return
 	}
 
@@ -239,19 +248,19 @@ func (s *Handler) checkSubmitCredentials(ctx context.Context, credd htcondor.Cre
 	case errors.As(err, &refusal):
 		s.logger.Warn(logging.DestinationHTTP, "the credd declined to supply the credentials a job needs",
 			"user", user, "reason", refusal.Reason)
-		s.requiredCredCache.record(user, checkCredsKey)
+		s.requiredCredCache.record(scope, user, checkCredsKey)
 	case err != nil:
 		s.logger.Warn(logging.DestinationHTTP, "could not ask the credd for the credentials a job needs",
 			"user", user, "error", err)
-		s.requiredCredCache.forget(user, checkCredsKey)
+		s.requiredCredCache.forget(scope, user, checkCredsKey)
 	case url != "":
 		// Only a service that needs the user's consent produces a URL, and
 		// the request names none, so this means the credd's own list does.
 		s.logger.Warn(logging.DestinationHTTP, "the credd needs the user to authorize a credential before jobs can use it",
 			"user", user, "url", url)
-		s.requiredCredCache.record(user, checkCredsKey)
+		s.requiredCredCache.record(scope, user, checkCredsKey)
 	default:
-		s.requiredCredCache.record(user, checkCredsKey)
+		s.requiredCredCache.record(scope, user, checkCredsKey)
 	}
 }
 
@@ -281,5 +290,7 @@ func (s *Handler) submitJob(ctx context.Context, submitFile string) (int, []*cla
 		return 0, nil, err
 	}
 	s.ensureRequiredCredentials(ctx)
-	return s.getSchedd().SubmitRemote(ctx, applied)
+	// scheddFor: the one schedd, or in multi-AP mode the AP the
+	// submission was assigned and routed to.
+	return s.scheddFor(ctx).SubmitRemote(ctx, applied)
 }

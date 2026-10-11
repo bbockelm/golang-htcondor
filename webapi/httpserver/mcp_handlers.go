@@ -19,6 +19,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
@@ -241,6 +242,9 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	// The caller's granted scopes, so the catalogue can be filtered and every
 	// other tool can consult them.
 	ctx = mcpserver.WithGrantedScopes(ctx, token.GetGrantedScopes())
+	// The subject and groups the grant was issued with: access point
+	// assignment may place work by them.
+	ctx = apassign.WithCaller(ctx, claimsFromSession(token.GetSession()))
 
 	// Owner-scoping needs the identity the SCHEDD attributes this connection
 	// to, which is not always the username claim we authenticated: a pool that

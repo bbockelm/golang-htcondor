@@ -56,6 +56,9 @@ type Server struct {
 	// forever -- which withholds the credential tools entirely, since the
 	// catalogue offers them only when a credd is present. See getCredd.
 	creddProvider func() htcondor.CreddClient
+	// creddFor, in multi-AP mode, is the credd of the AP a call was
+	// routed to. See getCreddFor.
+	creddFor func(ctx context.Context) htcondor.CreddClient
 	// instructions is the built initialize-response text. It is swapped
 	// atomically because SetInstructions can run on a reconfigure while
 	// an initialize is being served.
@@ -230,7 +233,9 @@ func (s *Server) submitRemote(ctx context.Context, submitFile string) (int, []*c
 		return 0, nil, err
 	}
 	s.ensureCredentials(ctx)
-	return s.getSchedd().SubmitRemote(ctx, applied)
+	// scheddFor: the one schedd, or in multi-AP mode the AP the call
+	// was assigned and routed to.
+	return s.scheddFor(ctx).SubmitRemote(ctx, applied)
 }
 
 // Config holds server configuration
@@ -270,7 +275,11 @@ type Config struct {
 	// silently withholds the credential tools, since the catalogue only
 	// offers them when a credd is present.
 	CreddProvider func() htcondor.CreddClient
-	Instructions  string // Server-level instructions provided to all agents in the MCP initialize response
+	// CreddFor, in multi-AP mode, returns the credd of the AP the call
+	// on ctx was routed to: each AP's schedd names its own credd, and a
+	// credential is only useful in that one.
+	CreddFor     func(ctx context.Context) htcondor.CreddClient
+	Instructions string // Server-level instructions provided to all agents in the MCP initialize response
 	// DisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
 	// offer, as path.Match patterns separated by commas or whitespace.
 	// See disabled_tools.go.
@@ -506,6 +515,7 @@ func NewServer(cfg Config) (*Server, error) {
 		collector:          cfg.Collector,
 		credd:              cfg.Credd,
 		creddProvider:      cfg.CreddProvider,
+		creddFor:           cfg.CreddFor,
 		trustDomain:        cfg.TrustDomain,
 		uidDomain:          cfg.UIDDomain,
 		signingKeyPath:     cfg.SigningKeyPath,
@@ -887,6 +897,19 @@ func (s *Server) getCredd() htcondor.CreddClient {
 		}
 	}
 	return s.credd
+}
+
+// getCreddFor returns the credd for a call on ctx: getCredd's answer
+// with one schedd; in multi-AP mode, the credd of the AP the call was
+// routed to, or nil (never a pool-wide guess).
+func (s *Server) getCreddFor(ctx context.Context) htcondor.CreddClient {
+	if s.multi == nil {
+		return s.getCredd()
+	}
+	if s.creddFor == nil {
+		return nil
+	}
+	return s.creddFor(ctx)
 }
 
 // scheddFor returns the schedd a call on ctx's job goes to: getSchedd's

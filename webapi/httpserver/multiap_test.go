@@ -351,11 +351,10 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 		t.Errorf("the MCP server's schedd accessor was called %d times in multi-AP mode", n)
 	}
 
-	// Named explicitly, so a regression reads as what it is. Submit,
-	// DAGs, interactive sessions, Jupyter, apps, credentials, watches,
-	// the dashboard and the collector are not served yet.
+	// Named explicitly, so a regression reads as what it is.
+	// Interactive sessions, Jupyter, apps, watches, the dashboard and
+	// the collector are not served yet.
 	for _, c := range []struct{ method, path string }{
-		{http.MethodPost, "/api/v1/jobs"},
 		{http.MethodPost, "/api/v1/jobs/1.0@" + ap1 + "/hold/extra"},
 		{http.MethodGet, "/api/v1/jobs/1.0@" + ap1 + "/match-analysis"},
 		{http.MethodDelete, "/api/v1/jobs/1.0@" + ap1 + "/stdout"},
@@ -366,16 +365,28 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 		{http.MethodGet, "/api/v1/jupyter/x"},
 		{http.MethodPost, "/api/v1/apps"},
 		{http.MethodPost, "/api/v1/collector/advertise"},
-		{http.MethodPost, "/api/v1/creds/service"},
 		{http.MethodGet, "/api/v1/dashboard"},
 		{http.MethodGet, "/api/v1/jobs/epochs"},
-		{http.MethodGet, "/api/v1/creds/user"},
 		{http.MethodPost, "/api/v1/interactive/terminal"},
+		{http.MethodPost, "/api/v1/interactive/sessions"},
+		{http.MethodPost, "/api/v1/jupyter/start"},
 		{http.MethodGet, "/api/v1/schedd/ping"},
 	} {
 		if rec := doAs(t, srv, "alice", c.method, c.path); rec.Code != http.StatusNotImplemented ||
 			!strings.Contains(rec.Body.String(), "multi-AP mode") {
 			t.Errorf("%s %s = %d %s, want 501", c.method, c.path, rec.Code, rec.Body.String())
+		}
+	}
+	// Submit follows the AP assignment, and credentials the AP's credd.
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/jobs"},
+		{http.MethodPost, "/api/v1/creds/service"},
+		{http.MethodGet, "/api/v1/creds/service/scitokens"},
+		{http.MethodGet, "/api/v1/creds/user"},
+		{http.MethodGet, "/api/v1/templates"},
+	} {
+		if !multiAPAllowed(c.method, c.path) {
+			t.Errorf("%s %s is refused in multi-AP mode", c.method, c.path)
 		}
 	}
 }
@@ -393,7 +404,10 @@ func TestMultiAPMCPCatalogue(t *testing.T) {
 			n == "whoami", n == "get_version", n == "doc_guide", n == "skills_list", n == "skills_get", strings.HasPrefix(n, "doc_"),
 			n == "remove_job", n == "remove_jobs", n == "hold_job", n == "release_job", n == "edit_job",
 			n == "get_job_stdout", n == "get_job_stderr", n == "get_job_output", n == "upload_job_input",
-			n == "create_input_upload_url", n == "create_output_download_url", n == "tail_job_output", n == "exec_in_job":
+			n == "create_input_upload_url", n == "create_output_download_url", n == "tail_job_output", n == "exec_in_job",
+			n == "submit_job", n == "submit_dag", n == "build_container",
+			n == "list_service_credentials", n == "get_credential_status", n == "store_service_credential",
+			n == "delete_service_credential":
 		default:
 			t.Errorf("multi-AP catalogue offers %q", n)
 		}

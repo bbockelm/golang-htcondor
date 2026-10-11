@@ -305,7 +305,8 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 
 	submitFile := buildSubmitFile(cfg, name, destination, cpus, memoryMB, diskMB, verify != "", dockerfile != "")
 
-	schedd := s.getSchedd()
+	// The routed AP in multi-AP mode: the spool goes where the job went.
+	schedd := s.scheddFor(ctx)
 	clusterID, procAds, err := s.submitRemote(ctx, submitFile)
 	if err != nil {
 		return nil, fmt.Errorf("build job submission failed: %w", err)
@@ -384,7 +385,7 @@ func buildContainerResult(clusterID int, name, destination, verify string, cpus,
 // the caller is already returning an error, and a leftover held job is a
 // smaller problem than masking that error with this one.
 func (s *Server) removeBuildJob(ctx context.Context, clusterID int, reason string) {
-	if _, err := s.getSchedd().RemoveJobs(ctx, fmt.Sprintf("ClusterId == %d", clusterID), reason); err != nil {
+	if _, err := s.scheddFor(ctx).RemoveJobs(ctx, fmt.Sprintf("ClusterId == %d", clusterID), reason); err != nil {
 		s.logger.Warn(logging.DestinationMCP, "could not remove a build job after a spooling failure",
 			"cluster_id", clusterID, "error", err)
 	}

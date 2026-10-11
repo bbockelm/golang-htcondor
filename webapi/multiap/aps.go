@@ -28,6 +28,10 @@ type APInfo struct {
 	// Trust is whether the AP accepts this server's tokens, from the
 	// registry's trust probe.
 	Trust APTrust `json:"trust"`
+	// Submit is whether the caller may submit here: the AP is their home
+	// AP or one of its alternates. Home marks the home AP.
+	Submit bool `json:"submit"`
+	Home   bool `json:"home,omitempty"`
 }
 
 // APTrust is the trust probe's view of one AP.

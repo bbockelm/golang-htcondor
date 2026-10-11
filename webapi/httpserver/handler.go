@@ -1472,8 +1472,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 	switch {
 	case multi != nil:
-		// Credentials follow the AP; per-AP credd discovery is not part of
-		// the read-only multi-AP mode.
+		// Credentials follow the AP: each AP's credd is the one its
+		// schedd advertises, found per call (creddFor). There is no
+		// server-wide credd.
 		h.creddAvailable.Store(false)
 	case h.getCredd() == nil:
 		logger.Info(logging.DestinationHTTP, "Credd not provided, attempting discovery...")
@@ -2076,8 +2077,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 	var mcpMulti *multiap.Service
 	mcpMultiConstraint := ""
+	var mcpCreddFor func(context.Context) htcondor.CreddClient
 	if h.multi != nil {
 		mcpMulti, mcpMultiConstraint = h.multi.svc, h.multi.constraint
+		mcpCreddFor = h.creddForContext
 	}
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
 		// Multi-AP mode: the read tools over the hub, and nothing that
@@ -2096,7 +2099,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// a snapshot taken here stays nil for the life of the process --
 		// which withholds every credential tool, because the catalogue
 		// only offers them when a credd is present.
-		CreddProvider:  h.getCredd,
+		CreddProvider: h.getCredd,
+		// Multi-AP mode: the credd of the AP a call was routed to.
+		CreddFor:       mcpCreddFor,
 		Collector:      h.collector,
 		HTCondorConfig: h.htcondorConfig,
 		AdminUsers:     h.mcpAdminUsers,

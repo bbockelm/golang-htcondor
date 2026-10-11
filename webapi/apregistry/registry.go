@@ -59,6 +59,10 @@ type Member struct {
 	AddressSince time.Time
 	// Trust is the outcome of the last trust probe; see Options.Probe.
 	Trust Trust
+	// CreddAddress is the credd the schedd says it uses (CredDIpAddr in
+	// its ad), or "" when it advertises none. Credentials a job on this
+	// AP needs are only useful in this credd.
+	CreddAddress string
 }
 
 // Trust states.
@@ -209,11 +213,17 @@ func (r *Registry) SetProbe(p ProbeFunc) {
 // Constraint is the ScheddAd constraint defining the set.
 func (r *Registry) Constraint() string { return r.constraint }
 
+// AttrCreddAddress is the schedd ad attribute naming the credd the schedd
+// uses (ATTR_CREDD_IP_ADDR in HTCondor).
+//
+//nolint:gosec // G101: a ClassAd attribute name, not a credential.
+const AttrCreddAddress = "CredDIpAddr"
+
 // queryOptions asks for every matching ad. Limit -1, not 0: a zero limit
 // is silently capped at 50 by the collector client, which would cut a
 // large AP set short with no error.
 func queryOptions() *htcondor.QueryOptions {
-	return &htcondor.QueryOptions{Limit: -1, Projection: []string{"Name", "MyAddress"}}
+	return &htcondor.QueryOptions{Limit: -1, Projection: []string{"Name", "MyAddress", AttrCreddAddress}}
 }
 
 // Refresh polls the collector once. On error the registry is unchanged.
@@ -240,6 +250,8 @@ func (r *Registry) Refresh(ctx context.Context) error {
 		if name == "" || addr == "" {
 			continue
 		}
+		credd, _ := ad.EvaluateAttrString(AttrCreddAddress)
+		credd = strings.TrimSpace(credd)
 		key := strings.ToLower(name)
 		seen[key] = true
 		m, ok := r.members[key]
@@ -247,12 +259,13 @@ func (r *Registry) Refresh(ctx context.Context) error {
 			r.members[key] = &Member{
 				Name: name, Address: addr, Schedd: r.newSchedd(name, addr),
 				Present: true, FirstSeen: now, LastSeen: now, LastConfirmed: now, AddressSince: now,
-				Trust: Trust{State: TrustUnknown},
+				Trust: Trust{State: TrustUnknown}, CreddAddress: credd,
 			}
 			continue
 		}
 		next := *m
 		next.Present, next.LastSeen, next.LastConfirmed = true, now, now
+		next.CreddAddress = credd
 		if addr != m.Address {
 			next.Address, next.Schedd, next.AddressSince = addr, r.newSchedd(name, addr), now
 			// A new address is a new daemon, possibly configured
