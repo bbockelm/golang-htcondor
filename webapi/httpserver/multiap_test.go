@@ -360,14 +360,16 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 	// the routes below are not served.
 	for _, c := range []struct{ method, path string }{
 		{http.MethodPost, "/api/v1/jobs/1.0@" + ap1 + "/hold/extra"},
-		{http.MethodGet, "/api/v1/jobs/1.0@" + ap1 + "/match-analysis"},
+		{http.MethodPost, "/api/v1/jobs/1.0@" + ap1 + "/match-analysis"},
 		{http.MethodDelete, "/api/v1/jobs/1.0@" + ap1 + "/stdout"},
 		{http.MethodPost, "/api/v1/share/watch"},
 		{http.MethodGet, "/api/v1/watches/x/share"},
 		{http.MethodPost, "/api/v1/admin/superuser"},
 		{http.MethodGet, "/api/v1/jupyter/x"},
 		{http.MethodPost, "/api/v1/collector/advertise"},
-		{http.MethodGet, "/api/v1/jobs/epochs"},
+		{http.MethodPost, "/api/v1/jobs/epochs"},
+		{http.MethodGet, "/api/v1/pool/drain-estimates"},
+		{http.MethodGet, "/api/v1/dbmirror/status"},
 		{http.MethodPost, "/api/v1/interactive/sessions"},
 		{http.MethodPost, "/api/v1/jupyter/start"},
 		{http.MethodGet, "/api/v1/schedd/ping"},
@@ -414,7 +416,9 @@ func TestMultiAPMCPCatalogue(t *testing.T) {
 			n == "delete_service_credential",
 			n == "interactive_session_start", n == "interactive_session_exec", n == "interactive_session_list",
 			n == "interactive_session_stop",
-			n == "watch_jobs", n == "check_watches", n == "cancel_watch", n == "create_watch_url":
+			n == "watch_jobs", n == "check_watches", n == "cancel_watch", n == "create_watch_url",
+			n == "analyze_issues", n == "query_job_epochs", n == "query_transfer_history", n == "analyze_job_match",
+			n == "query_pool":
 		default:
 			t.Errorf("multi-AP catalogue offers %q", n)
 		}

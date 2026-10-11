@@ -437,7 +437,7 @@ func multiAPAllowed(method, path string) bool {
 	if multiAPReadPaths[path] || multiAPHubReadPaths[path] {
 		return read
 	}
-	if multiAPWatchAllowed(method, path) {
+	if multiAPHubAllowed(method, path) {
 		return true
 	}
 	if path == "/api/v1/auth/logout" {

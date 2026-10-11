@@ -101,10 +101,16 @@ func (h *Handler) watchHubJobsTable(ctx context.Context, cursor []byte) (<-chan 
 	return out, func() { stop(); closer() }, nil
 }
 
-// multiAPWatchAllowed is the watch half of the multi-AP allowlist: the
-// share mint for one of the caller's watches, and its redemption.
+// multiAPHubAllowed is the part of the multi-AP allowlist that is not a
+// plain read path: the share mint for one of the caller's watches and
+// its redemption, and reads of the collector, which every AP shares
+// (ads, ping, the pool summary, the ad change stream -- not advertise).
 // /api/v1/jobs/watch is in multiAPHubReadPaths.
-func multiAPWatchAllowed(method, path string) bool {
+func multiAPHubAllowed(method, path string) bool {
+	if rest, ok := strings.CutPrefix(path, "/api/v1/collector/"); ok {
+		return (method == http.MethodGet || method == http.MethodHead) && rest != "" &&
+			rest != "advertise" && !strings.HasPrefix(rest, "advertise/")
+	}
 	if path == "/api/v1/share/watch" {
 		return method == http.MethodGet || method == http.MethodHead
 	}
@@ -117,14 +123,17 @@ func multiAPWatchAllowed(method, path string) bool {
 
 // multiAPHubReadPaths are the read routes multi-AP mode serves from the
 // hub or by routing, beyond the job list and history: the jobs change
-// stream, the dashboard (multiap_dashboard.go) and the issues view
-// (multiap_issues.go).
+// stream, the dashboard (multiap_dashboard.go), the issues view
+// (multiap_issues.go), and run-attempt and transfer history
+// (multiap_epochs.go).
 var multiAPHubReadPaths = map[string]bool{
 	"/api/v1/jobs/watch":                true,
 	"/api/v1/dashboard":                 true,
 	"/api/v1/dashboard/activity":        true,
 	"/api/v1/dashboard/activity/stream": true,
 	"/api/v1/issues":                    true,
+	"/api/v1/jobs/epochs":               true,
+	"/api/v1/jobs/transfers":            true,
 }
 
 // watchOwner is the owner a watch is stored against: the local part of

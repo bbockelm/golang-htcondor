@@ -1665,7 +1665,7 @@ func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interf
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	jobAds, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("query job: %w", err)
 	}
@@ -2479,7 +2479,8 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 	// Execute query
 	var stats htcondor.HistoryScanStats
 	opts.Stats = &stats
-	records, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, opts)
+	// The routed AP's schedd in multi-AP mode (multiap_hub.go).
+	records, err := s.scheddFor(ctx).QueryHistoryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}

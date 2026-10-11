@@ -12,6 +12,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
 // HistoryListResponse represents a history listing response. Source and
@@ -60,6 +61,10 @@ func (s *Handler) handleJobEpochs(w http.ResponseWriter, r *http.Request) {
 	opts := &htcondor.HistoryQueryOptions{
 		Source: htcondor.HistorySourceJobEpoch,
 	}
+	if s.multi != nil {
+		s.handleMultiEpochs(w, r, opts)
+		return
+	}
 	s.handleHistoryQuery(w, r, opts)
 }
 
@@ -73,6 +78,10 @@ func (s *Handler) handleJobTransfers(w http.ResponseWriter, r *http.Request) {
 
 	opts := &htcondor.HistoryQueryOptions{
 		Source: htcondor.HistorySourceTransfer,
+	}
+	if s.multi != nil {
+		s.handleMultiEpochs(w, r, opts)
+		return
 	}
 	s.handleHistoryQuery(w, r, opts)
 }
@@ -309,7 +318,8 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 	var stats htcondor.HistoryScanStats
 	streamQueryOpts := *opts
 	streamQueryOpts.Stats = &stats
-	resultCh, err := s.getSchedd().QueryHistoryStream(ctx, constraint, &streamQueryOpts, streamOpts)
+	// The routed AP's schedd in multi-AP mode (multiap_epochs.go).
+	resultCh, err := s.scheddFor(ctx).QueryHistoryStream(ctx, constraint, &streamQueryOpts, streamOpts)
 	// A whole ad's requests can be evaluated; a projected one's cannot.
 	wholeAd := isWholeAdProjection(opts.Projection)
 	if err != nil {
@@ -372,7 +382,11 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 		if wholeAd {
 			annotateEvaluatedRequests(result.Ad)
 		}
-
+		if sch := routedSchedd(ctx); sch != "" && result.Ad != nil {
+			// The access point it came from: the same cluster.proc on
+			// another AP is another job.
+			_ = result.Ad.Set(multiap.AttrScheddName, sch)
+		}
 		// Marshal the ad
 		adJSON, err := json.Marshal(result.Ad)
 		if err != nil {
@@ -431,7 +445,7 @@ func (s *Handler) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter,
 	var stats htcondor.HistoryScanStats
 	bufferedOpts := *opts
 	bufferedOpts.Stats = &stats
-	ads, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, &bufferedOpts)
+	ads, err := s.scheddFor(ctx).QueryHistoryWithOptions(ctx, constraint, &bufferedOpts)
 	if err != nil {
 		// Check error type and set appropriate status
 		switch {
@@ -446,13 +460,16 @@ func (s *Handler) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter,
 	}
 
 	wholeAd := isWholeAdProjection(opts.Projection)
+	sch := routedSchedd(ctx)
 	for _, ad := range ads {
 		evaluateUsageAttrs(ad)
 		if wholeAd {
 			annotateEvaluatedRequests(ad)
 		}
+		if sch != "" {
+			_ = ad.Set(multiap.AttrScheddName, sch)
+		}
 	}
-
 	// Return results as JSON
 	response := HistoryListResponse{
 		Ads:              ads,
@@ -486,6 +503,12 @@ func (s *Handler) historyOwnerScope(ctx context.Context, r *http.Request, constr
 			return "", false, fmt.Errorf("invalid owned_by_me parameter: %w", err)
 		}
 		ownedByMe = parsed
+	}
+	if s.multi != nil {
+		// The caller's User on the AP the read was routed to, unless the
+		// caller is a queue superuser there.
+		scoped, err := s.jobsOwnerScope(ctx, r, constraint, jobScopeRead)
+		return scoped, true, err
 	}
 	if !s.resolveOwnerScope(ctx, r, ownedByMe) {
 		return constraint, false, nil

@@ -274,12 +274,19 @@ func TestMultiAPWatchMCPTools(t *testing.T) {
 	}
 }
 
-// mcpCallAs calls an MCP tool on srv as user, returning its structured
-// content (nil on a tool error) and its text.
+// mcpCallAs calls an MCP tool on srv as user, with a credential,
+// returning its structured content (nil on a tool error) and its text.
 func mcpCallAs(t *testing.T, srv *Server, user, tool string, args map[string]any) (map[string]any, string) {
 	t.Helper()
 	params, _ := json.Marshal(map[string]any{"name": tool, "arguments": args})
-	ctx := htcondor.WithAuthenticatedUser(context.Background(), user)
+	// A credential to present to an AP a call is routed to; the fake
+	// schedds do not accept it, but they count the connection.
+	sec, err := htcondor.NewClientSecurityConfigWithConfig(context.Background(), nil, "x.y.z", "", 0, "CLIENT", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec.SecurityTag = user + "-tag"
+	ctx := htcondor.WithAuthenticatedUser(htcondor.WithSecurityConfig(context.Background(), sec), user)
 	out := srv.Handler.mcpServer.HandleMessage(ctx, &mcpserver.MCPMessage{JSONRPC: "2.0", ID: 1, Method: "tools/call", Params: params})
 	b, _ := json.Marshal(out)
 	var env struct {

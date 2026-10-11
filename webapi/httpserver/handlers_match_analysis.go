@@ -135,12 +135,12 @@ func (s *Handler) handleJobMatchAnalysis(w http.ResponseWriter, r *http.Request,
 	var jobAds []*classad.ClassAd
 	switch source {
 	case "", "live":
-		jobAds, _, err = s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		jobAds, _, err = s.scheddFor(ctx).QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 			Projection: projection,
 			Limit:      1,
 		})
 	case "archive":
-		jobAds, err = s.getSchedd().QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
+		jobAds, err = s.scheddFor(ctx).QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
 			Source:     htcondor.HistorySourceJobHistory,
 			Projection: projection,
 			Limit:      1,

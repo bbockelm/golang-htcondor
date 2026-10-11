@@ -152,6 +152,8 @@ func (s *Server) callMultiAPTool(ctx context.Context, name string, args map[stri
 		result = s.multiListAPsTool()
 	case "remove_jobs":
 		result, err = s.multiRemoveJobsTool(ctx, args)
+	case "query_job_epochs", "query_transfer_history":
+		result, err = s.multiEpochsTool(ctx, name, args)
 	default:
 		if multiAPActionTools[name] {
 			result, err = s.multiActionTool(ctx, name, args)
