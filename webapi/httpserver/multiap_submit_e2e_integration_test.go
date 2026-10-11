@@ -34,9 +34,10 @@ func (s *multiAPStack) e2eInitialAssignment() string {
 }
 
 // writeAssignment rewrites the mapfile and waits until the server's
-// answer for the test user is wantHome with exactly wantAlts. Nothing
-// tells the server: it notices the edit itself.
-func (s *multiAPStack) writeAssignment(t *testing.T, text, wantHome string, wantAlts ...string) {
+// answer for the test user is wantHome with exactly wantAlts. With
+// notice false nothing tells the server and it notices the edit itself;
+// with notice true the edit is applied as a reconfigure applies it.
+func (s *multiAPStack) writeAssignment(t *testing.T, notice bool, text, wantHome string, wantAlts ...string) {
 	t.Helper()
 	if err := os.WriteFile(s.assignMapPath(), []byte(text), 0o600); err != nil {
 		t.Fatal(err)
@@ -46,6 +47,9 @@ func (s *multiAPStack) writeAssignment(t *testing.T, text, wantHome string, want
 	when := time.Now().Add(time.Duration(s.assignEdits) * time.Minute)
 	if err := os.Chtimes(s.assignMapPath(), when, when); err != nil {
 		t.Fatal(err)
+	}
+	if notice {
+		s.srv.ReloadAPAssignment()
 	}
 	waitFor(t, fmt.Sprintf("the server to assign the test user to %s %v", wantHome, wantAlts), 30*time.Second, func() bool {
 		a := s.assignmentOf(t, s.me)
@@ -98,14 +102,22 @@ func (s *multiAPStack) assertOnlyOn(t *testing.T, marker, want string, cluster i
 	}
 }
 
-// purge removes a job this phase submitted, completed or not, so the
-// test user's queue is what it was.
-func (s *multiAPStack) purge(schedd, id string) {
-	s.condorQuiet("condor_rm", "-name", schedd, id)
-	s.condorQuiet("condor_rm", "-name", schedd, "-forcex", id)
+// e2eMarker names one submission, and registers -- before anything is
+// submitted -- its removal from both APs at the end of the phase,
+// completed or not, wherever it landed. A submission that was meant to
+// be refused and was not is cleaned up too.
+func (s *multiAPStack) e2eMarker(t *testing.T, what string) string {
+	t.Helper()
+	marker := fmt.Sprintf("%s-%d", what, time.Now().UnixNano())
+	t.Cleanup(func() {
+		c := fmt.Sprintf("E2ESubmitted =?= %q", marker)
+		for _, ap := range []string{e2eAP1, e2eAP2} {
+			s.condorQuiet("condor_rm", "-name", ap, "-constraint", c)
+			s.condorQuiet("condor_rm", "-name", ap, "-forcex", "-constraint", c)
+		}
+	})
+	return marker
 }
-
-func e2eMarker(what string) string { return fmt.Sprintf("%s-%d", what, time.Now().UnixNano()) }
 
 // e2eSubmitTwoStep: POST /api/v1/jobs lands on the assigned AP (ap2),
 // the hub lists it there once, the mapfile is changed to ap1 before the
@@ -120,7 +132,7 @@ func e2eSubmitTwoStep(t *testing.T, s *multiAPStack) {
 	}
 	ap1Before := s.queueState(t, e2eAP1)
 
-	marker := e2eMarker("two-step")
+	marker := s.e2eMarker(t, "two-step")
 	code, resp, body := s.restSubmit(t, "", "executable = /bin/cat\narguments = input.txt\ntransfer_executable = false\n"+
 		"transfer_input_files = input.txt\nshould_transfer_files = YES\nwhen_to_transfer_output = ON_EXIT\n"+
 		"output = out.txt\nerror = err.txt\n+E2ERun = true\n+E2ESubmitted = \""+marker+"\"\nqueue\n")
@@ -128,7 +140,6 @@ func e2eSubmitTwoStep(t *testing.T, s *multiAPStack) {
 		t.Fatalf("POST /api/v1/jobs = %d %s", code, body)
 	}
 	k := apJob{e2eAP2, int64(resp.ClusterID), 0}
-	t.Cleanup(func() { s.purge(k.schedd, k.local()) })
 	if resp.Schedd != e2eAP2 || len(resp.JobIDs) != 1 || resp.JobIDs[0] != k.String() ||
 		len(resp.Jobs) != 1 || resp.Jobs[0].Schedd != e2eAP2 || resp.Assignment == nil || resp.Assignment.Source != "mapfile" {
 		t.Fatalf("submit answer %s, want %s on %s", body, k, e2eAP2)
@@ -156,7 +167,7 @@ func e2eSubmitTwoStep(t *testing.T, s *multiAPStack) {
 	})
 
 	// The site moves the test user to ap1 between the steps.
-	s.writeAssignment(t, fmt.Sprintf("USER %s@%s %s\n", s.me, s.harness.GetTrustDomain(), e2eAP1), e2eAP1)
+	s.writeAssignment(t, false, fmt.Sprintf("USER %s@%s %s\n", s.me, s.harness.GetTrustDomain(), e2eAP1), e2eAP1)
 
 	// Step two names the job; it goes to ap2, where the job is.
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut,
@@ -187,13 +198,12 @@ func e2eSubmitTwoStep(t *testing.T, s *multiAPStack) {
 	}
 
 	// The next submission follows the new assignment.
-	next := e2eMarker("after-move")
+	next := s.e2eMarker(t, "after-move")
 	code, resp, body = s.restSubmit(t, "", "executable = /bin/sleep\narguments = 600\ntransfer_executable = false\n"+
 		"+E2ESubmitted = \""+next+"\"\nqueue\n")
 	if code != http.StatusCreated || resp.Schedd != e2eAP1 {
 		t.Fatalf("submit after the move = %d %s, want it on %s", code, body, e2eAP1)
 	}
-	t.Cleanup(func() { s.purge(e2eAP1, fmt.Sprint(resp.ClusterID)) })
 	s.assertOnlyOn(t, next, e2eAP1, resp.ClusterID)
 }
 
@@ -202,9 +212,9 @@ func e2eSubmitTwoStep(t *testing.T, s *multiAPStack) {
 // an alternate, the submission lands there.
 func e2eSubmitExplicitTarget(t *testing.T, s *multiAPStack) {
 	dom := s.harness.GetTrustDomain()
-	s.writeAssignment(t, fmt.Sprintf("USER %s@%s %s\n", s.me, dom, e2eAP2), e2eAP2)
+	s.writeAssignment(t, true, fmt.Sprintf("USER %s@%s %s\n", s.me, dom, e2eAP2), e2eAP2)
 	ap1Before := s.queueState(t, e2eAP1)
-	refused := e2eMarker("refused")
+	refused := s.e2eMarker(t, "refused")
 	sub := func(marker string) string {
 		return "executable = /bin/sleep\narguments = 600\ntransfer_executable = false\n+E2ESubmitted = \"" + marker + "\"\nqueue\n"
 	}
@@ -223,13 +233,12 @@ func e2eSubmitExplicitTarget(t *testing.T, s *multiAPStack) {
 	}
 
 	// ap1 becomes an alternate.
-	s.writeAssignment(t, fmt.Sprintf("# home, then alternates\nUSER %s@%s %s %s\n", s.me, dom, e2eAP2, e2eAP1), e2eAP2, e2eAP1)
-	allowed := e2eMarker("alternate")
+	s.writeAssignment(t, true, fmt.Sprintf("# home, then alternates\nUSER %s@%s %s %s\n", s.me, dom, e2eAP2, e2eAP1), e2eAP2, e2eAP1)
+	allowed := s.e2eMarker(t, "alternate")
 	code, resp, body := s.restSubmit(t, "?schedd="+url.QueryEscape(e2eAP1), sub(allowed))
 	if code != http.StatusCreated || resp.Schedd != e2eAP1 {
 		t.Fatalf("submit to the alternate = %d %s", code, body)
 	}
-	t.Cleanup(func() { s.purge(e2eAP1, fmt.Sprint(resp.ClusterID)) })
 	s.assertOnlyOn(t, allowed, e2eAP1, resp.ClusterID)
 
 	// /api/v1/aps marks both, and only the home AP as home.
@@ -251,19 +260,18 @@ func e2eSubmitExplicitTarget(t *testing.T, s *multiAPStack) {
 // back to ap2 alone must be in force before the refusal is asked for.
 func e2eSubmitMCP(t *testing.T, s *multiAPStack) {
 	dom := s.harness.GetTrustDomain()
-	s.writeAssignment(t, fmt.Sprintf("USER %s@%s %s\n", s.me, dom, e2eAP2), e2eAP2)
+	s.writeAssignment(t, true, fmt.Sprintf("USER %s@%s %s\n", s.me, dom, e2eAP2), e2eAP2)
 	token := s.writeToken(t, s.me)
 	if text := s.mcpTool(t, token, "whoami", nil); !strings.Contains(text, `"home_access_point": "`+e2eAP2+`"`) {
 		t.Errorf("MCP whoami does not name the home AP: %s", text)
 	}
-	marker := e2eMarker("mcp")
+	marker := s.e2eMarker(t, "mcp")
 	text := s.mcpTool(t, token, "submit_job", map[string]any{"submit_file": "executable = /bin/sleep\narguments = 600\n" +
 		"transfer_executable = false\n+E2ESubmitted = \"" + marker + "\"\nqueue\n"})
 	clusters := s.markedOn(t, e2eAP2, marker)
 	if len(clusters) != 1 {
 		t.Fatalf("submit_job: marked clusters on %s = %v, want one\n%s", e2eAP2, clusters, text)
 	}
-	t.Cleanup(func() { s.purge(e2eAP2, clusters[0]) })
 	var cluster int
 	_, _ = fmt.Sscan(clusters[0], &cluster)
 	s.assertOnlyOn(t, marker, e2eAP2, cluster)
@@ -272,7 +280,7 @@ func e2eSubmitMCP(t *testing.T, s *multiAPStack) {
 		t.Errorf("submit_job answer does not name %s on %s: %s", full, e2eAP2, text)
 	}
 
-	refused := e2eMarker("mcp-refused")
+	refused := s.e2eMarker(t, "mcp-refused")
 	ap1Before := s.queueState(t, e2eAP1)
 	_, failure := s.mcpToolTry(t, token, "submit_job", map[string]any{"schedd": e2eAP1, "submit_file": "executable = /bin/sleep\n" +
 		"arguments = 600\ntransfer_executable = false\n+E2ESubmitted = \"" + refused + "\"\nqueue\n"})
