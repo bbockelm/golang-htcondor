@@ -296,7 +296,10 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 
 	bridgeSSHToWebSocket(ctx, s, wsConn, sshClient, session, stdin, stdout, stderr,
 		bridgeOptions{
-			JobID:       fmt.Sprintf("%d.%d", cluster, proc),
+			// The complete id in multi-AP mode: the terminal count and
+			// the disconnect cleanup are per job, and 1.0 on two APs is
+			// two jobs.
+			JobID:       s.jobPathID(ctx, cluster, proc),
 			Interactive: interactive,
 		})
 }

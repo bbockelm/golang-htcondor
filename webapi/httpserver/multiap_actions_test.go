@@ -381,3 +381,35 @@ func TestScheddForFollowsTheRegistry(t *testing.T) {
 		t.Errorf("for an untrusted AP scheddFor = %v", got)
 	}
 }
+
+// An interactive terminal's disconnect removes its job on the AP the
+// terminal was routed to, never on another, and never as this daemon.
+func TestMultiAPDisconnectRemovesOnTheRoutedAP(t *testing.T) {
+	aps := newActionAPs(t, ap1, ap2)
+	srv := newActionServer(t, aps, nil)
+	sec, err := htcondor.NewClientSecurityConfigWithConfig(context.Background(), nil, "e30.e30.c2ln", "", 0, "CLIENT", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := aps.reg.Get(ap2)
+	routed := multiap.WithTarget(htcondor.WithAuthenticatedUser(htcondor.WithSecurityConfig(context.Background(), sec), "alice"),
+		multiap.Target{Member: m, ID: jobid.ID{Schedd: ap2, Cluster: 1}})
+	jobText := srv.jobPathID(routed, 1, 0)
+	if jobText != "1.0@"+ap2 {
+		t.Fatalf("terminal job id = %q, want the complete id", jobText)
+	}
+	before := aps.counts()
+	srv.removeJobOnDisconnect(routed, jobText)
+	after := aps.counts()
+	if after[ap2] == before[ap2] || after[ap1] != before[ap1] {
+		t.Errorf("disconnect removal went %v -> %v, want ap2 only", before, after)
+	}
+	// No credential: nothing reaches any schedd.
+	before = aps.counts()
+	noCred := multiap.WithTarget(htcondor.WithAuthenticatedUser(context.Background(), "alice"),
+		multiap.Target{Member: m, ID: jobid.ID{Schedd: ap2, Cluster: 1}})
+	srv.removeJobOnDisconnect(noCred, jobText)
+	if after := aps.counts(); after[ap1] != before[ap1] || after[ap2] != before[ap2] {
+		t.Errorf("a disconnect with no caller credential reached a schedd")
+	}
+}
