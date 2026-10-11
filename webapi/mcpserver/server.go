@@ -114,9 +114,12 @@ type Server struct {
 	// most one extra DC_CONFIG_VAL round trip per process. It is never
 	// refreshed: an access point that moves its binaries is restarting
 	// its daemons anyway. See Server.dagmanLayout.
-	dagmanLayoutOnce   sync.Once
-	dagmanLayoutBin    string
-	dagmanLayoutNoPort bool
+	//
+	// Kept per access point: a multi-AP server's DAGMan jobs run on the
+	// AP they are submitted to, whose BIN may differ from any other's.
+	// The key is the routed AP, "" with one schedd.
+	dagmanLayoutMu sync.Mutex
+	dagmanLayouts  map[string]*dagmanLayoutEntry
 	// dagmanLayoutFn replaces that discovery, so the precedence between
 	// configuration, discovery and the package default can be tested
 	// without a schedd. nil uses discoverDagmanLayout.
@@ -557,7 +560,10 @@ func NewServer(cfg Config) (*Server, error) {
 		// schedd when the collector reports a new address, and holding
 		// the old pointer is how MCP kept dialling a socket that no
 		// longer existed. The accessor is why this is a function.
-		Schedd:       func() interactive.ScheddClient { return s.getSchedd() },
+		Schedd: func() interactive.ScheddClient { return s.getSchedd() },
+		// A command run in a running job goes to that job's schedd: in
+		// multi-AP mode, the access point the tool call was routed to.
+		ScheddFor:    func(ctx context.Context) interactive.ScheddClient { return s.scheddFor(ctx) },
 		Logger:       logger,
 		LogDest:      logging.DestinationMCP,
 		SubmitPolicy: cfg.SubmitPolicy,
@@ -855,6 +861,34 @@ func (s *Server) getCredd() htcondor.CreddClient {
 		}
 	}
 	return s.credd
+}
+
+// scheddFor returns the schedd a call on ctx's job goes to: getSchedd's
+// answer with one schedd; in multi-AP mode, the access point the call
+// was routed to (callMultiAPTool), and nothing else. A call reached
+// without a route, or carrying no caller credential, gets a schedd that
+// cannot connect: there is no right AP to guess, and acting as this
+// server instead of the caller is never right.
+func (s *Server) scheddFor(ctx context.Context) *htcondor.Schedd {
+	if s.multi == nil {
+		return s.getSchedd()
+	}
+	t, ok := multiap.TargetFrom(ctx)
+	if !ok || t.Member.Schedd == nil {
+		return s.getSchedd() // counted and logged as the bug it is
+	}
+	if _, ok := htcondor.GetSecurityConfigFromContext(ctx); !ok {
+		s.logger.Error(logging.DestinationMCP, "Refusing a tool call with no caller credential attached",
+			"access_point", t.Member.Name)
+		return multiap.NoSchedd
+	}
+	// The member as the registry knows it now: its current address, and
+	// nothing at all once it is absent or untrusted.
+	m, err := s.multi.Member(t.Member.Name)
+	if err != nil {
+		return multiap.NoSchedd
+	}
+	return m.Schedd
 }
 
 func (s *Server) getSchedd() *htcondor.Schedd {

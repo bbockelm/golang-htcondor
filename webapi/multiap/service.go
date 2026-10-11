@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -82,15 +83,48 @@ type Service struct {
 	Stale  StaleMode
 	// UIDDomain completes a bare owner into the User attribute value.
 	UIDDomain string
+	// QueueSuperUser reports whether actor is in schedd's
+	// QUEUE_SUPER_USERS, as read from that AP. Cross-user power is per
+	// AP: nil means nobody is a superuser anywhere.
+	QueueSuperUser func(schedd, actor string) bool
+	// BulkFresh is HTTP_API_BULK_FRESH_SECONDS, for bulk actions this
+	// service's callers fan out; zero or negative never skips an AP.
+	BulkFresh time.Duration
+	// Admit, when set, is each AP's own verdict on a caller: an error
+	// refuses anything routed to that AP for user (an account disabled
+	// there, say). Route, share redemption and every bulk leg ask it. A
+	// grant is good at every AP; this is how one AP's decision still
+	// holds on that AP.
+	Admit func(ctx context.Context, m apregistry.Member, user string) error
+	// VerifyCaller, when set, confirms that the AP a call was routed to
+	// identifies ctx's credential as user; MCP runs it on every routed
+	// call, so the identity an action runs as is the routed AP's.
+	VerifyCaller func(ctx context.Context, m apregistry.Member, user string) error
+	// Now replaces the clock, for tests.
+	Now func() time.Time
+
+	writesMu sync.Mutex
+	writes   map[string]time.Time // last write by this server, per lower-cased AP
+}
+
+// IsQueueSuperUser reports whether actor is a queue superuser on schedd.
+func (s *Service) IsQueueSuperUser(schedd, actor string) bool {
+	return s != nil && s.QueueSuperUser != nil && schedd != "" && actor != "" && s.QueueSuperUser(schedd, actor)
 }
 
 // Error is a failure with the HTTP status it maps to.
 type Error struct {
 	Status int
 	Msg    string
-	// Candidates is set on an ambiguous incomplete job id (409).
+	// Reason is a machine-readable cause (Reason* constants), when one
+	// applies.
+	Reason string
+	// Candidates is set on an ambiguous incomplete job id (409), and on
+	// an incomplete one given to a mutation (400).
 	Candidates []JobRef
 }
+
+func asError(err error, target **Error) bool { return errors.As(err, target) }
 
 func (e *Error) Error() string { return e.Msg }
 
@@ -176,6 +210,16 @@ func (s *Service) snapshot() view {
 		v.members[key] = m
 		v.sources.APs++
 		src, ok := s.Hub.Source(m.Name)
+		if m.Untrusted() {
+			// The hub's copy may well be current, and reads still serve
+			// it; but nothing can be done on this AP, and a caller
+			// looking at its jobs must be told that.
+			v.fresh[key] = ok && src.State == StateFresh
+			v.sources.Degraded = append(v.sources.Degraded, Degraded{
+				Schedd: m.Name, State: StateUntrusted, Reason: untrustedReason(m),
+			})
+			continue
+		}
 		switch {
 		case ok && src.State == StateFresh:
 			v.fresh[key] = true
@@ -202,6 +246,15 @@ func (s *Service) snapshot() view {
 		}
 	}
 	return v
+}
+
+// untrustedReason is the sources-block reason for an AP that failed its
+// trust probe.
+func untrustedReason(m apregistry.Member) string {
+	if m.Trust.Reason == "" {
+		return untrustedMessage
+	}
+	return untrustedMessage + ": " + m.Trust.Reason
 }
 
 // Sources reports the AP set's freshness, for a response that serves no

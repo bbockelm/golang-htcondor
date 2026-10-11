@@ -75,6 +75,34 @@ type multiAPStack struct {
 	client  *http.Client
 	me      string // the test user's OS name, which is the jobs' Owner
 	srv     *Server
+	// sshOK is whether ssh-to-job can run here (an sshd config template
+	// was found).
+	sshOK bool
+}
+
+// sshTemplateLine points ssh-to-job at its sshd config template, found
+// next to the HTCondor install or where packages put it, and records
+// whether there is one.
+func sshTemplateLine(s *multiAPStack) string {
+	var candidates []string
+	if master, err := exec.LookPath("condor_master"); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(filepath.Dir(master)), "lib",
+			"condor_ssh_to_job_sshd_config_template"))
+	}
+	candidates = append(candidates,
+		"/usr/lib/condor_ssh_to_job_sshd_config_template",
+		"/usr/lib64/condor/condor_ssh_to_job_sshd_config_template",
+		"/etc/condor/condor_ssh_to_job_sshd_config_template",
+		"/usr/share/condor/condor_ssh_to_job_sshd_config_template")
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			if _, err := os.Stat("/usr/sbin/sshd"); err == nil {
+				s.sshOK = true
+				return "SSH_TO_JOB_SSHD_CONFIG_TEMPLATE = " + c
+			}
+		}
+	}
+	return ""
 }
 
 // apJob names a job across APs.
@@ -134,9 +162,15 @@ func TestMultiAPEndToEnd(t *testing.T) {
 		{"another user's jobs never appear", e2eScopesToTheCaller},
 		{"aps lists both with hub state", e2eListsAPs},
 		{"single job by complete id and by an ambiguous one", e2eGetsSingleJobs},
-		{"mutating routes are refused", e2eRefusesMutations},
+		{"with narrowing on, a bulk action matching nothing skips both fresh APs", e2eBulkSkipsProvablyEmpty},
+		{"unserved routes are refused and a bare id is not acted on", e2eRefusesUnserved},
+		{"both members pass the trust probe", e2eTrustProbe},
 		{"MCP query_jobs and get_job", e2eMCPReads},
-		{"a job removed on its schedd leaves the list and enters history", e2eRemovalReachesTheAPI},
+		{"a running job on ap2 is peeked, tailed, exec'd into and read back; ap1's same id is not running", e2eRunningJob},
+		{"single-job actions land on the job's AP only", e2eSingleJobActions},
+		{"a bulk hold reaches both APs and only the caller's jobs", e2eBulkHold},
+		{"input spools into the job's AP, directly and through a share URL", e2eSpoolAndShare},
+		{"a job removed through the API leaves the list and enters history", e2eRemoveViaAPI},
 		{"a stopped spoke degrades its AP and a restarted one recovers", e2eSpokeOutage},
 		{"a stopped hub is an error, not an empty queue, and single-job reads use the spoke", e2eHubOutage},
 	} {
@@ -337,22 +371,6 @@ func e2eGetsSingleJobs(t *testing.T, s *multiAPStack) {
 	}
 }
 
-// e2eRefusesMutations: multi-AP mode is read-only.
-func e2eRefusesMutations(t *testing.T, s *multiAPStack) {
-	code, body := s.do(t, s.me, http.MethodPost, "/api/v1/jobs", `{"submit_file":"executable=/bin/true\nqueue\n"}`)
-	if code != http.StatusNotImplemented {
-		t.Errorf("POST /api/v1/jobs = %d %s, want 501", code, body)
-	}
-	code, body = s.do(t, s.me, http.MethodDelete, "/api/v1/jobs/"+url.PathEscape(e2eAP1Job1.String()), "")
-	if code != http.StatusNotImplemented {
-		t.Errorf("DELETE /api/v1/jobs/%s = %d %s, want 501", e2eAP1Job1, code, body)
-	}
-	// Refused, so the job is still there.
-	if got := s.scheddAttr(t, e2eAP1, e2eAP1Job1, "JobStatus"); got != "1" {
-		t.Errorf("%s has JobStatus %q after a refused DELETE", e2eAP1Job1, got)
-	}
-}
-
 // e2eMCPReads: the MCP read tools over the same hub.
 func e2eMCPReads(t *testing.T, s *multiAPStack) {
 	// A bearer the API must identify by asking a member schedd, so
@@ -376,16 +394,6 @@ func e2eMCPReads(t *testing.T, s *multiAPStack) {
 	if j := decodeRow(t, raw); j.key() != e2eAP2Job1 {
 		t.Errorf("get_job %s returned %s", e2eAP2Job1, j.key())
 	}
-}
-
-// e2eRemovalReachesTheAPI: a job removed on its schedd leaves the list
-// and appears in history, through spoke and hub.
-func e2eRemovalReachesTheAPI(t *testing.T, s *multiAPStack) {
-	s.condorRm(t, e2eAP1Job2)
-	s.waitList(t, e2eAP1Job2.String()+" to leave the list", 60*time.Second, s.me, func(l e2eList) bool {
-		return sameJobs(l.keys(), []apJob{e2eAP1Job1, e2eAP2Job1, e2eAP2Job2})
-	})
-	s.waitArchive(t, e2eAP1Job2)
 }
 
 // e2eSpokeOutage: a stopped spoke degrades its AP without dropping its
@@ -431,6 +439,9 @@ func e2eSpokeOutage(t *testing.T, s *multiAPStack) {
 	if !containsJob(s.list(t, s.me, "/api/v1/jobs").keys(), e2eAP2Job2) {
 		t.Errorf("%s vanished while its AP's spoke was down; nothing could have reported it", e2eAP2Job2)
 	}
+
+	// A bulk action does not take the stale hub's word for ap2.
+	e2eBulkContactsStaleAP(t, s)
 
 	s.spoke2.Start()
 	s.waitList(t, e2eAP2+" to be fresh again, with the removal caught up", 90*time.Second, s.me, func(l e2eList) bool {
@@ -485,11 +496,17 @@ func startMultiAPStack(t *testing.T, bin string) *multiAPStack {
 
 	// Two schedds in one pool: the harness's own, renamed, and a second
 	// under the local name SCHEDD2 with its own spool, queue log, history
-	// and address file. No startd or negotiator: the jobs stay idle,
-	// which keeps every state the test asserts on one it caused.
+	// and address file. A negotiator and a one-slot startd run only the
+	// job a phase marks with E2ERun; everything else stays idle.
 	poolCfg := fmt.Sprintf(`
-DAEMON_LIST = MASTER, COLLECTOR, SCHEDD, SCHEDD2
+DAEMON_LIST = MASTER, COLLECTOR, SCHEDD, SCHEDD2, NEGOTIATOR, STARTD
 DC_DAEMON_LIST = + SCHEDD2
+# One slot, and only for the job a phase marks to run: every other job
+# stays idle, which keeps every state the test asserts on one it caused.
+START = TARGET.E2ERun =?= true
+ENABLE_SSH_TO_JOB = True
+SSH_TO_JOB_SSHD = /usr/sbin/sshd
+%[6]s
 UID_DOMAIN = %[1]s
 SCHEDD_NAME = %[2]s
 SCHEDD_INTERVAL = 2
@@ -505,7 +522,7 @@ SCHEDD2.SCHEDD_LOG = $(LOG)/SchedLog2
 # Lets a job be queued for another owner (+Owner), as a submit portal
 # does; the test user is not root.
 QUEUE_ALL_USERS_TRUSTED = True
-`, htcondor.HarnessTrustDomain, e2eAP1, e2eAP2, ap2Spool, ap2Dir)
+`, htcondor.HarnessTrustDomain, e2eAP1, e2eAP2, ap2Spool, ap2Dir, sshTemplateLine(s))
 	s.harness = htcondor.SetupCondorHarnessWithConfig(t, poolCfg)
 	s.cfgFile = s.harness.GetConfigFile()
 	t.Cleanup(func() {
@@ -595,16 +612,20 @@ func (s *multiAPStack) startServer(t *testing.T) {
 		ClientConfig:   htcCfg,
 		HTCondorConfig: htcCfg,
 		ListenAddr:     listener.Addr().String(),
-		MultiAP:        MultiAPConfig{ScheddConstraint: e2eAPConstraint},
-		Collector:      htcondor.NewCollector(s.harness.GetCollectorAddr()).WithConfig(htcCfg),
+		// Narrowing on, so a phase can check the hub's freshness path end
+		// to end; it is off by default.
+		MultiAP:   MultiAPConfig{ScheddConstraint: e2eAPConstraint, BulkFresh: 30 * time.Second},
+		Collector: htcondor.NewCollector(s.harness.GetCollectorAddr()).WithConfig(htcCfg),
 		// The test plays a trusted proxy naming the caller.
 		UserHeader:               "X-Test-User",
 		UserHeaderTrustAnyUnsafe: true,
 		SigningKeyPath:           s.harness.GetSigningKeyPath(),
-		TrustDomain:              s.harness.GetTrustDomain(),
-		UIDDomain:                s.harness.GetTrustDomain(),
-		EnableMCP:                true,
-		OAuth2DBPath:             filepath.Join(s.dir, "oauth2.db"),
+		// Share and download URLs the MCP tools mint point here.
+		HTTPBaseURL:  baseURL,
+		TrustDomain:  s.harness.GetTrustDomain(),
+		UIDDomain:    s.harness.GetTrustDomain(),
+		EnableMCP:    true,
+		OAuth2DBPath: filepath.Join(s.dir, "oauth2.db"),
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

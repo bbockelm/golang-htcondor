@@ -185,8 +185,16 @@ func (s *Handler) handleJobs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleSubmitJob(w, r)
 	case http.MethodDelete:
+		if s.multi != nil {
+			s.handleMultiBulkDelete(w, r)
+			return
+		}
 		s.handleBulkDeleteJobs(w, r)
 	case http.MethodPatch:
+		if s.multi != nil {
+			s.handleMultiBulkEdit(w, r)
+			return
+		}
 		s.handleBulkEditJobs(w, r)
 	default:
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -553,8 +561,6 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleJobByID handles /api/v1/jobs/{id} endpoint
-//
-//nolint:gocyclo // dispatches GET/PUT/DELETE plus several action sub-paths; splitting hides routing
 func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	// Extract job ID from path
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
@@ -564,17 +570,22 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobID := parts[0]
-
 	if s.multi != nil {
-		// The allowlist admits only GET of a bare id here.
-		if len(parts) == 1 && r.Method == http.MethodGet {
-			s.handleMultiGetJob(w, r, jobID)
-		} else {
-			s.refuseMultiAP(w, r)
-		}
+		// Routed to the job's own access point, then served below.
+		s.handleMultiJobByID(w, r, parts)
 		return
 	}
+	s.serveJobByID(w, r)
+}
+
+// serveJobByID is handleJobByID against one schedd: the only one in
+// single-AP mode, or the one handleMultiJobByID routed the request to.
+//
+//nolint:gocyclo // dispatches GET/PUT/DELETE plus several action sub-paths; splitting hides routing
+func (s *Handler) serveJobByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
+	parts := strings.Split(path, "/")
+	jobID := parts[0]
 
 	// Check for bulk operations at /api/v1/jobs/hold or /api/v1/jobs/release
 	if len(parts) == 1 {
@@ -806,7 +817,7 @@ func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID str
 	// directly used to send Projection="*" on the wire — the schedd
 	// then looked for an attribute named "*" and returned only
 	// ServerTime, breaking the detail page.
-	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{})
+	jobAds, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -880,7 +891,7 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 
 	// Remove the job using the schedd RemoveJobs method
 	reason := superuserReason(imp, "Removed", "Removed via HTTP API")
-	results, err := s.getSchedd().RemoveJobs(ctx, constraint, reason)
+	results, err := s.scheddFor(ctx).RemoveJobs(ctx, constraint, reason)
 	if imp != nil {
 		s.auditSuperuserAction(r, imp, "remove", fmt.Sprintf("%d.%d", cluster, proc), err)
 	}
@@ -924,7 +935,7 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 	// Success
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message": "Job removed successfully",
-		"job_id":  jobID,
+		"job_id":  s.routedJobID(ctx, jobID),
 		"results": map[string]int{
 			"total":   results.TotalJobs,
 			"success": results.Success,
@@ -1100,7 +1111,7 @@ func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID st
 		Force:               false,
 	}
 
-	edited, err := s.getSchedd().EditJobs(ctx, constraint, attributes, opts)
+	edited, err := s.scheddFor(ctx).EditJobs(ctx, constraint, attributes, opts)
 	if err == nil && edited == 0 {
 		s.writeError(w, http.StatusNotFound, "Job not found")
 		return
@@ -1131,7 +1142,7 @@ func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID st
 	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "success",
 		"message": fmt.Sprintf("Successfully edited job %s", jobID),
-		"job_id":  jobID,
+		"job_id":  s.routedJobID(ctx, jobID),
 	}); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err, "job_id", jobID)
 	}
@@ -1154,9 +1165,19 @@ func (s *Handler) jobsOwnerScope(ctx context.Context, r *http.Request, raw strin
 	if s.seesAllJobs(ctx, r, tier) {
 		return raw, nil
 	}
-	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	owner := ownerFromActor(actor)
 	if owner == "" {
 		return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")
+	}
+	if s.multi != nil {
+		// Domain-aware: the caller's User, not a bare Owner. An actor
+		// in another domain is refused, never rewritten.
+		user, err := s.multi.svc.UserFor(actor)
+		if err != nil {
+			return "", err
+		}
+		return andScope(fmt.Sprintf("User == %s", classadStringLit(user)), raw)
 	}
 	return scopeToOwner(owner, raw)
 }
@@ -1716,11 +1737,11 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 		}
 		s.writeJSON(w, http.StatusOK, fanOutResponse(fanOut, target.Cluster,
 			"Cluster input files uploaded successfully",
-			fmt.Sprintf("PUT again to /api/v1/jobs/%d/input", target.Cluster)))
+			fmt.Sprintf("PUT again to /api/v1/jobs/%s/input", s.clusterPathID(ctx, target.Cluster))))
 		return
 	}
 
-	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), target.Cluster, target.Proc,
+	procAd, err := fetchProcAdForSpool(ctx, s.scheddFor(ctx), target.Cluster, target.Proc,
 		func(c string) (string, error) {
 			return s.jobsOwnerScope(ctx, r, c, jobScopeMutate)
 		})
@@ -1735,7 +1756,7 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 	jobAds := []*classad.ClassAd{procAd}
 
 	// Spool job files from tar
-	if err := s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, limitedReader); err != nil {
+	if err := s.scheddFor(ctx).SpoolJobFilesFromTar(ctx, jobAds, limitedReader); err != nil {
 		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
@@ -1750,7 +1771,7 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 
 	s.writeJSON(w, http.StatusOK, map[string]string{
 		"message": "Job input files uploaded successfully",
-		"job_id":  jobID,
+		"job_id":  s.routedJobID(ctx, jobID),
 	})
 }
 
@@ -1898,7 +1919,7 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	// fetchProcAdForSpool for why this is necessary (Cmd /
 	// TransferExecutable live on the cluster ad and the proc-only
 	// query strips them).
-	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc, func(c string) (string, error) {
+	procAd, err := fetchProcAdForSpool(ctx, s.scheddFor(ctx), cluster, proc, func(c string) (string, error) {
 		return s.jobsOwnerScope(ctx, r, c, jobScopeMutate)
 	})
 	if err != nil {
@@ -1981,7 +2002,7 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	if target.AllProcs {
 		fanOut, spoolErr = s.spoolClusterFromStream(ctx, r, target.Cluster, pr)
 	} else {
-		spoolErr = s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, pr)
+		spoolErr = s.scheddFor(ctx).SpoolJobFilesFromTar(ctx, jobAds, pr)
 	}
 
 	// Wait for tar conversion to complete
@@ -2005,13 +2026,13 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	if fanOut != nil {
 		s.writeJSON(w, http.StatusOK, fanOutResponse(fanOut, target.Cluster,
 			"Cluster input files uploaded via multipart",
-			fmt.Sprintf("POST again to /api/v1/jobs/%d/input/multipart", target.Cluster)))
+			fmt.Sprintf("POST again to /api/v1/jobs/%s/input/multipart", s.clusterPathID(ctx, target.Cluster))))
 		return
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]string{
 		"message": "Job input files uploaded successfully via multipart",
-		"job_id":  jobID,
+		"job_id":  s.routedJobID(ctx, jobID),
 	})
 }
 
@@ -2055,7 +2076,7 @@ func (s *Handler) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID 
 	w.WriteHeader(http.StatusOK)
 
 	// Start receiving job sandbox
-	errChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, w)
+	errChan := s.scheddFor(ctx).ReceiveJobSandbox(ctx, constraint, w)
 
 	// Wait for transfer to complete
 	if err := <-errChan; err != nil {
@@ -2094,7 +2115,7 @@ func (s *Handler) streamFileFromTar(ctx context.Context, constraint, filename st
 
 	// Start receiving the job sandbox in the background
 	// We need to ensure pipeWriter is closed when transfer finishes
-	sandboxErrChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, pipeWriter)
+	sandboxErrChan := s.scheddFor(ctx).ReceiveJobSandbox(ctx, constraint, pipeWriter)
 
 	// Channel to capture the final error from ReceiveJobSandbox
 	finalErrChan := make(chan error, 1)
@@ -2664,17 +2685,24 @@ func (s *Handler) handleSingleJobAction(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	s.handleJobActionResults(w, results, jobID, actionVerb)
+	s.handleJobActionResults(w, results, s.routedJobID(ctx, jobID), actionVerb)
 }
 
 // handleJobHold handles POST /api/v1/jobs/{id}/hold
 func (s *Handler) handleJobHold(w http.ResponseWriter, r *http.Request, jobID string) {
-	s.handleSingleJobAction(w, r, jobID, "Held", "hold", s.getSchedd().HoldJobs)
+	// Resolved when the action runs, on the authenticated context: the
+	// schedd is chosen from the routed AP and needs the caller's
+	// credential, neither of which r's own context carries yet.
+	s.handleSingleJobAction(w, r, jobID, "Held", "hold", func(ctx context.Context, constraint, reason string) (*htcondor.JobActionResults, error) {
+		return s.scheddFor(ctx).HoldJobs(ctx, constraint, reason)
+	})
 }
 
 // handleJobRelease handles POST /api/v1/jobs/{id}/release
 func (s *Handler) handleJobRelease(w http.ResponseWriter, r *http.Request, jobID string) {
-	s.handleSingleJobAction(w, r, jobID, "Released", "release", s.getSchedd().ReleaseJobs)
+	s.handleSingleJobAction(w, r, jobID, "Released", "release", func(ctx context.Context, constraint, reason string) (*htcondor.JobActionResults, error) {
+		return s.scheddFor(ctx).ReleaseJobs(ctx, constraint, reason)
+	})
 }
 
 // CollectorAdsResponse represents collector ads listing response
@@ -3225,7 +3253,7 @@ func (s *Handler) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cl
 	opts := &htcondor.QueryOptions{
 		Projection: projection,
 	}
-	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	jobAds, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to query job", "error", err)
 		s.writeError(w, http.StatusInternalServerError, "Failed to query job")
@@ -4010,7 +4038,7 @@ func (s *Handler) spoolClusterFromStream(
 ) (*spool.Result, error) {
 	lim := spool.DefaultLimits()
 
-	ads, err := fetchProcAdsAwaitingInput(ctx, s.getSchedd(), cluster, lim.MaxProcs,
+	ads, err := fetchProcAdsAwaitingInput(ctx, s.scheddFor(ctx), cluster, lim.MaxProcs,
 		func(c string) (string, error) { return s.jobsOwnerScope(ctx, r, c, jobScopeMutate) })
 	if err != nil {
 		return nil, err
@@ -4057,7 +4085,7 @@ func (s *Handler) spoolClusterFromStream(
 		}
 	}()
 
-	res := spool.FanOut(ctx, attempt, src, lim, s.getSchedd().SpoolJobFilesFromTar)
+	res := spool.FanOut(ctx, attempt, src, lim, s.scheddFor(ctx).SpoolJobFilesFromTar)
 
 	// A failed receive is the call's error, not a per-proc one: every
 	// reader saw it, so res is a list of procs that failed for the same

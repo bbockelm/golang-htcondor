@@ -82,6 +82,19 @@ type Schedd struct {
 	// cfg is the HTCondor configuration this client authenticates and
 	// rate-limits with; nil means the process-wide default. See WithConfig.
 	cfg *config.Config
+	// rateLimitKey partitions the query rate limiter; see WithRateLimitKey.
+	rateLimitKey string
+}
+
+// WithRateLimitKey gives this client its own partition of the schedd
+// query rate limiter: a global budget of its own and per-user budgets of
+// its own, at the configured rates, instead of the budget every client
+// sharing its configuration draws on. A server talking to many schedds
+// keys each by the schedd's name, so one busy schedd cannot starve the
+// others. Empty (the default) is the shared budget.
+func (s *Schedd) WithRateLimitKey(key string) *Schedd {
+	s.rateLimitKey = key
+	return s
 }
 
 // NewSchedd creates a new Schedd instance
@@ -197,7 +210,7 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 	if rateLimitManager != nil {
 		rateLimitCtx, cancelRateLimit := context.WithTimeout(ctx, 1000*time.Millisecond)
 		defer cancelRateLimit()
-		if err := rateLimitManager.WaitSchedd(rateLimitCtx, username); err != nil {
+		if err := rateLimitManager.WaitScheddFor(rateLimitCtx, s.rateLimitKey, username); err != nil {
 			return nil, fmt.Errorf("rate limit exceeded: %w", err)
 		}
 	}
@@ -371,7 +384,7 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, useAuth b
 	if rateLimitManager != nil {
 		rateLimitCtx, cancelRateLimit := context.WithTimeout(ctx, 1000*time.Millisecond)
 		defer cancelRateLimit()
-		if err := rateLimitManager.WaitSchedd(rateLimitCtx, username); err != nil {
+		if err := rateLimitManager.WaitScheddFor(rateLimitCtx, s.rateLimitKey, username); err != nil {
 			return nil, fmt.Errorf("rate limit exceeded: %w", err)
 		}
 	}

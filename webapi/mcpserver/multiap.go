@@ -39,22 +39,25 @@ var multiAPPassthroughTools = map[string]bool{
 
 // multiAPToolAllowed reports whether multi-AP mode serves a tool.
 func multiAPToolAllowed(name string) bool {
-	return multiAPReadTools[name] || multiAPPassthroughTools[name] || isCondorDocTool(name)
+	return multiAPReadTools[name] || multiAPPassthroughTools[name] || multiAPActionTools[name] ||
+		name == "remove_jobs" || isCondorDocTool(name)
 }
 
 // errMultiAPTool refuses a tool multi-AP mode does not serve.
 func errMultiAPTool(name string) error {
 	return fmt.Errorf("the %q tool is not available on this multi-access-point server yet; "+
-		"it serves query_jobs, get_job, query_job_archive, aggregate_jobs and list_access_points", name)
+		"it serves reading your jobs, and acting on one job at a time or by constraint, but not submitting, "+
+		"DAGs, interactive sessions, credentials or watches", name)
 }
 
 // multiAPCatalog replaces the single-AP catalogue: passthrough tools as
-// they are, the read tools in their multi-AP form, nothing else.
+// they are, the action tools noting that job ids must be complete, the
+// read tools in their multi-AP form, nothing else.
 func multiAPCatalog(tools []Tool) []Tool {
 	out := make([]Tool, 0, len(tools))
 	for _, t := range tools {
 		if multiAPToolAllowed(t.Name) && !multiAPReadTools[t.Name] {
-			out = append(out, t)
+			out = append(out, multiAPActionToolDef(t))
 		}
 	}
 	return append(out, multiAPToolDefs()...)
@@ -143,7 +146,13 @@ func (s *Server) callMultiAPTool(ctx context.Context, name string, args map[stri
 		result, err = s.multiAggregateTool(ctx, args)
 	case "list_access_points":
 		result = s.multiListAPsTool()
+	case "remove_jobs":
+		result, err = s.multiRemoveJobsTool(ctx, args)
 	default:
+		if multiAPActionTools[name] {
+			result, err = s.multiActionTool(ctx, name, args)
+			break
+		}
 		if !multiAPToolAllowed(name) {
 			return nil, true, errMultiAPTool(name)
 		}
@@ -152,8 +161,9 @@ func (s *Server) callMultiAPTool(ctx context.Context, name string, args map[stri
 	return result, true, err
 }
 
-// multiCaller is the caller's User attribute value. No admin exemption:
-// cross-user reads are per AP and not part of the read-only mode.
+// multiCaller is the caller's User attribute value. Hub reads have no
+// admin exemption; an action's cross-user exemption is per AP
+// (allowsAllUsers).
 func (s *Server) multiCaller(ctx context.Context) (string, error) {
 	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
 	if actor == "" {
@@ -370,10 +380,12 @@ func (s *Server) multiListAPsTool() interface{} {
 // multi-AP mode.
 func multiAPInstructions(constraint string) string {
 	return "This server fronts several HTCondor access points (the schedds matching " + constraint + "); " +
-		"list_access_points names them. It is read-only for now: query_jobs, query_job_archive, get_job and aggregate_jobs " +
-		"read your jobs on all of them. A job is identified by schedd, cluster and proc together: the same cluster.proc " +
-		"can exist on two access points. Copy job_id from an answer rather than composing one. Answers name the access " +
-		"points whose data is not current.\n\n"
+		"list_access_points names them. query_jobs, query_job_archive, get_job and aggregate_jobs read your jobs on all " +
+		"of them. A job is identified by schedd, cluster and proc together: the same cluster.proc can exist on two access " +
+		"points. Copy job_id from an answer rather than composing one: the tools that act on one job (hold, release, " +
+		"remove, edit, output, input, tail, exec) need the complete id and refuse a bare cluster.proc. remove_jobs runs " +
+		"on every access point and reports each. Submitting, DAGs, interactive sessions, credentials and watches are not " +
+		"available here yet. Answers name the access points whose data is not current.\n\n"
 }
 
 // MultiAPScheddCalls reports how many times the single-schedd accessor

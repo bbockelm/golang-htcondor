@@ -76,7 +76,7 @@ func TestMintOutputURLSignsAnOutputTokenForTheOutputEndpoint(t *testing.T) {
 	s := uploadURLServer(t)
 	exp := time.Now().Add(10 * time.Minute)
 
-	u, err := mintOutputURL(s.shareSigner, "https://ap.example.org", 42, 3, "alice", exp, []string{"READ", "WRITE"})
+	u, err := mintOutputURL(s.shareSigner, "https://ap.example.org", "", 42, 3, "alice", exp, []string{"READ", "WRITE"})
 	if err != nil {
 		t.Fatalf("mintOutputURL: %v", err)
 	}

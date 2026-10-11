@@ -301,6 +301,14 @@ func (h *Handler) handleSSHConsentApprove(w http.ResponseWriter, r *http.Request
 	}
 
 	session := sshSessionFromRequester(request)
+	if session != "" && h.multi != nil {
+		// The gateway refuses session targets in multi-AP mode before
+		// issuing a code; a code that names one anyway (issued before a
+		// restart into this mode) is not approved, and nothing is
+		// created or probed for it.
+		h.writeError(w, http.StatusBadRequest, errSSHSessionsMultiAP.Error())
+		return
+	}
 	result := sshConsentResult{Approved: true, Session: session}
 
 	if decision.Create != nil {
@@ -426,7 +434,9 @@ func (h *Handler) sshConsentDefaults() InteractiveCreateTerminalRequest {
 }
 
 func (h *Handler) interactiveManagerOrNil() *interactive.Manager {
-	if h.mcpServer == nil {
+	// No interactive sessions in multi-AP mode: the manager submits to
+	// "the" schedd, and there is none.
+	if h.mcpServer == nil || h.multi != nil {
 		return nil
 	}
 	return h.mcpServer.InteractiveManager()

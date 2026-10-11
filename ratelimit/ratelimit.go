@@ -192,14 +192,67 @@ func (l *Limiter) GetStats() Stats {
 type Manager struct {
 	scheddLimiter    *Limiter
 	collectorLimiter *Limiter
+
+	// The schedd rates, for the per-schedd partitions WaitScheddFor
+	// creates on demand.
+	scheddGlobalRate  float64
+	scheddPerUserRate float64
+	partitionsMu      sync.Mutex
+	partitions        map[string]*Limiter
 }
 
 // NewManager creates a new rate limiter manager
 func NewManager(scheddGlobalRate, scheddPerUserRate, collectorGlobalRate, collectorPerUserRate float64) *Manager {
 	return &Manager{
-		scheddLimiter:    NewLimiter(scheddGlobalRate, scheddPerUserRate),
-		collectorLimiter: NewLimiter(collectorGlobalRate, collectorPerUserRate),
+		scheddLimiter:     NewLimiter(scheddGlobalRate, scheddPerUserRate),
+		collectorLimiter:  NewLimiter(collectorGlobalRate, collectorPerUserRate),
+		scheddGlobalRate:  scheddGlobalRate,
+		scheddPerUserRate: scheddPerUserRate,
 	}
+}
+
+// scheddPartition returns the schedd limiter for key. An empty key is
+// the shared limiter every schedd client without a key uses.
+//
+// A keyed partition has the same rates as the shared limiter -- its own
+// global budget and its own per-user budgets -- so traffic to one schedd
+// never spends another's. That is what a server fronting many access
+// points needs: one shared budget makes a busy AP look like a hot user
+// on every other AP, and starves them.
+//
+// Partitions are never removed. That is bounded by what creates them: a
+// server keys them by its access points' names, and its AP registry only
+// ever holds the APs that have matched its constraint (it keeps them,
+// rather than forgetting an AP whose ad blinked out). Each partition's
+// per-user map grows with its users exactly as the shared limiter's
+// does; Reset or ResetAll clears them.
+func (m *Manager) scheddPartition(key string) *Limiter {
+	if key == "" {
+		return m.scheddLimiter
+	}
+	m.partitionsMu.Lock()
+	defer m.partitionsMu.Unlock()
+	if m.partitions == nil {
+		m.partitions = map[string]*Limiter{}
+	}
+	l, ok := m.partitions[key]
+	if !ok {
+		l = NewLimiter(m.scheddGlobalRate, m.scheddPerUserRate)
+		m.partitions[key] = l
+	}
+	return l
+}
+
+// WaitScheddFor is WaitSchedd against the partition for one schedd:
+// (key, user) for the per-user limit, plus a global limit of key's own.
+// An empty key is WaitSchedd.
+func (m *Manager) WaitScheddFor(ctx context.Context, key, username string) error {
+	return m.scheddPartition(key).Wait(ctx, username)
+}
+
+// AllowScheddFor is AllowSchedd against the partition for one schedd.
+func (m *Manager) AllowScheddFor(key, username string) error {
+	return m.scheddPartition(key).Allow(username)
 }
 
 // AllowSchedd checks if a schedd query from the given username should be allowed
@@ -236,4 +289,7 @@ func (m *Manager) GetCollectorStats() Stats {
 func (m *Manager) ResetAll() {
 	m.scheddLimiter.Reset()
 	m.collectorLimiter.Reset()
+	m.partitionsMu.Lock()
+	m.partitions = nil
+	m.partitionsMu.Unlock()
 }

@@ -1606,11 +1606,11 @@ collector constraint, instead of one schedd:
 HTTP_API_SCHEDD_CONSTRAINT = regexp("^ap[0-9]+\\.example\\.org$", Name)
 ```
 
-This mode is **read-only** for now. It reads from a federation hub: an
-htcondordb running with `HTCONDORDB_FEDERATE_SCHEDD_CONSTRAINT` that fans
-every access point's own htcondordb (its spoke) into one catalog. See the
-htcondordb federation documentation for running one; give it the same
-constraint.
+Reads come from a federation hub: an htcondordb running with
+`HTCONDORDB_FEDERATE_SCHEDD_CONSTRAINT` that fans every access point's own
+htcondordb (its spoke) into one catalog. See the htcondordb federation
+documentation for running one; give it the same constraint. Actions go to
+the schedd of the access point the job is on, as you.
 
 What it serves:
 
@@ -1620,15 +1620,117 @@ What it serves:
 | `GET /api/v1/jobs/archive`, MCP `query_job_archive` | Your completed jobs, newest first by `EnteredHistoryTime`. Pages continue with `next_page_token`; `before_cluster`/`before_proc` are refused, because a cluster id is unique only within one access point. |
 | `GET /api/v1/jobs/{id}`, MCP `get_job` | One of your jobs, queued or completed (`archived`). |
 | MCP `aggregate_jobs` | Counts over `jobs` or `history`; group by `ScheddName` for a per-access-point count. |
-| `GET /api/v1/aps`, MCP `list_access_points` | The access points, whether each is in the collector, and how current the hub's copy of each is. |
+| `GET /api/v1/aps`, MCP `list_access_points` | The access points, whether each is in the collector, how current the hub's copy of each is, and whether it trusts this server (`trust`). |
+| One job: `DELETE`/`PATCH /api/v1/jobs/{id}`, `POST .../hold`, `.../release`, `.../warm`; `GET .../stdout`, `.../stderr`, `.../log`, `.../peek`, `.../dag`, `.../files/{name}`, `.../output`, `.../watch`, `.../ssh`; `PUT .../input`, `POST .../input/multipart`, `.../input/share`, `.../output/share`; `/api/v1/jobs/{id}/proxy/...` | As in single-AP mode, against the job's own access point. `{id}` must be complete. |
+| MCP `remove_job`, `hold_job`, `release_job`, `edit_job`, `get_job_stdout`, `get_job_stderr`, `get_job_output`, `upload_job_input`, `create_input_upload_url`, `create_output_download_url`, `tail_job_output`, `exec_in_job` | As in single-AP mode, against the job's access point. `job_id` must be complete, or bare with `schedd`. |
+| Bulk: `POST /api/v1/jobs/hold`, `.../release`, `DELETE /api/v1/jobs`, `PATCH /api/v1/jobs`, MCP `remove_jobs` | Run on every access point; see below. |
+| `GET /api/v1/share/output`, `PUT /api/v1/share/input` | A share URL acts on the access point it was minted for. |
 
-Everything else -- submit, hold/release/remove, edit, sandboxes, output,
-SSH, interactive sessions, Jupyter, credentials, watches, the dashboard,
-the pool pages and chat -- answers **501** ("not available in multi-AP mode
-yet"), and the MCP catalogue offers only the read tools above plus
-`whoami`, `get_version`, `doc_*` and `skills_*`. Superuser mode and the SSH
-gateway are not available; configuring the gateway together with multi-AP
-mode refuses to start.
+Everything else -- submit, DAGs, interactive sessions, Jupyter, apps,
+credentials, watches (including watch share URLs), match analysis, the
+dashboard, the pool pages and chat -- answers **501** ("not available in
+multi-AP mode yet"), and the MCP catalogue offers only the tools above
+plus `whoami`, `get_version`, `doc_*` and `skills_*`. Superuser mode is not
+available.
+
+**Actions need a complete id.** A mutation, a sandbox read, a share URL or
+an SSH connection naming only `123.0` is a **400** with
+`"reason": "incomplete_job_id"` and your jobs with that number as
+`candidates` -- it is never resolved for you, because the hub may know
+your finished `123.0` on ap1 and not yet the `123.0` you just submitted on
+ap3, and a wrong guess on remove cannot be undone. An access point the id
+names but this server cannot act on is its own error, never "job not
+found": `unknown_access_point` (404, not in the set),
+`access_point_absent` (503, not in the collector right now) or
+`access_point_untrusted` (503, "this access point does not trust this API
+server's tokens"). Action responses carry the complete `job_id`.
+
+**Bulk actions** run on every access point with bounded concurrency and a
+per-access-point timeout, and report each:
+
+```json
+{"message": "Bulk job hold completed on every access point",
+ "constraint": "JobStatus == 1",
+ "results": {"total": 4, "success": 4, "not_found": 0, "permission_denied": 0,
+             "bad_status": 0, "already_done": 0, "error": 0},
+ "jobs_edited": 0,
+ "complete": true,
+ "aps": [
+   {"schedd": "ap1.example.org", "status": "acted", "results": {"total": 2, "success": 2, ...}},
+   {"schedd": "ap2.example.org", "status": "skipped",
+    "reason": "the federation hub's copy of this access point is 3s behind (within 30s) and holds no matching job"},
+   {"schedd": "ap3.example.org", "status": "failed", "error": "..."}]}
+```
+
+`status` is `acted`, `no_match`, `skipped`, `failed`, `unreachable` (not in
+the collector; not contacted) or `untrusted` (not contacted). By default
+every usable access point is contacted. Setting
+`HTTP_API_BULK_FRESH_SECONDS` above 0 lets the hub narrow the fan-out: an
+access point is then skipped only when it is provably empty -- the hub
+reports it fresh with a measured lag within that many seconds, its jobs
+stream connected and error-free, and it holds no row that could match your
+scoped constraint there (a row the hub cannot evaluate, such as one
+missing `Owner` or using a function the hub lacks, counts as a possible
+match) -- and this server has not changed anything on it within the
+tolerance plus a minute. That last record is per process: it is lost on a
+restart and not shared between replicas, so a skip can miss a change
+another replica made moments ago. A stale, absent or unmeasured source,
+or a hub that does not answer within 5 seconds, is never proof. The
+fan-out runs to the end even if the client disconnects (bounded at five
+minutes) and is logged per access point. The answer is 200; 404 when
+every access point was accounted for and nothing matched; 502 when no
+access point could be acted on; 503 when no access point is known yet.
+`complete: false` means some access point was not covered -- see `aps`.
+The constraint is confined to your jobs per access point exactly as in
+single-AP mode, and one that does not parse is a 400 before anything is
+contacted.
+
+**Administrators** are scoped per access point: this server's own grant
+(admin group, `mcp:admin`, `mcp:superuser`, `MCP_ADMIN_USERS`) is
+necessary, and the caller must also be in that access point's
+`QUEUE_SUPER_USERS`, read from it. A queue superuser on ap1 reads and acts
+on other users' jobs there and nowhere else. Hub reads have no admin view.
+Project leads see their own jobs only.
+
+**Trust.** Every member is probed when it joins, when its address changes
+and every ten minutes (an untrusted one every minute): a token minted from
+the signing key for `htcondor-api-trust-probe@UID_DOMAIN` must be accepted
+and reported back as exactly that identity, and the member must report a
+`UID_DOMAIN` equal to this server's. A member that refuses the token,
+reports another identity, or will not or cannot report a matching
+`UID_DOMAIN` is `untrusted` in `/api/v1/aps` and in every `sources` block;
+actions on it fail fast, and bulk actions report it. A member that does
+not answer at all stays `unknown`. Only trusted members identify callers
+(a bearer token's identity is asked of them); a request routed to an
+access point is identified by that access point alone.
+
+**Each access point's own verdict.** A refresh revokes a grant only when
+every trusted member's user record (`condor_qusers -disable`) says so. A
+user disabled on one access point is still refused there: requests routed
+to it -- actions, sandbox reads, SSH, share URLs, bulk legs -- answer 403
+`"reason": "access_point_denied"`, while the other access points serve
+them. Verdicts are reused for a minute.
+
+**Identity in queries.** Routed reads and actions are confined on the
+`User` attribute (`owner@UID_DOMAIN`), not the bare `Owner`, and an
+identity in another domain is refused.
+
+**Per-access-point state.** Rate limits (`SCHEDD_QUERY_RATE_LIMIT`,
+`SCHEDD_QUERY_PER_USER_RATE_LIMIT`) apply per access point, so one busy
+access point does not spend the others' budget. Share URLs carry the
+access point inside their signature; a multi-AP server refuses one without
+it. Job transports, DAG structures and per-job watches are kept per access
+point.
+
+**SSH gateway.** Connect to a job as its complete id:
+`ssh 123.0@ap1.example.org@gateway.example.org` (OpenSSH splits the user
+from the host at the last `@`). A bare `123.0` is refused with your
+candidates. Interactive-session names (and a bare `ssh gateway`) are
+refused before any login is started, until submit is available here.
+
+**Proc-less ids.** `123@ap1.example.org` names a whole cluster for an input
+upload (`PUT .../input`, `POST .../input/multipart`, `.../input/share`), as
+`123` does with one schedd, and is a 400 everywhere else.
 
 **Job ids.** A job is identified by schedd, cluster and proc together: two
 access points each have a `123.0`. Every job in a response carries
@@ -1666,9 +1768,8 @@ access point the hub does not hold fresh is read from that access point's
 own htcondordb if it is current, else from its schedd as you; the response
 says which (`source`: `hub`, `spoke` or `schedd`).
 
-**Scope.** Every read is confined to your own jobs on the `User`
-attribute (`owner@UID_DOMAIN`), whatever constraint you pass; there is no
-admin view in this mode. An identity in a domain other than `UID_DOMAIN`
+**Scope.** Every hub read is confined to your own jobs on the `User`
+attribute (`owner@UID_DOMAIN`), whatever constraint you pass. An identity in a domain other than `UID_DOMAIN`
 (compared case-insensitively, as HTCondor does) is refused with a 403
 rather than read as the same name in `UID_DOMAIN`. The access points must share one `UID_DOMAIN`,
 `TRUST_DOMAIN` and pool signing key: a bearer token's identity is
@@ -1688,7 +1789,7 @@ point being down never makes the server unready. The collector ad carries
 
 The web UI shows an access point column and filter on the job and
 archive lists, which access points are behind, and an Access Points page;
-it offers no actions.
+it offers no actions yet.
 
 `HTTP_API_SCHEDD_CONSTRAINT` together with `-schedd`, `-schedd-addr` or
 `SCHEDD_NAME` is a startup error. `UID_DOMAIN` and a collector are
@@ -1744,7 +1845,8 @@ Frequently-used knobs:
 | `HTTP_API_SCHEDD_CONSTRAINT` | ScheddAd constraint selecting the access points of [multi-AP mode](#multi-ap-mode). Unset = one schedd. Read at startup. |
 | `HTTP_API_HUB_NAME` / `HTTP_API_HUB_ADDRESS` | Pin the federation hub by `Name`, or dial this sinful string, instead of discovering the `HTCondorDB` ad that carries `FederationConstraint`. Multi-AP mode only. |
 | `HTTP_API_MULTI_AP_STALE` | `include` (default) or `exclude` a degraded access point's rows in list reads. Either way it is named in `sources.degraded`. |
-| `HTTP_API_JOB_ID_CODEC` | Text form of a job id in URLs. Default and only built-in: `at` (`123.0@ap40.example.org`). |
+| `HTTP_API_JOB_ID_CODEC` | Text form of a job id in URLs and SSH gateway usernames. Default and only built-in: `at` (`123.0@ap40.example.org`). |
+| `HTTP_API_BULK_FRESH_SECONDS` | Opt in to letting a multi-AP bulk action skip an access point on the hub's word that nothing there matches, when the hub's copy is at most this many seconds behind. Default 0: every access point is contacted. |
 | `HTTP_API_DBMIRROR_TOKEN_SUBJECT` | Identity the token this server presents to the mirror asserts. Default `condor@<trust domain>`. Set it when the mirror authorizes a different name. |
 | `HTTP_API_IDENTITY_MAP` | Map the token subject to a local account (`gecos,username`). See [Local identity mapping](#local-identity-mapping). |
 | `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | Account file backing the mapping index. Default `/etc/passwd`. |

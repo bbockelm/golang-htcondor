@@ -231,17 +231,37 @@ func findOne(ctx context.Context, dbc *dbrpc.Client, table, constraint string, p
 
 // resolve completes an id among the caller's jobs on every AP.
 func (s *Service) resolve(ctx context.Context, v view, user string, id jobid.ID) (jobid.ID, error) {
+	cands, err := s.findCandidates(ctx, v, user, id)
+	if err != nil {
+		return jobid.ID{}, err
+	}
+	switch len(cands) {
+	case 0:
+		return jobid.ID{}, errorf(http.StatusNotFound, "job %s not found on any access point", s.Codec.Format(id))
+	case 1:
+		return id.WithSchedd(cands[0].Schedd), nil
+	}
+	return jobid.ID{}, &Error{
+		Status:     http.StatusConflict,
+		Msg:        fmt.Sprintf("job %s exists on %d access points; name one", s.Codec.Format(id), len(cands)),
+		Candidates: cands,
+	}
+}
+
+// findCandidates lists the caller's jobs, live and archived, with id's
+// cluster.proc, one per AP, sorted by AP.
+func (s *Service) findCandidates(ctx context.Context, v view, user string, id jobid.ID) ([]JobRef, error) {
 	var names []string
 	for _, m := range v.members {
 		names = append(names, m.Name)
 	}
 	constraint, err := scoped(user, fmt.Sprintf("ClusterId == %d && ProcId == %d", id.Cluster, id.Proc), names)
 	if err != nil {
-		return jobid.ID{}, err
+		return nil, err
 	}
 	dbc, closer, err := s.Hub.Client(ctx)
 	if err != nil {
-		return jobid.ID{}, errorf(http.StatusServiceUnavailable, "the federation hub is unavailable: %v", err)
+		return nil, errorf(http.StatusServiceUnavailable, "the federation hub is unavailable: %v", err)
 	}
 	defer closer()
 
@@ -265,15 +285,7 @@ func (s *Service) resolve(ctx context.Context, v view, user string, id jobid.ID)
 			err = perr
 		}
 		if err != nil {
-			return jobid.ID{}, errorf(http.StatusServiceUnavailable, "reading the federation hub: %v", err)
-		}
-	}
-	switch len(found) {
-	case 0:
-		return jobid.ID{}, errorf(http.StatusNotFound, "job %s not found on any access point", s.Codec.Format(id))
-	case 1:
-		for _, ref := range found {
-			return id.WithSchedd(ref.Schedd), nil
+			return nil, errorf(http.StatusServiceUnavailable, "reading the federation hub: %v", err)
 		}
 	}
 	cands := make([]JobRef, 0, len(found))
@@ -281,11 +293,7 @@ func (s *Service) resolve(ctx context.Context, v view, user string, id jobid.ID)
 		cands = append(cands, ref)
 	}
 	sort.Slice(cands, func(i, j int) bool { return cands[i].Schedd < cands[j].Schedd })
-	return jobid.ID{}, &Error{
-		Status:     http.StatusConflict,
-		Msg:        fmt.Sprintf("job %s exists on %d access points; name one", s.Codec.Format(id), len(cands)),
-		Candidates: cands,
-	}
+	return cands, nil
 }
 
 // IsAmbiguous returns the candidates of a 409.

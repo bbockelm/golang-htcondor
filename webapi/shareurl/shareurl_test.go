@@ -1,9 +1,11 @@
 package shareurl
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -272,5 +274,52 @@ func TestWatchTTLsAreTheWatchLifetimes(t *testing.T) {
 	}
 	if got := ClampTTL(KindWatch, 30*24*time.Hour); got != MaxWatchTTL {
 		t.Fatalf("an over-long watch TTL clamped to %v", got)
+	}
+}
+
+// The access point is signed with the rest: re-aiming a URL at another
+// AP's same-numbered job breaks the signature, and a token without one
+// keeps the wire form it always had.
+func TestScheddIsSigned(t *testing.T) {
+	s := testSigner(t)
+	p := Payload{Schedd: "ap2.example.org", Cluster: 1, Proc: 0, Owner: "alice",
+		Exp: time.Now().Add(time.Hour).Unix(), Authz: []string{"READ", "WRITE"}}
+	tok, err := s.Sign(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Verify(tok, KindOutput)
+	if err != nil || got.Schedd != "ap2.example.org" {
+		t.Fatalf("Verify = %+v, %v", got, err)
+	}
+
+	enc, sig, _ := strings.Cut(tok, ".")
+	raw, err := base64.RawURLEncoding.DecodeString(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := strings.Replace(string(raw), `"s":"ap2.example.org"`, `"s":"ap1.example.org"`, 1)
+	if moved == string(raw) {
+		t.Fatalf("payload does not carry s: %s", raw)
+	}
+	forged := base64.RawURLEncoding.EncodeToString([]byte(moved)) + "." + sig
+	if _, err := s.Verify(forged, KindOutput); err == nil {
+		t.Fatal("a URL re-aimed at another access point verified")
+	}
+	dropped := strings.Replace(string(raw), `"s":"ap2.example.org",`, "", 1)
+	if _, err := s.Verify(base64.RawURLEncoding.EncodeToString([]byte(dropped))+"."+sig, KindOutput); err == nil {
+		t.Fatal("a URL with its access point stripped verified")
+	}
+
+	// No schedd: no "s" member at all.
+	p.Schedd = ""
+	tok, err = s.Sign(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, _, _ = strings.Cut(tok, ".")
+	raw, _ = base64.RawURLEncoding.DecodeString(enc)
+	if strings.Contains(string(raw), `"s"`) {
+		t.Errorf("a single-AP token carries s: %s", raw)
 	}
 }

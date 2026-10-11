@@ -308,9 +308,12 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 			paths = append(paths, p+"x", p+"1.0@"+ap1+"/stdout")
 		}
 	}
-	// The job sub-resources every action lives under.
-	for _, sub := range []string{"input", "output", "stdout", "stderr", "hold", "release", "files", "ssh", "peek", "log", "watch", "proxy/x"} {
-		paths = append(paths, "/api/v1/jobs/1.0@"+ap1+"/"+sub)
+	// The job sub-resources every action lives under, and some that are
+	// not served.
+	for _, sub := range []string{"input", "input/multipart", "input/share", "output", "output/share", "stdout", "stderr",
+		"hold", "release", "files", "files/x", "ssh", "peek", "log", "watch", "warm", "dag", "proxy/x",
+		"match-analysis", "nonesuch", "hold/x"} {
+		paths = append(paths, "/api/v1/jobs/1.0@"+ap1+"/"+sub, "/api/v1/jobs/1.0/"+sub)
 	}
 	refused := 0
 	for _, path := range paths {
@@ -348,14 +351,22 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 		t.Errorf("the MCP server's schedd accessor was called %d times in multi-AP mode", n)
 	}
 
-	// Named explicitly, so a regression reads as what it is.
+	// Named explicitly, so a regression reads as what it is. Submit,
+	// DAGs, interactive sessions, Jupyter, apps, credentials, watches,
+	// the dashboard and the collector are not served yet.
 	for _, c := range []struct{ method, path string }{
 		{http.MethodPost, "/api/v1/jobs"},
-		{http.MethodDelete, "/api/v1/jobs"},
-		{http.MethodPatch, "/api/v1/jobs"},
-		{http.MethodDelete, "/api/v1/jobs/1.0@" + ap1},
-		{http.MethodPost, "/api/v1/jobs/1.0@" + ap1 + "/hold"},
-		{http.MethodGet, "/api/v1/jobs/1.0@" + ap1 + "/stdout"},
+		{http.MethodPost, "/api/v1/jobs/1.0@" + ap1 + "/hold/extra"},
+		{http.MethodGet, "/api/v1/jobs/1.0@" + ap1 + "/match-analysis"},
+		{http.MethodDelete, "/api/v1/jobs/1.0@" + ap1 + "/stdout"},
+		{http.MethodGet, "/api/v1/jobs/watch"},
+		{http.MethodGet, "/api/v1/share/watch"},
+		{http.MethodGet, "/api/v1/watches/x/share"},
+		{http.MethodPost, "/api/v1/admin/superuser"},
+		{http.MethodGet, "/api/v1/jupyter/x"},
+		{http.MethodPost, "/api/v1/apps"},
+		{http.MethodPost, "/api/v1/collector/advertise"},
+		{http.MethodPost, "/api/v1/creds/service"},
 		{http.MethodGet, "/api/v1/dashboard"},
 		{http.MethodGet, "/api/v1/jobs/epochs"},
 		{http.MethodGet, "/api/v1/creds/user"},
@@ -369,17 +380,20 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 	}
 }
 
-// TestMultiAPMCPReadsOnly checks the MCP surface through the HTTP
-// server's own wiring: the catalogue holds only read tools and a refused
-// tool is refused.
-func TestMultiAPMCPReadsOnly(t *testing.T) {
+// TestMultiAPMCPCatalogue checks the MCP surface through the HTTP
+// server's own wiring: the catalogue holds the read tools and the job
+// actions multi-AP mode routes, and nothing else.
+func TestMultiAPMCPCatalogue(t *testing.T) {
 	srv := newMultiAPServer(t, multiAPService(t, multiAPHub(t), multiaptest.NewRegistry(ap1, ap2)))
 	names := srv.Handler.mcpServer.ToolNames(context.Background())
 	sort.Strings(names)
 	for _, n := range names {
 		switch {
 		case n == "query_jobs", n == "get_job", n == "query_job_archive", n == "aggregate_jobs", n == "list_access_points",
-			n == "whoami", n == "get_version", n == "doc_guide", n == "skills_list", n == "skills_get", strings.HasPrefix(n, "doc_"):
+			n == "whoami", n == "get_version", n == "doc_guide", n == "skills_list", n == "skills_get", strings.HasPrefix(n, "doc_"),
+			n == "remove_job", n == "remove_jobs", n == "hold_job", n == "release_job", n == "edit_job",
+			n == "get_job_stdout", n == "get_job_stderr", n == "get_job_output", n == "upload_job_input",
+			n == "create_input_upload_url", n == "create_output_download_url", n == "tail_job_output", n == "exec_in_job":
 		default:
 			t.Errorf("multi-AP catalogue offers %q", n)
 		}

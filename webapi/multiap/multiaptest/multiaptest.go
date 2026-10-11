@@ -18,6 +18,7 @@ import (
 	"github.com/PelicanPlatform/classad/db"
 	"github.com/PelicanPlatform/classad/dbrpc"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 )
 
@@ -140,14 +141,20 @@ func (d *DB) PutHistory(schedd, user string, cluster, proc int, entered int64) {
 	}
 }
 
-// PutSource writes a federation_sources row. staleness < 0 leaves
-// StalenessSeconds unset.
+// PutSource writes a federation_sources row with its jobs stream
+// connected. staleness < 0 leaves StalenessSeconds unset.
 func (d *DB) PutSource(schedd, state string, staleness int64) {
 	d.t.Helper()
-	ad := fmt.Sprintf("ScheddName = %q\nState = %q\nLastSeen = %d", schedd, state, time.Now().Unix())
+	ad := fmt.Sprintf("ScheddName = %q\nState = %q\nLastSeen = %d\nJobsConnected = true", schedd, state, time.Now().Unix())
 	if staleness >= 0 {
 		ad += fmt.Sprintf("\nStalenessSeconds = %d", staleness)
 	}
+	d.commit(TableSources, schedd, ad)
+}
+
+// PutSourceAd writes a federation_sources row verbatim.
+func (d *DB) PutSourceAd(schedd, ad string) {
+	d.t.Helper()
 	d.commit(TableSources, schedd, ad)
 }
 
@@ -183,4 +190,32 @@ func (r *Registry) Get(name string) (apregistry.Member, bool) {
 		}
 	}
 	return apregistry.Member{}, false
+}
+
+// Update applies fn to the member named name (case-insensitive). It
+// fails the test helper's caller by panicking on an unknown name, which
+// is always a bug in the test.
+func (r *Registry) Update(name string, fn func(*apregistry.Member)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.members {
+		if strings.EqualFold(r.members[i].Name, name) {
+			fn(&r.members[i])
+			return
+		}
+	}
+	panic("multiaptest: no member " + name)
+}
+
+// WithSchedds gives every member a schedd handle at the address addr
+// returns for its name, and returns r.
+func (r *Registry) WithSchedds(addr func(name string) string) *Registry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.members {
+		a := addr(r.members[i].Name)
+		r.members[i].Address = a
+		r.members[i].Schedd = htcondor.NewSchedd(r.members[i].Name, a)
+	}
+	return r
 }

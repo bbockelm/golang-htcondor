@@ -216,7 +216,7 @@ func (h *Handler) queryJobs(ctx context.Context, constraint string, opts *htcond
 	if h.jobQueryOverride != nil {
 		return h.jobQueryOverride(ctx, constraint, opts)
 	}
-	schedd := h.getSchedd()
+	schedd := h.scheddFor(ctx)
 	if schedd == nil {
 		return nil, fmt.Errorf("no schedd configured")
 	}

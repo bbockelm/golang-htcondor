@@ -79,10 +79,17 @@ func (c *sshConn) Run(ctx context.Context, cmd string) (string, error) {
 // process to be reachable from that node, which is not true of an API
 // server in a container or behind NAT, and the attempt then times out
 // with nothing to show for it. Callers on a pool host can pass nil.
-func ScheddDialer(scheddFn func() *htcondor.Schedd, ccb *htcondor.CCBDialer) Dialer {
+//
+// scheddFn returns the schedd that owns key's job -- the one schedd, or,
+// for a server fronting several, the one key.Schedd names -- or nil when
+// there is none to ask.
+func ScheddDialer(scheddFn func(Key) *htcondor.Schedd, ccb *htcondor.CCBDialer) Dialer {
 	return func(ctx context.Context, key Key) (Conn, error) {
-		schedd := scheddFn()
+		schedd := scheddFn(key)
 		if schedd == nil {
+			if key.Schedd != "" {
+				return nil, fmt.Errorf("access point %s is not available; condor_ssh_to_job needs its schedd", key.Schedd)
+			}
 			return nil, errors.New("no schedd configured; condor_ssh_to_job needs one")
 		}
 		client, err := openJobShell(ctx, schedd, key.Cluster, key.Proc, &htcondor.JobShellOptions{CCB: ccb})

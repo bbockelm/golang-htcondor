@@ -62,6 +62,10 @@ type Source struct {
 	LastSeen       time.Time
 	LastReset      time.Time
 	SpokeAddress   string
+	// JobsConnected and JobsLastError describe the hub's jobs stream
+	// from this source.
+	JobsConnected bool
+	JobsLastError string
 }
 
 // ParseSource reads a federation_sources row. ok is false for a row
@@ -82,6 +86,8 @@ func ParseSource(ad *classad.ClassAd) (Source, bool) {
 		s.LastReset = time.Unix(v, 0).UTC()
 	}
 	s.SpokeAddress, _ = ad.EvaluateAttrString("SpokeAddress")
+	s.JobsConnected, _ = ad.EvaluateAttrBool("JobsConnected")
+	s.JobsLastError, _ = ad.EvaluateAttrString("JobsLastError")
 	if s.State == "" {
 		// A row the hub wrote without a state says nothing about
 		// freshness, so it is not fresh.

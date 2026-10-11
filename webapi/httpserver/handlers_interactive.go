@@ -546,6 +546,19 @@ func (s *Handler) startInteractiveHeartbeat(
 	return func() { close(stopCh) }
 }
 
+// disconnectJobID reads a terminal's job id: cluster.proc, or the
+// codec's complete form in multi-AP mode.
+func (s *Handler) disconnectJobID(text string) (int, int, error) {
+	if s.multi == nil {
+		return parseJobID(text)
+	}
+	id, err := s.multi.codec.Parse(text)
+	if err != nil {
+		return 0, 0, err
+	}
+	return int(id.Cluster), int(id.Proc), nil
+}
+
 // removeJobOnDisconnect issues a condor_rm for the given cluster.proc
 // after the SSH bridge tears down. Used for interactive terminal
 // sessions: when the user closes the browser tab (or clicks "End
@@ -556,7 +569,7 @@ func (s *Handler) startInteractiveHeartbeat(
 // ctx is the bridge's request context, which is being cancelled when this
 // runs: its values are kept and its cancellation is not.
 func (s *Handler) removeJobOnDisconnect(ctx context.Context, jobIDStr string) {
-	cluster, proc, err := parseJobID(jobIDStr)
+	cluster, proc, err := s.disconnectJobID(jobIDStr)
 	if err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "interactive disconnect: bad job id",
 			"job_id", jobIDStr, "error", err)
@@ -587,8 +600,11 @@ func (s *Handler) removeJobOnDisconnect(ctx context.Context, jobIDStr string) {
 	rmCtx, cancel := context.WithTimeout(rmCtx, 10*time.Second)
 	defer cancel()
 
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s", cluster, proc, classadStringLit(owner))
-	results, err := s.getSchedd().RemoveJobs(rmCtx, constraint, "Interactive session ended")
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && %s", cluster, proc, s.ownerClause(owner))
+	// The schedd of the AP the terminal was routed to, in multi-AP mode
+	// (rmCtx keeps the route); there a context with no caller credential
+	// gets no schedd at all rather than this daemon's.
+	results, err := s.scheddFor(rmCtx).RemoveJobs(rmCtx, constraint, "Interactive session ended")
 	if err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "interactive disconnect: condor_rm failed",
 			"job_id", jobIDStr, "error", err)

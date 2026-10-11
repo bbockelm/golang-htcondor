@@ -1,0 +1,468 @@
+package httpserver
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/bbockelm/cedar/security"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/jobid"
+	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+)
+
+// Multi-AP actions: every action names its job by a complete id, and is
+// sent to the schedd of the access point the id names.
+//
+// handleMultiJobByID parses the id through the codec, routes it
+// (multiap.Service.Route), records the AP on the request's context and
+// hands the request to the same handlers single-AP mode uses, with the
+// path rewritten to the job's local cluster.proc. Those handlers reach
+// their schedd through scheddFor, which in this mode answers only from
+// that context: a handler reached without a route gets a schedd that
+// cannot connect, never "the" schedd, because there is none.
+
+// scheddFor returns the schedd an action on ctx's job goes to: the one
+// schedd in single-AP mode; in multi-AP mode, the AP the request was
+// routed to.
+//
+// In multi-AP mode it fails closed twice. With no routed AP on ctx there
+// is no right answer, and the call is counted as a bug like any other
+// use of the single-schedd accessor. With no caller credential on ctx
+// the action would have to run as this daemon -- a queue superuser on
+// the AP -- so it is refused rather than sent; CredentialOrigin refuses
+// that fallback too, and this makes the refusal not depend on it.
+func (h *Handler) scheddFor(ctx context.Context) *htcondor.Schedd {
+	if h.multi == nil {
+		return h.getSchedd()
+	}
+	t, ok := multiap.TargetFrom(ctx)
+	if !ok || t.Member.Schedd == nil {
+		return h.multiAPScheddMisuse()
+	}
+	if _, ok := htcondor.GetSecurityConfigFromContext(ctx); !ok {
+		h.logger.Error(logging.DestinationSecurity,
+			"Refusing an action with no caller credential attached", "access_point", t.Member.Name)
+		return multiap.NoSchedd
+	}
+	// The member as the registry knows it now, not as it was when the
+	// request was routed: a long-lived caller (a job watch's poll loop)
+	// follows an address change, and stops reaching an AP that has since
+	// left the collector or failed its trust probe.
+	m, err := h.multi.svc.Member(t.Member.Name)
+	if err != nil {
+		h.logger.Debug(logging.DestinationHTTP, "Not reaching an access point that cannot be acted on now",
+			"access_point", t.Member.Name, "error", err)
+		return multiap.NoSchedd
+	}
+	return m.Schedd
+}
+
+// jobPathID is the job id a response or a URL this server builds should
+// carry: cluster.proc in single-AP mode, the codec's complete form for a
+// request routed to an AP.
+func (h *Handler) jobPathID(ctx context.Context, cluster, proc int) string {
+	if h.multi != nil {
+		if t, ok := multiap.TargetFrom(ctx); ok {
+			return h.multi.codec.Format(jobid.ID{Schedd: t.Member.Name, Cluster: int64(cluster), Proc: int64(proc)})
+		}
+	}
+	return fmt.Sprintf("%d.%d", cluster, proc)
+}
+
+// routedJobID is jobPathID for a handler that holds the job id as the
+// text it was routed with ("123.0" after the rewrite).
+func (h *Handler) routedJobID(ctx context.Context, local string) string {
+	if h.multi == nil {
+		return local
+	}
+	t, ok := multiap.TargetFrom(ctx)
+	if !ok || t.ID.Schedd == "" {
+		return local
+	}
+	return h.multi.codec.Format(t.ID)
+}
+
+// ownerClause is the ClassAd clause confining a query to the jobs of
+// owner, a job's Owner value (the actor before its last "@"): Owner ==
+// owner with one schedd. In multi-AP mode it is the User attribute,
+// owner@UID_DOMAIN: Owner is only the local part, and APs that ever
+// differed in UID_DOMAIN would otherwise hand one user's same-named
+// neighbour their jobs.
+func (h *Handler) ownerClause(owner string) string {
+	if h.multi == nil {
+		return fmt.Sprintf("Owner == %s", classadStringLit(owner))
+	}
+	return fmt.Sprintf("User == %s", classadStringLit(owner+"@"+h.multi.svc.UIDDomain))
+}
+
+// clusterPathID is how a caller names a whole cluster in a URL: its
+// number, or in multi-AP mode the id as they sent it.
+func (h *Handler) clusterPathID(ctx context.Context, cluster int) string {
+	if t, ok := multiap.TargetFrom(ctx); ok && t.Raw != "" {
+		return t.Raw
+	}
+	return fmt.Sprintf("%d", cluster)
+}
+
+// routedSchedd is the AP a request was routed to, or "".
+func routedSchedd(ctx context.Context) string {
+	if t, ok := multiap.TargetFrom(ctx); ok {
+		return t.Member.Name
+	}
+	return ""
+}
+
+// multiAPJobActionAllowed reports whether multi-AP mode serves method on
+// /api/v1/jobs/{id}/{rest}. An allowlist: every sub-resource is named
+// with the methods its handler accepts, and anything else -- a new
+// sub-resource nobody has routed yet -- is refused.
+//
+// match-analysis is not served: it reads the pool's slots as well as the
+// job, and has not been taught which collector view belongs to which AP.
+func multiAPJobActionAllowed(method, rest string) bool {
+	sub, tail, _ := strings.Cut(rest, "/")
+	get := method == http.MethodGet
+	switch sub {
+	case "hold", "release", "warm":
+		return tail == "" && method == http.MethodPost
+	case "stdout", "stderr", "log", "peek", "dag", "watch", "ssh":
+		return tail == "" && get
+	case "output":
+		return (tail == "" && get) || (tail == "share" && method == http.MethodPost)
+	case "input":
+		switch tail {
+		case "":
+			return method == http.MethodPut
+		case "multipart", "share":
+			return method == http.MethodPost
+		}
+		return false
+	case "files":
+		return tail != "" && get
+	case "proxy":
+		// Whatever the job's server speaks; the proxy handler decides.
+		return true
+	}
+	return false
+}
+
+// handleMultiJobByID serves /api/v1/jobs/{id}[/...] in multi-AP mode.
+func (h *Handler) handleMultiJobByID(w http.ResponseWriter, r *http.Request, parts []string) {
+	first := parts[0]
+	if len(parts) == 1 {
+		switch first {
+		case "hold", "release":
+			// POST /api/v1/jobs/hold|release: a bulk action.
+			if r.Method != http.MethodPost {
+				h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+				return
+			}
+			h.handleMultiBulkAction(w, r, first)
+			return
+		}
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			h.handleMultiGetJob(w, r, first)
+			return
+		}
+		if r.Method != http.MethodDelete && r.Method != http.MethodPatch {
+			h.refuseMultiAP(w, r)
+			return
+		}
+	} else if !multiAPJobActionAllowed(r.Method, strings.Join(parts[1:], "/")) {
+		// The server-wide allowlist already refused this; kept here so
+		// the dispatcher does not depend on being reached only through it.
+		h.refuseMultiAP(w, r)
+		return
+	}
+
+	id, err := h.multi.codec.Parse(first)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+		return
+	}
+	// Authenticated before anything about the AP is looked at or
+	// answered: an unauthenticated request learns nothing about the AP
+	// set, and the caller's identity is what the AP's own verdict
+	// (Admit) and a bare id's candidates are about.
+	_, user, ok := h.multiAPCaller(w, r)
+	if !ok {
+		return
+	}
+	// A proc-less id ("123@ap1", which the codec reads as 123.0 and
+	// renders back with ".0") is what single-AP mode calls a bare
+	// cluster: every proc of it for an input upload, and an invalid id
+	// everywhere else.
+	clusterOnly := h.multi.codec.Format(id) != first
+	sub := strings.Join(parts[1:], "/")
+	clusterTarget := sub == "input" || sub == "input/multipart" || sub == "input/share"
+	if clusterOnly && !clusterTarget {
+		h.writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("Invalid job ID: %q names no proc; use the complete id, e.g. %s", first,
+				h.multi.codec.Format(id)))
+		return
+	}
+	m, err := h.multi.svc.Route(r.Context(), user, id)
+	if err != nil {
+		h.multiAPError(w, err)
+		return
+	}
+	id = id.WithSchedd(m.Name)
+	ctx := multiap.WithTarget(r.Context(), multiap.Target{Member: m, ID: id, Raw: first})
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		// A change this server makes on the AP: until the hub has seen
+		// it, a bulk action must not skip the AP on the hub's word.
+		// Noted at the start and again at the end, because the schedd
+		// applies a slow one (a spool upload) when it finishes.
+		h.multi.svc.NoteWrite(m.Name)
+		defer h.multi.svc.NoteWrite(m.Name)
+	}
+
+	// The handlers below parse the job from the path, and know only
+	// cluster.proc; the AP rides on the context.
+	routed := r.WithContext(ctx)
+	u := *r.URL
+	rest := ""
+	if len(parts) > 1 {
+		rest = "/" + strings.Join(parts[1:], "/")
+	}
+	local := fmt.Sprintf("%d.%d", id.Cluster, id.Proc)
+	if clusterOnly {
+		local = fmt.Sprintf("%d", id.Cluster)
+	}
+	u.Path = "/api/v1/jobs/" + local + rest
+	u.RawPath = ""
+	routed.URL = &u
+	h.serveJobByID(w, routed)
+}
+
+// --- per-AP queue superusers -------------------------------------------------
+
+// apSuperusers holds each member's QUEUE_SUPER_USERS, read from that
+// member. Cross-user power in multi-AP mode is per AP: being a queue
+// superuser on one AP must not reach the jobs of any other.
+//
+// One policy, and one polling goroutine, per member ever seen. Members
+// are never removed from the registry (membership is sticky; the hub,
+// not this server, retires APs), so this is bounded by the APs that have
+// ever matched HTTP_API_SCHEDD_CONSTRAINT; a policy for an AP that has
+// gone away polls it every refresh interval and keeps its last answer.
+type apSuperusers struct {
+	reg       multiap.Registry
+	uidDomain string
+	logger    *logging.Logger
+
+	mu       sync.Mutex
+	policies map[string]*superuserPolicy // by lower-cased AP name
+	ctx      context.Context             // set by run; policies started after it inherit it
+}
+
+func newAPSuperusers(reg multiap.Registry, uidDomain string, logger *logging.Logger) *apSuperusers {
+	return &apSuperusers{reg: reg, uidDomain: uidDomain, logger: logger, policies: map[string]*superuserPolicy{}}
+}
+
+// memberSuperUserSource reads one member's QUEUE_SUPER_USERS from its
+// current schedd handle, which the registry replaces when the AP's
+// address changes.
+type memberSuperUserSource struct {
+	reg  multiap.Registry
+	name string
+}
+
+func (s memberSuperUserSource) QueueSuperUsers(ctx context.Context) ([]string, error) {
+	m, ok := s.reg.Get(s.name)
+	if !ok || m.Schedd == nil {
+		return nil, fmt.Errorf("access point %s has no known address", s.name)
+	}
+	return m.Schedd.QueueSuperUsers(ctx)
+}
+
+// run keeps a policy per member, polling each from its own AP, until ctx
+// ends.
+func (a *apSuperusers) run(ctx context.Context) {
+	a.mu.Lock()
+	a.ctx = ctx
+	a.mu.Unlock()
+	t := time.NewTicker(apregistry.DefaultInterval)
+	defer t.Stop()
+	for {
+		for _, m := range a.reg.Members() {
+			a.policy(m.Name)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// policy returns ap's policy, creating (and, once run has started,
+// starting) it on first use.
+func (a *apSuperusers) policy(ap string) *superuserPolicy {
+	key := strings.ToLower(ap)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if p, ok := a.policies[key]; ok {
+		return p
+	}
+	p := newSuperuserPolicy(memberSuperUserSource{reg: a.reg, name: ap}, a.uidDomain, "", 0, a.logger)
+	a.policies[key] = p
+	if a.ctx != nil {
+		go p.Run(a.ctx)
+	}
+	return p
+}
+
+// isQueueSuperUser reports whether actor is in ap's QUEUE_SUPER_USERS.
+// Unknown -- never read, or not a member -- is false.
+func (a *apSuperusers) isQueueSuperUser(ap, actor string) bool {
+	if a == nil || ap == "" || actor == "" {
+		return false
+	}
+	if _, ok := a.reg.Get(ap); !ok {
+		return false
+	}
+	p := a.policy(ap)
+	if !p.known() {
+		return false
+	}
+	_, isSuper := p.ImpersonationIdentity(actor)
+	return isSuper
+}
+
+// apQueueSuperUser is the per-AP superuser check multi-AP mode uses, and
+// hands to MCP: in tests a fixed table replaces the polled policies.
+func (m *multiAPMode) apQueueSuperUser(ap, actor string) bool {
+	if m.queueSuperUser != nil {
+		return m.queueSuperUser(ap, actor)
+	}
+	return m.superusers.isQueueSuperUser(ap, actor)
+}
+
+// --- member trust probe ------------------------------------------------------
+
+// trustProbeSubject is the local part of the identity the trust probe's
+// token is minted for. It names this server, and is never a real user.
+const trustProbeSubject = "htcondor-api-trust-probe"
+
+// probeMemberTrust checks that a member accepts this server's tokens:
+// it pings the AP with a token minted from the pool signing key for
+// trustProbeSubject@UID_DOMAIN and requires the AP to report exactly
+// that identity, and then asks the AP its UID_DOMAIN.
+//
+// A trust-domain or signing-key mismatch fails silently in practice --
+// cedar drops a token whose issuer the peer does not trust and offers
+// nothing usable, which reaches an action as an unrelated EOF -- so it is
+// found here, once, instead. The identity check catches an AP that maps
+// tokens to some other identity. The UID_DOMAIN read is separate because
+// a schedd reports a token's subject verbatim: the ping alone does not
+// say what UID_DOMAIN the AP qualifies its own users with, and v1 needs
+// every member to agree on it.
+//
+// A member that cannot be reached is inconclusive, not untrusted.
+func (h *Handler) probeMemberTrust(ctx context.Context, m apregistry.Member) error {
+	if m.Schedd == nil {
+		return fmt.Errorf("no address: %w", apregistry.ErrInconclusive)
+	}
+	if h.signingKeyPath == "" || h.trustDomain == "" || h.uidDomain == "" {
+		h.probeCannotRun.Do(func() {
+			h.logger.Error(logging.DestinationSecurity,
+				"Access point trust probes cannot run: no signing key, TRUST_DOMAIN or UID_DOMAIN to mint a probe token with; "+
+					"every member stays unknown, and none is used to identify callers",
+				"signing_key", h.signingKeyPath != "", "trust_domain", h.trustDomain != "", "uid_domain", h.uidDomain != "")
+		})
+		return fmt.Errorf("this server has no signing key, TRUST_DOMAIN or UID_DOMAIN to mint a probe token with: %w",
+			apregistry.ErrInconclusive)
+	}
+	want := trustProbeSubject + "@" + h.uidDomain
+	now := time.Now()
+	token, err := generateMCPAccessJWT(filepath.Dir(h.signingKeyPath), filepath.Base(h.signingKeyPath),
+		want, h.trustDomain, now.Unix(), now.Add(5*time.Minute).Unix(), []string{"READ"})
+	if err != nil {
+		return fmt.Errorf("minting the probe token: %w: %w", err, apregistry.ErrInconclusive)
+	}
+	sec, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, token, "", 0, "CLIENT", nil)
+	if err != nil {
+		return fmt.Errorf("building the probe's security configuration: %w: %w", err, apregistry.ErrInconclusive)
+	}
+	ctx = htcondor.WithSecurityConfig(htcondor.WithUserRequest(ctx, "access point trust probe"), sec)
+
+	res, err := m.Schedd.PingWithOptions(ctx, &htcondor.PingOptions{Command: htcondor.DCNopRead})
+	if err != nil {
+		if unreachable(err) {
+			return fmt.Errorf("the access point did not answer: %w: %w", err, apregistry.ErrInconclusive)
+		}
+		return fmt.Errorf("the access point refused a token signed with this server's key for trust domain %s: %w", h.trustDomain, err)
+	}
+	if !sameIdentity(res.User, want) {
+		return fmt.Errorf("the access point identified this server's token as %q, not %q", res.User, want)
+	}
+	uid, ok, err := m.Schedd.ConfigVal(ctx, "UID_DOMAIN")
+	switch {
+	case err != nil && unreachable(err):
+		return fmt.Errorf("the access point stopped answering: %w: %w", err, apregistry.ErrInconclusive)
+	case err != nil:
+		// An AP that will not say what UID_DOMAIN it qualifies users
+		// with cannot be shown to agree with this server's, and v1
+		// needs every member to.
+		return fmt.Errorf("the access point would not report its UID_DOMAIN to this server's token: %w", err)
+	case !ok:
+		return errors.New("the access point has no UID_DOMAIN set")
+	case !strings.EqualFold(strings.TrimSpace(uid), h.uidDomain):
+		return fmt.Errorf("the access point's UID_DOMAIN is %q, and this server's is %q", uid, h.uidDomain)
+	}
+	return nil
+}
+
+// sameIdentity compares two user@domain identities as HTCondor does:
+// the user part exactly, the domain without regard to case.
+func sameIdentity(got, want string) bool {
+	gi, wi := strings.LastIndex(got, "@"), strings.LastIndex(want, "@")
+	if gi < 0 || wi < 0 {
+		return got == want
+	}
+	return got[:gi] == want[:wi] && strings.EqualFold(got[gi+1:], want[wi+1:])
+}
+
+// unreachable reports whether a probe failed for want of a connection:
+// the AP is down, restarting or the network is, which says nothing about
+// trust. An authorization refusal is never that, whatever its text says,
+// and is checked first; after it only what the network itself reports
+// counts.
+func unreachable(err error) bool {
+	var authz *security.AuthorizationError
+	if errors.As(err, &authz) {
+		return false
+	}
+	var op *net.OpError
+	if errors.As(err, &op) && (op.Op == "dial" || op.Op == "read" || op.Op == "write") {
+		return true
+	}
+	// A reset is what a restarted schedd's stale shared-port address
+	// gives (wrapScheddConnectError): the next registry poll brings the
+	// new address, and a fresh probe.
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := err.Error()
+	for _, s := range []string{"connection refused", "no route to host", "network is unreachable", "no such host",
+		"i/o timeout", "connection reset by peer"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}

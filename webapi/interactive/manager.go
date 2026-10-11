@@ -66,6 +66,11 @@ type Options struct {
 	// *htcondor.Schedd so the lease and lifecycle logic can be tested
 	// without a pool behind it.
 	Schedd func() ScheddClient
+	// ScheddFor, when set, returns the schedd that owns the job a call
+	// on ctx is about, and is what reaching into a running job dials
+	// through. A host fronting several schedds sets it, so a command run
+	// in a job goes to that job's schedd; without it Schedd is used.
+	ScheddFor func(ctx context.Context) ScheddClient
 
 	Logger  *logging.Logger
 	LogDest logging.Destination
@@ -369,7 +374,12 @@ func NewManager(opts Options) (*Manager, error) {
 		opts.Now = time.Now
 	}
 	if opts.Dial == nil {
-		opts.Dial = sshDialer(opts.Schedd, opts.CCB)
+		scheddFor := opts.ScheddFor
+		if scheddFor == nil {
+			schedd := opts.Schedd
+			scheddFor = func(context.Context) ScheddClient { return schedd() }
+		}
+		opts.Dial = sshDialer(scheddFor, opts.CCB)
 	}
 	m := &Manager{
 		opts:     opts,

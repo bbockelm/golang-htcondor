@@ -60,6 +60,12 @@ func (s *Handler) projectLeadReadProjects(r *http.Request) []string {
 	if !s.projectLeads.configured() {
 		return nil
 	}
+	if s.multi != nil {
+		// Leads are this server's configuration, with no access point in
+		// it; a lead's cross-user reads would reach every AP alike. Not
+		// offered in multi-AP mode: a lead sees their own jobs.
+		return nil
+	}
 	session, ok := s.getSessionFromRequest(r)
 	if !ok || s.isWebUIAdmin(r) {
 		return nil
@@ -117,7 +123,33 @@ const (
 //
 // Everyone else is confined to their own jobs: Owner == ownerFromActor of
 // the authenticated identity.
+//
+// In multi-AP mode the answer is per access point. Everything above is
+// this server's own policy, and it is necessary but no longer
+// sufficient: the caller must also be in QUEUE_SUPER_USERS of the AP the
+// request was routed to, as read from that AP. An administrator who is a
+// queue superuser on ap1 reads and acts on other users' jobs there and
+// on no other AP. A request routed to no AP sees only its own jobs.
 func (s *Handler) seesAllJobs(ctx context.Context, r *http.Request, tier jobScopeTier) bool {
+	if !s.seesAllJobsByPolicy(ctx, r, tier) {
+		return false
+	}
+	if s.multi == nil {
+		return true
+	}
+	ap := routedSchedd(ctx)
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" {
+		if session, ok := s.getSessionFromRequest(r); ok {
+			actor = session.Username
+		}
+	}
+	return s.multi.svc.IsQueueSuperUser(ap, qualifyUser(actor, s.uidDomain))
+}
+
+// seesAllJobsByPolicy is this server's own half of seesAllJobs, which is
+// the whole of it in single-AP mode.
+func (s *Handler) seesAllJobsByPolicy(ctx context.Context, r *http.Request, tier jobScopeTier) bool {
 	if session, ok := s.getSessionFromRequest(r); ok {
 		if s.webuiAdminGroups.grants(session.Groups) {
 			return true

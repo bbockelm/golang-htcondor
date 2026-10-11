@@ -45,7 +45,7 @@ func (s *Server) procsAwaitingInput(ctx context.Context, cluster int) ([]*classa
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query cluster %d: %w", cluster, err)
 	}
@@ -100,7 +100,7 @@ func (s *Server) uploadToCluster(
 		return nil, err
 	}
 
-	res := spool.FanOut(ctx, attempt, src, lim, s.getSchedd().SpoolJobFilesFromTar)
+	res := spool.FanOut(ctx, attempt, src, lim, s.scheddFor(ctx).SpoolJobFilesFromTar)
 	res.NotAttempted = planned.NotAttempted
 	res.Capped = planned.Capped
 

@@ -357,6 +357,13 @@ type Handler struct {
 	// mirrorReaders caches, per username, whether the schedd accepts a
 	// session or user-header caller at READ. See mirrorReadVerified.
 	mirrorReaders mcpActorCache
+	// routedCallers caches, per credential and access point, who that AP
+	// says the credential is (verifyRoutedCaller). apVerdicts caches each
+	// AP's own verdict on a user (admitToAP).
+	routedCallers mcpActorCache
+	apVerdicts    apVerdicts
+	// probeCannotRun logs, once, that member trust probes cannot run.
+	probeCannotRun sync.Once
 	// toolStats counts MCP tool calls for /metrics and for the durable
 	// table in the application database. See toolstats.go.
 	toolStats              *toolstats.Store
@@ -1467,6 +1474,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// stays quiet about.
 	if multi != nil {
 		multi.setTokenSource(h.mirrorTokenSource())
+		// Each AP's own verdict on a caller, and who it says they are.
+		multi.svc.Admit = h.admitToAP
+		multi.svc.VerifyCaller = h.verifyRoutedCaller
 	}
 	if src := h.mirrorTokenSource(); src != nil {
 		h.dbMirror.SetTokenSource(src)
@@ -1813,7 +1823,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger.Info(logging.DestinationHTTP, "OAuth2 maximum grant lifetime configured",
 			"max_grant_lifetime", h.oauth2MaxGrantLifetime)
 
-		h.revocationOracles = h.buildRevocationOracles(cfg.OAuth2RevocationOracles)
+		// In multi-AP mode each schedd-backed oracle consults every
+		// member rather than whichever one is first.
+		h.revocationOracles = h.multiAPOracles(h.buildRevocationOracles(cfg.OAuth2RevocationOracles))
 
 		// Where groups come from the system, membership can be re-read at
 		// refresh time -- which is the live-membership oracle the
