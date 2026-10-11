@@ -62,16 +62,18 @@ const (
 
 // limitedServer serves readCmd and writeCmd over TOKEN, authorizing every
 // authenticated identity at every level, so only a session's authorization
-// limits can refuse a command. A cedar server keeps its sessions in the
-// process-wide cache, which is the one a daemon persists.
-func limitedServer(t *testing.T, keyFile string) string {
+// limits can refuse a command. integrity is the server's integrity level; a
+// command on a server that requires it runs only on a keyed session. A cedar
+// server keeps its sessions in the process-wide cache, which is the one a
+// daemon persists.
+func limitedServer(t *testing.T, keyFile string, integrity security.SecurityLevel) string {
 	t.Helper()
 	srv := cedarserver.New(&security.SecurityConfig{
 		AuthMethods:             []security.AuthMethod{security.AuthToken},
 		Authentication:          security.SecurityRequired,
 		CryptoMethods:           []security.CryptoMethod{security.CryptoAES},
 		Encryption:              security.SecurityOptional,
-		Integrity:               security.SecurityOptional,
+		Integrity:               integrity,
 		TrustDomain:             "pool.example",
 		TokenPoolSigningKeyFile: keyFile,
 	})
@@ -137,7 +139,7 @@ func TestRestoredSessionKeepsAuthorizationLimits(t *testing.T) {
 	}
 
 	cache := security.GetSessionCache()
-	addr := limitedServer(t, keyFile)
+	addr := limitedServer(t, keyFile, security.SecurityOptional)
 	neg, ok := run(t, addr, sec, readCmd)
 	if !ok {
 		t.Fatal("a READ-limited token was refused READ")
@@ -161,7 +163,7 @@ func TestRestoredSessionKeepsAuthorizationLimits(t *testing.T) {
 	if n, err := Restore(context.Background(), store, cache, nil); err != nil || n != 1 {
 		t.Fatalf("Restore: n=%d err=%v", n, err)
 	}
-	addr = limitedServer(t, keyFile)
+	addr = limitedServer(t, keyFile, security.SecurityOptional)
 
 	resume := *sec
 	resume.SessionID = sid
@@ -171,5 +173,85 @@ func TestRestoredSessionKeepsAuthorizationLimits(t *testing.T) {
 	}
 	if _, ok := run(t, addr, &resume, writeCmd); ok {
 		t.Error("the restored session ran WRITE; its READ limit was lost in the restore")
+	}
+}
+
+// TestRestoredSessionKeepsIntegrity: a server that requires integrity reports
+// it on the session it negotiates with a client that leaves its own levels
+// unset, and that session, persisted and restored into the cache (a
+// restart), still carries its key and policy: resumed by id on a new server
+// that requires integrity, it runs a command, which only a keyed session may.
+func TestRestoredSessionKeepsIntegrity(t *testing.T) {
+	keyDir := t.TempDir()
+	keyFile := filepath.Join(keyDir, "POOL")
+	if err := os.WriteFile(keyFile, []byte("restore-integrity-test-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	tok, err := security.GenerateJWT(keyDir, "POOL", "alice@pool.example", "pool.example", now, now+3600, nil)
+	if err != nil {
+		t.Fatalf("GenerateJWT: %v", err)
+	}
+	// Encryption and Integrity left unset: cedar sends them as OPTIONAL.
+	sec := &security.SecurityConfig{
+		AuthMethods:    []security.AuthMethod{security.AuthToken},
+		Authentication: security.SecurityRequired,
+		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+		Token:          tok,
+		SessionCache:   security.NewSessionCache(),
+	}
+
+	cache := security.GetSessionCache()
+	addr := limitedServer(t, keyFile, security.SecurityRequired)
+	neg, ok := run(t, addr, sec, readCmd)
+	if !ok {
+		t.Fatal("an integrity-requiring server refused the command")
+	}
+	if got := neg.ServerConfig.Integrity; got != "YES" {
+		t.Errorf("server reported Integrity = %q, want YES", got)
+	}
+	sid := neg.SessionId
+
+	live, ok := cache.LookupNonExpired(sid)
+	if !ok {
+		t.Fatal("the server cached no session")
+	}
+	store := &memStore{}
+	for _, r := range Snapshot(cache) {
+		if r.ID == sid {
+			store.recs = append(store.recs, r)
+		}
+	}
+	if len(store.recs) != 1 {
+		t.Fatalf("snapshot holds %d records for the session, want 1", len(store.recs))
+	}
+	cache.Invalidate(sid)
+	t.Cleanup(func() { cache.Invalidate(sid) })
+	if n, err := Restore(context.Background(), store, cache, nil); err != nil || n != 1 {
+		t.Fatalf("Restore: n=%d err=%v", n, err)
+	}
+	restored, ok := cache.LookupNonExpired(sid)
+	if !ok {
+		t.Fatal("the restored session is not in the cache")
+	}
+	if restored.Policy() == nil {
+		t.Fatal("the restored session has no policy")
+	}
+	for _, attr := range []string{"Encryption", "Integrity", "CryptoMethods"} {
+		want, ok := live.Policy().EvaluateAttrString(attr)
+		if !ok {
+			t.Fatalf("precondition: the live session's policy has no %s", attr)
+		}
+		if got, _ := restored.Policy().EvaluateAttrString(attr); got != want {
+			t.Errorf("restored policy %s = %q, want %q", attr, got, want)
+		}
+	}
+
+	addr = limitedServer(t, keyFile, security.SecurityRequired)
+	resume := *sec
+	resume.SessionID = sid
+	resume.Token = "" // only the restored session can authenticate this connection
+	if neg, ok := run(t, addr, &resume, readCmd); !ok || !neg.SessionResumed {
+		t.Fatalf("the restored session did not resume on a server requiring integrity (ran=%v)", ok)
 	}
 }
