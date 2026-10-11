@@ -75,6 +75,34 @@ type multiAPStack struct {
 	client  *http.Client
 	me      string // the test user's OS name, which is the jobs' Owner
 	srv     *Server
+	// sshOK is whether ssh-to-job can run here (an sshd config template
+	// was found).
+	sshOK bool
+}
+
+// sshTemplateLine points ssh-to-job at its sshd config template, found
+// next to the HTCondor install or where packages put it, and records
+// whether there is one.
+func sshTemplateLine(s *multiAPStack) string {
+	var candidates []string
+	if master, err := exec.LookPath("condor_master"); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(filepath.Dir(master)), "lib",
+			"condor_ssh_to_job_sshd_config_template"))
+	}
+	candidates = append(candidates,
+		"/usr/lib/condor_ssh_to_job_sshd_config_template",
+		"/usr/lib64/condor/condor_ssh_to_job_sshd_config_template",
+		"/etc/condor/condor_ssh_to_job_sshd_config_template",
+		"/usr/share/condor/condor_ssh_to_job_sshd_config_template")
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			if _, err := os.Stat("/usr/sbin/sshd"); err == nil {
+				s.sshOK = true
+				return "SSH_TO_JOB_SSHD_CONFIG_TEMPLATE = " + c
+			}
+		}
+	}
+	return ""
 }
 
 // apJob names a job across APs.
@@ -134,9 +162,11 @@ func TestMultiAPEndToEnd(t *testing.T) {
 		{"another user's jobs never appear", e2eScopesToTheCaller},
 		{"aps lists both with hub state", e2eListsAPs},
 		{"single job by complete id and by an ambiguous one", e2eGetsSingleJobs},
+		{"with narrowing on, a bulk action matching nothing skips both fresh APs", e2eBulkSkipsProvablyEmpty},
 		{"unserved routes are refused and a bare id is not acted on", e2eRefusesUnserved},
-		{"MCP query_jobs and get_job", e2eMCPReads},
 		{"both members pass the trust probe", e2eTrustProbe},
+		{"MCP query_jobs and get_job", e2eMCPReads},
+		{"a running job on ap2 is peeked, tailed, exec'd into and read back; ap1's same id is not running", e2eRunningJob},
 		{"single-job actions land on the job's AP only", e2eSingleJobActions},
 		{"a bulk hold reaches both APs and only the caller's jobs", e2eBulkHold},
 		{"input spools into the job's AP, directly and through a share URL", e2eSpoolAndShare},
@@ -466,11 +496,17 @@ func startMultiAPStack(t *testing.T, bin string) *multiAPStack {
 
 	// Two schedds in one pool: the harness's own, renamed, and a second
 	// under the local name SCHEDD2 with its own spool, queue log, history
-	// and address file. No startd or negotiator: the jobs stay idle,
-	// which keeps every state the test asserts on one it caused.
+	// and address file. A negotiator and a one-slot startd run only the
+	// job a phase marks with E2ERun; everything else stays idle.
 	poolCfg := fmt.Sprintf(`
-DAEMON_LIST = MASTER, COLLECTOR, SCHEDD, SCHEDD2
+DAEMON_LIST = MASTER, COLLECTOR, SCHEDD, SCHEDD2, NEGOTIATOR, STARTD
 DC_DAEMON_LIST = + SCHEDD2
+# One slot, and only for the job a phase marks to run: every other job
+# stays idle, which keeps every state the test asserts on one it caused.
+START = TARGET.E2ERun =?= true
+ENABLE_SSH_TO_JOB = True
+SSH_TO_JOB_SSHD = /usr/sbin/sshd
+%[6]s
 UID_DOMAIN = %[1]s
 SCHEDD_NAME = %[2]s
 SCHEDD_INTERVAL = 2
@@ -486,7 +522,7 @@ SCHEDD2.SCHEDD_LOG = $(LOG)/SchedLog2
 # Lets a job be queued for another owner (+Owner), as a submit portal
 # does; the test user is not root.
 QUEUE_ALL_USERS_TRUSTED = True
-`, htcondor.HarnessTrustDomain, e2eAP1, e2eAP2, ap2Spool, ap2Dir)
+`, htcondor.HarnessTrustDomain, e2eAP1, e2eAP2, ap2Spool, ap2Dir, sshTemplateLine(s))
 	s.harness = htcondor.SetupCondorHarnessWithConfig(t, poolCfg)
 	s.cfgFile = s.harness.GetConfigFile()
 	t.Cleanup(func() {
@@ -576,16 +612,20 @@ func (s *multiAPStack) startServer(t *testing.T) {
 		ClientConfig:   htcCfg,
 		HTCondorConfig: htcCfg,
 		ListenAddr:     listener.Addr().String(),
-		MultiAP:        MultiAPConfig{ScheddConstraint: e2eAPConstraint},
-		Collector:      htcondor.NewCollector(s.harness.GetCollectorAddr()).WithConfig(htcCfg),
+		// Narrowing on, so a phase can check the hub's freshness path end
+		// to end; it is off by default.
+		MultiAP:   MultiAPConfig{ScheddConstraint: e2eAPConstraint, BulkFresh: 30 * time.Second},
+		Collector: htcondor.NewCollector(s.harness.GetCollectorAddr()).WithConfig(htcCfg),
 		// The test plays a trusted proxy naming the caller.
 		UserHeader:               "X-Test-User",
 		UserHeaderTrustAnyUnsafe: true,
 		SigningKeyPath:           s.harness.GetSigningKeyPath(),
-		TrustDomain:              s.harness.GetTrustDomain(),
-		UIDDomain:                s.harness.GetTrustDomain(),
-		EnableMCP:                true,
-		OAuth2DBPath:             filepath.Join(s.dir, "oauth2.db"),
+		// Share and download URLs the MCP tools mint point here.
+		HTTPBaseURL:  baseURL,
+		TrustDomain:  s.harness.GetTrustDomain(),
+		UIDDomain:    s.harness.GetTrustDomain(),
+		EnableMCP:    true,
+		OAuth2DBPath: filepath.Join(s.dir, "oauth2.db"),
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
