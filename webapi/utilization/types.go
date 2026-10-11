@@ -119,6 +119,11 @@ type Request struct {
 	Min      float64 `json:"min"`
 	Max      float64 `json:"max"`
 	Distinct int     `json:"distinct"`
+	// Adaptive says most jobs wrote the request as a formula over their
+	// own usage; Typical, Min and Max are then its STARTING value, and
+	// Expression the most common formula (memory only).
+	Adaptive   bool   `json:"adaptive"`
+	Expression string `json:"expression,omitempty"`
 }
 
 // BatchPoint is one submission: a cluster, or for a DAG the whole run of

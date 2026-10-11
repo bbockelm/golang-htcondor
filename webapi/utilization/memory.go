@@ -58,8 +58,12 @@ type memoryJob struct {
 	atLeast bool
 	// wallHours is the job's wall clock in hours.
 	wallHours float64
-	// request is the RequestMemory it ran with, MiB.
+	// request is the RequestMemory it started with, MiB.
 	request float64
+	// adaptive marks a formula request; inForce is its value for the
+	// run that finished, which a job that outgrew the start was rerun at.
+	adaptive bool
+	inForce  float64
 }
 
 // outgrows reports whether the job would exceed a request.
@@ -87,6 +91,9 @@ type memoryPlan struct {
 	retryFraction float64
 	// p95 and maxPeak describe the peaks, for the advice text.
 	p95, maxPeak float64
+	// adaptiveJobs had a formula request; outgrewStart of them peaked
+	// above where it started.
+	adaptiveJobs, outgrewStart int
 	// exceeded counts jobs stopped for outgrowing their request.
 	exceeded int
 	curve    []MemoryCurvePoint
@@ -129,6 +136,16 @@ func planMemory(jobs []memoryJob) *memoryPlan {
 		peaks[i] = j.peak
 		requests[i] = j.request
 		plan.currentCost += j.request * j.wallHours
+		// An adaptive request is a retry by another name: a job that
+		// outgrows the start is held and rerun at the grown request. It
+		// is costed the way a retry is, the stopped run at full length.
+		if j.adaptive {
+			plan.adaptiveJobs++
+			if j.outgrows(j.request) {
+				plan.outgrewStart++
+				plan.currentCost += j.inForce * j.wallHours
+			}
+		}
 		if j.atLeast {
 			plan.exceeded++
 		}

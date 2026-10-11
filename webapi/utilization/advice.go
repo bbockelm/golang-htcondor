@@ -136,6 +136,13 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 
 	evidence := fmt.Sprintf("95%% of %s jobs peaked at or below %s; the largest peaked at %s.",
 		count(plan.n), sizeMiB(plan.p95), sizeMiB(plan.maxPeak))
+	if plan.adaptiveJobs*2 > plan.n {
+		// The jobs' request is a formula that starts small and grows
+		// after a hold; say so, since "most jobs requested X" would be
+		// wrong about every job that grew.
+		evidence = fmt.Sprintf("Your request starts at %s and grows after a memory hold; %s of %s jobs outgrew the start and were held once. %s",
+			sizeMiB(plan.typical), count(plan.outgrewStart), count(plan.n), evidence)
+	}
 	retryNote := ""
 	if hasRetry {
 		retryNote = fmt.Sprintf(" With the retry, about %s of jobs would run a second time with more memory.", percent(plan.retryFraction))
