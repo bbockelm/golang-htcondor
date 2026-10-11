@@ -46,7 +46,7 @@ const (
 
 // Defaults for Config.
 const (
-	DefaultWindow         = 64
+	DefaultWindow         = 100
 	DefaultResidualWindow = 256
 )
 
@@ -63,9 +63,8 @@ const (
 	// minLonger is how many runs longer than a running job's elapsed time
 	// its group needs to re-estimate it once it has outlived the median.
 	minLonger = 3
-	// minResiduals is how many of an owner's own prediction errors the
-	// calibrated bounds need before they are used instead of the access
-	// point's.
+	// minResiduals is how many past prediction errors the bounds need
+	// before they are drawn from errors rather than the group's spread.
 	minResiduals = 30
 
 	// scoreAlpha, scorePrior and scoreMargin drive level selection: each
@@ -83,12 +82,14 @@ const (
 
 // Config sizes an Estimator.
 type Config struct {
-	// Window is how many recent runtimes each group keeps. Default
-	// DefaultWindow. LevelGlobal keeps four times as many.
+	// Window is how many recent runtimes each group answers from.
+	// Default DefaultWindow. LevelGlobal answers from four times as
+	// many. Each retains more, to score completed jobs as of their
+	// submit and start (see retainFactor).
 	Window int
 	// ResidualWindow is how many recent prediction errors each owner
-	// keeps for the calibrated bounds. Default DefaultResidualWindow.
-	// The access point as a whole keeps four times as many.
+	// keeps, per view, for the bounds. Default DefaultResidualWindow.
+	// The access point keeps four times as many, overall and per level.
 	ResidualWindow int
 }
 
@@ -115,8 +116,8 @@ type Result struct {
 	// group's runs that lasted at least as long.
 	EstimateSeconds float64 `json:"estimate_seconds,omitempty"`
 	// P10Seconds and P90Seconds bound the runtime: about 80% of jobs
-	// finish between them. Calibrated against this owner's own past
-	// prediction errors once there are enough of them.
+	// finish between them. Drawn from past prediction errors made at
+	// the same point in a job's life (waiting or running); see bounds.
 	P10Seconds float64 `json:"p10_seconds,omitempty"`
 	P90Seconds float64 `json:"p90_seconds,omitempty"`
 	// Basis is which group answered.
@@ -219,27 +220,70 @@ func New(cfg Config) *Estimator {
 	return &Estimator{cfg: cfg.withDefaults(), st: newState()}
 }
 
+// view is the moment a history record is scored as of. A job is asked
+// about while it waits and while it runs, never just before it ends, so
+// each completed job is scored twice -- as it would have been estimated
+// at submit and at start, from only the jobs that had completed by
+// then -- and Estimate answers a waiting job from what the submit view
+// learned and a running one from the start view. Scoring a record
+// against everything that finished before it instead credits the
+// estimator with siblings a waiting job never sees: the level scores
+// then favour levels that are only good late, and the error
+// distribution behind the bounds is narrower than the one queries face.
+type view int
+
+const (
+	viewSubmit view = iota
+	viewStart
+	numViews
+)
+
+// retainFactor is how many more runtimes than it answers from a group
+// keeps, so that it can still answer as of a job's submit or start once
+// that job finishes: by then its own siblings may have pushed the runs
+// that were visible at the time out of the newest Window. Measured on a
+// replayed access point, 4 recovered most of what was lost and 16
+// nearly all of it.
+const retainFactor = 16
+
 type ownerState struct {
-	// score is each level's moving-average error for this owner.
-	score [numLevels]float32
-	// resid is the owner's recent prediction errors, log(actual/estimate).
-	resid window
+	// score is each level's moving-average error for this owner, per
+	// view.
+	score [numViews][numLevels]float32
+	// resid is the owner's recent prediction errors, log(actual/estimate),
+	// per view.
+	resid [numViews]window
 	// at is the newest completion seen for this owner, unix seconds.
 	at int64
 }
 
+// scores is the score set a view chooses by; nil for no owner.
+func (o *ownerState) scores(v view) *[numLevels]float32 {
+	if o == nil {
+		return nil
+	}
+	return &o.score[v]
+}
+
 type state struct {
-	groups      [LevelGlobal]map[string]*window
-	global      window
-	owners      map[string]*ownerState
-	globalResid window
+	groups [LevelGlobal]map[string]*window
+	global window
+	owners map[string]*ownerState
+	// levelResid is every owner's prediction errors per view and
+	// answering level, and globalResid per view.
+	levelResid  [numViews][numLevels]window
+	globalResid [numViews]window
 
 	loaded bool
 	jobs   int64
 	newest int64
 
+	// The self-evaluation counters, from the submit view.
 	scored, within2x   int64
 	scoredBy, withinBy [numLevels]int64
+
+	// scratch is the writer's buffer for as-of medians.
+	scratch []float32
 }
 
 func newState() *state {
@@ -252,11 +296,12 @@ func newState() *state {
 
 // Ingest applies a batch of completed jobs, in completion order.
 //
-// Each job is first scored the way it would have been estimated had it
-// been asked about just before it finished -- which updates the owner's
-// level scores, the residuals behind the bounds and the self-evaluation
-// counters -- and only then added to its groups. So no job ever
-// contributes to its own estimate.
+// Each job is first scored the way it would have been estimated when it
+// was submitted and when it started, from only the jobs that had
+// completed by each of those moments (see view) -- which updates the
+// owner's level scores, the errors behind the bounds and the
+// self-evaluation counters -- and only then added to its groups. So no
+// job ever contributes to its own estimate.
 func (e *Estimator) Ingest(b *Batch) {
 	e.wmu.Lock()
 	defer e.wmu.Unlock()
@@ -287,39 +332,50 @@ func (s *state) apply(recs []record, cfg Config) {
 
 func (s *state) ingest(r *record, cfg Config) {
 	actual := float64(r.runtime)
-	preds, _ := s.candidates(r.keys)
 	var own *ownerState
 	if r.keys.owner != "" {
 		own = s.owners[r.keys.owner]
 		if own == nil {
 			own = &ownerState{}
-			for i := range own.score {
-				own.score[i] = scorePrior
+			for v := range own.score {
+				for l := range own.score[v] {
+					own.score[v][l] = scorePrior
+				}
 			}
 			s.owners[r.keys.owner] = own
 		}
 	}
 
-	if lvl, ok := choose(own, &preds); ok {
-		chosen := preds[lvl]
-		s.scored++
-		s.scoredBy[lvl]++
-		if logError(chosen, actual) <= 1 {
-			s.within2x++
-			s.withinBy[lvl]++
+	for v := range numViews {
+		preds := s.candidatesAsOf(r.keys, r.asOf(v), cfg)
+		if lvl, ok := choose(own.scores(v), &preds); ok {
+			chosen := preds[lvl]
+			if v == viewSubmit {
+				s.scored++
+				s.scoredBy[lvl]++
+				if logError(chosen, actual) <= 1 {
+					s.within2x++
+					s.withinBy[lvl]++
+				}
+			}
+			res := float32(math.Log(math.Max(actual, 1) / math.Max(chosen, 1)))
+			if own != nil {
+				own.resid[v].add(res, r.at, cfg.ResidualWindow, cfg.ResidualWindow)
+			}
+			s.levelResid[v][lvl].add(res, r.at, 4*cfg.ResidualWindow, 4*cfg.ResidualWindow)
+			s.globalResid[v].add(res, r.at, 4*cfg.ResidualWindow, 4*cfg.ResidualWindow)
 		}
-		res := float32(math.Log(math.Max(actual, 1) / math.Max(chosen, 1)))
-		if own != nil {
-			own.resid.add(res, cfg.ResidualWindow)
-		}
-		s.globalResid.add(res, 4*cfg.ResidualWindow)
-	}
-	if own != nil {
-		for l, p := range preds {
-			if !math.IsNaN(p) {
-				own.score[l] = float32((1-scoreAlpha)*float64(own.score[l]) + scoreAlpha*logError(p, actual))
+		// After the choice, so this job's outcome does not inform the
+		// level it was predicted with.
+		if sc := own.scores(v); sc != nil {
+			for l, p := range preds {
+				if !math.IsNaN(p) {
+					sc[l] = float32((1-scoreAlpha)*float64(sc[l]) + scoreAlpha*logError(p, actual))
+				}
 			}
 		}
+	}
+	if own != nil {
 		own.at = max(own.at, r.at)
 	}
 
@@ -333,18 +389,41 @@ func (s *state) ingest(r *record, cfg Config) {
 			w = &window{}
 			s.groups[l][key] = w
 		}
-		w.add(r.runtime, cfg.Window)
-		w.at = max(w.at, r.at)
+		w.add(r.runtime, r.at, cfg.Window, retainFactor*cfg.Window)
 	}
-	s.global.add(r.runtime, 4*cfg.Window)
-	s.global.at = max(s.global.at, r.at)
+	s.global.add(r.runtime, r.at, 4*cfg.Window, retainFactor*4*cfg.Window)
 	s.jobs++
 	s.newest = max(s.newest, r.at)
 }
 
-// candidates returns each level's estimate for keys, NaN where the
-// level does not apply or has too few samples, and the window behind
-// each.
+// candidatesAsOf is each level's estimate for keys from only the
+// runtimes recorded before t; NaN where the level does not apply or has
+// too few of them.
+func (s *state) candidatesAsOf(k Keys, t int64, cfg Config) [numLevels]float64 {
+	var preds [numLevels]float64
+	for l := range s.groups {
+		preds[l] = math.NaN()
+		if k.k[l] == "" {
+			continue
+		}
+		w := s.groups[l][k.k[l]]
+		if w == nil {
+			continue
+		}
+		if vals := w.before(t, cfg.Window, &s.scratch); len(vals) >= minSamples {
+			preds[l] = quantileOf(vals, 0.5)
+		}
+	}
+	preds[LevelGlobal] = math.NaN()
+	if vals := s.global.before(t, 4*cfg.Window, &s.scratch); len(vals) >= minGlobalSamples {
+		preds[LevelGlobal] = quantileOf(vals, 0.5)
+	}
+	return preds
+}
+
+// candidates returns each level's estimate for keys from everything it
+// holds, NaN where the level does not apply or has too few samples, and
+// the window behind each.
 func (s *state) candidates(k Keys) ([numLevels]float64, [numLevels]*window) {
 	var preds [numLevels]float64
 	var wins [numLevels]*window
@@ -364,23 +443,26 @@ func (s *state) candidates(k Keys) ([numLevels]float64, [numLevels]*window) {
 	return preds, wins
 }
 
-// choose picks the level that answers: the most specific available one,
-// unless a less specific one has predicted this owner's jobs better by
-// more than scoreMargin. With no track record every level carries the
-// same prior, so the most specific answers.
-func choose(own *ownerState, preds *[numLevels]float64) (Level, bool) {
+// choose picks the level that answers: the most specific available
+// owner-confined level, unless a less specific one has predicted this
+// owner's jobs better by more than scoreMargin. With no track record
+// every level carries the same prior, so the most specific answers.
+// LevelGlobal answers only when no owner-confined level can: on the
+// replayed history, letting it compete cost accuracy, since a job is
+// nearly always more like its owner's other jobs than like the access
+// point's.
+func choose(scores *[numLevels]float32, preds *[numLevels]float64) (Level, bool) {
 	best := -1
-	for l, p := range preds {
-		if math.IsNaN(p) {
+	for l := range LevelGlobal {
+		if math.IsNaN(preds[l]) {
 			continue
 		}
-		if best < 0 {
-			best = l
-			continue
+		if best < 0 || (scores != nil && scores[l] < scores[best]-scoreMargin) {
+			best = int(l)
 		}
-		if own != nil && own.score[l] < own.score[best]-scoreMargin {
-			best = l
-		}
+	}
+	if best < 0 && !math.IsNaN(preds[LevelGlobal]) {
+		best = int(LevelGlobal)
 	}
 	if best < 0 {
 		return 0, false
@@ -394,7 +476,8 @@ func logError(pred, actual float64) float64 {
 	return math.Abs(math.Log2(math.Max(pred, errorFloor) / math.Max(actual, errorFloor)))
 }
 
-// Estimate answers for one job.
+// Estimate answers for one job: a waiting job from what the submit view
+// learned, and a running one from what the start view did.
 func (e *Estimator) Estimate(q Query) Result {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -404,20 +487,24 @@ func (e *Estimator) Estimate(q Query) Result {
 		res.Reason = ReasonWarmingUp
 		return res
 	}
+	v := viewSubmit
+	if q.Running {
+		v = viewStart
+	}
 	keys := DeriveKeys(q.Features)
 	preds, wins := s.candidates(keys)
 	own := s.owners[keys.owner]
 	if keys.owner == "" {
 		own = nil
 	}
-	lvl, ok := choose(own, &preds)
+	lvl, ok := choose(own.scores(v), &preds)
 	if !ok {
 		res.Reason = ReasonInsufficientHistory
 		return res
 	}
 	w := wins[lvl]
 	est := preds[lvl]
-	p10, p90 := s.bounds(own, est, w)
+	p10, p90 := s.bounds(own, v, lvl, est, w)
 
 	res.Available = true
 	res.Basis = &Basis{Level: lvl.String(), SampleCount: w.len()}
@@ -451,23 +538,34 @@ func (e *Estimator) Estimate(q Query) Result {
 
 // bounds returns the 10th and 90th percentile around est.
 //
-// A group's own spread is a poor upper bound -- on the replayed history
-// its 90th percentile covered only about 70% of jobs, because the
-// estimate's own error comes on top of the group's spread. So the bounds
-// come from the distribution of past prediction errors instead: est
-// scaled by the 10th and 90th percentiles of log(actual/estimate). The
-// owner's errors when there are enough of them, the access point's
-// otherwise, and the group's spread only before either exists.
-func (s *state) bounds(own *ownerState, est float64, w *window) (p10, p90 float64) {
-	r := &s.globalResid
-	if own != nil && own.resid.len() >= minResiduals {
-		r = &own.resid
+// They come from past prediction errors in the same view: est scaled by
+// the 10th and 90th percentiles of log(actual/estimate). A group's own
+// spread alone is a poor bound -- the estimate's error comes on top of
+// it -- and so is the owner's own error history alone: it is dominated
+// by their last large cluster, and the next one is often in a different
+// regime entirely. So the owner's errors are pooled with the access
+// point's errors for the level that answered, falling back to the access
+// point's errors overall while those are too few. The bounds are then
+// widened, never narrowed, to the answering group's own 10th and 90th
+// percentiles, which carry its spread when that is wider than the
+// errors have been. Before any errors exist the group's spread is all
+// there is.
+func (s *state) bounds(own *ownerState, v view, lvl Level, est float64, w *window) (p10, p90 float64) {
+	var pool []float32
+	if own != nil {
+		pool = own.resid[v].sorted
 	}
-	if r.len() >= minResiduals {
-		p10 = est * math.Exp(r.quantile(0.1))
-		p90 = est * math.Exp(r.quantile(0.9))
-	} else {
-		p10, p90 = w.quantile(0.1), w.quantile(0.9)
+	if lr := s.levelResid[v][lvl].sorted; len(lr) > 0 {
+		pool = slices.Concat(pool, lr)
+		slices.Sort(pool)
+	}
+	if len(pool) < minResiduals {
+		pool = s.globalResid[v].sorted
+	}
+	p10, p90 = w.quantile(0.1), w.quantile(0.9)
+	if len(pool) >= minResiduals {
+		p10 = math.Min(p10, est*math.Exp(quantileOf(pool, 0.1)))
+		p90 = math.Max(p90, est*math.Exp(quantileOf(pool, 0.9)))
 	}
 	return math.Min(p10, est), math.Max(p90, est)
 }
@@ -523,11 +621,11 @@ type Stats struct {
 	JobsIngested int64
 	// TrainedThrough is the newest completion read; zero before any.
 	TrainedThrough time.Time
-	// Scored counts jobs that had an estimate when they finished, and
-	// Within2x those whose estimate was within a factor of two of what
-	// they actually ran (by logError, so very short jobs are floored).
-	// Each is also broken down by the level that answered, keyed by
-	// Level.String().
+	// Scored counts completed jobs that would have had an estimate when
+	// they were submitted, and Within2x those whose estimate was within a
+	// factor of two of what they ran (by logError, so very short jobs are
+	// floored). Each is also broken down by the level that answered,
+	// keyed by Level.String().
 	Scored          int64
 	Within2x        int64
 	ScoredByLevel   map[string]int64
@@ -573,7 +671,8 @@ func (e *Estimator) Stats() Stats {
 // Clipped for the same reason as QueryAttrs.
 var HistoryAttrs = slices.Clip(append(slices.Clone(FeatureAttrs),
 	"CommittedTime", "RemoteWallClockTime", "CompletionDate", "EnteredHistoryTime",
-	"ExitCode", "ExitBySignal", "JobUniverse", "JobStatus", "QDate", "GlobalJobId"))
+	"ExitCode", "ExitBySignal", "JobUniverse", "JobStatus", "QDate", "JobCurrentStartDate", "JobStartDate",
+	"GlobalJobId"))
 
 // CompletedRuntime is how long a finished job ran, and whether it is a
 // job whose runtime says anything about the next one like it.
@@ -609,11 +708,21 @@ func CompletedRuntime(ad *classad.ClassAd) (float64, bool) {
 
 // record is one completed job, reduced to what ingesting it needs.
 type record struct {
-	keys    Keys
-	runtime float32
-	at      int64
-	cluster int64
-	proc    int64
+	keys      Keys
+	runtime   float32
+	at        int64 // completed
+	submitted int64
+	started   int64
+	cluster   int64
+	proc      int64
+}
+
+// asOf is the moment a view scores the record at.
+func (r *record) asOf(v view) int64 {
+	if v == viewStart {
+		return r.started
+	}
+	return r.submitted
 }
 
 // Batch collects completed jobs for one Ingest.
@@ -634,30 +743,64 @@ func NewBatch() *Batch {
 // Len is how many jobs the batch holds.
 func (b *Batch) Len() int { return len(b.recs) }
 
-// Add records a completed job that ran for runtime seconds and finished
-// at completed. A non-positive runtime is ignored.
-func (b *Batch) Add(f Features, procID int64, runtime float64, completed time.Time) {
-	if !(runtime > 0) || math.IsInf(runtime, 0) {
+// Completion is one completed job for a Batch.
+type Completion struct {
+	Features Features
+	ProcID   int64
+	// Runtime is how long it ran, in seconds; see CompletedRuntime.
+	Runtime float64
+	// Submitted, Started and Completed are when it was submitted, when
+	// its last execution started and when it finished. Submitted and
+	// Started are the moments it is scored as of (see Ingest). A missing
+	// one falls back to the other, and both to Completed, which scores
+	// the job against everything that finished before it did.
+	Submitted, Started, Completed time.Time
+}
+
+// Add records a completed job. A non-positive runtime is ignored.
+func (b *Batch) Add(c Completion) {
+	if !(c.Runtime > 0) || math.IsInf(c.Runtime, 0) || c.Completed.IsZero() {
 		return
 	}
-	k := DeriveKeys(f)
+	k := DeriveKeys(c.Features)
 	k.owner = b.interned(k.owner)
 	for i := range k.k {
 		k.k[i] = b.interned(k.k[i])
 	}
+	at := c.Completed.Unix()
+	sub, start := unixOr0(c.Submitted), unixOr0(c.Started)
+	if start <= 0 {
+		start = sub
+	}
+	if sub <= 0 {
+		sub = start
+	}
+	if sub <= 0 {
+		sub, start = at, at
+	}
 	b.recs = append(b.recs, record{
-		keys:    k,
-		runtime: float32(runtime),
-		at:      completed.Unix(),
-		cluster: f.ClusterID,
-		proc:    procID,
+		keys:      k,
+		runtime:   float32(c.Runtime),
+		at:        at,
+		submitted: min(sub, at),
+		started:   min(start, at),
+		cluster:   c.Features.ClusterID,
+		proc:      c.ProcID,
 	})
+}
+
+func unixOr0(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
 }
 
 // AddAd records a history record if CompletedRuntime accepts it, and
 // reports whether it did. The completion time is CompletionDate, else
 // EnteredHistoryTime; a record with neither is refused, since it cannot
-// be placed in order.
+// be placed in order. It is scored as of QDate and of
+// JobCurrentStartDate (else JobStartDate).
 func (b *Batch) AddAd(ad *classad.ClassAd) bool {
 	runtime, ok := CompletedRuntime(ad)
 	if !ok {
@@ -671,8 +814,19 @@ func (b *Batch) AddAd(ad *classad.ClassAd) bool {
 		return false
 	}
 	proc, _ := intAttr(ad, "ProcId")
+	c := Completion{Features: FeaturesFromAd(ad), ProcID: proc, Runtime: runtime, Completed: time.Unix(at, 0)}
+	if q, _ := intAttr(ad, "QDate"); q > 0 {
+		c.Submitted = time.Unix(q, 0)
+	}
+	start, _ := intAttr(ad, "JobCurrentStartDate")
+	if start <= 0 {
+		start, _ = intAttr(ad, "JobStartDate")
+	}
+	if start > 0 {
+		c.Started = time.Unix(start, 0)
+	}
 	n := len(b.recs)
-	b.Add(FeaturesFromAd(ad), proc, runtime, time.Unix(at, 0))
+	b.Add(c)
 	return len(b.recs) > n
 }
 

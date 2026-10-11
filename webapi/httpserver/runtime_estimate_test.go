@@ -482,8 +482,10 @@ htcondor_api_runtime_estimate_enabled 0
 
 	src := &fakeRuntimeHistory{}
 	n := refreshNow.Unix()
+	// Each submitted after the one before it finished, so each but the
+	// first is scored against the ones before it.
 	for i := range 5 {
-		src.add(historyRecord(t, "alice", i+1, 100, n-int64(100-i)))
+		src.add(historyRecord(t, "alice", i+1, 100, n-int64(1000*(5-i))))
 	}
 	h.runtimeRefresher = testRefresher(t, src, refreshNow)
 	h.runtimeEst = h.runtimeRefresher.est
@@ -504,9 +506,22 @@ htcondor_api_runtime_estimate_last_refresh_timestamp_seconds %d
 `, n)), "htcondor_api_runtime_estimate_last_refresh_timestamp_seconds"); err != nil {
 		t.Error(err)
 	}
-	// Jobs 2-5 each had one or more before them in the exact group.
+	if err := testutil.CollectAndCompare(c, strings.NewReader(`
+# HELP htcondor_api_runtime_estimate_within_2x_total Completed jobs whose runtime estimate at submit was within a factor of two of what they ran, by the level that answered. Divide by scored_total for live accuracy.
+# TYPE htcondor_api_runtime_estimate_within_2x_total counter
+htcondor_api_runtime_estimate_within_2x_total{level="batch"} 0
+htcondor_api_runtime_estimate_within_2x_total{level="cluster"} 0
+htcondor_api_runtime_estimate_within_2x_total{level="cmd"} 0
+htcondor_api_runtime_estimate_within_2x_total{level="exact"} 4
+htcondor_api_runtime_estimate_within_2x_total{level="global"} 0
+htcondor_api_runtime_estimate_within_2x_total{level="iwd"} 0
+htcondor_api_runtime_estimate_within_2x_total{level="owner"} 0
+htcondor_api_runtime_estimate_within_2x_total{level="template"} 0
+`), "htcondor_api_runtime_estimate_within_2x_total"); err != nil {
+		t.Error(err)
+	}
 	st := h.runtimeEst.Stats()
-	if st.ScoredByLevel["exact"] != 4 || st.Within2xByLevel["exact"] != 4 {
+	if st.ScoredByLevel["exact"] != 4 {
 		t.Errorf("self-evaluation: %+v", st)
 	}
 }

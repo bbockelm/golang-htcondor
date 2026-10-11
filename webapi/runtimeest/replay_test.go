@@ -71,7 +71,7 @@ func TestReplayBeatsLastTwo(t *testing.T) {
 		b := NewBatch()
 		for di < len(byDone) && byDone[di].done.Before(j.submit) {
 			d := byDone[di]
-			b.Add(d.f, 0, d.runtime, d.done)
+			b.Add(Completion{Features: d.f, Runtime: d.runtime, Submitted: d.submit, Completed: d.done})
 			l := last2[d.f.Owner]
 			l = append(l, d.runtime)
 			if len(l) > 2 {

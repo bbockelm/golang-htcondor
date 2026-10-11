@@ -11,7 +11,8 @@ import (
 
 var t0 = time.Unix(1_700_000_000, 0)
 
-// job is a completed job for a test batch.
+// job is a completed job for a test batch. With no submit or start
+// time it is scored as of its completion.
 type job struct {
 	f       Features
 	runtime float64
@@ -21,7 +22,7 @@ type job struct {
 func ingest(e *Estimator, jobs ...job) {
 	b := NewBatch()
 	for i, j := range jobs {
-		b.Add(j.f, int64(i), j.runtime, j.at)
+		b.Add(Completion{Features: j.f, ProcID: int64(i), Runtime: j.runtime, Completed: j.at})
 	}
 	e.Ingest(b)
 }
@@ -70,6 +71,28 @@ func TestMinimumSamples(t *testing.T) {
 	}
 }
 
+// Global answers only when no owner-confined level can, however well it
+// has done.
+func TestGlobalIsOnlyAFallback(t *testing.T) {
+	preds := [numLevels]float64{}
+	for i := range preds {
+		preds[i] = math.NaN()
+	}
+	preds[LevelOwner], preds[LevelGlobal] = 100, 200
+	scores := &[numLevels]float32{}
+	for i := range scores {
+		scores[i] = scorePrior
+	}
+	scores[LevelGlobal] = 0
+	if l, _ := choose(scores, &preds); l != LevelOwner {
+		t.Errorf("chose %s over an available owner level", l)
+	}
+	preds[LevelOwner] = math.NaN()
+	if l, ok := choose(scores, &preds); !ok || l != LevelGlobal {
+		t.Errorf("global did not answer alone: %s %v", l, ok)
+	}
+}
+
 // With no track record the most specific available level answers.
 func TestMostSpecificLevelAnswersByDefault(t *testing.T) {
 	e := New(Config{})
@@ -95,18 +118,18 @@ func TestChooseSwitchesOnScores(t *testing.T) {
 		preds[i] = math.NaN()
 	}
 	preds[LevelExact], preds[LevelCmd] = 100, 200
-	own := &ownerState{}
-	for i := range own.score {
-		own.score[i] = scorePrior
+	own := &[numLevels]float32{}
+	for i := range own {
+		own[i] = scorePrior
 	}
 	if l, _ := choose(own, &preds); l != LevelExact {
 		t.Errorf("equal scores chose %s", l)
 	}
-	own.score[LevelCmd] = scorePrior - scoreMargin/2
+	own[LevelCmd] = scorePrior - scoreMargin/2
 	if l, _ := choose(own, &preds); l != LevelExact {
 		t.Errorf("a near-tie chose %s; it belongs to the more specific level", l)
 	}
-	own.score[LevelCmd] = scorePrior - 2*scoreMargin
+	own[LevelCmd] = scorePrior - 2*scoreMargin
 	if l, _ := choose(own, &preds); l != LevelCmd {
 		t.Errorf("a clearly better level was not chosen: %s", l)
 	}
@@ -132,9 +155,9 @@ func TestScoresMoveSelectionToTheBetterLevel(t *testing.T) {
 		}
 	}
 	ingest(e, jobs...)
-	own := e.st.owners["alice"]
-	if own.score[LevelCluster] < own.score[LevelExact]+scoreMargin {
-		t.Fatalf("cluster score %.3f is not clearly worse than exact %.3f", own.score[LevelCluster], own.score[LevelExact])
+	own := e.st.owners["alice"].scores(viewSubmit)
+	if own[LevelCluster] < own[LevelExact]+scoreMargin {
+		t.Fatalf("cluster score %.3f is not clearly worse than exact %.3f", own[LevelCluster], own[LevelExact])
 	}
 
 	// A new cluster with four short procs done.
@@ -147,7 +170,7 @@ func TestScoresMoveSelectionToTheBetterLevel(t *testing.T) {
 	ingest(e, sibs...)
 	r := e.Estimate(Query{Features: Features{Owner: "alice", ClusterID: 99, Cmd: "sim"}})
 	if !r.Available || r.Basis.Level == "cluster" {
-		t.Errorf("the cluster level still answers: %+v (scores %v)", r, own.score)
+		t.Errorf("the cluster level still answers: %+v (scores %v)", r, *own)
 	}
 }
 
@@ -174,15 +197,44 @@ func TestPrequentialOrder(t *testing.T) {
 	// In completion order, each against the median of the ones before
 	// it -- the last against 100, not the 150 it would be had it seen
 	// itself.
-	res := e.st.owners["alice"].resid.ring
+	res := e.st.owners["alice"].resid[viewSubmit].ring
 	want := []float64{0, math.Log(2), math.Log(10)}
 	if len(res) != len(want) {
 		t.Fatalf("residuals = %v", res)
 	}
 	for i, w := range want {
-		if math.Abs(float64(res[i])-w) > 1e-5 {
-			t.Errorf("residual %d = %v, want %v", i, res[i], w)
+		if math.Abs(float64(res[i].v)-w) > 1e-5 {
+			t.Errorf("residual %d = %v, want %v", i, res[i].v, w)
 		}
+	}
+}
+
+// A completed job is scored as of its submit and its start, from only
+// the jobs that had completed by then. Siblings that finished between
+// its submit and its completion are information a waiting job never
+// had: the cluster level is never available to the submit view, and is
+// to the start view once earlier siblings have finished.
+func TestScoringViews(t *testing.T) {
+	e := New(Config{})
+	b := NewBatch()
+	for i := range 10 {
+		// All submitted together; started in waves of two; each runs 100s.
+		start := t0.Add(time.Duration(i/2) * 150 * time.Second)
+		b.Add(Completion{
+			Features: Features{Owner: "alice", ClusterID: 7, Cmd: "sim"}, ProcID: int64(i), Runtime: 100,
+			Submitted: t0, Started: start, Completed: start.Add(100 * time.Second),
+		})
+	}
+	e.Ingest(b)
+	if n := e.st.levelResid[viewSubmit][LevelCluster].len(); n != 0 {
+		t.Errorf("the submit view answered %d jobs from their own cluster", n)
+	}
+	if st := e.Stats(); st.ScoredByLevel["cluster"] != 0 || st.Scored != 0 {
+		t.Errorf("submit-view counters credited later siblings: %+v", st)
+	}
+	// Waves 2-5 started after wave 1 finished.
+	if n := e.st.levelResid[viewStart][LevelCluster].len(); n != 8 {
+		t.Errorf("the start view answered %d jobs from their cluster, want 8", n)
 	}
 }
 
@@ -194,6 +246,26 @@ func TestWithin2xUsesTheFlooredError(t *testing.T) {
 	ingest(e, job{f, 1, t0}, job{f, 3, t0.Add(time.Second)})
 	if st := e.Stats(); st.Scored != 1 || st.Within2x != 1 {
 		t.Errorf("stats = %+v", st)
+	}
+}
+
+// A waiting job's bounds come from the submit view's errors and a
+// running job's from the start view's.
+func TestBoundsFollowTheView(t *testing.T) {
+	e := New(Config{})
+	f := feat("alice", "x")
+	ingest(e, job{f, 100, t0})
+	own := e.st.owners["alice"]
+	for i := range 50 {
+		wide := float32(2 * (float64(i)/49 - 0.5)) // -1 .. 1
+		own.resid[viewSubmit].add(wide, 0, 256, 256)
+		own.resid[viewStart].add(wide/10, 0, 256, 256)
+	}
+	idle := e.Estimate(Query{Features: f})
+	running := e.Estimate(Query{Features: f, Running: true})
+	if !(idle.P90Seconds > running.P90Seconds) || !(idle.P10Seconds < running.P10Seconds) {
+		t.Errorf("idle %v-%v should be wider than running %v-%v",
+			idle.P10Seconds, idle.P90Seconds, running.P10Seconds, running.P90Seconds)
 	}
 }
 

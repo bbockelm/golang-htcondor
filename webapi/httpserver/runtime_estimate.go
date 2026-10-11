@@ -423,9 +423,9 @@ func newRuntimeEstimateCollector(h *Handler) *runtimeEstimateCollector {
 		trainedThrough: n("trained_through_timestamp_seconds", "Completion time of the newest job the runtime estimator has read."),
 		errors:         n("refresh_errors_total", "Runtime estimator history reads that failed. The previous estimates stay in use."),
 		truncations:    n("refresh_truncations_total", "Runtime estimator history reads that hit the row cap and dropped the oldest records."),
-		scored: n("scored_total", "Completed jobs the runtime estimator had an estimate for when they finished, "+
+		scored: n("scored_total", "Completed jobs the runtime estimator would have had an estimate for at submit, "+
 			"by the level that answered.", "level"),
-		within2x: n("within_2x_total", "Completed jobs whose runtime estimate was within a factor of two of what they ran, "+
+		within2x: n("within_2x_total", "Completed jobs whose runtime estimate at submit was within a factor of two of what they ran, "+
 			"by the level that answered. Divide by scored_total for live accuracy.", "level"),
 		keys:   n("keys", "Groups the runtime estimator holds, by level.", "level"),
 		owners: n("owners", "Owners the runtime estimator holds state for."),

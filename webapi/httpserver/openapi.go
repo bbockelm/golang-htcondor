@@ -1794,7 +1794,7 @@ const openAPISchema = `{
                     "reason": {"type": "string", "enum": ["disabled", "model_warming_up", "insufficient_history"], "description": "Why there is no estimate; absent when available."},
                     "estimate_seconds": {"type": "number", "description": "Expected total runtime. For a running job that has outlived the typical run, re-estimated from the comparable runs that lasted at least as long."},
                     "p10_seconds": {"type": "number", "description": "Lower end of the likely range: about 10% of comparable jobs finish sooner."},
-                    "p90_seconds": {"type": "number", "description": "Upper end of the likely range: about 90% of comparable jobs finish by then. Calibrated against the owner's own past estimation errors."},
+                    "p90_seconds": {"type": "number", "description": "Upper end of the likely range: about 90% of comparable jobs finish by then. Drawn from past estimation errors made at the same point in a job's life (waiting or running)."},
                     "basis": {
                       "type": "object",
                       "properties": {

@@ -1484,11 +1484,17 @@ batch name less any run number, its submit directory, its program, and
 the owner's jobs as a whole; the access point's jobs as a whole are the
 last resort. For an interpreter (`python`, `bash -c`, `apptainer exec`,
 ...) the program is the script it runs. An estimate is the median of the
-most recent 64 runtimes in one group -- a single earlier run is enough,
+most recent 100 runtimes in one group — a single earlier run is enough,
 since they are the owner's own jobs; the access point's group needs 30.
-Which group answers is chosen per owner by how well each has predicted that owner's
-jobs so far. The likely range (`p10_seconds` to `p90_seconds`) is
-calibrated against the owner's own past estimation errors. Only completed
+Which group answers is chosen per owner by how well each has predicted
+that owner's jobs so far. Each completed job is scored as it would have
+been estimated when it was submitted and when it started, from only the
+jobs that had finished by then, so the record matches the moment a
+question is actually asked. The likely range (`p10_seconds` to
+`p90_seconds`) comes from those past estimation errors — the owner's,
+pooled with the access point's for the same group level, at the same
+point in a job's life (waiting or running) — widened to the group's own
+spread when that is larger. Only completed
 jobs that exited 0 count; DAGMan and other scheduler/local-universe jobs
 are left out. Nothing about another job — its command, id or owner — is
 ever returned.
@@ -1522,8 +1528,8 @@ Metrics, all prefixed `htcondor_api_runtime_estimate_`: `enabled`,
 `refresh_truncations_total`, `keys{level}`, `owners`, and the estimator's
 running record of itself, `scored_total{level}` and
 `within_2x_total{level}`: every completed job is first scored against the
-estimate it would have got, so `within_2x_total / scored_total` is live
-accuracy.
+estimate it would have got when it was submitted, so
+`within_2x_total / scored_total` is live accuracy at submit.
 
 ## Example calls
 

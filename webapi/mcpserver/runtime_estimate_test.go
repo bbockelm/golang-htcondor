@@ -16,8 +16,8 @@ func loadedEstimator() *runtimeest.Estimator {
 	b := runtimeest.NewBatch()
 	for i := range 5 {
 		at := time.Unix(1_000_000+int64(i), 0)
-		b.Add(runtimeest.Features{Owner: "alice", ClusterID: int64(100 + i), Cmd: "sim"}, 0, 100, at)
-		b.Add(runtimeest.Features{Owner: "bob", ClusterID: int64(200 + i), Cmd: "sim"}, 0, 5000, at)
+		b.Add(runtimeest.Completion{Features: runtimeest.Features{Owner: "alice", ClusterID: int64(100 + i), Cmd: "sim"}, Runtime: 100, Completed: at})
+		b.Add(runtimeest.Completion{Features: runtimeest.Features{Owner: "bob", ClusterID: int64(200 + i), Cmd: "sim"}, Runtime: 5000, Completed: at})
 	}
 	est.Ingest(b)
 	return est
