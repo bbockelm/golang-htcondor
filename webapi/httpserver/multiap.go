@@ -275,7 +275,11 @@ func (h *Handler) multiAPScheddMisuse() *htcondor.Schedd {
 
 // identitySchedds returns the schedds to try when a call needs any
 // schedd to identify a caller: the one schedd in single-AP mode, else up
-// to three registry members (all members trust one signing key in v1).
+// to three registry members (all members trust one signing key in v1)
+// that have PASSED the trust probe. A member not yet probed -- or one
+// whose probe could not run -- is not trusted to say who anybody is: an
+// identity it reports may come from a different key, trust domain or
+// mapfile than the ones the probe would have checked.
 func (h *Handler) identitySchedds() []*htcondor.Schedd {
 	if h.multi == nil {
 		if s := h.getSchedd(); s != nil {
@@ -283,12 +287,14 @@ func (h *Handler) identitySchedds() []*htcondor.Schedd {
 		}
 		return nil
 	}
-	if h.multi.registry == nil {
-		return nil
-	}
 	var out []*htcondor.Schedd
-	for _, m := range h.multi.registry.Healthy(3) {
-		out = append(out, m.Schedd)
+	for _, m := range h.multi.svc.Registry.Members() {
+		if len(out) == 3 {
+			break
+		}
+		if m.Present && m.Schedd != nil && m.Trust.State == apregistry.TrustTrusted {
+			out = append(out, m.Schedd)
+		}
 	}
 	return out
 }
@@ -770,8 +776,20 @@ func (h *Handler) multiAPReadiness() (bool, map[string]any) {
 // QUERY_JOB_ADS: an identity resolved here is one the schedd accepts at
 // READ. DC_NOP is registered at ALLOW and would answer for anything the
 // schedd can authenticate. ctx must carry the request's SecurityConfig.
+//
+// A request routed to an AP asks that AP and no other: the identity an
+// action runs as is the one the AP it runs on reports.
 func (h *Handler) pingAsCaller(ctx context.Context) (*htcondor.PingResult, error) {
 	schedds := h.identitySchedds()
+	if h.multi != nil {
+		if t, ok := multiap.TargetFrom(ctx); ok {
+			m, err := h.multi.svc.Member(t.Member.Name)
+			if err != nil {
+				return nil, err
+			}
+			schedds = []*htcondor.Schedd{m.Schedd}
+		}
+	}
 	if len(schedds) == 0 {
 		return nil, errors.New("no schedd is available to identify the caller")
 	}

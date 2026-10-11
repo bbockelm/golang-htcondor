@@ -140,8 +140,7 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 	// download, but on a permissively-configured READ ACL it could
 	// succeed (and the audit log would show the requester as the
 	// downloader, hiding the actual data subject).
-	jobConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
-		cluster, proc, classadStringLit(owner))
+	jobConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && %s", cluster, proc, s.ownerClause(owner))
 	// scheddFor, not the s.schedd snapshot: this server replaces its
 	// schedd handle when the collector reports a new address, and a
 	// captured pointer keeps dialling a socket that no longer exists.
@@ -406,7 +405,7 @@ func (s *Handler) handleJobInputShare(w http.ResponseWriter, r *http.Request, jo
 	// this a permissive schedd READ ACL would let someone mint a URL
 	// that writes into a job they do not own.
 	ownerScope := func(c string) (string, error) {
-		return fmt.Sprintf("(%s) && Owner == %s", c, classadStringLit(owner)), nil
+		return fmt.Sprintf("(%s) && %s", c, s.ownerClause(owner)), nil
 	}
 
 	authz, err := shareurl.GrantAuthz(shareurl.KindInput, callerToken(ctx))
@@ -590,7 +589,7 @@ func (s *Handler) handleSharedInput(w http.ResponseWriter, r *http.Request) {
 	// Scoped, that token finds nothing instead of writing into it.
 	procAd, err := fetchProcAdForSpoolWith(ctx, s.scheddFor(ctx), payload.Cluster, payload.Proc,
 		func(c string) (string, error) {
-			return fmt.Sprintf("(%s) && Owner == %s", c, classadStringLit(payload.Owner)), nil
+			return fmt.Sprintf("(%s) && %s", c, s.ownerClause(payload.Owner)), nil
 		}, jobInputShareProjection)
 	if err != nil {
 		s.writeSpoolError(w, err)
@@ -678,6 +677,14 @@ func (s *Handler) shareRedeemTarget(ctx context.Context, p *shareurl.Payload) (c
 	if err != nil {
 		return nil, err
 	}
+	// The AP's own verdict on the URL's owner, as for any routed action.
+	user, err := s.multi.svc.UserFor(p.Owner)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.multi.svc.AdmitTo(ctx, m, user); err != nil {
+		return nil, err
+	}
 	if p.Kind == shareurl.KindInput {
 		s.multi.svc.NoteWrite(m.Name)
 	}
@@ -692,7 +699,19 @@ func (s *Handler) writeShareTargetError(w http.ResponseWriter, p *shareurl.Paylo
 	case errors.Is(err, errShareNoSchedd), errors.Is(err, errShareOtherSchedd):
 		s.writeError(w, http.StatusForbidden, "This URL cannot be redeemed on this server: "+err.Error()+"; ask for a new one")
 	default:
-		s.multiAPError(w, err)
+		// Whoever holds the URL is not authenticated: the status and the
+		// reason code, never the detail (a trust probe's error, say,
+		// names this server's trust domain).
+		status := multiap.StatusOf(err)
+		msg := "This URL's access point cannot be reached right now"
+		if multiap.ReasonOf(err) == multiap.ReasonUnknownAP {
+			msg = "This URL names an access point this server does not serve"
+		}
+		if multiap.ReasonOf(err) == multiap.ReasonDenied {
+			msg = "This URL's access point refuses its owner"
+		}
+		s.writeJSON(w, status, map[string]any{"error": http.StatusText(status), "code": status,
+			"message": msg, "reason": multiap.ReasonOf(err)})
 	}
 }
 

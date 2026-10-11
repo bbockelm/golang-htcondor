@@ -32,9 +32,13 @@ const oracleMemberConcurrency = 8
 // Asking only one member -- whichever happened to be first -- would make
 // a user's grant depend on that AP's records alone, in both directions.
 type multiAPOracle struct {
-	name      string
-	members   func() []apregistry.Member
-	perMember func(apregistry.Member) RevocationOracle
+	name string
+	// judgesUser is set for an oracle whose verdict is about the person
+	// (user records), which each AP also enforces at route time
+	// (admitToAP); an ACL oracle narrows scopes and is not consulted there.
+	judgesUser bool
+	members    func() []apregistry.Member
+	perMember  func(apregistry.Member) RevocationOracle
 }
 
 // Name implements RevocationOracle.
@@ -143,7 +147,7 @@ func (h *Handler) multiAPOracles(oracles []RevocationOracle) []RevocationOracle 
 		switch base := o.(type) {
 		case *UserRecordOracle:
 			proto := *base
-			out = append(out, &multiAPOracle{name: base.Name(), members: members,
+			out = append(out, &multiAPOracle{name: base.Name(), members: members, judgesUser: true,
 				perMember: func(m apregistry.Member) RevocationOracle {
 					one := proto
 					one.Lookup = func() UserRecordLookup { return m.Schedd }

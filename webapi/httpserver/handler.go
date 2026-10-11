@@ -357,6 +357,11 @@ type Handler struct {
 	// mirrorReaders caches, per username, whether the schedd accepts a
 	// session or user-header caller at READ. See mirrorReadVerified.
 	mirrorReaders mcpActorCache
+	// routedCallers caches, per credential and access point, who that AP
+	// says the credential is (verifyRoutedCaller). apVerdicts caches each
+	// AP's own verdict on a user (admitToAP).
+	routedCallers mcpActorCache
+	apVerdicts    apVerdicts
 	// toolStats counts MCP tool calls for /metrics and for the durable
 	// table in the application database. See toolstats.go.
 	toolStats              *toolstats.Store
@@ -1467,6 +1472,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// stays quiet about.
 	if multi != nil {
 		multi.setTokenSource(h.mirrorTokenSource())
+		// Each AP's own verdict on a caller, and who it says they are.
+		multi.svc.Admit = h.admitToAP
+		multi.svc.VerifyCaller = h.verifyRoutedCaller
 	}
 	if src := h.mirrorTokenSource(); src != nil {
 		h.dbMirror.SetTokenSource(src)

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
@@ -100,5 +101,39 @@ func TestSameIdentity(t *testing.T) {
 		if got := sameIdentity(c.a, c.b); got != c.want {
 			t.Errorf("sameIdentity(%q, %q) = %v", c.a, c.b, got)
 		}
+	}
+}
+
+// verifyRoutedCaller asks the routed AP who the credential is and
+// requires the caller: an AP that maps it to someone else is refused.
+func TestVerifyRoutedCaller(t *testing.T) {
+	signingKey := writeSigningKey(t)
+	cfg := tokenPoolConfig(filepath.Dir(signingKey))
+	h := &Handler{signingKeyPath: signingKey, trustDomain: mirrorAuthzTrustDomain, uidDomain: mirrorAuthzTrustDomain,
+		clientConfig: cfg, logger: newTestLogger(t)}
+	member := func(addr string) apregistry.Member {
+		return apregistry.Member{Name: addr, Address: addr, Schedd: htcondor.NewSchedd("ap", addr).WithConfig(cfg)}
+	}
+	alice := "alice@" + mirrorAuthzTrustDomain
+	now := time.Now()
+	tok, err := generateMCPAccessJWT(filepath.Dir(signingKey), filepath.Base(signingKey), alice,
+		mirrorAuthzTrustDomain, now.Unix(), now.Add(time.Hour).Unix(), []string{"READ"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec, err := htcondor.NewClientSecurityConfigWithConfig(context.Background(), cfg, tok, "", 0, "CLIENT", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := htcondor.WithSecurityConfig(htcondor.WithUserRequest(context.Background(), "test"), sec)
+
+	if err := h.verifyRoutedCaller(ctx, member(fakeProbedSchedd(t, cfg, mirrorAuthzTrustDomain, "")), alice); err != nil {
+		t.Errorf("an AP that identifies alice as alice: %v", err)
+	}
+	if err := h.verifyRoutedCaller(ctx, member(fakeProbedSchedd(t, cfg, mirrorAuthzTrustDomain, "bob@"+mirrorAuthzTrustDomain)), alice); err == nil {
+		t.Error("an AP that identifies alice's credential as bob was accepted")
+	}
+	if err := h.verifyRoutedCaller(context.Background(), member("<127.0.0.1:1>"), alice); err == nil {
+		t.Error("a call with no credential was verified")
 	}
 }

@@ -67,9 +67,11 @@ func TestRouteBareIDNamesCandidates(t *testing.T) {
 	if StatusOf(err) != http.StatusBadRequest || len(CandidatesOf(err)) != 0 {
 		t.Errorf("bare 3.0 (bob's) = %v %+v", err, CandidatesOf(err))
 	}
-	// No caller to scope to: still refused, no lookup.
-	if _, err := s.Route(context.Background(), "", jobid.ID{Cluster: 1}); StatusOf(err) != http.StatusBadRequest || len(CandidatesOf(err)) != 0 {
-		t.Errorf("bare id without a user = %v", err)
+	// No caller: nothing is routed, complete id or not.
+	for _, id := range []jobid.ID{{Cluster: 1}, {Schedd: "ap1", Cluster: 1}} {
+		if _, err := s.Route(context.Background(), "", id); StatusOf(err) != http.StatusUnauthorized {
+			t.Errorf("%+v without a user = %v, want 401", id, err)
+		}
 	}
 }
 

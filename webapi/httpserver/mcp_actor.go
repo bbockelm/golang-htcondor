@@ -255,6 +255,11 @@ func (h *Handler) actorForSession(ctx context.Context, cacheKey string) string {
 // A refusal is errActorResolveThrottled, never "": the caller must fail
 // the request rather than carry on with no identity.
 func (h *Handler) resolveActor(ctx context.Context, r *http.Request, cacheKey string) (string, error) {
+	// A request routed to an AP is identified by that AP (pingAsCaller),
+	// and its answer is that AP's: cached apart from every other AP's.
+	if ap := routedSchedd(ctx); ap != "" {
+		cacheKey = cacheKey + "\x00" + strings.ToLower(ap)
+	}
 	if actor, ok := h.mcpActors.get(cacheKey); ok {
 		return actor, nil
 	}

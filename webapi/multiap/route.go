@@ -99,15 +99,20 @@ func (s *Service) Member(schedd string) (apregistry.Member, error) {
 // guess on remove cannot be undone. user scopes the candidate lookup to
 // the caller's own jobs; with it empty, or the hub unreachable, the 400
 // carries no candidates.
+//
+// user is the caller's User value (UserFor), and is required: every
+// routed action is on behalf of an established identity, and the AP's
+// own verdict on it (Admit) is part of routing.
 func (s *Service) Route(ctx context.Context, user string, id jobid.ID) (apregistry.Member, error) {
+	if user == "" {
+		return apregistry.Member{}, errorf(http.StatusUnauthorized, "the caller's identity could not be established")
+	}
 	if err := jobid.Valid(id); err != nil {
 		return apregistry.Member{}, errorf(http.StatusBadRequest, "invalid job id: %v", err)
 	}
 	if !id.Complete() {
 		e := &Error{Status: http.StatusBadRequest, Reason: ReasonIncompleteID}
-		if user != "" {
-			e.Candidates = s.candidates(ctx, user, id)
-		}
+		e.Candidates = s.candidates(ctx, user, id)
 		e.Msg = fmt.Sprintf("job %s does not name its access point; an action needs the complete id, such as %s",
 			s.Codec.Format(id), s.Codec.Format(id.WithSchedd("ap.example.org")))
 		if len(e.Candidates) > 0 {
@@ -119,7 +124,35 @@ func (s *Service) Route(ctx context.Context, user string, id jobid.ID) (apregist
 		}
 		return apregistry.Member{}, e
 	}
-	return s.Member(id.Schedd)
+	m, err := s.Member(id.Schedd)
+	if err != nil {
+		return apregistry.Member{}, err
+	}
+	if err := s.AdmitTo(ctx, m, user); err != nil {
+		return apregistry.Member{}, err
+	}
+	return m, nil
+}
+
+// ReasonDenied: the AP's own records refuse the caller (an account
+// disabled there).
+const ReasonDenied = "access_point_denied"
+
+// AdmitTo asks the AP's own verdict on user (Service.Admit); nil when
+// there is no verdict to ask for.
+func (s *Service) AdmitTo(ctx context.Context, m apregistry.Member, user string) error {
+	if s.Admit == nil {
+		return nil
+	}
+	if err := s.Admit(ctx, m, user); err != nil {
+		var e *Error
+		if asError(err, &e) {
+			return err
+		}
+		return &Error{Status: http.StatusForbidden, Reason: ReasonDenied,
+			Msg: fmt.Sprintf("access point %s refuses you: %v", m.Name, err)}
+	}
+	return nil
 }
 
 // candidates lists the caller's jobs, live and archived, with id's

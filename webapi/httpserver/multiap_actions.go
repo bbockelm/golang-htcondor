@@ -83,6 +83,19 @@ func (h *Handler) routedJobID(ctx context.Context, local string) string {
 	return h.multi.codec.Format(t.ID)
 }
 
+// ownerClause is the ClassAd clause confining a query to the jobs of
+// owner, a job's Owner value (the actor before its last "@"): Owner ==
+// owner with one schedd. In multi-AP mode it is the User attribute,
+// owner@UID_DOMAIN: Owner is only the local part, and APs that ever
+// differed in UID_DOMAIN would otherwise hand one user's same-named
+// neighbour their jobs.
+func (h *Handler) ownerClause(owner string) string {
+	if h.multi == nil {
+		return fmt.Sprintf("Owner == %s", classadStringLit(owner))
+	}
+	return fmt.Sprintf("User == %s", classadStringLit(owner+"@"+h.multi.svc.UIDDomain))
+}
+
 // routedSchedd is the AP a request was routed to, or "".
 func routedSchedd(ctx context.Context) string {
 	if t, ok := multiap.TargetFrom(ctx); ok {
@@ -159,14 +172,13 @@ func (h *Handler) handleMultiJobByID(w http.ResponseWriter, r *http.Request, par
 		h.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
 		return
 	}
-	user := ""
-	if !id.Complete() {
-		// Refused either way; authenticating first lets the refusal
-		// name the caller's own candidates.
-		var ok bool
-		if _, user, ok = h.multiAPCaller(w, r); !ok {
-			return
-		}
+	// Authenticated before anything about the AP is looked at or
+	// answered: an unauthenticated request learns nothing about the AP
+	// set, and the caller's identity is what the AP's own verdict
+	// (Admit) and a bare id's candidates are about.
+	_, user, ok := h.multiAPCaller(w, r)
+	if !ok {
+		return
 	}
 	m, err := h.multi.svc.Route(r.Context(), user, id)
 	if err != nil {

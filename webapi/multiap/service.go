@@ -90,6 +90,16 @@ type Service struct {
 	// BulkFresh is HTTP_API_BULK_FRESH_SECONDS, for bulk actions this
 	// service's callers fan out; zero or negative never skips an AP.
 	BulkFresh time.Duration
+	// Admit, when set, is each AP's own verdict on a caller: an error
+	// refuses anything routed to that AP for user (an account disabled
+	// there, say). Route, share redemption and every bulk leg ask it. A
+	// grant is good at every AP; this is how one AP's decision still
+	// holds on that AP.
+	Admit func(ctx context.Context, m apregistry.Member, user string) error
+	// VerifyCaller, when set, confirms that the AP a call was routed to
+	// identifies ctx's credential as user; MCP runs it on every routed
+	// call, so the identity an action runs as is the routed AP's.
+	VerifyCaller func(ctx context.Context, m apregistry.Member, user string) error
 	// Now replaces the clock, for tests.
 	Now func() time.Time
 

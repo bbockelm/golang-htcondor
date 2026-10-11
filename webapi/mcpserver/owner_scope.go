@@ -86,7 +86,14 @@ func (s *Server) scopeToOwner(ctx context.Context, llmConstraint string, tier pr
 	if name == "" {
 		return "", false
 	}
-	owner := fmt.Sprintf("Owner == %s", classadStringLit(name))
+	owner := s.ownerClause(name)
+	if s.multi != nil {
+		// An actor in another domain than the APs' is refused, never
+		// read as the same name in UID_DOMAIN.
+		if _, err := s.multi.UserFor(actor); err != nil {
+			return "", false
+		}
+	}
 	c := strings.TrimSpace(llmConstraint)
 	if c == "" {
 		return owner, true

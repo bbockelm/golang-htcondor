@@ -275,11 +275,11 @@ func TestMultiAPSuperuserIsPerAP(t *testing.T) {
 	}
 	// The constraint each AP is sent follows.
 	c1, err := srv.jobOwnerScope(at(ap1), req, 5, 0, jobScopeMutate)
-	if err != nil || strings.Contains(c1, "Owner") {
+	if err != nil || strings.Contains(c1, "User ==") {
 		t.Errorf("ap1 constraint = %q (%v), want it unscoped", c1, err)
 	}
 	c2, err := srv.jobOwnerScope(at(ap2), req, 5, 0, jobScopeMutate)
-	if err != nil || !strings.Contains(c2, `Owner == "alice"`) {
+	if err != nil || !strings.Contains(c2, `User == "alice@d"`) {
 		t.Errorf("ap2 constraint = %q (%v), want it confined to alice", c2, err)
 	}
 	// Superuser mode itself is off in multi-AP mode.

@@ -1165,9 +1165,19 @@ func (s *Handler) jobsOwnerScope(ctx context.Context, r *http.Request, raw strin
 	if s.seesAllJobs(ctx, r, tier) {
 		return raw, nil
 	}
-	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	owner := ownerFromActor(actor)
 	if owner == "" {
 		return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")
+	}
+	if s.multi != nil {
+		// Domain-aware: the caller's User, not a bare Owner. An actor
+		// in another domain is refused, never rewritten.
+		user, err := s.multi.svc.UserFor(actor)
+		if err != nil {
+			return "", err
+		}
+		return andScope(fmt.Sprintf("User == %s", classadStringLit(user)), raw)
 	}
 	return scopeToOwner(owner, raw)
 }

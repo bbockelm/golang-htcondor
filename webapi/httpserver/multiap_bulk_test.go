@@ -114,7 +114,7 @@ func TestMultiAPBulkActionsFanOut(t *testing.T) {
 			t.Errorf("%s %s with every contacted AP failing = %d complete=%v", c.method, c.path, rec.Code, body.Complete)
 		}
 		for ap, constraint := range legs.get() {
-			if !strings.Contains(constraint, `Owner == "alice"`) {
+			if !strings.Contains(constraint, `User == "alice@d"`) {
 				t.Errorf("%s %s sent %s an unscoped constraint: %s", c.method, c.path, ap, constraint)
 			}
 		}
@@ -137,7 +137,7 @@ func TestMultiAPBulkScopeCannotWiden(t *testing.T) {
 		t.Fatal("no leg ran")
 	}
 	for ap, constraint := range got {
-		if !strings.HasPrefix(constraint, `(Owner == "alice") && (`) {
+		if !strings.HasPrefix(constraint, `(User == "alice@d") && (`) {
 			t.Errorf("%s was sent %s", ap, constraint)
 		}
 	}
@@ -159,10 +159,10 @@ func TestMultiAPBulkSuperuserPerAP(t *testing.T) {
 	req := newCookieRequest(http.MethodPost, "/api/v1/jobs/hold", `{"constraint":"JobStatus == 1"}`, sid)
 	rec := serve(srv, req)
 	got := legs.get()
-	if c := got["ap3.example.org"]; c == "" || strings.Contains(c, "Owner") {
+	if c := got["ap3.example.org"]; c == "" || strings.Contains(c, "User ==") {
 		t.Errorf("ap3 (superuser there) was sent %q, want it unscoped (%d %s)", c, rec.Code, rec.Body.String())
 	}
-	if c := got[ap1]; !strings.Contains(c, `Owner == "alice"`) {
+	if c := got[ap1]; !strings.Contains(c, `User == "alice@d"`) {
 		t.Errorf("ap1 (not superuser) was sent %q", c)
 	}
 	if aps.counts()["ap3.example.org"] == 0 {

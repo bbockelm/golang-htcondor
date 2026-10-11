@@ -61,7 +61,7 @@ func (s *Server) toolCreateOutputDownloadURL(ctx context.Context, args map[strin
 		return nil, err
 	}
 	ownerScope := func(c string) (string, error) {
-		return fmt.Sprintf("(%s) && Owner == %s", c, classadStringLit(caller.Owner)), nil
+		return fmt.Sprintf("(%s) && %s", c, s.ownerClause(caller.Owner)), nil
 	}
 
 	ttl := shareurl.ClampTTL(shareurl.KindOutput, ttlSecondsArg(args))

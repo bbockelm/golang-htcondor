@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -250,7 +251,7 @@ func TestMultiAPMCPSuperuserIsPerAP(t *testing.T) {
 		t.Error("a call routed to no AP reaches other users' jobs")
 	}
 	c, ok := a.srv.scopeToOwner(at(m2), "true", tierMutate)
-	if !ok || !strings.Contains(c, `Owner == "alice"`) {
+	if !ok || !strings.Contains(c, `User == "alice@d"`) {
 		t.Errorf("ap2 scope = %q", c)
 	}
 }
@@ -310,5 +311,53 @@ func TestMultiAPMCPActionVoidsTheBulkSkip(t *testing.T) {
 	}
 	if after[mAP1] != before[mAP1] {
 		t.Error("ap1, untouched and holding no match, was contacted")
+	}
+}
+
+// A schedd argument that contradicts a complete job_id is refused, not
+// silently dropped.
+func TestMultiAPMCPScheddMustAgree(t *testing.T) {
+	a := newMultiAPActionMCP(t, nil)
+	before := a.counts()
+	_, err := a.call(callerCtx(t), t, "hold_job", map[string]any{"job_id": "1.0@" + mAP1, "schedd": mAP2})
+	if err == nil || !strings.Contains(err.Error(), "pass one") {
+		t.Errorf("job_id on ap1 with schedd ap2: %v", err)
+	}
+	if after := a.counts(); after[mAP1] != before[mAP1] || after[mAP2] != before[mAP2] {
+		t.Error("a contradictory call reached a schedd")
+	}
+}
+
+// The routed AP's own verdict and its identification of the caller gate
+// every routed tool call.
+func TestMultiAPMCPRoutedChecks(t *testing.T) {
+	a := newMultiAPActionMCP(t, nil)
+	a.srv.multi.Admit = func(_ context.Context, m apregistry.Member, user string) error {
+		if m.Name == mAP2 {
+			return errors.New("disabled there")
+		}
+		return nil
+	}
+	verified := map[string]string{}
+	a.srv.multi.VerifyCaller = func(_ context.Context, m apregistry.Member, user string) error {
+		verified[m.Name] = user
+		return nil
+	}
+	before := a.counts()
+	if _, err := a.call(callerCtx(t), t, "hold_job", map[string]any{"job_id": "1.0@" + mAP2}); err == nil ||
+		multiap.ReasonOf(err) != multiap.ReasonDenied {
+		t.Errorf("hold on ap2, which refuses alice: %v", err)
+	}
+	_, _ = a.call(callerCtx(t), t, "hold_job", map[string]any{"job_id": "1.0@" + mAP1})
+	after := a.counts()
+	if after[mAP2] != before[mAP2] || after[mAP1] == before[mAP1] {
+		t.Errorf("connections %v -> %v, want ap1 only", before, after)
+	}
+	if verified[mAP1] != "alice@d" {
+		t.Errorf("the caller was not verified against the routed AP: %v", verified)
+	}
+	a.srv.multi.VerifyCaller = func(context.Context, apregistry.Member, string) error { return errors.New("identified as bob@d") }
+	if _, err := a.call(callerCtx(t), t, "hold_job", map[string]any{"job_id": "1.0@" + mAP1}); err == nil {
+		t.Error("a caller the routed AP does not identify as themselves was let through")
 	}
 }

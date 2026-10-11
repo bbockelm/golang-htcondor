@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/jobid"
@@ -53,6 +54,17 @@ var multiAPClusterTools = map[string]bool{
 	"upload_job_input":           true,
 	"create_input_upload_url":    true,
 	"create_output_download_url": true,
+}
+
+// ownerClause confines a query to the jobs of owner, a job's Owner
+// value: Owner == owner with one schedd; in multi-AP mode the User
+// attribute (owner@UID_DOMAIN), so a difference in UID_DOMAIN between
+// APs cannot hand a same-named user's jobs over.
+func (s *Server) ownerClause(owner string) string {
+	if s.multi == nil {
+		return fmt.Sprintf("Owner == %s", classadStringLit(owner))
+	}
+	return fmt.Sprintf("User == %s", classadStringLit(owner+"@"+s.multi.UIDDomain))
 }
 
 // routedSchedd is the AP a call was routed to, or "".
@@ -119,8 +131,12 @@ func (s *Server) routeJobArgs(ctx context.Context, name string, args map[string]
 		p, _ := args["proc"].(float64)
 		id = jobid.ID{Cluster: int64(c), Proc: int64(p)}
 	}
-	if !id.Complete() {
-		id.Schedd = stringArg(args, "schedd")
+	if sch := stringArg(args, "schedd"); sch != "" {
+		if id.Complete() && !strings.EqualFold(sch, id.Schedd) {
+			return nil, nil, jobid.ID{}, fmt.Errorf("job_id %s names access point %s, but schedd says %s; pass one",
+				text, id.Schedd, sch)
+		}
+		id.Schedd = sch
 	}
 	m, err := s.multi.Route(ctx, user, id)
 	if err != nil {
@@ -131,6 +147,12 @@ func (s *Server) routeJobArgs(ctx context.Context, name string, args map[string]
 		return nil, nil, jobid.ID{}, err
 	}
 	id = id.WithSchedd(m.Name)
+	// The identity this call runs as is the one the routed AP reports.
+	if s.multi.VerifyCaller != nil {
+		if err := s.multi.VerifyCaller(ctx, m, user); err != nil {
+			return nil, nil, jobid.ID{}, err
+		}
+	}
 
 	local := fmt.Sprintf("%d.%d", id.Cluster, id.Proc)
 	if multiAPClusterTools[name] && text != "" && s.multi.Codec.Format(id) != text {

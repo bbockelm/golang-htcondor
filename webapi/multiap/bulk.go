@@ -243,6 +243,12 @@ func (s *Service) FanOut(ctx context.Context, req BulkRequest, act BulkAction) (
 				return
 			}
 			defer func() { <-slots }()
+			if req.User != "" {
+				if err := s.AdmitTo(ctx, m, req.User); err != nil {
+					results[i].Status, results[i].Error = BulkFailed, err.Error()
+					return
+				}
+			}
 			if why, empty := s.provablyEmpty(ctx, req, balanced, m.Name); empty {
 				results[i].Status, results[i].Reason = BulkSkipped, why
 				return
@@ -354,6 +360,10 @@ func (s *Service) NoteWrite(ap string) {
 	}
 	s.writes[strings.ToLower(ap)] = s.clock()
 }
+
+// WroteSince reports whether this server noted a write to ap within the
+// last d.
+func (s *Service) WroteSince(ap string, d time.Duration) bool { return s.wroteSince(ap, d) }
 
 // wroteSince reports whether this server wrote to ap within the last d.
 func (s *Service) wroteSince(ap string, d time.Duration) bool {
