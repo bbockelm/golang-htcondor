@@ -240,9 +240,9 @@ func (s *Server) multiRemoveJobsTool(ctx context.Context, args map[string]interf
 		FreshWithin: s.multi.BulkFresh,
 	}, func(legCtx context.Context, m apregistry.Member) (multiap.BulkOutcome, error) {
 		apCtx := routed(legCtx, m)
-		constraint, ok := s.scopeToOwner(apCtx, llmConstraint, tierMutate)
-		if !ok {
-			return multiap.BulkOutcome{}, fmt.Errorf("authentication required")
+		constraint, err := s.scopeToOwner(apCtx, llmConstraint, tierMutate)
+		if err != nil {
+			return multiap.BulkOutcome{}, err
 		}
 		res, err := s.scheddFor(apCtx).RemoveJobs(apCtx, constraint, reason)
 		var refused *htcondor.JobActionRefusedError
