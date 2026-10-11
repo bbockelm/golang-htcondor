@@ -33,9 +33,9 @@ import (
 // e2eRefusesUnserved: what multi-AP mode does not do yet is still a
 // 501, and a mutation on a bare id is a 400 naming both candidates.
 func e2eRefusesUnserved(t *testing.T, s *multiAPStack) {
-	code, body := s.do(t, s.me, http.MethodPost, "/api/v1/jobs", `{"submit_file":"executable=/bin/true\nqueue\n"}`)
+	code, body := s.do(t, s.me, http.MethodPost, "/api/v1/interactive/sessions", `{}`)
 	if code != http.StatusNotImplemented {
-		t.Errorf("POST /api/v1/jobs = %d %s, want 501", code, body)
+		t.Errorf("POST /api/v1/interactive/sessions = %d %s, want 501", code, body)
 	}
 	code, body = s.do(t, s.me, http.MethodDelete, "/api/v1/jobs/1.0", "")
 	var refusal struct {
