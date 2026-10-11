@@ -98,7 +98,7 @@ const openAPISchema = `{
       "UtilAdvice": {
         "type": "object",
         "properties": {
-          "id": {"type": "string", "enum": ["memory-lower", "memory-retry", "memory-raise", "memory-ok", "cpus-lower", "cpus-raise", "disk-lower", "disk-raise", "gpu-idle", "gpu-unused", "short-jobs", "restarts"]},
+          "id": {"type": "string", "enum": ["memory-lower", "memory-retry", "memory-raise", "memory-ok", "cpus-lower", "cpus-raise", "disk-lower", "disk-raise", "gpu-idle", "gpu-unused", "gpus-lower", "gpu-cpu-bound", "gpu-memory-small", "short-jobs", "restarts"]},
           "resource": {"type": "string", "enum": ["cpu", "memory", "disk", "gpu", "runtime"]},
           "severity": {"type": "string", "enum": ["info", "suggest", "warn"]},
           "title": {"type": "string"},
@@ -152,7 +152,14 @@ const openAPISchema = `{
           "memory": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "peak_mib": {"$ref": "#/components/schemas/UtilDistribution"}}},
           "cpu": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "cores_used": {"$ref": "#/components/schemas/UtilDistribution"}, "efficiency": {"$ref": "#/components/schemas/UtilDistribution"}}},
           "disk": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "used_kib": {"$ref": "#/components/schemas/UtilDistribution"}}},
-          "gpu": {"type": "object", "nullable": true, "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "utilization": {"$ref": "#/components/schemas/UtilDistribution"}}},
+          "gpu": {"type": "object", "nullable": true, "description": "Null when no job requested a GPU. Utilization is often unmeasured: only execute points running HTCondor's GPU monitor record it.", "properties": {
+            "request": {"$ref": "#/components/schemas/UtilRequest"},
+            "jobs": {"type": "integer", "description": "Jobs that requested at least one GPU."},
+            "measured": {"type": "integer", "description": "Of those, jobs with a utilization measurement."},
+            "utilization": {"$ref": "#/components/schemas/UtilDistribution"},
+            "memory_peak_mib": {"$ref": "#/components/schemas/UtilDistribution"},
+            "device_memory_mib": {"type": "number", "nullable": true, "description": "Typical memory of the GPUs the jobs ran on, when the pool records MachineAttrGPUs_GlobalMemoryMb0."},
+            "cores_used_while_gpu": {"$ref": "#/components/schemas/UtilDistribution"}}},
           "memory_curve": {"type": "array", "description": "Expected reserved MiB-hours at each candidate request_memory; empty under 20 finished jobs.", "items": {"type": "object", "properties": {
             "request_mib": {"type": "number"}, "retry_mib": {"type": "number", "nullable": true}, "reserved_mib_hours": {"type": "number"},
             "retry_fraction": {"type": "number"}, "is_current": {"type": "boolean"}, "is_recommended": {"type": "boolean"}}}},

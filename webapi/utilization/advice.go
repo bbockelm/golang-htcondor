@@ -43,6 +43,14 @@ const (
 	gpuUnusedLevel = 0.01
 	gpuUnusedShare = 0.9
 	gpuIdleMedian  = 0.15
+	// gpuBusySlack lets a job that keeps 1.04 GPUs busy count as one.
+	gpuBusySlack = 0.05
+	// gpuCPUBoundUtil and cpuSaturated: a median GPU under half busy
+	// while the median job uses 90% of its cores is starved for CPU.
+	gpuCPUBoundUtil = 0.5
+	cpuSaturated    = 0.9
+	// gpuMemoryHeadroom is the margin over the largest GPU memory peak.
+	gpuMemoryHeadroom = 1.25
 )
 
 // adviseWorkflow builds a workflow's advice, most important first.
@@ -55,17 +63,21 @@ func adviseWorkflow(w *Workflow, jobs []*Job, plan *memoryPlan, completedWalls [
 	if a := diskAdvice(w, jobs); a != nil {
 		out = append(out, *a)
 	}
-	if a := gpuAdvice(w, jobs); a != nil {
-		out = append(out, *a)
-	}
+	out = append(out, gpuAdvice(w, jobs, out)...)
 	if a := shortJobsAdvice(completedWalls); a != nil {
 		out = append(out, *a)
 	}
 	if a := restartsAdvice(w); a != nil {
 		out = append(out, *a)
 	}
+	// Most urgent first; then GPU-hours saved ahead of any other saving,
+	// because a GPU is by far the scarcest and dearest thing a job
+	// reserves; then the larger saving.
 	slices.SortStableFunc(out, func(a, b Advice) int {
 		if c := cmp.Compare(severityRank(a.Severity), severityRank(b.Severity)); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(savesGPU(b), savesGPU(a)); c != 0 {
 			return c
 		}
 		return cmp.Compare(savedAmount(b), savedAmount(a))
@@ -87,6 +99,13 @@ func severityRank(s string) int {
 	}
 }
 
+func savesGPU(a Advice) int {
+	if a.Saves != nil && a.Saves.Unit == UnitGPUHours {
+		return 1
+	}
+	return 0
+}
+
 func savedAmount(a Advice) float64 {
 	if a.Saves == nil {
 		return -1
@@ -104,6 +123,7 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 	a := &Advice{
 		Resource:   ResourceMemory,
 		request:    plan.recommended,
+		changes:    changesMemory,
 		Confidence: confidence(plan.n),
 		Submit:     []string{"request_memory = " + submitSize(plan.recommended)},
 	}
@@ -194,6 +214,7 @@ func cpuAdvice(w *Workflow, jobs []*Job) []Advice {
 			Saves:      &Savings{Unit: UnitCoreHours, Amount: round(saved, 1)},
 			Confidence: confidence(used.N),
 			request:    rec,
+			changes:    changesCpus,
 		}}
 	case used.P50 > cpuRaiseUse*typical:
 		rec := math.Max(math.Round(used.P75), typical+1)
@@ -207,6 +228,7 @@ func cpuAdvice(w *Workflow, jobs []*Job) []Advice {
 			Submit:     []string{"request_cpus = " + number(rec)},
 			Confidence: confidence(used.N),
 			request:    rec,
+			changes:    changesCpus,
 		}}
 	}
 	return nil
@@ -246,6 +268,7 @@ func diskAdvice(w *Workflow, jobs []*Job) *Advice {
 			Submit:     []string{"request_disk = " + submitSize(rec/1024)},
 			Confidence: confidence(n),
 			request:    rec,
+			changes:    changesDisk,
 		}
 	}
 	if rec < diskLowerShare*req.Typical {
@@ -259,60 +282,185 @@ func diskAdvice(w *Workflow, jobs []*Job) *Advice {
 			Submit:     []string{"request_disk = " + submitSize(rec/1024)},
 			Confidence: confidence(n),
 			request:    rec,
+			changes:    changesDisk,
 		}
 	}
 	return nil
 }
 
-// gpuAdvice looks for GPUs that were reserved and left idle.
-func gpuAdvice(w *Workflow, jobs []*Job) *Advice {
-	if w.GPU == nil || w.GPU.Utilization == nil || w.GPU.Utilization.N < minAdviceJobs {
+// gpuAdvice is advice about the GPUs a workflow reserved. prior is the
+// advice already given, so the GPU advice does not repeat a CPU change.
+//
+// Utilization-based advice needs utilization, which many jobs do not
+// have (see GPUStats); the GPU-memory requirement check does not.
+func gpuAdvice(w *Workflow, jobs []*Job, prior []Advice) []Advice {
+	g := w.GPU
+	if g == nil {
 		return nil
 	}
-	util := w.GPU.Utilization
-	idle, reserved := 0, 0.0
-	gpuMem := 0.0
-	for _, j := range jobs {
-		u, ok := j.GPUUtilization()
-		if !ok {
-			continue
-		}
-		if u < gpuUnusedLevel {
-			idle++
-		}
-		reserved += j.RequestGPUs.V() * hours(j.Wall)
-		gpuMem = math.Max(gpuMem, orZero(j.GPUsMemoryUsage))
-	}
+	var out []Advice
 	memNote := ""
-	if gpuMem > 0 {
-		memNote = fmt.Sprintf(" The most GPU memory any job used was %s.", sizeMiB(gpuMem))
+	if g.MemoryPeakMiB != nil && g.MemoryPeakMiB.Max > 0 {
+		memNote = fmt.Sprintf(" The most GPU memory any job used was %s.", sizeMiB(g.MemoryPeakMiB.Max))
 	}
-	if float64(idle) >= gpuUnusedShare*float64(util.N) {
-		return &Advice{
-			ID:       "gpu-unused",
-			Resource: ResourceGPU,
-			Severity: SeverityWarn,
-			Title:    "Check whether these jobs use their GPUs",
-			Detail: fmt.Sprintf("%s of %s jobs kept their GPUs busy less than 1%% of the time.%s If the program does not use a GPU, removing request_gpus lets the jobs run on far more machines.",
-				count(idle), count(util.N), memNote),
-			Submit:     []string{},
-			Saves:      &Savings{Unit: UnitGPUHours, Amount: round(reserved, 1)},
-			Confidence: confidence(util.N),
+
+	if g.Utilization != nil && g.Utilization.N >= minAdviceJobs {
+		util := g.Utilization
+		var busy []float64
+		idle, reserved := 0, 0.0
+		for _, j := range jobs {
+			u, ok := j.GPUUtilization()
+			if !ok {
+				continue
+			}
+			if u < gpuUnusedLevel {
+				idle++
+			}
+			reserved += j.RequestGPUs.V() * hours(j.Wall)
+			busy = append(busy, j.GPUsAverageUsage.V())
+		}
+		slices.Sort(busy)
+
+		if float64(idle) >= gpuUnusedShare*float64(util.N) {
+			out = append(out, Advice{
+				ID:       "gpu-unused",
+				Resource: ResourceGPU,
+				Severity: SeverityWarn,
+				Title:    "Check whether these jobs use their GPUs",
+				Detail: fmt.Sprintf("%s of %s jobs kept their GPUs busy less than 1%% of the time.%s If the program does not use a GPU, removing request_gpus lets the jobs run on far more machines.",
+					count(idle), count(util.N), memNote),
+				Submit:     []string{},
+				Saves:      &Savings{Unit: UnitGPUHours, Amount: round(reserved, 1)},
+				Confidence: confidence(util.N),
+			})
+			return append(out, gpuMemoryAdvice(g, jobs)...)
+		}
+
+		explained := false
+		if a := gpusLowerAdvice(g, jobs, busy); a != nil {
+			out = append(out, *a)
+			explained = true
+		}
+		if a := gpuCPUBoundAdvice(w, prior); a != nil {
+			out = append(out, *a)
+			explained = true
+		}
+		if !explained && util.P50 < gpuIdleMedian {
+			out = append(out, Advice{
+				ID:       "gpu-idle",
+				Resource: ResourceGPU,
+				Severity: SeveritySuggest,
+				Title:    "Keep the GPU busier",
+				Detail: fmt.Sprintf("Half of %s jobs kept their GPUs busy %s of the time or less.%s The GPU is usually waiting on input, on the CPU, or on code that has not been moved to it.",
+					count(util.N), percent(util.P50), memNote),
+				Submit:     []string{},
+				Confidence: confidence(util.N),
+			})
 		}
 	}
-	if util.P50 < gpuIdleMedian {
-		return &Advice{
-			ID:       "gpu-idle",
-			Resource: ResourceGPU,
-			Severity: SeveritySuggest,
-			Title:    "Keep the GPU busier",
-			Detail: fmt.Sprintf("Half of %s jobs kept their GPUs busy %s of the time or less.%s The GPU is usually waiting on input, on the CPU, or on code that has not been moved to it.",
-				count(util.N), percent(util.P50), memNote),
-			Submit:     []string{},
-			Confidence: confidence(util.N),
+	return append(out, gpuMemoryAdvice(g, jobs)...)
+}
+
+// gpusLowerAdvice: jobs that ask for several GPUs and keep about one of
+// them busy. GPUsAverageUsage sums over a job's GPUs, so it reads
+// directly as "GPUs kept busy"; the advice is the 90th percentile of that,
+// rounded up, with a little slack so 1.02 busy is still one GPU.
+func gpusLowerAdvice(g *GPUStats, jobs []*Job, busy []float64) *Advice {
+	if g.Request == nil || g.Request.Typical <= 1 || len(busy) == 0 {
+		return nil
+	}
+	p90 := percentile(busy, 90)
+	rec := math.Max(1, math.Ceil(p90-gpuBusySlack))
+	if rec >= g.Request.Typical {
+		return nil
+	}
+	saved := 0.0
+	for _, j := range jobs {
+		if _, ok := j.GPUUtilization(); ok && j.RequestGPUs.V() > rec {
+			saved += (j.RequestGPUs.V() - rec) * hours(j.Wall)
 		}
 	}
-	return nil
+	return &Advice{
+		ID:       "gpus-lower",
+		Resource: ResourceGPU,
+		Severity: SeveritySuggest,
+		Title:    fmt.Sprintf("Request %s %s", number(rec), plural(rec, "GPU", "GPUs")),
+		Detail: fmt.Sprintf("90%% of %s jobs kept %s or fewer GPUs busy of the %s requested.",
+			count(len(busy)), number(round(p90, 1)), number(g.Request.Typical)),
+		Submit:     []string{"request_gpus = " + number(rec)},
+		Saves:      &Savings{Unit: UnitGPUHours, Amount: round(saved, 1)},
+		Confidence: confidence(len(busy)),
+		request:    rec,
+		changes:    changesGPUs,
+	}
+}
+
+// gpuCPUBoundAdvice: the GPU waits while the job's CPUs are flat out.
+// A GPU is only as busy as the cores preparing its work; when the job
+// keeps every core it asked for busy and the GPU mostly idle, more cores
+// is the cheap fix. Not given when the CPU advice already raises cores.
+func gpuCPUBoundAdvice(w *Workflow, prior []Advice) *Advice {
+	g := w.GPU
+	if g.Utilization == nil || g.Utilization.P50 >= gpuCPUBoundUtil || g.CoresUsedWhileGPU == nil ||
+		g.CoresUsedWhileGPU.N < minAdviceJobs || w.CPU.Request == nil || w.CPU.Request.Typical <= 0 {
+		return nil
+	}
+	requested := w.CPU.Request.Typical
+	if g.CoresUsedWhileGPU.P50 < cpuSaturated*requested {
+		return nil
+	}
+	for _, a := range prior {
+		if a.ID == "cpus-raise" {
+			return nil
+		}
+	}
+	rec := math.Max(requested+1, requested*2)
+	return &Advice{
+		ID:       "gpu-cpu-bound",
+		Resource: ResourceGPU,
+		Severity: SeveritySuggest,
+		Title:    fmt.Sprintf("Request %s CPUs to keep the GPU busy", number(rec)),
+		Detail: fmt.Sprintf("Half of %s jobs kept their GPUs busy %s of the time or less while using %s of the %s CPU cores they requested, so the GPU is likely waiting on the CPU.",
+			count(g.Utilization.N), percent(g.Utilization.P50), number(round(g.CoresUsedWhileGPU.P50, 1)), number(requested)),
+		Submit:     []string{"request_cpus = " + number(rec)},
+		Confidence: confidence(g.CoresUsedWhileGPU.N),
+		request:    rec,
+		changes:    changesCpus,
+	}
+}
+
+// gpuMemoryAdvice: jobs that require GPUs with more memory than they use.
+// Only a requirement the jobs actually state counts -- gpus_minimum_memory
+// (GPUsMinMemory) -- since that is the line to change; the GPU a job
+// merely happened to land on says nothing about what it needed.
+func gpuMemoryAdvice(g *GPUStats, jobs []*Job) []Advice {
+	if g.MemoryPeakMiB == nil || g.MemoryPeakMiB.N < minAdviceJobs {
+		return nil
+	}
+	var mins []float64
+	for _, j := range jobs {
+		if j.RequestGPUs.OK() && j.RequestGPUs.V() > 0 && j.GPUsMinMemory.OK() {
+			mins = append(mins, j.GPUsMinMemory.V())
+		}
+	}
+	required := summarizeRequest(mins)
+	if required == nil {
+		return nil
+	}
+	rec := niceMiB(g.MemoryPeakMiB.Max * gpuMemoryHeadroom)
+	if rec >= required.Typical {
+		return nil
+	}
+	return []Advice{{
+		ID:       "gpu-memory-small",
+		Resource: ResourceGPU,
+		Severity: SeveritySuggest,
+		Title:    "Require GPUs with " + submitSize(rec) + " of memory",
+		Detail: fmt.Sprintf("These jobs require GPUs with at least %s of memory; the most any of %s jobs used was %s. A lower requirement lets them run on more GPUs.",
+			sizeMiB(required.Typical), count(g.MemoryPeakMiB.N), sizeMiB(g.MemoryPeakMiB.Max)),
+		Submit:     []string{"gpus_minimum_memory = " + submitSize(rec)},
+		Confidence: confidence(g.MemoryPeakMiB.N),
+	}}
 }
 
 // shortJobsAdvice suggests batching work when most jobs are brief.

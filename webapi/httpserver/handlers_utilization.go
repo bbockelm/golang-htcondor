@@ -60,9 +60,9 @@ const utilizationRefresh = 5 * time.Minute
 // utilizationComputeTimeout bounds an analysis nobody may be waiting for
 // any more (see sharedComputeContext): three minutes, and a minute more
 // for each hundred thousand jobs the limit allows. Reading dominates --
-// parsing an ad is ~20 microseconds, and a schedd walks its history file
-// far slower than the mirror answers -- while the analysis itself is
-// about half a second per million (BenchmarkAnalyze).
+// parsing an ad is 20-30 microseconds, and a schedd walks its history file
+// far slower than the mirror answers -- while the analysis itself takes
+// about a second per million (BenchmarkAnalyze).
 func utilizationComputeTimeout(limit int) time.Duration {
 	return 3*time.Minute + time.Duration(limit/100000)*time.Minute
 }

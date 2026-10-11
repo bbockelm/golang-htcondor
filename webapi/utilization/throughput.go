@@ -194,13 +194,15 @@ func workflowThroughput(w *Workflow, jobs []*Job, plan *memoryPlan, memJobs []me
 		if a.request <= 0 {
 			continue
 		}
-		switch a.Resource {
-		case ResourceMemory:
+		switch a.changes {
+		case changesMemory:
 			suggested.MemoryMiB = a.request
-		case ResourceCPU:
+		case changesCpus:
 			suggested.Cpus = a.request
-		case ResourceDisk:
+		case changesDisk:
 			suggested.DiskKiB = a.request
+		case changesGPUs:
+			suggested.GPUs = a.request
 		}
 	}
 	retry := plan.retry

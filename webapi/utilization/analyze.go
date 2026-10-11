@@ -340,7 +340,6 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	walls, memReq, peaks := make([]float64, 0, n), make([]float64, 0, n), make([]float64, 0, n)
 	cpuReq, cores, eff := make([]float64, 0, n), make([]float64, 0, n), make([]float64, 0, n)
 	diskReq, diskUsed := make([]float64, 0, n), make([]float64, 0, n)
-	var gpuReq, gpuUtil []float64
 	memJobs := make([]memoryJob, 0, n)
 	var restartLost float64
 	for _, j := range g.jobs {
@@ -392,12 +391,6 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 		if j.DiskUsage.OK() {
 			diskUsed = append(diskUsed, j.DiskUsage.V())
 		}
-		if j.RequestGPUs.OK() && j.RequestGPUs.V() > 0 {
-			gpuReq = append(gpuReq, j.RequestGPUs.V())
-			if u, ok := j.GPUUtilization(); ok {
-				gpuUtil = append(gpuUtil, u)
-			}
-		}
 	}
 	w.WallHours = round(w.WallHours, 3)
 	w.Restarts.LostHours = round(hours(restartLost), 3)
@@ -405,9 +398,7 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	w.Memory = MemoryStats{Request: summarizeRequest(memReq), PeakMiB: distribution(peaks)}
 	w.CPU = CPUStats{Request: summarizeRequest(cpuReq), CoresUsed: distribution(cores), Efficiency: distribution(eff)}
 	w.Disk = DiskStats{Request: summarizeRequest(diskReq), UsedKiB: distribution(diskUsed)}
-	if len(gpuReq) > 0 {
-		w.GPU = &GPUStats{Request: summarizeRequest(gpuReq), Utilization: distribution(gpuUtil)}
-	}
+	w.GPU = gpuStats(g.jobs)
 
 	plan := planMemory(memJobs)
 	w.MemoryCurve = []MemoryCurvePoint{}
@@ -420,6 +411,44 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	var occ occupancyPair
 	w.Throughput, occ = workflowThroughput(&w, g.jobs, plan, memJobs, opts.Machines)
 	return w, occ
+}
+
+// gpuStats summarizes the jobs that requested GPUs; nil when none did.
+func gpuStats(jobs []*Job) *GPUStats {
+	var req, util, mem, device, cores []float64
+	for _, j := range jobs {
+		if !j.RequestGPUs.OK() || j.RequestGPUs.V() <= 0 {
+			continue
+		}
+		req = append(req, j.RequestGPUs.V())
+		if u, ok := j.GPUUtilization(); ok {
+			util = append(util, u)
+		}
+		if j.GPUsMemoryUsage.OK() {
+			mem = append(mem, j.GPUsMemoryUsage.V())
+		}
+		if j.GPUDeviceMemory.OK() {
+			device = append(device, j.GPUDeviceMemory.V())
+		}
+		if c, ok := j.coresUsed(); ok {
+			cores = append(cores, c)
+		}
+	}
+	if len(req) == 0 {
+		return nil
+	}
+	g := &GPUStats{
+		Request:           summarizeRequest(req),
+		Jobs:              len(req),
+		Measured:          len(util),
+		Utilization:       distribution(util),
+		MemoryPeakMiB:     distribution(mem),
+		CoresUsedWhileGPU: distribution(cores),
+	}
+	if r := summarizeRequest(device); r != nil {
+		g.DeviceMemoryMiB = ptr(r.Typical, 0)
+	}
+	return g
 }
 
 // memorySample is the job as memory sizing sees it, if it should see it
