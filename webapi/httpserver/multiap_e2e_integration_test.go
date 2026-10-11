@@ -134,9 +134,13 @@ func TestMultiAPEndToEnd(t *testing.T) {
 		{"another user's jobs never appear", e2eScopesToTheCaller},
 		{"aps lists both with hub state", e2eListsAPs},
 		{"single job by complete id and by an ambiguous one", e2eGetsSingleJobs},
-		{"mutating routes are refused", e2eRefusesMutations},
+		{"unserved routes are refused and a bare id is not acted on", e2eRefusesUnserved},
 		{"MCP query_jobs and get_job", e2eMCPReads},
-		{"a job removed on its schedd leaves the list and enters history", e2eRemovalReachesTheAPI},
+		{"both members pass the trust probe", e2eTrustProbe},
+		{"single-job actions land on the job's AP only", e2eSingleJobActions},
+		{"a bulk hold reaches both APs and only the caller's jobs", e2eBulkHold},
+		{"input spools into the job's AP, directly and through a share URL", e2eSpoolAndShare},
+		{"a job removed through the API leaves the list and enters history", e2eRemoveViaAPI},
 		{"a stopped spoke degrades its AP and a restarted one recovers", e2eSpokeOutage},
 		{"a stopped hub is an error, not an empty queue, and single-job reads use the spoke", e2eHubOutage},
 	} {
@@ -337,22 +341,6 @@ func e2eGetsSingleJobs(t *testing.T, s *multiAPStack) {
 	}
 }
 
-// e2eRefusesMutations: multi-AP mode is read-only.
-func e2eRefusesMutations(t *testing.T, s *multiAPStack) {
-	code, body := s.do(t, s.me, http.MethodPost, "/api/v1/jobs", `{"submit_file":"executable=/bin/true\nqueue\n"}`)
-	if code != http.StatusNotImplemented {
-		t.Errorf("POST /api/v1/jobs = %d %s, want 501", code, body)
-	}
-	code, body = s.do(t, s.me, http.MethodDelete, "/api/v1/jobs/"+url.PathEscape(e2eAP1Job1.String()), "")
-	if code != http.StatusNotImplemented {
-		t.Errorf("DELETE /api/v1/jobs/%s = %d %s, want 501", e2eAP1Job1, code, body)
-	}
-	// Refused, so the job is still there.
-	if got := s.scheddAttr(t, e2eAP1, e2eAP1Job1, "JobStatus"); got != "1" {
-		t.Errorf("%s has JobStatus %q after a refused DELETE", e2eAP1Job1, got)
-	}
-}
-
 // e2eMCPReads: the MCP read tools over the same hub.
 func e2eMCPReads(t *testing.T, s *multiAPStack) {
 	// A bearer the API must identify by asking a member schedd, so
@@ -376,16 +364,6 @@ func e2eMCPReads(t *testing.T, s *multiAPStack) {
 	if j := decodeRow(t, raw); j.key() != e2eAP2Job1 {
 		t.Errorf("get_job %s returned %s", e2eAP2Job1, j.key())
 	}
-}
-
-// e2eRemovalReachesTheAPI: a job removed on its schedd leaves the list
-// and appears in history, through spoke and hub.
-func e2eRemovalReachesTheAPI(t *testing.T, s *multiAPStack) {
-	s.condorRm(t, e2eAP1Job2)
-	s.waitList(t, e2eAP1Job2.String()+" to leave the list", 60*time.Second, s.me, func(l e2eList) bool {
-		return sameJobs(l.keys(), []apJob{e2eAP1Job1, e2eAP2Job1, e2eAP2Job2})
-	})
-	s.waitArchive(t, e2eAP1Job2)
 }
 
 // e2eSpokeOutage: a stopped spoke degrades its AP without dropping its
@@ -431,6 +409,9 @@ func e2eSpokeOutage(t *testing.T, s *multiAPStack) {
 	if !containsJob(s.list(t, s.me, "/api/v1/jobs").keys(), e2eAP2Job2) {
 		t.Errorf("%s vanished while its AP's spoke was down; nothing could have reported it", e2eAP2Job2)
 	}
+
+	// A bulk action does not take the stale hub's word for ap2.
+	e2eBulkContactsStaleAP(t, s)
 
 	s.spoke2.Start()
 	s.waitList(t, e2eAP2+" to be fresh again, with the removal caught up", 90*time.Second, s.me, func(l e2eList) bool {
