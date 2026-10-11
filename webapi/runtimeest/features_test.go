@@ -17,12 +17,11 @@ func adFrom(t *testing.T, text string) *classad.ClassAd {
 	return ad
 }
 
-// stripOwner drops the "owner\x1f" prefix so expectations read plainly.
+// stripOwner drops the "owner\x1fkind\x1f" prefix so expectations read
+// plainly.
 func stripOwner(key string) string {
-	if i := strings.Index(key, keySep); i >= 0 {
-		return key[i+1:]
-	}
-	return key
+	parts := strings.SplitN(key, keySep, 3)
+	return parts[len(parts)-1]
 }
 
 func TestFeaturesFromAdPrefersV2Arguments(t *testing.T) {
@@ -186,13 +185,80 @@ func TestDeriveKeys(t *testing.T) {
 			t.Errorf("%s = %q, want %q", l, got, w)
 		}
 	}
-	if k.Key(LevelOwner) != "alice" || k.Owner() != "alice" {
-		t.Errorf("owner key = %q", k.Key(LevelOwner))
+	if k.Key(LevelOwner) != "alice"+keySep+"u5" || k.Owner() != "alice" || k.Kind() != "u5" {
+		t.Errorf("owner key = %q, kind %q", k.Key(LevelOwner), k.Kind())
 	}
 	for l := LevelCluster; l < LevelOwner; l++ {
-		if !strings.HasPrefix(k.Key(l), "alice"+keySep) {
-			t.Errorf("%s key %q is not confined to the owner", l, k.Key(l))
+		if !strings.HasPrefix(k.Key(l), "alice"+keySep+"u5"+keySep) {
+			t.Errorf("%s key %q is not confined to the owner and kind", l, k.Key(l))
 		}
+	}
+	if k.Key(LevelGlobal) != "u5" {
+		t.Errorf("global key = %q", k.Key(LevelGlobal))
+	}
+}
+
+func TestFeaturesFromAdReadsKind(t *testing.T) {
+	cases := []struct {
+		name string
+		ad   string
+		kind string
+	}{
+		{"vanilla", "JobUniverse = 5", "u5"},
+		{"no universe is vanilla", "", "u5"},
+		{"DAG node", "JobUniverse = 5\nDAGManJobId = 41", "u5|dag"},
+		{"DAG node without a universe", "DAGManJobId = 41", "u5|dag"},
+		{"grid", "JobUniverse = 9", "u9"},
+		{"parallel DAG node", "JobUniverse = 11\nDAGManJobId = 41", "u11|dag"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := FeaturesFromAd(adFrom(t, "Owner = \"alice\"\nCmd = \"sim\"\n"+tc.ad))
+			if got := f.Kind(); got != tc.kind {
+				t.Errorf("kind = %q, want %q", got, tc.kind)
+			}
+		})
+	}
+	for _, a := range []string{"JobUniverse", "DAGManJobId"} {
+		if !slices.Contains(FeatureAttrs, a) || !slices.Contains(QueryAttrs, a) || !slices.Contains(HistoryAttrs, a) {
+			t.Errorf("%s missing from a projection", a)
+		}
+	}
+	for _, attrs := range [][]string{FeatureAttrs, QueryAttrs, HistoryAttrs} {
+		seen := map[string]bool{}
+		for _, a := range attrs {
+			if seen[a] {
+				t.Errorf("%s projected twice in %v", a, attrs)
+			}
+			seen[a] = true
+		}
+	}
+}
+
+// A DAG node and a standalone job of the same owner running the very same
+// command never share a group, nor do jobs of different universes; a job
+// with no universe groups with vanilla ones.
+func TestKeysAreKindConfined(t *testing.T) {
+	base := Features{Owner: "alice", Cmd: "x", Args: []string{"1"}, Iwd: "/d", BatchName: "b", ClusterID: 1}
+	dag, grid, unset, vanilla := base, base, base, base
+	dag.DAGNode = true
+	grid.Universe = 9
+	vanilla.Universe = UniverseVanilla
+	a, d, g := DeriveKeys(vanilla), DeriveKeys(dag), DeriveKeys(grid)
+	for l := LevelCluster; l < LevelGlobal; l++ {
+		if a.Key(l) == d.Key(l) {
+			t.Errorf("%s: DAG node and standalone job share key %q", l, a.Key(l))
+		}
+		if a.Key(l) == g.Key(l) {
+			t.Errorf("%s: vanilla and grid jobs share key %q", l, a.Key(l))
+		}
+	}
+	if DeriveKeys(unset) != a {
+		t.Error("a job with no universe is not grouped as vanilla")
+	}
+	// The access point's group is by universe alone.
+	if a.Key(LevelGlobal) != d.Key(LevelGlobal) || a.Key(LevelGlobal) == g.Key(LevelGlobal) {
+		t.Errorf("global keys: vanilla %q, DAG node %q, grid %q", a.Key(LevelGlobal), d.Key(LevelGlobal), g.Key(LevelGlobal))
 	}
 }
 

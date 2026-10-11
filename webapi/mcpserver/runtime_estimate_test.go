@@ -97,7 +97,8 @@ func TestRuntimeEstimateValidatesAgainstTheSchema(t *testing.T) {
 	s := contractServer(t)
 	elapsed, remaining := 30.0, 70.0
 	for name, r := range map[string]runtimeest.Result{
-		"unavailable": {Reason: runtimeest.ReasonWarmingUp},
+		"unavailable":   {Reason: runtimeest.ReasonWarmingUp},
+		"not estimated": {Reason: runtimeest.ReasonNotEstimated},
 		"idle": {Available: true, EstimateSeconds: 100, P10Seconds: 60, P90Seconds: 300,
 			Basis: &runtimeest.Basis{Level: "template", SampleCount: 9},
 			Model: runtimeest.Model{TrainedThrough: "2026-10-10T00:00:00Z", JobsIngested: 50}},
@@ -146,4 +147,35 @@ func TestRenderRuntimeEstimate(t *testing.T) {
 	if got := renderRuntimeEstimate(runtimeest.Result{Reason: runtimeest.ReasonInsufficientHistory}); !strings.Contains(got, "too few") {
 		t.Errorf("insufficient: %q", got)
 	}
+	if got := renderRuntimeEstimate(runtimeest.Result{Reason: runtimeest.ReasonNotEstimated}); !strings.Contains(got, "workflow manager, are not estimated") {
+		t.Errorf("not estimated: %q", got)
+	}
+}
+
+// A DAGMan job's get_job says it is not estimated, and gives no figure,
+// however much history its owner has.
+func TestGetJobRuntimeEstimateDAGMan(t *testing.T) {
+	f := newActionScopeFixture(t)
+	alice := f.as(t, "alice", "mcp:read")
+	f.server.runtimeEst = loadedEstimator()
+	dagman := fakeschedd.JobAd(3, 0, "alice", 2)
+	dagman.InsertAttr("JobUniverse", 7)
+	dagman.InsertAttrString("Cmd", "/usr/bin/condor_dagman")
+	dagman.InsertAttr("JobCurrentStartDate", time.Now().Unix()-30)
+	f.schedd.AddJobs(dagman)
+
+	out, err := f.server.toolGetJob(alice, map[string]interface{}{"job_id": "3.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := getJobStructured(t, out)
+	est, ok := sc["runtime_estimate"].(runtimeest.Result)
+	if !ok || est.Available || est.Reason != runtimeest.ReasonNotEstimated {
+		t.Errorf("runtime_estimate = %+v", sc["runtime_estimate"])
+	}
+	text := resultText(t, out)
+	if !strings.Contains(text, "Runtime estimate: none") || strings.Contains(text, "roughly") {
+		t.Errorf("text:\n%s", text)
+	}
+	validateStructured(t, "get_job", sc)
 }

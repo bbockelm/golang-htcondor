@@ -528,3 +528,41 @@ htcondor_api_runtime_estimate_within_2x_total{level="template"} 0
 		t.Errorf("self-evaluation: %+v", st)
 	}
 }
+
+// A DAGMan job is never estimated, and a DAG node is not estimated from
+// its owner's standalone jobs: alice's history is all standalone.
+func TestRuntimeEstimateEndpointJobKinds(t *testing.T) {
+	f := runtimeFixture(t)
+	dagman := fakeschedd.JobAd(5, 0, "alice", 2)
+	dagman.InsertAttr("JobUniverse", 7)
+	dagman.InsertAttrString("Cmd", "/usr/bin/condor_dagman")
+	dagman.InsertAttr("JobCurrentStartDate", time.Now().Unix()-40)
+	node := fakeschedd.JobAd(6, 0, "alice", 1)
+	node.InsertAttr("JobUniverse", 5)
+	node.InsertAttr("DAGManJobId", 5)
+	node.InsertAttrString("Cmd", "/home/alice/sim")
+	f.schedd.AddJobs(dagman, node)
+	alice := f.bearer(t, "alice")
+
+	code, body := f.estimate(t, "5.0", alice)
+	if code != http.StatusOK || body.Available || body.Reason != runtimeest.ReasonNotEstimated || body.Basis != nil {
+		t.Errorf("DAGMan job: status %d, %+v", code, body)
+	}
+	code, body = f.estimate(t, "6.0", alice)
+	if code != http.StatusOK || body.Available || body.Reason != runtimeest.ReasonInsufficientHistory {
+		t.Errorf("DAG node with only standalone history: status %d, %+v", code, body)
+	}
+
+	code, bulk, raw := f.bulkEstimates(t, alice, "1.0", "5.0", "6.0")
+	if code != http.StatusOK || !bulk.Available {
+		t.Fatalf("bulk: status %d: %s", code, raw)
+	}
+	for id, want := range map[string]string{"5.0": runtimeest.ReasonNotEstimated, "6.0": runtimeest.ReasonInsufficientHistory} {
+		if r, _ := estimateField[string](t, bulk.Estimates[id], "reason"); r != want {
+			t.Errorf("bulk %s reason = %q, want %q: %s", id, r, want, raw)
+		}
+	}
+	if v, _ := estimateField[float64](t, bulk.Estimates["1.0"], "estimate_seconds"); v != 100 {
+		t.Errorf("bulk 1.0 estimate = %v: %s", v, raw)
+	}
+}
