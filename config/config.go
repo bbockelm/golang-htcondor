@@ -37,7 +37,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // ConfigOptions contains configuration parameters for creating a Config
@@ -114,7 +113,14 @@ type Config struct {
 	// nil when the Config was built with SkipDefaults, in which case
 	// "is this a default?" has no meaning and IsDefault reports false.
 	builtinDefaults map[string]string
+	// hosts answers the host-name lookups for HOSTNAME and FULL_HOSTNAME,
+	// remembering canonical names for the life of this Config.
+	hosts *memoHosts
 }
+
+// localHostSystem is the machine HOSTNAME and FULL_HOSTNAME are computed
+// from; tests replace it.
+var localHostSystem hostSystem = systemHosts{}
 
 // New creates a new Config from the runtime environment
 func New() (*Config, error) {
@@ -407,11 +413,14 @@ func (c *Config) initBuiltins() {
 	c.Set("DAY", "86400")
 	c.Set("WEEK", "604800")
 
-	// Auto-detected values. FULL_HOSTNAME must be the fully-qualified name (as
-	// C++ HTCondor's get_local_fqdn produces), because configs routinely gate on
-	// it -- e.g. `"$(FULL_HOSTNAME)" == "host.example.org"`. os.Hostname() alone
-	// is often the short name, which would silently fail such comparisons.
-	short, fqdn := detectHostnames()
+	// Auto-detected values. HOSTNAME and FULL_HOSTNAME are computed as C++
+	// HTCondor computes them (localHostnames), so UID_DOMAIN and
+	// FILESYSTEM_DOMAIN, which default to $(FULL_HOSTNAME), and every config
+	// gated on `"$(FULL_HOSTNAME)" == "host.example.org"` agree with the C++
+	// daemons on the same machine. They are computed again once the
+	// configuration is read (applyLocalHostname).
+	c.hosts = &memoHosts{hostSystem: localHostSystem}
+	short, fqdn := localHostnames(c.Get, c.hosts)
 	c.Set("HOSTNAME", short)
 	c.Set("FULL_HOSTNAME", fqdn)
 
@@ -561,66 +570,6 @@ func (c *Config) IsDefault(key string) bool {
 // isWindows checks if running on Windows
 func isWindows() bool {
 	return os.PathSeparator == '\\'
-}
-
-// detectHostnames returns the short hostname and the fully-qualified domain
-// name, mirroring C++ HTCondor's init_local_hostname_impl: start from
-// os.Hostname(); if it carries no domain, resolve the canonical name via DNS;
-// then split the short name off before the first dot.
-func detectHostnames() (short, fqdn string) {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		return host, host
-	}
-	fqdn = host
-	// Only pay for a DNS lookup when the hostname is unqualified -- a dotted
-	// os.Hostname() is already the FQDN (matching the C++ "already has a dot"
-	// fast path).
-	if !strings.Contains(host, ".") {
-		if resolved := resolveFQDN(host); resolved != "" {
-			fqdn = resolved
-		}
-	}
-	return shortFromFQDN(fqdn), fqdn
-}
-
-// shortFromFQDN returns the first DNS label of a (possibly qualified) name --
-// "ap43.uw.osg-htc.org" -> "ap43", "ap43" -> "ap43".
-func shortFromFQDN(fqdn string) string {
-	if i := strings.IndexByte(fqdn, '.'); i >= 0 {
-		return fqdn[:i]
-	}
-	return fqdn
-}
-
-// resolveFQDN approximates getaddrinfo(AI_CANONNAME) for an unqualified host:
-// try the canonical (CNAME) name first, then the reverse-DNS name of a resolved
-// address. Returns "" if no qualified name can be found. Bounded by a short
-// timeout so config initialization never blocks on slow/absent DNS.
-func resolveFQDN(host string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	r := net.DefaultResolver
-
-	if cname, err := r.LookupCNAME(ctx, host); err == nil {
-		if c := strings.TrimSuffix(cname, "."); strings.Contains(c, ".") {
-			return c
-		}
-	}
-	if addrs, err := r.LookupHost(ctx, host); err == nil {
-		for _, addr := range addrs {
-			names, err := r.LookupAddr(ctx, addr)
-			if err != nil {
-				continue
-			}
-			for _, n := range names {
-				if name := strings.TrimSuffix(n, "."); strings.Contains(name, ".") {
-					return name
-				}
-			}
-		}
-	}
-	return ""
 }
 
 // detectIPAddresses detects IP addresses from network interfaces
@@ -1255,42 +1204,37 @@ func (c *Config) LoadFromEnvironment() error {
 		return err
 	}
 	c.applyCondorEnvOverrides()
-	c.applyNetworkHostname()
+	c.applyLocalHostname()
 	return nil
 }
 
-// applyNetworkHostname honors the NETWORK_HOSTNAME knob the way C++
-// HTCondor does: when it is set, it is the fully-qualified name this
-// machine calls itself, and it overrides the DNS-detected FULL_HOSTNAME.
+// applyLocalHostname computes HOSTNAME and FULL_HOSTNAME again from the
+// configuration read so far, as C++ real_config does after the root config
+// file and again after the whole chain (reset_local_hostname and
+// reinsert_specials). NETWORK_HOSTNAME, DEFAULT_DOMAIN_NAME and NO_DNS are
+// normally set in a config file, often gated on the FULL_HOSTNAME the host
+// boots under, so their effect is only known once the files are read. Like
+// C++, it replaces a FULL_HOSTNAME or HOSTNAME a config file set.
 //
-// A site sets it when the OS/DNS hostname and the name HTCondor
+// A site sets NETWORK_HOSTNAME when the OS/DNS hostname and the name HTCondor
 // advertises differ -- e.g. a host whose DNS name is
 // path-ap2101.chtc.wisc.edu but whose schedd advertises itself as
-// ap1.facility.path-cc.io. Without this, FULL_HOSTNAME stays the DNS
-// name, and everything derived from it -- most visibly the default
-// schedd/daemon name used to look the daemon up in the collector, but
-// also UID_DOMAIN, FILESYSTEM_DOMAIN and the rest -- fails to match what
-// the C++ daemons actually advertise, so discovery times out.
+// ap1.facility.path-cc.io. Everything derived from FULL_HOSTNAME -- the
+// default daemon name used to find the daemon in the collector, UID_DOMAIN,
+// FILESYSTEM_DOMAIN -- must then follow it, or it fails to match what the
+// C++ daemons advertise.
 //
-// It runs last, after the whole config-file chain and the _CONDOR_*
-// environment overrides, because NETWORK_HOSTNAME is normally set from a
-// config file and often gated on the current FULL_HOSTNAME (a host is
-// still coming up under its DNS name when the file is read, then renames
-// itself). Its value is therefore only known once the files have been
-// read. C++ real_config does the same recompute for the same reason.
-func (c *Config) applyNetworkHostname() {
-	nh, ok := c.Get("NETWORK_HOSTNAME")
-	if !ok {
+// A Config built with SkipDefaults has no detected macros and gets none.
+func (c *Config) applyLocalHostname() {
+	if c.options.SkipDefaults {
 		return
 	}
-	nh = strings.TrimSpace(nh)
-	if nh == "" {
-		return
+	if c.hosts == nil {
+		c.hosts = &memoHosts{hostSystem: localHostSystem}
 	}
-	c.Set("FULL_HOSTNAME", nh)
-	// The short HOSTNAME is the first label of the full name, mirroring
-	// how C++ derives it and how detectHostnames splits the DNS name.
-	c.Set("HOSTNAME", shortFromFQDN(nh))
+	short, fqdn := localHostnames(c.Get, c.hosts)
+	c.Set("HOSTNAME", short)
+	c.Set("FULL_HOSTNAME", fqdn)
 }
 
 // loadConfigFileChain reads the root configuration file (CONDOR_CONFIG or a
@@ -1335,6 +1279,9 @@ func (c *Config) loadConfigFileChain() error {
 // loadLocalConfigChain reads the local configuration chain that follows the
 // root configuration file.
 func (c *Config) loadLocalConfigChain() error {
+	// C++ inserts HOSTNAME and FULL_HOSTNAME after the root config file, so
+	// the local chain sees a DEFAULT_DOMAIN_NAME or NETWORK_HOSTNAME set there.
+	c.applyLocalHostname()
 	// HTCondor then reads the local configuration chain, with later sources
 	// overriding earlier ones: the LOCAL_CONFIG_DIR directories (config.d, files
 	// in lexicographic order) followed by the LOCAL_CONFIG_FILE list. Without
