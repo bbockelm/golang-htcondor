@@ -413,6 +413,21 @@ func TestPoolListProjection(t *testing.T) {
 func TestPoolNeverReturnsPrivateAttributes(t *testing.T) {
 	s, _ := poolServer(t, mixedPool(t)...)
 
+	// The ads themselves, before anything serializes them: the JSON
+	// encoder redacts private attributes too, but a payload that carried
+	// them would be one serializer away from sending them.
+	res, err := s.toolQueryPool(context.Background(), map[string]interface{}{"mode": "list", "projection": []interface{}{"*"}})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, ad := range res.(map[string]interface{})["structuredContent"].(map[string]interface{})["ads"].([]*classad.ClassAd) {
+		for _, name := range ad.GetAttributes() {
+			if isPrivatePoolAttr(name) {
+				t.Errorf("%s is in a returned ad", name)
+			}
+		}
+	}
+
 	sc, text := callPool(t, s, map[string]interface{}{"mode": "list", "projection": []interface{}{"*"}})
 	if strings.Contains(text, "secret-") {
 		t.Errorf("a claim id reached the text:\n%s", text)

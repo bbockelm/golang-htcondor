@@ -167,29 +167,20 @@ const (
 	defaultPoolListLimit = 50
 )
 
-// privatePoolAttrs are the attributes HTCondor treats as private
-// (ClassAdPrivateAttrs: claim ids and capabilities, which are bearer
-// credentials for a slot). The collector withholds them from a query by an
-// ordinary user, but it releases them to a client it authorizes at DAEMON
-// level, and this server may query with a credential of its own. So they
-// are refused here in every argument and stripped from every ad, whatever
-// the collector sends: this tool answers what anonymous condor_status
-// would, and never more.
-var privatePoolAttrs = map[string]bool{
-	"capability":    true,
-	"childclaimids": true,
-	"claimid":       true,
-	"claimidlist":   true,
-	"claimids":      true,
-	"pairedclaimid": true,
-	"transferkey":   true,
-}
-
-// isPrivatePoolAttr reports a private attribute name, including HTCondor's
-// "_condor_priv" prefix for privately-marked attributes.
+// isPrivatePoolAttr reports an attribute HTCondor treats as private: claim
+// ids and capabilities, which are bearer credentials for a slot, and
+// anything "_condor_priv"-prefixed. The collector withholds them from a
+// query by an ordinary user, but it releases them to a client it
+// authorizes at DAEMON level, and this server may query with a credential
+// of its own. So they are refused here in every argument and stripped from
+// every ad, whatever the collector sends: this tool answers what anonymous
+// condor_status would, and never more.
+//
+// classad.IsPrivateAttribute is the list every serialization layer
+// shares. PairedClaimId is added because HTCondor's own list carries it
+// and it is the same kind of credential.
 func isPrivatePoolAttr(name string) bool {
-	n := strings.ToLower(name)
-	return privatePoolAttrs[n] || strings.HasPrefix(n, "_condor_priv")
+	return classad.IsPrivateAttribute(name) || strings.EqualFold(name, "PairedClaimId")
 }
 
 // privateAttrInExpr reports the first private attribute a constraint
