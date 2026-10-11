@@ -123,12 +123,16 @@ func (s watchSource) History(ctx context.Context, owner string, attrs []string, 
 	// history row has not landed yet and everything during an archive
 	// outage. This is what keeps terminal outcomes resolving when the
 	// archive is unreachable.
+	//
+	// Each ad the feed yields is this call's own: the sweep, a nudge, an
+	// MCP wait and a watch share can evaluate the same owner at once, and
+	// a ClassAd's reads write to it.
 	var streamed int
 	if s.feed != nil {
-		for _, ad := range s.feed.Terminal(owner, since) {
+		s.feed.EachTerminal(owner, since, func(ad *classad.ClassAd) {
 			streamed++
 			emit(ad)
-		}
+		})
 	}
 	if archiveErr != nil && streamed == 0 {
 		return fmt.Errorf("terminal job outcomes cannot be resolved: %w", archiveErr)
