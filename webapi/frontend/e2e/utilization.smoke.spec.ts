@@ -185,9 +185,10 @@ test("a workflow's page lists its jobs, sorted by the server and loaded as it sc
   await list.getByRole('button', { name: /Run time/ }).click();
   await sorted;
 
-  // The next page arrives as the end of the list scrolls into view.
-  await list.getByRole('row').last().scrollIntoViewIfNeeded();
-  await page.mouse.wheel(0, 4000);
+  await expect(list).toContainText('100 of 310 shown');
+  // The next page arrives as the end of the list scrolls into view, with
+  // nothing clicked.
+  await list.getByRole('button', { name: 'Load more' }).scrollIntoViewIfNeeded();
   await expect(list).toContainText('200 of 310 shown');
 });
 

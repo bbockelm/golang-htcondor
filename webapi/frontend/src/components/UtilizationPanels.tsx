@@ -556,7 +556,7 @@ function SinglesRows({
             type="button"
             onClick={onToggle}
             aria-expanded={open}
-            className="inline-flex items-center gap-1.5 font-medium text-gray-900 hover:underline"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap font-medium text-gray-900 hover:underline"
           >
             <span aria-hidden className="inline-block w-3 text-gray-500">
               {open ? '▾' : '▸'}
@@ -972,6 +972,9 @@ export function WorkflowDetail({
   if (rec?.retry_mib) memMarkers.push({ value: rec.retry_mib, label: `retry ${formatMiB(rec.retry_mib)}`, kind: 'retry' });
 
   const tpCard = throughputAdviceId(w);
+  // For a workflow of GPU jobs only, the GPU section already shows the
+  // cores histogram; the CPU section keeps only what it adds.
+  const cpuShownWithGpu = !!(w.gpu?.cores_used_while_gpu && w.gpu.jobs === w.jobs);
   const cpuReq = w.cpu.request;
   const diskReq = w.disk.request;
   const gpu = w.gpu;
@@ -1099,15 +1102,13 @@ export function WorkflowDetail({
         </section>
       )}
 
-      {w.cpu.cores_used && (
+      {w.cpu.cores_used && (!cpuShownWithGpu || w.batches.length >= 2) && (
         <section aria-labelledby="wf-cpu" className="space-y-3">
           <h3 id="wf-cpu" className="text-sm font-semibold uppercase tracking-wide text-gray-500">
             CPU
           </h3>
           <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-            {/* For a workflow of GPU jobs only, the GPU section already
-                shows this histogram. */}
-            {!(gpu?.cores_used_while_gpu && gpu.jobs === w.jobs) && (
+            {!cpuShownWithGpu && (
               <Histogram
                 title="CPU cores kept busy per job"
                 subtitle={`median ${formatCores(w.cpu.cores_used.p50)} cores${cpuReq ? ` of ${formatCores(cpuReq.typical)} requested` : ''}${w.cpu.efficiency ? ` · median efficiency ${formatPercent(w.cpu.efficiency.p50)}` : ''}`}
