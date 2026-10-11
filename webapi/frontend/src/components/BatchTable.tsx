@@ -26,7 +26,7 @@ import {
   BatchTimeLeftCell,
   JobTimeLeftCell,
 } from '@/components/TimeLeft';
-import { rangeBarScale, type TimedJob } from '@/lib/timeLeft';
+import { estimateRequestJobs, rangeBarScale, timedStatus, type TimedJob } from '@/lib/timeLeft';
 import {
   useRuntimeEstimates,
   type EstimateRequestJob,
@@ -62,6 +62,7 @@ import {
   type Batch,
   type BatchJob,
   type BatchKey,
+  type DagNodeCounts,
   type JobTiming,
 } from '@/lib/batches';
 
@@ -78,17 +79,25 @@ type BatchSortKey =
   | 'memory'
   | 'cpu';
 
-// timedStatus is what the time-left wording needs of a job's status.
-function timedStatus(j: BatchJob): TimedJob['status'] {
-  if (j.display.key === 'idle') return 'idle';
-  if (j.display.key === 'running') return 'running';
-  return 'other';
+// timedJob pairs a job with its estimate. A job nobody asked about (past
+// the request's cap, or a DAGMan job) has none.
+function timedJob(j: BatchJob, est: RuntimeEstimatesState): TimedJob {
+  return { status: timedStatus(j), estimate: est.byId.get(j.id), dagman: j.dagman };
 }
 
-// timedJob pairs a job with its estimate. A job nobody asked about (past
-// the request's cap) has none.
-function timedJob(j: BatchJob, est: RuntimeEstimatesState): TimedJob {
-  return { status: timedStatus(j), estimate: est.byId.get(j.id) };
+// isDagRow: a batch that is, or holds, a DAG -- its row describes nodes.
+function isDagRow(b: Batch): boolean {
+  return b.isDag || b.jobs.some((j) => j.dagman || j.dagNode);
+}
+
+// dagNodes is a DAG row's node counts: from the progress computed over
+// every loaded job when there is one, which a status filter cannot hide
+// the DAGMan job from, else from the row's own DAGMan job.
+function dagNodes(b: Batch, progress: BatchProgressResult | undefined): DagNodeCounts | undefined {
+  if (progress?.known && progress.unit === 'nodes') {
+    return { total: progress.total, done: progress.done, failed: progress.failed, queued: 0 };
+  }
+  return b.dagNodes;
 }
 
 // Live usage for the 'usage' detail, keyed by BatchJob.id.
@@ -271,13 +280,11 @@ export function BatchTable({
   // Runtime estimates for the waiting and running jobs of the batches on
   // screen, one request per refresh of the listing. Multi-AP mode has
   // none, and the held view has no waiting or running jobs to ask about.
-  // The column appears once the server has said it can answer.
+  // The column appears once the server has said it can answer. DAGMan
+  // jobs are never estimated, so they are not asked about.
   const estimatesWanted = !multiAP && detail !== 'hold';
   const estimateJobs = useMemo<EstimateRequestJob[]>(
-    () =>
-      sorted
-        .slice(0, shownBatches)
-        .flatMap((b) => b.jobs.map((j) => ({ id: j.id, status: timedStatus(j) }))),
+    () => sorted.slice(0, shownBatches).flatMap((b) => estimateRequestJobs(b.jobs)),
     [sorted, shownBatches],
   );
   const estimates = useRuntimeEstimates(estimateJobs, estimatesWanted);
@@ -545,7 +552,12 @@ function BatchRow({
         </td>
         {estimates && timed && (
           <td className="px-3 py-2">
-            <BatchTimeLeftCell jobs={timed} fetchedAt={estimates.fetchedAt} now={now} />
+            <BatchTimeLeftCell
+              jobs={timed}
+              dag={isDagRow(batch) ? { nodes: dagNodes(batch, extras?.progress) } : undefined}
+              fetchedAt={estimates.fetchedAt}
+              now={now}
+            />
           </td>
         )}
         {detail !== 'usage' && (

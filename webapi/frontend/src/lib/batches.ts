@@ -66,6 +66,9 @@ export interface Batch {
   jobs: BatchJob[];
   // True when this batch is a DAG workflow (JobBatchName ends in `+N`).
   isDag: boolean;
+  // The DAG's node counts, summed over its root DAGMan jobs, when this
+  // batch has a root DAGMan job that has reported them; see dagNodeCounts.
+  dagNodes?: DagNodeCounts;
   // Every ClusterId represented in this batch. A DAG spans many clusters
   // (one per node job, plus nested sub-DAGMan jobs); the consumers that
   // re-filter ads by "does this ad belong to a surviving batch" key on
@@ -98,6 +101,12 @@ export interface BatchJob {
   submittedUnix?: number;
   // DAG node name, when this job is a node of a DAG workflow.
   nodeName?: string;
+  // A DAG's workflow manager (a DAGMan job, root or nested): it runs as
+  // long as the DAG does and is not one of its nodes.
+  dagman?: boolean;
+  // Submitted by DAGMan (DAGManJobId set): a node job, or a nested
+  // sub-DAG's DAGMan job.
+  dagNode?: boolean;
   holdReason?: string;
   // When the job's current run, or current wait, began.
   timing?: JobTiming;
@@ -108,6 +117,46 @@ export interface BatchJob {
 // captured number is the root DAGMan cluster — constant across the whole
 // tree even when nested sub-DAGs carry different DAGManJobId values.
 const DAG_SUFFIX = /\+(\d+)\s*$/;
+
+// isDagManJob mirrors the server's test (mcpserver/handlers_dag.go):
+// DAG_NodesTotal is conclusive once DAGMan has started, and before that
+// the command is the only sign.
+export function isDagManJob(ad: ClassAd): boolean {
+  if (num(attr(ad, 'DAG_NodesTotal')) !== undefined) return true;
+  const cmd = str(ad.Cmd)?.trim();
+  return cmd === 'condor_dagman' || !!cmd?.endsWith('/condor_dagman');
+}
+
+// isDagNode: a job DAGMan submitted, including a nested sub-DAG's DAGMan.
+export function isDagNode(ad: ClassAd): boolean {
+  return attr(ad, 'DAGManJobId') !== undefined && attr(ad, 'DAGManJobId') !== null;
+}
+
+// A DAG's node counts, as its root DAGMan job publishes them.
+export interface DagNodeCounts {
+  total: number;
+  done: number;
+  failed: number;
+  queued: number;
+}
+
+// dagNodeCounts sums the root DAGMan jobs' own counts, or is undefined
+// when there is no root or one has not reported yet. There is normally
+// one root; two appear when two workflows were submitted under one batch
+// name, and nodes add up across them.
+export function dagNodeCounts(roots: readonly ClassAd[]): DagNodeCounts | undefined {
+  if (roots.length === 0) return undefined;
+  const c: DagNodeCounts = { total: 0, done: 0, failed: 0, queued: 0 };
+  for (const r of roots) {
+    const t = num(attr(r, 'DAG_NodesTotal'));
+    if (t === undefined) return undefined;
+    c.total += t;
+    c.done += num(attr(r, 'DAG_NodesDone')) ?? 0;
+    c.failed += num(attr(r, 'DAG_NodesFailed')) ?? 0;
+    c.queued += num(attr(r, 'DAG_NodesQueued')) ?? 0;
+  }
+  return c;
+}
 
 // Escape a string for use as a ClassAd string literal inside a constraint.
 function escapeClassAdString(s: string): string {
@@ -127,6 +176,8 @@ interface BatchAcc {
   jobs: BatchJob[];
   clusters: Set<number>;
   minCluster: number;
+  // Root DAGMan jobs' ads, for the node counts.
+  dagRoots: ClassAd[];
 }
 
 // batchGroupKey is the key groupIntoBatches folds a job ad under, or
@@ -176,6 +227,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
         jobs: [],
         clusters: new Set<number>(),
         minCluster: cluster,
+        dagRoots: [],
       };
       map.set(key, a);
     }
@@ -196,6 +248,9 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
     if (!a.cmd) a.cmd = str(j.Cmd);
     if (!a.args) a.args = str(j.Args);
 
+    const dagman = isDagManJob(j);
+    const dagNode = isDagNode(j);
+    if (dagman && !dagNode) a.dagRoots.push(j);
     a.jobs.push({
       id: jobIdOf(j) ?? `${cluster}.${proc ?? 0}`,
       schedd,
@@ -206,6 +261,8 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       args: str(j.Args),
       submittedUnix: q,
       nodeName: str(j.DAGNodeName),
+      dagman: dagman || undefined,
+      dagNode: dagNode || undefined,
       holdReason: str(j.HoldReason),
       timing: jobTiming(j),
     });
@@ -264,6 +321,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       jobCount: a.jobCount,
       jobs: a.jobs,
       isDag,
+      dagNodes: dagNodeCounts(a.dagRoots),
       clusterIds: Array.from(a.clusters),
       removeConstraint,
       selectConstraint,
