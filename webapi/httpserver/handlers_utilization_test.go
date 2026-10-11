@@ -991,3 +991,34 @@ func TestUtilizationApply(t *testing.T) {
 		t.Errorf("missing w: %d", code)
 	}
 }
+
+// The detail names the requests every waiting job writes as a formula --
+// the ones apply would leave alone -- and nothing when only some do.
+func TestUtilizationWaitingAdaptive(t *testing.T) {
+	f := utilizationFixture(t)
+	formula := `ifThenElse(MemoryUsage isnt undefined, 2 * MemoryUsage, 2048)`
+	f.schedd.AddJobs(
+		queueAd(t, 950, 0, "alice", "/home/alice/alice_sim", 1, formula),
+		queueAd(t, 950, 1, "alice", "/home/alice/alice_sim", 1, formula),
+	)
+	alice := f.bearer(t, "alice")
+	key := f.utilization(t, "/api/v1/utilization", alice).Workflows[0].Key
+	w := f.do(t, http.MethodGet, "/api/v1/utilization/workflow?w="+key, "", alice)
+	var detail UtilizationWorkflowDetail
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", w.Code, w.Body.String())
+	}
+	if detail.WaitingJobs == nil || *detail.WaitingJobs != 2 || !slices.Equal(detail.WaitingAdaptive, []string{"memory"}) {
+		t.Errorf("waiting = %v, adaptive %v; want 2 and [memory]", detail.WaitingJobs, detail.WaitingAdaptive)
+	}
+
+	// carol's three waiting jobs: one formula, two plain -- not all.
+	g, _ := applyFixture(t)
+	carol := g.bearer(t, "carol")
+	ckey := workflowByExecutable(t, g.utilization(t, "/api/v1/utilization", carol), "big").Key
+	w = g.do(t, http.MethodGet, "/api/v1/utilization/workflow?w="+ckey, "", carol)
+	detail = UtilizationWorkflowDetail{}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil || detail.WaitingAdaptive != nil {
+		t.Errorf("carol: waiting_adaptive = %v, want omitted", detail.WaitingAdaptive)
+	}
+}

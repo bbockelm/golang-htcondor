@@ -32,6 +32,10 @@ type UtilizationWorkflowDetail struct {
 	// WaitingJobs is the caller's idle jobs of this workflow in the queue
 	// now; nil in multi-AP mode or when the queue could not be read.
 	WaitingJobs *int `json:"waiting_jobs"`
+	// WaitingAdaptive names the requests ("memory", "cpus", "disk",
+	// "gpus") that every one of those waiting jobs writes as a formula,
+	// so apply would leave them all as written.
+	WaitingAdaptive []string `json:"waiting_adaptive,omitempty"`
 }
 
 // handleUtilizationWorkflow handles GET /api/v1/utilization/workflow.
@@ -74,8 +78,9 @@ func (s *Handler) handleUtilizationWorkflow(w http.ResponseWriter, r *http.Reque
 	}
 	if s.multi == nil {
 		wf, _ := res.workflowSummary(key)
-		if n, err := s.waitingJobCount(c, r, key, wf.Owner); err == nil {
-			detail.WaitingJobs = &n
+		if waiting, err := s.waitingJobCount(c, r, key, wf.Owner); err == nil {
+			detail.WaitingJobs = &waiting.jobs
+			detail.WaitingAdaptive = waiting.adaptive
 		} else {
 			s.logger.Info(logging.DestinationHTTP, "utilization: could not count a workflow's waiting jobs", "error", err)
 		}
@@ -129,19 +134,47 @@ func (s *Handler) waitingJobs(c *utilizationCaller, r *http.Request, key, owner 
 	return out, nil
 }
 
-// waitingJobCount is how many waiting jobs a workflow has, cached briefly
-// per caller and workflow.
-func (s *Handler) waitingJobCount(c *utilizationCaller, r *http.Request, key, owner string) (int, error) {
+// waitingSummary is a workflow's waiting jobs as the detail reports them.
+type waitingSummary struct {
+	jobs     int
+	adaptive []string
+}
+
+// waitingRequests maps the Request* attributes apply edits to the names
+// the page uses for them.
+var waitingRequests = []struct{ attr, name string }{
+	{"RequestMemory", "memory"}, {"RequestCpus", "cpus"}, {"RequestDisk", "disk"}, {"RequestGPUs", "gpus"},
+}
+
+// waitingJobCount is how many waiting jobs a workflow has, and which
+// requests all of them write as formulas, cached briefly per caller and
+// workflow.
+func (s *Handler) waitingJobCount(c *utilizationCaller, r *http.Request, key, owner string) (waitingSummary, error) {
 	cacheKey := c.key + "|w=" + key + "|actor=" + htcondor.GetAuthenticatedUserFromContext(c.ctx)
-	return s.waitingCounts().get(c.ctx, cacheKey, func(context.Context) (int, error) {
+	return s.waitingCounts().get(c.ctx, cacheKey, func(context.Context) (waitingSummary, error) {
 		ads, err := s.waitingJobs(c, r, key, owner)
-		return len(ads), err
+		if err != nil {
+			return waitingSummary{}, err
+		}
+		out := waitingSummary{jobs: len(ads)}
+		for _, req := range waitingRequests {
+			formulas := 0
+			for _, ad := range ads {
+				if expr, ok := ad.Lookup(req.attr); ok && expr != nil && utilization.IsAdaptive(expr.String()) {
+					formulas++
+				}
+			}
+			if len(ads) > 0 && formulas == len(ads) {
+				out.adaptive = append(out.adaptive, req.name)
+			}
+		}
+		return out, nil
 	})
 }
 
-func (s *Handler) waitingCounts() *sharedCache[int] {
+func (s *Handler) waitingCounts() *sharedCache[waitingSummary] {
 	s.waitingCacheOnce.Do(func() {
-		s.waitingCacheVal = newSharedCache[int](waitingJobsRefresh, time.Minute)
+		s.waitingCacheVal = newSharedCache[waitingSummary](waitingJobsRefresh, time.Minute)
 	})
 	return s.waitingCacheVal
 }

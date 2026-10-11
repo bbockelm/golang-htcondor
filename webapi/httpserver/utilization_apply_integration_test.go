@@ -24,6 +24,8 @@ import (
 // match. The analysis must find the finished batch, the detail must
 // count the waiting jobs, and apply must change their requests to the
 // advised values.
+//
+//nolint:gocyclo // one end-to-end scenario, read top to bottom
 func TestUtilizationApplyIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -95,7 +97,7 @@ func TestUtilizationApplyIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s %s: %v", method, path, err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if out != nil && resp.StatusCode == http.StatusOK {
 			if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 				t.Fatalf("%s %s: decoding: %v", method, path, err)
