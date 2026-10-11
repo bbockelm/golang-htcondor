@@ -13,7 +13,7 @@ import (
 // HTCondor's tools send directly (condor_ping, condor_reconfig -daemon,
 // condor_off -daemon):
 //
-//   - DC_NOP / DC_NOP_*   -> liveness check; succeeds.
+//   - DC_NOP / DC_NOP_*   -> liveness check at each level; succeeds.
 //   - DC_RECONFIG[_FULL]  -> Reconfigure (reload config + OnReconfig callbacks).
 //   - DC_OFF_GRACEFUL / DC_OFF_PEACEFUL / DC_OFF_FAST -> Shutdown.
 //
@@ -29,11 +29,21 @@ import (
 // Daemon.Serve.
 func (d *Daemon) RegisterDefaultCommands(srv *cedarserver.Server) {
 	nop := func(context.Context, *cedarserver.Conn) error { return nil }
-	// DC_NOP is registered at ALLOW; the level-specific NOPs gate at their level.
+	// DC_NOP is registered at ALLOW; the level-specific NOPs gate at their
+	// level (condor_ping -type <level>). An unregistered command is refused
+	// CMD_NOT_FOUND, so every level DaemonCore registers one at is here.
 	srv.Handle(commands.DC_NOP, nop, "ALLOW")
 	srv.Handle(commands.DC_NOP_READ, nop, "READ")
 	srv.Handle(commands.DC_NOP_WRITE, nop, "WRITE")
 	srv.Handle(commands.DC_NOP_NEGOTIATOR, nop, "NEGOTIATOR")
+	srv.Handle(commands.DC_NOP_ADMINISTRATOR, nop, "ADMINISTRATOR")
+	// OWNER was merged into ADMINISTRATOR; DaemonCore still answers it there.
+	srv.Handle(commands.DC_NOP_OWNER, nop, "ADMINISTRATOR")
+	srv.Handle(commands.DC_NOP_CONFIG, nop, "CONFIG")
+	srv.Handle(commands.DC_NOP_DAEMON, nop, "DAEMON")
+	srv.Handle(commands.DC_NOP_ADVERTISE_STARTD, nop, "ADVERTISE_STARTD")
+	srv.Handle(commands.DC_NOP_ADVERTISE_SCHEDD, nop, "ADVERTISE_SCHEDD")
+	srv.Handle(commands.DC_NOP_ADVERTISE_MASTER, nop, "ADVERTISE_MASTER")
 
 	reconfig := func(_ context.Context, c *cedarserver.Conn) error {
 		d.log.Info(logging.DestinationGeneral, "DC_RECONFIG received; reloading configuration", "remote", c.RemoteAddr)

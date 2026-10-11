@@ -49,9 +49,19 @@ type wsConn struct {
 	closeOne sync.Once
 }
 
+// maxTunnelMessage caps one websocket message read from the peer. gorilla
+// imposes no limit of its own, so without one a peer could make this side
+// buffer a message of any size before yamux saw a byte of it.
+//
+// Each Write here sends one message, and the largest yamux writes is a
+// data frame of at most the receive window it was granted -- 256 KiB with
+// defaultYamuxConfig on both ends -- plus its header. This leaves room.
+const maxTunnelMessage = 1 << 20
+
 // newWSConn wraps a websocket connection. Caller must not use ws directly
 // after handing it to this adapter.
 func newWSConn(ws *websocket.Conn) *wsConn {
+	ws.SetReadLimit(maxTunnelMessage)
 	return &wsConn{ws: ws, closed: make(chan struct{})}
 }
 

@@ -104,7 +104,7 @@ func TestMCPRefusesCredentialForUnmappableCondorScopes(t *testing.T) {
 			}
 
 			// The shared helper the SSH gateway also uses.
-			if _, err := h.withCondorCredential(context.Background(), "alice", scopes); err == nil {
+			if _, err := h.withCondorCredential(context.Background(), "alice", scopes, nil); err == nil {
 				t.Fatalf("withCondorCredential minted a credential for %v", scopes)
 			}
 		})

@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/PelicanPlatform/classad v0.31.4
 	github.com/PelicanPlatform/classad/collections v0.29.6
-	github.com/bbockelm/cedar v0.7.3
+	github.com/bbockelm/cedar v0.7.7
 	github.com/bbockelm/gosssd v0.0.4
 	github.com/glebarez/go-sqlite v1.23.0
 	github.com/pressly/goose/v3 v3.27.3

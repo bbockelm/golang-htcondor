@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/PelicanPlatform/classad/dbrpc"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -21,6 +22,8 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/skills"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -28,7 +31,13 @@ import (
 
 // Server represents the MCP server
 type Server struct {
-	schedd *htcondor.Schedd
+	// multi is non-nil in multi-AP mode; see multiap.go.
+	multi           *multiap.Service
+	multiConstraint string
+	// multiScheddCalls counts calls to getSchedd in multi-AP mode, where
+	// it has no answer. Non-zero is a tool that escaped the allowlist.
+	multiScheddCalls atomic.Int64
+	schedd           *htcondor.Schedd
 	// scheddProvider, when set, is consulted for every schedd call
 	// instead of the snapshot above. The HTTP server replaces its
 	// schedd handle when the collector reports a new address, and a
@@ -36,7 +45,10 @@ type Server struct {
 	// exists -- see getSchedd.
 	scheddProvider func() *htcondor.Schedd
 	collector      *htcondor.Collector
-	credd          htcondor.CreddClient
+	// poolAds, when set, replaces the collector as query_pool's source.
+	// Tests only; see poolSource.
+	poolAds poolAdSource
+	credd   htcondor.CreddClient
 	// creddProvider, when set, is consulted for every credd use instead
 	// of the snapshot above. An access point often discovers its credd
 	// after this server is built, and a snapshot taken then stays nil
@@ -103,15 +115,22 @@ type Server struct {
 	// most one extra DC_CONFIG_VAL round trip per process. It is never
 	// refreshed: an access point that moves its binaries is restarting
 	// its daemons anyway. See Server.dagmanLayout.
-	dagmanLayoutOnce   sync.Once
-	dagmanLayoutBin    string
-	dagmanLayoutNoPort bool
+	//
+	// Kept per access point: a multi-AP server's DAGMan jobs run on the
+	// AP they are submitted to, whose BIN may differ from any other's.
+	// The key is the routed AP, "" with one schedd.
+	dagmanLayoutMu sync.Mutex
+	dagmanLayouts  map[string]*dagmanLayoutEntry
 	// dagmanLayoutFn replaces that discovery, so the precedence between
 	// configuration, discovery and the package default can be tested
 	// without a schedd. nil uses discoverDagmanLayout.
 	dagmanLayoutFn func(context.Context) (string, bool)
-	stdin          io.Reader
-	stdout         io.Writer
+	// dbClientFn replaces dialing the mirror through dbMirror, so the
+	// htcondordb tools can be tested against an in-process dbrpc server
+	// with production's table kinds. nil dials through dbMirror.
+	dbClientFn func(context.Context) (*dbrpc.Client, func(), *dbmirror.Info, error)
+	stdin      io.Reader
+	stdout     io.Writer
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by the analyze_job_match tool. Same
 	// motivation as the httpserver Handler equivalent: keep the slot
@@ -143,6 +162,8 @@ type Server struct {
 	dbMirror     *dbmirror.Locator
 	jobWatch     *jobwatch.Store
 	jobWatchEval *jobwatch.Evaluator
+	// runtimeEst adds a runtime estimate to get_job; nil leaves it out.
+	runtimeEst   *runtimeest.Estimator
 	watchMaxWait time.Duration
 
 	// build carries the site's container-build configuration, resolved
@@ -194,12 +215,23 @@ func (s *Server) ensureCredentials(ctx context.Context) {
 // gets the same preparation injected (Options.BeforeSubmit) for the
 // same reason.
 func (s *Server) submitRemote(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
+	applied, err := s.submitPolicy.Apply(submitFile)
+	if err != nil {
+		return 0, nil, err
+	}
 	s.ensureCredentials(ctx)
-	return s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
+	return s.getSchedd().SubmitRemote(ctx, applied)
 }
 
 // Config holds server configuration
 type Config struct {
+	// MultiAP, when set, puts the server in multi-AP mode: it fronts every
+	// access point the service knows, serves only the read tools, and has
+	// no single schedd. MultiAPConstraint is the AP set's constraint, for
+	// the instructions. See multiap.go.
+	MultiAP           *multiap.Service
+	MultiAPConstraint string
+
 	ScheddName string // Schedd name
 	ScheddAddr string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
 	// ScheddHost is the SCHEDD_HOST setting: the host (optionally
@@ -289,6 +321,12 @@ type Config struct {
 	// server cannot keep, and the agent would wait forever.
 	JobWatch     *jobwatch.Store
 	JobWatchEval *jobwatch.Evaluator
+
+	// RuntimeEstimator, when set, adds a runtime_estimate to get_job.
+	// The HTTP daemon passes the estimator its runtime-estimate endpoint
+	// answers from, which a background loop there keeps fed; nil (the
+	// standalone server, or the feature off) leaves the field out.
+	RuntimeEstimator *runtimeest.Estimator
 
 	// WatchMaxWait caps how long watch_jobs may block in-call before
 	// returning (HTTP_API_MCP_WATCH_MAX_WAIT). It must stay under the
@@ -391,6 +429,8 @@ func NewServer(cfg Config) (*Server, error) {
 	// Use provided schedd or create new one
 	var schedd *htcondor.Schedd
 	switch {
+	case cfg.MultiAP != nil:
+		// No single schedd in multi-AP mode.
 	case cfg.ScheddProvider != nil:
 		// A provider supersedes any snapshot: it is consulted per call,
 		// so it also answers "was a schedd supplied" here. Falling
@@ -442,33 +482,36 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		stats:          cfg.ToolStats,
-		clients:        newClientRegistry(),
-		schedd:         schedd,
-		scheddProvider: cfg.ScheddProvider,
-		collector:      cfg.Collector,
-		credd:          cfg.Credd,
-		creddProvider:  cfg.CreddProvider,
-		trustDomain:    cfg.TrustDomain,
-		uidDomain:      cfg.UIDDomain,
-		signingKeyPath: cfg.SigningKeyPath,
-		httpBaseURL:    cfg.HTTPBaseURL,
-		logger:         logger,
-		stdin:          stdin,
-		stdout:         stdout,
-		adminUsers:     adminUsers,
-		htcondorConfig: cfg.HTCondorConfig,
-		ccbDialer:      cfg.CCB,
-		delegated:      cfg.Delegated,
-		submitPolicy:   cfg.SubmitPolicy,
-		ensureCreds:    cfg.EnsureCredentials,
-		dagmanPath:     cfg.DagmanPath,
-		dagmanEnv:      cfg.DagmanEnvironment,
-		dbMirror:       cfg.DBMirror,
-		jobWatch:       cfg.JobWatch,
-		jobWatchEval:   cfg.JobWatchEval,
-		watchMaxWait:   cfg.WatchMaxWait,
-		build:          buildSettingsFromConfig(cfg),
+		multi:           cfg.MultiAP,
+		multiConstraint: cfg.MultiAPConstraint,
+		stats:           cfg.ToolStats,
+		clients:         newClientRegistry(),
+		schedd:          schedd,
+		scheddProvider:  cfg.ScheddProvider,
+		collector:       cfg.Collector,
+		credd:           cfg.Credd,
+		creddProvider:   cfg.CreddProvider,
+		trustDomain:     cfg.TrustDomain,
+		uidDomain:       cfg.UIDDomain,
+		signingKeyPath:  cfg.SigningKeyPath,
+		httpBaseURL:     cfg.HTTPBaseURL,
+		logger:          logger,
+		stdin:           stdin,
+		stdout:          stdout,
+		adminUsers:      adminUsers,
+		htcondorConfig:  cfg.HTCondorConfig,
+		ccbDialer:       cfg.CCB,
+		delegated:       cfg.Delegated,
+		submitPolicy:    cfg.SubmitPolicy,
+		ensureCreds:     cfg.EnsureCredentials,
+		dagmanPath:      cfg.DagmanPath,
+		dagmanEnv:       cfg.DagmanEnvironment,
+		dbMirror:        cfg.DBMirror,
+		jobWatch:        cfg.JobWatch,
+		jobWatchEval:    cfg.JobWatchEval,
+		runtimeEst:      cfg.RuntimeEstimator,
+		watchMaxWait:    cfg.WatchMaxWait,
+		build:           buildSettingsFromConfig(cfg),
 	}
 	// A missing or unreadable signing key is not fatal: it disables the
 	// one tool that needs it, and that tool says so when called.
@@ -493,7 +536,9 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	s.SetDisabledTools(cfg.DisabledTools)
 	s.SetInstructions(cfg.Instructions)
-	if s.dbMirror == nil {
+	if s.dbMirror == nil && schedd == nil {
+		s.dbMirror = dbmirror.NewLocator(nil, nil)
+	} else if s.dbMirror == nil {
 		s.dbMirror = dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
 			Name:     cfg.DBMirrorName,
 			Address:  cfg.DBMirrorAddress,
@@ -525,7 +570,10 @@ func NewServer(cfg Config) (*Server, error) {
 		// schedd when the collector reports a new address, and holding
 		// the old pointer is how MCP kept dialling a socket that no
 		// longer existed. The accessor is why this is a function.
-		Schedd:       func() interactive.ScheddClient { return s.getSchedd() },
+		Schedd: func() interactive.ScheddClient { return s.getSchedd() },
+		// A command run in a running job goes to that job's schedd: in
+		// multi-AP mode, the access point the tool call was routed to.
+		ScheddFor:    func(ctx context.Context) interactive.ScheddClient { return s.scheddFor(ctx) },
 		Logger:       logger,
 		LogDest:      logging.DestinationMCP,
 		SubmitPolicy: cfg.SubmitPolicy,
@@ -590,7 +638,8 @@ func discoverSchedd(collector *htcondor.Collector, scheddName, scheddHost string
 		return target.Address(), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(
+		htcondor.WithDaemonCredential(context.Background(), "schedd discovery"), timeout)
 	defer cancel()
 
 	constraint := "true"
@@ -824,7 +873,40 @@ func (s *Server) getCredd() htcondor.CreddClient {
 	return s.credd
 }
 
+// scheddFor returns the schedd a call on ctx's job goes to: getSchedd's
+// answer with one schedd; in multi-AP mode, the access point the call
+// was routed to (callMultiAPTool), and nothing else. A call reached
+// without a route, or carrying no caller credential, gets a schedd that
+// cannot connect: there is no right AP to guess, and acting as this
+// server instead of the caller is never right.
+func (s *Server) scheddFor(ctx context.Context) *htcondor.Schedd {
+	if s.multi == nil {
+		return s.getSchedd()
+	}
+	t, ok := multiap.TargetFrom(ctx)
+	if !ok || t.Member.Schedd == nil {
+		return s.getSchedd() // counted and logged as the bug it is
+	}
+	if _, ok := htcondor.GetSecurityConfigFromContext(ctx); !ok {
+		s.logger.Error(logging.DestinationMCP, "Refusing a tool call with no caller credential attached",
+			"access_point", t.Member.Name)
+		return multiap.NoSchedd
+	}
+	// The member as the registry knows it now: its current address, and
+	// nothing at all once it is absent or untrusted.
+	m, err := s.multi.Member(t.Member.Name)
+	if err != nil {
+		return multiap.NoSchedd
+	}
+	return m.Schedd
+}
+
 func (s *Server) getSchedd() *htcondor.Schedd {
+	if s.multi != nil {
+		s.multiScheddCalls.Add(1)
+		s.logger.Error(logging.DestinationMCP, "BUG: the single-schedd accessor was called in multi-AP mode; refusing")
+		return multiap.NoSchedd
+	}
 	if s.scheddProvider != nil {
 		if sc := s.scheddProvider(); sc != nil {
 			return sc

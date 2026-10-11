@@ -14,7 +14,6 @@ import (
 
 	"github.com/bbockelm/cedar/commands"
 	cedarserver "github.com/bbockelm/cedar/server"
-	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/daemon"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
@@ -43,12 +42,16 @@ func run() error {
 
 	// Server security from the pool config so the command port speaks the same
 	// authentication the rest of the daemons do.
-	sec, err := htcondor.GetServerSecurityConfig(d.Config(), commands.DC_NOP, "DEFAULT")
+	sec, err := d.ServerSecurityConfig(commands.DC_NOP, "DEFAULT")
 	if err != nil {
 		return fmt.Errorf("building security config: %w", err)
 	}
 
 	srv := cedarserver.New(sec)
+	// Each command negotiates under the SEC_<level>_* policy of its level.
+	if err := d.InstallSecurityLevels(srv); err != nil {
+		return fmt.Errorf("building per-level security config: %w", err)
+	}
 	d.RegisterDefaultCommands(srv)
 
 	log.Info(logging.DestinationGeneral, "testdaemon starting",

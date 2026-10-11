@@ -2,12 +2,15 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/authz"
+	"github.com/bbockelm/golang-htcondor/webapi/ownerscope"
 )
 
 // OwnerScope is what a tool call was confined to, so a handler can both
@@ -58,11 +61,11 @@ func (s *Server) ownerScope(ctx context.Context, tier privTier) (OwnerScope, boo
 // another user's jobs. Mirrors the wrapper used by the chat-side
 // LLM tools at httpserver/handlers_chat_tools.go:scopeToOwner.
 //
-// Returns (constraint, ok) where ok==false means the caller is
-// unauthenticated (no `actor` on context), or is not an admin and its
-// actor names no owner (e.g. "@domain"). Tool handlers should
-// refuse the request in that case rather than fall back to "no
-// filter" — the server enforces "must be authenticated" at the
+// Returns errScopeUnauthenticated when the caller is unauthenticated
+// (no `actor` on context), or is not an admin and its actor names no
+// owner (e.g. "@domain"), and an error when a non-admin's constraint
+// does not parse. Tool handlers should refuse the request in either
+// case rather than fall back to "no filter" — the server enforces "must be authenticated" at the
 // transport layer, but defense-in-depth here means a future
 // transport bug doesn't accidentally let an unauthenticated request
 // through.
@@ -72,22 +75,33 @@ func (s *Server) ownerScope(ctx context.Context, tier privTier) (OwnerScope, boo
 // admins skip this wrapper so they can do cross-user troubleshooting
 // (e.g. "find every held job", "remove all jobs in the stale
 // queue"); normal users always get owner-scoped.
-func (s *Server) scopeToOwner(ctx context.Context, llmConstraint string, tier privTier) (string, bool) {
+// errScopeUnauthenticated is scopeToOwner's refusal for a caller with no
+// owner to scope by.
+var errScopeUnauthenticated = errors.New("authentication required")
+
+func (s *Server) scopeToOwner(ctx context.Context, llmConstraint string, tier privTier) (string, error) {
 	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
 	if actor == "" {
-		return "", false
+		return "", errScopeUnauthenticated
 	}
 	if s.allowsAllUsers(ctx, actor, tier) {
-		return strings.TrimSpace(llmConstraint), true
+		return strings.TrimSpace(llmConstraint), nil
 	}
 	name := ownerFromActor(actor)
 	if name == "" {
-		return "", false
+		return "", errScopeUnauthenticated
 	}
-	owner := fmt.Sprintf("Owner == %s", classadStringLit(name))
+	owner := s.ownerClause(name)
+	if s.multi != nil {
+		// An actor in another domain than the APs' is refused, never
+		// read as the same name in UID_DOMAIN.
+		if _, err := s.multi.UserFor(actor); err != nil {
+			return "", errScopeUnauthenticated
+		}
+	}
 	c := strings.TrimSpace(llmConstraint)
 	if c == "" {
-		return owner, true
+		return owner, nil
 	}
 	// Combine safely. Splicing the raw untrusted constraint into "(owner) && (c)"
 	// does NOT confine it: a crafted c escapes the AND via '||' precedence and
@@ -95,12 +109,13 @@ func (s *Server) scopeToOwner(ctx context.Context, llmConstraint string, tier pr
 	// `(owner) && (true) || (true)`, which parses as `... || true` = every job).
 	// Re-serialize c through the ClassAd parser: the round-tripped form is always
 	// balanced, so the enclosing parens confine it. An input that will not parse
-	// is dropped (owner-only) rather than trusted -- fail closed.
+	// is refused: narrowing it to every job the caller owns would turn a typo in
+	// a remove_jobs constraint into "remove all my jobs".
 	safe, err := classadBalanced(c)
 	if err != nil {
-		return owner, true
+		return "", fmt.Errorf("constraint is not a valid ClassAd expression: %w", err)
 	}
-	return fmt.Sprintf("(%s) && (%s)", owner, safe), true
+	return fmt.Sprintf("(%s) && (%s)", owner, safe), nil
 }
 
 // classadBalanced parses an untrusted ClassAd boolean expression and returns its
@@ -214,7 +229,10 @@ const (
 // jobs at the given tier.
 //
 // MCP_ADMIN_USERS grants the read tier only, and only where the caller's
-// transport supplied no scopes at all. It used to grant both tiers, and
+// transport supplied no scopes at all. Its entries are compared with the
+// authenticated identity, the full user@domain a schedd reports (C++ or
+// cedar-based), user part exactly and domain in any case (isAdminUser), so
+// an entry must name the domain too. It used to grant both tiers, and
 // narrowing it is a real reduction for a deployment that relied on the
 // old behaviour -- which is why the server logs a warning at startup
 // when the list is configured and no superuser group is, rather than
@@ -223,6 +241,25 @@ func (s *Server) allowsAllUsers(ctx context.Context, authenticatedUser string, t
 	if s == nil || authenticatedUser == "" {
 		return false
 	}
+	if !s.allowsAllUsersByPolicy(ctx, authenticatedUser, tier) {
+		return false
+	}
+	if s.multi == nil {
+		return true
+	}
+	// Multi-AP mode: this server's grant is necessary and not sufficient.
+	// The caller must also be a queue superuser on the access point the
+	// call was routed to, as that AP reports it; a call routed nowhere
+	// sees only the caller's own jobs.
+	user, err := s.multi.UserFor(authenticatedUser)
+	if err != nil {
+		return false
+	}
+	return s.multi.IsQueueSuperUser(routedSchedd(ctx), user)
+}
+
+// allowsAllUsersByPolicy is this server's own half of allowsAllUsers.
+func (s *Server) allowsAllUsersByPolicy(ctx context.Context, authenticatedUser string, tier privTier) bool {
 	switch tier {
 	case tierMutate:
 		return hasScope(ctx, scopeMCPSuperuser)
@@ -245,9 +282,21 @@ func (s *Server) allowsAllUsers(ctx context.Context, authenticatedUser string, t
 		if scopedTransport(ctx) {
 			return false
 		}
-		_, ok := s.adminUsers[authenticatedUser]
-		return ok
+		return s.isAdminUser(authenticatedUser)
 	}
+}
+
+// isAdminUser reports whether actor is listed in MCP_ADMIN_USERS. An entry
+// names the same user as actor if the user parts are equal and the domains
+// equal in any case (authz.SameUser): a schedd reports the domain in lower
+// case, while an operator may write it as UID_DOMAIN is spelled.
+func (s *Server) isAdminUser(actor string) bool {
+	for u := range s.adminUsers {
+		if authz.SameUser(u, actor) {
+			return true
+		}
+	}
+	return false
 }
 
 // scopedTransport reports whether the caller arrived over a transport
@@ -320,23 +369,9 @@ func classadStringLit(s string) string {
 // reinterpreted that way. FetchMyJobs stays set alongside this as
 // defense in depth.
 func ownerScopedConstraint(owner, constraint string) (string, error) {
-	if owner == "" {
-		return "", fmt.Errorf("no authenticated owner to scope to")
-	}
-	scope := fmt.Sprintf("Owner == %s", classadStringLit(owner))
-	c := strings.TrimSpace(constraint)
-	if c == "" || strings.EqualFold(c, "true") {
-		return scope, nil
-	}
-	// Re-serialize the caller's constraint before splicing it in: raw
-	// concatenation does not confine it, since `||` binds looser than
-	// `&&` and an unbalanced input like `true) || (true` escapes the
-	// enclosing AND and matches every job.
-	safe, err := classadBalanced(c)
-	if err != nil {
-		return "", fmt.Errorf("constraint is not a valid ClassAd expression: %w", err)
-	}
-	return fmt.Sprintf("(%s) && (%s)", scope, safe), nil
+	// The parse-and-reserialize AND lives in one place, shared with the
+	// multi-AP reads that scope on User instead of Owner.
+	return ownerscope.Constrain("Owner", owner, constraint)
 }
 
 // fetchOptsFor keeps the schedd-side hint aligned with the constraint.

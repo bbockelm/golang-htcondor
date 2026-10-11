@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,6 +142,14 @@ func (s *Handler) handlePlacementStatus(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
+// placementContext is the context the placementd is called under: this
+// access point's own credential. The placementd registers its commands at
+// ADMINISTRATOR and authorizes the access point, not the person asking; the
+// admin gate in requirePlacementd is what stands for them here.
+func placementContext(r *http.Request) context.Context {
+	return htcondor.WithDaemonCredential(r.Context(), "placementd: admin-gated, authorizes this access point")
+}
+
 // requirePlacementd runs the admin gate and reports whether a placementd is
 // available, writing the appropriate error response when either check fails.
 func (s *Handler) requirePlacementd(w http.ResponseWriter, r *http.Request) bool {
@@ -164,7 +173,7 @@ func (s *Handler) handlePlacementUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	users, err := s.placementd.QueryUsers(r.Context(), r.URL.Query().Get("username"))
+	users, err := s.placementd.QueryUsers(placementContext(r), r.URL.Query().Get("username"))
 	if err != nil {
 		s.writePlacementError(w, "query users", err)
 		return
@@ -206,7 +215,7 @@ func (s *Handler) handlePlacementTokens(w http.ResponseWriter, r *http.Request) 
 		query.ValidOnly = true
 	}
 
-	tokens, err := s.placementd.QueryTokens(r.Context(), query)
+	tokens, err := s.placementd.QueryTokens(placementContext(r), query)
 	if err != nil {
 		s.writePlacementError(w, "query tokens", err)
 		return
@@ -240,7 +249,7 @@ func (s *Handler) handlePlacementAuthorizations(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	authz, err := s.placementd.QueryAuthorizations(r.Context(), r.URL.Query().Get("username"))
+	authz, err := s.placementd.QueryAuthorizations(placementContext(r), r.URL.Query().Get("username"))
 	if err != nil {
 		s.writePlacementError(w, "query authorizations", err)
 		return
@@ -277,7 +286,7 @@ func (s *Handler) handlePlacementLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.placementd.Login(r.Context(), htcondor.PlacementLoginRequest{
+	result, err := s.placementd.Login(placementContext(r), htcondor.PlacementLoginRequest{
 		UserName:       req.Username,
 		Authorizations: req.Authorizations,
 		Project:        req.Project,

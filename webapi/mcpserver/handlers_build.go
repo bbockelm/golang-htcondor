@@ -405,9 +405,17 @@ func validateBuildName(name string) error {
 		return fmt.Errorf("name must not start with a dash, which shells and tools read as an option: got %q", name)
 	case !strings.HasSuffix(name, ".sif"):
 		return fmt.Errorf("name must end in .sif, which is what apptainer writes: got %q", name)
+	case strings.ContainsAny(name, submitValueBreakers):
+		return fmt.Errorf("name must not contain a line break, a double quote or a semicolon: got %q", name)
 	}
 	return nil
 }
+
+// submitValueBreakers are the characters that would change the meaning
+// of the generated submit file rather than name a file: a line break
+// starts a new submit command, a double quote ends the quoted
+// transfer_output_remaps value, and a semicolon starts another remap.
+const submitValueBreakers = "\n\r\";"
 
 // buildDestination resolves where the finished image goes.
 //
@@ -420,6 +428,9 @@ func buildDestination(destination, stagingBase, name, owner string) (string, err
 	if destination != "" {
 		if !strings.Contains(destination, "://") {
 			return "", fmt.Errorf("destination must be a URL with a transfer scheme such as osdf:// or pelican://, got %q", destination)
+		}
+		if strings.ContainsAny(destination, submitValueBreakers) {
+			return "", fmt.Errorf("destination must not contain a line break, a double quote or a semicolon, got %q", destination)
 		}
 		return destination, nil
 	}

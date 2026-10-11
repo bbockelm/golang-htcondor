@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +39,8 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -51,12 +54,18 @@ import (
 
 // Handler represents the HTTP API handler that can be embedded in any HTTP server
 type Handler struct {
+	// grantReauth rate-limits re-running a grant's authorization policy
+	// when a credential minted from it is renewed.
+	grantReauth grantReauthLimiter
 	// startTime is when this handler was constructed, i.e. when the
 	// server came up. Fixed for the process lifetime and reported by
 	// /api/v1/version so the Info page can show how long the access
 	// point has been running.
-	startTime        time.Time
-	ccbDialer        *htcondor.CCBDialer // how to traverse CCB; see HandlerConfig.CCB
+	startTime time.Time
+	ccbDialer *htcondor.CCBDialer // how to traverse CCB; see HandlerConfig.CCB
+	// multi is non-nil in multi-AP mode, where schedd is nil and every
+	// route outside the multi-AP allowlist answers 501. See multiap.go.
+	multi            *multiAPMode
 	schedd           *htcondor.Schedd
 	scheddMu         sync.RWMutex // Protects schedd instance, scheddAddrSetAt, and scheddAddrLastConfirmedAt
 	scheddName       string       // Schedd name for discovery
@@ -212,10 +221,17 @@ type Handler struct {
 	// and to the collector ad (ActiveWatchStreams). streamOpened() is the
 	// single inc/dec choke point.
 	activeStreams atomic.Int64
+	// streamLimiterVal caps those streams per identity and in all; see
+	// stream_limit.go. Built on first use by streamLimits.
+	streamLimiterOnce sync.Once
+	streamLimiterVal  *streamLimiter
 	// mcpCIMDEnabled advertises Client ID Metadata Document support in the MCP
 	// OAuth2 discovery document (the resolver itself lives in the provider's
 	// storage). See oauth2_cimd.go.
 	mcpCIMDEnabled bool
+	// mcpDCRDisabled refuses dynamic client registration. See
+	// Config.MCPDCRDisabled.
+	mcpDCRDisabled bool
 	// extIssuers verifies external trusted-issuer subject tokens for RFC 8693
 	// token exchange. Nil when no issuers are configured. See
 	// oauth2_token_exchange_ext.go.
@@ -329,11 +345,26 @@ type Handler struct {
 	// per-request input (authenticated actor, granted scopes, security
 	// config) travels on the context instead.
 	mcpServer *mcpserver.Server
+	// credentialSessions holds a private cedar session cache per session
+	// tag for credentials minted or forwarded for a caller, so none of
+	// them uses the process-global cache: the counterpart, keyed by
+	// grant, of cookieSessionCaches. See credential_sessions.go.
+	credentialSessions *TokenCache
 	// mcpActors caches the schedd-verified identity of forwarded
 	// HTCondor IDTOKENs presented to /mcp/message.
 	mcpActors        mcpActorCache
 	webuiAdminGroups *groupSet // Required for Web UI admin pages (empty = no admin UI)
 	metricsPublic    bool      // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
+	// mirrorReaders caches, per username, whether the schedd accepts a
+	// session or user-header caller at READ. See mirrorReadVerified.
+	mirrorReaders mcpActorCache
+	// routedCallers caches, per credential and access point, who that AP
+	// says the credential is (verifyRoutedCaller). apVerdicts caches each
+	// AP's own verdict on a user (admitToAP).
+	routedCallers mcpActorCache
+	apVerdicts    apVerdicts
+	// probeCannotRun logs, once, that member trust probes cannot run.
+	probeCannotRun sync.Once
 	// toolStats counts MCP tool calls for /metrics and for the durable
 	// table in the application database. See toolstats.go.
 	toolStats              *toolstats.Store
@@ -353,6 +384,10 @@ type Handler struct {
 	masterKeyOnce  sync.Once
 	masterKeyBytes []byte
 	masterKeyErr   error
+	// The built-in IdP's own client secret, derived from the master key.
+	// See idpInternalClientSecret.
+	idpClientSecretOnce  sync.Once
+	idpClientSecretBytes []byte
 	// identityCookieKey signs the remembered-account hint. Derived from
 	// the application master key, which the pool signing keys wrap; empty
 	// when the deployment has no signing keys.
@@ -366,6 +401,11 @@ type Handler struct {
 	jobWatch     *jobwatch.Store
 	jobWatchEval *jobwatch.Evaluator
 	jobWatchFeed *jobwatch.Feed
+	// runtimeEst answers runtime estimates and runtimeRefresher keeps it
+	// fed from the mirror's history; both nil when the feature is off.
+	// See runtime_estimate.go.
+	runtimeEst       *runtimeest.Estimator
+	runtimeRefresher *runtimeRefresher
 	// jobPolls backs GET /api/v1/jobs/{id}/watch on a pool with no usable
 	// mirror feed: one schedd poll per distinct owner-scoped constraint,
 	// however many browsers are watching that job.
@@ -382,7 +422,8 @@ type Handler struct {
 	watchHeartbeatEvery time.Duration
 	logBuffer           *logging.Buffer   // In-memory ring buffer surfaced to the admin Web UI
 	idpProvider         *IDPProvider      // Built-in IDP provider
-	idpLoginLimiter     *LoginRateLimiter // Rate limiter for IDP login attempts
+	idpLoginLimiter     *LoginRateLimiter // IDP login attempts per source address
+	idpLoginByUser      *LoginRateLimiter // IDP login attempts per username
 	seedDemoUser        bool              // Seed the non-admin "user" account (demo mode only)
 	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
 	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
@@ -394,6 +435,11 @@ type Handler struct {
 	// its per-process CSRF key, all built on first use. See
 	// handlers_ssh_consent.go.
 	sshConsentState
+
+	// oauth2LimitState holds the per-source limits on the OAuth2
+	// endpoints that create state for an unauthenticated caller. See
+	// oauth2_rate_limits.go.
+	oauth2LimitState
 
 	// matchAnalysisOnce / matchAnalysisSlots back the lazy-allocated
 	// CollectorSlotProvider used by /api/v1/jobs/{id}/match-analysis.
@@ -413,8 +459,27 @@ type Handler struct {
 	issueCacheVal  *issueCache
 	token          string             // Token for daemon authentication
 	mux            *http.ServeMux     // HTTP request multiplexer
+	routePatterns  []string           // every pattern setupRoutes registered
 	ctx            context.Context    // Context for background goroutines
 	cancelFunc     context.CancelFunc // Function to cancel background goroutines
+
+	// utilizationCache holds the Utilization page's analyses, shared by
+	// everyone asking the same question for five minutes.
+	utilizationCacheOnce sync.Once
+	utilizationCacheVal  *utilizationCache
+	// utilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS; zero means the
+	// default.
+	utilizationMaxJobs int
+	// jobSetCache holds one workflow's jobs at a time for paging.
+	jobSetCacheOnce sync.Once
+	jobSetCacheVal  *jobSetCache
+	// poolShapeCache holds the pool's machine shapes for the throughput
+	// estimate.
+	poolShapeCacheOnce sync.Once
+	poolShapeCacheVal  *poolShapeCache
+	// poolDrainVal answers /api/v1/pool/drain-estimates; see pool_drain.go.
+	poolDrainOnce sync.Once
+	poolDrainVal  *poolDrain
 
 	// jupyterRegistry tracks pending and live JupyterLab tunnel instances.
 	// Created lazily on first /api/v1/jupyter use so older deployments that
@@ -502,6 +567,9 @@ type HandlerConfig struct {
 	// that host's schedd rather than whichever one the collector
 	// happens to list first.
 	ScheddHost string
+	// MultiAP, when its ScheddConstraint is set, serves every access point
+	// matching that constraint instead of one schedd. See multiap.go.
+	MultiAP MultiAPConfig
 	// InteractiveExtraSubmit holds extra HTCondor submit-file
 	// directives merged into the submit file produced for each
 	// interactive-terminal and JupyterLab job. The string value is
@@ -648,6 +716,20 @@ type HandlerConfig struct {
 	// at all -- which bounds memory and the table, not just the scrape.
 	// Zero means toolstats.DefaultMaxSeries.
 	ToolStatsMaxSeries int
+	// UtilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS: the most jobs
+	// one utilization analysis may read. Zero means the default (a
+	// million).
+	UtilizationMaxJobs int
+	// RuntimeEstimateInterval is how often the runtime estimator reads
+	// newly finished jobs from the htcondordb mirror
+	// (HTTP_API_RUNTIME_ESTIMATE_INTERVAL). Zero or negative disables
+	// runtime estimates entirely; there is no implicit default here, the
+	// shipped daemon sets 5m.
+	RuntimeEstimateInterval time.Duration
+	// RuntimeEstimateBackfill is how much history the estimator reads at
+	// startup, and how long a group of jobs is remembered without a new
+	// completion (HTTP_API_RUNTIME_ESTIMATE_BACKFILL). Zero means 168h.
+	RuntimeEstimateBackfill time.Duration
 
 	MetricsCacheTTL time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics. Use
@@ -695,6 +777,10 @@ type HandlerConfig struct {
 	// when set, restricts which hosts such a client_id may point at.
 	MCPCIMDEnabled      bool
 	MCPCIMDAllowedHosts []string
+	// MCPDCRDisabled refuses dynamic client registration (RFC 7591) and
+	// stops advertising its endpoint, for a deployment whose clients are
+	// all seeded, operator-provisioned or CIMD. HTTP_API_MCP_DCR=false.
+	MCPDCRDisabled bool
 	// MCPTokenExchangeIssuers is the JSON list of trusted external issuers for
 	// RFC 8693 token exchange (HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS). Empty = off.
 	MCPTokenExchangeIssuers string
@@ -1047,26 +1133,36 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		}
 	}
 
-	// Discover schedd address if not provided
-	scheddAddr := cfg.ScheddAddr
+	// Multi-AP mode has no single schedd: the AP registry replaces it.
+	var schedd *htcondor.Schedd
+	var multi *multiAPMode
 	scheddDiscovered := cfg.ScheddAddrDiscovered
-	if scheddAddr == "" {
-		if cfg.Collector == nil {
-			return nil, fmt.Errorf("ScheddAddr not provided and Collector not configured for discovery")
-		}
-
-		logger.Infof(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
+	if cfg.MultiAP.Enabled() {
 		var err error
-		scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, cfg.ScheddHost, 10*time.Second, logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to discover schedd: %w", err)
+		if multi, err = newMultiAPMode(cfg, logger); err != nil {
+			return nil, err
 		}
-		logger.Info(logging.DestinationSchedd, "Discovered schedd", "address", scheddAddr)
-		scheddDiscovered = true
-	}
+	} else {
+		// Discover schedd address if not provided
+		scheddAddr := cfg.ScheddAddr
+		if scheddAddr == "" {
+			if cfg.Collector == nil {
+				return nil, fmt.Errorf("ScheddAddr not provided and Collector not configured for discovery")
+			}
 
-	// Create schedd with the address as-is (can be host:port or sinful string)
-	schedd := htcondor.NewSchedd(cfg.ScheddName, scheddAddr).WithConfig(cfg.ClientConfig)
+			logger.Infof(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd '%s' from collector...", cfg.ScheddName)
+			var err error
+			scheddAddr, err = discoverSchedd(cfg.Collector, cfg.ScheddName, cfg.ScheddHost, 10*time.Second, logger)
+			if err != nil {
+				return nil, fmt.Errorf("failed to discover schedd: %w", err)
+			}
+			logger.Info(logging.DestinationSchedd, "Discovered schedd", "address", scheddAddr)
+			scheddDiscovered = true
+		}
+
+		// Create schedd with the address as-is (can be host:port or sinful string)
+		schedd = htcondor.NewSchedd(cfg.ScheddName, scheddAddr).WithConfig(cfg.ClientConfig)
+	}
 
 	// Set session TTL
 	sessionTTL := cfg.SessionTTL
@@ -1106,6 +1202,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 	h := &Handler{
 		startTime:                 now,
+		multi:                     multi,
 		schedd:                    schedd,
 		scheddName:                cfg.ScheddName,
 		scheddHost:                cfg.ScheddHost,
@@ -1122,6 +1219,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		httpBaseURL:               cfg.HTTPBaseURL,
 		mcpBaseURL:                strings.TrimSpace(cfg.MCPBaseURL),
 		mcpCIMDEnabled:            cfg.MCPCIMDEnabled,
+		mcpDCRDisabled:            cfg.MCPDCRDisabled,
 		ccbDialer:                 cfg.CCB,
 		userHeader:                cfg.UserHeader,
 		userHeaderUnsafeAllowAll:  cfg.UserHeaderTrustAnyUnsafe,
@@ -1139,20 +1237,14 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger:               logger,
 		tokenCache:           newTokenCache(cfg.TrustDomain), // Initialize token cache (includes username for rate limiting)
 		cookieSessionCaches:  newTokenCache(""),
+		credentialSessions:   newTokenCache(""),
 		streamBufferSize:     streamBufferSize,
 		streamWriteTimeout:   streamWriteTimeout,
 		metricsPublic:        cfg.MetricsPublic,
 		htcondorConfig:       cfg.HTCondorConfig,
 		clientConfig:         cfg.ClientConfig,
-		dbMirror: dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{
-			Name:     cfg.DBMirrorName,
-			Address:  cfg.DBMirrorAddress,
-			Required: cfg.DBMirrorRequired,
-			// Which schedd this daemon serves, so discovery can tell
-			// this access point's mirror from another's.
-			ScheddAddress: schedd.Address,
-		}),
-		token: cfg.Token,
+		dbMirror:             singleAPMirror(cfg, schedd),
+		token:                cfg.Token,
 	}
 
 	if h.webuiAdminGroups.configured() {
@@ -1161,7 +1253,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 
 	// Superuser mode. Runs after the signing key and domains are set,
 	// because it refuses to enable without them.
-	h.initSuperuserMode(cfg, logger)
+	if multi == nil {
+		h.initSuperuserMode(cfg, logger)
+	} else if strings.TrimSpace(cfg.SuperuserGroup) != "" {
+		logger.Warn(logging.DestinationHTTP, "Superuser mode is not available in multi-AP mode; HTTP_API_SUPERUSER_GROUP is ignored")
+	}
 
 	// Operator-supplied extra submit-file directives. The value is
 	// inserted verbatim into every interactive-terminal / Jupyter
@@ -1171,6 +1267,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.submitPolicy = submitpolicy.Policy{
 		Defaults:  cfg.SubmitFileDefaults,
 		Overrides: cfg.SubmitFileOverrides,
+	}
+	if err := h.submitPolicy.Check(""); err != nil {
+		// Every submission would be refused with this; say so now.
+		logger.Error(logging.DestinationHTTP, "Site submit-file overrides cannot be evaluated", "error", err)
 	}
 	if !h.submitPolicy.IsZero() {
 		logger.Info(logging.DestinationHTTP, "Site submit-file policy loaded",
@@ -1281,6 +1381,16 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		}
 	}
 
+	// Said once at startup because nothing else says it: an open
+	// /metrics answers every request, so the one sign it is open would
+	// otherwise be someone scraping it.
+	if h.metricsPublic {
+		logger.Warn(logging.DestinationSecurity,
+			"/metrics is served without authentication, to anyone who can reach this port",
+			"setting", "HTTP_API_METRICS_PUBLIC",
+			"hint", "restrict the port by network ACL, or unset this and give the scraper an API key with the metrics scope")
+	}
+
 	// HMAC key for short-lived signed URLs. Derived from the pool
 	// signing key when there is one, so that every process able to mint
 	// these agrees on the key: a standalone MCP server has no HTTP
@@ -1332,6 +1442,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.toolStats.SetMaxSeries(cfg.ToolStatsMaxSeries)
 	}
 	h.toolStatsOmitUser = cfg.ToolStatsOmitUser
+	h.utilizationMaxJobs = cfg.UtilizationMaxJobs
 	// The mirror's own state is exported at scrape time from whatever
 	// discovery last saw, so /metrics answers "is the htcondordb
 	// integration working?" without a request having to exercise it.
@@ -1339,6 +1450,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// Live count of open watch/SSE streams, exposed to /metrics from the same
 	// atomic the collector ad reads (one source of truth).
 	h.registerStreamGauge()
+	// Registered whether or not the feature is on; see the collector.
+	h.httpMetricsState.registry.MustRegister(newRuntimeEstimateCollector(h))
 
 	// Discover credd if not provided
 	// Services this access point wants on file before a job is submitted.
@@ -1352,9 +1465,14 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"services", h.requiredCredentials)
 	}
 
-	if h.getCredd() == nil {
+	switch {
+	case multi != nil:
+		// Credentials follow the AP; per-AP credd discovery is not part of
+		// the read-only multi-AP mode.
+		h.creddAvailable.Store(false)
+	case h.getCredd() == nil:
 		logger.Info(logging.DestinationHTTP, "Credd not provided, attempting discovery...")
-		creddAddr, err := discoverCredd(context.Background(), h.creddLookupFor(scheddAddr), logger)
+		creddAddr, err := discoverCredd(context.Background(), h.creddLookupFor(schedd.Address()), logger)
 		if err != nil {
 			logger.Warn(logging.DestinationHTTP, "Failed to discover credd, credential endpoints will be disabled", "error", err)
 			h.creddAvailable.Store(false)
@@ -1365,7 +1483,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			h.creddAvailable.Store(true)
 			h.creddDiscovered = true // Mark for periodic updates
 		}
-	} else {
+	default:
 		h.creddAvailable.Store(true)
 		h.creddDiscovered = false // Explicitly provided, no need for updates
 	}
@@ -1375,6 +1493,12 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// the Locator is built inside. A daemon with no signing key gets no
 	// source at all, which the Locator reads as "not configured" and
 	// stays quiet about.
+	if multi != nil {
+		multi.setTokenSource(h.mirrorTokenSource())
+		// Each AP's own verdict on a caller, and who it says they are.
+		multi.svc.Admit = h.admitToAP
+		multi.svc.VerifyCaller = h.verifyRoutedCaller
+	}
 	if src := h.mirrorTokenSource(); src != nil {
 		h.dbMirror.SetTokenSource(src)
 		logger.Info(logging.DestinationHTTP, "htcondordb mirror will authenticate with an IDTOKEN",
@@ -1720,7 +1844,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger.Info(logging.DestinationHTTP, "OAuth2 maximum grant lifetime configured",
 			"max_grant_lifetime", h.oauth2MaxGrantLifetime)
 
-		h.revocationOracles = h.buildRevocationOracles(cfg.OAuth2RevocationOracles)
+		// In multi-AP mode each schedd-backed oracle consults every
+		// member rather than whichever one is first.
+		h.revocationOracles = h.multiAPOracles(h.buildRevocationOracles(cfg.OAuth2RevocationOracles))
 
 		// Where groups come from the system, membership can be re-read at
 		// refresh time -- which is the live-membership oracle the
@@ -1797,7 +1923,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"refresh_token_lifespan", idpRefreshLifespan)
 		h.idpProvider = idpProvider
 		h.seedDemoUser = cfg.SeedDemoUser
-		h.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5) // 5 attempts per minute with burst of 5
+		// Failed logins: 5 a minute per source address, and 10 per
+		// username so a guesser spreading attempts across many
+		// addresses still meets a limit. See handleIDPLoginSubmit.
+		h.idpLoginLimiter = NewLoginRateLimiter(rate.Limit(5.0/60.0), 5)
+		h.idpLoginByUser = NewLoginRateLimiter(rate.Limit(10.0/60.0), 10)
 		logger.Info(logging.DestinationHTTP, "IDP provider enabled", "issuer", idpIssuer)
 
 		// Ensure OAuth2 state store is initialized if we might use SSO (which IDP enables)
@@ -1933,10 +2063,22 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// none runs when nobody is watching.
 	h.spoolBufferDir = cfg.SpoolBufferDir
 	h.jobPolls = newJobPollHub(2*time.Second, h.logger, h.scheddJobQuery)
+	h.jobPolls.queryMany = h.scheddJobsQuery
 	h.jobWatchEval = jobwatch.NewEvaluator(h.jobWatch, watchSource{h: h, feed: h.jobWatchFeed},
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
 
+	h.initRuntimeEstimates(cfg)
+
+	var mcpMulti *multiap.Service
+	mcpMultiConstraint := ""
+	if h.multi != nil {
+		mcpMulti, mcpMultiConstraint = h.multi.svc, h.multi.constraint
+	}
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
+		// Multi-AP mode: the read tools over the hub, and nothing that
+		// needs a single schedd.
+		MultiAP:              mcpMulti,
+		MultiAPConstraint:    mcpMultiConstraint,
 		ToolStats:            h.toolStats,
 		SkillsDir:            h.mcpSkillsDir,
 		SkillsReloadInterval: h.mcpSkillsReloadInterval,
@@ -1992,6 +2134,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// registered through one surface is visible from the other.
 		JobWatch:     h.jobWatch,
 		JobWatchEval: h.jobWatchEval,
+		// The same estimator the REST endpoint answers from; nil when
+		// runtime estimates are off, which leaves get_job without them.
+		RuntimeEstimator: h.runtimeEst,
 		// How long watch_jobs may block in-call. An explicit
 		// HTTP_API_MCP_WATCH_MAX_WAIT wins, because only the operator
 		// knows the gateway timeout in front of this daemon; otherwise it
@@ -2106,11 +2251,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var next http.Handler = h.mux
+	if h.multi != nil {
+		// Multi-AP mode serves an allowlist; see multiap.go.
+		next = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !multiAPAllowed(r.Method, r.URL.Path) {
+				h.refuseMultiAP(w, r)
+				return
+			}
+			h.mux.ServeHTTP(w, r)
+		})
+	}
 	if h.httpMetricsState != nil {
-		h.httpMetricsState.middleware(h.mux).ServeHTTP(w, r)
+		h.httpMetricsState.middleware(next).ServeHTTP(w, r)
 		return
 	}
-	h.mux.ServeHTTP(w, r)
+	next.ServeHTTP(w, r)
 }
 
 // isTransparentProxyPath reports whether the given request path is
@@ -2336,6 +2492,10 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 
 	h.ctx, h.cancelFunc = context.WithCancel(ctx) //nolint:gosec // G118: cancelFunc is stored and called during shutdown
 
+	if h.multi != nil {
+		return h.startMultiAPHandler(ctx, ln, protocol)
+	}
+
 	// Tail the schedd's job_queue.log into the watch collection, if configured.
 	if h.jobMirror != nil {
 		go func() { _ = h.jobMirror.Run(h.ctx) }()
@@ -2376,9 +2536,11 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	}
 
 	// Delete token rows once they are dead and old enough to be of no use
-	// to anybody. Negative retention is the operator asking to keep them
-	// forever, which is a policy some deployments have.
-	if h.oauth2Provider != nil && h.tokenRetentionFor >= 0 {
+	// to anybody, along with expired authorization state and clients
+	// that registered and never came back. Negative retention is the
+	// operator asking to keep token rows forever, which is a policy some
+	// deployments have; runTokenRetention honours it.
+	if h.oauth2Provider != nil {
 		go h.runTokenRetention(ctx)
 	}
 
@@ -2418,6 +2580,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	h.startJobWatchFeed(ctx)
 	h.startJobWatchNudge(ctx)
 	h.startJupyterSweeper(ctx)
+	h.startRuntimeEstimates(ctx)
 
 	return nil
 }
@@ -2444,7 +2607,7 @@ func (h *Handler) startJobWatchFeed(ctx context.Context) {
 		// cannot be inferred from the absence of the other -- "enabled but
 		// never connected" and "not enabled" would otherwise look alike.
 		h.logger.Info(logging.DestinationHTTP, "Job watch feed enabled; connecting to the htcondordb mirror")
-		_ = h.jobWatchFeed.Run(ctx, h.watchJobsTable)
+		_ = h.jobWatchFeed.Run(htcondor.WithDaemonCredential(ctx, "job watch feed"), h.watchJobsTable)
 	}()
 }
 
@@ -2510,6 +2673,7 @@ func (h *Handler) startJobWatchNudge(ctx context.Context) {
 	if h.jobWatchFeed == nil || h.jobWatchEval == nil || !h.dbMirror.Enabled() {
 		return
 	}
+	ctx = htcondor.WithDaemonCredential(ctx, "job watch evaluation")
 	nudger := jobwatch.NewNudger(h.jobWatchFeed, h.jobWatchEval.CheckOwner,
 		func(format string, args ...any) {
 			h.logger.Debug(logging.DestinationHTTP, fmt.Sprintf(format, args...))
@@ -2597,6 +2761,9 @@ func (h *Handler) startJobWatchEvaluator(ctx context.Context) {
 	if h.jobWatchEval == nil {
 		return
 	}
+	// The periodic sweep over every user's watches: owner-scoped by the
+	// evaluator's own constraints, run as this daemon.
+	ctx = htcondor.WithDaemonCredential(ctx, "job watch evaluation")
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -2615,6 +2782,7 @@ func (h *Handler) startDBMirrorPoll(ctx context.Context) {
 	if !h.dbMirror.Enabled() {
 		return
 	}
+	ctx = htcondor.WithDaemonCredential(ctx, "htcondordb mirror discovery")
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -2884,8 +3052,15 @@ func (h *Handler) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	binding, err := h.bindLoginToBrowser(w, r)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to bind login to browser", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+		return
+	}
+
 	// Store the state with the original URL (no authorize request for browser flow)
-	h.oauth2StateStore.StoreWithURL(state, nil, originalURL)
+	h.oauth2StateStore.StoreForBrowser(state, nil, originalURL, binding)
 
 	// Build authorization URL
 	authURL := h.oauth2Config.AuthCodeURL(state)
@@ -2911,6 +3086,9 @@ func (h *Handler) UpdateOAuth2RedirectURL(redirectURL string) {
 
 // getSchedd returns the current schedd instance (thread-safe)
 func (h *Handler) getSchedd() *htcondor.Schedd {
+	if h.multi != nil {
+		return h.multiAPScheddMisuse()
+	}
 	h.scheddMu.RLock()
 	defer h.scheddMu.RUnlock()
 	return h.schedd
@@ -2918,6 +3096,9 @@ func (h *Handler) getSchedd() *htcondor.Schedd {
 
 // GetSchedd returns the current schedd instance (thread-safe)
 func (h *Handler) GetSchedd() *htcondor.Schedd {
+	if h.multi != nil {
+		return h.multiAPScheddMisuse()
+	}
 	h.scheddMu.RLock()
 	defer h.scheddMu.RUnlock()
 	return h.schedd
@@ -3231,7 +3412,8 @@ func (h *Handler) periodicPing(ctx context.Context) {
 // 60-second updater tick — that's the failure mode where the cached sock=
 // has just gone stale and the next ping should use a fresh address.
 func (h *Handler) performPeriodicPing() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(
+		htcondor.WithDaemonCredential(context.Background(), "periodic health ping"), 10*time.Second)
 	defer cancel()
 
 	// secConfigForLog tracks the SecurityConfig actually attached to ctx so we
@@ -3461,21 +3643,23 @@ func (h *Handler) initializeIDP(ln net.Listener, protocol string) error {
 		return fmt.Errorf("failed to initialize IDP users: %w", err)
 	}
 
-	// Initialize auto-generated client with redirect URI
-	redirectURI := issuer + "/idp/callback"
-	if err := h.initializeIDPClient(ctx, redirectURI); err != nil {
-		return fmt.Errorf("failed to initialize IDP client: %w", err)
-	}
-
 	// Configure internal IDP as the upstream OAuth2 provider for the server
 	// This allows the server to use its own IDP for authentication (SSO)
-	clientID := "internal-client"
-	clientSecret := "internal-secret"
+	clientID := idpInternalClientID
+	clientSecret := h.idpInternalClientSecret()
 	ssoRedirectURI := issuer + OAuth2CallbackPath()
 
 	// Check if client exists
-	_, err := h.idpProvider.storage.GetClient(ctx, clientID)
-	if err != nil {
+	existing, err := h.idpProvider.storage.GetClient(ctx, clientID)
+	if err == nil {
+		// Stored by an earlier start. Its secret is whatever that start
+		// used -- the fixed string releases before this one shared, or a
+		// key from a master that has since changed -- so bring it in line
+		// with the one this process will present.
+		if err := h.syncIDPClientSecret(ctx, existing, clientSecret); err != nil {
+			return err
+		}
+	} else {
 		// Create client if not found (or error)
 		// Hash the secret
 		hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
@@ -3715,55 +3899,34 @@ func (h *Handler) initializeDemoUser(ctx context.Context) error {
 	return nil
 }
 
-// initializeIDPClient creates an auto-generated OAuth2 client for the server
-func (h *Handler) initializeIDPClient(ctx context.Context, redirectURI string) error {
-	clientID := "htcondor-server"
+// idpInternalClientID is the client the server's own SSO presents to the
+// built-in IdP.
+const idpInternalClientID = "internal-client"
 
-	// Check if client already exists
-	_, err := h.idpProvider.storage.GetClient(ctx, clientID)
-	if err == nil {
-		// Client already exists, update redirect URI if needed
-		// For simplicity, we'll just return
-		h.logger.Info(logging.DestinationHTTP, "IDP client already exists", "client_id", clientID)
+// idpInternalClientSecret is the secret the server's own SSO presents to
+// the built-in IdP: a subkey of the application master, so it is the same
+// across restarts and replicas and is not known to anyone without the
+// pool signing keys. It used to be a fixed string, which made the client
+// anyone's: every installation shared it.
+func (h *Handler) idpInternalClientSecret() string {
+	return hex.EncodeToString(h.purposeKey(idpInternalClientInfo, &h.idpClientSecretOnce,
+		&h.idpClientSecretBytes, "the built-in IdP's client secret"))
+}
+
+// syncIDPClientSecret replaces the stored client's secret when it does not
+// match the one this process presents.
+func (h *Handler) syncIDPClientSecret(ctx context.Context, client fosite.Client, secret string) error {
+	if bcrypt.CompareHashAndPassword(client.GetHashedSecret(), []byte(secret)) == nil {
 		return nil
 	}
-
-	if !errors.Is(err, fosite.ErrNotFound) {
-		return fmt.Errorf("failed to check for existing client: %w", err)
-	}
-
-	// Generate client secret
-	secret, err := generateRandomPassword(32)
+	hashed, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
 	if err != nil {
-		return fmt.Errorf("failed to generate client secret: %w", err)
+		return fmt.Errorf("failed to hash client secret: %w", err)
 	}
-
-	// Create the client
-	client := &fosite.DefaultClient{
-		ID:     clientID,
-		Secret: []byte(secret),
-		RedirectURIs: []string{
-			redirectURI,
-		},
-		GrantTypes: []string{
-			"authorization_code",
-			"refresh_token",
-		},
-		ResponseTypes: []string{
-			"code",
-		},
-		Scopes: []string{
-			"openid",
-			"profile",
-			"email",
-		},
+	if err := h.idpProvider.storage.UpdateClientSecret(ctx, client.GetID(), hashed); err != nil {
+		return fmt.Errorf("failed to update the internal IDP client secret: %w", err)
 	}
-
-	if err := h.idpProvider.storage.CreateClient(ctx, client); err != nil {
-		return fmt.Errorf("failed to create client: %w", err)
-	}
-
-	h.logger.Info(logging.DestinationHTTP, "Created IDP client", "client_id", clientID)
+	h.logger.Info(logging.DestinationHTTP, "Replaced the internal IDP client secret", "client_id", client.GetID())
 	return nil
 }
 

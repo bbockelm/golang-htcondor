@@ -204,8 +204,17 @@ queue
 		Logger:    logger.Slog(logging.DestinationHTTP),
 	})
 
+	// The pool's configuration, which names the broker the starter goes
+	// through (COLLECTOR_HOST): the starter dial refuses a broker its
+	// configuration does not name.
+	poolCfg, err := harness.GetConfig()
+	if err != nil {
+		t.Fatalf("pool config: %v", err)
+	}
+
 	server, err := NewServer(Config{
 		ListenAddr:               "127.0.0.1:0",
+		ClientConfig:             poolCfg,
 		ScheddName:               location.Name,
 		ScheddAddr:               location.Address,
 		UserHeader:               "X-Test-User",

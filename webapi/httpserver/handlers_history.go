@@ -18,10 +18,17 @@ import (
 // SourceNote name the backend that answered ("htcondordb" when a
 // synchronized mirror served it, absent for the schedd) so a caller can
 // tell how fresh the records are.
+//
+// ScanLimitReached is set when the schedd stopped at its scan limit
+// before finding as many records as asked for: it examined only the
+// RecordsScanned most recent history records, so older matches are not
+// in the answer -- even an empty one.
 type HistoryListResponse struct {
-	Ads        []*classad.ClassAd `json:"ads"`
-	Source     string             `json:"source,omitempty"`
-	SourceNote string             `json:"source_note,omitempty"`
+	Ads              []*classad.ClassAd `json:"ads"`
+	Source           string             `json:"source,omitempty"`
+	SourceNote       string             `json:"source_note,omitempty"`
+	ScanLimitReached bool               `json:"scan_limit_reached,omitempty"`
+	RecordsScanned   int                `json:"records_scanned,omitempty"`
 }
 
 // handleJobHistory handles GET /api/v1/jobs/archive
@@ -32,6 +39,10 @@ func (s *Handler) handleJobHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.multi != nil {
+		s.handleMultiHistory(w, r)
+		return
+	}
 	opts := &htcondor.HistoryQueryOptions{
 		Source: htcondor.HistorySourceJobHistory,
 	}
@@ -253,8 +264,8 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 	// job-history source is mirrored. An unscoped read routes as readily
 	// as a scoped one -- QUERY_SCHEDD_HISTORY is READ-level on the schedd
 	// and applies no owner filter of its own -- but only for a caller the
-	// schedd has identified, since routing is what skips asking it. Any
-	// miss falls through to the schedd.
+	// schedd has accepted at READ, since routing is what skips asking it.
+	// Any miss falls through to the schedd.
 	if baseOpts.Source == htcondor.HistorySourceJobHistory {
 		// scan_limit is a budget for the schedd's backwards scan of the
 		// history FILE; the archive prunes by zone map and has no
@@ -266,7 +277,7 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 		if !scanLimitExplicit {
 			mirrorOpts.ScanLimit = 0
 		}
-		served, decision := s.historyFromMirror(ctx, w, constraint, &mirrorOpts,
+		served, decision := s.historyFromMirror(ctx, w, r, constraint, &mirrorOpts,
 			htcondor.GetAuthenticatedUserFromContext(ctx))
 		if served {
 			return
@@ -293,7 +304,12 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh, err := s.getSchedd().QueryHistoryStream(ctx, constraint, opts, streamOpts)
+	// The stats are written before the channel closes, so they are read
+	// only after the loop below has drained it.
+	var stats htcondor.HistoryScanStats
+	streamQueryOpts := *opts
+	streamQueryOpts.Stats = &stats
+	resultCh, err := s.getSchedd().QueryHistoryStream(ctx, constraint, &streamQueryOpts, streamOpts)
 	if err != nil {
 		// Pre-request error - check type and set appropriate status
 		switch {
@@ -320,6 +336,9 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 	// Stream history ads as they arrive
 	adCount := 0
 	var errorMsg string
+	// stoppedEarly: the loop quit with the channel still open, so the
+	// query may still be running and its stats are not ready to read.
+	stoppedEarly := false
 	for result := range resultCh {
 		if result.Err != nil {
 			// Check if it's a rate limit error
@@ -342,6 +361,7 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 
 		// Check limit
 		if opts.Limit > 0 && adCount >= opts.Limit {
+			stoppedEarly = true
 			break
 		}
 
@@ -377,16 +397,33 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 			s.logger.Error(logging.DestinationHTTP, "Failed to write response footer with error", "error", err)
 		}
 	} else {
-		if _, err := w.Write([]byte(`]}`)); err != nil {
+		footer := ""
+		if !stoppedEarly {
+			footer = scanLimitFooter(stats)
+		}
+		if _, err := w.Write([]byte(`]` + footer + `}`)); err != nil {
 			s.logger.Error(logging.DestinationHTTP, "Failed to write response footer", "error", err)
 		}
 	}
 }
 
+// scanLimitFooter renders a cut-off scan's fields for the end of a streamed
+// response object (see HistoryListResponse), or "" when the scan was not cut
+// off.
+func scanLimitFooter(stats htcondor.HistoryScanStats) string {
+	if !stats.ScanLimitReached {
+		return ""
+	}
+	return fmt.Sprintf(`,"scan_limit_reached":true,"records_scanned":%d`, stats.RecordsScanned)
+}
+
 // bufferHistoryQuery performs a buffered history query
 func (s *Handler) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter, _ *http.Request, constraint string, opts *htcondor.HistoryQueryOptions) {
 	// Query history with buffering
-	ads, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, opts)
+	var stats htcondor.HistoryScanStats
+	bufferedOpts := *opts
+	bufferedOpts.Stats = &stats
+	ads, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, &bufferedOpts)
 	if err != nil {
 		// Check error type and set appropriate status
 		switch {
@@ -402,8 +439,12 @@ func (s *Handler) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter,
 
 	// Return results as JSON
 	response := HistoryListResponse{
-		Ads:    ads,
-		Source: "schedd",
+		Ads:              ads,
+		Source:           "schedd",
+		ScanLimitReached: stats.ScanLimitReached,
+	}
+	if stats.ScanLimitReached {
+		response.RecordsScanned = stats.RecordsScanned
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }

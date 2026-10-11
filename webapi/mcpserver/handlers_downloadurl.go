@@ -61,10 +61,14 @@ func (s *Server) toolCreateOutputDownloadURL(ctx context.Context, args map[strin
 		return nil, err
 	}
 	ownerScope := func(c string) (string, error) {
-		return fmt.Sprintf("(%s) && Owner == %s", c, classadStringLit(caller.Owner)), nil
+		return fmt.Sprintf("(%s) && %s", c, s.ownerClause(caller.Owner)), nil
 	}
 
 	ttl := shareurl.ClampTTL(shareurl.KindOutput, ttlSecondsArg(args))
+	authz, err := shareurl.GrantAuthz(shareurl.KindOutput, callerToken(ctx))
+	if err != nil {
+		return nil, err
+	}
 
 	procAds, remaining, err := s.procAdsForDownload(ctx, target, ownerScope)
 	if err != nil {
@@ -89,7 +93,7 @@ func (s *Server) toolCreateOutputDownloadURL(ctx context.Context, args map[strin
 		if !ok {
 			continue
 		}
-		u, terr := mintOutputURL(s.shareSigner, base, cluster, proc, caller.Owner, exp)
+		u, terr := mintOutputURL(s.shareSigner, base, routedSchedd(ctx), cluster, proc, caller.Owner, exp, authz)
 		if terr != nil {
 			return nil, terr
 		}
@@ -152,19 +156,26 @@ func (s *Server) toolCreateOutputDownloadURL(ctx context.Context, args map[strin
 // and nothing fails until somebody fetches the URL, where it surfaces
 // as "invalid or expired token" -- a message that says nothing about
 // the actual mistake.
+//
+// schedd is the access point the job is on, signed into the token; ""
+// for a server with one schedd.
 func mintOutputURL(
 	signer *shareurl.Signer,
 	base string,
+	schedd string,
 	cluster, proc int,
 	owner string,
 	exp time.Time,
+	authz []string,
 ) (string, error) {
 	tok, err := signer.Sign(shareurl.Payload{
+		Schedd:  schedd,
 		Cluster: cluster,
 		Proc:    proc,
 		Owner:   owner,
 		Exp:     exp.Unix(),
 		Kind:    shareurl.KindOutput,
+		Authz:   authz,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to sign download URL: %w", err)
@@ -193,7 +204,7 @@ func (s *Server) procAdsForDownload(
 	ownerScope func(string) (string, error),
 ) ([]*classad.ClassAd, int, error) {
 	if !target.AllProcs {
-		ad, err := spool.FetchProcAd(ctx, s.getSchedd(), target.Cluster, target.Proc,
+		ad, err := spool.FetchProcAd(ctx, s.scheddFor(ctx), target.Cluster, target.Proc,
 			ownerScope, downloadShareProjection)
 		if err != nil || ad == nil {
 			return nil, 0, err
@@ -208,7 +219,7 @@ func (s *Server) procAdsForDownload(
 	}
 	// One past the cap, so a truncated list can be reported as truncated
 	// rather than presented as the whole cluster.
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, scoped, &htcondor.QueryOptions{
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, scoped, &htcondor.QueryOptions{
 		Projection: downloadShareProjection,
 		Limit:      maxMintedURLs + 1,
 	})
@@ -219,4 +230,15 @@ func (s *Server) procAdsForDownload(
 		return ads[:maxMintedURLs], len(ads) - maxMintedURLs, nil
 	}
 	return ads, 0, nil
+}
+
+// callerToken is the credential a call presents to HTCondor, which bounds
+// what a URL it mints may authorize. Empty when the server presents its own,
+// running as the user.
+func callerToken(ctx context.Context) string {
+	sec, ok := htcondor.GetSecurityConfigFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return sec.Token
 }

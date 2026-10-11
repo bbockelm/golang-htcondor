@@ -143,8 +143,7 @@ func (s *Server) liveJobQuery(ctx context.Context, cluster, proc int) (string, *
 	if err != nil {
 		return "", nil, err
 	}
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
-		cluster, proc, classadStringLit(caller.Owner))
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && %s", cluster, proc, s.ownerClause(caller.Owner))
 	return constraint, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "JobStatus", "JobUniverse"},
 		Limit:      1,
@@ -179,7 +178,7 @@ func (s *Server) requireOwnRunningJob(ctx context.Context, jobID string, needs l
 	if err != nil {
 		return 0, 0, err
 	}
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to query job: %w", err)
 	}

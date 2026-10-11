@@ -64,3 +64,24 @@ func TestAddAttrsOmitsEmpty(t *testing.T) {
 		}
 	}
 }
+
+// TestAddAttrsMultiAP: a multi-AP server names its AP set, not a schedd.
+func TestAddAttrsMultiAP(t *testing.T) {
+	ad := classad.New()
+	AddAttrs(ad, Input{ScheddConstraint: `regexp("^ap", Name)`, ScheddCount: 52})
+	if v, _ := ad.EvaluateAttrString("ScheddConstraint"); v != `regexp("^ap", Name)` {
+		t.Errorf("ScheddConstraint = %q", v)
+	}
+	if v, ok := ad.EvaluateAttrInt("ScheddCount"); !ok || v != 52 {
+		t.Errorf("ScheddCount = %v,%v", v, ok)
+	}
+	if _, ok := ad.Lookup("ScheddName"); ok {
+		t.Error("a multi-AP ad must not carry ScheddName")
+	}
+
+	single := classad.New()
+	AddAttrs(single, Input{ScheddName: "ap40"})
+	if _, ok := single.Lookup("ScheddCount"); ok {
+		t.Error("a single-AP ad must not carry ScheddCount")
+	}
+}

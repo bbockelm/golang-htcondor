@@ -46,11 +46,7 @@ use POLICY : ALWAYS_RUN_JOBS
 }
 
 // TestMetaknobUWCSDesktop tests a complex metaknob with nested use directives.
-// NOTE: Currently skipped because it requires $(VAR?) syntax support for
-// conditional parameter checking, which is not yet implemented.
 func TestMetaknobUWCSDesktop(t *testing.T) {
-	t.Skip("UWCS_DESKTOP contains nested use directives with conditionals that require $(VAR?) syntax support")
-
 	input := `
 use POLICY : UWCS_DESKTOP
 	`

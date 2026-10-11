@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -64,14 +65,20 @@ const nbfClockSkewLeeway = 10 * time.Second
 // token, and the usual way to arrive at an empty list is a scope set
 // whose condor:/* entries all map to nothing, so an empty list is
 // refused rather than minted as an unrestricted token.
+// errNoAuthorizationLimits is a mint refused because the caller's scopes
+// map to no HTCondor authorization. The caller asked for nothing this
+// server can grant, so it is a refusal of the request rather than a
+// failure of the server.
+var errNoAuthorizationLimits = errors.New("no authorization limits")
+
 func generateMCPAccessJWT(
 	keyDir, keyID, subject, issuer string,
 	issuedAt, expiration int64,
 	authzLimits []string,
 ) (string, error) {
 	if len(authzLimits) == 0 {
-		return "", fmt.Errorf("refusing to mint an IDTOKEN for %s with no authorization limits; "+
-			"it would carry every authorization %s holds", subject, subject)
+		return "", fmt.Errorf("refusing to mint an IDTOKEN for %s: %w; "+
+			"it would carry every authorization %s holds", subject, errNoAuthorizationLimits, subject)
 	}
 
 	// Read and unscramble the signing key — same on-disk format as

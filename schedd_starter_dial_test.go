@@ -50,6 +50,7 @@ func TestStarterDialAppliesTheCCBPolicyForEveryCommand(t *testing.T) {
 	info := &JobConnectInfo{
 		StarterAddr: "<10.0.0.1:9618?CCBID=192.0.2.1:9618%2342>",
 		ClaimID:     validTestClaimID(t),
+		cfg:         mustConfig(t, "CCB_ADDRESS = 192.0.2.1:9618\n"),
 	}
 
 	for _, command := range []int{startSSHDCommand, starterPeekCommand} {
@@ -116,6 +117,7 @@ func TestPeekPassesStreamingToTheDial(t *testing.T) {
 	info := &JobConnectInfo{
 		StarterAddr: "<10.0.0.1:9618?CCBID=192.0.2.1:9618%2342>",
 		ClaimID:     validTestClaimID(t),
+		cfg:         mustConfig(t, "CCB_ADDRESS = 192.0.2.1:9618\n"),
 	}
 
 	var gotOpts *DialOptions

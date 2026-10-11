@@ -394,10 +394,12 @@ jobs:
   #
   # The ordinary integration job cannot cover it: its container runs as
   # "vscode" (USER vscode in the Dockerfile), so every pool it starts is a
-  # personal condor. This job exists solely to keep that one shipped default
+  # personal condor. This job exists to keep that one shipped default
   # honest, and runs only the tests that need root -- everything else is
   # already covered above, and re-running it here would cost minutes without
-  # adding coverage.
+  # adding coverage. The other root-only tests (the privileged-port test,
+  # droppriv, and the *_privileged_test.go unit tests) run here for the
+  # same reason: every other job skips them.
   docker-root-integration-test:
     name: Root Integration Test in Docker
     runs-on: ubuntu-latest
@@ -499,3 +501,20 @@ jobs:
           -e GOMODCACHE=/workspace/.gocache/mod \
           golang-htcondor:integration-test \
           bash .github/scripts/integration-tests-privileged-port.sh
+
+    # The unit tests that need root: every *_privileged_test.go outside
+    # droppriv/, which the step above runs whole. They skip in the
+    # unprivileged unit-test job, so before this step their root path ran
+    # in no job at all. Only those tests run, not their packages: some
+    # tests beside them deliberately skip as root. The script also fails
+    # if a root-gated test sits in a file it would not select, or if any
+    # selected test skips.
+    - name: Run the privileged unit tests as root
+      run: |
+        docker run --rm --privileged --user 0:0 \
+          -v ${{ github.workspace }}:/workspace \
+          -w /workspace \
+          -e GOCACHE=/workspace/.gocache/build \
+          -e GOMODCACHE=/workspace/.gocache/mod \
+          golang-htcondor:integration-test \
+          bash .github/scripts/privileged-unit-tests.sh

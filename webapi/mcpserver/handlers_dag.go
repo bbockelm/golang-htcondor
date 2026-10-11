@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing/fstest"
 	"unicode"
 
@@ -17,6 +18,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/dagman"
+	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
 )
 
 // A DAGMan workflow submitted from here is an ordinary scheduler-universe
@@ -203,12 +205,19 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 	if err != nil {
 		return nil, err
 	}
+	appliedSubmitFile, err := s.submitPolicy.Apply(submitFile)
+	if err != nil {
+		return nil, fmt.Errorf("the DAGMan job: %w", err)
+	}
+	if err := s.checkNodePolicy(parsed, files); err != nil {
+		return nil, err
+	}
 
 	if boolFlag(args, "dry_run") {
 		// A dry run reports rather than refuses, fatal findings
 		// included: the caller asked what is wrong with this workflow,
 		// and answering with one error hides the other four.
-		return dagDryRunResult(dagName, s.submitPolicy.Apply(submitFile), report, notes), nil
+		return dagDryRunResult(dagName, appliedSubmitFile, report, notes), nil
 	}
 	if report.Fatal() {
 		return nil, fmt.Errorf("this workflow cannot start:\n  - %s",
@@ -248,8 +257,12 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 	}
 	execSet := executableStagedNames(parsed, files)
 	for name, body := range files {
+		data, err := s.policyForStagedFile(name, body)
+		if err != nil {
+			return nil, fmt.Errorf("file %q: %w", name, err)
+		}
 		staged[name] = &fstest.MapFile{
-			Data: []byte(s.policyForStagedFile(name, body)),
+			Data: []byte(data),
 			Mode: stagedMode(name, execSet),
 		}
 	}
@@ -576,11 +589,29 @@ func spoolFailureMessage(clusterID int, removed bool, cause error) string {
 // a wrong guess would splice submit-file text into a shell script. So the
 // test is deliberately narrow: the name ends in .sub, which is the
 // convention DAGMan itself assumes (DAG_SUBMIT_FILE_SUFFIX).
-func (s *Server) policyForStagedFile(name, body string) string {
+func (s *Server) policyForStagedFile(name, body string) (string, error) {
 	if s.submitPolicy.IsZero() || !strings.HasSuffix(name, ".sub") {
-		return body
+		return body, nil
 	}
 	return s.submitPolicy.Apply(body)
+}
+
+// checkNodePolicy refuses a workflow whose node descriptions set, as a
+// custom attribute, a job attribute the site's overrides control. The
+// inline descriptions get the overrides from policyForInlineDescriptions,
+// which splices rather than calling Apply, so they are checked here; the
+// staged .sub files are checked here too so the refusal names the first
+// offending description whichever kind it is.
+func (s *Server) checkNodePolicy(parsed *dagman.DAG, files map[string]string) error {
+	if s.submitPolicy.IsZero() {
+		return nil
+	}
+	for _, d := range namedSubmitDescriptions(parsed, files) {
+		if err := s.submitPolicy.Check(d.body); err != nil {
+			return fmt.Errorf("%s: %w", d.name, err)
+		}
+	}
+	return nil
 }
 
 // policyForInlineDescriptions splices the site's submit policy into every
@@ -848,50 +879,13 @@ func dagFileFromAd(ad *classad.ClassAd) string {
 			return ""
 		}
 	}
-	tokens := splitV2Args(raw)
+	tokens := jobargs.SplitV2(raw)
 	for i, tok := range tokens {
 		if strings.EqualFold(tok, "-Dag") && i+1 < len(tokens) {
 			return tokens[i+1]
 		}
 	}
 	return ""
-}
-
-// splitV2Args undoes HTCondor's "new syntax" argument quoting as it
-// reaches the job ad: arguments are separated by whitespace outside
-// single quotes, whitespace inside them is literal, and a doubled single
-// quote is one literal quote. The outer double quotes belong to the
-// SUBMIT FILE and are gone by the time the value is an attribute.
-func splitV2Args(s string) []string {
-	var out []string
-	var cur strings.Builder
-	inQuote, started := false, false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '\'':
-			if inQuote && i+1 < len(s) && s[i+1] == '\'' {
-				cur.WriteByte('\'')
-				i++
-				continue
-			}
-			inQuote = !inQuote
-			started = true
-		case !inQuote && (c == ' ' || c == '\t'):
-			if started {
-				out = append(out, cur.String())
-				cur.Reset()
-				started = false
-			}
-		default:
-			cur.WriteByte(c)
-			started = true
-		}
-	}
-	if started {
-		out = append(out, cur.String())
-	}
-	return out
 }
 
 // writeDagNotes renders the analysis.
@@ -1230,20 +1224,39 @@ func checkDagNameLexes(dagName string) error {
 // daemon core sends is matched by content, and a reply that does not
 // match it exactly would otherwise be treated as a real directory.
 func (s *Server) dagmanLayout(ctx context.Context) (binDir string, disablePort bool) {
-	s.dagmanLayoutOnce.Do(func() {
+	key := strings.ToLower(routedSchedd(ctx))
+	s.dagmanLayoutMu.Lock()
+	if s.dagmanLayouts == nil {
+		s.dagmanLayouts = map[string]*dagmanLayoutEntry{}
+	}
+	e, ok := s.dagmanLayouts[key]
+	if !ok {
+		e = &dagmanLayoutEntry{}
+		s.dagmanLayouts[key] = e
+	}
+	s.dagmanLayoutMu.Unlock()
+	e.once.Do(func() {
 		discover := s.dagmanLayoutFn
 		if discover == nil {
 			discover = s.discoverDagmanLayout
 		}
-		s.dagmanLayoutBin, s.dagmanLayoutNoPort = discover(ctx)
+		e.bin, e.noPort = discover(ctx)
 	})
-	return s.dagmanLayoutBin, s.dagmanLayoutNoPort
+	return e.bin, e.noPort
 }
 
-// discoverDagmanLayout asks the schedd. Never fails a submission: a
-// refusal here costs the defaults, not the workflow.
+// dagmanLayoutEntry is one access point's memoised DAGMan layout.
+type dagmanLayoutEntry struct {
+	once   sync.Once
+	bin    string
+	noPort bool
+}
+
+// discoverDagmanLayout asks the schedd -- the routed AP's in multi-AP
+// mode. Never fails a submission: a refusal here costs the defaults, not
+// the workflow.
 func (s *Server) discoverDagmanLayout(ctx context.Context) (string, bool) {
-	schedd := s.getSchedd()
+	schedd := s.scheddFor(ctx)
 	if schedd == nil {
 		return "", false
 	}

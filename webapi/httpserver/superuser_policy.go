@@ -154,6 +154,8 @@ func (p *superuserPolicy) Refresh(ctx context.Context) error {
 // project-lead action, and an API server that came up before its schedd
 // should not lock leads out for a quarter of an hour.
 func (p *superuserPolicy) Run(ctx context.Context) {
+	// Reading the schedd's configuration is this daemon's own work.
+	ctx = htcondor.WithDaemonCredential(ctx, "queue superuser refresh")
 	_ = p.Refresh(ctx)
 	retry := p.retryInitial
 	if retry <= 0 {
@@ -217,7 +219,7 @@ func (p *superuserPolicy) ImpersonationIdentity(actor string) (identity string, 
 	// the actor authenticated as "bob@domain", and QueueSuperUsers returns
 	// both forms, but an actor who authenticated bare should still match a
 	// qualified entry.
-	if bare := strings.SplitN(qualified, "@", 2)[0]; p.users[strings.ToLower(bare)] {
+	if bare := ownerFromActor(qualified); p.users[strings.ToLower(bare)] {
 		return qualified, true
 	}
 	return p.fallback, false
@@ -334,7 +336,18 @@ func (h *Handler) initSuperuserMode(cfg HandlerConfig, logger *logging.Logger) {
 
 // superuserModeAvailable reports whether the feature is configured at all.
 // It says nothing about whether a given caller may use it.
+//
+// Never in multi-AP mode. Arming acts as a queue superuser identity read
+// from "the" schedd's QUEUE_SUPER_USERS and minted for whichever AP an
+// action names; doing that per AP -- an identity, a user record and an
+// audit trail on each of fifty schedds -- is a feature of its own. Until
+// it exists the mode is off, so armedSuperuser reports nothing armed and
+// every action runs as its caller; the arming endpoint is outside the
+// multi-AP allowlist.
 func (h *Handler) superuserModeAvailable() bool {
+	if h.multi != nil {
+		return false
+	}
 	return h.superuserPolicy != nil && h.superuserArmed != nil &&
 		(h.superuserGroups.configured() || h.projectLeads.configured())
 }

@@ -1,12 +1,18 @@
 import type { Page } from '@playwright/test';
 import type {
+  AccessPointsResponse,
   AdminLogsResponse,
   DashboardActivityResponse,
   DashboardStats,
   IssuesResponse,
   JobListResponse,
   Session,
+  ClassAd,
 } from '../../src/lib/api';
+import { utilizationFixture, utilizationJobsFixture } from '../../src/lib/utilization.fixture';
+import type { UtilJobSort } from '../../src/lib/utilization';
+import type { MetricsResponse } from '../../src/lib/metrics';
+import type { DrainEstimates } from '../../src/lib/drain';
 
 // Frozen sample responses for the smoke suite.
 //
@@ -226,7 +232,80 @@ export const adminLogsFixture: AdminLogsResponse = {
 // loudly on anything unmapped rather than returning an empty 200 -- a
 // silent {} is how a fixture suite quietly stops testing the page it
 // was written for.
-export async function installApiFixtures(page: Page) {
+// Multi-AP mode: one server in front of two access points, one of which
+// is behind. The same cluster.proc exists on both, as it does in
+// practice: cluster ids are per access point.
+export const multiAPSources = {
+  aps: 2,
+  fresh: 1,
+  degraded: [{ schedd: 'ap2.smoke.example', state: 'stale', staleness_seconds: 412 }],
+};
+
+export const multiAPJobsFixture: JobListResponse = {
+  jobs: [
+    {
+      schedd: 'ap1.smoke.example',
+      cluster: 12,
+      proc: 0,
+      job_id: '12.0@ap1.smoke.example',
+      ClusterId: 12,
+      ProcId: 0,
+      JobStatus: 2,
+      Owner: 'e2e',
+      Cmd: '/bin/sleep',
+      JobBatchName: 'smoke-ap1-batch',
+      QDate: 1757000000,
+    },
+    {
+      schedd: 'ap2.smoke.example',
+      cluster: 12,
+      proc: 0,
+      job_id: '12.0@ap2.smoke.example',
+      ClusterId: 12,
+      ProcId: 0,
+      JobStatus: 5,
+      Owner: 'e2e',
+      Cmd: '/bin/false',
+      JobBatchName: 'smoke-ap2-batch',
+      QDate: 1757000100,
+    },
+  ],
+  total_returned: 2,
+  has_more: false,
+  sources: multiAPSources,
+};
+
+export const multiAPAccessPointsFixture: AccessPointsResponse = {
+  constraint: 'regexp("smoke", Name)',
+  aps: [
+    { schedd: 'ap1.smoke.example', in_collector: true, hub: { state: 'fresh', staleness_seconds: 3 } },
+    { schedd: 'ap2.smoke.example', in_collector: true, hub: { state: 'stale', staleness_seconds: 412 } },
+  ],
+  sources: multiAPSources,
+  hub: { reachable: true },
+};
+
+// The pool's drain estimates with nothing running anywhere: the neutral
+// answer, so a page that asks renders its empty state. A test that wants
+// nodes routes its own (see pool.smoke.spec.ts).
+export const emptyDrainFixture: DrainEstimates = {
+  generated_at: new Date().toISOString(),
+  age_seconds: 0,
+  stale: false,
+  estimates_available: true,
+  summary: {
+    machines: 0,
+    jobs_running: 0,
+    jobs_estimated: 0,
+    jobs_from_this_ap: 0,
+    cores_freeing_next_hour: 0,
+    draining_nodes: 0,
+    draining_likely_empty_within_2h: 0,
+  },
+  machines: [],
+};
+
+export async function installApiFixtures(page: Page, opts: { multiAP?: boolean } = {}) {
   const table: Record<string, unknown> = {
     '/api/v1/whoami': { authenticated: true, user: 'e2e@test.htcondor.org' },
     '/api/v1/auth/me': sessionFixture,
@@ -249,6 +328,9 @@ export async function installApiFixtures(page: Page) {
       ],
     },
     '/api/v1/admin/logs': adminLogsFixture,
+    // Generated from simulated jobs, so its figures agree with each other
+    // (see the fixture's header).
+    '/api/v1/utilization': utilizationFixture,
     '/api/v1/version': {
       version: 'e2e',
       commit: 'e2e',
@@ -264,7 +346,38 @@ export async function installApiFixtures(page: Page) {
     '/api/v1/jupyter/instances': { instances: [] },
     '/api/v1/interactive/terminal': { terminals: [] },
     '/api/v1/apps': { apps: [] },
+    '/api/v1/pool/drain-estimates': emptyDrainFixture,
   };
+  if (opts.multiAP) {
+    table['/api/v1/auth/me'] = { ...sessionFixture, is_admin: false, multi_ap: true };
+    table['/api/v1/jobs'] = multiAPJobsFixture;
+    table['/api/v1/aps'] = multiAPAccessPointsFixture;
+    table['/api/v1/jobs/archive'] = {
+      ads: [
+        {
+          schedd: 'ap1.smoke.example',
+          cluster: 39,
+          proc: 0,
+          job_id: '39.0@ap1.smoke.example',
+          archived: true,
+          ClusterId: 39,
+          ProcId: 0,
+          Owner: 'e2e',
+          JobStatus: 4,
+          ExitCode: 0,
+          CompletionDate: Math.floor(Date.now() / 1000) - 600,
+          JobBatchName: 'smoke-ap1-archived',
+        },
+      ],
+      has_more: false,
+      sources: multiAPSources,
+    };
+    table['/api/v1/chat/info'] = { enabled: false };
+    // Everything else is what a multi-AP server answers for routes it
+    // does not serve.
+    delete table['/api/v1/dashboard'];
+    delete table['/api/v1/dashboard/activity'];
+  }
 
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -281,8 +394,43 @@ export async function installApiFixtures(page: Page) {
       });
       return;
     }
+    // A workflow's jobs, paged and sorted the way the server does it.
+    if (path === '/api/v1/utilization/jobs') {
+      const q = new URL(route.request().url()).searchParams;
+      const body = utilizationJobsFixture(q.get('w') ?? '', {
+        sort: (q.get('sort') ?? undefined) as UtilJobSort | undefined,
+        order: (q.get('order') ?? undefined) as 'asc' | 'desc' | undefined,
+        offset: Number(q.get('offset') ?? 0),
+        page_size: Number(q.get('page_size') ?? 100),
+      });
+      await route.fulfill(body ? { json: body } : { status: 404, json: { error: 'Not Found', message: 'no such workflow' } });
+      return;
+    }
     if (path in table) {
       await route.fulfill({ json: table[path] as object });
+      return;
+    }
+    // The jobs listing asks for its jobs' runtime estimates in one
+    // request. By default there are none to give, so each batch shows a
+    // dash; a test that wants some routes this itself.
+    if (path === '/api/v1/jobs/runtime-estimates') {
+      await route.fulfill({ json: { available: true, estimates: {}, model: { jobs_ingested: 0 } } });
+      return;
+    }
+    // Every waiting or running job's page asks for its runtime estimate.
+    // By default there is none, which the page shows as nothing at all;
+    // a test that wants one routes it for its job.
+    const estimate = path.match(/^\/api\/v1\/jobs\/([^/]+)\/runtime-estimate$/);
+    if (estimate) {
+      await route.fulfill({
+        json: {
+          job_id: decodeURIComponent(estimate[1]),
+          available: false,
+          reason: 'insufficient_history',
+          exceeded_history: false,
+          model: { jobs_ingested: 0 },
+        },
+      });
       return;
     }
     await route.fulfill({
@@ -290,4 +438,134 @@ export async function installApiFixtures(page: Page) {
       json: { error: `smoke suite has no fixture for ${path}` },
     });
   });
+}
+
+// --- The /jobs Progress, Held and Running views ---
+//
+// One queue with each case the views distinguish: a plain batch of which
+// most jobs have finished and left the queue, a max_materialize factory
+// with most of its jobs not yet queued, and a DAG whose count lives in its
+// root DAGMan job. Hold reasons are real-shaped: the "Error from <slot>:"
+// prefix is what the Held view strips.
+const qdate = 1757000000;
+
+function progressQueue(): ClassAd[] {
+  const jobs: ClassAd[] = [];
+  // sweep: 100 submitted, 12 still queued -- 88 done.
+  [2, 2, 2, 2, 2, 1, 1, 1, 1, 5, 5, 5].forEach((status, i) =>
+    jobs.push({
+      ClusterId: 500, ProcId: i, JobStatus: status, Owner: 'e2e', QDate: qdate,
+      Cmd: '/home/e2e/bin/train', JobBatchName: 'smoke-sweep', TotalSubmitProcs: 100,
+      RequestMemory: 2048, RequestCpus: 1,
+      ...(status === 5
+        ? {
+            HoldReasonCode: 34,
+            HoldReason:
+              i === 11
+                ? 'Transfer input files failure at access point smoke-ap: reading from file /home/e2e/in.dat: (errno 2) No such file or directory'
+                : `Error from slot1_${i}@glidein_${i}@node${i}.smoke.example.edu: memory usage exceeded request_memory`,
+          }
+        : {}),
+    }),
+  );
+  // factory: 1000 total, procs 0..39 queued so far, 30..39 still here.
+  for (let i = 30; i < 40; i++) {
+    jobs.push({
+      ClusterId: 510, ProcId: i, JobStatus: i < 36 ? 2 : 1, Owner: 'e2e', QDate: qdate + 10,
+      Cmd: '/bin/sim', JobBatchName: 'smoke-factory', TotalSubmitProcs: 1000,
+      JobMaterializeNextProcId: 40, RequestMemory: 4096, RequestCpus: 4,
+    });
+  }
+  // A DAG: the root DAGMan job and two node jobs.
+  jobs.push({
+    ClusterId: 600, ProcId: 0, JobStatus: 2, Owner: 'e2e', QDate: qdate + 20,
+    Cmd: '/usr/bin/condor_dagman', JobBatchName: 'smoke-pipeline.dag+600',
+    DAG_NodesTotal: 40, DAG_NodesDone: 17, DAG_NodesFailed: 3, DAG_NodesQueued: 2,
+    TotalSubmitProcs: 1,
+  });
+  for (let i = 0; i < 2; i++) {
+    jobs.push({
+      ClusterId: 601 + i, ProcId: 0, JobStatus: 2, Owner: 'e2e', QDate: qdate + 30,
+      Cmd: '/bin/step', JobBatchName: 'smoke-pipeline.dag+600', DAGManJobId: 600,
+      DAGNodeName: `step${i}`, TotalSubmitProcs: 1, RequestMemory: 1024, RequestCpus: 1,
+    });
+  }
+  return jobs;
+}
+
+// What the running view's narrow query answers: memory and CPU per
+// running job. 500.4 has not reported anything yet.
+function usageOf(j: ClassAd): ClassAd {
+  const u: ClassAd = {
+    ClusterId: j.ClusterId, ProcId: j.ProcId, JobStatus: 2,
+    RequestMemory: j.RequestMemory, RequestCpus: j.RequestCpus,
+  };
+  if (j.ClusterId === 500 && j.ProcId === 4) return u;
+  const frac = j.ClusterId === 500 && j.ProcId === 2 ? 1.15 : 0.5;
+  u.MemoryUsage = Math.round(Number(j.RequestMemory) * frac);
+  // 90% of the request, two hours into the run, as the CPU counters
+  // say it. CpusUsage beside them is what a cgroup v2 execute node
+  // publishes for a running job -- a hundred times too small -- and the
+  // page must not show it.
+  u.JobCurrentStartExecutingDate = qdate + 1000;
+  u.StatsLastUpdateTimeStarter = qdate + 1000 + 7200;
+  u.RemoteUserCpu = Number(j.RequestCpus) * 0.9 * 7200;
+  u.RemoteSysCpu = 0;
+  u.CpusUsage = Number(j.RequestCpus) * 0.009;
+  return u;
+}
+
+const recentCpuFixture: MetricsResponse = {
+  enabled: true,
+  table: 'job_metrics',
+  columns: [
+    { name: 'ClusterId', kind: 'group' },
+    { name: 'ProcId', kind: 'group' },
+    { name: 'avg_CpuUtil', kind: 'metric', func: 'avg', attr: 'CpuUtil' },
+  ],
+  rows: [['500', '0', '0.2']],
+};
+
+// installJobsProgressFixtures answers /api/v1/jobs the way the three
+// queries the page makes need: the listing, the running view's usage
+// query (asked for MemoryUsage), and the exact count for a partial listing
+// (a member(ClusterId, ...) constraint). Installed after
+// installApiFixtures, whose routes it overrides.
+//
+// `partial` makes the listing a first page that leaves out two of the
+// sweep's queued jobs, the case where counting what was listed would
+// call them finished. `exactQueries` collects the constraints of the
+// exact-count queries so a test can see they were made.
+export async function installJobsProgressFixtures(
+  page: Page,
+  opts: { partial?: boolean; exactQueries?: string[] } = {},
+) {
+  const queue = progressQueue();
+  await page.route('**/api/v1/jobs?**', async (route) => {
+    const url = new URL(route.request().url());
+    const projection = url.searchParams.get('projection') ?? '';
+    const constraint = url.searchParams.get('constraint') ?? '';
+    let body: JobListResponse;
+    if (projection.includes('MemoryUsage')) {
+      body = { jobs: queue.filter((j) => j.JobStatus === 2).map(usageOf), has_more: false };
+    } else if (constraint.startsWith('member(ClusterId')) {
+      opts.exactQueries?.push(constraint);
+      const ids = new Set((constraint.match(/\{([^}]*)\}/)?.[1] ?? '').split(',').map((x) => Number(x.trim())));
+      body = { jobs: queue.filter((j) => ids.has(Number(j.ClusterId))), has_more: false };
+    } else if (opts.partial) {
+      const listed = queue.filter((j) => !(j.ClusterId === 500 && (j.ProcId === 7 || j.ProcId === 8)));
+      body = {
+        jobs: listed,
+        total_returned: listed.length,
+        has_more: true,
+        pagination_unavailable: 'smoke: no cursor',
+      };
+    } else {
+      body = { jobs: queue, total_returned: queue.length, has_more: false };
+    }
+    await route.fulfill({ json: body });
+  });
+  await page.route('**/api/v1/metrics/job_metrics?**', (route) =>
+    route.fulfill({ json: recentCpuFixture }),
+  );
 }

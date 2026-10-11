@@ -4,16 +4,30 @@
 // the SPA; bearer tokens for programmatic use). All fetches include
 // credentials so the session cookie is sent with every request.
 
+import type { DrainEstimates } from "./drain";
 import type { MetricsResponse } from "./metrics";
+import type { UtilJobSort, UtilJobsResponse, UtilizationResponse } from "./utilization";
 
 const BASE = "/api/v1";
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  // Multi-AP mode: a 409 for a job id that exists on several access
+  // points lists them.
+  candidates?: JobCandidate[];
+  constructor(status: number, message: string, candidates?: JobCandidate[]) {
     super(message);
     this.status = status;
+    this.candidates = candidates;
   }
+}
+
+export interface JobCandidate {
+  schedd: string;
+  cluster: number;
+  proc: number;
+  job_id: string;
+  archived: boolean;
 }
 
 // fetchTextWithCap streams a text/plain endpoint and stops after `cap`
@@ -103,7 +117,11 @@ async function fetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
     // text and finally to the HTTP status line so the user always sees
     // *something* more specific than "500".
     const detail = body.message || body.error || res.statusText;
-    throw new ApiError(res.status, detail);
+    throw new ApiError(
+      res.status,
+      detail,
+      Array.isArray(body.candidates) ? body.candidates : undefined,
+    );
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -135,6 +153,9 @@ export interface Session {
   // Projects this session leads, armed or not. A lead may list their
   // projects' jobs with the Everyone scope, as an admin may list all jobs.
   project_lead_of?: string[];
+  // This server fronts several access points (schedds) and serves reads
+  // only: job rows carry `schedd` and `job_id`, and actions are not offered.
+  multi_ap?: boolean;
 }
 
 export interface SuperuserModeState {
@@ -442,6 +463,60 @@ export interface JobListResponse {
   source_note?: string;
   // A partial-result error; the ads before it are still valid.
   error?: string;
+  // Multi-AP mode only: which access points' data is not current.
+  sources?: Sources;
+}
+
+// Sources is the freshness of each access point behind a multi-AP read.
+// `degraded` lists every access point whose rows are not known to be
+// current: included as the hub holds them, or left out, by server policy.
+export interface Sources {
+  aps: number;
+  fresh: number;
+  degraded: DegradedSource[];
+}
+
+export interface DegradedSource {
+  schedd: string;
+  state: string; // stale | absent | untrusted | retiring
+  staleness_seconds?: number;
+  last_seen?: string;
+  reason?: string;
+}
+
+// One access point, as GET /api/v1/aps reports it.
+export interface AccessPoint {
+  schedd: string;
+  in_collector: boolean;
+  address?: string;
+  first_seen?: string;
+  last_seen?: string;
+  hub: {
+    state: string;
+    reason?: string;
+    staleness_seconds?: number;
+    last_seen?: string;
+    last_reset?: string;
+  };
+}
+
+export interface AccessPointsResponse {
+  constraint: string;
+  aps: AccessPoint[];
+  sources: Sources;
+  registry?: { last_success?: string; last_error?: string };
+  hub: { reachable: boolean; last_success?: string; last_error?: string };
+}
+
+// In multi-AP mode every job row names its job completely: `schedd`,
+// `cluster`, `proc`, and `job_id` -- the text form to put in a URL.
+// Single-AP rows carry none of these.
+export function jobIdOf(ad: ClassAd): string | undefined {
+  return typeof ad.job_id === 'string' && ad.job_id !== '' ? ad.job_id : undefined;
+}
+
+export function scheddOf(ad: ClassAd): string | undefined {
+  return typeof ad.schedd === 'string' && ad.schedd !== '' ? ad.schedd : undefined;
 }
 
 // HistoryListResponse mirrors the Go HistoryListResponse struct in
@@ -449,6 +524,14 @@ export interface JobListResponse {
 // variant of /api/v1/jobs/archive returns this shape.
 export interface HistoryListResponse {
   ads: ClassAd[];
+  // Set when the schedd stopped at its scan limit before finding as many
+  // records as asked for: older matches were not searched.
+  scan_limit_reached?: boolean;
+  records_scanned?: number;
+  // Multi-AP mode pages history with a token instead of before_cluster.
+  has_more?: boolean;
+  next_page_token?: string;
+  sources?: Sources;
 }
 
 export interface VersionInfo {
@@ -900,6 +983,61 @@ export interface DagGraphResponse {
   took_ms?: number;
 }
 
+// RuntimeEstimate is the JSON returned by
+// GET /api/v1/jobs/{id}/runtime-estimate: how long the job is likely to
+// run, from its owner's similar finished jobs. Mirrors runtimeest.Result
+// plus the job id; renames on the Go side must update this in lockstep.
+// The numbers are present only when available is true.
+export interface RuntimeEstimate {
+  job_id: string;
+  available: boolean;
+  reason?: "disabled" | "model_warming_up" | "insufficient_history";
+  estimate_seconds?: number;
+  p10_seconds?: number;
+  p90_seconds?: number;
+  // new_command: none of the owner's recently finished jobs ran the same
+  // program.
+  basis?: { level: RuntimeEstimateLevel; sample_count: number; new_command?: boolean };
+  // A broad group answered (cmd, owner or global): show it as a rough
+  // guess, not an expectation.
+  rough?: boolean;
+  // Only while the job runs; remaining_seconds is also absent once the
+  // job has run longer than its comparable jobs (exceeded_history).
+  elapsed_seconds?: number;
+  remaining_seconds?: number;
+  exceeded_history: boolean;
+  model: { trained_through?: string; jobs_ingested: number };
+}
+
+// JobRuntimeEstimate is one job's entry in RuntimeEstimates: the
+// single-job answer without the job id and model.
+export type JobRuntimeEstimate = Omit<RuntimeEstimate, "job_id" | "model">;
+
+// RuntimeEstimates is the JSON returned by
+// POST /api/v1/jobs/runtime-estimates. estimates holds only the jobs the
+// caller may read that are waiting or running; any other id is absent.
+export interface RuntimeEstimates {
+  available: boolean;
+  reason?: "disabled" | "model_warming_up";
+  estimates?: Record<string, JobRuntimeEstimate>;
+  model?: { trained_through?: string; jobs_ingested: number };
+}
+
+// The most ids one runtime-estimates request may carry.
+export const MAX_RUNTIME_ESTIMATE_IDS = 5000;
+
+// RuntimeEstimateLevel is which group of finished jobs an estimate came
+// from, most specific first.
+export type RuntimeEstimateLevel =
+  | "cluster"
+  | "exact"
+  | "template"
+  | "batch"
+  | "iwd"
+  | "cmd"
+  | "owner"
+  | "global";
+
 // MatchAnalysisResponse is the JSON returned by
 // GET /api/v1/jobs/{id}/match-analysis. The Go side wraps the analyzer's
 // Result struct in an envelope that also surfaces the raw Requirements
@@ -1203,7 +1341,67 @@ export const api = {
     return fetchJSON(`${BASE}/dashboard/activity${q ? "?" + q : ""}`);
   },
 
+  // How well finished jobs used what they reserved, per workflow, with
+  // suggestions for the next submission. See lib/utilization.ts.
+  utilization: (params: {
+    days: number;
+    owned_by_me?: boolean;
+    schedd?: string;
+    // A ClassAd expression ANDed with the scope and the window.
+    constraint?: string;
+    // Narrow a pool-wide answer to these users.
+    owners?: string[];
+    // How many finished jobs to analyze; the server clamps to its ceiling.
+    limit?: number;
+  }): Promise<UtilizationResponse> => {
+    const qs = new URLSearchParams();
+    qs.set("days", String(params.days));
+    if (params.owned_by_me !== undefined)
+      qs.set("owned_by_me", String(params.owned_by_me));
+    if (params.schedd) qs.set("schedd", params.schedd);
+    if (params.constraint) qs.set("constraint", params.constraint);
+    if (params.owners && params.owners.length > 0)
+      qs.set("owners", params.owners.join(","));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    return fetchJSON(`${BASE}/utilization?${qs.toString()}`);
+  },
+
+  // One workflow's jobs, paged, from the same analysed set: pass the
+  // parameters the analysis used.
+  utilizationJobs: (params: {
+    w: string;
+    days: number;
+    owned_by_me?: boolean;
+    schedd?: string;
+    constraint?: string;
+    owners?: string[];
+    limit?: number;
+    sort?: UtilJobSort;
+    order?: "asc" | "desc";
+    offset?: number;
+    page_size?: number;
+  }): Promise<UtilJobsResponse> => {
+    const qs = new URLSearchParams();
+    qs.set("w", params.w);
+    qs.set("days", String(params.days));
+    if (params.owned_by_me !== undefined)
+      qs.set("owned_by_me", String(params.owned_by_me));
+    if (params.schedd) qs.set("schedd", params.schedd);
+    if (params.constraint) qs.set("constraint", params.constraint);
+    if (params.owners && params.owners.length > 0)
+      qs.set("owners", params.owners.join(","));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params.sort) qs.set("sort", params.sort);
+    if (params.order) qs.set("order", params.order);
+    if (params.offset) qs.set("offset", String(params.offset));
+    if (params.page_size) qs.set("page_size", String(params.page_size));
+    return fetchJSON(`${BASE}/utilization/jobs?${qs.toString()}`);
+  },
+
   version: (): Promise<VersionInfo> => fetchJSON(`${BASE}/version`),
+
+  // Multi-AP mode: the access points this server fronts.
+  aps: (): Promise<AccessPointsResponse> => fetchJSON(`${BASE}/aps`),
 
   // The SSH gateway's certificate authority and certificate issuer.
   //
@@ -1261,12 +1459,15 @@ export const api = {
       projection?: string;
       page_token?: string;
       owned_by_me?: boolean;
+      // Multi-AP mode: one access point only.
+      schedd?: string;
     }): Promise<JobListResponse> => {
       const qs = new URLSearchParams();
       if (params?.constraint) qs.set("constraint", params.constraint);
       if (params?.limit !== undefined) qs.set("limit", String(params.limit));
       if (params?.projection) qs.set("projection", params.projection);
       if (params?.page_token) qs.set("page_token", params.page_token);
+      if (params?.schedd) qs.set("schedd", params.schedd);
       if (params?.owned_by_me !== undefined)
         qs.set("owned_by_me", String(params.owned_by_me));
       const query = qs.toString();
@@ -1329,6 +1530,10 @@ export const api = {
       // `limit` — bumping limit re-scans records you already have.
       before_cluster?: number;
       before_proc?: number;
+      // Multi-AP mode: the previous page's next_page_token, and one
+      // access point only.
+      page_token?: string;
+      schedd?: string;
     }): Promise<HistoryListResponse> => {
       const qs = new URLSearchParams();
       if (params?.constraint) qs.set("constraint", params.constraint);
@@ -1341,6 +1546,8 @@ export const api = {
         qs.set("before_cluster", String(params.before_cluster));
       if (params?.before_proc !== undefined)
         qs.set("before_proc", String(params.before_proc));
+      if (params?.page_token) qs.set("page_token", params.page_token);
+      if (params?.schedd) qs.set("schedd", params.schedd);
       qs.set("stream_results", "false");
       return fetchJSON(`${BASE}/jobs/archive?${qs.toString()}`);
     },
@@ -1552,6 +1759,18 @@ export const api = {
         `${BASE}/jobs/${encodeURIComponent(id)}/match-analysis${qs}`,
       );
     },
+
+    // How long the job is likely to run. Always 200 for a job the
+    // caller can see; available is false when there is no estimate.
+    runtimeEstimate: (id: string): Promise<RuntimeEstimate> =>
+      fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/runtime-estimate`),
+
+    // Many jobs' estimates in one request, for the listing.
+    runtimeEstimates: (ids: string[]): Promise<RuntimeEstimates> =>
+      fetchJSON(`${BASE}/jobs/runtime-estimates`, {
+        method: "POST",
+        body: JSON.stringify({ jobs: ids }),
+      }),
 
     // Mint a short-lived public URL to share with someone else.
     shareOutput: (
@@ -1846,6 +2065,16 @@ export const api = {
         )}?projection=${encodeURIComponent(proj)}`,
       );
     },
+  },
+
+  pool: {
+    // drainEstimates answers when each execute node would be empty if
+    // drained now; with a machine, for that node alone, with its jobs.
+    // 501 (ApiError) with no collector or in multi-AP mode.
+    drainEstimates: (machine?: string): Promise<DrainEstimates> =>
+      fetchJSON(
+        `${BASE}/pool/drain-estimates${machine ? `?machine=${encodeURIComponent(machine)}` : ""}`,
+      ),
   },
 
   placement: {

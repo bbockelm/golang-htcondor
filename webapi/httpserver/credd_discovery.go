@@ -52,6 +52,9 @@ const (
 // when the schedd is this host's -- the local address file. There is no
 // "any credd in the pool" fallback on purpose; see the note above.
 func discoverCredd(ctx context.Context, cfg creddLookup, logger *logging.Logger) (string, error) {
+	// Which credd this server uses is its own question, asked with its
+	// own credential.
+	ctx = htcondor.WithDaemonCredential(ctx, "credd discovery")
 	if addr := strings.TrimSpace(cfg.configured); addr != "" {
 		logger.Info(logging.DestinationHTTP, "using the configured credd",
 			"address", addr, "source", string(creddFromConfig))

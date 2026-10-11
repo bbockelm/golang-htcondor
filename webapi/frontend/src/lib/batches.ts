@@ -6,16 +6,28 @@
 // group them, filter them, total their resources -- so the answers live
 // here rather than in either page.
 
-import { displayJobStatus, type ClassAd, type DisplayStatus, type DisplayStatusInfo } from '@/lib/api';
+import {
+  displayJobStatus,
+  jobIdOf,
+  scheddOf,
+  type ClassAd,
+  type DisplayStatus,
+  type DisplayStatusInfo,
+} from '@/lib/api';
 
 // Attributes every batch listing needs. QDate has to be asked for
 // explicitly: the schedd does not backfill it, and the submit path sets it
 // at submit time (see submit.go). The Request* attributes drive the
 // resource totals in the summary panel. DAGManJobId/DAGNodeName mark a job
 // as a DAG node so a whole workflow folds into one batch (see
-// groupIntoBatches).
+// groupIntoBatches). The last six are what the Progress column counts
+// with (see batchProgress.ts): finished jobs leave the queue, so "how many
+// are done" has to be worked out from how many there were to begin with.
 export const BATCH_PROJECTION =
-  'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,DAGManJobId,DAGNodeName,Iwd,RequestCpus,RequestMemory,RequestGpus';
+  'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,DAGManJobId,DAGNodeName,Iwd,RequestCpus,RequestMemory,RequestGpus,' +
+  'TotalSubmitProcs,JobMaterializeNextProcId,DAG_NodesTotal,DAG_NodesDone,DAG_NodesFailed,DAG_NodesQueued,' +
+  // How long each job has been running or waiting (see jobTiming).
+  'JobCurrentStartExecutingDate,JobCurrentStartDate,EnteredCurrentStatus';
 
 // Batch is what we render: one batch's worth of jobs aggregated.
 export interface Batch {
@@ -24,6 +36,9 @@ export interface Batch {
   // cluster (the `+N` in JobBatchName), which is stable across the whole
   // workflow; for anything else it is the group's (smallest) ClusterId.
   batchID: number;
+  // The access point the batch is on, in multi-AP mode. Cluster ids are
+  // per access point, so two access points' cluster 12 are two batches.
+  schedd?: string;
   // Display name: for a DAG the dag file name with the `+<root>` suffix
   // stripped, else JobBatchName if set, else the batch id.
   name: string;
@@ -37,6 +52,12 @@ export interface Batch {
   args?: string;
   // QDate of the oldest job (= when the batch was submitted).
   submittedUnix?: number;
+  // The grouping key (see batchGroupKey). Unlike batchID it does not
+  // depend on which of the batch's jobs survived a filter -- a named batch
+  // spanning clusters 10 and 11 is batch 11 when only 11's jobs are held --
+  // so it is what joins a filtered row to anything computed over the whole
+  // queue.
+  groupKey: string;
   // Per-status counts — keyed by DisplayStatus so spool-held shows
   // up as "Uploading Inputs" instead of being lumped under "Held".
   statusCounts: Record<DisplayStatus, number>;
@@ -56,11 +77,19 @@ export interface Batch {
   // takes down every node and sub-DAG, not just the representative
   // cluster.
   removeConstraint: string;
+  // ClassAd constraint naming this batch's jobs wherever they are -- in
+  // the queue or long finished -- for links that look at the batch over
+  // time. Like removeConstraint, except a DAG is matched by its batch
+  // name alone: the root cluster id adds nothing once every job of the
+  // tree carries the name.
+  selectConstraint: string;
 }
 
 export interface BatchJob {
-  // Display id used in URLs ("3.0").
+  // Display id used in URLs: "3.0", or in multi-AP mode the server's
+  // job_id ("3.0@ap1.example.org").
   id: string;
+  schedd?: string;
   cluster: number; // ClusterId
   jobIdx: number; // ProcId
   display: DisplayStatusInfo;
@@ -69,6 +98,9 @@ export interface BatchJob {
   submittedUnix?: number;
   // DAG node name, when this job is a node of a DAG workflow.
   nodeName?: string;
+  holdReason?: string;
+  // When the job's current run, or current wait, began.
+  timing?: JobTiming;
 }
 
 // The trailing `+<rootDagmanCluster>` HTCondor appends to a DAG's
@@ -84,6 +116,7 @@ function escapeClassAdString(s: string): string {
 
 // One group's running accumulator before we finalize it into a Batch.
 interface BatchAcc {
+  schedd?: string;
   batchName?: string;
   owner?: string;
   cmd?: string;
@@ -96,28 +129,43 @@ interface BatchAcc {
   minCluster: number;
 }
 
+// batchGroupKey is the key groupIntoBatches folds a job ad under, or
+// undefined for an ad with no ClusterId (which belongs to no batch).
+//
+// A named submission (JobBatchName set) folds together by
+// `${Owner}\u0000${JobBatchName}`. Because a whole DAG tree — every node
+// job and every nested sub-DAG — shares ONE JobBatchName, this collapses
+// an entire workflow into a single batch, matching `condor_q -batch`.
+// Scoping by Owner keeps two users who reused a batch name apart in the
+// pool-wide view. Unnamed submissions fall back to per-cluster grouping.
+// Batches never span access points: a cluster id, and a batch name, is
+// only unique within one.
+export function batchGroupKey(j: ClassAd): string | undefined {
+  const cluster = num(j.ClusterId);
+  if (cluster === undefined) return undefined;
+  const batchName = str(j.JobBatchName);
+  const base = batchName
+    ? `${str(j.Owner) ?? ''}\u0000${batchName}`
+    : `cluster\u0000${cluster}`;
+  const schedd = scheddOf(j);
+  return schedd ? `${schedd}\u0001${base}` : base;
+}
+
 export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
-  // Grouping key: a named submission (JobBatchName set) folds together by
-  // `${Owner}\u0000${JobBatchName}`. Because a whole DAG tree — every node
-  // job and every nested sub-DAG — shares ONE JobBatchName, this collapses
-  // an entire workflow into a single batch, matching `condor_q -batch`.
-  // Scoping by Owner keeps two users who reused a batch name apart in the
-  // pool-wide view. Unnamed submissions fall back to per-cluster grouping,
-  // unchanged.
   const map = new Map<string, BatchAcc>();
   for (const j of jobs) {
-    const cluster = num(j.ClusterId);
+    const key = batchGroupKey(j);
+    if (key === undefined) continue;
+    const cluster = num(j.ClusterId)!;
     const proc = num(j.ProcId);
-    if (cluster === undefined) continue;
     const owner = str(j.Owner);
     const batchName = str(j.JobBatchName);
-    const key = batchName
-      ? `${owner ?? ''}\u0000${batchName}`
-      : `cluster\u0000${cluster}`;
+    const schedd = scheddOf(j);
 
     let a = map.get(key);
     if (!a) {
       a = {
+        schedd,
         batchName,
         owner,
         cmd: str(j.Cmd),
@@ -149,7 +197,8 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
     if (!a.args) a.args = str(j.Args);
 
     a.jobs.push({
-      id: `${cluster}.${proc ?? 0}`,
+      id: jobIdOf(j) ?? `${cluster}.${proc ?? 0}`,
+      schedd,
       cluster,
       jobIdx: proc ?? 0,
       display,
@@ -157,11 +206,13 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       args: str(j.Args),
       submittedUnix: q,
       nodeName: str(j.DAGNodeName),
+      holdReason: str(j.HoldReason),
+      timing: jobTiming(j),
     });
   }
 
   const batches: Batch[] = [];
-  for (const a of map.values()) {
+  for (const [groupKey, a] of map) {
     // Stable order within the batch: by cluster, then proc. A DAG spans
     // many clusters, so job index alone is not enough.
     a.jobs.sort((x, y) => x.cluster - y.cluster || x.jobIdx - y.jobIdx);
@@ -170,6 +221,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
     let name: string;
     let isDag = false;
     let removeConstraint: string;
+    let selectConstraint: string;
 
     const dag = a.batchName ? DAG_SUFFIX.exec(a.batchName) : null;
     if (a.batchName && dag) {
@@ -181,6 +233,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       batchID = Number(dag[1]);
       name = a.batchName.replace(DAG_SUFFIX, '');
       removeConstraint = `JobBatchName == "${escapeClassAdString(a.batchName)}" || ClusterId == ${batchID}`;
+      selectConstraint = `JobBatchName == "${escapeClassAdString(a.batchName)}"`;
     } else if (a.batchName) {
       // Plain named batch (not a DAG): may span several clusters under one
       // name, so remove by name + owner rather than by a single cluster.
@@ -189,32 +242,61 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       removeConstraint = a.owner
         ? `JobBatchName == "${escapeClassAdString(a.batchName)}" && Owner == "${escapeClassAdString(a.owner)}"`
         : `JobBatchName == "${escapeClassAdString(a.batchName)}"`;
+      selectConstraint = removeConstraint;
     } else {
       // Unnamed submission: one cluster, one batch, as before.
       batchID = a.minCluster;
       name = String(batchID);
       removeConstraint = `ClusterId == ${batchID}`;
+      selectConstraint = removeConstraint;
     }
 
     batches.push({
       batchID,
+      schedd: a.schedd,
       name,
       owner: a.owner,
       cmd: a.cmd,
       args: a.args,
       submittedUnix: a.submittedUnix,
+      groupKey,
       statusCounts: a.statusCounts,
       jobCount: a.jobCount,
       jobs: a.jobs,
       isDag,
       clusterIds: Array.from(a.clusters),
       removeConstraint,
+      selectConstraint,
     });
   }
 
   // Newest batch first. The table's own sort takes over from here; this
   // only fixes the order the sort starts from.
   return batches.sort((a, b) => b.batchID - a.batchID);
+}
+
+// BatchKey identifies a batch row: its cluster id, or in multi-AP mode
+// the access point and cluster id together.
+export type BatchKey = number | string;
+
+export function batchKey(b: Batch): BatchKey {
+  return b.schedd ? `${b.schedd}\u0000${b.batchID}` : b.batchID;
+}
+
+// adsInBatches keeps the ads whose cluster one of batches covers, for a
+// summary that totals exactly what a filtered table shows. A batch can
+// span many clusters (a DAG folds a whole tree into one row), so every
+// cluster it covers counts, not just its representative id; and in
+// multi-AP mode a cluster is matched together with its access point,
+// because two access points each have a cluster 12.
+export function adsInBatches(ads: ClassAd[], batches: Batch[]): ClassAd[] {
+  const key = (schedd: string | undefined, cluster: number) =>
+    schedd ? `${schedd}\u0000${cluster}` : String(cluster);
+  const clusters = new Set(batches.flatMap((b) => b.clusterIds.map((c) => key(b.schedd, c))));
+  return ads.filter((j) => {
+    const c = num(j.ClusterId);
+    return c !== undefined && clusters.has(key(scheddOf(j), c));
+  });
 }
 
 // applyBatchFilter does the user-facing substring filter. Both the
@@ -234,6 +316,7 @@ export function applyBatchFilter(batches: Batch[], query: string): Batch[] {
     const haystack = [
       b.name,
       String(b.batchID),
+      b.schedd ?? '',
       b.owner ?? '',
       b.cmd ?? '',
       b.args ?? '',
@@ -394,6 +477,98 @@ function addRequest(into: ResourceTotals, j: ClassAd) {
   into.gpus += gpus ?? 0;
 }
 
+// attr reads a job attribute case-insensitively. ClassAd attribute names
+// are, and a JSON object's keys are not: the schedd spells DAG_NodesTotal
+// the way DAGMan published it, which need not be the way it is written
+// here.
+// --- How long a job has been in its current state ---
+//
+// For the listings and the job page: how long a running job's current
+// run has been going, and how long an idle job has been waiting.
+
+export interface JobTiming {
+  kind: 'running' | 'waiting';
+  // Unix seconds the state began.
+  since: number;
+}
+
+// jobTiming reads the start of the current state off a job ad.
+//
+// Running counts from when the executable began (after input transfer),
+// falling back to when the job was matched and started its run. Waiting
+// counts from when the job last became idle -- an evicted job goes back
+// to waiting, and its wait starts again -- falling back to submission.
+export function jobTiming(ad: ClassAd): JobTiming | undefined {
+  const status = num(ad.JobStatus);
+  if (status === 2) {
+    const since =
+      num(attr(ad, 'JobCurrentStartExecutingDate')) ?? num(attr(ad, 'JobCurrentStartDate'));
+    return since !== undefined && since > 0 ? { kind: 'running', since } : undefined;
+  }
+  if (status === 1) {
+    const since = num(attr(ad, 'EnteredCurrentStatus')) ?? num(ad.QDate);
+    return since !== undefined && since > 0 ? { kind: 'waiting', since } : undefined;
+  }
+  return undefined;
+}
+
+// --- Cores a job is using ---
+//
+// CpusUsage cannot be trusted while a job runs. On a cgroup v2 execute
+// node the starter computes its CPU share as a fraction of one core and
+// then publishes it divided by 100 as though it were a percentage
+// (proc_family_direct_cgroup_v2.cpp, vanilla_proc.cpp), so a job keeping
+// one core busy reports 0.01. Only when the job exits is CpusUsage
+// recomputed from its CPU time, correctly.
+//
+// So for a running job the cores come from the cumulative counters: CPU
+// seconds this run (RemoteUserCpu + RemoteSysCpu, which the shadow zeroes
+// at the start of each run) over the wall time they cover. That wall time
+// ends at StatsLastUpdateTimeStarter -- the starter's clock when it built
+// the update that carried those counters, copied into the job ad from the
+// same update -- not "now": the counters are only refreshed every few
+// minutes, and dividing by the time since would understate a busy job.
+
+// What coresUsed reads, for the projections that feed it.
+export const CPU_COUNTER_ATTRS =
+  'RemoteUserCpu,RemoteSysCpu,StatsLastUpdateTimeStarter,JobCurrentStartExecutingDate';
+
+// Below this, the interval is too short to divide by: a few seconds of
+// counter granularity (whole CPU-seconds) would swing the answer wildly.
+const MIN_CPU_INTERVAL_SECONDS = 60;
+
+// coresUsed is the number of cores a job is using, or undefined when its
+// ad cannot say yet.
+export function coresUsed(ad: ClassAd): number | undefined {
+  const status = num(ad.JobStatus);
+  // Running and suspended jobs have not exited: their CpusUsage is the
+  // broken in-flight figure, never read here.
+  if (status === 2 || status === 7) {
+    const user = num(attr(ad, 'RemoteUserCpu'));
+    const sys = num(attr(ad, 'RemoteSysCpu'));
+    const sampled = num(attr(ad, 'StatsLastUpdateTimeStarter'));
+    const started = num(attr(ad, 'JobCurrentStartExecutingDate'));
+    if (user === undefined || sys === undefined || sampled === undefined || started === undefined) {
+      return undefined;
+    }
+    // A sample time from before this run started belongs to the previous
+    // run, whose counters the shadow has already zeroed.
+    const interval = sampled - started;
+    if (!(interval >= MIN_CPU_INTERVAL_SECONDS)) return undefined;
+    return (user + sys) / interval;
+  }
+  return num(attr(ad, 'CpusUsage'));
+}
+
+export function attr(ad: ClassAd, name: string): unknown {
+  if (name in ad) return ad[name];
+  const lc = name.toLowerCase();
+  for (const k of Object.keys(ad)) {
+    if (k.toLowerCase() === lc) return ad[k];
+  }
+  return undefined;
+}
+
 export function num(v: unknown): number | undefined {
   if (typeof v === 'number') return v;
   if (typeof v === 'string') {
@@ -417,7 +592,8 @@ export function str(v: unknown): string | undefined {
 // on a queue of 30k, and they are only ever read for the one batch
 // somebody opened.
 export const BATCH_USAGE_PROJECTION =
-  'ClusterId,ProcId,JobStatus,HoldReasonCode,RequestCpus,RequestMemory,RequestDisk,RequestGpus,CPUsUsage,MemoryUsage,ResidentSetSize,DiskUsage';
+  'ClusterId,ProcId,JobStatus,HoldReasonCode,RequestCpus,RequestMemory,RequestDisk,RequestGpus,CpusUsage,MemoryUsage,ResidentSetSize,DiskUsage,' +
+  CPU_COUNTER_ATTRS;
 
 // How a row's numbers should be read. The lib keeps HTCondor's own
 // units -- MiB for memory, KiB for disk -- and the panel formats them.
@@ -498,13 +674,13 @@ export function summarizeBatchUsage(ads: ClassAd[]): BatchUsage {
 
     if (isRunning) {
       running++;
-      const cpus = num(j.CPUsUsage);
+      const cpus = coresUsed(j);
       // MemoryUsage is an expression in the job ad more often than not,
       // so ResidentSetSize -- which the starter writes as a literal in
       // KiB -- is the one that can be trusted to be a number.
-      const rss = num(j.ResidentSetSize);
-      const mem = num(j.MemoryUsage) ?? (rss !== undefined ? rss / 1024 : undefined);
-      const disk = num(j.DiskUsage);
+      const rss = num(attr(j, 'ResidentSetSize'));
+      const mem = num(attr(j, 'MemoryUsage')) ?? (rss !== undefined ? rss / 1024 : undefined);
+      const disk = num(attr(j, 'DiskUsage'));
       let any = false;
       if (cpus !== undefined) {
         used.cpus += cpus;

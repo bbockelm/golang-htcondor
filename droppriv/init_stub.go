@@ -7,6 +7,6 @@ func dropPrivileges(_ Identity) error {
 	return ErrUnsupported
 }
 
-func restorePrivileges(_ Identity) error {
+func restorePrivileges(_ Identity, _ []int) error {
 	return ErrUnsupported
 }

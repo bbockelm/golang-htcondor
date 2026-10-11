@@ -23,6 +23,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
+	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -158,8 +159,10 @@ func IsReadOnlyTool(name string) bool {
 // without updating this map silently classifies it as write-only.
 var readOnlyMCPTools = map[string]bool{
 	"query_jobs":               true,
+	"list_access_points":       true, // multi-AP mode
 	"get_job":                  true,
 	"analyze_job_match":        true,
+	"query_pool":               true,
 	"query_job_archive":        true,
 	"query_job_epochs":         true,
 	"query_transfer_history":   true,
@@ -478,7 +481,7 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of archived records to scan before stopping",
+						"description": fmt.Sprintf("Maximum number of archived records the schedd examines, newest first, before it stops looking (default %d; negative for no limit). Matches older than that are not found; a result cut short this way reports scan_limit_reached and records_scanned. Setting it sends the query to the schedd even when the htcondordb mirror could answer.", htcondor.DefaultHistoryScanLimit),
 					},
 					"backwards": map[string]interface{}{
 						"type":        "boolean",
@@ -514,7 +517,7 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of epoch records to scan before stopping",
+						"description": fmt.Sprintf("Maximum number of epoch records the schedd examines, newest first, before it stops looking (default %d; negative for no limit). Matches older than that are not found; a result cut short this way reports scan_limit_reached and records_scanned.", htcondor.DefaultHistoryScanLimit),
 					},
 					"backwards": map[string]interface{}{
 						"type":        "boolean",
@@ -550,7 +553,7 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of transfer records to scan before stopping",
+						"description": fmt.Sprintf("Maximum number of transfer records the schedd examines, newest first, before it stops looking (default %d; negative for no limit). Matches older than that are not found; a result cut short this way reports scan_limit_reached and records_scanned.", htcondor.DefaultHistoryScanLimit),
 					},
 					"backwards": map[string]interface{}{
 						"type":        "boolean",
@@ -830,12 +833,13 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 		tools = append(tools,
 			Tool{
 				Name:        "query_history_db",
-				Description: "Query COMPLETED jobs from the htcondordb history archive (a durable mirror of the schedd's history), far more efficiently than scanning the schedd. Returns YOUR OWN jobs; MCP admins get every user's, and each answer states which scope it used. Constraint is a ClassAd expression, e.g. 'JobStatus == 4 && Owner == \"alice\"'.",
+				Description: "Query COMPLETED jobs from the htcondordb history archive (a durable mirror of the schedd's history), far more efficiently than scanning the schedd. Records come most recently archived first, so a limit returns the newest N matches; has_more says whether older matches were left out. Returns YOUR OWN jobs; MCP admins get every user's, and each answer states which scope it used. Constraint is a ClassAd expression, e.g. 'JobStatus == 4 && Owner == \"alice\"'.",
 				InputSchema: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"constraint": map[string]interface{}{"type": "string", "description": "ClassAd constraint expression over completed-job attributes (e.g. 'ExitCode != 0'). Empty matches all your jobs."},
-						"limit":      map[string]interface{}{"type": "integer", "description": "Max records to return (default 200, max 2000)."},
+						"projection": map[string]interface{}{"type": "array", "description": describeProjection(defaultHistoryAttrs), "items": map[string]interface{}{"type": "string"}},
+						"limit":      map[string]interface{}{"type": "integer", "description": "Max records to return, newest first (default 200, max 2000)."},
 					},
 				},
 			},
@@ -893,10 +897,20 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	// listing the caller has to read and summarize itself.
 	tools = append(tools, analyzeIssuesTool())
 
+	// The pool as condor_status shows it. Offered only with a collector
+	// to ask: without one every call would fail.
+	if s.poolSource() != nil {
+		tools = append(tools, queryPoolTool())
+	}
+
 	// Workflows. A DAG is submitted and tracked differently enough from
 	// a job that it gets its own pair rather than more arguments on
 	// submit_job.
 	tools = append(tools, dagTools()...)
+
+	if s.multi != nil {
+		tools = multiAPCatalog(tools)
+	}
 
 	grant := grantFromContext(ctx)
 	filtered := tools[:0:0]
@@ -983,6 +997,20 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		return nil, fmt.Errorf("the %q tool is not permitted by the scopes this token was granted", request.Name)
 	}
 
+	if s.multi != nil {
+		// An allowlist, enforced on the one path every transport shares.
+		result, handled, err := s.callMultiAPTool(ctx, request.Name, request.Arguments)
+		if handled && err != nil && !multiAPToolAllowed(request.Name) {
+			s.logger.Info(logging.DestinationMCP, "MCP tool call refused: not served in multi-AP mode",
+				"tool", request.Name, "trace_id", traceID)
+			s.recordToolCall(ctx, request.Name, toolstatsOutcomeRefused, time.Since(started))
+			return nil, err
+		}
+		if handled {
+			return s.finishToolCall(ctx, request.Name, traceID, started, result, err)
+		}
+	}
+
 	// Route to appropriate handler
 	var result interface{}
 	var err error
@@ -997,6 +1025,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolGetJob(ctx, request.Arguments)
 	case "analyze_job_match":
 		result, err = s.toolAnalyzeJobMatch(ctx, request.Arguments)
+	case "query_pool":
+		result, err = s.toolQueryPool(ctx, request.Arguments)
 	case "remove_job":
 		result, err = s.toolRemoveJob(ctx, request.Arguments)
 	case "remove_jobs":
@@ -1098,13 +1128,19 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		}
 	}
 
+	return s.finishToolCall(ctx, request.Name, traceID, started, result, err)
+}
+
+// finishToolCall brings a tool's result up to its published contract, and
+// records and logs the outcome.
+func (s *Server) finishToolCall(ctx context.Context, name, traceID string, started time.Time, result interface{}, err error) (interface{}, error) {
 	// Bring the result up to the contract its published outputSchema
 	// states, before either transport marshals it. See
 	// structured_contract.go: a client rejects the whole result when a
 	// schematised tool returns no structuredContent, or returns one where
 	// an empty collection came out as JSON null.
 	if err == nil {
-		result = s.finalizeToolResult(request.Name, result)
+		result = s.finalizeToolResult(name, result)
 	}
 
 	// Log the outcome either way. A failing tool used to produce no log
@@ -1116,11 +1152,11 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 	if err != nil {
 		outcome = toolstatsOutcomeError
 	}
-	s.recordToolCall(ctx, request.Name, outcome, time.Since(started))
+	s.recordToolCall(ctx, name, outcome, time.Since(started))
 
 	if err != nil {
 		s.logger.Error(logging.DestinationMCP, "MCP tool call failed",
-			"tool", request.Name,
+			"tool", name,
 			"trace_id", traceID,
 			"session_id", SessionIDFromContext(ctx),
 			"actor", htcondor.GetAuthenticatedUserFromContext(ctx),
@@ -1128,7 +1164,7 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 			"error", err)
 	} else {
 		s.logger.Info(logging.DestinationMCP, "MCP tool call succeeded",
-			"tool", request.Name,
+			"tool", name,
 			"trace_id", traceID,
 			"duration_ms", time.Since(started).Milliseconds())
 	}
@@ -1498,9 +1534,9 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 	//
 	// Admins are exempt from both for cross-user troubleshooting.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, idClause, tierRead)
+	if err != nil {
+		return nil, err
 	}
 	opts, ok := s.selfScopedQueryOptions(ctx, nil)
 	if !ok {
@@ -1535,6 +1571,14 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 	// HoldReasonCode, Cmd, Arguments/Args), or the section will silently
 	// stop appearing on the workflows it exists for.
 	text = appendDagSection(text, structured, cluster, jobAds[0])
+
+	// How long it is likely to run. The whole ad is in hand, so the
+	// features and the start time are too.
+	if s.runtimeEst != nil {
+		est := s.runtimeEst.Estimate(runtimeest.QueryFromAd(jobAds[0], time.Now()))
+		structured["runtime_estimate"] = est
+		text += renderRuntimeEstimate(est)
+	}
 
 	// Both keys carry the same map. structuredContent is what a modern
 	// client validates against the published outputSchema; metadata is
@@ -1596,9 +1640,9 @@ func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interf
 	// Owner-scope so a non-admin caller can't analyze another user's
 	// job and harvest its Requirements expression.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, idClause, tierRead)
+	if err != nil {
+		return nil, err
 	}
 	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "Requirements", "Owner"},
@@ -1702,18 +1746,22 @@ func (s *Server) performJobAction(ctx context.Context, args map[string]interface
 // an actor that names no owner, the call is refused rather than sent
 // unconfined.
 func (s *Server) singleJobMutateScope(ctx context.Context, idClause string) (string, error) {
-	if constraint, ok := s.scopeToOwner(ctx, idClause, tierMutate); ok {
+	constraint, err := s.scopeToOwner(ctx, idClause, tierMutate)
+	if err == nil {
 		return constraint, nil
 	}
+	if !errors.Is(err, errScopeUnauthenticated) {
+		return "", err
+	}
 	if s.delegated || htcondor.GetAuthenticatedUserFromContext(ctx) != "" {
-		return "", fmt.Errorf("authentication required")
+		return "", err
 	}
 	return idClause, nil
 }
 
 // toolRemoveJob handles removing a specific job
 func (s *Server) toolRemoveJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return s.performJobAction(ctx, args, s.getSchedd().RemoveJobs, "Removed via MCP", "remove")
+	return s.performJobAction(ctx, args, s.scheddFor(ctx).RemoveJobs, "Removed via MCP", "remove")
 }
 
 // toolRemoveJobs handles removing multiple jobs
@@ -1733,11 +1781,11 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 	// the wrapper for cross-user cleanup. CRITICAL: without this
 	// wrapper an LLM prompt-injection setting constraint = "true"
 	// could mass-remove every user's jobs (modulo schedd ACL).
-	constraint, ok := s.scopeToOwner(ctx, llmConstraint, tierMutate)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, llmConstraint, tierMutate)
+	if err != nil {
+		return nil, err
 	}
-	results, err := s.getSchedd().RemoveJobs(ctx, constraint, reason)
+	results, err := s.scheddFor(ctx).RemoveJobs(ctx, constraint, reason)
 	if errors.Is(err, htcondor.ErrNoJobsMatched) {
 		return nil, fmt.Errorf("no jobs matched constraint '%s'", llmConstraint)
 	}
@@ -1808,7 +1856,7 @@ func (s *Server) toolEditJob(ctx context.Context, args map[string]interface{}) (
 	// classAdValues. A failed lookup is not fatal -- it only costs the
 	// numeric coercion, and the edit itself is the schedd's to authorize.
 	var current *classad.ClassAd
-	if ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint,
+	if ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint,
 		&htcondor.QueryOptions{Projection: attrNames(updates), Limit: 1},
 	); err == nil && len(ads) > 0 {
 		current = ads[0]
@@ -1824,7 +1872,7 @@ func (s *Server) toolEditJob(ctx context.Context, args map[string]interface{}) (
 		Force:               false,
 	}
 
-	edited, err := s.getSchedd().EditJobs(ctx, constraint, attributes, opts)
+	edited, err := s.scheddFor(ctx).EditJobs(ctx, constraint, attributes, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to edit job: %w", err)
 	}
@@ -1952,12 +2000,12 @@ func sortedAttrNames(updates map[string]interface{}) []string {
 
 // toolHoldJob handles holding a job
 func (s *Server) toolHoldJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return s.performJobAction(ctx, args, s.getSchedd().HoldJobs, "Held via MCP", "hold")
+	return s.performJobAction(ctx, args, s.scheddFor(ctx).HoldJobs, "Held via MCP", "hold")
 }
 
 // toolReleaseJob handles releasing a job
 func (s *Server) toolReleaseJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return s.performJobAction(ctx, args, s.getSchedd().ReleaseJobs, "Released via MCP", "release")
+	return s.performJobAction(ctx, args, s.scheddFor(ctx).ReleaseJobs, "Released via MCP", "release")
 }
 
 // handleListResources returns the list of available resources
@@ -2129,9 +2177,9 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 	// instead of a schedd-side refusal after we have already disclosed
 	// which attributes their job has.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, idClause, tierRead)
+	if err != nil {
+		return nil, err
 	}
 	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "JobStatus", attributeName},
@@ -2139,7 +2187,7 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	jobAds, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query job: %w", err)
 	}
@@ -2165,41 +2213,45 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 	sandboxCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	var sandboxBuf bytes.Buffer
-	errChan := s.getSchedd().ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
-
-	if err := <-errChan; err != nil {
-		return nil, fmt.Errorf("failed to download job sandbox: %w", err)
-	}
-
-	// Extract the output file from the tar archive
-	outputContent, found, entries, err := extractSandboxFile(&sandboxBuf, outputFile)
+	// Streamed, and abandoned once the file is found: the sandbox can be
+	// far larger than anything this process should hold.
+	var match sandboxMatch
+	err = s.streamSandbox(sandboxCtx, constraint, func(r io.Reader) (bool, error) {
+		var rerr error
+		match, rerr = extractSandboxFile(r, outputFile, maxFileSize)
+		return match.found, rerr
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to read job sandbox: %w", err)
+		return nil, err
 	}
-	if !found {
+	if !match.found {
 		// Say what was there. Previously this named only what was
 		// wanted, which left "the transfer returned nothing" and "the
 		// file is called something else" looking identical from the
 		// outside.
 		return nil, fmt.Errorf("%s file %q not found in the job sandbox; the sandbox contains: %s",
-			outputType, filepath.Base(outputFile), describeSandboxEntries(entries))
+			outputType, filepath.Base(outputFile), describeSandboxEntries(match.entries, match.total))
 	}
+	outputContent := match.content
 
 	structured := map[string]interface{}{
 		"job_id":      jobID,
 		"output_type": outputType,
 		"filename":    outputFile,
-		"size":        len(outputContent),
+		"size":        match.size,
 		"empty":       outputContent == "",
+		"truncated":   match.truncated,
 		"content":     outputContent,
+	}
+	text := describeJobOutput(outputContent, outputType)
+	if match.truncated {
+		text += fmt.Sprintf("\n\n(truncated: showing the first %d of %d bytes)", len(outputContent), match.size)
 	}
 	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
-				"text": fmt.Sprintf("Job %s %s:\n%s", jobID, outputType,
-					describeJobOutput(outputContent, outputType)),
+				"text": fmt.Sprintf("Job %s %s:\n%s", jobID, outputType, text),
 			},
 		},
 		"metadata": structured,
@@ -2322,9 +2374,9 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 	// schedd ACL is broadly READ on most pools, so without this
 	// wrapper a `mcp:write` token holder could dump every user's
 	// historical job ads.
-	constraint, ok := s.scopeToOwner(ctx, llmConstraint, tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, llmConstraint, tierRead)
+	if err != nil {
+		return nil, err
 	}
 	if constraint == "" {
 		// scopeToOwner returns "" only for admin callers who passed
@@ -2403,7 +2455,7 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 	// a safe load win. Only the job-history source is mirrored; epochs and
 	// transfer history stay on the schedd. Any miss falls through transparently.
 	if source == htcondor.HistorySourceJobHistory {
-		if res, ok, decision := s.tryHistoryFromDB(ctx, constraint, opts, typeName); ok {
+		if res, ok, decision := s.tryHistoryFromDB(ctx, constraint, opts, typeName, limitCapped); ok {
 			return res, nil
 		} else if err := s.mirrorRequiredError(decision); err != nil {
 			return nil, err
@@ -2411,16 +2463,60 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 	}
 
 	// Execute query
+	var stats htcondor.HistoryScanStats
+	opts.Stats = &stats
 	records, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}
 
 	note := projectionNote
+	extras := historyExtras{}
 	if len(records) >= effectiveLimit {
 		note = truncationNote(effectiveLimit, limitCapped) + projectionNote
+		extras.hasMore = true
 	}
-	return historyResult(records, typeName, constraint, string(source), note), nil
+	if stats.Reported {
+		extras.recordsScanned = stats.RecordsScanned
+	}
+	if stats.ScanLimitReached {
+		// The schedd gave up before reaching the records this query is
+		// about. Without saying so, a short or empty answer reads as
+		// "there are no such jobs", which is exactly what it is not.
+		extras.scanLimitReached = true
+		note = scanLimitNote(stats, len(records), s.htcondordbEnabled()) + note
+	}
+	return historyResultWith(records, typeName, constraint, string(source), note, extras), nil
+}
+
+// scanLimitNote explains a history answer the schedd cut short at its scan
+// limit: how far back it looked, that older records were not searched, and
+// how to search further.
+func scanLimitNote(stats htcondor.HistoryScanStats, found int, mirror bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n\nIncomplete: the schedd examined only the %d most recent history records "+
+		"(scan_limit %d) and found %d match(es) among them; older records were not searched, "+
+		"so any older matches are missing from this answer, and fewer results than the limit "+
+		"(even zero) does not mean there are no more. Raise scan_limit to search further back "+
+		"(a larger scan costs the schedd more).",
+		stats.RecordsScanned, stats.ScanLimit, found)
+	if mirror {
+		b.WriteString(" query_history_db searches the full archive in the htcondordb mirror without a scan limit.")
+	}
+	return b.String()
+}
+
+// historyExtras are the optional facts about how a history answer was
+// produced that both paths report in the structured result.
+type historyExtras struct {
+	// hasMore: more records matched than were returned.
+	hasMore bool
+	// scanLimitReached: the schedd stopped at its scan limit, so older
+	// records were not searched.
+	scanLimitReached bool
+	// recordsScanned is how many records the schedd examined; 0 when it
+	// did not say (or the mirror answered).
+	recordsScanned int
 }
 
 // historyResult renders history records into the tool result. Both the schedd
@@ -2428,6 +2524,12 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 // the output contract is identical regardless of source; source names the
 // backend in the metadata and note is an optional trailing provenance line.
 func historyResult(records []*classad.ClassAd, typeName, constraint, source, note string) interface{} {
+	return historyResultWith(records, typeName, constraint, source, note, historyExtras{})
+}
+
+// historyResultWith is historyResult with the extras filed in the metadata
+// and structured result.
+func historyResultWith(records []*classad.ClassAd, typeName, constraint, source, note string, extras historyExtras) interface{} {
 	recordsJSON, err := json.Marshal(records)
 	if err != nil {
 		// Marshaling a slice of ClassAds does not realistically fail; degrade to
@@ -2436,6 +2538,26 @@ func historyResult(records []*classad.ClassAd, typeName, constraint, source, not
 	}
 	resultText := fmt.Sprintf("Found %d %s record(s):\n%s%s",
 		len(records), typeName, string(recordsJSON), note)
+	metadata := map[string]interface{}{
+		"total_records":      len(records),
+		"constraint":         constraint,
+		"source":             source,
+		"has_more":           extras.hasMore,
+		"scan_limit_reached": extras.scanLimitReached,
+	}
+	structured := map[string]interface{}{
+		"records":            records,
+		"count":              len(records),
+		"type":               typeName,
+		"constraint":         constraint,
+		"source":             source,
+		"has_more":           extras.hasMore,
+		"scan_limit_reached": extras.scanLimitReached,
+	}
+	if extras.recordsScanned > 0 {
+		metadata["records_scanned"] = extras.recordsScanned
+		structured["records_scanned"] = extras.recordsScanned
+	}
 
 	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
@@ -2444,18 +2566,8 @@ func historyResult(records []*classad.ClassAd, typeName, constraint, source, not
 				"text": resultText,
 			},
 		},
-		"metadata": map[string]interface{}{
-			"total_records": len(records),
-			"constraint":    constraint,
-			"source":        source,
-		},
-	}, map[string]interface{}{
-		"records":    records,
-		"count":      len(records),
-		"type":       typeName,
-		"constraint": constraint,
-		"source":     source,
-	})
+		"metadata": metadata,
+	}, structured)
 }
 
 // OutputFile represents a file from the job's output sandbox
@@ -2470,6 +2582,14 @@ type OutputFile struct {
 
 // maxFileSize is the maximum size of file content to include in response (100KB)
 const maxFileSize = 100 * 1024
+
+// maxOutputTotalSize bounds the content get_job_output returns across all
+// files. Past it, files are still listed but carry no more content.
+const maxOutputTotalSize = 1024 * 1024
+
+// maxOutputFiles bounds how many files get_job_output lists; the rest are
+// counted.
+const maxOutputFiles = 1000
 
 // toolUploadJobInput handles uploading input files to a job's sandbox
 func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -2509,9 +2629,9 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 		}
 	} else {
 		idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", target.Cluster, target.Proc)
-		constraint, ok := s.scopeToOwner(ctx, idClause, tierMutate)
-		if !ok {
-			return nil, fmt.Errorf("authentication required")
+		constraint, err := s.scopeToOwner(ctx, idClause, tierMutate)
+		if err != nil {
+			return nil, err
 		}
 		opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
 			Projection: []string{"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable"},
@@ -2519,7 +2639,7 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 		if !ok {
 			return nil, fmt.Errorf("authentication required")
 		}
-		jobAds, _, err = s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+		jobAds, _, err = s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query job: %w", err)
 		}
@@ -2621,7 +2741,7 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 	}
 
 	// Spool the files to the schedd
-	if err := s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, bytes.NewReader(tarBytes)); err != nil {
+	if err := s.scheddFor(ctx).SpoolJobFilesFromTar(ctx, jobAds, bytes.NewReader(tarBytes)); err != nil {
 		return nil, fmt.Errorf("failed to spool job files: %w", err)
 	}
 
@@ -2665,74 +2785,79 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 	// authenticated as someone else — that check is its, not ours. The
 	// owner clause means we do not ask.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, idClause, tierRead)
+	if err != nil {
+		return nil, err
 	}
 
-	// Download the job sandbox into a buffer
+	// Streamed rather than buffered: the sandbox can be far larger than
+	// anything this process should hold, and only maxFileSize of each
+	// file -- maxOutputTotalSize of them all -- is returned.
 	sandboxCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	var sandboxBuf bytes.Buffer
-	errChan := s.getSchedd().ReceiveJobSandbox(sandboxCtx, constraint, &sandboxBuf)
-
-	if err := <-errChan; err != nil {
-		return nil, fmt.Errorf("failed to download job sandbox: %w", err)
-	}
-
-	// Parse the tar archive and extract files
-	tarReader := tar.NewReader(&sandboxBuf)
 	var outputFiles []OutputFile
+	omitted := 0
+	budget := int64(maxOutputTotalSize)
+	err = s.streamSandbox(sandboxCtx, constraint, func(r io.Reader) (bool, error) {
+		tarReader := tar.NewReader(r)
+		for {
+			header, err := tarReader.Next()
+			if errors.Is(err, io.EOF) {
+				return false, nil
+			}
+			if err != nil {
+				return false, fmt.Errorf("failed to read tar archive: %w", err)
+			}
 
-	for {
-		header, err := tarReader.Next()
-		if errors.Is(err, io.EOF) {
-			break
+			// Skip directories
+			if header.Typeflag == tar.TypeDir {
+				continue
+			}
+			if len(outputFiles) >= maxOutputFiles {
+				omitted++
+				continue
+			}
+
+			// Read file content (up to the limit + 1 to detect truncation)
+			limit := min(int64(maxFileSize), budget)
+			content, err := io.ReadAll(io.LimitReader(tarReader, limit+1))
+			if err != nil {
+				return false, fmt.Errorf("failed to read file %s: %w", header.Name, err)
+			}
+
+			isTruncated := int64(len(content)) > limit
+			if isTruncated {
+				content = content[:limit]
+			}
+			budget -= int64(len(content))
+
+			// Determine if content is valid UTF-8 text or binary
+			isText := utf8.Valid(content) && !containsNullBytes(content)
+
+			file := OutputFile{
+				Filename:    header.Name,
+				IsTruncated: isTruncated,
+				Size:        header.Size,
+				IsBase64:    !isText,
+			}
+
+			if isText {
+				file.Data = string(content)
+			} else {
+				file.Data = base64.StdEncoding.EncodeToString(content)
+			}
+
+			// Generate HTTP URL if base URL is configured
+			if s.httpBaseURL != "" {
+				file.URL = s.buildFileDownloadURL(jobID, header.Name)
+			}
+
+			outputFiles = append(outputFiles, file)
 		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to read tar archive: %w", err)
-		}
-
-		// Skip directories
-		if header.Typeflag == tar.TypeDir {
-			continue
-		}
-
-		// Read file content (up to maxFileSize + 1 to detect truncation)
-		limitedReader := io.LimitReader(tarReader, maxFileSize+1)
-		content, err := io.ReadAll(limitedReader)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read file %s: %w", header.Name, err)
-		}
-
-		isTruncated := len(content) > maxFileSize
-		if isTruncated {
-			content = content[:maxFileSize]
-		}
-
-		// Determine if content is valid UTF-8 text or binary
-		isText := utf8.Valid(content) && !containsNullBytes(content)
-
-		file := OutputFile{
-			Filename:    header.Name,
-			IsTruncated: isTruncated,
-			Size:        header.Size,
-			IsBase64:    !isText,
-		}
-
-		if isText {
-			file.Data = string(content)
-		} else {
-			file.Data = base64.StdEncoding.EncodeToString(content)
-		}
-
-		// Generate HTTP URL if base URL is configured
-		if s.httpBaseURL != "" {
-			file.URL = s.buildFileDownloadURL(jobID, header.Name)
-		}
-
-		outputFiles = append(outputFiles, file)
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	if len(outputFiles) == 0 {
@@ -2764,9 +2889,13 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 
 	summaryText := fmt.Sprintf("Retrieved %d output file(s) from job %s:\n%s",
 		len(outputFiles), jobID, strings.Join(summaryParts, "\n"))
+	if omitted > 0 {
+		summaryText += fmt.Sprintf("\n(and %d more file(s) not listed)", omitted)
+	}
 
 	if len(truncatedFiles) > 0 {
-		summaryText += fmt.Sprintf("\n\nWARNING: The following files were truncated to 100KB: %s",
+		summaryText += fmt.Sprintf("\n\nWARNING: The following files were truncated "+
+			"(each file is capped at 100KB, and all files together at 1MB): %s",
 			strings.Join(truncatedFiles, ", "))
 		if s.httpBaseURL != "" {
 			summaryText += "\nUse the provided URLs to download the complete files."
@@ -2774,9 +2903,10 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 	}
 
 	structured := map[string]interface{}{
-		"job_id":     jobID,
-		"file_count": len(outputFiles),
-		"files":      outputFiles,
+		"job_id":        jobID,
+		"file_count":    len(outputFiles),
+		"files":         outputFiles,
+		"omitted_files": omitted,
 	}
 	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
@@ -2822,7 +2952,7 @@ func (s *Server) checkOAuthServicesNeeded(ctx context.Context, clusterID int) st
 		Projection: projection,
 		FetchOpts:  htcondor.FetchMyJobs,
 	}
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 	if err != nil || len(ads) == 0 {
 		return ""
 	}
@@ -3017,6 +3147,57 @@ func (s *Server) toolDeleteServiceCredential(ctx context.Context, args map[strin
 	), nil
 }
 
+// streamSandbox downloads the job sandbox matching constraint and hands it
+// to read as a tar stream, without holding the archive in memory.
+//
+// read may stop before the end of the archive by returning stopped=true;
+// the transfer is then abandoned -- closing the pipe fails its next write
+// and it unwinds -- and its resulting error is ours, so it is not
+// reported. Otherwise a failed transfer is reported in preference to the
+// read error it caused.
+func (s *Server) streamSandbox(ctx context.Context, constraint string, read func(io.Reader) (stopped bool, err error)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	pr, pw := io.Pipe()
+	errChan := s.scheddFor(ctx).ReceiveJobSandbox(ctx, constraint, pw)
+	transferErr := make(chan error, 1)
+	go func() {
+		err := <-errChan
+		_ = pw.CloseWithError(err)
+		transferErr <- err
+	}()
+
+	stopped, readErr := read(pr)
+	_ = pr.Close()
+	cancel()
+	if err := <-transferErr; err != nil && !stopped {
+		return fmt.Errorf("failed to download job sandbox: %w", err)
+	}
+	if readErr != nil {
+		return fmt.Errorf("failed to read job sandbox: %w", readErr)
+	}
+	return nil
+}
+
+// maxListedEntries is how many sandbox file names extractSandboxFile
+// keeps for explaining a miss; the rest are only counted.
+const maxListedEntries = 25
+
+// sandboxMatch is what extractSandboxFile found.
+type sandboxMatch struct {
+	content   string
+	found     bool
+	truncated bool
+	// size is the file's full size, which exceeds len(content) when
+	// truncated.
+	size int64
+	// entries names the archive's files, up to maxListedEntries; total
+	// counts all of them.
+	entries []string
+	total   int
+}
+
 // extractSandboxFile pulls one file out of a job-sandbox tar, matching on
 // base name, and returns what else the archive held so a miss can be
 // explained.
@@ -3031,48 +3212,60 @@ func (s *Server) toolDeleteServiceCredential(ctx context.Context, args map[strin
 // found is returned separately from content because an empty file is a
 // real answer. Reporting "not found" for a job whose stdout was empty
 // sends the caller looking for a transfer problem that does not exist.
-func extractSandboxFile(r io.Reader, want string) (content string, found bool, entries []string, err error) {
+//
+// At most maxBytes of the file are read, and reading stops at the match:
+// the listing is only needed to explain a miss, and a miss reads the
+// whole archive anyway.
+func extractSandboxFile(r io.Reader, want string, maxBytes int64) (sandboxMatch, error) {
+	var m sandboxMatch
 	wantBase := filepath.Base(want)
 	tr := tar.NewReader(r)
 	for {
 		header, terr := tr.Next()
 		if errors.Is(terr, io.EOF) {
-			break
+			return m, nil
 		}
 		if terr != nil {
-			return "", false, entries, terr
+			return m, terr
 		}
 		if header.Typeflag == tar.TypeDir {
 			continue
 		}
 		name := filepath.Base(header.Name)
-		entries = append(entries, name)
-		if found || name != wantBase {
+		m.total++
+		if len(m.entries) < maxListedEntries {
+			m.entries = append(m.entries, name)
+		}
+		if name != wantBase {
 			continue
 		}
-		b, rerr := io.ReadAll(tr)
+		b, rerr := io.ReadAll(io.LimitReader(tr, maxBytes+1))
 		if rerr != nil {
-			return "", false, entries, rerr
+			return m, rerr
 		}
-		// Keep reading so entries lists the whole sandbox even after a
-		// hit; the listing is what makes a later miss diagnosable.
-		content, found = string(b), true
+		if int64(len(b)) > maxBytes {
+			b, m.truncated = b[:maxBytes], true
+		}
+		m.content, m.found, m.size = string(b), true, header.Size
+		return m, nil
 	}
-	return content, found, entries, nil
 }
 
 // describeSandboxEntries renders a sandbox listing for an error message,
 // distinguishing an empty archive from one whose contents simply did not
-// include what was asked for.
-func describeSandboxEntries(entries []string) string {
-	if len(entries) == 0 {
+// include what was asked for. total counts every file, of which entries
+// names the first few.
+func describeSandboxEntries(entries []string, total int) string {
+	if total == 0 {
 		return "nothing at all -- the schedd returned an empty sandbox, so the output was " +
 			"probably never transferred back"
 	}
-	const maxListed = 25
-	if len(entries) > maxListed {
-		return strings.Join(entries[:maxListed], ", ") +
-			fmt.Sprintf(", and %d more", len(entries)-maxListed)
+	if len(entries) > maxListedEntries {
+		entries = entries[:maxListedEntries]
+	}
+	if total > len(entries) {
+		return strings.Join(entries, ", ") +
+			fmt.Sprintf(", and %d more", total-len(entries))
 	}
 	return strings.Join(entries, ", ")
 }

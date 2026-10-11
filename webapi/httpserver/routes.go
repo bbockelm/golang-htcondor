@@ -42,8 +42,26 @@ const (
 	wellKnownProtectedResource = "/.well-known/oauth-protected-resource"
 )
 
+// recordingMux registers on the handler's ServeMux and remembers each
+// pattern, so a test can walk every route that exists rather than a list
+// someone remembered to update.
+type recordingMux struct {
+	*http.ServeMux
+	patterns *[]string
+}
+
+func (m recordingMux) Handle(pattern string, handler http.Handler) {
+	*m.patterns = append(*m.patterns, pattern)
+	m.ServeMux.Handle(pattern, handler)
+}
+
+func (m recordingMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	*m.patterns = append(*m.patterns, pattern)
+	m.ServeMux.HandleFunc(pattern, handler)
+}
+
 func (h *Handler) setupRoutes() {
-	mux := h.mux
+	mux := recordingMux{ServeMux: h.mux, patterns: &h.routePatterns}
 	cors := func(handler http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
@@ -91,6 +109,11 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/openapi.json", cors(http.HandlerFunc(h.handleOpenAPISchema)))
 	mux.HandleFunc("/docs", h.handleSwaggerUI)
 	mux.HandleFunc("/docs/oauth2-redirect", h.handleSwaggerOAuth2Redirect)
+
+	// The access points this server fronts, in multi-AP mode only.
+	if h.multi != nil {
+		mux.Handle("/api/v1/aps", cors(h.requireCondorScope(http.HandlerFunc(h.handleAPs))))
+	}
 
 	// Job management endpoints
 	mux.Handle("/api/v1/jobs/watch", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobsWatch)))) // SSE job-ad change stream (more specific than /api/v1/jobs/ below)
@@ -147,6 +170,11 @@ func (h *Handler) setupRoutes() {
 
 	mux.Handle("/api/v1/dashboard", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboard))))
 	mux.Handle("/api/v1/issues", cors(h.requireCondorScope(http.HandlerFunc(h.handleIssues))))
+	// How well finished jobs used what they reserved, with submit-file
+	// advice. Owner-scoped like the archive it reads.
+	mux.Handle("/api/v1/utilization", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilization))))
+	// One workflow's jobs, a page at a time.
+	mux.Handle("/api/v1/utilization/jobs", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationJobs))))
 	mux.Handle("/api/v1/dashboard/activity", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboardActivity))))
 	mux.Handle("/api/v1/dashboard/activity/stream", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboardActivityStream))))
 
@@ -253,6 +281,8 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/collector/pool-summary", cors(h.requireCondorScope(http.HandlerFunc(h.handlePoolSummary)))) // aggregated /pool overview (more specific than the dispatcher below)
 	mux.Handle("/api/v1/collector/watch", cors(h.requireCondorScope(http.HandlerFunc(h.handleCollectorWatch))))     // SSE ad-change stream (more specific than the dispatcher below)
 	mux.Handle("/api/v1/collector/", h.requireCondorScope(http.HandlerFunc(h.handleCollectorPath)))                 // Pattern with trailing slash catches /api/v1/collector/* paths
+	// When each execute node would be empty if drained now (pool_drain.go).
+	mux.Handle("/api/v1/pool/drain-estimates", cors(h.requireCondorScope(http.HandlerFunc(h.handlePoolDrainEstimates))))
 
 	// htcondordb mirror status (admin-gated inside the handler). The
 	// data is on /readyz and /metrics too, but both of those answer a
@@ -302,6 +332,9 @@ func (h *Handler) setupRoutes() {
 			if !ok {
 				continue
 			}
+			// Any of these can name a client_id that is a metadata
+			// document URL, so each charges the fetch to its caller.
+			handler = h.withCIMDSource(handler)
 			mux.HandleFunc(oauth2EndpointPathFor(false, name), handler)
 			mux.HandleFunc(oauth2EndpointPathFor(true, name), handler)
 		}

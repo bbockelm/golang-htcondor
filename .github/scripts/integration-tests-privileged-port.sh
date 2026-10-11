@@ -33,4 +33,6 @@ GOWORK=off gotestsum -- \
 #
 # The whole package runs here, not a filtered subset: as root it is
 # green, and a filter would quietly stop covering anything added later.
+# The privileged tests of every other package are run, by name, by
+# privileged-unit-tests.sh, which leaves droppriv/ to this script.
 GOWORK=off gotestsum -- -timeout=5m ./droppriv/

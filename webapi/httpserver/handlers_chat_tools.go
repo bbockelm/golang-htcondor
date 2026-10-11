@@ -452,7 +452,7 @@ func (s *Handler) toolQueryJobs() chat.Tool {
 			if limit > 100 {
 				limit = 100
 			}
-			constraint, err := scopeToOwner(actor, args.Constraint)
+			constraint, err := scopeToOwner(ownerFromActor(actor), args.Constraint)
 			if err != nil {
 				return "", err
 			}
@@ -571,7 +571,7 @@ func (s *Handler) toolQueryJobsArchive() chat.Tool {
 			// pagination cursor. Same predicate the SPA uses on the
 			// archive page — kept consistent so the LLM and the user
 			// scrolling the table see the same record set.
-			constraint, err := scopeToOwner(actor, args.Constraint)
+			constraint, err := scopeToOwner(ownerFromActor(actor), args.Constraint)
 			if err != nil {
 				return "", err
 			}
@@ -773,7 +773,7 @@ func (s *Handler) toolRemoveJobs() chat.Tool {
 				return "", fmt.Errorf("either cluster_id or constraint is required (refusing to remove every job)")
 			}
 
-			constraint, err := scopeToOwner(actor, llmConstraint)
+			constraint, err := scopeToOwner(ownerFromActor(actor), llmConstraint)
 			if err != nil {
 				return "", err
 			}
@@ -871,7 +871,7 @@ func (s *Handler) singleJobActionTool(
 			// another user's job; with it, the worst case is a
 			// "no such job" reply.
 			ownerConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
-				args.ClusterID, args.ProcID, classadStringLit(actor))
+				args.ClusterID, args.ProcID, classadStringLit(ownerFromActor(actor)))
 			ads, _, err := schedd.QueryWithOptions(ctx, ownerConstraint, &htcondor.QueryOptions{
 				Limit:      1,
 				Projection: []string{"ClusterId", "ProcId", "Owner", "JobStatus"},
@@ -1004,11 +1004,15 @@ func toolHighlightJob() chat.Tool {
 // confines it — and an input that will not parse is rejected outright
 // rather than silently widened.
 //
-// Empty-string actor is rejected at the handler layer, not here, so
+// owner is the bare Owner value (ownerFromActor of the authenticated
+// actor), never a qualified "user@domain": job ads hold the bare name,
+// so a qualified one matches nothing.
+//
+// Empty-string owner is rejected at the handler layer, not here, so
 // this function never produces a `Owner == ""` constraint that
 // matches everything.
-func scopeToOwner(actor, llmConstraint string) (string, error) {
-	return andScope(fmt.Sprintf("Owner == %s", classadStringLit(actor)), llmConstraint)
+func scopeToOwner(owner, llmConstraint string) (string, error) {
+	return andScope(fmt.Sprintf("Owner == %s", classadStringLit(owner)), llmConstraint)
 }
 
 // andScope ANDs an untrusted constraint onto a trusted scoping clause, as

@@ -66,6 +66,7 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	"query_jobs":               readOnlyAnn(true),
 	"get_job":                  readOnlyAnn(true),
 	"analyze_job_match":        readOnlyAnn(true),
+	"query_pool":               readOnlyAnn(true),
 	"get_job_stdout":           readOnlyAnn(true),
 	"get_job_stderr":           readOnlyAnn(true),
 	"get_job_output":           readOnlyAnn(true),
@@ -73,6 +74,7 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	"query_job_epochs":         readOnlyAnn(true),
 	"query_transfer_history":   readOnlyAnn(true),
 	"query_history_db":         readOnlyAnn(true),
+	"list_access_points":       readOnlyAnn(true), // multi-AP mode
 	"query_jobs_as_of":         readOnlyAnn(true),
 	"aggregate_jobs":           readOnlyAnn(true),
 	"list_service_credentials": readOnlyAnn(true),

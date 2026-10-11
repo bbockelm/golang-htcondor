@@ -63,7 +63,7 @@ describe('admin usage page', () => {
   it('says plainly when nothing is recorded', async () => {
     usage.mockResolvedValue({ enabled: false });
     await renderPage();
-    expect(await screen.findByText('Usage is not being recorded on this server.')).toBeInTheDocument();
+    expect(await screen.findByText('MCP usage is not being recorded on this server.')).toBeInTheDocument();
     expect(screen.queryByRole('table')).toBeNull();
   });
 

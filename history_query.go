@@ -85,7 +85,7 @@ func (e historyEndpoint) queryWithOptions(ctx context.Context, constraint string
 	if err != nil {
 		return nil, fmt.Errorf("failed to create history query ad: %w", err)
 	}
-	return e.queryHistory(ctx, requestAd)
+	return e.queryHistory(ctx, requestAd, &effectiveOpts)
 }
 
 // queryStream runs a history query against the endpoint and streams the record ads through the
@@ -282,7 +282,7 @@ func parseSinceExpr(since string) (*classad.Expr, error) {
 }
 
 // queryHistory performs the actual history query without streaming
-func (e historyEndpoint) queryHistory(ctx context.Context, requestAd *classad.ClassAd) (_ []*classad.ClassAd, err error) {
+func (e historyEndpoint) queryHistory(ctx context.Context, requestAd *classad.ClassAd, opts *HistoryQueryOptions) (_ []*classad.ClassAd, err error) {
 	htcondorClient, err := e.connect(ctx, requestAd)
 	if err != nil {
 		return nil, err
@@ -320,14 +320,9 @@ func (e historyEndpoint) queryHistory(ctx context.Context, requestAd *classad.Cl
 				// We can ignore this for now
 				continue
 			} else if ownerVal == 0 {
-				// Last ad - check for errors
-				if errCode, ok := ad.EvaluateAttrInt("ErrorCode"); ok && errCode != 0 {
-					errMsg, _ := ad.EvaluateAttrString("ErrorString")
-					return nil, fmt.Errorf("history query error %d: %s", errCode, errMsg)
-				}
-				// Verify match count
-				if serverMatchCount, ok := ad.EvaluateAttrInt("NumMatches"); ok && int(serverMatchCount) != matchCount {
-					return nil, fmt.Errorf("client and server match count mismatch: %d != %d", matchCount, serverMatchCount)
+				// Last ad - check for errors and record how far the daemon scanned
+				if err := finishHistory(ad, matchCount, opts); err != nil {
+					return nil, err
 				}
 				break
 			}
@@ -380,14 +375,9 @@ func (e historyEndpoint) queryHistoryStreaming(ctx context.Context, requestAd *c
 				// First ad - check if server supports streaming
 				continue
 			} else if ownerVal == 0 {
-				// Last ad - check for errors
-				if errCode, ok := ad.EvaluateAttrInt("ErrorCode"); ok && errCode != 0 {
-					errMsg, _ := ad.EvaluateAttrString("ErrorString")
-					return nil, fmt.Errorf("history query error %d: %s", errCode, errMsg)
-				}
-				// Verify match count
-				if serverMatchCount, ok := ad.EvaluateAttrInt("NumMatches"); ok && int(serverMatchCount) != matchCount {
-					return nil, fmt.Errorf("client and server match count mismatch: %d != %d", matchCount, serverMatchCount)
+				// Last ad - check for errors and record how far the daemon scanned
+				if err := finishHistory(ad, matchCount, opts); err != nil {
+					return nil, err
 				}
 				break
 			}
@@ -416,4 +406,50 @@ func (e historyEndpoint) queryHistoryStreaming(ctx context.Context, requestAd *c
 	}
 
 	return ads, nil
+}
+
+// finishHistory checks the daemon's closing ad (Owner = 0): an error it reports, or a match count
+// that disagrees with the records that arrived. On success it fills opts.Stats, if requested,
+// with how far the daemon scanned.
+func finishHistory(final *classad.ClassAd, matchCount int, opts *HistoryQueryOptions) error {
+	if errCode, ok := final.EvaluateAttrInt("ErrorCode"); ok && errCode != 0 {
+		errMsg, _ := final.EvaluateAttrString("ErrorString")
+		return fmt.Errorf("history query error %d: %s", errCode, errMsg)
+	}
+	if serverMatchCount, ok := final.EvaluateAttrInt("NumMatches"); ok && int(serverMatchCount) != matchCount {
+		return fmt.Errorf("client and server match count mismatch: %d != %d", matchCount, serverMatchCount)
+	}
+	if opts != nil && opts.Stats != nil {
+		*opts.Stats = historyScanStats(final, opts)
+	}
+	return nil
+}
+
+// historyScanStats reads the scan statistics condor_history puts in its closing ad -- NumMatches,
+// MalformedAds and AdCount, the number of records it examined -- against the options the query
+// was sent with (after ApplyDefaults).
+//
+// The daemon stops at whichever comes first: Limit matches or ScanLimit records examined. Only
+// the second leaves matches unfound, so the scan limit counts as reached when the daemon
+// examined that many records without filling the match limit.
+func historyScanStats(final *classad.ClassAd, opts *HistoryQueryOptions) HistoryScanStats {
+	var st HistoryScanStats
+	if opts.ScanLimit > 0 {
+		st.ScanLimit = opts.ScanLimit
+	}
+	if v, ok := final.EvaluateAttrInt("NumMatches"); ok {
+		st.Matches = int(v)
+	}
+	if v, ok := final.EvaluateAttrInt("MalformedAds"); ok {
+		st.MalformedAds = int(v)
+	}
+	scanned, ok := final.EvaluateAttrInt("AdCount")
+	if !ok {
+		return st
+	}
+	st.Reported = true
+	st.RecordsScanned = int(scanned)
+	st.ScanLimitReached = st.ScanLimit > 0 && st.RecordsScanned >= st.ScanLimit &&
+		(opts.Limit <= 0 || st.Matches < opts.Limit)
+	return st
 }

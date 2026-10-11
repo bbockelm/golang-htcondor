@@ -210,7 +210,11 @@ func (s *Handler) jupyterSchedd() jupyterScheddOps {
 // still gets the policy applied; only the credential check is skipped.
 func (s *Handler) submitJupyterJob(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
 	if s.jupyterScheddOverride != nil {
-		return s.jupyterScheddOverride.SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
+		applied, err := s.submitPolicy.Apply(submitFile)
+		if err != nil {
+			return 0, nil, err
+		}
+		return s.jupyterScheddOverride.SubmitRemote(ctx, applied)
 	}
 	return s.submitJob(ctx, submitFile)
 }
@@ -636,15 +640,11 @@ func (s *Handler) handleJupyterEvents(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	ctx, needsRedirect, err := s.requireAuthentication(r)
-	if err != nil {
-		if needsRedirect {
-			s.redirectToLogin(w, r)
-			return
-		}
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+	ctx, release, ok := s.authenticateStream(w, r)
+	if !ok {
 		return
 	}
+	defer release()
 	username := htcondor.GetAuthenticatedUserFromContext(ctx)
 
 	reg, err := s.getOrCreateJupyterRegistry()
@@ -1784,6 +1784,13 @@ func (s *Handler) handleJupyterProxy(w http.ResponseWriter, r *http.Request, id,
 		return
 	}
 	username := htcondor.GetAuthenticatedUserFromContext(ctx)
+
+	// Never while superuser mode is armed, the caller's own notebook
+	// included. See refuseJobAppWhileArmed.
+	if refusal := s.refuseJobAppWhileArmed(r, "jupyter-proxy"); refusal != nil {
+		s.writeError(w, http.StatusForbidden, refusal.Error())
+		return
+	}
 
 	reg, err := s.getOrCreateJupyterRegistry()
 	if err != nil {

@@ -193,6 +193,20 @@ func (s *IDPStorage) CreateClient(ctx context.Context, client *fosite.DefaultCli
 	return err
 }
 
+// UpdateClientSecret replaces a client's stored secret, which must
+// already be hashed.
+func (s *IDPStorage) UpdateClientSecret(ctx context.Context, clientID string, hashedSecret []byte) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE idp_clients SET client_secret = ? WHERE id = ?`,
+		string(hashedSecret), clientID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fosite.ErrNotFound
+	}
+	return nil
+}
+
 // GetClient retrieves a client by ID
 //
 //nolint:dupl // This method is similar to OAuth2Storage.GetClient but uses a different table

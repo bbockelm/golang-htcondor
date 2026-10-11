@@ -247,3 +247,14 @@ func withNoReachableConfig(t *testing.T) {
 		t.Skip("this environment still resolves a configuration; the defaults branch is unreachable here")
 	}
 }
+
+// A command to condor_master is this daemon speaking whatever context it
+// started from, so it is never refused as unclassified.
+func TestMasterCommandsAreDaemonWork(t *testing.T) {
+	cfg := daemonPoolConfig(t)
+	t.Cleanup(func() { SetUnmarkedOriginPolicy(UnmarkedAllow) })
+	SetUnmarkedOriginPolicy(UnmarkedDeny)
+	if _, err := secConfigForMasterCommand(context.Background(), cfg, 60008, "<127.0.0.1:1>"); err != nil {
+		t.Fatalf("a master command on an unclassified context: %v", err)
+	}
+}

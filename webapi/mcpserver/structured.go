@@ -59,6 +59,11 @@ var (
 	strSchema  = map[string]interface{}{"type": "string"}
 	intSchema  = map[string]interface{}{"type": "integer"}
 	boolSchema = map[string]interface{}{"type": "boolean"}
+	// numberSchema is a total that may not be an integer.
+	numberSchema = map[string]interface{}{"type": "number"}
+	// numberMapSchema / intMapSchema are objects keyed by attribute name.
+	numberMapSchema = map[string]interface{}{"type": "object", "additionalProperties": numberSchema}
+	intMapSchema    = map[string]interface{}{"type": "object", "additionalProperties": intSchema}
 	// adSchema is a single ClassAd: an object with an open attribute set.
 	adSchema = map[string]interface{}{"type": "object", "additionalProperties": true}
 	// anySchema is used where the payload is a nested structure this file
@@ -100,6 +105,20 @@ func jobListSchema(itemsKey string) map[string]interface{} {
 	}, "count")
 }
 
+// historyListSchema is jobListSchema for the history tools, which also say
+// how far the schedd searched. scan_limit_reached is true when the schedd
+// stopped at its scan limit before finding as many records as asked for:
+// older records were not searched, so a short or empty answer is not a
+// complete one. records_scanned is how many records it examined.
+func historyListSchema() map[string]interface{} {
+	s := jobListSchema("records")
+	props := s["properties"].(map[string]interface{})
+	props["scan_limit_reached"] = boolSchema
+	props["records_scanned"] = intSchema
+	props["type"] = strSchema
+	return s
+}
+
 // outputSchemas publishes an output schema for each tool. A tool absent from
 // this map is served without an outputSchema, which is valid -- structured
 // output is recommended, not required. toolsFor stamps these onto the
@@ -109,9 +128,9 @@ var outputSchemas = map[string]map[string]interface{}{
 	"query_jobs":             jobListSchema("jobs"),
 	"query_history_db":       jobListSchema("records"),
 	"query_jobs_as_of":       jobListSchema("records"),
-	"query_job_archive":      jobListSchema("records"),
-	"query_job_epochs":       jobListSchema("records"),
-	"query_transfer_history": jobListSchema("records"),
+	"query_job_archive":      historyListSchema(),
+	"query_job_epochs":       historyListSchema(),
+	"query_transfer_history": historyListSchema(),
 	"get_job": obj(map[string]interface{}{
 		"job":    adSchema,
 		"job_id": strSchema,
@@ -121,6 +140,8 @@ var outputSchemas = map[string]map[string]interface{}{
 		// releases, and a client that rejected a result carrying a new
 		// one would break on a pool upgrade.
 		"dag": dagSchema,
+		// Present only when this server runs the runtime estimator.
+		"runtime_estimate": runtimeEstimateSchema,
 	}, "job_id"),
 
 	// --- aggregate ----------------------------------------------------
@@ -201,6 +222,42 @@ var outputSchemas = map[string]map[string]interface{}{
 		"result":       anySchema,
 		"slot_cache":   anySchema,
 	}, "job_id"),
+
+	// --- pool --------------------------------------------------------
+	// query_pool answers in one of two shapes, so the schema is their
+	// union: a listing carries ads/has_more, a summary carries the
+	// counts and totals. The totals are keyed by attribute name, which
+	// depends on the ad type, so those objects stay open.
+	"query_pool": obj(map[string]interface{}{
+		"ad_type":    strSchema,
+		"mode":       strSchema,
+		"constraint": strSchema,
+		"count":      intSchema,
+		"ads":        arr(adSchema),
+		"has_more":   boolSchema,
+		"machines":   intSchema,
+		"group_by":   arr(strSchema),
+		"groups": arr(obj(map[string]interface{}{
+			"key":    arr(strSchema),
+			"count":  intSchema,
+			"totals": numberMapSchema,
+		}, "key", "count")),
+		"groups_total":     intSchema,
+		"groups_truncated": boolSchema,
+		"totals":           numberMapSchema,
+		"missing":          intMapSchema,
+		"resources": map[string]interface{}{
+			"type": "object",
+			"additionalProperties": obj(map[string]interface{}{
+				"total":     numberSchema,
+				"claimed":   numberSchema,
+				"unclaimed": numberSchema,
+				"other":     numberSchema,
+			}, "total", "claimed", "unclaimed", "other"),
+		},
+		"slot_types": intMapSchema,
+		"truncated":  boolSchema,
+	}, "ad_type", "mode", "count"),
 
 	// --- submit / mutate ---------------------------------------------
 	// submit_dag reports what it staged and what the caller still owes,

@@ -62,6 +62,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         isAdmin={session?.is_admin}
         superuserAllowed={session?.superuser_allowed}
         superuserActive={session?.superuser_active}
+        multiAP={session?.multi_ap}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />

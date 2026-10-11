@@ -36,6 +36,14 @@ var (
 	}
 )
 
+// deviceCodePollInterval is the polling interval handed to clients.
+const deviceCodePollInterval = 5 * time.Second
+
+// deviceCodeMinPollGap is the gap between polls that is enforced: the
+// interval less a second, so a client that waits exactly the interval
+// is not refused over network jitter.
+const deviceCodeMinPollGap = deviceCodePollInterval - time.Second
+
 // DeviceCodeHandler implements the OAuth 2.0 Device Authorization Grant (RFC 8628)
 type DeviceCodeHandler struct {
 	storage        *OAuth2Storage
@@ -43,6 +51,7 @@ type DeviceCodeHandler struct {
 	deviceCodeLen  int
 	userCodeLen    int
 	userCodeFormat string // "numeric" or "alphanumeric"
+	now            func() time.Time
 }
 
 // NewDeviceCodeHandler creates a new device code handler
@@ -53,6 +62,7 @@ func NewDeviceCodeHandler(storage *OAuth2Storage, config *fosite.Config) *Device
 		deviceCodeLen:  32, // Length for device code
 		userCodeLen:    8,  // Length for user code
 		userCodeFormat: "alphanumeric",
+		now:            time.Now,
 	}
 }
 
@@ -117,12 +127,23 @@ func (h *DeviceCodeHandler) HandleDeviceAuthorizationRequest(ctx context.Context
 		VerificationURI:         verificationURI,
 		VerificationURIComplete: fmt.Sprintf("%s?user_code=%s", verificationURI, userCode),
 		ExpiresIn:               int(expiresIn.Seconds()),
-		Interval:                5, // Poll interval in seconds
+		Interval:                int(deviceCodePollInterval.Seconds()),
 	}, nil
 }
 
 // HandleDeviceAccessRequest handles token requests with device_code grant type
 func (h *DeviceCodeHandler) HandleDeviceAccessRequest(ctx context.Context, deviceCode string, session fosite.Session) (fosite.Requester, error) {
+	// RFC 8628 section 3.5: a client polling faster than its interval
+	// is told to slow down, whatever state the code is in, and that
+	// poll does not count as one.
+	paced, err := h.storage.MarkDeviceCodePolled(ctx, deviceCode, h.now(), deviceCodeMinPollGap)
+	if err != nil {
+		return nil, fosite.ErrServerError.WithWrap(err).WithDebug("Failed to record device code poll")
+	}
+	if !paced {
+		return nil, ErrSlowDown
+	}
+
 	// Get device code session
 	request, err := h.storage.GetDeviceCodeSession(ctx, deviceCode, session)
 	if err != nil {
@@ -141,9 +162,6 @@ func (h *DeviceCodeHandler) HandleDeviceAccessRequest(ctx context.Context, devic
 		}
 		return nil, err
 	}
-
-	// Update polling timestamp for rate limiting (optional)
-	_ = h.storage.UpdateDeviceCodePolling(ctx, deviceCode)
 
 	// Invalidate the device code after successful use
 	_ = h.storage.InvalidateDeviceCodeSession(ctx, deviceCode)

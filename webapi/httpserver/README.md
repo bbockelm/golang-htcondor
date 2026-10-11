@@ -389,7 +389,9 @@ Three answers, in increasing order of how much history they carry.
 **Right now.** `GET /readyz` grows a `dbmirror` block whenever routing is
 configured. `status` is `ok` only when reads are actually routing — a mirror
 that is up but too far behind the tolerance is `warning`, because it is running
-without doing its job:
+without doing its job. Without a credential the block is `status` and
+`required` only; an admin session or an API key with the `metrics` scope gets
+the rest:
 
 ```json
 { "status": "ok",
@@ -534,11 +536,15 @@ HTTP_API_IDLE_TIMEOUT = 2m       # Default: 120s
 # Session configuration (optional)
 HTTP_API_SESSION_TTL = 24h       # Default: 24h (session cookie lifetime)
 
-# User header for authentication (optional)
+# User header for authentication (optional). Honored only from the
+# reverse proxies listed here; with the header set and no list, the
+# server refuses to start.
 HTTP_API_USER_HEADER = X-Forwarded-User
+HTTP_API_USER_HEADER_TRUSTED_PROXIES = 10.0.0.0/8
 
-# JWT signing key path (optional, demo mode only)
-HTTP_API_SIGNING_KEY = /etc/condor/keys/jwt_signing.key
+# Pool signing key the server mints per-request HTCondor tokens with
+# (optional; defaults to SEC_TOKEN_POOL_SIGNING_KEY_FILE)
+HTTP_API_SIGNING_KEY = /etc/condor/passwords.d/POOL
 ```
 
 #### MCP OAuth2 Configuration
@@ -639,7 +645,9 @@ HTTP_API_MCP_SUPERUSER_GROUP = mcp-superusers
 #
 # Matched exactly against the authenticated actor: the OAuth2 username claim
 # for an OAuth2 caller, or the identity the schedd maps the caller to for a
-# forwarded HTCondor IDTOKEN (typically user@uid.domain).
+# forwarded HTCondor IDTOKEN or the stdio server. That is the full user@domain
+# (e.g. alice@uid.domain for FS, the token's sub for an IDTOKEN), with the
+# domain in lower case, from C++ and Go schedds alike; a bare name never matches.
 # Unset = every caller is scoped to their own jobs.
 #
 # `whoami` reports which of these applied, and why, for a given caller.
@@ -671,6 +679,9 @@ If `HTTP_API_USER_HEADER` is configured (e.g., from a reverse proxy), the user i
 ```bash
 # User identity from reverse proxy header
 HTTP_API_USER_HEADER = X-Remote-User
+# Only these proxies may set it. Required: with the header configured
+# and no list, the server refuses to start.
+HTTP_API_USER_HEADER_TRUSTED_PROXIES = 127.0.0.1/32
 
 # When both are configured:
 # - User identity comes from the header (e.g., X-Remote-User: alice)
@@ -838,6 +849,7 @@ UID_DOMAIN = example.com
 
 # Optional: Use user header from reverse proxy for identity
 # HTTP_API_USER_HEADER = X-Remote-User
+# HTTP_API_USER_HEADER_TRUSTED_PROXIES = 127.0.0.1/32
 ```
 
 Create the OAuth2 client secret file:
@@ -905,6 +917,7 @@ If running behind a reverse proxy that sets authentication headers:
 ```bash
 HTTP_API_LISTEN_ADDR = 127.0.0.1:8080
 HTTP_API_USER_HEADER = X-Forwarded-User
+HTTP_API_USER_HEADER_TRUSTED_PROXIES = 127.0.0.1/32
 HTTP_API_READ_TIMEOUT = 60s
 HTTP_API_WRITE_TIMEOUT = 60s
 ```

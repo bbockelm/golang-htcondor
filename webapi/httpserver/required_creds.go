@@ -276,6 +276,10 @@ func (s *Handler) checkSubmitCredentials(ctx context.Context, credd htcondor.Cre
 // credd handle, the list of required services and the cache that keeps
 // this off the hot path all live here.
 func (s *Handler) submitJob(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
+	applied, err := s.submitPolicy.Apply(submitFile)
+	if err != nil {
+		return 0, nil, err
+	}
 	s.ensureRequiredCredentials(ctx)
-	return s.getSchedd().SubmitRemote(ctx, s.submitPolicy.Apply(submitFile))
+	return s.getSchedd().SubmitRemote(ctx, applied)
 }

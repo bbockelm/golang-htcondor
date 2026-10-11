@@ -9,7 +9,6 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -67,6 +66,11 @@ type Options struct {
 	// *htcondor.Schedd so the lease and lifecycle logic can be tested
 	// without a pool behind it.
 	Schedd func() ScheddClient
+	// ScheddFor, when set, returns the schedd that owns the job a call
+	// on ctx is about, and is what reaching into a running job dials
+	// through. A host fronting several schedds sets it, so a command run
+	// in a job goes to that job's schedd; without it Schedd is used.
+	ScheddFor func(ctx context.Context) ScheddClient
 
 	Logger  *logging.Logger
 	LogDest logging.Destination
@@ -228,13 +232,16 @@ type session struct {
 	heartbeatOn   bool
 	stopHeartbeat chan struct{}
 
-	// secConfig is the credential the session was last reached with,
+	// credential is the credential the session was last reached with,
 	// kept so the manager can redial the job or remove it from a
 	// background goroutine that has no request context of its own.
 	// This is the same trust the WebSocket bridge takes by holding an
 	// authenticated ssh.Client open for the life of a terminal; the
-	// lease is what bounds how long it is held.
-	secConfig *security.SecurityConfig
+	// lease is what bounds how long it is held. It is kept with its
+	// renewer: the token itself lasts minutes and a lease runs for half
+	// an hour or more, so a copy of the token alone would be expired by
+	// the time the lease ran out.
+	credential *htcondor.CallerCredential
 }
 
 // Info is the caller-facing view of a session.
@@ -367,7 +374,12 @@ func NewManager(opts Options) (*Manager, error) {
 		opts.Now = time.Now
 	}
 	if opts.Dial == nil {
-		opts.Dial = sshDialer(opts.Schedd, opts.CCB)
+		scheddFor := opts.ScheddFor
+		if scheddFor == nil {
+			schedd := opts.Schedd
+			scheddFor = func(context.Context) ScheddClient { return schedd() }
+		}
+		opts.Dial = sshDialer(scheddFor, opts.CCB)
 	}
 	m := &Manager{
 		opts:     opts,
@@ -557,6 +569,11 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		ExtraSubmitLines:      m.opts.ExtraSubmit,
 	})
 
+	applied, err := m.opts.SubmitPolicy.Apply(submitFile)
+	if err != nil {
+		return nil, err
+	}
+
 	schedd := m.opts.Schedd()
 	if schedd == nil {
 		return nil, fmt.Errorf("no schedd configured")
@@ -568,7 +585,7 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		m.opts.BeforeSubmit(ctx)
 	}
 
-	clusterID, procAds, err := schedd.SubmitRemote(ctx, m.opts.SubmitPolicy.Apply(submitFile))
+	clusterID, procAds, err := schedd.SubmitRemote(ctx, applied)
 	if err != nil {
 		return nil, fmt.Errorf("schedd submit failed: %w", err)
 	}
@@ -601,7 +618,7 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		proc:          procID,
 		leaseExpires:  m.opts.Now().Add(lease),
 		leaseDuration: lease,
-		secConfig:     securityConfigFrom(ctx),
+		credential:    callerCredentialFrom(ctx),
 	}
 
 	key := sessionKey(caller.Owner, spec.Name)

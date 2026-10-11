@@ -33,12 +33,12 @@ func TestReadTierDoesNotGrantMutation(t *testing.T) {
 	ctx := tierCtx("root@uid.domain")
 
 	// Read tier: the constraint passes through untouched.
-	if got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead); !ok || got != "JobStatus == 5" {
+	if got, ok := okScope(s.scopeToOwner(ctx, "JobStatus == 5", tierRead)); !ok || got != "JobStatus == 5" {
 		t.Errorf("read tier should be unconfined for an MCP_ADMIN_USERS member: got %q ok=%v", got, ok)
 	}
 
 	// Mutate tier: confined to their own jobs despite being listed.
-	got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierMutate)
+	got, ok := okScope(s.scopeToOwner(ctx, "JobStatus == 5", tierMutate))
 	if !ok {
 		t.Fatal("the caller is authenticated; scoping must succeed")
 	}
@@ -51,7 +51,7 @@ func TestSuperuserScopeGrantsMutation(t *testing.T) {
 	s := tierServer() // not in MCP_ADMIN_USERS at all
 	ctx := tierCtx("carol@uid.domain", "mcp:read", "mcp:write", scopeMCPSuperuser)
 
-	if got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierMutate); !ok || got != "JobStatus == 5" {
+	if got, ok := okScope(s.scopeToOwner(ctx, "JobStatus == 5", tierMutate)); !ok || got != "JobStatus == 5" {
 		t.Errorf("mcp:superuser should be unconfined for mutation: got %q ok=%v", got, ok)
 	}
 }
@@ -61,10 +61,10 @@ func TestAdminScopeGrantsReadOnly(t *testing.T) {
 	s := tierServer()
 	ctx := tierCtx("dave@uid.domain", scopeMCPAdmin)
 
-	if got, ok := s.scopeToOwner(ctx, "true", tierRead); !ok || got != "true" {
+	if got, ok := okScope(s.scopeToOwner(ctx, "true", tierRead)); !ok || got != "true" {
 		t.Errorf("mcp:admin should be unconfined for reads: got %q ok=%v", got, ok)
 	}
-	got, _ := s.scopeToOwner(ctx, "true", tierMutate)
+	got, _ := okScope(s.scopeToOwner(ctx, "true", tierMutate))
 	if !strings.Contains(got, `Owner == "dave"`) {
 		t.Errorf("mcp:admin must not grant mutation; got %q", got)
 	}
@@ -76,7 +76,7 @@ func TestPlainUserConfinedAtBothTiers(t *testing.T) {
 	ctx := tierCtx("erin@uid.domain", "mcp:read", "mcp:write")
 
 	for _, tier := range []privTier{tierRead, tierMutate} {
-		got, ok := s.scopeToOwner(ctx, "true", tier)
+		got, ok := okScope(s.scopeToOwner(ctx, "true", tier))
 		if !ok {
 			t.Fatalf("%s: authenticated caller must scope", tier)
 		}
@@ -91,7 +91,7 @@ func TestPlainUserConfinedAtBothTiers(t *testing.T) {
 func TestUnauthenticatedRefusedAtBothTiers(t *testing.T) {
 	s := tierServer("root@uid.domain")
 	for _, tier := range []privTier{tierRead, tierMutate} {
-		if _, ok := s.scopeToOwner(context.Background(), "true", tier); ok {
+		if _, ok := okScope(s.scopeToOwner(context.Background(), "true", tier)); ok {
 			t.Errorf("%s tier: an unauthenticated caller must be refused", tier)
 		}
 	}
@@ -159,7 +159,7 @@ func TestAdminListDoesNotOverrideAScopeBearingToken(t *testing.T) {
 	// A real OAuth caller: scopes present, mcp:admin deliberately absent.
 	ctx := tierCtx("root@uid.domain", "mcp:read", "mcp:write")
 
-	got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead)
+	got, ok := okScope(s.scopeToOwner(ctx, "JobStatus == 5", tierRead))
 	if !ok {
 		t.Fatal("the caller is authenticated; scoping must succeed")
 	}
@@ -174,7 +174,7 @@ func TestAdminListStillAppliesWithoutScopes(t *testing.T) {
 	s := tierServer("root@uid.domain")
 	ctx := tierCtx("root@uid.domain") // no scopes at all
 
-	if got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead); !ok || got != "JobStatus == 5" {
+	if got, ok := okScope(s.scopeToOwner(ctx, "JobStatus == 5", tierRead)); !ok || got != "JobStatus == 5" {
 		t.Errorf("MCP_ADMIN_USERS should still grant the read tier over stdio: got %q ok=%v", got, ok)
 	}
 }
@@ -184,7 +184,7 @@ func TestAdminScopeWorksForAListedUserToo(t *testing.T) {
 	s := tierServer("root@uid.domain")
 	ctx := tierCtx("root@uid.domain", "mcp:read", scopeMCPAdmin)
 
-	if got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead); !ok || got != "JobStatus == 5" {
+	if got, ok := okScope(s.scopeToOwner(ctx, "JobStatus == 5", tierRead)); !ok || got != "JobStatus == 5" {
 		t.Errorf("the %s scope should be unconfined: got %q ok=%v", scopeMCPAdmin, got, ok)
 	}
 }
@@ -206,7 +206,7 @@ func TestAnEmptyGrantIsStillAScopeBearingToken(t *testing.T) {
 			if !scopedTransport(ctx) {
 				t.Fatal("an empty-but-present scope set must count as scope-bearing")
 			}
-			got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead)
+			got, ok := okScope(s.scopeToOwner(ctx, "JobStatus == 5", tierRead))
 			if !ok {
 				t.Fatal("the caller is authenticated; scoping must succeed")
 			}
@@ -219,7 +219,7 @@ func TestAnEmptyGrantIsStillAScopeBearingToken(t *testing.T) {
 	// And the list still applies where there is no grant at all.
 	s := tierServer("root@uid.domain")
 	ctx := htcondor.WithAuthenticatedUser(context.Background(), "root@uid.domain")
-	if got, ok := s.scopeToOwner(ctx, "JobStatus == 5", tierRead); !ok || got != "JobStatus == 5" {
+	if got, ok := okScope(s.scopeToOwner(ctx, "JobStatus == 5", tierRead)); !ok || got != "JobStatus == 5" {
 		t.Errorf("an unscoped MCP_ADMIN_USERS member should be unconfined: got %q ok=%v", got, ok)
 	}
 }

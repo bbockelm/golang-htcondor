@@ -47,7 +47,11 @@ func (h *Handler) advertiseInput() apiad.Input {
 		SuperuserEnabled: h.superuserModeAvailable(),
 		ActiveStreams:    h.activeStreams.Load(),
 	}
-	if sch := h.getSchedd(); sch != nil {
+	if h.multi != nil {
+		in.ScheddName = ""
+		in.ScheddConstraint = h.multi.constraint
+		in.ScheddCount = len(h.multi.svc.Registry.Members())
+	} else if sch := h.getSchedd(); sch != nil {
 		in.ScheddAddress = sch.Address()
 	}
 	if h.dbMirror != nil {

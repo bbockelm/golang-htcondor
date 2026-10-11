@@ -690,7 +690,7 @@ func TestCCBStreamingReachesTheDial(t *testing.T) {
 				// Force the real dialer: the point is what IT asks for.
 				Dial: nil,
 			})
-			mgr.opts.Dial = sshDialer(func() ScheddClient {
+			mgr.opts.Dial = sshDialer(func(context.Context) ScheddClient {
 				return htcondor.NewSchedd("test", "127.0.0.1:1")
 			}, dialer)
 

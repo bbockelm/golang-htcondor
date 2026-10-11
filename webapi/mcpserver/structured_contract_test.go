@@ -450,8 +450,8 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"query_job_archive", structuredOf(historyResult(nil, "job history", "true", "JOB_HISTORY", ""))},
 		{"query_job_epochs", structuredOf(historyResult(nil, "epoch", "true", "JOB_EPOCH_HISTORY", ""))},
 		{"query_transfer_history", structuredOf(historyResult(nil, "transfer", "true", "JOB_EPOCH_HISTORY", ""))},
-		{"query_history_db", structuredOf(dbTextResult("records", nil, 50, nil, OwnerScope{}))},
-		{"query_jobs_as_of", structuredOf(dbTextResult("records", nil, 50, nil, OwnerScope{}))},
+		{"query_history_db", structuredOf(dbTextResult("records", nil, 50, false, "", nil, OwnerScope{}))},
+		{"query_jobs_as_of", structuredOf(dbTextResult("records", nil, 50, false, "", nil, OwnerScope{}))},
 		{"aggregate_jobs", aggregateStructured(nil, nil, "jobs", "schedd", false)},
 		// An access point with nothing wrong is the normal case, and the
 		// one where a client's schema check would otherwise first run on
@@ -466,6 +466,9 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"get_job", map[string]interface{}{"job_id": "1.0", "job": map[string]interface{}{}}},
 		{"analyze_job_match", map[string]interface{}{
 			"job_id": "1.0", "requirements": "", "result": nil, "slot_cache": nil}},
+		// A pool summary that matched nothing. The listing's empty shape
+		// is checked in TestPoolEmptyAnswers, through the dispatcher.
+		{"query_pool", newPoolAggregator(&poolAdKinds[0], nil).structured("true")},
 
 		{"submit_job", map[string]interface{}{
 			"cluster_id": 0, "job_ids": []string(nil), "proc_count": 0,

@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/bbockelm/golang-htcondor/jobid"
 )
 
 func testSigner(t *testing.T) ssh.Signer {
@@ -609,5 +611,43 @@ func TestTheRequestedTargetReachesTheAuthorization(t *testing.T) {
 				t.Errorf("target = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A target the gateway cannot serve is refused before any device code
+// is issued, with the reason shown; one it can serve proceeds.
+func TestRefusedTargetGetsNoDeviceCode(t *testing.T) {
+	flow := &fakeFlow{auth: testAuth(), grant: &Grant{AccessToken: "at", Scopes: []string{"openid"}}}
+	flow.auth.Interval = time.Millisecond
+	a := grantingAuthenticator(t, "bbockelm", Options{Flow: flow, JobIDCodec: jobid.Default(),
+		RefuseTarget: func(tg Target) error {
+			if !tg.IsJob() {
+				return errors.New("sessions are not served here")
+			}
+			return nil
+		}})
+	srv := startServer(t, a)
+
+	shown, err := dial(t, srv.addr, "+work")
+	if err == nil {
+		t.Fatal("a refused target logged in")
+	}
+	if len(shown) == 0 || !strings.Contains(shown[len(shown)-1], "sessions are not served here") {
+		t.Errorf("the refusal was not shown: %q", shown)
+	}
+	flow.mu.Lock()
+	asked := flow.target
+	flow.mu.Unlock()
+	if asked != (Target{}) {
+		t.Errorf("a device code was started for a refused target: %+v", asked)
+	}
+	if _, err := dial(t, srv.addr, "1.0@ap1.example.org"); err != nil {
+		t.Errorf("a job on an AP was refused: %v", err)
+	}
+	flow.mu.Lock()
+	asked = flow.target
+	flow.mu.Unlock()
+	if asked.Schedd != "ap1.example.org" {
+		t.Errorf("the authorization did not carry the job's AP: %+v", asked)
 	}
 }

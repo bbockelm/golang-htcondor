@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -401,6 +402,9 @@ type jupyterTestHelper struct {
 	socket     string
 	tokenPath  string
 
+	// hits counts requests that reached the stand-in JupyterLab.
+	hits atomic.Int32
+
 	mu   sync.Mutex
 	done chan error
 }
@@ -415,12 +419,14 @@ func startJupyterTestHelper(t *testing.T, instanceID, token string) *jupyterTest
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "j.sock")
+	jh := &jupyterTestHelper{instanceID: instanceID, socket: sock}
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", sock)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
 	}
 	srv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			jh.hits.Add(1)
 			//nolint:gosec // G705: a test server echoing its own path back as text/plain
 			_, _ = fmt.Fprintf(w, "%s path=%s", jupyterTestSentinel, r.URL.Path)
 		}),
@@ -433,7 +439,8 @@ func startJupyterTestHelper(t *testing.T, instanceID, token string) *jupyterTest
 	if err := os.WriteFile(tokenPath, []byte(token), 0o600); err != nil {
 		t.Fatalf("write token: %v", err)
 	}
-	return &jupyterTestHelper{instanceID: instanceID, socket: sock, tokenPath: tokenPath}
+	jh.tokenPath = tokenPath
+	return jh
 }
 
 // connect dials baseURL with the token on file and waits until the server

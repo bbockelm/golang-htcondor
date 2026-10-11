@@ -217,6 +217,28 @@ func TestRESTMCPAdminGrantReadsButDoesNotAct(t *testing.T) {
 	}
 }
 
+// An MCP_ADMIN_USERS entry matches the bearer's identity with the domain in
+// any case and the user part exactly, as HTCondor compares users.
+func TestRESTMCPAdminUsersDomainCase(t *testing.T) {
+	for _, tc := range []struct {
+		entry string
+		want  []string
+	}{
+		{"bob@test.domain", []string{"alice", "bob"}},
+		{"bob@Test.DOMAIN", []string{"alice", "bob"}},
+		{"Bob@test.domain", []string{"bob"}},
+		{"bob@test.domain.example", []string{"bob"}},
+	} {
+		t.Run(tc.entry, func(t *testing.T) {
+			f := twoOwnerScheddServer(t)
+			f.s.mcpAdminUsers = []string{tc.entry}
+			if got := f.owners(t, "/api/v1/jobs?owned_by_me=false&limit=*", "jobs", f.bearer(t, "bob")); !slices.Equal(got, tc.want) {
+				t.Errorf("bob's bearer with MCP_ADMIN_USERS=%q read owners %v, want %v", tc.entry, got, tc.want)
+			}
+		})
+	}
+}
+
 // A non-admin browser session is confined as it always was, and an admin
 // session and an armed superuser are not.
 func TestRESTSessionReadScope(t *testing.T) {
@@ -280,8 +302,13 @@ func TestSeesAllJobsRule(t *testing.T) {
 	h := f.s.Handler
 	h.mcpAdminUsers = []string{"lister@test.domain"}
 
+	// No scopes is an unscoped credential; an empty list is a scoped one
+	// granted nothing.
 	bearerCtx := func(actor string, scopes ...string) context.Context {
 		ctx := htcondor.WithAuthenticatedUser(context.Background(), actor)
+		if scopes == nil {
+			return ctx
+		}
 		return withAPIKeyScopes(ctx, scopes)
 	}
 	bare := func() *http.Request {
@@ -299,6 +326,7 @@ func TestSeesAllJobsRule(t *testing.T) {
 		{"mcp:superuser grant", bearerCtx("carol@test.domain", "mcp:write", "mcp:superuser"), false, true},
 		{"MCP_ADMIN_USERS, unscoped credential", bearerCtx("lister@test.domain"), true, false},
 		{"MCP_ADMIN_USERS, scoped credential withholding mcp:admin", bearerCtx("lister@test.domain", "mcp:read"), false, false},
+		{"MCP_ADMIN_USERS, scoped credential granted nothing", bearerCtx("lister@test.domain", []string{}...), false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := h.seesAllJobs(tc.ctx, bare(), jobScopeRead); got != tc.read {
@@ -309,4 +337,15 @@ func TestSeesAllJobsRule(t *testing.T) {
 			}
 		})
 	}
+}
+
+// doCtx is a GET through ServeHTTP that ends when ctx does, for a path
+// that may hold the response open as a stream.
+func (f *twoOwnerFixture) doCtx(ctx context.Context, t *testing.T, path string, auth func(*http.Request)) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	auth(req)
+	w := httptest.NewRecorder()
+	f.s.ServeHTTP(w, req)
+	return w
 }

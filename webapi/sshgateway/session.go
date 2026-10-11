@@ -27,6 +27,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
 )
@@ -60,6 +61,11 @@ type Server struct {
 	// Transport and Resolve are required.
 	Transport JobTransport
 	Resolve   ResolveFunc
+
+	// JobIDCodec, when set, is how a username names a job on one of
+	// several access points (see ParseTargetWith). Nil for a gateway in
+	// front of one schedd.
+	JobIDCodec jobid.Codec
 
 	// Credential attaches the caller's HTCondor credential to the
 	// context a channel's work runs under.
@@ -227,7 +233,7 @@ func takeSlot(slots chan struct{}, nch ssh.NewChannel) bool {
 
 // resolve parses the username and finds the job behind it.
 func (s *Server) resolve(ctx context.Context, account, user string, report func(string)) (jobssh.Key, Target, error) {
-	target, err := ParseTarget(user)
+	target, err := ParseTargetWith(s.JobIDCodec, user)
 	if err != nil {
 		return jobssh.Key{}, Target{}, err
 	}
@@ -253,7 +259,7 @@ func (s *Server) resolve(ctx context.Context, account, user string, report func(
 //
 // Only what can be decided instantly stays in front of Accept.
 func (s *Server) handleSession(ctx context.Context, account, user string, nch ssh.NewChannel) {
-	if _, err := ParseTarget(user); err != nil {
+	if _, err := ParseTargetWith(s.JobIDCodec, user); err != nil {
 		// A username that names nothing is knowable without asking the
 		// pool anything, so it still gets a proper rejection.
 		_ = nch.Reject(ssh.ConnectionFailed, err.Error())

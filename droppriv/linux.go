@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 type threadCredentials struct {
@@ -18,13 +20,21 @@ type threadCredentials struct {
 	sgid  int
 	fsuid int
 	fsgid int
+	// groups is this thread's supplementary group list. Linux keeps it
+	// per thread, like the IDs above, and unix.Setgroups changes only
+	// the calling thread's (syscall.Setgroups changes every thread's).
+	groups []int
 }
+
+// captureCredentials reads the calling thread's credentials. A variable
+// so a test can make the read fail.
+var captureCredentials = captureThreadCredentials
 
 func runAsUser(target Identity, fn func() error) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	state, err := captureThreadCredentials()
+	state, err := captureCredentials()
 	if err != nil {
 		return err
 	}
@@ -61,13 +71,17 @@ func runAsUser(target Identity, fn func() error) error {
 // not privileged enough to elevate (e.g. a plain user in dev/CI), fn runs under
 // the current identity — matching set_priv's no-op-when-unprivileged behavior —
 // so the operation simply fails later if the target is inaccessible.
+//
+// Failing to read the thread's credentials is different: then nothing is known
+// about who fn would run as, so it does not run. Running it anyway would carry
+// out a write meant for root as whatever the thread happens to be.
 func withRoot(fn func() error) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	state, err := captureThreadCredentials()
+	state, err := captureCredentials()
 	if err != nil {
-		return fn()
+		return fmt.Errorf("cannot elevate to root: %w", err)
 	}
 	if err := elevateToRoot(state); err != nil {
 		// Not privileged to elevate; undo any partial change and run best-effort.
@@ -104,15 +118,21 @@ func captureThreadCredentials() (threadCredentials, error) {
 	fsuid, _, _ := syscall.RawSyscall(syscall.SYS_SETFSUID, ^uintptr(0), 0, 0)
 	fsgid, _, _ := syscall.RawSyscall(syscall.SYS_SETFSGID, ^uintptr(0), 0, 0)
 
+	groups, err := unix.Getgroups()
+	if err != nil {
+		return threadCredentials{}, fmt.Errorf("getgroups failed: %w", err)
+	}
+
 	return threadCredentials{
-		ruid:  ruid,
-		euid:  euid,
-		suid:  suid,
-		rgid:  rgid,
-		egid:  egid,
-		sgid:  sgid,
-		fsuid: int(fsuid), //nolint:gosec // G115: UIDs are 32-bit on Linux
-		fsgid: int(fsgid), //nolint:gosec // G115: GIDs are 32-bit on Linux
+		ruid:   ruid,
+		euid:   euid,
+		suid:   suid,
+		rgid:   rgid,
+		egid:   egid,
+		sgid:   sgid,
+		fsuid:  int(fsuid), //nolint:gosec // G115: UIDs are 32-bit on Linux
+		fsgid:  int(fsgid), //nolint:gosec // G115: GIDs are 32-bit on Linux
+		groups: groups,
 	}, nil
 }
 
@@ -134,7 +154,13 @@ func elevateToRoot(state threadCredentials) error {
 	return nil
 }
 
+// applyTargetCredentials switches the thread, which must be root, to target.
+// The supplementary groups go first, while it still can: an operation on a
+// user's behalf must not carry the groups of whoever the process is.
 func applyTargetCredentials(target Identity) error {
+	if err := unix.Setgroups([]int{int(target.GID)}); err != nil {
+		return fmt.Errorf("setgroups(%d) failed: %w", target.GID, err)
+	}
 	if err := setResGID(-1, int(target.GID), -1); err != nil {
 		return err
 	}
@@ -158,6 +184,9 @@ func restoreThreadCredentials(state threadCredentials) error {
 	}
 	if err := setResUID(-1, 0, -1); err != nil && firstErr == nil {
 		firstErr = err
+	}
+	if err := unix.Setgroups(state.groups); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("restoring supplementary groups: %w", err)
 	}
 	if err := setFSGID(state.fsgid); err != nil && firstErr == nil {
 		firstErr = err

@@ -12,6 +12,7 @@ import (
 	"weak"
 
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/golang-htcondor/authz"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 )
@@ -394,6 +395,16 @@ func fsAuthDir(cfg *config.Config, key string) string {
 	return ""
 }
 
+// configUIDDomain reads UID_DOMAIN, trimmed, or "" when unset.
+func configUIDDomain(cfg *config.Config) string {
+	if cfg != nil {
+		if v, ok := cfg.Get("UID_DOMAIN"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
 // fsRootToCondor reads FS_ROOT_TO_CONDOR as a tri-state: nil (unset) leaves cedar's
 // default (enabled, matching HTCondor); an explicit value overrides it.
 func fsRootToCondor(cfg *config.Config) *bool {
@@ -426,7 +437,10 @@ func fsRootToCondor(cfg *config.Config) *bool {
 //
 // The function follows HTCondor's security configuration pattern:
 //   - SEC_<context>_<feature> where context is CLIENT, READ, WRITE, etc.
-//   - Falls back to SEC_DEFAULT_* if context-specific settings are not found
+//   - Each setting falls back along the context's chain to SEC_DEFAULT_*, as
+//     HTCondor's SecMan::getSecSetting: an ADVERTISE_* context takes
+//     SEC_DAEMON_* first (and DAEMON takes SEC_WRITE_* under
+//     LEGACY_ALLOW_SEMANTICS)
 //   - Supports REQUIRED, PREFERRED, OPTIONAL, NEVER security levels
 //   - Supports multiple authentication methods (SSL, KERBEROS, TOKEN, etc.)
 //   - Supports multiple encryption methods (AES, BLOWFISH, 3DES)
@@ -442,7 +456,6 @@ func fsRootToCondor(cfg *config.Config) *bool {
 //
 // Deficiencies (to be addressed in follow-up):
 //   - Authorization settings (ALLOW_READ, DENY_WRITE, etc.) are separate from SecurityConfig
-//   - Context-specific overrides beyond CLIENT not yet fully implemented
 //   - NEGOTIATION security level not yet mapped
 func GetSecurityConfig(cfg *config.Config, command int, context string) (*security.SecurityConfig, error) {
 	if context == "" {
@@ -471,6 +484,11 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 		// path and the client rejects anything not under /tmp.
 		FSLocalDir:  fsAuthDir(cfg, "FS_LOCAL_DIR"),
 		FSRemoteDir: fsAuthDir(cfg, "FS_REMOTE_DIR"),
+		// UID_DOMAIN: the domain of an FS or CLAIMTOBE identity (user@UID_DOMAIN),
+		// on the server for the peer it authenticates and on the client for the
+		// name CLAIMTOBE claims, and of a mapped name without one. Empty leaves
+		// cedar's fallback, the host name, which is what UID_DOMAIN defaults to.
+		UIDDomain: configUIDDomain(cfg),
 	}
 
 	// Get authentication level
@@ -549,6 +567,17 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 //     for named issuer keys), the trust domain (TRUST_DOMAIN, defaulting to
 //     UID_DOMAIN), and the maximum token age (SEC_TOKEN_MAX_AGE).
 //
+// secContext is the authorization level whose SEC_<level>_* policy applies;
+// each setting falls back as GetSecurityConfig describes, so an unset
+// SEC_ADVERTISE_STARTD_AUTHENTICATION takes SEC_DAEMON_AUTHENTICATION before
+// SEC_DEFAULT_AUTHENTICATION. A daemon negotiates each command under the
+// policy of the level it is registered at with
+// daemon.Daemon.InstallSecurityLevels.
+//
+// UID_DOMAIN (set by GetSecurityConfig) is the domain of an FS peer's identity,
+// user@UID_DOMAIN. A daemon behind a shared port should build its configs with
+// daemon.Daemon.ServerSecurityConfig, which also sets the shared-port id.
+//
 // This is what a Go HTCondor daemon (e.g. a CCB server) should use so it
 // authenticates clients with the same policy and keys as the C++ daemons.
 func GetServerSecurityConfig(cfg *config.Config, command int, secContext string) (*security.SecurityConfig, error) {
@@ -622,18 +651,27 @@ type CredentialReloader interface {
 	Reload()
 }
 
-// getSecurityLevel retrieves a security level setting with context and default fallback
-// For example: SEC_CLIENT_AUTHENTICATION, falling back to SEC_DEFAULT_AUTHENTICATION
-func getSecurityLevel(cfg *config.Config, context, feature string) string {
-	// Try context-specific setting first
-	contextKey := fmt.Sprintf("SEC_%s_%s", context, feature)
-	if value, ok := cfg.Get(contextKey); ok {
-		return value
+// secSetting returns SEC_<level>_<feature> for the first level in secContext's
+// config-fallback chain that sets it (authz.ConfigChain: an ADVERTISE_* level
+// falls back to DAEMON, every level to DEFAULT), and the level that set it. As
+// SecMan::getSecSetting, it walks the chain one setting at a time, honours
+// LEGACY_ALLOW_SEMANTICS, and treats an empty value as unset.
+func secSetting(cfg authz.ConfigGetter, secContext, feature string) (value string, level authz.Perm, ok bool) {
+	legacyVal, _ := cfg.Get("LEGACY_ALLOW_SEMANTICS")
+	legacy := parseBool(legacyVal, false)
+	for _, lvl := range authz.ConfigChain(authz.Perm(strings.ToUpper(secContext)), legacy) {
+		if v, ok := cfg.Get(fmt.Sprintf("SEC_%s_%s", lvl, feature)); ok && strings.TrimSpace(v) != "" {
+			return v, lvl, true
+		}
 	}
+	return "", "", false
+}
 
-	// Fall back to DEFAULT setting
-	defaultKey := fmt.Sprintf("SEC_DEFAULT_%s", feature)
-	if value, ok := cfg.Get(defaultKey); ok {
+// getSecurityLevel retrieves a security level setting along secContext's
+// config-fallback chain (secSetting). For example: SEC_ADVERTISE_STARTD_AUTHENTICATION,
+// falling back to SEC_DAEMON_AUTHENTICATION, then to SEC_DEFAULT_AUTHENTICATION.
+func getSecurityLevel(cfg *config.Config, context, feature string) string {
+	if value, _, ok := secSetting(cfg, context, feature); ok {
 		return value
 	}
 
@@ -655,8 +693,9 @@ func getSecurityLevel(cfg *config.Config, context, feature string) string {
 // getSecurityMethods retrieves a comma-separated list of security methods
 // For example: SEC_CLIENT_AUTHENTICATION_METHODS, falling back to SEC_DEFAULT_AUTHENTICATION_METHODS
 func getSecurityMethods(cfg *config.Config, context, feature string) string {
-	// An operator's context-specific setting always wins.
-	if value, ok := cfg.Get(fmt.Sprintf("SEC_%s_%s", context, feature)); ok && value != "" {
+	// An operator's setting for the context, or a level it falls back to
+	// before DEFAULT (an ADVERTISE_* level's DAEMON), always wins.
+	if value, lvl, ok := secSetting(cfg, context, feature); ok && lvl != authz.PermDefault {
 		return value
 	}
 
@@ -763,17 +802,15 @@ func mapSecurityLevel(level string) security.SecurityLevel {
 //
 // Note on IDTOKENS vs TOKEN: in HTCondor's *config language* IDTOKENS
 // is the modern name for the same authentication mechanism whose
-// *wire-protocol name* is TOKEN. We want both config strings to
-// produce cedar's AuthToken, which serializes on the wire as "TOKEN"
-// — that's what every HTCondor schedd / collector recognizes. Mapping
-// IDTOKENS to cedar's AuthIDTokens (which serializes as the literal
-// "IDTOKENS") makes the schedd's SECMAN drop the offer and fall
-// through to whatever is left, typically SSL — see
-// cedar/security/auth.go where AuthIDTokens has the comment
-// `IDTokens not defined in HTCondor's condor_auth.h, map to
-// SciTokens for compatibility`. The C++ HTCondor client always
-// sends "TOKEN" regardless of what's in the config; this matches
-// that behavior.
+// *wire-protocol name* is TOKEN (SecMan::sec_char_to_auth_method maps
+// IDTOKENS, IDTOKEN and TOKENS to CAUTH_TOKEN). Every spelling maps to
+// cedar's AuthToken, which serializes on the wire as "TOKEN" -- what
+// every HTCondor schedd / collector recognizes, and what the C++
+// client sends whatever its config says. Since cedar v0.7.5,
+// AuthIDTokens is the same method too (the TOKEN bit, sent as
+// "TOKEN"); before it, cedar mapped AuthIDTokens to the SciTokens bit
+// and sent the literal "IDTOKENS", which an HTCondor peer does not
+// recognize. Mapping to AuthToken keeps one name for the method.
 func mapAuthMethods(methods string) []security.AuthMethod {
 	if methods == "" {
 		return []security.AuthMethod{}
@@ -867,6 +904,17 @@ func mapCryptoMethods(methods string) []security.CryptoMethod {
 func GetSecurityConfigOrDefault(ctx context.Context, cfg *config.Config, command int, secContext string, peerName string) (*security.SecurityConfig, error) {
 	// 1. Check if SecurityConfig is provided in context
 	if ctxSecConfig, ok := GetSecurityConfigFromContext(ctx); ok {
+		// A credential minted for the caller and about to expire is
+		// minted again rather than presented; see
+		// WithRenewableSecurityConfig. A refused renewal is the end of
+		// the caller's grant, and fails the connection.
+		fresh, err := renewSecurityConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if fresh != nil {
+			ctxSecConfig = *fresh
+		}
 		// Make a copy to avoid modifying the original
 		secConfig := &ctxSecConfig
 		// Update command for the specific operation

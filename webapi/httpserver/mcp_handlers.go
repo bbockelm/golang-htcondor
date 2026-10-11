@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -158,7 +159,8 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 		// is offered alongside TOKEN when the pool's auth methods include
 		// it). HTCondor still validates the token itself; we just don't lock
 		// the wire to TOKEN-only.
-		secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, htcToken, "", 0, "CLIENT", nil)
+		tag := mcpActorKey(htcToken)
+		secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, htcToken, "", 0, "CLIENT", h.credentialSessions.sessionCacheFor(tag))
 		if err != nil {
 			h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
 			h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
@@ -172,8 +174,10 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 		// session another user authenticated, and runs as them. The tag is a
 		// digest of the bearer rather than a claim out of it: a claim is
 		// attacker-chosen, so a forged `sub` would let an attacker land on a
-		// victim's session, which is the very thing being prevented.
-		secConfig.SecurityTag = mcpActorKey(htcToken)
+		// victim's session, which is the very thing being prevented. The
+		// bearer carries its own authorization limits, so its digest also
+		// changes whenever they do.
+		secConfig.SecurityTag = tag
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 
 		// Owner-scoped tools need to know who the caller is. Ask the schedd
@@ -213,7 +217,20 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	// Shared with the SSH gateway, which needs exactly this and must
 	// not grow its own copy -- see withCondorCredential for what a
 	// second copy would be free to forget.
-	ctx, err = h.withCondorCredential(ctx, username, token.GetGrantedScopes())
+	// Renewable while the access token behind this call is still active.
+	bearer, granted := bearerFromRequest(r), token.GetGrantedScopes()
+	ctx, err = h.withCondorCredential(ctx, username, granted, func(rctx context.Context) error {
+		return h.checkOAuth2Grant(rctx, bearer, granted)
+	})
+	if errors.Is(err, errNoAuthorizationLimits) {
+		// The grant's condor:/* scopes map to no authorization this
+		// server issues. That is the token's doing, not the server's.
+		h.logger.Warn(logging.DestinationHTTP, "MCP request refused: token grants no HTCondor authorization",
+			"username", username, "scopes", token.GetGrantedScopes())
+		h.writeOAuthError(w, http.StatusForbidden, "insufficient_scope",
+			"Token grants no HTCondor authorization this server issues")
+		return nil, nil, false
+	}
 	if err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Failed to prepare the caller's HTCondor credential",
 			"error", err, "username", username)
@@ -667,8 +684,15 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 
+			binding, err := h.bindLoginToBrowser(w, r)
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to bind login to browser", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
+				return
+			}
+
 			// Store authorize request for later retrieval
-			h.oauth2StateStore.Store(state, ar)
+			h.oauth2StateStore.StoreForBrowser(state, ar, "", binding)
 
 			// Build authorization URL
 			authURL := h.oauth2Config.AuthCodeURL(state)
@@ -746,6 +770,11 @@ func (h *Handler) grantableScopes(userGroups, requested []string) []string {
 // weigh a line that means nothing -- and re-granting it would keep it
 // alive for another refresh cycle. Dropped here, a deprecated scope
 // disappears from the grant the moment its client authorizes again.
+//
+// So does every other condor level but READ and WRITE, for the same
+// reason: mapCondorScopesToAuthz grants none of them, and a client
+// registered before registration refused them could still ask, and have
+// them shown pre-ticked.
 func withoutDeprecatedScopes(requested []string) []string {
 	deprecated := make(map[string]bool, len(oauth2DeprecatedScopes))
 	for _, scope := range oauth2DeprecatedScopes {
@@ -753,9 +782,13 @@ func withoutDeprecatedScopes(requested []string) []string {
 	}
 	out := make([]string, 0, len(requested))
 	for _, scope := range requested {
-		if !deprecated[scope] {
-			out = append(out, scope)
+		if deprecated[scope] {
+			continue
 		}
+		if strings.HasPrefix(scope, "condor:/") && len(mapCondorScopesToAuthz([]string{scope})) == 0 {
+			continue
+		}
+		out = append(out, scope)
 	}
 	return out
 }
@@ -1173,6 +1206,10 @@ func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Re
 			h.writeOAuthError(w, http.StatusBadRequest, "authorization_pending", "Authorization pending")
 			return
 		}
+		if errors.Is(err, ErrSlowDown) {
+			h.writeOAuthError(w, http.StatusBadRequest, "slow_down", "Polling too frequently; increase the interval by 5 seconds")
+			return
+		}
 		if errors.Is(err, fosite.ErrAccessDenied) {
 			h.writeOAuthError(w, http.StatusBadRequest, "access_denied", "Authorization denied by user")
 			return
@@ -1297,6 +1334,18 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.mcpDCRDisabled {
+		h.writeError(w, http.StatusForbidden, "Dynamic client registration is disabled on this server")
+		return
+	}
+	// Each registration is a row that lasts until the retention sweep
+	// finds it unused, and a bcrypt hash; see oauth2_rate_limits.go.
+	if !h.allowRegistration(r) {
+		h.writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable",
+			"Too many client registrations from this address; try again later")
+		return
+	}
+
 	ctx := r.Context()
 
 	// Parse registration request
@@ -1353,8 +1402,9 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate client ID and secret
-	clientID := fmt.Sprintf("client_%d", time.Now().UnixNano())
+	// Generate client ID and secret. The id is random rather than a
+	// timestamp, so one client's id says nothing about another's.
+	clientID := "client_" + generateRandomString(16)
 	clientSecret := generateRandomString(32)
 
 	// Hash the client secret with bcrypt (fosite expects bcrypt-hashed secrets)
@@ -1396,12 +1446,14 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		// without the group membership simply does not receive them.
 		"mcp:admin":     true,
 		"mcp:superuser": true,
+		// READ and WRITE only: they are the condor levels a token from
+		// this server can carry (mapCondorScopesToAuthz). Any other was
+		// accepted here, shown pre-ticked on the consent page, and
+		// granted nothing.
+		condorScopeRead:  true,
+		condorScopeWrite: true,
 	}
 	for _, scope := range regReq.Scopes {
-		// Allow condor:/* scopes
-		if strings.HasPrefix(scope, "condor:/") {
-			continue
-		}
 		if !supportedScopes[scope] {
 			h.writeError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported scope: %s", scope))
 			return
@@ -1489,10 +1541,11 @@ var oauth2AdvertisedScopes = []string{
 	// owner's ability to remove anybody's jobs.
 	"mcp:admin", "mcp:superuser",
 	// READ and WRITE only. The ADVERTISE_* levels were advertised as
-	// scopes but nothing in this server ever consulted them:
-	// advertise_to_collector publishes with the server's own collector
-	// client, not the caller's credential, so the scopes granted nothing
-	// and only lengthened the consent page.
+	// scopes and no tool checked them. advertise_to_collector sends the
+	// ad with the caller's own per-request credential, so whether that
+	// identity may advertise is the collector's ALLOW_ADVERTISE_*
+	// decision; the scopes only lengthened the consent page, and
+	// mapCondorScopesToAuthz no longer puts them in a minted token.
 	"condor:/READ", "condor:/WRITE",
 }
 
@@ -1535,7 +1588,6 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		// and keeps them.
 		"authorization_endpoint":        issuer + OAuth2EndpointPath("authorize"),
 		"token_endpoint":                issuer + OAuth2EndpointPath("token"),
-		"registration_endpoint":         issuer + OAuth2EndpointPath("register"),
 		"introspection_endpoint":        issuer + OAuth2EndpointPath("introspect"),
 		"revocation_endpoint":           issuer + OAuth2EndpointPath("revoke"),
 		"device_authorization_endpoint": issuer + OAuth2EndpointPath("device/authorize"),
@@ -1559,6 +1611,10 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		"scopes_supported":                      oauth2AdvertisedScopes,
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"code_challenge_methods_supported":      []string{"plain", "S256"},
+	}
+
+	if !h.mcpDCRDisabled {
+		metadata["registration_endpoint"] = issuer + OAuth2EndpointPath("register")
 	}
 
 	// Advertise Client ID Metadata Document support (an https:// client_id is
@@ -1666,6 +1722,14 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 	// Limit request body size for form parsing
 	setBodyLimit(w, r, 1<<20)
 
+	// Every authorization stores a device-code row, and this endpoint
+	// authenticates no client; see oauth2_rate_limits.go.
+	if !h.allowDeviceAuthorization(r) {
+		h.writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable",
+			"Too many device authorizations from this address; try again later")
+		return
+	}
+
 	ctx := r.Context()
 
 	// Parse client credentials from request
@@ -1680,6 +1744,14 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Failed to get client", "error", err, "client_id", clientID)
 		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "Client not found")
+		return
+	}
+	// RFC 8628 section 3.1: the client must be one allowed this grant.
+	// The token endpoint never checks it for this flow, so a client
+	// registered for the browser flow alone could otherwise start one.
+	if !slices.Contains(client.GetGrantTypes(), deviceCodeGrant) {
+		h.writeOAuthError(w, http.StatusBadRequest, "unauthorized_client",
+			"This client is not permitted to use the device authorization grant")
 		return
 	}
 
@@ -1863,9 +1935,16 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 				return
 			}
 
+			binding, err := h.bindLoginToBrowser(w, r)
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to bind login to browser", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+				return
+			}
+
 			// Store the return URL (current device verification URL)
 			returnURL := r.URL.String()
-			h.oauth2StateStore.StoreWithUsername(state, nil, returnURL, "")
+			h.oauth2StateStore.StoreForBrowser(state, nil, returnURL, binding)
 
 			// Build authorization URL
 			authURL := h.oauth2Config.AuthCodeURL(state)
@@ -1891,6 +1970,16 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 		// If user code is provided, look up the device code session and show consent page
 		if userCode != "" {
 			userCode = strings.ToUpper(strings.TrimSpace(userCode))
+
+			// Each lookup is a guess at a user code, so it spends the
+			// same budgets as the SSH approval screen's.
+			if !h.sshConsentAllow(r, username) {
+				h.logger.Warn(logging.DestinationSecurity,
+					"Rate-limiting device code lookups", "username", username)
+				h.writeError(w, http.StatusTooManyRequests,
+					"Too many attempts. Wait a moment and try again.")
+				return
+			}
 
 			// Get device code session by user code
 			_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
@@ -1986,20 +2075,30 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		// Get device code session by user code
-		_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
-		if err != nil {
-			h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
-			h.writeHTMLError(w, "Invalid or expired user code")
-			return
-		}
-
+		// Who is approving comes first: looking the code up before
+		// that would tell anybody at all whether a code exists.
 		username, userGroups := h.deviceApprovalIdentity(ctx, r)
 
 		// If still no username, authentication is required
 		if username == "" {
 			h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
 			h.writeHTMLError(w, "Authentication required")
+			return
+		}
+
+		if !h.sshConsentAllow(r, username) {
+			h.logger.Warn(logging.DestinationSecurity,
+				"Rate-limiting device code lookups", "username", username)
+			h.writeError(w, http.StatusTooManyRequests,
+				"Too many attempts. Wait a moment and try again.")
+			return
+		}
+
+		// Get device code session by user code
+		_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+			h.writeHTMLError(w, "Invalid or expired user code")
 			return
 		}
 
@@ -2912,7 +3011,6 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 		"exp", exp,
 		"authz", authz,
 		"scopes", scopes,
-		"signing_key_path", h.signingKeyPath,
 	)
 	// Mint via the local generator (NOT cedar's security.GenerateJWT)
 	// so we can backdate the `nbf` claim to absorb clock skew between

@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { ClassAd } from '@/lib/api';
 import {
+  adsInBatches,
   applyBatchFilter,
+  batchKey,
   filterAdsByStatus,
   groupIntoBatches,
+  jobTiming,
   statusRank,
   summarizeBatchUsage,
   summarizeJobs,
@@ -309,18 +312,34 @@ describe('statusRank', () => {
   });
 });
 
+// A run that started at T0, last sampled two hours later.
+const T0 = 1790000000;
+function counters(user: number, sys: number) {
+  return {
+    RemoteUserCpu: user,
+    RemoteSysCpu: sys,
+    JobCurrentStartExecutingDate: T0,
+    StatsLastUpdateTimeStarter: T0 + 7200,
+  };
+}
+
 describe('summarizeBatchUsage', () => {
   // One batch: two running jobs reporting usage, one idle, one held.
   const batch: ClassAd[] = [
     {
       ClusterId: 7, ProcId: 0, JobStatus: 2,
       RequestCpus: 4, RequestMemory: 4096, RequestDisk: 1048576, RequestGpus: 1,
-      CPUsUsage: 3.5, MemoryUsage: 1024, DiskUsage: 262144,
+      MemoryUsage: 1024, DiskUsage: 262144,
+      // Two hours into the run: 25,200 CPU-seconds is 3.5 cores. The
+      // CpusUsage beside it is what a cgroup v2 node really publishes
+      // for that job while it runs -- 100 times too small.
+      ...counters(24000, 1200), CpusUsage: 0.035,
     },
     {
       ClusterId: 7, ProcId: 1, JobStatus: 2,
       RequestCpus: 4, RequestMemory: 4096, RequestDisk: 1048576, RequestGpus: 1,
-      CPUsUsage: 0.5, ResidentSetSize: 524288, DiskUsage: 262144,
+      ResidentSetSize: 524288, DiskUsage: 262144,
+      ...counters(3400, 200), CpusUsage: 0.005,
     },
     {
       ClusterId: 7, ProcId: 2, JobStatus: 1,
@@ -341,6 +360,49 @@ describe('summarizeBatchUsage', () => {
     expect(row(u, 'CPUs').allocated).toBe(8);
     expect(row(u, 'CPUs').used).toBe(4);
     expect(row(u, 'CPUs').waiting).toBe(4);
+  });
+
+  it('reads CPU under the spelling the job ad uses', () => {
+    // ClassAd names are case-insensitive and a JSON key is not.
+    const u = summarizeBatchUsage([
+      { ClusterId: 9, ProcId: 0, JobStatus: 2, RequestCpus: 2, RequestMemory: 1024, ...counters(7000, 200) },
+      {
+        ClusterId: 9, ProcId: 1, JobStatus: 2, RequestCpus: 2, RequestMemory: 1024,
+        remoteusercpu: 3600, remotesyscpu: 0,
+        statslastupdatetimestarter: T0 + 7200, jobcurrentstartexecutingdate: T0,
+      },
+    ]);
+    expect(row(u, 'CPUs').used).toBe(1.5);
+  });
+
+  it('ignores a running job\'s CpusUsage, which is a hundred times too small', () => {
+    const u = summarizeBatchUsage([
+      { ClusterId: 9, ProcId: 0, JobStatus: 2, RequestCpus: 1, RequestMemory: 1024, ...counters(7000, 200), CpusUsage: 0.01 },
+    ]);
+    expect(row(u, 'CPUs').used).toBe(1);
+  });
+
+  it('trusts CpusUsage once the job has exited', () => {
+    // Transferring output: the starter recomputed it at exit.
+    const u = summarizeBatchUsage([
+      { ClusterId: 9, ProcId: 0, JobStatus: 6, RequestCpus: 1, RequestMemory: 1024, ...counters(7000, 200), CpusUsage: 0.97 },
+    ]);
+    expect(row(u, 'CPUs').used).toBe(0.97);
+  });
+
+  it('reports no CPU rather than a wild one for a run seconds old', () => {
+    const u = summarizeBatchUsage([
+      {
+        ClusterId: 9, ProcId: 0, JobStatus: 2, RequestCpus: 1, RequestMemory: 1024,
+        RemoteUserCpu: 3, RemoteSysCpu: 0, StatsLastUpdateTimeStarter: T0 + 5, JobCurrentStartExecutingDate: T0,
+      },
+      // A sample from before this run started belongs to the last run.
+      {
+        ClusterId: 9, ProcId: 1, JobStatus: 2, RequestCpus: 1, RequestMemory: 1024,
+        RemoteUserCpu: 0, RemoteSysCpu: 0, StatsLastUpdateTimeStarter: T0 - 600, JobCurrentStartExecutingDate: T0,
+      },
+    ]);
+    expect(row(u, 'CPUs').used).toBeUndefined();
   });
 
   it('falls back to ResidentSetSize when MemoryUsage is not a number', () => {
@@ -374,9 +436,84 @@ describe('summarizeBatchUsage', () => {
 
   it('counts output transfer as still holding the allocation', () => {
     const u = summarizeBatchUsage([
-      { ClusterId: 9, ProcId: 0, JobStatus: 6, RequestCpus: 3, RequestMemory: 1024, CPUsUsage: 0.1 },
+      { ClusterId: 9, ProcId: 0, JobStatus: 6, RequestCpus: 3, RequestMemory: 1024, CpusUsage: 0.1 },
     ]);
     expect(u.running).toBe(1);
     expect(row(u, 'CPUs').allocated).toBe(3);
+  });
+});
+
+describe('groupIntoBatches across access points', () => {
+  // The same cluster id on two access points is two batches: cluster ids
+  // are per access point.
+  const multi: ClassAd[] = [
+    { ClusterId: 1, ProcId: 0, JobStatus: 1, Owner: 'alice', schedd: 'ap1', job_id: '1.0@ap1' },
+    { ClusterId: 1, ProcId: 0, JobStatus: 2, Owner: 'alice', schedd: 'ap2', job_id: '1.0@ap2' },
+    { ClusterId: 1, ProcId: 1, JobStatus: 2, Owner: 'alice', schedd: 'ap2', job_id: '1.1@ap2' },
+    { ClusterId: 7, ProcId: 0, JobStatus: 1, Owner: 'alice', JobBatchName: 'run', schedd: 'ap1', job_id: '7.0@ap1' },
+    { ClusterId: 8, ProcId: 0, JobStatus: 1, Owner: 'alice', JobBatchName: 'run', schedd: 'ap2', job_id: '8.0@ap2' },
+  ];
+
+  it('keeps each access point\'s batches apart', () => {
+    const batches = groupIntoBatches(multi);
+    expect(batches).toHaveLength(4);
+    const one = batches.filter((b) => b.batchID === 1);
+    expect(one.map((b) => b.schedd).sort()).toEqual(['ap1', 'ap2']);
+    expect(one.find((b) => b.schedd === 'ap2')?.jobs.map((j) => j.id)).toEqual(['1.0@ap2', '1.1@ap2']);
+    expect(batches.filter((b) => b.name === 'run')).toHaveLength(2);
+  });
+
+  it('gives each row a distinct key', () => {
+    const keys = groupIntoBatches(multi).map(batchKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    // Single-AP keys stay the cluster id.
+    expect(batchKey(groupIntoBatches([{ ClusterId: 3, ProcId: 0 }])[0])).toBe(3);
+  });
+
+  it('matches the access point in the text filter', () => {
+    expect(applyBatchFilter(groupIntoBatches(multi), 'ap2').every((b) => b.schedd === 'ap2')).toBe(true);
+  });
+});
+
+describe('adsInBatches', () => {
+  it('matches a cluster together with its access point', () => {
+    const ads: ClassAd[] = [
+      { ClusterId: 12, ProcId: 0, JobStatus: 2, JobBatchName: 'keep', schedd: 'ap1', job_id: '12.0@ap1' },
+      { ClusterId: 12, ProcId: 0, JobStatus: 5, JobBatchName: 'drop', schedd: 'ap2', job_id: '12.0@ap2' },
+    ];
+    const kept = applyBatchFilter(groupIntoBatches(ads), 'keep');
+    expect(kept).toHaveLength(1);
+    expect(adsInBatches(ads, kept).map((a) => a.job_id)).toEqual(['12.0@ap1']);
+    expect(summarizeJobs(adsInBatches(ads, kept)).counts.held ?? 0).toBe(0);
+  });
+
+  it('keys on the cluster alone in single-AP mode', () => {
+    const ads: ClassAd[] = [
+      { ClusterId: 12, ProcId: 0, JobBatchName: 'keep' },
+      { ClusterId: 13, ProcId: 0, JobBatchName: 'drop' },
+    ];
+    expect(adsInBatches(ads, applyBatchFilter(groupIntoBatches(ads), 'keep'))).toEqual([ads[0]]);
+  });
+});
+
+describe('jobTiming', () => {
+  it('times a running job from when its executable began', () => {
+    expect(
+      jobTiming({ JobStatus: 2, JobCurrentStartDate: 1000, JobCurrentStartExecutingDate: 1060, QDate: 10 }),
+    ).toEqual({ kind: 'running', since: 1060 });
+    // Before the executable starts (input still transferring), from the
+    // start of the run.
+    expect(jobTiming({ JobStatus: 2, JobCurrentStartDate: 1000 })).toEqual({ kind: 'running', since: 1000 });
+  });
+
+  it('times an idle job from when it last became idle, else from submission', () => {
+    // Evicted at 5000: the wait restarts there, not at submission.
+    expect(jobTiming({ JobStatus: 1, QDate: 10, EnteredCurrentStatus: 5000 })).toEqual({ kind: 'waiting', since: 5000 });
+    expect(jobTiming({ JobStatus: 1, QDate: 10 })).toEqual({ kind: 'waiting', since: 10 });
+  });
+
+  it('has nothing to say about other states or a missing time', () => {
+    expect(jobTiming({ JobStatus: 5, EnteredCurrentStatus: 5000 })).toBeUndefined();
+    expect(jobTiming({ JobStatus: 2 })).toBeUndefined();
   });
 });

@@ -122,12 +122,21 @@ Three authentication channels, in precedence order:
 
 1. **API key** — `Authorization: Bearer htca-v1-{key_id}-{secret}`.
    Admin-mintable bearer tokens for non-interactive callers
-   (Prometheus, scripts, CI). Scopes gate access — currently just
-   `metrics` for `/metrics`. Mint via the admin UI at
+   (Prometheus, scripts, CI). Scopes gate access: `metrics` for
+   `/metrics`, `condor:/READ` and `condor:/WRITE` for the routes that
+   reach HTCondor. A key acts as its creator only if it carries a
+   `condor:/*` scope; a `metrics`-only key is refused everywhere but
+   `/metrics` and `/readyz`. Mint via the admin UI at
    `/admin/api-keys`, or `POST /api/v1/admin/api-keys`.
 2. **OAuth2 / OIDC** — for browsers and MCP clients. The server
    embeds its own IDP (`/idp/*`) and also accepts upstream OIDC
-   providers via `HTTP_API_OAUTH2_*` config.
+   providers via `HTTP_API_OAUTH2_*` config. An access token this
+   server issued is held to its granted scopes on the REST routes that
+   reach HTCondor, as an API key is: `condor:/READ` for reads and
+   `condor:/WRITE` for writes, or, on a grant with no `condor:/*`
+   scope, `mcp:read` / `mcp:write`. The job and Jupyter proxies, job
+   SSH and `/warm` run code in the job and need WRITE whatever the
+   method. A token granted none of these is refused.
 3. **Schedd JWT / pool token** — for `condor_*`-tool–style clients
    that already hold a valid HTCondor token.
 
@@ -170,6 +179,19 @@ Three behaviours worth knowing before turning this on:
   up to the first comma, which is what `os/user` reports on every
   platform. For `tannenba:x:20013:20013:tatannen:...` the value matched
   is `tatannen`; for `...:Tannenbaum, Todd,,:...` it is `Tannenbaum`.
+
+**GECOS can be user-writable.** `chfn` lets a user change their own
+full name where `/etc/login.defs` allows it (`CHFN_RESTRICT`; check the
+host, not the distribution's reputation). There, a local user who sets
+their name to someone else's subject either makes that subject
+ambiguous, so its owner cannot log in, or -- when the owner's account
+carries no matching GECOS -- becomes the account it maps to. On such a
+host set `CHFN_RESTRICT rwh` (room and phone numbers only) in
+`/etc/login.defs`. Accounts served by SSSD or another directory cannot
+be changed this way. Where token subjects are login names, put
+`username` first (`username,gecos`): a subject that is somebody's login
+name then never consults GECOS at all. The shadowed pairs in the
+startup log are worth watching either way.
 
 An ePPN is scoped (`bockelman@wisc.edu`) and a GECOS or login name
 usually is not, so the two cannot match without
@@ -347,7 +369,8 @@ Matching is case-insensitive.
 | `HTTP_API_SUPERUSER_GROUP` | Superuser mode (see below). Unset disables the feature. |
 
 `HTTP_API_MCP_READ_GROUP` and `HTTP_API_MCP_WRITE_GROUP` narrow MCP
-further, and take lists on the same terms.
+further, and take lists on the same terms. The write group also decides
+`condor:/WRITE`: a user it denies `mcp:write` is denied that too.
 
 Web interface access and MCP access are **separate**. They were one knob,
 so granting somebody the browser necessarily granted them MCP; a site can
@@ -407,6 +430,18 @@ turns it off for everyone. Actions on the operator's *own* jobs are unaffected
 and are not treated as impersonation. Membership is re-checked on every action:
 an armed operator who has since left `HTTP_API_SUPERUSER_GROUP` (and leads no
 project) gets a 403 on their next action, and the mode is turned off.
+
+**Job applications are closed while the mode is on.** VS Code, JupyterLab and
+anything else served through `/api/v1/jobs/{id}/proxy/` or
+`/api/v1/jupyter/instances/{id}/proxy/` are served from this server's own
+origin, so script the job sends back runs in the browser with the viewer's
+session. While the session is armed -- as a superuser or as a project lead --
+those routes, and `/api/v1/jobs/{id}/warm`, answer 403 for every job,
+including the operator's own. Every request is checked, so turning the mode on
+with an app already open refuses that app's next request and its next
+WebSocket upgrade. A connection already established before the mode was
+turned on is not closed, and script already loaded in an open app tab keeps
+running: close app tabs before turning the mode on.
 
 **Which identity acts.** If the operator is themselves listed in the schedd's
 `QUEUE_SUPER_USERS`, the server authenticates as them, and the schedd's own
@@ -496,8 +531,7 @@ compare case-insensitively. Groups are the session's, from
 a quote, a backslash or a control character is ignored.
 
 **What a lead can do**, while the mode is on: hold, release and remove another
-user's job in a project they lead, tail its output, ssh to it, and warm its
-connection ahead of time (`/warm`). Bulk hold
+user's job in a project they lead, tail its output, and ssh to it. Bulk hold
 and release reach the lead's own jobs plus their projects' jobs, whatever the
 constraint says. A job with no `ProjectName`, or one in another project, is
 refused with a 403, and so is a job that does not exist (with the same
@@ -518,10 +552,8 @@ reasons name the project:
 Held by alice@example.org via the web UI (project lead for Physics, acting for bob@example.org) (by user condor@example.org)
 ```
 
-**What a lead cannot do:** open another user's interactive app through the job
-proxy (VS Code and other proxied ports). The app is served from this server's
-own origin, so code the job's owner controls would run in the lead's browser
-with the lead's session. Global superusers keep that access.
+**What a lead cannot do:** open any job application while the mode is on,
+the same as a superuser (see [Superuser mode](#superuser-mode)).
 
 **Reading.** Without turning the mode on, a lead may list (and open) their own
 jobs plus their projects' jobs by choosing *Everyone* on the jobs page, the way
@@ -607,6 +639,10 @@ identity); other fields are read-only.
   grants and the `code` response type; anything else is refused with
   `invalid_client_metadata`. `client_credentials` and token exchange are
   enabled by an operator in the admin UI, never by self-registration.
+  Registration is unauthenticated, so it is limited to 30 per hour from one
+  address, and a registered client that has obtained no token within a week
+  is deleted unless an operator has annotated it or changed its grants.
+  `HTTP_API_MCP_DCR=false` turns registration off.
 - **Client ID Metadata Document (CIMD)** — instead of registering, a client
   identifies itself by an `https://` URL as its `client_id`; the server fetches
   a client-metadata document from that URL and treats it as a **public** client
@@ -614,7 +650,10 @@ identity); other fields are read-only.
   DCR. The fetch is hardened against SSRF (https-only, private/link-local/cloud-
   metadata addresses refused, no redirects, timeout + size cap), and the
   document must be self-consistent (its `client_id` equals the URL). On by
-  default; see the knobs below to disable or restrict it.
+  default; see the knobs below to disable or restrict it. **In production,
+  set `HTTP_API_MCP_CIMD_ALLOWED_HOSTS`** to the hosts of the clients you
+  expect: unset, any caller can make this server fetch from any public host
+  (each source address is limited to 20 uncached lookups a minute).
 - **`client_credentials`** — a confidential client acting as itself, with no end
   user. Enable the grant in the admin UI and set a **service identity**: that
   identity becomes the subject of the short-lived HTCondor IDTOKEN minted for
@@ -903,6 +942,27 @@ Put the office and the monitoring host in
 `HTTP_API_SSH_GATEWAY_LOCKOUT_TRUSTED` so testing the gateway cannot
 lock you out of it.
 
+### Behind a load balancer
+
+The gateway has to see each client's own address. It terminates the TCP
+connection itself and does not accept the PROXY protocol, so nothing
+upstream can tell it who the client is: pass the connection through at
+layer 4 with the source address intact (`externalTrafficPolicy: Local`
+on a Kubernetes Service, or no SNAT on the path). Behind anything that
+rewrites the source -- a TCP proxy, SNAT, a NAT gateway -- every client
+arrives from the same address, and everything counted per source is
+counted for the whole site at once:
+
+- At most four logins may be waiting at the approval prompt from one
+  address. The fifth person to connect is refused until one of those
+  finishes or its device code expires.
+- The failure budget is shared. One user's abandoned logins lock
+  everyone out, for `15m` the first time and up to a day.
+
+Listing the balancer in `HTTP_API_SSH_GATEWAY_LOCKOUT_TRUSTED` stops the
+lockouts by turning them off for every client behind it, and leaves the
+four-login limit in place.
+
 ### Certificates, for scripts and for not approving every connection
 
 `BatchMode=yes` refuses keyboard-interactive outright, so a script cannot use
@@ -1005,6 +1065,11 @@ certificates usually work:
   `MaxSessions`, and every terminal for one job shares it. Port and socket
   forwards do not count against it.
 - Each `ssh` is its own device authorization, so each asks for approval.
+- **Port forwards reach whatever the job can.** `ssh -L` and socket
+  forwards are dialled from inside the job, as `condor_ssh_to_job -L`
+  does, to any host and port or socket path the job could reach itself.
+  They carry the user's own authority over their own job, not the
+  server's.
 
 ## Disabling tools
 
@@ -1212,6 +1277,14 @@ at `/openapi.json`.
 - `GET /api/v1/jobs/{id}` — retrieve one
 - `PUT /api/v1/jobs/{id}/input` — upload input tarball
 - `GET /api/v1/jobs/{id}/output` — download output tarball
+- `GET /api/v1/jobs/{id}/runtime-estimate` — how long the job is likely
+  to run; see [Runtime estimates](#runtime-estimates)
+- `POST /api/v1/jobs/runtime-estimates` — the same for up to 5000 jobs at
+  once; see [Runtime estimates](#runtime-estimates)
+
+**Pool** (authenticated; every signed-in user)
+- `GET /api/v1/pool/drain-estimates` — when each execute node would be
+  empty if drained now; see [Drain estimates](#drain-estimates)
 
 **Templates** (browser-submission UI)
 - `GET /api/v1/templates` — list
@@ -1225,7 +1298,10 @@ at `/openapi.json`.
   authentication method, a session id and the daemon's valid commands, and
   unauthenticated it answered for the service account. Use `/readyz` for an
   unauthenticated health check — it reads the periodic pinger's cached
-  result and is what the Kubernetes probes use.
+  result and is what the Kubernetes probes use. Without a credential it
+  reports each daemon's status only; an admin session or an API key with
+  the `metrics` scope also gets the names, addresses and error text behind
+  them.
 - `GET /api/v1/schedd/ping`, `GET /api/v1/collector/ping` — the same, one
   daemon each
 - `GET /metrics` — Prometheus exposition (requires the `metrics`
@@ -1394,6 +1470,167 @@ metrics key.
   agents. The standalone `htcondor-mcp` binary speaks the same MCP
   protocol over stdio. See [mcpserver/README.md](../webapi/mcpserver/README.md).
 
+### Runtime estimates
+
+`GET /api/v1/jobs/{id}/runtime-estimate` estimates how long a job will run
+from the runtimes of **the same owner's** similar jobs that have already
+completed, and the MCP `get_job` tool carries the same answer as
+`runtime_estimate`. It needs the [htcondordb](#further-reading) mirror:
+history is read from the mirror's archive every
+`HTTP_API_RUNTIME_ESTIMATE_INTERVAL` (default `5m`), never from the
+schedd, because a background `condor_history` scan would cost the access
+point more than the estimates are worth. Without a mirror the feature is
+off; with a mirror that is stale or has a history gap, the estimates in
+memory keep answering and the read is retried next interval.
+
+Each completed job is filed under a ladder of groups, from most to least
+specific: its cluster, its exact command line (directories, URLs and
+hashes dropped), the same command line with every number masked, its
+batch name less any run number, its submit directory, its program, and
+the owner's jobs as a whole; the access point's jobs as a whole are the
+last resort. For an interpreter (`python`, `bash -c`, `apptainer exec`,
+...) the program is the script it runs. An estimate is the median of the
+most recent 100 runtimes in one group — a single earlier run is enough,
+since they are the owner's own jobs; the access point's group needs 30.
+Which group answers is chosen per owner by how well each has predicted
+that owner's jobs so far. Each completed job is scored as it would have
+been estimated when it was submitted and when it started, from only the
+jobs that had finished by then, so the record matches the moment a
+question is actually asked. The likely range (`p10_seconds` to
+`p90_seconds`) comes from those past estimation errors — the owner's,
+pooled with the access point's for the same group level, at the same
+point in a job's life (waiting or running) — widened to the group's own
+spread when that is larger. Only completed
+jobs that exited 0 count; DAGMan and other scheduler/local-universe jobs
+are left out. Nothing about another job — its command, id or owner — is
+ever returned.
+
+```json
+{
+  "job_id": "1234.0",
+  "available": true,
+  "estimate_seconds": 2710,
+  "p10_seconds": 1840,
+  "p90_seconds": 5120,
+  "basis": {"level": "template", "sample_count": 64},
+  "rough": false,
+  "elapsed_seconds": 900,
+  "remaining_seconds": 1810,
+  "exceeded_history": false,
+  "model": {"trained_through": "2026-10-10T17:42:11Z", "jobs_ingested": 48213}
+}
+```
+
+The web UI's job page shows it under the job's status, as "Expected run
+time", for a waiting or running job when there is an estimate, and
+nothing otherwise.
+
+`elapsed_seconds` and `remaining_seconds` appear only for a running job.
+A running job that has outlived the typical run is re-estimated from the
+runs in its group that lasted at least as long; once it has outlived
+nearly all of them, `exceeded_history` is true and no remaining time is
+given. When there is no estimate the response is still 200, with
+`available: false` and a `reason`: `disabled`, `model_warming_up` (the
+history has not been read yet) or `insufficient_history`.
+
+`rough` is true when the answer came from one of the broad groups — the
+same program whatever its arguments, the owner's jobs as a whole, or the
+access point's — which on a replayed access point were within a factor of
+two of the actual runtime only a quarter to a third of the time, against
+about three quarters for the others; the web UI labels those "rough
+guess". `basis.new_command` is true when none of the owner's recently
+completed jobs ran the same program.
+
+`POST /api/v1/jobs/runtime-estimates` with `{"jobs": ["1234.0", "1234.1",
+...]}` answers for up to 5000 jobs at once (more is a 413), which is how
+the web UI's jobs listing asks: once per refresh for the waiting and
+running jobs it shows. The answer is `{"available": true, "estimates":
+{"1234.0": {...}, ...}, "model": {...}}`, each estimate shaped like the
+single-job answer without `job_id` and `model`. Only jobs the caller may
+read that are waiting or running are answered; any other id is simply
+absent. A server without the feature, or one that has not read its
+history yet, answers `{"available": false, "reason": "disabled"}` (or
+`"model_warming_up"`) without looking anything up. It is a read, and an
+API key or token with only `condor:/READ` may use it.
+
+Metrics, all prefixed `htcondor_api_runtime_estimate_`: `enabled`,
+`jobs_ingested_total`, `last_refresh_timestamp_seconds`,
+`trained_through_timestamp_seconds`, `refresh_errors_total`,
+`refresh_truncations_total`, `keys{level}`, `owners`, and the estimator's
+running record of itself, `scored_total{level}` and
+`within_2x_total{level}`: every completed job is first scored against the
+estimate it would have got when it was submitted, so
+`within_2x_total / scored_total` is live accuracy at submit.
+
+### Drain estimates
+
+`GET /api/v1/pool/drain-estimates` answers, for every execute node that is
+running jobs or draining, "if this node were drained now, when would it be
+empty?" A drain lets each job run until it finishes or its retirement limit
+runs out, whichever comes first, then evicts it. The web UI's Pool page
+shows it as the "Empty if drained now" column and in its summary cards.
+
+Two numbers go into each job's answer:
+
+- **Its retirement deadline**, known for every job: the startd publishes
+  `RetirementTimeRemaining` on each claimed slot, counted from the ad's
+  `MyCurrentTime`. A job with a minute or less left (a 30-second limit, or
+  one that has already run out — backfill slots have none) is counted in
+  `evicted_on_drain` and leaves at its deadline.
+- **When it would finish**, known only for jobs submitted from this access
+  point (matched by the schedd name in the slot's `GlobalJobId`), from the
+  [runtime estimates](#runtime-estimates). On a shared pool most jobs come
+  from elsewhere and have none.
+
+So a node whose jobs all have a known end gets `likely_empty_seconds`; one
+that also runs jobs nobody can estimate gets `at_least_seconds` (the
+estimated part) and `unknown_up_to_seconds` (the latest retirement deadline
+among the rest). `at_most_seconds` is the startd's own
+`ExpectedMachineGracefulDrainingCompletion` when it publishes one, else the
+latest deadline. `exceeded` counts jobs running longer than comparable jobs
+have. With runtime estimates off (`HTTP_API_RUNTIME_ESTIMATE_INTERVAL=0`, or
+no mirror), the response has the same shape with `estimates_available:
+false` and the retirement bounds alone.
+
+```json
+{
+  "generated_at": "2026-10-11T19:10:00Z",
+  "age_seconds": 12,
+  "stale": false,
+  "estimates_available": true,
+  "access_point": "ap2001.chtc.wisc.edu",
+  "summary": {"machines": 1, "jobs_running": 4, "jobs_estimated": 2, "jobs_from_this_ap": 2,
+              "cores_freeing_next_hour": 8, "draining_nodes": 0, "draining_likely_empty_within_2h": 0},
+  "machines": [{
+    "machine": "e2231.chtc.wisc.edu", "draining": false,
+    "jobs_total": 4, "jobs_estimated": 2, "jobs_from_this_ap": 2,
+    "jobs_unknown_end": 2, "jobs_unknown_from_other_aps": 2,
+    "likely_empty_seconds": 5400, "likely_empty_at": "2026-10-11T20:40:00Z",
+    "at_least_seconds": 5400, "at_most_seconds": 259200, "at_most_at": "2026-10-14T19:10:00Z",
+    "unknown_up_to_seconds": 233000, "evicted_on_drain": 0, "exceeded": 0,
+    "expected_ends": [{"seconds": 2700, "usually_by_seconds": 5400, "cpus": 4},
+                      {"seconds": 5400, "usually_by_seconds": 8100, "cpus": 4}]
+  }]
+}
+```
+
+`?machine=NAME` answers for one node and adds `slots`, one per running job:
+`name`, `owner` (`RemoteOwner`), `submitted_from` (the schedd in its
+`GlobalJobId`), `from_this_ap`, `running_seconds`, `expected_end` and
+`usually_by` (about 90% of comparable jobs are done by then) when estimated,
+`exceeded`, `retirement_deadline` and `evicted_on_drain`. Without it the
+slots are left out, since a large pool has one per running job.
+
+The answer covers every user's jobs and every signed-in user may read it,
+so it is not computed as any of them: one computation, run as this daemon,
+reads the claimed slots from the collector and this access point's running
+jobs (`JobStatus == 2`, from the htcondordb mirror when there is one, else
+one schedd query), and is served to everyone for a minute. A request only
+waits for that answer. If a refresh fails, the last good answer is served
+with `stale: true` and an `error`; if the running jobs cannot be read, the
+answer has the retirement bounds and an `error` saying the estimates are
+missing. Not available in multi-AP mode.
+
 ## Example calls
 
 ```bash
@@ -1529,6 +1766,204 @@ does not work:
 HTCondor shared port open for CCB connection reversal listen=9618 advertised=htcondor-api.example.org:9618
 ```
 
+## Multi-AP mode
+
+One server can front every access point whose schedd ad matches a
+collector constraint, instead of one schedd:
+
+```
+HTTP_API_SCHEDD_CONSTRAINT = regexp("^ap[0-9]+\\.example\\.org$", Name)
+```
+
+Reads come from a federation hub: an htcondordb running with
+`HTCONDORDB_FEDERATE_SCHEDD_CONSTRAINT` that fans every access point's own
+htcondordb (its spoke) into one catalog. See the htcondordb federation
+documentation for running one; give it the same constraint. Actions go to
+the schedd of the access point the job is on, as you.
+
+What it serves:
+
+| Request | Answer |
+| --- | --- |
+| `GET /api/v1/jobs`, MCP `query_jobs` | Your queued jobs on every access point, from the hub. `?schedd=` (MCP `schedd`) limits it to one. Pages continue with `next_page_token`. |
+| `GET /api/v1/jobs/archive`, MCP `query_job_archive` | Your completed jobs, newest first by `EnteredHistoryTime`. Pages continue with `next_page_token`; `before_cluster`/`before_proc` are refused, because a cluster id is unique only within one access point. |
+| `GET /api/v1/jobs/{id}`, MCP `get_job` | One of your jobs, queued or completed (`archived`). |
+| MCP `aggregate_jobs` | Counts over `jobs` or `history`; group by `ScheddName` for a per-access-point count. |
+| `GET /api/v1/aps`, MCP `list_access_points` | The access points, whether each is in the collector, how current the hub's copy of each is, and whether it trusts this server (`trust`). |
+| One job: `DELETE`/`PATCH /api/v1/jobs/{id}`, `POST .../hold`, `.../release`, `.../warm`; `GET .../stdout`, `.../stderr`, `.../log`, `.../peek`, `.../dag`, `.../files/{name}`, `.../output`, `.../watch`, `.../ssh`; `PUT .../input`, `POST .../input/multipart`, `.../input/share`, `.../output/share`; `/api/v1/jobs/{id}/proxy/...` | As in single-AP mode, against the job's own access point. `{id}` must be complete. |
+| MCP `remove_job`, `hold_job`, `release_job`, `edit_job`, `get_job_stdout`, `get_job_stderr`, `get_job_output`, `upload_job_input`, `create_input_upload_url`, `create_output_download_url`, `tail_job_output`, `exec_in_job` | As in single-AP mode, against the job's access point. `job_id` must be complete, or bare with `schedd`. |
+| Bulk: `POST /api/v1/jobs/hold`, `.../release`, `DELETE /api/v1/jobs`, `PATCH /api/v1/jobs`, MCP `remove_jobs` | Run on every access point; see below. |
+| `GET /api/v1/share/output`, `PUT /api/v1/share/input` | A share URL acts on the access point it was minted for. |
+
+Everything else -- submit, DAGs, interactive sessions, Jupyter, apps,
+credentials, watches (including watch share URLs), match analysis, the
+dashboard, the pool pages and chat -- answers **501** ("not available in
+multi-AP mode yet"), and the MCP catalogue offers only the tools above
+plus `whoami`, `get_version`, `doc_*` and `skills_*`. Superuser mode is not
+available.
+
+**Actions need a complete id.** A mutation, a sandbox read, a share URL or
+an SSH connection naming only `123.0` is a **400** with
+`"reason": "incomplete_job_id"` and your jobs with that number as
+`candidates` -- it is never resolved for you, because the hub may know
+your finished `123.0` on ap1 and not yet the `123.0` you just submitted on
+ap3, and a wrong guess on remove cannot be undone. An access point the id
+names but this server cannot act on is its own error, never "job not
+found": `unknown_access_point` (404, not in the set),
+`access_point_absent` (503, not in the collector right now) or
+`access_point_untrusted` (503, "this access point does not trust this API
+server's tokens"). Action responses carry the complete `job_id`.
+
+**Bulk actions** run on every access point with bounded concurrency and a
+per-access-point timeout, and report each:
+
+```json
+{"message": "Bulk job hold completed on every access point",
+ "constraint": "JobStatus == 1",
+ "results": {"total": 4, "success": 4, "not_found": 0, "permission_denied": 0,
+             "bad_status": 0, "already_done": 0, "error": 0},
+ "jobs_edited": 0,
+ "complete": true,
+ "aps": [
+   {"schedd": "ap1.example.org", "status": "acted", "results": {"total": 2, "success": 2, ...}},
+   {"schedd": "ap2.example.org", "status": "skipped",
+    "reason": "the federation hub's copy of this access point is 3s behind (within 30s) and holds no matching job"},
+   {"schedd": "ap3.example.org", "status": "failed", "error": "..."}]}
+```
+
+`status` is `acted`, `no_match`, `skipped`, `failed`, `unreachable` (not in
+the collector; not contacted) or `untrusted` (not contacted). By default
+every usable access point is contacted. Setting
+`HTTP_API_BULK_FRESH_SECONDS` above 0 lets the hub narrow the fan-out: an
+access point is then skipped only when it is provably empty -- the hub
+reports it fresh with a measured lag within that many seconds, its jobs
+stream connected and error-free, and it holds no row that could match your
+scoped constraint there (a row the hub cannot evaluate, such as one
+missing `Owner` or using a function the hub lacks, counts as a possible
+match) -- and this server has not changed anything on it within the
+tolerance plus a minute. That last record is per process: it is lost on a
+restart and not shared between replicas, so a skip can miss a change
+another replica made moments ago. A stale, absent or unmeasured source,
+or a hub that does not answer within 5 seconds, is never proof. The
+fan-out runs to the end even if the client disconnects (bounded at five
+minutes) and is logged per access point. The answer is 200; 404 when
+every access point was accounted for and nothing matched; 502 when no
+access point could be acted on; 503 when no access point is known yet.
+`complete: false` means some access point was not covered -- see `aps`.
+The constraint is confined to your jobs per access point exactly as in
+single-AP mode, and one that does not parse is a 400 before anything is
+contacted.
+
+**Administrators** are scoped per access point: this server's own grant
+(admin group, `mcp:admin`, `mcp:superuser`, `MCP_ADMIN_USERS`) is
+necessary, and the caller must also be in that access point's
+`QUEUE_SUPER_USERS`, read from it. A queue superuser on ap1 reads and acts
+on other users' jobs there and nowhere else. Hub reads have no admin view.
+Project leads see their own jobs only.
+
+**Trust.** Every member is probed when it joins, when its address changes
+and every ten minutes (an untrusted one every minute): a token minted from
+the signing key for `htcondor-api-trust-probe@UID_DOMAIN` must be accepted
+and reported back as exactly that identity, and the member must report a
+`UID_DOMAIN` equal to this server's. A member that refuses the token,
+reports another identity, or will not or cannot report a matching
+`UID_DOMAIN` is `untrusted` in `/api/v1/aps` and in every `sources` block;
+actions on it fail fast, and bulk actions report it. A member that does
+not answer at all stays `unknown`. Only trusted members identify callers
+(a bearer token's identity is asked of them); a request routed to an
+access point is identified by that access point alone.
+
+**Each access point's own verdict.** A refresh revokes a grant only when
+every trusted member's user record (`condor_qusers -disable`) says so. A
+user disabled on one access point is still refused there: requests routed
+to it -- actions, sandbox reads, SSH, share URLs, bulk legs -- answer 403
+`"reason": "access_point_denied"`, while the other access points serve
+them. Verdicts are reused for a minute.
+
+**Identity in queries.** Routed reads and actions are confined on the
+`User` attribute (`owner@UID_DOMAIN`), not the bare `Owner`, and an
+identity in another domain is refused.
+
+**Per-access-point state.** Rate limits (`SCHEDD_QUERY_RATE_LIMIT`,
+`SCHEDD_QUERY_PER_USER_RATE_LIMIT`) apply per access point, so one busy
+access point does not spend the others' budget. Share URLs carry the
+access point inside their signature; a multi-AP server refuses one without
+it. Job transports, DAG structures and per-job watches are kept per access
+point.
+
+**SSH gateway.** Connect to a job as its complete id:
+`ssh 123.0@ap1.example.org@gateway.example.org` (OpenSSH splits the user
+from the host at the last `@`). A bare `123.0` is refused with your
+candidates. Interactive-session names (and a bare `ssh gateway`) are
+refused before any login is started, until submit is available here.
+
+**Proc-less ids.** `123@ap1.example.org` names a whole cluster for an input
+upload (`PUT .../input`, `POST .../input/multipart`, `.../input/share`), as
+`123` does with one schedd, and is a 400 everywhere else.
+
+**Job ids.** A job is identified by schedd, cluster and proc together: two
+access points each have a `123.0`. Every job in a response carries
+`schedd`, `cluster` and `proc` as separate members, plus `job_id`, the
+single-token form used in URLs (`123.0@ap40.example.org`; the text before
+the first `@` is `cluster.proc`, the rest is the schedd name). An
+incomplete id such as `123.0` is accepted by `GET /api/v1/jobs/{id}` and
+`get_job` when exactly one of your jobs, queued or completed, has it; the
+answer carries the complete id. Several matches are a **409** whose body
+lists them:
+
+```json
+{"error": "Conflict", "code": 409,
+ "message": "job 123.0 exists on 2 access points; name one",
+ "candidates": [
+   {"schedd": "ap1.example.org", "cluster": 123, "proc": 0, "job_id": "123.0@ap1.example.org", "archived": false},
+   {"schedd": "ap2.example.org", "cluster": 123, "proc": 0, "job_id": "123.0@ap2.example.org", "archived": true}]}
+```
+
+**Freshness.** Every list response carries a `sources` block naming each
+access point whose rows are not known to be current:
+
+```json
+"sources": {"aps": 52, "fresh": 50, "degraded": [
+  {"schedd": "ap17.example.org", "state": "stale", "staleness_seconds": 412},
+  {"schedd": "ap31.example.org", "state": "absent", "reason": "the federation hub does not hold this access point"}]}
+```
+
+`state` is the hub's (`stale`, `absent`, `untrusted`, `retiring`), or
+`absent` for an access point the hub does not list. By default a degraded
+access point's rows are included as the hub holds them;
+`HTTP_API_MULTI_AP_STALE = exclude` leaves them out, and the access point is
+still listed in `degraded`. Nothing is omitted silently. A single job on an
+access point the hub does not hold fresh is read from that access point's
+own htcondordb if it is current, else from its schedd as you; the response
+says which (`source`: `hub`, `spoke` or `schedd`).
+
+**Scope.** Every hub read is confined to your own jobs on the `User`
+attribute (`owner@UID_DOMAIN`), whatever constraint you pass. An identity in a domain other than `UID_DOMAIN`
+(compared case-insensitively, as HTCondor does) is refused with a 403
+rather than read as the same name in `UID_DOMAIN`. The access points must share one `UID_DOMAIN`,
+`TRUST_DOMAIN` and pool signing key: a bearer token's identity is
+confirmed by asking an access point's schedd, and any one of them can
+answer.
+
+**The access point set** is polled from the collector every 60 seconds. An
+access point whose ad disappears stays listed (`in_collector: false`)
+with its last address; nothing is removed because the collector stopped
+mentioning it.
+
+**Health.** `/readyz` is ready when the hub answers and at least one
+access point matches, and lists every access point's state to an admin
+session or a `metrics` API key (anyone else gets the count); one access
+point being down never makes the server unready. The collector ad carries
+`ScheddConstraint` and `ScheddCount` instead of `ScheddName`.
+
+The web UI shows an access point column and filter on the job and
+archive lists, which access points are behind, and an Access Points page;
+it offers no actions yet.
+
+`HTTP_API_SCHEDD_CONSTRAINT` together with `-schedd`, `-schedd-addr` or
+`SCHEDD_NAME` is a startup error. `UID_DOMAIN` and a collector are
+required.
+
 ## Configuration
 
 Settings live in HTCondor config (`condor_config_val`-readable) and
@@ -1559,12 +1994,16 @@ Frequently-used knobs:
 | `HTTP_API_METRICS_PUBLIC` | `true` to disable the API-key gate on `/metrics`. Default off — Prometheus must present an API key with the `metrics` scope. |
 | `HTTP_API_TOOL_STATS_FLUSH_INTERVAL` | How often MCP tool-call counters are written to the application database (e.g. `5m`). Default `5m`; they are also written at shutdown. See [MCP tool-call statistics](#mcp-tool-call-statistics). |
 | `HTTP_API_TOOL_STATS_MAX_LABEL_VALUES` | Cap on distinct values per `/metrics` label for tool statistics. Default `1000`; past it the quietest values render as `other`, while the database keeps them all. |
+| `HTTP_API_UTILIZATION_MAX_JOBS` | Most finished jobs one Utilization analysis (`GET /api/v1/utilization`) may read; a larger `limit` is clamped to it. Default `1000000`. An analysis holds about 250 bytes per job while it runs, so the default is about a quarter of a gigabyte at peak; the cached result is the answer, not the jobs. Read at startup. |
+| `HTTP_API_RUNTIME_ESTIMATE_INTERVAL` | How often [runtime estimates](#runtime-estimates) read newly completed jobs from the htcondordb mirror (a duration, e.g. `5m`). Default `5m`; `0` turns runtime estimates off entirely. Without a mirror they are off whatever this says. Read at startup. |
+| `HTTP_API_RUNTIME_ESTIMATE_BACKFILL` | How much job history runtime estimates read at startup, and how long a group of similar jobs is remembered without a new completion. Default `168h`. At most 500,000 of the newest records are read; the log says when that cap is hit. Read at startup. |
 | `HTTP_API_TOOL_STATS_MAX_SERIES` | Cap on distinct tool-call combinations held in memory and in the database. Default `10000`; past it new combinations fold into `other`. This is what bounds memory and disk. |
 | `HTTP_API_TOOL_STATS_OMIT_USER` | `true` renders every `/metrics` user label as `omitted`, for a site that does not want account names on a scrapeable endpoint. The database still records them. See [Usernames on /metrics](#usernames-on-metrics). |
 | `HTTP_API_ENABLE_MCP` | Enable the `/mcp/*` endpoints. Required by the chat assistant. |
 | `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` | JSON array of trusted external issuers for RFC 8693 token exchange (see [Token exchange](#token-exchange-rfc-8693)). Unset disables external exchange. |
 | `HTTP_API_MCP_CIMD` | Resolve an `https://` MCP `client_id` as a Client ID Metadata Document (a public client). Default `true`; set `false` to require DCR. See [MCP OAuth2 clients](#mcp-oauth2-clients). |
-| `HTTP_API_MCP_CIMD_ALLOWED_HOSTS` | Optional comma/space list of host or `.domain` patterns a CIMD `client_id` may point at. Empty = any host (SSRF guards still apply). |
+| `HTTP_API_MCP_CIMD_ALLOWED_HOSTS` | Comma/space list of host or `.domain` patterns a CIMD `client_id` may point at. Empty = any host (SSRF guards still apply). Recommended for production: without it, unauthenticated callers choose which public hosts this server fetches from. |
+| `HTTP_API_MCP_DCR` | Accept dynamic client registration (RFC 7591) at `/mcp/oauth2/register`. Default `true`; set `false` when every client is seeded, operator-provisioned or CIMD. Registrations are then refused with 403 and the endpoint is not advertised. See [MCP OAuth2 clients](#mcp-oauth2-clients). |
 | `HTTP_API_MCP_WATCH_MAX_WAIT` | Cap on how long the MCP `check_watches`/`watch_jobs` tools may block in-call before returning (a duration, e.g. `15s`). This number is advertised to the agent in the tool schema, so it has to be one the whole path can deliver, not just this server. Unset = `45s`, or the value derived from `HTTP_API_MCP_MAX_REQUEST_DURATION` where that is tighter. 45s is not a server limit — the server will hold a request for 14m30s by default — it is what an MCP client is observed to wait for before abandoning the call, which returns *nothing at all* to the agent rather than a timeout it could act on. **Set this lower when a gateway or proxy with a tighter timeout sits in front of this server**; set it higher only when you know the clients reaching this deployment are configured for a longer tool timeout. |
 | `HTTP_API_OAUTH2_REDIRECT_URL` | The redirect URI registered with the identity provider. Unset = derived from the issuer plus this server's callback path, which is `/oauth2/callback` when the web UI is compiled in and `/mcp/oauth2/callback` on an MCP-only build. Both paths are always served, so an authorization started before an upgrade still lands; but the URI the server *sends* must be registered at the IdP, so a build that gains the web UI needs `/oauth2/callback` added there (or this knob set to keep the old one). |
 | `HTTP_API_CREDD_ADDRESS` | Pins the credd this server talks to (a sinful, e.g. `<10.0.0.5:9618?sock=credd>`), overriding discovery. Normally unnecessary: the credd is read from the schedd itself, which publishes its own credd as `CredDIpAddr` in its ad and address file — the same binding `DCSchedd::getCreddAddress` uses. Set this when fronting a remote schedd that does not advertise it, since a credd that is not the submitting schedd's accepts credentials and leaves jobs held anyway. |
@@ -1574,6 +2013,11 @@ Frequently-used knobs:
 | `HTTP_API_DBMIRROR_NAME` | Pin job-queue routing to the htcondordb mirror advertising this `Name`. Set it when more than one mirror advertises to the pool: nothing in the ad says which schedd each one mirrors, so without a pin the freshest is chosen, which is a guess. |
 | `HTTP_API_DBMIRROR_ADDRESS` | Dial this sinful string instead of the mirror's advertised `MyAddress`, for one reachable only over NAT, a tunnel, or a Kubernetes Service. Freshness still comes from the collector ad — this changes where to connect, not whether the mirror is current enough to trust — and it applies whether the mirror was found through the collector or not. |
 | `HTTP_API_DBMIRROR_REQUIRED` | Never fall back to the schedd. A read the mirror cannot serve fails instead of becoming load on the access point you were trying to protect. See [the routing notes](../webapi/httpserver/README.md#configuration) for which failures are 503 and which are 400. |
+| `HTTP_API_SCHEDD_CONSTRAINT` | ScheddAd constraint selecting the access points of [multi-AP mode](#multi-ap-mode). Unset = one schedd. Read at startup. |
+| `HTTP_API_HUB_NAME` / `HTTP_API_HUB_ADDRESS` | Pin the federation hub by `Name`, or dial this sinful string, instead of discovering the `HTCondorDB` ad that carries `FederationConstraint`. Multi-AP mode only. |
+| `HTTP_API_MULTI_AP_STALE` | `include` (default) or `exclude` a degraded access point's rows in list reads. Either way it is named in `sources.degraded`. |
+| `HTTP_API_JOB_ID_CODEC` | Text form of a job id in URLs and SSH gateway usernames. Default and only built-in: `at` (`123.0@ap40.example.org`). |
+| `HTTP_API_BULK_FRESH_SECONDS` | Opt in to letting a multi-AP bulk action skip an access point on the hub's word that nothing there matches, when the hub's copy is at most this many seconds behind. Default 0: every access point is contacted. |
 | `HTTP_API_DBMIRROR_TOKEN_SUBJECT` | Identity the token this server presents to the mirror asserts. Default `condor@<trust domain>`. Set it when the mirror authorizes a different name. |
 | `HTTP_API_IDENTITY_MAP` | Map the token subject to a local account (`gecos,username`). See [Local identity mapping](#local-identity-mapping). |
 | `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | Account file backing the mapping index. Default `/etc/passwd`. |

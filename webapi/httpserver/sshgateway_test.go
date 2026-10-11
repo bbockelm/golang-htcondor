@@ -58,11 +58,11 @@ func TestCondorCredentialIsTaggedPerCaller(t *testing.T) {
 		logger:         testLogger(t),
 	}
 
-	ctxA, err := h.withCondorCredential(context.Background(), "alice", []string{"condor:/WRITE"})
+	ctxA, err := h.withCondorCredential(context.Background(), "alice", []string{"condor:/WRITE"}, nil)
 	if err != nil {
 		t.Fatalf("alice: %v", err)
 	}
-	ctxB, err := h.withCondorCredential(context.Background(), "bob", []string{"condor:/WRITE"})
+	ctxB, err := h.withCondorCredential(context.Background(), "bob", []string{"condor:/WRITE"}, nil)
 	if err != nil {
 		t.Fatalf("bob: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestCondorCredentialIsTaggedPerCaller(t *testing.T) {
 // authority than one whose could.
 func TestCondorCredentialWithoutASigningKey(t *testing.T) {
 	h := &Handler{logger: testLogger(t)}
-	_, err := h.withCondorCredential(context.Background(), "alice", nil)
+	_, err := h.withCondorCredential(context.Background(), "alice", nil, nil)
 	if err == nil {
 		t.Fatal("a caller with no mintable credential was handed a context anyway")
 	}

@@ -24,6 +24,7 @@
 
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { OwnerLink } from '@/components/OwnerLink';
 import Link from 'next/link';
 import {
   api,
@@ -36,21 +37,26 @@ import {
   Field,
   StatusBadge,
   JobDetailsSection,
+  MultiAPJobView,
   humanDuration,
   useNowTick,
 } from '@/app/jobs/[id]/JobDetailClient';
+import { useMultiAPMode } from '@/lib/multiap';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 
 export default function ArchiveDetailClient() {
   const { id } = useResolvedParams<{ id: string }>('/archive/[id]');
+  const mode = useMultiAPMode();
   // Pull the single ad from history. We use `projection=*` so the
   // AttributesTable on the page can render the full ad — same UX as
   // the live detail page. The archive listing's per-row projection
   // is narrower; pulling everything for the detail view is fine.
   const { data, isLoading, error } = useQuery<ClassAd | null, Error>({
     queryKey: ['archive-job', id],
-    enabled: !!id && id !== '_',
+    // Single-AP only: a cluster.proc lookup is ambiguous across access
+    // points, so multi-AP mode reads the job in MultiAPJobView.
+    enabled: !!id && id !== '_' && mode === false,
     // Archive records are immutable; never refetch automatically.
     staleTime: Infinity,
     // `projection=*` so the AttributesTable can render the full ad --
@@ -59,6 +65,13 @@ export default function ArchiveDetailClient() {
   });
 
   const [batchID, jobIdx] = id.split('.');
+
+  if (mode === undefined) {
+    return <p className="text-gray-400">Loading…</p>;
+  }
+  if (mode) {
+    return <MultiAPJobView id={id} archivedView />;
+  }
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -150,7 +163,7 @@ function ArchiveJobDetail({
     <div className="space-y-6">
       <div className="rounded-sm border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
         <Field label="Status" value={<StatusBadge display={display} />} />
-        <Field label="Owner" value={owner ?? '—'} />
+        <Field label="Owner" value={<OwnerLink owner={owner} />} />
         <Field
           label="Submitted"
           value={qdate ? new Date(qdate * 1000).toLocaleString() : '—'}

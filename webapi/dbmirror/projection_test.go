@@ -26,6 +26,8 @@ func TestProjectionCoversEverythingParseAdReads(t *testing.T) {
 		"JobQueueSecondsSinceSync": int64(17), "JobQueueLagBytes": int64(1671914),
 		"EpochCaughtUp": true, "EpochGapDetected": true, "EpochLastSyncTime": int64(1790001710),
 		"EpochSecondsSinceSync": int64(11), "EpochLagBytes": int64(512),
+		"Syncing": true, "MirroredScheddName": "ap2001.chtc.wisc.edu",
+		"MirroredScheddAddress": "<128.105.68.112:9618?sock=schedd>", "FederationConstraint": "true",
 	}
 
 	ad := classad.New()

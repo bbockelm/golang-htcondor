@@ -487,14 +487,33 @@ func appendSorted(dst []Template, src []Template) []Template {
 }
 
 // Get returns a template the caller is authorized to see. Lookup
-// order: user (only if owner is non-empty), global, built-in.
+// order: the caller's own (only if owner is non-empty), global,
+// built-in, then another user's shared template. A shared template
+// must not stand in for a global or built-in one of the same id for
+// every other user who fetches that id; Save refuses such ids, and the
+// order here covers rows saved before it did.
 func (l *Library) Get(id, owner string) (Template, bool) {
+	var shared *Template
 	if owner != "" && l.store != nil {
 		t, ok, err := l.store.Get(id, owner)
 		if err == nil && ok {
-			return t, true
+			if t.Owner == owner {
+				return t, true
+			}
+			shared = &t
 		}
 	}
+	if t, ok := l.public(id); ok {
+		return t, true
+	}
+	if shared != nil {
+		return *shared, true
+	}
+	return Template{}, false
+}
+
+// public returns the global or built-in template with this id.
+func (l *Library) public(id string) (Template, bool) {
 	for _, t := range l.global {
 		if t.ID == id {
 			return t, true
@@ -536,6 +555,10 @@ func (l *Library) Save(t Template, owner string) (Template, error) {
 	}
 	if err := validateTemplate(&t); err != nil {
 		return Template{}, err
+	}
+	if pub, ok := l.public(t.ID); ok {
+		return Template{}, fmt.Errorf("templates: id %q is taken by the %s template %q; choose another id or name",
+			t.ID, pub.Source, pub.Name)
 	}
 	if err := l.store.Save(t); err != nil {
 		return Template{}, fmt.Errorf("persist user template: %w", err)
@@ -763,6 +786,10 @@ func (s *sqlUserTemplateStore) LoadAll(owner string) ([]Template, error) {
 //   - their own template at (owner, id), regardless of visibility, OR
 //   - any other user's template at id when its visibility is "shared".
 //
+// The caller's own row wins over a shared one with the same id; among
+// other users' shared rows the order is by owner, so the answer does
+// not depend on row order.
+//
 // `owner` is the actor making the request; the returned Template's
 // Owner field reflects the actual writer (which may differ when the
 // user is loading a shared template).
@@ -775,7 +802,8 @@ func (s *sqlUserTemplateStore) Get(id, owner string) (Template, bool, error) {
 		SELECT owner, id, name, description, columns_csv, columns_json, contents, input_files, visibility
 		  FROM templates_user
 		 WHERE id = ? AND (owner = ? OR visibility = 'shared')
-		 LIMIT 1`, id, owner).
+		 ORDER BY owner = ? DESC, owner
+		 LIMIT 1`, id, owner, owner).
 		Scan(&t.Owner, &t.ID, &t.Name, &t.Description, &colsCSV, &colsJSON, &t.Contents, &inputFilesBlob, &visibility)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Template{}, false, nil

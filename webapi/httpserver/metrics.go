@@ -289,6 +289,8 @@ var routePatterns = []routePattern{
 	{exact: "/api/v1/dashboard", template: "/api/v1/dashboard"},
 	{exact: "/api/v1/dashboard/activity", template: "/api/v1/dashboard/activity"},
 	{exact: "/api/v1/issues", template: "/api/v1/issues"},
+	{exact: "/api/v1/utilization", template: "/api/v1/utilization"},
+	{exact: "/api/v1/utilization/jobs", template: "/api/v1/utilization/jobs"},
 	{exact: "/api/v1/version", template: "/api/v1/version"},
 	{exact: "/healthz", template: "/healthz"},
 	{exact: "/readyz", template: "/readyz"},
@@ -303,6 +305,7 @@ var routePatterns = []routePattern{
 	{exact: "/api/v1/jobs/transfers", template: "/api/v1/jobs/transfers"},
 	{exact: "/api/v1/jobs/hold", template: "/api/v1/jobs/hold"},
 	{exact: "/api/v1/jobs/release", template: "/api/v1/jobs/release"},
+	{exact: "/api/v1/jobs/runtime-estimates", template: "/api/v1/jobs/runtime-estimates"},
 
 	// Job item — order is critical: longest-prefix wins.
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/files/.+$`), template: "/api/v1/jobs/{id}/files/{name}"},
@@ -311,6 +314,7 @@ var routePatterns = []routePattern{
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/input/share$`), template: "/api/v1/jobs/{id}/input/share"},
 	{re: regexp.MustCompile(`^/api/v1/watches/[^/]+/share$`), template: "/api/v1/watches/{id}/share"},
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/(input|output|stdout|stderr|log|hold|release|ssh)$`), template: "/api/v1/jobs/{id}/{action}"},
+	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/runtime-estimate$`), template: "/api/v1/jobs/{id}/runtime-estimate"},
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+$`), template: "/api/v1/jobs/{id}"},
 
 	// Templates
@@ -335,6 +339,7 @@ var routePatterns = []routePattern{
 	// label since the paths under /admin/ are operator-only and
 	// scaling per-route adds little).
 	{re: regexp.MustCompile(`^/api/v1/collector/.*$`), template: "/api/v1/collector/*"},
+	{exact: "/api/v1/pool/drain-estimates", template: "/api/v1/pool/drain-estimates"},
 	{exact: "/api/v1/ping", template: "/api/v1/ping"},
 	{exact: "/api/v1/schedd/ping", template: "/api/v1/schedd/ping"},
 	{exact: "/api/v1/share/output", template: "/api/v1/share/output"},

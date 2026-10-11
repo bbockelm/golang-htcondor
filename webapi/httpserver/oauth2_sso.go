@@ -153,19 +153,7 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 				grantedScopes = append(grantedScopes, scope)
 			}
 		case "mcp:write":
-			switch {
-			case s.mcpWriteGroups.configured():
-				// Specific write group configured — user must be in it
-				if s.mcpWriteGroups.allows(userGroups) {
-					grantedScopes = append(grantedScopes, scope)
-				}
-			case s.mcpAccessGroups.configured():
-				// No specific write group; fall back to access group (already validated)
-				if s.mcpAccessGroups.allows(userGroups) {
-					grantedScopes = append(grantedScopes, scope)
-				}
-			default:
-				// No groups configured — grant to any authenticated user
+			if s.writeScopeAllowed(userGroups) {
 				grantedScopes = append(grantedScopes, scope)
 			}
 		case "mcp:admin":
@@ -191,6 +179,18 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 				grantedScopes = append(grantedScopes, scope)
 			}
 		default:
+			// condor:/WRITE is the same authorization as mcp:write --
+			// both mint an IDTOKEN carrying WRITE -- so it follows the
+			// same group policy. Granted unconditionally, it handed a
+			// user the write group denies mcp:write the same power
+			// under the other name. Case-insensitive because the
+			// mapping to an authorization level is.
+			if strings.EqualFold(scope, condorScopeWrite) {
+				if s.writeScopeAllowed(userGroups) {
+					grantedScopes = append(grantedScopes, scope)
+				}
+				continue
+			}
 			// Grant other scopes if requested (profile, email, condor:/*, etc.).
 			//
 			// Re: condor:/* scopes — these grant *narrowing* claims on
@@ -200,10 +200,10 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 			// they're in ALLOW_WRITE on the schedd side. See
 			// mapCondorScopesToAuthz for the full security model.
 			//
-			// Because of that narrowing semantics, granting condor:/*
-			// here without an explicit per-user group check is safe in
-			// today's deployment: a non-submitter who somehow obtains
-			// `condor:/WRITE` still can't submit. The audit-style
+			// The schedd's ACL is not this server's group policy,
+			// though, which is why condor:/WRITE is checked above.
+			// The other levels pass through: READ is left to the
+			// schedd's ACL, and the rest map to nothing. The audit-style
 			// concern ("user clicks Authorize on a malicious client
 			// asking for condor:/ADMINISTRATOR → admin token") is
 			// also addressed defensively in mapCondorScopesToAuthz,
@@ -214,6 +214,23 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 	}
 
 	return grantedScopes
+}
+
+// writeScopeAllowed is the group policy for a scope that grants WRITE:
+// the write group when one is configured, otherwise the access group,
+// otherwise any authenticated user.
+func (s *Handler) writeScopeAllowed(userGroups []string) bool {
+	switch {
+	case s.mcpWriteGroups.configured():
+		// Specific write group configured — user must be in it
+		return s.mcpWriteGroups.allows(userGroups)
+	case s.mcpAccessGroups.configured():
+		// No specific write group; fall back to access group (already validated)
+		return s.mcpAccessGroups.allows(userGroups)
+	default:
+		// No groups configured — grant to any authenticated user
+		return true
+	}
 }
 
 // fetchUserInfo fetches user information from the IDP user info endpoint
@@ -250,12 +267,15 @@ func (s *Handler) fetchUserInfo(ctx context.Context, accessToken string) (*UserI
 		Claims: claims,
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "Fetched user info from IDP", "claims", claims)
-
 	// Extract standard claims
 	if sub, ok := claims[s.oauth2UsernameClaim].(string); ok {
 		userInfo.Subject = sub
 	}
+
+	// The claims are personal data (email, name, groups) and Info reaches
+	// the admin log view, so only the subject is logged there.
+	s.logger.Info(logging.DestinationHTTP, "Fetched user info from IDP", "subject", userInfo.Subject)
+	s.logger.Debug(logging.DestinationHTTP, "User info claims from IDP", "claims", claims)
 	if email, ok := claims["email"].(string); ok {
 		userInfo.Email = email
 	}
@@ -298,13 +318,27 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retrieve the stored authorize request and original URL
-	ar, originalURL, ok := s.oauth2StateStore.GetWithURL(state)
+	// Retrieve the stored authorize request and original URL. The entry
+	// is consumed either way, so a state presented by the wrong browser
+	// cannot then be retried from the right one.
+	entry, ok := s.oauth2StateStore.Take(state)
 	if !ok {
 		s.logger.Error(logging.DestinationHTTP, "Invalid or expired OAuth2 state", "state", state)
 		s.writeError(w, http.StatusBadRequest, "Invalid or expired state parameter")
 		return
 	}
+	// The browser completing the login must be the one that started it;
+	// see login_binding.go. Checked before the code is redeemed, so a
+	// refused callback costs the IdP nothing and yields no session.
+	if !loginBoundToBrowser(r, entry.BrowserBinding) {
+		s.logger.Warn(logging.DestinationHTTP,
+			"Refusing OAuth2 callback from a browser that did not start the login",
+			"state", state, "bound", entry.BrowserBinding != "")
+		s.writeError(w, http.StatusBadRequest,
+			"This sign-in was not started in this browser; start it again")
+		return
+	}
+	ar, originalURL := entry.AuthorizeRequest, entry.OriginalURL
 
 	// Check if this is a browser-initiated flow (no authorize request)
 	isBrowserFlow := (ar == nil)
@@ -392,7 +426,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.Info(logging.DestinationHTTP, "Resolved the asserted identity locally",
 			"oidc_subject", subject, "account", account, "from_hint", hinted,
-			"groups", groups, "groups_from_system", s.localIdentity.sourcesGroups())
+			"groups_from_system", s.localIdentity.sourcesGroups())
 
 		// Remember the mapping only when it was made with full knowledge
 		// of the account database. A hinted mapping is not re-issued: it
@@ -405,8 +439,8 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		subject, userGroups = account, groups
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "User authenticated via SSO",
-		"subject", subject, "groups", userGroups)
+	s.logger.Info(logging.DestinationHTTP, "User authenticated via SSO", "subject", subject)
+	s.logger.Debug(logging.DestinationHTTP, "SSO user groups", "subject", subject, "groups", userGroups)
 
 	// File the provider's refresh token, if it gave one. After the
 	// mapping, because it is keyed by the session subject -- the name a
@@ -513,7 +547,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	s.oauth2StateStore.Remove(state)
 
 	s.logger.Info(logging.DestinationHTTP, "Authenticated via SSO, redirecting to consent",
-		"subject", subject, "groups", userGroups,
+		"subject", subject,
 		"client_id", ar.GetClient().GetID(),
 		"requested_scopes", ar.GetRequestedScopes())
 

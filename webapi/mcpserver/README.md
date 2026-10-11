@@ -177,6 +177,31 @@ versions of the golang-htcondor, ClassAd, and CEDAR libraries linked in.
 Read-only, no arguments. Use it to confirm which code is actually
 deployed — for example, after a redeploy.
 
+### query_pool
+
+Describe the pool, as `condor_status` does: execute slots and their
+state, CPUs/GPUs/memory claimed and unclaimed, machines, and the pool's
+schedds, submitters, negotiator and collector. Read-only; offered when the
+server has a collector.
+
+**Input:**
+- `ad_type` (string, optional): `slots` (default), `schedd`, `submitter`, `negotiator` or `collector`
+- `mode` (string, optional): `summary` (default) or `list`
+- `constraint` (string, optional): ClassAd expression selecting ads
+- `group_by` (array, optional): summary only; attributes to count by (default for slots: `State`, `Activity`)
+- `projection` (array, optional): list only; attributes to return (default: a working set per ad type; `["*"]` for all)
+- `limit` (integer, optional): list only; default 50, ceiling 500
+
+A summary covers every matching ad. For slots it reports slot types and,
+for `Cpus`, `Memory` and `GPUs`, the total and how much is in claimed,
+unclaimed and other-state slots. Each slot contributes its own value: a
+partitionable slot advertises what it has left and each dynamic slot what
+it holds, so the totals are the matched machines' capacity unless the
+constraint excludes dynamic slots. Slots that do not advertise an
+attribute are counted under `missing`, not added as zero. Claim ids and
+other private attributes are never returned and cannot be named in any
+argument.
+
 ## Interactive Sessions
 
 Four tools turn a job into something you can run commands in, rather than

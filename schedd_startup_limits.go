@@ -123,7 +123,7 @@ func (s *Schedd) CreateStartupLimit(ctx context.Context, req *StartupLimitReques
 	username := GetAuthenticatedUserFromContext(ctx)
 	rateLimitManager := rateLimitManagerFor(s.cfg)
 	if rateLimitManager != nil {
-		if err := rateLimitManager.WaitSchedd(ctx, username); err != nil {
+		if err := rateLimitManager.WaitScheddFor(ctx, s.rateLimitKey, username); err != nil {
 			return "", fmt.Errorf("rate limit exceeded: %w", err)
 		}
 	}
@@ -249,7 +249,7 @@ func (s *Schedd) QueryStartupLimits(ctx context.Context, uuid, tag string) ([]*S
 	username := GetAuthenticatedUserFromContext(ctx)
 	rateLimitManager := rateLimitManagerFor(s.cfg)
 	if rateLimitManager != nil {
-		if err := rateLimitManager.WaitSchedd(ctx, username); err != nil {
+		if err := rateLimitManager.WaitScheddFor(ctx, s.rateLimitKey, username); err != nil {
 			return nil, fmt.Errorf("rate limit exceeded: %w", err)
 		}
 	}

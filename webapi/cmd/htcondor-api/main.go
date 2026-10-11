@@ -406,7 +406,8 @@ func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *l
 // not-found log line; an empty want means "any schedd", which is not an
 // error worth logging as one.
 func scheddFromCollector(collector *htcondor.Collector, logger *logging.Logger, constraint, want string) (addr, name string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(
+		htcondor.WithDaemonCredential(context.Background(), "schedd discovery"), 10*time.Second)
 	defer cancel()
 
 	schedds, _, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
@@ -1560,11 +1561,11 @@ func reportStartupFailureToLog(startupErr error) {
 // has already dropped to condor before exec'ing us, so euid is non-
 // zero on entry and this is a no-op.
 //
-// We honor CONDOR_USER / CONDOR_IDS / DROP_PRIVILEGES from the loaded
-// config (same knobs HTCondor's own daemons read), and tolerate the
-// condor user not existing — in that case we leave the binary
-// running as root with a warning, matching what HTCondor does in
-// containers where the user is missing.
+// We honor CONDOR_USER / CONDOR_IDS from the loaded config (same knobs
+// HTCondor's own daemons read). A drop target that cannot be resolved
+// is fatal, as it is for the core daemons: the server refuses to start
+// rather than run as root. Where there is no condor account (a dev
+// container), start the binary as an unprivileged user instead.
 //
 // Must be called before opening the log file, the unified app DB, or
 // any other persistent resource the daemon will own — otherwise
@@ -1589,12 +1590,9 @@ func dropPrivilegesIfRoot(cfg *config.Config) error {
 
 	mgr, err := droppriv.NewManager(conf)
 	if err != nil {
-		// Most likely cause: condor user doesn't exist in the
-		// host's nsswitch chain (dev containers, CI). Log loud
-		// and continue as root rather than refusing to start —
-		// the operator may be doing local testing.
-		log.Printf("WARNING: cannot resolve condor user identity (%v); continuing as root", err)
-		return nil //nolint:nilerr // intentional: log + continue
+		return fmt.Errorf("cannot resolve the user to drop privileges to "+
+			"(set CONDOR_USER or CONDOR_IDS, or create the condor user); "+
+			"refusing to run as root: %w", err)
 	}
 	if err := mgr.Start(); err != nil {
 		return fmt.Errorf("droppriv.Start: %w", err)
@@ -1622,6 +1620,35 @@ func getScheddConfig(cfg *config.Config) (scheddNameValue, scheddAddrValue, sche
 	scheddAddrValue = *scheddAddr
 	scheddHostValue, _ = cfg.Get("SCHEDD_HOST")
 	return scheddNameValue, scheddAddrValue, scheddHostValue
+}
+
+// loadMultiAPConfig reads the multi-AP knobs. HTTP_API_SCHEDD_CONSTRAINT
+// set selects multi-AP mode, in which naming one schedd is a
+// contradiction: it is refused rather than silently winning.
+func loadMultiAPConfig(cfg *config.Config, scheddName, scheddAddr string) (httpserver.MultiAPConfig, error) {
+	mc := httpserver.MultiAPConfig{
+		ScheddConstraint: strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_SCHEDD_CONSTRAINT")),
+		HubName:          strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_HUB_NAME")),
+		HubAddress:       strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_HUB_ADDRESS")),
+		Stale:            strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_MULTI_AP_STALE")),
+		JobIDCodec:       strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_JOB_ID_CODEC")),
+	}
+	if !mc.Enabled() {
+		return mc, nil
+	}
+	if v := strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_BULK_FRESH_SECONDS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return mc, fmt.Errorf("HTTP_API_BULK_FRESH_SECONDS must be a whole number of seconds, not %q", v)
+		}
+		// Zero, like unset, never skips an AP on the hub's word.
+		mc.BulkFresh = time.Duration(n) * time.Second
+	}
+	if scheddName != "" || scheddAddr != "" {
+		return mc, fmt.Errorf("HTTP_API_SCHEDD_CONSTRAINT selects multi-AP mode, which serves many schedds; "+
+			"it cannot be combined with one named schedd (-schedd/SCHEDD_NAME %q, -schedd-addr %q)", scheddName, scheddAddr)
+	}
+	return mc, nil
 }
 
 // getHTTPConfig extracts HTTP API configuration from config
@@ -1803,8 +1830,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// Credentials that need root to read (pool signing key, KEK,
 	// TLS cert/key) are expected to be condor-readable per HTCondor
 	// convention (mode 0600 condor:condor or 0640 root:condor).
-	// dropPrivilegesIfRoot is a no-op when we're already non-root
-	// or when the condor user doesn't exist (dev/CI containers).
+	// dropPrivilegesIfRoot is a no-op when we're already non-root.
 	if err := dropPrivilegesIfRoot(cfg); err != nil {
 		return fmt.Errorf("failed to drop privileges: %w", err)
 	}
@@ -1859,6 +1885,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
+	reportUnmarkedOrigins(logger)
 	// Drain everything stdlib log emitted before this point into the
 	// structured logger (so the early daemon-core diagnostic, the
 	// UID_DOMAIN/TRUST_DOMAIN trace, etc. show up in
@@ -1881,7 +1908,18 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// to a new one. They are indistinguishable by the time the server
 	// sees them, so say which it was.
 	scheddAddrDiscovered := false
-	if scheddAddrValue == "" {
+	multiAP, err := loadMultiAPConfig(cfg, scheddNameValue, scheddAddrValue)
+	if err != nil {
+		return err
+	}
+	if multiAP.Enabled() {
+		logger.Info(logging.DestinationSchedd, "Multi-AP mode: serving every schedd matching HTTP_API_SCHEDD_CONSTRAINT",
+			"constraint", multiAP.ScheddConstraint)
+		if scheddHostValue != "" {
+			logger.Warn(logging.DestinationSchedd, "SCHEDD_HOST is ignored in multi-AP mode", "schedd_host", scheddHostValue)
+			scheddHostValue = ""
+		}
+	} else if scheddAddrValue == "" {
 		if scheddNameValue != "" {
 			logger.Info(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd from collector...", "name", scheddNameValue)
 		}
@@ -1968,6 +2006,17 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			toolStatsMaxSeries = n
 		}
 	}
+	utilizationMaxJobs := 0
+	if v, ok := cfg.Get("HTTP_API_UTILIZATION_MAX_JOBS"); ok {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n <= 0 {
+			logger.Warn(logging.DestinationHTTP,
+				"Ignoring HTTP_API_UTILIZATION_MAX_JOBS; expected a positive integer",
+				"value", v, "error", err)
+		} else {
+			utilizationMaxJobs = n
+		}
+	}
 	toolStatsMaxLabels := 0
 	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_MAX_LABEL_VALUES"); ok {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
@@ -1994,6 +2043,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 
 	dbMirrorName, dbMirrorAddress, dbMirrorRequired := loadDBMirrorConfig(cfg, logger)
 	pingInterval := loadPingInterval(cfg, logger)
+	runtimeEstimateInterval, runtimeEstimateBackfill := loadRuntimeEstimateConfig(cfg, logger)
 	mcpWatchMaxWait := loadMCPWatchMaxWait(cfg, logger)
 	mcpMaxRequestDuration := loadMCPMaxRequestDuration(cfg, logger)
 	upstreamRefresh := loadUpstreamRefresh(cfg, logger)
@@ -2013,6 +2063,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		CCB:                      ccbDialer,
 		ScheddName:               scheddNameValue,
 		ScheddAddr:               scheddAddrValue,
+		MultiAP:                  multiAP,
 		ScheddAddrDiscovered:     scheddAddrDiscovered,
 		ScheddHost:               scheddHostValue,
 		UserHeader:               userHeaderFromConfig,
@@ -2039,6 +2090,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2Issuer:               mcpCfg.oauth2Issuer,
 		MCPCIMDEnabled:             mcpCIMDEnabled(cfg),
 		MCPCIMDAllowedHosts:        config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_MCP_CIMD_ALLOWED_HOSTS")),
+		MCPDCRDisabled:             !mcpDCREnabled(cfg),
 		MCPTokenExchangeIssuers:    firstConfigValue(cfg, "HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS"),
 		OAuth2ClientID:             mcpCfg.oauth2ClientID,
 		OAuth2ClientSecret:         mcpCfg.oauth2ClientSecret,
@@ -2120,6 +2172,9 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		ToolStatsMaxLabelValues:     toolStatsMaxLabels,
 		ToolStatsOmitUser:           toolStatsOmitUser,
 		ToolStatsMaxSeries:          toolStatsMaxSeries,
+		UtilizationMaxJobs:          utilizationMaxJobs,
+		RuntimeEstimateInterval:     runtimeEstimateInterval,
+		RuntimeEstimateBackfill:     runtimeEstimateBackfill,
 		DBMirrorName:                dbMirrorName,
 		DBMirrorAddress:             dbMirrorAddress,
 		DBMirrorRequired:            dbMirrorRequired,
@@ -2244,6 +2299,20 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 }
 
 // runDemoMode runs the server with a mini condor setup
+// reportUnmarkedOrigins reports, rather than silently allows, a context
+// that reaches CEDAR as this daemon without saying whether it is a caller's
+// request or this daemon's own work. Each of this server's daemon paths is
+// marked; one that is not is a path nobody has classified, and the log line
+// names the command and peer so it can be found. The step after this one
+// refuses them (UnmarkedDeny), which the test suite already runs under.
+func reportUnmarkedOrigins(logger *logging.Logger) {
+	htcondor.SetUnmarkedOriginReporter(func(command int, secContext, peerName string) {
+		logger.Warn(logging.DestinationSecurity, "An unclassified context authenticated as this daemon",
+			"command", command, "context", secContext, "peer", peerName)
+	})
+	htcondor.SetUnmarkedOriginPolicy(htcondor.UnmarkedWarn)
+}
+
 func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	// Create logger for demo mode (stdout for access logs)
 	logger, err := logging.New(&logging.Config{
@@ -2258,6 +2327,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
+	reportUnmarkedOrigins(logger)
 
 	// Same as runNormalMode: drain anything stdlib log captured
 	// before the structured logger existed.
@@ -3106,6 +3176,21 @@ func mcpCIMDEnabled(cfg *config.Config) bool {
 	return v
 }
 
+// mcpDCREnabled reports whether dynamic client registration (RFC 7591) is
+// on. Default true; HTTP_API_MCP_DCR=false refuses it, for a deployment
+// whose clients are all seeded, operator-provisioned or CIMD.
+func mcpDCREnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_MCP_DCR")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return true
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_MCP_DCR=%q: must be a boolean", raw)
+	}
+	return v
+}
+
 func loadCCBStreaming(cfg *config.Config, logger *logging.Logger) bool {
 	streaming := !daemon.UnderCondorMaster()
 	source := "standalone default"
@@ -3293,6 +3378,40 @@ func loadDBMirrorConfig(cfg *config.Config, logger *logging.Logger) (name, addre
 // not set. Passed explicitly rather than left to the library so the
 // library's zero value can mean "disabled", as its field documents.
 const defaultPingInterval = 1 * time.Minute
+
+// defaultRuntimeEstimateInterval and defaultRuntimeEstimateBackfill
+// apply when HTTP_API_RUNTIME_ESTIMATE_INTERVAL and _BACKFILL are unset.
+const (
+	defaultRuntimeEstimateInterval = 5 * time.Minute
+	defaultRuntimeEstimateBackfill = 168 * time.Hour
+)
+
+// loadRuntimeEstimateConfig reads HTTP_API_RUNTIME_ESTIMATE_INTERVAL,
+// how often the runtime estimator reads newly finished jobs from the
+// htcondordb mirror, and HTTP_API_RUNTIME_ESTIMATE_BACKFILL, how much
+// history it reads at startup.
+//
+//	interval unset   the default, 5m
+//	interval 0       runtime estimates off entirely
+//	backfill unset   the default, 168h
+//
+// A malformed value refuses to start, as HTTP_API_PING_INTERVAL does: a
+// bare number is ambiguous by a factor of sixty.
+func loadRuntimeEstimateConfig(cfg *config.Config, logger *logging.Logger) (interval, backfill time.Duration) {
+	interval = defaultRuntimeEstimateInterval
+	if raw, ok := cfg.Get("HTTP_API_RUNTIME_ESTIMATE_INTERVAL"); ok && strings.TrimSpace(raw) != "" {
+		if strings.TrimSpace(raw) == "0" {
+			interval = 0
+		} else {
+			interval = configDurationSetting(cfg, "HTTP_API_RUNTIME_ESTIMATE_INTERVAL", logger)
+		}
+	}
+	backfill = configDurationSetting(cfg, "HTTP_API_RUNTIME_ESTIMATE_BACKFILL", logger)
+	if backfill == 0 {
+		backfill = defaultRuntimeEstimateBackfill
+	}
+	return interval, backfill
+}
 
 // loadRequiredCredentials reads HTTP_API_REQUIRED_CREDENTIALS, the OAuth
 // service credentials that must be on file before a job may be submitted.

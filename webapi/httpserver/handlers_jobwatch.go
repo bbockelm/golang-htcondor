@@ -76,15 +76,13 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	ctx, needsRedirect, err := s.requireAuthentication(r)
-	if err != nil {
-		if needsRedirect {
-			s.redirectToLogin(w, r)
-			return
-		}
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+	// Admitted before the first read: a refused stream should cost the
+	// schedd nothing.
+	ctx, release, ok := s.authenticateStream(w, r)
+	if !ok {
 		return
 	}
+	defer release()
 	cluster, proc, err := parseJobID(jobID)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))

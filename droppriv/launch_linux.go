@@ -3,6 +3,7 @@
 package droppriv
 
 import (
+	"fmt"
 	"os/exec"
 	"runtime"
 	"syscall"
@@ -12,14 +13,16 @@ import (
 // forking (locked) OS thread across the fork -- exactly as withRoot does for in-process work --
 // so the child inherits the privilege to setuid/setgid to target, then the thread's credentials
 // are restored. If the process cannot regain root (unprivileged run), cmd is started as the
-// current user (best effort), matching withRoot's fallback.
+// current user (best effort), matching withRoot's fallback. If the thread's credentials cannot
+// even be read, cmd is not started: who it would run as is unknown, and in a process that can
+// still become root that is root.
 func startAsUser(target Identity, cmd *exec.Cmd) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	state, err := captureThreadCredentials()
+	state, err := captureCredentials()
 	if err != nil {
-		return cmd.Start() // cannot inspect thread credentials: run as the current user
+		return fmt.Errorf("cannot start %s as uid %d: %w", cmd.Path, target.UID, err)
 	}
 	if err := elevateToRoot(state); err != nil {
 		_ = restoreThreadCredentials(state)

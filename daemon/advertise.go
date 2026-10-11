@@ -48,6 +48,8 @@ type AdvertiseConfig struct {
 // exit it INVALIDATEs the ad so the collector expires it promptly. It is a no-op (logs once)
 // when no collector is configured.
 func (d *Daemon) Advertise(ctx context.Context, cfg AdvertiseConfig) {
+	// This daemon's own ad, sent with its own credential.
+	ctx = htcondor.WithDaemonCredential(ctx, "advertising this daemon to the collector")
 	log := cfg.Logger
 	if log == nil {
 		log = d.Slog()

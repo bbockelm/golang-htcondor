@@ -53,7 +53,8 @@ func genericInstructions(docsEmbedded bool) string {
 	b.WriteString("- While a job runs: tail_job_output for stdout/stderr, exec_in_job for a command. " +
 		"After it finishes: get_job_stdout, get_job_stderr, get_job_output. Each pair is wrong at the other time.\n")
 	b.WriteString("- Held: read HoldReason, fix the cause, then release_job or resubmit. " +
-		"Idle too long: analyze_job_match. Many failures at once: analyze_issues.\n\n")
+		"Idle too long: analyze_job_match. Many failures at once: analyze_issues. " +
+		"What the pool has (slots, CPUs, GPUs, memory free): query_pool.\n\n")
 
 	b.WriteString("## More\n")
 	fmt.Fprintf(&b, "doc_guide(topic) has the details and every tool: %s.", strings.Join(guideTopicNames(), ", "))
@@ -90,6 +91,25 @@ func buildInstructions(scheddName, customInstructions, skillsSection string) str
 	return b.String()
 }
 
+// buildMultiAPInstructions is buildInstructions for multi-AP mode: the AP
+// set instead of one access point, and no generic submitting guidance --
+// none of those tools is offered.
+func buildMultiAPInstructions(constraint, customInstructions, skillsSection string) string {
+	var b strings.Builder
+	b.WriteString(multiAPInstructions(constraint))
+	if custom := strings.TrimSpace(customInstructions); custom != "" {
+		b.WriteString("## Deployment-specific notes\n\n")
+		b.WriteString(custom)
+		b.WriteString("\n\n")
+	}
+	if skillsSection != "" {
+		b.WriteString(skillsSection)
+		b.WriteString("\n")
+	}
+	b.WriteString("JobStatus: 1 Idle, 2 Running, 3 Removed, 4 Completed, 5 Held, 6 Transferring Output, 7 Suspended.\n")
+	return b.String()
+}
+
 // SetInstructions installs the deployment-specific instructions, combining them
 // with the generic HTCondor guidance the same way construction does. It is the
 // dynamic half of MCP_INSTRUCTIONS: a reconfigure calls this so an operator can
@@ -111,15 +131,20 @@ func (s *Server) SetInstructions(custom string) {
 // reconfigure, the library when a checkout is reloaded -- and the text has
 // to reflect whichever changed without discarding the other.
 func (s *Server) rebuildInstructions() {
-	name := ""
-	if sc := s.getSchedd(); sc != nil {
-		name = sc.Name()
-	}
 	custom := ""
 	if p := s.customInstructions.Load(); p != nil {
 		custom = *p
 	}
-	built := buildInstructions(name, custom, skillsInstructions(s.skillsLibrary()))
+	var built string
+	if s.multi != nil {
+		built = buildMultiAPInstructions(s.multiConstraint, custom, skillsInstructions(s.skillsLibrary()))
+	} else {
+		name := ""
+		if sc := s.getSchedd(); sc != nil {
+			name = sc.Name()
+		}
+		built = buildInstructions(name, custom, skillsInstructions(s.skillsLibrary()))
+	}
 	s.instructions.Store(&built)
 	// The SDK transport bakes this text, and the catalogue it is built
 	// from, into servers it caches per scope set. Bumping the generation

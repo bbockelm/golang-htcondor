@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 
 	"encoding/json"
 	"fmt"
@@ -55,6 +56,9 @@ type AuthMeResponse struct {
 	// Leads may list their projects' jobs without arming, the way admins
 	// may list everyone's, so the UI offers them the same scope toggle.
 	ProjectLeadOf []string `json:"project_lead_of,omitempty"`
+	// MultiAP reports that this server fronts several access points and
+	// serves reads only; the SPA shows the AP column and hides actions.
+	MultiAP bool `json:"multi_ap,omitempty"`
 }
 
 // handleAuthMe handles GET /api/v1/auth/me. Resolves the browser session
@@ -67,7 +71,7 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := AuthMeResponse{Authenticated: false}
+	resp := AuthMeResponse{Authenticated: false, MultiAP: s.multi != nil}
 
 	if session, ok := s.getSessionFromRequest(r); ok {
 		resp.Authenticated = true
@@ -345,15 +349,22 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	opts := dashboardWalkOptions(owner, ownedByMe)
 
 	// The tiles are one aggregate against a mirror, so they do not wait
-	// on the panels. See countsFromMirror.
-	if snap, merr := s.countsFromMirror(ctx, owner, ownedByMe); merr == nil {
-		s.writeJSON(w, http.StatusOK, DashboardResponse{
-			Username:     actor,
-			JobsByStatus: snap.Counts,
-			JobsTotal:    snap.Total,
-		})
-		return
-	} else if s.dbMirror.Enabled() {
+	// on the panels. See countsFromMirror. Only for a caller the schedd
+	// accepts at READ; see mirrorReadVerified.
+	allowed := s.mirrorAllowed(ctx, r)
+	merr := allowed
+	if merr == nil {
+		var snap *dashboardSnapshot
+		if snap, merr = s.countsFromMirror(ctx, owner, ownedByMe); merr == nil {
+			s.writeJSON(w, http.StatusOK, DashboardResponse{
+				Username:     actor,
+				JobsByStatus: snap.Counts,
+				JobsTotal:    snap.Total,
+			})
+			return
+		}
+	}
+	if s.dbMirror.Enabled() {
 		s.logger.Debug(logging.DestinationHTTP,
 			"dashboard: mirror unavailable, falling back to the cached queue walk", "error", merr)
 	}
@@ -363,7 +374,7 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// response did not double the load on the access point. One walk per
 	// interval per scope, keyed by owner because most viewers see only
 	// their own jobs; see dashboardCacheKey.
-	snap, err := s.dashboardSnapshotFor(ctx, owner, ownedByMe, opts)
+	snap, err := s.dashboardSnapshotFor(ctx, owner, ownedByMe, allowed == nil, opts)
 	if err != nil {
 		s.writeDashboardError(w, err)
 		return
@@ -376,15 +387,21 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 // dashboardSnapshotFor is the cached queue walk both dashboard endpoints
-// share when no mirror is answering.
-func (s *Handler) dashboardSnapshotFor(ctx context.Context, owner string, ownedByMe bool,
+// share when no mirror is answering. mirror says whether the caller may
+// be answered from the mirror at all (mirrorAllowed), which decides
+// whether the walk consults the archive; it is part of the cache key, so
+// a snapshot that did is never handed to a caller who may not.
+func (s *Handler) dashboardSnapshotFor(ctx context.Context, owner string, ownedByMe, mirror bool,
 	opts *htcondor.QueryOptions) (*dashboardSnapshot, error) {
 	key := dashboardCacheKey(owner, ownedByMe)
+	if !mirror {
+		key += "|schedd-only"
+	}
 	// walkCtx is the cache's, not this request's: the snapshot is shared,
 	// and the walk it protects is the expensive one. See
 	// sharedComputeContext.
 	return s.dashboards().get(ctx, key, func(walkCtx context.Context) (*dashboardSnapshot, error) {
-		return s.walkQueueForDashboard(walkCtx, opts, owner, ownedByMe)
+		return s.walkQueueForDashboard(walkCtx, opts, owner, ownedByMe, mirror)
 	})
 }
 
@@ -471,18 +488,24 @@ func (s *Handler) handleDashboardActivity(w http.ResponseWriter, r *http.Request
 		ownedByMe = true
 	}
 
-	if snap, merr := s.activityFromMirror(ctx, owner, ownedByMe); merr == nil {
-		s.writeJSON(w, http.StatusOK, DashboardActivityResponse{
-			Activity: snap.Activity,
-			Goodput:  snap.Goodput,
-		})
-		return
-	} else if s.dbMirror.Enabled() {
+	allowed := s.mirrorAllowed(ctx, r)
+	merr := allowed
+	if merr == nil {
+		var snap *dashboardSnapshot
+		if snap, merr = s.activityFromMirror(ctx, owner, ownedByMe); merr == nil {
+			s.writeJSON(w, http.StatusOK, DashboardActivityResponse{
+				Activity: snap.Activity,
+				Goodput:  snap.Goodput,
+			})
+			return
+		}
+	}
+	if s.dbMirror.Enabled() {
 		s.logger.Debug(logging.DestinationHTTP,
 			"dashboard activity: mirror unavailable, falling back to the cached queue walk", "error", merr)
 	}
 
-	snap, err := s.dashboardSnapshotFor(ctx, owner, ownedByMe, dashboardWalkOptions(owner, ownedByMe))
+	snap, err := s.dashboardSnapshotFor(ctx, owner, ownedByMe, allowed == nil, dashboardWalkOptions(owner, ownedByMe))
 	if err != nil {
 		s.writeDashboardError(w, err)
 		return
@@ -498,7 +521,7 @@ func (s *Handler) handleDashboardActivity(w http.ResponseWriter, r *http.Request
 // It is the expensive thing the dashboard does, which is why the caller
 // runs it behind a cache: on a busy access point this reads tens of
 // thousands of ads, and it used to do so on every open of the page.
-func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.QueryOptions, owner string, ownedByMe bool) (*dashboardSnapshot, error) {
+func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.QueryOptions, owner string, ownedByMe, mirror bool) (*dashboardSnapshot, error) {
 	streamOpts := &htcondor.StreamOptions{
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
@@ -542,7 +565,11 @@ func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.Quer
 	// has not got to. Ask the archive for the rest, when there is one:
 	// this is the mirror doing what it is for, and a failure here leaves
 	// the queue's shorter answer in place rather than emptying it.
-	if archived, aerr := s.recentlyCompletedFromArchive(ctx, owner, ownedByMe); aerr != nil {
+	archived, aerr := []RecentJob(nil), errors.New("the htcondordb mirror may not answer for this caller")
+	if mirror {
+		archived, aerr = s.recentlyCompletedFromArchive(ctx, owner, ownedByMe)
+	}
+	if aerr != nil {
 		s.logger.Debug(logging.DestinationHTTP,
 			"dashboard: no archive for recently-completed; showing what the queue still holds", "error", aerr)
 	} else {

@@ -28,6 +28,7 @@ import { useSearchParams } from 'next/navigation';
 import {
   api,
   ApiError,
+  type ClassAd,
   type DisplayStatus,
   type JobListResponse,
 } from '@/lib/api';
@@ -36,17 +37,31 @@ import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 import { FilterControls, type FilterMode } from '@/components/FilterControls';
 import { JobStatusStrip } from '@/components/JobStatusStrip';
 import { JobsSummaryPanel } from '@/components/JobsSummaryPanel';
-import { BatchTable } from '@/components/BatchTable';
+import { BatchTable, type RunningUsage } from '@/components/BatchTable';
 import { MAX_AUTO_PAGES, useAutoLoadAll, useLoadAllJobs } from '@/lib/loadAll';
 import { LISTING_PAGE_SIZE } from '@/lib/paging';
 import {
-  applyBatchFilter,
-  filterAdsByStatus,
-  groupIntoBatches,
-  num,
+  adsInBatches,
   summarizeJobs,
   BATCH_PROJECTION,
+  type BatchKey,
 } from '@/lib/batches';
+import { batchDetailFor, batchView } from '@/lib/batchView';
+import {
+  jobUsageByJob,
+  recentCpuByJob,
+  recentCpuConstraint,
+  RECENT_CPU_AGG,
+  RECENT_CPU_GROUP_BY,
+  RECENT_CPU_WINDOW_SECONDS,
+  RUNNING_USAGE_PROJECTION,
+} from '@/lib/runningUsage';
+import { useMultiAP } from '@/lib/multiap';
+import { utilizationHref } from '@/lib/utilizationLink';
+import { clustersNeedingCounts, withExactCounts } from '@/lib/exactCounts';
+import { useExactCounts } from '@/lib/useExactCounts';
+import { ScheddFilter } from '@/components/ScheddFilter';
+import { SourcesBanner } from '@/components/SourcesBanner';
 
 // How many job ads to pull per request. The queue can be far larger than
 // this -- an access point with 30k queued jobs is ordinary -- so the
@@ -60,6 +75,10 @@ const PAGE_SIZE = LISTING_PAGE_SIZE;
 const REFRESH_MS = 15_000;
 const REFRESH_MS_FULL = 60_000;
 
+// The running view's usage moves slowly -- execute nodes report every few
+// minutes -- so it refreshes at half the listing's pace.
+const USAGE_REFRESH_MS = 30_000;
+
 export default function JobsPage() {
   const searchParams = useSearchParams();
   // Admin browser sessions can opt into a pool-wide view; non-admin
@@ -72,6 +91,10 @@ export default function JobsPage() {
   const isAdmin = !!session?.is_admin;
   // A project lead's "Everyone" is their own jobs plus their projects'.
   const isLead = (session?.project_lead_of?.length ?? 0) > 0;
+  // Several access points behind one server: an access point column and
+  // filter, and no actions.
+  const multiAP = useMultiAP();
+  const [schedd, setSchedd] = useState(searchParams.get('schedd') ?? '');
 
   // Shared with the dashboard and /archive; see lib/scope.ts.
   const [scope] = useScope();
@@ -135,7 +158,7 @@ export default function JobsPage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery<JobListResponse, Error>({
-    queryKey: ['jobs', scope, loadAll, constraint],
+    queryKey: ['jobs', scope, loadAll, constraint, schedd],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       api.jobs.list({
@@ -146,6 +169,7 @@ export default function JobsPage() {
         limit: loadAll ? '*' : PAGE_SIZE,
         page_token: pageParam as string | undefined,
         owned_by_me: ownedByMe,
+        schedd: multiAP && schedd ? schedd : undefined,
       }),
     // A token is only ever present when an htcondordb mirror served the
     // query; a live schedd cannot be paged through.
@@ -194,14 +218,44 @@ export default function JobsPage() {
   // are held, and the chip is how you get to them.
   const statusCounts = useMemo(() => summarizeJobs(jobs).counts, [jobs]);
 
-  const statusFiltered = useMemo(
-    () => filterAdsByStatus(jobs, statuses),
-    [jobs, statuses],
+  // The count of finished jobs in a batch is "submitted minus still
+  // queued", which is only right when every queued job of the batch is in
+  // hand. A listing cut short, or narrowed by an expression that may keep
+  // some of a batch's jobs and not others, cannot promise that; those
+  // batches are counted again below.
+  const allLoaded =
+    !constraint && !!lastPage && !lastPage.has_more && !lastPage.error && !hasNextPage;
+
+  const { statusFiltered, batches, progress: listedProgress } = useMemo(
+    () => batchView(jobs, statuses, textFilter, allLoaded),
+    [jobs, statuses, textFilter, allLoaded],
   );
 
-  const batches = useMemo(
-    () => applyBatchFilter(groupIntoBatches(statusFiltered), textFilter),
-    [statusFiltered, textFilter],
+  const detail = batchDetailFor(statuses);
+
+  const usage = useRunningUsage({
+    enabled: detail === 'usage',
+    constraint,
+    scope,
+    ownedByMe,
+    schedd: multiAP && schedd ? schedd : undefined,
+    multiAP,
+  });
+
+  // Where the listing holds only part of a batch, a second query counts
+  // that batch's clusters exactly (see exactCounts.ts).
+  const countClusters = useMemo(
+    () => (allLoaded ? [] : clustersNeedingCounts(batches, listedProgress)),
+    [allLoaded, batches, listedProgress],
+  );
+  const exactCounts = useExactCounts({
+    clusters: countClusters,
+    ownedByMe,
+    schedd: multiAP && schedd ? schedd : undefined,
+  });
+  const progress = useMemo(
+    () => (exactCounts ? withExactCounts(listedProgress, batches, exactCounts) : listedProgress),
+    [listedProgress, batches, exactCounts],
   );
 
   // The summary totals exactly the jobs the table is showing. The text
@@ -209,16 +263,7 @@ export default function JobsPage() {
   // cluster survived it.
   const summary = useMemo(() => {
     if (!textFilter) return summarizeJobs(statusFiltered);
-    // A batch can span many clusters (a DAG folds a whole tree into one
-    // row), so keep every cluster the surviving batches cover, not just
-    // their representative id.
-    const clusters = new Set(batches.flatMap((b) => b.clusterIds));
-    return summarizeJobs(
-      statusFiltered.filter((j) => {
-        const c = num(j.ClusterId);
-        return c !== undefined && clusters.has(c);
-      }),
-    );
+    return summarizeJobs(adsInBatches(statusFiltered, batches));
   }, [statusFiltered, textFilter, batches]);
 
   // Chat surface gating. We hit /api/v1/chat/info on mount; the
@@ -239,7 +284,7 @@ export default function JobsPage() {
   // Lifted state so the chat's client-side tools can drive the
   // table view: expanded-batch set and a brief highlight on a
   // specific job row. (The filter is lifted for the same reason.)
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [expanded, setExpanded] = useState<Set<BatchKey>>(new Set());
   const [highlighted, setHighlighted] = useState<string | null>(null); // "cluster.proc"
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -345,14 +390,31 @@ export default function JobsPage() {
         <span className="text-sm text-gray-500">
           One row per batch. Click a row to see the jobs in it.
         </span>
-        {(isAdmin || isLead) && <ScopeToggle />}
+        {(isAdmin || isLead) && !multiAP && <ScopeToggle />}
+        {/* The same jobs over time. Carries whatever narrows this page on
+            the server -- a drill-in or an expression -- so it opens on
+            the jobs being looked at. */}
         <Link
-          href="/submit"
-          className="ml-auto rounded-sm bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
+          href={utilizationHref({ constraint, schedd: multiAP && schedd ? schedd : undefined })}
+          className="text-sm text-brand-700 hover:underline"
         >
-          + Submit a batch
+          Resource utilization
         </Link>
+        {multiAP ? (
+          <div className="ml-auto">
+            <ScheddFilter value={schedd} onChange={setSchedd} />
+          </div>
+        ) : (
+          <Link
+            href="/submit"
+            className="ml-auto rounded-sm bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
+          >
+            + Submit a batch
+          </Link>
+        )}
       </div>
+
+      <SourcesBanner sources={lastPage?.sources} />
 
       {/* Chat sits directly under the title, above the table. It's the
           primary affordance for "why is X held?" / "release my idle
@@ -379,11 +441,16 @@ export default function JobsPage() {
 
       {data && data.jobs.length === 0 && !constraint && (
         <p className="text-gray-500 text-sm">
-          No batches in the queue.{' '}
-          <Link href="/submit" className="text-brand-700 hover:underline">
-            Submit one
-          </Link>{' '}
-          to get started.
+          No batches in the queue.
+          {!multiAP && (
+            <>
+              {' '}
+              <Link href="/submit" className="text-brand-700 hover:underline">
+                Submit one
+              </Link>{' '}
+              to get started.
+            </>
+          )}
         </p>
       )}
 
@@ -473,6 +540,10 @@ export default function JobsPage() {
               setExpanded={setExpanded}
               highlighted={highlighted}
               onChange={() => refetch()}
+              multiAP={multiAP}
+              progress={progress}
+              detail={detail}
+              usage={usage}
             />
           )}
         </>
@@ -495,6 +566,97 @@ export default function JobsPage() {
         </p>
       )}
     </div>
+  );
+}
+
+// useRunningUsage fetches the running jobs' memory and CPU for the running
+// view.
+//
+// A query of its own rather than more attributes on the listing: the
+// listing can be thirty thousand jobs, and these numbers are only read
+// while the running view is open. Recent CPU comes from the per-job
+// samples when they are kept; the answer says {enabled:false} when not,
+// and every job then keeps the CPU figure from its own ad.
+function useRunningUsage({
+  enabled,
+  constraint,
+  scope,
+  ownedByMe,
+  schedd,
+  multiAP,
+}: {
+  enabled: boolean;
+  constraint: string | undefined;
+  scope: string;
+  ownedByMe: boolean;
+  schedd: string | undefined;
+  multiAP: boolean;
+}): RunningUsage | undefined {
+  const runningConstraint = constraint ? `(${constraint}) && (JobStatus == 2)` : 'JobStatus == 2';
+  const ads = useQuery({
+    queryKey: ['running-usage', scope, runningConstraint, schedd],
+    enabled,
+    queryFn: async () => {
+      // A paginated answer has to be walked: a limit of "*" is still
+      // clamped per request there. Bounded like the listing's own walk.
+      const out: ClassAd[] = [];
+      let token: string | undefined;
+      for (let i = 0; i < MAX_AUTO_PAGES; i++) {
+        const page = await api.jobs.list({
+          constraint: runningConstraint,
+          projection: RUNNING_USAGE_PROJECTION,
+          limit: '*',
+          page_token: token,
+          owned_by_me: ownedByMe,
+          schedd,
+        });
+        out.push(...(page.jobs ?? []));
+        token = page.next_page_token ?? undefined;
+        if (!token) break;
+      }
+      return out;
+    },
+    refetchInterval: USAGE_REFRESH_MS,
+    retry: false,
+  });
+
+  // Samples are keyed by cluster and proc, which two access points can
+  // share, so the multi-AP view keeps to the job ads' own figures.
+  const metricsConstraint = useMemo(
+    () => (ads.data ? recentCpuConstraint(ads.data) : undefined),
+    [ads.data],
+  );
+  const recent = useQuery({
+    queryKey: ['running-usage-recent-cpu', metricsConstraint],
+    enabled: enabled && !multiAP && !!metricsConstraint,
+    queryFn: () =>
+      api.metrics.query('job_metrics', {
+        constraint: metricsConstraint,
+        group_by: RECENT_CPU_GROUP_BY,
+        agg: RECENT_CPU_AGG,
+        since: Math.floor(Date.now() / 1000) - RECENT_CPU_WINDOW_SECONDS,
+      }),
+    refetchInterval: USAGE_REFRESH_MS,
+    retry: false,
+  });
+
+  // A failed samples query is treated like samples not being kept: every
+  // job still gets a CPU figure, labelled for what it is.
+  const recentByJob = useMemo(
+    () => (recent.data && !recent.error ? recentCpuByJob(recent.data) : undefined),
+    [recent.data, recent.error],
+  );
+  const byJob = useMemo(
+    () => jobUsageByJob(ads.data ?? [], recentByJob),
+    [ads.data, recentByJob],
+  );
+  // Waiting on the samples too, so a bar does not flip from "since start"
+  // to "last hour" a moment after it first appears.
+  const loading = ads.isLoading || recent.isLoading;
+
+  return useMemo(
+    () => (enabled ? { byJob, loading } : undefined),
+    [enabled, byJob, loading],
   );
 }
 

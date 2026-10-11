@@ -17,6 +17,7 @@ package dbmirror
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -70,6 +71,13 @@ const (
 	// InfoTTL is how long a discovered mirror ad is reused before the
 	// collector is asked again.
 	InfoTTL = 30 * time.Second
+	// RediscoverAfterDialFailure is how soon after a failed connection
+	// the cached ad is replaced by asking the collector again, instead of
+	// waiting out InfoTTL. A database that restarts comes back on a new
+	// address (a new port, or a new shared-port endpoint), and until the
+	// cache let go every read was sent to the old one. The floor bounds
+	// how often a database that stays down costs a collector query.
+	RediscoverAfterDialFailure = 5 * time.Second
 	// PollInterval is how often Poll re-discovers the mirror. It matches
 	// InfoTTL, so a polled Locator asks the collector exactly as often as
 	// a busy on-demand one did -- polling moves that query off the read
@@ -192,6 +200,17 @@ type Info struct {
 	// "the live queue is caught up with 0s of lag" are the same false/0,
 	// and the panel renders the second when it means the first.
 	JobQueueReported bool
+
+	// Syncing is whether the daemon reports any schedd-sync source.
+	Syncing bool
+	// MirroredScheddName and MirroredScheddAddress name the schedd a
+	// spoke's schedd-sync mirrors. Empty when the daemon does not say
+	// (schedd-sync off, or a daemon too old to advertise it).
+	MirroredScheddName    string
+	MirroredScheddAddress string
+	// FederationConstraint is set only on a federation hub's ad: the
+	// ScheddAd constraint defining the AP set it fans in.
+	FederationConstraint string
 }
 
 // mirrorAdAttrs is every attribute ParseAd reads, for callers that fetch
@@ -204,6 +223,7 @@ func mirrorAdAttrs() []string {
 		"HistoryCaughtUp", "HistoryGapDetected", "HistoryLastSyncTime", "HistorySecondsSinceSync", "HistoryLagBytes",
 		"JobQueueCaughtUp", "JobQueueLastSyncTime", "JobQueueSecondsSinceSync", "JobQueueLagBytes",
 		"EpochCaughtUp", "EpochGapDetected", "EpochLastSyncTime", "EpochSecondsSinceSync", "EpochLagBytes",
+		"Syncing", "MirroredScheddName", "MirroredScheddAddress", "FederationConstraint",
 	}
 }
 
@@ -239,6 +259,11 @@ func ParseAd(ad *classad.ClassAd) *Info {
 	info.EpochLagBytes, info.EpochLagReported = ad.EvaluateAttrInt("EpochLagBytes")
 
 	info.HistoryLagBytes, info.HistoryLagReported = ad.EvaluateAttrInt("HistoryLagBytes")
+
+	info.Syncing, _ = ad.EvaluateAttrBool("Syncing")
+	info.MirroredScheddName, _ = ad.EvaluateAttrString("MirroredScheddName")
+	info.MirroredScheddAddress, _ = ad.EvaluateAttrString("MirroredScheddAddress")
+	info.FederationConstraint, _ = ad.EvaluateAttrString("FederationConstraint")
 	return info
 }
 
@@ -308,6 +333,17 @@ type Options struct {
 	//
 	// Optional. Nil keeps the previous behaviour exactly.
 	TokenSource func(ctx context.Context) (string, error)
+
+	// Constraint is ANDed into the collector query for the database's ad.
+	// Set, it selects a kind of database rather than a particular one
+	// (a federation hub: HubConstraint), so the host match below does not
+	// apply: one advertiser is taken, several are refused.
+	Constraint string
+
+	// NoLocalFallback skips asking the database on this host when the
+	// collector has no answer. A locator looking for a federation hub
+	// sets it: the database on this host is a spoke, not the hub.
+	NoLocalFallback bool
 }
 
 // Locator discovers the mirror through the collector and dials it. Safe
@@ -320,6 +356,10 @@ type Locator struct {
 	mu     sync.Mutex
 	info   *Info
 	infoAt time.Time
+	// infoRefused is set when a connection to the cached ad's address
+	// failed, so Discover asks the collector again rather than handing
+	// out the same address for the rest of InfoTTL.
+	infoRefused bool
 	// lastErr is why the most recent discovery failed, for the
 	// readiness snapshot. Operators debugging "why is nothing routing"
 	// need the error, and it is otherwise only visible at debug level.
@@ -338,6 +378,12 @@ type Locator struct {
 	lastDialErr string
 	lastDialAt  time.Time
 	lastDialOK  time.Time
+
+	// spokes caches Spokes for InfoTTL, and spokesErr why the last
+	// refresh failed.
+	spokes    *SpokeSet
+	spokesAt  time.Time
+	spokesErr string
 }
 
 // NewLocator returns a Locator with default options.
@@ -465,7 +511,8 @@ func (l *Locator) Discover(ctx context.Context) (*Info, error) {
 		return nil, fmt.Errorf("no collector configured for htcondordb discovery")
 	}
 	l.mu.Lock()
-	if l.info != nil && time.Since(l.infoAt) < InfoTTL {
+	if l.info != nil && time.Since(l.infoAt) < InfoTTL &&
+		(!l.infoRefused || time.Since(l.lastTry) < rediscoverAfterDialFailure) {
 		info := l.info
 		l.mu.Unlock()
 		return info, nil
@@ -474,6 +521,10 @@ func (l *Locator) Discover(ctx context.Context) (*Info, error) {
 
 	return l.refresh(ctx)
 }
+
+// rediscoverAfterDialFailure is RediscoverAfterDialFailure, a variable
+// so tests need not wait it out.
+var rediscoverAfterDialFailure = RediscoverAfterDialFailure
 
 // refresh queries the collector unconditionally, bypassing the InfoTTL
 // cache, and records the outcome. Discover uses it on a cache miss and
@@ -494,6 +545,7 @@ func (l *Locator) refresh(ctx context.Context) (*Info, error) {
 		return nil, err
 	}
 	l.info, l.infoAt, l.lastErr, l.lastOK = info, time.Now(), "", time.Now()
+	l.infoRefused = false
 	return info, nil
 }
 
@@ -554,6 +606,9 @@ func (l *Locator) discover(ctx context.Context) (*Info, error) {
 	// reachable whenever it is co-located (or pinned) even if its
 	// advertisement is not getting through -- a denied UPDATE_AD_GENERIC,
 	// a collector that is down, an ad that aged out.
+	if l.opts.NoLocalFallback {
+		return nil, err
+	}
 	local, localErr := l.discoverLocal(ctx)
 	if localErr == nil {
 		return local, nil
@@ -580,6 +635,13 @@ func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
 	if l.opts.Name != "" {
 		constraint = fmt.Sprintf("Name == %s", classadStringLit(l.opts.Name))
 	}
+	if c := strings.TrimSpace(l.opts.Constraint); c != "" {
+		if constraint == "" {
+			constraint = c
+		} else {
+			constraint = fmt.Sprintf("(%s) && (%s)", constraint, c)
+		}
+	}
 	ads, _, err := l.collector.QueryAdsWithOptions(ctx, AdType, constraint, mirrorQueryOptions())
 	if err != nil {
 		return nil, fmt.Errorf("querying collector for the htcondordb ad: %w", err)
@@ -591,13 +653,16 @@ func (l *Locator) discoverFromCollector(ctx context.Context) (*Info, error) {
 		return nil, fmt.Errorf("no htcondordb database is advertising to the collector")
 	}
 
+	if l.opts.Constraint != "" && l.opts.Name == "" && len(ads) > 1 {
+		return nil, fmt.Errorf("%d htcondordb databases match %s; name the one to use", len(ads), l.opts.Constraint)
+	}
 	var scheddHost string
 	if l.opts.ScheddAddress != nil {
 		scheddHost = hostOfSinful(l.opts.ScheddAddress())
 	}
 	// A pinned name is the operator overriding discovery; their choice
 	// wins over the host heuristic below.
-	info, err := pickMirror(ads, scheddHost, l.opts.Name != "")
+	info, err := pickMirror(ads, scheddHost, l.opts.Name != "" || l.opts.Constraint != "")
 	if err != nil {
 		return nil, err
 	}
@@ -729,6 +794,11 @@ func (l *Locator) Client(ctx context.Context) (*dbrpc.Client, func(), *Info, err
 	if err != nil {
 		err = fmt.Errorf("connecting to htcondordb at %s: %w", info.Address, err)
 		l.recordDial(err)
+		l.mu.Lock()
+		if l.info == info {
+			l.infoRefused = true
+		}
+		l.mu.Unlock()
 		return nil, nil, nil, err
 	}
 	l.recordDial(nil)
@@ -786,6 +856,37 @@ func HistoryDecision(info *Info, opts *htcondor.HistoryQueryOptions) Decision {
 		}
 	}
 	return serve("served from the htcondordb mirror")
+}
+
+// HistoryNewestDecision decides whether the mirror may answer a history
+// read whose match set is larger than the limit, given the outcome of
+// asking it for the newest limit+1 matches ordered server-side by
+// HistoryOrderAttr (dbrpc TopK): err is that call's error and rows how
+// many rows it returned. Pure, so the policy is unit-tested without I/O.
+//
+// A client-side sort of a bounded read cannot answer such a query -- the
+// rows it fetched are an arbitrary subset, not the newest -- which is why
+// these reads used to go to the schedd. That made any time window with
+// more matches than the limit a schedd scan, and the schedd's scan budget
+// then turned an old window into zero records. Ordered server-side, the
+// mirror answers with the newest limit matches and says more matched.
+//
+// It still declines when it cannot do that faithfully: a mirror too old
+// for the TopK opcode, or one where fewer rows came back than the probe
+// already counted -- TopK skips a row with no numeric order key, so the
+// newest matches might be among the rows it could not rank.
+func HistoryNewestDecision(err error, rows, limit int) Decision {
+	switch {
+	case errors.Is(err, dbrpc.ErrTopKUnsupported):
+		return decline(ReasonOversized, fmt.Sprintf(
+			"more than %d matches, and this mirror cannot order them server-side; the schedd's backwards scan picks the newest", limit))
+	case err != nil:
+		return decline(ReasonQueryFailed, err.Error())
+	case rows <= limit:
+		return decline(ReasonOversized, fmt.Sprintf(
+			"more than %d matches, but not all carry %s to order by; the schedd's backwards scan picks the newest", limit, HistoryOrderAttr))
+	}
+	return serve(fmt.Sprintf("served from the htcondordb mirror; the newest %d of more matches, by %s", limit, HistoryOrderAttr))
 }
 
 // JobQueueStaleness is how far the mirror's job queue was behind the
@@ -930,10 +1031,22 @@ func EpochDecision(info *Info) Decision {
 	return serve("served from the htcondordb mirror (epoch history caught up)")
 }
 
+// HistoryOrderAttr is the attribute the mirror's history archive is
+// ordered by, newest first: the time the job entered the schedd's history
+// file. htcondordb stamps it on every archived record (from
+// EnteredCurrentStatus, falling back to CompletionDate, then the time it
+// read the record), so ordering by it reproduces the order of the
+// schedd's backwards scan of that file.
+const HistoryOrderAttr = "EnteredHistoryTime"
+
 // RecencyKey ranks a completed-job ad for reverse-chronological
-// ordering: the last status transition, falling back to the completion
-// time. Both are Unix seconds on a job ad; 0 sorts oldest.
+// ordering: HistoryOrderAttr when the ad carries it, otherwise the
+// values it is derived from -- the last status transition, then the
+// completion time. All are Unix seconds; 0 sorts oldest.
 func RecencyKey(ad *classad.ClassAd) int64 {
+	if v, ok := ad.EvaluateAttrInt(HistoryOrderAttr); ok && v > 0 {
+		return v
+	}
 	if v, ok := ad.EvaluateAttrInt("EnteredCurrentStatus"); ok && v > 0 {
 		return v
 	}

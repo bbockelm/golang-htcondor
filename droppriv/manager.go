@@ -40,6 +40,7 @@ type Manager struct {
 	enabled          bool
 	defaultIdentity  Identity
 	originalIdentity Identity
+	originalGroups   []int // supplementary groups for Stop to put back
 	cacheMu          sync.Mutex
 	cachedIdentities map[string]Identity
 }
@@ -130,11 +131,16 @@ func NewManager(conf Config) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current identity: %w", err)
 	}
+	groups, err := os.Getgroups()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get supplementary groups: %w", err)
+	}
 
 	mgr := &Manager{
 		enabled:          conf.Enabled,
 		defaultIdentity:  identity,
 		originalIdentity: original,
+		originalGroups:   groups,
 		cachedIdentities: make(map[string]Identity),
 	}
 
@@ -170,11 +176,17 @@ func (m *Manager) Stop() error {
 		return nil
 	}
 
-	if err := restorePrivileges(m.originalIdentity); err != nil {
+	if err := restorePrivileges(m.originalIdentity, m.originalGroups); err != nil {
 		return fmt.Errorf("failed to restore privileges: %w", err)
 	}
 
 	return nil
+}
+
+// Enabled reports whether the manager switches identities. When it does not,
+// every operation it performs on a user's behalf runs as the current process.
+func (m *Manager) Enabled() bool {
+	return m.enabled
 }
 
 func resolveDefaultIdentity(conf Config) (Identity, error) {

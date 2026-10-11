@@ -222,7 +222,7 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 	openCtx, cancelOpen := context.WithTimeout(ctx, sshSetupTimeout)
 	defer cancelOpen()
 
-	schedd := s.getSchedd()
+	schedd := s.scheddFor(ctx)
 	if schedd == nil {
 		s.failSSHSetup(wsConn, "unavailable", "No schedd is configured for this API server.")
 		return
@@ -296,7 +296,10 @@ func (s *Handler) handleJobSSH(w http.ResponseWriter, r *http.Request) {
 
 	bridgeSSHToWebSocket(ctx, s, wsConn, sshClient, session, stdin, stdout, stderr,
 		bridgeOptions{
-			JobID:       fmt.Sprintf("%d.%d", cluster, proc),
+			// The complete id in multi-AP mode: the terminal count and
+			// the disconnect cleanup are per job, and 1.0 on two APs is
+			// two jobs.
+			JobID:       s.jobPathID(ctx, cluster, proc),
 			Interactive: interactive,
 		})
 }
@@ -314,7 +317,7 @@ type bridgeOptions struct {
 // for any error path — the bridge still works, the watchdog just won't
 // be kept alive, which is the right safe default.
 func (s *Handler) jobIsInteractiveByID(ctx context.Context, cluster, proc int) bool {
-	schedd := s.getSchedd()
+	schedd := s.scheddFor(ctx)
 	if schedd == nil {
 		return false
 	}
@@ -403,9 +406,9 @@ func bridgeSSHToWebSocket(
 		// Note what it depends on: sshClient must still be alive when
 		// the sentinel is sent, which holds because the close-all
 		// defer is declared at the top of the function and so runs
-		// after this one. removeJobOnDisconnect uses a fresh context
-		// rather than `ctx`, which is dying by then, and treats its
-		// schedd I/O as best effort.
+		// after this one. removeJobOnDisconnect keeps ctx's credential
+		// but not its cancellation -- ctx is dying by then -- and treats
+		// its schedd I/O as best effort.
 		s.interactiveTerminals.attach(opts.JobID)
 		defer func() {
 			if !s.interactiveTerminals.detach(opts.JobID) {
@@ -415,7 +418,7 @@ func bridgeSSHToWebSocket(
 				return
 			}
 			s.sendInteractiveShutdownSignal(sshClient, opts.JobID)
-			s.removeJobOnDisconnect(opts.JobID)
+			s.removeJobOnDisconnect(ctx, opts.JobID)
 		}()
 	}
 

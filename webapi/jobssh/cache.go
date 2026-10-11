@@ -57,11 +57,17 @@ const DefaultIdleTimeout = 10 * time.Minute
 // Owner -- which would let it outlive the grant that opened it, with no
 // superuser check and no audit. Empty for an ordinary transport.
 //
+// Schedd is the access point the job is on, in a server fronting
+// several: cluster ids on different APs are independent, so 123.0 on
+// ap1 and 123.0 on ap2 are two jobs and must never share a transport.
+// Empty where there is only one schedd.
+//
 // Owner and Credential are required: a transport is never cached under
 // an empty one.
 type Key struct {
 	Owner         string
 	Credential    string
+	Schedd        string
 	Cluster       int
 	Proc          int
 	Impersonation string
@@ -71,10 +77,14 @@ type Key struct {
 // out: it can be a digest of a bearer, which says nothing a reader can
 // use.
 func (k Key) String() string {
-	if k.Impersonation != "" {
-		return fmt.Sprintf("%s[%s]/%d.%d", k.Owner, k.Impersonation, k.Cluster, k.Proc)
+	job := fmt.Sprintf("%d.%d", k.Cluster, k.Proc)
+	if k.Schedd != "" {
+		job += "@" + k.Schedd
 	}
-	return fmt.Sprintf("%s/%d.%d", k.Owner, k.Cluster, k.Proc)
+	if k.Impersonation != "" {
+		return fmt.Sprintf("%s[%s]/%s", k.Owner, k.Impersonation, job)
+	}
+	return fmt.Sprintf("%s/%s", k.Owner, job)
 }
 
 // ErrNoIdentity is returned for a Key with no Owner or no Credential.

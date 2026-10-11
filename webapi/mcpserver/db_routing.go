@@ -3,7 +3,9 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
 
@@ -27,17 +29,21 @@ import (
 // freshness gate declined, a dial/query error, or an unparseable row. The result
 // shares toolQueryHistory's exact shape (marshaled []*classad.ClassAd) so the
 // caller cannot tell the source apart except via the provenance note and the
-// "source" metadata.
-func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *htcondor.HistoryQueryOptions, typeName string) (interface{}, bool, dbmirror.Decision) {
+// "source" metadata. limitCapped says the tool's ceiling, not the caller, set
+// opts.Limit, which changes the advice a truncated answer carries.
+func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *htcondor.HistoryQueryOptions, typeName string, limitCapped bool) (interface{}, bool, dbmirror.Decision) {
 	if !s.htcondordbEnabled() {
 		return nil, false, decline(dbmirror.ReasonNotConfigured, "htcondordb routing is not configured")
 	}
 	// Routing is what skips the schedd handshake, so a delegated server
 	// must know the schedd accepted this caller before answering out of
 	// the mirror -- otherwise a token the schedd would refuse still gets
-	// history. Over stdio the process is the user and its own credential
-	// is what would have been used either way, so there is nothing to
-	// establish (the same split toolQueryJobs makes).
+	// history. The HTTP transport sets the identity only from a
+	// DC_NOP_READ ping the schedd accepted with the caller's own
+	// credential, so an identity here means READ was granted. Over stdio
+	// the process is the user and its own credential is what would have
+	// been used either way, so there is nothing to establish (the same
+	// split toolQueryJobs makes).
 	if s.delegated && htcondor.GetAuthenticatedUserFromContext(ctx) == "" {
 		return nil, false, decline(dbmirror.ReasonNoOwnerScope,
 			"the schedd has not identified this caller, so the mirror must not answer on its behalf")
@@ -51,48 +57,188 @@ func (s *Server) tryHistoryFromDB(ctx context.Context, constraint string, opts *
 		return nil, false, d
 	}
 
+	dbc, closer, _, err := s.dbClient(ctx)
+	if err != nil {
+		return nil, false, decline(dbmirror.ReasonDialFailed, err.Error()) // dial failed -> schedd
+	}
+	defer closer()
+	return mirrorHistoryResult(ctx, dbc, info, d, constraint, opts, typeName, limitCapped)
+}
+
+// mirrorHistoryResult is tryHistoryFromDB once routing has said yes (d) and the
+// mirror is dialed: the read, and the result the tool returns.
+func mirrorHistoryResult(ctx context.Context, dbc historyMirror, info *dbmirror.Info, d dbmirror.Decision,
+	constraint string, opts *htcondor.HistoryQueryOptions, typeName string, limitCapped bool) (interface{}, bool, dbmirror.Decision) {
 	// History defaults to unlimited on the schedd; the mirror read must be bounded.
 	limit := opts.Limit
 	if limit <= 0 || limit > dbmirror.MaxLimit {
 		limit = dbmirror.MaxLimit
 	}
 
-	dbc, closer, _, err := s.dbClient(ctx)
-	if err != nil {
-		return nil, false, decline(dbmirror.ReasonDialFailed, err.Error()) // dial failed -> schedd
+	records, more, rd := readMirrorHistory(ctx, dbc, constraint, opts.Projection, limit)
+	if !rd.Use {
+		return nil, false, rd
 	}
-	defer closer()
+	if rd.Note != "" {
+		d = rd
+	}
+	note := "\n" + dbmirror.Provenance(info, d.Note)
+	if more {
+		note = truncationNote(limit, limitCapped) + note
+	}
+	return historyResultWith(records, typeName, constraint, "htcondordb", note, historyExtras{hasMore: more}), true, d
+}
 
-	// Fetch one past the limit. The mirror has no global reverse-chron cursor, so
-	// it must fetch the FULL matching set to order it most-recent-first; if that
-	// set exceeds the limit, the fetched subset is not guaranteed to hold the
-	// newest records, so defer to the schedd's proper backwards scan instead of
-	// silently returning a wrong "recent N".
-	rows, err := dbc.QueryRawProject(ctx, "history", constraint, opts.Projection, limit+1)
+// mirrorHistoryTable is the mirror's completed-job archive.
+const mirrorHistoryTable = "history"
+
+// historyMirror is the part of a dbrpc client a mirror history read uses.
+type historyMirror interface {
+	QueryRawProject(ctx context.Context, table, constraint string, attrs []string, limit int) ([]string, error)
+	TopK(ctx context.Context, table, constraint string, attrs []string, orderAttr string, desc bool, k int) ([]string, error)
+}
+
+// readMirrorHistory reads the newest limit records matching constraint from the
+// mirror's history archive, newest first, as the schedd's backwards scan would
+// return them. more reports that further records matched. A decision with Use
+// false means the mirror cannot answer faithfully and the schedd should; a
+// served decision with a Note replaces the routing note in the provenance.
+//
+// A bounded probe (limit+1 rows) comes first. When it holds the whole match set,
+// that set is ordered here. When it does not, the rows it holds are an arbitrary
+// subset rather than the newest, so the mirror is asked again with server-side
+// ordering (TopK on dbmirror.HistoryOrderAttr) -- see HistoryNewestDecision.
+func readMirrorHistory(ctx context.Context, dbc historyMirror, constraint string, projection []string, limit int) ([]*classad.ClassAd, bool, dbmirror.Decision) {
+	// Order by the same key in both branches. A projection that leaves the
+	// order key out still needs it fetched to sort on; it is removed again
+	// before the records go back.
+	attrs, addedOrderAttr := withHistoryOrderAttr(projection)
+
+	rows, err := dbc.QueryRawProject(ctx, mirrorHistoryTable, constraint, attrs, limit+1)
 	if err != nil {
 		return nil, false, decline(dbmirror.ReasonQueryFailed, err.Error()) // query failed -> schedd
 	}
-	if len(rows) > limit {
-		// more matches than the cap -> schedd owns ordering
-		return nil, false, decline(dbmirror.ReasonOversized,
-			fmt.Sprintf("more than %d matches; the schedd's backwards scan owns ordering beyond that", limit))
+	if len(rows) <= limit {
+		records, d := parseMirrorRows(rows)
+		if !d.Use {
+			return nil, false, d
+		}
+		sortNewestFirst(records)
+		dropHistoryOrderAttr(records, addedOrderAttr)
+		return records, false, d
 	}
 
+	if len(attrs) == 0 {
+		return readNewestWholeHistory(ctx, dbc, constraint, limit)
+	}
+	top, err := dbc.TopK(ctx, mirrorHistoryTable, constraint, attrs, dbmirror.HistoryOrderAttr, true, limit+1)
+	if d := dbmirror.HistoryNewestDecision(err, len(top), limit); !d.Use {
+		return nil, false, d
+	}
+	records, pd := parseMirrorRows(top[:limit])
+	if !pd.Use {
+		return nil, false, pd
+	}
+	// TopK returns its rows best first, so they are not re-sorted.
+	dropHistoryOrderAttr(records, addedOrderAttr)
+	return records, true, dbmirror.HistoryNewestDecision(nil, len(top), limit)
+}
+
+// readNewestWholeHistory is readMirrorHistory's oversized branch for a caller
+// that asked for every attribute. TopK returns only the attributes it is asked
+// for, so it cannot carry whole ads; instead it finds the order-key value of the
+// limit-th newest match, and the whole ads at or above that value are fetched in
+// two bounded reads: everything strictly newer (fewer than limit rows), then as
+// many rows tied at the boundary as are still needed.
+func readNewestWholeHistory(ctx context.Context, dbc historyMirror, constraint string, limit int) ([]*classad.ClassAd, bool, dbmirror.Decision) {
+	key := dbmirror.HistoryOrderAttr
+	top, err := dbc.TopK(ctx, mirrorHistoryTable, constraint, []string{key}, key, true, limit+1)
+	if d := dbmirror.HistoryNewestDecision(err, len(top), limit); !d.Use {
+		return nil, false, d
+	}
+	boundaryAd, perr := classad.ParseOld(top[limit-1])
+	if perr != nil {
+		return nil, false, decline(dbmirror.ReasonBadRow, perr.Error())
+	}
+	boundary, ok := boundaryAd.EvaluateAttrInt(key)
+	if !ok {
+		return nil, false, decline(dbmirror.ReasonBadRow, fmt.Sprintf("an ordered row carries no integer %s", key))
+	}
+
+	newerRows, err := dbc.QueryRawProject(ctx, mirrorHistoryTable,
+		fmt.Sprintf("(%s) && %s > %d", constraint, key, boundary), nil, limit+1)
+	if err != nil {
+		return nil, false, decline(dbmirror.ReasonQueryFailed, err.Error())
+	}
+	if len(newerRows) > limit {
+		// Records arrived between the two reads and outnumber the page;
+		// which of them are newest is no longer known from this read.
+		return nil, false, decline(dbmirror.ReasonOversized,
+			fmt.Sprintf("more than %d matches arrived while the mirror was being read; the schedd's backwards scan picks the newest", limit))
+	}
+	rows := newerRows
+	if need := limit - len(newerRows); need > 0 {
+		tied, err := dbc.QueryRawProject(ctx, mirrorHistoryTable,
+			fmt.Sprintf("(%s) && %s == %d", constraint, key, boundary), nil, need)
+		if err != nil {
+			return nil, false, decline(dbmirror.ReasonQueryFailed, err.Error())
+		}
+		rows = append(rows, tied...)
+	}
+	records, d := parseMirrorRows(rows)
+	if !d.Use {
+		return nil, false, d
+	}
+	sortNewestFirst(records)
+	return records, true, dbmirror.HistoryNewestDecision(nil, len(top), limit)
+}
+
+// withHistoryOrderAttr returns the attributes to fetch for projection so the
+// order key is among them, and whether it had to be added. A nil projection
+// (every attribute) already includes it.
+func withHistoryOrderAttr(projection []string) ([]string, bool) {
+	if len(projection) == 0 {
+		return nil, false
+	}
+	for _, a := range projection {
+		if strings.EqualFold(a, dbmirror.HistoryOrderAttr) {
+			return projection, false
+		}
+	}
+	return append(slices.Clip(projection), dbmirror.HistoryOrderAttr), true
+}
+
+// parseMirrorRows parses old-ClassAd rows. A row that will not parse declines
+// the whole read rather than dropping a record.
+func parseMirrorRows(rows []string) ([]*classad.ClassAd, dbmirror.Decision) {
 	records := make([]*classad.ClassAd, 0, len(rows))
 	for _, r := range rows {
 		ad, perr := classad.ParseOld(r)
 		if perr != nil {
-			// a corrupt row -> fall back rather than drop records
-			return nil, false, decline(dbmirror.ReasonBadRow, perr.Error())
+			return nil, decline(dbmirror.ReasonBadRow, perr.Error())
 		}
 		records = append(records, ad)
 	}
-	// Order the complete matching set most-recent-first (opts.Backwards default).
+	return records, dbmirror.Decision{Use: true, Reason: dbmirror.ReasonServed}
+}
+
+// dropHistoryOrderAttr removes the order key from records that fetched it only
+// to be ordered by it, so the caller gets the projection it asked for.
+func dropHistoryOrderAttr(records []*classad.ClassAd, added bool) {
+	if !added {
+		return
+	}
+	for _, ad := range records {
+		ad.Delete(dbmirror.HistoryOrderAttr)
+	}
+}
+
+// sortNewestFirst orders history records most recent first, the order of the
+// schedd's backwards scan (opts.Backwards, the default).
+func sortNewestFirst(records []*classad.ClassAd) {
 	sort.SliceStable(records, func(i, j int) bool {
 		return dbmirror.RecencyKey(records[i]) > dbmirror.RecencyKey(records[j])
 	})
-
-	return historyResult(records, typeName, constraint, "htcondordb", "\n"+dbmirror.Provenance(info, d.Note)), true, d
 }
 
 // tryJobsFromDB attempts to serve a live job query (query_jobs) from the

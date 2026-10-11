@@ -231,15 +231,15 @@ SEC_TOKEN_SYSTEM_DIRECTORY = %s
 	if err != nil {
 		t.Fatalf("compatible caller token: %v", err)
 	}
-	if res.User != "alice" {
-		t.Errorf("compatible caller token authenticated as %q, want alice", res.User)
+	if res.User != "alice@pool.example" {
+		t.Errorf("compatible caller token authenticated as %q, want alice@pool.example", res.User)
 	}
 
 	res, err = ping(daemonContext(t), "")
 	if err != nil {
 		t.Fatalf("daemon path: %v", err)
 	}
-	if res.User != "condor" {
-		t.Errorf("daemon path authenticated as %q, want condor", res.User)
+	if res.User != "condor@pool.example" {
+		t.Errorf("daemon path authenticated as %q, want condor@pool.example", res.User)
 	}
 }

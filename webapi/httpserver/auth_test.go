@@ -596,7 +596,7 @@ func TestSetCondorCredentialIgnoresAnUnknownBearer(t *testing.T) {
 // it can present, and it falls through to the daemon's own credential.
 func TestResolveCachedBearerPrefersTheMintedCredential(t *testing.T) {
 	entry := &TokenCacheEntry{CondorCredential: "minted-idtoken", Scopes: []string{"condor:/WRITE"}}
-	cred, scopes := resolveCachedBearer(entry, "opaque-bearer")
+	cred, scopes, _ := resolveCachedBearer(entry, "opaque-bearer")
 	if cred != "minted-idtoken" {
 		t.Errorf("credential = %q, want the minted one", cred)
 	}
@@ -608,14 +608,14 @@ func TestResolveCachedBearerPrefersTheMintedCredential(t *testing.T) {
 // A bearer that is already a usable credential has none recorded, and
 // must still be used as itself.
 func TestResolveCachedBearerFallsBackToTheBearer(t *testing.T) {
-	cred, scopes := resolveCachedBearer(&TokenCacheEntry{}, "a-real-idtoken")
+	cred, scopes, scoped := resolveCachedBearer(&TokenCacheEntry{}, "a-real-idtoken")
 	if cred != "a-real-idtoken" {
 		t.Errorf("credential = %q, want the bearer", cred)
 	}
-	if scopes != nil {
-		t.Errorf("scopes = %v, want none", scopes)
+	if scopes != nil || scoped {
+		t.Errorf("scopes = %v, scoped = %v; want none, unscoped", scopes, scoped)
 	}
-	if cred, _ := resolveCachedBearer(nil, "a-real-idtoken"); cred != "a-real-idtoken" {
+	if cred, _, _ := resolveCachedBearer(nil, "a-real-idtoken"); cred != "a-real-idtoken" {
 		t.Errorf("a nil entry resolved to %q", cred)
 	}
 }
@@ -634,8 +634,28 @@ func TestRecordedCredentialIsWhatALaterRequestResolves(t *testing.T) {
 	if !ok {
 		t.Fatal("the bearer is not in the cache")
 	}
-	cred, scopes := resolveCachedBearer(entry, bearer)
-	if cred != "minted-idtoken" || len(scopes) != 1 {
-		t.Errorf("a later request resolved to %q / %v", cred, scopes)
+	cred, scopes, scoped := resolveCachedBearer(entry, bearer)
+	if cred != "minted-idtoken" || len(scopes) != 1 || !scoped {
+		t.Errorf("a later request resolved to %q / %v / scoped=%v", cred, scopes, scoped)
+	}
+}
+
+// A grant approved for nothing is still a scoped credential on a later
+// request. Read from the length of its scope list it looked like a bearer
+// with no scope model at all, which every scope gate admits.
+func TestRecordedEmptyGrantStaysScoped(t *testing.T) {
+	cache := NewTokenCache()
+	const bearer = "opaque-access-token"
+	if _, err := cache.AddValidated(bearer, "bbockelm", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("AddValidated: %v", err)
+	}
+	cache.SetCondorCredential(bearer, "minted-idtoken", []string{})
+
+	entry, ok := cache.Get(bearer)
+	if !ok {
+		t.Fatal("the bearer is not in the cache")
+	}
+	if _, scopes, scoped := resolveCachedBearer(entry, bearer); !scoped || len(scopes) != 0 {
+		t.Errorf("an empty grant resolved as scopes=%v scoped=%v; want none, scoped", scopes, scoped)
 	}
 }

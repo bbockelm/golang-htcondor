@@ -236,15 +236,21 @@ func TestIDPRefreshTokenFlow(t *testing.T) {
 	}
 
 	// Create a test client
-	redirectURI := "http://localhost:8080/callback"
-	if err := server.initializeIDPClient(ctx, redirectURI); err != nil {
-		t.Fatalf("Failed to initialize IDP client: %v", err)
+	if err := server.idpProvider.storage.CreateClient(ctx, &fosite.DefaultClient{
+		ID:            "refresh-test-client",
+		RedirectURIs:  []string{"http://localhost:8080/callback"},
+		GrantTypes:    []string{"authorization_code", "refresh_token"},
+		ResponseTypes: []string{"code"},
+		Scopes:        []string{"openid", "profile", "email"},
+		Public:        true,
+	}); err != nil {
+		t.Fatalf("Failed to create IDP client: %v", err)
 	}
 
 	// Simulate the full flow to get a refresh token
 	// 1. Create an authorization code session manually
 	session := DefaultIDPSession("testuser")
-	client, err := server.idpProvider.storage.GetClient(ctx, "htcondor-server")
+	client, err := server.idpProvider.storage.GetClient(ctx, "refresh-test-client")
 	if err != nil {
 		t.Fatalf("Failed to get client: %v", err)
 	}
@@ -284,7 +290,7 @@ func TestIDPRefreshTokenFlow(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(context.Background(), "POST", "/idp/token", strings.NewReader(tokenForm.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.SetBasicAuth("htcondor-server", "")
+	req.SetBasicAuth("refresh-test-client", "")
 
 	w := httptest.NewRecorder()
 	server.handleIDPToken(w, req)

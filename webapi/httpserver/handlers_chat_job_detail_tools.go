@@ -165,7 +165,7 @@ func (s *Handler) execRunInJob(ctx context.Context, actor string, in json.RawMes
 	// to the LLM instead of a generic "starter not running" wrapped
 	// in retry backoff.
 	ownerConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
-		cluster, proc, classadStringLit(actor))
+		cluster, proc, classadStringLit(ownerFromActor(actor)))
 	ads, _, err := schedd.QueryWithOptions(ctx, ownerConstraint, &htcondor.QueryOptions{
 		Limit:      1,
 		Projection: []string{"ClusterId", "ProcId", "Owner", "JobStatus"},
@@ -377,7 +377,7 @@ func (s *Handler) toolEditJobAttribute() chat.Tool {
 			// Confirm owner before mutating. Same belt-and-braces
 			// approach as hold/release/remove.
 			ownerConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
-				args.ClusterID, args.ProcID, classadStringLit(actor))
+				args.ClusterID, args.ProcID, classadStringLit(ownerFromActor(actor)))
 			ads, _, err := schedd.QueryWithOptions(ctx, ownerConstraint, &htcondor.QueryOptions{
 				Limit:      1,
 				Projection: []string{"ClusterId", "ProcId", "Owner"},
@@ -466,7 +466,7 @@ func (s *Handler) toolEditJobsByConstraint() chat.Tool {
 				}
 			}
 
-			scoped, err := scopeToOwner(actor, args.Constraint)
+			scoped, err := scopeToOwner(ownerFromActor(actor), args.Constraint)
 			if err != nil {
 				return "", err
 			}

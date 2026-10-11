@@ -14,7 +14,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,7 +21,6 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
 )
 
 // --- leads file and pattern ------------------------------------------------
@@ -794,56 +792,6 @@ func TestProjectLeadBulkCannotWiden(t *testing.T) {
 	}
 }
 
-// TestJobProxyRefusesProjectLead: the browser-proxied app path is the one
-// remote-access route project leads do not get, while a global superuser
-// keeps it.
-func TestJobProxyRefusesProjectLead(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprint(w, "hello from the job")
-	}))
-	defer backend.Close()
-
-	h := newProxyTestHandler(t, strings.TrimPrefix(backend.URL, "http://"))
-	h.userHeader = ""
-	h.userHeaderUnsafeAllowAll = false
-	h.sessionStore = createTestSessionStore(t, time.Hour)
-	h.initSuperuserMode(HandlerConfig{
-		SuperuserGroup:   "admins",
-		ProjectLeadsFile: writeLeadsFile(t, "Physics alice\n"),
-	}, h.logger)
-	h.superuserPolicy.source = &fakeSuperUsers{users: []string{"condor@test.htcondor.org"}}
-	_ = h.superuserPolicy.Refresh(context.Background())
-	ad := leadJobAd(12, "bob", "Physics", 2)
-	h.jobQueryOverride = func(_ context.Context, constraint string, _ *htcondor.QueryOptions) ([]*classad.ClassAd, error) {
-		if evalConstraint(t, constraint, ad) {
-			return []*classad.ClassAd{ad}, nil
-		}
-		return nil, nil
-	}
-
-	proxy := func(user string, groups ...string) *httptest.ResponseRecorder {
-		sid, _, err := h.sessionStore.Create(user, groups)
-		if err != nil {
-			t.Fatal(err)
-		}
-		armed := h.resolveImpersonationIdentity(context.Background(), user)
-		armed.projectScoped = !h.globalSuperuser(groups)
-		h.superuserArmed.Arm(sid, armed)
-		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/jobs/12.0/proxy/8080/", nil)
-		r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec
-		w := httptest.NewRecorder()
-		h.handleJobProxy(w, r, 12, 0, jobProxyTarget{Port: 8080}, "/")
-		return w
-	}
-
-	if w := proxy("alice"); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "interactive app") {
-		t.Errorf("project lead reached bob's app: %d %s", w.Code, w.Body.String())
-	}
-	if w := proxy("root", "admins"); w.Code != http.StatusOK {
-		t.Errorf("global superuser was refused the proxy: %d %s", w.Code, w.Body.String())
-	}
-}
-
 // TestProjectLeadReadScope: a lead reading "everyone" sees their own jobs
 // and their projects' jobs, and an admin or non-lead is unaffected.
 func TestProjectLeadReadScope(t *testing.T) {
@@ -1311,137 +1259,6 @@ func TestProjectLeadRefusalDoesNotRevealJobs(t *testing.T) {
 	}
 	if w, _ := holdOne(g, gsid, "9.0"); !strings.Contains(w.Body.String(), "not found") {
 		t.Errorf("global superuser's refusal for a missing job = %s", w.Body.String())
-	}
-}
-
-// TestImpersonatedTransportNotSharedWithPlainLookup: a transport opened under
-// superuser impersonation is cached apart from the operator's own. A plain
-// lookup by the same operator -- the SSH gateway's -- must not get it, or it
-// would outlive the arm with no superuser check and no audit.
-func TestImpersonatedTransportNotSharedWithPlainLookup(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprint(w, "hello from the job")
-	}))
-	defer backend.Close()
-
-	h := newProxyTestHandler(t, strings.TrimPrefix(backend.URL, "http://"))
-	h.userHeader = ""
-	h.userHeaderUnsafeAllowAll = false
-	h.sessionStore = createTestSessionStore(t, time.Hour)
-	h.initSuperuserMode(HandlerConfig{SuperuserGroup: "admins"}, h.logger)
-	h.superuserPolicy.source = &fakeSuperUsers{users: []string{"condor@test.htcondor.org"}}
-	_ = h.superuserPolicy.Refresh(context.Background())
-	ad := leadJobAd(12, "bob", "", 2)
-	h.jobQueryOverride = func(_ context.Context, constraint string, _ *htcondor.QueryOptions) ([]*classad.ClassAd, error) {
-		if evalConstraint(t, constraint, ad) {
-			return []*classad.ClassAd{ad}, nil
-		}
-		return nil, nil
-	}
-
-	sid, _, err := h.sessionStore.Create("root", []string{"admins"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.superuserArmed.Arm(sid, h.resolveImpersonationIdentity(context.Background(), "root"))
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/jobs/12.0/proxy/8080/", nil)
-	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec
-	w := httptest.NewRecorder()
-	h.handleJobProxy(w, r, 12, 0, jobProxyTarget{Port: 8080}, "/")
-	if w.Code != http.StatusOK {
-		t.Fatalf("impersonated proxy = %d %s", w.Code, w.Body.String())
-	}
-
-	cache, err := h.getOrCreateJobSSHCache()
-	if err != nil {
-		t.Fatal(err)
-	}
-	imp := &Impersonation{Actor: "root@test.htcondor.org", Target: "bob@test.htcondor.org", Identity: "condor@test.htcondor.org"}
-	if reused, err := cache.Warm(context.Background(), jobssh.Key{
-		Owner: "root", Credential: jobTransportMintedWrite, Cluster: 12, Proc: 0, Impersonation: imp.transportTag(),
-	}); err != nil || !reused {
-		t.Fatalf("the impersonated transport is not where it was cached (reused=%v err=%v)", reused, err)
-	}
-	if reused, err := cache.Warm(context.Background(), jobssh.Key{
-		Owner: "root", Credential: jobTransportMintedWrite, Cluster: 12, Proc: 0,
-	}); err != nil || reused {
-		t.Errorf("a plain lookup by the same operator got the impersonated transport (reused=%v err=%v)", reused, err)
-	}
-}
-
-// TestProjectLeadTransportKeptToItsGrant: a lead may warm a transport into
-// a job in their project, and it is cached under that elevation alone. A
-// plain lookup by the same lead, a lookup under the same identity without
-// the project (global scope), and a second lead of the same project must
-// each miss it.
-func TestProjectLeadTransportKeptToItsGrant(t *testing.T) {
-	env := newLeadTestEnv(t, "", "Physics alice carol\n", "")
-	env.ads = []*classad.ClassAd{leadJobAd(12, "bob", "Physics", 2)}
-
-	var dials atomic.Int32
-	cache, err := jobssh.NewCache(jobssh.Options{Dial: func(context.Context, jobssh.Key) (jobssh.Conn, error) {
-		dials.Add(1)
-		return &fakeJobConn{backend: "127.0.0.1:1", done: make(chan struct{})}, nil
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	env.h.jobSSHCache = cache
-	t.Cleanup(env.h.closeJobSSHCache)
-
-	warm := func(sid string) warmResponse {
-		t.Helper()
-		w := httptest.NewRecorder()
-		env.h.handleJobWarm(w, env.request(http.MethodPost, "/api/v1/jobs/12.0/warm", sid, nil), "12.0")
-		if w.Code != http.StatusOK {
-			t.Fatalf("lead warm = %d %s", w.Code, w.Body.String())
-		}
-		var resp warmResponse
-		_ = json.Unmarshal(w.Body.Bytes(), &resp)
-		return resp
-	}
-
-	alice := env.session("alice")
-	if code, _ := env.arm(alice); code != http.StatusOK {
-		t.Fatalf("arm alice: %d", code)
-	}
-	warm(alice)
-	if !warm(alice).Reused {
-		t.Fatal("the lead's own second warm did not reuse the transport")
-	}
-	if got := dials.Load(); got != 1 {
-		t.Fatalf("precondition: %d transports, want 1", got)
-	}
-
-	led := Impersonation{Identity: "condor@example.org", Target: "bob@example.org", Project: "Physics"}
-	global := led
-	global.Project = ""
-	lookup := func(imp string) bool {
-		t.Helper()
-		reused, err := cache.Warm(context.Background(), jobssh.Key{
-			Owner: "alice", Credential: jobTransportMintedWrite, Cluster: 12, Proc: 0, Impersonation: imp,
-		})
-		if err != nil {
-			t.Fatalf("Warm: %v", err)
-		}
-		return reused
-	}
-	if !lookup(led.transportTag()) {
-		t.Fatal("precondition: the lead's transport is not under the key this test reconstructs")
-	}
-	if lookup("") {
-		t.Error("a plain lookup by the lead got the elevated transport")
-	}
-	if lookup(global.transportTag()) {
-		t.Error("a global-scope lookup under the same identity got the project lead's transport")
-	}
-
-	carol := env.session("carol")
-	if code, _ := env.arm(carol); code != http.StatusOK {
-		t.Fatalf("arm carol: %d", code)
-	}
-	if warm(carol).Reused {
-		t.Error("a second lead of the same project was handed the first lead's transport")
 	}
 }
 

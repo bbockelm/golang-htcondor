@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/cedar/security"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 )
@@ -264,8 +263,8 @@ func (m *Manager) adopt(ctx context.Context, caller Caller, info *Info) {
 	// pair would have us dial the wrong sandbox.
 	sess.cluster = info.ClusterID
 	sess.proc = info.ProcID
-	if sc := securityConfigFrom(ctx); sc != nil {
-		sess.secConfig = sc
+	if cred := callerCredentialFrom(ctx); cred != nil {
+		sess.credential = cred
 	}
 }
 
@@ -359,8 +358,8 @@ func (m *Manager) attach(ctx context.Context, caller Caller, info *Info) (Shell,
 		return existing, nil
 	}
 	sess.shell = shell
-	if sc := securityConfigFrom(ctx); sc != nil {
-		sess.secConfig = sc
+	if cred := callerCredentialFrom(ctx); cred != nil {
+		sess.credential = cred
 	}
 	m.startHeartbeatLocked(sess)
 	m.mu.Unlock()
@@ -507,7 +506,7 @@ func (m *Manager) heartbeatLoop(sess *session, stop chan struct{}) {
 func (m *Manager) expire(sess *session) {
 	m.mu.Lock()
 	shell := sess.shell
-	secConfig := sess.secConfig
+	credential := sess.credential
 	cluster, proc := sess.cluster, sess.proc
 	owner, name := sess.owner, sess.name
 	m.mu.Unlock()
@@ -535,8 +534,8 @@ func (m *Manager) expire(sess *session) {
 		htcondor.WithUserRequest(context.Background(), "interactive session lease expiry"),
 		30*time.Second)
 	defer cancel()
-	if secConfig != nil {
-		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+	if credential != nil {
+		ctx = credential.Attach(ctx)
 	}
 	m.removeJob(ctx, Caller{Actor: owner, Owner: owner}, cluster, proc, "Interactive session lease expired")
 }
@@ -764,20 +763,19 @@ func (m *Manager) removeJob(ctx context.Context, caller Caller, cluster, proc in
 	}
 }
 
-// securityConfigFrom copies the caller's credential off a request
-// context so background work can reuse it. Returns nil when the host
-// runs as the user (the stdio server), where no credential is carried
-// on the context in the first place.
-func securityConfigFrom(ctx context.Context) *security.SecurityConfig {
+// callerCredentialFrom copies the caller's credential off a request
+// context so background work can reuse it. Returns nil when the host runs
+// as the user (the stdio server), where no credential is carried on the
+// context in the first place.
+func callerCredentialFrom(ctx context.Context) *htcondor.CallerCredential {
 	if ctx == nil {
 		return nil
 	}
-	sc, ok := htcondor.GetSecurityConfigFromContext(ctx)
+	cred, ok := htcondor.CallerCredentialFromContext(ctx)
 	if !ok {
 		return nil
 	}
-	copied := sc
-	return &copied
+	return &cred
 }
 
 func applySpecDefaults(spec *CreateSpec) {
@@ -823,7 +821,14 @@ func validateSpec(spec CreateSpec) error {
 	// does not parse takes them down with it. Parsing here also names
 	// the offending expression instead of leaving a schedd transaction
 	// failure to interpret.
+	//
+	// It is also spliced onto one submit-file line, and a ClassAd
+	// expression may span lines (`true ||<newline>x =?= y` parses), so a
+	// line break is refused as it is in the GPU fields below.
 	if req := strings.TrimSpace(spec.Requirements); req != "" {
+		if strings.ContainsAny(req, "\n\r") {
+			return fmt.Errorf("requirements may not contain line breaks")
+		}
 		if _, err := classad.ParseExpr(req); err != nil {
 			return fmt.Errorf("requirements %q is not a valid ClassAd expression: %w", req, err)
 		}

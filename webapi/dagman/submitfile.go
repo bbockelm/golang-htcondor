@@ -173,6 +173,12 @@ func SubmitFile(opt SubmitOptions) (string, error) {
 	if strings.ContainsAny(opt.DagName, "/\\") {
 		return "", fmt.Errorf("DagName %q must be a bare file name: the spool directory is flat", opt.DagName)
 	}
+	// BatchName is written inside a quoted string on one line: a newline
+	// would end the line and start a submit command of the caller's
+	// choosing, and a quote would end the string.
+	if strings.ContainsAny(opt.BatchName, "\n\r\"") {
+		return "", fmt.Errorf("batch name %q must not contain a line break or a double quote", opt.BatchName)
+	}
 	binDir := strings.TrimRight(strings.TrimSpace(opt.BinDir), "/")
 	exe := opt.DagmanPath
 	if exe == "" {

@@ -144,7 +144,8 @@ func (c *mcpActorCache) sweepSourcesLocked(now time.Time) {
 // actorResolveSource is the address a resolution is charged to: the
 // client as clientIP resolves it, with an IPv6 address reduced to its
 // /64, since one host commonly holds a whole /64 and would otherwise
-// have a budget per address.
+// have a budget per address. The other per-source limits on
+// unauthenticated endpoints key on it for the same reason.
 func actorResolveSource(r *http.Request, trusted []*net.IPNet) string {
 	addr := clientIP(r, trusted)
 	ip := net.ParseIP(addr)
@@ -202,9 +203,12 @@ func mcpActorKey(token string) string {
 // caller's bearer, used only to key the answer.
 //
 // The answer comes from the schedd, not from any token claim: ctx
-// already carries the request's SecurityConfig, so a DC_NOP ping
+// already carries the request's SecurityConfig, so the ping
 // authenticates exactly as the subsequent tool call will and the schedd
-// reports back the identity it mapped the caller to. That matters for
+// reports back the identity it mapped the caller to. The ping is
+// DC_NOP_READ rather than DC_NOP, which is registered at ALLOW: an
+// identity is only resolved for a credential the schedd accepts at
+// READ, the level of every query it stands in for. That matters for
 // both kinds of bearer. For a forwarded IDTOKEN, the claim is unverified
 // here — trusting it would be the mistake the REST path's token cache
 // exists to avoid. For an OAuth2 bearer the username claim is verified,
@@ -225,7 +229,7 @@ func (h *Handler) actorForSession(ctx context.Context, cacheKey string) string {
 		return actor
 	}
 
-	result, err := h.getSchedd().Ping(ctx)
+	result, err := h.pingAsCaller(ctx)
 	if err != nil {
 		h.logger.Warn(logging.DestinationHTTP, "Could not resolve the caller's identity with the schedd; owner-scoped MCP tools will refuse this call", "error", err)
 		h.mcpActors.put(cacheKey, "", mcpActorFailTTL)
@@ -251,6 +255,11 @@ func (h *Handler) actorForSession(ctx context.Context, cacheKey string) string {
 // A refusal is errActorResolveThrottled, never "": the caller must fail
 // the request rather than carry on with no identity.
 func (h *Handler) resolveActor(ctx context.Context, r *http.Request, cacheKey string) (string, error) {
+	// A request routed to an AP is identified by that AP (pingAsCaller),
+	// and its answer is that AP's: cached apart from every other AP's.
+	if ap := routedSchedd(ctx); ap != "" {
+		cacheKey = cacheKey + "\x00" + strings.ToLower(ap)
+	}
 	if actor, ok := h.mcpActors.get(cacheKey); ok {
 		return actor, nil
 	}
@@ -314,11 +323,13 @@ func shortTag(tag string) string {
 // Every REST caller reaches the same schedd with the same commands, so
 // an untagged config shares one cache entry across callers.
 //
-// userTag is the username, and is set only in user-header mode: there
-// the token is regenerated per request -- new jti, new iat -- so a
-// digest of it would differ every time and no session would ever be
-// reused. Everywhere else the tag is a digest of the credential rather
-// than a claim read out of it, because a claim is attacker-chosen.
+// userTag is set only in user-header mode, where the token is
+// regenerated per request -- new jti, new iat -- so a digest of it
+// would differ every time and no session would ever be reused; it is
+// derived from what this server minted the token for (see
+// mintedCredentialSessionTag). Everywhere else the tag is a digest of
+// the credential rather than a claim read out of it, because a claim
+// is attacker-chosen.
 func sessionTagFor(userTag, credential string) string {
 	if userTag != "" {
 		return userTag

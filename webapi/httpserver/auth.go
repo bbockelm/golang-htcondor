@@ -287,6 +287,10 @@ type TokenCacheEntry struct {
 	// that could not see them would read an approved-for-less grant as
 	// carrying no restriction at all.
 	Scopes []string
+	// Scoped is whether the bearer is a scoped credential at all, which
+	// Scopes cannot say by itself: a grant approved for nothing has no
+	// scopes, and is still not a bearer with no scope model.
+	Scoped bool
 
 	Expiration   time.Time
 	SessionCache *security.SessionCache
@@ -301,7 +305,8 @@ type TokenCacheEntry struct {
 
 // SetCondorCredential records the credential and scopes resolved for a
 // bearer, so later requests for it do not have to resolve them again --
-// and, more to the point, do not proceed without them.
+// and, more to the point, do not proceed without them. The bearer is
+// recorded as scoped whatever scopes says, empty included.
 func (tc *TokenCache) SetCondorCredential(token, credential string, scopes []string) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
@@ -311,6 +316,7 @@ func (tc *TokenCache) SetCondorCredential(token, credential string, scopes []str
 	}
 	entry.CondorCredential = credential
 	entry.Scopes = append([]string(nil), scopes...)
+	entry.Scoped = true
 }
 
 const (
@@ -524,11 +530,12 @@ func (tc *TokenCache) AddValidated(token, username string, expiration time.Time)
 }
 
 // sessionCacheFor returns the session cache kept for user, creating it
-// if there is none. Only for a user this server authenticated itself (a
-// session cookie), on a TokenCache used for nothing else: the key is a
-// username, not a token, and must not share a keyspace with bearers.
-// The entry is bounded and expires like a verified one; a new one only
-// means new CEDAR handshakes.
+// if there is none. user names a private partition this server chose --
+// a user it authenticated itself (a session cookie), or a credential's
+// session tag (see mintedCredentialSessionTag) -- on a TokenCache used
+// for that keyspace alone: the key is not a token and must not share a
+// keyspace with bearers. The entry is bounded and expires like a
+// verified one; a new one only means new CEDAR handshakes.
 func (tc *TokenCache) sessionCacheFor(user string) *security.SessionCache {
 	if tc == nil {
 		return security.NewSessionCache()
@@ -685,7 +692,7 @@ func (tc *TokenCache) ValidatedUsername(token string) string {
 
 // resolveCachedBearer reports the credential and scopes a request
 // should use for a bearer the cache already knows, given the bearer
-// itself as the fallback.
+// itself as the fallback, and whether the bearer is a scoped credential.
 //
 // Separated from createAuthenticatedContext so it can be tested:
 // that function cannot be driven through this branch in a unit test,
@@ -698,13 +705,13 @@ func (tc *TokenCache) ValidatedUsername(token string) string {
 // IS already a usable credential, and was wrong for every opaque one,
 // because CEDAR then had nothing to present and fell through to
 // whatever credential the daemon itself has.
-func resolveCachedBearer(entry *TokenCacheEntry, bearer string) (credential string, scopes []string) {
+func resolveCachedBearer(entry *TokenCacheEntry, bearer string) (credential string, scopes []string, scoped bool) {
 	if entry == nil {
-		return bearer, nil
+		return bearer, nil, false
 	}
 	credential = bearer
 	if entry.CondorCredential != "" {
 		credential = entry.CondorCredential
 	}
-	return credential, entry.Scopes
+	return credential, entry.Scopes, entry.Scoped
 }

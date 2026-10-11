@@ -2,9 +2,12 @@ package htcondor
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bbockelm/cedar/security"
 )
 
 // TestCollectorPingIntegration tests the Collector.Ping method against a real HTCondor instance
@@ -191,19 +194,111 @@ func TestScheddPingIntegration(t *testing.T) {
 
 		result, err := schedd.PingWithOptions(ctx, opts)
 
-		// We expect this to fail or return unauthorized
-		switch {
-		case err == nil && result != nil && result.Permission == "":
-			// If no error but no permission granted, that's expected
-			t.Logf("CONFIG permission correctly not granted")
-		case err != nil:
-			// Error is also acceptable for permission denied
-			t.Logf("CONFIG permission check failed as expected: %v", err)
-		case result != nil && result.Permission != "":
-			// If permission was granted, that's unexpected for a test user
-			t.Fatalf("WARNING: CONFIG permission was granted (unexpected in test environment)")
-		default:
-			t.Fatalf("Unexpected result for CONFIG permission check")
+		// The schedd refuses CONFIG to the test user (post-auth DENIED),
+		// which is the query's answer rather than an error.
+		if err != nil {
+			t.Fatalf("CONFIG permission query: %v", err)
+		}
+		if result.Authorized || result.Permission != "CONFIG" || result.Reason == "" {
+			t.Fatalf("CONFIG permission query = %+v, want not Authorized at CONFIG, with a reason", result)
+		}
+	})
+}
+
+// TestScheddPingAtReadIntegration checks, against a real schedd, the
+// property identity resolution in the API server relies on: DC_NOP is
+// registered at ALLOW and so succeeds for any identity the schedd can
+// authenticate, while DC_NOP_READ is registered at READ and is refused
+// for an identity READ excludes -- the same identity the schedd would
+// refuse QUERY_JOB_ADS.
+func TestScheddPingAtReadIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	const excluded = "mallory"
+	harness := SetupCondorHarnessWithConfig(t, "SCHEDD.DENY_READ = "+excluded+"@"+HarnessTrustDomain+"\n")
+	if err := harness.WaitForDaemons(); err != nil {
+		t.Fatalf("Daemons failed to start: %v", err)
+	}
+	location, err := NewCollector(harness.GetCollectorAddr()).LocateDaemon(context.Background(), "Schedd", "")
+	if err != nil {
+		t.Fatalf("Failed to locate schedd: %v", err)
+	}
+	schedd := NewSchedd(location.Name, location.Address)
+
+	asUser := func(t *testing.T, user string, authz ...string) context.Context {
+		t.Helper()
+		now := time.Now().Unix()
+		tok, err := security.GenerateJWT(harness.GetPasswordDir(), "POOL",
+			user+"@"+HarnessTrustDomain, HarnessTrustDomain, now, now+600, authz)
+		if err != nil {
+			t.Fatalf("GenerateJWT(%s): %v", user, err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		t.Cleanup(cancel)
+		sec, err := NewClientSecurityConfig(ctx, tok, "", 0, "CLIENT", nil)
+		if err != nil {
+			t.Fatalf("NewClientSecurityConfig(%s): %v", user, err)
+		}
+		sec.SecurityTag = user + strings.Join(authz, ",")
+		return WithSecurityConfig(ctx, sec)
+	}
+	refusedAtRead := func(t *testing.T, ctx context.Context, user string) {
+		t.Helper()
+		res, err := schedd.Ping(ctx)
+		if err != nil {
+			t.Fatalf("DC_NOP ping: %v (it is registered at ALLOW and must succeed for any authenticated identity)", err)
+		}
+		if !strings.HasPrefix(res.User, user+"@") {
+			t.Fatalf("DC_NOP ping authenticated as %q, want %s@...; the test is not exercising the token", res.User, user)
+		}
+		res, err = schedd.PingWithOptions(ctx, &PingOptions{Command: DCNopRead})
+		if err == nil {
+			t.Fatalf("DC_NOP_READ ping succeeded as %q although READ is refused", res.User)
+		}
+		var authzErr *security.AuthorizationError
+		if !errors.As(err, &authzErr) {
+			t.Errorf("DC_NOP_READ refusal is %T (%v), want *security.AuthorizationError", err, err)
+		}
+	}
+
+	t.Run("identity excluded by DENY_READ", func(t *testing.T) {
+		refusedAtRead(t, asUser(t, excluded), excluded)
+	})
+
+	// A token's authorization limits bound what it may do whoever holds
+	// it. ALLOW implies no other level; most others imply READ (for
+	// example ADVERTISE_STARTD does), so they would pass.
+	t.Run("token limited to ALLOW", func(t *testing.T) {
+		refusedAtRead(t, asUser(t, "pilot", "ALLOW"), "pilot")
+	})
+
+	// A DC_SEC_QUERY about READ is refused the same way, post-auth DENIED;
+	// that is its answer, not a failed ping.
+	t.Run("permission query", func(t *testing.T) {
+		res, err := schedd.PingWithOptions(asUser(t, excluded), &PingOptions{CheckPermission: DCNopRead})
+		if err != nil {
+			t.Fatalf("READ query for %s: %v, want Authorized false", excluded, err)
+		}
+		if res.Authorized || res.CommandNotFound || res.Reason == "" || !strings.HasPrefix(res.User, excluded+"@") {
+			t.Errorf("READ query for %s = %+v, want not Authorized, with a reason", excluded, res)
+		}
+		res, err = schedd.PingWithOptions(asUser(t, "alice"), &PingOptions{CheckPermission: DCNopRead})
+		if err != nil {
+			t.Fatalf("READ query for alice: %v", err)
+		}
+		if !res.Authorized {
+			t.Errorf("READ query for alice = %+v, want Authorized", res)
+		}
+	})
+
+	t.Run("permitted identity", func(t *testing.T) {
+		res, err := schedd.PingWithOptions(asUser(t, "alice"), &PingOptions{Command: DCNopRead})
+		if err != nil {
+			t.Fatalf("DC_NOP_READ ping for a permitted identity: %v", err)
+		}
+		if !strings.HasPrefix(res.User, "alice@") {
+			t.Errorf("DC_NOP_READ ping authenticated as %q, want alice@...", res.User)
 		}
 	})
 }

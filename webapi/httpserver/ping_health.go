@@ -168,6 +168,38 @@ type healthSnapshot struct {
 	DBMirror *dbMirrorHealthStatus `json:"dbmirror,omitempty"`
 }
 
+// publicHealthSnapshot is /readyz for a caller who may not see the
+// details (see readyzDetail): each status, and nothing that names or
+// locates a daemon or quotes an error.
+type publicHealthSnapshot struct {
+	Status    string                `json:"status"`
+	Collector publicDaemonStatus    `json:"collector"`
+	Schedd    publicDaemonStatus    `json:"schedd"`
+	DBMirror  *publicDBMirrorStatus `json:"dbmirror,omitempty"`
+}
+
+type publicDaemonStatus struct {
+	Status string `json:"status"`
+}
+
+type publicDBMirrorStatus struct {
+	Status   string `json:"status"`
+	Required bool   `json:"required"`
+}
+
+// public is the snapshot reduced to publicHealthSnapshot.
+func (h healthSnapshot) public() publicHealthSnapshot {
+	out := publicHealthSnapshot{
+		Status:    h.Status,
+		Collector: publicDaemonStatus{Status: h.Collector.Status},
+		Schedd:    publicDaemonStatus{Status: h.Schedd.Status},
+	}
+	if h.DBMirror != nil {
+		out.DBMirror = &publicDBMirrorStatus{Status: h.DBMirror.Status, Required: h.DBMirror.Required}
+	}
+	return out
+}
+
 // dbMirrorHealthStatus answers "is the htcondordb integration working?"
 // in one place. A Prometheus scrape answers it over time (see
 // mirrorCollector); this is the version an operator can curl on one host

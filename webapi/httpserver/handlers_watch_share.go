@@ -66,7 +66,7 @@ func (h *Handler) handleWatchShare(w http.ResponseWriter, r *http.Request, watch
 		return
 	}
 
-	owner := strings.SplitN(htcondor.GetAuthenticatedUserFromContext(ctx), "@", 2)[0]
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
 	if owner == "" {
 		h.writeError(w, http.StatusUnauthorized, "Could not determine authenticated user")
 		return
@@ -183,6 +183,15 @@ func (h *Handler) handleSharedWatch(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+
+	// Either form holds the connection for the whole wait. Counted
+	// against the watch's owner, apart from their own sessions, since
+	// whoever holds the URL is not necessarily them.
+	release, ok := h.admitStream(w, "share:"+payload.Owner)
+	if !ok {
+		return
+	}
+	defer release()
 
 	wait := watchpoll.ClampWait(r.URL.Query().Get("wait"))
 	start := time.Now()

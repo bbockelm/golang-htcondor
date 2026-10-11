@@ -20,13 +20,15 @@ import { LISTING_PAGE_SIZE } from '@/lib/paging';
 import { JobStatusStrip } from '@/components/JobStatusStrip';
 import { JobsSummaryPanel } from '@/components/JobsSummaryPanel';
 import { BatchTable } from '@/components/BatchTable';
+import { batchView } from '@/lib/batchView';
+import { sameUser } from '@/lib/users';
+import { clustersNeedingCounts, withExactCounts } from '@/lib/exactCounts';
+import { useExactCounts } from '@/lib/useExactCounts';
 import {
-  applyBatchFilter,
-  filterAdsByStatus,
-  groupIntoBatches,
-  num,
+  adsInBatches,
   summarizeJobs,
   BATCH_PROJECTION,
+  type BatchKey,
 } from '@/lib/batches';
 
 const PAGE_SIZE = LISTING_PAGE_SIZE;
@@ -51,7 +53,7 @@ export default function UserDetailClient() {
 
   const [filter, setFilter] = useState('');
   const [statuses, setStatuses] = useState<Set<DisplayStatus>>(new Set());
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [expanded, setExpanded] = useState<Set<BatchKey>>(new Set());
 
   const toggleStatus = useCallback((key: DisplayStatus) => {
     setStatuses((prev) => {
@@ -120,26 +122,27 @@ export default function UserDetailClient() {
   const lastPage = pages?.pages[pages.pages.length - 1];
 
   const statusCounts = useMemo(() => summarizeJobs(jobs).counts, [jobs]);
-  const statusFiltered = useMemo(
-    () => filterAdsByStatus(jobs, statuses),
-    [jobs, statuses],
+  // The Owner constraint keeps or drops whole batches, so unlike an
+  // arbitrary expression it cannot leave a batch's count partial; only a
+  // cut-off listing can.
+  const allLoaded = !!lastPage && !lastPage.has_more && !lastPage.error && !hasNextPage;
+  const { statusFiltered, batches, progress: listedProgress } = useMemo(
+    () => batchView(jobs, statuses, filter, allLoaded),
+    [jobs, statuses, filter, allLoaded],
   );
-  const batches = useMemo(
-    () => applyBatchFilter(groupIntoBatches(statusFiltered), filter),
-    [statusFiltered, filter],
+  // A cut-off listing gets its batches counted exactly; see /jobs.
+  const countClusters = useMemo(
+    () => (allLoaded ? [] : clustersNeedingCounts(batches, listedProgress)),
+    [allLoaded, batches, listedProgress],
+  );
+  const exactCounts = useExactCounts({ clusters: countClusters, ownedByMe: false });
+  const progress = useMemo(
+    () => (exactCounts ? withExactCounts(listedProgress, batches, exactCounts) : listedProgress),
+    [listedProgress, batches, exactCounts],
   );
   const summary = useMemo(() => {
     if (!filter) return summarizeJobs(statusFiltered);
-    // A batch can span many clusters (a DAG folds a whole tree into one
-    // row), so keep every cluster the surviving batches cover, not just
-    // their representative id.
-    const clusters = new Set(batches.flatMap((b) => b.clusterIds));
-    return summarizeJobs(
-      statusFiltered.filter((j) => {
-        const c = num(j.ClusterId);
-        return c !== undefined && clusters.has(c);
-      }),
-    );
+    return summarizeJobs(adsInBatches(statusFiltered, batches));
   }, [statusFiltered, filter, batches]);
 
   return (
@@ -247,6 +250,7 @@ export default function UserDetailClient() {
               setExpanded={setExpanded}
               highlighted={null}
               onChange={() => refetch()}
+              progress={progress}
             />
           )}
         </>
@@ -268,13 +272,4 @@ export default function UserDetailClient() {
       )}
     </div>
   );
-}
-
-// sameUser compares a queue Owner with the session's identity. The queue
-// stores a bare account name; a session identity may be fully qualified
-// (user@domain), so compare on the local part.
-function sameUser(owner: string, username: string | undefined): boolean {
-  if (!owner || !username) return false;
-  const local = (s: string) => s.split('@')[0].toLowerCase();
-  return local(owner) === local(username);
 }

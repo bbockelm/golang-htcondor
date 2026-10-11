@@ -370,3 +370,28 @@ func TestPlacementLoginDaemonRefusal(t *testing.T) {
 		t.Errorf("the daemon's reason should reach the caller: %s", rec.Body.String())
 	}
 }
+
+// The placementd authorizes this access point, not the caller, so the
+// admin-gated endpoints reach it with this daemon's credential. Reached
+// through ServeHTTP, which marks every request as a caller's: before the
+// placement calls said otherwise, each one was refused there for having no
+// caller credential and never reached the placementd.
+func TestPlacementCallsUseTheDaemonCredential(t *testing.T) {
+	server, admin, _ := newPlacementTestServer(t, htcondor.NewPlacementd("<127.0.0.1:1>"))
+	server.placementdAvailable.Store(true)
+	server.setupRoutes()
+
+	for _, tc := range []struct{ method, path, body string }{
+		{"GET", "/api/v1/placement/users", ""},
+		{"GET", "/api/v1/placement/tokens", ""},
+		{"GET", "/api/v1/placement/authorizations", ""},
+		{"POST", "/api/v1/placement/login", `{"username":"student1@example.edu"}`},
+	} {
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, admin(tc.method, tc.path, tc.body))
+		if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "in the caller's place") {
+			t.Errorf("%s %s: status %d, body %s; want the closed placementd port to be dialed",
+				tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}

@@ -39,6 +39,7 @@ func TestOutputSchemaPolicyCoversConditionalTools(t *testing.T) {
 		"store_service_credential", "delete_service_credential",
 		"query_history_db", "query_jobs_as_of", "aggregate_jobs",
 		"watch_jobs", "check_watches", "cancel_watch",
+		"query_pool",
 	}
 	for _, name := range conditional {
 		if outputSchemaFor(name) == nil {

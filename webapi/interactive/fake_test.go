@@ -31,6 +31,8 @@ type fakeSchedd struct {
 	spooled     [][]string
 	constraints []string // constraints the manager queried with
 	removed     []string
+	// removedWith is the token each removal would have presented.
+	removedWith []string
 
 	// onQuery runs before each query answer, so a test can make the
 	// queue change underneath a polling loop.
@@ -159,10 +161,20 @@ func (f *fakeSchedd) QueryWithOptions(_ context.Context, constraint string, opts
 	return ads, nil, nil
 }
 
-func (f *fakeSchedd) RemoveJobs(_ context.Context, constraint string, _ string) (*htcondor.JobActionResults, error) {
+func (f *fakeSchedd) RemoveJobs(ctx context.Context, constraint string, _ string) (*htcondor.JobActionResults, error) {
+	token := ""
+	if _, ok := htcondor.GetSecurityConfigFromContext(ctx); ok {
+		// What a real schedd connection would present, renewal included.
+		resolved, err := htcondor.GetSecurityConfigOrDefault(ctx, nil, 0, "CLIENT", "<127.0.0.1:1>")
+		if err != nil {
+			return nil, err
+		}
+		token = resolved.Token
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, constraint)
+	f.removedWith = append(f.removedWith, token)
 	return &htcondor.JobActionResults{}, nil
 }
 
@@ -199,6 +211,13 @@ func (f *fakeSchedd) spooledScript() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastScript
+}
+
+// removedWithTokens returns the token each removal would have presented.
+func (f *fakeSchedd) removedWithTokens() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.removedWith...)
 }
 
 func (f *fakeSchedd) removedJobs() []string {
