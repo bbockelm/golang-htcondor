@@ -16,7 +16,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 )
 
-// historyMirror is an in-process htcondordb whose tables have the kinds
+// testHistoryMirror is an in-process htcondordb whose tables have the kinds
 // production gives them: "jobs" a plain table and "history" an ARCHIVE,
 // created with the config htcondordb's schedd-sync uses
 // (cmd/htcondordb/scheddsync_manager.go).
@@ -26,11 +26,11 @@ import (
 // failed every call in production with "no such table: history". A
 // fixture that made history a plain table would have answered that op
 // and passed.
-type historyMirror struct {
+type testHistoryMirror struct {
 	srv *dbrpc.Server
 }
 
-func newHistoryMirror(t *testing.T) *historyMirror {
+func newHistoryMirror(t *testing.T) *testHistoryMirror {
 	t.Helper()
 	cat, err := db.OpenCatalog(t.TempDir())
 	if err != nil {
@@ -52,12 +52,12 @@ func newHistoryMirror(t *testing.T) *historyMirror {
 	}
 	srv := dbrpc.NewServerCatalog(cat)
 	t.Cleanup(func() { srv.Close(); _ = cat.Close() })
-	return &historyMirror{srv: srv}
+	return &testHistoryMirror{srv: srv}
 }
 
 // dial opens a session over a fresh pipe, in the shape Server.dbClient
 // returns.
-func (m *historyMirror) dial(context.Context) (*dbrpc.Client, func(), *dbmirror.Info, error) {
+func (m *testHistoryMirror) dial(context.Context) (*dbrpc.Client, func(), *dbmirror.Info, error) {
 	c, s := net.Pipe()
 	go func() { _ = m.srv.ServeConn(dbrpc.NewStreamConn(s)) }()
 	cl := dbrpc.NewClient(dbrpc.NewStreamConn(c))
@@ -67,7 +67,7 @@ func (m *historyMirror) dial(context.Context) (*dbrpc.Client, func(), *dbmirror.
 // archive appends a completed job the way the history syncer does. The
 // Environment is large and outside the default working set, so a row
 // carrying it shows the projection was not applied.
-func (m *historyMirror) archive(t *testing.T, owner string, cluster int) {
+func (m *testHistoryMirror) archive(t *testing.T, owner string, cluster int) {
 	t.Helper()
 	cl, closer, _, _ := m.dial(context.Background())
 	defer closer()
@@ -80,7 +80,7 @@ func (m *historyMirror) archive(t *testing.T, owner string, cluster int) {
 }
 
 // historyServer is a Server whose DB tools read m.
-func historyServer(m *historyMirror, admins ...string) *Server {
+func historyServer(m *testHistoryMirror, admins ...string) *Server {
 	s := &Server{
 		dbMirror:   dbmirror.NewLocator(htcondor.NewCollector("collector.example"), config.NewEmpty()),
 		dbClientFn: m.dial,
@@ -118,15 +118,6 @@ func historyCall(t *testing.T, s *Server, user string, args map[string]interface
 	return records, hasMore, text
 }
 
-func clusters(records []*classad.ClassAd) []int64 {
-	out := make([]int64, 0, len(records))
-	for _, r := range records {
-		c, _ := r.EvaluateAttrInt("ClusterId")
-		out = append(out, c)
-	}
-	return out
-}
-
 // TestQueryHistoryDBReadsTheArchive is the regression test for
 // query_history_db failing on every call against a real htcondordb
 // ("dbrpc: no such table: history"): it must read history as the
@@ -140,7 +131,7 @@ func TestQueryHistoryDBReadsTheArchive(t *testing.T) {
 	s := historyServer(m)
 
 	records, hasMore, text := historyCall(t, s, "alice", map[string]interface{}{})
-	if got := fmt.Sprint(clusters(records)); got != "[4 3 1]" {
+	if got := fmt.Sprint(clusters(t, records)); got != "[4 3 1]" {
 		t.Errorf("alice's history = %s, want [4 3 1]: her own jobs, most recently archived first", got)
 	}
 	if hasMore {
@@ -173,7 +164,7 @@ func TestQueryHistoryDBLimitIsTheNewest(t *testing.T) {
 	s := historyServer(m)
 
 	records, hasMore, _ := historyCall(t, s, "alice", map[string]interface{}{"limit": float64(2)})
-	if got := fmt.Sprint(clusters(records)); got != "[3 2]" {
+	if got := fmt.Sprint(clusters(t, records)); got != "[3 2]" {
 		t.Errorf("limit=2 returned %s, want the newest two [3 2]", got)
 	}
 	if !hasMore {
@@ -228,7 +219,7 @@ func TestQueryHistoryDBAdminSeesEveryOwner(t *testing.T) {
 	s := historyServer(m, "root")
 
 	records, _, _ := historyCall(t, s, "root", map[string]interface{}{})
-	if got := fmt.Sprint(clusters(records)); got != "[2 1]" {
+	if got := fmt.Sprint(clusters(t, records)); got != "[2 1]" {
 		t.Errorf("admin history = %s, want every owner's [2 1]", got)
 	}
 }
