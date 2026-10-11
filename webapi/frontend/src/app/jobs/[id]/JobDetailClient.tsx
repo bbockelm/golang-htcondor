@@ -17,6 +17,8 @@ import {
 import { useResolvedParams } from '@/lib/useResolvedParams';
 import { useMultiAPMode } from '@/lib/multiap';
 import { summarizeRequirements, standardLabels } from '@/lib/requirements';
+import { coresUsed, jobTiming } from '@/lib/batches';
+import { OwnerLink } from '@/components/OwnerLink';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -345,7 +347,7 @@ export function MultiAPJobView({ id, archivedView }: { id: string; archivedView:
               }
             />
             <Field label="Access point" value={schedd ?? '—'} mono />
-            <Field label="Owner" value={str(data.Owner) ?? '—'} />
+            <Field label="Owner" value={<OwnerLink owner={str(data.Owner)} />} />
             <Field
               label="Submitted"
               value={num(data.QDate) ? new Date(num(data.QDate)! * 1000).toLocaleString() : '—'}
@@ -390,6 +392,8 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
   // useNowTick re-renders the relative-time strings every minute even
   // if the underlying job ad hasn't changed.
   const now = useNowTick(60_000);
+  // How long the current run, or the current wait, has lasted.
+  const timing = jobTiming(job);
 
   const display = displayJobStatus({
     status: job.JobStatus as number | string | null | undefined,
@@ -418,8 +422,16 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
       <JobDetailChat jobID={jobID} job={job} />
 
       <div className="rounded-sm border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
-        <Field label="Status" value={<StatusBadge display={display} />} />
-        <Field label="Owner" value={owner ?? '—'} />
+        <Field
+          label="Status"
+          value={<StatusBadge display={display} />}
+          sub={
+            timing
+              ? `${timing.kind === 'running' ? 'running' : 'waiting'} for ${humanDuration(now - timing.since)}`
+              : undefined
+          }
+        />
+        <Field label="Owner" value={<OwnerLink owner={owner} />} />
         <Field
           label="Submitted"
           value={qdate ? new Date(qdate * 1000).toLocaleString() : '—'}
@@ -3079,9 +3091,10 @@ export function ResourceTable({ job }: { job: ClassAd }) {
     {
       label: 'CPUs',
       requested: fmtRequested(job.RequestCpus),
-      used: fmtUsage(job.CpusUsage ?? job.CumulativeRemoteSysCpu),
+      // Not CpusUsage, which is wrong while a job runs; see coresUsed.
+      used: fmtUsage(coresUsed(job)),
       reqN: num(job.RequestCpus),
-      usedN: num(job.CpusUsage),
+      usedN: coresUsed(job),
     },
     {
       label: 'Memory',

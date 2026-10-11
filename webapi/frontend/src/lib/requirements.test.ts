@@ -4,6 +4,7 @@ import {
   splitConjuncts,
   standardLabels,
   summarizeRequirements,
+  unwrapExpr,
 } from './requirements';
 
 // The real-world expression from a CHTC job pinned to one machine.
@@ -81,5 +82,39 @@ describe('splitConjuncts / normalizeClause', () => {
     expect(normalizeClause('(MY.WantGpuLab == true)')).toBe(
       'MY.WantGpuLab == true',
     );
+  });
+});
+
+describe('a Requirements expression as the API sends it', () => {
+  // Verbatim from a CHTC job page: the API wraps an unevaluated expression
+  // as "/Expr(...)/", the tree is left-nested ten deep, and it carries
+  // function calls with commas and string literals.
+  const fromApi =
+    '/Expr(((((((((((PoolName == "CHTC") || (substr(Machine, 0, 3) == "gzk")) && ((Machine != "txie-dsigpu4000.chtc.wisc.edu") && (Machine != "gpu4002.chtc.wisc.edu"))) && (Arch == "X86_64")) && HasContainer) && HasDockerURL) && (Memory >= RequestMemory)) && (Cpus >= RequestCpus)) && (countMatches(MY.RequireGPUs, AvailableGPUs) >= RequestGPUs)) && ((FileSystemDomain == MY.FileSystemDomain) || (HasFileTransfer && stringListIMember("osdf", HasFileTransferPluginMethods)))))/';
+
+  it('lists one line per real requirement', () => {
+    const s = summarizeRequirements(fromApi);
+    expect(s.notable).toEqual([
+      '(PoolName == "CHTC") || (substr(Machine, 0, 3) == "gzk")',
+      'Machine != "txie-dsigpu4000.chtc.wisc.edu"',
+      'Machine != "gpu4002.chtc.wisc.edu"',
+      'Arch == "X86_64"',
+      'HasContainer',
+      'HasDockerURL',
+      '(FileSystemDomain == MY.FileSystemDomain) || (HasFileTransfer && stringListIMember("osdf", HasFileTransferPluginMethods))',
+    ]);
+    expect(s.standard).toMatchObject({ memory: true, cpus: true, gpus: true });
+    expect(standardLabels(s.standard)).toEqual(['CPUs', 'memory', 'GPUs']);
+  });
+
+  it('shows the raw expression without the wrapper', () => {
+    expect(summarizeRequirements(fromApi).raw.startsWith('((((((((((PoolName')).toBe(true);
+    expect(unwrapExpr(fromApi).endsWith('HasFileTransferPluginMethods))))')).toBe(true);
+    expect(unwrapExpr('  Arch == "X86_64" ')).toBe('Arch == "X86_64"');
+  });
+
+  it('does not split on operators or parens inside a string literal', () => {
+    const s = summarizeRequirements('/Expr((Name == "a && (b") && (OpSys == "LINUX"))/');
+    expect(s.notable).toEqual(['Name == "a && (b"', 'OpSys == "LINUX"']);
   });
 });

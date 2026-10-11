@@ -43,11 +43,24 @@ describe('recentCpuByJob', () => {
   });
 });
 
+const T0 = 1790000000;
+
 describe('jobUsageByJob', () => {
   const ads: ClassAd[] = [
-    { ClusterId: 7, ProcId: 0, RequestMemory: 2048, RequestCpus: 1, MemoryUsage: 1229, CpusUsage: 0.95 },
-    { ClusterId: 7, ProcId: 1, RequestMemory: 2048, RequestCpus: 1, ResidentSetSize: 524288, CpusUsage: 0.9 },
-    { ClusterId: 7, ProcId: 2, RequestMemory: 2048, RequestCpus: 1 },
+    // Running jobs as the ad has them: CPU counters two hours into the
+    // run, beside the CpusUsage a cgroup v2 node publishes -- a hundred
+    // times too small -- which must not be what is shown.
+    {
+      ClusterId: 7, ProcId: 0, JobStatus: 2, RequestMemory: 2048, RequestCpus: 1, MemoryUsage: 1229,
+      RemoteUserCpu: 6600, RemoteSysCpu: 240, JobCurrentStartExecutingDate: T0, StatsLastUpdateTimeStarter: T0 + 7200,
+      CpusUsage: 0.0095,
+    },
+    {
+      ClusterId: 7, ProcId: 1, JobStatus: 2, RequestMemory: 2048, RequestCpus: 1, ResidentSetSize: 524288,
+      RemoteUserCpu: 6300, RemoteSysCpu: 180, JobCurrentStartExecutingDate: T0, StatsLastUpdateTimeStarter: T0 + 7200,
+      CpusUsage: 0.009,
+    },
+    { ClusterId: 7, ProcId: 2, JobStatus: 2, RequestMemory: 2048, RequestCpus: 1 },
   ];
 
   it('prefers the last hour of samples, and falls back to the ad', () => {
@@ -55,6 +68,7 @@ describe('jobUsageByJob', () => {
     expect(u.get('7.0')).toMatchObject({ cpuUsed: 0.2, cpuSource: 'recent' });
     // No recent sample for 7.1: since-start, and labelled so.
     expect(u.get('7.1')).toMatchObject({ cpuUsed: 0.9, cpuSource: 'since-start' });
+    expect(u.get('7.2')?.cpuUsed).toBeUndefined();
     expect(jobCpuReading(u.get('7.0')).title).toContain('last hour');
     expect(jobCpuReading(u.get('7.1')).title).toContain('since the job started');
   });
@@ -62,6 +76,7 @@ describe('jobUsageByJob', () => {
   it('uses the ad when samples are not kept at all', () => {
     const u = jobUsageByJob(ads, undefined);
     expect(u.get('7.0')).toMatchObject({ cpuUsed: 0.95, cpuSource: 'since-start' });
+    expect(jobCpuReading(u.get('7.0')).text).toBe('0.9 / 1 core');
   });
 
   it('reads memory from MemoryUsage, else ResidentSetSize in KiB', () => {
@@ -73,7 +88,10 @@ describe('jobUsageByJob', () => {
 
   it('does not join samples onto another access point\'s job', () => {
     const multi: ClassAd[] = [
-      { ClusterId: 7, ProcId: 0, CpusUsage: 0.5, RequestCpus: 1, schedd: 'ap1', job_id: '7.0@ap1' },
+      {
+        ClusterId: 7, ProcId: 0, JobStatus: 2, RequestCpus: 1, schedd: 'ap1', job_id: '7.0@ap1',
+        RemoteUserCpu: 3600, RemoteSysCpu: 0, JobCurrentStartExecutingDate: T0, StatsLastUpdateTimeStarter: T0 + 7200,
+      },
     ];
     const u = jobUsageByJob(multi, new Map([['7.0', 0.1]]));
     expect(u.get('7.0@ap1')).toMatchObject({ cpuUsed: 0.5, cpuSource: 'since-start' });

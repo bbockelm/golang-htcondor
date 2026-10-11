@@ -24,6 +24,7 @@
 
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { OwnerLink } from '@/components/OwnerLink';
 import Link from 'next/link';
 import {
   api,
@@ -162,7 +163,7 @@ function ArchiveJobDetail({
     <div className="space-y-6">
       <div className="rounded-sm border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
         <Field label="Status" value={<StatusBadge display={display} />} />
-        <Field label="Owner" value={owner ?? '—'} />
+        <Field label="Owner" value={<OwnerLink owner={owner} />} />
         <Field
           label="Submitted"
           value={qdate ? new Date(qdate * 1000).toLocaleString() : '—'}

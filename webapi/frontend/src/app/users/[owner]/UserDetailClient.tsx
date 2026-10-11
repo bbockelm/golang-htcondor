@@ -21,6 +21,7 @@ import { JobStatusStrip } from '@/components/JobStatusStrip';
 import { JobsSummaryPanel } from '@/components/JobsSummaryPanel';
 import { BatchTable } from '@/components/BatchTable';
 import { batchView } from '@/lib/batchView';
+import { sameUser } from '@/lib/users';
 import { clustersNeedingCounts, withExactCounts } from '@/lib/exactCounts';
 import { useExactCounts } from '@/lib/useExactCounts';
 import {
@@ -271,13 +272,4 @@ export default function UserDetailClient() {
       )}
     </div>
   );
-}
-
-// sameUser compares a queue Owner with the session's identity. The queue
-// stores a bare account name; a session identity may be fully qualified
-// (user@domain), so compare on the local part.
-function sameUser(owner: string, username: string | undefined): boolean {
-  if (!owner || !username) return false;
-  const local = (s: string) => s.split('@')[0].toLowerCase();
-  return local(owner) === local(username);
 }
