@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '@/lib/api';
 import { fullWorkflows } from '@/lib/utilization.fixture';
-import type { UtilApplyResponse, UtilWorkflow } from '@/lib/utilization';
+import type { UtilAdaptiveResource, UtilApplyResponse, UtilWorkflow } from '@/lib/utilization';
 import { ApplyPanel } from './UtilizationApply';
 import type { JobsQuery } from './UtilizationJobs';
 
@@ -18,11 +18,11 @@ const query: JobsQuery = { days: 7, owned_by_me: true, constraint: 'JobBatchName
 const blast = fullWorkflows.find((w) => w.key === 'wf-blast')!;
 const assemble = fullWorkflows.find((w) => w.key === 'wf-assemble')!;
 
-function renderPanel(workflow: UtilWorkflow, waiting: number | null) {
+function renderPanel(workflow: UtilWorkflow, waiting: number | null, waitingAdaptive?: UtilAdaptiveResource[]) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <ApplyPanel workflow={workflow} waitingJobs={waiting} query={query} />
+      <ApplyPanel workflow={workflow} waitingJobs={waiting} waitingAdaptive={waitingAdaptive} query={query} />
     </QueryClientProvider>,
   );
 }
@@ -98,7 +98,7 @@ describe('ApplyPanel', () => {
     expect(spy.mock.calls[0][0].advice).toEqual(['memory-retry']);
   });
 
-  it('says which suggestions cannot be applied, and that formula requests are kept', () => {
+  it('says which suggestions cannot be applied', () => {
     const w: UtilWorkflow = {
       ...assemble,
       advice: [
@@ -116,10 +116,46 @@ describe('ApplyPanel', () => {
         },
       ],
     };
-    renderPanel(w, 40);
+    renderPanel(w, 40, ['memory']);
     fireEvent.click(screen.getByRole('button', { name: 'Review the changes' }));
-    expect(screen.getByText('starts at 2 GB, grows after a memory hold')).toBeInTheDocument();
-    expect(screen.getByText(/Jobs whose request is a formula keep it/)).toBeInTheDocument();
     expect(screen.getByTestId('apply-blocked')).toHaveTextContent('Your jobs fit GPUs with 8 GB of memory');
+  });
+
+  it('shows a formula request as not changed, unticked, and leaves its advice out of the request', async () => {
+    const spy = vi.spyOn(api, 'utilizationApply').mockResolvedValue({ ...ok, edited: 40 });
+    renderPanel(assemble, 40, ['memory']);
+    fireEvent.click(screen.getByRole('button', { name: 'Review the changes' }));
+    const memory = screen.getByRole('checkbox', { name: 'Apply request_memory' });
+    expect(memory).toBeDisabled();
+    expect(memory).not.toBeChecked();
+    const row = memory.closest('tr')!;
+    expect(row).toHaveTextContent('starts at 2 GB, grows after a memory hold');
+    expect(row).toHaveTextContent('formula request — not changed');
+    expect(row).not.toHaveTextContent('2.3 GB');
+    // No separate note: the row says it.
+    expect(screen.queryByText(/keep it; they are left as they are/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to 40 waiting jobs' }));
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+    expect(spy.mock.calls[0][0].advice).toEqual(['disk-raise']);
+  });
+
+  it('offers no Apply, and says why, when every change is to a formula request', () => {
+    const memoryOnly: UtilWorkflow = { ...assemble, advice: assemble.advice.filter((a) => a.id === 'memory-raise') };
+    renderPanel(memoryOnly, 40, ['memory']);
+    fireEvent.click(screen.getByRole('button', { name: 'Review the changes' }));
+    expect(screen.queryByRole('button', { name: /^Apply to/ })).not.toBeInTheDocument();
+    expect(screen.getByTestId('apply-none')).toHaveTextContent(
+      'Nothing to apply: the waiting jobs request these as formulas, which are not changed.',
+    );
+  });
+
+  it('applies to the waiting jobs that can take it when not all of them have a formula', () => {
+    // waiting_adaptive omitted: no attribute is a formula on every waiting
+    // job, so the row stays; the ones with a formula come back skipped.
+    renderPanel(assemble, 40);
+    fireEvent.click(screen.getByRole('button', { name: 'Review the changes' }));
+    const memory = screen.getByRole('checkbox', { name: 'Apply request_memory' });
+    expect(memory).toBeEnabled();
+    expect(memory).toBeChecked();
   });
 });

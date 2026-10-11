@@ -955,6 +955,8 @@ export function utilizationWorkflowFixture(key: string): UtilWorkflowDetail | nu
     limit: 50_000,
     workflow: w,
     waiting_jobs: WAITING[key] ?? 0,
+    // genome-assembly's queued jobs ask for memory with the same formula.
+    ...(key === 'wf-assemble' ? { waiting_adaptive: ['memory' as const] } : {}),
   };
 }
 

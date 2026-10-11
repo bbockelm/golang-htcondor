@@ -268,6 +268,7 @@ export default function UtilizationPage() {
                 backHref={hrefFor({ w: '' })}
                 jobsQuery={analysis}
                 waitingJobs={detail.data.waiting_jobs}
+                waitingAdaptive={detail.data.waiting_adaptive}
               />
             ) : detail.isLoading ? (
               <p className="text-sm text-gray-400">Loading the workflow…</p>

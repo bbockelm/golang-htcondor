@@ -201,6 +201,9 @@ export interface UtilWorkflowDetail {
   // The caller's idle queue jobs of this workflow right now; null in
   // multi-AP mode or when the queue could not be read.
   waiting_jobs: number | null;
+  // The request attributes that EVERY waiting job writes as a formula,
+  // which an apply leaves alone on all of them; omitted when none.
+  waiting_adaptive?: UtilAdaptiveResource[];
 }
 
 export interface UtilApplyRequest {
@@ -915,7 +918,7 @@ export interface ApplyChange {
   attr: 'request_memory' | 'request_cpus' | 'request_disk' | 'request_gpus';
   from: string; // the typical request now, as the page shows it
   to: string; // the value from the advice's submit line
-  adaptive: boolean; // the current request is a formula, which an edit leaves alone
+  adaptive: boolean; // the waiting jobs' request is a formula, which an edit leaves alone
 }
 
 const ATTR_RE = /^\s*(request_(memory|cpus|disk|gpus))\s*=\s*(.+?)\s*$/i;
@@ -937,7 +940,14 @@ const CHANGE_KIND: Record<
  * and will not happen. The values shown come from the advice; the server
  * writes its own, by advice id.
  */
-export function applyPlan(w: UtilWorkflow): { changes: ApplyChange[]; blocked: UtilAdvice[] } {
+export function applyPlan(
+  w: UtilWorkflow,
+  // The attributes the server reports as formulas on EVERY waiting job,
+  // which an apply skips on all of them. Absent means none: where only
+  // some waiting jobs have a formula the change still applies to the
+  // rest, and the others come back as skipped.
+  waitingAdaptive: UtilAdaptiveResource[] = [],
+): { changes: ApplyChange[]; blocked: UtilAdvice[] } {
   const changes: ApplyChange[] = [];
   const blocked: UtilAdvice[] = [];
   for (const a of w.advice) {
@@ -967,7 +977,7 @@ export function applyPlan(w: UtilWorkflow): { changes: ApplyChange[]; blocked: U
         attr: `request_${kind}`,
         from: requestPhrase(kind, now, req?.adaptive),
         to,
-        adaptive: !!req?.adaptive,
+        adaptive: waitingAdaptive.includes(kind),
       });
     }
   }
@@ -1024,4 +1034,14 @@ export function normalizeSummary(w: UtilWorkflowSummaryWire): UtilWorkflowSummar
 
 export function normalizeUtilization(r: UtilizationResponseWire): UtilizationResponse {
   return { ...r, workflows: r.workflows.map(normalizeSummary), suggestions: r.suggestions ?? [] };
+}
+
+/**
+ * applicableIds are the advice an apply can act on: those with at least
+ * one change the waiting jobs will take. A change to a request that is a
+ * formula on those jobs is not one -- the server leaves it alone -- so
+ * offering it would promise an edit that will not happen.
+ */
+export function applicableIds(changes: ApplyChange[]): string[] {
+  return [...new Set(changes.filter((c) => !c.adaptive).map((c) => c.advice.id))];
 }

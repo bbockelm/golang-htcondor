@@ -48,6 +48,7 @@ import {
   requestPhrase,
   type UtilWorkflow,
   type UtilWorkflowSummary,
+  type UtilAdaptiveResource,
   type UtilSuggestion,
   type UtilizationResponse,
 } from '@/lib/utilization';
@@ -1223,6 +1224,7 @@ export function WorkflowDetail({
   backHref,
   jobsQuery,
   waitingJobs = null,
+  waitingAdaptive,
 }: {
   workflow: UtilWorkflow;
   days: number;
@@ -1230,8 +1232,10 @@ export function WorkflowDetail({
   // The analysis's parameters, for the list of this workflow's jobs.
   // Without them there is no list (the component tests render without).
   jobsQuery?: JobsQuery;
-  // The workflow's jobs still in the queue, for applying its advice.
+  // The workflow's jobs still in the queue, for applying its advice, and
+  // which of their requests are formulas.
   waitingJobs?: number | null;
+  waitingAdaptive?: UtilAdaptiveResource[];
 }) {
   const [focus, setFocus] = useState<JobFocus | null>(null);
   // A bar picks its range of jobs in the list below, when there is one.
@@ -1322,7 +1326,7 @@ export function WorkflowDetail({
 
       <ThroughputLead throughput={w.throughput} />
 
-      {jobsQuery && <ApplyPanel workflow={w} waitingJobs={waitingJobs} query={jobsQuery} />}
+      {jobsQuery && <ApplyPanel workflow={w} waitingJobs={waitingJobs} waitingAdaptive={waitingAdaptive} query={jobsQuery} />}
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(13rem,1fr))] gap-3">
         {sortResources(w.resources).map((r) => (

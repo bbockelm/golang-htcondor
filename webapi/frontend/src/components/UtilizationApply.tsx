@@ -13,21 +13,31 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
-import { applyPlan, describeSet, type UtilApplyResponse, type UtilWorkflow } from '@/lib/utilization';
+import {
+  applicableIds,
+  applyPlan,
+  describeSet,
+  type UtilAdaptiveResource,
+  type UtilApplyResponse,
+  type UtilWorkflow,
+} from '@/lib/utilization';
 import type { JobsQuery } from '@/components/UtilizationJobs';
 
 export function ApplyPanel({
   workflow,
   waitingJobs,
+  waitingAdaptive,
   query,
 }: {
   workflow: UtilWorkflow;
   waitingJobs: number | null;
+  // Request attributes that are formulas on the waiting jobs.
+  waitingAdaptive?: UtilAdaptiveResource[];
   query: JobsQuery;
 }) {
   const qc = useQueryClient();
-  const plan = applyPlan(workflow);
-  const ids = [...new Set(plan.changes.map((c) => c.advice.id))];
+  const plan = applyPlan(workflow, waitingAdaptive);
+  const ids = applicableIds(plan.changes);
   const [step, setStep] = useState<'offer' | 'review'>('offer');
   const [chosen, setChosen] = useState<Set<string>>(() => new Set(ids));
 
@@ -95,27 +105,27 @@ export function ApplyPanel({
             </thead>
             <tbody className="divide-y divide-brand-100">
               {plan.changes.map((c) => (
-                <tr key={`${c.advice.id}/${c.attr}`}>
+                // A formula request on the waiting jobs is left alone by
+                // the server, so its row is shown but cannot be ticked.
+                <tr key={`${c.advice.id}/${c.attr}`} className={c.adaptive ? 'text-gray-400' : undefined} data-disabled={c.adaptive || undefined}>
                   <td className="py-1 pr-2">
                     <input
                       type="checkbox"
-                      checked={chosen.has(c.advice.id)}
+                      checked={!c.adaptive && chosen.has(c.advice.id)}
+                      disabled={c.adaptive}
                       onChange={() => toggle(c.advice.id)}
                       aria-label={`Apply ${c.attr}`}
                     />
                   </td>
                   <td className="py-1 pr-3 font-mono text-xs">{c.attr}</td>
-                  <td className="py-1 pr-3 text-gray-700">{c.from}</td>
-                  <td className="py-1 font-medium text-gray-900">{c.to}</td>
+                  <td className={`py-1 pr-3 ${c.adaptive ? '' : 'text-gray-700'}`}>{c.from}</td>
+                  <td className={`py-1 ${c.adaptive ? 'italic' : 'font-medium text-gray-900'}`}>
+                    {c.adaptive ? 'formula request — not changed' : c.to}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          {plan.changes.some((c) => c.adaptive) && (
-            <p className="text-xs text-gray-600">
-              Jobs whose request is a formula keep it; they are left as they are.
-            </p>
-          )}
           {plan.blocked.length > 0 && (
             <div className="text-xs text-gray-600" data-testid="apply-blocked">
               Not applied to waiting jobs:
@@ -126,24 +136,39 @@ export function ApplyPanel({
               </ul>
             </div>
           )}
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={chosen.size === 0 || apply.isPending}
-              onClick={() => apply.mutate(ids.filter((id) => chosen.has(id)))}
-              className="rounded-sm bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
-            >
-              {apply.isPending ? 'Applying…' : `Apply to ${n} waiting ${waitingJobs === 1 ? 'job' : 'jobs'}`}
-            </button>
-            <button
-              type="button"
-              onClick={() => setStep('offer')}
-              disabled={apply.isPending}
-              className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-          </div>
+          {ids.length === 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-sm text-gray-700" data-testid="apply-none">
+                Nothing to apply: the waiting jobs request these as formulas, which are not changed.
+              </p>
+              <button
+                type="button"
+                onClick={() => setStep('offer')}
+                className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={chosen.size === 0 || apply.isPending}
+                onClick={() => apply.mutate(ids.filter((id) => chosen.has(id)))}
+                className="rounded-sm bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+              >
+                {apply.isPending ? 'Applying…' : `Apply to ${n} waiting ${waitingJobs === 1 ? 'job' : 'jobs'}`}
+              </button>
+              <button
+                type="button"
+                onClick={() => setStep('offer')}
+                disabled={apply.isPending}
+                className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
           {apply.error && <p className="text-sm text-red-700">Could not apply: {apply.error.message}</p>}
         </div>
       )}
