@@ -17,6 +17,7 @@ import {
 import { useResolvedParams } from '@/lib/useResolvedParams';
 import { useMultiAPMode } from '@/lib/multiap';
 import { summarizeRequirements, standardLabels } from '@/lib/requirements';
+import { coresUsed } from '@/lib/batches';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -3079,9 +3080,10 @@ export function ResourceTable({ job }: { job: ClassAd }) {
     {
       label: 'CPUs',
       requested: fmtRequested(job.RequestCpus),
-      used: fmtUsage(job.CpusUsage ?? job.CumulativeRemoteSysCpu),
+      // Not CpusUsage, which is wrong while a job runs; see coresUsed.
+      used: fmtUsage(coresUsed(job)),
       reqN: num(job.RequestCpus),
-      usedN: num(job.CpusUsage),
+      usedN: coresUsed(job),
     },
     {
       label: 'Memory',

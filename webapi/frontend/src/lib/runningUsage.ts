@@ -10,17 +10,18 @@
 //     for averaging under it.
 //
 //   - CPU is a RATE, and where it comes from changes what it means.
-//     CpusUsage in the job ad is an average since the job started on most
-//     execute nodes, so a job that computed hard for an hour and has been
-//     stuck in I/O since still reads as busy. When per-job samples are
-//     being kept, the average of their CpuUtil (cores used over each
-//     sample interval) over the last hour is what the job is doing now.
-//     Each reading keeps its source so the tooltip can say which one it
-//     is, and a job with no recent sample falls back to CpusUsage rather
-//     than disappearing.
+//     From the job ad alone it is an average since the run started (see
+//     coresUsed: CpusUsage itself is wrong while a job runs), so a job
+//     that computed hard for an hour and has been stuck in I/O since
+//     still reads as busy. When per-job samples are being kept, the
+//     average of their CpuUtil (cores used over each sample interval)
+//     over the last hour is what the job is doing now. Each reading keeps
+//     its source so the tooltip can say which one it is, and a job with
+//     no recent sample falls back to the run's average rather than
+//     disappearing.
 
 import { jobIdOf, scheddOf, type ClassAd } from '@/lib/api';
-import { attr, num, type BatchJob } from '@/lib/batches';
+import { attr, coresUsed, CPU_COUNTER_ATTRS, num, type BatchJob } from '@/lib/batches';
 import type { MetricsResponse } from '@/lib/metrics';
 
 // Narrow on purpose: this is fetched only for the running view, and only
@@ -28,7 +29,8 @@ import type { MetricsResponse } from '@/lib/metrics';
 // MemoryUsage is an expression over it and only evaluates to a number when
 // both are asked for.
 export const RUNNING_USAGE_PROJECTION =
-  'ClusterId,ProcId,JobStatus,RequestMemory,RequestCpus,MemoryUsage,ResidentSetSize,CpusUsage';
+  'ClusterId,ProcId,JobStatus,RequestMemory,RequestCpus,MemoryUsage,ResidentSetSize,' +
+  CPU_COUNTER_ATTRS;
 
 // How far back "recent" CPU looks.
 export const RECENT_CPU_WINDOW_SECONDS = 3600;
@@ -116,7 +118,7 @@ export function jobUsageByJob(
       u.cpuUsed = r;
       u.cpuSource = 'recent';
     } else {
-      const lifetime = num(attr(ad, 'CpusUsage'));
+      const lifetime = coresUsed(ad);
       if (lifetime !== undefined) {
         u.cpuUsed = lifetime;
         u.cpuSource = 'since-start';

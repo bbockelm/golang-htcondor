@@ -465,6 +465,54 @@ function addRequest(into: ResourceTotals, j: ClassAd) {
 // are, and a JSON object's keys are not: the schedd spells DAG_NodesTotal
 // the way DAGMan published it, which need not be the way it is written
 // here.
+// --- Cores a job is using ---
+//
+// CpusUsage cannot be trusted while a job runs. On a cgroup v2 execute
+// node the starter computes its CPU share as a fraction of one core and
+// then publishes it divided by 100 as though it were a percentage
+// (proc_family_direct_cgroup_v2.cpp, vanilla_proc.cpp), so a job keeping
+// one core busy reports 0.01. Only when the job exits is CpusUsage
+// recomputed from its CPU time, correctly.
+//
+// So for a running job the cores come from the cumulative counters: CPU
+// seconds this run (RemoteUserCpu + RemoteSysCpu, which the shadow zeroes
+// at the start of each run) over the wall time they cover. That wall time
+// ends at StatsLastUpdateTimeStarter -- the starter's clock when it built
+// the update that carried those counters, copied into the job ad from the
+// same update -- not "now": the counters are only refreshed every few
+// minutes, and dividing by the time since would understate a busy job.
+
+// What coresUsed reads, for the projections that feed it.
+export const CPU_COUNTER_ATTRS =
+  'RemoteUserCpu,RemoteSysCpu,StatsLastUpdateTimeStarter,JobCurrentStartExecutingDate';
+
+// Below this, the interval is too short to divide by: a few seconds of
+// counter granularity (whole CPU-seconds) would swing the answer wildly.
+const MIN_CPU_INTERVAL_SECONDS = 60;
+
+// coresUsed is the number of cores a job is using, or undefined when its
+// ad cannot say yet.
+export function coresUsed(ad: ClassAd): number | undefined {
+  const status = num(ad.JobStatus);
+  // Running and suspended jobs have not exited: their CpusUsage is the
+  // broken in-flight figure, never read here.
+  if (status === 2 || status === 7) {
+    const user = num(attr(ad, 'RemoteUserCpu'));
+    const sys = num(attr(ad, 'RemoteSysCpu'));
+    const sampled = num(attr(ad, 'StatsLastUpdateTimeStarter'));
+    const started = num(attr(ad, 'JobCurrentStartExecutingDate'));
+    if (user === undefined || sys === undefined || sampled === undefined || started === undefined) {
+      return undefined;
+    }
+    // A sample time from before this run started belongs to the previous
+    // run, whose counters the shadow has already zeroed.
+    const interval = sampled - started;
+    if (!(interval >= MIN_CPU_INTERVAL_SECONDS)) return undefined;
+    return (user + sys) / interval;
+  }
+  return num(attr(ad, 'CpusUsage'));
+}
+
 export function attr(ad: ClassAd, name: string): unknown {
   if (name in ad) return ad[name];
   const lc = name.toLowerCase();
@@ -497,7 +545,8 @@ export function str(v: unknown): string | undefined {
 // on a queue of 30k, and they are only ever read for the one batch
 // somebody opened.
 export const BATCH_USAGE_PROJECTION =
-  'ClusterId,ProcId,JobStatus,HoldReasonCode,RequestCpus,RequestMemory,RequestDisk,RequestGpus,CpusUsage,MemoryUsage,ResidentSetSize,DiskUsage';
+  'ClusterId,ProcId,JobStatus,HoldReasonCode,RequestCpus,RequestMemory,RequestDisk,RequestGpus,CpusUsage,MemoryUsage,ResidentSetSize,DiskUsage,' +
+  CPU_COUNTER_ATTRS;
 
 // How a row's numbers should be read. The lib keeps HTCondor's own
 // units -- MiB for memory, KiB for disk -- and the panel formats them.
@@ -578,9 +627,7 @@ export function summarizeBatchUsage(ads: ClassAd[]): BatchUsage {
 
     if (isRunning) {
       running++;
-      // Read case-insensitively: the ad spells it CpusUsage, and a lookup
-      // spelled CPUsUsage found nothing, so the panel never showed CPU.
-      const cpus = num(attr(j, 'CpusUsage'));
+      const cpus = coresUsed(j);
       // MemoryUsage is an expression in the job ad more often than not,
       // so ResidentSetSize -- which the starter writes as a literal in
       // KiB -- is the one that can be trusted to be a number.
