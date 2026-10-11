@@ -362,6 +362,8 @@ type Handler struct {
 	// AP's own verdict on a user (admitToAP).
 	routedCallers mcpActorCache
 	apVerdicts    apVerdicts
+	// probeCannotRun logs, once, that member trust probes cannot run.
+	probeCannotRun sync.Once
 	// toolStats counts MCP tool calls for /metrics and for the durable
 	// table in the application database. See toolstats.go.
 	toolStats              *toolstats.Store

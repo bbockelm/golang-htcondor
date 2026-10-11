@@ -28,6 +28,10 @@ func fakeProbedSchedd(t *testing.T, cfg *config.Config, uidDomain, mapTo string)
 		srv.FQUMapper = func(string, string) string { return mapTo }
 	}
 	srv.Handle(int(commands.DC_NOP_READ), func(context.Context, *cedarserver.Conn) error { return nil }, "READ")
+	if uidDomain == "-" {
+		// Answers nothing about its configuration.
+		return startTokenDaemon(t, srv)
+	}
 	srv.Handle(int(commands.DC_CONFIG_VAL), func(ctx context.Context, c *cedarserver.Conn) error {
 		in := message.NewMessageFromStream(c.Stream)
 		name, err := in.GetString(ctx)
@@ -73,6 +77,8 @@ func TestProbeMemberTrust(t *testing.T) {
 		{"maps the token to another identity", fakeProbedSchedd(t, cfg, mirrorAuthzTrustDomain, "nobody@elsewhere.org"), "nobody@elsewhere.org"},
 		{"another UID_DOMAIN", fakeProbedSchedd(t, cfg, "other.example", ""), "other.example"},
 		{"another signing key", fakeProbedSchedd(t, otherCfg, mirrorAuthzTrustDomain, ""), "refused a token"},
+		{"will not report its UID_DOMAIN", fakeProbedSchedd(t, cfg, "-", ""), "would not report its UID_DOMAIN"},
+		{"no UID_DOMAIN", fakeProbedSchedd(t, cfg, "Not defined", ""), "no UID_DOMAIN set"},
 	} {
 		err := probe(c.addr)
 		if err == nil || errors.Is(err, apregistry.ErrInconclusive) || !strings.Contains(err.Error(), c.want) {

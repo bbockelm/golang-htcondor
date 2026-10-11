@@ -334,6 +334,12 @@ func (h *Handler) probeMemberTrust(ctx context.Context, m apregistry.Member) err
 		return fmt.Errorf("no address: %w", apregistry.ErrInconclusive)
 	}
 	if h.signingKeyPath == "" || h.trustDomain == "" || h.uidDomain == "" {
+		h.probeCannotRun.Do(func() {
+			h.logger.Error(logging.DestinationSecurity,
+				"Access point trust probes cannot run: no signing key, TRUST_DOMAIN or UID_DOMAIN to mint a probe token with; "+
+					"every member stays unknown, and none is used to identify callers",
+				"signing_key", h.signingKeyPath != "", "trust_domain", h.trustDomain != "", "uid_domain", h.uidDomain != "")
+		})
 		return fmt.Errorf("this server has no signing key, TRUST_DOMAIN or UID_DOMAIN to mint a probe token with: %w",
 			apregistry.ErrInconclusive)
 	}
@@ -362,13 +368,16 @@ func (h *Handler) probeMemberTrust(ctx context.Context, m apregistry.Member) err
 	}
 	uid, ok, err := m.Schedd.ConfigVal(ctx, "UID_DOMAIN")
 	switch {
+	case err != nil && unreachable(err):
+		return fmt.Errorf("the access point stopped answering: %w: %w", err, apregistry.ErrInconclusive)
 	case err != nil:
-		// Not every AP answers DC_CONFIG_VAL to an ordinary identity.
-		// The token was accepted and mapped correctly, which is the part
-		// that would make every action fail.
-		h.logger.Info(logging.DestinationSecurity, "Could not read an access point's UID_DOMAIN during its trust probe",
-			"access_point", m.Name, "error", err)
-	case ok && !strings.EqualFold(strings.TrimSpace(uid), h.uidDomain):
+		// An AP that will not say what UID_DOMAIN it qualifies users
+		// with cannot be shown to agree with this server's, and v1
+		// needs every member to.
+		return fmt.Errorf("the access point would not report its UID_DOMAIN to this server's token: %w", err)
+	case !ok:
+		return errors.New("the access point has no UID_DOMAIN set")
+	case !strings.EqualFold(strings.TrimSpace(uid), h.uidDomain):
 		return fmt.Errorf("the access point's UID_DOMAIN is %q, and this server's is %q", uid, h.uidDomain)
 	}
 	return nil
@@ -384,15 +393,18 @@ func sameIdentity(got, want string) bool {
 	return got[:gi] == want[:wi] && strings.EqualFold(got[gi+1:], want[wi+1:])
 }
 
-// unreachable reports whether a probe failed before any handshake: the
-// AP is down or the network is, which says nothing about trust.
+// unreachable reports whether a probe failed for want of a connection:
+// the AP is down, restarting or the network is, which says nothing about
+// trust. An authorization refusal is never that, whatever its text says,
+// and is checked first; after it only what the network itself reports
+// counts.
 func unreachable(err error) bool {
 	var authz *security.AuthorizationError
 	if errors.As(err, &authz) {
 		return false
 	}
 	var op *net.OpError
-	if errors.As(err, &op) && op.Op == "dial" {
+	if errors.As(err, &op) && (op.Op == "dial" || op.Op == "read" || op.Op == "write") {
 		return true
 	}
 	// A reset is what a restarted schedd's stale shared-port address
