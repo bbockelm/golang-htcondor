@@ -30,6 +30,9 @@ type Record struct {
 	Kind    string
 	Message string
 	Owner   string
+	// Schedd is the access point the job is on, from ScheddName, on a
+	// server fronting several; empty with one schedd.
+	Schedd  string
 	Cluster int64
 	Proc    int64
 	Batch   string
@@ -68,12 +71,20 @@ type FacetSpread struct {
 
 // Example is one occurrence shown under a cluster.
 type Example struct {
-	Cluster int64  `json:"cluster_id"`
-	Proc    int64  `json:"proc_id"`
+	Cluster int64 `json:"cluster_id"`
+	Proc    int64 `json:"proc_id"`
+	// Schedd is the job's access point, in multi-AP mode.
+	Schedd  string `json:"schedd,omitempty"`
 	Owner   string `json:"owner,omitempty"`
 	Batch   string `json:"batch,omitempty"`
 	At      int64  `json:"at,omitempty"`
 	Message string `json:"message,omitempty"`
+}
+
+// ScheddCount is how much of a cluster is on one access point.
+type ScheddCount struct {
+	Schedd string `json:"schedd"`
+	Count  int    `json:"count"`
 }
 
 // OwnerCount is how much of a cluster belongs to one user.
@@ -103,11 +114,14 @@ type Cluster struct {
 	// Users is how many distinct people this is happening to, which is
 	// the difference between one user's broken submit file and a site
 	// problem.
-	Users     int          `json:"users"`
-	TopUsers  []OwnerCount `json:"top_users,omitempty"`
-	Codes     []CodeCount  `json:"codes,omitempty"`
-	FirstSeen int64        `json:"first_seen,omitempty"`
-	LastSeen  int64        `json:"last_seen,omitempty"`
+	Users    int          `json:"users"`
+	TopUsers []OwnerCount `json:"top_users,omitempty"`
+	// Schedds is how the cluster spreads over access points, in
+	// multi-AP mode: one AP's problem or every AP's.
+	Schedds   []ScheddCount `json:"schedds,omitempty"`
+	Codes     []CodeCount   `json:"codes,omitempty"`
+	FirstSeen int64         `json:"first_seen,omitempty"`
+	LastSeen  int64         `json:"last_seen,omitempty"`
 	// Timeline is how many occurrences fell in each equal slice of the
 	// window, oldest first. It answers the question a count cannot: a
 	// problem that stopped an hour ago and one that is still going look
@@ -499,6 +513,7 @@ func summarize(bucket []*group, opts RenderOptions) Cluster {
 	cl.Count = len(records)
 
 	byOwner := map[string]int{}
+	bySchedd := map[string]int{}
 	byCode := map[[2]int64]int{}
 	byFacet := map[string]map[string]int{}
 	for _, r := range records {
@@ -514,6 +529,9 @@ func summarize(bucket []*group, opts RenderOptions) Cluster {
 		if r.Owner != "" {
 			byOwner[r.Owner]++
 		}
+		if r.Schedd != "" {
+			bySchedd[r.Schedd]++
+		}
 		byCode[[2]int64{r.Code, r.SubCode}]++
 		if cl.FirstSeen == 0 || (r.At > 0 && r.At < cl.FirstSeen) {
 			cl.FirstSeen = r.At
@@ -523,6 +541,15 @@ func summarize(bucket []*group, opts RenderOptions) Cluster {
 		}
 	}
 	cl.Users = len(byOwner)
+	for schedd, n := range bySchedd {
+		cl.Schedds = append(cl.Schedds, ScheddCount{Schedd: schedd, Count: n})
+	}
+	sort.Slice(cl.Schedds, func(i, j int) bool {
+		if cl.Schedds[i].Count != cl.Schedds[j].Count {
+			return cl.Schedds[i].Count > cl.Schedds[j].Count
+		}
+		return cl.Schedds[i].Schedd < cl.Schedds[j].Schedd
+	})
 
 	for owner, n := range byOwner {
 		cl.TopUsers = append(cl.TopUsers, OwnerCount{Owner: owner, Count: n})
@@ -670,6 +697,7 @@ func pickExamples(records []Record) []Example {
 			out = append(out, Example{
 				Cluster: r.Cluster,
 				Proc:    r.Proc,
+				Schedd:  r.Schedd,
 				Owner:   r.Owner,
 				Batch:   r.Batch,
 				At:      r.At,

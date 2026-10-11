@@ -117,12 +117,14 @@ func multiAPWatchAllowed(method, path string) bool {
 
 // multiAPHubReadPaths are the read routes multi-AP mode serves from the
 // hub or by routing, beyond the job list and history: the jobs change
-// stream, and the dashboard (multiap_dashboard.go).
+// stream, the dashboard (multiap_dashboard.go) and the issues view
+// (multiap_issues.go).
 var multiAPHubReadPaths = map[string]bool{
 	"/api/v1/jobs/watch":                true,
 	"/api/v1/dashboard":                 true,
 	"/api/v1/dashboard/activity":        true,
 	"/api/v1/dashboard/activity/stream": true,
+	"/api/v1/issues":                    true,
 }
 
 // watchOwner is the owner a watch is stored against: the local part of

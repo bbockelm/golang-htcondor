@@ -12,6 +12,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/issues"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
 // The issues page's endpoint: what is going wrong on this access point,
@@ -46,6 +47,9 @@ type IssuesResponse struct {
 	Truncated     bool           `json:"truncated,omitempty"`
 	Notes         []string       `json:"notes,omitempty"`
 	Sections      []IssueSection `json:"sections"`
+	// Sources is multi-AP mode's: which access points' data is not
+	// current. Every example and cluster there names its AP.
+	Sources *multiap.Sources `json:"sources,omitempty"`
 	// Timings is what the answer cost to produce. Returned rather than
 	// only logged: this page reads two large tables and then does real
 	// work on what comes back, so "it is slow" has three possible
@@ -157,6 +161,11 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		var hubErr *multiap.Error
+		if errors.As(err, &hubErr) {
+			s.multiAPError(w, err)
+			return
+		}
 		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("Could not read what is going wrong: %v", err))
 		return
 	}
@@ -232,10 +241,22 @@ func (s *Handler) issuesAnswer(ctx context.Context, r *http.Request, q issueQuer
 	// the mirror must not be handed to a caller who may not read it there.
 	mirror := s.mirrorAllowed(ctx, r) == nil
 	key := fmt.Sprintf("%s|%t|%d|%t|%t|%s", owner, ownedByMe, int64(window/time.Second), q.includeEnded, mirror, filter)
+	var src issues.Source = handlerIssueSource{s: s, mirror: mirror}
+	var sources *multiap.Sources
+	if s.multi != nil {
+		// Every AP, from the hub: the caller's own jobs (hub reads have
+		// no cross-user view), run attempts where the hub federates
+		// epoch_history.
+		var err error
+		if scope, src, sources, err = s.multiAPIssueScope(ctx, r, filter); err != nil {
+			return IssuesResponse{}, err
+		}
+		key = fmt.Sprintf("multi|%s|%d|%t", scope, int64(window/time.Second), q.includeEnded)
+	}
 	// collectCtx is the cache's, not this request's: see
 	// sharedComputeContext.
 	set, cached, err := s.issueSets().get(ctx, key, func(collectCtx context.Context) (*issues.Set, error) {
-		return issues.Collect(collectCtx, handlerIssueSource{s: s, mirror: mirror}, issues.Options{
+		return issues.Collect(collectCtx, src, issues.Options{
 			Scope:        scope,
 			Window:       window,
 			IncludeEnded: q.includeEnded,
@@ -249,6 +270,7 @@ func (s *Handler) issuesAnswer(ctx context.Context, r *http.Request, q issueQuer
 	resp := buildIssuesResponse(set, window, granularity, q.includeEnded)
 	resp.OwnedByMe = ownedByMe
 	resp.Constraint = filter
+	resp.Sources = sources
 	resp.Timings = &IssueTimings{
 		HoldsMs:       set.HoldDuration.Milliseconds(),
 		Holds:         set.HoldCount,

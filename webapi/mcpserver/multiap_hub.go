@@ -11,6 +11,8 @@ var multiAPHubTools = map[string]bool{
 	"check_watches":    true,
 	"cancel_watch":     true,
 	"create_watch_url": true,
+	// Every AP's held jobs and run attempts, from the hub.
+	"analyze_issues": true,
 }
 
 // multiAPWatchNote is what watch_jobs adds on a multi-AP server.
