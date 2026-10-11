@@ -250,9 +250,9 @@ func TestMultiAPMCPSuperuserIsPerAP(t *testing.T) {
 	if a.srv.allowsAllUsers(ctx, "alice", tierMutate) {
 		t.Error("a call routed to no AP reaches other users' jobs")
 	}
-	c, ok := a.srv.scopeToOwner(at(m2), "true", tierMutate)
-	if !ok || !strings.Contains(c, `User == "alice@d"`) {
-		t.Errorf("ap2 scope = %q", c)
+	c, err := a.srv.scopeToOwner(at(m2), "true", tierMutate)
+	if err != nil || !strings.Contains(c, `User == "alice@d"`) {
+		t.Errorf("ap2 scope = %q, %v", c, err)
 	}
 }
 
