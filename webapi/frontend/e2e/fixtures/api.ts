@@ -388,6 +388,13 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
       await route.fulfill({ json: table[path] as object });
       return;
     }
+    // The jobs listing asks for its jobs' runtime estimates in one
+    // request. By default there are none to give, so each batch shows a
+    // dash; a test that wants some routes this itself.
+    if (path === '/api/v1/jobs/runtime-estimates') {
+      await route.fulfill({ json: { available: true, estimates: {}, model: { jobs_ingested: 0 } } });
+      return;
+    }
     // Every waiting or running job's page asks for its runtime estimate.
     // By default there is none, which the page shows as nothing at all;
     // a test that wants one routes it for its job.

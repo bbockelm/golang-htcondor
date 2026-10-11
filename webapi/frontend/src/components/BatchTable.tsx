@@ -21,6 +21,17 @@ import { BatchUsagePanel } from '@/components/BatchUsagePanel';
 import { RowMenu } from '@/components/RowMenu';
 import { utilizationHref } from '@/lib/utilizationLink';
 import { BatchProgressBar } from '@/components/BatchProgressBar';
+import {
+  BatchLongerThanUsual,
+  BatchTimeLeftCell,
+  JobTimeLeftCell,
+} from '@/components/TimeLeft';
+import { rangeBarScale, type TimedJob } from '@/lib/timeLeft';
+import {
+  useRuntimeEstimates,
+  type EstimateRequestJob,
+  type RuntimeEstimatesState,
+} from '@/lib/useRuntimeEstimates';
 import { UsageBar } from '@/components/UsageBar';
 import {
   progressFraction,
@@ -66,6 +77,19 @@ type BatchSortKey =
   | 'reason'
   | 'memory'
   | 'cpu';
+
+// timedStatus is what the time-left wording needs of a job's status.
+function timedStatus(j: BatchJob): TimedJob['status'] {
+  if (j.display.key === 'idle') return 'idle';
+  if (j.display.key === 'running') return 'running';
+  return 'other';
+}
+
+// timedJob pairs a job with its estimate. A job nobody asked about (past
+// the request's cap) has none.
+function timedJob(j: BatchJob, est: RuntimeEstimatesState): TimedJob {
+  return { status: timedStatus(j), estimate: est.byId.get(j.id) };
+}
 
 // Live usage for the 'usage' detail, keyed by BatchJob.id.
 export interface RunningUsage {
@@ -243,7 +267,24 @@ export function BatchTable({
   // beside it, and when a running batch was submitted is the least of
   // what that view is for.
   const showSubmitted = detail !== 'usage';
-  const columns = 7 + (showOwner ? 1 : 0) + (progress ? 1 : 0) + (multiAP ? 1 : 0);
+
+  // Runtime estimates for the waiting and running jobs of the batches on
+  // screen, one request per refresh of the listing. Multi-AP mode has
+  // none, and the held view has no waiting or running jobs to ask about.
+  // The column appears once the server has said it can answer.
+  const estimatesWanted = !multiAP && detail !== 'hold';
+  const estimateJobs = useMemo<EstimateRequestJob[]>(
+    () =>
+      sorted
+        .slice(0, shownBatches)
+        .flatMap((b) => b.jobs.map((j) => ({ id: j.id, status: timedStatus(j) }))),
+    [sorted, shownBatches],
+  );
+  const estimates = useRuntimeEstimates(estimateJobs, estimatesWanted);
+  const showTimeLeft = estimatesWanted && estimates.available === true;
+
+  const columns =
+    7 + (showOwner ? 1 : 0) + (progress ? 1 : 0) + (multiAP ? 1 : 0) + (showTimeLeft ? 1 : 0);
 
   return (
     <div className="space-y-2">
@@ -278,6 +319,7 @@ export function BatchTable({
                 <BatchHeader label="Progress" sortKey="progress" sort={sort} onSort={setSort} />
               )}
               <BatchHeader label="Status" sortKey="status" sort={sort} onSort={setSort} />
+              {showTimeLeft && <th className="px-3 py-2 text-left font-normal">Time left</th>}
               {showSubmitted && (
                 <BatchHeader label="Submitted" sortKey="submitted" sort={sort} onSort={setSort} />
               )}
@@ -322,6 +364,7 @@ export function BatchTable({
                 pendingRelease={releaseJobMut.variables}
                 pendingReleaseActive={releaseJobMut.isPending}
                 now={now}
+                estimates={showTimeLeft ? estimates : undefined}
               />
             ))}
             {/* Sentinel + "showing N of M" footer. The sentinel <tr>
@@ -418,6 +461,7 @@ function BatchRow({
   pendingRelease,
   pendingReleaseActive,
   now,
+  estimates,
 }: {
   batch: Batch;
   extras: RowExtras | undefined;
@@ -440,7 +484,13 @@ function BatchRow({
   pendingReleaseActive: boolean;
   // Unix seconds, for running and waiting times.
   now: number;
+  // Runtime estimates; undefined leaves the Time left column out.
+  estimates?: RuntimeEstimatesState;
 }) {
+  const timed = useMemo(
+    () => (estimates ? batch.jobs.map((j) => timedJob(j, estimates)) : undefined),
+    [batch.jobs, estimates],
+  );
   return (
     <>
       <tr
@@ -491,7 +541,13 @@ function BatchRow({
         <td className="px-3 py-2">
           <StatusBreakdown counts={batch.statusCounts} />
           <LongestRunning jobs={batch.jobs} now={now} />
+          {timed && <BatchLongerThanUsual jobs={timed} />}
         </td>
+        {estimates && timed && (
+          <td className="px-3 py-2">
+            <BatchTimeLeftCell jobs={timed} fetchedAt={estimates.fetchedAt} now={now} />
+          </td>
+        )}
         {detail !== 'usage' && (
           <td
             className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap"
@@ -582,6 +638,7 @@ function BatchRow({
               pendingRelease={pendingRelease}
               pendingReleaseActive={pendingReleaseActive}
               now={now}
+              estimates={estimates}
             />
           </td>
         </tr>
@@ -659,6 +716,7 @@ function JobsSubTable({
   pendingRelease,
   pendingReleaseActive,
   now,
+  estimates,
 }: {
   multiAP?: boolean;
   detail: BatchDetail;
@@ -673,6 +731,8 @@ function JobsSubTable({
   pendingReleaseActive: boolean;
   // Unix seconds, for running and waiting times.
   now: number;
+  // Runtime estimates; undefined leaves the Time left column out.
+  estimates?: RuntimeEstimatesState;
 }) {
   const router = useRouter();
   // Cap each expanded batch at 25 visible jobs initially; the
@@ -687,6 +747,17 @@ function JobsSubTable({
     total: totalJobs,
     shown: shownJobs,
   } = useInfiniteList(jobs, 25);
+  // Every job's range bar is drawn on one axis, so they compare.
+  const timed = useMemo(
+    () => (estimates ? jobs.map((j) => timedJob(j, estimates)) : undefined),
+    [jobs, estimates],
+  );
+  const scale = useMemo(
+    () => (timed && estimates ? rangeBarScale(timed, estimates.fetchedAt, now) : 0),
+    [timed, estimates, now],
+  );
+  const subColumns =
+    2 + (estimates ? 1 : 0) + (detail !== 'usage' ? 1 : 0) + (detail === 'usage' ? 2 : 1) + (multiAP ? 0 : 1);
   return (
     <div className="border-t border-gray-200">
       <table className="min-w-full text-xs">
@@ -694,6 +765,7 @@ function JobsSubTable({
           <tr>
             <th className="px-3 py-1.5">Job</th>
             <th className="px-3 py-1.5">Status</th>
+            {estimates && <th className="px-3 py-1.5">Time left</th>}
             {detail !== 'usage' && <th className="px-3 py-1.5">Submitted</th>}
             {detail === 'hold' ? (
               <th className="px-3 py-1.5">Hold reason</th>
@@ -752,6 +824,20 @@ function JobsSubTable({
                 <JobStatusPill display={j.display} />
                 {j.timing && <JobTimingText timing={j.timing} now={now} />}
               </td>
+              {estimates && (
+                <td className="px-3 py-1.5">
+                  {/* A job past the request's cap was not asked about:
+                      blank, not "no history". */}
+                  {estimates.requested.has(j.id) && (
+                    <JobTimeLeftCell
+                      job={timedJob(j, estimates)}
+                      scale={scale}
+                      fetchedAt={estimates.fetchedAt}
+                      now={now}
+                    />
+                  )}
+                </td>
+              )}
               {detail !== 'usage' && (
                 <td
                   className="px-3 py-1.5 text-gray-500 whitespace-nowrap"
@@ -830,7 +916,7 @@ function JobsSubTable({
               window scroll. */}
           {totalJobs > 0 && (
             <tr ref={jobSentinelRef as unknown as React.Ref<HTMLTableRowElement>}>
-              <td colSpan={multiAP ? 4 : 5} className="px-3 py-1.5 text-[11px] text-gray-500">
+              <td colSpan={subColumns} className="px-3 py-1.5 text-[11px] text-gray-500">
                 Showing {shownJobs.toLocaleString()} of {totalJobs.toLocaleString()} jobs
                 {hasMoreJobs && (
                   <>

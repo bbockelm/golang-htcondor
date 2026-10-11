@@ -1,6 +1,26 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { JobRuntimeEstimate, RuntimeEstimates } from '@/lib/api';
+
+// Every table asks for its jobs' runtime estimates; by default the server
+// has none to give, which leaves the Time left column out.
+const runtimeEstimates = vi.fn();
+vi.mock('@/lib/api', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      jobs: { ...actual.api.jobs, runtimeEstimates: (...a: unknown[]) => runtimeEstimates(...a) },
+    },
+  };
+});
+beforeEach(() => {
+  runtimeEstimates.mockReset();
+  runtimeEstimates.mockResolvedValue({ available: false, reason: 'disabled' } satisfies RuntimeEstimates);
+});
+
 import { BatchTable } from './BatchTable';
 import { groupIntoBatches } from '@/lib/batches';
 import { batchView } from '@/lib/batchView';
@@ -308,5 +328,83 @@ describe('BatchTable row actions menu', () => {
     fireEvent.keyDown(item, { key: 'Escape' });
     expect(screen.queryByRole('menu')).toBeNull();
     expect(document.activeElement).toBe(button);
+  });
+});
+
+describe('BatchTable time left', () => {
+  function estimate(over: Partial<JobRuntimeEstimate> = {}): JobRuntimeEstimate {
+    return {
+      available: true,
+      estimate_seconds: 3600,
+      p10_seconds: 2400,
+      p90_seconds: 9000,
+      basis: { level: 'template', sample_count: 12 },
+      rough: false,
+      exceeded_history: false,
+      ...over,
+    };
+  }
+  const answer = (estimates: Record<string, JobRuntimeEstimate>): RuntimeEstimates => ({
+    available: true,
+    estimates,
+    model: { jobs_ingested: 100 },
+  });
+
+  it('asks once for the waiting and running jobs and shows each batch\'s time left', async () => {
+    runtimeEstimates.mockResolvedValue(
+      answer({
+        '10.0': estimate({ elapsed_seconds: 600, remaining_seconds: 1800, estimate_seconds: 2400 }),
+        '11.0': estimate(),
+        '11.1': estimate(),
+      }),
+    );
+    table();
+    await screen.findByText('Time left');
+    expect(runtimeEstimates).toHaveBeenCalledTimes(1);
+    // Running jobs first: a batch's finish needs every one of them.
+    expect(runtimeEstimates).toHaveBeenCalledWith(['10.0', '11.0', '11.1']);
+    const cells = screen.getAllByTestId('batch-time-left').map((c) => c.textContent);
+    expect(cells).toContain('2 waiting · each about 1h once started');
+    expect(cells.some((t) => /^All done by ~/.test(t ?? ''))).toBe(true);
+    expect(screen.queryByTestId('longer-than-usual')).toBeNull();
+  });
+
+  it('flags a batch whose job is running longer than usual', async () => {
+    runtimeEstimates.mockResolvedValue(
+      answer({ '10.0': estimate({ elapsed_seconds: 20000, exceeded_history: true }) }),
+    );
+    table();
+    expect(await screen.findByText('Running longer than usual')).toBeInTheDocument();
+    expect(screen.getByText('Past its usual 1h')).toBeInTheDocument();
+  });
+
+  it('gives each expanded job its own time left', async () => {
+    runtimeEstimates.mockResolvedValue(
+      answer({
+        '10.0': estimate({ elapsed_seconds: 600, remaining_seconds: 1800, estimate_seconds: 2400 }),
+        '11.0': estimate({ rough: true, estimate_seconds: 7200, basis: { level: 'owner', sample_count: 9 } }),
+      }),
+    );
+    const batches = groupIntoBatches(ads);
+    table({ batches, expanded: new Set(batches.map((b) => b.batchID)) });
+    // The batch table's column and each expanded job table's.
+    expect(await screen.findAllByText('Time left')).toHaveLength(3);
+    const jobs = screen.getAllByTestId('job-time-left').map((c) => c.textContent ?? '');
+    expect(jobs.some((t) => /^~30mdone ~/.test(t))).toBe(true); // main, then the finish on its own line
+    expect(jobs).toContain('Runs roughly 2h once startedrough guess');
+    // 11.1 was asked about and has no figure.
+    expect(jobs).toContain('—');
+  });
+
+  it('leaves the column out when the server has no estimates', async () => {
+    table();
+    await waitFor(() => expect(runtimeEstimates).toHaveBeenCalled());
+    expect(screen.queryByText('Time left')).toBeNull();
+  });
+
+  it('does not ask in multi-AP mode or for held jobs', () => {
+    table({ multiAP: true });
+    table({ detail: 'hold' });
+    expect(runtimeEstimates).not.toHaveBeenCalled();
   });
 });

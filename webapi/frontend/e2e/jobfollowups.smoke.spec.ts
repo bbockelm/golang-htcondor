@@ -73,6 +73,40 @@ test('the jobs table says how long jobs have been running and waiting', async ({
   await expect(page.getByTitle('Waiting for 1d3h', { exact: true })).toBeVisible();
 });
 
+test('the jobs table says how long a batch has left', async ({ page }) => {
+  await page.route('**/api/v1/jobs?**', (route) =>
+    route.fulfill({
+      json: {
+        jobs: [
+          { ClusterId: 72, ProcId: 0, JobStatus: 2, Owner: 'e2e', JobBatchName: 'smoke-left', QDate: now - 9000, JobCurrentStartExecutingDate: now - 600 },
+          { ClusterId: 72, ProcId: 1, JobStatus: 1, Owner: 'e2e', JobBatchName: 'smoke-left', QDate: now - 9000, EnteredCurrentStatus: now - 9000 },
+        ],
+        has_more: false,
+      },
+    }),
+  );
+  const asked: string[][] = [];
+  await page.route('**/api/v1/jobs/runtime-estimates', (route) => {
+    asked.push((route.request().postDataJSON() as { jobs: string[] }).jobs);
+    return route.fulfill({
+      json: {
+        available: true,
+        estimates: {
+          '72.0': { available: true, estimate_seconds: 2400, p10_seconds: 1800, p90_seconds: 4800, rough: false, exceeded_history: false, elapsed_seconds: 600, remaining_seconds: 1800 },
+          '72.1': { available: true, estimate_seconds: 3600, p10_seconds: 2400, p90_seconds: 9000, rough: false, exceeded_history: false },
+        },
+        model: { jobs_ingested: 100 },
+      },
+    });
+  });
+  await page.goto('/jobs');
+  await expect(page.getByRole('columnheader', { name: 'Time left' })).toBeVisible();
+  const row = page.getByRole('row').filter({ hasText: 'smoke-left' }).first();
+  await expect(row).toContainText('1 waiting · each about 1h once started');
+  await expect(row).toContainText(/running ones done by ~/);
+  expect(asked[0]).toEqual(['72.0', '72.1']);
+});
+
 // Verbatim from a CHTC job page, as the API sends it.
 const chtcRequirements =
   '/Expr(((((((((((PoolName == "CHTC") || (substr(Machine, 0, 3) == "gzk")) && ((Machine != "txie-dsigpu4000.chtc.wisc.edu") && (Machine != "gpu4002.chtc.wisc.edu"))) && (Arch == "X86_64")) && HasContainer) && HasDockerURL) && (Memory >= RequestMemory)) && (Cpus >= RequestCpus)) && (countMatches(MY.RequireGPUs, AvailableGPUs) >= RequestGPUs)) && ((FileSystemDomain == MY.FileSystemDomain) || (HasFileTransfer && stringListIMember("osdf", HasFileTransferPluginMethods)))))/';

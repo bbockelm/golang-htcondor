@@ -994,7 +994,12 @@ export interface RuntimeEstimate {
   estimate_seconds?: number;
   p10_seconds?: number;
   p90_seconds?: number;
-  basis?: { level: RuntimeEstimateLevel; sample_count: number };
+  // new_command: none of the owner's recently finished jobs ran the same
+  // program.
+  basis?: { level: RuntimeEstimateLevel; sample_count: number; new_command?: boolean };
+  // A broad group answered (cmd, owner or global): show it as a rough
+  // guess, not an expectation.
+  rough?: boolean;
   // Only while the job runs; remaining_seconds is also absent once the
   // job has run longer than its comparable jobs (exceeded_history).
   elapsed_seconds?: number;
@@ -1002,6 +1007,23 @@ export interface RuntimeEstimate {
   exceeded_history: boolean;
   model: { trained_through?: string; jobs_ingested: number };
 }
+
+// JobRuntimeEstimate is one job's entry in RuntimeEstimates: the
+// single-job answer without the job id and model.
+export type JobRuntimeEstimate = Omit<RuntimeEstimate, "job_id" | "model">;
+
+// RuntimeEstimates is the JSON returned by
+// POST /api/v1/jobs/runtime-estimates. estimates holds only the jobs the
+// caller may read that are waiting or running; any other id is absent.
+export interface RuntimeEstimates {
+  available: boolean;
+  reason?: "disabled" | "model_warming_up";
+  estimates?: Record<string, JobRuntimeEstimate>;
+  model?: { trained_through?: string; jobs_ingested: number };
+}
+
+// The most ids one runtime-estimates request may carry.
+export const MAX_RUNTIME_ESTIMATE_IDS = 5000;
 
 // RuntimeEstimateLevel is which group of finished jobs an estimate came
 // from, most specific first.
@@ -1741,6 +1763,13 @@ export const api = {
     // caller can see; available is false when there is no estimate.
     runtimeEstimate: (id: string): Promise<RuntimeEstimate> =>
       fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/runtime-estimate`),
+
+    // Many jobs' estimates in one request, for the listing.
+    runtimeEstimates: (ids: string[]): Promise<RuntimeEstimates> =>
+      fetchJSON(`${BASE}/jobs/runtime-estimates`, {
+        method: "POST",
+        body: JSON.stringify({ jobs: ids }),
+      }),
 
     // Mint a short-lived public URL to share with someone else.
     shareOutput: (
