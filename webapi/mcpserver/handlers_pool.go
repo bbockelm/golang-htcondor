@@ -176,11 +176,10 @@ const (
 // every ad, whatever the collector sends: this tool answers what anonymous
 // condor_status would, and never more.
 //
-// classad.IsPrivateAttribute is the list every serialization layer
-// shares. PairedClaimId is added because HTCondor's own list carries it
-// and it is the same kind of credential.
+// classad.IsPrivateAttribute mirrors HTCondor's ClassAdPrivateAttrs and
+// is the list every serialization layer shares.
 func isPrivatePoolAttr(name string) bool {
-	return classad.IsPrivateAttribute(name) || strings.EqualFold(name, "PairedClaimId")
+	return classad.IsPrivateAttribute(name)
 }
 
 // privateAttrInExpr reports the first private attribute a constraint
