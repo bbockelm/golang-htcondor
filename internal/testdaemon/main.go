@@ -48,6 +48,10 @@ func run() error {
 	}
 
 	srv := cedarserver.New(sec)
+	// Each command negotiates under the SEC_<level>_* policy of its level.
+	if err := d.InstallSecurityLevels(srv); err != nil {
+		return fmt.Errorf("building per-level security config: %w", err)
+	}
 	d.RegisterDefaultCommands(srv)
 
 	log.Info(logging.DestinationGeneral, "testdaemon starting",

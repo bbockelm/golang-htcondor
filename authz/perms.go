@@ -20,9 +20,9 @@ const (
 )
 
 // configNext is the modern (recommended_v90) config-fallback chain from
-// DCpermissionHierarchy::aConfigNext: when ALLOW_<perm>/DENY_<perm> is not set,
-// look up the next perm's config, terminating at DEFAULT. ADVERTISE_* fall back
-// to DAEMON first. A perm absent from this map terminates immediately.
+// DCpermissionHierarchy::aConfigNext: when a setting for perm is not set, look
+// up the next perm's, terminating at DEFAULT. ADVERTISE_* fall back to DAEMON
+// first. A perm absent from this map (ALLOW, CLIENT) falls back to DEFAULT.
 var configNext = map[Perm]Perm{
 	PermRead:            PermDefault,
 	PermWrite:           PermDefault,
@@ -34,6 +34,14 @@ var configNext = map[Perm]Perm{
 	PermAdvertiseSchedd: PermDaemon,
 	PermAdvertiseMaster: PermDaemon,
 	// PermDefault terminates the chain (no entry).
+}
+
+// configNextLegacy is where DCpermissionHierarchy::aConfigNextLegacy, the
+// order before recommended_v90 security, differs from configNext: DAEMON
+// falls back to WRITE before DEFAULT. LEGACY_ALLOW_SEMANTICS (which use
+// SECURITY:HOST_BASED sets) selects it.
+var configNextLegacy = map[Perm]Perm{
+	PermDaemon: PermWrite,
 }
 
 // impliedNext is DCpermissionHierarchy::aImpliedNext: the next-lower permission a
@@ -62,18 +70,21 @@ func directlyImpliedBy(perm Perm) []Perm {
 	return out
 }
 
-// configChain returns perm followed by its config-fallback chain (perm,
-// configNext[perm], ..., DEFAULT), used to resolve ALLOW_<perm>/DENY_<perm>.
-func configChain(perm Perm) []Perm {
+// ConfigChain returns perm followed by the levels whose settings it falls
+// back to, ending at DEFAULT: DCpermissionHierarchy::nextConfig, as
+// SecMan::getSecSetting walks it to resolve SEC_<perm>_*, ALLOW_<perm> and
+// DENY_<perm>. legacy selects the order LEGACY_ALLOW_SEMANTICS restores.
+func ConfigChain(perm Perm, legacy bool) []Perm {
 	chain := []Perm{perm}
-	seen := map[Perm]bool{perm: true}
-	for {
+	for perm != PermDefault {
 		next, ok := configNext[perm]
-		if !ok || seen[next] {
-			break
+		if l, lok := configNextLegacy[perm]; legacy && lok {
+			next, ok = l, true
+		}
+		if !ok {
+			next = PermDefault
 		}
 		chain = append(chain, next)
-		seen[next] = true
 		perm = next
 	}
 	return chain

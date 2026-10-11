@@ -126,12 +126,12 @@ func (p *Policy) buildEntry(cfg ConfigGetter, perm Perm) *permEntry {
 	return e
 }
 
-// getSecSetting walks the config-fallback chain (perm, configNext..., DEFAULT),
+// getSecSetting walks the config-fallback chain (ConfigChain: perm, ..., DEFAULT),
 // trying "<key>_<subsys>" before "<key>" at each level, returning the first set
 // value and the knob that set it (mirrors SecMan::getSecSetting). fmt is
 // "ALLOW_%s" / "DENY_%s".
 func (p *Policy) getSecSetting(cfg ConfigGetter, format string, perm Perm) (value, knob string, ok bool) {
-	for _, pp := range configChain(perm) {
+	for _, pp := range ConfigChain(perm, false) {
 		base := fmt.Sprintf(format, string(pp))
 		if p.subsys != "" {
 			k := base + "_" + strings.ToUpper(p.subsys)
