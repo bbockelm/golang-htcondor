@@ -14,7 +14,7 @@ package config
 // cycle (A = $(B), B = $(A)), and recursion through a special function
 // ($SUBSTR(A,...) inside A) overflows its stack; this one stops after
 // maxExpandSteps substitutions, a value of maxExpandLen bytes, maxExpandWork
-// bytes rescanned or maxExpandDepth nested expansions, and reports
+// bytes examined by the macro search, or maxExpandDepth nested expansions, and reports
 // ErrMacroLoop.
 
 import (
@@ -41,7 +41,7 @@ var ErrHTCondorUndefined = errors.New("HTCondor's behavior is undefined here")
 const (
 	maxExpandSteps = 2000
 	maxExpandLen   = 1 << 18
-	maxExpandWork  = 1 << 24 // bytes rescanned, summed over the steps
+	maxExpandWork  = 1 << 24 // bytes the macro search examines, summed over the steps
 )
 
 // Macro ids, as config.cpp numbers them.
@@ -172,6 +172,9 @@ type macroPos struct {
 	dollar    int
 	bodyStart int
 	bodyEnd   int
+	// scanned is the number of bytes the search examined, including bytes
+	// it re-read after rejecting a body; set whether or not a macro was found.
+	scanned int
 }
 
 func (p macroPos) funcName(value string) string { return value[p.dollar+1 : p.bodyStart-1] }
@@ -188,6 +191,7 @@ func nextConfigMacro(value string,
 	skip func(id int, body string) bool) macroPos {
 	n := len(value)
 	tv := 0
+	scanned := 0
 	for {
 		// Find the next '$prefix(' that checkPrefix accepts.
 		var id int
@@ -195,11 +199,11 @@ func nextConfigMacro(value string,
 		dollar := -1
 		for {
 			if tv > n {
-				return macroPos{}
+				return macroPos{scanned: scanned}
 			}
 			k := strings.IndexByte(value[tv:], '$')
 			if k < 0 {
-				return macroPos{}
+				return macroPos{scanned: scanned + n - tv}
 			}
 			d := tv + k
 			p := d + 1
@@ -209,6 +213,7 @@ func nextConfigMacro(value string,
 			for p < n && (cIsAlnum(value[p]) || value[p] == '_') {
 				p++
 			}
+			scanned += p - tv
 			if p < n && value[p] == '(' {
 				id, bc = checkPrefix(value[d:p])
 				if id != macroNone {
@@ -242,10 +247,12 @@ func nextConfigMacro(value string,
 				if afterColon != 0 {
 					switch {
 					case ch == '(':
-						if k := strings.IndexByte(value[v:], ')'); k >= 0 {
+						k := strings.IndexByte(value[v:], ')')
+						if k >= 0 {
 							v += k + 1
 							continue
 						}
+						scanned += n - v
 					case isMeta, strings.IndexByte(colonDefExtraChars, ch) >= 0:
 						continue
 					}
@@ -261,6 +268,9 @@ func nextConfigMacro(value string,
 				}
 			}
 		}
+		// The body scan's bytes count even when it is rejected: the search
+		// resumes at name and reads them again.
+		scanned += v - name
 		if retry {
 			tv = name
 			continue
@@ -270,7 +280,7 @@ func nextConfigMacro(value string,
 				tv = v
 				continue
 			}
-			return macroPos{id: id, dollar: dollar, bodyStart: name, bodyEnd: v}
+			return macroPos{id: id, dollar: dollar, bodyStart: name, bodyEnd: v, scanned: scanned}
 		}
 		tv = name
 	}
@@ -297,8 +307,18 @@ const maxExpandDepth = 200
 
 func (e *expander) step(length int) error {
 	e.steps++
-	e.work += length
-	if e.steps > maxExpandSteps || length > maxExpandLen || e.work > maxExpandWork {
+	if e.steps > maxExpandSteps || length > maxExpandLen {
+		return ErrMacroLoop
+	}
+	return nil
+}
+
+// charge adds a search's scanned bytes to the work budget. The search can
+// re-read a value many times over (a rejected body is scanned again from its
+// start), so its own count, not the value's length, is what bounds the time.
+func (e *expander) charge(pos macroPos) error {
+	e.work += pos.scanned
+	if e.work > maxExpandWork {
 		return ErrMacroLoop
 	}
 	return nil
@@ -319,6 +339,9 @@ func (e *expander) expand(value string) (string, error) {
 	tmp := value
 	for {
 		pos := nextConfigMacro(tmp, isConfigMacro, isDollarBody)
+		if err := e.charge(pos); err != nil {
+			return "", err
+		}
 		if pos.id == macroNone {
 			break
 		}
@@ -335,6 +358,9 @@ func (e *expander) expand(value string) (string, error) {
 	dollarOnly := func(id int, body string) bool { return !isDollarBody(id, body) }
 	for {
 		pos := nextConfigMacro(tmp, isConfigMacro, dollarOnly)
+		if err := e.charge(pos); err != nil {
+			return "", err
+		}
 		if pos.id == macroNone {
 			break
 		}
@@ -376,6 +402,9 @@ func (e *expander) expandSelf(value, self string) (string, error) {
 	tmp := value
 	for {
 		pos := nextConfigMacro(tmp, isConfigMacro, onlySelf)
+		if err := e.charge(pos); err != nil {
+			return "", err
+		}
 		if pos.id == macroNone {
 			return tmp, nil
 		}

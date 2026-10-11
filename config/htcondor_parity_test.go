@@ -155,6 +155,11 @@ func TestExpansionErrors(t *testing.T) {
 		{"A = $(B)\nB = $(A)\n", "A", ErrMacroLoop},
 		{"A = x$(B)\nB = y$(A)\n", "A", ErrMacroLoop},
 		{"A = $SUBSTR(B,0)\nB = $(A)\n", "A", ErrMacroLoop},
+		// Found by the config fuzzer; each took 12-77s before the macro
+		// search's rescanning counted against the work budget.
+		{"0=$(:$(:$(:$(:$()$(0):)::(:::$()\n", "0", ErrMacroLoop},
+		{"0=$(:$(:$(:$(:$()$(0))::():::$()\n", "0", ErrMacroLoop},
+		{"0=$(:$(:$(0::$:)$:0::$:)$$:2:$()\n", "0", ErrMacroLoop},
 		{"A = $Fdd(a/b)\n", "A", ErrHTCondorUndefined},
 		{"A = $F(\"\")\n", "A", ErrHTCondorUndefined},
 	} {
@@ -171,5 +176,25 @@ func TestExpansionErrors(t *testing.T) {
 	}
 	if _, err := parseFor(t, "A B+\n", true); !errors.Is(err, ErrHTCondorUndefined) {
 		t.Errorf("a line ending in '+': error = %v, want ErrHTCondorUndefined", err)
+	}
+}
+
+// The macro search resumes inside a body it rejects and reads those bytes
+// again; its scanned count must include them, since that count is what bounds
+// expansion time.
+func TestMacroSearchCountsRescans(t *testing.T) {
+	plain := "x $(A) y"
+	if pos := nextConfigMacro(plain, isConfigMacro, nil); pos.id == macroNone || pos.scanned > len(plain) {
+		t.Errorf("%q: id=%d scanned=%d, want a match scanning at most %d bytes", plain, pos.id, pos.scanned, len(plain))
+	}
+	// Every body here is rejected ('!' is not an identifier character), so
+	// the search re-reads each one.
+	rejected := strings.Repeat("$(abc!", 20)
+	pos := nextConfigMacro(rejected, isConfigMacro, nil)
+	if pos.id != macroNone {
+		t.Fatalf("%q: unexpected match id=%d", rejected, pos.id)
+	}
+	if pos.scanned <= len(rejected) {
+		t.Errorf("scanned=%d for %d bytes with every body rejected; rescanned bytes were not counted", pos.scanned, len(rejected))
 	}
 }
