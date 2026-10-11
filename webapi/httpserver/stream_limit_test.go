@@ -246,17 +246,17 @@ func TestOneCallersWatchesShareOneQueryPerTick(t *testing.T) {
 		select {
 		case u := <-s.Updates():
 			if c == n {
-				if u.Ad != nil {
+				if u.View != nil {
 					t.Errorf("job %d is gone, but its watch got an ad", c)
 				}
 				continue
 			}
-			if u.Ad == nil {
+			if u.View == nil {
 				t.Errorf("job %d's watch was told it is gone", c)
 				continue
 			}
-			if got, _ := u.Ad.EvaluateAttrInt("ClusterId"); got != int64(c) {
-				t.Errorf("job %d's watch got job %d's ad", c, got)
+			if got, _ := u.View.Get("ClusterId"); got != float64(c) {
+				t.Errorf("job %d's watch got job %v's ad", c, got)
 			}
 		default:
 			t.Errorf("job %d's watch got no update from the tick", c)

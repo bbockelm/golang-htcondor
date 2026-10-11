@@ -10,6 +10,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
@@ -28,14 +29,25 @@ import (
 // are not persisted in either case; a client that reconnects gets a fresh
 // snapshot and carries on.
 
-// jobWatchUpdate is one delivery. A nil Ad means the job is no longer in
-// the queue -- removed, and on its way to the archive. Note that a job
+// jobWatchUpdate is one delivery. A nil View means the job is no longer
+// in the queue -- removed, and on its way to the archive. Note that a job
 // which merely *finished* is still in the queue (submissions carry a
 // LeaveJobInQueue expression that keeps completed jobs listed for days),
 // so "gone" and "completed" are different events and only the latter
 // arrives as an ad with JobStatus 4.
+//
+// The ad arrives rendered because every subscriber of a group receives
+// the same delivery, and a ClassAd cannot be read by several goroutines
+// at once (see jobwatch.AdView). The poll loop renders it once, while it
+// still owns it.
 type jobWatchUpdate struct {
-	Ad *classad.ClassAd
+	View jobwatch.AdView
+}
+
+// newJobWatchUpdate renders ad for broadcast. ad must not be in use by
+// any other goroutine; nil means the job is gone.
+func newJobWatchUpdate(ad *classad.ClassAd) jobWatchUpdate {
+	return jobWatchUpdate{View: jobwatch.NewAdView(ad)}
 }
 
 // jobWatchSource yields updates for one job until its context ends.
@@ -343,7 +355,7 @@ func (cp *credPoll) pollOnce(ctx context.Context) {
 			g.pollOnce(queryCtx)
 			continue
 		}
-		g.broadcast(jobWatchUpdate{Ad: match})
+		g.broadcast(newJobWatchUpdate(match))
 	}
 }
 
@@ -359,7 +371,7 @@ func (g *jobPollGroup) pollOnce(ctx context.Context) {
 		}
 		return
 	}
-	g.broadcast(jobWatchUpdate{Ad: ad})
+	g.broadcast(newJobWatchUpdate(ad))
 }
 
 func (g *jobPollGroup) broadcast(u jobWatchUpdate) {

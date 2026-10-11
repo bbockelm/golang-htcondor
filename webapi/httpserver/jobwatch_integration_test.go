@@ -117,11 +117,11 @@ func TestMirrorFeedDeliversAJobsChanges(t *testing.T) {
 		w.newJob("42.0", 42, 0, 1)
 	})
 	got := recvChange(t, ch, 30*time.Second)
-	if got.Ad == nil {
+	if got.View == nil {
 		t.Fatalf("expected an ad for 42.0, got %+v", got)
 	}
-	if v, _ := got.Ad.EvaluateAttrInt("JobStatus"); v != 1 {
-		t.Errorf("JobStatus = %d, want 1", v)
+	if v, _ := got.View.Get("JobStatus"); v != float64(1) {
+		t.Errorf("JobStatus = %v, want 1", v)
 	}
 
 	// An attribute edit is what the session pages are waiting on.
@@ -129,8 +129,8 @@ func TestMirrorFeedDeliversAJobsChanges(t *testing.T) {
 		w.set("42.0", "JobStatus", "2")
 	})
 	got = recvChange(t, ch, 30*time.Second)
-	if v, _ := got.Ad.EvaluateAttrInt("JobStatus"); v != 2 {
-		t.Errorf("after the edit JobStatus = %d, want 2", v)
+	if v, _ := got.View.Get("JobStatus"); v != float64(2) {
+		t.Errorf("after the edit JobStatus = %v, want 2", v)
 	}
 }
 
@@ -148,7 +148,7 @@ func TestMirrorFeedReportsAJobLeavingTheQueue(t *testing.T) {
 	defer unsub()
 
 	write(ctx, func(w *txWriter) { w.newJob("43.0", 43, 0, 1) })
-	if got := recvChange(t, ch, 30*time.Second); got.Ad == nil {
+	if got := recvChange(t, ch, 30*time.Second); got.View == nil {
 		t.Fatalf("expected the initial ad, got %+v", got)
 	}
 
