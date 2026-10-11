@@ -374,8 +374,10 @@ func TestUtilizationIsDocumented(t *testing.T) {
 	if err := json.Unmarshal([]byte(openAPISchema), &doc); err != nil {
 		t.Fatalf("openapi does not parse: %v", err)
 	}
-	if _, ok := doc.Paths["/utilization"]; !ok {
-		t.Error("/utilization missing from the OpenAPI paths")
+	for _, path := range []string{"/utilization", "/utilization/jobs"} {
+		if _, ok := doc.Paths[path]; !ok {
+			t.Errorf("%s missing from the OpenAPI paths", path)
+		}
 	}
 }
 
@@ -675,5 +677,74 @@ func TestUtilizationWindowStaysPrunable(t *testing.T) {
 	}
 	if !window || !owners {
 		t.Errorf("probes of %q: window %v, owners %v", mirror, window, owners)
+	}
+}
+
+func (f *twoOwnerFixture) utilizationJobs(t *testing.T, path string, auth func(*http.Request)) (int, UtilizationJobsResponse) {
+	t.Helper()
+	w := f.do(t, http.MethodGet, path, "", auth)
+	var resp UtilizationJobsResponse
+	if w.Code == http.StatusOK {
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decoding %s: %v", w.Body.String(), err)
+		}
+	}
+	return w.Code, resp
+}
+
+// A workflow's jobs page through in the requested order, for the caller
+// who may see them and nobody else.
+func TestUtilizationJobs(t *testing.T) {
+	f := utilizationFixture(t)
+	alice := f.bearer(t, "alice")
+	key := f.utilization(t, "/api/v1/utilization", alice).Workflows[0].Key
+
+	code, page := f.utilizationJobs(t, "/api/v1/utilization/jobs?w="+key+"&sort=memory&page_size=2", alice)
+	if code != http.StatusOK || page.Total != 3 || len(page.Jobs) != 2 || page.NextOffset == nil || *page.NextOffset != 2 {
+		t.Fatalf("first page: %d %+v", code, page)
+	}
+	// Peaks 1000, 950, 900 MiB: largest first.
+	if page.Jobs[0].ID != "103.0" || page.Jobs[1].ID != "102.0" || *page.Jobs[0].MemoryPeakMiB != 1000 {
+		t.Errorf("first page = %+v", page.Jobs)
+	}
+	_, page = f.utilizationJobs(t, "/api/v1/utilization/jobs?w="+key+"&sort=memory&page_size=2&offset=2", alice)
+	if len(page.Jobs) != 1 || page.Jobs[0].ID != "101.0" || page.NextOffset != nil {
+		t.Errorf("second page = %+v", page)
+	}
+	r := page.Jobs[0]
+	if r.Owner != "alice" || r.Outcome != "ok" || *r.Request.MemoryMiB != 2048 || r.Wall != 3600 || *r.CoresUsed != 0.9 {
+		t.Errorf("row = %+v", r)
+	}
+
+	// Owner-scoped like the analysis: bob cannot list alice's workflow,
+	// whatever he asks for; an administrator can.
+	for _, path := range []string{
+		"/api/v1/utilization/jobs?w=" + key,
+		"/api/v1/utilization/jobs?owned_by_me=false&w=" + key,
+		"/api/v1/utilization/jobs?owners=alice&w=" + key,
+	} {
+		if code, page := f.utilizationJobs(t, path, f.bearer(t, "bob")); code != http.StatusNotFound {
+			t.Errorf("bob GET %s: %d %+v, want 404", path, code, page)
+		}
+	}
+	if code, page := f.utilizationJobs(t, "/api/v1/utilization/jobs?owned_by_me=false&w="+key, f.bearer(t, "root")); code != http.StatusOK || page.Total != 3 {
+		t.Errorf("admin: %d %+v", code, page)
+	}
+	// With the analysis cached, the read is narrowed to the workflow's
+	// owner; the jobs listed must not change.
+	root := f.bearer(t, "root")
+	_ = f.utilization(t, "/api/v1/utilization?owned_by_me=false&days=30", root)
+	if code, page := f.utilizationJobs(t, "/api/v1/utilization/jobs?owned_by_me=false&days=30&w="+key, root); code != http.StatusOK || page.Total != 3 {
+		t.Errorf("admin, narrowed by the cached analysis: %d %+v", code, page)
+	}
+
+	for _, bad := range []string{"", "&sort=colour", "&order=up", "&offset=-1", "&page_size=0"} {
+		path := "/api/v1/utilization/jobs?w=" + key + bad
+		if bad == "" {
+			path = "/api/v1/utilization/jobs"
+		}
+		if code, _ := f.utilizationJobs(t, path, alice); code != http.StatusBadRequest {
+			t.Errorf("GET %s: %d, want 400", path, code)
+		}
 	}
 }

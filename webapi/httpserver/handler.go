@@ -457,6 +457,9 @@ type Handler struct {
 	// utilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS; zero means the
 	// default.
 	utilizationMaxJobs int
+	// jobSetCache holds one workflow's jobs at a time for paging.
+	jobSetCacheOnce sync.Once
+	jobSetCacheVal  *jobSetCache
 	// poolShapeCache holds the pool's machine shapes for the throughput
 	// estimate.
 	poolShapeCacheOnce sync.Once

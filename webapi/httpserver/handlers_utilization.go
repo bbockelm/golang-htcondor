@@ -538,6 +538,8 @@ type sharedCache[T any] struct {
 	ttl   time.Duration
 	// timeout bounds one computation.
 	timeout time.Duration
+	// maxEntries bounds the cache; zero means maxUtilizationCacheEntries.
+	maxEntries int
 }
 
 type sharedEntry[T any] struct {
@@ -575,6 +577,28 @@ func newUtilizationCache() *utilizationCache {
 // an error or, worse, half an answer. A failure is never cached.
 func (c *sharedCache[T]) get(ctx context.Context, key string, compute func(context.Context) (T, error)) (T, error) {
 	return c.getWithin(ctx, key, c.timeout, compute)
+}
+
+// peek returns a fresh value for key if there is one, without computing
+// or waiting: an entry being computed right now is reported absent.
+func (c *sharedCache[T]) peek(key string) (T, bool) {
+	var zero T
+	c.mu.Lock()
+	entry := c.byKey[key]
+	c.mu.Unlock()
+	if entry == nil {
+		return zero, false
+	}
+	select {
+	case entry.lock <- struct{}{}:
+		defer func() { <-entry.lock }()
+	default:
+		return zero, false
+	}
+	if entry.has && c.now().Sub(entry.at) < c.ttl {
+		return entry.val, true
+	}
+	return zero, false
 }
 
 // getWithin is get with a computation bound of its own, for work whose
@@ -619,7 +643,11 @@ func (c *sharedCache[T]) getWithin(ctx context.Context, key string, timeout time
 // c.mu held, before adding an entry. Expired entries go first, then the
 // oldest; one being computed or waited on is left alone.
 func (c *sharedCache[T]) makeRoom() {
-	if len(c.byKey) < maxUtilizationCacheEntries {
+	limit := c.maxEntries
+	if limit <= 0 {
+		limit = maxUtilizationCacheEntries
+	}
+	if len(c.byKey) < limit {
 		return
 	}
 	now := c.now()
@@ -629,7 +657,7 @@ func (c *sharedCache[T]) makeRoom() {
 			delete(c.byKey, k)
 		}
 	}
-	for len(c.byKey) >= maxUtilizationCacheEntries {
+	for len(c.byKey) >= limit {
 		var oldestKey string
 		var oldest *sharedEntry[T]
 		for k, e := range c.byKey {
