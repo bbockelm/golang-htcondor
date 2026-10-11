@@ -57,11 +57,10 @@ RESULT = $($(POINTER))
 	t.Logf("RESULT = %s", val)
 }
 
-// TestDoubleIndirectionWithNumber tests double indirection with numeric variable
-// Note: In actual HTCondor config, numeric variable names are only used within
-// metaknobs. This test skips that case as it's not a general config feature.
+// TestDoubleIndirectionWithNumber tests double indirection through a
+// parameter whose name is a number. A name is any run of identifier
+// characters, digits included: condor 25.14.1 expands RESULT to "test value".
 func TestDoubleIndirectionWithNumber(t *testing.T) {
-	t.Skip("Pure numeric variable names are not supported in general HTCondor config, only within metaknobs")
 
 	input := `
 1 = MYVAR

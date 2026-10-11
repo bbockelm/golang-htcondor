@@ -9,8 +9,7 @@ import (
 // it: these tests are about what parsing stores, not about defaults.
 func newTestConfig() *Config {
 	return &Config{
-		values:     map[string]string{},
-		evaluating: map[string]bool{},
+		values: map[string]string{},
 	}
 }
 

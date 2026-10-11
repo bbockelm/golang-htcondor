@@ -39,8 +39,8 @@ var cppMu sync.Mutex
 
 // Result is the outcome of parsing a config source with the C++ oracle.
 type Result struct {
-	// Parsed is false when Parse_config_string reported an error (a divergence
-	// if the Go parser accepted the same input).
+	// Parsed is false when HTCondor's config-file reader (Parse_macros)
+	// reported an error (a divergence if the Go parser accepted the same input).
 	Parsed bool
 	// Table is the canonical "KEY\x1Fvalue\n" encoding of the expanded macro
 	// set, populated only when Parsed is true.

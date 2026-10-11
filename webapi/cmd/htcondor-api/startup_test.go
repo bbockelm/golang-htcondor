@@ -36,8 +36,11 @@ func writeConfig(t *testing.T, root string, dropins map[string]string) {
 // the local hostname, the signing key and schedd are wherever the
 // compiled defaults point, and every authorization decision is then
 // made against configuration the operator never wrote.
+//
+// The broken line has no operator. (`THIS IS NOT VALID = = =` is not
+// broken: HTCondor ignores the words before '=' and sets THIS to "= =".)
 func TestConfigParseFailureRefusesToStart(t *testing.T) {
-	writeConfig(t, "", map[string]string{"99-broken.conf": "THIS IS NOT VALID = = =\n"})
+	writeConfig(t, "", map[string]string{"99-broken.conf": "THIS IS NOT VALID\n"})
 
 	cfg, err := loadConfigWithDefaults()
 	if err == nil {
@@ -146,7 +149,7 @@ func TestStartupFailureIsWrittenToTheLogFile(t *testing.T) {
 	// precisely the input whose lexing is being changed elsewhere --
 	// a test should not depend on a form whose handling is in flux.
 	writeConfig(t, "LOG = "+logDir+"\n", map[string]string{
-		"95-broken.conf": "THIS IS NOT VALID = = =\n",
+		"95-broken.conf": "THIS IS NOT VALID\n", // no operator
 	})
 
 	_, err := loadConfigWithDefaults()

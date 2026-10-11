@@ -10,8 +10,7 @@ import (
 
 func TestExecuteAssignment(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 	cfg.initBuiltins()
 
@@ -34,7 +33,6 @@ func TestExecuteAssignmentWithMacro(t *testing.T) {
 		values: map[string]string{
 			"BAR": "hello",
 		},
-		evaluating: make(map[string]bool),
 	}
 	cfg.initBuiltins()
 
@@ -58,7 +56,6 @@ func TestExecuteConditionalTrue(t *testing.T) {
 		values: map[string]string{
 			"ENABLE_FEATURE": "true",
 		},
-		evaluating: make(map[string]bool),
 	}
 	cfg.initBuiltins()
 
@@ -83,8 +80,7 @@ func TestExecuteConditionalTrue(t *testing.T) {
 
 func TestExecuteConditionalFalse(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 	cfg.initBuiltins()
 
@@ -112,7 +108,6 @@ func TestExecuteConditionalElif(t *testing.T) {
 		values: map[string]string{
 			"NUM": "2",
 		},
-		evaluating: make(map[string]bool),
 	}
 	cfg.initBuiltins()
 
@@ -155,7 +150,6 @@ func TestExecuteIncludeFile(t *testing.T) {
 
 	cfg := &Config{
 		values:        make(map[string]string),
-		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 	}
 	cfg.initBuiltins()
@@ -188,7 +182,6 @@ func TestExecuteIncludeGlob(t *testing.T) {
 
 	cfg := &Config{
 		values:        make(map[string]string),
-		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 	}
 	cfg.initBuiltins()
@@ -215,7 +208,6 @@ func TestExecuteIncludeGlob(t *testing.T) {
 func TestExecuteIncludeIfexist(t *testing.T) {
 	cfg := &Config{
 		values:        make(map[string]string),
-		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 	}
 	cfg.initBuiltins()
@@ -234,7 +226,6 @@ func TestExecuteIncludeIfexist(t *testing.T) {
 func TestExecuteIncludeCommand(t *testing.T) {
 	cfg := &Config{
 		values:        make(map[string]string),
-		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 	}
 	cfg.initBuiltins()
@@ -260,21 +251,20 @@ func TestExecuteCircularInclude(t *testing.T) {
 
 	// config1 includes config2
 	content1 := fmt.Sprintf(`VAR1 = value1
-include "%s"`, config2)
+include : %s`, config2)
 	if err := os.WriteFile(config1, []byte(content1), 0600); err != nil {
 		t.Fatalf("Failed to create config1: %v", err)
 	}
 
 	// config2 includes config1 (circular)
 	content2 := fmt.Sprintf(`VAR2 = value2
-include "%s"`, config1)
+include : %s`, config1)
 	if err := os.WriteFile(config2, []byte(content2), 0600); err != nil {
 		t.Fatalf("Failed to create config2: %v", err)
 	}
 
 	cfg := &Config{
 		values:        make(map[string]string),
-		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 	}
 	cfg.initBuiltins()
@@ -296,8 +286,7 @@ include "%s"`, config1)
 
 func TestExecuteUse(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 	cfg.initBuiltins()
 
@@ -316,8 +305,7 @@ func TestExecuteUse(t *testing.T) {
 
 func TestExecuteError(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 	cfg.initBuiltins()
 
@@ -337,8 +325,7 @@ func TestExecuteError(t *testing.T) {
 
 func TestExecuteWarning(t *testing.T) {
 	cfg := &Config{
-		values:     make(map[string]string),
-		evaluating: make(map[string]bool),
+		values: make(map[string]string),
 	}
 	cfg.initBuiltins()
 

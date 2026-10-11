@@ -12,15 +12,18 @@ extern "C" {
 #endif
 
 /*
- * Parse `text` as a config source into a fresh MACRO_SET whose defaults table
- * is NULL (so no param_info.in defaults leak in — a pure parse), then expand
- * every resulting macro and emit a canonical table.
+ * Parse `text` as a config file (Parse_macros over an in-memory stream, the
+ * reader HTCondor uses for config files) into a fresh MACRO_SET whose defaults
+ * table is NULL (so no param_info.in defaults leak in — a pure parse), then
+ * expand every resulting macro and emit a canonical table. Every include form
+ * is refused (a parse error), so the oracle never reads a host file or runs a
+ * command.
  *
  * Return value:
  *    1  parse succeeded; *out points to a malloc'd canonical encoding: the set
  *       of keys, sorted, one per line as "KEY\x1Fexpanded_value\n". Caller must
  *       config_free() it.
- *    0  Parse_config_string reported an error (bad line); *out is left NULL.
+ *    0  Parse_macros reported an error (bad line); *out is left NULL.
  *   -1  a C++ exception escaped (itself a finding); *out is left NULL.
  *
  * The reference environment (time constants, FULL_HOSTNAME, DETECTED_*, ...) is
