@@ -296,7 +296,7 @@ test('suggestions apply to waiting jobs after a review that lists every change',
   await panel.getByRole('button', { name: 'Review the changes' }).click();
   const changes = panel.getByTestId('apply-changes');
   await expect(changes).toContainText('request_memory');
-  await expect(changes).toContainText('1792 MB');
+  await expect(changes).toContainText('1.8 GB');
   await expect(changes).toContainText('request_disk');
   await panel.getByRole('button', { name: 'Apply to 120 waiting jobs' }).click();
   const result = page.getByTestId('apply-result');

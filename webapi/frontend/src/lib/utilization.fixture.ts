@@ -813,15 +813,30 @@ function throughputGain(ws: UtilWorkflow[]): number | null {
   return after > 0 ? before / after : null;
 }
 
+// changeOf turns an advice's first request line into the edit the server
+// would make: "request_memory = 1792 MB" -> RequestMemory 1792 (MiB).
+function changeOf(submit: string[]): UtilAdvice['change'] {
+  for (const l of submit) {
+    const m = l.match(/^request_(memory|cpus|disk)\s*=\s*([\d.]+)\s*(GB|MB)?/i);
+    if (!m) continue;
+    const n = Number(m[2]);
+    const mib = m[3]?.toUpperCase() === 'GB' ? n * MIB_PER_GIB : n;
+    if (m[1] === 'memory') return { attribute: 'RequestMemory', value: mib };
+    if (m[1] === 'disk') return { attribute: 'RequestDisk', value: mib * 1024 };
+    return { attribute: 'RequestCpus', value: n };
+  }
+  return undefined;
+}
+
 // Advice a queued job can take: a change to a plain request. A GPU
 // memory requirement lives in the job's requirements, not a request.
 function withApplies(w: UtilWorkflow): UtilWorkflow {
   return {
     ...w,
-    advice: w.advice.map((a) => ({
-      ...a,
-      applies: ['memory', 'cpu', 'disk'].includes(a.resource) && a.submit.some((l) => /^request_/.test(l)),
-    })),
+    advice: w.advice.map((a) => {
+      const applies = ['memory', 'cpu', 'disk'].includes(a.resource) && a.submit.some((l) => /^request_/.test(l));
+      return applies ? { ...a, applies, change: changeOf(a.submit) } : { ...a, applies };
+    }),
   };
 }
 

@@ -130,6 +130,8 @@ export interface UtilAdvice {
   confidence: 'low' | 'medium' | 'high';
   // POST /api/v1/utilization/apply can apply this advice to waiting jobs.
   applies?: boolean;
+  // The edit it makes, when it applies.
+  change?: { attribute: 'RequestMemory' | 'RequestCpus' | 'RequestDisk' | 'RequestGPUs'; value: number };
 }
 
 export interface UtilSavings {
@@ -918,6 +920,16 @@ export interface ApplyChange {
 
 const ATTR_RE = /^\s*(request_(memory|cpus|disk|gpus))\s*=\s*(.+?)\s*$/i;
 
+const CHANGE_KIND: Record<
+  NonNullable<UtilAdvice['change']>['attribute'],
+  (v: number) => { kind: 'memory' | 'cpus' | 'disk' | 'gpus'; to: string }
+> = {
+  RequestMemory: (v) => ({ kind: 'memory', to: formatMiB(v) }),
+  RequestCpus: (v) => ({ kind: 'cpus', to: formatCores(v) }),
+  RequestDisk: (v) => ({ kind: 'disk', to: formatKiB(v) }),
+  RequestGPUs: (v) => ({ kind: 'gpus', to: formatCores(v) }),
+};
+
 /**
  * applyPlan lists what applying a workflow's advice would change on its
  * waiting jobs -- attribute, from, to -- and the request-changing advice
@@ -935,8 +947,12 @@ export function applyPlan(w: UtilWorkflow): { changes: ApplyChange[]; blocked: U
       blocked.push(a);
       continue;
     }
-    for (const m of lines) {
-      const kind = m[2].toLowerCase() as 'memory' | 'cpus' | 'disk' | 'gpus';
+    // The server's own edit, when it says what it is; the submit lines
+    // otherwise.
+    const edits: { kind: 'memory' | 'cpus' | 'disk' | 'gpus'; to: string }[] = a.change
+      ? [CHANGE_KIND[a.change.attribute](a.change.value)]
+      : lines.map((m) => ({ kind: m[2].toLowerCase() as 'memory' | 'cpus' | 'disk' | 'gpus', to: m[3] }));
+    for (const { kind, to } of edits) {
       const req =
         kind === 'memory' ? w.memory.request : kind === 'cpus' ? w.cpu.request : kind === 'disk' ? w.disk.request : w.gpu?.request ?? null;
       const now = !req
@@ -948,9 +964,9 @@ export function applyPlan(w: UtilWorkflow): { changes: ApplyChange[]; blocked: U
             : formatCores(req.typical);
       changes.push({
         advice: a,
-        attr: m[1].toLowerCase() as ApplyChange['attr'],
+        attr: `request_${kind}`,
         from: requestPhrase(kind, now, req?.adaptive),
-        to: m[3],
+        to,
         adaptive: !!req?.adaptive,
       });
     }

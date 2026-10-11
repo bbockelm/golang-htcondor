@@ -53,10 +53,10 @@ describe('ApplyPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Review the changes' }));
     const rows = within(screen.getByTestId('apply-changes')).getAllByRole('row').slice(1);
     const cells = rows.map((r) => within(r).getAllByRole('cell').slice(1).map((c) => c.textContent));
-    // retry_request_memory is part of the memory advice, not a request
-    // of its own, so it is not listed as one.
+    // The value is the advice's own edit (change.value), so it reads in
+    // the page's units; retry_request_memory is not a request of its own.
     expect(cells).toEqual([
-      ['request_memory', '8 GB', '1792 MB'],
+      ['request_memory', '8 GB', '1.8 GB'],
       ['request_disk', '10 GB', '3 GB'],
     ]);
     // Reviewing is not applying.
