@@ -1737,7 +1737,7 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 		}
 		s.writeJSON(w, http.StatusOK, fanOutResponse(fanOut, target.Cluster,
 			"Cluster input files uploaded successfully",
-			fmt.Sprintf("PUT again to /api/v1/jobs/%d/input", target.Cluster)))
+			fmt.Sprintf("PUT again to /api/v1/jobs/%s/input", s.clusterPathID(ctx, target.Cluster))))
 		return
 	}
 
@@ -2026,7 +2026,7 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	if fanOut != nil {
 		s.writeJSON(w, http.StatusOK, fanOutResponse(fanOut, target.Cluster,
 			"Cluster input files uploaded via multipart",
-			fmt.Sprintf("POST again to /api/v1/jobs/%d/input/multipart", target.Cluster)))
+			fmt.Sprintf("POST again to /api/v1/jobs/%s/input/multipart", s.clusterPathID(ctx, target.Cluster))))
 		return
 	}
 

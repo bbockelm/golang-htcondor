@@ -39,6 +39,9 @@ type Target struct {
 	// ID is the complete job id. Zero for a target that names an AP
 	// without a job (a bulk action's per-AP leg).
 	ID jobid.ID
+	// Raw is the id as the caller wrote it, for a message that tells
+	// them to send it again.
+	Raw string
 }
 
 type targetKey struct{}

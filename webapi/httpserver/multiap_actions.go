@@ -106,6 +106,15 @@ func (h *Handler) ownerClause(owner string) string {
 	return fmt.Sprintf("User == %s", classadStringLit(owner+"@"+h.multi.svc.UIDDomain))
 }
 
+// clusterPathID is how a caller names a whole cluster in a URL: its
+// number, or in multi-AP mode the id as they sent it.
+func (h *Handler) clusterPathID(ctx context.Context, cluster int) string {
+	if t, ok := multiap.TargetFrom(ctx); ok && t.Raw != "" {
+		return t.Raw
+	}
+	return fmt.Sprintf("%d", cluster)
+}
+
 // routedSchedd is the AP a request was routed to, or "".
 func routedSchedd(ctx context.Context) string {
 	if t, ok := multiap.TargetFrom(ctx); ok {
@@ -190,13 +199,26 @@ func (h *Handler) handleMultiJobByID(w http.ResponseWriter, r *http.Request, par
 	if !ok {
 		return
 	}
+	// A proc-less id ("123@ap1", which the codec reads as 123.0 and
+	// renders back with ".0") is what single-AP mode calls a bare
+	// cluster: every proc of it for an input upload, and an invalid id
+	// everywhere else.
+	clusterOnly := h.multi.codec.Format(id) != first
+	sub := strings.Join(parts[1:], "/")
+	clusterTarget := sub == "input" || sub == "input/multipart" || sub == "input/share"
+	if clusterOnly && !clusterTarget {
+		h.writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("Invalid job ID: %q names no proc; use the complete id, e.g. %s", first,
+				h.multi.codec.Format(id)))
+		return
+	}
 	m, err := h.multi.svc.Route(r.Context(), user, id)
 	if err != nil {
 		h.multiAPError(w, err)
 		return
 	}
 	id = id.WithSchedd(m.Name)
-	ctx := multiap.WithTarget(r.Context(), multiap.Target{Member: m, ID: id})
+	ctx := multiap.WithTarget(r.Context(), multiap.Target{Member: m, ID: id, Raw: first})
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		// A change this server makes on the AP: until the hub has seen
 		// it, a bulk action must not skip the AP on the hub's word.
@@ -214,7 +236,11 @@ func (h *Handler) handleMultiJobByID(w http.ResponseWriter, r *http.Request, par
 	if len(parts) > 1 {
 		rest = "/" + strings.Join(parts[1:], "/")
 	}
-	u.Path = fmt.Sprintf("/api/v1/jobs/%d.%d%s", id.Cluster, id.Proc, rest)
+	local := fmt.Sprintf("%d.%d", id.Cluster, id.Proc)
+	if clusterOnly {
+		local = fmt.Sprintf("%d", id.Cluster)
+	}
+	u.Path = "/api/v1/jobs/" + local + rest
 	u.RawPath = ""
 	routed.URL = &u
 	h.serveJobByID(w, routed)

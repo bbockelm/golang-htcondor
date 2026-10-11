@@ -413,3 +413,40 @@ func TestMultiAPDisconnectRemovesOnTheRoutedAP(t *testing.T) {
 		t.Errorf("a disconnect with no caller credential reached a schedd")
 	}
 }
+
+// A proc-less id ("1@ap") is a whole cluster for an input upload, as a
+// bare cluster is in single-AP mode, and invalid everywhere else.
+func TestMultiAPProcLessIDs(t *testing.T) {
+	aps := newActionAPs(t, ap1, ap2)
+	srv := newActionServer(t, aps, nil)
+	before := aps.counts()
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodDelete, "/api/v1/jobs/1@" + ap1, ""},
+		{http.MethodPost, "/api/v1/jobs/1@" + ap1 + "/hold", ""},
+		{http.MethodGet, "/api/v1/jobs/1@" + ap1 + "/stdout", ""},
+	} {
+		b := aps.counts()[ap1]
+		if rec := doAlice(t, srv, c.method, c.path, c.body); rec.Code != http.StatusBadRequest ||
+			!strings.Contains(rec.Body.String(), "1.0@"+ap1) {
+			t.Errorf("%s %s = %d %s, want 400 suggesting the complete id", c.method, c.path, rec.Code, rec.Body.String())
+		}
+		if aps.counts()[ap1] != b {
+			t.Errorf("%s %s reached ap1", c.method, c.path)
+		}
+	}
+	if after := aps.counts(); after[ap1] != before[ap1] {
+		t.Error("a proc-less id reached ap1")
+	}
+	for _, c := range []struct{ method, sub string }{
+		{http.MethodPut, "/input"}, {http.MethodPost, "/input/multipart"}, {http.MethodPost, "/input/share"},
+	} {
+		before := aps.counts()
+		rec := doAlice(t, srv, c.method, "/api/v1/jobs/1@"+ap2+c.sub, "")
+		if rec.Code == http.StatusBadRequest && strings.Contains(rec.Body.String(), "names no proc") {
+			t.Errorf("%s 1@ap2%s was refused: %s", c.method, c.sub, rec.Body.String())
+		}
+		if after := aps.counts(); after[ap2] == before[ap2] || after[ap1] != before[ap1] {
+			t.Errorf("%s 1@ap2%s went %v -> %v", c.method, c.sub, before, after)
+		}
+	}
+}
