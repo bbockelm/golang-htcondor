@@ -18,7 +18,17 @@ export interface RowMenuItem {
   href: string;
 }
 
-export function RowMenu({ label, items }: { label: string; items: RowMenuItem[] }) {
+export function RowMenu({
+  label,
+  items,
+  touch,
+}: {
+  label: string;
+  items: RowMenuItem[];
+  // A finger-sized button and items, for the card layout on phones and
+  // tablets, where a 20px target is a miss as often as a hit.
+  touch?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -95,7 +105,9 @@ export function RowMenu({ label, items }: { label: string; items: RowMenuItem[] 
         aria-controls={open ? menuId : undefined}
         onClick={() => (open ? close(false) : openAt(0))}
         onKeyDown={onButtonKey}
-        className="rounded-sm border border-gray-300 bg-white px-1.5 py-0.5 text-xs leading-none text-gray-600 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+        className={`rounded-sm border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 ${
+          touch ? 'min-h-9 min-w-9 px-3 py-1.5 text-base leading-none' : 'px-1.5 py-0.5 text-xs leading-none'
+        }`}
       >
         <span aria-hidden>⋯</span>
       </button>
@@ -117,7 +129,7 @@ export function RowMenu({ label, items }: { label: string; items: RowMenuItem[] 
               role="menuitem"
               tabIndex={i === focusIndex ? 0 : -1}
               onClick={() => setOpen(false)}
-              className="block whitespace-nowrap px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 focus:bg-gray-100 focus:outline-none"
+              className={`block whitespace-nowrap px-3 text-sm text-gray-700 hover:bg-gray-100 focus:bg-gray-100 focus:outline-none ${touch ? 'py-3' : 'py-1.5'}`}
             >
               {item.label}
             </Link>

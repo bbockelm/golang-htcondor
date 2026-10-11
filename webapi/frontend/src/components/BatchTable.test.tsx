@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JobRuntimeEstimate, RuntimeEstimates } from '@/lib/api';
 
 // Every table asks for its jobs' runtime estimates; by default the server
@@ -435,5 +435,106 @@ describe('BatchTable time left', () => {
     table({ multiAP: true });
     table({ detail: 'hold' });
     expect(runtimeEstimates).not.toHaveBeenCalled();
+  });
+});
+
+// Below 1024px the table is cards. jsdom has no matchMedia: give it one
+// that says the screen is narrow.
+describe('BatchTable as cards', () => {
+  beforeEach(() => {
+    vi.stubGlobal('matchMedia', (q: string) => ({
+      matches: q.includes('max-width'),
+      media: q,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const held: ClassAd[] = [
+    {
+      ClusterId: 30, ProcId: 0, JobStatus: 5, Owner: 'alice', Cmd: '/bin/a', JobBatchName: 'sweep', TotalSubmitProcs: 10,
+      HoldReason: 'Error from slot1_3@node3.example.edu: memory usage exceeded request_memory',
+    },
+    {
+      ClusterId: 30, ProcId: 1, JobStatus: 5, Owner: 'alice', Cmd: '/bin/a', JobBatchName: 'sweep', TotalSubmitProcs: 10,
+      HoldReason: 'Error from slot1_9@node9.example.edu: memory usage exceeded request_memory',
+    },
+  ];
+
+  it('lists batches as cards with a sort picker, not a table', () => {
+    const view = batchView(ads, new Set(), '', true);
+    table({ batches: view.batches, progress: view.progress, showOwner: true });
+    expect(screen.queryByRole('table')).toBeNull();
+    const cards = screen.getAllByTestId('batch-card');
+    expect(cards).toHaveLength(2);
+    // Newest first, as the table starts.
+    expect(cards[0]).toHaveTextContent('sim');
+    expect(within(cards[0]).getByRole('link', { name: 'bob' })).toHaveAttribute('href', '/users/bob');
+    expect(cards[0]).toHaveTextContent('/bin/sim');
+    // The picker re-sorts: by name, descending.
+    fireEvent.change(screen.getByRole('combobox', { name: /Sort by/ }), { target: { value: 'batch' } });
+    expect(screen.getAllByTestId('batch-card')[0]).toHaveTextContent('training');
+    fireEvent.click(screen.getByRole('button', { name: /switch to ascending/ }));
+    expect(screen.getAllByTestId('batch-card')[0]).toHaveTextContent('sim');
+  });
+
+  it('keeps Remove and the actions menu on every card', () => {
+    table();
+    const card = screen.getAllByTestId('batch-card').find((c) => c.textContent?.includes('training'))!;
+    expect(within(card).getByTitle(/Remove batch training/)).toBeTruthy();
+    fireEvent.click(within(card).getByRole('button', { name: 'More actions for batch training' }));
+    expect(within(card).getByRole('menuitem', { name: 'Resource utilization' }).getAttribute('href')).toMatch(
+      /^\/utilization\?days=30&constraint=/,
+    );
+  });
+
+  it('opens when tapped anywhere but a control', () => {
+    const setExpanded = vi.fn();
+    table({ setExpanded });
+    const card = screen.getAllByTestId('batch-card')[0];
+    fireEvent.click(within(card).getByText('/bin/sim'));
+    expect(setExpanded).toHaveBeenCalledTimes(1);
+    // A control does its own job and does not also open the card.
+    fireEvent.click(within(card).getByTitle(/Remove batch/));
+    fireEvent.click(within(card).getByRole('button', { name: /More actions for batch/ }));
+    expect(setExpanded).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the hold reason in the held view, and its jobs with Release when open', () => {
+    const batches = groupIntoBatches(held);
+    table({ batches, detail: 'hold', expanded: new Set(batches.map((b) => b.batchID)) });
+    const card = screen.getByTestId('batch-card');
+    expect(within(card).getAllByText('memory usage exceeded request_memory')[0]).toBeTruthy();
+    expect(card).toHaveTextContent('×2');
+    const jobs = within(card).getAllByTestId('job-card');
+    expect(jobs).toHaveLength(2);
+    expect(within(jobs[0]).getByRole('button', { name: 'Release' })).toBeTruthy();
+    expect(within(jobs[0]).getByTitle('Remove job 30.0')).toBeTruthy();
+  });
+
+  it('shows memory and CPU bars in the running view', () => {
+    const running: ClassAd[] = [{ ClusterId: 40, ProcId: 0, JobStatus: 2, Owner: 'alice', Cmd: '/bin/a' }];
+    const batches = groupIntoBatches(running);
+    const byJob = new Map<string, JobUsage>([
+      ['40.0', { memUsedMiB: 2400, memReqMiB: 2048, cpuUsed: 0.9, cpuReq: 1, cpuSource: 'recent' }],
+    ]);
+    table({ batches, detail: 'usage', usage: { byJob, loading: false }, expanded: new Set([40]) });
+    const card = screen.getByTestId('batch-card');
+    expect(within(card).getAllByText('Memory (peak)').length).toBeGreaterThan(0);
+    expect(within(card).getAllByText('CPU (recent)').length).toBeGreaterThan(0);
+    // The job's own bars, inside the open card.
+    expect(within(within(card).getByTestId('job-card')).getByText('2.3 / 2.0 GB · 117%')).toBeTruthy();
+  });
+
+  it('offers nothing that acts on a job in multi-AP mode, but keeps the menu', () => {
+    const multi: ClassAd[] = [
+      { ClusterId: 1, ProcId: 0, JobStatus: 5, Owner: 'alice', schedd: 'ap1.example.org', job_id: '1.0@ap1.example.org' },
+    ];
+    const batches = groupIntoBatches(multi);
+    table({ batches, multiAP: true, expanded: new Set(batches.map((b) => `${b.schedd}\u0000${b.batchID}`)) });
+    expect(screen.queryByTitle(/Remove/)).toBeNull();
+    expect(screen.queryByText('Release')).toBeNull();
+    expect(screen.getByRole('button', { name: /More actions for batch/ })).toBeTruthy();
   });
 });

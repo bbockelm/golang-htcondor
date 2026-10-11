@@ -1087,8 +1087,8 @@ function OutputFilesPanel({
         ready ? '' : 'opacity-60'
       }`}
     >
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium text-gray-900">Output Files</h2>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <h2 className="shrink-0 text-sm font-medium text-gray-900">Output Files</h2>
         {hint && <span className="text-xs text-gray-400">{hint}</span>}
       </div>
 
@@ -1339,9 +1339,9 @@ function LiveTailPanel({
       <div
         ref={rootRef}
         tabIndex={-1}
-        className="rounded-sm border border-gray-200 bg-white p-3 flex items-center gap-3 focus:outline-none"
+        className="rounded-sm border border-gray-200 bg-white p-3 flex flex-wrap items-center gap-x-3 gap-y-1 focus:outline-none"
       >
-        <h2 className="text-sm font-medium text-gray-900">Live Tail</h2>
+        <h2 className="shrink-0 text-sm font-medium text-gray-900">Live Tail</h2>
         <span className="text-xs text-gray-500">
           Stream stdout / stderr from the running sandbox.
         </span>
@@ -3207,23 +3207,23 @@ export function ResourceTable({ job }: { job: ClassAd }) {
       <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
         Resources
       </h3>
-      <div className="overflow-hidden rounded-sm border border-gray-200">
+      <div className="overflow-x-auto rounded-sm border border-gray-200">
         <table className="min-w-full text-sm">
-          <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
+          <thead className="bg-gray-50 text-left text-xs uppercase tracking-normal text-gray-500 sm:tracking-wide">
             <tr>
-              <th className="px-3 py-1.5 w-32">Resource</th>
-              <th className="px-3 py-1.5">Requested</th>
-              <th className="px-3 py-1.5">Used</th>
-              <th className="px-3 py-1.5 w-40">Used of requested</th>
+              <th className="px-1.5 py-1.5 sm:px-3 sm:w-32">Resource</th>
+              <th className="px-1.5 py-1.5 sm:px-3">Requested</th>
+              <th className="px-1.5 py-1.5 sm:px-3">Used</th>
+              <th className="px-1.5 py-1.5 sm:px-3 sm:w-40">Used of requested</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {visible.map((r) => (
               <tr key={r.label}>
-                <td className="px-3 py-1.5 font-medium text-gray-700">{r.label}</td>
-                <td className="px-3 py-1.5 text-gray-900 tabular-nums">{r.requested}</td>
-                <td className="px-3 py-1.5 text-gray-900 tabular-nums">{r.used}</td>
-                <td className="px-3 py-1.5">
+                <td className="px-1.5 py-1.5 sm:px-3 font-medium text-gray-700">{r.label}</td>
+                <td className="px-1.5 py-1.5 sm:px-3 text-gray-900 tabular-nums">{r.requested}</td>
+                <td className="px-1.5 py-1.5 sm:px-3 text-gray-900 tabular-nums">{r.used}</td>
+                <td className="px-1.5 py-1.5 sm:px-3">
                   <UsageBar requested={r.reqN} used={r.usedN} />
                 </td>
               </tr>
@@ -3287,7 +3287,7 @@ export function UsageBar({
   return (
     <div className="flex items-center gap-2" title={`${label} of requested`}>
       <div
-        className="h-1.5 w-20 shrink-0 overflow-hidden rounded-full bg-gray-200"
+        className="h-1.5 w-12 shrink-0 overflow-hidden rounded-full bg-gray-200 sm:w-20"
         role="img"
         aria-label={`${label} of requested`}
       >
