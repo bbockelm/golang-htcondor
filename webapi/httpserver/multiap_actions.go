@@ -55,7 +55,17 @@ func (h *Handler) scheddFor(ctx context.Context) *htcondor.Schedd {
 			"Refusing an action with no caller credential attached", "access_point", t.Member.Name)
 		return multiap.NoSchedd
 	}
-	return t.Member.Schedd
+	// The member as the registry knows it now, not as it was when the
+	// request was routed: a long-lived caller (a job watch's poll loop)
+	// follows an address change, and stops reaching an AP that has since
+	// left the collector or failed its trust probe.
+	m, err := h.multi.svc.Member(t.Member.Name)
+	if err != nil {
+		h.logger.Debug(logging.DestinationHTTP, "Not reaching an access point that cannot be acted on now",
+			"access_point", t.Member.Name, "error", err)
+		return multiap.NoSchedd
+	}
+	return m.Schedd
 }
 
 // jobPathID is the job id a response or a URL this server builds should

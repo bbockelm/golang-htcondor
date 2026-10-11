@@ -350,3 +350,34 @@ func jobsshKeyNoAP(k jobssh.Key) jobssh.Key {
 	k.Schedd = ""
 	return k
 }
+
+// A long-lived routed context (a job watch's poll loop) follows the
+// registry: a new address is used, and an AP that left the collector or
+// failed its trust probe is no longer reached.
+func TestScheddForFollowsTheRegistry(t *testing.T) {
+	aps := newActionAPs(t, ap1, ap2)
+	srv := newActionServer(t, aps, nil)
+	stale, _ := aps.reg.Get(ap2)
+	sec, err := htcondor.NewClientSecurityConfigWithConfig(context.Background(), nil, "e30.e30.c2ln", "", 0, "CLIENT", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := multiap.WithTarget(htcondor.WithSecurityConfig(context.Background(), sec),
+		multiap.Target{Member: stale, ID: jobid.ID{Schedd: ap2, Cluster: 1}})
+
+	moved := htcondor.NewSchedd(ap2, "<127.0.0.1:2>")
+	aps.reg.Update(ap2, func(m *apregistry.Member) { m.Address, m.Schedd = "<127.0.0.1:2>", moved })
+	if got := srv.scheddFor(ctx); got != moved {
+		t.Errorf("after an address change scheddFor = %v, want the new handle", got)
+	}
+	aps.reg.Update(ap2, func(m *apregistry.Member) { m.Present = false })
+	if got := srv.scheddFor(ctx); got != multiap.NoSchedd {
+		t.Errorf("for an AP gone from the collector scheddFor = %v", got)
+	}
+	aps.reg.Update(ap2, func(m *apregistry.Member) {
+		m.Present, m.Trust = true, apregistry.Trust{State: apregistry.TrustUntrusted}
+	})
+	if got := srv.scheddFor(ctx); got != multiap.NoSchedd {
+		t.Errorf("for an untrusted AP scheddFor = %v", got)
+	}
+}

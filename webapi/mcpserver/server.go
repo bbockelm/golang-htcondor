@@ -882,7 +882,13 @@ func (s *Server) scheddFor(ctx context.Context) *htcondor.Schedd {
 			"access_point", t.Member.Name)
 		return multiap.NoSchedd
 	}
-	return t.Member.Schedd
+	// The member as the registry knows it now: its current address, and
+	// nothing at all once it is absent or untrusted.
+	m, err := s.multi.Member(t.Member.Name)
+	if err != nil {
+		return multiap.NoSchedd
+	}
+	return m.Schedd
 }
 
 func (s *Server) getSchedd() *htcondor.Schedd {
