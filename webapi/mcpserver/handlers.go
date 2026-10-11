@@ -480,7 +480,7 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of archived records to scan before stopping",
+						"description": fmt.Sprintf("Maximum number of archived records the schedd examines, newest first, before it stops looking (default %d; negative for no limit). Matches older than that are not found; a result cut short this way reports scan_limit_reached and records_scanned. Setting it sends the query to the schedd even when the htcondordb mirror could answer.", htcondor.DefaultHistoryScanLimit),
 					},
 					"backwards": map[string]interface{}{
 						"type":        "boolean",
@@ -516,7 +516,7 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of epoch records to scan before stopping",
+						"description": fmt.Sprintf("Maximum number of epoch records the schedd examines, newest first, before it stops looking (default %d; negative for no limit). Matches older than that are not found; a result cut short this way reports scan_limit_reached and records_scanned.", htcondor.DefaultHistoryScanLimit),
 					},
 					"backwards": map[string]interface{}{
 						"type":        "boolean",
@@ -552,7 +552,7 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 					},
 					"scan_limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of transfer records to scan before stopping",
+						"description": fmt.Sprintf("Maximum number of transfer records the schedd examines, newest first, before it stops looking (default %d; negative for no limit). Matches older than that are not found; a result cut short this way reports scan_limit_reached and records_scanned.", htcondor.DefaultHistoryScanLimit),
 					},
 					"backwards": map[string]interface{}{
 						"type":        "boolean",
@@ -2442,7 +2442,7 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 	// a safe load win. Only the job-history source is mirrored; epochs and
 	// transfer history stay on the schedd. Any miss falls through transparently.
 	if source == htcondor.HistorySourceJobHistory {
-		if res, ok, decision := s.tryHistoryFromDB(ctx, constraint, opts, typeName); ok {
+		if res, ok, decision := s.tryHistoryFromDB(ctx, constraint, opts, typeName, limitCapped); ok {
 			return res, nil
 		} else if err := s.mirrorRequiredError(decision); err != nil {
 			return nil, err
@@ -2450,16 +2450,60 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 	}
 
 	// Execute query
+	var stats htcondor.HistoryScanStats
+	opts.Stats = &stats
 	records, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}
 
 	note := projectionNote
+	extras := historyExtras{}
 	if len(records) >= effectiveLimit {
 		note = truncationNote(effectiveLimit, limitCapped) + projectionNote
+		extras.hasMore = true
 	}
-	return historyResult(records, typeName, constraint, string(source), note), nil
+	if stats.Reported {
+		extras.recordsScanned = stats.RecordsScanned
+	}
+	if stats.ScanLimitReached {
+		// The schedd gave up before reaching the records this query is
+		// about. Without saying so, a short or empty answer reads as
+		// "there are no such jobs", which is exactly what it is not.
+		extras.scanLimitReached = true
+		note = scanLimitNote(stats, len(records), s.htcondordbEnabled()) + note
+	}
+	return historyResultWith(records, typeName, constraint, string(source), note, extras), nil
+}
+
+// scanLimitNote explains a history answer the schedd cut short at its scan
+// limit: how far back it looked, that older records were not searched, and
+// how to search further.
+func scanLimitNote(stats htcondor.HistoryScanStats, found int, mirror bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n\nIncomplete: the schedd examined only the %d most recent history records "+
+		"(scan_limit %d) and found %d match(es) among them; older records were not searched, "+
+		"so any older matches are missing from this answer, and fewer results than the limit "+
+		"(even zero) does not mean there are no more. Raise scan_limit to search further back "+
+		"(a larger scan costs the schedd more).",
+		stats.RecordsScanned, stats.ScanLimit, found)
+	if mirror {
+		b.WriteString(" query_history_db searches the full archive in the htcondordb mirror without a scan limit.")
+	}
+	return b.String()
+}
+
+// historyExtras are the optional facts about how a history answer was
+// produced that both paths report in the structured result.
+type historyExtras struct {
+	// hasMore: more records matched than were returned.
+	hasMore bool
+	// scanLimitReached: the schedd stopped at its scan limit, so older
+	// records were not searched.
+	scanLimitReached bool
+	// recordsScanned is how many records the schedd examined; 0 when it
+	// did not say (or the mirror answered).
+	recordsScanned int
 }
 
 // historyResult renders history records into the tool result. Both the schedd
@@ -2467,6 +2511,12 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 // the output contract is identical regardless of source; source names the
 // backend in the metadata and note is an optional trailing provenance line.
 func historyResult(records []*classad.ClassAd, typeName, constraint, source, note string) interface{} {
+	return historyResultWith(records, typeName, constraint, source, note, historyExtras{})
+}
+
+// historyResultWith is historyResult with the extras filed in the metadata
+// and structured result.
+func historyResultWith(records []*classad.ClassAd, typeName, constraint, source, note string, extras historyExtras) interface{} {
 	recordsJSON, err := json.Marshal(records)
 	if err != nil {
 		// Marshaling a slice of ClassAds does not realistically fail; degrade to
@@ -2475,6 +2525,26 @@ func historyResult(records []*classad.ClassAd, typeName, constraint, source, not
 	}
 	resultText := fmt.Sprintf("Found %d %s record(s):\n%s%s",
 		len(records), typeName, string(recordsJSON), note)
+	metadata := map[string]interface{}{
+		"total_records":      len(records),
+		"constraint":         constraint,
+		"source":             source,
+		"has_more":           extras.hasMore,
+		"scan_limit_reached": extras.scanLimitReached,
+	}
+	structured := map[string]interface{}{
+		"records":            records,
+		"count":              len(records),
+		"type":               typeName,
+		"constraint":         constraint,
+		"source":             source,
+		"has_more":           extras.hasMore,
+		"scan_limit_reached": extras.scanLimitReached,
+	}
+	if extras.recordsScanned > 0 {
+		metadata["records_scanned"] = extras.recordsScanned
+		structured["records_scanned"] = extras.recordsScanned
+	}
 
 	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{
@@ -2483,18 +2553,8 @@ func historyResult(records []*classad.ClassAd, typeName, constraint, source, not
 				"text": resultText,
 			},
 		},
-		"metadata": map[string]interface{}{
-			"total_records": len(records),
-			"constraint":    constraint,
-			"source":        source,
-		},
-	}, map[string]interface{}{
-		"records":    records,
-		"count":      len(records),
-		"type":       typeName,
-		"constraint": constraint,
-		"source":     source,
-	})
+		"metadata": metadata,
+	}, structured)
 }
 
 // OutputFile represents a file from the job's output sandbox

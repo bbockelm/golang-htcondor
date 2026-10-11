@@ -105,6 +105,20 @@ func jobListSchema(itemsKey string) map[string]interface{} {
 	}, "count")
 }
 
+// historyListSchema is jobListSchema for the history tools, which also say
+// how far the schedd searched. scan_limit_reached is true when the schedd
+// stopped at its scan limit before finding as many records as asked for:
+// older records were not searched, so a short or empty answer is not a
+// complete one. records_scanned is how many records it examined.
+func historyListSchema() map[string]interface{} {
+	s := jobListSchema("records")
+	props := s["properties"].(map[string]interface{})
+	props["scan_limit_reached"] = boolSchema
+	props["records_scanned"] = intSchema
+	props["type"] = strSchema
+	return s
+}
+
 // outputSchemas publishes an output schema for each tool. A tool absent from
 // this map is served without an outputSchema, which is valid -- structured
 // output is recommended, not required. toolsFor stamps these onto the
@@ -114,9 +128,9 @@ var outputSchemas = map[string]map[string]interface{}{
 	"query_jobs":             jobListSchema("jobs"),
 	"query_history_db":       jobListSchema("records"),
 	"query_jobs_as_of":       jobListSchema("records"),
-	"query_job_archive":      jobListSchema("records"),
-	"query_job_epochs":       jobListSchema("records"),
-	"query_transfer_history": jobListSchema("records"),
+	"query_job_archive":      historyListSchema(),
+	"query_job_epochs":       historyListSchema(),
+	"query_transfer_history": historyListSchema(),
 	"get_job": obj(map[string]interface{}{
 		"job":    adSchema,
 		"job_id": strSchema,

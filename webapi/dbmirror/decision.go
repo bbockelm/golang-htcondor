@@ -47,8 +47,13 @@ const (
 	ReasonQueryFailed Reason = "query_failed"
 	// ReasonBadRow is set when a row the mirror returned would not parse.
 	ReasonBadRow Reason = "bad_row"
-	// ReasonOversized is set when more matches than the mirror read may return, so
-	// the schedd owns ordering.
+	// ReasonOversized is set when more rows match than one mirror read
+	// returns and the mirror cannot answer with the right subset: for
+	// live jobs, pagination stays on the schedd; for history, the mirror
+	// cannot order the match set server-side (it predates TopK, or some
+	// matching records lack the order key), so the schedd's backwards
+	// scan picks the newest records instead. A history read the mirror
+	// can order is served, newest first, and reports that more matched.
 	ReasonOversized Reason = "oversized"
 	// ReasonNoPagination is set when the mirror is too old to understand
 	// the cursor opcode a paginated read needs.

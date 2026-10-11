@@ -280,7 +280,14 @@ func (f *Schedd) queryHistory(ctx context.Context, c *cedarserver.Conn) error {
 	if source == "JOB_EPOCH" {
 		set = f.epochs
 	}
+	// The schedd scans newest first and stops after ScanLimit records,
+	// whether or not anything matched; the most recently added records
+	// are the newest. AdCount in the closing ad is how many it examined.
+	if scanLimit, ok := req.EvaluateAttrInt("ScanLimit"); ok && scanLimit > 0 && int64(len(set)) > scanLimit {
+		set = set[int64(len(set))-scanLimit:]
+	}
 	ads := matching(set, constraint)
+	scanned := len(set)
 	f.mu.Unlock()
 	for _, ad := range ads {
 		if err := sendAd(ctx, c, ad); err != nil {
@@ -290,6 +297,8 @@ func (f *Schedd) queryHistory(ctx context.Context, c *cedarserver.Conn) error {
 	final := classad.New()
 	final.InsertAttr("Owner", 0)
 	final.InsertAttr("NumMatches", int64(len(ads)))
+	final.InsertAttr("MalformedAds", 0)
+	final.InsertAttr("AdCount", int64(scanned))
 	return sendAd(ctx, c, final)
 }
 

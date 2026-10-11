@@ -371,6 +371,14 @@ const openAPISchema = `{
           "error": {
             "type": "string",
             "description": "Error message if an error occurred during streaming. When present in streaming mode, records up to the error were already sent."
+          },
+          "scan_limit_reached": {
+            "type": "boolean",
+            "description": "Present and true when the schedd stopped at its scan limit before finding as many records as requested: only the records_scanned most recent history records were examined, so older matches are not in the answer, even when it is empty. Raise scan_limit to search further back."
+          },
+          "records_scanned": {
+            "type": "integer",
+            "description": "How many history records the schedd examined; present with scan_limit_reached."
           }
         },
         "description": "History records response. In non-streaming mode, returns a JSON object with 'records' array. In streaming mode (stream_results=true), returns JSON Lines format with one record per line."
