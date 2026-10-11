@@ -244,3 +244,21 @@ describe('BatchTable running view', () => {
     expect(screen.getAllByText('not reported yet').length).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe('BatchTable running and waiting times', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const timed: ClassAd[] = [
+    { ClusterId: 50, ProcId: 0, JobStatus: 2, Owner: 'alice', JobCurrentStartExecutingDate: now - (2 * 3600 + 14 * 60) },
+    { ClusterId: 50, ProcId: 1, JobStatus: 2, Owner: 'alice', JobCurrentStartExecutingDate: now - 5 * 3600 },
+    { ClusterId: 50, ProcId: 2, JobStatus: 1, Owner: 'alice', QDate: now - 3 * 86400, EnteredCurrentStatus: now - (3 * 86400 + 2 * 3600) },
+  ];
+
+  it('shows how long each job has been running or waiting, and the batch\'s longest run', () => {
+    const batches = groupIntoBatches(timed);
+    table({ batches, expanded: new Set(batches.map((b) => b.batchID)) });
+    expect(screen.getByText('longest running 5h')).toBeTruthy();
+    expect(screen.getByTitle('Running for 2h14m')).toBeTruthy();
+    expect(screen.getByTitle('Running for 5h')).toBeTruthy();
+    expect(screen.getByTitle('Waiting for 3d2h')).toBeTruthy();
+  });
+});

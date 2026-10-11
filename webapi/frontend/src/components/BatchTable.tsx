@@ -9,7 +9,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { api, ApiError, type DisplayStatus, type DisplayStatusInfo } from '@/lib/api';
-import { statusPillCls } from '@/app/jobs/[id]/JobDetailClient';
+import { humanDuration, statusPillCls, useNowTick } from '@/app/jobs/[id]/JobDetailClient';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import {
   SortableHeader,
@@ -49,6 +49,7 @@ import {
   type Batch,
   type BatchJob,
   type BatchKey,
+  type JobTiming,
 } from '@/lib/batches';
 
 type BatchSortKey =
@@ -154,6 +155,8 @@ export function BatchTable({
   usage?: RunningUsage;
 }) {
   const queryClient = useQueryClient();
+  // Running and waiting times move on between refreshes of the listing.
+  const now = useNowTick(30_000);
 
   const extras = useMemo(() => {
     const m = new Map<BatchKey, RowExtras>();
@@ -316,6 +319,7 @@ export function BatchTable({
                 pendingJobActive={removeJobMut.isPending}
                 pendingRelease={releaseJobMut.variables}
                 pendingReleaseActive={releaseJobMut.isPending}
+                now={now}
               />
             ))}
             {/* Sentinel + "showing N of M" footer. The sentinel <tr>
@@ -411,6 +415,7 @@ function BatchRow({
   pendingJobActive,
   pendingRelease,
   pendingReleaseActive,
+  now,
 }: {
   batch: Batch;
   extras: RowExtras | undefined;
@@ -431,6 +436,8 @@ function BatchRow({
   pendingJobActive: boolean;
   pendingRelease: string | undefined;
   pendingReleaseActive: boolean;
+  // Unix seconds, for running and waiting times.
+  now: number;
 }) {
   return (
     <>
@@ -481,6 +488,7 @@ function BatchRow({
         )}
         <td className="px-3 py-2">
           <StatusBreakdown counts={batch.statusCounts} />
+          <LongestRunning jobs={batch.jobs} now={now} />
         </td>
         {detail !== 'usage' && (
           <td
@@ -556,6 +564,7 @@ function BatchRow({
               pendingJobActive={pendingJobActive}
               pendingRelease={pendingRelease}
               pendingReleaseActive={pendingReleaseActive}
+              now={now}
             />
           </td>
         </tr>
@@ -632,6 +641,7 @@ function JobsSubTable({
   pendingJobActive,
   pendingRelease,
   pendingReleaseActive,
+  now,
 }: {
   multiAP?: boolean;
   detail: BatchDetail;
@@ -644,6 +654,8 @@ function JobsSubTable({
   pendingJobActive: boolean;
   pendingRelease: string | undefined;
   pendingReleaseActive: boolean;
+  // Unix seconds, for running and waiting times.
+  now: number;
 }) {
   const router = useRouter();
   // Cap each expanded batch at 25 visible jobs initially; the
@@ -721,6 +733,7 @@ function JobsSubTable({
               </td>
               <td className="px-3 py-1.5">
                 <JobStatusPill display={j.display} />
+                {j.timing && <JobTimingText timing={j.timing} now={now} />}
               </td>
               {detail !== 'usage' && (
                 <td
@@ -880,6 +893,42 @@ function formatSubmitted(unix: number): string {
     dateStyle: 'short',
     timeStyle: 'short',
   });
+}
+
+// JobTimingText is how long a job has been in its current state, beside
+// its status: a running job's current run, an idle job's current wait.
+function JobTimingText({ timing, now }: { timing: JobTiming; now: number }) {
+  const d = humanDuration(now - timing.since);
+  return (
+    <span
+      className="ml-1.5 whitespace-nowrap text-[11px] tabular-nums text-gray-500"
+      title={timing.kind === 'running' ? `Running for ${d}` : `Waiting for ${d}`}
+    >
+      {d}
+    </span>
+  );
+}
+
+// LongestRunning is the longest current run among a batch's jobs, under
+// its status pills: the one number that says whether a batch's jobs are
+// minutes or days into their work.
+function LongestRunning({ jobs, now }: { jobs: BatchJob[]; now: number }) {
+  let earliest: number | undefined;
+  for (const j of jobs) {
+    if (j.timing?.kind === 'running' && (earliest === undefined || j.timing.since < earliest)) {
+      earliest = j.timing.since;
+    }
+  }
+  if (earliest === undefined) return null;
+  const d = humanDuration(now - earliest);
+  return (
+    <div
+      className="mt-0.5 whitespace-nowrap text-[11px] tabular-nums text-gray-500"
+      title={`The longest-running job in this batch has been running for ${d}`}
+    >
+      longest running {d}
+    </div>
+  );
 }
 
 // DisclosureCaret rotates 90° when the row is expanded.

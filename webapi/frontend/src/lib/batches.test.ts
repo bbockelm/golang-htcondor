@@ -6,6 +6,7 @@ import {
   batchKey,
   filterAdsByStatus,
   groupIntoBatches,
+  jobTiming,
   statusRank,
   summarizeBatchUsage,
   summarizeJobs,
@@ -492,5 +493,27 @@ describe('adsInBatches', () => {
       { ClusterId: 13, ProcId: 0, JobBatchName: 'drop' },
     ];
     expect(adsInBatches(ads, applyBatchFilter(groupIntoBatches(ads), 'keep'))).toEqual([ads[0]]);
+  });
+});
+
+describe('jobTiming', () => {
+  it('times a running job from when its executable began', () => {
+    expect(
+      jobTiming({ JobStatus: 2, JobCurrentStartDate: 1000, JobCurrentStartExecutingDate: 1060, QDate: 10 }),
+    ).toEqual({ kind: 'running', since: 1060 });
+    // Before the executable starts (input still transferring), from the
+    // start of the run.
+    expect(jobTiming({ JobStatus: 2, JobCurrentStartDate: 1000 })).toEqual({ kind: 'running', since: 1000 });
+  });
+
+  it('times an idle job from when it last became idle, else from submission', () => {
+    // Evicted at 5000: the wait restarts there, not at submission.
+    expect(jobTiming({ JobStatus: 1, QDate: 10, EnteredCurrentStatus: 5000 })).toEqual({ kind: 'waiting', since: 5000 });
+    expect(jobTiming({ JobStatus: 1, QDate: 10 })).toEqual({ kind: 'waiting', since: 10 });
+  });
+
+  it('has nothing to say about other states or a missing time', () => {
+    expect(jobTiming({ JobStatus: 5, EnteredCurrentStatus: 5000 })).toBeUndefined();
+    expect(jobTiming({ JobStatus: 2 })).toBeUndefined();
   });
 });

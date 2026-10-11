@@ -25,7 +25,9 @@ import {
 // are done" has to be worked out from how many there were to begin with.
 export const BATCH_PROJECTION =
   'ClusterId,ProcId,JobStatus,HoldReason,HoldReasonCode,Owner,Cmd,Args,QDate,JobBatchName,DAGManJobId,DAGNodeName,Iwd,RequestCpus,RequestMemory,RequestGpus,' +
-  'TotalSubmitProcs,JobMaterializeNextProcId,DAG_NodesTotal,DAG_NodesDone,DAG_NodesFailed,DAG_NodesQueued';
+  'TotalSubmitProcs,JobMaterializeNextProcId,DAG_NodesTotal,DAG_NodesDone,DAG_NodesFailed,DAG_NodesQueued,' +
+  // How long each job has been running or waiting (see jobTiming).
+  'JobCurrentStartExecutingDate,JobCurrentStartDate,EnteredCurrentStatus';
 
 // Batch is what we render: one batch's worth of jobs aggregated.
 export interface Batch {
@@ -91,6 +93,8 @@ export interface BatchJob {
   // DAG node name, when this job is a node of a DAG workflow.
   nodeName?: string;
   holdReason?: string;
+  // When the job's current run, or current wait, began.
+  timing?: JobTiming;
 }
 
 // The trailing `+<rootDagmanCluster>` HTCondor appends to a DAG's
@@ -197,6 +201,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       submittedUnix: q,
       nodeName: str(j.DAGNodeName),
       holdReason: str(j.HoldReason),
+      timing: jobTiming(j),
     });
   }
 
@@ -465,6 +470,37 @@ function addRequest(into: ResourceTotals, j: ClassAd) {
 // are, and a JSON object's keys are not: the schedd spells DAG_NodesTotal
 // the way DAGMan published it, which need not be the way it is written
 // here.
+// --- How long a job has been in its current state ---
+//
+// For the listings and the job page: how long a running job's current
+// run has been going, and how long an idle job has been waiting.
+
+export interface JobTiming {
+  kind: 'running' | 'waiting';
+  // Unix seconds the state began.
+  since: number;
+}
+
+// jobTiming reads the start of the current state off a job ad.
+//
+// Running counts from when the executable began (after input transfer),
+// falling back to when the job was matched and started its run. Waiting
+// counts from when the job last became idle -- an evicted job goes back
+// to waiting, and its wait starts again -- falling back to submission.
+export function jobTiming(ad: ClassAd): JobTiming | undefined {
+  const status = num(ad.JobStatus);
+  if (status === 2) {
+    const since =
+      num(attr(ad, 'JobCurrentStartExecutingDate')) ?? num(attr(ad, 'JobCurrentStartDate'));
+    return since !== undefined && since > 0 ? { kind: 'running', since } : undefined;
+  }
+  if (status === 1) {
+    const since = num(attr(ad, 'EnteredCurrentStatus')) ?? num(ad.QDate);
+    return since !== undefined && since > 0 ? { kind: 'waiting', since } : undefined;
+  }
+  return undefined;
+}
+
 // --- Cores a job is using ---
 //
 // CpusUsage cannot be trusted while a job runs. On a cgroup v2 execute
