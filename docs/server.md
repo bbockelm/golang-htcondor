@@ -1787,7 +1787,8 @@ Reads come from a federation hub: an htcondordb running with
 `HTCONDORDB_FEDERATE_SCHEDD_CONSTRAINT` that fans every access point's own
 htcondordb (its spoke) into one catalog. See the htcondordb federation
 documentation for running one; give it the same constraint. Actions go to
-the schedd of the access point the job is on, as you.
+the schedd of the access point the job is on, as you. New work goes to the
+access point your [assignment](#ap-assignment) names.
 
 What it serves:
 
@@ -1802,13 +1803,15 @@ What it serves:
 | MCP `remove_job`, `hold_job`, `release_job`, `edit_job`, `get_job_stdout`, `get_job_stderr`, `get_job_output`, `upload_job_input`, `create_input_upload_url`, `create_output_download_url`, `tail_job_output`, `exec_in_job` | As in single-AP mode, against the job's access point. `job_id` must be complete, or bare with `schedd`. |
 | Bulk: `POST /api/v1/jobs/hold`, `.../release`, `DELETE /api/v1/jobs`, `PATCH /api/v1/jobs`, MCP `remove_jobs` | Run on every access point; see below. |
 | `GET /api/v1/share/output`, `PUT /api/v1/share/input` | A share URL acts on the access point it was minted for. |
+| `POST /api/v1/jobs`, MCP `submit_job`, `submit_dag`, `build_container` | Submit, as you, to your home access point, or with `?schedd=` (MCP `schedd`) to one of its alternates; see [AP assignment](#ap-assignment). The answer carries complete job ids. |
+| `/api/v1/creds/user`, `/api/v1/creds/service[/...]`, MCP `list_service_credentials`, `get_credential_status`, `store_service_credential`, `delete_service_credential` | Your home access point's credd, or with `?schedd=` (MCP `schedd`) that of any access point in the set. The response header `X-HTCondor-Access-Point` (MCP: `schedd`) names it. |
+| `GET /api/v1/templates` and the rest of `/api/v1/templates` | Submit templates, from this server's own database. |
 
-Everything else -- submit, DAGs, interactive sessions, Jupyter, apps,
-credentials, watches (including watch share URLs), match analysis, the
-dashboard, the pool pages and chat -- answers **501** ("not available in
-multi-AP mode yet"), and the MCP catalogue offers only the tools above
-plus `whoami`, `get_version`, `doc_*` and `skills_*`. Superuser mode is not
-available.
+Everything else -- interactive sessions, Jupyter, apps, watches (including
+watch share URLs), match analysis, the dashboard, the pool pages and chat
+-- answers **501** ("not available in multi-AP mode yet"), and the MCP
+catalogue offers only the tools above plus `whoami`, `get_version`, `doc_*`
+and `skills_*`. Superuser mode is not available.
 
 **Actions need a complete id.** A mutation, a sandbox read, a share URL or
 an SSH connection naming only `123.0` is a **400** with
@@ -1903,11 +1906,127 @@ point.
 `ssh 123.0@ap1.example.org@gateway.example.org` (OpenSSH splits the user
 from the host at the last `@`). A bare `123.0` is refused with your
 candidates. Interactive-session names (and a bare `ssh gateway`) are
-refused before any login is started, until submit is available here.
+refused before any login is started, until interactive sessions are
+available here.
 
 **Proc-less ids.** `123@ap1.example.org` names a whole cluster for an input
 upload (`PUT .../input`, `POST .../input/multipart`, `.../input/share`), as
 `123` does with one schedd, and is a 400 everywhere else.
+
+### AP assignment
+
+Which access point a user's **new** work goes to is decided by an ordered
+chain of backends, `HTTP_API_AP_ASSIGNMENT`. The first backend to answer
+wins; an unknown backend name refuses to start the server.
+
+```
+HTTP_API_AP_ASSIGNMENT          = mapfile, rest
+HTTP_API_AP_ASSIGNMENT_DEFAULT  = ap01.example.org
+HTTP_API_AP_ASSIGNMENT_MAPFILE  = /etc/condor/ap-assignment.map
+```
+
+An answer names a home access point and, optionally, alternates. A
+submission goes to the home access point; `?schedd=` on `POST
+/api/v1/jobs` (or the `schedd` argument of `submit_job`, `submit_dag` and
+`build_container`) may name the home access point or an alternate, and
+anything else is **403** `"reason": "target_not_allowed"`. Existing jobs
+stay where they are: assignment happens once per submission, the answer
+carries complete job ids, and every later step -- the input upload of a
+two-step submit (`PUT .../input`, `upload_job_input`,
+`create_input_upload_url`) above all -- addresses the job by that id. A
+change to the assignment between the steps does not move the job. DAGMan's
+node jobs land on the DAGMan job's access point.
+
+Backends:
+
+- **`static`** (the default) assigns everyone to
+  `HTTP_API_AP_ASSIGNMENT_DEFAULT`; with no default nobody can submit. It
+  answers for everyone, so it must be last in the chain.
+- **`mapfile`** reads `HTTP_API_AP_ASSIGNMENT_MAPFILE`, in HTCondor mapfile
+  syntax. Each line is a match, a principal, the home access point and
+  optional alternates; the **first** matching line in file order wins:
+
+  ```
+  # match    principal                           schedd            alternates
+  USER       alice@example.org                   ap12.example.org  ap13.example.org
+  GROUP      cms                                 ap20.example.org
+  USER       /@physics\.example\.org$/           ap30.example.org
+  SUBJECT    /^https:\/\/idp\.example\.org\//i   ap31.example.org
+  GROUP      "High Energy Physics"               ap32.example.org
+  *          /.*/                                ap01.example.org
+  ```
+
+  `USER` matches the HTCondor identity (`alice@UID_DOMAIN`); `GROUP` any of
+  the caller's groups as the login recorded them (the web session's groups,
+  or an OAuth2 grant's); `SUBJECT` the principal the caller authenticated
+  to this server as; `*` any of the three. A principal is a literal,
+  compared exactly; a double-quoted literal (which may contain spaces,
+  `\"` and `\\`); or a regular expression in slashes, optionally followed
+  by `i` (ignore case) and `U` (ungreedy) as HTCondor accepts. Inside
+  slashes `\/` is a slash and `\\` one backslash, exactly as HTCondor reads
+  it. An expression is searched for, not anchored: write `^` and `$`. Go's
+  RE2 syntax applies (PCRE's minus backreferences and lookaround). A line
+  or the rest of a line starting with `#` is a comment. `@include` is
+  refused. The file is re-read when it changes (checked every two seconds)
+  and on reconfigure; a file that does not parse refuses to start the
+  server, and an edit that does not parse keeps the last map that did and
+  is logged.
+- **`rest`** asks a site service:
+
+  ```
+  GET {HTTP_API_AP_ASSIGNMENT_REST_URL}/v1/assignment?user=alice%40example.org&subject=...&kind=job&group=cms&group=...
+  Authorization: Bearer <contents of HTTP_API_AP_ASSIGNMENT_REST_TOKEN_FILE>
+
+  200 {"schedd":"ap12.example.org","alternates":["ap13.example.org"],"ttl_seconds":300}
+  404 -> no answer: ask the next backend
+  403 -> this user may not submit
+  ```
+
+  `kind` is `job`, `dag` or `container_build`. Any other status, a body
+  that is not that JSON or is over 64 KiB, or no answer within 2 seconds
+  is an error. The URL must be `https`, except to a loopback address;
+  redirects are not followed. The token file is re-read when it changes.
+
+Behavior common to every backend:
+
+- **Errors do not fall through.** A failing backend never sends anyone to
+  the next backend or the default. The user's last known good answer is
+  used for up to `HTTP_API_AP_ASSIGNMENT_STALE_SECONDS` (default 3600) from
+  when it was obtained; after that, or with none, the answer is **503**
+  `"reason": "assignment_unavailable"`. Each backend has a hard 2-second
+  timeout.
+- **The default** (`HTTP_API_AP_ASSIGNMENT_DEFAULT`) is used only when
+  every backend has no answer. Without one, that user gets **403** "no
+  access point is assigned to you" (`no_access_point_assigned`).
+- **Answers are validated.** A home access point outside the AP set is a
+  **503** (`assignment_invalid`) and an error in the log; an alternate
+  outside the set is dropped and logged. Work is never submitted outside
+  the set. A target that is in the set but not in the collector right now,
+  or untrusted, is a **503** (`target_unavailable`); an alternate still
+  takes work while the home access point is down.
+- **Answers are cached** per user and kind for the answer's TTL (mapfile
+  60 s, rest 300 s unless `ttl_seconds` says otherwise; at most an hour),
+  up to 10000 users. An edited mapfile takes effect on the next
+  submission.
+- **The access point's own verdict** applies as for actions: a user
+  disabled on the target access point is refused there (403
+  `access_point_denied`), and the job is owned by the identity that access
+  point reports for your credential.
+
+`GET /api/v1/aps` reports your `assignment` and marks each access point
+with `submit` (home or alternate) and `home`; `GET /api/v1/auth/me` and
+`GET /api/v1/whoami` carry the same `assignment`, and MCP `whoami` reports
+`home_access_point` and `alternate_access_points`. The web UI's submit page
+says which access point a batch will go to and offers the alternates.
+
+**Credentials follow the access point.** Each access point's schedd names
+its credd (`CredDIpAddr`), and a credential is only useful there. The
+pre-submit credential check (`HTTP_API_REQUIRED_CREDENTIALS` and the
+credd's own check) runs against the target access point's credd, and what
+it finds is cached per credd. Moving a user's home access point does not
+move stored credentials; the first submission to the new one asks for
+them. `HTTP_API_CREDD_ADDRESS` names one credd for one schedd and refuses
+to start a multi-AP server.
 
 **Job ids.** A job is identified by schedd, cluster and proc together: two
 access points each have a `123.0`. Every job in a response carries
@@ -2014,7 +2133,7 @@ Frequently-used knobs:
 | `HTTP_API_MCP_DCR` | Accept dynamic client registration (RFC 7591) at `/mcp/oauth2/register`. Default `true`; set `false` when every client is seeded, operator-provisioned or CIMD. Registrations are then refused with 403 and the endpoint is not advertised. See [MCP OAuth2 clients](#mcp-oauth2-clients). |
 | `HTTP_API_MCP_WATCH_MAX_WAIT` | Cap on how long the MCP `check_watches`/`watch_jobs` tools may block in-call before returning (a duration, e.g. `15s`). This number is advertised to the agent in the tool schema, so it has to be one the whole path can deliver, not just this server. Unset = `45s`, or the value derived from `HTTP_API_MCP_MAX_REQUEST_DURATION` where that is tighter. 45s is not a server limit — the server will hold a request for 14m30s by default — it is what an MCP client is observed to wait for before abandoning the call, which returns *nothing at all* to the agent rather than a timeout it could act on. **Set this lower when a gateway or proxy with a tighter timeout sits in front of this server**; set it higher only when you know the clients reaching this deployment are configured for a longer tool timeout. |
 | `HTTP_API_OAUTH2_REDIRECT_URL` | The redirect URI registered with the identity provider. Unset = derived from the issuer plus this server's callback path, which is `/oauth2/callback` when the web UI is compiled in and `/mcp/oauth2/callback` on an MCP-only build. Both paths are always served, so an authorization started before an upgrade still lands; but the URI the server *sends* must be registered at the IdP, so a build that gains the web UI needs `/oauth2/callback` added there (or this knob set to keep the old one). |
-| `HTTP_API_CREDD_ADDRESS` | Pins the credd this server talks to (a sinful, e.g. `<10.0.0.5:9618?sock=credd>`), overriding discovery. Normally unnecessary: the credd is read from the schedd itself, which publishes its own credd as `CredDIpAddr` in its ad and address file — the same binding `DCSchedd::getCreddAddress` uses. Set this when fronting a remote schedd that does not advertise it, since a credd that is not the submitting schedd's accepts credentials and leaves jobs held anyway. |
+| `HTTP_API_CREDD_ADDRESS` | Single-AP mode only (refused in multi-AP mode, where each access point's schedd names its own). Pins the credd this server talks to (a sinful, e.g. `<10.0.0.5:9618?sock=credd>`), overriding discovery. Normally unnecessary: the credd is read from the schedd itself, which publishes its own credd as `CredDIpAddr` in its ad and address file — the same binding `DCSchedd::getCreddAddress` uses. Set this when fronting a remote schedd that does not advertise it, since a credd that is not the submitting schedd's accepts credentials and leaves jobs held anyway. |
 | `HTTP_API_REQUIRED_CREDENTIALS` | OAuth service credentials that must exist before a job may be submitted (comma- or space-separated, e.g. `scitokens`). Some access points hold every job submitted without them, whatever the job actually uses. Each submit path checks the caller's credentials first and stores a placeholder for any that is missing, so a person using the web UI does not get a held job for a reason unrelated to what they asked for; a real credential obtained later through the OAuth flow replaces the placeholder. Presence is cached per user for 5 minutes. Best effort: if the credd is unavailable or refuses, the submit still proceeds and the reason is logged. Unset = nothing is required. |
 | `HTTP_API_MCP_MAX_REQUEST_DURATION` | Hard stop on an MCP request that is still making progress (a duration, e.g. `5m`). Unset = 15m. While an MCP request runs its write deadline is moved forward, so `HTTP_API_WRITE_TIMEOUT` — which is an absolute deadline meant for ordinary replies — does not decide how long a deliberately waiting tool may wait. A request that stops making progress is still cut off on its last window; this is the backstop for one that never finishes at all. |
 | `HTTP_API_ADVERTISE` | Advertise this API server to the collector (a `HTCondorAPI` ad: endpoint, schedd, mirror health, versions). Default `true`; `daemon.Advertise` is a no-op without `COLLECTOR_HOST`, so this only matters to opt out when a collector is configured. |
@@ -2026,6 +2145,12 @@ Frequently-used knobs:
 | `HTTP_API_MULTI_AP_STALE` | `include` (default) or `exclude` a degraded access point's rows in list reads. Either way it is named in `sources.degraded`. |
 | `HTTP_API_JOB_ID_CODEC` | Text form of a job id in URLs and SSH gateway usernames. Default and only built-in: `at` (`123.0@ap40.example.org`). |
 | `HTTP_API_BULK_FRESH_SECONDS` | Opt in to letting a multi-AP bulk action skip an access point on the hub's word that nothing there matches, when the hub's copy is at most this many seconds behind. Default 0: every access point is contacted. |
+| `HTTP_API_AP_ASSIGNMENT` | Multi-AP mode: ordered chain of [AP assignment](#ap-assignment) backends, `static`, `mapfile` and `rest`, separated by commas or spaces. Default `static`. An unknown name refuses to start. Read at startup. |
+| `HTTP_API_AP_ASSIGNMENT_DEFAULT` | Access point for a user no backend has an answer for, and the one `static` assigns. Unset = such a user cannot submit (403). |
+| `HTTP_API_AP_ASSIGNMENT_MAPFILE` | The `mapfile` backend's file. Re-read when it changes and on reconfigure; one that does not parse at startup refuses to start, and a bad edit keeps the last good map. |
+| `HTTP_API_AP_ASSIGNMENT_REST_URL` | Base URL of the site's assignment service, for the `rest` backend; `/v1/assignment` is appended. `https` unless loopback. |
+| `HTTP_API_AP_ASSIGNMENT_REST_TOKEN_FILE` | File whose contents are sent as `Authorization: Bearer` to the assignment service. Re-read when it changes. Unset = no header. |
+| `HTTP_API_AP_ASSIGNMENT_STALE_SECONDS` | How long a user's last known good assignment is used while a backend is failing. Default 3600; `0` never uses one. |
 | `HTTP_API_DBMIRROR_TOKEN_SUBJECT` | Identity the token this server presents to the mirror asserts. Default `condor@<trust domain>`. Set it when the mirror authorizes a different name. |
 | `HTTP_API_IDENTITY_MAP` | Map the token subject to a local account (`gecos,username`). See [Local identity mapping](#local-identity-mapping). |
 | `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | Account file backing the mapping index. Default `/etc/passwd`. |
