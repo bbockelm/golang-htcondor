@@ -28,6 +28,21 @@ func TestScheddRateLimitKeyPartitionsTheBudget(t *testing.T) {
 		_, _, err := s.QueryWithOptions(ctx, "true", &QueryOptions{Limit: 1})
 		return err != nil && strings.Contains(err.Error(), "rate limit")
 	}
+	// The streaming query takes the same budget.
+	streamLimited := func(s *Schedd) bool {
+		ch, err := s.QueryStreamWithOptions(ctx, "true", &QueryOptions{Limit: 1}, nil)
+		if err == nil {
+			for r := range ch {
+				_ = r // drain: the query fails to dial
+			}
+		}
+		return err != nil && strings.Contains(err.Error(), "rate limit")
+	}
+	s1 := NewSchedd("s1", dead).WithConfig(cfg).WithRateLimitKey("stream1")
+	s2 := NewSchedd("s2", dead).WithConfig(cfg).WithRateLimitKey("stream2")
+	if streamLimited(s1) || !streamLimited(s1) || streamLimited(s2) {
+		t.Error("the streaming query does not keep keyed budgets apart")
+	}
 	if limited(ap1) {
 		t.Fatal("ap1's first query was rate limited")
 	}
