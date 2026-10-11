@@ -259,3 +259,27 @@ func TestReconfigRereadsProjectLeadsFile(t *testing.T) {
 		t.Errorf("leads pattern = %v, want %v", got, want)
 	}
 }
+
+// A reconfigure of a multi-AP server re-reads the access point
+// assignment's files whether or not any knob changed: editing the mapfile
+// is the usual reason to send one.
+func TestReconfigReloadsAPAssignment(t *testing.T) {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "HTTP_API_SCHEDD_CONSTRAINT = regexp(\"^ap\", Name)\nHTTP_API_AP_ASSIGNMENT_MAPFILE = /etc/condor/assign.map\n"
+	target := &fakeTarget{}
+	w := newReconfigWatcher(configFrom(t, body), target, logger)
+	w.reconfigure(configFrom(t, body))
+	if n := len(target.groups["ap_assignment_reload"]); n != 1 {
+		t.Errorf("reconfigure reloaded the assignment %d times, want 1", n)
+	}
+	// Single-AP mode has no assignment to reload.
+	single := &fakeTarget{}
+	w = newReconfigWatcher(configFrom(t, ""), single, logger)
+	w.reconfigure(configFrom(t, ""))
+	if n := len(single.groups["ap_assignment_reload"]); n != 0 {
+		t.Errorf("single-AP reconfigure reloaded the assignment %d times", n)
+	}
+}

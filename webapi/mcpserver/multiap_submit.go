@@ -136,6 +136,11 @@ func (s *Server) multiSubmitTool(ctx context.Context, name, kind string, args ma
 	}
 	result, err := tool(ctx, routed)
 	if err != nil {
+		// The AP may have left the collector or turned untrusted since
+		// it was chosen: that, not the dial failure, is the answer.
+		if _, merr := s.multi.Member(m.Name); merr != nil {
+			return nil, merr
+		}
 		return nil, err
 	}
 	return s.noteSubmitted(result, m.Name, a), nil

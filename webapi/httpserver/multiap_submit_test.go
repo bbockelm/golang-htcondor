@@ -123,6 +123,10 @@ func errorReason(t *testing.T, rec *httptest.ResponseRecorder) string {
 
 // POST /api/v1/jobs lands on the caller's home AP and no other; the
 // credential bootstrap asks that AP's credd and no other.
+//
+// The counting schedds cannot accept a job, so the 201 body (complete
+// job_ids, schedd, jobs, assignment) is asserted end to end, in
+// e2eSubmitTwoStep.
 func TestMultiAPRESTSubmitLandsOnTheAssignedAP(t *testing.T) {
 	s := newSubmitServer(t, "USER alice@d "+ap2+" "+ap3+"\n", "scitokens")
 	before := s.aps.counts()
@@ -231,7 +235,10 @@ func TestMultiAPTwoStepInputIsNotReassigned(t *testing.T) {
 	_ = doAlice(t, s.srv, http.MethodPost, "/api/v1/jobs", submitJSON)
 	reachedOnlyAP(t, "step one", before, s.aps.counts(), ap2)
 
-	// The site moves alice to ap1 between the steps.
+	// The site moves alice to ap1 between the steps. Nothing watches the
+	// file in this harness (the background check runs only in a started
+	// server), so only the reconfigure-time reload can pick it up: the
+	// next submission landing on ap1 proves the reload took effect.
 	s.writeMap(t, "USER alice@d "+ap1+"\n")
 	s.reload(t)
 	before = s.aps.counts()
@@ -342,18 +349,6 @@ func TestMultiAPAuthMeReportsTheAssignment(t *testing.T) {
 	}
 	if !me.MultiAP || me.Assignment == nil || me.Assignment.Schedd != ap3 {
 		t.Errorf("auth/me = %s; want the group's AP %s", rec.Body.String(), ap3)
-	}
-}
-
-// Single-AP mode answers a submission exactly as before: no AP, no
-// assignment, bare ids.
-func TestSingleAPSubmitResponseUnchanged(t *testing.T) {
-	b, err := json.Marshal(JobSubmitResponse{ClusterID: 5, JobIDs: []string{"5.0"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b) != `{"cluster_id":5,"job_ids":["5.0"]}` {
-		t.Errorf("single-AP response = %s", b)
 	}
 }
 

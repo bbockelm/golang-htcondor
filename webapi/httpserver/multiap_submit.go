@@ -135,6 +135,13 @@ func (h *Handler) handleMultiSubmitJob(w http.ResponseWriter, r *http.Request) {
 
 	clusterID, procAds, err := h.submitJob(ctx, req.SubmitFile)
 	if err != nil {
+		// An AP that left the collector or turned untrusted since it was
+		// chosen is refused by scheddFor; say that, not "submission
+		// failed".
+		if _, merr := h.multi.svc.Member(m.Name); merr != nil {
+			h.multiAPError(w, merr)
+			return
+		}
 		h.writeSubmitFailure(ctx, w, err)
 		return
 	}
