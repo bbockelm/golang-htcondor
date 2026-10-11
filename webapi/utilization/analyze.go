@@ -178,7 +178,8 @@ func dagSuffix(batch string) (name string, root int64, ok bool) {
 
 // identify works out which workflow a job belongs to.
 //
-// The key is (owner, name, executable, access point), where name is the
+// The key is (owner, name, program, access point), where program is what
+// the job runs (see Program) and name is the
 // batch name with a DAG run's suffix removed, or the executable when the
 // job has no batch name. Advice is about the next submission, so the unit
 // is what gets resubmitted: the same script submitted daily as a fresh
@@ -186,7 +187,11 @@ func dagSuffix(batch string) (name string, root int64, ok bool) {
 // three, because each node type has its own profile and its own submit
 // file to change.
 func identify(j *Job) (id identity, isDAG bool) {
-	id = identity{exe: executableBase(j.Cmd), owner: j.Owner, schedd: j.Schedd}
+	id = identity{exe: j.Program, owner: j.Owner, schedd: j.Schedd}
+	if id.exe == "" {
+		// A Job built without reading an ad: derive it from Cmd alone.
+		id.exe = Program(j.Cmd, "")
+	}
 	if id.exe == "" {
 		id.exe = "(unknown)"
 	}
@@ -369,8 +374,8 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 			}
 		}
 
-		if j.RequestMemory.OK() {
-			memReq = append(memReq, j.RequestMemory.V())
+		if start := j.startMemory(); start.OK() {
+			memReq = append(memReq, start.V())
 		}
 		if mj, ok := memorySample(j); ok {
 			memJobs = append(memJobs, mj)
@@ -385,8 +390,8 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 				eff = append(eff, c/j.RequestCpus.V())
 			}
 		}
-		if j.RequestDisk.OK() {
-			diskReq = append(diskReq, j.RequestDisk.V())
+		if start := j.startDisk(); start.OK() {
+			diskReq = append(diskReq, start.V())
 		}
 		if j.DiskUsage.OK() {
 			diskUsed = append(diskUsed, j.DiskUsage.V())
@@ -398,6 +403,9 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	w.Memory = MemoryStats{Request: summarizeRequest(memReq), PeakMiB: distribution(peaks)}
 	w.CPU = CPUStats{Request: summarizeRequest(cpuReq), CoresUsed: distribution(cores), Efficiency: distribution(eff)}
 	w.Disk = DiskStats{Request: summarizeRequest(diskReq), UsedKiB: distribution(diskUsed)}
+	markAdaptive(w.Memory.Request, g.jobs, AdaptiveMemory)
+	markAdaptive(w.CPU.Request, g.jobs, AdaptiveCpus)
+	markAdaptive(w.Disk.Request, g.jobs, AdaptiveDisk)
 	w.GPU = gpuStats(g.jobs)
 
 	plan := planMemory(memJobs)
@@ -411,6 +419,35 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	var occ occupancyPair
 	w.Throughput, occ = workflowThroughput(&w, g.jobs, plan, memJobs, opts.Machines)
 	return w, occ
+}
+
+// markAdaptive flags a request summary as adaptive when most of the jobs
+// behind it wrote that request as a formula, and names the formula.
+func markAdaptive(r *Request, jobs []*Job, bit uint8) {
+	if r == nil {
+		return
+	}
+	adaptive, total := 0, 0
+	formulas := map[string]int{}
+	for _, j := range jobs {
+		total++
+		if j.isAdaptive(bit) {
+			adaptive++
+			if bit == AdaptiveMemory && j.MemoryFormula != "" {
+				formulas[j.MemoryFormula]++
+			}
+		}
+	}
+	r.Adaptive = adaptive*2 > total
+	if !r.Adaptive {
+		return
+	}
+	best := 0
+	for f, n := range formulas {
+		if n > best || (n == best && f < r.Expression) {
+			r.Expression, best = f, n
+		}
+	}
 }
 
 // gpuStats summarizes the jobs that requested GPUs; nil when none did.
@@ -462,16 +499,22 @@ func gpuStats(jobs []*Job) *GPUStats {
 // known to be AT LEAST the request it outgrew, and leaving it out would
 // size the next submission from the jobs that happened to fit, which is
 // exactly the mistake that got it stopped.
+//
+// An adaptive request is sized from where it starts: that is the request
+// the user chose, and the one each job's first run held. Its value in
+// force is what a rerun after a hold held (see planMemory).
 func memorySample(j *Job) (memoryJob, bool) {
-	if !j.RequestMemory.OK() {
+	start := j.startMemory()
+	if !start.OK() || !j.RequestMemory.OK() {
 		return memoryJob{}, false
 	}
-	mj := memoryJob{wallHours: hours(j.Wall), request: j.RequestMemory.V()}
+	mj := memoryJob{wallHours: hours(j.Wall), request: start.V(), inForce: j.RequestMemory.V(),
+		adaptive: j.isAdaptive(AdaptiveMemory)}
 	switch {
 	case j.Status == statusCompleted && j.MemoryUsage.OK():
 		mj.peak = j.MemoryUsage.V()
 	case j.Status == statusRemoved && j.ExceededMemory:
-		mj.peak = max(orZero(j.MemoryUsage), j.RequestMemory.V())
+		mj.peak = max(orZero(j.MemoryUsage), start.V())
 		mj.atLeast = true
 	default:
 		return memoryJob{}, false
@@ -535,8 +578,8 @@ func batches(g *group) []BatchPoint {
 		var memReq, peaks, cpuReq, cores, gpuReq, gpuUtil []float64
 		walls := make([]float64, 0, len(jobs))
 		for _, j := range jobs {
-			if j.RequestMemory.OK() {
-				memReq = append(memReq, j.RequestMemory.V())
+			if start := j.startMemory(); start.OK() {
+				memReq = append(memReq, start.V())
 			}
 			if mj, ok := memorySample(j); ok {
 				peaks = append(peaks, mj.peak)

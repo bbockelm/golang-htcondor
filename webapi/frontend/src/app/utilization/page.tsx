@@ -157,7 +157,28 @@ export default function UtilizationPage() {
   const exprError = constraint && error instanceof ApiError && error.status === 400 ? error.message : null;
 
   const shownWorkflows = filterWorkflows(data?.workflows ?? [], url.q);
-  const workflow = workflowKey ? data?.workflows.find((w) => w.key === workflowKey) : undefined;
+  const shownKeys = url.q ? new Set(shownWorkflows.map((w) => w.key)) : undefined;
+
+  // The parameters of the analysis, which the workflow's detail, its job
+  // list and an apply must all repeat to be about the same jobs.
+  const analysis = {
+    days,
+    owned_by_me: ownedByMe,
+    schedd: multiAP && schedd ? schedd : undefined,
+    constraint: constraint || undefined,
+    owners,
+    limit,
+  };
+  // The list carries summaries; a workflow's histograms, advice text and
+  // throughput come from its own endpoint when it is opened.
+  const detail = useQuery({
+    queryKey: ['utilization-workflow', workflowKey, days, ownedByMe, multiAP, schedd, constraint, owners.join(','), limit ?? null],
+    queryFn: () => api.utilizationWorkflow({ w: workflowKey, ...analysis }),
+    enabled: session !== undefined && !!workflowKey,
+    staleTime: 60_000,
+    retry: (n, e) => !(e instanceof ApiError && e.status === 404) && n < 1,
+  });
+  const detailMissing = detail.error instanceof ApiError && detail.error.status === 404;
 
   const addOwner = (o: string) => {
     if (!owners.includes(o)) replace({ owners: [...owners, o] });
@@ -240,22 +261,21 @@ export default function UtilizationPage() {
           {data.jobs_considered === 0 ? (
             <EmptyState days={days} />
           ) : workflowKey ? (
-            workflow ? (
+            detail.data ? (
               <WorkflowDetail
-                workflow={workflow}
+                workflow={detail.data.workflow}
                 days={days}
                 backHref={hrefFor({ w: '' })}
-                // The same parameters as the analysis, so the list is the
-                // jobs the figures above are about.
-                jobsQuery={{
-                  days,
-                  owned_by_me: ownedByMe,
-                  schedd: multiAP && schedd ? schedd : undefined,
-                  constraint: constraint || undefined,
-                  owners,
-                  limit,
-                }}
+                jobsQuery={analysis}
+                waitingJobs={detail.data.waiting_jobs}
+                waitingAdaptive={detail.data.waiting_adaptive}
               />
+            ) : detail.isLoading ? (
+              <p className="text-sm text-gray-400">Loading the workflow…</p>
+            ) : detail.error && !detailMissing ? (
+              <p className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                Could not load the workflow: {detail.error.message}
+              </p>
             ) : (
               <div className="space-y-2">
                 <Link href={hrefFor({ w: '' })} className="text-sm text-brand-700 hover:underline">
@@ -269,7 +289,7 @@ export default function UtilizationPage() {
           ) : (
             <>
               <Headline overall={data.overall} mine={ownedByMe} />
-              <Suggestions workflows={shownWorkflows} hrefFor={workflowHref} />
+              <Suggestions suggestions={data.suggestions} keys={shownKeys} hrefFor={workflowHref} />
               <WorkflowsTable
                 workflows={shownWorkflows}
                 hrefFor={workflowHref}

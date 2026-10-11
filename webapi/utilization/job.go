@@ -65,11 +65,11 @@ const (
 func Projection() []string {
 	return []string{
 		"ClusterId", "ProcId", "Owner", "JobBatchName", "DAGManJobId",
-		"Cmd", "JobUniverse", "QDate", "CompletionDate", "EnteredHistoryTime",
+		"Cmd", "Args", "Arguments", "JobUniverse", "QDate", "CompletionDate", "EnteredHistoryTime",
 		"EnteredCurrentStatus", "JobStartDate", "JobCurrentStartDate",
 		"JobStatus", "ExitCode", "ExitBySignal",
 		"RequestMemory", "RequestCpus", "RequestDisk", "RequestGPUs",
-		"MemoryUsage", "ResidentSetSize", "DiskUsage",
+		"MemoryUsage", "ResidentSetSize", "ResidentSetSize_RAW", "DiskUsage", "DiskUsage_RAW",
 		"RemoteWallClockTime", "RemoteUserCpu", "RemoteSysCpu",
 		"CumulativeRemoteUserCpu", "CumulativeRemoteSysCpu", "CommittedTime",
 		"NumJobStarts", "NumHoldsByReason",
@@ -144,6 +144,20 @@ type Job struct {
 	// ExceededMemory is HeldForMemory, or evicted for memory by a
 	// retry_request_memory policy.
 	ExceededMemory bool
+	// Adaptive marks requests written as formulas over the job's own
+	// usage (see FromAd); one bit per Adaptive* constant.
+	Adaptive uint8
+
+	// Program is what the job runs, for naming its workflow (see Program).
+	// Empty means "derive it from Cmd".
+	Program string
+	// RequestMemoryStart and RequestDiskStart are an adaptive request's
+	// STARTING value; the Request* field is the value in force for the
+	// run that finished. Absent when the request is a plain number.
+	RequestMemoryStart Num
+	RequestDiskStart   Num
+	// MemoryFormula is an adaptive RequestMemory as written.
+	MemoryFormula string
 }
 
 // Num is an optional number: present with a value, or absent. Absent is
@@ -181,6 +195,8 @@ func (r *JobReader) FromAd(ad *classad.ClassAd, schedd string) Job {
 	j.Schedd = r.intern(j.Schedd)
 	j.BatchName = r.intern(j.BatchName)
 	j.Cmd = r.intern(j.Cmd)
+	j.Program = r.intern(j.Program)
+	j.MemoryFormula = r.intern(j.MemoryFormula)
 	return j
 }
 
@@ -217,6 +233,11 @@ func FromAd(ad *classad.ClassAd, schedd string) Job {
 	j.BatchName, _ = ad.EvaluateAttrString("JobBatchName")
 	j.DAGManJobID = intAttr(ad, "DAGManJobId")
 	j.Cmd, _ = ad.EvaluateAttrString("Cmd")
+	args, ok := ad.EvaluateAttrString("Arguments")
+	if !ok {
+		args, _ = ad.EvaluateAttrString("Args")
+	}
+	j.Program = Program(j.Cmd, args)
 	j.Universe = small[int16](intAttr(ad, "JobUniverse"))
 	j.QDate = intAttr(ad, "QDate")
 	// A schedd need not record EnteredHistoryTime (HTCondor 25.8 does
@@ -238,8 +259,23 @@ func FromAd(ad *classad.ClassAd, schedd string) Job {
 	j.RequestCpus = numAttr(ad, "RequestCpus")
 	j.RequestDisk = numAttr(ad, "RequestDisk")
 	j.RequestGPUs = numAttr(ad, "RequestGPUs")
-	j.MemoryUsage = numAttr(ad, "MemoryUsage")
-	j.DiskUsage = numAttr(ad, "DiskUsage")
+	// The peak memory and disk are read from the _RAW attributes when the
+	// job has them. HTCondor rounds ResidentSetSize and DiskUsage UP for
+	// display -- 1,070,200 KiB becomes 1,250,000 -- and keeps the measured
+	// value in *_RAW. Rounded, a workflow's peaks pile up on a few round
+	// numbers, every percentile lands on one of them, and the memory
+	// sizing recommends requests a sixth larger than the jobs needed.
+	if raw := numAttr(ad, "ResidentSetSize_RAW"); raw.OK() {
+		j.MemoryUsage = NumOf(raw.V() / 1024)
+	} else {
+		j.MemoryUsage = numAttr(ad, "MemoryUsage")
+	}
+	if raw := numAttr(ad, "DiskUsage_RAW"); raw.OK() {
+		j.DiskUsage = raw
+	} else {
+		j.DiskUsage = numAttr(ad, "DiskUsage")
+	}
+	j.readAdaptive(ad)
 	if w := numAttr(ad, "RemoteWallClockTime"); w.OK() && w.V() > 0 {
 		j.Wall = w.V()
 	}
@@ -341,6 +377,136 @@ func intAttr(ad *classad.ClassAd, name string) int64 {
 		return 0
 	}
 	return int64(v)
+}
+
+// Adaptive request bits.
+const (
+	AdaptiveMemory uint8 = 1 << iota
+	AdaptiveCpus
+	AdaptiveDisk
+	AdaptiveGPUs
+)
+
+// usageAttrs are the job's own measurements. A request that refers to
+// one is a formula that adapts to what the job used, and before the job
+// has run they are all undefined.
+var usageAttrs = []string{
+	"MemoryUsage", "ResidentSetSize", "ResidentSetSize_RAW", "ProportionalSetSizeKb",
+	"ImageSize", "ImageSize_RAW", "DiskUsage", "DiskUsage_RAW",
+	"CpusUsage", "GPUsUsage", "GPUsMemoryUsage",
+}
+
+// IsAdaptive reports whether an expression refers to the job's usage.
+// A textual test, deliberately: the attribute names are distinctive, and
+// a false positive only means the request is described as a formula.
+func IsAdaptive(expr string) bool {
+	lower := strings.ToLower(expr)
+	for _, a := range usageAttrs {
+		if strings.Contains(lower, strings.ToLower(a)) {
+			return true
+		}
+	}
+	return false
+}
+
+// readAdaptive finds requests written as formulas over the job's usage
+// and records their STARTING value.
+//
+// A request like RequestMemory = ifThenElse(MemoryUsage isnt undefined,
+// max({2048, 3*MemoryUsage/2}), 2048) starts at 2 GB and grows after a
+// memory hold. Evaluated against the finished job it gives 1.5x the
+// peak -- a request nobody made. What the user chose, and what advice
+// should be compared with, is the value before any usage was known:
+// the formula evaluated with every usage attribute undefined. The
+// Request* field keeps the value in force for the run that finished --
+// the start, or the grown value for a job that outgrew it -- which is
+// what the time-weighted "allocated" hours count: that run really did
+// hold that much.
+func (j *Job) readAdaptive(ad *classad.ClassAd) {
+	type req struct {
+		name  string
+		bit   uint8
+		start *Num
+	}
+	var found []req
+	for _, r := range []req{
+		{"RequestMemory", AdaptiveMemory, &j.RequestMemoryStart},
+		{"RequestCpus", AdaptiveCpus, nil},
+		{"RequestDisk", AdaptiveDisk, &j.RequestDiskStart},
+		{"RequestGPUs", AdaptiveGPUs, nil},
+	} {
+		expr, ok := ad.Lookup(r.name)
+		if !ok || expr == nil {
+			continue
+		}
+		text := expr.String()
+		if !IsAdaptive(text) {
+			continue
+		}
+		j.Adaptive |= r.bit
+		if r.bit == AdaptiveMemory {
+			j.MemoryFormula = text
+		}
+		if r.start != nil {
+			found = append(found, r)
+		}
+	}
+	if len(found) == 0 {
+		return
+	}
+	// Evaluate with the usage attributes removed, then put them back: the
+	// ad is the caller's.
+	saved := map[string]*classad.Expr{}
+	for _, a := range usageAttrs {
+		if e, ok := ad.Lookup(a); ok {
+			saved[a] = e
+			ad.Delete(a)
+		}
+	}
+	for _, r := range found {
+		*r.start = numAttr(ad, r.name)
+	}
+	for a, e := range saved {
+		ad.InsertExpr(a, e)
+	}
+	// Evaluated against the finished job, the formula gives what it WOULD
+	// request now -- 1.5x the peak even for a job that never outgrew its
+	// start, which ran its one run at the start. The request in force for
+	// the run that finished is therefore the start, unless the job peaked
+	// above it (and so was held and rerun at the grown value).
+	for _, r := range []struct {
+		bit   uint8
+		start Num
+		used  Num
+		dst   *Num
+	}{
+		{AdaptiveMemory, j.RequestMemoryStart, j.MemoryUsage, &j.RequestMemory},
+		{AdaptiveDisk, j.RequestDiskStart, j.DiskUsage, &j.RequestDisk},
+	} {
+		if j.isAdaptive(r.bit) && r.start.OK() && (!r.used.OK() || r.used.V() <= r.start.V()) {
+			*r.dst = r.start
+		}
+	}
+}
+
+// isAdaptive reports whether bit is set in the job's adaptive requests.
+func (j *Job) isAdaptive(bit uint8) bool { return j.Adaptive&bit != 0 }
+
+// startMemory is the request the job started with: the formula's
+// starting value for an adaptive request, else the request itself.
+func (j *Job) startMemory() Num {
+	if j.isAdaptive(AdaptiveMemory) && j.RequestMemoryStart.OK() {
+		return j.RequestMemoryStart
+	}
+	return j.RequestMemory
+}
+
+// startDisk is startMemory for disk.
+func (j *Job) startDisk() Num {
+	if j.isAdaptive(AdaptiveDisk) && j.RequestDiskStart.OK() {
+		return j.RequestDiskStart
+	}
+	return j.RequestDisk
 }
 
 // small narrows a count or code to a smaller integer, saturating rather

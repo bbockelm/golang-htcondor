@@ -119,6 +119,11 @@ type Request struct {
 	Min      float64 `json:"min"`
 	Max      float64 `json:"max"`
 	Distinct int     `json:"distinct"`
+	// Adaptive says most jobs wrote the request as a formula over their
+	// own usage; Typical, Min and Max are then its STARTING value, and
+	// Expression the most common formula (memory only).
+	Adaptive   bool   `json:"adaptive"`
+	Expression string `json:"expression,omitempty"`
 }
 
 // BatchPoint is one submission: a cluster, or for a DAG the whole run of
@@ -181,12 +186,24 @@ type Advice struct {
 	Submit     []string `json:"submit"`
 	Saves      *Savings `json:"saves"`
 	Confidence string   `json:"confidence"`
+	// Applies says the advice changes a request that can be edited on
+	// jobs still waiting in the queue (POST /api/v1/utilization/apply),
+	// and Change is that edit.
+	Applies bool    `json:"applies"`
+	Change  *Change `json:"change,omitempty"`
 
 	// request is the new request the advice asks for, in the units of
 	// the request named by changes (cores, MiB, KiB, GPUs); zero when it
 	// changes no request.
 	request float64
 	changes string
+}
+
+// Change is the Request* attribute a piece of advice sets, and the
+// value, in the attribute's own units (MiB, cores, KiB, GPUs).
+type Change struct {
+	Attribute string  `json:"attribute"`
+	Value     float64 `json:"value"`
 }
 
 // What a piece of advice changes, for the throughput estimate.

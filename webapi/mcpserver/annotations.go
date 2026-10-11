@@ -104,7 +104,9 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	// access point is doing, so two calls a minute apart legitimately
 	// differ.
 	"analyze_issues": readOnlyAnn(true),
-	"cancel_watch":   readOnlyAnn(false),
+	// analyze_utilization reads finished jobs and the pool's machines.
+	"analyze_utilization": readOnlyAnn(true),
+	"cancel_watch":        readOnlyAnn(false),
 
 	// --- destructive job-control surface (issue #391) ---
 	// submit_job is grouped here per the issue even though it only creates;

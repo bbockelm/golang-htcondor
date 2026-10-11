@@ -73,20 +73,38 @@ func utilizationFixture(t *testing.T) *twoOwnerFixture {
 	return f
 }
 
-func (f *twoOwnerFixture) utilization(t *testing.T, path string, auth func(*http.Request)) utilization.Response {
+func (f *twoOwnerFixture) utilization(t *testing.T, path string, auth func(*http.Request)) utilization.Summary {
 	t.Helper()
 	w := f.do(t, http.MethodGet, path, "", auth)
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET %s: status %d: %s", path, w.Code, w.Body.String())
 	}
-	var resp utilization.Response
+	var resp utilization.Summary
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decoding %s: %v", w.Body.String(), err)
 	}
 	return resp
 }
 
-func workflowExecutables(resp utilization.Response) []string {
+// workflowDetail is GET /api/v1/utilization/workflow for one key.
+func (f *twoOwnerFixture) workflowDetail(t *testing.T, key string, auth func(*http.Request)) (int, utilization.Workflow, *int) {
+	t.Helper()
+	w := f.do(t, http.MethodGet, "/api/v1/utilization/workflow?w="+key, "", auth)
+	if w.Code != http.StatusOK {
+		return w.Code, utilization.Workflow{}, nil
+	}
+	var detail UtilizationWorkflowDetail
+	var wf utilization.Workflow
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decoding %s: %v", w.Body.String(), err)
+	}
+	if err := json.Unmarshal(detail.Workflow, &wf); err != nil {
+		t.Fatalf("decoding the workflow: %v", err)
+	}
+	return w.Code, wf, detail.WaitingJobs
+}
+
+func workflowExecutables(resp utilization.Summary) []string {
 	var out []string
 	for _, w := range resp.Workflows {
 		out = append(out, w.Executable)
@@ -192,7 +210,8 @@ func TestUtilizationEvaluatesMemoryUsage(t *testing.T) {
 	if len(resp.Workflows) != 1 {
 		t.Fatalf("workflows = %v", workflowExecutables(resp))
 	}
-	peaks := resp.Workflows[0].Memory.PeakMiB
+	_, wf, _ := f.workflowDetail(t, resp.Workflows[0].Key, f.bearer(t, "alice"))
+	peaks := wf.Memory.PeakMiB
 	if peaks == nil || peaks.N != 3 || peaks.Max != 1000 {
 		t.Errorf("peaks = %+v, want 3 jobs peaking at 1000 MiB", peaks)
 	}
@@ -206,7 +225,7 @@ func TestUtilizationCacheSurvivesCancelledFirstRequest(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var computes atomic.Int32
-	compute := func(ctx context.Context) (*utilization.Response, error) {
+	compute := func(ctx context.Context) (*utilizationResult, error) {
 		computes.Add(1)
 		close(started)
 		<-release
@@ -215,7 +234,7 @@ func TestUtilizationCacheSurvivesCancelledFirstRequest(t *testing.T) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return &utilization.Response{JobsConsidered: 42}, nil
+		return &utilizationResult{summary: &utilization.Summary{JobsConsidered: 42}}, nil
 	}
 
 	firstCtx, cancelFirst := context.WithCancel(context.Background())
@@ -231,11 +250,11 @@ func TestUtilizationCacheSurvivesCancelledFirstRequest(t *testing.T) {
 		t.Fatalf("the cancelled request's computation failed: %v", err)
 	}
 
-	resp, err := c.get(context.Background(), "k", func(context.Context) (*utilization.Response, error) {
+	resp, err := c.get(context.Background(), "k", func(context.Context) (*utilizationResult, error) {
 		t.Error("recomputed: the first answer was not cached")
 		return nil, errors.New("unexpected")
 	})
-	if err != nil || resp.JobsConsidered != 42 {
+	if err != nil || resp.summary.JobsConsidered != 42 {
 		t.Errorf("second request = %+v, %v; want the cached answer", resp, err)
 	}
 	if computes.Load() != 1 {
@@ -252,10 +271,10 @@ func TestUtilizationCacheSingleFlights(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := c.get(context.Background(), "k", func(context.Context) (*utilization.Response, error) {
+			_, err := c.get(context.Background(), "k", func(context.Context) (*utilizationResult, error) {
 				computes.Add(1)
 				time.Sleep(20 * time.Millisecond)
-				return &utilization.Response{}, nil
+				return &utilizationResult{summary: &utilization.Summary{}}, nil
 			})
 			if err != nil {
 				t.Error(err)
@@ -274,22 +293,22 @@ func TestUtilizationCacheExpiresAndDoesNotCacheErrors(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	c.now = func() time.Time { return now }
 
-	if _, err := c.get(context.Background(), "k", func(context.Context) (*utilization.Response, error) {
+	if _, err := c.get(context.Background(), "k", func(context.Context) (*utilizationResult, error) {
 		return nil, errors.New("schedd unreachable")
 	}); err == nil {
 		t.Fatal("error swallowed")
 	}
-	resp, err := c.get(context.Background(), "k", func(context.Context) (*utilization.Response, error) {
-		return &utilization.Response{JobsConsidered: 1}, nil
+	resp, err := c.get(context.Background(), "k", func(context.Context) (*utilizationResult, error) {
+		return &utilizationResult{summary: &utilization.Summary{JobsConsidered: 1}}, nil
 	})
-	if err != nil || resp.JobsConsidered != 1 {
+	if err != nil || resp.summary.JobsConsidered != 1 {
 		t.Fatalf("after a failure: %+v, %v", resp, err)
 	}
 	now = now.Add(utilizationRefresh + time.Second)
-	resp, _ = c.get(context.Background(), "k", func(context.Context) (*utilization.Response, error) {
-		return &utilization.Response{JobsConsidered: 2}, nil
+	resp, _ = c.get(context.Background(), "k", func(context.Context) (*utilizationResult, error) {
+		return &utilizationResult{summary: &utilization.Summary{JobsConsidered: 2}}, nil
 	})
-	if resp.JobsConsidered != 2 {
+	if resp.summary.JobsConsidered != 2 {
 		t.Errorf("expired answer served: %+v", resp)
 	}
 }
@@ -342,7 +361,7 @@ func TestUtilizationMultiAP(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp utilization.Response
+	var resp utilization.Summary
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +393,7 @@ func TestUtilizationIsDocumented(t *testing.T) {
 	if err := json.Unmarshal([]byte(openAPISchema), &doc); err != nil {
 		t.Fatalf("openapi does not parse: %v", err)
 	}
-	for _, path := range []string{"/utilization", "/utilization/jobs"} {
+	for _, path := range []string{"/utilization", "/utilization/jobs", "/utilization/workflow", "/utilization/apply"} {
 		if _, ok := doc.Paths[path]; !ok {
 			t.Errorf("%s missing from the OpenAPI paths", path)
 		}
@@ -430,7 +449,7 @@ Disk = 100000000`))
 	return f
 }
 
-func workflowByExecutable(t *testing.T, resp utilization.Response, exe string) utilization.Workflow {
+func workflowByExecutable(t *testing.T, resp utilization.Summary, exe string) utilization.WorkflowSummary {
 	t.Helper()
 	for _, w := range resp.Workflows {
 		if w.Executable == exe {
@@ -438,7 +457,7 @@ func workflowByExecutable(t *testing.T, resp utilization.Response, exe string) u
 		}
 	}
 	t.Fatalf("no %s workflow in %v", exe, workflowExecutables(resp))
-	return utilization.Workflow{}
+	return utilization.WorkflowSummary{}
 }
 
 // The estimate reads the pool's machines from the collector: ten
@@ -449,7 +468,12 @@ func TestUtilizationThroughputFromCollector(t *testing.T) {
 	f := throughputFixture(t)
 	carol := f.bearer(t, "carol")
 	resp := f.utilization(t, "/api/v1/utilization", carol)
-	tp := workflowByExecutable(t, resp, "big").Throughput
+	big := workflowByExecutable(t, resp, "big")
+	if big.Gain == nil || *big.Gain != 2 || big.SlotsLimited == nil {
+		t.Errorf("summary gain = %v, slots_limited %v", big.Gain, big.SlotsLimited)
+	}
+	_, wf, _ := f.workflowDetail(t, big.Key, carol)
+	tp := wf.Throughput
 	if tp == nil {
 		t.Fatal("no throughput estimate")
 	}
@@ -472,8 +496,8 @@ func TestUtilizationThroughputWithoutCollector(t *testing.T) {
 	f := throughputFixture(t)
 	f.s.collector = htcondor.NewCollector("127.0.0.1:1")
 	resp := f.utilization(t, "/api/v1/utilization", f.bearer(t, "carol"))
-	if w := workflowByExecutable(t, resp, "big"); w.Throughput != nil || resp.Overall.ThroughputGain != nil {
-		t.Errorf("throughput = %+v, overall %v; want null without a pool", w.Throughput, resp.Overall.ThroughputGain)
+	if w := workflowByExecutable(t, resp, "big"); w.Gain != nil || resp.Overall.ThroughputGain != nil {
+		t.Errorf("gain = %v, overall %v; want null without a pool", w.Gain, resp.Overall.ThroughputGain)
 	}
 	if resp.JobsConsidered != 25 {
 		t.Errorf("jobs = %d", resp.JobsConsidered)
@@ -490,16 +514,16 @@ func TestUtilizationMultiAPHasNoThroughput(t *testing.T) {
 	hub.PutSource(ap1, "fresh", 2)
 	srv := newMultiAPServer(t, multiAPService(t, hub, multiaptest.NewRegistry(ap1)))
 	rec := doAs(t, srv, "alice", http.MethodGet, "/api/v1/utilization")
-	var resp utilization.Response
+	var resp utilization.Summary
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 	w := workflowByExecutable(t, resp, "sim")
-	if a := w.Advice; len(a) == 0 || a[0].Resource != utilization.ResourceMemory || len(a[0].Submit) == 0 {
+	if a := w.Advice; len(a) == 0 || !strings.HasPrefix(a[0].ID, "memory-") {
 		t.Fatalf("advice = %+v; the fixture should change the memory request", a)
 	}
-	if w.Throughput != nil || resp.Overall.ThroughputGain != nil {
-		t.Errorf("throughput = %+v, overall %v; want null in multi-AP mode", w.Throughput, resp.Overall.ThroughputGain)
+	if w.Gain != nil || resp.Overall.ThroughputGain != nil {
+		t.Errorf("gain = %v, overall %v; want null in multi-AP mode", w.Gain, resp.Overall.ThroughputGain)
 	}
 }
 
@@ -800,5 +824,201 @@ func TestJobSetCacheBoundedBySize(t *testing.T) {
 	}
 	if computed["a"] != 1 || computed["c"] != 1 {
 		t.Errorf("computations = %v", computed)
+	}
+}
+
+// queueAd is a job in the queue.
+func queueAd(t *testing.T, cluster, proc int, owner, cmd string, status int, requestMemory string) *classad.ClassAd {
+	t.Helper()
+	ad, err := classad.ParseOld(fmt.Sprintf(`ClusterId = %d
+ProcId = %d
+Owner = %q
+Cmd = %q
+JobUniverse = 5
+JobStatus = %d
+RequestCpus = 1
+RequestDisk = 1048576
+RequestMemory = %s`, cluster, proc, owner, cmd, status, requestMemory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ad
+}
+
+// applyFixture is the throughput fixture -- carol's 25 finished "big"
+// jobs, advised 1 GB of memory and 256 MB of disk -- with a queue: three
+// of the same workflow waiting (one whose memory request is a formula),
+// and jobs that must not be touched: another program, a running one, a
+// held one, and bob's.
+type editCall struct {
+	constraint string
+	attrs      map[string]string
+}
+
+func applyFixture(t *testing.T) (*twoOwnerFixture, *[]editCall) {
+	t.Helper()
+	f := throughputFixture(t)
+	f.schedd.AddJobs(
+		queueAd(t, 900, 0, "carol", "/home/carol/big", 1, "8192"),
+		queueAd(t, 900, 1, "carol", "/home/carol/big", 1, "8192"),
+		queueAd(t, 901, 0, "carol", "/home/carol/big", 1, `ifThenElse(MemoryUsage isnt undefined, 2 * MemoryUsage, 8192)`),
+		queueAd(t, 902, 0, "carol", "/home/carol/other", 1, "8192"),
+		queueAd(t, 903, 0, "carol", "/home/carol/big", 2, "8192"),
+		queueAd(t, 904, 0, "carol", "/home/carol/big", 5, "8192"),
+		queueAd(t, 905, 0, "bob", "/home/carol/big", 1, "8192"),
+	)
+	var calls []editCall
+	f.s.utilizationEditHook = func(_ context.Context, constraint string, attrs map[string]string) (int, error) {
+		calls = append(calls, editCall{constraint, attrs})
+		start := strings.Index(constraint, "member(ProcId, {")
+		if start < 0 {
+			return 0, nil
+		}
+		list, _, _ := strings.Cut(constraint[start+len("member(ProcId, {"):], "}")
+		return len(strings.Split(list, ",")), nil
+	}
+	return f, &calls
+}
+
+func (f *twoOwnerFixture) apply(t *testing.T, body string, auth func(*http.Request)) (int, UtilizationApplyResponse) {
+	t.Helper()
+	w := f.do(t, http.MethodPost, "/api/v1/utilization/apply", body, auth)
+	var resp UtilizationApplyResponse
+	if w.Code == http.StatusOK {
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decoding %s: %v", w.Body.String(), err)
+		}
+	}
+	return w.Code, resp
+}
+
+// The detail carries the full workflow and how many of its jobs wait.
+func TestUtilizationWorkflowDetail(t *testing.T) {
+	f, _ := applyFixture(t)
+	carol := f.bearer(t, "carol")
+	key := workflowByExecutable(t, f.utilization(t, "/api/v1/utilization", carol), "big").Key
+	code, wf, waiting := f.workflowDetail(t, key, carol)
+	if code != http.StatusOK || wf.Key != key || wf.Jobs != 25 || wf.Memory.PeakMiB == nil || len(wf.Samples) != 25 {
+		t.Fatalf("detail: %d %+v", code, wf)
+	}
+	if waiting == nil || *waiting != 3 {
+		t.Errorf("waiting_jobs = %v, want carol's 3 idle jobs of this workflow", waiting)
+	}
+	var applies []string
+	for _, a := range wf.Advice {
+		if a.Applies {
+			applies = append(applies, fmt.Sprintf("%s=%s:%v", a.ID, a.Change.Attribute, a.Change.Value))
+		}
+	}
+	if want := []string{"disk-lower=RequestDisk:262144", "memory-lower=RequestMemory:1024"}; !slices.Equal(sortedCopy(applies), want) {
+		t.Errorf("applicable advice = %v, want %v", applies, want)
+	}
+	if code, _, _ := f.workflowDetail(t, key, f.bearer(t, "bob")); code != http.StatusNotFound {
+		t.Errorf("bob reading carol's workflow: %d, want 404", code)
+	}
+	if code, _, _ := f.workflowDetail(t, "nosuchkey000", carol); code != http.StatusNotFound {
+		t.Errorf("unknown key: %d", code)
+	}
+}
+
+func sortedCopy(s []string) []string {
+	out := slices.Clone(s)
+	slices.Sort(out)
+	return out
+}
+
+// Applying edits only carol's idle jobs of this workflow, only their
+// Request* attributes, to the values in the server's own advice; a
+// formula request is left as written.
+func TestUtilizationApply(t *testing.T) {
+	f, calls := applyFixture(t)
+	carol := f.bearer(t, "carol")
+	key := workflowByExecutable(t, f.utilization(t, "/api/v1/utilization", carol), "big").Key
+
+	// The body names advice, not values; a value in it is ignored.
+	code, resp := f.apply(t, `{"w":"`+key+`","advice":["memory-lower","disk-lower"],"RequestMemory":1}`, carol)
+	if code != http.StatusOK {
+		t.Fatalf("apply: %d", code)
+	}
+	if resp.Edited != 3 || resp.Set["RequestMemory"] != 1024 || resp.Set["RequestDisk"] != 262144 {
+		t.Errorf("response = %+v", resp)
+	}
+	if len(resp.Skipped) != 1 || resp.Skipped[0].Job != "901.0" || !strings.Contains(resp.Skipped[0].Reason, "RequestMemory") {
+		t.Errorf("skipped = %+v, want 901.0 for its formula memory request", resp.Skipped)
+	}
+	edited := map[string]map[string]string{}
+	for _, c := range *calls {
+		if !strings.Contains(c.constraint, "JobStatus == 1") || !strings.Contains(c.constraint, `Owner == "carol"`) {
+			t.Errorf("edit not confined to carol's idle jobs: %s", c.constraint)
+		}
+		for name := range c.attrs {
+			if !strings.HasPrefix(name, "Request") {
+				t.Errorf("edited %s", name)
+			}
+		}
+		edited[c.constraint] = c.attrs
+	}
+	var procs []string
+	for c, attrs := range edited {
+		switch {
+		case strings.Contains(c, "ClusterId == 900") && strings.Contains(c, "{0, 1}"):
+			if attrs["RequestMemory"] != "1024" || attrs["RequestDisk"] != "262144" {
+				t.Errorf("900: %v", attrs)
+			}
+			procs = append(procs, "900.0", "900.1")
+		case strings.Contains(c, "ClusterId == 901"):
+			if _, ok := attrs["RequestMemory"]; ok || attrs["RequestDisk"] != "262144" {
+				t.Errorf("901 (formula memory): %v", attrs)
+			}
+			procs = append(procs, "901.0")
+		default:
+			t.Errorf("unexpected edit %s %v", c, attrs)
+		}
+	}
+	if len(procs) != 3 {
+		t.Errorf("edited %v", procs)
+	}
+
+	// Advice that is not this workflow's is refused before anything is
+	// read; bob cannot reach carol's workflow at all.
+	if code, _ := f.apply(t, `{"w":"`+key+`","advice":["cpus-lower"]}`, carol); code != http.StatusBadRequest {
+		t.Errorf("advice not given: %d", code)
+	}
+	if code, _ := f.apply(t, `{"w":"`+key+`","advice":["memory-lower"],"owned_by_me":false}`, f.bearer(t, "bob")); code != http.StatusNotFound {
+		t.Errorf("bob applying to carol's workflow: %d, want 404", code)
+	}
+	if code, _ := f.apply(t, `{"advice":["memory-lower"]}`, carol); code != http.StatusBadRequest {
+		t.Errorf("missing w: %d", code)
+	}
+}
+
+// The detail names the requests every waiting job writes as a formula --
+// the ones apply would leave alone -- and nothing when only some do.
+func TestUtilizationWaitingAdaptive(t *testing.T) {
+	f := utilizationFixture(t)
+	formula := `ifThenElse(MemoryUsage isnt undefined, 2 * MemoryUsage, 2048)`
+	f.schedd.AddJobs(
+		queueAd(t, 950, 0, "alice", "/home/alice/alice_sim", 1, formula),
+		queueAd(t, 950, 1, "alice", "/home/alice/alice_sim", 1, formula),
+	)
+	alice := f.bearer(t, "alice")
+	key := f.utilization(t, "/api/v1/utilization", alice).Workflows[0].Key
+	w := f.do(t, http.MethodGet, "/api/v1/utilization/workflow?w="+key, "", alice)
+	var detail UtilizationWorkflowDetail
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", w.Code, w.Body.String())
+	}
+	if detail.WaitingJobs == nil || *detail.WaitingJobs != 2 || !slices.Equal(detail.WaitingAdaptive, []string{"memory"}) {
+		t.Errorf("waiting = %v, adaptive %v; want 2 and [memory]", detail.WaitingJobs, detail.WaitingAdaptive)
+	}
+
+	// carol's three waiting jobs: one formula, two plain -- not all.
+	g, _ := applyFixture(t)
+	carol := g.bearer(t, "carol")
+	ckey := workflowByExecutable(t, g.utilization(t, "/api/v1/utilization", carol), "big").Key
+	w = g.do(t, http.MethodGet, "/api/v1/utilization/workflow?w="+ckey, "", carol)
+	detail = UtilizationWorkflowDetail{}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil || detail.WaitingAdaptive != nil {
+		t.Errorf("carol: waiting_adaptive = %v, want omitted", detail.WaitingAdaptive)
 	}
 }

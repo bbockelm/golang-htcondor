@@ -389,6 +389,8 @@ func (s *Handler) buildChatTools() []chat.Tool {
 		s.toolEditJobAttribute(),
 		// Universal (read-only pool data; no page tag).
 		s.toolQuerySlots(),
+		// Universal: the user's own finished jobs, analysed.
+		s.toolAnalyzeUtilization(),
 	}
 	// Doc lookup tools are read-only reference search; only useful when
 	// the docs were compiled into the binary (`-tags embed_condor_docs`).

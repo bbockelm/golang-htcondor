@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { UtilAdvice, UtilMemoryCurvePoint, UtilThroughput, UtilWorkflow } from '@/lib/utilization';
-import { utilizationFixture } from '@/lib/utilization.fixture';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { UtilAdvice, UtilMemoryCurvePoint, UtilSuggestion, UtilThroughput, UtilWorkflow } from '@/lib/utilization';
+import { fullWorkflows, utilizationFixture } from '@/lib/utilization.fixture';
 import {
   AdviceCard,
   EmptyState,
@@ -40,7 +40,7 @@ function advice(over: Partial<UtilAdvice>): UtilAdvice {
 }
 
 function workflow(over: Partial<UtilWorkflow>): UtilWorkflow {
-  return { ...utilizationFixture.workflows[0], ...over };
+  return { ...fullWorkflows[0], ...over };
 }
 
 describe('ResourceCard', () => {
@@ -105,44 +105,49 @@ describe('states', () => {
 });
 
 describe('Suggestions', () => {
-  it('leads with warnings, then savings, and links each to its workflow', () => {
+  const sug = (over: Partial<UtilSuggestion>): UtilSuggestion => ({
+    key: 'a',
+    name: 'alpha',
+    executable: 'a.sh',
+    id: 'memory-lower',
+    resource: 'memory',
+    severity: 'suggest',
+    title: 'Request 2 GB of memory',
+    saves: { unit: 'gib_hours', amount: 900 },
+    confidence: 'high',
+    ...over,
+  });
+
+  it("keeps the server's order and links each to its workflow", () => {
     render(
       <Suggestions
         hrefFor={hrefFor}
-        workflows={[
-          workflow({
-            key: 'a',
-            name: 'alpha',
-            advice: [
-              advice({ id: 'cpus-lower', title: 'Small saving', saves: { unit: 'core_hours', amount: 5 } }),
-              advice({ id: 'memory-ok', title: 'Just a note', severity: 'info' }),
-            ],
-          }),
-          workflow({
-            key: 'b',
-            name: 'beta',
-            advice: [
-              advice({ id: 'memory-raise', title: 'Raise memory', severity: 'warn', saves: null }),
-              advice({ id: 'memory-lower', title: 'Big saving', saves: { unit: 'gib_hours', amount: 900 } }),
-            ],
-          }),
-        ]}
+        suggestions={[sug({ key: 'b', name: 'beta', title: 'Raise memory', severity: 'warn' }), sug({ title: 'Big saving' })]}
       />,
     );
     const titles = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
-    expect(titles).toEqual(['Raise memory', 'Big saving', 'Small saving']);
+    expect(titles).toEqual(['Raise memory', 'Big saving']);
     const first = screen.getAllByTestId('advice')[0];
     expect(within(first).getByRole('link', { name: 'beta' })).toHaveAttribute('href', '/utilization?w=b');
   });
 
   it('shows five and offers the rest', () => {
-    const many = Array.from({ length: 7 }, (_, i) =>
-      advice({ id: `a${i}`, title: `Advice ${i}`, saves: { unit: 'core_hours', amount: 100 - i } }),
-    );
-    render(<Suggestions hrefFor={hrefFor} workflows={[workflow({ advice: many })]} />);
+    const many = Array.from({ length: 7 }, (_, i) => sug({ id: `a${i}`, title: `Advice ${i}` }));
+    render(<Suggestions hrefFor={hrefFor} suggestions={many} />);
     expect(screen.getAllByTestId('advice')).toHaveLength(5);
     fireEvent.click(screen.getByRole('button', { name: 'Show all 7 suggestions' }));
     expect(screen.getAllByTestId('advice')).toHaveLength(7);
+  });
+
+  it('follows the text filter to the workflows it leaves', () => {
+    render(
+      <Suggestions
+        hrefFor={hrefFor}
+        keys={new Set(['b'])}
+        suggestions={[sug({ key: 'a', title: 'For alpha' }), sug({ key: 'b', name: 'beta', title: 'For beta' })]}
+      />,
+    );
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['For beta']);
   });
 });
 
@@ -263,7 +268,7 @@ describe('WorkflowsTable', () => {
 
 describe('WorkflowDetail', () => {
   it('renders every panel for a full workflow', () => {
-    const w = utilizationFixture.workflows.find((x) => x.key === 'wf-train')!;
+    const w = fullWorkflows.find((x) => x.key === 'wf-train')!;
     render(<WorkflowDetail workflow={w} days={7} backHref="/utilization" />);
     for (const title of [
       'Peak memory per job',
@@ -279,7 +284,7 @@ describe('WorkflowDetail', () => {
   });
 
   it('explains a missing curve rather than drawing an empty one', () => {
-    const w = utilizationFixture.workflows.find((x) => x.key === 'wf-post')!;
+    const w = fullWorkflows.find((x) => x.key === 'wf-post')!;
     render(<WorkflowDetail workflow={w} days={7} backHref="/utilization" />);
     expect(screen.getByText('Too few jobs to weigh one memory request against another.')).toBeInTheDocument();
   });
@@ -377,11 +382,13 @@ describe('throughput', () => {
   });
 
   it('sorts the workflows table by throughput, blanks last', () => {
+    const base = utilizationFixture.workflows[0];
     const ws = [
-      workflow({ key: 'a', name: 'alpha', throughput: { ...t, gain: 1.5 } }),
-      workflow({ key: 'b', name: 'beta', throughput: null }),
-      workflow({ key: 'c', name: 'gamma', throughput: { ...t, gain: 3.2 } }),
-      workflow({ key: 'd', name: 'delta', throughput: { ...t, gain: 4, slots_limited: false } }),
+      { ...base, key: 'a', name: 'alpha', gain: 1.5, slots_limited: true },
+      { ...base, key: 'b', name: 'beta', gain: undefined, slots_limited: undefined },
+      { ...base, key: 'c', name: 'gamma', gain: 3.2, slots_limited: true },
+      // Jobs that started promptly: no multiplier, whatever the estimate.
+      { ...base, key: 'd', name: 'delta', gain: 4, slots_limited: false },
     ];
     render(<WorkflowsTable workflows={ws} hrefFor={hrefFor} onOpen={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: /Throughput/ }));
@@ -411,7 +418,7 @@ describe('GPUs', () => {
   });
 
   it('leads a GPU workflow with utilization, GPU memory against the device, and the feeding check', () => {
-    const w = utilizationFixture.workflows.find((x) => x.key === 'wf-train')!;
+    const w = fullWorkflows.find((x) => x.key === 'wf-train')!;
     render(<WorkflowDetail workflow={w} days={7} backHref="/utilization" />);
     const sections = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
     // After the advice, GPUs come before memory.
@@ -434,22 +441,6 @@ describe('GPUs', () => {
     expect(screen.getByText('GPU utilization was not measured for these 12 jobs.')).toBeInTheDocument();
   });
 
-  it('ranks a GPU-hour saving above a bigger core-hour one', () => {
-    render(
-      <Suggestions
-        hrefFor={hrefFor}
-        workflows={[
-          workflow({
-            advice: [
-              advice({ id: 'cpus-lower', title: 'Cores', saves: { unit: 'core_hours', amount: 5000 } }),
-              advice({ id: 'gpus-lower', resource: 'gpu', title: 'GPUs', saves: { unit: 'gpu_hours', amount: 40 } }),
-            ],
-          }),
-        ]}
-      />,
-    );
-    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['GPUs', 'Cores']);
-  });
 });
 
 describe('more jobs', () => {
@@ -544,5 +535,64 @@ describe('single-job workflows', () => {
       .filter(Boolean);
     const singles = names.filter((n) => ['check-env', 'debug-run', 'probe-node'].includes(n!));
     expect(singles).toEqual(['check-env', 'debug-run', 'probe-node']);
+  });
+});
+
+describe('requests that grow', () => {
+  const assemble = fullWorkflows.find((x) => x.key === 'wf-assemble')!;
+
+  it('say where they start and that they grow, in the list', () => {
+    render(<WorkflowsTable workflows={utilizationFixture.workflows} hrefFor={hrefFor} onOpen={() => {}} />);
+    const row = screen.getByRole('row', { name: /^genome-assembly/ });
+    const meters = within(row).getAllByTestId('fit-meter');
+    // CPU, memory, disk: memory is the formula.
+    expect(meters[1]).toHaveTextContent('of 2 GB+');
+    expect(within(meters[1]).getByRole('img')).toHaveAccessibleName(/the request starts at 2 GB and grows/);
+    expect(meters[0]).not.toHaveTextContent('+');
+  });
+
+  it("say so on the workflow's charts", () => {
+    render(<WorkflowDetail workflow={assemble} days={7} backHref="/utilization" />);
+    // The histogram's marker and the scatter's legend both.
+    expect(screen.getAllByText('requested 2 GB, grows')).toHaveLength(2);
+    // And the advice about memory says what the request is today.
+    expect(screen.getByText('The memory request today starts at 2 GB, grows after a memory hold.')).toBeInTheDocument();
+    expect(
+      screen.getByText('The memory request starts at 2 GB, grows after a memory hold; the line is where it starts.'),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('on a phone', () => {
+  // jsdom has no matchMedia: give it one that says the screen is narrow.
+  beforeEach(() => {
+    vi.stubGlobal('matchMedia', (q: string) => ({
+      matches: q.includes('max-width'),
+      media: q,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('lists workflows as cards with their facts and meters, not a wide table', () => {
+    render(<WorkflowsTable workflows={utilizationFixture.workflows} hrefFor={hrefFor} onOpen={() => {}} />);
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+    const cards = screen.getAllByTestId('workflow-card');
+    const blast = cards.find((c) => c.textContent?.includes('blast-search'))!;
+    expect(blast).toHaveTextContent('1,204 jobs');
+    expect(blast).toHaveTextContent('882 h');
+    expect(within(blast).getAllByTestId('fit-meter')).toHaveLength(3);
+    expect(blast).toHaveTextContent('2 suggestions');
+    // The single-job group is a card too, and the order is picked from a list.
+    expect(screen.getByTestId('singles-group')).toHaveTextContent('3 single-job workflows');
+    expect(screen.getByRole('combobox', { name: /Sort by/ })).toHaveValue('wall');
+  });
+
+  it('opens a workflow from its card', () => {
+    const onOpen = vi.fn();
+    render(<WorkflowsTable workflows={utilizationFixture.workflows} hrefFor={hrefFor} onOpen={onOpen} />);
+    fireEvent.click(screen.getByRole('link', { name: 'blast-search' }));
+    expect(onOpen).toHaveBeenCalledWith('wf-blast');
   });
 });

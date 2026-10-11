@@ -31,6 +31,10 @@ manager, a job history database, site skills, embedded documentation).
 ## Diagnosis
 - analyze_issues -- what is going wrong on this access point, grouped.
 - analyze_job_match -- why a job is or is not matching slots.
+- analyze_utilization -- how well finished jobs used the CPU, memory, disk
+  and GPUs they requested, and what to request next time: the submit lines
+  to change, what that would save, and how many more jobs could run at once.
+  Pass workflow for one workflow's percentiles.
 - query_job_epochs -- retry history for jobs that ran more than once.
 
 ## The pool

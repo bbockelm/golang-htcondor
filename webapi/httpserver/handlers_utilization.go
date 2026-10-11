@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -85,7 +86,12 @@ type utilizationQuery struct {
 // parseUtilizationQuery reads and validates the parameters. An error is
 // the caller's to fix and becomes a 400 with its text.
 func (s *Handler) parseUtilizationQuery(r *http.Request) (utilizationQuery, error) {
-	q := r.URL.Query()
+	return s.parseUtilizationValues(r.URL.Query())
+}
+
+// parseUtilizationValues is parseUtilizationQuery over any set of values,
+// for a POST body that carries the same parameters.
+func (s *Handler) parseUtilizationValues(q url.Values) (utilizationQuery, error) {
 	uq := utilizationQuery{days: 7, ownedByMe: true, limit: utilizationDefaultLimit, accessPoint: q.Get("schedd")}
 	if v := q.Get("days"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -197,42 +203,90 @@ func (s *Handler) handleUtilization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.multi != nil {
-		s.handleMultiUtilization(w, r, uq)
+	c, ok := s.utilizationCall(w, r, uq)
+	if !ok {
 		return
 	}
+	res, err := s.utilizationAnalysis(c, uq)
+	if err != nil {
+		s.writeUtilizationAnalysisError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, res.summary)
+}
 
+// utilizationCaller is who is asking, settled once per request: the
+// scope their jobs are read in and the analysis cache key for it.
+type utilizationCaller struct {
+	ctx context.Context
+	// scope is the owner-scope constraint (single-AP mode); user is the
+	// caller's User (multi-AP mode).
+	scope, user string
+	mirror      bool
+	showOwner   bool
+	// key is the analysis cache key: the scope, the query and whether
+	// the mirror may answer.
+	key string
+}
+
+// utilizationCall authenticates and scopes a request, writing the error
+// when it fails. Every utilization endpoint goes through it, so they
+// cannot disagree on whose jobs a request sees.
+func (s *Handler) utilizationCall(w http.ResponseWriter, r *http.Request, uq utilizationQuery) (*utilizationCaller, bool) {
+	if s.multi != nil {
+		// The hub confines every read to the caller's User; the owner
+		// list and constraint narrow within that.
+		ctx, user, ok := s.multiAPCaller(w, r)
+		if !ok {
+			return nil, false
+		}
+		return &utilizationCaller{ctx: ctx, user: user, key: uq.key("multi|"+user, false)}, true
+	}
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
 			s.redirectToLogin(w, r)
-			return
+			return nil, false
 		}
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
-		return
+		return nil, false
 	}
-
 	scope, showOwner, status, err := s.utilizationScope(ctx, r, uq.ownedByMe)
 	if err != nil {
 		s.writeError(w, status, err.Error())
-		return
+		return nil, false
 	}
-
 	// Whether the mirror may answer is part of the key: an answer read
 	// out of the mirror must not be handed to a caller who may not read
 	// it there. The scope constraint names whose jobs these are, so two
 	// people never share an entry and two administrators asking for
 	// everyone do.
 	mirror := s.mirrorAllowed(ctx, r) == nil
-	resp, err := s.utilizationResults().getWithin(ctx, uq.key(scope, mirror), utilizationComputeTimeout(uq.limit),
-		func(computeCtx context.Context) (*utilization.Response, error) {
-			return s.computeUtilization(computeCtx, uq, uq.narrow(scope), showOwner, mirror)
+	return &utilizationCaller{ctx: ctx, scope: scope, mirror: mirror, showOwner: showOwner, key: uq.key(scope, mirror)}, true
+}
+
+// utilizationAnalysis is the caller's analysis, from the cache or
+// computed.
+func (s *Handler) utilizationAnalysis(c *utilizationCaller, uq utilizationQuery) (*utilizationResult, error) {
+	return s.utilizationResults().getWithin(c.ctx, c.key, utilizationComputeTimeout(uq.limit),
+		func(computeCtx context.Context) (*utilizationResult, error) {
+			resp, err := s.computeUtilization(computeCtx, c, uq)
+			if err != nil {
+				return nil, err
+			}
+			return newUtilizationResult(resp)
 		})
-	if err != nil {
-		s.writeUtilizationError(w, err)
+}
+
+// writeUtilizationAnalysisError reports a failed analysis, with the
+// federation hub's own status in multi-AP mode.
+func (s *Handler) writeUtilizationAnalysisError(w http.ResponseWriter, err error) {
+	var hubErr *multiap.Error
+	if errors.As(err, &hubErr) {
+		s.multiAPError(w, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, resp)
+	s.writeUtilizationError(w, err)
 }
 
 // utilizationScope is the constraint that confines the analysis to what
@@ -268,22 +322,34 @@ func (s *Handler) utilizationScope(ctx context.Context, r *http.Request, ownedBy
 
 // computeUtilization reads the window's finished jobs and analyses them.
 //
-// selection is the scope narrowed by the caller's owners and constraint;
-// the window is added per backend (see utilizationJobs).
-func (s *Handler) computeUtilization(ctx context.Context, uq utilizationQuery, selection string, showOwner, mirror bool) (*utilization.Response, error) {
+// The scope is narrowed by the caller's owners and constraint; the window
+// is added per backend (see utilizationJobs). There is no pool to measure
+// in multi-AP mode, so no throughput estimate either.
+func (s *Handler) computeUtilization(ctx context.Context, c *utilizationCaller, uq utilizationQuery) (*utilization.Response, error) {
 	now := time.Now().Unix()
 	since := now - int64(uq.days)*24*3600
 
 	start := time.Now()
-	jobs, truncated, source, err := s.utilizationJobs(ctx, selection, since, uq.limit, mirror)
+	var jobs []utilization.Job
+	var truncated bool
+	var source string
+	var err error
+	var machines []utilization.Machine
+	if s.multi != nil {
+		source = "hub"
+		jobs, truncated, err = s.multiUtilizationJobs(ctx, c.user, uq.narrow("true"), uq.accessPoint, since, uq.limit)
+	} else {
+		jobs, truncated, source, err = s.utilizationJobs(ctx, uq.narrow(c.scope), since, uq.limit, c.mirror)
+		machines = s.utilizationMachines(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
 	readTime := time.Since(start)
 	resp := utilization.Analyze(jobs, utilization.Options{
-		Since: since, Until: now, Days: uq.days, Truncated: truncated, ShowOwner: showOwner,
+		Since: since, Until: now, Days: uq.days, Truncated: truncated, ShowOwner: c.showOwner,
 		Limit: uq.limit, MaxLimit: s.utilizationMaxLimit(),
-		Machines: s.utilizationMachines(ctx),
+		Machines: machines,
 	})
 	s.logger.Info(logging.DestinationHTTP, "utilization analysed",
 		"source", source, "jobs", len(jobs), "truncated", truncated, "days", uq.days,
@@ -439,42 +505,6 @@ func (s *Handler) utilizationFromSchedd(ctx context.Context, constraint string, 
 	return jobs, truncated, nil
 }
 
-// handleMultiUtilization serves GET /api/v1/utilization in multi-AP mode:
-// the caller's own finished jobs on every AP (or the one named by
-// schedd), from the federation hub. Multi-AP reads are always the
-// caller's own, so owned_by_me has nothing to widen.
-func (s *Handler) handleMultiUtilization(w http.ResponseWriter, r *http.Request, uq utilizationQuery) {
-	ctx, user, ok := s.multiAPCaller(w, r)
-	if !ok {
-		return
-	}
-	// The hub confines every read to the caller's User; the owner list
-	// and constraint narrow within that.
-	resp, err := s.utilizationResults().getWithin(ctx, uq.key("multi|"+user, false), utilizationComputeTimeout(uq.limit),
-		func(computeCtx context.Context) (*utilization.Response, error) {
-			now := time.Now().Unix()
-			since := now - int64(uq.days)*24*3600
-			jobs, truncated, err := s.multiUtilizationJobs(computeCtx, user, uq.narrow("true"), uq.accessPoint, since, uq.limit)
-			if err != nil {
-				return nil, err
-			}
-			return utilization.Analyze(jobs, utilization.Options{
-				Since: since, Until: now, Days: uq.days, Truncated: truncated,
-				Limit: uq.limit, MaxLimit: s.utilizationMaxLimit(),
-			}), nil
-		})
-	if err != nil {
-		var hubErr *multiap.Error
-		if errors.As(err, &hubErr) {
-			s.multiAPError(w, err)
-			return
-		}
-		s.writeUtilizationError(w, err)
-		return
-	}
-	s.writeJSON(w, http.StatusOK, resp)
-}
-
 // multiUtilizationJobs pages through the hub's history for one user.
 func (s *Handler) multiUtilizationJobs(ctx context.Context, user, selection, schedd string, since int64, limit int) ([]utilization.Job, bool, error) {
 	var jobs []utilization.Job
@@ -571,10 +601,21 @@ func newSharedCache[T any](ttl, timeout time.Duration) *sharedCache[T] {
 }
 
 // utilizationCache holds analyses.
-type utilizationCache = sharedCache[*utilization.Response]
+type utilizationCache = sharedCache[*utilizationResult]
+
+// utilizationCacheBytes bounds the analysis cache by what its answers
+// take: the compact list plus every workflow's compressed detail. A
+// million-job analysis is about 5 MB of list and 45 MB of compressed
+// detail (BenchmarkResponseSize), so this holds about ten of the largest
+// and hundreds of ordinary ones. An answer larger than the whole bound is
+// served without being kept.
+const utilizationCacheBytes = 512 << 20
 
 func newUtilizationCache() *utilizationCache {
-	return newSharedCache[*utilization.Response](utilizationRefresh, utilizationComputeTimeout(utilizationDefaultLimit))
+	c := newSharedCache[*utilizationResult](utilizationRefresh, utilizationComputeTimeout(utilizationDefaultLimit))
+	c.sizeOf = func(r *utilizationResult) int { return r.size }
+	c.maxSize = utilizationCacheBytes
+	return c
 }
 
 // get returns the value for key, computing it if there is no fresh one.
