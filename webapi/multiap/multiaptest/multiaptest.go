@@ -141,14 +141,20 @@ func (d *DB) PutHistory(schedd, user string, cluster, proc int, entered int64) {
 	}
 }
 
-// PutSource writes a federation_sources row. staleness < 0 leaves
-// StalenessSeconds unset.
+// PutSource writes a federation_sources row with its jobs stream
+// connected. staleness < 0 leaves StalenessSeconds unset.
 func (d *DB) PutSource(schedd, state string, staleness int64) {
 	d.t.Helper()
-	ad := fmt.Sprintf("ScheddName = %q\nState = %q\nLastSeen = %d", schedd, state, time.Now().Unix())
+	ad := fmt.Sprintf("ScheddName = %q\nState = %q\nLastSeen = %d\nJobsConnected = true", schedd, state, time.Now().Unix())
 	if staleness >= 0 {
 		ad += fmt.Sprintf("\nStalenessSeconds = %d", staleness)
 	}
+	d.commit(TableSources, schedd, ad)
+}
+
+// PutSourceAd writes a federation_sources row verbatim.
+func (d *DB) PutSourceAd(schedd, ad string) {
+	d.t.Helper()
 	d.commit(TableSources, schedd, ad)
 }
 

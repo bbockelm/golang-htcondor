@@ -183,3 +183,26 @@ func serve(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
 	h.ServeHTTP(rec, req)
 	return rec
 }
+
+// A single-job action this server just took on an AP voids the hub's
+// "nothing there" for that AP: ap3 is fresh and holds none of alice's
+// jobs, but after alice acts on ap3 a bulk action must contact it.
+func TestMultiAPSingleActionVoidsTheBulkSkip(t *testing.T) {
+	srv, aps, _ := newBulkServer(t, nil)
+	doAlice(t, srv, http.MethodPost, "/api/v1/jobs/1.0@ap3.example.org/hold", "")
+	before := aps.counts()["ap3.example.org"]
+	rec := doAlice(t, srv, http.MethodPost, "/api/v1/jobs/hold", `{"constraint":"JobStatus == 1"}`)
+	if aps.counts()["ap3.example.org"] == before {
+		t.Errorf("ap3 was skipped on the hub's word right after this server acted there: %s", rec.Body.String())
+	}
+}
+
+// No access point known yet is a 503, not "nothing matched anywhere".
+func TestMultiAPBulkWithNoAPs(t *testing.T) {
+	svc := multiAPService(t, multiAPHub(t), multiaptest.NewRegistry())
+	srv := newMultiAPServer(t, svc)
+	rec := doAlice(t, srv, http.MethodPost, "/api/v1/jobs/hold", `{"constraint":"true"}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("bulk hold with no APs = %d %s, want 503", rec.Code, rec.Body.String())
+	}
+}

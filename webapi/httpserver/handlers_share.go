@@ -577,6 +577,10 @@ func (s *Handler) handleSharedInput(w http.ResponseWriter, r *http.Request) {
 		s.writeShareTargetError(w, payload, err)
 		return
 	}
+	if s.multi != nil {
+		// The upload is applied when it finishes; see NoteWrite.
+		defer s.multi.svc.NoteWrite(routedSchedd(ctx))
+	}
 
 	jobID := s.jobPathID(ctx, payload.Cluster, payload.Proc)
 	// Scope the lookup to the token's owner even though the mint checked

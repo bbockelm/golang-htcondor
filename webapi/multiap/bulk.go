@@ -51,6 +51,22 @@ const DefaultBulkConcurrency = 8
 // that hangs is reported rather than holding the response.
 const DefaultBulkAPTimeout = 60 * time.Second
 
+// DefaultBulkTimeout bounds a whole bulk action. The fan-out does not
+// follow the caller's cancellation -- a client that disconnects must not
+// leave an action applied to some APs and never reported -- so this is
+// what ends it.
+const DefaultBulkTimeout = 5 * time.Minute
+
+// hubCheckTimeout bounds the hub query behind a skip. A hub that does not
+// answer in time proves nothing, and the AP is contacted.
+const hubCheckTimeout = 5 * time.Second
+
+// sourceRowRefresh is how stale the hub lets a federation_sources row's
+// StalenessSeconds get before rewriting it (htcondordb federate rewrites
+// a row's volatile fields at most once a minute unless something else
+// changed). A measured lag can be under-reported by up to this much.
+const sourceRowRefresh = time.Minute
+
 // BulkCounts is one AP's job-action counts (or the sum over APs).
 type BulkCounts struct {
 	Total            int `json:"total"`
@@ -148,9 +164,17 @@ type BulkRequest struct {
 	// caller -- it must look where the action will.
 	AllUsers func(ap string) bool
 	// FreshWithin is how fresh the hub's copy of an AP must be for its
-	// "no match" to count. Zero or negative disables skipping.
+	// "no match" to count. Zero or negative -- the default -- disables
+	// skipping: every usable AP is contacted.
 	FreshWithin time.Duration
+	// Members, when set, is the AP set to fan out over, instead of the
+	// registry's current one: a caller that vetted the set (for a
+	// permission that must hold on every AP acted on) passes exactly the
+	// set it vetted.
+	Members []apregistry.Member
+	// Timeout bounds the whole action; zero selects DefaultBulkTimeout.
 	// Concurrency and APTimeout; zero selects the defaults.
+	Timeout     time.Duration
 	Concurrency int
 	APTimeout   time.Duration
 }
@@ -173,8 +197,26 @@ func (s *Service) FanOut(ctx context.Context, req BulkRequest, act BulkAction) (
 	if apTimeout <= 0 {
 		apTimeout = DefaultBulkAPTimeout
 	}
+	total := req.Timeout
+	if total <= 0 {
+		total = DefaultBulkTimeout
+	}
+	// Detached from the caller's cancellation, bounded on its own: an
+	// action half-applied because the client went away would otherwise
+	// never be reported to anyone.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), total)
+	defer cancel()
 
-	members := s.Registry.Members()
+	members := req.Members
+	if members == nil {
+		members = s.Registry.Members()
+	}
+	if len(members) == 0 {
+		// Before the first collector poll, or with nothing matching the
+		// constraint: "nothing matched anywhere" would be a lie.
+		return nil, errorf(http.StatusServiceUnavailable,
+			"no access point is known yet; the collector has not been read or nothing matches HTTP_API_SCHEDD_CONSTRAINT")
+	}
 	results := make([]BulkAPResult, len(members))
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, conc)
@@ -209,6 +251,9 @@ func (s *Service) FanOut(ctx context.Context, req BulkRequest, act BulkAction) (
 			defer cancel()
 			out, err := act(legCtx, m)
 			if err != nil {
+				// A leg that failed -- or timed out -- may still have
+				// been applied by the schedd.
+				s.NoteWrite(m.Name)
 				results[i].Status, results[i].Error = BulkFailed, err.Error()
 				return
 			}
@@ -249,20 +294,31 @@ func (s *Service) provablyEmpty(ctx context.Context, req BulkRequest, balanced, 
 	if !ok || age > req.FreshWithin {
 		return "", false
 	}
-	if s.wroteSince(ap, age+writeMargin) {
-		// This server changed something on ap more recently than the
-		// hub's copy is known to reflect: "nothing matches there" may
-		// describe the queue from before that change. A bulk release
-		// right after a bulk hold is the case that shows it.
+	// This server changed something on ap recently: "nothing matches
+	// there" may describe the queue from before that change (a bulk
+	// release right after a bulk hold is the case that shows it). The
+	// window does not trust the measured lag, which the hub may report up
+	// to sourceRowRefresh late.
+	if s.wroteSince(ap, req.FreshWithin+sourceRowRefresh+writeMargin) {
 		return "", false
 	}
+	// Only a definite "false" rules a row out: a row the hub cannot
+	// evaluate -- one the spoke never chained to its cluster (no Owner,
+	// User or JobStatus), or a function this evaluator lacks -- may well
+	// match on the schedd, which evaluates the whole ad.
 	scope := fmt.Sprintf("(User == %s || Owner == %s)", ownerscope.StringLit(req.User), ownerscope.StringLit(req.Owner))
 	if req.AllUsers != nil && req.AllUsers(ap) {
 		scope = "true"
 	} else if req.User == "" || req.Owner == "" {
 		return "", false
 	}
-	constraint := fmt.Sprintf("(%s) && (%s) && (%s)", scope, balanced, scheddIn([]string{ap}))
+	constraint := fmt.Sprintf("((%s) isnt false) && ((%s) isnt false) && (%s)", scope, balanced, scheddIn([]string{ap}))
+	check := hubCheckTimeout
+	if req.APTimeout > 0 && req.APTimeout < check {
+		check = req.APTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, check)
+	defer cancel()
 	dbc, closer, err := s.Hub.Client(ctx)
 	if err != nil {
 		return "", false
@@ -284,6 +340,12 @@ const writeMargin = 2 * time.Second
 // NoteWrite records that this server just changed something on ap (an
 // action, an edit, a spool). Until the hub's copy of ap is known to be
 // newer than that, a bulk action does not skip ap on the hub's word.
+// Callers note a write when it starts and again when it finishes.
+//
+// The record is this process's own: it does not survive a restart, and
+// replicas of the API server do not share it. A replica therefore trusts
+// the hub about another replica's recent writes -- one reason skipping
+// is off unless HTTP_API_BULK_FRESH_SECONDS asks for it.
 func (s *Service) NoteWrite(ap string) {
 	s.writesMu.Lock()
 	defer s.writesMu.Unlock()
@@ -313,9 +375,16 @@ func (s *Service) clock() time.Time {
 // snapshot this server holds of it. ok is false unless the hub reports
 // the source fresh with a measured staleness -- an unknown lag is never
 // fresh enough.
+//
+// The jobs stream must also be connected with no error: freshness is
+// measured on the syncstatus stream, which says nothing about whether
+// the jobs stream is flowing.
 func (h *Hub) Freshness(schedd string) (time.Duration, bool) {
 	src, ok := h.Source(schedd)
 	if !ok || src.State != StateFresh || !src.StalenessKnown || src.Staleness < 0 {
+		return 0, false
+	}
+	if !src.JobsConnected || src.JobsLastError != "" {
 		return 0, false
 	}
 	h.mu.RLock()

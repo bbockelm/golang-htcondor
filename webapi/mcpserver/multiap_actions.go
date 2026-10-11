@@ -9,6 +9,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/jobid"
+	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
@@ -155,6 +156,7 @@ func (s *Server) multiActionTool(ctx context.Context, name string, args map[stri
 		// Until the hub has seen this change, a bulk action must not skip
 		// the AP on the hub's word.
 		s.multi.NoteWrite(id.Schedd)
+		defer s.multi.NoteWrite(id.Schedd) // and when it finishes; see NoteWrite
 	}
 	result, err := s.singleJobTool(name)(ctx, routed)
 	if err != nil {
@@ -236,6 +238,11 @@ func (s *Server) multiRemoveJobsTool(ctx context.Context, args map[string]interf
 	if err != nil {
 		return nil, err
 	}
+	// The fan-out runs to the end even if the client has gone; this is
+	// then the only account of it.
+	s.logger.Info(logging.DestinationMCP, "Multi-AP bulk removal",
+		"actor", actor, "constraint", llmConstraint, "complete", rep.Complete,
+		"total", rep.Totals.Total, "success", rep.Totals.Success, "access_points", rep.BulkSummary())
 	structured := map[string]interface{}{
 		"action":            "remove",
 		"constraint":        llmConstraint,

@@ -1658,22 +1658,32 @@ per-access-point timeout, and report each:
  "aps": [
    {"schedd": "ap1.example.org", "status": "acted", "results": {"total": 2, "success": 2, ...}},
    {"schedd": "ap2.example.org", "status": "skipped",
-    "reason": "the federation hub's copy of this access point is 3s behind (within 60s) and holds no matching job"},
+    "reason": "the federation hub's copy of this access point is 3s behind (within 30s) and holds no matching job"},
    {"schedd": "ap3.example.org", "status": "failed", "error": "..."}]}
 ```
 
 `status` is `acted`, `no_match`, `skipped`, `failed`, `unreachable` (not in
-the collector; not contacted) or `untrusted` (not contacted). An access
-point is skipped only when it is provably empty: the hub reports it fresh
-with a measured lag within `HTTP_API_BULK_FRESH_SECONDS` (default 60) and
-holds no row matching your scoped constraint there, and this server has
-not itself changed anything on it since the hub's copy was taken. A stale,
-absent or unmeasured source is always contacted. The answer is 200; 404
-when every access point was accounted for and nothing matched; 502 when no
-access point could be acted on. `complete: false` means some access point
-was not covered -- see `aps`. The constraint is confined to your jobs per
-access point exactly as in single-AP mode, and one that does not parse is
-a 400 before anything is contacted.
+the collector; not contacted) or `untrusted` (not contacted). By default
+every usable access point is contacted. Setting
+`HTTP_API_BULK_FRESH_SECONDS` above 0 lets the hub narrow the fan-out: an
+access point is then skipped only when it is provably empty -- the hub
+reports it fresh with a measured lag within that many seconds, its jobs
+stream connected and error-free, and it holds no row that could match your
+scoped constraint there (a row the hub cannot evaluate, such as one
+missing `Owner` or using a function the hub lacks, counts as a possible
+match) -- and this server has not changed anything on it within the
+tolerance plus a minute. That last record is per process: it is lost on a
+restart and not shared between replicas, so a skip can miss a change
+another replica made moments ago. A stale, absent or unmeasured source,
+or a hub that does not answer within 5 seconds, is never proof. The
+fan-out runs to the end even if the client disconnects (bounded at five
+minutes) and is logged per access point. The answer is 200; 404 when
+every access point was accounted for and nothing matched; 502 when no
+access point could be acted on; 503 when no access point is known yet.
+`complete: false` means some access point was not covered -- see `aps`.
+The constraint is confined to your jobs per access point exactly as in
+single-AP mode, and one that does not parse is a 400 before anything is
+contacted.
 
 **Administrators** are scoped per access point: this server's own grant
 (admin group, `mcp:admin`, `mcp:superuser`, `MCP_ADMIN_USERS`) is
@@ -1819,7 +1829,7 @@ Frequently-used knobs:
 | `HTTP_API_HUB_NAME` / `HTTP_API_HUB_ADDRESS` | Pin the federation hub by `Name`, or dial this sinful string, instead of discovering the `HTCondorDB` ad that carries `FederationConstraint`. Multi-AP mode only. |
 | `HTTP_API_MULTI_AP_STALE` | `include` (default) or `exclude` a degraded access point's rows in list reads. Either way it is named in `sources.degraded`. |
 | `HTTP_API_JOB_ID_CODEC` | Text form of a job id in URLs and SSH gateway usernames. Default and only built-in: `at` (`123.0@ap40.example.org`). |
-| `HTTP_API_BULK_FRESH_SECONDS` | How far behind its access point the hub's copy may be for a multi-AP bulk action to skip that access point on the hub's word that nothing there matches. Default 60; 0 never skips. |
+| `HTTP_API_BULK_FRESH_SECONDS` | Opt in to letting a multi-AP bulk action skip an access point on the hub's word that nothing there matches, when the hub's copy is at most this many seconds behind. Default 0: every access point is contacted. |
 | `HTTP_API_DBMIRROR_TOKEN_SUBJECT` | Identity the token this server presents to the mirror asserts. Default `condor@<trust domain>`. Set it when the mirror authorizes a different name. |
 | `HTTP_API_IDENTITY_MAP` | Map the token subject to a local account (`gecos,username`). See [Local identity mapping](#local-identity-mapping). |
 | `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | Account file backing the mapping index. Default `/etc/passwd`. |

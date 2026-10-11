@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
@@ -34,7 +35,11 @@ type MultiAPBulkResponse struct {
 
 // runMultiBulk authenticates, fans leg out over the AP set, and writes
 // the report.
-func (h *Handler) runMultiBulk(w http.ResponseWriter, r *http.Request, rawConstraint, verb string, leg bulkLeg) {
+//
+// members, when non-nil, is the AP set a caller vetted (see
+// handleMultiBulkEdit); nil fans out over the registry.
+func (h *Handler) runMultiBulk(w http.ResponseWriter, r *http.Request, rawConstraint, verb string,
+	members []apregistry.Member, leg bulkLeg) {
 	ctx, needsRedirect, err := h.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
@@ -64,6 +69,7 @@ func (h *Handler) runMultiBulk(w http.ResponseWriter, r *http.Request, rawConstr
 			return ok && h.seesAllJobs(routed(m), r, jobScopeMutate)
 		},
 		FreshWithin: h.multi.bulkFresh,
+		Members:     members,
 	}, func(legCtx context.Context, m apregistry.Member) (multiap.BulkOutcome, error) {
 		apCtx := multiap.WithTarget(legCtx, multiap.Target{Member: m})
 		constraint, err := h.jobsOwnerScope(apCtx, r, rawConstraint, jobScopeMutate)
@@ -79,6 +85,11 @@ func (h *Handler) runMultiBulk(w http.ResponseWriter, r *http.Request, rawConstr
 		h.multiAPError(w, err)
 		return
 	}
+	// Recorded here as well as answered: the fan-out runs to the end even
+	// when the client has gone, and this is then the only account of it.
+	h.logger.Info(logging.DestinationHTTP, "Multi-AP bulk action",
+		"action", verb, "actor", actor, "constraint", rawConstraint, "complete", rep.Complete,
+		"total", rep.Totals.Total, "success", rep.Totals.Success, "edited", rep.Edited, "access_points", rep.BulkSummary())
 	h.writeMultiBulk(w, rawConstraint, verb, rep)
 }
 
@@ -133,7 +144,7 @@ func (h *Handler) handleMultiBulkAction(w http.ResponseWriter, r *http.Request, 
 		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	h.runMultiBulk(w, r, constraint, verb, func(ctx context.Context, sch *htcondor.Schedd, c string) (multiap.BulkOutcome, error) {
+	h.runMultiBulk(w, r, constraint, verb, nil, func(ctx context.Context, sch *htcondor.Schedd, c string) (multiap.BulkOutcome, error) {
 		if verb == "release" {
 			return actionOutcome(sch.ReleaseJobs(ctx, c, reason))
 		}
@@ -158,7 +169,7 @@ func (h *Handler) handleMultiBulkDelete(w http.ResponseWriter, r *http.Request) 
 	if req.Reason == "" {
 		req.Reason = "Removed via HTTP API bulk operation"
 	}
-	h.runMultiBulk(w, r, req.Constraint, "removal", func(ctx context.Context, sch *htcondor.Schedd, c string) (multiap.BulkOutcome, error) {
+	h.runMultiBulk(w, r, req.Constraint, "removal", nil, func(ctx context.Context, sch *htcondor.Schedd, c string) (multiap.BulkOutcome, error) {
 		return actionOutcome(sch.RemoveJobs(ctx, c, req.Reason))
 	})
 }
@@ -195,6 +206,7 @@ func (h *Handler) handleMultiBulkEdit(w http.ResponseWriter, r *http.Request) {
 		attributes[key] = encoded
 	}
 	opts := &htcondor.EditJobOptions{}
+	var vetted []apregistry.Member
 	if req.Options != nil && (req.Options.AllowProtectedAttrs || req.Options.Force) {
 		// An administrator's lever, and in multi-AP mode an AP's: it is
 		// granted only to a caller who is a queue superuser on every AP
@@ -204,10 +216,13 @@ func (h *Handler) handleMultiBulkEdit(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 			return
 		}
+		// The set checked here is the set acted on: a member that joins
+		// between the check and the fan-out was never vetted.
 		for _, m := range h.multi.svc.Registry.Members() {
 			if !m.Present || m.Untrusted() {
 				continue
 			}
+			vetted = append(vetted, m)
 			if !h.seesAllJobs(multiap.WithTarget(ctx, multiap.Target{Member: m}), r, jobScopeMutate) {
 				h.writeError(w, http.StatusForbidden, fmt.Sprintf(
 					"options.allow_protected_attrs and options.force need administrator rights on every access point, "+
@@ -215,9 +230,13 @@ func (h *Handler) handleMultiBulkEdit(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if len(vetted) == 0 {
+			h.writeError(w, http.StatusServiceUnavailable, "no access point is available to edit jobs on")
+			return
+		}
 		opts.AllowProtectedAttrs, opts.Force = req.Options.AllowProtectedAttrs, req.Options.Force
 	}
-	h.runMultiBulk(w, r, req.Constraint, "edit", func(ctx context.Context, sch *htcondor.Schedd, c string) (multiap.BulkOutcome, error) {
+	h.runMultiBulk(w, r, req.Constraint, "edit", vetted, func(ctx context.Context, sch *htcondor.Schedd, c string) (multiap.BulkOutcome, error) {
 		n, err := sch.EditJobs(ctx, c, attributes, opts)
 		if errors.Is(err, htcondor.ErrNoJobsMatched) {
 			return multiap.BulkOutcome{}, nil

@@ -208,13 +208,179 @@ func TestFanOutDoesNotTrustTheHubAboutItsOwnWrites(t *testing.T) {
 	if rec.contacted["ap1"] != 1 || statusOf(rep, "empty").Status != BulkSkipped {
 		t.Errorf("after a write to ap1: contacted %v, empty=%s", rec.contacted, statusOf(rep, "empty").Status)
 	}
-	// Once the hub's copy is newer than the write, its word counts again.
-	now = now.Add(time.Minute)
+	// Well after the write -- past the tolerance plus the hub's row
+	// refresh -- the hub's word counts again.
+	now = now.Add(3 * time.Minute)
 	rec = &bulkRecorder{}
 	if rep, err = s.FanOut(context.Background(), req, rec.act); err != nil {
 		t.Fatal(err)
 	}
 	if rec.contacted["ap1"] != 0 {
 		t.Errorf("a write older than the hub's lag still voids the skip: %+v", statusOf(rep, "ap1"))
+	}
+}
+
+// reviewService is one fresh AP, ap1, with rows put by the test.
+func reviewService(t *testing.T, putRows func(h *testDB)) *Service {
+	t.Helper()
+	hub := hubDB(t)
+	hub.PutSource("ap1", StateFresh, 2)
+	putRows(hub)
+	reg := newFakeRegistry("ap1").WithSchedds(func(n string) string { return "<10.0.0.1:9618?name=" + n + ">" })
+	return newService(t, hub, reg)
+}
+
+func fanOutAP1(t *testing.T, s *Service, constraint string) BulkAPResult {
+	t.Helper()
+	rep, err := s.FanOut(context.Background(), BulkRequest{User: "alice@d", Owner: "alice", Constraint: constraint,
+		FreshWithin: time.Minute}, (&bulkRecorder{}).act)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return statusOf(rep, "ap1")
+}
+
+func putRaw(t *testing.T, h *testDB, key, ad string) {
+	t.Helper()
+	ctx := context.Background()
+	cl, closer, _ := h.Dial(ctx)
+	defer closer()
+	tx, err := cl.BeginTable(ctx, TableJobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.NewClassAd(ctx, key, ad); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Only a definite false rules a hub row out. A row the spoke never
+// chained (no Owner, User or JobStatus), or a constraint using a
+// function the hub's evaluator lacks, may match on the schedd.
+func TestFanOutUndefinedIsNotNoMatch(t *testing.T) {
+	s := reviewService(t, func(h *testDB) {
+		putRaw(t, h, "opaque-x", "ScheddName = \"ap1\"\nProcId = 0\nKey = \"1.0\"")
+	})
+	if r := fanOutAP1(t, s, "JobStatus == 1"); r.Status == BulkSkipped {
+		t.Errorf("an unchained row was counted out: %+v", r)
+	}
+	s = reviewService(t, func(h *testDB) { h.PutJob("ap1", "alice@d", 1, 0, "QDate = 1000") })
+	for _, c := range []string{`debug(JobStatus) == 1`, `absTime(QDate) > absTime(0)`} {
+		if r := fanOutAP1(t, s, c); r.Status == BulkSkipped {
+			t.Errorf("%s: skipped though the schedd may match: %+v", c, r)
+		}
+	}
+	// A definite false is still a skip.
+	if r := fanOutAP1(t, s, "JobStatus == 7"); r.Status != BulkSkipped {
+		t.Errorf("JobStatus == 7 on an idle job: %+v, want skipped", r)
+	}
+}
+
+// A hub that does not answer proves nothing, quickly.
+func TestFanOutHungHubIsNotProof(t *testing.T) {
+	s := reviewService(t, func(*testDB) {})
+	s.Hub.dial = func(ctx context.Context) (*dbrpc.Client, func(), error) { <-ctx.Done(); return nil, nil, ctx.Err() }
+	rec := &bulkRecorder{}
+	start := time.Now()
+	rep, err := s.FanOut(context.Background(), BulkRequest{User: "alice@d", Owner: "alice", Constraint: "true",
+		FreshWithin: time.Minute}, rec.act)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > hubCheckTimeout+3*time.Second {
+		t.Errorf("a hung hub held the fan-out %v", d)
+	}
+	if rec.contacted["ap1"] != 1 || statusOf(rep, "ap1").Status == BulkSkipped {
+		t.Errorf("a hung hub's silence skipped ap1: %+v", statusOf(rep, "ap1"))
+	}
+}
+
+// The jobs stream must be connected and error-free for the hub's word to
+// count; freshness is measured on another stream.
+func TestFanOutNeedsAConnectedJobsStream(t *testing.T) {
+	for _, row := range []string{
+		"ScheddName = \"ap1\"\nState = \"fresh\"\nStalenessSeconds = 1\nJobsConnected = false",
+		"ScheddName = \"ap1\"\nState = \"fresh\"\nStalenessSeconds = 1\nJobsConnected = true\nJobsLastError = \"reset\"",
+		"ScheddName = \"ap1\"\nState = \"fresh\"\nStalenessSeconds = 1",
+	} {
+		hub := hubDB(t)
+		hub.PutSourceAd("ap1", row)
+		reg := newFakeRegistry("ap1").WithSchedds(func(n string) string { return "<10.0.0.1:9618>" })
+		s := newService(t, hub, reg)
+		if r := fanOutAP1(t, s, "true"); r.Status == BulkSkipped {
+			t.Errorf("row %q: skipped", row)
+		}
+	}
+}
+
+// Before the first collector poll there is nothing to fan out to, which
+// is not "nothing matched".
+func TestFanOutEmptyRegistry(t *testing.T) {
+	s := newService(t, hubDB(t), newFakeRegistry())
+	_, err := s.FanOut(context.Background(), BulkRequest{User: "alice@d", Owner: "alice", Constraint: "true"}, (&bulkRecorder{}).act)
+	if StatusOf(err) != 503 {
+		t.Errorf("empty registry: %v, want 503", err)
+	}
+}
+
+// A leg that failed may still have been applied: it is noted as a write.
+func TestFanOutNotesFailedLegs(t *testing.T) {
+	s := reviewService(t, func(h *testDB) { h.PutJob("ap1", "alice@d", 1, 0, "") })
+	rec := &bulkRecorder{fail: map[string]error{"ap1": context.DeadlineExceeded}}
+	if _, err := s.FanOut(context.Background(), BulkRequest{User: "alice@d", Owner: "alice", Constraint: "true"}, rec.act); err != nil {
+		t.Fatal(err)
+	}
+	if !s.wroteSince("ap1", time.Minute) {
+		t.Error("a failed leg left no own-write record")
+	}
+}
+
+// The caller's cancellation does not stop a fan-out half way.
+func TestFanOutOutlivesTheCaller(t *testing.T) {
+	s := reviewService(t, func(h *testDB) { h.PutJob("ap1", "alice@d", 1, 0, "") })
+	ctx, cancel := context.WithCancel(context.Background())
+	sawCancel := false
+	rep, err := s.FanOut(ctx, BulkRequest{User: "alice@d", Owner: "alice", Constraint: "true"},
+		func(legCtx context.Context, m apregistry.Member) (BulkOutcome, error) {
+			cancel()
+			time.Sleep(10 * time.Millisecond)
+			sawCancel = legCtx.Err() != nil
+			return BulkOutcome{Counts: BulkCounts{Total: 1, Success: 1}}, nil
+		})
+	if err != nil || sawCancel || statusOf(rep, "ap1").Status != BulkActed {
+		t.Errorf("caller cancelled mid-fan-out: leg saw cancel=%v, %+v, %v", sawCancel, statusOf(rep, "ap1"), err)
+	}
+}
+
+// A vetted member list is the set acted on, not the registry's later one.
+func TestFanOutUsesTheVettedMembers(t *testing.T) {
+	s := bulkService(t)
+	only, _ := s.Registry.Get("ap1")
+	rec := &bulkRecorder{}
+	rep, err := s.FanOut(context.Background(), BulkRequest{User: "alice@d", Owner: "alice", Constraint: "true",
+		Members: []apregistry.Member{only}}, rec.act)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.APs) != 1 || len(rec.contacted) != 1 || rec.contacted["ap1"] != 1 {
+		t.Errorf("fanned out over %v (%d APs), want ap1 only", rec.contacted, len(rep.APs))
+	}
+}
+
+// The own-write window does not trust the measured lag, which the hub
+// may report up to a minute late: a write 30 s ago against a hub that
+// says it is 2 s behind still voids the skip.
+func TestFanOutOwnWriteWindowIgnoresTheMeasuredLag(t *testing.T) {
+	s := reviewService(t, func(h *testDB) { h.PutJob("ap1", "alice@d", 1, 0, "") })
+	base := time.Now()
+	now := base
+	s.Now = func() time.Time { return now }
+	s.NoteWrite("ap1")
+	now = base.Add(30 * time.Second)
+	if r := fanOutAP1(t, s, "JobStatus == 5"); r.Status == BulkSkipped {
+		t.Errorf("skipped 30 s after this server's own write: %+v", r)
 	}
 }

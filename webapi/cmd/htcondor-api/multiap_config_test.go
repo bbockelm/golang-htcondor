@@ -26,9 +26,9 @@ func TestLoadMultiAPConfig(t *testing.T) {
 	}
 
 	if mc.BulkFresh != 0 {
-		t.Errorf("BulkFresh unset = %v, want 0 (the server's default)", mc.BulkFresh)
+		t.Errorf("BulkFresh unset = %v, want 0 (never skip)", mc.BulkFresh)
 	}
-	for v, want := range map[string]time.Duration{"30": 30 * time.Second, "0": -1} {
+	for v, want := range map[string]time.Duration{"30": 30 * time.Second, "0": 0} {
 		cfg.Set("HTTP_API_BULK_FRESH_SECONDS", v)
 		if mc, err = loadMultiAPConfig(cfg, "", ""); err != nil || mc.BulkFresh != want {
 			t.Errorf("HTTP_API_BULK_FRESH_SECONDS=%s: %v, %v; want %v", v, mc.BulkFresh, err, want)

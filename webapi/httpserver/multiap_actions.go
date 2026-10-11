@@ -178,7 +178,10 @@ func (h *Handler) handleMultiJobByID(w http.ResponseWriter, r *http.Request, par
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		// A change this server makes on the AP: until the hub has seen
 		// it, a bulk action must not skip the AP on the hub's word.
+		// Noted at the start and again at the end, because the schedd
+		// applies a slow one (a spool upload) when it finishes.
 		h.multi.svc.NoteWrite(m.Name)
+		defer h.multi.svc.NoteWrite(m.Name)
 	}
 
 	// The handlers below parse the job from the path, and know only

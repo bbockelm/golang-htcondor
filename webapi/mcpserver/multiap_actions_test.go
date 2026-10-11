@@ -294,3 +294,21 @@ func TestMultiAPMCPRemoveJobsFansOut(t *testing.T) {
 		t.Error("an unbalanced constraint was accepted")
 	}
 }
+
+// A single-job tool this server just ran on an AP voids the hub's
+// "nothing there" for that AP in a following remove_jobs.
+func TestMultiAPMCPActionVoidsTheBulkSkip(t *testing.T) {
+	a := newMultiAPActionMCP(t, nil)
+	_, _ = a.call(callerCtx(t), t, "hold_job", map[string]any{"job_id": "1.0@" + mAP2})
+	before := a.counts()
+	if _, err := a.call(callerCtx(t), t, "remove_jobs", map[string]any{"constraint": "ClusterId == 3"}); err != nil {
+		t.Fatal(err)
+	}
+	after := a.counts()
+	if after[mAP2] == before[mAP2] {
+		t.Error("ap2 was skipped on the hub's word right after hold_job acted there")
+	}
+	if after[mAP1] != before[mAP1] {
+		t.Error("ap1, untouched and holding no match, was contacted")
+	}
+}
