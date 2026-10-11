@@ -1533,9 +1533,9 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 	//
 	// Admins are exempt from both for cross-user troubleshooting.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, idClause, tierRead)
+	if err != nil {
+		return nil, err
 	}
 	opts, ok := s.selfScopedQueryOptions(ctx, nil)
 	if !ok {
@@ -1631,9 +1631,9 @@ func (s *Server) toolAnalyzeJobMatch(ctx context.Context, args map[string]interf
 	// Owner-scope so a non-admin caller can't analyze another user's
 	// job and harvest its Requirements expression.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, idClause, tierRead)
+	if err != nil {
+		return nil, err
 	}
 	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "Requirements", "Owner"},
@@ -1737,11 +1737,15 @@ func (s *Server) performJobAction(ctx context.Context, args map[string]interface
 // an actor that names no owner, the call is refused rather than sent
 // unconfined.
 func (s *Server) singleJobMutateScope(ctx context.Context, idClause string) (string, error) {
-	if constraint, ok := s.scopeToOwner(ctx, idClause, tierMutate); ok {
+	constraint, err := s.scopeToOwner(ctx, idClause, tierMutate)
+	if err == nil {
 		return constraint, nil
 	}
+	if !errors.Is(err, errScopeUnauthenticated) {
+		return "", err
+	}
 	if s.delegated || htcondor.GetAuthenticatedUserFromContext(ctx) != "" {
-		return "", fmt.Errorf("authentication required")
+		return "", err
 	}
 	return idClause, nil
 }
@@ -1768,9 +1772,9 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 	// the wrapper for cross-user cleanup. CRITICAL: without this
 	// wrapper an LLM prompt-injection setting constraint = "true"
 	// could mass-remove every user's jobs (modulo schedd ACL).
-	constraint, ok := s.scopeToOwner(ctx, llmConstraint, tierMutate)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, llmConstraint, tierMutate)
+	if err != nil {
+		return nil, err
 	}
 	results, err := s.getSchedd().RemoveJobs(ctx, constraint, reason)
 	if errors.Is(err, htcondor.ErrNoJobsMatched) {
@@ -2164,9 +2168,9 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 	// instead of a schedd-side refusal after we have already disclosed
 	// which attributes their job has.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, idClause, tierRead)
+	if err != nil {
+		return nil, err
 	}
 	opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "JobStatus", attributeName},
@@ -2361,9 +2365,9 @@ func (s *Server) toolQueryHistory(ctx context.Context, args map[string]interface
 	// schedd ACL is broadly READ on most pools, so without this
 	// wrapper a `mcp:write` token holder could dump every user's
 	// historical job ads.
-	constraint, ok := s.scopeToOwner(ctx, llmConstraint, tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, llmConstraint, tierRead)
+	if err != nil {
+		return nil, err
 	}
 	if constraint == "" {
 		// scopeToOwner returns "" only for admin callers who passed
@@ -2616,9 +2620,9 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 		}
 	} else {
 		idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", target.Cluster, target.Proc)
-		constraint, ok := s.scopeToOwner(ctx, idClause, tierMutate)
-		if !ok {
-			return nil, fmt.Errorf("authentication required")
+		constraint, err := s.scopeToOwner(ctx, idClause, tierMutate)
+		if err != nil {
+			return nil, err
 		}
 		opts, ok := s.selfScopedQueryOptions(ctx, &htcondor.QueryOptions{
 			Projection: []string{"ClusterId", "ProcId", "TransferInput", "Cmd", "TransferExecutable"},
@@ -2772,9 +2776,9 @@ func (s *Server) toolGetJobOutputFiles(ctx context.Context, args map[string]inte
 	// authenticated as someone else — that check is its, not ours. The
 	// owner clause means we do not ask.
 	idClause := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	constraint, ok := s.scopeToOwner(ctx, idClause, tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, idClause, tierRead)
+	if err != nil {
+		return nil, err
 	}
 
 	// Streamed rather than buffered: the sandbox can be far larger than

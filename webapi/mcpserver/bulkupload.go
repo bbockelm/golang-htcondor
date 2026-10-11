@@ -32,9 +32,9 @@ import (
 // spooling, oldest proc first, confined to the caller's own jobs.
 func (s *Server) procsAwaitingInput(ctx context.Context, cluster int) ([]*classad.ClassAd, error) {
 	lim := spool.DefaultLimits()
-	constraint, ok := s.scopeToOwner(ctx, spool.AwaitingInputConstraint(cluster), tierMutate)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, spool.AwaitingInputConstraint(cluster), tierMutate)
+	if err != nil {
+		return nil, err
 	}
 	// One past the limit, so the caller can say how many remain rather
 	// than reporting a truncated list as the whole of it.
