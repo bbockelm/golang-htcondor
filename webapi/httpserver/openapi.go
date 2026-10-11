@@ -281,7 +281,34 @@ const openAPISchema = `{
             "items": {
               "type": "string"
             },
-            "description": "Array of job IDs in cluster.proc format"
+            "description": "Array of job IDs in cluster.proc format; in multi-AP mode, complete ids (cluster.proc@schedd)"
+          },
+          "schedd": {
+            "type": "string",
+            "description": "Multi-AP mode only: the access point the jobs were submitted to"
+          },
+          "jobs": {
+            "type": "array",
+            "description": "Multi-AP mode only: each job as schedd, cluster, proc and job_id",
+            "items": {
+              "type": "object",
+              "properties": {
+                "schedd": {"type": "string"},
+                "cluster": {"type": "integer"},
+                "proc": {"type": "integer"},
+                "job_id": {"type": "string"}
+              }
+            }
+          },
+          "assignment": {
+            "type": "object",
+            "description": "Multi-AP mode only: the caller's access point assignment the submission followed",
+            "properties": {
+              "schedd": {"type": "string"},
+              "alternates": {"type": "array", "items": {"type": "string"}},
+              "source": {"type": "string"},
+              "stale": {"type": "boolean"}
+            }
           }
         }
       },
@@ -1253,6 +1280,15 @@ const openAPISchema = `{
         "summary": "Submit a job",
         "description": "Submit a new job to the schedd using SubmitRemote. Jobs are submitted with input file spooling enabled and start in HELD status until input files are uploaded via PUT /jobs/{jobId}/input. After uploading input files, poll GET /jobs/{jobId} to check job status (JobStatus: 1=Idle, 2=Running, 3=Removed, 4=Completed, 5=Held).",
         "operationId": "submitJob",
+        "parameters": [
+          {
+            "name": "schedd",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string"},
+            "description": "Multi-AP mode only: submit to this access point, which must be your home access point or one of its alternates (default: your home access point)"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
