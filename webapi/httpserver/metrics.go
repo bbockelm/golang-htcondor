@@ -317,6 +317,8 @@ var routePatterns = []routePattern{
 	{re: regexp.MustCompile(`^/api/v1/watches/[^/]+/share$`), template: "/api/v1/watches/{id}/share"},
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/(input|output|stdout|stderr|log|hold|release|ssh)$`), template: "/api/v1/jobs/{id}/{action}"},
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/runtime-estimate$`), template: "/api/v1/jobs/{id}/runtime-estimate"},
+	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/similar$`), template: "/api/v1/jobs/{id}/similar"},
+	{re: regexp.MustCompile(`^/api/v1/utilization/for-job/[^/]+$`), template: "/api/v1/utilization/for-job/{id}"},
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+$`), template: "/api/v1/jobs/{id}"},
 
 	// Templates

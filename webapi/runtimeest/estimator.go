@@ -1007,15 +1007,8 @@ func unixOr0(t time.Time) int64 {
 // be placed in order. It is scored as of QDate and of
 // JobCurrentStartDate (else JobStartDate).
 func (b *Batch) AddAd(ad *classad.ClassAd) bool {
-	runtime, ok := CompletedRuntime(ad)
+	runtime, at, ok := HistoryRecord(ad)
 	if !ok {
-		return false
-	}
-	at, _ := intAttr(ad, "CompletionDate")
-	if at <= 0 {
-		at, _ = intAttr(ad, "EnteredHistoryTime")
-	}
-	if at <= 0 {
 		return false
 	}
 	proc, _ := intAttr(ad, "ProcId")
