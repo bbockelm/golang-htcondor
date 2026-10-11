@@ -15,6 +15,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/golang-htcondor/webapi/dagman"
+	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
 )
 
 // adFrom builds a job ad from old-format text, which is how the schedd
@@ -45,9 +46,9 @@ func TestSplitArgsV2(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := splitArgsV2(tc.raw)
+			got := jobargs.SplitV2(tc.raw)
 			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
-				t.Errorf("splitArgsV2(%q) = %v, want %v", tc.raw, got, tc.want)
+				t.Errorf("jobargs.SplitV2(%q) = %v, want %v", tc.raw, got, tc.want)
 			}
 		})
 	}

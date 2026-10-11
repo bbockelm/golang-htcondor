@@ -21,6 +21,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/dagman"
+	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
 )
 
 // GET /api/v1/jobs/{cluster}.{proc}/dag returns a DAGMan workflow's
@@ -430,7 +431,7 @@ func dagPrecondition(ad *classad.ClassAd, cluster, proc int) (dagFile string, st
 // ad carries whichever the submit file used, so both have to work.
 func dagFileFromAd(ad *classad.ClassAd) string {
 	if raw, ok := ad.EvaluateAttrString("Arguments"); ok && strings.TrimSpace(raw) != "" {
-		if f := dagArgFromArgv(splitArgsV2(raw)); f != "" {
+		if f := dagArgFromArgv(jobargs.SplitV2(raw)); f != "" {
 			return f
 		}
 	}
@@ -454,45 +455,6 @@ func dagArgFromArgv(argv []string) string {
 		}
 	}
 	return ""
-}
-
-// splitArgsV2 splits an Arguments value written in submit "new syntax":
-// space separated, with a run that contains whitespace wrapped in single
-// quotes and a literal single quote doubled inside it. The surrounding
-// double quotes belong to the submit file, not to the job ad, so the
-// value here starts straight into the arguments.
-func splitArgsV2(raw string) []string {
-	var (
-		out    []string
-		cur    strings.Builder
-		inQ    bool
-		inWord bool
-	)
-	flush := func() {
-		if inWord {
-			out = append(out, cur.String())
-			cur.Reset()
-			inWord = false
-		}
-	}
-	for i := 0; i < len(raw); i++ {
-		c := raw[i]
-		switch {
-		case c == '\'' && inQ && i+1 < len(raw) && raw[i+1] == '\'':
-			cur.WriteByte('\'')
-			i++
-		case c == '\'':
-			inQ = !inQ
-			inWord = true
-		case !inQ && (c == ' ' || c == '\t' || c == '\n'):
-			flush()
-		default:
-			cur.WriteByte(c)
-			inWord = true
-		}
-	}
-	flush()
-	return out
 }
 
 // ---------------------------------------------------------------------
