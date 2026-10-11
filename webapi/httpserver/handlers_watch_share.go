@@ -66,9 +66,9 @@ func (h *Handler) handleWatchShare(w http.ResponseWriter, r *http.Request, watch
 		return
 	}
 
-	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
-	if owner == "" {
-		h.writeError(w, http.StatusUnauthorized, "Could not determine authenticated user")
+	owner, err := h.watchOwner(htcondor.GetAuthenticatedUserFromContext(ctx))
+	if err != nil {
+		h.writeError(w, http.StatusUnauthorized, "Could not determine authenticated user: "+err.Error())
 		return
 	}
 	watchID = strings.TrimSpace(watchID)
@@ -95,10 +95,13 @@ func (h *Handler) handleWatchShare(w http.ResponseWriter, r *http.Request, watch
 	ttl := shareurl.ClampTTL(shareurl.KindWatch, watchShareTTL(r))
 	exp := time.Now().Add(ttl)
 	tok, err := h.signShareToken(shareurl.Payload{
-		Owner: owner,
-		Exp:   exp.Unix(),
-		Kind:  shareurl.KindWatch,
-		Watch: watchID,
+		// Every AP in multi-AP mode: a watch is the owner's, wherever its
+		// jobs are.
+		Schedd: h.watchShareSchedd(),
+		Owner:  owner,
+		Exp:    exp.Unix(),
+		Kind:   shareurl.KindWatch,
+		Watch:  watchID,
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to sign token: %v", err))
@@ -177,6 +180,11 @@ func (h *Handler) handleSharedWatch(w http.ResponseWriter, r *http.Request) {
 		// Don't leak which check failed (signature vs expiry vs kind).
 		h.logger.Info(logging.DestinationHTTP, "Watch share token rejected", "error", err)
 		h.writeError(w, http.StatusUnauthorized, "Invalid or expired token")
+		return
+	}
+	if err := h.checkWatchShareScope(payload); err != nil {
+		h.logger.Info(logging.DestinationHTTP, "Watch share token refused", "schedd", payload.Schedd, "error", err)
+		h.writeError(w, http.StatusForbidden, "This URL cannot be redeemed on this server: "+err.Error()+"; ask for a new one")
 		return
 	}
 	if r.Method == http.MethodHead {

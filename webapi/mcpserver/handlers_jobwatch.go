@@ -221,9 +221,18 @@ func jobWatchTools(maxWait int) []Tool {
 // job ads as the daemon, and the owner recorded here is the only thing
 // confining a watch to its registrant.
 func (s *Server) watchActor(ctx context.Context) (string, error) {
-	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	owner := ownerFromActor(actor)
 	if owner == "" {
 		return "", fmt.Errorf("authentication required: a watch is registered against your identity, and the caller's could not be established")
+	}
+	if s.multi != nil {
+		// The watch reads the hub as owner@UID_DOMAIN: an identity in
+		// another domain is not that user, and is refused rather than
+		// narrowed to the local part.
+		if _, err := s.multi.UserFor(actor); err != nil {
+			return "", err
+		}
 	}
 	return owner, nil
 }

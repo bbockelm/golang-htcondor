@@ -28,15 +28,15 @@ import (
 // schedd ad matches HTTP_API_SCHEDD_CONSTRAINT.
 //
 // Reads of the caller's own jobs and history are served from the
-// federation hub. Actions on one job are routed to the schedd of the AP
-// its complete id names (multiap_actions.go); bulk actions fan out to
-// every member (multiap_bulk.go). A submission goes to the AP the
-// caller's assignment names, and credentials to that AP's credd
-// (multiap_submit.go). Interactive work -- browser terminals, named
-// sessions, JupyterLab, apps -- is placed the same way and then reached
-// on the AP its record names (multiap_interactive.go). Everything else
-// -- watches above all -- answers 501 until it has been taught which AP
-// it is about. The refusal is an ALLOWLIST
+// federation hub, and so are job watches (multiap_watch.go). Actions on
+// one job are routed to the schedd of the AP its complete id names
+// (multiap_actions.go); bulk actions fan out to every member
+// (multiap_bulk.go). A submission goes to the AP the caller's assignment
+// names, and credentials to that AP's credd (multiap_submit.go).
+// Interactive work -- browser terminals, named sessions, JupyterLab,
+// apps -- is placed the same way and then reached on the AP its record
+// names (multiap_interactive.go). Everything else answers 501 until it
+// has been taught which AP it is about. The refusal is an ALLOWLIST
 // (multiAPAllowed): a route nobody has looked at is refused, not served
 // against whichever schedd happens to be handy. There is no such schedd:
 // Handler.schedd is nil in this mode, and getSchedd counts and logs any
@@ -381,7 +381,7 @@ var multiAPReadPaths = map[string]bool{
 var multiAPJobSubroutes = map[string]bool{"archive": true, "epochs": true, "transfers": true, "watch": true}
 
 // multiAPSharePaths are the share-URL redemption routes multi-AP mode
-// serves. /api/v1/share/watch is not one: watches are not served yet.
+// serves for one job. /api/v1/share/watch is in multiAPWatchAllowed.
 var multiAPSharePaths = map[string]bool{
 	"/api/v1/share/output": true,
 	"/api/v1/share/input":  true,
@@ -434,8 +434,11 @@ func multiAPAllowed(method, path string) bool {
 		// The credd of the caller's home AP, or of ?schedd=.
 		return true
 	}
-	if multiAPReadPaths[path] {
+	if multiAPReadPaths[path] || multiAPHubReadPaths[path] {
 		return read
+	}
+	if multiAPWatchAllowed(method, path) {
+		return true
 	}
 	if path == "/api/v1/auth/logout" {
 		return true
@@ -930,10 +933,10 @@ func (h *Handler) pingAsCaller(ctx context.Context) (*htcondor.PingResult, error
 }
 
 // startMultiAPHandler is Start for multi-AP mode: the schedd-independent
-// half of startup, plus the registry and hub pollers. Everything that
-// polls or acts on "the" schedd -- address and credd updaters, periodic
-// pings, the queue-superuser poll, the job_queue.log tail, watches --
-// does not start.
+// half of startup, the registry and hub pollers, and job watches over
+// the hub. Everything that polls or acts on "the" schedd -- address and
+// credd updaters, periodic pings, the queue-superuser poll, the
+// job_queue.log tail -- does not start.
 func (h *Handler) startMultiAPHandler(ctx context.Context, ln net.Listener, protocol string) error {
 	if err := h.initializeIDP(ln, protocol); err != nil {
 		return err
@@ -958,5 +961,6 @@ func (h *Handler) startMultiAPHandler(ctx context.Context, ln net.Listener, prot
 	}
 	h.startSessionCleanup(ctx)
 	h.startMultiAP(h.ctx)
+	h.startMultiAPWatches(h.ctx)
 	return nil
 }

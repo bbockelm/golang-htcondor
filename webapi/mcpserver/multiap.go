@@ -43,15 +43,15 @@ var multiAPPassthroughTools = map[string]bool{
 func multiAPToolAllowed(name string) bool {
 	return multiAPReadTools[name] || multiAPPassthroughTools[name] || multiAPActionTools[name] ||
 		multiAPSubmitTools[name] != "" || multiAPCredentialTools[name] ||
-		multiAPInteractiveTools[name] ||
+		multiAPInteractiveTools[name] || multiAPHubTools[name] ||
 		name == "remove_jobs" || isCondorDocTool(name)
 }
 
 // errMultiAPTool refuses a tool multi-AP mode does not serve.
 func errMultiAPTool(name string) error {
 	return fmt.Errorf("the %q tool is not available on this multi-access-point server yet; "+
-		"it serves reading your jobs, acting on one job at a time or by constraint, submitting jobs, DAGs and "+
-		"container builds, credentials and interactive sessions, but not watches", name)
+		"it serves reading and watching your jobs, acting on one job at a time or by constraint, submitting jobs, DAGs and "+
+		"container builds, credentials and interactive sessions", name)
 }
 
 // multiAPCatalog replaces the single-AP catalogue: passthrough tools as
@@ -61,7 +61,7 @@ func multiAPCatalog(tools []Tool) []Tool {
 	out := make([]Tool, 0, len(tools))
 	for _, t := range tools {
 		if multiAPToolAllowed(t.Name) && !multiAPReadTools[t.Name] {
-			out = append(out, multiAPInteractiveToolDef(multiAPSubmitToolDef(multiAPActionToolDef(t))))
+			out = append(out, multiAPHubToolDef(multiAPInteractiveToolDef(multiAPSubmitToolDef(multiAPActionToolDef(t)))))
 		}
 	}
 	return append(out, multiAPToolDefs()...)
@@ -400,7 +400,9 @@ func multiAPInstructions(constraint string) string {
 		"(whoami names it, with any alternates you may pass as schedd) and answer with complete job ids. The credential " +
 		"tools use your home access point's credential service unless schedd names another. interactive_session_start " +
 		"starts a session on your home access point; the session stays there, and its name reaches it from any tool. " +
-		"Watches are not available here yet. Answers name the access points whose data is not current.\n\n"
+		"watch_jobs watches your jobs on every access point; the jobs it reports carry their access point, and a job on " +
+		"an access point whose data is not current is never reported finished until that access point's data catches up " +
+		"or its history record arrives. Answers name the access points whose data is not current.\n\n"
 }
 
 // MultiAPScheddCalls reports how many times the single-schedd accessor

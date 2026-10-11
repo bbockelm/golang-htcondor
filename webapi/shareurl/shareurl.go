@@ -96,6 +96,14 @@ func ClampTTL(k Kind, requested time.Duration) time.Duration {
 	return requested
 }
 
+// AllAccessPoints is the Schedd of a watch token minted by a server
+// fronting several access points. A watch is about its owner's jobs on
+// every AP, so the token names no one AP; it names all of them, inside
+// the HMAC like every other member, so a single-AP server refuses it
+// (its Schedd is not that server's schedd) and a multi-AP server
+// refuses a watch token without it.
+const AllAccessPoints = "*"
+
 // Payload is the data carried inside a signed token. It is kept tight:
 // anything richer (a per-share revocation list, say) would need
 // persistent state, which these ephemeral URLs deliberately avoid.

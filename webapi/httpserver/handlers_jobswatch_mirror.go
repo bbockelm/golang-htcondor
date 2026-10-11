@@ -101,7 +101,7 @@ func (h *Handler) streamJobsWatchFromMirror(ctx context.Context, w http.Response
 					return
 				}
 			}
-			if err := writeWatchSSE(w, flusher, jobsWatchEventName(ev.Kind), jobsWatchKey(ev), nil, nil, ""); err != nil {
+			if err := writeWatchSSE(w, flusher, jobsWatchEventName(ev.Kind), h.jobsWatchKeyFor(ev), nil, nil, ""); err != nil {
 				return
 			}
 		}

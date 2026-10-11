@@ -210,6 +210,11 @@ func (h *Handler) handleJobsWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	if h.multi != nil {
+		// The hub's jobs stream, the caller's own jobs on every AP.
+		h.streamJobsWatchFromMirror(ctx, w, r)
+		return
+	}
 	if h.jobMirror == nil {
 		// No local job_queue.log to tail, but this access point may
 		// still be following its queue through the htcondordb mirror.

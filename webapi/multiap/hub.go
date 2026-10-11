@@ -29,9 +29,10 @@ import (
 
 // Hub table and attribute names, from the hub's contract.
 const (
-	TableJobs    = "jobs"
-	TableHistory = "history"
-	TableSources = "federation_sources"
+	TableJobs         = "jobs"
+	TableHistory      = "history"
+	TableEpochHistory = "epoch_history"
+	TableSources      = "federation_sources"
 
 	AttrScheddName = "ScheddName"
 )
@@ -66,6 +67,18 @@ type Source struct {
 	// from this source.
 	JobsConnected bool
 	JobsLastError string
+	// Tables is the spoke tables the hub federates, as the row lists
+	// them: a <Table>Connected attribute per federated table.
+	Tables map[string]bool
+}
+
+// sourceTablePrefixes are the federation_sources attribute prefixes of
+// the tables a hub may federate (htcondordb federate tablePrefix).
+var sourceTablePrefixes = map[string]string{
+	TableJobs:         "Jobs",
+	TableHistory:      "History",
+	TableEpochHistory: "EpochHistory",
+	"syncstatus":      "SyncStatus",
 }
 
 // ParseSource reads a federation_sources row. ok is false for a row
@@ -88,6 +101,12 @@ func ParseSource(ad *classad.ClassAd) (Source, bool) {
 	s.SpokeAddress, _ = ad.EvaluateAttrString("SpokeAddress")
 	s.JobsConnected, _ = ad.EvaluateAttrBool("JobsConnected")
 	s.JobsLastError, _ = ad.EvaluateAttrString("JobsLastError")
+	s.Tables = map[string]bool{}
+	for table, prefix := range sourceTablePrefixes {
+		if _, ok := ad.Lookup(prefix + "Connected"); ok {
+			s.Tables[table] = true
+		}
+	}
 	if s.State == "" {
 		// A row the hub wrote without a state says nothing about
 		// freshness, so it is not fresh.
@@ -234,6 +253,23 @@ func (h *Hub) Source(schedd string) (Source, bool) {
 	defer h.mu.RUnlock()
 	s, ok := h.sources[strings.ToLower(schedd)]
 	return s, ok
+}
+
+// Federates reports whether the hub federates a spoke table, as its
+// federation_sources rows list it. A hub with no source rows yet, or
+// none this server has read, is taken not to.
+func (h *Hub) Federates(table string) bool {
+	if h == nil {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, s := range h.sources {
+		if s.Tables[table] {
+			return true
+		}
+	}
+	return false
 }
 
 // Sources returns the snapshot, sorted by schedd.

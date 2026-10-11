@@ -518,18 +518,27 @@ func (f *Feed) ownerOf(ad *classad.ClassAd) string {
 	return v
 }
 
-// Departures counts, per access point (lower-cased ScheddName, "" for a
-// row without one), one owner's jobs that left the queue at or after
-// since: those whose last ad said they had finished, and those whose
-// delete VouchDeparture vouched for. Nil from a cold feed, which has no
-// picture to count from.
-func (f *Feed) Departures(owner string, since time.Time) map[string]int {
+// Departure is a job the feed saw leave the queue.
+type Departure struct {
+	// Schedd is the job's ScheddName, lower-cased; empty for a row
+	// without one.
+	Schedd  string
+	Cluster int64
+	Proc    int64
+	At      time.Time
+}
+
+// Departures lists one owner's jobs that left the queue at or after
+// since, with evidence that they finished: their last ad said so, or
+// VouchDeparture vouched for the delete. Nil from a cold feed, which has
+// no picture to count from.
+func (f *Feed) Departures(owner string, since time.Time) []Departure {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.warm {
 		return nil
 	}
-	out := map[string]int{}
+	out := []Departure{}
 	for _, e := range f.ended {
 		if e.at.Before(since) || e.owner != owner {
 			continue
@@ -537,7 +546,7 @@ func (f *Feed) Departures(owner string, since time.Time) map[string]int {
 		if !e.vouched && !isTerminalStatus(e.status) {
 			continue
 		}
-		out[e.schedd]++
+		out = append(out, Departure{Schedd: e.schedd, Cluster: e.cluster, Proc: e.proc, At: e.at})
 	}
 	return out
 }

@@ -3,6 +3,7 @@ package jobwatch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -394,8 +395,11 @@ func TestFeedDeparturesNeedEvidence(t *testing.T) {
 	for _, k := range []string{"k1", "k2", "k3"} {
 		f.Apply(del(k))
 	}
-	got := f.Departures("alice", time.Now().Add(-time.Minute))
-	if got[apOne] != 1 || got[apTwo] != 1 {
+	got := map[string]bool{}
+	for _, d := range f.Departures("alice", time.Now().Add(-time.Minute)) {
+		got[fmt.Sprintf("%d.%d@%s", d.Cluster, d.Proc, d.Schedd)] = true
+	}
+	if len(got) != 2 || !got["1.0@"+apOne] || !got["2.0@"+apTwo] {
 		t.Fatalf("departures %v: want ap1's vouched delete and ap2's completed job, not ap2's unvouched delete", got)
 	}
 }

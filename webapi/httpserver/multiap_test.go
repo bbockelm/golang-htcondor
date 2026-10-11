@@ -318,7 +318,10 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 	refused := 0
 	for _, path := range paths {
 		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
-			req := httptest.NewRequestWithContext(context.Background(), method, path, bytes.NewReader([]byte("{}")))
+			// Bounded: an allowed stream (the jobs change stream, the
+			// activity ticker) would otherwise hold the walk open.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			req := httptest.NewRequestWithContext(ctx, method, path, bytes.NewReader([]byte("{}")))
 			req.Header.Set("X-Remote-User", "alice")
 			req.Header.Set("Origin", "http://example.com")
 			rec := httptest.NewRecorder()
@@ -333,6 +336,7 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 				}()
 				srv.ServeHTTP(rec, req)
 			}()
+			cancel()
 			if !multiAPAllowed(method, req.URL.Path) {
 				refused++
 				if rec.Code != http.StatusNotImplemented {
@@ -357,8 +361,7 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 		{http.MethodPost, "/api/v1/jobs/1.0@" + ap1 + "/hold/extra"},
 		{http.MethodGet, "/api/v1/jobs/1.0@" + ap1 + "/match-analysis"},
 		{http.MethodDelete, "/api/v1/jobs/1.0@" + ap1 + "/stdout"},
-		{http.MethodGet, "/api/v1/jobs/watch"},
-		{http.MethodGet, "/api/v1/share/watch"},
+		{http.MethodPost, "/api/v1/share/watch"},
 		{http.MethodGet, "/api/v1/watches/x/share"},
 		{http.MethodPost, "/api/v1/admin/superuser"},
 		{http.MethodGet, "/api/v1/jupyter/x"},
@@ -410,7 +413,8 @@ func TestMultiAPMCPCatalogue(t *testing.T) {
 			n == "list_service_credentials", n == "get_credential_status", n == "store_service_credential",
 			n == "delete_service_credential",
 			n == "interactive_session_start", n == "interactive_session_exec", n == "interactive_session_list",
-			n == "interactive_session_stop":
+			n == "interactive_session_stop",
+			n == "watch_jobs", n == "check_watches", n == "cancel_watch", n == "create_watch_url":
 		default:
 			t.Errorf("multi-AP catalogue offers %q", n)
 		}
