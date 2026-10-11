@@ -445,7 +445,15 @@ function usageOf(j: ClassAd): ClassAd {
   if (j.ClusterId === 500 && j.ProcId === 4) return u;
   const frac = j.ClusterId === 500 && j.ProcId === 2 ? 1.15 : 0.5;
   u.MemoryUsage = Math.round(Number(j.RequestMemory) * frac);
-  u.CpusUsage = Number(j.RequestCpus) * 0.9;
+  // 90% of the request, two hours into the run, as the CPU counters
+  // say it. CpusUsage beside them is what a cgroup v2 execute node
+  // publishes for a running job -- a hundred times too small -- and the
+  // page must not show it.
+  u.JobCurrentStartExecutingDate = qdate + 1000;
+  u.StatsLastUpdateTimeStarter = qdate + 1000 + 7200;
+  u.RemoteUserCpu = Number(j.RequestCpus) * 0.9 * 7200;
+  u.RemoteSysCpu = 0;
+  u.CpusUsage = Number(j.RequestCpus) * 0.009;
   return u;
 }
 
@@ -462,7 +470,7 @@ const recentCpuFixture: MetricsResponse = {
 
 // installJobsProgressFixtures answers /api/v1/jobs the way the three
 // queries the page makes need: the listing, the running view's usage
-// query (asked for CpusUsage), and the exact count for a partial listing
+// query (asked for MemoryUsage), and the exact count for a partial listing
 // (a member(ClusterId, ...) constraint). Installed after
 // installApiFixtures, whose routes it overrides.
 //
@@ -480,7 +488,7 @@ export async function installJobsProgressFixtures(
     const projection = url.searchParams.get('projection') ?? '';
     const constraint = url.searchParams.get('constraint') ?? '';
     let body: JobListResponse;
-    if (projection.includes('CpusUsage')) {
+    if (projection.includes('MemoryUsage')) {
       body = { jobs: queue.filter((j) => j.JobStatus === 2).map(usageOf), has_more: false };
     } else if (constraint.startsWith('member(ClusterId')) {
       opts.exactQueries?.push(constraint);
