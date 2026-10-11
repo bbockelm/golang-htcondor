@@ -228,6 +228,25 @@ func (s *Server) allowsAllUsers(ctx context.Context, authenticatedUser string, t
 	if s == nil || authenticatedUser == "" {
 		return false
 	}
+	if !s.allowsAllUsersByPolicy(ctx, authenticatedUser, tier) {
+		return false
+	}
+	if s.multi == nil {
+		return true
+	}
+	// Multi-AP mode: this server's grant is necessary and not sufficient.
+	// The caller must also be a queue superuser on the access point the
+	// call was routed to, as that AP reports it; a call routed nowhere
+	// sees only the caller's own jobs.
+	user, err := s.multi.UserFor(authenticatedUser)
+	if err != nil {
+		return false
+	}
+	return s.multi.IsQueueSuperUser(routedSchedd(ctx), user)
+}
+
+// allowsAllUsersByPolicy is this server's own half of allowsAllUsers.
+func (s *Server) allowsAllUsersByPolicy(ctx context.Context, authenticatedUser string, tier privTier) bool {
 	switch tier {
 	case tierMutate:
 		return hasScope(ctx, scopeMCPSuperuser)

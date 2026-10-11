@@ -179,7 +179,7 @@ func (s *Server) requireOwnRunningJob(ctx context.Context, jobID string, needs l
 	if err != nil {
 		return 0, 0, err
 	}
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to query job: %w", err)
 	}

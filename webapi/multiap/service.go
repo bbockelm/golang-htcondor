@@ -86,6 +86,9 @@ type Service struct {
 	// QUEUE_SUPER_USERS, as read from that AP. Cross-user power is per
 	// AP: nil means nobody is a superuser anywhere.
 	QueueSuperUser func(schedd, actor string) bool
+	// BulkFresh is HTTP_API_BULK_FRESH_SECONDS, for bulk actions this
+	// service's callers fan out; zero or negative never skips an AP.
+	BulkFresh time.Duration
 }
 
 // IsQueueSuperUser reports whether actor is a queue superuser on schedd.

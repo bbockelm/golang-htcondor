@@ -557,7 +557,10 @@ func NewServer(cfg Config) (*Server, error) {
 		// schedd when the collector reports a new address, and holding
 		// the old pointer is how MCP kept dialling a socket that no
 		// longer existed. The accessor is why this is a function.
-		Schedd:       func() interactive.ScheddClient { return s.getSchedd() },
+		Schedd: func() interactive.ScheddClient { return s.getSchedd() },
+		// A command run in a running job goes to that job's schedd: in
+		// multi-AP mode, the access point the tool call was routed to.
+		ScheddFor:    func(ctx context.Context) interactive.ScheddClient { return s.scheddFor(ctx) },
 		Logger:       logger,
 		LogDest:      logging.DestinationMCP,
 		SubmitPolicy: cfg.SubmitPolicy,
@@ -855,6 +858,28 @@ func (s *Server) getCredd() htcondor.CreddClient {
 		}
 	}
 	return s.credd
+}
+
+// scheddFor returns the schedd a call on ctx's job goes to: getSchedd's
+// answer with one schedd; in multi-AP mode, the access point the call
+// was routed to (callMultiAPTool), and nothing else. A call reached
+// without a route, or carrying no caller credential, gets a schedd that
+// cannot connect: there is no right AP to guess, and acting as this
+// server instead of the caller is never right.
+func (s *Server) scheddFor(ctx context.Context) *htcondor.Schedd {
+	if s.multi == nil {
+		return s.getSchedd()
+	}
+	t, ok := multiap.TargetFrom(ctx)
+	if !ok || t.Member.Schedd == nil {
+		return s.getSchedd() // counted and logged as the bug it is
+	}
+	if _, ok := htcondor.GetSecurityConfigFromContext(ctx); !ok {
+		s.logger.Error(logging.DestinationMCP, "Refusing a tool call with no caller credential attached",
+			"access_point", t.Member.Name)
+		return multiap.NoSchedd
+	}
+	return t.Member.Schedd
 }
 
 func (s *Server) getSchedd() *htcondor.Schedd {

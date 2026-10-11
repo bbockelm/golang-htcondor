@@ -128,6 +128,7 @@ func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, er
 		}
 		m.superusers = newAPSuperusers(m.svc.Registry, cfg.UIDDomain, logger)
 		m.svc.QueueSuperUser = m.apQueueSuperUser
+		m.svc.BulkFresh = m.bulkFresh
 		return m, nil
 	}
 	if cfg.Collector == nil {
@@ -165,6 +166,7 @@ func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, er
 	}
 	m.superusers = newAPSuperusers(reg, cfg.UIDDomain, logger)
 	m.svc.QueueSuperUser = m.apQueueSuperUser
+	m.svc.BulkFresh = m.bulkFresh
 	logger.Info(logging.DestinationHTTP, "Multi-AP mode enabled",
 		"schedd_constraint", m.constraint, "hub_name", mc.HubName, "hub_address", mc.HubAddress,
 		"stale", string(stale), "job_id_codec", strings.ToLower(strings.TrimSpace(mc.JobIDCodec)),

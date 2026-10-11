@@ -1748,7 +1748,7 @@ func (s *Server) singleJobMutateScope(ctx context.Context, idClause string) (str
 
 // toolRemoveJob handles removing a specific job
 func (s *Server) toolRemoveJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return s.performJobAction(ctx, args, s.getSchedd().RemoveJobs, "Removed via MCP", "remove")
+	return s.performJobAction(ctx, args, s.scheddFor(ctx).RemoveJobs, "Removed via MCP", "remove")
 }
 
 // toolRemoveJobs handles removing multiple jobs
@@ -1772,7 +1772,7 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	results, err := s.getSchedd().RemoveJobs(ctx, constraint, reason)
+	results, err := s.scheddFor(ctx).RemoveJobs(ctx, constraint, reason)
 	if errors.Is(err, htcondor.ErrNoJobsMatched) {
 		return nil, fmt.Errorf("no jobs matched constraint '%s'", llmConstraint)
 	}
@@ -1843,7 +1843,7 @@ func (s *Server) toolEditJob(ctx context.Context, args map[string]interface{}) (
 	// classAdValues. A failed lookup is not fatal -- it only costs the
 	// numeric coercion, and the edit itself is the schedd's to authorize.
 	var current *classad.ClassAd
-	if ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint,
+	if ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint,
 		&htcondor.QueryOptions{Projection: attrNames(updates), Limit: 1},
 	); err == nil && len(ads) > 0 {
 		current = ads[0]
@@ -1859,7 +1859,7 @@ func (s *Server) toolEditJob(ctx context.Context, args map[string]interface{}) (
 		Force:               false,
 	}
 
-	edited, err := s.getSchedd().EditJobs(ctx, constraint, attributes, opts)
+	edited, err := s.scheddFor(ctx).EditJobs(ctx, constraint, attributes, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to edit job: %w", err)
 	}
@@ -1987,12 +1987,12 @@ func sortedAttrNames(updates map[string]interface{}) []string {
 
 // toolHoldJob handles holding a job
 func (s *Server) toolHoldJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return s.performJobAction(ctx, args, s.getSchedd().HoldJobs, "Held via MCP", "hold")
+	return s.performJobAction(ctx, args, s.scheddFor(ctx).HoldJobs, "Held via MCP", "hold")
 }
 
 // toolReleaseJob handles releasing a job
 func (s *Server) toolReleaseJob(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	return s.performJobAction(ctx, args, s.getSchedd().ReleaseJobs, "Released via MCP", "release")
+	return s.performJobAction(ctx, args, s.scheddFor(ctx).ReleaseJobs, "Released via MCP", "release")
 }
 
 // handleListResources returns the list of available resources
@@ -2174,7 +2174,7 @@ func (s *Server) toolGetJobOutput(ctx context.Context, args map[string]interface
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	jobAds, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query job: %w", err)
 	}
@@ -2626,7 +2626,7 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 		if !ok {
 			return nil, fmt.Errorf("authentication required")
 		}
-		jobAds, _, err = s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+		jobAds, _, err = s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query job: %w", err)
 		}
@@ -2728,7 +2728,7 @@ func (s *Server) toolUploadJobInput(ctx context.Context, args map[string]interfa
 	}
 
 	// Spool the files to the schedd
-	if err := s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, bytes.NewReader(tarBytes)); err != nil {
+	if err := s.scheddFor(ctx).SpoolJobFilesFromTar(ctx, jobAds, bytes.NewReader(tarBytes)); err != nil {
 		return nil, fmt.Errorf("failed to spool job files: %w", err)
 	}
 
@@ -2939,7 +2939,7 @@ func (s *Server) checkOAuthServicesNeeded(ctx context.Context, clusterID int) st
 		Projection: projection,
 		FetchOpts:  htcondor.FetchMyJobs,
 	}
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 	if err != nil || len(ads) == 0 {
 		return ""
 	}
@@ -3147,7 +3147,7 @@ func (s *Server) streamSandbox(ctx context.Context, constraint string, read func
 	defer cancel()
 
 	pr, pw := io.Pipe()
-	errChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, pw)
+	errChan := s.scheddFor(ctx).ReceiveJobSandbox(ctx, constraint, pw)
 	transferErr := make(chan error, 1)
 	go func() {
 		err := <-errChan

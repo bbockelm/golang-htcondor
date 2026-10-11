@@ -380,17 +380,20 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 	}
 }
 
-// TestMultiAPMCPReadsOnly checks the MCP surface through the HTTP
-// server's own wiring: the catalogue holds only read tools and a refused
-// tool is refused.
-func TestMultiAPMCPReadsOnly(t *testing.T) {
+// TestMultiAPMCPCatalogue checks the MCP surface through the HTTP
+// server's own wiring: the catalogue holds the read tools and the job
+// actions multi-AP mode routes, and nothing else.
+func TestMultiAPMCPCatalogue(t *testing.T) {
 	srv := newMultiAPServer(t, multiAPService(t, multiAPHub(t), multiaptest.NewRegistry(ap1, ap2)))
 	names := srv.Handler.mcpServer.ToolNames(context.Background())
 	sort.Strings(names)
 	for _, n := range names {
 		switch {
 		case n == "query_jobs", n == "get_job", n == "query_job_archive", n == "aggregate_jobs", n == "list_access_points",
-			n == "whoami", n == "get_version", n == "doc_guide", n == "skills_list", n == "skills_get", strings.HasPrefix(n, "doc_"):
+			n == "whoami", n == "get_version", n == "doc_guide", n == "skills_list", n == "skills_get", strings.HasPrefix(n, "doc_"),
+			n == "remove_job", n == "remove_jobs", n == "hold_job", n == "release_job", n == "edit_job",
+			n == "get_job_stdout", n == "get_job_stderr", n == "get_job_output", n == "upload_job_input",
+			n == "create_input_upload_url", n == "create_output_download_url", n == "tail_job_output", n == "exec_in_job":
 		default:
 			t.Errorf("multi-AP catalogue offers %q", n)
 		}

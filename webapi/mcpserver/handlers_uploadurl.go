@@ -95,6 +95,7 @@ func (s *Server) toolCreateInputUploadURL(ctx context.Context, args map[string]i
 			continue
 		}
 		tok, terr := s.shareSigner.Sign(shareurl.Payload{
+			Schedd:  routedSchedd(ctx),
 			Cluster: cluster,
 			Proc:    proc,
 			Owner:   caller.Owner,
@@ -200,7 +201,7 @@ func (s *Server) procAdsToMintFor(
 	ownerScope func(string) (string, error),
 ) ([]*classad.ClassAd, int, error) {
 	if !target.AllProcs {
-		ad, err := spool.FetchProcAd(ctx, s.getSchedd(), target.Cluster, target.Proc,
+		ad, err := spool.FetchProcAd(ctx, s.scheddFor(ctx), target.Cluster, target.Proc,
 			ownerScope, spool.InputShareProjection)
 		if err != nil || ad == nil {
 			return nil, 0, err
@@ -211,7 +212,7 @@ func (s *Server) procAdsToMintFor(
 		return []*classad.ClassAd{ad}, 0, nil
 	}
 
-	ads, err := spool.FetchProcAdsAwaitingInput(ctx, s.getSchedd(), target.Cluster,
+	ads, err := spool.FetchProcAdsAwaitingInput(ctx, s.scheddFor(ctx), target.Cluster,
 		maxMintedURLs, ownerScope, spool.InputShareProjection)
 	if err != nil {
 		return nil, 0, err
