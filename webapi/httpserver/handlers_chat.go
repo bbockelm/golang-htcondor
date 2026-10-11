@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -128,6 +129,9 @@ func (s *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	writer := chat.NewWriter(w)
 	defer writer.Close()
 
+	// The request rides along for the server-side tools that need it to
+	// decide what this caller may read (see chatRequestFrom).
+	ctx = context.WithValue(ctx, chatRequestKey{}, r)
 	if err := s.chatEngine.Stream(ctx, writer, actor, req); err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "chat stream ended with error",
 			"error", err, "user", actor)
