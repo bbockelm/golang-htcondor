@@ -87,6 +87,13 @@ type Options struct {
 	// points; see Server.JobIDCodec. Nil for one schedd.
 	JobIDCodec jobid.Codec
 
+	// RefuseTarget, when set, refuses a login before any device code is
+	// issued for what the username asks to reach: a gateway that cannot
+	// serve a kind of target says so up front instead of after the user
+	// has approved a login it will not honour. The error's text is shown
+	// to the user.
+	RefuseTarget func(Target) error
+
 	// MaxConcurrent caps logins in flight. Every connection that
 	// reaches the prompt starts a device authorization and then waits
 	// minutes for a human, so without a cap an attacker opening
@@ -225,6 +232,12 @@ func (a *Authenticator) authenticate(ctx context.Context, conn ssh.ConnMetadata,
 	// forms that would have worked and this one would only say
 	// "Permission denied".
 	target, _ := ParseTargetWith(a.opts.JobIDCodec, conn.User())
+	if a.opts.RefuseTarget != nil {
+		if err := a.opts.RefuseTarget(target); err != nil {
+			a.tell(challenge, err.Error())
+			return nil, fmt.Errorf("sshgateway: refusing %s: %w", target, err)
+		}
+	}
 
 	auth, err := a.opts.Flow.Authorize(ctx, target)
 	if err != nil {

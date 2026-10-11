@@ -53,3 +53,25 @@ func TestMultiAPSSHGatewayResolve(t *testing.T) {
 		t.Errorf("unknown AP = %v", err)
 	}
 }
+
+// In multi-AP mode the gateway refuses a session target before any login,
+// and no interactive-session manager is offered to the approval screen.
+func TestMultiAPSSHGatewayRefusesSessionsUpFront(t *testing.T) {
+	aps := newActionAPs(t, ap1)
+	srv := newActionServer(t, aps, nil)
+	parse := func(user string) sshgateway.Target {
+		tg, _ := sshgateway.ParseTargetWith(srv.gatewayJobIDCodec(), user)
+		return tg
+	}
+	for _, u := range []string{"+work", "bbockelm"} {
+		if srv.sshGatewayRefuseTarget(parse(u)) == nil {
+			t.Errorf("%q (a session) was not refused before login", u)
+		}
+	}
+	if err := srv.sshGatewayRefuseTarget(parse("1.0@" + ap1)); err != nil {
+		t.Errorf("a job target was refused: %v", err)
+	}
+	if srv.interactiveManagerOrNil() != nil {
+		t.Error("the approval screen is offered an interactive-session manager in multi-AP mode")
+	}
+}

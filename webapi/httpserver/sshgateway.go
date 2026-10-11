@@ -226,10 +226,11 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 			ClientID: sshGatewayClientID,
 			Scopes:   sshGatewayScopes,
 		},
-		Identity:   h.sshGatewayIdentity,
-		Logger:     h.logger,
-		Prompt:     h.sshGatewayPromptName(issuer),
-		JobIDCodec: h.gatewayJobIDCodec(),
+		Identity:     h.sshGatewayIdentity,
+		Logger:       h.logger,
+		Prompt:       h.sshGatewayPromptName(issuer),
+		JobIDCodec:   h.gatewayJobIDCodec(),
+		RefuseTarget: h.sshGatewayRefuseTarget,
 	})
 	if err != nil {
 		return err
@@ -505,6 +506,20 @@ func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshga
 	return h.sshGatewaySession(ctx, account, t, report)
 }
 
+// errSSHSessionsMultiAP refuses an interactive-session target on a
+// gateway fronting several access points.
+var errSSHSessionsMultiAP = errors.New("interactive sessions are not available through this gateway yet, which fronts " +
+	"several access points; connect to a job you have as its complete id, e.g. ssh 12345.0@<access point>@<gateway>")
+
+// sshGatewayRefuseTarget refuses, before any login, what this gateway
+// cannot reach: an interactive session in multi-AP mode.
+func (h *Handler) sshGatewayRefuseTarget(t sshgateway.Target) error {
+	if h.multi != nil && !t.IsJob() {
+		return errSSHSessionsMultiAP
+	}
+	return nil
+}
+
 // sshGatewayResolveMultiAP is sshGatewayResolve for a gateway in front
 // of several access points. The username must name the job's AP in the
 // codec's form -- ssh 123.0@ap1.example.org@gateway -- and the key
@@ -514,9 +529,7 @@ func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshga
 // yet: creating one is a submission, and submissions need AP assignment.
 func (h *Handler) sshGatewayResolveMultiAP(ctx context.Context, account string, t sshgateway.Target) (jobssh.Key, error) {
 	if !t.IsJob() {
-		return jobssh.Key{}, fmt.Errorf("interactive sessions are not available through this gateway yet, which fronts "+
-			"several access points; connect to a job you have as its complete id, e.g. ssh %s@<gateway>",
-			h.multi.codec.Format(jobid.ID{Schedd: "ap.example.org", Cluster: 12345}))
+		return jobssh.Key{}, errSSHSessionsMultiAP
 	}
 	user, err := h.multi.svc.UserFor(account)
 	if err != nil {

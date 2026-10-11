@@ -332,7 +332,11 @@ var multiAPSharePaths = map[string]bool{
 }
 
 // multiAPSSHPaths serve the SSH gateway's device-flow approval screen
-// and its certificate authority. Neither reaches a schedd.
+// and its certificate authority. In multi-AP mode the approval refuses
+// an interactive-session login and creates nothing; approving a job
+// login runs the revocation oracles' scope check over the trusted
+// members, and the certificate endpoint identifies its caller with a
+// trusted member. Nothing here acts on a job.
 var multiAPSSHPaths = map[string]bool{
 	sshConsentReadPath:        true,
 	sshConsentApprovePath:     true,
