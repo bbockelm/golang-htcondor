@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import type { JobRuntimeEstimate } from '@/lib/api';
+import { groupIntoBatches } from '@/lib/batches';
 import {
   batchTimeLeft,
   clockTime,
+  dagTimeLeft,
+  estimateRequestJobs,
   expectedEnd,
   jobTimeLeft,
   longerThanUsualText,
@@ -268,5 +271,101 @@ describe('requestIds', () => {
     ];
     expect(requestIds(jobs)).toEqual(['1.1', '2.0', '1.0', '1.3']);
     expect(requestIds(jobs, 3)).toEqual(['1.1', '2.0', '1.0']);
+  });
+});
+
+// A DAG's DAGMan job as the listing sees it: running, never estimated.
+const dagman: TimedJob = { status: 'running', dagman: true };
+const nodes = { total: 20, done: 11, failed: 2, queued: 3 };
+
+describe('dagTimeLeft', () => {
+  it('says how many nodes are left and when the running ones finish, never when the DAG does', () => {
+    const t = dagTimeLeft([dagman, running(600, 1200), running(600, 2400)], nodes, now, now)!;
+    expect(t.main).toBe('7 of 20 nodes left');
+    expect(t.sub).toBe(`running nodes done by ~${clockTime(now + 2400, now)}`);
+    expect(t.more).toBeUndefined();
+    expect(t.title).toMatch(/^Running nodes usually done between /);
+  });
+
+  it('gives waiting node jobs how long each runs, on its own line', () => {
+    const t = dagTimeLeft([dagman, running(600, 1200), idle(), idle()], nodes, now, now)!;
+    expect(t.main).toBe('7 of 20 nodes left');
+    expect(t.sub).toBe(`running nodes done by ~${clockTime(now + 1200, now)}`);
+    expect(t.more).toEqual(['2 waiting · each about 1h once started']);
+    expect(t.title).toContain('Each usually runs 40m to 2h30m');
+    const waiting = dagTimeLeft([dagman, idle({ rough: true })], nodes, now, now)!;
+    expect(waiting.sub).toBe('1 waiting · each roughly 1h once started');
+    expect(waiting.more).toBeUndefined();
+  });
+
+  it('says which running nodes it can speak for', () => {
+    const t = dagTimeLeft([running(60, 600), overrun(9000), noEstimate('running')], nodes, now, now)!;
+    expect(t.sub).toBe(`1 of 3 running nodes done by ~${clockTime(now + 600, now)}`);
+  });
+
+  it('counts the node jobs in the queue before the DAG reports its nodes', () => {
+    const t = dagTimeLeft([dagman, running(60, 600), noEstimate('idle'), noEstimate('other')], undefined, now, now)!;
+    expect(t.main).toBe('3 node jobs in the queue');
+    expect(t.sub).toBe(`running nodes done by ~${clockTime(now + 600, now)}`);
+    expect(t.more).toEqual(['1 waiting']);
+    expect(dagTimeLeft([dagman, noEstimate('idle')], undefined, now, now)!.main).toBe('1 node job in the queue');
+    expect(dagTimeLeft([dagman], undefined, now, now)).toBeUndefined();
+  });
+
+  it('still counts nodes with nothing waiting or running, and says why there is no time', () => {
+    expect(dagTimeLeft([dagman], { total: 1, done: 0, failed: 0, queued: 0 }, now, now)).toEqual({
+      main: '1 of 1 node left', sub: undefined, more: undefined, title: undefined,
+    });
+    const t = dagTimeLeft([dagman, noEstimate('idle')], nodes, now, now)!;
+    expect(t).toEqual({ main: '7 of 20 nodes left', sub: '1 waiting', more: undefined, title: NO_HISTORY });
+  });
+
+  it('never claims a finish time for the DAG, nor names the mechanism', () => {
+    const all = [
+      dagTimeLeft([dagman, running(600, 1200), running(60, 60), idle()], nodes, now, now),
+      dagTimeLeft([dagman, running(600, 1200)], undefined, now, now),
+      dagTimeLeft([dagman, overrun(9000)], nodes, now, now),
+      dagTimeLeft([dagman, idle({ rough: true })], nodes, now, now),
+    ];
+    for (const t of all) {
+      const text = [t?.main, t?.sub, ...(t?.more ?? []), t?.title].join(' ');
+      expect(text).not.toMatch(/all done|most by|running ones/i);
+      expect(text).not.toMatch(/model|estimat|window|residual|level|percentile|p90|p10/i);
+      // Every clock time is the running nodes'.
+      for (const m of text.matchAll(/done (by|between)/g)) {
+        expect(text.slice(0, m.index)).toMatch(/running nodes $|Running nodes usually $/);
+      }
+    }
+  });
+
+  it('leaves a non-DAG batch as it was', () => {
+    const jobs = [running(600, 1200), running(600, 1800), running(600, 6000)];
+    expect(batchTimeLeft(jobs, now, now)!.main).toBe(`All done by ~${clockTime(now + 6000, now)}`);
+  });
+});
+
+describe('estimateRequestJobs', () => {
+  it('asks about every node job of a DAG but not its DAGMan job', () => {
+    const [dag] = groupIntoBatches([
+      { ClusterId: 100, ProcId: 0, JobStatus: 2, Owner: 'carol', Cmd: '/usr/bin/condor_dagman', JobBatchName: 'foo.dag+100' },
+      { ClusterId: 101, ProcId: 0, JobStatus: 2, Owner: 'carol', Cmd: 'condor_dagman', JobBatchName: 'foo.dag+100', DAGManJobId: 100 },
+      { ClusterId: 201, ProcId: 0, JobStatus: 2, Owner: 'carol', Cmd: '/bin/node', JobBatchName: 'foo.dag+100', DAGManJobId: 100 },
+      { ClusterId: 202, ProcId: 0, JobStatus: 1, Owner: 'carol', Cmd: '/bin/node', JobBatchName: 'foo.dag+100', DAGManJobId: 101 },
+    ]);
+    expect(estimateRequestJobs(dag.jobs)).toEqual([
+      { id: '201.0', status: 'running' },
+      { id: '202.0', status: 'idle' },
+    ]);
+  });
+
+  it('asks about every job of a plain batch', () => {
+    const [b] = groupIntoBatches([
+      { ClusterId: 7, ProcId: 0, JobStatus: 2, Owner: 'a', Cmd: '/bin/x' },
+      { ClusterId: 7, ProcId: 1, JobStatus: 5, Owner: 'a', Cmd: '/bin/x' },
+    ]);
+    expect(estimateRequestJobs(b.jobs)).toEqual([
+      { id: '7.0', status: 'running' },
+      { id: '7.1', status: 'other' },
+    ]);
   });
 });

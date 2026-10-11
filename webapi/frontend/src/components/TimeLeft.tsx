@@ -4,8 +4,10 @@
 // than usual" chip. The wording lives in lib/timeLeft.
 
 import { RoughChip } from '@/app/jobs/[id]/RuntimeEstimate';
+import type { DagNodeCounts } from '@/lib/batches';
 import {
   batchTimeLeft,
+  dagTimeLeft,
   jobTimeLeft,
   longerThanUsualText,
   rangeBar,
@@ -36,14 +38,18 @@ export function BatchLongerThanUsual({ jobs }: { jobs: readonly TimedJob[] }) {
 
 export function BatchTimeLeftCell({
   jobs,
+  dag,
   fetchedAt,
   now,
 }: {
   jobs: readonly TimedJob[];
+  // Set for a DAG's row, with its node counts when it has reported them:
+  // the cell then describes nodes, never a finish time for the DAG.
+  dag?: { nodes?: DagNodeCounts };
   fetchedAt: number;
   now: number;
 }) {
-  const t = batchTimeLeft(jobs, fetchedAt, now);
+  const t = dag ? dagTimeLeft(jobs, dag.nodes, fetchedAt, now) : batchTimeLeft(jobs, fetchedAt, now);
   if (!t) return <span className="text-gray-400">—</span>;
   return (
     <div className="w-40 text-xs" title={t.title} data-testid="batch-time-left">
@@ -52,6 +58,11 @@ export function BatchTimeLeftCell({
         {t.rough && <RoughChip />}
       </div>
       {t.sub && <div className="mt-0.5 text-[11px] text-gray-500">{t.sub}</div>}
+      {t.more?.map((line) => (
+        <div key={line} className="mt-0.5 text-[11px] text-gray-500">
+          {line}
+        </div>
+      ))}
     </div>
   );
 }

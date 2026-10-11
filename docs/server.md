@@ -1488,7 +1488,13 @@ specific: its cluster, its exact command line (directories, URLs and
 hashes dropped), the same command line with every number masked, its
 batch name less any run number, its submit directory, its program, and
 the owner's jobs as a whole; the access point's jobs as a whole are the
-last resort. For an interpreter (`python`, `bash -c`, `apptainer exec`,
+last resort. Every one of the owner's groups holds only jobs of the same
+universe (`JobUniverse`; an ad without one counts as vanilla) that are,
+like the job asked about, DAG nodes (`DAGManJobId` set) or not: a DAG
+node is never estimated from its owner's standalone jobs, even ones
+running the same command. The access point's group is its jobs of the
+same universe, DAG nodes or not, or all its jobs while that universe has
+fewer than 30. For an interpreter (`python`, `bash -c`, `apptainer exec`,
 ...) the program is the script it runs. An estimate is the median of the
 most recent 100 runtimes in one group — a single earlier run is enough,
 since they are the owner's own jobs; the access point's group needs 30.
@@ -1500,10 +1506,10 @@ question is actually asked. The likely range (`p10_seconds` to
 `p90_seconds`) comes from those past estimation errors — the owner's,
 pooled with the access point's for the same group level, at the same
 point in a job's life (waiting or running) — widened to the group's own
-spread when that is larger. Only completed
-jobs that exited 0 count; DAGMan and other scheduler/local-universe jobs
-are left out. Nothing about another job — its command, id or owner — is
-ever returned.
+spread when that is larger. Only completed jobs that exited 0 count;
+DAGMan and other scheduler/local-universe jobs are left out, and are
+never estimated themselves. Nothing about another job — its command, id
+or owner — is ever returned.
 
 ```json
 {
@@ -1531,7 +1537,9 @@ runs in its group that lasted at least as long; once it has outlived
 nearly all of them, `exceeded_history` is true and no remaining time is
 given. When there is no estimate the response is still 200, with
 `available: false` and a `reason`: `disabled`, `model_warming_up` (the
-history has not been read yet) or `insufficient_history`.
+history has not been read yet), `insufficient_history`, or
+`not_estimated` (a scheduler- or local-universe job, such as a DAG's
+DAGMan job, whose runtime is never estimated).
 
 `rough` is true when the answer came from one of the broad groups — the
 same program whatever its arguments, the owner's jobs as a whole, or the

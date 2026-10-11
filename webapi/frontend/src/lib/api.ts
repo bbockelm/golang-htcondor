@@ -991,7 +991,7 @@ export interface DagGraphResponse {
 export interface RuntimeEstimate {
   job_id: string;
   available: boolean;
-  reason?: "disabled" | "model_warming_up" | "insufficient_history";
+  reason?: "disabled" | "model_warming_up" | "insufficient_history" | "not_estimated";
   estimate_seconds?: number;
   p10_seconds?: number;
   p90_seconds?: number;

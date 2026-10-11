@@ -6,16 +6,36 @@
 // started and never a finish time, and a batch with jobs still waiting
 // gets no finish time for the batch as a whole: extrapolating one from
 // throughput was right too rarely to show. Only running jobs get a clock
-// time. Pure functions, so the wording is tested without rendering.
+// time. A DAG gets no finish time at all: its nodes not yet submitted are
+// in no estimate, so a DAG's row says how many nodes are left and when its
+// running nodes are expected to finish. Pure functions, so the wording is
+// tested without rendering.
 
 import type { JobRuntimeEstimate } from '@/lib/api';
+import type { BatchJob, DagNodeCounts } from '@/lib/batches';
 import { approxDuration, humanDuration } from '@/lib/duration';
+import type { EstimateRequestJob } from '@/lib/useRuntimeEstimates';
 
 // A job as these functions see it: whether it waits or runs, and its
 // estimate if the server gave one.
 export interface TimedJob {
   status: 'idle' | 'running' | 'other';
   estimate?: JobRuntimeEstimate;
+  // A DAG's DAGMan job: never estimated, and not one of its nodes.
+  dagman?: boolean;
+}
+
+// timedStatus is what the time-left wording needs of a job's status.
+export function timedStatus(j: BatchJob): TimedJob['status'] {
+  if (j.display.key === 'idle') return 'idle';
+  if (j.display.key === 'running') return 'running';
+  return 'other';
+}
+
+// estimateRequestJobs is the jobs of a listing to ask for estimates:
+// every one but the DAGMan jobs, which are never estimated.
+export function estimateRequestJobs(jobs: readonly BatchJob[]): EstimateRequestJob[] {
+  return jobs.filter((j) => !j.dagman).map((j) => ({ id: j.id, status: timedStatus(j) }));
 }
 
 // NO_HISTORY is why a waiting or running job shows no time.
@@ -84,6 +104,8 @@ export function longerThanUsualText(jobs: readonly TimedJob[]): string | undefin
 export interface BatchTimeLeft {
   main: string;
   sub?: string;
+  // Further small lines under sub.
+  more?: string[];
   // Hover text: the usual range, or why there is nothing to show.
   title?: string;
   // From a broad, rarely-close basis: shown with a "rough guess" chip.
@@ -104,32 +126,16 @@ export function batchTimeLeft(
   const running = jobs.filter((j) => j.status === 'running');
   if (idle.length === 0 && running.length === 0) return undefined;
 
-  const ends: number[] = [];
-  const endLo: number[] = [];
-  const endHi: number[] = [];
-  for (const j of running) {
-    const end = expectedEnd(j, fetchedAt);
-    if (end === undefined) continue;
-    ends.push(end);
-    const e = j.estimate!;
-    const elapsed = e.elapsed_seconds ?? 0;
-    if (e.p10_seconds !== undefined) endLo.push(fetchedAt + e.p10_seconds - elapsed);
-    if (e.p90_seconds !== undefined) endHi.push(fetchedAt + e.p90_seconds - elapsed);
-  }
-  // "All done by" is the latest of the jobs' own expected ends -- each
-  // job's typical finish, not a bound on the batch: about one job in ten
-  // runs past its own.
-  const latest = ends.length ? Math.max(...ends) : undefined;
+  const { ends, latest, range } = runningEnds(running, fetchedAt);
   const mostBy = median(ends);
-  const endsTitle =
-    endLo.length && endHi.length
-      ? `Running jobs usually done between ${clockTime(Math.min(...endLo), now)} and ${clockTime(Math.max(...endHi), now)}`
-      : undefined;
+  const endsTitle = range
+    ? `Running jobs usually done between ${clockTime(range[0], now)} and ${clockTime(range[1], now)}`
+    : undefined;
 
   if (idle.length > 0) {
-    const est = idle.map((j) => j.estimate).filter(usable);
+    const w = waitingSummary(idle);
     const runningPart = latest !== undefined ? `running ones done by ~${clockTime(latest, now)}` : undefined;
-    if (est.length === 0) {
+    if (w === undefined) {
       if (runningPart === undefined) return { main: '—', title: NO_HISTORY };
       return {
         main: `Running ones done by ~${clockTime(latest!, now)}`,
@@ -137,24 +143,7 @@ export function batchTimeLeft(
         title: endsTitle,
       };
     }
-    // Most of a batch's waiting jobs share one basis; call the figure
-    // rough when most of them are.
-    const rough = est.filter((e) => e.rough).length * 2 >= est.length;
-    const typical = approxDuration(median(est.map((e) => e.estimate_seconds))!);
-    const lo = median(est.flatMap((e) => (e.p10_seconds !== undefined ? [e.p10_seconds] : [])));
-    const hi = median(est.flatMap((e) => (e.p90_seconds !== undefined ? [e.p90_seconds] : [])));
-    let title: string | undefined;
-    if (lo !== undefined && hi !== undefined && approxDuration(lo) !== approxDuration(hi)) {
-      title = rough
-        ? `Each could run anywhere from ${approxDuration(lo)} to ${approxDuration(hi)}`
-        : `Each usually runs ${approxDuration(lo)} to ${approxDuration(hi)}`;
-    }
-    return {
-      main: `${idle.length.toLocaleString()} waiting · each ${rough ? 'roughly' : 'about'} ${typical} once started`,
-      sub: runningPart,
-      title,
-      rough,
-    };
+    return { main: w.text, sub: runningPart, title: w.title, rough: w.rough };
   }
 
   if (latest !== undefined) {
@@ -181,6 +170,122 @@ export function batchTimeLeft(
     return { main: `Past their usual ${usual}`, overrun: true };
   }
   return { main: '—', title: NO_HISTORY };
+}
+
+// runningEnds is when running jobs are expected to finish: each one's
+// expected end, the latest of them -- each job's typical finish, not a
+// bound on the batch: about one job in ten runs past its own -- and the
+// span from the earliest usual end to the latest.
+function runningEnds(
+  running: readonly TimedJob[],
+  fetchedAt: number,
+): { ends: number[]; latest?: number; range?: [number, number] } {
+  const ends: number[] = [];
+  const endLo: number[] = [];
+  const endHi: number[] = [];
+  for (const j of running) {
+    const end = expectedEnd(j, fetchedAt);
+    if (end === undefined) continue;
+    ends.push(end);
+    const e = j.estimate!;
+    const elapsed = e.elapsed_seconds ?? 0;
+    if (e.p10_seconds !== undefined) endLo.push(fetchedAt + e.p10_seconds - elapsed);
+    if (e.p90_seconds !== undefined) endHi.push(fetchedAt + e.p90_seconds - elapsed);
+  }
+  return {
+    ends,
+    latest: ends.length ? Math.max(...ends) : undefined,
+    range: endLo.length && endHi.length ? [Math.min(...endLo), Math.max(...endHi)] : undefined,
+  };
+}
+
+// waitingSummary is the line for waiting jobs with estimates -- "N waiting
+// · each about 1h once started" -- and its hover text, or undefined when
+// none has one.
+function waitingSummary(idle: readonly TimedJob[]): { text: string; title?: string; rough: boolean } | undefined {
+  const est = idle.map((j) => j.estimate).filter(usable);
+  if (est.length === 0) return undefined;
+  // Most of a batch's waiting jobs share one basis; call the figure
+  // rough when most of them are.
+  const rough = est.filter((e) => e.rough).length * 2 >= est.length;
+  const typical = approxDuration(median(est.map((e) => e.estimate_seconds))!);
+  const lo = median(est.flatMap((e) => (e.p10_seconds !== undefined ? [e.p10_seconds] : [])));
+  const hi = median(est.flatMap((e) => (e.p90_seconds !== undefined ? [e.p90_seconds] : [])));
+  let title: string | undefined;
+  if (lo !== undefined && hi !== undefined && approxDuration(lo) !== approxDuration(hi)) {
+    title = rough
+      ? `Each could run anywhere from ${approxDuration(lo)} to ${approxDuration(hi)}`
+      : `Each usually runs ${approxDuration(lo)} to ${approxDuration(hi)}`;
+  }
+  return {
+    text: `${idle.length.toLocaleString()} waiting · each ${rough ? 'roughly' : 'about'} ${typical} once started`,
+    title,
+    rough,
+  };
+}
+
+// nodesLeftText is a DAG's "7 of 20 nodes left": nodes neither done nor
+// failed.
+export function nodesLeftText(n: DagNodeCounts): string {
+  const left = Math.max(0, n.total - n.done - n.failed);
+  return `${left.toLocaleString()} of ${n.total.toLocaleString()} ${n.total === 1 ? 'node' : 'nodes'} left`;
+}
+
+// dagTimeLeft is the Time left cell of a DAG's row. It never gives a
+// finish time for the DAG: nodes not yet submitted are in no estimate.
+// The main line is how many nodes are left, from the DAG's own counts
+// when it has reported them, else how many node jobs are in the queue;
+// under it, when the running node jobs are expected to finish, and what
+// the waiting ones are expected to run. The DAGMan jobs are left out.
+// Undefined -- a bare dash -- when there is nothing to say.
+export function dagTimeLeft(
+  jobs: readonly TimedJob[],
+  nodes: DagNodeCounts | undefined,
+  fetchedAt: number,
+  now: number,
+): BatchTimeLeft | undefined {
+  const nodeJobs = jobs.filter((j) => !j.dagman);
+  const idle = nodeJobs.filter((j) => j.status === 'idle');
+  const running = nodeJobs.filter((j) => j.status === 'running');
+  let main: string;
+  if (nodes !== undefined) {
+    main = nodesLeftText(nodes);
+  } else if (nodeJobs.length > 0) {
+    main = `${nodeJobs.length.toLocaleString()} node ${nodeJobs.length === 1 ? 'job' : 'jobs'} in the queue`;
+  } else {
+    return undefined;
+  }
+
+  const lines: string[] = [];
+  const titles: string[] = [];
+  const { ends, latest, range } = runningEnds(running, fetchedAt);
+  if (latest !== undefined) {
+    const at = clockTime(latest, now);
+    lines.push(
+      ends.length === running.length
+        ? `running nodes done by ~${at}`
+        : `${ends.length.toLocaleString()} of ${running.length.toLocaleString()} running nodes done by ~${at}`,
+    );
+    if (range) {
+      titles.push(`Running nodes usually done between ${clockTime(range[0], now)} and ${clockTime(range[1], now)}`);
+    }
+  }
+  const w = idle.length > 0 ? waitingSummary(idle) : undefined;
+  if (w) {
+    lines.push(w.text);
+    if (w.title) titles.push(w.title);
+  } else if (idle.length > 0) {
+    lines.push(`${idle.length.toLocaleString()} waiting`);
+  }
+  if (latest === undefined && !w && running.length + idle.length > 0 && !running.some(isLongerThanUsual)) {
+    titles.push(NO_HISTORY);
+  }
+  return {
+    main,
+    sub: lines[0],
+    more: lines.length > 1 ? lines.slice(1) : undefined,
+    title: titles.length ? titles.join('\n') : undefined,
+  };
 }
 
 // The Time left cell of one job.

@@ -133,6 +133,18 @@ describe('groupIntoBatches', () => {
     expect(dag.jobs.map((j) => j.id)).toEqual(['100.0', '201.0', '305.0', '402.0']);
   });
 
+  it('marks the DAGMan job and the node jobs, and reads the DAG\'s node counts', () => {
+    const ads = nestedDag();
+    Object.assign(ads[0], { DAG_NodesTotal: 20, DAG_NodesDone: 11, DAG_NodesFailed: 2, DAG_NodesQueued: 3 });
+    const [dag] = groupIntoBatches(ads);
+    expect(dag.jobs.map((j) => !!j.dagman)).toEqual([true, false, false, false]);
+    expect(dag.jobs.map((j) => !!j.dagNode)).toEqual([false, true, true, true]);
+    expect(dag.dagNodes).toEqual({ total: 20, done: 11, failed: 2, queued: 3 });
+    // Before DAGMan reports, and for a plain batch, there are no counts.
+    expect(groupIntoBatches(nestedDag())[0].dagNodes).toBeUndefined();
+    expect(groupIntoBatches(queue()).every((b) => b.dagNodes === undefined)).toBe(true);
+  });
+
   it('removes a whole DAG by its shared batch name, not one cluster', () => {
     const [dag] = groupIntoBatches(nestedDag());
     // Matching the shared JobBatchName takes down every node and every

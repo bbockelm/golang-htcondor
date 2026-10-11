@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -719,5 +720,102 @@ func TestEstimateManyMatchesEstimate(t *testing.T) {
 	}
 	if len(e.EstimateMany(nil)) != 0 {
 		t.Error("no queries, some answers")
+	}
+}
+
+// Scheduler- and local-universe jobs -- DAGMan, mostly -- are never
+// estimated, alone or in a listing, however much history there is.
+func TestSchedulerAndLocalUniverseNotEstimated(t *testing.T) {
+	e := New(Config{})
+	var jobs []job
+	for i := range 40 {
+		jobs = append(jobs, job{feat(fmt.Sprintf("u%d", i), "condor_dagman"), 100, t0.Add(time.Duration(i) * time.Second)})
+	}
+	jobs = append(jobs, job{feat("alice", "condor_dagman"), 100, t0.Add(time.Minute)})
+	ingest(e, jobs...)
+	dagman := Features{Owner: "alice", Cmd: "condor_dagman", Universe: UniverseScheduler}
+	local := Features{Owner: "alice", Cmd: "condor_dagman", Universe: UniverseLocal}
+	vanilla := Features{Owner: "alice", Cmd: "condor_dagman"}
+	for _, f := range []Features{dagman, local} {
+		for _, running := range []bool{false, true} {
+			r := e.Estimate(Query{Features: f, Running: running, Elapsed: 10})
+			if r.Available || r.Reason != ReasonNotEstimated || r.Basis != nil || r.Model.JobsIngested != 41 {
+				t.Errorf("universe %d running %v: %+v", f.Universe, running, r)
+			}
+		}
+	}
+	got := e.EstimateMany([]Query{{Features: vanilla}, {Features: dagman}, {Features: vanilla}, {Features: local, Running: true}})
+	for i, want := range []bool{true, false, true, false} {
+		if got[i].Available != want {
+			t.Errorf("EstimateMany[%d] = %+v, want available %v", i, got[i], want)
+		}
+		if !want && got[i].Reason != ReasonNotEstimated {
+			t.Errorf("EstimateMany[%d] reason %q", i, got[i].Reason)
+		}
+	}
+	if b, _ := json.Marshal(got[1]); !strings.Contains(string(b), `"reason":"not_estimated"`) {
+		t.Errorf("JSON = %s", b)
+	}
+}
+
+// A DAG node is never estimated from the same owner's standalone jobs,
+// even running the same command, nor the reverse.
+func TestDAGNodesAndStandaloneJobsKeptApart(t *testing.T) {
+	e := New(Config{})
+	node := Features{Owner: "alice", ClusterID: 1, Cmd: "sim", DAGNode: true}
+	alone := Features{Owner: "alice", ClusterID: 2, Cmd: "sim"}
+	ingest(e, job{node, 100, t0}, job{alone, 5000, t0.Add(time.Second)})
+	node.ClusterID, alone.ClusterID = 3, 4
+	if r := e.Estimate(Query{Features: node}); !r.Available || r.EstimateSeconds != 100 {
+		t.Errorf("DAG node: %+v", r)
+	}
+	if r := e.Estimate(Query{Features: alone}); !r.Available || r.EstimateSeconds != 5000 {
+		t.Errorf("standalone job: %+v", r)
+	}
+	// Nothing of either kind for a grid job.
+	grid := alone
+	grid.Universe = 9
+	if r := e.Estimate(Query{Features: grid}); r.Available || r.Reason != ReasonInsufficientHistory {
+		t.Errorf("grid job: %+v", r)
+	}
+}
+
+// The access point's group is by universe once the universe has enough
+// jobs, and every job until then. DAG nodes and standalone jobs share it.
+func TestGlobalIsByUniverse(t *testing.T) {
+	e := New(Config{})
+	var jobs []job
+	for i := range 30 {
+		f := Features{Owner: fmt.Sprintf("v%d", i), Cmd: "x", DAGNode: i%2 == 0}
+		jobs = append(jobs, job{f, 100, t0.Add(time.Duration(i) * time.Second)})
+	}
+	for i := range 20 {
+		f := Features{Owner: fmt.Sprintf("g%d", i), Cmd: "x", Universe: 9}
+		jobs = append(jobs, job{f, 9000, t0.Add(time.Duration(100+i) * time.Second)})
+	}
+	ingest(e, jobs...)
+	stranger := func(u int64, dag bool) Result {
+		return e.Estimate(Query{Features: Features{Owner: "bob", Cmd: "y", Universe: u, DAGNode: dag}})
+	}
+	for _, dag := range []bool{false, true} {
+		if r := stranger(5, dag); !r.Available || r.Basis.Level != "global" || r.EstimateSeconds != 100 || r.Basis.SampleCount != 30 {
+			t.Errorf("vanilla, DAG node %v: %+v", dag, r)
+		}
+	}
+	// Twenty grid jobs are too few to stand alone: every job answers.
+	if r := stranger(9, false); !r.Available || r.Basis.SampleCount != 50 {
+		t.Errorf("thin grid universe: %+v", r)
+	}
+	var more []job
+	for i := range 10 {
+		f := Features{Owner: fmt.Sprintf("g%d", i), Cmd: "x", Universe: 9}
+		more = append(more, job{f, 9000, t0.Add(time.Duration(200+i) * time.Second)})
+	}
+	ingest(e, more...)
+	if r := stranger(9, false); !r.Available || r.EstimateSeconds != 9000 || r.Basis.SampleCount != 30 {
+		t.Errorf("grid universe with thirty: %+v", r)
+	}
+	if st := e.Stats(); st.Keys["global"] != 2 {
+		t.Errorf("global groups = %d, want 2", st.Keys["global"])
 	}
 }

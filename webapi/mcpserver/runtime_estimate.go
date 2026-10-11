@@ -53,6 +53,8 @@ func renderRuntimeEstimate(r runtimeest.Result) string {
 			return "\n\nRuntime estimate: not available yet (the job history is still being read)."
 		case runtimeest.ReasonInsufficientHistory:
 			return "\n\nRuntime estimate: not available (too few comparable finished jobs)."
+		case runtimeest.ReasonNotEstimated:
+			return "\n\nRuntime estimate: none; scheduler- and local-universe jobs, such as a DAG's workflow manager, are not estimated."
 		}
 		return ""
 	}

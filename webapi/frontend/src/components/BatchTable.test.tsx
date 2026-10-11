@@ -402,6 +402,35 @@ describe('BatchTable time left', () => {
     expect(screen.queryByText('Time left')).toBeNull();
   });
 
+  it('describes a DAG by its nodes, never asks about its DAGMan job, and gives no finish time for it', async () => {
+    const dagAds: ClassAd[] = [
+      {
+        ClusterId: 100, ProcId: 0, JobStatus: 2, Owner: 'carol', Cmd: 'condor_dagman', QDate: 500,
+        JobBatchName: 'foo.dag+100', DAG_NodesTotal: 20, DAG_NodesDone: 11, DAG_NodesFailed: 2, DAG_NodesQueued: 3,
+      },
+      { ClusterId: 201, ProcId: 0, JobStatus: 2, Owner: 'carol', Cmd: '/bin/node', QDate: 600, JobBatchName: 'foo.dag+100', DAGManJobId: 100 },
+      { ClusterId: 202, ProcId: 0, JobStatus: 2, Owner: 'carol', Cmd: '/bin/node', QDate: 600, JobBatchName: 'foo.dag+100', DAGManJobId: 100 },
+      { ClusterId: 203, ProcId: 0, JobStatus: 1, Owner: 'carol', Cmd: '/bin/node', QDate: 600, JobBatchName: 'foo.dag+100', DAGManJobId: 100 },
+    ];
+    runtimeEstimates.mockResolvedValue(
+      answer({
+        '201.0': estimate({ elapsed_seconds: 600, remaining_seconds: 1800, estimate_seconds: 2400 }),
+        '202.0': estimate({ elapsed_seconds: 20000, exceeded_history: true }),
+        '203.0': estimate(),
+      }),
+    );
+    const batches = groupIntoBatches(dagAds);
+    table({ batches, expanded: new Set(batches.map((b) => b.batchID)) });
+    await screen.findAllByText('Time left');
+    expect(runtimeEstimates).toHaveBeenCalledWith(['201.0', '202.0', '203.0']);
+    const cell = screen.getByTestId('batch-time-left');
+    expect(cell.textContent).toMatch(/^7 of 20 nodes left1 of 2 running nodes done by ~.+1 waiting · each about 1h once started$/);
+    expect(cell.getAttribute('title')).not.toMatch(/All done|most by/);
+    expect(screen.getByText('1 running longer than usual')).toBeInTheDocument();
+    // The DAGMan job gets no time-left cell of its own; each node job does.
+    expect(screen.getAllByTestId('job-time-left')).toHaveLength(3);
+  });
+
   it('does not ask in multi-AP mode or for held jobs', () => {
     table({ multiAP: true });
     table({ detail: 'hold' });

@@ -33,7 +33,7 @@
 
 import type { ClassAd } from '@/lib/api';
 import { displayJobStatus } from '@/lib/api';
-import { attr, batchGroupKey, num, str } from '@/lib/batches';
+import { attr, batchGroupKey, dagNodeCounts, isDagManJob, isDagNode, num } from '@/lib/batches';
 
 export type ProgressPart = 'done' | 'running' | 'idle' | 'held' | 'queued' | 'failed' | 'other';
 
@@ -74,20 +74,6 @@ export const PROGRESS_WHY = {
 
 function attrNum(ad: ClassAd, name: string): number | undefined {
   return num(attr(ad, name));
-}
-
-// isDagManJob mirrors the server's test (mcpserver/handlers_dag.go):
-// DAG_NodesTotal is conclusive once DAGMan has started, and before that
-// the command is the only sign.
-function isDagManJob(ad: ClassAd): boolean {
-  if (attrNum(ad, 'DAG_NodesTotal') !== undefined) return true;
-  const cmd = str(ad.Cmd)?.trim();
-  return cmd === 'condor_dagman' || !!cmd?.endsWith('/condor_dagman');
-}
-
-// isDagNode: a job DAGMan submitted, including a nested sub-DAG's DAGMan.
-function isDagNode(ad: ClassAd): boolean {
-  return attr(ad, 'DAGManJobId') !== undefined && attr(ad, 'DAGManJobId') !== null;
 }
 
 // progressByBatch computes progress for every batch in `ads`, keyed by
@@ -132,22 +118,11 @@ function progressOf(ads: ClassAd[], complete: boolean): BatchProgressResult {
   return jobProgress(ads);
 }
 
-// dagProgress sums the root DAGMan jobs' own counts. There is normally one
-// root; two appear when two workflows were submitted under one batch name,
-// and nodes add up across them.
+// dagProgress is the root DAGMan jobs' own counts (see dagNodeCounts).
 function dagProgress(roots: ClassAd[]): BatchProgressResult {
-  let total = 0;
-  let done = 0;
-  let failed = 0;
-  let queued = 0;
-  for (const r of roots) {
-    const t = attrNum(r, 'DAG_NodesTotal');
-    if (t === undefined) return { known: false, why: PROGRESS_WHY.dagNotReporting };
-    total += t;
-    done += attrNum(r, 'DAG_NodesDone') ?? 0;
-    failed += attrNum(r, 'DAG_NodesFailed') ?? 0;
-    queued += attrNum(r, 'DAG_NodesQueued') ?? 0;
-  }
+  const c = dagNodeCounts(roots);
+  if (c === undefined) return { known: false, why: PROGRESS_WHY.dagNotReporting };
+  const { total, done, failed, queued } = c;
   // Everything else -- ready, waiting on a parent, in a PRE or POST
   // script, futile -- is "not done and not in the queue".
   const other = Math.max(0, total - done - failed - queued);

@@ -13,7 +13,8 @@ import (
 
 // Level is how a job is grouped with others for an estimate, from the
 // most specific (its own cluster) to the least (every job on the access
-// point). Every level but LevelGlobal is confined to one owner.
+// point). Every level but LevelGlobal is confined to one owner, and every
+// level is confined to one kind of job (see Features.Kind).
 type Level int
 
 // The levels, most specific first. The order is the tie-break: when two
@@ -35,9 +36,11 @@ const (
 	LevelIwd
 	// LevelCmd is jobs running the same program, whatever the arguments.
 	LevelCmd
-	// LevelOwner is all of the owner's jobs.
+	// LevelOwner is all of the owner's jobs of the same kind.
 	LevelOwner
-	// LevelGlobal is every job on the access point.
+	// LevelGlobal is every job on the access point in the same universe,
+	// DAG node or not, or every job while that universe has too few (see
+	// minGlobalSamples).
 	LevelGlobal
 
 	numLevels
@@ -77,10 +80,54 @@ type Features struct {
 	Args      []string
 	Iwd       string
 	BatchName string
+	// Universe is the job's JobUniverse; 0 (not known) is taken as
+	// vanilla.
+	Universe int64
+	// DAGNode is whether the job is a node of a DAG (DAGManJobId is set).
+	DAGNode bool
+}
+
+// Universes the estimator treats specially.
+const (
+	UniverseVanilla   = 5
+	UniverseScheduler = 7
+	UniverseLocal     = 12
+)
+
+// Estimated reports whether jobs like f get an estimate at all.
+// Scheduler- and local-universe jobs -- DAGMan, mostly -- run as long as
+// the work they manage, so their own history says nothing useful.
+func (f *Features) Estimated() bool {
+	return f.Universe != UniverseScheduler && f.Universe != UniverseLocal
+}
+
+// Kind is the kind of job f is, which every owner-confined group is
+// confined to: its universe, and whether it is a DAG node -- "u5" or
+// "u5|dag". A DAG node and a standalone job of the same owner never
+// share a group, even running the same command, nor do jobs of
+// different universes.
+func (f *Features) Kind() string {
+	if f.DAGNode {
+		return f.universeKind() + "|dag"
+	}
+	return f.universeKind()
+}
+
+// universeKind is Kind without the DAG flag: "u5". LevelGlobal is
+// grouped by it. Splitting the access point's jobs by DAG node as well
+// made the level worse on a replayed access point: its DAG nodes came
+// from a handful of owners, so their median was mostly one person's
+// workload.
+func (f *Features) universeKind() string {
+	u := f.Universe
+	if u <= 0 {
+		u = UniverseVanilla
+	}
+	return "u" + strconv.FormatInt(u, 10)
 }
 
 // FeatureAttrs are the job attributes FeaturesFromAd reads.
-var FeatureAttrs = []string{"Owner", "ClusterId", "ProcId", "Cmd", "Arguments", "Args", "Iwd", "JobBatchName"}
+var FeatureAttrs = []string{"Owner", "ClusterId", "ProcId", "Cmd", "Arguments", "Args", "Iwd", "JobBatchName", "JobUniverse", "DAGManJobId"}
 
 // FeaturesFromAd reads a job's features from its ad, live or historical.
 func FeaturesFromAd(ad *classad.ClassAd) Features {
@@ -91,6 +138,8 @@ func FeaturesFromAd(ad *classad.ClassAd) Features {
 	f.Args = jobargs.FromAd(ad)
 	f.Iwd, _ = ad.EvaluateAttrString("Iwd")
 	f.BatchName, _ = ad.EvaluateAttrString("JobBatchName")
+	f.Universe, _ = intAttr(ad, "JobUniverse")
+	_, f.DAGNode = intAttr(ad, "DAGManJobId")
 	return f
 }
 
@@ -99,17 +148,23 @@ func FeaturesFromAd(ad *classad.ClassAd) Features {
 // and must not group it with every other job that has none either.
 type Keys struct {
 	owner string
-	k     [numLevels]string
+	kind  string
+	// universe is LevelGlobal's group (see Features.universeKind).
+	universe string
+	k        [numLevels]string
 }
 
 // Owner is the owner the keys are confined to.
 func (k Keys) Owner() string { return k.owner }
 
+// Kind is the kind of job the keys are confined to (see Features.Kind).
+func (k Keys) Kind() string { return k.kind }
+
 // Key is the job's group at one level, or "" when the level does not
-// apply. LevelGlobal has a single group and reports "*".
+// apply. LevelGlobal's group is the job's universe ("u5").
 func (k Keys) Key(l Level) string {
 	if l == LevelGlobal {
-		return "*"
+		return k.universe
 	}
 	if l < 0 || l >= numLevels {
 		return ""
@@ -123,17 +178,18 @@ const keySep = "\x1f"
 
 // DeriveKeys computes a job's group at every level.
 //
-// Every key is prefixed with the owner, so an estimate for one person is
-// built only from that person's jobs. A job with no owner gets no
-// owner-confined keys at all and can only be answered by LevelGlobal.
+// Every key is prefixed with the owner and the job's kind, so an
+// estimate for one person is built only from that person's jobs of the
+// same kind. A job with no owner gets no owner-confined keys at all and
+// can only be answered by LevelGlobal.
 func DeriveKeys(f Features) Keys {
-	var k Keys
+	k := Keys{kind: f.Kind(), universe: f.universeKind()}
 	if f.Owner == "" {
 		return k
 	}
 	k.owner = f.Owner
-	o := f.Owner + keySep
-	k.k[LevelOwner] = f.Owner
+	k.k[LevelOwner] = f.Owner + keySep + k.kind
+	o := k.k[LevelOwner] + keySep
 	if f.ClusterID > 0 {
 		k.k[LevelCluster] = o + strconv.FormatInt(f.ClusterID, 10)
 	}

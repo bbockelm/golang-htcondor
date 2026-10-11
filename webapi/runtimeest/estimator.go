@@ -4,7 +4,8 @@
 // It is an online estimator, not a trained model. Every completed job is
 // filed under a ladder of groups (see Level) -- its cluster, its exact
 // command line, the same command line with the numbers masked, its batch
-// name, its working directory, its program, its owner -- and an estimate
+// name, its working directory, its program, its owner -- each confined to
+// jobs of the same kind (universe, and DAG node or not), and an estimate
 // is the median of the recent runtimes in one of the groups the new job
 // falls into. Which group answers is chosen per owner, by how well each
 // level has predicted that owner's jobs so far (the 3Sigma approach).
@@ -42,6 +43,10 @@ const (
 	// ReasonInsufficientHistory means none of the job's groups -- not
 	// even the whole access point's -- has enough finished jobs.
 	ReasonInsufficientHistory = "insufficient_history"
+	// ReasonNotEstimated means the job is of a kind that is never
+	// estimated: a scheduler- or local-universe job, such as a DAGMan
+	// workflow manager (see Features.Estimated).
+	ReasonNotEstimated = "not_estimated"
 )
 
 // Defaults for Config.
@@ -59,6 +64,8 @@ const (
 	minSamples = 1
 	// minGlobalSamples is the same for LevelGlobal, which is a guess
 	// about a stranger's job and should at least be a well-founded one.
+	// LevelGlobal answers from the job's own universe once that universe
+	// has this many, and from every job until then.
 	minGlobalSamples = 30
 	// minLonger is how many runs longer than a running job's elapsed time
 	// its group needs to re-estimate it once it has outlived the median.
@@ -283,8 +290,12 @@ func (o *ownerState) scores(v view) *[numLevels]float32 {
 
 type state struct {
 	groups [LevelGlobal]map[string]*window
-	global window
-	owners map[string]*ownerState
+	// global is every job, and byUniverse every job of one universe (see
+	// Features.universeKind); LevelGlobal answers from the job's universe
+	// once it holds minGlobalSamples and from global until then.
+	global     window
+	byUniverse map[string]*window
+	owners     map[string]*ownerState
 	// levelResid is every owner's prediction errors per view and
 	// answering level, and globalResid per view.
 	levelResid  [numViews][numLevels]window
@@ -319,7 +330,7 @@ type poolKey struct {
 }
 
 func newState() *state {
-	s := &state{owners: make(map[string]*ownerState)}
+	s := &state{owners: make(map[string]*ownerState), byUniverse: make(map[string]*window)}
 	for i := range s.groups {
 		s.groups[i] = make(map[string]*window)
 	}
@@ -425,6 +436,12 @@ func (s *state) ingest(r *record, cfg Config) {
 		w.add(r.runtime, r.at, cfg.Window, retainFactor*cfg.Window)
 	}
 	s.global.add(r.runtime, r.at, 4*cfg.Window, retainFactor*4*cfg.Window)
+	gu := s.byUniverse[r.keys.universe]
+	if gu == nil {
+		gu = &window{}
+		s.byUniverse[r.keys.universe] = gu
+	}
+	gu.add(r.runtime, r.at, 4*cfg.Window, retainFactor*4*cfg.Window)
 	s.jobs++
 	s.newest = max(s.newest, r.at)
 }
@@ -448,6 +465,12 @@ func (s *state) candidatesAsOf(k Keys, t int64, cfg Config) [numLevels]float64 {
 		}
 	}
 	preds[LevelGlobal] = math.NaN()
+	if w := s.byUniverse[k.universe]; w != nil {
+		if vals := w.before(t, 4*cfg.Window, &s.scratch); len(vals) >= minGlobalSamples {
+			preds[LevelGlobal] = quantileOf(vals, 0.5)
+			return preds
+		}
+	}
 	if vals := s.global.before(t, 4*cfg.Window, &s.scratch); len(vals) >= minGlobalSamples {
 		preds[LevelGlobal] = quantileOf(vals, 0.5)
 	}
@@ -470,7 +493,9 @@ func (s *state) candidates(k Keys) ([numLevels]float64, [numLevels]*window) {
 		}
 	}
 	preds[LevelGlobal] = math.NaN()
-	if s.global.len() >= minGlobalSamples {
+	if w := s.byUniverse[k.universe]; w.len() >= minGlobalSamples {
+		preds[LevelGlobal], wins[LevelGlobal] = w.median(), w
+	} else if s.global.len() >= minGlobalSamples {
 		preds[LevelGlobal], wins[LevelGlobal] = s.global.median(), &s.global
 	}
 	return preds, wins
@@ -510,13 +535,18 @@ func logError(pred, actual float64) float64 {
 }
 
 // Estimate answers for one job: a waiting job from what the submit view
-// learned, and a running one from what the start view did.
+// learned, and a running one from what the start view did. A job of a
+// kind that is never estimated (see Features.Estimated) gets
+// ReasonNotEstimated.
 func (e *Estimator) Estimate(q Query) Result {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	s := e.st
 	if !s.loaded {
 		return Result{Model: s.model(), Reason: ReasonWarmingUp}
+	}
+	if !q.Features.Estimated() {
+		return Result{Model: s.model(), Reason: ReasonNotEstimated}
 	}
 	p := s.prepare(DeriveKeys(q.Features), viewOf(q), !e.cfg.noPoolCache)
 	return p.finish(q, s.model())
@@ -551,6 +581,10 @@ func (e *Estimator) EstimateMany(qs []Query) []Result {
 	}
 	for i := range qs {
 		q := &qs[i]
+		if !q.Features.Estimated() {
+			out[i] = Result{Model: m, Reason: ReasonNotEstimated}
+			continue
+		}
 		v := viewOf(*q)
 		l := &last[v]
 		if !l.set || !sameFeatures(&q.Features, l.f) {
@@ -569,7 +603,8 @@ func (e *Estimator) EstimateMany(qs []Query) []Result {
 // the same keys, without deriving them.
 func sameFeatures(a, b *Features) bool {
 	return a.Owner == b.Owner && a.ClusterID == b.ClusterID && a.Cmd == b.Cmd &&
-		a.Iwd == b.Iwd && a.BatchName == b.BatchName && slices.Equal(a.Args, b.Args)
+		a.Iwd == b.Iwd && a.BatchName == b.BatchName && a.Universe == b.Universe &&
+		a.DAGNode == b.DAGNode && slices.Equal(a.Args, b.Args)
 }
 
 func viewOf(q Query) view {
@@ -742,8 +777,8 @@ func (s *state) model() Model {
 }
 
 // Evict forgets every group and owner with no completion since
-// olderThan, and returns how many were dropped. LevelGlobal is never
-// dropped. This is what bounds memory: without it a cluster id, once
+// olderThan, and returns how many were dropped. LevelGlobal's groups, one
+// per universe, are never dropped. This is what bounds memory: without it a cluster id, once
 // seen, would be kept for the life of the process.
 func (e *Estimator) Evict(olderThan time.Time) int {
 	e.wmu.Lock()
@@ -797,7 +832,8 @@ type Stats struct {
 	Within2x        int64
 	ScoredByLevel   map[string]int64
 	Within2xByLevel map[string]int64
-	// Keys is how many groups each level holds; LevelGlobal always one.
+	// Keys is how many groups each level holds; for LevelGlobal, how many
+	// universes it has seen.
 	Keys map[string]int
 	// Owners is how many owners have state.
 	Owners int
@@ -825,7 +861,7 @@ func (e *Estimator) Stats() Stats {
 		out.ScoredByLevel[l.String()] = s.scoredBy[l]
 		out.Within2xByLevel[l.String()] = s.withinBy[l]
 		if l == LevelGlobal {
-			out.Keys[l.String()] = 1
+			out.Keys[l.String()] = len(s.byUniverse)
 		} else {
 			out.Keys[l.String()] = len(s.groups[l])
 		}
@@ -838,7 +874,7 @@ func (e *Estimator) Stats() Stats {
 // Clipped for the same reason as QueryAttrs.
 var HistoryAttrs = slices.Clip(append(slices.Clone(FeatureAttrs),
 	"CommittedTime", "RemoteWallClockTime", "CompletionDate", "EnteredHistoryTime",
-	"ExitCode", "ExitBySignal", "JobUniverse", "JobStatus", "QDate", "JobCurrentStartDate", "JobStartDate",
+	"ExitCode", "ExitBySignal", "JobStatus", "QDate", "JobCurrentStartDate", "JobStartDate",
 	"GlobalJobId"))
 
 // CompletedRuntime is how long a finished job ran, and whether it is a
@@ -860,7 +896,7 @@ func CompletedRuntime(ad *classad.ClassAd) (float64, bool) {
 	if sig, ok := ad.EvaluateAttrBool("ExitBySignal"); ok && sig {
 		return 0, false
 	}
-	if u, _ := intAttr(ad, "JobUniverse"); u == 7 || u == 12 {
+	if u, _ := intAttr(ad, "JobUniverse"); u == UniverseScheduler || u == UniverseLocal {
 		return 0, false
 	}
 	runtime, ok := ad.EvaluateAttrNumber("CommittedTime")
@@ -931,6 +967,8 @@ func (b *Batch) Add(c Completion) {
 	}
 	k := DeriveKeys(c.Features)
 	k.owner = b.interned(k.owner)
+	k.kind = b.interned(k.kind)
+	k.universe = b.interned(k.universe)
 	for i := range k.k {
 		k.k[i] = b.interned(k.k[i])
 	}
