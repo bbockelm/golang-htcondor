@@ -541,6 +541,10 @@ type sharedCache[T any] struct {
 	timeout time.Duration
 	// maxEntries bounds the cache; zero means maxUtilizationCacheEntries.
 	maxEntries int
+	// sizeOf and maxSize, when set, bound the cache by the total size of
+	// its values as well (see store).
+	sizeOf  func(T) int
+	maxSize int
 }
 
 type sharedEntry[T any] struct {
@@ -551,6 +555,10 @@ type sharedEntry[T any] struct {
 	val  T
 	has  bool
 	at   time.Time
+	// size and used are read and written under the cache's mu, for
+	// eviction by size: the value's sizeOf, and when it was last served.
+	size int
+	used time.Time
 }
 
 func newSharedCache[T any](ttl, timeout time.Duration) *sharedCache[T] {
@@ -623,6 +631,9 @@ func (c *sharedCache[T]) getWithin(ctx context.Context, key string, timeout time
 	}
 
 	if entry.has && c.now().Sub(entry.at) < c.ttl {
+		c.mu.Lock()
+		entry.used = c.now()
+		c.mu.Unlock()
 		return entry.val, nil
 	}
 	computeCtx, cancel := sharedComputeContext(ctx, timeout)
@@ -636,8 +647,56 @@ func (c *sharedCache[T]) getWithin(ctx context.Context, key string, timeout time
 		}
 		return zero, err
 	}
-	entry.val, entry.has, entry.at = val, true, c.now()
+	c.store(key, entry, val)
 	return val, nil
+}
+
+// store keeps a computed value. Called with entry's lock held.
+//
+// With a size bound, a value larger than the whole bound is not kept at
+// all -- the entry is dropped, so the next request computes it again --
+// and keeping one evicts the least recently served others until the
+// total fits. Entries being computed or waited on are left alone, so the
+// total can briefly exceed the bound by their size.
+func (c *sharedCache[T]) store(key string, entry *sharedEntry[T], val T) {
+	now := c.now()
+	if c.sizeOf == nil {
+		entry.val, entry.has, entry.at = val, true, now
+		return
+	}
+	size := c.sizeOf(val)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if size > c.maxSize {
+		var zero T
+		entry.val, entry.has, entry.size = zero, false, 0
+		if c.byKey[key] == entry {
+			delete(c.byKey, key)
+		}
+		return
+	}
+	entry.val, entry.has, entry.at, entry.size, entry.used = val, true, now, size, now
+	total := 0
+	for _, e := range c.byKey {
+		total += e.size
+	}
+	for total > c.maxSize {
+		var lruKey string
+		var lru *sharedEntry[T]
+		for k, e := range c.byKey {
+			if e == entry || e.size == 0 || len(e.lock) > 0 {
+				continue
+			}
+			if lru == nil || e.used.Before(lru.used) {
+				lruKey, lru = k, e
+			}
+		}
+		if lru == nil {
+			return
+		}
+		total -= lru.size
+		delete(c.byKey, lruKey)
+	}
 }
 
 // makeRoom keeps the cache under maxUtilizationCacheEntries. Called with

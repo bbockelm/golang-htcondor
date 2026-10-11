@@ -30,6 +30,13 @@ import (
 // it -- and keeps only that one workflow's jobs, in a small cache of its
 // own, for the pages that follow. Scrolling a workflow costs one read;
 // the analysis itself costs nothing more.
+//
+// That cache is bounded by the total jobs it holds, not just by its
+// entries: at most HTTP_API_UTILIZATION_MAX_JOBS jobs (a million, ~250 MB,
+// by default) across every cached workflow, evicting the least recently
+// paged ones to fit a new one. A single workflow larger than that bound is
+// not cached at all, and every page of it re-reads the window -- slow, but
+// the alternative is holding more than the operator allowed.
 
 // Page sizes.
 const (
@@ -37,11 +44,9 @@ const (
 	utilizationJobsPageMax     = 500
 )
 
-// utilizationJobSetEntries bounds the workflows whose jobs are held for
-// paging. Each is at most the analysis limit's worth of jobs, ~250 bytes
-// apiece, so this is the knob on the endpoint's memory: four at the
-// million-job ceiling is a gigabyte in the worst case, and a few
-// megabytes in the usual one.
+// utilizationJobSetEntries bounds how many workflows' jobs are held for
+// paging at once. Memory is bounded separately, by total jobs (see the
+// file comment).
 const utilizationJobSetEntries = 4
 
 // utilizationJobSet is one workflow's jobs, as read for paging.
@@ -224,6 +229,8 @@ func (s *Handler) utilizationJobSets() *jobSetCache {
 	s.jobSetCacheOnce.Do(func() {
 		c := newSharedCache[utilizationJobSet](utilizationRefresh, utilizationComputeTimeout(utilizationDefaultLimit))
 		c.maxEntries = utilizationJobSetEntries
+		c.sizeOf = func(set utilizationJobSet) int { return len(set.jobs) }
+		c.maxSize = s.utilizationMaxLimit()
 		s.jobSetCacheVal = c
 	})
 	return s.jobSetCacheVal

@@ -748,3 +748,57 @@ func TestUtilizationJobs(t *testing.T) {
 		}
 	}
 }
+
+// The jobs cache is bounded by total jobs held: keeping a workflow evicts
+// the least recently paged ones until the total fits, and one bigger than
+// the whole bound is not kept at all.
+func TestJobSetCacheBoundedBySize(t *testing.T) {
+	c := newSharedCache[utilizationJobSet](time.Hour, time.Minute)
+	c.maxEntries = 10
+	c.sizeOf = func(s utilizationJobSet) int { return len(s.jobs) }
+	c.maxSize = 10
+	clock := time.Unix(1700000000, 0)
+	c.now = func() time.Time { clock = clock.Add(time.Second); return clock }
+
+	computed := map[string]int{}
+	get := func(key string, n int) {
+		t.Helper()
+		_, err := c.get(context.Background(), key, func(context.Context) (utilizationJobSet, error) {
+			computed[key]++
+			return utilizationJobSet{jobs: make([]utilization.Job, n)}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	get("a", 6)
+	get("b", 3)
+	get("a", 6) // a is now the more recently served
+	get("c", 5) // 6+3+5 > 10: b goes first (least recent), then 6+5 still > 10, a goes
+	if _, ok := c.peek("b"); ok {
+		t.Error("b survived; it was least recently served")
+	}
+	if _, ok := c.peek("c"); !ok {
+		t.Error("c was not kept")
+	}
+	total := 0
+	for _, e := range c.byKey {
+		total += e.size
+	}
+	if total > c.maxSize {
+		t.Errorf("cache holds %d jobs, bound %d", total, c.maxSize)
+	}
+
+	// Larger than the whole bound: served, never kept.
+	get("huge", 11)
+	get("huge", 11)
+	if computed["huge"] != 2 {
+		t.Errorf("an oversized set was computed %d times for two requests, want 2 (not cached)", computed["huge"])
+	}
+	if _, ok := c.peek("c"); !ok {
+		t.Error("an oversized set evicted c")
+	}
+	if computed["a"] != 1 || computed["c"] != 1 {
+		t.Errorf("computations = %v", computed)
+	}
+}
