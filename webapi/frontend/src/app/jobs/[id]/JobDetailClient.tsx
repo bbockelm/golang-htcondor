@@ -18,6 +18,7 @@ import { useResolvedParams } from '@/lib/useResolvedParams';
 import { useMultiAPMode } from '@/lib/multiap';
 import { summarizeRequirements, standardLabels } from '@/lib/requirements';
 import { coresUsed, jobTiming } from '@/lib/batches';
+import { OwnerLink } from '@/components/OwnerLink';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -346,7 +347,7 @@ export function MultiAPJobView({ id, archivedView }: { id: string; archivedView:
               }
             />
             <Field label="Access point" value={schedd ?? '—'} mono />
-            <Field label="Owner" value={str(data.Owner) ?? '—'} />
+            <Field label="Owner" value={<OwnerLink owner={str(data.Owner)} />} />
             <Field
               label="Submitted"
               value={num(data.QDate) ? new Date(num(data.QDate)! * 1000).toLocaleString() : '—'}
@@ -430,7 +431,7 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
               : undefined
           }
         />
-        <Field label="Owner" value={owner ?? '—'} />
+        <Field label="Owner" value={<OwnerLink owner={owner} />} />
         <Field
           label="Submitted"
           value={qdate ? new Date(qdate * 1000).toLocaleString() : '—'}
