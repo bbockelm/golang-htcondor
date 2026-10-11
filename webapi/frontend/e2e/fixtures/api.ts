@@ -12,6 +12,7 @@ import type {
 import { utilizationFixture, utilizationJobsFixture } from '../../src/lib/utilization.fixture';
 import type { UtilJobSort } from '../../src/lib/utilization';
 import type { MetricsResponse } from '../../src/lib/metrics';
+import type { DrainEstimates } from '../../src/lib/drain';
 
 // Frozen sample responses for the smoke suite.
 //
@@ -284,6 +285,26 @@ export const multiAPAccessPointsFixture: AccessPointsResponse = {
   hub: { reachable: true },
 };
 
+// The pool's drain estimates with nothing running anywhere: the neutral
+// answer, so a page that asks renders its empty state. A test that wants
+// nodes routes its own (see pool.smoke.spec.ts).
+export const emptyDrainFixture: DrainEstimates = {
+  generated_at: new Date().toISOString(),
+  age_seconds: 0,
+  stale: false,
+  estimates_available: true,
+  summary: {
+    machines: 0,
+    jobs_running: 0,
+    jobs_estimated: 0,
+    jobs_from_this_ap: 0,
+    cores_freeing_next_hour: 0,
+    draining_nodes: 0,
+    draining_likely_empty_within_2h: 0,
+  },
+  machines: [],
+};
+
 export async function installApiFixtures(page: Page, opts: { multiAP?: boolean } = {}) {
   const table: Record<string, unknown> = {
     '/api/v1/whoami': { authenticated: true, user: 'e2e@test.htcondor.org' },
@@ -325,6 +346,7 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
     '/api/v1/jupyter/instances': { instances: [] },
     '/api/v1/interactive/terminal': { terminals: [] },
     '/api/v1/apps': { apps: [] },
+    '/api/v1/pool/drain-estimates': emptyDrainFixture,
   };
   if (opts.multiAP) {
     table['/api/v1/auth/me'] = { ...sessionFixture, is_admin: false, multi_ap: true };

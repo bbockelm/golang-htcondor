@@ -477,6 +477,9 @@ type Handler struct {
 	// estimate.
 	poolShapeCacheOnce sync.Once
 	poolShapeCacheVal  *poolShapeCache
+	// poolDrainVal answers /api/v1/pool/drain-estimates; see pool_drain.go.
+	poolDrainOnce sync.Once
+	poolDrainVal  *poolDrain
 
 	// jupyterRegistry tracks pending and live JupyterLab tunnel instances.
 	// Created lazily on first /api/v1/jupyter use so older deployments that

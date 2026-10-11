@@ -2983,6 +2983,115 @@ const openAPISchema = `{
         }
       }
     },
+    "/pool/drain-estimates": {
+      "get": {
+        "summary": "When each execute node would be empty if drained now",
+        "description": "For every execute node with running jobs (or that is draining): how long a drain started now would take to empty it. A drain lets each job run until it finishes or its retirement limit runs out, whichever is first. Retirement limits come from every claimed slot; expected finishing times exist only for jobs submitted from this access point, estimated from their owners' finished jobs. So a node whose jobs all have an estimate gets likely_empty_seconds; one with jobs from other access points gets at_least_seconds (the estimated part) and unknown_up_to_seconds (the latest retirement limit among the rest). The answer covers every user's jobs, is computed once for all callers, and is up to a minute old; seconds are counted from generated_at. Without ?machine the per-job slots are omitted. Not available in multi-AP mode.",
+        "operationId": "getPoolDrainEstimates",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "query",
+            "required": false,
+            "description": "Answer for this one machine (its Machine attribute, case-insensitive), with a row per running job.",
+            "schema": {"type": "string"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The estimates. When the latest refresh failed, the last good answer with stale true and error set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["generated_at", "age_seconds", "stale", "estimates_available", "summary", "machines"],
+                  "properties": {
+                    "generated_at": {"type": "string", "format": "date-time"},
+                    "age_seconds": {"type": "number"},
+                    "stale": {"type": "boolean", "description": "The latest refresh failed; this is the last answer that worked."},
+                    "error": {"type": "string", "description": "Why the answer is stale, or why it has no runtime estimates."},
+                    "estimates_available": {"type": "boolean", "description": "False when this access point does not estimate runtimes; the retirement bounds are still given."},
+                    "access_point": {"type": "string", "description": "This access point's schedd name, as it appears in GlobalJobId."},
+                    "summary": {
+                      "type": "object",
+                      "properties": {
+                        "machines": {"type": "integer"},
+                        "jobs_running": {"type": "integer"},
+                        "jobs_estimated": {"type": "integer"},
+                        "jobs_from_this_ap": {"type": "integer"},
+                        "cores_freeing_next_hour": {"type": "number", "description": "Cores held by estimated jobs expected to finish on their own within the hour. Jobs from this access point only."},
+                        "draining_nodes": {"type": "integer"},
+                        "draining_likely_empty_within_2h": {"type": "integer", "description": "Draining nodes all of whose jobs are expected to be gone within two hours."}
+                      }
+                    },
+                    "machines": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "machine": {"type": "string"},
+                          "draining": {"type": "boolean"},
+                          "jobs_total": {"type": "integer"},
+                          "jobs_estimated": {"type": "integer"},
+                          "jobs_from_this_ap": {"type": "integer"},
+                          "jobs_unknown_end": {"type": "integer", "description": "Jobs with no estimate whose retirement limit is more than a minute away."},
+                          "jobs_unknown_from_other_aps": {"type": "integer"},
+                          "likely_empty_seconds": {"type": "number", "description": "When the jobs with a known end are expected to be gone; 0 for a node with nothing running; absent when no job has a known end."},
+                          "likely_empty_at": {"type": "string", "format": "date-time"},
+                          "at_least_seconds": {"type": "number", "description": "Present when some jobs have an unknown end: likely_empty_seconds is then only a lower bound."},
+                          "at_most_seconds": {"type": "number", "description": "The latest a drain could take: the startd's ExpectedMachineGracefulDrainingCompletion, else the latest retirement deadline."},
+                          "at_most_at": {"type": "string", "format": "date-time"},
+                          "unknown_up_to_seconds": {"type": "number", "description": "The latest retirement deadline among the jobs with an unknown end."},
+                          "evicted_on_drain": {"type": "integer", "description": "Jobs a drain now would evict: their retirement limit ends before they would, or within a minute."},
+                          "exceeded": {"type": "integer", "description": "Jobs running longer than comparable jobs have."},
+                          "expected_ends": {
+                            "type": "array",
+                            "items": {"type": "object", "properties": {"seconds": {"type": "number"}, "usually_by_seconds": {"type": "number"}, "cpus": {"type": "number"}}}
+                          },
+                          "slots": {
+                            "type": "array",
+                            "description": "Only with ?machine.",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {"type": "string"},
+                                "owner": {"type": "string", "description": "RemoteOwner"},
+                                "cpus": {"type": "number"},
+                                "backfill": {"type": "boolean"},
+                                "submitted_from": {"type": "string", "description": "The schedd in the job's GlobalJobId."},
+                                "from_this_ap": {"type": "boolean"},
+                                "running_seconds": {"type": "number"},
+                                "expected_end": {"type": "string", "format": "date-time"},
+                                "usually_by": {"type": "string", "format": "date-time", "description": "When about 90% of comparable jobs have finished."},
+                                "exceeded": {"type": "boolean"},
+                                "retirement_deadline": {"type": "string", "format": "date-time"},
+                                "evicted_on_drain": {"type": "boolean"}
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "501": {
+            "description": "No collector configured, or multi-AP mode",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "502": {
+            "description": "The collector could not be read and there is no earlier answer",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
     "/collector/ads": {
       "get": {
         "summary": "Query collector for all ads",

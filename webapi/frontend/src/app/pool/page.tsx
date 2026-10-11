@@ -26,6 +26,23 @@ import {
   type NodeGroup,
   type PoolSummary,
 } from '@/lib/pool';
+import {
+  byMachine,
+  clockTime,
+  drainTotals,
+  TIMELINE_SECONDS,
+  type DrainSlot,
+  type MachineDrain,
+} from '@/lib/drain';
+import {
+  DrainCards,
+  DrainCellView,
+  DrainingBadge,
+  SlotDrainCells,
+  Timeline,
+  TimelineLegend,
+  type DrainView,
+} from '@/components/PoolDrain';
 
 export default function PoolPage() {
   const router = useRouter();
@@ -61,6 +78,28 @@ export default function PoolPage() {
 
   const slots = useMemo(() => (data?.ads ?? []).map(parseSlot), [data]);
 
+  // When each node would be empty if drained now. One shared answer on
+  // the server, refreshed with the page; a server without a collector
+  // (or in multi-AP mode) answers 501 and the column is not shown.
+  const drainQuery = useQuery({
+    queryKey: ['pool-drain'],
+    queryFn: () => api.pool.drainEstimates(),
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const drainUnsupported =
+    drainQuery.error instanceof ApiError && drainQuery.error.status === 501;
+  const drain = useMemo<DrainView | null>(() => {
+    const d = drainQuery.data;
+    if (!d) return null;
+    return {
+      index: byMachine(d.machines),
+      age: d.age_seconds,
+      now: new Date(),
+      available: d.estimates_available,
+    };
+  }, [drainQuery.data]);
+
   const textFilter = mode === 'text' ? input.trim().toLowerCase() : '';
   const filtered = useMemo(() => {
     if (!textFilter) return slots;
@@ -73,6 +112,16 @@ export default function PoolPage() {
 
   const summary = useMemo(() => summarize(filtered), [filtered]);
   const nodes = useMemo(() => groupByMachine(filtered), [filtered]);
+  // The cards follow the filter: they add up the nodes in view.
+  const drainTotalsInView = useMemo(() => {
+    if (!drain) return null;
+    const inView: MachineDrain[] = [];
+    for (const n of nodes) {
+      const m = drain.index.get(n.machine.toLowerCase());
+      if (m) inView.push(m);
+    }
+    return drainTotals(inView, drain.age);
+  }, [drain, nodes]);
 
   const [sort, setSort] = useState<SortState>({ key: 'machine', dir: 'asc' });
   const sortedNodes = useMemo(() => sortNodes(nodes, sort), [nodes, sort]);
@@ -155,6 +204,21 @@ export default function PoolPage() {
           ) : (
             <>
               <SummaryPanel summary={summary} />
+              {drain && drainTotalsInView && (
+                <DrainCards totals={drainTotalsInView} available={drain.available} />
+              )}
+              {drainQuery.data?.error && (
+                <p className="rounded-sm border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  {drainQuery.data.stale
+                    ? `Drain estimates are from ${Math.round(drainQuery.data.age_seconds / 60)} minutes ago; the latest refresh failed.`
+                    : 'Running jobs on this access point could not be read, so no node has a run-time estimate.'}
+                </p>
+              )}
+              {drainQuery.error && !drainUnsupported && (
+                <p className="text-xs text-gray-400">
+                  Drain estimates are unavailable: {(drainQuery.error as Error).message}
+                </p>
+              )}
               {nodes.length === 0 ? (
                 <p className="text-sm text-gray-500">
                   No slots match this {mode === 'expr' ? 'expression' : 'filter'}.
@@ -166,6 +230,7 @@ export default function PoolPage() {
                   onSort={onSort}
                   expanded={expanded}
                   onToggle={toggle}
+                  drain={drainUnsupported ? undefined : drain}
                   onSlot={(name) =>
                     router.push(`/pool/slots/${encodeURIComponent(name)}`)
                   }
@@ -361,6 +426,7 @@ function NodeTable({
   expanded,
   onToggle,
   onSlot,
+  drain,
 }: {
   nodes: NodeGroup[];
   sort: SortState;
@@ -368,9 +434,14 @@ function NodeTable({
   expanded: Set<string>;
   onToggle: (machine: string) => void;
   onSlot: (name: string) => void;
+  // undefined: the server has no drain estimates; null: not loaded yet.
+  drain?: DrainView | null;
 }) {
+  const showDrain = drain !== undefined;
+  const windowEnd = drain ? clockTime(new Date(drain.now.getTime() + TIMELINE_SECONDS * 1000), drain.now) : '';
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+      {drain && <TimelineLegend />}
       <table className="min-w-full text-sm tabular-nums">
         <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
           <tr>
@@ -380,6 +451,13 @@ function NodeTable({
             <SortHeader label="CPUs" col="cpus" align="right" sort={sort} onSort={onSort} />
             <SortHeader label="Memory (GiB)" col="memory" align="right" sort={sort} onSort={onSort} />
             <SortHeader label="GPUs" col="gpus" align="right" sort={sort} onSort={onSort} />
+            {showDrain && <th className="px-3 py-2 text-left">Empty if drained now</th>}
+            {showDrain && (
+              <th className="px-3 py-2 text-left normal-case tracking-normal">
+                <span className="uppercase tracking-wide">Next 6h</span>
+                {windowEnd && <span className="ml-1 text-gray-400">(now → {windowEnd})</span>}
+              </th>
+            )}
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
@@ -390,6 +468,7 @@ function NodeTable({
               open={expanded.has(node.machine)}
               onToggle={() => onToggle(node.machine)}
               onSlot={onSlot}
+              drain={drain}
             />
           ))}
         </tbody>
@@ -420,13 +499,34 @@ function NodeRow({
   open,
   onToggle,
   onSlot,
+  drain,
 }: {
   node: NodeGroup;
   open: boolean;
   onToggle: () => void;
   onSlot: (name: string) => void;
+  drain?: DrainView | null;
 }) {
   const u = node.usage;
+  const showDrain = drain !== undefined;
+  const md = drain?.index.get(node.machine.toLowerCase());
+
+  // The node's running jobs, one per slot, only while the row is open.
+  const { data: drainDetail } = useQuery({
+    queryKey: ['pool-drain-node', node.machine],
+    queryFn: () => api.pool.drainEstimates(node.machine),
+    enabled: open && showDrain,
+    refetchInterval: open ? 30_000 : false,
+    retry: false,
+  });
+  const drainSlots = useMemo(() => {
+    if (!showDrain) return undefined;
+    const bySlot = new Map<string, DrainSlot>();
+    for (const m of drainDetail?.machines ?? []) {
+      for (const s of m.slots ?? []) bySlot.set(s.name, s);
+    }
+    return bySlot;
+  }, [drainDetail, showDrain]);
 
   // The overview query excludes per-job (dynamic) slots to keep the payload
   // small, so node.slots has none. When a node is expanded, fetch its full
@@ -464,6 +564,7 @@ function NodeRow({
           <span className="inline-flex items-center gap-2">
             {node.machine}
             {node.owner && <OwnerBadge />}
+            {md?.draining && <DrainingBadge />}
           </span>
         </td>
         <td className="px-3 py-2 text-right text-gray-600">{node.runningJobs}</td>
@@ -476,14 +577,24 @@ function NodeRow({
         <td className="px-3 py-2 text-right">
           <UsagePair used={String(u.usedGpus)} total={String(u.totalGpus)} />
         </td>
+        {showDrain && (
+          <td className="px-3 py-2" data-testid="drain-cell">
+            {drain ? <DrainCellView m={md} drain={drain} running={node.runningJobs} /> : <span className="text-gray-300">…</span>}
+          </td>
+        )}
+        {showDrain && (
+          <td className="px-3 py-2">{drain && <Timeline m={md} age={drain.age} />}</td>
+        )}
       </tr>
       {open && (
         <tr>
-          <td colSpan={6} className="bg-gray-50 px-3 py-2">
+          <td colSpan={showDrain ? 8 : 6} className="bg-gray-50 px-3 py-2">
             <SlotSubTable
               slots={detailSlots}
               loading={detailFetching && !detail}
               onSlot={onSlot}
+              drainSlots={drainSlots}
+              now={drain?.now}
             />
           </td>
         </tr>
@@ -496,10 +607,16 @@ function SlotSubTable({
   slots,
   loading,
   onSlot,
+  drainSlots,
+  now,
 }: {
   slots: Slot[];
   loading?: boolean;
   onSlot: (name: string) => void;
+  // Each running job's drain detail by slot name; undefined hides the
+  // columns.
+  drainSlots?: Map<string, DrainSlot>;
+  now?: Date;
 }) {
   const ordered = [...slots].sort((a, b) => a.name.localeCompare(b.name));
   return (
@@ -515,6 +632,8 @@ function SlotSubTable({
           <th className="px-2 py-1 text-right">Memory</th>
           <th className="px-2 py-1 text-right">GPUs</th>
           <th className="px-2 py-1 text-left">Owner</th>
+          {drainSlots && <th className="px-2 py-1 text-left">Submitted from</th>}
+          {drainSlots && <th className="px-2 py-1 text-left">Expected end</th>}
         </tr>
       </thead>
       <tbody>
@@ -550,6 +669,7 @@ function SlotSubTable({
             <td className="px-2 py-1 text-right">{gib(s.memoryMB)}</td>
             <td className="px-2 py-1 text-right">{s.gpus ?? '—'}</td>
             <td className="px-2 py-1 text-gray-600">{s.remoteOwner ?? '—'}</td>
+            {drainSlots && <SlotDrainCells d={drainSlots.get(s.name)} now={now ?? new Date()} />}
           </tr>
         ))}
       </tbody>
