@@ -388,7 +388,7 @@ export default function JobsPage() {
           {ownedByMe ? 'My Batches' : isAdmin || !isLead ? 'All Batches' : 'My and Project Batches'}
         </h1>
         <span className="text-sm text-gray-500">
-          One row per batch. Click a row to see the jobs in it.
+          One entry per batch; open one to see its jobs.
         </span>
         {(isAdmin || isLead) && !multiAP && <ScopeToggle />}
         {/* The same jobs over time. Carries whatever narrows this page on
