@@ -1799,9 +1799,11 @@ const openAPISchema = `{
                       "type": "object",
                       "properties": {
                         "level": {"type": "string", "enum": ["cluster", "exact", "template", "batch", "iwd", "cmd", "owner", "global"], "description": "Which group of completed jobs answered: the job's own cluster, the same command line, the same command line with numbers masked, the same batch name, the same submit directory, the same program, all the owner's jobs, or all jobs on the access point."},
-                        "sample_count": {"type": "integer", "description": "How many recent runtimes that group holds."}
+                        "sample_count": {"type": "integer", "description": "How many recent runtimes that group holds."},
+                        "new_command": {"type": "boolean", "description": "None of the owner's recently completed jobs ran the same program. Absent when false."}
                       }
                     },
+                    "rough": {"type": "boolean", "description": "The estimate came from a broad group (level cmd, owner or global), which is right far less often than the specific ones; present it as a rough guess."},
                     "elapsed_seconds": {"type": "number", "description": "How long the current execution has run. Present only while the job is running."},
                     "remaining_seconds": {"type": "number", "description": "estimate_seconds less elapsed_seconds. Absent when the job is not running or has exceeded its history."},
                     "exceeded_history": {"type": "boolean", "description": "The job has run longer than nearly every comparable job, so no remaining time is given; the estimate and range are what history said before it started."},

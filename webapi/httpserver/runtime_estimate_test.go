@@ -372,6 +372,9 @@ func TestRuntimeEstimateEndpointOwnerScope(t *testing.T) {
 	if !body.Available || body.EstimateSeconds != 100 || body.Basis == nil || body.Basis.Level != "owner" {
 		t.Errorf("alice's estimate came from someone else's history: %+v", body)
 	}
+	if !body.Rough {
+		t.Errorf("an owner-level estimate is not marked rough: %+v", body)
+	}
 	if body.JobID != "1.0" || body.Model.JobsIngested != 10 {
 		t.Errorf("envelope: %+v", body)
 	}
