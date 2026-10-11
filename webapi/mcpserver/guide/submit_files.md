@@ -16,6 +16,10 @@ A submit file that uploads a custom script:
 The "queue" line determines how many job processes to create. Upload
 my_script.sh with upload_job_input after submit_job.
 
+To size request_cpus, request_memory and request_disk for work you have run
+before, ask analyze_utilization: it compares what past jobs of the same
+workflow requested with what they used and gives the lines to change.
+
 ## transfer_executable
 
 By default, HTCondor transfers the executable to the remote machine. If the

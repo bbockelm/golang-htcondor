@@ -2123,9 +2123,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		CCB:                     h.ccbDialer,
 		SigningKeyPath:          h.signingKeyPath,
 		TrustDomain:             h.trustDomain,
-		UIDDomain:               h.uidDomain,
-		HTTPBaseURL:             h.httpBaseURL,
-		Logger:                  h.logger,
+		// analyze_utilization reads at most what the Utilization page may.
+		UtilizationMaxJobs: h.utilizationMaxJobs,
+		UIDDomain:          h.uidDomain,
+		HTTPBaseURL:        h.httpBaseURL,
+		Logger:             h.logger,
 		// Behind HTTP every call is on behalf of somebody else, so an
 		// owner-scoped tool that cannot identify its caller must refuse
 		// rather than fall back to whoever this daemon authenticates as.

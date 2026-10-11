@@ -180,6 +180,9 @@ var readOnlyMCPTools = map[string]bool{
 	// analyze_issues reads held jobs and run-attempt history and groups
 	// them; it changes nothing.
 	"analyze_issues": true,
+	// analyze_utilization reads finished jobs and the pool's machine
+	// shapes; it changes nothing.
+	"analyze_utilization": true,
 	// The watch tools change only this server's own bookkeeping; they
 	// neither read nor alter a job, so an agent restricted to read-only
 	// tools can still ask to be told when something happens.
@@ -897,6 +900,10 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	// listing the caller has to read and summarize itself.
 	tools = append(tools, analyzeIssuesTool())
 
+	// "How well did my jobs use what they reserved, and what should I
+	// request next time" -- the Utilization page's answer.
+	tools = append(tools, analyzeUtilizationTool())
+
 	// The pool as condor_status shows it. Offered only with a collector
 	// to ask: without one every call would fail.
 	if s.poolSource() != nil {
@@ -1081,6 +1088,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolAggregateJobs(ctx, request.Arguments)
 	case "analyze_issues":
 		result, err = s.toolAnalyzeIssues(ctx, request.Arguments)
+	case "analyze_utilization":
+		result, err = s.toolAnalyzeUtilization(ctx, request.Arguments)
 	case "get_version":
 		result, err = s.toolGetVersion(ctx, request.Arguments)
 	case "whoami":

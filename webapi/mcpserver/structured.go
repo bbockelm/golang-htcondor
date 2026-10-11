@@ -123,6 +123,16 @@ func historyListSchema() map[string]interface{} {
 // this map is served without an outputSchema, which is valid -- structured
 // output is recommended, not required. toolsFor stamps these onto the
 // catalogue.
+// utilizationResourceSchema is one resource's used-of-reserved summary.
+var utilizationResourceSchema = obj(map[string]interface{}{
+	"resource":                 strSchema,
+	"allocated_hours":          numberSchema,
+	"allocated_hours_measured": numberSchema,
+	"used_hours":               numberSchema,
+	"used_fraction":            numberSchema,
+	"jobs_measured":            intSchema,
+})
+
 var outputSchemas = map[string]map[string]interface{}{
 	// --- job-query family: sets of ads -------------------------------
 	"query_jobs":             jobListSchema("jobs"),
@@ -154,6 +164,64 @@ var outputSchemas = map[string]map[string]interface{}{
 		"table":     strSchema,
 		"source":    strSchema,
 		"truncated": boolSchema,
+	}),
+
+	// analyze_utilization: the headline per resource, the workflows the
+	// time went to, and every suggestion with its submit lines -- the
+	// numbers an agent acts on without re-reading the prose.
+	"analyze_utilization": obj(map[string]interface{}{
+		"days":            intSchema,
+		"since":           intSchema,
+		"until":           intSchema,
+		"jobs_considered": intSchema,
+		"truncated":       boolSchema,
+		"limit":           intSchema,
+		"text_limit":      intSchema,
+		"notes":           arr(strSchema),
+		"overall": obj(map[string]interface{}{
+			"jobs":            intSchema,
+			"wall_hours":      numberSchema,
+			"badput_hours":    numberSchema,
+			"throughput_gain": numberSchema,
+			"resources":       arr(utilizationResourceSchema),
+		}),
+		"workflows_total": intSchema,
+		"workflows": arr(obj(map[string]interface{}{
+			"key":           strSchema,
+			"name":          strSchema,
+			"executable":    strSchema,
+			"owner":         strSchema,
+			"is_dag":        boolSchema,
+			"jobs":          intSchema,
+			"succeeded":     intSchema,
+			"failed":        intSchema,
+			"removed":       intSchema,
+			"wall_hours":    numberSchema,
+			"held_memory":   intSchema,
+			"held_disk":     intSchema,
+			"advice":        intSchema,
+			"used":          anySchema,
+			"request":       anySchema,
+			"gain":          numberSchema,
+			"resources":     arr(utilizationResourceSchema),
+			"throughput":    anySchema,
+			"distributions": anySchema,
+		})),
+		"advice_total": intSchema,
+		"advice": arr(obj(map[string]interface{}{
+			"workflow":   strSchema,
+			"id":         strSchema,
+			"resource":   strSchema,
+			"severity":   strSchema,
+			"title":      strSchema,
+			"detail":     strSchema,
+			"submit":     arr(strSchema),
+			"confidence": strSchema,
+			"saves": obj(map[string]interface{}{
+				"unit":   strSchema,
+				"amount": numberSchema,
+			}),
+		})),
 	}),
 
 	// analyze_issues answers in clusters, and the shape is what makes it

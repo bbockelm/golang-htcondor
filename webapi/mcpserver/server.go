@@ -27,6 +27,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/skills"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
+	"github.com/bbockelm/golang-htcondor/webapi/utilization"
 )
 
 // Server represents the MCP server
@@ -102,8 +103,17 @@ type Server struct {
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
 	delegated          bool
-	submitPolicy       submitpolicy.Policy
-	ensureCreds        func(ctx context.Context)
+	// utilizationMaxJobs is the most jobs one analyze_utilization call
+	// may read; zero means the package ceiling. See Config.
+	utilizationMaxJobs int
+	// utilMachines is the pool's machine shapes for analyze_utilization's
+	// throughput estimate, shared by every caller and refreshed every
+	// utilizationMachinesTTL.
+	utilMachinesMu sync.Mutex
+	utilMachines   []utilization.Machine
+	utilMachinesAt time.Time
+	submitPolicy   submitpolicy.Policy
+	ensureCreds    func(ctx context.Context)
 	// dagmanPath is the access point's condor_dagman binary. See
 	// Config.DagmanPath.
 	dagmanPath string
@@ -310,6 +320,11 @@ type Config struct {
 	// the stdio CLI keeps working exactly as before.
 	Delegated bool
 
+	// UtilizationMaxJobs is the most finished jobs one analyze_utilization
+	// call may read (HTTP_API_UTILIZATION_MAX_JOBS, the same ceiling as the
+	// Utilization page); zero means a million.
+	UtilizationMaxJobs int
+
 	// htcondordb mirror routing, mirroring the REST handler's config of
 	// the same name so one daemon routes both surfaces identically. See
 	// dbmirror.Options.
@@ -482,36 +497,37 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		multi:           cfg.MultiAP,
-		multiConstraint: cfg.MultiAPConstraint,
-		stats:           cfg.ToolStats,
-		clients:         newClientRegistry(),
-		schedd:          schedd,
-		scheddProvider:  cfg.ScheddProvider,
-		collector:       cfg.Collector,
-		credd:           cfg.Credd,
-		creddProvider:   cfg.CreddProvider,
-		trustDomain:     cfg.TrustDomain,
-		uidDomain:       cfg.UIDDomain,
-		signingKeyPath:  cfg.SigningKeyPath,
-		httpBaseURL:     cfg.HTTPBaseURL,
-		logger:          logger,
-		stdin:           stdin,
-		stdout:          stdout,
-		adminUsers:      adminUsers,
-		htcondorConfig:  cfg.HTCondorConfig,
-		ccbDialer:       cfg.CCB,
-		delegated:       cfg.Delegated,
-		submitPolicy:    cfg.SubmitPolicy,
-		ensureCreds:     cfg.EnsureCredentials,
-		dagmanPath:      cfg.DagmanPath,
-		dagmanEnv:       cfg.DagmanEnvironment,
-		dbMirror:        cfg.DBMirror,
-		jobWatch:        cfg.JobWatch,
-		jobWatchEval:    cfg.JobWatchEval,
-		runtimeEst:      cfg.RuntimeEstimator,
-		watchMaxWait:    cfg.WatchMaxWait,
-		build:           buildSettingsFromConfig(cfg),
+		multi:              cfg.MultiAP,
+		multiConstraint:    cfg.MultiAPConstraint,
+		stats:              cfg.ToolStats,
+		clients:            newClientRegistry(),
+		schedd:             schedd,
+		scheddProvider:     cfg.ScheddProvider,
+		collector:          cfg.Collector,
+		credd:              cfg.Credd,
+		creddProvider:      cfg.CreddProvider,
+		trustDomain:        cfg.TrustDomain,
+		uidDomain:          cfg.UIDDomain,
+		signingKeyPath:     cfg.SigningKeyPath,
+		httpBaseURL:        cfg.HTTPBaseURL,
+		logger:             logger,
+		stdin:              stdin,
+		stdout:             stdout,
+		adminUsers:         adminUsers,
+		htcondorConfig:     cfg.HTCondorConfig,
+		ccbDialer:          cfg.CCB,
+		delegated:          cfg.Delegated,
+		utilizationMaxJobs: cfg.UtilizationMaxJobs,
+		submitPolicy:       cfg.SubmitPolicy,
+		ensureCreds:        cfg.EnsureCredentials,
+		dagmanPath:         cfg.DagmanPath,
+		dagmanEnv:          cfg.DagmanEnvironment,
+		dbMirror:           cfg.DBMirror,
+		jobWatch:           cfg.JobWatch,
+		jobWatchEval:       cfg.JobWatchEval,
+		runtimeEst:         cfg.RuntimeEstimator,
+		watchMaxWait:       cfg.WatchMaxWait,
+		build:              buildSettingsFromConfig(cfg),
 	}
 	// A missing or unreadable signing key is not fatal: it disables the
 	// one tool that needs it, and that tool says so when called.
