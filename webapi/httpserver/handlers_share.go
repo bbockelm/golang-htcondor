@@ -144,7 +144,7 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 	// scheddFor, not the s.schedd snapshot: this server replaces its
 	// schedd handle when the collector reports a new address, and a
 	// captured pointer keeps dialling a socket that no longer exists.
-	ads, _, qerr := s.scheddFor(ctx).QueryWithOptions(ctx, jobConstraint, &htcondor.QueryOptions{
+	ads, qerr := s.queryJobs(ctx, jobConstraint, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "Owner"},
 		Limit:      1,
 	})

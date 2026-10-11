@@ -38,6 +38,16 @@ func TestScheddRateLimitKeyPartitionsTheBudget(t *testing.T) {
 		}
 		return err != nil && strings.Contains(err.Error(), "rate limit")
 	}
+	// And the history query.
+	historyLimited := func(s *Schedd) bool {
+		_, err := s.QueryHistoryWithOptions(ctx, "true", &HistoryQueryOptions{Limit: 1})
+		return err != nil && strings.Contains(err.Error(), "rate limit")
+	}
+	h1 := NewSchedd("h1", dead).WithConfig(cfg).WithRateLimitKey("hist1")
+	h2 := NewSchedd("h2", dead).WithConfig(cfg).WithRateLimitKey("hist2")
+	if historyLimited(h1) || !historyLimited(h1) || historyLimited(h2) {
+		t.Error("the history query does not keep keyed budgets apart")
+	}
 	s1 := NewSchedd("s1", dead).WithConfig(cfg).WithRateLimitKey("stream1")
 	s2 := NewSchedd("s2", dead).WithConfig(cfg).WithRateLimitKey("stream2")
 	if streamLimited(s1) || !streamLimited(s1) || streamLimited(s2) {

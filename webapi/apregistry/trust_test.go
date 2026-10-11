@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // probeRecorder answers trust probes from a per-name table.
@@ -190,4 +193,32 @@ func TestRunProbesInTheBackground(t *testing.T) {
 func trustOf2(r *Registry, name string) string {
 	m, _ := r.Get(name)
 	return m.Trust.State
+}
+
+// Each member's schedd client draws on its own rate-limit budget: a
+// member that spent its budget does not spend another's.
+func TestMembersHaveTheirOwnRateLimitBudgets(t *testing.T) {
+	cfg := config.NewEmpty()
+	cfg.Set("SCHEDD_QUERY_PER_USER_RATE_LIMIT", "0.001") // one query, then refused
+	fc := &fakeCollector{}
+	fc.set([]*classad.ClassAd{scheddAd(t, "ap1", "<127.0.0.1:1>"), scheddAd(t, "ap2", "<127.0.0.1:1>")}, nil)
+	r, err := New(fc, "true", Options{ClientConfig: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx := htcondor.WithAuthenticatedUser(htcondor.WithDaemonCredential(context.Background(), "test"), "alice")
+	limited := func(name string) bool {
+		m, _ := r.Get(name)
+		_, _, err := m.Schedd.QueryWithOptions(ctx, "true", &htcondor.QueryOptions{Limit: 1})
+		return err != nil && strings.Contains(err.Error(), "rate limit")
+	}
+	if limited("ap1") || !limited("ap1") {
+		t.Fatal("ap1's budget did not run out after one query")
+	}
+	if limited("ap2") {
+		t.Error("ap2 was refused on ap1's budget")
+	}
 }
