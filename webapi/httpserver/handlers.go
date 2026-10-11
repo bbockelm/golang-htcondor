@@ -604,6 +604,11 @@ func (s *Handler) serveJobByID(w http.ResponseWriter, r *http.Request) {
 				s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 			}
 			return
+		case "runtime-estimates":
+			// POST /api/v1/jobs/runtime-estimates — many jobs' runtime
+			// estimates at once, for the jobs listing.
+			s.handleBulkRuntimeEstimates(w, r)
+			return
 		}
 	}
 
@@ -1261,15 +1266,19 @@ func (s *Handler) jobOwnerScope(ctx context.Context, r *http.Request, cluster, p
 // acts on other users' jobs only through armed superuser mode, which
 // re-scopes the constraint itself (scopeForImpersonation).
 func (s *Handler) jobReadScope(ctx context.Context, r *http.Request, cluster, proc int) (string, error) {
-	job := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
+	return s.jobsReadScope(ctx, r, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
+}
+
+// jobsReadScope is jobReadScope for a constraint naming any set of jobs.
+func (s *Handler) jobsReadScope(ctx context.Context, r *http.Request, jobs string) (string, error) {
 	if projects := s.projectLeadReadProjects(r); len(projects) > 0 {
 		owner := htcondor.GetAuthenticatedUserFromContext(ctx)
 		if owner == "" {
 			return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")
 		}
-		return scopeToOwnerOrProjects(ownerFromActor(owner), projects, job)
+		return scopeToOwnerOrProjects(ownerFromActor(owner), projects, jobs)
 	}
-	return s.jobsOwnerScope(ctx, r, job, jobScopeRead)
+	return s.jobsOwnerScope(ctx, r, jobs, jobScopeRead)
 }
 
 func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {

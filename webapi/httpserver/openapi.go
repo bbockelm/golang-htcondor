@@ -1838,6 +1838,68 @@ const openAPISchema = `{
         }
       }
     },
+    "/jobs/runtime-estimates": {
+      "post": {
+        "summary": "Estimate how long many jobs will run",
+        "description": "The runtime estimates of up to 5000 jobs in one request, for a listing: each shaped like GET /jobs/{jobId}/runtime-estimate without job_id and model, keyed by job id. Only jobs the caller may read that are waiting or running are answered; any other id (another user's job, a missing one, a held one) is absent. A read, authorized as one despite the POST. When the server has no estimator, or has not read its history yet, the answer is available false with reason disabled or model_warming_up and nothing is looked up.",
+        "operationId": "getJobsRuntimeEstimates",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["jobs"],
+                "properties": {
+                  "jobs": {"type": "array", "maxItems": 5000, "items": {"type": "string"}, "description": "Job ids in cluster.proc format."}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The estimates, or why there are none",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["available"],
+                  "properties": {
+                    "available": {"type": "boolean"},
+                    "reason": {"type": "string", "enum": ["disabled", "model_warming_up"]},
+                    "estimates": {"type": "object", "additionalProperties": {"type": "object", "description": "The single-job estimate's fields: available, reason, estimate_seconds, p10_seconds, p90_seconds, basis, rough, elapsed_seconds, remaining_seconds, exceeded_history."}},
+                    "model": {
+                      "type": "object",
+                      "properties": {
+                        "trained_through": {"type": "string", "format": "date-time"},
+                        "jobs_ingested": {"type": "integer"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body or job ID",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "413": {
+            "description": "More than 5000 job ids",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "500": {
+            "description": "Failed to query the jobs",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
     "/jobs/{jobId}/ssh": {
       "get": {
         "summary": "Open an interactive SSH session inside a running job",

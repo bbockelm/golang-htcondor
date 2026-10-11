@@ -769,6 +769,15 @@ func (e *Estimator) Evict(olderThan time.Time) int {
 	return n
 }
 
+// Model describes what the estimator has read, and loaded whether it
+// has read anything yet (until it has, every estimate is
+// ReasonWarmingUp).
+func (e *Estimator) Model() (m Model, loaded bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.st.model(), e.st.loaded
+}
+
 // Stats is the estimator's state and its running record of how well it
 // has done, for metrics.
 type Stats struct {

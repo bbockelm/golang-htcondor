@@ -1279,6 +1279,8 @@ at `/openapi.json`.
 - `GET /api/v1/jobs/{id}/output` — download output tarball
 - `GET /api/v1/jobs/{id}/runtime-estimate` — how long the job is likely
   to run; see [Runtime estimates](#runtime-estimates)
+- `POST /api/v1/jobs/runtime-estimates` — the same for up to 5000 jobs at
+  once; see [Runtime estimates](#runtime-estimates)
 
 **Templates** (browser-submission UI)
 - `GET /api/v1/templates` — list
@@ -1507,6 +1509,7 @@ ever returned.
   "p10_seconds": 1840,
   "p90_seconds": 5120,
   "basis": {"level": "template", "sample_count": 64},
+  "rough": false,
   "elapsed_seconds": 900,
   "remaining_seconds": 1810,
   "exceeded_history": false,
@@ -1525,6 +1528,26 @@ nearly all of them, `exceeded_history` is true and no remaining time is
 given. When there is no estimate the response is still 200, with
 `available: false` and a `reason`: `disabled`, `model_warming_up` (the
 history has not been read yet) or `insufficient_history`.
+
+`rough` is true when the answer came from one of the broad groups — the
+same program whatever its arguments, the owner's jobs as a whole, or the
+access point's — which on a replayed access point were within a factor of
+two of the actual runtime only a quarter to a third of the time, against
+about three quarters for the others; the web UI labels those "rough
+guess". `basis.new_command` is true when none of the owner's recently
+completed jobs ran the same program.
+
+`POST /api/v1/jobs/runtime-estimates` with `{"jobs": ["1234.0", "1234.1",
+...]}` answers for up to 5000 jobs at once (more is a 413), which is how
+the web UI's jobs listing asks: once per refresh for the waiting and
+running jobs it shows. The answer is `{"available": true, "estimates":
+{"1234.0": {...}, ...}, "model": {...}}`, each estimate shaped like the
+single-job answer without `job_id` and `model`. Only jobs the caller may
+read that are waiting or running are answered; any other id is simply
+absent. A server without the feature, or one that has not read its
+history yet, answers `{"available": false, "reason": "disabled"}` (or
+`"model_warming_up"`) without looking anything up. It is a read, and an
+API key or token with only `condor:/READ` may use it.
 
 Metrics, all prefixed `htcondor_api_runtime_estimate_`: `enabled`,
 `jobs_ingested_total`, `last_refresh_timestamp_seconds`,

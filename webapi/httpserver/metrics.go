@@ -305,6 +305,7 @@ var routePatterns = []routePattern{
 	{exact: "/api/v1/jobs/transfers", template: "/api/v1/jobs/transfers"},
 	{exact: "/api/v1/jobs/hold", template: "/api/v1/jobs/hold"},
 	{exact: "/api/v1/jobs/release", template: "/api/v1/jobs/release"},
+	{exact: "/api/v1/jobs/runtime-estimates", template: "/api/v1/jobs/runtime-estimates"},
 
 	// Job item — order is critical: longest-prefix wins.
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/files/.+$`), template: "/api/v1/jobs/{id}/files/{name}"},
