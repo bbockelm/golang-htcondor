@@ -77,6 +77,12 @@ export interface Batch {
   // takes down every node and sub-DAG, not just the representative
   // cluster.
   removeConstraint: string;
+  // ClassAd constraint naming this batch's jobs wherever they are -- in
+  // the queue or long finished -- for links that look at the batch over
+  // time. Like removeConstraint, except a DAG is matched by its batch
+  // name alone: the root cluster id adds nothing once every job of the
+  // tree carries the name.
+  selectConstraint: string;
 }
 
 export interface BatchJob {
@@ -215,6 +221,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
     let name: string;
     let isDag = false;
     let removeConstraint: string;
+    let selectConstraint: string;
 
     const dag = a.batchName ? DAG_SUFFIX.exec(a.batchName) : null;
     if (a.batchName && dag) {
@@ -226,6 +233,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       batchID = Number(dag[1]);
       name = a.batchName.replace(DAG_SUFFIX, '');
       removeConstraint = `JobBatchName == "${escapeClassAdString(a.batchName)}" || ClusterId == ${batchID}`;
+      selectConstraint = `JobBatchName == "${escapeClassAdString(a.batchName)}"`;
     } else if (a.batchName) {
       // Plain named batch (not a DAG): may span several clusters under one
       // name, so remove by name + owner rather than by a single cluster.
@@ -234,11 +242,13 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       removeConstraint = a.owner
         ? `JobBatchName == "${escapeClassAdString(a.batchName)}" && Owner == "${escapeClassAdString(a.owner)}"`
         : `JobBatchName == "${escapeClassAdString(a.batchName)}"`;
+      selectConstraint = removeConstraint;
     } else {
       // Unnamed submission: one cluster, one batch, as before.
       batchID = a.minCluster;
       name = String(batchID);
       removeConstraint = `ClusterId == ${batchID}`;
+      selectConstraint = removeConstraint;
     }
 
     batches.push({
@@ -256,6 +266,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       isDag,
       clusterIds: Array.from(a.clusters),
       removeConstraint,
+      selectConstraint,
     });
   }
 

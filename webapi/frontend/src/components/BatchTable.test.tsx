@@ -98,13 +98,20 @@ describe('BatchTable in multi-AP mode', () => {
     { ClusterId: 1, ProcId: 0, JobStatus: 5, Owner: 'alice', schedd: 'ap2.example.org', job_id: '1.0@ap2.example.org' },
   ];
 
-  it('shows the access point and offers no actions', () => {
+  it('shows the access point and offers nothing that acts on a job', () => {
     table({ batches: groupIntoBatches(multi), multiAP: true });
     expect(screen.getByRole('button', { name: /Access point/ })).toBeTruthy();
     expect(screen.getByText('ap1.example.org')).toBeTruthy();
     expect(screen.getByText('ap2.example.org')).toBeTruthy();
-    expect(screen.queryByText('Actions')).toBeNull();
     expect(screen.queryByTitle(/Remove batch/)).toBeNull();
+    expect(screen.queryByText('Remove')).toBeNull();
+  });
+
+  it('opens a batch\'s utilization on its own access point', () => {
+    table({ batches: groupIntoBatches(multi), multiAP: true });
+    fireEvent.click(screen.getAllByRole('button', { name: /More actions for batch/ })[0]);
+    const href = screen.getByRole('menuitem', { name: 'Resource utilization' }).getAttribute('href')!;
+    expect(new URL(href, 'http://x').searchParams.get('schedd')).toMatch(/^ap[12]\.example\.org$/);
   });
 
   it('links each job by its complete id', () => {
@@ -260,5 +267,46 @@ describe('BatchTable running and waiting times', () => {
     expect(screen.getByTitle('Running for 2h14m')).toBeTruthy();
     expect(screen.getByTitle('Running for 5h')).toBeTruthy();
     expect(screen.getByTitle('Waiting for 3d2h')).toBeTruthy();
+  });
+});
+
+describe('BatchTable row actions menu', () => {
+  const dag: ClassAd[] = [
+    { ClusterId: 100, ProcId: 0, JobStatus: 2, Owner: 'carol', Cmd: 'condor_dagman', JobBatchName: 'foo.dag+100' },
+    { ClusterId: 101, ProcId: 0, JobStatus: 2, Owner: 'carol', JobBatchName: 'foo.dag+100', DAGManJobId: 100 },
+  ];
+
+  function utilizationOf(name: RegExp) {
+    fireEvent.click(screen.getByRole('button', { name }));
+    const href = screen.getByRole('menuitem', { name: 'Resource utilization' }).getAttribute('href')!;
+    const url = new URL(href, 'http://x');
+    return { path: url.pathname, days: url.searchParams.get('days'), constraint: url.searchParams.get('constraint') };
+  }
+
+  it('opens a named batch\'s utilization narrowed to that batch', () => {
+    table();
+    expect(utilizationOf(/More actions for batch training/)).toEqual({
+      path: '/utilization',
+      days: '30',
+      constraint: 'JobBatchName == "training" && Owner == "alice"',
+    });
+    // Remove is still right there.
+    expect(screen.getAllByTitle(/Remove batch/)).toHaveLength(2);
+  });
+
+  it('narrows a DAG by its batch name alone', () => {
+    table({ batches: groupIntoBatches(dag) });
+    expect(utilizationOf(/More actions for batch foo\.dag/).constraint).toBe('JobBatchName == "foo.dag+100"');
+  });
+
+  it('works from the keyboard', () => {
+    table();
+    const button = screen.getByRole('button', { name: /More actions for batch sim/ });
+    fireEvent.keyDown(button, { key: 'ArrowDown' });
+    const item = screen.getByRole('menuitem', { name: 'Resource utilization' });
+    expect(document.activeElement).toBe(item);
+    fireEvent.keyDown(item, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.activeElement).toBe(button);
   });
 });

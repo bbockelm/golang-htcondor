@@ -18,6 +18,8 @@ import {
   type SortState,
 } from '@/components/SortableTable';
 import { BatchUsagePanel } from '@/components/BatchUsagePanel';
+import { RowMenu } from '@/components/RowMenu';
+import { utilizationHref } from '@/lib/utilizationLink';
 import { BatchProgressBar } from '@/components/BatchProgressBar';
 import { UsageBar } from '@/components/UsageBar';
 import {
@@ -236,12 +238,12 @@ export function BatchTable({
   const removeError =
     removeBatchMut.error ?? removeJobMut.error ?? releaseJobMut.error;
 
-  // Multi-AP mode trades the Actions column for the Access point one. The
-  // running view trades Submitted for its second bar: two bars and their
-  // text do not fit beside it, and when a running batch was submitted is
-  // the least of what that view is for.
+  // Multi-AP mode adds the Access point column. The running view trades
+  // Submitted for its second bar: two bars and their text do not fit
+  // beside it, and when a running batch was submitted is the least of
+  // what that view is for.
   const showSubmitted = detail !== 'usage';
-  const columns = 7 + (showOwner ? 1 : 0) + (progress ? 1 : 0);
+  const columns = 7 + (showOwner ? 1 : 0) + (progress ? 1 : 0) + (multiAP ? 1 : 0);
 
   return (
     <div className="space-y-2">
@@ -289,7 +291,7 @@ export function BatchTable({
               ) : (
                 <BatchHeader label="Command" sortKey="cmd" sort={sort} onSort={setSort} />
               )}
-              {!multiAP && <th className="px-3 py-2 w-1 text-right">Actions</th>}
+              <th className="px-3 py-2 w-1 text-right">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
@@ -520,7 +522,7 @@ function BatchRow({
               // plus arguments, long enough on its own to push the
               // Actions column off the page.
               <div
-                className="max-w-56 truncate font-mono text-xs"
+                className="max-w-48 truncate font-mono text-xs"
                 title={batch.args ? `${batch.cmd} ${batch.args}` : batch.cmd}
               >
                 {batch.cmd}
@@ -531,21 +533,36 @@ function BatchRow({
             )}
           </td>
         )}
-        {!multiAP && (
-          <td
-            className="px-3 py-2 whitespace-nowrap text-right"
-            // Stop the row's click handler from firing when the user
-            // interacts with the action buttons.
-            onClick={(e) => e.stopPropagation()}
-          >
-            <ConfirmButton
-              compact
-              onConfirm={onRemoveBatch}
-              pending={pendingBatch}
-              title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
+        <td
+          className="px-3 py-2 whitespace-nowrap text-right"
+          // Stop the row's click handler from firing when the user
+          // interacts with the action buttons.
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="inline-flex items-center gap-1.5">
+            {/* Remove stays a button of its own rather than an item in the
+                menu: it is the action people come to the row for, and it
+                arms a confirmation in place. Multi-AP mode serves reads
+                only, so there the menu is all there is. */}
+            {!multiAP && (
+              <ConfirmButton
+                compact
+                onConfirm={onRemoveBatch}
+                pending={pendingBatch}
+                title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
+              />
+            )}
+            <RowMenu
+              label={`More actions for batch ${batch.name}`}
+              items={[
+                {
+                  label: 'Resource utilization',
+                  href: utilizationHref({ constraint: batch.selectConstraint, schedd: batch.schedd }),
+                },
+              ]}
             />
-          </td>
-        )}
+          </div>
+        </td>
       </tr>
       {expanded && (
         <tr>

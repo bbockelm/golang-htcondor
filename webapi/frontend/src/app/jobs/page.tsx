@@ -57,6 +57,7 @@ import {
   RUNNING_USAGE_PROJECTION,
 } from '@/lib/runningUsage';
 import { useMultiAP } from '@/lib/multiap';
+import { utilizationHref } from '@/lib/utilizationLink';
 import { clustersNeedingCounts, withExactCounts } from '@/lib/exactCounts';
 import { useExactCounts } from '@/lib/useExactCounts';
 import { ScheddFilter } from '@/components/ScheddFilter';
@@ -390,6 +391,15 @@ export default function JobsPage() {
           One row per batch. Click a row to see the jobs in it.
         </span>
         {(isAdmin || isLead) && !multiAP && <ScopeToggle />}
+        {/* The same jobs over time. Carries whatever narrows this page on
+            the server -- a drill-in or an expression -- so it opens on
+            the jobs being looked at. */}
+        <Link
+          href={utilizationHref({ constraint, schedd: multiAP && schedd ? schedd : undefined })}
+          className="text-sm text-brand-700 hover:underline"
+        >
+          Resource utilization
+        </Link>
         {multiAP ? (
           <div className="ml-auto">
             <ScheddFilter value={schedd} onChange={setSchedd} />
