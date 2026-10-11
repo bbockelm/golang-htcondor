@@ -262,14 +262,14 @@ func (s *multiAPStack) lastCluster(t *testing.T, schedd string) apJob {
 	if len(out) == 0 {
 		t.Fatalf("no jobs on %s", schedd)
 	}
-	var max int64
+	var newest int64
 	for _, f := range out {
 		var c int64
-		if _, err := fmt.Sscan(f, &c); err == nil && c > max {
-			max = c
+		if _, err := fmt.Sscan(f, &c); err == nil && c > newest {
+			newest = c
 		}
 	}
-	return apJob{schedd, max, 0}
+	return apJob{schedd, newest, 0}
 }
 
 // submitAwaitingInput queues a job on schedd as the test user without
