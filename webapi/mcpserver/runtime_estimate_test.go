@@ -75,8 +75,13 @@ func TestGetJobRuntimeEstimate(t *testing.T) {
 	if !est.Available || est.EstimateSeconds != 100 || est.RemainingSeconds == nil {
 		t.Errorf("estimate = %+v; want alice's 100s with time remaining", est)
 	}
+	// The job carries no command, so only alice's jobs in general answer:
+	// a rough guess.
+	if !est.Rough {
+		t.Errorf("an owner-level estimate is not marked rough: %+v", est)
+	}
 	text := resultText(t, out)
-	if !strings.Contains(text, "Runtime estimate: about 1m") || !strings.Contains(text, "remaining") {
+	if !strings.Contains(text, "Runtime estimate: roughly 1m") || !strings.Contains(text, "remaining") {
 		t.Errorf("text does not carry the estimate:\n%s", text)
 	}
 	validateStructured(t, "get_job", sc)
@@ -97,7 +102,7 @@ func TestRuntimeEstimateValidatesAgainstTheSchema(t *testing.T) {
 			Basis: &runtimeest.Basis{Level: "template", SampleCount: 9},
 			Model: runtimeest.Model{TrainedThrough: "2026-10-10T00:00:00Z", JobsIngested: 50}},
 		"running": {Available: true, EstimateSeconds: 100, P10Seconds: 60, P90Seconds: 300,
-			Basis:          &runtimeest.Basis{Level: "owner", SampleCount: 3},
+			Basis: &runtimeest.Basis{Level: "owner", SampleCount: 3, NewCommand: true}, Rough: true,
 			ElapsedSeconds: &elapsed, RemainingSeconds: &remaining},
 		"exceeded": {Available: true, EstimateSeconds: 100, P10Seconds: 60, P90Seconds: 300,
 			Basis: &runtimeest.Basis{Level: "cmd", SampleCount: 3}, ElapsedSeconds: &elapsed, ExceededHistory: true},
@@ -128,6 +133,15 @@ func TestRenderRuntimeEstimate(t *testing.T) {
 	})
 	if !strings.Contains(got, "no estimate of the time remaining") {
 		t.Errorf("exceeded: %q", got)
+	}
+	got = renderRuntimeEstimate(runtimeest.Result{
+		Available: true, EstimateSeconds: 7200, P10Seconds: 900, P90Seconds: 21600, Rough: true,
+		Basis: &runtimeest.Basis{Level: "owner", SampleCount: 40, NewCommand: true},
+	})
+	for _, want := range []string{"roughly 2h0m, a rough guess", "none of your recently finished jobs ran this program"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rough: missing %q in %q", want, got)
+		}
 	}
 	if got := renderRuntimeEstimate(runtimeest.Result{Reason: runtimeest.ReasonInsufficientHistory}); !strings.Contains(got, "too few") {
 		t.Errorf("insufficient: %q", got)

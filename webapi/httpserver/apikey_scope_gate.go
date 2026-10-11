@@ -43,9 +43,15 @@ func condorScopeForMethod(method string) string {
 // whatever the method -- a GET is enough to open a notebook kernel's
 // websocket -- and the Jupyter proxy never consults the schedd at all,
 // so nothing downstream would refuse a read-only credential there.
+//
+// And except for the bulk runtime-estimate read, a POST only because its
+// list of job ids does not fit in a URL.
 func condorScopeForRequest(r *http.Request) string {
 	if reachesIntoJob(r.URL.Path) {
 		return condorScopeWrite
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/api/v1/jobs/runtime-estimates" {
+		return condorScopeRead
 	}
 	return condorScopeForMethod(r.Method)
 }

@@ -1,9 +1,14 @@
 package runtimeest
 
 import (
+	"cmp"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand/v2"
+	"reflect"
+	"slices"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -516,6 +521,11 @@ func TestConcurrentReadsDuringIngest(t *testing.T) {
 				if r.Available && r.Basis.SampleCount%10 != 0 {
 					bad.Do(func() { badResult = r })
 				}
+				for _, r := range e.EstimateMany([]Query{{Features: f}, {Features: f, Running: true, Elapsed: 10}}) {
+					if r.Available && r.Basis.SampleCount%10 != 0 {
+						bad.Do(func() { badResult = r })
+					}
+				}
 				_ = e.Stats()
 			}
 		})
@@ -551,13 +561,163 @@ func TestResultJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `{"available":true,"estimate_seconds":600,"p10_seconds":300,"p90_seconds":1500,` +
-		`"basis":{"level":"template","sample_count":12},"elapsed_seconds":120,"remaining_seconds":480,` +
+		`"basis":{"level":"template","sample_count":12},"rough":false,"elapsed_seconds":120,"remaining_seconds":480,` +
 		`"exceeded_history":false,"model":{"trained_through":"2026-10-10T12:00:00Z","jobs_ingested":5000}}`
 	if string(got) != want {
 		t.Errorf("got  %s\nwant %s", got, want)
 	}
 	got, _ = json.Marshal(Result{Reason: ReasonWarmingUp})
-	if want := `{"available":false,"reason":"model_warming_up","exceeded_history":false,"model":{"jobs_ingested":0}}`; string(got) != want {
+	if want := `{"available":false,"reason":"model_warming_up","rough":false,"exceeded_history":false,"model":{"jobs_ingested":0}}`; string(got) != want {
 		t.Errorf("unavailable: got %s", got)
+	}
+	got, _ = json.Marshal(Result{Available: true, Rough: true, Basis: &Basis{Level: "owner", SampleCount: 3, NewCommand: true}})
+	if want := `{"available":true,"basis":{"level":"owner","sample_count":3,"new_command":true},"rough":true,` +
+		`"exceeded_history":false,"model":{"jobs_ingested":0}}`; string(got) != want {
+		t.Errorf("rough: got %s", got)
+	}
+}
+
+// The broad levels are marked rough, and say when the owner has never
+// run the program.
+func TestRoughLevels(t *testing.T) {
+	e := New(Config{})
+	var hist []job
+	for i := range 5 {
+		hist = append(hist, job{Features{Owner: "alice", Cmd: "x", Args: []string{"1"}}, 100, t0.Add(time.Duration(i) * time.Second)})
+	}
+	for i := range 30 {
+		hist = append(hist, job{feat("carol", "z"), 500, t0.Add(time.Duration(10+i) * time.Second)})
+	}
+	ingest(e, hist...)
+
+	cases := []struct {
+		name       string
+		f          Features
+		level      string
+		rough, new bool
+	}{
+		{"same arguments", Features{Owner: "alice", Cmd: "x", Args: []string{"1"}}, "exact", false, false},
+		{"other arguments", Features{Owner: "alice", Cmd: "x", Args: []string{"a"}}, "cmd", true, false},
+		{"another program", feat("alice", "y"), "owner", true, true},
+		{"nothing of their own", feat("bob", "x"), "global", true, true},
+	}
+	for _, c := range cases {
+		r := e.Estimate(Query{Features: c.f})
+		if !r.Available || r.Basis.Level != c.level || r.Rough != c.rough || r.Basis.NewCommand != c.new {
+			t.Errorf("%s: level %v rough %v new_command %v, want %s %v %v",
+				c.name, r.Basis, r.Rough, r.Basis != nil && r.Basis.NewCommand, c.level, c.rough, c.new)
+		}
+	}
+}
+
+// syntheticBatch is n completed jobs of a few owners, programs and
+// argument patterns, from start on, with lognormal runtimes.
+func syntheticBatch(rng *rand.Rand, start time.Time, n int) *Batch {
+	b := NewBatch()
+	at := start
+	for i := range n {
+		owner := []string{"alice", "bob", "carol"}[rng.IntN(3)]
+		at = at.Add(time.Duration(1+rng.IntN(20)) * time.Second)
+		b.Add(Completion{
+			Features: Features{
+				Owner: owner, ClusterID: int64(100 + rng.IntN(40)), Cmd: "sim" + strconv.Itoa(rng.IntN(4)),
+				Args:      []string{"--n", strconv.Itoa(rng.IntN(5))},
+				BatchName: "b" + strconv.Itoa(rng.IntN(3)),
+			},
+			ProcID:    int64(i),
+			Runtime:   lognormal(rng, 300*float64(1+rng.IntN(5)), 0.6),
+			Submitted: at.Add(-time.Duration(rng.IntN(3600)) * time.Second),
+			Started:   at.Add(-time.Duration(rng.IntN(600)) * time.Second),
+			Completed: at,
+		})
+	}
+	return b
+}
+
+// syntheticQueries are jobs like syntheticBatch's, waiting and running.
+func syntheticQueries(rng *rand.Rand, n int) []Query {
+	qs := make([]Query, n)
+	for i := range qs {
+		qs[i] = Query{
+			Features: Features{
+				Owner: []string{"alice", "bob", "carol", "dave"}[rng.IntN(4)], ClusterID: int64(100 + rng.IntN(50)),
+				Cmd: "sim" + strconv.Itoa(rng.IntN(5)), Args: []string{"--n", strconv.Itoa(rng.IntN(7))},
+				BatchName: "b" + strconv.Itoa(rng.IntN(3)),
+			},
+			Running: rng.IntN(2) == 0,
+			Elapsed: float64(rng.IntN(3000)),
+		}
+	}
+	return qs
+}
+
+// The residual-pool cache changes no answer, and is dropped when a
+// batch or an eviction changes what it was built from: an estimator
+// with the cache and one without, fed the same batches, agree after
+// every one.
+func TestPoolCacheMatchesUncached(t *testing.T) {
+	cached := New(Config{})
+	uncached := New(Config{noPoolCache: true})
+	qs := syntheticQueries(seeded(7, 8), 400)
+	check := func(stage string) {
+		t.Helper()
+		pooled := 0
+		for i, q := range qs {
+			a, b := cached.Estimate(q), uncached.Estimate(q)
+			if !reflect.DeepEqual(a, b) {
+				t.Fatalf("%s: query %d: cached %+v, uncached %+v", stage, i, a, b)
+			}
+			if a.Available {
+				pooled++
+			}
+		}
+		if pooled == 0 {
+			t.Fatalf("%s: no query had an estimate; the test checks nothing", stage)
+		}
+	}
+	start := t0
+	for round := range 6 {
+		// The same batch for both: Batch.sorted reorders in place.
+		rngA, rngB := seeded(uint64(round), 1), seeded(uint64(round), 1)
+		cached.Ingest(syntheticBatch(rngA, start, 300))
+		uncached.Ingest(syntheticBatch(rngB, start, 300))
+		start = start.Add(3 * time.Hour)
+		check(fmt.Sprintf("after batch %d", round))
+		if round == 3 {
+			cached.Evict(start.Add(-2 * time.Hour))
+			uncached.Evict(start.Add(-2 * time.Hour))
+			check("after an eviction")
+		}
+	}
+	if len(cached.st.pools) == 0 {
+		t.Error("the cache was never filled; the comparison exercised nothing")
+	}
+}
+
+// EstimateMany answers each job exactly as Estimate does, in any order.
+func TestEstimateManyMatchesEstimate(t *testing.T) {
+	e := New(Config{})
+	qs := syntheticQueries(seeded(3, 4), 300)
+	for _, r := range e.EstimateMany(qs) {
+		if r.Reason != ReasonWarmingUp {
+			t.Fatalf("before any ingest: %+v", r)
+		}
+	}
+	e.Ingest(syntheticBatch(seeded(5, 6), t0, 2000))
+	// Sorted, so neighbours share keys, and as given.
+	sorted := slices.Clone(qs)
+	slices.SortFunc(sorted, func(a, b Query) int {
+		return cmp.Or(cmp.Compare(a.Features.ClusterID, b.Features.ClusterID), cmp.Compare(a.Features.Owner, b.Features.Owner))
+	})
+	for _, set := range [][]Query{qs, sorted} {
+		got := e.EstimateMany(set)
+		for i, q := range set {
+			if want := e.Estimate(q); !reflect.DeepEqual(got[i], want) {
+				t.Fatalf("query %d %+v: many %+v, one %+v", i, q, got[i], want)
+			}
+		}
+	}
+	if len(e.EstimateMany(nil)) != 0 {
+		t.Error("no queries, some answers")
 	}
 }

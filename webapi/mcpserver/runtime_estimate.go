@@ -20,7 +20,9 @@ var runtimeEstimateSchema = obj(map[string]interface{}{
 	"basis": obj(map[string]interface{}{
 		"level":        strSchema,
 		"sample_count": intSchema,
+		"new_command":  boolSchema,
 	}, "level", "sample_count"),
+	"rough":             boolSchema,
 	"elapsed_seconds":   numberSchema,
 	"remaining_seconds": numberSchema,
 	"exceeded_history":  boolSchema,
@@ -55,14 +57,24 @@ func renderRuntimeEstimate(r runtimeest.Result) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n\nRuntime estimate: about %s (likely between %s and %s)",
-		secondsText(r.EstimateSeconds), secondsText(r.P10Seconds), secondsText(r.P90Seconds))
+	if r.Rough {
+		// The broad groups are right far less often; say so, so the
+		// agent does not pass the figure on as an expectation.
+		fmt.Fprintf(&b, "\n\nRuntime estimate: roughly %s, a rough guess (anywhere from %s to %s)",
+			secondsText(r.EstimateSeconds), secondsText(r.P10Seconds), secondsText(r.P90Seconds))
+	} else {
+		fmt.Fprintf(&b, "\n\nRuntime estimate: about %s (likely between %s and %s)",
+			secondsText(r.EstimateSeconds), secondsText(r.P10Seconds), secondsText(r.P90Seconds))
+	}
 	if r.Basis != nil {
 		what := runtimeLevelText[r.Basis.Level]
 		if what == "" {
 			what = r.Basis.Level
 		}
 		fmt.Fprintf(&b, ", based on %d %s", r.Basis.SampleCount, what)
+		if r.Basis.NewCommand {
+			b.WriteString("; none of your recently finished jobs ran this program")
+		}
 	}
 	b.WriteString(".")
 	switch {

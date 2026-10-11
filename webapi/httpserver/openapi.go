@@ -1799,9 +1799,11 @@ const openAPISchema = `{
                       "type": "object",
                       "properties": {
                         "level": {"type": "string", "enum": ["cluster", "exact", "template", "batch", "iwd", "cmd", "owner", "global"], "description": "Which group of completed jobs answered: the job's own cluster, the same command line, the same command line with numbers masked, the same batch name, the same submit directory, the same program, all the owner's jobs, or all jobs on the access point."},
-                        "sample_count": {"type": "integer", "description": "How many recent runtimes that group holds."}
+                        "sample_count": {"type": "integer", "description": "How many recent runtimes that group holds."},
+                        "new_command": {"type": "boolean", "description": "None of the owner's recently completed jobs ran the same program. Absent when false."}
                       }
                     },
+                    "rough": {"type": "boolean", "description": "The estimate came from a broad group (level cmd, owner or global), which is right far less often than the specific ones; present it as a rough guess."},
                     "elapsed_seconds": {"type": "number", "description": "How long the current execution has run. Present only while the job is running."},
                     "remaining_seconds": {"type": "number", "description": "estimate_seconds less elapsed_seconds. Absent when the job is not running or has exceeded its history."},
                     "exceeded_history": {"type": "boolean", "description": "The job has run longer than nearly every comparable job, so no remaining time is given; the estimate and range are what history said before it started."},
@@ -1831,6 +1833,68 @@ const openAPISchema = `{
           },
           "500": {
             "description": "Failed to query the job",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
+    "/jobs/runtime-estimates": {
+      "post": {
+        "summary": "Estimate how long many jobs will run",
+        "description": "The runtime estimates of up to 5000 jobs in one request, for a listing: each shaped like GET /jobs/{jobId}/runtime-estimate without job_id and model, keyed by job id. Only jobs the caller may read that are waiting or running are answered; any other id (another user's job, a missing one, a held one) is absent. A read, authorized as one despite the POST. When the server has no estimator, or has not read its history yet, the answer is available false with reason disabled or model_warming_up and nothing is looked up.",
+        "operationId": "getJobsRuntimeEstimates",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["jobs"],
+                "properties": {
+                  "jobs": {"type": "array", "maxItems": 5000, "items": {"type": "string"}, "description": "Job ids in cluster.proc format."}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The estimates, or why there are none",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["available"],
+                  "properties": {
+                    "available": {"type": "boolean"},
+                    "reason": {"type": "string", "enum": ["disabled", "model_warming_up"]},
+                    "estimates": {"type": "object", "additionalProperties": {"type": "object", "description": "The single-job estimate's fields: available, reason, estimate_seconds, p10_seconds, p90_seconds, basis, rough, elapsed_seconds, remaining_seconds, exceeded_history."}},
+                    "model": {
+                      "type": "object",
+                      "properties": {
+                        "trained_through": {"type": "string", "format": "date-time"},
+                        "jobs_ingested": {"type": "integer"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body or job ID",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "413": {
+            "description": "More than 5000 job ids",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "500": {
+            "description": "Failed to query the jobs",
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
           }
         }

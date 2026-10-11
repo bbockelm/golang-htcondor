@@ -53,6 +53,12 @@ func (l Level) String() string {
 	return levelNames[l]
 }
 
+// rough reports whether an estimate from l is only a rough guess (see
+// Result.Rough): LevelCmd and everything broader.
+func (l Level) rough() bool {
+	return l >= LevelCmd
+}
+
 // Levels lists every level, most specific first.
 func Levels() []Level {
 	out := make([]Level, numLevels)

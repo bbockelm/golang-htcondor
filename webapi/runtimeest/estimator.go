@@ -91,6 +91,10 @@ type Config struct {
 	// keeps, per view, for the bounds. Default DefaultResidualWindow.
 	// The access point keeps four times as many, overall and per level.
 	ResidualWindow int
+
+	// noPoolCache makes every estimate pool and sort its errors afresh,
+	// so a test can check the cache changes nothing.
+	noPoolCache bool
 }
 
 func (c Config) withDefaults() Config {
@@ -122,6 +126,14 @@ type Result struct {
 	P90Seconds float64 `json:"p90_seconds,omitempty"`
 	// Basis is which group answered.
 	Basis *Basis `json:"basis,omitempty"`
+	// Rough is true when one of the broad groups answered: the owner's
+	// jobs running the same program whatever the arguments, the owner's
+	// jobs in general, or the whole access point's. On a replayed access
+	// point those were within a factor of two of the actual runtime only
+	// a quarter to a third of the time, against about three quarters for
+	// the specific groups, so a client should present them as a rough
+	// guess rather than as an expectation.
+	Rough bool `json:"rough"`
 	// ElapsedSeconds is how long the job has been running, when it is.
 	ElapsedSeconds *float64 `json:"elapsed_seconds,omitempty"`
 	// RemainingSeconds is EstimateSeconds less ElapsedSeconds. Absent
@@ -142,6 +154,10 @@ type Basis struct {
 	Level string `json:"level"`
 	// SampleCount is how many recent runtimes the group holds.
 	SampleCount int `json:"sample_count"`
+	// NewCommand is true when none of the owner's recently finished jobs
+	// ran the same program (LevelCmd had nothing to answer from), which
+	// is the usual reason a rough level answered.
+	NewCommand bool `json:"new_command,omitempty"`
 }
 
 // Model describes what the estimator has read.
@@ -284,6 +300,22 @@ type state struct {
 
 	// scratch is the writer's buffer for as-of medians.
 	scratch []float32
+
+	// pools caches the sorted union of an owner's errors and a level's
+	// errors that bounds draws from (see residualPool), so that a
+	// listing's thousand estimates do not each concatenate and sort a
+	// thousand values. Filled by readers under poolMu, and dropped
+	// whenever a writer changes the errors (apply) or the owners (Evict),
+	// which happens under the write lock with no reader present.
+	poolMu sync.Mutex
+	pools  map[poolKey][]float32
+}
+
+// poolKey names a cached residual pool.
+type poolKey struct {
+	owner string
+	v     view
+	lvl   Level
 }
 
 func newState() *state {
@@ -328,6 +360,7 @@ func (s *state) apply(recs []record, cfg Config) {
 		s.ingest(&recs[i], cfg)
 	}
 	s.loaded = true
+	s.pools = nil
 }
 
 func (s *state) ingest(r *record, cfg Config) {
@@ -482,39 +515,118 @@ func (e *Estimator) Estimate(q Query) Result {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	s := e.st
-	res := Result{Model: s.model()}
 	if !s.loaded {
-		res.Reason = ReasonWarmingUp
-		return res
+		return Result{Model: s.model(), Reason: ReasonWarmingUp}
 	}
-	v := viewSubmit
+	p := s.prepare(DeriveKeys(q.Features), viewOf(q), !e.cfg.noPoolCache)
+	return p.finish(q, s.model())
+}
+
+// EstimateMany answers for many jobs at once, each exactly as Estimate
+// would, from one consistent snapshot.
+//
+// Jobs next to each other in qs with the same features, or the same
+// keys, in the same view -- the waiting procs of one cluster, say, or
+// its running ones -- share the level choice and the bounds; only what
+// depends on a running job's elapsed time is worked out per job. So a
+// caller should pass jobs in job id order.
+func (e *Estimator) EstimateMany(qs []Query) []Result {
+	out := make([]Result, len(qs))
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	s := e.st
+	m := s.model()
+	if !s.loaded {
+		for i := range out {
+			out[i] = Result{Model: m, Reason: ReasonWarmingUp}
+		}
+		return out
+	}
+	// The previous job's work in each view.
+	var last [numViews]struct {
+		set bool
+		f   *Features
+		k   Keys
+		p   prepared
+	}
+	for i := range qs {
+		q := &qs[i]
+		v := viewOf(*q)
+		l := &last[v]
+		if !l.set || !sameFeatures(&q.Features, l.f) {
+			k := DeriveKeys(q.Features)
+			if !l.set || k != l.k {
+				l.k, l.p = k, s.prepare(k, v, !e.cfg.noPoolCache)
+			}
+			l.set, l.f = true, &q.Features
+		}
+		out[i] = l.p.finish(*q, m)
+	}
+	return out
+}
+
+// sameFeatures reports whether two jobs have the same features, and so
+// the same keys, without deriving them.
+func sameFeatures(a, b *Features) bool {
+	return a.Owner == b.Owner && a.ClusterID == b.ClusterID && a.Cmd == b.Cmd &&
+		a.Iwd == b.Iwd && a.BatchName == b.BatchName && slices.Equal(a.Args, b.Args)
+}
+
+func viewOf(q Query) view {
 	if q.Running {
-		v = viewStart
+		return viewStart
 	}
-	keys := DeriveKeys(q.Features)
+	return viewSubmit
+}
+
+// prepared is the part of an estimate that depends only on a job's keys
+// and view: which level answers, its median and its bounds.
+type prepared struct {
+	ok         bool
+	lvl        Level
+	est        float64
+	p10, p90   float64
+	w          *window
+	newCommand bool
+}
+
+// prepare chooses the level for keys in view v and works out its
+// estimate and bounds. cache says whether bounds may use the pool cache.
+func (s *state) prepare(keys Keys, v view, cache bool) prepared {
 	preds, wins := s.candidates(keys)
-	own := s.owners[keys.owner]
-	if keys.owner == "" {
-		own = nil
+	var own *ownerState
+	if keys.owner != "" {
+		own = s.owners[keys.owner]
 	}
 	lvl, ok := choose(own.scores(v), &preds)
 	if !ok {
+		return prepared{}
+	}
+	p := prepared{ok: true, lvl: lvl, est: preds[lvl], w: wins[lvl], newCommand: math.IsNaN(preds[LevelCmd])}
+	p.p10, p.p90 = s.bounds(own, keys.owner, v, lvl, p.est, p.w, cache)
+	return p
+}
+
+// finish turns a prepared estimate into the Result for one job, adding
+// what depends on how long it has been running. The caller holds the
+// read lock: a running job reads the answering window.
+func (p *prepared) finish(q Query, m Model) Result {
+	res := Result{Model: m}
+	if !p.ok {
 		res.Reason = ReasonInsufficientHistory
 		return res
 	}
-	w := wins[lvl]
-	est := preds[lvl]
-	p10, p90 := s.bounds(own, v, lvl, est, w)
-
+	est, p10, p90 := p.est, p.p10, p.p90
 	res.Available = true
-	res.Basis = &Basis{Level: lvl.String(), SampleCount: w.len()}
+	res.Rough = p.lvl.rough()
+	res.Basis = &Basis{Level: p.lvl.String(), SampleCount: p.w.len(), NewCommand: p.newCommand}
 	if q.Running {
 		elapsed := q.Elapsed
 		res.ElapsedSeconds = &elapsed
 		if elapsed >= est {
 			// The job has outlived the typical run. What history says
 			// now is what the runs that lasted at least this long did.
-			if longer := w.above(elapsed); len(longer) >= minLonger {
+			if longer := p.w.above(elapsed); len(longer) >= minLonger {
 				est = quantileOf(longer, 0.5)
 				p90 = math.Max(quantileOf(longer, 0.9), est)
 				p10 = math.Min(quantileOf(longer, 0.1), est)
@@ -550,24 +662,69 @@ func (e *Estimator) Estimate(q Query) Result {
 // percentiles, which carry its spread when that is wider than the
 // errors have been. Before any errors exist the group's spread is all
 // there is.
-func (s *state) bounds(own *ownerState, v view, lvl Level, est float64, w *window) (p10, p90 float64) {
-	var pool []float32
-	if own != nil {
-		pool = own.resid[v].sorted
-	}
-	if lr := s.levelResid[v][lvl].sorted; len(lr) > 0 {
-		pool = slices.Concat(pool, lr)
-		slices.Sort(pool)
-	}
-	if len(pool) < minResiduals {
-		pool = s.globalResid[v].sorted
-	}
+func (s *state) bounds(own *ownerState, owner string, v view, lvl Level, est float64, w *window, cache bool) (p10, p90 float64) {
+	pool := s.residualPool(own, owner, v, lvl, cache)
 	p10, p90 = w.quantile(0.1), w.quantile(0.9)
 	if len(pool) >= minResiduals {
 		p10 = math.Min(p10, est*math.Exp(quantileOf(pool, 0.1)))
 		p90 = math.Max(p90, est*math.Exp(quantileOf(pool, 0.9)))
 	}
 	return math.Min(p10, est), math.Max(p90, est)
+}
+
+// residualPool is the sorted errors bounds draws from: the owner's
+// pooled with the access point's for the level, or the access point's
+// overall while those are too few. Only the union needs building, and it
+// is built once per owner, view and level and kept until the errors
+// change (see state.pools); the caller must not modify it.
+func (s *state) residualPool(own *ownerState, owner string, v view, lvl Level, cache bool) []float32 {
+	var mine []float32
+	if own != nil {
+		mine = own.resid[v].sorted
+	}
+	lr := s.levelResid[v][lvl].sorted
+	var pool []float32
+	switch {
+	case len(lr) == 0:
+		pool = mine
+	case len(mine) == 0:
+		pool = lr
+	case !cache:
+		pool = mergeSorted(mine, lr)
+	default:
+		k := poolKey{owner: owner, v: v, lvl: lvl}
+		s.poolMu.Lock()
+		pool = s.pools[k]
+		if pool == nil {
+			pool = mergeSorted(mine, lr)
+			if s.pools == nil {
+				s.pools = make(map[poolKey][]float32)
+			}
+			s.pools[k] = pool
+		}
+		s.poolMu.Unlock()
+	}
+	if len(pool) < minResiduals {
+		pool = s.globalResid[v].sorted
+	}
+	return pool
+}
+
+// mergeSorted is the sorted union of two ascending slices, in a new one.
+func mergeSorted(a, b []float32) []float32 {
+	out := make([]float32, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if b[j] < a[i] {
+			out = append(out, b[j])
+			j++
+		} else {
+			out = append(out, a[i])
+			i++
+		}
+	}
+	out = append(out, a[i:]...)
+	return append(out, b[j:]...)
 }
 
 // seconds rounds to whole seconds. Runtimes are whole seconds, and the
@@ -608,7 +765,17 @@ func (e *Estimator) Evict(olderThan time.Time) int {
 			delete(e.st.owners, k)
 		}
 	}
+	e.st.pools = nil
 	return n
+}
+
+// Model describes what the estimator has read, and loaded whether it
+// has read anything yet (until it has, every estimate is
+// ReasonWarmingUp).
+func (e *Estimator) Model() (m Model, loaded bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.st.model(), e.st.loaded
 }
 
 // Stats is the estimator's state and its running record of how well it
