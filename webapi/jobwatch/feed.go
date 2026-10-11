@@ -225,7 +225,7 @@ func (f *Feed) Apply(ev WatchEvent) {
 		// not reported as finished while it is running again.
 		delete(f.ended, ev.Key)
 		if id, ok := identOf(ad); ok {
-			f.notifyLocked(id, KeyChange{Ad: ad})
+			f.notifyAdLocked(id, ad)
 		}
 	case WatchDelete:
 		// The delete says only that the key is gone. What it was doing

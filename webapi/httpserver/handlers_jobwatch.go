@@ -11,6 +11,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 )
 
 // GET /api/v1/jobs/{id}/watch -- Server-Sent Events for one job.
@@ -145,6 +146,9 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 	}
 	defer s.streamOpened()()
 
+	// This request's own ad, read by this goroutine alone: projecting it
+	// directly is safe. Updates from either source arrive already
+	// rendered, because those are shared with other watchers.
 	last := projectAttrs(ad, attrs)
 	writeSSE(w, rc, "snapshot", last)
 
@@ -161,7 +165,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 
 	for {
 		var (
-			next  *classad.ClassAd
+			next  jobwatch.AdView
 			gone  bool
 			stale bool
 		)
@@ -183,12 +187,12 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 			if !open {
 				return
 			}
-			next, gone, stale = u.Ad, u.Gone, u.Stale
+			next, gone, stale = u.View, u.Gone, u.Stale
 		case u, open := <-pollChan(pollSrc):
 			if !open {
 				return
 			}
-			next, gone = u.Ad, u.Ad == nil
+			next, gone = u.View, u.View == nil
 		}
 
 		if stale {
@@ -212,7 +216,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 				pollSrc = s.jobPolls.Subscribe(ctx, constraint)
 				defer pollSrc.Close()
 			}
-			next, gone = fresh, fresh == nil
+			next, gone = jobwatch.NewAdView(fresh), fresh == nil
 		}
 
 		if gone {
@@ -222,7 +226,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 		if next == nil {
 			continue
 		}
-		cur := projectAttrs(next, attrs)
+		cur := next.Project(attrs)
 		changed := diffAttrs(last, cur)
 		if len(changed) == 0 {
 			// Most writes to a job ad touch nothing this client asked
@@ -238,7 +242,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 
 // jobWatchUpdateSource is the shape both sources deliver in.
 type jobWatchUpdateSource struct {
-	Ad    *classad.ClassAd
+	View  jobwatch.AdView
 	Gone  bool
 	Stale bool
 }
@@ -275,32 +279,12 @@ func splitAttrs(v string) []string {
 //
 // Attributes the ad does not carry are omitted rather than recorded
 // empty, so one appearing for the first time reads as a change.
+//
+// ad must be the caller's alone. Marshalling a ClassAd writes to it, so an
+// ad another goroutine can see -- anything a poll or the feed delivered --
+// is rendered once by its owner and projected with AdView.Project.
 func projectAttrs(ad *classad.ClassAd, attrs []string) map[string]any {
-	out := make(map[string]any, len(attrs))
-	if ad == nil {
-		return out
-	}
-	b, err := json.Marshal(ad)
-	if err != nil {
-		return out
-	}
-	var all map[string]any
-	if err := json.Unmarshal(b, &all); err != nil {
-		return out
-	}
-	// ClassAd attribute names are case-insensitive; the JSON carries
-	// whatever case the ad stored, which is not necessarily the case the
-	// caller asked in.
-	lower := make(map[string]string, len(all))
-	for k := range all {
-		lower[strings.ToLower(k)] = k
-	}
-	for _, a := range attrs {
-		if k, ok := lower[strings.ToLower(a)]; ok {
-			out[a] = all[k]
-		}
-	}
-	return out
+	return jobwatch.NewAdView(ad).Project(attrs)
 }
 
 // diffAttrs returns what changed between two projections, including
@@ -340,7 +324,7 @@ func subscribeFeed(s *Handler, cluster, proc int64) (<-chan jobWatchUpdateSource
 	go func() {
 		defer close(out)
 		for c := range in {
-			out <- jobWatchUpdateSource{Ad: c.Ad, Gone: c.Gone, Stale: c.Stale}
+			out <- jobWatchUpdateSource{View: c.View, Gone: c.Gone, Stale: c.Stale}
 		}
 	}()
 	return out, cancel
