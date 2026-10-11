@@ -80,6 +80,17 @@ type mcpActorCache struct {
 	limiter   *rate.Limiter
 	sources   map[string]*mcpActorSource
 	lastSweep time.Time
+	// now replaces the clock, for tests: the budgets refill with time, so a
+	// test that drains one must hold time still. Nil is time.Now.
+	now func() time.Time
+}
+
+// clock is the cache's current time.
+func (c *mcpActorCache) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 // mcpActorSource is one source address's resolution budget.
@@ -101,7 +112,7 @@ type mcpActorEntry struct {
 // The source's own budget is charged first, so a source that is over
 // it does not also drain the global ceiling everybody else shares.
 func (c *mcpActorCache) allowResolve(source string) bool {
-	now := time.Now()
+	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.limiter == nil {
@@ -167,7 +178,7 @@ func (c *mcpActorCache) get(token string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if time.Now().After(entry.expires) {
+	if c.clock().After(entry.expires) {
 		delete(c.entries, key)
 		return "", false
 	}
@@ -176,7 +187,7 @@ func (c *mcpActorCache) get(token string) (string, bool) {
 
 func (c *mcpActorCache) put(token, actor string, ttl time.Duration) {
 	key := mcpActorKey(token)
-	now := time.Now()
+	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
