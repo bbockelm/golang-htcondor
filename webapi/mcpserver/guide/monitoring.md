@@ -59,7 +59,8 @@ query_jobs, watch_jobs and the history tools filter with ClassAd expressions:
 - query_job_epochs -- one record per run attempt, for jobs that restarted.
 - query_transfer_history -- file transfer details.
 - query_history_db -- completed jobs from the history database, far faster than
-  scanning the schedd, where the access point has one.
+  scanning the schedd, where the access point has one. Newest first, so a limit
+  keeps the most recent matches; has_more says older ones were left out.
 - query_jobs_as_of -- the queue as it was at a past instant, where the
   database keeps that.
 - aggregate_jobs -- counts grouped by attribute ("how many held, per user"),

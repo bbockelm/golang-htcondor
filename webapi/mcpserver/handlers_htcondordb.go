@@ -35,7 +35,35 @@ func (s *Server) dbClient(ctx context.Context) (*dbrpc.Client, func(), *dbmirror
 	if !s.htcondordbEnabled() {
 		return nil, nil, nil, fmt.Errorf("htcondordb tools unavailable: no collector or HTCondor config configured")
 	}
+	if s.dbClientFn != nil {
+		return s.dbClientFn(ctx)
+	}
 	return s.dbMirror.Client(ctx)
+}
+
+// historyArchiveTable is htcondordb's completed-job table. It is an
+// ARCHIVE (append-only, newest-first), not a plain table, and the two are
+// reached by different ops: opQuery -- dbrpc.Client.QueryTable and
+// QueryAsOfTable -- resolves plain tables and view backings only, and
+// answers "no such table: history" for an archive. The projection ops
+// resolve all three, which is why every history read here goes through
+// queryHistoryArchive.
+const historyArchiveTable = "history"
+
+// queryHistoryArchive reads up to limit matching ads from the history
+// archive, newest-archived first, with the projection applied server-side
+// (nil = every attribute). It asks for one row past limit, so hasMore
+// reports that more matches exist rather than that the page happened to
+// be full.
+func queryHistoryArchive(ctx context.Context, dbc *dbrpc.Client, constraint string, projection []string, limit int) (rows []string, hasMore bool, err error) {
+	rows, err = dbc.QueryRawProject(ctx, historyArchiveTable, constraint, projection, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(rows) > limit {
+		return rows[:limit], true, nil
+	}
+	return rows, false, nil
 }
 
 // toolQueryHistoryDB queries completed jobs from the htcondordb "history" archive. Owner-scoped:
@@ -50,6 +78,8 @@ func (s *Server) toolQueryHistoryDB(ctx context.Context, args map[string]interfa
 		constraint = "true"
 	}
 	limit := dbLimitArg(args)
+	// Unprojected, every row is the whole ad; see projection.go.
+	projection, projectionNote := projectionOrDefault(stringListArg(args, "projection"), defaultHistoryAttrs)
 
 	dbc, closer, info, err := s.dbClient(ctx)
 	if err != nil {
@@ -57,11 +87,12 @@ func (s *Server) toolQueryHistoryDB(ctx context.Context, args map[string]interfa
 	}
 	defer closer()
 
-	rows, err := dbc.QueryTable(ctx, "history", constraint, limit)
+	rows, hasMore, err := queryHistoryArchive(ctx, dbc, constraint, projection, limit)
 	if err != nil {
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}
-	return dbTextResult("completed jobs (history archive)", rows, limit, info, scope), nil
+	return dbTextResult("completed jobs (history archive, most recently archived first)", rows, limit, hasMore,
+		projectionNote, info, scope), nil
 }
 
 // toolQueryJobsAsOf queries the live-jobs table as it was at a past instant (time-travel). Gated
@@ -91,11 +122,18 @@ func (s *Server) toolQueryJobsAsOf(ctx context.Context, args map[string]interfac
 		return nil, fmt.Errorf("this htcondordb database does not have time-travel enabled; cannot query historical state")
 	}
 
-	rows, err := dbc.QueryAsOfTable(ctx, "jobs", constraint, limit, asOf)
+	// One past the limit, so has_more means more matched, not that the
+	// page happened to be full.
+	rows, err := dbc.QueryAsOfTable(ctx, "jobs", constraint, limit+1, asOf)
 	if err != nil {
 		return nil, fmt.Errorf("time-travel query failed: %w", err)
 	}
-	return dbTextResult(fmt.Sprintf("jobs as of %s", asOf.UTC().Format(time.RFC3339)), rows, limit, info, scope), nil
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	return dbTextResult(fmt.Sprintf("jobs as of %s", asOf.UTC().Format(time.RFC3339)), rows, limit, hasMore,
+		"", info, scope), nil
 }
 
 // toolAggregateJobs runs a server-side GROUP BY over a table (default "jobs"), returning counts
@@ -231,12 +269,13 @@ func parseAsOf(s string) (time.Time, error) {
 }
 
 // dbTextResult formats query rows (each an old-ClassAd text blob) into a text tool result with
-// a count, truncation note, and freshness annotation.
-func dbTextResult(title string, rows []string, limit int, info *dbmirror.Info, scope OwnerScope) interface{} {
+// a count, truncation note, and freshness annotation. hasMore is whether more rows matched than
+// were returned; note is appended after the records.
+func dbTextResult(title string, rows []string, limit int, hasMore bool, note string, info *dbmirror.Info, scope OwnerScope) interface{} {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d %s", len(rows), title)
-	if len(rows) >= limit {
-		fmt.Fprintf(&b, " (capped at limit=%d; narrow the constraint or raise the limit for more)", limit)
+	if hasMore {
+		fmt.Fprintf(&b, " (more matched; capped at limit=%d -- narrow the constraint or raise the limit for more)", limit)
 	}
 	b.WriteString(":\n\n")
 	// Parse each old-ClassAd blob into an ad for structuredContent. Best
@@ -249,13 +288,14 @@ func dbTextResult(title string, rows []string, limit int, info *dbmirror.Info, s
 			records = append(records, ad)
 		}
 	}
+	b.WriteString(note)
 	b.WriteString(freshnessNote(info))
 	b.WriteString("\n" + scope.Note())
 	return structuredTextResult(b.String(), map[string]interface{}{
 		"records":  records,
 		"count":    len(rows),
 		"source":   "htcondordb",
-		"has_more": len(rows) >= limit,
+		"has_more": hasMore,
 	})
 }
 
