@@ -154,6 +154,25 @@ func (h *Handler) watchOwner(actor string) (string, error) {
 	return owner, nil
 }
 
+// streamCallerInDomain refuses, in multi-AP mode, a change stream to an
+// identity outside UID_DOMAIN: the feed names a job's owner by the local
+// part of its User, and alice@elsewhere is not the alice it would match.
+// It writes the refusal and reports false.
+func (h *Handler) streamCallerInDomain(w http.ResponseWriter, ctx context.Context) bool {
+	if h.multi == nil {
+		return true
+	}
+	if _, err := h.watchOwner(htcondor.GetAuthenticatedUserFromContext(ctx)); err != nil {
+		if errors.Is(err, errUnidentifiedCaller) {
+			h.writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
+			return false
+		}
+		h.multiAPError(w, err)
+		return false
+	}
+	return true
+}
+
 // watchShareSchedd is the Schedd a watch token carries: every AP in
 // multi-AP mode, none with one schedd.
 func (h *Handler) watchShareSchedd() string {
