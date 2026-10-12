@@ -422,12 +422,9 @@ func multiAPAllowed(method, path string) bool {
 		return true
 	}
 	read := method == http.MethodGet || method == http.MethodHead
-	if path == "/api/v1/jobs" && (method == http.MethodDelete || method == http.MethodPatch) {
-		// Bulk remove and edit fan out to every member.
-		return true
-	}
-	if path == "/api/v1/jobs" && method == http.MethodPost {
-		// Submit, to the AP the caller's assignment names.
+	if path == "/api/v1/jobs" && (method == http.MethodDelete || method == http.MethodPatch || method == http.MethodPost) {
+		// Bulk remove and edit fan out to every member; a submission goes
+		// to the AP the caller's assignment names.
 		return true
 	}
 	if multiAPCredentialPath(path) {
