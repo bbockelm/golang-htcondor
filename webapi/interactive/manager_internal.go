@@ -61,8 +61,9 @@ var sessionAdAttrs = []string{
 // a session that ended an hour ago.
 const liveSessionClause = `(JobStatus == 1 || JobStatus == 2 || JobStatus == 5)`
 
-// listAds queries the caller's live interactive sessions. A non-empty
-// name asks for that one session.
+// listAdsOn queries one access point -- ap, or with a single schedd ""
+// -- for the caller's live interactive sessions. A non-empty name asks
+// for that one session.
 //
 // The batch-name filter is applied by the SCHEDD, not here. Filtering
 // client-side would mean fetching the caller's whole queue and keeping
@@ -78,12 +79,6 @@ const liveSessionClause = `(JobStatus == 1 || JobStatus == 2 || JobStatus == 5)`
 // the transport resolved the caller's identity before the owner was
 // derived from it -- so the filters must be built from that identity
 // and never from anything the caller can set directly.
-func (m *Manager) listAds(ctx context.Context, caller Caller, name string) ([]Info, error) {
-	return m.listAll(ctx, caller, name)
-}
-
-// listAdsOn queries one access point -- ap, or with a single schedd ""
-// -- for the caller's live interactive sessions.
 func (m *Manager) listAdsOn(ctx context.Context, caller Caller, ap, name string) ([]Info, error) {
 	ctx, schedd, err := m.on(ctx, caller, ap)
 	if err != nil {

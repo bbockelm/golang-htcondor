@@ -138,7 +138,7 @@ func (f *fakeAPs) assignCount() int {
 
 // multiManager builds a Manager in multi-AP mode over aps. The
 // single-schedd accessor counts its calls, which must stay zero.
-func multiManager(t *testing.T, aps *fakeAPs, opts Options) (*Manager, *[]string, *int) {
+func multiManager(t *testing.T, aps *fakeAPs, opts Options) (*Manager, *[]string) {
 	t.Helper()
 	var mu sync.Mutex
 	dialed := &[]string{}
@@ -167,7 +167,7 @@ func multiManager(t *testing.T, aps *fakeAPs, opts Options) (*Manager, *[]string
 			t.Errorf("the single-schedd accessor was called %d times in multi-AP mode", *singleCalls)
 		}
 	})
-	return mgr, dialed, singleCalls
+	return mgr, dialed
 }
 
 func (f *fakeAPs) running(ap string) {
@@ -182,7 +182,7 @@ func (f *fakeAPs) running(ap string) {
 func TestMultiAPCreateLandsOnTheAssignedAPOnly(t *testing.T) {
 	aps := newFakeAPs(testAP1, testAP2)
 	aps.assign(testAP2)
-	mgr, _, _ := multiManager(t, aps, Options{})
+	mgr, _ := multiManager(t, aps, Options{})
 
 	info, err := mgr.Create(context.Background(), alice, CreateSpec{Name: "work"})
 	if err != nil {
@@ -214,7 +214,7 @@ func TestMultiAPSessionKeepsItsAPAfterReassignment(t *testing.T) {
 		t.Run(fmt.Sprintf("restart=%v", restart), func(t *testing.T) {
 			aps := newFakeAPs(testAP1, testAP2)
 			aps.assign(testAP2)
-			mgr, dialed, _ := multiManager(t, aps, Options{})
+			mgr, dialed := multiManager(t, aps, Options{})
 			if _, err := mgr.Create(context.Background(), alice, CreateSpec{Name: "work"}); err != nil {
 				t.Fatalf("Create: %v", err)
 			}
@@ -222,7 +222,7 @@ func TestMultiAPSessionKeepsItsAPAfterReassignment(t *testing.T) {
 			aps.assign(testAP1)
 			if restart {
 				mgr.Close()
-				mgr, dialed, _ = multiManager(t, aps, Options{})
+				mgr, dialed = multiManager(t, aps, Options{})
 			}
 			assignsBefore := aps.assignCount()
 
@@ -260,7 +260,7 @@ func TestMultiAPSessionKeepsItsAPAfterReassignment(t *testing.T) {
 func TestMultiAPLeaseExpiryRemovesOnTheSessionsAP(t *testing.T) {
 	aps := newFakeAPs(testAP1, testAP2)
 	aps.assign(testAP2)
-	mgr, _, _ := multiManager(t, aps, Options{
+	mgr, _ := multiManager(t, aps, Options{
 		HeartbeatInterval: 10 * time.Millisecond,
 		DefaultLease:      60 * time.Millisecond,
 	})
@@ -289,14 +289,14 @@ func TestMultiAPSessionNameIsUniqueAcrossAPs(t *testing.T) {
 		t.Run(fmt.Sprintf("restart=%v", restart), func(t *testing.T) {
 			aps := newFakeAPs(testAP1, testAP2)
 			aps.assign(testAP2)
-			mgr, _, _ := multiManager(t, aps, Options{})
+			mgr, _ := multiManager(t, aps, Options{})
 			if _, err := mgr.Create(context.Background(), alice, CreateSpec{Name: "work"}); err != nil {
 				t.Fatalf("Create: %v", err)
 			}
 			aps.assign(testAP1)
 			if restart {
 				mgr.Close()
-				mgr, _, _ = multiManager(t, aps, Options{})
+				mgr, _ = multiManager(t, aps, Options{})
 			}
 			_, err := mgr.Create(context.Background(), alice, CreateSpec{Name: "work"})
 			var exists *SessionExistsError
@@ -324,7 +324,7 @@ func TestMultiAPSessionNameIsUniqueAcrossAPs(t *testing.T) {
 // The per-owner limit counts sessions on every AP.
 func TestMultiAPPerOwnerLimitCountsEveryAP(t *testing.T) {
 	aps := newFakeAPs(testAP1, testAP2)
-	mgr, _, _ := multiManager(t, aps, Options{MaxPerOwner: 2})
+	mgr, _ := multiManager(t, aps, Options{MaxPerOwner: 2})
 	aps.assign(testAP1)
 	if _, err := mgr.Create(context.Background(), alice, CreateSpec{Name: "a"}); err != nil {
 		t.Fatalf("Create a: %v", err)
@@ -370,7 +370,7 @@ func TestMultiAPAmbiguousSessionNameIsRefused(t *testing.T) {
 	// The same number on both, as two fresh schedds would assign.
 	aps.injectSession(testAP1, 7, "work")
 	aps.injectSession(testAP2, 7, "work")
-	mgr, dialed, _ := multiManager(t, aps, Options{})
+	mgr, dialed := multiManager(t, aps, Options{})
 
 	_, err := mgr.Exec(context.Background(), alice, "work", ExecRequest{Command: "rm -rf data"})
 	var amb *AmbiguousSessionError
@@ -414,7 +414,7 @@ func TestMultiAPAmbiguousSessionNameIsRefused(t *testing.T) {
 func TestMultiAPUnreachableSessionAPIsNotSubstituted(t *testing.T) {
 	aps := newFakeAPs(testAP1, testAP2)
 	aps.assign(testAP2)
-	mgr, dialed, _ := multiManager(t, aps, Options{})
+	mgr, dialed := multiManager(t, aps, Options{})
 	if _, err := mgr.Create(context.Background(), alice, CreateSpec{Name: "work"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestMultiAPUnreachableSessionAPIsNotSubstituted(t *testing.T) {
 
 	// A fresh process finds it through the catalog and says the same.
 	mgr.Close()
-	mgr, dialed, _ = multiManager(t, aps, Options{})
+	mgr, dialed = multiManager(t, aps, Options{})
 	infos, err := mgr.List(context.Background(), alice)
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -461,7 +461,7 @@ func TestMultiAPUnreachableSessionAPIsNotSubstituted(t *testing.T) {
 func TestMultiAPCreateRefusesWithoutTheCatalog(t *testing.T) {
 	aps := newFakeAPs(testAP1, testAP2)
 	aps.locateErr = errors.New("the federation hub is unavailable")
-	mgr, _, _ := multiManager(t, aps, Options{})
+	mgr, _ := multiManager(t, aps, Options{})
 	if _, err := mgr.Create(context.Background(), alice, CreateSpec{Name: "work"}); err == nil ||
 		!strings.Contains(err.Error(), "federation hub") {
 		t.Fatalf("Create = %v, want the catalog's failure", err)
@@ -484,7 +484,7 @@ func TestMultiAPCatalogRowsAreFilteredAgain(t *testing.T) {
 	ad.InsertAttrString("Owner", "mallory")
 	ad.InsertAttrString("JobBatchName", BatchNameForSession("work"))
 	aps.catalog = func() []LocatedAd { return []LocatedAd{{AP: testAP1, Ad: ad}} }
-	mgr, dialed, _ := multiManager(t, aps, Options{})
+	mgr, dialed := multiManager(t, aps, Options{})
 	if _, err := mgr.Exec(context.Background(), alice, "work", ExecRequest{Command: "true"}); err == nil {
 		t.Fatal("Exec found another owner's session through the catalog")
 	}

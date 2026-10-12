@@ -384,7 +384,7 @@ func TestMultiAPJupyterKeepsItsAP(t *testing.T) {
 	stubJupyterHelper(t)
 	s := newInteractiveServer(t, "USER alice@d "+ap2+"\n", nil)
 	fakes := newAPJupyterSchedds(t, ap1, ap2, ap3)
-	s.srv.Handler.jupyterScheddOverride = fakes
+	s.srv.jupyterScheddOverride = fakes
 
 	rec := jupyterAs(t, s, http.MethodPost, "/api/v1/jupyter/instances", `{}`)
 	var created JupyterCreateResponse
@@ -395,7 +395,7 @@ func TestMultiAPJupyterKeepsItsAP(t *testing.T) {
 		t.Fatalf("created on %q; submissions ap1=%d ap2=%d ap3=%d", created.Schedd,
 			fakes.submits(ap1), fakes.submits(ap2), fakes.submits(ap3))
 	}
-	row, err := s.srv.Handler.jupyterSessionStore().Get(context.Background(), created.InstanceID)
+	row, err := s.srv.jupyterSessionStore().Get(context.Background(), created.InstanceID)
 	if err != nil || row.Schedd != ap2 {
 		t.Fatalf("stored row = %+v, %v; want schedd %s", row, err, ap2)
 	}
@@ -437,13 +437,13 @@ func TestMultiAPJupyterKeepsItsAP(t *testing.T) {
 func TestMultiAPJupyterRowWithoutAnAPIsNotRouted(t *testing.T) {
 	s := newInteractiveServer(t, "USER alice@d "+ap2+"\n", nil)
 	fakes := newAPJupyterSchedds(t, ap1, ap2, ap3)
-	s.srv.Handler.jupyterScheddOverride = fakes
-	store := s.srv.Handler.jupyterSessionStore()
+	s.srv.jupyterScheddOverride = fakes
+	store := s.srv.jupyterSessionStore()
 	if store == nil {
 		t.Fatal("no application database")
 	}
 	// As a single-AP server wrote it: no schedd column in the insert.
-	if _, err := s.srv.Handler.db.ExecContext(context.Background(), `
+	if _, err := s.srv.db.ExecContext(context.Background(), `
 		INSERT INTO jupyter_sessions (instance_id, owner, cluster_id, proc_id, image, next_nonce, created_at, expires_at)
 		VALUES ('old-session', 'alice', 77, 0, '', x'00', ?, ?)`,
 		time.Now().UTC(), time.Now().Add(time.Hour).UTC()); err != nil {
@@ -480,5 +480,21 @@ func TestMultiAPAPsReportsTheAssignmentPerKind(t *testing.T) {
 	}
 	if rec := doAlice(t, s.srv, http.MethodGet, "/api/v1/aps?kind=bogus", ""); rec.Code != http.StatusBadRequest {
 		t.Errorf("aps?kind=bogus = %d", rec.Code)
+	}
+}
+
+// A running session's transport key names the session's own AP, not the
+// first member or the caller's assignment.
+func TestMultiAPSSHGatewaySessionKeyNamesItsAP(t *testing.T) {
+	s := newInteractiveServer(t, "USER alice@d "+ap1+"\n", nil)
+	mgr := s.srv.interactiveManagerOrNil()
+	info := interactive.Info{Name: "work", JobID: "7.0@" + ap2, Schedd: ap2, ClusterID: 7, JobStatus: 2}
+	key, err := s.srv.sshGatewayAwaitRunning(s.callerCtx(t), mgr, interactive.Caller{Actor: "alice", Owner: "alice"},
+		"work", info, nil)
+	if err != nil || key.Schedd != ap2 || key.Cluster != 7 {
+		t.Fatalf("key = %+v, %v; want 7.0 on %s", key, err, ap2)
+	}
+	if got := s.srv.scheddForTransport(key); got == nil || got.Name() != ap2 {
+		t.Errorf("the transport dials %v, want %s", got, ap2)
 	}
 }
