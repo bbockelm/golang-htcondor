@@ -58,11 +58,13 @@ func (s *Handler) handleUtilizationWorkflow(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	begin := time.Now()
 	res, err := s.utilizationAnalysis(c, uq)
 	if err != nil {
 		s.writeUtilizationAnalysisError(w, err)
 		return
 	}
+	w.Header().Set("Server-Timing", res.timing.serverTiming(begin))
 	raw, found, err := res.workflow(key)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, err.Error())

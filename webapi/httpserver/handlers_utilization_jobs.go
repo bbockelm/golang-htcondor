@@ -156,18 +156,24 @@ func (s *Handler) handleUtilizationJobs(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 			since := time.Now().Unix() - int64(uq.days)*24*3600
-			var jobs []utilization.Job
+			var chunks [][]utilization.Job
 			var truncated bool
 			var rerr error
 			if s.multi != nil {
+				var jobs []utilization.Job
 				jobs, truncated, rerr = s.multiUtilizationJobs(computeCtx, user, sel, schedd, since, uq.limit)
+				chunks = [][]utilization.Job{jobs}
 			} else {
-				jobs, truncated, _, rerr = s.utilizationJobs(computeCtx, sel, since, uq.limit, mirror)
+				chunks, truncated, _, rerr = s.utilizationJobs(computeCtx, sel, since, uq.limit, mirror)
 			}
 			if rerr != nil {
 				return utilizationJobSet{}, rerr
 			}
-			return utilizationJobSet{jobs: utilization.WorkflowJobs(jobs, page.key), truncated: truncated}, nil
+			var members []utilization.Job
+			for _, jobs := range chunks {
+				members = append(members, utilization.WorkflowJobs(jobs, page.key)...)
+			}
+			return utilizationJobSet{jobs: members, truncated: truncated}, nil
 		})
 	if err != nil {
 		var hubErr *multiap.Error

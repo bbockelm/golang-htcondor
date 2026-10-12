@@ -47,6 +47,12 @@ const (
 // not finished, or that reserve nothing on an execute point, are ignored
 // -- see Job.finished and Job.reservesNothing.
 func Analyze(jobs []Job, opts Options) *Response {
+	return AnalyzeChunks([][]Job{jobs}, opts)
+}
+
+// AnalyzeChunks is Analyze over jobs held in several slices -- a
+// Decoder's, one per worker -- without first copying them into one.
+func AnalyzeChunks(chunks [][]Job, opts Options) *Response {
 	resp := &Response{
 		Since:     opts.Since,
 		Until:     opts.Until,
@@ -62,20 +68,22 @@ func Analyze(jobs []Job, opts Options) *Response {
 	// per workflow rather than once per job.
 	groups := map[identity]*group{}
 	var all []*Job
-	for i := range jobs {
-		j := &jobs[i]
-		if !j.finished() || j.reservesNothing() {
-			continue
+	for _, jobs := range chunks {
+		for i := range jobs {
+			j := &jobs[i]
+			if !j.finished() || j.reservesNothing() {
+				continue
+			}
+			all = append(all, j)
+			id, isDAG := identify(j)
+			g := groups[id]
+			if g == nil {
+				g = &group{id: id, key: id.hash()}
+				groups[id] = g
+			}
+			g.jobs = append(g.jobs, j)
+			g.isDAG = g.isDAG || isDAG
 		}
-		all = append(all, j)
-		id, isDAG := identify(j)
-		g := groups[id]
-		if g == nil {
-			g = &group{id: id, key: id.hash()}
-			groups[id] = g
-		}
-		g.jobs = append(g.jobs, j)
-		g.isDAG = g.isDAG || isDAG
 	}
 
 	resp.JobsConsidered = len(all)
@@ -509,7 +517,7 @@ func memorySample(j *Job) (memoryJob, bool) {
 		return memoryJob{}, false
 	}
 	mj := memoryJob{wallHours: hours(j.Wall), request: start.V(), inForce: j.RequestMemory.V(),
-		adaptive: j.isAdaptive(AdaptiveMemory)}
+		adaptive: j.isAdaptive(AdaptiveMemory), held: j.HeldForMemory}
 	switch {
 	case j.Status == statusCompleted && j.MemoryUsage.OK():
 		mj.peak = j.MemoryUsage.V()

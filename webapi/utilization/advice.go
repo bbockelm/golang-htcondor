@@ -179,8 +179,7 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 		// The jobs' request is a formula that starts small and grows
 		// after a hold; say so, since "most jobs requested X" would be
 		// wrong about every job that grew.
-		evidence = fmt.Sprintf("Your request starts at %s and grows after a memory hold; %s of %s jobs outgrew the start and were held once. %s",
-			sizeMiB(plan.typical), count(plan.outgrewStart), count(plan.n), evidence)
+		evidence = adaptiveEvidence(plan, holds) + " " + evidence
 	}
 	retryNote := ""
 	if hasRetry {
@@ -225,6 +224,69 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 		plan.keepCurrent()
 	}
 	return a
+}
+
+// adaptiveEvidence describes a formula request's holds.
+//
+// Two counts answer "how many jobs outgrew the start", and they differ:
+// the jobs with a memory hold recorded, among every job of the workflow,
+// and the jobs whose measured peak was above the start, among the
+// finished ones that have a peak. A held job can have no measured peak
+// (removed, or finished without one), or a peak that stayed under the
+// start; a job can peak above it with no hold on record. Stated side by
+// side ("492 held"; "460 of 756 outgrew the start and were held") they
+// read as a contradiction, so the held jobs are broken down by what was
+// measured of them, adding up to the count already given.
+func adaptiveEvidence(plan *memoryPlan, holds int) string {
+	start := sizeMiB(plan.typical)
+	out := fmt.Sprintf("Your request starts at %s and grows after a memory hold.", start)
+	if holds == 0 {
+		return out + fmt.Sprintf(" %s of %s jobs peaked above %s.", count(plan.outgrewStart), count(plan.n), start)
+	}
+	unmeasured := max(holds-plan.heldAbove-plan.heldBelow, 0)
+	type part struct {
+		n         int
+		one, many string
+	}
+	var parts []part
+	for _, p := range []part{
+		{plan.heldAbove, "peaked above " + start, "peaked above " + start},
+		{plan.heldBelow, "peaked at or under " + start, "peaked at or under " + start},
+		{unmeasured, "has no measured peak", "have no measured peak"},
+	} {
+		if p.n > 0 {
+			parts = append(parts, p)
+		}
+	}
+	switch {
+	case len(parts) == 1 && holds == 1:
+		out += " It " + parts[0].one + "."
+	case len(parts) == 1:
+		out += " All of them " + parts[0].many + "."
+	default:
+		phrases := make([]string, len(parts))
+		for i, p := range parts {
+			phrases[i] = count(p.n) + " " + map[bool]string{true: p.one, false: p.many}[p.n == 1]
+		}
+		out += " Of them, " + andList(phrases) + "."
+	}
+	if unheld := plan.outgrewStart - plan.heldAbove; unheld > 0 {
+		out += fmt.Sprintf(" Another %s peaked above %s with no hold recorded.", count(unheld), start)
+	}
+	return out
+}
+
+// andList joins phrases as "a, b, and c".
+func andList(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	case 2:
+		return parts[0] + " and " + parts[1]
+	}
+	return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1]
 }
 
 // cpuAdvice compares the cores jobs kept busy with the cores they asked

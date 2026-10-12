@@ -107,7 +107,7 @@ func TestAdaptiveRequestSizedFromStart(t *testing.T) {
 	if a == nil || a.Severity != SeverityWarn {
 		t.Fatalf("advice = %+v", a)
 	}
-	if !strings.HasPrefix(a.Detail, "Your request starts at 2 GB and grows after a memory hold; 10 of 25 jobs outgrew the start and were held once.") {
+	if !strings.HasPrefix(a.Detail, "Your request starts at 2 GB and grows after a memory hold. 10 of 25 jobs peaked above 2 GB.") {
 		t.Errorf("detail = %q", a.Detail)
 	}
 	if a.Saves == nil || a.Saves.Amount != round((90200-76800)/1024.0, 1) {
@@ -119,5 +119,99 @@ func TestAdaptiveRequestSizedFromStart(t *testing.T) {
 		if s.Resource == ResourceMemory && s.AllocatedHours != 15*2048+10*3900 {
 			t.Errorf("allocated = %v", s.AllocatedHours)
 		}
+	}
+}
+
+// The held count and the count of jobs that peaked above the start are
+// different counts -- every job of the workflow with a memory hold on
+// record; the finished jobs with a measured peak above the start -- and
+// side by side they read as a contradiction ("492 jobs were held"; "460
+// of 756 outgrew the start and were held once", from ny50.dag). The
+// detail breaks the held jobs down by what was measured of them, adding
+// up to the held count, and names the jobs that peaked above the start
+// with no hold on record.
+//
+// 40 jobs: 12 held, peak above 2 GB; 3 held, peak under it; 2 held and
+// finished with no peak; 5 above it with no hold recorded; 18 under it.
+func TestAdaptiveHoldsAddUp(t *testing.T) {
+	held := func(jobs []Job) []Job {
+		for i := range jobs {
+			jobs[i].HeldForMemory, jobs[i].ExceededMemory = true, true
+		}
+		return jobs
+	}
+	unmeasured := held(adaptiveJobs(2, 300, 2600))
+	for i := range unmeasured {
+		unmeasured[i].MemoryUsage = 0
+	}
+	var jobs []Job
+	jobs = append(jobs, held(adaptiveJobs(12, 1, 2600))...)
+	jobs = append(jobs, held(adaptiveJobs(3, 100, 1900))...)
+	jobs = append(jobs, unmeasured...)
+	jobs = append(jobs, adaptiveJobs(5, 400, 2700)...)
+	jobs = append(jobs, adaptiveJobs(18, 500, 1500)...)
+	w := onlyWorkflow(t, jobs)
+	if w.Holds.Memory != 17 {
+		t.Fatalf("memory holds = %d, want 17", w.Holds.Memory)
+	}
+	a := adviceByResource(w, ResourceMemory)
+	if a == nil {
+		t.Fatal("no memory advice")
+	}
+	want := "17 jobs were held for using more memory than requested. " +
+		"Your request starts at 2 GB and grows after a memory hold. " +
+		"Of them, 12 peaked above 2 GB, 3 peaked at or under 2 GB, and 2 have no measured peak. " +
+		"Another 5 peaked above 2 GB with no hold recorded. " +
+		"95% of 38 jobs"
+	if !strings.HasPrefix(a.Detail, want) {
+		t.Errorf("detail = %q\nwant prefix %q", a.Detail, want)
+	}
+}
+
+// Every held job peaked above the start: one statement, no breakdown.
+func TestAdaptiveHoldsAllAbove(t *testing.T) {
+	jobs := adaptiveJobs(10, 1, 2600)
+	for i := range jobs {
+		jobs[i].HeldForMemory, jobs[i].ExceededMemory = true, true
+	}
+	jobs = append(jobs, adaptiveJobs(15, 100, 1500)...)
+	a := adviceByResource(onlyWorkflow(t, jobs), ResourceMemory)
+	want := "10 jobs were held for using more memory than requested. " +
+		"Your request starts at 2 GB and grows after a memory hold. All of them peaked above 2 GB. 95% of 25 jobs"
+	if a == nil || !strings.HasPrefix(a.Detail, want) {
+		t.Errorf("advice = %+v\nwant detail prefix %q", a, want)
+	}
+}
+
+// A JobReader remembers what it learned about a request expression, and
+// reads every job as FromAd alone would: a formula over nothing but
+// usage starts at the same value in every job, however it is spelled; a
+// formula that also refers to the job's own attributes is evaluated in
+// each job; and a literal request is not a formula.
+func TestJobReaderRemembersRequests(t *testing.T) {
+	ads := []string{
+		"RequestMemory = " + chtcFormula,
+		// The same formula, spelled differently.
+		"RequestMemory = ifthenelse(memoryusage isnt undefined, max({2048, 3 * memoryusage / 2}), 2048)",
+		"RequestMemory = ifThenElse(MemoryUsage isnt undefined, 2 * MemoryUsage, BaseMemory)\nBaseMemory = 1000",
+		"RequestMemory = ifThenElse(MemoryUsage isnt undefined, 2 * MemoryUsage, BaseMemory)\nBaseMemory = 3000",
+		"RequestMemory = 512",
+		"RequestMemory = " + chtcFormula,
+		"RequestMemory = ifThenElse(MemoryUsage isnt undefined, 2 * MemoryUsage, BaseMemory)\nBaseMemory = 5000",
+		"RequestMemory = 768",
+	}
+	var r JobReader
+	for i, text := range ads {
+		ad := parseAd(t, "JobStatus = 4\nResidentSetSize = 400000\nMemoryUsage = ((ResidentSetSize + 1023) / 1024)\n"+text)
+		want := FromAd(ad, "")
+		got := r.FromAd(ad, "")
+		if got.Adaptive != want.Adaptive || got.RequestMemoryStart != want.RequestMemoryStart || got.RequestMemory != want.RequestMemory {
+			t.Errorf("ad %d: reader read adaptive %b start %v in force %v; FromAd %b %v %v",
+				i, got.Adaptive, got.RequestMemoryStart.V(), got.RequestMemory.V(),
+				want.Adaptive, want.RequestMemoryStart.V(), want.RequestMemory.V())
+		}
+	}
+	if len(r.requests) != 4 {
+		t.Errorf("reader knows %d expressions, want 4 (two spellings of one formula are one)", len(r.requests))
 	}
 }

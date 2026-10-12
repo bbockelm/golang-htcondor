@@ -1022,3 +1022,63 @@ func TestUtilizationWaitingAdaptive(t *testing.T) {
 		t.Errorf("carol: waiting_adaptive = %v, want omitted", detail.WaitingAdaptive)
 	}
 }
+
+// Every analysis reports where its time went: a Server-Timing header on
+// the list and the detail, naming each phase and whether this request
+// computed it or was served one computed earlier, and one observation
+// per phase in utilization_phase_seconds -- for the computation, not
+// for each request a cached answer serves.
+func TestUtilizationServerTiming(t *testing.T) {
+	f := utilizationFixture(t)
+	alice := f.bearer(t, "alice")
+	phaseCount := func() map[string]uint64 {
+		t.Helper()
+		families, err := f.s.httpMetricsState.registry.Gather()
+		if err != nil {
+			t.Fatalf("gathering metrics: %v", err)
+		}
+		out := map[string]uint64{}
+		for _, fam := range families {
+			if fam.GetName() != "htcondor_api_utilization_phase_seconds" {
+				continue
+			}
+			for _, m := range fam.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == "phase" {
+						out[l.GetValue()] = m.GetHistogram().GetSampleCount()
+					}
+				}
+			}
+		}
+		return out
+	}
+	phases := []string{"read", "decode", "decode_wait", "analyze", "summary", "compress"}
+	check := func(path, cache string) {
+		t.Helper()
+		w := f.do(t, http.MethodGet, path, "", alice)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s: %d %s", path, w.Code, w.Body.String())
+		}
+		st := w.Header().Get("Server-Timing")
+		if !strings.HasPrefix(st, "cache;desc="+cache+", ") {
+			t.Errorf("GET %s: Server-Timing %q, want cache %s", path, st, cache)
+		}
+		for _, p := range phases {
+			if !strings.Contains(st, ", "+p+";dur=") {
+				t.Errorf("GET %s: Server-Timing %q has no %s", path, st, p)
+			}
+		}
+	}
+	check("/api/v1/utilization", "miss")
+	for _, p := range phases {
+		if n := phaseCount()[p]; n != 1 {
+			t.Errorf("phase %s observed %d times after one analysis, want 1", p, n)
+		}
+	}
+	check("/api/v1/utilization", "hit")
+	resp := f.utilization(t, "/api/v1/utilization", alice)
+	check("/api/v1/utilization/workflow?w="+url.QueryEscape(resp.Workflows[0].Key), "hit")
+	if n := phaseCount()["read"]; n != 1 {
+		t.Errorf("read observed %d times after cached answers, want still 1", n)
+	}
+}

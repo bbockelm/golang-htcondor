@@ -25,10 +25,9 @@ func Program(cmd, args string) string {
 	if cmd != "" {
 		tokens = append([]string{cmd}, tokens...)
 	}
-	if p := programOf(tokens, 0); p != "" {
-		return p
-	}
-	return ""
+	// Cloned: the tokens are substrings of args, and a Job keeping its
+	// program name should not keep the whole command line with it.
+	return strings.Clone(programOf(tokens, 0))
 }
 
 // programOf walks a command line from its first word. depth bounds the
@@ -318,17 +317,34 @@ func splitArgs(s string) []string {
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' && !strings.Contains(s[1:len(s)-1], `"`) {
 		s = s[1 : len(s)-1]
 	}
+	// A word with no quoting or escapes in it is a substring of s; only
+	// the others are copied out, through buf.
 	var out []string
-	var cur strings.Builder
-	inWord := false
+	var buf []byte
+	start := -1 // where the current word began, or -1 between words
+	plain := true
 	var quote byte
+	unplain := func(i int) {
+		if plain {
+			buf = append(buf[:0], s[start:i]...)
+			plain = false
+		}
+	}
+	end := func(i int) {
+		if plain {
+			out = append(out, s[start:i])
+		} else {
+			out = append(out, string(buf))
+		}
+		start, plain = -1, true
+	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
 		case quote != 0:
 			if c == quote {
 				if quote == '\'' && i+1 < len(s) && s[i+1] == '\'' {
-					cur.WriteByte('\'')
+					buf = append(buf, '\'')
 					i++
 					continue
 				}
@@ -339,26 +355,35 @@ func splitArgs(s string) []string {
 				i++
 				c = s[i]
 			}
-			cur.WriteByte(c)
+			buf = append(buf, c)
 		case c == '\'' || c == '"':
-			quote, inWord = c, true
+			if start < 0 {
+				start = i
+			}
+			unplain(i)
+			quote = c
 		case c == '\\' && i+1 < len(s):
+			if start < 0 {
+				start = i
+			}
+			unplain(i)
 			i++
-			cur.WriteByte(s[i])
-			inWord = true
+			buf = append(buf, s[i])
 		case c == ' ' || c == '\t' || c == '\n':
-			if inWord {
-				out = append(out, cur.String())
-				cur.Reset()
-				inWord = false
+			if start >= 0 {
+				end(i)
 			}
 		default:
-			cur.WriteByte(c)
-			inWord = true
+			if start < 0 {
+				start = i
+			}
+			if !plain {
+				buf = append(buf, c)
+			}
 		}
 	}
-	if inWord {
-		out = append(out, cur.String())
+	if start >= 0 {
+		end(len(s))
 	}
 	return out
 }
