@@ -38,6 +38,7 @@ import {
   StatusBadge,
   JobDetailsSection,
   MultiAPJobView,
+  RequirementsSection,
   humanDuration,
   useNowTick,
 } from '@/app/jobs/[id]/JobDetailClient';
@@ -268,6 +269,10 @@ function ArchiveJobDetail({
         helperText="Re-evaluate this archived job's Requirements against the slots in the pool right now. Useful for asking 'would I get matched if I resubmitted this exactly as-is?'"
         defaultOpen={false}
       />
+
+      {/* The same Requirements breakdown the live page shows, below the
+          analysis panel as there. */}
+      <RequirementsSection job={job} />
 
       <JobDetailsSection jobID={jobID} job={job} editable={false} />
     </div>

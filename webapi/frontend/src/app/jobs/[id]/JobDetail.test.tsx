@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import {
+  RequirementsSection,
   ResourceTable,
   UsageBar,
   dagLayers,
@@ -22,6 +23,7 @@ import {
 } from './JobDetailClient';
 import type { ClassAd } from '@/lib/api';
 import { exprRequestJob } from '@/lib/jobRequests.fixture';
+import { CONTAINER_GPU_NOTABLE, CONTAINER_GPU_REQUIREMENTS } from '@/lib/requirements.fixture';
 
 describe('everRan', () => {
   // The Output Files panel gates on this. A job that ran and went back
@@ -291,6 +293,17 @@ describe('ResourceTable', () => {
       />,
     );
     expect(screen.getByText('50%')).toBeInTheDocument();
+  });
+});
+
+describe('RequirementsSection', () => {
+  it('breaks down a container GPU job\'s Requirements a clause per line', () => {
+    const { container } = render(<RequirementsSection job={{ Requirements: CONTAINER_GPU_REQUIREMENTS } as ClassAd} />);
+    const clauses = [...container.querySelectorAll('li code')].map((c) => c.textContent);
+    expect(clauses).toEqual(CONTAINER_GPU_NOTABLE);
+    expect(screen.getByText(/Standard resource requirements/)).toHaveTextContent(
+      'Standard resource requirements (CPUs, memory, GPUs)',
+    );
   });
 });
 

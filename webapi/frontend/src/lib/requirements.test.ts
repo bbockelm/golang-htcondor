@@ -6,6 +6,7 @@ import {
   summarizeRequirements,
   unwrapExpr,
 } from './requirements';
+import { CONTAINER_GPU_NOTABLE, CONTAINER_GPU_REQUIREMENTS } from './requirements.fixture';
 
 // The real-world expression from a CHTC job pinned to one machine.
 const CHTC_EXAMPLE =
@@ -116,5 +117,23 @@ describe('a Requirements expression as the API sends it', () => {
   it('does not split on operators or parens inside a string literal', () => {
     const s = summarizeRequirements('/Expr((Name == "a && (b") && (OpSys == "LINUX"))/');
     expect(s.notable).toEqual(['Name == "a && (b"', 'OpSys == "LINUX"']);
+  });
+});
+
+describe('a container job that asks for a GPU', () => {
+  // The archive page showed no breakdown for a job with this Requirements.
+  // The parser was not the cause -- the page never rendered the section --
+  // but each form here is one a parser could plausibly trip on.
+  it('lists each notable clause and folds the resource checks into one line', () => {
+    const s = summarizeRequirements(CONTAINER_GPU_REQUIREMENTS);
+    expect(s.notable).toEqual(CONTAINER_GPU_NOTABLE);
+    expect(standardLabels(s.standard)).toEqual(['CPUs', 'memory', 'GPUs']);
+  });
+
+  it('keeps a clause it cannot take apart as its own text', () => {
+    // An unbalanced clause: listed as written, and the rest still broken down.
+    const s = summarizeRequirements('/Expr((TARGET.Cpus >= RequestCpus) && TARGET.HasContainer && (Foo == "x")/');
+    expect(s.standard.cpus).toBe(true);
+    expect(s.notable).toEqual(['HasContainer', '(Foo == "x"']);
   });
 });

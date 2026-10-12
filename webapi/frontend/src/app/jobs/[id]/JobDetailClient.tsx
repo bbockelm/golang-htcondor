@@ -574,7 +574,9 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
 // notable clause plus a single "standard resource requirements" summary,
 // so the interesting constraint (a machine/pool pin) isn't buried in
 // boilerplate. The full expression stays available behind a disclosure.
-function RequirementsSection({ job }: { job: ClassAd }) {
+// Shared with the archive page: a finished job's Requirements reads the
+// same way.
+export function RequirementsSection({ job }: { job: ClassAd }) {
   const summary = summarizeRequirements(str(job.Requirements));
   if (summary.empty) return null;
   const labels = standardLabels(summary.standard);
