@@ -17,6 +17,8 @@ import {
   utilizationWorkflowFixture,
 } from '../../src/lib/utilization.fixture';
 import type { UtilJobSort } from '../../src/lib/utilization';
+import { BATCH_FIXTURES, batchJobsFixture } from '../../src/lib/batchPage.fixture';
+import type { BatchJobSort } from '../../src/lib/batchPage';
 import type { MetricsResponse } from '../../src/lib/metrics';
 import type { DrainEstimates } from '../../src/lib/drain';
 import { pinClock, SMOKE_NOW } from './clock';
@@ -427,6 +429,34 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
         page_size: Number(q.get('page_size') ?? 100),
       });
       await route.fulfill(body ? { json: body } : { status: 404, json: { error: 'Not Found', message: 'no such workflow' } });
+      return;
+    }
+    // A batch's page and its jobs (single-AP only: a multi-AP server
+    // answers 501 for both, which the default below already does). Any
+    // cluster of a fixture batch finds it, as on the server.
+    const batch = opts.multiAP ? null : path.match(/^\/api\/v1\/batches\/(\d+)(\/jobs)?$/);
+    if (batch) {
+      const id = Number(batch[1]);
+      const make = Object.values(BATCH_FIXTURES).find((f) => f(SMOKE_NOW).clusters.includes(id));
+      if (!make) {
+        await route.fulfill({ status: 404, json: { error: 'Not Found', message: 'batch not found' } });
+        return;
+      }
+      const b = make(SMOKE_NOW);
+      if (!batch[2]) {
+        await route.fulfill({ json: b });
+        return;
+      }
+      const q = new URL(route.request().url()).searchParams;
+      await route.fulfill({
+        json: batchJobsFixture(b, SMOKE_NOW, {
+          status: q.get('status')?.split(',').filter(Boolean),
+          sort: (q.get('sort') ?? undefined) as BatchJobSort | undefined,
+          order: (q.get('order') ?? undefined) as 'asc' | 'desc' | undefined,
+          offset: Number(q.get('offset') ?? 0),
+          page_size: Number(q.get('page_size') ?? 100),
+        }),
+      });
       return;
     }
     if (path in table) {

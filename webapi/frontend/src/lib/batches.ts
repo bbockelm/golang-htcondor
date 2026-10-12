@@ -178,26 +178,35 @@ interface BatchAcc {
   minCluster: number;
   // Root DAGMan jobs' ads, for the node counts.
   dagRoots: ClassAd[];
+  // A DAG's owner is its root DAGMan job's, when that job is listed.
+  rootOwner?: string;
 }
 
 // batchGroupKey is the key groupIntoBatches folds a job ad under, or
 // undefined for an ad with no ClusterId (which belongs to no batch).
 //
-// A named submission (JobBatchName set) folds together by
-// `${Owner}\u0000${JobBatchName}`. Because a whole DAG tree — every node
-// job and every nested sub-DAG — shares ONE JobBatchName, this collapses
-// an entire workflow into a single batch, matching `condor_q -batch`.
-// Scoping by Owner keeps two users who reused a batch name apart in the
-// pool-wide view. Unnamed submissions fall back to per-cluster grouping.
+// A DAG (JobBatchName ending in `+N`) folds together by its JobBatchName
+// alone: every node job and every nested sub-DAG shares it, and N, the
+// root DAGMan cluster, names one workflow on its access point. Owner is
+// left out on purpose: an access point whose schedd is not root runs
+// DAGMan's node jobs as its own user, and keying on Owner split such a
+// DAG into two rows.
+//
+// Any other named submission folds together by
+// `${Owner}\u0000${JobBatchName}`, matching `condor_q -batch`; scoping by
+// Owner keeps two users who reused a batch name apart in the pool-wide
+// view. Unnamed submissions fall back to per-cluster grouping.
 // Batches never span access points: a cluster id, and a batch name, is
 // only unique within one.
 export function batchGroupKey(j: ClassAd): string | undefined {
   const cluster = num(j.ClusterId);
   if (cluster === undefined) return undefined;
   const batchName = str(j.JobBatchName);
-  const base = batchName
-    ? `${str(j.Owner) ?? ''}\u0000${batchName}`
-    : `cluster\u0000${cluster}`;
+  const base = !batchName
+    ? `cluster\u0000${cluster}`
+    : DAG_SUFFIX.test(batchName)
+      ? `dag\u0000${batchName}`
+      : `${str(j.Owner) ?? ''}\u0000${batchName}`;
   const schedd = scheddOf(j);
   return schedd ? `${schedd}\u0001${base}` : base;
 }
@@ -250,7 +259,11 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
 
     const dagman = isDagManJob(j);
     const dagNode = isDagNode(j);
-    if (dagman && !dagNode) a.dagRoots.push(j);
+    if (dagman && !dagNode) {
+      a.dagRoots.push(j);
+      const root = batchName ? DAG_SUFFIX.exec(batchName) : null;
+      if (root && Number(root[1]) === cluster && owner) a.rootOwner = owner;
+    }
     a.jobs.push({
       id: jobIdOf(j) ?? `${cluster}.${proc ?? 0}`,
       schedd,
@@ -312,7 +325,7 @@ export function groupIntoBatches(jobs: ClassAd[]): Batch[] {
       batchID,
       schedd: a.schedd,
       name,
-      owner: a.owner,
+      owner: isDag ? (a.rootOwner ?? a.owner) : a.owner,
       cmd: a.cmd,
       args: a.args,
       submittedUnix: a.submittedUnix,
@@ -339,6 +352,25 @@ export type BatchKey = number | string;
 
 export function batchKey(b: Batch): BatchKey {
   return b.schedd ? `${b.schedd}\u0000${b.batchID}` : b.batchID;
+}
+
+// batchPagePath is a batch's own page, /batches/<id>. The server
+// resolves any of a batch's clusters to it, but it serves a single access
+// point only: a batch read in multi-AP mode (schedd set) has no page.
+export function batchPagePath(b: Pick<Batch, 'batchID' | 'schedd'>): string | undefined {
+  if (b.schedd) return undefined;
+  return `/batches/${b.batchID}`;
+}
+
+// batchIDOfJob is the id of the batch a job belongs to, as
+// groupIntoBatches would give it where the job's whole batch is in
+// view: a DAG's root DAGMan cluster, from the JobBatchName suffix, for
+// every job of the DAG; otherwise the job's own cluster, which the batch
+// page resolves to its batch.
+export function batchIDOfJob(ad: ClassAd): number | undefined {
+  const dag = str(ad.JobBatchName)?.match(DAG_SUFFIX);
+  if (dag) return Number(dag[1]);
+  return num(ad.ClusterId);
 }
 
 // adsInBatches keeps the ads whose cluster one of batches covers, for a

@@ -38,6 +38,11 @@ test('a batch opens its resource utilization from its actions menu', async ({ pa
   // From the keyboard, the way the menu is meant to work.
   await menu.focus();
   await page.keyboard.press('ArrowDown');
+  // The batch's own page leads the menu.
+  const open = page.getByRole('menuitem', { name: 'Open batch page' });
+  await expect(open).toBeFocused();
+  await expect(open).toHaveAttribute('href', /^\/batches\/\d+$/);
+  await page.keyboard.press('ArrowDown');
   const item = page.getByRole('menuitem', { name: 'Resource utilization' });
   await expect(item).toBeFocused();
   const href = new URL((await item.getAttribute('href'))!, 'http://x');
@@ -275,3 +280,33 @@ test('a job running longer than usual says so and opens its live output and shel
   await runtime.getByRole('button', { name: 'Open a shell in the job' }).click();
   await expect(page.getByRole('button', { name: 'Open shell' })).toHaveCount(0);
 });
+
+// The batch name goes to the batch's page; the rest of the row still
+// opens it in place. /users/<owner> is the same table.
+async function openUserPage(page: Page, owner: string) {
+  const placeholder = path.join(__dirname, '..', 'out', 'users', '_.html');
+  await page.route(`**/users/${owner}`, async (route) => {
+    if (route.request().resourceType() !== 'document') {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({ path: placeholder, contentType: 'text/html; charset=utf-8' });
+  });
+  await page.goto(`/users/${owner}`);
+}
+
+for (const where of ['/jobs', '/users/e2e']) {
+  test(`${where}: a batch's name opens its page, the rest of its row its jobs`, async ({ page }) => {
+    await installJobsProgressFixtures(page);
+    if (where === '/jobs') await page.goto('/jobs');
+    else await openUserPage(page, 'e2e');
+    const row = page.getByRole('row').filter({ hasText: 'smoke-sweep' });
+    const name = row.getByRole('link', { name: 'smoke-sweep' });
+    await expect(name).toHaveAttribute('href', '/batches/500');
+    await row.getByText('/home/e2e/bin/train').first().click();
+    await expect(page.getByRole('link', { name: '500.0' })).toBeVisible();
+    await expect(row).toHaveAttribute('aria-expanded', 'true');
+    await name.click();
+    await page.waitForURL('**/batches/500');
+  });
+}

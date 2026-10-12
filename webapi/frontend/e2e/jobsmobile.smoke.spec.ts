@@ -65,16 +65,31 @@ for (const viewport of [
         await noSidewaysScroll(page);
         await menu.click();
         await expect(card.getByRole('menuitem', { name: 'Resource utilization' })).toBeVisible();
+        await expect(card.getByRole('menuitem', { name: 'Open batch page' })).toHaveAttribute('href', '/batches/500');
         await page.keyboard.press('Escape');
+
+        // The name is the batch page's link; the caret beside it opens
+        // the card, and is big enough to tap.
+        await expect(card.getByRole('link', { name: 'smoke-sweep' })).toHaveAttribute('href', '/batches/500');
+        const caret = await card.getByRole('button', { name: 'Jobs in batch smoke-sweep' }).boundingBox();
+        expect(caret!.height, 'the caret is too small to tap').toBeGreaterThanOrEqual(36);
+        expect(caret!.width, 'the caret is too small to tap').toBeGreaterThanOrEqual(36);
 
         // Tap the card itself: it opens to its jobs, still without
         // widening the page.
-        await card.getByText('smoke-sweep').first().click();
+        await card.getByText(/^12 jobs$/).click();
         await expect(card.getByTestId('job-card').first()).toBeVisible();
         await expect(card.getByRole('link', { name: '500.0' })).toBeVisible();
         await noSidewaysScroll(page);
       });
     }
+
+    test("tapping a card's name opens the batch page, not the card", async ({ page }) => {
+      await page.goto('/jobs');
+      const card = page.getByTestId('batch-card').filter({ hasText: 'smoke-sweep' });
+      await card.getByRole('link', { name: 'smoke-sweep' }).click();
+      await page.waitForURL('**/batches/500');
+    });
 
     test('the held and running views keep their content on cards', async ({ page }) => {
       await page.goto('/jobs');
