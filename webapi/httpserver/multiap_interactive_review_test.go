@@ -38,6 +38,9 @@ func TestMultiAPSSHGatewayRefusesAnAmbiguousSessionName(t *testing.T) {
 // While a known session starts, the gateway re-reads it on its own AP
 // only -- not the hub and every AP each tick.
 func TestMultiAPSSHGatewayPollsOnlyTheSessionsAP(t *testing.T) {
+	prev := sshGatewaySessionPoll
+	sshGatewaySessionPoll = 10 * time.Millisecond
+	t.Cleanup(func() { sshGatewaySessionPoll = prev })
 	s := newInteractiveServer(t, "USER alice@d "+ap1+"\n", nil)
 	mgr := s.srv.interactiveManagerOrNil()
 	info := interactive.Info{Name: "work", JobID: "7.0@" + ap2, Schedd: ap2, ClusterID: 7, JobStatus: 1, Status: "starting"}
@@ -149,7 +152,7 @@ func TestMultiAPSSHApprovalScreenRefusesAForeignDomain(t *testing.T) {
 func TestSingleAPJupyterRowOfAnotherAPIsNotQueried(t *testing.T) {
 	stubJupyterHelper(t)
 	fake := newJupyterFakeSchedd()
-	h := newJupyterRestartHandler(t, t.TempDir()+"/app.db", fake)
+	h := newJupyterRestartHandler(t, migratedAppDB(t), fake)
 	h.schedd = htcondor.NewSchedd("ap-own.example.org", "<127.0.0.1:1>")
 	for _, row := range []struct{ id, schedd string }{{"foreign", "ap-other.example.org"}, {"own", "AP-OWN.example.org"}, {"legacy", ""}} {
 		if _, err := h.db.ExecContext(context.Background(), `

@@ -20,6 +20,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
+	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
@@ -47,7 +48,9 @@ type interactiveServer struct {
 func newInteractiveServer(t *testing.T, mapfile string, populate func(hub *multiaptest.DB)) *interactiveServer {
 	t.Helper()
 	aps := newActionAPs(t, ap1, ap2, ap3)
-	s := &interactiveServer{aps: aps, hub: multiaptest.NewHub(t)}
+	// Live tables only, in memory: these tests read no history, and a
+	// persistent hub's close is most of a test's time.
+	s := &interactiveServer{aps: aps, hub: multiaptest.NewMemoryHub(t)}
 	for _, n := range []string{ap1, ap2, ap3} {
 		s.hub.PutSource(n, multiap.StateFresh, 1)
 	}
@@ -65,7 +68,7 @@ func newInteractiveServer(t *testing.T, mapfile string, populate func(hub *multi
 		},
 		Logger:                   newTestLogger(t),
 		EnableMCP:                true,
-		OAuth2DBPath:             t.TempDir() + "/oauth2.db",
+		OAuth2DBPath:             migratedAppDB(t),
 		OAuth2Issuer:             "http://localhost:8080",
 		UserHeader:               "X-Remote-User",
 		UserHeaderTrustAnyUnsafe: true,
@@ -90,6 +93,56 @@ func newInteractiveServer(t *testing.T, mapfile string, populate func(hub *multi
 		}
 	})
 	return s
+}
+
+// appDBTemplate is one application database, migrated once per test
+// binary. Each server copies it, so the migrations -- most of a
+// server's setup time -- run once rather than once per test.
+var appDBTemplate struct {
+	once sync.Once
+	path string
+	err  error
+}
+
+// migratedAppDB is a fresh copy of the migrated application database,
+// for a server's OAuth2DBPath.
+func migratedAppDB(t *testing.T) string {
+	t.Helper()
+	appDBTemplate.once.Do(func() {
+		dir, err := os.MkdirTemp("", "m5b-appdb-*")
+		if err != nil {
+			appDBTemplate.err = err
+			return
+		}
+		path := filepath.Join(dir, "app.db")
+		db, err := appdb.Open(path)
+		if err != nil {
+			appDBTemplate.err = err
+			return
+		}
+		appDBTemplate.err = appdb.Migrate(context.Background(), db)
+		if cerr := db.Close(); appDBTemplate.err == nil {
+			appDBTemplate.err = cerr
+		}
+		appDBTemplate.path = path
+	})
+	if appDBTemplate.err != nil {
+		t.Fatalf("migrating the template application database: %v", appDBTemplate.err)
+	}
+	b, err := os.ReadFile(appDBTemplate.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if err := root.WriteFile("oauth2.db", b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, "oauth2.db")
 }
 
 func (s *interactiveServer) writeMap(t *testing.T, text string) {
@@ -450,6 +503,18 @@ func TestMultiAPJupyterKeepsItsAP(t *testing.T) {
 	h.jupyterRegistry = nil
 	h.jupyterRegistryMu.Unlock()
 	check("after a restart")
+
+	// The job completes on its AP: the list learns that from the AP the
+	// row names, and only from it, and reaps the session.
+	fakes.byAP[ap2].setStatus(cluster, 4)
+	q1, q3 := fakes.queries(ap1), fakes.queries(ap3)
+	if rec := jupyterAs(t, s, http.MethodGet, "/api/v1/jupyter/instances", ""); rec.Code != http.StatusOK ||
+		strings.Contains(rec.Body.String(), created.InstanceID) {
+		t.Errorf("list after the job completed on %s = %d %s, want the session reaped", ap2, rec.Code, rec.Body.String())
+	}
+	if fakes.queries(ap1) != q1 || fakes.queries(ap3) != q3 {
+		t.Error("the completed session's job was looked for on another AP")
+	}
 }
 
 // A row written by a single-AP server (no schedd) is listed in multi-AP

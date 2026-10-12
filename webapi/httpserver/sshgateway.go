@@ -455,6 +455,10 @@ type sshGatewaySessionSize struct {
 // and bounded because the caller is sitting at a terminal.
 const sshGatewaySessionWait = 3 * time.Minute
 
+// sshGatewaySessionPoll is how often that wait re-reads the session. A
+// variable for tests.
+var sshGatewaySessionPoll = 2 * time.Second
+
 // sshGatewayCredential mints the caller's HTCondor credential.
 //
 // Called per channel rather than per connection: the IDTOKEN lasts five
@@ -682,7 +686,7 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 			return jobssh.Key{}, fmt.Errorf(
 				"stopped waiting for session %q (job %s). It is still starting -- reconnect to pick it up: %w",
 				name, info.JobID, ctx.Err())
-		case <-time.After(2 * time.Second):
+		case <-time.After(sshGatewaySessionPoll):
 		}
 
 		// The session is known now: only its own access point is

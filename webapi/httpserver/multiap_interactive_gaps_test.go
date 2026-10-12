@@ -206,7 +206,7 @@ func TestSingleAPInteractiveShapeIsUnchanged(t *testing.T) {
 
 	stubJupyterHelper(t)
 	fake := newJupyterFakeSchedd()
-	jh := newJupyterRestartHandler(t, t.TempDir()+"/app.db", fake)
+	jh := newJupyterRestartHandler(t, migratedAppDB(t), fake)
 	created := createJupyterSession(t, jh)
 	list := listJupyterSessions(t, jh)
 	if len(list) != 1 || list[0].JobID != created.ClusterID+".0" || list[0].Schedd != "" {
