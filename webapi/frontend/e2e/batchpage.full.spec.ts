@@ -7,16 +7,19 @@ import { serverLog } from './fixtures/serverlog';
 // two-node DAG, each submitted through the REST API, then read on their
 // batch pages while they run and after they finish.
 
-const password = adminPassword(serverLog());
+const log = serverLog();
+const password = adminPassword(log);
 
 const RUN_TIMEOUT_MS = 150_000;
 
 // Where the access point's condor_dagman is. The CI image is a package
 // install; a local release build passes its own.
 const DAGMAN = process.env.E2E_DAGMAN ?? '/usr/bin/condor_dagman';
-// And its configuration, when it is not in the default place: a
-// scheduler-universe job has only the environment its ad carries.
-const CONDOR_CONFIG = process.env.E2E_CONDOR_CONFIG;
+// And its configuration: a scheduler-universe job has only the
+// environment its ad carries, and the demo pool's configuration is in
+// the directory the server logs, not in the default place.
+const CONDOR_CONFIG =
+  process.env.E2E_CONDOR_CONFIG ?? log.match(/(\/\S*\/htcondor-demo-\d+)/)?.[1]?.concat('/condor_config');
 
 async function submit(page: Page, lines: string[]): Promise<number> {
   const res = await page.request.post('/api/v1/jobs', { data: { submit_file: lines.join('\n') } });
