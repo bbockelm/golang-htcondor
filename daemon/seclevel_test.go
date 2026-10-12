@@ -194,15 +194,14 @@ func TestInstallSecurityLevelsNegotiatesAtCommandLevel(t *testing.T) {
 // TestInstallSecurityLevelsAdvertisesDaemonVersion: a command negotiated under
 // a per-level policy advertises the base policy's RemoteVersion, as one
 // negotiated under the base policy does, not cedar's built-in default. A C++
-// peer gates wire features on the version.
+// peer gates wire features on the version. So does a connection that resumes
+// a cached session, whose resume reply carries the version.
 func TestInstallSecurityLevelsAdvertisesDaemonVersion(t *testing.T) {
 	addr, _, _ := startSeclevelServer(t, map[string]string{"SEC_DEFAULT_AUTHENTICATION": "OPTIONAL"})
-	for name, cmd := range map[string]int{
-		"DC_NOP_READ":         commands.DC_NOP_READ,
-		"WRITE command":       seclevelWriteCmd,
-		"command at no level": seclevelNoPermCmd,
-	} {
+	connect := func(cmd int, cache *security.SessionCache) *security.SecurityNegotiation {
+		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		cl, err := client.ConnectAndAuthenticate(ctx, addr, &security.SecurityConfig{
 			Command:        cmd,
 			AuthMethods:    []security.AuthMethod{security.AuthFS},
@@ -210,15 +209,33 @@ func TestInstallSecurityLevelsAdvertisesDaemonVersion(t *testing.T) {
 			CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
 			Encryption:     security.SecurityOptional,
 			Integrity:      security.SecurityOptional,
-			SessionCache:   security.NewSessionCache(),
+			SessionCache:   cache,
 		})
-		cancel()
 		if err != nil {
-			t.Fatalf("%s: %v", name, err)
+			t.Fatalf("command %d: %v", cmd, err)
 		}
-		if got := cl.GetSecurityNegotiation().ServerConfig.RemoteVersion; got != seclevelVersion {
+		defer func() { _ = cl.Close() }()
+		return cl.GetSecurityNegotiation()
+	}
+	for name, cmd := range map[string]int{
+		"DC_NOP_READ":         commands.DC_NOP_READ,
+		"WRITE command":       seclevelWriteCmd,
+		"command at no level": seclevelNoPermCmd,
+	} {
+		if got := connect(cmd, security.NewSessionCache()).ServerConfig.RemoteVersion; got != seclevelVersion {
 			t.Errorf("%s: server advertised version %q, want %q", name, got, seclevelVersion)
 		}
-		_ = cl.Close()
+	}
+
+	cache := security.NewSessionCache()
+	if n := connect(commands.DC_NOP_READ, cache); n.SessionResumed {
+		t.Fatal("first connection with an empty session cache resumed a session")
+	}
+	n := connect(commands.DC_NOP_READ, cache)
+	if !n.SessionResumed {
+		t.Fatal("second connection did not resume the cached session")
+	}
+	if got := n.ServerConfig.RemoteVersion; got != seclevelVersion {
+		t.Errorf("resumed connection: server advertised version %q, want %q", got, seclevelVersion)
 	}
 }
