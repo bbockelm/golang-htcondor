@@ -82,6 +82,8 @@ type multiAPStack struct {
 	// assignEdits counts rewrites of the assignment mapfile, for
 	// distinct modification times.
 	assignEdits int
+	// configure adjusts the API server's configuration before it starts.
+	configure []func(*Config)
 }
 
 // sshTemplateLine points ssh-to-job at its sshd config template, found
@@ -485,13 +487,14 @@ func e2eHubOutage(t *testing.T, s *multiAPStack) {
 
 // startMultiAPStack builds the pool, submits the jobs, and starts the
 // spokes, the hub and the API server.
-func startMultiAPStack(t *testing.T, bin string) *multiAPStack {
+func startMultiAPStack(t *testing.T, bin string, configure ...func(*Config)) *multiAPStack {
 	t.Helper()
 	me, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &multiAPStack{dir: t.TempDir(), me: me.Username, client: &http.Client{Timeout: 30 * time.Second}}
+	s := &multiAPStack{dir: t.TempDir(), me: me.Username, client: &http.Client{Timeout: 30 * time.Second},
+		configure: configure}
 
 	// The second schedd's own state, outside the harness tree (which does
 	// not exist until the harness creates it).
@@ -620,7 +623,7 @@ func (s *multiAPStack) startServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	listener, baseURL := listenLocal(t)
-	srv, err := NewServer(Config{
+	cfg := Config{
 		ClientConfig:   htcCfg,
 		HTCondorConfig: htcCfg,
 		ListenAddr:     listener.Addr().String(),
@@ -639,7 +642,11 @@ func (s *multiAPStack) startServer(t *testing.T) {
 		UIDDomain:    s.harness.GetTrustDomain(),
 		EnableMCP:    true,
 		OAuth2DBPath: filepath.Join(s.dir, "oauth2.db"),
-	})
+	}
+	for _, f := range s.configure {
+		f(&cfg)
+	}
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
