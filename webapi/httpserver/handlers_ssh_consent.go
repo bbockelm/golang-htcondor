@@ -33,7 +33,9 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 )
 
@@ -117,8 +119,13 @@ type sshConsentView struct {
 	Exists bool `json:"session_exists"`
 	// CanCreate is false where this server runs no interactive
 	// manager, which makes the resource form pointless to show.
-	CanCreate      bool   `json:"can_create"`
-	JobID          string `json:"job_id,omitempty"`
+	CanCreate bool   `json:"can_create"`
+	JobID     string `json:"job_id,omitempty"`
+	// Schedd is, in multi-AP mode, the access point the existing
+	// session is on -- or, when there is none, the one a new session
+	// would be created on (the caller's assignment for interactive
+	// work).
+	Schedd         string `json:"schedd,omitempty"`
 	Status         string `json:"status,omitempty"`
 	HoldReason     string `json:"hold_reason,omitempty"`
 	HoldReasonCode int    `json:"hold_reason_code,omitempty"`
@@ -150,6 +157,8 @@ type sshConsentResult struct {
 	Approved bool   `json:"approved"`
 	Session  string `json:"session,omitempty"`
 	JobID    string `json:"job_id,omitempty"`
+	// Schedd is the access point the workspace is on, in multi-AP mode.
+	Schedd string `json:"schedd,omitempty"`
 	// Created distinguishes "your workspace was submitted" from "the
 	// one you already had is being used", which is the difference
 	// between waiting for the queue and not.
@@ -177,7 +186,7 @@ func (h *Handler) handleSSHConsentRead(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	username, _, ok := h.sshConsentIdentity(w, r)
+	username, groups, ok := h.sshConsentIdentity(w, r)
 	if !ok {
 		return
 	}
@@ -217,9 +226,20 @@ func (h *Handler) handleSSHConsentRead(w http.ResponseWriter, r *http.Request) {
 		} else if info != nil {
 			view.Exists = true
 			view.JobID = info.JobID
+			view.Schedd = info.Schedd
 			view.Status = info.Status
 			view.HoldReason = info.HoldReason
 			view.HoldReasonCode = info.HoldReasonCode
+		}
+	}
+	if h.multi != nil && view.CanCreate && !view.Exists && session != "" {
+		// Where a new session would go, so the screen can say so.
+		if user, err := h.multi.svc.UserFor(username); err == nil {
+			a := h.assignmentInfo(ctx, apassign.Request{User: user, Subject: username,
+				Groups: append([]string(nil), groups...), Kind: apassign.KindInteractive})
+			if a != nil {
+				view.Schedd = a.Schedd
+			}
 		}
 	}
 
@@ -301,25 +321,26 @@ func (h *Handler) handleSSHConsentApprove(w http.ResponseWriter, r *http.Request
 	}
 
 	session := sshSessionFromRequester(request)
-	if session != "" && h.multi != nil {
-		// The gateway refuses session targets in multi-AP mode before
-		// issuing a code; a code that names one anyway (issued before a
-		// restart into this mode) is not approved, and nothing is
-		// created or probed for it.
-		h.writeError(w, http.StatusBadRequest, errSSHSessionsMultiAP.Error())
-		return
-	}
 	result := sshConsentResult{Approved: true, Session: session}
 
 	if decision.Create != nil {
-		info, created, err := h.sshConsentCreateSession(ctx, username, session, *decision.Create)
+		// The groups the browser session recorded, so an assignment
+		// rule on a group places the session as it places the user's
+		// other work (multi-AP mode).
+		cctx := apassign.WithCaller(ctx, apassign.Caller{Subject: username, Groups: append([]string(nil), groups...)})
+		info, created, err := h.sshConsentCreateSession(cctx, username, session, *decision.Create)
 		if err != nil {
+			if h.multi != nil && multiap.StatusOf(err) != http.StatusInternalServerError {
+				h.multiAPError(w, err)
+				return
+			}
 			h.writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		result.Created = created
 		if info != nil {
 			result.JobID = info.JobID
+			result.Schedd = info.Schedd
 		}
 	}
 
@@ -433,10 +454,11 @@ func (h *Handler) sshConsentDefaults() InteractiveCreateTerminalRequest {
 	return req
 }
 
+// interactiveManagerOrNil is the session manager, or nil where this
+// server runs none. In multi-AP mode it places a new session by AP
+// assignment and reaches an existing one on the AP its record names.
 func (h *Handler) interactiveManagerOrNil() *interactive.Manager {
-	// No interactive sessions in multi-AP mode: the manager submits to
-	// "the" schedd, and there is none.
-	if h.mcpServer == nil || h.multi != nil {
+	if h.mcpServer == nil {
 		return nil
 	}
 	return h.mcpServer.InteractiveManager()

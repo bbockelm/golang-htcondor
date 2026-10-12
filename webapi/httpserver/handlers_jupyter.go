@@ -32,6 +32,8 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
+	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 	"github.com/gorilla/websocket"
@@ -197,14 +199,6 @@ func (s *Handler) forgetJupyterSession(ctx context.Context, reg *jupytertunnel.R
 	}
 }
 
-// jupyterSchedd is the schedd, or the stand-in a unit test installed.
-func (s *Handler) jupyterSchedd() jupyterScheddOps {
-	if s.jupyterScheddOverride != nil {
-		return s.jupyterScheddOverride
-	}
-	return s.getSchedd()
-}
-
 // submitJupyterJob submits through submitJob, which applies the submit
 // policy and checks required credentials. A unit test's stand-in schedd
 // still gets the policy applied; only the credential check is skipped.
@@ -270,6 +264,9 @@ func (s *Handler) adoptJupyterSessions(ctx context.Context, reg *jupytertunnel.R
 		}
 		if row.Image != "" {
 			meta["image"] = row.Image
+		}
+		if row.Schedd != "" {
+			meta[jupyterScheddMeta] = row.Schedd
 		}
 		if _, err := reg.AdoptInstance(row.InstanceID, row.Owner, row.CreatedAt, meta, row.Connected); err != nil {
 			s.logger.Warn(logging.DestinationHTTP, "jupyter: could not adopt a stored session",
@@ -371,10 +368,13 @@ func (s *Handler) handleJupyterPath(w http.ResponseWriter, r *http.Request) {
 type JupyterInstanceSummary struct {
 	InstanceID string `json:"instance_id"`
 	ClusterID  string `json:"cluster_id,omitempty"`
-	Image      string `json:"image,omitempty"`
-	Owner      string `json:"owner"`
-	CreatedAt  string `json:"created_at"`
-	Connected  bool   `json:"connected"` // helper has dialed back
+	// Schedd is the access point the session's job is on, in multi-AP
+	// mode.
+	Schedd    string `json:"schedd,omitempty"`
+	Image     string `json:"image,omitempty"`
+	Owner     string `json:"owner"`
+	CreatedAt string `json:"created_at"`
+	Connected bool   `json:"connected"` // helper has dialed back
 	// Reconnecting: the helper was connected and its tunnel dropped (or
 	// went with the last server process); it is expected to dial back.
 	Reconnecting                 bool   `json:"reconnecting,omitempty"`
@@ -425,22 +425,40 @@ func (s *Handler) handleJupyterListInstances(w http.ResponseWriter, r *http.Requ
 	// Each instance's cluster id is read once, before the query. A create
 	// can finish in between, and an id that appeared after the query was
 	// built has no ad in its answer -- which reads as a job that has gone.
+	//
+	// In multi-AP mode the query is one per AP, each to the AP the
+	// instances' records name (jupyterQueryContext); an instance with no
+	// AP on record is not looked for anywhere and so never reaped.
 	summaries := make([]JupyterInstanceSummary, len(insts))
-	clusters := make([]int, 0, len(insts))
+	clustersByAP := map[string][]int{}
 	for i, inst := range insts {
 		summaries[i] = instanceToSummary(inst)
 		if cid, ok := jupyterClusterID(summaries[i].ClusterID); ok {
-			clusters = append(clusters, cid)
+			clustersByAP[summaries[i].Schedd] = append(clustersByAP[summaries[i].Schedd], cid)
 		}
 	}
-	jobAdsByCluster, queriedOK := s.queryJupyterClusterAds(ctx, clusters)
+	type apAnswer struct {
+		ads map[int]*classad.ClassAd
+		ok  bool
+	}
+	answers := map[string]apAnswer{}
+	for ap, clusters := range clustersByAP {
+		qctx, ok := s.jupyterQueryContext(ctx, username, ap)
+		if !ok {
+			continue
+		}
+		ads, queried := s.queryJupyterClusterAds(qctx, clusters)
+		answers[ap] = apAnswer{ads: ads, ok: queried}
+	}
 	out := make([]JupyterInstanceSummary, 0, len(insts))
 	for i, inst := range insts {
 		summary := summaries[i]
 		var ad *classad.ClassAd
+		answer := answers[summary.Schedd]
+		queriedOK := answer.ok
 		cidInt, haveCluster := jupyterClusterID(summary.ClusterID)
 		if haveCluster {
-			ad = jobAdsByCluster[cidInt]
+			ad = answer.ads[cidInt]
 		}
 		if ad != nil {
 			enrichJupyterSummaryFromAd(&summary, ad)
@@ -523,7 +541,7 @@ func (s *Handler) queryJupyterClusterAds(
 	}
 	constraint := "(" + strings.Join(parts, " || ") + ") && ProcId == 0"
 
-	ads, _, err := s.jupyterSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+	ads, _, err := s.jupyterScheddFor(ctx).QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Projection: []string{
 			"ClusterId", "ProcId", "JobStatus",
 			"JobCurrentStartExecutingDate",
@@ -596,8 +614,11 @@ func (s *Handler) handleJupyterGetInstance(w http.ResponseWriter, r *http.Reques
 	// registry entry is just stale state — close it and tell the SPA
 	// 404 so it transitions to a "gone" view instead of perpetually
 	// showing "launching".
-	if cidInt, ok := jupyterClusterID(summary.ClusterID); ok {
-		adsByCluster, queriedOK := s.queryJupyterClusterAds(ctx, []int{cidInt})
+	// The instance's own AP in multi-AP mode, and with none on record
+	// (or that AP unreachable) no query at all.
+	qctx, canQuery := s.jupyterQueryContext(ctx, username, summary.Schedd)
+	if cidInt, ok := jupyterClusterID(summary.ClusterID); ok && canQuery {
+		adsByCluster, queriedOK := s.queryJupyterClusterAds(qctx, []int{cidInt})
 		ad := adsByCluster[cidInt]
 		if ad != nil {
 			enrichJupyterSummaryFromAd(&summary, ad)
@@ -620,6 +641,7 @@ func instanceToSummary(inst *jupytertunnel.Instance) JupyterInstanceSummary {
 	return JupyterInstanceSummary{
 		InstanceID:   inst.ID,
 		ClusterID:    inst.MetaValue("cluster_id"),
+		Schedd:       inst.MetaValue(jupyterScheddMeta),
 		Image:        inst.MetaValue("image"),
 		Owner:        inst.Owner,
 		CreatedAt:    inst.Created.UTC().Format(time.RFC3339),
@@ -744,6 +766,9 @@ type JupyterCreateRequest struct {
 type JupyterCreateResponse struct {
 	InstanceID string `json:"instance_id"`
 	ClusterID  string `json:"cluster_id"`
+	// Schedd is the access point the session was placed on, in
+	// multi-AP mode.
+	Schedd string `json:"schedd,omitempty"`
 	// ProxyPath is where the browser should eventually point its iframe
 	// (only useful once the helper has connected back; the SSE stream
 	// from /events tells you when).
@@ -818,11 +843,24 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// In multi-AP mode the session goes to the AP the caller's
+	// assignment names for kind "jupyter" (or the alternate ?schedd=
+	// names), and that AP is recorded on the instance and its row: every
+	// later read of its job goes there, never to a re-assigned one.
+	meta := map[string]string{"image": req.Image}
+	if s.multi != nil {
+		var m apregistry.Member
+		var ok bool
+		if ctx, m, ok = s.multiAssign(ctx, w, r, username, apassign.KindJupyter); !ok {
+			return
+		}
+		defer s.multi.svc.NoteWrite(m.Name)
+		meta[jupyterScheddMeta] = m.Name
+	}
+
 	instID, token, err := reg.CreateInstance(jupytertunnel.CreateInstanceOptions{
 		Owner: username,
-		Meta: map[string]string{
-			"image": req.Image,
-		},
+		Meta:  meta,
 	})
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create instance: %v", err))
@@ -840,6 +878,7 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 				InstanceID: instID,
 				Owner:      username,
 				Image:      req.Image,
+				Schedd:     routedSchedd(ctx),
 				CreatedAt:  time.Now(),
 				ExpiresAt:  time.Now().Add(s.jupyterSessionTTL()),
 				NextNonce:  nonce,
@@ -989,7 +1028,7 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 			Mode: 0o644,
 		}
 	}
-	if err := s.jupyterSchedd().SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
+	if err := s.jupyterScheddFor(ctx).SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
 		// Submission succeeded but spooling failed; the jobs are stuck
 		// in HELD with SpoolingInput. Best we can do is log and return
 		// — the schedd will eventually time them out, and the user
@@ -1012,11 +1051,12 @@ func (s *Handler) handleJupyterCreateInstance(w http.ResponseWriter, r *http.Req
 
 	s.logger.Info(logging.DestinationHTTP, "jupyter instance created",
 		"instance", instID, "owner", username, "cluster", clusterIDStr,
-		"universe", universe, "helper_goos", helperGOOS, "image", req.Image)
+		"universe", universe, "helper_goos", helperGOOS, "image", req.Image, "access_point", routedSchedd(ctx))
 
 	s.writeJSON(w, http.StatusCreated, JupyterCreateResponse{
 		InstanceID: instID,
 		ClusterID:  clusterIDStr,
+		Schedd:     routedSchedd(ctx),
 		ProxyPath:  proxyPath,
 	})
 }

@@ -104,7 +104,10 @@ type jupyterSessionRow struct {
 	ClusterID int
 	ProcID    int
 	// Image is what the session was launched with. Display only.
-	Image     string
+	Image string
+	// Schedd is the access point the session's job is on, in multi-AP
+	// mode; "" for a session started by a single-AP server.
+	Schedd    string
 	NextNonce []byte
 	// PrevNonce is the nonce the session moved away from, acceptable for
 	// one more dial. Nil once that grace has been used or never needed.
@@ -122,16 +125,17 @@ func (s *jupyterStore) Put(ctx context.Context, row jupyterSessionRow) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO jupyter_sessions
-		    (instance_id, owner, cluster_id, proc_id, image, next_nonce, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		    (instance_id, owner, cluster_id, proc_id, image, schedd, next_nonce, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(instance_id) DO UPDATE SET
 		    owner = excluded.owner,
 		    cluster_id = excluded.cluster_id,
 		    proc_id = excluded.proc_id,
 		    image = excluded.image,
+		    schedd = excluded."schedd",
 		    next_nonce = excluded.next_nonce,
 		    expires_at = excluded.expires_at`,
-		row.InstanceID, row.Owner, row.ClusterID, row.ProcID, row.Image,
+		row.InstanceID, row.Owner, row.ClusterID, row.ProcID, row.Image, row.Schedd,
 		row.NextNonce, row.CreatedAt.UTC(), row.ExpiresAt.UTC())
 	return err
 }
@@ -208,9 +212,9 @@ func (s *jupyterStore) Get(ctx context.Context, instanceID string) (jupyterSessi
 		return row, sql.ErrNoRows
 	}
 	err := s.db.QueryRowContext(ctx, `
-		SELECT instance_id, owner, cluster_id, proc_id, image, next_nonce, prev_nonce, connected, created_at, expires_at
+		SELECT instance_id, owner, cluster_id, proc_id, image, schedd, next_nonce, prev_nonce, connected, created_at, expires_at
 		  FROM jupyter_sessions WHERE instance_id = ?`, instanceID).
-		Scan(&row.InstanceID, &row.Owner, &row.ClusterID, &row.ProcID, &row.Image,
+		Scan(&row.InstanceID, &row.Owner, &row.ClusterID, &row.ProcID, &row.Image, &row.Schedd,
 			&row.NextNonce, &row.PrevNonce, &row.Connected, &row.CreatedAt, &row.ExpiresAt)
 	return row, err
 }
@@ -221,7 +225,7 @@ func (s *jupyterStore) Live(ctx context.Context, now time.Time) ([]jupyterSessio
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT instance_id, owner, cluster_id, proc_id, image, next_nonce, connected, created_at, expires_at
+		SELECT instance_id, owner, cluster_id, proc_id, image, schedd, next_nonce, connected, created_at, expires_at
 		  FROM jupyter_sessions WHERE expires_at > ? ORDER BY created_at`, now.UTC())
 	if err != nil {
 		return nil, err
@@ -230,7 +234,7 @@ func (s *jupyterStore) Live(ctx context.Context, now time.Time) ([]jupyterSessio
 	var out []jupyterSessionRow
 	for rows.Next() {
 		var row jupyterSessionRow
-		if err := rows.Scan(&row.InstanceID, &row.Owner, &row.ClusterID, &row.ProcID, &row.Image,
+		if err := rows.Scan(&row.InstanceID, &row.Owner, &row.ClusterID, &row.ProcID, &row.Image, &row.Schedd,
 			&row.NextNonce, &row.Connected, &row.CreatedAt, &row.ExpiresAt); err != nil {
 			return nil, err
 		}

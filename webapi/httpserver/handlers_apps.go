@@ -30,6 +30,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -38,7 +39,10 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
+	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/vscode"
 )
@@ -68,11 +72,16 @@ const (
 
 // AppSummary is one app as reported to a caller.
 type AppSummary struct {
+	// ID names the app in /api/v1/apps/{id}. In multi-AP mode it is
+	// "<id>@<schedd>", naming the access point the app is on.
 	ID    string `json:"id"`
 	Type  string `json:"type"`
 	JobID string `json:"job_id"`
-	Owner string `json:"owner,omitempty"`
-	State string `json:"state"`
+	// Schedd is the access point the app is on, in multi-AP mode, where
+	// JobID is the complete id.
+	Schedd string `json:"schedd,omitempty"`
+	Owner  string `json:"owner,omitempty"`
+	State  string `json:"state"`
 	// Detail says why, for a state a caller would otherwise have to
 	// guess at: what it is waiting for, or why it is held.
 	Detail string `json:"detail,omitempty"`
@@ -224,6 +233,17 @@ func (s *Handler) handleAppCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// In multi-AP mode the app goes to the AP the caller's assignment
+	// names for interactive work, and its id names that AP from then on.
+	if s.multi != nil {
+		var m apregistry.Member
+		var ok bool
+		if ctx, m, ok = s.multiAssign(ctx, w, r, owner, apassign.KindInteractive); !ok {
+			return
+		}
+		defer s.multi.svc.NoteWrite(m.Name)
+	}
+
 	submitFile, err := vscode.BuildSubmitFile(vscode.SubmitArgs{
 		SessionID:         id,
 		Universe:          "container",
@@ -256,7 +276,7 @@ func (s *Handler) handleAppCreate(w http.ResponseWriter, r *http.Request) {
 	stage := fstest.MapFS{
 		vscode.ExecutableName: &fstest.MapFile{Data: []byte(script), Mode: 0o755},
 	}
-	if err := s.getSchedd().SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
+	if err := s.scheddFor(ctx).SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
 		// The submit succeeded, so the job is sitting held with
 		// SpoolingInput. Remove it rather than leaving a job that can
 		// never run and that the caller has no handle on.
@@ -269,12 +289,13 @@ func (s *Handler) handleAppCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "app submitted",
-		"app", id, "type", req.Type, "cluster", clusterID, "owner", owner)
+		"app", id, "type", req.Type, "cluster", clusterID, "owner", owner, "access_point", routedSchedd(ctx))
 
 	s.writeJSON(w, http.StatusCreated, AppSummary{
-		ID:        id,
+		ID:        s.appIDText(id, routedSchedd(ctx)),
 		Type:      req.Type,
-		JobID:     fmt.Sprintf("%d.0", clusterID),
+		JobID:     s.jobPathID(ctx, clusterID, 0),
+		Schedd:    routedSchedd(ctx),
 		Owner:     owner,
 		State:     appStateWaiting,
 		Detail:    "submitted; waiting for a slot",
@@ -307,6 +328,10 @@ func (s *Handler) handleAppList(w http.ResponseWriter, r *http.Request) {
 	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
 	if owner == "" {
 		s.writeError(w, http.StatusUnauthorized, "no authenticated user")
+		return
+	}
+	if s.multi != nil {
+		s.multiListApps(ctx, w, owner)
 		return
 	}
 
@@ -344,15 +369,28 @@ func (s *Handler) queryAppAds(ctx context.Context, owner string) ([]*classad.Cla
 // Filtering here instead would lose them to the query limit.
 var appConstraint = fmt.Sprintf("%s =?= %q", vscode.AppAttr, vscode.AppAttrValue)
 
+// appAdAttrs is what an app listing reads off a job.
+var appAdAttrs = []string{
+	"ClusterId", "ProcId", "JobStatus", "JobBatchName",
+	"HoldReason", "HoldReasonCode", "QDate", "Owner",
+}
+
+// appBatchConstraint matches the one app whose id is id.
+func appBatchConstraint(id string) string {
+	return fmt.Sprintf("%s && JobBatchName =?= %q", appConstraint, vscode.BatchName(id))
+}
+
+// errNoSuchApp is a lookup that found no app of the caller's by that id.
+var errNoSuchApp = errors.New("no such app")
+
+// queryAppAdsWithConstraint asks the schedd ctx goes to: the one schedd,
+// or in multi-AP mode the AP ctx was routed to.
 func (s *Handler) queryAppAdsWithConstraint(ctx context.Context, owner, constraint string) ([]*classad.ClassAd, error) {
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
-		Limit: 200,
-		Projection: []string{
-			"ClusterId", "ProcId", "JobStatus", "JobBatchName",
-			"HoldReason", "HoldReasonCode", "QDate", "Owner",
-		},
-		FetchOpts: htcondor.FetchMyJobs,
-		Owner:     owner,
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		Limit:      200,
+		Projection: appAdAttrs,
+		FetchOpts:  htcondor.FetchMyJobs,
+		Owner:      owner,
 	})
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "app list query failed", "owner", owner, "error", err)
@@ -377,9 +415,9 @@ func (s *Handler) handleAppGet(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
-	sum, ok := s.findApp(ctx, owner, id)
-	if !ok {
-		s.writeError(w, http.StatusNotFound, "no such app")
+	sum, ctx, err := s.lookupApp(ctx, owner, id)
+	if err != nil {
+		s.writeAppLookupError(w, err)
 		return
 	}
 
@@ -404,7 +442,7 @@ func (s *Handler) handleAppGet(w http.ResponseWriter, r *http.Request, id string
 // refuses such a key, and the caller has already been refused unless
 // it has an identity.
 func (s *Handler) probeApp(ctx context.Context, r *http.Request, jobID string) (state, detail string) {
-	cluster, proc, err := parseJobID(jobID)
+	cluster, proc, err := s.disconnectJobID(jobID)
 	if err != nil {
 		return appStateRunning, ""
 	}
@@ -442,12 +480,12 @@ func (s *Handler) handleAppDelete(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
-	sum, ok := s.findApp(ctx, owner, id)
-	if !ok {
-		s.writeError(w, http.StatusNotFound, "no such app")
+	sum, ctx, err := s.lookupApp(ctx, owner, id)
+	if err != nil {
+		s.writeAppLookupError(w, err)
 		return
 	}
-	cluster, _, err := parseJobID(sum.JobID)
+	cluster, _, err := s.disconnectJobID(sum.JobID)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "app has an unparseable job id")
 		return
@@ -460,12 +498,60 @@ func (s *Handler) handleAppDelete(w http.ResponseWriter, r *http.Request, id str
 	s.writeJSON(w, http.StatusOK, sum)
 }
 
+// removeAppJob removes an app's job on the schedd ctx goes to: the one
+// schedd, or the app's AP in multi-AP mode.
 func (s *Handler) removeAppJob(ctx context.Context, cluster int) {
 	constraint := fmt.Sprintf("ClusterId == %d", cluster)
-	if _, err := s.getSchedd().RemoveJobs(ctx, constraint, "VS Code app removed"); err != nil {
+	if _, err := s.scheddFor(ctx).RemoveJobs(ctx, constraint, "VS Code app removed"); err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "removing an app job failed",
 			"cluster", cluster, "error", err)
 	}
+}
+
+// lookupApp finds one of the caller's apps by id, and returns the
+// context to act on it with: unchanged with one schedd, routed to the
+// app's AP in multi-AP mode.
+func (s *Handler) lookupApp(ctx context.Context, owner, id string) (AppSummary, context.Context, error) {
+	if s.multi != nil {
+		return s.multiFindApp(ctx, owner, id)
+	}
+	sum, ok := s.findApp(ctx, owner, id)
+	if !ok {
+		return AppSummary{}, nil, errNoSuchApp
+	}
+	return sum, ctx, nil
+}
+
+// writeAppLookupError answers a failed lookupApp.
+func (s *Handler) writeAppLookupError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errNoSuchApp) {
+		s.writeError(w, http.StatusNotFound, "no such app")
+		return
+	}
+	if s.multi != nil {
+		s.multiAPError(w, err)
+		return
+	}
+	s.writeError(w, http.StatusBadGateway, err.Error())
+}
+
+// appSummary is appSummaryFromAd for a job on schedd: in multi-AP mode
+// the id, job id and URL name that AP.
+func (s *Handler) appSummary(ad *classad.ClassAd, owner, schedd string) (AppSummary, bool) {
+	sum, ok := appSummaryFromAd(ad, owner)
+	if !ok || s.multi == nil || schedd == "" {
+		return sum, ok
+	}
+	cluster, _ := ad.EvaluateAttrInt("ClusterId")
+	proc, _ := ad.EvaluateAttrInt("ProcId")
+	full := s.multi.codec.Format(jobid.ID{Schedd: schedd, Cluster: cluster, Proc: proc})
+	sum.ID = s.appIDText(sum.ID, schedd)
+	sum.JobID = full
+	sum.Schedd = schedd
+	if sum.URL != "" {
+		sum.URL = appProxyPathFor(full)
+	}
+	return sum, true
 }
 
 // findApp locates one of the caller's apps by id.
@@ -542,5 +628,11 @@ func appSummaryFromAd(ad *classad.ClassAd, owner string) (AppSummary, bool) {
 // resolves one path component too high. The proxy redirects to this
 // form; handing it out already correct saves the round trip.
 func appProxyPath(cluster, proc int) string {
-	return fmt.Sprintf("/api/v1/jobs/%d.%d/proxy/unix/%s/", cluster, proc, vscode.SocketName)
+	return appProxyPathFor(fmt.Sprintf("%d.%d", cluster, proc))
+}
+
+// appProxyPathFor is appProxyPath for a job id in its text form: the
+// complete id in multi-AP mode.
+func appProxyPathFor(jobID string) string {
+	return fmt.Sprintf("/api/v1/jobs/%s/proxy/unix/%s/", jobID, vscode.SocketName)
 }

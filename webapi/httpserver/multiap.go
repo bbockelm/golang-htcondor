@@ -32,9 +32,11 @@ import (
 // its complete id names (multiap_actions.go); bulk actions fan out to
 // every member (multiap_bulk.go). A submission goes to the AP the
 // caller's assignment names, and credentials to that AP's credd
-// (multiap_submit.go). Everything else -- watches, interactive sessions,
-// Jupyter, apps -- answers 501 until it has been taught which AP it is
-// about. The refusal is an ALLOWLIST
+// (multiap_submit.go). Interactive work -- browser terminals, named
+// sessions, JupyterLab, apps -- is placed the same way and then reached
+// on the AP its record names (multiap_interactive.go). Everything else
+// -- watches above all -- answers 501 until it has been taught which AP
+// it is about. The refusal is an ALLOWLIST
 // (multiAPAllowed): a route nobody has looked at is refused, not served
 // against whichever schedd happens to be handy. There is no such schedd:
 // Handler.schedd is nil in this mode, and getSchedd counts and logs any
@@ -386,11 +388,11 @@ var multiAPSharePaths = map[string]bool{
 }
 
 // multiAPSSHPaths serve the SSH gateway's device-flow approval screen
-// and its certificate authority. In multi-AP mode the approval refuses
-// an interactive-session login and creates nothing; approving a job
-// login runs the revocation oracles' scope check over the trusted
-// members, and the certificate endpoint identifies its caller with a
-// trusted member. Nothing here acts on a job.
+// and its certificate authority. In multi-AP mode the approval creates
+// an interactive session through the session manager, on the AP the
+// caller's assignment names; approving a job login runs the revocation
+// oracles' scope check over the trusted members, and the certificate
+// endpoint identifies its caller with a trusted member.
 var multiAPSSHPaths = map[string]bool{
 	sshConsentReadPath:        true,
 	sshConsentApprovePath:     true,
@@ -461,6 +463,11 @@ func multiAPAllowed(method, path string) bool {
 	}
 	if multiAPSharePaths[path] {
 		// Redeeming a share URL acts on the AP the URL names.
+		return true
+	}
+	if multiAPInteractivePath(method, path) {
+		// Terminals, JupyterLab and apps: placed by AP assignment,
+		// then reached on the AP their record names.
 		return true
 	}
 	if path == "/api/v1/templates" || strings.HasPrefix(path, "/api/v1/templates/") {
@@ -899,16 +906,16 @@ func (h *Handler) pingAsCaller(ctx context.Context) (*htcondor.PingResult, error
 // startMultiAPHandler is Start for multi-AP mode: the schedd-independent
 // half of startup, plus the registry and hub pollers. Everything that
 // polls or acts on "the" schedd -- address and credd updaters, periodic
-// pings, the queue-superuser poll, the job_queue.log tail, watches,
-// Jupyter -- does not start.
+// pings, the queue-superuser poll, the job_queue.log tail, watches --
+// does not start.
 func (h *Handler) startMultiAPHandler(ctx context.Context, ln net.Listener, protocol string) error {
 	if err := h.initializeIDP(ln, protocol); err != nil {
 		return err
 	}
 	h.initializeOAuth2(ln, protocol)
 	h.warnIfMCPCannotMintCredentials()
-	// The gateway reaches jobs by complete id (sshGatewayResolveMultiAP);
-	// interactive-session targets are refused until submit is AP-aware.
+	// The gateway reaches jobs by complete id, and sessions on the AP
+	// their record names (sshGatewayResolveMultiAP).
 	if h.oauth2Provider != nil {
 		if err := h.startSSHGateway(h.ctx, h.oauth2Provider.config.AccessTokenIssuer); err != nil {
 			return fmt.Errorf("starting the SSH gateway: %w", err)
