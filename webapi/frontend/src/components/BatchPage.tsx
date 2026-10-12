@@ -354,7 +354,13 @@ export function HoldsSection({ batch }: { batch: BatchResponse }) {
                 </span>
               ))}
             </div>
-            <p className="mt-0.5 break-words font-mono text-xs text-gray-700">{displayHoldReason(g.template)}</p>
+            {/* One of the group's own messages: the group's pattern has
+                its varying parts blanked out, which is no message at all. */}
+            {g.examples[0]?.message && (
+              <p className="mt-0.5 break-words font-mono text-xs text-gray-700" title={g.examples[0].message}>
+                {displayHoldReason(g.examples[0].message)}
+              </p>
+            )}
             {g.examples.length > 0 && (
               <p className="mt-0.5 text-xs text-gray-500">
                 e.g.{' '}

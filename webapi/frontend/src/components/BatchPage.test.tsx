@@ -202,6 +202,25 @@ describe('HoldsSection', () => {
     expect(within(items[0]).getByRole('link', { name: '301.4' })).toHaveAttribute('href', '/jobs/301.4');
   });
 
+  it("quotes one of each group's own messages, never its pattern", () => {
+    wrap(<HoldsSection batch={liveBatchFixture(NOW)} />);
+    const s = screen.getByTestId('batch-holds');
+    const items = within(s).getAllByRole('listitem');
+    // Without the "Error from <slot>: " that names the machine.
+    expect(items[0]).toHaveTextContent('Job has gone over cgroup memory limit of 4096 megabytes.');
+    expect(items[0]).not.toHaveTextContent('Error from');
+    expect(items[1]).toHaveTextContent('Transfer input files failure at execution point slot1@e9: reading db.tar');
+    expect(s.textContent).not.toContain('*');
+  });
+
+  it('shows the count and label alone for a group with no example', () => {
+    const b = liveBatchFixture(NOW);
+    wrap(<HoldsSection batch={{ ...b, hold_reasons: [{ ...b.hold_reasons[0], examples: [] }] }} />);
+    const s = screen.getByTestId('batch-holds');
+    expect(s).toHaveTextContent('3jobs held nowMemory limit exceeded');
+    expect(s.textContent).not.toContain('*');
+  });
+
   it('leaves out the input-spooling hold every remote submit passes through', () => {
     const b = finishedBatchFixture(NOW);
     wrap(

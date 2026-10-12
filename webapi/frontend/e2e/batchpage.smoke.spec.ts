@@ -114,6 +114,8 @@ test('a batch in progress: progress, outcomes, holds, resources and its jobs', a
   const holds = page.getByTestId('batch-holds');
   await expect(holds).toContainText('Memory limit exceeded');
   await expect(holds.getByRole('link', { name: '301.4' })).toHaveAttribute('href', '/jobs/301.4');
+  await expect(holds).toContainText('Job has gone over cgroup memory limit of 4096 megabytes.');
+  expect(await holds.textContent()).not.toContain('*');
 
   await expect(page.getByTestId('batch-workflows').getByRole('link', { name: 'blastn' })).toHaveAttribute(
     'href',
