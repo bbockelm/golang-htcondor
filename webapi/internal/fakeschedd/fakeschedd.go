@@ -46,6 +46,9 @@ type Schedd struct {
 	startdQueries int
 	// actedOn is every job id an ACT_ON_JOBS request matched.
 	actedOn []string
+	// actionReply is added to every ACT_ON_JOBS reply; see
+	// SetActionReplyAttr.
+	actionReply map[string]int64
 	// sandboxes holds each job's output files, by "cluster.proc".
 	sandboxes map[string][]SandboxFile
 	// jobQueries counts QUERY_JOB_ADS requests and lastConstraint is the
@@ -323,10 +326,15 @@ func (f *Schedd) actOnJobs(ctx context.Context, c *cedarserver.Conn) error {
 		proc, _ := ad.EvaluateAttrInt("ProcId")
 		f.actedOn = append(f.actedOn, fmt.Sprintf("%d.%d", cluster, proc))
 	}
-	f.mu.Unlock()
-
 	result := classad.New()
 	result.InsertAttr("result_total_1", int64(len(ads)))
+	// The size of the whole queue, as the schedd reports it.
+	result.InsertAttr("TotalJobAds", int64(len(f.jobs)))
+	for name, value := range f.actionReply {
+		result.InsertAttr(name, value)
+	}
+	f.mu.Unlock()
+
 	if len(ads) == 0 {
 		result.InsertAttr("ActionResult", 0)
 		return sendAd(ctx, c, result)
@@ -343,6 +351,18 @@ func (f *Schedd) actOnJobs(ctx context.Context, c *cedarserver.Conn) error {
 		return err
 	}
 	return m.FinishMessage(ctx)
+}
+
+// SetActionReplyAttr puts name = value in every ACT_ON_JOBS reply from now
+// on, over what the fake would send -- e.g. the uninitialised
+// result_total_6 of a schedd built between 2025-02-24 and 2026-04-14.
+func (f *Schedd) SetActionReplyAttr(name string, value int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.actionReply == nil {
+		f.actionReply = map[string]int64{}
+	}
+	f.actionReply[name] = value
 }
 
 // Transfer is one sandbox download (TRANSFER_DATA_WITH_PERMS) request:
