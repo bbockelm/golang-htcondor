@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 
 import { adminPassword, loginAsAdmin } from './fixtures/login';
 import { serverLog } from './fixtures/serverlog';
@@ -28,6 +28,38 @@ async function submit(page: Page, lines: string[]): Promise<number> {
   const cluster = Number(created.cluster_id ?? created.ClusterId ?? created.cluster);
   expect(cluster).toBeGreaterThan(0);
   return cluster;
+}
+
+// attachDagmanDiagnostics puts what DAGMan said into the report of a
+// failed DAG test: the manager job's ad (from the queue, else the
+// archive) and its log and stderr from the spool. Best effort -- a
+// diagnostic that fails must not hide the failure it is explaining.
+async function attachDagmanDiagnostics(page: Page, testInfo: TestInfo, root: number, base: string) {
+  const id = `${root}.0`;
+  const fetchText = async (url: string): Promise<string> => {
+    try {
+      const res = await page.request.get(url, { timeout: 20_000 });
+      return `HTTP ${res.status()}\n${await res.text()}`;
+    } catch (e) {
+      return `request failed: ${String(e)}`;
+    }
+  };
+  const parts: [string, string][] = [
+    ['dagman-job-ad.txt', await fetchText(`/api/v1/jobs/${id}`)],
+    [
+      'dagman-job-archive.txt',
+      await fetchText(`/api/v1/jobs/archive?owned_by_me=false&constraint=${encodeURIComponent(`ClusterId == ${root}`)}`),
+    ],
+    [`${base}.dagman.out`, await fetchText(`/api/v1/jobs/${id}/files/${base}.dagman.out`)],
+    [`${base}.lib.err`, await fetchText(`/api/v1/jobs/${id}/files/${base}.lib.err`)],
+    [
+      'batch-jobs.json',
+      await fetchText(`/api/v1/jobs?owned_by_me=false&limit=*&constraint=${encodeURIComponent(`JobBatchName == "${base}.dag+${root}"`)}`),
+    ],
+  ];
+  for (const [name, body] of parts) {
+    await testInfo.attach(name, { body, contentType: 'text/plain' });
+  }
 }
 
 // archived counts a batch's finished jobs in the archive, by JobStatus.
@@ -91,7 +123,7 @@ test('a multi-job cluster: its page shows progress and every job, live and finis
   await expect(page.getByTestId('batch-holds')).toHaveCount(0);
 });
 
-test('a DAG: its page shows node progress, its jobs and its graph', async ({ page }) => {
+test('a DAG: its page shows node progress, its jobs and its graph', async ({ page }, testInfo) => {
   test.setTimeout(420_000);
   await loginAsAdmin(page, password);
 
@@ -123,7 +155,11 @@ test('a DAG: its page shows node progress, its jobs and its graph', async ({ pag
     `My.JobBatchName = "${dagName}+$(Cluster)"`,
     'on_exit_remove = (ExitSignal =?= 11 || (ExitCode =!= UNDEFINED && ExitCode >= 0 && ExitCode <= 2))',
     `arguments = "-p 0 -f -l . -Lockfile ${base}.dag.lock -Dag ${dagName}"`,
-    `environment = "_CONDOR_DAGMAN_LOG=${base}.dagman.out _CONDOR_MAX_DAGMAN_LOG=0 PATH=${DAGMAN.replace(/\/[^/]+$/, '')}:/usr/bin:/bin${
+    // DAGMAN_AVOID_SLASH_TMP=False: the demo pool's spool is under the
+    // system temp directory -- /tmp on Linux -- and DAGMan otherwise
+    // refuses to keep its node log there and exits before reading the
+    // DAG. A real access point's spool is not under /tmp.
+    `environment = "_CONDOR_DAGMAN_LOG=${base}.dagman.out _CONDOR_MAX_DAGMAN_LOG=0 _CONDOR_DAGMAN_AVOID_SLASH_TMP=False PATH=${DAGMAN.replace(/\/[^/]+$/, '')}:/usr/bin:/bin${
       CONDOR_CONFIG ? ` CONDOR_CONFIG=${CONDOR_CONFIG}` : ''
     }"`,
     'should_transfer_files = YES',
@@ -139,56 +175,62 @@ test('a DAG: its page shows node progress, its jobs and its graph', async ({ pag
   });
   expect(upload.status(), `upload failed: ${await upload.text()}`).toBeLessThan(400);
 
-  // Once DAGMan has submitted node A, the page has a workflow to show.
-  await page.goto(`/batches/${root}`);
-  await expect(page.getByRole('heading', { level: 1, name: dagName })).toBeVisible();
-  await expect(page.getByText('DAG', { exact: true })).toBeVisible();
+  try {
 
-  // Its jobs: the DAGMan job first.
-  const jobs = page.getByTestId('batch-jobs');
-  const nodeRow = (n: string) =>
-    jobs.getByTestId('batch-job-row').filter({ has: page.getByRole('cell', { name: n, exact: true }) });
-  await expect(async () => {
-    await page.reload();
-    await expect(nodeRow('DAGMan')).toHaveCount(1, { timeout: 5000 });
-  }).toPass({ timeout: 30_000 });
-  await expect(jobs.getByRole('link', { name: `${root}.0`, exact: true })).toHaveAttribute('href', `/jobs/${root}.0`);
+    // Once DAGMan has submitted node A, the page has a workflow to show.
+    await page.goto(`/batches/${root}`);
+    await expect(page.getByRole('heading', { level: 1, name: dagName })).toBeVisible();
+    await expect(page.getByText('DAG', { exact: true })).toBeVisible();
 
-  // Node A, once DAGMan has submitted it -- on the DAG's page whichever
-  // user it runs as (a schedd that is not root, like the demo's, runs
-  // DAGMan's nodes as its own user).
-  await expect(async () => {
-    await page.reload();
-    await expect(nodeRow('A')).toHaveCount(1, { timeout: 5000 });
-  }).toPass({ timeout: 60_000 });
-  const nodeCluster = Number((await nodeRow('A').getByRole('link').first().textContent())?.split('.')[0]);
-  expect(nodeCluster).toBeGreaterThan(root);
+    // Its jobs: the DAGMan job first.
+    const jobs = page.getByTestId('batch-jobs');
+    const nodeRow = (n: string) =>
+      jobs.getByTestId('batch-job-row').filter({ has: page.getByRole('cell', { name: n, exact: true }) });
+    await expect(async () => {
+      await page.reload();
+      await expect(nodeRow('DAGMan')).toHaveCount(1, { timeout: 5000 });
+    }).toPass({ timeout: 30_000 });
+    await expect(jobs.getByRole('link', { name: `${root}.0`, exact: true })).toHaveAttribute('href', `/jobs/${root}.0`);
 
-  // And a node's cluster leads to the DAG's page.
-  await page.goto(`/batches/${nodeCluster}`);
-  await expect(page).toHaveURL(new RegExp(`/batches/${root}$`));
-  await expect(page.getByRole('heading', { level: 1, name: dagName })).toBeVisible();
+    // Node A, once DAGMan has submitted it -- on the DAG's page whichever
+    // user it runs as (a schedd that is not root, like the demo's, runs
+    // DAGMan's nodes as its own user).
+    await expect(async () => {
+      await page.reload();
+      await expect(nodeRow('A')).toHaveCount(1, { timeout: 5000 });
+    }).toPass({ timeout: 60_000 });
+    const nodeCluster = Number((await nodeRow('A').getByRole('link').first().textContent())?.split('.')[0]);
+    expect(nodeCluster).toBeGreaterThan(root);
 
-  // The graph: both nodes, once DAGMan has written its files.
-  const panel = page.getByTestId('workflow-graph-panel');
-  await expect(async () => {
-    await panel.getByRole('button', { name: /Load graph|Refresh/ }).click();
-    // A and B, one above the other.
-    await expect(panel.getByRole('img', { name: 'Workflow graph: 2 groups in 2 layers' })).toBeVisible({
-      timeout: 10_000,
-    });
-  }).toPass({ timeout: 90_000 });
+    // And a node's cluster leads to the DAG's page.
+    await page.goto(`/batches/${nodeCluster}`);
+    await expect(page).toHaveURL(new RegExp(`/batches/${root}$`));
+    await expect(page.getByRole('heading', { level: 1, name: dagName })).toBeVisible();
 
-  // Node progress, once DAGMan has first reported it (it does so every
-  // two minutes).
-  await expect(async () => {
-    await page.reload();
-    await expect(page.getByTestId('batch-progress')).toContainText(/of 2 nodes done/, { timeout: 5000 });
-  }).toPass({ timeout: 180_000 });
-  await expect(page.getByTestId('dag-nodes')).toBeVisible();
+    // The graph: both nodes, once DAGMan has written its files.
+    const panel = page.getByTestId('workflow-graph-panel');
+    await expect(async () => {
+      await panel.getByRole('button', { name: /Load graph|Refresh/ }).click();
+      // A and B, one above the other.
+      await expect(panel.getByRole('img', { name: 'Workflow graph: 2 groups in 2 layers' })).toBeVisible({
+        timeout: 10_000,
+      });
+    }).toPass({ timeout: 90_000 });
 
-  // Clean up: removing the batch removes DAGMan and its nodes.
-  await page.getByRole('button', { name: 'Remove batch' }).click();
-  await page.getByRole('button', { name: /^Remove \d+ jobs?$/ }).click();
-  await expect(page.getByTestId('batch-actions')).toHaveCount(0, { timeout: 60_000 });
+    // Node progress, once DAGMan has first reported it (it does so every
+    // two minutes).
+    await expect(async () => {
+      await page.reload();
+      await expect(page.getByTestId('batch-progress')).toContainText(/of 2 nodes done/, { timeout: 5000 });
+    }).toPass({ timeout: 180_000 });
+    await expect(page.getByTestId('dag-nodes')).toBeVisible();
+
+    // Clean up: removing the batch removes DAGMan and its nodes.
+    await page.getByRole('button', { name: 'Remove batch' }).click();
+    await page.getByRole('button', { name: /^Remove \d+ jobs?$/ }).click();
+    await expect(page.getByTestId('batch-actions')).toHaveCount(0, { timeout: 60_000 });
+  } catch (e) {
+    await attachDagmanDiagnostics(page, testInfo, root, base);
+    throw e;
+  }
 });
