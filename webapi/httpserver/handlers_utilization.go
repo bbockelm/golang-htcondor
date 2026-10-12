@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/dbrpc"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -192,6 +191,9 @@ var utilizationDays = map[int]bool{1: true, 7: true, 30: true}
 var errMirrorRequiredUtilization = errors.New("this analysis must be served from the htcondordb mirror (HTTP_API_DBMIRROR_REQUIRED is set) and the mirror could not answer")
 
 // handleUtilization handles GET /api/v1/utilization.
+//
+// The response carries a Server-Timing header with the phases of the
+// computation that produced it (see utilizationTiming).
 func (s *Handler) handleUtilization(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -207,11 +209,13 @@ func (s *Handler) handleUtilization(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	begin := time.Now()
 	res, err := s.utilizationAnalysis(c, uq)
 	if err != nil {
 		s.writeUtilizationAnalysisError(w, err)
 		return
 	}
+	w.Header().Set("Server-Timing", res.timing.serverTiming(begin))
 	s.writeJSON(w, http.StatusOK, res.summary)
 }
 
@@ -270,11 +274,17 @@ func (s *Handler) utilizationCall(w http.ResponseWriter, r *http.Request, uq uti
 func (s *Handler) utilizationAnalysis(c *utilizationCaller, uq utilizationQuery) (*utilizationResult, error) {
 	return s.utilizationResults().getWithin(c.ctx, c.key, utilizationComputeTimeout(uq.limit),
 		func(computeCtx context.Context) (*utilizationResult, error) {
-			resp, err := s.computeUtilization(computeCtx, c, uq)
+			resp, timing, err := s.computeUtilization(computeCtx, c, uq)
 			if err != nil {
 				return nil, err
 			}
-			return newUtilizationResult(resp)
+			res, err := newUtilizationResult(resp, timing)
+			if err != nil {
+				return nil, err
+			}
+			s.logger.Debug(logging.DestinationHTTP, "utilization phases", res.timing.logArgs()...)
+			s.observeUtilizationPhases(res.timing)
+			return res, nil
 		})
 }
 
@@ -325,36 +335,40 @@ func (s *Handler) utilizationScope(ctx context.Context, r *http.Request, ownedBy
 // The scope is narrowed by the caller's owners and constraint; the window
 // is added per backend (see utilizationJobs). There is no pool to measure
 // in multi-AP mode, so no throughput estimate either.
-func (s *Handler) computeUtilization(ctx context.Context, c *utilizationCaller, uq utilizationQuery) (*utilization.Response, error) {
+func (s *Handler) computeUtilization(ctx context.Context, c *utilizationCaller, uq utilizationQuery) (*utilization.Response, utilizationTiming, error) {
 	now := time.Now().Unix()
 	since := now - int64(uq.days)*24*3600
 
-	start := time.Now()
-	var jobs []utilization.Job
+	var chunks [][]utilization.Job
 	var truncated bool
-	var source string
 	var err error
 	var machines []utilization.Machine
+	var t utilizationTiming
 	if s.multi != nil {
-		source = "hub"
+		t.source = "hub"
+		start := time.Now()
+		var jobs []utilization.Job
 		jobs, truncated, err = s.multiUtilizationJobs(ctx, c.user, uq.narrow("true"), uq.accessPoint, since, uq.limit)
+		chunks, t.read, t.rows = [][]utilization.Job{jobs}, time.Since(start), len(jobs)
 	} else {
-		jobs, truncated, source, err = s.utilizationJobs(ctx, uq.narrow(c.scope), since, uq.limit, c.mirror)
+		chunks, truncated, t, err = s.utilizationJobs(ctx, uq.narrow(c.scope), since, uq.limit, c.mirror)
 		machines = s.utilizationMachines(ctx)
 	}
 	if err != nil {
-		return nil, err
+		return nil, t, err
 	}
-	readTime := time.Since(start)
-	resp := utilization.Analyze(jobs, utilization.Options{
+	start := time.Now()
+	resp := utilization.AnalyzeChunks(chunks, utilization.Options{
 		Since: since, Until: now, Days: uq.days, Truncated: truncated, ShowOwner: c.showOwner,
 		Limit: uq.limit, MaxLimit: s.utilizationMaxLimit(),
 		Machines: machines,
 	})
+	t.analyze = time.Since(start)
 	s.logger.Info(logging.DestinationHTTP, "utilization analysed",
-		"source", source, "jobs", len(jobs), "truncated", truncated, "days", uq.days,
-		"read_ms", readTime.Milliseconds(), "analyse_ms", (time.Since(start) - readTime).Milliseconds())
-	return resp, nil
+		"source", t.source, "jobs", utilization.Count(chunks), "truncated", truncated, "days", uq.days,
+		"read_ms", t.read.Milliseconds(), "decode_wait_ms", t.decodeWait.Milliseconds(),
+		"analyse_ms", t.analyze.Milliseconds())
+	return resp, t, nil
 }
 
 // scheddEnteredHistory is when a schedd history record entered history.
@@ -383,20 +397,22 @@ const scheddEnteredHistory = `ifThenElse(isUndefined(EnteredHistoryTime), ` +
 // "attribute op literal" conjuncts, so the plain comparison skips whole
 // segments outside the window while an ifThenElse would scan the entire
 // archive. The schedd has no such index, and needs the fallback.
-func (s *Handler) utilizationJobs(ctx context.Context, scope string, since int64, limit int, mirror bool) ([]utilization.Job, bool, string, error) {
+func (s *Handler) utilizationJobs(ctx context.Context, scope string, since int64, limit int, mirror bool) ([][]utilization.Job, bool, utilizationTiming, error) {
 	mirrorConstraint, scheddConstraint := utilizationWindow(scope, since)
 	if mirror {
-		jobs, truncated, err := s.utilizationFromMirror(ctx, mirrorConstraint, limit)
+		chunks, truncated, t, err := s.utilizationFromMirror(ctx, mirrorConstraint, limit)
 		if err == nil {
-			return jobs, truncated, "htcondordb", nil
+			t.source = "htcondordb"
+			return chunks, truncated, t, nil
 		}
 		s.logger.Debug(logging.DestinationHTTP, "utilization: the mirror could not answer", "error", err)
 	}
 	if s.dbMirror.Required() {
-		return nil, false, "", errMirrorRequiredUtilization
+		return nil, false, utilizationTiming{}, errMirrorRequiredUtilization
 	}
-	jobs, truncated, err := s.utilizationFromSchedd(ctx, scheddConstraint, since, limit)
-	return jobs, truncated, "schedd", err
+	chunks, truncated, t, err := s.utilizationFromSchedd(ctx, scheddConstraint, since, limit)
+	t.source = "schedd"
+	return chunks, truncated, t, err
 }
 
 // utilizationWindow is the history constraint for scope's jobs since a
@@ -410,63 +426,74 @@ func utilizationWindow(scope string, since int64) (mirror, schedd string) {
 // which returns matches newest first with the limit pushed down. One past
 // the cap is asked for, so that hitting the cap and having exactly the
 // cap are told apart.
-func (s *Handler) utilizationFromMirror(ctx context.Context, constraint string, limit int) ([]utilization.Job, bool, error) {
+func (s *Handler) utilizationFromMirror(ctx context.Context, constraint string, limit int) ([][]utilization.Job, bool, utilizationTiming, error) {
+	var t utilizationTiming
 	info, err := s.dbMirror.Discover(ctx)
 	if err != nil {
 		s.recordMirror("history", dbmirror.Decision{Reason: dbmirror.ReasonNoMirror, Note: err.Error()})
-		return nil, false, err
+		return nil, false, t, err
 	}
 	// The same freshness rule as any other history read. A Since-free,
 	// newest-first read is exactly what the archive serves.
 	d := dbmirror.HistoryDecision(info, &htcondor.HistoryQueryOptions{Backwards: true})
 	if !d.Use {
 		s.recordMirror("history", d)
-		return nil, false, errors.New(d.Note)
+		return nil, false, t, errors.New(d.Note)
 	}
 	dbc, closer, _, err := s.dbMirror.Client(ctx)
 	if err != nil {
 		s.recordMirror("history", dbmirror.Decision{Reason: dbmirror.ReasonDialFailed, Note: err.Error()})
-		return nil, false, err
+		return nil, false, t, err
 	}
 	defer closer()
 
-	var jobs []utilization.Job
-	var reader utilization.JobReader
-	truncated := false
-	yield := func(row string) bool {
-		if len(jobs) >= limit {
-			truncated = true
-			return false
-		}
-		ad, perr := classad.ParseOld(row)
-		if perr != nil {
+	// Rows are parsed and decoded on every core while the stream is
+	// still arriving (see utilization.Decoder); this goroutine only
+	// counts them and hands them over.
+	read := func(stream func(yield func(string) bool) error) ([][]utilization.Job, bool, error) {
+		dec := utilization.NewDecoder(0)
+		rows, truncated := 0, false
+		start := time.Now()
+		err := stream(func(row string) bool {
+			if rows >= limit {
+				truncated = true
+				return false
+			}
+			rows++
+			dec.Row(row)
 			return true
-		}
-		jobs = append(jobs, reader.FromAd(ad, ""))
-		return true
+		})
+		t.read, t.rows = time.Since(start), rows
+		chunks, busy := dec.Finish()
+		t.decode, t.decodeWait = busy, time.Since(start)-t.read
+		return chunks, truncated, err
 	}
 	proj := utilization.Projection()
 	// The reference-chasing projection, so that a request written as an
 	// expression over some other attribute still evaluates. A mirror too
 	// old for it gets the plain projection, where such a request drops
 	// out of the numbers rather than being guessed at.
-	err = dbc.QueryRawProjectRefsStream(ctx, "history", constraint, proj, limit+1, yield)
+	chunks, truncated, err := read(func(yield func(string) bool) error {
+		return dbc.QueryRawProjectRefsStream(ctx, "history", constraint, proj, limit+1, yield)
+	})
 	if errors.Is(err, dbrpc.ErrProjectRefsUnsupported) {
-		jobs, truncated = nil, false
-		err = dbc.QueryRawProjectStream(ctx, "history", constraint, proj, limit+1, yield)
+		chunks, truncated, err = read(func(yield func(string) bool) error {
+			return dbc.QueryRawProjectStream(ctx, "history", constraint, proj, limit+1, yield)
+		})
 	}
 	if err != nil {
 		s.recordMirror("history", dbmirror.Decision{Reason: dbmirror.ReasonQueryFailed, Note: err.Error()})
-		return nil, false, err
+		return nil, false, t, err
 	}
 	s.recordMirror("history", d)
-	return jobs, truncated, nil
+	return chunks, truncated, t, nil
 }
 
 // utilizationFromSchedd reads the jobs from the schedd's history file,
 // newest first. The backwards walk stops at the first record older than
 // the window rather than reading the rest of the file to find nothing.
-func (s *Handler) utilizationFromSchedd(ctx context.Context, constraint string, since int64, limit int) ([]utilization.Job, bool, error) {
+func (s *Handler) utilizationFromSchedd(ctx context.Context, constraint string, since int64, limit int) ([][]utilization.Job, bool, utilizationTiming, error) {
+	var t utilizationTiming
 	opts := &htcondor.HistoryQueryOptions{
 		Source:        htcondor.HistorySourceJobHistory,
 		Limit:         limit + 1,
@@ -476,16 +503,16 @@ func (s *Handler) utilizationFromSchedd(ctx context.Context, constraint string, 
 		StreamResults: true,
 		Since:         fmt.Sprintf("%s < %d", scheddEnteredHistory, since),
 	}
+	start := time.Now()
 	results, err := s.getSchedd().QueryHistoryStream(ctx, constraint, opts, &htcondor.StreamOptions{
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, false, t, err
 	}
-	var jobs []utilization.Job
-	var reader utilization.JobReader
-	truncated := false
+	dec := utilization.NewDecoder(0)
+	rows, truncated := 0, false
 	var streamErr error
 	// Drained to the end even past the cap, so the reader is never left
 	// blocked on a channel nobody reads; Limit keeps that tail to one.
@@ -493,16 +520,20 @@ func (s *Handler) utilizationFromSchedd(ctx context.Context, constraint string, 
 		switch {
 		case res.Err != nil:
 			streamErr = res.Err
-		case len(jobs) >= limit:
+		case rows >= limit:
 			truncated = true
 		case res.Ad != nil:
-			jobs = append(jobs, reader.FromAd(res.Ad, ""))
+			rows++
+			dec.Ad(res.Ad, "")
 		}
 	}
+	t.read, t.rows = time.Since(start), rows
+	chunks, busy := dec.Finish()
+	t.decode, t.decodeWait = busy, time.Since(start)-t.read
 	if streamErr != nil {
-		return nil, false, streamErr
+		return nil, false, t, streamErr
 	}
-	return jobs, truncated, nil
+	return chunks, truncated, t, nil
 }
 
 // multiUtilizationJobs pages through the hub's history for one user.

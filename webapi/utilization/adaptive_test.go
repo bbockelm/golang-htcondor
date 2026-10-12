@@ -121,3 +121,36 @@ func TestAdaptiveRequestSizedFromStart(t *testing.T) {
 		}
 	}
 }
+
+// A JobReader remembers what it learned about a request expression, and
+// reads every job as FromAd alone would: a formula over nothing but
+// usage starts at the same value in every job, however it is spelled; a
+// formula that also refers to the job's own attributes is evaluated in
+// each job; and a literal request is not a formula.
+func TestJobReaderRemembersRequests(t *testing.T) {
+	ads := []string{
+		"RequestMemory = " + chtcFormula,
+		// The same formula, spelled differently.
+		"RequestMemory = ifthenelse(memoryusage isnt undefined, max({2048, 3 * memoryusage / 2}), 2048)",
+		"RequestMemory = ifThenElse(MemoryUsage isnt undefined, 2 * MemoryUsage, BaseMemory)\nBaseMemory = 1000",
+		"RequestMemory = ifThenElse(MemoryUsage isnt undefined, 2 * MemoryUsage, BaseMemory)\nBaseMemory = 3000",
+		"RequestMemory = 512",
+		"RequestMemory = " + chtcFormula,
+		"RequestMemory = ifThenElse(MemoryUsage isnt undefined, 2 * MemoryUsage, BaseMemory)\nBaseMemory = 5000",
+		"RequestMemory = 768",
+	}
+	var r JobReader
+	for i, text := range ads {
+		ad := parseAd(t, "JobStatus = 4\nResidentSetSize = 400000\nMemoryUsage = ((ResidentSetSize + 1023) / 1024)\n"+text)
+		want := FromAd(ad, "")
+		got := r.FromAd(ad, "")
+		if got.Adaptive != want.Adaptive || got.RequestMemoryStart != want.RequestMemoryStart || got.RequestMemory != want.RequestMemory {
+			t.Errorf("ad %d: reader read adaptive %b start %v in force %v; FromAd %b %v %v",
+				i, got.Adaptive, got.RequestMemoryStart.V(), got.RequestMemory.V(),
+				want.Adaptive, want.RequestMemoryStart.V(), want.RequestMemory.V())
+		}
+	}
+	if len(r.requests) != 4 {
+		t.Errorf("reader knows %d expressions, want 4 (two spellings of one formula are one)", len(r.requests))
+	}
+}

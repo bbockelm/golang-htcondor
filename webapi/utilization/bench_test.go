@@ -186,3 +186,123 @@ func BenchmarkResponseSize(b *testing.B) {
 		})
 	}
 }
+
+// realisticAd is a history record as the mirror returns it with the full
+// projection: a container job with a long quoted argument list and a
+// formula memory request.
+func realisticAd(i int) string {
+	return fmt.Sprintf(`ClusterId = %d
+ProcId = %d
+Owner = "user%d"
+JobBatchName = "ny50.dag+%d"
+DAGManJobId = %d
+Cmd = ""
+Args = "python3 runner.py --circuit ny50_%d --depth 40 --shots 1000 --backend 'aer simulator' --seed %d --out /srv/out/run_%d.json"
+JobUniverse = 5
+QDate = %d
+CompletionDate = %d
+EnteredHistoryTime = %d
+EnteredCurrentStatus = %d
+JobStartDate = %d
+JobCurrentStartDate = %d
+JobStatus = 4
+ExitCode = 0
+ExitBySignal = false
+RequestMemory = ifthenelse((MemoryUsage isnt undefined), max({ 2048,((3 * MemoryUsage) / 2) }), 2048)
+RequestCpus = 1
+RequestDisk = 4194304
+ResidentSetSize = 2500000
+ResidentSetSize_RAW = 2371234
+MemoryUsage = ((ResidentSetSize + 1023) / 1024)
+DiskUsage = 1000000
+DiskUsage_RAW = 966340
+RemoteWallClockTime = 3812.0
+RemoteUserCpu = 3500.0
+RemoteSysCpu = 40.0
+CumulativeRemoteUserCpu = 3500.0
+CumulativeRemoteSysCpu = 40.0
+CommittedTime = 3812
+NumJobStarts = 1
+NumHoldsByReason = [ JobOutOfResources = 1 ]
+LastHoldReasonCode = 34
+LastHoldReasonSubCode = 102
+VacateReasonCode = 34
+VacateReasonSubCode = 102`, 100000+i/100, i%100, i%50, 99000+i/1000, 99000+i/1000, i%9, i, i, 1760000000+i, 1760003800+i, 1760003800+i, 1760003800+i, 1760000100+i, 1760000100+i)
+}
+
+func BenchmarkRealisticParse(b *testing.B) {
+	text := realisticAd(1)
+	for b.Loop() {
+		if _, err := classad.ParseOld(text); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRealisticFromAd(b *testing.B) {
+	ads := make([]*classad.ClassAd, 1000)
+	for i := range ads {
+		ads[i], _ = classad.ParseOld(realisticAd(i))
+	}
+	b.Run("FromAd", func(b *testing.B) {
+		var r JobReader
+		i := 0
+		for b.Loop() {
+			_ = r.FromAd(ads[i%len(ads)], "")
+			i++
+		}
+	})
+	b.Run("program", func(b *testing.B) {
+		for b.Loop() {
+			_ = Program("", "python3 runner.py --circuit ny50_1 --depth 40 --shots 1000 --backend 'aer simulator' --seed 7 --out /srv/out/run_7.json")
+		}
+	})
+	b.Run("adaptive", func(b *testing.B) {
+		var reader JobReader
+		i := 0
+		for b.Loop() {
+			var j Job
+			j.MemoryUsage = NumOf(2316)
+			j.readAdaptive(ads[i%len(ads)], &reader)
+			i++
+		}
+	})
+}
+
+// BenchmarkDecode is reading records into Jobs: on the goroutine that
+// reads them, and through a Decoder on every core.
+func BenchmarkDecode(b *testing.B) {
+	rows := make([]string, 20000)
+	for i := range rows {
+		rows[i] = realisticAd(i)
+	}
+	b.Run("sequential", func(b *testing.B) {
+		for b.Loop() {
+			var r JobReader
+			jobs := make([]Job, 0, len(rows))
+			for _, row := range rows {
+				ad, err := classad.ParseOld(row)
+				if err != nil {
+					b.Fatal(err)
+				}
+				jobs = append(jobs, r.FromAd(ad, ""))
+			}
+			if len(jobs) != len(rows) {
+				b.Fatalf("decoded %d of %d", len(jobs), len(rows))
+			}
+		}
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(rows)), "ns/record")
+	})
+	b.Run("decoder", func(b *testing.B) {
+		for b.Loop() {
+			d := NewDecoder(0)
+			for _, row := range rows {
+				d.Row(row)
+			}
+			if chunks, _ := d.Finish(); Count(chunks) != len(rows) {
+				b.Fatalf("decoded %d of %d", Count(chunks), len(rows))
+			}
+		}
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(rows)), "ns/record")
+	})
+}

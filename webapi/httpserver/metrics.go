@@ -37,6 +37,7 @@ type httpMetrics struct {
 	scheddQueryTotal  *prometheus.CounterVec
 	scheddQueryDur    prometheus.Histogram
 	authFailuresTotal *prometheus.CounterVec
+	utilizationPhase  *prometheus.HistogramVec
 	mirror            *mirrorMetrics
 }
 
@@ -101,6 +102,18 @@ func newHTTPMetrics() *httpMetrics {
 			Buckets:   prometheus.DefBuckets,
 		}),
 
+		utilizationPhase: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "utilization",
+				Name:      "phase_seconds",
+				Help:      "Time each phase of a utilization analysis took: read (query to last record), decode (summed across goroutines), decode_wait, analyze, summary, compress.",
+				// A million-job analysis runs to minutes.
+				Buckets: []float64{.01, .05, .1, .5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+			},
+			[]string{"phase"},
+		),
+
 		mirror: newMirrorMetrics(),
 
 		authFailuresTotal: prometheus.NewCounterVec(
@@ -121,6 +134,7 @@ func newHTTPMetrics() *httpMetrics {
 		m.scheddQueryTotal,
 		m.scheddQueryDur,
 		m.authFailuresTotal,
+		m.utilizationPhase,
 		m.mirror.decisions,
 		// The standard Go runtime + process collectors give us GC,
 		// goroutines, FD count, RSS — table stakes for any Go service.

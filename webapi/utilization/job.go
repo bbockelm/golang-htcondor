@@ -23,6 +23,7 @@ package utilization
 
 import (
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -186,11 +187,81 @@ func (n Num) V() float64 { return math.Float64frombits(uint64(n) ^ numAbsentBits
 // copies.
 type JobReader struct {
 	strs map[string]string
+	// requests remembers what is known about each Request* expression,
+	// by its text, and recent the last few seen, by structure: a million
+	// jobs of one workflow share one formula, and printing it (to find
+	// the text), searching it for eleven names, and evaluating it with
+	// the usage taken out of the ad cost more than the rest of FromAd.
+	requests map[string]*knownRequest
+	recent   []*knownRequest
+}
+
+// knownRequest is what a JobReader knows about one Request* expression.
+type knownRequest struct {
+	expr     *classad.Expr
+	text     string
+	adaptive bool
+	// fixed is an adaptive expression that refers to nothing but usage
+	// attributes, so starts the same in every job: start, once
+	// hasStart.
+	fixed    bool
+	hasStart bool
+	start    Num
+}
+
+// recentRequests is how many expressions a JobReader compares a new one
+// against by structure before printing it.
+const recentRequests = 8
+
+// request is what is known about expr, a Request* expression in ad.
+func (r *JobReader) request(ad *classad.ClassAd, expr *classad.Expr) *knownRequest {
+	if r == nil {
+		text := expr.String()
+		return &knownRequest{expr: expr, text: text, adaptive: IsAdaptive(text)}
+	}
+	for i, k := range r.recent {
+		if k.expr.Equal(expr) {
+			copy(r.recent[1:i+1], r.recent[:i])
+			r.recent[0] = k
+			return k
+		}
+	}
+	text := expr.String()
+	k := r.requests[text]
+	if k == nil {
+		k = &knownRequest{expr: expr, text: text, adaptive: IsAdaptive(text)}
+		k.fixed = k.adaptive && onlyUsage(ad, expr)
+		if r.requests == nil {
+			r.requests = make(map[string]*knownRequest)
+		}
+		if len(r.requests) < maxInterned {
+			r.requests[text] = k
+		}
+	}
+	if len(r.recent) < recentRequests {
+		r.recent = append(r.recent, nil)
+	}
+	copy(r.recent[1:], r.recent[:len(r.recent)-1])
+	r.recent[0] = k
+	return k
+}
+
+// onlyUsage reports whether expr refers to no attribute but the job's
+// usage, so evaluates the same with the usage taken away in any ad.
+func onlyUsage(ad *classad.ClassAd, expr *classad.Expr) bool {
+	for _, refs := range [][]string{ad.ExternalRefs(expr), ad.InternalRefs(expr)} {
+		for _, ref := range refs {
+			if !slices.Contains(usageAttrsLower, strings.ToLower(ref)) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // FromAd is the package FromAd, with strings shared.
 func (r *JobReader) FromAd(ad *classad.ClassAd, schedd string) Job {
-	j := FromAd(ad, schedd)
+	j := fromAd(ad, schedd, r)
 	j.Owner = r.intern(j.Owner)
 	j.Schedd = r.intern(j.Schedd)
 	j.BatchName = r.intern(j.BatchName)
@@ -226,6 +297,12 @@ func (r *JobReader) intern(s string) string {
 // MemoryUsage normally is one. One that does not evaluate to a number is
 // left absent and the job drops out of that resource's numbers only.
 func FromAd(ad *classad.ClassAd, schedd string) Job {
+	return fromAd(ad, schedd, nil)
+}
+
+// fromAd is FromAd, remembering per-expression decisions in r when there
+// is one.
+func fromAd(ad *classad.ClassAd, schedd string, r *JobReader) Job {
 	j := Job{Schedd: schedd}
 	j.Cluster = intAttr(ad, "ClusterId")
 	j.Proc = intAttr(ad, "ProcId")
@@ -275,7 +352,7 @@ func FromAd(ad *classad.ClassAd, schedd string) Job {
 	} else {
 		j.DiskUsage = numAttr(ad, "DiskUsage")
 	}
-	j.readAdaptive(ad)
+	j.readAdaptive(ad, r)
 	if w := numAttr(ad, "RemoteWallClockTime"); w.OK() && w.V() > 0 {
 		j.Wall = w.V()
 	}
@@ -390,7 +467,7 @@ const (
 // usageAttrs are the job's own measurements. A request that refers to
 // one is a formula that adapts to what the job used, and before the job
 // has run they are all undefined.
-var usageAttrs = []string{
+var usageAttrs = [...]string{
 	"MemoryUsage", "ResidentSetSize", "ResidentSetSize_RAW", "ProportionalSetSizeKb",
 	"ImageSize", "ImageSize_RAW", "DiskUsage", "DiskUsage_RAW",
 	"CpusUsage", "GPUsUsage", "GPUsMemoryUsage",
@@ -401,13 +478,22 @@ var usageAttrs = []string{
 // a false positive only means the request is described as a formula.
 func IsAdaptive(expr string) bool {
 	lower := strings.ToLower(expr)
-	for _, a := range usageAttrs {
-		if strings.Contains(lower, strings.ToLower(a)) {
+	for _, a := range usageAttrsLower {
+		if strings.Contains(lower, a) {
 			return true
 		}
 	}
 	return false
 }
+
+// usageAttrsLower is usageAttrs, lowercased once.
+var usageAttrsLower = func() []string {
+	out := make([]string, len(usageAttrs))
+	for i, a := range usageAttrs {
+		out[i] = strings.ToLower(a)
+	}
+	return out
+}()
 
 // readAdaptive finds requests written as formulas over the job's usage
 // and records their STARTING value.
@@ -422,14 +508,10 @@ func IsAdaptive(expr string) bool {
 // the start, or the grown value for a job that outgrew it -- which is
 // what the time-weighted "allocated" hours count: that run really did
 // hold that much.
-func (j *Job) readAdaptive(ad *classad.ClassAd) {
-	type req struct {
-		name  string
-		bit   uint8
-		start *Num
-	}
-	var found []req
-	for _, r := range []req{
+func (j *Job) readAdaptive(ad *classad.ClassAd, reader *JobReader) {
+	var found []adaptiveReq
+	var known []*knownRequest
+	for _, r := range []adaptiveReq{
 		{"RequestMemory", AdaptiveMemory, &j.RequestMemoryStart},
 		{"RequestCpus", AdaptiveCpus, nil},
 		{"RequestDisk", AdaptiveDisk, &j.RequestDiskStart},
@@ -439,36 +521,63 @@ func (j *Job) readAdaptive(ad *classad.ClassAd) {
 		if !ok || expr == nil {
 			continue
 		}
-		text := expr.String()
-		if !IsAdaptive(text) {
+		k := reader.request(ad, expr)
+		if !k.adaptive {
 			continue
 		}
 		j.Adaptive |= r.bit
 		if r.bit == AdaptiveMemory {
-			j.MemoryFormula = text
+			j.MemoryFormula = k.text
 		}
-		if r.start != nil {
+		switch {
+		case r.start == nil:
+		case k.hasStart:
+			*r.start = k.start
+		default:
 			found = append(found, r)
+			known = append(known, k)
 		}
 	}
-	if len(found) == 0 {
-		return
+	if len(found) > 0 {
+		j.evalStarts(ad, found, known)
 	}
-	// Evaluate with the usage attributes removed, then put them back: the
-	// ad is the caller's.
-	saved := map[string]*classad.Expr{}
-	for _, a := range usageAttrs {
+	j.settleRequests()
+}
+
+// adaptiveReq is one Request* attribute readAdaptive looks at.
+type adaptiveReq struct {
+	name  string
+	bit   uint8
+	start *Num
+}
+
+// evalStarts evaluates each request in found with the usage attributes
+// removed, then puts them back: the ad is the caller's. A fixed
+// expression's start is remembered for the next job.
+func (j *Job) evalStarts(ad *classad.ClassAd, found []adaptiveReq, known []*knownRequest) {
+	var saved [len(usageAttrs)]*classad.Expr
+	for i, a := range usageAttrs {
 		if e, ok := ad.Lookup(a); ok {
-			saved[a] = e
+			saved[i] = e
 			ad.Delete(a)
 		}
 	}
-	for _, r := range found {
+	for i, r := range found {
 		*r.start = numAttr(ad, r.name)
+		if known[i].fixed {
+			known[i].start, known[i].hasStart = *r.start, true
+		}
 	}
-	for a, e := range saved {
-		ad.InsertExpr(a, e)
+	for i, e := range saved {
+		if e != nil {
+			ad.InsertExpr(usageAttrs[i], e)
+		}
 	}
+}
+
+// settleRequests sets each adaptive request to the one in force for the
+// run that finished.
+func (j *Job) settleRequests() {
 	// Evaluated against the finished job, the formula gives what it WOULD
 	// request now -- 1.5x the peak even for a job that never outgrew its
 	// start, which ran its one run at the start. The request in force for
