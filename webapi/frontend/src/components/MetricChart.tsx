@@ -12,6 +12,7 @@
 import { useId } from 'react';
 import {
   formatMetric,
+  RUN_COLORS,
   runColor,
   type MetricSeries,
 } from '@/lib/metrics';
@@ -138,7 +139,9 @@ export function MetricChart({ series }: { series: MetricSeries }) {
                 strokeWidth={2}
                 strokeLinejoin="round"
                 strokeLinecap="round"
-              />
+              >
+                {multi && <title>{`Run ${ex.run}`}</title>}
+              </polyline>
               {ex.points.map((p, j) => (
                 <circle key={j} cx={xs(p.t)} cy={ys(p.value)} r={3} fill={color}>
                   <title>
@@ -153,8 +156,18 @@ export function MetricChart({ series }: { series: MetricSeries }) {
         })}
       </svg>
 
-      {/* legend, only when more than one run attempt */}
-      {multi && (
+      {/* legend, only when more than one run attempt. A swatch per run
+          while each run has its own colour; past that, a swatch list would
+          repeat colours and run to dozens of entries, so one line says how
+          many runs there are and that the tooltips name them. */}
+      {multi && series.executions.length > RUN_COLORS.length && (
+        <p className="mt-1 text-xs text-gray-600">
+          {`${series.executions.length} runs (Run ${series.executions[0].run} to Run ${
+            series.executions[series.executions.length - 1].run
+          }). Colors repeat every ${RUN_COLORS.length} runs; hover a point for its run.`}
+        </p>
+      )}
+      {multi && series.executions.length <= RUN_COLORS.length && (
         <div className="mt-1 flex flex-wrap gap-3">
           {series.executions.map((ex, i) => (
             <span key={ex.run} className="inline-flex items-center gap-1 text-xs text-gray-600">

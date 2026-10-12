@@ -213,12 +213,16 @@ export function buildJobMetrics(resp: MetricsResponse | undefined, job?: ClassAd
 }
 
 // The categorical hues for run attempts, in fixed order (validated for CVD
-// on a light surface by the dataviz palette). More than this many runs on
-// one job is vanishingly rare; index past the end falls back to the last.
+// on a light surface by the dataviz palette).
 export const RUN_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#4a3aa7'];
 
+// runColor cycles through the palette, so neighbouring runs always differ.
+// A job can run dozens of times (a restart on every eviction); clamping to
+// the last hue painted every run past the sixth the same colour. Runs a
+// palette apart share a hue, so the chart names the run in each tooltip.
 export function runColor(i: number): string {
-  return RUN_COLORS[Math.min(i, RUN_COLORS.length - 1)];
+  const n = RUN_COLORS.length;
+  return RUN_COLORS[((i % n) + n) % n];
 }
 
 // formatMetric renders a value in the metric's unit, promoting bytes-ish
