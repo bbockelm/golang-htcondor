@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
+	"github.com/PelicanPlatform/classad/ast"
 	"github.com/PelicanPlatform/classad/classad"
 )
 
@@ -53,7 +55,8 @@ type Feed struct {
 	// never used as one -- the evaluator's queue still comes from a
 	// complete read.
 	live map[string]*classad.ClassAd
-	// ended is the final observed ad for jobs that have left the queue.
+	// ended is the final observed ad for jobs that have left the queue,
+	// frozen: see endedJob.
 	ended map[string]endedJob
 	// warm says a stream is connected and nothing has been missed since.
 	warm bool
@@ -82,9 +85,66 @@ type Feed struct {
 	EndedTTL time.Duration
 }
 
+// endedJob is a job's final ad, kept as a frozen attribute list rather
+// than as a ClassAd.
+//
+// The feed hands these to evaluations it does not control: the sweep, a
+// nudged check, an MCP caller waiting on a watch and a watch share can
+// all read one owner's terminal records at once. A *classad.ClassAd
+// cannot be shared that way, because its reads write to it --
+// evaluating a reference to an expression-valued attribute records it in
+// a per-ad map, and serializing sorts its attribute slice in place. A
+// watch constraint naming RequestMemory, which is usually an expression,
+// was enough for two evaluations to write that map at once, which is a
+// fatal error rather than a failed request.
+//
+// So nothing reads this list but the code that builds ads from it (see
+// ad), nothing writes it after freezeEnded, and each caller gets a
+// ClassAd of its own.
 type endedJob struct {
-	ad *classad.ClassAd
-	at time.Time
+	attrs []ast.AttributeAssignment
+	// owner is read once, when the job ends, so selecting one owner's
+	// records needs no evaluation at all.
+	owner string
+	at    time.Time
+}
+
+// freezeEnded records ad as a job's final state. The caller holds f.mu
+// and owns ad: AST sorts the ad's attribute slice in place.
+func freezeEnded(ad *classad.ClassAd, at time.Time) endedJob {
+	owner, _ := ad.EvaluateAttrString("Owner")
+	src := ad.AST().Attributes
+	attrs := make([]ast.AttributeAssignment, 0, len(src))
+	for _, a := range src {
+		if a != nil {
+			attrs = append(attrs, *a)
+		}
+	}
+	return endedJob{attrs: attrs, owner: owner, at: at}
+}
+
+// ad builds a ClassAd over the frozen attributes for one caller. It is
+// safe to call concurrently, and without f.mu, because it only reads
+// e.attrs.
+//
+// The copy is shallow at the expression level: the caller's ad has its
+// own attribute list, index and cyclic-reference state -- everything a
+// read writes -- and shares the expression trees, which evaluation and
+// serialization never modify. Insert, Set and Delete on the returned ad
+// replace its own entries and leave the frozen list alone.
+// InsertListElement appends to a shared list expression in place, so a
+// caller must not use it on these ads.
+//
+// Re-parsing from the ad text would give a deep copy, at about fifteen
+// times the cost (200us against 13us for a 160-attribute job ad), paid
+// for every terminal record on every evaluation.
+func (e endedJob) ad() *classad.ClassAd {
+	vals := slices.Clone(e.attrs)
+	ptrs := make([]*ast.AttributeAssignment, len(vals))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	return classad.FromAST(&ast.ClassAd{Attributes: ptrs})
 }
 
 const (
@@ -231,7 +291,7 @@ func (f *Feed) Apply(ev WatchEvent) {
 		// The delete says only that the key is gone. What it was doing
 		// when it went is in the upsert we kept.
 		if ad, ok := f.live[ev.Key]; ok {
-			f.ended[ev.Key] = endedJob{ad: ad, at: f.now()}
+			f.ended[ev.Key] = freezeEnded(ad, f.now())
 			delete(f.live, ev.Key)
 			if act, aok := f.activityForDelete(ad); aok && f.announced[ev.Key] != act.Kind {
 				f.publishActivityLocked(act)
@@ -295,24 +355,53 @@ func (f *Feed) Warm() bool {
 // outcome attributes, observed on the wire rather than read back from
 // the archive.
 //
-// The stream carries every job on the access point, so the owner filter
-// here is what keeps one user's outcomes out of another's watch.
+// Each ad is the caller's own; see EachTerminal.
 func (f *Feed) Terminal(owner string, since time.Time) []*classad.ClassAd {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if !f.warm {
-		return nil
-	}
-	out := make([]*classad.ClassAd, 0, 16)
-	for _, e := range f.ended {
-		if e.at.Before(since) {
-			continue
-		}
-		if v, ok := e.ad.EvaluateAttrString("Owner"); ok && v == owner {
-			out = append(out, e.ad)
-		}
-	}
+	var out []*classad.ClassAd
+	f.EachTerminal(owner, since, func(ad *classad.ClassAd) {
+		out = append(out, ad)
+	})
 	return out
+}
+
+// EachTerminal calls yield with the final observed ad of each of one
+// owner's jobs that ended at or after since, one at a time, so a caller
+// folding them never holds them all.
+//
+// Every ad yielded is a new one belonging to the caller: it may be
+// evaluated or serialized freely, concurrently with any other caller's
+// (see endedJob.ad for the one thing it must not be used for). The feed
+// keeps nothing that a yielded ad can reach and write.
+//
+// yield runs without the feed's lock held, so an evaluation, however
+// slow, never holds up the change stream.
+//
+// The stream carries every job on the access point, so the owner filter
+// here is what keeps one user's outcomes out of another's watch. An
+// empty owner selects nothing: it is what an unidentified caller has,
+// and it must not match jobs whose Owner is missing.
+func (f *Feed) EachTerminal(owner string, since time.Time, yield func(*classad.ClassAd)) {
+	if owner == "" {
+		return
+	}
+	f.mu.Lock()
+	if !f.warm {
+		f.mu.Unlock()
+		return
+	}
+	// Collect under the lock, build outside it. The frozen attribute
+	// lists stay valid after the lock is released: eviction and reset
+	// drop map entries, never modify the lists they held.
+	var mine []endedJob
+	for _, e := range f.ended {
+		if e.owner == owner && !e.at.Before(since) {
+			mine = append(mine, e)
+		}
+	}
+	f.mu.Unlock()
+	for _, e := range mine {
+		yield(e.ad())
+	}
 }
 
 // evictLocked bounds memory: age first, then oldest-out if still over.
