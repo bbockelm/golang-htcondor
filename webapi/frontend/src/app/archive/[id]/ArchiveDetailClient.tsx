@@ -235,7 +235,7 @@ function ArchiveJobDetail({
           The panel renders nothing once retention has aged the samples
           out, which is why there is no empty-state here. The job's final
           status means it never polls for updates. */}
-      <ResourceUsagePanel jobID={jobID} status={jobStatus} />
+      <ResourceUsagePanel jobID={jobID} status={jobStatus} job={job} />
 
       <SimilarJobsSection
         jobID={jobID}

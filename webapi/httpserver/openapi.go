@@ -1369,7 +1369,7 @@ const openAPISchema = `{
     "/jobs/{jobId}": {
       "get": {
         "summary": "Get job details",
-        "description": "Retrieve the ClassAd for a specific job",
+        "description": "Retrieve the ClassAd for a specific job. Attributes stored as expressions arrive as the string \"/Expr(...)/\". Alongside them, the member \"evaluated\" holds the number each of RequestCpus, RequestMemory, RequestDisk and RequestGPUs evaluates to in the job's own ad, so a request written as an expression (e.g. over MemoryUsage) can be read without a ClassAd evaluator; a request that does not evaluate to a number is left out.",
         "operationId": "getJob",
         "parameters": [
           {
@@ -2539,7 +2539,7 @@ const openAPISchema = `{
     "/jobs/archive": {
       "get": {
         "summary": "Query job archive",
-        "description": "Query archived (completed) job records. Served from the schedd's history file, or from a synchronized htcondordb mirror when one is current and the schedd has identified the caller \u2014 the response's source field names which answered.",
+        "description": "Query archived (completed) job records. Served from the schedd's history file, or from a synchronized htcondordb mirror when one is current and the schedd has identified the caller \u2014 the response's source field names which answered. With projection=* each record also carries the member \"evaluated\", as GET /jobs/{jobId} describes; a projected record does not, since an expression evaluated without the attributes it reads gives a wrong number.",
         "operationId": "queryJobArchive",
         "parameters": [
           {

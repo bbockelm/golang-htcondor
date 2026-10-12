@@ -48,11 +48,14 @@ export function MetricChart({ series }: { series: MetricSeries }) {
     <figure className="rounded-lg border border-gray-200 bg-white p-3">
       <figcaption className="mb-1 flex items-baseline justify-between gap-2">
         <span className="text-sm font-semibold text-gray-900">{series.label}</span>
-        <span className="text-xs text-gray-400">
+        <span className="text-xs text-gray-400" title={series.requestedExpr}>
           {series.requestedNote ??
             (series.requested !== undefined
               ? `Requested ${formatMetric(series.requested, series.unit)}`
               : '')}
+          {series.requestedExpr && (series.requestedNote || series.requested !== undefined) && (
+            <> · from expression</>
+          )}
         </span>
       </figcaption>
 

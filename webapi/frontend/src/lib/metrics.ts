@@ -8,6 +8,9 @@
 // three points (the sampler's floor is one point every ~15 min), and
 // disk/GPU appear only when the job actually used them.
 
+import type { ClassAd } from './api';
+import { jobRequest, type RequestAttr } from './jobRequests';
+
 export interface MetricsColumn {
   name: string;
   kind: 'group' | 'metric';
@@ -52,6 +55,8 @@ export interface MetricSeries {
   // count), in which case requestedNote carries it as text instead.
   requested?: number;
   requestedNote?: string;
+  // The request's expression, when the job wrote it as one.
+  requestedExpr?: string;
   pointCount: number;
   // Caveat shown under the chart (e.g. the memory HWM ratchet).
   note?: string;
@@ -63,6 +68,9 @@ interface JobMetricDef {
   unit: string;
   valueCol: string;
   requestCol?: string;
+  // The job attribute the request comes from, read from the ad when the
+  // page has it (see buildJobMetrics).
+  requestAttr: RequestAttr;
   // Whether the request is the same unit as the value (so it can be a line).
   requestIsLine: boolean;
   // Require actual usage (> 0) before charting -- for disk/GPU, which are
@@ -78,6 +86,7 @@ const JOB_METRIC_DEFS: JobMetricDef[] = [
     unit: 'MB',
     valueCol: 'max_MemoryUsage',
     requestCol: 'max_RequestMemory',
+    requestAttr: 'RequestMemory',
     requestIsLine: true,
     requireData: false,
     note: 'MemoryUsage is a high-water mark, not a live reading — the curve only rises, so it shows the peak a run ever needed rather than a working-set trace.',
@@ -88,6 +97,7 @@ const JOB_METRIC_DEFS: JobMetricDef[] = [
     unit: 'cores',
     valueCol: 'avg_CpuUtil',
     requestCol: 'max_RequestCpus',
+    requestAttr: 'RequestCpus',
     requestIsLine: true,
     requireData: false,
   },
@@ -97,6 +107,7 @@ const JOB_METRIC_DEFS: JobMetricDef[] = [
     unit: 'KB',
     valueCol: 'max_DiskUsage',
     requestCol: 'max_RequestDisk',
+    requestAttr: 'RequestDisk',
     requestIsLine: true,
     requireData: true,
     note: 'DiskUsage is a high-water mark for the current execution.',
@@ -107,6 +118,7 @@ const JOB_METRIC_DEFS: JobMetricDef[] = [
     unit: 'GPU',
     valueCol: 'avg_GpuUtil',
     requestCol: 'max_RequestGpus',
+    requestAttr: 'RequestGPUs',
     // GpuUtil is a utilization fraction; RequestGpus is a device count, so
     // it cannot share the axis. Shown as a note instead of a line.
     requestIsLine: false,
@@ -125,7 +137,12 @@ function toNum(v: string | undefined): number | undefined {
 
 // buildJobMetrics turns the server response into the charts the page should
 // draw. Returns [] when the feature is off or nothing clears the gate.
-export function buildJobMetrics(resp: MetricsResponse | undefined): MetricSeries[] {
+//
+// job, when given, is where the "requested" reference comes from: the value
+// each Request* evaluates to in the job's ad, the same number the resource
+// table shows. The samples' own max:Request* columns are the fallback for an
+// ad that does not carry the request.
+export function buildJobMetrics(resp: MetricsResponse | undefined, job?: ClassAd): MetricSeries[] {
   if (!resp || !resp.enabled || !resp.columns || !resp.rows) return [];
 
   const idx = new Map<string, number>();
@@ -183,6 +200,9 @@ export function buildJobMetrics(resp: MetricsResponse | undefined): MetricSeries
       pointCount,
       note: def.note,
     };
+    const fromAd = jobRequest(job, def.requestAttr);
+    if (fromAd.value !== undefined) requested = fromAd.value;
+    if (fromAd.expr) series.requestedExpr = fromAd.expr;
     if (requested !== undefined && requested > 0) {
       if (def.requestIsLine) series.requested = requested;
       else series.requestedNote = `Requested ${requested} GPU${requested === 1 ? '' : 's'}`;

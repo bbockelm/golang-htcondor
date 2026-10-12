@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { EXPR_REQUEST_MEMORY, exprRequestJob } from './jobRequests.fixture';
 import { buildJobMetrics, formatMetric, type MetricsResponse } from './metrics';
 
 // Columns exactly as the server returns for the job page's query.
@@ -75,6 +76,24 @@ describe('buildJobMetrics', () => {
     const gpu = buildJobMetrics(resp(rows)).find((s) => s.key === 'gpu')!;
     expect(gpu.requested).toBeUndefined();
     expect(gpu.requestedNote).toBe('Requested 2 GPUs');
+  });
+});
+
+describe('buildJobMetrics with the job ad', () => {
+  // The resource table and the graph's "requested" line read one number:
+  // the request as evaluated in the job's ad. The samples are the fallback.
+  it('draws the requested line at the evaluated request from the ad, and keeps its rule', () => {
+    const mem = buildJobMetrics(resp(memRows(5)), exprRequestJob).find((s) => s.key === 'memory')!;
+    expect(mem.requested).toBe(10987);
+    expect(mem.requestedExpr).toBe(EXPR_REQUEST_MEMORY);
+    const cpu = buildJobMetrics(resp(memRows(5)), exprRequestJob).find((s) => s.key === 'cpu')!;
+    expect(cpu.requested).toBe(1);
+    expect(cpu.requestedExpr).toBeUndefined();
+  });
+
+  it('falls back to the sampled request when the ad does not carry one', () => {
+    const mem = buildJobMetrics(resp(memRows(5)), {}).find((s) => s.key === 'memory')!;
+    expect(mem.requested).toBe(4096);
   });
 });
 

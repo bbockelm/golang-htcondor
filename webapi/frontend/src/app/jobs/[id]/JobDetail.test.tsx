@@ -21,6 +21,7 @@ import {
   workflowLogAvailability,
 } from './JobDetailClient';
 import type { ClassAd } from '@/lib/api';
+import { exprRequestJob } from '@/lib/jobRequests.fixture';
 
 describe('everRan', () => {
   // The Output Files panel gates on this. A job that ran and went back
@@ -253,6 +254,19 @@ describe('ResourceTable', () => {
   it('still hides the GPU row for a job that asked for none', () => {
     render(<ResourceTable job={{ RequestCpus: 1 } as ClassAd} />);
     expect(screen.queryByText('GPUs')).toBeNull();
+  });
+
+  // The reported case: RequestMemory is a rule over MemoryUsage, the graph
+  // drew its value (10.7 GB) and the table a dash. Both now read the value
+  // the server evaluated in the job's own ad.
+  it('shows a request written as an expression as the number it comes to', () => {
+    render(<ResourceTable job={exprRequestJob} />);
+    const cell = screen.getByText('10,987 MiB');
+    expect(cell).toBeInTheDocument();
+    expect(cell.closest('[title]')?.getAttribute('title')).toMatch(/^ifthenelse\(MemoryUsage/);
+    expect(screen.getByText('from expression')).toBeInTheDocument();
+    // 7325 used of 10987 requested.
+    expect(screen.getByText('67%')).toBeInTheDocument();
   });
 
   // Memory is the one with two units in play: MemoryUsage is MiB and
