@@ -72,6 +72,12 @@ type Options struct {
 	// in a job goes to that job's schedd; without it Schedd is used.
 	ScheddFor func(ctx context.Context) ScheddClient
 
+	// APs, when set, puts the manager in front of several access points
+	// (see multiap.go): a session's access point is chosen once, at
+	// Create, and every later call on it goes there. ScheddFor is then
+	// required and Schedd is never called.
+	APs APs
+
 	Logger  *logging.Logger
 	LogDest logging.Destination
 
@@ -206,8 +212,11 @@ type session struct {
 	name       string
 	owner      string
 	instanceID string
-	cluster    int
-	proc       int
+	// ap is the access point the session's job is on, in multi-AP mode:
+	// its record, which every call on the session is sent to.
+	ap      string
+	cluster int
+	proc    int
 
 	shell Shell
 	// deadShells holds connections detached while commands were still
@@ -246,8 +255,10 @@ type session struct {
 
 // Info is the caller-facing view of a session.
 type Info struct {
-	Name           string    `json:"name"`
-	JobID          string    `json:"job_id"`
+	Name  string `json:"name"`
+	JobID string `json:"job_id"`
+	// Schedd is the access point the session is on, in multi-AP mode.
+	Schedd         string    `json:"schedd,omitempty"`
 	ClusterID      int       `json:"cluster_id"`
 	ProcID         int       `json:"proc_id"`
 	JobStatus      int       `json:"job_status"`
@@ -262,6 +273,10 @@ type Info struct {
 	// the default the way it always did.
 	LeaseDuration time.Duration `json:"-"`
 	Attached      bool          `json:"attached"`
+	// Unverified marks a session reported from the federated catalog
+	// because its access point could not be asked; APError says why.
+	Unverified bool   `json:"-"`
+	APError    string `json:"access_point_error,omitempty"`
 }
 
 // CreateSpec describes a session to start.
@@ -333,6 +348,9 @@ type ExecResult struct {
 func NewManager(opts Options) (*Manager, error) {
 	if opts.Schedd == nil {
 		return nil, fmt.Errorf("interactive: Options.Schedd is required")
+	}
+	if opts.APs != nil && opts.ScheddFor == nil {
+		return nil, fmt.Errorf("interactive: Options.ScheddFor is required with Options.APs")
 	}
 	if opts.Logger == nil {
 		var err error
@@ -491,6 +509,16 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		return nil, err
 	}
 
+	// The access point the session goes to: asked once, here, and stored
+	// on the session. Nothing after this asks again.
+	ap, submitCtx := "", ctx
+	if m.multi() {
+		var err error
+		if ap, submitCtx, err = m.opts.APs.Assign(ctx, caller); err != nil {
+			return nil, err
+		}
+	}
+
 	// Serialized per (owner, name) across the check and the submit.
 	//
 	// The duplicate-name check and the per-owner limit below are both
@@ -507,7 +535,12 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 	// the in-process map: after a restart the map is empty but the
 	// jobs are not, and "you already have a session by that name" has
 	// to keep being true across that boundary.
-	existing, err := m.listAds(ctx, caller, "")
+	//
+	// With several access points, both are per owner across all of them
+	// (see multiap.go): every access point that may hold one of the
+	// caller's sessions is asked, and always the one this session is
+	// about to go to.
+	existing, err := m.listAll(ctx, caller, "", ap)
 	if err != nil {
 		return nil, err
 	}
@@ -574,18 +607,26 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		return nil, err
 	}
 
-	schedd := m.opts.Schedd()
+	var schedd ScheddClient
+	if m.multi() {
+		schedd = m.opts.ScheddFor(submitCtx)
+	} else {
+		schedd = m.opts.Schedd()
+	}
 	if schedd == nil {
 		return nil, fmt.Errorf("no schedd configured")
 	}
 	// Whatever the host must do before one of its users' jobs reaches
 	// the schedd -- on this deployment, bootstrapping the credentials
-	// the access point demands. Under ctx, so it runs as the caller.
+	// the access point demands. Under ctx, so it runs as the caller (and,
+	// with several access points, against the assigned one's credd).
 	if m.opts.BeforeSubmit != nil {
-		m.opts.BeforeSubmit(ctx)
+		m.opts.BeforeSubmit(submitCtx)
 	}
 
-	clusterID, procAds, err := schedd.SubmitRemote(ctx, applied)
+	m.wrote(ap)
+	defer m.wrote(ap)
+	clusterID, procAds, err := schedd.SubmitRemote(submitCtx, applied)
 	if err != nil {
 		return nil, fmt.Errorf("schedd submit failed: %w", err)
 	}
@@ -596,10 +637,10 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 			Mode: 0o755,
 		},
 	}
-	if err := schedd.SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
+	if err := schedd.SpoolJobFilesFromFS(submitCtx, procAds, stage); err != nil {
 		// The job exists but can never run: remove it rather than
 		// leave the caller a held job they did not ask for.
-		m.removeJob(ctx, caller, clusterID, 0, "watchdog spooling failed")
+		m.removeJob(ctx, caller, ap, clusterID, 0, "watchdog spooling failed")
 		return nil, fmt.Errorf("schedd accepted the submit but spooling the watchdog failed: %w", err)
 	}
 
@@ -614,6 +655,7 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		name:          spec.Name,
 		owner:         caller.Owner,
 		instanceID:    instanceID,
+		ap:            ap,
 		cluster:       clusterID,
 		proc:          procID,
 		leaseExpires:  m.opts.Now().Add(lease),
@@ -641,12 +683,13 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 
 	m.log().Info(m.opts.LogDest, "interactive session created",
 		"session", spec.Name, "owner", caller.Owner,
-		"job_id", jobIDOf(clusterID, procID), "instance", instanceID,
+		"job_id", m.jobID(ap, clusterID, procID), "instance", instanceID,
 		"lease_seconds", int(lease.Seconds()))
 
 	info := &Info{
 		Name:         spec.Name,
-		JobID:        jobIDOf(clusterID, procID),
+		JobID:        m.jobID(ap, clusterID, procID),
+		Schedd:       ap,
 		ClusterID:    clusterID,
 		ProcID:       procID,
 		JobStatus:    jobStatusIdle,
@@ -661,7 +704,7 @@ func (m *Manager) List(ctx context.Context, caller Caller) ([]Info, error) {
 	if !caller.valid() {
 		return nil, fmt.Errorf("authentication required")
 	}
-	infos, err := m.listAds(ctx, caller, "")
+	infos, err := m.listAll(ctx, caller, "")
 	if err != nil {
 		return nil, err
 	}
@@ -823,7 +866,8 @@ func (m *Manager) Stop(ctx context.Context, caller Caller, name string) (*Info, 
 	}
 
 	m.forgetNamed(caller.Owner, name, "stopped by caller")
-	m.removeJob(ctx, caller, info.ClusterID, info.ProcID, "Interactive session stopped")
+	// The session's own access point, from its record.
+	m.removeJob(ctx, caller, info.Schedd, info.ClusterID, info.ProcID, "Interactive session stopped")
 
 	info.Status = "stopping"
 	return info, nil

@@ -79,9 +79,15 @@ const liveSessionClause = `(JobStatus == 1 || JobStatus == 2 || JobStatus == 5)`
 // derived from it -- so the filters must be built from that identity
 // and never from anything the caller can set directly.
 func (m *Manager) listAds(ctx context.Context, caller Caller, name string) ([]Info, error) {
-	schedd := m.opts.Schedd()
-	if schedd == nil {
-		return nil, fmt.Errorf("no schedd configured")
+	return m.listAll(ctx, caller, name)
+}
+
+// listAdsOn queries one access point -- ap, or with a single schedd ""
+// -- for the caller's live interactive sessions.
+func (m *Manager) listAdsOn(ctx context.Context, caller Caller, ap, name string) ([]Info, error) {
+	ctx, schedd, err := m.on(ctx, caller, ap)
+	if err != nil {
+		return nil, err
 	}
 
 	var batchClause string
@@ -107,60 +113,81 @@ func (m *Manager) listAds(ctx context.Context, caller Caller, name string) ([]In
 
 	out := make([]Info, 0, len(ads))
 	for _, ad := range ads {
-		// The constraint already asked for these, but a schedd that
-		// ignored part of it must not widen what we return: filter
-		// again on the two things that define a session.
-		batchName, _ := ad.EvaluateAttrString("JobBatchName")
-		sessionName, ok := SessionNameFromBatchName(batchName)
-		if !ok || (name != "" && sessionName != name) {
-			continue
+		if info, ok := m.infoFromAd(ad, caller, name, ap); ok {
+			out = append(out, info)
 		}
-		if owner, ok := ad.EvaluateAttrString("Owner"); ok && owner != caller.Owner {
-			continue
-		}
-		cluster, _ := ad.EvaluateAttrInt("ClusterId")
-		proc, _ := ad.EvaluateAttrInt("ProcId")
-		status, _ := ad.EvaluateAttrInt("JobStatus")
-		holdReason, _ := ad.EvaluateAttrString("HoldReason")
-		holdCode, _ := ad.EvaluateAttrInt("HoldReasonCode")
-		qdate, _ := ad.EvaluateAttrInt("QDate")
-		leaseSecs, _ := ad.EvaluateAttrInt(SessionLeaseAttr)
-
-		info := Info{
-			Name:           sessionName,
-			JobID:          jobIDOf(int(cluster), int(proc)),
-			ClusterID:      int(cluster),
-			ProcID:         int(proc),
-			JobStatus:      int(status),
-			Status:         statusText(int(status), int(holdCode)),
-			HoldReason:     holdReason,
-			HoldReasonCode: int(holdCode),
-		}
-		if leaseSecs > 0 {
-			info.LeaseDuration = time.Duration(leaseSecs) * time.Second
-		}
-		if int(holdCode) == holdReasonSpoolingInput {
-			// Reported as "starting", so the hold text goes with it. A
-			// caller shown status=starting next to hold_reason="Spooling
-			// input data files" reasonably concludes something is wrong;
-			// nothing is.
-			info.HoldReason = ""
-		}
-		if qdate > 0 {
-			info.SubmittedAt = time.Unix(qdate, 0).UTC()
-		}
-		out = append(out, info)
 	}
 	return out, nil
+}
+
+// infoFromAd reads one session job's ad, reporting false for one that
+// is not the caller's session (named name, when name is set).
+func (m *Manager) infoFromAd(ad *classad.ClassAd, caller Caller, name, ap string) (Info, bool) {
+	// The constraint already asked for these, but a schedd that
+	// ignored part of it must not widen what we return: filter
+	// again on the two things that define a session.
+	batchName, _ := ad.EvaluateAttrString("JobBatchName")
+	sessionName, ok := SessionNameFromBatchName(batchName)
+	if !ok || (name != "" && sessionName != name) {
+		return Info{}, false
+	}
+	if owner, ok := ad.EvaluateAttrString("Owner"); ok && owner != caller.Owner {
+		return Info{}, false
+	}
+	cluster, _ := ad.EvaluateAttrInt("ClusterId")
+	proc, _ := ad.EvaluateAttrInt("ProcId")
+	status, _ := ad.EvaluateAttrInt("JobStatus")
+	holdReason, _ := ad.EvaluateAttrString("HoldReason")
+	holdCode, _ := ad.EvaluateAttrInt("HoldReasonCode")
+	qdate, _ := ad.EvaluateAttrInt("QDate")
+	leaseSecs, _ := ad.EvaluateAttrInt(SessionLeaseAttr)
+
+	info := Info{
+		Name:           sessionName,
+		JobID:          m.jobID(ap, int(cluster), int(proc)),
+		Schedd:         ap,
+		ClusterID:      int(cluster),
+		ProcID:         int(proc),
+		JobStatus:      int(status),
+		Status:         statusText(int(status), int(holdCode)),
+		HoldReason:     holdReason,
+		HoldReasonCode: int(holdCode),
+	}
+	if leaseSecs > 0 {
+		info.LeaseDuration = time.Duration(leaseSecs) * time.Second
+	}
+	if int(holdCode) == holdReasonSpoolingInput {
+		// Reported as "starting", so the hold text goes with it. A
+		// caller shown status=starting next to hold_reason="Spooling
+		// input data files" reasonably concludes something is wrong;
+		// nothing is.
+		info.HoldReason = ""
+	}
+	if qdate > 0 {
+		info.SubmittedAt = time.Unix(qdate, 0).UTC()
+	}
+	return info, true
 }
 
 // lookup resolves a session name to its job, adopting it into this
 // process if the name is live in the queue but unknown here (a fresh
 // process, or one that restarted since the session was created).
 func (m *Manager) lookup(ctx context.Context, caller Caller, name string) (*Info, error) {
-	infos, err := m.listAds(ctx, caller, name)
-	if err != nil {
-		return nil, err
+	var infos []Info
+	if m.multi() {
+		// One job on one access point, or an error: see lookupMulti.
+		info, err := m.lookupMulti(ctx, caller, name)
+		if err != nil {
+			return nil, err
+		}
+		if info != nil {
+			infos = []Info{*info}
+		}
+	} else {
+		var err error
+		if infos, err = m.listAdsOn(ctx, caller, "", name); err != nil {
+			return nil, err
+		}
 	}
 	// Two jobs can answer to one name only if two Creates raced past
 	// each other's duplicate check. The first is used and the second
@@ -249,6 +276,7 @@ func (m *Manager) adopt(ctx context.Context, caller Caller, info *Info) {
 		sess = &session{
 			name:          info.Name,
 			owner:         caller.Owner,
+			ap:            info.Schedd,
 			cluster:       info.ClusterID,
 			proc:          info.ProcID,
 			leaseDuration: lease,
@@ -263,6 +291,7 @@ func (m *Manager) adopt(ctx context.Context, caller Caller, info *Info) {
 	// pair would have us dial the wrong sandbox.
 	sess.cluster = info.ClusterID
 	sess.proc = info.ProcID
+	sess.ap = info.Schedd
 	if cred := callerCredentialFrom(ctx); cred != nil {
 		sess.credential = cred
 	}
@@ -336,7 +365,17 @@ func (m *Manager) attach(ctx context.Context, caller Caller, info *Info) (Shell,
 	// Dial outside the lock: it is a CEDAR handshake plus an sshd
 	// spawn inside the sandbox, which is far too long to hold a mutex
 	// every other session shares.
-	shell, err := m.opts.Dial(ctx, info.ClusterID, info.ProcID)
+	dialCtx := ctx
+	if m.multi() {
+		// Through the session's own access point, and only that one:
+		// the dialer reaches the schedd the routed context names.
+		routed, _, err := m.on(ctx, caller, info.Schedd)
+		if err != nil {
+			return nil, err
+		}
+		dialCtx = routed
+	}
+	shell, err := m.opts.Dial(dialCtx, info.ClusterID, info.ProcID)
 	if err != nil {
 		return nil, m.dialFailure(ctx, caller, info, err)
 	}
@@ -387,7 +426,7 @@ func (m *Manager) attach(ctx context.Context, caller Caller, info *Info) (Shell,
 // the job. The ad is the authority on that; the refusal text is not,
 // which is why nothing here looks at what the schedd said.
 func (m *Manager) dialFailure(ctx context.Context, caller Caller, info *Info, err error) error {
-	if reason, held := m.heldReason(ctx, caller, info.Name); held {
+	if reason, held := m.heldReason(ctx, caller, info.Schedd, info.Name); held {
 		return fmt.Errorf("session %q (job %s) is held: %s", info.Name, info.JobID, reason)
 	}
 	return fmt.Errorf("connect to session %q (job %s): %w", info.Name, info.JobID, err)
@@ -396,13 +435,13 @@ func (m *Manager) dialFailure(ctx context.Context, caller Caller, info *Info, er
 // heldReason reports whether the named session's job is on hold now,
 // and why.
 //
-// listAds rather than lookup: this runs on a failure path, where
+// listAdsOn rather than lookup: this runs on a failure path, where
 // adopting a session into this process or forgetting one -- both of
 // which lookup does -- would be a side effect of reporting an error.
 // A query that itself fails says nothing, and the caller falls back to
 // the error it already had.
-func (m *Manager) heldReason(ctx context.Context, caller Caller, name string) (string, bool) {
-	infos, err := m.listAds(ctx, caller, name)
+func (m *Manager) heldReason(ctx context.Context, caller Caller, ap, name string) (string, bool) {
+	infos, err := m.listAdsOn(ctx, caller, ap, name)
 	if err != nil {
 		return "", false
 	}
@@ -508,7 +547,7 @@ func (m *Manager) expire(sess *session) {
 	shell := sess.shell
 	credential := sess.credential
 	cluster, proc := sess.cluster, sess.proc
-	owner, name := sess.owner, sess.name
+	owner, name, ap := sess.owner, sess.name, sess.ap
 	m.mu.Unlock()
 
 	if shell != nil {
@@ -537,7 +576,9 @@ func (m *Manager) expire(sess *session) {
 	if credential != nil {
 		ctx = credential.Attach(ctx)
 	}
-	m.removeJob(ctx, Caller{Actor: owner, Owner: owner}, cluster, proc, "Interactive session lease expired")
+	// On the access point the session's record names: lease expiry is
+	// the session's own business, and never re-assigned.
+	m.removeJob(ctx, Caller{Actor: owner, Owner: owner}, ap, cluster, proc, "Interactive session lease expired")
 }
 
 // reapLoop expires sessions whose lease has run out.
@@ -751,15 +792,19 @@ func (m *Manager) clampLease(requested time.Duration) time.Duration {
 // has already done the thing that matters (dropped the sentinel, or
 // given up on the session), and a failure here costs a slot that the
 // watchdog reclaims on its own.
-func (m *Manager) removeJob(ctx context.Context, caller Caller, cluster, proc int, reason string) {
-	schedd := m.opts.Schedd()
-	if schedd == nil {
+func (m *Manager) removeJob(ctx context.Context, caller Caller, ap string, cluster, proc int, reason string) {
+	ctx, schedd, err := m.on(ctx, caller, ap)
+	if err != nil {
+		m.log().Warn(m.opts.LogDest, "interactive session condor_rm not sent",
+			"owner", caller.Owner, "job_id", m.jobID(ap, cluster, proc), "error", err)
 		return
 	}
+	m.wrote(ap)
+	defer m.wrote(ap)
 	constraint := fmt.Sprintf(`ClusterId == %d && ProcId == %d && Owner == %q`, cluster, proc, caller.Owner)
 	if _, err := schedd.RemoveJobs(ctx, constraint, reason); err != nil {
 		m.log().Warn(m.opts.LogDest, "interactive session condor_rm failed",
-			"owner", caller.Owner, "job_id", jobIDOf(cluster, proc), "error", err)
+			"owner", caller.Owner, "job_id", m.jobID(ap, cluster, proc), "error", err)
 	}
 }
 
