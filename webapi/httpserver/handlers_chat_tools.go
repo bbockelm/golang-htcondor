@@ -69,6 +69,11 @@ var (
 	submitPageTools    = []string{"submit"}
 	jobDetailPageTools = []string{"job-detail"}
 	archivePageTools   = []string{"archive"}
+	issuesPageTools    = []string{"issues"}
+	// The pages whose tables a set_filter / set_constraint narrows.
+	textFilterPageTools = []string{"jobs", "archive", "utilization", "pool"}
+	constraintPageTools = []string{"jobs", "archive", "utilization", "issues", "pool"}
+	poolPageTools       = []string{"pool"}
 )
 
 // jobsPageInstructions is appended to the chat system prompt when the
@@ -82,6 +87,9 @@ const jobsPageInstructions = `The user is on the jobs page. They see a single ta
 by batch (one row per cluster) with running/idle/held/etc. status counts. They can expand
 a batch row to see individual jobs. You have tools to:
   - filter the table to a substring (set_filter)
+  - filter the table with a ClassAd expression the schedd evaluates (set_constraint),
+    e.g. "only jobs that requested a GPU" -> set_constraint("RequestGPUs >= 1");
+    RequestGPUs is undefined on jobs that did not ask for one, which does not match
   - expand a batch row (expand_batch)
   - flash a job row to draw attention (highlight_job)
   - read the user's job state (query_jobs)
@@ -311,6 +319,10 @@ Tools available here:
   - set_filter: client-side substring match on whatever's currently loaded in the
     table. Useful for narrowing the user's view to "training-run" or "exit code 1"
     after they've scrolled in some history.
+  - set_constraint: a ClassAd expression the page sends to the schedd, which searches
+    all of history rather than what is loaded, e.g. "only jobs that requested a GPU"
+    -> set_constraint("RequestGPUs >= 1") (undefined on jobs that did not ask for one,
+    which does not match).
 
 Workflow tips:
   - When the user asks "did my X job succeed?", query with a constraint that names
@@ -325,15 +337,174 @@ Workflow tips:
   - The page's filter input is for the user's eyes — if you've found the answer,
     set_filter to match what you found so the user sees those rows on screen.`
 
+// issuesPageInstructions is appended to the chat system prompt when the
+// SPA reports `page=issues`.
+//
+// === KEEP IN SYNC WITH frontend/src/app/issues/page.tsx and
+// frontend/src/components/IssueSection.tsx ===
+// If you change the controls, the sections, what a row shows or what the
+// expression filter applies to, update the matching language here.
+const issuesPageInstructions = `The user is on the Issues page: what is going wrong, ranked.
+It shows held jobs and run attempts that failed, grouped into problems by what their
+messages have in common, in two sections: "Holds" and "Jobs that could not keep running"
+(the execute point was lost, the shadow failed, and so on). Each row is one problem: how
+many jobs, how many distinct users (one user is usually their own submit file; many is
+usually a site or pool problem), the hold-code label, where it happened when that is
+concentrated (a site or resource name), when it was last seen, a timeline of when it
+happened across the window, and the newest example job's message with a link to it.
+
+The controls, which the page context reports:
+  - the window: last 1h, 8h, 24h, 3d or 7d. For holds it is when the job was held; for
+    failed attempts, when the attempt ended.
+  - detail: fewer, broader problems (0) to more, narrower ones (1).
+  - "include problems that have already ended": adds released holds and failed run
+    attempts from history. Without it the page shows only what is held now.
+  - a ClassAd expression over job attributes that narrows which jobs are counted.
+  - for administrators, My Issues versus everyone's.
+
+Tools available here:
+  - analyze_issues: the page's own answer. Pass the window, detail, include-ended,
+    expression and scope from the page context so you talk about what the user sees.
+    Use it to explain a problem, compare problems, or say who and where a problem hits.
+  - set_constraint: apply an expression to the page so it shows only matching jobs'
+    problems. Use when the user asks to see a subset, e.g. "only jobs that asked for a
+    GPU" -> set_constraint("RequestGPUs >= 1"). RequestGPUs is undefined on jobs that
+    did not ask for a GPU; the expression then simply does not match them. Other
+    useful attributes: JobBatchName, Owner, ClusterId, RequestMemory, RequestCpus. It
+    applies to both held jobs and failed run attempts, so use job attributes both
+    carry. Pass "" to clear. An expression the page rejects shows an error under the
+    filter; say so and correct it.
+  - query_slots for questions about what the pool has (e.g. whether a requested GPU
+    exists at all).
+
+When a problem is concentrated at one site or resource, say that it looks like that
+resource's problem rather than the user's. When it is one user's, suggest what in their
+submit file would cause it. Holds whose problem has "ended" were released or removed.`
+
+// utilizationPageInstructions is appended to the chat system prompt when
+// the SPA reports `page=utilization`.
+//
+// === KEEP IN SYNC WITH frontend/src/app/utilization/page.tsx,
+// frontend/src/components/UtilizationPanels.tsx, UtilizationJobs.tsx,
+// UtilizationApply.tsx and UtilizationCharts.tsx ===
+// If you change the URL parameters, the filters, the panels or what an
+// open workflow shows, update the matching language here.
+const utilizationPageInstructions = `The user is on the Utilization page: how much of the
+CPU, memory, disk and GPUs their finished jobs (completed or removed) reserved they
+actually used, and what to request next time. Jobs are grouped into workflows (a DAG,
+a batch name or an executable).
+
+The page has two views:
+  - the overview: a headline (of what the jobs reserved, how much they used, weighted
+    by run time; memory is each job's peak) with how many more jobs could run at once
+    with right-sized requests, "What to change next time" suggestion cards, and a
+    table of workflows (jobs, run time, CPU cores, peak memory, disk, throughput,
+    advice).
+  - one workflow, when opened: its advice, histograms of peak memory, CPU cores used
+    and disk per job, a memory curve, trends by submission, and the list of its jobs.
+    When some of the workflow's jobs are still waiting, an Apply panel lets the user
+    change their requests. You cannot apply anything; point the user at that panel.
+
+The controls, which the page context reports:
+  - the window: the last 1, 7 or 30 days.
+  - a text filter over workflow names, executables, users and access points (only
+    narrows which workflows are listed; the figures above still cover all of them).
+  - a ClassAd expression over job attributes, which changes which jobs are analysed:
+    every figure, chart and job list recomputes.
+  - for administrators and project leads, the user's own jobs versus everyone's (or
+    their projects'), and a list of users to narrow to.
+
+Tools available here:
+  - analyze_utilization: the page's own analysis. Pass the window (days), expression
+    (constraint) and scope (everyone) from the page context so you talk about what the
+    user sees; pass workflow for one workflow's detail.
+  - set_constraint: apply an expression to the page so it analyses only matching jobs.
+    Use when the user asks for a subset, e.g. "only jobs that requested at least one
+    GPU" -> set_constraint("RequestGPUs >= 1"). RequestGPUs is undefined on jobs that
+    did not ask for a GPU, and an undefined comparison does not match. Other useful
+    attributes: JobBatchName, Cmd, Owner, RequestMemory (MiB), RequestCpus, RequestDisk
+    (KiB), ExitCode. Pass "" to clear.
+  - set_filter: the text filter over workflow names. Pass "" to clear.
+  - query_slots for what the pool has, e.g. whether a smaller or larger request would
+    still match machines.
+
+Suggestions come with the submit-file lines to change; quote them exactly.`
+
+// poolPageInstructions is appended to the chat system prompt when the
+// SPA reports `page=pool`.
+//
+// === KEEP IN SYNC WITH frontend/src/app/pool/page.tsx,
+// frontend/src/components/PoolDrain.tsx and frontend/src/lib/pool.ts ===
+// If you change the summary, the node table, the filter or how usage is
+// counted, update the matching language here -- and the comparison with
+// query_slots below.
+const poolPageInstructions = `The user is on the Pool page: the execute nodes this access
+point's pool reports to its collector, and their slots.
+
+What the page shows:
+  - a summary: CPUs, memory and GPUs in use out of the total, across the nodes in view;
+    the number of execute nodes, running jobs, nodes unavailable because their owner
+    is using them, and CPUs in use by backfill jobs.
+  - when drain estimates are available: cards for how soon nodes would be empty if
+    drained now, and per node an "Empty if drained now" estimate and a timeline of
+    the next 6 hours.
+  - a table with one row per execute node: running jobs, CPUs, memory (GiB) and GPUs as
+    used / total. Expanding a node lists its slots, including one per running job, with
+    type, state/activity, CPUs, memory, GPUs and the job's owner. Clicking a slot opens
+    its page.
+
+How the page counts: a node's total is the machine's TotalCpus / TotalMemory /
+TotalGPUs; "used" is the total minus what its partitionable slot still has free
+(Cpus / Memory / GPUs on that slot). Backfill slots re-advertise the same hardware and
+are not added to the total. Running jobs come from each partitionable slot's
+NumDynamicSlots.
+
+The filter, which the page context reports:
+  - text: matches slot name, machine, slot type, state, activity, the running job's
+    owner, arch and OS. Only narrows what is already loaded.
+  - ClassAd expression: sent to the collector over the slot ads. Per-job (dynamic)
+    slots are never matched by it, so it selects partitionable, static and backfill
+    slots, and a node is shown when one of its slots matches. Slot GPU attributes:
+    TotalGPUs (the machine's GPUs), TotalSlotGPUs (this slot's), GPUs (still free on a
+    partitionable slot; assigned on a static one), GPUs_DeviceName (model, e.g.
+    "NVIDIA A100-SXM4-80GB"; older pools publish CUDADeviceName), GPUs_Capability,
+    GPUs_GlobalMemoryMb. So "nodes with GPUs" is TotalSlotGPUs > 0 (or TotalGPUs > 0),
+    "with a free GPU" is GPUs > 0, and "running GPU jobs" is
+    TotalSlotGPUs > 0 && (GPUs < TotalSlotGPUs || (SlotType == "Static" && State == "Claimed")).
+    Other attributes: Machine, State, Activity, Cpus, Memory (MiB), TotalCpus,
+    TotalMemory, OpSys, Arch, SlotType.
+
+Tools available here:
+  - set_filter: the text filter. Pass "" to clear.
+  - set_constraint: the expression filter, e.g. "show only slots with GPUs" ->
+    set_constraint("TotalSlotGPUs > 0"). Pass "" to clear.
+  - expand_machine: open a node's row to show its slots.
+  - query_slots: read slot ads yourself. Its numbers are not the page's:
+      * it reports totals only (total_cpus, total_memory_mb, total_gpus, counted once
+        per machine), not what is in use; for "how busy" use the page's figures from
+        the user, or summarize=false and read State/Activity and free Cpus/GPUs.
+      * matched_slots counts slot ads (partitionable, static and backfill), not nodes;
+        "machines" is the page's execute-node count.
+      * gpu_models, os_breakdown and arch_breakdown count slot ads, not GPUs or nodes.
+      * like the page, it leaves out per-job slots unless your constraint names
+        SlotType, DynamicSlot or PartitionableSlot.
+    When the user's figures and query_slots differ, trust the page for in-use numbers
+    and explain the difference rather than contradicting it.
+
+You cannot drain, reconfigure or otherwise change any machine from here.`
+
 // chatPageInstructions returns the per-page system-prompt suffix map
 // the engine expects. Centralized so both the production engine
 // constructor and tests use the same mapping.
 func chatPageInstructions() map[string]string {
 	return map[string]string{
-		"jobs":       jobsPageInstructions,
-		"submit":     submitPageInstructions,
-		"job-detail": jobDetailPageInstructions,
-		"archive":    archivePageInstructions,
+		"jobs":        jobsPageInstructions,
+		"submit":      submitPageInstructions,
+		"job-detail":  jobDetailPageInstructions,
+		"archive":     archivePageInstructions,
+		"issues":      issuesPageInstructions,
+		"utilization": utilizationPageInstructions,
+		"pool":        poolPageInstructions,
 	}
 }
 
@@ -355,10 +526,14 @@ func (s *Handler) buildChatTools() []chat.Tool {
 		s.toolEditJobsByConstraint(),
 		// Archive page (server-side, owner-scoped, read-only).
 		s.toolQueryJobsArchive(),
-		// Jobs page (client-side UI nudges).
+		// Issues page (server-side, owner-scoped, read-only).
+		s.toolAnalyzeIssues(),
+		// Listing pages (client-side UI nudges).
 		toolSetFilter(),
+		toolSetConstraint(),
 		toolExpandBatch(),
 		toolHighlightJob(),
+		toolExpandMachine(),
 		// Submit page (server-side reference data).
 		s.toolListSubmitTemplates(),
 		// Submit page (client-side draft mutations + UI nudges).
@@ -927,22 +1102,50 @@ func (s *Handler) singleJobActionTool(
 func toolSetFilter() chat.Tool {
 	return &chatTool{
 		name:  "set_filter",
-		pages: jobsPageTools,
-		description: `Apply a substring filter to the jobs table the user is looking ` +
-			`at — keeping only rows whose batch name, cluster id, command line, owner, ` +
-			`or display status contains the query. Use to narrow the user's view to ` +
-			`what they asked about, e.g. "show me my held jobs" → set_filter("held"), ` +
-			`or "the training-run batch" → set_filter("training-run"). Pass the empty ` +
-			`string to clear the filter.`,
+		pages: textFilterPageTools,
+		description: `Put text in the page's text filter so the table shows only rows ` +
+			`containing it. What a row is matched on depends on the page (see the page ` +
+			`notes). Use to narrow the user's view to what they asked about, e.g. ` +
+			`"show me my held jobs" -> set_filter("held"), or "the training-run batch" -> ` +
+			`set_filter("training-run"). Pass the empty string to clear the filter.`,
 		schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"query": {
 					"type": "string",
-					"description": "Substring to match against batch rows; empty string clears."
+					"description": "Text to match against the table's rows; empty string clears."
 				}
 			},
 			"required": ["query"]
+		}`),
+		clientSide: true,
+	}
+}
+
+// toolSetConstraint switches the page's filter to its ClassAd expression
+// form and applies the expression, the way the user would by typing it and
+// pressing Apply. The page sends it to the server, which scopes it to what
+// the user may see, so it can only narrow the view.
+func toolSetConstraint() chat.Tool {
+	return &chatTool{
+		name:  "set_constraint",
+		pages: constraintPageTools,
+		description: `Apply a ClassAd expression as the page's filter, so the page shows only ` +
+			`what matches -- the same as typing it into the filter's "ClassAd expression" box ` +
+			`and pressing Apply. Use when the user asks to see a subset that a plain text ` +
+			`match cannot express, e.g. "only jobs that requested a GPU" -> ` +
+			`set_constraint("RequestGPUs >= 1"). Which attributes apply depends on the page ` +
+			`(job attributes, or slot attributes on the pool page; see the page notes). ` +
+			`The page reports an expression it rejects. Pass the empty string to clear.`,
+		schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"constraint": {
+					"type": "string",
+					"description": "ClassAd expression, e.g. RequestGPUs >= 1; empty string clears."
+				}
+			},
+			"required": ["constraint"]
 		}`),
 		clientSide: true,
 	}
@@ -983,6 +1186,28 @@ func toolHighlightJob() chat.Tool {
 				"proc_id":    {"type": "integer"}
 			},
 			"required": ["cluster_id", "proc_id"]
+		}`),
+		clientSide: true,
+	}
+}
+
+func toolExpandMachine() chat.Tool {
+	return &chatTool{
+		name:  "expand_machine",
+		pages: poolPageTools,
+		description: `Open an execute node's row in the pool table so the user can see its ` +
+			`slots and the jobs running on them. Use after answering a question that ` +
+			`points at a specific machine. The node must be in the table as currently ` +
+			`filtered.`,
+		schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"machine": {
+					"type": "string",
+					"description": "The node's name as the table shows it (the Machine attribute)."
+				}
+			},
+			"required": ["machine"]
 		}`),
 		clientSide: true,
 	}

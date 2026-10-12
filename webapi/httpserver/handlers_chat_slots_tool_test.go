@@ -133,3 +133,36 @@ func mustParseChatAd(t *testing.T, s string) *classad.ClassAd {
 	}
 	return ad
 }
+
+// Current startds name the GPU model GPUs_DeviceName and publish no
+// CUDADeviceName (ap40's GPU slots carry only the former); a machine
+// known only by TotalSlotGPUs still counts its GPUs.
+func TestSummarizeSlotAdsReadsCurrentGPUAttributes(t *testing.T) {
+	ads := []*classad.ClassAd{
+		mustParseChatAd(t, `[
+			Name = "slot1@gpu-a"; Machine = "gpu-a"; SlotType = "Partitionable";
+			TotalCpus = 64; TotalMemory = 512000; TotalGPUs = 4; TotalSlotGPUs = 4; GPUs = 1;
+			GPUs_DeviceName = "NVIDIA A100-SXM4-80GB";
+		]`),
+		mustParseChatAd(t, `[
+			Name = "slot1@gpu-b"; Machine = "gpu-b"; SlotType = "Partitionable";
+			TotalCpus = 32; TotalMemory = 256000; TotalSlotGPUs = 2; GPUs = 0;
+			GPUs_DeviceName = "NVIDIA RTX A5000";
+		]`),
+	}
+	got := summarizeSlotAds(ads, "")
+	if got["total_gpus"].(int) != 6 {
+		t.Errorf("total_gpus = %v, want 6 (4 from TotalGPUs, 2 from TotalSlotGPUs)", got["total_gpus"])
+	}
+	models, _ := got["gpu_models"].([]map[string]any)
+	var names []string
+	for _, m := range models {
+		names = append(names, m["key"].(string))
+	}
+	if strings.Join(names, ",") != "NVIDIA A100-SXM4-80GB,NVIDIA RTX A5000" {
+		t.Errorf("gpu_models = %v, want both GPUs_DeviceName models", names)
+	}
+	if v := summarizeSlotForChat(ads[0])["gpu_model"]; v != "NVIDIA A100-SXM4-80GB" {
+		t.Errorf("per-slot gpu_model = %v", v)
+	}
+}

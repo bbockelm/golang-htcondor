@@ -12,8 +12,12 @@
 // someone. The workflow is a query parameter rather than a path segment
 // because the app is a static export, where a dynamic route needs a page
 // per value at build time.
+//
+// The chat panel is wired up the way /archive's is. Its set_constraint
+// and set_filter hooks move the URL, exactly as the filter box does, so
+// what the assistant applies is what the page then analyses.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -22,6 +26,7 @@ import { useMultiAP } from '@/lib/multiap';
 import { ScheddFilter } from '@/components/ScheddFilter';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 import { FilterControls, type FilterMode } from '@/components/FilterControls';
+import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import {
   filterWorkflows,
   parseDays,
@@ -189,6 +194,62 @@ export default function UtilizationPage() {
   });
   const detailMissing = detail.error instanceof ApiError && detail.error.status === 404;
 
+  // The chat's hooks act through the URL like the filter box does. They
+  // are handed to the panel once, so they reach the current URL through a
+  // ref rather than the render they were made in.
+  const replaceRef = useRef(replace);
+  useEffect(() => {
+    replaceRef.current = replace;
+  });
+  // === KEEP IN SYNC WITH webapi/httpserver/handlers_chat_tools.go (utilizationPageInstructions) ===
+  // The server's instructions tell the assistant what this page shows and
+  // which of these hooks exist. Adding or removing a hook, a control or a
+  // filter here means updating that text.
+  const chatHooks = useMemo<Record<string, ToolHandler>>(
+    () => ({
+      // The two filters are one or the other, as in the box: applying
+      // one stops applying the other.
+      set_constraint: (input) => {
+        const c = typeof input.constraint === 'string' ? input.constraint.trim() : '';
+        setMode(c ? 'expr' : 'text');
+        setExprInput(c);
+        replaceRef.current({ constraint: c, q: '' });
+        return { ok: true, applied_constraint: c };
+      },
+      set_filter: (input) => {
+        const q = typeof input.query === 'string' ? input.query : '';
+        setMode('text');
+        setText(q);
+        replaceRef.current({ q, constraint: '' });
+        return { ok: true, applied_query: q };
+      },
+    }),
+    [],
+  );
+  const { data: chatInfo } = useQuery({
+    queryKey: ['chat-info'],
+    queryFn: api.chat.info,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const chatVisible = !!chatInfo?.enabled;
+  const busy = isFetching && (isPlaceholderData || isLoading);
+  const pageContext = [
+    `Scope: ${ownedByMe ? "the user's own jobs" : isAdmin ? "every user's jobs" : "the user's and their projects' jobs"} (everyone=${!ownedByMe}).`,
+    `Window: the last ${days} ${days === 1 ? 'day' : 'days'} (days=${days}).`,
+    constraint ? `Expression filter (analyses only matching jobs): ${constraint}` : 'Expression filter: none.',
+    url.q ? `Text filter on workflow names: "${url.q}" (${shownWorkflows.length} of ${data?.workflows.length ?? 0} workflows listed).` : '',
+    owners.length ? `Narrowed to users: ${owners.join(', ')}.` : '',
+    limit ? `Analysing up to ${limit} jobs.` : '',
+    exprError ? `The expression was rejected: ${exprError}` : '',
+    data ? `Jobs analysed: ${data.jobs_considered}; workflows: ${data.workflows.length}.` : isLoading || busy ? 'The page is still loading.' : '',
+    workflowKey
+      ? `Open workflow: ${detail.data?.workflow.name ?? workflowKey} (workflow=${workflowKey}).`
+      : 'Showing the overview of all workflows.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
   const addOwner = (o: string) => {
     if (!owners.includes(o)) replace({ owners: [...owners, o] });
   };
@@ -198,8 +259,6 @@ export default function UtilizationPage() {
     : isAdmin || !isLead
       ? 'Utilization: everyone'
       : 'Utilization: you and your projects';
-
-  const busy = isFetching && (isPlaceholderData || isLoading);
 
   return (
     <div className="space-y-6">
@@ -257,6 +316,17 @@ export default function UtilizationPage() {
           </p>
         )}
       </div>
+
+      <ChatPanel
+        visible={chatVisible}
+        page="utilization"
+        pageContext={pageContext}
+        hooks={chatHooks}
+        confirmableTools={[]}
+        headerLabel="Utilization assistant"
+        togglerLabel="Ask about these numbers"
+        pageHelp={`Ask things like "which workflow wastes the most memory?", "what should I request for the sweep jobs?", or "show only jobs that requested a GPU".`}
+      />
 
       {error && !data && !exprError && (
         <p className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

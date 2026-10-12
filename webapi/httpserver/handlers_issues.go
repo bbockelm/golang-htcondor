@@ -2,9 +2,11 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -31,6 +33,12 @@ type IssuesResponse struct {
 	// it the page describes what is stuck now, with it what has gone
 	// wrong over the window.
 	IncludeEnded bool `json:"include_ended"`
+	// OwnedByMe says whose jobs these are as applied: a caller that may
+	// not see everyone's gets its own whatever it asked for.
+	OwnedByMe bool `json:"owned_by_me"`
+	// Constraint is the caller's filter as applied (re-serialized), or
+	// empty.
+	Constraint string `json:"constraint,omitempty"`
 	// BucketSeconds is how much time one slice of a cluster's timeline
 	// covers, so a caller can label it without re-deriving the window.
 	BucketSeconds int64          `json:"bucket_seconds,omitempty"`
@@ -110,46 +118,91 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The Owner value of the caller's jobs: a bearer's actor is
-	// qualified ("alice@domain") and a job's Owner is not.
-	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
-	// Same rule as every other listing: a caller that is not an
-	// administrator is confined to its own jobs whatever it asks for.
-	ownedByMe := true
+	q := issueQuery{ownedByMe: true, window: defaultIssueWindow, granularity: 0.5, includeEnded: true}
 	if v := r.URL.Query().Get("owned_by_me"); v != "" {
 		if parsed, perr := strconv.ParseBool(v); perr == nil {
-			ownedByMe = parsed
+			q.ownedByMe = parsed
 		}
 	}
-	if !ownedByMe && !s.seesAllJobs(ctx, r, jobScopeRead) {
-		ownedByMe = true
-	}
-
-	window := defaultIssueWindow
 	if v := r.URL.Query().Get("window_seconds"); v != "" {
 		n, perr := strconv.ParseInt(v, 10, 64)
 		if perr != nil {
 			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid window_seconds: %v", perr))
 			return
 		}
-		window = time.Duration(n) * time.Second
+		q.window = time.Duration(n) * time.Second
 	}
-	if window < minIssueWindow {
-		window = minIssueWindow
-	}
-	if window > maxIssueWindow {
-		window = maxIssueWindow
-	}
-
-	granularity := 0.5
 	if v := r.URL.Query().Get("granularity"); v != "" {
 		g, perr := strconv.ParseFloat(v, 64)
 		if perr != nil {
 			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid granularity: %v", perr))
 			return
 		}
-		granularity = g
+		q.granularity = g
 	}
+	// Reading run-attempt history is the expensive half, so it is opt-in
+	// -- and it is also the only half that can answer "what went wrong
+	// and then stopped being wrong", so the page offers it prominently.
+	if v := r.URL.Query().Get("include_ended"); v != "" {
+		if parsed, perr := strconv.ParseBool(v); perr == nil {
+			q.includeEnded = parsed
+		}
+	}
+	q.constraint = r.URL.Query().Get("constraint")
+
+	resp, err := s.issuesAnswer(ctx, r, q)
+	if err != nil {
+		var bad issueQueryError
+		if errors.As(err, &bad) {
+			s.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("Could not read what is going wrong: %v", err))
+		return
+	}
+	s.writeJSON(w, http.StatusOK, resp)
+}
+
+// issueQuery is one question asked of the issues view: the page's
+// parameters, before they are clamped and scoped.
+type issueQuery struct {
+	// ownedByMe asks for the caller's own jobs; false asks for everyone's,
+	// which only a caller that sees all jobs gets.
+	ownedByMe    bool
+	window       time.Duration
+	granularity  float64
+	includeEnded bool
+	// constraint narrows the jobs considered, inside the owner scope.
+	constraint string
+}
+
+// issueQueryError is a question the caller has to fix, not a failure to
+// answer it.
+type issueQueryError struct{ msg string }
+
+func (e issueQueryError) Error() string { return e.msg }
+
+// issuesAnswer is the issues view for one caller: the REST endpoint and
+// the chat's analyze_issues both answer through it, so the two scope and
+// cache the same way. ctx must carry the authenticated user.
+func (s *Handler) issuesAnswer(ctx context.Context, r *http.Request, q issueQuery) (IssuesResponse, error) {
+	// The Owner value of the caller's jobs: a bearer's actor is
+	// qualified ("alice@domain") and a job's Owner is not.
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
+	// Same rule as every other listing: a caller that is not an
+	// administrator is confined to its own jobs whatever it asks for.
+	ownedByMe := q.ownedByMe
+	if !ownedByMe && !s.seesAllJobs(ctx, r, jobScopeRead) {
+		ownedByMe = true
+	}
+	window := q.window
+	if window < minIssueWindow {
+		window = minIssueWindow
+	}
+	if window > maxIssueWindow {
+		window = maxIssueWindow
+	}
+	granularity := q.granularity
 	if granularity < 0 {
 		granularity = 0
 	}
@@ -157,40 +210,45 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 		granularity = 1
 	}
 
-	// Reading run-attempt history is the expensive half, so it is opt-in
-	// -- and it is also the only half that can answer "what went wrong
-	// and then stopped being wrong", so the page offers it prominently.
-	includeEnded := true
-	if v := r.URL.Query().Get("include_ended"); v != "" {
-		if parsed, perr := strconv.ParseBool(v); perr == nil {
-			includeEnded = parsed
-		}
-	}
-
 	scope := "true"
 	if ownedByMe {
 		scope = fmt.Sprintf("Owner == %s", classadStringLit(owner))
 	}
+	// The caller's constraint narrows inside the scope and cannot widen
+	// it: andScope re-serializes it so it cannot reach past its
+	// parentheses.
+	filter := ""
+	if c := strings.TrimSpace(q.constraint); c != "" {
+		safe, err := classadBalanced(c)
+		if err != nil {
+			return IssuesResponse{}, issueQueryError{fmt.Sprintf("Invalid constraint: %v", err)}
+		}
+		filter = safe
+		if scope, err = andScope(scope, safe); err != nil {
+			return IssuesResponse{}, issueQueryError{fmt.Sprintf("Invalid constraint: %v", err)}
+		}
+	}
 	// Whether the mirror may answer is part of the key: a set read out of
 	// the mirror must not be handed to a caller who may not read it there.
 	mirror := s.mirrorAllowed(ctx, r) == nil
-	key := fmt.Sprintf("%s|%t|%d|%t|%t", owner, ownedByMe, int64(window/time.Second), includeEnded, mirror)
+	key := fmt.Sprintf("%s|%t|%d|%t|%t|%s", owner, ownedByMe, int64(window/time.Second), q.includeEnded, mirror, filter)
 	// collectCtx is the cache's, not this request's: see
 	// sharedComputeContext.
 	set, cached, err := s.issueSets().get(ctx, key, func(collectCtx context.Context) (*issues.Set, error) {
 		return issues.Collect(collectCtx, handlerIssueSource{s: s, mirror: mirror}, issues.Options{
 			Scope:        scope,
 			Window:       window,
-			IncludeEnded: includeEnded,
+			IncludeEnded: q.includeEnded,
 		})
 	})
 	if err != nil {
-		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("Could not read what is going wrong: %v", err))
-		return
+		return IssuesResponse{}, err
 	}
 
 	clusterStart := time.Now()
-	resp := buildIssuesResponse(set, window, granularity, includeEnded)
+	resp := buildIssuesResponse(set, window, granularity, q.includeEnded)
+	resp.OwnedByMe = ownedByMe
+	resp.Constraint = filter
 	resp.Timings = &IssueTimings{
 		HoldsMs:       set.HoldDuration.Milliseconds(),
 		Holds:         set.HoldCount,
@@ -211,7 +269,7 @@ func (s *Handler) handleIssues(w http.ResponseWriter, r *http.Request) {
 			"cluster_ms", resp.Timings.ClusterMs,
 			"window_seconds", resp.WindowSeconds, "owned_by_me", ownedByMe)
 	}
-	s.writeJSON(w, http.StatusOK, resp)
+	return resp, nil
 }
 
 // buildIssuesResponse clusters a collected set at one granularity.

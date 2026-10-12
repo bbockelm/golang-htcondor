@@ -27,6 +27,7 @@ and gets billed.
 | `query_jobs_archive` | server | same as `query_jobs` | ~30 KB | ~7.5k | Reasonable. |
 | `query_slots` (summarize=true) | server | aggregated counts/breakdowns | ~2 KB | ~500 | Excellent. |
 | `query_slots` (summarize=false) | server | `limit` ≤ 200, per-slot summary | ~50 KB | ~12k | Acceptable. |
+| `analyze_issues` | server | ≤ 8 problems per section, 3 example job ids each, messages ≤ 300 B, names ≤ 60 B | < 24 KiB (pinned by `TestChatIssuesSummaryIsBounded`) | ~6k | Same answer as the Issues page, from its cache. |
 | `remove_jobs` | server | small status object | ~1 KB | ~250 | Fine. |
 | `edit_job_attribute` / `edit_jobs_by_constraint` | server | small status | ~1 KB | ~250 | Fine. |
 | Submit-flow tools (`set_template_body`, `add_inline_file`, etc.) | client | client-side state mutations | sub-KB | <500 | Fine. |
