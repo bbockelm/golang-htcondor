@@ -12,6 +12,8 @@
 //   - We never touch lines inside multi-line values (rare in submit
 //     files; we accept the limitation).
 
+import { splitEnvironmentV2, toEnvVars, type EnvVar } from './environment';
+
 const QUEUE_RE = /^\s*queue(\s|$)/i;
 
 function attrLineRE(key: string): RegExp {
@@ -169,10 +171,7 @@ export function buildTableQueue(
 
 // --- Environment encoding -------------------------------------------------
 
-export interface EnvVar {
-  name: string;
-  value: string;
-}
+export type { EnvVar };
 
 /**
  * Encode a list of environment variables in HTCondor's "new" environment
@@ -217,42 +216,7 @@ export function decodeEnvironment(raw: string | undefined): EnvVar[] | null {
   const trimmed = raw.trim();
   if (!trimmed.startsWith('"') || !trimmed.endsWith('"')) return null;
   const inner = trimmed.slice(1, -1).replace(/""/g, '"'); // un-double quotes
-
-  // Tokenize on whitespace, but keep single-quoted segments intact and
-  // un-double internal single quotes ('' -> ').
-  const tokens: string[] = [];
-  let buf = '';
-  let inSingle = false;
-  for (let i = 0; i < inner.length; i++) {
-    const ch = inner[i];
-    if (ch === "'") {
-      if (inSingle && inner[i + 1] === "'") {
-        // doubled '' inside a single-quoted segment -> literal '
-        buf += "'";
-        i++;
-        continue;
-      }
-      inSingle = !inSingle;
-      continue;
-    }
-    if (!inSingle && /\s/.test(ch)) {
-      if (buf !== '') {
-        tokens.push(buf);
-        buf = '';
-      }
-      continue;
-    }
-    buf += ch;
-  }
-  if (buf !== '') tokens.push(buf);
-
-  const out: EnvVar[] = [];
-  for (const t of tokens) {
-    const eq = t.indexOf('=');
-    if (eq <= 0) continue;
-    out.push({ name: t.slice(0, eq), value: t.slice(eq + 1) });
-  }
-  return out;
+  return toEnvVars(splitEnvironmentV2(inner));
 }
 
 // --- Resource request helpers --------------------------------------------
