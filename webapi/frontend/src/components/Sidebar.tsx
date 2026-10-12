@@ -34,13 +34,15 @@ const NAV = [
   { href: '/info', label: 'Info' },
 ];
 
-// Multi-AP mode serves job and history reads, job actions and submit.
+// Multi-AP mode serves job and history reads, job actions, submit and
+// interactive work.
 const MULTI_AP_NAV = [
   { href: '/', label: 'Dashboard' },
   { href: '/jobs', label: 'Jobs' },
   { href: '/archive', label: 'Archive' },
   { href: '/utilization', label: 'Utilization' },
   { href: '/submit', label: 'Submit' },
+  { href: '/interactive', label: 'Interactive' },
   { href: '/aps', label: 'Access Points' },
 ];
 

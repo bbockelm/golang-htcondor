@@ -182,6 +182,12 @@ export interface APAssignment {
   reason?: string;
 }
 
+// scheddQuery is the ?schedd= naming the access point a new piece of
+// work goes to, in multi-AP mode; empty for the default.
+export function scheddQuery(schedd?: string): string {
+  return schedd ? `?schedd=${encodeURIComponent(schedd)}` : '';
+}
+
 // submitTargets lists the access points a caller may submit to, home
 // first; empty when there is no assignment.
 export function submitTargets(a?: APAssignment): string[] {
@@ -673,6 +679,8 @@ export interface JupyterCreateResponse {
   instance_id: string;
   cluster_id: string;
   proxy_path: string;
+  // The access point the session was placed on (multi-AP mode).
+  schedd?: string;
 }
 
 // JupyterInstanceSummary mirrors the Go-side struct in handlers_jupyter.go.
@@ -685,6 +693,11 @@ export interface JupyterCreateResponse {
 export interface JupyterInstanceSummary {
   instance_id: string;
   cluster_id?: string;
+  // The job as /jobs/[id] names it: cluster.0, or the complete id in
+  // multi-AP mode.
+  job_id?: string;
+  // The access point the session's job is on (multi-AP mode).
+  schedd?: string;
   image?: string;
   owner: string;
   created_at: string;
@@ -709,9 +722,12 @@ export interface JupyterInstanceSummary {
 // also look like a failure. `url` is only ever set when there is
 // genuinely something to open.
 export interface AppSummary {
+  // In multi-AP mode "<id>@<access point>".
   id: string;
   type: string;
   job_id: string;
+  // The access point the app is on (multi-AP mode).
+  schedd?: string;
   owner?: string;
   // waiting | starting | running | held | ended
   state: string;
@@ -771,6 +787,9 @@ export interface SSHConsentView {
   session_exists: boolean;
   can_create: boolean;
   job_id?: string;
+  // Multi-AP mode: the access point the existing session is on, or the
+  // one a new session would start on.
+  schedd?: string;
   status?: string;
   hold_reason?: string;
   hold_reason_code?: number;
@@ -797,6 +816,7 @@ export interface SSHConsentResult {
   approved: boolean;
   session?: string;
   job_id?: string;
+  schedd?: string;
   created: boolean;
 }
 
@@ -804,8 +824,9 @@ export interface InteractiveTerminalCreateResponse {
   instance_id: string;
   cluster_id: number;
   proc_id: number;
-  job_id: string; // "cluster.proc"
+  job_id: string; // "cluster.proc", the complete id in multi-AP mode
   batch_name: string;
+  schedd?: string;
 }
 
 // InteractiveTerminalSummary mirrors the Go-side struct returned by
@@ -816,6 +837,8 @@ export interface InteractiveTerminalCreateResponse {
 export interface InteractiveTerminalSummary {
   instance_id: string;
   job_id: string;
+  // The access point the job is on (multi-AP mode).
+  schedd?: string;
   cluster_id: number;
   proc_id: number;
   batch_name: string;
@@ -1478,7 +1501,10 @@ export const api = {
   version: (): Promise<VersionInfo> => fetchJSON(`${BASE}/version`),
 
   // Multi-AP mode: the access points this server fronts.
-  aps: (): Promise<AccessPointsResponse> => fetchJSON(`${BASE}/aps`),
+  // kind asks where that kind of work would go ("interactive",
+  // "jupyter"); the assignment may differ by kind.
+  aps: (kind?: string): Promise<AccessPointsResponse> =>
+    fetchJSON(`${BASE}/aps${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`),
 
   // The SSH gateway's certificate authority and certificate issuer.
   //
@@ -1894,8 +1920,10 @@ export const api = {
   },
 
   jupyter: {
-    create: (req: JupyterCreateRequest): Promise<JupyterCreateResponse> =>
-      fetchJSON(`${BASE}/jupyter/instances`, {
+    // schedd names the access point in multi-AP mode (default: the
+    // caller's assignment).
+    create: (req: JupyterCreateRequest, schedd?: string): Promise<JupyterCreateResponse> =>
+      fetchJSON(`${BASE}/jupyter/instances${scheddQuery(schedd)}`, {
         method: "POST",
         body: JSON.stringify(req),
       }),
@@ -1920,8 +1948,8 @@ export const api = {
     // POST /api/v1/apps — submits a job that runs a VS Code server on a
     // Unix socket in its sandbox. Returns immediately, before the job
     // has a slot: poll get() for the state.
-    create: (req: AppCreateRequest): Promise<AppSummary> =>
-      fetchJSON(`${BASE}/apps`, {
+    create: (req: AppCreateRequest, schedd?: string): Promise<AppSummary> =>
+      fetchJSON(`${BASE}/apps${scheddQuery(schedd)}`, {
         method: "POST",
         body: JSON.stringify(req),
       }),
@@ -1946,8 +1974,9 @@ export const api = {
     // keep the watchdog happy.
     createTerminal: (
       req: InteractiveTerminalCreateRequest,
+      schedd?: string,
     ): Promise<InteractiveTerminalCreateResponse> =>
-      fetchJSON(`${BASE}/interactive/terminal`, {
+      fetchJSON(`${BASE}/interactive/terminal${scheddQuery(schedd)}`, {
         method: "POST",
         body: JSON.stringify(req),
       }),

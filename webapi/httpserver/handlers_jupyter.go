@@ -31,6 +31,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
@@ -368,6 +369,10 @@ func (s *Handler) handleJupyterPath(w http.ResponseWriter, r *http.Request) {
 type JupyterInstanceSummary struct {
 	InstanceID string `json:"instance_id"`
 	ClusterID  string `json:"cluster_id,omitempty"`
+	// JobID is the session's job as /api/v1/jobs/{id} names it:
+	// cluster.0, or in multi-AP mode the complete id. Empty until the
+	// submit returns.
+	JobID string `json:"job_id,omitempty"`
 	// Schedd is the access point the session's job is on, in multi-AP
 	// mode.
 	Schedd    string `json:"schedd,omitempty"`
@@ -432,7 +437,7 @@ func (s *Handler) handleJupyterListInstances(w http.ResponseWriter, r *http.Requ
 	summaries := make([]JupyterInstanceSummary, len(insts))
 	clustersByAP := map[string][]int{}
 	for i, inst := range insts {
-		summaries[i] = instanceToSummary(inst)
+		summaries[i] = s.jupyterSummary(inst)
 		if cid, ok := jupyterClusterID(summaries[i].ClusterID); ok {
 			clustersByAP[summaries[i].Schedd] = append(clustersByAP[summaries[i].Schedd], cid)
 		}
@@ -607,7 +612,7 @@ func (s *Handler) handleJupyterGetInstance(w http.ResponseWriter, r *http.Reques
 		s.writeError(w, http.StatusNotFound, "no such Jupyter instance")
 		return
 	}
-	summary := instanceToSummary(inst)
+	summary := s.jupyterSummary(inst)
 
 	// Same reaping rules as the list handler: if the underlying
 	// HTCondor job has gone terminal (or vanished from the queue), the
@@ -633,6 +638,21 @@ func (s *Handler) handleJupyterGetInstance(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	s.writeJSON(w, http.StatusOK, summary)
+}
+
+// jupyterSummary is instanceToSummary plus the job's id in the form
+// this server's job routes take.
+func (s *Handler) jupyterSummary(inst *jupytertunnel.Instance) JupyterInstanceSummary {
+	summary := instanceToSummary(inst)
+	cid, ok := jupyterClusterID(summary.ClusterID)
+	switch {
+	case !ok:
+	case s.multi != nil && summary.Schedd != "":
+		summary.JobID = s.multi.codec.Format(jobid.ID{Schedd: summary.Schedd, Cluster: int64(cid)})
+	case s.multi == nil:
+		summary.JobID = fmt.Sprintf("%d.0", cid)
+	}
+	return summary
 }
 
 // instanceToSummary collapses the registry's Instance into the wire shape.

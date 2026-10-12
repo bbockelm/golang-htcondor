@@ -412,7 +412,8 @@ func TestMultiAPJupyterKeepsItsAP(t *testing.T) {
 		}
 		rec = jupyterAs(t, s, http.MethodGet, "/api/v1/jupyter/instances/"+created.InstanceID, "")
 		var one JupyterInstanceSummary
-		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &one) != nil || one.Schedd != ap2 || one.JobStatus != 2 {
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &one) != nil || one.Schedd != ap2 || one.JobStatus != 2 ||
+			one.JobID != created.ClusterID+".0@"+ap2 {
 			t.Fatalf("%s: get = %d %s", what, rec.Code, rec.Body.String())
 		}
 		if fakes.queries(ap2) != q2+2 || fakes.queries(ap1) != q1 || fakes.queries(ap3) != q3 {
@@ -462,5 +463,22 @@ func TestMultiAPJupyterRowWithoutAnAPIsNotRouted(t *testing.T) {
 		if n := fakes.queries(ap); n != 0 {
 			t.Errorf("the schedd-less session's job was looked for on %s (%d queries)", ap, n)
 		}
+	}
+}
+
+// /api/v1/aps answers where a kind of work would go, for the web UI's
+// interactive page.
+func TestMultiAPAPsReportsTheAssignmentPerKind(t *testing.T) {
+	s := newInteractiveServer(t, "USER alice@d "+ap2+" "+ap3+"\n", nil)
+	for _, kind := range []string{"", "interactive", "jupyter"} {
+		rec := doAlice(t, s.srv, http.MethodGet, "/api/v1/aps?kind="+kind, "")
+		var body APsResponse
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &body) != nil ||
+			body.Assignment == nil || body.Assignment.Schedd != ap2 {
+			t.Errorf("aps?kind=%s = %d %s", kind, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := doAlice(t, s.srv, http.MethodGet, "/api/v1/aps?kind=bogus", ""); rec.Code != http.StatusBadRequest {
+		t.Errorf("aps?kind=bogus = %d", rec.Code)
 	}
 }

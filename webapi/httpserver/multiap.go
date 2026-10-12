@@ -815,7 +815,19 @@ func (h *Handler) handleAPs(w http.ResponseWriter, r *http.Request) {
 		st := h.multi.registry.Status()
 		resp.Registry = &APRegistryState{LastSuccess: timeOrEmpty(st.LastSuccess), LastError: st.LastError}
 	}
-	resp.Assignment = h.assignmentInfo(ctx, h.jobAssignRequest(ctx, r, user))
+	// ?kind= asks where that kind of work would go (the web UI's
+	// interactive page asks for "interactive" and "jupyter"); a site's
+	// assignment may differ by kind.
+	areq := h.jobAssignRequest(ctx, r, user)
+	switch k := r.URL.Query().Get("kind"); k {
+	case "", apassign.KindJob:
+	case apassign.KindDAG, apassign.KindInteractive, apassign.KindJupyter, apassign.KindContainerBuild:
+		areq.Kind = k
+	default:
+		h.writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown kind %q", k))
+		return
+	}
+	resp.Assignment = h.assignmentInfo(ctx, areq)
 	if a := resp.Assignment; a != nil && a.Schedd != "" {
 		allowed := apassign.Assignment{Schedd: a.Schedd, Alternates: a.Alternates}
 		for i := range resp.APs {

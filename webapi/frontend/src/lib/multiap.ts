@@ -23,9 +23,21 @@ export function useMultiAPMode(): boolean | undefined {
 export function useAccessPoints(enabled: boolean) {
   return useQuery({
     queryKey: ['aps'],
-    queryFn: api.aps,
+    queryFn: () => api.aps(),
     enabled,
     refetchInterval: 30_000,
+  });
+}
+
+// useKindAssignment is where a kind of new work ("interactive",
+// "jupyter") would go, in multi-AP mode: the caller's assignment for
+// that kind. Only fetched when enabled.
+export function useKindAssignment(kind: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ['aps', kind],
+    queryFn: () => api.aps(kind),
+    enabled,
+    select: (r) => r.assignment,
   });
 }
 
