@@ -3,6 +3,7 @@ package runtimeest
 import (
 	"math"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -85,6 +86,9 @@ type Features struct {
 	Universe int64
 	// DAGNode is whether the job is a node of a DAG (DAGManJobId is set).
 	DAGNode bool
+	// Container is whether the job runs in a container (see
+	// isContainerJob). Which image does not matter.
+	Container bool
 }
 
 // Universes the estimator treats specially.
@@ -102,22 +106,33 @@ func (f *Features) Estimated() bool {
 }
 
 // Kind is the kind of job f is, which every owner-confined group is
-// confined to: its universe, and whether it is a DAG node -- "u5" or
-// "u5|dag". A DAG node and a standalone job of the same owner never
-// share a group, even running the same command, nor do jobs of
-// different universes.
+// confined to: its universe, whether it is a DAG node and whether it
+// runs in a container -- "u5", "u5|dag", "u5|ctr" or "u5|dag|ctr". A
+// DAG node and a standalone job of the same owner never share a group,
+// even running the same command, nor do a container job and a bare one,
+// nor jobs of different universes.
+//
+// The container flag is not the image: an owner who moves a command to
+// a new image keeps its history, which a key on the image would throw
+// away. The same script run in a container and bare can take very
+// different times: 2.4x apart, by median, on a replayed access point.
 func (f *Features) Kind() string {
+	k := f.universeKind()
 	if f.DAGNode {
-		return f.universeKind() + "|dag"
+		k += "|dag"
 	}
-	return f.universeKind()
+	if f.Container {
+		k += "|ctr"
+	}
+	return k
 }
 
-// universeKind is Kind without the DAG flag: "u5". LevelGlobal is
-// grouped by it. Splitting the access point's jobs by DAG node as well
-// made the level worse on a replayed access point: its DAG nodes came
-// from a handful of owners, so their median was mostly one person's
-// workload.
+// universeKind is Kind without the DAG and container flags: "u5".
+// LevelGlobal is grouped by it. Splitting the access point's jobs by DAG
+// node as well made the level worse on a replayed access point: its DAG
+// nodes came from a handful of owners, so their median was mostly one
+// person's workload. Splitting them by container made no difference
+// overall and helped the level in some periods and hurt it in others.
 func (f *Features) universeKind() string {
 	u := f.Universe
 	if u <= 0 {
@@ -126,8 +141,40 @@ func (f *Features) universeKind() string {
 	return "u" + strconv.FormatInt(u, 10)
 }
 
+// containerFlagAttrs and containerImageAttrs mark a container job (see
+// isContainerJob).
+var (
+	containerFlagAttrs  = []string{"WantContainer", "WantDocker"}
+	containerImageAttrs = []string{"ContainerImage", "DockerImage", "SingularityImage"}
+)
+
 // FeatureAttrs are the job attributes FeaturesFromAd reads.
-var FeatureAttrs = []string{"Owner", "ClusterId", "ProcId", "Cmd", "Arguments", "Args", "Iwd", "JobBatchName", "JobUniverse", "DAGManJobId"}
+var FeatureAttrs = slices.Concat(
+	[]string{"Owner", "ClusterId", "ProcId", "Cmd", "Arguments", "Args", "Iwd", "JobBatchName", "JobUniverse", "DAGManJobId"},
+	containerFlagAttrs, containerImageAttrs)
+
+// isContainerJob reports whether a job runs in a container. condor_submit
+// marks one with WantContainer (container universe, or any vanilla job
+// with a container_image or docker_image) or WantDocker (docker
+// universe) and records the image in ContainerImage or DockerImage;
+// SingularityImage is the older convention, set by the submitter
+// (+SingularityImage) and read by the execute node's
+// SINGULARITY_IMAGE_EXPR. Any one of them is enough: history records
+// written by an older schedd, or projected without the flags, may
+// carry only the image.
+func isContainerJob(ad *classad.ClassAd) bool {
+	for _, a := range containerFlagAttrs {
+		if b, ok := ad.EvaluateAttrBool(a); ok && b {
+			return true
+		}
+	}
+	for _, a := range containerImageAttrs {
+		if s, ok := ad.EvaluateAttrString(a); ok && strings.TrimSpace(s) != "" {
+			return true
+		}
+	}
+	return false
+}
 
 // FeaturesFromAd reads a job's features from its ad, live or historical.
 func FeaturesFromAd(ad *classad.ClassAd) Features {
@@ -140,6 +187,7 @@ func FeaturesFromAd(ad *classad.ClassAd) Features {
 	f.BatchName, _ = ad.EvaluateAttrString("JobBatchName")
 	f.Universe, _ = intAttr(ad, "JobUniverse")
 	_, f.DAGNode = intAttr(ad, "DAGManJobId")
+	f.Container = isContainerJob(ad)
 	return f
 }
 

@@ -1490,12 +1490,16 @@ batch name less any run number, its submit directory, its program, and
 the owner's jobs as a whole; the access point's jobs as a whole are the
 last resort. Every one of the owner's groups holds only jobs of the same
 universe (`JobUniverse`; an ad without one counts as vanilla) that are,
-like the job asked about, DAG nodes (`DAGManJobId` set) or not: a DAG
-node is never estimated from its owner's standalone jobs, even ones
-running the same command. The access point's group is its jobs of the
-same universe, DAG nodes or not, or all its jobs while that universe has
-fewer than 30. For an interpreter (`python`, `bash -c`, `apptainer exec`,
-...) the program is the script it runs. An estimate is the median of the
+like the job asked about, DAG nodes (`DAGManJobId` set) or not, and run
+in a container or not: a DAG node is never estimated from its owner's
+standalone jobs, nor a container job from bare ones, even ones running
+the same command. A job runs in a container when `WantContainer` or
+`WantDocker` is true or it names an image in `ContainerImage`,
+`DockerImage` or `SingularityImage`; which image does not matter, so
+moving to a new image keeps the history. The access point's group is its
+jobs of the same universe, DAG nodes or not and containers or not, or all
+its jobs while that universe has fewer than 30. For an interpreter
+(`python`, `bash -c`, `apptainer exec`, ...) the program is the script it runs. An estimate is the median of the
 most recent 100 runtimes in one group — a single earlier run is enough,
 since they are the owner's own jobs; the access point's group needs 30.
 Which group answers is chosen per owner by how well each has predicted

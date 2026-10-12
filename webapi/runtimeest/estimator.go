@@ -5,9 +5,9 @@
 // filed under a ladder of groups (see Level) -- its cluster, its exact
 // command line, the same command line with the numbers masked, its batch
 // name, its working directory, its program, its owner -- each confined to
-// jobs of the same kind (universe, and DAG node or not), and an estimate
-// is the median of the recent runtimes in one of the groups the new job
-// falls into. Which group answers is chosen per owner, by how well each
+// jobs of the same kind (universe, DAG node or not, container or not),
+// and an estimate is the median of the recent runtimes in one of the
+// groups the new job falls into. Which group answers is chosen per owner, by how well each
 // level has predicted that owner's jobs so far (the 3Sigma approach).
 //
 // That shape was chosen by replaying a real access point's history: the
@@ -604,7 +604,7 @@ func (e *Estimator) EstimateMany(qs []Query) []Result {
 func sameFeatures(a, b *Features) bool {
 	return a.Owner == b.Owner && a.ClusterID == b.ClusterID && a.Cmd == b.Cmd &&
 		a.Iwd == b.Iwd && a.BatchName == b.BatchName && a.Universe == b.Universe &&
-		a.DAGNode == b.DAGNode && slices.Equal(a.Args, b.Args)
+		a.DAGNode == b.DAGNode && a.Container == b.Container && slices.Equal(a.Args, b.Args)
 }
 
 func viewOf(q Query) view {

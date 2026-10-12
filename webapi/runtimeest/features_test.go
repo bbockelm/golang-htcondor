@@ -210,6 +210,15 @@ func TestFeaturesFromAdReadsKind(t *testing.T) {
 		{"DAG node without a universe", "DAGManJobId = 41", "u5|dag"},
 		{"grid", "JobUniverse = 9", "u9"},
 		{"parallel DAG node", "JobUniverse = 11\nDAGManJobId = 41", "u11|dag"},
+		{"container image", "JobUniverse = 5\nContainerImage = \"docker://python:3.12\"", "u5|ctr"},
+		{"container DAG node", "ContainerImage = \"img.sif\"\nDAGManJobId = 41", "u5|dag|ctr"},
+		{"container universe flag", "WantContainer = true", "u5|ctr"},
+		{"docker universe", "WantDocker = true\nDockerImage = \"centos:7\"", "u5|ctr"},
+		{"docker image alone", "DockerImage = \"centos:7\"", "u5|ctr"},
+		{"singularity image", "SingularityImage = \"/cvmfs/images/el9\"", "u5|ctr"},
+		{"flags false", "WantContainer = false\nWantDocker = false", "u5"},
+		{"empty image", "ContainerImage = \"\"", "u5"},
+		{"undefined image", "SingularityImage = undefined", "u5"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,7 +228,7 @@ func TestFeaturesFromAdReadsKind(t *testing.T) {
 			}
 		})
 	}
-	for _, a := range []string{"JobUniverse", "DAGManJobId"} {
+	for _, a := range []string{"JobUniverse", "DAGManJobId", "WantContainer", "WantDocker", "ContainerImage", "DockerImage", "SingularityImage"} {
 		if !slices.Contains(FeatureAttrs, a) || !slices.Contains(QueryAttrs, a) || !slices.Contains(HistoryAttrs, a) {
 			t.Errorf("%s missing from a projection", a)
 		}
@@ -259,6 +268,30 @@ func TestKeysAreKindConfined(t *testing.T) {
 	// The access point's group is by universe alone.
 	if a.Key(LevelGlobal) != d.Key(LevelGlobal) || a.Key(LevelGlobal) == g.Key(LevelGlobal) {
 		t.Errorf("global keys: vanilla %q, DAG node %q, grid %q", a.Key(LevelGlobal), d.Key(LevelGlobal), g.Key(LevelGlobal))
+	}
+}
+
+// A container job and a bare one of the same owner running the very same
+// command never share a group, whichever image the container job uses;
+// the access point's group is shared.
+func TestKeysAreContainerConfined(t *testing.T) {
+	const job = "Owner = \"alice\"\nClusterId = 7\nCmd = \"/home/alice/run.sh\"\nArguments = \"1\"\nIwd = \"/home/alice/w\"\nJobBatchName = \"b\"\nJobUniverse = 5\n"
+	bare := DeriveKeys(FeaturesFromAd(adFrom(t, job)))
+	ctr := DeriveKeys(FeaturesFromAd(adFrom(t, job+"ContainerImage = \"osdf:///images/a.sif\"")))
+	other := DeriveKeys(FeaturesFromAd(adFrom(t, job+"ContainerImage = \"docker://python:3.12\"\nWantContainer = true")))
+	for l := LevelCluster; l < LevelGlobal; l++ {
+		if bare.Key(l) == "" || ctr.Key(l) == "" {
+			t.Fatalf("%s: missing key (bare %q, container %q)", l, bare.Key(l), ctr.Key(l))
+		}
+		if bare.Key(l) == ctr.Key(l) {
+			t.Errorf("%s: container and bare jobs share key %q", l, bare.Key(l))
+		}
+		if ctr.Key(l) != other.Key(l) {
+			t.Errorf("%s: a new image changed the key: %q vs %q", l, ctr.Key(l), other.Key(l))
+		}
+	}
+	if bare.Key(LevelGlobal) != ctr.Key(LevelGlobal) {
+		t.Errorf("global keys: bare %q, container %q", bare.Key(LevelGlobal), ctr.Key(LevelGlobal))
 	}
 }
 
