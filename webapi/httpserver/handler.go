@@ -2558,7 +2558,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 
 	// Start OAuth2 state store cleanup if it exists
 	if h.oauth2StateStore != nil {
-		h.oauth2StateStore.Start(ctx)
+		h.oauth2StateStore.Start(h.ctx)
 	}
 
 	// Delete token rows once they are dead and old enough to be of no use
@@ -2567,7 +2567,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// operator asking to keep token rows forever, which is a policy some
 	// deployments have; runTokenRetention honours it.
 	if h.oauth2Provider != nil {
-		go h.runTokenRetention(ctx)
+		go h.runTokenRetention(h.ctx)
 	}
 
 	// Start schedd address updater whenever we have a collector to query
@@ -2579,20 +2579,20 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// auto-swap decision: if the address was operator-pinned, we
 	// confirm but never override.
 	if h.collector != nil && h.scheddName != "" {
-		h.startScheddAddressUpdater(ctx)
+		h.startScheddAddressUpdater(h.ctx)
 	}
 
 	// Start credd address updater if credd was discovered (or discovery failed but should retry)
 	if h.creddDiscovered && h.collector != nil {
-		h.startCreddAddressUpdater(ctx)
+		h.startCreddAddressUpdater(h.ctx)
 	}
 
 	// Start session cleanup goroutine
-	h.startSessionCleanup(ctx)
+	h.startSessionCleanup(h.ctx)
 
 	// Start periodic ping goroutine if enabled
 	if h.pingInterval > 0 {
-		go h.periodicPing(ctx)
+		go h.periodicPing(h.ctx)
 	}
 
 	// Keep the htcondordb mirror's advertisement current in the
@@ -2600,13 +2600,13 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// wants to route, so the admin and readiness surfaces describe
 	// nothing until traffic arrives -- and the first such read pays the
 	// collector round trip.
-	h.startDBMirrorPoll(ctx)
+	h.startDBMirrorPoll(h.ctx)
 
-	h.startJobWatchEvaluator(ctx)
-	h.startJobWatchFeed(ctx)
-	h.startJobWatchNudge(ctx)
-	h.startJupyterSweeper(ctx)
-	h.startRuntimeEstimates(ctx)
+	h.startJobWatchEvaluator(h.ctx)
+	h.startJobWatchFeed(h.ctx)
+	h.startJobWatchNudge(h.ctx)
+	h.startJupyterSweeper(h.ctx)
+	h.startRuntimeEstimates(h.ctx)
 
 	return nil
 }

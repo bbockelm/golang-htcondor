@@ -151,7 +151,7 @@ func TestShutdownPersistsTheCounters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := h.Start(ctx, ln, "http"); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -161,6 +161,13 @@ func TestShutdownPersistsTheCounters(t *testing.T) {
 	// question from whether the counters were written. Stop also
 	// closes the database, so the check below reopens the file.
 	_ = h.Stop(ctx)
+	// Stop waits for the background goroutines until its context ends.
+	// Ending is what Stop itself tells them to do; when one was left
+	// on Start's context instead, Stop sat out the whole timeout.
+	if ctx.Err() != nil {
+		t.Errorf("Stop gave up waiting for the handler's background goroutines: " +
+			"one of them does not stop when the handler does")
+	}
 
 	db, err := appdb.Open(dbPath)
 	if err != nil {
