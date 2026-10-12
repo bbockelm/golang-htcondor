@@ -6,12 +6,17 @@
 // click-through to a per-slot page, and a filter that runs either as a
 // free-text substring match (client-side) or a raw ClassAd expression
 // (sent to the collector query).
+//
+// The chat panel is wired up the way /archive's is: read-only tools on
+// the server, and hooks that move this page's filter and open a node's
+// row. Nothing the assistant can do here changes a machine.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
 import { FilterControls, type FilterMode } from '@/components/FilterControls';
+import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import {
   parseSlot,
   groupByMachine,
@@ -147,6 +152,69 @@ export default function PoolPage() {
       ? error.message
       : null;
 
+  // expand_machine opens a row of the table as it is now; the hooks are
+  // handed to the panel once, so they read the rows through a ref.
+  const nodesRef = useRef(nodes);
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+  // === KEEP IN SYNC WITH webapi/httpserver/handlers_chat_tools.go (poolPageInstructions) ===
+  // The server's instructions tell the assistant what this page shows and
+  // which of these hooks exist. Adding or removing a hook, a control or a
+  // filter here means updating that text.
+  const chatHooks = useMemo<Record<string, ToolHandler>>(
+    () => ({
+      set_filter: (input) => {
+        const q = typeof input.query === 'string' ? input.query : '';
+        setMode('text');
+        setAppliedExpr('');
+        setInput(q);
+        return { ok: true, applied_query: q };
+      },
+      set_constraint: (input) => {
+        const c = typeof input.constraint === 'string' ? input.constraint.trim() : '';
+        setMode(c ? 'expr' : 'text');
+        setInput(c);
+        setAppliedExpr(c);
+        return { ok: true, applied_constraint: c };
+      },
+      expand_machine: (input) => {
+        const want = typeof input.machine === 'string' ? input.machine.trim().toLowerCase() : '';
+        const node = nodesRef.current.find((n) => n.machine.toLowerCase() === want);
+        if (!node) {
+          return {
+            ok: false,
+            error: `no node named "${input.machine}" is in the table as it is filtered now`,
+          };
+        }
+        setExpanded((prev) => new Set(prev).add(node.machine));
+        return { ok: true, expanded: node.machine };
+      },
+    }),
+    [],
+  );
+  const { data: chatInfo } = useQuery({
+    queryKey: ['chat-info'],
+    queryFn: api.chat.info,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const chatVisible = !!chatInfo?.enabled;
+  const u = summary.usage;
+  const pageContext = [
+    mode === 'expr'
+      ? `Filter: ClassAd expression ${appliedExpr ? `"${appliedExpr}"` : '(none applied)'}.`
+      : `Filter: text ${input.trim() ? `"${input.trim()}"` : '(none)'}.`,
+    exprError ? `The expression was rejected: ${exprError}` : '',
+    notConfigured ? 'This server has no collector configured, so the page shows no pool.' : '',
+    isLoading
+      ? 'The page is still loading.'
+      : `In view: ${summary.machines} execute nodes, ${summary.runningJobs} running jobs; CPUs ${u.usedCpus}/${u.totalCpus} in use, memory ${Math.round(u.usedMemoryMB / 1024)}/${Math.round(u.totalMemoryMB / 1024)} GiB, GPUs ${u.usedGpus}/${u.totalGpus}.`,
+    expanded.size ? `Expanded nodes: ${[...expanded].slice(0, 10).join(', ')}.` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
@@ -158,6 +226,17 @@ export default function PoolPage() {
           <span className="text-xs text-gray-400">refreshing…</span>
         )}
       </div>
+
+      <ChatPanel
+        visible={chatVisible}
+        page="pool"
+        pageContext={pageContext}
+        hooks={chatHooks}
+        confirmableTools={[]}
+        headerLabel="Pool assistant"
+        togglerLabel="Ask about the pool"
+        pageHelp={`Ask things like "which nodes have a free GPU?", "show only slots with GPUs", or "why is this node not running anything?".`}
+      />
 
       {notConfigured ? (
         <p className="rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-600">

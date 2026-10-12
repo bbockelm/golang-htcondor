@@ -48,14 +48,15 @@ func (s *Handler) toolQuerySlots() chat.Tool {
 			`total_gpus, gpu_models breakdown, os_breakdown, arch_breakdown) which is far ` +
 			`more useful than per-slot rows for advice. Set summarize=false plus a tight ` +
 			`constraint when you genuinely need to see specific slots. ` +
-			`Common attributes: GPUs, CUDADeviceName, Cpus, Memory (MiB), TotalCpus, ` +
+			`Common attributes: TotalGPUs (the machine's GPUs), TotalSlotGPUs (this slot's), GPUs (free on a ` +
+			`partitionable slot), GPUs_DeviceName (GPU model; CUDADeviceName on older pools), Cpus, Memory (MiB), TotalCpus, ` +
 			`TotalMemory, OpSys, Arch, SlotType, State, Activity, Machine.`,
 		schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"constraint": {
 					"type": "string",
-					"description": "Optional ClassAd filter (e.g. 'GPUs > 0' or 'CUDADeviceName == \"NVIDIA A100\"'). Pool-wide; not user-scoped."
+					"description": "Optional ClassAd filter (e.g. 'TotalSlotGPUs > 0' or 'GPUs_DeviceName == \"NVIDIA A100-SXM4-80GB\"'). Pool-wide; not user-scoped."
 				},
 				"summarize": {
 					"type": "boolean",
@@ -105,8 +106,8 @@ func (s *Handler) toolQuerySlots() chat.Tool {
 					"TotalCpus", "TotalMemory", "TotalDisk", "TotalGpus",
 					"OpSys", "OpSysAndVer", "Arch",
 					"State", "Activity",
-					"GPUs", "AssignedGPUs",
-					"CUDADeviceName", "CUDACapability", "CUDAGlobalMemoryMb", "CUDADriverVersion",
+					"GPUs", "AssignedGPUs", "TotalSlotGPUs",
+					"GPUs_DeviceName", "CUDADeviceName", "CUDACapability", "CUDAGlobalMemoryMb", "CUDADriverVersion",
 				},
 			})
 			if err != nil {
@@ -170,7 +171,7 @@ func mentionsSlotType(constraint string) bool {
 //   - Total CPU / memory uses TotalCpus / TotalMemory when present
 //     (machine-wide), falling back to per-slot Cpus / Memory.
 //   - GPU counts come from GPUs (per slot); the gpu_models breakdown
-//     uses CUDADeviceName when published.
+//     uses GPUs_DeviceName, or CUDADeviceName on older startds.
 func summarizeSlotAds(ads []*classad.ClassAd, constraint string) map[string]any {
 	machineSeen := map[string]bool{}
 	gpuModels := map[string]int{}
@@ -199,6 +200,8 @@ func summarizeSlotAds(ads []*classad.ClassAd, constraint string) map[string]any 
 				}
 				if v, ok := readInt(ad, "TotalGpus"); ok {
 					totalGPUs += v
+				} else if v, ok := readInt(ad, "TotalSlotGPUs"); ok {
+					totalGPUs += v
 				} else if v, ok := readInt(ad, "GPUs"); ok {
 					totalGPUs += v
 				}
@@ -210,7 +213,7 @@ func summarizeSlotAds(ads []*classad.ClassAd, constraint string) map[string]any 
 		if v, ok := readString(ad, "Arch"); ok && v != "" {
 			archBreakdown[v]++
 		}
-		if model, ok := readString(ad, "CUDADeviceName"); ok && model != "" {
+		if model := slotGPUModel(ad); model != "" {
 			// Some pools publish a comma-joined list when the slot has
 			// multiple identical GPUs ("Tesla V100, Tesla V100"); split
 			// so each GPU is counted once.
@@ -297,7 +300,7 @@ func summarizeSlotForChat(ad *classad.ClassAd) map[string]any {
 	if v, ok := readInt(ad, "GPUs"); ok && v != 0 {
 		out["gpus"] = v
 	}
-	if v, ok := readString(ad, "CUDADeviceName"); ok && v != "" {
+	if v := slotGPUModel(ad); v != "" {
 		out["gpu_model"] = v
 	}
 	if v, ok := readString(ad, "OpSys"); ok && v != "" {
@@ -313,4 +316,16 @@ func summarizeSlotForChat(ad *classad.ClassAd) map[string]any {
 		out["activity"] = v
 	}
 	return out
+}
+
+// slotGPUModel is the slot's GPU model name. Current startds publish it as
+// GPUs_DeviceName and no longer publish CUDADeviceName (ap40's GPU slots
+// carry only the former); older ones publish only CUDADeviceName.
+func slotGPUModel(ad *classad.ClassAd) string {
+	for _, attr := range []string{"GPUs_DeviceName", "CUDADeviceName"} {
+		if v, ok := readString(ad, attr); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }

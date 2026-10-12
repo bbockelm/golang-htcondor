@@ -11,13 +11,19 @@
 //
 // The three controls are all sticky, because they describe how somebody
 // works rather than what they are looking at this minute: the window,
-// the granularity, and whether to read run-attempt history.
+// the granularity, and whether to read run-attempt history. The
+// expression filter is not: it is a question about some jobs, asked now.
+//
+// The chat panel is wired up the way /archive's is, with a server-side
+// analyze_issues tool that reads the same answer this page shows and a
+// set_constraint hook that applies an expression here.
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { api, ApiError, type IssueTimings, type IssuesResponse } from '@/lib/api';
 import { IssueSectionPanel } from '@/components/IssueSection';
+import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 import {
   ISSUE_WINDOWS,
@@ -42,15 +48,19 @@ export default function IssuesPage() {
   const [windowSeconds, setWindowSeconds] = useIssueWindow();
   const [granularity, setGranularity] = useIssueGranularity();
   const [includeEnded, setIncludeEnded] = useIssueIncludeEnded();
+  // The expression filter: the box's text, and what was applied.
+  const [exprInput, setExprInput] = useState('');
+  const [constraint, setConstraint] = useState('');
 
   const { data, isLoading, isFetching, error } = useQuery<IssuesResponse, Error>({
-    queryKey: ['issues', scope, windowSeconds, granularity, includeEnded],
+    queryKey: ['issues', scope, windowSeconds, granularity, includeEnded, constraint],
     queryFn: () =>
       api.issues({
         window_seconds: windowSeconds,
         granularity,
         include_ended: includeEnded,
         owned_by_me: ownedByMe,
+        constraint: constraint || undefined,
       }),
     refetchInterval: REFRESH_MS,
     // Moving the slider should redraw rather than blank the page: the
@@ -62,6 +72,52 @@ export default function IssuesPage() {
 
   const nothingWrong =
     !!data && data.sections.every((s) => s.clusters.length === 0);
+
+  // A rejected expression is a typo, not an outage: reported next to the
+  // input rather than as "could not work out what is going wrong".
+  const exprError =
+    constraint && error instanceof ApiError && error.status === 400 ? error.message : null;
+
+  const applyConstraint = (c: string) => {
+    const v = c.trim();
+    setExprInput(v);
+    setConstraint(v);
+  };
+
+  const { data: chatInfo } = useQuery({
+    queryKey: ['chat-info'],
+    queryFn: api.chat.info,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const chatVisible = !!chatInfo?.enabled;
+
+  // === KEEP IN SYNC WITH webapi/httpserver/handlers_chat_tools.go (issuesPageInstructions) ===
+  // The server's instructions tell the assistant what this page shows and
+  // which of these hooks exist. Adding or removing a hook, a control or a
+  // filter here means updating that text.
+  const chatHooks = useMemo<Record<string, ToolHandler>>(
+    () => ({
+      set_constraint: (input) => {
+        const c = typeof input.constraint === 'string' ? input.constraint.trim() : '';
+        setExprInput(c);
+        setConstraint(c);
+        return { ok: true, applied_constraint: c };
+      },
+    }),
+    [],
+  );
+
+  const pageContext = issuesChatContext({
+    ownedByMe,
+    windowSeconds,
+    granularity,
+    includeEnded,
+    constraint,
+    exprError,
+    data,
+    loading: isLoading,
+  });
 
   return (
     <div className="space-y-4">
@@ -78,6 +134,17 @@ export default function IssuesPage() {
         )}
       </div>
 
+      <ChatPanel
+        visible={chatVisible}
+        page="issues"
+        pageContext={pageContext}
+        hooks={chatHooks}
+        confirmableTools={[]}
+        headerLabel="Issues assistant"
+        togglerLabel="Ask about these problems"
+        pageHelp={`Ask things like "what is the biggest problem right now?", "is this one user or a site?", or "show only jobs that asked for a GPU".`}
+      />
+
       <Controls
         windowSeconds={windowSeconds}
         onWindow={setWindowSeconds}
@@ -87,7 +154,19 @@ export default function IssuesPage() {
         onIncludeEnded={setIncludeEnded}
       />
 
-      {error && (
+      <ExpressionFilter
+        input={exprInput}
+        onInput={setExprInput}
+        applied={constraint}
+        onApply={applyConstraint}
+      />
+      {exprError && (
+        <p className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+          {exprError}
+        </p>
+      )}
+
+      {error && !exprError && (
         <p className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           Could not work out what is going wrong:{' '}
           {error instanceof ApiError ? error.message : String(error)}
@@ -115,7 +194,8 @@ export default function IssuesPage() {
 
       {nothingWrong && (
         <p className="rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-600">
-          Nothing held and no failed run attempts in this window.
+          Nothing held and no failed run attempts in this window
+          {constraint ? ' among jobs matching the expression' : ''}.
         </p>
       )}
 
@@ -139,6 +219,107 @@ export default function IssuesPage() {
         </p>
       )}
     </div>
+  );
+}
+
+// issuesChatContext tells the assistant what this page is showing: the
+// settings it should repeat to analyze_issues, and the headline numbers
+// so it can answer "why is this empty?" without a call.
+function issuesChatContext({
+  ownedByMe,
+  windowSeconds,
+  granularity,
+  includeEnded,
+  constraint,
+  exprError,
+  data,
+  loading,
+}: {
+  ownedByMe: boolean;
+  windowSeconds: number;
+  granularity: number;
+  includeEnded: boolean;
+  constraint: string;
+  exprError: string | null;
+  data: IssuesResponse | undefined;
+  loading: boolean;
+}): string {
+  const lines = [
+    `Scope: ${ownedByMe ? "the user's own jobs" : "every user's jobs"} (everyone=${!ownedByMe}).`,
+    `Window: last ${windowSeconds / 3600} hours (window_hours=${windowSeconds / 3600}).`,
+    `Detail: ${granularity} (granularity=${granularity}).`,
+    `Include problems that have already ended: ${includeEnded ? 'yes' : 'no'} (include_ended=${includeEnded}).`,
+    constraint ? `Expression filter: ${constraint}` : 'Expression filter: none.',
+  ];
+  if (exprError) lines.push(`The expression was rejected: ${exprError}`);
+  if (loading) lines.push('The page is still loading.');
+  if (data) {
+    if (data.sections.every((s) => s.clusters.length === 0)) {
+      lines.push('The page shows nothing held and no failed run attempts.');
+    }
+    for (const s of data.sections) {
+      const top = s.clusters
+        .slice(0, 3)
+        .map((c) => `${c.count} jobs/${c.users} users: ${(c.examples?.[0]?.message || c.template).slice(0, 120)}`)
+        .join(' | ');
+      lines.push(`${s.title}: ${s.total} jobs, ${s.users} users, ${s.clusters.length} problems. Largest: ${top}`);
+    }
+    if (data.truncated) lines.push('The read was truncated; counts are a floor.');
+    for (const n of data.notes ?? []) lines.push(`Note shown: ${n}`);
+  }
+  return lines.join('\n');
+}
+
+// ExpressionFilter narrows the page to some jobs' problems. Applied on
+// submit, like the other pages' expression filters: every half-typed
+// expression is a syntax error or a different query.
+function ExpressionFilter({
+  input,
+  onInput,
+  applied,
+  onApply,
+}: {
+  input: string;
+  onInput: (v: string) => void;
+  applied: string;
+  onApply: (v: string) => void;
+}) {
+  return (
+    <form
+      className="flex flex-wrap items-center gap-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onApply(input);
+      }}
+    >
+      <label htmlFor="issues-expr" className="text-xs uppercase tracking-wide text-gray-500">
+        Only jobs matching
+      </label>
+      <input
+        id="issues-expr"
+        type="text"
+        value={input}
+        onChange={(e) => onInput(e.target.value)}
+        placeholder={'ClassAd, e.g. RequestGPUs >= 1 && JobBatchName == "train"'}
+        spellCheck={false}
+        className="min-w-[20rem] flex-1 rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-sm"
+      />
+      <button
+        type="submit"
+        className="rounded-sm bg-brand-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
+      >
+        Apply
+      </button>
+      {applied && (
+        <button
+          type="button"
+          onClick={() => onApply('')}
+          className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+        >
+          Clear
+        </button>
+      )}
+    </form>
   );
 }
 

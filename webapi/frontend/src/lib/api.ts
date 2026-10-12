@@ -1341,6 +1341,9 @@ export const api = {
     granularity?: number;
     include_ended?: boolean;
     owned_by_me?: boolean;
+    // A ClassAd expression over job attributes; only matching jobs'
+    // problems are counted. The server scopes it to the caller's jobs.
+    constraint?: string;
   }): Promise<IssuesResponse> => {
     const qs = new URLSearchParams();
     if (params?.window_seconds !== undefined)
@@ -1351,6 +1354,7 @@ export const api = {
       qs.set("include_ended", String(params.include_ended));
     if (params?.owned_by_me !== undefined)
       qs.set("owned_by_me", String(params.owned_by_me));
+    if (params?.constraint) qs.set("constraint", params.constraint);
     const q = qs.toString();
     return fetchJSON(`${BASE}/issues${q ? "?" + q : ""}`);
   },
@@ -2355,6 +2359,11 @@ export interface IssuesResponse {
   computed_at: number;
   granularity: number;
   include_ended: boolean;
+  // Whose jobs these are as applied; a caller that may not see
+  // everyone's gets its own whatever it asked for.
+  owned_by_me?: boolean;
+  // The expression filter as applied, or absent.
+  constraint?: string;
   // How much time one slice of a cluster's timeline covers.
   bucket_seconds?: number;
   source?: string;

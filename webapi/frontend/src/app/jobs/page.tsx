@@ -339,6 +339,15 @@ export default function JobsPage() {
         setMode('text');
         return { ok: true, applied_query: q };
       },
+      set_constraint: (input) => {
+        // The expression the user would type into the filter's
+        // expression box and Apply; the server evaluates it.
+        const c = typeof input.constraint === 'string' ? input.constraint.trim() : '';
+        setExprInput(c);
+        setAppliedExpr(c);
+        setMode(c ? 'expr' : 'text');
+        return { ok: true, applied_constraint: c };
+      },
       expand_batch: (input) => {
         const cid = Number(input.cluster_id);
         if (!Number.isFinite(cid) || cid <= 0) {

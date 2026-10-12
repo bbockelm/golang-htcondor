@@ -128,6 +128,20 @@ test('the chat surface mounts without page errors', async ({ page }) => {
   expect(errors, 'chat surface raised page errors').toEqual([]);
 });
 
+// The newer pages carry the same assistant, gated only on chat/info: the
+// pill shows whatever the page's own data says, including nothing.
+for (const path of ['/issues', '/utilization', '/pool']) {
+  test(`${path} offers the chat assistant`, async ({ page }) => {
+    const errors = watchForErrors(page);
+    if (path === '/pool') {
+      await page.route('**/api/v1/collector/ads/**', (route) => route.fulfill({ json: { ads: [] } }));
+    }
+    await page.goto(path);
+    await expect(page.getByRole('button', { name: 'Open chat assistant' })).toBeVisible();
+    expect(errors, `${path} raised page errors`).toEqual([]);
+  });
+}
+
 // The dashboard's activity panels are fed by a separate half of the
 // response from the status tiles, and they render conditionally. A page
 // that fetched the response, drew the tiles, and dropped every activity
