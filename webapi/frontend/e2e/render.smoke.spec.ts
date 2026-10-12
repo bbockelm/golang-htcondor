@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import path from 'node:path';
 
 import { installApiFixtures } from './fixtures/api';
+import { SMOKE_NOW } from './fixtures/clock';
 
 // Fail-fast suite: does each page render against known-good data?
 //
@@ -247,7 +248,7 @@ async function openJobPage(
   await page.goto(`/jobs/${id}`);
 }
 
-const startedRecently = Math.floor(Date.now() / 1000) - 300;
+const startedRecently = SMOKE_NOW - 300;
 
 // A running DAGMan manager: scheduler universe, so the schedd refuses
 // GET_JOB_CONNECT_INFO for it (schedd.cpp:18673) and neither tail nor
@@ -451,8 +452,8 @@ const fanoutDagGraph = {
     { name: 'gather', group_id: 'gather', state: 'unready', source: 'status-file' },
   ],
   state_sources: ['status-file', 'queue'],
-  status_file_time: Math.floor(Date.now() / 1000) - 120,
-  fetched_at: new Date(Date.now() - 120_000).toISOString(),
+  status_file_time: SMOKE_NOW - 120,
+  fetched_at: new Date((SMOKE_NOW - 120) * 1000).toISOString(),
   took_ms: 1240,
 };
 
@@ -708,7 +709,7 @@ test('a job that has left the queue opens its archived record', async ({ page })
             Owner: 'e2e',
             JobStatus: 4,
             ExitCode: 0,
-            CompletionDate: Math.floor(Date.now() / 1000) - 120,
+            CompletionDate: SMOKE_NOW - 120,
             Cmd: '/bin/smoke-finished',
           },
         ],

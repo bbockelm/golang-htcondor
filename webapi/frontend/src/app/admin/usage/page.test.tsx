@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AdminUsageResponse, UsageRow } from '@/lib/api';
 
 const usage = vi.fn();
@@ -29,7 +29,10 @@ function row(name: string, over: Partial<UsageRow> = {}): UsageRow {
   };
 }
 
-const recent = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+// The page reads the clock for "5m ago", so it is fixed (see the
+// describe below): only Date, so react-query's timers still run.
+const NOW = Date.UTC(2026, 9, 14, 17, 0);
+const recent = new Date(NOW - 5 * 60 * 1000).toISOString();
 
 const response: AdminUsageResponse = {
   enabled: true,
@@ -58,7 +61,12 @@ async function renderPage() {
 }
 
 describe('admin usage page', () => {
-  beforeEach(() => usage.mockReset());
+  beforeEach(() => {
+    usage.mockReset();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
 
   it('says plainly when nothing is recorded', async () => {
     usage.mockResolvedValue({ enabled: false });

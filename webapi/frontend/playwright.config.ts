@@ -1,5 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
+import { SMOKE_LOCALE, SMOKE_TIMEZONE } from './e2e/fixtures/clock';
+
 // Two suites, deliberately different in what they trade away.
 //
 //   smoke  - the built static export with every /api/v1/* call answered
@@ -48,7 +50,14 @@ export default defineConfig({
   projects: [
     {
       name: suite,
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        // The smoke fixtures are fixed at one instant (e2e/fixtures/clock.ts)
+        // and the pages print clock times relative to it, so where that
+        // instant falls in the day has to be fixed too. The full suite
+        // runs against a real server and real time.
+        ...(suite === 'full' ? {} : { timezoneId: SMOKE_TIMEZONE, locale: SMOKE_LOCALE }),
+      },
       testMatch: suite === 'full' ? /.*\.full\.spec\.ts/ : /.*\.smoke\.spec\.ts/,
     },
   ],

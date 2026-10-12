@@ -19,6 +19,7 @@ import {
 import type { UtilJobSort } from '../../src/lib/utilization';
 import type { MetricsResponse } from '../../src/lib/metrics';
 import type { DrainEstimates } from '../../src/lib/drain';
+import { pinClock, SMOKE_NOW } from './clock';
 
 // Frozen sample responses for the smoke suite.
 //
@@ -33,12 +34,11 @@ import type { DrainEstimates } from '../../src/lib/drain';
 // This suite proves the pages render and bind data. Anything that
 // depends on the live contract belongs in the full suite.
 
-// Activity timestamps are relative to load time rather than frozen:
-// the panels render "3m ago", and a fixed 2024 epoch would render
-// "2y ago" on every row -- still a pass, but it stops looking like the
-// thing being tested. Nothing asserts the formatted age, only that the
-// rows bind.
-const minutesAgo = (m: number) => Math.floor(Date.now() / 1000) - m * 60;
+// Activity timestamps are relative to SMOKE_NOW, the instant the
+// browser's clock is pinned to (see ./clock.ts): the panels render "3m
+// ago", and a fixed 2024 epoch would render "2y ago" on every row --
+// still a pass, but it stops looking like the thing being tested.
+const minutesAgo = (m: number) => SMOKE_NOW - m * 60;
 
 export const dashboardActivityFixture: DashboardActivityResponse = {
   activity: {
@@ -58,7 +58,7 @@ export const dashboardActivityFixture: DashboardActivityResponse = {
   },
   goodput: {
     window_hours: 24,
-    since: Math.floor(Date.now() / 1000) - 24 * 3600,
+    since: SMOKE_NOW - 24 * 3600,
     succeeded: 120,
     failed: 8,
     unfinished: 1,
@@ -85,7 +85,7 @@ export const dashboardFixture: DashboardStats = {
 // rather than typed like the JSON fixtures: the point here is the
 // framing, which a typed object could not express.
 function activityStreamFixture(): string {
-  const at = Math.floor(Date.now() / 1000);
+  const at = SMOKE_NOW;
   const frame = (ev: Record<string, unknown>) => `event: activity\ndata: ${JSON.stringify(ev)}\n\n`;
   return (
     frame({ kind: 'started', cluster_id: 77, proc_id: 0, owner: 'e2e', at, detail: 'smoke-live-host' }) +
@@ -128,7 +128,7 @@ export const jobsFixture: JobListResponse = {
 // none of the row rendering.
 export const issuesFixture: IssuesResponse = {
   window_seconds: 86400,
-  computed_at: Math.floor(Date.now() / 1000),
+  computed_at: SMOKE_NOW,
   granularity: 0.5,
   include_ended: true,
   bucket_seconds: 3600,
@@ -151,21 +151,21 @@ export const issuesFixture: IssuesResponse = {
             { name: 'site', distinct: 2, top: [{ value: 'Smoke-Site', count: 8 }] },
           ],
           codes: [{ code: 21, subcode: 102, label: 'memory usage exceeded the request', count: 12 }],
-          last_seen: Math.floor(Date.now() / 1000) - 300,
+          last_seen: SMOKE_NOW - 300,
           timeline: [0, 0, 1, 3, 2, 0, 0, 0, 1, 4, 6, 2, 0, 0, 0, 0, 1, 1, 0, 0, 2, 3, 5, 1],
           examples: [
             {
               cluster_id: 12,
               proc_id: 0,
               owner: 'e2e',
-              at: Math.floor(Date.now() / 1000) - 300,
+              at: SMOKE_NOW - 300,
               message: 'Error from slot1_4@smoke-host.example.edu: memory usage exceeded request_memory',
             },
             {
               cluster_id: 12,
               proc_id: 1,
               owner: 'e2e',
-              at: Math.floor(Date.now() / 1000) - 600,
+              at: SMOKE_NOW - 600,
               message: 'Error from slot1_9@smoke-other.example.edu: memory usage exceeded request_memory',
             },
           ],
@@ -303,7 +303,7 @@ export const multiAPAccessPointsFixture: AccessPointsResponse = {
 // answer, so a page that asks renders its empty state. A test that wants
 // nodes routes its own (see pool.smoke.spec.ts).
 export const emptyDrainFixture: DrainEstimates = {
-  generated_at: new Date().toISOString(),
+  generated_at: new Date(SMOKE_NOW * 1000).toISOString(),
   age_seconds: 0,
   stale: false,
   estimates_available: true,
@@ -320,6 +320,9 @@ export const emptyDrainFixture: DrainEstimates = {
 };
 
 export async function installApiFixtures(page: Page, opts: { multiAP?: boolean } = {}) {
+  // Every timestamp here is relative to SMOKE_NOW, so the page has to be
+  // living at that instant too.
+  await pinClock(page);
   const table: Record<string, unknown> = {
     '/api/v1/whoami': { authenticated: true, user: 'e2e@test.htcondor.org' },
     '/api/v1/auth/me': sessionFixture,
@@ -336,7 +339,7 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
           Owner: 'e2e',
           JobStatus: 4,
           ExitCode: 127,
-          CompletionDate: Math.floor(Date.now() / 1000) - 600,
+          CompletionDate: SMOKE_NOW - 600,
           JobBatchName: 'smoke-archived-batch',
         },
       ],
@@ -379,7 +382,7 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
           Owner: 'e2e',
           JobStatus: 4,
           ExitCode: 0,
-          CompletionDate: Math.floor(Date.now() / 1000) - 600,
+          CompletionDate: SMOKE_NOW - 600,
           JobBatchName: 'smoke-ap1-archived',
         },
       ],
