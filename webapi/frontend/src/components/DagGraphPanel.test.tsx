@@ -67,6 +67,14 @@ describe('DagGraphPanel', () => {
     expect(dagGraph).toHaveBeenLastCalledWith('90.0', { refresh: true });
   });
 
+  it('links to the batch page only when given one', () => {
+    const { unmount } = render(<DagGraphPanel jobId="90.0" batchHref="/batches/90" />);
+    expect(screen.getByRole('link', { name: 'Open batch page' })).toHaveAttribute('href', '/batches/90');
+    unmount();
+    render(<DagGraphPanel jobId="90.0" />);
+    expect(screen.queryByRole('link', { name: 'Open batch page' })).toBeNull();
+  });
+
   it('shows the reason when the workflow has nothing to draw', async () => {
     dagGraph.mockRejectedValue(new ApiError(409, 'This workflow has not written its DAG file yet.'));
     render(<DagGraphPanel jobId="90.0" />);

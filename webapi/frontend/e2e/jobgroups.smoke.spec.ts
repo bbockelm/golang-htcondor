@@ -63,7 +63,7 @@ test("a job's page links its batch, its workflow and the jobs its estimate is ba
   await openJobPage(page, '81291.4', runningAd);
 
   const related = page.getByTestId('job-related');
-  await expect(related.getByRole('link', { name: 'Batch 81291' })).toHaveAttribute('href', /\/jobs\?constraint=ClusterId/);
+  await expect(related.getByRole('link', { name: 'Batch 81291' })).toHaveAttribute('href', '/batches/81291');
   await expect(related.getByTestId('related-utilization')).toHaveAttribute('href', '/utilization?days=30&w=wf-blast');
 
   // The estimate's basis opens the jobs it names.
@@ -93,4 +93,21 @@ test('a job whose workflow has nothing to show offers no workflow link', async (
   // The Related row's own way in.
   await related.getByRole('button', { name: 'Similar jobs' }).click();
   await expect(page.getByTestId('similar-jobs')).toBeVisible();
+});
+
+// A DAG node's batch is its whole DAG, named by the root DAGMan cluster
+// the way the /jobs table names it.
+test("a DAG node's page links its DAG's batch", async ({ page }) => {
+  await page.route('**/api/v1/utilization/for-job/**', (route) => route.fulfill({ status: 404, json: {} }));
+  await openJobPage(page, '81295.0', {
+    ...runningAd,
+    ClusterId: 81295,
+    ProcId: 0,
+    JobBatchName: 'pipeline.dag+81290',
+    DAGManJobId: 81293,
+  });
+  await expect(page.getByTestId('job-related').getByRole('link', { name: 'Batch 81290' })).toHaveAttribute(
+    'href',
+    '/batches/81290',
+  );
 });

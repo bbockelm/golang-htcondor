@@ -474,6 +474,10 @@ test('a DAGMan manager draws its collapsed workflow on request', async ({ page }
   await openJobPage(page, '90.0', fanoutManagerAd);
 
   await expect(page.getByRole('heading', { name: 'Workflow graph' })).toBeVisible();
+  // Its batch page, which is this workflow's, beside the graph.
+  await expect(
+    page.getByTestId('workflow-graph-panel').getByRole('link', { name: 'Open batch page' }),
+  ).toHaveAttribute('href', '/batches/90');
 
   // Explicit load: nothing is drawn until the user asks.
   const svg = page.locator('svg[role="img"]');

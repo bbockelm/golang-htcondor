@@ -3,7 +3,9 @@ import type { ClassAd } from '@/lib/api';
 import {
   adsInBatches,
   applyBatchFilter,
+  batchIDOfJob,
   batchKey,
+  batchPagePath,
   filterAdsByStatus,
   groupIntoBatches,
   jobTiming,
@@ -527,5 +529,27 @@ describe('jobTiming', () => {
   it('has nothing to say about other states or a missing time', () => {
     expect(jobTiming({ JobStatus: 5, EnteredCurrentStatus: 5000 })).toBeUndefined();
     expect(jobTiming({ JobStatus: 2 })).toBeUndefined();
+  });
+});
+
+describe('batch page links', () => {
+  it('gives each batch its page by its id, and none for a batch read from several access points', () => {
+    const [b] = groupIntoBatches([{ ClusterId: 7, ProcId: 0, JobStatus: 1, Owner: 'a', JobBatchName: 'x' }]);
+    expect(batchPagePath(b)).toBe('/batches/7');
+    expect(batchPagePath({ batchID: 7, schedd: 'ap1.example.org' })).toBeUndefined();
+  });
+
+  it('finds the batch of a DAG node, a DAGMan job and a plain job as the table groups them', () => {
+    const dag: ClassAd[] = [
+      { ClusterId: 100, ProcId: 0, JobStatus: 2, Owner: 'c', Cmd: 'condor_dagman', JobBatchName: 'foo.dag+100' },
+      { ClusterId: 104, ProcId: 0, JobStatus: 2, Owner: 'c', JobBatchName: 'foo.dag+100', DAGManJobId: 100 },
+      // A nested sub-DAG's node: its own DAGManJobId, the root's suffix.
+      { ClusterId: 110, ProcId: 0, JobStatus: 1, Owner: 'c', JobBatchName: 'foo.dag+100', DAGManJobId: 105 },
+    ];
+    const [batch] = groupIntoBatches(dag);
+    for (const ad of dag) expect(batchIDOfJob(ad)).toBe(batch.batchID);
+    expect(batchIDOfJob({ ClusterId: 12, ProcId: 3 })).toBe(12);
+    expect(batchIDOfJob({ ClusterId: 12, JobBatchName: 'named' })).toBe(12);
+    expect(batchIDOfJob({})).toBeUndefined();
   });
 });

@@ -24,7 +24,7 @@ import {
   type SortState,
 } from '@/components/SortableTable';
 import { BatchUsagePanel } from '@/components/BatchUsagePanel';
-import { RowMenu } from '@/components/RowMenu';
+import { RowMenu, type RowMenuItem } from '@/components/RowMenu';
 import { utilizationHref } from '@/lib/utilizationLink';
 import { useCards } from '@/lib/useNarrow';
 import { BatchProgressBar } from '@/components/BatchProgressBar';
@@ -66,6 +66,7 @@ import {
   DISPLAY_STATUS_LABEL,
   DISPLAY_STATUS_ORDER,
   batchKey,
+  batchPagePath,
   type Batch,
   type BatchJob,
   type BatchKey,
@@ -563,6 +564,7 @@ function BatchRow({
     () => (estimates ? batch.jobs.map((j) => timedJob(j, estimates)) : undefined),
     [batch.jobs, estimates],
   );
+  const page = multiAP ? undefined : batchPagePath(batch);
   return (
     <>
       <tr
@@ -576,12 +578,25 @@ function BatchRow({
         <td className="px-3 py-2 font-mono text-xs">
           {/* A long batch name would otherwise wrap at every hyphen and
               squeeze the status pills into a column. */}
-          <span
-            className="inline-block max-w-44 truncate align-bottom text-gray-900"
-            title={batch.name}
-          >
-            {batch.name}
-          </span>
+          {page ? (
+            // The name goes to the batch's page; the rest of the row
+            // still opens it in place.
+            <Link
+              href={page}
+              onClick={(e) => e.stopPropagation()}
+              className="inline-block max-w-44 truncate align-bottom text-brand-700 hover:underline"
+              title={batch.name}
+            >
+              {batch.name}
+            </Link>
+          ) : (
+            <span
+              className="inline-block max-w-44 truncate align-bottom text-gray-900"
+              title={batch.name}
+            >
+              {batch.name}
+            </span>
+          )}
           {batch.isDag && (
             <span
               className="ml-2 rounded-sm bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700"
@@ -685,15 +700,7 @@ function BatchRow({
                 title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
               />
             )}
-            <RowMenu
-              label={`More actions for batch ${batch.name}`}
-              items={[
-                {
-                  label: 'Resource utilization',
-                  href: utilizationHref({ constraint: batch.selectConstraint, schedd: batch.schedd }),
-                },
-              ]}
-            />
+            <RowMenu label={`More actions for batch ${batch.name}`} items={batchMenuItems(batch, multiAP)} />
           </div>
         </td>
       </tr>
@@ -748,6 +755,27 @@ type BatchRowProps = {
   estimates?: RuntimeEstimatesState;
 };
 
+// batchMenuItems is a batch's ⋯ menu, the same in the table and on cards.
+// Multi-AP mode has no batch pages, even for a batch with no schedd.
+function batchMenuItems(batch: Batch, multiAP: boolean | undefined): RowMenuItem[] {
+  const page = multiAP ? undefined : batchPagePath(batch);
+  return [
+    ...(page ? [{ label: 'Open batch page', href: page }] : []),
+    {
+      label: 'Resource utilization',
+      href: utilizationHref({ constraint: batch.selectConstraint, schedd: batch.schedd }),
+    },
+  ];
+}
+
+function DagBadge() {
+  return (
+    <span className="ml-2 rounded-sm bg-purple-100 px-1.5 py-0.5 align-middle font-sans text-[10px] font-semibold uppercase tracking-wide text-purple-700">
+      DAG
+    </span>
+  );
+}
+
 // isControl says a tap landed on something with its own job -- a link, a
 // button, the menu -- rather than on the card, which a tap opens.
 function isControl(target: EventTarget | null): boolean {
@@ -778,6 +806,7 @@ function BatchCard(props: BatchRowProps) {
     [batch.jobs, estimates],
   );
   const command = batch.cmd ? (batch.args ? `${batch.cmd} ${batch.args}` : batch.cmd) : undefined;
+  const page = multiAP ? undefined : batchPagePath(batch);
   return (
     <li
       data-testid="batch-card"
@@ -788,24 +817,44 @@ function BatchCard(props: BatchRowProps) {
     >
       <div className="space-y-2 p-3">
         <div className="flex items-start gap-2">
-          <button
-            type="button"
-            onClick={onToggle}
-            aria-expanded={expanded}
-            className="flex min-h-9 min-w-0 flex-1 items-start gap-2 text-left"
-          >
-            <span className="mt-0.5 text-gray-400">
-              <DisclosureCaret expanded={expanded} />
-            </span>
-            <span className="min-w-0 break-words font-mono text-sm font-medium text-gray-900">
-              {batch.name}
-              {batch.isDag && (
-                <span className="ml-2 rounded-sm bg-purple-100 px-1.5 py-0.5 align-middle font-sans text-[10px] font-semibold uppercase tracking-wide text-purple-700">
-                  DAG
+          {page ? (
+            // The name goes to the batch's page, so the caret alone is
+            // the button; a tap anywhere else on the card still opens it.
+            <div className="flex min-h-9 min-w-0 flex-1 items-start gap-2">
+              <button
+                type="button"
+                onClick={onToggle}
+                aria-expanded={expanded}
+                aria-label={`Jobs in batch ${batch.name}`}
+                className="-m-2 flex min-h-9 min-w-9 shrink-0 items-start justify-center p-2 text-gray-400"
+              >
+                <span className="mt-0.5">
+                  <DisclosureCaret expanded={expanded} />
                 </span>
-              )}
-            </span>
-          </button>
+              </button>
+              <span className="min-w-0 break-words font-mono text-sm font-medium">
+                <Link href={page} className="text-brand-700 hover:underline">
+                  {batch.name}
+                </Link>
+                {batch.isDag && <DagBadge />}
+              </span>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onToggle}
+              aria-expanded={expanded}
+              className="flex min-h-9 min-w-0 flex-1 items-start gap-2 text-left"
+            >
+              <span className="mt-0.5 text-gray-400">
+                <DisclosureCaret expanded={expanded} />
+              </span>
+              <span className="min-w-0 break-words font-mono text-sm font-medium text-gray-900">
+                {batch.name}
+                {batch.isDag && <DagBadge />}
+              </span>
+            </button>
+          )}
           {/* Actions in the card's top corner, where a thumb finds them,
               rather than a row of their own. */}
           <div className="flex shrink-0 items-center gap-2">
@@ -816,16 +865,7 @@ function BatchCard(props: BatchRowProps) {
                 title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
               />
             )}
-            <RowMenu
-              touch
-              label={`More actions for batch ${batch.name}`}
-              items={[
-                {
-                  label: 'Resource utilization',
-                  href: utilizationHref({ constraint: batch.selectConstraint, schedd: batch.schedd }),
-                },
-              ]}
-            />
+            <RowMenu touch label={`More actions for batch ${batch.name}`} items={batchMenuItems(batch, multiAP)} />
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">

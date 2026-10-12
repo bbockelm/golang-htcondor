@@ -101,7 +101,7 @@ describe('Related', () => {
     vi.spyOn(api.jobs, 'utilizationWorkflow').mockResolvedValue(forJobFixture('12.0'));
     const onSimilar = vi.fn();
     wrap(<JobRelated jobID="12.0" cluster={12} archived={false} onSimilar={onSimilar} />);
-    expect(screen.getByRole('link', { name: 'Batch 12' })).toHaveAttribute('href', batchHref(12, false));
+    expect(screen.getByRole('link', { name: 'Batch 12' })).toHaveAttribute('href', '/batches/12');
     const util = await screen.findByTestId('related-utilization');
     expect(util).toHaveAttribute('href', '/utilization?days=30&w=wf-blast');
     fireEvent.click(screen.getByRole('button', { name: 'Similar jobs' }));
@@ -123,7 +123,22 @@ describe('Related', () => {
     wrap(<JobRelated jobID="12.0" cluster={12} archived onSimilar={() => {}} />);
     await waitFor(() => expect(spy).toHaveBeenCalled());
     expect(screen.queryByTestId('related-utilization')).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Batch 12' })).toHaveAttribute('href', batchHref(12, true));
+    // The batch page reads the archive too.
+    expect(screen.getByRole('link', { name: 'Batch 12' })).toHaveAttribute('href', '/batches/12');
+  });
+
+  it("links a DAG node to its DAG's batch, not its own cluster", () => {
+    vi.spyOn(api.auth, 'me').mockResolvedValue(session);
+    vi.spyOn(api.jobs, 'utilizationWorkflow').mockRejectedValue(new ApiError(404, 'none'));
+    wrap(<JobRelated jobID="104.0" cluster={104} batchID={100} archived={false} onSimilar={() => {}} />);
+    expect(screen.getByRole('link', { name: 'Batch 100' })).toHaveAttribute('href', '/batches/100');
+  });
+
+  it('lists the cluster in multi-AP mode, which has no batch pages', () => {
+    vi.spyOn(api.auth, 'me').mockResolvedValue(session);
+    vi.spyOn(api.jobs, 'utilizationWorkflow').mockRejectedValue(new ApiError(501, 'multi-AP'));
+    wrap(<JobRelated jobID="104.0@ap1.example.org" cluster={104} batchID={100} archived={false} onSimilar={() => {}} />);
+    expect(screen.getByRole('link', { name: 'Batch 104' })).toHaveAttribute('href', batchHref(104, false));
   });
 });
 

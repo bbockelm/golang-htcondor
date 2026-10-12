@@ -341,6 +341,25 @@ export function batchKey(b: Batch): BatchKey {
   return b.schedd ? `${b.schedd}\u0000${b.batchID}` : b.batchID;
 }
 
+// batchPagePath is a batch's own page, /batches/<id>. The server
+// resolves any of a batch's clusters to it, but it serves a single access
+// point only: a batch read in multi-AP mode (schedd set) has no page.
+export function batchPagePath(b: Pick<Batch, 'batchID' | 'schedd'>): string | undefined {
+  if (b.schedd) return undefined;
+  return `/batches/${b.batchID}`;
+}
+
+// batchIDOfJob is the id of the batch a job belongs to, as
+// groupIntoBatches would give it where the job's whole batch is in
+// view: a DAG's root DAGMan cluster, from the JobBatchName suffix, for
+// every job of the DAG; otherwise the job's own cluster, which the batch
+// page resolves to its batch.
+export function batchIDOfJob(ad: ClassAd): number | undefined {
+  const dag = str(ad.JobBatchName)?.match(DAG_SUFFIX);
+  if (dag) return Number(dag[1]);
+  return num(ad.ClusterId);
+}
+
 // adsInBatches keeps the ads whose cluster one of batches covers, for a
 // summary that totals exactly what a filtered table shows. A batch can
 // span many clusters (a DAG folds a whole tree into one row), so every

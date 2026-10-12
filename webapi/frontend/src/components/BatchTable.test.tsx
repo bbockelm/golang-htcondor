@@ -147,6 +147,53 @@ describe('BatchTable in multi-AP mode', () => {
   });
 });
 
+describe('BatchTable batch page links', () => {
+  const dag: ClassAd[] = [
+    { ClusterId: 100, ProcId: 0, JobStatus: 2, Owner: 'carol', Cmd: 'condor_dagman', JobBatchName: 'foo.dag+100' },
+    { ClusterId: 104, ProcId: 0, JobStatus: 2, Owner: 'carol', JobBatchName: 'foo.dag+100', DAGManJobId: 100 },
+  ];
+
+  it('links the batch name to its page, by the batch id', () => {
+    table();
+    expect(screen.getByRole('link', { name: 'training' })).toHaveAttribute('href', '/batches/10');
+    expect(screen.getByRole('link', { name: 'sim' })).toHaveAttribute('href', '/batches/11');
+  });
+
+  it('links a DAG by its root DAGMan cluster', () => {
+    table({ batches: groupIntoBatches(dag) });
+    expect(screen.getByRole('link', { name: 'foo.dag' })).toHaveAttribute('href', '/batches/100');
+  });
+
+  it('follows the name without opening the row; the rest of the row still opens it', () => {
+    const setExpanded = vi.fn();
+    table({ setExpanded });
+    fireEvent.click(screen.getByRole('link', { name: 'sim' }));
+    expect(setExpanded).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('/bin/sim'));
+    expect(setExpanded).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers the batch page first in the actions menu', () => {
+    table();
+    fireEvent.click(screen.getByRole('button', { name: 'More actions for batch training' }));
+    const items = screen.getAllByRole('menuitem');
+    expect(items.map((i) => i.textContent)).toEqual(['Open batch page', 'Resource utilization']);
+    expect(items[0]).toHaveAttribute('href', '/batches/10');
+  });
+
+  it('has no batch page in multi-AP mode', () => {
+    const multi: ClassAd[] = [
+      { ClusterId: 1, ProcId: 0, JobStatus: 5, Owner: 'alice', schedd: 'ap1.example.org', job_id: '1.0@ap1.example.org' },
+    ];
+    table({ batches: groupIntoBatches(multi), multiAP: true });
+    expect(screen.queryByRole('link', { name: '1' })).toBeNull();
+    expect(document.querySelector('a[href^="/batches/"]')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /More actions for batch/ }));
+    expect(screen.queryByRole('menuitem', { name: 'Open batch page' })).toBeNull();
+    expect(screen.getByRole('menuitem', { name: 'Resource utilization' })).toBeTruthy();
+  });
+});
+
 describe('BatchTable progress', () => {
   const queue: ClassAd[] = [
     // 10 submitted, 3 finished: 5 running, 2 held left.
@@ -330,7 +377,7 @@ describe('BatchTable row actions menu', () => {
     table();
     const button = screen.getByRole('button', { name: /More actions for batch sim/ });
     fireEvent.keyDown(button, { key: 'ArrowDown' });
-    const item = screen.getByRole('menuitem', { name: 'Resource utilization' });
+    const item = screen.getByRole('menuitem', { name: 'Open batch page' });
     expect(document.activeElement).toBe(item);
     fireEvent.keyDown(item, { key: 'Escape' });
     expect(screen.queryByRole('menu')).toBeNull();
@@ -508,6 +555,20 @@ describe('BatchTable as cards', () => {
     expect(setExpanded).toHaveBeenCalledTimes(1);
   });
 
+  it('links the name to the batch page, and the caret still opens the card', () => {
+    const setExpanded = vi.fn();
+    table({ setExpanded });
+    const card = screen.getAllByTestId('batch-card').find((c) => c.textContent?.includes('training'))!;
+    const link = within(card).getByRole('link', { name: 'training' });
+    expect(link).toHaveAttribute('href', '/batches/10');
+    fireEvent.click(link);
+    expect(setExpanded).not.toHaveBeenCalled();
+    fireEvent.click(within(card).getByRole('button', { name: 'Jobs in batch training' }));
+    expect(setExpanded).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(card).getByRole('button', { name: 'More actions for batch training' }));
+    expect(within(card).getByRole('menuitem', { name: 'Open batch page' })).toHaveAttribute('href', '/batches/10');
+  });
+
   it('shows the hold reason in the held view, and its jobs with Release when open', () => {
     const batches = groupIntoBatches(held);
     table({ batches, detail: 'hold', expanded: new Set(batches.map((b) => b.batchID)) });
@@ -543,5 +604,6 @@ describe('BatchTable as cards', () => {
     expect(screen.queryByTitle(/Remove/)).toBeNull();
     expect(screen.queryByText('Release')).toBeNull();
     expect(screen.getByRole('button', { name: /More actions for batch/ })).toBeTruthy();
+    expect(document.querySelector('a[href^="/batches/"]')).toBeNull();
   });
 });

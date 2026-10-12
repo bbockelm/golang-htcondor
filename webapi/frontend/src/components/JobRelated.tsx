@@ -9,15 +9,21 @@ import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { batchHref, utilizationHrefForJob } from '@/lib/similar';
+import { batchPagePath } from '@/lib/batches';
 
 export function JobRelated({
   jobID,
   cluster,
+  batchID,
   archived,
   onSimilar,
 }: {
   jobID: string;
   cluster: number | undefined;
+  // The job's batch (batchIDOfJob): a DAG's root cluster for each of its
+  // jobs. Without it the job's own cluster, which the batch page
+  // resolves to the same batch.
+  batchID?: number;
   archived: boolean;
   // Opens and scrolls to the page's similar-jobs section.
   onSimilar: () => void;
@@ -33,12 +39,18 @@ export function JobRelated({
   });
   const utilHref = utilizationHrefForJob(workflow, session?.username);
   const linkCls = 'text-brand-700 hover:underline';
+  // Batch pages serve a single access point; a multi-AP job id
+  // (cluster.proc@schedd) lists its cluster instead.
+  const multiAP = jobID.includes('@');
+  const batch = multiAP ? cluster : (batchID ?? cluster);
+  const batchLink =
+    batch === undefined ? undefined : multiAP ? batchHref(batch, archived) : batchPagePath({ batchID: batch });
   return (
     <nav aria-label="Related" className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm" data-testid="job-related">
       <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Related</span>
-      {cluster !== undefined && (
-        <Link href={batchHref(cluster, archived)} className={linkCls}>
-          Batch {cluster}
+      {batchLink && (
+        <Link href={batchLink} className={linkCls}>
+          Batch {batch}
         </Link>
       )}
       {utilHref && workflow && (

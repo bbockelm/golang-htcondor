@@ -244,8 +244,18 @@ export function dominantDagState(
 }
 
 // DagGraphPanel is the panel: explicit load, one Refresh button, no timer
-// (see the block comment above for why).
-export function DagGraphPanel({ jobId, schedd }: { jobId: string; schedd?: string }) {
+// (see the block comment above for why). batchHref, when given, links the
+// heading row to the workflow's batch page -- for the DAGMan job's own
+// page, not for the batch page itself.
+export function DagGraphPanel({
+  jobId,
+  schedd,
+  batchHref,
+}: {
+  jobId: string;
+  schedd?: string;
+  batchHref?: string;
+}) {
   const id = schedd && !jobId.includes('@') ? `${jobId}@${schedd}` : jobId;
   const [data, setData] = useState<DagGraphResponse | null>(null);
   // notice vs error: a 409 is the server telling us this workflow has
@@ -297,24 +307,31 @@ export function DagGraphPanel({ jobId, schedd }: { jobId: string; schedd?: strin
     >
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-sm font-medium text-gray-900">Workflow graph</h2>
-        <button
-          type="button"
-          onClick={() => load(loaded)}
-          disabled={loading}
-          // A hint, not body text: the panel is explicit-load, and the
-          // only thing worth saying about Refresh is that it is the
-          // slow one.
-          title={loaded ? 'Re-read this workflow (slow)' : undefined}
-          className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-        >
-          {loading
-            ? loaded
-              ? 'Refreshing…'
-              : 'Loading…'
-            : loaded
-              ? 'Refresh'
-              : 'Load graph'}
-        </button>
+        <div className="flex items-center gap-3">
+          {batchHref && (
+            <Link href={batchHref} className="text-xs text-brand-700 hover:underline">
+              Open batch page
+            </Link>
+          )}
+          <button
+            type="button"
+            onClick={() => load(loaded)}
+            disabled={loading}
+            // A hint, not body text: the panel is explicit-load, and the
+            // only thing worth saying about Refresh is that it is the
+            // slow one.
+            title={loaded ? 'Re-read this workflow (slow)' : undefined}
+            className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {loading
+              ? loaded
+                ? 'Refreshing…'
+                : 'Loading…'
+              : loaded
+                ? 'Refresh'
+                : 'Load graph'}
+          </button>
+        </div>
       </div>
 
       <p className="text-xs text-gray-500">

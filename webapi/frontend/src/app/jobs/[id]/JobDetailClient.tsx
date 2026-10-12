@@ -18,7 +18,7 @@ import { useResolvedParams } from '@/lib/useResolvedParams';
 import { humanDuration } from '@/lib/duration';
 import { useMultiAPMode } from '@/lib/multiap';
 import { summarizeRequirements, standardLabels } from '@/lib/requirements';
-import { coresUsed, jobTiming } from '@/lib/batches';
+import { batchIDOfJob, batchPagePath, coresUsed, jobTiming } from '@/lib/batches';
 import { OwnerLink } from '@/components/OwnerLink';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
@@ -442,7 +442,13 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
 
   return (
     <div className="space-y-6">
-      <JobRelated jobID={jobID} cluster={num(job.ClusterId)} archived={false} onSimilar={showSimilar} />
+      <JobRelated
+        jobID={jobID}
+        cluster={num(job.ClusterId)}
+        batchID={batchIDOfJob(job)}
+        archived={false}
+        onSimilar={showSimilar}
+      />
 
       {/* Chat sits at the top: it's the primary affordance for
           investigation ("why is this held?", "tail my stderr") and
@@ -1673,7 +1679,14 @@ export function workflowGraphAvailability(job: ClassAd): {
 function WorkflowGraphPanel({ jobID, job }: { jobID: string; job: ClassAd }) {
   const { applicable } = workflowGraphAvailability(job);
   if (!applicable) return null;
-  return <DagGraphPanel jobId={jobID} />;
+  // Batch pages serve a single access point (no cluster.proc@schedd).
+  const batch = jobID.includes('@') ? undefined : batchIDOfJob(job);
+  return (
+    <DagGraphPanel
+      jobId={jobID}
+      batchHref={batch === undefined ? undefined : batchPagePath({ batchID: batch })}
+    />
+  );
 }
 
 // The graph's pure helpers, for the tests that have always imported them
