@@ -158,7 +158,7 @@ func (h *Handler) watchOwner(actor string) (string, error) {
 // identity outside UID_DOMAIN: the feed names a job's owner by the local
 // part of its User, and alice@elsewhere is not the alice it would match.
 // It writes the refusal and reports false.
-func (h *Handler) streamCallerInDomain(w http.ResponseWriter, ctx context.Context) bool {
+func (h *Handler) streamCallerInDomain(ctx context.Context, w http.ResponseWriter) bool {
 	if h.multi == nil {
 		return true
 	}

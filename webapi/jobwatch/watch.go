@@ -442,8 +442,7 @@ func (f *Fold) resolveLegacy() {
 		for schedd, archived := range places {
 			if archived {
 				delete(f.seen, id)
-				real := JobID{Cluster: id.Cluster, Proc: id.Proc, Schedd: schedd}
-				f.tracked[real] = true
+				f.tracked[JobID{Cluster: id.Cluster, Proc: id.Proc, Schedd: schedd}] = true
 			}
 		}
 	}

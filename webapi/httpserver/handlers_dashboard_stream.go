@@ -81,7 +81,7 @@ func (s *Handler) handleDashboardActivityStream(w http.ResponseWriter, r *http.R
 	// SubscribeActivity -- so there is no path on which a wider stream
 	// is opened and narrowed afterwards. A caller nobody named gets no
 	// stream at all; the feed refuses an empty owner too.
-	if !s.streamCallerInDomain(w, ctx) {
+	if !s.streamCallerInDomain(ctx, w) {
 		return
 	}
 	owner, all := activityStreamScope(htcondor.GetAuthenticatedUserFromContext(ctx),

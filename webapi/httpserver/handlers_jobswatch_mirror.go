@@ -43,7 +43,7 @@ func (h *Handler) streamJobsWatchFromMirror(ctx context.Context, w http.Response
 	// Applied inside the feed rather than here, so there is no path on
 	// which a wider stream is opened and then narrowed. The feed
 	// refuses a caller nobody named.
-	if !h.streamCallerInDomain(w, ctx) {
+	if !h.streamCallerInDomain(ctx, w) {
 		return
 	}
 	owner, all := activityStreamScope(htcondor.GetAuthenticatedUserFromContext(ctx),
