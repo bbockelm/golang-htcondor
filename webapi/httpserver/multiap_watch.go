@@ -105,8 +105,11 @@ func (h *Handler) watchHubJobsTable(ctx context.Context, cursor []byte) (<-chan 
 // plain read path: the share mint for one of the caller's watches and
 // its redemption, and reads of the collector, which every AP shares
 // (ads, ping, the pool summary, the ad change stream -- not advertise).
-// /api/v1/jobs/watch is in multiAPHubReadPaths.
+// The plain read paths it serves are multiAPHubReadPaths.
 func multiAPHubAllowed(method, path string) bool {
+	if multiAPHubReadPaths[path] {
+		return method == http.MethodGet || method == http.MethodHead
+	}
 	if rest, ok := strings.CutPrefix(path, "/api/v1/collector/"); ok {
 		return (method == http.MethodGet || method == http.MethodHead) && rest != "" &&
 			rest != "advertise" && !strings.HasPrefix(rest, "advertise/")

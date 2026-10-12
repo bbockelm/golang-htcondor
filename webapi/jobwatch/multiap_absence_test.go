@@ -17,12 +17,12 @@ import (
 // tests drive the evaluator with that decision fixed and check what it
 // does with it.
 
-// apAd is a job on an access point, as a federation hub row carries it.
-func apAd(schedd string, cluster, proc, status int64) *classad.ClassAd {
+// apAd is proc 0 of a cluster on an access point, as a federation hub row carries it.
+func apAd(schedd string, cluster, status int64) *classad.ClassAd {
 	ad := classad.New()
 	ad.InsertAttrString("ScheddName", schedd)
 	ad.InsertAttr("ClusterId", cluster)
-	ad.InsertAttr("ProcId", proc)
+	ad.InsertAttr("ProcId", int64(0))
 	ad.InsertAttr("JobStatus", status)
 	ad.InsertAttrString("Owner", "alice")
 	return ad
@@ -105,7 +105,7 @@ func newAbsenceRig(t *testing.T, event Event, mode Mode) *absenceRig {
 	t.Helper()
 	r := &absenceRig{t: t, store: testStore(t), clock: time.Now()}
 	r.src = &coveredSource{
-		queue: []*classad.ClassAd{apAd(apOne, 1, 0, 2), apAd(apTwo, 1, 0, 2)},
+		queue: []*classad.ClassAd{apAd(apOne, 1, 2), apAd(apTwo, 1, 2)},
 		vouch: map[string]bool{apOne: true, apTwo: true},
 		lag:   5 * time.Second,
 		now:   func() time.Time { return r.clock },
@@ -144,7 +144,7 @@ func (r *absenceRig) live() *Watch {
 
 // dropAP2 takes ap2's 1.0 out of the queue.
 func (r *absenceRig) dropAP2() {
-	r.src.set(func(c *coveredSource) { c.queue = []*classad.ClassAd{apAd(apOne, 1, 0, 2)} })
+	r.src.set(func(c *coveredSource) { c.queue = []*classad.ClassAd{apAd(apOne, 1, 2)} })
 }
 
 // TestAbsenceFiresOnlyForAVouchedAP is the central rule from the
@@ -243,7 +243,7 @@ func TestHistoryFiresWhateverTheCoverage(t *testing.T) {
 	r.dropAP2()
 	r.src.set(func(c *coveredSource) {
 		c.vouch = map[string]bool{}
-		c.history = []*classad.ClassAd{apAd(apTwo, 1, 0, 4)}
+		c.history = []*classad.ClassAd{apAd(apTwo, 1, 4)}
 	})
 	if st := r.pass(time.Second); st.Fired != 1 {
 		t.Fatalf("fired %d, want the history record for 1.0@%s to fire with no AP vouched for", st.Fired, apTwo)
@@ -260,7 +260,7 @@ func TestHistoryOnOneAPDoesNotFinishTheOther(t *testing.T) {
 	r := newAbsenceRig(t, EventDone, ModeAll)
 	r.pass(0)
 	r.dropAP2()
-	r.src.set(func(c *coveredSource) { c.history = []*classad.ClassAd{apAd(apTwo, 1, 0, 4)} })
+	r.src.set(func(c *coveredSource) { c.history = []*classad.ClassAd{apAd(apTwo, 1, 4)} })
 	if st := r.pass(time.Minute); st.Fired != 0 {
 		t.Fatal(`an "all" watch fired with ap1's 1.0 still queued`)
 	}
@@ -389,9 +389,9 @@ func TestFeedDeparturesNeedEvidence(t *testing.T) {
 		s, _ := ad.EvaluateAttrString("ScheddName")
 		return vouch[s]
 	}
-	f.Apply(upsert("k1", apAd(apOne, 1, 0, 2)))
-	f.Apply(upsert("k2", apAd(apTwo, 1, 0, 2)))
-	f.Apply(upsert("k3", apAd(apTwo, 2, 0, 4)))
+	f.Apply(upsert("k1", apAd(apOne, 1, 2)))
+	f.Apply(upsert("k2", apAd(apTwo, 1, 2)))
+	f.Apply(upsert("k3", apAd(apTwo, 2, 4)))
 	for _, k := range []string{"k1", "k2", "k3"} {
 		f.Apply(del(k))
 	}
@@ -437,7 +437,7 @@ func TestFeedResumesFromItsCursor(t *testing.T) {
 	waitUntil(t, func() bool { return len(f.Terminal("alice", time.Now().Add(-time.Minute))) == 1 })
 
 	mu.Lock()
-	if len(asked) != 2 || asked[0] != nil && len(asked[0]) != 0 || string(asked[1]) != "c1" {
+	if len(asked) != 2 || len(asked[0]) != 0 || string(asked[1]) != "c1" {
 		t.Errorf("dialed with cursors %q, want none and then c1", asked)
 	}
 	mu.Unlock()

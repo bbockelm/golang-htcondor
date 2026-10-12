@@ -205,7 +205,10 @@ func TestMultiAPJobsWatchStream(t *testing.T) {
 	}
 	// Wait for the subscription before publishing.
 	lines := bufio.NewScanner(resp.Body)
-	for lines.Scan() && !strings.HasPrefix(lines.Text(), "event: ") {
+	for lines.Scan() {
+		if strings.HasPrefix(lines.Text(), "event: ") {
+			break
+		}
 	}
 	feed := srv.jobWatchFeed
 	for _, ev := range []jobwatch.WatchEvent{

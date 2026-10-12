@@ -101,51 +101,8 @@ func (s *Server) multiEpochsTool(ctx context.Context, name string, args map[stri
 	if id != nil && schedd != "" && !strings.EqualFold(schedd, id.Schedd) {
 		return nil, fmt.Errorf("job_id %s is not on %s; pass one", s.multi.Codec.Format(*id), schedd)
 	}
-	var adTypes []string
-	if source == htcondor.HistorySourceTransfer {
-		adTypes = multiap.TransferAdTypes
-		if raw, ok := args["transfer_types"].([]interface{}); ok && len(raw) > 0 {
-			adTypes = nil
-			for _, v := range raw {
-				t, _ := v.(string)
-				if t = strings.TrimSuffix(strings.ToUpper(t), "_FILES"); t == "INPUT" || t == "OUTPUT" || t == "CHECKPOINT" {
-					adTypes = append(adTypes, t)
-				}
-			}
-		}
-	}
-
 	if s.multi.Hub.Federates(multiap.TableEpochHistory) {
-		limit := 50
-		if v, ok := args["limit"].(float64); ok {
-			limit = int(v)
-		}
-		limit, _ = clampToolLimit(limit)
-		projection, note := projectionOrDefault(stringListArg(args, "projection"), defaultAttrsFor(source))
-		rows, res, err := s.multi.ListEpochs(ctx, multiap.EpochRequest{
-			User: user, Constraint: stringArg(args, "constraint"), Projection: projection, Limit: limit,
-			Schedd: schedd, Job: id, AdTypes: adTypes,
-		})
-		if err != nil {
-			return nil, err
-		}
-		items := make([]map[string]interface{}, 0, len(rows))
-		for _, r := range rows {
-			m, err := s.rowMap(r)
-			if err != nil {
-				return nil, err
-			}
-			items = append(items, m)
-		}
-		itemsJSON, _ := json.Marshal(items)
-		text := fmt.Sprintf("Found %d %s record(s):\n%s\n", len(items), typeName, itemsJSON)
-		if res.HasMore {
-			text += "More records match; narrow the constraint or raise limit.\n"
-		}
-		text += note + "\n" + sourcesNote(res.Sources) + "\n" + OwnerScope{Owner: user}.Note()
-		return structuredTextResult(text, map[string]interface{}{
-			"records": items, "count": len(items), "source": "hub", "has_more": res.HasMore, "sources": res.Sources,
-		}), nil
+		return s.multiEpochsFromHub(ctx, user, schedd, id, source, typeName, args)
 	}
 
 	target := schedd
@@ -198,4 +155,60 @@ func (s *Server) multiEpochsTool(ctx context.Context, name string, args map[stri
 		}
 	}
 	return result, nil
+}
+
+// multiEpochsFromHub is multiEpochsTool's read of the hub's epoch_history.
+func (s *Server) multiEpochsFromHub(ctx context.Context, user, schedd string, id *jobid.ID,
+	source htcondor.HistoryRecordSource, typeName string, args map[string]interface{}) (interface{}, error) {
+	var adTypes []string
+	if source == htcondor.HistorySourceTransfer {
+		adTypes = transferAdTypesArg(args)
+	}
+	limit := 50
+	if v, ok := args["limit"].(float64); ok {
+		limit = int(v)
+	}
+	limit, _ = clampToolLimit(limit)
+	projection, note := projectionOrDefault(stringListArg(args, "projection"), defaultAttrsFor(source))
+	rows, res, err := s.multi.ListEpochs(ctx, multiap.EpochRequest{
+		User: user, Constraint: stringArg(args, "constraint"), Projection: projection, Limit: limit,
+		Schedd: schedd, Job: id, AdTypes: adTypes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]map[string]interface{}, 0, len(rows))
+	for _, r := range rows {
+		m, err := s.rowMap(r)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, m)
+	}
+	itemsJSON, _ := json.Marshal(items)
+	text := fmt.Sprintf("Found %d %s record(s):\n%s\n", len(items), typeName, itemsJSON)
+	if res.HasMore {
+		text += "More records match; narrow the constraint or raise limit.\n"
+	}
+	text += note + "\n" + sourcesNote(res.Sources) + "\n" + OwnerScope{Owner: user}.Note()
+	return structuredTextResult(text, map[string]interface{}{
+		"records": items, "count": len(items), "source": "hub", "has_more": res.HasMore, "sources": res.Sources,
+	}), nil
+}
+
+// transferAdTypesArg reads transfer_types (INPUT_FILES or INPUT, and so
+// on) as EpochAdType values; absent or empty is every transfer type.
+func transferAdTypesArg(args map[string]interface{}) []string {
+	raw, ok := args["transfer_types"].([]interface{})
+	if !ok || len(raw) == 0 {
+		return multiap.TransferAdTypes
+	}
+	var out []string
+	for _, v := range raw {
+		t, _ := v.(string)
+		if t = strings.TrimSuffix(strings.ToUpper(t), "_FILES"); t == "INPUT" || t == "OUTPUT" || t == "CHECKPOINT" {
+			out = append(out, t)
+		}
+	}
+	return out
 }

@@ -115,7 +115,7 @@ func TestMultiAPEpochsRoutedWithoutFederation(t *testing.T) {
 func TestMultiAPMatchAnalysisRoutes(t *testing.T) {
 	aps := newActionAPs(t, ap1, ap2)
 	srv := newActionServer(t, aps, nil)
-	srv.Handler.collector = htcondor.NewCollector("<127.0.0.1:1>")
+	srv.collector = htcondor.NewCollector("<127.0.0.1:1>")
 
 	before := aps.counts()
 	doAs(t, srv, "alice", http.MethodGet, "/api/v1/jobs/1.0@"+ap2+"/match-analysis")

@@ -42,7 +42,7 @@ func sourceAd(schedd, state string, lines ...string) string {
 	return ad
 }
 
-// watchRig is alice's watch over 1.0, which exists on both APs.
+// watchRig is alice's "done" watch over 1.0, which exists on both APs.
 type watchRig struct {
 	t     *testing.T
 	hub   *testDB
@@ -52,7 +52,7 @@ type watchRig struct {
 	eval  *jobwatch.Evaluator
 }
 
-func newWatchRig(t *testing.T, event jobwatch.Event, mode jobwatch.Mode, constraint string) *watchRig {
+func newWatchRig(t *testing.T, mode jobwatch.Mode, constraint string) *watchRig {
 	t.Helper()
 	hub := hubDB(t)
 	hub.PutJob(ap1, "alice@d", 1, 0, "")
@@ -74,7 +74,7 @@ func newWatchRig(t *testing.T, event jobwatch.Event, mode jobwatch.Mode, constra
 	store := jobwatch.NewStore(sqldb)
 	r := &watchRig{t: t, hub: hub, reg: reg, svc: svc, store: store,
 		eval: jobwatch.NewEvaluator(store, WatchSource{Service: svc}, nil)}
-	w, err := jobwatch.New("alice", "", constraint, event, "", mode)
+	w, err := jobwatch.New("alice", "", constraint, jobwatch.EventDone, "", mode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestWatchAbsenceRuleMatrix(t *testing.T) {
 		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newWatchRig(t, jobwatch.EventDone, jobwatch.ModeAny, "ClusterId == 1")
+			r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
 			r.pass()
 			if got := r.watch().Tracked; len(got) != 2 {
 				t.Fatalf("tracked %+v, want alice's 1.0 on both APs and not bob's", got)
@@ -181,7 +181,7 @@ func TestWatchAbsenceRuleMatrix(t *testing.T) {
 // the hub still answers for, nothing is vouched for; with no hub at all
 // the pass fails rather than reading an empty queue.
 func TestWatchWaitsOnAnUnreachableHub(t *testing.T) {
-	r := newWatchRig(t, jobwatch.EventDone, jobwatch.ModeAny, "ClusterId == 1")
+	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
 	r.pass()
 	r.hub.DeleteJob(ap2, 1, 0)
 	// A snapshot that would vouch for ap2, which then ages past what the
@@ -204,7 +204,7 @@ func TestWatchWaitsOnAnUnreachableHub(t *testing.T) {
 // TestWatchHistoryFiresOnAStaleAP: a history record on the hub is
 // terminal evidence of its own; the AP's freshness does not matter.
 func TestWatchHistoryFiresOnAStaleAP(t *testing.T) {
-	r := newWatchRig(t, jobwatch.EventDone, jobwatch.ModeAny, "ClusterId == 1")
+	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
 	r.pass()
 	r.hub.DeleteJob(ap2, 1, 0)
 	r.hub.PutSourceAd(ap2, sourceAd(ap2, StateStale))
@@ -223,7 +223,7 @@ func TestWatchHistoryFiresOnAStaleAP(t *testing.T) {
 // whatever the watch's constraint says; bob's 1.0 on ap1 is never
 // tracked, and a constraint that tries to reach it changes nothing.
 func TestWatchIsOwnerScoped(t *testing.T) {
-	r := newWatchRig(t, jobwatch.EventDone, jobwatch.ModeAll, `ClusterId == 1 || Owner == "bob" || User == "bob@d"`)
+	r := newWatchRig(t, jobwatch.ModeAll, `ClusterId == 1 || Owner == "bob" || User == "bob@d"`)
 	r.pass()
 	for _, id := range r.watch().Tracked {
 		if id.Cluster != 1 || id.Proc != 0 {
@@ -245,7 +245,7 @@ func TestWatchIsOwnerScoped(t *testing.T) {
 // TestWatchSourceRefusesAnotherDomain: a watch owner is a local name;
 // an identity in another domain never reaches the hub.
 func TestWatchSourceRefusesAnotherDomain(t *testing.T) {
-	r := newWatchRig(t, jobwatch.EventDone, jobwatch.ModeAny, "ClusterId == 1")
+	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
 	_, _, err := WatchSource{Service: r.svc}.QueueCovered(context.Background(), "alice@elsewhere",
 		[]string{"ClusterId"}, 10, func(*classad.ClassAd) {})
 	if err == nil {
@@ -257,7 +257,7 @@ func TestWatchSourceRefusesAnotherDomain(t *testing.T) {
 // for the staleness the hub reported, the row's own lag and one snapshot
 // interval.
 func TestWatchCoverageBound(t *testing.T) {
-	r := newWatchRig(t, jobwatch.EventDone, jobwatch.ModeAny, "ClusterId == 1")
+	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
 	r.hub.PutSourceAd(ap2, sourceAd(ap2, StateFresh, "StalenessSeconds = 30"))
 	r.advanceHub(0)
 	at := r.svc.Hub.Status().LastSuccess
@@ -273,7 +273,7 @@ func TestWatchCoverageBound(t *testing.T) {
 // TestFeedHooks: the hub feed names a row's owner by User in UID_DOMAIN
 // only, and vouches for a delete only on a vouched AP.
 func TestFeedHooks(t *testing.T) {
-	r := newWatchRig(t, jobwatch.EventDone, jobwatch.ModeAny, "ClusterId == 1")
+	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
 	r.hub.PutSourceAd(ap2, sourceAd(ap2, StateStale))
 	r.advanceHub(0)
 	row := func(schedd, user string) *classad.ClassAd {
@@ -302,7 +302,7 @@ func TestFeedHooks(t *testing.T) {
 // TestHubFederatesFromSourceRows: the hub federates epoch_history when
 // its source rows carry EpochHistoryConnected.
 func TestHubFederatesFromSourceRows(t *testing.T) {
-	r := newWatchRig(t, jobwatch.EventDone, jobwatch.ModeAny, "ClusterId == 1")
+	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
 	if r.svc.Hub.Federates(TableEpochHistory) {
 		t.Fatal("federates epoch_history with no row listing it")
 	}

@@ -434,7 +434,7 @@ func multiAPAllowed(method, path string) bool {
 		// The credd of the caller's home AP, or of ?schedd=.
 		return true
 	}
-	if multiAPReadPaths[path] || multiAPHubReadPaths[path] {
+	if multiAPReadPaths[path] {
 		return read
 	}
 	if multiAPHubAllowed(method, path) {
