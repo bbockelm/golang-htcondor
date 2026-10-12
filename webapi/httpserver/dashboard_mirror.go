@@ -122,7 +122,7 @@ func (s *Handler) activityFromMirror(ctx context.Context, owner string, ownedByM
 		// the archive below has the rest.
 		{"CompletionDate", &act.RecentlyCompleted, "JobStatus == 4", []string{"ExitCode"}},
 	} {
-		jobs, lerr := mirrorRecent(ctx, dbc, "jobs", scope, list.attr, list.extra, since, list.detail)
+		jobs, lerr := mirrorRecent(ctx, dbc, "jobs", scope, list.attr, list.extra, since, list.detail, false)
 		if lerr != nil {
 			return nil, fmt.Errorf("reading recent %s: %w", list.attr, lerr)
 		}
@@ -134,7 +134,7 @@ func (s *Handler) activityFromMirror(ctx context.Context, owner string, ownedByM
 	// The archive may be absent or lagging while the live table is fine.
 	// Both of the reads below cost their own panel, not the page.
 	if archived, aerr := mirrorRecent(ctx, dbc, "history", scope, "CompletionDate", "", since,
-		[]string{"ExitCode", "ExitBySignal"}); aerr != nil {
+		[]string{"ExitCode", "ExitBySignal"}, false); aerr != nil {
 		s.logger.Debug(logging.DestinationHTTP,
 			"dashboard: mirror has no history for recently-completed", "error", aerr)
 	} else {
@@ -228,16 +228,20 @@ func mirrorHoldReasons(ctx context.Context, dbc *dbrpc.Client, scope string, sin
 }
 
 // mirrorRecent reads one activity list: the jobs whose timestamp lands
-// in the window, newest first.
+// in the window, newest first. perAP reads each job's ScheddName, on a
+// federation hub; a single AP's rows are named by cluster.proc alone,
+// even where an archive carries a ScheddName (historyimport stamps one)
+// that its queue rows do not.
 func mirrorRecent(ctx context.Context, dbc *dbrpc.Client, table, scope, attr, extra string,
-	since int64, detail []string) ([]RecentJob, error) {
+	since int64, detail []string, perAP bool) ([]RecentJob, error) {
 	constraint := fmt.Sprintf("(%s) && %s >= %d", scope, attr, since)
 	if extra != "" {
 		constraint += " && (" + extra + ")"
 	}
-	// ScheddName names the job's access point on a federation hub; a
-	// single AP's mirror rows have none.
-	project := append([]string{"ClusterId", "ProcId", "Owner", "ScheddName", attr}, detail...)
+	project := append([]string{"ClusterId", "ProcId", "Owner", attr}, detail...)
+	if perAP {
+		project = append(project, "ScheddName")
+	}
 
 	// Over-fetch, then take the newest: a mutable table has no ordering
 	// to push the limit down into, so the window is what bounds this and
@@ -257,7 +261,9 @@ func mirrorRecent(ctx context.Context, dbc *dbrpc.Client, table, scope, attr, ex
 		e.ClusterID, _ = ad.EvaluateAttrInt("ClusterId")
 		e.ProcID, _ = ad.EvaluateAttrInt("ProcId")
 		e.Owner, _ = ad.EvaluateAttrString("Owner")
-		e.Schedd, _ = ad.EvaluateAttrString("ScheddName")
+		if perAP {
+			e.Schedd, _ = ad.EvaluateAttrString("ScheddName")
+		}
 		e.At, _ = ad.EvaluateAttrInt(attr)
 		e.Detail = recentDetail(ad, detail)
 		out = append(out, e)

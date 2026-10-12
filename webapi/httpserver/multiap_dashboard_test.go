@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"testing"
@@ -124,5 +125,41 @@ func waitCond(t *testing.T, what string, cond func() bool) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestRecentCompletionsKeyOnAPOnlyInMultiAPMode: with one schedd a
+// completed job in the queue and in an archive that stamps ScheddName
+// (historyimport does) is one job, named by cluster.proc; on a hub the
+// recent lists carry each job's AP.
+func TestRecentCompletionsKeyOnAPOnlyInMultiAPMode(t *testing.T) {
+	ctx := context.Background()
+	db := multiaptest.NewHub(t)
+	now := time.Now().Unix()
+	db.PutSpokeJob("alice@d", 7, 0, fmt.Sprintf("JobStatus = 4\nCompletionDate = %d\nOwner = \"alice\"", now))
+	db.AppendHistory(fmt.Sprintf("ScheddName = %q\nClusterId = 7\nProcId = 0\nOwner = \"alice\"\nJobStatus = 4\n"+
+		"ExitCode = 0\nCompletionDate = %d\nGlobalJobId = \"x#7.0#1\"", ap1, now))
+	dbc, closer, err := db.Dial(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closer()
+	for _, perAP := range []bool{false, true} {
+		queue, err := mirrorRecent(ctx, dbc, "jobs", "true", "CompletionDate", "JobStatus == 4", now-3600, []string{"ExitCode"}, perAP)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hist, err := mirrorRecent(ctx, dbc, "history", "true", "CompletionDate", "", now-3600, []string{"ExitCode"}, perAP)
+		if err != nil {
+			t.Fatal(err)
+		}
+		act := DashboardActivity{RecentlyCompleted: queue}
+		act.mergeArchivedCompletions(hist)
+		switch {
+		case !perAP && (len(act.RecentlyCompleted) != 1 || act.RecentlyCompleted[0].Schedd != ""):
+			t.Errorf("single AP: recently completed %+v, want 7.0 once with no schedd", act.RecentlyCompleted)
+		case perAP && (len(hist) != 1 || hist[0].Schedd != ap1):
+			t.Errorf("multi-AP: the archive's 7.0 = %+v, want it on %s", hist, ap1)
+		}
 	}
 }

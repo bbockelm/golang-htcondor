@@ -174,7 +174,7 @@ func (s *Handler) handleMultiDashboardActivity(w http.ResponseWriter, r *http.Re
 		{"EnteredCurrentStatus", &act.RecentlyHeld, "JobStatus == 5", []string{"HoldReason"}},
 		{"CompletionDate", &act.RecentlyCompleted, "JobStatus == 4", []string{"ExitCode"}},
 	} {
-		jobs, lerr := mirrorRecent(ctx, dbc, multiap.TableJobs, scope, list.attr, list.extra, since, list.detail)
+		jobs, lerr := mirrorRecent(ctx, dbc, multiap.TableJobs, scope, list.attr, list.extra, since, list.detail, true)
 		if lerr != nil {
 			s.writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("reading recent %s on the federation hub: %v", list.attr, lerr))
 			return
@@ -184,7 +184,7 @@ func (s *Handler) handleMultiDashboardActivity(w http.ResponseWriter, r *http.Re
 	act.CompletedAvailable = len(act.RecentlyCompleted) > 0
 	act.CompletedPartial = true
 	if archived, aerr := mirrorRecent(ctx, dbc, multiap.TableHistory, scope, "CompletionDate", "", since,
-		[]string{"ExitCode", "ExitBySignal"}); aerr != nil {
+		[]string{"ExitCode", "ExitBySignal"}, true); aerr != nil {
 		s.logger.Debug(logging.DestinationHTTP, "dashboard: the hub's history did not answer", "error", aerr)
 	} else {
 		act.mergeArchivedCompletions(archived)

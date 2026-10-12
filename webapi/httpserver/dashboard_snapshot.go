@@ -443,7 +443,8 @@ func (act *DashboardActivity) mergeArchivedCompletions(archived []RecentJob) {
 		return
 	}
 	// Keyed by access point too: in multi-AP mode two APs' 7.0 are two
-	// jobs. (Schedd is empty with one schedd.)
+	// jobs. Schedd is set only there (mirrorRecent's perAP), so with one
+	// schedd the key is cluster.proc.
 	type key struct {
 		schedd string
 		c, p   int64

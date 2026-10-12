@@ -241,6 +241,14 @@ func (d *DB) PutHistory(schedd, user string, cluster, proc int, entered int64) {
 	}
 }
 
+// AppendHistory appends a history record verbatim.
+func (d *DB) AppendHistory(ad string) {
+	d.t.Helper()
+	if err := d.client().ArchiveAppend(context.Background(), TableHistory, ad); err != nil {
+		d.t.Fatal(err)
+	}
+}
+
 // PutSource writes a federation_sources row with the streams of a hub's
 // default tables (jobs, history, syncstatus) connected. staleness < 0
 // leaves StalenessSeconds unset.
