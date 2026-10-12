@@ -48,11 +48,11 @@ type SlotQuerier interface {
 // # Every caller gets its own ads
 //
 // The cache holds slots frozen (see frozenAd), never as *classad.ClassAd,
-// and every Slots or StreamSlots call is handed freshly built ads. An
-// analysis binds each slot to the job it is analyzing and evaluates it,
-// and both write to the ad; on a shared ad, concurrent analyses race and
-// one user's slot TARGET.* expressions evaluate against another user's
-// job.
+// and every Slots or StreamSlots call is handed freshly built ads. The
+// analyzer evaluates each slot against the job without writing to it, but
+// a caller that binds a slot (NewMatchClassAd, SetTarget) or changes it
+// writes the ad; on a shared ad, one user's slot TARGET.* expressions
+// could then evaluate against another user's job.
 type CollectorSlotProvider struct {
 	q SlotQuerier
 
@@ -349,7 +349,7 @@ func sortedKeys(m map[string]struct{}) []string {
 // worrying about projection truncation.
 //
 // Like any SlotProvider it hands each call copies of Ads, never Ads
-// itself, so the analyzer's binding and evaluation leave Ads untouched.
+// itself, so nothing a caller does to the returned ads reaches Ads.
 type StaticSlotProvider struct {
 	Ads []*classad.ClassAd
 

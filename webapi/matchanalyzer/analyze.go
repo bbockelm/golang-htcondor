@@ -27,9 +27,9 @@ type Analyzer struct {
 	// readable for high-cardinality attributes (e.g., Machine names).
 	distinctValuesCap int
 
-	// afterBind, when set, runs once per slot after the job and slot are
-	// bound to each other and before any predicate is evaluated. Tests
-	// use it to hold one analysis at that point while another runs.
+	// afterBind, when set, runs once per slot, after the slot is in hand
+	// and before any predicate is evaluated against it. Tests use it to
+	// hold one analysis at that point while another runs.
 	afterBind func(job, slot *classad.ClassAd)
 }
 
@@ -161,7 +161,7 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 		resolvedSlotAttrs[i] = boundSlotAttrs(boundExprs[i])
 		distrCollectors[i] = make(map[string]*attrDistCollector, len(resolvedSlotAttrs[i]))
 		for _, attr := range resolvedSlotAttrs[i] {
-			distrCollectors[i][attr] = newAttrDistCollector()
+			distrCollectors[i][attr] = newAttrDistCollector(attr)
 		}
 	}
 
@@ -176,22 +176,25 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 	// into the OOM killer. What survives the pass is per-PREDICATE, and
 	// the failing-value histograms are per-DISTINCT-VALUE.
 	comps := make([]*resourceComparison, len(preds))
+	compRefs := make([]*ast.AttributeReference, len(preds))
 	failing := make([]*failingValues, len(preds))
 	for i := range preds {
 		comps[i] = detectResourceComparison(boundExprs[i])
 		if comps[i] != nil {
+			compRefs[i] = slotAttrRef(comps[i].SlotAttr)
 			failing[i] = newFailingValues()
 		}
 	}
 
-	// Each slot is this analysis's own (the SlotProvider contract), so
-	// binding it to the job here cannot be seen by any other analysis.
+	// The job and each slot are paired for one evaluation at a time
+	// (EvaluateExprAgainst), never bound on the ads, so nothing here
+	// writes to either. Each slot is still this analysis's own (the
+	// SlotProvider contract).
 	onSlot := func(slot *classad.ClassAd) {
-		classad.NewMatchClassAd(job, slot)
 		if a.afterBind != nil {
 			a.afterBind(job, slot)
 		}
-		results := evalBoundPredicates(job, boundExprs)
+		results := evalBoundPredicates(job, slot, boundExprs)
 		if isFullMatch(results) {
 			res.FullMatches++
 		}
@@ -199,7 +202,7 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 			if comps[i] == nil || r == predTrue {
 				continue
 			}
-			v := slot.EvaluateAttr(comps[i].SlotAttr)
+			v := evalSlotAttr(slot, job, compRefs[i])
 			if !v.IsNumber() {
 				continue
 			}
@@ -209,17 +212,13 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 			}
 			failing[i].add(n)
 		}
-		a.processSlotResults(slot, results, res, matchedAllOthers, distrCollectors, resolvedSlotAttrs)
+		a.processSlotResults(slot, job, results, res, matchedAllOthers, distrCollectors, resolvedSlotAttrs)
 		res.TotalSlots++
 	}
 
 	if err := a.eachSlot(ctx, projection, onSlot); err != nil {
 		return nil, err
 	}
-	// The job is still bound to the last slot. Unbind it so nothing below
-	// evaluates the job against an arbitrary slot, and so the slot is not
-	// kept alive.
-	job.SetTarget(nil)
 
 	// Pick the narrowing predicate: highest matchedAllOthers value, with
 	// ties broken in favor of lower index (stable). If the max is zero —
@@ -303,14 +302,14 @@ func isFullMatch(results []predOutcome) bool {
 //   - record this slot's value of every resolved slot-side attribute
 //     in the per-attribute distribution collector
 func (a *Analyzer) processSlotResults(
-	slot *classad.ClassAd,
+	slot, job *classad.ClassAd,
 	results []predOutcome,
 	res *Result,
 	matchedAllOthers []int,
 	distrCollectors []map[string]*attrDistCollector,
 	resolvedSlotAttrs [][]string,
 ) {
-	slotName := slotIdentity(slot)
+	slotName := slotIdentity(slot, job)
 	for i, r := range results {
 		pr := &res.Predicates[i]
 		a.bucketOutcome(pr, r, slotName)
@@ -318,7 +317,7 @@ func (a *Analyzer) processSlotResults(
 			matchedAllOthers[i]++
 		}
 		for _, attr := range resolvedSlotAttrs[i] {
-			distrCollectors[i][attr].observe(slot, attr, slotName)
+			distrCollectors[i][attr].observe(slot, job, slotName)
 		}
 	}
 }
@@ -399,8 +398,8 @@ const (
 )
 
 // evalBoundPredicates evaluates every (already-bound) predicate expression
-// against the job ad, which the caller has bound to one slot, and returns
-// one outcome per predicate. The expressions are expected to have come
+// against the job ad, with slotAd as its TARGET, and returns one outcome
+// per predicate. The expressions are expected to have come
 // through bindBareReferences so every AttributeReference is explicitly
 // scoped (MY. for job-side, TARGET. for slot-side).
 //
@@ -410,17 +409,31 @@ const (
 // produce TARGET.x = jobAd.x, which is not what an operator reading the
 // predicate expects.
 //
-// The caller binds the pair with classad.NewMatchClassAd, which calls
-// SetTarget on both ads. Both must belong to this analysis alone: a
-// slot's own expressions resolve TARGET.* through the slot's binding, so
-// a slot shared with a concurrent analysis evaluates against whichever
-// job bound it last.
-func evalBoundPredicates(jobAd *classad.ClassAd, boundExprs []ast.Expr) []predOutcome {
+// The pairing is symmetric and lasts for one evaluation: within the
+// slot's own expressions TARGET is the job, as under classad.NewMatchClassAd,
+// but neither ad is written. NewMatchClassAd records the pairing on the ads
+// (SetTarget), so a slot shared with a concurrent analysis would evaluate
+// its TARGET.* against whichever job bound it last.
+func evalBoundPredicates(jobAd, slotAd *classad.ClassAd, boundExprs []ast.Expr) []predOutcome {
 	results := make([]predOutcome, len(boundExprs))
 	for i, expr := range boundExprs {
-		results[i] = classifyPredicateValue(jobAd.EvaluateExpr(expr))
+		results[i] = classifyPredicateValue(jobAd.EvaluateExprAgainst(expr, slotAd))
 	}
 	return results
+}
+
+// slotAttrRef returns a reference to attr in the ad it is evaluated in,
+// for evalSlotAttr. MY scope: a slot that lacks attr reports undefined
+// rather than falling through to the job's attribute of that name.
+func slotAttrRef(attr string) *ast.AttributeReference {
+	return ast.NewAttributeReference(attr, ast.MyScope)
+}
+
+// evalSlotAttr evaluates the slot attribute ref names with jobAd as the
+// slot's TARGET, as matching does, without writing to either ad. It agrees
+// with slotAd.EvaluateAttr on a slot bound to jobAd by NewMatchClassAd.
+func evalSlotAttr(slotAd, jobAd *classad.ClassAd, ref *ast.AttributeReference) classad.Value {
+	return slotAd.EvaluateExprAgainst(ref, jobAd)
 }
 
 // classifyPredicateValue maps a classad Value to a predOutcome. Anything
@@ -496,19 +509,23 @@ func lookupRequirements(jobAd *classad.ClassAd) ast.Expr {
 	return &ast.BooleanLiteral{Value: true}
 }
 
-// slotIdentity returns the most descriptive string name for a slot ad.
-// Prefers "Name" (which usually includes both the slot name and host) over
-// "Machine" alone. Returns "" if neither is set, which the caller treats
-// as "skip this slot for sample-host display".
-func slotIdentity(slot *classad.ClassAd) string {
-	if name, ok := slot.EvaluateAttrString("Name"); ok && name != "" {
-		return name
-	}
-	if name, ok := slot.EvaluateAttrString("Machine"); ok && name != "" {
-		return name
+// slotIdentity returns the most descriptive string name for a slot ad,
+// evaluated with job as its TARGET. Prefers "Name" (which usually includes
+// both the slot name and host) over "Machine" alone. Returns "" if neither
+// is set, which the caller treats as "skip this slot for sample-host
+// display".
+func slotIdentity(slot, job *classad.ClassAd) string {
+	for _, ref := range identityRefs {
+		if name, err := evalSlotAttr(slot, job, ref).StringValue(); err == nil && name != "" {
+			return name
+		}
 	}
 	return ""
 }
+
+// identityRefs are the slot attributes slotIdentity tries, in order.
+// Shared between analyses: evaluation never writes to an expression.
+var identityRefs = []*ast.AttributeReference{slotAttrRef("Name"), slotAttrRef("Machine")}
 
 // attrDistCollector accumulates one slot attribute's value distribution
 // across the slot pool. Stored separately from the public
@@ -528,6 +545,7 @@ func slotIdentity(slot *classad.ClassAd) string {
 // every match would balloon memory on large pools without adding
 // information beyond the count.
 type attrDistCollector struct {
+	ref           *ast.AttributeReference
 	values        map[string]int
 	valueExample  map[string]string
 	absent        int
@@ -538,8 +556,9 @@ type attrDistCollector struct {
 	errOutExample string
 }
 
-func newAttrDistCollector() *attrDistCollector {
+func newAttrDistCollector(attr string) *attrDistCollector {
 	return &attrDistCollector{
+		ref:          slotAttrRef(attr),
 		values:       map[string]int{},
 		valueExample: map[string]string{},
 	}
@@ -548,18 +567,19 @@ func newAttrDistCollector() *attrDistCollector {
 // observe records one slot's view of the attribute being tracked.
 // Distinguishes absent-from-ad from value-undefined by using the
 // classad library's Lookup (structural presence check) on top of
-// EvaluateAttr (value resolution). slotName is the human-readable slot
-// identifier (Name attribute, or Machine fallback) used as the
-// example-slot label; pass "" if the slot has no usable identity.
-func (c *attrDistCollector) observe(ad *classad.ClassAd, attr, slotName string) {
-	if _, ok := ad.Lookup(attr); !ok {
+// evaluation against job (value resolution). slotName is the
+// human-readable slot identifier (Name attribute, or Machine fallback)
+// used as the example-slot label; pass "" if the slot has no usable
+// identity.
+func (c *attrDistCollector) observe(ad, job *classad.ClassAd, slotName string) {
+	if _, ok := ad.Lookup(c.ref.Name); !ok {
 		c.absent++
 		if c.absentExample == "" {
 			c.absentExample = slotName
 		}
 		return
 	}
-	v := ad.EvaluateAttr(attr)
+	v := evalSlotAttr(ad, job, c.ref)
 	switch {
 	case v.IsUndefined():
 		c.undefined++
