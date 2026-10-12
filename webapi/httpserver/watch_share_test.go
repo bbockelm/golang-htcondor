@@ -36,7 +36,9 @@ func watchShareHandler(t *testing.T) (*Handler, *jobwatch.Store) {
 	if err != nil {
 		t.Fatalf("NewSigner: %v", err)
 	}
-	db, err := appdb.Open(filepath.Join(t.TempDir(), "watch.db"))
+	path := filepath.Join(t.TempDir(), "watch.db")
+	seedMigratedAppDB(path)
+	db, err := appdb.Open(path)
 	if err != nil {
 		t.Fatalf("appdb.Open: %v", err)
 	}

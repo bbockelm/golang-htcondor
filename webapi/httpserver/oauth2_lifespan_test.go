@@ -232,7 +232,7 @@ func TestDeviceCodeFlowSetsRefreshExpiryFromConfig(t *testing.T) {
 
 	// Register a client capable of device_code + refresh_token grants.
 	clientID := "test-device-client"
-	hashedSecret, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
+	hashedSecret, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
 	if err := provider.GetStorage().CreateClient(ctx, &fosite.DefaultClient{
 		ID:         clientID,
 		Secret:     hashedSecret,

@@ -13,7 +13,9 @@ import (
 
 func newJupyterTestStore(t *testing.T) *jupyterStore {
 	t.Helper()
-	db, err := appdb.Open(filepath.Join(t.TempDir(), "app.db"))
+	path := filepath.Join(t.TempDir(), "app.db")
+	seedMigratedAppDB(path)
+	db, err := appdb.Open(path)
 	if err != nil {
 		t.Fatalf("appdb.Open: %v", err)
 	}

@@ -1576,6 +1576,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// which made a stuck migration look identical to a stuck
 	// post-credd RPC.
 	logger.Info(logging.DestinationHTTP, "Opening application database", "path", dbPath)
+	if seedAppDB != nil {
+		seedAppDB(dbPath)
+	}
 	appDB, err := appdb.OpenWithWarnings(dbPath, func(msg string, args ...any) {
 		logger.Warn(logging.DestinationHTTP, msg, args...)
 	})
@@ -3688,7 +3691,7 @@ func (h *Handler) initializeIDP(ln net.Listener, protocol string) error {
 	} else {
 		// Create client if not found (or error)
 		// Hash the secret
-		hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+		hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), secretHashCost)
 		if err != nil {
 			return fmt.Errorf("failed to hash client secret: %w", err)
 		}
@@ -3945,7 +3948,7 @@ func (h *Handler) syncIDPClientSecret(ctx context.Context, client fosite.Client,
 	if bcrypt.CompareHashAndPassword(client.GetHashedSecret(), []byte(secret)) == nil {
 		return nil
 	}
-	hashed, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
+	hashed, err := bcrypt.GenerateFromPassword([]byte(secret), secretHashCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash client secret: %w", err)
 	}

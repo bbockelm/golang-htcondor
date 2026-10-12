@@ -1412,7 +1412,7 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 	clientSecret := generateRandomString(32)
 
 	// Hash the client secret with bcrypt (fosite expects bcrypt-hashed secrets)
-	hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+	hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), secretHashCost)
 	if err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Failed to hash client secret", "error", err)
 		h.writeError(w, http.StatusInternalServerError, "Failed to register client")

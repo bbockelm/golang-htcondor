@@ -13,7 +13,12 @@ import (
 // neither a caller's request nor this daemon's own work -- then fails here
 // instead of quietly authenticating as the daemon. See testOriginPolicy for
 // the integration build.
+//
+// It also swaps the costliest per-server startup steps for equivalents
+// that a suite building a server per test can afford; see
+// setup_seams_test.go.
 func TestMain(m *testing.M) {
 	htcondor.SetUnmarkedOriginPolicy(testOriginPolicy)
+	installTestSetupSeams()
 	os.Exit(m.Run())
 }

@@ -88,7 +88,7 @@ func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
 	var privateKey *rsa.PrivateKey
 	if privateKeyPEM == "" {
 		// Generate new RSA key
-		privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
+		privateKey, err = generateSigningKey()
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate RSA key: %w", err)
 		}

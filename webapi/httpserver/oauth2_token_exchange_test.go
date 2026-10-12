@@ -18,7 +18,7 @@ import (
 func insertConfidentialClient(t *testing.T, server *Server, id string, grants, scopes []string) string {
 	t.Helper()
 	secret := "secret-for-" + id
-	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}

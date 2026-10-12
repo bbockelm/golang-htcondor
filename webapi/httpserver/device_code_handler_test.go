@@ -25,7 +25,7 @@ func TestDeviceCodeHandler(t *testing.T) {
 	// Create test client
 	clientID := "test-device-client"
 	clientSecret := "test-device-secret"
-	hashedSecret, _ := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+	hashedSecret, _ := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.MinCost)
 
 	client := &fosite.DefaultClient{
 		ID:         clientID,
@@ -193,7 +193,7 @@ func TestDeviceCodeInvalidation(t *testing.T) {
 	storage := NewOAuth2Storage(newTestDB(t, dbPath))
 
 	// Create test client
-	clientSecret, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
+	clientSecret, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
 	client := &fosite.DefaultClient{
 		ID:         "test-client",
 		Secret:     clientSecret,
