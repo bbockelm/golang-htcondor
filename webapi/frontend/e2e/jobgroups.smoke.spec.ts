@@ -2,12 +2,13 @@ import { expect, test, type Page } from '@playwright/test';
 import path from 'node:path';
 
 import { installApiFixtures } from './fixtures/api';
+import { SMOKE_NOW } from './fixtures/clock';
 import { forJobFixture } from '../src/lib/similar.fixture';
 
 // From one job back to the groups it belongs to: the Related row at the
 // top of its page, and the similar jobs its runtime estimate is based on.
 
-const startedRecently = Math.floor(Date.now() / 1000) - 1800;
+const startedRecently = SMOKE_NOW - 1800;
 
 const runningAd = {
   ClusterId: 81291,

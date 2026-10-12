@@ -2,13 +2,14 @@ import { expect, test, type Page } from '@playwright/test';
 import path from 'node:path';
 
 import { installApiFixtures, installJobsProgressFixtures } from './fixtures/api';
+import { SMOKE_NOW } from './fixtures/clock';
 
 // The batch actions menu, running and waiting times, the owner link on
 // the job page, and the job page's Requirements breakdown, against
 // mocked responses. The smoke session is an administrator, so every
 // owner is linkable.
 
-const now = Math.floor(Date.now() / 1000);
+const now = SMOKE_NOW;
 const twoHours14 = 2 * 3600 + 14 * 60;
 
 // The /jobs/<id> page: /jobs/_ answers every id in production, so do the
@@ -103,7 +104,8 @@ test('the jobs table says how long a batch has left', async ({ page }) => {
   await expect(page.getByRole('columnheader', { name: 'Time left' })).toBeVisible();
   const row = page.getByRole('row').filter({ hasText: 'smoke-left' }).first();
   await expect(row).toContainText('1 waiting · each about 1h once started');
-  await expect(row).toContainText(/running ones done by ~/);
+  // Started 10m before noon with 30m to go (SMOKE_NOW is 12:00 PM).
+  await expect(row).toContainText(/running ones done by ~12:30\sPM/);
   expect(asked[0]).toEqual(['72.0', '72.1']);
 });
 

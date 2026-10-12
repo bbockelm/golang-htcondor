@@ -273,7 +273,14 @@ describe('BatchTable running view', () => {
 });
 
 describe('BatchTable running and waiting times', () => {
-  const now = Math.floor(Date.now() / 1000);
+  // The table reads the clock, so it is fixed: only Date, so the
+  // rendering's own timers still run.
+  const now = 1_791_997_200;
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(now * 1000);
+  });
+  afterEach(() => vi.useRealTimers());
   const timed: ClassAd[] = [
     { ClusterId: 50, ProcId: 0, JobStatus: 2, Owner: 'alice', JobCurrentStartExecutingDate: now - (2 * 3600 + 14 * 60) },
     { ClusterId: 50, ProcId: 1, JobStatus: 2, Owner: 'alice', JobCurrentStartExecutingDate: now - 5 * 3600 },

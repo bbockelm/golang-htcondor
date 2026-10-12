@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test';
 import type { CollectorAdsResponse } from '../src/lib/api';
 import type { DrainEstimates } from '../src/lib/drain';
 import { emptyDrainFixture, installApiFixtures } from './fixtures/api';
+import { SMOKE_NOW } from './fixtures/clock';
 
 // The Pool page's "Empty if drained now" column binds the drain
 // estimates to the nodes the collector query lists: one node with a mix
@@ -76,7 +77,7 @@ const drainFixture: DrainEstimates = {
       jobs_estimated: 3,
       jobs_from_this_ap: 3,
       likely_empty_seconds: 2400,
-      likely_empty_at: new Date(Date.now() + 2400_000).toISOString(),
+      likely_empty_at: new Date((SMOKE_NOW + 2400) * 1000).toISOString(),
       expected_ends: [{ seconds: 2400, usually_by_seconds: 3600, cpus: 4 }],
     },
   ],
