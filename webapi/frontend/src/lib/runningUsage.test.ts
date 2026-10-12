@@ -174,11 +174,14 @@ describe('batch readings', () => {
 });
 
 describe('recentCpuConstraint', () => {
+  // Rates from mis-timed samples are left out, as on the job page's chart.
+  const guard = ' && (SampleInterval is undefined || SampleInterval >= 60)';
+
   it('spans the clusters on screen', () => {
     expect(recentCpuConstraint([{ ClusterId: 9 }, { ClusterId: 3 }, { ClusterId: 5 }])).toBe(
-      'ClusterId >= 3 && ClusterId <= 9',
+      'ClusterId >= 3 && ClusterId <= 9' + guard,
     );
-    expect(recentCpuConstraint([{ ClusterId: 4 }])).toBe('ClusterId == 4');
+    expect(recentCpuConstraint([{ ClusterId: 4 }])).toBe('ClusterId == 4' + guard);
     expect(recentCpuConstraint([])).toBeUndefined();
   });
 });

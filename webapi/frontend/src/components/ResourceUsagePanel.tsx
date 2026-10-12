@@ -20,6 +20,7 @@ import {
   JOB_METRICS_AGG,
   JOB_METRICS_BUCKET_SECONDS,
   JOB_METRICS_GROUP_BY,
+  jobMetricsConstraint,
 } from '@/lib/metrics';
 import { MetricChart } from '@/components/MetricChart';
 
@@ -53,7 +54,7 @@ export function ResourceUsagePanel({
     refetchInterval: live ? 60_000 : false,
     queryFn: () =>
       api.metrics.query('job_metrics', {
-        constraint: `ClusterId == ${cluster} && ProcId == ${proc}`,
+        constraint: jobMetricsConstraint(cluster, proc),
         group_by: JOB_METRICS_GROUP_BY,
         bucket: JOB_METRICS_BUCKET_SECONDS,
         agg: JOB_METRICS_AGG,

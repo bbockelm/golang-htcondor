@@ -22,7 +22,7 @@
 
 import { jobIdOf, scheddOf, type ClassAd } from '@/lib/api';
 import { attr, coresUsed, CPU_COUNTER_ATTRS, num, type BatchJob } from '@/lib/batches';
-import type { MetricsResponse } from '@/lib/metrics';
+import { RATE_SAMPLE_GUARD, type MetricsResponse } from '@/lib/metrics';
 
 // Narrow on purpose: this is fetched only for the running view, and only
 // the running jobs, every 30 seconds. ResidentSetSize is here because
@@ -62,7 +62,10 @@ export function recentCpuConstraint(ads: ClassAd[]): string | undefined {
     if (c > hi) hi = c;
   }
   if (!Number.isFinite(lo)) return undefined;
-  return lo === hi ? `ClusterId == ${lo}` : `ClusterId >= ${lo} && ClusterId <= ${hi}`;
+  // The guard keeps a mis-timed sample's rate out of the average, as on the
+  // job page's chart (see RATE_SAMPLE_GUARD).
+  const clusters = lo === hi ? `ClusterId == ${lo}` : `ClusterId >= ${lo} && ClusterId <= ${hi}`;
+  return `${clusters} && ${RATE_SAMPLE_GUARD}`;
 }
 
 // recentCpuByJob reads the samples answer into "cluster.proc" -> cores.
