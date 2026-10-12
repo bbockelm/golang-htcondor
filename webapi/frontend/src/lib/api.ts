@@ -6,6 +6,7 @@
 
 import type { DrainEstimates } from "./drain";
 import type { MetricsResponse } from "./metrics";
+import type { BatchJobSort, BatchJobsResponse, BatchResponse } from "./batchPage";
 import type { SimilarJobsResponse, UtilizationForJob } from "./similar";
 import type {
   UtilApplyRequest,
@@ -1471,6 +1472,26 @@ export const api = {
     return fetchJSON(`${BASE}/utilization/jobs?${qs.toString()}`);
   },
 
+  // One batch or DAG for /batches/<id>; any ClusterId of the batch
+  // resolves, and the answer's id is the canonical one.
+  batches: {
+    get: (id: number | string): Promise<BatchResponse> =>
+      fetchJSON(`${BASE}/batches/${encodeURIComponent(String(id))}`),
+    jobs: (
+      id: number | string,
+      params: { status?: string[]; sort?: BatchJobSort; order?: "asc" | "desc"; offset?: number; page_size?: number } = {},
+    ): Promise<BatchJobsResponse> => {
+      const qs = new URLSearchParams();
+      if (params.status && params.status.length) qs.set("status", params.status.join(","));
+      if (params.sort) qs.set("sort", params.sort);
+      if (params.order) qs.set("order", params.order);
+      if (params.offset) qs.set("offset", String(params.offset));
+      if (params.page_size) qs.set("page_size", String(params.page_size));
+      const q = qs.toString();
+      return fetchJSON(`${BASE}/batches/${encodeURIComponent(String(id))}/jobs${q ? "?" + q : ""}`);
+    },
+  },
+
   version: (): Promise<VersionInfo> => fetchJSON(`${BASE}/version`),
 
   // Multi-AP mode: the access points this server fronts.
@@ -1637,6 +1658,19 @@ export const api = {
 
     // Remove every job matching a ClassAd constraint expression. Used by
     // the batch listing's "Remove batch" action with `ClusterId == N`.
+    // Hold or release every job a constraint selects, as one action (a
+    // batch's Hold and Release).
+    holdByConstraint: (constraint: string, reason?: string): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs/hold`, {
+        method: "POST",
+        body: JSON.stringify({ constraint, reason }),
+      }),
+    releaseByConstraint: (constraint: string, reason?: string): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs/release`, {
+        method: "POST",
+        body: JSON.stringify({ constraint, reason }),
+      }),
+
     removeByConstraint: (
       constraint: string,
       reason?: string,

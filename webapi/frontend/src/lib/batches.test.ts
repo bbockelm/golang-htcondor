@@ -114,6 +114,24 @@ describe('groupIntoBatches', () => {
     expect(training.statusCounts.running).toBe(2);
   });
 
+  it("keeps a DAG whole when its nodes run as another user, with its DAGMan job's owner", () => {
+    // A schedd that is not root runs DAGMan's node jobs as its own user,
+    // not as whoever submitted the DAG.
+    const ads: ClassAd[] = [
+      { ClusterId: 7, JobBatchName: 'w.dag+2', DAGManJobId: 2, DAGNodeName: 'A', Owner: 'condor', JobStatus: 2 },
+      { ClusterId: 2, JobBatchName: 'w.dag+2', Cmd: '/usr/bin/condor_dagman', Owner: 'admin', JobStatus: 2 },
+      // A named batch keeps its owners apart.
+      { ClusterId: 8, JobBatchName: 'w', Owner: 'condor', JobStatus: 1 },
+      { ClusterId: 9, JobBatchName: 'w', Owner: 'admin', JobStatus: 1 },
+    ];
+    const batches = groupIntoBatches(ads);
+    const dag = batches.find((b) => b.isDag)!;
+    expect(dag.jobCount).toBe(2);
+    expect(dag.owner).toBe('admin');
+    expect([...dag.clusterIds].sort()).toEqual([2, 7]);
+    expect(batches.filter((b) => !b.isDag)).toHaveLength(2);
+  });
+
   it('folds an entire DAG tree (nodes + nested sub-DAGs) into one batch', () => {
     const batches = groupIntoBatches(nestedDag());
     // All four jobs, despite three different clusters and differing
