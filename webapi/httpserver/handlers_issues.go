@@ -248,7 +248,7 @@ func (s *Handler) issuesAnswer(ctx context.Context, r *http.Request, q issueQuer
 		// no cross-user view), run attempts where the hub federates
 		// epoch_history.
 		var err error
-		if scope, src, sources, err = s.multiAPIssueScope(ctx, r, filter); err != nil {
+		if scope, src, sources, err = s.multiAPIssueScope(ctx, r, filter, q.includeEnded); err != nil {
 			return IssuesResponse{}, err
 		}
 		key = fmt.Sprintf("multi|%s|%d|%t", scope, int64(window/time.Second), q.includeEnded)

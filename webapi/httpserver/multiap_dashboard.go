@@ -71,6 +71,7 @@ func (s *Handler) handleMultiDashboard(w http.ResponseWriter, r *http.Request) {
 		s.multiAPError(w, err)
 		return
 	}
+	sources = svc.TableSources(sources, multiap.TableJobs)
 	resp := DashboardResponse{
 		Username:     htcondor.GetAuthenticatedUserFromContext(ctx),
 		JobsByStatus: map[string]int{},
@@ -132,6 +133,9 @@ func (s *Handler) handleMultiDashboardActivity(w http.ResponseWriter, r *http.Re
 		s.multiAPError(w, err)
 		return
 	}
+	// The lists read jobs, the finished counts and goodput history: an AP
+	// whose stream of either is not usable is reported, not silently short.
+	sources = svc.TableSources(svc.TableSources(sources, multiap.TableJobs), multiap.TableHistory)
 	now := time.Now()
 	since := now.Add(-dashboardRecentWindow).Unix()
 	resp := DashboardActivityResponse{

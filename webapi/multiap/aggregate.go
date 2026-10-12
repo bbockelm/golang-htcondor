@@ -94,3 +94,39 @@ func (src Sources) StateOf(schedd string) string {
 	}
 	return StateFresh
 }
+
+// TableSources adds to a sources block each AP whose stream of table
+// into the hub cannot vouch for that table's rows -- not federated from
+// it, disconnected, failing, or still catching up -- so a read of table
+// says which APs' rows in it may be missing rather than returning them
+// silently partial. An AP already degraded is left as it is.
+func (s *Service) TableSources(src Sources, table string) Sources {
+	out := Sources{APs: src.APs, Fresh: src.Fresh, Degraded: append([]Degraded{}, src.Degraded...)}
+	degraded := map[string]bool{}
+	for _, d := range src.Degraded {
+		degraded[strings.ToLower(d.Schedd)] = true
+	}
+	for _, m := range s.Registry.Members() {
+		if degraded[strings.ToLower(m.Name)] {
+			continue
+		}
+		reason := ""
+		hsrc, ok := s.Hub.Source(m.Name)
+		ts, federated := hsrc.TableStatus[table]
+		switch {
+		case !ok || !federated:
+			reason = "the federation hub does not federate " + table + " from this access point"
+		case !ts.Connected:
+			reason = "the federation hub's " + table + " stream from this access point is not connected"
+		case ts.LastError != "":
+			reason = "the federation hub's " + table + " stream from this access point is failing: " + ts.LastError
+		case ts.SyncedKnown && !ts.Synced:
+			reason = "the federation hub's " + table + " stream from this access point is catching up"
+		default:
+			continue
+		}
+		out.Fresh--
+		out.Degraded = append(out.Degraded, Degraded{Schedd: m.Name, State: StateStale, Reason: reason})
+	}
+	return out
+}

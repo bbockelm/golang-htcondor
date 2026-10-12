@@ -1884,6 +1884,12 @@ mode, and each record carries `ScheddName`; one naming neither is a
 would scan every access point's history file on every request, with no
 order or page token across them.
 
+The dashboard, the issues view and run-attempt reads also name, in their
+`sources` block, each access point whose stream of the table they read
+(`jobs`, `history`, `epoch_history`) is disconnected, failing, still
+catching up or not federated, with a `reason` naming the table, so a
+short answer says which access points it is short of.
+
 **Actions need a complete id.** A mutation, a sandbox read, a share URL or
 an SSH connection naming only `123.0` is a **400** with
 `"reason": "incomplete_job_id"` and your jobs with that number as

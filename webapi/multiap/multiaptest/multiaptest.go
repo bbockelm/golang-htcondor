@@ -241,11 +241,13 @@ func (d *DB) PutHistory(schedd, user string, cluster, proc int, entered int64) {
 	}
 }
 
-// PutSource writes a federation_sources row with its jobs stream
-// connected. staleness < 0 leaves StalenessSeconds unset.
+// PutSource writes a federation_sources row with the streams of a hub's
+// default tables (jobs, history, syncstatus) connected. staleness < 0
+// leaves StalenessSeconds unset.
 func (d *DB) PutSource(schedd, state string, staleness int64) {
 	d.t.Helper()
-	ad := fmt.Sprintf("ScheddName = %q\nState = %q\nLastSeen = %d\nJobsConnected = true", schedd, state, time.Now().Unix())
+	ad := fmt.Sprintf("ScheddName = %q\nState = %q\nLastSeen = %d\nJobsConnected = true\nHistoryConnected = true\nSyncStatusConnected = true",
+		schedd, state, time.Now().Unix())
 	if staleness >= 0 {
 		ad += fmt.Sprintf("\nStalenessSeconds = %d", staleness)
 	}

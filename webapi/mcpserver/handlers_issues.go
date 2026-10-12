@@ -140,6 +140,10 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 		if err != nil {
 			return nil, err
 		}
+		srcs = s.multi.TableSources(srcs, multiap.TableJobs)
+		if v, ok := args["include_ended"].(bool); !ok || v {
+			srcs = s.multi.TableSources(srcs, multiap.TableEpochHistory)
+		}
 		scope, constraint, src, sources = OwnerScope{Owner: user}, clause, multiap.IssueSource{Service: s.multi}, &srcs
 	} else {
 		var ok bool

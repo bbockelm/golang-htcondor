@@ -83,7 +83,7 @@ func (s *Service) ListEpochs(ctx context.Context, req EpochRequest) ([]Row, *Lis
 	if err != nil {
 		return nil, nil, err
 	}
-	res := &ListResult{Sources: sources}
+	res := &ListResult{Sources: s.TableSources(sources, TableEpochHistory)}
 	dbc, closer, err := s.HubClient(ctx)
 	if err != nil {
 		return nil, nil, err
