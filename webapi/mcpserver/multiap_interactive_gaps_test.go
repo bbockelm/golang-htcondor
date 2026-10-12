@@ -42,16 +42,16 @@ func TestMultiAPInteractiveRefusesAForeignDomain(t *testing.T) {
 // anything is sent there. Kills: interactiveAPs.Route skipping AdmitTo.
 func TestMultiAPInteractiveExecHonorsTheAPsVerdict(t *testing.T) {
 	a := newSessionAPs(t, "USER alice@d "+mAP1+"\n", func(hub *multiaptest.DB) {
-		hub.PutJob(mAP2, "alice@d", 7, 0, sessionBatch+"\nJobStatus = 2")
+		hub.PutJob(mAP3, "alice@d", 7, 0, sessionBatch+"\nJobStatus = 2")
 	})
-	a.srv.multi.Admit = refuseOn(mAP2)
+	a.srv.multi.Admit = refuseOn(mAP3)
 	before := a.counts()
 	_, _, err := a.call(t, "interactive_session_exec", map[string]any{"session": "work", "command": "true"})
-	if err == nil || !strings.Contains(err.Error(), "refused on "+mAP2) {
+	if err == nil || !strings.Contains(err.Error(), "refused on "+mAP3) {
 		t.Errorf("exec on a session whose AP refuses alice = %v, want that refusal", err)
 	}
-	if after := a.counts(); after[mAP2] != before[mAP2] {
-		t.Errorf("a refusing AP was contacted (%d connections)", after[mAP2]-before[mAP2])
+	if after := a.counts(); after[mAP3] != before[mAP3] {
+		t.Errorf("a refusing AP was contacted (%d connections)", after[mAP3]-before[mAP3])
 	}
 }
 

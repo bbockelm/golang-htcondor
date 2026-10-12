@@ -20,6 +20,7 @@ func TestMultiAPUnreachableRecordedSessionKeepsItsName(t *testing.T) {
 	if _, err := mgr.Create(context.Background(), alice, CreateSpec{Name: "work"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	aps.running(testAP1)
 	aps.setUnreachable(testAP1)
 
 	_, err := mgr.Create(context.Background(), alice, CreateSpec{Name: "work", Schedd: testAP2})
@@ -101,7 +102,7 @@ func TestMultiAPFindReachesAKnownSessionWithTheHubDown(t *testing.T) {
 func TestMultiAPHangingAPIsTimedOut(t *testing.T) {
 	aps := newFakeAPs(testAP1, testAP2)
 	aps.injectSession(testAP1, 7, "a")
-	aps.injectSession(testAP2, 7, "b")
+	aps.injectSession(testAP2, 8, "b")
 	aps.hang = map[string]bool{testAP2: true}
 	mgr, _ := multiManager(t, aps, Options{APTimeout: 200 * time.Millisecond})
 

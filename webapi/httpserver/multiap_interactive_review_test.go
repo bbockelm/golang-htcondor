@@ -71,7 +71,7 @@ func newConsentFlow(t *testing.T, s *interactiveServer, user string, groups ...s
 	if err := storage.CreateClient(context.Background(), client); err != nil {
 		t.Fatalf("create client: %v", err)
 	}
-	dh := NewDeviceCodeHandler(storage, &fosite.Config{AccessTokenIssuer: "http://localhost:8080"})
+	dh := NewDeviceCodeHandler(storage, &fosite.Config{AccessTokenIssuer: "http://localhost:8080"}) //nolint:gosec // G101: test issuer URL
 	resp, err := dh.HandleDeviceAuthorizationRequest(context.Background(), client, sshGatewayScopes, "work")
 	if err != nil {
 		t.Fatalf("device authorization: %v", err)

@@ -59,10 +59,10 @@ func TestMultiAPInteractiveRESTRefusesAForeignDomain(t *testing.T) {
 // looked for there. Kills: multiRoute skipping AdmitTo.
 func TestMultiAPAppOnARefusingAPIsNotReached(t *testing.T) {
 	s := newInteractiveServer(t, "USER alice@d "+ap1+"\n", func(hub *multiaptest.DB) {
-		hub.PutJob(ap2, "alice@d", 9, 0, appRow())
+		hub.PutJob(ap3, "alice@d", 9, 0, appRow())
 	})
-	s.svc.Admit = refuseOn(ap2)
-	for _, id := range []string{appHex, appHex + "@" + ap2} {
+	s.svc.Admit = refuseOn(ap3)
+	for _, id := range []string{appHex, appHex + "@" + ap3} {
 		before := s.aps.counts()
 		rec := doAlice(t, s.srv, http.MethodGet, "/api/v1/apps/"+id, "")
 		if rec.Code != http.StatusForbidden {
