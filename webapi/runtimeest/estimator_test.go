@@ -780,6 +780,27 @@ func TestDAGNodesAndStandaloneJobsKeptApart(t *testing.T) {
 	}
 }
 
+// A container job is never estimated from the same owner's bare jobs,
+// even running the same command, nor the reverse -- in a listing too,
+// where neighbouring jobs with the same features share their keys.
+func TestContainerAndBareJobsKeptApart(t *testing.T) {
+	e := New(Config{})
+	ctr := Features{Owner: "alice", ClusterID: 1, Cmd: "run.sh", Container: true}
+	bare := Features{Owner: "alice", ClusterID: 2, Cmd: "run.sh"}
+	ingest(e, job{ctr, 1600, t0}, job{bare, 700, t0.Add(time.Second)})
+	ctr.ClusterID, bare.ClusterID = 3, 3
+	if r := e.Estimate(Query{Features: ctr}); !r.Available || r.EstimateSeconds != 1600 {
+		t.Errorf("container job: %+v", r)
+	}
+	if r := e.Estimate(Query{Features: bare}); !r.Available || r.EstimateSeconds != 700 {
+		t.Errorf("bare job: %+v", r)
+	}
+	rs := e.EstimateMany([]Query{{Features: bare}, {Features: ctr}})
+	if rs[0].EstimateSeconds != 700 || rs[1].EstimateSeconds != 1600 {
+		t.Errorf("listing: bare %v, container %v", rs[0].EstimateSeconds, rs[1].EstimateSeconds)
+	}
+}
+
 // The access point's group is by universe once the universe has enough
 // jobs, and every job until then. DAG nodes and standalone jobs share it.
 func TestGlobalIsByUniverse(t *testing.T) {
