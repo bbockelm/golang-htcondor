@@ -211,7 +211,7 @@ func (h *Handler) handleSharedWatch(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) awaitWatchAnswer(ctx context.Context, p *shareurl.Payload, start, deadline time.Time) watchpoll.Answer {
 	var found *jobwatch.Watch
 	var missing bool
-	err := jobwatch.Await(ctx, h.jobWatchEval, p.Owner, deadline, watchpoll.Refresh,
+	err := jobwatch.Await(ctx, h.jobWatchEval, p.Owner, deadline, h.watchRefresh(),
 		func(err error) {
 			h.logger.Warn(logging.DestinationHTTP, "evaluating job watches failed", "error", err)
 		},
@@ -312,6 +312,15 @@ func (h *Handler) watchHeartbeat() time.Duration {
 		return h.watchHeartbeatEvery
 	}
 	return watchpoll.HeartbeatInterval
+}
+
+// watchRefresh is how often a waiting poll re-reads the watch: the
+// package default unless a test has shortened it.
+func (h *Handler) watchRefresh() time.Duration {
+	if h.watchRefreshEvery > 0 {
+		return h.watchRefreshEvery
+	}
+	return watchpoll.Refresh
 }
 
 // writeWatchPollSSE writes one frame.

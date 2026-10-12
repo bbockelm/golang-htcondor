@@ -417,6 +417,10 @@ type Handler struct {
 	// small /tmp is a way to take the server down with it.
 	spoolBufferDir string
 	shareSigner    *shareurl.Signer // HMAC signer for short-lived signed URLs
+	// watchRefreshEvery overrides how often a watch poll re-reads the
+	// watch while it waits. Zero means watchpoll.Refresh; only tests
+	// set it.
+	watchRefreshEvery time.Duration
 	// watchHeartbeatEvery overrides the streaming watch-poll heartbeat
 	// cadence. Zero means watchpoll.HeartbeatInterval; only tests set it.
 	watchHeartbeatEvery time.Duration

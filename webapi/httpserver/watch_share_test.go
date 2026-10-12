@@ -55,6 +55,7 @@ func watchShareHandler(t *testing.T) (*Handler, *jobwatch.Store) {
 		trustDomain:         "example.org",
 		jobWatch:            store,
 		watchHeartbeatEvery: 20 * time.Millisecond,
+		watchRefreshEvery:   50 * time.Millisecond,
 	}, store
 }
 
