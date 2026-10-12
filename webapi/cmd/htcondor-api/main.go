@@ -482,13 +482,16 @@ func discoverOIDCEndpoints(issuerURL string) (authURL, tokenURL, userInfoURL str
 //     inline bytes — same rationale as KEK).
 //   - url: optional URL override (for proxy/cache deployments).
 //   - model: optional model id override.
+//   - authScheme: "x-api-key" (default) or "bearer"; how the key is
+//     presented to the upstream, which differs between Anthropic's API
+//     and a gateway fronting it.
 //   - operatorInstructionsFile: optional file with site-specific extra
 //     system-prompt rules appended to every chat turn.
 //
-// All four are zero-valued when unset; the chat package treats an
+// All five are zero-valued when unset; the chat package treats an
 // empty apiKeyFile as "feature disabled" and the others have safe
 // defaults.
-func loadLLMConfig(cfg *config.Config) (apiKeyFile, url, model, operatorInstructionsFile string) {
+func loadLLMConfig(cfg *config.Config) (apiKeyFile, url, model, authScheme, operatorInstructionsFile string) {
 	if v, ok := cfg.Get("HTTP_API_LLM_API_KEY_FILE"); ok {
 		apiKeyFile = strings.TrimSpace(v)
 	}
@@ -497,6 +500,9 @@ func loadLLMConfig(cfg *config.Config) (apiKeyFile, url, model, operatorInstruct
 	}
 	if v, ok := cfg.Get("HTTP_API_LLM_MODEL"); ok {
 		model = strings.TrimSpace(v)
+	}
+	if v, ok := cfg.Get("HTTP_API_LLM_AUTH_SCHEME"); ok {
+		authScheme = strings.TrimSpace(v)
 	}
 	if v, ok := cfg.Get("HTTP_API_LLM_OPERATOR_INSTRUCTIONS_FILE"); ok {
 		operatorInstructionsFile = strings.TrimSpace(v)
@@ -2002,7 +2008,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	log.Printf("HTTP base URL: %s (public: %q)", httpBaseURL, publicBaseURL(cfg))
 
 	// LLM / chat-feature config. Zero-strings = chat disabled.
-	llmAPIKeyFile, llmAPIURL, llmModel, llmOperatorInstructions := loadLLMConfig(cfg)
+	llmAPIKeyFile, llmAPIURL, llmModel, llmAuthScheme, llmOperatorInstructions := loadLLMConfig(cfg)
 
 	// Metrics-endpoint exposure. Default: false (auth required). Set
 	// HTTP_API_METRICS_PUBLIC=true to skip the API-key gate when the
@@ -2202,6 +2208,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		LLMAPIKeyFile:               llmAPIKeyFile,
 		LLMAPIURL:                   llmAPIURL,
 		LLMModel:                    llmModel,
+		LLMAuthScheme:               llmAuthScheme,
 		LLMOperatorInstructionsFile: llmOperatorInstructions,
 		MetricsPublic:               metricsPublic,
 		ToolStatsFlushInterval:      toolStatsFlush,
@@ -2539,7 +2546,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	log.Printf("HTTP base URL: %s (public: %q)", httpBaseURL, publicBaseURL(cfg))
 
 	// LLM / chat-feature config. Zero-strings = chat disabled.
-	demoLLMKeyFile, demoLLMURL, demoLLMModel, demoLLMOperatorInstructions := loadLLMConfig(cfg)
+	demoLLMKeyFile, demoLLMURL, demoLLMModel, demoLLMAuthScheme, demoLLMOperatorInstructions := loadLLMConfig(cfg)
 
 	// Create and start HTTP server with MCP and IDP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
@@ -2619,6 +2626,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		LLMAPIKeyFile:               demoLLMKeyFile,
 		LLMAPIURL:                   demoLLMURL,
 		LLMModel:                    demoLLMModel,
+		LLMAuthScheme:               demoLLMAuthScheme,
 		LLMOperatorInstructionsFile: demoLLMOperatorInstructions,
 	})
 	if err != nil {

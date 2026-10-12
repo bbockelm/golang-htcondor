@@ -1087,6 +1087,11 @@ type HandlerConfig struct {
 	// LLMModel overrides the default Anthropic model id. Empty falls
 	// back to chat.DefaultAnthropicModel.
 	LLMModel string
+	// LLMAuthScheme selects the header the key travels in:
+	// chat.AuthSchemeAPIKey (x-api-key, the Anthropic default) or
+	// chat.AuthSchemeBearer for a gateway that wants
+	// "Authorization: Bearer". Empty = x-api-key.
+	LLMAuthScheme string
 
 	// LLMOperatorInstructionsFile is the path to a file containing
 	// extra system-prompt rules the operator wants appended to every
@@ -1956,6 +1961,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			APIKeyFile: cfg.LLMAPIKeyFile,
 			URL:        cfg.LLMAPIURL,
 			Model:      cfg.LLMModel,
+			AuthScheme: cfg.LLMAuthScheme,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to load LLM API key: %w", err)
@@ -1982,6 +1988,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			logger.Info(logging.DestinationHTTP, "Chat endpoint enabled",
 				"upstream", llm.URL(),
 				"model", llm.Model(),
+				"auth_scheme", llm.AuthScheme(),
 				"tool_count", len(tools),
 				"operator_instructions", cfg.LLMOperatorInstructionsFile != "",
 			)
