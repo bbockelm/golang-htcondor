@@ -1462,8 +1462,14 @@ metrics key.
   the collector; finding none simply disables the group.
 
 **Chat assistant** (when `HTTP_API_LLM_API_KEY_FILE` is set)
-- `POST /api/v1/chat` — AI-SDK v6 UI-message stream
+- `POST /api/v1/chat` — AI-SDK v6 UI-message stream. The body's `scope`
+  (`mine` or `everyone`) is the page's Mine/Everyone view; the server
+  grants `everyone` only to a caller the page's own endpoint would show
+  other users' jobs, and the assistant's tools act on other users' jobs
+  only for an administrator with the right to change them.
 - `GET /api/v1/chat/info` — feature probe
+- `GET /api/v1/chat/scope?page=<page>&scope=<mine|everyone>` — which jobs
+  the assistant would see for this caller on that page
 
 **MCP** (when enabled via `HTTP_API_ENABLE_MCP=true`)
 - The full MCP surface is exposed at `/mcp/*` for cooperative
