@@ -37,6 +37,7 @@ func (f *fakeTarget) SetWebUIAdminGroups(v string)   { f.record("webui_admin", v
 func (f *fakeTarget) SetSuperuserGroups(v string)    { f.record("superuser", v) }
 func (f *fakeTarget) SetMCPSkillsDir(v string)       { f.record("skills_dir", v) }
 func (f *fakeTarget) SetMCPDisabledTools(v string)   { f.record("disabled_tools", v) }
+func (f *fakeTarget) ReloadAPAssignment()            { f.record("ap_assignment_reload", "") }
 func (f *fakeTarget) SetProjectLeadsFile(v string)   { f.record("project_leads_file", v) }
 func (f *fakeTarget) SetProjectLeadsGroup(v string)  { f.record("project_leads_group", v) }
 
@@ -256,5 +257,29 @@ func TestReconfigRereadsProjectLeadsFile(t *testing.T) {
 	}
 	if got, want := target.groups["project_leads_group"], []string{"{project}-leads"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("leads pattern = %v, want %v", got, want)
+	}
+}
+
+// A reconfigure of a multi-AP server re-reads the access point
+// assignment's files whether or not any knob changed: editing the mapfile
+// is the usual reason to send one.
+func TestReconfigReloadsAPAssignment(t *testing.T) {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "HTTP_API_SCHEDD_CONSTRAINT = regexp(\"^ap\", Name)\nHTTP_API_AP_ASSIGNMENT_MAPFILE = /etc/condor/assign.map\n"
+	target := &fakeTarget{}
+	w := newReconfigWatcher(configFrom(t, body), target, logger)
+	w.reconfigure(configFrom(t, body))
+	if n := len(target.groups["ap_assignment_reload"]); n != 1 {
+		t.Errorf("reconfigure reloaded the assignment %d times, want 1", n)
+	}
+	// Single-AP mode has no assignment to reload.
+	single := &fakeTarget{}
+	w = newReconfigWatcher(configFrom(t, ""), single, logger)
+	w.reconfigure(configFrom(t, ""))
+	if n := len(single.groups["ap_assignment_reload"]); n != 0 {
+		t.Errorf("single-AP reconfigure reloaded the assignment %d times", n)
 	}
 }

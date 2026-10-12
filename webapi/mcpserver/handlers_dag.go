@@ -267,7 +267,8 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 		}
 	}
 
-	schedd := s.getSchedd()
+	// The routed AP in multi-AP mode: the spool goes where the job went.
+	schedd := s.scheddFor(ctx)
 	clusterID, procAds, err := s.submitRemote(ctx, submitFile)
 	if err != nil {
 		return nil, fmt.Errorf("submitting the DAGMan job failed: %w", err)

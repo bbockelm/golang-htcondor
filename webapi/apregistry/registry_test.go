@@ -219,3 +219,44 @@ func TestRunPollsUntilCancelled(t *testing.T) {
 		t.Fatal("Run did not stop")
 	}
 }
+
+// TestMembersCarryTheirCredd: each member names the credd its schedd ad
+// advertises, and follows a change of it.
+func TestMembersCarryTheirCredd(t *testing.T) {
+	fc := &fakeCollector{}
+	r, err := New(fc, `regexp("^ap", Name)`, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withCredd := func(name, addr, credd string) *classad.ClassAd {
+		ad := scheddAd(t, name, addr)
+		if credd != "" {
+			_ = ad.Set(AttrCreddAddress, credd)
+		}
+		return ad
+	}
+	fc.set([]*classad.ClassAd{withCredd("ap1", "<10.0.0.1:9618>", "<10.0.0.1:9620>"), withCredd("ap2", "<10.0.0.2:9618>", "")}, nil)
+	if err := r.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, a := range fc.lastOpts.Projection {
+		found = found || a == AttrCreddAddress
+	}
+	if !found {
+		t.Errorf("projection %v lacks %s", fc.lastOpts.Projection, AttrCreddAddress)
+	}
+	if m, _ := r.Get("ap1"); m.CreddAddress != "<10.0.0.1:9620>" {
+		t.Errorf("ap1 credd = %q", m.CreddAddress)
+	}
+	if m, _ := r.Get("ap2"); m.CreddAddress != "" {
+		t.Errorf("ap2 credd = %q, want none", m.CreddAddress)
+	}
+	fc.set([]*classad.ClassAd{withCredd("ap1", "<10.0.0.1:9618>", "<10.0.0.9:9620>")}, nil)
+	if err := r.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := r.Get("ap1"); m.CreddAddress != "<10.0.0.9:9620>" {
+		t.Errorf("ap1 credd after a move = %q", m.CreddAddress)
+	}
+}

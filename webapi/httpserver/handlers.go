@@ -20,8 +20,10 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 	"github.com/bbockelm/golang-htcondor/version"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -163,8 +165,18 @@ type JobSubmitRequest struct {
 
 // JobSubmitResponse represents a job submission response
 type JobSubmitResponse struct {
-	ClusterID int      `json:"cluster_id"`
-	JobIDs    []string `json:"job_ids"` // Array of "cluster.proc" strings
+	ClusterID int `json:"cluster_id"`
+	// JobIDs are "cluster.proc"; in multi-AP mode, complete ids
+	// ("cluster.proc@schedd"), the form every later step takes.
+	JobIDs []string `json:"job_ids"`
+	// Schedd is the access point the job was submitted to (multi-AP
+	// mode only).
+	Schedd string `json:"schedd,omitempty"`
+	// Jobs names each job by its separate parts (multi-AP mode only).
+	Jobs []multiap.JobRef `json:"jobs,omitempty"`
+	// Assignment is the caller's AP assignment the submission followed
+	// (multi-AP mode only).
+	Assignment *apassign.Assignment `json:"assignment,omitempty"`
 }
 
 // JobEditRequest represents a job edit request
@@ -497,6 +509,10 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 // handleSubmitJob handles POST /api/v1/jobs
 func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
+	if s.multi != nil {
+		s.handleMultiSubmitJob(w, r)
+		return
+	}
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -522,27 +538,7 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 
 	clusterID, procAds, err := s.submitJob(ctx, req.SubmitFile)
 	if err != nil {
-		// Check if it's an authentication error
-		if isAuthenticationError(err) {
-			s.logger.Warn(logging.DestinationHTTP, "Job submission auth failed",
-				"user", htcondor.GetAuthenticatedUserFromContext(ctx),
-				"error", err)
-			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
-			return
-		}
-		var controlled *submitpolicy.ControlledAttributeError
-		if errors.As(err, &controlled) {
-			s.writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		// Surface submission failures explicitly. Without this the only
-		// trace was the generic 500 in the access log; the Web UI would
-		// then show "500 Internal Server Error" with no detail because
-		// the error string was only ever in the response body.
-		s.logger.Error(logging.DestinationHTTP, "Job submission failed",
-			"user", htcondor.GetAuthenticatedUserFromContext(ctx),
-			"error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job submission failed: %v", err))
+		s.writeSubmitFailure(ctx, w, err)
 		return
 	}
 
@@ -558,6 +554,32 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		ClusterID: clusterID,
 		JobIDs:    jobIDs,
 	})
+}
+
+// writeSubmitFailure writes the response for a failed submission.
+func (s *Handler) writeSubmitFailure(ctx context.Context, w http.ResponseWriter, err error) {
+	// Check if it's an authentication error
+	if isAuthenticationError(err) {
+		s.logger.Warn(logging.DestinationHTTP, "Job submission auth failed",
+			"user", htcondor.GetAuthenticatedUserFromContext(ctx),
+			"error", err)
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+	var controlled *submitpolicy.ControlledAttributeError
+	if errors.As(err, &controlled) {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Surface submission failures explicitly. Without this the only
+	// trace was the generic 500 in the access log; the Web UI would
+	// then show "500 Internal Server Error" with no detail because
+	// the error string was only ever in the response body.
+	s.logger.Error(logging.DestinationHTTP, "Job submission failed",
+		"user", htcondor.GetAuthenticatedUserFromContext(ctx),
+		"access_point", routedSchedd(ctx),
+		"error", err)
+	s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job submission failed: %v", err))
 }
 
 // handleJobByID handles /api/v1/jobs/{id} endpoint
@@ -3330,6 +3352,8 @@ func (s *Handler) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cl
 type WhoAmIResponse struct {
 	Authenticated bool   `json:"authenticated"`
 	User          string `json:"user,omitempty"` // Omit if not authenticated
+	// Assignment is where the caller's new work goes (multi-AP mode).
+	Assignment *APAssignmentInfo `json:"assignment,omitempty"`
 }
 
 // handleWhoAmI handles GET /api/v1/whoami endpoint
@@ -3357,6 +3381,11 @@ func (s *Handler) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	response := WhoAmIResponse{
 		Authenticated: username != "",
 		User:          username,
+	}
+	if s.multi != nil && username != "" {
+		if user, err := s.multi.svc.UserFor(username); err == nil {
+			response.Assignment = s.assignmentInfo(ctx, s.jobAssignRequest(ctx, r, user))
+		}
 	}
 
 	s.writeJSON(w, http.StatusOK, response)

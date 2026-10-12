@@ -51,6 +51,9 @@ type reconfigTarget interface {
 	SetProjectLeadsGroup(string)
 	SetMCPSkillsDir(string)
 	SetMCPDisabledTools(string)
+	// ReloadAPAssignment re-reads the access point assignment's files
+	// (the mapfile, the REST token) and drops cached answers.
+	ReloadAPAssignment()
 }
 
 // reconfigParams is the table described above. It is deliberately a list of
@@ -230,6 +233,14 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_MULTI_AP_STALE"},
 	{name: "HTTP_API_JOB_ID_CODEC"},
 	{name: "HTTP_API_BULK_FRESH_SECONDS"},
+	// The assignment chain is built at startup; the mapfile's and token
+	// file's contents are re-read on every reconfigure (see reconfigure).
+	{name: "HTTP_API_AP_ASSIGNMENT"},
+	{name: "HTTP_API_AP_ASSIGNMENT_DEFAULT"},
+	{name: "HTTP_API_AP_ASSIGNMENT_MAPFILE"},
+	{name: "HTTP_API_AP_ASSIGNMENT_REST_URL"},
+	{name: "HTTP_API_AP_ASSIGNMENT_REST_TOKEN_FILE"},
+	{name: "HTTP_API_AP_ASSIGNMENT_STALE_SECONDS"},
 }
 
 // reconfigWatcher remembers what each known parameter was set to, so a
@@ -281,6 +292,14 @@ func (w *reconfigWatcher) reconfigure(cfg *config.Config) {
 			w.srv.SetProjectLeadsFile(path)
 			applied = append(applied, "HTTP_API_PROJECT_LEADS_FILE")
 		}
+	}
+
+	// The access point assignment mapfile and REST token live outside the
+	// configuration too, and editing the mapfile is the usual reason to
+	// reconfigure a multi-AP server. The backends themselves are built
+	// at startup; their files are re-read here.
+	if configValue(cfg, "HTTP_API_SCHEDD_CONSTRAINT") != "" {
+		w.srv.ReloadAPAssignment()
 	}
 
 	// Values can be secrets, so log which parameters changed, never what

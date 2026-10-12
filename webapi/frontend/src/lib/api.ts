@@ -163,9 +163,30 @@ export interface Session {
   // Projects this session leads, armed or not. A lead may list their
   // projects' jobs with the Everyone scope, as an admin may list all jobs.
   project_lead_of?: string[];
-  // This server fronts several access points (schedds) and serves reads
-  // only: job rows carry `schedd` and `job_id`, and actions are not offered.
+  // This server fronts several access points (schedds): job rows carry
+  // `schedd` and `job_id`.
   multi_ap?: boolean;
+  // Multi-AP mode: where this session's new work goes.
+  assignment?: APAssignment;
+}
+
+// APAssignment is where a caller's new work goes in multi-AP mode: the
+// home access point and the alternates they may name, or why there is
+// none.
+export interface APAssignment {
+  schedd?: string;
+  alternates?: string[];
+  source?: string;
+  stale?: boolean;
+  error?: string;
+  reason?: string;
+}
+
+// submitTargets lists the access points a caller may submit to, home
+// first; empty when there is no assignment.
+export function submitTargets(a?: APAssignment): string[] {
+  if (!a?.schedd) return [];
+  return [a.schedd, ...(a.alternates ?? [])];
 }
 
 export interface SuperuserModeState {
@@ -508,11 +529,16 @@ export interface AccessPoint {
     last_seen?: string;
     last_reset?: string;
   };
+  // Whether the caller may submit here (home or alternate), and which is
+  // home.
+  submit?: boolean;
+  home?: boolean;
 }
 
 export interface AccessPointsResponse {
   constraint: string;
   aps: AccessPoint[];
+  assignment?: APAssignment;
   sources: Sources;
   registry?: { last_success?: string; last_error?: string };
   hub: { reachable: boolean; last_success?: string; last_error?: string };
@@ -555,7 +581,10 @@ export interface VersionInfo {
 
 export interface SubmitResponse {
   cluster_id: number;
+  // Complete ids ("1.0@ap2.example.org") in multi-AP mode.
   job_ids: string[];
+  // Multi-AP mode: the access point the jobs went to.
+  schedd?: string;
 }
 
 export interface ShareOutputResponse {
@@ -1674,8 +1703,10 @@ export const api = {
         body: JSON.stringify({ constraint, attributes }),
       }),
 
-    submit: (submitFile: string): Promise<SubmitResponse> =>
-      fetchJSON(`${BASE}/jobs`, {
+    // schedd names the access point in multi-AP mode (the home access
+    // point when omitted).
+    submit: (submitFile: string, schedd?: string): Promise<SubmitResponse> =>
+      fetchJSON(`${BASE}/jobs${schedd ? `?schedd=${encodeURIComponent(schedd)}` : ''}`, {
         method: "POST",
         body: JSON.stringify({ submit_file: submitFile }),
       }),

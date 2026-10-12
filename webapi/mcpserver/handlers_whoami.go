@@ -65,6 +65,14 @@ type whoamiReport struct {
 	AccessPoint string `json:"access_point,omitempty"`
 	// AccessPoints is how many access points a multi-AP server fronts.
 	AccessPoints int `json:"access_points,omitempty"`
+	// HomeAccessPoint is where a multi-AP server submits this caller's
+	// new work, and AlternateAccessPoints the others they may name;
+	// AssignmentSource is what decided it. AssignmentError says why
+	// there is no home access point.
+	HomeAccessPoint       string   `json:"home_access_point,omitempty"`
+	AlternateAccessPoints []string `json:"alternate_access_points,omitempty"`
+	AssignmentSource      string   `json:"assignment_source,omitempty"`
+	AssignmentError       string   `json:"assignment_error,omitempty"`
 	// Scopes are the OAuth scopes the caller's token carries, when the
 	// transport supplied them.
 	Scopes []string `json:"oauth_scopes,omitempty"`
@@ -83,6 +91,13 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 	rep.AdminVia, rep.SuperuserVia = s.privilegeProvenance(ctx, actor)
 	if s.multi != nil {
 		rep.AccessPoints = len(s.multi.Registry.Members())
+		if actor != "" {
+			if a, err := s.multiHomeAP(ctx); err != nil {
+				rep.AssignmentError = err.Error()
+			} else {
+				rep.HomeAccessPoint, rep.AlternateAccessPoints, rep.AssignmentSource = a.Schedd, a.Alternates, a.Source
+			}
+		}
 	} else if sc := s.getSchedd(); sc != nil {
 		rep.AccessPoint = sc.Name()
 	}
@@ -123,6 +138,16 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 	}
 	if rep.AccessPoint != "" {
 		fmt.Fprintf(&sb, "Access point: %s\n", rep.AccessPoint)
+	}
+	switch {
+	case rep.HomeAccessPoint != "":
+		fmt.Fprintf(&sb, "New work you submit goes to your home access point, %s", rep.HomeAccessPoint)
+		if len(rep.AlternateAccessPoints) > 0 {
+			fmt.Fprintf(&sb, "; you may also submit to %s by passing schedd", strings.Join(rep.AlternateAccessPoints, ", "))
+		}
+		sb.WriteString(".\n")
+	case rep.AssignmentError != "":
+		fmt.Fprintf(&sb, "You cannot submit here: %s\n", rep.AssignmentError)
 	}
 	if len(rep.Scopes) > 0 {
 		fmt.Fprintf(&sb, "Token scopes: %s\n", strings.Join(rep.Scopes, " "))

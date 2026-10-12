@@ -751,8 +751,9 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 		tools = append(tools, skillTools()...)
 	}
 
-	// Add credential management tools if credd is available
-	if s.getCredd() != nil {
+	// Add credential management tools if credd is available. In multi-AP
+	// mode each AP has its own, found per call, so they are offered.
+	if s.getCredd() != nil || s.multi != nil {
 		tools = append(tools,
 			Tool{
 				Name:        "list_service_credentials",
@@ -1222,12 +1223,13 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 		return nil, fmt.Errorf("job submission failed: %w", err)
 	}
 
-	// Build job IDs list
+	// Build job IDs list: complete ids in multi-AP mode, the form every
+	// later tool needs.
 	jobIDs := make([]string, len(procAds))
 	for i, ad := range procAds {
 		cluster, _ := ad.EvaluateAttrInt("ClusterId")
 		proc, _ := ad.EvaluateAttrInt("ProcId")
-		jobIDs[i] = fmt.Sprintf("%d.%d", cluster, proc)
+		jobIDs[i] = s.jobIDText(ctx, cluster, proc)
 	}
 
 	// Spooling is per proc, not per submission: `queue N` leaves N procs
@@ -1240,11 +1242,11 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 		fanOut = fmt.Sprintf(`
    NOTE: this submission has %d procs, and HTCondor spools input PER PROC.
    Uploading to "%s" releases that proc only; the rest stay HELD.
-   Either pass the bare cluster id — upload_job_input(job_id="%d") — to spool
+   Either pass the bare cluster id — upload_job_input(%s) — to spool
    every proc still waiting in one call, or use HTTP/HTTPS URLs in
    transfer_input_files so the workers fetch shared inputs themselves
    (the better pattern for a large fan-out).
-`, len(procAds), jobIDs[0], cluster)
+`, len(procAds), jobIDs[0], s.clusterArgsText(ctx, cluster))
 	}
 
 	var nextSteps string
@@ -1258,7 +1260,7 @@ NEXT STEPS:
    DO NOT use release_job — the job cannot run until spooling is complete.
    Releasing without spooling will cause the job to fail immediately.%s
 3. After a successful upload_job_input, the job is automatically released to IDLE (JobStatus=1).
-4. To wait for the job to finish, register a watch with watch_jobs (event="done") and collect it with check_watches — do not poll query_jobs in a loop. The watch fires even if the job has already finished. Use query_jobs for a one-off status check.
+4. %s
 5. When JobStatus=4 (Completed), retrieve output using get_job_stdout and get_job_stderr.
 
 Job Status Values:
@@ -1268,14 +1270,14 @@ Job Status Values:
 - 4 = Completed
 - 5 = Held (waiting for input files or user action)
 
-First job ID for status checks: %s`, fanOut, jobIDs[0])
+First job ID for status checks: %s`, fanOut, s.waitStepText(), jobIDs[0])
 	} else {
 		nextSteps = fmt.Sprintf(`
 
 NEXT STEPS:
 1. The job has been submitted and should transition to IDLE (JobStatus=1) shortly.
    (No input file upload needed since the executable is a system command.)
-2. To wait for the job to finish, register a watch with watch_jobs (event="done") and collect it with check_watches — do not poll query_jobs in a loop. The watch fires even if the job has already finished. Use query_jobs for a one-off status check.
+2. %s
 3. When JobStatus=4 (Completed), retrieve output using get_job_stdout and get_job_stderr.
 
 Job Status Values:
@@ -1285,7 +1287,7 @@ Job Status Values:
 - 4 = Completed
 - 5 = Held (waiting for input files or user action)
 
-First job ID for status checks: %s`, jobIDs[0])
+First job ID for status checks: %s`, s.waitStepText(), jobIDs[0])
 	}
 
 	// Check for OAuthServicesNeeded by re-querying the submitted job.
@@ -2970,7 +2972,7 @@ func (s *Server) checkOAuthServicesNeeded(ctx context.Context, clusterID int) st
 		return ""
 	}
 
-	hasCredd := s.getCredd() != nil
+	hasCredd := s.getCreddFor(ctx) != nil
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "\n\nOAUTH CREDENTIALS REQUIRED:\nThe job requires OAuth credentials for: %s\n", services)
 	if hasCredd {
@@ -2989,11 +2991,11 @@ func (s *Server) checkOAuthServicesNeeded(ctx context.Context, clusterID int) st
 
 // toolListServiceCredentials lists all OAuth service credentials
 func (s *Server) toolListServiceCredentials(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	if s.getCredd() == nil {
+	if s.getCreddFor(ctx) == nil {
 		return nil, fmt.Errorf("credential service is not available")
 	}
 
-	creds, err := s.getCredd().ListServiceCreds(ctx, htcondor.CredTypeOAuth, "")
+	creds, err := s.getCreddFor(ctx).ListServiceCreds(ctx, htcondor.CredTypeOAuth, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list service credentials: %w", err)
 	}
@@ -3031,7 +3033,7 @@ func (s *Server) toolListServiceCredentials(ctx context.Context, _ map[string]in
 
 // toolGetCredentialStatus checks whether an OAuth credential exists for a service
 func (s *Server) toolGetCredentialStatus(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	if s.getCredd() == nil {
+	if s.getCreddFor(ctx) == nil {
 		return nil, fmt.Errorf("credential service is not available")
 	}
 
@@ -3041,7 +3043,7 @@ func (s *Server) toolGetCredentialStatus(ctx context.Context, args map[string]in
 	}
 	handle, _ := args["handle"].(string)
 
-	status, err := s.getCredd().GetServiceCredStatus(ctx, htcondor.CredTypeOAuth, service, handle, "")
+	status, err := s.getCreddFor(ctx).GetServiceCredStatus(ctx, htcondor.CredTypeOAuth, service, handle, "")
 	if err != nil {
 		if errors.Is(err, htcondor.ErrCredentialNotFound) {
 			label := service
@@ -3080,7 +3082,7 @@ func (s *Server) toolGetCredentialStatus(ctx context.Context, args map[string]in
 
 // toolStoreServiceCredential stores an OAuth credential for a service
 func (s *Server) toolStoreServiceCredential(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	if s.getCredd() == nil {
+	if s.getCreddFor(ctx) == nil {
 		return nil, fmt.Errorf("credential service is not available")
 	}
 
@@ -3111,7 +3113,7 @@ func (s *Server) toolStoreServiceCredential(ctx context.Context, args map[string
 		return nil, err
 	}
 
-	if err := s.getCredd().PutServiceCred(ctx, htcondor.CredTypeOAuth, credBytes, service, handle, "", nil); err != nil {
+	if err := s.getCreddFor(ctx).PutServiceCred(ctx, htcondor.CredTypeOAuth, credBytes, service, handle, "", nil); err != nil {
 		return nil, fmt.Errorf("failed to store credential: %w", err)
 	}
 
@@ -3128,7 +3130,7 @@ func (s *Server) toolStoreServiceCredential(ctx context.Context, args map[string
 
 // toolDeleteServiceCredential removes an OAuth credential for a service
 func (s *Server) toolDeleteServiceCredential(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	if s.getCredd() == nil {
+	if s.getCreddFor(ctx) == nil {
 		return nil, fmt.Errorf("credential service is not available")
 	}
 
@@ -3138,7 +3140,7 @@ func (s *Server) toolDeleteServiceCredential(ctx context.Context, args map[strin
 	}
 	handle, _ := args["handle"].(string)
 
-	if err := s.getCredd().DeleteServiceCred(ctx, htcondor.CredTypeOAuth, service, handle, ""); err != nil {
+	if err := s.getCreddFor(ctx).DeleteServiceCred(ctx, htcondor.CredTypeOAuth, service, handle, ""); err != nil {
 		if errors.Is(err, htcondor.ErrCredentialNotFound) {
 			return nil, fmt.Errorf("credential not found for service '%s'", service)
 		}

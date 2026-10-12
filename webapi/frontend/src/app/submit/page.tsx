@@ -32,11 +32,13 @@ import {
   api,
   ApiError,
   MAX_TEMPLATE_INPUT_FILE_BYTES,
+  submitTargets,
   type Template,
   type TemplateColumn,
   type TemplateInputFile,
 } from '@/lib/api';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
+import { SubmitTarget } from '@/components/SubmitTarget';
 import { Dropzone, type DroppedFile } from '@/components/Dropzone';
 import {
   ResourceRequestPanel,
@@ -206,6 +208,13 @@ export default function SubmitPage() {
     retry: false,
   });
   const currentUser = meQuery.data?.username ?? '';
+  // Multi-AP mode: the access point a submission goes to -- the home
+  // access point unless the user picks one of its alternates.
+  const multiAP = !!meQuery.data?.multi_ap;
+  const assignment = meQuery.data?.assignment;
+  const [pickedTarget, setPickedTarget] = useState('');
+  const targets = submitTargets(assignment);
+  const submitTarget = targets.includes(pickedTarget) ? pickedTarget : targets[0];
 
   const tplQuery = useQuery({
     queryKey: ['templates'],
@@ -579,7 +588,7 @@ export default function SubmitPage() {
           effectiveRows,
         );
       }
-      const submitted = await api.jobs.submit(body);
+      const submitted = await api.jobs.submit(body, multiAP ? submitTarget : undefined);
 
       // Common files: template default attachments + the user's
       // dropzone uploads + any inline executable script. These go to
@@ -770,7 +779,8 @@ export default function SubmitPage() {
     effectiveRowsForGate,
     tableSource,
   ]);
-  const submitDisabled = submit.isPending || submitBlockedReason !== null;
+  const submitDisabled =
+    submit.isPending || submitBlockedReason !== null || (multiAP && !submitTarget);
 
   // Chat surface gating. Same /api/v1/chat/info probe the jobs page
   // uses; the server returns enabled=false when the LLM key isn't
@@ -1436,6 +1446,12 @@ export default function SubmitPage() {
 
       <ChatHighlight active={recentlyChanged.has('submit')}>
         <div className="space-y-2">
+          <SubmitTarget
+            multiAP={multiAP}
+            assignment={assignment}
+            value={pickedTarget}
+            onChange={setPickedTarget}
+          />
           <div className="flex items-center gap-3">
             <button
               onClick={() => submit.mutate()}

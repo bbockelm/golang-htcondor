@@ -56,9 +56,11 @@ type AuthMeResponse struct {
 	// Leads may list their projects' jobs without arming, the way admins
 	// may list everyone's, so the UI offers them the same scope toggle.
 	ProjectLeadOf []string `json:"project_lead_of,omitempty"`
-	// MultiAP reports that this server fronts several access points and
-	// serves reads only; the SPA shows the AP column and hides actions.
+	// MultiAP reports that this server fronts several access points; the
+	// SPA shows the AP column and offers only what that mode serves.
 	MultiAP bool `json:"multi_ap,omitempty"`
+	// Assignment is where this session's new work goes, in multi-AP mode.
+	Assignment *APAssignmentInfo `json:"assignment,omitempty"`
 }
 
 // handleAuthMe handles GET /api/v1/auth/me. Resolves the browser session
@@ -81,6 +83,7 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 			resp.IsAdmin = s.webuiAdminGroups.allows(session.Groups)
 		}
 		resp.ProjectLeadOf = s.projectLeads.LedProjects(session.Username, session.Groups)
+		resp.Assignment = s.sessionAssignment(r, session)
 		resp.SuperuserAllowed = s.mayUseSuperuserMode(r)
 		if resp.SuperuserAllowed {
 			if sessionID, err := getSessionCookie(r); err == nil {

@@ -12,7 +12,9 @@ import (
 )
 
 // Multi-AP mode: the server fronts every access point matching a
-// collector constraint, and serves only reads, from the federation hub.
+// collector constraint. Reads come from the federation hub, actions go to
+// the AP a job's complete id names, and submissions to the AP the
+// caller's assignment names (multiap_submit.go).
 //
 // The catalogue is an ALLOWLIST (multiAPTools). A tool not named there is
 // neither listed nor callable: it would act on "the" schedd, and in this
@@ -40,14 +42,15 @@ var multiAPPassthroughTools = map[string]bool{
 // multiAPToolAllowed reports whether multi-AP mode serves a tool.
 func multiAPToolAllowed(name string) bool {
 	return multiAPReadTools[name] || multiAPPassthroughTools[name] || multiAPActionTools[name] ||
+		multiAPSubmitTools[name] != "" || multiAPCredentialTools[name] ||
 		name == "remove_jobs" || isCondorDocTool(name)
 }
 
 // errMultiAPTool refuses a tool multi-AP mode does not serve.
 func errMultiAPTool(name string) error {
 	return fmt.Errorf("the %q tool is not available on this multi-access-point server yet; "+
-		"it serves reading your jobs, and acting on one job at a time or by constraint, but not submitting, "+
-		"DAGs, interactive sessions, credentials or watches", name)
+		"it serves reading your jobs, acting on one job at a time or by constraint, submitting jobs, DAGs and "+
+		"container builds, and credentials, but not interactive sessions or watches", name)
 }
 
 // multiAPCatalog replaces the single-AP catalogue: passthrough tools as
@@ -57,7 +60,7 @@ func multiAPCatalog(tools []Tool) []Tool {
 	out := make([]Tool, 0, len(tools))
 	for _, t := range tools {
 		if multiAPToolAllowed(t.Name) && !multiAPReadTools[t.Name] {
-			out = append(out, multiAPActionToolDef(t))
+			out = append(out, multiAPSubmitToolDef(multiAPActionToolDef(t)))
 		}
 	}
 	return append(out, multiAPToolDefs()...)
@@ -151,6 +154,14 @@ func (s *Server) callMultiAPTool(ctx context.Context, name string, args map[stri
 	default:
 		if multiAPActionTools[name] {
 			result, err = s.multiActionTool(ctx, name, args)
+			break
+		}
+		if kind := multiAPSubmitTools[name]; kind != "" {
+			result, err = s.multiSubmitTool(ctx, name, kind, args)
+			break
+		}
+		if multiAPCredentialTools[name] {
+			result, err = s.multiCredentialTool(ctx, name, args)
 			break
 		}
 		if !multiAPToolAllowed(name) {
@@ -384,8 +395,10 @@ func multiAPInstructions(constraint string) string {
 		"of them. A job is identified by schedd, cluster and proc together: the same cluster.proc can exist on two access " +
 		"points. Copy job_id from an answer rather than composing one: the tools that act on one job (hold, release, " +
 		"remove, edit, output, input, tail, exec) need the complete id and refuse a bare cluster.proc. remove_jobs runs " +
-		"on every access point and reports each. Submitting, DAGs, interactive sessions, credentials and watches are not " +
-		"available here yet. Answers name the access points whose data is not current.\n\n"
+		"on every access point and reports each. submit_job, submit_dag and build_container submit to your home access point " +
+		"(whoami names it, with any alternates you may pass as schedd) and answer with complete job ids. The credential " +
+		"tools use your home access point's credential service unless schedd names another. Interactive sessions and " +
+		"watches are not available here yet. Answers name the access points whose data is not current.\n\n"
 }
 
 // MultiAPScheddCalls reports how many times the single-schedd accessor

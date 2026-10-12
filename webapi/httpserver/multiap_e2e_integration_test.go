@@ -23,6 +23,7 @@ import (
 	"github.com/bbockelm/cedar/security"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
@@ -78,6 +79,9 @@ type multiAPStack struct {
 	// sshOK is whether ssh-to-job can run here (an sshd config template
 	// was found).
 	sshOK bool
+	// assignEdits counts rewrites of the assignment mapfile, for
+	// distinct modification times.
+	assignEdits int
 }
 
 // sshTemplateLine points ssh-to-job at its sshd config template, found
@@ -173,6 +177,9 @@ func TestMultiAPEndToEnd(t *testing.T) {
 		{"a job removed through the API leaves the list and enters history", e2eRemoveViaAPI},
 		{"a stopped spoke degrades its AP and a restarted one recovers", e2eSpokeOutage},
 		{"a stopped hub is an error, not an empty queue, and single-job reads use the spoke", e2eHubOutage},
+		{"a two-step REST submit lands on the assigned AP, keeps its AP across a reassignment, and runs", e2eSubmitTwoStep},
+		{"an explicit target is honored only for an alternate", e2eSubmitExplicitTarget},
+		{"MCP submit_job lands on the assigned AP", e2eSubmitMCP},
 	} {
 		t.Run(phase.name, func(t *testing.T) { phase.run(t, s) })
 	}
@@ -584,6 +591,11 @@ HTCONDORDB_FEDERATE_RETIRE_AFTER = 1h
 UPDATE_INTERVAL = 2
 `, e2eAPConstraint))
 
+	// AP assignment: the test user's new work goes to ap2, the other
+	// user's to ap1.
+	if err := os.WriteFile(s.assignMapPath(), []byte(s.e2eInitialAssignment()), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	s.startServer(t)
 	return s
 }
@@ -614,7 +626,8 @@ func (s *multiAPStack) startServer(t *testing.T) {
 		ListenAddr:     listener.Addr().String(),
 		// Narrowing on, so a phase can check the hub's freshness path end
 		// to end; it is off by default.
-		MultiAP:   MultiAPConfig{ScheddConstraint: e2eAPConstraint, BulkFresh: 30 * time.Second},
+		MultiAP: MultiAPConfig{ScheddConstraint: e2eAPConstraint, BulkFresh: 30 * time.Second,
+			Assignment: apassign.Config{Backends: []string{apassign.BackendMapfile}, Mapfile: s.assignMapPath()}},
 		Collector: htcondor.NewCollector(s.harness.GetCollectorAddr()).WithConfig(htcCfg),
 		// The test plays a trusted proxy naming the caller.
 		UserHeader:               "X-Test-User",

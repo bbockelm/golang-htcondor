@@ -50,3 +50,39 @@ func TestLoadMultiAPConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadAPAssignmentConfig(t *testing.T) {
+	cfg := config.NewEmpty()
+	cfg.Set("HTTP_API_SCHEDD_CONSTRAINT", `regexp("^ap", Name)`)
+	mc, err := loadMultiAPConfig(cfg, "", "")
+	if err != nil || len(mc.Assignment.Backends) != 0 || mc.Assignment.Stale != 0 {
+		t.Fatalf("unset: %+v %v; want the default chain", mc.Assignment, err)
+	}
+	cfg.Set("HTTP_API_AP_ASSIGNMENT", "mapfile, rest")
+	cfg.Set("HTTP_API_AP_ASSIGNMENT_DEFAULT", " ap01.example.org ")
+	cfg.Set("HTTP_API_AP_ASSIGNMENT_MAPFILE", "/etc/condor/assign.map")
+	cfg.Set("HTTP_API_AP_ASSIGNMENT_REST_URL", "https://assign.example.org")
+	cfg.Set("HTTP_API_AP_ASSIGNMENT_REST_TOKEN_FILE", "/etc/condor/assign.token")
+	cfg.Set("HTTP_API_AP_ASSIGNMENT_STALE_SECONDS", "600")
+	mc, err = loadMultiAPConfig(cfg, "", "")
+	a := mc.Assignment
+	if err != nil || strings.Join(a.Backends, ",") != "mapfile,rest" || a.Default != "ap01.example.org" ||
+		a.Mapfile != "/etc/condor/assign.map" || a.RESTURL != "https://assign.example.org" ||
+		a.RESTTokenFile != "/etc/condor/assign.token" || a.Stale != 10*time.Minute {
+		t.Fatalf("set: %+v %v", a, err)
+	}
+	cfg.Set("HTTP_API_AP_ASSIGNMENT_STALE_SECONDS", "0")
+	if mc, err = loadMultiAPConfig(cfg, "", ""); err != nil || mc.Assignment.Stale >= 0 {
+		t.Errorf("STALE_SECONDS=0: %v %v; want never covered", mc.Assignment.Stale, err)
+	}
+	cfg.Set("HTTP_API_AP_ASSIGNMENT_STALE_SECONDS", "an hour")
+	if _, err = loadMultiAPConfig(cfg, "", ""); err == nil {
+		t.Error("a bad STALE_SECONDS was accepted")
+	}
+	cfg.Set("HTTP_API_AP_ASSIGNMENT_STALE_SECONDS", "")
+	// An unknown backend refuses to start.
+	cfg.Set("HTTP_API_AP_ASSIGNMENT", "mapfile, ldap")
+	if _, err = loadMultiAPConfig(cfg, "", ""); err == nil || !strings.Contains(err.Error(), "ldap") {
+		t.Errorf("unknown backend: %v", err)
+	}
+}

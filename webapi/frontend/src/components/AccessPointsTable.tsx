@@ -61,7 +61,18 @@ export function AccessPointsTable() {
             ) : (
               data.aps.map((ap) => (
                 <tr key={ap.schedd}>
-                  <td className="px-3 py-2 font-mono text-xs text-gray-900">{ap.schedd}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-gray-900">
+                    {ap.schedd}
+                    {ap.home ? (
+                      <span className="ml-2 rounded-full bg-brand-50 px-2 py-0.5 font-sans text-xs text-brand-700">
+                        your home
+                      </span>
+                    ) : ap.submit ? (
+                      <span className="ml-2 rounded-full bg-gray-100 px-2 py-0.5 font-sans text-xs text-gray-700">
+                        you may submit
+                      </span>
+                    ) : null}
+                  </td>
                   <td className="px-3 py-2">
                     <span
                       className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${STATE_CLS[ap.hub.state] ?? 'bg-gray-200 text-gray-700'}`}

@@ -100,6 +100,8 @@ type Service struct {
 	// identifies ctx's credential as user; MCP runs it on every routed
 	// call, so the identity an action runs as is the routed AP's.
 	VerifyCaller func(ctx context.Context, m apregistry.Member, user string) error
+	// Assign places new submissions (AP assignment); nil refuses them.
+	Assign Assigner
 	// Now replaces the clock, for tests.
 	Now func() time.Time
 

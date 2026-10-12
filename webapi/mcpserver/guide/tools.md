@@ -70,5 +70,8 @@ manager, a job history database, site skills, embedded documentation).
 - get_version -- this server's build.
 - list_access_points -- where one server fronts several access points: each
   one, and how fresh its data is.
-- whoami -- who you are authenticated as and what you can see.
+- whoami -- who you are authenticated as and what you can see; where one
+  server fronts several access points, also your home access point (where
+  submit_job, submit_dag and build_container send new work) and any
+  alternates you may name with their schedd argument.
 - advertise_to_collector -- publish a ClassAd to the HTCondor collector.

@@ -35,6 +35,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/version"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/apiad"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
@@ -1644,11 +1645,46 @@ func loadMultiAPConfig(cfg *config.Config, scheddName, scheddAddr string) (https
 		// Zero, like unset, never skips an AP on the hub's word.
 		mc.BulkFresh = time.Duration(n) * time.Second
 	}
+	asg, err := loadAPAssignmentConfig(cfg)
+	if err != nil {
+		return mc, err
+	}
+	mc.Assignment = asg
 	if scheddName != "" || scheddAddr != "" {
 		return mc, fmt.Errorf("HTTP_API_SCHEDD_CONSTRAINT selects multi-AP mode, which serves many schedds; "+
 			"it cannot be combined with one named schedd (-schedd/SCHEDD_NAME %q, -schedd-addr %q)", scheddName, scheddAddr)
 	}
 	return mc, nil
+}
+
+// loadAPAssignmentConfig reads HTTP_API_AP_ASSIGNMENT and its knobs: which
+// access point a user's new work goes to in multi-AP mode. An unknown
+// backend name refuses to start the server; so does a backend whose own
+// knobs are missing or wrong, which apassign.Build reports.
+func loadAPAssignmentConfig(cfg *config.Config) (apassign.Config, error) {
+	var out apassign.Config
+	backends, err := apassign.ParseBackends(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT"))
+	if err != nil {
+		return out, err
+	}
+	out.Backends = backends
+	out.Default = strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT_DEFAULT"))
+	out.Mapfile = strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT_MAPFILE"))
+	out.RESTURL = strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT_REST_URL"))
+	out.RESTTokenFile = strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT_REST_TOKEN_FILE"))
+	if v := strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT_STALE_SECONDS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return out, fmt.Errorf("HTTP_API_AP_ASSIGNMENT_STALE_SECONDS must be a whole number of seconds, not %q", v)
+		}
+		out.Stale = time.Duration(n) * time.Second
+		if n == 0 {
+			// Zero means what it says: a failing backend is never
+			// covered by an earlier answer.
+			out.Stale = -1
+		}
+	}
+	return out, nil
 }
 
 // getHTTPConfig extracts HTTP API configuration from config

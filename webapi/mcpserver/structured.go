@@ -39,6 +39,13 @@ func structuredTextResult(text string, structured interface{}) interface{} {
 
 // --- JSON Schema construction helpers -----------------------------------
 
+// assignmentSchema is a multi-AP submit's AP assignment.
+var assignmentSchema = obj(map[string]interface{}{
+	"schedd":     strSchema,
+	"alternates": arr(strSchema),
+	"source":     strSchema,
+})
+
 func obj(props map[string]interface{}, required ...string) map[string]interface{} {
 	s := map[string]interface{}{
 		"type":                 "object",
@@ -347,6 +354,9 @@ var outputSchemas = map[string]map[string]interface{}{
 		// refusing it, so it needs somewhere to say so.
 		"fatal":  boolSchema,
 		"errors": arr(strSchema),
+		// Multi-AP mode only.
+		"schedd":     strSchema,
+		"assignment": assignmentSchema,
 	}),
 	"submit_job": obj(map[string]interface{}{
 		"cluster_id":   intSchema,
@@ -354,6 +364,9 @@ var outputSchemas = map[string]map[string]interface{}{
 		"proc_count":   intSchema,
 		"needs_upload": boolSchema,
 		"warnings":     arr(strSchema),
+		// Multi-AP mode only: where the job went, and why.
+		"schedd":     strSchema,
+		"assignment": assignmentSchema,
 	}, "cluster_id"),
 	// build_container returns the submitted job plus the resolved
 	// destination and resources, so a caller can see what the site
@@ -367,6 +380,8 @@ var outputSchemas = map[string]map[string]interface{}{
 		"cpus":        intSchema,
 		"memory_mb":   intSchema,
 		"disk_mb":     intSchema,
+		"schedd":      strSchema,
+		"assignment":  assignmentSchema,
 	}, "cluster_id", "job_id", "destination"),
 	"remove_job":  jobActionSchema(),
 	"hold_job":    jobActionSchema(),
@@ -612,6 +627,12 @@ var outputSchemas = map[string]map[string]interface{}{
 		"confined_to_owner":  strSchema,
 		"access_point":       strSchema,
 		"oauth_scopes":       arr(strSchema),
+		// Multi-AP mode only.
+		"access_points":           intSchema,
+		"home_access_point":       strSchema,
+		"alternate_access_points": arr(strSchema),
+		"assignment_source":       strSchema,
+		"assignment_error":        strSchema,
 	}),
 }
 
