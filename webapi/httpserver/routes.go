@@ -282,6 +282,8 @@ func (h *Handler) setupRoutes() {
 	// /chat/info answers a feature probe and touches nothing.
 	mux.Handle("/api/v1/chat", cors(h.requireCondorScope(http.HandlerFunc(h.handleChat))))
 	mux.Handle("/api/v1/chat/info", cors(http.HandlerFunc(h.handleChatInfo)))
+	// Which jobs the chat's tools would cover for this caller on a page.
+	mux.Handle("/api/v1/chat/scope", cors(h.requireCondorScope(http.HandlerFunc(h.handleChatScope))))
 
 	// Collector endpoints
 	mux.Handle("/api/v1/collector/pool-summary", cors(h.requireCondorScope(http.HandlerFunc(h.handlePoolSummary)))) // aggregated /pool overview (more specific than the dispatcher below)

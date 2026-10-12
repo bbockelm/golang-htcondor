@@ -433,6 +433,9 @@ export default function JobsPage() {
       <ChatPanel
         visible={chatVisible}
         page="jobs"
+        // The toggle's position. The server decides what the assistant
+        // may see; the panel says what it decided.
+        scope={ownedByMe ? 'mine' : 'everyone'}
         hooks={chatHooks}
         headerLabel="Job assistant"
         togglerLabel="Ask about your jobs"

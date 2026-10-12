@@ -323,6 +323,7 @@ export default function ArchivePage() {
       <ChatPanel
         visible={chatVisible}
         page="archive"
+        scope={ownedByMe ? 'mine' : 'everyone'}
         hooks={chatHooks}
         headerLabel="Archive assistant"
         togglerLabel="Ask about your job history"

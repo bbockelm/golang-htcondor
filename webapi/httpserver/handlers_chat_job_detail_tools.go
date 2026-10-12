@@ -25,9 +25,9 @@ import (
 //
 // One server-side tool (toolRunInJob) lives here too: it reaches into
 // the running job's sandbox via condor_ssh_to_job and runs a single
-// non-interactive command. Owner-scoping is enforced explicitly before
-// the SSH dial so a misbehaving schedd-side ACL can't be exploited
-// through this path.
+// non-interactive command. The target is checked against the chat's
+// mutate scope before the SSH dial so a misbehaving schedd-side ACL
+// can't be exploited through this path.
 
 // runInJobOutputCapDefault / runInJobOutputCapMax bound the combined
 // stdout+stderr returned to the LLM. The defaults were 64 KiB but
@@ -68,8 +68,12 @@ type runInJobArgs struct {
 }
 
 // toolRunInJob runs a single non-interactive shell command inside the
-// job's sandbox over condor_ssh_to_job. Owner-scoped: we look up the
-// job's ClassAd first and refuse if Owner != actor.
+// job's sandbox over condor_ssh_to_job. Scoped like the other job
+// actions: we look up the job's ClassAd within the chat's mutate scope
+// first and refuse a job outside it. That is the caller's own job, or,
+// for a caller with the mutate tier viewing another user's job, that
+// job -- the page's own Terminal panel offers the same shell, with the
+// schedd deciding whether the caller may connect.
 func (s *Handler) toolRunInJob() chat.Tool {
 	return &chatTool{
 		name:  "run_in_job",
@@ -84,6 +88,17 @@ func (s *Handler) toolRunInJob() chat.Tool {
 		// matches the policy on edit_job_attribute / hold_job /
 		// release_job / remove_jobs.
 		confirm: true,
+		describe: func(ctx context.Context, actor string, in json.RawMessage) map[string]any {
+			var args runInJobArgs
+			if json.Unmarshal(in, &args) != nil {
+				return nil
+			}
+			cluster, proc, err := parseJobID(strings.TrimSpace(args.JobID))
+			if err != nil {
+				return nil
+			}
+			return s.describeJobOwner(ctx, actor, cluster, proc)
+		},
 		description: `Run a single non-interactive shell command inside the job's sandbox ` +
 			`(equivalent to: condor_ssh_to_job <id> <cmd>). Only works while the job is ` +
 			`Running (status=2) or Transferring Output (status=6). Returns combined ` +
@@ -158,26 +173,17 @@ func (s *Handler) execRunInJob(ctx context.Context, actor string, in json.RawMes
 		return "", errors.New("schedd not configured")
 	}
 
-	// Step 1: confirm the job exists, is owned by actor, and is in a
-	// state where condor_ssh_to_job can connect (Running or
+	// Step 1: confirm the job exists, is one the caller may act on, and
+	// is in a state where condor_ssh_to_job can connect (Running or
 	// Transferring Output). We do this BEFORE the SSH dial so a
 	// well-formed "no, you can't ssh into a held job" error gets back
 	// to the LLM instead of a generic "starter not running" wrapped
 	// in retry backoff.
-	ownerConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
-		cluster, proc, classadStringLit(ownerFromActor(actor)))
-	ads, _, err := schedd.QueryWithOptions(ctx, ownerConstraint, &htcondor.QueryOptions{
-		Limit:      1,
-		Projection: []string{"ClusterId", "ProcId", "Owner", "JobStatus"},
-	})
+	owner, attrs, err := s.chatTargetJobAd(ctx, actor, cluster, proc, "JobStatus")
 	if err != nil {
-		return "", fmt.Errorf("ownership check: %w", err)
+		return "", err
 	}
-	if len(ads) == 0 {
-		return "", fmt.Errorf("job %d.%d either does not exist or is not owned by %s",
-			cluster, proc, actor)
-	}
-	status, _ := readInt(ads[0], "JobStatus")
+	status := attrs["JobStatus"]
 	if status != 2 && status != 6 {
 		return "", fmt.Errorf("job %d.%d is not running (JobStatus=%d); ssh-to-job only works while the job is on a worker",
 			cluster, proc, status)
@@ -261,6 +267,7 @@ func (s *Handler) execRunInJob(ctx context.Context, actor string, in json.RawMes
 	stdoutText := buf.String()
 	out, _ := json.Marshal(map[string]any{
 		"job_id":      args.JobID,
+		"owner":       owner,
 		"command":     cmd,
 		"exit_code":   res.code,
 		"output":      stdoutText,
@@ -317,10 +324,10 @@ func errString(err error) string {
 // as raw text. The schedd refuses immutable / protected attributes
 // in our htcondor.EditJob layer; we surface the error verbatim.
 //
-// Owner-scoping mirrors the hold/release/remove pattern: a query
-// confirms the target ClusterId.ProcId is owned by the actor before
-// any mutation. Without that a hypothetical schedd ACL gap would
-// let an LLM-generated tool call mutate someone else's job.
+// Scoping mirrors the hold/release/remove pattern: a query confirms the
+// target ClusterId.ProcId is within the chat's mutate scope before any
+// mutation. Without that a hypothetical schedd ACL gap would let an
+// LLM-generated tool call mutate a job outside it.
 // ---------------------------------------------------------------------
 
 // editJobAttributeArgs is what the LLM passes to edit_job_attribute.
@@ -357,6 +364,13 @@ func (s *Handler) toolEditJobAttribute() chat.Tool {
 			"required": ["cluster_id", "proc_id", "name", "expression"]
 		}`),
 		confirm: true,
+		describe: func(ctx context.Context, actor string, in json.RawMessage) map[string]any {
+			var args editJobAttributeArgs
+			if json.Unmarshal(in, &args) != nil || args.ClusterID <= 0 || args.ProcID < 0 {
+				return nil
+			}
+			return s.describeJobOwner(ctx, actor, args.ClusterID, args.ProcID)
+		},
 		exec: func(ctx context.Context, actor string, in json.RawMessage) (string, error) {
 			var args editJobAttributeArgs
 			if err := json.Unmarshal(in, &args); err != nil {
@@ -372,24 +386,14 @@ func (s *Handler) toolEditJobAttribute() chat.Tool {
 				return "", fmt.Errorf("expression must not be empty")
 			}
 
-			schedd := s.getSchedd()
-
-			// Confirm owner before mutating. Same belt-and-braces
-			// approach as hold/release/remove.
-			ownerConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
-				args.ClusterID, args.ProcID, classadStringLit(ownerFromActor(actor)))
-			ads, _, err := schedd.QueryWithOptions(ctx, ownerConstraint, &htcondor.QueryOptions{
-				Limit:      1,
-				Projection: []string{"ClusterId", "ProcId", "Owner"},
-			})
+			// Confirm the job is in scope before mutating. Same
+			// belt-and-braces approach as hold/release/remove.
+			owner, err := s.chatTargetJob(ctx, actor, args.ClusterID, args.ProcID)
 			if err != nil {
-				return "", fmt.Errorf("ownership check: %w", err)
-			}
-			if len(ads) == 0 {
-				return "", fmt.Errorf("job %d.%d either does not exist or is not owned by %s",
-					args.ClusterID, args.ProcID, actor)
+				return "", err
 			}
 
+			schedd := s.getSchedd()
 			err = schedd.EditJob(ctx, args.ClusterID, args.ProcID,
 				map[string]string{args.Name: args.Expression},
 				&htcondor.EditJobOptions{},
@@ -401,6 +405,7 @@ func (s *Handler) toolEditJobAttribute() chat.Tool {
 			out, _ := json.Marshal(map[string]any{
 				"action":     "edit_job_attribute",
 				"job_id":     fmt.Sprintf("%d.%d", args.ClusterID, args.ProcID),
+				"owner":      owner,
 				"attribute":  args.Name,
 				"expression": args.Expression,
 			})
@@ -425,9 +430,10 @@ func (s *Handler) toolEditJobsByConstraint() chat.Tool {
 		description: `Edit one or more ClassAd attributes on every job matching a ` +
 			`constraint. The user does not have a UI for this; the assistant uses it for ` +
 			`bulk sweeps like "set JobPrio=10 on every held job in cluster 42" or "clear ` +
-			`PeriodicHold on all my idle jobs". 'constraint' is a ClassAd expression ` +
-			`auto-scoped to the user's owner; you can't accidentally touch someone else's ` +
-			`jobs. 'attributes' values must be valid ClassAd expressions (see ` +
+			`PeriodicHold on all my idle jobs". 'constraint' is a ClassAd expression the ` +
+			`server confines to the jobs the user may act on: their own, or, for an ` +
+			`administrator viewing everyone's jobs, every user's (the confirmation then lists ` +
+			`whose jobs match). 'attributes' values must be valid ClassAd expressions (see ` +
 			`edit_job_attribute for the encoding rules). Returns the count of jobs ` +
 			`affected. Requires user confirmation.`,
 		schema: json.RawMessage(`{
@@ -435,7 +441,7 @@ func (s *Handler) toolEditJobsByConstraint() chat.Tool {
 			"properties": {
 				"constraint": {
 					"type": "string",
-					"description": "ClassAd filter expression. Auto-scoped to the authenticated user."
+					"description": "ClassAd filter expression. The server confines it to the jobs the user may act on."
 				},
 				"attributes": {
 					"type": "object",
@@ -446,6 +452,13 @@ func (s *Handler) toolEditJobsByConstraint() chat.Tool {
 			"required": ["constraint", "attributes"]
 		}`),
 		confirm: true,
+		describe: func(ctx context.Context, actor string, in json.RawMessage) map[string]any {
+			var args editJobsByConstraintArgs
+			if json.Unmarshal(in, &args) != nil || strings.TrimSpace(args.Constraint) == "" {
+				return nil
+			}
+			return s.describeConstraintOwners(ctx, actor, args.Constraint)
+		},
 		exec: func(ctx context.Context, actor string, in json.RawMessage) (string, error) {
 			var args editJobsByConstraintArgs
 			if err := json.Unmarshal(in, &args); err != nil {
@@ -466,7 +479,7 @@ func (s *Handler) toolEditJobsByConstraint() chat.Tool {
 				}
 			}
 
-			scoped, err := scopeToOwner(ownerFromActor(actor), args.Constraint)
+			scoped, err := chatJobScope(ctx, actor, args.Constraint, jobScopeMutate)
 			if err != nil {
 				return "", err
 			}
@@ -481,6 +494,7 @@ func (s *Handler) toolEditJobsByConstraint() chat.Tool {
 				"constraint": scoped,
 				"attributes": args.Attributes,
 				"affected":   count,
+				"scope":      chatScopeLabel(ctx, jobScopeMutate),
 			})
 			return string(out), nil
 		},
@@ -497,13 +511,13 @@ func (s *Handler) toolEditJobsByConstraint() chat.Tool {
 func toolGetJobAttributes() chat.Tool {
 	return &chatTool{
 		name:       "get_job_attributes",
-		pages:      jobDetailPageTools,
+		pages:      jobAdPageTools,
 		clientSide: true,
 		description: `Read ClassAd attributes for the current job. Pass ` + "`names`" + ` to get a ` +
 			`narrow projection (returns just those attributes). Omit ` + "`names`" + ` to get the ` +
 			`full ClassAd (only do this when the user genuinely needs everything; full ads ` +
-			`can run hundreds of attributes). The page polls every 10s, so the data is at ` +
-			`most a few seconds stale.`,
+			`can run hundreds of attributes). On a queued job's page the page polls every 10s, ` +
+			`so the data is at most a few seconds stale; an archived job's record does not change.`,
 		schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -555,15 +569,16 @@ func toolGetJobLog() chat.Tool {
 func toolGetMatchAnalysis() chat.Tool {
 	return &chatTool{
 		name:       "get_match_analysis",
-		pages:      jobDetailPageTools,
+		pages:      jobAdPageTools,
 		clientSide: true,
 		description: `Run (or read cached) match analysis explaining why an idle/held job ` +
 			`isn't being scheduled to a slot. Returns a sorted breakdown of which ` +
 			`requirement is excluding the most slots in the pool, plus a summary count ` +
 			`of matched / unmatched / not-considered slots. ` +
 			`USE FOR: idle (status=1) or held (status=5) jobs only. For other states ` +
-			`the result is meaningless. Heavy on first call (collector slot dump); ` +
-			`server caches for ~30s.`,
+			`the result is meaningless. On an archived (finished) job's page it instead ` +
+			`answers whether the job, resubmitted as it was, would match the pool now. ` +
+			`Heavy on first call (collector slot dump); server caches for ~30s.`,
 		schema: json.RawMessage(`{"type": "object", "properties": {}}`),
 	}
 }

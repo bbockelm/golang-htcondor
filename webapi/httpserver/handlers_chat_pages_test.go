@@ -68,27 +68,32 @@ func TestChatPanelPagesHaveInstructions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the SPA's pages: %v", err)
 	}
-	for _, want := range []string{"jobs", "submit", "job-detail", "archive", "issues", "utilization", "pool"} {
+	for _, want := range []string{"jobs", "submit", "job-detail", "archive", "archive-detail", "issues", "utilization", "pool"} {
 		if !seen[want] {
 			t.Errorf("no page mounts the chat with page %q", want)
 		}
 	}
 }
 
-// What the assistant can do on the Issues, Utilization and Pool pages:
-// read, and move the page's own filter. Nothing there changes a job or a
-// machine, so nothing there asks for confirmation.
+// What the assistant can do on the Issues, Utilization and Pool pages and
+// an archived job's page: read, and move the page's own filter. Nothing
+// there changes a job or a machine, so nothing there asks for
+// confirmation.
 func TestChatToolsOnReadOnlyPages(t *testing.T) {
 	tools := (&Handler{}).buildChatTools()
 	// Server-side tools allowed on these pages; all read-only.
 	readOnly := map[string]bool{
 		"analyze_issues": true, "analyze_utilization": true, "query_slots": true,
-		"doc_job_attributes": true, "doc_search": true,
+		"doc_job_attributes": true, "doc_search": true, "query_jobs_archive": true,
 	}
 	for page, want := range map[string][]string{
 		"issues":      {"analyze_issues", "set_constraint", "query_slots", "analyze_utilization"},
 		"utilization": {"analyze_utilization", "set_constraint", "set_filter", "query_slots"},
 		"pool":        {"query_slots", "set_constraint", "set_filter", "expand_machine"},
+		// A finished job: its record, match analysis, and history. Not
+		// the event log or stdout/stderr, which are read from the live
+		// queue and so are not found for a job only in history.
+		"archive-detail": {"get_job_attributes", "get_match_analysis", "query_jobs_archive"},
 	} {
 		on := chatToolsOnPage(tools, page)
 		for _, name := range want {
@@ -104,6 +109,9 @@ func TestChatToolsOnReadOnlyPages(t *testing.T) {
 				t.Errorf("page %s offers server-side tool %s, which is not a known read", page, name)
 			}
 		}
+	}
+	if on := chatToolsOnPage(tools, "archive-detail"); on["get_job_log"] != nil || on["read_job_output"] != nil {
+		t.Error("the archived-job page offers a tool that reads the live queue")
 	}
 	// Tagged where they mean something and nowhere else.
 	if on := chatToolsOnPage(tools, "jobs"); on["analyze_issues"] != nil || on["expand_machine"] != nil {

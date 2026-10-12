@@ -1,10 +1,8 @@
 package httpserver
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
@@ -46,33 +44,25 @@ func issuesFixture(t *testing.T) *twoOwnerFixture {
 	return f
 }
 
-// chatIssues runs the chat's analyze_issues as who would from the page.
+// chatIssues runs the chat's analyze_issues as who would from the page in
+// its own (mine) view.
 func chatIssues(t *testing.T, f *twoOwnerFixture, who, args string, groups ...string) (map[string]any, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/v1/chat", nil)
-	f.session(t, who, groups...)(req)
-	authCtx, _, err := f.s.requireAuthentication(req)
+	return chatIssuesScoped(t, f, who, "mine", args, groups...)
+}
+
+// chatIssuesScoped is chatIssues with the page asking for scope.
+func chatIssuesScoped(t *testing.T, f *twoOwnerFixture, who, scope, args string, groups ...string) (map[string]any, error) {
+	t.Helper()
+	out, err := runChatTool(t, f, f.session(t, who, groups...), "issues", scope, "analyze_issues", args)
 	if err != nil {
-		t.Fatalf("authenticating %s: %v", who, err)
+		return nil, err
 	}
-	for _, tool := range f.s.buildChatTools() {
-		if tool.Name() != "analyze_issues" {
-			continue
-		}
-		out, err := tool.Execute(context.WithValue(authCtx, chatRequestKey{}, req), who, json.RawMessage(args))
-		if err != nil {
-			return nil, err
-		}
-		var got map[string]any
-		if err := json.Unmarshal([]byte(out), &got); err != nil {
-			t.Fatalf("analyze_issues returned something other than JSON: %v\n%s", err, out)
-		}
-		return got, nil
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("analyze_issues returned something other than JSON: %v\n%s", err, out)
 	}
-	t.Fatal("the chat offers no analyze_issues")
-	return nil, nil
+	return got, nil
 }
 
 // exampleJobs lists the example job ids across every problem in a chat
@@ -123,7 +113,7 @@ func TestChatAnalyzeIssuesIsTheCallersOwn(t *testing.T) {
 	f := issuesFixture(t)
 
 	for _, args := range []string{`{}`, `{"everyone":true}`} {
-		got, err := chatIssues(t, f, "alice", args)
+		got, err := chatIssuesScoped(t, f, "alice", "everyone", args)
 		if err != nil {
 			t.Fatalf("alice %s: %v", args, err)
 		}
@@ -148,17 +138,17 @@ func TestChatAnalyzeIssuesIsTheCallersOwn(t *testing.T) {
 	}
 }
 
-// An administrator gets everyone's problems when they ask for them, and
-// their own otherwise -- what the page's scope toggle does.
+// An administrator gets everyone's problems in the page's everyone view,
+// and their own otherwise -- what the page's scope toggle does.
 func TestChatAnalyzeIssuesAdminMatchesREST(t *testing.T) {
 	f := issuesFixture(t)
 
-	got, err := chatIssues(t, f, "root", `{"everyone":true}`, "condor-admins")
+	got, err := chatIssuesScoped(t, f, "root", "everyone", `{}`, "condor-admins")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ids := exampleJobs(got); !slices.Equal(ids, []string{"31.0", "32.0", "33.0"}) {
-		t.Errorf("admin everyone=true saw %v, want every user's held jobs", ids)
+		t.Errorf("admin in the everyone view saw %v, want every user's held jobs", ids)
 	}
 	rest := restIssueJobs(t, f, url.Values{"owned_by_me": {"false"}}, f.session(t, "root", "condor-admins"))
 	if !slices.Equal(rest, exampleJobs(got)) {

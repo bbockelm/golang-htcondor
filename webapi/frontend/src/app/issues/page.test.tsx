@@ -3,8 +3,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IssuesResponse } from '@/lib/api';
 import { callHook, chatPanelProps, resetChatPanelSpy } from '@/test/chatPanelSpy';
+import { scopeStore } from '@/lib/scope';
 
 vi.mock('@/components/ChatPanel', async () => (await import('@/test/chatPanelSpy')).chatPanelMock());
+
+// The session the page sees; a case that needs an administrator swaps it.
+const session = vi.hoisted(() => ({ current: { username: 'alice', is_admin: false } }));
 
 const issues = vi.fn();
 const chatInfo = vi.fn();
@@ -14,7 +18,7 @@ vi.mock('@/lib/api', async () => {
     ...actual,
     api: {
       ...actual.api,
-      auth: { ...actual.api.auth, me: () => Promise.resolve({ username: 'alice', is_admin: false }) },
+      auth: { ...actual.api.auth, me: () => Promise.resolve(session.current) },
       chat: { ...actual.api.chat, info: () => chatInfo() },
       issues: (...a: unknown[]) => issues(...a),
     },
@@ -41,6 +45,8 @@ async function renderPage() {
 
 describe('issues page chat', () => {
   beforeEach(() => {
+    session.current = { username: 'alice', is_admin: false };
+    scopeStore.setScope('mine');
     issues.mockReset();
     chatInfo.mockReset();
     resetChatPanelSpy();
@@ -87,5 +93,19 @@ describe('issues page chat', () => {
     await waitFor(() =>
       expect(issues).toHaveBeenLastCalledWith(expect.objectContaining({ constraint: undefined })),
     );
+  });
+
+  it("passes the toggle's position as the chat scope", async () => {
+    session.current = { username: 'root', is_admin: true };
+    scopeStore.setScope('all');
+    chatInfo.mockResolvedValue({ enabled: true });
+    await renderPage();
+    await screen.findByRole('button', { name: 'Open chat assistant' });
+    await waitFor(() => expect(chatPanelProps().scope).toBe('everyone'));
+
+    act(() => {
+      scopeStore.setScope('mine');
+    });
+    await waitFor(() => expect(chatPanelProps().scope).toBe('mine'));
   });
 });

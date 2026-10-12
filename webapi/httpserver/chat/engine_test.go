@@ -239,7 +239,7 @@ func TestNewWriterEmitsSSEHeaders(t *testing.T) {
 func TestWriterToolApprovalSequence(t *testing.T) {
 	rec := httptest.NewRecorder()
 	w := NewWriter(rec)
-	w.WriteConfirmationRequest("tu_42", "remove_job", json.RawMessage(`{"cluster_id":42}`))
+	w.WriteConfirmationRequest("tu_42", "remove_job", json.RawMessage(`{"cluster_id":42}`), nil)
 	w.Close()
 
 	body := rec.Body.String()
@@ -352,7 +352,7 @@ func TestSystemPromptComposition(t *testing.T) {
 	engine := NewEngine(nil, nil, pageInstr, "OPERATOR_RULES_MARKER")
 
 	t.Run("known page includes its suffix and the operator addendum", func(t *testing.T) {
-		got := engine.systemPromptForPage("jobs", nil, "")
+		got := engine.systemPromptForPage("jobs", nil, "", Scope{})
 		if !strings.Contains(got, "JOBS_INSTRUCTIONS_MARKER") {
 			t.Errorf("missing jobs suffix in prompt:\n%s", got)
 		}
@@ -371,7 +371,7 @@ func TestSystemPromptComposition(t *testing.T) {
 	})
 
 	t.Run("unknown page falls back to base+addendum only", func(t *testing.T) {
-		got := engine.systemPromptForPage("unknown_xyz", nil, "")
+		got := engine.systemPromptForPage("unknown_xyz", nil, "", Scope{})
 		if strings.Contains(got, "JOBS_INSTRUCTIONS_MARKER") ||
 			strings.Contains(got, "SUBMIT_INSTRUCTIONS_MARKER") {
 			t.Errorf("unknown page leaked a known page's suffix:\n%s", got)
@@ -383,14 +383,14 @@ func TestSystemPromptComposition(t *testing.T) {
 
 	t.Run("empty operator addendum produces no operator block", func(t *testing.T) {
 		bare := NewEngine(nil, nil, pageInstr, "")
-		got := bare.systemPromptForPage("jobs", nil, "")
+		got := bare.systemPromptForPage("jobs", nil, "", Scope{})
 		if strings.Contains(got, "Site operator instructions") {
 			t.Errorf("bare engine emitted operator block despite empty addendum:\n%s", got)
 		}
 	})
 
 	t.Run("page context is injected and respects the cap", func(t *testing.T) {
-		got := engine.systemPromptForPage("jobs", nil, "job_id=1.0\nstatus=Running")
+		got := engine.systemPromptForPage("jobs", nil, "job_id=1.0\nstatus=Running", Scope{})
 		if !strings.Contains(got, "Page context:") {
 			t.Errorf("missing 'Page context:' header in prompt:\n%s", got)
 		}
@@ -409,7 +409,7 @@ func TestSystemPromptComposition(t *testing.T) {
 		// a runaway caller could pin gigantic strings into the
 		// system prompt.
 		huge := strings.Repeat("A", 4096)
-		clamped := engine.systemPromptForPage("jobs", nil, huge)
+		clamped := engine.systemPromptForPage("jobs", nil, huge, Scope{})
 		if !strings.Contains(clamped, "[truncated]") {
 			t.Errorf("huge page context should be marked truncated:\n%s", clamped)
 		}

@@ -16,6 +16,9 @@
 //   - `confirmableTools` — names of tools that require an
 //     auto-approve checkbox (jobs page lists hold/release/remove;
 //     submit page passes an empty list and the row hides).
+//   - `scope` — the page's Mine/Everyone toggle ("mine" when the page
+//     has none). Sent with every request; the server decides what the
+//     assistant may actually see and the panel says what it decided.
 //   - `pageHelp`, `togglerLabel`, `headerLabel` — host-supplied UI
 //     strings so each page can phrase its empty-state hint and
 //     pill label appropriately.
@@ -40,7 +43,8 @@ import remarkGfm from 'remark-gfm';
 // so defer the load to the client and skip SSR entirely.
 const ReactMarkdown = dynamic(() => import('react-markdown'), { ssr: false });
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '@/lib/api';
+import { useQuery } from '@tanstack/react-query';
+import { api, type ChatScope, type ChatScopeRequest } from '@/lib/api';
 
 const AUTO_APPROVE_LS_KEY = 'htcondor-api.chat.auto_approve';
 
@@ -104,6 +108,12 @@ interface ChatPanelProps {
   // Pure metadata; the server caps the length and never feeds it into
   // any tool input.
   pageContext?: string;
+  // Which jobs the page is showing: its Mine/Everyone toggle, or for a
+  // detail page "everyone" when the job is somebody else's. Sent as the
+  // request's `scope`. Only a request: the server resolves it against
+  // what this user may see, and the panel's footer states the result.
+  // Omitted means "mine".
+  scope?: ChatScopeRequest;
   // Client-side tool dispatchers, keyed by tool name. Entries the
   // server doesn't advertise for the current page never get called;
   // a missing entry for a tool the LLM somehow invoked falls through
@@ -160,6 +170,7 @@ export function ChatPanel({
   visible,
   page,
   pageContext,
+  scope = 'mine',
   hooks,
   confirmableTools = JOBS_DEFAULT_CONFIRMABLE,
   pageHelp = DEFAULT_PAGE_HELP,
@@ -183,6 +194,7 @@ export function ChatPanel({
   const autoApproveRef = useRef<Set<string>>(autoApprove);
   const pageRef = useRef<string>(page);
   const pageContextRef = useRef<string>(pageContext ?? '');
+  const scopeRef = useRef<ChatScopeRequest>(scope);
   // Mirror state into refs via effect so the body resolver inside
   // the (memoized) transport always sees latest values without us
   // writing to refs during render (which React's strict rules forbid).
@@ -195,6 +207,9 @@ export function ChatPanel({
   useEffect(() => {
     pageContextRef.current = pageContext ?? '';
   }, [pageContext]);
+  useEffect(() => {
+    scopeRef.current = scope;
+  }, [scope]);
 
   // useMemo so the transport instance is stable across re-renders.
   // The body resolver runs per-POST, so it sees the *latest* values
@@ -213,6 +228,7 @@ export function ChatPanel({
           auto_approve: Array.from(autoApproveRef.current),
           page: pageRef.current,
           page_context: pageContextRef.current,
+          scope: scopeRef.current,
         }),
       }),
     [],
@@ -426,6 +442,20 @@ export function ChatPanel({
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(defaultOpen);
 
+  // What the server makes of this page's scope for this user: the same
+  // resolution each chat request gets, read up front so the panel can
+  // say which jobs the assistant sees before anything is asked.
+  const { data: resolvedScope } = useQuery({
+    queryKey: ['chat-scope', page, scope],
+    queryFn: () => api.chat.scope(page, scope),
+    enabled: visible && open,
+    staleTime: 60_000,
+    retry: false,
+  });
+  // Beyond the user's own jobs the server ignores auto-approval, so the
+  // card does not offer it.
+  const canAutoApprove = !resolvedScope || resolvedScope.scope === 'mine';
+
   // Auto-scroll to the bottom on new messages / streaming deltas.
   useEffect(() => {
     if (!transcriptRef.current) return;
@@ -515,7 +545,7 @@ export function ChatPanel({
           <ApprovalCard
             key={p.toolCallId}
             request={p}
-            alreadyAuto={autoApprove.has(p.toolName)}
+            alreadyAuto={autoApprove.has(p.toolName) || !canAutoApprove}
             onApprove={() => approve(p.toolCallId)}
             onApproveAndRemember={() => approveAndRemember(p.toolCallId, p.toolName)}
             onReject={() => reject(p.toolCallId, p.toolName)}
@@ -568,12 +598,29 @@ export function ChatPanel({
             Send
           </button>
         </div>
-        <p className="mt-1 text-[10px] text-gray-400">
-          The assistant only sees your own jobs.
-        </p>
+        {resolvedScope && (
+          <p className="mt-1 text-[10px] text-gray-400" data-testid="chat-scope-notice">
+            {chatScopeNotice(resolvedScope)}
+          </p>
+        )}
       </div>
     </div>
   );
+}
+
+// chatScopeNotice states which jobs the assistant sees, from the scope
+// the server resolved.
+export function chatScopeNotice(s: ChatScope): string {
+  switch (s.scope) {
+    case 'everyone':
+      return "The assistant sees every user's jobs.";
+    case 'projects':
+      return 'The assistant sees your jobs and those of the projects you lead.';
+    default:
+      return s.requested === 'everyone'
+        ? 'Your own jobs are all the assistant can see.'
+        : 'The assistant only sees your own jobs.';
+  }
 }
 
 // isWaitingForFirstAssistantContent reports whether the chat is
@@ -642,6 +689,16 @@ interface PendingApproval {
   toolCallId: string;
   toolName: string;
   input: unknown;
+  // What the server added to the approval request (its
+  // approvalDescriptor): the owners of the jobs the action would touch,
+  // when they are not the user. See ApprovalOwners.
+  descriptor?: ApprovalDescriptor;
+}
+
+interface ApprovalDescriptor {
+  owners?: string[];
+  more_owners?: number;
+  owner_unknown?: boolean;
 }
 
 // collectPendingApprovals walks the messages and returns any tool
@@ -680,7 +737,7 @@ function collectPendingApprovals(messages: UIMessage[]): PendingApproval[] {
         input?: unknown;
         output?: unknown;
         errorText?: string;
-        approval?: { id?: string };
+        approval?: { id?: string; descriptor?: unknown };
       };
       if (typeof tp.type !== 'string') continue;
       const isToolPart =
@@ -709,6 +766,10 @@ function collectPendingApprovals(messages: UIMessage[]): PendingApproval[] {
         toolCallId: tp.toolCallId,
         toolName: name,
         input: tp.input ?? {},
+        descriptor:
+          tp.approval?.descriptor && typeof tp.approval.descriptor === 'object'
+            ? (tp.approval.descriptor as ApprovalDescriptor)
+            : undefined,
       });
     }
   }
@@ -756,6 +817,7 @@ function ApprovalCard({
       <div className="font-medium text-amber-900">
         Approve <span className="font-mono">{request.toolName}</span>?
       </div>
+      <ApprovalOwners descriptor={request.descriptor} />
       <pre className="mt-1 max-h-32 overflow-auto rounded-sm bg-white px-2 py-1 font-mono text-[11px] text-gray-800">
         {JSON.stringify(request.input, null, 2)}
       </pre>
@@ -817,6 +879,29 @@ function ApprovalCard({
           Reject
         </button>
       </div>
+    </div>
+  );
+}
+
+// ApprovalOwners names whose jobs an action would touch. The server sends
+// it only when that is somebody other than the user, so its presence is
+// the warning.
+function ApprovalOwners({ descriptor }: { descriptor?: ApprovalDescriptor }) {
+  if (!descriptor) return null;
+  if (descriptor.owner_unknown) {
+    return (
+      <div className="mt-1 font-medium text-amber-900">
+        Owner: could not be determined
+      </div>
+    );
+  }
+  const owners = descriptor.owners ?? [];
+  if (owners.length === 0) return null;
+  const more = descriptor.more_owners ?? 0;
+  return (
+    <div className="mt-1 font-medium text-amber-900">
+      {owners.length === 1 && more === 0 ? 'Owner' : 'Owners'}: {owners.join(', ')}
+      {more > 0 && ` and ${more} more`}
     </div>
   );
 }

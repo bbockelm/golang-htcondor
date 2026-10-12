@@ -20,3 +20,13 @@ export function mayListUser(owner: string, session: Session | undefined): boolea
   if (!session) return false;
   return !!session.is_admin || sameUser(owner, session.username);
 }
+
+// chatScopeForJob is what a single-job page asks the assistant to cover:
+// everyone's jobs when the job is somebody else's, so the assistant's
+// tools reach the job the page has been allowed to show; the user's own
+// otherwise, and while the session is not known yet. The server decides
+// what the user may actually see.
+export function chatScopeForJob(owner: string | undefined, username: string | undefined): 'mine' | 'everyone' {
+  if (!owner || !username) return 'mine';
+  return sameUser(owner, username) ? 'mine' : 'everyone';
+}

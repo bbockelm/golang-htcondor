@@ -45,6 +45,16 @@ type Tool interface {
 	Execute(ctx context.Context, actor string, input json.RawMessage) (string, error)
 }
 
+// ConfirmationDescriber is implemented by a confirmation-required tool
+// that has facts the user should see on the approval card beyond the
+// tool's input -- e.g. whose job an action would touch. The engine calls
+// it just before emitting the approval request, under the same context
+// and actor Execute will get. A nil result adds nothing to the card.
+// What it returns is for display only: Execute re-checks everything.
+type ConfirmationDescriber interface {
+	DescribeConfirmation(ctx context.Context, actor string, input json.RawMessage) map[string]any
+}
+
 // Request is one /api/v1/chat call. Messages is the full conversation
 // history (browser sends every turn so the server is stateless). Each
 // message's content is the AI-SDK shape — see request_message.go.
@@ -78,13 +88,20 @@ type Request struct {
 	// "Page context" header.
 	//
 	// Trust model: the SPA is not adversarial against itself, and the
-	// chat surface only ever shows the user their own data, so the
-	// risk of "prompt injection from the page context" is the same as
-	// the user typing the same content. Tools never read PageContext;
+	// page context describes only what the page already showed this
+	// user, so the risk of "prompt injection from the page context" is
+	// the same as the user typing the same content. It grants nothing:
+	// which jobs the tools reach is Scope, resolved by the server.
+	// Tools never read PageContext;
 	// it exists purely to pre-populate the model's working memory so
 	// the LLM doesn't waste tokens asking the user "which job?" on
 	// every turn. Cap is enforced by the engine.
 	PageContext string `json:"page_context,omitempty"`
+	// Scope is the page's Mine/Everyone toggle: "mine" or "everyone";
+	// anything else is "mine". It is a request, not a grant: the server
+	// resolves it against the caller's own permissions (see Scope and
+	// WithScope) and the engine and tools read only that resolution.
+	Scope string `json:"scope,omitempty"`
 }
 
 // Engine drives one chat turn end-to-end. Construct with NewEngine
@@ -197,13 +214,22 @@ func (e *Engine) Tool(name string) Tool {
 func (e *Engine) Stream(ctx context.Context, w *Writer, actor string, req Request) error {
 	approved := stringSet(req.PreApprovedToolUseIDs)
 	autoApprove := stringSet(req.AutoApprove)
+	// The scope the server resolved for this request, never the one the
+	// page asked for. When the tools reach beyond the caller's own jobs,
+	// tool results carry text other users wrote (hold reasons, batch
+	// names, arguments), which could steer the model into an action; so
+	// every action then waits for the user, whatever they auto-approved.
+	scope := ScopeFrom(ctx)
+	if !scope.Confined() {
+		autoApprove = nil
+	}
 
 	// Compute the per-request tool slice and Anthropic schema. Tools
 	// not advertised to the LLM cannot be invoked, so an LLM jailbreak
 	// attempting to call a jobs-page tool from the submit page just
 	// fails at the schema-validation layer in the Anthropic API.
 	pageTools, pageSchema := e.toolsForPage(req.Page)
-	systemPrompt := e.systemPromptForPage(req.Page, pageTools, req.PageContext)
+	systemPrompt := e.systemPromptForPage(req.Page, pageTools, req.PageContext, scope)
 
 	// Convert browser-shape messages to Anthropic-shape, dropping any
 	// fields the LLM doesn't need to see.
@@ -322,7 +348,11 @@ func (e *Engine) Stream(ctx context.Context, w *Writer, actor string, req Reques
 			if tool.RequiresConfirmation() &&
 				!approved[blk.ID] &&
 				!autoApprove[blk.Name] {
-				w.WriteConfirmationRequest(blk.ID, blk.Name, blk.Input)
+				var detail map[string]any
+				if d, ok := tool.(ConfirmationDescriber); ok {
+					detail = d.DescribeConfirmation(ctx, actor, blk.Input)
+				}
+				w.WriteConfirmationRequest(blk.ID, blk.Name, blk.Input, detail)
 				clientHandoff = true
 				continue
 			}
@@ -573,9 +603,10 @@ func toolAvailableOnPage(t Tool, page string) bool {
 // systemPromptForPage assembles the system message we send on every
 // turn. We keep the base short and operator-evergreen: the LLM doesn't
 // need to know the operator's name or pool, just that it's helping
-// a single authenticated user investigate / manage their own jobs
-// and that the server enforces owner scoping irrespective of what
-// the LLM tries.
+// a single authenticated user investigate / manage jobs, which jobs
+// its tools cover (the server-resolved scope, never the page's
+// request), and that the server enforces that scope irrespective of
+// what the LLM tries.
 //
 // On top of that base, we append (in order):
 //  1. The page-specific instructions block, if pageInstructions has
@@ -590,15 +621,17 @@ func toolAvailableOnPage(t Tool, page string) bool {
 // gigantic strings into the system prompt and burning tokens.
 const pageContextMaxLen = 2048
 
-func (e *Engine) systemPromptForPage(page string, tools []Tool, pageContext string) string {
+func (e *Engine) systemPromptForPage(page string, tools []Tool, pageContext string, scope Scope) string {
 	var b strings.Builder
 	b.WriteString(`You are a HTCondor assistant embedded in an HTC user's job-management UI.
-Your job is to help the user investigate and act on THEIR OWN jobs in the local pool.
+Your job is to help the user investigate and act on jobs in the local pool.
 Be concise — terminal users don't need filler.
 
-Owner scoping: every tool you call is silently scoped to the authenticated user.
-You CANNOT see or act on other users' jobs even if asked. If the user asks you to,
-explain that and suggest an alternative.
+`)
+	// Which jobs the tools cover comes from the server's resolution of
+	// the page's scope, not from anything the page sent.
+	b.WriteString(scope.promptStatement())
+	b.WriteString(`The server enforces this scope on every tool call, whatever you pass.
 
 If a user asks you to do something none of your tools cover, describe the exact
 manual step they should take instead — don't pretend you did it.

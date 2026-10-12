@@ -44,7 +44,6 @@ type chatIssuesArgs struct {
 	Granularity  *float64 `json:"granularity,omitempty"`
 	IncludeEnded *bool    `json:"include_ended,omitempty"`
 	Constraint   string   `json:"constraint,omitempty"`
-	Everyone     bool     `json:"everyone,omitempty"`
 }
 
 func (s *Handler) toolAnalyzeIssues() chat.Tool {
@@ -56,16 +55,15 @@ func (s *Handler) toolAnalyzeIssues() chat.Tool {
 			`its job count, how many distinct users it affects, the hold codes, where it happened (site/resource) when ` +
 			`that is concentrated, when it was last seen, and example jobs. Pass the window, detail and "include ended" ` +
 			`settings the page context reports so the answer matches the screen; pass constraint to narrow to some jobs ` +
-			`(e.g. RequestGPUs >= 1 for jobs that asked for a GPU). Covers the user's own jobs; everyone=true covers ` +
-			`every user's, for administrators only.`,
+			`(e.g. RequestGPUs >= 1 for jobs that asked for a GPU). Covers the chat's scope: the user's own jobs, or ` +
+			`every user's when the page shows everyone's and the user is an administrator.`,
 		schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"window_hours": {"type": "number", "minimum": 1, "maximum": 168, "description": "How far back to look, in hours (default 24; the page offers 1, 8, 24, 72 and 168)."},
 				"granularity": {"type": "number", "minimum": 0, "maximum": 1, "description": "How finely to split problems, 0 (fewer, broader) to 1 (more, narrower). Default 0.5."},
 				"include_ended": {"type": "boolean", "description": "Also count problems that have already ended (released holds, failed run attempts). Default true."},
-				"constraint": {"type": "string", "description": "Optional ClassAd filter over job attributes, e.g. RequestGPUs >= 1 or JobBatchName == \"sweep\"."},
-				"everyone": {"type": "boolean", "description": "Every user's jobs rather than the user's own. Only administrators get this; anyone else gets their own jobs."}
+				"constraint": {"type": "string", "description": "Optional ClassAd filter over job attributes, e.g. RequestGPUs >= 1 or JobBatchName == \"sweep\"."}
 			}
 		}`),
 		exec: func(ctx context.Context, _ string, in json.RawMessage) (string, error) {
@@ -79,8 +77,12 @@ func (s *Handler) toolAnalyzeIssues() chat.Tool {
 			if r == nil || s.multi != nil {
 				return "", errors.New("this tool is not available here")
 			}
+			// The page's scope as the server resolved it. issuesAnswer
+			// applies its own administrator rule on top, so this can only
+			// ever narrow what GET /api/v1/issues would give this caller.
+			scope := chat.ScopeFrom(ctx)
 			q := issueQuery{
-				ownedByMe:    !args.Everyone,
+				ownedByMe:    scope.Effective != chat.ScopeEveryone,
 				window:       defaultIssueWindow,
 				granularity:  0.5,
 				includeEnded: true,
@@ -103,7 +105,7 @@ func (s *Handler) toolAnalyzeIssues() chat.Tool {
 				}
 				return "", fmt.Errorf("could not read what is going wrong: %w", err)
 			}
-			out, err := json.Marshal(chatIssuesSummary(resp, args.Everyone))
+			out, err := json.Marshal(chatIssuesSummary(resp, scope.Requested == chat.ScopeEveryone))
 			if err != nil {
 				return "", err
 			}
@@ -150,7 +152,7 @@ func chatIssuesSummary(resp IssuesResponse, askedEveryone bool) map[string]any {
 	if !resp.OwnedByMe {
 		scope = "every user's jobs"
 	} else if askedEveryone {
-		scope = "your own jobs (only administrators can see everyone's)"
+		scope = "your own jobs (the page asked for everyone's; only administrators can see them)"
 	}
 	sections := make([]chatIssueSection, 0, len(resp.Sections))
 	for _, sec := range resp.Sections {

@@ -235,7 +235,12 @@ func (w *Writer) WriteToolError(toolCallID, _ /*toolName*/, msg string) {
 //
 // The approvalId we send here is the same as the toolCallId so the
 // frontend can correlate without an extra map.
-func (w *Writer) WriteConfirmationRequest(toolCallID, toolName string, args json.RawMessage) {
+//
+// detail, when non-nil, rides on the approval request as the SDK's
+// approvalDescriptor (the SPA reads it as part.approval.descriptor):
+// facts for the approval card the tool input does not carry, such as
+// the owner of the job an action would touch.
+func (w *Writer) WriteConfirmationRequest(toolCallID, toolName string, args json.RawMessage, detail map[string]any) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.finishTextLocked()
@@ -264,11 +269,15 @@ func (w *Writer) WriteConfirmationRequest(toolCallID, toolName string, args json
 		"input":            jsonRaw(args),
 		"providerExecuted": true,
 	})
-	w.writeChunkLocked(map[string]any{
+	request := map[string]any{
 		"type":       "tool-approval-request",
 		"approvalId": toolCallID,
 		"toolCallId": toolCallID,
-	})
+	}
+	if len(detail) > 0 {
+		request["approvalDescriptor"] = detail
+	}
+	w.writeChunkLocked(request)
 }
 
 // WriteError emits a terminal error chunk. Caller should return
