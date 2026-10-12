@@ -12,6 +12,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 
 	"github.com/bbockelm/golang-htcondor/webapi/batches"
+	"github.com/bbockelm/golang-htcondor/webapi/utilization"
 )
 
 // batchAd is a job ad: the given attributes over an owner, a cluster and
@@ -359,5 +360,38 @@ func TestBatchesAreDocumented(t *testing.T) {
 		if _, ok := doc.Paths[path]; !ok {
 			t.Errorf("%s missing from the OpenAPI paths", path)
 		}
+	}
+}
+
+// A DAGMan job's record is the workflow's span and verdict, not a job's
+// work: it stays out of the finished-job statistics, which describe the
+// nodes.
+func TestBatchFinishedLeavesOutDAGMan(t *testing.T) {
+	var reader utilization.JobReader
+	rec := func(text string) batchRecord {
+		ad, err := classad.ParseOld(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return newBatchRecord(ad, false, &reader)
+	}
+	recs := []batchRecord{
+		rec("ClusterId = 1\nProcId = 0\nCmd = \"/usr/bin/condor_dagman\"\nJobUniverse = 7\nJobStatus = 4\nExitCode = 1\n" +
+			"RemoteWallClockTime = 3600.0\nCommittedTime = 0\nDAG_NodesTotal = 2\nJobBatchName = \"a.dag+1\""),
+		rec("ClusterId = 2\nProcId = 0\nCmd = \"/bin/x\"\nJobStatus = 4\nExitCode = 0\nRemoteWallClockTime = 60.0\nCommittedTime = 60\n" +
+			"DAGManJobId = 1\nJobBatchName = \"a.dag+1\""),
+	}
+	ident, _ := batches.Identify(&recs[0].f)
+	snap := summarizeBatch(ident, recs, nil)
+	fin := snap.summary.Finished
+	if fin.Jobs != 1 || fin.Succeeded != 1 || fin.Failed != 0 || fin.WallHours != 60.0/3600 || fin.BadputHours != 0 ||
+		fin.Runtime == nil || fin.Runtime.Max != 60 || !snap.summary.HasHistory || len(snap.rows) != 2 {
+		t.Errorf("finished = %+v, rows %d", fin, len(snap.rows))
+	}
+	// Only the DAGMan job has finished: there is history, and no job
+	// statistics yet.
+	snap = summarizeBatch(ident, recs[:1], nil)
+	if !snap.summary.HasHistory || snap.summary.Finished.Jobs != 0 || snap.summary.LastCompletion != nil {
+		t.Errorf("dagman only: %+v", snap.summary)
 	}
 }

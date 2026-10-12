@@ -769,7 +769,17 @@ func (a *batchSummary) add(rec *batchRecord) {
 		a.sum.LiveJobs++
 		return
 	}
-	a.addFinished(rec)
+	a.sum.HasHistory = true
+	if c := rec.j.Completion; c > 0 && (a.sum.LastCompletion == nil || c > *a.sum.LastCompletion) {
+		a.sum.LastCompletion = &c
+	}
+	// A DAGMan job's run is the workflow's, not work of its own: its
+	// hours are a DAG's whole span, and its exit status says whether
+	// some node failed, which the nodes already say. Its record is in
+	// the rows and in dag.
+	if !rec.f.IsDagManJob() {
+		a.addFinished(rec)
+	}
 }
 
 // addWorkflow counts the job in its Utilization workflow. A DAGMan job
@@ -811,9 +821,6 @@ func (a *batchSummary) addHold(rec *batchRecord) {
 func (a *batchSummary) addFinished(rec *batchRecord) {
 	fin := &a.sum.Finished
 	fin.Jobs++
-	if c := rec.j.Completion; c > 0 && (a.sum.LastCompletion == nil || c > *a.sum.LastCompletion) {
-		a.sum.LastCompletion = &c
-	}
 	outcome := rec.outcome()
 	if outcome == "" {
 		return
@@ -879,7 +886,6 @@ func (a *batchSummary) addOutcome(rec *batchRecord, outcome string) {
 // finish orders and rounds off what add gathered.
 func (a *batchSummary) finish(ident batches.Identity) BatchResponse {
 	sum := a.sum
-	sum.HasHistory = sum.Finished.Jobs > 0
 	for c := range a.clusters {
 		sum.Clusters = append(sum.Clusters, c)
 	}
