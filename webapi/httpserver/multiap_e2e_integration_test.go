@@ -485,9 +485,24 @@ func e2eHubOutage(t *testing.T, s *multiAPStack) {
 	t.Logf("reads recovered %s after the hub restarted", time.Since(started).Round(100*time.Millisecond))
 }
 
+// multiAPStackOptions add configuration for a test that needs more of
+// the stack: pool is appended to the pool's, hub to the hub's, and spoke
+// is called with each spoke's history file for lines to append to it.
+type multiAPStackOptions struct {
+	pool, hub string
+	spoke     func(history string) string
+}
+
 // startMultiAPStack builds the pool, submits the jobs, and starts the
 // spokes, the hub and the API server.
 func startMultiAPStack(t *testing.T, bin string, configure ...func(*Config)) *multiAPStack {
+	t.Helper()
+	return startMultiAPStackWith(t, bin, multiAPStackOptions{}, configure...)
+}
+
+// startMultiAPStackWith is startMultiAPStack with more of the stack
+// configured.
+func startMultiAPStackWith(t *testing.T, bin string, opt multiAPStackOptions, configure ...func(*Config)) *multiAPStack {
 	t.Helper()
 	me, err := user.Current()
 	if err != nil {
@@ -532,7 +547,7 @@ SCHEDD2.SCHEDD_LOG = $(LOG)/SchedLog2
 # Lets a job be queued for another owner (+Owner), as a submit portal
 # does; the test user is not root.
 QUEUE_ALL_USERS_TRUSTED = True
-`, htcondor.HarnessTrustDomain, e2eAP1, e2eAP2, ap2Spool, ap2Dir, sshTemplateLine(s))
+`, htcondor.HarnessTrustDomain, e2eAP1, e2eAP2, ap2Spool, ap2Dir, sshTemplateLine(s)) + opt.pool
 	s.harness = htcondor.SetupCondorHarnessWithConfig(t, poolCfg)
 	s.cfgFile = s.harness.GetConfigFile()
 	t.Cleanup(func() {
@@ -563,7 +578,11 @@ QUEUE_ALL_USERS_TRUSTED = True
 	// mirrored schedd from its address file (the schedd writes its own
 	// Name there), heartbeating every second.
 	spokeCfg := func(name, queueLog, history, addrFile string) string {
-		return dbAuth + fmt.Sprintf(`
+		extra := ""
+		if opt.spoke != nil {
+			extra = opt.spoke(history)
+		}
+		return extra + dbAuth + fmt.Sprintf(`
 HTCONDORDB_NAME = %s
 HTCONDORDB_SYNC_SCHEDD = true
 HTCONDORDB_JOB_QUEUE_LOG = %s
@@ -592,7 +611,7 @@ HTCONDORDB_FEDERATE_DISCOVER_INTERVAL = 1
 HTCONDORDB_FEDERATE_STATE_INTERVAL = 1
 HTCONDORDB_FEDERATE_RETIRE_AFTER = 1h
 UPDATE_INTERVAL = 2
-`, e2eAPConstraint))
+`, e2eAPConstraint)+opt.hub)
 
 	// AP assignment: the test user's new work goes to ap2, the other
 	// user's to ap1.

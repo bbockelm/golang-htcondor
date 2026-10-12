@@ -1812,12 +1812,72 @@ What it serves:
 | `GET /api/v1/templates` and the rest of `/api/v1/templates` | Submit templates, from this server's own database. |
 | `POST /api/v1/interactive/terminal`, `POST /api/v1/jupyter/instances`, `POST /api/v1/apps`, MCP `interactive_session_start` | Start a terminal, a JupyterLab, an app or a named session on your home access point for that kind of work, or with `?schedd=` (MCP `schedd`) on an alternate; see [interactive work](#interactive-work-in-multi-ap-mode). The answer names the access point (`schedd`) and the complete job id. |
 | `GET /api/v1/interactive/terminal`, `GET /api/v1/jupyter/instances[/{id}]`, `GET /api/v1/apps[/{id}]`, `DELETE /api/v1/apps/{id}`, the JupyterLab tunnel, events and proxy, MCP `interactive_session_exec`, `interactive_session_list`, `interactive_session_stop` | As in single-AP mode, against the access point each one is on. |
+| MCP `watch_jobs`, `check_watches`, `cancel_watch`, `create_watch_url`; `POST /api/v1/watches/{id}/share`, `GET /api/v1/share/watch` | Watches over your jobs on every access point; see below. |
+| `GET /api/v1/jobs/watch` | Changes to your jobs on every access point, from the hub's jobs stream; each event's `key` is the complete job id. |
+| `GET /api/v1/dashboard`, `.../dashboard/activity`, `.../dashboard/activity/stream` | Your jobs on every access point, from the hub, in total and per access point (`aps`), with the `sources` block; see below. |
+| `GET /api/v1/issues`, MCP `analyze_issues` | Held jobs and failed run attempts on every access point, from the hub; every example and cluster names its access point (`schedd`, `schedds`). Run attempts need the hub to federate `epoch_history`; without it the answer says so in `notes`. |
+| `GET /api/v1/jobs/epochs`, `.../transfers`, MCP `query_job_epochs`, `query_transfer_history` | Run-attempt and transfer records; see below. |
+| `GET /api/v1/jobs/{id}/match-analysis`, MCP `analyze_job_match` | The job's ad from its access point, the slots from the collector. `{id}` must be complete. |
+| `GET /api/v1/collector/...` (not `advertise`), MCP `query_pool` | The pool's collector, which the access points share. |
 
-Everything else -- watches (including watch share URLs), match analysis,
-the dashboard, the pool pages and chat -- answers **501** ("not available
-in multi-AP mode yet"), and the MCP catalogue offers only the tools above
-plus `whoami`, `get_version`, `doc_*` and `skills_*`. Superuser mode is not
-available.
+Everything else -- drain estimates and runtime estimates (they read one
+schedd's running jobs), `job_metrics` (the hub does not federate it),
+the single-schedd status routes (`/api/v1/ping`, `/api/v1/schedd/ping`,
+`/api/v1/dbmirror/*`; `/api/v1/aps` and `/readyz` describe the access
+points and the hub) and chat -- answers **501** ("not available in
+multi-AP mode yet"), and the MCP catalogue offers only the tools above
+plus `whoami`, `get_version`, `doc_*` and `skills_*`. Superuser mode is
+not available.
+
+**Watches.** One evaluator follows every registered watch over the hub,
+and the hub's jobs table is followed as one change stream for every access
+point (resumed from its position after a dropped connection). A watch's
+constraint selects among your jobs on every access point -- add
+`ScheddName` to it to watch one -- and each job it tracks and reports
+carries its access point (`schedd`): the same `cluster.proc` on two access
+points is two jobs. A job that leaves the queue is reported finished from
+its history record, or from its last ad on the hub's stream saying it
+completed or was removed, on any access point. Its *absence* from the
+queue counts as finished only for an access point the hub reports
+`fresh`, with a measured staleness and its jobs stream connected and
+error-free, on a `federation_sources` snapshot the hub still answers for,
+and only once that snapshot reflects the access point from after the job
+was last seen there (allowing for the reported staleness, a minute for
+the hub's row refresh and one snapshot interval). A stale, absent,
+retiring or untrusted access point, a disconnected or failing stream, a
+spoke being replayed or an unreachable hub never yields a "finished" on
+absence; the watch waits, and fires once the history record arrives or
+the access point is current again. A watch URL is about its owner's jobs
+on every access point, so it carries `"s": "*"` inside its signature: a
+multi-AP server refuses a watch URL without it, and a single-AP server one
+with it. An identity outside `UID_DOMAIN` cannot register or share a
+watch.
+
+**Dashboard.** `jobs_by_status` and `jobs_total` count your jobs on every
+access point; `aps` gives each access point's counts and its state on the
+hub. The activity answer's lists carry `schedd` and `job_id` on each job,
+and its `aps` give each access point's `finished_recently`: history
+records in the last hour plus jobs the hub's stream saw leave the queue
+with evidence that they finished -- a last ad that said so, or a delete on
+an access point that was then fresh with its stream connected. A delete on
+any other access point is also what retiring or replaying that access
+point looks like, and is not counted; such an access point's count is
+marked `finished_partial`. Hub reads have no cross-user view, so
+`owned_by_me=false` is not honoured.
+
+**Run attempts and transfers.** With the hub federating `epoch_history`
+(`HTCONDORDB_FEDERATE_TABLES = jobs history syncstatus epoch_history`),
+`/api/v1/jobs/epochs` and `.../transfers` (and their MCP tools) read your
+records on every access point from it, newest first, each with `schedd`
+and `job_id`; `?schedd=` and `?job_id=` narrow them (a bare `123.0` is
+accepted when one access point has that job of yours). Transfer records
+are the run-attempt records whose `EpochAdType` is `INPUT`, `OUTPUT` or
+`CHECKPOINT`. Without `epoch_history` on the hub, a request naming a job
+or an access point is sent to that access point's schedd, as in single-AP
+mode, and each record carries `ScheddName`; one naming neither is a
+**501** with `"reason": "epoch_history_not_federated"` -- answering it
+would scan every access point's history file on every request, with no
+order or page token across them.
 
 **Actions need a complete id.** A mutation, a sandbox read, a share URL or
 an SSH connection naming only `123.0` is a **400** with

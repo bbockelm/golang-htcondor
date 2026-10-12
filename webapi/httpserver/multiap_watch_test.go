@@ -40,6 +40,19 @@ func TestMultiAPWatchRoutesAllowlist(t *testing.T) {
 		{http.MethodPost, "/api/v1/share/watch", false},
 		{http.MethodGet, "/api/v1/jobs/watch", true},
 		{http.MethodDelete, "/api/v1/jobs/watch", false},
+		// The rest of milestone 6a's reads.
+		{http.MethodGet, "/api/v1/dashboard", true},
+		{http.MethodGet, "/api/v1/dashboard/activity/stream", true},
+		{http.MethodPost, "/api/v1/dashboard", false},
+		{http.MethodGet, "/api/v1/issues", true},
+		{http.MethodGet, "/api/v1/jobs/epochs", true},
+		{http.MethodGet, "/api/v1/jobs/transfers", true},
+		{http.MethodGet, "/api/v1/jobs/1.0@" + ap1 + "/match-analysis", true},
+		{http.MethodGet, "/api/v1/collector/ads", true},
+		{http.MethodGet, "/api/v1/collector/pool-summary", true},
+		{http.MethodGet, "/api/v1/collector/advertise", false},
+		{http.MethodPost, "/api/v1/collector/advertise", false},
+		{http.MethodGet, "/api/v1/pool/drain-estimates", false},
 	} {
 		if got := multiAPAllowed(c.method, c.path); got != c.want {
 			t.Errorf("multiAPAllowed(%s %s) = %v, want %v", c.method, c.path, got, c.want)
