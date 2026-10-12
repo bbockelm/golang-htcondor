@@ -22,10 +22,10 @@ import (
 // a spoke each, a hub federating epoch_history too -- with the schedds
 // writing epoch history.
 //
-// The central rule: a job whose AP's source is stale is never reported
-// finished on its absence. While spoke 2 is stopped, ap2's 1.0 is
-// removed on schedd 2; the watch over it must not fire until spoke 2 is
-// back and the job's history record has reached the hub.
+// While spoke 2 is stopped, ap2's 1.0 is removed on schedd 2, and the
+// watch over it fires from the job's history record once spoke 2 is
+// back. The absence rule itself cannot be exercised here (see
+// e2eStaleAPRemoval); its unit tests hold it.
 //
 // The job that runs is ap1's: epoch history is written by the shadow,
 // which reads JOB_EPOCH_HISTORY without the second schedd's local name,
@@ -248,16 +248,33 @@ func e2eDashboardPerAP(t *testing.T, w *e2eWatches) {
 	if code != http.StatusOK || json.Unmarshal([]byte(body), &a) != nil {
 		t.Fatalf("dashboard activity = %d %s", code, body)
 	}
+	found := false
 	for _, ap := range a.APs {
-		if ap.Schedd == e2eAP1 && ap.FinishedRecently < 1 {
-			t.Errorf("%s finished_recently %d, want %s counted", e2eAP1, ap.FinishedRecently, e2eAP1Job1)
+		if ap.Schedd == e2eAP1 {
+			found = true
+			if ap.FinishedRecently < 1 {
+				t.Errorf("%s finished_recently %d, want %s counted", e2eAP1, ap.FinishedRecently, e2eAP1Job1)
+			}
 		}
+	}
+	if !found {
+		t.Errorf("dashboard activity aps %+v lacks %s", a.APs, e2eAP1)
 	}
 }
 
 // e2eStaleAPRemoval: with spoke 2 stopped, ap2's 1.0 is removed on its
-// schedd. Nothing may report it finished while ap2's source is stale;
-// once spoke 2 is back, its history record fires the all-watch.
+// schedd; the watch is still waiting and the dashboard calls ap2 not
+// current. Once spoke 2 is back, the job's history record fires the
+// all-watch.
+//
+// This does not test the absence rule: the hub keeps a stopped spoke's
+// rows (until HTCONDORDB_FEDERATE_RETIRE_AFTER), so ap2's 1.0 is never
+// missing from the hub's queue while ap2 is stale, and an evaluator that
+// ignored coverage would wait here too. The rule -- stale, absent,
+// untrusted, disconnected, erroring, replaying or catching-up sources,
+// an unreachable hub, the horizon -- is held by the unit tests in
+// webapi/multiap (watch_test.go) and webapi/jobwatch
+// (multiap_absence_test.go).
 func e2eStaleAPRemoval(t *testing.T, w *e2eWatches) {
 	s := w.s
 	s.spoke2.Stop()
@@ -266,23 +283,25 @@ func e2eStaleAPRemoval(t *testing.T, w *e2eWatches) {
 	})
 	s.condorRm(t, e2eAP2Job1)
 
-	// Several evaluator passes with ap2 stale: the watch waits, and the
-	// dashboard says ap2 is not current.
-	stale := time.Now()
-	for time.Since(stale) < 45*time.Second {
-		if a := w.poll(t, w.allURL, 15*time.Second); a.State != watchpoll.StateWaiting {
-			t.Fatalf("the all-watch = %+v while %s is stale; its removal cannot have been seen", a, e2eAP2)
-		}
+	if a := w.poll(t, w.allURL, 0); a.State != watchpoll.StateWaiting {
+		t.Fatalf("the all-watch = %+v while %s is stale; its removal cannot have been seen", a, e2eAP2)
 	}
 	code, body := s.get(t, s.me, "/api/v1/dashboard")
 	var d DashboardResponse
 	if code != http.StatusOK || json.Unmarshal([]byte(body), &d) != nil {
 		t.Fatalf("dashboard = %d %s", code, body)
 	}
+	found := false
 	for _, ap := range d.APs {
-		if ap.Schedd == e2eAP2 && ap.State == multiap.StateFresh {
-			t.Errorf("dashboard reports %s fresh with its spoke stopped", e2eAP2)
+		if ap.Schedd == e2eAP2 {
+			found = true
+			if ap.State == multiap.StateFresh {
+				t.Errorf("dashboard reports %s fresh with its spoke stopped", e2eAP2)
+			}
 		}
+	}
+	if !found {
+		t.Errorf("dashboard aps %+v lacks %s", d.APs, e2eAP2)
 	}
 
 	s.spoke2.Start()
