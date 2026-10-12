@@ -44,6 +44,15 @@ type SlotQuerier interface {
 // If a caller passes the special projection ["*"] we skip the cache key
 // arithmetic and treat it as "all attributes". Subsequent requests for
 // any subset are served from the same entry.
+//
+// # Every caller gets its own ads
+//
+// The cache holds slots frozen (see frozenAd), never as *classad.ClassAd,
+// and every Slots or StreamSlots call is handed freshly built ads. An
+// analysis binds each slot to the job it is analyzing and evaluates it,
+// and both write to the ad; on a shared ad, concurrent analyses race and
+// one user's slot TARGET.* expressions evaluate against another user's
+// job.
 type CollectorSlotProvider struct {
 	q SlotQuerier
 
@@ -78,7 +87,7 @@ type slotCacheEntry struct {
 	// commit to what we asked for.
 	projection map[string]struct{}
 
-	ads []*classad.ClassAd
+	slots []frozenAd
 }
 
 // SlotStreamFunc delivers slot ads one at a time. It is supplied by the
@@ -140,7 +149,25 @@ func NewCollectorSlotProvider(q SlotQuerier, opts ...CollectorSlotProviderOption
 // Slots implements SlotProvider. requiredAttrs is the union of attributes
 // the caller will read from the returned ads. The provider may return ads
 // containing additional attributes, but never fewer.
+//
+// The ads are the caller's own: built for this call, shared with no other
+// caller and not retained by the cache.
 func (p *CollectorSlotProvider) Slots(ctx context.Context, requiredAttrs []string) ([]*classad.ClassAd, error) {
+	frozen, err := p.cachedSlots(ctx, requiredAttrs)
+	if err != nil {
+		return nil, err
+	}
+	ads := make([]*classad.ClassAd, len(frozen))
+	for i, f := range frozen {
+		ads[i] = f.thaw()
+	}
+	return ads, nil
+}
+
+// cachedSlots returns the cached slots, refreshing the cache first when it
+// is stale or lacks an attribute in requiredAttrs. The result is shared
+// with every other caller: thaw an entry to use it.
+func (p *CollectorSlotProvider) cachedSlots(ctx context.Context, requiredAttrs []string) ([]frozenAd, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -149,10 +176,10 @@ func (p *CollectorSlotProvider) Slots(ctx context.Context, requiredAttrs []strin
 	// Cache hit?
 	if p.entry != nil && !p.entry.expired(p.ttl) {
 		if p.entry.allAttrs {
-			return p.entry.ads, nil
+			return p.entry.slots, nil
 		}
 		if !wantAll && hasAll(p.entry.projection, requested) {
-			return p.entry.ads, nil
+			return p.entry.slots, nil
 		}
 	}
 
@@ -181,9 +208,15 @@ func (p *CollectorSlotProvider) Slots(ctx context.Context, requiredAttrs []strin
 		return nil, fmt.Errorf("matchanalyzer: slot query: %w", err)
 	}
 
+	// Freeze while the ads are still ours alone; the *ClassAd values are
+	// dropped here and never reach a caller.
+	slots := make([]frozenAd, len(ads))
+	for i, ad := range ads {
+		slots[i] = freeze(ad)
+	}
 	entry := &slotCacheEntry{
 		fetchedAt: time.Now(),
-		ads:       ads,
+		slots:     slots,
 		allAttrs:  wantAll,
 	}
 	if !wantAll {
@@ -194,7 +227,7 @@ func (p *CollectorSlotProvider) Slots(ctx context.Context, requiredAttrs []strin
 	}
 	p.entry = entry
 
-	return ads, nil
+	return slots, nil
 }
 
 // StreamSlots implements SlotStreamer.
@@ -206,16 +239,18 @@ func (p *CollectorSlotProvider) Slots(ctx context.Context, requiredAttrs []strin
 // again is the trade: an analysis is a person asking "why will my job not
 // run", not something on a timer.
 //
-// Falls back to the slice path when no streaming query was supplied, so a
-// provider built without one still works.
+// Falls back to the cache when no streaming query was supplied, so a
+// provider built without one still works. Each cached slot is thawed into
+// a new ad as it is handed over, so the caller owns every ad it is given
+// and only one is built at a time.
 func (p *CollectorSlotProvider) StreamSlots(ctx context.Context, requiredAttrs []string, fn func(*classad.ClassAd) bool) error {
 	if p.stream == nil {
-		ads, err := p.Slots(ctx, requiredAttrs)
+		frozen, err := p.cachedSlots(ctx, requiredAttrs)
 		if err != nil {
 			return err
 		}
-		for _, ad := range ads {
-			if !fn(ad) {
+		for _, f := range frozen {
+			if !fn(f.thaw()) {
 				return nil
 			}
 		}
@@ -243,7 +278,7 @@ func (p *CollectorSlotProvider) CacheStatus() CacheStatus {
 	}
 	return CacheStatus{
 		FetchedAt:  p.entry.fetchedAt,
-		AdCount:    len(p.entry.ads),
+		AdCount:    len(p.entry.slots),
 		AllAttrs:   p.entry.allAttrs,
 		Projection: sortedKeys(p.entry.projection),
 		AgeSeconds: int(time.Since(p.entry.fetchedAt).Seconds()),
@@ -309,9 +344,12 @@ func sortedKeys(m map[string]struct{}) []string {
 }
 
 // StaticSlotProvider is a trivial in-memory SlotProvider for tests. It
-// returns the same set of ads on every call, regardless of the requested
+// returns the same set of slots on every call, regardless of the requested
 // attributes — so tests can reason about slot match outcomes without
 // worrying about projection truncation.
+//
+// Like any SlotProvider it hands each call copies of Ads, never Ads
+// itself, so the analyzer's binding and evaluation leave Ads untouched.
 type StaticSlotProvider struct {
 	Ads []*classad.ClassAd
 
@@ -319,12 +357,23 @@ type StaticSlotProvider struct {
 	// Slots call. Tests assert on this to verify the analyzer asked for
 	// the right projection.
 	LastRequestedAttrs []string
+
+	mu sync.Mutex
 }
 
 // Slots implements SlotProvider.
 func (p *StaticSlotProvider) Slots(_ context.Context, requiredAttrs []string) ([]*classad.ClassAd, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	// Deep-copy the slice so a test's mutation of LastRequestedAttrs
 	// doesn't echo back into the analyzer's state on a subsequent call.
 	p.LastRequestedAttrs = append([]string(nil), requiredAttrs...)
-	return p.Ads, nil
+	if p.Ads == nil {
+		return nil, nil
+	}
+	ads := make([]*classad.ClassAd, len(p.Ads))
+	for i, ad := range p.Ads {
+		ads[i] = privateCopy(ad)
+	}
+	return ads, nil
 }

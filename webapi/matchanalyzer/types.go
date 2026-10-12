@@ -93,6 +93,12 @@ type Decomposer interface {
 // invocation — the IdentityAttrs plus every attribute referenced by the
 // job's Requirements. Implementations are free to fetch a superset (for
 // caching reasons), but must never return less.
+//
+// The returned ads belong to the caller. The analyzer binds each one to
+// the job it is analyzing (SetTarget) and evaluates it, and both write to
+// the ad, so an implementation must never hand the same *classad.ClassAd
+// to two calls or keep one it has handed out. A provider that caches
+// keeps its cache in a form it copies from (see frozenAd).
 type SlotProvider interface {
 	Slots(ctx context.Context, requiredAttrs []string) ([]*classad.ClassAd, error)
 }
@@ -107,6 +113,7 @@ type SlotProvider interface {
 //
 // fn returns false to stop early. The implementation must stop calling
 // fn and return promptly, and must not retain the ad after fn returns.
+// As with SlotProvider, each ad passed to fn belongs to that call alone.
 type SlotStreamer interface {
 	StreamSlots(ctx context.Context, requiredAttrs []string, fn func(*classad.ClassAd) bool) error
 }

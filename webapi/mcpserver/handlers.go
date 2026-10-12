@@ -1608,6 +1608,9 @@ func (s *Server) toolGetJob(ctx context.Context, args map[string]interface{}) (i
 // The provider's slot cache is process-wide so an agent that runs the
 // analysis tool a few times in quick succession (a common debugging
 // pattern) only triggers one collector query within the cache window.
+// Concurrent analyses, by different users, share that cache; each is
+// handed its own copy of every slot, because an analysis binds each slot
+// to the job it is analyzing.
 func (s *Server) matchAnalysisProvider() *matchanalyzer.CollectorSlotProvider {
 	s.matchAnalysisOnce.Do(func() {
 		if s.collector == nil {
