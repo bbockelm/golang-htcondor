@@ -26,6 +26,11 @@ type Analyzer struct {
 	// into a single "(other: N)" bucket. Keeps webpage and CLI output
 	// readable for high-cardinality attributes (e.g., Machine names).
 	distinctValuesCap int
+
+	// afterBind, when set, runs once per slot after the job and slot are
+	// bound to each other and before any predicate is evaluated. Tests
+	// use it to hold one analysis at that point while another runs.
+	afterBind func(job, slot *classad.ClassAd)
 }
 
 // Option configures an Analyzer at construction time.
@@ -78,12 +83,17 @@ func New(slots SlotProvider, opts ...Option) *Analyzer {
 // submitted job). If absent, Analyze treats Requirements as the literal
 // `true` and returns a single trivially-matching predicate; that's not a
 // useful analysis but also not an error condition worth aborting on.
+//
+// jobAd is not modified: the analysis binds and evaluates a private copy,
+// so the caller's ad is left unbound and keeps no slot alive. The caller
+// must not modify jobAd while Analyze runs.
 func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result, error) {
 	if jobAd == nil {
 		return nil, fmt.Errorf("matchanalyzer: jobAd is nil")
 	}
+	job := privateCopy(jobAd)
 
-	reqExpr := lookupRequirements(jobAd)
+	reqExpr := lookupRequirements(job)
 
 	preds, err := a.decomposer.Decompose(reqExpr)
 	if err != nil {
@@ -137,7 +147,7 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 
 	matchedAllOthers := make([]int, len(preds)) // per-predicate counter
 
-	boundExprs := bindPredicates(jobAd, preds)
+	boundExprs := bindPredicates(job, preds)
 
 	// Distributions are computed per *post-bind slot-side attribute*,
 	// not per ReferencedSlotAttr (which is conservative and includes
@@ -174,8 +184,14 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 		}
 	}
 
+	// Each slot is this analysis's own (the SlotProvider contract), so
+	// binding it to the job here cannot be seen by any other analysis.
 	onSlot := func(slot *classad.ClassAd) {
-		results := evalPredicatesAgainstSlot(jobAd, slot, boundExprs)
+		classad.NewMatchClassAd(job, slot)
+		if a.afterBind != nil {
+			a.afterBind(job, slot)
+		}
+		results := evalBoundPredicates(job, boundExprs)
 		if isFullMatch(results) {
 			res.FullMatches++
 		}
@@ -200,6 +216,10 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 	if err := a.eachSlot(ctx, projection, onSlot); err != nil {
 		return nil, err
 	}
+	// The job is still bound to the last slot. Unbind it so nothing below
+	// evaluates the job against an arbitrary slot, and so the slot is not
+	// kept alive.
+	job.SetTarget(nil)
 
 	// Pick the narrowing predicate: highest matchedAllOthers value, with
 	// ties broken in favor of lower index (stable). If the max is zero —
@@ -250,7 +270,7 @@ func (a *Analyzer) Analyze(ctx context.Context, jobAd *classad.ClassAd) (*Result
 				continue
 			}
 			_ = p // kept for future per-predicate metadata if needed
-			res.Predicates[i].ResourceSuggestion = computeResourceSuggestion(comps[i], jobAd, failing[i])
+			res.Predicates[i].ResourceSuggestion = computeResourceSuggestion(comps[i], job, failing[i])
 		}
 	}
 
@@ -378,25 +398,24 @@ const (
 	predError
 )
 
-// evalPredicatesAgainstSlot evaluates every (already-bound) predicate
-// expression against the given slot ad and returns one outcome per
-// predicate. The expressions are expected to have come through
-// bindBareReferences so every AttributeReference is explicitly scoped
-// (MY. for job-side, TARGET. for slot-side).
+// evalBoundPredicates evaluates every (already-bound) predicate expression
+// against the job ad, which the caller has bound to one slot, and returns
+// one outcome per predicate. The expressions are expected to have come
+// through bindBareReferences so every AttributeReference is explicitly
+// scoped (MY. for job-side, TARGET. for slot-side).
 //
-// We wire the two ads via classad.MatchClassAd and evaluate against the
-// **job** ad, not the slot. That mirrors HTCondor's matching semantics
-// for a job's Requirements: MY = job, TARGET = slot. Evaluating against
-// the slot would invert this and produce TARGET.x = jobAd.x, which is
-// not what an operator reading the predicate expects.
+// Evaluation is against the **job** ad, not the slot. That mirrors
+// HTCondor's matching semantics for a job's Requirements: MY = job,
+// TARGET = slot. Evaluating against the slot would invert this and
+// produce TARGET.x = jobAd.x, which is not what an operator reading the
+// predicate expects.
 //
-// MatchClassAd.NewMatchClassAd calls SetTarget on both ads, which
-// mutates them. The caller is expected to pass a job ad it's comfortable
-// having TARGET set on (typically a single-use copy from a query); for
-// the slot ad we re-set TARGET on every iteration anyway.
-func evalPredicatesAgainstSlot(jobAd, slotAd *classad.ClassAd, boundExprs []ast.Expr) []predOutcome {
-	classad.NewMatchClassAd(jobAd, slotAd)
-
+// The caller binds the pair with classad.NewMatchClassAd, which calls
+// SetTarget on both ads. Both must belong to this analysis alone: a
+// slot's own expressions resolve TARGET.* through the slot's binding, so
+// a slot shared with a concurrent analysis evaluates against whichever
+// job bound it last.
+func evalBoundPredicates(jobAd *classad.ClassAd, boundExprs []ast.Expr) []predOutcome {
 	results := make([]predOutcome, len(boundExprs))
 	for i, expr := range boundExprs {
 		results[i] = classifyPredicateValue(jobAd.EvaluateExpr(expr))
