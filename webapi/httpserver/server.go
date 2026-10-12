@@ -417,6 +417,9 @@ type Config struct {
 	LLMAPIURL string
 	// LLMModel overrides the default model id. Empty = package default.
 	LLMModel string
+	// LLMAuthScheme is how the key is sent upstream: "x-api-key"
+	// (default) or "bearer". See HandlerConfig.
+	LLMAuthScheme string
 	// LLMOperatorInstructionsFile is the path to a file with extra
 	// system-prompt rules the operator wants the chat assistant to
 	// follow on every turn. Empty disables. See HandlerConfig for
@@ -567,6 +570,7 @@ func NewServer(cfg Config) (*Server, error) {
 		LLMAPIKeyFile:               cfg.LLMAPIKeyFile,
 		LLMAPIURL:                   cfg.LLMAPIURL,
 		LLMModel:                    cfg.LLMModel,
+		LLMAuthScheme:               cfg.LLMAuthScheme,
 		LLMOperatorInstructionsFile: cfg.LLMOperatorInstructionsFile,
 	}
 

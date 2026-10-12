@@ -45,6 +45,17 @@ const DefaultAnthropicURL = "https://api.anthropic.com/v1/messages"
 // reasoning, cheap enough at scale" middle.
 const DefaultAnthropicModel = "claude-sonnet-4-5"
 
+// Auth schemes for presenting the API key upstream.
+//
+// Anthropic's own API reads the key from the x-api-key header. An
+// OpenAI-style gateway that fronts the Messages API (Envoy AI Gateway,
+// LiteLLM, and the like) typically authenticates every route the same
+// way, with "Authorization: Bearer", and never looks at x-api-key.
+const (
+	AuthSchemeAPIKey = "x-api-key"
+	AuthSchemeBearer = "bearer"
+)
+
 // MaxTokens caps how much the LLM can emit per turn. Tool-heavy
 // flows can take a few thousand tokens of reasoning + tool args; 4096
 // is comfortable headroom while still bounding worst-case spend.
@@ -55,10 +66,11 @@ const MaxTokens = 4096
 // the surface we use is small (one endpoint, streaming) and a fresh
 // dep adds non-trivial code to vet.
 type AnthropicClient struct {
-	apiKey string // "Bearer-equivalent" — sent as x-api-key
-	url    string // Operator-overridable; defaults to DefaultAnthropicURL
-	model  string // Default model when Request.Model is empty
-	httpDo func(*http.Request) (*http.Response, error)
+	apiKey     string // Sent as x-api-key or as a Bearer token, per authScheme
+	authScheme string // AuthSchemeAPIKey or AuthSchemeBearer
+	url        string // Operator-overridable; defaults to DefaultAnthropicURL
+	model      string // Default model when Request.Model is empty
+	httpDo     func(*http.Request) (*http.Response, error)
 }
 
 // AnthropicConfig configures the client. APIKeyFile is the on-disk
@@ -79,6 +91,12 @@ type AnthropicConfig struct {
 	// DefaultAnthropicModel.
 	Model string
 
+	// AuthScheme selects the header the key is sent in: AuthSchemeAPIKey
+	// (x-api-key, what api.anthropic.com reads; the default) or
+	// AuthSchemeBearer ("Authorization: Bearer", what a gateway fronting
+	// the Messages API usually wants). Anything else is a startup error.
+	AuthScheme string
+
 	// HTTPClient is the http.Client to dispatch with. nil = a stock
 	// client with a 60-second per-request timeout.
 	HTTPClient *http.Client
@@ -88,9 +106,12 @@ type AnthropicConfig struct {
 // client. Returns nil, nil when no key is configured — that's the
 // "chat disabled" path; callers must check.
 //
-// Refuses to read the key file with mode bits set for group or other
-// (`stat --printf=%a key` should be `600` or `400`). Same security
-// posture as seal.LoadMasterKEKFromFile.
+// Refuses to read a key file that is world-accessible (any other-bits
+// set). Group-readable is allowed, because that is what a Kubernetes
+// secret volume looks like under fsGroup: the kubelet makes every file
+// 0440, root-owned and group-owned by the daemon's gid, and there is no
+// way to ask it for 0400. Same security posture as
+// seal.LoadMasterKEKFromFile, which spells out the same three modes.
 func NewAnthropicClient(cfg AnthropicConfig) (*AnthropicClient, error) {
 	if strings.TrimSpace(cfg.APIKeyFile) == "" {
 		return nil, nil
@@ -112,8 +133,8 @@ func NewAnthropicClient(cfg AnthropicConfig) (*AnthropicClient, error) {
 	if info.IsDir() {
 		return nil, fmt.Errorf("chat: api key file %s is a directory", cfg.APIKeyFile)
 	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("chat: api key file %s has world/group perms (mode %#o); must be 0600 or 0400", cfg.APIKeyFile, perm)
+	if perm := info.Mode().Perm(); perm&0o007 != 0 {
+		return nil, fmt.Errorf("chat: api key file %s is world-accessible (mode %#o); must have no other-bits set (typical: 0600, 0400, or 0440 for kubelet+fsGroup mounts)", cfg.APIKeyFile, perm)
 	}
 	raw, err := io.ReadAll(f)
 	if err != nil {
@@ -139,17 +160,31 @@ func NewAnthropicClient(cfg AnthropicConfig) (*AnthropicClient, error) {
 		model = DefaultAnthropicModel
 	}
 
+	authScheme := strings.ToLower(strings.TrimSpace(cfg.AuthScheme))
+	switch authScheme {
+	case "":
+		authScheme = AuthSchemeAPIKey
+	case AuthSchemeAPIKey, AuthSchemeBearer:
+	default:
+		return nil, fmt.Errorf("chat: unknown LLM auth scheme %q; want %q or %q", cfg.AuthScheme, AuthSchemeAPIKey, AuthSchemeBearer)
+	}
+
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 120 * time.Second}
 	}
 	return &AnthropicClient{
-		apiKey: apiKey,
-		url:    endpoint,
-		model:  model,
-		httpDo: httpClient.Do,
+		apiKey:     apiKey,
+		authScheme: authScheme,
+		url:        endpoint,
+		model:      model,
+		httpDo:     httpClient.Do,
 	}, nil
 }
+
+// AuthScheme returns how the key is presented upstream (AuthSchemeAPIKey
+// or AuthSchemeBearer). Useful in handler logs.
+func (c *AnthropicClient) AuthScheme() string { return c.authScheme }
 
 // Model returns the default model id this client was configured with.
 // Useful in handler logs.
@@ -266,7 +301,11 @@ func (c *AnthropicClient) Stream(ctx context.Context, system string, msgs []Anth
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("x-api-key", c.apiKey)
+		if c.authScheme == AuthSchemeBearer {
+			req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		} else {
+			req.Header.Set("x-api-key", c.apiKey)
+		}
 		req.Header.Set("anthropic-version", AnthropicAPIVersion)
 		req.Header.Set("Accept", "text/event-stream")
 

@@ -2194,9 +2194,10 @@ Frequently-used knobs:
 | `HTTP_API_VSCODE_IMAGE` | Container image a VS Code session runs. Any transfer scheme works, so a `.sif` staged on OSDF can be named directly. Set, it wins outright and a caller cannot override it; unset, a caller may name an image, which grants nothing new since they can already submit a job with any image. Defaults to a published code-server image. See [VS Code sessions](#vs-code-sessions). |
 | `HTTP_API_MCP_DISABLED_TOOLS` | MCP tools this access point does not offer, as glob patterns separated by commas or whitespace. Applied on SIGHUP. See [Disabling tools](#disabling-tools). |
 | `HTTP_API_TRUSTED_PROXIES` | Comma-separated CIDRs (or bare addresses) whose `X-Forwarded-For` / `X-Real-IP` are honored when recording a client address. Unset means none are, and the peer address is logged. |
-| `HTTP_API_LLM_API_KEY_FILE` | Path to a 0600-mode file with the Anthropic API key. Enables the chat assistant. |
-| `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). |
-| `HTTP_API_LLM_MODEL` | Override the default Claude model. |
+| `HTTP_API_LLM_API_KEY_FILE` | Path to a file with the LLM API key. Enables the chat assistant. The file must not be world-accessible: 0600, 0400, or 0440 (what a Kubernetes secret volume is under `fsGroup`). |
+| `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). The full URL of the `/v1/messages` route. |
+| `HTTP_API_LLM_MODEL` | Override the default Claude model. With a gateway, the model name as the gateway knows it. |
+| `HTTP_API_LLM_AUTH_SCHEME` | How the key is sent: `x-api-key` (default; what api.anthropic.com reads) or `bearer` (`Authorization: Bearer`, what an OpenAI-style gateway fronting the Messages API, such as Envoy AI Gateway or LiteLLM, authenticates). |
 | `HTTP_API_LLM_OPERATOR_INSTRUCTIONS_FILE` | Site-policy text appended to every chat system prompt. |
 | `PRIVATE_NETWORK_NAME` | This host's private network name. When it equals a daemon's advertised `PrivNet`, that daemon is dialed directly instead of through its CCB broker. Defaults to `$(FULL_HOSTNAME)`, as in C++. See [Reaching jobs behind CCB](#reaching-jobs-behind-ccb). |
 | `HTTP_API_SHARED_PORT` | Open an inbound HTCondor port (a port or `host:port`, e.g. `9618`) so this server can be reached by execute nodes behind a Condor Connection Broker. Off by default. See [Reaching jobs behind CCB](#reaching-jobs-behind-ccb). |
