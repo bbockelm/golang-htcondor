@@ -128,13 +128,18 @@ func TestMultiAPTerminalCreateLandsOnTheAssignedAP(t *testing.T) {
 	before := s.aps.counts()
 	rec := doAlice(t, s.srv, http.MethodPost, "/api/v1/interactive/terminal", `{}`)
 	reachedOnlyAP(t, "POST /api/v1/interactive/terminal", before, s.aps.counts(), ap2)
-	if rec.Code == http.StatusNotImplemented || rec.Code == http.StatusForbidden {
-		t.Fatalf("terminal refused: %d %s", rec.Code, rec.Body.String())
+	// The counting schedd cannot take a job: the submit reached it and
+	// failed there, which is all a 502 here can mean.
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "schedd submit failed") {
+		t.Fatalf("terminal = %d %s, want the counting schedd's submit failure", rec.Code, rec.Body.String())
 	}
 
 	before = s.aps.counts()
-	_ = doAlice(t, s.srv, http.MethodPost, "/api/v1/interactive/terminal?schedd="+ap3, `{}`)
+	rec = doAlice(t, s.srv, http.MethodPost, "/api/v1/interactive/terminal?schedd="+ap3, `{}`)
 	reachedOnlyAP(t, "a terminal on the alternate", before, s.aps.counts(), ap3)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "schedd submit failed") {
+		t.Errorf("terminal on the alternate = %d %s, want the counting schedd's submit failure", rec.Code, rec.Body.String())
+	}
 
 	before = s.aps.counts()
 	rec = doAlice(t, s.srv, http.MethodPost, "/api/v1/interactive/terminal?schedd="+ap1, `{}`)
@@ -250,8 +255,8 @@ func TestMultiAPAppCreateLandsOnTheAssignedAP(t *testing.T) {
 	before := s.aps.counts()
 	rec := doAlice(t, s.srv, http.MethodPost, "/api/v1/apps", `{}`)
 	reachedOnlyAP(t, "POST /api/v1/apps", before, s.aps.counts(), ap2)
-	if rec.Code == http.StatusNotImplemented || rec.Code == http.StatusForbidden {
-		t.Fatalf("app refused: %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "schedd submit failed") {
+		t.Fatalf("app = %d %s, want the counting schedd's submit failure", rec.Code, rec.Body.String())
 	}
 }
 
@@ -285,8 +290,11 @@ func TestMultiAPAppIsReachedOnItsAP(t *testing.T) {
 		before := s.aps.counts()
 		rec := doAlice(t, s.srv, c.method, "/api/v1/apps/"+c.id, "")
 		reachedOnlyAP(t, c.method+" "+c.id, before, s.aps.counts(), ap2)
-		if rec.Code == http.StatusNotFound || rec.Code == http.StatusNotImplemented {
-			t.Errorf("%s %s = %d %s", c.method, c.id, rec.Code, rec.Body.String())
+		// The app's AP was asked for it, and the counting schedd failed
+		// the query: 502, not 404 (which would mean it was looked for
+		// and is not there) or anything about another AP.
+		if rec.Code != http.StatusBadGateway {
+			t.Errorf("%s %s = %d %s, want 502 from the app's AP", c.method, c.id, rec.Code, rec.Body.String())
 		}
 	}
 	// An app the hub does not have is not looked for anywhere.
@@ -321,6 +329,8 @@ type apJupyterSchedds struct {
 	mu     sync.Mutex
 	byAP   map[string]*jupyterFakeSchedd
 	misses int
+	// hang makes an AP's status queries block until their context ends.
+	hang map[string]bool
 }
 
 func newAPJupyterSchedds(t *testing.T, names ...string) *apJupyterSchedds {
@@ -354,6 +364,17 @@ func (a *apJupyterSchedds) SpoolJobFilesFromFS(ctx context.Context, procAds []*c
 }
 
 func (a *apJupyterSchedds) QueryWithOptions(ctx context.Context, constraint string, opts *htcondor.QueryOptions) ([]*classad.ClassAd, *htcondor.PageInfo, error) {
+	a.mu.Lock()
+	hang := a.hang[routedSchedd(ctx)]
+	a.mu.Unlock()
+	if hang {
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-time.After(10 * time.Second):
+			return nil, nil, fmt.Errorf("the hanging schedd gave up")
+		}
+	}
 	return a.at(ctx).QueryWithOptions(ctx, constraint, opts)
 }
 

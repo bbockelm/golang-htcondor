@@ -1945,10 +1945,12 @@ goes to the new access point.
   Exec, stop, the heartbeat and lease expiry go to the session's access
   point; if it cannot be reached the call fails naming it. Sessions this
   server did not start or has not reached since its last restart are
-  found through the hub, so starting or finding one needs the hub to
-  answer. `interactive_session_list` reports each session's access point;
-  one whose access point cannot be asked is reported from the hub with
-  `access_point_error`.
+  found through the hub, so starting one, or finding one this server
+  does not already know, needs the hub to answer. Each access point has
+  15 seconds to answer a listing; one that does not is treated as
+  unreachable. `interactive_session_list` reports each session's access
+  point; one whose access point cannot be asked is reported from the hub,
+  and from this server's own record of it, with `access_point_error`.
 - **The SSH gateway** resolves a session name the same way, and starts a
   missing one on your assigned access point. It knows you only by your
   account, so an assignment rule on a group does not apply to a session it
@@ -1959,7 +1961,11 @@ goes to the new access point.
   (`jupyter_sessions.schedd`), and every status read -- including after a
   restart adopts the session -- goes there. A row written by a single-AP
   server has none; in multi-AP mode its job is not looked for on any
-  access point, so it is listed without job status until it expires.
+  access point (its cluster id names no access point), so it is listed
+  without job status or job id until it expires, and is not reaped
+  meanwhile. The reverse holds after switching back to one schedd: a row
+  a multi-AP server wrote for another access point is not looked for on
+  this one.
 - **Apps** have ids of the form `<id>@<schedd>` in this mode, so `GET` and
   `DELETE /api/v1/apps/{id}` go straight to the app's access point. A bare
   id is located through the hub, and one found on two access points is a

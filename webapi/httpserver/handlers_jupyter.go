@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing/fstest"
 	"time"
@@ -446,15 +447,30 @@ func (s *Handler) handleJupyterListInstances(w http.ResponseWriter, r *http.Requ
 		ads map[int]*classad.ClassAd
 		ok  bool
 	}
+	// One query per AP, in parallel and each bounded (jupyterQueryContext),
+	// so one AP that hangs does not hold up the list.
 	answers := map[string]apAnswer{}
+	var answersMu sync.Mutex
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, 8)
 	for ap, clusters := range clustersByAP {
-		qctx, ok := s.jupyterQueryContext(ctx, username, ap)
-		if !ok {
-			continue
-		}
-		ads, queried := s.queryJupyterClusterAds(qctx, clusters)
-		answers[ap] = apAnswer{ads: ads, ok: queried}
+		wg.Add(1)
+		go func(ap string, clusters []int) {
+			defer wg.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			qctx, cancel, ok := s.jupyterQueryContext(ctx, username, ap)
+			if !ok {
+				return
+			}
+			defer cancel()
+			ads, queried := s.queryJupyterClusterAds(qctx, clusters)
+			answersMu.Lock()
+			answers[ap] = apAnswer{ads: ads, ok: queried}
+			answersMu.Unlock()
+		}(ap, clusters)
 	}
+	wg.Wait()
 	out := make([]JupyterInstanceSummary, 0, len(insts))
 	for i, inst := range insts {
 		summary := summaries[i]
@@ -621,7 +637,10 @@ func (s *Handler) handleJupyterGetInstance(w http.ResponseWriter, r *http.Reques
 	// showing "launching".
 	// The instance's own AP in multi-AP mode, and with none on record
 	// (or that AP unreachable) no query at all.
-	qctx, canQuery := s.jupyterQueryContext(ctx, username, summary.Schedd)
+	qctx, cancel, canQuery := s.jupyterQueryContext(ctx, username, summary.Schedd)
+	if canQuery {
+		defer cancel()
+	}
 	if cidInt, ok := jupyterClusterID(summary.ClusterID); ok && canQuery {
 		adsByCluster, queriedOK := s.queryJupyterClusterAds(qctx, []int{cidInt})
 		ad := adsByCluster[cidInt]
@@ -649,7 +668,7 @@ func (s *Handler) jupyterSummary(inst *jupytertunnel.Instance) JupyterInstanceSu
 	case !ok:
 	case s.multi != nil && summary.Schedd != "":
 		summary.JobID = s.multi.codec.Format(jobid.ID{Schedd: summary.Schedd, Cluster: int64(cid)})
-	case s.multi == nil:
+	case s.multi == nil && s.jupyterRowIsOurs(summary.Schedd):
 		summary.JobID = fmt.Sprintf("%d.0", cid)
 	}
 	return summary

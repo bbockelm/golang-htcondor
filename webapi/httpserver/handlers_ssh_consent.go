@@ -190,6 +190,9 @@ func (h *Handler) handleSSHConsentRead(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !h.sshConsentInDomain(w, username) {
+		return
+	}
 	userCode, request, ok := h.sshConsentLookup(w, r, username, r.URL.Query().Get("user_code"))
 	if !ok {
 		return
@@ -219,7 +222,7 @@ func (h *Handler) handleSSHConsentRead(w http.ResponseWriter, r *http.Request) {
 			h.logger.Warn(logging.DestinationHTTP,
 				"Could not look up interactive sessions for an SSH approval screen",
 				"username", owner, "error", err)
-		} else if info, err := findInteractiveSession(cctx, mgr, interactive.Caller{Actor: owner, Owner: owner}, session); err != nil {
+		} else if info, err := findInteractiveSession(cctx, mgr, interactive.Caller{Actor: username, Owner: owner}, session); err != nil {
 			h.logger.Warn(logging.DestinationHTTP,
 				"Could not look up interactive sessions for an SSH approval screen",
 				"username", owner, "error", err)
@@ -277,6 +280,9 @@ func (h *Handler) handleSSHConsentApprove(w http.ResponseWriter, r *http.Request
 
 	username, groups, ok := h.sshConsentIdentity(w, r)
 	if !ok {
+		return
+	}
+	if !h.sshConsentInDomain(w, username) {
 		return
 	}
 
@@ -397,13 +403,22 @@ func (h *Handler) sshConsentCreateSession(ctx context.Context, username, session
 		return nil, false, err
 	}
 
+	// An identity in another UID domain is somebody else, not the
+	// same-named user here: refused, as REST and MCP refuse it, before
+	// the domain is stripped below.
+	if h.multi != nil {
+		if _, err := h.multi.svc.UserFor(username); err != nil {
+			return nil, false, err
+		}
+	}
+
 	mgr := h.interactiveManagerOrNil()
 	if mgr == nil {
 		return nil, false, errors.New("this access point does not run interactive sessions")
 	}
 
 	owner := ownerFromActor(username)
-	caller := interactive.Caller{Actor: owner, Owner: owner}
+	caller := interactive.Caller{Actor: username, Owner: owner}
 	cctx, err := h.withCondorCredential(ctx, owner, sshGatewayScopes, nil)
 	if err != nil {
 		return nil, false, fmt.Errorf("could not act as %s: %w", owner, err)
@@ -436,6 +451,21 @@ func (h *Handler) sshConsentCreateSession(ctx context.Context, username, session
 	default:
 		return nil, false, err
 	}
+}
+
+// sshConsentInDomain refuses, in multi-AP mode, a browser identity in
+// another UID domain, or answers true. The approval screen strips the
+// domain to reach a session's owner; without this, alice@elsewhere
+// would read and create alice@UID_DOMAIN's workspaces.
+func (h *Handler) sshConsentInDomain(w http.ResponseWriter, username string) bool {
+	if h.multi == nil {
+		return true
+	}
+	if _, err := h.multi.svc.UserFor(username); err != nil {
+		h.multiAPError(w, err)
+		return false
+	}
+	return true
 }
 
 // sshConsentDefaults is what the approval form opens with.

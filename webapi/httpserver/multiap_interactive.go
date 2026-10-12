@@ -297,18 +297,45 @@ const jupyterScheddMeta = "schedd"
 // record (a row from before this server fronted several APs) or whose
 // AP cannot be asked now: its job is not looked for anywhere else, and
 // the instance is neither enriched nor reaped.
-func (h *Handler) jupyterQueryContext(ctx context.Context, actor, schedd string) (context.Context, bool) {
+//
+// The reverse holds after a rollback to one schedd: a row a multi-AP
+// server wrote names its AP, and unless that is this server's own
+// schedd, the one schedd is not asked about another AP's cluster id.
+//
+// The context carries jupyterAPTimeout, so an AP that hangs leaves its
+// instances unread rather than holding up the others.
+func (h *Handler) jupyterQueryContext(ctx context.Context, actor, schedd string) (context.Context, context.CancelFunc, bool) {
 	if h.multi == nil {
-		return ctx, true
+		if !h.jupyterRowIsOurs(schedd) {
+			return nil, nil, false
+		}
+		qctx, cancel := context.WithTimeout(ctx, jupyterAPTimeout)
+		return qctx, cancel, true
 	}
 	if schedd == "" {
-		return nil, false
+		return nil, nil, false
 	}
-	routed, err := h.multiRoute(ctx, actor, schedd)
+	qctx, cancel := context.WithTimeout(ctx, jupyterAPTimeout)
+	routed, err := h.multiRoute(qctx, actor, schedd)
 	if err != nil {
-		return nil, false
+		cancel()
+		return nil, nil, false
 	}
-	return routed, true
+	return routed, cancel, true
+}
+
+// jupyterAPTimeout bounds one AP's answer to a JupyterLab status read.
+// A variable for tests.
+var jupyterAPTimeout = 15 * time.Second
+
+// jupyterRowIsOurs reports, with one schedd, whether a JupyterLab row's
+// recorded AP is that schedd: "" (a single-AP row) or its own name.
+func (h *Handler) jupyterRowIsOurs(schedd string) bool {
+	if schedd == "" {
+		return true
+	}
+	own := h.getSchedd()
+	return own != nil && strings.EqualFold(own.Name(), schedd)
 }
 
 // jupyterScheddFor is the schedd a JupyterLab call on ctx uses: the

@@ -44,6 +44,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/vscode"
 )
 
@@ -528,10 +529,12 @@ func (s *Handler) writeAppLookupError(w http.ResponseWriter, err error) {
 		s.writeError(w, http.StatusNotFound, "no such app")
 		return
 	}
-	if s.multi != nil {
+	var me *multiap.Error
+	if errors.As(err, &me) {
 		s.multiAPError(w, err)
 		return
 	}
+	// The schedd could not be asked.
 	s.writeError(w, http.StatusBadGateway, err.Error())
 }
 

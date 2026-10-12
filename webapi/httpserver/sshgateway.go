@@ -612,18 +612,17 @@ func (h *Handler) sshGatewaySession(ctx context.Context, account string, t sshga
 }
 
 // findInteractiveSession returns the caller's session called name, or
-// nil when they have none.
+// nil when they have none. By name, not by listing every session: with
+// several access points a name on two of them is refused
+// (interactive.AmbiguousSessionError) rather than resolved to whichever
+// sorts first, and a session this process already knows is found on its
+// own access point without the federation hub.
 func findInteractiveSession(ctx context.Context, mgr *interactive.Manager, caller interactive.Caller, name string) (*interactive.Info, error) {
-	sessions, err := mgr.List(ctx, caller)
+	info, err := mgr.Find(ctx, caller, name)
 	if err != nil {
 		return nil, fmt.Errorf("looking for session %q: %w", name, err)
 	}
-	for i := range sessions {
-		if sessions[i].Name == name {
-			return &sessions[i], nil
-		}
-	}
-	return nil, nil
+	return info, nil
 }
 
 // sshGatewayAwaitRunning waits for a session's job to start.
@@ -686,9 +685,11 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 		case <-time.After(2 * time.Second):
 		}
 
-		found, err := findInteractiveSession(ctx, mgr, caller, name)
+		// The session is known now: only its own access point is
+		// asked, not the hub and every other access point each tick.
+		found, err := mgr.FindOn(ctx, caller, info.Schedd, name)
 		if err != nil {
-			return jobssh.Key{}, err
+			return jobssh.Key{}, fmt.Errorf("re-reading session %q (job %s): %w", name, info.JobID, err)
 		}
 		if found == nil {
 			return jobssh.Key{}, fmt.Errorf("session %q disappeared while waiting for it to start", name)
