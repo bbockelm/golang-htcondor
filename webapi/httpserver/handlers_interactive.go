@@ -36,6 +36,8 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
+	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -145,8 +147,11 @@ type InteractiveCreateTerminalResponse struct {
 	InstanceID string `json:"instance_id"`
 	ClusterID  int    `json:"cluster_id"`
 	ProcID     int    `json:"proc_id"`
-	JobID      string `json:"job_id"` // "cluster.proc" — convenience for the SPA
+	JobID      string `json:"job_id"` // "cluster.proc" (the complete id in multi-AP mode) — convenience for the SPA
 	BatchName  string `json:"batch_name"`
+	// Schedd is the access point the terminal was placed on, in
+	// multi-AP mode.
+	Schedd string `json:"schedd,omitempty"`
 }
 
 // InteractiveTerminalSummary is the SPA-facing shape of one terminal
@@ -157,8 +162,11 @@ type InteractiveCreateTerminalResponse struct {
 // shared status module distinguishes "queued" from "transferring
 // input" from "executing".
 type InteractiveTerminalSummary struct {
-	InstanceID                   string `json:"instance_id"`
-	JobID                        string `json:"job_id"`
+	InstanceID string `json:"instance_id"`
+	JobID      string `json:"job_id"`
+	// Schedd is the access point the job is on, in multi-AP mode, where
+	// JobID is the complete id.
+	Schedd                       string `json:"schedd,omitempty"`
 	ClusterID                    int    `json:"cluster_id"`
 	ProcID                       int    `json:"proc_id"`
 	BatchName                    string `json:"batch_name"`
@@ -281,6 +289,19 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 		return
 	}
 
+	// In multi-AP mode the terminal goes to the AP the caller's
+	// assignment names for interactive work (or the alternate ?schedd=
+	// names). Everything after this -- the spool below, the /ssh bridge
+	// and its disconnect cleanup -- addresses it by its complete id.
+	if s.multi != nil {
+		var m apregistry.Member
+		var ok bool
+		if ctx, m, ok = s.multiAssign(ctx, w, r, username, apassign.KindInteractive); !ok {
+			return
+		}
+		defer s.multi.svc.NoteWrite(m.Name)
+	}
+
 	instanceID, err := generateInteractiveInstanceID()
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("gen id: %v", err))
@@ -319,7 +340,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 			Mode: 0o755,
 		},
 	}
-	if err := s.getSchedd().SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
+	if err := s.scheddFor(ctx).SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "interactive spool failed",
 			"owner", username, "cluster", clusterID, "error", err)
 		s.writeError(w, http.StatusBadGateway,
@@ -333,11 +354,11 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 			procID = int(v)
 		}
 	}
-	jobID := fmt.Sprintf("%d.%d", clusterID, procID)
+	jobID := s.jobPathID(ctx, clusterID, procID)
 
 	s.logger.Info(logging.DestinationHTTP, "interactive terminal created",
 		"instance", instanceID, "owner", username, "cluster", clusterID, "proc", procID,
-		"batch_name", batchName)
+		"batch_name", batchName, "access_point", routedSchedd(ctx))
 
 	s.writeJSON(w, http.StatusCreated, InteractiveCreateTerminalResponse{
 		InstanceID: instanceID,
@@ -345,6 +366,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 		ProcID:     procID,
 		JobID:      jobID,
 		BatchName:  batchName,
+		Schedd:     routedSchedd(ctx),
 	})
 }
 
@@ -412,6 +434,10 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 		s.writeError(w, http.StatusUnauthorized, "no authenticated user")
 		return
 	}
+	if s.multi != nil {
+		s.multiListInteractiveTerminals(ctx, w, owner)
+		return
+	}
 	// FetchMyJobs feeds opts.Owner into the schedd's MyJobs constraint
 	// as `Owner == Me`. The schedd stores the job's Owner attribute with
 	// whatever string the negotiation surfaced (typically the full
@@ -421,14 +447,10 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 	// keep this in sync with the dashboard handler, which is the
 	// canonical example.
 	opts := &htcondor.QueryOptions{
-		Limit: 500,
-		Projection: []string{
-			"ClusterId", "ProcId", "JobStatus", "JobBatchName",
-			"HoldReason", "HoldReasonCode", "QDate",
-			"JobCurrentStartExecutingDate",
-		},
-		FetchOpts: htcondor.FetchMyJobs,
-		Owner:     owner,
+		Limit:      500,
+		Projection: interactiveTerminalAttrs,
+		FetchOpts:  htcondor.FetchMyJobs,
+		Owner:      owner,
 	}
 	ads, _, err := s.getSchedd().QueryWithOptions(ctx, "true", opts)
 	if err != nil {
@@ -440,40 +462,9 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 
 	out := make([]InteractiveTerminalSummary, 0, len(ads))
 	for _, ad := range ads {
-		batchName, ok := ad.EvaluateAttrString("JobBatchName")
-		if !ok {
-			continue
+		if summary, ok := s.interactiveTerminalSummary(ad, ""); ok {
+			out = append(out, summary)
 		}
-		kind, sessionName, ok := classifyInteractiveBatchName(batchName)
-		if !ok {
-			continue
-		}
-		clusterID, _ := ad.EvaluateAttrInt("ClusterId")
-		procID, _ := ad.EvaluateAttrInt("ProcId")
-		jobStatus, _ := ad.EvaluateAttrInt("JobStatus")
-		holdCode, _ := ad.EvaluateAttrInt("HoldReasonCode")
-		holdReason, _ := ad.EvaluateAttrString("HoldReason")
-		qdate, _ := ad.EvaluateAttrInt("QDate")
-		startExec, _ := ad.EvaluateAttrInt("JobCurrentStartExecutingDate")
-
-		summary := InteractiveTerminalSummary{
-			Kind:                         kind,
-			Name:                         sessionName,
-			SSHCommand:                   s.sshCommandForSession(kind, sessionName),
-			InstanceID:                   strings.TrimPrefix(batchName, interactiveTerminalBatchPrefix),
-			JobID:                        fmt.Sprintf("%d.%d", clusterID, procID),
-			ClusterID:                    int(clusterID),
-			ProcID:                       int(procID),
-			BatchName:                    batchName,
-			JobStatus:                    int(jobStatus),
-			JobCurrentStartExecutingDate: startExec,
-			HoldReasonCode:               int(holdCode),
-			HoldReason:                   holdReason,
-		}
-		if qdate > 0 {
-			summary.SubmittedAt = time.Unix(qdate, 0).UTC().Format(time.RFC3339)
-		}
-		out = append(out, summary)
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]any{"terminals": out})

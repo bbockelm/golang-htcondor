@@ -19,7 +19,7 @@ function watchForErrors(page: import('@playwright/test').Page) {
   return errors;
 }
 
-for (const path of ['/', '/jobs', '/archive', '/utilization', '/aps', '/submit']) {
+for (const path of ['/', '/jobs', '/archive', '/utilization', '/aps', '/submit', '/interactive']) {
   test(`multi-AP: renders ${path} without page errors`, async ({ page }) => {
     const errors = watchForErrors(page);
     const res = await page.goto(path);
@@ -43,7 +43,37 @@ test('multi-AP: the sidebar offers the pages multi-AP mode serves', async ({ pag
   await page.goto('/jobs');
   await expect(page.getByRole('link', { name: 'Access Points' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Submit', exact: true })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Interactive', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Interactive', exact: true })).toBeVisible();
+});
+
+test('multi-AP: a terminal launches on the chosen access point', async ({ page }) => {
+  const posted: string[] = [];
+  await page.route('**/api/v1/interactive/terminal?schedd=*', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    posted.push(route.request().url());
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        instance_id: 'abc',
+        cluster_id: 8,
+        proc_id: 0,
+        job_id: '8.0@ap2.smoke.example',
+        batch_name: 'htcondor-api-interactive-terminal-abc',
+        schedd: 'ap2.smoke.example',
+      }),
+    });
+  });
+  await page.goto('/interactive');
+  // One launcher per kind of interactive work, each naming where it goes.
+  await expect(page.getByText('Will submit to')).toHaveCount(3);
+  const select = page.getByRole('combobox', { name: 'Access point for the terminal' });
+  await expect(select).toHaveValue('ap1.smoke.example');
+  await select.selectOption('ap2.smoke.example');
+  await page.getByRole('button', { name: 'Launch terminal' }).click();
+  await expect.poll(() => posted.length).toBe(1);
+  expect(new URL(posted[0]).searchParams.get('schedd')).toBe('ap2.smoke.example');
+  await expect(page).toHaveURL(/\/interactive\/terminal\/8\.0(%40|@)ap2\.smoke\.example/);
 });
 
 test('multi-AP: the submit page names the access point and offers the alternates', async ({ page }) => {

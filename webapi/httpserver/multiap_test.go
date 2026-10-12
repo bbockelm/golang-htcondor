@@ -352,8 +352,7 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 	}
 
 	// Named explicitly, so a regression reads as what it is.
-	// Interactive sessions, Jupyter, apps, watches, the dashboard and
-	// the collector are not served yet.
+	// Watches, the dashboard and the collector are not served yet.
 	for _, c := range []struct{ method, path string }{
 		{http.MethodPost, "/api/v1/jobs/1.0@" + ap1 + "/hold/extra"},
 		{http.MethodGet, "/api/v1/jobs/1.0@" + ap1 + "/match-analysis"},
@@ -363,11 +362,9 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 		{http.MethodGet, "/api/v1/watches/x/share"},
 		{http.MethodPost, "/api/v1/admin/superuser"},
 		{http.MethodGet, "/api/v1/jupyter/x"},
-		{http.MethodPost, "/api/v1/apps"},
 		{http.MethodPost, "/api/v1/collector/advertise"},
 		{http.MethodGet, "/api/v1/dashboard"},
 		{http.MethodGet, "/api/v1/jobs/epochs"},
-		{http.MethodPost, "/api/v1/interactive/terminal"},
 		{http.MethodPost, "/api/v1/interactive/sessions"},
 		{http.MethodPost, "/api/v1/jupyter/start"},
 		{http.MethodGet, "/api/v1/schedd/ping"},
@@ -384,6 +381,10 @@ func TestMultiAPRefusesEverythingElse(t *testing.T) {
 		{http.MethodGet, "/api/v1/creds/service/scitokens"},
 		{http.MethodGet, "/api/v1/creds/user"},
 		{http.MethodGet, "/api/v1/templates"},
+		// Interactive work, placed by AP assignment (multiap_interactive.go).
+		{http.MethodPost, "/api/v1/interactive/terminal"},
+		{http.MethodPost, "/api/v1/apps"},
+		{http.MethodPost, "/api/v1/jupyter/instances"},
 	} {
 		if !multiAPAllowed(c.method, c.path) {
 			t.Errorf("%s %s is refused in multi-AP mode", c.method, c.path)
@@ -407,7 +408,9 @@ func TestMultiAPMCPCatalogue(t *testing.T) {
 			n == "create_input_upload_url", n == "create_output_download_url", n == "tail_job_output", n == "exec_in_job",
 			n == "submit_job", n == "submit_dag", n == "build_container",
 			n == "list_service_credentials", n == "get_credential_status", n == "store_service_credential",
-			n == "delete_service_credential":
+			n == "delete_service_credential",
+			n == "interactive_session_start", n == "interactive_session_exec", n == "interactive_session_list",
+			n == "interactive_session_stop":
 		default:
 			t.Errorf("multi-AP catalogue offers %q", n)
 		}

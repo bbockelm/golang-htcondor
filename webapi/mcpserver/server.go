@@ -591,7 +591,15 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.EnsureCredentials != nil {
 		beforeSubmit = s.ensureCredentials
 	}
+	// In multi-AP mode the manager is told how to reach the access
+	// points (multiap_interactive.go), and the single-schedd accessor
+	// above is never called.
+	var sessionAPs interactive.APs
+	if s.multi != nil {
+		sessionAPs = interactiveAPs{s: s}
+	}
 	interactiveMgr, err := interactive.NewManager(interactive.Options{
+		APs: sessionAPs,
 		// getSchedd, not the s.schedd snapshot: this server replaces its
 		// schedd when the collector reports a new address, and holding
 		// the old pointer is how MCP kept dialling a socket that no

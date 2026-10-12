@@ -170,6 +170,12 @@ function ConsentForm({
         <dd className="font-medium text-gray-900">{view.username}</dd>
         <dt className="text-gray-500">Workspace</dt>
         <dd className="font-mono text-gray-900">{view.session}</dd>
+        {view.schedd && (
+          <>
+            <dt className="text-gray-500">Access point</dt>
+            <dd className="font-mono text-gray-900">{view.schedd}</dd>
+          </>
+        )}
         <dt className="text-gray-500">Grants</dt>
         <dd className="font-mono text-xs text-gray-700">
           {view.scopes.join(' ')}

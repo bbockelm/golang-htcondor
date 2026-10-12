@@ -10,11 +10,14 @@ export function SubmitTarget({
   assignment,
   value,
   onChange,
+  label = 'Access point',
 }: {
   multiAP: boolean;
   assignment?: APAssignment;
   value: string;
   onChange: (schedd: string) => void;
+  // The select's accessible name, where a page has more than one.
+  label?: string;
 }) {
   if (!multiAP) return null;
   const targets = submitTargets(assignment);
@@ -33,7 +36,7 @@ export function SubmitTarget({
         <code className="rounded-sm bg-gray-100 px-1.5 py-0.5 text-xs">{current}</code>
       ) : (
         <select
-          aria-label="Access point"
+          aria-label={label}
           value={current}
           onChange={(e) => onChange(e.target.value)}
           className="rounded-sm border border-gray-300 px-2 py-1 font-mono text-xs"

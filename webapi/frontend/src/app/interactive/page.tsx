@@ -24,6 +24,7 @@ import Link from 'next/link';
 import {
   api,
   ApiError,
+  submitTargets,
   type AppSummary,
   type InteractiveTerminalSummary,
   type JupyterInstanceSummary,
@@ -44,6 +45,8 @@ import {
 } from '@/components/ResourceRequest';
 import { SubmitLinesField } from '@/components/SubmitLinesField';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { SubmitTarget } from '@/components/SubmitTarget';
+import { useKindAssignment, useMultiAP } from '@/lib/multiap';
 
 const DEFAULT_JUPYTER_IMAGE = 'quay.io/jupyter/scipy-notebook:latest';
 
@@ -91,15 +94,19 @@ function VSCodeSection() {
   const [workdir, setWorkdir] = useState('');
   const [submitLines, setSubmitLines] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const target = useLaunchTarget('interactive');
 
   const submit = useMutation({
     mutationFn: () =>
-      api.apps.create({
-        ...resourceRequestToApi(resources),
-        image: image.trim() || undefined,
-        workdir: workdir.trim() || undefined,
-        submit_lines: submitLines.trim() || undefined,
-      }),
+      api.apps.create(
+        {
+          ...resourceRequestToApi(resources),
+          image: image.trim() || undefined,
+          workdir: workdir.trim() || undefined,
+          submit_lines: submitLines.trim() || undefined,
+        },
+        target.schedd,
+      ),
     onMutate: () => setErrorMsg(null),
     onSuccess: (app) => {
       queryClient.invalidateQueries({ queryKey: ['apps'] });
@@ -158,10 +165,11 @@ function VSCodeSection() {
         </Field>
         <ResourceRequestPanel value={resources} onChange={setResources} />
         <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
+        <LaunchTarget target={target} label="Access point for VS Code" />
         {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
         <button
           onClick={() => submit.mutate()}
-          disabled={submit.isPending}
+          disabled={submit.isPending || target.blocked}
           className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
         >
           {submit.isPending ? 'Submitting…' : 'Launch VS Code'}
@@ -291,13 +299,18 @@ function JupyterSection() {
   const [submitLines, setSubmitLines] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const target = useLaunchTarget('jupyter');
+
   const submit = useMutation({
     mutationFn: () =>
-      api.jupyter.create({
-        image,
-        ...resourceRequestToApi(resources),
-        submit_lines: submitLines.trim() || undefined,
-      }),
+      api.jupyter.create(
+        {
+          image,
+          ...resourceRequestToApi(resources),
+          submit_lines: submitLines.trim() || undefined,
+        },
+        target.schedd,
+      ),
     onMutate: () => setErrorMsg(null),
     onSuccess: (resp) => {
       queryClient.invalidateQueries({ queryKey: ['jupyter', 'instances'] });
@@ -346,10 +359,11 @@ function JupyterSection() {
         </Field>
         <ResourceRequestPanel value={resources} onChange={setResources} />
         <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
+        <LaunchTarget target={target} label="Access point for JupyterLab" />
         {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
         <button
           onClick={() => submit.mutate()}
-          disabled={submit.isPending}
+          disabled={submit.isPending || target.blocked}
           className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
         >
           {submit.isPending ? 'Submitting…' : 'Launch JupyterLab'}
@@ -412,7 +426,7 @@ function JupyterRow({ inst }: { inst: JupyterInstanceSummary }) {
         </Link>
       </td>
       <td className="px-3 py-2 font-mono text-xs text-gray-700">
-        {inst.cluster_id ? `${inst.cluster_id}.0` : '—'}
+        {inst.job_id ?? (inst.cluster_id ? `${inst.cluster_id}.0` : '—')}
       </td>
       <td className="px-3 py-2 font-mono text-xs text-gray-700 max-w-xs truncate">
         {inst.image ?? '—'}
@@ -474,16 +488,21 @@ function TerminalSection() {
   const [submitLines, setSubmitLines] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const target = useLaunchTarget('interactive');
+
   const submit = useMutation({
     mutationFn: () =>
-      api.interactive.createTerminal({
-        ...resourceRequestToApi(resources),
-        submit_lines: submitLines.trim() || undefined,
-      }),
+      api.interactive.createTerminal(
+        {
+          ...resourceRequestToApi(resources),
+          submit_lines: submitLines.trim() || undefined,
+        },
+        target.schedd,
+      ),
     onMutate: () => setErrorMsg(null),
     onSuccess: (resp) => {
       invalidateInteractiveLists(queryClient);
-      router.push(`/interactive/terminal/${resp.job_id}`);
+      router.push(`/interactive/terminal/${encodeURIComponent(resp.job_id)}`);
     },
     onError: (err) => {
       setErrorMsg(err instanceof ApiError ? err.message : String(err));
@@ -521,10 +540,11 @@ function TerminalSection() {
         <div className="text-sm font-medium text-gray-700">Launch new</div>
         <ResourceRequestPanel value={resources} onChange={setResources} />
         <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
+        <LaunchTarget target={target} label="Access point for the terminal" />
         {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
         <button
           onClick={() => submit.mutate()}
-          disabled={submit.isPending}
+          disabled={submit.isPending || target.blocked}
           className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
         >
           {submit.isPending ? 'Submitting…' : 'Launch terminal'}
@@ -582,7 +602,7 @@ function TerminalTable({
             <tr key={t.job_id} className="hover:bg-gray-50">
               <td className="px-3 py-2 font-mono text-xs">
                 <Link
-                  href={`/interactive/terminal/${t.job_id}`}
+                  href={`/interactive/terminal/${encodeURIComponent(t.job_id)}`}
                   className="text-brand-700 hover:underline"
                 >
                   {t.job_id}
@@ -621,7 +641,7 @@ function TerminalTable({
               </td>
               <td className="px-3 py-2 text-right whitespace-nowrap">
                 <Link
-                  href={`/interactive/terminal/${t.job_id}`}
+                  href={`/interactive/terminal/${encodeURIComponent(t.job_id)}`}
                   className="text-xs text-gray-500 hover:text-gray-700 mr-3"
                 >
                   Open ↗
@@ -646,6 +666,40 @@ function TerminalTable({
 // ----------------------------------------------------------------------
 // Shared bits
 // ----------------------------------------------------------------------
+
+// LaunchTargetState is where a launch goes, in multi-AP mode: the
+// caller's assignment for the kind of work, and the access point picked
+// (home unless they chose an alternate). Outside multi-AP mode schedd
+// is undefined and nothing blocks a launch.
+interface LaunchTargetState {
+  multiAP: boolean;
+  assignment?: ReturnType<typeof useKindAssignment>['data'];
+  schedd?: string;
+  setSchedd: (s: string) => void;
+  blocked: boolean;
+}
+
+function useLaunchTarget(kind: 'interactive' | 'jupyter'): LaunchTargetState {
+  const multiAP = useMultiAP();
+  const { data: assignment } = useKindAssignment(kind, multiAP);
+  const [chosen, setChosen] = useState('');
+  if (!multiAP) return { multiAP, setSchedd: setChosen, blocked: false };
+  const targets = submitTargets(assignment);
+  const schedd = targets.includes(chosen) ? chosen : targets[0];
+  return { multiAP, assignment, schedd, setSchedd: setChosen, blocked: !schedd };
+}
+
+function LaunchTarget({ target, label }: { target: LaunchTargetState; label: string }) {
+  return (
+    <SubmitTarget
+      multiAP={target.multiAP}
+      assignment={target.assignment}
+      value={target.schedd ?? ''}
+      onChange={target.setSchedd}
+      label={label}
+    />
+  );
+}
 
 function SectionCard({
   title,

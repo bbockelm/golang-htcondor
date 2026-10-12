@@ -197,6 +197,7 @@ func (s *Server) toolInteractiveSessionStart(ctx context.Context, args map[strin
 		Lease:        time.Duration(intArg(args, "lease_seconds", 0)) * time.Second,
 		Requirements: strings.TrimSpace(stringArg(args, "requirements")),
 		SubmitLines:  stringArg(args, "submit_lines"),
+		Schedd:       strings.TrimSpace(stringArg(args, "schedd")),
 	}
 	info, err := mgr.Create(ctx, caller, spec)
 	if err != nil {
@@ -208,10 +209,10 @@ func (s *Server) toolInteractiveSessionStart(ctx context.Context, args map[strin
 			{
 				"type": "text",
 				"text": fmt.Sprintf(
-					"Started interactive session %q (job %s). It is queued and will be ready once it matches a slot.\n"+
+					"Started interactive session %q (job %s%s). It is queued and will be ready once it matches a slot.\n"+
 						"Run commands with interactive_session_exec using session=%q — that call waits for the job to start.\n"+
 						"The session holds its slot until you call interactive_session_stop, or until %s with no calls on it.",
-					info.Name, info.JobID, info.Name, leaseDescription(info.LeaseExpires)),
+					info.Name, info.JobID, onAccessPoint(info.Schedd), info.Name, leaseDescription(info.LeaseExpires)),
 			},
 		},
 		"metadata":          interactiveInfoMetadata(*info),
@@ -285,7 +286,10 @@ func (s *Server) toolInteractiveSessionList(ctx context.Context, _ map[string]in
 	} else {
 		fmt.Fprintf(&sb, "%d interactive session(s):\n", len(infos))
 		for _, info := range infos {
-			fmt.Fprintf(&sb, "- %s: %s (job %s)", info.Name, info.Status, info.JobID)
+			fmt.Fprintf(&sb, "- %s: %s (job %s%s)", info.Name, info.Status, info.JobID, onAccessPoint(info.Schedd))
+			if info.APError != "" {
+				fmt.Fprintf(&sb, " — its access point cannot be reached now (%s); this is the last known state", info.APError)
+			}
 			if info.HoldReason != "" {
 				fmt.Fprintf(&sb, " — held: %s", info.HoldReason)
 			}
@@ -343,6 +347,12 @@ func interactiveInfoMetadata(info interactive.Info) map[string]interface{} {
 	if info.HoldReason != "" {
 		m["hold_reason"] = info.HoldReason
 	}
+	if info.Schedd != "" {
+		m["schedd"] = info.Schedd
+	}
+	if info.APError != "" {
+		m["access_point_error"] = info.APError
+	}
 	if !info.LeaseExpires.IsZero() {
 		m["lease_expires"] = info.LeaseExpires.UTC().Format(time.RFC3339)
 	}
@@ -350,6 +360,15 @@ func interactiveInfoMetadata(info interactive.Info) map[string]interface{} {
 		m["submitted_at"] = info.SubmittedAt.UTC().Format(time.RFC3339)
 	}
 	return m
+}
+
+// onAccessPoint names the access point a session is on, in multi-AP
+// mode, for a tool's text.
+func onAccessPoint(schedd string) string {
+	if schedd == "" {
+		return ""
+	}
+	return ", on access point " + schedd
 }
 
 // formatExecResult renders a command's outcome for a model to read.

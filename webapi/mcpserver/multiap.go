@@ -43,6 +43,7 @@ var multiAPPassthroughTools = map[string]bool{
 func multiAPToolAllowed(name string) bool {
 	return multiAPReadTools[name] || multiAPPassthroughTools[name] || multiAPActionTools[name] ||
 		multiAPSubmitTools[name] != "" || multiAPCredentialTools[name] ||
+		multiAPInteractiveTools[name] ||
 		name == "remove_jobs" || isCondorDocTool(name)
 }
 
@@ -50,7 +51,7 @@ func multiAPToolAllowed(name string) bool {
 func errMultiAPTool(name string) error {
 	return fmt.Errorf("the %q tool is not available on this multi-access-point server yet; "+
 		"it serves reading your jobs, acting on one job at a time or by constraint, submitting jobs, DAGs and "+
-		"container builds, and credentials, but not interactive sessions or watches", name)
+		"container builds, credentials and interactive sessions, but not watches", name)
 }
 
 // multiAPCatalog replaces the single-AP catalogue: passthrough tools as
@@ -60,7 +61,7 @@ func multiAPCatalog(tools []Tool) []Tool {
 	out := make([]Tool, 0, len(tools))
 	for _, t := range tools {
 		if multiAPToolAllowed(t.Name) && !multiAPReadTools[t.Name] {
-			out = append(out, multiAPSubmitToolDef(multiAPActionToolDef(t)))
+			out = append(out, multiAPInteractiveToolDef(multiAPSubmitToolDef(multiAPActionToolDef(t))))
 		}
 	}
 	return append(out, multiAPToolDefs()...)
@@ -397,8 +398,9 @@ func multiAPInstructions(constraint string) string {
 		"remove, edit, output, input, tail, exec) need the complete id and refuse a bare cluster.proc. remove_jobs runs " +
 		"on every access point and reports each. submit_job, submit_dag and build_container submit to your home access point " +
 		"(whoami names it, with any alternates you may pass as schedd) and answer with complete job ids. The credential " +
-		"tools use your home access point's credential service unless schedd names another. Interactive sessions and " +
-		"watches are not available here yet. Answers name the access points whose data is not current.\n\n"
+		"tools use your home access point's credential service unless schedd names another. interactive_session_start " +
+		"starts a session on your home access point; the session stays there, and its name reaches it from any tool. " +
+		"Watches are not available here yet. Answers name the access points whose data is not current.\n\n"
 }
 
 // MultiAPScheddCalls reports how many times the single-schedd accessor

@@ -46,6 +46,11 @@ type fakeSchedd struct {
 	// not own, standing in for a schedd whose authenticated-query
 	// filter did not apply. The manager is expected to drop it.
 	leakOtherOwners bool
+
+	// stampOwner, when set, is the owner every submission gets, the way
+	// a schedd stamps the authenticated identity. Without it a test
+	// calls setOwner after each submit.
+	stampOwner string
 }
 
 type fakeJob struct {
@@ -71,7 +76,7 @@ func (f *fakeSchedd) SubmitRemote(_ context.Context, submitFile string) (int, []
 	cluster := f.nextCluster
 	f.nextCluster++
 
-	job := &fakeJob{cluster: cluster, proc: 0, status: jobStatusIdle}
+	job := &fakeJob{cluster: cluster, proc: 0, status: jobStatusIdle, owner: f.stampOwner}
 	for _, line := range strings.Split(submitFile, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "batch_name = ") {

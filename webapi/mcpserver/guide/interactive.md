@@ -22,6 +22,13 @@ Three things to know:
   changes do not carry over, so chain dependent steps in one command with
   '&&'. Files written into the sandbox do persist.
 
+On a server that fronts several access points, a session starts on your home
+access point (whoami names it; pass schedd to choose one of your alternates)
+and stays there even if your assignment changes later. A session name is
+unique across all of them, so the name alone always reaches the same session.
+Answers name the access point and give the complete job id
+(123.0@ap1.example.org), which is what the job tools take.
+
 ## One command in a job that is already running
 
 To run a single command inside a job that is ALREADY running -- including an

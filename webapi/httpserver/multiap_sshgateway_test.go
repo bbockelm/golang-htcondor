@@ -12,7 +12,8 @@ import (
 
 // The gateway in multi-AP mode reaches a job by its complete id, through
 // that job's AP; a bare id is refused with candidates, and an
-// interactive-session target is refused until submit is AP-aware.
+// interactive-session target goes to the session manager, which places
+// it by AP assignment (multiap_interactive_test.go).
 func TestMultiAPSSHGatewayResolve(t *testing.T) {
 	aps := newActionAPs(t, ap1, ap2)
 	srv := newActionServer(t, aps, nil)
@@ -45,33 +46,25 @@ func TestMultiAPSSHGatewayResolve(t *testing.T) {
 	if multiap.ReasonOf(err) != multiap.ReasonIncompleteID || len(multiap.CandidatesOf(err)) != 2 {
 		t.Errorf("bare 1.0 = %v, want a refusal naming both of alice's", err)
 	}
+	// No assignment is configured here, so a new session has nowhere to
+	// go -- and is not sent to any AP.
+	before := aps.counts()
 	if _, err := srv.sshGatewayResolve(ctx, "alice", parse("+work"), nil); err == nil ||
-		!strings.Contains(err.Error(), "interactive sessions are not available") {
+		!strings.Contains(err.Error(), "no access point is assigned to you") {
 		t.Errorf("session target = %v", err)
 	}
+	reachedNone(t, "an unassigned session target", before, aps.counts())
 	if _, err := srv.sshGatewayResolve(ctx, "alice", parse("1.0@ap9.example.org"), nil); multiap.ReasonOf(err) != multiap.ReasonUnknownAP {
 		t.Errorf("unknown AP = %v", err)
 	}
 }
 
-// In multi-AP mode the gateway refuses a session target before any login,
-// and no interactive-session manager is offered to the approval screen.
-func TestMultiAPSSHGatewayRefusesSessionsUpFront(t *testing.T) {
+// In multi-AP mode the approval screen and the gateway are offered the
+// session manager: sessions are placed by AP assignment.
+func TestMultiAPSSHGatewayOffersSessions(t *testing.T) {
 	aps := newActionAPs(t, ap1)
 	srv := newActionServer(t, aps, nil)
-	parse := func(user string) sshgateway.Target {
-		tg, _ := sshgateway.ParseTargetWith(srv.gatewayJobIDCodec(), user)
-		return tg
-	}
-	for _, u := range []string{"+work", "bbockelm"} {
-		if srv.sshGatewayRefuseTarget(parse(u)) == nil {
-			t.Errorf("%q (a session) was not refused before login", u)
-		}
-	}
-	if err := srv.sshGatewayRefuseTarget(parse("1.0@" + ap1)); err != nil {
-		t.Errorf("a job target was refused: %v", err)
-	}
-	if srv.interactiveManagerOrNil() != nil {
-		t.Error("the approval screen is offered an interactive-session manager in multi-AP mode")
+	if srv.interactiveManagerOrNil() == nil {
+		t.Error("the approval screen is offered no interactive-session manager in multi-AP mode")
 	}
 }

@@ -1810,12 +1810,14 @@ What it serves:
 | `POST /api/v1/jobs`, MCP `submit_job`, `submit_dag`, `build_container` | Submit, as you, to your home access point, or with `?schedd=` (MCP `schedd`) to one of its alternates; see [AP assignment](#ap-assignment). The answer carries complete job ids. |
 | `/api/v1/creds/user`, `/api/v1/creds/service[/...]`, MCP `list_service_credentials`, `get_credential_status`, `store_service_credential`, `delete_service_credential` | Your home access point's credd, or with `?schedd=` (MCP `schedd`) that of any access point in the set. The response header `X-HTCondor-Access-Point` (MCP: `schedd`) names it. |
 | `GET /api/v1/templates` and the rest of `/api/v1/templates` | Submit templates, from this server's own database. |
+| `POST /api/v1/interactive/terminal`, `POST /api/v1/jupyter/instances`, `POST /api/v1/apps`, MCP `interactive_session_start` | Start a terminal, a JupyterLab, an app or a named session on your home access point for that kind of work, or with `?schedd=` (MCP `schedd`) on an alternate; see [interactive work](#interactive-work-in-multi-ap-mode). The answer names the access point (`schedd`) and the complete job id. |
+| `GET /api/v1/interactive/terminal`, `GET /api/v1/jupyter/instances[/{id}]`, `GET /api/v1/apps[/{id}]`, `DELETE /api/v1/apps/{id}`, the JupyterLab tunnel, events and proxy, MCP `interactive_session_exec`, `interactive_session_list`, `interactive_session_stop` | As in single-AP mode, against the access point each one is on. |
 
-Everything else -- interactive sessions, Jupyter, apps, watches (including
-watch share URLs), match analysis, the dashboard, the pool pages and chat
--- answers **501** ("not available in multi-AP mode yet"), and the MCP
-catalogue offers only the tools above plus `whoami`, `get_version`, `doc_*`
-and `skills_*`. Superuser mode is not available.
+Everything else -- watches (including watch share URLs), match analysis,
+the dashboard, the pool pages and chat -- answers **501** ("not available
+in multi-AP mode yet"), and the MCP catalogue offers only the tools above
+plus `whoami`, `get_version`, `doc_*` and `skills_*`. Superuser mode is not
+available.
 
 **Actions need a complete id.** A mutation, a sandbox read, a share URL or
 an SSH connection naming only `123.0` is a **400** with
@@ -1909,13 +1911,71 @@ point.
 **SSH gateway.** Connect to a job as its complete id:
 `ssh 123.0@ap1.example.org@gateway.example.org` (OpenSSH splits the user
 from the host at the last `@`). A bare `123.0` is refused with your
-candidates. Interactive-session names (and a bare `ssh gateway`) are
-refused before any login is started, until interactive sessions are
-available here.
+candidates. A session name (`ssh +work@gateway`, or a bare `ssh gateway`
+for the default session) reaches that session on whichever access point it
+is on, or starts it on your assigned one; see below.
 
 **Proc-less ids.** `123@ap1.example.org` names a whole cluster for an input
 upload (`PUT .../input`, `POST .../input/multipart`, `.../input/share`), as
 `123` does with one schedd, and is a 400 everywhere else.
+
+### Interactive work in multi-AP mode
+
+Browser terminals, named interactive sessions (MCP and the SSH gateway),
+JupyterLab and apps are placed like a submission: on the access point your
+[assignment](#ap-assignment) names for that kind of work -- `interactive`
+for terminals, sessions and apps, `jupyter` for JupyterLab -- or, with
+`?schedd=` (the `schedd` argument of `interactive_session_start`), on one
+of its alternates. From then on each is reached on the access point its
+own record names, and the assignment is never asked again for it: a user
+whose assignment moves keeps what they have where it is, and only new work
+goes to the new access point.
+
+- **Terminals** are named by their complete job id, which the `/ssh`
+  bridge, its heartbeat and its disconnect cleanup route by.
+- **Sessions** are named by the caller, and a name is unique per user
+  across every access point, so `ssh +work@gateway` and
+  `interactive_session_exec` always mean one job. Starting a session asks
+  every access point that may hold one of your sessions -- those the
+  federation hub lists, those this server has reached since it started,
+  and the assigned one -- and refuses a name already in use anywhere;
+  the per-user session limit counts every access point. A name found on
+  two access points (two servers racing, say) is refused with both job
+  ids rather than resolved: remove the one you do not want by its id.
+  Exec, stop, the heartbeat and lease expiry go to the session's access
+  point; if it cannot be reached the call fails naming it. Sessions this
+  server did not start or has not reached since its last restart are
+  found through the hub, so starting one, or finding one this server
+  does not already know, needs the hub to answer. Each access point has
+  15 seconds to answer a listing; one that does not is treated as
+  unreachable. `interactive_session_list` reports each session's access
+  point; one whose access point cannot be asked is reported from the hub,
+  and from this server's own record of it, with `access_point_error`.
+- **The SSH gateway** resolves a session name the same way, and starts a
+  missing one on your assigned access point. It knows you only by your
+  account, so an assignment rule on a group does not apply to a session it
+  starts. Approving an SSH login with a workspace starts it the same way,
+  with the groups your browser session recorded, and the approval screen
+  names the access point.
+- **JupyterLab** records the access point in the session's row
+  (`jupyter_sessions.schedd`), and every status read -- including after a
+  restart adopts the session -- goes there. A row written by a single-AP
+  server has none; in multi-AP mode its job is not looked for on any
+  access point (its cluster id names no access point), so it is listed
+  without job status or job id until it expires, and is not reaped
+  meanwhile. The reverse holds after switching back to one schedd: a row
+  a multi-AP server wrote for another access point is not looked for on
+  this one.
+- **Apps** have ids of the form `<id>@<schedd>` in this mode, so `GET` and
+  `DELETE /api/v1/apps/{id}` go straight to the app's access point. A bare
+  id is located through the hub, and one found on two access points is a
+  409.
+
+Lists (`GET /api/v1/interactive/terminal`, `GET /api/v1/apps`) come from
+the hub, with a `sources` block, like every other multi-AP read.
+`GET /api/v1/aps?kind=interactive` (or `jupyter`) reports where that kind
+of work would go; the web UI's interactive page uses it to name the access
+point and offer the alternates.
 
 ### AP assignment
 
@@ -1932,8 +1992,9 @@ HTTP_API_AP_ASSIGNMENT_MAPFILE  = /etc/condor/ap-assignment.map
 An answer names a home access point and, optionally, alternates. A
 submission goes to the home access point; `?schedd=` on `POST
 /api/v1/jobs` (or the `schedd` argument of `submit_job`, `submit_dag` and
-`build_container`) may name the home access point or an alternate, and
-anything else is **403** `"reason": "target_not_allowed"`. Existing jobs
+`build_container`), and on the interactive surfaces above, may name the
+home access point or an alternate, and anything else is **403**
+`"reason": "target_not_allowed"`. Existing jobs
 stay where they are: assignment happens once per submission, the answer
 carries complete job ids, and every later step -- the input upload of a
 two-step submit (`PUT .../input`, `upload_job_input`,
@@ -2000,7 +2061,8 @@ Backends:
   403 {"result":"denied"}         -> this user may not submit
   ```
 
-  `kind` is `job`, `dag` or `container_build`. A 404 or 403 counts only
+  `kind` is `job`, `dag`, `container_build`, `interactive` (browser
+  terminals, named sessions and apps) or `jupyter`. A 404 or 403 counts only
   with that body: a 404 page from a proxy or a mistyped path, or a 403 for
   some other reason, is an error -- otherwise it would send everyone to the
   default, or deny everyone. **Answer a bad or missing bearer token with

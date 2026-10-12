@@ -72,6 +72,22 @@ func NewHub(t testing.TB) *DB {
 	return d
 }
 
+// NewMemoryHub is NewHub with the live tables -- jobs and
+// federation_sources -- held in memory and no history archive: for a
+// test that reads only live jobs. Closing a persistent table costs a
+// test a fifth of a second; this one closes at once.
+func NewMemoryHub(t testing.TB) *DB {
+	d := NewDB(t)
+	ctx := context.Background()
+	cl := d.client()
+	for _, tbl := range []string{TableJobs, TableSources} {
+		if err := cl.CreateTableInMemory(ctx, tbl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return d
+}
+
 // Dial opens a dbrpc session over a fresh pipe.
 func (d *DB) Dial(context.Context) (*dbrpc.Client, func(), error) {
 	c, s := net.Pipe()

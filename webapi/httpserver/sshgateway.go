@@ -32,6 +32,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
@@ -226,11 +227,10 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 			ClientID: sshGatewayClientID,
 			Scopes:   sshGatewayScopes,
 		},
-		Identity:     h.sshGatewayIdentity,
-		Logger:       h.logger,
-		Prompt:       h.sshGatewayPromptName(issuer),
-		JobIDCodec:   h.gatewayJobIDCodec(),
-		RefuseTarget: h.sshGatewayRefuseTarget,
+		Identity:   h.sshGatewayIdentity,
+		Logger:     h.logger,
+		Prompt:     h.sshGatewayPromptName(issuer),
+		JobIDCodec: h.gatewayJobIDCodec(),
 	})
 	if err != nil {
 		return err
@@ -455,6 +455,10 @@ type sshGatewaySessionSize struct {
 // and bounded because the caller is sitting at a terminal.
 const sshGatewaySessionWait = 3 * time.Minute
 
+// sshGatewaySessionPoll is how often that wait re-reads the session. A
+// variable for tests.
+var sshGatewaySessionPoll = 2 * time.Second
+
 // sshGatewayCredential mints the caller's HTCondor credential.
 //
 // Called per channel rather than per connection: the IDTOKEN lasts five
@@ -498,7 +502,7 @@ func (h *Handler) sshGatewayCredential(ctx context.Context, account string, scop
 // by sshGatewayCredential; with none the cache refuses the key.
 func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshgateway.Target, report func(string)) (jobssh.Key, error) {
 	if h.multi != nil {
-		return h.sshGatewayResolveMultiAP(ctx, account, t)
+		return h.sshGatewayResolveMultiAP(ctx, account, t, report)
 	}
 	if t.IsJob() {
 		return jobssh.Key{Owner: account, Credential: jobTransportCredential(ctx, ""), Cluster: t.Cluster, Proc: t.Proc}, nil
@@ -506,30 +510,26 @@ func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshga
 	return h.sshGatewaySession(ctx, account, t, report)
 }
 
-// errSSHSessionsMultiAP refuses an interactive-session target on a
-// gateway fronting several access points.
-var errSSHSessionsMultiAP = errors.New("interactive sessions are not available through this gateway yet, which fronts " +
-	"several access points; connect to a job you have as its complete id, e.g. ssh 12345.0@<access point>@<gateway>")
-
-// sshGatewayRefuseTarget refuses, before any login, what this gateway
-// cannot reach: an interactive session in multi-AP mode.
-func (h *Handler) sshGatewayRefuseTarget(t sshgateway.Target) error {
-	if h.multi != nil && !t.IsJob() {
-		return errSSHSessionsMultiAP
-	}
-	return nil
-}
-
 // sshGatewayResolveMultiAP is sshGatewayResolve for a gateway in front
 // of several access points. The username must name the job's AP in the
 // codec's form -- ssh 123.0@ap1.example.org@gateway -- and the key
 // carries it, so the transport is opened through that AP's schedd.
 // A bare job id is refused with the caller's candidates rather than
-// guessed, as every other action is. Interactive sessions are not served
-// yet: creating one is a submission, and submissions need AP assignment.
-func (h *Handler) sshGatewayResolveMultiAP(ctx context.Context, account string, t sshgateway.Target) (jobssh.Key, error) {
+// guessed, as every other action is.
+//
+// A session target (+name, or a bare username) resolves through the
+// session manager, which knows which AP each of the caller's sessions is
+// on and places a new one by AP assignment (kind "interactive"); the key
+// names the session's AP.
+func (h *Handler) sshGatewayResolveMultiAP(ctx context.Context, account string, t sshgateway.Target, report func(string)) (jobssh.Key, error) {
 	if !t.IsJob() {
-		return jobssh.Key{}, errSSHSessionsMultiAP
+		// The gateway knows the caller only by their account: an
+		// assignment rule on the user or the subject applies to them, one
+		// on a group does not.
+		if _, ok := apassign.CallerFrom(ctx); !ok {
+			ctx = apassign.WithCaller(ctx, apassign.Caller{Subject: account})
+		}
+		return h.sshGatewaySession(ctx, account, t, report)
 	}
 	user, err := h.multi.svc.UserFor(account)
 	if err != nil {
@@ -559,7 +559,10 @@ func (h *Handler) sshGatewayResolveMultiAP(ctx context.Context, account string, 
 // the next piece of work.
 func (h *Handler) sshGatewaySession(ctx context.Context, account string, t sshgateway.Target, report func(string)) (jobssh.Key, error) {
 	name := t.Name
-	mgr := h.mcpServer.InteractiveManager()
+	if report == nil {
+		report = func(string) {}
+	}
+	mgr := h.interactiveManagerOrNil()
 	if mgr == nil {
 		return jobssh.Key{}, fmt.Errorf(
 			"interactive sessions are not available on this server, so %q cannot be started; "+
@@ -613,18 +616,17 @@ func (h *Handler) sshGatewaySession(ctx context.Context, account string, t sshga
 }
 
 // findInteractiveSession returns the caller's session called name, or
-// nil when they have none.
+// nil when they have none. By name, not by listing every session: with
+// several access points a name on two of them is refused
+// (interactive.AmbiguousSessionError) rather than resolved to whichever
+// sorts first, and a session this process already knows is found on its
+// own access point without the federation hub.
 func findInteractiveSession(ctx context.Context, mgr *interactive.Manager, caller interactive.Caller, name string) (*interactive.Info, error) {
-	sessions, err := mgr.List(ctx, caller)
+	info, err := mgr.Find(ctx, caller, name)
 	if err != nil {
 		return nil, fmt.Errorf("looking for session %q: %w", name, err)
 	}
-	for i := range sessions {
-		if sessions[i].Name == name {
-			return &sessions[i], nil
-		}
-	}
-	return nil, nil
+	return info, nil
 }
 
 // sshGatewayAwaitRunning waits for a session's job to start.
@@ -644,9 +646,19 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 
 	deadline := time.Now().Add(sshGatewaySessionWait)
 	for {
+		if info.APError != "" {
+			// Multi-AP mode, and the session's AP could not be asked:
+			// what is known of it is the hub's copy. Not waited on, and
+			// never looked for anywhere else.
+			return jobssh.Key{}, fmt.Errorf("session %q (job %s) is on access point %s, which cannot be reached now: %s",
+				name, info.JobID, info.Schedd, info.APError)
+		}
 		switch info.JobStatus {
 		case jobStatusRunning:
-			return jobssh.Key{Owner: caller.Owner, Credential: jobTransportCredential(ctx, ""), Cluster: info.ClusterID, Proc: info.ProcID}, nil
+			// Schedd is the session's AP in multi-AP mode, so the
+			// transport is opened through it; "" with one schedd.
+			return jobssh.Key{Owner: caller.Owner, Credential: jobTransportCredential(ctx, ""), Schedd: info.Schedd,
+				Cluster: info.ClusterID, Proc: info.ProcID}, nil
 		case jobStatusHeld:
 			reason := info.HoldReason
 			if reason == "" {
@@ -674,12 +686,14 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 			return jobssh.Key{}, fmt.Errorf(
 				"stopped waiting for session %q (job %s). It is still starting -- reconnect to pick it up: %w",
 				name, info.JobID, ctx.Err())
-		case <-time.After(2 * time.Second):
+		case <-time.After(sshGatewaySessionPoll):
 		}
 
-		found, err := findInteractiveSession(ctx, mgr, caller, name)
+		// The session is known now: only its own access point is
+		// asked, not the hub and every other access point each tick.
+		found, err := mgr.FindOn(ctx, caller, info.Schedd, name)
 		if err != nil {
-			return jobssh.Key{}, err
+			return jobssh.Key{}, fmt.Errorf("re-reading session %q (job %s): %w", name, info.JobID, err)
 		}
 		if found == nil {
 			return jobssh.Key{}, fmt.Errorf("session %q disappeared while waiting for it to start", name)
