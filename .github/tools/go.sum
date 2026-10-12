@@ -108,8 +108,8 @@ github.com/ashanbrown/makezero/v2 v2.2.1 h1:A7uU8dgB1PA9aelTxHMfHIQ8Qev8AB3JLxJU
 github.com/ashanbrown/makezero/v2 v2.2.1/go.mod h1:aEGT/9q3S8DHeE57C88z2a6xydvgx8J5hgXIGWgo0MY=
 github.com/bahlo/generic-list-go v0.2.0 h1:5sz/EEAK+ls5wF+NeqDpk5+iNdMDXrh3z3nPnH1Wvgk=
 github.com/bahlo/generic-list-go v0.2.0/go.mod h1:2KvAjgMlE5NNynlg/5iLrrCCZ2+5xWbdbCW3pNTGyYg=
-github.com/bbockelm/cedar v0.7.8 h1:bjwwA2HMdDgbE+J/3CmDSK316/TC/JHzxRWh7T9KYhk=
-github.com/bbockelm/cedar v0.7.8/go.mod h1:1SABFonyJbC729ODTx03voZhpMSBQqqy+Q+6TvpE08s=
+github.com/bbockelm/cedar v0.7.9 h1:pUlv1ehlyNyDq5xw+XJ1xTgNBBAIH/vx2z2U+ddBmx0=
+github.com/bbockelm/cedar v0.7.9/go.mod h1:1SABFonyJbC729ODTx03voZhpMSBQqqy+Q+6TvpE08s=
 github.com/bbockelm/golang-htcondor v0.16.4-0.20260926032345-41c11247a087 h1:GVSLPuKWo9l8/kggORc6rCrOKVvsMYvIStATznPMYOQ=
 github.com/bbockelm/golang-htcondor v0.16.4-0.20260926032345-41c11247a087/go.mod h1:qTvkXEjQY5dTxryEkjTXbE/T7mfHEe+46DMTR66Eou4=
 github.com/bbockelm/gosssd v0.0.4 h1:VfPc8eqINew99vwq3+si4FC+tpcauXrSntGmaii4zqY=

@@ -8,7 +8,7 @@
 # than inline in the workflow.
 set -euo pipefail
 
-PACKAGES=(. ./sandbox/ ./classadlog/ ./metricsd/)
+PACKAGES=(. ./sandbox/ ./classadlog/ ./metricsd/ ./sessioncache/)
 
 # The same drift check the webapi script does, for the same reason: a
 # package whose tests are all behind the integration tag runs nowhere if it
