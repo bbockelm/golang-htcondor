@@ -87,14 +87,11 @@ type Feed struct {
 	// server fronting several access points keys on User instead (see
 	// webapi/multiap), and must set this before Run.
 	OwnerOf func(*classad.ClassAd) string
-	// VouchDeparture, when set, is asked as each delete arrives whether
-	// the job's leaving the queue is evidence that it finished: on a
-	// federation hub a delete is also what retiring an access point, or
-	// reconciling one that was replayed, looks like. A departure it does
-	// not vouch for is still recorded (subscribers are told the job is
-	// gone) but counts in Departures only if the job's last ad already
-	// said it had finished.
-	VouchDeparture func(*classad.ClassAd) bool
+	// Keep, when set, makes the feed hold only FeedAttrs and the
+	// attributes it names (the evaluator's live watches' read set, see
+	// Evaluator.LiveAttrs) of each job, and what those refer to. Nil
+	// holds whole ads. See project.
+	Keep func() []string
 
 	// MaxEnded bounds memory; oldest out first.
 	MaxEnded int
@@ -130,9 +127,6 @@ type endedJob struct {
 	schedd        string
 	cluster, proc int64
 	status        int64
-	// vouched is VouchDeparture's verdict when the delete arrived; true
-	// where there is no such hook.
-	vouched bool
 }
 
 // freezeEnded records ad as a job's final state. The caller holds f.mu
@@ -173,7 +167,19 @@ func (e endedJob) ad() *classad.ClassAd {
 	for i := range vals {
 		ptrs[i] = &vals[i]
 	}
-	return classad.FromAST(&ast.ClassAd{Attributes: ptrs})
+	ad := classad.FromAST(&ast.ClassAd{Attributes: ptrs})
+	ad.InsertAttrBool(FeedRecordAttr, true)
+	return ad
+}
+
+// FeedRecordAttr marks a terminal record built from the feed's last ad
+// of a job, which holds only some of its attributes (see FeedAttrs).
+const FeedRecordAttr = "JobwatchFeedRecord"
+
+// isFeedRecord reports whether ad is one of the feed's terminal records.
+func isFeedRecord(ad *classad.ClassAd) bool {
+	v, ok := ad.EvaluateAttrBool(FeedRecordAttr)
+	return ok && v
 }
 
 const (
@@ -382,7 +388,8 @@ func (f *Feed) Apply(ev WatchEvent) {
 				delete(f.announced, ev.Key)
 			}
 		}
-		f.live[ev.Key] = ad
+		// Subscribers get the whole ad; the feed keeps only what it reads.
+		f.live[ev.Key] = f.project(ad)
 		// A job can come back -- a held job released, or a key reused
 		// after a compaction reload. Clear any terminal record so it is
 		// not reported as finished while it is running again.
@@ -394,9 +401,7 @@ func (f *Feed) Apply(ev WatchEvent) {
 		// The delete says only that the key is gone. What it was doing
 		// when it went is in the upsert we kept.
 		if ad, ok := f.live[ev.Key]; ok {
-			e := f.freezeEnded(ad, f.now())
-			e.vouched = f.VouchDeparture == nil || f.VouchDeparture(ad)
-			f.ended[ev.Key] = e
+			f.ended[ev.Key] = f.freezeEnded(ad, f.now())
 			delete(f.live, ev.Key)
 			if act, aok := f.activityForDelete(ad); aok && f.announced[ev.Key] != act.Kind {
 				f.publishActivityLocked(act)
@@ -529,9 +534,11 @@ type Departure struct {
 }
 
 // Departures lists one owner's jobs that left the queue at or after
-// since, with evidence that they finished: their last ad said so, or
-// VouchDeparture vouched for the delete. Nil from a cold feed, which has
-// no picture to count from.
+// since whose last ad said they had completed or been removed. A delete
+// alone is not evidence: on a federation hub it is also an access point
+// being retired, or reconciled after a replay, and a job that leaves
+// while held or idle has not been shown to have finished. Nil from a
+// cold feed, which has no picture to count from.
 func (f *Feed) Departures(owner string, since time.Time) []Departure {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -543,7 +550,7 @@ func (f *Feed) Departures(owner string, since time.Time) []Departure {
 		if e.at.Before(since) || e.owner != owner {
 			continue
 		}
-		if !e.vouched && !isTerminalStatus(e.status) {
+		if !isTerminalStatus(e.status) {
 			continue
 		}
 		out = append(out, Departure{Schedd: e.schedd, Cluster: e.cluster, Proc: e.proc, At: e.at})
@@ -603,3 +610,50 @@ func parseWatchAd(text string) (*classad.ClassAd, error) {
 }
 
 var errEmptyAd = errors.New("jobwatch: empty ad text")
+
+// FeedAttrs are the attributes the feed keeps for every job: identity
+// and owner, the state and outcome the evaluator and the activity
+// stream read, the evidence a job ran, and what a notification carries.
+//
+// The feed holds the last ad of every job written since it connected --
+// on a federation hub, every AP's -- so whole ads cost several kilobytes
+// each for attributes nothing here reads. Subscribers to one job are
+// handed the whole ad as it arrives; only what the feed keeps is
+// projected. A watch constraint may name anything, so the evaluator's
+// live watches' read set is kept too (Keep), and a terminal record only
+// ever resolves a job a watch already tracks (see Fold.Finished): one
+// projected before a watch naming another attribute existed cannot be
+// mistaken for a match.
+var FeedAttrs = append([]string{
+	"ScheddName", "User", "GlobalJobId",
+	"QDate", "EnteredCurrentStatus", "CompletionDate", "Cmd", "RemoteHost",
+}, BaseAttrs...)
+
+// project returns a copy of ad holding FeedAttrs, Keep's attributes and
+// every attribute of the ad those refer to (RequestMemory is usually an
+// expression over MemoryUsage, which is one over ResidentSetSize), or ad
+// itself when Keep is nil. It shares the kept expressions, which nothing
+// here modifies.
+func (f *Feed) project(ad *classad.ClassAd) *classad.ClassAd {
+	if f.Keep == nil {
+		return ad
+	}
+	want := append(append([]string(nil), FeedAttrs...), f.Keep()...)
+	keep := make(map[string]bool, len(want)+16)
+	out := classad.New()
+	for len(want) > 0 {
+		name := want[len(want)-1]
+		want = want[:len(want)-1]
+		if keep[strings.ToLower(name)] {
+			continue
+		}
+		keep[strings.ToLower(name)] = true
+		e, ok := ad.Lookup(name)
+		if !ok {
+			continue
+		}
+		out.InsertExpr(name, e)
+		want = append(want, ad.InternalRefs(e)...)
+	}
+	return out
+}

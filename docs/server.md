@@ -1839,15 +1839,20 @@ points is two jobs. A job that leaves the queue is reported finished from
 its history record, or from its last ad on the hub's stream saying it
 completed or was removed, on any access point. Its *absence* from the
 queue counts as finished only for an access point the hub reports
-`fresh`, with a measured staleness and its jobs stream connected and
-error-free, on a `federation_sources` snapshot the hub still answers for,
-and only once that snapshot reflects the access point from after the job
-was last seen there (allowing for the reported staleness, a minute for
-the hub's row refresh and one snapshot interval). A stale, absent,
-retiring or untrusted access point, a disconnected or failing stream, a
-spoke being replayed or an unreachable hub never yields a "finished" on
+`fresh`, with a measured staleness, its jobs stream connected and
+error-free, and its jobs table caught up: `JobsSynced` true in the
+`federation_sources` rows read just before and just after the queue read,
+with the same `JobsSyncedAt` (a hub too old to publish `JobsSynced` is
+instead not trusted within ten minutes of the access point's `LastReset`).
+It also counts only once that read reflects the access point from after
+the job was last seen there (allowing for the reported staleness, a
+minute for the hub's row refresh and one hub state interval). A stale,
+absent, retiring or untrusted access point, a disconnected, failing or
+replaying stream, or an unreachable hub never yields a "finished" on
 absence; the watch waits, and fires once the history record arrives or
-the access point is current again. A watch URL is about its owner's jobs
+the access point is current again. A watch entry stored before access
+points were recorded resolves from a history record when exactly one
+access point has that `cluster.proc`, and otherwise waits. A watch URL is about its owner's jobs
 on every access point, so it carries `"s": "*"` inside its signature: a
 multi-AP server refuses a watch URL without it, and a single-AP server one
 with it. An identity outside `UID_DOMAIN` cannot register or share a
@@ -1858,11 +1863,11 @@ access point; `aps` gives each access point's counts and its state on the
 hub. The activity answer's lists carry `schedd` and `job_id` on each job,
 and its `aps` give each access point's `finished_recently`: history
 records in the last hour plus jobs the hub's stream saw leave the queue
-with evidence that they finished -- a last ad that said so, or a delete on
-an access point that was then fresh with its stream connected. A delete on
-any other access point is also what retiring or replaying that access
-point looks like, and is not counted; such an access point's count is
-marked `finished_partial`. Hub reads have no cross-user view, so
+whose last ad said they completed or were removed. A delete alone is not
+counted: it is also what retiring (`.retire`) or replaying an access
+point looks like, and a job that leaves held or idle has not been shown
+to have finished. An access point that is not fresh has its count marked
+`finished_partial`. Hub reads have no cross-user view, so
 `owned_by_me=false` is not honoured.
 
 **Run attempts and transfers.** With the hub federating `epoch_history`

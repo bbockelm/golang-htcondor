@@ -358,11 +358,9 @@ func TestWatchCoverageBound(t *testing.T) {
 }
 
 // TestFeedHooks: the hub feed names a row's owner by User in UID_DOMAIN
-// only, and vouches for a delete only on a vouched AP.
+// only.
 func TestFeedHooks(t *testing.T) {
 	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
-	r.hub.PutSourceAd(ap2, sourceAd(ap2, StateStale))
-	r.advanceHub(0)
 	row := func(schedd, user string) *classad.ClassAd {
 		ad := classad.New()
 		ad.InsertAttrString(AttrScheddName, schedd)
@@ -374,15 +372,6 @@ func TestFeedHooks(t *testing.T) {
 	}
 	if got := r.svc.OwnerOfRow(row(ap1, "alice@elsewhere")); got != "" {
 		t.Errorf("owner of alice@elsewhere = %q, want none", got)
-	}
-	if !r.svc.VouchDeparture(row(ap1, "alice@d")) {
-		t.Error("a delete on fresh ap1 was not vouched for")
-	}
-	if r.svc.VouchDeparture(row(ap2, "alice@d")) {
-		t.Error("a delete on stale ap2 was vouched for")
-	}
-	if r.svc.VouchDeparture(row("ap9.example.org", "alice@d")) {
-		t.Error("a delete on an AP outside the set was vouched for")
 	}
 }
 

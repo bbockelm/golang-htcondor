@@ -63,10 +63,10 @@ func TestMultiAPDashboardCountsPerAP(t *testing.T) {
 }
 
 // TestMultiAPDashboardFinishedIgnoresAStaleAPsDisappearances: a job
-// leaving the hub's queue on a fresh, connected AP counts as finished;
-// one leaving it on a stale AP does not -- that is what retiring or
-// reconciling the AP looks like too -- while a history record counts on
-// either.
+// leaving the hub's queue counts as finished only if its last ad said it
+// completed -- not if it left idle or held, on a stale AP or a fresh one
+// (that is what retiring or reconciling an AP looks like too) -- while a
+// history record counts on either.
 func TestMultiAPDashboardFinishedIgnoresAStaleAPsDisappearances(t *testing.T) {
 	hub := dashboardHub(t)
 	srv := newMultiAPServer(t, multiAPService(t, hub, multiaptest.NewRegistry(ap1, ap2)))
@@ -75,13 +75,16 @@ func TestMultiAPDashboardFinishedIgnoresAStaleAPsDisappearances(t *testing.T) {
 	go func() { _ = srv.jobWatchFeed.RunResumable(ctx, srv.watchHubJobsTable) }()
 	waitCond(t, "the feed to follow the hub", srv.jobWatchFeed.Warm)
 
-	// One job on each AP appears and leaves.
-	hub.PutJob(ap1, "alice@d", 30, 0, "")
+	// Jobs appear and leave: completed and held on fresh ap1, idle on
+	// stale ap2.
+	hub.PutJob(ap1, "alice@d", 30, 0, "JobStatus = 4")
+	hub.PutJob(ap1, "alice@d", 32, 0, "JobStatus = 5")
 	hub.PutJob(ap2, "alice@d", 30, 0, "")
 	hub.DeleteJob(ap1, 30, 0)
+	hub.DeleteJob(ap1, 32, 0)
 	hub.DeleteJob(ap2, 30, 0)
-	waitCond(t, "both deletes to reach the feed", func() bool {
-		return len(srv.jobWatchFeed.Terminal("alice", time.Now().Add(-time.Hour))) == 2
+	waitCond(t, "the deletes to reach the feed", func() bool {
+		return len(srv.jobWatchFeed.Terminal("alice", time.Now().Add(-time.Hour))) == 3
 	})
 	// And a history record on the stale AP.
 	hub.PutHistory(ap2, "alice@d", 31, 0, time.Now().Unix())
@@ -96,7 +99,7 @@ func TestMultiAPDashboardFinishedIgnoresAStaleAPsDisappearances(t *testing.T) {
 		got[ap.Schedd] = ap
 	}
 	if got[ap1].FinishedRecently != 1 || got[ap1].FinishedPartial {
-		t.Errorf("%s: %+v, want its departure counted", ap1, got[ap1])
+		t.Errorf("%s: %+v, want its completed departure counted and not its held one", ap1, got[ap1])
 	}
 	if got[ap2].FinishedRecently != 1 || !got[ap2].FinishedPartial {
 		t.Errorf("%s: %+v, want its history record counted, its disappearance not, and the count marked partial", ap2, got[ap2])

@@ -37,8 +37,6 @@ func (h *Handler) multiAPWatchSource(feed *jobwatch.Feed) jobwatch.Source {
 	// Hub rows are owned by User, owner@UID_DOMAIN; a watch's owner is
 	// its local part, as in single-AP mode.
 	feed.OwnerOf = svc.OwnerOfRow
-	// A delete on the hub is also an AP retired or reconciled.
-	feed.VouchDeparture = svc.VouchDeparture
 	return multiap.WatchSource{Service: svc, Feed: feed}
 }
 

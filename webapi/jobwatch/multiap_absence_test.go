@@ -103,6 +103,11 @@ const (
 
 func newAbsenceRig(t *testing.T, event Event, mode Mode) *absenceRig {
 	t.Helper()
+	return newAbsenceRigWith(t, event, mode, "ClusterId == 1")
+}
+
+func newAbsenceRigWith(t *testing.T, event Event, mode Mode, constraint string) *absenceRig {
+	t.Helper()
 	r := &absenceRig{t: t, store: testStore(t), clock: time.Now()}
 	r.src = &coveredSource{
 		queue: []*classad.ClassAd{apAd(apOne, 1, 2), apAd(apTwo, 1, 2)},
@@ -112,7 +117,7 @@ func newAbsenceRig(t *testing.T, event Event, mode Mode) *absenceRig {
 	}
 	r.eval = NewEvaluator(r.store, r.src, nil)
 	r.eval.now = func() time.Time { return r.clock }
-	w, err := New("alice", "both", "ClusterId == 1", event, "", mode)
+	w, err := New("alice", "both", constraint, event, "", mode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,27 +385,181 @@ func TestSingleAPFoldIgnoresARecordedAP(t *testing.T) {
 }
 
 // TestFeedDeparturesNeedEvidence: a delete on a federation hub is also
-// an AP being retired or reconciled, so a departure counts only if the
-// job's last ad says it finished or the hook vouched for the delete.
+// an AP being retired or reconciled, and a job that leaves while running
+// or held has not been shown to have finished: only a last ad that says
+// completed or removed makes a departure.
 func TestFeedDeparturesNeedEvidence(t *testing.T) {
 	f := warmFeed(t)
-	vouch := map[string]bool{apOne: true}
-	f.VouchDeparture = func(ad *classad.ClassAd) bool {
-		s, _ := ad.EvaluateAttrString("ScheddName")
-		return vouch[s]
-	}
 	f.Apply(upsert("k1", apAd(apOne, 1, 2)))
-	f.Apply(upsert("k2", apAd(apTwo, 1, 2)))
+	f.Apply(upsert("k2", apAd(apTwo, 1, 5)))
 	f.Apply(upsert("k3", apAd(apTwo, 2, 4)))
-	for _, k := range []string{"k1", "k2", "k3"} {
+	f.Apply(upsert("k4", apAd(apOne, 3, 3)))
+	for _, k := range []string{"k1", "k2", "k3", "k4"} {
 		f.Apply(del(k))
 	}
 	got := map[string]bool{}
 	for _, d := range f.Departures("alice", time.Now().Add(-time.Minute)) {
 		got[fmt.Sprintf("%d.%d@%s", d.Cluster, d.Proc, d.Schedd)] = true
 	}
-	if len(got) != 2 || !got["1.0@"+apOne] || !got["2.0@"+apTwo] {
-		t.Fatalf("departures %v: want ap1's vouched delete and ap2's completed job, not ap2's unvouched delete", got)
+	if len(got) != 2 || !got["2.0@"+apTwo] || !got["3.0@"+apOne] {
+		t.Fatalf("departures %v: want the completed 2.0 and the removed 3.0 only", got)
+	}
+}
+
+// TestFeedResetIsNotDepartures: a Reset is the source starting over, not
+// every job it held leaving.
+func TestFeedResetIsNotDepartures(t *testing.T) {
+	f := warmFeed(t)
+	f.Apply(upsert("k1", apAd(apOne, 1, 4)))
+	f.Apply(WatchEvent{Kind: WatchReset})
+	if d := f.Departures("alice", time.Now().Add(-time.Minute)); len(d) != 0 {
+		t.Fatalf("departures after a Reset: %+v", d)
+	}
+}
+
+// TestFeedResumeThatCannotOpenStartsOver: a resume the source cannot
+// even open drops what the feed held and its cursor, and starts again
+// from the head.
+func TestFeedResumeThatCannotOpenStartsOver(t *testing.T) {
+	f := NewFeed(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var asked [][]byte
+	dials := make(chan chan WatchEvent, 4)
+	go func() {
+		_ = f.RunResumable(ctx, func(_ context.Context, cursor []byte) (<-chan WatchEvent, func(), error) {
+			mu.Lock()
+			asked = append(asked, append([]byte(nil), cursor...))
+			n := len(asked)
+			mu.Unlock()
+			if n == 2 {
+				return nil, nil, errors.New("cursor from another epoch")
+			}
+			ch := make(chan WatchEvent, 8)
+			dials <- ch
+			return ch, func() {}, nil
+		})
+	}()
+	first := <-dials
+	first <- WatchEvent{Kind: WatchUpsert, Key: "k", AdText: exitAd(1, 0, 4, 0).MarshalOld(), Cursor: []byte("c1")}
+	close(first)
+	third := <-dials
+	// The job's last ad went with the reset: its delete records nothing.
+	third <- WatchEvent{Kind: WatchDelete, Key: "k", Cursor: []byte("c2")}
+	third <- WatchEvent{Kind: WatchUpsert, Key: "sentinel", AdText: exitAd(2, 0, 2, 0).MarshalOld(), Cursor: []byte("c3")}
+	waitUntil(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.live["sentinel"] != nil
+	})
+	if n := len(f.Terminal("alice", time.Now().Add(-time.Hour))); n != 0 {
+		t.Errorf("%d terminal records survived a resume that could not open", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) < 3 || string(asked[1]) != "c1" || len(asked[2]) != 0 {
+		t.Errorf("dialed with cursors %q, want none, c1, then none", asked)
+	}
+}
+
+// TestFeedKeepsOnlyWhatItReads: the feed's copy of a job holds FeedAttrs
+// and the live watches' attributes; a subscriber still gets the whole ad.
+func TestFeedKeepsOnlyWhatItReads(t *testing.T) {
+	f := warmFeed(t)
+	f.Keep = func() []string { return []string{"JobBatchName", "RequestMemory"} }
+	ad := apAd(apOne, 1, 2)
+	ad.InsertAttrString("JobBatchName", "b")
+	if err := ad.Set("RequestMemory", mustExpr(t, "ifThenElse(MemoryUsage =!= undefined, MemoryUsage, 2048)")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ad.Set("MemoryUsage", mustExpr(t, "ResidentSetSize / 1024")); err != nil {
+		t.Fatal(err)
+	}
+	ad.InsertAttr("ResidentSetSize", 1024*489)
+	ad.InsertAttrString("Environment", "A=1 B=2")
+	ch, cancel := f.Subscribe(1, 0)
+	defer cancel()
+	f.Apply(upsert("k", ad))
+	if c := <-ch; c.View == nil {
+		t.Fatal("no update delivered")
+	} else if _, ok := c.View.Get("Environment"); !ok {
+		t.Error("the subscriber's ad was projected")
+	}
+	f.mu.Lock()
+	kept := f.live["k"]
+	f.mu.Unlock()
+	if _, ok := kept.Lookup("Environment"); ok {
+		t.Error("the feed kept an attribute nothing reads")
+	}
+	for _, a := range []string{"JobBatchName", "ScheddName", "JobStatus", "ClusterId"} {
+		if _, ok := kept.Lookup(a); !ok {
+			t.Errorf("the feed dropped %s", a)
+		}
+	}
+	// What a kept expression refers to is kept with it.
+	if v, ok := kept.EvaluateAttrInt("RequestMemory"); !ok || v != 489 {
+		t.Errorf("RequestMemory = %d, %v on the feed's copy, want 489", v, ok)
+	}
+}
+
+func mustExpr(t *testing.T, text string) *classad.Expr {
+	t.Helper()
+	e, err := classad.ParseExpr(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// TestFeedRecordResolvesOnlyTrackedJobs: a terminal record from the feed
+// is a projection, so it resolves a job the watch already tracks and is
+// never re-matched against the constraint to select a new one.
+func TestFeedRecordResolvesOnlyTrackedJobs(t *testing.T) {
+	w, err := New("alice", "", `JobBatchName =!= "skip"`, EventDone, "", ModeAny)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := func(cluster int64) *classad.ClassAd {
+		ad := exitAd(cluster, 0, 4, 0)
+		ad.InsertAttrBool(FeedRecordAttr, true)
+		return ad
+	}
+	if out := w.Evaluate(Snapshot{History: []*classad.ClassAd{record(9)}}); out.Fires || out.Selected != 0 {
+		t.Fatalf("an untracked job's feed record was matched: %+v", out)
+	}
+	w.Tracked = []JobID{{Cluster: 9}}
+	if out := w.Evaluate(Snapshot{History: []*classad.ClassAd{record(9)}}); !out.Fires {
+		t.Fatalf("a tracked job's feed record did not resolve it: %+v", out)
+	}
+}
+
+// TestLegacyEntryResolvesFromAnUnambiguousHistoryRecord: a tracked entry
+// stored without an access point completes from a history record when
+// exactly one access point has that cluster.proc; with two it waits.
+func TestLegacyEntryResolvesFromAnUnambiguousHistoryRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		history []*classad.ClassAd
+		queue   []*classad.ClassAd
+		fires   bool
+	}{
+		{"one AP's record", []*classad.ClassAd{apAd(apTwo, 7, 4)}, nil, true},
+		{"two APs' records", []*classad.ClassAd{apAd(apOne, 7, 4), apAd(apTwo, 7, 4)}, nil, false},
+		{"one record, the id queued on another AP", []*classad.ClassAd{apAd(apTwo, 7, 4)}, []*classad.ClassAd{apAd(apOne, 7, 2)}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newAbsenceRigWith(t, EventDone, ModeAll, "ClusterId == 7")
+			w := r.live()
+			if err := r.store.SaveProgress(context.Background(), w, Outcome{Tracked: []JobID{{Cluster: 7, Proc: 0}}}); err != nil {
+				t.Fatal(err)
+			}
+			r.src.set(func(c *coveredSource) { c.queue, c.history = tc.queue, tc.history })
+			st := r.pass(time.Minute)
+			if fired := st.Fired == 1; fired != tc.fires {
+				t.Fatalf("fired=%v, want %v (tracked %+v)", fired, tc.fires, r.live().Tracked)
+			}
+		})
 	}
 }
 

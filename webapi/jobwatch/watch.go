@@ -355,6 +355,10 @@ type Fold struct {
 	seen map[JobID]placement
 	// tracked is the watch's memory as this fold identifies jobs.
 	tracked map[JobID]bool
+	// places is, in multi-AP mode, which access points each cluster.proc
+	// was seen on this pass, and whether in the history archive: what
+	// resolves a tracked entry stored without an access point.
+	places map[[2]int64]map[string]bool
 
 	satisfied int
 	matched   []JobRef
@@ -400,6 +404,49 @@ func (w *Watch) fold(now time.Time, queueTruncated, perAP bool) *Fold {
 		f.tracked[id] = true
 	}
 	return f
+}
+
+// notePlace records where a job was seen, for resolveLegacy.
+func (f *Fold) notePlace(id JobID, archived bool) {
+	if !f.perAP || id.Schedd == "" {
+		return
+	}
+	if f.places == nil {
+		f.places = map[[2]int64]map[string]bool{}
+	}
+	k := [2]int64{id.Cluster, id.Proc}
+	if f.places[k] == nil {
+		f.places[k] = map[string]bool{}
+	}
+	f.places[k][id.Schedd] = f.places[k][id.Schedd] || archived
+}
+
+// resolveLegacy replaces each tracked entry stored without an access
+// point (before access points were recorded) with the job it must be,
+// when that is unambiguous: exactly one access point has that
+// cluster.proc this pass, in its history archive. With two candidates it
+// is left waiting rather than guessed; its absence is never evidence
+// (absenceIsEvidence), so it can only ever resolve this way.
+func (f *Fold) resolveLegacy() {
+	if !f.perAP {
+		return
+	}
+	for id := range f.seen {
+		if id.Schedd != "" {
+			continue
+		}
+		places := f.places[[2]int64{id.Cluster, id.Proc}]
+		if len(places) != 1 {
+			continue
+		}
+		for schedd, archived := range places {
+			if archived {
+				delete(f.seen, id)
+				real := JobID{Cluster: id.Cluster, Proc: id.Proc, Schedd: schedd}
+				f.tracked[real] = true
+			}
+		}
+	}
 }
 
 // absenceIsEvidence reports whether a tracked job's absence from this
@@ -448,6 +495,7 @@ func (f *Fold) Queued(ad *classad.ClassAd) {
 		return
 	}
 	id := jobIDOf(ad, f.perAP)
+	f.notePlace(id, false)
 	p := f.seen[id]
 
 	// A terminal ad seen in the queue (Completed or Removed) is as
@@ -487,11 +535,23 @@ func (f *Fold) Queued(ad *classad.ClassAd) {
 }
 
 // Finished folds in one history row.
+//
+// A terminal record from the change stream (isFeedRecord) carries only
+// the attributes the feed keeps, so the watch's constraint is not
+// re-evaluated against it -- a missing attribute could make it match a
+// job it should not. It only resolves a job this watch already tracks,
+// which was selected on a whole ad; an untracked job is left to the
+// history archive.
 func (f *Fold) Finished(ad *classad.ClassAd) {
-	if !f.w.selects(ad) {
+	id := jobIDOf(ad, f.perAP)
+	if isFeedRecord(ad) {
+		if !f.tracked[id] {
+			return
+		}
+	} else if !f.w.selects(ad) {
 		return
 	}
-	id := jobIDOf(ad, f.perAP)
+	f.notePlace(id, true)
 	p := f.seen[id]
 	p.inHistory = true
 	p.ended = true
@@ -579,6 +639,7 @@ func (f *Fold) hit(id JobID, ad *classad.ClassAd) {
 // complete queue and from history has finished, which is what lets
 // "done" work without an archive.
 func (f *Fold) Done() Outcome {
+	f.resolveLegacy()
 	out := Outcome{Tracked: make([]JobID, 0, len(f.seen)), Satisfied: f.satisfied, Matched: f.matched}
 	var unresolved []JobID
 	var stillHere int

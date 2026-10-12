@@ -3,7 +3,9 @@ package jobwatch
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -83,6 +85,38 @@ type Evaluator struct {
 	// memory is per watch id; see absenceMemory. Used only with a
 	// CoveredSource.
 	memory map[string]*absenceMemory
+	// liveAttrs is what the live watches read, for the feed's projection
+	// (LiveAttrs).
+	liveAttrs atomic.Pointer[[]string]
+}
+
+// LiveAttrs is every attribute the live watches read, as of the last
+// sweep and any registration since: what a feed must keep of each job
+// (Feed.Keep) for its terminal records to resolve them.
+func (e *Evaluator) LiveAttrs() []string {
+	if p := e.liveAttrs.Load(); p != nil {
+		return *p
+	}
+	return BaseAttrs
+}
+
+// noteAttrs records watches' read sets; replace starts over from them.
+func (e *Evaluator) noteAttrs(watches []*Watch, replace bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var have []string
+	if p := e.liveAttrs.Load(); p != nil && !replace {
+		have = *p
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(have)+16)
+	for _, a := range append(append([]string(nil), have...), projectionFor(watches)...) {
+		if k := strings.ToLower(a); !seen[k] {
+			seen[k] = true
+			out = append(out, a)
+		}
+	}
+	e.liveAttrs.Store(&out)
 }
 
 // NewEvaluator wires an evaluator. logf may be nil.
@@ -188,6 +222,7 @@ func (e *Evaluator) Pass(ctx context.Context) (Stats, error) {
 	}
 	st.Watches = len(live)
 	e.forget(live)
+	e.noteAttrs(live, true)
 	if len(live) == 0 {
 		return st, nil
 	}
@@ -328,6 +363,7 @@ func (e *Evaluator) CheckOwner(ctx context.Context, owner string) (int, error) {
 	if len(mine) == 0 {
 		return 0, nil
 	}
+	e.noteAttrs(mine, false)
 	return e.passOwner(ctx, owner, mine)
 }
 

@@ -256,27 +256,6 @@ func (s *Service) hubStateInterval() time.Duration {
 	return DefaultHubStateInterval
 }
 
-// VouchDeparture reports whether a job leaving the hub's jobs table now
-// is evidence that it left its AP's queue: the jobwatch.Feed hook. The
-// delete arrived on the hub's ordered stream, so only the AP's state
-// matters, by the same rule as WatchCoverage.
-func (s *Service) VouchDeparture(ad *classad.ClassAd) bool {
-	st := s.Hub.Status()
-	if !st.Reachable {
-		return false
-	}
-	m, ok := s.Registry.Get(attrString(ad, AttrScheddName))
-	if !ok {
-		return false
-	}
-	src, ok := s.Hub.Source(m.Name)
-	if !ok {
-		return false
-	}
-	_, ok = s.vouch(m, src, st.LastSuccess)
-	return ok
-}
-
 // OwnerOfRow is the owner a hub row belongs to, for the jobwatch.Feed:
 // the local part of its User when User is in UID_DOMAIN, else none. A
 // row whose User is in another domain belongs to nobody this server can

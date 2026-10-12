@@ -2091,6 +2091,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	}
 	h.jobWatchEval = jobwatch.NewEvaluator(h.jobWatch, watchSrc,
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
+	// The feed keeps of each job only what the watches, the activity
+	// stream and the dashboard read (jobwatch.FeedAttrs), not whole ads.
+	h.jobWatchFeed.Keep = h.jobWatchEval.LiveAttrs
 
 	h.initRuntimeEstimates(cfg)
 

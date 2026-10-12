@@ -25,12 +25,11 @@ import (
 // owned_by_me=false is not honoured here.
 //
 // "Finished recently" per AP counts jobs with evidence that they
-// finished: a history record in the window, or a departure the hub's
-// jobs stream saw that the feed vouched for when it arrived -- a job
-// whose last ad said it had finished, or a delete on an AP that was then
-// fresh with its jobs stream connected and error-free. A delete on any
-// other AP is also what retiring or reconciling that AP looks like, and
-// is not counted (jobwatch.Feed.Departures, multiap.VouchDeparture).
+// finished: a history record in the window, or a job the hub's jobs
+// stream saw leave whose last ad said it had completed or been removed.
+// A delete alone is not counted: it is also what retiring (.retire) or
+// reconciling an AP looks like, and a job that leaves held or idle has
+// not been shown to have finished (jobwatch.Feed.Departures).
 
 // DashboardAP is one AP's counts.
 type DashboardAP struct {

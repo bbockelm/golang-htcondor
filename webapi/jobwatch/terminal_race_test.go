@@ -79,6 +79,8 @@ func TestTerminalAdsAreNotSharedBetweenConsumers(t *testing.T) {
 				errs <- err.Error()
 				return
 			}
+			// A feed record resolves a job the watch tracks.
+			w.Tracked = []JobID{{Cluster: 3}}
 			for range rounds {
 				ads := f.Terminal("alice", since)
 				fold := w.Fold(time.Time{}, false)

@@ -59,6 +59,9 @@ func TestFeedKeepsTheOutcomeThatTheQueueDestroys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A watch that saw the job: the stream's record resolves the jobs a
+	// watch tracks (see Fold.Finished).
+	w.Tracked = []JobID{{Cluster: 42}}
 	if !w.Evaluate(Snapshot{History: got}).Fires {
 		t.Error("a failure observed on the stream should resolve without the archive")
 	}
