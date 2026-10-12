@@ -505,6 +505,10 @@ func (s *Handler) computeBatch(ctx context.Context, r *http.Request, ident batch
 		if root != nil {
 			dag = dagInfo(root, src)
 			since, _ = root.EvaluateAttrInt("QDate")
+			// The DAG is its root's, whoever its nodes run as.
+			if owner, ok := root.EvaluateAttrString("Owner"); ok && owner != "" {
+				ident.Owner = owner
+			}
 		}
 	} else if ident.Kind == batches.KindCluster && qdate != nil {
 		since = *qdate

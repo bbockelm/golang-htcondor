@@ -52,8 +52,8 @@ func batchFixture(t *testing.T) *twoOwnerFixture {
 		// Uploading its inputs: held, but not a hold reason.
 		batchAd(t, 506, 0, "alice", dag, `Cmd = "/home/alice/fit.sh"`, "JobStatus = 5", at("QDate", 60), "DAGManJobId = 502", `DAGNodeName = "E"`,
 			`HoldReason = "Spooling input data files"`, "HoldReasonCode = 16"),
-		// bob's job under alice's DAG's batch name: his own row on the
-		// jobs page, and his own batch here.
+		// A node of alice's DAG run as bob, as a schedd not running as
+		// root does: bob sees his job, alice's DAG takes it in.
 		batchAd(t, 900, 0, "bob", dag, `Cmd = "/home/bob/x"`, "JobStatus = 1", at("QDate", 70)),
 		batchAd(t, 601, 0, "alice", `JobBatchName = "sweep"`, `Cmd = "/home/alice/sweep"`, "JobStatus = 1", at("QDate", 500), "TotalSubmitProcs = 2"),
 		batchAd(t, 601, 1, "alice", `JobBatchName = "sweep"`, `Cmd = "/home/alice/sweep"`, "JobStatus = 2", at("QDate", 500), "TotalSubmitProcs = 2",
@@ -133,7 +133,7 @@ func TestBatchDAG(t *testing.T) {
 		if !slices.Equal(b.Clusters, []int64{500, 501, 502, 503, 504, 505, 506}) {
 			t.Errorf("/batches/%s: clusters %v", id, b.Clusters)
 		}
-		if b.Constraint != `JobBatchName == "ny50.dag+500" && Owner == "alice"` || b.RemoveConstraint != `JobBatchName == "ny50.dag+500" || ClusterId == 500` {
+		if b.Constraint != `JobBatchName == "ny50.dag+500"` || b.RemoveConstraint != `JobBatchName == "ny50.dag+500" || ClusterId == 500` {
 			t.Errorf("/batches/%s: constraints %q, %q", id, b.Constraint, b.RemoveConstraint)
 		}
 	}
@@ -268,14 +268,14 @@ func TestBatchScopeAndErrors(t *testing.T) {
 	if b := f.batch(t, "/api/v1/batches/600", root); b.ID != 600 || b.Owner != "alice" {
 		t.Errorf("admin: %+v", b)
 	}
-	// An administrator sees every user's jobs, and still sees alice's DAG
-	// as alice's: bob's job under the same name is his own row on the
-	// jobs page, so not one of hers here.
-	if b := f.batch(t, "/api/v1/batches/500", root); slices.Contains(b.Clusters, 900) || len(b.Clusters) != 7 {
-		t.Errorf("admin's view of alice's DAG: clusters %v", b.Clusters)
+	// An administrator sees the whole DAG, whoever its jobs run as, and
+	// it is the root DAGMan job's owner's.
+	if b := f.batch(t, "/api/v1/batches/900", root); b.ID != 500 || b.Owner != "alice" || !slices.Contains(b.Clusters, 900) || len(b.Clusters) != 8 {
+		t.Errorf("admin's view of alice's DAG: id %d owner %q clusters %v", b.ID, b.Owner, b.Clusters)
 	}
-	// A DAG's jobs are matched by batch name alone, which another user
-	// can reuse: the read is still confined to what the caller may see.
+	// A DAG's jobs are matched by batch name alone, whoever owns them --
+	// a schedd not running as root runs a DAG's nodes as itself -- and
+	// the read is still confined to what the caller may see.
 	if b := f.batch(t, "/api/v1/batches/900", bob); b.Kind != batches.KindDAG || !slices.Equal(b.Clusters, []int64{900}) ||
 		b.LiveJobs != 1 || b.Finished.Jobs != 0 || b.Dag != nil {
 		t.Errorf("bob's job under alice's DAG name = %+v", b)

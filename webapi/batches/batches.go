@@ -8,8 +8,11 @@
 // change to either side has to keep both green.
 //
 //   - A DAG is every job sharing the DAG's JobBatchName, "<name>+<root>":
-//     node jobs, nested sub-DAGs and the DAGMan jobs alike. Its id is the
-//     root DAGMan cluster, the number after the "+".
+//     node jobs, nested sub-DAGs and the DAGMan jobs alike, whoever owns
+//     them -- a schedd not running as root runs the nodes as itself, not
+//     as the user who submitted the DAG. Its id is the root DAGMan
+//     cluster, the number after the "+", and its owner is the root
+//     DAGMan job's.
 //   - A named batch that is not a DAG is every job of one owner under one
 //     JobBatchName, across however many clusters; its id is the smallest
 //     of them.
@@ -168,11 +171,8 @@ type Identity struct {
 	Select string
 	// Remove is what removing the batch removes (removeConstraint).
 	Remove string
-	// Jobs selects exactly the batch's jobs: Select, with a DAG's owner
-	// too. The jobs page folds a batch by owner and name, but its
-	// selectConstraint names a DAG by its name alone, which another user
-	// can reuse ("+N" is the root's cluster, but nothing stops a submit
-	// file from writing it).
+	// Jobs selects exactly the batch's jobs. It is Select: a DAG by its
+	// name alone, a named batch by its name and owner, a cluster by id.
 	Jobs string
 }
 
@@ -180,21 +180,14 @@ type Identity struct {
 // smallest cluster is minCluster, makes.
 func identity(batchName, owner string, minCluster int64) Identity {
 	if batchName != "" {
-		if m := dagSuffix.FindStringSubmatch(batchName); m != nil {
-			// A root cluster too large to be one is a name, not a DAG.
-			if root, err := strconv.ParseInt(m[1], 10, 64); err == nil {
-				sel := `JobBatchName == "` + escape(batchName) + `"`
-				jobs := sel
-				if owner != "" {
-					jobs += ` && Owner == "` + escape(owner) + `"`
-				}
-				return Identity{
-					Kind: KindDAG, ID: root, Owner: owner,
-					Name:   dagSuffix.ReplaceAllString(batchName, ""),
-					Select: sel,
-					Remove: sel + " || ClusterId == " + strconv.FormatInt(root, 10),
-					Jobs:   jobs,
-				}
+		if root, ok := dagRoot(batchName); ok {
+			sel := `JobBatchName == "` + escape(batchName) + `"`
+			return Identity{
+				Kind: KindDAG, ID: root, Owner: owner,
+				Name:   dagSuffix.ReplaceAllString(batchName, ""),
+				Select: sel,
+				Remove: sel + " || ClusterId == " + strconv.FormatInt(root, 10),
+				Jobs:   sel,
 			}
 		}
 		sel := `JobBatchName == "` + escape(batchName) + `"`
@@ -205,6 +198,18 @@ func identity(batchName, owner string, minCluster int64) Identity {
 	}
 	c := strconv.FormatInt(minCluster, 10)
 	return Identity{Kind: KindCluster, ID: minCluster, Name: c, Owner: owner, Select: "ClusterId == " + c, Remove: "ClusterId == " + c, Jobs: "ClusterId == " + c}
+}
+
+// dagRoot is the root DAGMan cluster a DAG's batch name ends in, false
+// for a name that is not a DAG's. A number too large to be a cluster is
+// a name.
+func dagRoot(batchName string) (int64, bool) {
+	m := dagSuffix.FindStringSubmatch(batchName)
+	if m == nil {
+		return 0, false
+	}
+	root, err := strconv.ParseInt(m[1], 10, 64)
+	return root, err == nil
 }
 
 // Identify is the batch one job belongs to, as far as that job alone can
@@ -223,10 +228,15 @@ func escape(s string) string {
 }
 
 // GroupKey is batchGroupKey: the key a job folds under, false for a job
-// with no ClusterId.
+// with no ClusterId. A DAG folds by its batch name, which names one
+// workflow on the access point; any other name by owner and name, since
+// two users' "test" are two batches.
 func GroupKey(f *Fields) (string, bool) {
 	if f.ClusterID == nil {
 		return "", false
+	}
+	if _, ok := dagRoot(f.JobBatchName); ok {
+		return "dag\x00" + f.JobBatchName, true
 	}
 	if f.JobBatchName != "" {
 		return f.Owner + "\x00" + f.JobBatchName, true
@@ -328,6 +338,17 @@ func Group(jobs []Fields) []Batch {
 	out := make([]Batch, 0, len(order))
 	for _, key := range order {
 		a := byKey[key]
+		// A DAG's owner is its root DAGMan job's -- the one whose
+		// cluster the name ends in -- since its nodes may run as someone
+		// else. Without it, the first owner seen.
+		if root, ok := dagRoot(a.batchName); ok {
+			for _, r := range a.roots {
+				if *r.ClusterID == root && r.Owner != "" {
+					a.owner = r.Owner
+					break
+				}
+			}
+		}
 		a.b.Identity = identity(a.batchName, a.owner, a.minCluster)
 		a.b.DagNodes = dagNodeCounts(a.roots)
 		out = append(out, a.b)

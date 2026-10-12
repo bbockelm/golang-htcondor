@@ -1,82 +1,468 @@
 {
-  "about": "What a batch is: job ads in, the /jobs page's rows out. Checked by webapi/batches (Go, batches.Group) and by the frontend (groupIntoBatches). Each expected entry lists only the fields both sides compute; batches are in the order groupIntoBatches returns them (largest batchID first); clusterIds are compared sorted ascending; statusCounts omits zero counts; dagNodes is null when absent.",
+  "about": "What a batch is: job ads in, the /jobs page's rows out. A DAG (JobBatchName ending in +N) folds by its name alone and takes its root DAGMan job's Owner; any other name folds by Owner and name. Checked by webapi/batches (Go, batches.Group) and by the frontend (groupIntoBatches). Each expected entry lists only the fields both sides compute; batches are in the order groupIntoBatches returns them (largest batchID first); clusterIds are compared sorted ascending; statusCounts omits zero counts; dagNodes is null when absent.",
   "cases": [
     {
       "name": "a DAG with a nested sub-DAG folds into one batch, named for the DAG file, id the root DAGMan cluster",
       "ads": [
-        {"ClusterId": 101, "ProcId": 0, "Owner": "alice", "JobBatchName": "ny50.dag+100", "DAGManJobId": 100, "DAGNodeName": "A", "Cmd": "/home/alice/run.sh", "JobStatus": 2, "QDate": 1010},
-        {"ClusterId": 100, "ProcId": 0, "Owner": "alice", "JobBatchName": "ny50.dag+100", "Cmd": "/usr/bin/condor_dagman", "JobStatus": 2, "QDate": 1000, "DAG_NodesTotal": 10, "DAG_NodesDone": 3, "DAG_NodesFailed": 1, "DAG_NodesQueued": 2},
-        {"ClusterId": 102, "ProcId": 0, "Owner": "alice", "JobBatchName": "ny50.dag+100", "DAGManJobId": 100, "DAGNodeName": "SUB", "Cmd": "/usr/bin/condor_dagman", "JobStatus": 2, "QDate": 1020, "DAG_NodesTotal": 4, "DAG_NodesDone": 1},
-        {"ClusterId": 103, "ProcId": 0, "Owner": "alice", "JobBatchName": "ny50.dag+100", "DAGManJobId": 102, "DAGNodeName": "B", "Cmd": "/home/alice/run.sh", "JobStatus": 1, "QDate": 1030},
-        {"ClusterId": 103, "ProcId": 1, "Owner": "alice", "JobBatchName": "ny50.dag+100", "DAGManJobId": 102, "DAGNodeName": "B", "Cmd": "/home/alice/run.sh", "JobStatus": 5, "HoldReasonCode": 16, "QDate": 1030}
+        {
+          "ClusterId": 101,
+          "ProcId": 0,
+          "Owner": "alice",
+          "JobBatchName": "ny50.dag+100",
+          "DAGManJobId": 100,
+          "DAGNodeName": "A",
+          "Cmd": "/home/alice/run.sh",
+          "JobStatus": 2,
+          "QDate": 1010
+        },
+        {
+          "ClusterId": 100,
+          "ProcId": 0,
+          "Owner": "alice",
+          "JobBatchName": "ny50.dag+100",
+          "Cmd": "/usr/bin/condor_dagman",
+          "JobStatus": 2,
+          "QDate": 1000,
+          "DAG_NodesTotal": 10,
+          "DAG_NodesDone": 3,
+          "DAG_NodesFailed": 1,
+          "DAG_NodesQueued": 2
+        },
+        {
+          "ClusterId": 102,
+          "ProcId": 0,
+          "Owner": "alice",
+          "JobBatchName": "ny50.dag+100",
+          "DAGManJobId": 100,
+          "DAGNodeName": "SUB",
+          "Cmd": "/usr/bin/condor_dagman",
+          "JobStatus": 2,
+          "QDate": 1020,
+          "DAG_NodesTotal": 4,
+          "DAG_NodesDone": 1
+        },
+        {
+          "ClusterId": 103,
+          "ProcId": 0,
+          "Owner": "alice",
+          "JobBatchName": "ny50.dag+100",
+          "DAGManJobId": 102,
+          "DAGNodeName": "B",
+          "Cmd": "/home/alice/run.sh",
+          "JobStatus": 1,
+          "QDate": 1030
+        },
+        {
+          "ClusterId": 103,
+          "ProcId": 1,
+          "Owner": "alice",
+          "JobBatchName": "ny50.dag+100",
+          "DAGManJobId": 102,
+          "DAGNodeName": "B",
+          "Cmd": "/home/alice/run.sh",
+          "JobStatus": 5,
+          "HoldReasonCode": 16,
+          "QDate": 1030
+        }
       ],
       "expected": [
-        {"batchID": 100, "name": "ny50.dag", "owner": "alice", "isDag": true, "jobCount": 5, "clusterIds": [100, 101, 102, 103],
-         "submittedUnix": 1000, "statusCounts": {"running": 3, "idle": 1, "uploading": 1},
-         "dagNodes": {"total": 10, "done": 3, "failed": 1, "queued": 2},
-         "selectConstraint": "JobBatchName == \"ny50.dag+100\"",
-         "removeConstraint": "JobBatchName == \"ny50.dag+100\" || ClusterId == 100"}
+        {
+          "batchID": 100,
+          "name": "ny50.dag",
+          "owner": "alice",
+          "isDag": true,
+          "jobCount": 5,
+          "clusterIds": [
+            100,
+            101,
+            102,
+            103
+          ],
+          "submittedUnix": 1000,
+          "statusCounts": {
+            "running": 3,
+            "idle": 1,
+            "uploading": 1
+          },
+          "dagNodes": {
+            "total": 10,
+            "done": 3,
+            "failed": 1,
+            "queued": 2
+          },
+          "selectConstraint": "JobBatchName == \"ny50.dag+100\"",
+          "removeConstraint": "JobBatchName == \"ny50.dag+100\" || ClusterId == 100"
+        }
+      ]
+    },
+    {
+      "name": "a DAG whose nodes run as another user is one batch, owned by its root DAGMan job's owner (without the root, the first owner seen); a plain name two users reuse is still two batches",
+      "ads": [
+        {
+          "ClusterId": 3,
+          "ProcId": 0,
+          "Owner": "bbockelm",
+          "JobBatchName": "x.dag+2",
+          "DAGManJobId": 2,
+          "DAGNodeName": "A",
+          "JobStatus": 4,
+          "QDate": 110
+        },
+        {
+          "ClusterId": 2,
+          "ProcId": 0,
+          "Owner": "admin",
+          "JobBatchName": "x.dag+2",
+          "Cmd": "/usr/bin/condor_dagman",
+          "JobStatus": 2,
+          "QDate": 100,
+          "DAG_NodesTotal": 3,
+          "DAG_NodesDone": 1,
+          "DAG_NodesFailed": 0,
+          "DAG_NodesQueued": 1
+        },
+        {
+          "ClusterId": 4,
+          "ProcId": 0,
+          "Owner": "bbockelm",
+          "JobBatchName": "x.dag+2",
+          "DAGManJobId": 2,
+          "DAGNodeName": "B",
+          "JobStatus": 1,
+          "QDate": 120
+        },
+        {
+          "ClusterId": 11,
+          "ProcId": 0,
+          "Owner": "alice",
+          "JobBatchName": "test",
+          "JobStatus": 1,
+          "QDate": 200
+        },
+        {
+          "ClusterId": 12,
+          "ProcId": 0,
+          "Owner": "bob",
+          "JobBatchName": "test",
+          "JobStatus": 1,
+          "QDate": 210
+        },
+        {
+          "ClusterId": 51,
+          "ProcId": 0,
+          "Owner": "u1",
+          "JobBatchName": "y.dag+50",
+          "DAGManJobId": 50,
+          "JobStatus": 2,
+          "QDate": 300
+        },
+        {
+          "ClusterId": 52,
+          "ProcId": 0,
+          "Owner": "u2",
+          "JobBatchName": "y.dag+50",
+          "DAGManJobId": 50,
+          "JobStatus": 1,
+          "QDate": 310
+        }
+      ],
+      "expected": [
+        {
+          "batchID": 50,
+          "name": "y.dag",
+          "owner": "u1",
+          "isDag": true,
+          "jobCount": 2,
+          "clusterIds": [
+            51,
+            52
+          ],
+          "submittedUnix": 300,
+          "statusCounts": {
+            "running": 1,
+            "idle": 1
+          },
+          "dagNodes": null,
+          "selectConstraint": "JobBatchName == \"y.dag+50\"",
+          "removeConstraint": "JobBatchName == \"y.dag+50\" || ClusterId == 50"
+        },
+        {
+          "batchID": 12,
+          "name": "test",
+          "owner": "bob",
+          "isDag": false,
+          "jobCount": 1,
+          "clusterIds": [
+            12
+          ],
+          "submittedUnix": 210,
+          "statusCounts": {
+            "idle": 1
+          },
+          "dagNodes": null,
+          "selectConstraint": "JobBatchName == \"test\" && Owner == \"bob\"",
+          "removeConstraint": "JobBatchName == \"test\" && Owner == \"bob\""
+        },
+        {
+          "batchID": 11,
+          "name": "test",
+          "owner": "alice",
+          "isDag": false,
+          "jobCount": 1,
+          "clusterIds": [
+            11
+          ],
+          "submittedUnix": 200,
+          "statusCounts": {
+            "idle": 1
+          },
+          "dagNodes": null,
+          "selectConstraint": "JobBatchName == \"test\" && Owner == \"alice\"",
+          "removeConstraint": "JobBatchName == \"test\" && Owner == \"alice\""
+        },
+        {
+          "batchID": 2,
+          "name": "x.dag",
+          "owner": "admin",
+          "isDag": true,
+          "jobCount": 3,
+          "clusterIds": [
+            2,
+            3,
+            4
+          ],
+          "submittedUnix": 100,
+          "statusCounts": {
+            "completed": 1,
+            "running": 1,
+            "idle": 1
+          },
+          "dagNodes": {
+            "total": 3,
+            "done": 1,
+            "failed": 0,
+            "queued": 1
+          },
+          "selectConstraint": "JobBatchName == \"x.dag+2\"",
+          "removeConstraint": "JobBatchName == \"x.dag+2\" || ClusterId == 2"
+        }
       ]
     },
     {
       "name": "a DAG whose root DAGMan job has not reported has no node counts; a trailing space after +N is still a DAG",
       "ads": [
-        {"ClusterId": 7, "ProcId": 0, "Owner": "carol", "JobBatchName": "wf.dag+7 ", "Cmd": "condor_dagman", "JobStatus": 1, "QDate": 50},
-        {"ClusterId": 8, "ProcId": 0, "Owner": "carol", "JobBatchName": "wf.dag+7 ", "DAGManJobId": 7, "JobStatus": 1, "QDate": 60}
+        {
+          "ClusterId": 7,
+          "ProcId": 0,
+          "Owner": "carol",
+          "JobBatchName": "wf.dag+7 ",
+          "Cmd": "condor_dagman",
+          "JobStatus": 1,
+          "QDate": 50
+        },
+        {
+          "ClusterId": 8,
+          "ProcId": 0,
+          "Owner": "carol",
+          "JobBatchName": "wf.dag+7 ",
+          "DAGManJobId": 7,
+          "JobStatus": 1,
+          "QDate": 60
+        }
       ],
       "expected": [
-        {"batchID": 7, "name": "wf.dag", "owner": "carol", "isDag": true, "jobCount": 2, "clusterIds": [7, 8],
-         "submittedUnix": 50, "statusCounts": {"idle": 2}, "dagNodes": null,
-         "selectConstraint": "JobBatchName == \"wf.dag+7 \"",
-         "removeConstraint": "JobBatchName == \"wf.dag+7 \" || ClusterId == 7"}
+        {
+          "batchID": 7,
+          "name": "wf.dag",
+          "owner": "carol",
+          "isDag": true,
+          "jobCount": 2,
+          "clusterIds": [
+            7,
+            8
+          ],
+          "submittedUnix": 50,
+          "statusCounts": {
+            "idle": 2
+          },
+          "dagNodes": null,
+          "selectConstraint": "JobBatchName == \"wf.dag+7 \"",
+          "removeConstraint": "JobBatchName == \"wf.dag+7 \" || ClusterId == 7"
+        }
       ]
     },
     {
       "name": "a named batch spans clusters, one owner's; its id is the smallest cluster; another owner's same name is another batch",
       "ads": [
-        {"ClusterId": 21, "ProcId": 0, "Owner": "alice", "JobBatchName": "sweep", "JobStatus": 2, "QDate": 300},
-        {"ClusterId": 20, "ProcId": 0, "Owner": "alice", "JobBatchName": "sweep", "JobStatus": 5, "QDate": 200},
-        {"ClusterId": 20, "ProcId": 1, "Owner": "alice", "JobBatchName": "sweep", "JobStatus": 4, "QDate": 200},
-        {"ClusterId": 22, "ProcId": 0, "Owner": "bob", "JobBatchName": "sweep", "JobStatus": 1, "QDate": 400}
+        {
+          "ClusterId": 21,
+          "ProcId": 0,
+          "Owner": "alice",
+          "JobBatchName": "sweep",
+          "JobStatus": 2,
+          "QDate": 300
+        },
+        {
+          "ClusterId": 20,
+          "ProcId": 0,
+          "Owner": "alice",
+          "JobBatchName": "sweep",
+          "JobStatus": 5,
+          "QDate": 200
+        },
+        {
+          "ClusterId": 20,
+          "ProcId": 1,
+          "Owner": "alice",
+          "JobBatchName": "sweep",
+          "JobStatus": 4,
+          "QDate": 200
+        },
+        {
+          "ClusterId": 22,
+          "ProcId": 0,
+          "Owner": "bob",
+          "JobBatchName": "sweep",
+          "JobStatus": 1,
+          "QDate": 400
+        }
       ],
       "expected": [
-        {"batchID": 22, "name": "sweep", "owner": "bob", "isDag": false, "jobCount": 1, "clusterIds": [22],
-         "submittedUnix": 400, "statusCounts": {"idle": 1}, "dagNodes": null,
-         "selectConstraint": "JobBatchName == \"sweep\" && Owner == \"bob\"",
-         "removeConstraint": "JobBatchName == \"sweep\" && Owner == \"bob\""},
-        {"batchID": 20, "name": "sweep", "owner": "alice", "isDag": false, "jobCount": 3, "clusterIds": [20, 21],
-         "submittedUnix": 200, "statusCounts": {"running": 1, "held": 1, "completed": 1}, "dagNodes": null,
-         "selectConstraint": "JobBatchName == \"sweep\" && Owner == \"alice\"",
-         "removeConstraint": "JobBatchName == \"sweep\" && Owner == \"alice\""}
+        {
+          "batchID": 22,
+          "name": "sweep",
+          "owner": "bob",
+          "isDag": false,
+          "jobCount": 1,
+          "clusterIds": [
+            22
+          ],
+          "submittedUnix": 400,
+          "statusCounts": {
+            "idle": 1
+          },
+          "dagNodes": null,
+          "selectConstraint": "JobBatchName == \"sweep\" && Owner == \"bob\"",
+          "removeConstraint": "JobBatchName == \"sweep\" && Owner == \"bob\""
+        },
+        {
+          "batchID": 20,
+          "name": "sweep",
+          "owner": "alice",
+          "isDag": false,
+          "jobCount": 3,
+          "clusterIds": [
+            20,
+            21
+          ],
+          "submittedUnix": 200,
+          "statusCounts": {
+            "running": 1,
+            "held": 1,
+            "completed": 1
+          },
+          "dagNodes": null,
+          "selectConstraint": "JobBatchName == \"sweep\" && Owner == \"alice\"",
+          "removeConstraint": "JobBatchName == \"sweep\" && Owner == \"alice\""
+        }
       ]
     },
     {
       "name": "unnamed jobs are one batch per cluster; an ad without a ClusterId belongs to none",
       "ads": [
-        {"ClusterId": 30, "ProcId": 0, "Owner": "dave", "JobStatus": 2, "QDate": 10},
-        {"ClusterId": 30, "ProcId": 1, "Owner": "dave", "JobStatus": 7, "QDate": 10},
-        {"ClusterId": 31, "ProcId": 0, "Owner": "dave", "JobStatus": 6, "QDate": 11},
-        {"ProcId": 0, "Owner": "dave", "JobStatus": 1}
+        {
+          "ClusterId": 30,
+          "ProcId": 0,
+          "Owner": "dave",
+          "JobStatus": 2,
+          "QDate": 10
+        },
+        {
+          "ClusterId": 30,
+          "ProcId": 1,
+          "Owner": "dave",
+          "JobStatus": 7,
+          "QDate": 10
+        },
+        {
+          "ClusterId": 31,
+          "ProcId": 0,
+          "Owner": "dave",
+          "JobStatus": 6,
+          "QDate": 11
+        },
+        {
+          "ProcId": 0,
+          "Owner": "dave",
+          "JobStatus": 1
+        }
       ],
       "expected": [
-        {"batchID": 31, "name": "31", "owner": "dave", "isDag": false, "jobCount": 1, "clusterIds": [31],
-         "submittedUnix": 11, "statusCounts": {"transferring": 1}, "dagNodes": null,
-         "selectConstraint": "ClusterId == 31", "removeConstraint": "ClusterId == 31"},
-        {"batchID": 30, "name": "30", "owner": "dave", "isDag": false, "jobCount": 2, "clusterIds": [30],
-         "submittedUnix": 10, "statusCounts": {"running": 1, "suspended": 1}, "dagNodes": null,
-         "selectConstraint": "ClusterId == 30", "removeConstraint": "ClusterId == 30"}
+        {
+          "batchID": 31,
+          "name": "31",
+          "owner": "dave",
+          "isDag": false,
+          "jobCount": 1,
+          "clusterIds": [
+            31
+          ],
+          "submittedUnix": 11,
+          "statusCounts": {
+            "transferring": 1
+          },
+          "dagNodes": null,
+          "selectConstraint": "ClusterId == 31",
+          "removeConstraint": "ClusterId == 31"
+        },
+        {
+          "batchID": 30,
+          "name": "30",
+          "owner": "dave",
+          "isDag": false,
+          "jobCount": 2,
+          "clusterIds": [
+            30
+          ],
+          "submittedUnix": 10,
+          "statusCounts": {
+            "running": 1,
+            "suspended": 1
+          },
+          "dagNodes": null,
+          "selectConstraint": "ClusterId == 30",
+          "removeConstraint": "ClusterId == 30"
+        }
       ]
     },
     {
       "name": "a batch name is escaped as a ClassAd string; without an owner it is selected by name alone",
       "ads": [
-        {"ClusterId": 40, "ProcId": 0, "JobBatchName": "say \"hi\" \\o/", "JobStatus": 3, "QDate": 5}
+        {
+          "ClusterId": 40,
+          "ProcId": 0,
+          "JobBatchName": "say \"hi\" \\o/",
+          "JobStatus": 3,
+          "QDate": 5
+        }
       ],
       "expected": [
-        {"batchID": 40, "name": "say \"hi\" \\o/", "isDag": false, "jobCount": 1, "clusterIds": [40],
-         "submittedUnix": 5, "statusCounts": {"removed": 1}, "dagNodes": null,
-         "selectConstraint": "JobBatchName == \"say \\\"hi\\\" \\\\o/\"",
-         "removeConstraint": "JobBatchName == \"say \\\"hi\\\" \\\\o/\""}
+        {
+          "batchID": 40,
+          "name": "say \"hi\" \\o/",
+          "isDag": false,
+          "jobCount": 1,
+          "clusterIds": [
+            40
+          ],
+          "submittedUnix": 5,
+          "statusCounts": {
+            "removed": 1
+          },
+          "dagNodes": null,
+          "selectConstraint": "JobBatchName == \"say \\\"hi\\\" \\\\o/\"",
+          "removeConstraint": "JobBatchName == \"say \\\"hi\\\" \\\\o/\""
+        }
       ]
     }
   ]

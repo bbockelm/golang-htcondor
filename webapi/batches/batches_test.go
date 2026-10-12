@@ -142,14 +142,13 @@ JobMaterializeNextProcId = 2`)
 	}
 }
 
-// A DAG's jobs are its owner's: the page folds by owner and name.
+// A DAG's jobs are every job under its name; a named batch's, its owner's.
 func TestIdentityJobs(t *testing.T) {
 	for _, c := range []struct {
 		f    Fields
 		jobs string
 	}{
-		{Fields{ClusterID: p64(5), Owner: "alice", JobBatchName: "a.dag+5"}, `JobBatchName == "a.dag+5" && Owner == "alice"`},
-		{Fields{ClusterID: p64(5), JobBatchName: "a.dag+5"}, `JobBatchName == "a.dag+5"`},
+		{Fields{ClusterID: p64(5), Owner: "alice", JobBatchName: "a.dag+5"}, `JobBatchName == "a.dag+5"`},
 		{Fields{ClusterID: p64(5), Owner: "alice", JobBatchName: "x"}, `JobBatchName == "x" && Owner == "alice"`},
 		{Fields{ClusterID: p64(5), Owner: "alice"}, `ClusterId == 5`},
 	} {
