@@ -21,7 +21,7 @@ import { summarizeRequirements, standardLabels } from '@/lib/requirements';
 import { coresUsed, jobTiming } from '@/lib/batches';
 import { OwnerLink } from '@/components/OwnerLink';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
-import { EVALUATED_KEY, jobRequest } from '@/lib/jobRequests';
+import { EVALUATED_KEY, hasGpus, jobRequest } from '@/lib/jobRequests';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { LogViewerPanel } from '@/components/LogViewerPanel';
@@ -3238,10 +3238,10 @@ export function ResourceTable({ job }: { job: ClassAd }) {
     },
   ];
 
-  // Drop GPUs row when both columns are empty (most jobs).
-  const visible = rows.filter(
-    (r) => !(r.label === 'GPUs' && r.requested === '—' && r.used === '—'),
-  );
+  // A GPU row only for a job with GPUs: one it asked for, or has assigned,
+  // provisioned or in use. RequestGPUs = 0 is not a GPU job.
+  const showGpus = hasGpus(job);
+  const visible = rows.filter((r) => r.label !== 'GPUs' || showGpus);
 
   return (
     <div>

@@ -66,3 +66,14 @@ export function jobRequest(job: ClassAd | undefined, name: RequestAttr): JobRequ
   if (isExpr(raw)) out.expr = unwrapExpr(raw);
   return out;
 }
+
+// hasGpus decides whether a GPU row or series belongs on the page: the job
+// asked for at least one GPU, or it has some assigned, provisioned or in
+// use. RequestGPUs = 0 alone is a job without GPUs.
+export function hasGpus(job: ClassAd | undefined): boolean {
+  if ((jobRequest(job, 'RequestGPUs').value ?? 0) > 0) return true;
+  if ((toNum(attr(job, 'GPUsProvisioned')) ?? 0) > 0) return true;
+  if ((toNum(attr(job, 'GPUsUsage')) ?? 0) > 0) return true;
+  const assigned = attr(job, 'AssignedGPUs');
+  return typeof assigned === 'string' && assigned.trim() !== '';
+}

@@ -256,6 +256,18 @@ describe('ResourceTable', () => {
     expect(screen.queryByText('GPUs')).toBeNull();
   });
 
+  // The reported case: a running job with RequestGPUs = 0 and
+  // GPUsProvisioned = 0 got a GPU row reading "0".
+  it('hides the GPU row for a job that requested zero GPUs', () => {
+    render(<ResourceTable job={{ RequestCpus: 1, RequestGPUs: 0, GPUsProvisioned: 0 } as ClassAd} />);
+    expect(screen.queryByText('GPUs')).toBeNull();
+  });
+
+  it('shows the GPU row for a job holding a GPU it did not count in its request', () => {
+    render(<ResourceTable job={{ RequestGPUs: 0, AssignedGPUs: 'GPU-0000aaaa' } as ClassAd} />);
+    expect(screen.getByText('GPUs')).toBeInTheDocument();
+  });
+
   // The reported case: RequestMemory is a rule over MemoryUsage, the graph
   // drew its value (10.7 GB) and the table a dash. Both now read the value
   // the server evaluated in the job's own ad.
