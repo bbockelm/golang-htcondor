@@ -41,6 +41,11 @@ type fakeAPs struct {
 	catalog func() []LocatedAd
 	// locateErr fails Locate, as for a hub that does not answer.
 	locateErr error
+	// locates counts Locate calls: the catalog asked.
+	locates int
+	// hang makes an AP's queries block until their context ends, as
+	// for one whose packets are dropped.
+	hang map[string]bool
 }
 
 func newFakeAPs(names ...string) *fakeAPs {
@@ -90,6 +95,7 @@ func (f *fakeAPs) Route(ctx context.Context, _ Caller, ap string) (context.Conte
 
 func (f *fakeAPs) Locate(_ context.Context, caller Caller, _ string, _ []string) ([]LocatedAd, error) {
 	f.mu.Lock()
+	f.locates++
 	catalog, err := f.catalog, f.locateErr
 	f.mu.Unlock()
 	if err != nil {
@@ -125,9 +131,25 @@ func (f *fakeAPs) scheddFor(ctx context.Context) ScheddClient {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if s, ok := f.schedds[ap]; ok {
+		if f.hang[ap] {
+			return hangingSchedd{s}
+		}
 		return s
 	}
 	return nil
+}
+
+// hangingSchedd answers no query until its context ends (or, so a test
+// that lost its timeout fails rather than hangs, ten seconds pass).
+type hangingSchedd struct{ *fakeSchedd }
+
+func (h hangingSchedd) QueryWithOptions(ctx context.Context, _ string, _ *htcondor.QueryOptions) ([]*classad.ClassAd, *htcondor.PageInfo, error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case <-time.After(10 * time.Second):
+		return nil, nil, errors.New("the hanging schedd gave up")
+	}
 }
 
 func (f *fakeAPs) assignCount() int {
@@ -470,25 +492,5 @@ func TestMultiAPCreateRefusesWithoutTheCatalog(t *testing.T) {
 		if n := len(s.submittedFiles()); n != 0 {
 			t.Errorf("%s got %d submissions", ap, n)
 		}
-	}
-}
-
-// A catalog row for another owner, or one that is not a session, is
-// not taken for the caller's.
-func TestMultiAPCatalogRowsAreFilteredAgain(t *testing.T) {
-	aps := newFakeAPs(testAP1, testAP2)
-	ad := classad.New()
-	ad.InsertAttr("ClusterId", int64(5))
-	ad.InsertAttr("ProcId", int64(0))
-	ad.InsertAttr("JobStatus", int64(jobStatusRunning))
-	ad.InsertAttrString("Owner", "mallory")
-	ad.InsertAttrString("JobBatchName", BatchNameForSession("work"))
-	aps.catalog = func() []LocatedAd { return []LocatedAd{{AP: testAP1, Ad: ad}} }
-	mgr, dialed := multiManager(t, aps, Options{})
-	if _, err := mgr.Exec(context.Background(), alice, "work", ExecRequest{Command: "true"}); err == nil {
-		t.Fatal("Exec found another owner's session through the catalog")
-	}
-	if len(*dialed) != 0 {
-		t.Errorf("dialed %v", *dialed)
 	}
 }

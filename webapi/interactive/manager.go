@@ -77,6 +77,9 @@ type Options struct {
 	// Create, and every later call on it goes there. ScheddFor is then
 	// required and Schedd is never called.
 	APs APs
+	// APTimeout bounds one access point's answer to a session listing
+	// with several access points. Defaults to DefaultAPTimeout.
+	APTimeout time.Duration
 
 	Logger  *logging.Logger
 	LogDest logging.Destination
@@ -546,7 +549,7 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 	// (see multiap.go): every access point that may hold one of the
 	// caller's sessions is asked, and always the one this session is
 	// about to go to.
-	existing, err := m.listAll(ctx, caller, "", ap)
+	existing, answered, err := m.listAllAnswered(ctx, caller, "", ap)
 	if err != nil {
 		return nil, err
 	}
@@ -559,6 +562,21 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 	if len(existing) >= m.opts.MaxPerOwner {
 		return nil, fmt.Errorf("you already have %d interactive sessions, the per-user limit; stop one before starting another",
 			len(existing))
+	}
+	// This process's record of the name on another access point stands
+	// until that access point has said the session is gone: replacing it
+	// would strand the job there with no lease expiry. The listing above
+	// already counts a record on an access point that could not be
+	// asked; this keeps the record itself from being displaced whatever
+	// the listing said.
+	if m.multi() {
+		if sess := m.sessionFor(caller.Owner, spec.Name); sess != nil && sess.ap != "" &&
+			!strings.EqualFold(sess.ap, ap) && !answered[strings.ToLower(sess.ap)] {
+			return nil, fmt.Errorf("%w (job %s, on access point %s, which could not be asked whether it still exists); "+
+				"use it, or stop it first", &SessionExistsError{Name: spec.Name, Info: Info{Name: spec.Name, Schedd: sess.ap,
+				JobID: m.jobID(sess.ap, sess.cluster, sess.proc), ClusterID: sess.cluster, ProcID: sess.proc}},
+				m.jobID(sess.ap, sess.cluster, sess.proc), sess.ap)
+		}
 	}
 
 	instanceID, err := GenerateInstanceID()

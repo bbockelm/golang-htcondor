@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 )
@@ -190,40 +192,135 @@ func apSet(groups ...[]string) []string {
 	return out
 }
 
+// DefaultAPTimeout bounds one access point's answer to a session
+// listing, so one that hangs is treated as unreachable instead of
+// holding up every other access point -- and, inside Create, the
+// per-name lock.
+const DefaultAPTimeout = 15 * time.Second
+
+// apConcurrency bounds how many access points a listing asks at once.
+const apConcurrency = 8
+
+// apAnswer is one access point's answer to a session listing.
+type apAnswer struct {
+	ap    string
+	infos []Info
+	err   error
+}
+
+// askAPs asks each access point for the caller's live sessions (name's,
+// or all of them), in parallel and each within APTimeout. A timeout is
+// an error like any other: the caller falls back to what it knows.
+func (m *Manager) askAPs(ctx context.Context, caller Caller, aps []string, name string) []apAnswer {
+	out := make([]apAnswer, len(aps))
+	timeout := m.opts.APTimeout
+	if timeout <= 0 {
+		timeout = DefaultAPTimeout
+	}
+	slots := make(chan struct{}, apConcurrency)
+	var wg sync.WaitGroup
+	for i, ap := range aps {
+		wg.Add(1)
+		go func(i int, ap string) {
+			defer wg.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			apCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			infos, err := m.listAdsOn(apCtx, caller, ap, name)
+			if err == nil && apCtx.Err() != nil {
+				err = apCtx.Err()
+			}
+			out[i] = apAnswer{ap: ap, infos: infos, err: err}
+		}(i, ap)
+	}
+	wg.Wait()
+	return out
+}
+
+// recordedOn is what this process's own records say of owner's sessions
+// on ap -- name's, or all of them -- as Info marked with apErr, for an
+// access point that cannot be asked. They are sessions this process
+// placed or reached there, and the catalog may not have seen them yet.
+func (m *Manager) recordedOn(owner, ap, name string, apErr error) []Info {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Info
+	for _, sess := range m.sessions {
+		if sess.owner != owner || !strings.EqualFold(sess.ap, ap) || (name != "" && sess.name != name) {
+			continue
+		}
+		out = append(out, Info{
+			Name:         sess.name,
+			JobID:        m.jobID(sess.ap, sess.cluster, sess.proc),
+			Schedd:       sess.ap,
+			ClusterID:    sess.cluster,
+			ProcID:       sess.proc,
+			Status:       "unknown",
+			LeaseExpires: sess.leaseExpires,
+			Attached:     sess.shell != nil,
+			Unverified:   true,
+			APError:      apErr.Error(),
+		})
+	}
+	return out
+}
+
+// unreachableRows is what is known of the sessions on an access point
+// that could not be asked: the catalog's rows and this process's own
+// records, once each.
+func (m *Manager) unreachableRows(caller Caller, byAP map[string][]Info, ap, name string, apErr error) []Info {
+	var out []Info
+	seen := map[string]bool{}
+	for _, info := range catalogRows(byAP, ap) {
+		info.APError = apErr.Error()
+		seen[info.JobID] = true
+		out = append(out, info)
+	}
+	for _, info := range m.recordedOn(caller.Owner, ap, name, apErr) {
+		if !seen[info.JobID] {
+			out = append(out, info)
+		}
+	}
+	return out
+}
+
 // listAll lists the caller's live sessions -- name's, or all of them --
 // on every access point that may hold one: the ones the catalog names,
 // the ones this process's records name, and also. Each is asked
 // directly. An access point that cannot be asked contributes the
-// catalog's copy of its sessions, marked Unverified, so a session there
-// is reported (and still counts against the name and the limit) rather
-// than silently missing.
+// catalog's copy of its sessions and this process's own records of
+// them, marked with APError, so a session there is reported (and still
+// counts against the name and the limit) rather than silently missing.
 func (m *Manager) listAll(ctx context.Context, caller Caller, name string, also ...string) ([]Info, error) {
+	infos, _, err := m.listAllAnswered(ctx, caller, name, also...)
+	return infos, err
+}
+
+// listAllAnswered is listAll, and which access points answered (by
+// lower-cased name): those whose sessions are known first-hand.
+func (m *Manager) listAllAnswered(ctx context.Context, caller Caller, name string, also ...string) ([]Info, map[string]bool, error) {
 	if !m.multi() {
-		return m.listAdsOn(ctx, caller, "", name)
+		infos, err := m.listAdsOn(ctx, caller, "", name)
+		return infos, nil, err
 	}
 	byAP, err := m.located(ctx, caller, name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var fromCatalog []string
-	for ap := range byAP {
-		fromCatalog = append(fromCatalog, ap)
-	}
+	answered := map[string]bool{}
 	var out []Info
-	for _, ap := range apSet(fromCatalog, m.knownAPs(caller.Owner, name), also) {
-		infos, err := m.listAdsOn(ctx, caller, ap, name)
-		if err != nil {
-			m.log().Warn(m.opts.LogDest, "could not ask an access point for interactive sessions; using the catalog's copy",
-				"access_point", ap, "owner", caller.Owner, "error", err)
-			for _, info := range catalogRows(byAP, ap) {
-				info.APError = err.Error()
-				out = append(out, info)
-			}
+	for _, a := range m.askAPs(ctx, caller, apSet(keysOf(byAP), m.knownAPs(caller.Owner, name), also), name) {
+		if a.err != nil {
+			m.log().Warn(m.opts.LogDest, "could not ask an access point for interactive sessions; using what is known of it",
+				"access_point", a.ap, "owner", caller.Owner, "error", a.err)
+			out = append(out, m.unreachableRows(caller, byAP, a.ap, name, a.err)...)
 			continue
 		}
-		out = append(out, infos...)
+		answered[strings.ToLower(a.ap)] = true
+		out = append(out, a.infos...)
 	}
-	return out, nil
+	return out, answered, nil
 }
 
 // catalogRows is the catalog's rows for ap, whatever its spelling.
@@ -237,7 +334,7 @@ func catalogRows(byAP map[string][]Info, ap string) []Info {
 }
 
 // lookupMulti resolves a session name to exactly one job on exactly one
-// access point.
+// access point, or none.
 //
 // The in-process record comes first: a session this process created or
 // reached is on the access point it recorded, and that access point is
@@ -247,11 +344,11 @@ func catalogRows(byAP map[string][]Info, ap string) []Info {
 // name confirmed on two is ambiguous and refused.
 func (m *Manager) lookupMulti(ctx context.Context, caller Caller, name string) (*Info, error) {
 	if sess := m.sessionFor(caller.Owner, name); sess != nil && sess.ap != "" {
-		infos, err := m.listAdsOn(ctx, caller, sess.ap, name)
-		if err != nil {
-			return nil, err
+		a := m.askAPs(ctx, caller, []string{sess.ap}, name)[0]
+		if a.err != nil {
+			return nil, fmt.Errorf("session %q is on access point %s, which cannot be reached now: %w", name, sess.ap, a.err)
 		}
-		if info := firstNamed(infos, name); info != nil {
+		if info := firstNamed(a.infos, name); info != nil {
 			return info, nil
 		}
 		// Gone from the access point it was on: drop the record, and
@@ -263,19 +360,15 @@ func (m *Manager) lookupMulti(ctx context.Context, caller Caller, name string) (
 		return nil, err
 	}
 	var found []Info
-	for _, ap := range apSet(keysOf(byAP)) {
-		infos, err := m.listAdsOn(ctx, caller, ap, name)
-		if err != nil {
+	for _, a := range m.askAPs(ctx, caller, apSet(keysOf(byAP)), name) {
+		if a.err != nil {
 			// Cannot be asked: the catalog says a session of that name
 			// is there, so it still counts -- a name that might be on
 			// two access points is not resolved to one of them.
-			for _, info := range catalogRows(byAP, ap) {
-				info.APError = err.Error()
-				found = append(found, info)
-			}
+			found = append(found, m.unreachableRows(caller, byAP, a.ap, name, a.err)...)
 			continue
 		}
-		if info := firstNamed(infos, name); info != nil {
+		if info := firstNamed(a.infos, name); info != nil {
 			found = append(found, *info)
 		}
 	}
@@ -295,6 +388,45 @@ func (m *Manager) lookupMulti(ctx context.Context, caller Caller, name string) (
 	}
 	sort.Strings(jobs)
 	return nil, &AmbiguousSessionError{Name: name, Jobs: jobs}
+}
+
+// Find resolves a session name to the caller's one live session, or nil
+// when they have none by that name. It does not adopt the session into
+// this process's records (a caller that only attaches to it -- the SSH
+// gateway -- must not start its lease).
+//
+// With several access points it is lookupMulti: a session this process
+// knows is asked of its own access point only (no catalog needed), and
+// a name on two access points is an AmbiguousSessionError.
+func (m *Manager) Find(ctx context.Context, caller Caller, name string) (*Info, error) {
+	if !caller.valid() {
+		return nil, fmt.Errorf("authentication required")
+	}
+	if err := ValidateSessionName(name); err != nil {
+		return nil, err
+	}
+	if m.multi() {
+		return m.lookupMulti(ctx, caller, name)
+	}
+	infos, err := m.listAdsOn(ctx, caller, "", name)
+	if err != nil {
+		return nil, err
+	}
+	return firstNamed(infos, name), nil
+}
+
+// FindOn re-reads a known session on the access point it is on (ap; ""
+// with one schedd), for a caller polling it: no catalog, no other access
+// point. Nil when it is no longer live there.
+func (m *Manager) FindOn(ctx context.Context, caller Caller, ap, name string) (*Info, error) {
+	if !caller.valid() {
+		return nil, fmt.Errorf("authentication required")
+	}
+	a := m.askAPs(ctx, caller, []string{ap}, name)[0]
+	if a.err != nil {
+		return nil, a.err
+	}
+	return firstNamed(a.infos, name), nil
 }
 
 func keysOf(m map[string][]Info) []string {
