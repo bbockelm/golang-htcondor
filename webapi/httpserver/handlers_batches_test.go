@@ -76,7 +76,9 @@ func batchFixture(t *testing.T) *twoOwnerFixture {
 		batchAd(t, 600, 2, "alice", append(done(300, 50), `JobBatchName = "sweep"`, `Cmd = "/home/alice/sweep"`, "ExitBySignal = true", "ExitSignal = 9",
 			"TotalSubmitProcs = 3")...),
 		batchAd(t, 700, 0, "alice", append(done(800, 60), `Cmd = "/home/alice/one"`, "ExitCode = 0", "TotalSubmitProcs = 2")...),
-		batchAd(t, 700, 1, "alice", append(done(800, 70), `Cmd = "/home/alice/one"`, "ExitCode = 0", "TotalSubmitProcs = 2")...),
+		// Spooled: held while its inputs uploaded, which is no problem.
+		batchAd(t, 700, 1, "alice", append(done(800, 70), `Cmd = "/home/alice/one"`, "ExitCode = 0", "TotalSubmitProcs = 2",
+			`LastHoldReason = "Spooling input data files"`, "LastHoldReasonCode = 16")...),
 	)
 	return f
 }
@@ -232,6 +234,15 @@ func TestBatchFinishedOnly(t *testing.T) {
 	}
 	if p := b.Progress; !p.Known || p.Total != 2 || p.Done != 2 {
 		t.Errorf("progress = %+v", p)
+	}
+	// The spooling hold is not a hold reason, in the summary or a row.
+	if len(b.HoldReasons) != 0 {
+		t.Errorf("hold reasons = %+v", b.HoldReasons)
+	}
+	for _, r := range f.batchJobs(t, "/api/v1/batches/700/jobs", f.bearer(t, "alice")).Jobs {
+		if r.HoldReason != "" || r.HoldCode != nil {
+			t.Errorf("row %s: hold %q %v", r.ID, r.HoldReason, r.HoldCode)
+		}
 	}
 }
 

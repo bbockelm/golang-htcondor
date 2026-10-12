@@ -249,6 +249,11 @@ func newBatchRecord(ad *classad.ClassAd, live bool, reader *utilization.JobReade
 			rec.holdCode = &c
 		}
 		rec.holdSub, _ = ad.EvaluateAttrInt(sub)
+		// Waiting for its inputs to upload is how a spooled job starts,
+		// not a problem it had.
+		if rec.holdCode != nil && issues.HoldReasonIsRoutine(*rec.holdCode) {
+			rec.holdReason, rec.holdCode, rec.holdSub = "", nil, 0
+		}
 	}
 	if rec.j.ExitBySignal {
 		if s, ok := ad.EvaluateAttrInt("ExitSignal"); ok {
@@ -801,16 +806,13 @@ func (a *batchSummary) addWorkflow(rec *batchRecord) {
 }
 
 // addHold files the job's hold reason: held now, or held on the way to
-// finishing. Waiting for its inputs to upload is not a problem.
+// finishing.
 func (a *batchSummary) addHold(rec *batchRecord) {
 	if rec.holdReason == "" {
 		return
 	}
 	kind := "was_held"
 	if rec.live {
-		if rec.holdCode != nil && issues.HoldReasonIsRoutine(*rec.holdCode) {
-			return
-		}
 		kind = "held"
 	}
 	a.holds.Add(issues.Record{Kind: kind, Message: rec.holdReason, Owner: rec.j.Owner,
