@@ -103,5 +103,7 @@ describe('formatMetric', () => {
     expect(formatMetric(4096, 'MB')).toBe('4 GB');
     expect(formatMetric(2 * 1024 * 1024, 'KB')).toBe('2 GB');
     expect(formatMetric(1.5, 'cores')).toBe('1.5 cores');
+    expect(formatMetric(1, 'cores')).toBe('1 core');
+    expect(formatMetric(10987, 'MB')).toBe('10.7 GB');
   });
 });

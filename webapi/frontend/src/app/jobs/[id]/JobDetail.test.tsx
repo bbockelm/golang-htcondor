@@ -23,6 +23,7 @@ import {
 } from './JobDetailClient';
 import type { ClassAd } from '@/lib/api';
 import { exprRequestJob } from '@/lib/jobRequests.fixture';
+import { formatMetric } from '@/lib/metrics';
 import { CONTAINER_GPU_NOTABLE, CONTAINER_GPU_REQUIREMENTS } from '@/lib/requirements.fixture';
 
 describe('everRan', () => {
@@ -275,12 +276,17 @@ describe('ResourceTable', () => {
   // the server evaluated in the job's own ad.
   it('shows a request written as an expression as the number it comes to', () => {
     render(<ResourceTable job={exprRequestJob} />);
-    const cell = screen.getByText('10,987 MiB');
+    // The same words the graph's caption uses (formatMetric, via formatMiB).
+    expect(formatMetric(10987, 'MB')).toBe('10.7 GB');
+    const cell = screen.getByText('10.7 GB');
     expect(cell).toBeInTheDocument();
     expect(cell.closest('[title]')?.getAttribute('title')).toMatch(/^ifthenelse\(MemoryUsage/);
     expect(screen.getByText('from expression')).toBeInTheDocument();
     // 7325 used of 10987 requested.
+    expect(screen.getByText('7.2 GB')).toBeInTheDocument();
     expect(screen.getByText('67%')).toBeInTheDocument();
+    // Disk, KiB on the wire, through the same formatter.
+    expect(screen.getByText('6 GB')).toBeInTheDocument();
   });
 
   // Memory is the one with two units in play: MemoryUsage is MiB and

@@ -10,6 +10,7 @@
 
 import type { ClassAd } from './api';
 import { jobRequest, type RequestAttr } from './jobRequests';
+import { formatKiB, formatMiB } from './utilization';
 
 export interface MetricsColumn {
   name: string;
@@ -225,22 +226,18 @@ export function runColor(i: number): string {
   return RUN_COLORS[((i % n) + n) % n];
 }
 
-// formatMetric renders a value in the metric's unit, promoting bytes-ish
-// units to human scale. Memory is MB, disk is KB.
+// formatMetric renders a value in the metric's unit. Memory (MiB) and disk
+// (KiB) go through formatMiB/formatKiB, the formatter the resource table
+// and the rest of the app use, so a request reads the same in the table,
+// the caption and a tooltip.
 export function formatMetric(value: number, unit: string): string {
   switch (unit) {
     case 'MB':
-      return value >= 1024
-        ? `${(value / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB`
-        : `${value.toLocaleString(undefined, { maximumFractionDigits: 0 })} MB`;
+      return formatMiB(value);
     case 'KB':
-      if (value >= 1024 * 1024)
-        return `${(value / 1024 / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB`;
-      if (value >= 1024)
-        return `${(value / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} MB`;
-      return `${value.toLocaleString(undefined, { maximumFractionDigits: 0 })} KB`;
+      return formatKiB(value);
     case 'cores':
-      return `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} cores`;
+      return `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${value === 1 ? 'core' : 'cores'}`;
     case 'GPU':
       return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
     default:

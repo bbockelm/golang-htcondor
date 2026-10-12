@@ -63,4 +63,17 @@ describe('MetricChart', () => {
     expect(legendEntries(container)).toEqual(['Run 1', 'Run 2', 'Run 3']);
     expect(screen.queryByText(/Colors repeat/)).toBeNull();
   });
+
+  // One formatter for the caption, the tooltips and the axis, and the axis
+  // in one unit with round ticks: not "19.5 GB / 9.8 GB / 0 MB".
+  it('labels memory the same way in the caption, the axis and the tooltips', () => {
+    const series = { ...runsSeries(2), requested: 10987 };
+    const { container } = render(<MetricChart series={series} />);
+    expect(screen.getByText('Requested 10.7 GB')).toBeInTheDocument();
+    // The y-axis labels: the texts in the gridline groups, not the requested line's label.
+    const axis = [...container.querySelectorAll('svg > g:has(> line.stroke-gray-100) > text')].map((t) => t.textContent);
+    expect(axis).toEqual(['0', '5 GB', '10 GB', '15 GB']);
+    const tip = container.querySelector('circle > title')?.textContent ?? '';
+    expect(tip).toMatch(/^Run 1 — 1,000 MB · /);
+  });
 });

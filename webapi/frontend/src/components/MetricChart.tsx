@@ -10,6 +10,7 @@
 // reference is a line only when it shares the value's unit.
 
 import { useId } from 'react';
+import { formatAxisTicks, niceTicks, type AxisUnit } from '@/lib/axis';
 import {
   formatMetric,
   RUN_COLORS,
@@ -36,13 +37,20 @@ export function MetricChart({ series }: { series: MetricSeries }) {
     }
   }
   const dataMax = Math.max(0, ...allValues, series.requested ?? 0);
-  const yMax = niceCeil(dataMax);
+  // Ticks are round numbers in the unit the axis is labelled in, and the
+  // whole axis is labelled in one unit (see formatAxisTicks).
+  const axisUnit: AxisUnit = series.unit === 'MB' ? 'mib' : series.unit === 'KB' ? 'kib' : 'plain';
+  const yTicks = niceTicks(dataMax, axisUnit, 4);
+  const yMax = yTicks[yTicks.length - 1];
+  const yLabels =
+    axisUnit === 'plain'
+      ? yTicks.map((v) => (v === 0 ? '0' : formatMetric(v, series.unit)))
+      : formatAxisTicks(yTicks, axisUnit);
   const spanT = tMax > tMin ? tMax - tMin : 1;
 
   const xs = (t: number) => PAD.left + ((t - tMin) / spanT) * PLOT_W;
   const ys = (v: number) => PAD.top + PLOT_H - (yMax > 0 ? v / yMax : 0) * PLOT_H;
 
-  const yTicks = [0, yMax / 2, yMax];
   const multi = series.executions.length > 1;
 
   return (
@@ -90,7 +98,7 @@ export function MetricChart({ series }: { series: MetricSeries }) {
               dominantBaseline="middle"
               className="fill-gray-400 text-[10px]"
             >
-              {formatMetric(v, series.unit)}
+              {yLabels[i]}
             </text>
           </g>
         ))}
@@ -184,13 +192,4 @@ export function MetricChart({ series }: { series: MetricSeries }) {
       {series.note && <p className="mt-1 text-[11px] text-gray-400">{series.note}</p>}
     </figure>
   );
-}
-
-// niceCeil rounds a maximum up to a readable axis top (1/2/5 × 10^n).
-function niceCeil(v: number): number {
-  if (v <= 0) return 1;
-  const mag = Math.pow(10, Math.floor(Math.log10(v)));
-  const n = v / mag;
-  const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
-  return step * mag;
 }

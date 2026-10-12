@@ -13,12 +13,14 @@ test('an archived job shows a request written as an expression as one number, in
 
   const resources = page.locator('table').filter({ has: page.getByRole('columnheader', { name: 'Requested' }) });
   const memory = resources.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Memory', exact: true }) });
-  await expect(memory.getByText('10,987 MiB')).toBeVisible();
+  await expect(memory.getByText('10.7 GB')).toBeVisible();
   await expect(memory.getByText('from expression')).toBeVisible();
   await expect(memory.locator('[title^="ifthenelse(MemoryUsage"]')).toHaveCount(1);
 
   const graph = page.locator('figure').filter({ has: page.getByText('Memory', { exact: true }) });
   await expect(graph.getByText('Requested 10.7 GB · from expression')).toBeVisible();
+  // The axis in one unit, in round steps of it.
+  await expect(graph.locator('svg > g:has(> line.stroke-gray-100) > text')).toHaveText(['0', '5 GB', '10 GB', '15 GB']);
 });
 
 test('an archived job breaks down its Requirements', async ({ page }) => {

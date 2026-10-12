@@ -22,6 +22,7 @@ import { coresUsed, jobTiming } from '@/lib/batches';
 import { OwnerLink } from '@/components/OwnerLink';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 import { EVALUATED_KEY, hasGpus, jobRequest } from '@/lib/jobRequests';
+import { formatKiB, formatMiB } from '@/lib/utilization';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { LogViewerPanel } from '@/components/LogViewerPanel';
@@ -3217,9 +3218,9 @@ export function ResourceTable({ job }: { job: ClassAd }) {
     },
     {
       label: 'Disk',
-      requested: fmtKiBAsMiB(disk.value),
+      requested: fmtKiB(disk.value),
       requestedExpr: disk.expr,
-      used: fmtKiBAsMiB(job.DiskUsage ?? job.DiskUsage_RAW),
+      used: fmtKiB(job.DiskUsage ?? job.DiskUsage_RAW),
       // Both sides are KiB on the wire, so the ratio needs no
       // conversion -- only the display does.
       reqN: disk.value,
@@ -3641,24 +3642,24 @@ function fmtUsage(v: unknown): string {
 // pass it straight to fmtMiB.
 function fmtMemoryUsed(job: ClassAd): string {
   const direct = num(job.MemoryUsage);
-  if (direct !== undefined) return `${direct.toLocaleString()} MiB`;
-  return fmtKiBAsMiB(job.ResidentSetSize ?? job.ResidentSetSize_RAW);
+  if (direct !== undefined) return formatMiB(direct);
+  return fmtKiB(job.ResidentSetSize ?? job.ResidentSetSize_RAW);
 }
 
+// Memory (MiB) and disk (KiB) read through the app's one byte formatter,
+// lib/utilization's formatMiB/formatKiB -- the one the usage graphs use for
+// their captions, tooltips and axes -- so a request reads the same in the
+// table as in the graph above it.
 function fmtMiB(v: unknown): string {
   const n = num(v);
-  if (n === undefined) return '—';
-  return `${n.toLocaleString()} MiB`;
+  return n === undefined ? '—' : formatMiB(n);
 }
 
 // Disk request lands in KiB on HTCondor's wire (yes, really —
-// RequestDisk and DiskUsage are kilobytes). Display as MiB for sane
-// reading.
-function fmtKiBAsMiB(v: unknown): string {
+// RequestDisk and DiskUsage are kilobytes).
+function fmtKiB(v: unknown): string {
   const n = num(v);
-  if (n === undefined) return '—';
-  const mib = n / 1024;
-  return `${mib.toLocaleString(undefined, { maximumFractionDigits: 1 })} MiB`;
+  return n === undefined ? '—' : formatKiB(n);
 }
 
 function numOrDash(v: unknown): React.ReactNode {
