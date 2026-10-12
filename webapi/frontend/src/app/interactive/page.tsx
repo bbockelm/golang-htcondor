@@ -165,7 +165,7 @@ function VSCodeSection() {
         </Field>
         <ResourceRequestPanel value={resources} onChange={setResources} />
         <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
-        <LaunchTarget target={target} />
+        <LaunchTarget target={target} label="Access point for VS Code" />
         {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
         <button
           onClick={() => submit.mutate()}
@@ -359,7 +359,7 @@ function JupyterSection() {
         </Field>
         <ResourceRequestPanel value={resources} onChange={setResources} />
         <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
-        <LaunchTarget target={target} />
+        <LaunchTarget target={target} label="Access point for JupyterLab" />
         {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
         <button
           onClick={() => submit.mutate()}
@@ -540,7 +540,7 @@ function TerminalSection() {
         <div className="text-sm font-medium text-gray-700">Launch new</div>
         <ResourceRequestPanel value={resources} onChange={setResources} />
         <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
-        <LaunchTarget target={target} />
+        <LaunchTarget target={target} label="Access point for the terminal" />
         {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
         <button
           onClick={() => submit.mutate()}
@@ -689,13 +689,14 @@ function useLaunchTarget(kind: 'interactive' | 'jupyter'): LaunchTargetState {
   return { multiAP, assignment, schedd, setSchedd: setChosen, blocked: !schedd };
 }
 
-function LaunchTarget({ target }: { target: LaunchTargetState }) {
+function LaunchTarget({ target, label }: { target: LaunchTargetState; label: string }) {
   return (
     <SubmitTarget
       multiAP={target.multiAP}
       assignment={target.assignment}
       value={target.schedd ?? ''}
       onChange={target.setSchedd}
+      label={label}
     />
   );
 }

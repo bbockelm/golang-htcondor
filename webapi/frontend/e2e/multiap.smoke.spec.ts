@@ -67,7 +67,7 @@ test('multi-AP: a terminal launches on the chosen access point', async ({ page }
   await page.goto('/interactive');
   // One launcher per kind of interactive work, each naming where it goes.
   await expect(page.getByText('Will submit to')).toHaveCount(3);
-  const select = page.getByRole('combobox', { name: 'Access point' }).last();
+  const select = page.getByRole('combobox', { name: 'Access point for the terminal' });
   await expect(select).toHaveValue('ap1.smoke.example');
   await select.selectOption('ap2.smoke.example');
   await page.getByRole('button', { name: 'Launch terminal' }).click();
