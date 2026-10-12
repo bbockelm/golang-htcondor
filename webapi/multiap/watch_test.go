@@ -42,7 +42,8 @@ func sourceAd(schedd, state string, lines ...string) string {
 	return ad
 }
 
-// watchRig is alice's "done" watch over 1.0, which exists on both APs.
+// watchRig is alice's "done" watch over 1.0, which exists on both APs;
+// bob has 4.0 on ap1, an id alice does not have.
 type watchRig struct {
 	t     *testing.T
 	hub   *testDB
@@ -57,7 +58,7 @@ func newWatchRig(t *testing.T, mode jobwatch.Mode, constraint string) *watchRig 
 	hub := hubDB(t)
 	hub.PutJob(ap1, "alice@d", 1, 0, "")
 	hub.PutJob(ap2, "alice@d", 1, 0, "")
-	hub.PutJob(ap1, "bob@d", 1, 0, "")
+	hub.PutJob(ap1, "bob@d", 4, 0, "")
 	hub.PutSourceAd(ap1, sourceAd(ap1, StateFresh))
 	hub.PutSourceAd(ap2, sourceAd(ap2, StateFresh))
 	reg := newFakeRegistry(ap1, ap2)
@@ -84,13 +85,19 @@ func newWatchRig(t *testing.T, mode jobwatch.Mode, constraint string) *watchRig 
 	return r
 }
 
-// advanceHub moves the hub snapshot's clock past the evaluator's last
-// sighting, by refreshing federation_sources as of a later time: what
-// the rule needs to see before an absence counts is a snapshot newer
-// than the job's last sighting by the bound on how stale it may be.
+// advanceHub moves the hub's clock past the evaluator's last sighting:
+// what the rule needs to see before an absence counts is a
+// federation_sources read newer than the job's last sighting by the
+// bound on how stale it may be.
 func (r *watchRig) advanceHub(by time.Duration) {
 	r.t.Helper()
-	at := time.Now().Add(by)
+	r.advanceHubFrom(time.Now(), by)
+}
+
+// advanceHubFrom sets the hub's clock to from+by.
+func (r *watchRig) advanceHubFrom(from time.Time, by time.Duration) {
+	r.t.Helper()
+	at := from.Add(by)
 	r.svc.Hub.now = func() time.Time { return at }
 	if err := r.svc.Hub.Refresh(context.Background()); err != nil {
 		r.t.Fatal(err)
@@ -150,6 +157,22 @@ func TestWatchAbsenceRuleMatrix(t *testing.T) {
 				m.Trust = apregistry.Trust{State: apregistry.TrustUntrusted, Reason: "refused the token"}
 			})
 		}, false},
+		{"jobs catch-up published and done", func(r *watchRig) {
+			r.hub.PutSourceAd(ap2, sourceAd(ap2, StateFresh, "JobsSynced = true", "JobsSyncedAt = 100"))
+		}, true},
+		{"jobs catch-up published and not done", func(r *watchRig) {
+			// A from-scratch replay: connected, no error, fresh heartbeat,
+			// rows still arriving.
+			r.hub.PutSourceAd(ap2, sourceAd(ap2, StateFresh, "JobsSynced = false", "JobsSyncedAt = 100"))
+		}, false},
+		{"no catch-up published, reset just now", func(r *watchRig) {
+			r.hub.PutSourceAd(ap2, sourceAd(ap2, StateFresh,
+				fmt.Sprintf("LastReset = %d", time.Now().Add(3*time.Hour-time.Minute).Unix())))
+		}, false},
+		{"no catch-up published, reset long ago", func(r *watchRig) {
+			r.hub.PutSourceAd(ap2, sourceAd(ap2, StateFresh,
+				fmt.Sprintf("LastReset = %d", time.Now().Add(-time.Hour).Unix())))
+		}, true},
 		{"not in the AP set", func(r *watchRig) {
 			r.reg.Remove(ap2)
 		}, false},
@@ -177,27 +200,90 @@ func TestWatchAbsenceRuleMatrix(t *testing.T) {
 	}
 }
 
-// TestWatchWaitsOnAnUnreachableHub: with no federation_sources snapshot
-// the hub still answers for, nothing is vouched for; with no hub at all
-// the pass fails rather than reading an empty queue.
+// TestWatchWaitsOnAnUnreachableHub: with no hub the pass fails rather
+// than reading an empty queue.
 func TestWatchWaitsOnAnUnreachableHub(t *testing.T) {
 	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
 	r.pass()
 	r.hub.DeleteJob(ap2, 1, 0)
-	// A snapshot that would vouch for ap2, which then ages past what the
-	// hub's status answers for: the hub has stopped answering.
 	r.advanceHub(3 * time.Hour)
-	at := time.Now().Add(7 * time.Hour)
-	r.svc.Hub.now = func() time.Time { return at }
-	if st := r.pass(); st.Fired != 0 {
-		t.Fatal("fired on a hub whose sources this server has not heard from")
-	}
-	// No hub at all: a failed pass, not an empty queue.
 	r.svc.Hub.dial = func(context.Context) (*dbrpc.Client, func(), error) {
 		return nil, nil, errors.New("connection refused")
 	}
 	if st := r.pass(); st.Fired != 0 || st.Errors != 1 {
 		t.Fatalf("stats %+v: an unreachable hub must be a failed pass, not an empty queue", st)
+	}
+}
+
+// TestWatchCatchUpMustHoldAcrossTheRead: an AP is vouched for only if
+// the federation_sources read after the jobs read still says JobsSynced
+// with the JobsSyncedAt the read before it did.
+func TestWatchCatchUpMustHoldAcrossTheRead(t *testing.T) {
+	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
+	parse := func(text string) map[string]Source {
+		ad, err := classad.ParseOld(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src, _ := ParseSource(ad)
+		return map[string]Source{ap2: src}
+	}
+	at := time.Now()
+	synced := parse(sourceAd(ap2, StateFresh, "JobsSynced = true", "JobsSyncedAt = 100"))
+	for name, after := range map[string]map[string]Source{
+		"a replay began":    parse(sourceAd(ap2, StateFresh, "JobsSynced = false", "JobsSyncedAt = 100")),
+		"a replay finished": parse(sourceAd(ap2, StateFresh, "JobsSynced = true", "JobsSyncedAt = 200")),
+		"the row went":      {},
+	} {
+		if _, ok := r.svc.coverage(synced, after, at).AsOf(ap2); ok {
+			t.Errorf("%s during the read, yet ap2 was vouched for", name)
+		}
+	}
+	// Not caught up before the read is not vouched for, whatever the
+	// read after it says.
+	catching := parse(sourceAd(ap2, StateFresh, "JobsSynced = false", "JobsSyncedAt = 100"))
+	if _, ok := r.svc.coverage(catching, synced, at).AsOf(ap2); ok {
+		t.Error("ap2 was vouched for on a read made while its jobs were still catching up")
+	}
+	if _, ok := r.svc.coverage(synced, synced, at).AsOf(ap2); !ok {
+		t.Error("an unchanged catch-up across the read was not vouched for")
+	}
+}
+
+// TestWatchAbsenceWaitsForTheHorizon: a job gone from a fresh AP counts
+// as finished only once a federation_sources read is newer than its last
+// sighting by the reported staleness, the row's refresh lag and one hub
+// state interval -- not a moment before. Each term is large enough here
+// that dropping any one fires early.
+func TestWatchAbsenceWaitsForTheHorizon(t *testing.T) {
+	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
+	r.hub.PutSourceAd(ap2, strings.Replace(sourceAd(ap2, StateFresh), "StalenessSeconds = 2", "StalenessSeconds = 30", 1))
+	r.pass()
+	sighted := time.Now() // just after the read that last saw it
+	r.hub.DeleteJob(ap2, 1, 0)
+	horizon := 30*time.Second + sourceRowRefresh + DefaultHubStateInterval
+	r.advanceHubFrom(sighted, horizon-2*time.Second)
+	if st := r.pass(); st.Fired != 0 {
+		t.Fatal("fired before the horizon")
+	}
+	r.advanceHubFrom(sighted, horizon+2*time.Second)
+	if st := r.pass(); st.Fired != 1 {
+		t.Fatal("did not fire past the horizon")
+	}
+}
+
+// TestWatchQueueReadReportsTruncation: a queue read past its limit says
+// so, and the evaluator then treats no absence as evidence.
+func TestWatchQueueReadReportsTruncation(t *testing.T) {
+	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
+	var got int
+	truncated, _, err := WatchSource{Service: r.svc}.QueueCovered(context.Background(), "alice",
+		[]string{"ClusterId"}, 1, func(*classad.ClassAd) { got++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated || got != 1 {
+		t.Fatalf("truncated=%v with %d rows yielded: alice has two jobs and the limit is one", truncated, got)
 	}
 }
 
@@ -220,21 +306,22 @@ func TestWatchHistoryFiresOnAStaleAP(t *testing.T) {
 }
 
 // TestWatchIsOwnerScoped: the source reads one owner's jobs by User,
-// whatever the watch's constraint says; bob's 1.0 on ap1 is never
-// tracked, and a constraint that tries to reach it changes nothing.
+// whatever the watch's constraint says. bob's 4.0 on ap1, an id alice
+// does not have, is never tracked though the constraint names him.
 func TestWatchIsOwnerScoped(t *testing.T) {
 	r := newWatchRig(t, jobwatch.ModeAll, `ClusterId == 1 || Owner == "bob" || User == "bob@d"`)
+	r.hub.PutJob(ap1, "bob@d", 5, 0, "")
 	r.pass()
 	for _, id := range r.watch().Tracked {
 		if id.Cluster != 1 || id.Proc != 0 {
-			t.Errorf("tracked %+v", id)
+			t.Errorf("tracked %+v: another user's job", id)
 		}
 	}
 	if n := len(r.watch().Tracked); n != 2 {
-		t.Errorf("tracked %d jobs, want alice's two; bob's must be out of reach", n)
+		t.Errorf("tracked %d jobs, want alice's two", n)
 	}
-	// Removing bob's job and every one of alice's except ap1's 1.0
-	// leaves the watch waiting on that one.
+	// alice's 1.0 leaves ap1; her 1.0 on ap2 is still queued, so the
+	// "all" watch waits.
 	r.hub.DeleteJob(ap1, 1, 0)
 	r.advanceHub(3 * time.Hour)
 	if st := r.pass(); st.Fired != 0 {
@@ -254,8 +341,8 @@ func TestWatchSourceRefusesAnotherDomain(t *testing.T) {
 }
 
 // TestWatchCoverageBound: the time an AP is vouched for up to allows
-// for the staleness the hub reported, the row's own lag and one snapshot
-// interval.
+// for the staleness the hub reported, the row's own lag and one hub
+// state interval.
 func TestWatchCoverageBound(t *testing.T) {
 	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
 	r.hub.PutSourceAd(ap2, sourceAd(ap2, StateFresh, "StalenessSeconds = 30"))
@@ -265,7 +352,7 @@ func TestWatchCoverageBound(t *testing.T) {
 	if !ok {
 		t.Fatal("a fresh, connected ap2 is not vouched for")
 	}
-	if want := at.Add(-30*time.Second - sourceRowRefresh - r.svc.Hub.interval); !asOf.Equal(want) {
+	if want := at.Add(-30*time.Second - sourceRowRefresh - DefaultHubStateInterval); !asOf.Equal(want) {
 		t.Errorf("ap2 vouched for up to %v, want %v", asOf, want)
 	}
 }
@@ -313,5 +400,87 @@ func TestHubFederatesFromSourceRows(t *testing.T) {
 	r.advanceHub(0)
 	if !r.svc.Hub.Federates(TableEpochHistory) {
 		t.Fatal("does not federate epoch_history, which ap1's row lists")
+	}
+}
+
+// followHub runs a feed over the in-process hub's jobs table, as the
+// server does, until the test ends.
+func followHub(t *testing.T, r *watchRig) *jobwatch.Feed {
+	t.Helper()
+	feed := jobwatch.NewFeed(nil)
+	feed.OwnerOf = r.svc.OwnerOfRow
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() {
+		_ = feed.RunResumable(ctx, func(ctx context.Context, cursor []byte) (<-chan jobwatch.WatchEvent, func(), error) {
+			dbc, closer, err := r.hub.Dial(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			if cursor == nil {
+				if cursor, err = dbc.WatchHead(ctx, TableJobs); err != nil {
+					closer()
+					return nil, nil, err
+				}
+			}
+			raw, stop, err := dbc.WatchTable(ctx, TableJobs, cursor)
+			if err != nil {
+				closer()
+				return nil, nil, err
+			}
+			out := make(chan jobwatch.WatchEvent, 64)
+			go func() {
+				defer close(out)
+				for ev := range raw {
+					out <- jobwatch.WatchEvent{Kind: ev.Kind, Key: ev.Key, AdText: ev.AdText, Cursor: ev.Cursor}
+				}
+			}()
+			return out, func() { stop(); closer() }, nil
+		})
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for !feed.Warm() {
+		if time.Now().After(deadline) {
+			t.Fatal("the feed never followed the hub")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return feed
+}
+
+// TestWatchFeedTerminalRecordsNeedEvidence: a job leaving the hub's
+// queue is offered to the evaluator as finished only if its last ad
+// said it completed or was removed, and only on an AP in the set. A held
+// job's row leaving (an AP retired or reconciled) is not.
+func TestWatchFeedTerminalRecordsNeedEvidence(t *testing.T) {
+	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId > 5")
+	feed := followHub(t, r)
+	r.hub.PutJob(ap2, "alice@d", 6, 0, "JobStatus = 4")
+	r.hub.PutJob(ap2, "alice@d", 8, 0, "JobStatus = 5")
+	r.hub.PutJob("ap9.example.org", "alice@d", 7, 0, "JobStatus = 4")
+	for _, k := range []struct {
+		schedd string
+		c      int
+	}{{ap2, 6}, {ap2, 8}, {"ap9.example.org", 7}} {
+		r.hub.DeleteJob(k.schedd, k.c, 0)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(feed.Terminal("alice", time.Now().Add(-time.Hour))) != 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("the deletes never reached the feed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	got := map[int64]bool{}
+	err := WatchSource{Service: r.svc, Feed: feed}.History(context.Background(), "alice",
+		[]string{"ClusterId", "ProcId", "JobStatus"}, time.Now().Add(-time.Hour), 100, func(ad *classad.ClassAd) {
+			c, _ := ad.EvaluateAttrInt("ClusterId")
+			got[c] = true
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got[6] || got[8] || got[7] {
+		t.Fatalf("terminal records %v: want 6.0 (completed on a member), not 8.0 (held) or 7.0 (not a member)", got)
 	}
 }

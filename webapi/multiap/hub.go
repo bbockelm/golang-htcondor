@@ -70,7 +70,29 @@ type Source struct {
 	// Tables is the spoke tables the hub federates, as the row lists
 	// them: a <Table>Connected attribute per federated table.
 	Tables map[string]bool
+	// TableStatus is each federated table's stream from this source.
+	TableStatus map[string]TableStatus
 }
+
+// TableStatus is the hub's stream of one table from one source, from
+// the <Table>Connected, <Table>LastError, <Table>Synced and
+// <Table>SyncedAt attributes of its federation_sources row.
+type TableStatus struct {
+	Connected bool
+	LastError string
+	// SyncedKnown says the hub publishes <Table>Synced (htcondordb with
+	// per-table catch-up state); older hubs do not. Synced is then
+	// whether the stream has finished its current catch-up -- until it
+	// has, a row missing from the table may simply not have been
+	// replayed yet -- and SyncedAt when it last did.
+	SyncedKnown bool
+	Synced      bool
+	SyncedAt    time.Time
+}
+
+// Usable reports whether the stream is connected with no error since
+// its last clean session.
+func (t TableStatus) Usable() bool { return t.Connected && t.LastError == "" }
 
 // sourceTablePrefixes are the federation_sources attribute prefixes of
 // the tables a hub may federate (htcondordb federate tablePrefix).
@@ -102,10 +124,23 @@ func ParseSource(ad *classad.ClassAd) (Source, bool) {
 	s.JobsConnected, _ = ad.EvaluateAttrBool("JobsConnected")
 	s.JobsLastError, _ = ad.EvaluateAttrString("JobsLastError")
 	s.Tables = map[string]bool{}
+	s.TableStatus = map[string]TableStatus{}
 	for table, prefix := range sourceTablePrefixes {
-		if _, ok := ad.Lookup(prefix + "Connected"); ok {
-			s.Tables[table] = true
+		if _, ok := ad.Lookup(prefix + "Connected"); !ok {
+			continue
 		}
+		s.Tables[table] = true
+		var ts TableStatus
+		ts.Connected, _ = ad.EvaluateAttrBool(prefix + "Connected")
+		ts.LastError, _ = ad.EvaluateAttrString(prefix + "LastError")
+		if _, ok := ad.Lookup(prefix + "Synced"); ok {
+			ts.SyncedKnown = true
+			ts.Synced, _ = ad.EvaluateAttrBool(prefix + "Synced")
+		}
+		if v, ok := ad.EvaluateAttrInt(prefix + "SyncedAt"); ok && v > 0 {
+			ts.SyncedAt = time.Unix(v, 0).UTC()
+		}
+		s.TableStatus[table] = ts
 	}
 	if s.State == "" {
 		// A row the hub wrote without a state says nothing about
@@ -154,8 +189,10 @@ func (h *Hub) Client(ctx context.Context) (*dbrpc.Client, func(), error) {
 func (h *Hub) Refresh(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	sources, err := h.readSources(ctx)
+	// Taken before the read: the rows describe the hub no later than
+	// this, which is the direction of error that only delays a verdict.
 	now := h.now()
+	sources, err := h.readSources(ctx)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.lastAttempt = now
@@ -285,4 +322,14 @@ func (h *Hub) Sources() []Source {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Schedd < out[j].Schedd })
 	return out
+}
+
+// ReadSources reads federation_sources now, bypassing the snapshot, and
+// returns it with the time taken before the read.
+func (h *Hub) ReadSources(ctx context.Context) (map[string]Source, time.Time, error) {
+	at := h.now()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	src, err := h.readSources(ctx)
+	return src, at, err
 }

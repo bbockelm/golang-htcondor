@@ -53,9 +53,13 @@ func (w WatchSource) Queue(ctx context.Context, owner string, attrs []string, li
 // says which APs the read vouches for. owner is a watch's owner, the
 // local part of User; the read keys on User (owner@UID_DOMAIN).
 //
-// The coverage is computed before the rows are read: it describes the
-// hub's copy no later than the read, which is the direction of error
-// that only delays a verdict.
+// federation_sources is read just before the jobs and again just after,
+// as htcondordb's catch-up contract asks: an AP is vouched for only if
+// the first read does (see vouch), and -- on a hub that publishes
+// <Table>Synced -- the second still says JobsSynced with the same
+// JobsSyncedAt, so no replay began or ended while the jobs were read.
+// The time taken before the first read is the snapshot's time, the
+// direction of error that only delays a verdict.
 func (w WatchSource) QueueCovered(ctx context.Context, owner string, attrs []string, limit int,
 	yield func(*classad.ClassAd)) (bool, *jobwatch.Coverage, error) {
 	s := w.Service
@@ -63,10 +67,13 @@ func (w WatchSource) QueueCovered(ctx context.Context, owner string, attrs []str
 	if err != nil {
 		return false, nil, err
 	}
-	cov := s.WatchCoverage()
 	constraint, err := s.memberScope(user, "true")
 	if err != nil {
 		return false, nil, err
+	}
+	before, at, err := s.Hub.ReadSources(ctx)
+	if err != nil {
+		return false, nil, fmt.Errorf("reading the federation hub's sources: %w", err)
 	}
 	seen := 0
 	err = s.hubStream(ctx, TableJobs, constraint, projectionWith(attrs, AttrScheddName, AttrUser), limit+1,
@@ -79,7 +86,40 @@ func (w WatchSource) QueueCovered(ctx context.Context, owner string, attrs []str
 	if err != nil {
 		return false, nil, fmt.Errorf("reading the federation hub's queue: %w", err)
 	}
-	return seen > limit, cov, nil
+	truncated := seen > limit
+	after, _, aerr := s.Hub.ReadSources(ctx)
+	if aerr != nil {
+		// Nothing confirms the catch-up held across the read: vouch for
+		// nothing this pass.
+		return truncated, jobwatch.NewCoverage(), nil
+	}
+	return truncated, s.coverage(before, after, at), nil
+}
+
+// coverage vouches for each member that before vouches for at time at,
+// and whose jobs catch-up, where the hub publishes one, after confirms.
+func (s *Service) coverage(before, after map[string]Source, at time.Time) *jobwatch.Coverage {
+	cov := jobwatch.NewCoverage()
+	for _, m := range s.Registry.Members() {
+		key := strings.ToLower(m.Name)
+		src, ok := before[key]
+		if !ok {
+			continue
+		}
+		asOf, ok := s.vouch(m, src, at)
+		if !ok {
+			continue
+		}
+		if ts := src.TableStatus[TableJobs]; ts.SyncedKnown {
+			again, ok := after[key]
+			at2 := again.TableStatus[TableJobs]
+			if !ok || !at2.Synced || !at2.SyncedAt.Equal(ts.SyncedAt) {
+				continue
+			}
+		}
+		cov.Vouch(m.Name, asOf)
+	}
+	return cov
 }
 
 // History streams owner's jobs that finished since a point in time, on
@@ -143,17 +183,22 @@ func attrString(ad *classad.ClassAd, name string) string {
 	return v
 }
 
-// WatchCoverage is which APs a hub read made now can vouch for, and how
-// far: an AP the registry holds, that has not failed its trust probe,
-// whose hub source is fresh with a measured staleness, and whose jobs
-// stream is connected with no error since its last clean session -- all
-// as of a federation_sources snapshot the hub is still answering for.
-//
-// The time each AP is vouched for up to is the snapshot's time less the
-// staleness it reported, less the most the row can lag the hub's own
-// measurement (the hub rewrites staleness alone at most once a minute)
-// and one snapshot interval. A job last seen before that and missing now
-// has left the queue.
+// DefaultHubStateInterval is htcondordb's default
+// HTCONDORDB_FEDERATE_STATE_INTERVAL: how often the hub recomputes
+// source states and writes federation_sources. The hub does not publish
+// it; Service.HubStateInterval overrides it.
+const DefaultHubStateInterval = 5 * time.Second
+
+// resetSettle is, on a hub that does not publish <Table>Synced, how long
+// after a source's LastReset its jobs are not vouched for: such a hub
+// cannot say when the replay a Reset starts has finished, and a replay
+// from scratch has a connected, error-free stream and a fresh heartbeat
+// while its rows are still arriving.
+const resetSettle = 10 * time.Minute
+
+// WatchCoverage is which APs the snapshot of federation_sources vouches
+// for (see vouch). The evaluator reads the sources itself around each
+// queue read (QueueCovered); this is the same rule over the snapshot.
 func (s *Service) WatchCoverage() *jobwatch.Coverage {
 	cov := jobwatch.NewCoverage()
 	st := s.Hub.Status()
@@ -161,24 +206,54 @@ func (s *Service) WatchCoverage() *jobwatch.Coverage {
 		return cov
 	}
 	for _, m := range s.Registry.Members() {
-		if asOf, ok := s.vouchedAsOf(m, st.LastSuccess); ok {
+		src, ok := s.Hub.Source(m.Name)
+		if !ok {
+			continue
+		}
+		if asOf, ok := s.vouch(m, src, st.LastSuccess); ok {
 			cov.Vouch(m.Name, asOf)
 		}
 	}
 	return cov
 }
 
-// vouchedAsOf applies WatchCoverage's rule to one member.
-func (s *Service) vouchedAsOf(m apregistry.Member, sourcesAt time.Time) (time.Time, bool) {
-	if m.Untrusted() {
+// vouch decides whether a member's jobs on the hub, per a
+// federation_sources row read at time at, are complete enough that a
+// job missing from them has left its AP's queue, and up to when. It
+// must be: in the registry and not failed its trust probe; fresh on the
+// hub with a measured staleness; its jobs stream connected with no error
+// since its last clean session; and caught up -- JobsSynced where the hub
+// publishes it, else no Reset within resetSettle.
+//
+// It is vouched for up to at less the staleness the row reported, the
+// most the row can lag the hub's measurement (the hub rewrites staleness
+// alone at most once a minute) and one hub state interval.
+func (s *Service) vouch(m apregistry.Member, src Source, at time.Time) (time.Time, bool) {
+	if m.Untrusted() || src.State != StateFresh || !src.StalenessKnown {
 		return time.Time{}, false
 	}
-	src, ok := s.Hub.Source(m.Name)
-	if !ok || src.State != StateFresh || !src.StalenessKnown || !src.JobsConnected || src.JobsLastError != "" {
+	jobs, ok := src.TableStatus[TableJobs]
+	if !ok {
+		jobs = TableStatus{Connected: src.JobsConnected, LastError: src.JobsLastError}
+	}
+	if !jobs.Usable() {
 		return time.Time{}, false
 	}
-	lag := time.Duration(src.Staleness)*time.Second + sourceRowRefresh + s.Hub.interval
-	return sourcesAt.Add(-lag), true
+	switch {
+	case jobs.SyncedKnown && !jobs.Synced:
+		return time.Time{}, false
+	case !jobs.SyncedKnown && !src.LastReset.IsZero() && at.Sub(src.LastReset) < resetSettle:
+		return time.Time{}, false
+	}
+	lag := time.Duration(src.Staleness)*time.Second + sourceRowRefresh + s.hubStateInterval()
+	return at.Add(-lag), true
+}
+
+func (s *Service) hubStateInterval() time.Duration {
+	if s.HubStateInterval > 0 {
+		return s.HubStateInterval
+	}
+	return DefaultHubStateInterval
 }
 
 // VouchDeparture reports whether a job leaving the hub's jobs table now
@@ -194,7 +269,11 @@ func (s *Service) VouchDeparture(ad *classad.ClassAd) bool {
 	if !ok {
 		return false
 	}
-	_, ok = s.vouchedAsOf(m, st.LastSuccess)
+	src, ok := s.Hub.Source(m.Name)
+	if !ok {
+		return false
+	}
+	_, ok = s.vouch(m, src, st.LastSuccess)
 	return ok
 }
 

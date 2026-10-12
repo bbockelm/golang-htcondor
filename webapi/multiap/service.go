@@ -87,6 +87,10 @@ type Service struct {
 	// QUEUE_SUPER_USERS, as read from that AP. Cross-user power is per
 	// AP: nil means nobody is a superuser anywhere.
 	QueueSuperUser func(schedd, actor string) bool
+	// HubStateInterval is the hub's HTCONDORDB_FEDERATE_STATE_INTERVAL,
+	// which bounds how far a federation_sources row lags the hub's own
+	// state; zero is DefaultHubStateInterval.
+	HubStateInterval time.Duration
 	// BulkFresh is HTTP_API_BULK_FRESH_SECONDS, for bulk actions this
 	// service's callers fan out; zero or negative never skips an AP.
 	BulkFresh time.Duration

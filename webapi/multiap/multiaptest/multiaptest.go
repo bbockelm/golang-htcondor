@@ -38,8 +38,9 @@ type DB struct {
 	srv *dbrpc.Server
 	mu  sync.Mutex
 	seq int
-	// keys is each PutJob row's opaque key, by schedd/cluster.proc.
-	keys map[string]string
+	// keys is each PutJob row's opaque key, by schedd/cluster.proc and
+	// then user: two users' rows may share an id on one AP.
+	keys map[string]map[string]string
 }
 
 // NewDB returns an empty database, closed when the test ends.
@@ -128,9 +129,13 @@ func (d *DB) PutJob(schedd, user string, cluster, proc int, extra string) {
 	d.seq++
 	key := fmt.Sprintf("opaque-%d", d.seq)
 	if d.keys == nil {
-		d.keys = map[string]string{}
+		d.keys = map[string]map[string]string{}
 	}
-	d.keys[fmt.Sprintf("%s/%d.%d", schedd, cluster, proc)] = key
+	id := fmt.Sprintf("%s/%d.%d", schedd, cluster, proc)
+	if d.keys[id] == nil {
+		d.keys[id] = map[string]string{}
+	}
+	d.keys[id][user] = key
 	d.mu.Unlock()
 	owner, _, _ := strings.Cut(user, "@")
 	ad := fmt.Sprintf("ScheddName = %q\nUser = %q\nOwner = %q\nClusterId = %d\nProcId = %d\nJobStatus = 1\nKey = \"%d.%d\"",
@@ -142,14 +147,33 @@ func (d *DB) PutJob(schedd, user string, cluster, proc int, extra string) {
 }
 
 // DeleteJob removes a live job row PutJob wrote, as the hub does when
-// the job leaves its AP's queue.
+// the job leaves its AP's queue. The id must name one user's row; with
+// two users' rows under it, DeleteUserJob says whose.
 func (d *DB) DeleteJob(schedd string, cluster, proc int) {
 	d.t.Helper()
 	d.mu.Lock()
-	key, ok := d.keys[fmt.Sprintf("%s/%d.%d", schedd, cluster, proc)]
+	users := d.keys[fmt.Sprintf("%s/%d.%d", schedd, cluster, proc)]
+	d.mu.Unlock()
+	if len(users) != 1 {
+		d.t.Fatalf("multiaptest: %d rows hold %d.%d on %s; use DeleteUserJob", len(users), cluster, proc, schedd)
+	}
+	for user := range users {
+		d.DeleteUserJob(schedd, user, cluster, proc)
+	}
+}
+
+// DeleteUserJob removes user's live job row cluster.proc on schedd.
+func (d *DB) DeleteUserJob(schedd, user string, cluster, proc int) {
+	d.t.Helper()
+	d.mu.Lock()
+	id := fmt.Sprintf("%s/%d.%d", schedd, cluster, proc)
+	key, ok := d.keys[id][user]
+	if ok {
+		delete(d.keys[id], user)
+	}
 	d.mu.Unlock()
 	if !ok {
-		d.t.Fatalf("multiaptest: no job %d.%d on %s to delete", cluster, proc, schedd)
+		d.t.Fatalf("multiaptest: no job %d.%d of %s on %s to delete", cluster, proc, user, schedd)
 	}
 	ctx := context.Background()
 	tx, err := d.client().BeginTable(ctx, TableJobs)
