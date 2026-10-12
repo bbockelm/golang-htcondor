@@ -60,8 +60,10 @@ func TestMultiAPCreateAsksTheRecordedAPDespiteALaggingCatalog(t *testing.T) {
 	aps.assign(testAP1)
 	_, err := mgr.Create(context.Background(), alice, CreateSpec{Name: "work"})
 	var exists *SessionExistsError
-	if !errors.As(err, &exists) || exists.Info.Schedd != testAP2 {
-		t.Fatalf("second Create = %v, want SessionExistsError for the session on %s", err, testAP2)
+	// Status is set only by the AP's own answer: the record alone (the
+	// displacement guard) would carry none, and is not the AP asked.
+	if !errors.As(err, &exists) || exists.Info.Schedd != testAP2 || exists.Info.Status != "starting" {
+		t.Fatalf("second Create = %v (%+v), want SessionExistsError from %s's own answer", err, exists, testAP2)
 	}
 	if n := len(aps.schedds[testAP1].submittedFiles()); n != 0 {
 		t.Errorf("%s got %d submissions, want none", testAP1, n)
