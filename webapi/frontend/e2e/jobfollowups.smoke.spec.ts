@@ -111,23 +111,32 @@ test('the jobs table says how long a batch has left', async ({ page }) => {
 const chtcRequirements =
   '/Expr(((((((((((PoolName == "CHTC") || (substr(Machine, 0, 3) == "gzk")) && ((Machine != "txie-dsigpu4000.chtc.wisc.edu") && (Machine != "gpu4002.chtc.wisc.edu"))) && (Arch == "X86_64")) && HasContainer) && HasDockerURL) && (Memory >= RequestMemory)) && (Cpus >= RequestCpus)) && (countMatches(MY.RequireGPUs, AvailableGPUs) >= RequestGPUs)) && ((FileSystemDomain == MY.FileSystemDomain) || (HasFileTransfer && stringListIMember("osdf", HasFileTransferPluginMethods)))))/';
 
-test('the job page links the owner, times the run, and breaks down its requirements', async ({ page }) => {
-  await page.route('**/api/v1/jobs/71.0/runtime-estimate', (route) =>
-    route.fulfill({
-      json: {
-        job_id: '71.0',
-        available: true,
-        estimate_seconds: 3 * 3600,
-        p10_seconds: 2.5 * 3600,
-        p90_seconds: 5 * 3600,
-        basis: { level: 'template', sample_count: 12 },
-        elapsed_seconds: twoHours14 + 60,
-        remaining_seconds: 3 * 3600 - twoHours14 - 60,
-        exceeded_history: false,
-        model: { trained_through: '2026-10-10T12:00:00Z', jobs_ingested: 5000 },
-      },
-    }),
-  );
+// A running job's card states clock times, and which day they fall on
+// depends on the time zone and on the time of day the test runs. So these
+// tests pin both: the browser runs in UTC, en-US, with its clock fixed,
+// and each case states exactly what the card says. One case is all on one
+// day; the others start before midnight and end after it, from either
+// side, which is when a time needs its day said.
+const runtimeEstimate = {
+  job_id: '71.0',
+  available: true,
+  estimate_seconds: 3 * 3600,
+  p10_seconds: 2.5 * 3600,
+  p90_seconds: 5 * 3600,
+  basis: { level: 'template', sample_count: 12 },
+  elapsed_seconds: twoHours14 + 60,
+  remaining_seconds: 3 * 3600 - twoHours14 - 60,
+  exceeded_history: false,
+  model: { trained_through: '2026-10-10T12:00:00Z', jobs_ingested: 5000 },
+};
+
+// openRunningJobAt opens job 71.0 -- running for 2h15m, about 3h in all
+// -- with the browser's clock fixed at `at`.
+async function openRunningJobAt(page: Page, at: string) {
+  const pinned = new Date(at);
+  await page.clock.setFixedTime(pinned);
+  const t = Math.floor(pinned.getTime() / 1000);
+  await page.route('**/api/v1/jobs/71.0/runtime-estimate', (route) => route.fulfill({ json: runtimeEstimate }));
   await openJobPage(page, '71.0', {
     ClusterId: 71,
     ProcId: 0,
@@ -135,42 +144,90 @@ test('the job page links the owner, times the run, and breaks down its requireme
     JobUniverse: 5,
     Owner: 'alice',
     Cmd: '/home/alice/run.sh',
-    QDate: now - 90000,
-    JobCurrentStartDate: now - twoHours14 - 60,
-    JobCurrentStartExecutingDate: now - twoHours14,
+    QDate: t - 90000,
+    JobCurrentStartDate: t - twoHours14 - 60,
+    JobCurrentStartExecutingDate: t - twoHours14,
     Requirements: chtcRequirements,
   });
+  return page.getByTestId('runtime-estimate');
+}
 
-  await expect(page.getByRole('link', { name: 'alice' })).toHaveAttribute('href', '/users/alice');
-  await expect(page.getByText('running for 2h14m')).toBeVisible();
-  const runtime = page.getByTestId('runtime-estimate');
+// expectClockTimes checks the card's clock times. A time's space before
+// AM/PM is a non-breaking one, which \s matches.
+async function expectClockTimes(
+  runtime: import('@playwright/test').Locator,
+  want: { done: string; started: string; usually: string; end: string },
+) {
+  const re = (s: string) => new RegExp(`^${s.replace(/ (AM|PM)/g, '\\s$1')}$`);
   await expect(runtime.getByRole('heading', { name: 'Expected run time' })).toBeVisible();
-  await expect(runtime.getByText(/^About 45m left · likely done around \d{1,2}:\d{2}/)).toBeVisible();
-  await expect(runtime.getByText(/^started \d{1,2}:\d{2}/)).toBeVisible();
-  await expect(runtime.getByText(/^usually done /)).toBeVisible();
-  await expect(
-    runtime.getByText(
-      'Running 2h15m of about 3h. From 12 of your earlier jobs with the same command and argument pattern.',
-    ),
-  ).toBeVisible();
-  // A job within its usual time has nothing to look into.
-  await expect(runtime.getByText('Longer than usual')).toHaveCount(0);
+  await expect(runtime.getByText(re(`About 45m left · likely done around ${want.done}`))).toBeVisible();
+  await expect(runtime.getByText(re(`started ${want.started}`))).toBeVisible();
+  await expect(runtime.getByText(re(`usually done ${want.usually}`))).toBeVisible();
+  await expect(runtime.getByText(re(want.end))).toBeVisible();
+}
 
-  const reqs = page.locator('div').filter({ has: page.getByRole('heading', { name: 'Requirements' }) }).last();
-  for (const clause of [
-    '(PoolName == "CHTC") || (substr(Machine, 0, 3) == "gzk")',
-    'Machine != "txie-dsigpu4000.chtc.wisc.edu"',
-    'Machine != "gpu4002.chtc.wisc.edu"',
-    'Arch == "X86_64"',
-    'HasContainer',
-    'HasDockerURL',
-    '(FileSystemDomain == MY.FileSystemDomain) || (HasFileTransfer && stringListIMember("osdf", HasFileTransferPluginMethods))',
-  ]) {
-    await expect(reqs.locator('li code').filter({ hasText: clause }).first()).toBeVisible();
-  }
-  await expect(reqs.getByText('Standard resource requirements (CPUs, memory, GPUs)')).toBeVisible();
-  // Not one opaque clause holding the whole wrapped expression.
-  await expect(reqs.locator('li code').filter({ hasText: '/Expr(' })).toHaveCount(0);
+test.describe('the run time card, with the clock pinned', () => {
+  test.use({ timezoneId: 'UTC', locale: 'en-US' });
+
+  test('the job page links the owner, times the run, and breaks down its requirements', async ({ page }) => {
+    // Monday 3:00 PM: started 12:45 PM, all on one day.
+    const runtime = await openRunningJobAt(page, '2026-10-12T15:00:00Z');
+
+    await expect(page.getByRole('link', { name: 'alice' })).toHaveAttribute('href', '/users/alice');
+    await expect(page.getByText('running for 2h14m')).toBeVisible();
+    await expectClockTimes(runtime, {
+      done: '3:45 PM',
+      started: '12:45 PM',
+      usually: '3:15 to 5:45 PM',
+      end: '6:45 PM',
+    });
+    await expect(
+      runtime.getByText(
+        'Running 2h15m of about 3h. From 12 of your earlier jobs with the same command and argument pattern.',
+      ),
+    ).toBeVisible();
+    // A job within its usual time has nothing to look into.
+    await expect(runtime.getByText('Longer than usual')).toHaveCount(0);
+
+    const reqs = page.locator('div').filter({ has: page.getByRole('heading', { name: 'Requirements' }) }).last();
+    for (const clause of [
+      '(PoolName == "CHTC") || (substr(Machine, 0, 3) == "gzk")',
+      'Machine != "txie-dsigpu4000.chtc.wisc.edu"',
+      'Machine != "gpu4002.chtc.wisc.edu"',
+      'Arch == "X86_64"',
+      'HasContainer',
+      'HasDockerURL',
+      '(FileSystemDomain == MY.FileSystemDomain) || (HasFileTransfer && stringListIMember("osdf", HasFileTransferPluginMethods))',
+    ]) {
+      await expect(reqs.locator('li code').filter({ hasText: clause }).first()).toBeVisible();
+    }
+    await expect(reqs.getByText('Standard resource requirements (CPUs, memory, GPUs)')).toBeVisible();
+    // Not one opaque clause holding the whole wrapped expression.
+    await expect(reqs.locator('li code').filter({ hasText: '/Expr(' })).toHaveCount(0);
+  });
+
+  test('a run that started before midnight says which day it started', async ({ page }) => {
+    // Monday 12:35 AM: started Sunday 10:20 PM, done in the small hours.
+    const runtime = await openRunningJobAt(page, '2026-10-12T00:35:00Z');
+    await expect(page.getByText('running for 2h14m')).toBeVisible();
+    await expectClockTimes(runtime, {
+      done: '1:20 AM',
+      started: 'Sun 10:20 PM',
+      usually: '12:50 to 3:20 AM',
+      end: '4:20 AM',
+    });
+  });
+
+  test('a run that ends after midnight says which day it ends', async ({ page }) => {
+    // Sunday 11:30 PM: started 9:15 PM, likely done Monday 12:15 AM.
+    const runtime = await openRunningJobAt(page, '2026-10-11T23:30:00Z');
+    await expectClockTimes(runtime, {
+      done: 'Mon 12:15 AM',
+      started: '9:15 PM',
+      usually: '11:45 PM to Mon 2:15 AM',
+      end: 'Mon 3:15 AM',
+    });
+  });
 });
 
 test('a job running longer than usual says so and opens its live output and shell', async ({ page }) => {
