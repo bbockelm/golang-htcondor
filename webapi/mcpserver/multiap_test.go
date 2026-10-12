@@ -90,12 +90,11 @@ func TestMultiAPCatalogIsAnAllowlist(t *testing.T) {
 			t.Errorf("%s: err = %v, want a multi-AP refusal", n, err)
 		}
 	}
-	if refused < 8 {
+	if refused < 5 {
 		t.Errorf("only %d tools refused", refused)
 	}
 	// Named, so a regression reads as what it is.
-	for _, n := range []string{"interactive_session_start",
-		"interactive_session_exec", "watch_jobs", "create_watch_url",
+	for _, n := range []string{"watch_jobs", "create_watch_url",
 		"analyze_job_match", "advertise_to_collector", "query_job_epochs"} {
 		if multiAPToolAllowed(n) {
 			t.Errorf("%s is served in multi-AP mode", n)

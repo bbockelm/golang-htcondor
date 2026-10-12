@@ -40,8 +40,10 @@ import (
 type APs interface {
 	// Assign picks the access point a NEW session for caller goes to
 	// (AP assignment, asked once per Create) and returns its name and
-	// ctx routed to it, ready for a submission there.
-	Assign(ctx context.Context, caller Caller) (ap string, routed context.Context, err error)
+	// ctx routed to it, ready for a submission there. explicit is the
+	// access point the caller asked for, or ""; the host honors it only
+	// as AP assignment allows (the home access point or an alternate).
+	Assign(ctx context.Context, caller Caller, explicit string) (ap string, routed context.Context, err error)
 	// Route returns ctx routed to ap -- the access point an existing
 	// session's record names -- for a call on caller's behalf. It fails
 	// when ap cannot be acted on now (absent, untrusted, or refusing

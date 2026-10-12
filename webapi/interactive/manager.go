@@ -318,6 +318,12 @@ type CreateSpec struct {
 	SubmitLines string
 
 	Lease time.Duration
+
+	// Schedd asks for the session on a particular access point, on a
+	// server that fronts several. Honored only as AP assignment allows;
+	// empty means the caller's home access point. Ignored with one
+	// schedd.
+	Schedd string
 }
 
 // ExecRequest is one command to run in a session.
@@ -514,7 +520,7 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 	ap, submitCtx := "", ctx
 	if m.multi() {
 		var err error
-		if ap, submitCtx, err = m.opts.APs.Assign(ctx, caller); err != nil {
+		if ap, submitCtx, err = m.opts.APs.Assign(ctx, caller, strings.TrimSpace(spec.Schedd)); err != nil {
 			return nil, err
 		}
 	}

@@ -407,7 +407,9 @@ func TestMultiAPMCPCatalogue(t *testing.T) {
 			n == "create_input_upload_url", n == "create_output_download_url", n == "tail_job_output", n == "exec_in_job",
 			n == "submit_job", n == "submit_dag", n == "build_container",
 			n == "list_service_credentials", n == "get_credential_status", n == "store_service_credential",
-			n == "delete_service_credential":
+			n == "delete_service_credential",
+			n == "interactive_session_start", n == "interactive_session_exec", n == "interactive_session_list",
+			n == "interactive_session_stop":
 		default:
 			t.Errorf("multi-AP catalogue offers %q", n)
 		}

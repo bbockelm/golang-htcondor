@@ -64,11 +64,15 @@ func (f *fakeAPs) assign(ap string) {
 	f.assigned = ap
 }
 
-func (f *fakeAPs) Assign(ctx context.Context, _ Caller) (string, context.Context, error) {
+func (f *fakeAPs) Assign(ctx context.Context, _ Caller, explicit string) (string, context.Context, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.assigns++
-	return f.assigned, context.WithValue(ctx, apKey{}, f.assigned), nil
+	ap := f.assigned
+	if explicit != "" {
+		ap = explicit
+	}
+	return ap, context.WithValue(ctx, apKey{}, ap), nil
 }
 
 func (f *fakeAPs) Route(ctx context.Context, _ Caller, ap string) (context.Context, error) {
