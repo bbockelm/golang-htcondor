@@ -14,7 +14,7 @@
 
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { api } from '@/lib/api';
+import { api, type ClassAd } from '@/lib/api';
 import {
   buildJobMetrics,
   JOB_METRICS_AGG,
@@ -26,9 +26,13 @@ import { MetricChart } from '@/components/MetricChart';
 export function ResourceUsagePanel({
   jobID,
   status,
+  job,
 }: {
   jobID: string;
   status: number | undefined;
+  // The job's ad, for the "requested" reference: the same evaluated
+  // requests the resource table shows.
+  job?: ClassAd;
 }) {
   // jobID is "cluster.proc"; only integers make a valid constraint.
   // parseInt (rather than Number) so an id carrying a suffix -- the
@@ -56,7 +60,7 @@ export function ResourceUsagePanel({
       }),
   });
 
-  const series = useMemo(() => buildJobMetrics(data), [data]);
+  const series = useMemo(() => buildJobMetrics(data, job), [data, job]);
 
   // The whole section is invisible until there is something worth showing.
   if (series.length === 0) return null;

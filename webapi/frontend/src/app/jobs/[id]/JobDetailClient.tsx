@@ -21,6 +21,8 @@ import { summarizeRequirements, standardLabels } from '@/lib/requirements';
 import { batchIDOfJob, batchPagePath, coresUsed, jobTiming } from '@/lib/batches';
 import { OwnerLink } from '@/components/OwnerLink';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
+import { EVALUATED_KEY, hasGpus, jobRequest } from '@/lib/jobRequests';
+import { formatKiB, formatMiB } from '@/lib/utilization';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { LogViewerPanel } from '@/components/LogViewerPanel';
@@ -534,7 +536,7 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
         mark={similarMark}
       />
 
-      <ResourceUsagePanel jobID={jobID} status={status} />
+      <ResourceUsagePanel jobID={jobID} status={status} job={job} />
 
       <OutputFilesPanel jobID={jobID} status={status} job={job} />
 
@@ -582,7 +584,9 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
 // notable clause plus a single "standard resource requirements" summary,
 // so the interesting constraint (a machine/pool pin) isn't buried in
 // boilerplate. The full expression stays available behind a disclosure.
-function RequirementsSection({ job }: { job: ClassAd }) {
+// Shared with the archive page: a finished job's Requirements reads the
+// same way.
+export function RequirementsSection({ job }: { job: ClassAd }) {
   const summary = summarizeRequirements(str(job.Requirements));
   if (summary.empty) return null;
   const labels = standardLabels(summary.standard);
@@ -1859,7 +1863,9 @@ export function AttributesTable({
   const queryClient = useQueryClient();
 
   const rows = useMemo<AttributeRow[]>(() => {
-    const all = Object.entries(job).map(([name, raw]) => ({
+    // The server's evaluated requests ride beside the ad; they are not one
+    // of its attributes and cannot be edited as one.
+    const all = Object.entries(job).filter(([name]) => name !== EVALUATED_KEY).map(([name, raw]) => ({
       name,
       value: stringifyAdValue(raw),
       type: inferAttributeType(raw),
@@ -2189,9 +2195,19 @@ export function ResourceTable({ job }: { job: ClassAd }) {
   // Each row carries the formatted strings AND the two raw numbers, so
   // the bar can be drawn from the same values the text reports rather
   // than from a second reading of the ad.
+  //
+  // The requested side is jobRequest's: the value each Request* evaluates
+  // to in this ad, so a request written as an expression shows the number
+  // the usage graphs draw as their "requested" line, not a dash.
+  const cpus = jobRequest(job, 'RequestCpus');
+  const memory = jobRequest(job, 'RequestMemory');
+  const disk = jobRequest(job, 'RequestDisk');
+  const gpus = jobRequest(job, 'RequestGPUs');
   const rows: {
     label: string;
     requested: string;
+    // The request's expression, when it was written as one.
+    requestedExpr?: string;
     used: string;
     // Raw numbers in one unit, for the proportion. Undefined where the
     // ad does not say, which draws no bar.
@@ -2200,26 +2216,29 @@ export function ResourceTable({ job }: { job: ClassAd }) {
   }[] = [
     {
       label: 'CPUs',
-      requested: fmtRequested(job.RequestCpus),
+      requested: fmtRequested(cpus.value),
+      requestedExpr: cpus.expr,
       // Not CpusUsage, which is wrong while a job runs; see coresUsed.
       used: fmtUsage(coresUsed(job)),
-      reqN: num(job.RequestCpus),
+      reqN: cpus.value,
       usedN: coresUsed(job),
     },
     {
       label: 'Memory',
-      requested: fmtMiB(job.RequestMemory),
+      requested: fmtMiB(memory.value),
+      requestedExpr: memory.expr,
       used: fmtMemoryUsed(job),
-      reqN: num(job.RequestMemory),
+      reqN: memory.value,
       usedN: memoryUsedMiB(job),
     },
     {
       label: 'Disk',
-      requested: fmtKiBAsMiB(job.RequestDisk),
-      used: fmtKiBAsMiB(job.DiskUsage ?? job.DiskUsage_RAW),
+      requested: fmtKiB(disk.value),
+      requestedExpr: disk.expr,
+      used: fmtKiB(job.DiskUsage ?? job.DiskUsage_RAW),
       // Both sides are KiB on the wire, so the ratio needs no
       // conversion -- only the display does.
-      reqN: num(job.RequestDisk),
+      reqN: disk.value,
       usedN: num(job.DiskUsage ?? job.DiskUsage_RAW),
     },
     {
@@ -2229,17 +2248,18 @@ export function ResourceTable({ job }: { job: ClassAd }) {
       // not, so the misspelled lookups were always undefined and the
       // row was dropped from every job -- including the GPU ones.
       label: 'GPUs',
-      requested: fmtRequested(job.RequestGPUs),
+      requested: fmtRequested(gpus.value),
+      requestedExpr: gpus.expr,
       used: fmtUsage(job.GPUsUsage),
-      reqN: num(job.RequestGPUs),
+      reqN: gpus.value,
       usedN: num(job.GPUsUsage),
     },
   ];
 
-  // Drop GPUs row when both columns are empty (most jobs).
-  const visible = rows.filter(
-    (r) => !(r.label === 'GPUs' && r.requested === '—' && r.used === '—'),
-  );
+  // A GPU row only for a job with GPUs: one it asked for, or has assigned,
+  // provisioned or in use. RequestGPUs = 0 is not a GPU job.
+  const showGpus = hasGpus(job);
+  const visible = rows.filter((r) => r.label !== 'GPUs' || showGpus);
 
   return (
     <div>
@@ -2260,7 +2280,16 @@ export function ResourceTable({ job }: { job: ClassAd }) {
             {visible.map((r) => (
               <tr key={r.label}>
                 <td className="px-1.5 py-1.5 sm:px-3 font-medium text-gray-700">{r.label}</td>
-                <td className="px-1.5 py-1.5 sm:px-3 text-gray-900 tabular-nums">{r.requested}</td>
+                <td className="px-1.5 py-1.5 sm:px-3 text-gray-900 tabular-nums">
+                  {r.requestedExpr ? (
+                    <span title={r.requestedExpr}>
+                      {r.requested}
+                      <span className="block text-[11px] font-normal text-gray-400">from expression</span>
+                    </span>
+                  ) : (
+                    r.requested
+                  )}
+                </td>
                 <td className="px-1.5 py-1.5 sm:px-3 text-gray-900 tabular-nums">{r.used}</td>
                 <td className="px-1.5 py-1.5 sm:px-3">
                   <UsageBar requested={r.reqN} used={r.usedN} />
@@ -2388,7 +2417,12 @@ export function ExecutionTable({ job }: { job: ClassAd }) {
 
 export function RawClassAd({ job }: { job: ClassAd }) {
   const [copied, setCopied] = useState(false);
-  const text = JSON.stringify(job, null, 2);
+  // The ad as the schedd holds it, without the server's evaluated requests.
+  const text = JSON.stringify(
+    Object.fromEntries(Object.entries(job).filter(([name]) => name !== EVALUATED_KEY)),
+    null,
+    2,
+  );
   const handleCopy = () => {
     navigator.clipboard?.writeText(text);
     setCopied(true);
@@ -2623,24 +2657,24 @@ function fmtUsage(v: unknown): string {
 // pass it straight to fmtMiB.
 function fmtMemoryUsed(job: ClassAd): string {
   const direct = num(job.MemoryUsage);
-  if (direct !== undefined) return `${direct.toLocaleString()} MiB`;
-  return fmtKiBAsMiB(job.ResidentSetSize ?? job.ResidentSetSize_RAW);
+  if (direct !== undefined) return formatMiB(direct);
+  return fmtKiB(job.ResidentSetSize ?? job.ResidentSetSize_RAW);
 }
 
+// Memory (MiB) and disk (KiB) read through the app's one byte formatter,
+// lib/utilization's formatMiB/formatKiB -- the one the usage graphs use for
+// their captions, tooltips and axes -- so a request reads the same in the
+// table as in the graph above it.
 function fmtMiB(v: unknown): string {
   const n = num(v);
-  if (n === undefined) return '—';
-  return `${n.toLocaleString()} MiB`;
+  return n === undefined ? '—' : formatMiB(n);
 }
 
 // Disk request lands in KiB on HTCondor's wire (yes, really —
-// RequestDisk and DiskUsage are kilobytes). Display as MiB for sane
-// reading.
-function fmtKiBAsMiB(v: unknown): string {
+// RequestDisk and DiskUsage are kilobytes).
+function fmtKiB(v: unknown): string {
   const n = num(v);
-  if (n === undefined) return '—';
-  const mib = n / 1024;
-  return `${mib.toLocaleString(undefined, { maximumFractionDigits: 1 })} MiB`;
+  return n === undefined ? '—' : formatKiB(n);
 }
 
 function numOrDash(v: unknown): React.ReactNode {

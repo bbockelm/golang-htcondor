@@ -578,6 +578,12 @@ func parseProjection(r *http.Request) []string {
 	return parts
 }
 
+// multiWholeAd reports whether a multi-AP read returns whole ads: the hub
+// reads every attribute when there is no projection or it names "*".
+func multiWholeAd(projection []string) bool {
+	return len(projection) == 0 || isWholeAdProjection(projection)
+}
+
 // handleMultiListJobs serves GET /api/v1/jobs in multi-AP mode: the
 // caller's live jobs on every AP, from the hub.
 func (h *Handler) handleMultiListJobs(w http.ResponseWriter, r *http.Request) {
@@ -595,7 +601,7 @@ func (h *Handler) handleMultiListJobs(w http.ResponseWriter, r *http.Request) {
 		User: user, Constraint: q.Get("constraint"), Projection: parseProjection(r),
 		Limit: limit, PageToken: q.Get("page_token"), Schedd: q.Get("schedd"),
 	}
-	out := &jsonRowStream{h: h, w: w, key: "jobs"}
+	out := &jsonRowStream{h: h, w: w, key: "jobs", wholeAd: multiWholeAd(req.Projection)}
 	res, err := h.multi.svc.ListJobs(ctx, req, out.write)
 	if err != nil {
 		h.multiAPError(w, err)
@@ -623,15 +629,16 @@ func (h *Handler) handleMultiHistory(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	projection := parseProjection(r)
 	rows, res, err := h.multi.svc.ListHistory(ctx, multiap.ListRequest{
-		User: user, Constraint: q.Get("constraint"), Projection: parseProjection(r),
+		User: user, Constraint: q.Get("constraint"), Projection: projection,
 		Limit: limit, PageToken: q.Get("page_token"), Schedd: q.Get("schedd"),
 	})
 	if err != nil {
 		h.multiAPError(w, err)
 		return
 	}
-	out := &jsonRowStream{h: h, w: w, key: "ads"}
+	out := &jsonRowStream{h: h, w: w, key: "ads", wholeAd: multiWholeAd(projection)}
 	for _, row := range rows {
 		if !out.write(row) {
 			break
@@ -659,6 +666,7 @@ func (h *Handler) handleMultiGetJob(w http.ResponseWriter, r *http.Request, idTe
 		return
 	}
 	evaluateUsageAttrs(res.Row.Ad)
+	annotateEvaluatedRequests(res.Row.Ad) // no projection: the whole ad
 	body, err := h.multi.svc.RowJSON(res.Row)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "could not encode the job")
@@ -683,9 +691,12 @@ func (h *Handler) handleMultiGetJob(w http.ResponseWriter, r *http.Request, idTe
 
 // jsonRowStream writes {"<key>":[rows...], footer} as rows arrive.
 type jsonRowStream struct {
-	h       *Handler
-	w       http.ResponseWriter
-	key     string
+	h   *Handler
+	w   http.ResponseWriter
+	key string
+	// wholeAd: the rows carry every attribute, so their requests can be
+	// evaluated (see annotateEvaluatedRequests).
+	wholeAd bool
 	started bool
 	n       int
 	failed  error
@@ -703,6 +714,9 @@ func (s *jsonRowStream) begin() {
 
 func (s *jsonRowStream) write(row multiap.Row) bool {
 	evaluateUsageAttrs(row.Ad)
+	if s.wholeAd {
+		annotateEvaluatedRequests(row.Ad)
+	}
 	b, err := s.h.multi.svc.RowJSON(row)
 	if err != nil {
 		s.failed = err

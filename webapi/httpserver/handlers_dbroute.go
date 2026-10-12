@@ -224,7 +224,9 @@ func (s *Handler) streamMirrorRows(ctx context.Context, w http.ResponseWriter, t
 	}
 	defer closer()
 
-	rows := &mirrorRowStream{h: s, w: w, table: table, key: key, limit: effLimit, note: note}
+	rows := &mirrorRowStream{h: s, w: w, table: table, key: key, limit: effLimit, note: note,
+		// After normalizing, an empty projection is every attribute.
+		wholeAd: len(projection) == 0}
 
 	if cursor != nil {
 		// The paginated read: the server resumes its own ordered scan and
@@ -328,6 +330,9 @@ type mirrorRowStream struct {
 	key   string
 	limit int
 	note  string
+	// wholeAd: rows carry every attribute, so their requests can be
+	// evaluated (see annotateEvaluatedRequests).
+	wholeAd bool
 
 	written   int
 	streamed  bool
@@ -347,6 +352,11 @@ func (m *mirrorRowStream) write(row string) bool {
 		m.failure = "unparseable row from the htcondordb mirror"
 		m.h.logger.Warn(logging.DestinationHTTP, m.failure, "table", m.table, "error", perr)
 		return false
+	}
+	// The same treatment the schedd-served rows get.
+	evaluateUsageAttrs(ad)
+	if m.wholeAd {
+		annotateEvaluatedRequests(ad)
 	}
 	adJSON, jerr := json.Marshal(ad)
 	if jerr != nil {

@@ -887,6 +887,8 @@ func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID str
 	// out. MemoryUsage in particular is an expression over ResidentSetSize,
 	// and would otherwise reach the client as "/Expr(...)/".
 	evaluateUsageAttrs(jobAds[0])
+	// The whole ad is here, so its requests evaluate as the schedd would.
+	annotateEvaluatedRequests(jobAds[0])
 
 	// Return the job ClassAd as JSON - uses MarshalJSON method
 	s.writeJSON(w, http.StatusOK, jobAds[0])

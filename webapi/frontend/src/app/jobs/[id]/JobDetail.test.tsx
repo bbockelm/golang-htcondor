@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import {
+  RequirementsSection,
   ResourceTable,
   UsageBar,
   dagLayers,
@@ -21,6 +22,9 @@ import {
   workflowLogAvailability,
 } from './JobDetailClient';
 import type { ClassAd } from '@/lib/api';
+import { exprRequestJob } from '@/lib/jobRequests.fixture';
+import { formatMetric } from '@/lib/metrics';
+import { CONTAINER_GPU_NOTABLE, CONTAINER_GPU_REQUIREMENTS } from '@/lib/requirements.fixture';
 
 describe('everRan', () => {
   // The Output Files panel gates on this. A job that ran and went back
@@ -255,6 +259,36 @@ describe('ResourceTable', () => {
     expect(screen.queryByText('GPUs')).toBeNull();
   });
 
+  // The reported case: a running job with RequestGPUs = 0 and
+  // GPUsProvisioned = 0 got a GPU row reading "0".
+  it('hides the GPU row for a job that requested zero GPUs', () => {
+    render(<ResourceTable job={{ RequestCpus: 1, RequestGPUs: 0, GPUsProvisioned: 0 } as ClassAd} />);
+    expect(screen.queryByText('GPUs')).toBeNull();
+  });
+
+  it('shows the GPU row for a job holding a GPU it did not count in its request', () => {
+    render(<ResourceTable job={{ RequestGPUs: 0, AssignedGPUs: 'GPU-0000aaaa' } as ClassAd} />);
+    expect(screen.getByText('GPUs')).toBeInTheDocument();
+  });
+
+  // The reported case: RequestMemory is a rule over MemoryUsage, the graph
+  // drew its value (10.7 GB) and the table a dash. Both now read the value
+  // the server evaluated in the job's own ad.
+  it('shows a request written as an expression as the number it comes to', () => {
+    render(<ResourceTable job={exprRequestJob} />);
+    // The same words the graph's caption uses (formatMetric, via formatMiB).
+    expect(formatMetric(10987, 'MB')).toBe('10.7 GB');
+    const cell = screen.getByText('10.7 GB');
+    expect(cell).toBeInTheDocument();
+    expect(cell.closest('[title]')?.getAttribute('title')).toMatch(/^ifthenelse\(MemoryUsage/);
+    expect(screen.getByText('from expression')).toBeInTheDocument();
+    // 7325 used of 10987 requested.
+    expect(screen.getByText('7.2 GB')).toBeInTheDocument();
+    expect(screen.getByText('67%')).toBeInTheDocument();
+    // Disk, KiB on the wire, through the same formatter.
+    expect(screen.getByText('6 GB')).toBeInTheDocument();
+  });
+
   // Memory is the one with two units in play: MemoryUsage is MiB and
   // ResidentSetSize is KiB, and taking the wrong one at face value makes
   // a job using half its request look like it used none.
@@ -265,6 +299,17 @@ describe('ResourceTable', () => {
       />,
     );
     expect(screen.getByText('50%')).toBeInTheDocument();
+  });
+});
+
+describe('RequirementsSection', () => {
+  it('breaks down a container GPU job\'s Requirements a clause per line', () => {
+    const { container } = render(<RequirementsSection job={{ Requirements: CONTAINER_GPU_REQUIREMENTS } as ClassAd} />);
+    const clauses = [...container.querySelectorAll('li code')].map((c) => c.textContent);
+    expect(clauses).toEqual(CONTAINER_GPU_NOTABLE);
+    expect(screen.getByText(/Standard resource requirements/)).toHaveTextContent(
+      'Standard resource requirements (CPUs, memory, GPUs)',
+    );
   });
 });
 

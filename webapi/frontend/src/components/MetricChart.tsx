@@ -10,8 +10,10 @@
 // reference is a line only when it shares the value's unit.
 
 import { useId } from 'react';
+import { formatAxisTicks, niceTicks, type AxisUnit } from '@/lib/axis';
 import {
   formatMetric,
+  RUN_COLORS,
   runColor,
   type MetricSeries,
 } from '@/lib/metrics';
@@ -35,24 +37,34 @@ export function MetricChart({ series }: { series: MetricSeries }) {
     }
   }
   const dataMax = Math.max(0, ...allValues, series.requested ?? 0);
-  const yMax = niceCeil(dataMax);
+  // Ticks are round numbers in the unit the axis is labelled in, and the
+  // whole axis is labelled in one unit (see formatAxisTicks).
+  const axisUnit: AxisUnit = series.unit === 'MB' ? 'mib' : series.unit === 'KB' ? 'kib' : 'plain';
+  const yTicks = niceTicks(dataMax, axisUnit, 4);
+  const yMax = yTicks[yTicks.length - 1];
+  const yLabels =
+    axisUnit === 'plain'
+      ? yTicks.map((v) => (v === 0 ? '0' : formatMetric(v, series.unit)))
+      : formatAxisTicks(yTicks, axisUnit);
   const spanT = tMax > tMin ? tMax - tMin : 1;
 
   const xs = (t: number) => PAD.left + ((t - tMin) / spanT) * PLOT_W;
   const ys = (v: number) => PAD.top + PLOT_H - (yMax > 0 ? v / yMax : 0) * PLOT_H;
 
-  const yTicks = [0, yMax / 2, yMax];
   const multi = series.executions.length > 1;
 
   return (
     <figure className="rounded-lg border border-gray-200 bg-white p-3">
       <figcaption className="mb-1 flex items-baseline justify-between gap-2">
         <span className="text-sm font-semibold text-gray-900">{series.label}</span>
-        <span className="text-xs text-gray-400">
+        <span className="text-xs text-gray-400" title={series.requestedExpr}>
           {series.requestedNote ??
             (series.requested !== undefined
               ? `Requested ${formatMetric(series.requested, series.unit)}`
               : '')}
+          {series.requestedExpr && (series.requestedNote || series.requested !== undefined) && (
+            <> · from expression</>
+          )}
         </span>
       </figcaption>
 
@@ -86,7 +98,7 @@ export function MetricChart({ series }: { series: MetricSeries }) {
               dominantBaseline="middle"
               className="fill-gray-400 text-[10px]"
             >
-              {formatMetric(v, series.unit)}
+              {yLabels[i]}
             </text>
           </g>
         ))}
@@ -135,7 +147,9 @@ export function MetricChart({ series }: { series: MetricSeries }) {
                 strokeWidth={2}
                 strokeLinejoin="round"
                 strokeLinecap="round"
-              />
+              >
+                {multi && <title>{`Run ${ex.run}`}</title>}
+              </polyline>
               {ex.points.map((p, j) => (
                 <circle key={j} cx={xs(p.t)} cy={ys(p.value)} r={3} fill={color}>
                   <title>
@@ -150,8 +164,18 @@ export function MetricChart({ series }: { series: MetricSeries }) {
         })}
       </svg>
 
-      {/* legend, only when more than one run attempt */}
-      {multi && (
+      {/* legend, only when more than one run attempt. A swatch per run
+          while each run has its own colour; past that, a swatch list would
+          repeat colours and run to dozens of entries, so one line says how
+          many runs there are and that the tooltips name them. */}
+      {multi && series.executions.length > RUN_COLORS.length && (
+        <p className="mt-1 text-xs text-gray-600">
+          {`${series.executions.length} runs (Run ${series.executions[0].run} to Run ${
+            series.executions[series.executions.length - 1].run
+          }). Colors repeat every ${RUN_COLORS.length} runs; hover a point for its run.`}
+        </p>
+      )}
+      {multi && series.executions.length <= RUN_COLORS.length && (
         <div className="mt-1 flex flex-wrap gap-3">
           {series.executions.map((ex, i) => (
             <span key={ex.run} className="inline-flex items-center gap-1 text-xs text-gray-600">
@@ -168,13 +192,4 @@ export function MetricChart({ series }: { series: MetricSeries }) {
       {series.note && <p className="mt-1 text-[11px] text-gray-400">{series.note}</p>}
     </figure>
   );
-}
-
-// niceCeil rounds a maximum up to a readable axis top (1/2/5 × 10^n).
-function niceCeil(v: number): number {
-  if (v <= 0) return 1;
-  const mag = Math.pow(10, Math.floor(Math.log10(v)));
-  const n = v / mag;
-  const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
-  return step * mag;
 }

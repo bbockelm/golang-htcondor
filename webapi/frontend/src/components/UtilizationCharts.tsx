@@ -23,6 +23,7 @@ import {
   type UtilRequest,
   type UtilSample,
 } from '@/lib/utilization';
+import { formatAxis, niceTicks, type AxisUnit } from '@/lib/axis';
 import { formatSeconds } from '@/lib/usage';
 import { useNarrow } from '@/lib/useNarrow';
 
@@ -223,57 +224,8 @@ function Glyph({
 
 // --- Scales ---
 
-export type AxisUnit = 'mib' | 'kib' | 'plain' | 'hours' | 'minutes' | 'fraction';
-
-/**
- * niceTicks picks round axis ticks from zero to at least `max`. Memory and
- * disk are ticked in whole GB once they reach a GB, so the axis reads
- * "2 GB, 4 GB" rather than "2,000 MB, 4,000 MB".
- */
-export function niceTicks(max: number, unit: AxisUnit, count = 4): number[] {
-  let scale = 1;
-  if (unit === 'mib' && max >= 1024) scale = 1024;
-  if (unit === 'kib') scale = max >= 1024 * 1024 ? 1024 * 1024 : 1024;
-  const m = max / scale;
-  if (!(m > 0)) return [0, scale];
-  // A share of something tops out at all of it.
-  if (unit === 'fraction' && m <= 1.05) return [0, 0.25, 0.5, 0.75, 1];
-  const raw = m / count;
-  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
-  const n = raw / mag;
-  let step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag;
-  // Below a GB, steps of a fifth make "409.6 MB"; quarters and halves
-  // make "256 MB" and "512 MB", which are numbers people request.
-  if (scale > 1 && step < 1) step = step <= 0.25 ? 0.25 : 0.5;
-  const top = Math.ceil(m / step - 1e-9) * step;
-  const out: number[] = [];
-  for (let v = 0; v <= top + step / 2; v += step) out.push(v * scale);
-  return out;
-}
-
-// axisNumber renders a tick value exactly enough to tell neighbours
-// apart: a 2.5 GB step must not round to "3 GB", and zero is just "0".
-function axisNumber(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 2 });
-}
-
-export function formatAxis(v: number, unit: AxisUnit): string {
-  if (v === 0) return '0';
-  switch (unit) {
-    case 'mib':
-      return v >= 1024 ? `${axisNumber(v / 1024)} GB` : `${axisNumber(v)} MB`;
-    case 'kib':
-      return formatAxis(v / 1024, 'mib');
-    case 'hours':
-      return `${axisNumber(v)} h`;
-    case 'minutes':
-      return `${axisNumber(v)} min`;
-    case 'fraction':
-      return formatPercent(v);
-    default:
-      return axisNumber(v);
-  }
-}
+// AxisUnit, niceTicks and formatAxis live in lib/axis, shared with the job
+// page's usage graphs.
 
 // barPath draws a column with a rounded data end and a square base.
 function barPath(x: number, y: number, w: number, h: number, r = 4): string {

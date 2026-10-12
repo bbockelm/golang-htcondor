@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { EXPR_REQUEST_MEMORY, exprRequestJob } from './jobRequests.fixture';
 import { buildJobMetrics, formatMetric, type MetricsResponse } from './metrics';
 
 // Columns exactly as the server returns for the job page's query.
@@ -78,11 +79,31 @@ describe('buildJobMetrics', () => {
   });
 });
 
+describe('buildJobMetrics with the job ad', () => {
+  // The resource table and the graph's "requested" line read one number:
+  // the request as evaluated in the job's ad. The samples are the fallback.
+  it('draws the requested line at the evaluated request from the ad, and keeps its rule', () => {
+    const mem = buildJobMetrics(resp(memRows(5)), exprRequestJob).find((s) => s.key === 'memory')!;
+    expect(mem.requested).toBe(10987);
+    expect(mem.requestedExpr).toBe(EXPR_REQUEST_MEMORY);
+    const cpu = buildJobMetrics(resp(memRows(5)), exprRequestJob).find((s) => s.key === 'cpu')!;
+    expect(cpu.requested).toBe(1);
+    expect(cpu.requestedExpr).toBeUndefined();
+  });
+
+  it('falls back to the sampled request when the ad does not carry one', () => {
+    const mem = buildJobMetrics(resp(memRows(5)), {}).find((s) => s.key === 'memory')!;
+    expect(mem.requested).toBe(4096);
+  });
+});
+
 describe('formatMetric', () => {
   it('promotes MB and KB to human scale', () => {
     expect(formatMetric(512, 'MB')).toBe('512 MB');
     expect(formatMetric(4096, 'MB')).toBe('4 GB');
     expect(formatMetric(2 * 1024 * 1024, 'KB')).toBe('2 GB');
     expect(formatMetric(1.5, 'cores')).toBe('1.5 cores');
+    expect(formatMetric(1, 'cores')).toBe('1 core');
+    expect(formatMetric(10987, 'MB')).toBe('10.7 GB');
   });
 });

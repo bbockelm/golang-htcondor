@@ -310,6 +310,8 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 	streamQueryOpts := *opts
 	streamQueryOpts.Stats = &stats
 	resultCh, err := s.getSchedd().QueryHistoryStream(ctx, constraint, &streamQueryOpts, streamOpts)
+	// A whole ad's requests can be evaluated; a projected one's cannot.
+	wholeAd := isWholeAdProjection(opts.Projection)
 	if err != nil {
 		// Pre-request error - check type and set appropriate status
 		switch {
@@ -363,6 +365,12 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 		if opts.Limit > 0 && adCount >= opts.Limit {
 			stoppedEarly = true
 			break
+		}
+
+		// Usage attributes go out as numbers, as on the live paths.
+		evaluateUsageAttrs(result.Ad)
+		if wholeAd {
+			annotateEvaluatedRequests(result.Ad)
 		}
 
 		// Marshal the ad
@@ -435,6 +443,14 @@ func (s *Handler) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter,
 			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 		}
 		return
+	}
+
+	wholeAd := isWholeAdProjection(opts.Projection)
+	for _, ad := range ads {
+		evaluateUsageAttrs(ad)
+		if wholeAd {
+			annotateEvaluatedRequests(ad)
+		}
 	}
 
 	// Return results as JSON

@@ -38,6 +38,7 @@ import {
   StatusBadge,
   JobDetailsSection,
   MultiAPJobView,
+  RequirementsSection,
   humanDuration,
   useNowTick,
 } from '@/app/jobs/[id]/JobDetailClient';
@@ -235,7 +236,7 @@ function ArchiveJobDetail({
           The panel renders nothing once retention has aged the samples
           out, which is why there is no empty-state here. The job's final
           status means it never polls for updates. */}
-      <ResourceUsagePanel jobID={jobID} status={jobStatus} />
+      <ResourceUsagePanel jobID={jobID} status={jobStatus} job={job} />
 
       <SimilarJobsSection
         jobID={jobID}
@@ -268,6 +269,10 @@ function ArchiveJobDetail({
         helperText="Re-evaluate this archived job's Requirements against the slots in the pool right now. Useful for asking 'would I get matched if I resubmitted this exactly as-is?'"
         defaultOpen={false}
       />
+
+      {/* The same Requirements breakdown the live page shows, below the
+          analysis panel as there. */}
+      <RequirementsSection job={job} />
 
       <JobDetailsSection jobID={jobID} job={job} editable={false} />
     </div>
