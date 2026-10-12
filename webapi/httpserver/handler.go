@@ -480,6 +480,9 @@ type Handler struct {
 	// the job page's Utilization link.
 	workflowHistoryOnce sync.Once
 	workflowHistoryVal  *sharedCache[*bool]
+	// batchCache holds recent reads of batches (handlers_batches.go).
+	batchCacheOnce sync.Once
+	batchCacheVal  *sharedCache[*batchSnapshot]
 	// utilizationEditHook replaces the schedd edit apply makes. Tests only.
 	utilizationEditHook func(ctx context.Context, constraint string, attrs map[string]string) (int, error)
 	// poolShapeCache holds the pool's machine shapes for the throughput

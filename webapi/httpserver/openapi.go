@@ -1976,6 +1976,50 @@ const openAPISchema = `{
         }
       }
     },
+    "/batches/{batchId}": {
+      "get": {
+        "summary": "A batch: one row of the jobs page, over its whole life",
+        "description": "A DAG (every job sharing its JobBatchName, id the root DAGMan cluster), a named batch (one owner's jobs under one JobBatchName across clusters, id the smallest cluster) or a cluster, found by any of its cluster ids in the queue or in history. Identity and the constraint selecting its jobs; progress; jobs in the queue by status; finished-job outcomes, runtimes, wall/badput/core hours and memory from up to 100,000 history records, newest first; hold reasons grouped as on the Issues page; a DAG's DAG_* attributes; the Utilization workflows its jobs fall in. Same scope as GET /jobs/{jobId}: another user's batch is 404. Reused for 15 seconds. Not available in multi-AP mode.",
+        "operationId": "getBatch",
+        "parameters": [{"name": "batchId", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 0}, "description": "Any cluster id of the batch; the answer's id is the batch's own."}],
+        "responses": {
+          "200": {"description": "The batch.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "kind": {"type": "string", "enum": ["dag", "named", "cluster"]}, "id": {"type": "integer"}, "name": {"type": "string"},
+            "owner": {"type": "string"}, "constraint": {"type": "string"}, "remove_constraint": {"type": "string"},
+            "clusters": {"type": "array", "items": {"type": "integer"}}, "dagman_job_id": {"type": "string"},
+            "submitted": {"type": "integer"}, "first_start": {"type": "integer"}, "last_completion": {"type": "integer"},
+            "progress": {"type": "object"}, "live": {"type": "object", "additionalProperties": {"type": "integer"}},
+            "live_jobs": {"type": "integer"}, "live_truncated": {"type": "boolean"}, "finished": {"type": "object"},
+            "hold_reasons": {"type": "array", "items": {"type": "object"}}, "dag": {"type": "object"},
+            "workflows": {"type": "array", "items": {"type": "object"}}, "has_history": {"type": "boolean"}, "fetched_at": {"type": "integer"}}}}}},
+          "400": {"description": "Bad batch id", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Batch not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/batches/{batchId}/jobs": {
+      "get": {
+        "summary": "A batch's jobs, queued and finished",
+        "description": "The batch's jobs in the queue and its history records in one list. Default order: the queue first by id, then the finished, latest first. Rows without the sort key sort last.",
+        "operationId": "getBatchJobs",
+        "parameters": [
+          {"name": "batchId", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 0}},
+          {"name": "status", "in": "query", "schema": {"type": "string"}, "description": "Comma-separated: running, idle, uploading, transferring, held, suspended, completed, removed, unknown, live (every queued job), finished (every history record)."},
+          {"name": "sort", "in": "query", "schema": {"type": "string", "enum": ["default", "id", "status", "submitted", "started", "finished", "runtime", "exit", "peak_memory"]}},
+          {"name": "order", "in": "query", "schema": {"type": "string", "enum": ["asc", "desc"]}},
+          {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0}},
+          {"name": "page_size", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}}
+        ],
+        "responses": {
+          "200": {"description": "One page of jobs.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "id": {"type": "integer"}, "total": {"type": "integer"}, "offset": {"type": "integer"}, "next_offset": {"type": "integer", "nullable": true},
+            "live_truncated": {"type": "boolean"}, "history_truncated": {"type": "boolean"},
+            "jobs": {"type": "array", "items": {"type": "object"}}}}}}},
+          "400": {"description": "Bad batch id or query", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Batch not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
     "/utilization/for-job/{jobId}": {
       "get": {
         "summary": "The Utilization workflow of a job",
