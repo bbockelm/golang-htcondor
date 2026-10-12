@@ -517,7 +517,7 @@ func memorySample(j *Job) (memoryJob, bool) {
 		return memoryJob{}, false
 	}
 	mj := memoryJob{wallHours: hours(j.Wall), request: start.V(), inForce: j.RequestMemory.V(),
-		adaptive: j.isAdaptive(AdaptiveMemory)}
+		adaptive: j.isAdaptive(AdaptiveMemory), held: j.HeldForMemory}
 	switch {
 	case j.Status == statusCompleted && j.MemoryUsage.OK():
 		mj.peak = j.MemoryUsage.V()

@@ -64,6 +64,8 @@ type memoryJob struct {
 	// run that finished, which a job that outgrew the start was rerun at.
 	adaptive bool
 	inForce  float64
+	// held marks a job with a memory hold recorded.
+	held bool
 }
 
 // outgrows reports whether the job would exceed a request.
@@ -92,8 +94,11 @@ type memoryPlan struct {
 	// p95 and maxPeak describe the peaks, for the advice text.
 	p95, maxPeak float64
 	// adaptiveJobs had a formula request; outgrewStart of them peaked
-	// above where it started.
+	// above where it started. heldAbove and heldBelow are the jobs with a
+	// memory hold recorded whose peak was above the start, and at or
+	// under it.
 	adaptiveJobs, outgrewStart int
+	heldAbove, heldBelow       int
 	// exceeded counts jobs stopped for outgrowing their request.
 	exceeded int
 	curve    []MemoryCurvePoint
@@ -145,6 +150,12 @@ func planMemory(jobs []memoryJob) *memoryPlan {
 				plan.outgrewStart++
 				plan.currentCost += j.inForce * j.wallHours
 			}
+		}
+		switch {
+		case j.held && j.outgrows(j.request):
+			plan.heldAbove++
+		case j.held:
+			plan.heldBelow++
 		}
 		if j.atLeast {
 			plan.exceeded++
