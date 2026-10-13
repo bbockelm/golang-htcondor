@@ -5,7 +5,7 @@ module github.com/bbockelm/golang-htcondor/citools
 go 1.26.0
 
 require (
-	github.com/bbockelm/htcondordb v0.21.1
+	github.com/bbockelm/htcondordb v0.21.2
 	github.com/golangci/golangci-lint/v2 v2.13.2
 	github.com/goreleaser/nfpm/v2 v2.43.1
 	gotest.tools/gotestsum v1.13.0
