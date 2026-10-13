@@ -532,25 +532,28 @@ const SPECS: WorkflowSpec[] = [
         saves: { unit: 'core_hours', amount: ctx.wallHours * 5 },
         confidence: ctx.confidence,
       },
+      // Worded as the server words them (webapi/utilization/advice.go).
       {
         id: 'gpu-idle',
         resource: 'gpu',
-        severity: 'warn',
-        title: 'The GPU sat idle most of the time',
-        detail: 'Half of these jobs kept their GPU busy less than 35% of the time. Feeding it data faster, or fitting two runs on one GPU, would use it better.',
+        severity: 'suggest',
+        title: 'Keep the GPU busier',
+        detail:
+          'Half of 58 jobs kept their GPUs busy 34% of the time or less. The most GPU memory any job used was 4.1 GB. The GPU is usually waiting on input, on the CPU, or on code that has not been moved to it.',
         submit: [],
-        saves: { unit: 'gpu_hours', amount: ctx.wallHours * 0.6 },
-        confidence: ctx.confidence,
+        saves: null,
+        confidence: 'high',
       },
       {
         id: 'gpu-memory-small',
         resource: 'gpu',
         severity: 'suggest',
-        title: 'Your jobs fit GPUs with 8 GB of memory',
-        detail: 'The largest of 64 jobs used 4.1 GB of GPU memory; they all ran on 40 GB GPUs.',
-        submit: ['gpus_minimum_memory = 8192'],
+        title: 'Require GPUs with 6 GB of memory',
+        detail:
+          'These jobs require GPUs with at least 40 GB of memory; the most GPU memory any of 64 jobs used was 4.1 GB, 10% of the 40 GB their GPUs had. A lower minimum lets them run on more GPUs.',
+        submit: ['gpus_minimum_memory = 6 GB'],
         saves: null,
-        confidence: ctx.confidence,
+        confidence: 'high',
       },
       {
         id: 'restarts',

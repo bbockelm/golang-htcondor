@@ -67,13 +67,22 @@ export function jobRequest(job: ClassAd | undefined, name: RequestAttr): JobRequ
   return out;
 }
 
+// gpusUsed is how many GPUs the job kept busy: GPUsAverageUsage, the run's
+// average, else GPUsUsage, the running job's recent figure. A finished
+// job's history record carries only the average. Both are summed over the
+// job's GPUs, so 2 is two GPUs fully busy. The server leaves out a figure
+// larger than the GPUs the job held.
+export function gpusUsed(job: ClassAd | undefined): number | undefined {
+  return toNum(attr(job, 'GPUsAverageUsage')) ?? toNum(attr(job, 'GPUsUsage'));
+}
+
 // hasGpus decides whether a GPU row or series belongs on the page: the job
 // asked for at least one GPU, or it has some assigned, provisioned or in
 // use. RequestGPUs = 0 alone is a job without GPUs.
 export function hasGpus(job: ClassAd | undefined): boolean {
   if ((jobRequest(job, 'RequestGPUs').value ?? 0) > 0) return true;
   if ((toNum(attr(job, 'GPUsProvisioned')) ?? 0) > 0) return true;
-  if ((toNum(attr(job, 'GPUsUsage')) ?? 0) > 0) return true;
+  if ((gpusUsed(job) ?? 0) > 0) return true;
   const assigned = attr(job, 'AssignedGPUs');
   return typeof assigned === 'string' && assigned.trim() !== '';
 }

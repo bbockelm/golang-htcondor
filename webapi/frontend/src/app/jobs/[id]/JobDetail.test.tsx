@@ -254,6 +254,13 @@ describe('ResourceTable', () => {
     expect(screen.getByText('2')).toBeInTheDocument();
   });
 
+  // A finished job's record has GPUsAverageUsage and never GPUsUsage.
+  it('shows a finished job\'s GPU use from GPUsAverageUsage', () => {
+    render(<ResourceTable job={{ RequestGPUs: 2, GPUsProvisioned: 2, GPUsAverageUsage: 1.25 } as ClassAd} />);
+    expect(screen.getByText('GPUs')).toBeInTheDocument();
+    expect(screen.getByText('1.3')).toBeInTheDocument();
+  });
+
   it('still hides the GPU row for a job that asked for none', () => {
     render(<ResourceTable job={{ RequestCpus: 1 } as ClassAd} />);
     expect(screen.queryByText('GPUs')).toBeNull();

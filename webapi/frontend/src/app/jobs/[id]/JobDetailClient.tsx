@@ -22,7 +22,7 @@ import { batchIDOfJob, batchPagePath, coresUsed, jobTiming } from '@/lib/batches
 import { OwnerLink } from '@/components/OwnerLink';
 import { chatScopeForJob } from '@/lib/users';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
-import { EVALUATED_KEY, hasGpus, jobRequest } from '@/lib/jobRequests';
+import { EVALUATED_KEY, gpusUsed, hasGpus, jobRequest } from '@/lib/jobRequests';
 import { formatKiB, formatMiB } from '@/lib/utilization';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
@@ -1823,16 +1823,15 @@ export function ResourceTable({ job }: { job: ClassAd }) {
     },
     {
       // HTCondor capitalises this acronym: the attributes are
-      // RequestGPUs and GPUsUsage, not RequestGpus/GpusUsage. ClassAd
-      // attribute names are case-insensitive, a JSON object's keys are
-      // not, so the misspelled lookups were always undefined and the
-      // row was dropped from every job -- including the GPU ones.
+      // RequestGPUs and GPUsAverageUsage/GPUsUsage, not RequestGpus/
+      // GpusUsage. A finished job has only GPUsAverageUsage; see
+      // gpusUsed.
       label: 'GPUs',
       requested: fmtRequested(gpus.value),
       requestedExpr: gpus.expr,
-      used: fmtUsage(job.GPUsUsage),
+      used: fmtUsage(gpusUsed(job)),
       reqN: gpus.value,
-      usedN: num(job.GPUsUsage),
+      usedN: gpusUsed(job),
     },
   ];
 
