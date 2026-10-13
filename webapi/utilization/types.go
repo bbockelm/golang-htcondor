@@ -138,7 +138,7 @@ type BatchPoint struct {
 	CPUCoresP50      *float64 `json:"cpu_cores_p50"`
 	WallP50          *float64 `json:"wall_p50"`
 	// GPURequest is the typical request_gpus of the batch's GPU jobs, and
-	// GPUUtilP50 their median fraction of those GPUs kept busy.
+	// GPUUtilP50 their median fraction of the GPUs they had kept busy.
 	GPURequest *float64 `json:"gpu_request"`
 	GPUUtilP50 *float64 `json:"gpu_util_p50"`
 }
@@ -259,7 +259,7 @@ type GPUStats struct {
 	// utilization measurement.
 	Jobs     int `json:"jobs"`
 	Measured int `json:"measured"`
-	// Utilization is the fraction of the requested GPUs kept busy.
+	// Utilization is the fraction of the GPUs each job had kept busy.
 	Utilization *Distribution `json:"utilization"`
 	// MemoryPeakMiB is each job's peak GPU memory (GPUsMemoryUsage).
 	MemoryPeakMiB *Distribution `json:"memory_peak_mib"`

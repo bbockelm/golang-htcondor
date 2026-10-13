@@ -76,7 +76,8 @@ func Projection() []string {
 		"NumJobStarts", "NumHoldsByReason",
 		"HoldReasonCode", "HoldReasonSubCode", "LastHoldReasonCode", "LastHoldReasonSubCode",
 		"VacateReasonCode", "VacateReasonSubCode",
-		"GPUsAverageUsage", "GPUsMemoryUsage", "GPUsMinMemory", "MachineAttrGPUs_GlobalMemoryMb0",
+		"GPUsAverageUsage", "GPUsUsage", "GPUsMemoryUsage", "GPUsMinMemory", "MachineAttrGPUs_GlobalMemoryMb0",
+		"GPUsProvisioned", "AssignedGPUs",
 	}
 }
 
@@ -129,7 +130,12 @@ type Job struct {
 
 	// GPUsAverageUsage is GPU-seconds busy per second of the run, summed
 	// over the job's GPUs -- 2.0 is two GPUs fully busy. See GPUUtilization.
+	// FromAd falls back to GPUsUsage, and leaves out a figure more GPUs
+	// than the job held could not produce (see PlausibleGPUUsage).
 	GPUsAverageUsage Num
+	// GPUsHeld is how many GPUs the job had (see GPUsHeld); absent means
+	// "as many as it requested".
+	GPUsHeld Num
 	// GPUsMemoryUsage is the peak GPU memory in MiB.
 	GPUsMemoryUsage Num
 	// GPUsMinMemory is the job's gpus_minimum_memory, MiB: how much memory
@@ -378,7 +384,16 @@ func fromAd(ad *classad.ClassAd, schedd string, r *JobReader) Job {
 		j.CPUSeconds = NumOf(user.V() + orZero(numAttr(ad, "RemoteSysCpu")))
 	}
 
+	if held, ok := GPUsHeldFromAd(ad); ok {
+		j.GPUsHeld = NumOf(held)
+	}
 	j.GPUsAverageUsage = numAttr(ad, "GPUsAverageUsage")
+	if !j.GPUsAverageUsage.OK() {
+		j.GPUsAverageUsage = numAttr(ad, "GPUsUsage")
+	}
+	if u := j.GPUsAverageUsage; u.OK() && j.GPUsHeld.OK() && !PlausibleGPUUsage(u.V(), j.GPUsHeld.V()) {
+		j.GPUsAverageUsage = 0
+	}
 	j.GPUsMemoryUsage = numAttr(ad, "GPUsMemoryUsage")
 	j.GPUsMinMemory = numAttr(ad, "GPUsMinMemory")
 	// A GPU's memory reaches the job ad only if the pool asks for it:
@@ -695,18 +710,47 @@ func (j *Job) coresUsed() (float64, bool) {
 	return j.CPUSeconds.V() / j.Wall, true
 }
 
-// GPUUtilization is the fraction of the requested GPUs kept busy.
+// gpus is how many GPUs the job had: GPUsHeld, or the request for a Job
+// that does not record it.
+func (j *Job) gpus() float64 {
+	if j.GPUsHeld.OK() && j.GPUsHeld.V() > 0 {
+		return j.GPUsHeld.V()
+	}
+	if j.RequestGPUs.OK() && j.RequestGPUs.V() > 0 {
+		return j.RequestGPUs.V()
+	}
+	return 0
+}
+
+// gpusBusy is GPUsAverageUsage when it can be believed: a run long
+// enough to measure, a job that requested GPUs, and no more GPUs kept
+// busy than it had.
+func (j *Job) gpusBusy() (float64, bool) {
+	held := j.gpus()
+	if !j.GPUsAverageUsage.OK() || !j.RequestGPUs.OK() || j.RequestGPUs.V() <= 0 || held <= 0 || j.Wall < minCPUWall {
+		return 0, false
+	}
+	u := j.GPUsAverageUsage.V()
+	if !PlausibleGPUUsage(u, held) {
+		return 0, false
+	}
+	return u, true
+}
+
+// GPUUtilization is the fraction of the job's GPUs kept busy.
 //
 // HTCondor's GPUsAverageUsage is computed on the execute point as
 // (UptimeGPUsSeconds - StartOfJobUptimeGPUsSeconds) / (LastUpdate -
 // FirstUpdate): busy GPU-seconds per second, where the busy seconds are
 // SUMMED over every GPU assigned to the slot. Two GPUs fully busy is 2.0,
-// so it is divided by the request to get a fraction. It covers the job's
-// last run, which is a rate and so comparable across runs of different
-// lengths.
+// so it is divided by the GPUs the job had -- which can be more than it
+// requested, when it matched a larger slot -- to get a fraction. It
+// covers the job's last run, which is a rate and so comparable across
+// runs of different lengths.
 func (j *Job) GPUUtilization() (float64, bool) {
-	if !j.GPUsAverageUsage.OK() || !j.RequestGPUs.OK() || j.RequestGPUs.V() <= 0 || j.Wall < minCPUWall {
+	u, ok := j.gpusBusy()
+	if !ok {
 		return 0, false
 	}
-	return j.GPUsAverageUsage.V() / j.RequestGPUs.V(), true
+	return u / j.gpus(), true
 }

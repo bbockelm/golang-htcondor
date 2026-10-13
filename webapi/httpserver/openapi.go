@@ -100,7 +100,7 @@ const openAPISchema = `{
       "UtilAdvice": {
         "type": "object",
         "properties": {
-          "id": {"type": "string", "enum": ["memory-lower", "memory-retry", "memory-raise", "memory-ok", "cpus-lower", "cpus-raise", "disk-lower", "disk-raise", "gpu-idle", "gpu-unused", "gpus-lower", "gpu-cpu-bound", "gpu-memory-small", "short-jobs", "restarts"]},
+          "id": {"type": "string", "enum": ["memory-lower", "memory-retry", "memory-raise", "memory-ok", "cpus-lower", "cpus-raise", "disk-lower", "disk-raise", "gpu-idle", "gpu-unused", "gpus-lower", "gpu-cpu-bound", "gpu-memory-small", "gpu-memory-require", "gpu-memory-raise", "short-jobs", "restarts"]},
           "resource": {"type": "string", "enum": ["cpu", "memory", "disk", "gpu", "runtime"]},
           "severity": {"type": "string", "enum": ["info", "suggest", "warn"]},
           "title": {"type": "string"},
@@ -174,7 +174,7 @@ const openAPISchema = `{
             "memory_request_mib": {"type": "number", "nullable": true}, "memory_p95_mib": {"type": "number", "nullable": true},
             "cpu_request": {"type": "number", "nullable": true}, "cpu_cores_p50": {"type": "number", "nullable": true}, "wall_p50": {"type": "number", "nullable": true},
             "gpu_request": {"type": "number", "nullable": true, "description": "Typical request_gpus of the batch's GPU jobs."},
-            "gpu_util_p50": {"type": "number", "nullable": true, "description": "Median fraction of requested GPUs kept busy."}}}},
+            "gpu_util_p50": {"type": "number", "nullable": true, "description": "Median fraction of the GPUs each job had kept busy."}}}},
           "samples": {"type": "array", "items": {"type": "object", "properties": {
             "job": {"type": "string", "description": "cluster.proc, as in /utilization/jobs rows."},
             "memory_mib": {"type": "number", "nullable": true}, "wall": {"type": "number"}, "cores": {"type": "number", "nullable": true},
