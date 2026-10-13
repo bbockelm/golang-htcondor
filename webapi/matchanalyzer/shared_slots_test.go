@@ -332,3 +332,56 @@ func BenchmarkAnalyzeCachedSlots(b *testing.B) {
 		})
 	}
 }
+
+// The analysis pairs its job with each slot for one evaluation at a time
+// and never records the pairing on either ad: the job copy the predicates
+// are evaluated in and every slot it is evaluated against carry no TARGET,
+// while the analysis runs and after it. The slots' TARGET.* expressions
+// still see the job.
+func TestAnalyzeBindsNeitherJobNorSlot(t *testing.T) {
+	// user1 is admitted by slots 0, 2 and 4 of 6.
+	a := New(&StaticSlotProvider{Ads: accessPool(t, 6, 2)})
+	var job *classad.ClassAd
+	var slots []*classad.ClassAd
+	a.afterBind = func(j, slot *classad.ClassAd) {
+		job = j
+		slots = append(slots, slot)
+		if j.GetTarget() != nil {
+			t.Errorf("slot %d: the job is bound to a slot", len(slots)-1)
+		}
+		for i, s := range slots {
+			if s.GetTarget() != nil {
+				t.Errorf("slot %d: slot %d is bound to a job", len(slots)-1, i)
+			}
+		}
+	}
+	res, err := a.Analyze(context.Background(), accessJob(t, 1))
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(slots) != 6 {
+		t.Fatalf("analyzed %d slots, want 6", len(slots))
+	}
+	if job.GetTarget() != nil {
+		t.Error("the job is still bound to a slot after the analysis")
+	}
+	for i, s := range slots {
+		if s.GetTarget() != nil {
+			t.Errorf("slot %d is still bound to a job after the analysis", i)
+		}
+	}
+
+	if res.FullMatches != 3 {
+		t.Errorf("FullMatches = %d, want 3", res.FullMatches)
+	}
+	var allowed []ValueCount
+	for _, d := range res.Predicates[0].AttributeDistributions {
+		if d.Attribute == "AllowedForJob" {
+			allowed = d.Values
+		}
+	}
+	want := []ValueCount{{Value: "false", Count: 3, Example: "slot1@h1"}, {Value: "true", Count: 3, Example: "slot0@h0"}}
+	if !reflect.DeepEqual(allowed, want) {
+		t.Errorf("AllowedForJob distribution = %+v, want %+v", allowed, want)
+	}
+}

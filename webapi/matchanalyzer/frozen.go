@@ -8,16 +8,18 @@ import (
 // frozenAd is a ClassAd's attributes in a form that is only ever copied,
 // never evaluated or matched. It is what may be shared between analyses.
 //
-// A *classad.ClassAd cannot be shared. Matching binds it to its peer
-// (SetTarget), and evaluation writes to it as well: the cycle guard, the
-// lazily built index, the lazy attribute sort. Two analyses holding one
-// slot ad race, and one analysis's TARGET binding can be replaced by
-// another's, so the slot's TARGET.* expressions read the other user's
-// job.
+// A *classad.ClassAd is not handed to two analyses. The analyzer only
+// reads slot ads (it evaluates with EvaluateExprAgainst, which binds TARGET
+// for one evaluation without writing either ad), but binding with
+// NewMatchClassAd or SetTarget writes the ad, and so does any change a
+// caller makes. With one slot ad shared, one analysis's TARGET binding
+// could replace another's, so the slot's TARGET.* expressions read the
+// other user's job. Private copies keep that from depending on every
+// reader staying read-only.
 //
 // The expression trees are shared, not copied: evaluation never writes to
-// them. Everything evaluation or matching does write belongs to the
-// *classad.ClassAd that thaw builds, one per use.
+// them. Everything matching or a caller's change does write belongs to
+// the *classad.ClassAd that thaw builds, one per use.
 type frozenAd []ast.AttributeAssignment
 
 // freeze copies ad's attributes. The caller must own ad: reading its

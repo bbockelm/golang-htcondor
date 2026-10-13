@@ -59,8 +59,8 @@ type Predicate struct {
 	Source string
 
 	// Expr is the AST node to evaluate. The analyzer evaluates it against
-	// each slot via classad.MatchClassAd so TARGET. references resolve
-	// against the slot.
+	// each slot with the slot as TARGET (ClassAd.EvaluateExprAgainst), so
+	// TARGET. references resolve against the slot.
 	Expr ast.Expr
 
 	// ReferencedSlotAttrs are the slot-side attributes this predicate reads
@@ -94,9 +94,9 @@ type Decomposer interface {
 // job's Requirements. Implementations are free to fetch a superset (for
 // caching reasons), but must never return less.
 //
-// The returned ads belong to the caller. The analyzer binds each one to
-// the job it is analyzing (SetTarget) and evaluates it, and both write to
-// the ad, so an implementation must never hand the same *classad.ClassAd
+// The returned ads belong to the caller. The analyzer pairs each one with
+// the job for one evaluation at a time and does not write to it, but the
+// caller may: an implementation must never hand the same *classad.ClassAd
 // to two calls or keep one it has handed out. A provider that caches
 // keeps its cache in a form it copies from (see frozenAd).
 type SlotProvider interface {

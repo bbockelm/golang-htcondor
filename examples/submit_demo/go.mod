@@ -5,7 +5,7 @@ go 1.26.0
 require github.com/bbockelm/golang-htcondor v0.0.0
 
 require (
-	github.com/PelicanPlatform/classad v0.31.4 // indirect
+	github.com/PelicanPlatform/classad v0.31.5 // indirect
 	github.com/bbockelm/cedar v0.7.10 // indirect
 	github.com/bbockelm/gosssd v0.0.4 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
