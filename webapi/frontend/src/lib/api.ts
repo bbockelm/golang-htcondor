@@ -1098,8 +1098,7 @@ export type RuntimeEstimateLevel =
   | "batch"
   | "iwd"
   | "cmd"
-  | "owner"
-  | "global";
+  | "owner";
 
 // MatchAnalysisResponse is the JSON returned by
 // GET /api/v1/jobs/{id}/match-analysis. The Go side wraps the analyzer's

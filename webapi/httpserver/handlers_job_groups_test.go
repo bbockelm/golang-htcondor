@@ -43,8 +43,7 @@ QDate = %d`, cluster, owner, cmd, args, status, now.Add(-24*time.Hour).Unix())
 
 // groupsFixture: alice's five finished "sim --seed N" jobs of the "sweep"
 // batch and one of another program; bob's five of the same command line;
-// thirty of carol's, so the access point has enough for a global
-// estimate. Queued: alice's sim job 400 (a new seed, a new sweep run),
+// thirty of carol's, which never answer for anyone else. Queued: alice's sim job 400 (a new seed, a new sweep run),
 // alice's job 401 of a program with no history, bob's job 500. The
 // estimator has read all the history.
 func groupsFixture(t *testing.T) *twoOwnerFixture {
@@ -154,16 +153,28 @@ func TestJobSimilarLevels(t *testing.T) {
 	}
 }
 
-// The global group spans every user: totals only, never a job.
-func TestJobSimilarGlobalIsAggregateOnly(t *testing.T) {
+// No group spans other users: there is no access-point-wide level to
+// list, and a job whose owner has nothing of its kind -- alice's brand-new
+// program aside from her other jobs -- is grouped with her jobs alone.
+func TestJobSimilarHasNoAccessPointLevel(t *testing.T) {
 	f := groupsFixture(t)
-	_, resp := f.similar(t, "/api/v1/jobs/400.0/similar?level=global", f.bearer(t, "alice"))
-	if !resp.AggregateOnly || len(resp.Jobs) != 0 || resp.Total != 0 {
-		t.Errorf("global: aggregate_only %v, jobs %v", resp.AggregateOnly, similarIDs(resp))
+	alice := f.bearer(t, "alice")
+	if code, _ := f.similar(t, "/api/v1/jobs/400.0/similar?level=global", alice); code != http.StatusBadRequest {
+		t.Errorf("level=global: %d, want 400", code)
 	}
-	// 41 runtimes across alice, bob and carol.
-	if resp.Runtimes == nil || resp.Runtimes.Count != 41 || resp.Window.MaxJobs != 4*runtimeest.DefaultWindow {
-		t.Errorf("global runtimes = %+v window %+v", resp.Runtimes, resp.Window)
+	_, resp := f.similar(t, "/api/v1/jobs/401.0/similar", alice)
+	for _, l := range resp.Levels {
+		if l.Level == "global" {
+			t.Errorf("levels offer %q", l.Level)
+		}
+	}
+	if resp.EstimateLevel == nil || *resp.EstimateLevel != "owner" || resp.Level != "owner" || resp.Total != 6 {
+		t.Errorf("brand-new program: level %q (estimate %v), %v", resp.Level, resp.EstimateLevel, similarIDs(resp))
+	}
+	for _, j := range resp.Jobs {
+		if j.Cluster >= 600 {
+			t.Errorf("alice's group holds another user's %s", j.ID)
+		}
 	}
 }
 

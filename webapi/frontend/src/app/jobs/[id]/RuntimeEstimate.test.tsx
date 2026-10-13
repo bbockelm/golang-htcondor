@@ -243,6 +243,10 @@ describe('runtimeCard', () => {
     }
     expect(runtimeCard(undefined, 1, NOW)).toBeNull();
     expect(runtimeCard(estimate({ available: false }), 1, NOW)).toBeNull();
+    for (const status of [1, 2]) {
+      const none: RuntimeEstimate = { job_id: '12.0', available: false, reason: 'insufficient_history', exceeded_history: false, model: { jobs_ingested: 500 } };
+      expect(runtimeCard(none, status, NOW)).toBeNull();
+    }
     expect(runtimeCard(estimate({ estimate_seconds: undefined }), 2, NOW)).toBeNull();
   });
 
@@ -252,7 +256,7 @@ describe('runtimeCard', () => {
       card(runningEstimate(), 2),
       card(longEstimate(), 2),
       card(roughEstimate(), 1),
-      card(roughEstimate({ basis: { level: 'global', sample_count: 300 } }), 1),
+      card(roughEstimate({ basis: { level: 'owner', sample_count: 300, new_command: true } }), 1),
       card(roughEstimate({ elapsed_seconds: 600, remaining_seconds: 6600 }), 2),
     ];
     for (const c of cards) {
@@ -275,9 +279,8 @@ describe('basisLine', () => {
     expect(sub('iwd')).toBe('from 7 of your earlier jobs from the same submit directory');
     expect(sub('cmd')).toBe('from 7 of your earlier jobs running the same program');
     expect(sub('owner')).toBe('Based on your recent jobs in general.');
-    expect(sub('global')).toBe(
-      'You have no recently finished jobs to compare with. Based on recent jobs on this access point.',
-    );
+    // A level this page does not know says nothing rather than guess.
+    expect(sub('global' as unknown as RuntimeEstimateLevel)).toBeUndefined();
     expect(basisLine({ level: 'owner', sample_count: 7, new_command: true })).toBe(
       'This command has not run recently. Based on your recent jobs in general.',
     );
@@ -389,6 +392,16 @@ describe('RuntimeEstimateView', () => {
       1,
     );
     expect(container).toBeEmptyDOMElement();
+    for (const status of [1, 2]) {
+      rerender(
+        <RuntimeEstimateView
+          estimate={{ job_id: '12.0', available: false, reason: 'insufficient_history', exceeded_history: false, model: { jobs_ingested: 500 } }}
+          status={status}
+          fetchedAt={NOW}
+        />,
+      );
+      expect(container).toBeEmptyDOMElement();
+    }
     for (const status of [3, 4, 5, 6, 7, undefined]) {
       rerender(<RuntimeEstimateView estimate={estimate()} status={status} fetchedAt={NOW} />);
       expect(container).toBeEmptyDOMElement();

@@ -11,7 +11,6 @@ const LEVELS: { level: EstimateLevel; description: string; count: number | null;
   { level: 'iwd', description: 'same submit directory, numbers ignored', count: 80, median: 3300 },
   { level: 'cmd', description: 'same program, any arguments', count: 150, median: 3600 },
   { level: 'owner', description: 'all your jobs of this kind', count: 400, median: 1800 },
-  { level: 'global', description: 'every job of this kind on this access point', count: 5000, median: 1200 },
 ];
 
 const NOW = 1_760_100_000;
@@ -32,7 +31,7 @@ export function similarFixture(
 ): SimilarJobsResponse {
   const level = opts.level ?? 'template';
   const l = LEVELS.find((x) => x.level === level) ?? LEVELS[1];
-  const all = level === 'global' ? [] : jobsFor(level, l.count ?? 0, l.median);
+  const all = jobsFor(level, l.count ?? 0, l.median);
   const offset = opts.offset ?? 0;
   const size = Math.min(opts.page_size ?? 50, 200);
   const page = all.slice(offset, offset + size);
@@ -48,7 +47,6 @@ export function similarFixture(
     ],
     window: { days: 30, max_jobs: 500 },
     runtimes: { count: l.count ?? 0, p10: m * 0.6, p25: m * 0.8, p50: m, p75: m * 1.2, p90: m * 1.5 },
-    aggregate_only: level === 'global',
     total: all.length,
     offset,
     next_offset: offset + size < all.length ? offset + size : null,

@@ -78,12 +78,13 @@ describe('SimilarJobs', () => {
     await waitFor(() => expect(spy.mock.calls.at(-1)![1]).toMatchObject({ level: 'cmd', offset: 50 }));
   });
 
-  it('shows the pool-wide group as a spread only, never its jobs', async () => {
-    vi.spyOn(api.jobs, 'similar').mockImplementation(async (id, p) => similarFixture(id, { ...p, level: p?.level ?? 'global' }));
+  it('offers no group wider than the owner\'s own jobs', async () => {
+    vi.spyOn(api.jobs, 'similar').mockImplementation(async (id, p) => similarFixture(id, { ...p, level: p?.level ?? 'owner' }));
     wrap(<SimilarJobs jobID="12.0" />);
-    expect(await screen.findByTestId('aggregate-only')).toHaveTextContent("other people's jobs");
-    expect(screen.getByTestId('runtime-spread')).toBeInTheDocument();
-    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+    const levels = await screen.findByRole('radiogroup', { name: 'Compare with' });
+    expect(within(levels).getByRole('radio', { checked: true })).toHaveTextContent('all your jobs of this kind');
+    expect(within(levels).queryByText(/access point/)).not.toBeInTheDocument();
+    expect(screen.getAllByRole('row').slice(1)).toHaveLength(50);
   });
 
   it('says so when the server has no similar jobs to offer', async () => {

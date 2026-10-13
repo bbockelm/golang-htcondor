@@ -53,8 +53,8 @@ func TestWarmingUpUntilFirstIngest(t *testing.T) {
 	}
 }
 
-// An owner-confined level answers from a single earlier run -- they are
-// the owner's own jobs -- while global needs thirty.
+// A level answers from a single earlier run: they are the owner's own
+// jobs.
 func TestMinimumSamples(t *testing.T) {
 	e := New(Config{})
 	ingest(e, job{feat("alice", "x"), 100, t0})
@@ -62,40 +62,63 @@ func TestMinimumSamples(t *testing.T) {
 	if !r.Available || r.EstimateSeconds != 100 || r.Basis.SampleCount != 1 {
 		t.Fatalf("one earlier run: %+v", r)
 	}
-	// Bob has nothing of his own and global has only one job.
-	if r := e.Estimate(Query{Features: feat("bob", "x")}); r.Available || r.Reason != ReasonInsufficientHistory {
-		t.Fatalf("bob with a thin global: %+v", r)
+}
+
+// Other users' jobs never answer for an owner with none of their own,
+// however many there are, and a job with no owner gets no estimate at
+// all. Nor is such a job scored when it completes: it had no estimate
+// to score.
+func TestNoEstimateFromOtherUsersJobs(t *testing.T) {
+	e := New(Config{})
+	var hist []job
+	for i := range 500 {
+		hist = append(hist, job{feat("carol", "x"), 500, t0.Add(time.Duration(i) * time.Second)})
 	}
-	var more []job
-	for i := range 29 {
-		more = append(more, job{feat("carol", "y"), 500, t0.Add(time.Duration(10+i) * time.Second)})
+	ingest(e, hist...)
+	scored := e.Stats().Scored
+	for _, q := range []Query{
+		{Features: feat("bob", "x")},
+		{Features: feat("bob", "x"), Running: true, Elapsed: 10},
+		{Features: feat("", "x")},
+	} {
+		if r := e.Estimate(q); r.Available || r.Reason != ReasonInsufficientHistory || r.Basis != nil {
+			t.Errorf("%+v: %+v", q, r)
+		}
+		if r := e.EstimateMany([]Query{q})[0]; r.Available || r.Reason != ReasonInsufficientHistory {
+			t.Errorf("many %+v: %+v", q, r)
+		}
 	}
-	ingest(e, more...)
-	r = e.Estimate(Query{Features: feat("bob", "x")})
-	if !r.Available || r.Basis.Level != "global" || r.Basis.SampleCount != 30 {
-		t.Fatalf("bob with a full global: %+v", r)
+	ingest(e, job{feat("bob", "x"), 60, t0.Add(time.Hour)}, job{feat("", "x"), 60, t0.Add(time.Hour + time.Second)})
+	st := e.Stats()
+	if st.Scored != scored {
+		t.Errorf("scored %d -> %d: a job with no history of its owner's was scored", scored, st.Scored)
+	}
+	if _, ok := st.ScoredByLevel["global"]; ok {
+		t.Errorf("stats still report a global level: %v", st.ScoredByLevel)
+	}
+	// Bob's own job now answers for him, from his runtime alone.
+	if r := e.Estimate(Query{Features: feat("bob", "x")}); !r.Available || r.Basis.Level != "exact" || r.EstimateSeconds != 60 {
+		t.Errorf("bob after his own job: %+v", r)
 	}
 }
 
-// Global answers only when no owner-confined level can, however well it
-// has done.
-func TestGlobalIsOnlyAFallback(t *testing.T) {
+// choose answers only from a level that is available, and not at all
+// when none is.
+func TestChooseNoLevel(t *testing.T) {
 	preds := [numLevels]float64{}
 	for i := range preds {
 		preds[i] = math.NaN()
 	}
-	preds[LevelOwner], preds[LevelGlobal] = 100, 200
 	scores := &[numLevels]float32{}
-	for i := range scores {
-		scores[i] = scorePrior
+	if _, ok := choose(scores, &preds); ok {
+		t.Error("chose a level with none available")
 	}
-	scores[LevelGlobal] = 0
-	if l, _ := choose(scores, &preds); l != LevelOwner {
-		t.Errorf("chose %s over an available owner level", l)
+	if _, ok := choose(nil, &preds); ok {
+		t.Error("chose a level for no owner with none available")
 	}
-	preds[LevelOwner] = math.NaN()
-	if l, ok := choose(scores, &preds); !ok || l != LevelGlobal {
-		t.Errorf("global did not answer alone: %s %v", l, ok)
+	preds[LevelOwner] = 100
+	if l, ok := choose(scores, &preds); !ok || l != LevelOwner {
+		t.Errorf("chose %s %v, want owner", l, ok)
 	}
 }
 
@@ -488,9 +511,9 @@ func TestEvict(t *testing.T) {
 	if after.JobsIngested != before.JobsIngested {
 		t.Error("eviction changed the ingested count")
 	}
-	// old now falls back to global, which is never evicted.
+	// old has nothing left, and new's jobs do not answer for old.
 	r := e.Estimate(Query{Features: Features{Owner: "old", ClusterID: 1, Cmd: "x"}})
-	if !r.Available || r.Basis.Level != "global" {
+	if r.Available || r.Reason != ReasonInsufficientHistory {
 		t.Errorf("after eviction: %+v", r)
 	}
 	r = e.Estimate(Query{Features: Features{Owner: "new", Cmd: "y"}})
@@ -600,7 +623,6 @@ func TestRoughLevels(t *testing.T) {
 		{"same arguments", Features{Owner: "alice", Cmd: "x", Args: []string{"1"}}, "exact", false, false},
 		{"other arguments", Features{Owner: "alice", Cmd: "x", Args: []string{"a"}}, "cmd", true, false},
 		{"another program", feat("alice", "y"), "owner", true, true},
-		{"nothing of their own", feat("bob", "x"), "global", true, true},
 	}
 	for _, c := range cases {
 		r := e.Estimate(Query{Features: c.f})
@@ -608,6 +630,10 @@ func TestRoughLevels(t *testing.T) {
 			t.Errorf("%s: level %v rough %v new_command %v, want %s %v %v",
 				c.name, r.Basis, r.Rough, r.Basis != nil && r.Basis.NewCommand, c.level, c.rough, c.new)
 		}
+	}
+	// Carol's thirty jobs do not answer for bob, who has none.
+	if r := e.Estimate(Query{Features: feat("bob", "x")}); r.Available || r.Reason != ReasonInsufficientHistory {
+		t.Errorf("nothing of their own: %+v", r)
 	}
 }
 
@@ -685,8 +711,13 @@ func TestPoolCacheMatchesUncached(t *testing.T) {
 		start = start.Add(3 * time.Hour)
 		check(fmt.Sprintf("after batch %d", round))
 		if round == 3 {
-			cached.Evict(start.Add(-2 * time.Hour))
-			uncached.Evict(start.Add(-2 * time.Hour))
+			// Halfway through the batch just read: some groups go, and
+			// the rest still answer.
+			cutoff := start.Add(-3*time.Hour + 25*time.Minute)
+			if n := cached.Evict(cutoff); n == 0 {
+				t.Fatal("the eviction dropped nothing")
+			}
+			uncached.Evict(cutoff)
 			check("after an eviction")
 		}
 	}
@@ -801,42 +832,36 @@ func TestContainerAndBareJobsKeptApart(t *testing.T) {
 	}
 }
 
-// The access point's group is by universe once the universe has enough
-// jobs, and every job until then. DAG nodes and standalone jobs share it.
-func TestGlobalIsByUniverse(t *testing.T) {
+// An owner whose own errors are too few for the bounds, answered from a
+// level the access point has too few errors for either, gets its bounds
+// from the access point's errors at every level: calibration of an
+// estimate drawn from the owner's own jobs, never another user's runtime
+// as the estimate.
+func TestBoundsFallBackToTheAccessPointsErrors(t *testing.T) {
 	e := New(Config{})
-	var jobs []job
-	for i := range 30 {
-		f := Features{Owner: fmt.Sprintf("v%d", i), Cmd: "x", DAGNode: i%2 == 0}
-		jobs = append(jobs, job{f, 100, t0.Add(time.Duration(i) * time.Second)})
+	var hist []job
+	for i := range 40 {
+		// Each owner's second run takes four times the first, so every
+		// error the access point records is log(4), at the exact level.
+		f := feat(fmt.Sprintf("o%d", i), "x")
+		hist = append(hist,
+			job{f, 100, t0.Add(time.Duration(2*i) * time.Second)},
+			job{f, 400, t0.Add(time.Duration(2*i+1) * time.Second)})
 	}
-	for i := range 20 {
-		f := Features{Owner: fmt.Sprintf("g%d", i), Cmd: "x", Universe: 9}
-		jobs = append(jobs, job{f, 9000, t0.Add(time.Duration(100+i) * time.Second)})
+	hist = append(hist, job{Features{Owner: "dave", BatchName: "b", Cmd: "y"}, 100, t0.Add(time.Hour)})
+	ingest(e, hist...)
+	if n := e.st.levelResid[viewSubmit][LevelBatch].len(); n != 0 {
+		t.Fatalf("batch level has %d errors; the test needs none", n)
 	}
-	ingest(e, jobs...)
-	stranger := func(u int64, dag bool) Result {
-		return e.Estimate(Query{Features: Features{Owner: "bob", Cmd: "y", Universe: u, DAGNode: dag}})
+	if n := e.st.allResid[viewSubmit].len(); n != 40 {
+		t.Fatalf("access point errors = %d, want 40", n)
 	}
-	for _, dag := range []bool{false, true} {
-		if r := stranger(5, dag); !r.Available || r.Basis.Level != "global" || r.EstimateSeconds != 100 || r.Basis.SampleCount != 30 {
-			t.Errorf("vanilla, DAG node %v: %+v", dag, r)
-		}
+	r := e.Estimate(Query{Features: Features{Owner: "dave", BatchName: "b", Cmd: "z"}})
+	if !r.Available || r.Basis.Level != "batch" || r.EstimateSeconds != 100 {
+		t.Fatalf("dave: %+v", r)
 	}
-	// Twenty grid jobs are too few to stand alone: every job answers.
-	if r := stranger(9, false); !r.Available || r.Basis.SampleCount != 50 {
-		t.Errorf("thin grid universe: %+v", r)
-	}
-	var more []job
-	for i := range 10 {
-		f := Features{Owner: fmt.Sprintf("g%d", i), Cmd: "x", Universe: 9}
-		more = append(more, job{f, 9000, t0.Add(time.Duration(200+i) * time.Second)})
-	}
-	ingest(e, more...)
-	if r := stranger(9, false); !r.Available || r.EstimateSeconds != 9000 || r.Basis.SampleCount != 30 {
-		t.Errorf("grid universe with thirty: %+v", r)
-	}
-	if st := e.Stats(); st.Keys["global"] != 2 {
-		t.Errorf("global groups = %d, want 2", st.Keys["global"])
+	// The group's own spread is a single run; the errors widen it.
+	if r.P10Seconds != 100 || r.P90Seconds != 400 {
+		t.Errorf("bounds %v-%v, want 100-400 from the access point's errors", r.P10Seconds, r.P90Seconds)
 	}
 }

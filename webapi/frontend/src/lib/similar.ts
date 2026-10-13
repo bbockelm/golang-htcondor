@@ -28,7 +28,6 @@ export interface SimilarJobsResponse {
     p75: number;
     p90: number;
   } | null;
-  aggregate_only: boolean; // true for 'global' (it spans other users): jobs is always []
   total: number; // jobs found in history for this group (<= window.max_jobs)
   offset: number;
   next_offset: number | null;

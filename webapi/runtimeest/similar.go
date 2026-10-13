@@ -31,7 +31,6 @@ var levelDescriptions = [numLevels]string{
 	"same submit directory, numbers ignored",
 	"same program, any arguments",
 	"all your jobs of this kind",
-	"every job of this kind on this access point",
 }
 
 // Description is what the level groups, in plain words.
@@ -42,21 +41,15 @@ func (l Level) Description() string {
 	return levelDescriptions[l]
 }
 
-// WindowSize is how many recent runtimes a group at l answers from:
-// Config.Window, and four times as many for LevelGlobal.
-func (e *Estimator) WindowSize(l Level) int {
-	if l == LevelGlobal {
-		return 4 * e.cfg.Window
-	}
+// WindowSize is how many recent runtimes a group answers from:
+// Config.Window.
+func (e *Estimator) WindowSize() int {
 	return e.cfg.Window
 }
 
 // GroupRuntimes is the runtimes the estimator holds for k's group at l
 // right now, ascending: exactly what an estimate answered from l uses.
-// For LevelGlobal that is the job's universe, or every job while the
-// universe has too few (see minGlobalSamples) -- the same choice the
-// estimate makes. Nil when the group holds nothing or nothing has been
-// read yet.
+// Nil when the group holds nothing or nothing has been read yet.
 func (e *Estimator) GroupRuntimes(k Keys, l Level) []float64 {
 	if l < 0 || l >= numLevels {
 		return nil
@@ -68,13 +61,7 @@ func (e *Estimator) GroupRuntimes(k Keys, l Level) []float64 {
 		return nil
 	}
 	var w *window
-	if l == LevelGlobal {
-		if u := s.byUniverse[k.universe]; u.len() >= minGlobalSamples {
-			w = u
-		} else if s.global.len() >= minGlobalSamples {
-			w = &s.global
-		}
-	} else if key := k.k[l]; key != "" {
+	if key := k.k[l]; key != "" {
 		w = s.groups[l][key]
 	}
 	if w.len() == 0 {
@@ -130,14 +117,9 @@ func HistoryRecord(ad *classad.ClassAd) (runtime float64, completed int64, ok bo
 	return runtime, completed, true
 }
 
-// InGroup reports whether a history record falls in k's group at an
-// owner-confined level: the same features and keys the estimator files
-// it under. Never true for LevelGlobal, whose group spans other users
-// and is described only in aggregate.
+// InGroup reports whether a history record falls in k's group at l: the
+// same features and keys the estimator files it under.
 func InGroup(ad *classad.ClassAd, k Keys, l Level) bool {
-	if l < 0 || l >= LevelGlobal {
-		return false
-	}
 	key := k.Key(l)
 	return key != "" && DeriveKeys(FeaturesFromAd(ad)).Key(l) == key
 }

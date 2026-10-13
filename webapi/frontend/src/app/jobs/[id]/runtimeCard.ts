@@ -27,21 +27,17 @@ const basisText: Record<RuntimeEstimateLevel, [string, string] | null> = {
     'from N of your earlier jobs running the same program',
   ],
   owner: null,
-  global: null,
 };
 
-// basisLine says what the estimate was drawn from. The two broadest
-// bases say why nothing closer answered when that is known: a rough
-// guess should say what it is a guess from.
+// basisLine says what the estimate was drawn from. The broadest basis
+// says why nothing closer answered when that is known: a rough guess
+// should say what it is a guess from.
 export function basisLine(basis: RuntimeEstimate['basis']): string | undefined {
   if (!basis) return undefined;
   if (basis.level === 'owner') {
     return basis.new_command
       ? 'This command has not run recently. Based on your recent jobs in general.'
       : 'Based on your recent jobs in general.';
-  }
-  if (basis.level === 'global') {
-    return 'You have no recently finished jobs to compare with. Based on recent jobs on this access point.';
   }
   const text = basisText[basis.level];
   if (!text) return undefined;

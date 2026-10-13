@@ -6,8 +6,8 @@
 // it -- and go from one job back to the group it belongs to.
 //
 // One group at a time, from the most specific (same command) to the
-// broadest (every recent job on the access point). The broadest spans
-// other users, so it shows only its spread, never their jobs.
+// broadest (all the owner's jobs of the kind). Every group is the
+// owner's own jobs.
 
 import { useState } from 'react';
 import Link from 'next/link';
@@ -148,7 +148,7 @@ export function SimilarJobs({
         <p className="text-sm text-gray-600">
           <span className="font-medium text-gray-900">{first.description.charAt(0).toUpperCase() + first.description.slice(1)}</span>
           {': '}finished in the last {Math.round(first.window.days)} days
-          {first.total > 0 && !first.aggregate_only ? `, ${first.total.toLocaleString()} found` : ''}.
+          {first.total > 0 ? `, ${first.total.toLocaleString()} found` : ''}.
         </p>
         {first.runtimes ? (
           <div className="mt-2">
@@ -157,11 +157,7 @@ export function SimilarJobs({
         ) : (
           <p className="mt-2 text-sm text-gray-500">Run times for this group are not available yet.</p>
         )}
-        {first.aggregate_only ? (
-          <p className="mt-2 text-sm text-gray-600" data-testid="aggregate-only">
-            This group includes other people&apos;s jobs, so only how long they took is shown, not the jobs.
-          </p>
-        ) : jobs.length === 0 ? (
+        {jobs.length === 0 ? (
           <p className="mt-2 text-sm text-gray-500">No finished jobs in this group.</p>
         ) : (
           <div className="mt-2 overflow-x-auto rounded-sm border border-gray-200">

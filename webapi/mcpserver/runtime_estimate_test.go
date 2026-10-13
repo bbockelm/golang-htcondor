@@ -179,3 +179,17 @@ func TestGetJobRuntimeEstimateDAGMan(t *testing.T) {
 	}
 	validateStructured(t, "get_job", sc)
 }
+
+// Every level the estimator can answer from has words, and no other
+// level does.
+func TestRuntimeLevelTextCoversLevels(t *testing.T) {
+	levels := runtimeest.Levels()
+	for _, l := range levels {
+		if runtimeLevelText[l.String()] == "" {
+			t.Errorf("no text for level %s", l)
+		}
+	}
+	if len(runtimeLevelText) != len(levels) {
+		t.Errorf("%d level texts for %d levels", len(runtimeLevelText), len(levels))
+	}
+}
