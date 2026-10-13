@@ -4,7 +4,10 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/PelicanPlatform/classad/db"
 	"github.com/PelicanPlatform/classad/dbrpc"
+
+	"github.com/bbockelm/golang-htcondor/webapi/utilization"
 )
 
 func TestParseBucketSeconds(t *testing.T) {
@@ -79,6 +82,29 @@ func TestParseMetricsAggs(t *testing.T) {
 		t.Errorf("aggs[2] = %+v, want count:*", aggs[2])
 	}
 
+	for _, a := range aggs {
+		if a.Filter != "" {
+			t.Errorf("%+v is filtered", a)
+		}
+	}
+
+	// GPU usage counts only plausible samples; the request beside it,
+	// and the other columns, every sample.
+	aggs, _, err = parseMetricsAggs("avg:GpuUtil,max:GPUsAverageUsage,max:RequestGpus,max:MemoryUsage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		utilization.GPUUsageSampleFilter("GpuUtil"),
+		utilization.GPUUsageSampleFilter("GPUsAverageUsage"),
+		"", "",
+	}
+	for i, a := range aggs {
+		if a.Filter != want[i] {
+			t.Errorf("aggs[%d] (%s) filter = %q, want %q", i, a.Arg, a.Filter, want[i])
+		}
+	}
+
 	for _, bad := range []string{"", "MemoryUsage", "bogus:X", "max:*", "max:bad-attr"} {
 		if _, _, err := parseMetricsAggs(bad); err == nil {
 			t.Errorf("expected error for agg %q", bad)
@@ -113,5 +139,55 @@ func TestMetricsUnavailable(t *testing.T) {
 	}
 	if metricsUnavailable(errors.New("connection reset")) {
 		t.Error("a real failure must not be treated as unavailable")
+	}
+}
+
+// The job page's query over a job_metrics archive: a sample reporting
+// more GPUs busy than the job had drops out of the GPU average and
+// nothing else, and a job given more GPUs than it requested keeps its
+// samples when the sample records them.
+func TestMetricsGPUUsageDropsImplausibleSamples(t *testing.T) {
+	cat, err := db.OpenCatalog(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	arch, err := cat.CreateArchiveTable("job_metrics", db.ArchiveConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{
+		// One 900-second bucket of a 2-GPU job: 1.0 and 1.2 busy, and one
+		// sample from an execute point reporting 12973.47.
+		"RunInstanceID = 0\nSampleTime = 900\nRequestGpus = 2\nMemoryUsage = 100\nGpuUtil = 1.0",
+		"RunInstanceID = 0\nSampleTime = 1000\nRequestGpus = 2\nMemoryUsage = 300\nGpuUtil = 12973.47",
+		"RunInstanceID = 0\nSampleTime = 1100\nRequestGpus = 2\nMemoryUsage = 200\nGpuUtil = 1.2",
+		// A run that asked for 1 GPU and was given 2.
+		"RunInstanceID = 1\nSampleTime = 900\nRequestGpus = 1\nGPUsProvisioned = 2\nMemoryUsage = 50\nGpuUtil = 1.8",
+	} {
+		if err := arch.AppendOld(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, groups, err := parseMetricsGroups("RunInstanceID", "SampleTime", 900)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggs, _, err := parseMetricsAggs("avg:GpuUtil,max:MemoryUsage,count:*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := arch.AggregateCols("true", groups, aggs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]string{}
+	for _, r := range rows {
+		got[r.Group[0]] = r.Values
+	}
+	if v := got["0"]; len(v) != 3 || v[0] != "1.1" || v[1] != "300" || v[2] != "3" {
+		t.Errorf("run 0 = %v, want avg GpuUtil 1.1 of the two real samples, max memory 300 and count 3 over all", v)
+	}
+	if v := got["1"]; len(v) != 3 || v[0] != "1.8" {
+		t.Errorf("run 1 = %v, want GpuUtil 1.8", v)
 	}
 }

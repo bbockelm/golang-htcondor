@@ -67,13 +67,53 @@ export function jobRequest(job: ClassAd | undefined, name: RequestAttr): JobRequ
   return out;
 }
 
+// GPU_USAGE_TOLERANCE is how far above the GPUs held a usage figure may go
+// and still count; the same as the server's utilization.GPUUsageTolerance.
+export const GPU_USAGE_TOLERANCE = 0.01;
+
+// gpusHeld is how many GPUs the job had: GPUsProvisioned, else the number
+// of distinct AssignedGPUs ids, else RequestGPUs. The same rule as the
+// server's utilization.GPUsHeld. A job matched to a slot larger than its
+// request held the whole slot.
+export function gpusHeld(job: ClassAd | undefined): number | undefined {
+  const provisioned = toNum(attr(job, 'GPUsProvisioned'));
+  if (provisioned !== undefined && provisioned > 0) return provisioned;
+  const assigned = attr(job, 'AssignedGPUs');
+  if (typeof assigned === 'string') {
+    const ids = new Set(assigned.split(/[, \t]+/).filter((id) => id !== ''));
+    if (ids.size > 0) return ids.size;
+  }
+  const request = jobRequest(job, 'RequestGPUs').value;
+  return request !== undefined && request >= 0 ? request : undefined;
+}
+
+// gpusUsed is how many GPUs the job kept busy: GPUsAverageUsage, the run's
+// average, else GPUsUsage, the running job's recent figure. A finished
+// job's history record carries only the average. Both are summed over the
+// job's GPUs, so 2 is two GPUs fully busy.
+//
+// A figure more GPUs than the job held could not produce is not a
+// measurement -- execute points have reported 12973.47 for a two-GPU
+// job -- and reads as unknown, not clamped (the server's
+// utilization.PlausibleGPUUsage). The ad keeps it as recorded. An ad
+// without GPUsProvisioned or AssignedGPUs is not judged: the request
+// alone is no bound for a job given more GPUs than it asked for.
+export function gpusUsed(job: ClassAd | undefined): number | undefined {
+  const used = toNum(attr(job, 'GPUsAverageUsage')) ?? toNum(attr(job, 'GPUsUsage'));
+  if (used === undefined) return undefined;
+  if (attr(job, 'GPUsProvisioned') === undefined && attr(job, 'AssignedGPUs') === undefined) return used;
+  const held = gpusHeld(job);
+  if (held === undefined) return used;
+  return used >= 0 && used <= held * (1 + GPU_USAGE_TOLERANCE) ? used : undefined;
+}
+
 // hasGpus decides whether a GPU row or series belongs on the page: the job
 // asked for at least one GPU, or it has some assigned, provisioned or in
 // use. RequestGPUs = 0 alone is a job without GPUs.
 export function hasGpus(job: ClassAd | undefined): boolean {
   if ((jobRequest(job, 'RequestGPUs').value ?? 0) > 0) return true;
   if ((toNum(attr(job, 'GPUsProvisioned')) ?? 0) > 0) return true;
-  if ((toNum(attr(job, 'GPUsUsage')) ?? 0) > 0) return true;
+  if ((gpusUsed(job) ?? 0) > 0) return true;
   const assigned = attr(job, 'AssignedGPUs');
   return typeof assigned === 'string' && assigned.trim() !== '';
 }

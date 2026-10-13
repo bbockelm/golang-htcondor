@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { EXPR_REQUEST_MEMORY as EXPR, exprRequestJob } from './jobRequests.fixture';
-import { hasGpus, jobRequest } from './jobRequests';
+import { gpusHeld, gpusUsed, hasGpus, jobRequest } from './jobRequests';
 
 describe('jobRequest', () => {
   it('reads an expression request as the number the server evaluated, and keeps the rule', () => {
@@ -50,5 +50,32 @@ describe('hasGpus', () => {
     expect(hasGpus({ RequestGPUs: 0, AssignedGPUs: 'GPU-0000aaaa' })).toBe(true);
     expect(hasGpus({ GPUsProvisioned: 1 })).toBe(true);
     expect(hasGpus({ GPUsUsage: 0.4 })).toBe(true);
+  });
+});
+
+// The server's rule (utilization.GPUsHeld / PlausibleGPUUsage), mirrored.
+describe('gpusHeld and gpusUsed', () => {
+  it('counts the GPUs held: provisioned, else distinct assigned ids, else the request', () => {
+    expect(gpusHeld({ RequestGPUs: 1, GPUsProvisioned: 2, AssignedGPUs: 'GPU-1a' })).toBe(2);
+    expect(gpusHeld({ RequestGPUs: 1, AssignedGPUs: 'GPU-1a, GPU-1b,GPU-1a' })).toBe(2);
+    expect(gpusHeld({ RequestGPUs: 3 })).toBe(3);
+    expect(gpusHeld({})).toBeUndefined();
+  });
+
+  it.each([
+    ['req 2, prov 2, avg 12973.47', { RequestGPUs: 2, GPUsProvisioned: 2, AssignedGPUs: 'GPU-0a,GPU-0b', GPUsAverageUsage: 12973.47 }, undefined],
+    ['req 2, prov 2, avg 53.67', { RequestGPUs: 2, GPUsProvisioned: 2, GPUsAverageUsage: 53.67 }, undefined],
+    ['req 4, prov 4, avg 110688.3', { RequestGPUs: 4, GPUsProvisioned: 4, GPUsAverageUsage: 110688.3 }, undefined],
+    ['req 1, prov 2, two ids, avg 1.8', { RequestGPUs: 1, GPUsProvisioned: 2, AssignedGPUs: 'GPU-1a,GPU-1b', GPUsAverageUsage: 1.8 }, 1.8],
+    ['req 1, two ids, avg 1.8', { RequestGPUs: 1, AssignedGPUs: 'GPU-1a,GPU-1b', GPUsAverageUsage: 1.8 }, 1.8],
+    ['req 4, prov 4, avg 3.2', { RequestGPUs: 4, GPUsProvisioned: 4, GPUsAverageUsage: 3.2 }, 3.2],
+    ['req 1, prov 1, avg 1.004 (jitter)', { RequestGPUs: 1, GPUsProvisioned: 1, GPUsAverageUsage: 1.004 }, 1.004],
+    ['req 1, prov 1, avg 1.2', { RequestGPUs: 1, GPUsProvisioned: 1, GPUsAverageUsage: 1.2 }, undefined],
+    ['req 2, prov 2, GPUsUsage only', { RequestGPUs: 2, GPUsProvisioned: 2, GPUsUsage: 1.5 }, 1.5],
+    ['req 2, prov 2, GPUsUsage 9', { RequestGPUs: 2, GPUsProvisioned: 2, GPUsUsage: 9 }, undefined],
+    // Neither GPUsProvisioned nor AssignedGPUs: not judged.
+    ['req 1 only, avg 1.8', { RequestGPUs: 1, GPUsAverageUsage: 1.8 }, 1.8],
+  ])('%s', (_name, job, want) => {
+    expect(gpusUsed(job)).toBe(want);
   });
 });

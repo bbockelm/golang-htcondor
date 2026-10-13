@@ -870,6 +870,16 @@ test('a workflow whose jobs started promptly gets no multiplier', async ({ page 
   await expect(page.getByTestId('advice-throughput')).toHaveCount(0);
 });
 
+test('a GPU workflow lists its GPU suggestions with their submit lines', async ({ page }) => {
+  await page.goto('/utilization?w=wf-train');
+  const idle = page.locator('[data-testid="advice"][data-advice-id="gpu-idle"]');
+  await expect(idle).toContainText('Keep the GPU busier');
+  await expect(idle).toContainText('Half of 58 jobs kept their GPUs busy 34% of the time or less.');
+  const memory = page.locator('[data-testid="advice"][data-advice-id="gpu-memory-small"]');
+  await expect(memory).toContainText('Lower the GPU memory minimum to 6 GB');
+  await expect(memory.locator('pre')).toHaveText('gpus_minimum_memory = 6 GB');
+});
+
 test('a suggestion copies its submit lines', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.goto('/utilization?w=wf-blast');

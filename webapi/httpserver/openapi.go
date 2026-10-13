@@ -100,7 +100,7 @@ const openAPISchema = `{
       "UtilAdvice": {
         "type": "object",
         "properties": {
-          "id": {"type": "string", "enum": ["memory-lower", "memory-retry", "memory-raise", "memory-ok", "cpus-lower", "cpus-raise", "disk-lower", "disk-raise", "gpu-idle", "gpu-unused", "gpus-lower", "gpu-cpu-bound", "gpu-memory-small", "short-jobs", "restarts"]},
+          "id": {"type": "string", "enum": ["memory-lower", "memory-retry", "memory-raise", "memory-ok", "cpus-lower", "cpus-raise", "disk-lower", "disk-raise", "gpu-idle", "gpu-unused", "gpus-lower", "gpu-cpu-bound", "gpu-memory-small", "gpu-memory-require", "gpu-memory-raise", "short-jobs", "restarts"]},
           "resource": {"type": "string", "enum": ["cpu", "memory", "disk", "gpu", "runtime"]},
           "severity": {"type": "string", "enum": ["info", "suggest", "warn"]},
           "title": {"type": "string"},
@@ -174,7 +174,7 @@ const openAPISchema = `{
             "memory_request_mib": {"type": "number", "nullable": true}, "memory_p95_mib": {"type": "number", "nullable": true},
             "cpu_request": {"type": "number", "nullable": true}, "cpu_cores_p50": {"type": "number", "nullable": true}, "wall_p50": {"type": "number", "nullable": true},
             "gpu_request": {"type": "number", "nullable": true, "description": "Typical request_gpus of the batch's GPU jobs."},
-            "gpu_util_p50": {"type": "number", "nullable": true, "description": "Median fraction of requested GPUs kept busy."}}}},
+            "gpu_util_p50": {"type": "number", "nullable": true, "description": "Median fraction of the GPUs each job had kept busy."}}}},
           "samples": {"type": "array", "items": {"type": "object", "properties": {
             "job": {"type": "string", "description": "cluster.proc, as in /utilization/jobs rows."},
             "memory_mib": {"type": "number", "nullable": true}, "wall": {"type": "number"}, "cores": {"type": "number", "nullable": true},
@@ -766,7 +766,7 @@ const openAPISchema = `{
       "get": {
         "tags": ["metrics"],
         "summary": "Query time-series metrics",
-        "description": "A read-only, owner-scoped, time-bucketed aggregate over an htcondordb archive time-series table. The only table today is job_metrics; an unknown table is 404. The job page uses this to plot per-run memory/CPU/disk/GPU: group_by=RunInstanceID, bucket=15m, agg=max:MemoryUsage,avg:CpuUtil,max:DiskUsage,avg:GpuUtil plus the max:Request* reference lines, constraint=ClusterId == N && ProcId == M. The same surface answers fleet questions by grouping on other columns (Owner, ProjectName, admin-configured extras). MemoryUsage/DiskUsage are high-water marks, not instantaneous (see the design notes). A non-admin caller is confined to its own Owner. When the sampler is disabled the response is 200 with enabled=false and no rows.",
+        "description": "A read-only, owner-scoped, time-bucketed aggregate over an htcondordb archive time-series table. The only table today is job_metrics; an unknown table is 404. The job page uses this to plot per-run memory/CPU/disk/GPU: group_by=RunInstanceID, bucket=15m, agg=max:MemoryUsage,avg:CpuUtil,max:DiskUsage,avg:GpuUtil plus the max:Request* reference lines, constraint=ClusterId == N && ProcId == M. The same surface answers fleet questions by grouping on other columns (Owner, ProjectName, admin-configured extras). MemoryUsage/DiskUsage are high-water marks, not instantaneous (see the design notes). An aggregate over GpuUtil or GPUsAverageUsage counts only samples reporting no more GPUs busy than the job had. A non-admin caller is confined to its own Owner. When the sampler is disabled the response is 200 with enabled=false and no rows.",
         "operationId": "queryMetrics",
         "parameters": [
           {"name": "table", "in": "path", "required": true, "schema": {"type": "string", "enum": ["job_metrics"]}, "description": "The metrics table to read."},

@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -252,6 +252,25 @@ describe('ResourceTable', () => {
     render(<ResourceTable job={{ RequestGPUs: 2, GPUsUsage: 1.5 } as ClassAd} />);
     expect(screen.getByText('GPUs')).toBeInTheDocument();
     expect(screen.getByText('2')).toBeInTheDocument();
+  });
+
+  // A finished job's record has GPUsAverageUsage and never GPUsUsage.
+  it('shows a finished job\'s GPU use from GPUsAverageUsage', () => {
+    render(<ResourceTable job={{ RequestGPUs: 2, GPUsProvisioned: 2, GPUsAverageUsage: 1.25 } as ClassAd} />);
+    expect(screen.getByText('GPUs')).toBeInTheDocument();
+    expect(screen.getByText('1.3')).toBeInTheDocument();
+  });
+
+  // Usage no job's GPUs could produce shows as unknown, judged against the
+  // GPUs it held -- which can be more than it asked for.
+  it.each([
+    ['req 2, prov 2, avg 12973.47', { RequestGPUs: 2, GPUsProvisioned: 2, AssignedGPUs: 'GPU-0a,GPU-0b', GPUsAverageUsage: 12973.47 }, '—'],
+    ['req 1, prov 2, two ids, avg 1.8', { RequestGPUs: 1, GPUsProvisioned: 2, AssignedGPUs: 'GPU-1a,GPU-1b', GPUsAverageUsage: 1.8 }, '1.8'],
+    ['req 4, prov 4, avg 3.2', { RequestGPUs: 4, GPUsProvisioned: 4, GPUsAverageUsage: 3.2 }, '3.2'],
+  ])('GPU use for %s', (_name, job, used) => {
+    render(<ResourceTable job={job as ClassAd} />);
+    const row = screen.getByText('GPUs').closest('tr')!;
+    expect(within(row).getAllByRole('cell')[2]).toHaveTextContent(used);
   });
 
   it('still hides the GPU row for a job that asked for none', () => {

@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
+
+	"github.com/bbockelm/golang-htcondor/webapi/utilization"
 )
 
 // metricsTableDef is an allowlisted archive table and the attribute its
@@ -280,13 +282,27 @@ func parseMetricsAggs(spec string) ([]dbrpc.AggSpec, []metricsColumn, error) {
 		if arg == "*" && f != dbrpc.AggCount {
 			return nil, nil, fmt.Errorf("%s requires an attribute, not *", fn)
 		}
-		aggs = append(aggs, dbrpc.AggSpec{Func: f, Arg: arg})
+		spec := dbrpc.AggSpec{Func: f, Arg: arg}
+		if metricsGPUUsageAttr(arg) {
+			spec.Filter = utilization.GPUUsageSampleFilter(arg)
+		}
+		aggs = append(aggs, spec)
 		cols = append(cols, metricsColumn{Name: fn + "_" + arg, Kind: "metric", Func: fn, Attr: arg})
 	}
 	if len(aggs) == 0 {
 		return nil, nil, fmt.Errorf("at least one agg is required, e.g. agg=max:MemoryUsage")
 	}
 	return aggs, cols, nil
+}
+
+// metricsGPUUsageAttr reports whether a sample attribute is GPU usage in
+// GPUs kept busy. An aggregate over one counts only the samples whose
+// usage the job's GPUs could have produced: an execute point sometimes
+// reports thousands of GPUs busy on a two-GPU job, and one such sample
+// would swamp every other in its bucket. The filter narrows only that
+// aggregate, so the bucket's other columns still see every sample.
+func metricsGPUUsageAttr(attr string) bool {
+	return strings.EqualFold(attr, "GpuUtil") || strings.EqualFold(attr, "GPUsAverageUsage")
 }
 
 // metricsConstraint ANDs the optional time window onto the caller's

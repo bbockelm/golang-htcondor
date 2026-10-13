@@ -145,3 +145,30 @@ func TestEvaluateUsageAttrs(t *testing.T) {
 		evaluateUsageAttrs(nil)
 	})
 }
+
+// GPU usage is served as HTCondor recorded it, including a figure no job
+// could produce: the raw ad and the attribute list show the record, and
+// the pages that derive a usage figure judge it themselves.
+func TestGPUUsageIsServedAsRecorded(t *testing.T) {
+	ad, err := classad.Parse(`[RequestGPUs = 2; GPUsProvisioned = 2; AssignedGPUs = "GPU-0a,GPU-0b"; GPUsAverageUsage = 12973.47; GPUsUsage = 53.67]`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	before, err := json.Marshal(ad)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	evaluateUsageAttrs(ad)
+	after, err := json.Marshal(ad)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("served ad changed:\n before %s\n after  %s", before, after)
+	}
+	for _, name := range []string{"GPUsAverageUsage", "GPUsUsage"} {
+		if _, ok := ad.Lookup(name); !ok {
+			t.Errorf("%s removed", name)
+		}
+	}
+}

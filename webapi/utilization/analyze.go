@@ -287,11 +287,13 @@ func resourceSummaries(jobs []*Job) []ResourceSummary {
 			}
 		}
 		if j.RequestGPUs.OK() && j.RequestGPUs.V() > 0 {
+			// GPU-hours are the GPUs the job had: a job matched to a
+			// slot larger than its request held the whole slot.
 			anyGPU = true
-			gpu.alloc += j.RequestGPUs.V() * wh
-			if _, ok := j.GPUUtilization(); ok {
-				gpu.used += j.GPUsAverageUsage.V() * wh
-				gpu.allocMeasured += j.RequestGPUs.V() * wh
+			gpu.alloc += j.gpus() * wh
+			if busy, ok := j.gpusBusy(); ok {
+				gpu.used += busy * wh
+				gpu.allocMeasured += j.gpus() * wh
 				gpu.measured++
 			}
 		}

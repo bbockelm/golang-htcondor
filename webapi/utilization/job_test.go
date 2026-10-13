@@ -164,9 +164,9 @@ func TestFromAdHolds(t *testing.T) {
 	}
 }
 
-// GPUsAverageUsage sums over the job's GPUs; utilization is per GPU
-// requested.
-func TestGPUUtilizationIsPerRequestedGPU(t *testing.T) {
+// GPUsAverageUsage sums over the job's GPUs; utilization is per GPU the
+// job had, which without GPUsProvisioned or AssignedGPUs is its request.
+func TestGPUUtilizationIsPerGPUHeld(t *testing.T) {
 	j := FromAd(parseAd(t, "JobStatus = 4\nRequestGPUs = 2\nGPUsAverageUsage = 1.5\nRemoteWallClockTime = 600"), "")
 	if u, ok := j.GPUUtilization(); !ok || u != 0.75 {
 		t.Errorf("utilization = %v, want 0.75", u)
