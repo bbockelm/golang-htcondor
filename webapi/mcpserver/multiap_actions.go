@@ -34,6 +34,7 @@ var multiAPActionTools = map[string]bool{
 	"create_output_download_url": true,
 	"tail_job_output":            true,
 	"exec_in_job":                true,
+	"analyze_job_match":          true,
 }
 
 // multiAPReadOnlyActionTools change nothing on the AP; the rest of
@@ -46,6 +47,7 @@ var multiAPReadOnlyActionTools = map[string]bool{
 	"tail_job_output":            true,
 	"create_output_download_url": true,
 	"create_input_upload_url":    true,
+	"analyze_job_match":          true,
 }
 
 // multiAPClusterTools take a bare cluster ("123") to mean every proc of
@@ -102,6 +104,8 @@ func (s *Server) singleJobTool(name string) func(context.Context, map[string]int
 		return s.toolTailJobOutput
 	case "exec_in_job":
 		return s.toolExecInJob
+	case "analyze_job_match":
+		return s.toolAnalyzeJobMatch
 	}
 	return nil
 }

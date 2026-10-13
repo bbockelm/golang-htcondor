@@ -119,7 +119,10 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 		feedCh  <-chan jobWatchUpdateSource
 		feedOff func()
 	)
-	if s.jobWatchFeed != nil && s.jobWatchFeed.Warm() {
+	// Not in multi-AP mode: the feed there follows every AP's jobs, and
+	// a subscription by cluster.proc would carry another AP's job of the
+	// same number. The poll below reads the job's own AP.
+	if s.multi == nil && s.jobWatchFeed != nil && s.jobWatchFeed.Warm() {
 		feedCh, feedOff = subscribeFeed(s, int64(cluster), int64(proc))
 		defer feedOff()
 	}

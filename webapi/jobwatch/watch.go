@@ -21,6 +21,7 @@ package jobwatch
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,10 +41,15 @@ const (
 	ModeAll Mode = "all"
 )
 
-// JobID identifies a job within a schedd.
+// JobID identifies a job. Schedd is the access point it is on, lower-
+// cased, on a server fronting several (multi-AP mode): the same
+// cluster.proc on two access points is two jobs, tracked and reported
+// independently. It is empty on a server with one schedd, and in a
+// tracked entry stored before access points were recorded.
 type JobID struct {
-	Cluster int64 `json:"cluster_id"`
-	Proc    int64 `json:"proc_id"`
+	Cluster int64  `json:"cluster_id"`
+	Proc    int64  `json:"proc_id"`
+	Schedd  string `json:"schedd,omitempty"`
 }
 
 // Watch is a registered interest: Constraint selects which jobs, Event
@@ -332,10 +338,27 @@ type Fold struct {
 	now       time.Time
 	truncated bool
 
+	// perAP is set for a source spanning several access points: a job's
+	// identity includes its ScheddName, and its absence from the queue
+	// is evidence of anything only where cov vouches for that access
+	// point (see Coverage). mem is the evaluator's memory of when each
+	// absent job was last seen, and readAt when this pass's queue read
+	// finished.
+	perAP  bool
+	cov    *Coverage
+	mem    *absenceMemory
+	readAt time.Time
+
 	// seen is every job in scope: the tracked set plus anything matching
 	// that turns up now. The value records where it was seen, which is
 	// what the terminal events turn on.
 	seen map[JobID]placement
+	// tracked is the watch's memory as this fold identifies jobs.
+	tracked map[JobID]bool
+	// places is, in multi-AP mode, which access points each cluster.proc
+	// was seen on this pass, and whether in the history archive: what
+	// resolves a tracked entry stored without an access point.
+	places map[[2]int64]map[string]bool
 
 	satisfied int
 	matched   []JobRef
@@ -358,14 +381,105 @@ type placement struct {
 
 // Fold starts an evaluation. now may be zero for time.Now.
 func (w *Watch) Fold(now time.Time, queueTruncated bool) *Fold {
-	f := &Fold{w: w, now: now, truncated: queueTruncated, seen: make(map[JobID]placement, len(w.Tracked)+16)}
+	return w.fold(now, queueTruncated, false)
+}
+
+// fold starts an evaluation; perAP selects multi-AP identities (see
+// Fold.perAP).
+func (w *Watch) fold(now time.Time, queueTruncated, perAP bool) *Fold {
+	f := &Fold{w: w, now: now, truncated: queueTruncated, perAP: perAP,
+		seen: make(map[JobID]placement, len(w.Tracked)+16), tracked: make(map[JobID]bool, len(w.Tracked))}
 	// The tracked set is in scope before anything arrives. Without it a
 	// cluster that has fully drained would look like an empty selection,
 	// and "all done" would be back to deciding a vacuous truth.
 	for _, id := range w.Tracked {
+		if !perAP {
+			// One schedd: an access point recorded by a multi-AP server
+			// this database once belonged to names nothing here, and
+			// keeping it would make the entry absent from every read --
+			// which, with one schedd, is evidence the job finished.
+			id.Schedd = ""
+		}
 		f.seen[id] = placement{}
+		f.tracked[id] = true
 	}
 	return f
+}
+
+// notePlace records where a job was seen, for resolveLegacy.
+func (f *Fold) notePlace(id JobID, archived bool) {
+	if !f.perAP || id.Schedd == "" {
+		return
+	}
+	if f.places == nil {
+		f.places = map[[2]int64]map[string]bool{}
+	}
+	k := [2]int64{id.Cluster, id.Proc}
+	if f.places[k] == nil {
+		f.places[k] = map[string]bool{}
+	}
+	f.places[k][id.Schedd] = f.places[k][id.Schedd] || archived
+}
+
+// resolveLegacy replaces each tracked entry stored without an access
+// point (before access points were recorded) with the job it must be,
+// when that is unambiguous: exactly one access point has that
+// cluster.proc this pass, in its history archive. With two candidates it
+// is left waiting rather than guessed; its absence is never evidence
+// (absenceIsEvidence), so it can only ever resolve this way.
+func (f *Fold) resolveLegacy() {
+	if !f.perAP {
+		return
+	}
+	for id := range f.seen {
+		if id.Schedd != "" {
+			continue
+		}
+		places := f.places[[2]int64{id.Cluster, id.Proc}]
+		if len(places) != 1 {
+			continue
+		}
+		for schedd, archived := range places {
+			if archived {
+				delete(f.seen, id)
+				f.tracked[JobID{Cluster: id.Cluster, Proc: id.Proc, Schedd: schedd}] = true
+			}
+		}
+	}
+}
+
+// absenceIsEvidence reports whether a tracked job's absence from this
+// pass's queue read shows that it left the queue (multi-AP mode). Two
+// conditions, both from the source: its access point is vouched for in
+// cov -- fresh, its jobs stream connected without error -- and the data
+// the read reflects for that access point is newer than the last time
+// this evaluator saw the job there. A job with no access point (a
+// tracked entry stored before they were recorded) is never vouched for.
+func (f *Fold) absenceIsEvidence(id JobID) bool {
+	if f.cov == nil || id.Schedd == "" {
+		return false
+	}
+	return f.cov.evidence(id.Schedd, f.lastSeen(id))
+}
+
+// lastSeen is when the job was last seen in the queue, as far as this
+// process knows: the read that last found it, which is the previous
+// pass's for a job missing for the first time. With no memory of any
+// pass (a restart, a new watch) it is this pass's own read -- the job
+// may have been there a moment ago, and the read is not newer than that.
+func (f *Fold) lastSeen(id JobID) time.Time {
+	if f.mem == nil {
+		return f.readAt
+	}
+	if t, ok := f.mem.since[id]; ok {
+		return t
+	}
+	t := f.mem.lastRead
+	if t.IsZero() {
+		t = f.readAt
+	}
+	f.mem.since[id] = t
+	return t
 }
 
 // Truncated marks the queue read as incomplete. It is called after the
@@ -379,7 +493,8 @@ func (f *Fold) Queued(ad *classad.ClassAd) {
 	if !f.w.selects(ad) {
 		return
 	}
-	id := jobIDOf(ad)
+	id := jobIDOf(ad, f.perAP)
+	f.notePlace(id, false)
 	p := f.seen[id]
 
 	// A terminal ad seen in the queue (Completed or Removed) is as
@@ -419,11 +534,23 @@ func (f *Fold) Queued(ad *classad.ClassAd) {
 }
 
 // Finished folds in one history row.
+//
+// A terminal record from the change stream (isFeedRecord) carries only
+// the attributes the feed keeps, so the watch's constraint is not
+// re-evaluated against it -- a missing attribute could make it match a
+// job it should not. It only resolves a job this watch already tracks,
+// which was selected on a whole ad; an untracked job is left to the
+// history archive.
 func (f *Fold) Finished(ad *classad.ClassAd) {
-	if !f.w.selects(ad) {
+	id := jobIDOf(ad, f.perAP)
+	if isFeedRecord(ad) {
+		if !f.tracked[id] {
+			return
+		}
+	} else if !f.w.selects(ad) {
 		return
 	}
-	id := jobIDOf(ad)
+	f.notePlace(id, true)
 	p := f.seen[id]
 	p.inHistory = true
 	p.ended = true
@@ -511,6 +638,7 @@ func (f *Fold) hit(id JobID, ad *classad.ClassAd) {
 // complete queue and from history has finished, which is what lets
 // "done" work without an archive.
 func (f *Fold) Done() Outcome {
+	f.resolveLegacy()
 	out := Outcome{Tracked: make([]JobID, 0, len(f.seen)), Satisfied: f.satisfied, Matched: f.matched}
 	var unresolved []JobID
 	var stillHere int
@@ -522,6 +650,11 @@ func (f *Fold) Done() Outcome {
 			// that is final: the job is gone and cannot enter the state now.
 			lost++
 		}
+		if f.mem != nil && (p.inQueue || p.inHistory) {
+			// Seen, or accounted for: nothing to remember about when it
+			// was last seen.
+			delete(f.mem.since, id)
+		}
 		switch {
 		case p.inQueue:
 			stillHere++
@@ -530,9 +663,20 @@ func (f *Fold) Done() Outcome {
 		case f.truncated:
 			// Absent from a partial read means absent from the part we
 			// got, which is not evidence of anything.
+		case f.perAP && !f.absenceIsEvidence(id):
+			// Absent, but from an access point whose rows in this read
+			// cannot show that it left: its source is stale, absent or
+			// untrusted, its jobs stream is down or failing, the hub is
+			// unreachable -- or the read is not yet newer than the last
+			// time the job was seen. As far as anyone can tell it is
+			// still there, so the watch waits: counted as still queued,
+			// which also keeps the give-up and unsatisfiable verdicts
+			// (both of which rest on every job having gone) from firing
+			// on it.
+			stillHere++
 		default:
 			// Gone from a complete queue with nothing to explain it.
-			if f.w.Event == EventDone && f.w.tracks(id) {
+			if f.w.Event == EventDone && f.tracked[id] {
 				f.satisfied++
 				out.Satisfied = f.satisfied
 				if len(out.Matched) < MaxMatched {
@@ -542,6 +686,13 @@ func (f *Fold) Done() Outcome {
 				unresolved = append(unresolved, id)
 			}
 		}
+	}
+	if f.mem != nil {
+		// The next pass's "last seen" for every job present now. Moved
+		// on a truncated read too: a job beyond the cut was not seen,
+		// and dating its last sighting later than it was is the
+		// conservative error.
+		f.mem.lastRead = f.readAt
 	}
 	out.Selected = len(out.Tracked)
 	sortJobIDs(out.Tracked)
@@ -718,15 +869,6 @@ func (w *Watch) selects(ad *classad.ClassAd) bool {
 	return w.matchConstraint != nil && w.matchConstraint.Matches(ad)
 }
 
-func (w *Watch) tracks(id JobID) bool {
-	for _, t := range w.Tracked {
-		if t == id {
-			return true
-		}
-	}
-	return false
-}
-
 // HTCondor JobStatus values used here.
 const (
 	statusRunning   = 2
@@ -771,10 +913,18 @@ func statusOf(ad *classad.ClassAd) int64 {
 	return v
 }
 
-func jobIDOf(ad *classad.ClassAd) JobID {
+// jobIDOf reads a job's identity. perAP adds its access point, from the
+// ScheddName every row of a federation hub carries, lower-cased: schedd
+// names compare without regard to case, and the identity must not split
+// on a respelling.
+func jobIDOf(ad *classad.ClassAd, perAP bool) JobID {
 	id := JobID{}
 	id.Cluster, _ = ad.EvaluateAttrInt("ClusterId")
 	id.Proc, _ = ad.EvaluateAttrInt("ProcId")
+	if perAP {
+		s, _ := ad.EvaluateAttrString("ScheddName")
+		id.Schedd = strings.ToLower(s)
+	}
 	return id
 }
 
@@ -809,10 +959,16 @@ func (r *JobRef) set(k, v string) {
 // sortJobIDs keeps the tracked set stable, so storing it does not churn
 // and a diff between evaluations is readable.
 func sortJobIDs(ids []JobID) {
-	for i := 1; i < len(ids); i++ {
-		for j := i; j > 0 && (ids[j].Cluster < ids[j-1].Cluster ||
-			(ids[j].Cluster == ids[j-1].Cluster && ids[j].Proc < ids[j-1].Proc)); j-- {
-			ids[j], ids[j-1] = ids[j-1], ids[j]
-		}
+	sort.Slice(ids, func(i, j int) bool { return jobIDLess(ids[i], ids[j]) })
+}
+
+// jobIDLess orders job ids by access point, then cluster, then proc.
+func jobIDLess(a, b JobID) bool {
+	if a.Schedd != b.Schedd {
+		return a.Schedd < b.Schedd
 	}
+	if a.Cluster != b.Cluster {
+		return a.Cluster < b.Cluster
+	}
+	return a.Proc < b.Proc
 }

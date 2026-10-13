@@ -128,15 +128,15 @@ func routedSchedd(ctx context.Context) string {
 // with the methods its handler accepts, and anything else -- a new
 // sub-resource nobody has routed yet -- is refused.
 //
-// match-analysis is not served: it reads the pool's slots as well as the
-// job, and has not been taught which collector view belongs to which AP.
+// match-analysis reads the job from its AP and the slots from the
+// pool's collector, which every AP shares.
 func multiAPJobActionAllowed(method, rest string) bool {
 	sub, tail, _ := strings.Cut(rest, "/")
 	get := method == http.MethodGet
 	switch sub {
 	case "hold", "release", "warm":
 		return tail == "" && method == http.MethodPost
-	case "stdout", "stderr", "log", "peek", "dag", "watch", "ssh":
+	case "stdout", "stderr", "log", "peek", "dag", "watch", "ssh", "match-analysis":
 		return tail == "" && get
 	case "output":
 		return (tail == "" && get) || (tail == "share" && method == http.MethodPost)

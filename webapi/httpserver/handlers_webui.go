@@ -15,6 +15,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
 // AuthMeResponse describes the currently-authenticated browser session.
@@ -250,6 +251,10 @@ type DashboardResponse struct {
 	// archive means no rate, and an omitted field says that where a
 	// zeroed one would read as "everything failed".
 	Goodput *GoodputSummary `json:"goodput,omitempty"`
+	// APs and Sources are multi-AP mode's: the counts per access point,
+	// and which APs' data is not current (multiap_dashboard.go).
+	APs     []DashboardAP    `json:"aps,omitempty"`
+	Sources *multiap.Sources `json:"sources,omitempty"`
 }
 
 // holdReasonCodeSpoolingInput is HTCondor's "Spooling input data files"
@@ -303,6 +308,10 @@ func statusName(code int64) string {
 func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if s.multi != nil {
+		s.handleMultiDashboard(w, r)
 		return
 	}
 
@@ -426,6 +435,10 @@ type DashboardActivityResponse struct {
 	// archive means no rate, and an omitted field says that where a
 	// zeroed one would read as "everything failed".
 	Goodput *GoodputSummary `json:"goodput,omitempty"`
+	// APs and Sources are multi-AP mode's: what finished per access
+	// point, and which APs' data is not current (multiap_dashboard.go).
+	APs     []DashboardAPActivity `json:"aps,omitempty"`
+	Sources *multiap.Sources      `json:"sources,omitempty"`
 }
 
 // dashboardWalkOptions is the projection the cached walk reads.
@@ -469,6 +482,10 @@ func dashboardWalkOptions(owner string, ownedByMe bool) *htcondor.QueryOptions {
 func (s *Handler) handleDashboardActivity(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if s.multi != nil {
+		s.handleMultiDashboardActivity(w, r)
 		return
 	}
 	ctx, needsRedirect, err := s.requireAuthentication(r)

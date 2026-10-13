@@ -9,6 +9,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/webapi/issues"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
 // analyze_issues: what is going wrong on this access point, grouped.
@@ -125,15 +126,35 @@ func (s *Server) issueMirrorRows(ctx context.Context, table, constraint string, 
 }
 
 func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	scope, ok := s.ownerScope(ctx, tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
-	}
-	// The same owner confinement every read tool applies: a non-admin
-	// caller's view of "what is going wrong" is their own jobs.
+	var scope OwnerScope
+	var src issues.Source = mcpIssueSource{s}
+	var sources *multiap.Sources
 	constraint := "true"
-	if !scope.AllUsers {
-		constraint = fmt.Sprintf("Owner == %s", classadStringLit(scope.Owner))
+	if s.multi != nil {
+		// Every AP, from the hub: the caller's own jobs.
+		user, err := s.multiCaller(ctx)
+		if err != nil {
+			return nil, err
+		}
+		clause, _, srcs, err := s.multi.Scope(user, "", stringArg(args, "schedd"))
+		if err != nil {
+			return nil, err
+		}
+		srcs = s.multi.TableSources(srcs, multiap.TableJobs)
+		if v, ok := args["include_ended"].(bool); !ok || v {
+			srcs = s.multi.TableSources(srcs, multiap.TableEpochHistory)
+		}
+		scope, constraint, src, sources = OwnerScope{Owner: user}, clause, multiap.IssueSource{Service: s.multi}, &srcs
+	} else {
+		var ok bool
+		if scope, ok = s.ownerScope(ctx, tierRead); !ok {
+			return nil, fmt.Errorf("authentication required")
+		}
+		// The same owner confinement every read tool applies: a non-admin
+		// caller's view of "what is going wrong" is their own jobs.
+		if !scope.AllUsers {
+			constraint = fmt.Sprintf("Owner == %s", classadStringLit(scope.Owner))
+		}
 	}
 
 	window := issuesDefaultWindow
@@ -163,7 +184,7 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 		includeEnded = v
 	}
 
-	set, err := issues.Collect(ctx, mcpIssueSource{s}, issues.Options{
+	set, err := issues.Collect(ctx, src, issues.Options{
 		Scope:        constraint,
 		Window:       window,
 		IncludeEnded: includeEnded,
@@ -201,7 +222,11 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 				if i >= issuesMaxExamples {
 					break
 				}
-				fmt.Fprintf(&b, "      e.g. %d.%d (%s): %s\n", ex.Cluster, ex.Proc, ex.Owner, oneLine(ex.Message))
+				id := fmt.Sprintf("%d.%d", ex.Cluster, ex.Proc)
+				if ex.Schedd != "" {
+					id += "@" + ex.Schedd
+				}
+				fmt.Fprintf(&b, "      e.g. %s (%s): %s\n", id, ex.Owner, oneLine(ex.Message))
 			}
 		}
 		structured = append(structured, map[string]interface{}{
@@ -210,9 +235,12 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 			"clusters": trimExamples(clusters),
 		})
 	}
+	if sources != nil {
+		b.WriteString("\n" + sourcesNote(*sources))
+	}
 	b.WriteString("\n" + scope.Note())
 
-	return structuredTextResult(b.String(), map[string]interface{}{
+	out := map[string]interface{}{
 		"window_seconds": int64(window / time.Second),
 		"bucket_seconds": int64(window/time.Second) / issuesTimelineBuckets,
 		"granularity":    granularity,
@@ -223,7 +251,11 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 		// to special-case null on the common "nothing wrong" answer.
 		"notes":    append([]string{}, set.Notes...),
 		"sections": structured,
-	}), nil
+	}
+	if sources != nil {
+		out["sources"] = sources
+	}
+	return structuredTextResult(b.String(), out), nil
 }
 
 type issueSectionView struct {

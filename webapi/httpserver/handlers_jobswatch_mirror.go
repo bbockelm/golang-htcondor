@@ -43,6 +43,9 @@ func (h *Handler) streamJobsWatchFromMirror(ctx context.Context, w http.Response
 	// Applied inside the feed rather than here, so there is no path on
 	// which a wider stream is opened and then narrowed. The feed
 	// refuses a caller nobody named.
+	if !h.streamCallerInDomain(ctx, w) {
+		return
+	}
 	owner, all := activityStreamScope(htcondor.GetAuthenticatedUserFromContext(ctx),
 		r.URL.Query().Get("owned_by_me"), h.seesAllJobs(ctx, r, jobScopeRead))
 	events, cancel, err := h.jobWatchFeed.SubscribeActivity(owner, all, jobsWatchMirrorBuffer)
@@ -101,7 +104,7 @@ func (h *Handler) streamJobsWatchFromMirror(ctx context.Context, w http.Response
 					return
 				}
 			}
-			if err := writeWatchSSE(w, flusher, jobsWatchEventName(ev.Kind), jobsWatchKey(ev), nil, nil, ""); err != nil {
+			if err := writeWatchSSE(w, flusher, jobsWatchEventName(ev.Kind), h.jobsWatchKeyFor(ev), nil, nil, ""); err != nil {
 				return
 			}
 		}

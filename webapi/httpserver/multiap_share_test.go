@@ -73,10 +73,11 @@ func TestMultiAPShareURLRoutesToItsAP(t *testing.T) {
 		}
 	}
 
-	// Watch share URLs are not served in multi-AP mode yet.
+	// A watch share URL must name every AP (multiap_watch_test.go); one
+	// naming none is refused.
 	rec := redeem(t, srv, http.MethodGet, "/api/v1/share/watch", shareToken(t, srv, shareurl.Payload{Kind: shareurl.KindWatch, Watch: "w1"}))
-	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("watch share in multi-AP mode = %d %s, want 501", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("watch share without s in multi-AP mode = %d %s, want 403", rec.Code, rec.Body.String())
 	}
 }
 

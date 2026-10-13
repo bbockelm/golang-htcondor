@@ -25,9 +25,10 @@ import (
 // Hub table names (htcondordb federate/), duplicated so this package
 // does not import the package under test.
 const (
-	TableJobs    = "jobs"
-	TableHistory = "history"
-	TableSources = "federation_sources"
+	TableJobs         = "jobs"
+	TableHistory      = "history"
+	TableEpochHistory = "epoch_history"
+	TableSources      = "federation_sources"
 )
 
 // DB is an in-process htcondordb.
@@ -37,6 +38,9 @@ type DB struct {
 	srv *dbrpc.Server
 	mu  sync.Mutex
 	seq int
+	// keys is each PutJob row's opaque key, by schedd/cluster.proc and
+	// then user: two users' rows may share an id on one AP.
+	keys map[string]map[string]string
 }
 
 // NewDB returns an empty database, closed when the test ends.
@@ -124,6 +128,14 @@ func (d *DB) PutJob(schedd, user string, cluster, proc int, extra string) {
 	d.mu.Lock()
 	d.seq++
 	key := fmt.Sprintf("opaque-%d", d.seq)
+	if d.keys == nil {
+		d.keys = map[string]map[string]string{}
+	}
+	id := fmt.Sprintf("%s/%d.%d", schedd, cluster, proc)
+	if d.keys[id] == nil {
+		d.keys[id] = map[string]string{}
+	}
+	d.keys[id][user] = key
 	d.mu.Unlock()
 	owner, _, _ := strings.Cut(user, "@")
 	ad := fmt.Sprintf("ScheddName = %q\nUser = %q\nOwner = %q\nClusterId = %d\nProcId = %d\nJobStatus = 1\nKey = \"%d.%d\"",
@@ -132,6 +144,78 @@ func (d *DB) PutJob(schedd, user string, cluster, proc int, extra string) {
 		ad += "\n" + extra
 	}
 	d.commit(TableJobs, key, ad)
+}
+
+// DeleteJob removes a live job row PutJob wrote, as the hub does when
+// the job leaves its AP's queue. The id must name one user's row; with
+// two users' rows under it, DeleteUserJob says whose.
+func (d *DB) DeleteJob(schedd string, cluster, proc int) {
+	d.t.Helper()
+	d.mu.Lock()
+	users := d.keys[fmt.Sprintf("%s/%d.%d", schedd, cluster, proc)]
+	d.mu.Unlock()
+	if len(users) != 1 {
+		d.t.Fatalf("multiaptest: %d rows hold %d.%d on %s; use DeleteUserJob", len(users), cluster, proc, schedd)
+	}
+	for user := range users {
+		d.DeleteUserJob(schedd, user, cluster, proc)
+	}
+}
+
+// DeleteUserJob removes user's live job row cluster.proc on schedd.
+func (d *DB) DeleteUserJob(schedd, user string, cluster, proc int) {
+	d.t.Helper()
+	d.mu.Lock()
+	id := fmt.Sprintf("%s/%d.%d", schedd, cluster, proc)
+	key, ok := d.keys[id][user]
+	if ok {
+		delete(d.keys[id], user)
+	}
+	d.mu.Unlock()
+	if !ok {
+		d.t.Fatalf("multiaptest: no job %d.%d of %s on %s to delete", cluster, proc, user, schedd)
+	}
+	ctx := context.Background()
+	tx, err := d.client().BeginTable(ctx, TableJobs)
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	if err := tx.DestroyClassAd(ctx, key); err != nil {
+		d.t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		d.t.Fatal(err)
+	}
+}
+
+// EnableEpochHistory creates the hub's epoch_history archive, as a hub
+// federating it has.
+func (d *DB) EnableEpochHistory() {
+	d.t.Helper()
+	if err := d.client().CreateArchiveTable(context.Background(), TableEpochHistory, db.ArchiveConfig{
+		CategoricalAttrs: []string{"ScheddName", "Owner", "User", "GlobalJobId"},
+		ValueAttrs:       []string{"ClusterId"},
+		ZoneAttrs:        []string{"EpochWriteDate", "EnteredHistoryTime"},
+	}); err != nil {
+		d.t.Fatal(err)
+	}
+}
+
+// PutEpoch appends an epoch_history record: one run instance's EpochAdType
+// record (EPOCH, INPUT, OUTPUT, ...) written at writeDate, with extra
+// ClassAd lines.
+func (d *DB) PutEpoch(schedd, user string, cluster, proc int, adType string, writeDate int64, extra string) {
+	d.t.Helper()
+	owner, _, _ := strings.Cut(user, "@")
+	ad := fmt.Sprintf("ScheddName = %q\nUser = %q\nOwner = %q\nClusterId = %d\nProcId = %d\nEpochAdType = %q\n"+
+		"EpochWriteDate = %d\nRunInstanceID = 0\nGlobalJobId = \"%s#%d.%d#1\"",
+		schedd, user, owner, cluster, proc, adType, writeDate, schedd, cluster, proc)
+	if extra != "" {
+		ad += "\n" + extra
+	}
+	if err := d.client().ArchiveAppend(context.Background(), TableEpochHistory, ad); err != nil {
+		d.t.Fatal(err)
+	}
 }
 
 // PutSpokeJob writes a spoke's row: keyed cluster.proc, no ScheddName.
@@ -157,11 +241,21 @@ func (d *DB) PutHistory(schedd, user string, cluster, proc int, entered int64) {
 	}
 }
 
-// PutSource writes a federation_sources row with its jobs stream
-// connected. staleness < 0 leaves StalenessSeconds unset.
+// AppendHistory appends a history record verbatim.
+func (d *DB) AppendHistory(ad string) {
+	d.t.Helper()
+	if err := d.client().ArchiveAppend(context.Background(), TableHistory, ad); err != nil {
+		d.t.Fatal(err)
+	}
+}
+
+// PutSource writes a federation_sources row with the streams of a hub's
+// default tables (jobs, history, syncstatus) connected. staleness < 0
+// leaves StalenessSeconds unset.
 func (d *DB) PutSource(schedd, state string, staleness int64) {
 	d.t.Helper()
-	ad := fmt.Sprintf("ScheddName = %q\nState = %q\nLastSeen = %d\nJobsConnected = true", schedd, state, time.Now().Unix())
+	ad := fmt.Sprintf("ScheddName = %q\nState = %q\nLastSeen = %d\nJobsConnected = true\nHistoryConnected = true\nSyncStatusConnected = true",
+		schedd, state, time.Now().Unix())
 	if staleness >= 0 {
 		ad += fmt.Sprintf("\nStalenessSeconds = %d", staleness)
 	}
@@ -221,6 +315,19 @@ func (r *Registry) Update(name string, fn func(*apregistry.Member)) {
 		}
 	}
 	panic("multiaptest: no member " + name)
+}
+
+// Remove takes the member named name (case-insensitive) out of the set.
+func (r *Registry) Remove(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	kept := r.members[:0]
+	for _, m := range r.members {
+		if !strings.EqualFold(m.Name, name) {
+			kept = append(kept, m)
+		}
+	}
+	r.members = kept
 }
 
 // WithSchedds gives every member a schedd handle at the address addr

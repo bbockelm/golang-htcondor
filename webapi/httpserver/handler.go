@@ -2091,8 +2091,16 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.spoolBufferDir = cfg.SpoolBufferDir
 	h.jobPolls = newJobPollHub(2*time.Second, h.logger, h.scheddJobQuery)
 	h.jobPolls.queryMany = h.scheddJobsQuery
-	h.jobWatchEval = jobwatch.NewEvaluator(h.jobWatch, watchSource{h: h, feed: h.jobWatchFeed},
+	var watchSrc jobwatch.Source = watchSource{h: h, feed: h.jobWatchFeed}
+	if h.multi != nil {
+		// Every AP's jobs, from the federation hub.
+		watchSrc = h.multiAPWatchSource(h.jobWatchFeed)
+	}
+	h.jobWatchEval = jobwatch.NewEvaluator(h.jobWatch, watchSrc,
 		func(msg string, args ...any) { h.logger.Info(logging.DestinationHTTP, msg, args...) })
+	// The feed keeps of each job only what the watches, the activity
+	// stream and the dashboard read (jobwatch.FeedAttrs), not whole ads.
+	h.jobWatchFeed.Keep = h.jobWatchEval.LiveAttrs
 
 	h.initRuntimeEstimates(cfg)
 

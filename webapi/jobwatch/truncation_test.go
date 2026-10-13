@@ -17,7 +17,7 @@ import (
 // never fully seen, however many of the jobs in hand are finished.
 func TestAllCannotFireOnAPartialView(t *testing.T) {
 	w := mustWatch(t, EventDone, ModeAll)
-	w.Tracked = []JobID{{42, 0}, {42, 1}}
+	w.Tracked = []JobID{{42, 0, ""}, {42, 1, ""}}
 
 	// Every job we know about has finished...
 	complete := Snapshot{History: []*classad.ClassAd{historyAd(0, completed, 0), historyAd(1, completed, 0)}}

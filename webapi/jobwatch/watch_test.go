@@ -105,7 +105,7 @@ func TestModeAllNeedsANonEmptySet(t *testing.T) {
 // The half that has already drained out of the queue must stay counted.
 func TestModeAllWaitsForTheLastJob(t *testing.T) {
 	w := mustWatch(t, EventDone, ModeAll)
-	w.Tracked = []JobID{{42, 0}, {42, 1}, {42, 2}}
+	w.Tracked = []JobID{{42, 0, ""}, {42, 1, ""}, {42, 2, ""}}
 
 	got := w.Evaluate(Snapshot{
 		Queue:   []*classad.ClassAd{job(42, 1, running)},
@@ -167,7 +167,7 @@ func TestSucceededAndFailedPartitionTerminal(t *testing.T) {
 	now := time.Now()
 	for _, event := range []Event{EventSucceeded, EventFailed} {
 		w := mustWatch(t, event, ModeAny)
-		w.Tracked = []JobID{{42, 0}}
+		w.Tracked = []JobID{{42, 0, ""}}
 		got := w.Evaluate(Snapshot{Now: now})
 		if got.Fires {
 			t.Errorf("%s fired immediately on absence; in a healthy pool the history row lands "+
@@ -193,7 +193,7 @@ func TestUnresolvedOutcomeFiresRatherThanWaitingForever(t *testing.T) {
 	start := time.Now()
 	for _, event := range []Event{EventSucceeded, EventFailed} {
 		w := mustWatch(t, event, ModeAll)
-		w.Tracked = []JobID{{42, 0}, {42, 1}}
+		w.Tracked = []JobID{{42, 0, ""}, {42, 1, ""}}
 
 		// The jobs are gone and history has nothing.
 		got := w.Evaluate(Snapshot{Now: start})
@@ -225,7 +225,7 @@ func TestUnresolvedOutcomeFiresRatherThanWaitingForever(t *testing.T) {
 // still in the queue has not ended, so there is nothing to give up on.
 func TestUnresolvedGraceDoesNotApplyWhileWorkIsRunning(t *testing.T) {
 	w := mustWatch(t, EventFailed, ModeAny)
-	w.Tracked = []JobID{{42, 0}, {42, 1}}
+	w.Tracked = []JobID{{42, 0, ""}, {42, 1, ""}}
 	long := time.Now().Add(-24 * time.Hour)
 	w.AllEndedAt = long
 
@@ -242,7 +242,7 @@ func TestUnresolvedGraceDoesNotApplyWhileWorkIsRunning(t *testing.T) {
 // real answer wins and nothing is reported as undetermined.
 func TestResolvedOutcomeBeatsTheGracePeriod(t *testing.T) {
 	w := mustWatch(t, EventFailed, ModeAny)
-	w.Tracked = []JobID{{42, 0}}
+	w.Tracked = []JobID{{42, 0, ""}}
 	w.AllEndedAt = time.Now().Add(-24 * time.Hour)
 
 	got := w.Evaluate(Snapshot{Now: time.Now(), History: []*classad.ClassAd{historyAd(0, completed, 1)}})
@@ -257,7 +257,7 @@ func TestResolvedOutcomeBeatsTheGracePeriod(t *testing.T) {
 func TestUndeterminedNeverAppliesToTheLiveEvents(t *testing.T) {
 	for _, event := range []Event{EventHeld, EventRunning} {
 		w := mustWatch(t, event, ModeAny)
-		w.Tracked = []JobID{{42, 0}}
+		w.Tracked = []JobID{{42, 0, ""}}
 		w.AllEndedAt = time.Now().Add(-24 * time.Hour)
 		if got := w.Evaluate(Snapshot{Now: time.Now()}); got.Fires {
 			t.Errorf("%s fired on absence; it describes a job that is in the queue", event)
