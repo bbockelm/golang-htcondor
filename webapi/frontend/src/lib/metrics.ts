@@ -38,6 +38,26 @@ export const JOB_METRICS_AGG =
   'max:MemoryUsage,avg:CpuUtil,max:DiskUsage,avg:GpuUtil,' +
   'max:RequestMemory,max:RequestCpus,max:RequestDisk,max:RequestGpus';
 
+// Derived rates (CpuUtil, GpuUtil) are a counter's change divided by the
+// sample's SampleInterval, in seconds. Samples were once recorded with an
+// interval of about a second -- an ingest clock read just after the
+// previous sample rather than the starter's -- and a second's worth of
+// counter over one second reads as hundreds of cores on a one-core job.
+// Those rows are append-only and still in the store, and the chart
+// averages server-side per bucket, so a client can no longer pick them
+// out: the query has to leave them out. A sampler's real intervals are
+// minutes long. A run's first sample has no interval and no rates, and
+// stays (its memory and disk readings are good). The cost: a short-interval
+// sample's memory and disk readings go too, which a later sample's
+// high-water mark covers.
+export const RATE_MIN_SAMPLE_INTERVAL = 60;
+export const RATE_SAMPLE_GUARD = `(SampleInterval is undefined || SampleInterval >= ${RATE_MIN_SAMPLE_INTERVAL})`;
+
+// jobMetricsConstraint selects one job's samples for the charts.
+export function jobMetricsConstraint(cluster: number, proc: number): string {
+  return `ClusterId == ${cluster} && ProcId == ${proc} && ${RATE_SAMPLE_GUARD}`;
+}
+
 export interface SeriesPoint {
   t: number; // unix seconds (bucket start)
   value: number;
