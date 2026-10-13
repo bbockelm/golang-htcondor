@@ -235,7 +235,7 @@ export default function UtilizationPage() {
   const chatVisible = !!chatInfo?.enabled;
   const busy = isFetching && (isPlaceholderData || isLoading);
   const pageContext = [
-    `Scope: ${ownedByMe ? "the user's own jobs" : isAdmin ? "every user's jobs" : "the user's and their projects' jobs"} (everyone=${!ownedByMe}).`,
+    `View: ${ownedByMe ? "the user's own jobs" : isAdmin ? "every user's jobs" : "the user's and their projects' jobs"}.`,
     `Window: the last ${days} ${days === 1 ? 'day' : 'days'} (days=${days}).`,
     constraint ? `Expression filter (analyses only matching jobs): ${constraint}` : 'Expression filter: none.',
     url.q ? `Text filter on workflow names: "${url.q}" (${shownWorkflows.length} of ${data?.workflows.length ?? 0} workflows listed).` : '',
@@ -320,6 +320,7 @@ export default function UtilizationPage() {
       <ChatPanel
         visible={chatVisible}
         page="utilization"
+        scope={ownedByMe ? 'mine' : 'everyone'}
         pageContext={pageContext}
         hooks={chatHooks}
         confirmableTools={[]}

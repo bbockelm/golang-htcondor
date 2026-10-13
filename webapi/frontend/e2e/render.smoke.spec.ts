@@ -142,6 +142,28 @@ for (const path of ['/issues', '/utilization', '/pool']) {
   });
 }
 
+// An archived job's page carries the assistant too, and opening it reads
+// which jobs the assistant sees without an uncaught error. (The page's
+// other panels ask for data these fixtures do not serve, so failed
+// requests are not counted.) The page is the /archive/_ placeholder, as
+// the Go SPA handler serves it for any id.
+test('an archived job offers the chat assistant', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  const placeholder = path.join(__dirname, '..', 'out', 'archive', '_.html');
+  await page.route('**/archive/39.0', async (route) => {
+    if (route.request().resourceType() !== 'document') {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({ path: placeholder, contentType: 'text/html; charset=utf-8' });
+  });
+  await page.goto('/archive/39.0');
+  await page.getByRole('button', { name: 'Open chat assistant' }).click();
+  await expect(page.getByText('The assistant only sees your own jobs.')).toBeVisible();
+  expect(errors, '/archive/39.0 raised page errors').toEqual([]);
+});
+
 // The dashboard's activity panels are fed by a separate half of the
 // response from the status tiles, and they render conditionally. A page
 // that fetched the response, drew the tiles, and dropped every activity

@@ -37,10 +37,6 @@ type chatUtilizationArgs struct {
 	Constraint string `json:"constraint,omitempty"`
 	Workflow   string `json:"workflow,omitempty"`
 	Limit      int    `json:"limit,omitempty"`
-	// Everyone asks for the page's pool-wide view. utilizationScope gives
-	// it only to the callers the page gives it to (administrators, and
-	// project leads for their projects); anyone else gets their own.
-	Everyone bool `json:"everyone,omitempty"`
 }
 
 func (s *Handler) toolAnalyzeUtilization() chat.Tool {
@@ -51,16 +47,15 @@ func (s *Handler) toolAnalyzeUtilization() chat.Tool {
 			`submission: the submit-file lines to change, what that would have saved, how confident it is, and how many ` +
 			`more jobs could run at once. Memory is each job's peak. Pass workflow (a name, part of one, or a key from an ` +
 			`earlier answer) for one workflow's percentiles. Use it for "am I asking for too much memory?" or "what ` +
-			`should I request?" rather than reading job history yourself. Covers the user's own jobs; everyone=true ` +
-			`covers everyone's for administrators (and a project lead's projects), as the Utilization page does.`,
+			`should I request?" rather than reading job history yourself. Covers the chat's scope: the user's own jobs, ` +
+			`or, when the page shows everyone's, every user's for an administrator and a project lead's projects for a lead.`,
 		schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"days": {"type": "integer", "enum": [1, 7, 30], "description": "How far back to look (default 7)."},
 				"constraint": {"type": "string", "description": "Optional ClassAd filter over job attributes, e.g. JobBatchName == \"sweep\"."},
 				"workflow": {"type": "string", "description": "One workflow to detail: its name, part of its name or executable, or its key."},
-				"limit": {"type": "integer", "minimum": 1, "description": "Most recent finished jobs to analyse (default 50000)."},
-				"everyone": {"type": "boolean", "description": "Everyone's jobs rather than the user's own, as the page's scope toggle does. Only administrators and project leads get more than their own."}
+				"limit": {"type": "integer", "minimum": 1, "description": "Most recent finished jobs to analyse (default 50000)."}
 			}
 		}`),
 		exec: func(ctx context.Context, _ string, in json.RawMessage) (string, error) {
@@ -75,9 +70,10 @@ func (s *Handler) toolAnalyzeUtilization() chat.Tool {
 				return "", errors.New("this tool is not available here")
 			}
 			// The page's own parameters, parsed and checked the page's way:
-			// its "Mine" view unless asked for everyone's, which the scope
-			// below grants only to whom the page grants it.
-			q := url.Values{"owned_by_me": {strconv.FormatBool(!args.Everyone)}}
+			// its "Mine" view unless the chat's resolved scope reaches
+			// further, and utilizationScope below grants that only to whom
+			// the page grants it.
+			q := url.Values{"owned_by_me": {strconv.FormatBool(chat.ScopeFrom(ctx).Confined())}}
 			if args.Days != 0 {
 				q.Set("days", strconv.Itoa(args.Days))
 			}
@@ -116,7 +112,7 @@ func (s *Handler) toolAnalyzeUtilization() chat.Tool {
 			}
 			text, _ := mcpserver.RenderUtilization(res.summary, detail,
 				mcpserver.UtilizationView{Workflow: strings.TrimSpace(args.Workflow)})
-			return text, nil
+			return "Scope: " + chatScopeLabel(ctx, jobScopeRead) + "\n\n" + text, nil
 		},
 	}
 }

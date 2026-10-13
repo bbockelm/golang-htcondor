@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
@@ -20,6 +20,7 @@ import { useMultiAPMode } from '@/lib/multiap';
 import { summarizeRequirements, standardLabels } from '@/lib/requirements';
 import { batchIDOfJob, batchPagePath, coresUsed, jobTiming } from '@/lib/batches';
 import { OwnerLink } from '@/components/OwnerLink';
+import { chatScopeForJob } from '@/lib/users';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 import { EVALUATED_KEY, hasGpus, jobRequest } from '@/lib/jobRequests';
 import { formatKiB, formatMiB } from '@/lib/utilization';
@@ -676,6 +677,104 @@ function buildJobChatContext(jobID: string, job: ClassAd): string {
   return parts.join('\n');
 }
 
+// jobAttributesTool is the get_job_attributes chat tool over a job ad the
+// page already holds. Shared by this page and the archived-job page.
+export function jobAttributesTool(job: ClassAd): ToolHandler {
+  return (input) => {
+    const names = Array.isArray(input.names)
+      ? (input.names as unknown[]).filter(
+          (n): n is string => typeof n === 'string',
+        )
+      : null;
+    if (!names || names.length === 0) {
+      // Full-ad request. Cap on size to protect the LLM context.
+      // Was 64 KiB; tightened to 24 KiB (~6k tokens) in 2026-05.
+      // Common interesting projections are well under 1 KiB, so
+      // 24 KiB leaves plenty of room for "the full ad" on
+      // ordinary jobs while keeping a chirp-spam'd ad from
+      // single-handedly consuming a turn.
+      const text = JSON.stringify(job);
+      if (text.length > 24 * 1024) {
+        return {
+          ok: false,
+          error:
+            'job ClassAd exceeds 24 KiB; pass `names` with the specific attributes you need (typical interesting set: JobStatus, HoldReason, RemoteHost, RequestMemory, NumShadowStarts, ExitCode).',
+        };
+      }
+      return { ok: true, attributes: job };
+    }
+    // Case-insensitive lookup against the ad's keys. ClassAds are
+    // case-insensitive on the wire; the JSON marshaling preserves
+    // whatever cap the schedd handed back, so the LLM might ask for
+    // "holdReason" while the ad has "HoldReason".
+    const lc: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(job)) {
+      lc[k.toLowerCase()] = v;
+    }
+    const out: Record<string, unknown> = {};
+    for (const n of names) {
+      const v = lc[n.toLowerCase()];
+      if (v !== undefined) out[n] = v;
+    }
+    return { ok: true, attributes: out, missing: names.filter((n) => lc[n.toLowerCase()] === undefined) };
+  };
+}
+
+// matchAnalysisTool is the get_match_analysis chat tool. source "archive"
+// analyses a job from history (the archived-job page). Shared by this
+// page and the archived-job page.
+export function matchAnalysisTool(
+  queryClient: QueryClient,
+  jobID: string,
+  source?: 'archive',
+): ToolHandler {
+  return async () => {
+    try {
+      const data = await queryClient.fetchQuery({
+        queryKey: ['job-match-analysis', jobID, source ?? 'live'],
+        queryFn: () => api.jobs.matchAnalysis(jobID, source ? { source } : undefined),
+        staleTime: 30_000,
+      });
+      // Project the analyzer's full Result down to the fields
+      // the LLM can act on, dropping the heavy ones (per-predicate
+      // attribute distributions, long sample-host arrays). The
+      // SPA panel keeps the full response in its own cache; this
+      // trimming applies only to what we forward to the model.
+      const result = data.result;
+      const trimmedPredicates = (result.predicates ?? []).map((p) => ({
+        index: p.index,
+        source: p.source,
+        matched: p.matched,
+        not_matched: p.not_matched,
+        undefined: p.undefined,
+        error: p.error,
+        narrowing_score: p.narrowing_score,
+        sample_matched_hosts: (p.sample_matched_hosts ?? []).slice(0, 5),
+        sample_not_matched_hosts: (p.sample_not_matched_hosts ?? []).slice(
+          0,
+          5,
+        ),
+        // attribute_distributions deliberately omitted — useful
+        // for the GUI's histogram, useless for the chat LLM and
+        // can be tens of KB on big pools.
+      }));
+      return {
+        ok: true,
+        job_id: data.job_id,
+        requirements: data.requirements,
+        result: {
+          total_slots: result.total_slots,
+          full_matches: result.full_matches,
+          narrowing_predicate_index: result.narrowing_predicate_index,
+          predicates: trimmedPredicates,
+        },
+      };
+    } catch (e) {
+      return { ok: false, error: errMsg(e) };
+    }
+  };
+}
+
 // JobDetailChat hosts the per-job ChatPanel. Builds the per-request
 // page-context string and the client-side tool dispatch hooks. The
 // hooks operate against the React Query cache where possible (so a
@@ -684,7 +783,7 @@ function buildJobChatContext(jobID: string, job: ClassAd): string {
 //
 // === KEEP IN SYNC WITH jobDetailPageInstructions IN
 // httpserver/handlers_chat_tools.go ===
-function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
+export function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
   const queryClient = useQueryClient();
   const { data: chatInfo } = useQuery({
     queryKey: ['chat-info'],
@@ -693,6 +792,10 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
     retry: false,
   });
   const chatVisible = !!chatInfo?.enabled;
+  const { data: session } = useQuery({
+    queryKey: ['session'],
+    queryFn: api.auth.me,
+  });
 
   const pageContext = useMemo(
     () => buildJobChatContext(jobID, job),
@@ -701,44 +804,7 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
 
   const hooks = useMemo<Record<string, ToolHandler>>(
     () => ({
-      get_job_attributes: (input) => {
-        const names = Array.isArray(input.names)
-          ? (input.names as unknown[]).filter(
-              (n): n is string => typeof n === 'string',
-            )
-          : null;
-        if (!names || names.length === 0) {
-          // Full-ad request. Cap on size to protect the LLM context.
-          // Was 64 KiB; tightened to 24 KiB (~6k tokens) in 2026-05.
-          // Common interesting projections are well under 1 KiB, so
-          // 24 KiB leaves plenty of room for "the full ad" on
-          // ordinary jobs while keeping a chirp-spam'd ad from
-          // single-handedly consuming a turn.
-          const text = JSON.stringify(job);
-          if (text.length > 24 * 1024) {
-            return {
-              ok: false,
-              error:
-                'job ClassAd exceeds 24 KiB; pass `names` with the specific attributes you need (typical interesting set: JobStatus, HoldReason, RemoteHost, RequestMemory, NumShadowStarts, ExitCode).',
-            };
-          }
-          return { ok: true, attributes: job };
-        }
-        // Case-insensitive lookup against the ad's keys. ClassAds are
-        // case-insensitive on the wire; the JSON marshaling preserves
-        // whatever cap the schedd handed back, so the LLM might ask for
-        // "holdReason" while the ad has "HoldReason".
-        const lc: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(job)) {
-          lc[k.toLowerCase()] = v;
-        }
-        const out: Record<string, unknown> = {};
-        for (const n of names) {
-          const v = lc[n.toLowerCase()];
-          if (v !== undefined) out[n] = v;
-        }
-        return { ok: true, attributes: out, missing: names.filter((n) => lc[n.toLowerCase()] === undefined) };
-      },
+      get_job_attributes: jobAttributesTool(job),
 
       get_job_log: async (input) => {
         try {
@@ -770,51 +836,7 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
         }
       },
 
-      get_match_analysis: async () => {
-        try {
-          const data = await queryClient.fetchQuery({
-            queryKey: ['job-match-analysis', jobID],
-            queryFn: () => api.jobs.matchAnalysis(jobID),
-            staleTime: 30_000,
-          });
-          // Project the analyzer's full Result down to the fields
-          // the LLM can act on, dropping the heavy ones (per-predicate
-          // attribute distributions, long sample-host arrays). The
-          // SPA panel keeps the full response in its own cache; this
-          // trimming applies only to what we forward to the model.
-          const result = data.result;
-          const trimmedPredicates = (result.predicates ?? []).map((p) => ({
-            index: p.index,
-            source: p.source,
-            matched: p.matched,
-            not_matched: p.not_matched,
-            undefined: p.undefined,
-            error: p.error,
-            narrowing_score: p.narrowing_score,
-            sample_matched_hosts: (p.sample_matched_hosts ?? []).slice(0, 5),
-            sample_not_matched_hosts: (p.sample_not_matched_hosts ?? []).slice(
-              0,
-              5,
-            ),
-            // attribute_distributions deliberately omitted — useful
-            // for the GUI's histogram, useless for the chat LLM and
-            // can be tens of KB on big pools.
-          }));
-          return {
-            ok: true,
-            job_id: data.job_id,
-            requirements: data.requirements,
-            result: {
-              total_slots: result.total_slots,
-              full_matches: result.full_matches,
-              narrowing_predicate_index: result.narrowing_predicate_index,
-              predicates: trimmedPredicates,
-            },
-          };
-        } catch (e) {
-          return { ok: false, error: errMsg(e) };
-        }
-      },
+      get_match_analysis: matchAnalysisTool(queryClient, jobID),
 
       read_job_output: async (input) => {
         const stream = String(input.stream ?? '');
@@ -954,6 +976,11 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
     <ChatPanel
       visible={chatVisible}
       page="job-detail"
+      // Another user's job (an administrator or project lead viewing
+      // it) asks for everyone's scope, so the assistant can work on the
+      // job the page shows; the server grants it only to whom it grants
+      // reading the job.
+      scope={chatScopeForJob(str(job.Owner), session?.username)}
       pageContext={pageContext}
       hooks={hooks}
       headerLabel="Job assistant"

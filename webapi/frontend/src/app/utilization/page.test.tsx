@@ -3,8 +3,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UtilizationResponse } from '@/lib/utilization';
 import { callHook, chatPanelProps, resetChatPanelSpy } from '@/test/chatPanelSpy';
+import { scopeStore } from '@/lib/scope';
 
 vi.mock('@/components/ChatPanel', async () => (await import('@/test/chatPanelSpy')).chatPanelMock());
+
+// The session the page sees; a case that needs an administrator swaps it.
+const session = vi.hoisted(() => ({ current: { username: 'alice', is_admin: false } }));
 
 // The page keeps its state in the URL. This stands in for Next's router:
 // replace() moves the search params and re-renders whoever reads them, as
@@ -44,7 +48,7 @@ vi.mock('@/lib/api', async () => {
     ...actual,
     api: {
       ...actual.api,
-      auth: { ...actual.api.auth, me: () => Promise.resolve({ username: 'alice', is_admin: false }) },
+      auth: { ...actual.api.auth, me: () => Promise.resolve(session.current) },
       chat: { ...actual.api.chat, info: () => chatInfo() },
       utilization: (...a: unknown[]) => utilization(...a),
     },
@@ -75,6 +79,8 @@ async function renderPage() {
 
 describe('utilization page chat', () => {
   beforeEach(() => {
+    session.current = { username: 'alice', is_admin: false };
+    scopeStore.setScope('mine');
     utilization.mockReset();
     chatInfo.mockReset();
     nav.replace.mockClear();
@@ -138,5 +144,28 @@ describe('utilization page chat', () => {
     await waitFor(() => expect(chatPanelProps().pageContext).toContain('Expression filter: none.'));
     expect(chatPanelProps().pageContext).toContain('Text filter on workflow names: "train"');
     expect(screen.getByRole('button', { name: 'Text' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it("passes the toggle's position as the chat scope", async () => {
+    session.current = { username: 'root', is_admin: true };
+    scopeStore.setScope('all');
+    chatInfo.mockResolvedValue({ enabled: true });
+    await renderPage();
+    await screen.findByRole('button', { name: 'Open chat assistant' });
+    await waitFor(() => expect(chatPanelProps().scope).toBe('everyone'));
+
+    act(() => {
+      scopeStore.setScope('mine');
+    });
+    await waitFor(() => expect(chatPanelProps().scope).toBe('mine'));
+  });
+
+  it('asks for mine when the session cannot widen, whatever the stored scope', async () => {
+    scopeStore.setScope('all');
+    chatInfo.mockResolvedValue({ enabled: true });
+    await renderPage();
+    await screen.findByRole('button', { name: 'Open chat assistant' });
+    await waitFor(() => expect(utilization).toHaveBeenCalled());
+    expect(chatPanelProps().scope).toBe('mine');
   });
 });

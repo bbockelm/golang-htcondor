@@ -2292,12 +2292,37 @@ export const api = {
         if (!r.ok) throw new ApiError(r.status, r.statusText);
         return r.json();
       }),
+    // Which jobs the assistant's tools cover for this caller on a page,
+    // as the server resolves the page's Mine/Everyone request: the same
+    // resolution every chat request gets. See ChatScope.
+    scope: (page: string, scope: ChatScopeRequest): Promise<ChatScope> =>
+      fetchJSON(
+        `${BASE}/chat/scope?${new URLSearchParams({ page, scope }).toString()}`,
+      ),
     // The streaming endpoint is consumed by the AI SDK's useChat
     // hook (see ChatPanel). We don't expose a typed wrapper here —
     // useChat handles the request shape and stream parsing.
     streamURL: `${BASE}/chat`,
   },
 };
+
+// ChatScopeRequest is what a page asks the assistant to cover: the
+// position of its Mine/Everyone toggle. It is a request; the server
+// decides (ChatScope).
+export type ChatScopeRequest = "mine" | "everyone";
+
+// ChatScope is the server's resolution of a page's ChatScopeRequest for
+// this caller (GET /api/v1/chat/scope).
+export interface ChatScope {
+  // What the page asked for.
+  requested: ChatScopeRequest;
+  // What the assistant's tools cover: the caller's own jobs, every
+  // user's, or (a project lead) their own plus their projects'.
+  scope: "mine" | "everyone" | "projects";
+  projects?: string[];
+  // Whether the assistant may act on other users' jobs.
+  act_on_others: boolean;
+}
 
 // --- Helpers ---
 

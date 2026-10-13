@@ -21,9 +21,13 @@
 // MatchAnalysisPanel with source="archive" — the archived ad still
 // carries the Requirements expression and the analyzer doesn't care
 // that the job no longer exists in the queue.
+//
+// The chat assistant (ArchiveDetailChat) is read-only: the job has
+// finished. === KEEP IN SYNC WITH archiveDetailPageInstructions IN
+// httpserver/handlers_chat_tools.go ===
 
 import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { OwnerLink } from '@/components/OwnerLink';
 import Link from 'next/link';
 import {
@@ -41,7 +45,11 @@ import {
   RequirementsSection,
   humanDuration,
   useNowTick,
+  jobAttributesTool,
+  matchAnalysisTool,
 } from '@/app/jobs/[id]/JobDetailClient';
+import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
+import { chatScopeForJob } from '@/lib/users';
 import { useMultiAPMode } from '@/lib/multiap';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
@@ -175,6 +183,8 @@ function ArchiveJobDetail({
     <div className="space-y-6">
       <JobRelated jobID={jobID} cluster={num(job.ClusterId)} archived onSimilar={showSimilar} />
 
+      <ArchiveDetailChat jobID={jobID} job={job} />
+
       <div className="rounded-sm border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
         <Field label="Status" value={<StatusBadge display={display} />} />
         <Field label="Owner" value={<OwnerLink owner={owner} />} />
@@ -276,6 +286,73 @@ function ArchiveJobDetail({
 
       <JobDetailsSection jobID={jobID} job={job} editable={false} />
     </div>
+  );
+}
+
+// archiveChatContext tells the assistant which finished job this is, so
+// it does not have to ask. Terse: it rides on every request.
+function archiveChatContext(jobID: string, job: ClassAd): string {
+  const parts = [`job_id=${jobID}`, 'archived: completed or removed; in history, not the queue'];
+  const status = num(job.JobStatus);
+  if (status !== undefined) {
+    const display = archiveDisplayStatus(
+      status,
+      num(job.ExitCode),
+      job.ExitBySignal === true || job.ExitBySignal === 'true',
+    );
+    parts.push(`status=${display.label} (JobStatus=${status})`);
+  }
+  const owner = str(job.Owner);
+  if (owner) parts.push(`owner=${owner}`);
+  const exitCode = num(job.ExitCode);
+  if (exitCode !== undefined) parts.push(`exit_code=${exitCode}`);
+  const host = str(job.LastRemoteHost) ?? str(job.RemoteHost);
+  if (host) parts.push(`last_host=${host}`);
+  const batch = str(job.JobBatchName);
+  if (batch) parts.push(`batch=${batch}`);
+  return parts.join('\n');
+}
+
+// ArchiveDetailChat hosts the archived job's ChatPanel: the job's record
+// and match analysis on the client, history through the server. Nothing
+// here changes anything.
+//
+// === KEEP IN SYNC WITH archiveDetailPageInstructions IN
+// httpserver/handlers_chat_tools.go ===
+export function ArchiveDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
+  const queryClient = useQueryClient();
+  const { data: chatInfo } = useQuery({
+    queryKey: ['chat-info'],
+    queryFn: api.chat.info,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const { data: session } = useQuery({
+    queryKey: ['session'],
+    queryFn: api.auth.me,
+  });
+  const pageContext = useMemo(() => archiveChatContext(jobID, job), [jobID, job]);
+  const hooks = useMemo<Record<string, ToolHandler>>(
+    () => ({
+      get_job_attributes: jobAttributesTool(job),
+      get_match_analysis: matchAnalysisTool(queryClient, jobID, 'archive'),
+    }),
+    [job, jobID, queryClient],
+  );
+  return (
+    <ChatPanel
+      visible={!!chatInfo?.enabled}
+      page="archive-detail"
+      // Another user's job asks for everyone's scope; the server grants it
+      // only to whom it grants reading that user's history.
+      scope={chatScopeForJob(str(job.Owner), session?.username)}
+      pageContext={pageContext}
+      hooks={hooks}
+      confirmableTools={[]}
+      headerLabel="Job assistant"
+      togglerLabel="Ask about this job"
+      pageHelp={`Ask things like "why did this fail?", "how much memory did it really use?", "did the rest of the batch fail too?", or "would it match the pool if I resubmitted it?".`}
+    />
   );
 }
 

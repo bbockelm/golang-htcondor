@@ -1,45 +1,33 @@
 package httpserver
 
 import (
-	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
 // chatUtilization runs the chat's analyze_utilization as who would from
 // the page: under the context the chat handler builds for that session.
 func chatUtilization(t *testing.T, f *twoOwnerFixture, who, args string) string {
 	t.Helper()
-	return chatUtilizationAs(t, f, who, args)
+	return chatUtilizationScoped(t, f, who, "mine", args)
 }
 
-// chatUtilizationAs is chatUtilization for a session in groups.
+// chatUtilizationAs is chatUtilization for a session in groups, with the
+// page asking for everyone's jobs.
 func chatUtilizationAs(t *testing.T, f *twoOwnerFixture, who, args string, groups ...string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/v1/chat", nil)
-	f.session(t, who, groups...)(req)
-	authCtx, _, err := f.s.requireAuthentication(req)
+	return chatUtilizationScoped(t, f, who, "everyone", args, groups...)
+}
+
+// chatUtilizationScoped runs analyze_utilization as who would from the
+// page asking for scope.
+func chatUtilizationScoped(t *testing.T, f *twoOwnerFixture, who, scope, args string, groups ...string) string {
+	t.Helper()
+	out, err := runChatTool(t, f, f.session(t, who, groups...), "utilization", scope, "analyze_utilization", args)
 	if err != nil {
-		t.Fatalf("authenticating %s: %v", who, err)
+		t.Fatalf("analyze_utilization as %s: %v", who, err)
 	}
-	for _, tool := range f.s.buildChatTools() {
-		if tool.Name() != "analyze_utilization" {
-			continue
-		}
-		out, err := tool.Execute(context.WithValue(authCtx, chatRequestKey{}, req), who, json.RawMessage(args))
-		if err != nil {
-			t.Fatalf("analyze_utilization as %s: %v", who, err)
-		}
-		return out
-	}
-	t.Fatal("the chat offers no analyze_utilization")
-	return ""
+	return out
 }
 
 // The chat analyses the caller's own finished jobs, and a constraint
@@ -63,17 +51,17 @@ func TestChatAnalyzeUtilizationIsTheCallersOwn(t *testing.T) {
 	}
 }
 
-// everyone=true is the page's scope toggle: an administrator gets every
-// user's workflows, anyone else still gets only their own.
+// The page's everyone view: an administrator gets every user's
+// workflows, anyone else still gets only their own.
 func TestChatAnalyzeUtilizationEveryoneIsTheToggle(t *testing.T) {
 	f := utilizationFixture(t)
 
-	out := chatUtilization(t, f, "alice", `{"everyone":true}`)
+	out := chatUtilizationAs(t, f, "alice", `{}`)
 	if !strings.Contains(out, "alice_sim") || strings.Contains(out, "bob_sim") {
 		t.Errorf("a non-administrator asking for everyone reached other users' jobs:\n%s", out)
 	}
 
-	out = chatUtilizationAs(t, f, "root", `{"everyone":true}`, "condor-admins")
+	out = chatUtilizationAs(t, f, "root", `{}`, "condor-admins")
 	if !strings.Contains(out, "alice_sim") || !strings.Contains(out, "bob_sim") {
 		t.Errorf("an administrator asking for everyone did not get both users' workflows:\n%s", out)
 	}

@@ -137,6 +137,7 @@ export default function IssuesPage() {
       <ChatPanel
         visible={chatVisible}
         page="issues"
+        scope={ownedByMe ? 'mine' : 'everyone'}
         pageContext={pageContext}
         hooks={chatHooks}
         confirmableTools={[]}
@@ -245,7 +246,7 @@ function issuesChatContext({
   loading: boolean;
 }): string {
   const lines = [
-    `Scope: ${ownedByMe ? "the user's own jobs" : "every user's jobs"} (everyone=${!ownedByMe}).`,
+    `View: ${ownedByMe ? 'My Issues' : "everyone's issues"}.`,
     `Window: last ${windowSeconds / 3600} hours (window_hours=${windowSeconds / 3600}).`,
     `Detail: ${granularity} (granularity=${granularity}).`,
     `Include problems that have already ended: ${includeEnded ? 'yes' : 'no'} (include_ended=${includeEnded}).`,

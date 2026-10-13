@@ -132,6 +132,9 @@ func (s *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	// The request rides along for the server-side tools that need it to
 	// decide what this caller may read (see chatRequestFrom).
 	ctx = context.WithValue(ctx, chatRequestKey{}, r)
+	// Settle the page's Mine/Everyone request once, with the page's own
+	// authorization checks. The engine and every tool read only this.
+	ctx = chat.WithScope(ctx, s.resolveChatScope(ctx, r, req.Page, req.Scope))
 	if err := s.chatEngine.Stream(ctx, writer, actor, req); err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "chat stream ended with error",
 			"error", err, "user", actor)

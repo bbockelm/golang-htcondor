@@ -42,6 +42,9 @@ type chatTool struct {
 	// Request.Page (e.g. "jobs", "submit").
 	pages []string
 	exec  func(ctx context.Context, actor string, input json.RawMessage) (string, error)
+	// describe, for a confirm tool, adds facts to the approval card (see
+	// chat.ConfirmationDescriber). Optional.
+	describe func(ctx context.Context, actor string, input json.RawMessage) map[string]any
 }
 
 func (t *chatTool) Name() string                 { return t.name }
@@ -50,6 +53,12 @@ func (t *chatTool) InputSchema() json.RawMessage { return t.schema }
 func (t *chatTool) ClientSide() bool             { return t.clientSide }
 func (t *chatTool) RequiresConfirmation() bool   { return t.confirm }
 func (t *chatTool) AvailablePages() []string     { return t.pages }
+func (t *chatTool) DescribeConfirmation(ctx context.Context, actor string, in json.RawMessage) map[string]any {
+	if t.describe == nil {
+		return nil
+	}
+	return t.describe(ctx, actor, in)
+}
 func (t *chatTool) Execute(ctx context.Context, actor string, in json.RawMessage) (string, error) {
 	if t.exec == nil {
 		// Client-side tool: the engine never calls Execute on a
@@ -68,8 +77,12 @@ var (
 	jobsPageTools      = []string{"jobs"}
 	submitPageTools    = []string{"submit"}
 	jobDetailPageTools = []string{"job-detail"}
-	archivePageTools   = []string{"archive"}
-	issuesPageTools    = []string{"issues"}
+	// query_jobs_archive reads history, where both archive pages' jobs are.
+	archiveQueryPageTools = []string{"archive", "archive-detail"}
+	// The single-job reads that work on a finished job as well as a
+	// queued one: the job's ad (the page holds it) and match analysis.
+	jobAdPageTools  = []string{"job-detail", "archive-detail"}
+	issuesPageTools = []string{"issues"}
 	// The pages whose tables a set_filter / set_constraint narrows.
 	textFilterPageTools = []string{"jobs", "archive", "utilization", "pool"}
 	constraintPageTools = []string{"jobs", "archive", "utilization", "issues", "pool"}
@@ -81,18 +94,23 @@ var (
 //
 // === KEEP IN SYNC WITH frontend/src/app/jobs/page.tsx ===
 // If you remove a column from the jobs table, change what set_filter
-// matches against, or alter how expanded rows render, update the
-// matching language here so the LLM doesn't hallucinate UI affordances.
+// matches against, alter how expanded rows render, or change the
+// Mine/Everyone toggle (the page sends its position as the chat scope),
+// update the matching language here so the LLM doesn't hallucinate UI
+// affordances.
 const jobsPageInstructions = `The user is on the jobs page. They see a single table grouped
 by batch (one row per cluster) with running/idle/held/etc. status counts. They can expand
-a batch row to see individual jobs. You have tools to:
+a batch row to see individual jobs. Administrators (and project leads) have a Mine /
+Everyone toggle; in the Everyone view the table has an Owner column, and your tools cover
+what the Scope paragraph above says. When they cover other users' jobs, give the Owner
+of every job or batch you mention. You have tools to:
   - filter the table to a substring (set_filter)
   - filter the table with a ClassAd expression the schedd evaluates (set_constraint),
     e.g. "only jobs that requested a GPU" -> set_constraint("RequestGPUs >= 1");
     RequestGPUs is undefined on jobs that did not ask for one, which does not match
   - expand a batch row (expand_batch)
   - flash a job row to draw attention (highlight_job)
-  - read the user's job state (query_jobs)
+  - read job state (query_jobs), within the scope above
   - hold/release/remove a single job (those require user confirmation)
   - bulk-remove jobs (remove_jobs — takes a cluster_id OR a ClassAd constraint and
     removes every match, capped at 1000 per call. Confirmation required.)
@@ -116,8 +134,10 @@ BULK REMOVE WORKFLOW (remove_jobs):
   3. Server caps each call at 1000 affected jobs. If query_jobs reports more than that,
      narrow the filter (e.g. add a JobStatus or QDate clause) and run multiple calls.
      Don't loop quietly to bypass the cap — ask the user.
-  4. Owner-scoping is enforced server-side regardless of what you put in 'constraint';
-     you cannot match other users' jobs.`
+  4. Scoping is enforced server-side regardless of what you put in 'constraint': you
+     can match only the jobs the Scope paragraph says you can act on. When that includes
+     other users' jobs, say whose jobs the removal would hit before calling remove_jobs;
+     the approval card lists the owners too.`
 
 // submitPageInstructions is appended to the chat system prompt when the
 // SPA reports `page=submit`.
@@ -255,6 +275,10 @@ the job's <cluster>.<proc> id. Your tools are scoped to THIS job — when a tool
 job_id you should pass the same id from the page context (the SPA includes it in the
 request body so you don't need to ask the user).
 
+The page context names the job's owner. It may be another user's job, when an
+administrator opens it; then refer to it as that user's job, not "your job", and
+remember that an action (edit_job_attribute, run_in_job) acts on that user's work.
+
 The page already shows the user the high-level facts (status, hold reason, exit code,
 last host, requested vs. used resources). DO NOT just re-read those back to them — they
 can see the page. Help with deeper investigation:
@@ -306,10 +330,12 @@ const archivePageInstructions = `The user is on the archive page — a flat tabl
 job in the schedd's HISTORY (completed and removed jobs). They can scroll to load more;
 the SPA paginates via a (ClusterId, ProcId) keyset cursor. The archive can hold
 hundreds of thousands of records, so think pagination-first: don't try to slurp
-everything at once.
+everything at once. Administrators have a Mine / Everyone toggle; your tools cover what
+the Scope paragraph above says, and when that is every user's jobs, give the Owner of
+every job you mention.
 
 Tools available here:
-  - query_jobs_archive: server-side, owner-scoped query against the schedd's history.
+  - query_jobs_archive: server-side query against the schedd's history, within the scope.
     Constraint vocabulary is the same as query_jobs (the live queue) but the typical
     fields are different — JobStatus is always 3 (Removed) or 4 (Completed); look at
     ExitCode / ExitBySignal for "did it succeed?", at CompletionDate / QDate for "when",
@@ -363,8 +389,11 @@ The controls, which the page context reports:
   - for administrators, My Issues versus everyone's.
 
 Tools available here:
-  - analyze_issues: the page's own answer. Pass the window, detail, include-ended,
-    expression and scope from the page context so you talk about what the user sees.
+  - analyze_issues: the page's own answer. Pass the window, detail, include-ended and
+    expression from the page context so you talk about what the user sees. It covers
+    the scope the Scope paragraph above states (the page's My Issues / everyone's view,
+    as far as the user may see it); you do not pass that. In everyone's view, name the
+    users a problem hits.
     Use it to explain a problem, compare problems, or say who and where a problem hits.
   - set_constraint: apply an expression to the page so it shows only matching jobs'
     problems. Use when the user asks to see a subset, e.g. "only jobs that asked for a
@@ -415,9 +444,11 @@ The controls, which the page context reports:
     their projects'), and a list of users to narrow to.
 
 Tools available here:
-  - analyze_utilization: the page's own analysis. Pass the window (days), expression
-    (constraint) and scope (everyone) from the page context so you talk about what the
-    user sees; pass workflow for one workflow's detail.
+  - analyze_utilization: the page's own analysis. Pass the window (days) and expression
+    (constraint) from the page context so you talk about what the user sees; pass
+    workflow for one workflow's detail. It covers the scope the Scope paragraph above
+    states (the page's own view, as far as the user may see it); you do not pass that.
+    When it covers other users' jobs, name whose workflows you talk about.
   - set_constraint: apply an expression to the page so it analyses only matching jobs.
     Use when the user asks for a subset, e.g. "only jobs that requested at least one
     GPU" -> set_constraint("RequestGPUs >= 1"). RequestGPUs is undefined on jobs that
@@ -493,28 +524,64 @@ Tools available here:
 
 You cannot drain, reconfigure or otherwise change any machine from here.`
 
+// archiveDetailPageInstructions is appended to the chat system prompt
+// when the SPA reports `page=archive-detail`: one finished job's record
+// from the schedd's history.
+//
+// === KEEP IN SYNC WITH frontend/src/app/archive/[id]/ArchiveDetailClient.tsx ===
+// If you add or drop a panel, or change which tools the page answers,
+// update the matching language here.
+const archiveDetailPageInstructions = `The user is on an archived job's page: one completed or
+removed job, read from the schedd's history. The page context names the job (job_id), its
+owner, its final status and exit code. The job has finished, so nothing about it can be
+changed, and nothing runs inside it any more.
+
+The page context names the job's owner. It may be another user's job, when an
+administrator opens it; then refer to it as that user's job, not "your job".
+
+The page shows: status, owner, submit / start / completion times, wall clock, batch,
+exit code or signal, command and arguments; resource-usage graphs when samples were
+kept; a "similar jobs" section; a "Match against current pool" panel; and every
+attribute of the job's record.
+
+Tools available here:
+  - get_job_attributes: read attributes of this job's record (HoldReason from before it
+    finished, ExitCode, ExitBySignal, RemoveReason, RemoteHost / LastRemoteHost,
+    RequestMemory vs. MemoryUsage, NumJobStarts, ...). Pass names; avoid the whole ad.
+  - get_match_analysis: would this job, resubmitted as it was, match the pool now? Use
+    when the user asks whether a resubmission would run or why it took long to start.
+  - query_jobs_archive: other records in history, e.g. the rest of this job's batch
+    (ClusterId == <cluster>) or earlier runs of the same command. Within the scope above.
+
+There is no event log, stdout or stderr here: they lived in the job's sandbox, which
+the access point no longer keeps for a job that has left the queue. Say so if asked,
+and point to the files the job transferred back, wherever its submit file sent them.`
+
 // chatPageInstructions returns the per-page system-prompt suffix map
 // the engine expects. Centralized so both the production engine
 // constructor and tests use the same mapping.
 func chatPageInstructions() map[string]string {
 	return map[string]string{
-		"jobs":        jobsPageInstructions,
-		"submit":      submitPageInstructions,
-		"job-detail":  jobDetailPageInstructions,
-		"archive":     archivePageInstructions,
-		"issues":      issuesPageInstructions,
-		"utilization": utilizationPageInstructions,
-		"pool":        poolPageInstructions,
+		"jobs":           jobsPageInstructions,
+		"submit":         submitPageInstructions,
+		"job-detail":     jobDetailPageInstructions,
+		"archive-detail": archiveDetailPageInstructions,
+		"archive":        archivePageInstructions,
+		"issues":         issuesPageInstructions,
+		"utilization":    utilizationPageInstructions,
+		"pool":           poolPageInstructions,
 	}
 }
 
 // buildChatTools is the real implementation, called from
-// handlers_chat.go's stub. Each server-side tool here enforces owner
-// scoping: the LLM can pass any constraint it likes, and we rewrite
-// it to AND in `Owner == "<actor>"` before issuing the schedd RPC.
-// The single-job mutations (hold/release/remove) read the job ad
-// first and refuse if Owner != actor — defense in depth so a
-// schedd ACL gap can't be exploited via the chat path.
+// handlers_chat.go's stub. Each server-side tool here enforces the
+// chat's resolved scope (chatJobScope): the LLM can pass any constraint
+// it likes, and we AND it onto the scope's clause -- `Owner == "<actor>"`
+// unless the caller may see (or act on) other users' jobs -- before
+// issuing the schedd RPC. The single-job mutations (hold/release/remove)
+// read the job ad within that scope first and refuse a job outside it —
+// defense in depth so a schedd ACL gap can't be exploited via the chat
+// path.
 func (s *Handler) buildChatTools() []chat.Tool {
 	tools := []chat.Tool{
 		// Jobs page (server-side, owner-scoped).
@@ -585,7 +652,7 @@ func (s *Handler) buildChatTools() []chat.Tool {
 type queryJobsArgs struct {
 	// Constraint is a ClassAd expression filter (e.g. `JobStatus == 5`
 	// for held jobs, `BatchName == "training-run"`). The chat layer
-	// always ANDs in `Owner == "<actor>"` before issuing.
+	// confines it to the chat's scope (chatJobScope) before issuing.
 	Constraint string `json:"constraint,omitempty"`
 	// Limit caps the result count. Defaults to 50 server-side; we
 	// also clamp here so the LLM can't ask for 100k rows that flood
@@ -597,7 +664,8 @@ func (s *Handler) toolQueryJobs() chat.Tool {
 	return &chatTool{
 		name:  "query_jobs",
 		pages: jobsPageTools,
-		description: `List the user's jobs, optionally filtered by a ClassAd ` +
+		description: `List jobs in the chat's scope (the user's own, or every user's when the ` +
+			`page shows everyone's and the user may see them), optionally filtered by a ClassAd ` +
 			`expression in 'constraint' (HTCondor's classad query language). ` +
 			`Common attributes: JobStatus (1=Idle, 2=Running, 3=Removed, 4=Completed, 5=Held), ` +
 			`HoldReason, BatchName (JobBatchName), QDate (epoch seconds), ClusterId, ProcId, ` +
@@ -607,7 +675,7 @@ func (s *Handler) toolQueryJobs() chat.Tool {
 			"properties": {
 				"constraint": {
 					"type": "string",
-					"description": "Optional ClassAd filter expression. Auto-scoped to the authenticated user."
+					"description": "Optional ClassAd filter expression. The server confines it to the chat's scope."
 				},
 				"limit": {
 					"type": "integer",
@@ -629,7 +697,7 @@ func (s *Handler) toolQueryJobs() chat.Tool {
 			if limit > 100 {
 				limit = 100
 			}
-			constraint, err := scopeToOwner(ownerFromActor(actor), args.Constraint)
+			constraint, err := chatJobScope(ctx, actor, args.Constraint, jobScopeRead)
 			if err != nil {
 				return "", err
 			}
@@ -655,6 +723,7 @@ func (s *Handler) toolQueryJobs() chat.Tool {
 				"jobs":       summary,
 				"count":      len(summary),
 				"constraint": constraint,
+				"scope":      chatScopeLabel(ctx, jobScopeRead),
 			})
 			return string(out), nil
 		},
@@ -689,10 +758,11 @@ type queryJobsArchiveArgs struct {
 func (s *Handler) toolQueryJobsArchive() chat.Tool {
 	return &chatTool{
 		name:  "query_jobs_archive",
-		pages: archivePageTools,
+		pages: archiveQueryPageTools,
 		description: `Query the schedd's history (the "archive") for completed and removed jobs ` +
 			`matching a ClassAd expression. Same constraint vocabulary as query_jobs (the live ` +
-			`queue). Auto-scoped to the authenticated user. Common attributes: ` +
+			`queue). Confined to the chat's scope (the user's own jobs, or every user's when the page ` +
+			`shows everyone's and the user may see them). Common attributes: ` +
 			`JobStatus (3=Removed, 4=Completed), ExitCode, ExitBySignal, QDate, CompletionDate, ` +
 			`RemoteWallClockTime, JobBatchName, Cmd, Args, ClusterId, ProcId. ` +
 			`USE FOR: "show my failed jobs", "find that python run from yesterday", ` +
@@ -704,7 +774,7 @@ func (s *Handler) toolQueryJobsArchive() chat.Tool {
 			"properties": {
 				"constraint": {
 					"type": "string",
-					"description": "Optional ClassAd filter expression. Auto-scoped to the user. Examples: \"ExitCode != 0\", \"JobBatchName == \\\"training-run\\\"\", \"CompletionDate > 1700000000\"."
+					"description": "Optional ClassAd filter expression. The server confines it to the chat's scope. Examples: \"ExitCode != 0\", \"JobBatchName == \\\"training-run\\\"\", \"CompletionDate > 1700000000\"."
 				},
 				"limit": {
 					"type": "integer",
@@ -748,7 +818,7 @@ func (s *Handler) toolQueryJobsArchive() chat.Tool {
 			// pagination cursor. Same predicate the SPA uses on the
 			// archive page — kept consistent so the LLM and the user
 			// scrolling the table see the same record set.
-			constraint, err := scopeToOwner(ownerFromActor(actor), args.Constraint)
+			constraint, err := chatJobScope(ctx, actor, args.Constraint, jobScopeRead)
 			if err != nil {
 				return "", err
 			}
@@ -803,6 +873,7 @@ func (s *Handler) toolQueryJobsArchive() chat.Tool {
 				"next_cursor": nextCursor,
 				"end_of_history": nextCursor == nil &&
 					len(ads) < limit,
+				"scope": chatScopeLabel(ctx, jobScopeRead),
 			})
 			return string(out), nil
 		},
@@ -823,7 +894,7 @@ func (a *jobActionArgs) jobID() string {
 func (s *Handler) toolHoldJob() chat.Tool {
 	return s.singleJobActionTool(
 		"hold_job",
-		`Place a held lock on one of the user's jobs (ClassAd JobStatus=5). `+
+		`Place a held lock on a job (ClassAd JobStatus=5). `+
 			`Held jobs stop running and stay in the queue until released. Use `+
 			`'reason' to record why. Requires user confirmation by default.`,
 		"Held via chat assistant",
@@ -849,7 +920,7 @@ func (s *Handler) toolReleaseJob() chat.Tool {
 func (s *Handler) toolRemoveJob() chat.Tool {
 	return s.singleJobActionTool(
 		"remove_job",
-		`Remove (cancel + delete) one of the user's jobs from the queue. This is `+
+		`Remove (cancel + delete) a job from the queue. This is `+
 			`permanent — the job won't be retried. Requires user confirmation by `+
 			`default. Use 'reason' to record why.`,
 		"Removed via chat assistant",
@@ -864,8 +935,8 @@ func (s *Handler) toolRemoveJob() chat.Tool {
 // Two ways to identify the target set, in priority order:
 //   - `cluster_id` (recommended for "remove this batch") — single
 //     int, gets translated to `ClusterId == N`.
-//   - `constraint` — arbitrary ClassAd expression. Always wrapped
-//     with `Owner == actor` before issuing.
+//   - `constraint` — arbitrary ClassAd expression. Always confined
+//     to the chat's mutate scope (chatJobScope) before issuing.
 //
 // Either one MUST be provided; passing both is a typo and we reject
 // it explicitly so the LLM gets a clear error rather than a quietly
@@ -880,14 +951,15 @@ type removeJobsArgs struct {
 // removeJobsMaxAffected caps a single bulk-remove call. Set high
 // enough that "remove all my held jobs" works for typical users (a
 // few hundred is normal during a flapping run), low enough that an
-// LLM mistake-or-jailbreak with `constraint=""` (which would expand
-// to `Owner == actor`, matching every one of the user's jobs) gets
+// LLM mistake-or-jailbreak with an all-matching constraint (every one
+// of the user's jobs, or in an administrator's everyone scope every
+// job in the queue) gets
 // rejected before it touches the queue. The user can override by
 // removing in narrower batches.
 const removeJobsMaxAffected = 1000
 
-// toolRemoveJobs is the bulk version of remove_job. Owner-scoped via
-// scopeToOwner; pre-counts matches to refuse over-broad calls AND to
+// toolRemoveJobs is the bulk version of remove_job. Scoped via
+// chatJobScope; pre-counts matches to refuse over-broad calls AND to
 // surface the count in the tool result so the assistant can tell the
 // user what just happened ("removed 47 jobs from batch 42").
 //
@@ -900,7 +972,18 @@ func (s *Handler) toolRemoveJobs() chat.Tool {
 		name:    "remove_jobs",
 		pages:   jobsPageTools,
 		confirm: true,
-		description: `Remove (cancel + delete) MULTIPLE of the user's jobs at once — typically ` +
+		describe: func(ctx context.Context, actor string, in json.RawMessage) map[string]any {
+			var args removeJobsArgs
+			if json.Unmarshal(in, &args) != nil {
+				return nil
+			}
+			c, err := removeJobsConstraint(args)
+			if err != nil {
+				return nil
+			}
+			return s.describeConstraintOwners(ctx, actor, c)
+		},
+		description: `Remove (cancel + delete) MULTIPLE jobs at once — typically ` +
 			`an entire batch or every job matching a ClassAd filter. Permanent: removed ` +
 			`jobs aren't retried. Requires user confirmation. ` +
 			`USE FOR: "remove the whole batch 42" (cluster_id: 42), "delete every held job" ` +
@@ -908,8 +991,9 @@ func (s *Handler) toolRemoveJobs() chat.Tool {
 			`(constraint: "JobBatchName == \"sweep-2026-04\""). ` +
 			`BEFORE CALLING: call query_jobs first with the same constraint so you can tell ` +
 			`the user how many will be affected ("This will remove 47 jobs — proceed?"). ` +
-			`Owner-scoping is enforced server-side: you cannot match other users' jobs even ` +
-			`if you craft a constraint that tries to. The server caps a single call at ` +
+			`The server confines the constraint to the jobs the user may act on: their own, or, ` +
+			`for an administrator viewing everyone's jobs, every user's (the confirmation then ` +
+			`lists whose jobs match). The server caps a single call at ` +
 			`1000 affected jobs; for larger removals, narrow the filter and run multiple times.`,
 		schema: json.RawMessage(`{
 			"type": "object",
@@ -934,23 +1018,12 @@ func (s *Handler) toolRemoveJobs() chat.Tool {
 				return "", fmt.Errorf("invalid args: %w", err)
 			}
 
-			// Translate the cluster_id shortcut. The two-input shapes
-			// are mutually exclusive so the LLM doesn't accidentally
-			// build "ClusterId == N AND <something narrower>" thinking
-			// it scopes when actually the && is restrictive.
-			var llmConstraint string
-			switch {
-			case args.ClusterID > 0 && args.Constraint != "":
-				return "", fmt.Errorf("pass either cluster_id OR constraint, not both")
-			case args.ClusterID > 0:
-				llmConstraint = fmt.Sprintf("ClusterId == %d", args.ClusterID)
-			case strings.TrimSpace(args.Constraint) != "":
-				llmConstraint = args.Constraint
-			default:
-				return "", fmt.Errorf("either cluster_id or constraint is required (refusing to remove every job)")
+			llmConstraint, err := removeJobsConstraint(args)
+			if err != nil {
+				return "", err
 			}
 
-			constraint, err := scopeToOwner(ownerFromActor(actor), llmConstraint)
+			constraint, err := chatJobScope(ctx, actor, llmConstraint, jobScopeMutate)
 			if err != nil {
 				return "", err
 			}
@@ -973,6 +1046,7 @@ func (s *Handler) toolRemoveJobs() chat.Tool {
 					"matched":    0,
 					"affected":   0,
 					"constraint": constraint,
+					"scope":      chatScopeLabel(ctx, jobScopeMutate),
 					"note":       "no jobs matched; nothing to do",
 				})
 				return string(out), nil
@@ -1002,17 +1076,36 @@ func (s *Handler) toolRemoveJobs() chat.Tool {
 				"errors":            results.Error,
 				"reason":            reason,
 				"constraint":        constraint,
+				"scope":             chatScopeLabel(ctx, jobScopeMutate),
 			})
 			return string(out), nil
 		},
 	}
 }
 
+// removeJobsConstraint translates remove_jobs' two input shapes into one
+// constraint. They are mutually exclusive so the LLM doesn't accidentally
+// build "ClusterId == N AND <something narrower>" thinking it scopes when
+// actually the && is restrictive.
+func removeJobsConstraint(args removeJobsArgs) (string, error) {
+	switch {
+	case args.ClusterID > 0 && args.Constraint != "":
+		return "", fmt.Errorf("pass either cluster_id OR constraint, not both")
+	case args.ClusterID > 0:
+		return fmt.Sprintf("ClusterId == %d", args.ClusterID), nil
+	case strings.TrimSpace(args.Constraint) != "":
+		return args.Constraint, nil
+	default:
+		return "", fmt.Errorf("either cluster_id or constraint is required (refusing to remove every job)")
+	}
+}
+
 // singleJobActionTool factors the shared structure for hold/release/
-// remove: parse args, verify the target is owned by the actor, build
-// a constraint that names that exact job AND the owner (so a schedd
-// without strict ACLs still can't accidentally touch someone else's
-// job), invoke the schedd action, return a structured result.
+// remove: parse args, find the target within the jobs the caller may act
+// on (their own, or with the mutate tier in an everyone scope any
+// user's), build a constraint that names that exact job AND the owner it
+// was found to have, invoke the schedd action, return a structured
+// result. The schedd still checks that the caller may act on the job.
 func (s *Handler) singleJobActionTool(
 	name, description, defaultReason string,
 	action func(ctx context.Context, schedd *htcondor.Schedd, constraint, reason string) (*htcondor.JobActionResults, error),
@@ -1031,6 +1124,13 @@ func (s *Handler) singleJobActionTool(
 			"required": ["cluster_id", "proc_id"]
 		}`),
 		confirm: true,
+		describe: func(ctx context.Context, actor string, in json.RawMessage) map[string]any {
+			var args jobActionArgs
+			if json.Unmarshal(in, &args) != nil || args.ClusterID <= 0 || args.ProcID < 0 {
+				return nil
+			}
+			return s.describeJobOwner(ctx, actor, args.ClusterID, args.ProcID)
+		},
 		exec: func(ctx context.Context, actor string, in json.RawMessage) (string, error) {
 			var args jobActionArgs
 			if err := json.Unmarshal(in, &args); err != nil {
@@ -1040,31 +1140,19 @@ func (s *Handler) singleJobActionTool(
 				return "", fmt.Errorf("cluster_id must be > 0 and proc_id must be >= 0")
 			}
 
+			// Step 1: find the target job among those the caller may act
+			// on. Without this any LLM whose constraint-rewrite was
+			// somehow bypassed could touch a job outside the scope; with
+			// it, the worst case is a "no such job" reply.
+			owner, err := s.chatTargetJob(ctx, actor, args.ClusterID, args.ProcID)
+			if err != nil {
+				return "", err
+			}
 			schedd := s.getSchedd()
 
-			// Step 1: confirm the target job exists AND is owned by
-			// the authenticated user. Without this any LLM whose
-			// constraint-rewrite was somehow bypassed could nuke
-			// another user's job; with it, the worst case is a
-			// "no such job" reply.
-			ownerConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
-				args.ClusterID, args.ProcID, classadStringLit(ownerFromActor(actor)))
-			ads, _, err := schedd.QueryWithOptions(ctx, ownerConstraint, &htcondor.QueryOptions{
-				Limit:      1,
-				Projection: []string{"ClusterId", "ProcId", "Owner", "JobStatus"},
-			})
-			if err != nil {
-				return "", fmt.Errorf("ownership check: %w", err)
-			}
-			if len(ads) == 0 {
-				return "", fmt.Errorf("job %s either does not exist or is not owned by %s",
-					args.jobID(), actor)
-			}
-
-			// Step 2: dispatch the action. Constraint includes the
-			// owner check redundantly so the schedd's per-RPC ACL
-			// is also satisfied by content, not just by token
-			// identity.
+			// Step 2: dispatch the action, pinned to the job AND the
+			// owner just read, so it matches nothing if that changed.
+			ownerConstraint := pinnedJobConstraint(args.ClusterID, args.ProcID, owner)
 			reason := strings.TrimSpace(args.Reason)
 			if reason == "" {
 				reason = defaultReason
@@ -1076,6 +1164,7 @@ func (s *Handler) singleJobActionTool(
 			out, _ := json.Marshal(map[string]any{
 				"action":            name,
 				"job_id":            args.jobID(),
+				"owner":             owner,
 				"affected":          results.Success,
 				"not_found":         results.NotFound,
 				"permission_denied": results.PermissionDenied,

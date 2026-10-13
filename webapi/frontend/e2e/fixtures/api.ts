@@ -359,6 +359,9 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
     // enabled so the chat surface actually mounts: the jobs page hides
     // ChatPanel entirely on enabled=false, which would leave it untested.
     '/api/v1/chat/info': { enabled: true },
+    // Which jobs the assistant sees, as the server resolves the page's
+    // scope; an open panel reads it to say so.
+    '/api/v1/chat/scope': { requested: 'mine', scope: 'mine', act_on_others: false },
     '/api/v1/templates': { templates: [] },
     // The /interactive page's three lists. Empty is the interesting
     // default: it renders the launch forms, which is most of the page.
