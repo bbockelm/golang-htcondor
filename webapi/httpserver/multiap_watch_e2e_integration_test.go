@@ -64,6 +64,7 @@ func TestMultiAPWatchesEndToEnd(t *testing.T) {
 		name string
 		run  func(*testing.T, *e2eWatches)
 	}{
+		{"the hub reports each AP's jobs stream caught up", e2eHubPublishesJobsSynced},
 		{"watches register over both APs' 1.0", e2eRegisterWatches},
 		{"ap1's 1.0 completes and fires the watch for ap1 only", e2eAP1Completes},
 		{"the completed job's run attempts come from the hub", e2eEpochsFromHub},
@@ -149,6 +150,24 @@ func matchedIDs(a watchpoll.Answer) []string {
 		out = append(out, fmt.Sprintf("%d.%d@%s", m.Cluster, m.Proc, m.Schedd))
 	}
 	return out
+}
+
+// e2eHubPublishesJobsSynced: the pinned hub publishes JobsSynced and
+// JobsSyncedAt for both APs, so the absence rule runs on the catch-up
+// state rather than the older-hub LastReset fallback. A renamed or missing
+// attribute would otherwise go unnoticed: the fallback still passes the
+// rest of this test.
+func e2eHubPublishesJobsSynced(t *testing.T, w *e2eWatches) {
+	srcs := w.s.srv.multi.svc.Hub.Sources()
+	if len(srcs) != 2 {
+		t.Fatalf("the hub lists %d sources, want 2", len(srcs))
+	}
+	for _, src := range srcs {
+		ts := src.TableStatus[multiap.TableJobs]
+		if !ts.SyncedKnown || !ts.Synced || ts.SyncedAt.IsZero() {
+			t.Errorf("hub source %s jobs stream = %+v, want JobsSynced true with a JobsSyncedAt", src.Schedd, ts)
+		}
+	}
 }
 
 // e2eRegisterWatches: two watches over ClusterId == 1, which is a job on
