@@ -103,8 +103,8 @@ func TestRealisticGPUWorkloadGetsGPUAdvice(t *testing.T) {
 		t.Fatalf("train: no GPU memory advice; got %v", adviceIDs(train))
 	}
 	// 12 GB plus a quarter is 15 GB.
-	if !slices.Equal(mem.Submit, []string{"gpus_minimum_memory = 15 GB"}) {
-		t.Errorf("gpu-memory-require submit = %v", mem.Submit)
+	if !slices.Equal(mem.Submit, []string{"gpus_minimum_memory = 15 GB"}) || mem.Title != "Require GPUs with 15 GB of memory" {
+		t.Errorf("gpu-memory-require = %q %v", mem.Title, mem.Submit)
 	}
 
 	sweep := workflowNamed(t, resp, "sweep")
@@ -251,7 +251,7 @@ func TestGPUMemoryRequireAndRaise(t *testing.T) {
 	}
 	w := onlyWorkflow(t, raise)
 	a := adviceByID(w, "gpu-memory-raise")
-	if a == nil || !slices.Equal(a.Submit, []string{"gpus_minimum_memory = 25 GB"}) {
+	if a == nil || !slices.Equal(a.Submit, []string{"gpus_minimum_memory = 25 GB"}) || a.Title != "Raise the GPU memory minimum to 25 GB" {
 		t.Fatalf("advice = %v / %+v", adviceIDs(w), a)
 	}
 	if !strings.Contains(a.Detail, "19.5 GB, 49% of the 40 GB their GPUs had") {
@@ -268,7 +268,8 @@ func TestGPUMemoryRequireAndRaise(t *testing.T) {
 		lower[i].GPUsMinMemory = f(40960)
 	}
 	w = onlyWorkflow(t, lower)
-	if a := adviceByID(w, "gpu-memory-small"); a == nil || !slices.Equal(a.Submit, []string{"gpus_minimum_memory = 6 GB"}) {
+	if a := adviceByID(w, "gpu-memory-small"); a == nil || !slices.Equal(a.Submit, []string{"gpus_minimum_memory = 6 GB"}) ||
+		a.Title != "Lower the GPU memory minimum to 6 GB" {
 		t.Errorf("advice = %v / %+v", adviceIDs(w), a)
 	}
 }

@@ -548,7 +548,7 @@ const SPECS: WorkflowSpec[] = [
         id: 'gpu-memory-small',
         resource: 'gpu',
         severity: 'suggest',
-        title: 'Require GPUs with 6 GB of memory',
+        title: 'Lower the GPU memory minimum to 6 GB',
         detail:
           'These jobs require GPUs with at least 40 GB of memory; the most GPU memory any of 64 jobs used was 4.1 GB, 10% of the 40 GB their GPUs had. A lower minimum lets them run on more GPUs.',
         submit: ['gpus_minimum_memory = 6 GB'],

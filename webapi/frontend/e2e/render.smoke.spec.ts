@@ -876,7 +876,7 @@ test('a GPU workflow lists its GPU suggestions with their submit lines', async (
   await expect(idle).toContainText('Keep the GPU busier');
   await expect(idle).toContainText('Half of 58 jobs kept their GPUs busy 34% of the time or less.');
   const memory = page.locator('[data-testid="advice"][data-advice-id="gpu-memory-small"]');
-  await expect(memory).toContainText('Require GPUs with 6 GB of memory');
+  await expect(memory).toContainText('Lower the GPU memory minimum to 6 GB');
   await expect(memory.locator('pre')).toHaveText('gpus_minimum_memory = 6 GB');
 });
 

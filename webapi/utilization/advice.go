@@ -602,7 +602,6 @@ func gpuMemoryAdvice(g *GPUStats, jobs []*Job) []Advice {
 	a := Advice{
 		Resource:   ResourceGPU,
 		Severity:   SeveritySuggest,
-		Title:      "Require GPUs with " + submitSize(rec) + " of memory",
 		Submit:     []string{"gpus_minimum_memory = " + submitSize(rec)},
 		Confidence: gpuConfidence(n),
 	}
@@ -612,13 +611,16 @@ func gpuMemoryAdvice(g *GPUStats, jobs []*Job) []Advice {
 			return nil
 		}
 		a.ID = "gpu-memory-require"
+		a.Title = "Require GPUs with " + submitSize(rec) + " of memory"
 		a.Detail = fmt.Sprintf("These jobs state no GPU memory minimum, and %s A GPU with less memory cannot run them.", used)
 	case rec < required.Typical:
 		a.ID = "gpu-memory-small"
+		a.Title = "Lower the GPU memory minimum to " + submitSize(rec)
 		a.Detail = fmt.Sprintf("These jobs require GPUs with at least %s of memory; %s A lower minimum lets them run on more GPUs.",
 			sizeMiB(required.Typical), used)
 	case peak > required.Typical:
 		a.ID = "gpu-memory-raise"
+		a.Title = "Raise the GPU memory minimum to " + submitSize(rec)
 		a.Detail = fmt.Sprintf("These jobs require GPUs with at least %s of memory, but %s A GPU with only the minimum cannot run them.",
 			sizeMiB(required.Typical), used)
 	default:
