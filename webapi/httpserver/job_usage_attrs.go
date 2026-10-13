@@ -2,8 +2,6 @@ package httpserver
 
 import (
 	"github.com/PelicanPlatform/classad/classad"
-
-	"github.com/bbockelm/golang-htcondor/webapi/utilization"
 )
 
 // usageAttrsToEvaluate are job attributes that HTCondor stores as expressions
@@ -52,15 +50,14 @@ var usageAttrsToEvaluate = []string{
 // The integer/real distinction is preserved so a byte count does not acquire
 // a decimal point on its way through.
 //
-// GPU usage that more GPUs than the job held could not produce is removed
-// (see utilization.PlausibleGPUUsage): GPUsAverageUsage = 12973.47 on a
-// two-GPU job is not a measurement, and every page that shows it would
-// have to know that.
+// GPU usage is served as recorded, even when more GPUs than the job held
+// could not have produced it: the ad is what HTCondor wrote. Pages that
+// derive a usage figure from it apply utilization.PlausibleGPUUsage's
+// rule themselves.
 func evaluateUsageAttrs(ad *classad.ClassAd) {
 	if ad == nil {
 		return
 	}
-	defer dropImplausibleGPUUsage(ad)
 	for _, name := range usageAttrsToEvaluate {
 		if _, ok := ad.Lookup(name); !ok {
 			continue
@@ -76,23 +73,5 @@ func evaluateUsageAttrs(ad *classad.ClassAd) {
 				_ = ad.Set(name, f)
 			}
 		}
-	}
-}
-
-// dropImplausibleGPUUsage removes GPU usage attributes that exceed the GPUs
-// the job held.
-//
-// Only an ad that says how many GPUs the job held -- GPUsProvisioned or
-// AssignedGPUs -- is judged. A projection that left both out would leave
-// only the request to go by, and a job matched to a slot with more GPUs
-// than it asked for can really keep more than its request busy.
-func dropImplausibleGPUUsage(ad *classad.ClassAd) {
-	_, prov := ad.Lookup("GPUsProvisioned")
-	_, assigned := ad.Lookup("AssignedGPUs")
-	if !prov && !assigned {
-		return
-	}
-	for _, name := range utilization.ImplausibleGPUUsage(ad) {
-		ad.Delete(name)
 	}
 }

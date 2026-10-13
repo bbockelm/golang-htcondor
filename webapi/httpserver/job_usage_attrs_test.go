@@ -146,36 +146,29 @@ func TestEvaluateUsageAttrs(t *testing.T) {
 	})
 }
 
-// GPU usage beyond the GPUs a job held is not served; usage a job could
-// have produced is, including from GPUs it was given beyond its request.
-func TestImplausibleGPUUsageIsNotServed(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		ad   string
-		keep bool
-	}{
-		{"req 2, prov 2, avg 12973.47", `[RequestGPUs = 2; GPUsProvisioned = 2; AssignedGPUs = "GPU-0a,GPU-0b"; GPUsAverageUsage = 12973.47]`, false},
-		{"req 1, prov 2, avg 1.8", `[RequestGPUs = 1; GPUsProvisioned = 2; AssignedGPUs = "GPU-1a,GPU-1b"; GPUsAverageUsage = 1.8]`, true},
-		{"req 4, prov 4, avg 3.2", `[RequestGPUs = 4; GPUsProvisioned = 4; GPUsAverageUsage = 3.2]`, true},
-		{"req 1, two ids, GPUsUsage 1.8", `[RequestGPUs = 1; AssignedGPUs = "GPU-1a,GPU-1b"; GPUsUsage = 1.8]`, true},
-		{"req 1, prov 1, GPUsUsage 7", `[RequestGPUs = 1; GPUsProvisioned = 1; GPUsUsage = 7]`, false},
-		// Nothing says how many GPUs it held: not judged.
-		{"req 1 only, avg 1.8", `[RequestGPUs = 1; GPUsAverageUsage = 1.8]`, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ad, err := classad.Parse(tc.ad)
-			if err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			evaluateUsageAttrs(ad)
-			_, avg := ad.Lookup("GPUsAverageUsage")
-			_, cur := ad.Lookup("GPUsUsage")
-			if got := avg || cur; got != tc.keep {
-				t.Errorf("usage kept = %v, want %v", got, tc.keep)
-			}
-			if _, ok := ad.Lookup("RequestGPUs"); !ok {
-				t.Error("RequestGPUs removed")
-			}
-		})
+// GPU usage is served as HTCondor recorded it, including a figure no job
+// could produce: the raw ad and the attribute list show the record, and
+// the pages that derive a usage figure judge it themselves.
+func TestGPUUsageIsServedAsRecorded(t *testing.T) {
+	ad, err := classad.Parse(`[RequestGPUs = 2; GPUsProvisioned = 2; AssignedGPUs = "GPU-0a,GPU-0b"; GPUsAverageUsage = 12973.47; GPUsUsage = 53.67]`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	before, err := json.Marshal(ad)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	evaluateUsageAttrs(ad)
+	after, err := json.Marshal(ad)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("served ad changed:\n before %s\n after  %s", before, after)
+	}
+	for _, name := range []string{"GPUsAverageUsage", "GPUsUsage"} {
+		if _, ok := ad.Lookup(name); !ok {
+			t.Errorf("%s removed", name)
+		}
 	}
 }
