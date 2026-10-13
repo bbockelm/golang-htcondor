@@ -933,8 +933,9 @@ func (h *Handler) pingAsCaller(ctx context.Context) (*htcondor.PingResult, error
 // half of startup, the registry and hub pollers, and job watches over
 // the hub. Everything that polls or acts on "the" schedd -- address and
 // credd updaters, periodic pings, the queue-superuser poll, the
-// job_queue.log tail -- does not start.
-func (h *Handler) startMultiAPHandler(ctx context.Context, ln net.Listener, protocol string) error {
+// job_queue.log tail -- does not start. What does start runs on h.ctx,
+// which Stop cancels, never on Start's context.
+func (h *Handler) startMultiAPHandler(ln net.Listener, protocol string) error {
 	if err := h.initializeIDP(ln, protocol); err != nil {
 		return err
 	}
@@ -951,12 +952,12 @@ func (h *Handler) startMultiAPHandler(ctx context.Context, ln net.Listener, prot
 			"the gateway authenticates with the device flow and cannot run without it")
 	}
 	if h.oauth2StateStore != nil {
-		h.oauth2StateStore.Start(ctx)
+		h.oauth2StateStore.Start(h.ctx)
 	}
 	if h.oauth2Provider != nil {
-		go h.runTokenRetention(ctx)
+		go h.runTokenRetention(h.ctx)
 	}
-	h.startSessionCleanup(ctx)
+	h.startSessionCleanup(h.ctx)
 	h.startMultiAP(h.ctx)
 	h.startMultiAPWatches(h.ctx)
 	return nil

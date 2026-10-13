@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -52,6 +53,15 @@ func multiAPService(t *testing.T, hub *multiaptest.DB, reg multiap.Registry) *mu
 // and OAuth2 on, and the user header trusted from anywhere.
 func newMultiAPServer(t *testing.T, svc *multiap.Service) *Server {
 	t.Helper()
+	srv := newUnroutedMultiAPServer(t, svc)
+	srv.setupRoutes()
+	return srv
+}
+
+// newUnroutedMultiAPServer is newMultiAPServer without the routes, for a
+// test that calls Start, which installs them itself.
+func newUnroutedMultiAPServer(t *testing.T, svc *multiap.Service) *Server {
+	t.Helper()
 	srv, err := NewServer(Config{
 		MultiAP:                  MultiAPConfig{ScheddConstraint: `regexp("^ap", Name)`, service: svc},
 		Logger:                   newTestLogger(t),
@@ -67,7 +77,6 @@ func newMultiAPServer(t *testing.T, svc *multiap.Service) *Server {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	srv.setupRoutes()
 	return srv
 }
 
@@ -425,5 +434,40 @@ func TestMultiAPMCPCatalogue(t *testing.T) {
 	}
 	if len(names) < 5 {
 		t.Errorf("catalogue = %v", names)
+	}
+}
+
+// TestMultiAPStopStopsWhatStartBegan is TestShutdownPersistsTheCounters'
+// shutdown check for multi-AP mode, whose Start is its own function and
+// starts its own goroutines: the hub's job watch feed and nudger, the
+// per-AP superuser poll, the assignment watcher, and the session and
+// OAuth2 state cleanups. Each must end on Stop's cancel; one left on
+// Start's context holds Stop until its own deadline.
+func TestMultiAPStopStopsWhatStartBegan(t *testing.T) {
+	hub := multiaptest.NewMemoryHub(t)
+	hub.PutSource(ap1, multiap.StateFresh, 1)
+	srv := newUnroutedMultiAPServer(t, multiAPService(t, hub, multiaptest.NewRegistry(ap1)))
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	// Start's context outlives Stop, as a daemon's does: only Stop's
+	// cancel can end the goroutines.
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	defer cancelStart()
+	if err := srv.Handler.Start(startCtx, ln, "http"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelStop()
+	began := time.Now()
+	_ = srv.Stop(stopCtx)
+	if stopCtx.Err() != nil {
+		t.Errorf("Stop gave up waiting for the handler's background goroutines after %v: "+
+			"one of them does not stop when the handler does", time.Since(began).Round(time.Millisecond))
 	}
 }
