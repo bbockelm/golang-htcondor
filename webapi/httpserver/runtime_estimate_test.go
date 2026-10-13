@@ -516,7 +516,6 @@ htcondor_api_runtime_estimate_within_2x_total{level="batch"} 0
 htcondor_api_runtime_estimate_within_2x_total{level="cluster"} 0
 htcondor_api_runtime_estimate_within_2x_total{level="cmd"} 0
 htcondor_api_runtime_estimate_within_2x_total{level="exact"} 4
-htcondor_api_runtime_estimate_within_2x_total{level="global"} 0
 htcondor_api_runtime_estimate_within_2x_total{level="iwd"} 0
 htcondor_api_runtime_estimate_within_2x_total{level="owner"} 0
 htcondor_api_runtime_estimate_within_2x_total{level="template"} 0

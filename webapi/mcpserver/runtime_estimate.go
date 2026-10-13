@@ -42,7 +42,6 @@ var runtimeLevelText = map[string]string{
 	"iwd":      "of your finished jobs from the same submit directory",
 	"cmd":      "of your finished jobs running the same program",
 	"owner":    "of your recently finished jobs",
-	"global":   "recently finished jobs on this access point",
 }
 
 // renderRuntimeEstimate is the text form of get_job's runtime_estimate.
@@ -52,7 +51,7 @@ func renderRuntimeEstimate(r runtimeest.Result) string {
 		case runtimeest.ReasonWarmingUp:
 			return "\n\nRuntime estimate: not available yet (the job history is still being read)."
 		case runtimeest.ReasonInsufficientHistory:
-			return "\n\nRuntime estimate: not available (too few comparable finished jobs)."
+			return "\n\nRuntime estimate: not available (too few of the owner's comparable jobs have finished recently)."
 		case runtimeest.ReasonNotEstimated:
 			return "\n\nRuntime estimate: none; scheduler- and local-universe jobs, such as a DAG's workflow manager, are not estimated."
 		}

@@ -156,7 +156,6 @@ type SimilarJobsResponse struct {
 	Levels        []SimilarLevel             `json:"levels"`
 	Window        SimilarWindow              `json:"window"`
 	Runtimes      *runtimeest.RuntimeSummary `json:"runtimes"`
-	AggregateOnly bool                       `json:"aggregate_only"`
 	Total         int                        `json:"total"`
 	Offset        int                        `json:"offset"`
 	NextOffset    *int                       `json:"next_offset"`
@@ -208,9 +207,6 @@ type SimilarJob struct {
 //     completions may be listed before it has them;
 //   - its read is capped (runtimeEstimateMaxRows) and this one reads at
 //     most similarScanLimit of the owner's records.
-//
-// LevelGlobal's group is every user's jobs. It is described in aggregate
-// only, never by job -- the same rule runtimeest.Result keeps.
 func (s *Handler) handleJobSimilar(w http.ResponseWriter, r *http.Request, cluster, proc int) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -273,7 +269,11 @@ func (s *Handler) handleJobSimilar(w http.ResponseWriter, r *http.Request, clust
 	}
 	level, ok := s.similarLevel(asked, resp.EstimateLevel, keys)
 	if !ok {
-		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("this job has nothing to group on at level %q", asked.String()))
+		msg := "this job has nothing to group on"
+		if asked != nil {
+			msg = fmt.Sprintf("this job has nothing to group on at level %q", asked.String())
+		}
+		s.writeError(w, http.StatusBadRequest, msg)
 		return
 	}
 	for _, l := range runtimeest.Levels() {
@@ -290,19 +290,11 @@ func (s *Handler) handleJobSimilar(w http.ResponseWriter, r *http.Request, clust
 		backfill = s.runtimeRefresher.backfill
 	}
 	maxJobs := runtimeest.DefaultWindow
-	if level == runtimeest.LevelGlobal {
-		maxJobs *= 4
-	}
 	if s.runtimeEst != nil {
-		maxJobs = s.runtimeEst.WindowSize(level)
+		maxJobs = s.runtimeEst.WindowSize()
 		resp.Runtimes = runtimeest.Summarize(s.runtimeEst.GroupRuntimes(keys, level))
 	}
 	resp.Window = SimilarWindow{Days: backfill.Hours() / 24, MaxJobs: maxJobs}
-	if level == runtimeest.LevelGlobal {
-		resp.AggregateOnly = true
-		s.writeJSON(w, http.StatusOK, resp)
-		return
-	}
 
 	members, err := s.similarMembers(ctx, r, ad, keys, level, time.Now().Add(-backfill).Unix(), maxJobs)
 	if err != nil {
@@ -322,7 +314,8 @@ func (s *Handler) handleJobSimilar(w http.ResponseWriter, r *http.Request, clust
 
 // similarLevel is the level to list: the one asked for, which must apply
 // to the job; else the one that answered its estimate; else the most
-// specific that applies.
+// specific that applies. ok is false when that level does not apply, or
+// no level does (a job with no owner).
 func (s *Handler) similarLevel(asked *runtimeest.Level, estimate *string, keys runtimeest.Keys) (runtimeest.Level, bool) {
 	if asked != nil {
 		return *asked, keys.Key(*asked) != ""
@@ -337,7 +330,7 @@ func (s *Handler) similarLevel(asked *runtimeest.Level, estimate *string, keys r
 			return l, true
 		}
 	}
-	return runtimeest.LevelGlobal, true
+	return 0, false
 }
 
 // similarMembers reads the owner's finished jobs in the window, newest

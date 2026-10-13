@@ -40,8 +40,9 @@ const (
 	ReasonDisabled = "disabled"
 	// ReasonWarmingUp means the history has not been read yet.
 	ReasonWarmingUp = "model_warming_up"
-	// ReasonInsufficientHistory means none of the job's groups -- not
-	// even the whole access point's -- has enough finished jobs.
+	// ReasonInsufficientHistory means none of the job's groups has a
+	// finished job: the owner has finished no recent job of the same kind.
+	// Other users' jobs never answer in their place.
 	ReasonInsufficientHistory = "insufficient_history"
 	// ReasonNotEstimated means the job is of a kind that is never
 	// estimated: a scheduler- or local-universe job, such as a DAGMan
@@ -56,17 +57,12 @@ const (
 )
 
 const (
-	// minSamples is the fewest runtimes an owner-confined group needs
-	// before it may answer. One: those are the owner's own jobs, so there
-	// is nothing to protect, and on the replayed history a single earlier
-	// run of the same command line was a far better guess than the
-	// owner's jobs as a whole, which a higher floor fell back to.
+	// minSamples is the fewest runtimes a group needs before it may
+	// answer. One: those are the owner's own jobs, so there is nothing to
+	// protect, and on the replayed history a single earlier run of the
+	// same command line was a far better guess than the owner's jobs as a
+	// whole, which a higher floor fell back to.
 	minSamples = 1
-	// minGlobalSamples is the same for LevelGlobal, which is a guess
-	// about a stranger's job and should at least be a well-founded one.
-	// LevelGlobal answers from the job's own universe once that universe
-	// has this many, and from every job until then.
-	minGlobalSamples = 30
 	// minLonger is how many runs longer than a running job's elapsed time
 	// its group needs to re-estimate it once it has outlived the median.
 	minLonger = 3
@@ -90,9 +86,8 @@ const (
 // Config sizes an Estimator.
 type Config struct {
 	// Window is how many recent runtimes each group answers from.
-	// Default DefaultWindow. LevelGlobal answers from four times as
-	// many. Each retains more, to score completed jobs as of their
-	// submit and start (see retainFactor).
+	// Default DefaultWindow. Each retains more, to score completed jobs
+	// as of their submit and start (see retainFactor).
 	Window int
 	// ResidualWindow is how many recent prediction errors each owner
 	// keeps, per view, for the bounds. Default DefaultResidualWindow.
@@ -134,12 +129,12 @@ type Result struct {
 	// Basis is which group answered.
 	Basis *Basis `json:"basis,omitempty"`
 	// Rough is true when one of the broad groups answered: the owner's
-	// jobs running the same program whatever the arguments, the owner's
-	// jobs in general, or the whole access point's. On a replayed access
-	// point those were within a factor of two of the actual runtime only
-	// a quarter to a third of the time, against about three quarters for
-	// the specific groups, so a client should present them as a rough
-	// guess rather than as an expectation.
+	// jobs running the same program whatever the arguments, or the
+	// owner's jobs in general. On a replayed access point those were
+	// within a factor of two of the actual runtime only a quarter to a
+	// third of the time, against about three quarters for the specific
+	// groups, so a client should present them as a rough guess rather
+	// than as an expectation.
 	Rough bool `json:"rough"`
 	// ElapsedSeconds is how long the job has been running, when it is.
 	ElapsedSeconds *float64 `json:"elapsed_seconds,omitempty"`
@@ -289,17 +284,13 @@ func (o *ownerState) scores(v view) *[numLevels]float32 {
 }
 
 type state struct {
-	groups [LevelGlobal]map[string]*window
-	// global is every job, and byUniverse every job of one universe (see
-	// Features.universeKind); LevelGlobal answers from the job's universe
-	// once it holds minGlobalSamples and from global until then.
-	global     window
-	byUniverse map[string]*window
-	owners     map[string]*ownerState
+	groups [numLevels]map[string]*window
+	owners map[string]*ownerState
 	// levelResid is every owner's prediction errors per view and
-	// answering level, and globalResid per view.
-	levelResid  [numViews][numLevels]window
-	globalResid [numViews]window
+	// answering level, and allResid per view whatever the level (see
+	// residualPool).
+	levelResid [numViews][numLevels]window
+	allResid   [numViews]window
 
 	loaded bool
 	jobs   int64
@@ -330,7 +321,7 @@ type poolKey struct {
 }
 
 func newState() *state {
-	s := &state{owners: make(map[string]*ownerState), byUniverse: make(map[string]*window)}
+	s := &state{owners: make(map[string]*ownerState)}
 	for i := range s.groups {
 		s.groups[i] = make(map[string]*window)
 	}
@@ -407,7 +398,7 @@ func (s *state) ingest(r *record, cfg Config) {
 				own.resid[v].add(res, r.at, cfg.ResidualWindow, cfg.ResidualWindow)
 			}
 			s.levelResid[v][lvl].add(res, r.at, 4*cfg.ResidualWindow, 4*cfg.ResidualWindow)
-			s.globalResid[v].add(res, r.at, 4*cfg.ResidualWindow, 4*cfg.ResidualWindow)
+			s.allResid[v].add(res, r.at, 4*cfg.ResidualWindow, 4*cfg.ResidualWindow)
 		}
 		// After the choice, so this job's outcome does not inform the
 		// level it was predicted with.
@@ -435,13 +426,6 @@ func (s *state) ingest(r *record, cfg Config) {
 		}
 		w.add(r.runtime, r.at, cfg.Window, retainFactor*cfg.Window)
 	}
-	s.global.add(r.runtime, r.at, 4*cfg.Window, retainFactor*4*cfg.Window)
-	gu := s.byUniverse[r.keys.universe]
-	if gu == nil {
-		gu = &window{}
-		s.byUniverse[r.keys.universe] = gu
-	}
-	gu.add(r.runtime, r.at, 4*cfg.Window, retainFactor*4*cfg.Window)
 	s.jobs++
 	s.newest = max(s.newest, r.at)
 }
@@ -464,16 +448,6 @@ func (s *state) candidatesAsOf(k Keys, t int64, cfg Config) [numLevels]float64 {
 			preds[l] = quantileOf(vals, 0.5)
 		}
 	}
-	preds[LevelGlobal] = math.NaN()
-	if w := s.byUniverse[k.universe]; w != nil {
-		if vals := w.before(t, 4*cfg.Window, &s.scratch); len(vals) >= minGlobalSamples {
-			preds[LevelGlobal] = quantileOf(vals, 0.5)
-			return preds
-		}
-	}
-	if vals := s.global.before(t, 4*cfg.Window, &s.scratch); len(vals) >= minGlobalSamples {
-		preds[LevelGlobal] = quantileOf(vals, 0.5)
-	}
 	return preds
 }
 
@@ -492,35 +466,25 @@ func (s *state) candidates(k Keys) ([numLevels]float64, [numLevels]*window) {
 			preds[l], wins[l] = w.median(), w
 		}
 	}
-	preds[LevelGlobal] = math.NaN()
-	if w := s.byUniverse[k.universe]; w.len() >= minGlobalSamples {
-		preds[LevelGlobal], wins[LevelGlobal] = w.median(), w
-	} else if s.global.len() >= minGlobalSamples {
-		preds[LevelGlobal], wins[LevelGlobal] = s.global.median(), &s.global
-	}
 	return preds, wins
 }
 
 // choose picks the level that answers: the most specific available
-// owner-confined level, unless a less specific one has predicted this
-// owner's jobs better by more than scoreMargin. With no track record
-// every level carries the same prior, so the most specific answers.
-// LevelGlobal answers only when no owner-confined level can: on the
-// replayed history, letting it compete cost accuracy, since a job is
-// nearly always more like its owner's other jobs than like the access
-// point's.
+// level, unless a less specific one has predicted this owner's jobs
+// better by more than scoreMargin. With no track record every level
+// carries the same prior, so the most specific answers. When no level
+// is available there is no estimate. Other users' jobs never stand in:
+// on a replayed access point, an estimate from the access point's jobs
+// as a whole was right too rarely to be worth showing.
 func choose(scores *[numLevels]float32, preds *[numLevels]float64) (Level, bool) {
 	best := -1
-	for l := range LevelGlobal {
+	for l := range numLevels {
 		if math.IsNaN(preds[l]) {
 			continue
 		}
 		if best < 0 || (scores != nil && scores[l] < scores[best]-scoreMargin) {
 			best = int(l)
 		}
-	}
-	if best < 0 && !math.IsNaN(preds[LevelGlobal]) {
-		best = int(LevelGlobal)
 	}
 	if best < 0 {
 		return 0, false
@@ -692,8 +656,10 @@ func (p *prepared) finish(q Query, m Model) Result {
 // by their last large cluster, and the next one is often in a different
 // regime entirely. So the owner's errors are pooled with the access
 // point's errors for the level that answered, falling back to the access
-// point's errors overall while those are too few. The bounds are then
-// widened, never narrowed, to the answering group's own 10th and 90th
+// point's errors at every level while those are too few. Those errors
+// size the range around an estimate drawn from the owner's own jobs;
+// they are never an estimate themselves. The bounds are then widened,
+// never narrowed, to the answering group's own 10th and 90th
 // percentiles, which carry its spread when that is wider than the
 // errors have been. Before any errors exist the group's spread is all
 // there is.
@@ -709,9 +675,10 @@ func (s *state) bounds(own *ownerState, owner string, v view, lvl Level, est flo
 
 // residualPool is the sorted errors bounds draws from: the owner's
 // pooled with the access point's for the level, or the access point's
-// overall while those are too few. Only the union needs building, and it
-// is built once per owner, view and level and kept until the errors
-// change (see state.pools); the caller must not modify it.
+// at every level while those are too few. Only the union needs
+// building, and it is built once per owner, view and level and kept
+// until the errors change (see state.pools); the caller must not modify
+// it.
 func (s *state) residualPool(own *ownerState, owner string, v view, lvl Level, cache bool) []float32 {
 	var mine []float32
 	if own != nil {
@@ -740,7 +707,7 @@ func (s *state) residualPool(own *ownerState, owner string, v view, lvl Level, c
 		s.poolMu.Unlock()
 	}
 	if len(pool) < minResiduals {
-		pool = s.globalResid[v].sorted
+		pool = s.allResid[v].sorted
 	}
 	return pool
 }
@@ -777,9 +744,9 @@ func (s *state) model() Model {
 }
 
 // Evict forgets every group and owner with no completion since
-// olderThan, and returns how many were dropped. LevelGlobal's groups, one
-// per universe, are never dropped. This is what bounds memory: without it a cluster id, once
-// seen, would be kept for the life of the process.
+// olderThan, and returns how many were dropped. This is what bounds
+// memory: without it a cluster id, once seen, would be kept for the life
+// of the process.
 func (e *Estimator) Evict(olderThan time.Time) int {
 	e.wmu.Lock()
 	defer e.wmu.Unlock()
@@ -832,8 +799,7 @@ type Stats struct {
 	Within2x        int64
 	ScoredByLevel   map[string]int64
 	Within2xByLevel map[string]int64
-	// Keys is how many groups each level holds; for LevelGlobal, how many
-	// universes it has seen.
+	// Keys is how many groups each level holds.
 	Keys map[string]int
 	// Owners is how many owners have state.
 	Owners int
@@ -860,11 +826,7 @@ func (e *Estimator) Stats() Stats {
 	for l := Level(0); l < numLevels; l++ {
 		out.ScoredByLevel[l.String()] = s.scoredBy[l]
 		out.Within2xByLevel[l.String()] = s.withinBy[l]
-		if l == LevelGlobal {
-			out.Keys[l.String()] = len(s.byUniverse)
-		} else {
-			out.Keys[l.String()] = len(s.groups[l])
-		}
+		out.Keys[l.String()] = len(s.groups[l])
 	}
 	return out
 }
@@ -968,7 +930,6 @@ func (b *Batch) Add(c Completion) {
 	k := DeriveKeys(c.Features)
 	k.owner = b.interned(k.owner)
 	k.kind = b.interned(k.kind)
-	k.universe = b.interned(k.universe)
 	for i := range k.k {
 		k.k[i] = b.interned(k.k[i])
 	}

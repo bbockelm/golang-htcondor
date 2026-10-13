@@ -193,9 +193,6 @@ func TestDeriveKeys(t *testing.T) {
 			t.Errorf("%s key %q is not confined to the owner and kind", l, k.Key(l))
 		}
 	}
-	if k.Key(LevelGlobal) != "u5" {
-		t.Errorf("global key = %q", k.Key(LevelGlobal))
-	}
 }
 
 func TestFeaturesFromAdReadsKind(t *testing.T) {
@@ -254,7 +251,7 @@ func TestKeysAreKindConfined(t *testing.T) {
 	grid.Universe = 9
 	vanilla.Universe = UniverseVanilla
 	a, d, g := DeriveKeys(vanilla), DeriveKeys(dag), DeriveKeys(grid)
-	for l := LevelCluster; l < LevelGlobal; l++ {
+	for _, l := range Levels() {
 		if a.Key(l) == d.Key(l) {
 			t.Errorf("%s: DAG node and standalone job share key %q", l, a.Key(l))
 		}
@@ -265,21 +262,16 @@ func TestKeysAreKindConfined(t *testing.T) {
 	if DeriveKeys(unset) != a {
 		t.Error("a job with no universe is not grouped as vanilla")
 	}
-	// The access point's group is by universe alone.
-	if a.Key(LevelGlobal) != d.Key(LevelGlobal) || a.Key(LevelGlobal) == g.Key(LevelGlobal) {
-		t.Errorf("global keys: vanilla %q, DAG node %q, grid %q", a.Key(LevelGlobal), d.Key(LevelGlobal), g.Key(LevelGlobal))
-	}
 }
 
 // A container job and a bare one of the same owner running the very same
-// command never share a group, whichever image the container job uses;
-// the access point's group is shared.
+// command never share a group, whichever image the container job uses.
 func TestKeysAreContainerConfined(t *testing.T) {
 	const job = "Owner = \"alice\"\nClusterId = 7\nCmd = \"/home/alice/run.sh\"\nArguments = \"1\"\nIwd = \"/home/alice/w\"\nJobBatchName = \"b\"\nJobUniverse = 5\n"
 	bare := DeriveKeys(FeaturesFromAd(adFrom(t, job)))
 	ctr := DeriveKeys(FeaturesFromAd(adFrom(t, job+"ContainerImage = \"osdf:///images/a.sif\"")))
 	other := DeriveKeys(FeaturesFromAd(adFrom(t, job+"ContainerImage = \"docker://python:3.12\"\nWantContainer = true")))
-	for l := LevelCluster; l < LevelGlobal; l++ {
+	for _, l := range Levels() {
 		if bare.Key(l) == "" || ctr.Key(l) == "" {
 			t.Fatalf("%s: missing key (bare %q, container %q)", l, bare.Key(l), ctr.Key(l))
 		}
@@ -289,9 +281,6 @@ func TestKeysAreContainerConfined(t *testing.T) {
 		if ctr.Key(l) != other.Key(l) {
 			t.Errorf("%s: a new image changed the key: %q vs %q", l, ctr.Key(l), other.Key(l))
 		}
-	}
-	if bare.Key(LevelGlobal) != ctr.Key(LevelGlobal) {
-		t.Errorf("global keys: bare %q, container %q", bare.Key(LevelGlobal), ctr.Key(LevelGlobal))
 	}
 }
 
@@ -312,7 +301,7 @@ func TestDeriveKeysSkipsEmptyComponents(t *testing.T) {
 		t.Error("a job with no Cmd got command keys")
 	}
 	k = DeriveKeys(Features{Cmd: "x", BatchName: "b", Iwd: "/d"})
-	for l := LevelCluster; l < LevelGlobal; l++ {
+	for _, l := range Levels() {
 		if k.Key(l) != "" {
 			t.Errorf("owner-less job got %s key %q", l, k.Key(l))
 		}
@@ -323,7 +312,7 @@ func TestDeriveKeysSkipsEmptyComponents(t *testing.T) {
 func TestKeysAreOwnerConfined(t *testing.T) {
 	a := DeriveKeys(Features{Owner: "alice", Cmd: "x", Iwd: "/d", BatchName: "b", ClusterID: 1})
 	b := DeriveKeys(Features{Owner: "bob", Cmd: "x", Iwd: "/d", BatchName: "b", ClusterID: 1})
-	for l := LevelCluster; l < LevelGlobal; l++ {
+	for _, l := range Levels() {
 		if a.Key(l) == b.Key(l) {
 			t.Errorf("%s: alice and bob share key %q", l, a.Key(l))
 		}

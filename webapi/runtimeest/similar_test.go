@@ -24,9 +24,8 @@ func historyAd(t *testing.T, owner, cmd, args, batch string, cluster int64, runt
 }
 
 // The group at each level is decided by the estimator's own keys: the
-// template ignores numbers, the batch ignores the run suffix, every
-// owner-confined level stays with its owner, and the global level never
-// names a member.
+// template ignores numbers, the batch ignores the run suffix, and every
+// level stays with its owner.
 func TestInGroup(t *testing.T) {
 	job := historyAd(t, "alice", "/home/alice/sim", "--seed 4 --in data.txt", "sweep+101", 101, 0, 0)
 	k := DeriveKeys(FeaturesFromAd(job))
@@ -45,7 +44,7 @@ func TestInGroup(t *testing.T) {
 		{"cluster siblings", historyAd(t, "alice", "/x/other", "", "", 101, 60, 1000), LevelCluster, true},
 		{"another owner never", historyAd(t, "bob", "/home/alice/sim", "--seed 4 --in data.txt", "sweep+101", 101, 60, 1000), LevelTemplate, false},
 		{"another owner, owner level", historyAd(t, "bob", "/x/sim", "", "", 7, 60, 1000), LevelOwner, false},
-		{"global lists nobody", historyAd(t, "alice", "/home/alice/sim", "--seed 4 --in data.txt", "", 101, 60, 1000), LevelGlobal, false},
+		{"no such level", historyAd(t, "alice", "/home/alice/sim", "--seed 4 --in data.txt", "", 101, 60, 1000), Level(len(Levels())), false},
 	} {
 		if got := InGroup(tc.ad, k, tc.level); got != tc.want {
 			t.Errorf("%s: InGroup at %s = %v, want %v", tc.name, tc.level, got, tc.want)
@@ -79,7 +78,7 @@ func TestGroupRuntimes(t *testing.T) {
 	if res.Basis == nil || res.Basis.Level != "template" || res.EstimateSeconds != 550 {
 		t.Errorf("estimate = %+v; the median of the listed runtimes should be it", res)
 	}
-	if e.GroupRuntimes(k, LevelExact) != nil || e.WindowSize(LevelTemplate) != DefaultWindow || e.WindowSize(LevelGlobal) != 4*DefaultWindow {
+	if e.GroupRuntimes(k, LevelExact) != nil || e.WindowSize() != DefaultWindow {
 		t.Error("exact group or window sizes wrong")
 	}
 	if New(Config{}).GroupRuntimes(k, LevelTemplate) != nil {
@@ -93,7 +92,9 @@ func TestParseLevel(t *testing.T) {
 			t.Errorf("%s does not round-trip", l)
 		}
 	}
-	if _, ok := ParseLevel("nonsense"); ok {
-		t.Error("parsed nonsense")
+	for _, s := range []string{"nonsense", "global"} {
+		if _, ok := ParseLevel(s); ok {
+			t.Errorf("parsed %q", s)
+		}
 	}
 }

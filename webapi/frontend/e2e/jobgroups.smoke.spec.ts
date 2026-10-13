@@ -78,10 +78,10 @@ test("a job's page links its batch, its workflow and the jobs its estimate is ba
   await expect(similar.getByRole('radio', { checked: true })).toContainText('same program, any arguments · 150');
   await expect(similar.getByRole('button', { name: /Show more \(50 of 150\)/ })).toBeVisible();
 
-  // The whole access point: its spread, not other people's jobs.
-  await similar.getByRole('radio', { name: /every job of this kind on this access point/ }).click();
-  await expect(similar.getByTestId('aggregate-only')).toBeVisible();
-  await expect(similar.locator('table')).toHaveCount(0);
+  // The widest: all of the owner's jobs of the kind, never anyone else's.
+  await similar.getByRole('radio', { name: /all your jobs of this kind/ }).click();
+  await expect(similar.getByRole('radio', { checked: true })).toContainText('all your jobs of this kind · 400');
+  await expect(similar.getByRole('radio', { name: /access point/ })).toHaveCount(0);
 });
 
 test('a job whose workflow has nothing to show offers no workflow link', async ({ page }) => {

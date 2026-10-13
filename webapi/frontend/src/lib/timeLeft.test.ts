@@ -160,6 +160,11 @@ describe('batchTimeLeft', () => {
     }
     const unavailable: TimedJob = { status: 'idle', estimate: { available: false, reason: 'insufficient_history', exceeded_history: false } };
     expect(batchTimeLeft([unavailable], now, now)).toEqual({ main: '—', title: NO_HISTORY });
+    for (const status of ['idle', 'running'] as const) {
+      const j: TimedJob = { ...unavailable, status };
+      expect(jobTimeLeft(j, now, now)).toEqual({ main: '—', title: NO_HISTORY });
+      expect(rangeBar(j, 3600, now, now)).toBeUndefined();
+    }
   });
 
   it('has nothing to say about a batch with no waiting or running jobs', () => {

@@ -1878,7 +1878,7 @@ const openAPISchema = `{
     "/jobs/{jobId}/runtime-estimate": {
       "get": {
         "summary": "Estimate how long a job will run",
-        "description": "How long the job is likely to run in total, with a likely range, estimated from the runtimes of the same owner's similar jobs that have already completed (the same cluster, command line, batch name, submit directory or program, chosen by which has predicted that owner's jobs best), always of the same universe and, for a DAG node, from DAG nodes only. For a running job, also how long it has run and how long it likely has left. Built from the htcondordb mirror's job history, refreshed every few minutes; it never reveals another job's command, id or owner. Always 200 for a job the caller can see: when no estimate can be made, available is false and reason says why (disabled, model_warming_up, insufficient_history, not_estimated).",
+        "description": "How long the job is likely to run in total, with a likely range, estimated from the runtimes of the same owner's similar jobs that have already completed (the same cluster, command line, batch name, submit directory or program, or the owner's jobs as a whole, chosen by which has predicted that owner's jobs best), always of the same universe and, for a DAG node, from DAG nodes only. Other users' jobs never answer: an owner with no comparable finished job gets no estimate. For a running job, also how long it has run and how long it likely has left. Built from the htcondordb mirror's job history, refreshed every few minutes; it never reveals another job's command, id or owner. Always 200 for a job the caller can see: when no estimate can be made, available is false and reason says why (disabled, model_warming_up, insufficient_history, not_estimated).",
         "operationId": "getJobRuntimeEstimate",
         "parameters": [
           {
@@ -1902,19 +1902,19 @@ const openAPISchema = `{
                   "properties": {
                     "job_id": {"type": "string"},
                     "available": {"type": "boolean"},
-                    "reason": {"type": "string", "enum": ["disabled", "model_warming_up", "insufficient_history", "not_estimated"], "description": "Why there is no estimate; absent when available. not_estimated: the job is a scheduler- or local-universe job, such as a DAG's workflow manager (DAGMan), which is never estimated."},
+                    "reason": {"type": "string", "enum": ["disabled", "model_warming_up", "insufficient_history", "not_estimated"], "description": "Why there is no estimate; absent when available. insufficient_history: the owner has no recently finished job of the same kind. not_estimated: the job is a scheduler- or local-universe job, such as a DAG's workflow manager (DAGMan), which is never estimated."},
                     "estimate_seconds": {"type": "number", "description": "Expected total runtime. For a running job that has outlived the typical run, re-estimated from the comparable runs that lasted at least as long."},
                     "p10_seconds": {"type": "number", "description": "Lower end of the likely range: about 10% of comparable jobs finish sooner."},
                     "p90_seconds": {"type": "number", "description": "Upper end of the likely range: about 90% of comparable jobs finish by then. Drawn from past estimation errors made at the same point in a job's life (waiting or running)."},
                     "basis": {
                       "type": "object",
                       "properties": {
-                        "level": {"type": "string", "enum": ["cluster", "exact", "template", "batch", "iwd", "cmd", "owner", "global"], "description": "Which group of completed jobs answered: the job's own cluster, the same command line, the same command line with numbers masked, the same batch name, the same submit directory, the same program, all the owner's jobs, or all jobs on the access point. Every group but global holds only jobs of the same universe that are, like this one, DAG nodes or not; global holds the access point's jobs of the same universe."},
+                        "level": {"type": "string", "enum": ["cluster", "exact", "template", "batch", "iwd", "cmd", "owner"], "description": "Which group of the owner's completed jobs answered: the job's own cluster, the same command line, the same command line with numbers masked, the same batch name, the same submit directory, the same program, or all the owner's jobs. Every group holds only jobs of the same universe that are, like this one, DAG nodes or not."},
                         "sample_count": {"type": "integer", "description": "How many recent runtimes that group holds."},
                         "new_command": {"type": "boolean", "description": "None of the owner's recently completed jobs ran the same program. Absent when false."}
                       }
                     },
-                    "rough": {"type": "boolean", "description": "The estimate came from a broad group (level cmd, owner or global), which is right far less often than the specific ones; present it as a rough guess."},
+                    "rough": {"type": "boolean", "description": "The estimate came from a broad group (level cmd or owner), which is right far less often than the specific ones; present it as a rough guess."},
                     "elapsed_seconds": {"type": "number", "description": "How long the current execution has run. Present only while the job is running."},
                     "remaining_seconds": {"type": "number", "description": "estimate_seconds less elapsed_seconds. Absent when the job is not running or has exceeded its history."},
                     "exceeded_history": {"type": "boolean", "description": "The job has run longer than nearly every comparable job, so no remaining time is given; the estimate and range are what history said before it started."},
@@ -1952,11 +1952,11 @@ const openAPISchema = `{
     "/jobs/{jobId}/similar": {
       "get": {
         "summary": "The finished jobs behind a runtime estimate",
-        "description": "The job's group at one level of the runtime estimator -- by default the level that answered its estimate -- as the estimator files it: the owner's finished jobs that completed normally within the estimator's recency window, grouped by its own features and keys, newest first and at most its per-group sample bound. runtimes summarizes what the estimator holds for the group right now, which is what an estimate uses. The global level spans every user and is answered with aggregates only (aggregate_only, no jobs). The job is read with the same scope as GET /jobs/{jobId}: someone else's job is a 404, and the list holds only jobs the caller may read. Not available in multi-AP mode.",
+        "description": "The job's group at one level of the runtime estimator -- by default the level that answered its estimate -- as the estimator files it: the owner's finished jobs that completed normally within the estimator's recency window, grouped by its own features and keys, newest first and at most its per-group sample bound. runtimes summarizes what the estimator holds for the group right now, which is what an estimate uses. The job is read with the same scope as GET /jobs/{jobId}: someone else's job is a 404, and the list holds only jobs the caller may read. Not available in multi-AP mode.",
         "operationId": "getJobSimilar",
         "parameters": [
           {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}},
-          {"name": "level", "in": "query", "required": false, "schema": {"type": "string", "enum": ["cluster", "exact", "template", "batch", "iwd", "cmd", "owner", "global"]}, "description": "A level that does not apply to the job is a 400."},
+          {"name": "level", "in": "query", "required": false, "schema": {"type": "string", "enum": ["cluster", "exact", "template", "batch", "iwd", "cmd", "owner"]}, "description": "A level that does not apply to the job is a 400."},
           {"name": "offset", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 0, "default": 0}},
           {"name": "page_size", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}}
         ],
@@ -1967,7 +1967,7 @@ const openAPISchema = `{
             "levels": {"type": "array", "items": {"type": "object", "properties": {"level": {"type": "string"}, "description": {"type": "string"}, "applies": {"type": "boolean"}, "count": {"type": "integer", "nullable": true}}}},
             "window": {"type": "object", "properties": {"days": {"type": "number"}, "max_jobs": {"type": "integer"}}},
             "runtimes": {"type": "object", "nullable": true, "properties": {"count": {"type": "integer"}, "p10": {"type": "number"}, "p25": {"type": "number"}, "p50": {"type": "number"}, "p75": {"type": "number"}, "p90": {"type": "number"}}},
-            "aggregate_only": {"type": "boolean"}, "total": {"type": "integer"}, "offset": {"type": "integer"}, "next_offset": {"type": "integer", "nullable": true},
+            "total": {"type": "integer"}, "offset": {"type": "integer"}, "next_offset": {"type": "integer", "nullable": true},
             "jobs": {"type": "array", "items": {"type": "object", "properties": {
               "id": {"type": "string"}, "cluster": {"type": "integer"}, "proc": {"type": "integer"}, "submitted": {"type": "integer", "nullable": true},
               "completed": {"type": "integer"}, "runtime": {"type": "number"}, "exit_code": {"type": "integer"}}}}}}}}},
