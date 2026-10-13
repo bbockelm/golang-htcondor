@@ -68,7 +68,9 @@ describe('the job page in multi-AP mode', () => {
     await renderPage();
     await waitFor(() => expect(replace).toHaveBeenCalledWith('/jobs/12.0%40ap2.example.org'));
     expect(get).toHaveBeenCalledWith('12.0');
-    expect(await screen.findByText('ap2.example.org', { selector: 'span,div,dd,p' })).toBeTruthy();
+    // The summary names the access point. The attributes list shows the
+    // same text as the schedd member's value, so look in the field.
+    expect((await screen.findByText('Access point')).parentElement).toHaveTextContent('ap2.example.org');
     // A held job: the single-AP page would offer Release and Remove.
     expect(screen.queryByText('Release')).toBeNull();
     expect(screen.queryByText('Remove')).toBeNull();
