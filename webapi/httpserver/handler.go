@@ -417,6 +417,10 @@ type Handler struct {
 	// small /tmp is a way to take the server down with it.
 	spoolBufferDir string
 	shareSigner    *shareurl.Signer // HMAC signer for short-lived signed URLs
+	// watchRefreshEvery overrides how often a watch poll re-reads the
+	// watch while it waits. Zero means watchpoll.Refresh; only tests
+	// set it.
+	watchRefreshEvery time.Duration
 	// watchHeartbeatEvery overrides the streaming watch-poll heartbeat
 	// cadence. Zero means watchpoll.HeartbeatInterval; only tests set it.
 	watchHeartbeatEvery time.Duration
@@ -1576,6 +1580,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// which made a stuck migration look identical to a stuck
 	// post-credd RPC.
 	logger.Info(logging.DestinationHTTP, "Opening application database", "path", dbPath)
+	if seedAppDB != nil {
+		seedAppDB(dbPath)
+	}
 	appDB, err := appdb.OpenWithWarnings(dbPath, func(msg string, args ...any) {
 		logger.Warn(logging.DestinationHTTP, msg, args...)
 	})
@@ -2558,7 +2565,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 
 	// Start OAuth2 state store cleanup if it exists
 	if h.oauth2StateStore != nil {
-		h.oauth2StateStore.Start(ctx)
+		h.oauth2StateStore.Start(h.ctx)
 	}
 
 	// Delete token rows once they are dead and old enough to be of no use
@@ -2567,7 +2574,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// operator asking to keep token rows forever, which is a policy some
 	// deployments have; runTokenRetention honours it.
 	if h.oauth2Provider != nil {
-		go h.runTokenRetention(ctx)
+		go h.runTokenRetention(h.ctx)
 	}
 
 	// Start schedd address updater whenever we have a collector to query
@@ -2579,20 +2586,20 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// auto-swap decision: if the address was operator-pinned, we
 	// confirm but never override.
 	if h.collector != nil && h.scheddName != "" {
-		h.startScheddAddressUpdater(ctx)
+		h.startScheddAddressUpdater(h.ctx)
 	}
 
 	// Start credd address updater if credd was discovered (or discovery failed but should retry)
 	if h.creddDiscovered && h.collector != nil {
-		h.startCreddAddressUpdater(ctx)
+		h.startCreddAddressUpdater(h.ctx)
 	}
 
 	// Start session cleanup goroutine
-	h.startSessionCleanup(ctx)
+	h.startSessionCleanup(h.ctx)
 
 	// Start periodic ping goroutine if enabled
 	if h.pingInterval > 0 {
-		go h.periodicPing(ctx)
+		go h.periodicPing(h.ctx)
 	}
 
 	// Keep the htcondordb mirror's advertisement current in the
@@ -2600,13 +2607,13 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	// wants to route, so the admin and readiness surfaces describe
 	// nothing until traffic arrives -- and the first such read pays the
 	// collector round trip.
-	h.startDBMirrorPoll(ctx)
+	h.startDBMirrorPoll(h.ctx)
 
-	h.startJobWatchEvaluator(ctx)
-	h.startJobWatchFeed(ctx)
-	h.startJobWatchNudge(ctx)
-	h.startJupyterSweeper(ctx)
-	h.startRuntimeEstimates(ctx)
+	h.startJobWatchEvaluator(h.ctx)
+	h.startJobWatchFeed(h.ctx)
+	h.startJobWatchNudge(h.ctx)
+	h.startJupyterSweeper(h.ctx)
+	h.startRuntimeEstimates(h.ctx)
 
 	return nil
 }
@@ -3688,7 +3695,7 @@ func (h *Handler) initializeIDP(ln net.Listener, protocol string) error {
 	} else {
 		// Create client if not found (or error)
 		// Hash the secret
-		hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+		hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), secretHashCost)
 		if err != nil {
 			return fmt.Errorf("failed to hash client secret: %w", err)
 		}
@@ -3945,7 +3952,7 @@ func (h *Handler) syncIDPClientSecret(ctx context.Context, client fosite.Client,
 	if bcrypt.CompareHashAndPassword(client.GetHashedSecret(), []byte(secret)) == nil {
 		return nil
 	}
-	hashed, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
+	hashed, err := bcrypt.GenerateFromPassword([]byte(secret), secretHashCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash client secret: %w", err)
 	}

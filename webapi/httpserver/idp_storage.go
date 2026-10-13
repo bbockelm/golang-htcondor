@@ -49,7 +49,7 @@ func (s *IDPStorage) CreateUser(ctx context.Context, username, password, state s
 		return fmt.Errorf("invalid user state: must be 'pending', 'active', or 'admin'")
 	}
 
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), secretHashCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}

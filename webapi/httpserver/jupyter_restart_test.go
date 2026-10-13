@@ -136,6 +136,7 @@ func (f *jupyterFakeSchedd) queriedClusterZero() bool {
 // so a fresh registry, over the application database at dbPath.
 func newJupyterRestartHandler(t *testing.T, dbPath string, schedd *jupyterFakeSchedd) *Handler {
 	t.Helper()
+	seedMigratedAppDB(dbPath)
 	db, err := appdb.Open(dbPath)
 	if err != nil {
 		t.Fatalf("appdb.Open: %v", err)
