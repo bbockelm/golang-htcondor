@@ -2534,7 +2534,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	h.ctx, h.cancelFunc = context.WithCancel(ctx) //nolint:gosec // G118: cancelFunc is stored and called during shutdown
 
 	if h.multi != nil {
-		return h.startMultiAPHandler(ctx, ln, protocol)
+		return h.startMultiAPHandler(ln, protocol)
 	}
 
 	// Tail the schedd's job_queue.log into the watch collection, if configured.
