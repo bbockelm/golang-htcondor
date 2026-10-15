@@ -219,7 +219,11 @@ export function WorkflowJobs({
   const total = data?.pages[0]?.total;
   const marked = focus ? rows.filter((r) => inFocus(r, focus, true)).length : 0;
 
-  // Load the next page as the end of the list comes into view.
+  // The list scrolls in its own bounded area, so the page has an end
+  // however many jobs the workflow has: loading more as the page
+  // scrolled made it grow forever. The next page loads as the end of
+  // the AREA comes into view.
+  const area = useRef<HTMLDivElement | null>(null);
   const sentinel = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const node = sentinel.current;
@@ -228,7 +232,7 @@ export function WorkflowJobs({
       (entries) => {
         if (entries.some((e) => e.isIntersecting) && !isFetchingNextPage) void fetchNextPage();
       },
-      { rootMargin: '300px 0px' },
+      { root: area.current, rootMargin: '300px 0px' },
     );
     obs.observe(node);
     return () => obs.disconnect();
@@ -241,7 +245,7 @@ export function WorkflowJobs({
   const scrolledFor = useRef<JobFocus | null>(null);
   useEffect(() => {
     if (focus && firstIdx >= 0 && scrolledFor.current !== focus && firstMarked.current) {
-      firstMarked.current.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+      scrollToRow(area.current, firstMarked.current);
       scrolledFor.current = focus;
     }
   }, [focus, firstIdx]);
@@ -309,10 +313,18 @@ export function WorkflowJobs({
         </p>
       )}
       {error && !notFound && <p className="text-sm text-red-700">Could not load the jobs: {error.message}</p>}
-      {rows.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+      {(rows.length > 0 || hasNextPage) && (
+        <div
+          ref={area}
+          // Scrollable by keyboard too.
+          tabIndex={0}
+          role="region"
+          aria-label="Jobs of this workflow"
+          className="max-h-[70vh] overflow-auto rounded-lg border border-gray-200 bg-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-brand-400"
+          data-testid="workflow-jobs-scroll"
+        >
           <table className="min-w-full text-sm">
-            <thead className="bg-gray-50 text-left text-xs text-gray-500">
+            <thead className="sticky top-0 z-10 bg-gray-50 text-left text-xs text-gray-500 shadow-[0_1px_0_0_rgb(229_231_235)]">
               <tr>
                 <th className="px-3 py-2 uppercase tracking-wide">Job</th>
                 <th className="px-3 py-2 uppercase tracking-wide">Outcome</th>
@@ -372,17 +384,31 @@ export function WorkflowJobs({
               })}
             </tbody>
           </table>
-        </div>
-      )}
-      {hasNextPage && (
-        <div ref={sentinel} className="py-2 text-center text-xs text-gray-400">
-          {isFetchingNextPage ? 'Loading more jobs…' : (
-            <button type="button" onClick={() => void fetchNextPage()} className="underline">
-              Load more
-            </button>
+          {hasNextPage && (
+            <div ref={sentinel} className="py-2 text-center text-xs text-gray-400">
+              {isFetchingNextPage ? (
+                'Loading more jobs…'
+              ) : (
+                <button type="button" onClick={() => void fetchNextPage()} className="underline">
+                  Load more
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
     </section>
   );
+}
+
+// scrollToRow centres a row in the list's own scroll area, and brings the
+// area into view only if none of it is on screen: the page is not moved
+// to a row the list can show by itself.
+function scrollToRow(area: HTMLElement | null, row: HTMLElement) {
+  if (!area) return;
+  const a = area.getBoundingClientRect();
+  const r = row.getBoundingClientRect();
+  const top = area.scrollTop + (r.top - a.top) - (area.clientHeight - r.height) / 2;
+  area.scrollTo?.({ top: Math.max(0, top), behavior: 'smooth' });
+  if (a.bottom <= 0 || a.top >= window.innerHeight) area.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
 }

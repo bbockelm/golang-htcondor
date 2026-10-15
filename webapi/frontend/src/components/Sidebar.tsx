@@ -16,8 +16,9 @@ interface SidebarProps {
   // Several access points behind this server: only the pages that mode
   // serves are offered.
   multiAP?: boolean;
-  // Mobile drawer state. On lg+ the sidebar is always visible and these
-  // are ignored.
+  // Mobile drawer state. On lg+ the sidebar is always visible -- pinned
+  // to the viewport's height, so the account controls at its foot stay on
+  // screen however long the page -- and these are ignored.
   open: boolean;
   onClose: () => void;
 }
@@ -79,7 +80,7 @@ export function Sidebar({
       />
 
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-60 shrink-0 flex-col border-r bg-ink-950 text-gray-100 transition-transform lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-60 shrink-0 flex-col border-r bg-ink-950 text-gray-100 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0 ${
           open ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
