@@ -83,3 +83,29 @@ func TestRefusedResultsUnwrapsOnlyRefusals(t *testing.T) {
 		t.Error("a connection failure was read as the schedd's answer")
 	}
 }
+
+// TestJobActionOnMissingJobIgnoresLimitGarbage: schedds built between
+// 2025-02-24 and 2026-04-14 send an uninitialised result_total_6
+// (AR_LIMIT_EXCEEDED); a 25.8.0 schedd answered a hold matching nothing
+// with 1840092560. Acting on a job that is not there is still "no such
+// job", not "a schedd limit was exceeded".
+func TestJobActionOnMissingJobIgnoresLimitGarbage(t *testing.T) {
+	f := twoOwnerScheddServer(t)
+	f.schedd.SetActionReplyAttr("result_total_6", 1840092560)
+	alice := f.session(t, "alice")
+
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodPost, "/api/v1/jobs/99.0/hold", ""},
+		{http.MethodPost, "/api/v1/jobs/99.0/release", ""},
+		{http.MethodPost, "/api/v1/jobs/hold", `{"constraint":"ClusterId == 99"}`},
+		{http.MethodPost, "/api/v1/jobs/release", `{"constraint":"ClusterId == 99"}`},
+		{http.MethodDelete, "/api/v1/jobs", `{"constraint":"ClusterId == 99"}`},
+	} {
+		if w := f.do(t, tc.method, tc.path, tc.body, alice); w.Code != http.StatusNotFound {
+			t.Errorf("%s %s of a job that does not exist: status %d, want 404: %s", tc.method, tc.path, w.Code, w.Body.String())
+		}
+	}
+	if acted := f.schedd.ActedOn(); len(acted) != 0 {
+		t.Errorf("acted on %v", acted)
+	}
+}
