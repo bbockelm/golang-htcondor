@@ -10,9 +10,10 @@ import { serverLog } from '../fixtures/serverlog';
 // Placement onboarding, end to end, against a real pool
 // (scripts/placement-e2e/harness.sh): someone the placementd does not know
 // signs in and is refused a token; an admin onboards them in the Directory;
-// they then get a token in the browser and another through the standard
-// device flow, and each token submits a job with the HTCondor CLI that runs
-// as the account the admin created.
+// their session becomes the account without signing in again; they then get
+// a token in the browser and another through the standard device flow, and
+// each token submits a job with the HTCondor CLI that runs as the account the
+// admin created.
 
 const SCRIPTS = path.resolve(__dirname, '..', '..', '..', '..', 'scripts', 'placement-e2e');
 
@@ -135,7 +136,7 @@ async function postToken(page: Page, body: object) {
   });
 }
 
-test('an unknown identity is onboarded, and both of its tokens run jobs as its account', async ({ browser }) => {
+test('an unknown identity is onboarded, and both of its tokens run jobs as its account', async ({ browser, playwright }) => {
   const newbieContext = await browser.newContext();
   const newbie = await newbieContext.newPage();
   const adminContext = await browser.newContext();
@@ -194,18 +195,57 @@ test('an unknown identity is onboarded, and both of its tokens run jobs as its a
     await expect(mapped.getByText('mapfile', { exact: true })).toBeVisible();
   });
 
+  await test.step('the signed-in identity becomes the account, without signing in again', async () => {
+    const sessionCookie = async () =>
+      (await newbieContext.cookies()).find((c) => c.name === 'htcondor_session')?.value ?? '';
+    const before = await sessionCookie();
+    expect(before.startsWith('p.'), 'newbie starts with a placement-only session').toBe(true);
+
+    // The server re-checks a session at most every 30 seconds, and newbie's
+    // page last asked moments ago; keep asking until it is due.
+    const check = newbie.getByRole('button', { name: 'Check again' });
+    const jobs = newbie.getByRole('link', { name: 'Jobs' });
+    await expect(async () => {
+      if (await check.isVisible()) await check.click();
+      await expect(jobs).toBeVisible({ timeout: 2_000 });
+    }).toPass({ intervals: [3_000], timeout: 60_000 });
+
+    // The full shell, as the account, under a new session id.
+    await expect(newbie.getByText(ACCOUNT, { exact: true }).first()).toBeVisible();
+    await expect(check).toHaveCount(0);
+    const after = await sessionCookie();
+    expect(after).not.toBe('');
+    expect(after).not.toBe(before);
+    expect(after.startsWith('p.')).toBe(false);
+
+    // The placement-only session is gone. Asked from a client holding only
+    // that cookie, so the browser's new one cannot answer instead.
+    const oldClient = await playwright.request.newContext({
+      baseURL: BASE_URL,
+      ignoreHTTPSErrors: true,
+      extraHTTPHeaders: { Cookie: `htcondor_session=${before}` },
+    });
+    try {
+      const stale = await oldClient.get('/api/v1/auth/me');
+      expect(stale.status()).toBe(200);
+      expect((await stale.json()).authenticated).toBe(false);
+    } finally {
+      await oldClient.dispose();
+    }
+  });
+
   await test.step('the onboarded identity gets a token in the browser', async () => {
-    await newbie.reload();
+    const main = newbie.getByRole('main');
     // Still refused would mean the onboarding did not reach the placementd.
     await expect(newbie.getByText('newbie is not authorized to use this access point.')).toHaveCount(0);
-    await expect(newbie.getByLabel('Project')).toHaveValue(PROJECT);
-    await expect(newbie.locator('option')).toHaveText([PROJECT]);
+    await expect(main.getByLabel('Project')).toHaveValue(PROJECT);
+    await expect(main.locator('option')).toHaveText([PROJECT]);
     await expect(newbie.getByRole('checkbox', { name: 'Read: View jobs' })).toBeChecked();
     await expect(newbie.getByRole('checkbox', { name: 'Write: Submit and manage jobs' })).toBeChecked();
     await newbie.getByRole('button', { name: 'Request token' }).click();
     await expect(newbie.getByRole('heading', { name: 'Token granted' })).toBeVisible();
 
-    const details = newbie.locator('dl');
+    const details = main.locator('dl');
     await expect(details.locator('dt')).toHaveText([
       'Name', 'AP identifier', 'AP host', 'Issued', 'Expires', 'Project', 'Permissions',
     ]);

@@ -1,8 +1,8 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { Sidebar } from './Sidebar';
 import { SuperuserBanner } from './SuperuserBanner';
@@ -31,6 +31,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setSidebarOpen((prev) => (prev ? false : prev));
   }, [pathname]);
 
+  const queryClient = useQueryClient();
   const { data: session, isLoading } = useQuery({
     queryKey: ['session'],
     queryFn: api.auth.me,
@@ -57,6 +58,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (placementOnly && !onPlacementPage) router.replace('/placement');
   }, [placementOnly, onPlacementPage, router]);
+
+  // The session became a full one (the person was onboarded while signed
+  // in): the normal shell renders from the same answer, and everything read
+  // under the placement-only session is read again.
+  const wasPlacementOnly = useRef(false);
+  useEffect(() => {
+    if (placementOnly) {
+      wasPlacementOnly.current = true;
+    } else if (wasPlacementOnly.current && isAuthenticated) {
+      wasPlacementOnly.current = false;
+      void queryClient.invalidateQueries({ predicate: (q) => q.queryKey[0] !== 'session' });
+    }
+  }, [placementOnly, isAuthenticated, queryClient]);
 
   if (!isPublic && !isAuthenticated) {
     // While the redirect is in flight, render nothing.

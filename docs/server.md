@@ -2439,6 +2439,11 @@ names it, whose domain need not be `UID_DOMAIN`. `placementd` listed before
 every other method is tried first; listed after them, it is tried when
 they fail. An identity no method maps gets a placement-only session.
 
+A person onboarded while signed in with a placement-only session gets full
+access without signing in again: `GET /api/v1/auth/me` re-runs the
+sign-in's mapping for the session, at most every 30 seconds, and once it
+maps, replaces the session with a full one under a new session id.
+
 Every token this server mints for such a session -- or for an OAuth2 grant
 it authorizes -- names the account as its subject, carries `condor:/READ`
 and `condor:/WRITE` only as far as the account holds them (other grants,

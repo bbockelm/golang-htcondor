@@ -183,16 +183,8 @@ func (h *Handler) placementdMapLogin(ctx context.Context, identity string) *Plac
 
 // startPlacementdSession finishes a browser login mapped through the
 // placementd: a full session as the placementd account.
-func (h *Handler) startPlacementdSession(w http.ResponseWriter, identity, displayName string, groups []string,
-	info *PlacementAccountInfo, originalURL, oidcSubject string) {
-	sessionID, sessionData, err := h.sessionStore.CreateSession(SessionData{
-		Username:          info.Account,
-		Groups:            groups,
-		PlacementIdentity: identity,
-		DisplayName:       displayName,
-		IdentitySource:    identitySourcePlacementd,
-		Placement:         info,
-	})
+func (h *Handler) startPlacementdSession(w http.ResponseWriter, li loginIdentity, m loginMapping, oidcSubject string) {
+	sessionID, sessionData, err := h.sessionStore.CreateSession(browserSessionData(li, m))
 	if err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Failed to create a placementd session",
 			"error", err, "oidc_subject", oidcSubject)
@@ -201,10 +193,10 @@ func (h *Handler) startPlacementdSession(w http.ResponseWriter, identity, displa
 	}
 	h.setSessionCookie(w, sessionID, sessionData.ExpiresAt)
 	h.logger.Info(logging.DestinationSecurity, "Signed in through the placementd mapping",
-		"oidc_subject", oidcSubject, "identity", identity, "account", info.Account,
-		"levels", info.Levels(), "project", info.Project, "session_key", sessionLogID(sessionID))
+		"oidc_subject", oidcSubject, "identity", li.placementID, "account", m.placement.Account,
+		"levels", m.placement.Levels(), "project", m.placement.Project, "session_key", sessionLogID(sessionID))
 
-	redirectURL := originalURL
+	redirectURL := li.originalURL
 	if redirectURL == "" || !isSafeLocalRedirect(redirectURL) {
 		redirectURL = "/"
 	}
