@@ -105,6 +105,8 @@ type Handler struct {
 	// admin UI page that uses them, and is not a startup failure.
 	placementd          htcondor.PlacementdClient
 	placementdAvailable atomic.Bool
+	// placementCaps caches the placementd's advertised API version.
+	placementCaps placementAPIVersionCache
 	// clientUsage records "this OAuth2 client obtained a token" without
 	// a database write per token request. Nil when OAuth2 is disabled.
 	clientUsage *clientUsageRecorder

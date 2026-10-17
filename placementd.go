@@ -206,6 +206,12 @@ type PlacementdClient interface {
 	// QueryAuthorizations lists grantable authorizations; a non-empty
 	// userName narrows the list to what that user may request.
 	QueryAuthorizations(ctx context.Context, userName string) ([]PlacementAuthorization, error)
+	// Query runs a typed directory query (PLACEMENT_QUERY; API version
+	// 2). See placementd_edit.go.
+	Query(ctx context.Context, q PlacementQuery) ([]PlacementObject, error)
+	// Edit runs an atomic batch of directory edits (PLACEMENT_EDIT; API
+	// version 2).
+	Edit(ctx context.Context, ops []PlacementOp, dryRun bool) ([]PlacementEditResult, error)
 }
 
 // Placementd is a CEDAR client for condor_placementd.

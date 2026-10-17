@@ -36,7 +36,7 @@ const openAPISchema = `{
     },
     {
       "name": "placement",
-      "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. Admin-only — the daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so these endpoints require membership in the web UI admin group. Absent a placementd, every one of them but /placement/status returns 503."
+      "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. Admin-only — the daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so these endpoints require membership in the web UI admin group. Absent a placementd, every one of them but /placement/status returns 503. The /placement/admin endpoints manage the placementd's directory (identities, accounts, projects, authorizations) and need a placementd advertising PlacementdApiVersion >= 2; against an older one they return 501, and /placement/status reports api_version so a UI can hide them."
     }
   ],
   "components": {
@@ -687,7 +687,131 @@ const openAPISchema = `{
         "properties": {
           "available": {"type": "boolean"},
           "address": {"type": "string", "description": "Sinful string of the placementd in use."},
-          "reason": {"type": "string", "description": "Why the placementd is unavailable, when it is."}
+          "reason": {"type": "string", "description": "Why the placementd is unavailable, when it is."},
+          "api_version": {"type": "integer", "description": "The placementd's PlacementdApiVersion. 2 or more means the /placement/admin directory endpoints work."}
+        }
+      },
+      "PlacementEntityMeta": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string", "description": "Immutable uuid."},
+          "source": {"type": "string", "enum": ["mapfile", "internal"], "description": "Owner of the row. mapfile rows are read-only here until adopted."},
+          "version": {"type": "integer", "format": "int64", "description": "Increases on every change. Send it back as expected_version."},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"},
+          "modified_by": {"type": "string"}
+        }
+      },
+      "PlacementIdentity": {
+        "allOf": [{"$ref": "#/components/schemas/PlacementEntityMeta"}, {"type": "object", "properties": {
+          "foreign_id": {"type": "string"},
+          "account_id": {"type": "string"},
+          "account": {"type": "string"},
+          "expires_at": {"type": "string", "format": "date-time", "description": "Absent means never."},
+          "expired": {"type": "boolean"},
+          "display_name": {"type": "string"},
+          "comment": {"type": "string"},
+          "authorizations": {"type": "array", "items": {"type": "string"}},
+          "projects": {"type": "array", "items": {"type": "string"}},
+          "default_project": {"type": "string"},
+          "last_token_expiration": {"type": "string", "format": "date-time"}
+        }}]
+      },
+      "PlacementAccount": {
+        "allOf": [{"$ref": "#/components/schemas/PlacementEntityMeta"}, {"type": "object", "properties": {
+          "name": {"type": "string"},
+          "authorizations": {"type": "array", "items": {"type": "string"}},
+          "projects": {"type": "array", "items": {"type": "string"}},
+          "default_project": {"type": "string"},
+          "identities": {"type": "array", "items": {"type": "string"}}
+        }}]
+      },
+      "PlacementProject": {
+        "allOf": [{"$ref": "#/components/schemas/PlacementEntityMeta"}, {"type": "object", "properties": {
+          "name": {"type": "string"},
+          "description": {"type": "string"},
+          "accounts": {"type": "array", "items": {"type": "string"}}
+        }}]
+      },
+      "PlacementAuthorizationRecord": {
+        "allOf": [{"$ref": "#/components/schemas/PlacementEntityMeta"}, {"type": "object", "properties": {
+          "name": {"type": "string"},
+          "label": {"type": "string"},
+          "color": {"type": "string"},
+          "description": {"type": "string"},
+          "requestable": {"type": "boolean"}
+        }}]
+      },
+      "PlacementEntityInput": {
+        "type": "object",
+        "description": "Writable fields. Identity: foreign_id, account (name or id), expires_at (RFC 3339 or Unix seconds), display_name, comment. Account: name, authorizations, projects, default_project (lists replace the whole set). Project: name, description. Authorization: name, label, color, description, requestable. On PATCH only the fields present change, null clears a field, and expected_version guards against concurrent edits.",
+        "additionalProperties": true,
+        "properties": {
+          "expected_version": {"type": "integer", "format": "int64", "description": "PATCH only."}
+        }
+      },
+      "PlacementMapfileStatus": {
+        "type": "object",
+        "properties": {
+          "load_time": {"type": "string", "format": "date-time"},
+          "load_attempt_time": {"type": "string", "format": "date-time"},
+          "ok": {"type": "boolean"},
+          "quarantined": {"type": "integer"},
+          "conflicts": {"type": "integer"},
+          "user_mapfile": {"type": "string"},
+          "authorizations_mapfile": {"type": "string"},
+          "problems": {"type": "array", "items": {"type": "object", "properties": {
+            "kind": {"type": "string"}, "file": {"type": "string"}, "line": {"type": "integer"},
+            "key": {"type": "string"}, "message": {"type": "string"}
+          }}}
+        }
+      },
+      "PlacementEditResult": {
+        "type": "object",
+        "properties": {
+          "index": {"type": "integer"},
+          "id": {"type": "string"},
+          "version": {"type": "integer", "format": "int64"},
+          "warning": {"type": "string"},
+          "error_code": {"type": "integer"},
+          "error": {"type": "string"}
+        }
+      },
+      "PlacementEditResponse": {
+        "type": "object",
+        "properties": {
+          "committed": {"type": "boolean"},
+          "dry_run": {"type": "boolean"},
+          "results": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementEditResult"}}
+        }
+      },
+      "PlacementAdminError": {
+        "type": "object",
+        "properties": {
+          "error": {"type": "string"},
+          "message": {"type": "string"},
+          "code": {"type": "integer"},
+          "placement_code": {"type": "integer", "description": "The placementd's error code (13 not found, 14 version mismatch, 15 owned by the mapfile, 16 invalid argument, 17 still referenced, 18 duplicate, 19 unknown type)."},
+          "placement_error": {"type": "string"},
+          "owned_by": {"type": "string", "description": "Set to mapfile when the row must be adopted before it can change."},
+          "cascade_required": {"type": "boolean", "description": "The delete succeeds with cascade=true."},
+          "results": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementEditResult"}}
+        }
+      },
+      "PlacementBatchRequest": {
+        "type": "object",
+        "required": ["operations"],
+        "properties": {
+          "dry_run": {"type": "boolean", "description": "Validate and report, then roll back."},
+          "operations": {"type": "array", "maxItems": 1000, "items": {"type": "object", "required": ["operation", "target_type"], "properties": {
+            "operation": {"type": "string", "enum": ["Create", "Update", "Delete", "Adopt"]},
+            "target_type": {"type": "string", "enum": ["Identity", "Account", "Project", "Authorization", "All"]},
+            "id": {"type": "string"},
+            "name": {"type": "string", "description": "Natural-key selector when id is absent."},
+            "expected_version": {"type": "integer", "format": "int64"},
+            "cascade": {"type": "boolean"},
+            "fields": {"$ref": "#/components/schemas/PlacementEntityInput"}
+          }}}
         }
       }
     }
@@ -1000,6 +1124,178 @@ const openAPISchema = `{
           "403": {"description": "The placementd refused: unknown or expired user, an authorization or project the user is not entitled to, or a requester lacking INSTRUCTOR", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "500": {"description": "The placementd could not record the token, or the connection was not encrypted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "502": {"description": "The placementd could not be reached, or its schedd leg failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/{kind}": {
+      "get": {
+        "summary": "List directory entities",
+        "description": "Identities, accounts, projects or authorizations, with each row's source and version. Requires membership in the web UI admin group.",
+        "operationId": "listPlacementEntities",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}},
+          {"name": "name", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Match one natural key (the foreign ID for identities)."},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}, "description": "ClassAd expression evaluated against each entity ad."},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer"}}
+        ],
+        "responses": {
+          "200": {"description": "Entities, keyed by kind", "content": {"application/json": {"schema": {"type": "object", "additionalProperties": {"type": "array", "items": {"oneOf": [{"$ref": "#/components/schemas/PlacementIdentity"}, {"$ref": "#/components/schemas/PlacementAccount"}, {"$ref": "#/components/schemas/PlacementProject"}, {"$ref": "#/components/schemas/PlacementAuthorizationRecord"}]}}}}}},
+          "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "post": {
+        "summary": "Create a directory entity",
+        "description": "Creates an internal row. References (an identity's account, an account's projects and authorizations) must already exist. Requires membership in the web UI admin group.",
+        "operationId": "createPlacementEntity",
+        "tags": ["placement"],
+        "parameters": [{"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}}, {"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEntityInput"}}}},
+        "responses": {
+          "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "409": {"description": "Version mismatch, a mapfile-owned row (owned_by), a delete that needs cascade (cascade_required), or a duplicate name", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/{kind}/{id}": {
+      "get": {
+        "summary": "Get a directory entity",
+        "operationId": "getPlacementEntity",
+        "tags": ["placement"],
+        "parameters": [{"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}}, {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The entity uuid."}],
+        "responses": {
+          "200": {"description": "The entity", "content": {"application/json": {"schema": {"oneOf": [{"$ref": "#/components/schemas/PlacementIdentity"}, {"$ref": "#/components/schemas/PlacementAccount"}, {"$ref": "#/components/schemas/PlacementProject"}, {"$ref": "#/components/schemas/PlacementAuthorizationRecord"}]}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "patch": {
+        "summary": "Update a directory entity",
+        "description": "Changes only the fields present; null clears one. Send expected_version: a 409 means the row changed since it was read. Mapfile rows return 409 with owned_by=mapfile until adopted.",
+        "operationId": "updatePlacementEntity",
+        "tags": ["placement"],
+        "parameters": [{"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}}, {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The entity uuid."}, {"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEntityInput"}}}},
+        "responses": {
+          "200": {"description": "Updated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "409": {"description": "Version mismatch, a mapfile-owned row (owned_by), a delete that needs cascade (cascade_required), or a duplicate name", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "delete": {
+        "summary": "Delete a directory entity",
+        "description": "Refused with 409 and cascade_required=true while grants or identities reference the row, unless cascade=true.",
+        "operationId": "deletePlacementEntity",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}}, {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The entity uuid."}, {"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."},
+          {"name": "cascade", "in": "query", "required": false, "schema": {"type": "boolean"}},
+          {"name": "expected_version", "in": "query", "required": false, "schema": {"type": "integer", "format": "int64"}}
+        ],
+        "responses": {
+          "200": {"description": "Deleted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "409": {"description": "Version mismatch, a mapfile-owned row (owned_by), a delete that needs cascade (cascade_required), or a duplicate name", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/{kind}/{id}/adopt": {
+      "post": {
+        "summary": "Adopt a mapfile row",
+        "description": "Transfers ownership from the mapfile to the directory, so the row becomes editable. Adopting an account adopts its identities. While the key is still in the mapfile the next reload takes it back; the result carries a warning then.",
+        "operationId": "adoptPlacementEntity",
+        "tags": ["placement"],
+        "parameters": [{"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}}, {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The entity uuid."}, {"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."}],
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {"type": "object", "properties": {"expected_version": {"type": "integer", "format": "int64"}}}}}},
+        "responses": {
+          "200": {"description": "Adopted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "409": {"description": "Version mismatch, a mapfile-owned row (owned_by), a delete that needs cascade (cascade_required), or a duplicate name", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/adopt-all": {
+      "post": {
+        "summary": "Adopt every mapfile row",
+        "operationId": "adoptAllPlacementEntities",
+        "tags": ["placement"],
+        "parameters": [{"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."}],
+        "responses": {
+          "200": {"description": "Adopted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/batch": {
+      "post": {
+        "summary": "Apply a batch of directory edits",
+        "description": "One atomic PLACEMENT_EDIT: every operation applies or none does. A failed batch answers with the first failure's status and every operation's result.",
+        "operationId": "placementBatch",
+        "tags": ["placement"],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementBatchRequest"}}}},
+        "responses": {
+          "200": {"description": "Applied, or validated on a dry run", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "409": {"description": "Version mismatch, a mapfile-owned row (owned_by), a delete that needs cascade (cascade_required), or a duplicate name", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/mapfile-status": {
+      "get": {
+        "summary": "Mapfile reload status",
+        "description": "The outcome of the placementd's last mapfile reload: when it loaded, how many keys were quarantined or reclaimed, and the problems found.",
+        "operationId": "placementMapfileStatus",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMapfileStatus"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }

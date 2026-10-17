@@ -420,6 +420,9 @@ export interface PlacementStatus {
   available: boolean;
   address?: string;
   reason?: string;
+  // The daemon's PlacementdApiVersion; 2+ serves the directory endpoints
+  // (lib/placementAdmin.ts).
+  api_version?: number;
 }
 
 // PlacementUser is a foreign identity, merged with its newest live token.

@@ -138,6 +138,8 @@ func (h *Handler) setupRoutes() {
 	// prefix so handlePlacementPath can route on the last segment; all
 	// of them are admin-gated inside the handlers.
 	mux.Handle("/api/v1/placement/", cors(http.HandlerFunc(h.handlePlacementPath)))
+	// Directory CRUD (handlers_placement_admin.go); admin-gated inside.
+	mux.Handle(placementAdminPrefix+"/", cors(http.HandlerFunc(h.handlePlacementAdmin)))
 
 	// Authentication endpoint
 	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(h.handleWhoAmI)))
