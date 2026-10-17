@@ -10,10 +10,13 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 
+	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
 )
@@ -24,7 +27,10 @@ import (
 // The population repeats an id on purpose. alice's 1.0 is on both APs
 // (peak memory 300 on ap1, 700 on ap2); bob's 1.0 is on ap1 too (9999),
 // beside his 5.0 (8888). A read that dropped the AP merges alice's two;
-// one that dropped the owner scope shows bob's numbers.
+// one that dropped the owner scope shows bob's numbers. alice's 2.0 has
+// a proc 1 beside it (2.1, 60), so a job clause that dropped ProcId
+// shows; and bob's 5.0 has a sample the spoke never chained (no User,
+// 77777), which nobody may read.
 
 // metricsSourceAd is a federation_sources row whose job_metrics stream
 // is in the given state: "ok", "absent" (no JobMetrics* attributes) or
@@ -59,6 +65,7 @@ func metricsHub(t *testing.T, ap2Stream string) *multiaptest.DB {
 		{ap1, "alice@d", 1, 0, 0, 900, 100},
 		{ap1, "alice@d", 1, 0, 0, 1000, 300},
 		{ap1, "alice@d", 2, 0, 0, 900, 50},
+		{ap1, "alice@d", 2, 1, 0, 900, 60},
 		{ap2, "alice@d", 1, 0, 0, 900, 700},
 		{ap2, "alice@d", 1, 0, 1, 1900, 650},
 		{ap1, "bob@d", 1, 0, 0, 900, 9999},
@@ -66,6 +73,7 @@ func metricsHub(t *testing.T, ap2Stream string) *multiaptest.DB {
 	} {
 		hub.PutMetric(s.schedd, s.user, s.cluster, s.proc, s.run, s.at, fmt.Sprintf("MemoryUsage = %d", s.mem))
 	}
+	hub.PutUnchainedMetric(ap1, 5, 0, 0, 950, "MemoryUsage = 77777")
 	hub.PutSourceAd(ap1, metricsSourceAd(ap1, "ok"))
 	hub.PutSourceAd(ap2, metricsSourceAd(ap2, ap2Stream))
 	return hub
@@ -213,7 +221,7 @@ func TestMultiAPMetricsOwnerScope(t *testing.T) {
 	if got := strings.Join(columnNames(b), ","); got != "ScheddName,ClusterId,ProcId,max_MemoryUsage" {
 		t.Errorf("columns = %s, want ScheddName before ClusterId", got)
 	}
-	want := []string{ap1 + "|1|0|300", ap1 + "|2|0|50", ap2 + "|1|0|700"}
+	want := []string{ap1 + "|1|0|300", ap1 + "|2|0|50", ap1 + "|2|1|60", ap2 + "|1|0|700"}
 	if got := rowsText(b); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("alice's jobs = %v, want %v", got, want)
 	}
@@ -264,15 +272,15 @@ func TestMultiAPMetricsAdminsAreNotWidened(t *testing.T) {
 	}
 	srv.setupRoutes()
 	b := getMetrics(t, srv, "alice", url.Values{"group_by": {"User"}, "agg": {"count:*"}})
-	if got := strings.Join(rowsText(b), ","); got != "alice@d|5" {
-		t.Errorf("an administrator read %s, want only their own 5 samples", got)
+	if got := strings.Join(rowsText(b), ","); got != "alice@d|6" {
+		t.Errorf("an administrator read %s, want only their own 6 samples", got)
 	}
 }
 
 func TestMultiAPMetricsGroupByScheddName(t *testing.T) {
 	srv := metricsServer(t, metricsHub(t, "ok"))
 	b := getMetrics(t, srv, "alice", url.Values{"group_by": {"ScheddName"}, "agg": {"count:*,max:MemoryUsage"}})
-	want := []string{ap1 + "|3|300", ap2 + "|2|700"}
+	want := []string{ap1 + "|4|300", ap2 + "|2|700"}
 	if got := rowsText(b); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("per AP = %v, want %v", got, want)
 	}
@@ -382,8 +390,8 @@ func TestMultiAPMetricsRefusesForeignDomain(t *testing.T) {
 	}
 	// The local domain spelled out is the same user.
 	b := getMetrics(t, srv, "alice@d", url.Values{"agg": {"count:*"}})
-	if got := strings.Join(rowsText(b), ","); got != "5" {
-		t.Errorf("alice@d: %s samples, want 5", got)
+	if got := strings.Join(rowsText(b), ","); got != "6" {
+		t.Errorf("alice@d: %s samples, want 6", got)
 	}
 }
 
@@ -483,5 +491,164 @@ func TestMultiAPMetricsServiceTrustsTheSourcesTable(t *testing.T) {
 	})
 	if !errors.Is(err, multiap.ErrMetricsNotFederated) || res == nil || len(res.Rows) != 0 || len(res.Sources.Degraded) != 2 {
 		t.Errorf("AggregateMetrics = %+v, %v; want ErrMetricsNotFederated and both APs named", res, err)
+	}
+}
+
+// Two procs of one cluster select apart: a job clause that dropped
+// ProcId would read 2.0 and 2.1 together.
+func TestMultiAPMetricsJobIDSelectsTheProc(t *testing.T) {
+	srv := metricsServer(t, metricsHub(t, "ok"))
+	for job, want := range map[string]string{"2.0@" + ap1: "50|1", "2.1@" + ap1: "60|1"} {
+		b := getMetrics(t, srv, "alice", url.Values{"job_id": {job}, "agg": {"max:MemoryUsage,count:*"}})
+		if got := strings.Join(rowsText(b), ","); got != want {
+			t.Errorf("%s = %s, want %s: that proc's one sample", job, got, want)
+		}
+	}
+}
+
+// The caller's constraint is confined before the server's job and time
+// clauses are ANDed beside it: a top-level || in it must not discard
+// either clause. (Scope's re-serialization protects only its own User
+// and ScheddName clauses.)
+func TestMultiAPMetricsConstraintCannotEscapeServerClauses(t *testing.T) {
+	srv := metricsServer(t, metricsHub(t, "ok"))
+	b := getMetrics(t, srv, "alice", url.Values{"job_id": {"2.0@" + ap1}, "constraint": {"true || false"},
+		"agg": {"max:MemoryUsage,count:*"}})
+	if got := strings.Join(rowsText(b), ","); got != "50|1" {
+		t.Errorf("job 2.0 with constraint `true || false` = %s, want 50|1 (2.0's sample alone)", got)
+	}
+	b = getMetrics(t, srv, "alice", url.Values{"since": {"1000"}, "constraint": {"true || false"}, "agg": {"count:*"}})
+	if got := strings.Join(rowsText(b), ","); got != "2" {
+		t.Errorf("since=1000 with constraint `true || false` = %s samples, want 2", got)
+	}
+}
+
+// AP names compare as HTCondor compares them, and the answer names the
+// member as it names itself, not as the caller spelled it.
+func TestMultiAPMetricsAPNamesIgnoreCase(t *testing.T) {
+	srv := metricsServer(t, metricsHub(t, "ok"))
+	for _, q := range []url.Values{
+		{"job_id": {"1.0@" + ap1}, "schedd": {strings.ToUpper(ap1)}},
+		{"job_id": {"1.0@" + strings.ToUpper(ap1)}},
+		{"job_id": {"1.0@" + strings.ToUpper(ap1)}, "schedd": {ap1}},
+	} {
+		q.Set("agg", "max:MemoryUsage")
+		b := getMetrics(t, srv, "alice", q)
+		if got := strings.Join(rowsText(b), ","); got != "300" {
+			t.Errorf("%s = %s, want 300", q.Encode(), got)
+		}
+		if b.Job == nil || b.Job.Schedd != ap1 || b.Job.JobID != "1.0@"+ap1 {
+			t.Errorf("%s: job = %+v, want the member's spelling %s", q.Encode(), b.Job, ap1)
+		}
+	}
+}
+
+// ?schedd= settles a bare id that two APs hold.
+func TestMultiAPMetricsBareIDWithSchedd(t *testing.T) {
+	srv := metricsServer(t, metricsHub(t, "ok"))
+	for ap, want := range map[string]string{ap1: "300", ap2: "700"} {
+		b := getMetrics(t, srv, "alice", url.Values{"job_id": {"1.0"}, "schedd": {ap}, "agg": {"max:MemoryUsage"}})
+		if got := strings.Join(rowsText(b), ","); got != want || b.Job == nil || b.Job.JobID != "1.0@"+ap {
+			t.Errorf("1.0 with schedd=%s = %s, job %+v; want %s from 1.0@%s", ap, got, b.Job, want, ap)
+		}
+	}
+	if rec := doAs(t, srv, "alice", http.MethodGet, "/api/v1/metrics/job_metrics?agg=count:*&job_id=1.0&schedd=ap9.example.org"); rec.Code != http.StatusBadRequest {
+		t.Errorf("a bare id on a schedd outside the set = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
+// A sample the spoke never chained to its job carries the job's numbers
+// but no User: nobody's read returns it, not even one naming the job.
+func TestMultiAPMetricsUnchainedSamplesAreNobodys(t *testing.T) {
+	srv := metricsServer(t, metricsHub(t, "ok"))
+	for _, c := range []struct {
+		who  string
+		q    url.Values
+		want string
+	}{
+		{"alice", url.Values{"agg": {"count:*,max:MemoryUsage"}}, "6|700"},
+		{"alice", url.Values{"job_id": {"5.0@" + ap1}, "agg": {"count:*"}}, "0"},
+		{"bob", url.Values{"job_id": {"5.0@" + ap1}, "agg": {"count:*,max:MemoryUsage"}}, "1|8888"},
+		{"bob", url.Values{"agg": {"count:*,max:MemoryUsage"}}, "2|9999"},
+	} {
+		b := getMetrics(t, srv, c.who, c.q)
+		if got := strings.Join(rowsText(b), ","); got != c.want {
+			t.Errorf("%s %s = %s, want %s (the unchained sample is nobody's)", c.who, c.q.Encode(), got, c.want)
+		}
+	}
+}
+
+// TableSources is applied once per table a read uses, each call on the
+// last one's output; each keeps what the earlier one listed as not kept.
+func TestMultiAPTableSourcesKeepsEarlierNotKept(t *testing.T) {
+	hub := multiAPHub(t)
+	hub.PutSourceAd(ap1, fmt.Sprintf("ScheddName = %q\nState = \"fresh\"\nJobsConnected = true\nStalenessSeconds = 1\n"+
+		"HistoryConnected = true\nEpochHistoryConnected = true\nJobMetricsConnected = true", ap1))
+	hub.PutSourceAd(ap2, fmt.Sprintf("ScheddName = %q\nState = \"fresh\"\nJobsConnected = true\nStalenessSeconds = 1\n"+
+		"HistoryConnected = true\nEpochHistoryMissing = true\nEpochHistoryConnected = false\n"+
+		"JobMetricsMissing = true\nJobMetricsConnected = false", ap2))
+	svc := multiAPService(t, hub, multiaptest.NewRegistry(ap1, ap2))
+	src := svc.TableSources(svc.TableSources(svc.Sources(), multiap.TableEpochHistory), multiap.TableJobMetrics)
+	var got []string
+	for _, n := range src.NotKept {
+		got = append(got, n.Schedd+"/"+n.Table)
+		if n.Reason == "" {
+			t.Errorf("not_kept %+v has no reason", n)
+		}
+	}
+	want := ap2 + "/" + multiap.TableEpochHistory + "," + ap2 + "/" + multiap.TableJobMetrics
+	if strings.Join(got, ",") != want {
+		t.Errorf("not_kept = %v, want %s", got, want)
+	}
+	if src.Fresh != 2 || len(src.Degraded) != 0 {
+		t.Errorf("sources = %+v, want both fresh", src)
+	}
+}
+
+// HEAD is not served where GET is; pinned so a change is deliberate.
+func TestMultiAPMetricsHeadIsNotServed(t *testing.T) {
+	srv := metricsServer(t, metricsHub(t, "ok"))
+	if rec := doAs(t, srv, "alice", http.MethodHead, "/api/v1/metrics/job_metrics?agg=count:*"); rec.Code != http.StatusNotImplemented {
+		t.Errorf("HEAD = %d, want 501", rec.Code)
+	}
+}
+
+// The hub aggregate runs under a deadline, as single-AP mode's does: a
+// fine bucket over a long window must not hold the shared hub.
+func TestMultiAPMetricsHubReadHasADeadline(t *testing.T) {
+	hub := metricsHub(t, "ok")
+	var mu sync.Mutex
+	var deadlines []bool
+	h := multiap.NewHub(func(ctx context.Context) (*dbrpc.Client, func(), error) {
+		_, ok := ctx.Deadline()
+		mu.Lock()
+		deadlines = append(deadlines, ok)
+		mu.Unlock()
+		return hub.Dial(ctx)
+	}, time.Hour)
+	if err := h.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	svc := &multiap.Service{Registry: multiaptest.NewRegistry(ap1, ap2), Hub: h, Stale: multiap.StaleInclude, UIDDomain: "d",
+		Codec: jobid.Default()}
+	mu.Lock()
+	deadlines = nil
+	mu.Unlock()
+	// A bare id, so the job's resolution dials the hub too.
+	bare := jobid.ID{Cluster: 2, Proc: 0}
+	if _, err := svc.AggregateMetrics(context.Background(), multiap.MetricsRequest{
+		User: "alice@d", Job: &bare, Aggs: []dbrpc.AggSpec{{Func: dbrpc.AggCount, Arg: "*"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deadlines) < 2 {
+		t.Fatalf("the hub was dialled %d times, want the resolution and the aggregate", len(deadlines))
+	}
+	for i, ok := range deadlines {
+		if !ok {
+			t.Errorf("hub dial %d carries no deadline", i)
+		}
 	}
 }

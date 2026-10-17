@@ -95,15 +95,21 @@ func (src Sources) StateOf(schedd string) string {
 	return StateFresh
 }
 
+// optionalTables are the hub tables a spoke may lawfully not keep, so a
+// <Table>Missing from the hub means "no rows here" rather than a fault.
+// Every other table (jobs, history, syncstatus) is one a spoke must
+// have: missing, it is degraded whatever the hub says.
+var optionalTables = map[string]bool{TableJobMetrics: true, TableEpochHistory: true}
+
 // TableSources adds to a sources block each AP whose stream of table
 // into the hub cannot vouch for that table's rows -- not federated from
 // it, disconnected, failing, or still catching up -- so a read of table
 // says which APs' rows in it may be missing rather than returning them
 // silently partial. An AP already degraded is left as it is.
 //
-// An AP the hub reports keeps no such table at all (<Table>Missing: a
-// spoke without job_metrics or epoch history) has no rows to miss. It
-// goes in NotKept instead, and still counts as fresh.
+// An AP the hub reports keeps no such table at all (<Table>Missing, for
+// an optional table: a spoke without job_metrics or epoch history) has
+// no rows to miss. It goes in NotKept instead, and still counts as fresh.
 func (s *Service) TableSources(src Sources, table string) Sources {
 	out := Sources{APs: src.APs, Fresh: src.Fresh, Degraded: append([]Degraded{}, src.Degraded...),
 		NotKept: append([]NotKept(nil), src.NotKept...)}
@@ -119,7 +125,7 @@ func (s *Service) TableSources(src Sources, table string) Sources {
 		hsrc, ok := s.Hub.Source(m.Name)
 		ts, federated := hsrc.TableStatus[table]
 		switch {
-		case ok && federated && ts.Missing:
+		case ok && federated && ts.Missing && optionalTables[table]:
 			why := "this access point keeps no " + table
 			if ts.LastError != "" {
 				why = ts.LastError

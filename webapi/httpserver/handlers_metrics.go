@@ -181,7 +181,7 @@ func (s *Handler) handleMetricsQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	defer closer()
 
-	qctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	qctx, cancel := context.WithTimeout(ctx, multiap.MetricsTimeout)
 	defer cancel()
 
 	rows, err := dbc.ArchiveAggregateBucketed(qctx, table, constraint, groupCols, aggs)

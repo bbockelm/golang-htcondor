@@ -114,3 +114,23 @@ func TestMultiAPEpochsNameAnAPWithoutEpochHistory(t *testing.T) {
 		t.Errorf("fresh = %d, want 2", b.Sources.Fresh)
 	}
 }
+
+// A spoke the hub reports has no jobs table (JobsMissing) is degraded,
+// not "not kept": jobs, history and syncstatus are tables every spoke
+// must have, and the dashboard would otherwise count that AP complete.
+func TestMultiAPDashboardJobsMissingIsDegraded(t *testing.T) {
+	hub := dashboardHub(t)
+	hub.PutSourceAd(ap1, fmt.Sprintf("ScheddName = %q\nState = \"fresh\"\nStalenessSeconds = 1\n"+
+		"JobsConnected = false\nJobsMissing = true\nJobsLastError = \"the spoke has no jobs table\"\nHistoryConnected = true", ap1))
+	srv := newMultiAPServer(t, multiAPService(t, hub, multiaptest.NewRegistry(ap1, ap2)))
+	rec := doAs(t, srv, "alice", http.MethodGet, "/api/v1/dashboard")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dashboard: %d %s", rec.Code, rec.Body.String())
+	}
+	if d := degradedFor(t, rec.Body.Bytes(), ap1); d == nil || !strings.Contains(d.Reason, "jobs") {
+		t.Errorf("ap1 has no jobs stream (JobsMissing) and the dashboard calls it fresh: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"not_kept"`) {
+		t.Errorf("a missing jobs table is listed as not kept: %s", rec.Body.String())
+	}
+}

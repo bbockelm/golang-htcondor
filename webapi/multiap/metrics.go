@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 
@@ -34,6 +35,12 @@ var ErrMetricsNotFederated = &Error{Status: http.StatusNotImplemented, Reason: R
 
 // ReasonMetricsNotFederated is ErrMetricsNotFederated's reason.
 const ReasonMetricsNotFederated = "job_metrics_not_federated"
+
+// MetricsTimeout bounds one samples aggregate, in both modes: a fine
+// bucket over a long window would otherwise hold the database -- in
+// multi-AP mode the hub every AP's reads share -- for as long as the
+// caller waits.
+const MetricsTimeout = 30 * time.Second
 
 // MetricsRequest is a time-bucketed aggregate over the caller's samples.
 type MetricsRequest struct {
@@ -84,6 +91,9 @@ func (s *Service) AggregateMetrics(ctx context.Context, req MetricsRequest) (*Me
 	if req.User == "" {
 		return nil, errorf(http.StatusUnauthorized, "the caller's identity could not be established")
 	}
+	// The deadline covers the job's resolution as well as the aggregate.
+	ctx, cancel := context.WithTimeout(ctx, MetricsTimeout)
+	defer cancel()
 	if src, off := s.MetricsOff(ctx); off {
 		return &MetricsResult{Sources: src}, ErrMetricsNotFederated
 	}
@@ -91,12 +101,21 @@ func (s *Service) AggregateMetrics(ctx context.Context, req MetricsRequest) (*Me
 	var job *jobid.ID
 	var clauses []string
 	if req.Job != nil {
-		id, err := s.ResolveJob(ctx, req.User, *req.Job)
+		id := *req.Job
+		if !id.Complete() && schedd != "" {
+			// ?schedd= settles which AP a bare cluster.proc is on.
+			id = id.WithSchedd(schedd)
+		}
+		id, err := s.ResolveJob(ctx, req.User, id)
 		if err != nil {
 			return nil, err
 		}
 		if schedd != "" && !strings.EqualFold(schedd, id.Schedd) {
 			return nil, errorf(http.StatusBadRequest, "job %s is not on %s", s.Codec.Format(id), schedd)
+		}
+		if m, ok := s.Registry.Get(id.Schedd); ok {
+			// The member's own spelling, not the caller's.
+			id.Schedd = m.Name
 		}
 		job, schedd = &id, id.Schedd
 		// ScheddName is confined to the job's AP by Scope, below.

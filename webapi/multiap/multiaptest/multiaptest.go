@@ -249,6 +249,21 @@ func (d *DB) PutMetric(schedd, user string, cluster, proc, run int, sampleTime i
 	}
 }
 
+// PutUnchainedMetric appends a job_metrics sample the spoke never
+// chained to its job: ScheddName, Key and the job's numbers, and no
+// User, Owner or GlobalJobId (the hub contract for such rows).
+func (d *DB) PutUnchainedMetric(schedd string, cluster, proc, run int, sampleTime int64, extra string) {
+	d.t.Helper()
+	ad := fmt.Sprintf("ScheddName = %q\nKey = \"%d.%d\"\nClusterId = %d\nProcId = %d\nRunInstanceID = %d\nSampleTime = %d",
+		schedd, cluster, proc, cluster, proc, run, sampleTime)
+	if extra != "" {
+		ad += "\n" + extra
+	}
+	if err := d.client().ArchiveAppend(context.Background(), TableJobMetrics, ad); err != nil {
+		d.t.Fatal(err)
+	}
+}
+
 // PutSpokeJob writes a spoke's row: keyed cluster.proc, no ScheddName.
 func (d *DB) PutSpokeJob(user string, cluster, proc int, extra string) {
 	d.t.Helper()
