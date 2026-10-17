@@ -15,6 +15,7 @@
 package mapfile
 
 import (
+	"log/slog"
 	"regexp"
 	"strings"
 	"testing"
@@ -34,6 +35,7 @@ func FuzzParse(f *testing.F) {
 		"FS /^(a)|(b)$/iU [\\1][\\2]\\\n",
 		"FS /a\\/b/ x\r\n# c\n\n",
 		`FS "unterminated`,
+		"FS a \"unterminated\\\n",
 		"FS /(?=x)/ y\n",
 		"@include /dev/null\n",
 		"OIDC /^OSG100012[0-9]$/ *.hpc.example.edu\n",
@@ -42,10 +44,10 @@ func FuzzParse(f *testing.F) {
 		f.Add(seed, true)
 	}
 	f.Fuzz(func(t *testing.T, text string, regexKeys bool) {
-		opts := Options{RegexKeys: regexKeys, NoInclude: true, OnError: func(*ParseError) error { return nil }}
+		opts := Options{RegexKeys: regexKeys, NoInclude: true, Logger: slog.New(slog.DiscardHandler)}
 		mf, err := opts.Parse(strings.NewReader(text), "fuzz")
 		if err != nil {
-			t.Fatalf("Parse with a skipping OnError failed: %v", err)
+			t.Fatalf("Parse with the default error handling failed: %v", err)
 		}
 		for _, method := range mf.Methods() {
 			for _, e := range mf.Entries(method) {
@@ -56,6 +58,6 @@ func FuzzParse(f *testing.F) {
 				mf.Map(method, e.Canonicalization)
 			}
 		}
-		_, _ = Options{RegexKeys: regexKeys, NoInclude: true}.Parse(strings.NewReader(text), "fuzz")
+		_, _ = Options{RegexKeys: regexKeys, NoInclude: true, OnError: fatal}.Parse(strings.NewReader(text), "fuzz")
 	})
 }

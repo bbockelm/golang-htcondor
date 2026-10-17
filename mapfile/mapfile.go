@@ -28,7 +28,10 @@
 // contain spaces; inside it \" is a quote, \\ is one backslash, and any
 // other backslash is kept along with the character after it. A closing
 // quote need not be followed by white space: the next field starts right
-// after it.
+// after it. A quoted field with no closing quote runs to the end of the
+// line, including the newline: `FS alice "bob` maps alice to "bob\n",
+// and an unclosed method or principal leaves the line without a
+// canonicalization.
 //
 // # Principals
 //
@@ -43,14 +46,15 @@
 // regular expression, slashes are ordinary characters, and no flags are
 // recognised.
 //
-// Regular expressions use Go's regexp (RE2) syntax, not PCRE2.
-// Backreferences, lookaround, atomic groups, possessive quantifiers and
-// other PCRE-only constructs are refused when the file is loaded, with an
-// error naming the line. Some differences cannot be detected and are
-// accepted: $ matches only at the very end of the principal (PCRE2 also
-// matches before a final newline); patterns match UTF-8 characters rather
-// than bytes; and the i flag folds non-ASCII letters, which HTCondor's
-// PCRE2 does not (/é/i matches É here but not in HTCondor).
+// Regular expressions use Go's regexp (RE2) syntax, not PCRE2. A line
+// whose expression uses backreferences, lookaround, atomic groups,
+// possessive quantifiers or another PCRE-only construct is a bad line
+// (see Errors), although HTCondor would use it. Some differences cannot
+// be detected and are accepted: $ matches only at the very end of the
+// principal (PCRE2 also matches before a final newline); patterns match
+// UTF-8 characters rather than bytes; and the i flag folds non-ASCII
+// letters, which HTCondor's PCRE2 does not (/é/i matches É here but not
+// in HTCondor).
 //
 // # Lookup
 //
@@ -79,20 +83,27 @@
 //
 // # Errors
 //
-// HTCondor logs a malformed line and skips it. This package instead fails
-// the load with a *ParseError naming the file and line, unless
-// Options.OnError says to skip the line, which reproduces HTCondor.
+// As in HTCondor, a line that cannot be used is logged and skipped, and
+// loading continues. Bad lines are those missing a principal or
+// canonicalization, those whose regular expression does not compile, and
+// an @include that names nothing, names a file or directory that cannot
+// be read, appears in an included file, or is refused by
+// Options.NoInclude. The log record (slog at level Warn, on
+// Options.Logger) names the file and line. Set Options.OnError to collect
+// bad lines as *ParseError values or to make them fatal. Failing to open
+// or read the top-level file is always an error.
 //
-// # Other differences from HTCondor
+// # Differences from HTCondor
 //
 //   - A line ending in "\r\n" is read as ending in "\n"; HTCondor keeps
 //     the "\r" in the last field it reads.
-//   - A quoted or /regex/ field with no closing delimiter is an error.
-//     HTCondor runs it to the end of the line, which leaves a principal
-//     without a canonicalization (an error there too) or a
-//     canonicalization ending in a newline.
 //   - A backslash ending a canonicalization is dropped; HTCondor appends
 //     a NUL, which ends the name wherever it is used as a C string.
+//   - A NUL byte is an ordinary character. HTCondor drops the rest of
+//     the line after it and joins the next line on.
+//   - A failed read of an included file is a bad line and skips the rest
+//     of that file; HTCondor retries the read, forever if it keeps
+//     failing.
 //   - MapFile's prefix mode (is_prefix, used for URL maps) and the
 //     two-field user map read by GetUser are not implemented.
 package mapfile
