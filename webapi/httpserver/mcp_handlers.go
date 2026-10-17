@@ -1620,9 +1620,9 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		// identity rather than a location, every token already issued
 		// carries it, and changing it would invalidate all of them.
 		"issuer": issuer,
-		// The endpoints are advertised at the plain path where the web
-		// UI is compiled in. Both remain routed -- see
-		// OAuth2EndpointPath -- because a client discovers these once
+		// The endpoints are advertised at the plain path except where
+		// MCP is all there is. Both remain routed wherever MCP is -- see
+		// oauth2EndpointPath -- because a client discovers these once
 		// and keeps them.
 		"authorization_endpoint":        issuer + h.oauth2EndpointPath("authorize"),
 		"token_endpoint":                issuer + h.oauth2EndpointPath("token"),

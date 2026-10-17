@@ -143,9 +143,9 @@ func TestOAuth2IsServedWithTheWebUIOrMCP(t *testing.T) {
 				// The /mcp/ spelling is advertised only where MCP is all
 				// there is; that is what MCP clients of such a server
 				// have always discovered.
-				wantToken := "https://api.example.org/oauth2/token"
+				wantToken := "https://api.example.org/oauth2/token" //nolint:gosec // G101: an endpoint URL
 				if mcp && !webUI {
-					wantToken = "https://api.example.org/mcp/oauth2/token"
+					wantToken = "https://api.example.org/mcp/oauth2/token" //nolint:gosec // G101: an endpoint URL
 				}
 				if got := md["token_endpoint"]; got != wantToken {
 					t.Errorf("token_endpoint = %v, want %s", got, wantToken)

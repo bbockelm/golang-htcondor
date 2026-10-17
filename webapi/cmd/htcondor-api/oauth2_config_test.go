@@ -16,7 +16,7 @@ func TestOAuth2SettingsAreReadWithTheWebUIOrMCP(t *testing.T) {
 	for _, webUI := range []bool{false, true} {
 		for _, mcp := range []bool{false, true} {
 			t.Run(fmt.Sprintf("webui=%v/mcp=%v", webUI, mcp), func(t *testing.T) {
-				cfg := cfgWith(t, map[string]string{
+				cfg := cfgWith(t, map[string]string{ //nolint:gosec // G101: test endpoint URLs, no credentials
 					"HTTP_API_ENABLE_MCP":       fmt.Sprint(mcp),
 					"HTTP_API_OAUTH2_ISSUER":    "https://ap.example.edu",
 					"HTTP_API_OAUTH2_CLIENT_ID": "upstream-client",
