@@ -15,6 +15,7 @@
 package mapfile
 
 import (
+	"errors"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -46,6 +47,9 @@ func FuzzParse(f *testing.F) {
 	f.Fuzz(func(t *testing.T, text string, regexKeys bool) {
 		opts := Options{RegexKeys: regexKeys, NoInclude: true, Logger: slog.New(slog.DiscardHandler)}
 		mf, err := opts.Parse(strings.NewReader(text), "fuzz")
+		if errors.Is(err, ErrUnsupportedRegex) {
+			return
+		}
 		if err != nil {
 			t.Fatalf("Parse with the default error handling failed: %v", err)
 		}

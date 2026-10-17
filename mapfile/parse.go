@@ -128,14 +128,13 @@ func (p *parser) fail(file string, line int, err error) error {
 
 // parse reads one file. It returns non-nil only if loading must stop.
 // A read error stops the load in the top-level file; in an included file
-// it is reported like a bad line and the rest of that file is skipped.
+// it is reported like a bad line and the rest of that file, including the
+// part of the line read before the error, is skipped.
 func (p *parser) parse(r io.Reader, name string, allowInclude, included bool) error {
 	br := bufio.NewReader(r)
 	line := 0
+	// readErr reports a failed read of line+1.
 	readErr := func(err error) error {
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
 		if included {
 			return p.fail(name, line+1, fmt.Errorf("read: %w", err))
 		}
@@ -143,8 +142,12 @@ func (p *parser) parse(r io.Reader, name string, allowInclude, included bool) er
 	}
 	for {
 		text, rerr := br.ReadString('\n')
-		if text == "" && rerr != nil {
+		if rerr != nil && !errors.Is(rerr, io.EOF) {
+			// text is a partial line; never use it.
 			return readErr(rerr)
+		}
+		if text == "" {
+			return nil
 		}
 		line++
 		// C++ keeps the "\n": it is white space to ParseField, and part
@@ -157,7 +160,7 @@ func (p *parser) parse(r io.Reader, name string, allowInclude, included bool) er
 			return err
 		}
 		if rerr != nil {
-			return readErr(rerr)
+			return nil
 		}
 	}
 }
@@ -190,7 +193,13 @@ func (p *parser) parseLine(text, name string, line int, allowInclude bool) error
 	if r.entry.Regex {
 		re, err := compileRegex(principal.text, principal.ignoreCase, principal.ungreedy)
 		if err != nil {
-			return p.fail(name, line, fmt.Errorf("principal %q: %w", principal.text, err))
+			err = fmt.Errorf("principal %q: %w", principal.text, err)
+			if errors.Is(err, ErrUnsupportedRegex) {
+				// HTCondor would use this line; skipping it changes
+				// what later lines map.
+				return &ParseError{File: name, Line: line, Err: err}
+			}
+			return p.fail(name, line, err)
 		}
 		r.re = re
 	}
@@ -243,9 +252,14 @@ func (p *parser) include(text string, off int, name string, line int, allowed bo
 	return nil
 }
 
+// openInclude opens an included file; tests replace it.
+var openInclude = func(path string) (io.ReadCloser, error) {
+	return os.Open(path) //nolint:gosec // named by the administrator's map file
+}
+
 // includeFile reads an included file, which may not itself include.
 func (p *parser) includeFile(path, name string, line int) error {
-	f, err := os.Open(path) //nolint:gosec // named by the administrator's map file
+	f, err := openInclude(path)
 	if err != nil {
 		return p.fail(name, line, fmt.Errorf("@include: %w", err))
 	}

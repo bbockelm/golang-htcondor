@@ -17,6 +17,7 @@ package mapfile
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -390,15 +391,21 @@ func TestParseErrors(t *testing.T) {
 		{"unterminated method", `"FS a b` + "\n", 1, "expected"},
 		{"unterminated @include method", `"@include` + "\n", 1, "expected"},
 		{"trailing backslash in principal", `FS "a\`, 1, "expected"},
+		// Regular expressions PCRE2 refuses as well.
 		{"bad regex", "\n\nFS /a(/ x\n", 3, "missing closing )"},
-		{"backreference", `FS /(a)\1/ x`, 1, "backreference"},
-		{"named backreference", `FS /(?P<n>a)\k<n>/ x`, 1, "backreference"},
-		{"backreference after class", `FS /(a)[[:x]\1/ x`, 1, "backreference"},
-		{"lookahead", "FS /a(?=b)/ x", 1, "lookahead"},
-		{"negative lookbehind", "FS /(?<!a)b/ x", 1, "negative lookbehind"},
-		{"atomic group", "FS /(?>a)/ x", 1, "atomic group"},
-		{"possessive", "FS /a*+/ x", 1, "invalid nested repetition"},
+		{"unexpected paren", "FS /a)/ x\n", 1, "unexpected )"},
+		{"missing bracket", "FS /[]/ x\n", 1, "missing closing ]"},
+		{"nothing to repeat", "FS /*a/ x\n", 1, "missing argument"},
+		{"empty verb", "FS /(*)/ x\n", 1, "missing argument"},
+		{"nested repeat", "FS /a**/ x\n", 1, "invalid nested repetition"},
+		{"repeat out of order", "FS /a{2,1}/ x\n", 1, "invalid repeat count"},
+		{"repeat over PCRE2 limit", "FS /a{65536}/ x\n", 1, "invalid repeat count"},
+		{"reversed range", "FS /[z-a]/ x\n", 1, "invalid character class range"},
+		{"unknown POSIX class", "FS /[[:foo:]]/ x\n", 1, "invalid character class range"},
+		{"unknown escape", `FS /a\y/ x` + "\n", 1, "invalid escape"},
+		{"case-changing escape", `FS /\U/ x` + "\n", 1, "invalid escape"},
 		{"regex keys bad regex", "FS a( x", 1, "missing closing )"},
+		{"regex keys trailing backslash", `FS a\ x` + "\n", 1, "trailing backslash"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -439,6 +446,71 @@ func TestParseErrors(t *testing.T) {
 				t.Errorf("err = %q, want prefix %q", err, prefix)
 			}
 		})
+	}
+}
+
+// A regular expression PCRE2 accepts but Go cannot evaluate stops the
+// load whatever OnError says: HTCondor would use the line, and skipping it
+// lets later lines map principals it maps.
+func TestUnsupportedRegexIsFatal(t *testing.T) {
+	tests := []struct {
+		name, principal, contains string
+	}{
+		{"backreference", `/(a)\1/`, "backreference"},
+		{"named backreference", `/(?P<n>a)\k<n>/`, "backreference"},
+		{"backreference after class", `/(a)[[:x]\1/`, "backreference"},
+		{"lookahead", "/a(?=b)/", "lookahead"},
+		{"negative lookahead", `/^CN=(?!admin)(\w+)$/`, "negative lookahead"},
+		{"negative lookbehind", "/(?<!a)b/", "negative lookbehind"},
+		{"atomic group", "/(?>a)/", "atomic group"},
+		{"verb", "/(*UTF)a/", "verb"},
+		{"possessive", "/a*+/", "invalid nested repetition"},
+		{"possessive count", "/a{2}+/", "invalid nested repetition"},
+		{"horizontal space", `/a\hb/`, "invalid escape"},
+		{"keep out", `/a\Kb/`, "invalid escape"},
+		{"branch reset", "/(?|a)/", "invalid or unsupported Perl syntax"},
+		{"comment", "/a(?#c)/", "invalid or unsupported Perl syntax"},
+		{"word start", "/[[:<:]]a/", "invalid character class range"},
+		{"PCRE2 property", `/\p{Xan}/`, "invalid character class range"},
+		{"repeat over Go limit", "/a{1001}/", "invalid repeat count"},
+		{"non-UTF-8 byte", "/a\xffb/", "invalid UTF-8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			text := "FS before x\nFS " + tt.principal + " y\nFS after z\n"
+			skip := func(*ParseError) error { return nil }
+			for _, o := range []Options{{}, {OnError: skip}, {OnError: fatal}} {
+				h := &captureHandler{}
+				o.Logger = slog.New(h)
+				mf, err := o.Parse(strings.NewReader(text), "test.map")
+				if mf != nil {
+					t.Errorf("Parse returned a map file")
+				}
+				var perr *ParseError
+				if !errors.As(err, &perr) || perr.File != "test.map" || perr.Line != 2 {
+					t.Fatalf("err = %v, want *ParseError at test.map:2", err)
+				}
+				if !errors.Is(err, ErrUnsupportedRegex) || !strings.Contains(err.Error(), tt.contains) {
+					t.Errorf("err = %v, want ErrUnsupportedRegex containing %q", err, tt.contains)
+				}
+				if recs := h.get(); len(recs) != 0 {
+					t.Errorf("logged %+v", recs)
+				}
+			}
+		})
+	}
+
+	// With regex keys every principal is a regular expression.
+	_, err := Options{RegexKeys: true}.Parse(strings.NewReader("FS a(?=b) x\n"), "test.map")
+	if !errors.Is(err, ErrUnsupportedRegex) {
+		t.Errorf("regex keys: err = %v, want ErrUnsupportedRegex", err)
+	}
+
+	// Skipping the first line would map CN=bob to admin_bob, where
+	// HTCondor maps it to bob.
+	_, err = Parse(strings.NewReader("SSL /^CN=(?!admin)(\\w+)$/ \\1\nSSL /^CN=(.*)$/ admin_\\1\n"), "test.map")
+	if !errors.Is(err, ErrUnsupportedRegex) {
+		t.Errorf("err = %v, want ErrUnsupportedRegex", err)
 	}
 }
 
@@ -500,7 +572,7 @@ func TestZeroOptionsLogsToDefault(t *testing.T) {
 	slog.SetDefault(slog.New(h))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	mf, err := Parse(strings.NewReader("FS a b\nFS bad\nFS /(?=x)/ y\n@include\nFS c d\n"), "m")
+	mf, err := Parse(strings.NewReader("FS a b\nFS bad\nFS /x**/ y\n@include\nFS c d\n"), "m")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -522,6 +594,43 @@ func TestReadError(t *testing.T) {
 	_, err := Parse(iotest.ErrReader(boom), "m")
 	if !errors.Is(err, boom) || !strings.HasPrefix(err.Error(), "m: ") {
 		t.Errorf("err = %v, want m: boom", err)
+	}
+	_, err = Parse(io.MultiReader(strings.NewReader("FS a b\nFS alice alicia_"), iotest.ErrReader(boom)), "m")
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want boom", err)
+	}
+}
+
+// A read error in an included file skips the rest of it, including the
+// partial line read before the error, and is reported at that line.
+func TestIncludeReadErrorDropsPartialLine(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "main")
+	inc := filepath.Join(dir, "inc")
+	writeFile(t, main, "@include inc\nFS m m\n")
+	writeFile(t, inc, "")
+	boom := errors.New("boom")
+	prev := openInclude
+	t.Cleanup(func() { openInclude = prev })
+	openInclude = func(path string) (io.ReadCloser, error) {
+		if path != inc {
+			return prev(path)
+		}
+		// The read fails partway through "FS alice alicia_smith".
+		r := io.MultiReader(strings.NewReader("FS a b\nFS alice alicia_"), iotest.ErrReader(boom))
+		return io.NopCloser(r), nil
+	}
+
+	h := &captureHandler{}
+	mf, err := Options{Logger: slog.New(h)}.Load(main)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	checkLookups(t, mf, []lookup{{"FS", "a", "b"}, {"FS", "alice", ""}, {"FS", "m", "m"}})
+	recs := h.get()
+	checkLogged(t, recs, inc, "2")
+	if !strings.Contains(recs[0].attrs["error"], "boom") {
+		t.Errorf("logged %+v", recs)
 	}
 }
 

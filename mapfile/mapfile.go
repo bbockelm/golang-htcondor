@@ -46,11 +46,11 @@
 // regular expression, slashes are ordinary characters, and no flags are
 // recognised.
 //
-// Regular expressions use Go's regexp (RE2) syntax, not PCRE2. A line
-// whose expression uses backreferences, lookaround, atomic groups,
-// possessive quantifiers or another PCRE-only construct is a bad line
-// (see Errors), although HTCondor would use it. Some differences cannot
-// be detected and are accepted: $ matches only at the very end of the
+// Regular expressions use Go's regexp (RE2) syntax, not PCRE2. An
+// expression that uses backreferences, lookaround, atomic groups,
+// possessive quantifiers, verbs, or another construct PCRE2 accepts and
+// Go does not makes loading fail with ErrUnsupportedRegex (see Errors).
+// Some differences cannot be detected and are accepted: $ matches only at the very end of the
 // principal (PCRE2 also matches before a final newline); patterns match
 // UTF-8 characters rather than bytes; and the i flag folds non-ASCII
 // letters, which HTCondor's PCRE2 does not (/é/i matches É here but not
@@ -85,13 +85,23 @@
 //
 // As in HTCondor, a line that cannot be used is logged and skipped, and
 // loading continues. Bad lines are those missing a principal or
-// canonicalization, those whose regular expression does not compile, and
-// an @include that names nothing, names a file or directory that cannot
-// be read, appears in an included file, or is refused by
+// canonicalization, those whose regular expression PCRE2 would refuse
+// too, and an @include that names nothing, names a file or directory that
+// cannot be read, appears in an included file, or is refused by
 // Options.NoInclude. The log record (slog at level Warn, on
 // Options.Logger) names the file and line. Set Options.OnError to collect
 // bad lines as *ParseError values or to make them fatal. Failing to open
 // or read the top-level file is always an error.
+//
+// A regular expression that Go cannot compile but HTCondor would use is
+// not a bad line: HTCondor maps principals by it, so skipping it could
+// let a later line map them differently. Loading stops with a *ParseError
+// wrapping ErrUnsupportedRegex, whatever Options.OnError does. A Go
+// compile error is taken to be such a construct unless it is one PCRE2
+// is known to share (an unbalanced parenthesis or bracket, a trailing
+// backslash, a quantifier with nothing to repeat or nested in another,
+// a reversed range or count, an unknown POSIX class, or an escape PCRE2
+// does not define); when in doubt, loading fails.
 //
 // # Differences from HTCondor
 //
@@ -102,8 +112,8 @@
 //   - A NUL byte is an ordinary character. HTCondor drops the rest of
 //     the line after it and joins the next line on.
 //   - A failed read of an included file is a bad line and skips the rest
-//     of that file; HTCondor retries the read, forever if it keeps
-//     failing.
+//     of that file, including the part of the line read before the
+//     error; HTCondor retries the read, forever if it keeps failing.
 //   - MapFile's prefix mode (is_prefix, used for URL maps) and the
 //     two-field user map read by GetUser are not implemented.
 package mapfile
