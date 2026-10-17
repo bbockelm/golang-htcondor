@@ -69,6 +69,11 @@ type Session struct {
 	// (see OAuth2Storage.parentGrantScopes). Empty for tokens obtained
 	// directly and for those exchanged from an external issuer's token.
 	ParentGrant string `json:"parentGrant,omitempty"`
+
+	// PlacementIdentity is the sign-in identity that approved a grant
+	// holding the placement scope. The placement endpoints act for
+	// it, and only for it; it is never taken from a request.
+	PlacementIdentity string `json:"placementIdentity,omitempty"`
 }
 
 // Clone deep-copies the session, including the fields declared above.
@@ -88,7 +93,8 @@ func (s *Session) Clone() fosite.Session {
 	if s == nil {
 		return nil
 	}
-	clone := &Session{AuthTime: s.AuthTime, Actor: s.Actor, ParentGrant: s.ParentGrant}
+	clone := &Session{AuthTime: s.AuthTime, Actor: s.Actor, ParentGrant: s.ParentGrant,
+		PlacementIdentity: s.PlacementIdentity}
 	if s.DefaultSession != nil {
 		// DefaultSession.Clone returns a fosite.Session whose concrete
 		// type is *openid.DefaultSession.

@@ -184,7 +184,18 @@ func (s *Handler) requestReminter(r *http.Request, subject string) reminter {
 	}
 	var live func() error
 	if sid, err := getSessionCookie(r); err == nil && s.sessionStore != nil {
-		if sd := s.sessionStore.Get(sid); sd != nil {
+		if sd := s.sessionStore.Get(sid); sd.IsPlacementd() {
+			// Renewed as it was minted: bounded by the placementd account,
+			// which is re-read on the way.
+			return func(ctx context.Context) (string, error) {
+				now := s.sessionStore.Get(sid)
+				if now == nil || now.Username != sd.Username || !now.IsPlacementd() {
+					return "", errSessionEnded
+				}
+				tok, _, err := s.mintPlacementSessionToken(ctx, sid, now)
+				return tok, err
+			}
+		} else if sd != nil {
 			user := sd.Username
 			live = func() error {
 				if now := s.sessionStore.Get(sid); now == nil || now.Username != user {

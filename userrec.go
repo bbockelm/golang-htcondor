@@ -69,6 +69,19 @@ type UserRecordQueryOptions struct {
 // what makes these records usable as a revocation signal by an unprivileged
 // service: an admin disables a user, and everything else can only observe it.
 func (s *Schedd) QueryUserRecords(ctx context.Context, opts *UserRecordQueryOptions) (records []UserRecord, err error) {
+	return s.queryUserRecords(ctx, UserRecordOwner, opts)
+}
+
+// QueryProjectRecords returns the schedd's project records matching opts.
+// The schedd keeps one per project a job has been submitted under (or that
+// an admin created with condor_qusers -add -project); each carries the same
+// Enabled flag and job counters an owner record does. UserRecord.User holds
+// the project's Name.
+func (s *Schedd) QueryProjectRecords(ctx context.Context, opts *UserRecordQueryOptions) ([]UserRecord, error) {
+	return s.queryUserRecords(ctx, UserRecordProject, opts)
+}
+
+func (s *Schedd) queryUserRecords(ctx context.Context, kind UserRecordKind, opts *UserRecordQueryOptions) (records []UserRecord, err error) {
 	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, commands.QUERY_USERREC_ADS, "CLIENT", s.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
@@ -87,7 +100,7 @@ func (s *Schedd) QueryUserRecords(ctx context.Context, opts *UserRecordQueryOpti
 	cedarStream := htcondorClient.GetStream()
 
 	queryMsg := message.NewMessageForStream(cedarStream)
-	if err := queryMsg.PutClassAd(ctx, createUserRecordQueryAd(opts)); err != nil {
+	if err := queryMsg.PutClassAd(ctx, createUserRecordQueryAdOfKind(kind, opts)); err != nil {
 		return nil, fmt.Errorf("failed to serialize user record query: %w", err)
 	}
 	if err := queryMsg.FinishMessage(ctx); err != nil {
@@ -145,11 +158,15 @@ func (s *Schedd) GetUserRecord(ctx context.Context, user string) (*UserRecord, e
 // createUserRecordQueryAd builds the request ad for QUERY_USERREC_ADS. The
 // shape mirrors DCSchedd::makeUsersQueryAd on the C++ side.
 func createUserRecordQueryAd(opts *UserRecordQueryOptions) *classad.ClassAd {
+	return createUserRecordQueryAdOfKind(UserRecordOwner, opts)
+}
+
+func createUserRecordQueryAdOfKind(kind UserRecordKind, opts *UserRecordQueryOptions) *classad.ClassAd {
 	ad := classad.New()
-	// Ask only for Owner ads. The same command also serves Project ads,
-	// and the schedd defaults to Owner when TargetType is absent, but
-	// being explicit keeps the reply set stable if that default changes.
-	_ = ad.Set("TargetType", "Owner")
+	// Ask for one kind only. The schedd defaults to Owner when TargetType
+	// is absent, but being explicit keeps the reply set stable if that
+	// default changes.
+	_ = ad.Set("TargetType", string(kind))
 
 	if opts == nil {
 		return ad
@@ -200,4 +217,138 @@ func userRecordFromAd(ad *classad.ClassAd) UserRecord {
 // constraint expression.
 func classadQuoteString(s string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+}
+
+// UserRecordKind selects which of the schedd's two record types a command
+// acts on.
+type UserRecordKind string
+
+const (
+	// UserRecordOwner is a per-user record, keyed on User ("alice@domain").
+	UserRecordOwner UserRecordKind = "Owner"
+	// UserRecordProject is a per-project record, keyed on Name.
+	UserRecordProject UserRecordKind = "Project"
+)
+
+// UserRecordActionResult is the schedd's reply to ENABLE_USERREC or
+// DISABLE_USERREC.
+type UserRecordActionResult struct {
+	// NumAds is how many records the command changed. Zero for a project
+	// with no record: the schedd treats "no such project" as a no-op
+	// rather than an error.
+	NumAds int
+	// Warning is the schedd's note about updates it ignored, if any.
+	Warning string
+}
+
+// UserRecordError is a failure the schedd reported for a user-record
+// command, rather than a transport failure.
+type UserRecordError struct {
+	// Code is the schedd's Result; SC_ERR_NOT_FOUND (2) for an owner with
+	// no record.
+	Code    int
+	Message string
+}
+
+// UserRecordErrNotFound is the schedd's SC_ERR_NOT_FOUND: the owner has no
+// record.
+const UserRecordErrNotFound = 2
+
+func (e *UserRecordError) Error() string {
+	if e.Message == "" {
+		return fmt.Sprintf("schedd refused the user record command (result %d)", e.Code)
+	}
+	return fmt.Sprintf("schedd refused the user record command (result %d): %s", e.Code, e.Message)
+}
+
+// EnableUserRecord sets Enabled on one owner or project record
+// (`condor_qusers -enable`). It never creates a record. ENABLE_USERREC is an
+// ADMINISTRATOR command on the schedd.
+func (s *Schedd) EnableUserRecord(ctx context.Context, kind UserRecordKind, name string) (*UserRecordActionResult, error) {
+	return s.actOnUserRecord(ctx, commands.ENABLE_USERREC, kind, name, "")
+}
+
+// DisableUserRecord clears Enabled on one owner or project record and
+// records reason as its DisableReason (`condor_qusers -disable -reason`). A
+// disabled owner cannot submit; a disabled project refuses jobs that name it.
+// DISABLE_USERREC is an ADMINISTRATOR command on the schedd.
+func (s *Schedd) DisableUserRecord(ctx context.Context, kind UserRecordKind, name, reason string) (*UserRecordActionResult, error) {
+	return s.actOnUserRecord(ctx, commands.DISABLE_USERREC, kind, name, reason)
+}
+
+// actOnUserRecord sends one ENABLE/DISABLE_USERREC request. The wire format
+// is DCSchedd::actOnUsers: an int count, that many command ads, end of
+// message; the reply is one ad carrying Result, NumAds and, on failure,
+// ErrorString.
+func (s *Schedd) actOnUserRecord(ctx context.Context, cmd int, kind UserRecordKind, name, reason string) (result *UserRecordActionResult, err error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("a record name is required")
+	}
+	ad := userRecordActionAd(cmd, kind, name, reason)
+
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, cmd, "CLIENT", s.address)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create security config: %w", err)
+	}
+	htcondorClient, err := client.ConnectAndAuthenticate(ctx, s.address, secConfig)
+	if err != nil {
+		return nil, wrapScheddConnectError(s.address, err)
+	}
+	defer func() {
+		if cerr := htcondorClient.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close connection: %w", cerr)
+		}
+	}()
+
+	stream := htcondorClient.GetStream()
+	req := message.NewMessageForStream(stream)
+	if err := req.PutInt(ctx, 1); err != nil {
+		return nil, fmt.Errorf("failed to send record count: %w", err)
+	}
+	if err := req.PutClassAd(ctx, ad); err != nil {
+		return nil, fmt.Errorf("failed to send record command: %w", err)
+	}
+	if err := req.FinishMessage(ctx); err != nil {
+		return nil, fmt.Errorf("failed to send record command: %w", err)
+	}
+
+	reply, err := message.NewMessageFromStream(stream).GetClassAd(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read schedd reply: %w", err)
+	}
+	return userRecordActionResultFromAd(reply)
+}
+
+// userRecordActionAd builds one command ad the way DCSchedd::actOnUsers does
+// for a name: User for an owner, TargetType="Project" plus Name for a
+// project, and DisableReason on a disable.
+func userRecordActionAd(cmd int, kind UserRecordKind, name, reason string) *classad.ClassAd {
+	ad := classad.New()
+	if kind == UserRecordProject {
+		_ = ad.Set("TargetType", string(UserRecordProject))
+		_ = ad.Set("Name", name)
+	} else {
+		_ = ad.Set("User", name)
+	}
+	if cmd == commands.DISABLE_USERREC && reason != "" {
+		_ = ad.Set("DisableReason", reason)
+	}
+	return ad
+}
+
+func userRecordActionResultFromAd(ad *classad.ClassAd) (*UserRecordActionResult, error) {
+	code := 0
+	if v, ok := ad.EvaluateAttrInt("Result"); ok {
+		code = int(v)
+	}
+	msg, _ := ad.EvaluateAttrString("ErrorString")
+	if code != 0 {
+		return nil, &UserRecordError{Code: code, Message: msg}
+	}
+	out := &UserRecordActionResult{}
+	if v, ok := ad.EvaluateAttrInt("NumAds"); ok {
+		out.NumAds = int(v)
+	}
+	out.Warning, _ = ad.EvaluateAttrString("Warning")
+	return out, nil
 }

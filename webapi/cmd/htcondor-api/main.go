@@ -2142,6 +2142,11 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2UserInfoURL:          mcpCfg.oauth2UserInfoURL,
 		OAuth2Scopes:               mcpCfg.oauth2Scopes,
 		OAuth2UsernameClaim:        mcpCfg.oauth2UsernameClaim,
+		PlacementIdentityClaims:    config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_PLACEMENT_IDENTITY_CLAIMS")),
+		PlacementDisplayNameClaims: config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_PLACEMENT_DISPLAY_NAME_CLAIMS")),
+		PlacementDeviceClients:     placementDeviceClients(cfg),
+		PlacementScheddHost:        firstConfigValue(cfg, "HTTP_API_PLACEMENT_SCHEDD_HOST"),
+		PlacementCollectorHost:     firstConfigValue(cfg, "HTTP_API_PLACEMENT_COLLECTOR_HOST"),
 		OAuth2Requirements:         mcpCfg.oauth2Requirements,
 		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,
 		IdentityMapStrategies:      mcpCfg.identityMapStrategies,
@@ -3823,4 +3828,15 @@ func positiveConfigInt(cfg *config.Config, name string, logger *logging.Logger) 
 		return 0
 	}
 	return v
+}
+
+// placementDeviceClients is HTTP_API_PLACEMENT_DEVICE_CLIENTS as written, or
+// nil when unset so the server applies its default. Set to empty, it admits
+// no client.
+func placementDeviceClients(cfg *config.Config) *string {
+	v, ok := cfg.Get("HTTP_API_PLACEMENT_DEVICE_CLIENTS")
+	if !ok {
+		return nil
+	}
+	return &v
 }

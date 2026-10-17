@@ -1166,6 +1166,12 @@ func (s *Handler) handleAdminSetTokenScopes(w http.ResponseWriter, r *http.Reque
 		s.writeError(w, http.StatusInternalServerError, "Failed to read the token's scopes")
 		return
 	}
+	// A placement grant's scope set is fixed: it is what keeps its token
+	// to the placement endpoints (placement_scope.go caches it as such).
+	if isPlacementGrant(current) {
+		s.writeError(w, http.StatusConflict, "A placement token's scopes cannot be changed; revoke it instead.")
+		return
+	}
 
 	// Before anything changes: a grant issued before the authorized set was
 	// recorded has none, and the read below would then fall back to the

@@ -139,6 +139,9 @@ func (s *Handler) handleSSHCertificate(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	if s.refuseForPlacementdSession(w, r, "SSH certificates") {
+		return
+	}
 
 	ctx, _, err := s.requireAuthentication(r)
 	if err != nil {

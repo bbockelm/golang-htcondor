@@ -157,7 +157,7 @@ list of strategies; the first to answer wins.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `HTTP_API_IDENTITY_MAP` | unset (no mapping) | Comma-separated strategy list, e.g. `gecos,username`. `gecos` matches the token subject against accounts' GECOS names; `username` treats the subject as a login name. An unparseable list makes the server refuse to start rather than fall back to an unmapped identity. |
+| `HTTP_API_IDENTITY_MAP` | unset (no mapping) | Comma-separated strategy list, e.g. `gecos,username`. `gecos` matches the token subject against accounts' GECOS names; `username` treats the subject as a login name; `placementd` asks condor_placementd (see [placementd as an identity mapping](#placementd-as-an-identity-mapping)). An unparseable list makes the server refuse to start rather than fall back to an unmapped identity. |
 | `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | system default | Read accounts from this file instead of `/etc/passwd`. Both the index and the re-check use it, so it is self-consistent. |
 | `HTTP_API_IDENTITY_MAP_TTL` | `5m` | How long the account index and group answers are reused. The index is rebuilt lazily on the first login after it expires. |
 | `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | `false` | Also try the local part of a scoped subject: `bockelman@wisc.edu` matches a GECOS of `bockelman`. The full subject is tried first, so this only ever adds a fallback. |
@@ -1454,12 +1454,41 @@ metrics key.
 - `POST /api/v1/placement/login` — mint an IDToken. The response is the
   only time the token exists in retrievable form.
 
+- `GET /api/v1/placement/records/projects` — every project the map file
+  names, with its schedd project record's state
+- `GET /api/v1/placement/records/{accounts|projects}/{name}` — the schedd
+  record behind a placement account or project, with its job counters
+- `POST /api/v1/placement/records/{accounts|projects}/{name}/{suspend|unsuspend}`
+  — `DISABLE_USERREC` / `ENABLE_USERREC` on the schedd; the reason is
+  `suspended by <admin> via web UI`. Only names the placementd hands out.
+
   These are admin-only on purpose: the placementd registers its commands
   at ADMINISTRATOR and this server talks to it as the AP's own identity,
   so an endpoint any signed-in user could reach would let them mint a
   bearer token for anyone in the map file. The server finds the daemon
   via `PLACEMENTD_ADDRESS_FILE` (or `$(LOG)/.placementd_address`), then
-  the collector; finding none simply disables the group.
+  the collector; finding none simply disables the group. It looks again
+  when a connection fails (a restarted placementd has a new address) and
+  when the feature is next asked for, so a placementd started or upgraded
+  later is picked up without restarting this server.
+
+**Placement onboarding** (any signed-in session; see
+[Placement onboarding](#placement-onboarding))
+- `GET /api/v1/placement/me` — the session's placement identity, the
+  projects and authorizations it may request, and whether the schedd has
+  the account or a project disabled
+- `POST /api/v1/placement/me/token` — `{project, authorizations[],
+  user_code?}`; needs an `X-Requested-With` header. Returns the token, or
+  with `user_code` hands it to that device request instead.
+- `GET /api/v1/placement/me/device/{user_code}`,
+  `POST /api/v1/placement/me/device/{user_code}/deny`
+- `POST /api/v1/placement/me/project` -- `{project}`; selects the project
+  of a session signed in through the `placementd` identity mapping
+- `GET /api/v1/placement/me` and `POST /api/v1/placement/me/token` also
+  accept a bearer access token holding the `placement` scope
+- `POST /auth/device_authorization`, `GET /auth/code`,
+  `POST /auth/cancel_device` — placement-webapp's device flow, for
+  `placement-client`
 
 **Chat assistant** (when `HTTP_API_LLM_API_KEY_FILE` is set)
 - `POST /api/v1/chat` — AI-SDK v6 UI-message stream. The body's `scope`
@@ -2258,6 +2287,107 @@ it offers no actions yet.
 `HTTP_API_SCHEDD_CONSTRAINT` together with `-schedd`, `-schedd-addr` or
 `SCHEDD_NAME` is a startup error. `UID_DOMAIN` and a collector are
 required.
+
+### Placement onboarding
+
+When a `condor_placementd` is reachable, this server also does what CHTC's
+placement-webapp did for users: someone signs in, picks a project and the
+permissions they want, and gets a placement token for their AP account,
+either in the browser at `/placement` (shown once, downloaded as
+`Placement.token`; nothing is written to disk) or through the device flow
+`placement-client` speaks, confirmed at `/placement/device`.
+
+**The identity.** At sign-in the server takes the first non-empty claim
+named by `HTTP_API_PLACEMENT_IDENTITY_CLAIMS` (default `sub`) from the
+provider's userinfo, replaces each run of characters other than letters,
+digits, `_`, `@`, `.` and `-` with `_`, and keeps at most 64 characters.
+That is placement-webapp's `USERNAME_FIELDS` rule exactly, so existing map
+file lines keep matching. Set the same claim list placement-webapp used,
+for example `HTTP_API_PLACEMENT_IDENTITY_CLAIMS = eppn, sub`.
+
+**People with no local account.** With [local identity
+mapping](#local-identity-mapping) on, a sign-in that maps to no account is
+normally refused. While a placementd is reachable it instead gets a
+*placement-only* session: no username, and it reaches only `/placement`,
+`/placement/device`, `GET /api/v1/auth/me`, `/api/v1/placement/me*`, the
+device-flow paths and sign-out. Every other route answers 403 (or sends a
+page load to `/placement`). `HTTP_API_WEBUI_ACCESS_GROUP` is not applied
+to these sessions; whether they get a token is the placementd map file's
+decision.
+
+**What the token can be.** The server calls the placementd as itself, so
+the user-facing endpoints never take an identity from the request: the
+identity is always the session's, the requester is always the same
+identity, and tokens for someone else (INSTRUCTOR) are not offered. A
+request may name only the authorizations the placementd offers that
+identity, and a project from its map file line. `WEBADMIN` is not
+honored; the admin pages follow `HTTP_API_WEBUI_ADMIN_GROUP`.
+
+**The device flow.** `POST /auth/device_authorization` without a
+`grant_type` starts a request for a `client_id` listed in
+`HTTP_API_PLACEMENT_DEVICE_CLIENTS`; with
+`grant_type=urn:ietf:params:oauth:grant-type:device_code` it polls. The
+responses are placement-webapp's byte for byte, including the success body
+`{"access_token": "<token>\n", "expires_in": "<seconds>", "token_type":
+"Placement"}`. A pending request lasts 30 minutes and is polled every 5
+seconds. The approved token is kept, sealed with `HTTP_API_KEK_FILE` when
+one is configured, until the client collects it once; it is then deleted,
+and expired requests are swept.
+
+**The standard device flow (placement-client).** New clients use this
+server's own RFC 8628 device grant instead of the paths above. They read
+`/.well-known/oauth-authorization-server` (so this server's OAuth2
+authorization server must be on, which it is when the web UI or MCP is
+enabled), ask the device authorization endpoint as the pre-registered
+public client `placement_client` for the scope `placement` (and
+`offline_access` to keep a refresh token), and send the person to the
+verification page, where any signed-in session with an identity --
+placement-only included -- approves it. The access token then calls `GET
+/api/v1/placement/me` and `POST /api/v1/placement/me/token` with
+`Authorization: Bearer`, and nothing else: every other route refuses it.
+The identity it acts for is the one that approved it, recorded on the
+grant. `placement` cannot be combined with any other scope, and is granted
+through the device flow only. Each refresh re-reads the identity from the
+placementd and ends the grant when the identity is gone or expired, or the
+account's schedd user record is disabled. The legacy paths above keep
+working for older clients.
+
+### placementd as an identity mapping
+
+With `placementd` in `HTTP_API_IDENTITY_MAP` (alone, or in the list, e.g.
+`placementd,gecos`), a sign-in identity the placementd has authorized,
+unexpired, with an account that holds `READ` or `WRITE`, signs in **as that
+account**: the session's user is the account exactly as the placementd
+names it, whose domain need not be `UID_DOMAIN`. `placementd` listed before
+every other method is tried first; listed after them, it is tried when
+they fail. An identity no method maps gets a placement-only session.
+
+Every token this server mints for such a session -- or for an OAuth2 grant
+it authorizes -- names the account as its subject, carries `condor:/READ`
+and `condor:/WRITE` only as far as the account holds them (other grants,
+such as `INSTRUCTOR`, are not authorization levels and are left out), and
+carries the session's selected project as the `project` claim, as the
+placementd's own tokens do. A project switcher appears when the account has
+more than one. The session never outlives the mapping's expiry. The account
+is re-read at most every five minutes, on the next token: an identity
+removed, expired or pointed at another account ends the session; changed
+grants and projects are taken up. OAuth2 grants of the account are
+re-checked the same way on refresh.
+
+Some features need a local Unix account and are refused for these
+sessions: credential storage in the credd (`/api/v1/creds/*`), the SSH
+gateway and SSH certificates, superuser mode, token exchange of their
+grants, and share links for accounts outside `UID_DOMAIN`. Owner-scoped
+reads match the job's `Owner`, the part of the account before `@`, as for
+every other caller.
+
+| Knob | Purpose |
+| --- | --- |
+| `HTTP_API_PLACEMENT_IDENTITY_CLAIMS` | Userinfo claims, in order, the placement identity is taken from. Default `sub`. Read at startup. |
+| `HTTP_API_PLACEMENT_DISPLAY_NAME_CLAIMS` | Claims, in order, the person is greeted by. Default `name`. Read at startup. |
+| `HTTP_API_PLACEMENT_DEVICE_CLIENTS` | Comma-separated `client_id`s the device flow accepts. Default `placement_client,curl,`. Set empty to accept none. Read at startup. |
+| `HTTP_API_PLACEMENT_SCHEDD_HOST` | `SCHEDD_HOST` shown with a token for `~/.condor/user_config`. Default: this server's schedd name. Read at startup. |
+| `HTTP_API_PLACEMENT_COLLECTOR_HOST` | `COLLECTOR_HOST` shown with a token. Default: `COLLECTOR_HOST`. Read at startup. |
 
 ## Configuration
 

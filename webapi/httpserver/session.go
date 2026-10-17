@@ -28,6 +28,55 @@ type SessionData struct {
 	Groups    []string  // User groups from IDP (for scope filtering)
 	CreatedAt time.Time // When the session was created
 	ExpiresAt time.Time // When the session expires
+	// PlacementIdentity is the identity this session presents to
+	// condor_placementd, derived from the provider's claims at login
+	// (placement_identity.go). Empty when none could be derived. It is
+	// the ONLY identity the user-facing placement endpoints ever send.
+	PlacementIdentity string
+	// DisplayName is what the provider called the person, for greeting.
+	DisplayName string
+	// Scope is sessionScopeFull for an ordinary session, or
+	// sessionScopePlacement for one whose person maps to no local
+	// account. A placement session has an empty Username and reaches only
+	// the placement onboarding pages; see placement_session_gate.go.
+	Scope string
+	// IdentitySource is identitySourcePlacementd when the session's
+	// HTCondor identity is the account condor_placementd assigned to
+	// PlacementIdentity (HTTP_API_IDENTITY_MAP = placementd). Username is
+	// then that account, verbatim, and Placement describes it.
+	IdentitySource string
+	// Placement is the placementd account behind the session, for
+	// IdentitySource == identitySourcePlacementd; nil otherwise.
+	Placement *PlacementAccountInfo
+}
+
+// identitySourcePlacementd marks a session mapped through condor_placementd.
+const identitySourcePlacementd = "placementd"
+
+// IsPlacementd reports whether the session's HTCondor identity came from
+// condor_placementd.
+func (sd *SessionData) IsPlacementd() bool {
+	return sd != nil && sd.IdentitySource == identitySourcePlacementd && sd.Placement != nil
+}
+
+const (
+	// sessionScopeFull is an ordinary browser session.
+	sessionScopeFull = ""
+	// sessionScopePlacement is a session that reaches only placement
+	// onboarding.
+	sessionScopePlacement = "placement"
+)
+
+// placementSessionPrefix starts every placement-only session's cookie value.
+// It lets the request gate recognize such a session without a database read
+// on every request. It cannot be forged: the stored key is the hash of the
+// whole value, so editing the prefix in or out yields no session at all.
+const placementSessionPrefix = "p."
+
+// IsPlacementOnly reports whether the session is restricted to placement
+// onboarding.
+func (sd *SessionData) IsPlacementOnly() bool {
+	return sd != nil && sd.Scope == sessionScopePlacement
 }
 
 // SessionStore manages HTTP sessions with SQLite persistence
@@ -86,6 +135,10 @@ func (s *SessionStore) createTable() error {
 
 	// Migrate existing tables: add groups_json column if it doesn't exist
 	_, _ = s.db.ExecContext(ctx, `ALTER TABLE http_sessions ADD COLUMN groups_json TEXT`)
+	// And the placement identity columns (migration 0023).
+	for _, col := range []string{"placement_identity", "display_name", "scope", "identity_source", "placement_json"} {
+		_, _ = s.db.ExecContext(ctx, `ALTER TABLE http_sessions ADD COLUMN `+col+` TEXT NOT NULL DEFAULT ''`)
+	}
 
 	return nil
 }
@@ -120,19 +173,56 @@ func sessionLogID(sessionID string) string {
 
 // Create creates a new session for the given username and groups
 func (s *SessionStore) Create(username string, groups ...[]string) (string, *SessionData, error) {
+	data := SessionData{Username: username}
+	if len(groups) > 0 {
+		data.Groups = groups[0]
+	}
+	return s.CreateSession(data)
+}
+
+// CreateSession stores a new session carrying data's Username, Groups,
+// PlacementIdentity, DisplayName and Scope; the times are set here. A
+// placement-only session must have no Username: it is not a local user, and
+// nothing may mistake it for one.
+func (s *SessionStore) CreateSession(data SessionData) (string, *SessionData, error) {
+	if data.Scope == sessionScopePlacement && data.Username != "" {
+		return "", nil, fmt.Errorf("a placement-only session cannot carry a username")
+	}
+	if data.Scope != sessionScopeFull && data.Scope != sessionScopePlacement {
+		return "", nil, fmt.Errorf("unknown session scope %q", data.Scope)
+	}
+	if data.IdentitySource == identitySourcePlacementd &&
+		(data.Placement == nil || data.Placement.Account == "" || data.Username != data.Placement.Account) {
+		return "", nil, fmt.Errorf("a placementd session's username must be its placementd account")
+	}
 	sessionID, err := generateSessionID()
 	if err != nil {
 		return "", nil, err
 	}
+	if data.Scope == sessionScopePlacement {
+		sessionID = placementSessionPrefix + sessionID
+	}
 
 	now := time.Now()
 	session := &SessionData{
-		Username:  username,
-		CreatedAt: now,
-		ExpiresAt: now.Add(s.ttl),
+		Username:          data.Username,
+		Groups:            data.Groups,
+		CreatedAt:         now,
+		ExpiresAt:         now.Add(s.ttl),
+		PlacementIdentity: data.PlacementIdentity,
+		DisplayName:       data.DisplayName,
+		Scope:             data.Scope,
+		IdentitySource:    data.IdentitySource,
+		Placement:         data.Placement,
 	}
-	if len(groups) > 0 {
-		session.Groups = groups[0]
+	// A placementd account is honored no longer than its mapping.
+	if session.IsPlacementd() && !session.Placement.MappingExpiresAt.IsZero() &&
+		session.Placement.MappingExpiresAt.Before(session.ExpiresAt) {
+		session.ExpiresAt = session.Placement.MappingExpiresAt
+	}
+	placementJSON, err := encodePlacementAccount(session.Placement)
+	if err != nil {
+		return "", nil, err
 	}
 
 	// Serialize groups as JSON
@@ -150,9 +240,11 @@ func (s *SessionStore) Create(username string, groups ...[]string) (string, *Ses
 	// and an unused secret-shaped column on disk was a footgun.
 	ctx := context.Background()
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO http_sessions (session_id, username, created_at, expires_at, groups_json)
-		 VALUES (?, ?, ?, ?, ?)`,
-		sessionKey(sessionID), session.Username, session.CreatedAt, session.ExpiresAt, groupsJSON)
+		`INSERT INTO http_sessions (session_id, username, created_at, expires_at, groups_json,
+		                            placement_identity, display_name, scope, identity_source, placement_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionKey(sessionID), session.Username, session.CreatedAt, session.ExpiresAt, groupsJSON,
+		session.PlacementIdentity, session.DisplayName, session.Scope, session.IdentitySource, placementJSON)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to store session in database: %w", err)
 	}
@@ -167,12 +259,15 @@ func (s *SessionStore) Get(sessionID string) *SessionData {
 
 	var session SessionData
 	var groupsJSON sql.NullString
+	var placementJSON string
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT username, created_at, expires_at, groups_json
+		`SELECT username, created_at, expires_at, groups_json,
+		        placement_identity, display_name, scope, identity_source, placement_json
 		 FROM http_sessions
 		 WHERE session_id = ? AND expires_at > ?`,
-		sessionKey(sessionID), time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &groupsJSON)
+		sessionKey(sessionID), time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &groupsJSON,
+		&session.PlacementIdentity, &session.DisplayName, &session.Scope, &session.IdentitySource, &placementJSON)
 
 	if err != nil {
 		// Session not found or expired
@@ -182,8 +277,31 @@ func (s *SessionStore) Get(sessionID string) *SessionData {
 	if groupsJSON.Valid && groupsJSON.String != "" {
 		_ = json.Unmarshal([]byte(groupsJSON.String), &session.Groups)
 	}
+	if session.IdentitySource == identitySourcePlacementd {
+		info, err := decodePlacementAccount(placementJSON)
+		if err != nil || info == nil || info.Account != session.Username {
+			// A placementd session whose account cannot be read back is
+			// no session: minting for it would have no bound.
+			return nil
+		}
+		session.Placement = info
+	}
 
 	return &session
+}
+
+// UpdatePlacement stores a placementd session's re-read account and its
+// expiry. The caller never moves the expiry later than it was.
+func (s *SessionStore) UpdatePlacement(sessionID string, info *PlacementAccountInfo, expiresAt time.Time) error {
+	placementJSON, err := encodePlacementAccount(info)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(context.Background(),
+		`UPDATE http_sessions SET placement_json = ?, expires_at = ?
+		 WHERE session_id = ? AND identity_source = ?`,
+		placementJSON, expiresAt, sessionKey(sessionID), identitySourcePlacementd)
+	return err
 }
 
 // Delete removes a session
@@ -281,8 +399,24 @@ func (s *Handler) clearSessionCookie(w http.ResponseWriter) {
 }
 
 // getSessionFromRequest extracts session data from the request
-// Returns the session data and true if a valid session exists
+// Returns the session data and true if a valid session exists.
+//
+// A placement-only session is NOT returned: to every caller of this, it is no
+// session at all. It has no local username, and code that authenticates as
+// session.Username must never see an empty one. The few handlers that serve
+// placement-only sessions use getAnySessionFromRequest.
 func (s *Handler) getSessionFromRequest(r *http.Request) (*SessionData, bool) {
+	session, ok := s.getAnySessionFromRequest(r)
+	if !ok || session.IsPlacementOnly() {
+		return nil, false
+	}
+	return session, true
+}
+
+// getAnySessionFromRequest is getSessionFromRequest including placement-only
+// sessions. Only placement onboarding, /api/v1/auth/me and the session gate
+// call it.
+func (s *Handler) getAnySessionFromRequest(r *http.Request) (*SessionData, bool) {
 	sessionID, err := getSessionCookie(r)
 	if err != nil {
 		return nil, false

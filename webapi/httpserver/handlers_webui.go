@@ -62,6 +62,26 @@ type AuthMeResponse struct {
 	MultiAP bool `json:"multi_ap,omitempty"`
 	// Assignment is where this session's new work goes, in multi-AP mode.
 	Assignment *APAssignmentInfo `json:"assignment,omitempty"`
+	// PlacementOnly reports a session that maps to no local account and
+	// reaches only the placement pages.
+	PlacementOnly bool `json:"placement_only,omitempty"`
+	// Placement is the session's placement identity, present when this
+	// server issues placement tokens and the session has one.
+	Placement *PlacementSessionInfo `json:"placement,omitempty"`
+}
+
+// PlacementSessionInfo is the placement identity of a session.
+type PlacementSessionInfo struct {
+	Identity    string `json:"identity"`
+	DisplayName string `json:"display_name,omitempty"`
+	// Account is set when the session signed in as the account the
+	// placementd assigned to Identity (HTTP_API_IDENTITY_MAP =
+	// placementd): the account, the permissions on jobs it holds, its
+	// projects and the one tokens are minted for.
+	Account  string   `json:"account,omitempty"`
+	Levels   []string `json:"levels,omitempty"`
+	Projects []string `json:"projects,omitempty"`
+	Project  string   `json:"project,omitempty"`
 }
 
 // handleAuthMe handles GET /api/v1/auth/me. Resolves the browser session
@@ -76,8 +96,22 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 
 	resp := AuthMeResponse{Authenticated: false, MultiAP: s.multi != nil}
 
-	if session, ok := s.getSessionFromRequest(r); ok {
+	if session, ok := s.getAnySessionFromRequest(r); ok && session.IsPlacementOnly() {
+		// Nothing about a local account: there is none.
 		resp.Authenticated = true
+		resp.PlacementOnly = true
+		resp.Placement = &PlacementSessionInfo{Identity: session.PlacementIdentity, DisplayName: session.DisplayName}
+	} else if ok {
+		resp.Authenticated = true
+		if session.PlacementIdentity != "" && s.placementOnboardingEnabled(r.Context()) {
+			resp.Placement = &PlacementSessionInfo{Identity: session.PlacementIdentity, DisplayName: session.DisplayName}
+			if session.IsPlacementd() {
+				resp.Placement.Account = session.Placement.Account
+				resp.Placement.Levels = session.Placement.Levels()
+				resp.Placement.Projects = session.Placement.Projects
+				resp.Placement.Project = session.Placement.Project
+			}
+		}
 		resp.Username = session.Username
 		resp.Groups = session.Groups
 		if s.webuiAdminGroups.configured() {

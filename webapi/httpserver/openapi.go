@@ -36,7 +36,7 @@ const openAPISchema = `{
     },
     {
       "name": "placement",
-      "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. Admin-only — the daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so these endpoints require membership in the web UI admin group. Absent a placementd, every one of them but /placement/status returns 503. The /placement/admin endpoints manage the placementd's directory (identities, accounts, projects, authorizations) and need a placementd advertising PlacementdApiVersion >= 2; against an older one they return 501, and /placement/status reports api_version so a UI can hide them."
+      "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. The daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so the admin endpoints (/placement/status, users, tokens, authorizations, login, records and admin) require membership in the web UI admin group. The /placement/me endpoints serve any signed-in browser session, including one with no local account; they always act for the session's own placement identity and never take one from the request. GET /placement/me and POST /placement/me/token also accept a bearer access token holding the placement scope, which this server's own RFC 8628 device grant issues to the client placement_client; such a token reaches nothing else. The legacy device flow older placement-client versions use is served outside /api/v1, at /auth/device_authorization, /auth/code and /auth/cancel_device, with placement-webapp's exact responses. Absent a placementd, every endpoint but /placement/status returns 503. The /placement/admin endpoints manage the placementd's directory (identities, accounts, projects, authorizations) and need a placementd advertising PlacementdApiVersion >= 2; against an older one they return 501, and /placement/status reports api_version so a UI can hide them."
     }
   ],
   "components": {
@@ -537,9 +537,9 @@ const openAPISchema = `{
       },
       "PlacementUser": {
         "type": "object",
-        "description": "A foreign identity known to the placementd, merged with its newest live token.",
+        "description": "A sign-in identity known to the placementd, merged with its newest live token.",
         "properties": {
-          "username": {"type": "string", "description": "Foreign identity, as it appears in the placementd map file."},
+          "username": {"type": "string", "description": "Sign-in identity, as it appears in the placementd map file."},
           "ap_user_id": {"type": "string", "description": "Local AP account the identity maps to; the token subject."},
           "token_expiration": {"type": "string", "format": "date-time", "description": "Expiration of this user's newest unexpired token. Absent when they hold none."},
           "mapping_expiration": {"type": "string", "format": "date-time", "description": "When the map-file entry stops being honored. Absent means never."},
@@ -553,7 +553,7 @@ const openAPISchema = `{
         "description": "An issued token as recorded by the placementd. The token string itself is not stored and is never returned here.",
         "properties": {
           "token_id": {"type": "string", "description": "The token's jti claim."},
-          "username": {"type": "string", "description": "Foreign identity the token was issued for."},
+          "username": {"type": "string", "description": "Sign-in identity the token was issued for."},
           "ap_user_id": {"type": "string", "description": "Local AP account named in the token's subject."},
           "requester": {"type": "string", "description": "Who asked for the token; differs from username only for instructor-issued tokens."},
           "authorizations": {"type": "array", "items": {"type": "string"}, "description": "The token's bounding set."},
@@ -576,7 +576,7 @@ const openAPISchema = `{
         "type": "object",
         "required": ["username"],
         "properties": {
-          "username": {"type": "string", "description": "Foreign identity to log in. Must appear in the placementd map file."},
+          "username": {"type": "string", "description": "Sign-in identity to log in. Must appear in the placementd map file."},
           "authorizations": {"type": "array", "items": {"type": "string"}, "description": "Narrows the token's bounding set. EVERY entry must be one the user is entitled to, or the whole request is refused. Omit for the user's full set."},
           "project": {"type": "string", "description": "Ties the token, and the jobs submitted with it, to an AP project the user is authorized for."},
           "requester": {"type": "string", "description": "Identity asking on the user's behalf. Must itself be mapped and hold the INSTRUCTOR authorization."}
@@ -813,6 +813,70 @@ const openAPISchema = `{
             "cascade": {"type": "boolean"},
             "fields": {"$ref": "#/components/schemas/PlacementEntityInput"}
           }}}
+        }
+      },
+      "PlacementMe": {
+        "type": "object",
+        "description": "The signed-in session's placement identity, as the placementd sees it.",
+        "properties": {
+          "identity": {"type": "string", "description": "The identity sent to the placementd, derived at sign-in from HTTP_API_PLACEMENT_IDENTITY_CLAIMS. Empty when the provider supplied none."},
+          "display_name": {"type": "string"},
+          "authorized": {"type": "boolean", "description": "Whether the placementd will issue this identity a token."},
+          "expired": {"type": "boolean", "description": "Whether the identity's mapping has expired."},
+          "mapping_expiration": {"type": "string", "format": "date-time"},
+          "account": {"type": "string", "description": "The AP account tokens are issued for."},
+          "authorizations": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementAuthorization"}, "description": "The authorizations this identity may request."},
+          "projects": {"type": "array", "items": {"type": "object", "properties": {
+            "name": {"type": "string"}, "default": {"type": "boolean"},
+            "enabled": {"type": "boolean", "description": "False when the schedd's project record is disabled; no record counts as enabled."}}}},
+          "account_enabled": {"type": "boolean", "description": "False when the schedd's user record for account is disabled."},
+          "records_available": {"type": "boolean", "description": "False when the schedd could not be asked; the enabled flags then say nothing."}
+        }
+      },
+      "PlacementTokenRequest": {
+        "type": "object",
+        "required": ["project", "authorizations"],
+        "description": "A token request. It names no user; any field not listed here is refused.",
+        "properties": {
+          "project": {"type": "string"},
+          "authorizations": {"type": "array", "items": {"type": "string"}, "description": "Each must be one PlacementMe offers."},
+          "user_code": {"type": "string", "description": "Bind the token to this pending device request instead of returning it."}
+        }
+      },
+      "PlacementIssued": {
+        "type": "object",
+        "properties": {
+          "token": {"type": "string", "description": "The token. Absent when it was bound to a device request."},
+          "ap_user_id": {"type": "string"},
+          "issued_at": {"type": "string", "format": "date-time"},
+          "expires_at": {"type": "string", "format": "date-time"},
+          "project": {"type": "string"},
+          "authorizations": {"type": "array", "items": {"type": "string"}},
+          "user_config": {"type": "string", "description": "SCHEDD_HOST and COLLECTOR_HOST lines for ~/.condor/user_config."},
+          "device": {"$ref": "#/components/schemas/PlacementDeviceRequest"}
+        }
+      },
+      "PlacementDeviceRequest": {
+        "type": "object",
+        "properties": {
+          "user_code": {"type": "string"},
+          "client_id": {"type": "string"},
+          "client_name": {"type": "string"},
+          "state": {"type": "string", "enum": ["pending", "approved", "denied", "expired"]},
+          "expires_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "PlacementRecord": {
+        "type": "object",
+        "description": "The schedd's user or project record for a name the placementd hands out.",
+        "properties": {
+          "kind": {"type": "string", "enum": ["account", "project"]},
+          "name": {"type": "string"},
+          "found": {"type": "boolean", "description": "False when nothing has been submitted under the name yet."},
+          "enabled": {"type": "boolean"},
+          "disable_reason": {"type": "string"},
+          "stats": {"type": "object", "additionalProperties": {"type": "integer"}, "description": "NumIdle, NumRunning, NumHeld, NumSuspended, NumScheduler*, TotalCompletedJobs, TotalRemovedJobs, when published."},
+          "members": {"type": "array", "items": {"type": "string"}, "description": "Identities mapped to the account, or accounts in the project."}
         }
       }
     }
@@ -1062,7 +1126,7 @@ const openAPISchema = `{
         "operationId": "listPlacementUsers",
         "tags": ["placement"],
         "parameters": [
-          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to one foreign identity. An unknown identity yields an empty list, not an error."}
+          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to one sign-in identity. An unknown identity yields an empty list, not an error."}
         ],
         "responses": {
           "200": {"description": "Users", "content": {"application/json": {"schema": {"type": "object", "properties": {"users": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementUser"}}}}}}},
@@ -1080,7 +1144,7 @@ const openAPISchema = `{
         "operationId": "listPlacementTokens",
         "tags": ["placement"],
         "parameters": [
-          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to tokens issued for one foreign identity."},
+          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to tokens issued for one sign-in identity."},
           {"name": "token_id", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to a single jti. Takes precedence over the other filters."},
           {"name": "valid_only", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Drop tokens that have already expired."}
         ],
@@ -1114,7 +1178,7 @@ const openAPISchema = `{
     "/placement/login": {
       "post": {
         "summary": "Mint a placement token",
-        "description": "Ask the placementd for an IDToken for a foreign identity. Beyond returning the token this creates the AP user record -- and the project record, when a project is named -- in the schedd if they do not exist; a login against a DISABLED user or project fails rather than re-enabling it. The response is the only time the token is available. Requires membership in the web UI admin group.",
+        "description": "Ask the placementd for an IDToken for a sign-in identity. Beyond returning the token this creates the AP user record -- and the project record, when a project is named -- in the schedd if they do not exist; a login against a DISABLED user or project fails rather than re-enabling it. The response is the only time the token is available. Requires membership in the web UI admin group.",
         "operationId": "placementLogin",
         "tags": ["placement"],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementLoginRequest"}}}},
@@ -1299,6 +1363,120 @@ const openAPISchema = `{
           "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me": {
+      "get": {
+        "summary": "Your placement identity",
+        "description": "What the placementd says about the signed-in session's own identity, with the projects and authorizations it may request and the schedd's enabled flags. Any browser session.",
+        "operationId": "placementMe",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Identity", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMe"}}}},
+          "401": {"description": "Not signed in", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "Placement tokens are not available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me/token": {
+      "post": {
+        "summary": "Request a placement token for yourself",
+        "description": "Mints a token for the session's own identity (UserName and Requester are both the session's). Requires the X-Requested-With header. With user_code the token goes to that device request and is not returned.",
+        "operationId": "placementMeToken",
+        "tags": ["placement"],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementTokenRequest"}}}},
+        "responses": {
+          "201": {"description": "Token issued", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementIssued"}}}},
+          "400": {"description": "Malformed request, unknown field, or an authorization not offered", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not authorized, or the X-Requested-With header is missing", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Unknown device code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The device request was already answered or has expired", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "Placement tokens are not available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me/project": {
+      "post": {
+        "summary": "Select your project",
+        "description": "For a session signed in through the placementd identity mapping: the project its tokens name. Requires the X-Requested-With header.",
+        "operationId": "placementMeProject",
+        "tags": ["placement"],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["project"], "properties": {"project": {"type": "string"}}}}}},
+        "responses": {
+          "200": {"description": "Selected"},
+          "400": {"description": "Not one of the account's projects", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The session has no placementd account", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me/device/{user_code}": {
+      "get": {
+        "summary": "A pending device request",
+        "operationId": "placementDeviceRequest",
+        "tags": ["placement"],
+        "parameters": [{"name": "user_code", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z]{4}-[A-Za-z]{4}$"}}],
+        "responses": {
+          "200": {"description": "Request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementDeviceRequest"}}}},
+          "404": {"description": "Unknown code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me/device/{user_code}/deny": {
+      "post": {
+        "summary": "Deny a pending device request",
+        "description": "The client's next poll gets access_denied. A request already answered or expired is left as it is. Same as POST /auth/cancel_device. Requires the X-Requested-With header.",
+        "operationId": "placementDeviceDeny",
+        "tags": ["placement"],
+        "parameters": [{"name": "user_code", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "Canceled"},
+          "404": {"description": "Unknown code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/records/projects": {
+      "get": {
+        "summary": "List placement projects",
+        "description": "Every project on a placementd map file line, with its schedd record's state. Requires membership in the web UI admin group.",
+        "operationId": "listPlacementProjects",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Projects"}
+        }
+      }
+    },
+    "/placement/records/{kind}/{name}": {
+      "get": {
+        "summary": "A placement account's or project's schedd record",
+        "description": "The record, its job counters and who it belongs to. Only names the placementd hands out. Requires membership in the web UI admin group.",
+        "operationId": "getPlacementRecord",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["accounts", "projects"]}},
+          {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Record", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementRecord"}}}},
+          "404": {"description": "Not a name the placementd hands out", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/records/{kind}/{name}/{action}": {
+      "post": {
+        "summary": "Suspend or unsuspend a placement account or project",
+        "description": "DISABLE_USERREC or ENABLE_USERREC on the schedd. A suspension's reason is \"suspended by <admin> via web UI\". Requires membership in the web UI admin group.",
+        "operationId": "setPlacementRecordSuspended",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["accounts", "projects"]}},
+          {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "action", "in": "path", "required": true, "schema": {"type": "string", "enum": ["suspend", "unsuspend"]}}
+        ],
+        "responses": {
+          "200": {"description": "The record after the change", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementRecord"}}}},
+          "404": {"description": "Not a placement name, or the schedd has no record for it", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The schedd refused or could not be reached", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },

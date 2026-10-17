@@ -141,6 +141,13 @@ func (h *Handler) setupRoutes() {
 	// Directory CRUD (handlers_placement_admin.go); admin-gated inside.
 	mux.Handle(placementAdminPrefix+"/", cors(http.HandlerFunc(h.handlePlacementAdmin)))
 
+	// placement-webapp's device flow, at its own paths, for
+	// placement-client (placement_device.go). No CORS: these are for
+	// command-line clients and the browser that follows /auth/code.
+	mux.HandleFunc("/auth/device_authorization", h.handlePlacementDeviceAuthorization)
+	mux.HandleFunc("/auth/code", h.handlePlacementDeviceCode)
+	mux.HandleFunc("/auth/cancel_device", h.handlePlacementDeviceCancel)
+
 	// Authentication endpoint
 	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(h.handleWhoAmI)))
 	// The gateway's certificate authority, and certificates signed by

@@ -2,7 +2,7 @@
 
 // Placement page — the AP-side view of condor_placementd.
 //
-// The placementd maps "foreign" identities (a campus IdP account, a course
+// The placementd maps sign-in identities (a campus IdP account, a course
 // roster entry) onto local AP accounts and mints IDTokens for them. This page
 // mirrors the reference portal's shape: an authorization legend rendered with
 // the operator's own labels and colors, a roster of mapped users, the tokens
@@ -28,8 +28,13 @@ import {
 } from '@/lib/api';
 import { Directory } from './Directory';
 import { MapfileStatusBanner } from './MapfileStatusBanner';
+import {
+  PlacementProjectsTab,
+  PlacementRecordDrawer,
+  type PlacementRecordTarget,
+} from '@/components/PlacementRecordDrawer';
 
-type Tab = 'users' | 'tokens' | 'authorizations';
+type Tab = 'users' | 'projects' | 'tokens' | 'authorizations';
 
 export default function AdminPlacementPage() {
   const status = useQuery({
@@ -43,6 +48,8 @@ export default function AdminPlacementPage() {
   // instead would mean a render-phase update, which React rightly complains
   // about.
   const [issueFor, setIssueFor] = useState('');
+  // The account or project whose schedd record is open in the drawer.
+  const [record, setRecord] = useState<PlacementRecordTarget | null>(null);
 
   const available = status.data?.available === true;
   // A placementd with the directory commands replaces Users with Directory.
@@ -107,6 +114,9 @@ export default function AdminPlacementPage() {
             <TabButton active={tab === 'users'} onClick={() => setTab('users')}>
               {directory ? 'Directory' : 'Users'}
             </TabButton>
+            <TabButton active={tab === 'projects'} onClick={() => setTab('projects')}>
+              Projects
+            </TabButton>
             <TabButton active={tab === 'tokens'} onClick={() => setTab('tokens')}>
               Tokens
             </TabButton>
@@ -131,6 +141,7 @@ export default function AdminPlacementPage() {
           {tab === 'users' && !directory && (
             <UsersTab
               authzByName={authzByName}
+              onOpenAccount={(name) => setRecord({ kind: 'accounts', name })}
               onIssueFor={(u) => {
                 setIssueFor(u.username);
                 if (typeof window !== 'undefined') {
@@ -139,6 +150,7 @@ export default function AdminPlacementPage() {
               }}
             />
           )}
+          {tab === 'projects' && <PlacementProjectsTab onOpen={setRecord} />}
           {tab === 'tokens' && <TokensTab authzByName={authzByName} />}
           {tab === 'authorizations' && (
             <AuthorizationsTab
@@ -149,6 +161,7 @@ export default function AdminPlacementPage() {
           )}
         </>
       )}
+      {record && <PlacementRecordDrawer target={record} onClose={() => setRecord(null)} />}
     </div>
   );
 }
@@ -228,7 +241,7 @@ function IssueTokenPanel({
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h2 className="text-sm font-semibold text-gray-900">Issue a token</h2>
         <p className="mt-1 text-xs text-gray-500">
-          Mints an IDToken for a foreign identity and, if they have none yet,
+          Mints an IDToken for a sign-in identity and, if they have none yet,
           creates their user record on the schedd. A disabled user or project is
           refused rather than re-enabled.
         </p>
@@ -400,9 +413,11 @@ function IssuedToken({
 function UsersTab({
   authzByName,
   onIssueFor,
+  onOpenAccount,
 }: {
   authzByName: Map<string, PlacementAuthorization>;
   onIssueFor: (u: PlacementUser) => void;
+  onOpenAccount: (apUserID: string) => void;
 }) {
   const [filter, setFilter] = useState('');
   const users = useQuery({
@@ -471,7 +486,17 @@ function UsersTab({
                     )}
                   </td>
                   <td className="px-3 py-2 font-mono text-xs text-gray-700">
-                    {u.ap_user_id || '—'}
+                    {u.ap_user_id ? (
+                      <button
+                        type="button"
+                        onClick={() => onOpenAccount(u.ap_user_id as string)}
+                        className="text-brand-700 hover:underline"
+                      >
+                        {u.ap_user_id}
+                      </button>
+                    ) : (
+                      '—'
+                    )}
                   </td>
                   <td className="px-3 py-2">
                     <ChipList names={u.authorizations} authzByName={authzByName} />

@@ -107,6 +107,9 @@ type Handler struct {
 	placementdAvailable atomic.Bool
 	// placementCaps caches the placementd's advertised API version.
 	placementCaps placementAPIVersionCache
+	// placementOnboard is the user-facing placement state: identity
+	// claims, the device-flow shim's store. See placement_onboarding.go.
+	placementOnboard placementOnboarding
 	// clientUsage records "this OAuth2 client obtained a token" without
 	// a database write per token request. Nil when OAuth2 is disabled.
 	clientUsage *clientUsageRecorder
@@ -1083,6 +1086,22 @@ type HandlerConfig struct {
 	// "discover one", and a failed discovery simply leaves the
 	// placement endpoints disabled. Tests inject a fake here.
 	Placementd htcondor.PlacementdClient
+	// PlacementIdentityClaims are the userinfo claims, in order, that a
+	// session's placement identity is taken from
+	// (HTTP_API_PLACEMENT_IDENTITY_CLAIMS). Empty means "sub".
+	PlacementIdentityClaims []string
+	// PlacementDisplayNameClaims are the claims, in order, a placement
+	// user is greeted by (HTTP_API_PLACEMENT_DISPLAY_NAME_CLAIMS). Empty
+	// means "name".
+	PlacementDisplayNameClaims []string
+	// PlacementDeviceClients is HTTP_API_PLACEMENT_DEVICE_CLIENTS as
+	// written: the client_ids the placement device flow accepts. Nil means
+	// the default, "placement_client,curl,".
+	PlacementDeviceClients *string
+	// PlacementScheddHost and PlacementCollectorHost override the
+	// SCHEDD_HOST and COLLECTOR_HOST lines shown with a placement token.
+	PlacementScheddHost    string
+	PlacementCollectorHost string
 
 	// LLMAPIKeyFile is the path to a file holding the Anthropic API
 	// key used by the chat endpoint at /api/v1/chat. Empty disables
@@ -1537,14 +1556,20 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// logged at info: most pools run no placementd at all, and a warning
 	// would be noise in every one of them.
 	if h.placementd == nil {
-		placementAddr, err := discoverPlacementd(context.Background(), cfg.HTCondorConfig, cfg.Collector, logger)
+		// The resolver also runs later: when a connection to the
+		// discovered address fails (a restarted placementd has a new
+		// one), and when one is wanted but none was found here.
+		resolve := func(ctx context.Context) (string, error) {
+			return discoverPlacementd(ctx, cfg.HTCondorConfig, cfg.Collector, logger)
+		}
+		placementAddr, err := resolve(context.Background())
 		if err != nil {
 			logger.Info(logging.DestinationHTTP, "No placementd found; placement endpoints disabled", "reason", err)
 		} else {
 			logger.Info(logging.DestinationHTTP, "Discovered placementd", "address", placementAddr)
-			h.placementd = htcondor.NewPlacementd(placementAddr).WithConfig(h.clientConfig)
 			h.placementdAvailable.Store(true)
 		}
+		h.placementd = htcondor.NewPlacementd(placementAddr).WithConfig(h.clientConfig).WithResolver(resolve)
 	} else {
 		h.placementdAvailable.Store(true)
 	}
@@ -1672,7 +1697,12 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		DiskMB:   cfg.SSHGatewaySessionDiskMB,
 	}
 
-	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupSources,
+	// "placementd" in the list is served here, not by the local
+	// resolver; see placement_identity_map.go.
+	localStrategies, placementdFirst, placementdMapped := splitPlacementdStrategy(cfg.IdentityMapStrategies)
+	h.placementOnboard.mapIdentity = placementdMapped
+	h.placementOnboard.mapIdentityFirst = placementdFirst
+	if li := newLocalIdentity(localStrategies, cfg.IdentityGroupSources,
 		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, cfg.IdentityMapStripDomain, logger); li != nil {
 		h.localIdentity = li
 		// Lets the index survive a restart; see
@@ -1813,6 +1843,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"refresh_token_lifespan", oauth2RefreshLifespan)
 		h.oauth2Provider = oauth2Provider
 		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled for MCP endpoints", "issuer", oauth2Issuer)
+		// placement-client's client (placement_scope.go).
+		if err := h.seedPlacementClient(context.Background()); err != nil {
+			logger.Warn(logging.DestinationHTTP, "Could not create the placement client", "error", err)
+		}
 
 		// Trusted external issuers for RFC 8693 token exchange (optional).
 		// Fail closed on a bad config: log it and leave external exchange off
@@ -1911,6 +1945,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		return nil, fmt.Errorf("failed to create session store: %w", err)
 	}
 	h.sessionStore = sessionStore
+	h.configurePlacementOnboarding(cfg)
 	logger.Info(logging.DestinationHTTP, "Session store enabled", "ttl", sessionTTL)
 
 	// API-key store. Shares the unified app DB; the schema is in
@@ -2293,6 +2328,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"That request did not come from this site.")
 			return
 		}
+	}
+	// A placement-only session reaches the placement pages and nothing
+	// else; see placement_session_gate.go.
+	if h.placementSessionGate(w, r) {
+		return
+	}
+	// And a bearer token holding the placement scope reaches only the
+	// two endpoints it is for (placement_scope.go).
+	if h.placementBearerGate(w, r) {
+		return
 	}
 	var next http.Handler = h.mux
 	if h.multi != nil {

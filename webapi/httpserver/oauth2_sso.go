@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -135,6 +136,11 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 		switch scope {
 		case "openid":
 			// Already added
+			continue
+		case placementScope:
+			// Granted only by approving a placement device request,
+			// which records whose identity the grant acts for. A grant
+			// made through any other path would act for nobody.
 			continue
 		case "mcp:read":
 			switch {
@@ -404,39 +410,17 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// the browser session, the OAuth2 session, and through the state
 	// store, the consent and device-approval flows.
 	subject := userInfo.Subject
-	if s.localIdentity != nil {
-		// A previously confirmed mapping, if this browser has one. It is
-		// re-confirmed against the live account database below, never
-		// trusted; what it avoids is the enumeration needed to discover
-		// the account from scratch, which a just-restarted daemon cannot
-		// do until its directory is answering.
-		hint := s.readIdentityCookie(r, subject)
-		account, groups, hinted, err := s.localIdentity.resolveWithHint(ctx, subject, userGroups, hint)
-		if err != nil {
-			// Refused, not degraded. See localIdentity's comment on why
-			// there is no fallback to the token's own claims.
-			s.logger.Warn(logging.DestinationHTTP,
-				"Refusing a login that maps to no single local account",
-				"oidc_subject", subject, "error", err)
-			// A browser is on the other end of the SSO callback, so this
-			// renders like the group-policy refusal next to it rather
-			// than handing the person a JSON object to read.
-			s.renderIdentityDeniedPage(w, err)
-			return
-		}
-		s.logger.Info(logging.DestinationHTTP, "Resolved the asserted identity locally",
-			"oidc_subject", subject, "account", account, "from_hint", hinted,
-			"groups_from_system", s.localIdentity.sourcesGroups())
-
-		// Remember the mapping only when it was made with full knowledge
-		// of the account database. A hinted mapping is not re-issued: it
-		// was confirmed by name, which cannot rule out a second account
-		// claiming the same GECOS, so extending its life would launder a
-		// weaker check into a longer-lived claim.
-		if !hinted && s.localIdentity.indexIsComplete() {
-			s.setIdentityCookie(w, subject, account)
-		}
-		subject, userGroups = account, groups
+	// The identity this person presents to condor_placementd, taken from
+	// the provider's own claims before any local mapping: it is the
+	// left-hand column of the placementd's map file, not a local name.
+	placementID := placementIdentityFromClaims(userInfo.Claims, s.placementOnboard.identityClaims)
+	placementName := placementDisplayName(userInfo.Claims, s.placementOnboard.displayNameClaims)
+	subject, userGroups, placementInfo, handled := s.resolveLoginIdentity(w, r, loginIdentity{
+		subject: subject, groups: userGroups, placementID: placementID, placementName: placementName,
+		browser: isBrowserFlow, originalURL: originalURL,
+	})
+	if handled {
+		return
 	}
 
 	s.logger.Info(logging.DestinationHTTP, "User authenticated via SSO", "subject", subject)
@@ -466,6 +450,12 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 			"surface", map[bool]string{true: "web-ui", false: "mcp"}[isBrowserFlow],
 			"error", accessErr)
 
+		// An account from the placementd is not entitled to the web
+		// interface by the placementd alone; it may still get its token.
+		if isBrowserFlow && placementInfo != nil && placementID != "" {
+			s.startPlacementOnlySession(w, placementID, placementName, userGroups, originalURL, subject)
+			return
+		}
 		// A browser gets a page. This used to return the API's JSON error
 		// body, which is unreadable in a tab and gives somebody who has
 		// just logged in successfully nothing to act on.
@@ -482,9 +472,18 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// For browser flow, create session and redirect back to original URL
+	if isBrowserFlow && placementInfo != nil {
+		s.startPlacementdSession(w, placementID, placementName, userGroups, placementInfo, originalURL, userInfo.Subject)
+		return
+	}
 	if isBrowserFlow {
 		// Create HTTP session cookie for browser-based authentication
-		sessionID, sessionData, err := s.sessionStore.Create(subject, userGroups)
+		sessionID, sessionData, err := s.sessionStore.CreateSession(SessionData{
+			Username:          subject,
+			Groups:            userGroups,
+			PlacementIdentity: placementID,
+			DisplayName:       placementName,
+		})
 		if err != nil {
 			s.logger.Error(logging.DestinationHTTP, "Failed to create HTTP session",
 				"error", err, "subject", subject)
@@ -674,4 +673,143 @@ func (s *Handler) renderAccessDeniedPage(w http.ResponseWriter, required *groupS
 	}
 	s.renderResultPage(w, http.StatusForbidden, "Access denied", "#f44336",
 		"Access denied", message, sub)
+}
+
+// startPlacementOnlySession finishes a browser login for somebody who maps
+// to no local account: a placement-only session, then the placement page.
+//
+// The web UI's access group is not applied: it decides who may use this
+// access point's web interface, and this session reaches none of it. Whether
+// the person may have a placement token is the placementd's map file's
+// decision, made when they ask for one.
+func (s *Handler) startPlacementOnlySession(w http.ResponseWriter, identity, displayName string,
+	groups []string, originalURL, oidcSubject string) {
+	sessionID, sessionData, err := s.sessionStore.CreateSession(SessionData{
+		Groups:            groups,
+		PlacementIdentity: identity,
+		DisplayName:       displayName,
+		Scope:             sessionScopePlacement,
+	})
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create a placement-only session",
+			"error", err, "oidc_subject", oidcSubject)
+		s.writeError(w, http.StatusInternalServerError, "Failed to create session")
+		return
+	}
+	s.setSessionCookie(w, sessionID, sessionData.ExpiresAt)
+	s.logger.Info(logging.DestinationHTTP, "Created a placement-only session for an identity with no local account",
+		"oidc_subject", oidcSubject, "identity", identity, "session_key", sessionLogID(sessionID))
+
+	redirectURL := "/placement"
+	if isSafeLocalRedirect(originalURL) && (originalURL == "/placement" ||
+		strings.HasPrefix(originalURL, "/placement/") || strings.HasPrefix(originalURL, "/placement?")) {
+		redirectURL = originalURL
+	}
+	s.finishBrowserLogin(w, redirectURL)
+}
+
+// errNoPlacementAccount is a login the placementd maps to no account, where
+// the placementd is the only identity mapping.
+var errNoPlacementAccount = errors.New("the placement service maps this sign-in to no account on this access point")
+
+// loginIdentity is what the SSO callback knows when it maps a login.
+type loginIdentity struct {
+	subject, placementID, placementName, originalURL string
+	groups                                           []string
+	browser                                          bool
+}
+
+// resolveLoginIdentity applies HTTP_API_IDENTITY_MAP to a login: the local
+// strategies and condor_placementd, in the configured order. It returns the
+// subject and groups the login proceeds as and, when the placementd mapped
+// it, the account. handled reports that it already answered the request (a
+// placement-only session, or a refusal).
+func (s *Handler) resolveLoginIdentity(w http.ResponseWriter, r *http.Request, li loginIdentity) (
+	subject string, userGroups []string, placementInfo *PlacementAccountInfo, handled bool) {
+	ctx := r.Context()
+	subject, userGroups = li.subject, li.groups
+	placementID, placementName, isBrowserFlow, originalURL := li.placementID, li.placementName, li.browser, li.originalURL
+	// condor_placementd as a mapping (HTTP_API_IDENTITY_MAP = placementd):
+	// tried first when it is listed first, or when it is the only
+	// mapping; otherwise after the local strategies have failed.
+	po := &s.placementOnboard
+	if po.mapIdentity && (po.mapIdentityFirst || !s.localIdentity.mapsAccount()) {
+		placementInfo = s.placementdMapLogin(ctx, placementID)
+	}
+	if placementInfo == nil && po.mapIdentity && !s.localIdentity.mapsAccount() {
+		// placementd is the only mapping, and it maps nobody here.
+		if isBrowserFlow && placementID != "" && s.placementOnboardingEnabled(ctx) {
+			s.startPlacementOnlySession(w, placementID, placementName, userGroups, originalURL, subject)
+			return subject, userGroups, nil, true
+		}
+		s.logger.Warn(logging.DestinationHTTP,
+			"Refusing a login the placementd maps to no account", "oidc_subject", subject, "identity", placementID)
+		s.renderIdentityDeniedPage(w, errNoPlacementAccount)
+		return subject, userGroups, nil, true
+	}
+	if placementInfo == nil && s.localIdentity != nil {
+		// A previously confirmed mapping, if this browser has one. It is
+		// re-confirmed against the live account database below, never
+		// trusted; what it avoids is the enumeration needed to discover
+		// the account from scratch, which a just-restarted daemon cannot
+		// do until its directory is answering.
+		hint := s.readIdentityCookie(r, subject)
+		account, groups, hinted, err := s.localIdentity.resolveWithHint(ctx, subject, userGroups, hint)
+		if err != nil && po.mapIdentity && !po.mapIdentityFirst {
+			placementInfo = s.placementdMapLogin(ctx, placementID)
+		}
+		switch {
+		case placementInfo != nil:
+			// Mapped by the placementd after the local strategies.
+		case err != nil:
+			// Somebody with no local account may still be here for a
+			// placement token. They get a session that reaches only
+			// that (placement_session_gate.go), with no username, so
+			// nothing can treat them as a local user.
+			if isBrowserFlow && placementID != "" && s.placementOnboardingEnabled(ctx) {
+				s.startPlacementOnlySession(w, placementID, placementName, userGroups, originalURL, subject)
+				return subject, userGroups, nil, true
+			}
+			// Refused, not degraded. See localIdentity's comment on why
+			// there is no fallback to the token's own claims.
+			s.logger.Warn(logging.DestinationHTTP,
+				"Refusing a login that maps to no single local account",
+				"oidc_subject", subject, "error", err)
+			// A browser is on the other end of the SSO callback, so this
+			// renders like the group-policy refusal next to it rather
+			// than handing the person a JSON object to read.
+			s.renderIdentityDeniedPage(w, err)
+			return subject, userGroups, nil, true
+		default:
+			s.logger.Info(logging.DestinationHTTP, "Resolved the asserted identity locally",
+				"oidc_subject", subject, "account", account, "from_hint", hinted,
+				"groups_from_system", s.localIdentity.sourcesGroups())
+
+			// Remember the mapping only when it was made with full knowledge
+			// of the account database. A hinted mapping is not re-issued: it
+			// was confirmed by name, which cannot rule out a second account
+			// claiming the same GECOS, so extending its life would launder a
+			// weaker check into a longer-lived claim.
+			if !hinted && s.localIdentity.indexIsComplete() {
+				s.setIdentityCookie(w, subject, account)
+			}
+			subject, userGroups = account, groups
+		}
+	}
+	if placementInfo != nil {
+		// The account is the placementd's answer for this identity and
+		// nothing else. Recorded before anything is issued for it, so
+		// every token a grant of this subject ever gets is bounded.
+		subject = placementInfo.Account
+		if err := s.recordPlacementSubject(ctx, &SessionData{
+			Username: subject, PlacementIdentity: placementID,
+			IdentitySource: identitySourcePlacementd, Placement: placementInfo,
+		}); err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to record a placementd account", "error", err, "account", subject)
+			s.writeError(w, http.StatusInternalServerError, "Failed to complete sign-in")
+			return subject, userGroups, nil, true
+		}
+	}
+
+	return subject, userGroups, placementInfo, false
 }

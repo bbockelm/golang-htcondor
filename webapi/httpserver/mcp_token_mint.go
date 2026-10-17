@@ -76,6 +76,18 @@ func generateMCPAccessJWT(
 	issuedAt, expiration int64,
 	authzLimits []string,
 ) (string, error) {
+	return generateMCPAccessJWTWithClaims(keyDir, keyID, subject, issuer, issuedAt, expiration, authzLimits, nil)
+}
+
+// generateMCPAccessJWTWithClaims is generateMCPAccessJWT with extra payload
+// claims -- the "project" claim placementd tokens carry. An extra claim
+// never replaces a standard one.
+func generateMCPAccessJWTWithClaims(
+	keyDir, keyID, subject, issuer string,
+	issuedAt, expiration int64,
+	authzLimits []string,
+	extraClaims map[string]any,
+) (string, error) {
 	if len(authzLimits) == 0 {
 		return "", fmt.Errorf("refusing to mint an IDTOKEN for %s: %w; "+
 			"it would carry every authorization %s holds", subject, errNoAuthorizationLimits, subject)
@@ -142,6 +154,12 @@ func generateMCPAccessJWT(
 	}
 	if issuer != "" {
 		payload["iss"] = issuer
+	}
+	for k, v := range extraClaims {
+		if _, standard := payload[k]; standard || k == "scope" || k == "iss" {
+			continue
+		}
+		payload[k] = v
 	}
 	if len(authzLimits) > 0 {
 		scopes := make([]string, len(authzLimits))

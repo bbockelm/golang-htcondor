@@ -96,6 +96,9 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	if s.refusePlacementdShare(w, r) {
+		return
+	}
 
 	// Public shares need to act on behalf of the job owner at redeem time;
 	// that requires a signing key for JWT minting. Bail early with a
@@ -368,6 +371,9 @@ type ShareInputResponse struct {
 func (s *Handler) handleJobInputShare(w http.ResponseWriter, r *http.Request, jobID string) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if s.refusePlacementdShare(w, r) {
 		return
 	}
 	if s.signingKeyPath == "" {
@@ -723,4 +729,20 @@ func callerToken(ctx context.Context) string {
 		return ""
 	}
 	return sec.Token
+}
+
+// refusePlacementdShare refuses a share link for an account the placementd
+// assigned outside UID_DOMAIN: a link is redeemed as the job's Owner in
+// UID_DOMAIN, which would not be that account.
+func (s *Handler) refusePlacementdShare(w http.ResponseWriter, r *http.Request) bool {
+	sd, ok := s.placementdSession(r)
+	if !ok {
+		return false
+	}
+	if i := strings.LastIndex(sd.Placement.Account, "@"); i >= 0 && sd.Placement.Account[i+1:] == s.uidDomain {
+		return false
+	}
+	s.writeError(w, http.StatusForbidden,
+		"Share links are not available to accounts outside this access point's domain.")
+	return true
 }

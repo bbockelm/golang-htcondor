@@ -64,3 +64,37 @@ func discoverPlacementd(ctx context.Context, htcConfig *config.Config, collector
 	}
 	return address, nil
 }
+
+// placementdReady reports whether a placementd can be used, noticing one
+// that appeared since startup. A discovered client re-resolves its address
+// on its own when a connection fails (Placementd.WithResolver); this covers
+// the other case, a placementd that was not running when this server
+// started.
+//
+// It never blocks the request on discovery, which can wait on the
+// collector: an unavailable placementd starts a background look (throttled
+// inside the client) and the answer is "not yet". A later request sees it.
+func (h *Handler) placementdReady(ctx context.Context) bool {
+	if h.placementd == nil {
+		return false
+	}
+	if h.placementdAvailable.Load() {
+		return true
+	}
+	p, ok := h.placementd.(*htcondor.Placementd)
+	if !ok || !h.placementOnboard.resolving.CompareAndSwap(false, true) {
+		return false
+	}
+	// Detached from the request, which may end first; bounded on its own.
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		defer h.placementOnboard.resolving.Store(false)
+		ctx, cancel := context.WithTimeout(bg, 15*time.Second)
+		defer cancel()
+		if p.Resolve(htcondor.WithDaemonCredential(ctx, "placementd discovery")) != "" {
+			h.placementdAvailable.Store(true)
+			h.logger.Info(logging.DestinationHTTP, "Discovered placementd", "address", p.Address())
+		}
+	}()
+	return false
+}

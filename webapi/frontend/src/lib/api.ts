@@ -169,6 +169,24 @@ export interface Session {
   multi_ap?: boolean;
   // Multi-AP mode: where this session's new work goes.
   assignment?: APAssignment;
+  // A session with no local account, which reaches only the placement
+  // pages.
+  placement_only?: boolean;
+  // The session's placement identity, when this server issues placement
+  // tokens.
+  placement?: PlacementSessionIdentity;
+}
+
+export interface PlacementSessionIdentity {
+  identity: string;
+  display_name?: string;
+  // Set when the session signed in as the account the placementd assigned
+  // to this identity: the account, the permissions on jobs it holds, its
+  // projects, and the one its work is charged to.
+  account?: string;
+  levels?: string[];
+  projects?: string[];
+  project?: string;
 }
 
 // APAssignment is where a caller's new work goes in multi-AP mode: the
@@ -404,9 +422,9 @@ export interface DBMirrorStatus {
 
 // --- Placement (condor_placementd) ---
 //
-// The placementd issues IDTokens to "foreign" identities -- users who
+// The placementd issues IDTokens to sign-in identities -- users who
 // authenticate somewhere else (a campus IdP, a course roster) and need a
-// credential for THIS access point. Its map file decides which foreign
+// credential for THIS access point. Its map file decides which sign-in
 // identity becomes which local AP account, which authorizations that
 // account may hold, and which projects it may charge to.
 //
@@ -425,7 +443,7 @@ export interface PlacementStatus {
   api_version?: number;
 }
 
-// PlacementUser is a foreign identity, merged with its newest live token.
+// PlacementUser is a sign-in identity, merged with its newest live token.
 // `authorized: false` means the identity dropped out of the map file but
 // still holds an unexpired token: it keeps working until it expires, and
 // cannot be renewed.
@@ -462,6 +480,62 @@ export interface PlacementAuthorization {
   label?: string;
   color?: string;
   description?: string;
+}
+
+// PlacementMe is what the placementd says about the signed-in person.
+export interface PlacementMe {
+  identity: string;
+  display_name?: string;
+  authorized: boolean;
+  expired: boolean;
+  mapping_expiration?: string;
+  account?: string;
+  authorizations: PlacementAuthorization[];
+  projects: { name: string; default: boolean; enabled: boolean }[];
+  account_enabled: boolean;
+  records_available: boolean;
+}
+
+// PlacementIssued is a token issued to the signed-in person. `token` is
+// absent when it went to a device request instead.
+export interface PlacementIssued {
+  token?: string;
+  ap_user_id?: string;
+  issued_at?: string;
+  expires_at?: string;
+  project: string;
+  authorizations: string[];
+  user_config?: string;
+  device?: PlacementDeviceRequest;
+}
+
+// PlacementDeviceRequest is a pending device-flow request, as the
+// confirmation page shows it.
+export interface PlacementDeviceRequest {
+  user_code: string;
+  client_id: string;
+  client_name: string;
+  state: 'pending' | 'approved' | 'denied' | 'expired';
+  expires_at: string;
+}
+
+// PlacementRecord is the schedd's user or project record for a name the
+// placementd hands out.
+export interface PlacementRecord {
+  kind: 'account' | 'project';
+  name: string;
+  found: boolean;
+  enabled: boolean;
+  disable_reason?: string;
+  stats?: Record<string, number>;
+  members?: string[];
+}
+
+export interface PlacementProjectSummary {
+  name: string;
+  found: boolean;
+  enabled: boolean;
+  members: number;
 }
 
 // HTCondor returns ClassAds as JSON objects with arbitrary attributes.
@@ -2281,6 +2355,51 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(req),
       }),
+
+    // The signed-in person's own placement identity and what they may
+    // request. Any session, including one with no local account.
+    me: (): Promise<PlacementMe> => fetchJSON(`${BASE}/placement/me`),
+    // A token for the signed-in person. With userCode, the token goes to
+    // that pending device request instead of coming back here.
+    requestToken: (req: {
+      project: string;
+      authorizations: string[];
+      user_code?: string;
+    }): Promise<PlacementIssued> =>
+      fetchJSON(`${BASE}/placement/me/token`, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        body: JSON.stringify(req),
+      }),
+    // Choose the project a placement-assigned account's work is charged to.
+    setProject: (project: string): Promise<{ project: string }> =>
+      fetchJSON(`${BASE}/placement/me/project`, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        body: JSON.stringify({ project }),
+      }),
+    deviceRequest: (userCode: string): Promise<PlacementDeviceRequest> =>
+      fetchJSON(`${BASE}/placement/me/device/${encodeURIComponent(userCode)}`),
+    denyDevice: (userCode: string): Promise<{ status: string }> =>
+      fetchJSON(`${BASE}/placement/me/device/${encodeURIComponent(userCode)}/deny`, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      }),
+
+    // Admin: the schedd records behind placement accounts and projects.
+    record: (kind: 'accounts' | 'projects', name: string): Promise<PlacementRecord> =>
+      fetchJSON(`${BASE}/placement/records/${kind}/${encodeURIComponent(name)}`),
+    setSuspended: (
+      kind: 'accounts' | 'projects',
+      name: string,
+      suspended: boolean,
+    ): Promise<PlacementRecord> =>
+      fetchJSON(
+        `${BASE}/placement/records/${kind}/${encodeURIComponent(name)}/${suspended ? 'suspend' : 'unsuspend'}`,
+        { method: "POST" },
+      ),
+    projects: (): Promise<{ projects: PlacementProjectSummary[] }> =>
+      fetchJSON(`${BASE}/placement/records/projects`),
   },
 
   chat: {

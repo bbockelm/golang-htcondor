@@ -220,6 +220,13 @@ var reconfigParams = []reconfigParam{
 	// handler is built.
 	{name: "HTTP_API_UTILIZATION_MAX_JOBS"},
 
+	// Placement onboarding, read when the handler is built.
+	{name: "HTTP_API_PLACEMENT_IDENTITY_CLAIMS"},
+	{name: "HTTP_API_PLACEMENT_DISPLAY_NAME_CLAIMS"},
+	{name: "HTTP_API_PLACEMENT_DEVICE_CLIENTS"},
+	{name: "HTTP_API_PLACEMENT_SCHEDD_HOST"},
+	{name: "HTTP_API_PLACEMENT_COLLECTOR_HOST"},
+
 	// Mirror routing, resolved into a discovery locator at startup.
 	{name: "HTTP_API_DBMIRROR_NAME"},
 	{name: "HTTP_API_DBMIRROR_ADDRESS"},
