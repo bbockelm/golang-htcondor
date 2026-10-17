@@ -1607,6 +1607,33 @@ about three quarters for the others; the web UI labels those "rough
 guess". `basis.new_command` is true when none of the owner's recently
 completed jobs ran the same program.
 
+`memory` says what the runs of the group that answered peaked at, in MiB,
+so a page that shows both describes one group:
+
+```json
+"memory": {
+  "sample_count": 64, "p10_mib": 910, "p25_mib": 1040, "p50_mib": 1210,
+  "p75_mib": 1500, "p90_mib": 1980,
+  "peak_mib": 6200, "requested_mib": 2048, "above_requested": 9,
+  "rough": false, "above_usual": true
+}
+```
+
+A run's peak is `ResidentSetSize_RAW` (KiB) when the record has it, else
+`MemoryUsage` evaluated, as the Utilization page reads it; a run with
+neither counts for its runtime and is left out of `memory`, which is
+absent when no run in the group has a peak. `peak_mib` is the job's own
+peak so far (for a finished job, its peak), `requested_mib` its
+`RequestMemory` and `above_requested` how many of the group's runs peaked
+above that. `above_usual` is true when a running job, answered from a
+specific group (not `rough`) with at least 5 known peaks, has already
+peaked at both 1.25 times the group's `p90_mib` and 256 MiB above it;
+HTCondor only ever raises a running job's figure, so that excess has
+already happened. The jobs listing marks such a job "More memory than
+usual". A job that has left the queue is answered from its history
+record (with `above_usual` false), which is what the archived job's page
+shows.
+
 `POST /api/v1/jobs/runtime-estimates` with `{"jobs": ["1234.0", "1234.1",
 ...]}` answers for up to 5000 jobs at once (more is a 413), which is how
 the web UI's jobs listing asks: once per refresh for the waiting and

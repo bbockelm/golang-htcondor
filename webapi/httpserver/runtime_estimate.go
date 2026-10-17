@@ -344,7 +344,8 @@ func (h *Handler) startRuntimeEstimates(ctx context.Context) {
 // point runs; it still authenticates first, and does not look the job up.
 //
 // The job is read with the same scope as every other job read, so a job
-// that is not the caller's is "not found". The estimate is then built
+// that is not the caller's is "not found"; one that has left the queue
+// is read from history. The estimate is then built
 // from that job's owner's history -- aggregates only, never another
 // job's command line or id.
 func (h *Handler) handleJobRuntimeEstimate(w http.ResponseWriter, r *http.Request, cluster, proc int) {
@@ -386,8 +387,21 @@ func (h *Handler) handleJobRuntimeEstimate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if len(ads) == 0 {
-		h.writeError(w, http.StatusNotFound, fmt.Sprintf("Job not found: %s", jobID))
-		return
+		// A finished job is answered too, from its history record: the
+		// estimate is what it would have had when submitted, and its
+		// memory block compares its peak with its group's -- which is
+		// what the archived job's page shows.
+		ad, found, herr := h.lookupFinishedJob(ctx, r, constraint, runtimeest.QueryAttrs)
+		if herr != nil {
+			h.logger.Error(logging.DestinationHTTP, "runtime-estimate: query job history", "error", herr, "job", jobID)
+			h.writeError(w, http.StatusInternalServerError, "Failed to query job")
+			return
+		}
+		if !found {
+			h.writeError(w, http.StatusNotFound, fmt.Sprintf("Job not found: %s", jobID))
+			return
+		}
+		ads = append(ads, ad)
 	}
 	res := h.runtimeEst.Estimate(runtimeest.QueryFromAd(ads[0], time.Now()))
 	h.writeJSON(w, http.StatusOK, response{JobID: jobID, Result: res})

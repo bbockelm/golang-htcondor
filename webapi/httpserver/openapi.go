@@ -2420,7 +2420,7 @@ const openAPISchema = `{
     "/jobs/{jobId}/runtime-estimate": {
       "get": {
         "summary": "Estimate how long a job will run",
-        "description": "How long the job is likely to run in total, with a likely range, estimated from the runtimes of the same owner's similar jobs that have already completed (the same cluster, command line, batch name, submit directory or program, or the owner's jobs as a whole, chosen by which has predicted that owner's jobs best), always of the same universe and, for a DAG node, from DAG nodes only. Other users' jobs never answer: an owner with no comparable finished job gets no estimate. For a running job, also how long it has run and how long it likely has left. Built from the htcondordb mirror's job history, refreshed every few minutes; it never reveals another job's command, id or owner. Always 200 for a job the caller can see: when no estimate can be made, available is false and reason says why (disabled, model_warming_up, insufficient_history, not_estimated).",
+        "description": "How long the job is likely to run in total, with a likely range, estimated from the runtimes of the same owner's similar jobs that have already completed (the same cluster, command line, batch name, submit directory or program, or the owner's jobs as a whole, chosen by which has predicted that owner's jobs best), always of the same universe and, for a DAG node, from DAG nodes only. Other users' jobs never answer: an owner with no comparable finished job gets no estimate. For a running job, also how long it has run and how long it likely has left. memory says what the same group's runs peaked at, and how the job's own peak compares. A job that has left the queue is answered from its history record, as it would have been estimated when submitted. Built from the htcondordb mirror's job history, refreshed every few minutes; it never reveals another job's command, id or owner. Always 200 for a job the caller can see: when no estimate can be made, available is false and reason says why (disabled, model_warming_up, insufficient_history, not_estimated).",
         "operationId": "getJobRuntimeEstimate",
         "parameters": [
           {
@@ -2460,6 +2460,19 @@ const openAPISchema = `{
                     "elapsed_seconds": {"type": "number", "description": "How long the current execution has run. Present only while the job is running."},
                     "remaining_seconds": {"type": "number", "description": "estimate_seconds less elapsed_seconds. Absent when the job is not running or has exceeded its history."},
                     "exceeded_history": {"type": "boolean", "description": "The job has run longer than nearly every comparable job, so no remaining time is given; the estimate and range are what history said before it started."},
+                    "memory": {
+                      "type": "object",
+                      "description": "What the runs of the group that answered peaked at, in MiB, over those with a known peak. Absent when none has one.",
+                      "properties": {
+                        "sample_count": {"type": "integer", "description": "How many of the group's runs have a known peak."},
+                        "p10_mib": {"type": "number"}, "p25_mib": {"type": "number"}, "p50_mib": {"type": "number"}, "p75_mib": {"type": "number"}, "p90_mib": {"type": "number"},
+                        "peak_mib": {"type": "number", "description": "The job's own peak so far (MemoryUsage, unrounded when the schedd keeps ResidentSetSize_RAW); for a finished job, its peak. Absent when none is recorded."},
+                        "requested_mib": {"type": "number", "description": "The job's RequestMemory, evaluated. Absent when it does not evaluate to a positive number."},
+                        "above_requested": {"type": "integer", "description": "How many of the group's runs peaked above requested_mib."},
+                        "rough": {"type": "boolean", "description": "The same as the estimate's rough: the group is a broad one."},
+                        "above_usual": {"type": "boolean", "description": "The job is running, the group is a specific one (not rough) with at least 5 known peaks, and the job's peak so far is at least 1.25 times the group's p90 and at least 256 MiB above it."}
+                      }
+                    },
                     "model": {
                       "type": "object",
                       "properties": {
@@ -2494,7 +2507,7 @@ const openAPISchema = `{
     "/jobs/{jobId}/similar": {
       "get": {
         "summary": "The finished jobs behind a runtime estimate",
-        "description": "The job's group at one level of the runtime estimator -- by default the level that answered its estimate -- as the estimator files it: the owner's finished jobs that completed normally within the estimator's recency window, grouped by its own features and keys, newest first and at most its per-group sample bound. runtimes summarizes what the estimator holds for the group right now, which is what an estimate uses. The job is read with the same scope as GET /jobs/{jobId}: someone else's job is a 404, and the list holds only jobs the caller may read. Not available in multi-AP mode.",
+        "description": "The job's group at one level of the runtime estimator -- by default the level that answered its estimate -- as the estimator files it: the owner's finished jobs that completed normally within the estimator's recency window, grouped by its own features and keys, newest first and at most its per-group sample bound. runtimes summarizes what the estimator holds for the group right now, which is what an estimate uses, and memory the same runs' peak memory in MiB (those with a known peak; null when none has one). The job is read with the same scope as GET /jobs/{jobId}: someone else's job is a 404, and the list holds only jobs the caller may read. Not available in multi-AP mode.",
         "operationId": "getJobSimilar",
         "parameters": [
           {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}},
@@ -2509,10 +2522,12 @@ const openAPISchema = `{
             "levels": {"type": "array", "items": {"type": "object", "properties": {"level": {"type": "string"}, "description": {"type": "string"}, "applies": {"type": "boolean"}, "count": {"type": "integer", "nullable": true}}}},
             "window": {"type": "object", "properties": {"days": {"type": "number"}, "max_jobs": {"type": "integer"}}},
             "runtimes": {"type": "object", "nullable": true, "properties": {"count": {"type": "integer"}, "p10": {"type": "number"}, "p25": {"type": "number"}, "p50": {"type": "number"}, "p75": {"type": "number"}, "p90": {"type": "number"}}},
+            "memory": {"type": "object", "nullable": true, "properties": {"count": {"type": "integer"}, "p10": {"type": "number"}, "p25": {"type": "number"}, "p50": {"type": "number"}, "p75": {"type": "number"}, "p90": {"type": "number"}}},
             "total": {"type": "integer"}, "offset": {"type": "integer"}, "next_offset": {"type": "integer", "nullable": true},
             "jobs": {"type": "array", "items": {"type": "object", "properties": {
               "id": {"type": "string"}, "cluster": {"type": "integer"}, "proc": {"type": "integer"}, "submitted": {"type": "integer", "nullable": true},
-              "completed": {"type": "integer"}, "runtime": {"type": "number"}, "exit_code": {"type": "integer"}}}}}}}}},
+              "completed": {"type": "integer"}, "runtime": {"type": "number"}, "exit_code": {"type": "integer"},
+              "peak_memory_mib": {"type": "number", "nullable": true}}}}}}}}},
           "400": {"description": "Bad parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "404": {"description": "Job not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
