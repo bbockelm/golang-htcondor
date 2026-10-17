@@ -36,7 +36,7 @@ const openAPISchema = `{
     },
     {
       "name": "placement",
-      "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. The daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so the admin endpoints (/placement/status, users, tokens, authorizations, login, records and admin) require membership in the web UI admin group. The /placement/me endpoints serve any signed-in browser session, including one with no local account; they always act for the session's own placement identity and never take one from the request. GET /placement/me and POST /placement/me/token also accept a bearer access token holding the placement scope, which this server's own RFC 8628 device grant issues to the client placement_client; such a token reaches nothing else. The legacy device flow older placement-client versions use is served outside /api/v1, at /auth/device_authorization, /auth/code and /auth/cancel_device, with placement-webapp's exact responses. Absent a placementd, every endpoint but /placement/status returns 503. The /placement/admin endpoints manage the placementd's directory (identities, accounts, projects, authorizations) and need a placementd advertising PlacementdApiVersion >= 2; against an older one they return 501, and /placement/status reports api_version so a UI can hide them."
+      "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. The daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so the admin endpoints (/placement/status, users, tokens, authorizations, login, records and admin) require membership in the web UI admin group. The /placement/me endpoints serve any signed-in browser session, including one with no local account; they always act for the session's own placement identity and never take one from the request. GET /placement/me and POST /placement/me/token also accept a bearer access token holding the placement scope, which this server's own RFC 8628 device grant issues to the client placement_client; such a token reaches nothing else. The legacy device flow older placement-client versions use is served outside /api/v1, at /auth/device_authorization, /auth/code and /auth/cancel_device, with placement-webapp's exact responses. Absent a placementd, every endpoint but /placement/status returns 503. The /placement/admin endpoints manage the placementd's directory (identities, accounts, projects, authorizations) and need a placementd advertising PlacementdApiVersion >= 2; against an older one they return 501, and /placement/status reports api_version so a UI can hide them. Every directory write is recorded in the placementd's history against the signed-in admin, never against a name taken from the request, with an optional change_comment."
     }
   ],
   "components": {
@@ -696,7 +696,8 @@ const openAPISchema = `{
         "properties": {
           "id": {"type": "string", "description": "Immutable uuid."},
           "source": {"type": "string", "enum": ["mapfile", "internal"], "description": "Owner of the row. mapfile rows are read-only here until adopted."},
-          "version": {"type": "integer", "format": "int64", "description": "Increases on every change. Send it back as expected_version."},
+          "version": {"type": "integer", "format": "int64", "description": "Changes on every change to the entity. Opaque: send it back as expected_version."},
+          "modification_id": {"type": "integer", "format": "int64", "description": "The entity's latest history entry."},
           "created_at": {"type": "string", "format": "date-time"},
           "updated_at": {"type": "string", "format": "date-time"},
           "modified_by": {"type": "string"}
@@ -747,7 +748,8 @@ const openAPISchema = `{
         "description": "Writable fields. Identity: identity, account (name or id), expires_at (RFC 3339 or Unix seconds), display_name, comment. Account: name, authorizations, projects, default_project (lists replace the whole set). Project: name, description. Authorization: name, label, color, description, requestable. On PATCH only the fields present change, null clears a field, and expected_version guards against concurrent edits.",
         "additionalProperties": true,
         "properties": {
-          "expected_version": {"type": "integer", "format": "int64", "description": "PATCH only."}
+          "expected_version": {"type": "integer", "format": "int64", "description": "PATCH only."},
+          "change_comment": {"type": "string", "description": "Recorded in the history with this change."}
         }
       },
       "PlacementMapfileStatus": {
@@ -798,11 +800,30 @@ const openAPISchema = `{
           "results": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementEditResult"}}
         }
       },
+      "PlacementModification": {
+        "type": "object",
+        "description": "One history entry: one entity changed by one batch or map file reload.",
+        "properties": {
+          "id": {"type": "integer", "format": "int64"},
+          "changeset_id": {"type": "integer", "format": "int64", "description": "Groups the entries one batch or reload made."},
+          "time": {"type": "string", "format": "date-time"},
+          "channel": {"type": "string", "enum": ["cedar", "mapfile", "migration"]},
+          "actor": {"type": "string", "description": "Who authenticated to the placementd."},
+          "on_behalf_of": {"type": "string", "description": "The admin the change was made for."},
+          "peer_address": {"type": "string"},
+          "comment": {"type": "string"},
+          "operation": {"type": "string", "enum": ["create", "update", "delete", "adopt", "reclaim", "handoff"]},
+          "entity_type": {"type": "string", "enum": ["identity", "account", "project", "authorization"]},
+          "entity_id": {"type": "string"},
+          "changes": {"type": "object", "description": "Changed fields by name, each {old, new}; null is absent or cleared, and grants are lists.", "additionalProperties": {"type": "object", "properties": {"old": {}, "new": {}}}}
+        }
+      },
       "PlacementBatchRequest": {
         "type": "object",
         "required": ["operations"],
         "properties": {
           "dry_run": {"type": "boolean", "description": "Validate and report, then roll back."},
+          "change_comment": {"type": "string", "description": "Recorded in the history with this change."},
           "operations": {"type": "array", "maxItems": 1000, "items": {"type": "object", "required": ["operation", "target_type"], "properties": {
             "operation": {"type": "string", "enum": ["Create", "Update", "Delete", "Adopt"]},
             "target_type": {"type": "string", "enum": ["Identity", "Account", "Project", "Authorization", "All"]},
@@ -1281,6 +1302,7 @@ const openAPISchema = `{
           {"name": "cascade", "in": "query", "required": false, "schema": {"type": "boolean"}},
           {"name": "expected_version", "in": "query", "required": false, "schema": {"type": "integer", "format": "int64"}}
         ],
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {"type": "object", "properties": {"change_comment": {"type": "string", "description": "Recorded in the history with this change."}}}}}},
         "responses": {
           "200": {"description": "Deleted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
           "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
@@ -1301,7 +1323,7 @@ const openAPISchema = `{
         "operationId": "adoptPlacementEntity",
         "tags": ["placement"],
         "parameters": [{"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}}, {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The entity uuid."}, {"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."}],
-        "requestBody": {"required": false, "content": {"application/json": {"schema": {"type": "object", "properties": {"expected_version": {"type": "integer", "format": "int64"}}}}}},
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {"type": "object", "properties": {"expected_version": {"type": "integer", "format": "int64"}, "change_comment": {"type": "string", "description": "Recorded in the history with this change."}}}}}},
         "responses": {
           "200": {"description": "Adopted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
           "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
@@ -1320,6 +1342,7 @@ const openAPISchema = `{
         "operationId": "adoptAllPlacementEntities",
         "tags": ["placement"],
         "parameters": [{"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."}],
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {"type": "object", "properties": {"change_comment": {"type": "string", "description": "Recorded in the history with this change."}}}}}},
         "responses": {
           "200": {"description": "Adopted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
           "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
@@ -1342,6 +1365,49 @@ const openAPISchema = `{
           "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
           "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
           "409": {"description": "Version mismatch, a mapfile-owned row (owned_by), a delete that needs cascade (cascade_required), or a duplicate name", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/history": {
+      "get": {
+        "summary": "Directory history",
+        "description": "Changes to the directory, newest first: who made each, through which channel, and each field's old and new value. Entries outlive deleted entities.",
+        "operationId": "placementHistory",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "entity_id", "in": "query", "required": false, "schema": {"type": "string"}, "description": "One entity's uuid."},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}, "description": "ClassAd expression evaluated against each entry."},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}}
+        ],
+        "responses": {
+          "200": {"description": "History, newest first", "content": {"application/json": {"schema": {"type": "object", "properties": {"history": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementModification"}}}}}}},
+          "400": {"description": "Invalid limit or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/{kind}/{id}/history": {
+      "get": {
+        "summary": "One entity's history",
+        "operationId": "placementEntityHistory",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}},
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The entity uuid."},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}}
+        ],
+        "responses": {
+          "200": {"description": "History, newest first", "content": {"application/json": {"schema": {"type": "object", "properties": {"history": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementModification"}}}}}}},
+          "400": {"description": "Invalid limit or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
           "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},

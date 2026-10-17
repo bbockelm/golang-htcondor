@@ -7,6 +7,7 @@ import type {
   DirProject,
   EditResponse,
   MapfileStatus,
+  Modification,
 } from '../../src/lib/placementAdmin';
 import { SMOKE_NOW } from './clock';
 
@@ -79,6 +80,33 @@ export const mapfileStatusFixture: MapfileStatus = {
   ],
 };
 
+export const placementHistoryFixture: Modification[] = [
+  {
+    id: 120,
+    changeset_id: 44,
+    time: at(-3600),
+    channel: 'cedar',
+    actor: 'condor@ap.smoke.example',
+    on_behalf_of: 'e2e',
+    comment: 'spring term',
+    operation: 'update',
+    entity_type: 'identity',
+    entity_id: '6f1c2c1e-1111-4a3b-9c1d-000000000002',
+    changes: { ExpiresAt: { old: null, new: SMOKE_NOW + 30 * 86400 }, DisplayName: { old: null, new: 'Bob' } },
+  },
+  {
+    id: 7,
+    changeset_id: 1,
+    time: at(-90 * 86400),
+    channel: 'migration',
+    actor: 'migration',
+    operation: 'create',
+    entity_type: 'identity',
+    entity_id: '6f1c2c1e-1111-4a3b-9c1d-000000000002',
+    changes: { Identity: { old: null, new: 'bob@cilogon.org' } },
+  },
+];
+
 const legacyAuthz: PlacementAuthorization[] = placementAuthorizationsFixture.map((a) => ({
   name: a.name,
   label: a.label,
@@ -112,6 +140,9 @@ export async function installPlacementFixtures(page: Page): Promise<{ edits: { m
     if (path === '/api/v1/placement/tokens') return route.fulfill({ json: { tokens: [] } });
     if (path === '/api/v1/placement/users') return route.fulfill({ json: { users: [] } });
     if (path === '/api/v1/placement/admin/mapfile-status') return route.fulfill({ json: mapfileStatusFixture });
+    if (path === '/api/v1/placement/admin/history' || path.endsWith('/history')) {
+      return route.fulfill({ json: { history: placementHistoryFixture } });
+    }
     const kind = path.match(/^\/api\/v1\/placement\/admin\/([a-z]+)$/)?.[1];
     if (kind && kind in lists) return route.fulfill({ json: { [kind]: lists[kind] } });
     await route.fulfill({ status: 404, json: { error: 'Not Found', message: 'no fixture' } });

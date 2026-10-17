@@ -131,12 +131,13 @@ export function EntityForm<K extends PlacementKind>({
   const [values, setValues] = useState<FormValues>(start);
   const set = (k: string, v: FormValues[string]) => setValues((prev) => ({ ...prev, [k]: v }));
 
+  const [changeComment, setChangeComment] = useState('');
   const save = useMutation({
     mutationFn: () => {
       const fields = changedFields(start, values, create);
       return entity === null
-        ? placementAdmin.create(kind, fields)
-        : placementAdmin.update(kind, entity.id, entity.version, fields);
+        ? placementAdmin.create(kind, fields, { changeComment })
+        : placementAdmin.update(kind, entity.id, entity.version, fields, changeComment);
     },
     onSuccess: onSaved,
   });
@@ -267,6 +268,10 @@ export function EntityForm<K extends PlacementKind>({
             </label>
           </>
         )}
+
+        <Field label="Change comment (optional)">
+          <input className={inputClass} value={changeComment} onChange={(e) => setChangeComment(e.target.value)} />
+        </Field>
 
         {save.error && (
           <div role="alert" className="rounded-sm border border-red-200 bg-red-50 p-2 text-xs text-red-700">

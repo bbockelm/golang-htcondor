@@ -27,6 +27,7 @@ export interface PlacementEntityMeta {
   created_at?: string;
   updated_at?: string;
   modified_by?: string;
+  modification_id?: number;
 }
 
 export interface DirIdentity extends PlacementEntityMeta {
@@ -89,6 +90,26 @@ export interface MapfileStatus {
   user_mapfile?: string;
   authorizations_mapfile?: string;
   problems: MapfileProblem[];
+}
+
+// One history entry: one entity changed by one batch or map file reload.
+export type ModificationChannel = "cedar" | "mapfile" | "migration";
+export type ModificationOperation = "create" | "update" | "delete" | "adopt" | "reclaim" | "handoff";
+export type FieldValue = string | number | boolean | null | FieldValue[];
+
+export interface Modification {
+  id: number;
+  changeset_id: number;
+  time?: string;
+  channel: ModificationChannel | string;
+  actor: string;
+  on_behalf_of?: string;
+  peer_address?: string;
+  comment?: string;
+  operation: ModificationOperation | string;
+  entity_type: string;
+  entity_id: string;
+  changes: Record<string, { old: FieldValue; new: FieldValue }>;
 }
 
 export interface EditResult {
@@ -195,46 +216,82 @@ export const placementAdmin = {
   },
   get: <K extends PlacementKind>(kind: K, id: string): Promise<DirEntityByKind[K]> =>
     request(`${BASE}/${kind}/${encodeURIComponent(id)}`),
-  create: (kind: PlacementKind, fields: EntityFields, dryRun = false): Promise<EditResponse> =>
-    request(`${BASE}/${kind}${qs({ dry_run: dryRun })}`, {
+  // changeComment, on every write, is recorded in the history with the
+  // change. The server records the signed-in admin as who made it.
+  create: (
+    kind: PlacementKind,
+    fields: EntityFields,
+    opts: { dryRun?: boolean; changeComment?: string } = {},
+  ): Promise<EditResponse> =>
+    request(`${BASE}/${kind}${qs({ dry_run: opts.dryRun })}`, {
       method: "POST",
-      body: JSON.stringify(fields),
+      body: JSON.stringify(withComment(fields, opts.changeComment)),
     }),
   update: (
     kind: PlacementKind,
     id: string,
     expectedVersion: number,
     fields: EntityFields,
+    changeComment?: string,
   ): Promise<EditResponse> =>
     request(`${BASE}/${kind}/${encodeURIComponent(id)}`, {
       method: "PATCH",
-      body: JSON.stringify({ ...fields, expected_version: expectedVersion }),
+      body: JSON.stringify(withComment({ ...fields, expected_version: expectedVersion }, changeComment)),
     }),
   remove: (
     kind: PlacementKind,
     id: string,
-    opts: { cascade?: boolean; expectedVersion?: number } = {},
+    opts: { cascade?: boolean; expectedVersion?: number; changeComment?: string } = {},
   ): Promise<EditResponse> =>
     request(
       `${BASE}/${kind}/${encodeURIComponent(id)}${qs({
         cascade: opts.cascade,
         expected_version: opts.expectedVersion,
       })}`,
-      { method: "DELETE" },
+      { method: "DELETE", body: JSON.stringify(withComment({}, opts.changeComment)) },
     ),
-  adopt: (kind: PlacementKind, id: string, expectedVersion?: number): Promise<EditResponse> =>
+  adopt: (
+    kind: PlacementKind,
+    id: string,
+    expectedVersion?: number,
+    changeComment?: string,
+  ): Promise<EditResponse> =>
     request(`${BASE}/${kind}/${encodeURIComponent(id)}/adopt`, {
       method: "POST",
-      body: JSON.stringify(expectedVersion ? { expected_version: expectedVersion } : {}),
+      body: JSON.stringify(
+        withComment(expectedVersion ? { expected_version: expectedVersion } : {}, changeComment),
+      ),
     }),
-  adoptAll: (): Promise<EditResponse> => request(`${BASE}/adopt-all`, { method: "POST" }),
-  batch: (operations: BatchOperation[], dryRun = false): Promise<EditResponse> =>
+  adoptAll: (changeComment?: string): Promise<EditResponse> =>
+    request(`${BASE}/adopt-all`, {
+      method: "POST",
+      body: JSON.stringify(withComment({}, changeComment)),
+    }),
+  batch: (
+    operations: BatchOperation[],
+    dryRun = false,
+    changeComment?: string,
+  ): Promise<EditResponse> =>
     request(`${BASE}/batch`, {
       method: "POST",
-      body: JSON.stringify({ dry_run: dryRun, operations }),
+      body: JSON.stringify(withComment({ dry_run: dryRun, operations }, changeComment)),
     }),
+  // history lists changes newest first: one entity's when kind and id are
+  // given, otherwise the whole directory's.
+  history: async (target?: { kind: PlacementKind; id: string }, limit?: number): Promise<Modification[]> => {
+    const url = target
+      ? `${BASE}/${target.kind}/${encodeURIComponent(target.id)}/history${qs({ limit })}`
+      : `${BASE}/history${qs({ limit })}`;
+    const body = await request<{ history?: Modification[] }>(url);
+    return body.history ?? [];
+  },
   mapfileStatus: (): Promise<MapfileStatus> => request(`${BASE}/mapfile-status`),
 };
+
+function withComment<T extends object>(body: T, changeComment?: string): T & { change_comment?: string } {
+  const c = changeComment?.trim();
+  return c ? { ...body, change_comment: c } : body;
+}
 
 // describeEditError turns a refusal into the sentence an admin acts on.
 export function describeEditError(err: unknown): string {

@@ -95,6 +95,7 @@ export function OnboardWizard({
   const [chosenProjects, setChosenProjects] = useState<string[]>([]);
   const [defaultProject, setDefaultProject] = useState('');
   const [checked, setChecked] = useState<string | null>(null);
+  const [changeComment, setChangeComment] = useState('');
 
   const existing = useMemo(
     () => accounts.find((a) => a.name === account.trim()),
@@ -124,7 +125,7 @@ export function OnboardWizard({
   const ops = onboardOperations(input, existing);
 
   const run = useMutation({
-    mutationFn: (dryRun: boolean) => placementAdmin.batch(ops, dryRun),
+    mutationFn: (dryRun: boolean) => placementAdmin.batch(ops, dryRun, changeComment),
     onSuccess: (resp, dryRun) => {
       if (dryRun) {
         const warnings = resp.results.map((r) => r.warning).filter(Boolean);
@@ -219,6 +220,10 @@ export function OnboardWizard({
             </li>
           ))}
         </ol>
+
+        <Field label="Change comment (optional)">
+          <input className={inputClass} value={changeComment} onChange={(e) => setChangeComment(e.target.value)} />
+        </Field>
 
         {checked && (
           <p role="status" className="rounded-sm border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-800">
