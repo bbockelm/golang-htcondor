@@ -35,6 +35,9 @@ func metricsSourceAd(schedd, stream string) string {
 		ad += "\nJobMetricsConnected = true\nJobMetricsSynced = true\nJobMetricsSyncedAt = 1000"
 	case "failing":
 		ad += "\nJobMetricsConnected = false\nJobMetricsLastError = \"no such archive: job_metrics\""
+	case "missing":
+		ad += "\nJobMetricsMissing = true\nJobMetricsConnected = false\nJobMetricsSynced = false\n" +
+			"JobMetricsLastError = \"the spoke has no job_metrics table (HTCONDORDB_JOB_METRICS is not enabled on it)\""
 	}
 	return ad
 }
@@ -445,5 +448,23 @@ func TestMetricsSingleAPShapeUnchanged(t *testing.T) {
 		`{"name":"max_MemoryUsage","kind":"metric","func":"max","attr":"MemoryUsage"}],"rows":[["1","900","300"]]}`
 	if string(got) != want {
 		t.Errorf("single-AP body =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestMultiAPMetricsAPWithoutJobMetrics: an AP whose spoke keeps no
+// job_metrics is named in not_kept, with the hub's reason, and is not a
+// fault: it stays fresh and out of degraded.
+func TestMultiAPMetricsAPWithoutJobMetrics(t *testing.T) {
+	srv := metricsServer(t, metricsHub(t, "missing"))
+	b := getMetrics(t, srv, "alice", url.Values{"group_by": {"ScheddName"}, "agg": {"count:*"}})
+	if !b.Enabled || b.Sources == nil {
+		t.Fatalf("enabled=%v sources=%v", b.Enabled, b.Sources)
+	}
+	if b.Sources.Fresh != 2 || len(b.Sources.Degraded) != 0 {
+		t.Errorf("sources = %+v, want both fresh and nothing degraded", b.Sources)
+	}
+	if len(b.Sources.NotKept) != 1 || b.Sources.NotKept[0].Schedd != ap2 || b.Sources.NotKept[0].Table != multiap.TableJobMetrics ||
+		!strings.Contains(b.Sources.NotKept[0].Reason, "HTCONDORDB_JOB_METRICS") {
+		t.Errorf("not_kept = %+v, want ap2's job_metrics with the hub's reason", b.Sources.NotKept)
 	}
 }

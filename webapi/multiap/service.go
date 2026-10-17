@@ -193,6 +193,16 @@ type Sources struct {
 	APs      int        `json:"aps"`
 	Fresh    int        `json:"fresh"`
 	Degraded []Degraded `json:"degraded"`
+	// NotKept lists the APs that keep no copy of a table a read used
+	// (TableSources): they have no such rows, which is not a fault.
+	NotKept []NotKept `json:"not_kept,omitempty"`
+}
+
+// NotKept is one AP that keeps no copy of a table.
+type NotKept struct {
+	Schedd string `json:"schedd"`
+	Table  string `json:"table"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // view is one read's picture of the AP set.

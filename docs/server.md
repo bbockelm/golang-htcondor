@@ -1990,7 +1990,11 @@ name, in their `sources` block, each access point whose stream of the
 table they read (`jobs`, `history`, `epoch_history`, `job_metrics`) is
 disconnected, failing, still catching up or not federated, with a
 `reason` naming the table, so a short answer says which access points it
-is short of.
+is short of. An access point whose own htcondordb keeps no such table at
+all (the hub reports `<Table>Missing`, e.g. a spoke without
+`HTCONDORDB_JOB_METRICS` or epoch history) has no rows to be short of:
+it is listed in `not_kept` (`schedd`, `table`, `reason`) instead, and
+still counts as fresh.
 
 **Actions need a complete id.** A mutation, a sandbox read, a share URL or
 an SSH connection naming only `123.0` is a **400** with

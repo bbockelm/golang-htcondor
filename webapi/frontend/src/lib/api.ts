@@ -589,6 +589,9 @@ export interface Sources {
   aps: number;
   fresh: number;
   degraded: DegradedSource[];
+  // Access points that keep no copy of a table the read used (a spoke
+  // without job_metrics or epoch history): no rows, and not a fault.
+  not_kept?: { schedd: string; table: string; reason?: string }[];
 }
 
 export interface DegradedSource {

@@ -100,8 +100,13 @@ func (src Sources) StateOf(schedd string) string {
 // it, disconnected, failing, or still catching up -- so a read of table
 // says which APs' rows in it may be missing rather than returning them
 // silently partial. An AP already degraded is left as it is.
+//
+// An AP the hub reports keeps no such table at all (<Table>Missing: a
+// spoke without job_metrics or epoch history) has no rows to miss. It
+// goes in NotKept instead, and still counts as fresh.
 func (s *Service) TableSources(src Sources, table string) Sources {
-	out := Sources{APs: src.APs, Fresh: src.Fresh, Degraded: append([]Degraded{}, src.Degraded...)}
+	out := Sources{APs: src.APs, Fresh: src.Fresh, Degraded: append([]Degraded{}, src.Degraded...),
+		NotKept: append([]NotKept(nil), src.NotKept...)}
 	degraded := map[string]bool{}
 	for _, d := range src.Degraded {
 		degraded[strings.ToLower(d.Schedd)] = true
@@ -114,6 +119,13 @@ func (s *Service) TableSources(src Sources, table string) Sources {
 		hsrc, ok := s.Hub.Source(m.Name)
 		ts, federated := hsrc.TableStatus[table]
 		switch {
+		case ok && federated && ts.Missing:
+			why := "this access point keeps no " + table
+			if ts.LastError != "" {
+				why = ts.LastError
+			}
+			out.NotKept = append(out.NotKept, NotKept{Schedd: m.Name, Table: table, Reason: why})
+			continue
 		case !ok || !federated:
 			reason = "the federation hub does not federate " + table + " from this access point"
 		case !ts.Connected:

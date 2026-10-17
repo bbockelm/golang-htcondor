@@ -87,3 +87,30 @@ func TestMultiAPDashboardReportsAnAPsHistoryStream(t *testing.T) {
 		}
 	}
 }
+
+// TestMultiAPEpochsNameAnAPWithoutEpochHistory: a spoke that keeps no
+// epoch history is not a failing stream; the AP is listed in not_kept.
+func TestMultiAPEpochsNameAnAPWithoutEpochHistory(t *testing.T) {
+	hub := epochsHub(t)
+	hub.PutSourceAd(ap2, fmt.Sprintf("ScheddName = %q\nState = \"fresh\"\nJobsConnected = true\nStalenessSeconds = 1\n"+
+		"HistoryConnected = true\nEpochHistoryConnected = false\nEpochHistorySynced = false\nEpochHistoryMissing = true\n"+
+		"EpochHistoryLastError = \"the spoke has no epoch_history table\"", ap2))
+	srv := newMultiAPServer(t, multiAPService(t, hub, multiaptest.NewRegistry(ap1, ap2)))
+	rec := doAs(t, srv, "alice", http.MethodGet, "/api/v1/jobs/epochs")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("epochs: %d %s", rec.Code, rec.Body.String())
+	}
+	if d := degradedFor(t, rec.Body.Bytes(), ap2); d != nil {
+		t.Errorf("ap2 keeps no epoch history and is reported degraded: %+v", d)
+	}
+	var b struct {
+		Sources multiap.Sources `json:"sources"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &b)
+	if len(b.Sources.NotKept) != 1 || b.Sources.NotKept[0].Schedd != ap2 || b.Sources.NotKept[0].Table != multiap.TableEpochHistory {
+		t.Errorf("not_kept = %+v, want ap2's epoch_history", b.Sources.NotKept)
+	}
+	if b.Sources.Fresh != 2 {
+		t.Errorf("fresh = %d, want 2", b.Sources.Fresh)
+	}
+}
