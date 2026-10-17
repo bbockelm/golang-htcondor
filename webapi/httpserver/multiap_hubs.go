@@ -106,7 +106,8 @@ func newHubSet(mc MultiAPConfig, locs *hubLocators, logger *logging.Logger) (*mu
 			"name one hub with the address, or unset the address and let each named hub be found in the collector")
 	}
 	opts := multiap.HubOptions{
-		Policy: multiap.HubPolicy{SwitchAfter: mc.HubSwitchAfter, SwitchMargin: mc.HubSwitchMargin, FailAfter: mc.HubFailAfter},
+		Policy: multiap.HubPolicy{SwitchAfter: mc.HubSwitchAfter, SwitchMargin: mc.HubSwitchMargin, FailAfter: mc.HubFailAfter,
+			Settle: mc.HubSettle},
 		OnSwitch: func(sw multiap.HubSwitch) {
 			logger.Warn(logging.DestinationHTTP, "Federation hub switched; reads now come from another hub",
 				"from", sw.From, "to", sw.To, "reason", sw.Reason, "generation", sw.Generation)

@@ -358,8 +358,10 @@ func TestHubPinnedReadStaysOnItsHub(t *testing.T) {
 		t.Fatalf("pinned read: rows %v, sources %+v; want %s's 1.0 with %s's 2 fresh APs", got, res.Sources, hubA, hubA)
 	}
 	rows, res = list(context.Background())
-	if got := ids(s, rows); len(got) != 1 || rows[0].ID.Cluster != 2 || res.Sources.Hub != hubB || res.Sources.Fresh != 1 {
-		t.Fatalf("unpinned read: rows %v, sources %+v; want %s's 2.0 with %s's 1 fresh AP", got, res.Sources, hubB, hubB)
+	// Just switched: B's fresh ap1 is settling, its stale ap2 stale.
+	if got := ids(s, rows); len(got) != 1 || rows[0].ID.Cluster != 2 || res.Sources.Hub != hubB || res.Sources.Fresh != 0 ||
+		res.Sources.StateOf(ap1) != StateSettling || res.Sources.StateOf(ap2) != StateStale {
+		t.Fatalf("unpinned read: rows %v, sources %+v; want %s's 2.0 with ap1 settling", got, res.Sources, hubB)
 	}
 	if o1, o2 := s.HubOrigin(pinned), s.HubOrigin(context.Background()); o1 == o2 {
 		t.Fatalf("origins %q and %q are equal across a switch", o1, o2)

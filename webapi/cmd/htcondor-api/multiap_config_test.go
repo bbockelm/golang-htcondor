@@ -50,11 +50,12 @@ func TestLoadMultiAPConfig(t *testing.T) {
 	cfg.Set("HTTP_API_HUB_SWITCH_SECONDS", "90")
 	cfg.Set("HTTP_API_HUB_SWITCH_MARGIN", "2")
 	cfg.Set("HTTP_API_HUB_FAIL_AFTER", "3")
+	cfg.Set("HTTP_API_HUB_SETTLE_SECONDS", "45")
 	if mc, err = loadMultiAPConfig(cfg, "", ""); err != nil || mc.HubName != "hub-a@db, hub-b@db" ||
-		mc.HubSwitchAfter != 90*time.Second || mc.HubSwitchMargin != 2 || mc.HubFailAfter != 3 {
+		mc.HubSwitchAfter != 90*time.Second || mc.HubSwitchMargin != 2 || mc.HubFailAfter != 3 || mc.HubSettle != 45*time.Second {
 		t.Errorf("hub selection: %+v, %v", mc, err)
 	}
-	for _, k := range []string{"HTTP_API_HUB_SWITCH_SECONDS", "HTTP_API_HUB_SWITCH_MARGIN", "HTTP_API_HUB_FAIL_AFTER"} {
+	for _, k := range []string{"HTTP_API_HUB_SWITCH_SECONDS", "HTTP_API_HUB_SWITCH_MARGIN", "HTTP_API_HUB_FAIL_AFTER", "HTTP_API_HUB_SETTLE_SECONDS"} {
 		cfg.Set(k, "soon")
 		if _, err = loadMultiAPConfig(cfg, "", ""); err == nil || !strings.Contains(err.Error(), k) {
 			t.Errorf("%s=soon: err = %v, want it refused by name", k, err)

@@ -59,6 +59,9 @@ type MultiAPConfig struct {
 	HubSwitchAfter  time.Duration
 	HubSwitchMargin int
 	HubFailAfter    int
+	// HubSettle is HTTP_API_HUB_SETTLE_SECONDS: how long after a switch
+	// the new hub's APs are reported settling. Zero takes the default.
+	HubSettle time.Duration
 	// Stale is HTTP_API_MULTI_AP_STALE: include (default) or exclude a
 	// degraded AP's rows from unscoped reads.
 	Stale string

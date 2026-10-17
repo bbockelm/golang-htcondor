@@ -298,6 +298,11 @@ func (s *Service) provablyEmpty(ctx context.Context, req BulkRequest, balanced, 
 	if req.FreshWithin <= 0 || s.Hub == nil {
 		return "", false
 	}
+	if _, settling := s.Hub.Settling(ctx); settling {
+		// The hub became active less than the settle window ago: it may
+		// not hold what the previous hub did.
+		return "", false
+	}
 	age, ok := s.Hub.For(ctx).Freshness(ap)
 	if !ok || age > req.FreshWithin {
 		return "", false

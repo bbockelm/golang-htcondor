@@ -218,6 +218,9 @@ type view struct {
 	members map[string]apregistry.Member
 	// fresh is which of them the hub holds fresh.
 	fresh map[string]bool
+	// settling is which of them the hub holds fresh but has held for
+	// less than the settle window since a switch made it active.
+	settling map[string]bool
 }
 
 // snapshot computes the AP set and its freshness on the hub ctx is
@@ -226,7 +229,8 @@ type view struct {
 // schedd outside the set are not served.
 func (s *Service) snapshot(ctx context.Context) view {
 	ep := s.Hub.For(ctx)
-	v := view{hub: ep, members: map[string]apregistry.Member{}, fresh: map[string]bool{}}
+	v := view{hub: ep, members: map[string]apregistry.Member{}, fresh: map[string]bool{}, settling: map[string]bool{}}
+	sw, settling := s.Hub.Settling(ctx)
 	v.sources.Hub = ep.Name()
 	v.sources.Degraded = []Degraded{}
 	reachable := ep.Status().Reachable
@@ -246,6 +250,12 @@ func (s *Service) snapshot(ctx context.Context) view {
 			continue
 		}
 		switch {
+		case ok && src.State == StateFresh && settling:
+			v.settling[key] = true
+			v.sources.Degraded = append(v.sources.Degraded, Degraded{
+				Schedd: m.Name, State: StateSettling, Reason: s.settlingReason(sw),
+			})
+			continue
 		case ok && src.State == StateFresh:
 			v.fresh[key] = true
 			v.sources.Fresh++
@@ -271,6 +281,18 @@ func (s *Service) snapshot(ctx context.Context) view {
 		}
 	}
 	return v
+}
+
+// settlingReason is the sources-block reason for an AP on a hub that
+// became active less than the settle window ago.
+func (s *Service) settlingReason(sw HubSwitch) string {
+	from := sw.From
+	if from == "" {
+		from = "the previous hub"
+	}
+	return fmt.Sprintf("reads moved to federation hub %s from %s at %s (%s); until %s its copy may lack changes %s had",
+		sw.To, from, sw.At.UTC().Format(time.RFC3339), sw.Reason,
+		s.Hub.SettleUntil(sw).UTC().Format(time.RFC3339), from)
 }
 
 // untrustedReason is the sources-block reason for an AP that failed its
@@ -314,7 +336,9 @@ func (s *Service) allowed(v view, schedd string) ([]string, error) {
 	if s.Stale == StaleExclude {
 		kept := names[:0]
 		for _, n := range names {
-			if v.fresh[strings.ToLower(n)] {
+			// A settling AP's rows are the hub's current copy, not a
+			// degraded source's: they stay.
+			if k := strings.ToLower(n); v.fresh[k] || v.settling[k] {
 				kept = append(kept, n)
 			}
 		}

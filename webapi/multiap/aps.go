@@ -59,6 +59,7 @@ func rfc3339(t time.Time) string {
 func (s *Service) APs(ctx context.Context) []APInfo {
 	ep := s.Hub.For(ctx)
 	reachable := ep.Status().Reachable
+	sw, settling := s.Hub.Settling(ctx)
 	members := s.Registry.Members()
 	out := make([]APInfo, 0, len(members))
 	for _, m := range members {
@@ -76,6 +77,9 @@ func (s *Service) APs(ctx context.Context) []APInfo {
 		switch {
 		case ok:
 			info.Hub = APHubState{State: src.State, Reason: src.Reason, LastSeen: rfc3339(src.LastSeen), LastReset: rfc3339(src.LastReset)}
+			if settling && src.State == StateFresh {
+				info.Hub.State, info.Hub.Reason = StateSettling, s.settlingReason(sw)
+			}
 			if src.StalenessKnown {
 				st := src.Staleness
 				info.Hub.StalenessSeconds = &st

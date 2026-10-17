@@ -92,13 +92,18 @@ func (s *Service) getComplete(ctx context.Context, v view, m apregistry.Member, 
 	proj := projectionWith(projection, keyAttrs...)
 	notFound := errorf(http.StatusNotFound, "job %s not found", s.Codec.Format(id))
 
-	// Tier 1: the hub, when it holds this AP fresh.
-	if v.fresh[strings.ToLower(m.Name)] {
+	// Tier 1: the hub, when it holds this AP fresh. A hub that became
+	// active less than the settle window ago (settling) answers what it
+	// holds, but its miss is asked of the AP: the job may not have reached
+	// it yet.
+	if key := strings.ToLower(m.Name); v.fresh[key] || v.settling[key] {
 		if row, err := s.hubFind(ctx, m.Name, constraint, proj); err == nil {
-			if row == nil {
+			if row != nil {
+				return &JobResult{Row: *row, Source: SourceHub}, nil
+			}
+			if v.fresh[key] {
 				return nil, notFound
 			}
-			return &JobResult{Row: *row, Source: SourceHub}, nil
 		}
 	}
 

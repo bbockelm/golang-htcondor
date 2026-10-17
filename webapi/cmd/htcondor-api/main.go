@@ -1676,6 +1676,7 @@ func loadMultiAPConfig(cfg *config.Config, scheddName, scheddAddr string) (https
 		{"HTTP_API_HUB_SWITCH_SECONDS", func(n int) { mc.HubSwitchAfter = time.Duration(n) * time.Second }},
 		{"HTTP_API_HUB_SWITCH_MARGIN", func(n int) { mc.HubSwitchMargin = n }},
 		{"HTTP_API_HUB_FAIL_AFTER", func(n int) { mc.HubFailAfter = n }},
+		{"HTTP_API_HUB_SETTLE_SECONDS", func(n int) { mc.HubSettle = time.Duration(n) * time.Second }},
 	} {
 		v := strings.TrimSpace(firstConfigValue(cfg, k.name))
 		if v == "" {

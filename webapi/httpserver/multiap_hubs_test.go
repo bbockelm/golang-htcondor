@@ -69,7 +69,7 @@ func TestMultiAPTwoHubs(t *testing.T) {
 	got = aps()
 	if got.Hub.Name != "hub-b" || !got.Hub.Active || got.Hubs[0].Active || got.HubSwitch == nil ||
 		got.HubSwitch.Reason != "unreachable" || got.HubSwitch.From != "hub-a" || got.HubSwitch.To != "hub-b" ||
-		got.Sources.Hub != "hub-b" || got.Sources.Fresh != 1 {
+		got.Sources.Hub != "hub-b" || got.Sources.Fresh != 0 || got.Sources.StateOf(ap1) != multiap.StateSettling {
 		t.Fatalf("aps after hub-a stopped: hub %+v hubs %+v sources %+v switch %+v", got.Hub, got.Hubs, got.Sources, got.HubSwitch)
 	}
 	l := decodeList(t, doAs(t, srv, "alice", http.MethodGet, "/api/v1/jobs"))

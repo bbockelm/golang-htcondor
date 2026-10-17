@@ -58,6 +58,10 @@ const (
 	// DefaultHubDiscoverInterval is how often the hub set is
 	// re-discovered.
 	DefaultHubDiscoverInterval = 30 * time.Second
+	// DefaultHubSettle is how long after a switch the new hub's copy of
+	// every AP is reported settling rather than fresh: htcondordb's
+	// default fresh threshold (60 s) and a margin.
+	DefaultHubSettle = 90 * time.Second
 )
 
 // HubPolicy is how the active hub is chosen. Zero fields take the
@@ -66,6 +70,9 @@ type HubPolicy struct {
 	SwitchAfter  time.Duration
 	SwitchMargin int
 	FailAfter    int
+	// Settle is how long after a switch the new hub is not trusted to
+	// hold everything the old one did (see Hub.Settling).
+	Settle time.Duration
 }
 
 func (p HubPolicy) withDefaults() HubPolicy {
@@ -77,6 +84,9 @@ func (p HubPolicy) withDefaults() HubPolicy {
 	}
 	if p.FailAfter <= 0 {
 		p.FailAfter = DefaultHubFailAfter
+	}
+	if p.Settle <= 0 {
+		p.Settle = DefaultHubSettle
 	}
 	return p
 }
@@ -307,6 +317,9 @@ type hubPin struct {
 	ep      *HubEndpoint
 	gen     uint64
 	changed <-chan struct{}
+	// settling is the switch that made ep active, while it is younger
+	// than the settle window; nil otherwise.
+	settling *HubSwitch
 }
 
 // origin names a pin for the consumers that must start over on another
@@ -330,8 +343,36 @@ func (h *Hub) Pin(ctx context.Context) context.Context {
 func (h *Hub) pinNow() hubPin {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return hubPin{hub: h, ep: h.activeLocked(), gen: h.gen, changed: h.changed}
+	p := hubPin{hub: h, ep: h.activeLocked(), gen: h.gen, changed: h.changed}
+	if sw := h.last; sw != nil && sw.Reason != "initial" && sw.Generation == h.gen &&
+		h.clock().Sub(sw.At) < h.policy.Settle {
+		c := *sw
+		p.settling = &c
+	}
+	return p
 }
+
+// Settling reports whether the hub ctx is pinned to (else the active
+// one) became active by a switch less than the settle window ago, and
+// that switch. Until the window passes, the new hub's copy of an AP is
+// not trusted to hold everything the old hub's did -- a job the caller
+// saw there may not have reached it yet -- so its fresh APs are reported
+// settling, a by-id miss is asked of the AP itself, and a bulk action
+// does not skip an AP on its word. The first selection at startup is not
+// a switch.
+func (h *Hub) Settling(ctx context.Context) (HubSwitch, bool) {
+	if h == nil {
+		return HubSwitch{}, false
+	}
+	p := h.pinOf(ctx)
+	if p.settling == nil {
+		return HubSwitch{}, false
+	}
+	return *p.settling, true
+}
+
+// SettleUntil is when a switch's settle window ends.
+func (h *Hub) SettleUntil(sw HubSwitch) time.Time { return sw.At.Add(h.policy.Settle) }
 
 func (h *Hub) pinOf(ctx context.Context) hubPin {
 	if p, ok := ctx.Value(hubPinKey{}).(hubPin); ok && p.hub == h {

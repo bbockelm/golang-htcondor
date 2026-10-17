@@ -44,6 +44,9 @@ const (
 	StateAbsent    = "absent"
 	StateUntrusted = "untrusted"
 	StateRetiring  = "retiring"
+	// StateSettling is this server's, not the hub's: the AP is fresh on
+	// a hub that became active less than the settle window ago.
+	StateSettling = "settling"
 )
 
 // DefaultSourcesInterval is how often the hub's federation_sources table
