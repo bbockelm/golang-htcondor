@@ -16,6 +16,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
+	"github.com/bbockelm/golang-htcondor/webapi/utilization"
 )
 
 // TestMultiAPTwoHubs: /api/v1/aps and /readyz name the active hub and
@@ -230,5 +231,59 @@ func TestMultiAPDashboardDeparturesFollowTheirHub(t *testing.T) {
 	}
 	if onB := finished(); onB != onA-1 {
 		t.Fatalf("finished on %s: %d on hub-a with its departure, %d on hub-b; want one fewer, without hub-a's departure", ap1, onA, onB)
+	}
+}
+
+// twoHubServer is a multi-AP server over hubs a and b, with a able to be
+// stopped.
+func twoHubServer(t *testing.T, a, b *multiaptest.DB) (*Server, *multiap.Hub, *atomic.Bool) {
+	t.Helper()
+	var aDown atomic.Bool
+	hub := multiap.NewHubSet(multiap.HubOptions{Interval: time.Hour, Static: []multiap.HubSpec{
+		{Name: "hub-a", Dial: func(ctx context.Context) (*dbrpc.Client, func(), error) {
+			if aDown.Load() {
+				return nil, nil, errors.New("connection refused")
+			}
+			return a.Dial(ctx)
+		}},
+		{Name: "hub-b", Dial: b.Dial},
+	}})
+	if err := hub.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	srv := newMultiAPServer(t, &multiap.Service{Registry: multiaptest.NewRegistry(ap1, ap2), Hub: hub,
+		Stale: multiap.StaleInclude, UIDDomain: "d"})
+	return srv, hub, &aDown
+}
+
+// TestMultiAPUtilizationCacheFollowsTheHub: an analysis of hub A's
+// history is not served from the cache once reads move to hub B.
+func TestMultiAPUtilizationCacheFollowsTheHub(t *testing.T) {
+	a, b := multiaptest.NewHub(t), multiaptest.NewHub(t)
+	putHubHistory(t, a, ap1, "alice@d", 10, "/home/alice/sim")
+	putHubHistory(t, a, ap1, "alice@d", 11, "/home/alice/sim")
+	putHubHistory(t, b, ap1, "alice@d", 10, "/home/alice/sim")
+	for _, db := range []*multiaptest.DB{a, b} {
+		db.PutSource(ap1, "fresh", 2)
+		db.PutSource(ap2, "fresh", 2)
+	}
+	srv, hub, aDown := twoHubServer(t, a, b)
+	jobs := func() int {
+		t.Helper()
+		rec := doAs(t, srv, "alice", http.MethodGet, "/api/v1/utilization")
+		var resp utilization.Summary
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &resp) != nil {
+			t.Fatalf("utilization: %d %s", rec.Code, rec.Body.String())
+		}
+		return resp.JobsConsidered
+	}
+	if n := jobs(); n != 2 {
+		t.Fatalf("on hub-a: %d jobs, want 2", n)
+	}
+	aDown.Store(true)
+	_ = hub.Refresh(context.Background())
+	_ = hub.Refresh(context.Background())
+	if n := jobs(); n != 1 {
+		t.Fatalf("after the switch: %d jobs, want hub-b's 1 (hub-a's analysis was served from the cache)", n)
 	}
 }

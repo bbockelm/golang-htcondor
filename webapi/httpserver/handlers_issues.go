@@ -195,6 +195,11 @@ func (e issueQueryError) Error() string { return e.msg }
 // the chat's analyze_issues both answer through it, so the two scope and
 // cache the same way. ctx must carry the authenticated user.
 func (s *Handler) issuesAnswer(ctx context.Context, r *http.Request, q issueQuery) (IssuesResponse, error) {
+	if s.multi != nil {
+		// One federation hub for the scope, the collection and the
+		// sources block.
+		ctx = s.multi.svc.PinHub(ctx)
+	}
 	// The Owner value of the caller's jobs: a bearer's actor is
 	// qualified ("alice@domain") and a job's Owner is not.
 	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
@@ -251,7 +256,10 @@ func (s *Handler) issuesAnswer(ctx context.Context, r *http.Request, q issueQuer
 		if scope, src, sources, err = s.multiAPIssueScope(ctx, r, filter, q.includeEnded); err != nil {
 			return IssuesResponse{}, err
 		}
-		key = fmt.Sprintf("multi|%s|%d|%t", scope, int64(window/time.Second), q.includeEnded)
+		// A set collected on one hub is never served under another's
+		// sources block: the hub and its selection generation are in the
+		// key.
+		key = fmt.Sprintf("multi|%s|%s|%d|%t", s.multi.svc.HubOrigin(ctx), scope, int64(window/time.Second), q.includeEnded)
 	}
 	// collectCtx is the cache's, not this request's: see
 	// sharedComputeContext.
