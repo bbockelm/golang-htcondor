@@ -83,6 +83,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         superuserActive={session?.superuser_active}
         multiAP={session?.multi_ap}
         placement={!!session?.placement}
+        placementProjects={session?.placement?.projects}
+        placementProject={session?.placement?.project}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />

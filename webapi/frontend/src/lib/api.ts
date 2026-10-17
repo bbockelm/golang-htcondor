@@ -180,6 +180,13 @@ export interface Session {
 export interface PlacementSessionIdentity {
   identity: string;
   display_name?: string;
+  // Set when the session signed in as the account the placementd assigned
+  // to this identity: the account, the permissions on jobs it holds, its
+  // projects, and the one its work is charged to.
+  account?: string;
+  levels?: string[];
+  projects?: string[];
+  project?: string;
 }
 
 // APAssignment is where a caller's new work goes in multi-AP mode: the
@@ -2363,6 +2370,13 @@ export const api = {
         method: "POST",
         headers: { "X-Requested-With": "XMLHttpRequest" },
         body: JSON.stringify(req),
+      }),
+    // Choose the project a placement-assigned account's work is charged to.
+    setProject: (project: string): Promise<{ project: string }> =>
+      fetchJSON(`${BASE}/placement/me/project`, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        body: JSON.stringify({ project }),
       }),
     deviceRequest: (userCode: string): Promise<PlacementDeviceRequest> =>
       fetchJSON(`${BASE}/placement/me/device/${encodeURIComponent(userCode)}`),

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { ProjectSwitcher } from './ProjectSwitcher';
 
 interface SidebarProps {
   userName?: string;
@@ -18,6 +19,9 @@ interface SidebarProps {
   multiAP?: boolean;
   // This session can request a placement token.
   placement?: boolean;
+  // A placement-assigned account's projects and the selected one.
+  placementProjects?: string[];
+  placementProject?: string;
   // Mobile drawer state. On lg+ the sidebar is always visible -- pinned
   // to the viewport's height, so the account controls at its foot stay on
   // screen however long the page -- and these are ignored.
@@ -69,6 +73,8 @@ export function Sidebar({
   superuserActive,
   multiAP,
   placement,
+  placementProjects,
+  placementProject,
   open,
   onClose,
 }: SidebarProps) {
@@ -155,6 +161,9 @@ export function Sidebar({
           {userName ? (
             <>
               <div className="truncate text-gray-300">{userName}</div>
+              {placementProjects && (
+                <ProjectSwitcher projects={placementProjects} project={placementProject} />
+              )}
               <button
                 type="button"
                 onClick={async () => {
