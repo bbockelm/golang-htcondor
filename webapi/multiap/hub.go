@@ -258,7 +258,8 @@ func transportFailure(ctx context.Context, err error) bool {
 	}
 	var ne net.Error
 	return errors.Is(err, dbrpc.ErrConnClosed) || errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &ne)
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, net.ErrClosed) || errors.As(err, &ne)
 }
 
 func (e *HubEndpoint) connect(ctx context.Context) (*dbrpc.Client, func(), error) {

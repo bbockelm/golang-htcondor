@@ -58,6 +58,9 @@ func NewCoverageFrom(origin string, several bool) *Coverage {
 	return &Coverage{asOf: map[string]time.Time{}, origin: origin, several: several}
 }
 
+// Several reports whether the source has more than one backend.
+func (c *Coverage) Several() bool { return c != nil && c.several }
+
 // Origin is the origin the read came from; empty when the source names
 // none.
 func (c *Coverage) Origin() string {

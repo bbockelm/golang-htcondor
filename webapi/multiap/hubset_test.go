@@ -477,6 +477,12 @@ func TestWatchCoverageNamesItsHub(t *testing.T) {
 		return cov.Origin(), n
 	}
 	pass := src.PinPass(context.Background())
+	if _, cov, err := src.QueueCovered(pass, "alice", []string{"ClusterId"}, 100, func(*classad.ClassAd) {}); err != nil || !cov.Several() {
+		t.Fatalf("coverage with two hubs known: several=%v, %v; want several", cov.Several(), err)
+	}
+	if cov := (WatchSource{Service: pairServiceOneHub(t)}).coverageOf(t); cov.Several() {
+		t.Fatal("coverage with one hub says there are several")
+	}
 	originA, rowsA := read(pass)
 	if originA != hubA+"/0" || rowsA != 2 {
 		t.Fatalf("coverage origin %q with %d rows, want %s/0 with alice's 2", originA, rowsA, hubA)
@@ -674,4 +680,20 @@ func TestHubDiscoveryGrace(t *testing.T) {
 	if n := len(h.Statuses()); n != 1 || h.Active().Name() != hubA {
 		t.Fatalf("after the grace period: %d hubs, active %q; want only the active %s", n, h.Active().Name(), hubA)
 	}
+}
+
+// pairServiceOneHub is a Service over one in-process hub.
+func pairServiceOneHub(t *testing.T) *Service {
+	db := memoryHub(t)
+	freshSources(db)
+	return newService(t, db, newFakeRegistry(ap1, ap2))
+}
+
+func (w WatchSource) coverageOf(t *testing.T) *jobwatch.Coverage {
+	t.Helper()
+	_, cov, err := w.QueueCovered(context.Background(), "alice", []string{"ClusterId"}, 100, func(*classad.ClassAd) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cov
 }
