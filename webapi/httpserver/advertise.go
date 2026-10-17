@@ -39,11 +39,13 @@ func (h *Handler) streamOpened() func() {
 // Called once per cycle by apiad.Augment, so runtime changes (mirror health, a
 // rediscovered schedd, the current stream count) are always current.
 func (h *Handler) advertiseInput() apiad.Input {
+	// MCPEnabled is mcpEnabled, not mcpServer != nil: the MCP server
+	// object exists whether or not /mcp is served.
 	in := apiad.Input{
 		Endpoint:         h.httpBaseURL,
 		ScheddName:       h.scheddName,
 		TrustDomain:      h.trustDomain,
-		MCPEnabled:       h.mcpServer != nil,
+		MCPEnabled:       h.mcpEnabled,
 		SuperuserEnabled: h.superuserModeAvailable(),
 		ActiveStreams:    h.activeStreams.Load(),
 	}

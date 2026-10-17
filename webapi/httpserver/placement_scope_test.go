@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,11 +21,19 @@ import (
 // provider, so placement_client and the placement scope exist.
 func placementOAuthServer(t *testing.T, fake *onboardFake) *onboardingServer {
 	t.Helper()
+	return placementOAuthServerWith(t, fake, false, true)
+}
+
+// placementOAuthServerWith is placementOAuthServer serving the given
+// surfaces.
+func placementOAuthServerWith(t *testing.T, fake *onboardFake, webUI, mcp bool) *onboardingServer {
+	t.Helper()
 	srv, err := NewServer(Config{
 		Logger:         newTestLogger(t),
 		ScheddName:     "ap.example",
 		ScheddAddr:     "127.0.0.1:1",
-		EnableMCP:      true,
+		EnableMCP:      mcp,
+		WebUIEnabled:   webUI,
 		OAuth2DBPath:   t.TempDir() + "/oauth2.db",
 		OAuth2Issuer:   "http://localhost:8080",
 		SigningKeyPath: writeTestSigningKey(t),
@@ -73,7 +82,7 @@ var csrfFieldRE = regexp.MustCompile(`name="` + consentCSRFField + `" value="([^
 // by approver, and returns the token response.
 func placementDeviceTokens(t *testing.T, s *onboardingServer, approver *http.Cookie, scope string) map[string]any {
 	t.Helper()
-	rec := s.form(t, nil, oauth2EndpointPathFor(false, "device/authorize"),
+	rec := s.form(t, nil, s.oauth2EndpointPath("device/authorize"),
 		url.Values{"client_id": {placementClientID}, "scope": {scope}})
 	var dev DeviceAuthorizationResponse
 	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &dev) != nil {
@@ -81,7 +90,7 @@ func placementDeviceTokens(t *testing.T, s *onboardingServer, approver *http.Coo
 	}
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
-		mcpDeviceVerifyPath+"?user_code="+url.QueryEscape(dev.UserCode), nil)
+		s.deviceVerifyPath()+"?user_code="+url.QueryEscape(dev.UserCode), nil)
 	req.AddCookie(approver)
 	page := httptest.NewRecorder()
 	s.ServeHTTP(page, req)
@@ -89,14 +98,14 @@ func placementDeviceTokens(t *testing.T, s *onboardingServer, approver *http.Coo
 	if page.Code != http.StatusOK || m == nil {
 		t.Fatalf("verify page: %d %s", page.Code, page.Body.String())
 	}
-	rec = s.form(t, approver, mcpDeviceVerifyPath, url.Values{
+	rec = s.form(t, approver, s.deviceVerifyPath(), url.Values{
 		"user_code": {dev.UserCode}, "action": {"approve"}, consentCSRFField: {m[1]},
 	})
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "approved") {
 		t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
 	}
 
-	rec = s.form(t, nil, oauth2EndpointPathFor(false, "token"), url.Values{
+	rec = s.form(t, nil, s.oauth2EndpointPath("token"), url.Values{
 		"grant_type": {deviceCodeGrant}, "device_code": {dev.DeviceCode}, "client_id": {placementClientID},
 	})
 	var tok map[string]any
@@ -175,6 +184,40 @@ func TestPlacementDeviceGrantActsForTheApprovingIdentity(t *testing.T) {
 		if n != aliceIdentity && n != "" {
 			t.Errorf("the placementd was asked about %q", n)
 		}
+	}
+}
+
+// The placement device flow needs OAuth2, not MCP: with the web UI on and
+// MCP off, placement_client is seeded, the scope is advertised, and its
+// device flow ends in a placement token from /api/v1/placement/me/token.
+func TestPlacementDeviceFlowWithWebUIAndWithoutMCP(t *testing.T) {
+	fake := newOnboardFake()
+	s := placementOAuthServerWith(t, fake, true, false)
+	if s.oauth2Provider == nil {
+		t.Fatal("no OAuth2 provider with the web UI on and MCP off")
+	}
+	if !slices.Contains(s.advertisedScopes(), placementScope) {
+		t.Errorf("the placement scope is not advertised: %v", s.advertisedScopes())
+	}
+	if path := s.oauth2EndpointPath("device/authorize"); strings.HasPrefix(path, "/mcp/") {
+		t.Fatalf("device authorization advertised at %s without MCP", path)
+	}
+
+	tok := placementDeviceTokens(t, s, s.placementCookie(t, aliceIdentity), "placement offline_access")
+	access, _ := tok["access_token"].(string)
+	if access == "" || !strings.Contains(fmt.Sprint(tok["scope"]), placementScope) {
+		t.Fatalf("token response = %v", tok)
+	}
+	rec := s.bearer(t, access, http.MethodPost, "/api/v1/placement/me/token", `{"project":"ProjA","authorizations":["READ"]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("/me/token with the bearer: %d %s", rec.Code, rec.Body.String())
+	}
+	if last := fake.logins[len(fake.logins)-1]; last.UserName != aliceIdentity {
+		t.Errorf("login = %+v", last)
+	}
+	// And the bearer gate still holds it to the placement endpoints.
+	if rec := s.bearer(t, access, http.MethodGet, "/api/v1/jobs", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("the placement bearer on /api/v1/jobs: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

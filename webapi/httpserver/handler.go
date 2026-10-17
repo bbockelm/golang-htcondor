@@ -230,6 +230,12 @@ type Handler struct {
 	// stream_limit.go. Built on first use by streamLimits.
 	streamLimiterOnce sync.Once
 	streamLimiterVal  *streamLimiter
+	// webUIEnabled and mcpEnabled are the two surfaces OAuth2 serves.
+	// The authorization server exists when either is on; the MCP
+	// protocol endpoint, its /mcp/ aliases and the mcp:read/mcp:write
+	// advertisement only when mcpEnabled. See HandlerConfig.WebUIEnabled.
+	webUIEnabled bool
+	mcpEnabled   bool
 	// mcpCIMDEnabled advertises Client ID Metadata Document support in the MCP
 	// OAuth2 discovery document (the resolver itself lives in the provider's
 	// storage). See oauth2_cimd.go.
@@ -760,7 +766,15 @@ type HandlerConfig struct {
 	// configure Prometheus to send it as a Bearer token.
 	MetricsPublic bool
 	Logger        *logging.Logger // Logger instance (optional, creates default if nil)
-	EnableMCP     bool            // Enable MCP endpoints with OAuth2 (default: false)
+	// EnableMCP serves the MCP protocol endpoint (/mcp) and nothing
+	// else: OAuth2 is decided by OAuth2Enabled, which this is half of.
+	EnableMCP bool
+	// WebUIEnabled says this server serves the web UI. OAuth2 -- the
+	// authorization server, its metadata, the device flow and the SSO
+	// login -- is served when this or EnableMCP is set: MCP gates only
+	// MCP. The daemon sets it from webui.IsEmbedded(); an embedder or a
+	// test sets it directly.
+	WebUIEnabled bool
 
 	// DBPath is the unified SQLite database file backing OAuth2/MCP
 	// storage, the embedded IDP, browser sessions, and user-saved
@@ -1159,6 +1173,18 @@ type HandlerConfig struct {
 	TemplateUserStoreDBPath string //nolint:unused // kept for back-compat; ignored by NewHandler.
 }
 
+// OAuth2Enabled reports whether this configuration serves OAuth2: the
+// authorization server, its discovery metadata, the device flow and the
+// SSO login.
+//
+// The web UI needs it to log anybody in and MCP clients authenticate
+// through it, so either one turns it on. MCP gates only MCP. This was
+// once decided by EnableMCP alone, which left a web UI with MCP off
+// unable to log anybody in, with no metadata and no device flow.
+func (c HandlerConfig) OAuth2Enabled() bool {
+	return c.WebUIEnabled || c.EnableMCP
+}
+
 // NewHandler creates a new HTTP API handler that can be embedded in any HTTP server
 //
 //nolint:gocyclo // Initialization logic with sequential checks is acceptable
@@ -1260,6 +1286,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		uidDomain:                 cfg.UIDDomain,
 		httpBaseURL:               cfg.HTTPBaseURL,
 		mcpBaseURL:                strings.TrimSpace(cfg.MCPBaseURL),
+		webUIEnabled:              cfg.WebUIEnabled,
+		mcpEnabled:                cfg.EnableMCP,
 		mcpCIMDEnabled:            cfg.MCPCIMDEnabled,
 		mcpDCRDisabled:            cfg.MCPDCRDisabled,
 		ccbDialer:                 cfg.CCB,
@@ -1675,7 +1703,6 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// rides on the same DB connection (no separate file).
 	h.templateLibrary = buildTemplateLibrary(cfg, logger, h.db)
 
-	// Setup OAuth2 provider if MCP is enabled
 	// Map the provider's subject onto a local account, where the
 	// deployment says the two differ. Built before the first request so
 	// the account index is warm and its problems are in the startup log
@@ -1811,7 +1838,12 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger.Info(logging.DestinationHTTP, "OAuth2 login requirements in effect", "requirements", req)
 	}
 
-	if cfg.EnableMCP {
+	// The OAuth2 authorization server. Created whenever the web UI or MCP
+	// is served -- not under EnableMCP alone, which is where it used to
+	// be: a web UI with MCP off then had no login callback, no metadata,
+	// no device flow and no admin client management. MCP gates only MCP;
+	// its own settings follow in the block after this one.
+	if cfg.OAuth2Enabled() {
 		oauth2Issuer := cfg.OAuth2Issuer
 		if oauth2Issuer == "" {
 			oauth2Issuer = "http://localhost:8080"
@@ -1834,6 +1866,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			Sealer:               h.sealer,
 			CIMDEnabled:          cfg.MCPCIMDEnabled,
 			CIMDAllowedHosts:     cfg.MCPCIMDAllowedHosts,
+			// The /mcp/ spelling wherever MCP is on, as it always was;
+			// without MCP that path is not routed.
+			TokenPath: oauth2EndpointPathFor(!cfg.EnableMCP, "token"),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create OAuth2 provider: %w", err)
@@ -1842,7 +1877,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"access_token_lifespan", oauth2AccessLifespan,
 			"refresh_token_lifespan", oauth2RefreshLifespan)
 		h.oauth2Provider = oauth2Provider
-		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled for MCP endpoints", "issuer", oauth2Issuer)
+		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled", "issuer", oauth2Issuer,
+			"web_ui", cfg.WebUIEnabled, "mcp", cfg.EnableMCP)
 		// placement-client's client (placement_scope.go).
 		if err := h.seedPlacementClient(context.Background()); err != nil {
 			logger.Warn(logging.DestinationHTTP, "Could not create the placement client", "error", err)
@@ -1890,14 +1926,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			h.oauth2UserInfoURL = cfg.OAuth2UserInfoURL
 			logger.Info(logging.DestinationHTTP, "OAuth2 SSO client configured", "auth_url", cfg.OAuth2AuthURL, "scopes", scopes)
 
-			// If we are also the provider (EnableMCP), ensure the client exists
-			if cfg.EnableMCP {
-				// Client registration code remains the same...
-				h.ensureOAuth2ClientRegistered(cfg.OAuth2ClientID, cfg.OAuth2ClientSecret, cfg.OAuth2RedirectURL, scopes)
-			}
+			// This server is the provider too, so the SSO client must
+			// exist in it.
+			h.ensureOAuth2ClientRegistered(cfg.OAuth2ClientID, cfg.OAuth2ClientSecret, cfg.OAuth2RedirectURL, scopes)
 		}
 
-		// Set group-based access control
 		h.oauth2MaxGrantLifetime = cfg.OAuth2MaxGrantLifetime
 		if h.oauth2MaxGrantLifetime <= 0 {
 			h.oauth2MaxGrantLifetime = DefaultMaxGrantLifetime
@@ -1916,7 +1949,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// with token-sourced groups.
 		h.registerSystemGroupOracle(logger)
 		h.registerUpstreamOracle(logger)
+	}
 
+	// MCP's own settings. Only the protocol endpoint reads these.
+	if cfg.EnableMCP {
 		h.mcpMaxRequest = cfg.MCPMaxRequestDuration
 		h.mcpUseSDK = cfg.MCPUseSDKTransport
 		h.mcpInstructions = cfg.MCPInstructions
@@ -3735,7 +3771,7 @@ func (h *Handler) initializeIDP(ln net.Listener, protocol string) error {
 	// This allows the server to use its own IDP for authentication (SSO)
 	clientID := idpInternalClientID
 	clientSecret := h.idpInternalClientSecret()
-	ssoRedirectURI := issuer + OAuth2CallbackPath()
+	ssoRedirectURI := issuer + h.oauth2CallbackPath()
 
 	// Check if client exists
 	existing, err := h.idpProvider.storage.GetClient(ctx, clientID)

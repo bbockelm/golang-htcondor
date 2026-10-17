@@ -23,6 +23,9 @@ type OAuth2Provider struct {
 	storage  *OAuth2Storage
 	config   *fosite.Config
 	strategy *compose.CommonStrategy
+	// tokenPath is the token endpoint's path, kept so UpdateIssuer can
+	// rebuild config.TokenURL under a new issuer.
+	tokenPath string
 }
 
 // OAuth2ProviderOptions configures lifespans and other tunables for
@@ -47,6 +50,12 @@ type OAuth2ProviderOptions struct {
 	// CIMDAllowedHosts optionally restricts which hosts a CIMD client_id may
 	// point at; empty means any host (the SSRF guards still apply).
 	CIMDAllowedHosts []string
+
+	// TokenPath is the token endpoint's path on Issuer. Empty means
+	// /mcp/oauth2/token, which every server serving MCP routes; a server
+	// without MCP does not route it and must say where its token
+	// endpoint is.
+	TokenPath string
 }
 
 // NewOAuth2Provider creates a new OAuth2 provider with SQLite storage.
@@ -68,6 +77,10 @@ func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
 
 	if opts.DB == nil {
 		return nil, fmt.Errorf("OAuth2 provider: DB is required")
+	}
+	tokenPath := opts.TokenPath
+	if tokenPath == "" {
+		tokenPath = oauth2EndpointPathFor(false, "token")
 	}
 	storage := NewOAuth2Storage(opts.DB)
 	// Set the sealer BEFORE the first Load/SaveRSAKey call below;
@@ -119,7 +132,7 @@ func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
 		RefreshTokenLifespan:     opts.RefreshTokenLifespan,
 		AuthorizeCodeLifespan:    time.Minute * 10,
 		IDTokenLifespan:          opts.AccessTokenLifespan,
-		TokenURL:                 opts.Issuer + "/mcp/oauth2/token",
+		TokenURL:                 opts.Issuer + tokenPath,
 		AccessTokenIssuer:        opts.Issuer,
 		ScopeStrategy:            fosite.HierarchicScopeStrategy,
 		AudienceMatchingStrategy: fosite.DefaultAudienceMatchingStrategy,
@@ -184,10 +197,11 @@ func NewOAuth2Provider(opts OAuth2ProviderOptions) (*OAuth2Provider, error) {
 	)
 
 	return &OAuth2Provider{
-		oauth2:   oauth2Provider,
-		storage:  storage,
-		config:   config,
-		strategy: strategy,
+		oauth2:    oauth2Provider,
+		storage:   storage,
+		config:    config,
+		strategy:  strategy,
+		tokenPath: tokenPath,
 	}, nil
 }
 
@@ -217,7 +231,11 @@ func (p *OAuth2Provider) GetStrategy() *compose.CommonStrategy {
 // UpdateIssuer updates the issuer URL in the configuration
 // This is useful when using port 0 and getting the actual port after server start
 func (p *OAuth2Provider) UpdateIssuer(issuer string) {
-	p.config.TokenURL = issuer + "/mcp/oauth2/token"
+	tokenPath := p.tokenPath
+	if tokenPath == "" {
+		tokenPath = oauth2EndpointPathFor(false, "token")
+	}
+	p.config.TokenURL = issuer + tokenPath
 	p.config.AccessTokenIssuer = issuer
 }
 

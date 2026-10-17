@@ -140,6 +140,20 @@ Three authentication channels, in precedence order:
 3. **Schedd JWT / pool token** — for `condor_*`-tool–style clients
    that already hold a valid HTCondor token.
 
+**When OAuth2 is served.** The OAuth2 authorization server — its
+metadata at `/.well-known/oauth-authorization-server`, the
+`/oauth2/*` endpoints (authorize, token, device authorization and
+verification, introspect, revoke, register, the SSO callback) and the
+admin client and token pages — is served whenever the **web UI or MCP**
+is enabled. `HTTP_API_ENABLE_MCP` gates only MCP: with it off, a server
+with the web UI still serves all of the above, but not `/mcp`, not the
+`/mcp/oauth2/*` spelling of the endpoints, not the protected-resource
+documents for `/mcp`, and does not advertise `mcp:read` / `mcp:write`.
+The web UI counts as enabled when it is compiled in (the
+`embed_frontend` build). The endpoints are advertised under
+`/mcp/oauth2/` only on a server whose only surface is MCP; both
+spellings are routed wherever MCP is on.
+
 A separate browser-session cookie is used for the SPA UI; it sits
 on top of (2) — the IDP issues the token; the cookie carries the
 session.
@@ -633,7 +647,8 @@ The admin UI at `/admin/clients` lists every client and lets an operator edit
 its permitted grant types (and, for `client_credentials`, its service
 identity); other fields are read-only.
 
-- **Dynamic Client Registration (DCR, RFC 7591)** — `POST /mcp/oauth2/register`.
+- **Dynamic Client Registration (DCR, RFC 7591)** — `POST /oauth2/register`
+  (also `/mcp/oauth2/register` wherever MCP is on).
   A client registers itself and gets a confidential `client_id` + secret. It
   may declare only the `authorization_code`, `refresh_token` and device-code
   grants and the `code` response type; anything else is refused with
@@ -870,7 +885,8 @@ belongs to one database, so replicas would present different host keys.
 | `HTTP_API_SSH_GATEWAY_SESSION_MEMORY_MB` | Memory for the same. Default 1024. |
 | `HTTP_API_SSH_GATEWAY_SESSION_DISK_MB` | Disk for the same. Default 8192 — a VS Code Remote server does not fit in less. |
 
-The gateway needs OAuth2 configured (`HTTP_API_ENABLE_MCP`), since the device
+The gateway needs OAuth2, which is served whenever the web UI or MCP is
+enabled (see [When OAuth2 is served](#authentication)), since the device
 flow is how it authenticates. Shell access needs no new scope: the schedd
 registers `GET_JOB_CONNECT_INFO` at `WRITE`, so `condor:/WRITE` covers it.
 
@@ -1501,6 +1517,8 @@ metrics key.
   the assistant would see for this caller on that page
 
 **MCP** (when enabled via `HTTP_API_ENABLE_MCP=true`)
+- The OAuth2 endpoints do not depend on this; see
+  [When OAuth2 is served](#authentication).
 - The full MCP surface is exposed at `/mcp/*` for cooperative
   agents. The standalone `htcondor-mcp` binary speaks the same MCP
   protocol over stdio. See [mcpserver/README.md](../webapi/mcpserver/README.md).
@@ -2424,13 +2442,13 @@ Frequently-used knobs:
 | `HTTP_API_RUNTIME_ESTIMATE_BACKFILL` | How much job history runtime estimates read at startup, and how long a group of similar jobs is remembered without a new completion. Default `168h`. At most 500,000 of the newest records are read; the log says when that cap is hit. Read at startup. |
 | `HTTP_API_TOOL_STATS_MAX_SERIES` | Cap on distinct tool-call combinations held in memory and in the database. Default `10000`; past it new combinations fold into `other`. This is what bounds memory and disk. |
 | `HTTP_API_TOOL_STATS_OMIT_USER` | `true` renders every `/metrics` user label as `omitted`, for a site that does not want account names on a scrapeable endpoint. The database still records them. See [Usernames on /metrics](#usernames-on-metrics). |
-| `HTTP_API_ENABLE_MCP` | Enable the `/mcp/*` endpoints. Required by the chat assistant. |
+| `HTTP_API_ENABLE_MCP` | Enable the MCP endpoint (`/mcp`), the `/mcp/oauth2/*` spelling of the OAuth2 endpoints, and the `mcp:read`/`mcp:write` scopes in OAuth2 metadata. Required by the chat assistant. OAuth2 itself is served whenever the web UI **or** MCP is enabled, so a web UI with this off still logs people in and serves the device flow. |
 | `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` | JSON array of trusted external issuers for RFC 8693 token exchange (see [Token exchange](#token-exchange-rfc-8693)). Unset disables external exchange. |
 | `HTTP_API_MCP_CIMD` | Resolve an `https://` MCP `client_id` as a Client ID Metadata Document (a public client). Default `true`; set `false` to require DCR. See [MCP OAuth2 clients](#mcp-oauth2-clients). |
 | `HTTP_API_MCP_CIMD_ALLOWED_HOSTS` | Comma/space list of host or `.domain` patterns a CIMD `client_id` may point at. Empty = any host (SSRF guards still apply). Recommended for production: without it, unauthenticated callers choose which public hosts this server fetches from. |
-| `HTTP_API_MCP_DCR` | Accept dynamic client registration (RFC 7591) at `/mcp/oauth2/register`. Default `true`; set `false` when every client is seeded, operator-provisioned or CIMD. Registrations are then refused with 403 and the endpoint is not advertised. See [MCP OAuth2 clients](#mcp-oauth2-clients). |
+| `HTTP_API_MCP_DCR` | Accept dynamic client registration (RFC 7591) at `/oauth2/register` (and `/mcp/oauth2/register` where MCP is on). Default `true`; set `false` when every client is seeded, operator-provisioned or CIMD. Registrations are then refused with 403 and the endpoint is not advertised. See [MCP OAuth2 clients](#mcp-oauth2-clients). |
 | `HTTP_API_MCP_WATCH_MAX_WAIT` | Cap on how long the MCP `check_watches`/`watch_jobs` tools may block in-call before returning (a duration, e.g. `15s`). This number is advertised to the agent in the tool schema, so it has to be one the whole path can deliver, not just this server. Unset = `45s`, or the value derived from `HTTP_API_MCP_MAX_REQUEST_DURATION` where that is tighter. 45s is not a server limit — the server will hold a request for 14m30s by default — it is what an MCP client is observed to wait for before abandoning the call, which returns *nothing at all* to the agent rather than a timeout it could act on. **Set this lower when a gateway or proxy with a tighter timeout sits in front of this server**; set it higher only when you know the clients reaching this deployment are configured for a longer tool timeout. |
-| `HTTP_API_OAUTH2_REDIRECT_URL` | The redirect URI registered with the identity provider. Unset = derived from the issuer plus this server's callback path, which is `/oauth2/callback` when the web UI is compiled in and `/mcp/oauth2/callback` on an MCP-only build. Both paths are always served, so an authorization started before an upgrade still lands; but the URI the server *sends* must be registered at the IdP, so a build that gains the web UI needs `/oauth2/callback` added there (or this knob set to keep the old one). |
+| `HTTP_API_OAUTH2_REDIRECT_URL` | The redirect URI registered with the identity provider. Unset = derived from the issuer plus this server's callback path, which is `/mcp/oauth2/callback` on a server whose only surface is MCP and `/oauth2/callback` everywhere else. Both paths are served wherever MCP is on, so an authorization started before an upgrade still lands; but the URI the server *sends* must be registered at the IdP, so a build that gains the web UI needs `/oauth2/callback` added there (or this knob set to keep the old one). |
 | `HTTP_API_CREDD_ADDRESS` | Single-AP mode only (refused in multi-AP mode, where each access point's schedd names its own). Pins the credd this server talks to (a sinful, e.g. `<10.0.0.5:9618?sock=credd>`), overriding discovery. Normally unnecessary: the credd is read from the schedd itself, which publishes its own credd as `CredDIpAddr` in its ad and address file — the same binding `DCSchedd::getCreddAddress` uses. Set this when fronting a remote schedd that does not advertise it, since a credd that is not the submitting schedd's accepts credentials and leaves jobs held anyway. |
 | `HTTP_API_REQUIRED_CREDENTIALS` | OAuth service credentials that must exist before a job may be submitted (comma- or space-separated, e.g. `scitokens`). Some access points hold every job submitted without them, whatever the job actually uses. Each submit path checks the caller's credentials first and stores a placeholder for any that is missing, so a person using the web UI does not get a held job for a reason unrelated to what they asked for; a real credential obtained later through the OAuth flow replaces the placeholder. Presence is cached per user for 5 minutes. Best effort: if the credd is unavailable or refuses, the submit still proceeds and the reason is logged. Unset = nothing is required. |
 | `HTTP_API_MCP_MAX_REQUEST_DURATION` | Hard stop on an MCP request that is still making progress (a duration, e.g. `5m`). Unset = 15m. While an MCP request runs its write deadline is moved forward, so `HTTP_API_WRITE_TIMEOUT` — which is an absolute deadline meant for ordinary replies — does not decide how long a deliberately waiting tool may wait. A request that stops making progress is still cut off on its last window; this is the backstop for one that never finishes at all. |

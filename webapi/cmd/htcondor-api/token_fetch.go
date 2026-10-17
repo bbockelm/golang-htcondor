@@ -262,9 +262,64 @@ func runTokenFetch(args []string) error {
 	return nil
 }
 
+// oauth2Endpoints are the URLs of the OAuth2 endpoints this tool uses.
+type oauth2Endpoints struct {
+	register        string
+	deviceAuthorize string
+	token           string
+}
+
+// discoverOAuth2Endpoints reads the issuer's RFC 8414 metadata.
+//
+// The paths are not fixed: a server advertises /oauth2/ or /mcp/oauth2/
+// depending on what it serves, and one without MCP does not route the
+// /mcp/ spelling at all. A server whose metadata cannot be read gets the
+// /mcp/oauth2/ paths, which every server that served OAuth2 before the
+// metadata existed routes.
+func discoverOAuth2Endpoints(issuer string) oauth2Endpoints {
+	base := strings.TrimSuffix(issuer, "/")
+	eps := oauth2Endpoints{
+		register:        base + "/mcp/oauth2/register",
+		deviceAuthorize: base + "/mcp/oauth2/device/authorize",
+		token:           base + "/mcp/oauth2/token",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/.well-known/oauth-authorization-server", nil)
+	if err != nil {
+		return eps
+	}
+	resp, err := getHTTPClient().Do(req)
+	if err != nil {
+		return eps
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return eps
+	}
+	var md struct {
+		Registration        string `json:"registration_endpoint"`
+		DeviceAuthorization string `json:"device_authorization_endpoint"`
+		Token               string `json:"token_endpoint"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&md); err != nil {
+		return eps
+	}
+	if md.Registration != "" {
+		eps.register = md.Registration
+	}
+	if md.DeviceAuthorization != "" {
+		eps.deviceAuthorize = md.DeviceAuthorization
+	}
+	if md.Token != "" {
+		eps.token = md.Token
+	}
+	return eps
+}
+
 // registerClient registers a new OAuth2 client with the server
 func registerClient(config *TokenFetchConfig) (string, string, error) {
-	registerURL := config.IssuerURL + "/mcp/oauth2/register"
+	registerURL := discoverOAuth2Endpoints(config.IssuerURL).register
 
 	reqBody := map[string]interface{}{
 		"client_name":   "HTCondor API CLI",
@@ -315,8 +370,10 @@ func registerClient(config *TokenFetchConfig) (string, string, error) {
 
 // performDeviceCodeFlow executes the OAuth2 device code flow
 func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
+	eps := discoverOAuth2Endpoints(config.IssuerURL)
+
 	// Step 1: Request device code
-	deviceAuthURL := config.IssuerURL + "/mcp/oauth2/device/authorize"
+	deviceAuthURL := eps.deviceAuthorize
 
 	data := url.Values{}
 	data.Set("client_id", config.ClientID)
@@ -367,7 +424,7 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 	fmt.Println()
 
 	// Step 2: Poll for token
-	tokenURL := config.IssuerURL + "/mcp/oauth2/token"
+	tokenURL := eps.token
 	pollInterval := time.Duration(deviceResp.Interval) * time.Second
 	if pollInterval < 5*time.Second {
 		pollInterval = 5 * time.Second
@@ -455,7 +512,7 @@ func performDeviceCodeFlow(config *TokenFetchConfig) (*TokenInfo, error) {
 
 // refreshToken refreshes an access token using a refresh token
 func refreshToken(tokenInfo *TokenInfo) (*TokenInfo, error) {
-	tokenURL := tokenInfo.IssuerURL + "/mcp/oauth2/token"
+	tokenURL := discoverOAuth2Endpoints(tokenInfo.IssuerURL).token
 
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")

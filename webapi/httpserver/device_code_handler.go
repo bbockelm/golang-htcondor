@@ -52,6 +52,9 @@ type DeviceCodeHandler struct {
 	userCodeLen    int
 	userCodeFormat string // "numeric" or "alphanumeric"
 	now            func() time.Time
+	// verifyPath is the path of the verification page on the issuer,
+	// as the server advertises it (Handler.deviceVerifyPath).
+	verifyPath string
 }
 
 // NewDeviceCodeHandler creates a new device code handler
@@ -63,6 +66,7 @@ func NewDeviceCodeHandler(storage *OAuth2Storage, config *fosite.Config) *Device
 		userCodeLen:    8,  // Length for user code
 		userCodeFormat: "alphanumeric",
 		now:            time.Now,
+		verifyPath:     mcpDeviceVerifyPath,
 	}
 }
 
@@ -115,11 +119,9 @@ func (h *DeviceCodeHandler) HandleDeviceAuthorizationRequest(ctx context.Context
 		return nil, fosite.ErrServerError.WithWrap(err).WithDebug("Failed to store device code")
 	}
 
-	// Get verification URI from config (should be set by the caller)
 	// The path follows what this server actually serves; see
-	// OAuth2DeviceVerifyPath. Both paths are routed, so a code issued
-	// before an upgrade still resolves.
-	verificationURI := h.config.AccessTokenIssuer + deviceVerifyPath()
+	// Handler.deviceVerifyPath.
+	verificationURI := h.config.AccessTokenIssuer + h.verifyPath
 
 	return &DeviceAuthorizationResponse{
 		DeviceCode:              deviceCode,
