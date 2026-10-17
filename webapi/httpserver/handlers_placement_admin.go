@@ -87,6 +87,8 @@ type placementEntityJSON struct {
 	CreatedAt  *time.Time `json:"created_at,omitempty"`
 	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
 	ModifiedBy string     `json:"modified_by,omitempty"`
+	// ModificationID is the entity's latest history entry.
+	ModificationID int64 `json:"modification_id,omitempty"`
 }
 
 type placementIdentityJSON struct {
@@ -188,8 +190,10 @@ type placementAdminErrorBody struct {
 
 // placementBatchRequest is POST /placement/admin/batch.
 type placementBatchRequest struct {
-	DryRun     bool                    `json:"dry_run"`
-	Operations []placementBatchOpInput `json:"operations"`
+	DryRun bool `json:"dry_run"`
+	// ChangeComment is recorded in the audit log with the batch.
+	ChangeComment string                  `json:"change_comment,omitempty"`
+	Operations    []placementBatchOpInput `json:"operations"`
 }
 
 type placementBatchOpInput struct {
@@ -230,10 +234,28 @@ func (s *Handler) handlePlacementAdmin(w http.ResponseWriter, r *http.Request) {
 		if !placementMethod(s, w, r, http.MethodPost) {
 			return
 		}
+		raw, ok := s.decodeOptionalPlacementObject(w, r)
+		if !ok {
+			return
+		}
+		comment, err := placementChangeComment(raw)
+		if err == nil && len(raw) > 0 {
+			err = fmt.Errorf("adopting everything takes only change_comment")
+		}
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		s.runPlacementEdit(w, r, "adopt all", []htcondor.PlacementOp{{
 			Operation:  htcondor.PlacementOpAdopt,
 			TargetType: htcondor.PlacementTargetAll,
-		}}, placementDryRun(r), http.StatusOK)
+		}}, placementEditOptions(r, comment), http.StatusOK)
+		return
+	case "history":
+		if !placementMethod(s, w, r, http.MethodGet) {
+			return
+		}
+		s.handlePlacementHistory(w, r, r.URL.Query().Get("entity_id"))
 		return
 	case "batch":
 		if !placementMethod(s, w, r, http.MethodPost) {
@@ -271,14 +293,20 @@ func (s *Handler) handlePlacementAdmin(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		}
 	case 3:
-		if parts[2] != "adopt" {
+		switch parts[2] {
+		case "adopt":
+			if !placementMethod(s, w, r, http.MethodPost) {
+				return
+			}
+			s.handlePlacementAdminAdopt(w, r, target, parts[1])
+		case "history":
+			if !placementMethod(s, w, r, http.MethodGet) {
+				return
+			}
+			s.handlePlacementHistory(w, r, parts[1])
+		default:
 			s.writeError(w, http.StatusNotFound, "Placement admin endpoint not found")
-			return
 		}
-		if !placementMethod(s, w, r, http.MethodPost) {
-			return
-		}
-		s.handlePlacementAdminAdopt(w, r, target, parts[1])
 	default:
 		s.writeError(w, http.StatusNotFound, "Placement admin endpoint not found")
 	}
@@ -385,6 +413,11 @@ func (s *Handler) handlePlacementAdminCreate(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
+	comment, err := placementChangeComment(raw)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	fields, err := placementFieldsFromJSON(target, raw, false)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
@@ -398,7 +431,7 @@ func (s *Handler) handlePlacementAdminCreate(w http.ResponseWriter, r *http.Requ
 		Operation:  htcondor.PlacementOpCreate,
 		TargetType: target,
 		Fields:     fields,
-	}}, placementDryRun(r), http.StatusCreated)
+	}}, placementEditOptions(r, comment), http.StatusCreated)
 }
 
 func (s *Handler) handlePlacementAdminUpdate(w http.ResponseWriter, r *http.Request, target, id string) {
@@ -407,6 +440,11 @@ func (s *Handler) handlePlacementAdminUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	expected, err := placementExpectedVersion(raw)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	comment, err := placementChangeComment(raw)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -426,7 +464,7 @@ func (s *Handler) handlePlacementAdminUpdate(w http.ResponseWriter, r *http.Requ
 		ID:              id,
 		ExpectedVersion: expected,
 		Fields:          fields,
-	}}, placementDryRun(r), http.StatusOK)
+	}}, placementEditOptions(r, comment), http.StatusOK)
 }
 
 func (s *Handler) handlePlacementAdminDelete(w http.ResponseWriter, r *http.Request, target, id string) {
@@ -439,44 +477,52 @@ func (s *Handler) handlePlacementAdminDelete(w http.ResponseWriter, r *http.Requ
 		}
 		expected = n
 	}
+	// The body is optional: {"change_comment": "..."}.
+	raw, ok := s.decodeOptionalPlacementObject(w, r)
+	if !ok {
+		return
+	}
+	comment, err := placementChangeComment(raw)
+	if err == nil && len(raw) > 0 {
+		err = fmt.Errorf("a delete body takes only change_comment")
+	}
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	s.runPlacementEdit(w, r, "delete "+strings.ToLower(target), []htcondor.PlacementOp{{
 		Operation:       htcondor.PlacementOpDelete,
 		TargetType:      target,
 		ID:              id,
 		ExpectedVersion: expected,
 		Cascade:         placementQueryBool(r, "cascade"),
-	}}, placementDryRun(r), http.StatusOK)
+	}}, placementEditOptions(r, comment), http.StatusOK)
 }
 
 func (s *Handler) handlePlacementAdminAdopt(w http.ResponseWriter, r *http.Request, target, id string) {
-	var expected int64
-	// The body is optional: {"expected_version": N}.
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+	// The body is optional: {"expected_version": N, "change_comment": "..."}.
+	raw, ok := s.decodeOptionalPlacementObject(w, r)
+	if !ok {
 		return
 	}
-	if len(bytes.TrimSpace(body)) > 0 {
-		raw := map[string]json.RawMessage{}
-		if err := json.Unmarshal(body, &raw); err != nil {
-			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
-			return
-		}
-		if expected, err = placementExpectedVersion(raw); err != nil {
-			s.writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if len(raw) > 0 {
-			s.writeError(w, http.StatusBadRequest, "An adopt takes only expected_version")
-			return
-		}
+	expected, err := placementExpectedVersion(raw)
+	var comment string
+	if err == nil {
+		comment, err = placementChangeComment(raw)
+	}
+	if err == nil && len(raw) > 0 {
+		err = fmt.Errorf("an adopt takes only expected_version and change_comment")
+	}
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	s.runPlacementEdit(w, r, "adopt "+strings.ToLower(target), []htcondor.PlacementOp{{
 		Operation:       htcondor.PlacementOpAdopt,
 		TargetType:      target,
 		ID:              id,
 		ExpectedVersion: expected,
-	}}, placementDryRun(r), http.StatusOK)
+	}}, placementEditOptions(r, comment), http.StatusOK)
 }
 
 func (s *Handler) handlePlacementBatch(w http.ResponseWriter, r *http.Request) {
@@ -489,6 +535,10 @@ func (s *Handler) handlePlacementBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Operations) == 0 {
 		s.writeError(w, http.StatusBadRequest, "operations is empty")
+		return
+	}
+	if len(req.ChangeComment) > placementMaxChangeComment {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("change_comment is longer than %d bytes", placementMaxChangeComment))
 		return
 	}
 	ops := make([]htcondor.PlacementOp, 0, len(req.Operations))
@@ -525,16 +575,30 @@ func (s *Handler) handlePlacementBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		ops = append(ops, op)
 	}
-	s.runPlacementEdit(w, r, "apply batch", ops, req.DryRun || placementDryRun(r), http.StatusOK)
+	opts := placementEditOptions(r, req.ChangeComment)
+	opts.DryRun = opts.DryRun || req.DryRun
+	s.runPlacementEdit(w, r, "apply batch", ops, opts, http.StatusOK)
+}
+
+// placementEditOptions are a write's options as the request gives them:
+// dry_run from the query string and the change comment from the body.
+// OnBehalfOf is left for runPlacementEdit, which takes it from the session.
+func placementEditOptions(r *http.Request, comment string) htcondor.PlacementEditOptions {
+	return htcondor.PlacementEditOptions{DryRun: placementDryRun(r), Comment: comment}
 }
 
 // runPlacementEdit sends ops and writes the response.
-func (s *Handler) runPlacementEdit(w http.ResponseWriter, r *http.Request, what string, ops []htcondor.PlacementOp, dryRun bool, okStatus int) {
+//
+// OnBehalfOf is always the signed-in admin, from the session. Nothing in the
+// request can set it: the daemon records it as the person responsible.
+func (s *Handler) runPlacementEdit(w http.ResponseWriter, r *http.Request, what string, ops []htcondor.PlacementOp, opts htcondor.PlacementEditOptions, okStatus int) {
 	admin := ""
 	if session, ok := s.getSessionFromRequest(r); ok {
 		admin = session.Username
 	}
-	results, err := s.placementd.Edit(placementContext(r), ops, dryRun)
+	opts.OnBehalfOf = admin
+	dryRun := opts.DryRun
+	results, err := s.placementd.Edit(placementContext(r), ops, opts)
 	out := make([]placementEditResultJSON, 0, len(results))
 	for _, res := range results {
 		out = append(out, placementEditResultJSON{
@@ -579,6 +643,53 @@ func (s *Handler) decodePlacementObject(w http.ResponseWriter, r *http.Request) 
 		return nil, false
 	}
 	return raw, true
+}
+
+// decodeOptionalPlacementObject is decodePlacementObject for a body that
+// may be empty.
+func (s *Handler) decodeOptionalPlacementObject(w http.ResponseWriter, r *http.Request) (map[string]json.RawMessage, bool) {
+	raw := map[string]json.RawMessage{}
+	if r.Body == nil {
+		return raw, true
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return nil, false
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return raw, true
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return nil, false
+	}
+	return raw, true
+}
+
+// placementMaxChangeComment bounds a change comment.
+const placementMaxChangeComment = 4096
+
+// placementChangeComment removes change_comment from raw and returns it;
+// absent is "". It is the audit-log comment for the whole change, not an
+// entity field.
+func placementChangeComment(raw map[string]json.RawMessage) (string, error) {
+	v, ok := raw["change_comment"]
+	if !ok {
+		return "", nil
+	}
+	delete(raw, "change_comment")
+	if string(bytes.TrimSpace(v)) == "null" {
+		return "", nil
+	}
+	var c string
+	if err := json.Unmarshal(v, &c); err != nil {
+		return "", fmt.Errorf("change_comment must be a string")
+	}
+	if len(c) > placementMaxChangeComment {
+		return "", fmt.Errorf("change_comment is longer than %d bytes", placementMaxChangeComment)
+	}
+	return strings.TrimSpace(c), nil
 }
 
 // placementExpectedVersion removes expected_version from raw and returns it;
@@ -717,12 +828,13 @@ func (s *Handler) writePlacementAdminError(w http.ResponseWriter, op string, err
 
 func placementMetaJSON(m htcondor.PlacementEntityMeta) placementEntityJSON {
 	return placementEntityJSON{
-		ID:         m.ID,
-		Source:     m.Source,
-		Version:    m.Version,
-		CreatedAt:  optionalTime(m.CreatedAt),
-		UpdatedAt:  optionalTime(m.UpdatedAt),
-		ModifiedBy: m.ModifiedBy,
+		ID:             m.ID,
+		Source:         m.Source,
+		Version:        m.Version,
+		CreatedAt:      optionalTime(m.CreatedAt),
+		UpdatedAt:      optionalTime(m.UpdatedAt),
+		ModifiedBy:     m.ModifiedBy,
+		ModificationID: m.ModificationID,
 	}
 }
 
