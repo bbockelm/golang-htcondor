@@ -18,7 +18,7 @@ import { ExpiryField, GrantFields } from './EntityForm';
 import { Field, Modal, inputClass } from './directoryShared';
 
 export interface OnboardInput {
-  foreignId: string;
+  identity: string;
   displayName: string;
   account: string;
   expiresAt: string | null;
@@ -63,7 +63,7 @@ export function onboardOperations(input: OnboardInput, existing?: DirAccount): B
     });
   }
   const identity: BatchOperation['fields'] = {
-    foreign_id: input.foreignId,
+    name: input.identity,
     account: input.account,
   };
   if (input.expiresAt) identity.expires_at = input.expiresAt;
@@ -85,7 +85,7 @@ export function OnboardWizard({
   onClose: () => void;
   onDone: (resp: EditResponse) => void;
 }) {
-  const [foreignId, setForeignId] = useState('');
+  const [identity, setIdentity] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [account, setAccount] = useState('');
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
@@ -113,7 +113,7 @@ export function OnboardWizard({
   const grantsLocked = existing?.source === 'mapfile';
 
   const input: OnboardInput = {
-    foreignId: foreignId.trim(),
+    identity: identity.trim(),
     displayName: displayName.trim(),
     account: account.trim(),
     expiresAt,
@@ -140,7 +140,7 @@ export function OnboardWizard({
     run.error instanceof PlacementAdminError
       ? run.error.results.find((r) => r.error_code)
       : undefined;
-  const ready = input.foreignId !== '' && input.account !== '';
+  const ready = input.identity !== '' && input.account !== '';
 
   return (
     <Modal title="Onboard user" onClose={onClose} wide>
@@ -153,11 +153,11 @@ export function OnboardWizard({
         }}
       >
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Foreign ID">
+          <Field label="Sign-in identity">
             <input
               className={`${inputClass} font-mono`}
-              value={foreignId}
-              onChange={(e) => setForeignId(e.target.value)}
+              value={identity}
+              onChange={(e) => setIdentity(e.target.value)}
               placeholder="alice@wisc.edu"
               required
             />
@@ -214,7 +214,7 @@ export function OnboardWizard({
             <li key={i}>
               {op.operation} {op.target_type.toLowerCase()}{' '}
               <span className="font-mono">
-                {String(op.fields?.foreign_id ?? op.fields?.name ?? input.account)}
+                {String(op.fields?.name ?? input.account)}
               </span>
             </li>
           ))}

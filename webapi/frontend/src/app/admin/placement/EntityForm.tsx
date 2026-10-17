@@ -44,7 +44,7 @@ function initialValues(kind: PlacementKind, e: DirEntityByKind[PlacementKind] | 
     case 'identities': {
       const i = e as DirIdentity | null;
       return {
-        foreign_id: i?.foreign_id ?? '',
+        name: i?.name ?? '',
         account: i?.account ?? '',
         expires_at: i?.expires_at ?? null,
         display_name: i?.display_name ?? '',
@@ -158,11 +158,11 @@ export function EntityForm<K extends PlacementKind>({
       >
         {kind === 'identities' && (
           <>
-            <Field label="Foreign ID">
+            <Field label="Sign-in identity">
               <input
                 className={`${inputClass} font-mono`}
-                value={str('foreign_id')}
-                onChange={(e) => set('foreign_id', e.target.value)}
+                value={str('name')}
+                onChange={(e) => set('name', e.target.value)}
                 placeholder="alice@wisc.edu"
                 required
               />

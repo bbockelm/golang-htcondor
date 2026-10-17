@@ -30,7 +30,8 @@ export interface PlacementEntityMeta {
 }
 
 export interface DirIdentity extends PlacementEntityMeta {
-  foreign_id: string;
+  // The sign-in identity.
+  name: string;
   account_id?: string;
   account?: string;
   expires_at?: string;

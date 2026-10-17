@@ -160,13 +160,13 @@ func TestPlacementAdminList(t *testing.T) {
 		Type: "Identity",
 		Identity: &htcondor.PlacementIdentity{
 			PlacementEntityMeta: htcondor.PlacementEntityMeta{ID: "i1", Source: "mapfile", Version: 3},
-			ForeignID:           "alice@wisc.edu",
+			Name:                "alice@wisc.edu",
 			Account:             "alice@ap",
 			ExpiresAt:           exp,
 		},
 	}, {
 		Type:     "Identity",
-		Identity: &htcondor.PlacementIdentity{PlacementEntityMeta: htcondor.PlacementEntityMeta{ID: "i2"}, ForeignID: "bob"},
+		Identity: &htcondor.PlacementIdentity{PlacementEntityMeta: htcondor.PlacementEntityMeta{ID: "i2"}, Name: "bob"},
 	}}
 	server, admin, _ := newPlacementTestServer(t, fake)
 
@@ -182,7 +182,7 @@ func TestPlacementAdminList(t *testing.T) {
 		Identities []placementIdentityJSON `json:"identities"`
 	}
 	decodeBody(t, rec, &got)
-	if len(got.Identities) != 2 || got.Identities[0].ForeignID != "alice@wisc.edu" || got.Identities[0].Version != 3 {
+	if len(got.Identities) != 2 || got.Identities[0].Name != "alice@wisc.edu" || got.Identities[0].Version != 3 {
 		t.Fatalf("identities = %+v", got.Identities)
 	}
 	if got.Identities[0].ExpiresAt == nil || !got.Identities[0].ExpiresAt.Equal(exp) {
@@ -235,7 +235,7 @@ func TestPlacementAdminCreate(t *testing.T) {
 	server, admin, _ := newPlacementTestServer(t, fake)
 
 	rec := serveAdmin(t, server, admin("POST", "/api/v1/placement/admin/identities",
-		`{"foreign_id":"alice@wisc.edu","account":"alice@ap","expires_at":"2026-01-01T00:00:00Z","comment":null}`))
+		`{"name":"alice@wisc.edu","account":"alice@ap","expires_at":"2026-01-01T00:00:00Z","comment":null}`))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -246,7 +246,7 @@ func TestPlacementAdminCreate(t *testing.T) {
 	if op.Operation != "Create" || op.TargetType != "Identity" || op.ID != "" || op.Name != "" {
 		t.Errorf("op = %+v", op)
 	}
-	if op.Fields["ForeignId"] != "alice@wisc.edu" || op.Fields["Account"] != "alice@ap" {
+	if op.Fields["Name"] != "alice@wisc.edu" || op.Fields["Account"] != "alice@ap" {
 		t.Errorf("fields = %+v", op.Fields)
 	}
 	if ts, ok := op.Fields["ExpiresAt"].(time.Time); !ok || ts.Unix() != 1767225600 {
@@ -263,8 +263,8 @@ func TestPlacementAdminCreate(t *testing.T) {
 	}
 
 	for _, body := range []string{
-		`{"foreignid":"typo"}`,
-		`{"foreign_id":5}`,
+		`{"nickname":"x"}`,
+		`{"name":5}`,
 		`{"expires_at":"next tuesday"}`,
 		`{}`,
 		`not json`,
@@ -315,7 +315,7 @@ func TestPlacementAdminUpdate(t *testing.T) {
 	if v, ok := op.Fields["ExpiresAt"]; !ok || v != nil {
 		t.Errorf("ExpiresAt = %v (present %v), want nil", v, ok)
 	}
-	if _, ok := op.Fields["ForeignId"]; ok {
+	if _, ok := op.Fields["Name"]; ok {
 		t.Error("a patch must carry only the fields it changes")
 	}
 	if len(op.Fields) != 2 {
@@ -381,7 +381,7 @@ func TestPlacementAdminBatch(t *testing.T) {
 		"dry_run": true,
 		"operations": [
 			{"operation":"Create","target_type":"Account","fields":{"name":"alice@ap","authorizations":["READ"],"projects":["P"],"default_project":"P"}},
-			{"operation":"Create","target_type":"Identity","fields":{"foreign_id":"alice@wisc.edu","account":"alice@ap"}},
+			{"operation":"Create","target_type":"Identity","fields":{"name":"alice@wisc.edu","account":"alice@ap"}},
 			{"operation":"Update","target_type":"Account","name":"bob@ap","expected_version":2,"fields":{"default_project":null}}
 		]}`))
 	if rec.Code != http.StatusOK {

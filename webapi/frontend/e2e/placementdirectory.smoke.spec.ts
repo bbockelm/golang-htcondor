@@ -33,7 +33,7 @@ test('placement directory lists entries by source and onboards a user', async ({
 
   await page.getByRole('button', { name: 'Onboard user' }).click();
   const dialog = page.getByRole('dialog', { name: 'Onboard user' });
-  await dialog.getByLabel('Foreign ID').fill('carol@wisc.edu');
+  await dialog.getByLabel('Sign-in identity').fill('carol@wisc.edu');
   await dialog.getByLabel(/^Account/).fill('carol@ap.smoke.example');
   await dialog.getByRole('button', { name: 'Onboard' }).click();
   await expect(dialog).toHaveCount(0);
@@ -44,7 +44,7 @@ test('placement directory lists entries by source and onboards a user', async ({
     dry_run: false,
     operations: [
       { operation: 'Create', target_type: 'Account' },
-      { operation: 'Create', target_type: 'Identity', fields: { foreign_id: 'carol@wisc.edu' } },
+      { operation: 'Create', target_type: 'Identity', fields: { name: 'carol@wisc.edu' } },
     ],
   });
   expect(errors).toEqual([]);

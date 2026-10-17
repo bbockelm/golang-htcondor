@@ -55,14 +55,14 @@ function columnsFor(kind: PlacementKind, authzByName: Map<string, DirAuthorizati
     case 'identities':
       return [
         {
-          key: 'foreign_id',
-          label: 'Foreign ID',
-          value: (r) => (r as DirIdentity).foreign_id,
+          key: 'name',
+          label: 'Sign-in identity',
+          value: (r) => (r as DirIdentity).name,
           render: (r) => {
             const i = r as DirIdentity;
             return (
               <span className="font-mono text-xs">
-                {i.foreign_id}
+                {i.name}
                 {i.display_name && <span className="ml-2 font-sans text-gray-500">{i.display_name}</span>}
               </span>
             );
@@ -205,7 +205,7 @@ function searchText(kind: PlacementKind, r: AnyEntity): string {
   switch (kind) {
     case 'identities': {
       const i = r as DirIdentity;
-      return [i.foreign_id, i.account, i.display_name, i.comment, ...i.projects, ...i.authorizations].join(' ');
+      return [i.name, i.account, i.display_name, i.comment, ...i.projects, ...i.authorizations].join(' ');
     }
     case 'accounts': {
       const a = r as DirAccount;
@@ -226,7 +226,7 @@ function warningsOf(resp: EditResponse): string[] {
   return resp.results.map((r) => r.warning).filter((w): w is string => !!w);
 }
 
-export function Directory({ onIssueToken }: { onIssueToken?: (foreignId: string) => void }) {
+export function Directory({ onIssueToken }: { onIssueToken?: (identity: string) => void }) {
   const qc = useQueryClient();
   const [view, setView] = useState<PlacementKind>('identities');
   const [mode, setMode] = useState<FilterMode>('text');
@@ -441,7 +441,7 @@ export function Directory({ onIssueToken }: { onIssueToken?: (foreignId: string)
                         {view === 'identities' && onIssueToken && (
                           <button
                             type="button"
-                            onClick={() => onIssueToken((row as DirIdentity).foreign_id)}
+                            onClick={() => onIssueToken((row as DirIdentity).name)}
                             className="rounded-sm border border-gray-300 px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-100"
                           >
                             Issue token

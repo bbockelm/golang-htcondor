@@ -53,7 +53,7 @@ type placementFieldSpec struct {
 // keyed by their JSON names (§6.3 of the placementd design).
 var placementWritableFields = map[string]map[string]placementFieldSpec{
 	htcondor.PlacementTargetIdentity: {
-		"foreign_id":   {"ForeignId", placementFieldString},
+		"name":         {"Name", placementFieldString},
 		"account":      {"Account", placementFieldString},
 		"expires_at":   {"ExpiresAt", placementFieldTime},
 		"display_name": {"DisplayName", placementFieldString},
@@ -91,7 +91,7 @@ type placementEntityJSON struct {
 
 type placementIdentityJSON struct {
 	placementEntityJSON
-	ForeignID string `json:"foreign_id"`
+	Name      string `json:"name"`
 	AccountID string `json:"account_id,omitempty"`
 	Account   string `json:"account,omitempty"`
 	// ExpiresAt absent means the mapping never expires.
@@ -718,7 +718,7 @@ func placementObjectJSON(o htcondor.PlacementObject) any {
 		i := o.Identity
 		return placementIdentityJSON{
 			placementEntityJSON: placementMetaJSON(i.PlacementEntityMeta),
-			ForeignID:           i.ForeignID,
+			Name:                i.Name,
 			AccountID:           i.AccountID,
 			Account:             i.Account,
 			ExpiresAt:           optionalTime(i.ExpiresAt),

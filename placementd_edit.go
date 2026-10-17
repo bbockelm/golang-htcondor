@@ -179,8 +179,7 @@ type PlacementQuery struct {
 	TargetType string
 	// ID matches one entity by uuid.
 	ID string
-	// Name matches one entity by natural key: the foreign ID for an
-	// Identity, the name for everything else.
+	// Name matches one entity by its natural key, the name.
 	Name string
 	// Requirements is a ClassAd expression evaluated against each result
 	// ad; only matches are returned. It is sent as an expression, not a
@@ -208,11 +207,11 @@ type PlacementEntityMeta struct {
 	ModifiedBy string
 }
 
-// PlacementIdentity is an external login principal: the foreign ID a web
-// front end derives from an IdP login, mapped to exactly one account.
+// PlacementIdentity is a sign-in identity: the name a web front end derives
+// from an IdP login, mapped to exactly one account.
 type PlacementIdentity struct {
 	PlacementEntityMeta
-	ForeignID string
+	Name string
 	// AccountID is the uuid of the account; Account is its name.
 	AccountID string
 	Account   string
@@ -239,7 +238,7 @@ type PlacementAccount struct {
 	Authorizations []string
 	Projects       []string
 	DefaultProject string
-	// Identities lists the foreign IDs mapped to this account.
+	// Identities lists the names of the identities mapped to this account.
 	Identities []string
 }
 
@@ -331,7 +330,7 @@ type PlacementOp struct {
 	// reference the target.
 	Cascade bool
 	// Fields are the writable attributes, keyed by ClassAd attribute
-	// name (ForeignId, Account, ExpiresAt, Name, Authorizations, ...).
+	// name (Name, Account, ExpiresAt, Authorizations, ...).
 	// Values may be string, bool, any integer type, time.Time (sent as
 	// Unix seconds), []string (sent as a ClassAd list), or nil, which is
 	// sent as the literal undefined and so clears the attribute. On
@@ -531,9 +530,9 @@ func placementOpAd(op PlacementOp) (*classad.ClassAd, error) {
 		ad.InsertAttrBool("Cascade", true)
 	}
 
-	// Name is both the natural-key selector and, for accounts, projects
-	// and authorizations, a writable field. One ad holds one Name, so a
-	// rename has to select by ID.
+	// Name is both the natural-key selector and a writable field. One ad
+	// holds one Name: with an Id it is the new name, without one it is the
+	// selector. So a rename has to select by ID.
 	_, renames := placementFieldKey(op.Fields, "Name")
 	if op.Name != "" {
 		if renames {
@@ -639,7 +638,7 @@ func decodePlacementObject(ad *classad.ClassAd, queried string) PlacementObject 
 	switch typ {
 	case PlacementTargetIdentity:
 		i := &PlacementIdentity{PlacementEntityMeta: meta}
-		i.ForeignID, _ = ad.EvaluateAttrString("ForeignId")
+		i.Name, _ = ad.EvaluateAttrString("Name")
 		i.AccountID, _ = ad.EvaluateAttrString("AccountId")
 		i.Account, _ = ad.EvaluateAttrString("Account")
 		i.ExpiresAt = placementUnix(ad, "ExpiresAt")

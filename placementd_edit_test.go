@@ -183,11 +183,11 @@ func TestPlacementdQueryRequestAndDecode(t *testing.T) {
 func TestPlacementdQueryDecodesEveryType(t *testing.T) {
 	f := newFakePlacementdV2(t, []*classad.ClassAd{
 		mustParseAd(t, `[MyType = "PlacementIdentity"; Id = "i1"; Source = "mapfile"; Version = 1;
-			ForeignId = "alice@wisc.edu"; AccountId = "a1"; Account = "alice@ap"; ExpiresAt = 1767225600;
+			Name = "alice@wisc.edu"; AccountId = "a1"; Account = "alice@ap"; ExpiresAt = 1767225600;
 			Expired = false; DisplayName = "Alice"; Comment = "TA"; Authorizations = {"READ"};
 			Projects = {"P"}; DefaultProject = "P"; LastTokenExpiration = 1767000000]`),
 		// ExpiresAt absent means the mapping never expires.
-		mustParseAd(t, `[MyType = "PlacementIdentity"; Id = "i2"; ForeignId = "bob"; Expired = true]`),
+		mustParseAd(t, `[MyType = "PlacementIdentity"; Id = "i2"; Name = "bob"; Expired = true]`),
 		mustParseAd(t, `[MyType = "PlacementProject"; Id = "p1"; Name = "ProjA"; Description = "d"; Accounts = {"alice@ap"}]`),
 		mustParseAd(t, `[MyType = "PlacementAuthorization"; Id = "z1"; Name = "READ"; Label = "Read"; Color = "normal"; Description = "x"; Requestable = 1]`),
 		mustParseAd(t, `[MyType = "PlacementMapfileStatus"; PlacementdMapfileLoadTime = 1760000000;
@@ -206,7 +206,7 @@ func TestPlacementdQueryDecodesEveryType(t *testing.T) {
 		t.Fatalf("got %d objects", len(objs))
 	}
 	id := objs[0].Identity
-	if id == nil || id.ForeignID != "alice@wisc.edu" || id.Account != "alice@ap" || id.AccountID != "a1" ||
+	if id == nil || id.Name != "alice@wisc.edu" || id.Account != "alice@ap" || id.AccountID != "a1" ||
 		id.ExpiresAt.Unix() != 1767225600 || id.DisplayName != "Alice" || id.LastTokenExpiration.Unix() != 1767000000 {
 		t.Errorf("identity = %+v", id)
 	}
@@ -271,7 +271,7 @@ func TestPlacementdEditFraming(t *testing.T) {
 		{
 			Operation: PlacementOpCreate, TargetType: PlacementTargetIdentity,
 			Fields: map[string]any{
-				"ForeignId": "alice@wisc.edu",
+				"Name":      "alice@wisc.edu",
 				"Account":   "alice@ap.example",
 				"ExpiresAt": time.Unix(1767225600, 0),
 			},

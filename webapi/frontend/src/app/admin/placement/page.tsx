@@ -120,8 +120,8 @@ export default function AdminPlacementPage() {
 
           {tab === 'users' && directory && (
             <Directory
-              onIssueToken={(foreignId) => {
-                setIssueFor(foreignId);
+              onIssueToken={(identity) => {
+                setIssueFor(identity);
                 if (typeof window !== 'undefined') {
                   window.scrollTo({ top: 0, behavior: 'smooth' });
                 }

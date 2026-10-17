@@ -704,7 +704,7 @@ const openAPISchema = `{
       },
       "PlacementIdentity": {
         "allOf": [{"$ref": "#/components/schemas/PlacementEntityMeta"}, {"type": "object", "properties": {
-          "foreign_id": {"type": "string"},
+          "name": {"type": "string", "description": "The sign-in identity."},
           "account_id": {"type": "string"},
           "account": {"type": "string"},
           "expires_at": {"type": "string", "format": "date-time", "description": "Absent means never."},
@@ -744,7 +744,7 @@ const openAPISchema = `{
       },
       "PlacementEntityInput": {
         "type": "object",
-        "description": "Writable fields. Identity: foreign_id, account (name or id), expires_at (RFC 3339 or Unix seconds), display_name, comment. Account: name, authorizations, projects, default_project (lists replace the whole set). Project: name, description. Authorization: name, label, color, description, requestable. On PATCH only the fields present change, null clears a field, and expected_version guards against concurrent edits.",
+        "description": "Writable fields. Identity: name, account (name or id), expires_at (RFC 3339 or Unix seconds), display_name, comment. Account: name, authorizations, projects, default_project (lists replace the whole set). Project: name, description. Authorization: name, label, color, description, requestable. On PATCH only the fields present change, null clears a field, and expected_version guards against concurrent edits.",
         "additionalProperties": true,
         "properties": {
           "expected_version": {"type": "integer", "format": "int64", "description": "PATCH only."}
@@ -1136,7 +1136,7 @@ const openAPISchema = `{
         "tags": ["placement"],
         "parameters": [
           {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}},
-          {"name": "name", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Match one natural key (the foreign ID for identities)."},
+          {"name": "name", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Match one name."},
           {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}, "description": "ClassAd expression evaluated against each entity ad."},
           {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer"}}
         ],
