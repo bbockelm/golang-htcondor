@@ -186,9 +186,9 @@ test("a workflow's page lists its jobs, sorted by the server and loaded as it sc
   await sorted;
 
   await expect(list).toContainText('100 of 310 shown');
-  // The next page arrives as the end of the list scrolls into view, with
-  // nothing clicked.
-  await list.getByRole('button', { name: 'Load more' }).scrollIntoViewIfNeeded();
+  // The next page arrives as the end of the list's own area scrolls into
+  // view, with nothing clicked.
+  await list.getByTestId('workflow-jobs-scroll').evaluate((e) => e.scrollTo(0, e.scrollHeight));
   await expect(list).toContainText('200 of 310 shown');
 });
 
@@ -200,7 +200,8 @@ test('picking a bar of the memory histogram marks those jobs in the list', async
   await fig.locator('rect.cursor-pointer').last().click();
   const focus = page.getByTestId('job-focus');
   await expect(focus).toContainText('Marking jobs with peak memory');
-  await expect(page.locator('[data-testid="workflow-jobs"] tr[data-marked="true"]').first()).toBeVisible();
+  // The list's area scrolls to the first of them; the page does not.
+  await expect(page.locator('[data-testid="workflow-jobs"] tr[data-marked="true"]').first()).toBeInViewport();
   await focus.getByRole('button', { name: 'clear' }).click();
   await expect(focus).toHaveCount(0);
 });
@@ -221,6 +222,9 @@ test('clicking a job on the run-time scatter finds it in the job list', async ({
   await expect(row).toHaveCount(1);
   await expect(row.getByRole('link')).toHaveText(id);
   await expect(row).toBeInViewport();
+  // Found by scrolling the list's own area.
+  const area = page.getByTestId('workflow-jobs-scroll');
+  await expect.poll(() => area.evaluate((e) => e.scrollTop)).toBeGreaterThan(0);
   await expect(fig.getByTestId('scatter-picked')).toHaveCount(1);
 });
 

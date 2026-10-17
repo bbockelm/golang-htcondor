@@ -22,6 +22,7 @@ import type { BatchJobSort } from '../../src/lib/batchPage';
 import type { MetricsResponse } from '../../src/lib/metrics';
 import type { DrainEstimates } from '../../src/lib/drain';
 import { pinClock, SMOKE_NOW } from './clock';
+import { serveDynamicRoutes } from './dynamicRoutes';
 
 // Frozen sample responses for the smoke suite.
 //
@@ -325,6 +326,9 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
   // Every timestamp here is relative to SMOKE_NOW, so the page has to be
   // living at that instant too.
   await pinClock(page);
+  // Links to /jobs/<id> and the like are fetched in the background; the
+  // static server cannot answer them, the Go server can.
+  await serveDynamicRoutes(page);
   const table: Record<string, unknown> = {
     '/api/v1/whoami': { authenticated: true, user: 'e2e@test.htcondor.org' },
     '/api/v1/auth/me': sessionFixture,
