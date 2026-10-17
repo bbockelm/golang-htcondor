@@ -118,7 +118,7 @@ func TestPeriodicCollectorPingUsesConfiguredMethods(t *testing.T) {
 // is offered either way, so an anonymous SSL handshake keeps the
 // collector healthy when the configured methods are not accepted.
 func TestPeriodicCollectorPingOffersSSL(t *testing.T) {
-	certFile, keyFile := writeKeyPair(t, t.TempDir(), 0o600)
+	certFile, keyFile := writeKeyPairNamed(t, t.TempDir(), "localhost", "collector.crt", "collector.key")
 	collector := newPingDaemon(t, &security.SecurityConfig{
 		AuthMethods: []security.AuthMethod{security.AuthSSL},
 		CertFile:    certFile,
