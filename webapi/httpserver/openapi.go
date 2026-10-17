@@ -4310,17 +4310,43 @@ func (s *Handler) handleOpenAPISchema(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	// Parse and re-encode to ensure valid JSON and pretty printing
-	var schema interface{}
+	var schema map[string]any
 	if err := json.Unmarshal([]byte(openAPISchema), &schema); err != nil {
 		s.writeError(w, http.StatusInternalServerError, "Failed to parse OpenAPI schema")
 		return
 	}
+	s.setOpenAPIOAuth2URLs(schema)
 
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(schema); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to encode OpenAPI schema", "error", err)
 	}
+}
+
+// setOpenAPIOAuth2URLs points the schema's OAuth2 security scheme at the
+// endpoints this server advertises. The literal in openAPISchema names
+// the /mcp/ spelling, which a server without MCP does not route.
+func (s *Handler) setOpenAPIOAuth2URLs(schema map[string]any) {
+	flow, ok := nestedMap(schema, "components", "securitySchemes", "oauth2", "flows", "authorizationCode")
+	if !ok {
+		return
+	}
+	flow["authorizationUrl"] = s.oauth2EndpointPath("authorize")
+	flow["tokenUrl"] = s.oauth2EndpointPath("token")
+}
+
+// nestedMap walks m through the named keys, each of which must hold an
+// object.
+func nestedMap(m map[string]any, keys ...string) (map[string]any, bool) {
+	for _, k := range keys {
+		next, ok := m[k].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		m = next
+	}
+	return m, true
 }
 
 // handleSwaggerUI serves the Swagger UI

@@ -90,7 +90,7 @@ func (h *Handler) renderPlacementDeviceConsent(w http.ResponseWriter, approver *
 		html.EscapeString(clientName),
 		html.EscapeString(approver.PlacementIdentity),
 		html.EscapeString(userCode),
-		html.EscapeString(deviceVerifyPath()),
+		html.EscapeString(h.deviceVerifyPath()),
 		html.EscapeString(userCode),
 		consentCSRFField, html.EscapeString(token))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

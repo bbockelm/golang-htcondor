@@ -315,7 +315,7 @@ func TestRegistrationRefusesCondorLevelsNeverGranted(t *testing.T) {
 			t.Fatal(err)
 		}
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
-			OAuth2EndpointPath("register"), bytes.NewReader(body))
+			s.oauth2EndpointPath("register"), bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		s.ServeHTTP(rec, req)
