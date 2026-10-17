@@ -9,19 +9,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/watchpoll"
 )
 
 // Two federation hubs, end to end: the stack TestMultiAPEndToEnd builds,
-// with a second hub fed from the same two spokes, and the API server
-// discovering both through the collector. The hub reads go to is
-// stopped:
+// with a standby hub that federates ap1 only, and the API server
+// discovering both through the collector. The full hub, which reads go
+// to, is stopped:
 //
-//   - reads continue from the other hub within a bounded time, naming it;
-//   - a watch over jobs that stay queued does not fire across the switch
-//     (they are on the new hub too, but the evaluator's evidence starts
-//     over there);
+//   - reads continue from the standby within a bounded time, naming it,
+//     with ap1 settling and ap2 absent;
+//   - a watch over jobs that stay queued -- 2.0 on both APs -- does not
+//     fire across the switch, though ap2's 2.0 is missing from the
+//     standby, for longer than the absence horizon;
 //   - a job that completes after the switch fires its watch.
+const (
+	e2eFullHub    = "hub@127.0.0.1"
+	e2eStandbyHub = "standby@127.0.0.1"
+	// e2eAbsenceHorizon outlasts how long after a sighting an absence
+	// can first count: the reported staleness, the hub's minute of row
+	// refresh and a state interval.
+	e2eAbsenceHorizon = 80 * time.Second
+)
+
 func TestMultiAPHubFailoverEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test (runs two schedds, four htcondordb daemons and an API server)")
@@ -31,7 +42,7 @@ func TestMultiAPHubFailoverEndToEnd(t *testing.T) {
 		t.Skip("schedd sync refuses to run as root; run this test as an ordinary user")
 	}
 	started := time.Now()
-	s := startMultiAPStackWith(t, bin, multiAPStackOptions{secondHub: true})
+	s := startMultiAPStackWith(t, bin, multiAPStackOptions{secondHub: `regexp("^ap1@", Name)`})
 	s.waitList(t, "both APs' jobs to reach the API, with both APs fresh", 90*time.Second, s.me, func(l e2eList) bool {
 		for _, k := range e2eMine {
 			if !containsJob(l.keys(), k) {
@@ -47,9 +58,9 @@ func TestMultiAPHubFailoverEndToEnd(t *testing.T) {
 		name string
 		run  func(*testing.T, *e2eHubFailover)
 	}{
-		{"both hubs are discovered and reachable, one active", e2eBothHubsKnown},
-		{"watches register on the active hub", e2eFailoverRegisterWatches},
-		{"stopping the active hub moves reads to the other", e2eStopActiveHub},
+		{"both hubs are discovered, the full one active", e2eBothHubsKnown},
+		{"watches register on the full hub", e2eFailoverRegisterWatches},
+		{"stopping the full hub moves reads to the standby", e2eStopActiveHub},
 		{"a watch over queued jobs does not fire across the switch", e2eQueuedWatchHolds},
 		{"a job that completes after the switch fires its watch", e2eCompletesAfterSwitch},
 	} {
@@ -65,52 +76,34 @@ func TestMultiAPHubFailoverEndToEnd(t *testing.T) {
 
 type e2eHubFailover struct {
 	*e2eWatches
-	// active and other are the hubs' names before the switch.
-	active, other string
 	// queuedURL watches 2.0 on both APs, which stay idle; runURL watches
 	// 1.0 on both, of which ap1's runs after the switch.
 	queuedURL, runURL string
 }
 
-// proc returns the hub process advertising name.
-func (f *e2eHubFailover) proc(t *testing.T, name string) *htcondordbProc {
-	t.Helper()
-	switch name {
-	case "hub@127.0.0.1":
-		return f.s.hub
-	case "hub2@127.0.0.1":
-		return f.s.hub2
-	}
-	t.Fatalf("no hub process advertises %q", name)
-	return nil
-}
-
-// e2eBothHubsKnown: /api/v1/aps lists both hubs, both reachable with
-// both APs fresh, and one of them active.
+// e2eBothHubsKnown: /api/v1/aps lists both hubs, reachable; the full hub
+// holds both APs fresh and is active, the standby holds ap1.
 func e2eBothHubsKnown(t *testing.T, f *e2eHubFailover) {
 	var aps APsResponse
-	waitFor(t, "both hubs to be discovered and to hold both APs fresh", 90*time.Second, func() bool {
+	waitFor(t, "both hubs to be discovered, the full one active with both APs fresh", 150*time.Second, func() bool {
 		aps = f.s.aps(t)
-		if len(aps.Hubs) != 2 {
+		if len(aps.Hubs) != 2 || aps.Hub.Name != e2eFullHub {
 			return false
 		}
 		for _, h := range aps.Hubs {
-			if !h.Reachable || h.FreshAPs != 2 {
+			want := 2
+			if h.Name == e2eStandbyHub {
+				want = 1
+			}
+			if !h.Reachable || h.FreshAPs != want {
 				return false
 			}
 		}
 		return true
 	})
-	if !aps.Hub.Active || aps.Hub.Name == "" || aps.Sources.Hub != aps.Hub.Name {
+	if !aps.Hub.Active || aps.Sources.Hub != e2eFullHub {
 		t.Fatalf("active hub %+v, sources from %q", aps.Hub, aps.Sources.Hub)
 	}
-	f.active = aps.Hub.Name
-	for _, h := range aps.Hubs {
-		if h.Name != f.active {
-			f.other = h.Name
-		}
-	}
-	t.Logf("active hub %s, peer %s", f.active, f.other)
 }
 
 func (f *e2eHubFailover) registerOn(t *testing.T, label, constraint string) string {
@@ -135,23 +128,28 @@ func e2eFailoverRegisterWatches(t *testing.T, f *e2eHubFailover) {
 	f.runURL = f.registerOn(t, "run", "ClusterId == 1")
 }
 
-// e2eStopActiveHub: the active hub stops; reads come from the other,
-// naming it, within a bounded time, with both APs still fresh.
+// e2eStopActiveHub: the full hub stops; reads come from the standby,
+// naming it, within a bounded time: ap1's jobs, ap1 settling (just
+// switched) and ap2 absent.
 func e2eStopActiveHub(t *testing.T, f *e2eHubFailover) {
 	stopped := time.Now()
-	f.proc(t, f.active).Stop()
-	l := f.s.waitList(t, "reads to come from "+f.other, 60*time.Second, f.s.me, func(l e2eList) bool {
-		return l.Sources.Hub == f.other && l.Sources.Fresh == 2 && len(l.keys()) >= len(e2eMine)
+	f.s.hub.Stop()
+	l := f.s.waitList(t, "reads to come from "+e2eStandbyHub, 60*time.Second, f.s.me, func(l e2eList) bool {
+		return l.Sources.Hub == e2eStandbyHub && containsJob(l.keys(), e2eAP1Job1) && containsJob(l.keys(), e2eAP1Job2)
 	})
-	t.Logf("reads moved from %s to %s %s after it stopped", f.active, f.other, time.Since(stopped).Round(100*time.Millisecond))
-	for _, k := range e2eMine {
-		if !containsJob(l.keys(), k) {
-			t.Errorf("%s missing from %s's listing", k, f.other)
-		}
+	t.Logf("reads moved from %s to %s %s after it stopped", e2eFullHub, e2eStandbyHub, time.Since(stopped).Round(100*time.Millisecond))
+	if st := l.Sources.StateOf(e2eAP1); st != multiap.StateSettling && st != multiap.StateFresh {
+		t.Errorf("%s on the standby is %q, want settling (or fresh once settled)", e2eAP1, st)
+	}
+	if st := l.Sources.StateOf(e2eAP2); st != multiap.StateAbsent {
+		t.Errorf("%s on the standby is %q, want absent", e2eAP2, st)
+	}
+	if containsJob(l.keys(), e2eAP2Job2) {
+		t.Errorf("%s listed from a standby that does not federate %s", e2eAP2Job2, e2eAP2)
 	}
 	aps := f.s.aps(t)
-	if aps.Hub.Name != f.other || aps.HubSwitch == nil || aps.HubSwitch.Reason != "unreachable" ||
-		aps.HubSwitch.From != f.active || aps.HubSwitch.To != f.other {
+	if aps.Hub.Name != e2eStandbyHub || aps.HubSwitch == nil || aps.HubSwitch.Reason != "unreachable" ||
+		aps.HubSwitch.From != e2eFullHub || aps.HubSwitch.To != e2eStandbyHub {
 		t.Fatalf("after the switch: hub %+v, switch %+v", aps.Hub, aps.HubSwitch)
 	}
 	if code, body := f.s.get(t, "", "/readyz"); code != 200 {
@@ -159,12 +157,17 @@ func e2eStopActiveHub(t *testing.T, f *e2eHubFailover) {
 	}
 }
 
-// e2eQueuedWatchHolds: the jobs the queued watch tracks never left; the
-// evaluator runs passes on the new hub (a waiting poll is passes held
-// open) and nothing fires.
+// e2eQueuedWatchHolds: the jobs the queued watch tracks never left, but
+// ap2's 2.0 is missing from the standby. Passes run on the standby (a
+// waiting poll is passes held open) for longer than the absence
+// horizon, and nothing fires.
 func e2eQueuedWatchHolds(t *testing.T, f *e2eHubFailover) {
-	if a := f.poll(t, f.queuedURL, 10*time.Second); a.State != watchpoll.StateWaiting || a.Selected != 2 {
-		t.Fatalf("the queued watch across the switch = %+v, want still waiting on both 2.0s", a)
+	for start := time.Now(); time.Since(start) < e2eAbsenceHorizon; {
+		// Under the server's 30 s write timeout.
+		if a := f.poll(t, f.queuedURL, 20*time.Second); a.State != watchpoll.StateWaiting || a.Selected != 2 {
+			t.Fatalf("the queued watch %s after the switch = %+v, want still waiting on both 2.0s",
+				time.Since(start).Round(time.Second), a)
+		}
 	}
 	if a := f.poll(t, f.runURL, 0); a.State != watchpoll.StateWaiting {
 		t.Fatalf("the run watch = %+v before anything ran", a)
@@ -181,7 +184,7 @@ func e2eCompletesAfterSwitch(t *testing.T, f *e2eHubFailover) {
 	var a watchpoll.Answer
 	deadline := time.Now().Add(4 * time.Minute)
 	for a.State != watchpoll.StateFired && time.Now().Before(deadline) {
-		a = f.poll(t, f.runURL, 60*time.Second)
+		a = f.poll(t, f.runURL, 20*time.Second)
 	}
 	if a.State != watchpoll.StateFired {
 		t.Fatalf("the run watch did not fire after %s completed: %+v", e2eAP1Job1, a)
