@@ -94,6 +94,9 @@ type placementStatusResponse struct {
 	// Reason explains an Available=false, so an operator sees why in the
 	// UI rather than only in the server log.
 	Reason string `json:"reason,omitempty"`
+	// APIVersion is the placementd's PlacementdApiVersion; 2 or more
+	// means the directory endpoints under /placement/admin work.
+	APIVersion int `json:"api_version,omitempty"`
 }
 
 // handlePlacementPath dispatches /api/v1/placement/* to the handler for each
@@ -135,6 +138,7 @@ func (s *Handler) handlePlacementStatus(w http.ResponseWriter, r *http.Request) 
 		if p, ok := s.placementd.(*htcondor.Placementd); ok {
 			resp.Address = p.Address()
 		}
+		resp.APIVersion = s.placementAPIVersion(r.Context())
 	} else {
 		resp.Reason = "No condor_placementd was found. Set PLACEMENTD_ADDRESS_FILE, " +
 			"or run one and let it advertise to the collector."
