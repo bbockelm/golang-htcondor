@@ -164,9 +164,9 @@ func TestMultiAPListJobsREST(t *testing.T) {
 		t.Errorf("unbalanced constraint: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Pages with the db1: cursor; a hub1: token is refused.
+	// Pages with the hub-bound jh1: cursor; a hub1: token is refused.
 	b = decodeList(t, doAs(t, srv, "alice", http.MethodGet, "/api/v1/jobs?limit=2"))
-	if !b.HasMore || !strings.HasPrefix(b.NextPageToken, "db1:") {
+	if !b.HasMore || !strings.HasPrefix(b.NextPageToken, "jh1:") {
 		t.Fatalf("page 1 = %+v", b)
 	}
 	b2 := decodeList(t, doAs(t, srv, "alice", http.MethodGet, "/api/v1/jobs?limit=2&page_token="+url.QueryEscape(b.NextPageToken)))

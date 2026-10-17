@@ -487,19 +487,16 @@ func (s *Service) ListJobs(ctx context.Context, req ListRequest, yield func(Row)
 	if req.User == "" {
 		return nil, errorf(http.StatusUnauthorized, "the caller's identity could not be established")
 	}
+	ctx = s.PinHub(ctx)
+	v := s.snapshot(ctx)
 	var cursor dbrpc.SeqCursor
 	if req.PageToken != "" {
-		if !dbmirror.IsCursor(req.PageToken) {
-			return nil, errorf(http.StatusBadRequest, "this page token was not issued for the multi-AP job list")
-		}
-		c, err := dbmirror.DecodeCursor(req.PageToken)
+		c, err := decodeJobsToken(req.PageToken, v.hub.Name())
 		if err != nil {
-			return nil, errorf(http.StatusBadRequest, "unreadable page token: %v", err)
+			return nil, err
 		}
 		cursor = c
 	}
-	ctx = s.PinHub(ctx)
-	v := s.snapshot(ctx)
 	res := &ListResult{Sources: v.sources}
 	schedds, err := s.allowed(v, req.Schedd)
 	if err != nil {
@@ -547,7 +544,7 @@ func (s *Service) ListJobs(ctx context.Context, req ListRequest, yield func(Row)
 	}
 	if page != nil && page.More && !stopped {
 		res.HasMore = true
-		res.NextPageToken = dbmirror.EncodeCursor(page.Next)
+		res.NextPageToken = encodeJobsToken(v.hub.Name(), page.Next)
 	}
 	return res, nil
 }
