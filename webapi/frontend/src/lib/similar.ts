@@ -6,6 +6,17 @@ import type { RuntimeEstimateLevel } from './api';
 
 export type EstimateLevel = RuntimeEstimateLevel;
 
+// Quantiles describe a group's values: count of them, and the 10th to
+// 90th percentiles.
+export interface Quantiles {
+  count: number;
+  p10: number;
+  p25: number;
+  p50: number;
+  p75: number;
+  p90: number;
+}
+
 export interface SimilarJobsResponse {
   job_id: string;
   level: EstimateLevel; // the level listed
@@ -20,14 +31,10 @@ export interface SimilarJobsResponse {
   window: { days: number; max_jobs: number };
   // The runtimes the estimator holds for this group right now -- what the
   // estimate used; null when there are none to show.
-  runtimes: {
-    count: number;
-    p10: number;
-    p25: number;
-    p50: number;
-    p75: number;
-    p90: number;
-  } | null;
+  runtimes: Quantiles | null;
+  // The same runs' peak memory, in MiB, over those with a known peak;
+  // null when none has one.
+  memory: Quantiles | null;
   total: number; // jobs found in history for this group (<= window.max_jobs)
   offset: number;
   next_offset: number | null;
@@ -42,6 +49,20 @@ export interface SimilarJob {
   completed: number; // unix seconds
   runtime: number; // seconds
   exit_code: number; // always 0: only jobs that completed normally feed estimates
+  peak_memory_mib: number | null; // MiB; null when the record has none
+}
+
+/**
+ * peakMemoryMiB is the most memory a job has used, in MiB, read as the
+ * server reads it for similar jobs: ResidentSetSize_RAW (KiB, unrounded)
+ * when the ad has it, else MemoryUsage. A rounded ResidentSetSize can sit
+ * a quarter above the measured figure, which would misplace the job
+ * against similar jobs' unrounded peaks.
+ */
+export function peakMemoryMiB(job: Record<string, unknown> | undefined): number | undefined {
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+  const raw = n(job?.ResidentSetSize_RAW);
+  return raw !== undefined ? raw / 1024 : n(job?.MemoryUsage);
 }
 
 export interface UtilizationForJob {

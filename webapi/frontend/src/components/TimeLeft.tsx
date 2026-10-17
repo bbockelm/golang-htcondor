@@ -1,7 +1,8 @@
 'use client';
 
 // The jobs listing's "Time left" cells and the batch's "running longer
-// than usual" chip. The wording lives in lib/timeLeft.
+// than usual" and "using more memory than usual" chips. The wording
+// lives in lib/timeLeft.
 
 import { RoughChip } from '@/app/jobs/[id]/RuntimeEstimate';
 import type { DagNodeCounts } from '@/lib/batches';
@@ -10,15 +11,20 @@ import {
   dagTimeLeft,
   jobTimeLeft,
   longerThanUsualText,
+  moreMemoryText,
   rangeBar,
   type TimedJob,
 } from '@/lib/timeLeft';
 
 // LongerThanUsualChip is amber, like the job page's warnings: a job past
 // what comparable jobs took may be stuck.
-export function LongerThanUsualChip({ text }: { text: string }) {
+// A job using more memory than similar jobs did gets the same chip.
+export function LongerThanUsualChip({ text, title }: { text: string; title?: string }) {
   return (
-    <span className="inline-flex whitespace-nowrap rounded-full bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800">
+    <span
+      className="inline-flex whitespace-nowrap rounded-full bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800"
+      title={title}
+    >
       {text}
     </span>
   );
@@ -31,6 +37,18 @@ export function BatchLongerThanUsual({ jobs }: { jobs: readonly TimedJob[] }) {
   if (!text) return null;
   return (
     <div className="mt-1" data-testid="longer-than-usual">
+      <LongerThanUsualChip text={text} />
+    </div>
+  );
+}
+
+// BatchMoreMemoryThanUsual is the batch's memory chip, or nothing when
+// no running job is past what similar jobs peaked at.
+export function BatchMoreMemoryThanUsual({ jobs }: { jobs: readonly TimedJob[] }) {
+  const text = moreMemoryText(jobs);
+  if (!text) return null;
+  return (
+    <div className="mt-1" data-testid="more-memory-than-usual">
       <LongerThanUsualChip text={text} />
     </div>
   );
@@ -88,6 +106,11 @@ export function JobTimeLeftCell({
         {t.main && <span className={t.main === '—' ? 'text-gray-400' : 'font-medium text-gray-800'}>{t.main}</span>}
         {t.rough && <RoughChip />}
       </div>
+      {t.memory && (
+        <div className="mt-0.5" data-testid="job-more-memory">
+          <LongerThanUsualChip text="More memory than usual" title={t.memory} />
+        </div>
+      )}
       {t.sub && <div className="mt-0.5 text-[11px] text-gray-500">{t.sub}</div>}
       {bar && <RangeBar g={bar} />}
     </div>

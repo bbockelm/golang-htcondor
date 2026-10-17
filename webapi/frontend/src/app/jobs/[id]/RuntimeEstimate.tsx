@@ -132,6 +132,18 @@ export function RuntimeEstimateView({
   );
 }
 
+// liveEstimateQuery is how a waiting or running job's page reads its
+// estimate. The memory card reads the same query, so the page asks once.
+export function liveEstimateQuery(jobID: string, status: number | undefined) {
+  return {
+    queryKey: ['runtime-estimate', jobID],
+    enabled: status === 1 || status === 2,
+    retry: false,
+    refetchInterval: status === 2 ? 60_000 : 300_000,
+    queryFn: () => api.jobs.runtimeEstimate(jobID),
+  };
+}
+
 // RuntimeEstimateField fetches and shows the estimate for a waiting or
 // running job. A running job's remaining time moves, so it is asked
 // again every minute; a waiting job's estimate changes only as other
@@ -145,13 +157,7 @@ export function RuntimeEstimateField({
   status: number | undefined;
 } & RuntimeEstimateActions) {
   const live = status === 1 || status === 2;
-  const { data, dataUpdatedAt } = useQuery({
-    queryKey: ['runtime-estimate', jobID],
-    enabled: live,
-    retry: false,
-    refetchInterval: status === 2 ? 60_000 : 300_000,
-    queryFn: () => api.jobs.runtimeEstimate(jobID),
-  });
+  const { data, dataUpdatedAt } = useQuery(liveEstimateQuery(jobID, status));
   if (!live) return null;
   return (
     <RuntimeEstimateView

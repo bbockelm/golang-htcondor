@@ -193,3 +193,56 @@ func TestRuntimeLevelTextCoversLevels(t *testing.T) {
 		t.Errorf("%d level texts for %d levels", len(runtimeLevelText), len(levels))
 	}
 }
+
+// The memory block satisfies the schema in each shape it takes.
+func TestRuntimeEstimateMemoryValidatesAgainstTheSchema(t *testing.T) {
+	s := contractServer(t)
+	peak, req, above := 6200.0, 2048.0, 3
+	for name, m := range map[string]*runtimeest.MemoryEstimate{
+		"group only": {SampleCount: 9, P10MiB: 900, P25MiB: 1000, P50MiB: 1200, P75MiB: 1500, P90MiB: 2000},
+		"everything": {SampleCount: 9, P10MiB: 900, P25MiB: 1000, P50MiB: 1200, P75MiB: 1500, P90MiB: 2000,
+			PeakMiB: &peak, RequestedMiB: &req, AboveRequested: &above, AboveUsual: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := runtimeest.Result{Available: true, EstimateSeconds: 100, P10Seconds: 60, P90Seconds: 300,
+				Basis: &runtimeest.Basis{Level: "template", SampleCount: 9}, Memory: m}
+			payload := map[string]interface{}{"job_id": "1.0", "job": map[string]interface{}{}, "runtime_estimate": r}
+			validateStructured(t, "get_job", finalized(t, s, "get_job", structuredTextResult("", payload)))
+		})
+	}
+}
+
+func TestRenderMemoryEstimate(t *testing.T) {
+	elapsed, remaining := 600.0, 3000.0
+	peak, req, above := 6246.0, 2048.0, 3
+	got := renderRuntimeEstimate(runtimeest.Result{
+		Available: true, EstimateSeconds: 3600, P10Seconds: 1800, P90Seconds: 7200,
+		Basis:          &runtimeest.Basis{Level: "template", SampleCount: 12},
+		ElapsedSeconds: &elapsed, RemainingSeconds: &remaining,
+		Memory: &runtimeest.MemoryEstimate{SampleCount: 9, P10MiB: 900, P25MiB: 1000, P50MiB: 1229, P75MiB: 1500, P90MiB: 2000,
+			PeakMiB: &peak, RequestedMiB: &req, AboveRequested: &above, AboveUsual: true},
+	})
+	for _, want := range []string{
+		"Peak memory of those jobs: about 1.2 GiB (usually 900 MiB to 2.0 GiB; 9 with a recorded peak).",
+		"This job's peak so far: 6.1 GiB, well above nearly all of them.",
+		"3 of 9 peaked above the 2.0 GiB requested.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	got = renderRuntimeEstimate(runtimeest.Result{
+		Available: true, EstimateSeconds: 3600, P10Seconds: 1800, P90Seconds: 7200, Rough: true,
+		Basis:  &runtimeest.Basis{Level: "owner", SampleCount: 40},
+		Memory: &runtimeest.MemoryEstimate{SampleCount: 40, P10MiB: 100, P50MiB: 500, P90MiB: 4096, Rough: true},
+	})
+	if want := "Peak memory of those jobs: roughly 500 MiB (anywhere from 100 MiB to 4.0 GiB; 40 with a recorded peak)."; !strings.Contains(got, want) {
+		t.Errorf("rough: missing %q in %q", want, got)
+	}
+	if strings.Contains(got, "This job") || strings.Contains(got, "requested") {
+		t.Errorf("rough, no peak or request: %q", got)
+	}
+	if got := renderRuntimeEstimate(runtimeest.Result{Available: true, EstimateSeconds: 60, P10Seconds: 60, P90Seconds: 60}); strings.Contains(got, "memory") {
+		t.Errorf("no memory block: %q", got)
+	}
+}

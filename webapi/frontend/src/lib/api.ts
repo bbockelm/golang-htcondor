@@ -1146,7 +1146,31 @@ export interface RuntimeEstimate {
   elapsed_seconds?: number;
   remaining_seconds?: number;
   exceeded_history: boolean;
+  // What the same group's runs peaked at; absent when none has a known
+  // peak.
+  memory?: RuntimeMemory;
   model: { trained_through?: string; jobs_ingested: number };
+}
+
+// RuntimeMemory mirrors runtimeest.MemoryEstimate: the peak memory of the
+// runs an estimate's group holds, in MiB, over those with a known peak.
+export interface RuntimeMemory {
+  sample_count: number;
+  p10_mib: number;
+  p25_mib: number;
+  p50_mib: number;
+  p75_mib: number;
+  p90_mib: number;
+  // The job's own peak so far; for a finished job, its peak.
+  peak_mib?: number;
+  // The job's RequestMemory, and how many of the group's runs peaked
+  // above it.
+  requested_mib?: number;
+  above_requested?: number;
+  rough: boolean;
+  // A running job already well past what nearly every run of a specific
+  // group peaked at.
+  above_usual: boolean;
 }
 
 // JobRuntimeEstimate is one job's entry in RuntimeEstimates: the

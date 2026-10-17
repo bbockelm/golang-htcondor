@@ -51,3 +51,28 @@ test('a job that requested no GPUs has no GPU row', async ({ page }) => {
   await expect(resources.getByRole('cell', { name: 'CPUs', exact: true })).toBeVisible();
   await expect(resources.getByRole('cell', { name: 'GPUs', exact: true })).toHaveCount(0);
 });
+
+test('an archived job compares its peak memory with similar jobs', async ({ page }) => {
+  await page.route('**/api/v1/jobs/9301.0/runtime-estimate', (route) =>
+    route.fulfill({
+      json: {
+        job_id: '9301.0',
+        available: true,
+        estimate_seconds: 3000,
+        p10_seconds: 2400,
+        p90_seconds: 3600,
+        basis: { level: 'exact', sample_count: 40 },
+        exceeded_history: false,
+        memory: { sample_count: 40, p10_mib: 5200, p25_mib: 5600, p50_mib: 6000, p75_mib: 6600, p90_mib: 7100, peak_mib: 7325, requested_mib: 10987, above_requested: 0, rough: false, above_usual: false },
+        model: { jobs_ingested: 5000 },
+      },
+    }),
+  );
+  await openArchivedRestartedJob(page);
+  const memory = page.getByTestId('memory-estimate');
+  await expect(memory.getByText('Peaked at 7.2 GB')).toBeVisible();
+  await expect(memory.getByText('Similar jobs peaked at about 5.9 GB; 9 in 10 stayed under 6.9 GB.')).toBeVisible();
+  // A finished job is not compared with its request, nor called above usual.
+  await expect(memory.getByText(/requested/)).toHaveCount(0);
+  await expect(memory.getByText('More memory than usual')).toHaveCount(0);
+});

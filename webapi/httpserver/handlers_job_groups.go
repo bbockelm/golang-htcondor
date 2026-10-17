@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -58,12 +59,19 @@ func (s *Handler) lookupJob(ctx context.Context, r *http.Request, cluster, proc 
 	if len(ads) > 0 {
 		return ads[0], true, nil
 	}
+	return s.lookupFinishedJob(ctx, r, constraint, projection)
+}
+
+// lookupFinishedJob is lookupJob's history half: the job constraint
+// selects, already scoped to the caller, from the mirror when it may
+// answer, else the schedd's history.
+func (s *Handler) lookupFinishedJob(ctx context.Context, r *http.Request, constraint string, projection []string) (*classad.ClassAd, bool, error) {
 	if s.mirrorAllowed(ctx, r) == nil {
 		if ads, err := s.mirrorRows(ctx, "history", constraint, projection, 1); err == nil && len(ads) > 0 {
 			return ads[0], true, nil
 		}
 	}
-	ads, err = s.getSchedd().QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
+	ads, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
 		Source: htcondor.HistorySourceJobHistory, Limit: 1, ScanLimit: 200000, Projection: projection, Backwards: true,
 	})
 	if err != nil {
@@ -156,6 +164,7 @@ type SimilarJobsResponse struct {
 	Levels        []SimilarLevel             `json:"levels"`
 	Window        SimilarWindow              `json:"window"`
 	Runtimes      *runtimeest.RuntimeSummary `json:"runtimes"`
+	Memory        *runtimeest.MemorySummary  `json:"memory"`
 	Total         int                        `json:"total"`
 	Offset        int                        `json:"offset"`
 	NextOffset    *int                       `json:"next_offset"`
@@ -185,6 +194,9 @@ type SimilarJob struct {
 	Completed int64   `json:"completed"`
 	Runtime   float64 `json:"runtime"`
 	ExitCode  int     `json:"exit_code"`
+	// PeakMemoryMiB is the most memory it used, as the estimator reads
+	// it (runtimeest.PeakMemoryMiB); null when the record has none.
+	PeakMemoryMiB *float64 `json:"peak_memory_mib"`
 }
 
 // handleJobSimilar handles GET /api/v1/jobs/{id}/similar: the finished
@@ -196,8 +208,8 @@ type SimilarJob struct {
 // for which group each falls in, the same recency window (the backfill)
 // and the same bound on how many recent runtimes a group answers from
 // (WindowSize). It can still differ from the estimator's own window, and
-// the runtimes block -- read from the estimator itself -- is the one an
-// estimate used:
+// the runtimes and memory blocks -- read from the estimator itself -- are
+// the ones an estimate used:
 //   - the estimator keeps a group's newest runtimes while the group stays
 //     active, so a long-running server can hold runs older than the
 //     backfill that this read does not reach; a group that went quiet
@@ -293,6 +305,7 @@ func (s *Handler) handleJobSimilar(w http.ResponseWriter, r *http.Request, clust
 	if s.runtimeEst != nil {
 		maxJobs = s.runtimeEst.WindowSize()
 		resp.Runtimes = runtimeest.Summarize(s.runtimeEst.GroupRuntimes(keys, level))
+		resp.Memory = runtimeest.Summarize(s.runtimeEst.GroupMemory(keys, level))
 	}
 	resp.Window = SimilarWindow{Days: backfill.Hours() / 24, MaxJobs: maxJobs}
 
@@ -360,6 +373,10 @@ func (s *Handler) similarMembers(ctx context.Context, r *http.Request, ad *class
 		job := SimilarJob{ID: fmt.Sprintf("%d.%d", c, p), Cluster: c, Proc: p, Completed: completed, Runtime: runtime}
 		if q, ok := h.EvaluateAttrInt("QDate"); ok && q > 0 {
 			job.Submitted = &q
+		}
+		if mib, ok := runtimeest.PeakMemoryMiB(h); ok {
+			mib = math.Round(mib)
+			job.PeakMemoryMiB = &mib
 		}
 		members = append(members, job)
 		return len(members) < maxJobs

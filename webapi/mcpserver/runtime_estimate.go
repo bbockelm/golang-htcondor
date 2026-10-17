@@ -26,6 +26,19 @@ var runtimeEstimateSchema = obj(map[string]interface{}{
 	"elapsed_seconds":   numberSchema,
 	"remaining_seconds": numberSchema,
 	"exceeded_history":  boolSchema,
+	"memory": obj(map[string]interface{}{
+		"sample_count":    intSchema,
+		"p10_mib":         numberSchema,
+		"p25_mib":         numberSchema,
+		"p50_mib":         numberSchema,
+		"p75_mib":         numberSchema,
+		"p90_mib":         numberSchema,
+		"peak_mib":        numberSchema,
+		"requested_mib":   numberSchema,
+		"above_requested": intSchema,
+		"rough":           boolSchema,
+		"above_usual":     boolSchema,
+	}, "sample_count", "p10_mib", "p25_mib", "p50_mib", "p75_mib", "p90_mib", "rough", "above_usual"),
 	"model": obj(map[string]interface{}{
 		"trained_through": strSchema,
 		"jobs_ingested":   intSchema,
@@ -85,6 +98,38 @@ func renderRuntimeEstimate(r runtimeest.Result) string {
 	case r.RemainingSeconds != nil && r.ElapsedSeconds != nil:
 		fmt.Fprintf(&b, " Running %s so far; about %s remaining.",
 			secondsText(*r.ElapsedSeconds), secondsText(*r.RemainingSeconds))
+	}
+	b.WriteString(renderMemoryEstimate(r.Memory, r.ElapsedSeconds != nil))
+	return b.String()
+}
+
+// renderMemoryEstimate is the memory sentences after a runtime estimate:
+// what the same jobs peaked at, this job's own peak, and how many of
+// them went past its request. Nothing when none of them has a peak.
+func renderMemoryEstimate(m *runtimeest.MemoryEstimate, running bool) string {
+	if m == nil {
+		return ""
+	}
+	var b strings.Builder
+	about, spread := "about", "usually"
+	if m.Rough {
+		about, spread = "roughly", "anywhere from"
+	}
+	fmt.Fprintf(&b, " Peak memory of those jobs: %s %s (%s %s to %s; %d with a recorded peak).",
+		about, mib(m.P50MiB), spread, mib(m.P10MiB), mib(m.P90MiB), m.SampleCount)
+	if m.PeakMiB != nil {
+		if running {
+			fmt.Fprintf(&b, " This job's peak so far: %s", mib(*m.PeakMiB))
+		} else {
+			fmt.Fprintf(&b, " This job's recorded peak: %s", mib(*m.PeakMiB))
+		}
+		if m.AboveUsual {
+			b.WriteString(", well above nearly all of them")
+		}
+		b.WriteString(".")
+	}
+	if m.RequestedMiB != nil && m.AboveRequested != nil {
+		fmt.Fprintf(&b, " %d of %d peaked above the %s requested.", *m.AboveRequested, m.SampleCount, mib(*m.RequestedMiB))
 	}
 	return b.String()
 }

@@ -21,6 +21,8 @@ const runningAd = {
   JobBatchName: 'blast-search',
   QDate: startedRecently - 120,
   JobStartDate: startedRecently,
+  RequestMemory: 2048,
+  ResidentSetSize_RAW: 1536 * 1024,
 };
 
 // The static export has one page per route; /jobs/<id> is served by the
@@ -56,6 +58,7 @@ test("a job's page links its batch, its workflow and the jobs its estimate is ba
         elapsed_seconds: 1800,
         remaining_seconds: 900,
         exceeded_history: false,
+        memory: { sample_count: 35, p10_mib: 900, p25_mib: 1056, p50_mib: 1200, p75_mib: 1380, p90_mib: 1560, peak_mib: 1536, requested_mib: 2048, above_requested: 0, rough: false, above_usual: false },
         model: { jobs_ingested: 5000 },
       },
     }),
@@ -72,6 +75,13 @@ test("a job's page links its batch, its workflow and the jobs its estimate is ba
   await expect(similar.getByRole('radio', { checked: true })).toContainText('same command, numbers ignored');
   await expect(similar.getByRole('link').first()).toHaveAttribute('href', /^\/archive\/\d+\.\d+$/);
   await expect(similar.getByTestId('spread-mark')).toBeVisible();
+  // Under the run times, the same group's peak memory: this job's peak
+  // so far and its request on the same axis.
+  const memory = similar.getByTestId('memory-spread');
+  await expect(memory.getByTestId('memory-spread-mark')).toBeVisible();
+  await expect(memory.getByText('Requested', { exact: true })).toBeVisible();
+  await expect(memory).toContainText('Half of these 36 jobs peaked at 1 GB to 1.3 GB (typically 1.2 GB); 9 in 10 stayed under 1.5 GB. This job so far: 1.5 GB. Requested: 2 GB.');
+  await expect(similar.getByRole('columnheader', { name: 'Peak memory' })).toBeVisible();
 
   // Wider: every job running the same program.
   await similar.getByRole('radio', { name: /same program/ }).click();

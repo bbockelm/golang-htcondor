@@ -11,9 +11,10 @@
 // running nodes are expected to finish. Pure functions, so the wording is
 // tested without rendering.
 
-import type { JobRuntimeEstimate } from '@/lib/api';
+import type { JobRuntimeEstimate, RuntimeMemory } from '@/lib/api';
 import type { BatchJob, DagNodeCounts } from '@/lib/batches';
 import { approxDuration, humanDuration } from '@/lib/duration';
+import { formatMiB } from '@/lib/utilization';
 import type { EstimateRequestJob } from '@/lib/useRuntimeEstimates';
 
 // A job as these functions see it: whether it waits or runs, and its
@@ -98,6 +99,31 @@ export function longerThanUsualText(jobs: readonly TimedJob[]): string | undefin
   if (n === 0) return undefined;
   if (jobs.length === 1) return 'Running longer than usual';
   return `${n.toLocaleString()} running longer than usual`;
+}
+
+// isMoreMemoryThanUsual: a running job that has already peaked well past
+// what nearly every similar job did.
+export function isMoreMemoryThanUsual(j: TimedJob): boolean {
+  return j.status === 'running' && !!j.estimate?.available && !!j.estimate.memory?.above_usual;
+}
+
+// moreMemoryTitle is the hover text of a job's "More memory than usual"
+// chip: its peak, and what similar jobs peaked at.
+export function moreMemoryTitle(m: RuntimeMemory): string {
+  const peers = `peak at about ${formatMiB(m.p50_mib)}, 9 in 10 under ${formatMiB(m.p90_mib)}`;
+  return m.peak_mib !== undefined
+    ? `Peak so far ${formatMiB(m.peak_mib)}; similar jobs ${peers}`
+    : `Similar jobs ${peers}`;
+}
+
+// moreMemoryText is the batch's memory chip, or undefined when no job is
+// past its usual memory. A one-job batch's chip names the job, not a
+// count.
+export function moreMemoryText(jobs: readonly TimedJob[]): string | undefined {
+  const n = jobs.filter(isMoreMemoryThanUsual).length;
+  if (n === 0) return undefined;
+  if (jobs.length === 1) return 'Using more memory than usual';
+  return `${n.toLocaleString()} using more memory than usual`;
 }
 
 // The Time left cell of a batch row.
@@ -296,11 +322,20 @@ export interface JobTimeLeft {
   rough?: boolean;
   // The amber "Longer than usual" chip.
   longer?: boolean;
+  // The amber "More memory than usual" chip's hover text, when it shows.
+  memory?: string;
 }
 
 // jobTimeLeft is one waiting or running job's cell, or undefined for a
 // job that is neither.
 export function jobTimeLeft(j: TimedJob, fetchedAt: number, now: number): JobTimeLeft | undefined {
+  const t = jobRuntimeLeft(j, fetchedAt, now);
+  if (t && isMoreMemoryThanUsual(j)) t.memory = moreMemoryTitle(j.estimate!.memory!);
+  return t;
+}
+
+// jobRuntimeLeft is jobTimeLeft's run time part.
+function jobRuntimeLeft(j: TimedJob, fetchedAt: number, now: number): JobTimeLeft | undefined {
   if (j.status === 'other') return undefined;
   const e = j.estimate;
   if (!usable(e)) return { main: '—', title: NO_HISTORY };

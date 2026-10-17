@@ -146,6 +146,9 @@ type Result struct {
 	// to give. The estimate and bounds are then what history said before
 	// the job started.
 	ExceededHistory bool `json:"exceeded_history"`
+	// Memory is what the same group's runs peaked at, and how this job
+	// compares. Absent when none of them has a known peak.
+	Memory *MemoryEstimate `json:"memory,omitempty"`
 	// Model describes the history behind the estimate.
 	Model Model `json:"model"`
 }
@@ -178,13 +181,18 @@ type Query struct {
 	// seconds, how long the current execution has run.
 	Running bool
 	Elapsed float64
+	// PeakMemoryMiB is the job's peak memory so far (see PeakMemoryMiB)
+	// and RequestMemoryMiB its RequestMemory, both MiB, 0 when unknown.
+	PeakMemoryMiB    float64
+	RequestMemoryMiB float64
 }
 
 // QueryAttrs are the job attributes QueryFromAd reads.
 //
 // Clipped, so a caller that appends to it gets its own copy rather than
 // writing into one shared by every request.
-var QueryAttrs = slices.Clip(append(slices.Clone(FeatureAttrs), "JobStatus", "JobCurrentStartDate", "JobStartDate", "ServerTime"))
+var QueryAttrs = slices.Clip(slices.Concat(FeatureAttrs,
+	[]string{"JobStatus", "JobCurrentStartDate", "JobStartDate", "ServerTime", "RequestMemory"}, PeakMemoryAttrs))
 
 // QueryFromAd builds a Query from a live job ad. now is used when the
 // ad does not carry the schedd's ServerTime.
@@ -194,7 +202,8 @@ var QueryAttrs = slices.Clip(append(slices.Clone(FeatureAttrs), "JobStatus", "Jo
 // running job with neither is treated as not running: an elapsed time
 // of zero would be a guess presented as a measurement.
 func QueryFromAd(ad *classad.ClassAd, now time.Time) Query {
-	q := Query{Features: FeaturesFromAd(ad)}
+	q := Query{Features: FeaturesFromAd(ad), RequestMemoryMiB: requestMemoryMiB(ad)}
+	q.PeakMemoryMiB, _ = PeakMemoryMiB(ad)
 	status, _ := intAttr(ad, "JobStatus")
 	if status != 2 {
 		return q
@@ -424,7 +433,7 @@ func (s *state) ingest(r *record, cfg Config) {
 			w = &window{}
 			s.groups[l][key] = w
 		}
-		w.add(r.runtime, r.at, cfg.Window, retainFactor*cfg.Window)
+		w.addRun(r.runtime, r.mem, r.at, cfg.Window, retainFactor*cfg.Window)
 	}
 	s.jobs++
 	s.newest = max(s.newest, r.at)
@@ -644,6 +653,7 @@ func (p *prepared) finish(q Query, m Model) Result {
 	res.EstimateSeconds = seconds(est)
 	res.P10Seconds = seconds(p10)
 	res.P90Seconds = seconds(p90)
+	res.Memory = memoryOf(&q, p.w, p.lvl)
 	return res
 }
 
@@ -832,12 +842,13 @@ func (e *Estimator) Stats() Stats {
 }
 
 // HistoryAttrs are the attributes Batch.AddAd reads from a history
-// record: the features, and what decides whether and how long it ran.
+// record: the features, what decides whether and how long it ran, and
+// its peak memory.
 // Clipped for the same reason as QueryAttrs.
-var HistoryAttrs = slices.Clip(append(slices.Clone(FeatureAttrs),
+var HistoryAttrs = slices.Clip(append(append(slices.Clone(FeatureAttrs),
 	"CommittedTime", "RemoteWallClockTime", "CompletionDate", "EnteredHistoryTime",
 	"ExitCode", "ExitBySignal", "JobStatus", "QDate", "JobCurrentStartDate", "JobStartDate",
-	"GlobalJobId"))
+	"GlobalJobId"), PeakMemoryAttrs...))
 
 // CompletedRuntime is how long a finished job ran, and whether it is a
 // job whose runtime says anything about the next one like it.
@@ -875,7 +886,8 @@ func CompletedRuntime(ad *classad.ClassAd) (float64, bool) {
 type record struct {
 	keys      Keys
 	runtime   float32
-	at        int64 // completed
+	mem       float32 // peak MiB; 0 unknown
+	at        int64   // completed
 	submitted int64
 	started   int64
 	cluster   int64
@@ -920,6 +932,11 @@ type Completion struct {
 	// one falls back to the other, and both to Completed, which scores
 	// the job against everything that finished before it did.
 	Submitted, Started, Completed time.Time
+	// PeakMemoryMiB is the most memory it used, in MiB (see
+	// PeakMemoryMiB). Zero, negative or not finite means unknown: the
+	// job still counts for its runtime, and is left out of its groups'
+	// memory figures.
+	PeakMemoryMiB float64
 }
 
 // Add records a completed job. A non-positive runtime is ignored.
@@ -944,9 +961,14 @@ func (b *Batch) Add(c Completion) {
 	if sub <= 0 {
 		sub, start = at, at
 	}
+	var mem float32
+	if c.PeakMemoryMiB > 0 && !math.IsInf(c.PeakMemoryMiB, 0) {
+		mem = float32(c.PeakMemoryMiB)
+	}
 	b.recs = append(b.recs, record{
 		keys:      k,
 		runtime:   float32(c.Runtime),
+		mem:       mem,
 		at:        at,
 		submitted: min(sub, at),
 		started:   min(start, at),
@@ -966,7 +988,8 @@ func unixOr0(t time.Time) int64 {
 // reports whether it did. The completion time is CompletionDate, else
 // EnteredHistoryTime; a record with neither is refused, since it cannot
 // be placed in order. It is scored as of QDate and of
-// JobCurrentStartDate (else JobStartDate).
+// JobCurrentStartDate (else JobStartDate). Its peak memory is
+// PeakMemoryMiB's.
 func (b *Batch) AddAd(ad *classad.ClassAd) bool {
 	runtime, at, ok := HistoryRecord(ad)
 	if !ok {
@@ -974,6 +997,7 @@ func (b *Batch) AddAd(ad *classad.ClassAd) bool {
 	}
 	proc, _ := intAttr(ad, "ProcId")
 	c := Completion{Features: FeaturesFromAd(ad), ProcID: proc, Runtime: runtime, Completed: time.Unix(at, 0)}
+	c.PeakMemoryMiB, _ = PeakMemoryMiB(ad)
 	if q, _ := intAttr(ad, "QDate"); q > 0 {
 		c.Submitted = time.Unix(q, 0)
 	}

@@ -24,36 +24,69 @@ import (
 type window struct {
 	ring   []entry // insertion order; circular once full
 	sorted []float32
-	next   int   // where the next value goes once the ring is full
-	at     int64 // the newest value's time, unix seconds
+	// mem is the peak memory, ascending, of the same values sorted holds,
+	// leaving out those whose memory is unknown. A group's memory figures
+	// then describe exactly the runs its runtime figures do. Nil in a
+	// window that never records memory (an owner's errors, say).
+	mem  []float32
+	next int   // where the next value goes once the ring is full
+	at   int64 // the newest value's time, unix seconds
 }
 
-// entry is one value. Its time is unsigned 32-bit seconds, which halves
-// the entry and lasts until 2106.
+// entry is one value. Its time is unsigned 32-bit seconds, which lasts
+// until 2106 and, with the two float32s, keeps an entry at 12 bytes
+// rather than 16. mem is a run's peak memory in MiB, 0 when unknown;
+// float32 is ample for a figure HTCondor reports in whole MiB.
 type entry struct {
-	v  float32
-	at uint32
+	v   float32
+	mem float32
+	at  uint32
 }
 
 // add records a value from time at. The window answers from its newest
 // size values and retains at most retain (>= size) of them.
 func (w *window) add(x float32, at int64, size, retain int) {
+	w.addRun(x, 0, at, size, retain)
+}
+
+// addRun is add for a run that also carries its peak memory in MiB, 0
+// when that is unknown.
+func (w *window) addRun(x, mem float32, at int64, size, retain int) {
 	w.at = max(w.at, at)
 	if len(w.sorted) >= size {
-		// The oldest value answered from leaves the answer.
-		old := w.newest(size - 1).v
-		if i, ok := slices.BinarySearch(w.sorted, old); ok {
-			w.sorted = slices.Delete(w.sorted, i, i+1)
+		// The oldest value answered from leaves the answer, and its
+		// memory with it.
+		old := w.newest(size - 1)
+		w.sorted = deleteSorted(w.sorted, old.v)
+		if old.mem > 0 {
+			w.mem = deleteSorted(w.mem, old.mem)
 		}
 	}
+	e := entry{v: x, mem: mem, at: clampUnix32(at)}
 	if len(w.ring) < retain {
-		w.ring = append(w.ring, entry{x, clampUnix32(at)})
+		w.ring = append(w.ring, e)
 	} else {
-		w.ring[w.next] = entry{x, clampUnix32(at)}
+		w.ring[w.next] = e
 		w.next = (w.next + 1) % len(w.ring)
 	}
-	i, _ := slices.BinarySearch(w.sorted, x)
-	w.sorted = slices.Insert(w.sorted, i, x)
+	w.sorted = insertSorted(w.sorted, x)
+	if mem > 0 {
+		w.mem = insertSorted(w.mem, mem)
+	}
+}
+
+// insertSorted adds x to ascending s.
+func insertSorted(s []float32, x float32) []float32 {
+	i, _ := slices.BinarySearch(s, x)
+	return slices.Insert(s, i, x)
+}
+
+// deleteSorted removes one x from ascending s, if it is there.
+func deleteSorted(s []float32, x float32) []float32 {
+	if i, ok := slices.BinarySearch(s, x); ok {
+		return slices.Delete(s, i, i+1)
+	}
+	return s
 }
 
 // newest is the k-th newest retained value, 0 being the newest.
