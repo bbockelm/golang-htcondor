@@ -49,8 +49,9 @@ func (s *Handler) handleMultiMetricsQuery(w http.ResponseWriter, r *http.Request
 	off := func(src multiap.Sources) {
 		s.writeJSON(w, http.StatusOK, metricsResponse{Enabled: false, Table: table, Sources: &src})
 	}
-	if !svc.Hub.Federates(multiap.TableJobMetrics) {
-		off(svc.TableSources(svc.Sources(), multiap.TableJobMetrics))
+	// Before the parameters, as single-AP mode reports the sampler off.
+	if src, isOff := svc.MetricsOff(ctx); isOff {
+		off(src)
 		return
 	}
 

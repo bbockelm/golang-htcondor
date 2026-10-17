@@ -65,6 +65,18 @@ type MetricsResult struct {
 	Job *jobid.ID
 }
 
+// MetricsOff reports whether the hub has no job_metrics to read, with
+// the sources block to answer with when it has none. ctx is the
+// request's: every hub read a samples request makes -- this, the job
+// resolution, the scope and its sources block, the aggregate -- is of
+// the hub that request reads.
+func (s *Service) MetricsOff(_ context.Context) (Sources, bool) {
+	if s.Hub.Federates(TableJobMetrics) {
+		return Sources{}, false
+	}
+	return s.TableSources(s.Sources(), TableJobMetrics), true
+}
+
 // AggregateMetrics aggregates the caller's job_metrics samples on the
 // hub. It fails with ErrMetricsNotFederated, returning the sources block
 // beside it, when the hub has no job_metrics to read.
@@ -72,8 +84,8 @@ func (s *Service) AggregateMetrics(ctx context.Context, req MetricsRequest) (*Me
 	if req.User == "" {
 		return nil, errorf(http.StatusUnauthorized, "the caller's identity could not be established")
 	}
-	if !s.Hub.Federates(TableJobMetrics) {
-		return &MetricsResult{Sources: s.TableSources(s.Sources(), TableJobMetrics)}, ErrMetricsNotFederated
+	if src, off := s.MetricsOff(ctx); off {
+		return &MetricsResult{Sources: src}, ErrMetricsNotFederated
 	}
 	schedd := req.Schedd
 	var job *jobid.ID

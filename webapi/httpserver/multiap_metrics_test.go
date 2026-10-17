@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -466,5 +467,21 @@ func TestMultiAPMetricsAPWithoutJobMetrics(t *testing.T) {
 	if len(b.Sources.NotKept) != 1 || b.Sources.NotKept[0].Schedd != ap2 || b.Sources.NotKept[0].Table != multiap.TableJobMetrics ||
 		!strings.Contains(b.Sources.NotKept[0].Reason, "HTCONDORDB_JOB_METRICS") {
 		t.Errorf("not_kept = %+v, want ap2's job_metrics with the hub's reason", b.Sources.NotKept)
+	}
+}
+
+// TestMultiAPMetricsServiceTrustsTheSourcesTable: the service reads
+// samples only from a hub whose federation_sources list job_metrics,
+// even when an archive of that name is there.
+func TestMultiAPMetricsServiceTrustsTheSourcesTable(t *testing.T) {
+	hub := multiAPHub(t)
+	hub.EnableJobMetrics()
+	hub.PutMetric(ap1, "alice@d", 1, 0, 0, 900, "MemoryUsage = 1")
+	svc := multiAPService(t, hub, multiaptest.NewRegistry(ap1, ap2))
+	res, err := svc.AggregateMetrics(context.Background(), multiap.MetricsRequest{
+		User: "alice@d", Aggs: []dbrpc.AggSpec{{Func: dbrpc.AggCount, Arg: "*"}},
+	})
+	if !errors.Is(err, multiap.ErrMetricsNotFederated) || res == nil || len(res.Rows) != 0 || len(res.Sources.Degraded) != 2 {
+		t.Errorf("AggregateMetrics = %+v, %v; want ErrMetricsNotFederated and both APs named", res, err)
 	}
 }
