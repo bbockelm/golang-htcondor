@@ -26,6 +26,8 @@ import {
   type PlacementToken,
   type PlacementUser,
 } from '@/lib/api';
+import { Directory } from './Directory';
+import { MapfileStatusBanner } from './MapfileStatusBanner';
 
 type Tab = 'users' | 'tokens' | 'authorizations';
 
@@ -43,6 +45,8 @@ export default function AdminPlacementPage() {
   const [issueFor, setIssueFor] = useState('');
 
   const available = status.data?.available === true;
+  // A placementd with the directory commands replaces Users with Directory.
+  const directory = (status.data?.api_version ?? 1) >= 2;
 
   const authorizations = useQuery({
     queryKey: ['placement', 'authorizations'],
@@ -97,9 +101,11 @@ export default function AdminPlacementPage() {
             onUsernameChange={setIssueFor}
           />
 
+          {directory && <MapfileStatusBanner />}
+
           <div className="flex gap-1 border-b border-gray-200 text-sm">
             <TabButton active={tab === 'users'} onClick={() => setTab('users')}>
-              Users
+              {directory ? 'Directory' : 'Users'}
             </TabButton>
             <TabButton active={tab === 'tokens'} onClick={() => setTab('tokens')}>
               Tokens
@@ -112,7 +118,17 @@ export default function AdminPlacementPage() {
             </TabButton>
           </div>
 
-          {tab === 'users' && (
+          {tab === 'users' && directory && (
+            <Directory
+              onIssueToken={(foreignId) => {
+                setIssueFor(foreignId);
+                if (typeof window !== 'undefined') {
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }
+              }}
+            />
+          )}
+          {tab === 'users' && !directory && (
             <UsersTab
               authzByName={authzByName}
               onIssueFor={(u) => {
