@@ -252,7 +252,9 @@ func GetDefaultConfig() *config.Config {
 // Intended for callers that want to add SSL as a secondary auth method
 // to a hand-built SecurityConfig without going through the full
 // GetSecurityConfig path (which only loads SSL credentials when the
-// configured AuthenticationMethods list already names SSL).
+// configured AuthenticationMethods list already names SSL). Such callers
+// should also call ApplySSLClientTrust, which adds AUTH_SSL_CLIENT_CADIR
+// and AUTH_SSL_CLIENT_USE_DEFAULT_CAS.
 func LookupSSLClientCredentials() (certFile, keyFile, caFile string, ok bool) {
 	return LookupSSLClientCredentialsWithConfig(nil)
 }
@@ -277,6 +279,33 @@ func LookupSSLClientCredentialsWithConfig(cfg *config.Config) (certFile, keyFile
 		caFile = v
 	}
 	return certFile, keyFile, caFile, certFile != "" && keyFile != ""
+}
+
+// ApplySSLClientTrust sets the trust anchors sc verifies an SSL server with
+// from AUTH_SSL_CLIENT_CAFILE, AUTH_SSL_CLIENT_CADIR and
+// AUTH_SSL_CLIENT_USE_DEFAULT_CAS, for callers that build a SecurityConfig by
+// hand around LookupSSLClientCredentials. A nil cfg is the process-wide
+// default configuration; when there is none, sc is left unchanged.
+func ApplySSLClientTrust(cfg *config.Config, sc *security.SecurityConfig) {
+	if cfg == nil {
+		cfg = getDefaultConfig()
+	}
+	if cfg == nil {
+		return
+	}
+	applySSLTrust(cfg, sc, "CLIENT")
+}
+
+// applySSLTrust sets sc's SSL trust anchors from AUTH_SSL_<side>_CAFILE,
+// AUTH_SSL_<side>_CADIR and AUTH_SSL_<side>_USE_DEFAULT_CAS, side being CLIENT
+// or SERVER, as HTCondor reads them for that side of the handshake. All three
+// are replaced rather than merged, so a server never trusts the client CAs.
+// USE_DEFAULT_CAS is read as param_boolean does, defaulting to true.
+func applySSLTrust(cfg *config.Config, sc *security.SecurityConfig, side string) {
+	sc.CAFile, _ = cfg.Get("AUTH_SSL_" + side + "_CAFILE")
+	sc.CADir, _ = cfg.Get("AUTH_SSL_" + side + "_CADIR")
+	useDefault := cfg.GetBool("AUTH_SSL_"+side+"_USE_DEFAULT_CAS", true)
+	sc.UseDefaultCAs = &useDefault
 }
 
 // ReloadDefaultConfig reloads the global default HTCondor configuration.
@@ -520,9 +549,7 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 			if keyFile, ok := cfg.Get("AUTH_SSL_CLIENT_KEYFILE"); ok {
 				secConfig.KeyFile = keyFile
 			}
-			if caFile, ok := cfg.Get("AUTH_SSL_CLIENT_CAFILE"); ok {
-				secConfig.CAFile = caFile
-			}
+			applySSLTrust(cfg, secConfig, "CLIENT")
 			break
 		}
 	}
@@ -560,8 +587,8 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 // and additionally loads the credentials a server needs to *verify* incoming
 // authentications rather than to present its own:
 //
-//   - SSL: the server certificate/key/CA (AUTH_SSL_SERVER_CERTFILE / KEYFILE /
-//     CAFILE) instead of the client ones.
+//   - SSL: the server certificate/key and trust anchors (AUTH_SSL_SERVER_CERTFILE
+//     / KEYFILE / CAFILE / CADIR / USE_DEFAULT_CAS) instead of the client ones.
 //   - TOKEN/IDTOKENS: the signing keys used to validate presented tokens
 //     (SEC_TOKEN_POOL_SIGNING_KEY_FILE for the pool key, SEC_PASSWORD_DIRECTORY
 //     for named issuer keys), the trust domain (TRUST_DOMAIN, defaulting to
@@ -598,8 +625,8 @@ func GetServerSecurityConfig(cfg *config.Config, command int, secContext string)
 		return false
 	}
 
-	// SSL: replace the client cert/key/CA (loaded by GetSecurityConfig) with the
-	// server's own.
+	// SSL: replace the client cert/key/trust anchors (loaded by
+	// GetSecurityConfig) with the server's own.
 	if hasMethod(security.AuthSSL) {
 		if v, ok := cfg.Get("AUTH_SSL_SERVER_CERTFILE"); ok {
 			sc.CertFile = v
@@ -607,9 +634,7 @@ func GetServerSecurityConfig(cfg *config.Config, command int, secContext string)
 		if v, ok := cfg.Get("AUTH_SSL_SERVER_KEYFILE"); ok {
 			sc.KeyFile = v
 		}
-		if v, ok := cfg.Get("AUTH_SSL_SERVER_CAFILE"); ok {
-			sc.CAFile = v
-		}
+		applySSLTrust(cfg, sc, "SERVER")
 	}
 
 	// TOKEN/IDTOKENS: the keys and trust domain used to verify presented tokens.

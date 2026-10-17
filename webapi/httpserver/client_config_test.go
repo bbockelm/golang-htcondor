@@ -47,14 +47,18 @@ func TestConfigureSecurityForTokenReadsClientConfig(t *testing.T) {
 }
 
 func TestConfigureSecurityForCollectorPingReadsClientConfig(t *testing.T) {
-	cfg := clientConfigFrom(t, "AUTH_SSL_CLIENT_CERTFILE = /pool/cert\nAUTH_SSL_CLIENT_KEYFILE = /pool/key\nAUTH_SSL_CLIENT_CAFILE = /pool/ca\n")
+	cfg := clientConfigFrom(t, "AUTH_SSL_CLIENT_CERTFILE = /pool/cert\nAUTH_SSL_CLIENT_KEYFILE = /pool/key\nAUTH_SSL_CLIENT_CAFILE = /pool/ca\n"+
+		"AUTH_SSL_CLIENT_CADIR = /pool/certs\nAUTH_SSL_CLIENT_USE_DEFAULT_CAS = false\n")
 
 	got, err := configureSecurityForCollectorPing(cfg, "", "collector.example.org")
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	if got.CertFile != "/pool/cert" || got.KeyFile != "/pool/key" || got.CAFile != "/pool/ca" {
-		t.Errorf("SSL credentials = (%q, %q, %q), want the ClientConfig's", got.CertFile, got.KeyFile, got.CAFile)
+	if got.CertFile != "/pool/cert" || got.KeyFile != "/pool/key" || got.CAFile != "/pool/ca" || got.CADir != "/pool/certs" {
+		t.Errorf("SSL credentials = (%q, %q, %q, %q), want the ClientConfig's", got.CertFile, got.KeyFile, got.CAFile, got.CADir)
+	}
+	if got.UseDefaultCAs == nil || *got.UseDefaultCAs {
+		t.Errorf("UseDefaultCAs = %v, want false", got.UseDefaultCAs)
 	}
 }
 

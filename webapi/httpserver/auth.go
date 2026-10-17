@@ -176,8 +176,9 @@ func stripAuthMethod(list []security.AuthMethod, m security.AuthMethod) []securi
 // many collectors permit anonymous SSL: the client only verifies the
 // server's cert and connects as ANONYMOUS@…, which is enough for a
 // read-only ping. Cedar's SSL auth handles empty CertFile/KeyFile as
-// "no client cert presented" and empty CAFile as "use the system trust
-// store" — see cedar/security/ssl_auth.go and cmd/ssl-test/main.go.
+// "no client cert presented", and trusts the system store alongside
+// AUTH_SSL_CLIENT_CAFILE/CADIR unless AUTH_SSL_CLIENT_USE_DEFAULT_CAS is
+// false — see cedar/security/ssl_trust.go.
 //
 // serverName is used by cedar's SSL handshake for hostname/SAN
 // verification. Without it, cedar falls back to the literal string
@@ -204,9 +205,9 @@ func configureSecurityForCollectorPing(cfg *config.Config, token, serverName str
 
 	// Best-effort credential lookup. Empty values are fine: cedar
 	// treats them as "no client cert" / "system trust store".
-	certFile, keyFile, caFile, _ := htcondor.LookupSSLClientCredentialsWithConfig(cfg)
+	certFile, keyFile, _, _ := htcondor.LookupSSLClientCredentialsWithConfig(cfg)
 
-	return &security.SecurityConfig{
+	sc := &security.SecurityConfig{
 		AuthMethods:    methods,
 		Authentication: security.SecurityRequired,
 		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
@@ -215,9 +216,10 @@ func configureSecurityForCollectorPing(cfg *config.Config, token, serverName str
 		Token:          token,
 		CertFile:       certFile,
 		KeyFile:        keyFile,
-		CAFile:         caFile,
 		ServerName:     serverName,
-	}, nil
+	}
+	htcondor.ApplySSLClientTrust(cfg, sc)
+	return sc, nil
 }
 
 // GetSecurityConfigFromToken retrieves the token from context and creates a SecurityConfig
