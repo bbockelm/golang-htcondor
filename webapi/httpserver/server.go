@@ -407,6 +407,13 @@ type Config struct {
 	// Placementd is an optional condor_placementd client; nil means
 	// "discover one". See HandlerConfig.
 	Placementd htcondor.PlacementdClient
+	// Placement onboarding; see the HandlerConfig fields of the same
+	// names.
+	PlacementIdentityClaims    []string
+	PlacementDisplayNameClaims []string
+	PlacementDeviceClients     *string
+	PlacementScheddHost        string
+	PlacementCollectorHost     string
 
 	// LLMAPIKeyFile is the path to a file holding the Anthropic API
 	// key. Empty disables the chat endpoint. See HandlerConfig.
@@ -567,6 +574,11 @@ func NewServer(cfg Config) (*Server, error) {
 		Token:                       cfg.Token,
 		Credd:                       cfg.Credd,
 		Placementd:                  cfg.Placementd,
+		PlacementIdentityClaims:     cfg.PlacementIdentityClaims,
+		PlacementDisplayNameClaims:  cfg.PlacementDisplayNameClaims,
+		PlacementDeviceClients:      cfg.PlacementDeviceClients,
+		PlacementScheddHost:         cfg.PlacementScheddHost,
+		PlacementCollectorHost:      cfg.PlacementCollectorHost,
 		LLMAPIKeyFile:               cfg.LLMAPIKeyFile,
 		LLMAPIURL:                   cfg.LLMAPIURL,
 		LLMModel:                    cfg.LLMModel,

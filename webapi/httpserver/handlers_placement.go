@@ -104,6 +104,17 @@ type placementStatusResponse struct {
 func (s *Handler) handlePlacementPath(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/placement"), "/")
 
+	// The user-facing endpoints (handlers_placement_me.go) and the admin
+	// record views (handlers_placement_records.go).
+	if path == "me" || strings.HasPrefix(path, "me/") {
+		s.handlePlacementMePath(w, r, strings.TrimPrefix(strings.TrimPrefix(path, "me"), "/"))
+		return
+	}
+	if rest, ok := strings.CutPrefix(path, "records/"); ok {
+		s.handlePlacementRecordsPath(w, r, rest)
+		return
+	}
+
 	switch path {
 	case "status":
 		// Admin-gated like the rest — the address of an internal daemon
@@ -133,7 +144,7 @@ func (s *Handler) handlePlacementStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	resp := placementStatusResponse{Available: s.placementdAvailable.Load()}
+	resp := placementStatusResponse{Available: s.placementdReady(r.Context())}
 	if resp.Available {
 		if p, ok := s.placementd.(*htcondor.Placementd); ok {
 			resp.Address = p.Address()
@@ -160,7 +171,7 @@ func (s *Handler) requirePlacementd(w http.ResponseWriter, r *http.Request) bool
 	if !s.requireAdmin(w, r) {
 		return false
 	}
-	if s.placementd == nil || !s.placementdAvailable.Load() {
+	if !s.placementdReady(r.Context()) {
 		s.writeError(w, http.StatusServiceUnavailable,
 			"No condor_placementd is available. Set PLACEMENTD_ADDRESS_FILE or run one in the pool.")
 		return false

@@ -404,6 +404,11 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// the browser session, the OAuth2 session, and through the state
 	// store, the consent and device-approval flows.
 	subject := userInfo.Subject
+	// The identity this person presents to condor_placementd, taken from
+	// the provider's own claims before any local mapping: it is the
+	// left-hand column of the placementd's map file, not a local name.
+	placementID := placementForeignID(userInfo.Claims, s.placementOnboard.identityClaims)
+	placementName := placementDisplayName(userInfo.Claims, s.placementOnboard.displayNameClaims)
 	if s.localIdentity != nil {
 		// A previously confirmed mapping, if this browser has one. It is
 		// re-confirmed against the live account database below, never
@@ -413,6 +418,14 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		hint := s.readIdentityCookie(r, subject)
 		account, groups, hinted, err := s.localIdentity.resolveWithHint(ctx, subject, userGroups, hint)
 		if err != nil {
+			// Somebody with no local account may still be here for a
+			// placement token. They get a session that reaches only
+			// that (placement_session_gate.go), with no username, so
+			// nothing can treat them as a local user.
+			if isBrowserFlow && placementID != "" && s.placementOnboardingEnabled(ctx) {
+				s.startPlacementOnlySession(w, placementID, placementName, userGroups, originalURL, subject)
+				return
+			}
 			// Refused, not degraded. See localIdentity's comment on why
 			// there is no fallback to the token's own claims.
 			s.logger.Warn(logging.DestinationHTTP,
@@ -484,7 +497,12 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// For browser flow, create session and redirect back to original URL
 	if isBrowserFlow {
 		// Create HTTP session cookie for browser-based authentication
-		sessionID, sessionData, err := s.sessionStore.Create(subject, userGroups)
+		sessionID, sessionData, err := s.sessionStore.CreateSession(SessionData{
+			Username:           subject,
+			Groups:             userGroups,
+			PlacementForeignID: placementID,
+			DisplayName:        placementName,
+		})
 		if err != nil {
 			s.logger.Error(logging.DestinationHTTP, "Failed to create HTTP session",
 				"error", err, "subject", subject)
@@ -674,4 +692,37 @@ func (s *Handler) renderAccessDeniedPage(w http.ResponseWriter, required *groupS
 	}
 	s.renderResultPage(w, http.StatusForbidden, "Access denied", "#f44336",
 		"Access denied", message, sub)
+}
+
+// startPlacementOnlySession finishes a browser login for somebody who maps
+// to no local account: a placement-only session, then the placement page.
+//
+// The web UI's access group is not applied: it decides who may use this
+// access point's web interface, and this session reaches none of it. Whether
+// the person may have a placement token is the placementd's map file's
+// decision, made when they ask for one.
+func (s *Handler) startPlacementOnlySession(w http.ResponseWriter, foreignID, displayName string,
+	groups []string, originalURL, oidcSubject string) {
+	sessionID, sessionData, err := s.sessionStore.CreateSession(SessionData{
+		Groups:             groups,
+		PlacementForeignID: foreignID,
+		DisplayName:        displayName,
+		Scope:              sessionScopePlacement,
+	})
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create a placement-only session",
+			"error", err, "oidc_subject", oidcSubject)
+		s.writeError(w, http.StatusInternalServerError, "Failed to create session")
+		return
+	}
+	s.setSessionCookie(w, sessionID, sessionData.ExpiresAt)
+	s.logger.Info(logging.DestinationHTTP, "Created a placement-only session for an identity with no local account",
+		"oidc_subject", oidcSubject, "foreign_id", foreignID, "session_key", sessionLogID(sessionID))
+
+	redirectURL := "/placement"
+	if isSafeLocalRedirect(originalURL) && (originalURL == "/placement" ||
+		strings.HasPrefix(originalURL, "/placement/") || strings.HasPrefix(originalURL, "/placement?")) {
+		redirectURL = originalURL
+	}
+	s.finishBrowserLogin(w, redirectURL)
 }

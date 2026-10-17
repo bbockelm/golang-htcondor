@@ -1454,12 +1454,37 @@ metrics key.
 - `POST /api/v1/placement/login` — mint an IDToken. The response is the
   only time the token exists in retrievable form.
 
+- `GET /api/v1/placement/records/projects` — every project the map file
+  names, with its schedd project record's state
+- `GET /api/v1/placement/records/{accounts|projects}/{name}` — the schedd
+  record behind a placement account or project, with its job counters
+- `POST /api/v1/placement/records/{accounts|projects}/{name}/{suspend|unsuspend}`
+  — `DISABLE_USERREC` / `ENABLE_USERREC` on the schedd; the reason is
+  `suspended by <admin> via web UI`. Only names the placementd hands out.
+
   These are admin-only on purpose: the placementd registers its commands
   at ADMINISTRATOR and this server talks to it as the AP's own identity,
   so an endpoint any signed-in user could reach would let them mint a
   bearer token for anyone in the map file. The server finds the daemon
   via `PLACEMENTD_ADDRESS_FILE` (or `$(LOG)/.placementd_address`), then
-  the collector; finding none simply disables the group.
+  the collector; finding none simply disables the group. It looks again
+  when a connection fails (a restarted placementd has a new address) and
+  when the feature is next asked for, so a placementd started or upgraded
+  later is picked up without restarting this server.
+
+**Placement onboarding** (any signed-in session; see
+[Placement onboarding](#placement-onboarding))
+- `GET /api/v1/placement/me` — the session's placement identity, the
+  projects and authorizations it may request, and whether the schedd has
+  the account or a project disabled
+- `POST /api/v1/placement/me/token` — `{project, authorizations[],
+  user_code?}`; needs an `X-Requested-With` header. Returns the token, or
+  with `user_code` hands it to that device request instead.
+- `GET /api/v1/placement/me/device/{user_code}`,
+  `POST /api/v1/placement/me/device/{user_code}/deny`
+- `POST /auth/device_authorization`, `GET /auth/code`,
+  `POST /auth/cancel_device` — placement-webapp's device flow, for
+  `placement-client`
 
 **Chat assistant** (when `HTTP_API_LLM_API_KEY_FILE` is set)
 - `POST /api/v1/chat` — AI-SDK v6 UI-message stream. The body's `scope`
@@ -2258,6 +2283,60 @@ it offers no actions yet.
 `HTTP_API_SCHEDD_CONSTRAINT` together with `-schedd`, `-schedd-addr` or
 `SCHEDD_NAME` is a startup error. `UID_DOMAIN` and a collector are
 required.
+
+### Placement onboarding
+
+When a `condor_placementd` is reachable, this server also does what CHTC's
+placement-webapp did for users: someone signs in, picks a project and the
+permissions they want, and gets a placement token for their AP account,
+either in the browser at `/placement` (shown once, downloaded as
+`Placement.token`; nothing is written to disk) or through the device flow
+`placement-client` speaks, confirmed at `/placement/device`.
+
+**The identity.** At sign-in the server takes the first non-empty claim
+named by `HTTP_API_PLACEMENT_IDENTITY_CLAIMS` (default `sub`) from the
+provider's userinfo, replaces each run of characters other than letters,
+digits, `_`, `@`, `.` and `-` with `_`, and keeps at most 64 characters.
+That is placement-webapp's `USERNAME_FIELDS` rule exactly, so existing map
+file lines keep matching. Set the same claim list placement-webapp used,
+for example `HTTP_API_PLACEMENT_IDENTITY_CLAIMS = eppn, sub`.
+
+**People with no local account.** With [local identity
+mapping](#local-identity-mapping) on, a sign-in that maps to no account is
+normally refused. While a placementd is reachable it instead gets a
+*placement-only* session: no username, and it reaches only `/placement`,
+`/placement/device`, `GET /api/v1/auth/me`, `/api/v1/placement/me*`, the
+device-flow paths and sign-out. Every other route answers 403 (or sends a
+page load to `/placement`). `HTTP_API_WEBUI_ACCESS_GROUP` is not applied
+to these sessions; whether they get a token is the placementd map file's
+decision.
+
+**What the token can be.** The server calls the placementd as itself, so
+the user-facing endpoints never take an identity from the request: the
+foreign ID is always the session's, the requester is always the same
+identity, and tokens for someone else (INSTRUCTOR) are not offered. A
+request may name only the authorizations the placementd offers that
+identity, and a project from its map file line. `WEBADMIN` is not
+honored; the admin pages follow `HTTP_API_WEBUI_ADMIN_GROUP`.
+
+**The device flow.** `POST /auth/device_authorization` without a
+`grant_type` starts a request for a `client_id` listed in
+`HTTP_API_PLACEMENT_DEVICE_CLIENTS`; with
+`grant_type=urn:ietf:params:oauth:grant-type:device_code` it polls. The
+responses are placement-webapp's byte for byte, including the success body
+`{"access_token": "<token>\n", "expires_in": "<seconds>", "token_type":
+"Placement"}`. A pending request lasts 30 minutes and is polled every 5
+seconds. The approved token is kept, sealed with `HTTP_API_KEK_FILE` when
+one is configured, until the client collects it once; it is then deleted,
+and expired requests are swept.
+
+| Knob | Purpose |
+| --- | --- |
+| `HTTP_API_PLACEMENT_IDENTITY_CLAIMS` | Userinfo claims, in order, the placement foreign ID is taken from. Default `sub`. Read at startup. |
+| `HTTP_API_PLACEMENT_DISPLAY_NAME_CLAIMS` | Claims, in order, the person is greeted by. Default `name`. Read at startup. |
+| `HTTP_API_PLACEMENT_DEVICE_CLIENTS` | Comma-separated `client_id`s the device flow accepts. Default `placement_client,curl,`. Set empty to accept none. Read at startup. |
+| `HTTP_API_PLACEMENT_SCHEDD_HOST` | `SCHEDD_HOST` shown with a token for `~/.condor/user_config`. Default: this server's schedd name. Read at startup. |
+| `HTTP_API_PLACEMENT_COLLECTOR_HOST` | `COLLECTOR_HOST` shown with a token. Default: `COLLECTOR_HOST`. Read at startup. |
 
 ## Configuration
 
