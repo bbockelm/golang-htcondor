@@ -375,6 +375,64 @@ func TestSubstitution(t *testing.T) {
 	}
 }
 
+func TestMapEntry(t *testing.T) {
+	tests := []struct {
+		name              string
+		opts              Options
+		text              string
+		method, principal string
+		wantLine          int // 0 means no match
+		wantGroups        []string
+	}{
+		{"literal: groups is the principal alone", Options{}, "FS alice u_\\0\n", "FS", "alice", 1, []string{"alice"}},
+		{"regex: whole match and groups", Options{}, "FS /(\\w+)@(\\w+)/ \\2.\\1\n", "FS", "x bob@site", 1, []string{"bob@site", "bob", "site"}},
+		{"regex: unset group below the highest set group is empty", Options{}, "FS /^(a)?(b)$/ x\n", "FS", "b", 1, []string{"b", "", "b"}},
+		{"regex: groups end at the highest set group", Options{}, "FS /^(a)|(b)$/ x\n", "FS", "a", 1, []string{"a", "a"}},
+		{"regex: no groups", Options{}, "FS /b+/ x\n", "FS", "abbc", 1, []string{"bb"}},
+		{"regex before literal wins", Options{}, "FS /^(a)/ r\nFS abc l\n", "FS", "abc", 1, []string{"a", "a"}},
+		{"literal before regex wins", Options{}, "FS abc l\nFS /^(a)/ r\n", "FS", "abc", 1, []string{"abc"}},
+		{"later regex after a non-matching literal", Options{}, "FS abc l\nFS /^(a)/ r\n", "FS", "abd", 2, []string{"a", "a"}},
+		{"duplicate literal across a regex", Options{}, "FS a first\nFS /^z/ z\nFS a second\n", "FS", "a", 1, []string{"a"}},
+		{"first regex wins", Options{}, "FS /(a)/ one\nFS /(a)(b)/ two\n", "FS", "ab", 1, []string{"a", "a"}},
+		{"method case-insensitive", Options{}, "# c\noidc a b\n", "OIDC", "a", 2, []string{"a"}},
+		{"regex keys: bare principal is a regex", Options{RegexKeys: true}, "FS a(.)c x\n", "FS", "zabcz", 1, []string{"abc", "b"}},
+		{"regex keys: slashes are part of the pattern", Options{RegexKeys: true}, "FS /^a$/ x\n", "FS", "a", 0, nil},
+		{"no match", Options{}, "FS a b\n", "FS", "b", 0, nil},
+		{"unknown method", Options{}, "FS a b\n", "SSL", "a", 0, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mf := mustParse(t, tt.opts, tt.text)
+			e, groups, ok := mf.MapEntry(tt.method, tt.principal)
+			if tt.wantLine == 0 {
+				if ok || groups != nil || e != (Entry{}) {
+					t.Fatalf("MapEntry = %+v, %q, %v; want no match", e, groups, ok)
+				}
+				return
+			}
+			if !ok || e.Line != tt.wantLine || e.File != "test.map" || !reflect.DeepEqual(groups, tt.wantGroups) {
+				t.Fatalf("MapEntry = %+v, %q, %v; want test.map line %d, %q", e, groups, ok, tt.wantLine, tt.wantGroups)
+			}
+			found := false
+			for _, want := range mf.Entries(tt.method) {
+				if want.Line == tt.wantLine {
+					found = true
+					if e != want {
+						t.Errorf("entry = %+v, want %+v", e, want)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("no entry for %s at line %d", tt.method, tt.wantLine)
+			}
+			got, mapped := mf.Map(tt.method, tt.principal)
+			if want := substitute(e.Canonicalization, groups); !mapped || got != want {
+				t.Errorf("Map = %q, %v; want %q", got, mapped, want)
+			}
+		})
+	}
+}
+
 func TestParseErrors(t *testing.T) {
 	tests := []struct {
 		name, text string
@@ -667,6 +725,9 @@ func TestEntriesAndMethods(t *testing.T) {
 	checkLookups(t, mf, []lookup{{"FS", "b", "y"}})
 
 	var nilMF *MapFile
+	if e, g, ok := nilMF.MapEntry("FS", "a"); ok || g != nil || e != (Entry{}) {
+		t.Error("nil MapFile matched")
+	}
 	if _, ok := nilMF.Map("FS", "a"); ok || nilMF.Len() != 0 || nilMF.Entries("FS") != nil || nilMF.Methods() != nil {
 		t.Error("nil MapFile not empty")
 	}

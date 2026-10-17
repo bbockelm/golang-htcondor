@@ -64,7 +64,8 @@
 // (C++ groups consecutive literal lines into one hash table, which is a
 // performance detail with the same result.)
 //
-// The canonicalization is returned with \0 through \9 replaced: for a
+// MapFile.MapEntry returns the winning line and the text each \N stands
+// for. The canonicalization is returned with \0 through \9 replaced: for a
 // regular expression, \0 is the whole match and \n the n-th group (empty
 // if the group did not take part in the match, left as written if no
 // group at or beyond n took part); for a literal, \0 is the principal and
@@ -216,12 +217,31 @@ func (m *MapFile) add(r rule) {
 // Map returns the canonicalization of principal under method, with \N
 // substituted, and whether any line matched.
 func (m *MapFile) Map(method, principal string) (string, bool) {
-	if m == nil {
+	e, groups, ok := m.MapEntry(method, principal)
+	if !ok {
 		return "", false
+	}
+	return substitute(e.Canonicalization, groups), true
+}
+
+// MapEntry returns the line that Map uses for principal under method, the
+// values Map substitutes for \N in its canonicalization, and whether any
+// line matched. Map is MapEntry followed by that substitution.
+//
+// In the returned groups, groups[N] is what replaces \N, and a \N with
+// N >= len(groups) is left as written. For a regular-expression line, groups[0] is the whole match and
+// groups[N] the N-th group; groups ends at the highest group that took
+// part in the match, and a group below it that did not take part is "".
+// For a literal line, groups is []string{principal}: \0 is the principal
+// and \1 through \9 are left as written. groups is never empty when ok
+// is true, and the caller may modify it.
+func (m *MapFile) MapEntry(method, principal string) (Entry, []string, bool) {
+	if m == nil {
+		return Entry{}, nil, false
 	}
 	t := m.methods[lowerASCII(method)]
 	if t == nil {
-		return "", false
+		return Entry{}, nil, false
 	}
 	lit, haveLit := t.literals[principal]
 	for _, i := range t.regexes {
@@ -229,13 +249,13 @@ func (m *MapFile) Map(method, principal string) (string, bool) {
 			break
 		}
 		if groups, ok := regexGroups(t.rules[i].re, principal); ok {
-			return substitute(t.rules[i].entry.Canonicalization, groups), true
+			return t.rules[i].entry, groups, true
 		}
 	}
 	if haveLit {
-		return substitute(t.rules[lit].entry.Canonicalization, []string{principal}), true
+		return t.rules[lit].entry, []string{principal}, true
 	}
-	return "", false
+	return Entry{}, nil, false
 }
 
 // Entries returns every line for method (compared without regard to ASCII
