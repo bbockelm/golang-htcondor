@@ -3,7 +3,6 @@
 package httpserver
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -99,22 +98,26 @@ func TestMultiAPJobMetricsEndToEnd(t *testing.T) {
 
 // hubFederatesJobMetrics starts bin as a hub with one static spoke
 // (nothing there to reach) federating job_metrics, and reports whether
-// it accepts the table: it is up once it publishes an address; an older
-// one exits at once, saying it cannot federate the table.
+// it accepts the table.
+//
+// The answer is the hub's own word, not a timing: a hub that accepts its
+// tables logs "running as a federation hub" naming them, once it has
+// validated them; an older one exits saying it cannot federate the
+// table. Its address file proves nothing -- it is written before the
+// tables are validated.
 func hubFederatesJobMetrics(t *testing.T, bin string) (bool, string) {
 	t.Helper()
 	dir := t.TempDir()
-	addr := filepath.Join(dir, "addr")
 	cfg := fmt.Sprintf(`
 LOG = %[1]s
 HTCONDORDB_DIR = %[1]s
-HTCONDORDB_ADDRESS_FILE = %[2]s
+HTCONDORDB_ADDRESS_FILE = %[1]s/addr
 HTCONDORDB_ADVERTISE = false
 HTCONDORDB_FEDERATE_SPOKES = probe
 HTCONDORDB_FEDERATE_SPOKE_PROBE_ADDRESS = <127.0.0.1:1>
 HTCONDORDB_FEDERATE_SPOKE_PROBE_SCHEDD = probe@127.0.0.1
 HTCONDORDB_FEDERATE_TABLES = jobs syncstatus job_metrics
-`, dir, addr)
+`, dir)
 	cfgPath := filepath.Join(dir, "condor_config")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -123,28 +126,61 @@ HTCONDORDB_FEDERATE_TABLES = jobs syncstatus job_metrics
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "-listen", "127.0.0.1:0") //nolint:gosec // test binary from HTCONDORDB_BINARY
 	cmd.Env = append(os.Environ(), "CONDOR_CONFIG="+cfgPath)
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
+	outPath := filepath.Join(dir, "output")
+	out, err := os.Create(outPath) //nolint:gosec // the test's own file
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = out.Close() }()
+	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting %s: %v", bin, err)
 	}
 	exited := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(exited) }()
 	defer func() { _ = cmd.Process.Kill(); <-exited }()
+	// Everything the daemon wrote: its output and its log files.
+	said := func() string {
+		var b strings.Builder
+		files, _ := filepath.Glob(filepath.Join(dir, "*Log"))
+		for _, f := range append([]string{outPath}, files...) {
+			if c, err := os.ReadFile(f); err == nil { //nolint:gosec // the test's own files
+				b.Write(c)
+			}
+		}
+		return b.String()
+	}
+	accepted := func(text string) bool {
+		for _, line := range strings.Split(text, "\n") {
+			if strings.Contains(line, "running as a federation hub") && strings.Contains(line, "job_metrics") {
+				return true
+			}
+		}
+		return false
+	}
 	for {
 		select {
 		case <-exited:
-			msg := strings.TrimSpace(out.String())
+			text := said()
+			if accepted(text) {
+				t.Fatalf("%s accepted job_metrics and then exited:\n%s", bin, text)
+			}
+			msg := ""
+			for _, line := range strings.Split(text, "\n") {
+				if strings.Contains(line, "cannot federate") {
+					msg = strings.TrimSpace(line)
+				}
+			}
 			if msg == "" {
-				msg = "it exited at startup"
+				t.Fatalf("%s exited at startup without saying it cannot federate job_metrics:\n%s", bin, text)
 			}
 			return false, msg
 		case <-ctx.Done():
 			_ = cmd.Process.Kill()
 			<-exited
-			t.Fatalf("%s as a job_metrics hub neither started nor exited in 30s:\n%s", bin, out.String())
+			t.Fatalf("%s as a job_metrics hub neither started nor exited in 30s:\n%s", bin, said())
 		case <-time.After(100 * time.Millisecond):
-			if b, err := os.ReadFile(addr); err == nil && len(bytes.TrimSpace(b)) > 0 { //nolint:gosec // the test's own file
+			if accepted(said()) {
 				return true, ""
 			}
 		}
