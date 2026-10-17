@@ -15,13 +15,72 @@
 package mapfile
 
 import (
+	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"testing/iotest"
 )
+
+// fatal makes every bad line stop the load.
+func fatal(e *ParseError) error { return e }
+
+// logRecord is a log record reduced to what the tests check.
+type logRecord struct {
+	level slog.Level
+	msg   string
+	attrs map[string]string
+}
+
+// captureHandler is a slog.Handler that keeps every record.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []logRecord
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler            { return h }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	rec := logRecord{level: r.Level, msg: r.Message, attrs: map[string]string{}}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, rec)
+	return nil
+}
+
+func (h *captureHandler) get() []logRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]logRecord(nil), h.records...)
+}
+
+// checkLogged checks that recs are Warn records naming file and each of
+// lines, in order.
+func checkLogged(t *testing.T, recs []logRecord, file string, lines ...string) {
+	t.Helper()
+	if len(recs) != len(lines) {
+		t.Fatalf("logged %d records, want %d: %+v", len(recs), len(lines), recs)
+	}
+	for i, line := range lines {
+		r := recs[i]
+		if r.level != slog.LevelWarn || r.attrs["file"] != file || r.attrs["line"] != line || r.attrs["error"] == "" {
+			t.Errorf("record %d = %+v, want Warn at %s:%s with an error", i, r, file, line)
+		}
+	}
+}
 
 func mustParse(t *testing.T, o Options, text string) *MapFile {
 	t.Helper()
@@ -146,6 +205,9 @@ func TestFields(t *testing.T) {
 		// the next field starts there.
 		{"regex then non-flag", Options{}, `FS /a/ix c`, Entry{Method: "FS", Principal: "a", Regex: true, IgnoreCase: true, Canonicalization: "x"}},
 		{"quote then text", Options{}, `FS "a"b c`, Entry{Method: "FS", Principal: "a", Canonicalization: "b"}},
+		// An unclosed quote runs to the end of the line, newline included.
+		{"unterminated canonicalization", Options{}, `FS a "b c`, Entry{Method: "FS", Principal: "a", Canonicalization: "b c\n"}},
+		{"unterminated canonicalization ending in backslash", Options{}, `FS a "b\`, Entry{Method: "FS", Principal: "a", Canonicalization: "b\\\n"}},
 		{"regex keys: slashes literal", Options{RegexKeys: true}, `GSI /C=US/CN=x/i c`, Entry{Method: "GSI", Principal: "/C=US/CN=x/i", Regex: true, Canonicalization: "c"}},
 		{"regex keys: quoted", Options{RegexKeys: true}, `GSI "a b" c`, Entry{Method: "GSI", Principal: "a b", Regex: true, Canonicalization: "c"}},
 	}
@@ -189,6 +251,30 @@ func TestSkippedLines(t *testing.T) {
 func TestLineEndings(t *testing.T) {
 	mf := mustParse(t, Options{}, "FS a b\r\nFS c d\r\nFS e f")
 	checkLookups(t, mf, []lookup{{"FS", "a", "b"}, {"FS", "c", "d"}, {"FS", "e", "f"}})
+}
+
+// An unclosed quote runs to the end of the line: the newline when there
+// is one ("\r\n" read as "\n"), else the end of the file.
+func TestUnterminatedCanonicalization(t *testing.T) {
+	for _, tt := range []struct{ text, want string }{
+		{"FS a \"b c\n", "b c\n"},
+		{"FS a \"b c\r\n", "b c\n"},
+		{"FS a \"b c", "b c"},
+		{"FS a \"b\\", "b"},
+		{"FS /^(a)$/ \"<\\1>\n", "<a>\n"},
+	} {
+		h := &captureHandler{}
+		mf, err := Options{Logger: slog.New(h)}.Parse(strings.NewReader(tt.text), "m")
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tt.text, err)
+		}
+		if got, ok := mf.Map("FS", "a"); !ok || got != tt.want {
+			t.Errorf("Parse(%q): Map = %q, %v; want %q", tt.text, got, ok, tt.want)
+		}
+		if recs := h.get(); len(recs) != 0 {
+			t.Errorf("Parse(%q) logged %+v", tt.text, recs)
+		}
+	}
 }
 
 func TestMatching(t *testing.T) {
@@ -299,25 +385,53 @@ func TestParseErrors(t *testing.T) {
 		{"missing principal", "FS\n", 1, "expected"},
 		{"empty regex", "FS // x\n", 1, "expected"},
 		{"empty quoted principal", `FS "" x` + "\n", 1, "expected"},
-		{"unterminated quote", `FS "a b` + "\n", 1, "unterminated quoted string"},
-		{"unterminated regex", "FS /a b\n", 1, "unterminated regular expression"},
-		{"unterminated canonicalization", `FS a "b` + "\n", 1, "unterminated quoted string"},
-		{"unterminated method", `"FS a b` + "\n", 1, "unterminated quoted string"},
-		{"trailing backslash in quote", `FS a "b\`, 1, "unterminated"},
+		// An unclosed method or principal takes the rest of the line.
+		{"unterminated principal", `FS "a b` + "\n", 1, "expected"},
+		{"unterminated regex", "FS /a b\n", 1, "expected"},
+		{"unterminated method", `"FS a b` + "\n", 1, "expected"},
+		{"unterminated @include method", `"@include` + "\n", 1, "expected"},
+		{"trailing backslash in principal", `FS "a\`, 1, "expected"},
+		// Regular expressions PCRE2 refuses as well.
 		{"bad regex", "\n\nFS /a(/ x\n", 3, "missing closing )"},
-		{"backreference", `FS /(a)\1/ x`, 1, "backreference"},
-		{"named backreference", `FS /(?P<n>a)\k<n>/ x`, 1, "backreference"},
-		{"backreference after class", `FS /(a)[[:x]\1/ x`, 1, "backreference"},
-		{"lookahead", "FS /a(?=b)/ x", 1, "lookahead"},
-		{"negative lookbehind", "FS /(?<!a)b/ x", 1, "negative lookbehind"},
-		{"atomic group", "FS /(?>a)/ x", 1, "atomic group"},
-		{"possessive", "FS /a*+/ x", 1, "invalid nested repetition"},
+		{"unexpected paren", "FS /a)/ x\n", 1, "unexpected )"},
+		{"missing bracket", "FS /[]/ x\n", 1, "missing closing ]"},
+		{"nothing to repeat", "FS /*a/ x\n", 1, "missing argument"},
+		{"empty verb", "FS /(*)/ x\n", 1, "missing argument"},
+		{"nested repeat", "FS /a**/ x\n", 1, "invalid nested repetition"},
+		{"repeat out of order", "FS /a{2,1}/ x\n", 1, "invalid repeat count"},
+		{"repeat over PCRE2 limit", "FS /a{65536}/ x\n", 1, "invalid repeat count"},
+		{"reversed range", "FS /[z-a]/ x\n", 1, "invalid character class range"},
+		{"unknown POSIX class", "FS /[[:foo:]]/ x\n", 1, "invalid character class range"},
+		{"unknown escape", `FS /a\y/ x` + "\n", 1, "invalid escape"},
+		{"case-changing escape", `FS /\U/ x` + "\n", 1, "invalid escape"},
 		{"regex keys bad regex", "FS a( x", 1, "missing closing )"},
+		{"regex keys trailing backslash", `FS a\ x` + "\n", 1, "trailing backslash"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			opts := Options{RegexKeys: strings.HasPrefix(tt.name, "regex keys")}
-			_, err := opts.Parse(strings.NewReader(tt.text), "test.map")
+			regexKeys := strings.HasPrefix(tt.name, "regex keys")
+
+			// By default the line is logged and skipped, and the
+			// lines around it are kept.
+			h := &captureHandler{}
+			text := "M before x\n" + tt.text
+			want := []lookup{{"M", "before", "x"}}
+			if strings.HasSuffix(tt.text, "\n") {
+				text += "M after y\n"
+				want = append(want, lookup{"M", "after", "y"})
+			}
+			mf, err := Options{RegexKeys: regexKeys, Logger: slog.New(h)}.Parse(strings.NewReader(text), "test.map")
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			checkLookups(t, mf, want)
+			recs := h.get()
+			checkLogged(t, recs, "test.map", strconv.Itoa(tt.line+1))
+			if !strings.Contains(recs[0].attrs["error"], tt.contains) {
+				t.Errorf("logged error %q, want it to contain %q", recs[0].attrs["error"], tt.contains)
+			}
+
+			_, err = Options{RegexKeys: regexKeys, OnError: fatal}.Parse(strings.NewReader(tt.text), "test.map")
 			var perr *ParseError
 			if !errors.As(err, &perr) {
 				t.Fatalf("err = %v, want *ParseError", err)
@@ -332,6 +446,71 @@ func TestParseErrors(t *testing.T) {
 				t.Errorf("err = %q, want prefix %q", err, prefix)
 			}
 		})
+	}
+}
+
+// A regular expression PCRE2 accepts but Go cannot evaluate stops the
+// load whatever OnError says: HTCondor would use the line, and skipping it
+// lets later lines map principals it maps.
+func TestUnsupportedRegexIsFatal(t *testing.T) {
+	tests := []struct {
+		name, principal, contains string
+	}{
+		{"backreference", `/(a)\1/`, "backreference"},
+		{"named backreference", `/(?P<n>a)\k<n>/`, "backreference"},
+		{"backreference after class", `/(a)[[:x]\1/`, "backreference"},
+		{"lookahead", "/a(?=b)/", "lookahead"},
+		{"negative lookahead", `/^CN=(?!admin)(\w+)$/`, "negative lookahead"},
+		{"negative lookbehind", "/(?<!a)b/", "negative lookbehind"},
+		{"atomic group", "/(?>a)/", "atomic group"},
+		{"verb", "/(*UTF)a/", "verb"},
+		{"possessive", "/a*+/", "invalid nested repetition"},
+		{"possessive count", "/a{2}+/", "invalid nested repetition"},
+		{"horizontal space", `/a\hb/`, "invalid escape"},
+		{"keep out", `/a\Kb/`, "invalid escape"},
+		{"branch reset", "/(?|a)/", "invalid or unsupported Perl syntax"},
+		{"comment", "/a(?#c)/", "invalid or unsupported Perl syntax"},
+		{"word start", "/[[:<:]]a/", "invalid character class range"},
+		{"PCRE2 property", `/\p{Xan}/`, "invalid character class range"},
+		{"repeat over Go limit", "/a{1001}/", "invalid repeat count"},
+		{"non-UTF-8 byte", "/a\xffb/", "invalid UTF-8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			text := "FS before x\nFS " + tt.principal + " y\nFS after z\n"
+			skip := func(*ParseError) error { return nil }
+			for _, o := range []Options{{}, {OnError: skip}, {OnError: fatal}} {
+				h := &captureHandler{}
+				o.Logger = slog.New(h)
+				mf, err := o.Parse(strings.NewReader(text), "test.map")
+				if mf != nil {
+					t.Errorf("Parse returned a map file")
+				}
+				var perr *ParseError
+				if !errors.As(err, &perr) || perr.File != "test.map" || perr.Line != 2 {
+					t.Fatalf("err = %v, want *ParseError at test.map:2", err)
+				}
+				if !errors.Is(err, ErrUnsupportedRegex) || !strings.Contains(err.Error(), tt.contains) {
+					t.Errorf("err = %v, want ErrUnsupportedRegex containing %q", err, tt.contains)
+				}
+				if recs := h.get(); len(recs) != 0 {
+					t.Errorf("logged %+v", recs)
+				}
+			}
+		})
+	}
+
+	// With regex keys every principal is a regular expression.
+	_, err := Options{RegexKeys: true}.Parse(strings.NewReader("FS a(?=b) x\n"), "test.map")
+	if !errors.Is(err, ErrUnsupportedRegex) {
+		t.Errorf("regex keys: err = %v, want ErrUnsupportedRegex", err)
+	}
+
+	// Skipping the first line would map CN=bob to admin_bob, where
+	// HTCondor maps it to bob.
+	_, err = Parse(strings.NewReader("SSL /^CN=(?!admin)(\\w+)$/ \\1\nSSL /^CN=(.*)$/ admin_\\1\n"), "test.map")
+	if !errors.Is(err, ErrUnsupportedRegex) {
+		t.Errorf("err = %v, want ErrUnsupportedRegex", err)
 	}
 }
 
@@ -352,8 +531,11 @@ func TestRegexAccepted(t *testing.T) {
 
 func TestOnError(t *testing.T) {
 	text := "FS a b\nFS bad\nFS /(/ x\nFS c d\n"
+
+	// OnError replaces logging; returning nil skips the line.
 	var seen []string
-	mf, err := Options{OnError: func(e *ParseError) error {
+	h := &captureHandler{}
+	mf, err := Options{Logger: slog.New(h), OnError: func(e *ParseError) error {
 		seen = append(seen, e.Error())
 		return nil
 	}}.Parse(strings.NewReader(text), "m")
@@ -363,7 +545,17 @@ func TestOnError(t *testing.T) {
 	if len(seen) != 2 || !strings.HasPrefix(seen[0], "m:2: ") || !strings.HasPrefix(seen[1], "m:3: ") {
 		t.Errorf("errors = %q", seen)
 	}
+	if recs := h.get(); len(recs) != 0 {
+		t.Errorf("logged %+v with OnError set", recs)
+	}
 	checkLookups(t, mf, []lookup{{"FS", "a", "b"}, {"FS", "c", "d"}})
+
+	// Returning the *ParseError makes the first bad line fatal.
+	_, err = Options{OnError: fatal}.Parse(strings.NewReader(text), "m")
+	var perr *ParseError
+	if !errors.As(err, &perr) || perr.File != "m" || perr.Line != 2 {
+		t.Errorf("err = %v, want *ParseError at m:2", err)
+	}
 
 	stop := errors.New("stop")
 	_, err = Options{OnError: func(*ParseError) error { return stop }}.Parse(strings.NewReader(text), "m")
@@ -372,8 +564,78 @@ func TestOnError(t *testing.T) {
 	}
 }
 
+// The zero Options logs bad lines to slog.Default() and keeps the rest.
+// Not parallel: it replaces the default logger.
+func TestZeroOptionsLogsToDefault(t *testing.T) {
+	h := &captureHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	mf, err := Parse(strings.NewReader("FS a b\nFS bad\nFS /x**/ y\n@include\nFS c d\n"), "m")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	checkLookups(t, mf, []lookup{{"FS", "a", "b"}, {"FS", "c", "d"}, {"FS", "x", ""}})
+	if mf.Len() != 2 {
+		t.Errorf("Len = %d, want 2", mf.Len())
+	}
+	recs := h.get()
+	checkLogged(t, recs, "m", "2", "3", "4")
+	for _, r := range recs {
+		if r.msg != "mapfile: skipping line" {
+			t.Errorf("message = %q", r.msg)
+		}
+	}
+}
+
+func TestReadError(t *testing.T) {
+	boom := errors.New("boom")
+	_, err := Parse(iotest.ErrReader(boom), "m")
+	if !errors.Is(err, boom) || !strings.HasPrefix(err.Error(), "m: ") {
+		t.Errorf("err = %v, want m: boom", err)
+	}
+	_, err = Parse(io.MultiReader(strings.NewReader("FS a b\nFS alice alicia_"), iotest.ErrReader(boom)), "m")
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want boom", err)
+	}
+}
+
+// A read error in an included file skips the rest of it, including the
+// partial line read before the error, and is reported at that line.
+func TestIncludeReadErrorDropsPartialLine(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "main")
+	inc := filepath.Join(dir, "inc")
+	writeFile(t, main, "@include inc\nFS m m\n")
+	writeFile(t, inc, "")
+	boom := errors.New("boom")
+	prev := openInclude
+	t.Cleanup(func() { openInclude = prev })
+	openInclude = func(path string) (io.ReadCloser, error) {
+		if path != inc {
+			return prev(path)
+		}
+		// The read fails partway through "FS alice alicia_smith".
+		r := io.MultiReader(strings.NewReader("FS a b\nFS alice alicia_"), iotest.ErrReader(boom))
+		return io.NopCloser(r), nil
+	}
+
+	h := &captureHandler{}
+	mf, err := Options{Logger: slog.New(h)}.Load(main)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	checkLookups(t, mf, []lookup{{"FS", "a", "b"}, {"FS", "alice", ""}, {"FS", "m", "m"}})
+	recs := h.get()
+	checkLogged(t, recs, inc, "2")
+	if !strings.Contains(recs[0].attrs["error"], "boom") {
+		t.Errorf("logged %+v", recs)
+	}
+}
+
 func TestParseErrorNoName(t *testing.T) {
-	_, err := Parse(strings.NewReader("FS a\n"), "")
+	_, err := Options{OnError: fatal}.Parse(strings.NewReader("FS a\n"), "")
 	if err == nil || err.Error() != "line 1: expected <method> <principal> <canonicalization>" {
 		t.Errorf("err = %v", err)
 	}
@@ -423,8 +685,16 @@ func writeFile(t *testing.T, path, text string) {
 func TestLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "map")
-	writeFile(t, path, "FS a b\nFS c\n")
-	_, err := Load(path)
+	writeFile(t, path, "FS a b\nFS c\nFS d e\n")
+	h := &captureHandler{}
+	mf, err := Options{Logger: slog.New(h)}.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	checkLookups(t, mf, []lookup{{"FS", "a", "b"}, {"FS", "d", "e"}, {"FS", "c", ""}})
+	checkLogged(t, h.get(), path, "2")
+
+	_, err = Options{OnError: fatal}.Load(path)
 	var perr *ParseError
 	if !errors.As(err, &perr) || perr.File != path || perr.Line != 2 {
 		t.Fatalf("err = %v", err)
@@ -503,14 +773,26 @@ func TestIncludeErrors(t *testing.T) {
 	}{
 		{"missing file", "FS a b\n@include nope\n", Options{}, main, 2, "no such file"},
 		{"empty path", "@include\n", Options{}, main, 1, "@include needs a file or directory"},
-		{"unterminated path", `@include "x` + "\n", Options{}, main, 1, "unterminated"},
+		// The path takes the newline, as in C++.
+		{"unterminated path", `@include "inc` + "\n", Options{}, main, 1, "inc\n: no such file"},
+		{"unterminated method at end of file", `"@include`, Options{}, main, 1, "@include needs a file or directory"},
 		{"nested include", "@include nested\n", Options{}, filepath.Join(dir, "nested"), 2, "not allowed in an included file"},
 		{"no include", "@include nested\n", Options{NoInclude: true}, main, 1, "@include is not allowed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			writeFile(t, main, tt.text)
-			_, err := tt.opts.Load(main)
+
+			h := &captureHandler{}
+			opts := tt.opts
+			opts.Logger = slog.New(h)
+			if _, err := opts.Load(main); err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			checkLogged(t, h.get(), tt.file, strconv.Itoa(tt.line))
+
+			opts.OnError = fatal
+			_, err := opts.Load(main)
 			var perr *ParseError
 			if !errors.As(err, &perr) {
 				t.Fatalf("err = %v, want *ParseError", err)
@@ -521,18 +803,22 @@ func TestIncludeErrors(t *testing.T) {
 		})
 	}
 
-	// Skipping errors reproduces HTCondor: the nested @include is
-	// ignored and the rest of both files is read; a self-include reads
-	// the file a second time without recursing.
-	writeFile(t, main, "@include nested\n@include self\nFS m m\n")
-	var n int
-	mf, err := Options{OnError: func(*ParseError) error { n++; return nil }}.Load(main)
+	// As in HTCondor, the nested @include is ignored and the rest of
+	// both files is read; a self-include reads the file a second time
+	// without recursing.
+	writeFile(t, filepath.Join(dir, "inc"), "FS i i\n")
+	writeFile(t, main, "@include nested\n@include self\n@include \"inc\nFS m m\n")
+	h := &captureHandler{}
+	mf, err := Options{Logger: slog.New(h)}.Load(main)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Errorf("errors = %d, want 2", n)
+	recs := h.get()
+	if len(recs) != 3 || recs[0].attrs["file"] != filepath.Join(dir, "nested") ||
+		recs[1].attrs["file"] != filepath.Join(dir, "self") || recs[2].attrs["file"] != main {
+		t.Errorf("logged %+v", recs)
 	}
+	checkLookups(t, mf, []lookup{{"FS", "i", ""}})
 	checkLookups(t, mf, []lookup{{"FS", "n", "n"}, {"FS", "s", "s"}, {"FS", "m", "m"}})
 }
 

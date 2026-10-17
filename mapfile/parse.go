@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"regexp"
 	"strings"
@@ -35,8 +36,8 @@ const includeDirective = "@include"
 
 // Options controls how a map file is read. The zero value reads a file
 // the way HTCondor reads CLASSAD_USER_MAPFILE, and CERTIFICATE_MAPFILE
-// with CERTIFICATE_MAPFILE_ASSUME_HASH_KEYS = true, except that a bad line
-// is an error.
+// with CERTIFICATE_MAPFILE_ASSUME_HASH_KEYS = true: a line that cannot be
+// used is logged and skipped.
 type Options struct {
 	// RegexKeys makes every principal a regular expression, as HTCondor
 	// reads CERTIFICATE_MAPFILE when CERTIFICATE_MAPFILE_ASSUME_HASH_KEYS
@@ -48,11 +49,15 @@ type Options struct {
 	// directory skips (LOCAL_CONFIG_DIR_EXCLUDE_REGEXP). Nil means
 	// DefaultIncludeExclude.
 	IncludeExclude *regexp.Regexp
-	// OnError is called with each line that cannot be used. If it
-	// returns nil the line is skipped, as HTCondor does; otherwise
-	// loading stops with the error it returns. Nil stops at the first
-	// bad line with that line's *ParseError.
+	// OnError is called with each line that cannot be used, in place of
+	// logging it. If it returns nil the line is skipped; otherwise
+	// loading stops with the error it returns. Return the *ParseError to
+	// make bad lines fatal. Nil logs each bad line to Logger at Warn and
+	// skips it, as HTCondor does.
 	OnError func(*ParseError) error
+	// Logger receives bad lines when OnError is nil. Nil means
+	// slog.Default().
+	Logger *slog.Logger
 }
 
 // ParseError is a line of a map file that cannot be used.
@@ -78,7 +83,8 @@ func Load(path string) (*MapFile, error) { return Options{}.Load(path) }
 // errors and as the base of relative @include paths.
 func Parse(r io.Reader, name string) (*MapFile, error) { return Options{}.Parse(r, name) }
 
-// Load reads the map file at path.
+// Load reads the map file at path. Only failing to open or read that
+// file is an error, unless OnError makes bad lines errors.
 func (o Options) Load(path string) (*MapFile, error) {
 	f, err := os.Open(path) //nolint:gosec // the map file is chosen by the administrator
 	if err != nil {
@@ -89,13 +95,17 @@ func (o Options) Load(path string) (*MapFile, error) {
 }
 
 // Parse reads a map file from r. name is used in errors and as the base
-// of relative @include paths.
+// of relative @include paths. Only failing to read r is an error, unless
+// OnError makes bad lines errors.
 func (o Options) Parse(r io.Reader, name string) (*MapFile, error) {
 	p := &parser{opts: o, mf: &MapFile{}}
 	if p.opts.IncludeExclude == nil {
 		p.opts.IncludeExclude = defaultIncludeExclude
 	}
-	if err := p.parse(r, name, !o.NoInclude); err != nil {
+	if p.opts.Logger == nil {
+		p.opts.Logger = slog.Default()
+	}
+	if err := p.parse(r, name, !o.NoInclude, false); err != nil {
 		return nil, err
 	}
 	return p.mf, nil
@@ -109,37 +119,48 @@ type parser struct {
 // fail reports a bad line and returns non-nil if loading must stop.
 func (p *parser) fail(file string, line int, err error) error {
 	perr := &ParseError{File: file, Line: line, Err: err}
-	if p.opts.OnError == nil {
-		return perr
+	if p.opts.OnError != nil {
+		return p.opts.OnError(perr)
 	}
-	return p.opts.OnError(perr)
+	p.opts.Logger.Warn("mapfile: skipping line", "file", file, "line", line, "error", err)
+	return nil
 }
 
 // parse reads one file. It returns non-nil only if loading must stop.
-func (p *parser) parse(r io.Reader, name string, allowInclude bool) error {
+// A read error stops the load in the top-level file; in an included file
+// it is reported like a bad line and the rest of that file, including the
+// part of the line read before the error, is skipped.
+func (p *parser) parse(r io.Reader, name string, allowInclude, included bool) error {
 	br := bufio.NewReader(r)
 	line := 0
+	// readErr reports a failed read of line+1.
+	readErr := func(err error) error {
+		if included {
+			return p.fail(name, line+1, fmt.Errorf("read: %w", err))
+		}
+		return fmt.Errorf("%s: %w", name, err)
+	}
 	for {
 		text, rerr := br.ReadString('\n')
-		if text == "" && rerr != nil {
-			if errors.Is(rerr, io.EOF) {
-				return nil
-			}
-			return fmt.Errorf("%s: %w", name, rerr)
+		if rerr != nil && !errors.Is(rerr, io.EOF) {
+			// text is a partial line; never use it.
+			return readErr(rerr)
+		}
+		if text == "" {
+			return nil
 		}
 		line++
-		// C++ keeps the line ending: "\n" is white space to ParseField
-		// but a "\r" ends up in the last field. Drop both.
-		text = strings.TrimSuffix(text, "\n")
-		text = strings.TrimSuffix(text, "\r")
+		// C++ keeps the "\n": it is white space to ParseField, and part
+		// of a quoted field that is not closed. A "\r" before it is
+		// dropped.
+		if t, ok := strings.CutSuffix(text, "\r\n"); ok {
+			text = t + "\n"
+		}
 		if err := p.parseLine(text, name, line, allowInclude); err != nil {
 			return err
 		}
 		if rerr != nil {
-			if errors.Is(rerr, io.EOF) {
-				return nil
-			}
-			return fmt.Errorf("%s: %w", name, rerr)
+			return nil
 		}
 	}
 }
@@ -147,7 +168,7 @@ func (p *parser) parse(r io.Reader, name string, allowInclude bool) error {
 // parseLine is the body of MapFile::ParseCanonicalization's loop.
 func (p *parser) parseLine(text, name string, line int, allowInclude bool) error {
 	method, off := parseField(text, 0, false)
-	if method.text == includeDirective && !method.unterminated {
+	if method.text == includeDirective {
 		return p.include(text, off, name, line, allowInclude)
 	}
 	if method.text == "" || method.text[0] == '#' {
@@ -155,11 +176,6 @@ func (p *parser) parseLine(text, name string, line int, allowInclude bool) error
 	}
 	principal, off := parseField(text, off, !p.opts.RegexKeys)
 	canon, _ := parseField(text, off, false)
-	for _, f := range []field{method, principal, canon} {
-		if f.unterminated {
-			return p.fail(name, line, fmt.Errorf("unterminated %s", f.kind()))
-		}
-	}
 	if principal.text == "" || canon.text == "" {
 		return p.fail(name, line, errors.New("expected <method> <principal> <canonicalization>"))
 	}
@@ -177,7 +193,13 @@ func (p *parser) parseLine(text, name string, line int, allowInclude bool) error
 	if r.entry.Regex {
 		re, err := compileRegex(principal.text, principal.ignoreCase, principal.ungreedy)
 		if err != nil {
-			return p.fail(name, line, fmt.Errorf("principal %q: %w", principal.text, err))
+			err = fmt.Errorf("principal %q: %w", principal.text, err)
+			if errors.Is(err, ErrUnsupportedRegex) {
+				// HTCondor would use this line; skipping it changes
+				// what later lines map.
+				return &ParseError{File: name, Line: line, Err: err}
+			}
+			return p.fail(name, line, err)
 		}
 		r.re = re
 	}
@@ -194,9 +216,6 @@ func (p *parser) include(text string, off int, name string, line int, allowed bo
 		return p.fail(name, line, errors.New("@include is not allowed in an included file"))
 	}
 	target, _ := parseField(text, off, false)
-	if target.unterminated {
-		return p.fail(name, line, fmt.Errorf("unterminated %s", target.kind()))
-	}
 	path := target.text
 	if path == "" {
 		return p.fail(name, line, errors.New("@include needs a file or directory"))
@@ -233,14 +252,19 @@ func (p *parser) include(text string, off int, name string, line int, allowed bo
 	return nil
 }
 
+// openInclude opens an included file; tests replace it.
+var openInclude = func(path string) (io.ReadCloser, error) {
+	return os.Open(path) //nolint:gosec // named by the administrator's map file
+}
+
 // includeFile reads an included file, which may not itself include.
 func (p *parser) includeFile(path, name string, line int) error {
-	f, err := os.Open(path) //nolint:gosec // named by the administrator's map file
+	f, err := openInclude(path)
 	if err != nil {
 		return p.fail(name, line, fmt.Errorf("@include: %w", err))
 	}
 	defer f.Close() //nolint:errcheck // read-only
-	return p.parse(f, path, false)
+	return p.parse(f, path, false, true)
 }
 
 func isAbs(path string) bool {
@@ -266,21 +290,14 @@ type field struct {
 	// regex reports that the field was delimited by slashes.
 	regex                bool
 	ignoreCase, ungreedy bool
-	unterminated         bool
-}
-
-func (f field) kind() string {
-	if f.regex {
-		return "regular expression"
-	}
-	return "quoted string"
 }
 
 func isFieldSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' }
 
 // parseField reads the field starting at or after off and returns it with
 // the offset just past it. regexDelim lets a field start with / (the
-// popts argument of ParseField).
+// popts argument of ParseField). A quoted field with no closing delimiter
+// runs to the end of the line, newline included.
 func parseField(line string, off int, regexDelim bool) (field, int) {
 	for off < len(line) && isFieldSpace(line[off]) {
 		off++
@@ -328,14 +345,14 @@ func parseField(line string, off int, regexDelim bool) (field, int) {
 				b.WriteByte(n)
 			}
 		case c == '\\':
-			// A backslash ending the line: the field cannot be closed.
+			// A backslash ending the file: C++ appends a NUL, which ends
+			// the field wherever it is used as a C string.
 		default:
 			b.WriteByte(c)
 		}
 		off++
 	}
 	f.text = b.String()
-	f.unterminated = true
 	return f, off
 }
 
