@@ -72,6 +72,9 @@ type multiAPStack struct {
 	spoke1  *htcondordbProc
 	spoke2  *htcondordbProc
 	hub     *htcondordbProc
+	// hub2 is a second federation hub, fed from the same spokes, when the
+	// test asked for one (multiAPStackOptions.secondHub).
+	hub2    *htcondordbProc
 	baseURL string
 	client  *http.Client
 	me      string // the test user's OS name, which is the jobs' Owner
@@ -491,6 +494,9 @@ func e2eHubOutage(t *testing.T, s *multiAPStack) {
 type multiAPStackOptions struct {
 	pool, hub string
 	spoke     func(history string) string
+	// secondHub runs a second federation hub, hub2@127.0.0.1, configured
+	// as the first and fed from the same spokes.
+	secondHub bool
 }
 
 // startMultiAPStack builds the pool, submits the jobs, and starts the
@@ -603,15 +609,23 @@ UPDATE_INTERVAL = 2
 	// The hub: discovers the AP set and its spokes from the collector.
 	// Freshness at 5 s against a 1 s heartbeat, so a stopped spoke goes
 	// stale within seconds; nothing retires during the test.
-	s.hub = startHTCondorDB(t, s.harness, bin, filepath.Join(s.dir, "hub"), dbAuth+fmt.Sprintf(`
-HTCONDORDB_NAME = hub@127.0.0.1
+	// Each hub advertises under its own HTCONDORDB_NAME, which is how
+	// the API server tells two of them apart.
+	hubCfg := func(name string) string {
+		return dbAuth + fmt.Sprintf(`
+HTCONDORDB_NAME = %s
 HTCONDORDB_FEDERATE_SCHEDD_CONSTRAINT = %s
 HTCONDORDB_FEDERATE_FRESH_SECONDS = 5
 HTCONDORDB_FEDERATE_DISCOVER_INTERVAL = 1
 HTCONDORDB_FEDERATE_STATE_INTERVAL = 1
 HTCONDORDB_FEDERATE_RETIRE_AFTER = 1h
 UPDATE_INTERVAL = 2
-`, e2eAPConstraint)+opt.hub)
+`, name, e2eAPConstraint) + opt.hub
+	}
+	s.hub = startHTCondorDB(t, s.harness, bin, filepath.Join(s.dir, "hub"), hubCfg("hub@127.0.0.1"))
+	if opt.secondHub {
+		s.hub2 = startHTCondorDB(t, s.harness, bin, filepath.Join(s.dir, "hub2"), hubCfg("hub2@127.0.0.1"))
+	}
 
 	// AP assignment: the test user's new work goes to ap2, the other
 	// user's to ap1.
