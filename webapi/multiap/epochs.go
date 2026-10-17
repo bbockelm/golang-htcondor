@@ -119,7 +119,7 @@ func (s *Service) ListEpochs(ctx context.Context, req EpochRequest) ([]Row, *Lis
 			err = qerr
 		}
 	}
-	if err != nil {
+	if s.noteRead(ctx, err) != nil {
 		return nil, nil, errorf(http.StatusServiceUnavailable, "reading the federation hub's epoch_history: %v", err)
 	}
 	if len(rows) > limit {

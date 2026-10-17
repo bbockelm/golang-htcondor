@@ -340,7 +340,7 @@ func (s *Service) hubStream(ctx context.Context, table, constraint string, proj 
 		yield(ad)
 		return true
 	})
-	if err == nil {
+	if s.noteRead(ctx, err) == nil {
 		err = perr
 	}
 	return err

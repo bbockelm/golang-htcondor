@@ -179,7 +179,8 @@ func (s *Service) hubFindTable(ctx context.Context, table, schedd, constraint st
 		return nil, err
 	}
 	defer closer()
-	return findOne(ctx, dbc, table, fmt.Sprintf("(%s) && (%s)", constraint, scheddIn([]string{schedd})), proj, "")
+	row, err := findOne(ctx, dbc, table, fmt.Sprintf("(%s) && (%s)", constraint, scheddIn([]string{schedd})), proj, "")
+	return row, s.noteRead(ctx, err)
 }
 
 // spokeFind reads the job from the AP's spoke. served is false when the
@@ -287,7 +288,7 @@ func (s *Service) findCandidates(ctx context.Context, v view, user string, id jo
 			}
 			return true
 		})
-		if err == nil {
+		if s.noteRead(ctx, err) == nil {
 			err = perr
 		}
 		if err != nil {

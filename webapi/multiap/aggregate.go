@@ -46,7 +46,7 @@ func (s *Service) Aggregate(ctx context.Context, user, table, constraint string,
 	} else {
 		rows, err = dbc.AggregateTable(ctx, table, scope, groupBy, aggs)
 	}
-	if err != nil {
+	if s.noteRead(ctx, err) != nil {
 		return nil, v.sources, errorf(http.StatusServiceUnavailable, "aggregating on the federation hub: %v", err)
 	}
 	return rows, v.sources, nil

@@ -535,7 +535,7 @@ func (h *Hub) Discover(ctx context.Context) error {
 func (h *Hub) usableLocked(ep *HubEndpoint) bool {
 	ep.mu.RLock()
 	defer ep.mu.RUnlock()
-	return ep.failures < h.policy.FailAfter && ep.reachableLocked()
+	return ep.failures < h.policy.FailAfter && ep.readFailures < h.policy.FailAfter && ep.reachableLocked()
 }
 
 func (h *Hub) freshOf(ep *HubEndpoint) int {
@@ -600,6 +600,13 @@ func (h *Hub) selectLocked(now time.Time) *HubSwitch {
 func (h *Hub) switchLocked(to *HubEndpoint, reason string, now time.Time) *HubSwitch {
 	from := h.activeLocked()
 	h.active, h.cand = to, nil
+	if from != nil && from != to {
+		// Its failed reads were reads as the active hub; as a standby it
+		// is judged by its sources reads until it is read from again.
+		from.mu.Lock()
+		from.readFailures = 0
+		from.mu.Unlock()
+	}
 	if from == to {
 		// The first selection kept the hub reads were already going to.
 		return nil

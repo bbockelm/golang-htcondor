@@ -17,7 +17,10 @@ package multiap
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -180,6 +183,12 @@ type HubEndpoint struct {
 	lastErr     string
 	// failures counts federation_sources reads that failed in a row.
 	failures int
+	// readFailures counts reads of the hub's data (jobs, history, ...)
+	// that failed in a row on the transport -- a dial, a dropped
+	// connection, a timeout -- not on the query. A hub can answer its
+	// small sources table and still fail every real read.
+	readFailures int
+	lastReadErr  string
 }
 
 // Name is the hub's collector ad Name; empty for a hub given only as a
@@ -193,15 +202,63 @@ func (e *HubEndpoint) Name() string {
 
 func (e *HubEndpoint) clock() time.Time { return e.owner.clock() }
 
-// Client dials the hub. A read that cannot dial the active hub asks the
-// Hub to re-read every hub's sources early, so failover does not wait
-// for the next poll.
+// Client dials the hub for a data read. A failed dial counts toward
+// failover (NoteRead).
 func (e *HubEndpoint) Client(ctx context.Context) (*dbrpc.Client, func(), error) {
 	c, closer, err := e.connect(ctx)
-	if err != nil && ctx.Err() == nil && e != nil && e.owner.Active() == e {
-		e.owner.kickRefresh()
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(ctx.Err(), context.Canceled) {
+		// Whatever stopped the dial -- refused, unreachable, the hub's
+		// ad gone, authentication -- the hub cannot be read.
+		e.noteReadFailure(err)
 	}
 	return c, closer, err
+}
+
+// NoteRead records the outcome of a data read on this hub. A transport
+// failure -- the connection failed or dropped, or the read timed out --
+// counts toward FailAfter, and on the active hub brings the next
+// selection forward; a success clears the count. A query the server
+// refused (a bad constraint, an unknown table) and a caller that went
+// away say nothing about the hub, and are not counted.
+func (e *HubEndpoint) NoteRead(ctx context.Context, err error) {
+	if e == nil {
+		return
+	}
+	switch {
+	case err == nil:
+		e.mu.Lock()
+		e.readFailures, e.lastReadErr = 0, ""
+		e.mu.Unlock()
+		return
+	case !transportFailure(ctx, err):
+		return
+	}
+	e.noteReadFailure(err)
+}
+
+func (e *HubEndpoint) noteReadFailure(err error) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.readFailures++
+	e.lastReadErr = err.Error()
+	e.mu.Unlock()
+	if e.owner.Active() == e {
+		e.owner.kickRefresh()
+	}
+}
+
+// transportFailure reports whether err, from a query made with ctx,
+// says the hub dropped the connection or did not answer in time -- not
+// that it refused the query, or that the caller went away.
+func transportFailure(ctx context.Context, err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return false
+	}
+	var ne net.Error
+	return errors.Is(err, dbrpc.ErrConnClosed) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &ne)
 }
 
 func (e *HubEndpoint) connect(ctx context.Context) (*dbrpc.Client, func(), error) {
@@ -276,9 +333,12 @@ type HubStatus struct {
 	LastAttempt time.Time
 	LastError   string
 	// Failures is how many federation_sources reads have failed in a
-	// row.
-	Failures int
-	Sources  int
+	// row; ReadFailures how many data reads failed in a row on the
+	// transport, and LastReadError why the last one did.
+	Failures      int
+	ReadFailures  int
+	LastReadError string
+	Sources       int
 	// FreshAPs is how many access points in the AP set the hub reports
 	// fresh, the measure hub selection ranks on.
 	FreshAPs int
@@ -292,7 +352,8 @@ func (e *HubEndpoint) Status() HubStatus {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	st := HubStatus{Name: e.name, Address: e.address, LastSuccess: e.sourcesAt, LastAttempt: e.lastAttempt,
-		LastError: e.lastErr, Failures: e.failures, Sources: len(e.sources)}
+		LastError: e.lastErr, Failures: e.failures, ReadFailures: e.readFailures, LastReadError: e.lastReadErr,
+		Sources: len(e.sources)}
 	st.Reachable = e.reachableLocked()
 	st.FreshAPs = e.freshLocked(e.owner.isMember)
 	return st

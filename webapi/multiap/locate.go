@@ -55,7 +55,7 @@ func (s *Service) FindOwn(ctx context.Context, user, constraint string, projecti
 		rows = append(rows, row)
 		return true
 	})
-	if err == nil {
+	if s.noteRead(ctx, err) == nil {
 		err = perr
 	}
 	if err != nil {

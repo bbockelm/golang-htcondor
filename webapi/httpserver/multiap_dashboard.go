@@ -94,6 +94,7 @@ func (s *Handler) handleMultiDashboard(w http.ResponseWriter, r *http.Request) {
 		defer closer()
 		rows, err := dbc.AggregateTable(ctx, multiap.TableJobs, scope,
 			[]string{multiap.AttrScheddName, "JobStatus", "HoldReasonCode"}, []dbrpc.AggSpec{{Func: dbrpc.AggCount, Arg: "*"}})
+		svc.NoteHubRead(ctx, err)
 		if err != nil {
 			s.writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("counting jobs on the federation hub: %v", err))
 			return

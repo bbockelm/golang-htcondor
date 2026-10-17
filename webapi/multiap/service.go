@@ -308,6 +308,16 @@ func untrustedReason(m apregistry.Member) string {
 // (else the active one), for a response that serves no rows of its own.
 func (s *Service) Sources(ctx context.Context) Sources { return s.snapshot(ctx).sources }
 
+// noteRead records a data read's outcome against the hub ctx is pinned
+// to (HubEndpoint.NoteRead), and returns err.
+func (s *Service) noteRead(ctx context.Context, err error) error {
+	s.Hub.For(ctx).NoteRead(ctx, err)
+	return err
+}
+
+// NoteHubRead is noteRead for a caller reading through HubClient.
+func (s *Service) NoteHubRead(ctx context.Context, err error) { s.noteRead(ctx, err) }
+
 // PinHub returns ctx pinned to the active federation hub: every read
 // made with it is served from, and reports the freshness of, that one
 // hub, even if another becomes active meanwhile. A request pins once, so
@@ -556,7 +566,7 @@ func (s *Service) ListJobs(ctx context.Context, req ListRequest, yield func(Row)
 			}
 			return true
 		})
-	if err == nil {
+	if s.noteRead(ctx, err) == nil {
 		err = rowErr
 	}
 	if err != nil {
