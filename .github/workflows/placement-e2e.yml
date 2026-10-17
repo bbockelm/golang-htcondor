@@ -1,0 +1,214 @@
+name: Placement onboarding E2E
+
+# Placement onboarding against a real HTCondor: a personal pool with a
+# condor_placementd, htcondor-api serving the embedded UI with its built-in
+# IdP, and a Playwright story that has an admin onboard an unknown identity,
+# that identity get a token in the browser and another through the device
+# flow, and each token run a job through the HTCondor CLI as the onboarded
+# account. See scripts/placement-e2e/.
+#
+# HTCondor is compiled from source: the placementd's database and its query
+# and edit commands are not in a release yet. The build is cached by commit,
+# so only a new HTCONDOR_SOURCE pays for it.
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - .github/workflows/placement-e2e.yml
+      - scripts/placement-e2e/**
+      - placementd*.go
+      - webapi/httpserver/placement*.go
+      - webapi/httpserver/handlers_placement*.go
+      - webapi/httpserver/device_code_handler.go
+      - webapi/httpserver/idp_*.go
+      - webapi/frontend/playwright.placement.config.ts
+      - webapi/frontend/e2e/placement/**
+      - webapi/frontend/e2e/fixtures/login.ts
+      - webapi/frontend/e2e/fixtures/serverlog.ts
+      - webapi/frontend/src/app/placement/**
+      - webapi/frontend/src/app/admin/placement/**
+      - webapi/frontend/src/components/PlacementTokenRequest.tsx
+      - webapi/frontend/src/lib/placementAdmin.ts
+  pull_request:
+    branches: [ main ]
+    paths:
+      - .github/workflows/placement-e2e.yml
+      - scripts/placement-e2e/**
+      - placementd*.go
+      - webapi/httpserver/placement*.go
+      - webapi/httpserver/handlers_placement*.go
+      - webapi/httpserver/device_code_handler.go
+      - webapi/httpserver/idp_*.go
+      - webapi/frontend/playwright.placement.config.ts
+      - webapi/frontend/e2e/placement/**
+      - webapi/frontend/e2e/fixtures/login.ts
+      - webapi/frontend/e2e/fixtures/serverlog.ts
+      - webapi/frontend/src/app/placement/**
+      - webapi/frontend/src/app/admin/placement/**
+      - webapi/frontend/src/components/PlacementTokenRequest.tsx
+      - webapi/frontend/src/lib/placementAdmin.ts
+  workflow_dispatch:
+    inputs:
+      htcondor_source:
+        description: 'HTCondor to build, as OWNER/REPO@REF (a branch, tag or commit); empty for the default below'
+        required: false
+        default: ''
+
+env:
+  # The HTCondor the test builds and runs: OWNER/REPO@REF. The placementd
+  # database lives on this fork until it merges upstream; then this becomes
+  # htcondor/htcondor@<commit>, or the build gives way to released packages.
+  HTCONDOR_SOURCE: ${{ inputs.htcondor_source || 'bbockelm/htcondor@22fc685c67aff58b60dca9dbffbcb9c8bd5ca545' }}
+
+jobs:
+  placement-e2e:
+    name: Placement onboarding (real HTCondor)
+    # Pinned rather than -latest: the cached build links against this
+    # image's libraries.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    # A branch or tag is resolved to its commit, so the cache key names
+    # exactly what was built.
+    - name: Resolve the HTCondor source
+      id: htc
+      run: |
+        repo=${HTCONDOR_SOURCE%@*}
+        ref=${HTCONDOR_SOURCE#*@}
+        [ -n "$repo" ] && [ -n "$ref" ] && [ "$repo" != "$HTCONDOR_SOURCE" ] || {
+          echo "HTCONDOR_SOURCE must be OWNER/REPO@REF, got '$HTCONDOR_SOURCE'"; exit 1; }
+        if [[ $ref =~ ^[0-9a-f]{40}$ ]]; then
+          sha=$ref
+        else
+          sha=$(git ls-remote "https://github.com/$repo.git" "$ref" "refs/tags/$ref^{}" | awk 'END {print $1}')
+          [ -n "$sha" ] || { echo "no ref $ref in $repo"; exit 1; }
+        fi
+        echo "repo=$repo" >> "$GITHUB_OUTPUT"
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        echo "prefix=$HOME/htcondor-install" >> "$GITHUB_OUTPUT"
+        echo "HTCondor: $repo at $sha"
+
+    - name: Restore the HTCondor build
+      id: htc-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.htc.outputs.prefix }}
+        key: htcondor-${{ env.ImageOS }}-${{ steps.htc.outputs.repo }}-${{ steps.htc.outputs.sha }}-${{ hashFiles('scripts/placement-e2e/build-htcondor.sh') }}
+
+    - name: Checkout HTCondor
+      if: steps.htc-cache.outputs.cache-hit != 'true'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: ${{ steps.htc.outputs.repo }}
+        ref: ${{ steps.htc.outputs.sha }}
+        path: htcondor-src
+        persist-credentials: false
+
+    - name: Build HTCondor
+      if: steps.htc-cache.outputs.cache-hit != 'true'
+      run: scripts/placement-e2e/build-htcondor.sh htcondor-src "${{ steps.htc.outputs.prefix }}"
+
+    # Saved straight after the build, before the test can fail, so a rerun
+    # starts from the cache.
+    - name: Save the HTCondor build
+      if: steps.htc-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.htc.outputs.prefix }}
+        key: ${{ steps.htc-cache.outputs.cache-primary-key }}
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: .go-version
+        cache-dependency-path: webapi/go.sum
+
+    - name: Set up Node
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: '24'
+        cache: 'npm'
+        cache-dependency-path: webapi/frontend/package-lock.json
+
+    - name: Install dependencies
+      working-directory: webapi/frontend
+      run: npm ci
+
+    - name: Cache Playwright browsers
+      id: pw-cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ hashFiles('webapi/frontend/package-lock.json') }}
+
+    - name: Install browser
+      if: steps.pw-cache.outputs.cache-hit != 'true'
+      working-directory: webapi/frontend
+      run: npx playwright install --with-deps chromium
+
+    - name: Install browser system deps
+      if: steps.pw-cache.outputs.cache-hit == 'true'
+      working-directory: webapi/frontend
+      run: npx playwright install-deps chromium
+
+    # The UI has to be inside the binary: without -tags embed_frontend a
+    # fallback page answers every route with 200, and the browser steps
+    # would be looking at it.
+    - name: Build htcondor-api with the embedded UI
+      run: |
+        (cd webapi/frontend && NODE_ENV=production npm run build)
+        mkdir -p webapi/httpserver/webui/dist
+        cp -r webapi/frontend/out/* webapi/httpserver/webui/dist/
+        (cd webapi && GOWORK=off go build -tags embed_frontend -o "$RUNNER_TEMP/htcondor-api" ./cmd/htcondor-api)
+
+    - name: Start the pool and htcondor-api
+      run: |
+        command -v htpasswd >/dev/null || sudo apt-get install -y -q apache2-utils
+        HTCONDOR_PREFIX="${{ steps.htc.outputs.prefix }}" API_BIN="$RUNNER_TEMP/htcondor-api" \
+          scripts/placement-e2e/harness.sh up "$RUNNER_TEMP/pe2e"
+        # Later steps get what the harness exported.
+        bash -c 'source "$1" && env' _ "$RUNNER_TEMP/pe2e/env" |
+          grep -E '^(CONDOR_CONFIG|E2E_[A-Z_]+|PLACEMENT_E2E_BASE_URL)=' >> "$GITHUB_ENV"
+        echo "${{ steps.htc.outputs.prefix }}/bin" >> "$GITHUB_PATH"
+        echo "${{ steps.htc.outputs.prefix }}/sbin" >> "$GITHUB_PATH"
+
+    - name: Run the placement onboarding suite
+      working-directory: webapi/frontend
+      run: npx playwright test -c playwright.placement.config.ts
+
+    - name: Daemon logs on failure
+      if: failure()
+      run: scripts/placement-e2e/harness.sh logs "$RUNNER_TEMP/pe2e"
+
+    - name: Stop the pool
+      if: always()
+      run: scripts/placement-e2e/harness.sh down "$RUNNER_TEMP/pe2e" || true
+
+    # Logs and the report only: the run directory also holds the pool's
+    # signing key and the tokens the test was given.
+    - name: Upload logs and report
+      if: failure()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: placement-e2e-logs
+        path: |
+          ${{ runner.temp }}/pe2e/condor/log/
+          ${{ runner.temp }}/pe2e/api/stdout.log
+          ${{ runner.temp }}/pe2e/out/*-job/job.*
+          webapi/frontend/playwright-report-placement/
+          webapi/frontend/test-results-placement/
+        include-hidden-files: true
+        if-no-files-found: ignore
+        retention-days: 7
