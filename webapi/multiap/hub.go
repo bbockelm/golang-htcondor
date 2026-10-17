@@ -363,14 +363,26 @@ func (e *HubEndpoint) reachableLocked() bool {
 	return !e.sourcesAt.IsZero() && e.clock().Sub(e.sourcesAt) <= 3*e.owner.interval+10*time.Second
 }
 
-// freshLocked counts the sources the hub reports fresh among those
-// member accepts.
+// freshLocked counts the sources the hub reports fresh, with their jobs
+// caught up, among those member accepts: JobsSynced where the hub
+// publishes it, else no Reset within resetSettle (the rule the watch
+// evaluator applies to an older hub) -- a hub replaying an AP from
+// scratch reports it fresh while its rows are still arriving, and must
+// not rank as holding it.
 func (e *HubEndpoint) freshLocked(member func(string) bool) int {
 	n := 0
 	for _, s := range e.sources {
-		if s.State == StateFresh && member(s.Schedd) {
-			n++
+		if s.State != StateFresh || !member(s.Schedd) {
+			continue
 		}
+		jobs := s.TableStatus[TableJobs]
+		switch {
+		case jobs.SyncedKnown && !jobs.Synced:
+			continue
+		case !jobs.SyncedKnown && !s.LastReset.IsZero() && e.sourcesAt.Sub(s.LastReset) < resetSettle:
+			continue
+		}
+		n++
 	}
 	return n
 }

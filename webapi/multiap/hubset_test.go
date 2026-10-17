@@ -3,6 +3,7 @@ package multiap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -407,6 +408,9 @@ func TestWatchFailoverToLaggingHubDoesNotFire(t *testing.T) {
 		b.PutJob(ap1, "alice@d", 1, 0, "")
 		b.PutSourceAd(ap1, sourceAd(ap1, StateFresh, "JobsSynced = true", "JobsSyncedAt = 100"))
 		b.PutSourceAd(ap2, sourceAd(ap2, StateFresh, "JobsSynced = false", "JobsSyncedAt = 100"))
+		// A third source B holds caught up (the rig ranks every source
+		// row), so B outranks A once A falls behind on ap1.
+		b.PutSourceAd("ap3.example.org", sourceAd("ap3.example.org", StateFresh, "JobsSynced = true", "JobsSyncedAt = 100"))
 	})
 	if r.pair.active() != hubA {
 		t.Fatalf("active %q, want %s", r.pair.active(), hubA)
@@ -620,5 +624,54 @@ func waitUntil(t *testing.T, what string, ok func() bool) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestHubRankingIgnoresReplayingSources: on a hub too old to publish
+// JobsSynced, an AP reset less than resetSettle ago is still replaying,
+// so it does not make that hub fresher; once the reset is old, it does.
+func TestHubRankingIgnoresReplayingSources(t *testing.T) {
+	a, b := memoryHub(t), memoryHub(t)
+	freshSources(a)
+	a.PutSourceAd(ap2, sourceAd(ap2, StateStale))
+	b.PutSourceAd(ap1, sourceAd(ap1, StateFresh))
+	p := newHubPair(t, a, b, HubPolicy{SwitchAfter: time.Minute})
+	b.PutSourceAd(ap2, sourceAd(ap2, StateFresh, fmt.Sprintf("LastReset = %d", p.clock.now().Unix())))
+	p.refresh()
+	p.over(5*time.Minute, 30*time.Second)
+	if got := p.active(); got != hubA {
+		t.Fatalf("switched to %q on an AP it is still replaying", got)
+	}
+	p.over(10*time.Minute, 30*time.Second)
+	if got := p.active(); got != hubB {
+		t.Fatalf("active %q once %s's reset of ap2 is old, want %s", got, hubB, hubB)
+	}
+}
+
+// TestHubDiscoveryGrace: a discovery that finds no hub at all (the
+// collector restarted) keeps the last known set for a grace period;
+// one that finds some hubs is applied at once.
+func TestHubDiscoveryGrace(t *testing.T) {
+	a, b := memoryHub(t), memoryHub(t)
+	freshSources(a)
+	freshSources(b)
+	d := &discoverable{}
+	d.set(HubSpec{Name: hubA, Dial: a.Dial}, HubSpec{Name: hubB, Dial: b.Dial})
+	clock := &testClock{t: time.Now()}
+	h := NewHubSet(HubOptions{Interval: time.Hour, Discover: d.discover})
+	h.now = clock.now
+	ctx := context.Background()
+	_ = h.Discover(ctx)
+	_ = h.Refresh(ctx)
+	d.set()
+	clock.advance(time.Minute)
+	_ = h.Discover(ctx)
+	if n := len(h.Statuses()); n != 2 || h.DiscoveryError() == "" {
+		t.Fatalf("an empty discovery left %d hubs (error %q), want both kept and the reason reported", n, h.DiscoveryError())
+	}
+	clock.advance(DefaultHubDiscoveryGrace)
+	_ = h.Discover(ctx)
+	if n := len(h.Statuses()); n != 1 || h.Active().Name() != hubA {
+		t.Fatalf("after the grace period: %d hubs, active %q; want only the active %s", n, h.Active().Name(), hubA)
 	}
 }

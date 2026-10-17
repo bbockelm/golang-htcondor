@@ -287,3 +287,37 @@ func TestMultiAPUtilizationCacheFollowsTheHub(t *testing.T) {
 		t.Fatalf("after the switch: %d jobs, want hub-b's 1 (hub-a's analysis was served from the cache)", n)
 	}
 }
+
+// TestHubReportNamesAPinnedHubDiscoveryDropped: a request pinned to a
+// hub that discovery has since dropped still reports that hub as its
+// own, not an empty one.
+func TestHubReportNamesAPinnedHubDiscoveryDropped(t *testing.T) {
+	a, b := multiaptest.NewMemoryHub(t), multiaptest.NewMemoryHub(t)
+	for _, db := range []*multiaptest.DB{a, b} {
+		db.PutSource(ap1, multiap.StateFresh, 2)
+	}
+	var aDown atomic.Bool
+	dialA := func(ctx context.Context) (*dbrpc.Client, func(), error) {
+		if aDown.Load() {
+			return nil, nil, errors.New("connection refused")
+		}
+		return a.Dial(ctx)
+	}
+	specs := []multiap.HubSpec{{Name: "hub-a", Dial: dialA}, {Name: "hub-b", Dial: b.Dial}}
+	hub := multiap.NewHubSet(multiap.HubOptions{Interval: time.Hour,
+		Discover: func(context.Context) ([]multiap.HubSpec, error) { return specs, nil }})
+	ctx := context.Background()
+	_ = hub.Discover(ctx)
+	_ = hub.Refresh(ctx)
+	m := &multiAPMode{svc: &multiap.Service{Registry: multiaptest.NewRegistry(ap1), Hub: hub, UIDDomain: "d"}}
+	pinned := m.svc.PinHub(ctx)
+	aDown.Store(true)
+	_ = hub.Refresh(ctx)
+	_ = hub.Refresh(ctx)
+	specs = specs[1:]
+	_ = hub.Discover(ctx)
+	cur, all, _ := m.hubReport(pinned)
+	if cur.Name != "hub-a" || cur.Active || len(all) != 1 || all[0].Name != "hub-b" {
+		t.Fatalf("report for a request pinned to the dropped hub-a: cur %+v, all %+v", cur, all)
+	}
+}

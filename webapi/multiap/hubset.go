@@ -58,6 +58,10 @@ const (
 	// DefaultHubDiscoverInterval is how often the hub set is
 	// re-discovered.
 	DefaultHubDiscoverInterval = 30 * time.Second
+	// DefaultHubDiscoveryGrace is how long a discovery that finds no hub
+	// at all is taken for a collector that lost its ads (it restarted)
+	// rather than for every hub gone: the last known set is kept.
+	DefaultHubDiscoveryGrace = 5 * time.Minute
 	// DefaultHubSettle is how long after a switch the new hub's copy of
 	// every AP is reported settling rather than fresh: htcondordb's
 	// default fresh threshold (60 s) and a margin.
@@ -150,6 +154,8 @@ type Hub struct {
 
 	discoverAt  time.Time
 	discoverErr string
+	// emptySince is when discovery started finding no hub at all.
+	emptySince time.Time
 }
 
 // NewHub returns a Hub of one hub, dialed with dial. It is always the
@@ -421,22 +427,10 @@ func (h *Hub) Status() HubStatus {
 	return st
 }
 
-// Source returns the active hub's row for schedd; see HubEndpoint.Source.
-func (h *Hub) Source(schedd string) (Source, bool) { return h.Active().Source(schedd) }
-
-// Federates reports whether the active hub federates table.
-func (h *Hub) Federates(table string) bool { return h.Active().Federates(table) }
-
-// Sources returns the active hub's snapshot.
-func (h *Hub) Sources() []Source { return h.Active().Sources() }
-
 // ReadSources reads the active hub's federation_sources now.
 func (h *Hub) ReadSources(ctx context.Context) (map[string]Source, time.Time, error) {
 	return h.For(ctx).ReadSources(ctx)
 }
-
-// Freshness is the active hub's Freshness.
-func (h *Hub) Freshness(schedd string) (time.Duration, bool) { return h.Active().Freshness(schedd) }
 
 // Statuses reports every known hub, the active one marked, by name.
 func (h *Hub) Statuses() []HubStatus {
@@ -526,6 +520,20 @@ func (h *Hub) Discover(ctx context.Context) error {
 		return err
 	}
 	h.discoverErr = ""
+	if len(specs) == 0 && len(h.eps) > 0 {
+		// A collector that restarted answers with no ads until the hubs
+		// advertise again; that is no reason to forget the standbys.
+		if h.emptySince.IsZero() {
+			h.emptySince = h.discoverAt
+		}
+		if h.discoverAt.Sub(h.emptySince) < DefaultHubDiscoveryGrace {
+			h.discoverErr = "the collector lists no federation hub; keeping the hubs it last listed"
+			h.mu.Unlock()
+			return nil
+		}
+	} else {
+		h.emptySince = time.Time{}
+	}
 	h.mu.Unlock()
 	h.setEndpoints(specs)
 	return nil

@@ -379,15 +379,15 @@ func TestFeedHooks(t *testing.T) {
 // its source rows carry EpochHistoryConnected.
 func TestHubFederatesFromSourceRows(t *testing.T) {
 	r := newWatchRig(t, jobwatch.ModeAny, "ClusterId == 1")
-	if r.svc.Hub.Federates(TableEpochHistory) {
+	if r.svc.Hub.Active().Federates(TableEpochHistory) {
 		t.Fatal("federates epoch_history with no row listing it")
 	}
-	if !r.svc.Hub.Federates(TableHistory) {
+	if !r.svc.Hub.Active().Federates(TableHistory) {
 		t.Fatal("does not federate history, which every row lists")
 	}
 	r.hub.PutSourceAd(ap1, sourceAd(ap1, StateFresh, "EpochHistoryConnected = false"))
 	r.advanceHub(0)
-	if !r.svc.Hub.Federates(TableEpochHistory) {
+	if !r.svc.Hub.Active().Federates(TableEpochHistory) {
 		t.Fatal("does not federate epoch_history, which ap1's row lists")
 	}
 }

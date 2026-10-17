@@ -836,18 +836,18 @@ func (m *multiAPMode) hubReach(st multiap.HubStatus) APHubReach {
 // switch, for /api/v1/aps and /readyz.
 func (m *multiAPMode) hubReport(ctx context.Context) (APHubReach, []APHubReach, *APHubSwitch) {
 	pinned := m.svc.Hub.For(ctx)
-	var cur APHubReach
 	var all []APHubReach
 	for _, st := range m.svc.Hub.Statuses() {
-		r := m.hubReach(st)
-		all = append(all, r)
-		if strings.EqualFold(st.Name, pinned.Name()) {
-			cur = r
-		}
+		all = append(all, m.hubReach(st))
 	}
-	if len(all) == 0 {
-		cur = m.hubReach(m.svc.Hub.Status())
+	// The hub the request is pinned to, whether or not it is still in
+	// the set (discovery may have dropped it since).
+	st := m.svc.Hub.Status()
+	if pinned != nil {
+		st = pinned.Status()
+		st.Active = pinned == m.svc.Hub.Active()
 	}
+	cur := m.hubReach(st)
 	var sw *APHubSwitch
 	if last := m.svc.Hub.LastSwitch(); last != nil {
 		sw = &APHubSwitch{From: last.From, To: last.To, Reason: last.Reason, At: timeOrEmpty(last.At)}

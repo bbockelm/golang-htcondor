@@ -158,7 +158,7 @@ func matchedIDs(a watchpoll.Answer) []string {
 // attribute would otherwise go unnoticed: the fallback still passes the
 // rest of this test.
 func e2eHubPublishesJobsSynced(t *testing.T, w *e2eWatches) {
-	srcs := w.s.srv.multi.svc.Hub.Sources()
+	srcs := w.s.srv.multi.svc.Hub.Active().Sources()
 	if len(srcs) != 2 {
 		t.Fatalf("the hub lists %d sources, want 2", len(srcs))
 	}
@@ -218,7 +218,7 @@ func e2eEpochsFromHub(t *testing.T, w *e2eWatches) {
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("last epochs read: %+v, %v", l, lastErr)
-			for _, src := range s.srv.multi.svc.Hub.Sources() {
+			for _, src := range s.srv.multi.svc.Hub.Active().Sources() {
 				t.Logf("hub source %s: %s tables %v", src.Schedd, src.State, src.Tables)
 			}
 		}
