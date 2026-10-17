@@ -3545,6 +3545,9 @@ func (h *Handler) performPeriodicPing() {
 	// build one (no token + no signing key), it stays nil and we still log
 	// the failure but with a "client_auth_methods" of "<nil>".
 	var secConfigForLog *security.SecurityConfig
+	// pingToken is the token the schedd ping presents, offered to the
+	// collector too.
+	pingToken := h.token
 
 	// If we have a static token, use it directly
 	if h.token != "" {
@@ -3561,6 +3564,7 @@ func (h *Handler) performPeriodicPing() {
 		if err != nil {
 			h.logger.Warn(logging.DestinationHTTP, "Failed to generate token for periodic ping", "error", err)
 		} else {
+			pingToken = token
 			secConfig, err := configureSecurityForToken(h.clientConfig, token, nil, false)
 			if err != nil {
 				h.logger.Error(logging.DestinationHTTP, "Failed to configure security for periodic ping", "error", err)
@@ -3574,11 +3578,8 @@ func (h *Handler) performPeriodicPing() {
 	// Ping collector if configured. The collector ping is read-only
 	// — we don't need the token's identity, just any handshake the
 	// server accepts — so we override the SecurityConfig on a
-	// per-call ctx with one that also offers SSL when local SSL
-	// credentials are configured. This keeps /readyz green when the
-	// daemon's token doesn't match the collector's IssuerKeys
-	// (issuer rotation, TrustDomain misconfig, …) but the host has
-	// SSL credentials the collector trusts.
+	// per-call ctx with one built from the configured CLIENT methods,
+	// plus the ping token and SSL; see configureSecurityForCollectorPing.
 	if h.collector != nil {
 		h.pingHealth.markCollectorEnabled()
 
@@ -3587,7 +3588,7 @@ func (h *Handler) performPeriodicPing() {
 
 		collectorCtx := ctx
 		collectorSecForLog := secConfigForLog
-		if pingSec, perr := configureSecurityForCollectorPing(h.clientConfig, h.token, collectorHost); perr == nil {
+		if pingSec, perr := configureSecurityForCollectorPing(h.clientConfig, pingToken, collectorHost); perr == nil {
 			collectorCtx = htcondor.WithSecurityConfig(ctx, pingSec)
 			collectorSecForLog = pingSec
 		}

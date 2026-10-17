@@ -164,61 +164,76 @@ func stripAuthMethod(list []security.AuthMethod, m security.AuthMethod) []securi
 }
 
 // ConfigureSecurityForCollectorPing builds a SecurityConfig used solely
-// by the periodic collector ping. The collector ping is read-only —
-// we just need *some* mutually agreeable handshake — so this offers
-// both TOKEN and SSL. That's useful when the daemon's token does not
-// match the collector's IssuerKeys (an issuer rotation, a misconfigured
-// TrustDomain, etc.): SSL keeps /readyz green via a path that has
-// nothing to do with JWT signing. The schedd path — which DOES need
-// the token's identity for authz — keeps using TOKEN only.
+// by the periodic collector ping. The ping is this daemon's own health
+// check, so it starts from the configured CLIENT security settings --
+// SEC_CLIENT_AUTHENTICATION_METHODS and the credentials those methods
+// need -- exactly as any other daemon-credential call to the collector
+// does. A pool that authenticates with FS or IDTOKENS is pinged with FS
+// or IDTOKENS.
 //
-// SSL is always offered (even with no client cert/key on disk) because
-// many collectors permit anonymous SSL: the client only verifies the
-// server's cert and connects as ANONYMOUS@…, which is enough for a
-// read-only ping. Cedar's SSL auth handles empty CertFile/KeyFile as
-// "no client cert presented", and trusts the system store alongside
-// AUTH_SSL_CLIENT_CAFILE/CADIR unless AUTH_SSL_CLIENT_USE_DEFAULT_CAS is
-// false — see cedar/security/ssl_trust.go.
+// On top of that base, two methods are always offered, because the ping
+// is read-only and needs only *some* handshake the collector accepts:
+//
+//   - TOKEN, first, with token as the credential, when token is
+//     non-empty. Token auth gives the collector a real identity to log.
+//   - SSL, last, when the configuration does not already offer it. That
+//     keeps /readyz green when the daemon's token does not match the
+//     collector's IssuerKeys (an issuer rotation, a misconfigured
+//     TrustDomain, etc.) but the collector accepts SSL. SSL is offered
+//     even with no client cert/key on disk because many collectors
+//     permit anonymous SSL: the client only verifies the server's cert
+//     and connects as ANONYMOUS@..., which is enough for a ping. Cedar
+//     handles empty CertFile/KeyFile as "no client cert presented", and
+//     trusts the system store alongside AUTH_SSL_CLIENT_CAFILE/CADIR
+//     unless AUTH_SSL_CLIENT_USE_DEFAULT_CAS is false -- see
+//     cedar/security/ssl_trust.go.
 //
 // serverName is used by cedar's SSL handshake for hostname/SAN
 // verification. Without it, cedar falls back to the literal string
 // "unknown" and verification fails ("certificate is valid for
 // host.example.com, ..., not unknown"). Pass the bare hostname of the
-// collector address — see hostFromCondorAddress in handler.go.
-//
-// `token` may be empty; in that case only SSL is offered.
+// collector address -- see hostFromCondorAddress in handler.go.
 func ConfigureSecurityForCollectorPing(token, serverName string) (*security.SecurityConfig, error) {
 	return configureSecurityForCollectorPing(nil, token, serverName)
 }
 
 // configureSecurityForCollectorPing is ConfigureSecurityForCollectorPing
-// reading the SSL client credentials from cfg (nil: the process-wide
+// reading the security configuration from cfg (nil: the process-wide
 // default).
 func configureSecurityForCollectorPing(cfg *config.Config, token, serverName string) (*security.SecurityConfig, error) {
-	methods := []security.AuthMethod{security.AuthSSL}
+	// The configured base, as the daemon itself: a fresh context carries
+	// no caller's SecurityConfig, and is marked as daemon work so the
+	// fallback to the daemon's own credentials is a declared one.
+	ctx := htcondor.WithDaemonCredential(context.Background(), "periodic health ping")
+	sc, err := htcondor.GetSecurityConfigOrDefault(ctx, cfg, 0, "CLIENT", "")
+	if err != nil {
+		return nil, err
+	}
+
 	if token != "" {
-		// TOKEN first so cedar prefers it when both work — token
-		// auth gives us a real identity in the schedd's logs vs.
-		// the anonymous-SSL session.
-		methods = []security.AuthMethod{security.AuthToken, security.AuthSSL}
+		sc.Token = token
+		sc.AuthMethods = append([]security.AuthMethod{security.AuthToken}, stripAuthMethod(sc.AuthMethods, security.AuthToken)...)
+	}
+	if !containsAuthMethod(sc.AuthMethods, security.AuthSSL) {
+		// The configured base loads SSL credentials only when SSL is
+		// configured; load them for the SSL added here. Best effort:
+		// empty values mean "no client cert" / "system trust store".
+		sc.AuthMethods = append(sc.AuthMethods, security.AuthSSL)
+		sc.CertFile, sc.KeyFile, _, _ = htcondor.LookupSSLClientCredentialsWithConfig(cfg)
+		htcondor.ApplySSLClientTrust(cfg, sc)
 	}
 
-	// Best-effort credential lookup. Empty values are fine: cedar
-	// treats them as "no client cert" / "system trust store".
-	certFile, keyFile, _, _ := htcondor.LookupSSLClientCredentialsWithConfig(cfg)
-
-	sc := &security.SecurityConfig{
-		AuthMethods:    methods,
-		Authentication: security.SecurityRequired,
-		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
-		Encryption:     security.SecurityOptional,
-		Integrity:      security.SecurityOptional,
-		Token:          token,
-		CertFile:       certFile,
-		KeyFile:        keyFile,
-		ServerName:     serverName,
+	sc.Authentication = security.SecurityRequired
+	if len(sc.CryptoMethods) == 0 {
+		sc.CryptoMethods = []security.CryptoMethod{security.CryptoAES}
 	}
-	htcondor.ApplySSLClientTrust(cfg, sc)
+	if sc.Encryption == "" {
+		sc.Encryption = security.SecurityOptional
+	}
+	if sc.Integrity == "" {
+		sc.Integrity = security.SecurityOptional
+	}
+	sc.ServerName = serverName
 	return sc, nil
 }
 
