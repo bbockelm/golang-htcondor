@@ -316,7 +316,7 @@ func (s *Service) noteRead(ctx context.Context, err error) error {
 }
 
 // NoteHubRead is noteRead for a caller reading through HubClient.
-func (s *Service) NoteHubRead(ctx context.Context, err error) { s.noteRead(ctx, err) }
+func (s *Service) NoteHubRead(ctx context.Context, err error) { _ = s.noteRead(ctx, err) }
 
 // PinHub returns ctx pinned to the active federation hub: every read
 // made with it is served from, and reports the freshness of, that one

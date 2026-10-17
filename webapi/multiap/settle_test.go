@@ -33,7 +33,7 @@ func TestSettleWindowAfterSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 	schedd := &fakeSchedd{ads: []*classad.ClassAd{job}}
-	s.Schedd = func(m apregistry.Member) ScheddQuerier { return schedd }
+	s.Schedd = func(apregistry.Member) ScheddQuerier { return schedd }
 	id, err := s.Codec.Parse("5.0@" + ap1)
 	if err != nil {
 		t.Fatal(err)
