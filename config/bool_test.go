@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -42,28 +44,55 @@ func TestStringIsBooleanParam(t *testing.T) {
 	}
 }
 
-// TestGetBool shows GetBool returns def for an unset knob or one whose value
-// is not a boolean, and the generated table's default for a knob that has
-// one, as param_boolean does.
+// TestGetBool shows GetBool returns def for an unset knob, and the generated
+// table's default for a knob that has one, as param_boolean does. A value that
+// is not a boolean is logged and, as in param_boolean, gives the value of the
+// literal it starts with, or def if it starts with none.
+// Not parallel: it replaces the default logger.
 func TestGetBool(t *testing.T) {
-	cfg, err := NewFromReader(strings.NewReader("A = false\nB = no\nC = 3 > 2\n"))
+	cfg, err := NewFromReader(strings.NewReader(`A = false
+B = no
+C = 3 > 2
+D = false   # only our CA
+E = falsey
+F = TRUEish
+G = 0 || true
+H = 1 + 1 == 2
+`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, tt := range []struct {
 		key       string
 		def, want bool
+		logged    bool
 	}{
-		{"A", true, false},
-		{"B", true, true}, // not a boolean: the default
-		{"B", false, false},
-		{"C", false, true},
-		{"UNSET_KNOB_FOR_TEST", true, true},
-		{"UNSET_KNOB_FOR_TEST", false, false},
-		{"AUTH_SSL_CLIENT_USE_DEFAULT_CAS", false, true}, // table default is true
+		{"A", true, false, false},
+		{"B", true, true, true}, // no literal: the default
+		{"B", false, false, true},
+		{"C", false, true, false},
+		{"D", true, false, true}, // HTCondor has no inline comments
+		{"E", true, false, true},
+		{"F", false, true, true},
+		{"G", false, true, false}, // a literal prefix, but a valid expression
+		{"H", false, true, false},
+		{"UNSET_KNOB_FOR_TEST", true, true, false},
+		{"UNSET_KNOB_FOR_TEST", false, false, false},
+		{"AUTH_SSL_CLIENT_USE_DEFAULT_CAS", false, true, false}, // table default is true
 	} {
-		if got := cfg.GetBool(tt.key, tt.def); got != tt.want {
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		got := cfg.GetBool(tt.key, tt.def)
+		slog.SetDefault(prev)
+		if got != tt.want {
 			t.Errorf("GetBool(%q, %v) = %v, want %v", tt.key, tt.def, got, tt.want)
+		}
+		out := buf.String()
+		if logged := out != ""; logged != tt.logged {
+			t.Errorf("GetBool(%q, %v) logged %q, want logged = %v", tt.key, tt.def, out, tt.logged)
+		} else if logged && (!strings.Contains(out, "level=ERROR") || !strings.Contains(out, "knob="+tt.key)) {
+			t.Errorf("GetBool(%q, %v) logged %q, want an error naming the knob", tt.key, tt.def, out)
 		}
 	}
 }

@@ -217,6 +217,12 @@ func NewClientSecurityConfigWithConfig(
 	return secConfig, nil
 }
 
+// usesTLS reports whether list offers a method that runs a TLS handshake,
+// SSL or SCITOKENS, and so needs the AUTH_SSL_* trust anchors.
+func usesTLS(list []security.AuthMethod) bool {
+	return hasAuthMethod(list, security.AuthSSL) || hasAuthMethod(list, security.AuthSciTokens)
+}
+
 // hasAuthMethod reports whether m is in list. Small helper so callers
 // that need to overlay additional methods on top of NewClientSecurityConfig's
 // configured-base list can do so idempotently — e.g. file_transfer
@@ -540,18 +546,19 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 	cryptoMethods := getSecurityMethods(cfg, context, "CRYPTO_METHODS")
 	secConfig.CryptoMethods = mapCryptoMethods(cryptoMethods)
 
-	// Get SSL certificate/key paths if SSL authentication is enabled
-	for _, method := range secConfig.AuthMethods {
-		if method == security.AuthSSL {
-			if certFile, ok := cfg.Get("AUTH_SSL_CLIENT_CERTFILE"); ok {
-				secConfig.CertFile = certFile
-			}
-			if keyFile, ok := cfg.Get("AUTH_SSL_CLIENT_KEYFILE"); ok {
-				secConfig.KeyFile = keyFile
-			}
-			applySSLTrust(cfg, secConfig, "CLIENT")
-			break
+	// The client certificate is presented only by SSL. The trust anchors
+	// verify the server's certificate in both SSL and SCITOKENS, which runs
+	// over the same TLS handshake (setup_ssl_ctx in HTCondor).
+	if hasAuthMethod(secConfig.AuthMethods, security.AuthSSL) {
+		if certFile, ok := cfg.Get("AUTH_SSL_CLIENT_CERTFILE"); ok {
+			secConfig.CertFile = certFile
 		}
+		if keyFile, ok := cfg.Get("AUTH_SSL_CLIENT_KEYFILE"); ok {
+			secConfig.KeyFile = keyFile
+		}
+	}
+	if usesTLS(secConfig.AuthMethods) {
+		applySSLTrust(cfg, secConfig, "CLIENT")
 	}
 
 	// Get token file/directory if token authentication is enabled.
@@ -587,8 +594,9 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 // and additionally loads the credentials a server needs to *verify* incoming
 // authentications rather than to present its own:
 //
-//   - SSL: the server certificate/key and trust anchors (AUTH_SSL_SERVER_CERTFILE
-//     / KEYFILE / CAFILE / CADIR / USE_DEFAULT_CAS) instead of the client ones.
+//   - SSL and SCITOKENS: the server certificate/key and trust anchors
+//     (AUTH_SSL_SERVER_CERTFILE / KEYFILE / CAFILE / CADIR / USE_DEFAULT_CAS)
+//     instead of the client ones.
 //   - TOKEN/IDTOKENS: the signing keys used to validate presented tokens
 //     (SEC_TOKEN_POOL_SIGNING_KEY_FILE for the pool key, SEC_PASSWORD_DIRECTORY
 //     for named issuer keys), the trust domain (TRUST_DOMAIN, defaulting to
@@ -625,9 +633,10 @@ func GetServerSecurityConfig(cfg *config.Config, command int, secContext string)
 		return false
 	}
 
-	// SSL: replace the client cert/key/trust anchors (loaded by
-	// GetSecurityConfig) with the server's own.
-	if hasMethod(security.AuthSSL) {
+	// SSL and SCITOKENS: replace the client cert/key/trust anchors (loaded by
+	// GetSecurityConfig) with the server's own. Both run a TLS handshake in
+	// which the server presents its certificate.
+	if usesTLS(sc.AuthMethods) {
 		if v, ok := cfg.Get("AUTH_SSL_SERVER_CERTFILE"); ok {
 			sc.CertFile = v
 		}

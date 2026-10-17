@@ -108,3 +108,65 @@ func TestApplySSLClientTrust(t *testing.T) {
 	ApplySSLClientTrust(nil, sc)
 	checkTrust(t, "nil", sc, "", "/global/certs", true)
 }
+
+// TestSciTokensTrustKnobs shows SCITOKENS alone loads the AUTH_SSL_* trust
+// anchors, as HTCondor's setup_ssl_ctx does for its TLS handshake: on the
+// client, the delegated-token client, the server, and a per-level server
+// policy. The client presents no certificate for SCITOKENS; the server
+// presents its own.
+func TestSciTokensTrustKnobs(t *testing.T) {
+	cfg := mustConfig(t, `
+SEC_DEFAULT_AUTHENTICATION_METHODS = SCITOKENS
+SEC_WRITE_AUTHENTICATION_METHODS = SCITOKENS
+AUTH_SSL_CLIENT_CERTFILE = /client/cert.pem
+AUTH_SSL_CLIENT_KEYFILE = /client/key.pem
+AUTH_SSL_CLIENT_CAFILE = /client/ca.pem
+AUTH_SSL_CLIENT_CADIR = /client/certs
+AUTH_SSL_CLIENT_USE_DEFAULT_CAS = false
+AUTH_SSL_SERVER_CERTFILE = /server/cert.pem
+AUTH_SSL_SERVER_KEYFILE = /server/key.pem
+AUTH_SSL_SERVER_CAFILE = /server/ca.pem
+AUTH_SSL_SERVER_CADIR = /server/certs
+AUTH_SSL_SERVER_USE_DEFAULT_CAS = false
+`)
+	noCert := func(what string, sc *security.SecurityConfig) {
+		t.Helper()
+		if sc.CertFile != "" || sc.KeyFile != "" {
+			t.Errorf("%s: CertFile = %q, KeyFile = %q; want none", what, sc.CertFile, sc.KeyFile)
+		}
+	}
+
+	sc, err := GetSecurityConfig(cfg, 0, "CLIENT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkTrust(t, "GetSecurityConfig", sc, "/client/ca.pem", "/client/certs", false)
+	noCert("GetSecurityConfig", sc)
+
+	sc, err = NewClientSecurityConfigWithConfig(t.Context(), cfg, "a.token.value", "", 0, "CLIENT", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkTrust(t, "NewClientSecurityConfig with a token", sc, "/client/ca.pem", "/client/certs", false)
+	noCert("NewClientSecurityConfig with a token", sc)
+
+	for _, level := range []string{"DEFAULT", "WRITE"} {
+		sc, err = GetServerSecurityConfig(cfg, 0, level)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkTrust(t, "GetServerSecurityConfig "+level, sc, "/server/ca.pem", "/server/certs", false)
+		if sc.CertFile != "/server/cert.pem" || sc.KeyFile != "/server/key.pem" {
+			t.Errorf("GetServerSecurityConfig %s: CertFile = %q, KeyFile = %q", level, sc.CertFile, sc.KeyFile)
+		}
+	}
+
+	// A method list with neither SSL nor SCITOKENS loads no trust anchors.
+	sc, err = GetSecurityConfig(mustConfig(t, "SEC_DEFAULT_AUTHENTICATION_METHODS = FS\nAUTH_SSL_CLIENT_CADIR = /client/certs\n"), 0, "CLIENT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.CADir != "" || sc.UseDefaultCAs != nil {
+		t.Errorf("FS only: CADir = %q, UseDefaultCAs = %v; want unset", sc.CADir, sc.UseDefaultCAs)
+	}
+}
