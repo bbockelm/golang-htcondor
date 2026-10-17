@@ -5,9 +5,10 @@ go 1.26.0
 require (
 	github.com/PelicanPlatform/classad v0.31.5
 	github.com/PelicanPlatform/classad/collections v0.29.6
-	github.com/bbockelm/cedar v0.7.11
+	github.com/bbockelm/cedar v0.7.12-0.20261017165254-d864685fa29e
 	github.com/bbockelm/gosssd v0.0.4
 	github.com/glebarez/go-sqlite v1.23.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/crypto v0.55.0
@@ -21,7 +22,6 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgraph-io/ristretto/v2 v2.4.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect

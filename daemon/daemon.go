@@ -330,6 +330,9 @@ func (d *Daemon) SharedPortName() string {
 // as a C++ daemon checks it against its own command sinful; without it any id
 // the client reports is accepted on the ip:port check alone.
 //
+// Its SciTokensMapper reads CERTIFICATE_MAPFILE from the daemon's config at
+// each mapping rather than when the config is built.
+//
 // Call it after Listener, once for the base config and once for each
 // per-command config (cedar/server's SecurityConfigForCommand).
 func (d *Daemon) ServerSecurityConfig(command int, secContext string) (*security.SecurityConfig, error) {
@@ -338,6 +341,10 @@ func (d *Daemon) ServerSecurityConfig(command int, secContext string) (*security
 		return nil, err
 	}
 	sc.SharedPortID = d.SharedPortName()
+	// Map SciTokens through the CERTIFICATE_MAPFILE of the daemon's current
+	// config, so a reconfig that sets or moves it applies to configs built
+	// before it.
+	sc.SciTokensMapper = htcondor.SciTokensMapper(d.Config)
 	return sc, nil
 }
 
@@ -581,6 +588,8 @@ func (d *Daemon) reconfigure() {
 	}
 	d.cfg.Store(cfg)
 	d.lastReconfig.Store(time.Now().Unix())
+	// HTCondor re-reads CERTIFICATE_MAPFILE after every reconfig.
+	htcondor.ReloadCertificateMapFile()
 	// Re-apply per-destination log levels from the reloaded config, so condor_reconfig
 	// changes log verbosity on the running daemon (the levels are held in a live atomic
 	// snapshot the installed handlers read).
