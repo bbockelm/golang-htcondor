@@ -125,6 +125,15 @@ func (o *UserRecordOracle) Check(ctx context.Context, username string, _ []strin
 	return ReauthDecision{Status: UserStatusActive}, nil
 }
 
+// CheckAccount is Check for a fully qualified account -- one the placementd
+// assigned, whose domain need not be UID_DOMAIN -- used as given.
+func (o *UserRecordOracle) CheckAccount(ctx context.Context, account string, _ ...string) (ReauthDecision, error) {
+	if !strings.Contains(account, "@") {
+		return ReauthDecision{}, fmt.Errorf("account %q is not fully qualified", account)
+	}
+	return o.Check(ctx, account, nil)
+}
+
 func (o *UserRecordOracle) schedd() UserRecordLookup {
 	if o.Lookup == nil {
 		return nil

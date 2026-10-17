@@ -19,6 +19,7 @@ func placementOnlyExpectedAllowed(path string) bool {
 	switch path {
 	case "/api/v1/auth/me", "/api/v1/auth/logout", "/login", "/logout",
 		"/auth/device_authorization", "/auth/code", "/auth/cancel_device",
+		"/mcp/oauth2/device/verify", "/oauth2/device/verify",
 		"/placement", "/placement/", "/placement/device", "/placement/device/":
 		return true
 	}

@@ -157,7 +157,7 @@ list of strategies; the first to answer wins.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `HTTP_API_IDENTITY_MAP` | unset (no mapping) | Comma-separated strategy list, e.g. `gecos,username`. `gecos` matches the token subject against accounts' GECOS names; `username` treats the subject as a login name. An unparseable list makes the server refuse to start rather than fall back to an unmapped identity. |
+| `HTTP_API_IDENTITY_MAP` | unset (no mapping) | Comma-separated strategy list, e.g. `gecos,username`. `gecos` matches the token subject against accounts' GECOS names; `username` treats the subject as a login name; `placementd` asks condor_placementd (see [placementd as an identity mapping](#placementd-as-an-identity-mapping)). An unparseable list makes the server refuse to start rather than fall back to an unmapped identity. |
 | `HTTP_API_IDENTITY_MAP_PASSWD_FILE` | system default | Read accounts from this file instead of `/etc/passwd`. Both the index and the re-check use it, so it is self-consistent. |
 | `HTTP_API_IDENTITY_MAP_TTL` | `5m` | How long the account index and group answers are reused. The index is rebuilt lazily on the first login after it expires. |
 | `HTTP_API_IDENTITY_MAP_STRIP_DOMAIN` | `false` | Also try the local part of a scoped subject: `bockelman@wisc.edu` matches a GECOS of `bockelman`. The full subject is tried first, so this only ever adds a fallback. |
@@ -1482,6 +1482,10 @@ metrics key.
   with `user_code` hands it to that device request instead.
 - `GET /api/v1/placement/me/device/{user_code}`,
   `POST /api/v1/placement/me/device/{user_code}/deny`
+- `POST /api/v1/placement/me/project` -- `{project}`; selects the project
+  of a session signed in through the `placementd` identity mapping
+- `GET /api/v1/placement/me` and `POST /api/v1/placement/me/token` also
+  accept a bearer access token holding the `placement` scope
 - `POST /auth/device_authorization`, `GET /auth/code`,
   `POST /auth/cancel_device` — placement-webapp's device flow, for
   `placement-client`
@@ -2329,6 +2333,52 @@ responses are placement-webapp's byte for byte, including the success body
 seconds. The approved token is kept, sealed with `HTTP_API_KEK_FILE` when
 one is configured, until the client collects it once; it is then deleted,
 and expired requests are swept.
+
+**The standard device flow (placement-client).** New clients use this
+server's own RFC 8628 device grant instead of the paths above. They read
+`/.well-known/oauth-authorization-server` (so `HTTP_API_ENABLE_MCP` must
+be on), ask the device authorization endpoint as the pre-registered
+public client `placement_client` for the scope `placement` (and
+`offline_access` to keep a refresh token), and send the person to the
+verification page, where any signed-in session with an identity --
+placement-only included -- approves it. The access token then calls `GET
+/api/v1/placement/me` and `POST /api/v1/placement/me/token` with
+`Authorization: Bearer`, and nothing else: every other route refuses it.
+The identity it acts for is the one that approved it, recorded on the
+grant. `placement` cannot be combined with any other scope, and is granted
+through the device flow only. Each refresh re-reads the identity from the
+placementd and ends the grant when the identity is gone or expired, or the
+account's schedd user record is disabled. The legacy paths above keep
+working for older clients.
+
+### placementd as an identity mapping
+
+With `placementd` in `HTTP_API_IDENTITY_MAP` (alone, or in the list, e.g.
+`placementd,gecos`), a sign-in identity the placementd has authorized,
+unexpired, with an account that holds `READ` or `WRITE`, signs in **as that
+account**: the session's user is the account exactly as the placementd
+names it, whose domain need not be `UID_DOMAIN`. `placementd` listed before
+every other method is tried first; listed after them, it is tried when
+they fail. An identity no method maps gets a placement-only session.
+
+Every token this server mints for such a session -- or for an OAuth2 grant
+it authorizes -- names the account as its subject, carries `condor:/READ`
+and `condor:/WRITE` only as far as the account holds them (other grants,
+such as `INSTRUCTOR`, are not authorization levels and are left out), and
+carries the session's selected project as the `project` claim, as the
+placementd's own tokens do. A project switcher appears when the account has
+more than one. The session never outlives the mapping's expiry. The account
+is re-read at most every five minutes, on the next token: an identity
+removed, expired or pointed at another account ends the session; changed
+grants and projects are taken up. OAuth2 grants of the account are
+re-checked the same way on refresh.
+
+Some features need a local Unix account and are refused for these
+sessions: credential storage in the credd (`/api/v1/creds/*`), the SSH
+gateway and SSH certificates, superuser mode, token exchange of their
+grants, and share links for accounts outside `UID_DOMAIN`. Owner-scoped
+reads match the job's `Owner`, the part of the account before `@`, as for
+every other caller.
 
 | Knob | Purpose |
 | --- | --- |

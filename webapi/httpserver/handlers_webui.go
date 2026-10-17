@@ -74,6 +74,14 @@ type AuthMeResponse struct {
 type PlacementSessionInfo struct {
 	Identity    string `json:"identity"`
 	DisplayName string `json:"display_name,omitempty"`
+	// Account is set when the session signed in as the account the
+	// placementd assigned to Identity (HTTP_API_IDENTITY_MAP =
+	// placementd): the account, the permissions on jobs it holds, its
+	// projects and the one tokens are minted for.
+	Account  string   `json:"account,omitempty"`
+	Levels   []string `json:"levels,omitempty"`
+	Projects []string `json:"projects,omitempty"`
+	Project  string   `json:"project,omitempty"`
 }
 
 // handleAuthMe handles GET /api/v1/auth/me. Resolves the browser session
@@ -97,6 +105,12 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		resp.Authenticated = true
 		if session.PlacementIdentity != "" && s.placementOnboardingEnabled(r.Context()) {
 			resp.Placement = &PlacementSessionInfo{Identity: session.PlacementIdentity, DisplayName: session.DisplayName}
+			if session.IsPlacementd() {
+				resp.Placement.Account = session.Placement.Account
+				resp.Placement.Levels = session.Placement.Levels()
+				resp.Placement.Projects = session.Placement.Projects
+				resp.Placement.Project = session.Placement.Project
+			}
 		}
 		resp.Username = session.Username
 		resp.Groups = session.Groups

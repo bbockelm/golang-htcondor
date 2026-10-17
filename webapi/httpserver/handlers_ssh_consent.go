@@ -184,6 +184,9 @@ func (h *Handler) handleSSHConsentRead(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	if h.refuseForPlacementdSession(w, r, "The SSH gateway") {
+		return
+	}
 	ctx := r.Context()
 
 	username, groups, ok := h.sshConsentIdentity(w, r)
@@ -261,6 +264,9 @@ func (h *Handler) handleSSHConsentRead(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleSSHConsentApprove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if h.refuseForPlacementdSession(w, r, "The SSH gateway") {
 		return
 	}
 	ctx := r.Context()

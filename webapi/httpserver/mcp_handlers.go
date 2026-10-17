@@ -631,6 +631,14 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 	// lookup is what consumes it.
 	ctx := WithRequestedRedirectURI(r.Context(), r.URL.Query().Get("redirect_uri"))
 
+	// The placement scope is granted through the device flow only, where
+	// the approving identity is recorded.
+	if isPlacementGrant(strings.Fields(r.FormValue("scope"))) {
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_scope",
+			"The placement scope is granted through the device authorization flow only")
+		return
+	}
+
 	// Filter requested scopes to only those allowed for the client
 	filteredReq, err := h.filterRequestedScopes(ctx, r)
 	if err != nil {
@@ -1551,6 +1559,9 @@ var oauth2AdvertisedScopes = []string{
 	// decision; the scopes only lengthened the consent page, and
 	// mapCondorScopesToAuthz no longer puts them in a minted token.
 	"condor:/READ", "condor:/WRITE",
+	// The placement scope: a device-flow grant for placement-client that
+	// may request a placement token and nothing else (placement_scope.go).
+	placementScope,
 }
 
 // oauth2DeprecatedScopes were advertised once and are not any more. They
@@ -1769,6 +1780,13 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 		scopes = []string{"openid", "mcp:read", "mcp:write"}
 	}
 
+	// A placement grant is for placement and nothing else.
+	if placementScopeMixError(scopes) {
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_scope",
+			"The placement scope cannot be combined with other scopes")
+		return
+	}
+
 	// Filter scopes to only those allowed for the client
 	allowedScopes := client.GetScopes()
 	allowedScopeMap := make(map[string]bool)
@@ -1906,111 +1924,147 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 	// Limit request body size for form parsing
 	setBodyLimit(w, r, 1<<20)
 
+	switch r.Method {
+	case http.MethodGet:
+		h.deviceVerifyGet(w, r)
+	case http.MethodPost:
+		h.deviceVerifyPost(w, r)
+	default:
+		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+// deviceVerifyGet shows the code entry form, or the consent page for a code.
+func (h *Handler) deviceVerifyGet(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	// Check authentication before showing the form (same as handleOAuth2Authorize)
+	username := ""
 
-	if r.Method == http.MethodGet {
-		// Check authentication before showing the form (same as handleOAuth2Authorize)
-		username := ""
+	// Method 1: User header (demo mode) — trusted-proxy gated.
+	if h.isUserHeaderTrustedSource(r) {
+		username = r.Header.Get(h.userHeader)
+		if username != "" {
+			h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+				"username", username, "header", h.userHeader)
+		}
+	}
 
-		// Method 1: User header (demo mode) — trusted-proxy gated.
-		if h.isUserHeaderTrustedSource(r) {
-			username = r.Header.Get(h.userHeader)
-			if username != "" {
-				h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
-					"username", username, "header", h.userHeader)
-			}
+	// Method 2: Check for session
+	if username == "" {
+		if session, ok := h.getSessionFromRequest(r); ok {
+			username = session.Username
+			h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
+		}
+	}
+
+	// A session with no local account may approve placement
+	// requests (§7.3a), so it is not sent back to sign in again.
+	approver, hasApprover := h.placementDeviceApprover(r)
+	placementOnlySession := username == "" && hasApprover && approver.IsPlacementOnly()
+
+	// If no authentication and OAuth2 SSO is configured, redirect to upstream IDP
+	if username == "" && !placementOnlySession && h.oauth2Config != nil {
+		// Generate state parameter
+		state, err := h.oauth2StateStore.GenerateState()
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+			return
 		}
 
-		// Method 2: Check for session
+		binding, err := h.bindLoginToBrowser(w, r)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to bind login to browser", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+			return
+		}
+
+		// Store the return URL (current device verification URL)
+		returnURL := r.URL.String()
+		h.oauth2StateStore.StoreForBrowser(state, nil, returnURL, binding)
+
+		// Build authorization URL
+		authURL := h.oauth2Config.AuthCodeURL(state)
+
+		h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for device verification authentication",
+			"state", state, "auth_url", authURL, "return_url", returnURL)
+
+		// Redirect to IDP
+		http.Redirect(w, r, authURL, http.StatusFound)
+		return
+	}
+
+	// If still no username, authentication is required
+	if username == "" && !placementOnlySession {
+		h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
+		h.writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	rateKey := username
+	if rateKey == "" {
+		rateKey = placementApproverBinding(approver.PlacementIdentity)
+	}
+
+	// Get user code from query parameter
+	userCode := r.URL.Query().Get("user_code")
+
+	// If user code is provided, look up the device code session and show consent page
+	if userCode != "" {
+		userCode = strings.ToUpper(strings.TrimSpace(userCode))
+
+		// Each lookup is a guess at a user code, so it spends the
+		// same budgets as the SSH approval screen's.
+		if !h.sshConsentAllow(r, rateKey) {
+			h.logger.Warn(logging.DestinationSecurity,
+				"Rate-limiting device code lookups", "username", username)
+			h.writeError(w, http.StatusTooManyRequests,
+				"Too many attempts. Wait a moment and try again.")
+			return
+		}
+
+		// Get device code session by user code
+		_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+			h.writeHTMLError(w, "Invalid or expired user code")
+			return
+		}
+
+		// A placement request is approved by identity (§7.3a).
+		if placementOnlyScopes(request.GetRequestedScopes()) {
+			if !hasApprover {
+				h.writeHTMLError(w, "This request needs a sign-in the placement service knows")
+				return
+			}
+			h.renderPlacementDeviceConsent(w, approver, userCode, request)
+			return
+		}
 		if username == "" {
-			if session, ok := h.getSessionFromRequest(r); ok {
-				username = session.Username
-				h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
-			}
+			h.writeHTMLError(w, "This sign-in can only approve placement token requests")
+			return
 		}
-
-		// If no authentication and OAuth2 SSO is configured, redirect to upstream IDP
-		if username == "" && h.oauth2Config != nil {
-			// Generate state parameter
-			state, err := h.oauth2StateStore.GenerateState()
-			if err != nil {
-				h.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
-				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
-				return
-			}
-
-			binding, err := h.bindLoginToBrowser(w, r)
-			if err != nil {
-				h.logger.Error(logging.DestinationHTTP, "Failed to bind login to browser", "error", err)
-				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
-				return
-			}
-
-			// Store the return URL (current device verification URL)
-			returnURL := r.URL.String()
-			h.oauth2StateStore.StoreForBrowser(state, nil, returnURL, binding)
-
-			// Build authorization URL
-			authURL := h.oauth2Config.AuthCodeURL(state)
-
-			h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for device verification authentication",
-				"state", state, "auth_url", authURL, "return_url", returnURL)
-
-			// Redirect to IDP
-			http.Redirect(w, r, authURL, http.StatusFound)
+		if h.refusePlacementdDeviceClient(w, r, request) {
 			return
 		}
 
-		// If still no username, authentication is required
-		if username == "" {
-			h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
-			h.writeError(w, http.StatusUnauthorized, "Authentication required")
+		// An SSH login gets the workspace screen instead, where
+		// the person can consent to what the session will ask
+		// for as well as to the login itself. The redirect goes
+		// out only where the SPA is compiled in, because
+		// otherwise it would point at a 404 and leave a user with
+		// no way to approve at all.
+		if to := sshConsentRedirect(sshSessionFromRequester(request), userCode, webui.IsEmbedded()); to != "" {
+			http.Redirect(w, r, to, http.StatusFound)
 			return
 		}
 
-		// Get user code from query parameter
-		userCode := r.URL.Query().Get("user_code")
+		// Show consent page with scopes
+		h.renderDeviceConsentPage(w, r, username, userCode, request)
+		return
+	}
 
-		// If user code is provided, look up the device code session and show consent page
-		if userCode != "" {
-			userCode = strings.ToUpper(strings.TrimSpace(userCode))
-
-			// Each lookup is a guess at a user code, so it spends the
-			// same budgets as the SSH approval screen's.
-			if !h.sshConsentAllow(r, username) {
-				h.logger.Warn(logging.DestinationSecurity,
-					"Rate-limiting device code lookups", "username", username)
-				h.writeError(w, http.StatusTooManyRequests,
-					"Too many attempts. Wait a moment and try again.")
-				return
-			}
-
-			// Get device code session by user code
-			_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
-			if err != nil {
-				h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
-				h.writeHTMLError(w, "Invalid or expired user code")
-				return
-			}
-
-			// An SSH login gets the workspace screen instead, where
-			// the person can consent to what the session will ask
-			// for as well as to the login itself. The redirect goes
-			// out only where the SPA is compiled in, because
-			// otherwise it would point at a 404 and leave a user with
-			// no way to approve at all.
-			if to := sshConsentRedirect(sshSessionFromRequester(request), userCode, webui.IsEmbedded()); to != "" {
-				http.Redirect(w, r, to, http.StatusFound)
-				return
-			}
-
-			// Show consent page with scopes
-			h.renderDeviceConsentPage(w, r, username, userCode, request)
-			return
-		}
-
-		// Display verification form (for entering user code)
-		html := `<!DOCTYPE html>
+	// Display verification form (for entering user code)
+	html := `<!DOCTYPE html>
 <html>
 <head>
     <title>Device Authorization</title>
@@ -2063,120 +2117,144 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
     </div>
 </body>
 </html>`
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(html))
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(html))
+}
+
+// deviceVerifyPost applies an approval or denial.
+func (h *Handler) deviceVerifyPost(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	// Handle approval/denial
+	userCode := strings.ToUpper(strings.TrimSpace(r.FormValue("user_code")))
+	action := r.FormValue("action")
+
+	if userCode == "" {
+		h.writeHTMLError(w, "User code is required")
 		return
 	}
 
-	if r.Method == http.MethodPost {
-		// Handle approval/denial
-		userCode := strings.ToUpper(strings.TrimSpace(r.FormValue("user_code")))
-		action := r.FormValue("action")
+	// Who is approving comes first: looking the code up before
+	// that would tell anybody at all whether a code exists.
+	username, userGroups := h.deviceApprovalIdentity(ctx, r)
+	approver, hasApprover := h.placementDeviceApprover(r)
 
-		if userCode == "" {
-			h.writeHTMLError(w, "User code is required")
-			return
-		}
+	// If still no username, authentication is required
+	if username == "" && !hasApprover {
+		h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
+		h.writeHTMLError(w, "Authentication required")
+		return
+	}
+	rateKey := username
+	if rateKey == "" {
+		rateKey = placementApproverBinding(approver.PlacementIdentity)
+	}
 
-		// Who is approving comes first: looking the code up before
-		// that would tell anybody at all whether a code exists.
-		username, userGroups := h.deviceApprovalIdentity(ctx, r)
-
-		// If still no username, authentication is required
-		if username == "" {
-			h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
-			h.writeHTMLError(w, "Authentication required")
-			return
-		}
-
-		if !h.sshConsentAllow(r, username) {
-			h.logger.Warn(logging.DestinationSecurity,
-				"Rate-limiting device code lookups", "username", username)
-			h.writeError(w, http.StatusTooManyRequests,
-				"Too many attempts. Wait a moment and try again.")
-			return
-		}
-
-		// Get device code session by user code
-		_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
-		if err != nil {
-			h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
-			h.writeHTMLError(w, "Invalid or expired user code")
-			return
-		}
-
-		// Checked once the username is known, because the token is
-		// bound to it: a token minted for one person's form must not
-		// approve another's. Before the action is read, because this
-		// page is what turns a code printed in somebody's terminal
-		// into a credential.
-		if !h.checkConsentCSRF(r, username, userCode) {
-			h.refuseStaleConsent(w, r, username, "device verification")
-			return
-		}
-
-		switch action {
-		case "approve":
-			// Create session for user. See the consent handler for why
-			// the group list is persisted with the grant.
-			session := DefaultOpenIDConnectSession(username).WithGroups(userGroups)
-
-			// The same two steps the authorization-code consent handler
-			// performs: narrow what was requested to what the user ticked,
-			// then intersect that with what their groups allow. The device
-			// flow previously narrowed against the session's GRANTED scopes
-			// instead -- a set nothing in this flow ever populates, so the
-			// intersection was always empty and every device login came back
-			// with "openid" alone.
-			acceptedScopes := narrowConsentScopes(request.GetRequestedScopes(), r.Form)
-			acceptedScopes = h.getScopesForGroups(userGroups, acceptedScopes)
-			acceptedScopes = h.scopesAllowedByScheddACL(ctx, username, acceptedScopes)
-			// The set an operator may later restore this grant to. Same
-			// reasoning as the consent handler: recorded where what the
-			// user agreed to is known.
-			session.WithAuthorizedScopes(acceptedScopes)
-
-			// Approve the device code with the user-narrowed scope set.
-			if err := h.oauth2Provider.GetStorage().ApproveDeviceCodeSessionWithScopes(ctx, userCode, username, session, acceptedScopes); err != nil {
-				h.logger.Error(logging.DestinationHTTP, "Failed to approve device code", "error", err)
-				h.writeHTMLError(w, "Failed to approve device")
-				return
-			}
-
-			h.logger.Info(logging.DestinationHTTP, "Device code approved",
-				"user_code", userCode, "username", username,
-				"client_id", request.GetClient().GetID(),
-				"requested_scopes", request.GetRequestedScopes(),
-				"accepted_scopes", acceptedScopes)
-
-			// Return success page
-			h.renderResultPage(w, http.StatusOK, "Authorization Complete", "#4CAF50",
-				"&#10003; Authorization Complete",
-				"You have successfully authorized the device.",
-				"You can close this window now.")
-		case "deny":
-			// Deny the device code
-			if err := h.oauth2Provider.GetStorage().DenyDeviceCodeSession(ctx, userCode); err != nil {
-				h.logger.Error(logging.DestinationHTTP, "Failed to deny device code", "error", err)
-				h.writeHTMLError(w, "Failed to deny device")
-				return
-			}
-
-			h.logger.Info(logging.DestinationHTTP, "Device code denied", "user_code", userCode, "username", username)
-
-			// Return denial page
-			h.renderResultPage(w, http.StatusOK, "Authorization Denied", "#f44336",
-				"&#10007; Authorization Denied",
-				"You have denied authorization for this device.",
-				"You can close this window now.")
-		default:
-			h.writeHTMLError(w, "Invalid action")
-		}
+	if !h.sshConsentAllow(r, rateKey) {
+		h.logger.Warn(logging.DestinationSecurity,
+			"Rate-limiting device code lookups", "username", username)
+		h.writeError(w, http.StatusTooManyRequests,
+			"Too many attempts. Wait a moment and try again.")
 		return
 	}
 
-	h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	// Get device code session by user code
+	_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+		h.writeHTMLError(w, "Invalid or expired user code")
+		return
+	}
+
+	// A placement request is approved by identity (§7.3a), with the
+	// form's token bound to that identity.
+	if placementOnlyScopes(request.GetRequestedScopes()) {
+		if !hasApprover {
+			h.writeHTMLError(w, "This request needs a sign-in the placement service knows")
+			return
+		}
+		if !h.checkConsentCSRF(r, placementApproverBinding(approver.PlacementIdentity), userCode) {
+			h.refuseStaleConsent(w, r, placementApproverBinding(approver.PlacementIdentity), "placement device verification")
+			return
+		}
+		h.decidePlacementDevice(w, r, approver, userCode, request)
+		return
+	}
+	if username == "" {
+		h.writeHTMLError(w, "This sign-in can only approve placement token requests")
+		return
+	}
+	if h.refusePlacementdDeviceClient(w, r, request) {
+		return
+	}
+
+	// Checked once the username is known, because the token is
+	// bound to it: a token minted for one person's form must not
+	// approve another's. Before the action is read, because this
+	// page is what turns a code printed in somebody's terminal
+	// into a credential.
+	if !h.checkConsentCSRF(r, username, userCode) {
+		h.refuseStaleConsent(w, r, username, "device verification")
+		return
+	}
+
+	switch action {
+	case "approve":
+		// Create session for user. See the consent handler for why
+		// the group list is persisted with the grant.
+		session := DefaultOpenIDConnectSession(username).WithGroups(userGroups)
+
+		// The same two steps the authorization-code consent handler
+		// performs: narrow what was requested to what the user ticked,
+		// then intersect that with what their groups allow. The device
+		// flow previously narrowed against the session's GRANTED scopes
+		// instead -- a set nothing in this flow ever populates, so the
+		// intersection was always empty and every device login came back
+		// with "openid" alone.
+		acceptedScopes := narrowConsentScopes(request.GetRequestedScopes(), r.Form)
+		acceptedScopes = h.getScopesForGroups(userGroups, acceptedScopes)
+		acceptedScopes = h.scopesAllowedByScheddACL(ctx, username, acceptedScopes)
+		// The set an operator may later restore this grant to. Same
+		// reasoning as the consent handler: recorded where what the
+		// user agreed to is known.
+		session.WithAuthorizedScopes(acceptedScopes)
+
+		// Approve the device code with the user-narrowed scope set.
+		if err := h.oauth2Provider.GetStorage().ApproveDeviceCodeSessionWithScopes(ctx, userCode, username, session, acceptedScopes); err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to approve device code", "error", err)
+			h.writeHTMLError(w, "Failed to approve device")
+			return
+		}
+
+		h.logger.Info(logging.DestinationHTTP, "Device code approved",
+			"user_code", userCode, "username", username,
+			"client_id", request.GetClient().GetID(),
+			"requested_scopes", request.GetRequestedScopes(),
+			"accepted_scopes", acceptedScopes)
+
+		// Return success page
+		h.renderResultPage(w, http.StatusOK, "Authorization Complete", "#4CAF50",
+			"&#10003; Authorization Complete",
+			"You have successfully authorized the device.",
+			"You can close this window now.")
+	case "deny":
+		// Deny the device code
+		if err := h.oauth2Provider.GetStorage().DenyDeviceCodeSession(ctx, userCode); err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to deny device code", "error", err)
+			h.writeHTMLError(w, "Failed to deny device")
+			return
+		}
+
+		h.logger.Info(logging.DestinationHTTP, "Device code denied", "user_code", userCode, "username", username)
+
+		// Return denial page
+		h.renderResultPage(w, http.StatusOK, "Authorization Denied", "#f44336",
+			"&#10007; Authorization Denied",
+			"You have denied authorization for this device.",
+			"You can close this window now.")
+	default:
+		h.writeHTMLError(w, "Invalid action")
+	}
 }
 
 // consentPageParams defines the parameters for rendering a consent page.
@@ -3008,6 +3086,22 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 		}
 	}
 
+	// A subject a placementd-mapped session authorized is held to what
+	// its account was granted, and its tokens carry its project.
+	bound, err := h.placementSubjectBound(context.Background(), username)
+	if err != nil {
+		return "", err
+	}
+	var extra map[string]any
+	if bound != nil {
+		authz = boundPlacementAuthz(authz, bound)
+		if len(authz) == 0 {
+			return "", fmt.Errorf("account %s holds none of the permissions this grant asks for: %w",
+				username, errNoAuthorizationLimits)
+		}
+		extra = placementProjectClaim(bound.Project)
+	}
+
 	h.logger.Info(logging.DestinationHTTP, "Generating HTCondor token",
 		"username", username,
 		"trust_domain", h.trustDomain,
@@ -3020,7 +3114,7 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 	// so we can backdate the `nbf` claim to absorb clock skew between
 	// this server and the schedd (we've seen even 1s of skew cause
 	// rejections). The token is otherwise a standard HTCondor IDTOKEN.
-	token, err := generateMCPAccessJWT(
+	token, err := generateMCPAccessJWTWithClaims(
 		filepath.Dir(h.signingKeyPath),
 		filepath.Base(h.signingKeyPath),
 		username,
@@ -3028,6 +3122,7 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 		iat,
 		exp,
 		authz,
+		extra,
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate JWT: %w", err)

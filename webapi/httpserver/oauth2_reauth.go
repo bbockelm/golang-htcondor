@@ -2,11 +2,13 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ory/fosite"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -180,12 +182,94 @@ func (h *Handler) reauthorizeGrant(ctx context.Context, ar fosite.Requester) ([]
 		return nil, grantRevokedError(reason)
 	}
 
-	granted, reason := h.reevaluateSubject(ctx, username, sess.Groups, granted, ar.GetID())
+	// A placement grant (§7.3a) is held to the placementd's current answer
+	// for its identity, and to nothing else: it carries no scope the group
+	// policy or the other oracles speak to.
+	if isPlacementGrant(granted) || sess.PlacementIdentity != "" {
+		reason, err := h.reauthorizePlacementIdentity(ctx, sess.PlacementIdentity, "")
+		if err != nil {
+			return nil, fosite.ErrTemporarilyUnavailable.WithHint(err.Error())
+		}
+		if reason != "" {
+			h.revokeGrant(ctx, ar.GetID(), username, reason)
+			return nil, grantRevokedError(reason)
+		}
+		return granted, nil
+	}
+
+	// A subject a placementd-mapped session authorized (§7.6) is re-read
+	// from the placementd: unmapped or re-pointed ends the grant.
+	bound, err := h.placementSubjectBound(ctx, username)
+	if err != nil {
+		return nil, fosite.ErrServerError.WithWrap(err)
+	}
+	if bound != nil {
+		reason, err := h.reauthorizePlacementIdentity(ctx, bound.Identity, username)
+		if err != nil {
+			return nil, fosite.ErrTemporarilyUnavailable.WithHint(err.Error())
+		}
+		if reason != "" {
+			h.revokeGrant(ctx, ar.GetID(), username, reason)
+			return nil, grantRevokedError(reason)
+		}
+	}
+
+	granted, reason := h.reevaluateSubjectWith(ctx, username, sess.Groups, granted, ar.GetID(), bound != nil)
 	if reason != "" {
 		h.revokeGrant(ctx, ar.GetID(), username, reason)
 		return nil, grantRevokedError(reason)
 	}
 	return granted, nil
+}
+
+// reauthorizePlacementIdentity re-reads identity from the placementd and
+// returns why a grant resting on it must end, or "" when it may continue. With
+// wantAccount set, the identity must still map to that account, and the
+// stored bound for it is refreshed. The account's schedd user record being
+// disabled also ends the grant (the user-record oracle, applied to the
+// placementd account rather than a local name). An error means the
+// placementd could not be asked; the grant is neither continued nor revoked.
+func (h *Handler) reauthorizePlacementIdentity(ctx context.Context, identity, wantAccount string) (string, error) {
+	if identity == "" {
+		return "this grant names no sign-in identity", nil
+	}
+	if h.placementd == nil || !h.placementdReady(ctx) {
+		return "", errors.New("the placement service is not available")
+	}
+	pctx := htcondor.WithDaemonCredential(ctx, "placement grant refresh: the grant's own identity")
+	users, err := h.placementd.QueryUsers(pctx, identity)
+	if err != nil {
+		return "", fmt.Errorf("asking the placement service about %s: %w", identity, err)
+	}
+	var user *htcondor.PlacementUser
+	for i := range users {
+		if users[i].UserName == identity {
+			user = &users[i]
+		}
+	}
+	switch {
+	case user == nil || !user.Authorized:
+		h.updatePlacementSubject(ctx, wantAccount, identity, nil)
+		return "the sign-in identity is no longer authorized by the placement service", nil
+	case !user.MappingExpiration.IsZero() && !user.MappingExpiration.After(time.Now()):
+		h.updatePlacementSubject(ctx, wantAccount, identity, nil)
+		return "the sign-in identity's access has expired", nil
+	case wantAccount != "" && user.APUserID != wantAccount:
+		h.updatePlacementSubject(ctx, wantAccount, identity, nil)
+		return "the sign-in identity now maps to a different account", nil
+	}
+	if wantAccount != "" {
+		h.updatePlacementSubject(ctx, wantAccount, identity, &PlacementAccountInfo{
+			Account: user.APUserID, Authorizations: user.Authorizations, MappingExpiresAt: user.MappingExpiration,
+		})
+	}
+	if user.APUserID != "" {
+		oracle := &UserRecordOracle{Lookup: h.placementUserRecordLookup, Logger: h.logger}
+		if decision, err := oracle.CheckAccount(ctx, user.APUserID); err == nil && decision.Status == UserStatusRevoked {
+			return decision.Reason, nil
+		}
+	}
+	return "", nil
 }
 
 // reevaluateSubject applies the current group policy and the revocation
@@ -196,6 +280,14 @@ func (h *Handler) reauthorizeGrant(ctx context.Context, ar fosite.Requester) ([]
 // grant on refusal, while an exchange of an external issuer's token has no
 // grant here to revoke. requestID is for the log only and may be empty.
 func (h *Handler) reevaluateSubject(ctx context.Context, username string, groups, granted []string, requestID string) (scopes []string, refusal string) {
+	return h.reevaluateSubjectWith(ctx, username, groups, granted, requestID, false)
+}
+
+// reevaluateSubjectWith is reevaluateSubject; placementdAccount marks a
+// subject that is an account the placementd assigned, which has no local
+// account for the system-groups oracle to find -- its absence there is not a
+// deletion -- and is checked against the placementd instead.
+func (h *Handler) reevaluateSubjectWith(ctx context.Context, username string, groups, granted []string, requestID string, placementdAccount bool) (scopes []string, refusal string) {
 	// --- group policy re-evaluation -------------------------------------
 	// IMPORTANT: for a stored grant, groups is the session's membership
 	// list as of consent, not a live reading. Re-running the policy against it therefore catches
@@ -242,6 +334,9 @@ func (h *Handler) reevaluateSubject(ctx context.Context, username string, groups
 
 	// --- external oracles -----------------------------------------------
 	for _, oracle := range h.revocationOracles {
+		if placementdAccount && oracle.Name() == systemGroupOracleName {
+			continue
+		}
 		decision, err := oracle.Check(ctx, username, granted)
 		if err != nil {
 			// Fail open, loudly. An oracle that cannot answer must not

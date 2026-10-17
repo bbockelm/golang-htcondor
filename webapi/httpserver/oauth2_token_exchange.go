@@ -194,9 +194,18 @@ func (h *Handler) resolveSubjectToken(ctx context.Context, token, tokenType stri
 		if err != nil {
 			return exchangeSubject{}, fmt.Errorf("subject_token introspection failed: %w", err)
 		}
+		// A placement grant is for a placement token and nothing else, and
+		// a grant of a placementd-assigned account is bounded by records
+		// keyed to its own subject, which an exchanged grant would not carry.
+		if isPlacementGrant(ar.GetGrantedScopes()) {
+			return exchangeSubject{}, fmt.Errorf("subject_token holds the placement scope, which cannot be exchanged")
+		}
 		subject := ar.GetSession().GetSubject()
 		if subject == "" {
 			return exchangeSubject{}, fmt.Errorf("subject_token has no subject")
+		}
+		if bound, err := h.placementSubjectBound(ctx, subject); err != nil || bound != nil {
+			return exchangeSubject{}, fmt.Errorf("subject_token belongs to an account assigned by the placement service, which cannot be exchanged")
 		}
 		var groups []string
 		if s, ok := ar.GetSession().(*Session); ok {

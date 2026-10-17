@@ -90,13 +90,31 @@ type placementMeTokenResponse struct {
 // handlePlacementMePath dispatches /api/v1/placement/me and below. rest is
 // the path after "me", without leading slash.
 func (s *Handler) handlePlacementMePath(w http.ResponseWriter, r *http.Request, rest string) {
-	session, ok := s.getAnySessionFromRequest(r)
-	if !ok {
-		s.writeError(w, http.StatusUnauthorized, "Authentication required")
-		return
+	// A bearer access token holding the placement scope (§7.3a) acts for
+	// the identity recorded on its grant, and may use only /me and
+	// /me/token.
+	session, isBearer, err := s.placementBearerIdentity(r)
+	if isBearer {
+		if err != nil {
+			s.writeOAuthError(w, http.StatusUnauthorized, "invalid_token",
+				"A token holding the placement scope is required")
+			return
+		}
+		if !placementBearerAllowed(r.Method, r.URL.Path) {
+			s.writeError(w, http.StatusForbidden, "A placement token can only request a placement token.")
+			return
+		}
+	} else {
+		var ok bool
+		session, ok = s.getAnySessionFromRequest(r)
+		if !ok {
+			s.writeError(w, http.StatusUnauthorized, "Authentication required")
+			return
+		}
 	}
-	// State-changing calls carry a header a cross-site form cannot set.
-	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get("X-Requested-With") == "" {
+	// State-changing calls from a browser carry a header a cross-site
+	// form cannot set. A bearer token is not attached by a browser.
+	if !isBearer && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get("X-Requested-With") == "" {
 		s.writeError(w, http.StatusForbidden, "Missing X-Requested-With header")
 		return
 	}
@@ -118,6 +136,12 @@ func (s *Handler) handlePlacementMePath(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		s.handlePlacementMeToken(w, r, session)
+	case rest == "project":
+		if r.Method != http.MethodPost {
+			s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		s.handlePlacementMeProject(w, r, session)
 	case strings.HasPrefix(rest, "device/"):
 		parts := strings.Split(strings.TrimPrefix(rest, "device/"), "/")
 		code, err := url.PathUnescape(parts[0])
@@ -298,6 +322,10 @@ func (s *Handler) handlePlacementMeToken(w http.ResponseWriter, r *http.Request,
 	}
 
 	var userCode string
+	if req.UserCode != "" && s.bearerRequest(r) {
+		s.writeError(w, http.StatusBadRequest, "user_code is for the browser confirmation page.")
+		return
+	}
 	if req.UserCode != "" {
 		userCode = normalizePlacementUserCode(req.UserCode)
 		if userCode == "" {
@@ -469,4 +497,60 @@ func jsonNumberClaim(claims map[string]any, name string) (int64, bool) {
 		return int64(f), true
 	}
 	return 0, false
+}
+
+// handlePlacementMeProject is POST /api/v1/placement/me/project {project}:
+// selects the project a placementd session's tokens name. Only a project the
+// account has.
+func (s *Handler) handlePlacementMeProject(w http.ResponseWriter, r *http.Request, session *SessionData) {
+	if !session.IsPlacementd() {
+		s.writeError(w, http.StatusConflict, "This sign-in has no account whose project can be selected.")
+		return
+	}
+	setBodyLimit(w, r, 1<<12)
+	var req struct {
+		Project string `json:"project"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+	chosen := ""
+	for _, p := range session.Placement.Projects {
+		if strings.EqualFold(p, strings.TrimSpace(req.Project)) {
+			chosen = p
+		}
+	}
+	if chosen == "" {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("%q is not one of your projects.", req.Project))
+		return
+	}
+	sid, err := getSessionCookie(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	info := *session.Placement
+	info.Project = chosen
+	if err := s.sessionStore.UpdatePlacement(sid, &info, session.ExpiresAt); err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not select the project.")
+		return
+	}
+	updated := *session
+	updated.Placement = &info
+	if err := s.recordPlacementSubject(r.Context(), &updated); err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "Could not record the selected project for OAuth2 grants",
+			"account", info.Account, "error", err)
+	}
+	s.logger.Info(logging.DestinationHTTP, "Selected a project for a placementd session",
+		"account", info.Account, "project", chosen)
+	s.writeJSON(w, http.StatusOK, map[string]string{"project": chosen})
+}
+
+// bearerRequest reports whether the request authenticated with a bearer.
+func (s *Handler) bearerRequest(r *http.Request) bool {
+	tok, err := extractBearerToken(r)
+	return err == nil && tok != ""
 }

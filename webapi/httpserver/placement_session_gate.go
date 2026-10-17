@@ -30,6 +30,11 @@ var placementOnlyAPIPaths = map[string]bool{
 	"/auth/device_authorization": true,
 	"/auth/code":                 true,
 	"/auth/cancel_device":        true,
+	// This server's own device verification page, where a placement-only
+	// session may approve a placement request and nothing else (the
+	// handler checks which).
+	mcpDeviceVerifyPath:   true,
+	webUIDeviceVerifyPath: true,
 }
 
 // placementOnlyPages are the web UI pages a placement-only session may load.

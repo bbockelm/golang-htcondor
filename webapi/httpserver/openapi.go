@@ -36,7 +36,7 @@ const openAPISchema = `{
     },
     {
       "name": "placement",
-      "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. The daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so the admin endpoints (/placement/status, users, tokens, authorizations, login, records and admin) require membership in the web UI admin group. The /placement/me endpoints serve any signed-in browser session, including one with no local account; they always act for the session's own placement identity and never take one from the request. The RFC 8628 device flow placement-client uses is served outside /api/v1, at /auth/device_authorization, /auth/code and /auth/cancel_device, with placement-webapp's exact responses. Absent a placementd, every endpoint but /placement/status returns 503. The /placement/admin endpoints manage the placementd's directory (identities, accounts, projects, authorizations) and need a placementd advertising PlacementdApiVersion >= 2; against an older one they return 501, and /placement/status reports api_version so a UI can hide them."
+      "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. The daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so the admin endpoints (/placement/status, users, tokens, authorizations, login, records and admin) require membership in the web UI admin group. The /placement/me endpoints serve any signed-in browser session, including one with no local account; they always act for the session's own placement identity and never take one from the request. GET /placement/me and POST /placement/me/token also accept a bearer access token holding the placement scope, which this server's own RFC 8628 device grant issues to the client placement_client; such a token reaches nothing else. The legacy device flow older placement-client versions use is served outside /api/v1, at /auth/device_authorization, /auth/code and /auth/cancel_device, with placement-webapp's exact responses. Absent a placementd, every endpoint but /placement/status returns 503. The /placement/admin endpoints manage the placementd's directory (identities, accounts, projects, authorizations) and need a placementd advertising PlacementdApiVersion >= 2; against an older one they return 501, and /placement/status reports api_version so a UI can hide them."
     }
   ],
   "components": {
@@ -1393,6 +1393,20 @@ const openAPISchema = `{
           "404": {"description": "Unknown device code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "409": {"description": "The device request was already answered or has expired", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "503": {"description": "Placement tokens are not available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me/project": {
+      "post": {
+        "summary": "Select your project",
+        "description": "For a session signed in through the placementd identity mapping: the project its tokens name. Requires the X-Requested-With header.",
+        "operationId": "placementMeProject",
+        "tags": ["placement"],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["project"], "properties": {"project": {"type": "string"}}}}}},
+        "responses": {
+          "200": {"description": "Selected"},
+          "400": {"description": "Not one of the account's projects", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The session has no placementd account", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },

@@ -40,9 +40,17 @@ type placementOnboarding struct {
 	devices       *placementDeviceStore
 	deviceLimiter *LoginRateLimiter
 
+	// mapIdentity is set when HTTP_API_IDENTITY_MAP names placementd;
+	// mapIdentityFirst when it is listed before every local strategy.
+	mapIdentity      bool
+	mapIdentityFirst bool
+
 	// resolving is set while a background look for a placementd runs;
 	// see placementdReady.
 	resolving atomic.Bool
+
+	// placementBearers caches which bearer tokens hold the placement scope.
+	bearers placementBearerCache
 
 	// records, when set, replaces the schedd for user and project record
 	// calls. Tests set it.
@@ -164,4 +172,26 @@ func (h *Handler) placementRecords() placementRecordClient {
 		return s
 	}
 	return nil
+}
+
+// placementUserRecordLookup is the user-record lookup for placement
+// accounts: the records override when a test set one, else the schedd.
+func (h *Handler) placementUserRecordLookup() UserRecordLookup {
+	if rc := h.placementOnboard.records; rc != nil {
+		return recordClientLookup{rc}
+	}
+	return h.userRecordLookup()
+}
+
+// recordClientLookup adapts a placementRecordClient to UserRecordLookup.
+type recordClientLookup struct{ rc placementRecordClient }
+
+func (l recordClientLookup) GetUserRecord(ctx context.Context, user string) (*htcondor.UserRecord, error) {
+	recs, err := l.rc.QueryUserRecords(ctx, &htcondor.UserRecordQueryOptions{
+		Constraint: "User == " + classadString(user), Limit: 1,
+	})
+	if err != nil || len(recs) == 0 {
+		return nil, err
+	}
+	return &recs[0], nil
 }

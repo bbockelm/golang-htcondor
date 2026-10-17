@@ -1183,6 +1183,10 @@ func (s *Handler) extractOrGenerateToken(r *http.Request) (token, mintedFor stri
 			// No signing key configured, cannot generate token from session
 			return "", "", fmt.Errorf("session cookie found but token generation not configured")
 		}
+		if sessionData.IsPlacementd() {
+			sid, _ := getSessionCookie(r)
+			return s.mintPlacementSessionToken(r.Context(), sid, sessionData)
+		}
 		return s.mintRequestToken(sessionData.Username, "session")
 	}
 

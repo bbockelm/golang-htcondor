@@ -368,7 +368,10 @@ func (h *Handler) globalSuperuser(groups []string) bool {
 // someone from the leads file, or from the group, take effect on their next
 // action rather than when their arm expires.
 func (h *Handler) superuserScopeFor(session *SessionData) superuserScope {
-	if session == nil {
+	// An account assigned by the placementd acts only as itself: superuser
+	// mode impersonates through identities this server looks up locally,
+	// and such an account has none.
+	if session == nil || session.IsPlacementd() {
 		return superuserScope{}
 	}
 	return superuserScope{

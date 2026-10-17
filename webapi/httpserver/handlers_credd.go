@@ -251,6 +251,11 @@ func (s *Handler) handleServiceCredentialItem(w http.ResponseWriter, r *http.Req
 // always have). Multi-AP: the credd of the caller's home AP, or of the AP
 // ?schedd= names; see multiCredContext.
 func (s *Handler) credentialContext(w http.ResponseWriter, r *http.Request, requireAvailable bool) (context.Context, htcondor.CreddClient, bool) {
+	// The credd keeps credentials for local accounts; an account the
+	// placementd assigned need not be one.
+	if s.refuseForPlacementdSession(w, r, "Credential storage") {
+		return nil, nil, false
+	}
 	if s.multi != nil {
 		return s.multiCredContext(w, r)
 	}

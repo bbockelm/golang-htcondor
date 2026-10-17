@@ -63,7 +63,10 @@ type systemGroupOracle struct {
 }
 
 // Name identifies the oracle in log lines.
-func (o *systemGroupOracle) Name() string { return "system-groups" }
+func (o *systemGroupOracle) Name() string { return systemGroupOracleName }
+
+// systemGroupOracleName names the system-groups oracle.
+const systemGroupOracleName = "system-groups"
 
 // Check re-reads membership for username and reports what it now earns.
 //

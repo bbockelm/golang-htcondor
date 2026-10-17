@@ -1697,7 +1697,12 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		DiskMB:   cfg.SSHGatewaySessionDiskMB,
 	}
 
-	if li := newLocalIdentity(cfg.IdentityMapStrategies, cfg.IdentityGroupSources,
+	// "placementd" in the list is served here, not by the local
+	// resolver; see placement_identity_map.go.
+	localStrategies, placementdFirst, placementdMapped := splitPlacementdStrategy(cfg.IdentityMapStrategies)
+	h.placementOnboard.mapIdentity = placementdMapped
+	h.placementOnboard.mapIdentityFirst = placementdFirst
+	if li := newLocalIdentity(localStrategies, cfg.IdentityGroupSources,
 		cfg.IdentityMapPasswdFile, cfg.IdentityMapTTL, cfg.IdentityMapStripDomain, logger); li != nil {
 		h.localIdentity = li
 		// Lets the index survive a restart; see
@@ -1838,6 +1843,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"refresh_token_lifespan", oauth2RefreshLifespan)
 		h.oauth2Provider = oauth2Provider
 		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled for MCP endpoints", "issuer", oauth2Issuer)
+		// placement-client's client (placement_scope.go).
+		if err := h.seedPlacementClient(context.Background()); err != nil {
+			logger.Warn(logging.DestinationHTTP, "Could not create the placement client", "error", err)
+		}
 
 		// Trusted external issuers for RFC 8693 token exchange (optional).
 		// Fail closed on a bad config: log it and leave external exchange off
@@ -2323,6 +2332,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A placement-only session reaches the placement pages and nothing
 	// else; see placement_session_gate.go.
 	if h.placementSessionGate(w, r) {
+		return
+	}
+	// And a bearer token holding the placement scope reaches only the
+	// two endpoints it is for (placement_scope.go).
+	if h.placementBearerGate(w, r) {
 		return
 	}
 	var next http.Handler = h.mux
