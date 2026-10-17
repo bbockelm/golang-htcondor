@@ -100,6 +100,7 @@ var sourceTablePrefixes = map[string]string{
 	TableJobs:         "Jobs",
 	TableHistory:      "History",
 	TableEpochHistory: "EpochHistory",
+	TableJobMetrics:   "JobMetrics",
 	"syncstatus":      "SyncStatus",
 }
 

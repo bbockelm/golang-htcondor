@@ -28,7 +28,8 @@ import (
 // schedd ad matches HTTP_API_SCHEDD_CONSTRAINT.
 //
 // Reads of the caller's own jobs and history are served from the
-// federation hub, and so are job watches (multiap_watch.go). Actions on
+// federation hub, and so are job watches (multiap_watch.go) and job
+// resource-usage samples (multiap_metrics.go). Actions on
 // one job are routed to the schedd of the AP its complete id names
 // (multiap_actions.go); bulk actions fan out to every member
 // (multiap_bulk.go). A submission goes to the AP the caller's assignment

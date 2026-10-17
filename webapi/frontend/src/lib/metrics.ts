@@ -8,7 +8,7 @@
 // three points (the sampler's floor is one point every ~15 min), and
 // disk/GPU appear only when the job actually used them.
 
-import type { ClassAd } from './api';
+import type { ClassAd, Sources } from './api';
 import { jobRequest, type RequestAttr } from './jobRequests';
 import { formatKiB, formatMiB } from './utilization';
 
@@ -28,6 +28,10 @@ export interface MetricsResponse {
   columns?: MetricsColumn[];
   rows?: string[][];
   truncated?: boolean;
+  // Multi-AP mode: the job a job_id read was for, and how current the
+  // hub's copy of each access point is.
+  job?: { schedd: string; cluster: number; proc: number; job_id: string };
+  sources?: Sources;
 }
 
 // The query the job page issues. Kept beside the defs that read it back so
@@ -56,6 +60,30 @@ export const RATE_SAMPLE_GUARD = `(SampleInterval is undefined || SampleInterval
 // jobMetricsConstraint selects one job's samples for the charts.
 export function jobMetricsConstraint(cluster: number, proc: number): string {
   return `ClusterId == ${cluster} && ProcId == ${proc} && ${RATE_SAMPLE_GUARD}`;
+}
+
+// jobMetricsSelector is how the job page's query names its job, or
+// undefined when the id cannot name one.
+//
+// In multi-AP mode a cluster.proc repeats across access points, so the
+// job goes as the server's complete job_id ("12.0@ap1") and the server
+// confines the samples to that access point; the id is passed whole,
+// never split here. In single-AP mode it is a constraint on the numbers.
+// parseInt (rather than Number) so an id carrying a suffix -- the archive
+// route builds keys like "12345.0@1790000000" -- still resolves, matching
+// how the archive detail page itself reads the id.
+export function jobMetricsSelector(
+  jobID: string,
+  multiAP: boolean,
+): { constraint: string; job_id?: string } | undefined {
+  if (multiAP) {
+    return jobID ? { constraint: RATE_SAMPLE_GUARD, job_id: jobID } : undefined;
+  }
+  const [clusterStr, procStr] = jobID.split('.');
+  const cluster = Number.parseInt(clusterStr, 10);
+  const proc = Number.parseInt(procStr ?? '0', 10);
+  if (!Number.isInteger(cluster) || !Number.isInteger(proc)) return undefined;
+  return { constraint: jobMetricsConstraint(cluster, proc) };
 }
 
 export interface SeriesPoint {

@@ -100,11 +100,17 @@ func (h *Handler) watchHubJobsTable(ctx context.Context, cursor []byte) (<-chan 
 }
 
 // multiAPHubAllowed is the part of the multi-AP allowlist that is not a
-// plain read path: the share mint for one of the caller's watches and
-// its redemption, and reads of the collector, which every AP shares
-// (ads, ping, the pool summary, the ad change stream -- not advertise).
+// plain read path: job resource-usage samples (GET only), the share mint
+// for one of the caller's watches and its redemption, and reads of the
+// collector, which every AP shares (ads, ping, the pool summary, the ad
+// change stream -- not advertise).
 // The plain read paths it serves are multiAPHubReadPaths.
 func multiAPHubAllowed(method, path string) bool {
+	if path == multiAPMetricsPath {
+		// Job resource-usage samples (multiap_metrics.go). The handler
+		// answers GET alone, and no other metrics table is served.
+		return method == http.MethodGet
+	}
 	if multiAPHubReadPaths[path] {
 		return method == http.MethodGet || method == http.MethodHead
 	}
