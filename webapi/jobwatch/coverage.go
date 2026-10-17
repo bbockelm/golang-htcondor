@@ -36,18 +36,26 @@ type Coverage struct {
 	// from more than one backend (two federation hubs): evidence is only
 	// comparable between reads of one origin.
 	origin string
+	// several says the source has more than one backend it could have
+	// read from, so a job tracked before this process's first read may
+	// have been seen on another (see absenceMemory.strict).
+	several bool
 }
 
 // NewCoverage returns a Coverage that vouches for no access point.
 func NewCoverage() *Coverage { return &Coverage{asOf: map[string]time.Time{}} }
 
 // NewCoverageFrom returns a Coverage of a read from origin that vouches
-// for no access point yet. When the origin of a watch's reads changes,
-// the evaluator forgets when it last saw each of the watch's jobs: a
-// sighting on one backend and an absence on another are not evidence
-// together, so absence is re-earned on the new one.
-func NewCoverageFrom(origin string) *Coverage {
-	return &Coverage{asOf: map[string]time.Time{}, origin: origin}
+// for no access point yet; several says the source has more than one
+// backend it could read from. When the origin of a watch's reads
+// changes, the evaluator starts its memory of the watch's jobs over, and
+// a tracked job counts as gone by its absence only once it has been seen
+// in the new origin's queue: before that, the new backend may simply
+// never have held it (a lagging hub's jobs stream). Until then only
+// terminal evidence from the new origin -- a history record, a terminal
+// record on its stream -- finishes it.
+func NewCoverageFrom(origin string, several bool) *Coverage {
+	return &Coverage{asOf: map[string]time.Time{}, origin: origin, several: several}
 }
 
 // Origin is the origin the read came from; empty when the source names
@@ -115,6 +123,13 @@ type absenceMemory struct {
 	// origin is the Coverage origin the memory was gathered from. A
 	// read of another origin starts the memory over.
 	origin string
+	// strict is set when the memory may describe jobs tracked on another
+	// origin: it was started over because the origin changed, or started
+	// fresh on a source with several origins. A strict memory counts a
+	// job's absence only once seenHere says the job was in this origin's
+	// queue.
+	strict   bool
+	seenHere map[JobID]bool
 	// lastRead is when the previous pass's queue read finished: every
 	// tracked job not in since was present in it (or beyond its cut).
 	lastRead time.Time

@@ -235,17 +235,17 @@ func TestWatchCatchUpMustHoldAcrossTheRead(t *testing.T) {
 		"a replay finished": parse(sourceAd(ap2, StateFresh, "JobsSynced = true", "JobsSyncedAt = 200")),
 		"the row went":      {},
 	} {
-		if _, ok := r.svc.coverage("", synced, after, at).AsOf(ap2); ok {
+		if _, ok := r.svc.coverage(jobwatch.NewCoverage(), synced, after, at).AsOf(ap2); ok {
 			t.Errorf("%s during the read, yet ap2 was vouched for", name)
 		}
 	}
 	// Not caught up before the read is not vouched for, whatever the
 	// read after it says.
 	catching := parse(sourceAd(ap2, StateFresh, "JobsSynced = false", "JobsSyncedAt = 100"))
-	if _, ok := r.svc.coverage("", catching, synced, at).AsOf(ap2); ok {
+	if _, ok := r.svc.coverage(jobwatch.NewCoverage(), catching, synced, at).AsOf(ap2); ok {
 		t.Error("ap2 was vouched for on a read made while its jobs were still catching up")
 	}
-	if _, ok := r.svc.coverage("", synced, synced, at).AsOf(ap2); !ok {
+	if _, ok := r.svc.coverage(jobwatch.NewCoverage(), synced, synced, at).AsOf(ap2); !ok {
 		t.Error("an unchanged catch-up across the read was not vouched for")
 	}
 }

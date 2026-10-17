@@ -140,17 +140,24 @@ func (e *Evaluator) ownerLock(owner string) *sync.Mutex {
 	return m
 }
 
-// memoryFor returns a watch's absence memory for a read of origin,
-// creating it -- or starting it over when it was gathered from another
-// origin: what one backend showed says nothing about what another's
-// absence means, so after a switch every absent job is taken to have
-// been seen at the first read of the new origin.
-func (e *Evaluator) memoryFor(id, origin string) *absenceMemory {
+// memoryFor returns a watch's absence memory for a read with coverage
+// cov, creating it -- or starting it over when it was gathered from
+// another origin. What one backend showed says nothing about another's
+// absence, so a started-over memory is strict: a job counts as gone by
+// absence only after it has been seen in the new origin's queue (see
+// Coverage). A memory started fresh on a source with several origins is
+// strict too, since the watch's jobs may have been tracked on another.
+func (e *Evaluator) memoryFor(id string, cov *Coverage) *absenceMemory {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	m := e.memory[id]
-	if m == nil || m.origin != origin {
-		m = &absenceMemory{origin: origin, since: map[JobID]time.Time{}}
+	switch {
+	case m == nil:
+		m = &absenceMemory{origin: cov.Origin(), strict: cov != nil && cov.several, since: map[JobID]time.Time{},
+			seenHere: map[JobID]bool{}}
+		e.memory[id] = m
+	case m.origin != cov.Origin():
+		m = &absenceMemory{origin: cov.Origin(), strict: true, since: map[JobID]time.Time{}, seenHere: map[JobID]bool{}}
 		e.memory[id] = m
 	}
 	return m
@@ -307,7 +314,7 @@ func (e *Evaluator) passOwner(ctx context.Context, owner string, watches []*Watc
 			f.Truncated()
 		}
 		if perAP {
-			f.cov, f.mem, f.readAt = cov, e.memoryFor(watches[i].ID, cov.Origin()), readAt
+			f.cov, f.mem, f.readAt = cov, e.memoryFor(watches[i].ID, cov), readAt
 		}
 	}
 

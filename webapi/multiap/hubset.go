@@ -261,6 +261,17 @@ func (h *Hub) activeLocked() *HubEndpoint {
 	return nil
 }
 
+// Several reports whether more than one hub is known: a watch's jobs
+// may have been seen on another hub than the one read now.
+func (h *Hub) Several() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.eps) > 1
+}
+
 // Generation counts changes of active hub.
 func (h *Hub) Generation() uint64 {
 	if h == nil {

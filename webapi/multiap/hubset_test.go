@@ -394,8 +394,8 @@ func newTwoHubWatchRig(t *testing.T, policy HubPolicy, setupB func(b *testDB)) *
 // stream has not finished its replay (JobsSynced false) and does not
 // hold the job yet. B vouches for nothing on ap2, so the job's absence
 // from B is not evidence, and the watch must not fire, however much time
-// passes, until B has caught up -- and then only once the absence has
-// been earned on B.
+// passes. Nor once B reports itself caught up: B never held the job, so
+// only its history record on B finishes it.
 //
 // Hub A is still answering throughout (it fell behind on ap1, which is
 // why reads moved), so anything that consulted A's federation_sources
@@ -430,17 +430,21 @@ func TestWatchFailoverToLaggingHubDoesNotFire(t *testing.T) {
 	if r.pair.active() != hubB {
 		t.Fatalf("active %q, want %s", r.pair.active(), hubB)
 	}
-	// B catches up on ap2, and the job is not there: now absence is
-	// evidence -- earned on B, over two of B's reads.
+	// B catches up on ap2, and the job is not there. B never held it, so
+	// its absence still proves nothing: B's jobs stream may simply be
+	// behind. The watch waits for terminal evidence from B.
 	r.b.PutSourceAd(ap2, sourceAd(ap2, StateFresh, "JobsSynced = true", "JobsSyncedAt = 200"))
-	fired := 0
-	for i := 0; i < 3 && fired == 0; i++ {
+	for i := 0; i < 3; i++ {
 		r.pair.clock.advance(3 * time.Hour)
 		r.pair.refresh()
-		fired = r.pass().Fired
+		if st := r.pass(); st.Fired != 0 {
+			t.Fatalf("pass %d on %s fired on the absence of a job it never held: %+v", i, hubB, r.watch().Matched)
+		}
 	}
-	if fired != 1 {
-		t.Fatal("the watch never fired once B had caught up and the job was gone")
+	// The job's history record reaches B: that finishes it.
+	r.b.PutHistory(ap2, "alice@d", 1, 0, time.Now().Unix())
+	if st := r.pass(); st.Fired != 1 {
+		t.Fatalf("fired %d once %s held the job's history record, want 1", st.Fired, hubB)
 	}
 	if w := r.watch(); len(w.Matched) != 1 || w.Matched[0].Schedd != ap2 {
 		t.Fatalf("matched %+v, want 1.0@%s", w.Matched, ap2)

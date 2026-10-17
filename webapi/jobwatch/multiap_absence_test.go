@@ -41,8 +41,9 @@ type coveredSource struct {
 	now      func() time.Time
 	queueErr error
 	// origin is the coverage's origin: which of several backends the
-	// read came from.
-	origin string
+	// read came from; several, whether there is more than one.
+	origin  string
+	several bool
 	// single, when set, is what Queue (the single-AP entry point) was
 	// asked: a multi-AP source must never be read through it.
 	single int
@@ -62,7 +63,7 @@ func (c *coveredSource) QueueCovered(_ context.Context, _ string, _ []string, _ 
 	if c.queueErr != nil {
 		return false, nil, c.queueErr
 	}
-	cov := NewCoverageFrom(c.origin)
+	cov := NewCoverageFrom(c.origin, c.several)
 	for ap, ok := range c.vouch {
 		if ok {
 			cov.Vouch(ap, c.now().Add(-c.lag))
@@ -620,26 +621,73 @@ func waitUntil(t *testing.T, cond func() bool) {
 	}
 }
 
-// TestAbsenceOriginChangeReearns: the source's reads move to another
-// backend (a second federation hub) and ap2's 1.0 is missing there. The
-// read vouches for ap2 and is newer than the job's last sighting -- but
-// that sighting was on the other backend, so it is forgotten: the first
-// read of the new origin counts as the last sighting, and only a later
-// read of that origin, newer than it, fires.
-func TestAbsenceOriginChangeReearns(t *testing.T) {
+// TestAbsenceOriginChangeNeedsTerminalEvidence: the source's reads move
+// to another backend (a second federation hub) and ap2's 1.0 is missing
+// there. The read vouches for ap2 and is newer than the job's last
+// sighting -- but the job was never seen in the new origin's queue, so
+// the new backend may simply never have held it: absence is not
+// evidence, however long it lasts. Its history record from the new
+// origin finishes it.
+func TestAbsenceOriginChangeNeedsTerminalEvidence(t *testing.T) {
 	r := newAbsenceRig(t, EventDone, ModeAny)
-	r.src.set(func(c *coveredSource) { c.origin = "hub-a/0" })
+	r.src.set(func(c *coveredSource) { c.origin, c.several = "hub-a/0", true })
 	r.pass(0)
 	if w := r.live(); len(w.Tracked) != 2 {
 		t.Fatalf("tracked %+v, want 1.0 on each AP", w.Tracked)
 	}
 	r.dropAP2()
 	r.src.set(func(c *coveredSource) { c.origin = "hub-b/1" })
-	if st := r.pass(time.Minute); st.Fired != 0 {
-		t.Fatal("fired on the first read of a new origin, from a sighting on the old one")
+	for i := 0; i < 5; i++ {
+		if st := r.pass(time.Minute); st.Fired != 0 {
+			t.Fatalf("pass %d fired on the absence of a job never seen in the new origin", i)
+		}
 	}
+	r.src.set(func(c *coveredSource) { c.history = []*classad.ClassAd{apAd(apTwo, 1, 4)} })
 	if st := r.pass(time.Minute); st.Fired != 1 {
-		t.Fatalf("fired %d on the second read of the new origin, want 1", st.Fired)
+		t.Fatalf("fired %d with the job's history record from the new origin, want 1", st.Fired)
+	}
+}
+
+// TestAbsenceOriginChangeReearnedOnceSeen: after the origin changes, a
+// job seen in the new origin's queue and then gone counts as gone by its
+// absence again, once a read newer than that sighting shows it missing.
+func TestAbsenceOriginChangeReearnedOnceSeen(t *testing.T) {
+	r := newAbsenceRig(t, EventDone, ModeAny)
+	r.src.set(func(c *coveredSource) { c.origin, c.several = "hub-a/0", true })
+	r.pass(0)
+	r.src.set(func(c *coveredSource) { c.origin = "hub-b/1" })
+	if st := r.pass(time.Minute); st.Fired != 0 {
+		t.Fatal("fired with both jobs queued")
+	}
+	r.dropAP2()
+	if st := r.pass(time.Minute); st.Fired != 1 {
+		t.Fatalf("fired %d once 1.0@ap2, seen in the new origin, left it; want 1", st.Fired)
+	}
+}
+
+// TestAbsenceFreshMemoryOnSeveralOrigins: a memory started on a source
+// with several backends (a restart, with two hubs) does not know which
+// backend saw a tracked job: a job missing from the first read needs
+// terminal evidence, while one seen and then gone counts by absence.
+func TestAbsenceFreshMemoryOnSeveralOrigins(t *testing.T) {
+	r := newAbsenceRig(t, EventDone, ModeAny)
+	r.pass(0) // tracked, with no origin: as before the restart
+	r.eval = NewEvaluator(r.store, r.src, nil)
+	r.eval.now = func() time.Time { return r.clock }
+	r.src.set(func(c *coveredSource) { c.origin, c.several = "hub-b/0", true })
+	r.dropAP2()
+	for i := 0; i < 3; i++ {
+		if st := r.pass(time.Minute); st.Fired != 0 {
+			t.Fatalf("pass %d after a restart fired on the absence of a job this process never saw", i)
+		}
+	}
+	r.src.set(func(c *coveredSource) {
+		c.queue = []*classad.ClassAd{apAd(apOne, 1, 2), apAd(apTwo, 1, 2)}
+	})
+	r.pass(time.Minute)
+	r.dropAP2()
+	if st := r.pass(time.Minute); st.Fired != 1 {
+		t.Fatalf("fired %d once the job was seen and then gone, want 1", st.Fired)
 	}
 }
 

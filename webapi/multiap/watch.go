@@ -106,20 +106,25 @@ func (w WatchSource) QueueCovered(ctx context.Context, owner string, attrs []str
 	}
 	truncated := seen > limit
 	after, _, aerr := hub.ReadSources(ctx)
-	origin := s.HubOrigin(ctx)
 	if aerr != nil {
 		// Nothing confirms the catch-up held across the read: vouch for
 		// nothing this pass.
-		return truncated, jobwatch.NewCoverageFrom(origin), nil
+		return truncated, s.newCoverage(ctx), nil
 	}
-	return truncated, s.coverage(origin, before, after, at), nil
+	return truncated, s.coverage(s.newCoverage(ctx), before, after, at), nil
 }
 
-// coverage vouches for each member that before vouches for at time at,
-// and whose jobs catch-up, where the hub publishes one, after confirms.
-// before and after are one hub's, named by origin.
-func (s *Service) coverage(origin string, before, after map[string]Source, at time.Time) *jobwatch.Coverage {
-	cov := jobwatch.NewCoverageFrom(origin)
+// newCoverage is an empty coverage naming the hub ctx is pinned to and
+// its selection generation as the origin, and whether there is more than
+// one hub a watch's jobs could have been seen on.
+func (s *Service) newCoverage(ctx context.Context) *jobwatch.Coverage {
+	return jobwatch.NewCoverageFrom(s.HubOrigin(ctx), s.Hub.Several())
+}
+
+// coverage vouches, in cov, for each member that before vouches for at
+// time at, and whose jobs catch-up, where the hub publishes one, after
+// confirms. before and after are the hub cov names.
+func (s *Service) coverage(cov *jobwatch.Coverage, before, after map[string]Source, at time.Time) *jobwatch.Coverage {
 	for _, m := range s.Registry.Members() {
 		key := strings.ToLower(m.Name)
 		src, ok := before[key]
@@ -226,7 +231,7 @@ const resetSettle = 10 * time.Minute
 func (s *Service) WatchCoverage(ctx context.Context) *jobwatch.Coverage {
 	ctx = s.PinHub(ctx)
 	hub := s.Hub.For(ctx)
-	cov := jobwatch.NewCoverageFrom(s.HubOrigin(ctx))
+	cov := s.newCoverage(ctx)
 	st := hub.Status()
 	if !st.Reachable {
 		return cov

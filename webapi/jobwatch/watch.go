@@ -459,6 +459,11 @@ func (f *Fold) absenceIsEvidence(id JobID) bool {
 	if f.cov == nil || id.Schedd == "" {
 		return false
 	}
+	if f.mem != nil && f.mem.strict && !f.mem.seenHere[id] {
+		// Never seen in this origin's queue: it may never have reached
+		// this backend. Only terminal evidence from it finishes the job.
+		return false
+	}
 	return f.cov.evidence(id.Schedd, f.lastSeen(id))
 }
 
@@ -654,6 +659,9 @@ func (f *Fold) Done() Outcome {
 			// Seen, or accounted for: nothing to remember about when it
 			// was last seen.
 			delete(f.mem.since, id)
+		}
+		if f.mem != nil && p.inQueue {
+			f.mem.seenHere[id] = true
 		}
 		switch {
 		case p.inQueue:
