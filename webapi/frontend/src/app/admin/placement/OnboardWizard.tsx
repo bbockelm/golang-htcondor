@@ -10,8 +10,7 @@ import {
   type DirAccount,
   type DirAuthorization,
   type EditResponse,
-  PlacementAdminError,
-  describeEditError,
+  describeBatchError,
   placementAdmin,
 } from '@/lib/placementAdmin';
 import { ExpiryField, GrantFields } from './EntityForm';
@@ -137,10 +136,6 @@ export function OnboardWizard({
     onError: () => setChecked(null),
   });
 
-  const failed =
-    run.error instanceof PlacementAdminError
-      ? run.error.results.find((r) => r.error_code)
-      : undefined;
   const ready = input.identity !== '' && input.account !== '';
 
   return (
@@ -232,8 +227,7 @@ export function OnboardWizard({
         )}
         {run.error && (
           <p role="alert" className="rounded-sm border border-red-200 bg-red-50 p-2 text-xs text-red-700">
-            {failed && `Step ${failed.index + 1}: `}
-            {describeEditError(run.error)}
+            {describeBatchError(run.error)}
           </p>
         )}
 
