@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -222,11 +223,24 @@ type PlacementdClient interface {
 // the path). This client therefore demands authentication and encryption on
 // every connection rather than letting configuration weaken them.
 type Placementd struct {
+	// mu guards address and the re-resolution state below it.
+	mu      sync.Mutex
 	address string
+	// resolver, when set, finds the daemon's current address. See
+	// WithResolver.
+	resolver func(ctx context.Context) (string, error)
+	// lastResolve is when resolver last ran, so a daemon that is down
+	// costs one discovery per resolveInterval rather than one per call.
+	lastResolve     time.Time
+	resolveInterval time.Duration
 	// cfg is the HTCondor configuration this client authenticates and
 	// rate-limits with; nil means the process-wide default. See WithConfig.
 	cfg *config.Config
 }
+
+// defaultPlacementResolveInterval bounds how often a failing client asks its
+// resolver for a new address.
+const defaultPlacementResolveInterval = 10 * time.Second
 
 // Compile-time check that Placementd satisfies the interface.
 var _ PlacementdClient = (*Placementd)(nil)
@@ -237,17 +251,96 @@ func NewPlacementd(address string) *Placementd {
 	return &Placementd{address: address}
 }
 
-// Address returns the sinful string this client talks to.
-func (p *Placementd) Address() string { return p.address }
+// Address returns the sinful string this client talks to. It is empty for a
+// client created with no address whose resolver has not found one yet.
+func (p *Placementd) Address() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.address
+}
+
+// WithResolver makes the client follow the daemon when its address changes.
+//
+// The address a client was built with goes stale when the placementd
+// restarts: under shared port its sinful string carries a socket name that
+// the new process does not reuse. With a resolver, a connection failure
+// re-runs resolve (at most once per resolveInterval) and, when that yields a
+// different address, retries the command once against it. A client created
+// with an empty address resolves on first use.
+func (p *Placementd) WithResolver(resolve func(ctx context.Context) (string, error)) *Placementd {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resolver = resolve
+	return p
+}
+
+// Resolve asks the resolver for the daemon's address now, subject to the
+// same throttle as a failed connection, and returns the address the client
+// then has ("" when none is known). Callers use it to notice a placementd
+// that appeared after the client was created.
+func (p *Placementd) Resolve(ctx context.Context) string {
+	addr, _ := p.reresolve(ctx, p.Address())
+	return addr
+}
+
+// reresolve asks the resolver for the current address. It reports the new
+// address and whether it differs from the one the caller just failed with.
+// A throttled or failed resolution reports no change.
+func (p *Placementd) reresolve(ctx context.Context, failed string) (string, bool) {
+	p.mu.Lock()
+	resolve := p.resolver
+	interval := p.resolveInterval
+	if interval == 0 {
+		interval = defaultPlacementResolveInterval
+	}
+	if resolve == nil || (!p.lastResolve.IsZero() && time.Since(p.lastResolve) < interval) {
+		// Another caller may have resolved since this one dialed.
+		current := p.address
+		p.mu.Unlock()
+		return current, current != "" && current != failed
+	}
+	p.lastResolve = time.Now()
+	p.mu.Unlock()
+
+	addr, err := resolve(ctx)
+	if err != nil || addr == "" {
+		return failed, false
+	}
+	p.mu.Lock()
+	p.address = addr
+	p.mu.Unlock()
+	return addr, addr != failed
+}
 
 // summaryAdType is the MyType the placementd puts on the trailing ad of a
 // query response. The ad carries no payload of its own beyond an optional
 // ErrorCode/ErrorString pair; it exists to terminate the stream.
 const summaryAdType = "Summary"
 
-// connect dials the placementd and authenticates for one command.
+// connect dials the placementd and authenticates for one command. With a
+// resolver (WithResolver), a failure to connect re-resolves the address and,
+// if it changed, tries once more there.
 func (p *Placementd) connect(ctx context.Context, cmd int) (*client.HTCondorClient, error) {
-	secConfig, err := GetSecurityConfigOrDefault(ctx, p.cfg, cmd, "CLIENT", p.address)
+	addr := p.Address()
+	if addr == "" {
+		resolved, _ := p.reresolve(ctx, "")
+		if resolved == "" {
+			return nil, fmt.Errorf("no placementd address is known")
+		}
+		addr = resolved
+	}
+	c, err := p.connectTo(ctx, cmd, addr)
+	if err == nil {
+		return c, nil
+	}
+	if next, changed := p.reresolve(ctx, addr); changed {
+		return p.connectTo(ctx, cmd, next)
+	}
+	return nil, err
+}
+
+func (p *Placementd) connectTo(ctx context.Context, cmd int, addr string) (*client.HTCondorClient, error) {
+	secConfig, err := GetSecurityConfigOrDefault(ctx, p.cfg, cmd, "CLIENT", addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -255,9 +348,9 @@ func (p *Placementd) connect(ctx context.Context, cmd int) (*client.HTCondorClie
 	secConfig.Authentication = security.SecurityRequired
 	secConfig.Encryption = security.SecurityRequired
 
-	c, err := client.ConnectAndAuthenticate(ctx, p.address, secConfig)
+	c, err := client.ConnectAndAuthenticate(ctx, addr, secConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to placementd at %s: %w", p.address, err)
+		return nil, fmt.Errorf("failed to connect to placementd at %s: %w", addr, err)
 	}
 	return c, nil
 }
