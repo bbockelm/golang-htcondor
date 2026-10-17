@@ -95,6 +95,8 @@ const (
 	PlacementTargetMapfileStatus = "MapfileStatus"
 	// PlacementTargetAll is Adopt-only: adopt every mapfile row.
 	PlacementTargetAll = "All"
+	// PlacementTargetModification is query-only: the audit log.
+	PlacementTargetModification = "Modification"
 )
 
 // Operations for PlacementOp.Operation.
@@ -201,6 +203,8 @@ type PlacementQuery struct {
 	Projection []string
 	// Limit caps the number of results; zero or less means no cap.
 	Limit int
+	// EntityID restricts a Modification query to one entity's uuid.
+	EntityID string
 }
 
 // PlacementEntityMeta is the bookkeeping every directory entity carries.
@@ -210,12 +214,16 @@ type PlacementEntityMeta struct {
 	// Source is the entity's owner: PlacementSourceMapfile or
 	// PlacementSourceInternal.
 	Source string
-	// Version increases on every change. An account's version also
-	// changes when its grants do.
+	// Version changes on every change to the entity, including an
+	// account's grants. Treat it as opaque: compare it, send it back as
+	// ExpectedVersion, never do arithmetic on it.
 	Version    int64
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 	ModifiedBy string
+	// ModificationID is the entity's latest audit-log entry; see
+	// PlacementModification.
+	ModificationID int64
 }
 
 // PlacementIdentity is an identity a web front end derives from an IdP
@@ -321,6 +329,7 @@ type PlacementObject struct {
 	Project       *PlacementProject
 	Authorization *PlacementAuthorizationRecord
 	MapfileStatus *PlacementMapfileStatus
+	Modification  *PlacementModification
 }
 
 // PlacementOp is one operation of a PLACEMENT_EDIT batch.
@@ -430,12 +439,27 @@ func placementQueryAd(q PlacementQuery) (*classad.ClassAd, error) {
 	if q.Limit > 0 {
 		ad.InsertAttr("Limit", int64(q.Limit))
 	}
+	if q.EntityID != "" {
+		ad.InsertAttrString("EntityId", q.EntityID)
+	}
 	return ad, nil
 }
 
+// PlacementEditOptions qualifies a PLACEMENT_EDIT batch.
+type PlacementEditOptions struct {
+	// DryRun makes the daemon validate and report, then roll back.
+	DryRun bool
+	// OnBehalfOf names the person the caller is acting for, recorded in
+	// the audit log next to the authenticated peer. The daemon records
+	// it but does not authorize with it.
+	OnBehalfOf string
+	// Comment is recorded in the audit log with the batch.
+	Comment string
+}
+
 // Edit runs a PLACEMENT_EDIT batch. The batch is atomic: either every
-// operation applied or none did. With dryRun the daemon validates and reports
-// results, then rolls back.
+// operation applied or none did. With opts.DryRun the daemon validates and
+// reports results, then rolls back.
 //
 // The results come back even when the batch failed, one per operation, so a
 // caller can show which operation failed and why. In that case the error is a
@@ -445,8 +469,8 @@ func placementQueryAd(q PlacementQuery) (*classad.ClassAd, error) {
 // empty or oversized batch, a field that collides with an operation
 // attribute, an unencodable value) are refused here with the same code
 // before dialing.
-func (p *Placementd) Edit(ctx context.Context, ops []PlacementOp, dryRun bool) ([]PlacementEditResult, error) {
-	header, opAds, err := placementEditAds(ops, dryRun)
+func (p *Placementd) Edit(ctx context.Context, ops []PlacementOp, opts PlacementEditOptions) ([]PlacementEditResult, error) {
+	header, opAds, err := placementEditAds(ops, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +513,7 @@ func (p *Placementd) Edit(ctx context.Context, ops []PlacementOp, dryRun bool) (
 }
 
 // placementEditAds builds the header and operation ads for a batch.
-func placementEditAds(ops []PlacementOp, dryRun bool) (*classad.ClassAd, []*classad.ClassAd, error) {
+func placementEditAds(ops []PlacementOp, opts PlacementEditOptions) (*classad.ClassAd, []*classad.ClassAd, error) {
 	if len(ops) == 0 || len(ops) > placementMaxOperations {
 		return nil, nil, &PlacementError{
 			Code:    PlacementErrInvalidArgument,
@@ -499,7 +523,13 @@ func placementEditAds(ops []PlacementOp, dryRun bool) (*classad.ClassAd, []*clas
 	header := classad.New()
 	header.InsertAttrString("MyType", "PlacementEdit")
 	header.InsertAttr("NumOperations", int64(len(ops)))
-	header.InsertAttrBool("DryRun", dryRun)
+	header.InsertAttrBool("DryRun", opts.DryRun)
+	if opts.OnBehalfOf != "" {
+		header.InsertAttrString("OnBehalfOf", opts.OnBehalfOf)
+	}
+	if opts.Comment != "" {
+		header.InsertAttrString("Comment", opts.Comment)
+	}
 
 	opAds := make([]*classad.ClassAd, 0, len(ops))
 	for i, op := range ops {
@@ -694,6 +724,8 @@ func decodePlacementObject(ad *classad.ClassAd, queried string) PlacementObject 
 		obj.Authorization = au
 	case PlacementTargetMapfileStatus:
 		obj.MapfileStatus = decodePlacementMapfileStatus(ad)
+	case PlacementTargetModification:
+		obj.Modification = decodePlacementModification(ad)
 	}
 	return obj
 }
@@ -706,6 +738,7 @@ func decodePlacementMeta(ad *classad.ClassAd) PlacementEntityMeta {
 	m.CreatedAt = placementUnix(ad, "CreatedAt")
 	m.UpdatedAt = placementUnix(ad, "UpdatedAt")
 	m.ModifiedBy, _ = ad.EvaluateAttrString("ModifiedBy")
+	m.ModificationID, _ = ad.EvaluateAttrInt("ModificationId")
 	return m
 }
 

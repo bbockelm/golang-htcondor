@@ -281,7 +281,7 @@ func TestPlacementdEditFraming(t *testing.T) {
 			ExpectedVersion: 7,
 			Fields:          map[string]any{"ExpiresAt": nil, "Comment": "renewed"},
 		},
-	}, true)
+	}, PlacementEditOptions{DryRun: true, OnBehalfOf: "alice", Comment: "onboarding"})
 	if err != nil {
 		t.Fatalf("Edit: %v", err)
 	}
@@ -298,6 +298,12 @@ func TestPlacementdEditFraming(t *testing.T) {
 	}
 	if got, ok := h.EvaluateAttrBool("DryRun"); !ok || !got {
 		t.Errorf("DryRun = %v, %v", got, ok)
+	}
+	if got, _ := h.EvaluateAttrString("OnBehalfOf"); got != "alice" {
+		t.Errorf("OnBehalfOf = %q, want alice", got)
+	}
+	if got, _ := h.EvaluateAttrString("Comment"); got != "onboarding" {
+		t.Errorf("Comment = %q, want onboarding", got)
 	}
 	if len(f.editOps) != 3 {
 		t.Fatalf("daemon read %d operation ads", len(f.editOps))
@@ -356,7 +362,7 @@ func TestPlacementdEditFailureCarriesResults(t *testing.T) {
 	results, err := NewPlacementd(f.addr).Edit(placementTestContext(t), []PlacementOp{
 		{Operation: PlacementOpDelete, TargetType: PlacementTargetProject, Key: "ProjA", Cascade: true},
 		{Operation: PlacementOpUpdate, TargetType: PlacementTargetAccount, Key: "bob@ap", Fields: map[string]any{"Projects": []string{"P"}}},
-	}, false)
+	}, PlacementEditOptions{})
 	var perr *PlacementError
 	if !errors.As(err, &perr) || perr.Code != PlacementErrOwnedBySource {
 		t.Fatalf("err = %v, want code 15", err)
@@ -370,6 +376,12 @@ func TestPlacementdEditFailureCarriesResults(t *testing.T) {
 	if v, ok := f.editHeader.EvaluateAttrBool("DryRun"); !ok || v {
 		t.Errorf("DryRun = %v, %v; want false and present", v, ok)
 	}
+	// Unset audit fields are not sent at all.
+	for _, attr := range []string{"OnBehalfOf", "Comment"} {
+		if _, ok := f.editHeader.Lookup(attr); ok {
+			t.Errorf("%s sent though unset", attr)
+		}
+	}
 }
 
 // A Summary with only an ErrorCode is a failure too: the design keys the
@@ -380,7 +392,7 @@ func TestPlacementdEditSummaryCodeOnly(t *testing.T) {
 	})
 	_, err := NewPlacementd(f.addr).Edit(placementTestContext(t), []PlacementOp{
 		{Operation: PlacementOpAdopt, TargetType: PlacementTargetAll},
-	}, false)
+	}, PlacementEditOptions{})
 	var perr *PlacementError
 	if !errors.As(err, &perr) || perr.Code != PlacementErrVersionMismatch {
 		t.Fatalf("err = %v, want code 14", err)
@@ -405,7 +417,7 @@ func TestPlacementOpValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewPlacementd("<127.0.0.1:1>").Edit(context.Background(), tc.ops, false)
+			_, err := NewPlacementd("<127.0.0.1:1>").Edit(context.Background(), tc.ops, PlacementEditOptions{})
 			var perr *PlacementError
 			if !errors.As(err, &perr) || perr.Code != PlacementErrInvalidArgument {
 				t.Fatalf("err = %v, want code 16 before dialing", err)
