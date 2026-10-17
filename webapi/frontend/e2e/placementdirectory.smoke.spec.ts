@@ -28,6 +28,13 @@ test('placement directory lists entries by source and onboards a user', async ({
   const intRow = page.getByTestId('dir-row-6f1c2c1e-1111-4a3b-9c1d-000000000002');
   await expect(intRow.getByRole('button', { name: 'Edit' })).toBeVisible();
 
+  await intRow.getByRole('button', { name: 'History' }).click();
+  const history = page.getByRole('dialog', { name: 'History of bob@cilogon.org' });
+  await expect(history.getByTestId('history-120')).toContainText('by e2e');
+  await expect(history.getByTestId('history-120')).toContainText('spring term');
+  await expect(history.getByTestId('history-7')).toContainText('by Import');
+  await history.getByRole('button', { name: 'Close' }).click();
+
   await page.getByRole('tab', { name: 'Accounts' }).click();
   await expect(page.getByText('bob@ap.smoke.example').first()).toBeVisible();
 
@@ -35,6 +42,7 @@ test('placement directory lists entries by source and onboards a user', async ({
   const dialog = page.getByRole('dialog', { name: 'Onboard user' });
   await dialog.getByLabel('Identity', { exact: true }).fill('carol@wisc.edu');
   await dialog.getByLabel(/^Account/).fill('carol@ap.smoke.example');
+  await dialog.getByLabel('Change comment (optional)').fill('new student');
   await dialog.getByRole('button', { name: 'Onboard' }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByText('User onboarded.')).toBeVisible();
@@ -42,6 +50,7 @@ test('placement directory lists entries by source and onboards a user', async ({
   const batch = edits.find((e) => e.path === '/api/v1/placement/admin/batch');
   expect(batch?.body).toMatchObject({
     dry_run: false,
+    change_comment: 'new student',
     operations: [
       { operation: 'Create', target_type: 'Account' },
       { operation: 'Create', target_type: 'Identity', fields: { identity: 'carol@wisc.edu' } },
