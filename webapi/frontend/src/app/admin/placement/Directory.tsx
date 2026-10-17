@@ -6,7 +6,7 @@
 // here.
 
 import { useCallback, useMemo, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type DirAccount,
   type DirAuthorization,
@@ -14,13 +14,10 @@ import {
   type DirIdentity,
   type DirProject,
   type EditResponse,
-  PlacementAdminError,
   type PlacementKind,
-  describeEditError,
   placementAdmin,
 } from '@/lib/placementAdmin';
 import { ChipList } from '@/components/ChipList';
-import { ConfirmButton } from '@/components/ConfirmButton';
 import { FilterControls, type FilterMode } from '@/components/FilterControls';
 import {
   ScrollableTable,
@@ -31,6 +28,13 @@ import {
 import { AuthzChips, SourceBadge, formatWhen } from './directoryShared';
 import { EntityForm, KIND_SINGULAR } from './EntityForm';
 import { OnboardWizard } from './OnboardWizard';
+import { ChangeDialog, type ChangeAction } from './ChangeDialog';
+import { HistoryPanel } from './HistoryPanel';
+
+// keyOf is the entry's natural key, for headings and confirmations.
+function keyOf(row: AnyEntity): string {
+  return 'identity' in row ? (row as DirIdentity).identity : (row as { name: string }).name;
+}
 
 const VIEWS: { kind: PlacementKind; label: string }[] = [
   { kind: 'identities', label: 'Identities' },
@@ -235,7 +239,9 @@ export function Directory({ onIssueToken }: { onIssueToken?: (identity: string) 
   const [editing, setEditing] = useState<{ entity: AnyEntity | null } | null>(null);
   const [onboarding, setOnboarding] = useState(false);
   const [notice, setNotice] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
-  const [cascadeFor, setCascadeFor] = useState<string | null>(null);
+  const [change, setChange] = useState<ChangeAction | null>(null);
+  // Whose history is open: one entry, or the whole directory (null target).
+  const [history, setHistory] = useState<{ target?: { kind: PlacementKind; id: string }; title: string } | null>(null);
 
   const rows = useQuery({
     queryKey: ['placement', 'directory', view, constraint],
@@ -271,34 +277,8 @@ export function Directory({ onIssueToken }: { onIssueToken?: (identity: string) 
   const afterEdit = (verb: string) => (resp: EditResponse) => {
     const warnings = warningsOf(resp);
     setNotice(warnings.length > 0 ? { tone: 'warn', text: warnings.join(' ') } : { tone: 'ok', text: verb });
-    setCascadeFor(null);
     refresh();
   };
-  const onError = (err: unknown, id?: string) => {
-    if (err instanceof PlacementAdminError && err.cascadeRequired && id) {
-      setCascadeFor(id);
-      setNotice(null);
-      return;
-    }
-    setNotice({ tone: 'error', text: describeEditError(err) });
-  };
-
-  const remove = useMutation({
-    mutationFn: (v: { id: string; version: number; cascade: boolean }) =>
-      placementAdmin.remove(view, v.id, { cascade: v.cascade, expectedVersion: v.version }),
-    onSuccess: afterEdit('Deleted.'),
-    onError: (err, v) => onError(err, v.id),
-  });
-  const adopt = useMutation({
-    mutationFn: (v: { id: string; version: number }) => placementAdmin.adopt(view, v.id, v.version),
-    onSuccess: afterEdit('Adopted.'),
-    onError: (err) => onError(err),
-  });
-  const adoptAll = useMutation({
-    mutationFn: () => placementAdmin.adoptAll(),
-    onSuccess: afterEdit('Adopted every map file entry.'),
-    onError: (err) => onError(err),
-  });
 
   const columns = useMemo(() => columnsFor(view, authzByName), [view, authzByName]);
   const [sort, setSort] = useSortState<string>(columns[0].key, 'asc');
@@ -322,7 +302,6 @@ export function Directory({ onIssueToken }: { onIssueToken?: (identity: string) 
   const switchView = (k: PlacementKind) => {
     setView(k);
     setNotice(null);
-    setCascadeFor(null);
     setSort({ key: columnsFor(k, authzByName)[0].key, direction: 'asc' });
   };
 
@@ -344,13 +323,20 @@ export function Directory({ onIssueToken }: { onIssueToken?: (identity: string) 
           ))}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <ConfirmButton
-            label="Adopt all"
-            confirmLabel="Adopt every map file entry"
-            title="Adopt every map file entry"
-            pending={adoptAll.isPending}
-            onConfirm={() => adoptAll.mutate()}
-          />
+          <button
+            type="button"
+            onClick={() => setHistory({ title: 'Recent changes' })}
+            className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            Recent changes
+          </button>
+          <button
+            type="button"
+            onClick={() => setChange({ kind: 'adoptAll' })}
+            className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            Adopt all
+          </button>
           <button
             type="button"
             onClick={() => setOnboarding(true)}
@@ -447,12 +433,22 @@ export function Directory({ onIssueToken }: { onIssueToken?: (identity: string) 
                             Issue token
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setHistory({ target: { kind: view, id: row.id }, title: `History of ${keyOf(row)}` })
+                          }
+                          className="rounded-sm border border-gray-300 px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-100"
+                        >
+                          History
+                        </button>
                         {mapfile ? (
                           <button
                             type="button"
-                            disabled={adopt.isPending}
-                            onClick={() => adopt.mutate({ id: row.id, version: row.version })}
-                            className="rounded-sm border border-amber-400 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-50 disabled:opacity-50"
+                            onClick={() =>
+                              setChange({ kind: 'adopt', entity: view, id: row.id, version: row.version, label: keyOf(row) })
+                            }
+                            className="rounded-sm border border-amber-400 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-50"
                           >
                             Adopt
                           </button>
@@ -465,26 +461,15 @@ export function Directory({ onIssueToken }: { onIssueToken?: (identity: string) 
                             >
                               Edit
                             </button>
-                            {cascadeFor === row.id ? (
-                              <span className="inline-flex items-center gap-1">
-                                <span className="text-xs text-red-700">Still referenced.</span>
-                                <ConfirmButton
-                                  compact
-                                  label="Delete with references"
-                                  confirmLabel="Delete all"
-                                  pending={remove.isPending}
-                                  onConfirm={() => remove.mutate({ id: row.id, version: row.version, cascade: true })}
-                                />
-                              </span>
-                            ) : (
-                              <ConfirmButton
-                                compact
-                                label="Delete"
-                                confirmLabel="Delete"
-                                pending={remove.isPending}
-                                onConfirm={() => remove.mutate({ id: row.id, version: row.version, cascade: false })}
-                              />
-                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setChange({ kind: 'delete', entity: view, id: row.id, version: row.version, label: keyOf(row) })
+                              }
+                              className="rounded-sm border border-gray-300 px-2 py-0.5 text-xs text-gray-700 hover:bg-red-50 hover:text-red-700"
+                            >
+                              Delete
+                            </button>
                           </>
                         )}
                       </div>
@@ -513,6 +498,30 @@ export function Directory({ onIssueToken }: { onIssueToken?: (identity: string) 
             setEditing(null);
             refresh();
           }}
+        />
+      )}
+
+      {change && (
+        <ChangeDialog
+          action={change}
+          onClose={() => setChange(null)}
+          onDone={(resp, verb) => {
+            setChange(null);
+            afterEdit(verb)(resp);
+          }}
+          onReload={() => {
+            setChange(null);
+            refresh();
+          }}
+        />
+      )}
+
+      {history && (
+        <HistoryPanel
+          target={history.target}
+          title={history.title}
+          authzByName={authzByName}
+          onClose={() => setHistory(null)}
         />
       )}
 

@@ -212,7 +212,7 @@ type PlacementdClient interface {
 	Query(ctx context.Context, q PlacementQuery) ([]PlacementObject, error)
 	// Edit runs an atomic batch of directory edits (PLACEMENT_EDIT; API
 	// version 2).
-	Edit(ctx context.Context, ops []PlacementOp, dryRun bool) ([]PlacementEditResult, error)
+	Edit(ctx context.Context, ops []PlacementOp, opts PlacementEditOptions) ([]PlacementEditResult, error)
 }
 
 // Placementd is a CEDAR client for condor_placementd.

@@ -21,7 +21,7 @@ func (f *fakePlacementd) Query(context.Context, htcondor.PlacementQuery) ([]htco
 	return nil, errors.New("fakePlacementd: no PLACEMENT_QUERY")
 }
 
-func (f *fakePlacementd) Edit(context.Context, []htcondor.PlacementOp, bool) ([]htcondor.PlacementEditResult, error) {
+func (f *fakePlacementd) Edit(context.Context, []htcondor.PlacementOp, htcondor.PlacementEditOptions) ([]htcondor.PlacementEditResult, error) {
 	return nil, errors.New("fakePlacementd: no PLACEMENT_EDIT")
 }
 
@@ -37,6 +37,7 @@ type fakePlacementdV2 struct {
 	gotQuery   htcondor.PlacementQuery
 	gotOps     []htcondor.PlacementOp
 	gotDryRun  bool
+	gotOpts    htcondor.PlacementEditOptions
 	editCalled bool
 }
 
@@ -47,9 +48,9 @@ func (f *fakePlacementdV2) Query(_ context.Context, q htcondor.PlacementQuery) (
 	return f.objects, f.queryErr
 }
 
-func (f *fakePlacementdV2) Edit(_ context.Context, ops []htcondor.PlacementOp, dryRun bool) ([]htcondor.PlacementEditResult, error) {
+func (f *fakePlacementdV2) Edit(_ context.Context, ops []htcondor.PlacementOp, opts htcondor.PlacementEditOptions) ([]htcondor.PlacementEditResult, error) {
 	f.editCalled = true
-	f.gotOps, f.gotDryRun = ops, dryRun
+	f.gotOps, f.gotDryRun, f.gotOpts = ops, opts.DryRun, opts
 	if f.results != nil || f.editErr != nil {
 		return f.results, f.editErr
 	}
@@ -422,8 +423,10 @@ func TestPlacementAdminBatch(t *testing.T) {
 	}
 }
 
-// Each directory error code maps to the status §7.4 names, with the hints a
-// UI acts on.
+// Each directory error code maps to an HTTP status: not found 404; version
+// mismatch, mapfile-owned (owned_by), still referenced (cascade_required)
+// and duplicate 409; invalid argument and unknown type 400. The hints are
+// what a UI acts on.
 func TestPlacementAdminErrorMapping(t *testing.T) {
 	cases := []struct {
 		code            int

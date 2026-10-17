@@ -8,6 +8,7 @@ import type {
   DirProject,
   EditResponse,
   MapfileStatus,
+  Modification,
   PlacementKind,
 } from '@/lib/placementAdmin';
 
@@ -19,6 +20,7 @@ const adopt = vi.fn();
 const adoptAll = vi.fn();
 const batch = vi.fn();
 const mapfileStatus = vi.fn();
+const history = vi.fn();
 
 vi.mock('@/lib/placementAdmin', async () => {
   const actual = await vi.importActual<typeof import('@/lib/placementAdmin')>('@/lib/placementAdmin');
@@ -31,7 +33,8 @@ vi.mock('@/lib/placementAdmin', async () => {
       update: (...a: unknown[]) => update(...a),
       remove: (...a: unknown[]) => remove(...a),
       adopt: (...a: unknown[]) => adopt(...a),
-      adoptAll: () => adoptAll(),
+      adoptAll: (...a: unknown[]) => adoptAll(...a),
+      history: (...a: unknown[]) => history(...a),
       batch: (...a: unknown[]) => batch(...a),
       mapfileStatus: () => mapfileStatus(),
     },
@@ -43,6 +46,7 @@ const { Directory } = await import('./Directory');
 const { MapfileStatusBanner } = await import('./MapfileStatusBanner');
 const { onboardOperations } = await import('./OnboardWizard');
 const { changedFields } = await import('./EntityForm');
+const { HistoryEntry, who } = await import('./HistoryPanel');
 
 const identities: DirIdentity[] = [
   {
@@ -99,7 +103,7 @@ const rowFor = (id: string) => screen.findByTestId(`dir-row-${id}`);
 
 describe('Directory', () => {
   beforeEach(() => {
-    for (const m of [list, update, create, remove, adopt, adoptAll, batch, mapfileStatus]) m.mockReset();
+    for (const m of [list, update, create, remove, adopt, adoptAll, batch, mapfileStatus, history]) m.mockReset();
     list.mockImplementation((kind: PlacementKind) =>
       Promise.resolve(
         { identities, accounts, projects, authorizations }[kind],
@@ -126,7 +130,10 @@ describe('Directory', () => {
     adopt.mockResolvedValue({ ...ok, results: [{ index: 0, id: 'i-map', version: 4, warning: 'Still in the map file.' }] });
     renderDirectory();
     fireEvent.click(within(await rowFor('i-map')).getByRole('button', { name: 'Adopt' }));
-    await waitFor(() => expect(adopt).toHaveBeenCalledWith('identities', 'i-map', 3));
+    const dialog = await screen.findByRole('dialog', { name: 'Adopt identity' });
+    fireEvent.change(within(dialog).getByLabelText('Change comment (optional)'), { target: { value: 'moving off the map file' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Adopt' }));
+    await waitFor(() => expect(adopt).toHaveBeenCalledWith('identities', 'i-map', 3, 'moving off the map file'));
     expect(await screen.findByText('Still in the map file.')).toBeInTheDocument();
   });
 
@@ -160,9 +167,11 @@ describe('Directory', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Edit identity' });
     fireEvent.change(within(dialog).getByLabelText('Display name'), { target: { value: '' } });
     fireEvent.change(within(dialog).getByLabelText('Comment'), { target: { value: 'TA' } });
+    fireEvent.change(within(dialog).getByLabelText('Change comment (optional)'), { target: { value: 'new role' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    // The identity's own comment is a field; the change comment is not.
     await waitFor(() =>
-      expect(update).toHaveBeenCalledWith('identities', 'i-int', 5, { display_name: null, comment: 'TA' }),
+      expect(update).toHaveBeenCalledWith('identities', 'i-int', 5, { display_name: null, comment: 'TA' }, 'new role'),
     );
   });
 
@@ -190,17 +199,17 @@ describe('Directory', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Accounts' }));
     const row = await rowFor('a-bob');
     fireEvent.click(within(row).getByRole('button', { name: 'Delete' }));
-    // Armed: the first button is now Cancel, the second confirms.
-    fireEvent.click(within(row).getByRole('button', { name: 'Delete' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete account' });
+    fireEvent.change(within(dialog).getByLabelText('Change comment (optional)'), { target: { value: 'left' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
     await waitFor(() =>
-      expect(remove).toHaveBeenCalledWith('accounts', 'a-bob', { cascade: false, expectedVersion: 2 }),
+      expect(remove).toHaveBeenCalledWith('accounts', 'a-bob', { cascade: false, expectedVersion: 2, changeComment: 'left' }),
     );
-    const cascade = await within(row).findByRole('button', { name: 'Delete with references' });
-    fireEvent.click(cascade);
-    fireEvent.click(within(row).getByRole('button', { name: 'Delete all' }));
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Delete with references' }));
     await waitFor(() =>
-      expect(remove).toHaveBeenLastCalledWith('accounts', 'a-bob', { cascade: true, expectedVersion: 2 }),
+      expect(remove).toHaveBeenLastCalledWith('accounts', 'a-bob', { cascade: true, expectedVersion: 2, changeComment: 'left' }),
     );
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
   it('onboards a user in one batch', async () => {
@@ -283,5 +292,75 @@ describe('MapfileStatusBanner', () => {
     expect(within(banner).getByText('1')).toBeInTheDocument();
     expect(within(banner).getByText('1 problem')).toBeInTheDocument();
     expect(within(banner).getByText(/bad expiry/)).toBeInTheDocument();
+  });
+});
+
+const updateEntry: Modification = {
+  id: 42,
+  changeset_id: 17,
+  time: '2026-10-16T12:00:00Z',
+  channel: 'cedar',
+  actor: 'condor@ap.example',
+  on_behalf_of: 'root',
+  comment: 'spring course',
+  operation: 'update',
+  entity_type: 'account',
+  entity_id: 'a-bob',
+  changes: {
+    Authorizations: { old: ['READ', 'WRITE'], new: ['READ', 'INSTRUCTOR'] },
+    DefaultProject: { old: null, new: 'ProjA' },
+  },
+};
+
+describe('history', () => {
+  beforeEach(() => {
+    for (const m of [list, history]) m.mockReset();
+    list.mockImplementation((kind: PlacementKind) =>
+      Promise.resolve({ identities, accounts, projects, authorizations }[kind]),
+    );
+  });
+
+  it('names whom a change was made for, else the editor or the map file', () => {
+    expect(who(updateEntry)).toBe('root');
+    expect(who({ ...updateEntry, on_behalf_of: undefined })).toBe('condor@ap.example');
+    expect(who({ ...updateEntry, on_behalf_of: undefined, channel: 'mapfile', actor: 'mapfile' })).toBe('Map file');
+  });
+
+  it('shows grant lists as removed, added and kept chips, and scalars as old to new', () => {
+    const byName = new Map(authorizations.map((a) => [a.name, a]));
+    render(
+      <ul>
+        <HistoryEntry m={updateEntry} authzByName={byName} />
+      </ul>,
+    );
+    const entry = screen.getByTestId('history-42');
+    expect(within(entry).getByText('Updated')).toBeInTheDocument();
+    expect(within(entry).getByText('by root')).toBeInTheDocument();
+    expect(within(entry).getByText('spring course')).toBeInTheDocument();
+    expect(within(entry).getByText('Write').closest('[data-diff]')).toHaveAttribute('data-diff', 'removed');
+    expect(within(entry).getByText('+ INSTRUCTOR')).toHaveAttribute('data-diff', 'added');
+    expect(within(entry).getByText('Read').closest('[data-diff]')).toHaveAttribute('data-diff', 'kept');
+    expect(within(entry).getByText('Default project')).toBeInTheDocument();
+    expect(within(entry).getByText('ProjA')).toBeInTheDocument();
+  });
+
+  it('opens one row\'s history from the Directory', async () => {
+    history.mockResolvedValue([updateEntry]);
+    renderDirectory();
+    fireEvent.click(screen.getByRole('tab', { name: 'Accounts' }));
+    fireEvent.click(within(await rowFor('a-bob')).getByRole('button', { name: 'History' }));
+    const dialog = await screen.findByRole('dialog', { name: 'History of bob@ap.example' });
+    expect(await within(dialog).findByText('spring course')).toBeInTheDocument();
+    expect(history).toHaveBeenCalledWith({ kind: 'accounts', id: 'a-bob' }, 100);
+  });
+
+  it('opens the whole directory\'s recent changes', async () => {
+    history.mockResolvedValue([]);
+    renderDirectory();
+    await rowFor('i-map');
+    fireEvent.click(screen.getByRole('button', { name: 'Recent changes' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Recent changes' });
+    expect(await within(dialog).findByText('No changes recorded.')).toBeInTheDocument();
+    expect(history).toHaveBeenCalledWith(undefined, 100);
   });
 });
