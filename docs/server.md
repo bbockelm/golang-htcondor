@@ -1898,11 +1898,13 @@ What it serves:
 | `GET /api/v1/dashboard`, `.../dashboard/activity`, `.../dashboard/activity/stream` | Your jobs on every access point, from the hub, in total and per access point (`aps`), with the `sources` block; see below. |
 | `GET /api/v1/issues`, MCP `analyze_issues` | Held jobs and failed run attempts on every access point, from the hub; every example and cluster names its access point (`schedd`, `schedds`). Run attempts need the hub to federate `epoch_history`; without it the answer says so in `notes`. |
 | `GET /api/v1/jobs/epochs`, `.../transfers`, MCP `query_job_epochs`, `query_transfer_history` | Run-attempt and transfer records; see below. |
+| `GET /api/v1/metrics/job_metrics` | Resource-usage samples of your jobs on every access point, from the hub; see below. |
 | `GET /api/v1/jobs/{id}/match-analysis`, MCP `analyze_job_match` | The job's ad from its access point, the slots from the collector. `{id}` must be complete. |
 | `GET /api/v1/collector/...` (not `advertise`), MCP `query_pool` | The pool's collector, which the access points share. |
 
 Everything else -- drain estimates and runtime estimates (they read one
-schedd's running jobs), `job_metrics` (the hub does not federate it),
+schedd's running jobs), any other method on `/api/v1/metrics/job_metrics`
+and any other table under `/api/v1/metrics/`,
 the single-schedd status routes (`/api/v1/ping`, `/api/v1/schedd/ping`,
 `/api/v1/dbmirror/*`; `/api/v1/aps` and `/readyz` describe the access
 points and the hub) and chat -- answers **501** ("not available in
@@ -1965,11 +1967,41 @@ mode, and each record carries `ScheddName`; one naming neither is a
 would scan every access point's history file on every request, with no
 order or page token across them.
 
-The dashboard, the issues view and run-attempt reads also name, in their
-`sources` block, each access point whose stream of the table they read
-(`jobs`, `history`, `epoch_history`) is disconnected, failing, still
-catching up or not federated, with a `reason` naming the table, so a
-short answer says which access points it is short of.
+**Resource usage.** With the hub federating `job_metrics` (each spoke
+running with `HTCONDORDB_JOB_METRICS`, and the hub with
+`HTCONDORDB_FEDERATE_TABLES = jobs history syncstatus job_metrics`),
+`GET /api/v1/metrics/job_metrics` takes the same `constraint`,
+`group_by`, `bucket`, `agg`, `since` and `until` as in single-AP mode and
+aggregates your samples on every access point. Every caller,
+administrators included, reads only their own (`User`), on member access
+points only. `?job_id=` reads one job's samples: a complete id, or a
+bare `123.0` when one access point has that job of yours (on two it is a
+**409** with the `candidates`); the answer's `job` names the complete id.
+`?schedd=` reads one access point's, and settles a bare `job_id`. A
+`group_by` naming `ClusterId` or `ProcId` gains `ScheddName` before
+them, since the same `cluster.proc` on two access points is two jobs;
+`group_by=ScheddName` aggregates per access point. The answer carries the `sources` block. A hub that does not
+federate `job_metrics` answers `{"enabled": false}` with the `sources`
+block, as single-AP mode answers without the sampler. One aggregate is
+bounded at 30 seconds and 20000 rows, as in single-AP mode. A sample its
+access point's htcondordb never tied to its job carries no `User`, so no
+read returns it -- not even one naming that job -- and it is missing from
+the job page's graphs. The job page draws its resource-usage graphs from
+this, by the job's complete id, and says so when the job's access point
+records no usage (`not_kept`).
+
+The dashboard, the issues view, run-attempt reads and resource usage also
+name, in their `sources` block, each access point whose stream of the
+table they read (`jobs`, `history`, `epoch_history`, `job_metrics`) is
+disconnected, failing, still catching up or not federated, with a
+`reason` naming the table, so a short answer says which access points it
+is short of. An access point whose own htcondordb keeps no such table at
+all (the hub reports `<Table>Missing`, e.g. a spoke without
+`HTCONDORDB_JOB_METRICS` or epoch history) has no rows to be short of:
+it is listed in `not_kept` (`schedd`, `table`, `reason`) instead, and
+still counts as fresh. Only those two tables are optional; an access
+point the hub reports has no `jobs`, `history` or `syncstatus` table is
+degraded.
 
 **Actions need a complete id.** A mutation, a sandbox read, a share URL or
 an SSH connection naming only `123.0` is a **400** with

@@ -132,6 +132,13 @@ func (s *Service) ListEpochs(ctx context.Context, req EpochRequest) ([]Row, *Lis
 // on every AP: unchanged when complete; the one AP holding it when
 // exactly one does; else a 404, or a 409 with the candidates. For reads
 // only -- an action never resolves (Route).
+//
+// A complete id is returned as given, without asking whose job it is:
+// the hub read that follows is confined by Scope (User == the caller),
+// and that clause is the only thing keeping the read to the caller's
+// rows. Never widen Scope to admit rows without a User (samples or
+// records the spoke never chained to their job) for a read naming a
+// job: nobody can say whose those are.
 func (s *Service) ResolveJob(ctx context.Context, user string, id jobid.ID) (jobid.ID, error) {
 	if err := jobid.Valid(id); err != nil {
 		return jobid.ID{}, errorf(http.StatusBadRequest, "invalid job id: %v", err)

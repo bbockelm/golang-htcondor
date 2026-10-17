@@ -17,6 +17,7 @@ vi.mock('next/navigation', () => ({
 
 const get = vi.fn();
 const archiveOne = vi.fn();
+const metricsQuery = vi.fn();
 vi.mock('next/dynamic', () => ({ default: () => () => null }));
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
@@ -26,6 +27,7 @@ vi.mock('@/lib/api', async () => {
       ...actual.api,
       jobs: { ...actual.api.jobs, get: (...a: unknown[]) => get(...a), archiveOne: (...a: unknown[]) => archiveOne(...a) },
       chat: { info: vi.fn().mockResolvedValue({ enabled: false }) },
+      metrics: { query: (...a: unknown[]) => metricsQuery(...a) },
       auth: { me: vi.fn().mockResolvedValue({ authenticated: true, is_admin: false, multi_ap: true }) },
     },
   };
@@ -60,7 +62,22 @@ describe('the job page in multi-AP mode', () => {
     replace.mockClear();
     get.mockReset();
     archiveOne.mockReset();
+    metricsQuery.mockReset();
+    metricsQuery.mockResolvedValue({ enabled: false, table: 'job_metrics' });
     path = '/jobs/12.0';
+  });
+
+  it('asks for resource usage by the complete id the server answered with', async () => {
+    get.mockResolvedValue(job);
+    await renderPage();
+    await waitFor(() => expect(metricsQuery).toHaveBeenCalled());
+    for (const [table, params] of metricsQuery.mock.calls) {
+      expect(table).toBe('job_metrics');
+      // Not the URL's bare 12.0, and no cluster.proc clause that would
+      // match ap1's 12.0 too.
+      expect(params.job_id).toBe('12.0@ap2.example.org');
+      expect(params.constraint).not.toMatch(/ClusterId|ProcId/);
+    }
   });
 
   it('completes an incomplete id and offers no actions', async () => {
@@ -98,5 +115,7 @@ describe('the job page in multi-AP mode', () => {
     expect(first.closest('a')?.getAttribute('href')).toBe('/jobs/1.0%40ap1');
     expect(screen.getByText('1.0@ap2').closest('a')?.getAttribute('href')).toBe('/archive/1.0%40ap2');
     expect(get).toHaveBeenCalledTimes(1);
+    // Nothing is plotted for an id that names no one job.
+    expect(metricsQuery).not.toHaveBeenCalled();
   });
 });

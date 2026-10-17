@@ -589,6 +589,9 @@ export interface Sources {
   aps: number;
   fresh: number;
   degraded: DegradedSource[];
+  // Access points that keep no copy of a table the read used (a spoke
+  // without job_metrics or epoch history): no rows, and not a fault.
+  not_kept?: { schedd: string; table: string; reason?: string }[];
 }
 
 export interface DegradedSource {
@@ -1660,10 +1663,15 @@ export const api = {
         agg: string;
         since?: number;
         until?: number;
+        // Multi-AP mode: one job, by its complete job_id; one access point.
+        job_id?: string;
+        schedd?: string;
       },
     ): Promise<MetricsResponse> => {
       const qs = new URLSearchParams();
       if (params.constraint) qs.set("constraint", params.constraint);
+      if (params.job_id) qs.set("job_id", params.job_id);
+      if (params.schedd) qs.set("schedd", params.schedd);
       if (params.group_by) qs.set("group_by", params.group_by);
       if (params.bucket !== undefined) qs.set("bucket", String(params.bucket));
       qs.set("agg", params.agg);

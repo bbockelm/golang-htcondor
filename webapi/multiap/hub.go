@@ -88,6 +88,10 @@ type TableStatus struct {
 	SyncedKnown bool
 	Synced      bool
 	SyncedAt    time.Time
+	// Missing is <Table>Missing: the source keeps no such table (a spoke
+	// without HTCONDORDB_JOB_METRICS, say), so it has no rows to send.
+	// That is a fact about the AP, not a fault in the stream.
+	Missing bool
 }
 
 // Usable reports whether the stream is connected with no error since
@@ -100,6 +104,7 @@ var sourceTablePrefixes = map[string]string{
 	TableJobs:         "Jobs",
 	TableHistory:      "History",
 	TableEpochHistory: "EpochHistory",
+	TableJobMetrics:   "JobMetrics",
 	"syncstatus":      "SyncStatus",
 }
 
@@ -137,6 +142,7 @@ func ParseSource(ad *classad.ClassAd) (Source, bool) {
 			ts.SyncedKnown = true
 			ts.Synced, _ = ad.EvaluateAttrBool(prefix + "Synced")
 		}
+		ts.Missing, _ = ad.EvaluateAttrBool(prefix + "Missing")
 		if v, ok := ad.EvaluateAttrInt(prefix + "SyncedAt"); ok && v > 0 {
 			ts.SyncedAt = time.Unix(v, 0).UTC()
 		}

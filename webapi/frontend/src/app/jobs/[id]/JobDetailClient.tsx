@@ -379,6 +379,14 @@ export function MultiAPJobView({ id, archivedView }: { id: string; archivedView:
             {str(data.HoldReason) && <Field label="Hold Reason" value={str(data.HoldReason)!} full warn />}
           </div>
           <RequirementsSection job={data} />
+          {/* The id is the server's complete one here: samples are kept
+              per access point, and a bare cluster.proc may be on two. */}
+          <ResourceUsagePanel
+            jobID={jobID}
+            status={num(data.JobStatus)}
+            job={data}
+            multiAP
+          />
           <JobDetailsSection jobID={jobID} job={data} editable={false} />
         </>
       )}

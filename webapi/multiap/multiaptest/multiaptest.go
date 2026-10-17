@@ -28,6 +28,7 @@ const (
 	TableJobs         = "jobs"
 	TableHistory      = "history"
 	TableEpochHistory = "epoch_history"
+	TableJobMetrics   = "job_metrics"
 	TableSources      = "federation_sources"
 )
 
@@ -214,6 +215,51 @@ func (d *DB) PutEpoch(schedd, user string, cluster, proc int, adType string, wri
 		ad += "\n" + extra
 	}
 	if err := d.client().ArchiveAppend(context.Background(), TableEpochHistory, ad); err != nil {
+		d.t.Fatal(err)
+	}
+}
+
+// EnableJobMetrics creates the hub's job_metrics archive, as a hub
+// federating it has.
+func (d *DB) EnableJobMetrics() {
+	d.t.Helper()
+	if err := d.client().CreateArchiveTable(context.Background(), TableJobMetrics, db.ArchiveConfig{
+		CategoricalAttrs: []string{"ScheddName", "Owner", "User", "GlobalJobId"},
+		ValueAttrs:       []string{"ClusterId"},
+		ZoneAttrs:        []string{"SampleTime"},
+	}); err != nil {
+		d.t.Fatal(err)
+	}
+}
+
+// PutMetric appends a job_metrics sample the way the hub holds one:
+// run instance run of cluster.proc on schedd, sampled at sampleTime,
+// with extra ClassAd lines (the counters).
+func (d *DB) PutMetric(schedd, user string, cluster, proc, run int, sampleTime int64, extra string) {
+	d.t.Helper()
+	owner, _, _ := strings.Cut(user, "@")
+	ad := fmt.Sprintf("ScheddName = %q\nUser = %q\nOwner = %q\nClusterId = %d\nProcId = %d\nRunInstanceID = %d\n"+
+		"SampleTime = %d\nGlobalJobId = \"%s#%d.%d#1\"",
+		schedd, user, owner, cluster, proc, run, sampleTime, schedd, cluster, proc)
+	if extra != "" {
+		ad += "\n" + extra
+	}
+	if err := d.client().ArchiveAppend(context.Background(), TableJobMetrics, ad); err != nil {
+		d.t.Fatal(err)
+	}
+}
+
+// PutUnchainedMetric appends a job_metrics sample the spoke never
+// chained to its job: ScheddName, Key and the job's numbers, and no
+// User, Owner or GlobalJobId (the hub contract for such rows).
+func (d *DB) PutUnchainedMetric(schedd string, cluster, proc, run int, sampleTime int64, extra string) {
+	d.t.Helper()
+	ad := fmt.Sprintf("ScheddName = %q\nKey = \"%d.%d\"\nClusterId = %d\nProcId = %d\nRunInstanceID = %d\nSampleTime = %d",
+		schedd, cluster, proc, cluster, proc, run, sampleTime)
+	if extra != "" {
+		ad += "\n" + extra
+	}
+	if err := d.client().ArchiveAppend(context.Background(), TableJobMetrics, ad); err != nil {
 		d.t.Fatal(err)
 	}
 }

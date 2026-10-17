@@ -976,7 +976,7 @@ const openAPISchema = `{
       "get": {
         "tags": ["metrics"],
         "summary": "Query time-series metrics",
-        "description": "A read-only, owner-scoped, time-bucketed aggregate over an htcondordb archive time-series table. The only table today is job_metrics; an unknown table is 404. The job page uses this to plot per-run memory/CPU/disk/GPU: group_by=RunInstanceID, bucket=15m, agg=max:MemoryUsage,avg:CpuUtil,max:DiskUsage,avg:GpuUtil plus the max:Request* reference lines, constraint=ClusterId == N && ProcId == M. The same surface answers fleet questions by grouping on other columns (Owner, ProjectName, admin-configured extras). MemoryUsage/DiskUsage are high-water marks, not instantaneous (see the design notes). An aggregate over GpuUtil or GPUsAverageUsage counts only samples reporting no more GPUs busy than the job had. A non-admin caller is confined to its own Owner. When the sampler is disabled the response is 200 with enabled=false and no rows.",
+        "description": "A read-only, owner-scoped, time-bucketed aggregate over an htcondordb archive time-series table. The only table today is job_metrics; an unknown table is 404. The job page uses this to plot per-run memory/CPU/disk/GPU: group_by=RunInstanceID, bucket=15m, agg=max:MemoryUsage,avg:CpuUtil,max:DiskUsage,avg:GpuUtil plus the max:Request* reference lines, constraint=ClusterId == N && ProcId == M. The same surface answers fleet questions by grouping on other columns (Owner, ProjectName, admin-configured extras). MemoryUsage/DiskUsage are high-water marks, not instantaneous (see the design notes). An aggregate over GpuUtil or GPUsAverageUsage counts only samples reporting no more GPUs busy than the job had. A non-admin caller is confined to its own Owner. When the sampler is disabled the response is 200 with enabled=false and no rows. In multi-AP mode the samples come from the federation hub, every caller (administrators too) is confined to its own User on the member access points, job_id selects one job, group_by gains ScheddName before ClusterId or ProcId, and the response carries job and sources; a hub that does not federate job_metrics answers enabled=false.",
         "operationId": "queryMetrics",
         "parameters": [
           {"name": "table", "in": "path", "required": true, "schema": {"type": "string", "enum": ["job_metrics"]}, "description": "The metrics table to read."},
@@ -985,7 +985,9 @@ const openAPISchema = `{
           {"name": "bucket", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Time bucket width on the table's time attribute (SampleTime for job_metrics): a duration like '15m' or a number of seconds. Omit for no time bucketing."},
           {"name": "agg", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Comma-separated aggregates as func:Attr, e.g. 'max:MemoryUsage,avg:CpuUtil'. Functions: count (count:*), sum, avg, min, max."},
           {"name": "since", "in": "query", "required": false, "schema": {"type": "integer"}, "description": "Lower bound (inclusive) on the time attribute, unix seconds."},
-          {"name": "until", "in": "query", "required": false, "schema": {"type": "integer"}, "description": "Upper bound (inclusive) on the time attribute, unix seconds."}
+          {"name": "until", "in": "query", "required": false, "schema": {"type": "integer"}, "description": "Upper bound (inclusive) on the time attribute, unix seconds."},
+          {"name": "job_id", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Multi-AP mode: one job's samples, by its complete id (e.g. '123.0@ap1.example.org'). A bare cluster.proc is accepted when exactly one access point has that job of the caller's; on more it is a 409 listing candidates."},
+          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Multi-AP mode: one access point's samples."}
         ],
         "responses": {
           "200": {
@@ -1005,7 +1007,14 @@ const openAPISchema = `{
                   "bucket_seconds": {"type": "integer"}
                 }}},
                 "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
-                "truncated": {"type": "boolean", "description": "True if the row cap was hit; narrow the query."}
+                "truncated": {"type": "boolean", "description": "True if the row cap was hit; narrow the query."},
+                "job": {"type": "object", "description": "Multi-AP mode, with job_id: the complete id read.", "properties": {
+                  "schedd": {"type": "string"},
+                  "cluster": {"type": "integer"},
+                  "proc": {"type": "integer"},
+                  "job_id": {"type": "string"}
+                }},
+                "sources": {"type": "object", "description": "Multi-AP mode: how current the hub's copy of each access point is, naming each whose job_metrics stream is down or not federated."}
               }
             }}}
           },

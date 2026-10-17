@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { EXPR_REQUEST_MEMORY, exprRequestJob } from './jobRequests.fixture';
-import { buildJobMetrics, formatMetric, type MetricsResponse } from './metrics';
+import {
+  buildJobMetrics,
+  formatMetric,
+  jobMetricsSelector,
+  RATE_SAMPLE_GUARD,
+  type MetricsResponse,
+} from './metrics';
 
 // Columns exactly as the server returns for the job page's query.
 const COLUMNS = [
@@ -105,5 +111,24 @@ describe('formatMetric', () => {
     expect(formatMetric(1.5, 'cores')).toBe('1.5 cores');
     expect(formatMetric(1, 'cores')).toBe('1 core');
     expect(formatMetric(10987, 'MB')).toBe('10.7 GB');
+  });
+});
+
+describe('jobMetricsSelector', () => {
+  it('names a single-AP job by its numbers', () => {
+    expect(jobMetricsSelector('12.3', false)).toEqual({
+      constraint: `ClusterId == 12 && ProcId == 3 && ${RATE_SAMPLE_GUARD}`,
+    });
+    expect(jobMetricsSelector('12345.0@1790000000', false)?.constraint).toContain('ClusterId == 12345 && ProcId == 0');
+    expect(jobMetricsSelector('x.y', false)).toBeUndefined();
+  });
+
+  it('passes a multi-AP job id whole, with no cluster or proc clause', () => {
+    // The numbers repeat across access points; the server confines the
+    // samples to the one the id names.
+    const sel = jobMetricsSelector('12.3@ap2.example.org', true);
+    expect(sel).toEqual({ constraint: RATE_SAMPLE_GUARD, job_id: '12.3@ap2.example.org' });
+    expect(sel?.constraint).not.toMatch(/ClusterId|ProcId/);
+    expect(jobMetricsSelector('', true)).toBeUndefined();
   });
 });

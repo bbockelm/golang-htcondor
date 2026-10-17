@@ -1,6 +1,10 @@
+import path from 'node:path';
+
 import { expect, test } from '@playwright/test';
 
 import { installApiFixtures } from './fixtures/api';
+import { restartedJobMetrics } from './fixtures/jobpages';
+import { SMOKE_NOW } from './fixtures/clock';
 
 // Multi-AP mode against mocked responses: the pages render, name the
 // access point of every job, say which access point is behind, and
@@ -142,4 +146,63 @@ test('multi-AP: the archive names the access point and links the complete id', a
   const link = page.getByRole('link', { name: '39.0@ap1.smoke.example' });
   await expect(link).toBeVisible();
   await expect(link).toHaveAttribute('href', '/archive/39.0%40ap1.smoke.example');
+});
+
+test('multi-AP: the job page plots resource usage for the job on its access point', async ({ page }) => {
+  const errors = watchForErrors(page);
+  const id = '9301.0@ap2.smoke.example';
+  // The job page's document: the export's placeholder, as the Go server
+  // answers it.
+  const placeholder = path.join(__dirname, '..', 'out', 'jobs', '_.html');
+  await page.route(
+    (url) => decodeURIComponent(url.pathname) === `/jobs/${id}`,
+    async (r) => {
+      if (r.request().resourceType() !== 'document') return r.fallback();
+      await r.fulfill({ path: placeholder, contentType: 'text/html; charset=utf-8' });
+    },
+  );
+  await page.route(
+    (url) => decodeURIComponent(url.pathname) === `/api/v1/jobs/${id}`,
+    (r) =>
+      r.fulfill({
+        json: {
+          schedd: 'ap2.smoke.example',
+          cluster: 9301,
+          proc: 0,
+          job_id: id,
+          archived: false,
+          source: 'hub',
+          ClusterId: 9301,
+          ProcId: 0,
+          Owner: 'e2e',
+          JobStatus: 2,
+          QDate: SMOKE_NOW - 7200,
+          RequestMemory: 10987,
+          RequestCpus: 4,
+          Cmd: '/bin/smoke',
+        },
+      }),
+  );
+  const asked: URLSearchParams[] = [];
+  await page.route('**/api/v1/metrics/job_metrics?**', (r) => {
+    asked.push(new URL(r.request().url()).searchParams);
+    return r.fulfill({
+      json: {
+        ...restartedJobMetrics(),
+        job: { schedd: 'ap2.smoke.example', cluster: 9301, proc: 0, job_id: id },
+        sources: { aps: 2, fresh: 2, degraded: [] },
+      },
+    });
+  });
+  await page.goto(`/jobs/${id}`);
+  await expect(page.getByRole('heading', { name: 'Resource usage' })).toBeVisible();
+  await expect(page.getByRole('img', { name: /^Memory over time/ })).toBeVisible();
+  // The samples are asked for by the complete id, with no cluster.proc
+  // clause that would match another access point's 9301.0.
+  expect(asked.length).toBeGreaterThan(0);
+  for (const q of asked) {
+    expect(q.get('job_id')).toBe(id);
+    expect(q.get('constraint') ?? '').not.toMatch(/ClusterId|ProcId/);
+  }
+  expect(errors).toEqual([]);
 });
