@@ -55,14 +55,14 @@ function columnsFor(kind: PlacementKind, authzByName: Map<string, DirAuthorizati
     case 'identities':
       return [
         {
-          key: 'name',
-          label: 'Sign-in identity',
-          value: (r) => (r as DirIdentity).name,
+          key: 'identity',
+          label: 'Identity',
+          value: (r) => (r as DirIdentity).identity,
           render: (r) => {
             const i = r as DirIdentity;
             return (
               <span className="font-mono text-xs">
-                {i.name}
+                {i.identity}
                 {i.display_name && <span className="ml-2 font-sans text-gray-500">{i.display_name}</span>}
               </span>
             );
@@ -205,7 +205,7 @@ function searchText(kind: PlacementKind, r: AnyEntity): string {
   switch (kind) {
     case 'identities': {
       const i = r as DirIdentity;
-      return [i.name, i.account, i.display_name, i.comment, ...i.projects, ...i.authorizations].join(' ');
+      return [i.identity, i.account, i.display_name, i.comment, ...i.projects, ...i.authorizations].join(' ');
     }
     case 'accounts': {
       const a = r as DirAccount;
@@ -441,7 +441,7 @@ export function Directory({ onIssueToken }: { onIssueToken?: (identity: string) 
                         {view === 'identities' && onIssueToken && (
                           <button
                             type="button"
-                            onClick={() => onIssueToken((row as DirIdentity).name)}
+                            onClick={() => onIssueToken((row as DirIdentity).identity)}
                             className="rounded-sm border border-gray-300 px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-100"
                           >
                             Issue token

@@ -63,7 +63,7 @@ export function onboardOperations(input: OnboardInput, existing?: DirAccount): B
     });
   }
   const identity: BatchOperation['fields'] = {
-    name: input.identity,
+    identity: input.identity,
     account: input.account,
   };
   if (input.expiresAt) identity.expires_at = input.expiresAt;
@@ -153,7 +153,7 @@ export function OnboardWizard({
         }}
       >
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Sign-in identity">
+          <Field label="Identity">
             <input
               className={`${inputClass} font-mono`}
               value={identity}
@@ -214,7 +214,7 @@ export function OnboardWizard({
             <li key={i}>
               {op.operation} {op.target_type.toLowerCase()}{' '}
               <span className="font-mono">
-                {String(op.fields?.name ?? input.account)}
+                {String(op.fields?.identity ?? op.fields?.name ?? input.account)}
               </span>
             </li>
           ))}

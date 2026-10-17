@@ -53,7 +53,7 @@ type placementFieldSpec struct {
 // keyed by their JSON names (§6.3 of the placementd design).
 var placementWritableFields = map[string]map[string]placementFieldSpec{
 	htcondor.PlacementTargetIdentity: {
-		"name":         {"Name", placementFieldString},
+		"identity":     {"Identity", placementFieldString},
 		"account":      {"Account", placementFieldString},
 		"expires_at":   {"ExpiresAt", placementFieldTime},
 		"display_name": {"DisplayName", placementFieldString},
@@ -91,7 +91,7 @@ type placementEntityJSON struct {
 
 type placementIdentityJSON struct {
 	placementEntityJSON
-	Name      string `json:"name"`
+	Identity  string `json:"identity"`
 	AccountID string `json:"account_id,omitempty"`
 	Account   string `json:"account,omitempty"`
 	// ExpiresAt absent means the mapping never expires.
@@ -193,10 +193,13 @@ type placementBatchRequest struct {
 }
 
 type placementBatchOpInput struct {
-	Operation       string                     `json:"operation"`
-	TargetType      string                     `json:"target_type"`
-	ID              string                     `json:"id,omitempty"`
+	Operation  string `json:"operation"`
+	TargetType string `json:"target_type"`
+	ID         string `json:"id,omitempty"`
+	// Name selects an account, project or authorization; Identity
+	// selects an identity.
 	Name            string                     `json:"name,omitempty"`
+	Identity        string                     `json:"identity,omitempty"`
 	ExpectedVersion int64                      `json:"expected_version,omitempty"`
 	Cascade         bool                       `json:"cascade,omitempty"`
 	Fields          map[string]json.RawMessage `json:"fields,omitempty"`
@@ -305,9 +308,19 @@ func placementQueryBool(r *http.Request, key string) bool {
 
 func (s *Handler) handlePlacementAdminList(w http.ResponseWriter, r *http.Request, kind, target string) {
 	q := r.URL.Query()
+	// The key parameter is named for the type's key: identity for
+	// identities, name for the rest.
+	keyParam, otherParam := "name", "identity"
+	if target == htcondor.PlacementTargetIdentity {
+		keyParam, otherParam = "identity", "name"
+	}
+	if q.Has(otherParam) {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("%s are matched by %s, not %s", kind, keyParam, otherParam))
+		return
+	}
 	query := htcondor.PlacementQuery{
 		TargetType:   target,
-		Name:         q.Get("name"),
+		Key:          q.Get(keyParam),
 		Requirements: q.Get("constraint"),
 	}
 	if l := q.Get("limit"); l != "" {
@@ -484,9 +497,19 @@ func (s *Handler) handlePlacementBatch(w http.ResponseWriter, r *http.Request) {
 			Operation:       in.Operation,
 			TargetType:      in.TargetType,
 			ID:              in.ID,
-			Name:            in.Name,
+			Key:             in.Name,
 			ExpectedVersion: in.ExpectedVersion,
 			Cascade:         in.Cascade,
+		}
+		if in.TargetType == htcondor.PlacementTargetIdentity {
+			if in.Name != "" {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("operations[%d]: an identity is selected by identity, not name", i))
+				return
+			}
+			op.Key = in.Identity
+		} else if in.Identity != "" {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("operations[%d]: only an identity is selected by identity", i))
+			return
 		}
 		if len(in.Fields) > 0 {
 			if _, known := placementWritableFields[in.TargetType]; !known {
@@ -531,7 +554,7 @@ func (s *Handler) runPlacementEdit(w http.ResponseWriter, r *http.Request, what 
 		for _, op := range ops {
 			sel := op.ID
 			if sel == "" {
-				sel = op.Name
+				sel = op.Key
 			}
 			summary = append(summary, strings.TrimSpace(op.Operation+" "+op.TargetType+" "+sel))
 		}
@@ -718,7 +741,7 @@ func placementObjectJSON(o htcondor.PlacementObject) any {
 		i := o.Identity
 		return placementIdentityJSON{
 			placementEntityJSON: placementMetaJSON(i.PlacementEntityMeta),
-			Name:                i.Name,
+			Identity:            i.Identity,
 			AccountID:           i.AccountID,
 			Account:             i.Account,
 			ExpiresAt:           optionalTime(i.ExpiresAt),
