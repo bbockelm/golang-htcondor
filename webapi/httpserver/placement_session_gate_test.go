@@ -56,7 +56,7 @@ func TestPlacementOnlySessionIsRefusedEverywhereElse(t *testing.T) {
 
 	// In the admin group, so a refusal cannot be the admin gate's doing.
 	sid, _, err := srv.sessionStore.CreateSession(SessionData{
-		PlacementForeignID: aliceFID, Groups: []string{"condor-admins"}, Scope: sessionScopePlacement,
+		PlacementIdentity: aliceIdentity, Groups: []string{"condor-admins"}, Scope: sessionScopePlacement,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +116,7 @@ func TestPlacementOnlySessionIsRefusedEverywhereElse(t *testing.T) {
 // The allowlisted routes do work for a placement-only session.
 func TestPlacementOnlySessionReachesPlacement(t *testing.T) {
 	srv := newOnboardingServer(t, newOnboardFake())
-	c := srv.placementCookie(t, aliceFID)
+	c := srv.placementCookie(t, aliceIdentity)
 	for _, tc := range []struct {
 		method, path string
 		want         int

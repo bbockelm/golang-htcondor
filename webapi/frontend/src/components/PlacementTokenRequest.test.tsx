@@ -21,7 +21,7 @@ vi.mock('@/lib/api', async () => {
 });
 
 const alice: PlacementMe = {
-  foreign_id: 'alice@idp.example',
+  identity: 'alice@idp.example',
   display_name: 'Alice',
   authorized: true,
   expired: false,

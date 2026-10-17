@@ -96,7 +96,7 @@ func TestUnmappedLoginGetsAPlacementOnlySession(t *testing.T) {
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.AddCookie(c)
 	sess, ok := srv.getAnySessionFromRequest(req)
-	if !ok || !sess.IsPlacementOnly() || sess.Username != "" || sess.PlacementForeignID != "zoe@uni.example" || sess.DisplayName != "Zoe Q" {
+	if !ok || !sess.IsPlacementOnly() || sess.Username != "" || sess.PlacementIdentity != "zoe@uni.example" || sess.DisplayName != "Zoe Q" {
 		t.Errorf("session = %+v", sess)
 	}
 }

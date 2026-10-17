@@ -9,11 +9,11 @@ export const placementOnlySession: Session = {
   authenticated: true,
   is_admin: false,
   placement_only: true,
-  placement: { foreign_id: 'zoe@uni.example', display_name: 'Zoe Q' },
+  placement: { identity: 'zoe@uni.example', display_name: 'Zoe Q' },
 };
 
 export const placementMeFixture: PlacementMe = {
-  foreign_id: 'zoe@uni.example',
+  identity: 'zoe@uni.example',
   display_name: 'Zoe Q',
   authorized: true,
   expired: false,

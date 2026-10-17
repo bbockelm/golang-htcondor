@@ -5,7 +5,7 @@ import (
 	"unicode"
 )
 
-// The placement identity is the "foreign ID" a browser session presents to
+// The placement identity is the "identity" a browser session presents to
 // condor_placementd: the left-hand column of its map file.
 //
 // It must come out byte-for-byte what CHTC's placement-webapp (pdwebapp)
@@ -19,9 +19,9 @@ import (
 // functions below reproduce those three exactly; placement_identity_test.go
 // holds vectors generated with CPython.
 
-// placementForeignIDMaxLen is pdwebapp's MAX_USERNAME_LENGTH, counted in
+// placementIdentityMaxLen is pdwebapp's MAX_USERNAME_LENGTH, counted in
 // code points as Python slices strings.
-const placementForeignIDMaxLen = 64
+const placementIdentityMaxLen = 64
 
 // defaultPlacementIdentityClaims is pdwebapp's default USERNAME_FIELDS.
 var defaultPlacementIdentityClaims = []string{"sub"}
@@ -29,11 +29,11 @@ var defaultPlacementIdentityClaims = []string{"sub"}
 // defaultPlacementDisplayNameClaims is pdwebapp's DISPLAY_NAME_FIELDS.
 var defaultPlacementDisplayNameClaims = []string{"name"}
 
-// placementForeignID derives the foreign ID from userinfo claims: the first
+// placementIdentity derives the identity from userinfo claims: the first
 // listed claim holding a non-empty string, sanitized. It returns "" when no
 // claim qualifies -- or when the result sanitizes to nothing, which pdwebapp
 // would have refused as well.
-func placementForeignID(claims map[string]any, order []string) string {
+func placementIdentityFromClaims(claims map[string]any, order []string) string {
 	if len(order) == 0 {
 		order = defaultPlacementIdentityClaims
 	}
@@ -79,8 +79,8 @@ func sanitizePlacementUsername(name string) string {
 		}
 	}
 	out := []rune(b.String())
-	if len(out) > placementForeignIDMaxLen {
-		out = out[:placementForeignIDMaxLen]
+	if len(out) > placementIdentityMaxLen {
+		out = out[:placementIdentityMaxLen]
 	}
 	return string(out)
 }

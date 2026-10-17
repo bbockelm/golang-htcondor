@@ -2313,7 +2313,7 @@ decision.
 
 **What the token can be.** The server calls the placementd as itself, so
 the user-facing endpoints never take an identity from the request: the
-foreign ID is always the session's, the requester is always the same
+identity is always the session's, the requester is always the same
 identity, and tokens for someone else (INSTRUCTOR) are not offered. A
 request may name only the authorizations the placementd offers that
 identity, and a project from its map file line. `WEBADMIN` is not
@@ -2332,7 +2332,7 @@ and expired requests are swept.
 
 | Knob | Purpose |
 | --- | --- |
-| `HTTP_API_PLACEMENT_IDENTITY_CLAIMS` | Userinfo claims, in order, the placement foreign ID is taken from. Default `sub`. Read at startup. |
+| `HTTP_API_PLACEMENT_IDENTITY_CLAIMS` | Userinfo claims, in order, the placement identity is taken from. Default `sub`. Read at startup. |
 | `HTTP_API_PLACEMENT_DISPLAY_NAME_CLAIMS` | Claims, in order, the person is greeted by. Default `name`. Read at startup. |
 | `HTTP_API_PLACEMENT_DEVICE_CLIENTS` | Comma-separated `client_id`s the device flow accepts. Default `placement_client,curl,`. Set empty to accept none. Read at startup. |
 | `HTTP_API_PLACEMENT_SCHEDD_HOST` | `SCHEDD_HOST` shown with a token for `~/.condor/user_config`. Default: this server's schedd name. Read at startup. |

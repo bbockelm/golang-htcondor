@@ -1087,7 +1087,7 @@ type HandlerConfig struct {
 	// placement endpoints disabled. Tests inject a fake here.
 	Placementd htcondor.PlacementdClient
 	// PlacementIdentityClaims are the userinfo claims, in order, that a
-	// session's placement foreign ID is taken from
+	// session's placement identity is taken from
 	// (HTTP_API_PLACEMENT_IDENTITY_CLAIMS). Empty means "sub".
 	PlacementIdentityClaims []string
 	// PlacementDisplayNameClaims are the claims, in order, a placement

@@ -178,7 +178,7 @@ export interface Session {
 }
 
 export interface PlacementSessionIdentity {
-  foreign_id: string;
+  identity: string;
   display_name?: string;
 }
 
@@ -415,9 +415,9 @@ export interface DBMirrorStatus {
 
 // --- Placement (condor_placementd) ---
 //
-// The placementd issues IDTokens to "foreign" identities -- users who
+// The placementd issues IDTokens to sign-in identities -- users who
 // authenticate somewhere else (a campus IdP, a course roster) and need a
-// credential for THIS access point. Its map file decides which foreign
+// credential for THIS access point. Its map file decides which sign-in
 // identity becomes which local AP account, which authorizations that
 // account may hold, and which projects it may charge to.
 //
@@ -436,7 +436,7 @@ export interface PlacementStatus {
   api_version?: number;
 }
 
-// PlacementUser is a foreign identity, merged with its newest live token.
+// PlacementUser is a sign-in identity, merged with its newest live token.
 // `authorized: false` means the identity dropped out of the map file but
 // still holds an unexpired token: it keeps working until it expires, and
 // cannot be renewed.
@@ -477,7 +477,7 @@ export interface PlacementAuthorization {
 
 // PlacementMe is what the placementd says about the signed-in person.
 export interface PlacementMe {
-  foreign_id: string;
+  identity: string;
   display_name?: string;
   authorized: boolean;
   expired: boolean;

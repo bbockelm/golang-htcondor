@@ -20,7 +20,7 @@ import (
 // package because the placementd is new enough that cedar has not enumerated
 // them; the values are the stable wire numbers.
 const (
-	// PlacementUserLogin requests an IDToken for a foreign user identity.
+	// PlacementUserLogin requests an IDToken for a sign-in identity.
 	PlacementUserLogin = commands.SCHED_VERS + 155
 	// PlacementQueryUsers lists the users the placementd knows about.
 	PlacementQueryUsers = commands.SCHED_VERS + 156
@@ -87,7 +87,7 @@ func (e *PlacementError) Error() string {
 
 // PlacementLoginRequest asks the placementd to mint an IDToken.
 type PlacementLoginRequest struct {
-	// UserName is the foreign identity to log in -- the left-hand column of
+	// UserName is the sign-in identity to log in -- the left-hand column of
 	// the placementd map file, not the local AP account. Required.
 	UserName string
 	// Authorizations narrows the token's bounding set to these
@@ -100,7 +100,7 @@ type PlacementLoginRequest struct {
 	// project. It must appear in the user's map-file project list. Empty
 	// means the token carries no project claim.
 	Project string
-	// Requester is the foreign identity of whoever is asking, when that is
+	// Requester is the sign-in identity of whoever is asking, when that is
 	// not the user being logged in -- an instructor minting a token for a
 	// student, say. The requester must itself be mapped and hold the
 	// INSTRUCTOR authorization. Empty means the user is requesting for
@@ -119,9 +119,9 @@ type PlacementLoginResult struct {
 }
 
 // PlacementUser is one row of the placementd's user view: the map-file entry
-// for a foreign identity, merged with the newest unexpired token issued to it.
+// for a sign-in identity, merged with the newest unexpired token issued to it.
 type PlacementUser struct {
-	// UserName is the foreign identity.
+	// UserName is the sign-in identity.
 	UserName string
 	// APUserID is the local AP account the identity maps to (the token's
 	// subject).
@@ -146,10 +146,10 @@ type PlacementUser struct {
 // PlacementToken is one issued token as recorded in the placementd database.
 // The token itself is not stored, only its identity and claims.
 type PlacementToken struct {
-	// Requester is the foreign identity that asked for the token, which
+	// Requester is the sign-in identity that asked for the token, which
 	// differs from UserName only for instructor-issued tokens.
 	Requester string
-	// UserName is the foreign identity the token was issued for.
+	// UserName is the sign-in identity the token was issued for.
 	UserName string
 	// APUserID is the local AP account named in the token's subject.
 	APUserID string
@@ -167,7 +167,7 @@ type PlacementToken struct {
 // PlacementTokenQuery narrows QueryTokens. A zero query returns every token
 // the daemon has ever issued, expired ones included.
 type PlacementTokenQuery struct {
-	// UserName restricts the result to tokens issued for one foreign
+	// UserName restricts the result to tokens issued for one sign-in
 	// identity.
 	UserName string
 	// TokenID restricts the result to the single token with this jti. It
@@ -198,7 +198,7 @@ type PlacementAuthorization struct {
 // PlacementdClient is the placementd operations, as an interface so callers
 // (notably the web API) can substitute a fake in tests.
 type PlacementdClient interface {
-	// Login mints an IDToken for a foreign identity.
+	// Login mints an IDToken for a sign-in identity.
 	Login(ctx context.Context, req PlacementLoginRequest) (*PlacementLoginResult, error)
 	// QueryUsers lists known users; an empty userName lists all of them.
 	QueryUsers(ctx context.Context, userName string) ([]PlacementUser, error)
@@ -369,7 +369,7 @@ func sendPlacementRequest(ctx context.Context, c *client.HTCondorClient, ad *cla
 	return message.NewMessageFromStream(stream), nil
 }
 
-// Login mints an IDToken for a foreign identity. See PlacementLoginRequest for
+// Login mints an IDToken for a sign-in identity. See PlacementLoginRequest for
 // what the daemon does with each field.
 //
 // A login has a side effect beyond the token: the placementd creates the AP

@@ -20,7 +20,7 @@ const placementOnly: Session = {
   authenticated: true,
   is_admin: false,
   placement_only: true,
-  placement: { foreign_id: 'zoe@uni.example', display_name: 'Zoe Q' },
+  placement: { identity: 'zoe@uni.example', display_name: 'Zoe Q' },
 };
 
 async function renderShell() {
@@ -61,7 +61,7 @@ describe('AppShell for a placement-only session', () => {
 
   it('offers the placement page to an ordinary session that can use it', async () => {
     pathname = '/jobs';
-    me.mockResolvedValue({ authenticated: true, is_admin: false, username: 'alice', placement: { foreign_id: 'a@idp' } });
+    me.mockResolvedValue({ authenticated: true, is_admin: false, username: 'alice', placement: { identity: 'a@idp' } });
     await renderShell();
     expect(await screen.findByRole('link', { name: 'Placement token' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Jobs' })).toBeInTheDocument();

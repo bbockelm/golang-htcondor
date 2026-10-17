@@ -407,7 +407,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// The identity this person presents to condor_placementd, taken from
 	// the provider's own claims before any local mapping: it is the
 	// left-hand column of the placementd's map file, not a local name.
-	placementID := placementForeignID(userInfo.Claims, s.placementOnboard.identityClaims)
+	placementID := placementIdentityFromClaims(userInfo.Claims, s.placementOnboard.identityClaims)
 	placementName := placementDisplayName(userInfo.Claims, s.placementOnboard.displayNameClaims)
 	if s.localIdentity != nil {
 		// A previously confirmed mapping, if this browser has one. It is
@@ -498,10 +498,10 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	if isBrowserFlow {
 		// Create HTTP session cookie for browser-based authentication
 		sessionID, sessionData, err := s.sessionStore.CreateSession(SessionData{
-			Username:           subject,
-			Groups:             userGroups,
-			PlacementForeignID: placementID,
-			DisplayName:        placementName,
+			Username:          subject,
+			Groups:            userGroups,
+			PlacementIdentity: placementID,
+			DisplayName:       placementName,
 		})
 		if err != nil {
 			s.logger.Error(logging.DestinationHTTP, "Failed to create HTTP session",
@@ -701,13 +701,13 @@ func (s *Handler) renderAccessDeniedPage(w http.ResponseWriter, required *groupS
 // access point's web interface, and this session reaches none of it. Whether
 // the person may have a placement token is the placementd's map file's
 // decision, made when they ask for one.
-func (s *Handler) startPlacementOnlySession(w http.ResponseWriter, foreignID, displayName string,
+func (s *Handler) startPlacementOnlySession(w http.ResponseWriter, identity, displayName string,
 	groups []string, originalURL, oidcSubject string) {
 	sessionID, sessionData, err := s.sessionStore.CreateSession(SessionData{
-		Groups:             groups,
-		PlacementForeignID: foreignID,
-		DisplayName:        displayName,
-		Scope:              sessionScopePlacement,
+		Groups:            groups,
+		PlacementIdentity: identity,
+		DisplayName:       displayName,
+		Scope:             sessionScopePlacement,
 	})
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to create a placement-only session",
@@ -717,7 +717,7 @@ func (s *Handler) startPlacementOnlySession(w http.ResponseWriter, foreignID, di
 	}
 	s.setSessionCookie(w, sessionID, sessionData.ExpiresAt)
 	s.logger.Info(logging.DestinationHTTP, "Created a placement-only session for an identity with no local account",
-		"oidc_subject", oidcSubject, "foreign_id", foreignID, "session_key", sessionLogID(sessionID))
+		"oidc_subject", oidcSubject, "identity", identity, "session_key", sessionLogID(sessionID))
 
 	redirectURL := "/placement"
 	if isSafeLocalRedirect(originalURL) && (originalURL == "/placement" ||

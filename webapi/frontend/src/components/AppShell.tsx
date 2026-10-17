@@ -67,7 +67,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     if (!onPlacementPage) return null;
     return (
       <PlacementShell
-        name={session?.placement?.display_name || session?.placement?.foreign_id}
+        name={session?.placement?.display_name || session?.placement?.identity}
       >
         {children}
       </PlacementShell>

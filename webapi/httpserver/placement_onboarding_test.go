@@ -16,7 +16,7 @@ import (
 )
 
 // onboardFake is the placementd for onboarding tests. It records every
-// foreign ID any call named, so a test can assert that the session's is the
+// identity any call named, so a test can assert that the session's is the
 // only one that ever reaches the daemon.
 type onboardFake struct {
 	fakePlacementd
@@ -98,14 +98,14 @@ func (f *fakeRecords) DisableUserRecord(_ context.Context, kind htcondor.UserRec
 func boolp(b bool) *bool { return &b }
 
 const (
-	aliceFID  = "alice@idp.example"
-	aliceAcct = "alice@ap.example"
+	aliceIdentity = "alice@idp.example"
+	aliceAcct     = "alice@ap.example"
 )
 
 func newOnboardFake() *onboardFake {
 	f := &onboardFake{tokenExp: time.Now().Add(6 * time.Hour).Truncate(time.Second)}
 	f.users = []htcondor.PlacementUser{
-		{UserName: aliceFID, APUserID: aliceAcct, Projects: []string{"ProjA", "ProjB"}, Authorizations: []string{"READ", "WRITE", "INSTRUCTOR"}, Authorized: true},
+		{UserName: aliceIdentity, APUserID: aliceAcct, Projects: []string{"ProjA", "ProjB"}, Authorizations: []string{"READ", "WRITE", "INSTRUCTOR"}, Authorized: true},
 		{UserName: "mallory@idp.example", APUserID: "mallory@ap.example", Projects: []string{"ProjM"}, Authorizations: []string{"READ"}, Authorized: true},
 	}
 	f.authz = []htcondor.PlacementAuthorization{
@@ -143,11 +143,11 @@ func newOnboardingServer(t *testing.T, fake *onboardFake) *onboardingServer {
 	return &onboardingServer{Server: server, fake: fake, records: recs}
 }
 
-// placementCookie creates a placement-only session for foreignID.
-func (s *onboardingServer) placementCookie(t *testing.T, foreignID string) *http.Cookie {
+// placementCookie creates a placement-only session for identity.
+func (s *onboardingServer) placementCookie(t *testing.T, identity string) *http.Cookie {
 	t.Helper()
 	sid, _, err := s.sessionStore.CreateSession(SessionData{
-		PlacementForeignID: foreignID, DisplayName: "Alice", Scope: sessionScopePlacement,
+		PlacementIdentity: identity, DisplayName: "Alice", Scope: sessionScopePlacement,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -156,9 +156,9 @@ func (s *onboardingServer) placementCookie(t *testing.T, foreignID string) *http
 }
 
 // userCookie creates an ordinary session.
-func (s *onboardingServer) userCookie(t *testing.T, user, foreignID string, groups ...string) *http.Cookie {
+func (s *onboardingServer) userCookie(t *testing.T, user, identity string, groups ...string) *http.Cookie {
 	t.Helper()
-	sid, _, err := s.sessionStore.CreateSession(SessionData{Username: user, Groups: groups, PlacementForeignID: foreignID})
+	sid, _, err := s.sessionStore.CreateSession(SessionData{Username: user, Groups: groups, PlacementIdentity: identity})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestPlacementMeReportsTheSessionsIdentity(t *testing.T) {
 	srv.records.projects = []htcondor.UserRecord{{User: "projb", Enabled: boolp(false)}}
 	srv.records.owners = []htcondor.UserRecord{{User: aliceAcct, Enabled: boolp(false)}}
 
-	rec := srv.do(t, srv.placementCookie(t, aliceFID), http.MethodGet, "/api/v1/placement/me", "")
+	rec := srv.do(t, srv.placementCookie(t, aliceIdentity), http.MethodGet, "/api/v1/placement/me", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -198,7 +198,7 @@ func TestPlacementMeReportsTheSessionsIdentity(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.ForeignID != aliceFID || !got.Authorized || got.Expired || got.Account != aliceAcct {
+	if got.Identity != aliceIdentity || !got.Authorized || got.Expired || got.Account != aliceAcct {
 		t.Errorf("me = %+v", got)
 	}
 	if len(got.Authorizations) != 2 || got.Authorizations[1].Color != "warning" {
@@ -229,7 +229,7 @@ func TestPlacementMeExpiredMapping(t *testing.T) {
 	fake := newOnboardFake()
 	fake.users[0].MappingExpiration = time.Now().Add(-time.Hour)
 	srv := newOnboardingServer(t, fake)
-	rec := srv.do(t, srv.placementCookie(t, aliceFID), http.MethodGet, "/api/v1/placement/me", "")
+	rec := srv.do(t, srv.placementCookie(t, aliceIdentity), http.MethodGet, "/api/v1/placement/me", "")
 	var got placementMeResponse
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
 	if got.Authorized || !got.Expired {
@@ -242,12 +242,12 @@ func TestPlacementMeExpiredMapping(t *testing.T) {
 func TestPlacementTokenIsAlwaysForTheSessionIdentity(t *testing.T) {
 	fake := newOnboardFake()
 	srv := newOnboardingServer(t, fake)
-	cookie := srv.placementCookie(t, aliceFID)
+	cookie := srv.placementCookie(t, aliceIdentity)
 
 	for _, body := range []string{
 		`{"project":"ProjA","authorizations":["READ"],"username":"mallory@idp.example"}`,
 		`{"project":"ProjA","authorizations":["READ"],"requester":"mallory@idp.example"}`,
-		`{"project":"ProjA","authorizations":["READ"],"foreign_id":"mallory@idp.example"}`,
+		`{"project":"ProjA","authorizations":["READ"],"identity":"mallory@idp.example"}`,
 	} {
 		rec := srv.do(t, cookie, http.MethodPost, "/api/v1/placement/me/token", body)
 		if rec.Code != http.StatusBadRequest {
@@ -263,14 +263,14 @@ func TestPlacementTokenIsAlwaysForTheSessionIdentity(t *testing.T) {
 		t.Fatalf("%d logins", len(fake.logins))
 	}
 	login := fake.logins[0]
-	if login.UserName != aliceFID || login.Requester != aliceFID {
+	if login.UserName != aliceIdentity || login.Requester != aliceIdentity {
 		t.Errorf("login = %+v; UserName and Requester must both be the session's identity", login)
 	}
 	if login.Project != "ProjA" || strings.Join(login.Authorizations, ",") != "READ,WRITE" {
 		t.Errorf("login = %+v", login)
 	}
 	for _, n := range fake.names {
-		if n != aliceFID && n != "" {
+		if n != aliceIdentity && n != "" {
 			t.Errorf("the placementd was asked about %q", n)
 		}
 	}
@@ -279,7 +279,7 @@ func TestPlacementTokenIsAlwaysForTheSessionIdentity(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Token == "" || got.APUserID != "ap-"+aliceFID+"@ap.example" || got.ExpiresAt == nil || !got.ExpiresAt.Equal(fake.tokenExp) {
+	if got.Token == "" || got.APUserID != "ap-"+aliceIdentity+"@ap.example" || got.ExpiresAt == nil || !got.ExpiresAt.Equal(fake.tokenExp) {
 		t.Errorf("token response = %+v", got)
 	}
 	if got.UserConfig != "SCHEDD_HOST = ap.example\nCOLLECTOR_HOST = cm.example" {
@@ -295,7 +295,7 @@ func TestPlacementTokenIsAlwaysForTheSessionIdentity(t *testing.T) {
 func TestPlacementTokenRefusesUnofferedAuthorization(t *testing.T) {
 	fake := newOnboardFake()
 	srv := newOnboardingServer(t, fake)
-	rec := srv.do(t, srv.placementCookie(t, aliceFID), http.MethodPost, "/api/v1/placement/me/token",
+	rec := srv.do(t, srv.placementCookie(t, aliceIdentity), http.MethodPost, "/api/v1/placement/me/token",
 		`{"project":"ProjA","authorizations":["INSTRUCTOR"]}`)
 	if rec.Code != http.StatusBadRequest || len(fake.logins) != 0 {
 		t.Errorf("status %d, logins %d: %s", rec.Code, len(fake.logins), rec.Body.String())
@@ -304,7 +304,7 @@ func TestPlacementTokenRefusesUnofferedAuthorization(t *testing.T) {
 
 func TestPlacementTokenRequiresProjectAndAuthorizations(t *testing.T) {
 	srv := newOnboardingServer(t, newOnboardFake())
-	c := srv.placementCookie(t, aliceFID)
+	c := srv.placementCookie(t, aliceIdentity)
 	for _, body := range []string{`{"authorizations":["READ"]}`, `{"project":"ProjA","authorizations":[]}`} {
 		if rec := srv.do(t, c, http.MethodPost, "/api/v1/placement/me/token", body); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: %d", body, rec.Code)
@@ -326,7 +326,7 @@ func TestPlacementTokenNeedsRequestedWithHeader(t *testing.T) {
 	srv := newOnboardingServer(t, newOnboardFake())
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/placement/me/token",
 		strings.NewReader(`{"project":"ProjA","authorizations":["READ"]}`))
-	req.AddCookie(srv.placementCookie(t, aliceFID))
+	req.AddCookie(srv.placementCookie(t, aliceIdentity))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -338,34 +338,34 @@ func TestPlacementTokenNeedsRequestedWithHeader(t *testing.T) {
 func TestPlacementMeForAnOrdinarySession(t *testing.T) {
 	fake := newOnboardFake()
 	srv := newOnboardingServer(t, fake)
-	c := srv.userCookie(t, "alice", aliceFID)
+	c := srv.userCookie(t, "alice", aliceIdentity)
 	if rec := srv.do(t, c, http.MethodGet, "/api/v1/placement/me", ""); rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 	rec := srv.do(t, c, http.MethodGet, "/api/v1/auth/me", "")
 	var me AuthMeResponse
 	_ = json.Unmarshal(rec.Body.Bytes(), &me)
-	if me.Username != "alice" || me.PlacementOnly || me.Placement == nil || me.Placement.ForeignID != aliceFID {
+	if me.Username != "alice" || me.PlacementOnly || me.Placement == nil || me.Placement.Identity != aliceIdentity {
 		t.Errorf("auth/me = %+v", me)
 	}
 }
 
 func TestAuthMeForPlacementOnlySession(t *testing.T) {
 	srv := newOnboardingServer(t, newOnboardFake())
-	rec := srv.do(t, srv.placementCookie(t, aliceFID), http.MethodGet, "/api/v1/auth/me", "")
+	rec := srv.do(t, srv.placementCookie(t, aliceIdentity), http.MethodGet, "/api/v1/auth/me", "")
 	var me AuthMeResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
 		t.Fatal(err)
 	}
 	if !me.Authenticated || !me.PlacementOnly || me.Username != "" || me.IsAdmin || me.Placement == nil ||
-		me.Placement.ForeignID != aliceFID || me.Placement.DisplayName != "Alice" {
+		me.Placement.Identity != aliceIdentity || me.Placement.DisplayName != "Alice" {
 		t.Errorf("auth/me = %+v", me)
 	}
 }
 
 func TestPlacementOnlySessionIsInvisibleToOrdinaryLookups(t *testing.T) {
 	srv := newOnboardingServer(t, newOnboardFake())
-	c := srv.placementCookie(t, aliceFID)
+	c := srv.placementCookie(t, aliceIdentity)
 	if !strings.HasPrefix(c.Value, placementSessionPrefix) {
 		t.Errorf("placement session cookie %q lacks its prefix", c.Value)
 	}
@@ -421,7 +421,7 @@ func TestPlacementRecordsOnlyForPlacementNames(t *testing.T) {
 
 func TestPlacementRecordsAreAdminOnly(t *testing.T) {
 	srv := newOnboardingServer(t, newOnboardFake())
-	user := srv.userCookie(t, "alice", aliceFID)
+	user := srv.userCookie(t, "alice", aliceIdentity)
 	rec := srv.do(t, user, http.MethodPost, "/api/v1/placement/records/accounts/"+aliceAcct+"/suspend", "")
 	if rec.Code != http.StatusForbidden || len(srv.records.disabled) != 0 {
 		t.Errorf("non-admin suspend: %d", rec.Code)

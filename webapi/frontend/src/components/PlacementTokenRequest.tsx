@@ -88,7 +88,7 @@ function RequestForm({
     onSuccess: onIssued,
   });
 
-  if (!me.foreign_id) {
+  if (!me.identity) {
     return (
       <Notice>
         Your sign-in did not include an identity that the placement service recognizes.
@@ -98,7 +98,7 @@ function RequestForm({
   if (me.expired) {
     return (
       <Notice>
-        Access for <span className="font-mono">{me.foreign_id}</span> has expired on this
+        Access for <span className="font-mono">{me.identity}</span> has expired on this
         access point.
       </Notice>
     );
@@ -106,7 +106,7 @@ function RequestForm({
   if (!me.authorized) {
     return (
       <Notice>
-        <span className="font-mono">{me.foreign_id}</span> is not authorized to use this
+        <span className="font-mono">{me.identity}</span> is not authorized to use this
         access point.
       </Notice>
     );

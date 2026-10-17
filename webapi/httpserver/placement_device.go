@@ -83,7 +83,7 @@ type placementDeviceGrant struct {
 	Interval       int64
 	LastPoll       int64
 	State          string
-	ForeignID      string
+	Identity       string
 	// Token is the unsealed placement token once approved, "" before.
 	Token          string
 	TokenExpiresAt int64
@@ -151,13 +151,13 @@ func (s *placementDeviceStore) create(ctx context.Context, clientID string) (dev
 }
 
 const placementDeviceColumns = `device_code_hash, user_code, client_id, created_at, expires_at, interval,
-	last_poll, state, foreign_id, token_sealed, token_dek, token_expires_at`
+	last_poll, state, identity, token_sealed, token_dek, token_expires_at`
 
 func (s *placementDeviceStore) scan(row *sql.Row) (*placementDeviceGrant, error) {
 	var g placementDeviceGrant
 	var sealed, dek []byte
 	err := row.Scan(&g.DeviceCodeHash, &g.UserCode, &g.ClientID, &g.CreatedAt, &g.ExpiresAt, &g.Interval,
-		&g.LastPoll, &g.State, &g.ForeignID, &sealed, &dek, &g.TokenExpiresAt)
+		&g.LastPoll, &g.State, &g.Identity, &sealed, &dek, &g.TokenExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -198,7 +198,7 @@ func (s *placementDeviceStore) touchPoll(ctx context.Context, hash string, now i
 
 // approve binds a token to a pending, unexpired grant. A grant that was
 // meanwhile denied, approved or expired yields errPlacementDeviceGrantGone.
-func (s *placementDeviceStore) approve(ctx context.Context, userCode, foreignID, token string, tokenExp int64) error {
+func (s *placementDeviceStore) approve(ctx context.Context, userCode, identity, token string, tokenExp int64) error {
 	stored, dek := []byte(token), []byte(nil)
 	if s.sealer != nil {
 		var err error
@@ -207,9 +207,9 @@ func (s *placementDeviceStore) approve(ctx context.Context, userCode, foreignID,
 		}
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE placement_device_grants
-		SET state = ?, foreign_id = ?, token_sealed = ?, token_dek = ?, token_expires_at = ?
+		SET state = ?, identity = ?, token_sealed = ?, token_dek = ?, token_expires_at = ?
 		WHERE user_code = ? AND state = ? AND expires_at >= ?`,
-		placementDeviceStateApproved, foreignID, stored, dek, tokenExp,
+		placementDeviceStateApproved, identity, stored, dek, tokenExp,
 		userCode, placementDeviceStatePending, s.now().Unix())
 	if err != nil {
 		return err
@@ -223,10 +223,10 @@ func (s *placementDeviceStore) approve(ctx context.Context, userCode, foreignID,
 // deny refuses a pending, unexpired grant. Like pdwebapp's cancel_device,
 // a grant that is already resolved or expired is left as it is, and that is
 // not an error.
-func (s *placementDeviceStore) deny(ctx context.Context, userCode, foreignID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE placement_device_grants SET state = ?, foreign_id = ?
+func (s *placementDeviceStore) deny(ctx context.Context, userCode, identity string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE placement_device_grants SET state = ?, identity = ?
 		WHERE user_code = ? AND state = ? AND expires_at >= ?`,
-		placementDeviceStateDenied, foreignID, userCode, placementDeviceStatePending, s.now().Unix())
+		placementDeviceStateDenied, identity, userCode, placementDeviceStatePending, s.now().Unix())
 	return err
 }
 
@@ -545,7 +545,7 @@ func (h *Handler) placementDeviceDeliver(w http.ResponseWriter, r *http.Request,
 		body["expires_in"] = strconv.FormatInt(max(0, grant.TokenExpiresAt-now), 10)
 	}
 	h.logger.Info(logging.DestinationHTTP, "Placement device token delivered",
-		"client_id", grant.ClientID, "user_code", grant.UserCode, "foreign_id", grant.ForeignID)
+		"client_id", grant.ClientID, "user_code", grant.UserCode, "identity", grant.Identity)
 	writePlacementDeviceJSON(w, http.StatusOK, body)
 }
 
@@ -612,12 +612,12 @@ func (h *Handler) placementDeviceDeny(w http.ResponseWriter, r *http.Request, ra
 		h.writeError(w, http.StatusNotFound, "That code was not recognized.")
 		return
 	}
-	if err := store.deny(r.Context(), code, session.PlacementForeignID); err != nil {
+	if err := store.deny(r.Context(), code, session.PlacementIdentity); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "Could not cancel the request.")
 		return
 	}
 	h.logger.Info(logging.DestinationHTTP, "Placement device request canceled",
-		"user_code", code, "foreign_id", session.PlacementForeignID)
+		"user_code", code, "identity", session.PlacementIdentity)
 	h.writeJSON(w, http.StatusOK, map[string]string{"status": "canceled"})
 }
 

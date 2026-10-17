@@ -28,11 +28,11 @@ type SessionData struct {
 	Groups    []string  // User groups from IDP (for scope filtering)
 	CreatedAt time.Time // When the session was created
 	ExpiresAt time.Time // When the session expires
-	// PlacementForeignID is the identity this session presents to
+	// PlacementIdentity is the identity this session presents to
 	// condor_placementd, derived from the provider's claims at login
 	// (placement_identity.go). Empty when none could be derived. It is
-	// the ONLY foreign ID the user-facing placement endpoints ever send.
-	PlacementForeignID string
+	// the ONLY identity the user-facing placement endpoints ever send.
+	PlacementIdentity string
 	// DisplayName is what the provider called the person, for greeting.
 	DisplayName string
 	// Scope is sessionScopeFull for an ordinary session, or
@@ -119,7 +119,7 @@ func (s *SessionStore) createTable() error {
 	// Migrate existing tables: add groups_json column if it doesn't exist
 	_, _ = s.db.ExecContext(ctx, `ALTER TABLE http_sessions ADD COLUMN groups_json TEXT`)
 	// And the placement identity columns (migration 0023).
-	for _, col := range []string{"placement_foreign_id", "display_name", "scope"} {
+	for _, col := range []string{"placement_identity", "display_name", "scope"} {
 		_, _ = s.db.ExecContext(ctx, `ALTER TABLE http_sessions ADD COLUMN `+col+` TEXT NOT NULL DEFAULT ''`)
 	}
 
@@ -164,7 +164,7 @@ func (s *SessionStore) Create(username string, groups ...[]string) (string, *Ses
 }
 
 // CreateSession stores a new session carrying data's Username, Groups,
-// PlacementForeignID, DisplayName and Scope; the times are set here. A
+// PlacementIdentity, DisplayName and Scope; the times are set here. A
 // placement-only session must have no Username: it is not a local user, and
 // nothing may mistake it for one.
 func (s *SessionStore) CreateSession(data SessionData) (string, *SessionData, error) {
@@ -184,13 +184,13 @@ func (s *SessionStore) CreateSession(data SessionData) (string, *SessionData, er
 
 	now := time.Now()
 	session := &SessionData{
-		Username:           data.Username,
-		Groups:             data.Groups,
-		CreatedAt:          now,
-		ExpiresAt:          now.Add(s.ttl),
-		PlacementForeignID: data.PlacementForeignID,
-		DisplayName:        data.DisplayName,
-		Scope:              data.Scope,
+		Username:          data.Username,
+		Groups:            data.Groups,
+		CreatedAt:         now,
+		ExpiresAt:         now.Add(s.ttl),
+		PlacementIdentity: data.PlacementIdentity,
+		DisplayName:       data.DisplayName,
+		Scope:             data.Scope,
 	}
 
 	// Serialize groups as JSON
@@ -209,10 +209,10 @@ func (s *SessionStore) CreateSession(data SessionData) (string, *SessionData, er
 	ctx := context.Background()
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO http_sessions (session_id, username, created_at, expires_at, groups_json,
-		                            placement_foreign_id, display_name, scope)
+		                            placement_identity, display_name, scope)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		sessionKey(sessionID), session.Username, session.CreatedAt, session.ExpiresAt, groupsJSON,
-		session.PlacementForeignID, session.DisplayName, session.Scope)
+		session.PlacementIdentity, session.DisplayName, session.Scope)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to store session in database: %w", err)
 	}
@@ -230,11 +230,11 @@ func (s *SessionStore) Get(sessionID string) *SessionData {
 
 	err := s.db.QueryRowContext(ctx,
 		`SELECT username, created_at, expires_at, groups_json,
-		        placement_foreign_id, display_name, scope
+		        placement_identity, display_name, scope
 		 FROM http_sessions
 		 WHERE session_id = ? AND expires_at > ?`,
 		sessionKey(sessionID), time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &groupsJSON,
-		&session.PlacementForeignID, &session.DisplayName, &session.Scope)
+		&session.PlacementIdentity, &session.DisplayName, &session.Scope)
 
 	if err != nil {
 		// Session not found or expired

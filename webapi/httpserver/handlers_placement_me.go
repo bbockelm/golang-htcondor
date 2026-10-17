@@ -16,7 +16,7 @@ import (
 
 // The user-facing placement endpoints, /api/v1/placement/me*. Any signed-in
 // session reaches them, placement-only sessions included. See
-// placement_onboarding.go for the invariant they keep: the foreign ID sent
+// placement_onboarding.go for the invariant they keep: the identity sent
 // to the placementd is the session's, never the request's.
 
 // placementMeAuthorization is one authorization the person may request,
@@ -40,7 +40,7 @@ type placementMeProject struct {
 
 // placementMeResponse is GET /api/v1/placement/me.
 type placementMeResponse struct {
-	ForeignID   string `json:"foreign_id"`
+	Identity    string `json:"identity"`
 	DisplayName string `json:"display_name,omitempty"`
 	// Authorized is whether the placementd will issue this identity a
 	// token at all.
@@ -149,16 +149,16 @@ type placementSelf struct {
 	expired    bool
 }
 
-// lookupPlacementSelf asks the placementd about foreignID, which the caller
+// lookupPlacementSelf asks the placementd about identity, which the caller
 // took from the session.
-func (s *Handler) lookupPlacementSelf(r *http.Request, foreignID string) (placementSelf, error) {
-	users, err := s.placementd.QueryUsers(placementUserContext(r), foreignID)
+func (s *Handler) lookupPlacementSelf(r *http.Request, identity string) (placementSelf, error) {
+	users, err := s.placementd.QueryUsers(placementUserContext(r), identity)
 	if err != nil {
 		return placementSelf{}, err
 	}
 	var out placementSelf
 	for i := range users {
-		if users[i].UserName == foreignID {
+		if users[i].UserName == identity {
 			out.user = &users[i]
 			break
 		}
@@ -173,18 +173,18 @@ func (s *Handler) lookupPlacementSelf(r *http.Request, foreignID string) (placem
 
 func (s *Handler) handlePlacementMe(w http.ResponseWriter, r *http.Request, session *SessionData) {
 	resp := placementMeResponse{
-		ForeignID:      session.PlacementForeignID,
+		Identity:       session.PlacementIdentity,
 		DisplayName:    session.DisplayName,
 		Authorizations: []placementMeAuthorization{},
 		Projects:       []placementMeProject{},
 		AccountEnabled: true,
 	}
-	if session.PlacementForeignID == "" {
+	if session.PlacementIdentity == "" {
 		s.writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	self, err := s.lookupPlacementSelf(r, session.PlacementForeignID)
+	self, err := s.lookupPlacementSelf(r, session.PlacementIdentity)
 	if err != nil {
 		s.writePlacementError(w, "look up your placement identity", err)
 		return
@@ -199,7 +199,7 @@ func (s *Handler) handlePlacementMe(w http.ResponseWriter, r *http.Request, sess
 		return
 	}
 
-	authz, err := s.placementd.QueryAuthorizations(placementUserContext(r), session.PlacementForeignID)
+	authz, err := s.placementd.QueryAuthorizations(placementUserContext(r), session.PlacementIdentity)
 	if err != nil {
 		var perr *htcondor.PlacementError
 		if !errors.As(err, &perr) || (perr.Code != htcondor.PlacementErrUserNotAuthorized &&
@@ -273,8 +273,8 @@ func (s *Handler) fillPlacementRecordFlags(r *http.Request, resp *placementMeRes
 }
 
 func (s *Handler) handlePlacementMeToken(w http.ResponseWriter, r *http.Request, session *SessionData) {
-	foreignID := session.PlacementForeignID
-	if foreignID == "" {
+	identity := session.PlacementIdentity
+	if identity == "" {
 		s.writeError(w, http.StatusForbidden, "Your sign-in did not provide an identity the placement service knows.")
 		return
 	}
@@ -325,7 +325,7 @@ func (s *Handler) handlePlacementMeToken(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	self, err := s.lookupPlacementSelf(r, foreignID)
+	self, err := s.lookupPlacementSelf(r, identity)
 	if err != nil {
 		s.writePlacementError(w, "look up your placement identity", err)
 		return
@@ -338,7 +338,7 @@ func (s *Handler) handlePlacementMeToken(w http.ResponseWriter, r *http.Request,
 	// Only the authorizations offered to this person may be asked for,
 	// as on pdwebapp's form: grants the operator did not make requestable
 	// (INSTRUCTOR, say) are not for a self-service token.
-	offered, err := s.placementd.QueryAuthorizations(placementUserContext(r), foreignID)
+	offered, err := s.placementd.QueryAuthorizations(placementUserContext(r), identity)
 	if err != nil {
 		s.writePlacementError(w, "list your authorizations", err)
 		return
@@ -360,8 +360,8 @@ func (s *Handler) handlePlacementMeToken(w http.ResponseWriter, r *http.Request,
 	}
 
 	result, err := s.placementd.Login(placementUserContext(r), htcondor.PlacementLoginRequest{
-		UserName:       foreignID,
-		Requester:      foreignID,
+		UserName:       identity,
+		Requester:      identity,
 		Authorizations: authz,
 		Project:        project,
 	})
@@ -393,7 +393,7 @@ func (s *Handler) handlePlacementMeToken(w http.ResponseWriter, r *http.Request,
 
 	jti, _ := claims["jti"].(string)
 	if userCode != "" {
-		if err := s.placementOnboard.devices.approve(r.Context(), userCode, foreignID, result.Token, expUnix); err != nil {
+		if err := s.placementOnboard.devices.approve(r.Context(), userCode, identity, result.Token, expUnix); err != nil {
 			if errors.Is(err, errPlacementDeviceGrantGone) {
 				s.writeError(w, http.StatusConflict, "That device request has already been answered or has expired.")
 				return
@@ -417,7 +417,7 @@ func (s *Handler) handlePlacementMeToken(w http.ResponseWriter, r *http.Request,
 	}
 
 	s.logger.Info(logging.DestinationSecurity, "Placement token issued",
-		"foreign_id", foreignID, "account", resp.APUserID, "project", project,
+		"identity", identity, "account", resp.APUserID, "project", project,
 		"authorizations", authz, "token_id", jti, "device", userCode != "")
 	w.Header().Set("Cache-Control", "no-store")
 	s.writeJSON(w, http.StatusCreated, resp)

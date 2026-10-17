@@ -40,14 +40,14 @@ func TestSanitizePlacementUsernameMatchesPdwebapp(t *testing.T) {
 	}
 }
 
-func TestSanitizedForeignIDIsAtMost64CodePoints(t *testing.T) {
+func TestSanitizedIdentityIsAtMost64CodePoints(t *testing.T) {
 	got := sanitizePlacementUsername(strings.Repeat("日", 100))
 	if n := utf8.RuneCountInString(got); n != 64 {
 		t.Errorf("length = %d code points, want 64", n)
 	}
 }
 
-func TestPlacementForeignIDTakesFirstNonEmptyClaim(t *testing.T) {
+func TestPlacementIdentityTakesFirstNonEmptyClaim(t *testing.T) {
 	claims := map[string]any{
 		"eppn":   "",
 		"email":  42, // not a string: skipped, as pdwebapp skips it
@@ -55,13 +55,13 @@ func TestPlacementForeignIDTakesFirstNonEmptyClaim(t *testing.T) {
 		"name":   "Alice Example",
 		"groups": []any{"a"},
 	}
-	if got := placementForeignID(claims, []string{"eppn", "email", "sub"}); got != "http_cilogon.org_serverA_users_7" {
-		t.Errorf("foreign id = %q", got)
+	if got := placementIdentityFromClaims(claims, []string{"eppn", "email", "sub"}); got != "http_cilogon.org_serverA_users_7" {
+		t.Errorf("identity = %q", got)
 	}
-	if got := placementForeignID(claims, nil); got != "http_cilogon.org_serverA_users_7" {
-		t.Errorf("default (sub) foreign id = %q", got)
+	if got := placementIdentityFromClaims(claims, nil); got != "http_cilogon.org_serverA_users_7" {
+		t.Errorf("default (sub) identity = %q", got)
 	}
-	if got := placementForeignID(claims, []string{"eppn", "missing"}); got != "" {
+	if got := placementIdentityFromClaims(claims, []string{"eppn", "missing"}); got != "" {
 		t.Errorf("no usable claim gave %q, want empty", got)
 	}
 	if got := placementDisplayName(claims, nil); got != "Alice Example" {

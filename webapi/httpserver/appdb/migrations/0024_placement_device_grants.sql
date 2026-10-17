@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS placement_device_grants (
     interval         INTEGER NOT NULL,
     last_poll        INTEGER NOT NULL DEFAULT 0,
     state            TEXT NOT NULL DEFAULT 'pending',
-    foreign_id       TEXT NOT NULL DEFAULT '',
+    identity       TEXT NOT NULL DEFAULT '',
     token_sealed     BLOB,
     token_dek        BLOB,
     token_expires_at INTEGER NOT NULL DEFAULT 0

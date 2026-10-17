@@ -72,7 +72,7 @@ type AuthMeResponse struct {
 
 // PlacementSessionInfo is the placement identity of a session.
 type PlacementSessionInfo struct {
-	ForeignID   string `json:"foreign_id"`
+	Identity    string `json:"identity"`
 	DisplayName string `json:"display_name,omitempty"`
 }
 
@@ -92,11 +92,11 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		// Nothing about a local account: there is none.
 		resp.Authenticated = true
 		resp.PlacementOnly = true
-		resp.Placement = &PlacementSessionInfo{ForeignID: session.PlacementForeignID, DisplayName: session.DisplayName}
+		resp.Placement = &PlacementSessionInfo{Identity: session.PlacementIdentity, DisplayName: session.DisplayName}
 	} else if ok {
 		resp.Authenticated = true
-		if session.PlacementForeignID != "" && s.placementOnboardingEnabled(r.Context()) {
-			resp.Placement = &PlacementSessionInfo{ForeignID: session.PlacementForeignID, DisplayName: session.DisplayName}
+		if session.PlacementIdentity != "" && s.placementOnboardingEnabled(r.Context()) {
+			resp.Placement = &PlacementSessionInfo{Identity: session.PlacementIdentity, DisplayName: session.DisplayName}
 		}
 		resp.Username = session.Username
 		resp.Groups = session.Groups

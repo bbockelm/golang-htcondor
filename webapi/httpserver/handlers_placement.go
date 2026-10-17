@@ -24,7 +24,7 @@ import (
 // placementUserResponse is one row of the users view.
 type placementUserResponse struct {
 	UserName string `json:"username"`
-	// APUserID is the local AP account the foreign identity maps to.
+	// APUserID is the local AP account the sign-in identity maps to.
 	APUserID string `json:"ap_user_id,omitempty"`
 	// TokenExpiration is when this user's newest live token runs out.
 	// Absent when they hold no unexpired token.
@@ -66,7 +66,7 @@ type placementAuthorizationResponse struct {
 
 // placementLoginRequest is the POST body for minting a token.
 type placementLoginRequest struct {
-	// Username is the foreign identity to log in. Required.
+	// Username is the sign-in identity to log in. Required.
 	Username string `json:"username"`
 	// Authorizations narrows the token's bounding set. Every entry must be
 	// one the user is entitled to or the whole request is refused. Empty

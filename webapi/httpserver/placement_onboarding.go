@@ -17,15 +17,15 @@ import (
 //
 // The security invariant, which nothing here may relax: the placementd is
 // called with this server's daemon credential (it registers its commands at
-// ADMINISTRATOR), so the foreign ID sent is ALWAYS the session's
-// PlacementForeignID, never anything from the request; Requester always
+// ADMINISTRATOR), so the identity sent is ALWAYS the session's
+// PlacementIdentity, never anything from the request; Requester always
 // equals UserName; and the INSTRUCTOR third-party flow stays off. That is
 // what stops a signed-in user from minting a token for somebody else.
 
 // placementOnboarding is the Handler's onboarding state.
 type placementOnboarding struct {
 	// identityClaims and displayNameClaims are the ordered userinfo
-	// claims the foreign ID and greeting come from
+	// claims the identity and greeting come from
 	// (HTTP_API_PLACEMENT_IDENTITY_CLAIMS, ..._DISPLAY_NAME_CLAIMS).
 	identityClaims    []string
 	displayNameClaims []string
@@ -122,10 +122,10 @@ func (h *Handler) placementOnboardingEnabled(ctx context.Context) bool {
 
 // placementUserContext is the context user-facing placement calls run
 // under: this server's credential, because the placementd authorizes the
-// access point. The foreign ID in every such call is the session's own.
+// access point. The identity in every such call is the session's own.
 func placementUserContext(r *http.Request) context.Context {
 	return htcondor.WithDaemonCredential(r.Context(),
-		"placementd: user onboarding, foreign ID fixed to the session's")
+		"placementd: user onboarding, identity fixed to the session's")
 }
 
 // placementUserConfig is the ~/.condor/user_config snippet pdwebapp shows

@@ -2,7 +2,7 @@
 
 // Placement page — the AP-side view of condor_placementd.
 //
-// The placementd maps "foreign" identities (a campus IdP account, a course
+// The placementd maps sign-in identities (a campus IdP account, a course
 // roster entry) onto local AP accounts and mints IDTokens for them. This page
 // mirrors the reference portal's shape: an authorization legend rendered with
 // the operator's own labels and colors, a roster of mapped users, the tokens
@@ -241,7 +241,7 @@ function IssueTokenPanel({
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h2 className="text-sm font-semibold text-gray-900">Issue a token</h2>
         <p className="mt-1 text-xs text-gray-500">
-          Mints an IDToken for a foreign identity and, if they have none yet,
+          Mints an IDToken for a sign-in identity and, if they have none yet,
           creates their user record on the schedd. A disabled user or project is
           refused rather than re-enabled.
         </p>

@@ -106,7 +106,7 @@ func TestPlacementDevicePollingGolden(t *testing.T) {
 	assertGolden(t, "another client's device code", h.poll(t, "curl", dc), 400, `{"error": "unauthorized_client"}`)
 
 	// Approve through the user endpoint, as the confirmation page does.
-	rec := h.do(t, h.placementCookie(t, aliceFID), http.MethodPost, "/api/v1/placement/me/token",
+	rec := h.do(t, h.placementCookie(t, aliceIdentity), http.MethodPost, "/api/v1/placement/me/token",
 		`{"project":"ProjA","authorizations":["READ"],"user_code":"`+strings.ToLower(uc)+`"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
@@ -117,7 +117,7 @@ func TestPlacementDevicePollingGolden(t *testing.T) {
 		t.Errorf("a device approval returned %+v; the token must go to the device only", approved)
 	}
 
-	token := testPlacementJWT(aliceFID, h.fake.tokenExp)
+	token := testPlacementJWT(aliceIdentity, h.fake.tokenExp)
 	expiresIn := h.fake.tokenExp.Unix() - h.now.Unix()
 	assertGolden(t, "success", h.poll(t, "placement_client", dc), 200,
 		`{"access_token": "`+token+`\n", "expires_in": "`+strconv.FormatInt(expiresIn, 10)+`", "token_type": "Placement"}`)
@@ -129,7 +129,7 @@ func TestPlacementDevicePollingGolden(t *testing.T) {
 func TestPlacementDeviceDeniedAndExpiredGolden(t *testing.T) {
 	h := newDeviceHarness(t)
 	dc, uc := h.issue(t)
-	rec := h.do(t, h.placementCookie(t, aliceFID), http.MethodPost, "/api/v1/placement/me/device/"+uc+"/deny", "")
+	rec := h.do(t, h.placementCookie(t, aliceIdentity), http.MethodPost, "/api/v1/placement/me/device/"+uc+"/deny", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("deny: %d %s", rec.Code, rec.Body.String())
 	}
@@ -158,7 +158,7 @@ func TestPlacementDeviceClientAuthGolden(t *testing.T) {
 func TestPlacementDeviceSuccessWithoutExpiryGolden(t *testing.T) {
 	h := newDeviceHarness(t)
 	dc, uc := h.issue(t)
-	if err := h.placementOnboard.devices.approve(context.Background(), uc, aliceFID, "eyJ.payload.sig", 0); err != nil {
+	if err := h.placementOnboard.devices.approve(context.Background(), uc, aliceIdentity, "eyJ.payload.sig", 0); err != nil {
 		t.Fatal(err)
 	}
 	assertGolden(t, "no exp", h.poll(t, "placement_client", dc), 200,
@@ -189,7 +189,7 @@ func TestPlacementDeviceCancelForm(t *testing.T) {
 	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/cancel_device",
 		strings.NewReader("user_code="+uc))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(h.placementCookie(t, aliceFID))
+	req.AddCookie(h.placementCookie(t, aliceIdentity))
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -208,7 +208,7 @@ func TestPlacementDeviceTokenIsSealedAtRest(t *testing.T) {
 	}
 	h.placementOnboard.devices.sealer = sealer
 	dc, uc := h.issue(t)
-	if err := h.placementOnboard.devices.approve(context.Background(), uc, aliceFID, "secret.token.value", 0); err != nil {
+	if err := h.placementOnboard.devices.approve(context.Background(), uc, aliceIdentity, "secret.token.value", 0); err != nil {
 		t.Fatal(err)
 	}
 	var stored []byte

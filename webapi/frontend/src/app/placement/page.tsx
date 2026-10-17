@@ -18,7 +18,7 @@ export default function PlacementPage() {
   const [issued, setIssued] = useState<PlacementIssued | null>(null);
   const name =
     session.data?.placement?.display_name ||
-    session.data?.placement?.foreign_id ||
+    session.data?.placement?.identity ||
     session.data?.username ||
     '';
 
@@ -31,9 +31,9 @@ export default function PlacementPage() {
           on this access point.
         </p>
       </div>
-      {session.data?.placement?.foreign_id && (
+      {session.data?.placement?.identity && (
         <p className="text-sm text-gray-700">
-          Signed in as <span className="font-mono">{session.data.placement.foreign_id}</span>.
+          Signed in as <span className="font-mono">{session.data.placement.identity}</span>.
         </p>
       )}
 

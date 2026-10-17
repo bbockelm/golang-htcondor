@@ -537,9 +537,9 @@ const openAPISchema = `{
       },
       "PlacementUser": {
         "type": "object",
-        "description": "A foreign identity known to the placementd, merged with its newest live token.",
+        "description": "A sign-in identity known to the placementd, merged with its newest live token.",
         "properties": {
-          "username": {"type": "string", "description": "Foreign identity, as it appears in the placementd map file."},
+          "username": {"type": "string", "description": "Sign-in identity, as it appears in the placementd map file."},
           "ap_user_id": {"type": "string", "description": "Local AP account the identity maps to; the token subject."},
           "token_expiration": {"type": "string", "format": "date-time", "description": "Expiration of this user's newest unexpired token. Absent when they hold none."},
           "mapping_expiration": {"type": "string", "format": "date-time", "description": "When the map-file entry stops being honored. Absent means never."},
@@ -553,7 +553,7 @@ const openAPISchema = `{
         "description": "An issued token as recorded by the placementd. The token string itself is not stored and is never returned here.",
         "properties": {
           "token_id": {"type": "string", "description": "The token's jti claim."},
-          "username": {"type": "string", "description": "Foreign identity the token was issued for."},
+          "username": {"type": "string", "description": "Sign-in identity the token was issued for."},
           "ap_user_id": {"type": "string", "description": "Local AP account named in the token's subject."},
           "requester": {"type": "string", "description": "Who asked for the token; differs from username only for instructor-issued tokens."},
           "authorizations": {"type": "array", "items": {"type": "string"}, "description": "The token's bounding set."},
@@ -576,7 +576,7 @@ const openAPISchema = `{
         "type": "object",
         "required": ["username"],
         "properties": {
-          "username": {"type": "string", "description": "Foreign identity to log in. Must appear in the placementd map file."},
+          "username": {"type": "string", "description": "Sign-in identity to log in. Must appear in the placementd map file."},
           "authorizations": {"type": "array", "items": {"type": "string"}, "description": "Narrows the token's bounding set. EVERY entry must be one the user is entitled to, or the whole request is refused. Omit for the user's full set."},
           "project": {"type": "string", "description": "Ties the token, and the jobs submitted with it, to an AP project the user is authorized for."},
           "requester": {"type": "string", "description": "Identity asking on the user's behalf. Must itself be mapped and hold the INSTRUCTOR authorization."}
@@ -819,7 +819,7 @@ const openAPISchema = `{
         "type": "object",
         "description": "The signed-in session's placement identity, as the placementd sees it.",
         "properties": {
-          "foreign_id": {"type": "string", "description": "The identity sent to the placementd, derived at sign-in from HTTP_API_PLACEMENT_IDENTITY_CLAIMS. Empty when the provider supplied none."},
+          "identity": {"type": "string", "description": "The identity sent to the placementd, derived at sign-in from HTTP_API_PLACEMENT_IDENTITY_CLAIMS. Empty when the provider supplied none."},
           "display_name": {"type": "string"},
           "authorized": {"type": "boolean", "description": "Whether the placementd will issue this identity a token."},
           "expired": {"type": "boolean", "description": "Whether the identity's mapping has expired."},
@@ -1126,7 +1126,7 @@ const openAPISchema = `{
         "operationId": "listPlacementUsers",
         "tags": ["placement"],
         "parameters": [
-          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to one foreign identity. An unknown identity yields an empty list, not an error."}
+          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to one sign-in identity. An unknown identity yields an empty list, not an error."}
         ],
         "responses": {
           "200": {"description": "Users", "content": {"application/json": {"schema": {"type": "object", "properties": {"users": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementUser"}}}}}}},
@@ -1144,7 +1144,7 @@ const openAPISchema = `{
         "operationId": "listPlacementTokens",
         "tags": ["placement"],
         "parameters": [
-          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to tokens issued for one foreign identity."},
+          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to tokens issued for one sign-in identity."},
           {"name": "token_id", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to a single jti. Takes precedence over the other filters."},
           {"name": "valid_only", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Drop tokens that have already expired."}
         ],
@@ -1178,7 +1178,7 @@ const openAPISchema = `{
     "/placement/login": {
       "post": {
         "summary": "Mint a placement token",
-        "description": "Ask the placementd for an IDToken for a foreign identity. Beyond returning the token this creates the AP user record -- and the project record, when a project is named -- in the schedd if they do not exist; a login against a DISABLED user or project fails rather than re-enabling it. The response is the only time the token is available. Requires membership in the web UI admin group.",
+        "description": "Ask the placementd for an IDToken for a sign-in identity. Beyond returning the token this creates the AP user record -- and the project record, when a project is named -- in the schedd if they do not exist; a login against a DISABLED user or project fails rather than re-enabling it. The response is the only time the token is available. Requires membership in the web UI admin group.",
         "operationId": "placementLogin",
         "tags": ["placement"],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementLoginRequest"}}}},
