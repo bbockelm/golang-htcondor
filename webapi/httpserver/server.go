@@ -212,7 +212,10 @@ type Config struct {
 	// TemplateUserStoreDBPath is deprecated; the templates store
 	// shares the unified DBPath. Kept so existing callers compile.
 	TemplateUserStoreDBPath string //nolint:unused // back-compat; ignored.
-	EnableMCP               bool   // Enable MCP endpoints with OAuth2 (default: false)
+	EnableMCP               bool   // Serve MCP at /mcp. See HandlerConfig.EnableMCP.
+	// WebUIEnabled says this server serves the web UI, which needs
+	// OAuth2 whether or not MCP is on. See HandlerConfig.WebUIEnabled.
+	WebUIEnabled bool
 	// DBPath is the unified SQLite database file. See HandlerConfig.DBPath.
 	DBPath string
 	// KEKFilePath enables envelope encryption for long-lived secrets
@@ -485,6 +488,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MetricsCacheTTL:             cfg.MetricsCacheTTL,
 		Logger:                      cfg.Logger,
 		EnableMCP:                   cfg.EnableMCP,
+		WebUIEnabled:                cfg.WebUIEnabled,
 		DBPath:                      cfg.DBPath,
 		KEKFilePath:                 cfg.KEKFilePath,
 		OAuth2DBPath:                cfg.OAuth2DBPath,

@@ -226,6 +226,11 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 			Issuer:   gatewayIssuer,
 			ClientID: sshGatewayClientID,
 			Scopes:   sshGatewayScopes,
+			// The gateway's issuer is this server under another name,
+			// so it routes what this server routes: /mcp/oauth2/
+			// wherever MCP is on, as it always was, and only /oauth2/
+			// where it is not.
+			EndpointPrefix: h.gatewayOAuth2Path(""),
 		},
 		Identity:   h.sshGatewayIdentity,
 		Logger:     h.logger,
@@ -337,6 +342,15 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 	return nil
 }
 
+// gatewayOAuth2Path is the path of the named OAuth2 endpoint the SSH
+// gateway drives. Not oauth2EndpointPath: that one is what clients are
+// told, and the gateway's issuer may be a proxy in front of this server,
+// so the gateway keeps the path it has always used wherever that is
+// still routed.
+func (h *Handler) gatewayOAuth2Path(name string) string {
+	return oauth2EndpointPathFor(!h.mcpEnabled, name)
+}
+
 // probeSSHGatewayIssuer checks, once, that the device endpoint the
 // gateway will drive is actually reachable from this process.
 //
@@ -358,7 +372,7 @@ func (h *Handler) probeSSHGatewayIssuer(ctx context.Context, issuer string) {
 	case <-time.After(2 * time.Second):
 	}
 
-	endpoint := strings.TrimSuffix(issuer, "/") + "/mcp/oauth2/device/authorize"
+	endpoint := strings.TrimSuffix(issuer, "/") + h.gatewayOAuth2Path("device/authorize")
 	form := url.Values{}
 	form.Set("client_id", sshGatewayClientID)
 

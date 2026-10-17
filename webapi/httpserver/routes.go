@@ -315,26 +315,27 @@ func (h *Handler) setupRoutes() {
 	mux.HandleFunc("/api/v1/schedd/ping", h.handleScheddPing) // Ping schedd only
 	// Collector ping is handled via /api/v1/collector/ping in handleCollectorPath
 
-	// MCP endpoints (OAuth2 protected)
+	// OAuth2: served whenever the provider exists, which is whenever the
+	// web UI or MCP is (HandlerConfig.OAuth2Enabled). MCP gates only the
+	// MCP-specific routes inside: the protocol endpoint, the /mcp/
+	// spelling of the OAuth2 endpoints, and the protected-resource
+	// documents that describe /mcp.
 	if h.oauth2Provider != nil {
 		// OAuth2 metadata discovery (RFC 8414 and RFC 9068)
 		mux.HandleFunc("/.well-known/oauth-authorization-server", h.handleOAuth2Metadata)
+		// RFC 9728 for the REST API, which accepts these bearer tokens
+		// whether or not MCP is on.
 		mux.HandleFunc(wellKnownProtectedResource, h.handleOAuth2ProtectedResourceMetadata)
-		// RFC 9728 section 3.1: a resource with a path is described at
-		// that path appended to the well-known one. MCP clients derive
-		// this URL from the server URL they were configured with, so
-		// without it they fetch a document that does not exist -- see
-		// handleOAuth2ProtectedResourceMetadata.
-		mux.HandleFunc(wellKnownProtectedResource+mcpPath, h.handleOAuth2ProtectedResourceMetadata)
-		mux.HandleFunc(wellKnownProtectedResource+mcpMessagePath, h.handleOAuth2ProtectedResourceMetadata)
 
-		// OAuth2 endpoints, each served under both prefixes.
+		// OAuth2 endpoints. The plain /oauth2/ path always; the /mcp/
+		// one where MCP is on.
 		//
 		// The /mcp/ prefix is historical: MCP is what first needed
 		// these, and they now serve the web UI, editor extensions and
-		// anything else that speaks OAuth2. The plain path is what gets
-		// advertised where the web UI is compiled in; the old one stays
-		// routed because a client discovers these once and keeps them.
+		// anything else that speaks OAuth2. It stays routed wherever MCP
+		// is, because a client discovers these once and keeps them. A
+		// server without MCP never served OAuth2 under it, so nothing
+		// holds that spelling there.
 		oauth2Handlers := map[string]http.HandlerFunc{
 			"authorize":        h.handleOAuth2Authorize,
 			"consent":          h.handleOAuth2Consent,
@@ -352,22 +353,36 @@ func (h *Handler) setupRoutes() {
 			// Any of these can name a client_id that is a metadata
 			// document URL, so each charges the fetch to its caller.
 			handler = h.withCIMDSource(handler)
-			mux.HandleFunc(oauth2EndpointPathFor(false, name), handler)
 			mux.HandleFunc(oauth2EndpointPathFor(true, name), handler)
+			if h.mcpEnabled {
+				mux.HandleFunc(oauth2EndpointPathFor(false, name), handler)
+			}
 		}
-		// The SSO callback is served at both paths whatever the server
-		// advertises (OAuth2CallbackPath): an authorization started before
-		// an upgrade comes back to the path it began with.
-		mux.HandleFunc(mcpCallbackPath, h.handleOAuth2Callback)
+		// The SSO callback and the device verification page (RFC 8628).
+		// Where MCP is on, both spellings are served whatever the server
+		// advertises: an authorization or a device code issued before an
+		// upgrade comes back to the path it began with, and a device
+		// code's user has minutes to open it.
 		mux.HandleFunc(webUICallbackPath, h.handleOAuth2Callback)
-
-		// Device code flow endpoints (RFC 8628)
-		// Served at both paths whatever this server advertises
-		// (OAuth2DeviceVerifyPath): a device code issued before an
-		// upgrade carries the URL it was issued with, and its user has
-		// minutes to open it.
-		mux.HandleFunc(mcpDeviceVerifyPath, h.handleOAuth2DeviceVerify)
 		mux.HandleFunc(webUIDeviceVerifyPath, h.handleOAuth2DeviceVerify)
+		if h.mcpEnabled {
+			mux.HandleFunc(mcpCallbackPath, h.handleOAuth2Callback)
+			mux.HandleFunc(mcpDeviceVerifyPath, h.handleOAuth2DeviceVerify)
+		}
+		h.logger.Info(logging.DestinationHTTP, "OAuth2 endpoints enabled",
+			"path_prefix", oauth2EndpointPathFor(h.plainOAuth2Paths(), ""))
+	}
+
+	// MCP: the protocol endpoint and the documents describing it. Needs
+	// the provider too, since every MCP request is authenticated by it.
+	if h.mcpEnabled && h.oauth2Provider != nil {
+		// RFC 9728 section 3.1: a resource with a path is described at
+		// that path appended to the well-known one. MCP clients derive
+		// this URL from the server URL they were configured with, so
+		// without it they fetch a document that does not exist -- see
+		// handleOAuth2ProtectedResourceMetadata.
+		mux.HandleFunc(wellKnownProtectedResource+mcpPath, h.handleOAuth2ProtectedResourceMetadata)
+		mux.HandleFunc(wellKnownProtectedResource+mcpMessagePath, h.handleOAuth2ProtectedResourceMetadata)
 
 		// MCP protocol endpoint. "/mcp" is an exact-match pattern --
 		// it does not shadow /mcp/oauth2/... -- and /mcp/message stays

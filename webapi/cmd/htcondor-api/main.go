@@ -38,6 +38,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/apiad"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/sharedportrouter"
 )
@@ -1056,14 +1057,16 @@ func loadOAuth2Endpoints(cfg *config.Config, logger *logging.Logger) (authURL, t
 	return authURL, tokenURL, userInfoURL
 }
 
-// loadOAuth2RedirectURL loads or derives OAuth2 redirect URL
-func loadOAuth2RedirectURL(cfg *config.Config, issuer string, logger *logging.Logger) string {
+// loadOAuth2RedirectURL loads or derives OAuth2 redirect URL.
+// callbackPath is the path this server advertises for its callback
+// (httpserver.OAuth2CallbackPath).
+func loadOAuth2RedirectURL(cfg *config.Config, issuer, callbackPath string, logger *logging.Logger) string {
 	if redirectURL, ok := cfg.Get("HTTP_API_OAUTH2_REDIRECT_URL"); ok && redirectURL != "" {
 		return redirectURL
 	}
 
 	if issuer != "" {
-		url := issuer + httpserver.OAuth2CallbackPath()
+		url := issuer + callbackPath
 		logger.Info(logging.DestinationHTTP, "OAuth2 redirect URL derived from issuer", "url", url)
 		return url
 	}
@@ -1346,8 +1349,16 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 
 }
 
-// loadMCPConfig loads MCP configuration from HTCondor config
-func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logging.Logger) mcpConfig {
+// loadMCPConfig loads the MCP and OAuth2 configuration from HTCondor
+// config.
+//
+// The OAuth2 settings are read whenever the web UI or MCP is served,
+// because the web UI logs people in through OAuth2 whether or not MCP is
+// on. They used to be read only with HTTP_API_ENABLE_MCP, so a web UI
+// with MCP off silently ignored its issuer, its identity provider, its
+// access groups and its identity mapping. Only the MCP settings proper
+// still wait for MCP.
+func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled bool, logger *logging.Logger) mcpConfig {
 	config := mcpConfig{}
 
 	// Check if MCP should be enabled from config
@@ -1367,7 +1378,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	config.oauth2DBPath = loadDBPath(cfg, logger)
 	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
 
-	if !config.enabled {
+	if !config.enabled && !webUIEnabled {
 		return config
 	}
 
@@ -1388,7 +1399,8 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	config.oauth2AuthURL, config.oauth2TokenURL, config.oauth2UserInfoURL = loadOAuth2Endpoints(cfg, logger)
 
 	// Load OAuth2 redirect URL
-	config.oauth2RedirectURL = loadOAuth2RedirectURL(cfg, config.oauth2Issuer, logger)
+	config.oauth2RedirectURL = loadOAuth2RedirectURL(cfg, config.oauth2Issuer,
+		httpserver.OAuth2CallbackPath(webUIEnabled, config.enabled), logger)
 
 	// Log the user info URL if set
 	if config.oauth2UserInfoURL != "" {
@@ -1442,6 +1454,10 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 		logger.Info(logging.DestinationHTTP, "OAuth2 maximum grant lifetime", "duration", config.oauth2MaxGrantLifetime)
 	}
 	config.oauth2RevocationOracles = loadRevocationOracles(cfg, logger)
+
+	if !config.enabled {
+		return config
+	}
 
 	// Load the MCP admin list. These subjects skip the owner-scope
 	// wrapper on MCP tools, so they can query and act on other users'
@@ -1974,8 +1990,14 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		}
 	}
 
+	// The web UI is served when it is compiled in. A development build
+	// behind `next dev` is not: that binary serves no UI of its own, and
+	// the dev server proxies only /mcp/ of the OAuth2 paths, so it keeps
+	// the MCP-only paths and needs HTTP_API_ENABLE_MCP for a login.
+	webUIEnabled := webui.IsEmbedded()
+
 	// Load MCP configuration
-	mcpCfg := loadMCPConfig(cfg, listenAddrFromConfig, logger)
+	mcpCfg := loadMCPConfig(cfg, listenAddrFromConfig, webUIEnabled, logger)
 
 	// Check if IDP should be enabled
 	enableIDP := false
@@ -2125,6 +2147,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		Collector:                collector,
 		Logger:                   logger,
 		EnableMCP:                mcpCfg.enabled,
+		WebUIEnabled:             webUIEnabled,
 		// DBPath is the canonical name; OAuth2DBPath kept for back-compat.
 		DBPath:                     mcpCfg.oauth2DBPath,
 		KEKFilePath:                loadKEKFilePath(cfg, logger),
@@ -2575,7 +2598,10 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		Logger:                   logger,
 		Token:                    serverToken, // Token for daemon authentication
 		EnableMCP:                true,        // Enable MCP in demo mode
-		DBPath:                   appDBPath,
+		// As in normal mode: whether the UI is compiled in. Demo has MCP
+		// on, so this only chooses which OAuth2 paths are advertised.
+		WebUIEnabled: webui.IsEmbedded(),
+		DBPath:       appDBPath,
 		// All OAuth2/IDP URLs derive from httpBaseURL so a `:8080` listen
 		// addr gets a real host (localhost) instead of producing
 		// browser-invalid URLs like "https://:8080/".
@@ -2584,7 +2610,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		OAuth2ClientSecret: "demo-secret",
 		OAuth2AuthURL:      httpBaseURL + "/mcp/oauth2/authorize",
 		OAuth2TokenURL:     httpBaseURL + "/mcp/oauth2/token",
-		OAuth2RedirectURL:  httpBaseURL + httpserver.OAuth2CallbackPath(),
+		OAuth2RedirectURL:  httpBaseURL + httpserver.OAuth2CallbackPath(webui.IsEmbedded(), true),
 		OAuth2Scopes:       []string{"openid", "profile", "email"},
 		EnableIDP:          true,
 		// Demo mode only: gives the browser tests a non-admin identity

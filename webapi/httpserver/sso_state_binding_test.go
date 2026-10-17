@@ -142,7 +142,7 @@ func registerSSOTestClient(t *testing.T, server *Server) string {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return OAuth2EndpointPath("authorize") + "?" + url.Values{
+	return server.oauth2EndpointPath("authorize") + "?" + url.Values{
 		"response_type": {"code"},
 		"client_id":     {"binding-test-client"},
 		"redirect_uri":  {"https://client.example.org/cb"},

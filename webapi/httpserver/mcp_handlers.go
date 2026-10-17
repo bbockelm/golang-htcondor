@@ -99,16 +99,17 @@ const maxMCPBody = 16 << 20 // 16 MB
 // request never reaches withCondorCredential at all: mcpAuthContext's
 // forwarded-token branch builds its own security config from the bearer and
 // lets the schedd validate it. Refusing to start would break that deployment
-// over a setting none of its requests touch -- and /mcp is only registered
-// when an OAuth2 provider exists, so it cannot be told apart by configuration
-// alone.
+// over a setting none of its requests touch -- and nothing in the
+// configuration tells that deployment apart.
 //
 // The hazard itself is closed per request instead: withCondorCredential now
 // returns an error rather than a credential-less context, so an OAuth2 caller
 // gets a 500 and no CEDAR call is made. This exists so the reason appears in
 // the log at startup rather than only in the first failed request.
 func (h *Handler) warnIfMCPCannotMintCredentials() {
-	if h.oauth2Provider == nil || h.mcpServer == nil {
+	// mcpEnabled, not mcpServer: the server is built whether or not MCP
+	// is served, because the web UI's interactive sessions use it.
+	if !h.mcpEnabled || h.oauth2Provider == nil {
 		return
 	}
 	if h.signingKeyPath != "" && h.trustDomain != "" {
@@ -743,7 +744,7 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 	// Redirect to consent page
 	// The path a person sees in the address bar while deciding
 	// whether to approve, so it follows what this server advertises.
-	consentURL := fmt.Sprintf("%s?state=%s", OAuth2EndpointPath("consent"), state)
+	consentURL := fmt.Sprintf("%s?state=%s", h.oauth2EndpointPath("consent"), state)
 	http.Redirect(w, r, consentURL, http.StatusFound)
 }
 
@@ -902,7 +903,7 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 			Username:        username,
 			ClientID:        ar.GetClient().GetID(),
 			RequestedScopes: ar.GetRequestedScopes(),
-			FormAction:      OAuth2EndpointPath("consent"),
+			FormAction:      h.oauth2EndpointPath("consent"),
 			HiddenFields: map[string]string{
 				"state":          state,
 				consentCSRFField: h.consentCSRFToken(username, state),
@@ -1564,6 +1565,28 @@ var oauth2AdvertisedScopes = []string{
 	placementScope,
 }
 
+// mcpOnlyScopes are the scopes advertised only where MCP is served.
+// mcp:admin and mcp:superuser are not among them: the REST API honours
+// those too (seesAllJobsByPolicy), so they mean something without MCP.
+var mcpOnlyScopes = []string{"mcp:read", "mcp:write"}
+
+// advertisedScopes is the scope set this server publishes in its
+// discovery documents: oauth2AdvertisedScopes, less mcp:read and
+// mcp:write where MCP is off.
+//
+// Only the advertisement narrows. What a client may request
+// (cimdClientScopes, client registration) is unchanged, so a grant
+// already carrying mcp:* still refreshes, and switching MCP off and on
+// again strands nobody.
+func (h *Handler) advertisedScopes() []string {
+	if h.mcpEnabled {
+		return oauth2AdvertisedScopes
+	}
+	return slices.DeleteFunc(slices.Clone(oauth2AdvertisedScopes), func(s string) bool {
+		return slices.Contains(mcpOnlyScopes, s)
+	})
+}
+
 // oauth2DeprecatedScopes were advertised once and are not any more. They
 // grant nothing -- mapCondorScopesToAuthz ignores every condor level but
 // READ and WRITE -- but they must stay *requestable*, because a client
@@ -1601,11 +1624,11 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		// UI is compiled in. Both remain routed -- see
 		// OAuth2EndpointPath -- because a client discovers these once
 		// and keeps them.
-		"authorization_endpoint":        issuer + OAuth2EndpointPath("authorize"),
-		"token_endpoint":                issuer + OAuth2EndpointPath("token"),
-		"introspection_endpoint":        issuer + OAuth2EndpointPath("introspect"),
-		"revocation_endpoint":           issuer + OAuth2EndpointPath("revoke"),
-		"device_authorization_endpoint": issuer + OAuth2EndpointPath("device/authorize"),
+		"authorization_endpoint":        issuer + h.oauth2EndpointPath("authorize"),
+		"token_endpoint":                issuer + h.oauth2EndpointPath("token"),
+		"introspection_endpoint":        issuer + h.oauth2EndpointPath("introspect"),
+		"revocation_endpoint":           issuer + h.oauth2EndpointPath("revoke"),
+		"device_authorization_endpoint": issuer + h.oauth2EndpointPath("device/authorize"),
 		// This is an OAuth2 authorization server (RFC 8414), not an
 		// OpenID Connect provider. It used to advertise otherwise --
 		// id_token response types, subject_types_supported and
@@ -1623,13 +1646,13 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		// fosite composition in oauth2_provider.go.
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials", "urn:ietf:params:oauth:grant-type:device_code", tokenExchangeGrantType},
-		"scopes_supported":                      oauth2AdvertisedScopes,
+		"scopes_supported":                      h.advertisedScopes(),
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"code_challenge_methods_supported":      []string{"plain", "S256"},
 	}
 
 	if !h.mcpDCRDisabled {
-		metadata["registration_endpoint"] = issuer + OAuth2EndpointPath("register")
+		metadata["registration_endpoint"] = issuer + h.oauth2EndpointPath("register")
 	}
 
 	// Advertise Client ID Metadata Document support (an https:// client_id is
@@ -1711,8 +1734,12 @@ func (h *Handler) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, r
 		"authorization_servers":                 []string{issuer},
 		"bearer_methods_supported":              []string{"header"},
 		"resource_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":                      oauth2AdvertisedScopes,
+		"scopes_supported":                      h.advertisedScopes(),
 		"resource_documentation":                issuer + "/mcp",
+	}
+	if !h.mcpEnabled {
+		// No /mcp to document; the REST API's reference is /docs.
+		metadata["resource_documentation"] = issuer + "/docs"
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1829,6 +1856,7 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 
 	// Create device code handler
 	deviceHandler := NewDeviceCodeHandler(h.oauth2Provider.GetStorage(), h.oauth2Provider.config)
+	deviceHandler.verifyPath = h.deviceVerifyPath()
 
 	// Handle device authorization
 	resp, err := deviceHandler.HandleDeviceAuthorizationRequest(ctx, client, scopes, sshSession)
@@ -2110,7 +2138,7 @@ func (h *Handler) deviceVerifyGet(w http.ResponseWriter, r *http.Request) {
     <div class="container">
         <h1>Device Authorization</h1>
         <p>Enter the code displayed on your device:</p>
-        <form method="GET" action="/mcp/oauth2/device/verify">
+        <form method="GET" action="` + h.deviceVerifyPath() + `">
             <input type="text" name="user_code" placeholder="XXXX-XXXX" required pattern="[A-Za-z0-9-]+" />
             <button type="submit">Continue</button>
         </form>
@@ -2736,7 +2764,7 @@ func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, r *http.Request
 		Username:        username,
 		ClientID:        request.GetClient().GetID(),
 		RequestedScopes: request.GetRequestedScopes(),
-		FormAction:      "/mcp/oauth2/device/verify",
+		FormAction:      h.deviceVerifyPath(),
 		HiddenFields: map[string]string{
 			"user_code":      userCode,
 			consentCSRFField: h.consentCSRFToken(username, userCode),

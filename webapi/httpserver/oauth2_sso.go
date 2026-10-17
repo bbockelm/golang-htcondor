@@ -550,7 +550,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		"client_id", ar.GetClient().GetID(),
 		"requested_scopes", ar.GetRequestedScopes())
 
-	http.Redirect(w, r, "/mcp/oauth2/consent?state="+url.QueryEscape(consentState), http.StatusFound)
+	http.Redirect(w, r, s.oauth2EndpointPath("consent")+"?state="+url.QueryEscape(consentState), http.StatusFound)
 }
 
 // handleLogin initiates the OAuth2 login flow
