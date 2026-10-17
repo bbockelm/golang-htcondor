@@ -142,7 +142,7 @@ func (s *Service) AggregateMetrics(ctx context.Context, req MetricsRequest) (*Me
 	}
 	defer closer()
 	rows, err := dbc.ArchiveAggregateBucketed(ctx, TableJobMetrics, scope, req.Group, req.Aggs)
-	if err != nil {
+	if s.noteRead(ctx, err) != nil {
 		if metricsMissing(err) {
 			return res, ErrMetricsNotFederated
 		}

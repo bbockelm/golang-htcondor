@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 )
@@ -77,6 +78,8 @@ func TestDataReadFailureClassification(t *testing.T) {
 	bg := context.Background()
 	canceled, cancel := context.WithCancel(bg)
 	cancel()
+	expired, cancel2 := context.WithTimeout(bg, -time.Second)
+	defer cancel2()
 	for _, tc := range []struct {
 		name  string
 		ctx   context.Context
@@ -89,6 +92,7 @@ func TestDataReadFailureClassification(t *testing.T) {
 		{"refused query", bg, &dbrpc.ServerError{Msg: "no such table"}, false},
 		{"bad request", bg, dbrpc.ErrBadRequest, false},
 		{"caller went away", canceled, fmt.Errorf("x: %w", dbrpc.ErrConnClosed), false},
+		{"read's own budget ran out", expired, context.DeadlineExceeded, false},
 		{"unparseable row", bg, errors.New("unparseable row"), false},
 	} {
 		if got := transportFailure(tc.ctx, tc.err); got != tc.count {

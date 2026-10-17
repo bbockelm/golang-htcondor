@@ -2426,7 +2426,10 @@ What a switch does to each consumer:
   reporting an access point `fresh` holds every change on it -- a list
   read may lack a job another hub showed, during the settle window or
   after it if the hub's jobs stream is backlogged. A first selection at
-  startup is not a switch and does not settle.
+  startup is not a switch and does not settle. An access point that is
+  settling and that the new hub reports keeps no copy of an optional
+  table (`job_metrics`, `epoch_history`) is listed in `not_kept` for it
+  as well: it has none of those rows on any hub.
 - **Page tokens.** A job list token (`/api/v1/jobs`, MCP `query_jobs`)
   is a position in one hub's change log and names that hub; asked of
   another, it is refused with a 400 (`reason`: `restart_pagination`), and

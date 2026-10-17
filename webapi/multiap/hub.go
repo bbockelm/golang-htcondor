@@ -251,9 +251,11 @@ func (e *HubEndpoint) noteReadFailure(err error) {
 
 // transportFailure reports whether err, from a query made with ctx,
 // says the hub dropped the connection or did not answer in time -- not
-// that it refused the query, or that the caller went away.
+// that it refused the query, that the caller went away, or that the
+// read ran out a budget of its own (a heavy aggregate under
+// MetricsTimeout says nothing about the hub).
 func transportFailure(ctx context.Context, err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 		return false
 	}
 	var ne net.Error

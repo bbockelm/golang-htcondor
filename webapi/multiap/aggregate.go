@@ -99,6 +99,14 @@ func (src Sources) StateOf(schedd string) string {
 	return StateFresh
 }
 
+// notKeptReason is why an AP keeps no copy of table.
+func notKeptReason(table string, ts TableStatus) string {
+	if ts.LastError != "" {
+		return ts.LastError
+	}
+	return "this access point keeps no " + table
+}
+
 // optionalTables are the hub tables a spoke may lawfully not keep, so a
 // <Table>Missing from the hub means "no rows here" rather than a fault.
 // Every other table (jobs, history, syncstatus) is one a spoke must
@@ -115,6 +123,12 @@ var optionalTables = map[string]bool{TableJobMetrics: true, TableEpochHistory: t
 // an optional table: a spoke without job_metrics or epoch history) has
 // no rows to miss. It goes in NotKept instead, and still counts as fresh.
 //
+// An AP that is settling (the hub became active less than the settle
+// window ago) stays degraded, settling: the new hub may lack its rows.
+// If the hub also reports it keeps none of an optional table, it is
+// listed in NotKept as well -- it has no such rows on any hub, so a read
+// of that table finding none there is the answer, not the switch.
+//
 // The table states are the hub ctx is pinned to (else the active one's),
 // which must be the hub src came from.
 func (s *Service) TableSources(ctx context.Context, src Sources, table string) Sources {
@@ -122,23 +136,28 @@ func (s *Service) TableSources(ctx context.Context, src Sources, table string) S
 	out := Sources{Hub: src.Hub, APs: src.APs, Fresh: src.Fresh, Degraded: append([]Degraded{}, src.Degraded...),
 		NotKept: append([]NotKept(nil), src.NotKept...)}
 	degraded := map[string]bool{}
+	settling := map[string]bool{}
 	for _, d := range src.Degraded {
 		degraded[strings.ToLower(d.Schedd)] = true
+		settling[strings.ToLower(d.Schedd)] = d.State == StateSettling
 	}
 	for _, m := range s.Registry.Members() {
-		if degraded[strings.ToLower(m.Name)] {
+		key := strings.ToLower(m.Name)
+		if degraded[key] && !settling[key] {
 			continue
 		}
 		reason := ""
 		hsrc, ok := ep.Source(m.Name)
 		ts, federated := hsrc.TableStatus[table]
+		if settling[key] {
+			if ok && federated && ts.Missing && optionalTables[table] {
+				out.NotKept = append(out.NotKept, NotKept{Schedd: m.Name, Table: table, Reason: notKeptReason(table, ts)})
+			}
+			continue
+		}
 		switch {
 		case ok && federated && ts.Missing && optionalTables[table]:
-			why := "this access point keeps no " + table
-			if ts.LastError != "" {
-				why = ts.LastError
-			}
-			out.NotKept = append(out.NotKept, NotKept{Schedd: m.Name, Table: table, Reason: why})
+			out.NotKept = append(out.NotKept, NotKept{Schedd: m.Name, Table: table, Reason: notKeptReason(table, ts)})
 			continue
 		case !ok || !federated:
 			reason = "the federation hub does not federate " + table + " from this access point"
