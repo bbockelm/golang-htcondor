@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError } from '@/lib/api';
 import { forJobFixture, similarFixture } from '@/lib/similar.fixture';
 import { batchHref, utilizationHrefForJob } from '@/lib/similar';
-import { SimilarJobs } from './SimilarJobs';
+import { MemorySpread, RuntimeSpread, SimilarJobs } from './SimilarJobs';
 import { JobRelated } from './JobRelated';
 import { RuntimeEstimateView } from '@/app/jobs/[id]/RuntimeEstimate';
 
@@ -154,5 +154,67 @@ describe('utilizationHrefForJob', () => {
     expect(utilizationHrefForJob(forJobFixture('1.0', { has_history: null }), 'e2e')).toBe(
       '/utilization?days=30&w=wf-blast',
     );
+  });
+});
+
+describe('the spreads', () => {
+  const q = { count: 9, p10: 900, p25: 1000, p50: 1229, p75: 1500, p90: 2048 };
+
+  it('describes run times and peak memory in the same form', () => {
+    render(<RuntimeSpread runtimes={{ count: 9, p10: 600, p25: 1200, p50: 1800, p75: 2400, p90: 3600 }} mark={{ seconds: 3000, label: 'This job so far' }} />);
+    expect(screen.getByTestId('runtime-spread')).toHaveTextContent(
+      'Half of these 9 jobs took 20m to 40m (typically 30m); 9 in 10 finished within 1h. This job so far: 50m.',
+    );
+    render(<MemorySpread memory={q} mark={{ mib: 6246, label: 'This job so far' }} requestedMiB={2048} />);
+    const memory = screen.getByTestId('memory-spread');
+    expect(memory).toHaveTextContent(
+      'Half of these 9 jobs peaked at 1,000 MB to 1.5 GB (typically 1.2 GB); 9 in 10 stayed under 2 GB. This job so far: 6.1 GB. Requested: 2 GB.',
+    );
+    expect(within(memory).getByTestId('memory-spread-mark')).toBeInTheDocument();
+    expect(within(memory).getByTestId('memory-spread-ref')).toBeInTheDocument();
+    expect(within(memory).getByText('Requested')).toBeInTheDocument();
+  });
+
+  it('places the job and its request on the same axis as the group', () => {
+    render(<MemorySpread memory={q} mark={{ mib: 6246, label: 'This job' }} requestedMiB={2048} />);
+    const memory = screen.getByTestId('memory-spread');
+    // The axis reaches past the largest of them: the job's peak.
+    const left = (el: HTMLElement) => parseFloat(el.style.left);
+    expect(left(within(memory).getByTestId('memory-spread-mark'))).toBeCloseTo(100 / 1.15, 1);
+    expect(left(within(memory).getByTestId('memory-spread-ref'))).toBeCloseTo((2048 / (6246 * 1.15)) * 100, 1);
+  });
+
+  it('stretches the axis to a request larger than everything else', () => {
+    render(<MemorySpread memory={q} mark={{ mib: 3000, label: 'This job' }} requestedMiB={8192} />);
+    const memory = screen.getByTestId('memory-spread');
+    expect(parseFloat(within(memory).getByTestId('memory-spread-ref').style.left)).toBeCloseTo(100 / 1.15, 1);
+  });
+
+  it('draws no mark or request line without them', () => {
+    render(<MemorySpread memory={q} />);
+    expect(screen.queryByTestId('memory-spread-mark')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('memory-spread-ref')).not.toBeInTheDocument();
+  });
+});
+
+describe('SimilarJobs memory', () => {
+  it('shows the group\'s memory under its run times, and each job\'s peak', async () => {
+    vi.spyOn(api.jobs, 'similar').mockImplementation(async (id, p) => similarFixture(id, p));
+    wrap(<SimilarJobs jobID="12.0" memory={{ mark: { mib: 3000, label: 'This job so far' }, requestedMiB: 2048 }} />);
+    await screen.findByTestId('similar-jobs');
+    expect(screen.getByTestId('memory-spread')).toHaveTextContent('This job so far: 2.9 GB.');
+    expect(screen.getByRole('columnheader', { name: 'Peak memory' })).toBeInTheDocument();
+    const rows = screen.getAllByRole('row').slice(1);
+    // The fixture leaves every seventh record without a peak.
+    expect(within(rows[6]).getAllByRole('cell')[3]).toHaveTextContent('—');
+    expect(within(rows[0]).getAllByRole('cell')[3]).toHaveTextContent(/^\d[\d.]* (MB|GB)$/);
+  });
+
+  it('shows no memory plot for a group whose records have no peak', async () => {
+    vi.spyOn(api.jobs, 'similar').mockImplementation(async (id, p) => similarFixture(id, { ...p, level: 'iwd' }));
+    wrap(<SimilarJobs jobID="12.0" />);
+    await screen.findByTestId('similar-jobs');
+    expect(screen.getByTestId('runtime-spread')).toBeInTheDocument();
+    expect(screen.queryByTestId('memory-spread')).not.toBeInTheDocument();
   });
 });

@@ -30,6 +30,7 @@ import { useCards } from '@/lib/useNarrow';
 import { BatchProgressBar } from '@/components/BatchProgressBar';
 import {
   BatchLongerThanUsual,
+  BatchMoreMemoryThanUsual,
   BatchTimeLeftCell,
   JobTimeLeftCell,
 } from '@/components/TimeLeft';
@@ -629,6 +630,7 @@ function BatchRow({
           <StatusBreakdown counts={batch.statusCounts} />
           <LongestRunning jobs={batch.jobs} now={now} />
           {timed && <BatchLongerThanUsual jobs={timed} />}
+          {timed && <BatchMoreMemoryThanUsual jobs={timed} />}
         </td>
         {estimates && timed && (
           <td className="px-3 py-2">
@@ -886,6 +888,7 @@ function BatchCard(props: BatchRowProps) {
             </div>
           ) : null}
           {timed && <BatchLongerThanUsual jobs={timed} />}
+          {timed && <BatchMoreMemoryThanUsual jobs={timed} />}
         </div>
         {estimates && timed && (
           <BatchTimeLeftCell

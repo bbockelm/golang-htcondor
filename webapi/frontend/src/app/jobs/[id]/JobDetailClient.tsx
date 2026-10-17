@@ -23,12 +23,14 @@ import { OwnerLink } from '@/components/OwnerLink';
 import { chatScopeForJob } from '@/lib/users';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 import { EVALUATED_KEY, gpusUsed, hasGpus, jobRequest } from '@/lib/jobRequests';
+import { peakMemoryMiB } from '@/lib/similar';
 import { formatKiB, formatMiB } from '@/lib/utilization';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { LogViewerPanel } from '@/components/LogViewerPanel';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
 import { RuntimeEstimateField } from './RuntimeEstimate';
+import { MemoryEstimateField } from './MemoryEstimate';
 import { JobRelated } from '@/components/JobRelated';
 import { SimilarJobsSection } from '@/components/SimilarJobs';
 import { DagGraphPanel } from '@/components/DagGraphPanel';
@@ -443,6 +445,12 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
   // This job on the group's spread: how long it has been running.
   const similarMark =
     status === 2 && startDate ? { seconds: Math.max(0, now - startDate), label: 'This job so far' } : undefined;
+  // And on the group's memory: its peak so far, and its request.
+  const peakSoFar = status === 2 ? peakMemoryMiB(job) : undefined;
+  const similarMemory = {
+    mark: peakSoFar !== undefined ? { mib: peakSoFar, label: 'This job so far' } : undefined,
+    requestedMiB: jobRequest(job, 'RequestMemory').value,
+  };
 
   return (
     <div className="space-y-6">
@@ -531,11 +539,14 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
         onShowSimilar={showSimilar}
       />
 
+      <MemoryEstimateField jobID={jobID} status={status} />
+
       <SimilarJobsSection
         jobID={jobID}
         open={similarOpen}
         onToggle={() => setSimilarOpen((v) => !v)}
         mark={similarMark}
+        memory={similarMemory}
       />
 
       <ResourceUsagePanel jobID={jobID} status={status} job={job} />

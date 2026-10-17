@@ -114,6 +114,49 @@ test('the jobs table says how long a batch has left', async ({ page }) => {
   expect(asked[0]).toEqual(['72.0', '72.1']);
 });
 
+// Three running jobs of one batch: one already past what similar jobs
+// peaked at, one within it, and one whose group has no memory figures.
+test('the jobs table marks a job using more memory than usual', async ({ page }) => {
+  const started = now - 600;
+  await page.route('**/api/v1/jobs?**', (route) =>
+    route.fulfill({
+      json: {
+        jobs: [0, 1, 2].map((p) => ({
+          ClusterId: 74, ProcId: p, JobStatus: 2, Owner: 'e2e', JobBatchName: 'smoke-mem', QDate: now - 9000,
+          JobCurrentStartExecutingDate: started,
+        })),
+        has_more: false,
+      },
+    }),
+  );
+  const run = { available: true, estimate_seconds: 2400, p10_seconds: 1800, p90_seconds: 4800, rough: false, exceeded_history: false, elapsed_seconds: 600, remaining_seconds: 1800 };
+  const group = { sample_count: 9, p10_mib: 900, p25_mib: 1000, p50_mib: 1229, p75_mib: 1500, p90_mib: 2048, rough: false };
+  await page.route('**/api/v1/jobs/runtime-estimates', (route) =>
+    route.fulfill({
+      json: {
+        available: true,
+        estimates: {
+          '74.0': { ...run, memory: { ...group, peak_mib: 6246, above_usual: true } },
+          '74.1': { ...run, memory: { ...group, peak_mib: 1100, above_usual: false } },
+          '74.2': run,
+        },
+        model: { jobs_ingested: 100 },
+      },
+    }),
+  );
+  await page.goto('/jobs');
+  const row = page.getByRole('row').filter({ hasText: 'smoke-mem' }).first();
+  await expect(row.getByTestId('more-memory-than-usual')).toHaveText('1 using more memory than usual');
+  await row.click();
+  const chips = page.getByTestId('job-more-memory');
+  await expect(chips).toHaveCount(1);
+  await expect(chips.getByText('More memory than usual')).toHaveAttribute(
+    'title',
+    'Peak so far 6.1 GB; similar jobs peak at about 1.2 GB, 9 in 10 under 2 GB',
+  );
+  await expect(page.getByRole('row', { name: /^74\.0 / }).getByTestId('job-more-memory')).toBeVisible();
+});
+
 // Verbatim from a CHTC job page, as the API sends it.
 const chtcRequirements =
   '/Expr(((((((((((PoolName == "CHTC") || (substr(Machine, 0, 3) == "gzk")) && ((Machine != "txie-dsigpu4000.chtc.wisc.edu") && (Machine != "gpu4002.chtc.wisc.edu"))) && (Arch == "X86_64")) && HasContainer) && HasDockerURL) && (Memory >= RequestMemory)) && (Cpus >= RequestCpus)) && (countMatches(MY.RequireGPUs, AvailableGPUs) >= RequestGPUs)) && ((FileSystemDomain == MY.FileSystemDomain) || (HasFileTransfer && stringListIMember("osdf", HasFileTransferPluginMethods)))))/';
@@ -134,6 +177,7 @@ const runtimeEstimate = {
   elapsed_seconds: twoHours14 + 60,
   remaining_seconds: 3 * 3600 - twoHours14 - 60,
   exceeded_history: false,
+  memory: { sample_count: 12, p10_mib: 700, p25_mib: 800, p50_mib: 950, p75_mib: 1100, p90_mib: 1300, peak_mib: 900, requested_mib: 1024, above_requested: 2, rough: false, above_usual: false },
   model: { trained_through: '2026-10-10T12:00:00Z', jobs_ingested: 5000 },
 };
 
@@ -195,6 +239,13 @@ test.describe('the run time card, with the clock pinned', () => {
     ).toBeVisible();
     // A job within its usual time has nothing to look into.
     await expect(runtime.getByText('Longer than usual')).toHaveCount(0);
+    // Nor one within its usual memory.
+    const memory = page.getByTestId('memory-estimate');
+    await expect(memory.getByRole('heading', { name: 'Peak memory' })).toBeVisible();
+    await expect(memory.getByText('Peak so far 900 MB')).toBeVisible();
+    await expect(memory.getByText('Similar jobs peaked at about 950 MB; 9 in 10 stayed under 1.3 GB.')).toBeVisible();
+    await expect(memory.getByText('2 of 12 similar jobs peaked above the 1 GB requested.')).toBeVisible();
+    await expect(memory.getByText('More memory than usual')).toHaveCount(0);
 
     const reqs = page.locator('div').filter({ has: page.getByRole('heading', { name: 'Requirements' }) }).last();
     for (const clause of [
@@ -279,6 +330,40 @@ test('a job running longer than usual says so and opens its live output and shel
   await expect(page.getByRole('button', { name: 'Open shell' })).toBeVisible();
   await runtime.getByRole('button', { name: 'Open a shell in the job' }).click();
   await expect(page.getByRole('button', { name: 'Open shell' })).toHaveCount(0);
+});
+
+test('a job using more memory than usual says so on its page', async ({ page }) => {
+  await page.route('**/api/v1/jobs/75.0/runtime-estimate', (route) =>
+    route.fulfill({
+      json: {
+        job_id: '75.0',
+        available: true,
+        estimate_seconds: 3600,
+        p10_seconds: 1200,
+        p90_seconds: 9000,
+        basis: { level: 'template', sample_count: 30 },
+        elapsed_seconds: 600,
+        remaining_seconds: 3000,
+        exceeded_history: false,
+        memory: {
+          sample_count: 30, p10_mib: 900, p25_mib: 1000, p50_mib: 1229, p75_mib: 1500, p90_mib: 2048,
+          peak_mib: 6246, requested_mib: 4096, above_requested: 0, rough: false, above_usual: true,
+        },
+        model: { trained_through: '2026-10-10T12:00:00Z', jobs_ingested: 5000 },
+      },
+    }),
+  );
+  await openJobPage(page, '75.0', {
+    ClusterId: 75, ProcId: 0, JobStatus: 2, JobUniverse: 5, Owner: 'e2e', Cmd: '/home/e2e/run.sh',
+    QDate: now - 9000, JobCurrentStartDate: now - 600, RequestMemory: 4096, MemoryUsage: 6246,
+  });
+  const memory = page.getByTestId('memory-estimate');
+  await expect(memory.getByText('More memory than usual')).toBeVisible();
+  await expect(memory.getByText('Peak so far 6.1 GB')).toBeVisible();
+  await expect(memory.getByText('Similar jobs peaked at about 1.2 GB; 9 in 10 stayed under 2 GB.')).toBeVisible();
+  await expect(memory.getByText('All 30 similar jobs stayed under the 4 GB requested.')).toBeVisible();
+  // The run time card beside it is within its usual time.
+  await expect(page.getByTestId('runtime-estimate').getByText('Longer than usual')).toHaveCount(0);
 });
 
 // The batch name goes to the batch's page; the rest of the row still
