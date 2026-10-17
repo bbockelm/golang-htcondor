@@ -108,6 +108,16 @@ export default function UtilizationPage() {
     return `/utilization${q ? `?${q}` : ''}`;
   };
   const workflowHref = (key: string) => hrefFor({ w: key });
+  // An owner's name links to that user's workflows. Names are only shown
+  // when the answer covers other people's jobs, which needs a session
+  // that can widen; the link asks for that scope too, so it opens the
+  // same way in a new tab.
+  const ownerHref = ownedByMe
+    ? undefined
+    : (o: string) => {
+        const h = hrefFor({ w: '', owners: [o] });
+        return `${h}${h.includes('?') ? '&' : '?'}owned_by_me=false`;
+      };
   const replace = (over: Partial<UrlState>) => router.replace(hrefFor(over), { scroll: false });
 
   // The filter inputs. Text applies as it is typed and lives in the URL as
@@ -346,6 +356,7 @@ export default function UtilizationPage() {
                 workflow={detail.data.workflow}
                 days={days}
                 backHref={hrefFor({ w: '' })}
+                ownerHref={ownerHref}
                 jobsQuery={analysis}
                 waitingJobs={detail.data.waiting_jobs}
                 waitingAdaptive={detail.data.waiting_adaptive}
@@ -369,7 +380,12 @@ export default function UtilizationPage() {
           ) : (
             <>
               <Headline overall={data.overall} mine={ownedByMe} />
-              <Suggestions suggestions={data.suggestions} keys={shownKeys} hrefFor={workflowHref} />
+              <Suggestions
+                suggestions={data.suggestions}
+                keys={shownKeys}
+                hrefFor={workflowHref}
+                ownerHref={ownerHref}
+              />
               <WorkflowsTable
                 workflows={shownWorkflows}
                 hrefFor={workflowHref}

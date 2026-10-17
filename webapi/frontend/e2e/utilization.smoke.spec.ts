@@ -108,6 +108,29 @@ test('clicking an owner adds them to the filter, and the query carries it', asyn
   await expect(page).toHaveURL(/owners=bob/);
 });
 
+test("a workflow's owner links to that user's workflows, keeping the window", async ({ page }) => {
+  await everyone(page);
+  const seen = await installUtilization(page);
+  await page.goto('/utilization?days=30&w=wf-assemble');
+  await expect(page.getByRole('heading', { name: 'genome-assembly' })).toBeVisible();
+  const owner = page.getByRole('link', { name: 'bob', exact: true });
+  await expect(owner).toHaveAttribute('href', '/utilization?days=30&owners=bob&owned_by_me=false');
+  await owner.click();
+  await expect(page).toHaveURL(/\/utilization\?days=30&owners=bob&owned_by_me=false$/);
+  await expect(page.getByTestId('owner-chip')).toHaveText(['bob×']);
+  await expect.poll(() => lastQuery(seen).get('owners')).toBe('bob');
+  await expect(page.getByRole('row', { name: /^genome-assembly/ })).toBeVisible();
+  await expect(page.getByRole('row', { name: /^blast-search/ })).toHaveCount(0);
+});
+
+test("a workflow's owner is plain text in the Mine scope", async ({ page }) => {
+  await installUtilization(page);
+  await page.goto('/utilization?w=wf-assemble');
+  await expect(page.getByRole('heading', { name: 'genome-assembly' })).toBeVisible();
+  await expect(page.getByText('· bob', { exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'bob', exact: true })).toHaveCount(0);
+});
+
 test('the user list picks several users and keeps offering the rest', async ({ page }) => {
   await everyone(page);
   const seen = await installUtilization(page);

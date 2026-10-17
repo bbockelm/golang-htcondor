@@ -139,6 +139,26 @@ describe('Suggestions', () => {
     expect(screen.getAllByTestId('advice')).toHaveLength(7);
   });
 
+  it("links the owner's name to their workflows when the page can narrow to a user", () => {
+    render(
+      <Suggestions
+        hrefFor={hrefFor}
+        ownerHref={(o) => `/utilization?owners=${o}`}
+        suggestions={[sug({ owner: 'bob' })]}
+      />,
+    );
+    const card = screen.getByTestId('advice');
+    expect(within(card).getByRole('link', { name: 'bob' })).toHaveAttribute('href', '/utilization?owners=bob');
+    expect(card).toHaveTextContent('For alpha (bob)');
+  });
+
+  it("leaves the owner's name plain without a way to narrow", () => {
+    render(<Suggestions hrefFor={hrefFor} suggestions={[sug({ owner: 'bob' })]} />);
+    const card = screen.getByTestId('advice');
+    expect(card).toHaveTextContent('For alpha (bob)');
+    expect(within(card).queryByRole('link', { name: 'bob' })).toBeNull();
+  });
+
   it('follows the text filter to the workflows it leaves', () => {
     render(
       <Suggestions
@@ -281,6 +301,21 @@ describe('WorkflowDetail', () => {
     ]) {
       expect(screen.getByText(title)).toBeInTheDocument();
     }
+  });
+
+  it("links the owner's name in the header to their workflows", () => {
+    const w = fullWorkflows.find((x) => x.key === 'wf-assemble')!;
+    render(
+      <WorkflowDetail workflow={w} days={7} backHref="/utilization" ownerHref={(o) => `/utilization?owners=${o}`} />,
+    );
+    expect(screen.getByRole('link', { name: w.owner })).toHaveAttribute('href', `/utilization?owners=${w.owner}`);
+  });
+
+  it("shows the owner's name as plain text without a way to narrow", () => {
+    const w = fullWorkflows.find((x) => x.key === 'wf-assemble')!;
+    render(<WorkflowDetail workflow={w} days={7} backHref="/utilization" />);
+    expect(screen.getByText(w.owner!, { exact: false })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: w.owner })).toBeNull();
   });
 
   it('explains a missing curve rather than drawing an empty one', () => {

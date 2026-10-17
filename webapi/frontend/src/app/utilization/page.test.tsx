@@ -1,7 +1,8 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UtilizationResponse } from '@/lib/utilization';
+import { utilizationFixture, utilizationWorkflowFixture } from '@/lib/utilization.fixture';
 import { callHook, chatPanelProps, resetChatPanelSpy } from '@/test/chatPanelSpy';
 import { scopeStore } from '@/lib/scope';
 
@@ -21,8 +22,8 @@ const nav = vi.hoisted(() => {
       search = new URLSearchParams(href.split('?')[1] ?? '');
       listeners.forEach((l) => l());
     }),
-    reset: () => {
-      search = new URLSearchParams();
+    reset: (q = '') => {
+      search = new URLSearchParams(q);
     },
     subscribe: (l: () => void) => {
       listeners.add(l);
@@ -41,6 +42,7 @@ vi.mock('next/navigation', async () => {
 });
 
 const utilization = vi.fn();
+const utilizationWorkflow = vi.fn();
 const chatInfo = vi.fn();
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
@@ -51,6 +53,9 @@ vi.mock('@/lib/api', async () => {
       auth: { ...actual.api.auth, me: () => Promise.resolve(session.current) },
       chat: { ...actual.api.chat, info: () => chatInfo() },
       utilization: (...a: unknown[]) => utilization(...a),
+      utilizationWorkflow: (...a: unknown[]) => utilizationWorkflow(...a),
+      // The workflow's job list is not what these tests are about.
+      utilizationJobs: () => new Promise(() => {}),
     },
   };
 });
@@ -167,5 +172,62 @@ describe('utilization page chat', () => {
     await screen.findByRole('button', { name: 'Open chat assistant' });
     await waitFor(() => expect(utilization).toHaveBeenCalled());
     expect(chatPanelProps().scope).toBe('mine');
+  });
+});
+
+// An owner's name links to that user's workflows, pool-wide, keeping the
+// rest of the URL. It only exists where names are shown: in a scope that
+// sees other people's jobs.
+describe('utilization page owner links', () => {
+  // genome-assembly is bob's.
+  const filters = 'days=30&q=genome&constraint=RequestGpus+%3E+0&limit=200000';
+  const bobHref = '/utilization?days=30&q=genome&constraint=RequestGpus+%3E+0&owners=bob&limit=200000&owned_by_me=false';
+
+  beforeEach(() => {
+    session.current = { username: 'root', is_admin: true };
+    scopeStore.setScope('all');
+    utilization.mockReset();
+    utilizationWorkflow.mockReset();
+    chatInfo.mockReset();
+    chatInfo.mockResolvedValue({ enabled: false });
+    nav.replace.mockClear();
+    nav.reset();
+    resetChatPanelSpy();
+    utilization.mockResolvedValue(utilizationFixture);
+    utilizationWorkflow.mockImplementation((p: { w: string }) => Promise.resolve(utilizationWorkflowFixture(p.w)));
+  });
+
+  it("links the workflow's owner to their workflows, keeping the filters and dropping the workflow", async () => {
+    nav.reset(`${filters}&owners=alice,bob&w=wf-assemble`);
+    await renderPage();
+    const link = await screen.findByRole('link', { name: 'bob' });
+    expect(link).toHaveAttribute('href', bobHref);
+  });
+
+  it("links a suggestion's owner on the overview", async () => {
+    nav.reset(filters);
+    await renderPage();
+    const card = (await screen.findAllByTestId('advice')).find((c) => c.textContent?.includes('(bob)'))!;
+    expect(within(card).getByRole('link', { name: 'bob' })).toHaveAttribute('href', bobHref);
+  });
+
+  it('has no owner link in the Mine scope', async () => {
+    scopeStore.setScope('mine');
+    nav.reset('w=wf-assemble');
+    await renderPage();
+    await screen.findByRole('heading', { name: 'genome-assembly' });
+    // The name is still shown, as text.
+    expect(screen.getByText('· bob')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'bob' })).toBeNull();
+  });
+
+  it('has no owner link for a session that cannot widen, whatever the stored scope', async () => {
+    session.current = { username: 'alice', is_admin: false };
+    nav.reset('owned_by_me=false&w=wf-assemble');
+    await renderPage();
+    await screen.findByRole('heading', { name: 'genome-assembly' });
+    expect(utilization).toHaveBeenLastCalledWith(expect.objectContaining({ owned_by_me: true }));
+    expect(screen.getByText('· bob')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'bob' })).toBeNull();
   });
 });
