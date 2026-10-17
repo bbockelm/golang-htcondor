@@ -49,8 +49,9 @@ type placementFieldSpec struct {
 	kind placementFieldKind
 }
 
-// placementWritableFields are the writable attributes of each TargetType,
-// keyed by their JSON names (§6.3 of the placementd design).
+// placementWritableFields are the attributes PLACEMENT_EDIT lets each
+// TargetType set, keyed by their JSON names. Anything else in a body is
+// refused here rather than sent to the daemon.
 var placementWritableFields = map[string]map[string]placementFieldSpec{
 	htcondor.PlacementTargetIdentity: {
 		"identity":     {"Identity", placementFieldString},

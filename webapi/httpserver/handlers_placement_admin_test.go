@@ -423,8 +423,10 @@ func TestPlacementAdminBatch(t *testing.T) {
 	}
 }
 
-// Each directory error code maps to the status §7.4 names, with the hints a
-// UI acts on.
+// Each directory error code maps to an HTTP status: not found 404; version
+// mismatch, mapfile-owned (owned_by), still referenced (cascade_required)
+// and duplicate 409; invalid argument and unknown type 400. The hints are
+// what a UI acts on.
 func TestPlacementAdminErrorMapping(t *testing.T) {
 	cases := []struct {
 		code            int

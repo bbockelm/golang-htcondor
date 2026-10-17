@@ -16,10 +16,10 @@ import (
 	cedarserver "github.com/bbockelm/cedar/server"
 )
 
-// fakePlacementdV2 serves PLACEMENT_QUERY and PLACEMENT_EDIT the way §6 of
-// the placementd design frames them: the query request is one ad; the edit
-// request is a header ad followed by NumOperations operation ads, all in ONE
-// message; every reply is N ads plus a trailing Summary in ONE message.
+// fakePlacementdV2 serves PLACEMENT_QUERY and PLACEMENT_EDIT with the
+// daemon's framing: the query request is one ad; the edit request is a header
+// ad followed by NumOperations operation ads, all in ONE message; every reply
+// is N ads plus a trailing Summary in ONE message.
 type fakePlacementdV2 struct {
 	addr string
 
