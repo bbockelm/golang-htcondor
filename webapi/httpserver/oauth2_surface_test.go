@@ -200,7 +200,7 @@ func TestProtectedResourceMetadataWithoutMCP(t *testing.T) {
 	if got := metadataScopes(t, md); slices.Contains(got, "mcp:read") || slices.Contains(got, "mcp:write") {
 		t.Errorf("scopes_supported advertises MCP scopes without MCP: %v", got)
 	}
-	if doc, _ := md["resource_documentation"].(string); strings.HasSuffix(doc, "/mcp") {
+	if doc, _ := md["resource_documentation"].(string); strings.HasSuffix(doc, mcpPath) {
 		t.Errorf("resource_documentation = %q, which is not served without MCP", doc)
 	}
 }
