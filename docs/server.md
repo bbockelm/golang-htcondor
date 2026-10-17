@@ -2336,8 +2336,9 @@ and expired requests are swept.
 
 **The standard device flow (placement-client).** New clients use this
 server's own RFC 8628 device grant instead of the paths above. They read
-`/.well-known/oauth-authorization-server` (so `HTTP_API_ENABLE_MCP` must
-be on), ask the device authorization endpoint as the pre-registered
+`/.well-known/oauth-authorization-server` (so this server's OAuth2
+authorization server must be on, which it is when the web UI or MCP is
+enabled), ask the device authorization endpoint as the pre-registered
 public client `placement_client` for the scope `placement` (and
 `offline_access` to keep a refresh token), and send the person to the
 verification page, where any signed-in session with an identity --
