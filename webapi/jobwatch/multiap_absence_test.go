@@ -40,6 +40,9 @@ type coveredSource struct {
 	lag      time.Duration
 	now      func() time.Time
 	queueErr error
+	// origin is the coverage's origin: which of several backends the
+	// read came from.
+	origin string
 	// single, when set, is what Queue (the single-AP entry point) was
 	// asked: a multi-AP source must never be read through it.
 	single int
@@ -59,7 +62,7 @@ func (c *coveredSource) QueueCovered(_ context.Context, _ string, _ []string, _ 
 	if c.queueErr != nil {
 		return false, nil, c.queueErr
 	}
-	cov := NewCoverage()
+	cov := NewCoverageFrom(c.origin)
 	for ap, ok := range c.vouch {
 		if ok {
 			cov.Vouch(ap, c.now().Add(-c.lag))
@@ -614,5 +617,154 @@ func waitUntil(t *testing.T, cond func() bool) {
 			t.Fatal("condition not reached")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestAbsenceOriginChangeReearns: the source's reads move to another
+// backend (a second federation hub) and ap2's 1.0 is missing there. The
+// read vouches for ap2 and is newer than the job's last sighting -- but
+// that sighting was on the other backend, so it is forgotten: the first
+// read of the new origin counts as the last sighting, and only a later
+// read of that origin, newer than it, fires.
+func TestAbsenceOriginChangeReearns(t *testing.T) {
+	r := newAbsenceRig(t, EventDone, ModeAny)
+	r.src.set(func(c *coveredSource) { c.origin = "hub-a/0" })
+	r.pass(0)
+	if w := r.live(); len(w.Tracked) != 2 {
+		t.Fatalf("tracked %+v, want 1.0 on each AP", w.Tracked)
+	}
+	r.dropAP2()
+	r.src.set(func(c *coveredSource) { c.origin = "hub-b/1" })
+	if st := r.pass(time.Minute); st.Fired != 0 {
+		t.Fatal("fired on the first read of a new origin, from a sighting on the old one")
+	}
+	if st := r.pass(time.Minute); st.Fired != 1 {
+		t.Fatalf("fired %d on the second read of the new origin, want 1", st.Fired)
+	}
+}
+
+// TestAbsenceSameOriginKeepsMemory: reads of one origin keep the memory,
+// so a job that leaves fires on the first read newer than its sighting,
+// exactly as with a source that names no origin.
+func TestAbsenceSameOriginKeepsMemory(t *testing.T) {
+	r := newAbsenceRig(t, EventDone, ModeAny)
+	r.src.set(func(c *coveredSource) { c.origin = "hub-a/0" })
+	r.pass(0)
+	r.dropAP2()
+	if st := r.pass(time.Minute); st.Fired != 1 {
+		t.Fatalf("fired %d on a newer read of the same origin, want 1", st.Fired)
+	}
+}
+
+// pinningSource is a coveredSource that pins each pass (PassPinner) and
+// records whether every read of a pass carried the pass's pin.
+type pinningSource struct {
+	*coveredSource
+	pins     int
+	unpinned int
+}
+
+type passPinKey struct{}
+
+func (p *pinningSource) PinPass(ctx context.Context) context.Context {
+	p.mu.Lock()
+	p.pins++
+	n := p.pins
+	p.mu.Unlock()
+	return context.WithValue(ctx, passPinKey{}, n)
+}
+
+func (p *pinningSource) check(ctx context.Context) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n, _ := ctx.Value(passPinKey{}).(int); n == 0 || n != p.pins {
+		p.unpinned++
+	}
+}
+
+func (p *pinningSource) QueueCovered(ctx context.Context, owner string, attrs []string, limit int,
+	yield func(*classad.ClassAd)) (bool, *Coverage, error) {
+	p.check(ctx)
+	return p.coveredSource.QueueCovered(ctx, owner, attrs, limit, yield)
+}
+
+func (p *pinningSource) History(ctx context.Context, owner string, attrs []string, since time.Time, limit int,
+	yield func(*classad.ClassAd)) error {
+	p.check(ctx)
+	return p.coveredSource.History(ctx, owner, attrs, since, limit, yield)
+}
+
+// TestPassPinnerPinsEveryRead: a PassPinner is pinned once per owner
+// pass, and the pass's queue and history reads both carry that pin.
+func TestPassPinnerPinsEveryRead(t *testing.T) {
+	r := newAbsenceRig(t, EventDone, ModeAny)
+	src := &pinningSource{coveredSource: r.src}
+	r.eval = NewEvaluator(r.store, src, nil)
+	r.eval.now = func() time.Time { return r.clock }
+	for i := 0; i < 3; i++ {
+		r.pass(time.Minute)
+	}
+	if src.pins != 3 || src.unpinned != 0 {
+		t.Fatalf("pins %d, unpinned reads %d: want 3 passes each read under its own pin", src.pins, src.unpinned)
+	}
+}
+
+// TestFeedOriginChangeStartsOver: the stream reopens on another origin
+// (a second federation hub). Everything the feed held came from the
+// first -- a departure, the last ad of a completed job still queued
+// there -- and is dropped, as on a Reset: no departures, and the new
+// origin deleting a key the old one held reports nothing. The dialer is
+// told the old origin with its cursor, so it can tell the cursor is not
+// the new one's.
+func TestFeedOriginChangeStartsOver(t *testing.T) {
+	f := NewFeed(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var asked []Resume
+	origins := []string{"hub-a/0", "hub-b/1"}
+	dials := make(chan chan WatchEvent, 4)
+	go func() {
+		_ = f.RunResumableFrom(ctx, func(_ context.Context, from Resume) (<-chan WatchEvent, func(), string, error) {
+			mu.Lock()
+			asked = append(asked, Resume{Cursor: append([]byte(nil), from.Cursor...), Origin: from.Origin})
+			origin := origins[min(len(asked)-1, len(origins)-1)]
+			mu.Unlock()
+			ch := make(chan WatchEvent, 8)
+			dials <- ch
+			return ch, func() {}, origin, nil
+		})
+	}()
+	since := time.Now().Add(-time.Hour)
+	a := <-dials
+	a <- WatchEvent{Kind: WatchUpsert, Key: "k1", AdText: exitAd(1, 0, 4, 0).MarshalOld(), Cursor: []byte("a1")}
+	a <- WatchEvent{Kind: WatchUpsert, Key: "k2", AdText: exitAd(2, 0, 4, 0).MarshalOld(), Cursor: []byte("a2")}
+	a <- WatchEvent{Kind: WatchDelete, Key: "k2", Cursor: []byte("a3")}
+	waitUntil(t, func() bool { return len(f.Departures("alice", since)) == 1 })
+	if f.Origin() != "hub-a/0" {
+		t.Fatalf("origin %q, want hub-a/0", f.Origin())
+	}
+	close(a)
+	b := <-dials
+	b <- WatchEvent{Kind: WatchDelete, Key: "k1", Cursor: []byte("b1")}
+	b <- WatchEvent{Kind: WatchUpsert, Key: "sentinel", AdText: exitAd(3, 0, 2, 0).MarshalOld(), Cursor: []byte("b2")}
+	waitUntil(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.live["sentinel"] != nil
+	})
+	if d := f.Departures("alice", since); len(d) != 0 {
+		t.Fatalf("departures after moving to another origin: %+v", d)
+	}
+	if n := len(f.Terminal("alice", since)); n != 0 {
+		t.Fatalf("%d terminal records survived moving to another origin", n)
+	}
+	if f.Origin() != "hub-b/1" {
+		t.Fatalf("origin %q, want hub-b/1", f.Origin())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 2 || asked[0].Cursor != nil || asked[0].Origin != "" || string(asked[1].Cursor) != "a3" || asked[1].Origin != "hub-a/0" {
+		t.Fatalf("dialed with %+v, want nothing, then a3 from hub-a/0", asked)
 	}
 }

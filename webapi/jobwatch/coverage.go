@@ -32,10 +32,32 @@ import (
 // AP not listed proves nothing by being absent.
 type Coverage struct {
 	asOf map[string]time.Time // by lower-cased schedd name
+	// origin names what the read came from, when the source can read
+	// from more than one backend (two federation hubs): evidence is only
+	// comparable between reads of one origin.
+	origin string
 }
 
 // NewCoverage returns a Coverage that vouches for no access point.
 func NewCoverage() *Coverage { return &Coverage{asOf: map[string]time.Time{}} }
+
+// NewCoverageFrom returns a Coverage of a read from origin that vouches
+// for no access point yet. When the origin of a watch's reads changes,
+// the evaluator forgets when it last saw each of the watch's jobs: a
+// sighting on one backend and an absence on another are not evidence
+// together, so absence is re-earned on the new one.
+func NewCoverageFrom(origin string) *Coverage {
+	return &Coverage{asOf: map[string]time.Time{}, origin: origin}
+}
+
+// Origin is the origin the read came from; empty when the source names
+// none.
+func (c *Coverage) Origin() string {
+	if c == nil {
+		return ""
+	}
+	return c.origin
+}
 
 // Vouch records that the read reflects every change on schedd up to
 // asOf.
@@ -75,12 +97,24 @@ type CoveredSource interface {
 		yield func(*classad.ClassAd)) (truncated bool, cov *Coverage, err error)
 }
 
+// PassPinner is a Source that reads from one of several backends (two
+// federation hubs) and can hold one evaluation pass to one of them. The
+// evaluator calls PinPass at the start of each owner's pass and makes
+// every read of that pass with the context it returns, so a pass never
+// mixes what two backends said.
+type PassPinner interface {
+	PinPass(ctx context.Context) context.Context
+}
+
 // absenceMemory is what the evaluator remembers between passes about a
 // watch's jobs, for deciding whether a read is newer than a job's last
 // sighting. It lives in memory only: after a restart every absent job is
 // taken to have been seen at the first pass's read, which only delays a
 // verdict.
 type absenceMemory struct {
+	// origin is the Coverage origin the memory was gathered from. A
+	// read of another origin starts the memory over.
+	origin string
 	// lastRead is when the previous pass's queue read finished: every
 	// tracked job not in since was present in it (or beyond its cut).
 	lastRead time.Time

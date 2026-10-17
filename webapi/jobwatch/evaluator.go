@@ -140,13 +140,17 @@ func (e *Evaluator) ownerLock(owner string) *sync.Mutex {
 	return m
 }
 
-// memoryFor returns a watch's absence memory, creating it.
-func (e *Evaluator) memoryFor(id string) *absenceMemory {
+// memoryFor returns a watch's absence memory for a read of origin,
+// creating it -- or starting it over when it was gathered from another
+// origin: what one backend showed says nothing about what another's
+// absence means, so after a switch every absent job is taken to have
+// been seen at the first read of the new origin.
+func (e *Evaluator) memoryFor(id, origin string) *absenceMemory {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	m := e.memory[id]
-	if m == nil {
-		m = &absenceMemory{since: map[JobID]time.Time{}}
+	if m == nil || m.origin != origin {
+		m = &absenceMemory{origin: origin, since: map[JobID]time.Time{}}
 		e.memory[id] = m
 	}
 	return m
@@ -251,6 +255,10 @@ func (e *Evaluator) passOwner(ctx context.Context, owner string, watches []*Watc
 	lock := e.ownerLock(owner)
 	lock.Lock()
 	defer lock.Unlock()
+	if p, ok := e.src.(PassPinner); ok {
+		// Every read below is one backend's.
+		ctx = p.PinPass(ctx)
+	}
 
 	// The oldest watch decides how far back to look, so a watch
 	// registered after its jobs finished still sees them.
@@ -299,7 +307,7 @@ func (e *Evaluator) passOwner(ctx context.Context, owner string, watches []*Watc
 			f.Truncated()
 		}
 		if perAP {
-			f.cov, f.mem, f.readAt = cov, e.memoryFor(watches[i].ID), readAt
+			f.cov, f.mem, f.readAt = cov, e.memoryFor(watches[i].ID, cov.Origin()), readAt
 		}
 	}
 
