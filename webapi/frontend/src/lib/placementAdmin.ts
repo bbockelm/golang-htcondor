@@ -30,7 +30,7 @@ export interface PlacementEntityMeta {
 }
 
 export interface DirIdentity extends PlacementEntityMeta {
-  foreign_id: string;
+  identity: string;
   account_id?: string;
   account?: string;
   expires_at?: string;
@@ -113,7 +113,9 @@ export interface BatchOperation {
   operation: "Create" | "Update" | "Delete" | "Adopt";
   target_type: PlacementTargetType | "All";
   id?: string;
+  // Selector when id is absent: identity for an Identity, name otherwise.
   name?: string;
+  identity?: string;
   expected_version?: number;
   cascade?: boolean;
   fields?: EntityFields;

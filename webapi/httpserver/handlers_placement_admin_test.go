@@ -160,29 +160,29 @@ func TestPlacementAdminList(t *testing.T) {
 		Type: "Identity",
 		Identity: &htcondor.PlacementIdentity{
 			PlacementEntityMeta: htcondor.PlacementEntityMeta{ID: "i1", Source: "mapfile", Version: 3},
-			ForeignID:           "alice@wisc.edu",
+			Identity:            "alice@wisc.edu",
 			Account:             "alice@ap",
 			ExpiresAt:           exp,
 		},
 	}, {
 		Type:     "Identity",
-		Identity: &htcondor.PlacementIdentity{PlacementEntityMeta: htcondor.PlacementEntityMeta{ID: "i2"}, ForeignID: "bob"},
+		Identity: &htcondor.PlacementIdentity{PlacementEntityMeta: htcondor.PlacementEntityMeta{ID: "i2"}, Identity: "bob"},
 	}}
 	server, admin, _ := newPlacementTestServer(t, fake)
 
-	rec := serveAdmin(t, server, admin("GET", `/api/v1/placement/admin/identities?constraint=Expired&limit=10&name=alice@wisc.edu`, ""))
+	rec := serveAdmin(t, server, admin("GET", `/api/v1/placement/admin/identities?constraint=Expired&limit=10&identity=alice@wisc.edu`, ""))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
 	if fake.gotQuery.TargetType != "Identity" || fake.gotQuery.Requirements != "Expired" ||
-		fake.gotQuery.Limit != 10 || fake.gotQuery.Name != "alice@wisc.edu" {
+		fake.gotQuery.Limit != 10 || fake.gotQuery.Key != "alice@wisc.edu" {
 		t.Errorf("query = %+v", fake.gotQuery)
 	}
 	var got struct {
 		Identities []placementIdentityJSON `json:"identities"`
 	}
 	decodeBody(t, rec, &got)
-	if len(got.Identities) != 2 || got.Identities[0].ForeignID != "alice@wisc.edu" || got.Identities[0].Version != 3 {
+	if len(got.Identities) != 2 || got.Identities[0].Identity != "alice@wisc.edu" || got.Identities[0].Version != 3 {
 		t.Fatalf("identities = %+v", got.Identities)
 	}
 	if got.Identities[0].ExpiresAt == nil || !got.Identities[0].ExpiresAt.Equal(exp) {
@@ -194,6 +194,16 @@ func TestPlacementAdminList(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"projects":[]`) {
 		t.Errorf("empty list not rendered as []: %s", rec.Body.String())
+	}
+
+	// Identities are matched by identity, the rest by name.
+	rec = serveAdmin(t, server, admin("GET", "/api/v1/placement/admin/identities?name=alice@wisc.edu", ""))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("identities?name= = %d, want 400", rec.Code)
+	}
+	rec = serveAdmin(t, server, admin("GET", "/api/v1/placement/admin/accounts?name=alice@ap", ""))
+	if rec.Code != http.StatusOK || fake.gotQuery.Key != "alice@ap" || fake.gotQuery.TargetType != "Account" {
+		t.Errorf("accounts?name= = %d, query %+v", rec.Code, fake.gotQuery)
 	}
 
 	rec = serveAdmin(t, server, admin("GET", "/api/v1/placement/admin/identities?limit=-3", ""))
@@ -235,7 +245,7 @@ func TestPlacementAdminCreate(t *testing.T) {
 	server, admin, _ := newPlacementTestServer(t, fake)
 
 	rec := serveAdmin(t, server, admin("POST", "/api/v1/placement/admin/identities",
-		`{"foreign_id":"alice@wisc.edu","account":"alice@ap","expires_at":"2026-01-01T00:00:00Z","comment":null}`))
+		`{"identity":"alice@wisc.edu","account":"alice@ap","expires_at":"2026-01-01T00:00:00Z","comment":null}`))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -243,10 +253,10 @@ func TestPlacementAdminCreate(t *testing.T) {
 		t.Fatalf("ops = %+v", fake.gotOps)
 	}
 	op := fake.gotOps[0]
-	if op.Operation != "Create" || op.TargetType != "Identity" || op.ID != "" || op.Name != "" {
+	if op.Operation != "Create" || op.TargetType != "Identity" || op.ID != "" || op.Key != "" {
 		t.Errorf("op = %+v", op)
 	}
-	if op.Fields["ForeignId"] != "alice@wisc.edu" || op.Fields["Account"] != "alice@ap" {
+	if op.Fields["Identity"] != "alice@wisc.edu" || op.Fields["Account"] != "alice@ap" {
 		t.Errorf("fields = %+v", op.Fields)
 	}
 	if ts, ok := op.Fields["ExpiresAt"].(time.Time); !ok || ts.Unix() != 1767225600 {
@@ -263,8 +273,9 @@ func TestPlacementAdminCreate(t *testing.T) {
 	}
 
 	for _, body := range []string{
-		`{"foreignid":"typo"}`,
-		`{"foreign_id":5}`,
+		`{"nickname":"x"}`,
+		`{"identity":5}`,
+		`{"name":"alice@wisc.edu","account":"alice@ap"}`,
 		`{"expires_at":"next tuesday"}`,
 		`{}`,
 		`not json`,
@@ -315,7 +326,7 @@ func TestPlacementAdminUpdate(t *testing.T) {
 	if v, ok := op.Fields["ExpiresAt"]; !ok || v != nil {
 		t.Errorf("ExpiresAt = %v (present %v), want nil", v, ok)
 	}
-	if _, ok := op.Fields["ForeignId"]; ok {
+	if _, ok := op.Fields["Identity"]; ok {
 		t.Error("a patch must carry only the fields it changes")
 	}
 	if len(op.Fields) != 2 {
@@ -381,7 +392,7 @@ func TestPlacementAdminBatch(t *testing.T) {
 		"dry_run": true,
 		"operations": [
 			{"operation":"Create","target_type":"Account","fields":{"name":"alice@ap","authorizations":["READ"],"projects":["P"],"default_project":"P"}},
-			{"operation":"Create","target_type":"Identity","fields":{"foreign_id":"alice@wisc.edu","account":"alice@ap"}},
+			{"operation":"Create","target_type":"Identity","fields":{"identity":"alice@wisc.edu","account":"alice@ap"}},
 			{"operation":"Update","target_type":"Account","name":"bob@ap","expected_version":2,"fields":{"default_project":null}}
 		]}`))
 	if rec.Code != http.StatusOK {
@@ -390,7 +401,7 @@ func TestPlacementAdminBatch(t *testing.T) {
 	if !fake.gotDryRun || len(fake.gotOps) != 3 {
 		t.Fatalf("dry %v ops %+v", fake.gotDryRun, fake.gotOps)
 	}
-	if op := fake.gotOps[2]; op.Name != "bob@ap" || op.ExpectedVersion != 2 {
+	if op := fake.gotOps[2]; op.Key != "bob@ap" || op.ExpectedVersion != 2 {
 		t.Errorf("op 2 = %+v", op)
 	} else if v, ok := op.Fields["DefaultProject"]; !ok || v != nil {
 		t.Errorf("DefaultProject = %v, want cleared", v)
@@ -401,6 +412,8 @@ func TestPlacementAdminBatch(t *testing.T) {
 		`{"operations":[{"operation":"Create","target_type":"Account","fields":{"bogus":1}}]}`,
 		`{"operations":[{"operation":"Adopt","target_type":"All","fields":{"name":"x"}}]}`,
 		`{"operations":[], "extra": 1}`,
+		`{"operations":[{"operation":"Delete","target_type":"Identity","name":"alice@wisc.edu"}]}`,
+		`{"operations":[{"operation":"Delete","target_type":"Account","identity":"alice@ap"}]}`,
 	} {
 		rec := serveAdmin(t, server, admin("POST", "/api/v1/placement/admin/batch", body))
 		if rec.Code != http.StatusBadRequest {
@@ -509,5 +522,18 @@ func TestPlacementAdminIsDocumented(t *testing.T) {
 				t.Errorf("%s %s missing from the OpenAPI paths", strings.ToUpper(m), path)
 			}
 		}
+	}
+}
+
+func TestPlacementAdminBatchSelectsIdentityByIdentity(t *testing.T) {
+	fake := newFakeV2()
+	server, admin, _ := newPlacementTestServer(t, fake)
+	rec := serveAdmin(t, server, admin("POST", "/api/v1/placement/admin/batch",
+		`{"operations":[{"operation":"Delete","target_type":"Identity","identity":"alice@wisc.edu","cascade":true}]}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
+	}
+	if op := fake.gotOps[0]; op.Key != "alice@wisc.edu" || op.TargetType != "Identity" || !op.Cascade {
+		t.Errorf("op = %+v", op)
 	}
 }

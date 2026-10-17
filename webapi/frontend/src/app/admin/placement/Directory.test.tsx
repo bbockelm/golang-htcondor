@@ -49,7 +49,7 @@ const identities: DirIdentity[] = [
     id: 'i-map',
     source: 'mapfile',
     version: 3,
-    foreign_id: 'alice@wisc.edu',
+    identity: 'alice@wisc.edu',
     account: 'alice@ap.example',
     expired: false,
     authorizations: ['READ'],
@@ -59,7 +59,7 @@ const identities: DirIdentity[] = [
     id: 'i-int',
     source: 'internal',
     version: 5,
-    foreign_id: 'bob@cilogon',
+    identity: 'bob@cilogon',
     account: 'bob@ap.example',
     display_name: 'Bob',
     expired: false,
@@ -209,7 +209,7 @@ describe('Directory', () => {
     await rowFor('i-map');
     fireEvent.click(screen.getByRole('button', { name: 'Onboard user' }));
     const dialog = await screen.findByRole('dialog', { name: 'Onboard user' });
-    fireEvent.change(within(dialog).getByLabelText('Foreign ID'), { target: { value: 'carol@wisc.edu' } });
+    fireEvent.change(within(dialog).getByLabelText('Identity'), { target: { value: 'carol@wisc.edu' } });
     fireEvent.change(within(dialog).getByLabelText(/^Account/), { target: { value: 'carol@ap.example' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Onboard' }));
     await waitFor(() => expect(batch).toHaveBeenCalledTimes(1));
@@ -220,13 +220,13 @@ describe('Directory', () => {
       'Create Identity',
     ]);
     expect(ops[0].fields.authorizations).toEqual(['READ', 'WRITE']);
-    expect(ops[1].fields).toEqual({ foreign_id: 'carol@wisc.edu', account: 'carol@ap.example' });
+    expect(ops[1].fields).toEqual({ identity: 'carol@wisc.edu', account: 'carol@ap.example' });
   });
 });
 
 describe('onboardOperations', () => {
   const base = {
-    foreignId: 'dan@wisc.edu',
+    identity: 'dan@wisc.edu',
     displayName: '',
     account: 'bob@ap.example',
     expiresAt: null,

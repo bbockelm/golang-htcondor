@@ -116,6 +116,15 @@ const (
 	PlacementSourceInternal = "internal"
 )
 
+// PlacementKeyAttr returns the attribute that holds a target type's natural
+// key: Identity for identities, Name for every other type.
+func PlacementKeyAttr(targetType string) string {
+	if targetType == PlacementTargetIdentity {
+		return "Identity"
+	}
+	return "Name"
+}
+
 // PlacementdAPIVersionAttr is the daemon-ad attribute that advertises which
 // placementd commands the daemon serves.
 const PlacementdAPIVersionAttr = "PlacementdApiVersion"
@@ -179,9 +188,10 @@ type PlacementQuery struct {
 	TargetType string
 	// ID matches one entity by uuid.
 	ID string
-	// Name matches one entity by natural key: the foreign ID for an
-	// Identity, the name for everything else.
-	Name string
+	// Key matches one entity by its natural key: the identity for an
+	// Identity, the name for every other type. It is sent as the type's
+	// key attribute (see PlacementKeyAttr).
+	Key string
 	// Requirements is a ClassAd expression evaluated against each result
 	// ad; only matches are returned. It is sent as an expression, not a
 	// string.
@@ -208,11 +218,12 @@ type PlacementEntityMeta struct {
 	ModifiedBy string
 }
 
-// PlacementIdentity is an external login principal: the foreign ID a web
-// front end derives from an IdP login, mapped to exactly one account.
+// PlacementIdentity is an identity a web front end derives from an IdP
+// login, mapped to exactly one account.
 type PlacementIdentity struct {
 	PlacementEntityMeta
-	ForeignID string
+	// Identity is the identity itself, the type's key.
+	Identity string
 	// AccountID is the uuid of the account; Account is its name.
 	AccountID string
 	Account   string
@@ -239,7 +250,7 @@ type PlacementAccount struct {
 	Authorizations []string
 	Projects       []string
 	DefaultProject string
-	// Identities lists the foreign IDs mapped to this account.
+	// Identities lists the names of the identities mapped to this account.
 	Identities []string
 }
 
@@ -321,9 +332,10 @@ type PlacementOp struct {
 	TargetType string
 	// ID selects the entity by uuid. Not for Create.
 	ID string
-	// Name selects the entity by natural key when ID is empty. Not for
-	// Create. To rename, select by ID and put the new name in Fields.
-	Name string
+	// Key selects the entity by natural key when ID is empty, sent as
+	// the type's key attribute (see PlacementKeyAttr). Not for Create.
+	// To change the key, select by ID and put the new value in Fields.
+	Key string
 	// ExpectedVersion, when non-zero, makes the operation fail with
 	// PlacementErrVersionMismatch unless the entity is at that version.
 	ExpectedVersion int64
@@ -331,7 +343,7 @@ type PlacementOp struct {
 	// reference the target.
 	Cascade bool
 	// Fields are the writable attributes, keyed by ClassAd attribute
-	// name (ForeignId, Account, ExpiresAt, Name, Authorizations, ...).
+	// name (Identity, Account, ExpiresAt, Name, Authorizations, ...).
 	// Values may be string, bool, any integer type, time.Time (sent as
 	// Unix seconds), []string (sent as a ClassAd list), or nil, which is
 	// sent as the literal undefined and so clears the attribute. On
@@ -399,8 +411,8 @@ func placementQueryAd(q PlacementQuery) (*classad.ClassAd, error) {
 	if q.ID != "" {
 		ad.InsertAttrString("Id", q.ID)
 	}
-	if q.Name != "" {
-		ad.InsertAttrString("Name", q.Name)
+	if q.Key != "" {
+		ad.InsertAttrString(PlacementKeyAttr(q.TargetType), q.Key)
 	}
 	if strings.TrimSpace(q.Requirements) != "" {
 		expr, err := classad.ParseExpr(q.Requirements)
@@ -515,8 +527,9 @@ func placementOpAd(op PlacementOp) (*classad.ClassAd, error) {
 	ad.InsertAttrString("Operation", op.Operation)
 	ad.InsertAttrString("TargetType", op.TargetType)
 
-	if op.Operation == PlacementOpCreate && (op.ID != "" || op.Name != "") {
-		return nil, fmt.Errorf("a Create takes no Id or Name selector; put the name in Fields")
+	keyAttr := PlacementKeyAttr(op.TargetType)
+	if op.Operation == PlacementOpCreate && (op.ID != "" || op.Key != "") {
+		return nil, fmt.Errorf("a Create takes no selector; put the %s in Fields", keyAttr)
 	}
 	if op.ID != "" {
 		ad.InsertAttrString("Id", op.ID)
@@ -531,15 +544,21 @@ func placementOpAd(op PlacementOp) (*classad.ClassAd, error) {
 		ad.InsertAttrBool("Cascade", true)
 	}
 
-	// Name is both the natural-key selector and, for accounts, projects
-	// and authorizations, a writable field. One ad holds one Name, so a
-	// rename has to select by ID.
-	_, renames := placementFieldKey(op.Fields, "Name")
-	if op.Name != "" {
-		if renames {
-			return nil, fmt.Errorf("a rename selects by ID, not by Name")
+	// The key attribute is both the selector and a writable field. One
+	// ad holds it once: with an Id it is the new value, without one the
+	// selector. So changing the key has to select by ID.
+	rekeys := placementHasField(op.Fields, keyAttr)
+	if op.Key != "" {
+		if rekeys {
+			return nil, fmt.Errorf("changing the %s selects by Id, not by %s", keyAttr, keyAttr)
 		}
-		ad.InsertAttrString("Name", op.Name)
+		ad.InsertAttrString(keyAttr, op.Key)
+	}
+	// An identity has no Name; the daemon refuses one.
+	if op.TargetType == PlacementTargetIdentity {
+		if placementHasField(op.Fields, "Name") {
+			return nil, fmt.Errorf("an Identity is keyed by Identity, not Name")
+		}
 	}
 
 	// Sorted so the wire bytes, and so any failure message, are stable.
@@ -559,15 +578,15 @@ func placementOpAd(op PlacementOp) (*classad.ClassAd, error) {
 	return ad, nil
 }
 
-// placementFieldKey finds attr in fields case-insensitively, as ClassAd
-// attribute names are.
-func placementFieldKey(fields map[string]any, attr string) (string, bool) {
+// placementHasField reports whether fields sets attr, compared
+// case-insensitively as ClassAd attribute names are.
+func placementHasField(fields map[string]any, attr string) bool {
 	for k := range fields {
 		if strings.EqualFold(k, attr) {
-			return k, true
+			return true
 		}
 	}
-	return "", false
+	return false
 }
 
 // setPlacementField encodes one field value.
@@ -639,7 +658,7 @@ func decodePlacementObject(ad *classad.ClassAd, queried string) PlacementObject 
 	switch typ {
 	case PlacementTargetIdentity:
 		i := &PlacementIdentity{PlacementEntityMeta: meta}
-		i.ForeignID, _ = ad.EvaluateAttrString("ForeignId")
+		i.Identity, _ = ad.EvaluateAttrString("Identity")
 		i.AccountID, _ = ad.EvaluateAttrString("AccountId")
 		i.Account, _ = ad.EvaluateAttrString("Account")
 		i.ExpiresAt = placementUnix(ad, "ExpiresAt")

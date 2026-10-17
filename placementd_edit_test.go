@@ -133,7 +133,7 @@ func TestPlacementdQueryRequestAndDecode(t *testing.T) {
 
 	objs, err := NewPlacementd(f.addr).Query(placementTestContext(t), PlacementQuery{
 		TargetType:   PlacementTargetAccount,
-		Name:         "alice@ap.example",
+		Key:          "alice@ap.example",
 		Requirements: `Source == "internal"`,
 		Projection:   []string{"Name", "Projects"},
 		Limit:        5,
@@ -183,11 +183,11 @@ func TestPlacementdQueryRequestAndDecode(t *testing.T) {
 func TestPlacementdQueryDecodesEveryType(t *testing.T) {
 	f := newFakePlacementdV2(t, []*classad.ClassAd{
 		mustParseAd(t, `[MyType = "PlacementIdentity"; Id = "i1"; Source = "mapfile"; Version = 1;
-			ForeignId = "alice@wisc.edu"; AccountId = "a1"; Account = "alice@ap"; ExpiresAt = 1767225600;
+			Identity = "alice@wisc.edu"; AccountId = "a1"; Account = "alice@ap"; ExpiresAt = 1767225600;
 			Expired = false; DisplayName = "Alice"; Comment = "TA"; Authorizations = {"READ"};
 			Projects = {"P"}; DefaultProject = "P"; LastTokenExpiration = 1767000000]`),
 		// ExpiresAt absent means the mapping never expires.
-		mustParseAd(t, `[MyType = "PlacementIdentity"; Id = "i2"; ForeignId = "bob"; Expired = true]`),
+		mustParseAd(t, `[MyType = "PlacementIdentity"; Id = "i2"; Identity = "bob"; Expired = true]`),
 		mustParseAd(t, `[MyType = "PlacementProject"; Id = "p1"; Name = "ProjA"; Description = "d"; Accounts = {"alice@ap"}]`),
 		mustParseAd(t, `[MyType = "PlacementAuthorization"; Id = "z1"; Name = "READ"; Label = "Read"; Color = "normal"; Description = "x"; Requestable = 1]`),
 		mustParseAd(t, `[MyType = "PlacementMapfileStatus"; PlacementdMapfileLoadTime = 1760000000;
@@ -206,7 +206,7 @@ func TestPlacementdQueryDecodesEveryType(t *testing.T) {
 		t.Fatalf("got %d objects", len(objs))
 	}
 	id := objs[0].Identity
-	if id == nil || id.ForeignID != "alice@wisc.edu" || id.Account != "alice@ap" || id.AccountID != "a1" ||
+	if id == nil || id.Identity != "alice@wisc.edu" || id.Account != "alice@ap" || id.AccountID != "a1" ||
 		id.ExpiresAt.Unix() != 1767225600 || id.DisplayName != "Alice" || id.LastTokenExpiration.Unix() != 1767000000 {
 		t.Errorf("identity = %+v", id)
 	}
@@ -271,7 +271,7 @@ func TestPlacementdEditFraming(t *testing.T) {
 		{
 			Operation: PlacementOpCreate, TargetType: PlacementTargetIdentity,
 			Fields: map[string]any{
-				"ForeignId": "alice@wisc.edu",
+				"Identity":  "alice@wisc.edu",
 				"Account":   "alice@ap.example",
 				"ExpiresAt": time.Unix(1767225600, 0),
 			},
@@ -354,8 +354,8 @@ func TestPlacementdEditFailureCarriesResults(t *testing.T) {
 		mustParseAd(t, `[MyType = "Summary"; ErrorCode = 15; ErrorString = "owned by mapfile"]`),
 	})
 	results, err := NewPlacementd(f.addr).Edit(placementTestContext(t), []PlacementOp{
-		{Operation: PlacementOpDelete, TargetType: PlacementTargetProject, Name: "ProjA", Cascade: true},
-		{Operation: PlacementOpUpdate, TargetType: PlacementTargetAccount, Name: "bob@ap", Fields: map[string]any{"Projects": []string{"P"}}},
+		{Operation: PlacementOpDelete, TargetType: PlacementTargetProject, Key: "ProjA", Cascade: true},
+		{Operation: PlacementOpUpdate, TargetType: PlacementTargetAccount, Key: "bob@ap", Fields: map[string]any{"Projects": []string{"P"}}},
 	}, false)
 	var perr *PlacementError
 	if !errors.As(err, &perr) || perr.Code != PlacementErrOwnedBySource {
@@ -394,8 +394,10 @@ func TestPlacementOpValidation(t *testing.T) {
 	}{
 		{"empty batch", nil},
 		{"too many", make([]PlacementOp, placementMaxOperations+1)},
-		{"create with selector", []PlacementOp{{Operation: "Create", TargetType: "Project", Name: "x"}}},
-		{"rename by name", []PlacementOp{{Operation: "Update", TargetType: "Project", Name: "x", Fields: map[string]any{"Name": "y"}}}},
+		{"create with selector", []PlacementOp{{Operation: "Create", TargetType: "Project", Key: "x"}}},
+		{"rename by name", []PlacementOp{{Operation: "Update", TargetType: "Project", Key: "x", Fields: map[string]any{"Name": "y"}}}},
+		{"rekey identity by identity", []PlacementOp{{Operation: "Update", TargetType: "Identity", Key: "x", Fields: map[string]any{"Identity": "y"}}}},
+		{"identity with a Name", []PlacementOp{{Operation: "Create", TargetType: "Identity", Fields: map[string]any{"Name": "y", "Account": "a"}}}},
 		{"field overrides operation", []PlacementOp{{Operation: "Update", TargetType: "Project", ID: "u", Fields: map[string]any{"operation": "Delete"}}}},
 		{"cascade on update", []PlacementOp{{Operation: "Update", TargetType: "Project", ID: "u", Cascade: true}}},
 		{"unsupported value", []PlacementOp{{Operation: "Update", TargetType: "Project", ID: "u", Fields: map[string]any{"Description": 1.5}}}},
@@ -445,5 +447,45 @@ func TestPlacementErrorNames(t *testing.T) {
 	}
 	if PlacementQueryCommand != 564 || PlacementEditCommand != 565 {
 		t.Errorf("command numbers = %d, %d; want SCHED_VERS(400)+164/165", PlacementQueryCommand, PlacementEditCommand)
+	}
+}
+
+// An identity is keyed by Identity on the wire, in queries and in edits;
+// every other type by Name.
+func TestPlacementIdentityKeyAttribute(t *testing.T) {
+	if PlacementKeyAttr(PlacementTargetIdentity) != "Identity" || PlacementKeyAttr(PlacementTargetAccount) != "Name" {
+		t.Fatalf("key attrs = %q, %q", PlacementKeyAttr(PlacementTargetIdentity), PlacementKeyAttr(PlacementTargetAccount))
+	}
+
+	q, err := placementQueryAd(PlacementQuery{TargetType: PlacementTargetIdentity, Key: "alice@wisc.edu"})
+	if err != nil {
+		t.Fatalf("query ad: %v", err)
+	}
+	if got, _ := q.EvaluateAttrString("Identity"); got != "alice@wisc.edu" {
+		t.Errorf("query Identity = %q", got)
+	}
+	if _, ok := q.Lookup("Name"); ok {
+		t.Error("an identity query must not send Name")
+	}
+
+	sel, err := placementOpAd(PlacementOp{Operation: PlacementOpDelete, TargetType: PlacementTargetIdentity, Key: "alice@wisc.edu"})
+	if err != nil {
+		t.Fatalf("selector op: %v", err)
+	}
+	if got, _ := sel.EvaluateAttrString("Identity"); got != "alice@wisc.edu" {
+		t.Errorf("selector Identity = %q", got)
+	}
+	if _, ok := sel.Lookup("Name"); ok {
+		t.Error("an identity op must not send Name")
+	}
+
+	// With an Id, Identity is the new value.
+	rekey, err := placementOpAd(PlacementOp{Operation: PlacementOpUpdate, TargetType: PlacementTargetIdentity, ID: "u1",
+		Fields: map[string]any{"Identity": "alice@cilogon.org"}})
+	if err != nil {
+		t.Fatalf("rekey op: %v", err)
+	}
+	if got, _ := rekey.EvaluateAttrString("Identity"); got != "alice@cilogon.org" {
+		t.Errorf("rekey Identity = %q", got)
 	}
 }
