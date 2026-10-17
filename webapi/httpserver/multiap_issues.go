@@ -21,13 +21,13 @@ func (s *Handler) multiAPIssueScope(ctx context.Context, r *http.Request, constr
 	if r != nil {
 		schedd = r.URL.Query().Get("schedd")
 	}
-	scope, _, sources, err := s.multi.svc.Scope(user, constraint, schedd)
+	scope, _, sources, err := s.multi.svc.Scope(ctx, user, constraint, schedd)
 	if err != nil {
 		return "", nil, nil, err
 	}
-	sources = s.multi.svc.TableSources(sources, multiap.TableJobs)
+	sources = s.multi.svc.TableSources(ctx, sources, multiap.TableJobs)
 	if includeEnded {
-		sources = s.multi.svc.TableSources(sources, multiap.TableEpochHistory)
+		sources = s.multi.svc.TableSources(ctx, sources, multiap.TableEpochHistory)
 	}
 	return scope, multiap.IssueSource{Service: s.multi.svc}, &sources, nil
 }

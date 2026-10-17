@@ -2509,6 +2509,9 @@ func publicMultiAPReadiness(body map[string]any) map[string]any {
 	if hub, ok := body["hub"].(map[string]any); ok {
 		out["hub"] = map[string]any{"reachable": hub["reachable"]}
 	}
+	if n, ok := body["hubs_reachable"]; ok {
+		out["hubs_reachable"] = n
+	}
 	if reason, ok := body["reason"]; ok {
 		out["reason"] = reason
 	}

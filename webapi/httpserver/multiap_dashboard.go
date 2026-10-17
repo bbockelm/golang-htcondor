@@ -66,12 +66,12 @@ func (s *Handler) handleMultiDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	svc := s.multi.svc
-	scope, names, sources, err := svc.Scope(user, "", r.URL.Query().Get("schedd"))
+	scope, names, sources, err := svc.Scope(ctx, user, "", r.URL.Query().Get("schedd"))
 	if err != nil {
 		s.multiAPError(w, err)
 		return
 	}
-	sources = svc.TableSources(sources, multiap.TableJobs)
+	sources = svc.TableSources(ctx, sources, multiap.TableJobs)
 	resp := DashboardResponse{
 		Username:     htcondor.GetAuthenticatedUserFromContext(ctx),
 		JobsByStatus: map[string]int{},
@@ -128,14 +128,14 @@ func (s *Handler) handleMultiDashboardActivity(w http.ResponseWriter, r *http.Re
 		return
 	}
 	svc := s.multi.svc
-	scope, names, sources, err := svc.Scope(user, "", r.URL.Query().Get("schedd"))
+	scope, names, sources, err := svc.Scope(ctx, user, "", r.URL.Query().Get("schedd"))
 	if err != nil {
 		s.multiAPError(w, err)
 		return
 	}
 	// The lists read jobs, the finished counts and goodput history: an AP
 	// whose stream of either is not usable is reported, not silently short.
-	sources = svc.TableSources(svc.TableSources(sources, multiap.TableJobs), multiap.TableHistory)
+	sources = svc.TableSources(ctx, svc.TableSources(ctx, sources, multiap.TableJobs), multiap.TableHistory)
 	now := time.Now()
 	since := now.Add(-dashboardRecentWindow).Unix()
 	resp := DashboardActivityResponse{
@@ -257,7 +257,9 @@ func (s *Handler) finishedPerAP(ctx context.Context, dbc *dbrpc.Client, scope, u
 	if i := strings.LastIndex(user, "@"); i > 0 {
 		owner = user[:i]
 	}
-	if s.jobWatchFeed != nil {
+	// The feed's departures count only while it follows the hub this
+	// request reads; after a switch it starts over on the new one.
+	if s.jobWatchFeed != nil && s.jobWatchFeed.Origin() == s.multi.svc.HubOrigin(ctx) {
 		for _, d := range s.jobWatchFeed.Departures(owner, time.Unix(since, 0)) {
 			if d.Schedd != "" {
 				add(d.Schedd, d.Cluster, d.Proc)

@@ -21,7 +21,8 @@ import (
 // at the federation hub: the evaluator reads each owner's jobs on every
 // AP from the hub (multiap.WatchSource), and the feed follows the hub's
 // jobs table -- one stream for every AP -- resuming from its cursor
-// across a dropped connection. A tracked job's absence from the queue
+// across a dropped connection. With two hubs both follow the active one,
+// and start over on the other when it changes (multiap.OpenJobsWatch). A tracked job's absence from the queue
 // counts only on an AP the hub's federation_sources vouches for; see
 // multiap.WatchSource and jobwatch.Coverage.
 //
@@ -51,7 +52,7 @@ func (h *Handler) startMultiAPWatches(ctx context.Context) {
 	go func() {
 		defer h.wg.Done()
 		h.logger.Info(logging.DestinationHTTP, "Job watch feed enabled; following the federation hub's jobs table")
-		_ = h.jobWatchFeed.RunResumable(htcondor.WithDaemonCredential(ctx, "job watch feed"), h.watchHubJobsTable)
+		_ = h.jobWatchFeed.RunResumableFrom(htcondor.WithDaemonCredential(ctx, "job watch feed"), h.watchHubJobsTable)
 	}()
 	nudger := jobwatch.NewNudger(h.jobWatchFeed, h.jobWatchEval.CheckOwner,
 		func(format string, args ...any) {
@@ -65,38 +66,10 @@ func (h *Handler) startMultiAPWatches(ctx context.Context) {
 	}()
 }
 
-// watchHubJobsTable opens a watch on the hub's jobs table: from its head
-// with no cursor, else resuming after cursor. The hub answers a cursor it
-// cannot resume from (it restarted, or its change log no longer reaches
-// back) with a Reset and its whole table.
-func (h *Handler) watchHubJobsTable(ctx context.Context, cursor []byte) (<-chan jobwatch.WatchEvent, func(), error) {
-	dbc, closer, err := h.multi.svc.Hub.Client(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	if cursor == nil {
-		if cursor, err = dbc.WatchHead(ctx, multiap.TableJobs); err != nil {
-			closer()
-			return nil, nil, fmt.Errorf("reading the hub's jobs watch head: %w", err)
-		}
-	}
-	raw, stop, err := dbc.WatchTable(ctx, multiap.TableJobs, cursor)
-	if err != nil {
-		closer()
-		return nil, nil, fmt.Errorf("opening the hub's jobs watch: %w", err)
-	}
-	out := make(chan jobwatch.WatchEvent, 64)
-	go func() {
-		defer close(out)
-		for ev := range raw {
-			select {
-			case out <- jobwatch.WatchEvent{Kind: ev.Kind, Key: ev.Key, AdText: ev.AdText, Cursor: ev.Cursor}:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	return out, func() { stop(); closer() }, nil
+// watchHubJobsTable opens a watch on the active hub's jobs table; see
+// multiap.Service.OpenJobsWatch.
+func (h *Handler) watchHubJobsTable(ctx context.Context, from jobwatch.Resume) (<-chan jobwatch.WatchEvent, func(), string, error) {
+	return h.multi.svc.OpenJobsWatch(ctx, from)
 }
 
 // multiAPHubAllowed is the part of the multi-AP allowlist that is not a

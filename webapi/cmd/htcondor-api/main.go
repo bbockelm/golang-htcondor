@@ -1667,6 +1667,26 @@ func loadMultiAPConfig(cfg *config.Config, scheddName, scheddAddr string) (https
 		// Zero, like unset, never skips an AP on the hub's word.
 		mc.BulkFresh = time.Duration(n) * time.Second
 	}
+	// Hub selection among several federation hubs; unset or zero takes
+	// multiap's defaults.
+	for _, k := range []struct {
+		name string
+		into func(n int)
+	}{
+		{"HTTP_API_HUB_SWITCH_SECONDS", func(n int) { mc.HubSwitchAfter = time.Duration(n) * time.Second }},
+		{"HTTP_API_HUB_SWITCH_MARGIN", func(n int) { mc.HubSwitchMargin = n }},
+		{"HTTP_API_HUB_FAIL_AFTER", func(n int) { mc.HubFailAfter = n }},
+	} {
+		v := strings.TrimSpace(firstConfigValue(cfg, k.name))
+		if v == "" {
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return mc, fmt.Errorf("%s must be a whole number, not %q", k.name, v)
+		}
+		k.into(n)
+	}
 	asg, err := loadAPAssignmentConfig(cfg)
 	if err != nil {
 		return mc, err

@@ -1,6 +1,7 @@
 package multiap
 
 import (
+	"context"
 	"time"
 )
 
@@ -53,9 +54,11 @@ func rfc3339(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// APs lists the AP set with the registry's and the hub's view of each.
-func (s *Service) APs() []APInfo {
-	reachable := s.Hub.Status().Reachable
+// APs lists the AP set with the registry's view of each and the view of
+// the hub ctx is pinned to (else the active one).
+func (s *Service) APs(ctx context.Context) []APInfo {
+	ep := s.Hub.For(ctx)
+	reachable := ep.Status().Reachable
 	members := s.Registry.Members()
 	out := make([]APInfo, 0, len(members))
 	for _, m := range members {
@@ -69,7 +72,7 @@ func (s *Service) APs() []APInfo {
 		}
 		info.Trust = APTrust{State: state, Reason: m.Trust.Reason, CheckedAt: rfc3339(m.Trust.CheckedAt),
 			Actions: m.Present && !m.Untrusted() && m.Schedd != nil}
-		src, ok := s.Hub.Source(m.Name)
+		src, ok := ep.Source(m.Name)
 		switch {
 		case ok:
 			info.Hub = APHubState{State: src.State, Reason: src.Reason, LastSeen: rfc3339(src.LastSeen), LastReset: rfc3339(src.LastReset)}

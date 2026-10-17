@@ -101,7 +101,7 @@ func (s *Server) multiEpochsTool(ctx context.Context, name string, args map[stri
 	if id != nil && schedd != "" && !strings.EqualFold(schedd, id.Schedd) {
 		return nil, fmt.Errorf("job_id %s is not on %s; pass one", s.multi.Codec.Format(*id), schedd)
 	}
-	if s.multi.Hub.Federates(multiap.TableEpochHistory) {
+	if s.multi.Hub.For(ctx).Federates(multiap.TableEpochHistory) {
 		return s.multiEpochsFromHub(ctx, user, schedd, id, source, typeName, args)
 	}
 

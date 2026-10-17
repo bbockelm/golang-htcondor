@@ -190,6 +190,10 @@ type Degraded struct {
 
 // Sources is the block every multi-AP read response carries.
 type Sources struct {
+	// Hub names the federation hub the read was served from (its
+	// collector ad Name), when there is one to name. Every count and
+	// state here is that hub's.
+	Hub      string     `json:"hub,omitempty"`
 	APs      int        `json:"aps"`
 	Fresh    int        `json:"fresh"`
 	Degraded []Degraded `json:"degraded"`
@@ -205,8 +209,10 @@ type NotKept struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// view is one read's picture of the AP set.
+// view is one read's picture of the AP set, from one hub.
 type view struct {
+	// hub is the hub the picture is of, and the one the read queries.
+	hub     *HubEndpoint
 	sources Sources
 	// members is every AP in the set, by lower-cased name.
 	members map[string]apregistry.Member
@@ -214,18 +220,21 @@ type view struct {
 	fresh map[string]bool
 }
 
-// snapshot computes the AP set and its freshness. The AP set is the
-// registry's: an AP the hub does not list is absent, never omitted, and
-// hub rows for a schedd outside the set are not served.
-func (s *Service) snapshot() view {
-	v := view{members: map[string]apregistry.Member{}, fresh: map[string]bool{}}
+// snapshot computes the AP set and its freshness on the hub ctx is
+// pinned to (else the active one). The AP set is the registry's: an AP
+// the hub does not list is absent, never omitted, and hub rows for a
+// schedd outside the set are not served.
+func (s *Service) snapshot(ctx context.Context) view {
+	ep := s.Hub.For(ctx)
+	v := view{hub: ep, members: map[string]apregistry.Member{}, fresh: map[string]bool{}}
+	v.sources.Hub = ep.Name()
 	v.sources.Degraded = []Degraded{}
-	reachable := s.Hub.Status().Reachable
+	reachable := ep.Status().Reachable
 	for _, m := range s.Registry.Members() {
 		key := strings.ToLower(m.Name)
 		v.members[key] = m
 		v.sources.APs++
-		src, ok := s.Hub.Source(m.Name)
+		src, ok := ep.Source(m.Name)
 		if m.Untrusted() {
 			// The hub's copy may well be current, and reads still serve
 			// it; but nothing can be done on this AP, and a caller
@@ -273,9 +282,19 @@ func untrustedReason(m apregistry.Member) string {
 	return untrustedMessage + ": " + m.Trust.Reason
 }
 
-// Sources reports the AP set's freshness, for a response that serves no
-// rows of its own.
-func (s *Service) Sources() Sources { return s.snapshot().sources }
+// Sources reports the AP set's freshness on the hub ctx is pinned to
+// (else the active one), for a response that serves no rows of its own.
+func (s *Service) Sources(ctx context.Context) Sources { return s.snapshot(ctx).sources }
+
+// PinHub returns ctx pinned to the active federation hub: every read
+// made with it is served from, and reports the freshness of, that one
+// hub, even if another becomes active meanwhile. A request pins once, so
+// its reads never mix two hubs' answers.
+func (s *Service) PinHub(ctx context.Context) context.Context { return s.Hub.Pin(ctx) }
+
+// HubOrigin names the hub ctx is pinned to and the selection generation
+// it was pinned in (see Hub.Origin).
+func (s *Service) HubOrigin(ctx context.Context) string { return s.Hub.Origin(ctx) }
 
 // allowed is the set of APs a read may return rows from: the requested
 // one, or every member, minus degraded APs when StaleExclude is set.
@@ -479,7 +498,8 @@ func (s *Service) ListJobs(ctx context.Context, req ListRequest, yield func(Row)
 		}
 		cursor = c
 	}
-	v := s.snapshot()
+	ctx = s.PinHub(ctx)
+	v := s.snapshot(ctx)
 	res := &ListResult{Sources: v.sources}
 	schedds, err := s.allowed(v, req.Schedd)
 	if err != nil {
@@ -492,7 +512,7 @@ func (s *Service) ListJobs(ctx context.Context, req ListRequest, yield func(Row)
 	if err != nil {
 		return nil, err
 	}
-	dbc, closer, err := s.Hub.Client(ctx)
+	dbc, closer, err := v.hub.Client(ctx)
 	if err != nil {
 		return nil, errorf(http.StatusServiceUnavailable, "the federation hub is unavailable: %v", err)
 	}

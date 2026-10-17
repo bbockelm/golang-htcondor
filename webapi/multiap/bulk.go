@@ -185,6 +185,8 @@ type BulkAction func(ctx context.Context, m apregistry.Member) (BulkOutcome, err
 
 // FanOut runs act on every member that needs it and reports per AP.
 func (s *Service) FanOut(ctx context.Context, req BulkRequest, act BulkAction) (*BulkReport, error) {
+	// Every skip is decided on one hub's word: its freshness and its rows.
+	ctx = s.PinHub(ctx)
 	balanced, err := ownerscope.Balanced(req.Constraint)
 	if err != nil {
 		return nil, errorf(http.StatusBadRequest, "constraint is not a valid ClassAd expression: %v", err)
@@ -296,7 +298,7 @@ func (s *Service) provablyEmpty(ctx context.Context, req BulkRequest, balanced, 
 	if req.FreshWithin <= 0 || s.Hub == nil {
 		return "", false
 	}
-	age, ok := s.Hub.Freshness(ap)
+	age, ok := s.Hub.For(ctx).Freshness(ap)
 	if !ok || age > req.FreshWithin {
 		return "", false
 	}
@@ -325,7 +327,7 @@ func (s *Service) provablyEmpty(ctx context.Context, req BulkRequest, balanced, 
 	}
 	ctx, cancel := context.WithTimeout(ctx, check)
 	defer cancel()
-	dbc, closer, err := s.Hub.Client(ctx)
+	dbc, closer, err := s.Hub.For(ctx).Client(ctx)
 	if err != nil {
 		return "", false
 	}
@@ -378,32 +380,6 @@ func (s *Service) clock() time.Time {
 		return s.Now()
 	}
 	return time.Now()
-}
-
-// Freshness is how far behind its AP the hub's copy of schedd is, bounded
-// from above: the hub's own staleness measure plus the age of the
-// snapshot this server holds of it. ok is false unless the hub reports
-// the source fresh with a measured staleness -- an unknown lag is never
-// fresh enough.
-//
-// The jobs stream must also be connected with no error: freshness is
-// measured on the syncstatus stream, which says nothing about whether
-// the jobs stream is flowing.
-func (h *Hub) Freshness(schedd string) (time.Duration, bool) {
-	src, ok := h.Source(schedd)
-	if !ok || src.State != StateFresh || !src.StalenessKnown || src.Staleness < 0 {
-		return 0, false
-	}
-	if !src.JobsConnected || src.JobsLastError != "" {
-		return 0, false
-	}
-	h.mu.RLock()
-	snapshotAge := h.now().Sub(h.sourcesAt)
-	h.mu.RUnlock()
-	if snapshotAge < 0 {
-		snapshotAge = 0
-	}
-	return time.Duration(src.Staleness)*time.Second + snapshotAge, true
 }
 
 // BulkSummary is a one-line description of a report, for logs and tool

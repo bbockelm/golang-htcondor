@@ -13,8 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/PelicanPlatform/classad/dbrpc"
-
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -48,11 +46,19 @@ type MultiAPConfig struct {
 	// ScheddConstraint is HTTP_API_SCHEDD_CONSTRAINT: the AP set, over
 	// ScheddAds.
 	ScheddConstraint string
-	// HubName and HubAddress are HTTP_API_HUB_NAME / _ADDRESS: pin the
-	// federation hub instead of discovering the HTCondorDB ad that
-	// carries FederationConstraint.
+	// HubName and HubAddress are HTTP_API_HUB_NAME / _ADDRESS: name the
+	// federation hubs (one, or several separated by commas or spaces),
+	// or dial one at a fixed address, instead of discovering every
+	// HTCondorDB ad that carries FederationConstraint.
 	HubName    string
 	HubAddress string
+	// HubSwitchAfter, HubSwitchMargin and HubFailAfter are
+	// HTTP_API_HUB_SWITCH_SECONDS, _SWITCH_MARGIN and _FAIL_AFTER: how
+	// the active hub is chosen among several (multiap.HubPolicy). Zero
+	// takes the default.
+	HubSwitchAfter  time.Duration
+	HubSwitchMargin int
+	HubFailAfter    int
 	// Stale is HTTP_API_MULTI_AP_STALE: include (default) or exclude a
 	// degraded AP's rows from unscoped reads.
 	Stale string
@@ -90,7 +96,7 @@ func (c MultiAPConfig) Enabled() bool {
 type multiAPMode struct {
 	svc        *multiap.Service
 	registry   *apregistry.Registry // nil in tests that supply a service
-	hubLoc     *dbmirror.Locator    // nil in tests
+	hubLocs    *hubLocators         // nil in tests
 	spokeLoc   *dbmirror.Locator    // nil in tests
 	constraint string
 	codec      jobid.Codec
@@ -159,24 +165,21 @@ func newMultiAPMode(cfg HandlerConfig, logger *logging.Logger) (*multiAPMode, er
 	if err != nil {
 		return nil, err
 	}
-	hubOpts := dbmirror.Options{Name: mc.HubName, Address: mc.HubAddress}
-	if mc.HubName == "" {
-		hubOpts.Constraint = dbmirror.HubConstraint
+	m.hubLocs = &hubLocators{collector: cfg.Collector, cfg: cfg.HTCondorConfig}
+	hub, err := newHubSet(mc, m.hubLocs, logger)
+	if err != nil {
+		return nil, err
 	}
-	// The database on this host is a spoke, not the hub, unless the
-	// operator pinned the hub's address -- then asking that address
-	// directly is the right fallback.
-	hubOpts.NoLocalFallback = mc.HubAddress == ""
-	m.hubLoc = dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, hubOpts)
+	// Hubs are ranked on the access points this server serves.
+	hub.SetMembership(func(schedd string) bool {
+		_, ok := reg.Get(schedd)
+		return ok
+	})
 	m.spokeLoc = dbmirror.NewLocatorWithOptions(cfg.Collector, cfg.HTCondorConfig, dbmirror.Options{})
-	hubLoc := m.hubLoc
 	m.registry = reg
 	m.svc = &multiap.Service{
-		Registry: reg,
-		Hub: multiap.NewHub(func(ctx context.Context) (*dbrpc.Client, func(), error) {
-			c, closer, _, err := hubLoc.Client(ctx)
-			return c, closer, err
-		}, 0),
+		Registry:  reg,
+		Hub:       hub,
 		Spokes:    m.spokeLoc,
 		Codec:     codec,
 		Stale:     stale,
@@ -221,8 +224,8 @@ func (m *multiAPMode) setTokenSource(src func(ctx context.Context) (string, erro
 	if m == nil || src == nil {
 		return
 	}
-	if m.hubLoc != nil {
-		m.hubLoc.SetTokenSource(src)
+	if m.hubLocs != nil {
+		m.hubLocs.setTokenSource(src)
 	}
 	if m.spokeLoc != nil {
 		m.spokeLoc.SetTokenSource(src)
@@ -293,7 +296,7 @@ func (h *Handler) startMultiAP(ctx context.Context) {
 			})
 		}()
 	}
-	if m.svc.Hub != nil && m.hubLoc != nil {
+	if m.svc.Hub != nil && m.hubLocs != nil {
 		h.wg.Add(1)
 		go func() {
 			defer h.wg.Done()
@@ -307,7 +310,8 @@ func (h *Handler) startMultiAP(ctx context.Context) {
 					if err != nil {
 						h.logger.Warn(logging.DestinationHTTP, "Federation hub is not answering", "error", err)
 					} else {
-						h.logger.Info(logging.DestinationHTTP, "Federation hub is answering", "sources", m.svc.Hub.Status().Sources)
+						st := m.svc.Hub.Status()
+						h.logger.Info(logging.DestinationHTTP, "Federation hub is answering", "hub", st.Name, "sources", st.Sources)
 					}
 					lastErr = msg
 				}
@@ -553,7 +557,9 @@ func (h *Handler) multiAPCaller(w http.ResponseWriter, r *http.Request) (context
 		h.multiAPError(w, err)
 		return nil, "", false
 	}
-	return ctx, user, true
+	// One federation hub for the whole request: every read it makes, and
+	// every freshness it reports, is that hub's.
+	return h.multi.svc.PinHub(ctx), user, true
 }
 
 func parseLimit(r *http.Request) (int, error) {
@@ -778,7 +784,11 @@ type APsResponse struct {
 	APs        []multiap.APInfo `json:"aps"`
 	Sources    multiap.Sources  `json:"sources"`
 	Registry   *APRegistryState `json:"registry,omitempty"`
-	Hub        APHubReach       `json:"hub"`
+	// Hub is the federation hub this answer comes from; Hubs every hub
+	// this server knows, the one reads go to now marked active.
+	Hub       APHubReach   `json:"hub"`
+	Hubs      []APHubReach `json:"hubs,omitempty"`
+	HubSwitch *APHubSwitch `json:"hub_switch,omitempty"`
 	// Assignment is where the caller's new work goes; each AP's submit
 	// says whether the caller may submit there.
 	Assignment *APAssignmentInfo `json:"assignment,omitempty"`
@@ -790,11 +800,56 @@ type APRegistryState struct {
 	LastError   string `json:"last_error,omitempty"`
 }
 
-// APHubReach is whether the federation hub is answering.
+// APHubReach is whether a federation hub is answering.
 type APHubReach struct {
+	// Name is the hub's collector ad Name, Address where it was found.
+	Name    string `json:"name,omitempty"`
+	Address string `json:"address,omitempty"`
+	// Active is whether reads go to this hub now.
+	Active      bool   `json:"active"`
 	Reachable   bool   `json:"reachable"`
 	LastSuccess string `json:"last_success,omitempty"`
 	LastError   string `json:"last_error,omitempty"`
+	// FreshAPs is how many access points this hub holds fresh, which is
+	// what hub selection ranks on.
+	FreshAPs int `json:"fresh_aps"`
+}
+
+// APHubSwitch is the last change of active hub.
+type APHubSwitch struct {
+	From   string `json:"from,omitempty"`
+	To     string `json:"to,omitempty"`
+	Reason string `json:"reason"`
+	At     string `json:"at"`
+}
+
+// hubReach reports a hub's status.
+func (m *multiAPMode) hubReach(st multiap.HubStatus) APHubReach {
+	return APHubReach{Name: st.Name, Address: m.hubAddress(st), Active: st.Active, Reachable: st.Reachable,
+		LastSuccess: timeOrEmpty(st.LastSuccess), LastError: st.LastError, FreshAPs: st.FreshAPs}
+}
+
+// hubReport is the hub ctx is pinned to, every known hub, and the last
+// switch, for /api/v1/aps and /readyz.
+func (m *multiAPMode) hubReport(ctx context.Context) (APHubReach, []APHubReach, *APHubSwitch) {
+	pinned := m.svc.Hub.For(ctx)
+	var cur APHubReach
+	var all []APHubReach
+	for _, st := range m.svc.Hub.Statuses() {
+		r := m.hubReach(st)
+		all = append(all, r)
+		if strings.EqualFold(st.Name, pinned.Name()) {
+			cur = r
+		}
+	}
+	if len(all) == 0 {
+		cur = m.hubReach(m.svc.Hub.Status())
+	}
+	var sw *APHubSwitch
+	if last := m.svc.Hub.LastSwitch(); last != nil {
+		sw = &APHubSwitch{From: last.From, To: last.To, Reason: last.Reason, At: timeOrEmpty(last.At)}
+	}
+	return cur, all, sw
 }
 
 func timeOrEmpty(t time.Time) string {
@@ -819,12 +874,14 @@ func (h *Handler) handleAPs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	hs := h.multi.svc.Hub.Status()
+	cur, all, sw := h.multi.hubReport(ctx)
 	resp := APsResponse{
 		Constraint: h.multi.constraint,
-		APs:        h.multi.svc.APs(),
-		Sources:    h.multi.svc.Sources(),
-		Hub:        APHubReach{Reachable: hs.Reachable, LastSuccess: timeOrEmpty(hs.LastSuccess), LastError: hs.LastError},
+		APs:        h.multi.svc.APs(ctx),
+		Sources:    h.multi.svc.Sources(ctx),
+		Hub:        cur,
+		Hubs:       all,
+		HubSwitch:  sw,
 	}
 	if h.multi.registry != nil {
 		st := h.multi.registry.Status()
@@ -853,14 +910,23 @@ func (h *Handler) handleAPs(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, resp)
 }
 
-// multiAPReadiness is /readyz in multi-AP mode: ready when the hub
-// answers and the AP set is non-empty. One AP being down never makes the
-// server unready -- at fifty, one always is; the per-AP map says which.
+// multiAPReadiness is /readyz in multi-AP mode: ready when some
+// federation hub answers and the AP set is non-empty. One AP being down
+// never makes the server unready -- at fifty, one always is; the per-AP
+// map says which. Nor does one of two hubs: reads fail over to the other.
 func (h *Handler) multiAPReadiness() (bool, map[string]any) {
-	hs := h.multi.svc.Hub.Status()
+	ctx := h.multi.svc.PinHub(context.Background())
+	cur, all, sw := h.multi.hubReport(ctx)
+	reachable := 0
+	for _, hub := range all {
+		if hub.Reachable {
+			reachable++
+		}
+	}
+	anyReachable := reachable > 0
 	members := h.multi.svc.Registry.Members()
 	aps := map[string]any{}
-	for _, info := range h.multi.svc.APs() {
+	for _, info := range h.multi.svc.APs(ctx) {
 		aps[info.Schedd] = map[string]any{
 			"in_collector": info.InCollector,
 			"hub_state":    info.Hub.State,
@@ -870,19 +936,28 @@ func (h *Handler) multiAPReadiness() (bool, map[string]any) {
 	body := map[string]any{
 		"mode": "multi-ap",
 		"hub": map[string]any{
-			"reachable":    hs.Reachable,
-			"last_success": timeOrEmpty(hs.LastSuccess),
-			"last_error":   hs.LastError,
+			"name":         cur.Name,
+			"reachable":    cur.Reachable,
+			"last_success": cur.LastSuccess,
+			"last_error":   cur.LastError,
 		},
-		"aps":       aps,
-		"ap_count":  len(members),
-		"sources":   h.multi.svc.Sources(),
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"hubs":           all,
+		"hubs_reachable": reachable,
+		"aps":            aps,
+		"ap_count":       len(members),
+		"sources":        h.multi.svc.Sources(ctx),
+		"timestamp":      time.Now().UTC().Format(time.RFC3339),
 	}
-	ready := hs.Reachable && len(members) > 0
+	if sw != nil {
+		body["hub_switch"] = sw
+	}
+	if e := h.multi.svc.Hub.DiscoveryError(); e != "" {
+		body["hub_discovery_error"] = e
+	}
+	ready := anyReachable && len(members) > 0
 	switch {
-	case !hs.Reachable:
-		body["reason"] = "the federation hub is not answering"
+	case !anyReachable:
+		body["reason"] = "no federation hub is answering"
 	case len(members) == 0:
 		body["reason"] = "no access point matches HTTP_API_SCHEDD_CONSTRAINT yet"
 	}

@@ -207,7 +207,7 @@ func TestWatchWaitsOnAnUnreachableHub(t *testing.T) {
 	r.pass()
 	r.hub.DeleteJob(ap2, 1, 0)
 	r.advanceHub(3 * time.Hour)
-	r.svc.Hub.dial = func(context.Context) (*dbrpc.Client, func(), error) {
+	r.svc.Hub.Active().dial = func(context.Context) (*dbrpc.Client, func(), error) {
 		return nil, nil, errors.New("connection refused")
 	}
 	if st := r.pass(); st.Fired != 0 || st.Errors != 1 {
@@ -235,17 +235,17 @@ func TestWatchCatchUpMustHoldAcrossTheRead(t *testing.T) {
 		"a replay finished": parse(sourceAd(ap2, StateFresh, "JobsSynced = true", "JobsSyncedAt = 200")),
 		"the row went":      {},
 	} {
-		if _, ok := r.svc.coverage(synced, after, at).AsOf(ap2); ok {
+		if _, ok := r.svc.coverage("", synced, after, at).AsOf(ap2); ok {
 			t.Errorf("%s during the read, yet ap2 was vouched for", name)
 		}
 	}
 	// Not caught up before the read is not vouched for, whatever the
 	// read after it says.
 	catching := parse(sourceAd(ap2, StateFresh, "JobsSynced = false", "JobsSyncedAt = 100"))
-	if _, ok := r.svc.coverage(catching, synced, at).AsOf(ap2); ok {
+	if _, ok := r.svc.coverage("", catching, synced, at).AsOf(ap2); ok {
 		t.Error("ap2 was vouched for on a read made while its jobs were still catching up")
 	}
-	if _, ok := r.svc.coverage(synced, synced, at).AsOf(ap2); !ok {
+	if _, ok := r.svc.coverage("", synced, synced, at).AsOf(ap2); !ok {
 		t.Error("an unchanged catch-up across the read was not vouched for")
 	}
 }
@@ -348,7 +348,7 @@ func TestWatchCoverageBound(t *testing.T) {
 	r.hub.PutSourceAd(ap2, sourceAd(ap2, StateFresh, "StalenessSeconds = 30"))
 	r.advanceHub(0)
 	at := r.svc.Hub.Status().LastSuccess
-	asOf, ok := r.svc.WatchCoverage().AsOf(ap2)
+	asOf, ok := r.svc.WatchCoverage(context.Background()).AsOf(ap2)
 	if !ok {
 		t.Fatal("a fresh, connected ap2 is not vouched for")
 	}
@@ -393,7 +393,7 @@ func TestHubFederatesFromSourceRows(t *testing.T) {
 }
 
 // followHub runs a feed over the in-process hub's jobs table, as the
-// server does, until the test ends.
+// server does (Service.OpenJobsWatch), until the test ends.
 func followHub(t *testing.T, r *watchRig) *jobwatch.Feed {
 	t.Helper()
 	feed := jobwatch.NewFeed(nil)
@@ -401,31 +401,7 @@ func followHub(t *testing.T, r *watchRig) *jobwatch.Feed {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() {
-		_ = feed.RunResumable(ctx, func(ctx context.Context, cursor []byte) (<-chan jobwatch.WatchEvent, func(), error) {
-			dbc, closer, err := r.hub.Dial(ctx)
-			if err != nil {
-				return nil, nil, err
-			}
-			if cursor == nil {
-				if cursor, err = dbc.WatchHead(ctx, TableJobs); err != nil {
-					closer()
-					return nil, nil, err
-				}
-			}
-			raw, stop, err := dbc.WatchTable(ctx, TableJobs, cursor)
-			if err != nil {
-				closer()
-				return nil, nil, err
-			}
-			out := make(chan jobwatch.WatchEvent, 64)
-			go func() {
-				defer close(out)
-				for ev := range raw {
-					out <- jobwatch.WatchEvent{Kind: ev.Kind, Key: ev.Key, AdText: ev.AdText, Cursor: ev.Cursor}
-				}
-			}()
-			return out, func() { stop(); closer() }, nil
-		})
+		_ = feed.RunResumableFrom(ctx, r.svc.OpenJobsWatch)
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for !feed.Warm() {

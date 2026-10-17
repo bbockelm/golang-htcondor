@@ -23,6 +23,15 @@ import (
 // retiring or untrusted source, a jobs stream that is down or whose last
 // session failed, a hub whose sources this server has not heard from --
 // is not vouched for, and the evaluator waits.
+//
+// With two hubs, an evaluation pass is pinned to one (PinPass): its
+// queue read, both federation_sources reads around it, its history read
+// and the feed's terminal records all come from that hub, and the
+// coverage it returns names the hub and selection generation as its
+// origin. The evaluator forgets what it remembered about a watch's jobs
+// when the origin changes, so after a switch absence is re-earned on the
+// new hub -- which vouches for nothing until its own federation_sources
+// says its jobs stream from that AP has caught up.
 
 // AttrUser is the attribute multi-AP owner scoping keys on.
 const AttrUser = "User"
@@ -38,7 +47,14 @@ type WatchSource struct {
 	Feed *jobwatch.Feed
 }
 
-var _ jobwatch.CoveredSource = WatchSource{}
+var (
+	_ jobwatch.CoveredSource = WatchSource{}
+	_ jobwatch.PassPinner    = WatchSource{}
+)
+
+// PinPass implements jobwatch.PassPinner: one evaluation pass reads one
+// hub.
+func (w WatchSource) PinPass(ctx context.Context) context.Context { return w.Service.PinHub(ctx) }
 
 // Queue implements jobwatch.Source. The evaluator reads a CoveredSource
 // through QueueCovered; this answers the same rows without saying which
@@ -71,7 +87,9 @@ func (w WatchSource) QueueCovered(ctx context.Context, owner string, attrs []str
 	if err != nil {
 		return false, nil, err
 	}
-	before, at, err := s.Hub.ReadSources(ctx)
+	ctx = s.PinHub(ctx)
+	hub := s.Hub.For(ctx)
+	before, at, err := hub.ReadSources(ctx)
 	if err != nil {
 		return false, nil, fmt.Errorf("reading the federation hub's sources: %w", err)
 	}
@@ -87,19 +105,21 @@ func (w WatchSource) QueueCovered(ctx context.Context, owner string, attrs []str
 		return false, nil, fmt.Errorf("reading the federation hub's queue: %w", err)
 	}
 	truncated := seen > limit
-	after, _, aerr := s.Hub.ReadSources(ctx)
+	after, _, aerr := hub.ReadSources(ctx)
+	origin := s.HubOrigin(ctx)
 	if aerr != nil {
 		// Nothing confirms the catch-up held across the read: vouch for
 		// nothing this pass.
-		return truncated, jobwatch.NewCoverage(), nil
+		return truncated, jobwatch.NewCoverageFrom(origin), nil
 	}
-	return truncated, s.coverage(before, after, at), nil
+	return truncated, s.coverage(origin, before, after, at), nil
 }
 
 // coverage vouches for each member that before vouches for at time at,
 // and whose jobs catch-up, where the hub publishes one, after confirms.
-func (s *Service) coverage(before, after map[string]Source, at time.Time) *jobwatch.Coverage {
-	cov := jobwatch.NewCoverage()
+// before and after are one hub's, named by origin.
+func (s *Service) coverage(origin string, before, after map[string]Source, at time.Time) *jobwatch.Coverage {
+	cov := jobwatch.NewCoverageFrom(origin)
 	for _, m := range s.Registry.Members() {
 		key := strings.ToLower(m.Name)
 		src, ok := before[key]
@@ -134,6 +154,7 @@ func (w WatchSource) History(ctx context.Context, owner string, attrs []string, 
 	if err != nil {
 		return err
 	}
+	ctx = s.PinHub(ctx)
 	seen := map[[3]string]bool{}
 	emit := func(ad *classad.ClassAd) {
 		k := rowKey(ad)
@@ -152,7 +173,9 @@ func (w WatchSource) History(ctx context.Context, owner string, attrs []string, 
 	archiveErr := s.hubStream(ctx, TableHistory, constraint, projectionWith(attrs, AttrScheddName, AttrUser), limit, emit)
 
 	streamed := 0
-	if w.Feed != nil {
+	// The feed's records count only while it follows the hub this pass
+	// reads: after a switch it starts over on the new hub.
+	if w.Feed != nil && w.Feed.Origin() == s.HubOrigin(ctx) {
 		for _, ad := range w.Feed.Terminal(owner, since) {
 			// The ad itself must say the job finished: a delete on the
 			// hub is also an AP being retired or reconciled.
@@ -196,17 +219,20 @@ const DefaultHubStateInterval = 5 * time.Second
 // while its rows are still arriving.
 const resetSettle = 10 * time.Minute
 
-// WatchCoverage is which APs the snapshot of federation_sources vouches
-// for (see vouch). The evaluator reads the sources itself around each
-// queue read (QueueCovered); this is the same rule over the snapshot.
-func (s *Service) WatchCoverage() *jobwatch.Coverage {
-	cov := jobwatch.NewCoverage()
-	st := s.Hub.Status()
+// WatchCoverage is which APs the snapshot of federation_sources of the
+// hub ctx is pinned to (else the active one) vouches for (see vouch).
+// The evaluator reads the sources itself around each queue read
+// (QueueCovered); this is the same rule over the snapshot.
+func (s *Service) WatchCoverage(ctx context.Context) *jobwatch.Coverage {
+	ctx = s.PinHub(ctx)
+	hub := s.Hub.For(ctx)
+	cov := jobwatch.NewCoverageFrom(s.HubOrigin(ctx))
+	st := hub.Status()
 	if !st.Reachable {
 		return cov
 	}
 	for _, m := range s.Registry.Members() {
-		src, ok := s.Hub.Source(m.Name)
+		src, ok := hub.Source(m.Name)
 		if !ok {
 			continue
 		}
@@ -289,11 +315,12 @@ func (s *Service) memberScope(user, constraint string) (string, error) {
 	return scoped(user, constraint, names)
 }
 
-// hubStream reads rows from a hub table, parsed. A row that will not
-// parse stops the read: to a watch a missing job is a finished one.
+// hubStream reads rows from a table of the hub ctx is pinned to (else
+// the active one), parsed. A row that will not parse stops the read: to
+// a watch a missing job is a finished one.
 func (s *Service) hubStream(ctx context.Context, table, constraint string, proj []string, limit int,
 	yield func(*classad.ClassAd)) error {
-	dbc, closer, err := s.Hub.Client(ctx)
+	dbc, closer, err := s.Hub.For(ctx).Client(ctx)
 	if err != nil {
 		return err
 	}
@@ -312,4 +339,68 @@ func (s *Service) hubStream(ctx context.Context, table, constraint string, proj 
 		err = perr
 	}
 	return err
+}
+
+// OpenJobsWatch opens a watch on the active hub's jobs table, for the
+// job-watch feed (jobwatch.Feed.RunResumableFrom): resuming after
+// from.Cursor when from is this hub's, from the table's head otherwise.
+// origin names the hub and selection generation (Hub.Origin).
+//
+// A cursor is a position in one hub's change log, so another hub's is
+// never sent: after a switch the feed starts over on the new hub, holding
+// nothing from the old one. The stream ends when the active hub changes,
+// which is what moves the feed. The hub answers a cursor of its own it
+// cannot resume from (it restarted, or its change log no longer reaches
+// back) with a Reset and its whole table.
+func (s *Service) OpenJobsWatch(ctx context.Context, from jobwatch.Resume) (<-chan jobwatch.WatchEvent, func(), string, error) {
+	if s.Hub == nil {
+		return nil, nil, "", fmt.Errorf("no federation hub is configured")
+	}
+	pin := s.Hub.pinNow()
+	origin := pin.origin()
+	cursor := from.Cursor
+	if from.Origin != origin {
+		cursor = nil
+	}
+	dbc, closer, err := pin.ep.Client(ctx)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if cursor == nil {
+		if cursor, err = dbc.WatchHead(ctx, TableJobs); err != nil {
+			closer()
+			return nil, nil, "", fmt.Errorf("reading the hub's jobs watch head: %w", err)
+		}
+	}
+	raw, stop, err := dbc.WatchTable(ctx, TableJobs, cursor)
+	if err != nil {
+		closer()
+		return nil, nil, "", fmt.Errorf("opening the hub's jobs watch: %w", err)
+	}
+	out := make(chan jobwatch.WatchEvent, 64)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case ev, ok := <-raw:
+				if !ok {
+					return
+				}
+				select {
+				case out <- jobwatch.WatchEvent{Kind: ev.Kind, Key: ev.Key, AdText: ev.AdText, Cursor: ev.Cursor}:
+				case <-ctx.Done():
+					return
+				case <-pin.changed:
+					return
+				}
+			case <-ctx.Done():
+				return
+			case <-pin.changed:
+				// Another hub is active: end this stream so the feed
+				// reopens on it.
+				return
+			}
+		}
+	}()
+	return out, func() { stop(); closer() }, origin, nil
 }

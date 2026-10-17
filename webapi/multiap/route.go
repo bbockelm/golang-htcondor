@@ -164,7 +164,8 @@ func (s *Service) candidates(ctx context.Context, user string, id jobid.ID) []Jo
 	if s.Hub == nil {
 		return nil
 	}
-	cands, err := s.findCandidates(ctx, s.snapshot(), user, id)
+	ctx = s.PinHub(ctx)
+	cands, err := s.findCandidates(ctx, s.snapshot(ctx), user, id)
 	if err != nil {
 		return nil
 	}

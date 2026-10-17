@@ -521,7 +521,7 @@ func TestUserForRefusesAnotherDomain(t *testing.T) {
 func TestHubSourcesAndAPs(t *testing.T) {
 	hub := seededHub(t)
 	s := newService(t, hub, newFakeRegistry("ap1.example.org", "ap3.example.org"))
-	aps := s.APs()
+	aps := s.APs(context.Background())
 	if len(aps) != 2 || aps[0].Hub.State != StateFresh || aps[1].Hub.State != StateAbsent {
 		t.Errorf("APs = %+v", aps)
 	}

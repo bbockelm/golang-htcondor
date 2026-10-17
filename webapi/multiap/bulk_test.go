@@ -125,7 +125,7 @@ func TestFanOutContactsEverythingWithoutProof(t *testing.T) {
 
 	// The hub's snapshot says fresh, but the hub stops answering queries:
 	// nothing is proven, so nothing is skipped.
-	s.Hub.dial = func(context.Context) (*dbrpc.Client, func(), error) { return nil, nil, errors.New("hub down") }
+	s.Hub.Active().dial = func(context.Context) (*dbrpc.Client, func(), error) { return nil, nil, errors.New("hub down") }
 	rec = &bulkRecorder{}
 	if _, err := s.FanOut(context.Background(), BulkRequest{User: "alice@d", Owner: "alice", Constraint: "true",
 		FreshWithin: time.Minute}, rec.act); err != nil {
@@ -282,7 +282,7 @@ func TestFanOutUndefinedIsNotNoMatch(t *testing.T) {
 // A hub that does not answer proves nothing, quickly.
 func TestFanOutHungHubIsNotProof(t *testing.T) {
 	s := reviewService(t, func(*testDB) {})
-	s.Hub.dial = func(ctx context.Context) (*dbrpc.Client, func(), error) { <-ctx.Done(); return nil, nil, ctx.Err() }
+	s.Hub.Active().dial = func(ctx context.Context) (*dbrpc.Client, func(), error) { <-ctx.Done(); return nil, nil, ctx.Err() }
 	rec := &bulkRecorder{}
 	start := time.Now()
 	rep, err := s.FanOut(context.Background(), BulkRequest{User: "alice@d", Owner: "alice", Constraint: "true",

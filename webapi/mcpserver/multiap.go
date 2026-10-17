@@ -149,7 +149,7 @@ func (s *Server) callMultiAPTool(ctx context.Context, name string, args map[stri
 	case "aggregate_jobs":
 		result, err = s.multiAggregateTool(ctx, args)
 	case "list_access_points":
-		result = s.multiListAPsTool()
+		result = s.multiListAPsTool(ctx)
 	case "remove_jobs":
 		result, err = s.multiRemoveJobsTool(ctx, args)
 	case "query_job_epochs", "query_transfer_history":
@@ -370,9 +370,9 @@ func (s *Server) multiAggregateTool(ctx context.Context, args map[string]interfa
 	return structuredTextResult(b.String(), structured), nil
 }
 
-func (s *Server) multiListAPsTool() interface{} {
-	aps := s.multi.APs()
-	sources := s.multi.Sources()
+func (s *Server) multiListAPsTool(ctx context.Context) interface{} {
+	aps := s.multi.APs(ctx)
+	sources := s.multi.Sources(ctx)
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d access point(s):\n", len(aps))
 	for _, ap := range aps {

@@ -77,11 +77,12 @@ type MetricsResult struct {
 // request's: every hub read a samples request makes -- this, the job
 // resolution, the scope and its sources block, the aggregate -- is of
 // the hub that request reads.
-func (s *Service) MetricsOff(_ context.Context) (Sources, bool) {
-	if s.Hub.Federates(TableJobMetrics) {
+func (s *Service) MetricsOff(ctx context.Context) (Sources, bool) {
+	ctx = s.PinHub(ctx)
+	if s.Hub.For(ctx).Federates(TableJobMetrics) {
 		return Sources{}, false
 	}
-	return s.TableSources(s.Sources(), TableJobMetrics), true
+	return s.TableSources(ctx, s.Sources(ctx), TableJobMetrics), true
 }
 
 // AggregateMetrics aggregates the caller's job_metrics samples on the
@@ -91,8 +92,9 @@ func (s *Service) AggregateMetrics(ctx context.Context, req MetricsRequest) (*Me
 	if req.User == "" {
 		return nil, errorf(http.StatusUnauthorized, "the caller's identity could not be established")
 	}
-	// The deadline covers the job's resolution as well as the aggregate.
-	ctx, cancel := context.WithTimeout(ctx, MetricsTimeout)
+	// The deadline covers the job's resolution as well as the aggregate,
+	// and all of it reads one hub.
+	ctx, cancel := context.WithTimeout(s.PinHub(ctx), MetricsTimeout)
 	defer cancel()
 	if src, off := s.MetricsOff(ctx); off {
 		return &MetricsResult{Sources: src}, ErrMetricsNotFederated
@@ -129,11 +131,11 @@ func (s *Service) AggregateMetrics(ctx context.Context, req MetricsRequest) (*Me
 		clauses = append(clauses, "("+c+")")
 	}
 	constraint := strings.Join(append([]string{base}, clauses...), " && ")
-	scope, _, sources, err := s.Scope(req.User, constraint, schedd)
+	scope, _, sources, err := s.Scope(ctx, req.User, constraint, schedd)
 	if err != nil {
 		return nil, err
 	}
-	res := &MetricsResult{Sources: s.TableSources(sources, TableJobMetrics), Job: job}
+	res := &MetricsResult{Sources: s.TableSources(ctx, sources, TableJobMetrics), Job: job}
 	dbc, closer, err := s.HubClient(ctx)
 	if err != nil {
 		return nil, err

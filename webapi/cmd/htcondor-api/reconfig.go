@@ -240,6 +240,9 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_MULTI_AP_STALE"},
 	{name: "HTTP_API_JOB_ID_CODEC"},
 	{name: "HTTP_API_BULK_FRESH_SECONDS"},
+	{name: "HTTP_API_HUB_SWITCH_SECONDS"},
+	{name: "HTTP_API_HUB_SWITCH_MARGIN"},
+	{name: "HTTP_API_HUB_FAIL_AFTER"},
 	// The assignment chain is built at startup; the mapfile's and token
 	// file's contents are re-read on every reconfigure (see reconfigure).
 	{name: "HTTP_API_AP_ASSIGNMENT"},

@@ -136,13 +136,13 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 		if err != nil {
 			return nil, err
 		}
-		clause, _, srcs, err := s.multi.Scope(user, "", stringArg(args, "schedd"))
+		clause, _, srcs, err := s.multi.Scope(ctx, user, "", stringArg(args, "schedd"))
 		if err != nil {
 			return nil, err
 		}
-		srcs = s.multi.TableSources(srcs, multiap.TableJobs)
+		srcs = s.multi.TableSources(ctx, srcs, multiap.TableJobs)
 		if v, ok := args["include_ended"].(bool); !ok || v {
-			srcs = s.multi.TableSources(srcs, multiap.TableEpochHistory)
+			srcs = s.multi.TableSources(ctx, srcs, multiap.TableEpochHistory)
 		}
 		scope, constraint, src, sources = OwnerScope{Owner: user}, clause, multiap.IssueSource{Service: s.multi}, &srcs
 	} else {

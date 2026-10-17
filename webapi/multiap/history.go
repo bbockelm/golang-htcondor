@@ -148,7 +148,8 @@ func (s *Service) ListHistory(ctx context.Context, req ListRequest) ([]Row, *Lis
 		}
 		after = &k
 	}
-	v := s.snapshot()
+	ctx = s.PinHub(ctx)
+	v := s.snapshot(ctx)
 	res := &ListResult{Sources: v.sources}
 	schedds, err := s.allowed(v, req.Schedd)
 	if err != nil {
@@ -161,7 +162,7 @@ func (s *Service) ListHistory(ctx context.Context, req ListRequest) ([]Row, *Lis
 	if err != nil {
 		return nil, nil, err
 	}
-	dbc, closer, err := s.Hub.Client(ctx)
+	dbc, closer, err := v.hub.Client(ctx)
 	if err != nil {
 		return nil, nil, errorf(http.StatusServiceUnavailable, "the federation hub is unavailable: %v", err)
 	}
