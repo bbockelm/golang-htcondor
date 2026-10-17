@@ -21,6 +21,7 @@ const nextConfig = {
       { source: '/idp/:path*',          destination: 'http://localhost:8080/idp/:path*' },
       { source: '/openapi.json',        destination: 'http://localhost:8080/openapi.json' },
       { source: '/docs',                destination: 'http://localhost:8080/docs' },
+      { source: '/auth/:path*',         destination: 'http://localhost:8080/auth/:path*' },
     ];
   },
 };

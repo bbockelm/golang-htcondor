@@ -50,9 +50,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
   }, [isLoading, isAuthenticated, isPublic, fullPath, router]);
 
+  // A session with no local account reaches only the placement pages, in
+  // a shell without the access point's navigation.
+  const placementOnly = !!session?.placement_only;
+  const onPlacementPage = pathname === '/placement' || pathname.startsWith('/placement/');
+  useEffect(() => {
+    if (placementOnly && !onPlacementPage) router.replace('/placement');
+  }, [placementOnly, onPlacementPage, router]);
+
   if (!isPublic && !isAuthenticated) {
     // While the redirect is in flight, render nothing.
     return null;
+  }
+
+  if (placementOnly) {
+    if (!onPlacementPage) return null;
+    return (
+      <PlacementShell
+        name={session?.placement?.display_name || session?.placement?.foreign_id}
+      >
+        {children}
+      </PlacementShell>
+    );
   }
 
   return (
@@ -63,6 +82,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         superuserAllowed={session?.superuser_allowed}
         superuserActive={session?.superuser_active}
         multiAP={session?.multi_ap}
+        placement={!!session?.placement}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
@@ -110,6 +130,39 @@ function MobileTopBar({ onOpen }: { onOpen: () => void }) {
         </svg>
       </button>
       <div className="text-sm font-semibold">HTCondor Access Point</div>
+    </div>
+  );
+}
+
+// PlacementShell is the reduced frame for a placement-only session: a title
+// bar with the person's name and Sign out, and nothing to navigate to.
+function PlacementShell({ name, children }: { name?: string; children: React.ReactNode }) {
+  return (
+    <div className="flex min-h-screen flex-col">
+      <header className="flex items-center justify-between gap-3 bg-ink-950 px-4 py-3 text-gray-100">
+        <div>
+          <div className="text-sm font-semibold">HTCondor Access Point</div>
+        </div>
+        <div className="flex items-center gap-3 text-xs">
+          {name && <span className="truncate text-gray-300">{name}</span>}
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await api.auth.logout();
+              } catch {
+                // Leaving anyway; the next /auth/me says signed out.
+              }
+              window.location.href = '/';
+            }}
+            className="text-gray-400 hover:text-white"
+          >
+            Sign out
+          </button>
+        </div>
+      </header>
+      <main className="flex-1 px-4 py-6 lg:px-8 lg:py-8">{children}</main>
+      <Footer />
     </div>
   );
 }

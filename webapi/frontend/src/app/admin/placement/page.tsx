@@ -28,8 +28,13 @@ import {
 } from '@/lib/api';
 import { Directory } from './Directory';
 import { MapfileStatusBanner } from './MapfileStatusBanner';
+import {
+  PlacementProjectsTab,
+  PlacementRecordDrawer,
+  type PlacementRecordTarget,
+} from '@/components/PlacementRecordDrawer';
 
-type Tab = 'users' | 'tokens' | 'authorizations';
+type Tab = 'users' | 'projects' | 'tokens' | 'authorizations';
 
 export default function AdminPlacementPage() {
   const status = useQuery({
@@ -43,6 +48,8 @@ export default function AdminPlacementPage() {
   // instead would mean a render-phase update, which React rightly complains
   // about.
   const [issueFor, setIssueFor] = useState('');
+  // The account or project whose schedd record is open in the drawer.
+  const [record, setRecord] = useState<PlacementRecordTarget | null>(null);
 
   const available = status.data?.available === true;
   // A placementd with the directory commands replaces Users with Directory.
@@ -107,6 +114,9 @@ export default function AdminPlacementPage() {
             <TabButton active={tab === 'users'} onClick={() => setTab('users')}>
               {directory ? 'Directory' : 'Users'}
             </TabButton>
+            <TabButton active={tab === 'projects'} onClick={() => setTab('projects')}>
+              Projects
+            </TabButton>
             <TabButton active={tab === 'tokens'} onClick={() => setTab('tokens')}>
               Tokens
             </TabButton>
@@ -131,6 +141,7 @@ export default function AdminPlacementPage() {
           {tab === 'users' && !directory && (
             <UsersTab
               authzByName={authzByName}
+              onOpenAccount={(name) => setRecord({ kind: 'accounts', name })}
               onIssueFor={(u) => {
                 setIssueFor(u.username);
                 if (typeof window !== 'undefined') {
@@ -139,6 +150,7 @@ export default function AdminPlacementPage() {
               }}
             />
           )}
+          {tab === 'projects' && <PlacementProjectsTab onOpen={setRecord} />}
           {tab === 'tokens' && <TokensTab authzByName={authzByName} />}
           {tab === 'authorizations' && (
             <AuthorizationsTab
@@ -149,6 +161,7 @@ export default function AdminPlacementPage() {
           )}
         </>
       )}
+      {record && <PlacementRecordDrawer target={record} onClose={() => setRecord(null)} />}
     </div>
   );
 }
@@ -400,9 +413,11 @@ function IssuedToken({
 function UsersTab({
   authzByName,
   onIssueFor,
+  onOpenAccount,
 }: {
   authzByName: Map<string, PlacementAuthorization>;
   onIssueFor: (u: PlacementUser) => void;
+  onOpenAccount: (apUserID: string) => void;
 }) {
   const [filter, setFilter] = useState('');
   const users = useQuery({
@@ -471,7 +486,17 @@ function UsersTab({
                     )}
                   </td>
                   <td className="px-3 py-2 font-mono text-xs text-gray-700">
-                    {u.ap_user_id || '—'}
+                    {u.ap_user_id ? (
+                      <button
+                        type="button"
+                        onClick={() => onOpenAccount(u.ap_user_id as string)}
+                        className="text-brand-700 hover:underline"
+                      >
+                        {u.ap_user_id}
+                      </button>
+                    ) : (
+                      '—'
+                    )}
                   </td>
                   <td className="px-3 py-2">
                     <ChipList names={u.authorizations} authzByName={authzByName} />

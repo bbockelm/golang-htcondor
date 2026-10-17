@@ -169,6 +169,17 @@ export interface Session {
   multi_ap?: boolean;
   // Multi-AP mode: where this session's new work goes.
   assignment?: APAssignment;
+  // A session with no local account, which reaches only the placement
+  // pages.
+  placement_only?: boolean;
+  // The session's placement identity, when this server issues placement
+  // tokens.
+  placement?: PlacementSessionIdentity;
+}
+
+export interface PlacementSessionIdentity {
+  foreign_id: string;
+  display_name?: string;
 }
 
 // APAssignment is where a caller's new work goes in multi-AP mode: the
@@ -462,6 +473,62 @@ export interface PlacementAuthorization {
   label?: string;
   color?: string;
   description?: string;
+}
+
+// PlacementMe is what the placementd says about the signed-in person.
+export interface PlacementMe {
+  foreign_id: string;
+  display_name?: string;
+  authorized: boolean;
+  expired: boolean;
+  mapping_expiration?: string;
+  account?: string;
+  authorizations: PlacementAuthorization[];
+  projects: { name: string; default: boolean; enabled: boolean }[];
+  account_enabled: boolean;
+  records_available: boolean;
+}
+
+// PlacementIssued is a token issued to the signed-in person. `token` is
+// absent when it went to a device request instead.
+export interface PlacementIssued {
+  token?: string;
+  ap_user_id?: string;
+  issued_at?: string;
+  expires_at?: string;
+  project: string;
+  authorizations: string[];
+  user_config?: string;
+  device?: PlacementDeviceRequest;
+}
+
+// PlacementDeviceRequest is a pending device-flow request, as the
+// confirmation page shows it.
+export interface PlacementDeviceRequest {
+  user_code: string;
+  client_id: string;
+  client_name: string;
+  state: 'pending' | 'approved' | 'denied' | 'expired';
+  expires_at: string;
+}
+
+// PlacementRecord is the schedd's user or project record for a name the
+// placementd hands out.
+export interface PlacementRecord {
+  kind: 'account' | 'project';
+  name: string;
+  found: boolean;
+  enabled: boolean;
+  disable_reason?: string;
+  stats?: Record<string, number>;
+  members?: string[];
+}
+
+export interface PlacementProjectSummary {
+  name: string;
+  found: boolean;
+  enabled: boolean;
+  members: number;
 }
 
 // HTCondor returns ClassAds as JSON objects with arbitrary attributes.
@@ -2281,6 +2348,44 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(req),
       }),
+
+    // The signed-in person's own placement identity and what they may
+    // request. Any session, including one with no local account.
+    me: (): Promise<PlacementMe> => fetchJSON(`${BASE}/placement/me`),
+    // A token for the signed-in person. With userCode, the token goes to
+    // that pending device request instead of coming back here.
+    requestToken: (req: {
+      project: string;
+      authorizations: string[];
+      user_code?: string;
+    }): Promise<PlacementIssued> =>
+      fetchJSON(`${BASE}/placement/me/token`, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        body: JSON.stringify(req),
+      }),
+    deviceRequest: (userCode: string): Promise<PlacementDeviceRequest> =>
+      fetchJSON(`${BASE}/placement/me/device/${encodeURIComponent(userCode)}`),
+    denyDevice: (userCode: string): Promise<{ status: string }> =>
+      fetchJSON(`${BASE}/placement/me/device/${encodeURIComponent(userCode)}/deny`, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      }),
+
+    // Admin: the schedd records behind placement accounts and projects.
+    record: (kind: 'accounts' | 'projects', name: string): Promise<PlacementRecord> =>
+      fetchJSON(`${BASE}/placement/records/${kind}/${encodeURIComponent(name)}`),
+    setSuspended: (
+      kind: 'accounts' | 'projects',
+      name: string,
+      suspended: boolean,
+    ): Promise<PlacementRecord> =>
+      fetchJSON(
+        `${BASE}/placement/records/${kind}/${encodeURIComponent(name)}/${suspended ? 'suspend' : 'unsuspend'}`,
+        { method: "POST" },
+      ),
+    projects: (): Promise<{ projects: PlacementProjectSummary[] }> =>
+      fetchJSON(`${BASE}/placement/records/projects`),
   },
 
   chat: {

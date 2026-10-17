@@ -16,6 +16,8 @@ interface SidebarProps {
   // Several access points behind this server: only the pages that mode
   // serves are offered.
   multiAP?: boolean;
+  // This session can request a placement token.
+  placement?: boolean;
   // Mobile drawer state. On lg+ the sidebar is always visible -- pinned
   // to the viewport's height, so the account controls at its foot stay on
   // screen however long the page -- and these are ignored.
@@ -47,6 +49,10 @@ const MULTI_AP_NAV = [
   { href: '/aps', label: 'Access Points' },
 ];
 
+// Offered when this server issues placement tokens and the session has a
+// placement identity.
+const PLACEMENT_NAV = [{ href: '/placement', label: 'Placement token' }];
+
 const ADMIN_NAV = [
   { href: '/admin/placement', label: 'Placement' },
   { href: '/admin/clients', label: 'OAuth2 Clients' },
@@ -62,6 +68,7 @@ export function Sidebar({
   superuserAllowed,
   superuserActive,
   multiAP,
+  placement,
   open,
   onClose,
 }: SidebarProps) {
@@ -112,7 +119,7 @@ export function Sidebar({
         </div>
 
         <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
-          {(multiAP ? MULTI_AP_NAV : NAV).map((item) => (
+          {[...(multiAP ? MULTI_AP_NAV : NAV), ...(placement ? PLACEMENT_NAV : [])].map((item) => (
             <NavLink
               key={item.href}
               href={item.href}
