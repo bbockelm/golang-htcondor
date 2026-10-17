@@ -1958,7 +1958,7 @@ func (h *Handler) deviceVerifyGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A session with no local account may approve placement
-	// requests (§7.3a), so it is not sent back to sign in again.
+	// requests, so it is not sent back to sign in again.
 	approver, hasApprover := h.placementDeviceApprover(r)
 	placementOnlySession := username == "" && hasApprover && approver.IsPlacementOnly()
 
@@ -2030,7 +2030,7 @@ func (h *Handler) deviceVerifyGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// A placement request is approved by identity (§7.3a).
+		// A placement request is approved by identity.
 		if placementOnlyScopes(request.GetRequestedScopes()) {
 			if !hasApprover {
 				h.writeHTMLError(w, "This request needs a sign-in the placement service knows")
@@ -2166,7 +2166,7 @@ func (h *Handler) deviceVerifyPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A placement request is approved by identity (§7.3a), with the
+	// A placement request is approved by identity, with the
 	// form's token bound to that identity.
 	if placementOnlyScopes(request.GetRequestedScopes()) {
 		if !hasApprover {

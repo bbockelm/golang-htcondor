@@ -12,7 +12,7 @@ import (
 )
 
 // Approval of a placement device request in this server's own RFC 8628 flow
-// (§7.3a). It differs from other device approvals in two ways:
+// for placement-client. It differs from other device approvals in two ways:
 //
 //   - a placement-only session may approve it, and only it;
 //   - the grant records the approving identity, which is what the placement

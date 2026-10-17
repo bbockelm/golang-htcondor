@@ -71,7 +71,7 @@ type Session struct {
 	ParentGrant string `json:"parentGrant,omitempty"`
 
 	// PlacementIdentity is the sign-in identity that approved a grant
-	// holding the placement scope (§7.3a). The placement endpoints act for
+	// holding the placement scope. The placement endpoints act for
 	// it, and only for it; it is never taken from a request.
 	PlacementIdentity string `json:"placementIdentity,omitempty"`
 }

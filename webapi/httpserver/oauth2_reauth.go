@@ -182,7 +182,7 @@ func (h *Handler) reauthorizeGrant(ctx context.Context, ar fosite.Requester) ([]
 		return nil, grantRevokedError(reason)
 	}
 
-	// A placement grant (§7.3a) is held to the placementd's current answer
+	// A placement grant (one holding the placement scope) is held to the placementd's current answer
 	// for its identity, and to nothing else: it carries no scope the group
 	// policy or the other oracles speak to.
 	if isPlacementGrant(granted) || sess.PlacementIdentity != "" {
@@ -197,7 +197,7 @@ func (h *Handler) reauthorizeGrant(ctx context.Context, ar fosite.Requester) ([]
 		return granted, nil
 	}
 
-	// A subject a placementd-mapped session authorized (§7.6) is re-read
+	// A subject a placementd-mapped session authorized is re-read
 	// from the placementd: unmapped or re-pointed ends the grant.
 	bound, err := h.placementSubjectBound(ctx, username)
 	if err != nil {

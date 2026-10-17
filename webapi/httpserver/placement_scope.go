@@ -16,7 +16,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
-// The placement scope (§7.3a): placement-client signs in through this
+// The placement scope: placement-client signs in through this
 // server's own RFC 8628 device grant as the pre-registered public client
 // placement_client and gets an access token holding "placement". That token
 // reaches GET /api/v1/placement/me and POST /api/v1/placement/me/token and

@@ -141,7 +141,7 @@ func TestPlacementScopeCannotBeMixed(t *testing.T) {
 	}
 }
 
-// The whole §7.3a flow: a placement-only session approves placement-client's
+// The whole standard device flow: a placement-only session approves placement-client's
 // device request, and the resulting bearer acts for that identity, and only
 // on /me and /me/token.
 func TestPlacementDeviceGrantActsForTheApprovingIdentity(t *testing.T) {

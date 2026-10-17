@@ -90,7 +90,7 @@ type placementMeTokenResponse struct {
 // handlePlacementMePath dispatches /api/v1/placement/me and below. rest is
 // the path after "me", without leading slash.
 func (s *Handler) handlePlacementMePath(w http.ResponseWriter, r *http.Request, rest string) {
-	// A bearer access token holding the placement scope (§7.3a) acts for
+	// A bearer access token holding the placement scope acts for
 	// the identity recorded on its grant, and may use only /me and
 	// /me/token.
 	session, isBearer, err := s.placementBearerIdentity(r)
