@@ -51,6 +51,12 @@ func (e *Estimator) WindowSize() int {
 // right now, ascending: exactly what an estimate answered from l uses.
 // Nil when the group holds nothing or nothing has been read yet.
 func (e *Estimator) GroupRuntimes(k Keys, l Level) []float64 {
+	return e.groupValues(k, l, func(w *window) []float32 { return w.sorted })
+}
+
+// groupValues is a copy of what of reads from k's group at l, nil when
+// that is empty or nothing has been read yet.
+func (e *Estimator) groupValues(k Keys, l Level, of func(*window) []float32) []float64 {
 	if l < 0 || l >= numLevels {
 		return nil
 	}
@@ -67,14 +73,19 @@ func (e *Estimator) GroupRuntimes(k Keys, l Level) []float64 {
 	if w.len() == 0 {
 		return nil
 	}
-	out := make([]float64, len(w.sorted))
-	for i, v := range w.sorted {
+	vals := of(w)
+	if len(vals) == 0 {
+		return nil
+	}
+	out := make([]float64, len(vals))
+	for i, v := range vals {
 		out[i] = float64(v)
 	}
 	return out
 }
 
-// RuntimeSummary is a group's runtimes, in seconds.
+// RuntimeSummary is a group's runtimes, in seconds. A MemorySummary is
+// the same quantiles of its peak memory, in MiB.
 type RuntimeSummary struct {
 	Count int     `json:"count"`
 	P10   float64 `json:"p10"`
@@ -86,7 +97,8 @@ type RuntimeSummary struct {
 
 // Summarize describes ascending runtimes with the quantiles an estimate
 // is read from (interpolated, as the estimator does: P50 is the median an
-// estimate answers with). Nil for none.
+// estimate answers with). Nil for none. It describes GroupMemory's peaks
+// the same way, as a MemorySummary.
 func Summarize(sorted []float64) *RuntimeSummary {
 	if len(sorted) == 0 {
 		return nil
