@@ -363,10 +363,30 @@ export function AdviceCard({
 
 const TOP_ADVICE = 5;
 
+// OwnerName is a workflow owner's name: a link to that user's workflows
+// when the page can narrow to one, plain text otherwise.
+function OwnerName({ owner, href }: { owner: string; href?: (owner: string) => string }) {
+  if (!href) return <>{owner}</>;
+  return (
+    <Link href={href(owner)} className="text-brand-700 hover:underline" title={`Show only ${owner}'s workflows`}>
+      {owner}
+    </Link>
+  );
+}
+
 // SuggestionCard is one suggestion in the ranked list across workflows.
 // The evidence and the submit lines are on the workflow's page, which is
 // one click away; the list carries what is needed to choose.
-export function SuggestionCard({ s, hrefFor }: { s: UtilSuggestion; hrefFor: (key: string) => string }) {
+export function SuggestionCard({
+  s,
+  hrefFor,
+  ownerHref,
+}: {
+  s: UtilSuggestion;
+  hrefFor: (key: string) => string;
+  // Set when the page can narrow to a user: the owner's name links there.
+  ownerHref?: (owner: string) => string;
+}) {
   const sev = SEVERITY[s.severity];
   const saves = formatSaves(s.saves);
   const low = s.confidence === 'low';
@@ -394,7 +414,12 @@ export function SuggestionCard({ s, hrefFor }: { s: UtilSuggestion; hrefFor: (ke
         <Link href={hrefFor(s.key)} className="font-medium text-brand-700 hover:underline">
           {s.name}
         </Link>
-        {s.owner && <> ({s.owner})</>}
+        {s.owner && (
+          <>
+            {' '}(
+            <OwnerName owner={s.owner} href={ownerHref} />)
+          </>
+        )}
         {saves && (
           <>
             {' '}· Saves about <span className="font-semibold text-gray-900 tabular-nums">{saves}</span> for the same work
@@ -413,10 +438,12 @@ export function SuggestionCard({ s, hrefFor }: { s: UtilSuggestion; hrefFor: (ke
 export function Suggestions({
   suggestions,
   hrefFor,
+  ownerHref,
   keys,
 }: {
   suggestions: UtilSuggestion[];
   hrefFor: (key: string) => string;
+  ownerHref?: (owner: string) => string;
   // Only these workflows' suggestions, when the list is filtered.
   keys?: Set<string>;
 }) {
@@ -434,7 +461,7 @@ export function Suggestions({
         <>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
             {shown.map((x) => (
-              <SuggestionCard key={`${x.key}/${x.id}`} s={x} hrefFor={hrefFor} />
+              <SuggestionCard key={`${x.key}/${x.id}`} s={x} hrefFor={hrefFor} ownerHref={ownerHref} />
             ))}
           </div>
           {ranked.length > TOP_ADVICE && (
@@ -1222,6 +1249,7 @@ export function WorkflowDetail({
   workflow: w,
   days,
   backHref,
+  ownerHref,
   jobsQuery,
   waitingJobs = null,
   waitingAdaptive,
@@ -1229,6 +1257,9 @@ export function WorkflowDetail({
   workflow: UtilWorkflow;
   days: number;
   backHref: string;
+  // Set when the page can narrow to a user: the owner's name links to
+  // that user's workflows.
+  ownerHref?: (owner: string) => string;
   // The analysis's parameters, for the list of this workflow's jobs.
   // Without them there is no list (the component tests render without).
   jobsQuery?: JobsQuery;
@@ -1285,7 +1316,11 @@ export function WorkflowDetail({
             <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-xs font-semibold text-indigo-800">DAG</span>
           )}
           <span className="font-mono text-sm text-gray-500">{w.executable}</span>
-          {w.owner && <span className="text-sm text-gray-500">· {w.owner}</span>}
+          {w.owner && (
+            <span className="text-sm text-gray-500">
+              · <OwnerName owner={w.owner} href={ownerHref} />
+            </span>
+          )}
           {w.schedd && <span className="text-sm text-gray-500">· {w.schedd}</span>}
         </div>
         <div className="mt-3 flex flex-wrap gap-x-8 gap-y-3 tabular-nums">
