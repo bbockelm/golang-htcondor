@@ -164,3 +164,49 @@ func (l *Locator) ClientFor(ctx context.Context, info *Info) (*dbrpc.Client, fun
 	}
 	return dbrpc.NewClient(dbrpc.NewCedarConn(ctx, cl.GetStream())), func() { _ = cl.Close() }, nil
 }
+
+// Hubs lists every federation hub the collector advertises -- every
+// database whose ad matches Options.Constraint (HubConstraint), and
+// Options.Name when set -- sorted by Name, with no caching: the caller
+// polls. A database with no Name, no address or no FederationConstraint
+// is skipped (PickHubs): a hub is told apart from its peers by Name. A failed query is an error,
+// never an empty list.
+//
+// Unlike Discover, several answers are not refused: a multi-AP server
+// reads from one hub at a time and chooses among them itself.
+func (l *Locator) Hubs(ctx context.Context) ([]*Info, error) {
+	if l == nil || l.collector == nil {
+		return nil, fmt.Errorf("no collector configured for htcondordb discovery")
+	}
+	constraint := HubConstraint
+	if c := strings.TrimSpace(l.opts.Constraint); c != "" {
+		constraint = c
+	}
+	if l.opts.Name != "" {
+		constraint = fmt.Sprintf("(Name == %s) && (%s)", classadStringLit(l.opts.Name), constraint)
+	}
+	ads, _, err := l.collector.QueryAdsWithOptions(ctx, AdType, constraint,
+		&htcondor.QueryOptions{Limit: -1, Projection: mirrorAdAttrs()})
+	if err != nil {
+		return nil, fmt.Errorf("querying collector for htcondordb federation hubs: %w", err)
+	}
+	return PickHubs(ads), nil
+}
+
+// PickHubs reads hub ads: those with FederationConstraint, a Name and an
+// address, one per Name (case-insensitive), sorted by Name.
+func PickHubs(ads []*classad.ClassAd) []*Info {
+	var out []*Info
+	seen := map[string]bool{}
+	for _, ad := range ads {
+		info := ParseAd(ad)
+		key := strings.ToLower(info.Name)
+		if info.Name == "" || info.Address == "" || info.FederationConstraint == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
