@@ -6,6 +6,7 @@ import (
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/security"
 	cedarserver "github.com/bbockelm/cedar/server"
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/authz"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -55,13 +56,20 @@ func (d *Daemon) SecurityLevelConfigs() (map[string]*security.SecurityConfig, er
 // commands as the base policy does; a per-level policy also advertises
 // srv.SecurityConfig's RemoteVersion.
 //
+// It also sets srv.HandshakeDeadline from SEC_TCP_SESSION_DEADLINE; a
+// reconfig does not change it.
+//
 // Call it after Listener (the policies carry the shared-port id) and
-// cedarserver.New.
+// cedarserver.New, before srv serves.
 func (d *Daemon) InstallSecurityLevels(srv *cedarserver.Server) error {
 	byLevel, err := d.SecurityLevelConfigs()
 	if err != nil {
 		return err
 	}
+	// SEC_TCP_SESSION_DEADLINE bounds each connection's command protocol, as
+	// on a DaemonCore command socket. It is set only here, since srv reads it
+	// unlocked once serving.
+	srv.HandshakeDeadline = htcondor.TCPSessionDeadline(d.Config())
 	var current atomic.Pointer[map[string]*security.SecurityConfig]
 	current.Store(&byLevel)
 	installSecurityLevels(srv, func() map[string]*security.SecurityConfig { return *current.Load() })

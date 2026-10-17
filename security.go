@@ -601,6 +601,9 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 //     (SEC_TOKEN_POOL_SIGNING_KEY_FILE for the pool key, SEC_PASSWORD_DIRECTORY
 //     for named issuer keys), the trust domain (TRUST_DOMAIN, defaulting to
 //     UID_DOMAIN), and the maximum token age (SEC_TOKEN_MAX_AGE).
+//   - SCITOKENS: the SCITOKENS lines of CERTIFICATE_MAPFILE (SciTokensMapper),
+//     SCITOKENS_SERVER_AUDIENCE, and SEC_SCITOKENS_FOREIGN_TOKEN_ISSUERS when
+//     SEC_SCITOKENS_ALLOW_FOREIGN_TOKEN_TYPES is true.
 //
 // secContext is the authorization level whose SEC_<level>_* policy applies;
 // each setting falls back as GetSecurityConfig describes, so an unset
@@ -667,6 +670,16 @@ func GetServerSecurityConfig(cfg *config.Config, command int, secContext string)
 			sc.TrustDomain = v
 		}
 	}
+
+	// SCITOKENS: a token is accepted only when the SCITOKENS lines of
+	// CERTIFICATE_MAPFILE map its "issuer,subject", and the peer is the mapped
+	// user. With no map file the mapper stays nil and cedar refuses every
+	// SciToken.
+	if _, ok := certificateMapFileKey(cfg); ok {
+		sc.SciTokensMapper = SciTokensMapper(func() *config.Config { return cfg })
+	}
+	sc.SciTokensServerAudience = sciTokensServerAudience(cfg)
+	sc.SciTokensForeignTokenIssuers = sciTokensForeignTokenIssuers(cfg)
 
 	// The server's credential files (SSL key/cert, token signing keys) are read as
 	// root via droppriv, so they remain readable after the daemon drops to the
