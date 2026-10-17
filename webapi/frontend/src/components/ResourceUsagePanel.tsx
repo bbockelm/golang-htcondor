@@ -21,6 +21,7 @@ import {
   JOB_METRICS_BUCKET_SECONDS,
   JOB_METRICS_GROUP_BY,
   jobMetricsSelector,
+  unrecordedAP,
 } from '@/lib/metrics';
 import { MetricChart } from '@/components/MetricChart';
 
@@ -59,8 +60,16 @@ export function ResourceUsagePanel({
 
   const series = useMemo(() => buildJobMetrics(data, job), [data, job]);
 
-  // The whole section is invisible until there is something worth showing.
-  if (series.length === 0) return null;
+  // The whole section is invisible until there is something worth
+  // showing -- unless the job's access point records no usage at all,
+  // which is worth a line rather than an absence that reads as "none".
+  if (series.length === 0) {
+    const ap = unrecordedAP(data);
+    if (!ap) return null;
+    return (
+      <p className="text-sm text-gray-500">Resource usage is not recorded on {ap}.</p>
+    );
+  }
 
   return (
     <div className="space-y-3">

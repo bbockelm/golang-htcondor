@@ -292,3 +292,15 @@ export function formatMetric(value: number, unit: string): string {
       return value.toLocaleString();
   }
 }
+
+// unrecordedAP names the job's access point when the server says it
+// keeps no resource metrics (sources.not_kept for job_metrics), so the
+// page can say so instead of showing nothing.
+export function unrecordedAP(resp: MetricsResponse | undefined): string | undefined {
+  const schedd = resp?.job?.schedd;
+  if (!schedd) return undefined;
+  const hit = resp?.sources?.not_kept?.find(
+    (n) => n.table === 'job_metrics' && n.schedd.toLowerCase() === schedd.toLowerCase(),
+  );
+  return hit ? hit.schedd : undefined;
+}

@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MetricsResponse } from '@/lib/metrics';
@@ -186,6 +186,51 @@ describe('ResourceUsagePanel', () => {
     expect(drawn).toHaveLength(7);
     // ap2's 5.3 GB, never ap1's 400 MB.
     for (const d of drawn) expect(d).toMatch(/^5\.3 GB /);
+  });
+
+  it('in multi-AP mode says when the job\'s access point records no usage', async () => {
+    query.mockImplementation(() =>
+      Promise.resolve({
+        enabled: true,
+        table: 'job_metrics',
+        rows: [],
+        job: { schedd: 'ap3.example.org', cluster: 7, proc: 0, job_id: '7.0@ap3.example.org' },
+        sources: {
+          aps: 3,
+          fresh: 3,
+          degraded: [],
+          not_kept: [{ schedd: 'ap3.example.org', table: 'job_metrics', reason: 'no job_metrics' }],
+        },
+      }),
+    );
+    renderPanel('7.0@ap3.example.org', true);
+    expect(await screen.findByText('Resource usage is not recorded on ap3.example.org.')).toBeInTheDocument();
+  });
+
+  it('says nothing when another access point records no usage', async () => {
+    query.mockImplementation(() =>
+      Promise.resolve({
+        enabled: true,
+        table: 'job_metrics',
+        rows: [],
+        job: { schedd: 'ap2.example.org', cluster: 7, proc: 0, job_id: '7.0@ap2.example.org' },
+        sources: { aps: 3, fresh: 3, degraded: [], not_kept: [{ schedd: 'ap3.example.org', table: 'job_metrics' }] },
+      }),
+    );
+    const { container } = renderPanel('7.0@ap2.example.org', true);
+    await waitFor(() => expect(query).toHaveBeenCalled());
+    // Let the answer land and render.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('in single-AP mode asks nothing for an id that names no job', async () => {
+    // Querying anyway would send no constraint: every one of the
+    // caller's samples, drawn as this job's.
+    renderPanel('x.y');
+    renderPanel('');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('keeps the run baseline, which carries memory but no rate', async () => {

@@ -1977,13 +1977,18 @@ administrators included, reads only their own (`User`), on member access
 points only. `?job_id=` reads one job's samples: a complete id, or a
 bare `123.0` when one access point has that job of yours (on two it is a
 **409** with the `candidates`); the answer's `job` names the complete id.
-`?schedd=` reads one access point's. A `group_by` naming `ClusterId` or
-`ProcId` gains `ScheddName` before them, since the same `cluster.proc` on
-two access points is two jobs; `group_by=ScheddName` aggregates per
-access point. The answer carries the `sources` block. A hub that does not
+`?schedd=` reads one access point's, and settles a bare `job_id`. A
+`group_by` naming `ClusterId` or `ProcId` gains `ScheddName` before
+them, since the same `cluster.proc` on two access points is two jobs;
+`group_by=ScheddName` aggregates per access point. The answer carries the `sources` block. A hub that does not
 federate `job_metrics` answers `{"enabled": false}` with the `sources`
-block, as single-AP mode answers without the sampler. The job page draws
-its resource-usage graphs from this, by the job's complete id.
+block, as single-AP mode answers without the sampler. One aggregate is
+bounded at 30 seconds and 20000 rows, as in single-AP mode. A sample its
+access point's htcondordb never tied to its job carries no `User`, so no
+read returns it -- not even one naming that job -- and it is missing from
+the job page's graphs. The job page draws its resource-usage graphs from
+this, by the job's complete id, and says so when the job's access point
+records no usage (`not_kept`).
 
 The dashboard, the issues view, run-attempt reads and resource usage also
 name, in their `sources` block, each access point whose stream of the
@@ -1994,7 +1999,9 @@ is short of. An access point whose own htcondordb keeps no such table at
 all (the hub reports `<Table>Missing`, e.g. a spoke without
 `HTCONDORDB_JOB_METRICS` or epoch history) has no rows to be short of:
 it is listed in `not_kept` (`schedd`, `table`, `reason`) instead, and
-still counts as fresh.
+still counts as fresh. Only those two tables are optional; an access
+point the hub reports has no `jobs`, `history` or `syncstatus` table is
+degraded.
 
 **Actions need a complete id.** A mutation, a sandbox read, a share URL or
 an SSH connection naming only `123.0` is a **400** with
