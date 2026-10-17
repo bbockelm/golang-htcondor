@@ -217,6 +217,12 @@ func NewClientSecurityConfigWithConfig(
 	return secConfig, nil
 }
 
+// usesTLS reports whether list offers a method that runs a TLS handshake,
+// SSL or SCITOKENS, and so needs the AUTH_SSL_* trust anchors.
+func usesTLS(list []security.AuthMethod) bool {
+	return hasAuthMethod(list, security.AuthSSL) || hasAuthMethod(list, security.AuthSciTokens)
+}
+
 // hasAuthMethod reports whether m is in list. Small helper so callers
 // that need to overlay additional methods on top of NewClientSecurityConfig's
 // configured-base list can do so idempotently — e.g. file_transfer
@@ -252,7 +258,9 @@ func GetDefaultConfig() *config.Config {
 // Intended for callers that want to add SSL as a secondary auth method
 // to a hand-built SecurityConfig without going through the full
 // GetSecurityConfig path (which only loads SSL credentials when the
-// configured AuthenticationMethods list already names SSL).
+// configured AuthenticationMethods list already names SSL). Such callers
+// should also call ApplySSLClientTrust, which adds AUTH_SSL_CLIENT_CADIR
+// and AUTH_SSL_CLIENT_USE_DEFAULT_CAS.
 func LookupSSLClientCredentials() (certFile, keyFile, caFile string, ok bool) {
 	return LookupSSLClientCredentialsWithConfig(nil)
 }
@@ -277,6 +285,33 @@ func LookupSSLClientCredentialsWithConfig(cfg *config.Config) (certFile, keyFile
 		caFile = v
 	}
 	return certFile, keyFile, caFile, certFile != "" && keyFile != ""
+}
+
+// ApplySSLClientTrust sets the trust anchors sc verifies an SSL server with
+// from AUTH_SSL_CLIENT_CAFILE, AUTH_SSL_CLIENT_CADIR and
+// AUTH_SSL_CLIENT_USE_DEFAULT_CAS, for callers that build a SecurityConfig by
+// hand around LookupSSLClientCredentials. A nil cfg is the process-wide
+// default configuration; when there is none, sc is left unchanged.
+func ApplySSLClientTrust(cfg *config.Config, sc *security.SecurityConfig) {
+	if cfg == nil {
+		cfg = getDefaultConfig()
+	}
+	if cfg == nil {
+		return
+	}
+	applySSLTrust(cfg, sc, "CLIENT")
+}
+
+// applySSLTrust sets sc's SSL trust anchors from AUTH_SSL_<side>_CAFILE,
+// AUTH_SSL_<side>_CADIR and AUTH_SSL_<side>_USE_DEFAULT_CAS, side being CLIENT
+// or SERVER, as HTCondor reads them for that side of the handshake. All three
+// are replaced rather than merged, so a server never trusts the client CAs.
+// USE_DEFAULT_CAS is read as param_boolean does, defaulting to true.
+func applySSLTrust(cfg *config.Config, sc *security.SecurityConfig, side string) {
+	sc.CAFile, _ = cfg.Get("AUTH_SSL_" + side + "_CAFILE")
+	sc.CADir, _ = cfg.Get("AUTH_SSL_" + side + "_CADIR")
+	useDefault := cfg.GetBool("AUTH_SSL_"+side+"_USE_DEFAULT_CAS", true)
+	sc.UseDefaultCAs = &useDefault
 }
 
 // ReloadDefaultConfig reloads the global default HTCondor configuration.
@@ -511,20 +546,19 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 	cryptoMethods := getSecurityMethods(cfg, context, "CRYPTO_METHODS")
 	secConfig.CryptoMethods = mapCryptoMethods(cryptoMethods)
 
-	// Get SSL certificate/key paths if SSL authentication is enabled
-	for _, method := range secConfig.AuthMethods {
-		if method == security.AuthSSL {
-			if certFile, ok := cfg.Get("AUTH_SSL_CLIENT_CERTFILE"); ok {
-				secConfig.CertFile = certFile
-			}
-			if keyFile, ok := cfg.Get("AUTH_SSL_CLIENT_KEYFILE"); ok {
-				secConfig.KeyFile = keyFile
-			}
-			if caFile, ok := cfg.Get("AUTH_SSL_CLIENT_CAFILE"); ok {
-				secConfig.CAFile = caFile
-			}
-			break
+	// The client certificate is presented only by SSL. The trust anchors
+	// verify the server's certificate in both SSL and SCITOKENS, which runs
+	// over the same TLS handshake (setup_ssl_ctx in HTCondor).
+	if hasAuthMethod(secConfig.AuthMethods, security.AuthSSL) {
+		if certFile, ok := cfg.Get("AUTH_SSL_CLIENT_CERTFILE"); ok {
+			secConfig.CertFile = certFile
 		}
+		if keyFile, ok := cfg.Get("AUTH_SSL_CLIENT_KEYFILE"); ok {
+			secConfig.KeyFile = keyFile
+		}
+	}
+	if usesTLS(secConfig.AuthMethods) {
+		applySSLTrust(cfg, secConfig, "CLIENT")
 	}
 
 	// Get token file/directory if token authentication is enabled.
@@ -560,8 +594,9 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 // and additionally loads the credentials a server needs to *verify* incoming
 // authentications rather than to present its own:
 //
-//   - SSL: the server certificate/key/CA (AUTH_SSL_SERVER_CERTFILE / KEYFILE /
-//     CAFILE) instead of the client ones.
+//   - SSL and SCITOKENS: the server certificate/key and trust anchors
+//     (AUTH_SSL_SERVER_CERTFILE / KEYFILE / CAFILE / CADIR / USE_DEFAULT_CAS)
+//     instead of the client ones.
 //   - TOKEN/IDTOKENS: the signing keys used to validate presented tokens
 //     (SEC_TOKEN_POOL_SIGNING_KEY_FILE for the pool key, SEC_PASSWORD_DIRECTORY
 //     for named issuer keys), the trust domain (TRUST_DOMAIN, defaulting to
@@ -598,18 +633,17 @@ func GetServerSecurityConfig(cfg *config.Config, command int, secContext string)
 		return false
 	}
 
-	// SSL: replace the client cert/key/CA (loaded by GetSecurityConfig) with the
-	// server's own.
-	if hasMethod(security.AuthSSL) {
+	// SSL and SCITOKENS: replace the client cert/key/trust anchors (loaded by
+	// GetSecurityConfig) with the server's own. Both run a TLS handshake in
+	// which the server presents its certificate.
+	if usesTLS(sc.AuthMethods) {
 		if v, ok := cfg.Get("AUTH_SSL_SERVER_CERTFILE"); ok {
 			sc.CertFile = v
 		}
 		if v, ok := cfg.Get("AUTH_SSL_SERVER_KEYFILE"); ok {
 			sc.KeyFile = v
 		}
-		if v, ok := cfg.Get("AUTH_SSL_SERVER_CAFILE"); ok {
-			sc.CAFile = v
-		}
+		applySSLTrust(cfg, sc, "SERVER")
 	}
 
 	// TOKEN/IDTOKENS: the keys and trust domain used to verify presented tokens.
