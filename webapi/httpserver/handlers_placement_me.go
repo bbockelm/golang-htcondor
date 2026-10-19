@@ -210,7 +210,7 @@ func (s *Handler) handlePlacementMe(w http.ResponseWriter, r *http.Request, sess
 
 	self, err := s.lookupPlacementSelf(r, session.PlacementIdentity)
 	if err != nil {
-		s.writePlacementError(w, "look up your placement identity", err)
+		s.writePlacementUserError(w, "look up your placement identity", err)
 		return
 	}
 	resp.Authorized, resp.Expired = self.authorized, self.expired
@@ -228,7 +228,7 @@ func (s *Handler) handlePlacementMe(w http.ResponseWriter, r *http.Request, sess
 		var perr *htcondor.PlacementError
 		if !errors.As(err, &perr) || (perr.Code != htcondor.PlacementErrUserNotAuthorized &&
 			perr.Code != htcondor.PlacementErrUserMappingExpired) {
-			s.writePlacementError(w, "list your authorizations", err)
+			s.writePlacementUserError(w, "list your authorizations", err)
 			return
 		}
 		// The mapping went away between the two calls.
@@ -355,7 +355,7 @@ func (s *Handler) handlePlacementMeToken(w http.ResponseWriter, r *http.Request,
 
 	self, err := s.lookupPlacementSelf(r, identity)
 	if err != nil {
-		s.writePlacementError(w, "look up your placement identity", err)
+		s.writePlacementUserError(w, "look up your placement identity", err)
 		return
 	}
 	if !self.authorized {
@@ -368,7 +368,7 @@ func (s *Handler) handlePlacementMeToken(w http.ResponseWriter, r *http.Request,
 	// (INSTRUCTOR, say) are not for a self-service token.
 	offered, err := s.placementd.QueryAuthorizations(placementUserContext(r), identity)
 	if err != nil {
-		s.writePlacementError(w, "list your authorizations", err)
+		s.writePlacementUserError(w, "list your authorizations", err)
 		return
 	}
 	authz := make([]string, 0, len(req.Authorizations))
@@ -394,7 +394,7 @@ func (s *Handler) handlePlacementMeToken(w http.ResponseWriter, r *http.Request,
 		Project:        project,
 	})
 	if err != nil {
-		s.writePlacementError(w, "issue a token", err)
+		s.writePlacementUserError(w, "issue a token", err)
 		return
 	}
 

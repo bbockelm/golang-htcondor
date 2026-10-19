@@ -226,6 +226,10 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_PLACEMENT_DEVICE_CLIENTS"},
 	{name: "HTTP_API_PLACEMENT_SCHEDD_HOST"},
 	{name: "HTTP_API_PLACEMENT_COLLECTOR_HOST"},
+	// Which placementd discovery accepts, decided when the handler is
+	// built.
+	{name: "HTTP_API_PLACEMENTD_NAME"},
+	{name: "PLACEMENTD_HOST"},
 
 	// Mirror routing, resolved into a discovery locator at startup.
 	{name: "HTTP_API_DBMIRROR_NAME"},

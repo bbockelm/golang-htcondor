@@ -59,7 +59,8 @@ func TestDaemonPathsAreMarked(t *testing.T) {
 			_, _ = discoverCredd(context.Background(), creddLookup{scheddName: "some-schedd", scheddAddr: closed, collector: collector}, logger)
 		}},
 		{"placementd discovery", func() {
-			_, _ = discoverPlacementd(context.Background(), nil, collector, logger)
+			l := &placementdLocator{scheddName: "some-schedd", query: collectorAdQuery(collector), logger: logger}
+			_, _ = l.discover(context.Background())
 		}},
 		{"queue superuser refresh", func() {
 			p := newSuperuserPolicy(scheddSuperUserSource{get: func() *htcondor.Schedd { return htcondor.NewSchedd("closed", closed) }},

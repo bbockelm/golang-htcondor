@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PlacementIssued, PlacementMe } from '@/lib/api';
+import { ApiError, type PlacementIssued, type PlacementMe } from '@/lib/api';
 
 const me = vi.fn();
 const requestToken = vi.fn();
@@ -94,6 +94,43 @@ describe('PlacementTokenRequest', () => {
     await renderForm();
     expect(await screen.findByText(/is not authorized to use this access point/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Request token' })).not.toBeInTheDocument();
+  });
+
+  it('says plainly that placement is unavailable', async () => {
+    me.mockRejectedValue(new ApiError(503, 'Placement tokens are not available on this server.'));
+    await renderForm();
+    expect(
+      await screen.findByText(
+        'Placement tokens are not available on this access point right now. Please try again later.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('never shows a server failure as sent', async () => {
+    // What an older server sent: the daemon's address and this server's
+    // identity, which are not the person's business.
+    me.mockRejectedValue(
+      new ApiError(
+        502,
+        'Failed to look up your placement identity: failed to connect to placementd at <128.105.76.18:9618?sock=placementd_7607_5906>: command 556 refused by the peer (DENIED)',
+      ),
+    );
+    await renderForm();
+    expect(
+      await screen.findByText('Your placement details could not be loaded. Please try again later.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/placementd|DENIED|128\.105/)).not.toBeInTheDocument();
+  });
+
+  it('shows a plain message when the token request fails', async () => {
+    me.mockResolvedValue({ ...alice, account_enabled: true });
+    requestToken.mockRejectedValue(new ApiError(502, 'Failed to issue a token: refused by the peer (DENIED)'));
+    await renderForm();
+    fireEvent.click(await screen.findByRole('button', { name: 'Request token' }));
+    expect(
+      await screen.findByText('The token could not be issued. Please try again later.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/DENIED/)).not.toBeInTheDocument();
   });
 
   it('says so when the mapping has expired', async () => {
