@@ -105,6 +105,9 @@ type Handler struct {
 	// admin UI page that uses them, and is not a startup failure.
 	placementd          htcondor.PlacementdClient
 	placementdAvailable atomic.Bool
+	// placementdLocator found placementd and is its resolver; nil when
+	// the client was supplied rather than discovered.
+	placementdLocator *placementdLocator
 	// placementCaps caches the placementd's advertised API version.
 	placementCaps placementAPIVersionCache
 	// placementOnboard is the user-facing placement state: identity
@@ -1116,6 +1119,11 @@ type HandlerConfig struct {
 	// SCHEDD_HOST and COLLECTOR_HOST lines shown with a placement token.
 	PlacementScheddHost    string
 	PlacementCollectorHost string
+	// PlacementdName pins the placementd by its ad's Name, or by a sinful
+	// string (HTTP_API_PLACEMENTD_NAME, else PLACEMENTD_HOST). Empty
+	// means this access point's own placementd: the local address file,
+	// else a PlacementD ad from this access point's host.
+	PlacementdName string
 
 	// LLMAPIKeyFile is the path to a file holding the Anthropic API
 	// key used by the chat endpoint at /api/v1/chat. Empty disables
@@ -1587,9 +1595,23 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// The resolver also runs later: when a connection to the
 		// discovered address fails (a restarted placementd has a new
 		// one), and when one is wanted but none was found here.
-		resolve := func(ctx context.Context) (string, error) {
-			return discoverPlacementd(ctx, cfg.HTCondorConfig, cfg.Collector, logger)
+		locator := &placementdLocator{
+			htcConfig:  cfg.HTCondorConfig,
+			name:       cfg.PlacementdName,
+			scheddName: h.scheddName,
+			query:      collectorAdQuery(cfg.Collector),
+			logger:     logger,
 		}
+		if multi == nil {
+			locator.scheddAddr = func() string {
+				if s := h.getSchedd(); s != nil {
+					return s.Address()
+				}
+				return ""
+			}
+		}
+		h.placementdLocator = locator
+		resolve := locator.discover
 		placementAddr, err := resolve(context.Background())
 		if err != nil {
 			logger.Info(logging.DestinationHTTP, "No placementd found; placement endpoints disabled", "reason", err)

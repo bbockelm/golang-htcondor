@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -474,4 +475,94 @@ func TestOpenAPIDocumentsPlacementOnboarding(t *testing.T) {
 // testSessionCookie is the session cookie a browser would send.
 func testSessionCookie(value string) *http.Cookie {
 	return &http.Cookie{Name: sessionCookieName, Value: value} //nolint:gosec // G124: a request cookie in a test
+}
+
+// productionDenial is the error a placementd that refused this server
+// produced, as the client reports it: the daemon's address, the identity
+// this server authenticated as, and how.
+//
+//nolint:gosec // G101: an error message, not a credential.
+const productionDenial = `failed to connect to placementd at <128.105.76.18:9618?addrs=128.105.76.18-9618&alias=townsend-ap4000.chtc.wisc.edu&sock=placementd_7607_5906>: ` +
+	`command 556 refused by the peer (DENIED) at <128.105.76.18:9618>; authenticated as "SCHEDD_ap2001.chtc.wisc.edu@cm.chtc.wisc.edu" via TOKEN`
+
+// A placementd that cannot answer is the server's problem: a signed-in
+// person is told placement is unavailable, and nothing about the daemon,
+// its address, or this server's identity reaches them.
+func TestPlacementMeHidesPlacementdFailures(t *testing.T) {
+	fake := newOnboardFake()
+	fake.err = errors.New(productionDenial)
+	srv := newOnboardingServer(t, fake)
+	cookie := srv.placementCookie(t, aliceIdentity)
+
+	for _, tc := range []struct{ method, target, body string }{
+		{http.MethodGet, "/api/v1/placement/me", ""},
+		{http.MethodPost, "/api/v1/placement/me/token", `{"project":"ProjA","authorizations":["READ"]}`},
+	} {
+		rec := srv.do(t, cookie, tc.method, tc.target, tc.body)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s %s: status %d, want 503", tc.method, tc.target, rec.Code)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, placementUnavailableMessage) {
+			t.Errorf("%s %s: body %s lacks the plain message", tc.method, tc.target, body)
+		}
+		for _, leak := range []string{"128.105", "sock=", "townsend", "SCHEDD_", "cm.chtc", "TOKEN", "DENIED", "556", "placementd at"} {
+			if strings.Contains(body, leak) {
+				t.Errorf("%s %s: body leaks %q: %s", tc.method, tc.target, leak, body)
+			}
+		}
+	}
+}
+
+// The placementd's own refusals are about the person and still reach them.
+func TestPlacementMePassesPolicyRefusals(t *testing.T) {
+	fake := newOnboardFake()
+	fake.err = &htcondor.PlacementError{Code: htcondor.PlacementErrUserMappingExpired, Message: "Your access has expired."}
+	srv := newOnboardingServer(t, fake)
+	rec := srv.do(t, srv.placementCookie(t, aliceIdentity), http.MethodGet, "/api/v1/placement/me", "")
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "Your access has expired.") {
+		t.Errorf("status %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// An administrator still gets the detail, which is how the cause is found.
+func TestPlacementAdminKeepsFailureDetail(t *testing.T) {
+	fake := newOnboardFake()
+	fake.err = errors.New(productionDenial)
+	srv := newOnboardingServer(t, fake)
+	rec := srv.do(t, srv.userCookie(t, "root", "", "condor-admins"), http.MethodGet, "/api/v1/placement/users", "")
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "DENIED") {
+		t.Errorf("status %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// With only another access point's placementd in the collector, the
+// session is not offered placement, before or after the server looks
+// again, which is what keeps the "Placement token" entry out of the UI.
+func TestAuthMeOmitsPlacementWithoutThisAccessPointsPlacementd(t *testing.T) {
+	srv := newOnboardingServer(t, newOnboardFake())
+	cfg, _ := discoveryConfig(t, thisAPHost)
+	coll := sharedCollector(t, placementdAd(otherAPHost, otherAPHost, otherPlacementd))
+	srv.placementd = htcondor.NewPlacementd("").WithResolver(newTestLocator(t, cfg, coll, thisAPHost).discover)
+	srv.placementdAvailable.Store(false)
+	c := srv.userCookie(t, "alice", aliceIdentity)
+
+	for attempt := range 2 {
+		rec := srv.do(t, c, http.MethodGet, "/api/v1/auth/me", "")
+		var me AuthMeResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
+			t.Fatal(err)
+		}
+		if me.Placement != nil {
+			t.Errorf("attempt %d: auth/me offers placement: %+v", attempt, me.Placement)
+		}
+		// Let the background look the first request started finish.
+		deadline := time.Now().Add(5 * time.Second)
+		for srv.placementOnboard.resolving.Load() && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if rec := srv.do(t, c, http.MethodGet, "/api/v1/placement/me", ""); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("placement/me status %d, want 503", rec.Code)
+	}
 }

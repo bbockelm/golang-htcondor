@@ -23,6 +23,19 @@ const CHECKBOX_CLASS: Record<string, string> = {
   danger: 'accent-red-600',
 };
 
+const UNAVAILABLE = 'Placement tokens are not available on this access point right now. Please try again later.';
+
+// placementErrorText is what a person is told when a placement request
+// fails. The server's own refusals (4xx) are about them and are shown as
+// sent; anything else is plain copy.
+export function placementErrorText(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) {
+    if (err.status === 503) return UNAVAILABLE;
+    if (err.status >= 400 && err.status < 500 && err.message) return err.message;
+  }
+  return fallback;
+}
+
 export function placementTokenFileName(): string {
   return 'Placement.token';
 }
@@ -43,13 +56,9 @@ export function PlacementTokenRequest({
 
   if (me.isLoading) return <p className="text-gray-400">Loading…</p>;
   if (me.error) {
-    const err = me.error as Error;
-    const status = err instanceof ApiError ? err.status : undefined;
     return (
       <p className="text-sm text-red-600">
-        {status === 503
-          ? 'Placement tokens are not available on this access point.'
-          : `Could not load your placement identity: ${err.message}`}
+        {placementErrorText(me.error, 'Your placement details could not be loaded. Please try again later.')}
       </p>
     );
   }
@@ -178,7 +187,9 @@ function RequestForm({
           {request.isPending ? 'Requesting…' : 'Request token'}
         </button>
         {request.error && (
-          <span className="text-sm text-red-600">{(request.error as Error).message}</span>
+          <span className="text-sm text-red-600">
+            {placementErrorText(request.error, 'The token could not be issued. Please try again later.')}
+          </span>
         )}
       </div>
     </form>

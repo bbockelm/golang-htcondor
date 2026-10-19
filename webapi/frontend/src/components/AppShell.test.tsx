@@ -67,4 +67,14 @@ describe('AppShell for a placement-only session', () => {
     expect(screen.getByRole('link', { name: 'Jobs' })).toBeInTheDocument();
     expect(replace).not.toHaveBeenCalled();
   });
+
+  it('does not offer the placement page when this access point has no placementd', async () => {
+    // The server leaves placement out of the session when it has no
+    // placementd of its own, even for a session with a placement identity.
+    pathname = '/jobs';
+    me.mockResolvedValue({ authenticated: true, is_admin: false, username: 'alice' });
+    await renderShell();
+    expect(await screen.findByRole('link', { name: 'Jobs' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Placement token' })).not.toBeInTheDocument();
+  });
 });

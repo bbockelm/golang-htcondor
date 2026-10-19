@@ -417,6 +417,7 @@ type Config struct {
 	PlacementDeviceClients     *string
 	PlacementScheddHost        string
 	PlacementCollectorHost     string
+	PlacementdName             string
 
 	// LLMAPIKeyFile is the path to a file holding the Anthropic API
 	// key. Empty disables the chat endpoint. See HandlerConfig.
@@ -583,6 +584,7 @@ func NewServer(cfg Config) (*Server, error) {
 		PlacementDeviceClients:      cfg.PlacementDeviceClients,
 		PlacementScheddHost:         cfg.PlacementScheddHost,
 		PlacementCollectorHost:      cfg.PlacementCollectorHost,
+		PlacementdName:              cfg.PlacementdName,
 		LLMAPIKeyFile:               cfg.LLMAPIKeyFile,
 		LLMAPIURL:                   cfg.LLMAPIURL,
 		LLMModel:                    cfg.LLMModel,

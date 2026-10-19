@@ -906,6 +906,21 @@ func resolveJobQueueLog(cfg *config.Config, logger *logging.Logger) string {
 	return fallback
 }
 
+// loadPlacementdName is the placementd an operator chose, by its ad's Name
+// or a sinful string: HTTP_API_PLACEMENTD_NAME, else PLACEMENTD_HOST, which
+// is how HTCondor's own tools on this host find a placementd (and the Name
+// a placementd on this host advertises). Empty means this access point's
+// own placementd, which is the only one discovery otherwise accepts.
+func loadPlacementdName(cfg *config.Config, logger *logging.Logger) string {
+	for _, knob := range []string{"HTTP_API_PLACEMENTD_NAME", "PLACEMENTD_HOST"} {
+		if v := strings.TrimSpace(firstConfigValue(cfg, knob)); v != "" {
+			logger.Info(logging.DestinationHTTP, "Using the configured placementd", "knob", knob, "placementd", v)
+			return v
+		}
+	}
+	return ""
+}
+
 func firstConfigValue(cfg *config.Config, knob string) string {
 	if v, ok := cfg.Get(knob); ok {
 		return v
@@ -2119,6 +2134,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	if creddAddress != "" {
 		logger.Info(logging.DestinationHTTP, "HTTP_API_CREDD_ADDRESS configured", "address", creddAddress)
 	}
+	placementdName := loadPlacementdName(cfg, logger)
 
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:               listenAddrFromConfig,
@@ -2170,6 +2186,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		PlacementDeviceClients:     placementDeviceClients(cfg),
 		PlacementScheddHost:        firstConfigValue(cfg, "HTTP_API_PLACEMENT_SCHEDD_HOST"),
 		PlacementCollectorHost:     firstConfigValue(cfg, "HTTP_API_PLACEMENT_COLLECTOR_HOST"),
+		PlacementdName:             placementdName,
 		OAuth2Requirements:         mcpCfg.oauth2Requirements,
 		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,
 		IdentityMapStrategies:      mcpCfg.identityMapStrategies,

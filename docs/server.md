@@ -1481,12 +1481,20 @@ metrics key.
   These are admin-only on purpose: the placementd registers its commands
   at ADMINISTRATOR and this server talks to it as the AP's own identity,
   so an endpoint any signed-in user could reach would let them mint a
-  bearer token for anyone in the map file. The server finds the daemon
-  via `PLACEMENTD_ADDRESS_FILE` (or `$(LOG)/.placementd_address`), then
-  the collector; finding none simply disables the group. It looks again
-  when a connection fails (a restarted placementd has a new address) and
-  when the feature is next asked for, so a placementd started or upgraded
-  later is picked up without restarting this server.
+  bearer token for anyone in the map file. The server uses only this
+  access point's placementd: the one named by `HTTP_API_PLACEMENTD_NAME`
+  (or HTCondor's `PLACEMENTD_HOST`) if set; else the one in
+  `PLACEMENTD_ADDRESS_FILE` (or `$(LOG)/.placementd_address`); else a
+  PlacementD ad in the collector whose `Machine` is this access point's
+  host — the schedd's `Machine`, the host in the schedd's `Name`, or
+  `FULL_HOSTNAME`. A placementd another access point advertises to the
+  same collector is never chosen, since it would issue tokens for that
+  access point. Finding none disables the group and logs why once at
+  startup; `GET /api/v1/placement/status` reports the latest reason. It
+  looks again, by the same rule, when a connection fails (a restarted
+  placementd has a new address) and when the feature is next asked for,
+  so a placementd started or upgraded later is picked up without
+  restarting this server.
 
 **Placement onboarding** (any signed-in session; see
 [Placement onboarding](#placement-onboarding))
@@ -2465,6 +2473,7 @@ every other caller.
 | `HTTP_API_PLACEMENT_DEVICE_CLIENTS` | Comma-separated `client_id`s the device flow accepts. Default `placement_client,curl,`. Set empty to accept none. Read at startup. |
 | `HTTP_API_PLACEMENT_SCHEDD_HOST` | `SCHEDD_HOST` shown with a token for `~/.condor/user_config`. Default: this server's schedd name. Read at startup. |
 | `HTTP_API_PLACEMENT_COLLECTOR_HOST` | `COLLECTOR_HOST` shown with a token. Default: `COLLECTOR_HOST`. Read at startup. |
+| `HTTP_API_PLACEMENTD_NAME` | The placementd to use, by the `Name` in its collector ad (or a sinful string). Unset: `PLACEMENTD_HOST` if set, else this access point's own placementd (address file, then a collector ad from this access point's host). Set it only for a placementd that serves this access point from another host. Read at startup. |
 
 ## Configuration
 
