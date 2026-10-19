@@ -66,7 +66,7 @@ env:
   # The HTCondor the test builds and runs: OWNER/REPO@REF. The placementd
   # database lives on this fork until it merges upstream; then this becomes
   # htcondor/htcondor@<commit>, or the build gives way to released packages.
-  HTCONDOR_SOURCE: ${{ inputs.htcondor_source || 'bbockelm/htcondor@22fc685c67aff58b60dca9dbffbcb9c8bd5ca545' }}
+  HTCONDOR_SOURCE: ${{ inputs.htcondor_source || 'bbockelm/htcondor@3be43eb962c96900dbebfa799727bc4e62c8dce4' }}
 
 jobs:
   placement-e2e:
