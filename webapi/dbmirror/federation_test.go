@@ -93,3 +93,34 @@ func TestPickSpokesPairsByMirroredName(t *testing.T) {
 		t.Error("spoke discovery must ask for every ad (Limit -1)")
 	}
 }
+
+// TestPickHubs: every hub ad with a Name and an address, one per Name,
+// by Name; spokes and nameless or addressless ads are not hubs.
+func TestPickHubs(t *testing.T) {
+	hub := func(name, addr string) *classad.ClassAd {
+		ad := classad.New()
+		if name != "" {
+			ad.InsertAttrString("Name", name)
+		}
+		if addr != "" {
+			ad.InsertAttrString("MyAddress", addr)
+		}
+		ad.InsertAttrString("FederationConstraint", `regexp("^ap", Name)`)
+		return ad
+	}
+	got := PickHubs([]*classad.ClassAd{
+		hub("hub-b@db", "<10.0.0.2:9618>"),
+		hub("hub-a@db", "<10.0.0.1:9618>"),
+		hub("HUB-A@db", "<10.0.0.9:9618>"), // the same hub, by name
+		hub("", "<10.0.0.3:9618>"),
+		hub("hub-c@db", ""),
+		spokeAd(t, "spoke@ap1", "<10.0.0.4:9618>", "ap1", true, true, ""),
+	})
+	if len(got) != 2 || got[0].Name != "hub-a@db" || got[0].Address != "<10.0.0.1:9618>" || got[1].Name != "hub-b@db" {
+		var names []string
+		for _, i := range got {
+			names = append(names, i.Name+" "+i.Address)
+		}
+		t.Fatalf("PickHubs = %v, want hub-a@db at 10.0.0.1 and hub-b@db", names)
+	}
+}

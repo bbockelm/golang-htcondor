@@ -56,7 +56,8 @@ func (s *Service) GetJob(ctx context.Context, user string, id jobid.ID, projecti
 	if err := jobid.Valid(id); err != nil {
 		return nil, errorf(http.StatusBadRequest, "invalid job id: %v", err)
 	}
-	v := s.snapshot()
+	ctx = s.PinHub(ctx)
+	v := s.snapshot(ctx)
 	if !id.Complete() {
 		resolved, err := s.resolve(ctx, v, user, id)
 		if err != nil {
@@ -91,13 +92,18 @@ func (s *Service) getComplete(ctx context.Context, v view, m apregistry.Member, 
 	proj := projectionWith(projection, keyAttrs...)
 	notFound := errorf(http.StatusNotFound, "job %s not found", s.Codec.Format(id))
 
-	// Tier 1: the hub, when it holds this AP fresh.
-	if v.fresh[strings.ToLower(m.Name)] {
+	// Tier 1: the hub, when it holds this AP fresh. A hub that became
+	// active less than the settle window ago (settling) answers what it
+	// holds, but its miss is asked of the AP: the job may not have reached
+	// it yet.
+	if key := strings.ToLower(m.Name); v.fresh[key] || v.settling[key] {
 		if row, err := s.hubFind(ctx, m.Name, constraint, proj); err == nil {
-			if row == nil {
+			if row != nil {
+				return &JobResult{Row: *row, Source: SourceHub}, nil
+			}
+			if v.fresh[key] {
 				return nil, notFound
 			}
-			return &JobResult{Row: *row, Source: SourceHub}, nil
 		}
 	}
 
@@ -168,12 +174,13 @@ func (s *Service) hubFind(ctx context.Context, schedd, constraint string, proj [
 }
 
 func (s *Service) hubFindTable(ctx context.Context, table, schedd, constraint string, proj []string) (*Row, error) {
-	dbc, closer, err := s.Hub.Client(ctx)
+	dbc, closer, err := s.Hub.For(ctx).Client(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer closer()
-	return findOne(ctx, dbc, table, fmt.Sprintf("(%s) && (%s)", constraint, scheddIn([]string{schedd})), proj, "")
+	row, err := findOne(ctx, dbc, table, fmt.Sprintf("(%s) && (%s)", constraint, scheddIn([]string{schedd})), proj, "")
+	return row, s.noteRead(ctx, err)
 }
 
 // spokeFind reads the job from the AP's spoke. served is false when the
@@ -259,7 +266,7 @@ func (s *Service) findCandidates(ctx context.Context, v view, user string, id jo
 	if err != nil {
 		return nil, err
 	}
-	dbc, closer, err := s.Hub.Client(ctx)
+	dbc, closer, err := s.Hub.For(ctx).Client(ctx)
 	if err != nil {
 		return nil, errorf(http.StatusServiceUnavailable, "the federation hub is unavailable: %v", err)
 	}
@@ -281,7 +288,7 @@ func (s *Service) findCandidates(ctx context.Context, v view, user string, id jo
 			}
 			return true
 		})
-		if err == nil {
+		if s.noteRead(ctx, err) == nil {
 			err = perr
 		}
 		if err != nil {

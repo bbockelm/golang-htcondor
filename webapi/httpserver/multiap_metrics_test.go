@@ -588,7 +588,8 @@ func TestMultiAPTableSourcesKeepsEarlierNotKept(t *testing.T) {
 		"HistoryConnected = true\nEpochHistoryMissing = true\nEpochHistoryConnected = false\n"+
 		"JobMetricsMissing = true\nJobMetricsConnected = false", ap2))
 	svc := multiAPService(t, hub, multiaptest.NewRegistry(ap1, ap2))
-	src := svc.TableSources(svc.TableSources(svc.Sources(), multiap.TableEpochHistory), multiap.TableJobMetrics)
+	ctx := context.Background()
+	src := svc.TableSources(ctx, svc.TableSources(ctx, svc.Sources(ctx), multiap.TableEpochHistory), multiap.TableJobMetrics)
 	var got []string
 	for _, n := range src.NotKept {
 		got = append(got, n.Schedd+"/"+n.Table)

@@ -121,7 +121,7 @@ func TestUntrustedAPIsFlagged(t *testing.T) {
 	if err := s.Hub.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	src := s.Sources()
+	src := s.Sources(context.Background())
 	var flagged *Degraded
 	for i, d := range src.Degraded {
 		if d.Schedd == "ap3" {
@@ -134,7 +134,7 @@ func TestUntrustedAPIsFlagged(t *testing.T) {
 	if src.Fresh != 2 {
 		t.Errorf("fresh = %d, want 2 (ap1, ap2; ap3 is untrusted, gone is absent)", src.Fresh)
 	}
-	for _, ap := range s.APs() {
+	for _, ap := range s.APs(context.Background()) {
 		switch ap.Schedd {
 		case "ap3":
 			if ap.Trust.State != apregistry.TrustUntrusted || ap.Trust.Actions || !strings.Contains(ap.Trust.Reason, "nobody@elsewhere") {

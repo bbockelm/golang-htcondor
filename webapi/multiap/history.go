@@ -148,7 +148,8 @@ func (s *Service) ListHistory(ctx context.Context, req ListRequest) ([]Row, *Lis
 		}
 		after = &k
 	}
-	v := s.snapshot()
+	ctx = s.PinHub(ctx)
+	v := s.snapshot(ctx)
 	res := &ListResult{Sources: v.sources}
 	schedds, err := s.allowed(v, req.Schedd)
 	if err != nil {
@@ -161,7 +162,7 @@ func (s *Service) ListHistory(ctx context.Context, req ListRequest) ([]Row, *Lis
 	if err != nil {
 		return nil, nil, err
 	}
-	dbc, closer, err := s.Hub.Client(ctx)
+	dbc, closer, err := v.hub.Client(ctx)
 	if err != nil {
 		return nil, nil, errorf(http.StatusServiceUnavailable, "the federation hub is unavailable: %v", err)
 	}
@@ -184,7 +185,7 @@ func (s *Service) ListHistory(ctx context.Context, req ListRequest) ([]Row, *Lis
 		// region does not end on this page.
 		top, err := s.historyQuery(func(yield func(string) bool) error {
 			texts, err := dbc.TopK(ctx, TableHistory, and(definedAfter(after)), proj, attrEnteredHistory, true, limit+1)
-			if err != nil {
+			if s.noteRead(ctx, err) != nil {
 				return err
 			}
 			for _, t := range texts {
@@ -298,7 +299,7 @@ func cutHistory(rows []histRow, limit int, res *ListResult) ([]Row, *ListResult)
 // historyScan reads every row matching constraint, up to the boundary cap.
 func (s *Service) historyScan(ctx context.Context, dbc *dbrpc.Client, constraint string, proj []string) ([]histRow, error) {
 	rows, err := s.historyQuery(func(yield func(string) bool) error {
-		return dbc.QueryRawProjectStream(ctx, TableHistory, constraint, proj, maxBoundaryRows+1, yield)
+		return s.noteRead(ctx, dbc.QueryRawProjectStream(ctx, TableHistory, constraint, proj, maxBoundaryRows+1, yield))
 	})
 	if err != nil {
 		return nil, err

@@ -67,7 +67,7 @@ func (s *Handler) handleMultiEpochs(w http.ResponseWriter, r *http.Request, opts
 		}
 	}
 
-	if svc.Hub.Federates(multiap.TableEpochHistory) {
+	if svc.Hub.For(ctx).Federates(multiap.TableEpochHistory) {
 		limit, err := parseLimit(r)
 		if err != nil {
 			s.writeError(w, http.StatusBadRequest, err.Error())

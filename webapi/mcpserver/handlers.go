@@ -1006,6 +1006,9 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 	}
 
 	if s.multi != nil {
+		// One federation hub for the whole call, so its reads and the
+		// freshness it reports are one hub's.
+		ctx = s.multi.PinHub(ctx)
 		// An allowlist, enforced on the one path every transport shares.
 		result, handled, err := s.callMultiAPTool(ctx, request.Name, request.Arguments)
 		if handled && err != nil && !multiAPToolAllowed(request.Name) {

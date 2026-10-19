@@ -1879,7 +1879,8 @@ HTTP_API_SCHEDD_CONSTRAINT = regexp("^ap[0-9]+\\.example\\.org$", Name)
 Reads come from a federation hub: an htcondordb running with
 `HTCONDORDB_FEDERATE_SCHEDD_CONSTRAINT` that fans every access point's own
 htcondordb (its spoke) into one catalog. See the htcondordb federation
-documentation for running one; give it the same constraint. Actions go to
+documentation for running one; give it the same constraint. Run two for
+availability ([two hubs](#two-hubs) below). Actions go to
 the schedd of the access point the job is on, as you. New work goes to the
 access point your [assignment](#ap-assignment) names.
 
@@ -2329,10 +2330,11 @@ lists them:
 ```
 
 **Freshness.** Every list response carries a `sources` block naming each
-access point whose rows are not known to be current:
+access point whose rows are not known to be current, and the hub the
+rows came from (`hub`, its collector ad `Name`):
 
 ```json
-"sources": {"aps": 52, "fresh": 50, "degraded": [
+"sources": {"hub": "hub-a@db.example.org", "aps": 52, "fresh": 50, "degraded": [
   {"schedd": "ap17.example.org", "state": "stale", "staleness_seconds": 412},
   {"schedd": "ap31.example.org", "state": "absent", "reason": "the federation hub does not hold this access point"}]}
 ```
@@ -2359,11 +2361,117 @@ access point whose ad disappears stays listed (`in_collector: false`)
 with its last address; nothing is removed because the collector stopped
 mentioning it.
 
-**Health.** `/readyz` is ready when the hub answers and at least one
-access point matches, and lists every access point's state to an admin
-session or a `metrics` API key (anyone else gets the count); one access
-point being down never makes the server unready. The collector ad carries
-`ScheddConstraint` and `ScheddCount` instead of `ScheddName`.
+**Health.** `/readyz` is ready when some hub answers and at least one
+access point matches, and lists every access point's state and every
+hub's to an admin session or a `metrics` API key (anyone else gets the
+counts); one access point being down never makes the server unready, nor
+does one of two hubs. The collector ad carries `ScheddConstraint` and
+`ScheddCount` instead of `ScheddName`.
+
+<a id="two-hubs"></a>**Two hubs.** For availability, run two federation hubs, each an
+independent htcondordb fed from every spoke, rather than one replicated
+hub. Their tables are deterministic functions of the spokes' data, so the
+two converge with no coordination between them. Give each its own
+`HTCONDORDB_NAME` (the collector keys their ads on it) and the same
+`HTCONDORDB_FEDERATE_SCHEDD_CONSTRAINT`; nothing else differs. This
+server discovers every `HTCondorDB` ad carrying `FederationConstraint`,
+re-discovering every 30 seconds, or uses the hubs `HTTP_API_HUB_NAME`
+lists. A discovery that finds no hub at all (a collector that just
+restarted) keeps the hubs last found for five minutes.
+
+It reads from **one hub at a time** -- the active hub -- and never mixes
+the two within a request or a watch evaluation: a watch cursor, a
+`JobsSyncedAt` and a job's absence each mean something only on the hub
+that reported it. Every hub's `federation_sources` is read every 5
+seconds. The active hub is kept while it answers and is not clearly
+worse, and replaced when:
+
+- it stops answering: `HTTP_API_HUB_FAIL_AFTER` reads of its
+  `federation_sources` in a row failed (default 2, so about 10 seconds),
+  or as many reads of its data in a row failed on the connection -- it
+  could not be dialed, the connection dropped, the read timed out. A
+  query the hub refused does not count, and a failed read brings the
+  next check forward. Reads move to the answering hub with the most fresh
+  access points. With nowhere to go, the active hub is kept.
+- another hub has reported at least `HTTP_API_HUB_SWITCH_MARGIN` more
+  fresh access points (default 1) at every check for
+  `HTTP_API_HUB_SWITCH_SECONDS` (default 120), and the last switch is at
+  least that old. A difference that does not last that long -- each
+  hub's state pass lands at its own moment -- never switches. An access
+  point counts as fresh for this only with its jobs stream caught up
+  (`JobsSynced`, or, on a hub too old to publish it, no `LastReset`
+  within ten minutes): a hub replaying an access point does not rank as
+  holding it.
+
+Nothing switches back just because the first hub returned. With one hub
+there is nothing to choose and nothing changes. `/api/v1/aps` reports the
+hub the answer came from (`hub`), every hub with the active one marked
+(`hubs`: `name`, `address`, `active`, `reachable`, `fresh_aps`), and the
+last switch (`hub_switch`: `from`, `to`, `reason` `unreachable` or
+`fresher`, `at`); a switch is logged as a warning.
+
+What a switch does to each consumer:
+
+- **Reads** (lists, history, single jobs, the dashboard, issues, run
+  attempts, utilization, MCP tools) are pinned to the active hub when the
+  request starts. One already running finishes on its hub; the next is
+  served by the new one, and its `sources` block is the new hub's.
+  Cached answers (issues, utilization) are kept per hub.
+- **Settling.** Two hubs are not in step: the new one may not yet hold a
+  job the old one showed, and its `federation_sources` can say an access
+  point is fresh while its jobs stream is still behind (`StalenessSeconds`
+  is measured on the heartbeat stream, and `JobsSynced` says a catch-up
+  finished, not that nothing is queued behind it). So for
+  `HTTP_API_HUB_SETTLE_SECONDS` after a switch (default 90: the hub's
+  default 60-second fresh threshold and a margin) every access point the
+  new hub holds fresh is reported `settling` in `sources`, with a reason
+  naming the switch; a by-id read the new hub misses (`GET
+  /api/v1/jobs/{id}`, MCP `get_job`) is asked of the access point's own
+  htcondordb or schedd instead of answering 404; and a bulk action never
+  skips an access point on the new hub's word. What is guaranteed: a
+  read says which hub it came from and that hub's own view of every
+  access point, and never mixes two hubs. What is not: that a hub
+  reporting an access point `fresh` holds every change on it -- a list
+  read may lack a job another hub showed, during the settle window or
+  after it if the hub's jobs stream is backlogged. A first selection at
+  startup is not a switch and does not settle. An access point that is
+  settling and that the new hub reports keeps no copy of an optional
+  table (`job_metrics`, `epoch_history`) is listed in `not_kept` for it
+  as well: it has none of those rows on any hub.
+- **Page tokens.** A job list token (`/api/v1/jobs`, MCP `query_jobs`)
+  is a position in one hub's change log and names that hub; asked of
+  another, it is refused with a 400 (`reason`: `restart_pagination`), and
+  the listing must start over from the first page. Back on the hub that
+  issued it, it resumes. History tokens (`/api/v1/jobs/archive`) are
+  ordered by the job's values, which every hub orders alike, and carry
+  on across a switch.
+- **Watches** are evaluated one owner's pass at a time, each pass pinned
+  to one hub: its queue read, the `federation_sources` reads around it,
+  its history read and the stream's terminal records all come from that
+  hub. When the hub changes, the evaluator starts its memory of each
+  watch's jobs over. A tracked job counts as gone by its absence only
+  once it has been seen in the new hub's queue (and then only where that
+  hub vouches for its access point, as above); a job the new hub has
+  never shown -- it may still be in its jobs stream's backlog -- is
+  finished only by the new hub's history record or a terminal record on
+  its stream, which a job that really finished reaches in time. A server
+  that restarts with two hubs known treats every tracked job the same
+  way until it sees it. Nothing fires on the new hub on evidence gathered
+  on the old one.
+- **The jobs stream** (`/api/v1/jobs/watch`, the activity ticker,
+  terminal records) ends when the active hub changes and starts over on
+  the new one, from its head, as on a Reset: what it held from the old
+  hub is dropped, its departures with it, and the old hub's cursor is
+  never sent to the new one. A Reset never reports departures.
+- **Writes** go to the access points, not the hubs, and nothing here
+  waits for a write to reach a hub: a list read right after an action
+  may show the job as it was, on either hub. The one decision that
+  trusts a hub after a write -- a bulk action skipping an access point
+  under `HTTP_API_BULK_FRESH_SECONDS` -- refuses for a window after any
+  write this server made there, refuses during a settle window, and
+  otherwise requires the hub it asks to measure its own lag behind that
+  access point within the bound. A by-id read during a settle window
+  that the new hub misses is answered by the access point itself.
 
 The web UI shows an access point column and filter on the job and
 archive lists, which access points are behind, and an Access Points page;
@@ -2525,7 +2633,11 @@ Frequently-used knobs:
 | `HTTP_API_DBMIRROR_ADDRESS` | Dial this sinful string instead of the mirror's advertised `MyAddress`, for one reachable only over NAT, a tunnel, or a Kubernetes Service. Freshness still comes from the collector ad — this changes where to connect, not whether the mirror is current enough to trust — and it applies whether the mirror was found through the collector or not. |
 | `HTTP_API_DBMIRROR_REQUIRED` | Never fall back to the schedd. A read the mirror cannot serve fails instead of becoming load on the access point you were trying to protect. See [the routing notes](../webapi/httpserver/README.md#configuration) for which failures are 503 and which are 400. |
 | `HTTP_API_SCHEDD_CONSTRAINT` | ScheddAd constraint selecting the access points of [multi-AP mode](#multi-ap-mode). Unset = one schedd. Read at startup. |
-| `HTTP_API_HUB_NAME` / `HTTP_API_HUB_ADDRESS` | Pin the federation hub by `Name`, or dial this sinful string, instead of discovering the `HTCondorDB` ad that carries `FederationConstraint`. Multi-AP mode only. |
+| `HTTP_API_HUB_NAME` / `HTTP_API_HUB_ADDRESS` | Name the federation hubs (one `Name`, or several separated by commas or spaces), or dial one at this sinful string, instead of discovering every `HTCondorDB` ad that carries `FederationConstraint`. The address goes with at most one name. Multi-AP mode only. Read at startup. |
+| `HTTP_API_HUB_FAIL_AFTER` | With [two hubs](#two-hubs), how many `federation_sources` reads of the active hub must fail in a row before reads move to another. Default 2. Read at startup. |
+| `HTTP_API_HUB_SWITCH_SECONDS` | With two hubs, how long another hub must hold more fresh access points before reads move to it, and the least time between two such switches. Default 120. Read at startup. |
+| `HTTP_API_HUB_SWITCH_MARGIN` | With two hubs, how many more fresh access points another hub must hold to count as fresher. Default 1. Read at startup. |
+| `HTTP_API_HUB_SETTLE_SECONDS` | With two hubs, how long after a switch the new hub's access points are reported `settling` and a by-id miss on it is asked of the access point. Default 90. Read at startup. |
 | `HTTP_API_MULTI_AP_STALE` | `include` (default) or `exclude` a degraded access point's rows in list reads. Either way it is named in `sources.degraded`. |
 | `HTTP_API_JOB_ID_CODEC` | Text form of a job id in URLs and SSH gateway usernames. Default and only built-in: `at` (`123.0@ap40.example.org`). |
 | `HTTP_API_BULK_FRESH_SECONDS` | Opt in to letting a multi-AP bulk action skip an access point on the hub's word that nothing there matches, when the hub's copy is at most this many seconds behind. Default 0: every access point is contacted. |

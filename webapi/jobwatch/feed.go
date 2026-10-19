@@ -81,6 +81,10 @@ type Feed struct {
 	// cursor is the position of the last event applied, for a resumable
 	// stream (RunResumable); nil before the first.
 	cursor []byte
+	// origin names the source the stream, its cursor and everything held
+	// came from (RunResumableFrom); originSet once a stream has opened.
+	origin    string
+	originSet bool
 
 	// OwnerOf names the owner a job ad belongs to, for owner-scoped
 	// reads and the activity stream. Nil reads the Owner attribute. A
@@ -280,16 +284,49 @@ type ResumeDialer func(ctx context.Context, cursor []byte) (events <-chan WatchE
 // A federation hub's jobs table is what this follows in multi-AP mode:
 // one stream for every access point.
 func (f *Feed) RunResumable(ctx context.Context, dial ResumeDialer) error {
+	return f.RunResumableFrom(ctx, func(ctx context.Context, from Resume) (<-chan WatchEvent, func(), string, error) {
+		events, stop, err := dial(ctx, from.Cursor)
+		return events, stop, "", err
+	})
+}
+
+// Resume is where a resumable stream continues: the cursor after the
+// last event applied, and the origin of the stream that issued it.
+type Resume struct {
+	Cursor []byte
+	Origin string
+}
+
+// OriginDialer opens a watch on a jobs table that may come from one of
+// several sources (two federation hubs), and names the one it opened:
+// origin. A cursor is a position in one source's change log, meaningless
+// to another, so a dialer that opens a different origin than from.Origin
+// must not pass from.Cursor to it: it opens that source's head instead.
+type OriginDialer func(ctx context.Context, from Resume) (events <-chan WatchEvent, stop func(), origin string, err error)
+
+// RunResumableFrom is RunResumable over a dialer that names its origin.
+// When a stream opens on a different origin than the one the feed holds
+// state from, the feed starts over (as on a Reset: everything held is
+// dropped, followers are told, and no departure is reported) and follows
+// the new origin from its head. A stream from one source ends when its
+// dialer ends it, which is how a dialer moves the feed to another.
+func (f *Feed) RunResumableFrom(ctx context.Context, dial OriginDialer) error {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		f.mu.Lock()
-		cursor := append([]byte(nil), f.cursor...)
+		from := Resume{Cursor: append([]byte(nil), f.cursor...), Origin: f.origin}
 		f.mu.Unlock()
-		if len(cursor) == 0 {
-			cursor = nil
+		if len(from.Cursor) == 0 {
+			from.Cursor = nil
 		}
+		cursor := from.Cursor
 		err := f.follow(ctx, func(ctx context.Context) (<-chan WatchEvent, func(), error) {
-			return dial(ctx, cursor)
+			events, stop, origin, err := dial(ctx, from)
+			if err != nil {
+				return nil, nil, err
+			}
+			f.adoptOrigin(origin)
+			return events, stop, nil
 		})
 		if ctx.Err() != nil {
 			return nil
@@ -421,6 +458,32 @@ func (f *Feed) Apply(ev WatchEvent) {
 		return
 	}
 	f.evictLocked()
+}
+
+// adoptOrigin records the origin of a stream that just opened, starting
+// over when it is not the one the feed's state came from.
+func (f *Feed) adoptOrigin(origin string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.originSet && f.origin == origin {
+		return
+	}
+	if f.originSet {
+		f.clearLocked()
+		f.cursor = nil
+		f.notifyAllLocked()
+		f.logf("job watch stream moved to another source; starting over", "from", f.origin, "to", origin)
+	}
+	f.origin, f.originSet = origin, true
+}
+
+// Origin names the source the feed's state came from (see
+// RunResumableFrom); empty before a stream has opened, and for a feed
+// whose dialer names none.
+func (f *Feed) Origin() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.origin
 }
 
 // Reset drops everything and goes cold, for a caller that knows the

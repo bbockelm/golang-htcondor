@@ -244,7 +244,9 @@ func (s *Handler) utilizationCall(w http.ResponseWriter, r *http.Request, uq uti
 		if !ok {
 			return nil, false
 		}
-		return &utilizationCaller{ctx: ctx, user: user, key: uq.key("multi|"+user, false)}, true
+		// The hub the request is pinned to is in the key: an analysis of
+		// one hub's rows is not served after reads move to another.
+		return &utilizationCaller{ctx: ctx, user: user, key: uq.key("multi|"+s.multi.svc.HubOrigin(ctx)+"|"+user, false)}, true
 	}
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {

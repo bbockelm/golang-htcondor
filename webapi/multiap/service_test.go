@@ -169,7 +169,7 @@ func TestListJobsDegraded(t *testing.T) {
 	}
 }
 
-// TestListJobsPagesExactlyOnce pages a db1: cursor one row at a time.
+// TestListJobsPagesExactlyOnce pages a hub-bound (jh1:) cursor one row at a time.
 func TestListJobsPagesExactlyOnce(t *testing.T) {
 	hub := seededHub(t)
 	for c := 10; c < 17; c++ {
@@ -195,7 +195,7 @@ func TestListJobsPagesExactlyOnce(t *testing.T) {
 			if !res.HasMore {
 				break
 			}
-			if !strings.HasPrefix(res.NextPageToken, "db1:") {
+			if !strings.HasPrefix(res.NextPageToken, "jh1:") {
 				t.Fatalf("token %q", res.NextPageToken)
 			}
 			token = res.NextPageToken
@@ -521,7 +521,7 @@ func TestUserForRefusesAnotherDomain(t *testing.T) {
 func TestHubSourcesAndAPs(t *testing.T) {
 	hub := seededHub(t)
 	s := newService(t, hub, newFakeRegistry("ap1.example.org", "ap3.example.org"))
-	aps := s.APs()
+	aps := s.APs(context.Background())
 	if len(aps) != 2 || aps[0].Hub.State != StateFresh || aps[1].Hub.State != StateAbsent {
 		t.Errorf("APs = %+v", aps)
 	}

@@ -37,7 +37,7 @@ func (i IssueSource) JobAds(ctx context.Context, constraint string, projection [
 
 // EpochAds implements issues.Source.
 func (i IssueSource) EpochAds(ctx context.Context, constraint string, projection []string, limit int) ([]*classad.ClassAd, string, error) {
-	if !i.Service.Hub.Federates(TableEpochHistory) {
+	if !i.Service.Hub.For(ctx).Federates(TableEpochHistory) {
 		return nil, "", ErrEpochsNotFederated
 	}
 	ads, err := i.Service.HubRows(ctx, TableEpochHistory, constraint, projection, limit)
@@ -48,6 +48,7 @@ func (i IssueSource) EpochAds(ctx context.Context, constraint string, projection
 // always among the attributes read. A row that will not parse is an
 // error.
 func (s *Service) HubRows(ctx context.Context, table, constraint string, projection []string, limit int) ([]*classad.ClassAd, error) {
+	ctx = s.PinHub(ctx)
 	var out []*classad.ClassAd
 	err := s.hubStream(ctx, table, constraint, projectionWith(projection, AttrScheddName), limit, func(ad *classad.ClassAd) {
 		out = append(out, ad)

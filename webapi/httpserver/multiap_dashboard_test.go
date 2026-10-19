@@ -73,7 +73,7 @@ func TestMultiAPDashboardFinishedIgnoresAStaleAPsDisappearances(t *testing.T) {
 	srv := newMultiAPServer(t, multiAPService(t, hub, multiaptest.NewRegistry(ap1, ap2)))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = srv.jobWatchFeed.RunResumable(ctx, srv.watchHubJobsTable) }()
+	go func() { _ = srv.jobWatchFeed.RunResumableFrom(ctx, srv.watchHubJobsTable) }()
 	waitCond(t, "the feed to follow the hub", srv.jobWatchFeed.Warm)
 
 	// Jobs appear and leave: completed and held on fresh ap1, idle on

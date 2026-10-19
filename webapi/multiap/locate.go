@@ -23,7 +23,8 @@ func (s *Service) FindOwn(ctx context.Context, user, constraint string, projecti
 	if user == "" {
 		return nil, Sources{}, errorf(http.StatusUnauthorized, "the caller's identity could not be established")
 	}
-	v := s.snapshot()
+	ctx = s.PinHub(ctx)
+	v := s.snapshot(ctx)
 	var names []string
 	for _, m := range v.members {
 		names = append(names, m.Name)
@@ -38,7 +39,7 @@ func (s *Service) FindOwn(ctx context.Context, user, constraint string, projecti
 	if limit <= 0 {
 		limit = DefaultFindOwnLimit
 	}
-	dbc, closer, err := s.Hub.Client(ctx)
+	dbc, closer, err := v.hub.Client(ctx)
 	if err != nil {
 		return nil, v.sources, errorf(http.StatusServiceUnavailable, "the federation hub is unavailable: %v", err)
 	}
@@ -54,7 +55,7 @@ func (s *Service) FindOwn(ctx context.Context, user, constraint string, projecti
 		rows = append(rows, row)
 		return true
 	})
-	if err == nil {
+	if s.noteRead(ctx, err) == nil {
 		err = perr
 	}
 	if err != nil {

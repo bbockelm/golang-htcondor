@@ -32,10 +32,43 @@ import (
 // AP not listed proves nothing by being absent.
 type Coverage struct {
 	asOf map[string]time.Time // by lower-cased schedd name
+	// origin names what the read came from, when the source can read
+	// from more than one backend (two federation hubs): evidence is only
+	// comparable between reads of one origin.
+	origin string
+	// several says the source has more than one backend it could have
+	// read from, so a job tracked before this process's first read may
+	// have been seen on another (see absenceMemory.strict).
+	several bool
 }
 
 // NewCoverage returns a Coverage that vouches for no access point.
 func NewCoverage() *Coverage { return &Coverage{asOf: map[string]time.Time{}} }
+
+// NewCoverageFrom returns a Coverage of a read from origin that vouches
+// for no access point yet; several says the source has more than one
+// backend it could read from. When the origin of a watch's reads
+// changes, the evaluator starts its memory of the watch's jobs over, and
+// a tracked job counts as gone by its absence only once it has been seen
+// in the new origin's queue: before that, the new backend may simply
+// never have held it (a lagging hub's jobs stream). Until then only
+// terminal evidence from the new origin -- a history record, a terminal
+// record on its stream -- finishes it.
+func NewCoverageFrom(origin string, several bool) *Coverage {
+	return &Coverage{asOf: map[string]time.Time{}, origin: origin, several: several}
+}
+
+// Several reports whether the source has more than one backend.
+func (c *Coverage) Several() bool { return c != nil && c.several }
+
+// Origin is the origin the read came from; empty when the source names
+// none.
+func (c *Coverage) Origin() string {
+	if c == nil {
+		return ""
+	}
+	return c.origin
+}
 
 // Vouch records that the read reflects every change on schedd up to
 // asOf.
@@ -75,12 +108,31 @@ type CoveredSource interface {
 		yield func(*classad.ClassAd)) (truncated bool, cov *Coverage, err error)
 }
 
+// PassPinner is a Source that reads from one of several backends (two
+// federation hubs) and can hold one evaluation pass to one of them. The
+// evaluator calls PinPass at the start of each owner's pass and makes
+// every read of that pass with the context it returns, so a pass never
+// mixes what two backends said.
+type PassPinner interface {
+	PinPass(ctx context.Context) context.Context
+}
+
 // absenceMemory is what the evaluator remembers between passes about a
 // watch's jobs, for deciding whether a read is newer than a job's last
 // sighting. It lives in memory only: after a restart every absent job is
 // taken to have been seen at the first pass's read, which only delays a
 // verdict.
 type absenceMemory struct {
+	// origin is the Coverage origin the memory was gathered from. A
+	// read of another origin starts the memory over.
+	origin string
+	// strict is set when the memory may describe jobs tracked on another
+	// origin: it was started over because the origin changed, or started
+	// fresh on a source with several origins. A strict memory counts a
+	// job's absence only once seenHere says the job was in this origin's
+	// queue.
+	strict   bool
+	seenHere map[JobID]bool
 	// lastRead is when the previous pass's queue read finished: every
 	// tracked job not in since was present in it (or beyond its cut).
 	lastRead time.Time

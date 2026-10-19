@@ -55,7 +55,7 @@ func TestMultiAPJobMetricsEndToEnd(t *testing.T) {
 	hub := s.srv.multi.svc.Hub
 	var rows []multiap.Source
 	waitFor(t, "the hub's federation_sources rows for both APs", 90*time.Second, func() bool {
-		rows = hub.Sources()
+		rows = hub.Active().Sources()
 		return len(rows) == 2
 	})
 	for _, src := range rows {

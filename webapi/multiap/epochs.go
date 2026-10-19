@@ -50,7 +50,8 @@ type EpochRequest struct {
 // archive's order. It fails with ErrEpochsNotFederated on a hub that
 // does not federate epoch_history.
 func (s *Service) ListEpochs(ctx context.Context, req EpochRequest) ([]Row, *ListResult, error) {
-	if !s.Hub.Federates(TableEpochHistory) {
+	ctx = s.PinHub(ctx)
+	if !s.Hub.For(ctx).Federates(TableEpochHistory) {
 		return nil, nil, ErrEpochsNotFederated
 	}
 	schedd := req.Schedd
@@ -79,11 +80,11 @@ func (s *Service) ListEpochs(ctx context.Context, req EpochRequest) ([]Row, *Lis
 		return nil, nil, errorf(http.StatusBadRequest, "invalid constraint: %v", err)
 	}
 	constraint := strings.Join(append([]string{base}, clauses...), " && ")
-	scope, _, sources, err := s.Scope(req.User, constraint, schedd)
+	scope, _, sources, err := s.Scope(ctx, req.User, constraint, schedd)
 	if err != nil {
 		return nil, nil, err
 	}
-	res := &ListResult{Sources: s.TableSources(sources, TableEpochHistory)}
+	res := &ListResult{Sources: s.TableSources(ctx, sources, TableEpochHistory)}
 	dbc, closer, err := s.HubClient(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -118,7 +119,7 @@ func (s *Service) ListEpochs(ctx context.Context, req EpochRequest) ([]Row, *Lis
 			err = qerr
 		}
 	}
-	if err != nil {
+	if s.noteRead(ctx, err) != nil {
 		return nil, nil, errorf(http.StatusServiceUnavailable, "reading the federation hub's epoch_history: %v", err)
 	}
 	if len(rows) > limit {
@@ -146,7 +147,8 @@ func (s *Service) ResolveJob(ctx context.Context, user string, id jobid.ID) (job
 	if id.Complete() {
 		return id, nil
 	}
-	return s.resolve(ctx, s.snapshot(), user, id)
+	ctx = s.PinHub(ctx)
+	return s.resolve(ctx, s.snapshot(ctx), user, id)
 }
 
 // RouteRead is the AP a read naming one AP goes to, for a read the hub
