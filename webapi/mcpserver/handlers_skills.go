@@ -115,12 +115,16 @@ func (s *Server) toolSkillsList(_ context.Context, args map[string]interface{}) 
 		out = append(out, entry{ID: sk.ID, Name: sk.Name, Description: sk.Description, Path: sk.Path})
 	}
 
-	return map[string]interface{}{
-		"skills":            out,
-		"count":             len(out),
-		"hint":              "Read one in full with skills_get.",
-		"structuredContent": map[string]interface{}{"skills": out, "count": len(out)},
-	}, nil
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d skill(s). Read one in full with skills_get.\n", len(out))
+	for _, e := range out {
+		fmt.Fprintf(&sb, "\n- %s: %s", e.ID, e.Name)
+		if e.Description != "" {
+			fmt.Fprintf(&sb, " -- %s", e.Description)
+		}
+	}
+	return structuredTextResult(sb.String(),
+		map[string]interface{}{"skills": out, "count": len(out)}), nil
 }
 
 // toolSkillsGet answers skills_get.
@@ -148,18 +152,17 @@ func (s *Server) toolSkillsGet(_ context.Context, args map[string]interface{}) (
 		return nil, fmt.Errorf("no skill %q; available ids include: %s", id, strings.Join(available, ", "))
 	}
 
-	return map[string]interface{}{
+	// The Markdown goes in a text block. "content" at the top level of a
+	// tool result is MCP's content-block array, so the body cannot be
+	// filed there as a string; the structured copy is where a field
+	// named content belongs.
+	return structuredTextResult(sk.Body, map[string]interface{}{
 		"id":          sk.ID,
+		"path":        sk.Path,
 		"name":        sk.Name,
 		"description": sk.Description,
-		"path":        sk.Path,
 		"content":     sk.Body,
-		"structuredContent": map[string]interface{}{
-			"name":        sk.Name,
-			"description": sk.Description,
-			"content":     sk.Body,
-		},
-	}, nil
+	}), nil
 }
 
 // skillResources lists the library as MCP resources.

@@ -25,6 +25,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // skillsFixture writes a small library and returns its root.
@@ -101,9 +102,12 @@ func TestSkillsListAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := res.(map[string]interface{})
+	m := res.(map[string]interface{})["structuredContent"].(map[string]interface{})
 	if m["count"].(int) != 2 {
 		t.Errorf("count = %v, want 2", m["count"])
+	}
+	if text := skillResultText(t, res); !strings.Contains(text, "gpu") || !strings.Contains(text, "skills_get") {
+		t.Errorf("list text = %q", text)
 	}
 
 	// The filter narrows on id, name and description alike.
@@ -111,7 +115,7 @@ func TestSkillsListAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := res.(map[string]interface{})["count"].(int); got != 1 {
+	if got := res.(map[string]interface{})["structuredContent"].(map[string]interface{})["count"].(int); got != 1 {
 		t.Errorf("filtered count = %d, want 1", got)
 	}
 
@@ -119,14 +123,37 @@ func TestSkillsListAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := got.(map[string]interface{})["content"].(string)
+	body := skillResultText(t, got)
 	if !strings.Contains(body, "request_gpus") {
 		t.Errorf("content = %q", body)
+	}
+	if sc := got.(map[string]interface{})["structuredContent"].(map[string]interface{}); sc["content"] != body {
+		t.Errorf("structuredContent.content = %q, want the body", sc["content"])
 	}
 	// Front matter must not reach the agent as content.
 	if strings.Contains(body, "description:") {
 		t.Errorf("front matter leaked: %q", body)
 	}
+}
+
+// skillResultText converts a skills tool result the way the transport
+// does and returns its single text block. A body filed under "content"
+// as a string fails here, as it does at the client: that key is MCP's
+// content-block array.
+func skillResultText(t *testing.T, res interface{}) string {
+	t.Helper()
+	out, err := toSDKResult(res)
+	if err != nil {
+		t.Fatalf("result does not convert to a CallToolResult: %v", err)
+	}
+	if len(out.Content) != 1 {
+		t.Fatalf("got %d content blocks, want 1", len(out.Content))
+	}
+	text, ok := out.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content block is %T, want *mcp.TextContent", out.Content[0])
+	}
+	return text.Text
 }
 
 // A near-miss is the common case, so the error should name alternatives
