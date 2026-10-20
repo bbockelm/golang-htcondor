@@ -62,8 +62,10 @@ describe('memoryCard', () => {
     expect(memoryCard(mem({ requested_mib: 500_000, above_requested: 0 }), 1)!.bar.refs).toBeUndefined();
   });
 
-  it('never calls a job above usual unless it is running', () => {
-    expect(memoryCard(mem({ peak_mib: 60_000, above_usual: true }), 4)!.above).toBe(false);
+  it('calls a finished job above usual when it was, and a waiting one never', () => {
+    expect(memoryCard(mem({ peak_mib: 60_000, above_usual: true }), 4)!.above).toBe(true);
+    expect(memoryCard(mem({ peak_mib: 1100, above_usual: false }), 4)!.above).toBe(false);
+    expect(memoryCard(mem({ peak_mib: 60_000, above_usual: true }), 1)!.above).toBe(false);
   });
 
   it('compares a finished job\'s peak with similar jobs, and leaves its request out', () => {

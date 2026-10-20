@@ -1639,8 +1639,12 @@ peaked at both 1.25 times the group's `p90_mib` and 256 MiB above it;
 HTCondor only ever raises a running job's figure, so that excess has
 already happened. The jobs listing marks such a job "More memory than
 usual". A job that has left the queue is answered from its history
-record (with `above_usual` false), which is what the archived job's page
-shows.
+record, which is what the archived job's page shows. It is answered from
+groups holding runs other than its own, and its own run is left out of
+what it is compared with: `above_usual` applies the same thresholds to
+its final peak, and `exceeded_history` is true when its runtime was
+longer than the median of the group's other runs and fewer than 3 of
+them lasted at least as long.
 
 `POST /api/v1/jobs/runtime-estimates` with `{"jobs": ["1234.0", "1234.1",
 ...]}` answers for up to 5000 jobs at once (more is a 413), which is how

@@ -51,13 +51,13 @@ describe('buildJobMetrics', () => {
     expect(four.map((s) => s.key)).toContain('memory');
   });
 
-  it('plots memory with the requested reference and its HWM caveat', () => {
+  it('plots memory with the requested reference and says how to read it', () => {
     const mem = buildJobMetrics(resp(memRows(5))).find((s) => s.key === 'memory')!;
     expect(mem.requested).toBe(4096);
     expect(mem.pointCount).toBe(5);
     expect(mem.executions).toHaveLength(1);
     expect(mem.executions[0].points[0].value).toBe(2048);
-    expect(mem.note).toMatch(/high-water/i);
+    expect(mem.note).toBe('Each point is the most memory the run had used by then.');
   });
 
   it('omits disk and GPU when the job never used them', () => {

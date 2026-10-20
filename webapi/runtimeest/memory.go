@@ -53,8 +53,9 @@ type MemoryEstimate struct {
 	// Rough is the runtime estimate's Rough: the group is one of the
 	// broad ones.
 	Rough bool `json:"rough"`
-	// AboveUsual is true when a running job has already peaked well past
-	// what nearly every run of a specific group did (see aboveUsual).
+	// AboveUsual is true when a running job has already peaked, or a
+	// finished one peaked, well past what nearly every run of a specific
+	// group did (see peakAboveUsual).
 	AboveUsual bool `json:"above_usual"`
 }
 
@@ -94,19 +95,34 @@ func memoryOf(q *Query, w *window, lvl Level) *MemoryEstimate {
 }
 
 // aboveUsual is whether a running job's peak so far is well past what its
-// group's runs peaked at: the job is running, the group is a specific one
-// (a broad group mixes unlike jobs, and its spread says nothing about
-// this one), the group has at least minMemorySamples known peaks, and the
-// peak is past the 90th percentile by both aboveUsualFactor and
-// aboveUsualMarginMiB. HTCondor's figure for a running job only ever
-// rises, so once it is past the group's runs it stays past: this is an
-// excess the job has already had, not a sample that may come back down.
+// group's runs peaked at (see peakAboveUsual). HTCondor's figure for a
+// running job only ever rises, so once it is past the group's runs it
+// stays past: this is an excess the job has already had, not a sample
+// that may come back down. A finished job is judged by judgeFinished.
 func aboveUsual(q *Query, mem []float32, lvl Level) bool {
-	if !q.Running || lvl.rough() || len(mem) < minMemorySamples || !(q.PeakMemoryMiB > 0) {
+	return q.Running && peakAboveUsual(q.PeakMemoryMiB, mem, lvl)
+}
+
+// peakAboveUsual is whether peak is well past the ascending known peaks
+// mem of a group at lvl: the group is a specific one (a broad group mixes
+// unlike jobs, and its spread says nothing about this one), it has at
+// least minMemorySamples known peaks, and peak is past their 90th
+// percentile by both aboveUsualFactor and aboveUsualMarginMiB.
+func peakAboveUsual(peak float64, mem []float32, lvl Level) bool {
+	if lvl.rough() || len(mem) < minMemorySamples || !(peak > 0) {
 		return false
 	}
 	p90 := quantileOf(mem, 0.9)
-	return q.PeakMemoryMiB >= aboveUsualFactor*p90 && q.PeakMemoryMiB >= p90+aboveUsualMarginMiB
+	return peak >= aboveUsualFactor*p90 && peak >= p90+aboveUsualMarginMiB
+}
+
+// peakEntry is a peak as a window entry holds it: unknown (zero, negative
+// or not finite) as 0.
+func peakEntry(mib float64) float32 {
+	if mib > 0 && !math.IsInf(mib, 0) {
+		return float32(mib)
+	}
+	return 0
 }
 
 // PeakMemoryAttrs are the attributes PeakMemoryMiB reads.

@@ -138,7 +138,7 @@ const JOB_METRIC_DEFS: JobMetricDef[] = [
     requestAttr: 'RequestMemory',
     requestIsLine: true,
     requireData: false,
-    note: 'MemoryUsage is a high-water mark, not a live reading — the curve only rises, so it shows the peak a run ever needed rather than a working-set trace.',
+    note: 'Each point is the most memory the run had used by then.',
   },
   {
     key: 'cpu',
@@ -159,7 +159,7 @@ const JOB_METRIC_DEFS: JobMetricDef[] = [
     requestAttr: 'RequestDisk',
     requestIsLine: true,
     requireData: true,
-    note: 'DiskUsage is a high-water mark for the current execution.',
+    note: 'Each point is the most disk the run had used by then.',
   },
   {
     key: 'gpu',
@@ -172,7 +172,7 @@ const JOB_METRIC_DEFS: JobMetricDef[] = [
     // it cannot share the axis. Shown as a note instead of a line.
     requestIsLine: false,
     requireData: true,
-    note: 'Per-interval GPU utilization, de-averaged from the pool’s lifetime average.',
+    note: 'Each point is how busy the GPUs were over that interval.',
   },
 ];
 

@@ -388,10 +388,11 @@ func (h *Handler) handleJobRuntimeEstimate(w http.ResponseWriter, r *http.Reques
 	}
 	if len(ads) == 0 {
 		// A finished job is answered too, from its history record: the
-		// estimate is what it would have had when submitted, and its
-		// memory block compares its peak with its group's -- which is
-		// what the archived job's page shows.
-		ad, found, herr := h.lookupFinishedJob(ctx, r, constraint, runtimeest.QueryAttrs)
+		// estimate is what it would have had when submitted, its memory
+		// block compares its peak with its group's, and exceeded_history
+		// and memory.above_usual say whether its run was unusual --
+		// which is what the archived job's page shows.
+		ad, found, herr := h.lookupFinishedJob(ctx, r, constraint, runtimeest.FinishedQueryAttrs)
 		if herr != nil {
 			h.logger.Error(logging.DestinationHTTP, "runtime-estimate: query job history", "error", herr, "job", jobID)
 			h.writeError(w, http.StatusInternalServerError, "Failed to query job")

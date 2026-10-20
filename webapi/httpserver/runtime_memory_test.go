@@ -156,3 +156,33 @@ func TestJobSimilarMemory(t *testing.T) {
 		t.Errorf("wire form: %s", body)
 	}
 }
+
+// A finished job is judged by the same rules as a running one: alice's
+// job 30.0 ran fifty times as long as her other sim runs and peaked at
+// 6000 MiB against their 1000-1400, so it was both longer and bigger than
+// usual; her 13.0, inside the group's spread, was neither.
+func TestRuntimeEstimateFinishedJobUnusual(t *testing.T) {
+	f := memoryFixture(t)
+	text := historyRecordText("alice", 30, 5000, time.Now().Unix()-60) + "\nResidentSetSize_RAW = " + fmt.Sprint(6000*1024)
+	ad, err := classad.ParseOld(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.schedd.AddHistory(ad)
+	b := runtimeest.NewBatch()
+	b.AddAd(ad)
+	f.s.runtimeEst.Ingest(b)
+
+	alice := f.bearer(t, "alice")
+	code, body := f.estimate(t, "30.0", alice)
+	if code != http.StatusOK || body.Memory == nil {
+		t.Fatalf("status %d, %+v", code, body)
+	}
+	if !body.ExceededHistory || !body.Memory.AboveUsual {
+		t.Errorf("an outlying finished job: exceeded_history %v, above_usual %v (basis %+v)", body.ExceededHistory, body.Memory.AboveUsual, body.Basis)
+	}
+	_, body = f.estimate(t, "13.0", alice)
+	if body.ExceededHistory || body.Memory == nil || body.Memory.AboveUsual {
+		t.Errorf("an ordinary finished job: %+v, memory %+v", body, body.Memory)
+	}
+}

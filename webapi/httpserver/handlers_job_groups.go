@@ -43,7 +43,7 @@ const (
 )
 
 // jobLookupAttrs is what both endpoints read of the job itself.
-var jobLookupAttrs = slices.Concat(runtimeest.QueryAttrs, []string{"Args", "EnteredHistoryTime", "CompletionDate"})
+var jobLookupAttrs = slices.Concat(runtimeest.FinishedQueryAttrs, []string{"Args"})
 
 // lookupJob reads one job the caller may see: from the queue, else from
 // history. found is false for a job that is not there or not theirs.

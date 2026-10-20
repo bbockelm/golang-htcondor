@@ -69,8 +69,8 @@ export function requestLine(m: RuntimeMemory): string | undefined {
 
 // MemoryCard is everything the card shows.
 export interface MemoryCard {
-  // A running job already past what nearly every similar job peaked at:
-  // amber, with its own chip.
+  // A running job already past, or a finished one that went past, what
+  // nearly every similar job peaked at: amber, with its own chip.
   above: boolean;
   rough: boolean;
   headline: string;
@@ -117,7 +117,8 @@ export function memoryCard(m: RuntimeMemory | undefined, status: number | undefi
   };
   const peers = `Similar jobs peaked at ${about} ${typical}; 9 in 10 stayed under ${formatMiB(m.p90_mib)}.`;
   const req = live ? requestLine(m) : undefined;
-  const above = status === 2 && m.above_usual;
+  // A waiting job has used nothing yet.
+  const above = status !== 1 && m.above_usual;
 
   if (peak === undefined) {
     return {
