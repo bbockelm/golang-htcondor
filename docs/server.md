@@ -1505,7 +1505,10 @@ metrics key.
   user_code?}`; needs an `X-Requested-With` header. Returns the token, or
   with `user_code` hands it to that device request instead.
 - `GET /api/v1/placement/me/device/{user_code}`,
-  `POST /api/v1/placement/me/device/{user_code}/deny`
+  `POST /api/v1/placement/me/device/{user_code}/deny` — look up or cancel
+  a device request. Both spend the device verification page's budget of
+  20 code attempts a minute per session and per client address; past it
+  they answer 429.
 - `POST /api/v1/placement/me/project` -- `{project}`; selects the project
   of a session signed in through the `placementd` identity mapping
 - `GET /api/v1/placement/me` and `POST /api/v1/placement/me/token` also
