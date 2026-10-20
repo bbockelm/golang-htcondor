@@ -18,6 +18,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
+	"github.com/bbockelm/golang-htcondor/webapi/appolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
@@ -134,6 +135,15 @@ type Server struct {
 	// The key is the routed AP, "" with one schedd.
 	dagmanLayoutMu sync.Mutex
 	dagmanLayouts  map[string]*dagmanLayoutEntry
+	// apPolicy holds each access point's policy as its schedd reports it:
+	// what get_access_point_policy renders, and where every submission
+	// takes its JOB_DEFAULT_REQUEST* values from, so that the two agree.
+	// Shared with the REST server when it built this one.
+	apPolicy *appolicy.Cache
+	// policySourceFn replaces the schedd the policy is read from, so the
+	// tool and the submit defaults can be tested without one. nil reads
+	// through scheddFor.
+	policySourceFn func(context.Context) (appolicy.ConfigSource, string)
 	// dagmanLayoutFn replaces that discovery, so the precedence between
 	// configuration, discovery and the package default can be tested
 	// without a schedd. nil uses discoverDagmanLayout.
@@ -235,7 +245,7 @@ func (s *Server) submitRemote(ctx context.Context, submitFile string) (int, []*c
 	s.ensureCredentials(ctx)
 	// scheddFor: the one schedd, or in multi-AP mode the AP the call
 	// was assigned and routed to.
-	return s.scheddFor(ctx).SubmitRemote(ctx, applied)
+	return s.scheddFor(ctx).SubmitRemote(s.withSubmitDefaults(ctx), applied)
 }
 
 // Config holds server configuration
@@ -434,6 +444,11 @@ type Config struct {
 	// getenv is no help because it would capture THIS server's
 	// environment rather than the access point's.
 	DagmanEnvironment map[string]string
+
+	// APPolicy is the cache of access point policy readings. The REST
+	// server passes its own so both surfaces submit with the same
+	// defaults and read each access point once; nil creates one.
+	APPolicy *appolicy.Cache
 }
 
 // NewServer creates a new MCP server
@@ -538,6 +553,10 @@ func NewServer(cfg Config) (*Server, error) {
 		runtimeEst:         cfg.RuntimeEstimator,
 		watchMaxWait:       cfg.WatchMaxWait,
 		build:              buildSettingsFromConfig(cfg),
+		apPolicy:           cfg.APPolicy,
+	}
+	if s.apPolicy == nil {
+		s.apPolicy = appolicy.NewCache()
 	}
 	// A missing or unreadable signing key is not fatal: it disables the
 	// one tool that needs it, and that tool says so when called.
@@ -616,9 +635,12 @@ func NewServer(cfg Config) (*Server, error) {
 		// manager and never through one of the tools, so wiring it in one
 		// place and not the other is exactly the gap that held those jobs.
 		BeforeSubmit: beforeSubmit,
-		ExtraSubmit:  cfg.InteractiveExtraSubmit,
-		CCB:          cfg.CCB,
-		Requirements: cfg.InteractiveRequirements,
+		// And the same request defaults: a session is a job on the same
+		// access point as any other.
+		SubmitContext: s.withSubmitDefaults,
+		ExtraSubmit:   cfg.InteractiveExtraSubmit,
+		CCB:           cfg.CCB,
+		Requirements:  cfg.InteractiveRequirements,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create interactive session manager: %w", err)

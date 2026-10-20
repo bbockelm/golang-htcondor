@@ -1221,6 +1221,32 @@ func TestCreateRunsBeforeSubmitWithTheCallersContext(t *testing.T) {
 	}
 }
 
+// The host's SubmitContext decides the context the job is submitted
+// under -- which is how the access point's request defaults reach the
+// submit engine -- and it derives from the caller's.
+func TestCreateSubmitsUnderTheHostsSubmitContext(t *testing.T) {
+	schedd := newFakeSchedd()
+	type derived struct{}
+	mgr, _ := testManager(t, schedd, Options{
+		SubmitContext: func(ctx context.Context) context.Context {
+			return context.WithValue(ctx, derived{}, true)
+		},
+	})
+	ctx := context.WithValue(context.Background(), ctxKey{}, "alice's request")
+	if _, err := mgr.Create(ctx, alice, CreateSpec{Name: "build"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	schedd.mu.Lock()
+	got := schedd.submitCtx
+	schedd.mu.Unlock()
+	if got == nil || got.Value(derived{}) != true {
+		t.Fatal("the job was not submitted under the host's SubmitContext")
+	}
+	if _, ok := got.Value(ctxKey{}).(string); !ok {
+		t.Error("the submit context does not derive from the caller's")
+	}
+}
+
 // A job can be Running when the wait for it ends and Held by the time
 // the dial lands: the shadow is what marks it running AND what holds it
 // when the access point's credentials cannot be fetched. The schedd

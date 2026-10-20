@@ -528,6 +528,28 @@ func (c *Config) DefaultValue(key string) (string, bool) {
 	return "", false
 }
 
+// BuiltinDefault is HTCondor's built-in default for a knob -- the value
+// a Config starts with before any file is read -- or false when HTCondor
+// ships none. Like DefaultValue it is the raw, unexpanded string, and it
+// needs no Config: it answers for an HTCondor configuration this process
+// has not loaded, such as a remote daemon's.
+func BuiltinDefault(name string) (string, bool) {
+	for _, po := range paramOverrides {
+		if strings.EqualFold(po.Name, name) {
+			return po.Default, true
+		}
+	}
+	for _, pd := range paramDefaults {
+		if strings.EqualFold(pd.Name, name) {
+			if pd.Win32Default != "" && isWindows() {
+				return pd.Win32Default, true
+			}
+			return pd.Default, true
+		}
+	}
+	return "", false
+}
+
 // IsDefault reports whether key still holds the value HTCondor built in.
 //
 // False means the deployment set it: a config file, the environment, or a

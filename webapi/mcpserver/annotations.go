@@ -106,7 +106,10 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	"analyze_issues": readOnlyAnn(true),
 	// analyze_utilization reads finished jobs and the pool's machines.
 	"analyze_utilization": readOnlyAnn(true),
-	"cancel_watch":        readOnlyAnn(false),
+	// get_access_point_policy reads the schedd's configuration. Open-world:
+	// the answer is whatever the access point is configured with now.
+	"get_access_point_policy": readOnlyAnn(true),
+	"cancel_watch":            readOnlyAnn(false),
 
 	// --- destructive job-control surface (issue #391) ---
 	// submit_job is grouped here per the issue even though it only creates;

@@ -57,6 +57,13 @@ type SubmitFile struct {
 	// mentioned it. See submitCommand.
 	assigned map[string]bool
 	universe int
+	// params answers the configuration knobs condor_submit reads with
+	// param(); nil means HTCondor's built-in defaults. See SubmitParams.
+	params SubmitParams
+	// defaultDisk is the RequestDisk expression the job ad being built
+	// took from JOB_DEFAULT_REQUESTDISK, or "" when it took none. Reset
+	// by every setResourceRequests; see defaultDiskEvaluates.
+	defaultDisk string
 
 	// Queue statement information
 	queueCount    int
@@ -122,6 +129,13 @@ type SubmitParseOptions struct {
 	// parse runs on that user's behalf, which is how condor_submit
 	// reads one.
 	AllowLocalAccess bool
+
+	// Params answers the configuration knobs condor_submit reads from
+	// its own configuration rather than from the submit file: the
+	// JOB_DEFAULT_REQUEST* defaults for a job that omits request_cpus,
+	// request_memory, request_disk or request_gpus. Nil uses HTCondor's
+	// built-in defaults.
+	Params SubmitParams
 }
 
 // ParseSubmitFile parses a submit file from a reader. The parse cannot
@@ -195,6 +209,7 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 		assigned:   assignedNames(configStmts),
 		universe:   UniverseVanilla, // Default
 		queueCount: 1,               // Default if no queue statement
+		params:     opts.Params,
 	}
 
 	// Set universe if specified. Read through submitCommand like every
@@ -506,6 +521,12 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 
 	// Set any custom attributes (+ or MY.)
 	if err := sf.setCustomAttributes(ad); err != nil {
+		return nil, err
+	}
+
+	// After the custom attributes, which can supply what a configured
+	// RequestDisk default reads (or replace it outright).
+	if err := sf.defaultDiskEvaluates(ad); err != nil {
 		return nil, err
 	}
 
@@ -1131,25 +1152,32 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 		reqParts = append(reqParts, "(TARGET.OpSys =!= UNDEFINED)")
 	}
 
+	// The resource clauses each name a request attribute, so each is
+	// added only when the job will carry that attribute: a clause over
+	// an attribute left unset ("undefined") is itself undefined, and a
+	// job whose Requirements is undefined matches nothing.
+
 	// Add TARGET.Disk check if we're transferring files
 	if stf, ok := sf.submitCommand("should_transfer_files"); ok {
-		if strings.ToUpper(stf) == "YES" {
+		if _, disk := sf.requestValue("request_disk"); disk && strings.ToUpper(stf) == "YES" {
 			reqParts = append(reqParts, "(TARGET.Disk >= RequestDisk)")
 		}
 	}
 
 	// Add memory requirement check if specified
-	if _, ok := sf.submitCommand("request_memory"); ok {
+	if v, ok := sf.submitCommand("request_memory"); ok && !isUndefinedRequest(v) {
 		reqParts = append(reqParts, "(TARGET.Memory >= RequestMemory)")
 	}
 
 	// Add CPU requirement check if specified
-	if _, ok := sf.submitCommand("request_cpus"); ok {
+	if v, ok := sf.submitCommand("request_cpus"); ok && !isUndefinedRequest(v) {
 		reqParts = append(reqParts, "(TARGET.Cpus >= RequestCpus)")
 	}
 
-	// Add GPU requirement check if specified
-	if reqGpus, ok := sf.submitCommand("request_gpus"); ok {
+	// Add the GPU requirement for a GPU request, the configured default
+	// included: a job that asks for GPUs because the site said every job
+	// does must not land on a slot without one.
+	if reqGpus, ok := sf.requestValue("request_gpus"); ok {
 		if intGpus, err := parseInt(reqGpus); err == nil && intGpus > 0 {
 			reqParts = append(reqParts, "(TARGET.Gpus >= RequestGpus)")
 		}
@@ -1276,44 +1304,78 @@ func setExprAttr(ad *classad.ClassAd, attr, command, value string) error {
 	return nil
 }
 
-// setResourceRequests sets resource request attributes
+// setResourceRequests sets the request_* attributes, the way
+// condor_submit's SetRequestResources does (condor_utils/submit_utils.cpp).
+//
+// A request the submit file omits takes the configured default,
+// JOB_DEFAULT_REQUEST{CPUS,MEMORY,DISK,GPUS}, processed exactly as if the
+// user had written it: a size with an optional unit suffix is scaled to
+// the attribute's base unit, anything else is stored as an expression,
+// and "undefined" -- written by the user or by the default -- leaves the
+// attribute unset. condor_submit applies the defaults only when it is not
+// materializing jobs from a cluster ad, because the materialized jobs
+// inherit them from that ad; this engine builds every job ad in full,
+// SubmitLate included, so each one gets them.
 func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
-	// Request CPUs (default: 1). A count, so no units -- but it may be an
-	// expression, which condor_submit stores unevaluated.
-	if reqCpus, ok := sf.submitCommand("request_cpus"); ok {
-		if err := setCountAttr(ad, "RequestCpus", reqCpus); err != nil {
+	sf.defaultDisk = ""
+
+	// CPUs: a count, so no units -- but it may be an expression, which
+	// condor_submit stores unevaluated. A parallel-universe job that
+	// names no request_cpus asks for one CPU per node whatever
+	// JOB_DEFAULT_REQUESTCPUS says: SetParallelParams assigns 1 before
+	// the default is looked at, to keep pre-8.9 behaviour.
+	if v, ok := sf.submitCommand("request_cpus"); ok {
+		if err := setRequestCount(ad, "RequestCpus", v); err != nil {
 			return err
 		}
-	} else {
+	} else if sf.universe == UniverseParallel {
 		_ = ad.Set("RequestCpus", int64(1))
+	} else if v, ok := sf.requestDefault("request_cpus"); ok {
+		if err := setRequestCount(ad, "RequestCpus", v); err != nil {
+			return fmt.Errorf("JOB_DEFAULT_REQUESTCPUS: %w", err)
+		}
 	}
 
-	// Request Memory in MiB (default: 128). A bare number is already in
-	// MiB; a K/M/G/T suffix scales from bytes, so request_memory = 4GB
-	// is RequestMemory = 4096. Dropping the suffix here would silently
-	// ask for 4 MiB.
-	if reqMem, ok := sf.submitCommand("request_memory"); ok {
-		if err := setSizeAttr(ad, "RequestMemory", reqMem, unitMiB); err != nil {
+	// Memory in MiB. A bare number is already in MiB; a K/M/G/T suffix
+	// scales from bytes, so request_memory = 4GB is RequestMemory = 4096.
+	// A VM job with no request_memory asks for the memory its VM is
+	// given, ahead of any configured default, as condor_submit does.
+	if v, ok := sf.submitCommand("request_memory"); ok {
+		if err := setRequestSize(ad, "RequestMemory", v, unitMiB); err != nil {
 			return err
 		}
-	} else {
-		_ = ad.Set("RequestMemory", int64(128))
+	} else if _, vm := sf.submitCommand("vm_memory"); vm && sf.universe == UniverseVM {
+		_ = setExprAttr(ad, "RequestMemory", "request_memory", "MY.VM_Memory")
+	} else if v, ok := sf.requestDefault("request_memory"); ok {
+		if err := setRequestSize(ad, "RequestMemory", v, unitMiB); err != nil {
+			return fmt.Errorf("JOB_DEFAULT_REQUESTMEMORY: %w", err)
+		}
 	}
 
-	// Request Disk in KiB (default: 1024). Same rule with a KiB base:
-	// request_disk = 10GB is RequestDisk = 10485760.
-	if reqDisk, ok := sf.submitCommand("request_disk"); ok {
-		if err := setSizeAttr(ad, "RequestDisk", reqDisk, unitKiB); err != nil {
+	// Disk in KiB. Same rule with a KiB base: request_disk = 10GB is
+	// RequestDisk = 10485760.
+	if v, ok := sf.submitCommand("request_disk"); ok {
+		if err := setRequestSize(ad, "RequestDisk", v, unitKiB); err != nil {
 			return err
 		}
-	} else {
-		_ = ad.Set("RequestDisk", int64(1024))
+	} else if v, ok := sf.requestDefault("request_disk"); ok {
+		if err := setRequestSize(ad, "RequestDisk", v, unitKiB); err != nil {
+			return fmt.Errorf("JOB_DEFAULT_REQUESTDISK: %w", err)
+		}
+		if e, ok := ad.Lookup("RequestDisk"); ok {
+			sf.defaultDisk = e.String()
+		}
 	}
 
-	// Request GPUs (default: 0)
-	if reqGpus, ok := sf.submitCommand("request_gpus"); ok {
-		if err := setCountAttr(ad, "RequestGpus", reqGpus); err != nil {
+	// GPUs. HTCondor ships no default, so a job that names none asks for
+	// none unless the site configured JOB_DEFAULT_REQUESTGPUS.
+	if v, ok := sf.submitCommand("request_gpus"); ok {
+		if err := setRequestCount(ad, "RequestGpus", v); err != nil {
 			return err
+		}
+	} else if v, ok := sf.requestDefault("request_gpus"); ok {
+		if err := setRequestCount(ad, "RequestGpus", v); err != nil {
+			return fmt.Errorf("JOB_DEFAULT_REQUESTGPUS: %w", err)
 		}
 	}
 
@@ -1330,6 +1392,23 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 	}
 
 	return nil
+}
+
+// setRequestSize is setSizeAttr for a request_* command, which also
+// accepts "undefined": the request is deliberately left unset.
+func setRequestSize(ad *classad.ClassAd, attr, raw string, base int64) error {
+	if isUndefinedRequest(raw) {
+		return nil
+	}
+	return setSizeAttr(ad, attr, raw, base)
+}
+
+// setRequestCount is setCountAttr with the same "undefined" rule.
+func setRequestCount(ad *classad.ClassAd, attr, raw string) error {
+	if isUndefinedRequest(raw) {
+		return nil
+	}
+	return setCountAttr(ad, attr, raw)
 }
 
 // setNotification sets notification preference

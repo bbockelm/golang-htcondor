@@ -9,6 +9,11 @@ manager, a job history database, site skills, embedded documentation).
 - create_input_upload_url -- a URL to PUT a tar of large inputs to.
 - submit_dag -- submit a DAGMan workflow (see the "dag" topic).
 - build_container -- build and publish an Apptainer image (see "containers").
+- get_access_point_policy -- this access point's rules for jobs: how many one
+  submission and one user may have, the submit requirements that refuse jobs,
+  the transforms that change them, what a job that omits request_* gets, and
+  the system policies that hold or remove jobs. Read it before a large
+  submission, and when a job is refused or held by a rule you did not write.
 
 ## Waiting and watching
 - watch_jobs / check_watches / cancel_watch -- wait for a job event without

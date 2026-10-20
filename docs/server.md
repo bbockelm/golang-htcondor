@@ -1910,6 +1910,7 @@ What it serves:
 | `GET /api/v1/metrics/job_metrics` | Resource-usage samples of your jobs on every access point, from the hub; see below. |
 | `GET /api/v1/jobs/{id}/match-analysis`, MCP `analyze_job_match` | The job's ad from its access point, the slots from the collector. `{id}` must be complete. |
 | `GET /api/v1/collector/...` (not `advertise`), MCP `query_pool` | The pool's collector, which the access points share. |
+| MCP `get_access_point_policy` | Your home access point's policy, or with `schedd` that of any access point in the set, as its schedd reports it. The answer names it (`schedd`). |
 
 Everything else -- drain estimates and runtime estimates (they read one
 schedd's running jobs), any other method on `/api/v1/metrics/job_metrics`

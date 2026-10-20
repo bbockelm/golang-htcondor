@@ -10,6 +10,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
 // Bootstrapping the credentials an access point requires before a job may be
@@ -292,5 +293,34 @@ func (s *Handler) submitJob(ctx context.Context, submitFile string) (int, []*cla
 	s.ensureRequiredCredentials(ctx)
 	// scheddFor: the one schedd, or in multi-AP mode the AP the
 	// submission was assigned and routed to.
-	return s.scheddFor(ctx).SubmitRemote(ctx, applied)
+	schedd := s.scheddFor(ctx)
+	return schedd.SubmitRemote(s.withSubmitDefaults(ctx, schedd), applied)
+}
+
+// withSubmitDefaults returns ctx carrying the JOB_DEFAULT_REQUEST* values
+// of the access point a job goes to, as its schedd reports them -- what
+// condor_submit there would apply, and what the MCP server's
+// get_access_point_policy reports. When the schedd cannot be asked, this
+// daemon's own configuration and then HTCondor's built-in defaults apply;
+// the lookup never fails a submission.
+func (s *Handler) withSubmitDefaults(ctx context.Context, schedd *htcondor.Schedd) context.Context {
+	if schedd == nil {
+		out, _ := s.apPolicy.SubmitContext(ctx, "", nil, s.htcondorConfig)
+		return out
+	}
+	// Keyed as the MCP server keys it, so the two share one reading.
+	name := schedd.Name()
+	if t, ok := multiap.TargetFrom(ctx); ok {
+		name = t.Member.Name
+	}
+	if name == "" {
+		name = schedd.Address()
+	}
+	out, err := s.apPolicy.SubmitContext(ctx, name, schedd, s.htcondorConfig)
+	if err != nil {
+		s.logger.Warn(logging.DestinationHTTP,
+			"could not read the access point's request defaults; submitting with this server's",
+			"access_point", name, "error", err)
+	}
+	return out
 }

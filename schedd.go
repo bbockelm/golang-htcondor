@@ -563,9 +563,14 @@ func createJobQueryAd(constraint string, opts *QueryOptions) (*classad.ClassAd, 
 // Submit submits a job to the schedd using an HTCondor submit file
 // submitFileContent is the content of an HTCondor submit file
 // Returns the cluster ID as a string
+//
+// A job that omits a request_* command gets the JOB_DEFAULT_REQUEST*
+// default from the params WithSubmitParams attached to ctx, or HTCondor's
+// built-in one.
 func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, error) {
 	// Parse the submit file
-	submitFile, err := ParseSubmitFile(strings.NewReader(submitFileContent))
+	submitFile, err := ParseSubmitFileWithOptions(strings.NewReader(submitFileContent),
+		SubmitParseOptions{Params: SubmitParamsFromContext(ctx)})
 	if err != nil {
 		return "", fmt.Errorf("failed to parse submit file: %w", err)
 	}
@@ -656,9 +661,13 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 // 6. Returns the cluster ID and proc ads for subsequent file spooling
 //
 // The caller should then use SpoolJobFilesFromFS or SpoolJobFilesFromTar to upload input files.
+//
+// As with Submit, request_* defaults come from the params WithSubmitParams
+// attached to ctx.
 func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (clusterID int, procAds []*classad.ClassAd, err error) {
 	// Parse the submit file
-	submitFile, err := ParseSubmitFile(strings.NewReader(submitFileContent))
+	submitFile, err := ParseSubmitFileWithOptions(strings.NewReader(submitFileContent),
+		SubmitParseOptions{Params: SubmitParamsFromContext(ctx)})
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to parse submit file: %w", err)
 	}

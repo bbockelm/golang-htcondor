@@ -30,6 +30,7 @@ import (
 
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
+	"github.com/bbockelm/golang-htcondor/webapi/appolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
@@ -159,7 +160,12 @@ type Handler struct {
 	// overrides, applied to EVERY job this API submits regardless of the
 	// surface it arrived on. Zero value applies nothing.
 	submitPolicy submitpolicy.Policy
-	userHeader   string
+	// apPolicy holds each access point's policy as its schedd reports
+	// it. Every submit path takes its JOB_DEFAULT_REQUEST* values from
+	// here, and the MCP server shares it, so get_access_point_policy
+	// reports what submission actually does.
+	apPolicy   *appolicy.Cache
+	userHeader string
 	// userHeaderTrustedProxies is the list of source-IP prefixes from
 	// which the userHeader is honored. Populated from
 	// HandlerConfig.UserHeaderTrustedProxies (CIDR list). nil + empty
@@ -1326,6 +1332,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		clientConfig:         cfg.ClientConfig,
 		dbMirror:             singleAPMirror(cfg, schedd),
 		token:                cfg.Token,
+		apPolicy:             appolicy.NewCache(),
 	}
 
 	if h.webuiAdminGroups.configured() {
@@ -2250,6 +2257,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		InteractiveExtraSubmit:  h.interactiveExtraSubmit,
 		DagmanPath:              h.dagmanPath,
 		DagmanEnvironment:       h.dagmanEnv,
+		APPolicy:                h.apPolicy,
 		InteractiveRequirements: h.interactiveRequirements,
 		Build:                   h.build,
 		CCB:                     h.ccbDialer,

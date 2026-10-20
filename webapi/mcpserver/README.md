@@ -202,6 +202,45 @@ attribute are counted under `missing`, not added as zero. Claim ids and
 other private attributes are never returned and cannot be named in any
 argument.
 
+### get_access_point_policy
+
+Report the access point's configuration that decides how a user's jobs are
+submitted and treated, one sentence per setting, each marked when the site
+changed it from HTCondor's default. Read-only, no arguments (in multi-AP
+mode, `schedd` names an access point other than the caller's home one).
+
+The values are asked of the schedd (`DC_CONFIG_VAL`, READ-level), never
+taken from this server's own configuration, and only from an allowlist:
+
+- **Submission limits**: `MAX_JOBS_PER_SUBMISSION`, `MAX_JOBS_PER_OWNER`,
+  `MAX_JOBS_SUBMITTED`, `MAX_RUNNING_SCHEDULER_JOBS_PER_OWNER` (which caps
+  concurrent DAGs per user).
+- **Submit requirements**: `SUBMIT_REQUIREMENT_NAMES` and, per name, the
+  expression, its `_REASON` and `_IS_WARNING`.
+- **Job transforms**: `JOB_TRANSFORM_NAMES` and, per name, a summary --
+  its `REQUIREMENTS` and the attributes it sets, defaults, copies, renames
+  or deletes -- never the transform text.
+- **Request defaults**: `JOB_DEFAULT_REQUEST{CPUS,MEMORY,DISK,GPUS}`.
+- **Hold, remove and release policy**: `SYSTEM_PERIODIC_{HOLD,REMOVE,RELEASE}`,
+  their `_NAMES` lists and named forms, each with its `_REASON` (and
+  `_SUBCODE` for holds), and `SYSTEM_MAX_RELEASES`.
+- **File transfer**: `MAX_TRANSFER_INPUT_MB`, `MAX_TRANSFER_OUTPUT_MB`,
+  `MAX_CONCURRENT_UPLOADS`, `MAX_CONCURRENT_DOWNLOADS`.
+- **DAGMan**: `DAGMAN_MAX_JOBS_IDLE`, `DAGMAN_MAX_JOBS_SUBMITTED`,
+  `DAGMAN_MAX_PRE_SCRIPTS`, `DAGMAN_MAX_POST_SCRIPTS`, with the effective
+  value when `HTTP_API_DAGMAN_ENVIRONMENT` overrides one.
+- **Features**: `SCHEDD_ALLOW_LATE_MATERIALIZE`, `SCHEDD_ENABLE_SSH_TO_JOB`,
+  `START_SCHEDULER_UNIVERSE`, `JOB_EPOCH_HISTORY` (whether it is set, never
+  the path), `LOCAL_CREDMON_PROVIDER_NAMES`, `CLIENT_CREDMON_PROVIDER_NAMES`,
+  `SUBMIT_ADD_LOCAL_CREDMON_PROVIDERS`, `SUBMIT_ADD_LOCAL_CREDMON_PROVIDER_NAMES`,
+  `SUBMIT_TEMPLATE_NAMES`.
+
+Each access point is read at most once every 10 minutes. A setting the
+schedd cannot report is shown as unknown; the call fails only when the
+schedd cannot be reached at all. Every submission through this server
+takes its `JOB_DEFAULT_REQUEST*` values from the same reading, falling
+back to the server's own configuration when the schedd cannot be asked.
+
 ## Interactive Sessions
 
 Four tools turn a job into something you can run commands in, rather than
