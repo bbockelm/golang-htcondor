@@ -29,8 +29,6 @@ const BASE_URL = env('PLACEMENT_E2E_BASE_URL');
 const CA_CERT = env('E2E_CA_CERT');
 const NEWBIE_PASSWORD = env('E2E_NEWBIE_PASSWORD');
 const POSTDOC_PASSWORD = env('E2E_POSTDOC_PASSWORD');
-// newbie's account is the one approval suggests: what a map file "*" line
-// would give the identity.
 const NEWBIE_ACCOUNT = `newbie@${env('E2E_UID_DOMAIN')}`;
 const POSTDOC_ACCOUNT = `physpostdoc@${env('E2E_UID_DOMAIN')}`;
 const PROJECT = 'Physics';
@@ -224,8 +222,18 @@ test('unknown identities get access by request and by onboarding, and their toke
     const identity = dialog.getByLabel('Identity', { exact: true });
     await expect(identity).toHaveValue('newbie');
     await expect(identity).toHaveAttribute('readonly', '');
-    await expect(dialog.getByLabel(/^Account/)).toHaveValue(NEWBIE_ACCOUNT);
+    // No account is suggested for an identity outside the operator's
+    // prefill domains, and a reserved one is refused.
+    const accountField = dialog.getByLabel(/^Account/);
+    await expect(accountField).toHaveValue('');
+    const requestId = (await row.getAttribute('data-testid'))!.replace('request-row-', '');
+    const refused = await admin.request.post(`/api/v1/placement/admin/requests/${requestId}/approve`, {
+      data: { account: `root@${env('E2E_UID_DOMAIN')}`, authorizations: ['READ'] },
+    });
+    expect(refused.status()).toBe(400);
+    await accountField.fill(NEWBIE_ACCOUNT);
     await expect(dialog.getByText('New account.')).toBeVisible();
+    await expect(dialog.getByRole('region', { name: 'Existing account' })).toHaveCount(0);
     await expect(dialog.getByRole('checkbox', { name: 'Read' })).toBeChecked();
     await expect(dialog.getByRole('checkbox', { name: 'Write' })).toBeChecked();
     await expect(dialog.getByRole('checkbox', { name: PROJECT, exact: true })).toBeChecked();

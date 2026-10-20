@@ -86,7 +86,15 @@ export default function PlacementPage() {
       ) : (
         <PlacementTokenRequest
           onIssued={setIssued}
-          unauthorized={() => <PlacementAccessRequest onApproved={onApproved} />}
+          unauthorized={(me) =>
+            // An expired mapping is extended by an administrator, not
+            // requested again.
+            me.expired ? (
+              <p className="text-sm text-gray-700">Ask an administrator of this access point to extend it.</p>
+            ) : (
+              <PlacementAccessRequest onApproved={onApproved} />
+            )
+          }
         />
       )}
     </div>

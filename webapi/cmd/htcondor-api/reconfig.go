@@ -226,6 +226,8 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_PLACEMENT_DEVICE_CLIENTS"},
 	{name: "HTTP_API_PLACEMENT_SCHEDD_HOST"},
 	{name: "HTTP_API_PLACEMENT_COLLECTOR_HOST"},
+	{name: "HTTP_API_PLACEMENT_PREFILL_DOMAINS"},
+	{name: "HTTP_API_PLACEMENT_REQUEST_RETENTION"},
 	// Which placementd discovery accepts, decided when the handler is
 	// built.
 	{name: "HTTP_API_PLACEMENTD_NAME"},

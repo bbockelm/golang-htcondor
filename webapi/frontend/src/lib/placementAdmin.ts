@@ -144,8 +144,10 @@ export interface BatchOperation {
 
 // One access request, as administrators see it. Display name, email and
 // note are what the requester's provider and the requester gave: render
-// them as text only.
-export type AccessRequestStatus = "pending" | "approved" | "denied" | "withdrawn";
+// them as text only. The email is present only when the provider marked it
+// verified.
+// "approving" is a request whose approval is being applied.
+export type AccessRequestStatus = "pending" | "approving" | "approved" | "denied" | "withdrawn";
 
 export interface AccessRequest {
   id: number;
@@ -184,6 +186,9 @@ export interface ApproveInput {
   expires_at?: string | null;
   display_name?: string;
   comment?: string;
+  // Map the identity to an account that already exists, leaving the
+  // account as it is.
+  attach_to_existing?: boolean;
 }
 
 export interface ApproveResponse extends EditResponse {

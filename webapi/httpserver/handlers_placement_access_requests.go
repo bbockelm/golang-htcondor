@@ -1,14 +1,18 @@
 package httpserver
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -71,9 +75,14 @@ func meRequestJSON(req *placementAccessRequest) *placementMeRequestJSON {
 	if req == nil {
 		return nil
 	}
+	status := req.Status
+	if status == accessRequestApproving {
+		// Not decided until the directory change commits.
+		status = accessRequestPending
+	}
 	out := &placementMeRequestJSON{
 		ID:        req.ID,
-		Status:    req.Status,
+		Status:    status,
 		Projects:  nonNilStrings(req.Projects),
 		Note:      req.Note,
 		CreatedAt: req.CreatedAt,
@@ -127,6 +136,11 @@ func (s *Handler) handlePlacementMeRequest(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if req == nil {
+			// An approval in progress holds the request.
+			if cur, err := store.latest(r.Context(), identity); err == nil && cur != nil && cur.Status == accessRequestApproving {
+				s.writeError(w, http.StatusConflict, "Your request is being approved.")
+				return
+			}
 			s.writeError(w, http.StatusNotFound, "You have no pending request.")
 			return
 		}
@@ -146,7 +160,7 @@ func (s *Handler) createPlacementAccessRequest(w http.ResponseWriter, r *http.Re
 
 	// Charged before anything else is done for the caller, refusals
 	// included: the limit is on attempts.
-	if !po.requestIdentityLimiter.Allow(identity) || !po.requestAddressLimiter.Allow(clientIP(r, s.trustedProxies)) {
+	if !po.requestIdentityLimiter.Allow(identity) || !s.allowAccessRequestFrom(r) {
 		w.Header().Set("Retry-After", "600")
 		s.writeError(w, http.StatusTooManyRequests, "Too many requests. Try again later.")
 		return
@@ -181,6 +195,13 @@ func (s *Handler) createPlacementAccessRequest(w http.ResponseWriter, r *http.Re
 		s.writeError(w, http.StatusConflict, "You already have access to this access point.")
 		return
 	}
+	// An expired mapping is still in the directory, where an approval
+	// cannot create it again: it needs its expiry extended.
+	if self.expired {
+		s.writeError(w, http.StatusConflict,
+			"Your access to this access point has expired. Ask an administrator of this access point to extend it.")
+		return
+	}
 
 	req, err := po.requests.create(r.Context(), placementAccessRequest{
 		Identity:    identity,
@@ -204,6 +225,31 @@ func (s *Handler) createPlacementAccessRequest(w http.ResponseWriter, r *http.Re
 	s.writeJSON(w, http.StatusCreated, placementMeRequestResponse{
 		Identity: identity, DisplayName: session.DisplayName, Email: session.Email, Request: meRequestJSON(req),
 	})
+}
+
+// allowAccessRequestFrom charges the per-address limit on filing requests.
+//
+// The address is only worth limiting when it is the client's. With no
+// trusted proxies configured, a loopback or private peer is most likely a
+// proxy or ingress in front of this server, and every user would share
+// its one budget; the per-identity limit still applies then.
+func (s *Handler) allowAccessRequestFrom(r *http.Request) bool {
+	po := &s.placementOnboard
+	if len(s.trustedProxies) == 0 {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
+			po.requestAddressOff.Do(func() {
+				s.logger.Info(logging.DestinationHTTP,
+					"Access requests from a private address are limited per identity only; set HTTP_API_TRUSTED_PROXIES to limit them per client address",
+					"peer", host)
+			})
+			return true
+		}
+	}
+	return po.requestAddressLimiter.Allow(clientIP(r, s.trustedProxies))
 }
 
 // capitalize upper-cases the first letter of an error message used as a
@@ -260,6 +306,22 @@ type placementApproveBody struct {
 	DisplayName string          `json:"display_name"`
 	Comment     string          `json:"comment"`
 	DryRun      bool            `json:"dry_run"`
+	// AttachToExisting confirms mapping the identity to an account that
+	// already exists, and that other identities may share. Without it,
+	// an existing account is refused with what it holds. Attaching never
+	// changes the account: its grants stay as they are, and the
+	// authorizations and projects given are not used.
+	AttachToExisting bool `json:"attach_to_existing"`
+}
+
+// placementAccountExistsBody is the 409 an approval answers when the
+// account exists and attaching was not confirmed.
+type placementAccountExistsBody struct {
+	Error         string                `json:"error"`
+	Message       string                `json:"message"`
+	Code          int                   `json:"code"`
+	AccountExists bool                  `json:"account_exists"`
+	Account       *placementAccountJSON `json:"account"`
 }
 
 // placementApproveResponse answers an approval: the batch's outcome and,
@@ -270,16 +332,64 @@ type placementApproveResponse struct {
 }
 
 // suggestedPlacementAccount is what the map file's "*" gives identity: the
-// part before its last "@", in UID_DOMAIN.
+// part before its last "@", in UID_DOMAIN. It is suggested only for an
+// identity in a domain listed in HTTP_API_PLACEMENT_PREFILL_DOMAINS: the
+// part before the "@" is chosen by whoever controls the identity, and only
+// the operator knows for which domains that is the person's own name.
 func (s *Handler) suggestedPlacementAccount(identity string) string {
-	local := identity
-	if at := strings.LastIndex(local, "@"); at >= 0 {
-		local = local[:at]
-	}
-	if local == "" || s.uidDomain == "" {
+	at := strings.LastIndex(identity, "@")
+	if at <= 0 || s.uidDomain == "" ||
+		!s.placementOnboard.prefillDomains[strings.ToLower(identity[at+1:])] {
 		return ""
 	}
-	return local + "@" + s.uidDomain
+	account := identity[:at] + "@" + s.uidDomain
+	if s.checkPlacementAccountName(account) != nil {
+		return ""
+	}
+	return account
+}
+
+// reservedPlacementAccounts is the set of account names, lower-cased and
+// without a domain, an approval may never create or attach to: root,
+// condor and condor_pool, and every name in QUEUE_SUPER_USERS (a group's
+// name too, without its "%"), whatever its domain. The schedd qualifies a
+// super-user name with its own UID_DOMAIN, which need not be the
+// placementd's, so the name alone decides.
+func reservedPlacementAccounts(queueSuperUsers string) map[string]bool {
+	out := map[string]bool{"root": true, "condor": true, "condor_pool": true}
+	for _, f := range strings.FieldsFunc(queueSuperUsers, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
+		f = strings.TrimPrefix(f, "%")
+		if at := strings.Index(f, "@"); at >= 0 {
+			f = f[:at]
+		}
+		if f != "" {
+			out[strings.ToLower(f)] = true
+		}
+	}
+	return out
+}
+
+// checkPlacementAccountName refuses an account name the placementd would
+// not hold, or that would act as a super user: it must be user@domain,
+// one "@" with something on both sides, no whitespace, control or format
+// characters, and no double quote, backslash or comma.
+func (s *Handler) checkPlacementAccountName(account string) error {
+	if len(account) > 256 || !utf8.ValidString(account) {
+		return fmt.Errorf("account %q is not a valid account name", account)
+	}
+	if strings.IndexFunc(account, func(r rune) bool {
+		return unicode.IsSpace(r) || isControlOrFormat(r) || r == '"' || r == '\\' || r == ','
+	}) >= 0 {
+		return fmt.Errorf("account %q contains a character an account name cannot", account)
+	}
+	user, domain, ok := strings.Cut(account, "@")
+	if !ok || user == "" || domain == "" || strings.Contains(domain, "@") {
+		return fmt.Errorf("account %q must be user@domain", account)
+	}
+	if s.placementOnboard.reservedAccounts[strings.ToLower(user)] {
+		return fmt.Errorf("account %q is reserved for the access point itself", account)
+	}
+	return nil
 }
 
 func (s *Handler) accessRequestJSON(req *placementAccessRequest) *placementAccessRequestJSON {
@@ -383,10 +493,14 @@ func (s *Handler) listPlacementAccessRequests(w http.ResponseWriter, r *http.Req
 		status = accessRequestPending
 	case "all":
 		status = ""
-	case accessRequestPending, accessRequestApproved, accessRequestDenied, accessRequestWithdrawn:
+	case accessRequestPending, accessRequestApproving, accessRequestApproved, accessRequestDenied, accessRequestWithdrawn:
 	default:
-		s.writeError(w, http.StatusBadRequest, "status must be pending, approved, denied, withdrawn or all")
+		s.writeError(w, http.StatusBadRequest, "status must be pending, approving, approved, denied, withdrawn or all")
 		return
+	}
+	// An approval interrupted mid-way gives its request back.
+	if _, err := store.releaseStaleApprovals(r.Context()); err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "Could not release interrupted approvals", "error", err)
 	}
 	reqs, err := store.list(r.Context(), status)
 	if err != nil {
@@ -478,32 +592,11 @@ func (s *Handler) approvePlacementAccessRequest(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	setBodyLimit(w, r, 1<<16)
-	var body placementApproveBody
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+	body, in, comment, ok := s.decodeApproval(w, r)
+	if !ok {
 		return
 	}
-	account := strings.TrimSpace(body.Account)
-	if account == "" {
-		s.writeError(w, http.StatusBadRequest, "account is required")
-		return
-	}
-	comment, err := cleanAccessRequestText("comment", body.Comment)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, capitalize(err.Error())+".")
-		return
-	}
-	var expires any
-	if len(body.ExpiresAt) > 0 && strings.TrimSpace(string(body.ExpiresAt)) != "null" {
-		expires, err = placementFieldValue(placementFieldSpec{attr: "ExpiresAt", kind: placementFieldTime}, body.ExpiresAt)
-		if err != nil {
-			s.writeError(w, http.StatusBadRequest, "expires_at "+err.Error())
-			return
-		}
-	}
+	account := in.account
 
 	req, ok := s.pendingAccessRequest(w, r, id)
 	if !ok {
@@ -539,22 +632,33 @@ func (s *Handler) approvePlacementAccessRequest(w http.ResponseWriter, r *http.R
 			existing = o.Account
 		}
 	}
-
-	ops, err := accessRequestApproveOps(req, approveInput{
-		account:        account,
-		authorizations: trimmedStrings(body.Authorizations),
-		projects:       trimmedStrings(body.Projects),
-		defaultProject: strings.TrimSpace(body.DefaultProject),
-		expires:        expires,
-		displayName:    strings.TrimSpace(body.DisplayName),
-	}, existing)
-	if err != nil {
-		s.writeError(w, http.StatusConflict, err.Error())
+	// Another identity's account is shared from now on; that takes the
+	// admin's say-so, given with what the account holds in front of them.
+	if existing != nil && !body.AttachToExisting {
+		acct, _ := placementObjectJSON(htcondor.PlacementObject{Account: existing}).(placementAccountJSON)
+		s.writeJSON(w, http.StatusConflict, placementAccountExistsBody{
+			Error: http.StatusText(http.StatusConflict),
+			Message: fmt.Sprintf("The account %s already exists, with %d identities. Confirm attaching this identity to it.",
+				existing.Name, len(existing.Identities)),
+			Code:          http.StatusConflict,
+			AccountExists: true,
+			Account:       &acct,
+		})
 		return
 	}
 
+	ops := accessRequestApproveOps(req, in, existing != nil)
+
 	admin := s.sessionAdmin(r)
 	dryRun := body.DryRun || placementDryRun(r)
+	store := s.placementOnboard.requests
+	// Held while the directory changes, so it cannot be withdrawn or
+	// denied under the admin. A dry run changes nothing and holds nothing.
+	if !dryRun {
+		if _, err := store.beginApproval(r.Context(), id, admin); !s.writeDecisionError(w, id, err) {
+			return
+		}
+	}
 	opts := htcondor.PlacementEditOptions{
 		DryRun:     dryRun,
 		OnBehalfOf: admin,
@@ -572,6 +676,12 @@ func (s *Handler) approvePlacementAccessRequest(w http.ResponseWriter, r *http.R
 		"admin", admin, "request", id, "identity", req.Identity, "account", account,
 		"operations", len(ops), "dry_run", dryRun, "error", err)
 	if err != nil {
+		// Nothing was granted: the request is pending again.
+		if !dryRun {
+			if aerr := store.abandonApproval(context.WithoutCancel(r.Context()), id); aerr != nil {
+				s.logger.Error(logging.DestinationHTTP, "Could not return an access request to pending", "request", id, "error", aerr)
+			}
+		}
 		var perr *htcondor.PlacementError
 		identityOp := len(ops) - 1
 		if errors.As(err, &perr) && perr.Code == htcondor.PlacementErrDuplicate &&
@@ -579,7 +689,6 @@ func (s *Handler) approvePlacementAccessRequest(w http.ResponseWriter, r *http.R
 			s.writeIdentityExists(w, req.Identity)
 			return
 		}
-		// The request stays pending: nothing was granted.
 		s.writePlacementAdminError(w, "approve the request", err, out)
 		return
 	}
@@ -591,8 +700,7 @@ func (s *Handler) approvePlacementAccessRequest(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	decided, err := s.placementOnboard.requests.decide(r.Context(), id, placementAccessDecision{
-		Status:      accessRequestApproved,
+	decided, err := store.finishApproval(context.WithoutCancel(r.Context()), id, placementAccessDecision{
 		By:          admin,
 		Note:        comment,
 		Account:     account,
@@ -607,6 +715,53 @@ func (s *Handler) approvePlacementAccessRequest(w http.ResponseWriter, r *http.R
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
+// decodeApproval reads and checks an approval's body, writing the error
+// response when it is refused.
+func (s *Handler) decodeApproval(w http.ResponseWriter, r *http.Request) (placementApproveBody, approveInput, string, bool) {
+	setBodyLimit(w, r, 1<<16)
+	var body placementApproveBody
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return body, approveInput{}, "", false
+	}
+	account := strings.TrimSpace(body.Account)
+	if account == "" {
+		s.writeError(w, http.StatusBadRequest, "account is required")
+		return body, approveInput{}, "", false
+	}
+	if err := s.checkPlacementAccountName(account); err != nil {
+		s.writeError(w, http.StatusBadRequest, capitalize(err.Error())+".")
+		return body, approveInput{}, "", false
+	}
+	comment, err := cleanAccessRequestText("comment", body.Comment)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, capitalize(err.Error())+".")
+		return body, approveInput{}, "", false
+	}
+	var expires any
+	if len(body.ExpiresAt) > 0 && strings.TrimSpace(string(body.ExpiresAt)) != "null" {
+		expires, err = placementFieldValue(placementFieldSpec{attr: "ExpiresAt", kind: placementFieldTime}, body.ExpiresAt)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, "expires_at "+err.Error())
+			return body, approveInput{}, "", false
+		}
+		if t, ok := expires.(time.Time); ok && !t.After(time.Now()) {
+			s.writeError(w, http.StatusBadRequest, "expires_at is in the past")
+			return body, approveInput{}, "", false
+		}
+	}
+	return body, approveInput{
+		account:        account,
+		authorizations: trimmedStrings(body.Authorizations),
+		projects:       trimmedStrings(body.Projects),
+		defaultProject: strings.TrimSpace(body.DefaultProject),
+		expires:        expires,
+		displayName:    strings.TrimSpace(body.DisplayName),
+	}, comment, true
+}
+
 // approveInput is an approval's account and grants.
 type approveInput struct {
 	account        string
@@ -618,13 +773,14 @@ type approveInput struct {
 }
 
 // accessRequestApproveOps is the batch that onboards req's identity: the
-// account created if it does not exist (or its grants updated when they
-// change), then the identity, keyed by the request's identity, mapped to
-// it. The identity is always the last operation.
-func accessRequestApproveOps(req *placementAccessRequest, in approveInput, existing *htcondor.PlacementAccount) ([]htcondor.PlacementOp, error) {
+// account created when it does not exist, then the identity, keyed by the
+// request's identity, mapped to it. An existing account is never changed:
+// its grants are those of every identity mapped to it, and they are
+// changed on the directory page, where that is visible. The identity is
+// always the last operation.
+func accessRequestApproveOps(req *placementAccessRequest, in approveInput, accountExists bool) []htcondor.PlacementOp {
 	var ops []htcondor.PlacementOp
-	switch {
-	case existing == nil:
+	if !accountExists {
 		fields := map[string]any{
 			"Name":           in.account,
 			"Authorizations": nonNilStrings(in.authorizations),
@@ -635,25 +791,6 @@ func accessRequestApproveOps(req *placementAccessRequest, in approveInput, exist
 		}
 		ops = append(ops, htcondor.PlacementOp{
 			Operation: htcondor.PlacementOpCreate, TargetType: htcondor.PlacementTargetAccount, Fields: fields,
-		})
-	case !sameStrings(existing.Authorizations, in.authorizations) ||
-		!sameStrings(existing.Projects, in.projects) ||
-		existing.DefaultProject != in.defaultProject:
-		if existing.Source == htcondor.PlacementSourceMapfile {
-			return nil, fmt.Errorf("the account %s comes from the map file, so its grants cannot be changed here", existing.Name)
-		}
-		var def any
-		if in.defaultProject != "" {
-			def = in.defaultProject
-		}
-		ops = append(ops, htcondor.PlacementOp{
-			Operation: htcondor.PlacementOpUpdate, TargetType: htcondor.PlacementTargetAccount,
-			ID: existing.ID, ExpectedVersion: existing.Version,
-			Fields: map[string]any{
-				"Authorizations": nonNilStrings(in.authorizations),
-				"Projects":       nonNilStrings(in.projects),
-				"DefaultProject": def,
-			},
 		})
 	}
 	identity := map[string]any{
@@ -669,19 +806,7 @@ func accessRequestApproveOps(req *placementAccessRequest, in approveInput, exist
 	ops = append(ops, htcondor.PlacementOp{
 		Operation: htcondor.PlacementOpCreate, TargetType: htcondor.PlacementTargetIdentity, Fields: identity,
 	})
-	return ops, nil
-}
-
-func sameStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return ops
 }
 
 func trimmedStrings(in []string) []string {
@@ -840,4 +965,29 @@ func (s *Handler) writeDecisionError(w http.ResponseWriter, id int64, err error)
 		s.writeError(w, http.StatusInternalServerError, "Could not record the decision.")
 	}
 	return false
+}
+
+// sweepPlacementAccessRequests gives back requests whose approval was
+// interrupted, and deletes approved, denied and withdrawn requests older
+// than the retention: they hold the requester's provider subject, name,
+// email and note, which are not needed once the request is settled.
+func (s *Handler) sweepPlacementAccessRequests(ctx context.Context) {
+	store := s.placementOnboard.requests
+	if store == nil {
+		return
+	}
+	if n, err := store.releaseStaleApprovals(ctx); err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "Could not release interrupted approvals", "error", err)
+	} else if n > 0 {
+		s.logger.Info(logging.DestinationHTTP, "Released interrupted access request approvals", "count", n)
+	}
+	n, err := store.deleteClosedBefore(ctx, store.now().Add(-s.placementOnboard.requestRetention))
+	if err != nil {
+		s.logger.Warn(logging.DestinationHTTP, "Could not delete old access requests", "error", err)
+		return
+	}
+	if n > 0 {
+		s.logger.Info(logging.DestinationHTTP, "Deleted old access requests", "count", n,
+			"retention", s.placementOnboard.requestRetention)
+	}
 }

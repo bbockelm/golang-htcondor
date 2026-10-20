@@ -2605,50 +2605,84 @@ every other caller.
 
 ### Access requests
 
-Somebody who signs in with an identity the placementd does not map (or
-maps with an expired entry) sees **Request access** on `/placement`
-instead of a dead end: the projects they want, as free text, and a note.
-The request records the identity from the session, never from the request,
-together with the provider's display name and email from sign-in. Each
-identity has at most one pending request; it can be withdrawn, and a new
-one filed after a withdrawal or a denial. Filing is rate-limited: 3 at once
-per identity, then one every 10 minutes, and 10 at once per client
-address, then one a minute. A note is at most 2 KB, and a request names at
-most 10 projects of 64 characters each.
+Somebody who signs in with an identity the placementd does not map sees
+**Request access** on `/placement` instead of a dead end: the projects
+they want, as free text, and a note. The request records the identity from
+the session, never from the request, together with the provider's display
+name and, when the provider marks it verified (`email_verified`), email
+from sign-in. Names and emails from the provider are kept to 256
+characters, without control or invisible formatting characters. Each
+identity has at most one open request; it can be withdrawn while pending,
+and a new one filed after a withdrawal or a denial. Someone whose mapping
+has expired is told to ask an administrator to extend it instead: they are
+already in the directory, which an approval cannot add them to again.
+
+Filing is rate-limited: 3 at once per identity, then one every 10 minutes,
+and 10 at once per client address, then one a minute. The client address
+is the peer's, or the forwarded one from a proxy in
+`HTTP_API_TRUSTED_PROXIES`. When no proxies are configured and the peer is
+a loopback or private address (most likely an unconfigured proxy or
+ingress), only the per-identity limit applies, and the server logs that
+once. A note is at most 2 KB, a request names at most 10 projects of 64
+characters each, and neither may contain control or invisible formatting
+characters (bidirectional overrides, zero-width characters).
 
 Administrators (`HTTP_API_WEBUI_ADMIN_GROUP`) see the requests on the
 **Requests** tab of `/admin/placement`, with the number pending beside the
 tab and beside Placement in the sidebar. **Approve** opens the Onboard user
-form pre-filled with the identity, the account a map file `*` would give it
-(the part before the last `@`, in `UID_DOMAIN`), the requested projects
-that exist in the directory (matched ignoring case; the others are listed),
-and `READ` and `WRITE`. Approving makes one directory change through the
-placementd, recorded as the approving administrator's with the comment
-`access request #<id>`: the account is created if it does not exist (or
-its grants updated if they differ), then the identity is created and
-mapped to it. The request is marked approved only once that change
-committed, and records the account and the change set. If the identity is
-already in the directory, approval is refused and the request can be
-marked resolved instead, which checks that the identity has access now.
-**Deny** takes a reason, which the requester sees. Approving needs a
-placementd that supports directory management; with an older one the tab
-is read-only.
+form pre-filled with the identity, the requested projects that exist in
+the directory (matched ignoring case; the others are listed), and `READ`
+and `WRITE`. The account is suggested only for an identity whose domain is
+listed in `HTTP_API_PLACEMENT_PREFILL_DOMAINS`: the part before the last
+`@`, in `UID_DOMAIN`, as a map file `*` would give it. Otherwise the
+administrator types it.
+
+The account must be `user@domain`, with no whitespace, double quotes,
+backslashes or commas, and its user part may not be `root`, `condor`,
+`condor_pool` or a name (or `%group`) in `QUEUE_SUPER_USERS`, in any
+domain. When the account does not exist, approving creates it with the
+chosen grants. When it exists, the form shows the identities already on it
+and its grants, and approving needs **Attach to this existing account**
+checked (`attach_to_existing` in the API; without it the server answers 409
+with the account). Attaching never changes the account: its grants are
+those of every identity on it, and are changed from the Directory. An
+expiry, when given, must be in the future.
+
+Approving makes one directory change through the placementd, recorded as
+the approving administrator's with the comment `access request #<id>`.
+While it runs, the request is held (`approving`): the requester cannot
+withdraw it and another administrator cannot deny it. It is marked
+approved, with the account and the change set, only once the change
+committed, and goes back to pending if the change fails or the server
+stops mid-way (after 5 minutes). If the identity is already in the
+directory, approval is refused and the request can be marked resolved
+instead, which checks that the identity has access now. **Deny** takes a
+reason, which the requester sees. Approving needs a placementd that
+supports directory management; with an older one the tab is read-only.
 
 With `placementd` in `HTTP_API_IDENTITY_MAP`, an approved person who is
 still signed in gets their account without signing in again, as any newly
 onboarded identity does.
 
 Requests are kept in this server's database (`placement_access_requests`);
-the placementd records only who has access. Nothing is sent by email.
+the placementd records only who has access. Approved, denied and
+withdrawn requests are deleted once they have not changed for
+`HTTP_API_PLACEMENT_REQUEST_RETENTION` (default `2160h`, 90 days), checked
+hourly; pending ones are kept. Nothing is sent by email.
 
 | Endpoint | Who |
 | --- | --- |
 | `GET`, `POST`, `DELETE /api/v1/placement/me/request` | The signed-in person, for their own identity. `POST` and `DELETE` require `X-Requested-With`. |
-| `GET /api/v1/placement/admin/requests?status=pending\|approved\|denied\|withdrawn\|all` | Admins. |
+| `GET /api/v1/placement/admin/requests?status=pending\|approving\|approved\|denied\|withdrawn\|all` | Admins. |
 | `GET /api/v1/placement/admin/requests/count` | Admins. |
-| `POST /api/v1/placement/admin/requests/{id}/approve` | Admins. `{account, authorizations, projects, default_project, expires_at, display_name, comment}`; `?dry_run=1` checks only. |
+| `POST /api/v1/placement/admin/requests/{id}/approve` | Admins. `{account, attach_to_existing, authorizations, projects, default_project, expires_at, display_name, comment}`; `?dry_run=1` checks only. |
 | `POST /api/v1/placement/admin/requests/{id}/deny` | Admins. `{reason}`. |
 | `POST /api/v1/placement/admin/requests/{id}/resolve` | Admins. `{comment}`. |
+
+| Knob | Purpose |
+| --- | --- |
+| `HTTP_API_PLACEMENT_PREFILL_DOMAINS` | Comma-separated identity domains (the part after the last `@`, case-insensitive) whose requests get an account suggested. Empty, the default, suggests none. List only domains where the part before the `@` is the person's own login name. Read at startup. |
+| `HTTP_API_PLACEMENT_REQUEST_RETENTION` | How long approved, denied and withdrawn requests are kept, as a duration with a unit (`2160h`). Default 90 days. Read at startup. |
 
 ## Configuration
 

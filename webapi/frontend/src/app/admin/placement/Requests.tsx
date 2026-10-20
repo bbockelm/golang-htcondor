@@ -36,6 +36,7 @@ const DEFAULT_AUTHORIZATIONS = ['READ', 'WRITE'];
 
 const STATUS_CLASS: Record<AccessRequestStatus, string> = {
   pending: 'bg-amber-100 text-amber-800',
+  approving: 'bg-sky-100 text-sky-800',
   approved: 'bg-emerald-100 text-emerald-800',
   denied: 'bg-red-100 text-red-800',
   withdrawn: 'bg-gray-200 text-gray-700',
@@ -309,6 +310,7 @@ function ApproveForm({
       projects={projects}
       initial={initial}
       identityLocked
+      confirmAttach
       onClose={onClose}
       onDone={onDone}
       submit={(input, _existing, dryRun, comment) =>
@@ -322,6 +324,7 @@ function ApproveForm({
             expires_at: input.expiresAt,
             display_name: input.displayName,
             comment,
+            attach_to_existing: input.attachToExisting ?? false,
           },
           dryRun,
         )

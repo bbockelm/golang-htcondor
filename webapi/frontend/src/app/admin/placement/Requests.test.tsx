@@ -58,7 +58,7 @@ const projects: DirProject[] = [
   { id: 'p1', source: 'internal', version: 1, name: 'Physics', accounts: [] },
   { id: 'p2', source: 'internal', version: 1, name: 'Staff', accounts: [] },
 ];
-const accounts: DirAccount[] = [];
+let accounts: DirAccount[] = [];
 
 function listing(over: Partial<AccessRequestList> = {}): AccessRequestList {
   return { requests: [newbie], pending: 1, can_approve: true, ...over };
@@ -84,6 +84,7 @@ async function openApproval() {
 
 describe('Requests', () => {
   beforeEach(() => {
+    accounts = [];
     for (const m of [requests, list, approveRequest, denyRequest, resolveRequest, batch]) m.mockReset();
     requests.mockResolvedValue(listing());
     list.mockImplementation(async (kind: PlacementKind) =>
@@ -146,12 +147,50 @@ describe('Requests', () => {
         expires_at: null,
         display_name: '<img src=x onerror=alert(1)>',
         comment: 'welcome',
+        attach_to_existing: false,
       },
       false,
     ]);
     // Nothing went through the generic batch endpoint.
     expect(batch).not.toHaveBeenCalled();
     expect(await screen.findByText('Request approved.')).toBeInTheDocument();
+  });
+
+  it('attaches to an existing account only when the admin confirms, showing who is on it', async () => {
+    accounts = [
+      {
+        id: 'a1',
+        source: 'internal',
+        version: 4,
+        name: 'shared@ap.example',
+        authorizations: ['READ'],
+        projects: ['Staff'],
+        default_project: 'Staff',
+        identities: ['alice@idp.example', 'bob@idp.example'],
+      },
+    ];
+    approveRequest.mockResolvedValue({ committed: true, dry_run: false, results: [] });
+    const dialog = await openApproval();
+    const approve = within(dialog).getByRole('button', { name: 'Approve' });
+    expect(within(dialog).queryByRole('region', { name: 'Existing account' })).toBeNull();
+    expect(approve).toBeEnabled();
+
+    fireEvent.change(within(dialog).getByLabelText(/^Account/), { target: { value: 'shared@ap.example' } });
+    const warning = within(dialog).getByRole('region', { name: 'Existing account' });
+    expect(within(warning).getByText('alice@idp.example')).toBeInTheDocument();
+    expect(within(warning).getByText('bob@idp.example')).toBeInTheDocument();
+    expect(within(warning).getByText(/READ/)).toBeInTheDocument();
+    expect(within(warning).getByText(/Staff/)).toBeInTheDocument();
+    // Its grants are the account's, and are not changed here.
+    expect(within(dialog).getByRole('checkbox', { name: 'Write' })).toBeDisabled();
+    expect(approve).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'Check' })).toBeDisabled();
+
+    fireEvent.click(within(warning).getByRole('checkbox', { name: 'Attach this identity to the existing account' }));
+    expect(approve).toBeEnabled();
+    fireEvent.click(approve);
+    await waitFor(() => expect(approveRequest).toHaveBeenCalledTimes(1));
+    expect(approveRequest.mock.calls[0][1]).toMatchObject({ account: 'shared@ap.example', attach_to_existing: true });
   });
 
   it('checks an approval as a dry run', async () => {

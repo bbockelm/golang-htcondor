@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,6 +46,19 @@ type placementOnboarding struct {
 	requests               *placementAccessRequestStore
 	requestIdentityLimiter *LoginRateLimiter
 	requestAddressLimiter  *LoginRateLimiter
+	// requestAddressOff logs, once, that requests from a private peer
+	// are not limited per address.
+	requestAddressOff sync.Once
+	// requestRetention is how long decided and withdrawn requests are
+	// kept (HTTP_API_PLACEMENT_REQUEST_RETENTION).
+	requestRetention time.Duration
+	// prefillDomains are the identity domains, lower-cased, whose
+	// requests get an account suggested (HTTP_API_PLACEMENT_PREFILL_DOMAINS).
+	prefillDomains map[string]bool
+	// reservedAccounts are the account names, lower-cased and without a
+	// domain, an approval may never create or attach to: root, condor,
+	// condor_pool and the schedd's QUEUE_SUPER_USERS.
+	reservedAccounts map[string]bool
 
 	// mapIdentity is set when HTTP_API_IDENTITY_MAP names placementd;
 	// mapIdentityFirst when it is listed before every local strategy.
@@ -124,6 +138,21 @@ func (h *Handler) configurePlacementOnboarding(cfg HandlerConfig) {
 		po.requests = &placementAccessRequestStore{db: h.db, now: time.Now}
 	}
 	po.requestIdentityLimiter = NewLoginRateLimiter(accessRequestIdentityRate, accessRequestIdentityBurst)
+	po.requestRetention = cfg.PlacementRequestRetention
+	if po.requestRetention <= 0 {
+		po.requestRetention = defaultAccessRequestRetention
+	}
+	po.prefillDomains = map[string]bool{}
+	for _, d := range cfg.PlacementPrefillDomains {
+		if d = strings.ToLower(strings.TrimSpace(d)); d != "" {
+			po.prefillDomains[d] = true
+		}
+	}
+	superUsers := ""
+	if cfg.HTCondorConfig != nil {
+		superUsers, _ = cfg.HTCondorConfig.Get("QUEUE_SUPER_USERS")
+	}
+	po.reservedAccounts = reservedPlacementAccounts(superUsers)
 	po.requestAddressLimiter = NewLoginRateLimiter(accessRequestAddressRate, accessRequestAddressBurst)
 	// Polls arrive every five seconds per client; this allows a busy NAT
 	// a good many clients while still bounding what one address can do.

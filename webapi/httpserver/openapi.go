@@ -890,10 +890,10 @@ const openAPISchema = `{
           "identity": {"type": "string"},
           "idp_subject": {"type": "string"},
           "display_name": {"type": "string"},
-          "email": {"type": "string"},
+          "email": {"type": "string", "description": "Only when the provider marked it verified."},
           "projects": {"type": "array", "items": {"type": "string"}},
           "note": {"type": "string"},
-          "status": {"type": "string", "enum": ["pending", "approved", "denied", "withdrawn"]},
+          "status": {"type": "string", "enum": ["pending", "approving", "approved", "denied", "withdrawn"]},
           "created_at": {"type": "string", "format": "date-time"},
           "updated_at": {"type": "string", "format": "date-time"},
           "decided_by": {"type": "string"},
@@ -901,7 +901,7 @@ const openAPISchema = `{
           "decision_note": {"type": "string"},
           "account": {"type": "string"},
           "changeset_id": {"type": "integer", "description": "The directory change set an approval made, when known."},
-          "suggested_account": {"type": "string", "description": "The identity's part before its last @, in UID_DOMAIN."}
+          "suggested_account": {"type": "string", "description": "The identity's part before its last @, in UID_DOMAIN; only for an identity in a domain listed in HTTP_API_PLACEMENT_PREFILL_DOMAINS."}
         }
       },
       "PlacementIssued": {
@@ -1472,7 +1472,7 @@ const openAPISchema = `{
         "operationId": "listPlacementAccessRequests",
         "tags": ["placement"],
         "parameters": [
-          {"name": "status", "in": "query", "required": false, "schema": {"type": "string", "enum": ["pending", "approved", "denied", "withdrawn", "all"], "default": "pending"}}
+          {"name": "status", "in": "query", "required": false, "schema": {"type": "string", "enum": ["pending", "approving", "approved", "denied", "withdrawn", "all"], "default": "pending"}}
         ],
         "responses": {
           "200": {"description": "Requests", "content": {"application/json": {"schema": {"type": "object", "properties": {"requests": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementAccessRequest"}}, "pending": {"type": "integer", "description": "Every pending request, whatever the filter."}, "can_approve": {"type": "boolean", "description": "Whether the placementd serves the directory edits an approval needs."}}}}}},
@@ -1510,16 +1510,17 @@ const openAPISchema = `{
     "/placement/admin/requests/{id}/approve": {
       "post": {
         "summary": "Approve an access request",
-        "description": "One PLACEMENT_EDIT batch, made on behalf of the signed-in administrator with the change comment \"access request #<id>\" plus the comment given: the account is created if it does not exist (or its grants updated when they differ), then the request's identity is created and mapped to it. The request is marked approved only once the batch committed. dry_run (body or query) validates without changing anything.",
+        "description": "One PLACEMENT_EDIT batch, made on behalf of the signed-in administrator with the change comment \"access request #<id>\" plus the comment given: the account is created if it does not exist, then the request's identity is created and mapped to it. An existing account is never changed, and is used only with attach_to_existing. While the batch runs the request is approving, and cannot be withdrawn or denied; it is marked approved only once the batch committed, and is pending again if it failed. dry_run (body or query) validates without changing anything.",
         "operationId": "approvePlacementAccessRequest",
         "tags": ["placement"],
         "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["account"], "properties": {
-          "account": {"type": "string"},
+          "account": {"type": "string", "description": "user@domain. The user part may not be root, condor, condor_pool or a QUEUE_SUPER_USERS name."},
+          "attach_to_existing": {"type": "boolean", "description": "Confirms mapping the identity to an account that already exists. The account is never changed: authorizations, projects and default_project are then not used."},
           "authorizations": {"type": "array", "items": {"type": "string"}},
           "projects": {"type": "array", "items": {"type": "string"}},
           "default_project": {"type": "string"},
-          "expires_at": {"type": "string", "format": "date-time", "nullable": true, "description": "When the identity's mapping stops being honored; absent or null for never."},
+          "expires_at": {"type": "string", "format": "date-time", "nullable": true, "description": "When the identity's mapping stops being honored; absent or null for never. Must be in the future."},
           "display_name": {"type": "string"},
           "comment": {"type": "string", "maxLength": 2048},
           "dry_run": {"type": "boolean"}
@@ -1529,7 +1530,7 @@ const openAPISchema = `{
           "400": {"description": "Invalid body, or the placementd refused a field", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
           "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "404": {"description": "No such request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-          "409": {"description": "The request is not pending; the identity is already in the directory (identity_exists); or the account comes from the map file and the grants differ", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The request is not pending; the identity is already in the directory (identity_exists); or the account exists and attach_to_existing was not set (account_exists, with the account: its identities and grants)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
@@ -1640,7 +1641,7 @@ const openAPISchema = `{
           "201": {"description": "Filed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMeRequest"}}}},
           "400": {"description": "Invalid body, or over a limit", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "403": {"description": "No placement identity, or the X-Requested-With header is missing", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-          "409": {"description": "A request is already pending, or the identity already has access", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "A request is already open, the identity already has access, or its access has expired (an administrator extends it)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "429": {"description": "Too many requests", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       },
@@ -1650,6 +1651,7 @@ const openAPISchema = `{
         "tags": ["placement"],
         "responses": {
           "200": {"description": "Withdrawn", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMeRequest"}}}},
+          "409": {"description": "The request is being approved", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "404": {"description": "No pending request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }

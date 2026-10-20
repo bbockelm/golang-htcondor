@@ -20,15 +20,27 @@ import (
 // A request never grants anything. Approval is one PLACEMENT_EDIT batch,
 // made for the approving admin, so every limit the placementd puts on its
 // directory applies to it; the request is marked approved only once that
-// batch committed.
+// batch committed. While the batch runs the request is "approving": it is
+// neither pending (so it cannot be withdrawn or denied under the admin)
+// nor approved.
 
 // Request states.
 const (
 	accessRequestPending   = "pending"
+	accessRequestApproving = "approving"
 	accessRequestApproved  = "approved"
 	accessRequestDenied    = "denied"
 	accessRequestWithdrawn = "withdrawn"
 )
+
+// accessRequestApprovalLease is how long an approval may hold its request.
+// One still "approving" after this was interrupted (the server stopped
+// mid-way) and goes back to pending.
+const accessRequestApprovalLease = 5 * time.Minute
+
+// defaultAccessRequestRetention is how long a decided or withdrawn request
+// is kept when HTTP_API_PLACEMENT_REQUEST_RETENTION is not set.
+const defaultAccessRequestRetention = 90 * 24 * time.Hour
 
 // Limits on what a requester may write.
 const (
@@ -102,8 +114,8 @@ func scanAccessRequest(row interface{ Scan(...any) error }) (*placementAccessReq
 }
 
 // create stores a new pending request. It returns errAccessRequestPending
-// when the identity already has one: the partial unique index decides, so
-// two concurrent requests cannot both succeed.
+// when the identity already has one pending or being approved: the partial
+// unique index decides, so two concurrent requests cannot both succeed.
 func (st *placementAccessRequestStore) create(ctx context.Context, req placementAccessRequest) (*placementAccessRequest, error) {
 	projects, err := json.Marshal(nonNilStrings(req.Projects))
 	if err != nil {
@@ -228,13 +240,70 @@ func (st *placementAccessRequestStore) decide(ctx context.Context, id int64, d p
 	if d.Status != accessRequestApproved && d.Status != accessRequestDenied {
 		return nil, fmt.Errorf("unknown decision %q", d.Status)
 	}
+	return st.transition(ctx, id, accessRequestPending, d)
+}
+
+// beginApproval moves a pending request to approving, held by admin by.
+// It fails like decide when the request is not pending.
+func (st *placementAccessRequestStore) beginApproval(ctx context.Context, id int64, by string) (*placementAccessRequest, error) {
+	return st.transition(ctx, id, accessRequestPending, placementAccessDecision{Status: accessRequestApproving, By: by})
+}
+
+// finishApproval records the approval of a request this server is
+// approving.
+func (st *placementAccessRequestStore) finishApproval(ctx context.Context, id int64, d placementAccessDecision) (*placementAccessRequest, error) {
+	d.Status = accessRequestApproved
+	return st.transition(ctx, id, accessRequestApproving, d)
+}
+
+// abandonApproval puts a request whose approval failed back to pending.
+func (st *placementAccessRequestStore) abandonApproval(ctx context.Context, id int64) error {
+	_, err := st.db.ExecContext(ctx,
+		`UPDATE placement_access_requests SET status = ?, decided_by = '', updated_at = ?
+		 WHERE id = ? AND status = ?`,
+		accessRequestPending, st.now().Unix(), id, accessRequestApproving)
+	return err
+}
+
+// releaseStaleApprovals puts back to pending every request held for
+// approval longer than accessRequestApprovalLease.
+func (st *placementAccessRequestStore) releaseStaleApprovals(ctx context.Context) (int64, error) {
+	res, err := st.db.ExecContext(ctx,
+		`UPDATE placement_access_requests SET status = ?, decided_by = '', updated_at = ?
+		 WHERE status = ? AND updated_at < ?`,
+		accessRequestPending, st.now().Unix(), accessRequestApproving,
+		st.now().Add(-accessRequestApprovalLease).Unix())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// deleteClosedBefore deletes the approved, denied and withdrawn requests
+// last changed before t.
+func (st *placementAccessRequestStore) deleteClosedBefore(ctx context.Context, t time.Time) (int64, error) {
+	res, err := st.db.ExecContext(ctx,
+		`DELETE FROM placement_access_requests WHERE status IN (?, ?, ?) AND updated_at < ?`,
+		accessRequestApproved, accessRequestDenied, accessRequestWithdrawn, t.Unix())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// transition moves request id from status from to d.Status, recording d.
+func (st *placementAccessRequestStore) transition(ctx context.Context, id int64, from string, d placementAccessDecision) (*placementAccessRequest, error) {
 	now := st.now().Unix()
+	decidedAt := now
+	if d.Status == accessRequestApproving {
+		decidedAt = 0
+	}
 	res, err := st.db.ExecContext(ctx,
 		`UPDATE placement_access_requests
 		 SET status = ?, updated_at = ?, decided_by = ?, decided_at = ?, decision_note = ?,
 		     account = ?, changeset_id = ?
 		 WHERE id = ? AND status = ?`,
-		d.Status, now, d.By, now, d.Note, d.Account, d.ChangesetID, id, accessRequestPending)
+		d.Status, now, d.By, decidedAt, d.Note, d.Account, d.ChangesetID, id, from)
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +325,7 @@ func (st *placementAccessRequestStore) decide(ctx context.Context, id int64, d p
 }
 
 // cleanAccessRequestProjects checks and normalizes requested project names:
-// trimmed, none empty, no control characters, at most
+// trimmed, none empty, no control or format characters, at most
 // accessRequestMaxProjectLen characters each and accessRequestMaxProjects
 // in all, duplicates (ignoring case) dropped.
 func cleanAccessRequestProjects(in []string) ([]string, error) {
@@ -267,7 +336,7 @@ func cleanAccessRequestProjects(in []string) ([]string, error) {
 		if p == "" {
 			continue
 		}
-		if !utf8.ValidString(p) || strings.IndexFunc(p, unicode.IsControl) >= 0 {
+		if !utf8.ValidString(p) || strings.IndexFunc(p, isControlOrFormat) >= 0 {
 			return nil, fmt.Errorf("a project name contains a character that is not allowed")
 		}
 		if utf8.RuneCountInString(p) > accessRequestMaxProjectLen {
@@ -288,7 +357,8 @@ func cleanAccessRequestProjects(in []string) ([]string, error) {
 
 // cleanAccessRequestText checks free text from a requester or an
 // administrator: valid UTF-8, at most accessRequestMaxNote bytes, no control
-// characters other than newline and tab. It returns the text trimmed.
+// or format characters other than newline and tab. It returns the text
+// trimmed.
 func cleanAccessRequestText(what, s string) (string, error) {
 	s = strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n"))
 	if len(s) > accessRequestMaxNote {
@@ -297,8 +367,16 @@ func cleanAccessRequestText(what, s string) (string, error) {
 	if !utf8.ValidString(s) {
 		return "", fmt.Errorf("the %s is not valid text", what)
 	}
-	if strings.IndexFunc(s, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) >= 0 {
+	if strings.IndexFunc(s, func(r rune) bool { return isControlOrFormat(r) && r != '\n' && r != '\t' }) >= 0 {
 		return "", fmt.Errorf("the %s contains a character that is not allowed", what)
 	}
 	return s, nil
+}
+
+// isControlOrFormat reports a control character (Cc) or an invisible
+// format character (Cf): bidirectional overrides and isolates, zero-width
+// joiners and spaces, the byte order mark. Text with them can display as
+// something other than what it says.
+func isControlOrFormat(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
 }
