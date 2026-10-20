@@ -7,7 +7,8 @@
 
 import { useQuery } from '@tanstack/react-query';
 
-import { RuntimeRangeBar } from '@/components/RuntimeRangeBar';
+import { RangePlot } from '@/components/RangePlot';
+import { chartEntries, HowToRead } from '@/components/RangeLegend';
 import { api, type RuntimeMemory } from '@/lib/api';
 
 import { memoryCard } from './memoryCard';
@@ -37,11 +38,33 @@ export function MemoryEstimateView({ memory, status }: { memory: RuntimeMemory |
         {card.rough && <RoughChip />}
       </p>
       <div>
-        <RuntimeRangeBar {...card.bar} rough={card.rough} longer={card.above} />
+        <RangePlot
+          band={card.bar.band}
+          box={card.bar.box}
+          tick={card.bar.tick}
+          job={card.bar.elapsed}
+          jobCapped={card.bar.elapsedCapped}
+          refs={card.bar.refs}
+          rough={card.rough}
+          unusual={card.above}
+          testID="memory-range-bar"
+        />
         <div className="flex justify-between gap-3 text-xs text-gray-600 tabular-nums">
           <span>{card.axis.left}</span>
           {card.axis.middle && <span className="text-center">{card.axis.middle}</span>}
           <span className="text-right">{card.axis.right}</span>
+        </div>
+        <div className="mt-1">
+          <HowToRead
+            entries={chartEntries({
+              rough: card.rough,
+              box: card.bar.box !== undefined,
+              job: card.bar.elapsed !== undefined,
+              // Only a running job is compared with what is usual.
+              canBeUnusual: status === 2,
+              requested: !!card.bar.refs?.length,
+            })}
+          />
         </div>
       </div>
       {card.lines.map((line) => (

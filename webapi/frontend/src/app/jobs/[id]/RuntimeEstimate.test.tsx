@@ -302,7 +302,7 @@ describe('RuntimeEstimateView', () => {
     expect(bar).toHaveAttribute('aria-hidden', 'true');
     expect(bar.querySelector('[data-part="band"]')).toHaveStyle({ left: '22.22%', width: '61.11%' });
     expect(bar.querySelector('[data-part="tick"]')).toHaveStyle({ left: '38.89%' });
-    expect(bar.querySelector('[data-part="elapsed"]')).toBeNull();
+    expect(bar.querySelector('[data-part="job"]')).toBeNull();
     expect(screen.queryByText('rough guess')).toBeNull();
     expect(screen.queryByText('Longer than usual')).toBeNull();
   });
@@ -313,10 +313,10 @@ describe('RuntimeEstimateView', () => {
     expect(shown()).toContain('started 3:00 PM');
     expect(shown()).toContain('usually done 3:40 to 5:30 PM');
     expect(screen.getByText('Running 10m of about 1h. From 64 finished jobs in this cluster.')).toBeInTheDocument();
-    const fill = screen.getByTestId('runtime-range-bar').querySelector('[data-part="elapsed"]');
+    const fill = screen.getByTestId('runtime-range-bar').querySelector('[data-part="job"]');
     expect(fill).toHaveClass('bg-green-700');
     expect(fill).toHaveStyle({ width: '5.56%' });
-    const now = screen.getByTestId('runtime-range-bar').querySelector('[data-part="now"]');
+    const now = screen.getByTestId('runtime-range-bar').querySelector('[data-part="job-end"]');
     expect(now).toHaveClass('bg-green-700');
     expect(now).toHaveStyle({ left: '5.56%' });
   });
@@ -333,11 +333,11 @@ describe('RuntimeEstimateView', () => {
     expect(within(c).getByText('It may be stuck, or this input may need more work than usual.')).toBeInTheDocument();
     // Over the band, not under it: the comparison is where they overlap.
     const band = c.querySelector('[data-part="band"]')!;
-    const fill = c.querySelector('[data-part="elapsed"]')!;
+    const fill = c.querySelector('[data-part="job"]')!;
     expect(fill).toHaveClass('bg-amber-600', 'z-10');
     expect(band).not.toHaveClass('z-10');
     expect(band.compareDocumentPosition(fill) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(c.querySelector('[data-part="now"]')).toHaveClass('bg-amber-600');
+    expect(c.querySelector('[data-part="job-end"]')).toHaveClass('bg-amber-600');
     fireEvent.click(screen.getByRole('button', { name: 'View live output' }));
     fireEvent.click(screen.getByRole('button', { name: 'Open a shell in the job' }));
     expect(onViewOutput).toHaveBeenCalledOnce();
@@ -347,8 +347,8 @@ describe('RuntimeEstimateView', () => {
   it('ends a fill cut at the axis without a mark for now', () => {
     view(longEstimate({ elapsed_seconds: 30 * 3600 }), 2);
     const bar = screen.getByTestId('runtime-range-bar');
-    expect(bar.querySelector('[data-part="elapsed"]')).toHaveStyle({ width: '100.00%' });
-    expect(bar.querySelector('[data-part="now"]')).toBeNull();
+    expect(bar.querySelector('[data-part="job"]')).toHaveStyle({ width: '100.00%' });
+    expect(bar.querySelector('[data-part="job-end"]')).toBeNull();
     expect(screen.getByText('now: 1d6h')).toBeInTheDocument();
   });
 
@@ -360,7 +360,8 @@ describe('RuntimeEstimateView', () => {
 
   it('offers no actions to a job within its usual time', () => {
     view(runningEstimate(), 2, { onViewOutput: () => {}, onOpenShell: () => {} });
-    expect(screen.queryByRole('button')).toBeNull();
+    // Only the chart's own "How to read".
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['How to read']);
   });
 
   it('shows a rough guess hatched and grey', () => {
@@ -383,7 +384,7 @@ describe('RuntimeEstimateView', () => {
     expect((bar.querySelector('[data-part="band"]') as HTMLElement).style.backgroundImage).toContain(
       'repeating-linear-gradient',
     );
-    expect(bar.querySelector('[data-part="elapsed"]')).toHaveClass('bg-green-700');
+    expect(bar.querySelector('[data-part="job"]')).toHaveClass('bg-green-700');
   });
 
   it('renders nothing without an estimate or for other states', () => {

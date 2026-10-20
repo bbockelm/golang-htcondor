@@ -16,12 +16,15 @@ import { api, ApiError } from '@/lib/api';
 import { approxDuration } from '@/lib/duration';
 import type { EstimateLevel, Quantiles, SimilarJobsResponse } from '@/lib/similar';
 import { formatMiB } from '@/lib/utilization';
+import { RangePlot } from '@/components/RangePlot';
+import { chartEntries, HowToRead } from '@/components/RangeLegend';
 
 const PAGE_SIZE = 50;
 
-// Spread draws a group's values on an axis from zero: whiskers from the
-// 10th to 90th percentile, a box over the middle half, a tick at the
-// median, a mark for this job, and any labelled reference lines (a
+// Spread draws a group's values with RangePlot, the same marks as the
+// job page's cards: the band where most of them land, the middle half as
+// a box inside it, the typical value as a tick, this job as a fill from
+// zero (amber when it is unusual), and labelled reference lines (a
 // request, say). The sentence under it says the same in words; words
 // supplies its verbs ("took" ... "finished within") and format its
 // figures.
@@ -32,59 +35,42 @@ export function Spread({
   mark,
   refs = [],
   testID,
-  markTestID,
 }: {
   q: Quantiles;
   format: (v: number) => string;
   words: { range: string; under: string };
-  mark?: { value: number; label: string };
+  // unusual is undefined where the page never calls the job unusual (a
+  // finished job), so the key does not offer the amber mark.
+  mark?: { value: number; label: string; unusual?: boolean };
   refs?: { value: number; label: string }[];
   testID: string;
-  markTestID: string;
 }) {
   const max = Math.max(q.p90, mark?.value ?? 0, ...refs.map((r) => r.value)) * 1.15 || 1;
-  const at = (v: number) => `${Math.min(100, (v / max) * 100).toFixed(2)}%`;
+  const at = (v: number) => Math.min(1, Math.max(0, v / max));
   return (
     <div data-testid={testID}>
-      <div className="relative h-8" aria-hidden="true">
-        <div className="absolute inset-x-0 top-4 h-px bg-gray-300" />
-        <div
-          className="absolute top-[15px] h-0.5 bg-[#2a78d6]"
-          style={{ left: at(q.p10), width: `calc(${at(q.p90)} - ${at(q.p10)})` }}
-        />
-        <div
-          className="absolute top-2.5 h-3 rounded-sm bg-[#86b6ef]"
-          style={{ left: at(q.p25), width: `max(3px, calc(${at(q.p75)} - ${at(q.p25)}))` }}
-        />
-        <div className="absolute top-1.5 h-5 w-0.5 bg-[#184f95]" style={{ left: at(q.p50) }} />
-        {refs.map((r) => (
-          <div
-            key={r.label}
-            className="absolute top-0 h-8 border-l border-dashed border-gray-500"
-            style={{ left: at(r.value) }}
-            data-testid={`${testID}-ref`}
-          />
-        ))}
-        {mark && (
-          <div
-            className="absolute top-0 h-8 w-[3px] -translate-x-1/2 rounded-sm bg-gray-900"
-            style={{ left: at(mark.value) }}
-            data-testid={markTestID}
-          />
-        )}
-      </div>
-      <div className="relative flex justify-between text-xs text-gray-500 tabular-nums">
+      <RangePlot
+        band={{ from: at(q.p10), to: at(q.p90) }}
+        box={{ from: at(q.p25), to: at(q.p75) }}
+        tick={at(q.p50)}
+        job={mark && at(mark.value)}
+        unusual={mark?.unusual}
+        refs={refs.map((r) => ({ at: at(r.value), label: r.label }))}
+        testID={`${testID}-plot`}
+      />
+      <div className="flex justify-between text-xs text-gray-500 tabular-nums">
         <span>0</span>
-        {refs.map((r) => (
-          <span
-            key={r.label}
-            className="absolute -translate-x-1/2 whitespace-nowrap bg-white px-0.5"
-            style={{ left: at(r.value) }}
-          >
-            {r.label}
-          </span>
-        ))}
         <span>{format(max)}</span>
+      </div>
+      <div className="mt-1">
+        <HowToRead
+          entries={chartEntries({
+            box: true,
+            job: mark !== undefined,
+            canBeUnusual: mark?.unusual !== undefined,
+            requested: refs.length > 0,
+          })}
+        />
       </div>
       <p className="mt-1 text-sm text-gray-700">
         Half of these {q.count.toLocaleString()} jobs {words.range} {format(q.p25)} to {format(q.p75)} (typically{' '}
@@ -114,16 +100,15 @@ export function RuntimeSpread({
   mark,
 }: {
   runtimes: Quantiles;
-  mark?: { seconds: number; label: string };
+  mark?: { seconds: number; label: string; unusual?: boolean };
 }) {
   return (
     <Spread
       q={runtimes}
       format={approxDuration}
       words={{ range: 'took', under: 'finished within' }}
-      mark={mark && { value: mark.seconds, label: mark.label }}
+      mark={mark && { value: mark.seconds, label: mark.label, unusual: mark.unusual }}
       testID="runtime-spread"
-      markTestID="spread-mark"
     />
   );
 }
@@ -136,7 +121,7 @@ export function MemorySpread({
   requestedMiB,
 }: {
   memory: Quantiles;
-  mark?: { mib: number; label: string };
+  mark?: { mib: number; label: string; unusual?: boolean };
   requestedMiB?: number;
 }) {
   return (
@@ -144,10 +129,9 @@ export function MemorySpread({
       q={memory}
       format={formatMiB}
       words={{ range: 'peaked at', under: 'stayed under' }}
-      mark={mark && { value: mark.mib, label: mark.label }}
+      mark={mark && { value: mark.mib, label: mark.label, unusual: mark.unusual }}
       refs={requestedMiB ? [{ value: requestedMiB, label: 'Requested' }] : []}
       testID="memory-spread"
-      markTestID="memory-spread-mark"
     />
   );
 }
@@ -157,9 +141,9 @@ function when(t: number): string {
 }
 
 // This job's memory on the group's memory spread: its peak (so far), and
-// what it requested.
+// what it requested. unusual is set only for a running job.
 export interface MemoryMarks {
-  mark?: { mib: number; label: string };
+  mark?: { mib: number; label: string; unusual?: boolean };
   requestedMiB?: number;
 }
 
@@ -171,7 +155,7 @@ export function SimilarJobs({
   jobID: string;
   // This job on the group's spread: how long it has run, its estimate, or
   // for a finished job how long it took.
-  mark?: { seconds: number; label: string };
+  mark?: { seconds: number; label: string; unusual?: boolean };
   memory?: MemoryMarks;
 }) {
   // Undefined until the user picks: the server answers with the group
@@ -319,7 +303,7 @@ export function SimilarJobsSection({
   jobID: string;
   open: boolean;
   onToggle: () => void;
-  mark?: { seconds: number; label: string };
+  mark?: { seconds: number; label: string; unusual?: boolean };
   memory?: MemoryMarks;
 }) {
   return (

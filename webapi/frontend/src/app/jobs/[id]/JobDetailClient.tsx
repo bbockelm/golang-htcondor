@@ -29,7 +29,7 @@ import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { LogViewerPanel } from '@/components/LogViewerPanel';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
-import { RuntimeEstimateField } from './RuntimeEstimate';
+import { liveEstimateQuery, RuntimeEstimateField } from './RuntimeEstimate';
 import { MemoryEstimateField } from './MemoryEstimate';
 import { JobRelated } from '@/components/JobRelated';
 import { SimilarJobsSection } from '@/components/SimilarJobs';
@@ -451,12 +451,23 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
     setTimeout(() => document.getElementById('similar-jobs')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }), 0);
   };
   // This job on the group's spread: how long it has been running.
+  // Amber where the cards call it unusual: the same estimate they read.
+  const { data: estimate } = useQuery(liveEstimateQuery(jobID, status));
   const similarMark =
-    status === 2 && startDate ? { seconds: Math.max(0, now - startDate), label: 'This job so far' } : undefined;
+    status === 2 && startDate
+      ? {
+          seconds: Math.max(0, now - startDate),
+          label: 'This job so far',
+          unusual: !!(estimate?.available && estimate.exceeded_history),
+        }
+      : undefined;
   // And on the group's memory: its peak so far, and its request.
   const peakSoFar = status === 2 ? peakMemoryMiB(job) : undefined;
   const similarMemory = {
-    mark: peakSoFar !== undefined ? { mib: peakSoFar, label: 'This job so far' } : undefined,
+    mark:
+      peakSoFar !== undefined
+        ? { mib: peakSoFar, label: 'This job so far', unusual: !!(estimate?.available && estimate.memory?.above_usual) }
+        : undefined,
     requestedMiB: jobRequest(job, 'RequestMemory').value,
   };
 

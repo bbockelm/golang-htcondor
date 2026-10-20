@@ -3,6 +3,7 @@
 // per-job cells. Words come from lib/drain; these only lay them out.
 
 import { slotStateStyle } from '@/lib/pool';
+import { HATCH, RANGE_TOKENS } from '@/components/RangePlot';
 import {
   drainCell,
   slotEnd,
@@ -140,57 +141,51 @@ export function Timeline({ m, age }: { m: MachineDrain | undefined; age: number 
         {t.unknown !== undefined && (
           <span
             className="absolute inset-y-0 left-0"
-            style={{
-              width: `${t.unknown * 100}%`,
-              background:
-                'repeating-linear-gradient(135deg, rgb(209 213 219) 0 3px, rgb(243 244 246) 3px 7px)',
-            }}
+            style={{ width: `${t.unknown * 100}%`, backgroundImage: HATCH }}
           />
         )}
         {t.bands.map((b, i) => (
           <span
             key={`b${i}`}
-            className="absolute inset-y-0 bg-blue-200"
+            className={`absolute inset-y-0 ${RANGE_TOKENS.band}`}
             style={{ left: `${b.from * 100}%`, width: `${Math.max(0, b.to - b.from) * 100}%` }}
           />
         ))}
         {t.ticks.map((x, i) => (
           <span
             key={`t${i}`}
-            className="absolute inset-y-0 w-[3px] bg-blue-700"
+            className={`absolute inset-y-0 w-[3px] ${RANGE_TOKENS.tick}`}
             style={{ left: `calc(${x * 100}% - 1px)` }}
           />
         ))}
-        {t.exceeded && <span className="absolute inset-y-0 left-0 w-[3px] bg-amber-600" />}
+        {t.exceeded && <span className={`absolute inset-y-0 left-0 w-[3px] ${RANGE_TOKENS.jobUnusual}`} />}
       </span>
       {t.beyond && <span className="whitespace-nowrap text-xs text-gray-400">→ {t.beyond}</span>}
     </span>
   );
 }
 
+// TimelineLegend keys the timeline with the colours every job-against-
+// its-usual-range chart uses (RangePlot's tokens). The marks themselves
+// differ -- many jobs' ends on one node, not one job against its group
+// -- so this key is its own.
 export function TimelineLegend() {
   const swatch = 'inline-block h-3 w-3 rounded-sm align-middle';
   return (
     <div className="flex flex-wrap gap-x-4 gap-y-1 border-b border-gray-100 px-3 py-2 text-xs text-gray-500">
       <span>
-        <span className={`${swatch} w-[3px] bg-blue-700`} /> expected end of a job from this access
+        <span className={`${swatch} w-[3px] ${RANGE_TOKENS.tick}`} /> expected end of a job from this access
         point
       </span>
       <span>
-        <span className={`${swatch} bg-blue-200`} /> its usual range
+        <span className={`${swatch} ${RANGE_TOKENS.band}`} /> its usual range
       </span>
       <span>
-        <span
-          className={swatch}
-          style={{
-            background:
-              'repeating-linear-gradient(135deg, rgb(209 213 219) 0 3px, rgb(243 244 246) 3px 7px)',
-          }}
-        />{' '}
+        <span className={swatch} style={{ backgroundImage: HATCH }} />{' '}
         no estimate: could run until its retirement limit
       </span>
       <span>
-        <span className={`${swatch} w-[3px] bg-amber-600`} /> running longer than usual
+        <span className={`${swatch} w-[3px] ${RANGE_TOKENS.jobUnusual}`} /> running longer than usual
       </span>
     </div>
   );

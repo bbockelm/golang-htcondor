@@ -29,10 +29,16 @@ const PEAK_REACH = 4;
 
 // memoryAxisMax is where the bar's axis ends: comfortably past the
 // usual range and the job's peak, on a round figure.
-export function memoryAxisMax(m: Pick<RuntimeMemory, 'p50_mib' | 'p90_mib'>, peak?: number): number {
+// The request is reached for the same way, so it is drawn unless it is
+// far past both.
+export function memoryAxisMax(
+  m: Pick<RuntimeMemory, 'p50_mib' | 'p90_mib'>,
+  peak?: number,
+  requested?: number,
+): number {
   const usual = Math.max(m.p50_mib, m.p90_mib);
-  const reach = peak === undefined ? 0 : usual > 0 ? Math.min(peak, usual * PEAK_REACH) : peak;
-  return niceMiB(Math.max(usual, reach) * 1.2);
+  const near = (v: number | undefined) => (v === undefined ? 0 : usual > 0 ? Math.min(v, usual * PEAK_REACH) : v);
+  return niceMiB(Math.max(usual, near(peak), near(requested)) * 1.2);
 }
 
 // memoryRangeText is the usual range, or undefined when its ends read as
@@ -89,10 +95,17 @@ export function memoryCard(m: RuntimeMemory | undefined, status: number | undefi
   const typical = formatMiB(m.p50_mib);
   // A waiting job has used nothing yet.
   const peak = status === 1 ? undefined : m.peak_mib;
-  const max = memoryAxisMax(m, peak);
+  const max = memoryAxisMax(m, peak, m.requested_mib);
   const range = memoryRangeText(m);
   const bar: BarGeometry = { tick: frac(m.p50_mib, max) };
-  if (range !== undefined) bar.band = { from: frac(m.p10_mib, max), to: frac(m.p90_mib, max) };
+  if (range !== undefined) {
+    bar.band = { from: frac(m.p10_mib, max), to: frac(m.p90_mib, max) };
+    bar.box = { from: frac(m.p25_mib, max), to: frac(m.p75_mib, max) };
+  }
+  // The request, as the similar-jobs plot draws it, when it is on the axis.
+  if (m.requested_mib !== undefined && m.requested_mib <= max) {
+    bar.refs = [{ at: frac(m.requested_mib, max), label: 'Requested' }];
+  }
   if (peak !== undefined) {
     bar.elapsed = frac(peak, max);
     if (peak > max) bar.elapsedCapped = true;

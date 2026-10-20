@@ -74,11 +74,20 @@ test("a job's page links its batch, its workflow and the jobs its estimate is ba
   const similar = page.getByTestId('similar-jobs');
   await expect(similar.getByRole('radio', { checked: true })).toContainText('same command, numbers ignored');
   await expect(similar.getByRole('link').first()).toHaveAttribute('href', /^\/archive\/\d+\.\d+$/);
-  await expect(similar.getByTestId('spread-mark')).toBeVisible();
+  // This job on the run times, as the cards draw it: a green fill and dot.
+  const runtimePlot = similar.getByTestId('runtime-spread-plot');
+  await expect(runtimePlot.locator('[data-part="job-end"]')).toBeVisible();
+  await expect(runtimePlot.locator('[data-part="box"]')).toBeVisible();
+  // The plot's own key: no request on a run time plot.
+  await similar.getByTestId('runtime-spread').getByRole('button', { name: 'How to read' }).click();
+  await expect(similar.getByTestId('runtime-spread').getByTestId('range-legend').getByRole('listitem')).toHaveText([
+    'Most similar jobs', 'Half of similar jobs', 'Typical', 'This job', 'This job, unusually high',
+  ]);
   // Under the run times, the same group's peak memory: this job's peak
   // so far and its request on the same axis.
   const memory = similar.getByTestId('memory-spread');
-  await expect(memory.getByTestId('memory-spread-mark')).toBeVisible();
+  await expect(memory.locator('[data-part="job-end"]')).toBeVisible();
+  await expect(memory.locator('[data-part="ref"]')).toBeVisible();
   await expect(memory.getByText('Requested', { exact: true })).toBeVisible();
   await expect(memory).toContainText('Half of these 36 jobs peaked at 1 GB to 1.3 GB (typically 1.2 GB); 9 in 10 stayed under 1.5 GB. This job so far: 1.5 GB. Requested: 2 GB.');
   await expect(similar.getByRole('columnheader', { name: 'Peak memory' })).toBeVisible();
