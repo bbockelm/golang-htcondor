@@ -55,7 +55,7 @@ import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 import { JobRelated } from '@/components/JobRelated';
 import { SimilarJobsSection } from '@/components/SimilarJobs';
-import { ArchivedMemoryEstimate } from '@/app/jobs/[id]/MemoryEstimate';
+import { archivedEstimateQuery, ArchivedMemoryEstimate } from '@/app/jobs/[id]/MemoryEstimate';
 import { jobRequest } from '@/lib/jobRequests';
 import { peakMemoryMiB } from '@/lib/similar';
 
@@ -179,12 +179,18 @@ function ArchiveJobDetail({
     setSimilarOpen(true);
     setTimeout(() => document.getElementById('similar-jobs')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }), 0);
   };
+  // Amber where its run was unusual: the estimate the memory card reads.
+  const { data: estimate } = useQuery(archivedEstimateQuery(jobID, jobStatus));
+  const judged = estimate?.available ? estimate : undefined;
   // This job on the group's spread: how long it took.
-  const similarMark = wallClock !== undefined ? { seconds: wallClock, label: 'This job took' } : undefined;
+  const similarMark =
+    wallClock !== undefined
+      ? { seconds: wallClock, label: 'This job took', unusual: !!judged?.exceeded_history }
+      : undefined;
   // And on the group's memory: what it peaked at, and what it requested.
   const peak = peakMemoryMiB(job);
   const similarMemory = {
-    mark: peak !== undefined ? { mib: peak, label: 'This job' } : undefined,
+    mark: peak !== undefined ? { mib: peak, label: 'This job', unusual: !!judged?.memory?.above_usual } : undefined,
     requestedMiB: jobRequest(job, 'RequestMemory').value,
   };
 

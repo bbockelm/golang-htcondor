@@ -18,6 +18,7 @@ import type { EstimateLevel, Quantiles, SimilarJobsResponse } from '@/lib/simila
 import { formatMiB } from '@/lib/utilization';
 import { RangePlot } from '@/components/RangePlot';
 import { chartEntries, HowToRead } from '@/components/RangeLegend';
+import { LongerThanUsualChip } from '@/components/TimeLeft';
 
 const PAGE_SIZE = 50;
 
@@ -136,6 +137,17 @@ export function MemorySpread({
   );
 }
 
+// PlotHeading names a plot, with the amber chip the job page's cards use
+// when this job was unusual on it.
+function PlotHeading({ title, chip }: { title: string; chip?: string }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <h3 className="text-xs font-medium text-gray-500">{title}</h3>
+      {chip && <LongerThanUsualChip text={chip} />}
+    </div>
+  );
+}
+
 function when(t: number): string {
   return new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
@@ -224,7 +236,9 @@ export function SimilarJobs({
         </p>
         {first.runtimes ? (
           <div className="mt-2">
-            {first.memory && <h3 className="text-xs font-medium text-gray-500">Run time</h3>}
+            {(first.memory || mark?.unusual) && (
+              <PlotHeading title="Run time" chip={mark?.unusual ? 'Longer than usual' : undefined} />
+            )}
             <RuntimeSpread runtimes={first.runtimes} mark={mark} />
           </div>
         ) : (
@@ -232,7 +246,7 @@ export function SimilarJobs({
         )}
         {first.memory && (
           <div className="mt-3">
-            <h3 className="text-xs font-medium text-gray-500">Peak memory</h3>
+            <PlotHeading title="Peak memory" chip={memory?.mark?.unusual ? 'More memory than usual' : undefined} />
             <MemorySpread memory={first.memory} mark={memory?.mark} requestedMiB={memory?.requestedMiB} />
           </div>
         )}

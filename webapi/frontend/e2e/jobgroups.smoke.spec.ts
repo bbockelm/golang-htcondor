@@ -4,6 +4,7 @@ import path from 'node:path';
 import { installApiFixtures } from './fixtures/api';
 import { SMOKE_NOW } from './fixtures/clock';
 import { forJobFixture } from '../src/lib/similar.fixture';
+import { routeJobGroup } from './fixtures/estimates';
 
 // From one job back to the groups it belongs to: the Related row at the
 // top of its page, and the similar jobs its runtime estimate is based on.
@@ -46,23 +47,8 @@ test.beforeEach(async ({ page }) => {
 
 test("a job's page links its batch, its workflow and the jobs its estimate is based on", async ({ page }) => {
   await page.route('**/api/v1/utilization/for-job/**', (route) => route.fulfill({ json: forJobFixture('81291.4') }));
-  await page.route('**/api/v1/jobs/81291.4/runtime-estimate', (route) =>
-    route.fulfill({
-      json: {
-        job_id: '81291.4',
-        available: true,
-        estimate_seconds: 2700,
-        p10_seconds: 1600,
-        p90_seconds: 4000,
-        basis: { level: 'template', sample_count: 41 },
-        elapsed_seconds: 1800,
-        remaining_seconds: 900,
-        exceeded_history: false,
-        memory: { sample_count: 35, p10_mib: 900, p25_mib: 1056, p50_mib: 1200, p75_mib: 1380, p90_mib: 1560, peak_mib: 1536, requested_mib: 2048, above_requested: 0, rough: false, above_usual: false },
-        model: { jobs_ingested: 5000 },
-      },
-    }),
-  );
+  // Half an hour into a typical 45m; peaked at 1.5 GB of the 2 GB requested.
+  await routeJobGroup(page, '81291.4', { elapsed_seconds: 1800, remaining_seconds: 900, peak_mib: 1536, requested_mib: 2048 });
   await openJobPage(page, '81291.4', runningAd);
 
   const related = page.getByTestId('job-related');

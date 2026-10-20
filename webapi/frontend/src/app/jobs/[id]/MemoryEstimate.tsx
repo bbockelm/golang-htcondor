@@ -60,8 +60,9 @@ export function MemoryEstimateView({ memory, status }: { memory: RuntimeMemory |
               rough: card.rough,
               box: card.bar.box !== undefined,
               job: card.bar.elapsed !== undefined,
-              // Only a running job is compared with what is usual.
-              canBeUnusual: status === 2,
+              // Wherever the job is drawn it may be unusual: running, or
+              // finished and past what similar jobs used.
+              canBeUnusual: true,
               requested: !!card.bar.refs?.length,
             })}
           />
@@ -84,17 +85,23 @@ export function MemoryEstimateField({ jobID, status }: { jobID: string; status: 
   return <MemoryEstimateView memory={data.memory} status={status} />;
 }
 
-// ArchivedMemoryEstimate fetches and shows a finished job's card. The
-// record does not change, so it is read once.
-export function ArchivedMemoryEstimate({ jobID, status }: { jobID: string; status: number | undefined }) {
-  const finished = status === 3 || status === 4;
-  const { data } = useQuery({
+// archivedEstimateQuery is how a finished job's page reads its estimate:
+// once, since the record does not change. The memory card and the
+// similar-jobs marks read the same query.
+export function archivedEstimateQuery(jobID: string, status: number | undefined) {
+  return {
     queryKey: ['runtime-estimate', jobID],
-    enabled: finished,
+    enabled: status === 3 || status === 4,
     retry: false,
     staleTime: Infinity,
     queryFn: () => api.jobs.runtimeEstimate(jobID),
-  });
+  };
+}
+
+// ArchivedMemoryEstimate fetches and shows a finished job's card.
+export function ArchivedMemoryEstimate({ jobID, status }: { jobID: string; status: number | undefined }) {
+  const finished = status === 3 || status === 4;
+  const { data } = useQuery(archivedEstimateQuery(jobID, status));
   if (!finished || !data?.available) return null;
   return <MemoryEstimateView memory={data.memory} status={status} />;
 }

@@ -218,3 +218,25 @@ describe('SimilarJobs memory', () => {
     expect(screen.queryByTestId('memory-spread')).not.toBeInTheDocument();
   });
 });
+
+describe('SimilarJobs for a job that was unusual', () => {
+  it('turns this job amber on each plot it was unusual on, and names it there', async () => {
+    vi.spyOn(api.jobs, 'similar').mockImplementation(async (id, p) => similarFixture(id, p));
+    wrap(
+      <SimilarJobs
+        jobID="12.0"
+        mark={{ seconds: 200_000, label: 'This job took', unusual: true }}
+        memory={{ mark: { mib: 1300, label: 'This job', unusual: false } }}
+      />,
+    );
+    await screen.findByTestId('similar-jobs');
+    expect(screen.getByText('Longer than usual')).toBeInTheDocument();
+    expect(screen.queryByText('More memory than usual')).toBeNull();
+    const job = (id: string) => screen.getByTestId(id).querySelector('[data-part="job"]');
+    expect(job('runtime-spread-plot')).toHaveClass('bg-amber-600');
+    expect(job('memory-spread-plot')).toHaveClass('bg-green-700');
+    // A finished job may be unusual too, so its key says what amber means.
+    fireEvent.click(within(screen.getByTestId('memory-spread')).getByRole('button', { name: 'How to read' }));
+    expect(screen.getByTestId('range-legend')).toHaveTextContent('This job, unusually high');
+  });
+});

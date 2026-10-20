@@ -3,6 +3,8 @@ import path from 'node:path';
 
 import { installApiFixtures, installJobsProgressFixtures } from './fixtures/api';
 import { SMOKE_NOW } from './fixtures/clock';
+import { routeJobGroup } from './fixtures/estimates';
+import { estimateFixture, estimateGroup, type EstimateFor, type JobGroup } from '../src/lib/similar.fixture';
 
 // The batch actions menu, running and waiting times, the owner link on
 // the job page, and the job page's Requirements breakdown, against
@@ -129,16 +131,21 @@ test('the jobs table marks a job using more memory than usual', async ({ page })
       },
     }),
   );
-  const run = { available: true, estimate_seconds: 2400, p10_seconds: 1800, p90_seconds: 4800, rough: false, exceeded_history: false, elapsed_seconds: 600, remaining_seconds: 1800 };
-  const group = { sample_count: 9, p10_mib: 900, p25_mib: 1000, p50_mib: 1229, p75_mib: 1500, p90_mib: 2048, rough: false };
+  // Each job's entry as the bulk answer carries it: the single-job answer
+  // without its id and model, from the group the similar jobs show.
+  const bulk = (id: string, job: EstimateFor, group?: JobGroup) => {
+    const { job_id: _id, model: _model, ...rest } = estimateFixture(id, job, group);
+    return rest;
+  };
+  const running = { elapsed_seconds: 600, remaining_seconds: 2100 };
   await page.route('**/api/v1/jobs/runtime-estimates', (route) =>
     route.fulfill({
       json: {
         available: true,
         estimates: {
-          '74.0': { ...run, memory: { ...group, peak_mib: 6246, above_usual: true } },
-          '74.1': { ...run, memory: { ...group, peak_mib: 1100, above_usual: false } },
-          '74.2': run,
+          '74.0': bulk('74.0', { ...running, peak_mib: 6246, above_usual: true }),
+          '74.1': bulk('74.1', { ...running, peak_mib: 1100 }),
+          '74.2': bulk('74.2', running, { ...estimateGroup(), memory: null }),
         },
         model: { jobs_ingested: 100 },
       },
@@ -152,7 +159,7 @@ test('the jobs table marks a job using more memory than usual', async ({ page })
   await expect(chips).toHaveCount(1);
   await expect(chips.getByText('More memory than usual')).toHaveAttribute(
     'title',
-    'Peak so far 6.1 GB; similar jobs peak at about 1.2 GB, 9 in 10 under 2 GB',
+    'Peak so far 6.1 GB; similar jobs peak at about 1.2 GB, 9 in 10 under 1.5 GB',
   );
   await expect(page.getByRole('row', { name: /^74\.0 / }).getByTestId('job-more-memory')).toBeVisible();
 });
@@ -167,18 +174,16 @@ const chtcRequirements =
 // and each case states exactly what the card says. One case is all on one
 // day; the others start before midnight and end after it, from either
 // side, which is when a time needs its day said.
-const runtimeEstimate = {
-  job_id: '71.0',
-  available: true,
-  estimate_seconds: 3 * 3600,
-  p10_seconds: 2.5 * 3600,
-  p90_seconds: 5 * 3600,
-  basis: { level: 'template', sample_count: 12 },
+// Job 71.0's group: about 3h, usually 2h30m to 5h; peaks about 950 MB.
+const group71: JobGroup = {
+  runtimes: { count: 12, p10: 2.5 * 3600, p25: 2.75 * 3600, p50: 3 * 3600, p75: 4 * 3600, p90: 5 * 3600 },
+  memory: { count: 11, p10: 700, p25: 800, p50: 950, p75: 1100, p90: 1300 },
+};
+const job71: EstimateFor = {
   elapsed_seconds: twoHours14 + 60,
   remaining_seconds: 3 * 3600 - twoHours14 - 60,
-  exceeded_history: false,
-  memory: { sample_count: 12, p10_mib: 700, p25_mib: 800, p50_mib: 950, p75_mib: 1100, p90_mib: 1300, peak_mib: 900, requested_mib: 1024, above_requested: 2, rough: false, above_usual: false },
-  model: { trained_through: '2026-10-10T12:00:00Z', jobs_ingested: 5000 },
+  peak_mib: 900,
+  requested_mib: 1024,
 };
 
 // openRunningJobAt opens job 71.0 -- running for 2h15m, about 3h in all
@@ -187,7 +192,7 @@ async function openRunningJobAt(page: Page, at: string) {
   const pinned = new Date(at);
   await page.clock.setFixedTime(pinned);
   const t = Math.floor(pinned.getTime() / 1000);
-  await page.route('**/api/v1/jobs/71.0/runtime-estimate', (route) => route.fulfill({ json: runtimeEstimate }));
+  await routeJobGroup(page, '71.0', job71, group71);
   await openJobPage(page, '71.0', {
     ClusterId: 71,
     ProcId: 0,
@@ -244,7 +249,7 @@ test.describe('the run time card, with the clock pinned', () => {
     await expect(memory.getByRole('heading', { name: 'Peak memory' })).toBeVisible();
     await expect(memory.getByText('Peak so far 900 MB')).toBeVisible();
     await expect(memory.getByText('Similar jobs peaked at about 950 MB; 9 in 10 stayed under 1.3 GB.')).toBeVisible();
-    await expect(memory.getByText('2 of 12 similar jobs peaked above the 1 GB requested.')).toBeVisible();
+    await expect(memory.getByText('4 of 11 similar jobs peaked above the 1 GB requested.')).toBeVisible();
     await expect(memory.getByText('More memory than usual')).toHaveCount(0);
 
     const reqs = page.locator('div').filter({ has: page.getByRole('heading', { name: 'Requirements' }) }).last();
@@ -289,20 +294,12 @@ test.describe('the run time card, with the clock pinned', () => {
 });
 
 test('a job running longer than usual says so and opens its live output and shell', async ({ page }) => {
-  await page.route('**/api/v1/jobs/73.0/runtime-estimate', (route) =>
-    route.fulfill({
-      json: {
-        job_id: '73.0',
-        available: true,
-        estimate_seconds: 3600,
-        p10_seconds: 1200,
-        p90_seconds: 9000,
-        basis: { level: 'cluster', sample_count: 64 },
-        elapsed_seconds: 3 * 3600 + 12 * 60,
-        exceeded_history: true,
-        model: { trained_through: '2026-10-10T12:00:00Z', jobs_ingested: 5000 },
-      },
-    }),
+  // Usually 20m to 2h30m, typically 1h; running 3h12m.
+  await routeJobGroup(
+    page,
+    '73.0',
+    { elapsed_seconds: 3 * 3600 + 12 * 60, exceeded_history: true },
+    { runtimes: { count: 64, p10: 1200, p25: 2400, p50: 3600, p75: 5400, p90: 9000 }, memory: null },
   );
   await page.route('**/api/v1/jobs/73.0/peek**', (route) =>
     route.fulfill({ json: { stdout: { text: 'smoke-peek-line\n', offset: 16 } } }),
@@ -333,26 +330,9 @@ test('a job running longer than usual says so and opens its live output and shel
 });
 
 test('a job using more memory than usual says so on its page', async ({ page }) => {
-  await page.route('**/api/v1/jobs/75.0/runtime-estimate', (route) =>
-    route.fulfill({
-      json: {
-        job_id: '75.0',
-        available: true,
-        estimate_seconds: 3600,
-        p10_seconds: 1200,
-        p90_seconds: 9000,
-        basis: { level: 'template', sample_count: 30 },
-        elapsed_seconds: 600,
-        remaining_seconds: 3000,
-        exceeded_history: false,
-        memory: {
-          sample_count: 30, p10_mib: 900, p25_mib: 1000, p50_mib: 1229, p75_mib: 1500, p90_mib: 2048,
-          peak_mib: 6246, requested_mib: 4096, above_requested: 0, rough: false, above_usual: true,
-        },
-        model: { trained_through: '2026-10-10T12:00:00Z', jobs_ingested: 5000 },
-      },
-    }),
-  );
+  await routeJobGroup(page, '75.0', {
+    elapsed_seconds: 600, remaining_seconds: 2100, peak_mib: 6246, requested_mib: 4096, above_usual: true,
+  });
   await openJobPage(page, '75.0', {
     ClusterId: 75, ProcId: 0, JobStatus: 2, JobUniverse: 5, Owner: 'e2e', Cmd: '/home/e2e/run.sh',
     QDate: now - 9000, JobCurrentStartDate: now - 600, RequestMemory: 4096, MemoryUsage: 6246,
@@ -360,8 +340,8 @@ test('a job using more memory than usual says so on its page', async ({ page }) 
   const memory = page.getByTestId('memory-estimate');
   await expect(memory.getByText('More memory than usual')).toBeVisible();
   await expect(memory.getByText('Peak so far 6.1 GB')).toBeVisible();
-  await expect(memory.getByText('Similar jobs peaked at about 1.2 GB; 9 in 10 stayed under 2 GB.')).toBeVisible();
-  await expect(memory.getByText('All 30 similar jobs stayed under the 4 GB requested.')).toBeVisible();
+  await expect(memory.getByText('Similar jobs peaked at about 1.2 GB; 9 in 10 stayed under 1.5 GB.')).toBeVisible();
+  await expect(memory.getByText('All 36 similar jobs stayed under the 4 GB requested.')).toBeVisible();
   // Drawn as every such chart is: amber fill and dot, the middle half, the request.
   const bar = memory.getByTestId('memory-range-bar');
   await expect(bar.locator('[data-part="job-end"]')).toHaveClass(/bg-amber-600/);
