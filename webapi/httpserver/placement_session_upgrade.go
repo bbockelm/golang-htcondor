@@ -89,6 +89,7 @@ func (h *Handler) upgradePlacementSession(w http.ResponseWriter, r *http.Request
 		groups:        sd.Groups,
 		placementID:   sd.PlacementIdentity,
 		placementName: sd.DisplayName,
+		email:         sd.Email,
 		browser:       true,
 	}
 	// No identity-cookie hint: the request contributes nothing.

@@ -214,6 +214,12 @@ type placementBatchOpInput struct {
 
 // handlePlacementAdmin serves /api/v1/placement/admin/*.
 func (s *Handler) handlePlacementAdmin(w http.ResponseWriter, r *http.Request) {
+	// Access requests live in this server's database: they can be read
+	// and denied whatever the placementd serves.
+	if rest, ok := strings.CutPrefix(r.URL.Path, placementAdminPrefix+"/requests"); ok && (rest == "" || strings.HasPrefix(rest, "/")) {
+		s.handlePlacementAccessRequestsAdmin(w, r, rest)
+		return
+	}
 	if !s.requirePlacementd(w, r) {
 		return
 	}

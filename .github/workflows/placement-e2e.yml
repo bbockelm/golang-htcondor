@@ -2,10 +2,10 @@ name: Placement onboarding E2E
 
 # Placement onboarding against a real HTCondor: a personal pool with a
 # condor_placementd, htcondor-api serving the embedded UI with its built-in
-# IdP, and a Playwright story that has an admin onboard an unknown identity,
-# that identity get a token in the browser and another through the device
-# flow, and each token run a job through the HTCondor CLI as the onboarded
-# account. See scripts/placement-e2e/.
+# IdP, and a Playwright story in which one unknown identity asks for access
+# and an admin approves it, another is onboarded from the Directory, they get
+# a token in the browser and through the device flow, and each token runs a
+# job through the HTCondor CLI as its account. See scripts/placement-e2e/.
 #
 # HTCondor is compiled from source: the placementd's database and its query
 # and edit commands are not in a release yet. The build is cached by commit,
@@ -36,6 +36,7 @@ on:
       - webapi/frontend/src/app/placement/**
       - webapi/frontend/src/app/admin/placement/**
       - webapi/frontend/src/components/PlacementTokenRequest.tsx
+      - webapi/frontend/src/components/PlacementAccessRequest.tsx
       - webapi/frontend/src/lib/placementAdmin.ts
   pull_request:
     branches: [ main ]
@@ -54,6 +55,7 @@ on:
       - webapi/frontend/src/app/placement/**
       - webapi/frontend/src/app/admin/placement/**
       - webapi/frontend/src/components/PlacementTokenRequest.tsx
+      - webapi/frontend/src/components/PlacementAccessRequest.tsx
       - webapi/frontend/src/lib/placementAdmin.ts
   workflow_dispatch:
     inputs:

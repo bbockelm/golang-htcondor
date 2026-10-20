@@ -142,12 +142,62 @@ export interface BatchOperation {
   fields?: EntityFields;
 }
 
+// One access request, as administrators see it. Display name, email and
+// note are what the requester's provider and the requester gave: render
+// them as text only.
+export type AccessRequestStatus = "pending" | "approved" | "denied" | "withdrawn";
+
+export interface AccessRequest {
+  id: number;
+  identity: string;
+  idp_subject?: string;
+  display_name?: string;
+  email?: string;
+  projects: string[];
+  note?: string;
+  status: AccessRequestStatus;
+  created_at: string;
+  updated_at: string;
+  decided_by?: string;
+  decided_at?: string;
+  decision_note?: string;
+  account?: string;
+  changeset_id?: number;
+  // The identity's part before its last "@", in UID_DOMAIN: what a map
+  // file line with "*" would give it.
+  suggested_account?: string;
+}
+
+export interface AccessRequestList {
+  requests: AccessRequest[];
+  // Every pending request, whatever the filter.
+  pending: number;
+  // Whether approving is possible: the placementd serves directory edits.
+  can_approve: boolean;
+}
+
+export interface ApproveInput {
+  account: string;
+  authorizations: string[];
+  projects: string[];
+  default_project: string;
+  expires_at?: string | null;
+  display_name?: string;
+  comment?: string;
+}
+
+export interface ApproveResponse extends EditResponse {
+  request?: AccessRequest;
+}
+
 // PlacementAdminError is an ApiError with the directory's refusal details.
 export class PlacementAdminError extends ApiError {
   placementCode?: number;
   ownedBy?: string;
   cascadeRequired: boolean;
   results: EditResult[];
+  // An approval found the identity already in the directory.
+  identityExists: boolean;
   constructor(
     status: number,
     message: string,
@@ -156,6 +206,7 @@ export class PlacementAdminError extends ApiError {
       owned_by?: string;
       cascade_required?: boolean;
       results?: EditResult[];
+      identity_exists?: boolean;
     },
   ) {
     super(status, message);
@@ -163,6 +214,7 @@ export class PlacementAdminError extends ApiError {
     this.ownedBy = body.owned_by;
     this.cascadeRequired = body.cascade_required === true;
     this.results = body.results ?? [];
+    this.identityExists = body.identity_exists === true;
   }
 
   // A version mismatch: someone else changed the row first.
@@ -286,6 +338,28 @@ export const placementAdmin = {
     return body.history ?? [];
   },
   mapfileStatus: (): Promise<MapfileStatus> => request(`${BASE}/mapfile-status`),
+
+  // Access requests from people the placementd does not map.
+  requests: (status: AccessRequestStatus | "all" = "pending"): Promise<AccessRequestList> =>
+    request(`${BASE}/requests${qs({ status })}`),
+  pendingRequests: async (): Promise<number> =>
+    (await request<{ pending: number }>(`${BASE}/requests/count`)).pending,
+  // approve onboards the request's identity in one batch, recorded as the
+  // signed-in admin's change.
+  approveRequest: (id: number, input: ApproveInput, dryRun = false): Promise<ApproveResponse> =>
+    request(`${BASE}/requests/${id}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ ...input, dry_run: dryRun }),
+    }),
+  denyRequest: (id: number, reason: string): Promise<AccessRequest> =>
+    request(`${BASE}/requests/${id}/deny`, { method: "POST", body: JSON.stringify({ reason }) }),
+  // resolve marks a request approved for an identity given access some
+  // other way.
+  resolveRequest: (id: number, comment?: string): Promise<AccessRequest> =>
+    request(`${BASE}/requests/${id}/resolve`, {
+      method: "POST",
+      body: JSON.stringify(comment?.trim() ? { comment: comment.trim() } : {}),
+    }),
 };
 
 function withComment<T extends object>(body: T, changeComment?: string): T & { change_comment?: string } {

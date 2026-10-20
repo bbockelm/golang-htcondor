@@ -40,6 +40,12 @@ type placementOnboarding struct {
 	devices       *placementDeviceStore
 	deviceLimiter *LoginRateLimiter
 
+	// requests are the access requests of people the placementd does not
+	// map, and the limits on filing them (placement_access_requests.go).
+	requests               *placementAccessRequestStore
+	requestIdentityLimiter *LoginRateLimiter
+	requestAddressLimiter  *LoginRateLimiter
+
 	// mapIdentity is set when HTTP_API_IDENTITY_MAP names placementd;
 	// mapIdentityFirst when it is listed before every local strategy.
 	mapIdentity      bool
@@ -115,7 +121,10 @@ func (h *Handler) configurePlacementOnboarding(cfg HandlerConfig) {
 
 	if h.db != nil {
 		po.devices = &placementDeviceStore{db: h.db, sealer: h.sealer, now: time.Now}
+		po.requests = &placementAccessRequestStore{db: h.db, now: time.Now}
 	}
+	po.requestIdentityLimiter = NewLoginRateLimiter(accessRequestIdentityRate, accessRequestIdentityBurst)
+	po.requestAddressLimiter = NewLoginRateLimiter(accessRequestAddressRate, accessRequestAddressBurst)
 	// Polls arrive every five seconds per client; this allows a busy NAT
 	// a good many clients while still bounding what one address can do.
 	po.deviceLimiter = NewLoginRateLimiter(2, 60)

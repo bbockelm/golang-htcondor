@@ -136,6 +136,8 @@ func (s *Handler) handlePlacementMePath(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		s.handlePlacementMeToken(w, r, session)
+	case rest == "request":
+		s.handlePlacementMeRequest(w, r, session)
 	case rest == "project":
 		if r.Method != http.MethodPost {
 			s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")

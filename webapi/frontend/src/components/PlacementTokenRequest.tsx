@@ -43,10 +43,13 @@ export function placementTokenFileName(): string {
 export function PlacementTokenRequest({
   userCode,
   onIssued,
+  unauthorized,
 }: {
   // When set, the token is bound to this device request.
   userCode?: string;
   onIssued: (issued: PlacementIssued) => void;
+  // Shown below the notice when the identity has no access.
+  unauthorized?: (me: PlacementMe) => React.ReactNode;
 }) {
   const me = useQuery({
     queryKey: ['placement', 'me'],
@@ -63,17 +66,21 @@ export function PlacementTokenRequest({
     );
   }
   if (!me.data) return null;
-  return <RequestForm me={me.data} userCode={userCode} onIssued={onIssued} />;
+  return (
+    <RequestForm me={me.data} userCode={userCode} onIssued={onIssued} unauthorized={unauthorized} />
+  );
 }
 
 function RequestForm({
   me,
   userCode,
   onIssued,
+  unauthorized,
 }: {
   me: PlacementMe;
   userCode?: string;
   onIssued: (issued: PlacementIssued) => void;
+  unauthorized?: (me: PlacementMe) => React.ReactNode;
 }) {
   const enabledProjects = me.projects.filter((p) => p.enabled);
   const defaultProject =
@@ -106,18 +113,24 @@ function RequestForm({
   }
   if (me.expired) {
     return (
-      <Notice>
-        Access for <span className="font-mono">{me.identity}</span> has expired on this
-        access point.
-      </Notice>
+      <>
+        <Notice>
+          Access for <span className="font-mono">{me.identity}</span> has expired on this
+          access point.
+        </Notice>
+        {unauthorized?.(me)}
+      </>
     );
   }
   if (!me.authorized) {
     return (
-      <Notice>
-        <span className="font-mono">{me.identity}</span> is not authorized to use this
-        access point.
-      </Notice>
+      <>
+        <Notice>
+          <span className="font-mono">{me.identity}</span> is not authorized to use this
+          access point.
+        </Notice>
+        {unauthorized?.(me)}
+      </>
     );
   }
   if (me.authorizations.length === 0) {

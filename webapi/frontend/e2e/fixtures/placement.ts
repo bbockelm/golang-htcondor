@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test';
 import type { PlacementAuthorization, PlacementStatus } from '../../src/lib/api';
 import type {
+  AccessRequest,
   DirAccount,
   DirAuthorization,
   DirIdentity,
@@ -117,6 +118,21 @@ const legacyAuthz: PlacementAuthorization[] = placementAuthorizationsFixture.map
 // installPlacementFixtures answers /api/v1/placement/*; install it after
 // installApiFixtures so these routes take precedence. Returns the edit
 // requests the page sent.
+// One pending access request. Its name and note carry markup, which the
+// page must show as text.
+export const accessRequestFixture: AccessRequest = {
+  id: 3,
+  identity: 'dana@wisc.edu',
+  display_name: 'Dana <b>R</b>',
+  email: 'dana@wisc.edu',
+  projects: ['chem101', 'Astronomy'],
+  note: 'Starting in the <i>B</i> lab',
+  status: 'pending',
+  created_at: '2026-10-17T12:00:00Z',
+  updated_at: '2026-10-17T12:00:00Z',
+  suggested_account: 'dana@ap.smoke.example',
+};
+
 export async function installPlacementFixtures(page: Page): Promise<{ edits: { method: string; path: string; body: unknown }[] }> {
   const edits: { method: string; path: string; body: unknown }[] = [];
   const lists: Record<string, unknown[]> = {
@@ -140,6 +156,10 @@ export async function installPlacementFixtures(page: Page): Promise<{ edits: { m
     if (path === '/api/v1/placement/tokens') return route.fulfill({ json: { tokens: [] } });
     if (path === '/api/v1/placement/users') return route.fulfill({ json: { users: [] } });
     if (path === '/api/v1/placement/admin/mapfile-status') return route.fulfill({ json: mapfileStatusFixture });
+    if (path === '/api/v1/placement/admin/requests/count') return route.fulfill({ json: { pending: 1 } });
+    if (path === '/api/v1/placement/admin/requests') {
+      return route.fulfill({ json: { requests: [accessRequestFixture], pending: 1, can_approve: true } });
+    }
     if (path === '/api/v1/placement/admin/history' || path.endsWith('/history')) {
       return route.fulfill({ json: { history: placementHistoryFixture } });
     }

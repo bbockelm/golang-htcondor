@@ -35,6 +35,10 @@ type SessionData struct {
 	PlacementIdentity string
 	// DisplayName is what the provider called the person, for greeting.
 	DisplayName string
+	// Email is the address the provider gave at sign-in, kept for a
+	// session with a placement identity: it goes on an access request,
+	// for the administrators deciding it.
+	Email string
 	// Scope is sessionScopeFull for an ordinary session, or
 	// sessionScopePlacement for one whose person maps to no local
 	// account. A placement session has an empty Username and reaches only
@@ -140,8 +144,8 @@ func (s *SessionStore) createTable() error {
 
 	// Migrate existing tables: add groups_json column if it doesn't exist
 	_, _ = s.db.ExecContext(ctx, `ALTER TABLE http_sessions ADD COLUMN groups_json TEXT`)
-	// And the placement identity columns (migrations 0023 and 0025).
-	for _, col := range []string{"placement_identity", "display_name", "scope", "identity_source", "placement_json", "idp_subject"} {
+	// And the placement identity columns (migrations 0023, 0025 and 0026).
+	for _, col := range []string{"placement_identity", "display_name", "scope", "identity_source", "placement_json", "idp_subject", "email"} {
 		_, _ = s.db.ExecContext(ctx, `ALTER TABLE http_sessions ADD COLUMN `+col+` TEXT NOT NULL DEFAULT ''`)
 	}
 
@@ -186,7 +190,7 @@ func (s *SessionStore) Create(username string, groups ...[]string) (string, *Ses
 }
 
 // CreateSession stores a new session carrying data's Username, Groups,
-// PlacementIdentity, DisplayName, Scope and IDPSubject; the times are set
+// PlacementIdentity, DisplayName, Email, Scope and IDPSubject; the times are set
 // here. A non-zero data.ExpiresAt caps the expiry. A placement-only session
 // must have no Username: it is not a local user, and nothing may mistake it
 // for one.
@@ -235,8 +239,8 @@ func (s *SessionStore) Rotate(oldID string, data SessionData) (string, *SessionD
 }
 
 const insertSessionSQL = `INSERT INTO http_sessions (session_id, username, created_at, expires_at, groups_json,
-	placement_identity, display_name, scope, identity_source, placement_json, idp_subject)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	placement_identity, display_name, scope, identity_source, placement_json, idp_subject, email)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // newSession checks data and makes the session to store: its id, the
 // session, and the arguments to insertSessionSQL.
@@ -267,6 +271,7 @@ func (s *SessionStore) newSession(data SessionData) (string, *SessionData, []any
 		ExpiresAt:         now.Add(s.ttl),
 		PlacementIdentity: data.PlacementIdentity,
 		DisplayName:       data.DisplayName,
+		Email:             data.Email,
 		Scope:             data.Scope,
 		IdentitySource:    data.IdentitySource,
 		Placement:         data.Placement,
@@ -300,7 +305,7 @@ func (s *SessionStore) newSession(data SessionData) (string, *SessionData, []any
 	// disk was a footgun.
 	args := []any{sessionKey(sessionID), session.Username, session.CreatedAt, session.ExpiresAt, groupsJSON,
 		session.PlacementIdentity, session.DisplayName, session.Scope, session.IdentitySource, placementJSON,
-		session.IDPSubject}
+		session.IDPSubject, session.Email}
 	return sessionID, session, args, nil
 }
 
@@ -315,12 +320,12 @@ func (s *SessionStore) Get(sessionID string) *SessionData {
 
 	err := s.db.QueryRowContext(ctx,
 		`SELECT username, created_at, expires_at, groups_json,
-		        placement_identity, display_name, scope, identity_source, placement_json, idp_subject
+		        placement_identity, display_name, scope, identity_source, placement_json, idp_subject, email
 		 FROM http_sessions
 		 WHERE session_id = ? AND expires_at > ?`,
 		sessionKey(sessionID), time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &groupsJSON,
 		&session.PlacementIdentity, &session.DisplayName, &session.Scope, &session.IdentitySource, &placementJSON,
-		&session.IDPSubject)
+		&session.IDPSubject, &session.Email)
 
 	if err != nil {
 		// Session not found or expired

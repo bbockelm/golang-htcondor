@@ -1,7 +1,8 @@
 'use client';
 
 // Onboard a user in one batch: the account (created if it does not exist,
-// its grants updated if changed), then the identity.
+// its grants updated if changed), then the identity. The same form approves
+// an access request, pre-filled from it and sent to the approve endpoint.
 
 import { useMemo, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
@@ -71,28 +72,59 @@ export function onboardOperations(input: OnboardInput, existing?: DirAccount): B
   return ops;
 }
 
+// OnboardSubmit sends the onboarding, or checks it when dryRun is set.
+export type OnboardSubmit = (
+  input: OnboardInput,
+  existing: DirAccount | undefined,
+  dryRun: boolean,
+  changeComment: string,
+) => Promise<EditResponse>;
+
+const submitBatch: OnboardSubmit = (input, existing, dryRun, changeComment) =>
+  placementAdmin.batch(onboardOperations(input, existing), dryRun, changeComment);
+
 export function OnboardWizard({
   accounts,
   authorizations,
   projects,
   onClose,
   onDone,
+  initial,
+  identityLocked = false,
+  title = 'Onboard user',
+  submitLabel = 'Onboard',
+  submit = submitBatch,
+  notice,
+  errorAction,
 }: {
   accounts: DirAccount[];
   authorizations: DirAuthorization[];
   projects: string[];
   onClose: () => void;
   onDone: (resp: EditResponse) => void;
+  // Starting values, e.g. from an access request.
+  initial?: Partial<OnboardInput>;
+  // The identity is shown but cannot be changed.
+  identityLocked?: boolean;
+  title?: string;
+  submitLabel?: string;
+  submit?: OnboardSubmit;
+  // Shown above the grants.
+  notice?: React.ReactNode;
+  // Shown with an error, for an action that answers it.
+  errorAction?: (err: unknown) => React.ReactNode;
 }) {
-  const [identity, setIdentity] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  const [account, setAccount] = useState('');
-  const [expiresAt, setExpiresAt] = useState<string | null>(null);
+  const [identity, setIdentity] = useState(initial?.identity ?? '');
+  const [displayName, setDisplayName] = useState(initial?.displayName ?? '');
+  const [account, setAccount] = useState(initial?.account ?? '');
+  const [expiresAt, setExpiresAt] = useState<string | null>(initial?.expiresAt ?? null);
   const [authz, setAuthz] = useState<string[]>(
-    authorizations.filter((a) => a.requestable).map((a) => a.name),
+    initial?.authorizations ?? authorizations.filter((a) => a.requestable).map((a) => a.name),
   );
-  const [chosenProjects, setChosenProjects] = useState<string[]>([]);
-  const [defaultProject, setDefaultProject] = useState('');
+  const [chosenProjects, setChosenProjects] = useState<string[]>(initial?.projects ?? []);
+  const [defaultProject, setDefaultProject] = useState(
+    initial?.defaultProject ?? initial?.projects?.[0] ?? '',
+  );
   const [checked, setChecked] = useState<string | null>(null);
   const [changeComment, setChangeComment] = useState('');
 
@@ -124,7 +156,7 @@ export function OnboardWizard({
   const ops = onboardOperations(input, existing);
 
   const run = useMutation({
-    mutationFn: (dryRun: boolean) => placementAdmin.batch(ops, dryRun, changeComment),
+    mutationFn: (dryRun: boolean) => submit(input, existing, dryRun, changeComment),
     onSuccess: (resp, dryRun) => {
       if (dryRun) {
         const warnings = resp.results.map((r) => r.warning).filter(Boolean);
@@ -139,7 +171,7 @@ export function OnboardWizard({
   const ready = input.identity !== '' && input.account !== '';
 
   return (
-    <Modal title="Onboard user" onClose={onClose} wide>
+    <Modal title={title} onClose={onClose} wide>
       <form
         className="space-y-3"
         onSubmit={(e) => {
@@ -151,10 +183,11 @@ export function OnboardWizard({
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Identity">
             <input
-              className={`${inputClass} font-mono`}
+              className={`${inputClass} font-mono read-only:bg-gray-50`}
               value={identity}
               onChange={(e) => setIdentity(e.target.value)}
               placeholder="alice@wisc.edu"
+              readOnly={identityLocked}
               required
             />
           </Field>
@@ -189,6 +222,8 @@ export function OnboardWizard({
           </Field>
           <ExpiryField value={expiresAt} onChange={setExpiresAt} />
         </div>
+
+        {notice}
 
         <GrantFields
           authorizations={authorizations}
@@ -228,6 +263,7 @@ export function OnboardWizard({
         {run.error && (
           <p role="alert" className="rounded-sm border border-red-200 bg-red-50 p-2 text-xs text-red-700">
             {describeBatchError(run.error)}
+            {errorAction?.(run.error)}
           </p>
         )}
 
@@ -255,7 +291,7 @@ export function OnboardWizard({
             disabled={!ready || run.isPending}
             className="rounded-sm bg-brand-600 px-3 py-1 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
           >
-            {run.isPending ? 'Working…' : 'Onboard'}
+            {run.isPending ? 'Working…' : submitLabel}
           </button>
         </div>
       </form>

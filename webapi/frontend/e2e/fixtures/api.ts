@@ -351,6 +351,8 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
       ],
     },
     '/api/v1/admin/logs': adminLogsFixture,
+    // The sidebar's pending access request badge, for an admin.
+    '/api/v1/placement/admin/requests/count': { pending: 0 },
     // Generated from simulated jobs, so its figures agree with each other
     // (see the fixture's header).
     '/api/v1/utilization': utilizationFixture,

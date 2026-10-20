@@ -864,6 +864,46 @@ const openAPISchema = `{
           "user_code": {"type": "string", "description": "Bind the token to this pending device request instead of returning it."}
         }
       },
+      "PlacementMeRequest": {
+        "type": "object",
+        "properties": {
+          "identity": {"type": "string"},
+          "display_name": {"type": "string"},
+          "email": {"type": "string"},
+          "request": {"nullable": true, "type": "object", "properties": {
+            "id": {"type": "integer"},
+            "status": {"type": "string", "enum": ["pending", "approved", "denied", "withdrawn"]},
+            "projects": {"type": "array", "items": {"type": "string"}},
+            "note": {"type": "string"},
+            "created_at": {"type": "string", "format": "date-time"},
+            "updated_at": {"type": "string", "format": "date-time"},
+            "decided_at": {"type": "string", "format": "date-time"},
+            "reason": {"type": "string", "description": "The administrator's reason, on a denial."},
+            "account": {"type": "string", "description": "The account access was granted as, on an approval."}
+          }}
+        }
+      },
+      "PlacementAccessRequest": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "identity": {"type": "string"},
+          "idp_subject": {"type": "string"},
+          "display_name": {"type": "string"},
+          "email": {"type": "string"},
+          "projects": {"type": "array", "items": {"type": "string"}},
+          "note": {"type": "string"},
+          "status": {"type": "string", "enum": ["pending", "approved", "denied", "withdrawn"]},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"},
+          "decided_by": {"type": "string"},
+          "decided_at": {"type": "string", "format": "date-time"},
+          "decision_note": {"type": "string"},
+          "account": {"type": "string"},
+          "changeset_id": {"type": "integer", "description": "The directory change set an approval made, when known."},
+          "suggested_account": {"type": "string", "description": "The identity's part before its last @, in UID_DOMAIN."}
+        }
+      },
       "PlacementIssued": {
         "type": "object",
         "properties": {
@@ -1425,6 +1465,111 @@ const openAPISchema = `{
         }
       }
     },
+    "/placement/admin/requests": {
+      "get": {
+        "summary": "List access requests",
+        "description": "Requests from people whose identity the placementd does not map, newest first (at most 500). Requires membership in the web UI admin group. Display names, emails and notes are what the requester's provider and the requester gave.",
+        "operationId": "listPlacementAccessRequests",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "status", "in": "query", "required": false, "schema": {"type": "string", "enum": ["pending", "approved", "denied", "withdrawn", "all"], "default": "pending"}}
+        ],
+        "responses": {
+          "200": {"description": "Requests", "content": {"application/json": {"schema": {"type": "object", "properties": {"requests": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementAccessRequest"}}, "pending": {"type": "integer", "description": "Every pending request, whatever the filter."}, "can_approve": {"type": "boolean", "description": "Whether the placementd serves the directory edits an approval needs."}}}}}},
+          "400": {"description": "Unknown status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/requests/count": {
+      "get": {
+        "summary": "Count pending access requests",
+        "operationId": "countPlacementAccessRequests",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Count", "content": {"application/json": {"schema": {"type": "object", "properties": {"pending": {"type": "integer"}}}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/requests/{id}": {
+      "get": {
+        "summary": "One access request",
+        "operationId": "getPlacementAccessRequest",
+        "tags": ["placement"],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "responses": {
+          "200": {"description": "Request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAccessRequest"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/requests/{id}/approve": {
+      "post": {
+        "summary": "Approve an access request",
+        "description": "One PLACEMENT_EDIT batch, made on behalf of the signed-in administrator with the change comment \"access request #<id>\" plus the comment given: the account is created if it does not exist (or its grants updated when they differ), then the request's identity is created and mapped to it. The request is marked approved only once the batch committed. dry_run (body or query) validates without changing anything.",
+        "operationId": "approvePlacementAccessRequest",
+        "tags": ["placement"],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["account"], "properties": {
+          "account": {"type": "string"},
+          "authorizations": {"type": "array", "items": {"type": "string"}},
+          "projects": {"type": "array", "items": {"type": "string"}},
+          "default_project": {"type": "string"},
+          "expires_at": {"type": "string", "format": "date-time", "nullable": true, "description": "When the identity's mapping stops being honored; absent or null for never."},
+          "display_name": {"type": "string"},
+          "comment": {"type": "string", "maxLength": 2048},
+          "dry_run": {"type": "boolean"}
+        }}}}},
+        "responses": {
+          "200": {"description": "Approved, or validated on a dry run", "content": {"application/json": {"schema": {"allOf": [{"$ref": "#/components/schemas/PlacementEditResponse"}, {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/PlacementAccessRequest"}}}]}}}},
+          "400": {"description": "Invalid body, or the placementd refused a field", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The request is not pending; the identity is already in the directory (identity_exists); or the account comes from the map file and the grants differ", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/requests/{id}/deny": {
+      "post": {
+        "summary": "Deny an access request",
+        "description": "The reason is shown to the requester.",
+        "operationId": "denyPlacementAccessRequest",
+        "tags": ["placement"],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["reason"], "properties": {"reason": {"type": "string", "maxLength": 2048}}}}}},
+        "responses": {
+          "200": {"description": "Denied", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAccessRequest"}}}},
+          "400": {"description": "No reason, or an invalid body", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The request is not pending", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/requests/{id}/resolve": {
+      "post": {
+        "summary": "Mark an access request resolved",
+        "description": "Marks the request approved without changing the directory, for an identity given access some other way. Refused unless the placementd maps the identity now.",
+        "operationId": "resolvePlacementAccessRequest",
+        "tags": ["placement"],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {"type": "object", "properties": {"comment": {"type": "string", "maxLength": 2048}}}}}},
+        "responses": {
+          "200": {"description": "Resolved", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAccessRequest"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The request is not pending, or the identity does not have access", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
     "/placement/admin/mapfile-status": {
       "get": {
         "summary": "Mapfile reload status",
@@ -1468,6 +1613,44 @@ const openAPISchema = `{
           "404": {"description": "Unknown device code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "409": {"description": "The device request was already answered or has expired", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "503": {"description": "Placement tokens are not available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me/request": {
+      "get": {
+        "summary": "Your access request",
+        "description": "Your latest access request, or null, with the identity, name and email a new request would record. For a session whose placement identity the placementd does not map.",
+        "operationId": "placementMeRequest",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMeRequest"}}}},
+          "403": {"description": "The session has no placement identity", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "post": {
+        "summary": "Request access",
+        "description": "Files a request for the session's own identity; the body names none, and any field not listed is refused. Only for an identity the placementd does not map, one pending request at a time, and rate-limited per identity and per address. Requires the X-Requested-With header.",
+        "operationId": "placementMeRequestCreate",
+        "tags": ["placement"],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {
+          "projects": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 64}},
+          "note": {"type": "string", "description": "At most 2048 bytes."}
+        }}}}},
+        "responses": {
+          "201": {"description": "Filed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMeRequest"}}}},
+          "400": {"description": "Invalid body, or over a limit", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "No placement identity, or the X-Requested-With header is missing", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "A request is already pending, or the identity already has access", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "429": {"description": "Too many requests", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "delete": {
+        "summary": "Withdraw your pending access request",
+        "operationId": "placementMeRequestWithdraw",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Withdrawn", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMeRequest"}}}},
+          "404": {"description": "No pending request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },
