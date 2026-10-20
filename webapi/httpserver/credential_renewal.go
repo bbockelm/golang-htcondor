@@ -118,26 +118,33 @@ func (l *grantReauthLimiter) due(id string, now time.Time) bool {
 // few minutes it also re-runs the grant's authorization policy, which
 // revokes the grant on a refusal exactly as a refresh would.
 func (s *Handler) checkOAuth2Grant(ctx context.Context, bearer string, scopes []string) error {
+	_, err := s.checkOAuth2GrantIdentity(ctx, bearer, scopes)
+	return err
+}
+
+// checkOAuth2GrantIdentity is checkOAuth2Grant, also returning the sign-in
+// identity the grant names (see grantIdentity).
+func (s *Handler) checkOAuth2GrantIdentity(ctx context.Context, bearer string, scopes []string) (string, error) {
 	if s.oauth2Provider == nil {
-		return errors.New("OAuth2 is not configured; the grant cannot be re-checked")
+		return "", errors.New("OAuth2 is not configured; the grant cannot be re-checked")
 	}
 	ar, err := s.oauth2Provider.IntrospectAccessToken(ctx, bearer)
 	if err != nil {
-		return fmt.Errorf("the OAuth2 grant behind this credential is no longer active: %w", err)
+		return "", fmt.Errorf("the OAuth2 grant behind this credential is no longer active: %w", err)
 	}
 	if !sameScopes(ar.GetGrantedScopes(), scopes) {
-		return errGrantChanged
+		return "", errGrantChanged
 	}
 	if s.grantReauth.due(ar.GetID(), time.Now()) {
 		granted, err := s.reauthorizeGrant(ctx, ar)
 		if err != nil {
-			return fmt.Errorf("the OAuth2 grant behind this credential was refused on reauthorization: %w", err)
+			return "", fmt.Errorf("the OAuth2 grant behind this credential was refused on reauthorization: %w", err)
 		}
 		if !sameScopes(granted, scopes) {
-			return errGrantChanged
+			return "", errGrantChanged
 		}
 	}
-	return nil
+	return grantIdentity(ar), nil
 }
 
 func sameScopes(a, b []string) bool {
@@ -157,10 +164,11 @@ func (s *Handler) grantReminter(bearer, username string, scopes []string, notAft
 		if !notAfter.IsZero() && !time.Now().Before(notAfter) {
 			return "", errGrantExpired
 		}
-		if err := s.checkOAuth2Grant(ctx, bearer, scopes); err != nil {
+		identity, err := s.checkOAuth2GrantIdentity(ctx, bearer, scopes)
+		if err != nil {
 			return "", err
 		}
-		tok, err := s.generateHTCondorTokenWithScopes(username, scopes)
+		tok, err := s.generateGrantHTCondorToken(username, identity, scopes)
 		if err != nil {
 			return "", err
 		}

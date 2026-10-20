@@ -258,7 +258,7 @@ func TestAuthzProbeSessionsArePrivate(t *testing.T) {
 	o := &ScheddACLOracle{
 		// Nothing listens here; the probe fails after building its config.
 		Schedd: func() *htcondor.Schedd { return htcondor.NewSchedd("probe-test", "<127.0.0.1:1>") },
-		MintToken: func(username string, _ []string) (string, error) {
+		MintToken: func(_ context.Context, username string, _ []string) (string, error) {
 			tok := scopedPoolIDToken("test.htcondor.org", username+"@test.htcondor.org", "")
 			minted = append(minted, tok)
 			return tok, nil

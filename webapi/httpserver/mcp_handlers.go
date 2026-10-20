@@ -221,7 +221,7 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	// second copy would be free to forget.
 	// Renewable while the access token behind this call is still active.
 	bearer, granted := bearerFromRequest(r), token.GetGrantedScopes()
-	ctx, err = h.withCondorCredential(ctx, username, granted, func(rctx context.Context) error {
+	ctx, err = h.withGrantCondorCredential(ctx, username, grantIdentity(token), granted, func(rctx context.Context) error {
 		return h.checkOAuth2Grant(rctx, bearer, granted)
 	})
 	if errors.Is(err, errNoAuthorizationLimits) {
@@ -663,6 +663,8 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 
 	username := ""
 	var userGroups []string
+	// The identity of a placementd-mapped session, recorded on the grant.
+	placementIdentity := ""
 
 	// Method 1: User header (demo mode).
 	// Only honored from configured trusted-proxy CIDRs (or in
@@ -681,6 +683,9 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 		if session, ok := h.getSessionFromRequest(r); ok {
 			username = session.Username
 			userGroups = session.Groups
+			if session.IsPlacementd() {
+				placementIdentity = session.PlacementIdentity
+			}
 			h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
 		}
 	}
@@ -739,7 +744,7 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Store authorize request and username for consent page
-	h.oauth2StateStore.StoreWithUsername(state, ar, "", username, userGroups)
+	h.oauth2StateStore.StoreForConsent(state, ar, username, userGroups, placementIdentity)
 
 	// Redirect to consent page
 	// The path a person sees in the address bar while deciding
@@ -895,6 +900,8 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "Invalid or expired consent request")
 		return
 	}
+	placementIdentity := h.oauth2StateStore.PlacementIdentity(state)
+	ctx = withGrantIdentityContext(ctx, placementIdentity)
 
 	if r.Method == http.MethodGet {
 		// Display consent form
@@ -933,6 +940,7 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 			// the grant is later refreshed; they are otherwise read once
 			// here and discarded.
 			session := DefaultOpenIDConnectSession(username).WithGroups(groups)
+			session.PlacementIdentity = placementIdentity
 
 			// Per-scope consent: a v1 consent page (rendered by
 			// renderConsentPage) carries `consent_form_version=1`
@@ -2231,6 +2239,8 @@ func (h *Handler) deviceVerifyPost(w http.ResponseWriter, r *http.Request) {
 		// Create session for user. See the consent handler for why
 		// the group list is persisted with the grant.
 		session := DefaultOpenIDConnectSession(username).WithGroups(userGroups)
+		session.PlacementIdentity = h.approvingPlacementIdentity(r, username)
+		ctx := withGrantIdentityContext(ctx, session.PlacementIdentity)
 
 		// The same two steps the authorization-code consent handler
 		// performs: narrow what was requested to what the user ticked,
@@ -2756,7 +2766,7 @@ func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, r *http.Request
 	ctx := context.Background()
 	var groups []string
 	if r != nil {
-		ctx = r.Context()
+		ctx = withGrantIdentityContext(r.Context(), h.approvingPlacementIdentity(r, username))
 		_, groups = h.deviceApprovalIdentity(ctx, r)
 	}
 	h.renderConsentPage(ctx, w, groups, consentPageParams{
@@ -3044,8 +3054,18 @@ func mapCondorScopesToAuthz(scopes []string) []string {
 // keeps subsequent requests from re-handshaking.
 const condorIDTokenLifetime = 5 * time.Minute
 
-// generateHTCondorTokenWithScopes generates an HTCondor token with scope-based permissions
+// generateHTCondorTokenWithScopes generates an HTCondor token with
+// scope-based permissions for a caller that names no sign-in identity. A
+// subject that is a placementd account is refused: its tokens are minted
+// only for a grant, within the bound of the identity that approved it.
 func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []string) (string, error) {
+	return h.generateGrantHTCondorToken(username, "", scopes)
+}
+
+// generateGrantHTCondorToken is generateHTCondorTokenWithScopes for a grant
+// that identity approved; identity is the grant's own (grantIdentity),
+// never one read from the request or from the stored bounds.
+func (h *Handler) generateGrantHTCondorToken(username, identity string, scopes []string) (string, error) {
 	if h.signingKeyPath == "" {
 		return "", fmt.Errorf("signing key path not configured")
 	}
@@ -3115,8 +3135,9 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 	}
 
 	// A subject a placementd-mapped session authorized is held to what
-	// its account was granted, and its tokens carry its project.
-	bound, err := h.placementSubjectBound(context.Background(), username)
+	// the identity that approved this grant holds on the account, and its
+	// tokens carry that identity's project.
+	bound, err := h.placementSubjectBound(context.Background(), username, identity)
 	if err != nil {
 		return "", err
 	}

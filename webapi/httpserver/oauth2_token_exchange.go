@@ -204,7 +204,7 @@ func (h *Handler) resolveSubjectToken(ctx context.Context, token, tokenType stri
 		if subject == "" {
 			return exchangeSubject{}, fmt.Errorf("subject_token has no subject")
 		}
-		if bound, err := h.placementSubjectBound(ctx, subject); err != nil || bound != nil {
+		if recorded, err := h.placementSubjectRecorded(ctx, subject); err != nil || recorded {
 			return exchangeSubject{}, fmt.Errorf("subject_token belongs to an account assigned by the placement service, which cannot be exchanged")
 		}
 		var groups []string

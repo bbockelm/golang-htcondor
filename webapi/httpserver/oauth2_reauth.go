@@ -184,8 +184,9 @@ func (h *Handler) reauthorizeGrant(ctx context.Context, ar fosite.Requester) ([]
 
 	// A placement grant (one holding the placement scope) is held to the placementd's current answer
 	// for its identity, and to nothing else: it carries no scope the group
-	// policy or the other oracles speak to.
-	if isPlacementGrant(granted) || sess.PlacementIdentity != "" {
+	// policy or the other oracles speak to. Other grants a placementd-mapped
+	// session approved name an identity too, and are re-checked below.
+	if isPlacementGrant(granted) {
 		reason, err := h.reauthorizePlacementIdentity(ctx, sess.PlacementIdentity, "")
 		if err != nil {
 			return nil, fosite.ErrTemporarilyUnavailable.WithHint(err.Error())
@@ -197,14 +198,25 @@ func (h *Handler) reauthorizeGrant(ctx context.Context, ar fosite.Requester) ([]
 		return granted, nil
 	}
 
-	// A subject a placementd-mapped session authorized is re-read
-	// from the placementd: unmapped or re-pointed ends the grant.
-	bound, err := h.placementSubjectBound(ctx, username)
+	// A subject a placementd-mapped session authorized is re-read from
+	// the placementd for the identity that approved this grant, never for
+	// whichever identity of the account signed in last: unmapped or
+	// re-pointed ends the grant. A grant that names no identity, or one that
+	// never signed in as the account, has nothing to be re-read for and ends
+	// too.
+	identity := sess.PlacementIdentity
+	bound, err := h.placementSubjectBound(ctx, username, identity)
+	if errors.Is(err, errPlacementGrantIdentity) {
+		reason := err.Error()
+		h.revokeGrant(ctx, ar.GetID(), username, reason)
+		return nil, grantRevokedError(reason)
+	}
 	if err != nil {
 		return nil, fosite.ErrServerError.WithWrap(err)
 	}
 	if bound != nil {
-		reason, err := h.reauthorizePlacementIdentity(ctx, bound.Identity, username)
+		ctx = withGrantIdentityContext(ctx, identity)
+		reason, err := h.reauthorizePlacementIdentity(ctx, identity, username)
 		if err != nil {
 			return nil, fosite.ErrTemporarilyUnavailable.WithHint(err.Error())
 		}

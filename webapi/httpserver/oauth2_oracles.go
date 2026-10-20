@@ -174,8 +174,9 @@ type ScheddACLOracle struct {
 	// MintToken produces an HTCondor IDTOKEN asserting username, used as
 	// the probe credential. The scopes argument is passed through to the
 	// handler's minter; Check asks for every level it probes (see Check
-	// for why).
-	MintToken func(username string, scopes []string) (string, error)
+	// for why). ctx is Check's, which carries the sign-in identity of the
+	// grant being checked, if any (withGrantIdentityContext).
+	MintToken func(ctx context.Context, username string, scopes []string) (string, error)
 	// Config is the HTCondor configuration the probe's security config is
 	// built from; nil is the process-wide default.
 	Config *config.Config
@@ -219,7 +220,7 @@ func (o *ScheddACLOracle) Check(ctx context.Context, username string, scopes []s
 	// refuses an unlimited token and maps an empty request to READ, so a
 	// probe minted that way failed every WRITE check and stripped
 	// mcp:write and condor:/WRITE from every grant the ACL allowed them.
-	probeToken, err := o.MintToken(username, []string{condorScopeRead, condorScopeWrite})
+	probeToken, err := o.MintToken(ctx, username, []string{condorScopeRead, condorScopeWrite})
 	if err != nil {
 		return ReauthDecision{}, fmt.Errorf("minting probe token for %s: %w", username, err)
 	}
@@ -418,7 +419,7 @@ func (h *Handler) buildRevocationOracles(names []string) []RevocationOracle {
 				Schedd:    h.identitySchedd,
 				UIDDomain: h.uidDomain,
 				Logger:    h.logger,
-				MintToken: h.generateHTCondorTokenWithScopes,
+				MintToken: h.mintGrantProbeToken,
 				Config:    h.clientConfig,
 				Sessions:  h.credentialSessions,
 			})
@@ -484,6 +485,9 @@ func (h *Handler) scheddACLOracle() RevocationOracle {
 // daemon was briefly unreachable would be the worse failure, and unlike
 // the refresh path there is a person watching who cannot tell the
 // difference between "you may not have this" and "we could not ask".
+//
+// The probe is minted for the sign-in identity of the grant being approved,
+// when ctx carries one (withGrantIdentityContext).
 func (h *Handler) scopesAllowedByScheddACL(ctx context.Context, username string, scopes []string) []string {
 	return h.filterScopesByOracle(ctx, h.scheddACLOracle(), username, scopes)
 }

@@ -70,9 +70,12 @@ type Session struct {
 	// directly and for those exchanged from an external issuer's token.
 	ParentGrant string `json:"parentGrant,omitempty"`
 
-	// PlacementIdentity is the sign-in identity that approved a grant
-	// holding the placement scope. The placement endpoints act for
-	// it, and only for it; it is never taken from a request.
+	// PlacementIdentity is the sign-in identity that approved the grant:
+	// for a grant holding the placement scope, the identity the placement
+	// endpoints act for, and only for; for any other grant a placementd-
+	// mapped session approved, the identity whose bound on the account
+	// every token minted for the grant stays within. It is never taken
+	// from a request.
 	PlacementIdentity string `json:"placementIdentity,omitempty"`
 }
 
@@ -206,4 +209,12 @@ func sessionFrom(r fosite.Requester) (*Session, bool) {
 	}
 	s, ok := r.GetSession().(*Session)
 	return s, ok
+}
+
+// grantIdentity is the sign-in identity recorded on r's session, or "".
+func grantIdentity(r fosite.Requester) string {
+	if s, ok := sessionFrom(r); ok {
+		return s.PlacementIdentity
+	}
+	return ""
 }
