@@ -304,6 +304,42 @@ func TestPlacementdQueryUsers(t *testing.T) {
 	}
 }
 
+// ApUserId is the subject of the identity's newest token, which can name an
+// account the identity no longer maps to; MappedAccount is the map's own
+// answer and is read separately.
+func TestPlacementdQueryUsersMappedAccount(t *testing.T) {
+	f := newFakePlacementd(t, map[int][]*classad.ClassAd{
+		PlacementQueryUsers: {
+			mustAd(t, map[string]any{
+				"UserName":      "student1@example.edu",
+				"ApUserId":      "old@ap.example.edu",
+				"MappedAccount": "new@ap.example.edu",
+				"Authorized":    true,
+			}),
+			mustAd(t, map[string]any{
+				"UserName":   "student2@example.edu",
+				"ApUserId":   "student2@ap.example.edu",
+				"Authorized": true,
+			}),
+			summaryAd(t),
+		},
+	})
+
+	users, err := NewPlacementd(f.addr).QueryUsers(placementTestContext(t), "")
+	if err != nil {
+		t.Fatalf("QueryUsers: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("got %d users, want 2", len(users))
+	}
+	if users[0].APUserID != "old@ap.example.edu" || users[0].MappedAccount != "new@ap.example.edu" {
+		t.Errorf("ApUserId / MappedAccount = %q / %q", users[0].APUserID, users[0].MappedAccount)
+	}
+	if users[1].MappedAccount != "" {
+		t.Errorf("MappedAccount from a daemon that does not send it = %q", users[1].MappedAccount)
+	}
+}
+
 func TestPlacementdQueryUsersFiltersByName(t *testing.T) {
 	f := newFakePlacementd(t, map[int][]*classad.ClassAd{
 		PlacementQueryUsers: {summaryAd(t)},
