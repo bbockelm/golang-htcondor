@@ -119,7 +119,7 @@ func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, r *
 	mirrorConstraint := constraint
 	if scoped {
 		var err error
-		if mirrorConstraint, err = scopeToOwner(ownerFromActor(owner), constraint); err != nil {
+		if mirrorConstraint, err = scopeToActor(ctx, owner, constraint); err != nil {
 			return false, s.recordMirror("jobs", dbmirror.Decision{
 				Reason: dbmirror.ReasonUnsupportedQuery,
 				Note:   fmt.Sprintf("constraint cannot be owner-scoped for the mirror: %v", err),

@@ -132,6 +132,19 @@ type fakeMirror struct {
 
 func newFakeMirror(t *testing.T, cfg *config.Config, owners ...string) *fakeMirror {
 	t.Helper()
+	var jobs, history []string
+	for i, owner := range owners {
+		jobs = append(jobs, fmt.Sprintf("ClusterId = %d\nProcId = 0\nOwner = %q\nJobStatus = 1", i+1, owner))
+		history = append(history, fmt.Sprintf("ClusterId = %d\nProcId = 0\nOwner = %q\nJobStatus = 4\nCompletionDate = %d",
+			100+i, owner, time.Now().Unix()-60))
+	}
+	return newFakeMirrorAds(t, cfg, jobs, history)
+}
+
+// newFakeMirrorAds is newFakeMirror holding the given job and history ads,
+// in old ClassAd syntax. Each job ad needs a ClusterId.
+func newFakeMirrorAds(t *testing.T, cfg *config.Config, jobs, history []string) *fakeMirror {
+	t.Helper()
 	cat, err := db.OpenCatalog(t.TempDir())
 	if err != nil {
 		t.Fatalf("open catalog: %v", err)
@@ -154,18 +167,21 @@ func newFakeMirror(t *testing.T, cfg *config.Config, owners ...string) *fakeMirr
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	for i, owner := range owners {
-		ad := fmt.Sprintf("ClusterId = %d\nProcId = 0\nOwner = %q\nJobStatus = 1", i+1, owner)
-		if err := tx.NewClassAd(ctx, fmt.Sprintf("%d.0", i+1), ad); err != nil {
+	for _, ad := range jobs {
+		parsed, err := classad.ParseOld(ad)
+		if err != nil {
+			t.Fatalf("job ad %q: %v", ad, err)
+		}
+		cluster, _ := parsed.EvaluateAttrInt("ClusterId")
+		proc, _ := parsed.EvaluateAttrInt("ProcId")
+		if err := tx.NewClassAd(ctx, fmt.Sprintf("%d.%d", cluster, proc), ad); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	for i, owner := range owners {
-		ad := fmt.Sprintf("ClusterId = %d\nProcId = 0\nOwner = %q\nJobStatus = 4\nCompletionDate = %d",
-			100+i, owner, time.Now().Unix()-60)
+	for _, ad := range history {
 		if err := seed.ArchiveAppend(ctx, "history", ad); err != nil {
 			t.Fatalf("append history: %v", err)
 		}

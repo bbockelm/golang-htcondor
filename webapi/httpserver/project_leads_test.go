@@ -319,9 +319,9 @@ func TestProjectClauseSemantics(t *testing.T) {
 			t.Errorf("%q should still match the project's job", scoped)
 		}
 
-		read, err := scopeToOwnerOrProjects("alice", []string{"Physics"}, user)
+		read, err := scopeToActorOrProjects(context.Background(), "alice", []string{"Physics"}, user)
 		if err != nil {
-			t.Fatalf("scopeToOwnerOrProjects(%q): %v", user, err)
+			t.Fatalf("scopeToActorOrProjects(%q): %v", user, err)
 		}
 		if evalConstraint(t, read, inChem) || evalConstraint(t, read, noProject) {
 			t.Errorf("user constraint %q widened the read scope %q", user, read)
@@ -334,7 +334,7 @@ func TestProjectClauseSemantics(t *testing.T) {
 	if _, err := scopeToProjects([]string{"Physics"}, "true) || (true"); err == nil {
 		t.Errorf("an unbalanced constraint was accepted")
 	}
-	if _, err := scopeToOwnerOrProjects("alice", []string{"Physics"}, "true) || (true"); err == nil {
+	if _, err := scopeToActorOrProjects(context.Background(), "alice", []string{"Physics"}, "true) || (true"); err == nil {
 		t.Errorf("an unbalanced constraint was accepted for the read scope")
 	}
 	if got := projectClause(nil); got != "false" {

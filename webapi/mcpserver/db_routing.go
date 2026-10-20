@@ -279,7 +279,7 @@ func (s *Server) tryJobsFromDB(ctx context.Context, constraint string, projectio
 	scoped := constraint
 	if !scope.AllUsers {
 		var err error
-		if scoped, err = ownerScopedConstraint(scope.Owner, constraint); err != nil {
+		if scoped, err = ownerScopedConstraint(scope, constraint); err != nil {
 			return nil, false, decline(dbmirror.ReasonUnsupportedQuery,
 				fmt.Sprintf("constraint cannot be owner-scoped for the mirror: %v", err))
 		}

@@ -1604,6 +1604,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 		return nil, errUnidentifiedCaller
 	}
 	ctx = htcondor.WithAuthenticatedUser(ctx, username)
+	ctx = s.withPlacementOwnerScope(ctx, r, username)
 
 	return ctx, nil
 }

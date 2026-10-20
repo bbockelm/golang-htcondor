@@ -16,6 +16,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/bbockelm/golang-htcondor/webapi/ownerscope"
 )
 
 // AuthMeResponse describes the currently-authenticated browser session.
@@ -371,8 +372,9 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
 	// The Owner value of the caller's jobs. A bearer's actor is
-	// qualified ("alice@domain") and a job's Owner is not.
-	owner := ownerFromActor(actor)
+	// qualified ("alice@domain") and a job's Owner is not. A placementd
+	// account is keyed and scoped by its full name (ownerKey).
+	owner := ownerKey(ctx, actor)
 
 	// Admins may opt into a pool-wide view via ?owned_by_me=false.
 	// Non-admins (and the default for everyone) get the my-jobs view.
@@ -541,7 +543,7 @@ func (s *Handler) handleDashboardActivity(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
-	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
+	owner := ownerKey(ctx, htcondor.GetAuthenticatedUserFromContext(ctx))
 	ownedByMe := true
 	if v := r.URL.Query().Get("owned_by_me"); v != "" {
 		if parsed, perr := strconv.ParseBool(v); perr == nil {
@@ -590,7 +592,14 @@ func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.Quer
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, "true", opts, streamOpts)
+	// FetchMyJobs asks the schedd for the caller's own jobs. A placementd
+	// account is held to its User by the constraint as well, as every
+	// other read of its jobs is.
+	constraint := "true"
+	if ownedByMe && ownerscope.UserScoped(ctx) {
+		constraint = ownerKeyClause(ctx, owner)
+	}
+	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -656,7 +665,7 @@ func (s *Handler) recentlyCompletedFromArchive(ctx context.Context, owner string
 	}
 	constraint := "true"
 	if ownedByMe {
-		constraint = fmt.Sprintf("Owner == %s", classadStringLit(owner))
+		constraint = ownerKeyClause(ctx, owner)
 	}
 	dbc, closer, _, err := s.dbMirror.Client(ctx)
 	if err != nil {

@@ -201,8 +201,9 @@ func (s *Handler) issuesAnswer(ctx context.Context, r *http.Request, q issueQuer
 		ctx = s.multi.svc.PinHub(ctx)
 	}
 	// The Owner value of the caller's jobs: a bearer's actor is
-	// qualified ("alice@domain") and a job's Owner is not.
-	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
+	// qualified ("alice@domain") and a job's Owner is not. A placementd
+	// account is keyed and scoped by its full name (ownerKey).
+	owner := ownerKey(ctx, htcondor.GetAuthenticatedUserFromContext(ctx))
 	// Same rule as every other listing: a caller that is not an
 	// administrator is confined to its own jobs whatever it asks for.
 	ownedByMe := q.ownedByMe
@@ -226,7 +227,7 @@ func (s *Handler) issuesAnswer(ctx context.Context, r *http.Request, q issueQuer
 
 	scope := "true"
 	if ownedByMe {
-		scope = fmt.Sprintf("Owner == %s", classadStringLit(owner))
+		scope = ownerKeyClause(ctx, owner)
 	}
 	// The caller's constraint narrows inside the scope and cannot widen
 	// it: andScope re-serializes it so it cannot reach past its

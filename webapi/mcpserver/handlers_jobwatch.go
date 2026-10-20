@@ -234,6 +234,12 @@ func (s *Server) watchActor(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
+	// A watch is filed under the bare name and follows jobs by Owner, so
+	// a placementd account in another domain would watch the local
+	// user's of that name.
+	if s.placementOutsideUIDDomain(ctx, actor) {
+		return "", errOutsideUIDDomain
+	}
 	return owner, nil
 }
 

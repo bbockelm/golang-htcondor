@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -438,13 +439,15 @@ func scopeToProjects(projects []string, constraint string) (string, error) {
 	return andScope(projectClause(projects), constraint)
 }
 
-// scopeToOwnerOrProjects confines a constraint to the caller's own jobs plus
-// the jobs in the projects they lead. This is a project lead's read scope.
-func scopeToOwnerOrProjects(owner string, projects []string, constraint string) (string, error) {
-	if owner == "" {
-		return "", fmt.Errorf("no owner to scope to")
+// scopeToActorOrProjects confines a constraint to the caller's own jobs
+// (actorClause) plus the jobs in the projects they lead. This is a project
+// lead's read scope.
+func scopeToActorOrProjects(ctx context.Context, actor string, projects []string, constraint string) (string, error) {
+	clause, err := actorClause(ctx, actor)
+	if err != nil {
+		return "", fmt.Errorf("no owner to scope to: %w", err)
 	}
-	return andScope(fmt.Sprintf("((Owner == %s) || %s)", classadStringLit(owner), projectClause(projects)), constraint)
+	return andScope(fmt.Sprintf("((%s) || %s)", clause, projectClause(projects)), constraint)
 }
 
 // superuserScope is what an armed session may act on.

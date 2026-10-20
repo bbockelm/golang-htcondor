@@ -24,6 +24,12 @@ func scopeAdmits(t *testing.T, scoped, owner string) bool {
 	return b
 }
 
+// ownerOnlyScope is the scope ownerScope resolves for an ordinary caller
+// whose jobs' Owner is owner.
+func ownerOnlyScope(owner string) OwnerScope {
+	return OwnerScope{Owner: owner, clause: (&Server{}).ownerClause(owner)}
+}
+
 // TestOwnerScopedConstraintConfinesTheCaller covers the property the
 // whole owner-scoping story rests on: whatever the caller passes, the
 // result must still be restricted to their own jobs.
@@ -53,7 +59,7 @@ func TestOwnerScopedConstraintConfinesTheCaller(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := ownerScopedConstraint("alice", c.constraint)
+			got, err := ownerScopedConstraint(ownerOnlyScope("alice"), c.constraint)
 			if err != nil {
 				// Refusing to build a constraint is an acceptable
 				// outcome for a malformed input — the caller turns it
@@ -77,7 +83,7 @@ func TestOwnerScopedConstraintConfinesTheCaller(t *testing.T) {
 // from a token, not a literal we control. A quote in it must not end
 // the string early and change what the expression means.
 func TestOwnerScopedConstraintEscapesTheOwner(t *testing.T) {
-	got, err := ownerScopedConstraint(`alice" || true || "`, "true")
+	got, err := ownerScopedConstraint(ownerOnlyScope(`alice" || true || "`), "true")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -90,7 +96,7 @@ func TestOwnerScopedConstraintEscapesTheOwner(t *testing.T) {
 // and a scope-less constraint is the whole queue. It must be an error,
 // never an empty clause the caller might splice in anyway.
 func TestOwnerScopedConstraintRequiresAnOwner(t *testing.T) {
-	if got, err := ownerScopedConstraint("", "true"); err == nil {
+	if got, err := ownerScopedConstraint(OwnerScope{}, "true"); err == nil {
 		t.Errorf("expected an error with no owner, got %q", got)
 	}
 }

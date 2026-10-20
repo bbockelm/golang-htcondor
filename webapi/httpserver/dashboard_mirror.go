@@ -51,7 +51,7 @@ func (s *Handler) mirrorScope(ctx context.Context, owner string, ownedByMe bool)
 	}
 	scope := "true"
 	if ownedByMe {
-		scope = fmt.Sprintf("Owner == %s", classadStringLit(owner))
+		scope = ownerKeyClause(ctx, owner)
 	}
 	return dbc, closer, scope, nil
 }

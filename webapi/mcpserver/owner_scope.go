@@ -23,10 +23,14 @@ import (
 // nothing in either answer to explain the difference.
 type OwnerScope struct {
 	// Owner is the identity the call was confined to, empty for an
-	// unconfined admin call.
+	// unconfined admin call: a job's Owner value, or for a placementd
+	// account its full user name (see callerClause).
 	Owner string
 	// AllUsers is true when the call covers every user's jobs.
 	AllUsers bool
+	// clause is the ClassAd clause confining a query to Owner's jobs;
+	// empty with AllUsers.
+	clause string
 }
 
 // Note renders the scope for the caller. Every read tool appends it, so
@@ -53,7 +57,39 @@ func (s *Server) ownerScope(ctx context.Context, tier privTier) (OwnerScope, boo
 	if owner == "" {
 		return OwnerScope{}, false
 	}
-	return OwnerScope{Owner: owner}, true
+	clause := s.callerClause(ctx, actor, owner)
+	if s.multi == nil && ownerscope.UserScoped(ctx) {
+		owner = actor
+	}
+	return OwnerScope{Owner: owner, clause: clause}, true
+}
+
+// callerClause is the ClassAd clause confining a query to the caller's
+// own jobs: ownerClause(owner), or with one schedd, for a placementd
+// account (ownerscope.WithUserScope), User == actor. Such an account's
+// domain need not be UID_DOMAIN, and Owner, the part before the "@", is
+// shared with the local user of the same name.
+func (s *Server) callerClause(ctx context.Context, actor, owner string) string {
+	if s.multi == nil && ownerscope.UserScoped(ctx) {
+		return fmt.Sprintf("User == %s", classadStringLit(actor))
+	}
+	return s.ownerClause(owner)
+}
+
+// errOutsideUIDDomain refuses what is filed under a bare user name in
+// UID_DOMAIN -- watches, interactive sessions, share URLs redeemed as that
+// name, a per-user staging directory -- to a placementd account in another
+// domain, which is not the local user of the same name.
+var errOutsideUIDDomain = errors.New("this is not available to accounts assigned by the placement service outside this access point's domain")
+
+// placementOutsideUIDDomain reports whether the caller is a placementd
+// account whose domain is not UID_DOMAIN.
+func (s *Server) placementOutsideUIDDomain(ctx context.Context, actor string) bool {
+	if s.multi != nil || !ownerscope.UserScoped(ctx) {
+		return false
+	}
+	i := strings.LastIndex(actor, "@")
+	return i < 0 || s.uidDomain == "" || !strings.EqualFold(actor[i+1:], s.uidDomain)
 }
 
 // scopeToOwner wraps an LLM-supplied ClassAd constraint with an owner
@@ -91,7 +127,7 @@ func (s *Server) scopeToOwner(ctx context.Context, llmConstraint string, tier pr
 	if name == "" {
 		return "", errScopeUnauthenticated
 	}
-	owner := s.ownerClause(name)
+	owner := s.callerClause(ctx, actor, name)
 	if s.multi != nil {
 		// An actor in another domain than the APs' is refused, never
 		// read as the same name in UID_DOMAIN.
@@ -368,10 +404,19 @@ func classadStringLit(s string) string {
 // fail-open. A constraint the schedd merely evaluates cannot be
 // reinterpreted that way. FetchMyJobs stays set alongside this as
 // defense in depth.
-func ownerScopedConstraint(owner, constraint string) (string, error) {
-	// The parse-and-reserialize AND lives in one place, shared with the
-	// multi-AP reads that scope on User instead of Owner.
-	return ownerscope.Constrain("Owner", owner, constraint)
+func ownerScopedConstraint(scope OwnerScope, constraint string) (string, error) {
+	if scope.clause == "" {
+		return "", errors.New("no authenticated owner to scope to")
+	}
+	c := strings.TrimSpace(constraint)
+	if c == "" || strings.EqualFold(c, "true") {
+		return scope.clause, nil
+	}
+	safe, err := ownerscope.Balanced(c)
+	if err != nil {
+		return "", fmt.Errorf("constraint is not a valid ClassAd expression: %w", err)
+	}
+	return fmt.Sprintf("(%s) && (%s)", scope.clause, safe), nil
 }
 
 // fetchOptsFor keeps the schedd-side hint aligned with the constraint.
