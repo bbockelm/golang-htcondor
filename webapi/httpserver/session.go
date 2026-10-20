@@ -48,6 +48,11 @@ type SessionData struct {
 	// Placement is the placementd account behind the session, for
 	// IdentitySource == identitySourcePlacementd; nil otherwise.
 	Placement *PlacementAccountInfo
+	// IDPSubject is the provider's subject for the sign-in, kept on a
+	// placement-only session so the sign-in's identity mapping can be
+	// re-run for it (placement_session_upgrade.go). Empty on other
+	// sessions.
+	IDPSubject string
 }
 
 // identitySourcePlacementd marks a session mapped through condor_placementd.
@@ -135,8 +140,8 @@ func (s *SessionStore) createTable() error {
 
 	// Migrate existing tables: add groups_json column if it doesn't exist
 	_, _ = s.db.ExecContext(ctx, `ALTER TABLE http_sessions ADD COLUMN groups_json TEXT`)
-	// And the placement identity columns (migration 0023).
-	for _, col := range []string{"placement_identity", "display_name", "scope", "identity_source", "placement_json"} {
+	// And the placement identity columns (migrations 0023 and 0025).
+	for _, col := range []string{"placement_identity", "display_name", "scope", "identity_source", "placement_json", "idp_subject"} {
 		_, _ = s.db.ExecContext(ctx, `ALTER TABLE http_sessions ADD COLUMN `+col+` TEXT NOT NULL DEFAULT ''`)
 	}
 
@@ -181,23 +186,74 @@ func (s *SessionStore) Create(username string, groups ...[]string) (string, *Ses
 }
 
 // CreateSession stores a new session carrying data's Username, Groups,
-// PlacementIdentity, DisplayName and Scope; the times are set here. A
-// placement-only session must have no Username: it is not a local user, and
-// nothing may mistake it for one.
+// PlacementIdentity, DisplayName, Scope and IDPSubject; the times are set
+// here. A non-zero data.ExpiresAt caps the expiry. A placement-only session
+// must have no Username: it is not a local user, and nothing may mistake it
+// for one.
 func (s *SessionStore) CreateSession(data SessionData) (string, *SessionData, error) {
+	sessionID, session, args, err := s.newSession(data)
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err := s.db.ExecContext(context.Background(), insertSessionSQL, args...); err != nil {
+		return "", nil, fmt.Errorf("failed to store session in database: %w", err)
+	}
+	return sessionID, session, nil
+}
+
+// Rotate replaces the placement-only session oldID with a new session
+// carrying data, under a new id: the new row is stored and the old one
+// deleted in one transaction, so exactly one of them exists afterwards.
+// It fails, storing nothing, when oldID is not a placement-only session --
+// including when a concurrent Rotate already replaced it.
+func (s *SessionStore) Rotate(oldID string, data SessionData) (string, *SessionData, error) {
+	sessionID, session, args, err := s.newSession(data)
+	if err != nil {
+		return "", nil, err
+	}
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", nil, fmt.Errorf("rotating the session: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `DELETE FROM http_sessions WHERE session_id = ? AND scope = ? AND expires_at > ?`,
+		sessionKey(oldID), sessionScopePlacement, time.Now())
+	if err != nil {
+		return "", nil, fmt.Errorf("rotating the session: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return "", nil, fmt.Errorf("rotating the session: the placement-only session is gone")
+	}
+	if _, err := tx.ExecContext(ctx, insertSessionSQL, args...); err != nil {
+		return "", nil, fmt.Errorf("rotating the session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", nil, fmt.Errorf("rotating the session: %w", err)
+	}
+	return sessionID, session, nil
+}
+
+const insertSessionSQL = `INSERT INTO http_sessions (session_id, username, created_at, expires_at, groups_json,
+	placement_identity, display_name, scope, identity_source, placement_json, idp_subject)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+// newSession checks data and makes the session to store: its id, the
+// session, and the arguments to insertSessionSQL.
+func (s *SessionStore) newSession(data SessionData) (string, *SessionData, []any, error) {
 	if data.Scope == sessionScopePlacement && data.Username != "" {
-		return "", nil, fmt.Errorf("a placement-only session cannot carry a username")
+		return "", nil, nil, fmt.Errorf("a placement-only session cannot carry a username")
 	}
 	if data.Scope != sessionScopeFull && data.Scope != sessionScopePlacement {
-		return "", nil, fmt.Errorf("unknown session scope %q", data.Scope)
+		return "", nil, nil, fmt.Errorf("unknown session scope %q", data.Scope)
 	}
 	if data.IdentitySource == identitySourcePlacementd &&
 		(data.Placement == nil || data.Placement.Account == "" || data.Username != data.Placement.Account) {
-		return "", nil, fmt.Errorf("a placementd session's username must be its placementd account")
+		return "", nil, nil, fmt.Errorf("a placementd session's username must be its placementd account")
 	}
 	sessionID, err := generateSessionID()
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if data.Scope == sessionScopePlacement {
 		sessionID = placementSessionPrefix + sessionID
@@ -214,6 +270,10 @@ func (s *SessionStore) CreateSession(data SessionData) (string, *SessionData, er
 		Scope:             data.Scope,
 		IdentitySource:    data.IdentitySource,
 		Placement:         data.Placement,
+		IDPSubject:        data.IDPSubject,
+	}
+	if !data.ExpiresAt.IsZero() && data.ExpiresAt.Before(session.ExpiresAt) {
+		session.ExpiresAt = data.ExpiresAt
 	}
 	// A placementd account is honored no longer than its mapping.
 	if session.IsPlacementd() && !session.Placement.MappingExpiresAt.IsZero() &&
@@ -222,7 +282,7 @@ func (s *SessionStore) CreateSession(data SessionData) (string, *SessionData, er
 	}
 	placementJSON, err := encodePlacementAccount(session.Placement)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	// Serialize groups as JSON
@@ -230,26 +290,18 @@ func (s *SessionStore) CreateSession(data SessionData) (string, *SessionData, er
 	if len(session.Groups) > 0 {
 		data, err := json.Marshal(session.Groups)
 		if err != nil {
-			return "", nil, fmt.Errorf("failed to serialize groups: %w", err)
+			return "", nil, nil, fmt.Errorf("failed to serialize groups: %w", err)
 		}
 		groupsJSON = sql.NullString{String: string(data), Valid: true}
 	}
 
-	// Store session in database. The `token` column was dropped in
-	// migration 0002 — the field was reserved but never populated,
-	// and an unused secret-shaped column on disk was a footgun.
-	ctx := context.Background()
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO http_sessions (session_id, username, created_at, expires_at, groups_json,
-		                            placement_identity, display_name, scope, identity_source, placement_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		sessionKey(sessionID), session.Username, session.CreatedAt, session.ExpiresAt, groupsJSON,
-		session.PlacementIdentity, session.DisplayName, session.Scope, session.IdentitySource, placementJSON)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to store session in database: %w", err)
-	}
-
-	return sessionID, session, nil
+	// The `token` column was dropped in migration 0002 — the field was
+	// reserved but never populated, and an unused secret-shaped column on
+	// disk was a footgun.
+	args := []any{sessionKey(sessionID), session.Username, session.CreatedAt, session.ExpiresAt, groupsJSON,
+		session.PlacementIdentity, session.DisplayName, session.Scope, session.IdentitySource, placementJSON,
+		session.IDPSubject}
+	return sessionID, session, args, nil
 }
 
 // Get retrieves a session by ID
@@ -263,11 +315,12 @@ func (s *SessionStore) Get(sessionID string) *SessionData {
 
 	err := s.db.QueryRowContext(ctx,
 		`SELECT username, created_at, expires_at, groups_json,
-		        placement_identity, display_name, scope, identity_source, placement_json
+		        placement_identity, display_name, scope, identity_source, placement_json, idp_subject
 		 FROM http_sessions
 		 WHERE session_id = ? AND expires_at > ?`,
 		sessionKey(sessionID), time.Now()).Scan(&session.Username, &session.CreatedAt, &session.ExpiresAt, &groupsJSON,
-		&session.PlacementIdentity, &session.DisplayName, &session.Scope, &session.IdentitySource, &placementJSON)
+		&session.PlacementIdentity, &session.DisplayName, &session.Scope, &session.IdentitySource, &placementJSON,
+		&session.IDPSubject)
 
 	if err != nil {
 		// Session not found or expired

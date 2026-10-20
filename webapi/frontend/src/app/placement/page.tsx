@@ -3,8 +3,8 @@
 // /placement: request a placement token for the signed-in person. Reached by
 // every session, including one with no local account on this access point.
 
-import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type PlacementIssued } from '@/lib/api';
 import {
   IssuedTokenDetails,
@@ -14,8 +14,32 @@ import {
 } from '@/components/PlacementTokenRequest';
 
 export default function PlacementPage() {
+  const queryClient = useQueryClient();
   const session = useQuery({ queryKey: ['session'], queryFn: api.auth.me });
   const [issued, setIssued] = useState<PlacementIssued | null>(null);
+  const placementOnly = !!session.data?.placement_only;
+
+  // Somebody onboarded while signed in gets their account on the next
+  // /auth/me; ask again whenever they come back to this page. The shell
+  // (AppShell) switches when the answer changes.
+  useEffect(() => {
+    if (!placementOnly) return;
+    const recheck = () => {
+      if (document.visibilityState !== 'visible') return;
+      void queryClient.invalidateQueries({ queryKey: ['session'] });
+    };
+    window.addEventListener('focus', recheck);
+    document.addEventListener('visibilitychange', recheck);
+    return () => {
+      window.removeEventListener('focus', recheck);
+      document.removeEventListener('visibilitychange', recheck);
+    };
+  }, [placementOnly, queryClient]);
+
+  const checkAgain = () => {
+    void queryClient.invalidateQueries({ queryKey: ['session'] });
+    void queryClient.invalidateQueries({ queryKey: ['placement', 'me'] });
+  };
   const name =
     session.data?.placement?.display_name ||
     session.data?.placement?.identity ||
@@ -35,6 +59,19 @@ export default function PlacementPage() {
         <p className="text-sm text-gray-700">
           Signed in as <span className="font-mono">{session.data.placement.identity}</span>.
         </p>
+      )}
+      {placementOnly && (
+        <div className="flex flex-wrap items-center gap-3 text-sm text-gray-700">
+          <span>Been given access to this access point since you signed in?</span>
+          <button
+            type="button"
+            onClick={checkAgain}
+            disabled={session.isFetching}
+            className="rounded-sm border border-gray-300 bg-white px-3 py-1 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {session.isFetching ? 'Checking…' : 'Check again'}
+          </button>
+        </div>
       )}
 
       {issued ? (

@@ -12,6 +12,22 @@ export const placementOnlySession: Session = {
   placement: { identity: 'zoe@uni.example', display_name: 'Zoe Q' },
 };
 
+// The same person once an administrator has onboarded them: a full session
+// as their account.
+export const onboardedSession: Session = {
+  authenticated: true,
+  is_admin: false,
+  username: 'zoe@ap.smoke.example',
+  placement: {
+    identity: 'zoe@uni.example',
+    display_name: 'Zoe Q',
+    account: 'zoe@ap.smoke.example',
+    levels: ['READ', 'WRITE'],
+    projects: ['SmokeProject'],
+    project: 'SmokeProject',
+  },
+};
+
 export const placementMeFixture: PlacementMe = {
   identity: 'zoe@uni.example',
   display_name: 'Zoe Q',

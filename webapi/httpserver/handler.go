@@ -113,6 +113,9 @@ type Handler struct {
 	// placementOnboard is the user-facing placement state: identity
 	// claims, the device-flow shim's store. See placement_onboarding.go.
 	placementOnboard placementOnboarding
+	// placementUpgrades throttles re-running a placement-only session's
+	// identity mapping. See placement_session_upgrade.go.
+	placementUpgrades placementUpgradeThrottle
 	// clientUsage records "this OAuth2 client obtained a token" without
 	// a database write per token request. Nil when OAuth2 is disabled.
 	clientUsage *clientUsageRecorder

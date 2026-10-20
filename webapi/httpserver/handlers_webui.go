@@ -96,7 +96,17 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 
 	resp := AuthMeResponse{Authenticated: false, MultiAP: s.multi != nil}
 
-	if session, ok := s.getAnySessionFromRequest(r); ok && session.IsPlacementOnly() {
+	session, ok := s.getAnySessionFromRequest(r)
+	if ok && session.IsPlacementOnly() {
+		// Onboarded since signing in? Then this becomes a full session,
+		// under a new id (placement_session_upgrade.go).
+		if sessionID, err := getSessionCookie(r); err == nil {
+			if upgraded, r2 := s.upgradePlacementSession(w, r, sessionID, session); upgraded != nil {
+				session, r = upgraded, r2
+			}
+		}
+	}
+	if ok && session.IsPlacementOnly() {
 		// Nothing about a local account: there is none.
 		resp.Authenticated = true
 		resp.PlacementOnly = true

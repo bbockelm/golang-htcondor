@@ -42,6 +42,7 @@ vi.mock('@/lib/placementAdmin', async () => {
 });
 
 const { PlacementAdminError } = await import('@/lib/placementAdmin');
+const actualAdmin = await vi.importActual<typeof import('@/lib/placementAdmin')>('@/lib/placementAdmin');
 const { Directory } = await import('./Directory');
 const { MapfileStatusBanner } = await import('./MapfileStatusBanner');
 const { onboardOperations } = await import('./OnboardWizard');
@@ -230,6 +231,45 @@ describe('Directory', () => {
     ]);
     expect(ops[0].fields.authorizations).toEqual(['READ', 'WRITE']);
     expect(ops[1].fields).toEqual({ identity: 'carol@wisc.edu', account: 'carol@ap.example' });
+  });
+  it('names a failed onboarding step once, counting from 1', async () => {
+    batch.mockRejectedValue(
+      new PlacementAdminError(409, "operation 0: Identity 'newbie' already exists", {
+        placement_code: 6,
+        results: [{ index: 0, error_code: 6, error: "Identity 'newbie' already exists" }],
+      }),
+    );
+    renderDirectory();
+    await rowFor('i-map');
+    fireEvent.click(screen.getByRole('button', { name: 'Onboard user' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Onboard user' });
+    fireEvent.change(within(dialog).getByLabelText('Identity'), { target: { value: 'newbie' } });
+    fireEvent.change(within(dialog).getByLabelText(/^Account/), { target: { value: 'bob@ap.example' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Onboard' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      /^Step 1: Identity 'newbie' already exists$/,
+    );
+  });
+});
+
+describe('describeBatchError', () => {
+  const { describeBatchError } = actualAdmin;
+  it('replaces the daemon\'s 0-based operation with a 1-based step', () => {
+    expect(describeBatchError(new PlacementAdminError(400, 'placementd edit: operation 1: bad field', {}))).toBe(
+      'Step 2: bad field',
+    );
+    expect(describeBatchError(new Error('operation 2: Identity x already exists'))).toBe(
+      'Step 3: Identity x already exists',
+    );
+  });
+  it('prefers the failed result\'s index', () => {
+    const err = new PlacementAdminError(409, 'operation 0: Account a already exists', {
+      results: [{ index: 0 }, { index: 1, error_code: 6 }],
+    });
+    expect(describeBatchError(err)).toBe('Step 2: Account a already exists');
+  });
+  it('adds no step when none is known', () => {
+    expect(describeBatchError(new Error('Not allowed'))).toBe('Not allowed');
   });
 });
 

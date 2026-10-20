@@ -293,6 +293,24 @@ function withComment<T extends object>(body: T, changeComment?: string): T & { c
   return c ? { ...body, change_comment: c } : body;
 }
 
+// describeBatchError is describeEditError for a batch: the sentence, led by
+// the 1-based step that failed. The placementd names the step as a 0-based
+// "operation N:" inside its message; that is replaced, not repeated.
+export function describeBatchError(err: unknown): string {
+  let text = describeEditError(err);
+  let index: number | undefined;
+  const daemon = /(?:placementd edit: )?operation (\d+): /i.exec(text);
+  if (daemon) {
+    index = Number(daemon[1]);
+    text = text.slice(0, daemon.index) + text.slice(daemon.index + daemon[0].length);
+  }
+  if (err instanceof PlacementAdminError) {
+    const failed = err.results.find((r) => r.error_code);
+    if (failed) index = failed.index;
+  }
+  return index === undefined ? text : `Step ${index + 1}: ${text}`;
+}
+
 // describeEditError turns a refusal into the sentence an admin acts on.
 export function describeEditError(err: unknown): string {
   if (err instanceof PlacementAdminError) {

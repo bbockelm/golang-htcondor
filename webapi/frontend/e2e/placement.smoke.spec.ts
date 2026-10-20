@@ -1,7 +1,12 @@
 import { expect, test } from '@playwright/test';
 
 import { installApiFixtures } from './fixtures/api';
-import { installPlacementFixtures, placementIssuedFixture } from './fixtures/placementOnboarding';
+import {
+  installPlacementFixtures,
+  onboardedSession,
+  placementIssuedFixture,
+  placementOnlySession,
+} from './fixtures/placementOnboarding';
 
 // Placement onboarding against mocked responses: the token page and the
 // device confirmation page, for a session with no local account.
@@ -45,6 +50,25 @@ test('placement: a token is requested and offered for download', async ({ page }
 test('placement: any other page sends a placement-only session to /placement', async ({ page }) => {
   await page.goto('/jobs');
   await expect(page).toHaveURL(/\/placement\/?$/);
+});
+
+test('placement: onboarded while signed in, the full navigation appears', async ({ page }) => {
+  const errors = watchForErrors(page);
+  let onboarded = false;
+  await page.route('**/api/v1/auth/me', (route) =>
+    route.fulfill({ json: onboarded ? onboardedSession : placementOnlySession }),
+  );
+  await page.goto('/placement');
+  const check = page.getByRole('button', { name: 'Check again' });
+  await expect(check).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Jobs' })).toHaveCount(0);
+
+  onboarded = true;
+  await check.click();
+  await expect(page.getByRole('link', { name: 'Jobs' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Placement token' })).toBeVisible();
+  await expect(check).toHaveCount(0);
+  expect(errors).toEqual([]);
 });
 
 test('placement device: confirm a request', async ({ page }) => {
