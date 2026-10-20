@@ -26,8 +26,10 @@ type fakeSchedd struct {
 	nextCluster int
 	jobs        []*fakeJob
 
-	submitted   []string // submit files, in order
-	lastScript  string   // the watchdog script from the latest spool
+	submitted []string // submit files, in order
+	// submitCtx is the context of the latest submission.
+	submitCtx   context.Context
+	lastScript  string // the watchdog script from the latest spool
 	spooled     [][]string
 	constraints []string // constraints the manager queried with
 	removed     []string
@@ -66,12 +68,13 @@ type fakeJob struct {
 
 func newFakeSchedd() *fakeSchedd { return &fakeSchedd{nextCluster: 100} }
 
-func (f *fakeSchedd) SubmitRemote(_ context.Context, submitFile string) (int, []*classad.ClassAd, error) {
+func (f *fakeSchedd) SubmitRemote(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.submitErr != nil {
 		return 0, nil, f.submitErr
 	}
+	f.submitCtx = ctx
 	f.submitted = append(f.submitted, submitFile)
 	cluster := f.nextCluster
 	f.nextCluster++

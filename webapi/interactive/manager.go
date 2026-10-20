@@ -171,6 +171,13 @@ type Options struct {
 	// submission to break.
 	BeforeSubmit func(ctx context.Context)
 
+	// SubmitContext, when set, derives the context a session's job is
+	// submitted under. The host attaches the access point's
+	// JOB_DEFAULT_REQUEST* values here (htcondor.WithSubmitParams), so a
+	// session that names no GPUs gets what any other job on that access
+	// point would. Like BeforeSubmit it must not fail the submission.
+	SubmitContext func(ctx context.Context) context.Context
+
 	// Now is the clock, for tests.
 	Now func() time.Time
 }
@@ -433,6 +440,9 @@ func (m *Manager) ScheddForTest() ScheddClient { return m.opts.Schedd() }
 // to prepare something before a submit can assert that it did.
 func (m *Manager) HasBeforeSubmitForTest() bool { return m.opts.BeforeSubmit != nil }
 
+// HasSubmitContextForTest reports whether a host wired Options.SubmitContext.
+func (m *Manager) HasSubmitContextForTest() bool { return m.opts.SubmitContext != nil }
+
 func sessionKey(owner, name string) string { return owner + "\x00" + name }
 
 // lockSession serializes work on one (owner, name) and returns the
@@ -646,6 +656,10 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 	// with several access points, against the assigned one's credd).
 	if m.opts.BeforeSubmit != nil {
 		m.opts.BeforeSubmit(submitCtx)
+	}
+
+	if m.opts.SubmitContext != nil {
+		submitCtx = m.opts.SubmitContext(submitCtx)
 	}
 
 	m.wrote(ap)

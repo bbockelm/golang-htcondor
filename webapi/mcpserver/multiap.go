@@ -44,14 +44,14 @@ func multiAPToolAllowed(name string) bool {
 	return multiAPReadTools[name] || multiAPPassthroughTools[name] || multiAPActionTools[name] ||
 		multiAPSubmitTools[name] != "" || multiAPCredentialTools[name] ||
 		multiAPInteractiveTools[name] || multiAPHubTools[name] ||
-		name == "remove_jobs" || isCondorDocTool(name)
+		name == "remove_jobs" || name == "get_access_point_policy" || isCondorDocTool(name)
 }
 
 // errMultiAPTool refuses a tool multi-AP mode does not serve.
 func errMultiAPTool(name string) error {
 	return fmt.Errorf("the %q tool is not available on this multi-access-point server yet; "+
 		"it serves reading and watching your jobs, acting on one job at a time or by constraint, submitting jobs, DAGs and "+
-		"container builds, credentials and interactive sessions", name)
+		"container builds, credentials, interactive sessions and access point policy", name)
 }
 
 // multiAPCatalog replaces the single-AP catalogue: passthrough tools as
@@ -61,7 +61,7 @@ func multiAPCatalog(tools []Tool) []Tool {
 	out := make([]Tool, 0, len(tools))
 	for _, t := range tools {
 		if multiAPToolAllowed(t.Name) && !multiAPReadTools[t.Name] {
-			out = append(out, multiAPHubToolDef(multiAPInteractiveToolDef(multiAPSubmitToolDef(multiAPActionToolDef(t)))))
+			out = append(out, multiAPPolicyToolDef(multiAPHubToolDef(multiAPInteractiveToolDef(multiAPSubmitToolDef(multiAPActionToolDef(t))))))
 		}
 	}
 	return append(out, multiAPToolDefs()...)
@@ -154,6 +154,8 @@ func (s *Server) callMultiAPTool(ctx context.Context, name string, args map[stri
 		result, err = s.multiRemoveJobsTool(ctx, args)
 	case "query_job_epochs", "query_transfer_history":
 		result, err = s.multiEpochsTool(ctx, name, args)
+	case "get_access_point_policy":
+		result, err = s.multiAPPolicyTool(ctx, args)
 	default:
 		if multiAPActionTools[name] {
 			result, err = s.multiActionTool(ctx, name, args)
@@ -399,7 +401,9 @@ func multiAPInstructions(constraint string) string {
 		"points. Copy job_id from an answer rather than composing one: the tools that act on one job (hold, release, " +
 		"remove, edit, output, input, tail, exec) need the complete id and refuse a bare cluster.proc. remove_jobs runs " +
 		"on every access point and reports each. submit_job, submit_dag and build_container submit to your home access point " +
-		"(whoami names it, with any alternates you may pass as schedd) and answer with complete job ids. The credential " +
+		"(whoami names it, with any alternates you may pass as schedd) and answer with complete job ids. " +
+		"get_access_point_policy reports an access point's limits and job policies; consult it before a large " +
+		"submission, or when jobs are refused or held by policy. The credential " +
 		"tools use your home access point's credential service unless schedd names another. interactive_session_start " +
 		"starts a session on your home access point; the session stays there, and its name reaches it from any tool. " +
 		"watch_jobs watches your jobs on every access point; the jobs it reports carry their access point, and a job on " +

@@ -298,6 +298,33 @@ var outputSchemas = map[string]map[string]interface{}{
 		"slot_cache":   anySchema,
 	}, "job_id"),
 
+	// --- access point policy ------------------------------------------
+	// One entry per knob, grouped. value is "" when the knob is unset;
+	// the per-kind fields (a requirement's reason, a hold policy's
+	// subcode, a DAGMan throttle this server overrides) appear only on
+	// the entries they belong to.
+	"get_access_point_policy": obj(map[string]interface{}{
+		"access_point": strSchema,
+		"fetched_at":   strSchema,
+		"schedd":       strSchema,
+		"groups": arr(obj(map[string]interface{}{
+			"name":  strSchema,
+			"title": strSchema,
+			"entries": arr(obj(map[string]interface{}{
+				"name":        strSchema,
+				"value":       strSchema,
+				"set":         boolSchema,
+				"non_default": boolSchema,
+				"description": strSchema,
+				"unknown":     boolSchema,
+				"effective":   strSchema,
+				"reason":      strSchema,
+				"is_warning":  boolSchema,
+				"subcode":     strSchema,
+			}, "name", "value", "set", "non_default", "description")),
+		}, "name", "entries")),
+	}, "access_point", "fetched_at", "groups"),
+
 	// --- pool --------------------------------------------------------
 	// query_pool answers in one of two shapes, so the schema is their
 	// union: a listing carries ads/has_more, a summary carries the

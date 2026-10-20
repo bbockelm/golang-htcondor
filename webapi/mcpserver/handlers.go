@@ -183,6 +183,8 @@ var readOnlyMCPTools = map[string]bool{
 	// analyze_utilization reads finished jobs and the pool's machine
 	// shapes; it changes nothing.
 	"analyze_utilization": true,
+	// get_access_point_policy reads the schedd's configuration.
+	"get_access_point_policy": true,
 	// The watch tools change only this server's own bookkeeping; they
 	// neither read nor alter a job, so an agent restricted to read-only
 	// tools can still ask to be told when something happens.
@@ -905,6 +907,10 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 	// request next time" -- the Utilization page's answer.
 	tools = append(tools, analyzeUtilizationTool())
 
+	// The access point's own limits and policies, which an agent
+	// otherwise discovers only by being refused or held.
+	tools = append(tools, accessPointPolicyTool())
+
 	// The pool as condor_status shows it. Offered only with a collector
 	// to ask: without one every call would fail.
 	if s.poolSource() != nil {
@@ -1094,6 +1100,8 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		result, err = s.toolAnalyzeIssues(ctx, request.Arguments)
 	case "analyze_utilization":
 		result, err = s.toolAnalyzeUtilization(ctx, request.Arguments)
+	case "get_access_point_policy":
+		result, err = s.toolGetAccessPointPolicy(ctx, request.Arguments)
 	case "get_version":
 		result, err = s.toolGetVersion(ctx, request.Arguments)
 	case "whoami":

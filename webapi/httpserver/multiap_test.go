@@ -427,7 +427,7 @@ func TestMultiAPMCPCatalogue(t *testing.T) {
 			n == "interactive_session_stop",
 			n == "watch_jobs", n == "check_watches", n == "cancel_watch", n == "create_watch_url",
 			n == "analyze_issues", n == "query_job_epochs", n == "query_transfer_history", n == "analyze_job_match",
-			n == "query_pool":
+			n == "query_pool", n == "get_access_point_policy":
 		default:
 			t.Errorf("multi-AP catalogue offers %q", n)
 		}

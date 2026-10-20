@@ -81,6 +81,12 @@ func parseOldClassAdFile(path string) (*classad.ClassAd, error) {
 
 // runCondorSubmit runs condor_submit -dry-run and returns the generated ClassAd
 func runCondorSubmit(submitContent string) (*classad.ClassAd, error) {
+	return runCondorSubmitEnv(submitContent, nil)
+}
+
+// runCondorSubmitEnv is runCondorSubmit with extra environment, which is
+// how a test hands condor_submit configuration: _CONDOR_<KNOB>=value.
+func runCondorSubmitEnv(submitContent string, env []string) (*classad.ClassAd, error) {
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "condor_submit_test_*")
 	if err != nil {
@@ -100,6 +106,9 @@ func runCondorSubmit(submitContent string) (*classad.ClassAd, error) {
 	// Run condor_submit -dry-run
 	//nolint:gosec,noctx // G204: Test uses fixed condor_submit command; noctx: test doesn't need cancellation
 	cmd := exec.Command("condor_submit", "-dry-run", classadPath, submitPath)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("condor_submit failed: %w\nOutput: %s", err, string(output))
@@ -186,8 +195,11 @@ var attributesToIgnore = map[string]bool{
 	"ExitStatus":               true,
 	"ExitBySignal":             true,
 	// TransferInputSizeMB is the same kind of stamp, but it is not inert:
-	// condor_submit's default RequestDisk expression reads it, which is
-	// part of why RequestDisk is ignored below.
+	// condor_submit's default RequestDisk expression reads it. The Go
+	// library never sees the input files, so it leaves the attribute
+	// unset, and the expression's MAX takes its 1 GiB floor -- the value
+	// condor_submit's ad evaluates to for these small inputs, which is
+	// why RequestDisk itself is compared.
 	"TransferInputSizeMB": true,
 
 	// Ad typing. condor_submit writes MyType/TargetType as ordinary
@@ -228,7 +240,6 @@ var attributesToIgnore = map[string]bool{
 	// Values that genuinely differ and are known to.
 	"Environment":         true, // MASKS: condor_submit always emits Environment (""), and the V1/V2 forms differ
 	"ShouldTransferFiles": true, // MASKS: condor_submit defaults to IF_NEEDED, this library to YES
-	"RequestDisk":         true, // condor_submit emits the MAX(...) expression, this library a number
 	"Requirements":        true, // complex expressions do not render identically
 }
 
@@ -952,6 +963,116 @@ queue
 			}
 
 			compareClassAds(t, result.ProcAds[0], condorAd, "StdioAliases/"+tc.name)
+		})
+	}
+}
+
+// TestIntegrationRequestDefaults asks condor_submit what a job that omits
+// request_* gets, with HTCondor's built-in JOB_DEFAULT_REQUEST* and with
+// a site's, and holds the Go library to the same answer when it is handed
+// the same configuration through SubmitParseOptions.Params.
+//
+// condor_submit reads the knobs from its configuration, which the test
+// sets through _CONDOR_<KNOB> in its environment. The no-knob case relies
+// on the local configuration leaving them at HTCondor's defaults.
+func TestIntegrationRequestDefaults(t *testing.T) {
+	if !condorSubmitAvailable() {
+		t.Skip("condor_submit not available")
+	}
+
+	const vanilla = "universe = vanilla\nexecutable = /usr/bin/true\n"
+	for _, tc := range []struct {
+		name   string
+		submit string
+		knobs  map[string]string
+	}{
+		{name: "BuiltinDefaults", submit: vanilla},
+		{name: "SiteDefaults", submit: vanilla, knobs: map[string]string{
+			"JOB_DEFAULT_REQUESTCPUS":   "4",
+			"JOB_DEFAULT_REQUESTMEMORY": "2GB",
+			"JOB_DEFAULT_REQUESTGPUS":   "1",
+			"JOB_DEFAULT_REQUESTDISK":   "3GB",
+		}},
+		// An expression default is stored as an expression, and
+		// "undefined" leaves the attribute off altogether.
+		{name: "ExpressionAndUndefined", submit: vanilla, knobs: map[string]string{
+			"JOB_DEFAULT_REQUESTMEMORY": "ifThenElse(JobUniverse == 5, 3000, 100)",
+			"JOB_DEFAULT_REQUESTDISK":   "undefined",
+		}},
+		// What the submit file says beats the default.
+		{name: "SubmitFileWins", submit: vanilla + "request_memory = 1GB\nrequest_cpus = 2\n", knobs: map[string]string{
+			"JOB_DEFAULT_REQUESTCPUS":   "4",
+			"JOB_DEFAULT_REQUESTMEMORY": "2GB",
+		}},
+		// "undefined" written by the user means no request at all.
+		{name: "UserUndefined", submit: vanilla + "request_memory = undefined\nrequest_cpus = undefined\n"},
+		// A parallel job asks for one CPU per node unless it says
+		// otherwise; JOB_DEFAULT_REQUESTCPUS does not apply to it.
+		{name: "ParallelIgnoresCpuDefault", submit: "universe = parallel\nexecutable = /usr/bin/true\nmachine_count = 2\n",
+			knobs: map[string]string{"JOB_DEFAULT_REQUESTCPUS": "4"}},
+		// disk_usage stops condor_submit computing TransferInputSizeMB,
+		// so its own ad then carries the default RequestDisk with the
+		// input size undefined -- exactly the Go library's case.
+		{name: "DiskUsageLeavesInputSizeUnset", submit: vanilla + "disk_usage = 10\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			submitContent := tc.submit + "queue\n"
+			var env []string
+			for k, v := range tc.knobs {
+				env = append(env, "_CONDOR_"+k+"="+v)
+			}
+			condorAd, err := runCondorSubmitEnv(submitContent, env)
+			if err != nil {
+				t.Fatalf("Failed to run condor_submit: %v", err)
+			}
+
+			sf, err := ParseSubmitFileWithOptions(strings.NewReader(submitContent),
+				SubmitParseOptions{Params: SubmitParamMap(tc.knobs)})
+			if err != nil {
+				t.Fatalf("Failed to parse submit file: %v", err)
+			}
+			result, err := sf.Submit(1)
+			if err != nil {
+				t.Fatalf("Submit failed: %v", err)
+			}
+			goAd := result.ProcAds[0]
+
+			for _, attr := range []string{"RequestCpus", "RequestMemory", "RequestDisk", "RequestGpus"} {
+				_, inCondor := condorAd.Lookup(attr)
+				_, inGo := goAd.Lookup(attr)
+				if inCondor != inGo {
+					t.Errorf("%s: condor_submit sets it: %v; Go sets it: %v", attr, inCondor, inGo)
+					continue
+				}
+				if !inCondor {
+					continue
+				}
+				goVal, condorVal := goAd.EvaluateAttr(attr), condorAd.EvaluateAttr(attr)
+				if !goVal.IsNumber() {
+					t.Errorf("%s does not evaluate to a number in the Go ad (%v): a job carrying it never matches", attr, goVal)
+				}
+				if !valuesEqual(goVal, condorVal) {
+					t.Errorf("%s differs:\n  Go:     %v\n  Condor: %v", attr, goVal, condorVal)
+				}
+			}
+
+			// Both ads evaluate RequestDisk at the floor of the default
+			// expression for these inputs, which alone would not tell a
+			// stored expression from a stored 1 GiB. Evaluating each
+			// side's RequestDisk against a large input does.
+			goDisk, goHas := goAd.Lookup("RequestDisk")
+			condorDisk, condorHas := condorAd.Lookup("RequestDisk")
+			if goHas && condorHas {
+				at := func(e *classad.Expr) classad.Value {
+					scratch := classad.New()
+					_ = scratch.Set("TransferInputSizeMB", 2000)
+					_ = scratch.Set("RequestDisk", e)
+					return scratch.EvaluateAttr("RequestDisk")
+				}
+				if g, c := at(goDisk), at(condorDisk); !valuesEqual(g, c) {
+					t.Errorf("RequestDisk with a 2000 MB input:\n  Go:     %v (%s)\n  Condor: %v (%s)", g, goDisk, c, condorDisk)
+				}
+			}
 		})
 	}
 }

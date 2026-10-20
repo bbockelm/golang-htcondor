@@ -7,12 +7,14 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/google/jsonschema-go/jsonschema"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/appolicy"
 )
 
 // These tests exist because the published outputSchema is enforced by the
@@ -560,6 +562,9 @@ func emptyCases(t *testing.T) []emptyCase {
 
 		{"get_version", map[string]interface{}{"Module": "", "Revision": "", "Dirty": false}},
 		{"whoami", whoamiReport{}},
+		// An access point whose schedd reported nothing set at all.
+		{"get_access_point_policy", appolicy.Render(appolicy.NewSnapshot("ap", time.Time{}, nil),
+			appolicy.RenderOptions{}).Structured()},
 	}
 }
 

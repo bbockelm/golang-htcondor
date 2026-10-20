@@ -45,7 +45,9 @@ func genericInstructions(docsEmbedded bool) string {
 		"the job stays held. Larger inputs: create_input_upload_url, or URLs in transfer_input_files.\n")
 	b.WriteString("- $(...) is HTCondor macro expansion, not shell: $(hostname) becomes empty. " +
 		"Put shell logic in a script.\n")
-	b.WriteString("- Steps that depend on each other are a DAG: use submit_dag rather than sequencing jobs yourself.\n\n")
+	b.WriteString("- Steps that depend on each other are a DAG: use submit_dag rather than sequencing jobs yourself.\n")
+	b.WriteString("- get_access_point_policy has this access point's job limits, submit requirements and hold rules: " +
+		"check it before a large submission, and when jobs are refused or held by policy.\n\n")
 
 	b.WriteString("## Monitoring\n")
 	b.WriteString("- JobStatus: 1 Idle, 2 Running, 3 Removed, 4 Completed, 5 Held, 6 Transferring Output, 7 Suspended.\n")

@@ -119,10 +119,13 @@ func TestSubmitSizeUnitsEndToEnd(t *testing.T) {
 			wantDisk:   524288,
 		},
 		{
+			// HTCondor's built-in JOB_DEFAULT_REQUESTDISK is
+			// MAX({1024, (TransferInputSizeMB+1) * 1.25}) * 1024, which
+			// is 1 GiB when the input size is unknown.
 			name:       "defaults when unspecified",
 			submit:     "",
 			wantMemory: 128,
-			wantDisk:   1024,
+			wantDisk:   1048576,
 		},
 	}
 
