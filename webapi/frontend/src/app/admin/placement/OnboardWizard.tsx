@@ -25,6 +25,8 @@ export interface OnboardInput {
   authorizations: string[];
   projects: string[];
   defaultProject: string;
+  // The admin confirmed mapping the identity to an account that exists.
+  attachToExisting?: boolean;
 }
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
@@ -96,6 +98,7 @@ export function OnboardWizard({
   submit = submitBatch,
   notice,
   errorAction,
+  confirmAttach = false,
 }: {
   accounts: DirAccount[];
   authorizations: DirAuthorization[];
@@ -113,6 +116,9 @@ export function OnboardWizard({
   notice?: React.ReactNode;
   // Shown with an error, for an action that answers it.
   errorAction?: (err: unknown) => React.ReactNode;
+  // An existing account is shown with who is on it and what it holds,
+  // is not changed, and is used only once the admin confirms.
+  confirmAttach?: boolean;
 }) {
   const [identity, setIdentity] = useState(initial?.identity ?? '');
   const [displayName, setDisplayName] = useState(initial?.displayName ?? '');
@@ -127,6 +133,7 @@ export function OnboardWizard({
   );
   const [checked, setChecked] = useState<string | null>(null);
   const [changeComment, setChangeComment] = useState('');
+  const [attach, setAttach] = useState(false);
 
   const existing = useMemo(
     () => accounts.find((a) => a.name === account.trim()),
@@ -136,13 +143,15 @@ export function OnboardWizard({
   const [shownFor, setShownFor] = useState<string | undefined>(undefined);
   if (existing && shownFor !== existing.id) {
     setShownFor(existing.id);
+    setAttach(false);
     setAuthz(existing.authorizations);
     setChosenProjects(existing.projects);
     setDefaultProject(existing.default_project ?? '');
   } else if (!existing && shownFor !== undefined) {
     setShownFor(undefined);
   }
-  const grantsLocked = existing?.source === 'mapfile';
+  const grantsLocked = existing?.source === 'mapfile' || (confirmAttach && !!existing);
+  const attachNeeded = confirmAttach && !!existing && !attach;
 
   const input: OnboardInput = {
     identity: identity.trim(),
@@ -152,6 +161,7 @@ export function OnboardWizard({
     authorizations: authz,
     projects: chosenProjects,
     defaultProject,
+    ...(confirmAttach ? { attachToExisting: !!existing && attach } : {}),
   };
   const ops = onboardOperations(input, existing);
 
@@ -168,7 +178,7 @@ export function OnboardWizard({
     onError: () => setChecked(null),
   });
 
-  const ready = input.identity !== '' && input.account !== '';
+  const ready = input.identity !== '' && input.account !== '' && !attachNeeded;
 
   return (
     <Modal title={title} onClose={onClose} wide>
@@ -222,6 +232,37 @@ export function OnboardWizard({
           </Field>
           <ExpiryField value={expiresAt} onChange={setExpiresAt} />
         </div>
+
+        {confirmAttach && existing && (
+          <section
+            aria-label="Existing account"
+            className="space-y-1 rounded-sm border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900"
+          >
+            <p>
+              The account <span className="font-mono">{existing.name}</span> already exists. Its grants are
+              not changed here.
+            </p>
+            <p>Identities on it:</p>
+            {existing.identities.length > 0 ? (
+              <ul className="list-disc pl-5 font-mono">
+                {existing.identities.map((i) => (
+                  <li key={i}>{i}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="pl-5">None.</p>
+            )}
+            <p>Authorizations: {existing.authorizations.join(', ') || 'none'}</p>
+            <p>
+              Projects: {existing.projects.join(', ') || 'none'}
+              {existing.default_project ? ` (default ${existing.default_project})` : ''}
+            </p>
+            <label className="flex items-center gap-2 pt-1 font-medium">
+              <input type="checkbox" checked={attach} onChange={(e) => setAttach(e.target.checked)} />
+              Attach this identity to the existing account
+            </label>
+          </section>
+        )}
 
         {notice}
 

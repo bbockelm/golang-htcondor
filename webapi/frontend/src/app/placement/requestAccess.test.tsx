@@ -64,11 +64,13 @@ describe('/placement', () => {
     expect(await screen.findByRole('region', { name: 'Request access' })).toBeInTheDocument();
   });
 
-  it('offers it for an expired mapping too', async () => {
+  it('sends an expired mapping to an administrator instead', async () => {
     me.mockResolvedValue({ ...unmapped, expired: true });
     renderPage();
     expect(await screen.findByText(/has expired on this/)).toBeInTheDocument();
-    expect(await screen.findByRole('region', { name: 'Request access' })).toBeInTheDocument();
+    expect(await screen.findByText('Ask an administrator of this access point to extend it.')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Request access' })).toBeNull();
+    expect(myRequest).not.toHaveBeenCalled();
   });
 
   it('shows the token form, and no request, to an identity with access', async () => {
