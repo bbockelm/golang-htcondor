@@ -1451,7 +1451,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 						// same way the MCP data path does, bounded by
 						// the scopes this grant actually carries.
 						remint = s.grantReminter(token, username, ar.GetGrantedScopes(), expiration)
-						condorCredential, err = s.generateHTCondorTokenWithScopes(username, ar.GetGrantedScopes())
+						condorCredential, err = s.generateGrantHTCondorToken(username, grantIdentity(ar), ar.GetGrantedScopes())
 						if err != nil {
 							// Drop the entry AddValidated just made.
 							// Left in place, the next request with this

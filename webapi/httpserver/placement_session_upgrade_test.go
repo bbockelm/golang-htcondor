@@ -161,8 +161,8 @@ func TestPlacementOnlySessionUpgradesAfterOnboarding(t *testing.T) {
 	requireFullSession(t, s, fresh)
 
 	// Tokens minted for the account stay within what it holds.
-	bound, err := s.placementSubjectBound(context.Background(), newbieAcct)
-	if err != nil || bound == nil || bound.Identity != newbieIdentity {
+	bound, err := s.placementSubjectBound(context.Background(), newbieAcct, newbieIdentity)
+	if err != nil || bound == nil || bound.Project != "Physics" {
 		t.Errorf("the account was not recorded for bounded grants: %+v %v", bound, err)
 	}
 }

@@ -75,6 +75,12 @@ var sshGatewayScopes = []string{"openid", "condor:/READ", "condor:/WRITE"}
 // re-check, and the credential is not renewed: it lasts the one token
 // lifetime it was minted with.
 func (h *Handler) withCondorCredential(ctx context.Context, username string, scopes []string, stillValid func(context.Context) error) (context.Context, error) {
+	return h.withGrantCondorCredential(ctx, username, "", scopes, stillValid)
+}
+
+// withGrantCondorCredential is withCondorCredential for an OAuth2 grant
+// that identity approved (see generateGrantHTCondorToken).
+func (h *Handler) withGrantCondorCredential(ctx context.Context, username, identity string, scopes []string, stillValid func(context.Context) error) (context.Context, error) {
 	if h.signingKeyPath == "" || h.trustDomain == "" {
 		// Nothing to mint with, so there is nothing safe to return.
 		//
@@ -90,7 +96,7 @@ func (h *Handler) withCondorCredential(ctx context.Context, username string, sco
 		return ctx, errors.New("no signing key or trust domain is configured, so no HTCondor " +
 			"credential can be minted for this caller; set HTTP_API_SIGNING_KEY and a trust domain")
 	}
-	htcToken, err := h.generateHTCondorTokenWithScopes(username, scopes)
+	htcToken, err := h.generateGrantHTCondorToken(username, identity, scopes)
 	if err != nil {
 		return ctx, fmt.Errorf("minting an HTCondor token for %q: %w", username, err)
 	}
@@ -123,7 +129,7 @@ func (h *Handler) withCondorCredential(ctx context.Context, username string, sco
 		if err := stillValid(rctx); err != nil {
 			return nil, err
 		}
-		tok, err := h.generateHTCondorTokenWithScopes(username, scopes)
+		tok, err := h.generateGrantHTCondorToken(username, identity, scopes)
 		if err != nil {
 			return nil, fmt.Errorf("minting an HTCondor token for %q: %w", username, err)
 		}

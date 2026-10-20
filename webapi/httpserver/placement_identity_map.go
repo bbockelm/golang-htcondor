@@ -291,13 +291,21 @@ func placementProjectClaim(project string) map[string]any {
 // placementMintBound limits a token minted for an OAuth2 subject that a
 // placementd session authorized.
 type placementMintBound struct {
-	Identity string
-	Levels   []string
-	Project  string
+	Levels  []string
+	Project string
 }
 
+// errPlacementGrantIdentity refuses a grant of a placementd account that
+// does not name the identity whose sign-in authorized it, or names one that
+// never signed in as the account. Several identities can map to one account
+// with different grants and projects, so without its own identity there is
+// no bound the grant can be held to.
+var errPlacementGrantIdentity = errors.New("this grant does not name the sign-in identity that authorized it; authorize it again")
+
 // recordPlacementSubject remembers that the OAuth2 subject sd.Username is a
-// placementd account, so every token minted for its grants is bounded.
+// placementd account reached through sd.PlacementIdentity, so every token
+// minted for the grants that identity authorizes is bounded by what it
+// holds. Each identity of an account keeps its own bound.
 func (h *Handler) recordPlacementSubject(ctx context.Context, sd *SessionData) error {
 	if !sd.IsPlacementd() || h.db == nil {
 		return nil
@@ -309,25 +317,49 @@ func (h *Handler) recordPlacementSubject(ctx context.Context, sd *SessionData) e
 	}
 	_, err := h.db.ExecContext(ctx, `INSERT INTO placement_oauth_subjects
 		(subject, identity, authorizations, project, mapping_expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(subject) DO UPDATE SET identity = excluded.identity, authorizations = excluded.authorizations,
+		ON CONFLICT(subject, identity) DO UPDATE SET authorizations = excluded.authorizations,
 		project = excluded.project, mapping_expires_at = excluded.mapping_expires_at, updated_at = excluded.updated_at`,
 		sd.Placement.Account, sd.PlacementIdentity, string(authz), sd.Placement.Project, exp, time.Now().Unix())
 	return err
 }
 
-// placementSubjectBound returns the bound for an OAuth2 subject a placementd
-// session authorized, or nil when it is not one. An error is fatal to the
-// mint: without the bound there is nothing to stay within.
-func (h *Handler) placementSubjectBound(ctx context.Context, subject string) (*placementMintBound, error) {
+// placementSubjectRecorded reports whether any placementd session has
+// authorized grants for subject.
+func (h *Handler) placementSubjectRecorded(ctx context.Context, subject string) (bool, error) {
 	if h.db == nil || subject == "" {
-		return nil, nil
+		return false, nil
 	}
-	var identity, authz, project string
-	var exp int64
-	err := h.db.QueryRowContext(ctx, `SELECT identity, authorizations, project, mapping_expires_at
-		FROM placement_oauth_subjects WHERE subject = ?`, subject).Scan(&identity, &authz, &project, &exp)
+	var one int
+	err := h.db.QueryRowContext(ctx, `SELECT 1 FROM placement_oauth_subjects WHERE subject = ? LIMIT 1`,
+		subject).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading the placementd bound for %s: %w", subject, err)
+	}
+	return true, nil
+}
+
+// placementSubjectBound returns the bound for a grant of subject that
+// identity authorized, or nil when no placementd session authorized grants
+// for subject. A subject that has bounds but none for identity -- identity
+// empty included -- is errPlacementGrantIdentity. Any error is fatal to the
+// mint: without the bound there is nothing to stay within.
+func (h *Handler) placementSubjectBound(ctx context.Context, subject, identity string) (*placementMintBound, error) {
+	recorded, err := h.placementSubjectRecorded(ctx, subject)
+	if err != nil || !recorded {
+		return nil, err
+	}
+	if identity == "" {
+		return nil, errPlacementGrantIdentity
+	}
+	var authz, project string
+	var exp int64
+	err = h.db.QueryRowContext(ctx, `SELECT authorizations, project, mapping_expires_at
+		FROM placement_oauth_subjects WHERE subject = ? AND identity = ?`, subject, identity).Scan(&authz, &project, &exp)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errPlacementGrantIdentity
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading the placementd bound for %s: %w", subject, err)
@@ -341,18 +373,19 @@ func (h *Handler) placementSubjectBound(ctx context.Context, subject string) (*p
 	if exp != 0 && time.Unix(exp, 0).Before(time.Now()) {
 		grants = nil
 	}
-	return &placementMintBound{Identity: identity, Levels: placementLevels(grants), Project: project}, nil
+	return &placementMintBound{Levels: placementLevels(grants), Project: project}, nil
 }
 
-// updatePlacementSubject stores a re-read account for subject, or forgets
-// the grants when info is nil (the identity no longer maps to it).
+// updatePlacementSubject stores a re-read account for the bound of subject
+// through identity, or forgets its grants when info is nil (identity no
+// longer maps to subject). Other identities' bounds are untouched.
 func (h *Handler) updatePlacementSubject(ctx context.Context, subject, identity string, info *PlacementAccountInfo) {
 	if h.db == nil {
 		return
 	}
 	if info == nil {
 		_, _ = h.db.ExecContext(ctx, `UPDATE placement_oauth_subjects SET authorizations = '', updated_at = ?
-			WHERE subject = ?`, time.Now().Unix(), subject)
+			WHERE subject = ? AND identity = ?`, time.Now().Unix(), subject, identity)
 		return
 	}
 	authz, _ := json.Marshal(info.Authorizations)
@@ -360,9 +393,35 @@ func (h *Handler) updatePlacementSubject(ctx context.Context, subject, identity 
 	if !info.MappingExpiresAt.IsZero() {
 		exp = info.MappingExpiresAt.Unix()
 	}
-	_, _ = h.db.ExecContext(ctx, `UPDATE placement_oauth_subjects SET identity = ?, authorizations = ?,
-		mapping_expires_at = ?, updated_at = ? WHERE subject = ?`,
-		identity, string(authz), exp, time.Now().Unix(), subject)
+	_, _ = h.db.ExecContext(ctx, `UPDATE placement_oauth_subjects SET authorizations = ?,
+		mapping_expires_at = ?, updated_at = ? WHERE subject = ? AND identity = ?`,
+		string(authz), exp, time.Now().Unix(), subject, identity)
+}
+
+// grantIdentityKey carries, on a context, the sign-in identity of the grant
+// being approved or re-checked.
+type grantIdentityKey struct{}
+
+// withGrantIdentityContext records identity on ctx for the token minted to
+// probe the access point on that grant's behalf; "" leaves ctx as it is.
+func withGrantIdentityContext(ctx context.Context, identity string) context.Context {
+	if identity == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, grantIdentityKey{}, identity)
+}
+
+// grantIdentityFromContext is the identity withGrantIdentityContext
+// recorded, or "".
+func grantIdentityFromContext(ctx context.Context) string {
+	identity, _ := ctx.Value(grantIdentityKey{}).(string)
+	return identity
+}
+
+// mintGrantProbeToken mints the schedd-acl oracle's probe token for the
+// grant whose identity ctx carries.
+func (h *Handler) mintGrantProbeToken(ctx context.Context, username string, scopes []string) (string, error) {
+	return h.generateGrantHTCondorToken(username, grantIdentityFromContext(ctx), scopes)
 }
 
 // boundPlacementAuthz applies a placementd bound to the levels a grant's
@@ -392,6 +451,17 @@ func (h *Handler) refuseForPlacementdSession(w http.ResponseWriter, r *http.Requ
 	}
 	h.writeError(w, http.StatusForbidden, what+" is not available to accounts assigned by the placement service.")
 	return true
+}
+
+// approvingPlacementIdentity is the identity of the placementd-mapped
+// session approving a grant for username, or "" when the approver is not
+// one (a local account, or a name the user header asserted).
+func (h *Handler) approvingPlacementIdentity(r *http.Request, username string) string {
+	sd, ok := h.placementdSession(r)
+	if !ok || sd.Username != username {
+		return ""
+	}
+	return sd.PlacementIdentity
 }
 
 // placementdSessionFromContext reports the placementd session behind a

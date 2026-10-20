@@ -542,7 +542,11 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 			fosite.ErrServerError.WithDescription("Failed to continue authorization"))
 		return
 	}
-	s.oauth2StateStore.StoreWithUsername(consentState, ar, "", subject, userGroups)
+	placementIdentity := ""
+	if mapped.placement != nil {
+		placementIdentity = li.placementID
+	}
+	s.oauth2StateStore.StoreForConsent(consentState, ar, subject, userGroups, placementIdentity)
 	s.oauth2StateStore.Remove(state)
 
 	s.logger.Info(logging.DestinationHTTP, "Authenticated via SSO, redirecting to consent",

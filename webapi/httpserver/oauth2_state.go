@@ -35,6 +35,10 @@ type OAuth2StateEntry struct {
 	OriginalURL      string   // Original URL to redirect back to after authentication
 	Username         string   // Authenticated username for consent flow
 	Groups           []string // User groups for scope filtering in consent flow
+	// PlacementIdentity is the sign-in identity of a placementd-mapped
+	// approver, recorded on the grant consent creates so its tokens are
+	// bounded by what that identity holds. Empty for every other approver.
+	PlacementIdentity string
 	// BrowserBinding is the login-binding nonce held in a cookie by the
 	// browser that started this login (see login_binding.go). The SSO
 	// callback accepts the state only from a browser presenting it.
@@ -104,6 +108,28 @@ func (s *OAuth2StateStore) StoreWithUsername(state string, ar fosite.AuthorizeRe
 		entry.Groups = groups[0]
 	}
 	s.insert(state, entry)
+}
+
+// StoreForConsent is StoreWithUsername for an approver a placementd mapping
+// signed in through placementIdentity ("" for any other approver).
+func (s *OAuth2StateStore) StoreForConsent(state string, ar fosite.AuthorizeRequester, username string, groups []string, placementIdentity string) {
+	s.insert(state, &OAuth2StateEntry{
+		AuthorizeRequest:  ar,
+		Username:          username,
+		Groups:            groups,
+		PlacementIdentity: placementIdentity,
+	})
+}
+
+// PlacementIdentity is the placementd identity stored for state's consent,
+// or "".
+func (s *OAuth2StateStore) PlacementIdentity(state string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if entry, ok := s.entries[state]; ok {
+		return entry.PlacementIdentity
+	}
+	return ""
 }
 
 // StoreForBrowser stores the state of a login that leaves for the IdP
