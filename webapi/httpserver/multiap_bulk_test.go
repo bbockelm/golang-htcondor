@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
 )
@@ -204,5 +205,60 @@ func TestMultiAPBulkWithNoAPs(t *testing.T) {
 	rec := doAlice(t, srv, http.MethodPost, "/api/v1/jobs/hold", `{"constraint":"true"}`)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("bulk hold with no APs = %d %s, want 503", rec.Code, rec.Body.String())
+	}
+}
+
+// An AP that matched nothing did not act, even when its schedd -- one built
+// between 2025-02-24 and 2026-04-14 -- sends an uninitialised
+// result_total_6 (AR_LIMIT_EXCEEDED); a 25.8.0 schedd sent 1840092560.
+// Read as a count, it made the AP "acted" with ~1.84e9 errors, turned the
+// 404 into a 200 and noted a write that never happened.
+func TestMultiAPBulkIgnoresLimitGarbage(t *testing.T) {
+	keyFile := writeTestSigningKey(t)
+	fs := fakeschedd.Start(t, keyFile, "test.domain")
+	fs.SetActionReplyAttr("result_total_6", 1840092560)
+	reg := multiaptest.NewRegistry(ap1).WithSchedds(func(string) string { return fs.Addr() })
+	hub := multiaptest.NewHub(t)
+	// Stale, so the AP is contacted whatever the hub holds.
+	hub.PutSource(ap1, multiap.StateStale, 500)
+	svc := multiAPService(t, hub, reg)
+	srv, err := NewServer(Config{
+		MultiAP:                  MultiAPConfig{ScheddConstraint: `regexp("^ap", Name)`, service: svc, BulkFresh: time.Minute},
+		Logger:                   newTestLogger(t),
+		OAuth2DBPath:             t.TempDir() + "/oauth2.db",
+		UserHeader:               "X-Remote-User",
+		UserHeaderTrustAnyUnsafe: true,
+		SigningKeyPath:           keyFile,
+		TrustDomain:              "test.domain",
+		UIDDomain:                "d",
+		WebUIAdminGroup:          "admins",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv.setupRoutes()
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/jobs/hold"},
+		{http.MethodPost, "/api/v1/jobs/release"},
+		{http.MethodDelete, "/api/v1/jobs"},
+	} {
+		rec := doAlice(t, srv, c.method, c.path, `{"constraint":"ClusterId == 99"}`)
+		var body MultiAPBulkResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s %s: %d %s", c.method, c.path, rec.Code, rec.Body.String())
+		}
+		if len(body.APs) != 1 || body.APs[0].Status != multiap.BulkNoMatch {
+			t.Errorf("%s %s: APs = %+v, want %s no_match", c.method, c.path, body.APs, ap1)
+		}
+		if rec.Code != http.StatusNotFound || body.Totals != (multiap.BulkCounts{}) {
+			t.Errorf("%s %s matching nothing = %d totals %+v, want 404 and zero", c.method, c.path, rec.Code, body.Totals)
+		}
+	}
+	if svc.WroteSince(ap1, time.Hour) {
+		t.Error("a bulk action that matched nothing noted a write")
+	}
+	if acted := fs.ActedOn(); len(acted) != 0 {
+		t.Errorf("acted on %v", acted)
 	}
 }

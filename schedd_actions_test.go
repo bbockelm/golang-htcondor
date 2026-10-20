@@ -3,6 +3,7 @@ package htcondor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -88,7 +89,7 @@ func TestParseJobActionResults(t *testing.T) {
 	_ = ad.Set("result_total_5", int64(1)) // PermissionDenied
 	_ = ad.Set("result_total_6", int64(2)) // LimitExceeded
 
-	results := parseJobActionResults(ad)
+	results := parseJobActionResults(ad, JA_RELEASE_JOBS)
 
 	// TotalJobs is the sum of all AR_* result counts:
 	// 8 (success) + 1 (not found) + 1 (permission denied) + 2 (limit exceeded) = 12.
@@ -166,7 +167,7 @@ func TestParseJobActionResultsIgnoresQueueSize(t *testing.T) {
 	_ = ad.Set("TotalJobAds", int64(52926))
 	_ = ad.Set("result_total_1", int64(2))
 
-	if got := parseJobActionResults(ad).TotalJobs; got != 2 {
+	if got := parseJobActionResults(ad, JA_REMOVE_JOBS).TotalJobs; got != 2 {
 		t.Errorf("TotalJobs = %d, want 2 (the jobs acted on, not the queue)", got)
 	}
 }
@@ -178,9 +179,72 @@ func TestParseJobActionResultsIgnoresNegativeCounts(t *testing.T) {
 	_ = ad.Set("result_total_1", int64(1))
 	_ = ad.Set("result_total_6", int64(-1748915244))
 
-	results := parseJobActionResults(ad)
+	results := parseJobActionResults(ad, JA_RELEASE_JOBS)
 	if results.LimitExceeded != 0 || results.TotalJobs != 1 {
 		t.Errorf("got LimitExceeded=%d TotalJobs=%d, want 0 and 1", results.LimitExceeded, results.TotalJobs)
+	}
+}
+
+// limitGarbage is a result_total_6 a 25.8.0 schedd sent in reply to a hold
+// whose constraint matched nothing.
+const limitGarbage = 1840092560
+
+// replyAd is an ACT_ON_JOBS totals reply from a queue of queued job ads.
+func replyAd(queued, success, limit int64) *classad.ClassAd {
+	ad := classad.New()
+	_ = ad.Set("TotalJobAds", queued)
+	for i := 0; i <= 5; i++ {
+		_ = ad.Set(fmt.Sprintf("result_total_%d", i), int64(0))
+	}
+	_ = ad.Set("result_total_1", success)
+	_ = ad.Set("result_total_6", limit)
+	return ad
+}
+
+// Only a release records AR_LIMIT_EXCEEDED, so on anything else a positive
+// result_total_6 is the uninitialised counter, and a hold matching nothing
+// must still read as nothing matched.
+func TestParseJobActionResultsIgnoresLimitOutsideRelease(t *testing.T) {
+	for _, action := range []JobAction{JA_HOLD_JOBS, JA_REMOVE_JOBS, JA_REMOVE_X_JOBS, JA_SUSPEND_JOBS} {
+		results := parseJobActionResults(replyAd(40, 0, limitGarbage), action)
+		if results.LimitExceeded != 0 || results.TotalJobs != 0 {
+			t.Errorf("action %d: LimitExceeded=%d TotalJobs=%d, want 0 and 0", action, results.LimitExceeded, results.TotalJobs)
+		}
+		if err := error(&JobActionRefusedError{Results: results}); !errors.Is(err, ErrNoJobsMatched) {
+			t.Errorf("action %d: a refusal matching nothing is not ErrNoJobsMatched: %v", action, err)
+		}
+		// Small garbage too: it is the action, not the size, that rules it out.
+		if got := parseJobActionResults(replyAd(40, 1, 3), action).LimitExceeded; got != 0 {
+			t.Errorf("action %d: LimitExceeded=%d from a small result_total_6, want 0", action, got)
+		}
+	}
+}
+
+// A release can be over a limit only for jobs in the queue, so a count
+// above TotalJobAds is the uninitialised counter.
+func TestParseJobActionResultsIgnoresLimitAboveQueue(t *testing.T) {
+	results := parseJobActionResults(replyAd(40, 0, limitGarbage), JA_RELEASE_JOBS)
+	if results.LimitExceeded != 0 || results.TotalJobs != 0 {
+		t.Errorf("LimitExceeded=%d TotalJobs=%d, want 0 and 0", results.LimitExceeded, results.TotalJobs)
+	}
+	if got := parseJobActionResults(replyAd(40, 0, 41), JA_RELEASE_JOBS).LimitExceeded; got != 0 {
+		t.Errorf("LimitExceeded=%d with 40 jobs queued, want 0", got)
+	}
+}
+
+// A release refused by SYSTEM_MAX_RELEASES is still reported.
+func TestParseJobActionResultsKeepsReleaseLimit(t *testing.T) {
+	results := parseJobActionResults(replyAd(40, 1, 2), JA_RELEASE_JOBS)
+	if results.LimitExceeded != 2 || results.TotalJobs != 3 {
+		t.Errorf("LimitExceeded=%d TotalJobs=%d, want 2 and 3", results.LimitExceeded, results.TotalJobs)
+	}
+	// Every job in the queue over the limit is still a real count.
+	if got := parseJobActionResults(replyAd(2, 0, 2), JA_RELEASE_JOBS).LimitExceeded; got != 2 {
+		t.Errorf("LimitExceeded=%d with every queued job over the limit, want 2", got)
+	}
+	err := &JobActionRefusedError{Results: parseJobActionResults(replyAd(2, 0, 2), JA_RELEASE_JOBS)}
+	if errors.Is(err, ErrNoJobsMatched) {
+		t.Errorf("a release refused over the limit reads as nothing matched: %v", err)
 	}
 }
 

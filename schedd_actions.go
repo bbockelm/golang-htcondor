@@ -239,7 +239,7 @@ func (s *Schedd) actOnJobs(
 		// that matches nothing lands here too, with every count zero: the
 		// schedd reports AR_NOT_FOUND only for an ID it was named, never for
 		// a constraint.
-		results := parseJobActionResults(resultAd)
+		results := parseJobActionResults(resultAd, action)
 		return results, &JobActionRefusedError{Results: results}
 	}
 
@@ -275,15 +275,16 @@ func (s *Schedd) actOnJobs(
 		return nil, fmt.Errorf("failed to read confirmation: %w", err)
 	}
 	if confirmation != 1 { // OK = 1
-		return parseJobActionResults(resultAd), fmt.Errorf("schedd failed to commit changes: result=%d", confirmation)
+		return parseJobActionResults(resultAd, action), fmt.Errorf("schedd failed to commit changes: result=%d", confirmation)
 	}
 
 	// Parse and return results
-	return parseJobActionResults(resultAd), nil
+	return parseJobActionResults(resultAd, action), nil
 }
 
 // parseJobActionResults extracts job action results from the result ClassAd
-func parseJobActionResults(resultAd *classad.ClassAd) *JobActionResults {
+// of the given action.
+func parseJobActionResults(resultAd *classad.ClassAd, action JobAction) *JobActionResults {
 	results := &JobActionResults{
 		ResultAd: resultAd,
 	}
@@ -294,10 +295,8 @@ func parseJobActionResults(resultAd *classad.ClassAd) *JobActionResults {
 	// AR_ALREADY_DONE = 4, AR_PERMISSION_DENIED = 5, AR_LIMIT_EXCEEDED = 6
 	// (JobActionResults::publishResults, src/condor_daemon_client/dc_schedd.cpp:1524)
 	//
-	// A count below zero is not a count. Schedds built between 2025-02-24
-	// and 2026-04-14 publish result_total_6 from an uninitialized field
-	// (HTCONDOR-2926, fixed by HTCONDOR-3665), and the garbage is as often
-	// hugely negative as not; summed in, it makes TotalJobs negative.
+	// A count below zero is not a count: the uninitialised result_total_6
+	// (see limitExceeded) is as often hugely negative as not.
 	count := func(index int) int {
 		val, ok := resultAd.EvaluateAttrInt(fmt.Sprintf("result_total_%d", index))
 		if !ok || val < 0 {
@@ -311,7 +310,7 @@ func parseJobActionResults(resultAd *classad.ClassAd) *JobActionResults {
 	results.BadStatus = count(int(AR_BAD_STATUS))
 	results.AlreadyDone = count(int(AR_ALREADY_DONE))
 	results.PermissionDenied = count(int(AR_PERMISSION_DENIED))
-	results.LimitExceeded = count(int(AR_LIMIT_EXCEEDED))
+	results.LimitExceeded = limitExceeded(resultAd, action, count(int(AR_LIMIT_EXCEEDED)))
 
 	// The jobs the action was attempted on: every job has exactly one
 	// outcome. The reply also carries TotalJobAds, which an earlier version
@@ -321,6 +320,30 @@ func parseJobActionResults(resultAd *classad.ClassAd) *JobActionResults {
 	results.TotalJobs = results.Attempted()
 
 	return results
+}
+
+// limitExceeded is the AR_LIMIT_EXCEEDED count n as far as it can be
+// believed. This is not dead code: schedds built between 2025-02-24 and
+// 2026-04-14 (HTCONDOR-2926, fixed by HTCONDOR-3665) publish
+// result_total_6 from a counter they never initialise, so it is whatever
+// was in that memory -- a hold matching nothing came back with 1840092560,
+// which read as nearly two billion jobs over a schedd limit.
+//
+// The schedd records the outcome in one place only: releasing a job held
+// more than SYSTEM_MAX_RELEASES times (Scheduler::actOnJobs,
+// src/condor_schedd.V6/schedd.cpp:8152-8166). For every other action the
+// count can only be garbage. For a release each one is a distinct job in the
+// queue, so it cannot exceed TotalJobAds, the job ads the schedd last
+// counted there; a value that does is garbage. (Garbage smaller than
+// that is indistinguishable from a real count.)
+func limitExceeded(resultAd *classad.ClassAd, action JobAction, n int) int {
+	if action != JA_RELEASE_JOBS {
+		return 0
+	}
+	if queued, ok := resultAd.EvaluateAttrInt("TotalJobAds"); ok && int64(n) > queued {
+		return 0
+	}
+	return n
 }
 
 // Attempted is the number of jobs the action reached: every one has exactly
