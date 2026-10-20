@@ -123,9 +123,14 @@ type PlacementLoginResult struct {
 type PlacementUser struct {
 	// UserName is the sign-in identity.
 	UserName string
-	// APUserID is the local AP account the identity maps to (the token's
-	// subject).
+	// APUserID is the subject of the identity's newest unexpired token,
+	// falling back to the mapped account when it has none. It can name an
+	// account the identity no longer maps to; see MappedAccount.
 	APUserID string
+	// MappedAccount is the account the placementd's map names for the
+	// identity: empty when the identity is unmapped or the daemon predates
+	// the attribute. Prefer it over APUserID when set.
+	MappedAccount string
 	// TokenExpiration is when the newest unexpired token for this user runs
 	// out; the zero time means no live token.
 	TokenExpiration time.Time
@@ -453,6 +458,7 @@ func (p *Placementd) QueryUsers(ctx context.Context, userName string) ([]Placeme
 		u := PlacementUser{}
 		u.UserName, _ = a.EvaluateAttrString("UserName")
 		u.APUserID, _ = a.EvaluateAttrString("ApUserId")
+		u.MappedAccount, _ = a.EvaluateAttrString("MappedAccount")
 		u.TokenExpiration = placementUnix(a, "TokenExpiration")
 		// The daemon spells this attribute "MappingExpration" (sic). Read
 		// the corrected spelling too so we keep working if that is fixed.

@@ -25,6 +25,35 @@ type onboardFake struct {
 	names    []string
 	logins   []htcondor.PlacementLoginRequest
 	tokenExp time.Time
+
+	// apiVersion 2 or more makes the fake a daemon with the directory
+	// commands: Query answers Identity lookups from identities, which
+	// need not agree with the token-derived accounts in users.
+	apiVersion int
+	identities []htcondor.PlacementIdentity
+}
+
+func (f *onboardFake) APIVersion(context.Context) (int, error) { return f.apiVersion, nil }
+
+func (f *onboardFake) Query(_ context.Context, q htcondor.PlacementQuery) ([]htcondor.PlacementObject, error) {
+	f.record(q.Key)
+	if f.apiVersion < htcondor.PlacementdAPIVersionDirectory {
+		return nil, errors.New("onboardFake: no PLACEMENT_QUERY")
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	if q.TargetType != htcondor.PlacementTargetIdentity {
+		return nil, nil
+	}
+	var out []htcondor.PlacementObject
+	for i := range f.identities {
+		if q.Key == "" || f.identities[i].Identity == q.Key {
+			id := f.identities[i]
+			out = append(out, htcondor.PlacementObject{Type: htcondor.PlacementTargetIdentity, Identity: &id})
+		}
+	}
+	return out, nil
 }
 
 func (f *onboardFake) record(name string) {

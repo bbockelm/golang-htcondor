@@ -249,35 +249,29 @@ func (h *Handler) reauthorizePlacementIdentity(ctx context.Context, identity, wa
 		return "", errors.New("the placement service is not available")
 	}
 	pctx := htcondor.WithDaemonCredential(ctx, "placement grant refresh: the grant's own identity")
-	users, err := h.placementd.QueryUsers(pctx, identity)
+	m, err := h.placementMappingFor(pctx, identity)
 	if err != nil {
 		return "", fmt.Errorf("asking the placement service about %s: %w", identity, err)
 	}
-	var user *htcondor.PlacementUser
-	for i := range users {
-		if users[i].UserName == identity {
-			user = &users[i]
-		}
-	}
 	switch {
-	case user == nil || !user.Authorized:
+	case m == nil:
 		h.updatePlacementSubject(ctx, wantAccount, identity, nil)
 		return "the sign-in identity is no longer authorized by the placement service", nil
-	case !user.MappingExpiration.IsZero() && !user.MappingExpiration.After(time.Now()):
+	case m.expired(time.Now()):
 		h.updatePlacementSubject(ctx, wantAccount, identity, nil)
 		return "the sign-in identity's access has expired", nil
-	case wantAccount != "" && user.APUserID != wantAccount:
+	case wantAccount != "" && m.Account != wantAccount:
 		h.updatePlacementSubject(ctx, wantAccount, identity, nil)
 		return "the sign-in identity now maps to a different account", nil
 	}
 	if wantAccount != "" {
 		h.updatePlacementSubject(ctx, wantAccount, identity, &PlacementAccountInfo{
-			Account: user.APUserID, Authorizations: user.Authorizations, MappingExpiresAt: user.MappingExpiration,
+			Account: m.Account, Authorizations: m.Authorizations, MappingExpiresAt: m.ExpiresAt,
 		})
 	}
-	if user.APUserID != "" {
+	if m.Account != "" {
 		oracle := &UserRecordOracle{Lookup: h.placementUserRecordLookup, Logger: h.logger}
-		if decision, err := oracle.CheckAccount(ctx, user.APUserID); err == nil && decision.Status == UserStatusRevoked {
+		if decision, err := oracle.CheckAccount(ctx, m.Account); err == nil && decision.Status == UserStatusRevoked {
 			return decision.Reason, nil
 		}
 	}
