@@ -23,7 +23,9 @@ import (
 // unexpired and holds READ or WRITE, and the web UI's access group. Its input
 // is only what the session stored at sign-in -- the provider's subject and
 // groups and the placement identity it verified -- never anything from the
-// request.
+// request. Where groups come from the system, the stored provider groups are
+// not used: the new session gets the account's system groups, as a sign-in
+// would.
 //
 // Only a server whose HTTP_API_IDENTITY_MAP names placementd does this: that
 // is the mapping an administrator changes from this server.

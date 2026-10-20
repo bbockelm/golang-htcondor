@@ -16,6 +16,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
+	"github.com/bbockelm/golang-htcondor/droppriv"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -729,8 +730,9 @@ type loginIdentity struct {
 // loginMapping is HTTP_API_IDENTITY_MAP's answer for a sign-in.
 type loginMapping struct {
 	// subject and groups are what the sign-in proceeds as: a local
-	// account and its groups, a placementd account and the provider's
-	// groups, or the provider's own subject when nothing translates it.
+	// account and its groups, a placementd account and its groups (the
+	// provider's, or the system's when groups come from the system), or
+	// the provider's own subject when nothing translates it.
 	subject string
 	groups  []string
 	// placement is the account, when the placementd mapped the sign-in.
@@ -815,8 +817,45 @@ func (s *Handler) mapLoginIdentity(ctx context.Context, li loginIdentity, hint s
 		// The account is the placementd's answer for this identity and
 		// nothing else.
 		m.subject = m.placement.Account
+		if s.localIdentity.sourcesGroups() {
+			m.groups = s.placementAccountGroups(ctx, li, m.placement.Account)
+		}
 	}
 	return m
+}
+
+// placementAccountGroups is a placementd account's groups where groups come
+// from the system: the system's groups for the account's local part when
+// the account is in UID_DOMAIN, and none otherwise. The provider's groups
+// claim is never used. Those groups decide who is an administrator, so a
+// provider that could assert a group named like an admin group would
+// otherwise make any account it vouches for one. An account in another
+// domain is not the local account of the same name, and a failed lookup is
+// no groups: either way the session gets fewer permissions, never more.
+func (s *Handler) placementAccountGroups(ctx context.Context, li loginIdentity, account string) []string {
+	if len(li.groups) > 0 {
+		s.logger.Info(logging.DestinationSecurity, "Ignoring the identity provider's groups for a placementd account; groups come from the system",
+			"identity", li.placementID, "account", account, "provider_groups", len(li.groups))
+	}
+	i := strings.LastIndex(account, "@")
+	if i <= 0 || s.uidDomain == "" || !strings.EqualFold(account[i+1:], s.uidDomain) {
+		return nil
+	}
+	groups, err := s.localIdentity.groups.LookupGroups(ctx, account[:i])
+	var degraded *droppriv.DegradedError
+	switch {
+	case errors.As(err, &degraded):
+		s.logger.Warn(logging.DestinationHTTP,
+			"Group list is incomplete; this session may have fewer permissions than it should",
+			"account", account, "unavailable_source", degraded.Source,
+			"groups", degraded.Groups, "error", degraded.Err)
+		return degraded.Groups
+	case err != nil:
+		s.logger.Warn(logging.DestinationHTTP, "Could not read a placementd account's groups; it has none",
+			"account", account, "error", err)
+		return nil
+	}
+	return groups
 }
 
 // commitLoginMapping does what a mapped sign-in needs before anything is
