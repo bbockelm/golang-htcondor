@@ -21,7 +21,7 @@
 # Everything lives under RUNDIR, which "up" creates and must not exist.
 # RUNDIR/env is shell syntax exporting what the tests need: CONDOR_CONFIG,
 # PATH, the base URL, the server log the admin password is printed to, and
-# the second IdP user's password.
+# the passwords of the IdP users with no AP account.
 set -euo pipefail
 
 die() { echo "harness: $*" >&2; exit 1; }
@@ -255,9 +255,13 @@ up() {
 	wait_for "/login to redirect to the IdP" 30 api_login_redirects || { logs; exit 1; }
 	grep -q '^Password:' "$RUNDIR/api/stdout.log" || { logs; die "htcondor-api printed no IdP admin password"; }
 
-	local newbie_pw
+	# Two people with no AP account: one asks for access, the other is
+	# onboarded by the admin.
+	local newbie_pw postdoc_pw
 	newbie_pw=$(python3 -I -c 'import secrets; print(secrets.token_urlsafe(18))')
+	postdoc_pw=$(python3 -I -c 'import secrets; print(secrets.token_urlsafe(18))')
 	add_idp_user newbie "$newbie_pw"
+	add_idp_user postdoc "$postdoc_pw"
 
 	{
 		printf 'export CONDOR_CONFIG=%q\n' "$CONDOR_CONFIG"
@@ -268,6 +272,7 @@ up() {
 		printf 'export E2E_SERVER_LOG=%q\n' "$RUNDIR/api/stdout.log"
 		printf 'export E2E_CA_CERT=%q\n' "$RUNDIR/tls/ca.crt"
 		printf 'export E2E_NEWBIE_PASSWORD=%q\n' "$newbie_pw"
+		printf 'export E2E_POSTDOC_PASSWORD=%q\n' "$postdoc_pw"
 		printf 'export E2E_UID_DOMAIN=%q\n' "$DOMAIN"
 	} > "$RUNDIR/env"
 	chmod 600 "$RUNDIR/env"

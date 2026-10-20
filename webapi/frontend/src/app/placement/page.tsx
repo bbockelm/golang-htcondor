@@ -3,9 +3,10 @@
 // /placement: request a placement token for the signed-in person. Reached by
 // every session, including one with no local account on this access point.
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type PlacementIssued } from '@/lib/api';
+import { PlacementAccessRequest } from '@/components/PlacementAccessRequest';
 import {
   IssuedTokenDetails,
   PlacementTokenRequest,
@@ -40,6 +41,12 @@ export default function PlacementPage() {
     void queryClient.invalidateQueries({ queryKey: ['session'] });
     void queryClient.invalidateQueries({ queryKey: ['placement', 'me'] });
   };
+  // An approved request: the session is asked for again, which gives a
+  // signed-in person their account, and the token form reads their access.
+  const onApproved = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ['session'] });
+    void queryClient.invalidateQueries({ queryKey: ['placement', 'me'], exact: true });
+  }, [queryClient]);
   const name =
     session.data?.placement?.display_name ||
     session.data?.placement?.identity ||
@@ -77,7 +84,10 @@ export default function PlacementPage() {
       {issued ? (
         <IssuedToken issued={issued} name={name} onAnother={() => setIssued(null)} />
       ) : (
-        <PlacementTokenRequest onIssued={setIssued} />
+        <PlacementTokenRequest
+          onIssued={setIssued}
+          unauthorized={() => <PlacementAccessRequest onApproved={onApproved} />}
+        />
       )}
     </div>
   );

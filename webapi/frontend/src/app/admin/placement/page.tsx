@@ -27,6 +27,9 @@ import {
   type PlacementUser,
 } from '@/lib/api';
 import { Directory } from './Directory';
+import { Requests } from './Requests';
+import { CountBadge } from '@/components/CountBadge';
+import { placementAdmin } from '@/lib/placementAdmin';
 import { MapfileStatusBanner } from './MapfileStatusBanner';
 import {
   PlacementProjectsTab,
@@ -34,7 +37,7 @@ import {
   type PlacementRecordTarget,
 } from '@/components/PlacementRecordDrawer';
 
-type Tab = 'users' | 'projects' | 'tokens' | 'authorizations';
+type Tab = 'users' | 'requests' | 'projects' | 'tokens' | 'authorizations';
 
 export default function AdminPlacementPage() {
   const status = useQuery({
@@ -54,6 +57,13 @@ export default function AdminPlacementPage() {
   const available = status.data?.available === true;
   // A placementd with the directory commands replaces Users with Directory.
   const directory = (status.data?.api_version ?? 1) >= 2;
+
+  // Shared with the sidebar's badge.
+  const pendingRequests = useQuery({
+    queryKey: ['placement', 'requests', 'count'],
+    queryFn: placementAdmin.pendingRequests,
+    enabled: available,
+  });
 
   const authorizations = useQuery({
     queryKey: ['placement', 'authorizations'],
@@ -114,6 +124,10 @@ export default function AdminPlacementPage() {
             <TabButton active={tab === 'users'} onClick={() => setTab('users')}>
               {directory ? 'Directory' : 'Users'}
             </TabButton>
+            <TabButton active={tab === 'requests'} onClick={() => setTab('requests')}>
+              Requests
+              <CountBadge count={pendingRequests.data} label="pending" />
+            </TabButton>
             <TabButton active={tab === 'projects'} onClick={() => setTab('projects')}>
               Projects
             </TabButton>
@@ -150,6 +164,7 @@ export default function AdminPlacementPage() {
               }}
             />
           )}
+          {tab === 'requests' && <Requests />}
           {tab === 'projects' && <PlacementProjectsTab onOpen={setRecord} />}
           {tab === 'tokens' && <TokensTab authzByName={authzByName} />}
           {tab === 'authorizations' && (

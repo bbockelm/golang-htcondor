@@ -513,12 +513,19 @@ func TestPlacementAdminIsDocumented(t *testing.T) {
 		t.Fatalf("openapi does not parse: %v", err)
 	}
 	for path, methods := range map[string][]string{
-		"/placement/admin/{kind}":            {"get", "post"},
-		"/placement/admin/{kind}/{id}":       {"get", "patch", "delete"},
-		"/placement/admin/{kind}/{id}/adopt": {"post"},
-		"/placement/admin/adopt-all":         {"post"},
-		"/placement/admin/batch":             {"post"},
-		"/placement/admin/mapfile-status":    {"get"},
+		"/placement/admin/{kind}":                {"get", "post"},
+		"/placement/admin/{kind}/{id}":           {"get", "patch", "delete"},
+		"/placement/admin/{kind}/{id}/adopt":     {"post"},
+		"/placement/admin/adopt-all":             {"post"},
+		"/placement/admin/batch":                 {"post"},
+		"/placement/admin/mapfile-status":        {"get"},
+		"/placement/admin/requests":              {"get"},
+		"/placement/admin/requests/count":        {"get"},
+		"/placement/admin/requests/{id}":         {"get"},
+		"/placement/admin/requests/{id}/approve": {"post"},
+		"/placement/admin/requests/{id}/deny":    {"post"},
+		"/placement/admin/requests/{id}/resolve": {"post"},
+		"/placement/me/request":                  {"get", "post", "delete"},
 	} {
 		for _, m := range methods {
 			if _, ok := doc.Paths[path][m]; !ok {

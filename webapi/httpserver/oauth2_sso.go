@@ -419,6 +419,10 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		subject: subject, groups: userGroups, placementID: placementID, placementName: placementName,
 		browser: isBrowserFlow, originalURL: originalURL,
 	}
+	// Kept only with a placement identity: it goes on an access request.
+	if placementID != "" {
+		li.email = userInfo.Email
+	}
 	mapped, handled := s.resolveLoginIdentity(w, r, li)
 	if handled {
 		return
@@ -686,6 +690,7 @@ func (s *Handler) startPlacementOnlySession(w http.ResponseWriter, li loginIdent
 		Groups:            li.groups,
 		PlacementIdentity: li.placementID,
 		DisplayName:       li.placementName,
+		Email:             li.email,
 		Scope:             sessionScopePlacement,
 		IDPSubject:        li.subject,
 	})
@@ -715,8 +720,10 @@ var errNoPlacementAccount = errors.New("the placement service maps this sign-in 
 // loginIdentity is what the SSO callback knows when it maps a login.
 type loginIdentity struct {
 	subject, placementID, placementName, originalURL string
-	groups                                           []string
-	browser                                          bool
+	// email is the provider's, kept when there is a placement identity.
+	email   string
+	groups  []string
+	browser bool
 }
 
 // loginMapping is HTTP_API_IDENTITY_MAP's answer for a sign-in.
@@ -848,6 +855,7 @@ func browserSessionData(li loginIdentity, m loginMapping) SessionData {
 		Groups:            m.groups,
 		PlacementIdentity: li.placementID,
 		DisplayName:       li.placementName,
+		Email:             li.email,
 	}
 	if m.placement != nil {
 		sd.IdentitySource = identitySourcePlacementd

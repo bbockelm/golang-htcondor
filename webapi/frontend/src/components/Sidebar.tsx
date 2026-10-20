@@ -2,8 +2,10 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { placementAdmin } from '@/lib/placementAdmin';
+import { CountBadge } from './CountBadge';
 import { ProjectSwitcher } from './ProjectSwitcher';
 
 interface SidebarProps {
@@ -79,6 +81,14 @@ export function Sidebar({
   onClose,
 }: SidebarProps) {
   const pathname = usePathname();
+  // Pending access requests, beside the admin Placement link.
+  const pendingRequests = useQuery({
+    queryKey: ['placement', 'requests', 'count'],
+    queryFn: placementAdmin.pendingRequests,
+    enabled: !!isAdmin && !multiAP,
+    refetchInterval: 60_000,
+    retry: false,
+  });
 
   return (
     <>
@@ -149,6 +159,9 @@ export function Sidebar({
                   onNavigate={onClose}
                 >
                   {item.label}
+                  {item.href === '/admin/placement' && (
+                    <CountBadge count={pendingRequests.data} label="pending access requests" />
+                  )}
                 </NavLink>
               ))}
             </>

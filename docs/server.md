@@ -2592,6 +2592,53 @@ every other caller.
 | `HTTP_API_PLACEMENT_COLLECTOR_HOST` | `COLLECTOR_HOST` shown with a token. Default: `COLLECTOR_HOST`. Read at startup. |
 | `HTTP_API_PLACEMENTD_NAME` | The placementd to use, by the `Name` in its collector ad (or a sinful string). Unset: `PLACEMENTD_HOST` if set, else this access point's own placementd (address file, then a collector ad from this access point's host). Set it only for a placementd that serves this access point from another host. Read at startup. |
 
+### Access requests
+
+Somebody who signs in with an identity the placementd does not map (or
+maps with an expired entry) sees **Request access** on `/placement`
+instead of a dead end: the projects they want, as free text, and a note.
+The request records the identity from the session, never from the request,
+together with the provider's display name and email from sign-in. Each
+identity has at most one pending request; it can be withdrawn, and a new
+one filed after a withdrawal or a denial. Filing is rate-limited: 3 at once
+per identity, then one every 10 minutes, and 10 at once per client
+address, then one a minute. A note is at most 2 KB, and a request names at
+most 10 projects of 64 characters each.
+
+Administrators (`HTTP_API_WEBUI_ADMIN_GROUP`) see the requests on the
+**Requests** tab of `/admin/placement`, with the number pending beside the
+tab and beside Placement in the sidebar. **Approve** opens the Onboard user
+form pre-filled with the identity, the account a map file `*` would give it
+(the part before the last `@`, in `UID_DOMAIN`), the requested projects
+that exist in the directory (matched ignoring case; the others are listed),
+and `READ` and `WRITE`. Approving makes one directory change through the
+placementd, recorded as the approving administrator's with the comment
+`access request #<id>`: the account is created if it does not exist (or
+its grants updated if they differ), then the identity is created and
+mapped to it. The request is marked approved only once that change
+committed, and records the account and the change set. If the identity is
+already in the directory, approval is refused and the request can be
+marked resolved instead, which checks that the identity has access now.
+**Deny** takes a reason, which the requester sees. Approving needs a
+placementd that supports directory management; with an older one the tab
+is read-only.
+
+With `placementd` in `HTTP_API_IDENTITY_MAP`, an approved person who is
+still signed in gets their account without signing in again, as any newly
+onboarded identity does.
+
+Requests are kept in this server's database (`placement_access_requests`);
+the placementd records only who has access. Nothing is sent by email.
+
+| Endpoint | Who |
+| --- | --- |
+| `GET`, `POST`, `DELETE /api/v1/placement/me/request` | The signed-in person, for their own identity. `POST` and `DELETE` require `X-Requested-With`. |
+| `GET /api/v1/placement/admin/requests?status=pending\|approved\|denied\|withdrawn\|all` | Admins. |
+| `GET /api/v1/placement/admin/requests/count` | Admins. |
+| `POST /api/v1/placement/admin/requests/{id}/approve` | Admins. `{account, authorizations, projects, default_project, expires_at, display_name, comment}`; `?dry_run=1` checks only. |
+| `POST /api/v1/placement/admin/requests/{id}/deny` | Admins. `{reason}`. |
+| `POST /api/v1/placement/admin/requests/{id}/resolve` | Admins. `{comment}`. |
+
 ## Configuration
 
 Settings live in HTCondor config (`condor_config_val`-readable) and

@@ -496,6 +496,34 @@ export interface PlacementMe {
   records_available: boolean;
 }
 
+// PlacementAccessRequestStatus is where an access request stands.
+export type PlacementAccessRequestStatus = 'pending' | 'approved' | 'denied' | 'withdrawn';
+
+// PlacementMyRequest is the signed-in person's access request, as they see
+// it.
+export interface PlacementMyRequest {
+  id: number;
+  status: PlacementAccessRequestStatus;
+  projects: string[];
+  note?: string;
+  created_at: string;
+  updated_at: string;
+  decided_at?: string;
+  // The administrator's reason, on a denial.
+  reason?: string;
+  // The account access was granted as, on an approval.
+  account?: string;
+}
+
+// PlacementMyRequestState is the signed-in person's latest access request,
+// with what a new one would record about them.
+export interface PlacementMyRequestState {
+  identity: string;
+  display_name?: string;
+  email?: string;
+  request: PlacementMyRequest | null;
+}
+
 // PlacementIssued is a token issued to the signed-in person. `token` is
 // absent when it went to a device request instead.
 export interface PlacementIssued {
@@ -2402,6 +2430,20 @@ export const api = {
         method: "POST",
         headers: { "X-Requested-With": "XMLHttpRequest" },
         body: JSON.stringify(req),
+      }),
+    // The signed-in person's access request: theirs is the only one they
+    // can read, file or withdraw.
+    myRequest: (): Promise<PlacementMyRequestState> => fetchJSON(`${BASE}/placement/me/request`),
+    requestAccess: (req: { projects: string[]; note: string }): Promise<PlacementMyRequestState> =>
+      fetchJSON(`${BASE}/placement/me/request`, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        body: JSON.stringify(req),
+      }),
+    withdrawRequest: (): Promise<PlacementMyRequestState> =>
+      fetchJSON(`${BASE}/placement/me/request`, {
+        method: "DELETE",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
       }),
     // Choose the project a placement-assigned account's work is charged to.
     setProject: (project: string): Promise<{ project: string }> =>
