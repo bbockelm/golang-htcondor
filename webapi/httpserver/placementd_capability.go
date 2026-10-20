@@ -2,6 +2,8 @@ package httpserver
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -71,14 +73,15 @@ func (s *Handler) placementAPIVersion(ctx context.Context) int {
 		return c.version
 	}
 
-	n, err := htcondor.QueryPlacementdAPIVersion(lookupCtx, s.collector, address)
+	n, err := s.queryPlacementdAPIVersion(lookupCtx, address)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Debug(logging.DestinationHTTP, "Could not read the placementd API version", "error", err)
 		}
 		// Keep what we knew about this daemon rather than flap the UI
-		// on one failed query.
-		if c.address != address || c.version == 0 {
+		// on one failed query. No ad for it is not a failed query: the
+		// version is then unknown, which is 1.
+		if c.address != address || c.version == 0 || errors.Is(err, htcondor.ErrPlacementdAdNotFound) {
 			c.version = 1
 		}
 		c.address = address
@@ -89,4 +92,27 @@ func (s *Handler) placementAPIVersion(ctx context.Context) int {
 	c.version = n
 	c.expires = now.Add(placementCapabilityTTL)
 	return n
+}
+
+// queryPlacementdAPIVersion reads the API version off the collector ad of
+// the placementd at address. Several access points' placementds may share
+// the collector, so the ad must be this one's: its MyAddress, else the one
+// the discovery rule accepts (htcondor.SelectPlacementdAd), never simply the
+// first.
+func (s *Handler) queryPlacementdAPIVersion(ctx context.Context, address string) (int, error) {
+	l := s.placementdLocator
+	if l == nil || l.query == nil {
+		// A placementd supplied rather than discovered: only its address
+		// identifies it.
+		return htcondor.QueryPlacementdAPIVersion(ctx, s.collector, address)
+	}
+	ads, err := l.query(ctx, htcondor.PlacementdAdType, "", htcondor.PlacementdAdProjection())
+	if err != nil {
+		return 0, fmt.Errorf("failed to query collector for placementd ads: %w", err)
+	}
+	ad := htcondor.SelectPlacementdAd(ads, address, l.owns(ctx))
+	if ad == nil {
+		return 0, fmt.Errorf("%w: %d placementd ad(s), none for %s", htcondor.ErrPlacementdAdNotFound, len(ads), address)
+	}
+	return htcondor.PlacementdAPIVersion(ad), nil
 }

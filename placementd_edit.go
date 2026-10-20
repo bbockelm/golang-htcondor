@@ -2,6 +2,7 @@ package htcondor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -152,34 +153,84 @@ func PlacementdAPIVersion(ad *classad.ClassAd) int {
 	return int(v)
 }
 
-// QueryPlacementdAPIVersion asks the collector for the placementd's daemon ad
-// and returns its PlacementdApiVersion. When several placementds advertise,
-// the one whose MyAddress equals address wins; otherwise the first ad does.
-// No ad at all is an error, not version 1, so a caller can tell "old daemon"
-// from "could not look".
+// ErrPlacementdAdNotFound reports that no PlacementD ad in the collector is
+// the placementd a client uses.
+var ErrPlacementdAdNotFound = errors.New("no collector ad for this placementd")
+
+// PlacementdAdProjection is what SelectPlacementdAd and
+// PlacementdAPIVersion read off a PlacementD ad. A query has to name it: the
+// collector's default projection drops the version attribute.
+func PlacementdAdProjection() []string {
+	return []string{"MyAddress", "Name", "Machine", PlacementdAPIVersionAttr}
+}
+
+// SelectPlacementdAd picks, from a collector's PlacementD ads, the ad of the
+// placementd at address, or nil when none is.
+//
+// The ad whose MyAddress is address wins. A placementd's sinful string can
+// differ from its ad's (a restart under shared port renames the socket, and
+// the ad lags), so when none does and accept is non-nil, the one ad accept
+// admits is used; accept identifies the daemon some other way, such as by
+// its Name or its host. Several admitted ads are ambiguous and give nil.
+// There is no "first ad" fallback: in a collector several access points
+// share, the first ad is often another access point's placementd.
+func SelectPlacementdAd(ads []*classad.ClassAd, address string, accept func(*classad.ClassAd) bool) *classad.ClassAd {
+	want := trimSinful(address)
+	if want != "" {
+		for _, ad := range ads {
+			if a, ok := ad.EvaluateAttrString("MyAddress"); ok && trimSinful(a) == want {
+				return ad
+			}
+		}
+	}
+	if accept == nil {
+		return nil
+	}
+	var chosen *classad.ClassAd
+	for _, ad := range ads {
+		if !accept(ad) {
+			continue
+		}
+		if chosen != nil {
+			return nil
+		}
+		chosen = ad
+	}
+	return chosen
+}
+
+func trimSinful(s string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(s), "<"), ">")
+}
+
+// QueryPlacementdAPIVersion asks the collector for the daemon ad of the
+// placementd at address and returns its PlacementdApiVersion. See
+// QueryPlacementdAPIVersionMatching.
 func QueryPlacementdAPIVersion(ctx context.Context, coll *Collector, address string) (int, error) {
+	return QueryPlacementdAPIVersionMatching(ctx, coll, address, nil)
+}
+
+// QueryPlacementdAPIVersionMatching asks the collector for the daemon ad of
+// the placementd at address, chosen as SelectPlacementdAd does, and returns
+// its PlacementdApiVersion. No such ad is an error wrapping
+// ErrPlacementdAdNotFound, not version 1, so a caller can tell "old daemon"
+// from "could not tell".
+func QueryPlacementdAPIVersionMatching(ctx context.Context, coll *Collector, address string, accept func(*classad.ClassAd) bool) (int, error) {
 	if coll == nil {
 		return 0, fmt.Errorf("no collector to query for the placementd ad")
 	}
 	ads, _, err := coll.QueryAdsWithOptions(ctx, PlacementdAdType, "", &QueryOptions{
-		Limit: -1,
-		// The default projection would drop the attribute this asks for.
-		Projection: []string{"MyAddress", "Name", PlacementdAPIVersionAttr},
+		Limit:      -1,
+		Projection: PlacementdAdProjection(),
 	})
 	if err != nil {
 		return 0, fmt.Errorf("failed to query collector for placementd ads: %w", err)
 	}
-	if len(ads) == 0 {
-		return 0, fmt.Errorf("no placementd ads found in collector")
+	ad := SelectPlacementdAd(ads, address, accept)
+	if ad == nil {
+		return 0, fmt.Errorf("%w: %d placementd ad(s), none for %s", ErrPlacementdAdNotFound, len(ads), address)
 	}
-	chosen := ads[0]
-	for _, ad := range ads {
-		if a, ok := ad.EvaluateAttrString("MyAddress"); ok && a == address {
-			chosen = ad
-			break
-		}
-	}
-	return PlacementdAPIVersion(chosen), nil
+	return PlacementdAPIVersion(ad), nil
 }
 
 // PlacementQuery selects entities for Query. TargetType is required; the
