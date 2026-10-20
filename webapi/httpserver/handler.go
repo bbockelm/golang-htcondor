@@ -1128,6 +1128,15 @@ type HandlerConfig struct {
 	// SCHEDD_HOST and COLLECTOR_HOST lines shown with a placement token.
 	PlacementScheddHost    string
 	PlacementCollectorHost string
+	// PlacementPrefillDomains are the identity domains an access request's
+	// account is suggested from (HTTP_API_PLACEMENT_PREFILL_DOMAINS): for
+	// an identity in one of them, the part before its last "@" in
+	// UID_DOMAIN. Empty means no suggestion.
+	PlacementPrefillDomains []string
+	// PlacementRequestRetention is how long a decided or withdrawn access
+	// request is kept (HTTP_API_PLACEMENT_REQUEST_RETENTION). Zero means
+	// 90 days.
+	PlacementRequestRetention time.Duration
 	// PlacementdName pins the placementd by its ad's Name, or by a sinful
 	// string (HTTP_API_PLACEMENTD_NAME, else PLACEMENTD_HOST). Empty
 	// means this access point's own placementd: the local address file,
@@ -3528,6 +3537,7 @@ func (h *Handler) startSessionCleanup(ctx context.Context) {
 			select {
 			case <-ticker.C:
 				h.sessionStore.Cleanup()
+				h.sweepPlacementAccessRequests(ctx)
 				h.logger.Debug(logging.DestinationHTTP, "Cleaned up expired sessions",
 					"active_sessions", h.sessionStore.Size())
 

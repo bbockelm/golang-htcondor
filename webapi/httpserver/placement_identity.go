@@ -48,17 +48,64 @@ func placementIdentityFromClaims(claims map[string]any, order []string) string {
 }
 
 // placementDisplayName is the first listed claim holding a non-empty
-// string, unsanitized: it is only ever shown to its owner.
+// string, as profileText makes it: it is shown to its owner, and to
+// administrators with an access request.
 func placementDisplayName(claims map[string]any, order []string) string {
 	if len(order) == 0 {
 		order = defaultPlacementDisplayNameClaims
 	}
 	for _, name := range order {
-		if v, ok := claims[name].(string); ok && v != "" {
-			return v
+		if v, ok := claims[name].(string); ok {
+			if v = profileText(v); v != "" {
+				return v
+			}
 		}
 	}
 	return ""
+}
+
+// placementEmail is the provider's email claim, as profileText makes it,
+// when the provider says it verified the address (email_verified true);
+// otherwise "". An unverified address is whatever the person typed into
+// their account, and administrators would read it as a fact.
+func placementEmail(claims map[string]any) string {
+	switch v := claims["email_verified"].(type) {
+	case bool:
+		if !v {
+			return ""
+		}
+	case string:
+		if !strings.EqualFold(v, "true") {
+			return ""
+		}
+	default:
+		return ""
+	}
+	email, _ := claims["email"].(string)
+	return profileText(email)
+}
+
+// profileTextMaxLen bounds a name or email kept from the provider, in
+// characters.
+const profileTextMaxLen = 256
+
+// profileText is text a provider sent about a person, made fit to keep
+// and show: control and invisible format characters (bidirectional
+// overrides, zero-width characters) removed, trimmed, and at most
+// profileTextMaxLen characters.
+func profileText(s string) string {
+	s = strings.ToValidUTF8(s, "")
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > profileTextMaxLen {
+		s = strings.TrimSpace(string(r[:profileTextMaxLen]))
+	}
+	return s
 }
 
 // sanitizePlacementUsername is pdwebapp's util.sanitize_username.

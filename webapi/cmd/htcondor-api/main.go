@@ -2207,6 +2207,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		PlacementDeviceClients:     placementDeviceClients(cfg),
 		PlacementScheddHost:        firstConfigValue(cfg, "HTTP_API_PLACEMENT_SCHEDD_HOST"),
 		PlacementCollectorHost:     firstConfigValue(cfg, "HTTP_API_PLACEMENT_COLLECTOR_HOST"),
+		PlacementPrefillDomains:    config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_PLACEMENT_PREFILL_DOMAINS")),
+		PlacementRequestRetention:  configDurationSetting(cfg, "HTTP_API_PLACEMENT_REQUEST_RETENTION", logger),
 		PlacementdName:             placementdName,
 		OAuth2Requirements:         mcpCfg.oauth2Requirements,
 		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,

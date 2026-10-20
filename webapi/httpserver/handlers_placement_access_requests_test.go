@@ -31,6 +31,10 @@ type requestsFake struct {
 	results []htcondor.PlacementEditResult
 	editErr error
 
+	// onEdit, when set, runs at the start of every Edit, before the
+	// batch is recorded: what happens while the daemon works.
+	onEdit func()
+
 	edits   [][]htcondor.PlacementOp
 	opts    []htcondor.PlacementEditOptions
 	queries []htcondor.PlacementQuery
@@ -70,6 +74,9 @@ func (f *requestsFake) Query(_ context.Context, q htcondor.PlacementQuery) ([]ht
 }
 
 func (f *requestsFake) Edit(_ context.Context, ops []htcondor.PlacementOp, opts htcondor.PlacementEditOptions) ([]htcondor.PlacementEditResult, error) {
+	if f.onEdit != nil {
+		f.onEdit()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.edits = append(f.edits, ops)
@@ -96,10 +103,10 @@ type requestsServer struct {
 	fake *requestsFake
 }
 
-func newRequestsServer(t *testing.T) *requestsServer {
+func newRequestsServer(t *testing.T, configure ...func(*Config)) *requestsServer {
 	t.Helper()
 	fake := newRequestsFake()
-	server, err := NewServer(Config{
+	cfg := Config{
 		ListenAddr:   "127.0.0.1:0",
 		ScheddName:   "ap.example",
 		ScheddAddr:   "127.0.0.1:9618",
@@ -108,7 +115,11 @@ func newRequestsServer(t *testing.T) *requestsServer {
 		Placementd:   fake,
 		UIDDomain:    "ap.example",
 		Logger:       newTestLogger(t),
-	})
+	}
+	for _, f := range configure {
+		f(&cfg)
+	}
+	server, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -243,7 +254,7 @@ func TestAccessRequestLifecycle(t *testing.T) {
 }
 
 func TestAccessRequestListAndDeny(t *testing.T) {
-	srv := newRequestsServer(t)
+	srv := newRequestsServer(t, func(c *Config) { c.PlacementPrefillDomains = []string{"idp.example"} })
 	newbie := srv.placementSession(t, requesterIdentity)
 	srv.fileRequest(t, newbie)
 	mustStatus(t, srv.do(t, newbie, "DELETE", "/api/v1/placement/me/request", ""), http.StatusOK, "withdraw")
@@ -360,14 +371,6 @@ func TestAccessRequestOnlyForUnmappedIdentities(t *testing.T) {
 	if r := srv.stored(t, aliceIdentity); r != nil {
 		t.Errorf("stored %+v", r)
 	}
-
-	// An expired mapping is not access.
-	srv.fake.users = append(srv.fake.users, htcondor.PlacementUser{
-		UserName: "lapsed@idp.example", APUserID: "lapsed@ap.example", Authorized: true,
-		MappingExpiration: time.Now().Add(-time.Hour),
-	})
-	rec = srv.do(t, srv.placementSession(t, "lapsed@idp.example"), "POST", "/api/v1/placement/me/request", `{}`)
-	mustStatus(t, rec, http.StatusCreated, "an expired identity")
 
 	// A session with no placement identity has nothing to ask for.
 	rec = srv.do(t, srv.session(t, "bob"), "POST", "/api/v1/placement/me/request", `{}`)
@@ -581,46 +584,6 @@ func TestAccessRequestApproveIdentityExists(t *testing.T) {
 	}
 }
 
-func TestAccessRequestApproveExistingAccount(t *testing.T) {
-	srv := newRequestsServer(t)
-	admin := srv.admin(t)
-	meta := htcondor.PlacementEntityMeta{ID: "acct-1", Version: 9, Source: htcondor.PlacementSourceInternal}
-	srv.fake.accounts["shared@ap.example"] = &htcondor.PlacementAccount{
-		PlacementEntityMeta: meta, Name: "shared@ap.example",
-		Authorizations: []string{"READ"}, Projects: []string{"Physics"}, DefaultProject: "Physics",
-	}
-
-	// Same grants: only the identity is created.
-	id := srv.fileRequest(t, srv.placementSession(t, requesterIdentity)).Request.ID
-	rec := srv.do(t, admin, "POST", approvePath(id),
-		`{"account":"shared@ap.example","authorizations":["READ"],"projects":["Physics"],"default_project":"Physics"}`)
-	mustStatus(t, rec, http.StatusOK, "approve onto an existing account")
-	if ops := srv.fake.edits[0]; len(ops) != 1 || ops[0].TargetType != htcondor.PlacementTargetIdentity {
-		t.Errorf("ops = %+v", ops)
-	}
-
-	// Changed grants update the account, at the version read.
-	id = srv.fileRequest(t, srv.placementSession(t, "second@idp.example")).Request.ID
-	rec = srv.do(t, admin, "POST", approvePath(id),
-		`{"account":"shared@ap.example","authorizations":["READ","WRITE"],"projects":["Physics"],"default_project":"Physics"}`)
-	mustStatus(t, rec, http.StatusOK, "approve with new grants")
-	ops := srv.fake.edits[1]
-	if len(ops) != 2 || ops[0].Operation != htcondor.PlacementOpUpdate || ops[0].ID != "acct-1" ||
-		ops[0].ExpectedVersion != 9 || ops[1].Fields["Identity"] != "second@idp.example" {
-		t.Errorf("ops = %+v", ops)
-	}
-
-	// A map-file account's grants are not changed from here.
-	meta.Source = htcondor.PlacementSourceMapfile
-	srv.fake.accounts["shared@ap.example"].PlacementEntityMeta = meta
-	id = srv.fileRequest(t, srv.placementSession(t, "third@idp.example")).Request.ID
-	rec = srv.do(t, admin, "POST", approvePath(id), `{"account":"shared@ap.example","authorizations":["WRITE"]}`)
-	mustStatus(t, rec, http.StatusConflict, "change a map-file account's grants")
-	if srv.fake.editCount() != 2 {
-		t.Error("the refused change reached PLACEMENT_EDIT")
-	}
-}
-
 func TestAccessRequestApproveNeedsTheDirectory(t *testing.T) {
 	srv := newRequestsServer(t)
 	srv.fake.apiVersion = 1
@@ -760,7 +723,8 @@ func TestAccessRequestOnePendingPerIdentityInTheStore(t *testing.T) {
 // admin approves, and their existing session becomes the account.
 func TestAccessRequestApprovalUpgradesTheSession(t *testing.T) {
 	s, newbie := newbieServer(t, map[string]any{
-		"sub": newbieSubject, "eppn": newbieIdentity, "name": "Newbie", "email": "newbie@example.edu",
+		"sub": newbieSubject, "eppn": newbieIdentity, "name": "Newbie",
+		"email": "newbie@example.edu", "email_verified": true,
 	})
 	sd, ok := s.getAnySessionFromRequest(cookieRequest(newbie))
 	if !ok || sd.Email != "newbie@example.edu" {

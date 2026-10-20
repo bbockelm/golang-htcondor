@@ -421,7 +421,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 	// Kept only with a placement identity: it goes on an access request.
 	if placementID != "" {
-		li.email = userInfo.Email
+		li.email = placementEmail(userInfo.Claims)
 	}
 	mapped, handled := s.resolveLoginIdentity(w, r, li)
 	if handled {
