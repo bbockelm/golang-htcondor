@@ -99,9 +99,9 @@ func chatJobScope(ctx context.Context, actor, constraint string, tier jobScopeTi
 		return "", errUnidentifiedCaller
 	}
 	if sc.Effective == chat.ScopeProjects && tier == jobScopeRead {
-		return scopeToOwnerOrProjects(owner, sc.Projects, constraint)
+		return scopeToActorOrProjects(ctx, actor, sc.Projects, constraint)
 	}
-	return scopeToOwner(owner, constraint)
+	return scopeToActor(ctx, actor, constraint)
 }
 
 // chatScopeLabel says, for a tool result, which jobs a tool covered.

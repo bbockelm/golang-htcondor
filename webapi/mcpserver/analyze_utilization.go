@@ -200,9 +200,9 @@ func (s *Server) toolAnalyzeUtilization(ctx context.Context, args map[string]int
 	scopeClause := "true"
 	var notes []string
 	if !scope.AllUsers {
-		scopeClause = s.ownerClause(scope.Owner)
+		scopeClause = scope.clause
 		for _, o := range a.owners {
-			if !strings.EqualFold(o, scope.Owner) {
+			if !strings.EqualFold(o, ownerFromActor(scope.Owner)) {
 				notes = append(notes, fmt.Sprintf("You can analyse only your own jobs, so the owner %q matches nothing.", o))
 			}
 		}

@@ -133,12 +133,19 @@ func (h *Handler) watchOwner(actor string) (string, error) {
 	return owner, nil
 }
 
-// streamCallerInDomain refuses, in multi-AP mode, a change stream to an
-// identity outside UID_DOMAIN: the feed names a job's owner by the local
-// part of its User, and alice@elsewhere is not the alice it would match.
-// It writes the refusal and reports false.
+// streamCallerInDomain refuses a change stream to an identity outside
+// UID_DOMAIN: the feed names a job's owner by the local part of its User
+// (or by its Owner, with one schedd), and alice@elsewhere is not the
+// alice it would match. With one schedd only a placementd account is
+// refused (placementOutsideUIDDomain). It writes the refusal and reports
+// false.
 func (h *Handler) streamCallerInDomain(ctx context.Context, w http.ResponseWriter) bool {
 	if h.multi == nil {
+		if h.placementOutsideUIDDomain(ctx, htcondor.GetAuthenticatedUserFromContext(ctx)) {
+			h.writeError(w, http.StatusForbidden,
+				"Live job updates are not available to accounts assigned by the placement service outside this access point's domain.")
+			return false
+		}
 		return true
 	}
 	if _, err := h.watchOwner(htcondor.GetAuthenticatedUserFromContext(ctx)); err != nil {

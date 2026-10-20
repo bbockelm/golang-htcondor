@@ -325,10 +325,10 @@ func (s *Handler) utilizationScope(ctx context.Context, r *http.Request, ownedBy
 			errors.New("authentication required: this analysis covers only your own jobs, and the caller's identity could not be established")
 	}
 	if len(leadProjects) > 0 {
-		scope, err = scopeToOwnerOrProjects(ownerFromActor(actor), leadProjects, "true")
+		scope, err = scopeToActorOrProjects(ctx, actor, leadProjects, "true")
 		return scope, true, http.StatusBadRequest, err
 	}
-	scope, err = scopeToOwner(ownerFromActor(actor), "true")
+	scope, err = scopeToActor(ctx, actor, "true")
 	return scope, false, http.StatusBadRequest, err
 }
 

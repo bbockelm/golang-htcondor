@@ -12,6 +12,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/bbockelm/golang-htcondor/webapi/ownerscope"
 )
 
 // Watching one job for changes.
@@ -259,6 +260,7 @@ func (h *jobPollHub) keyFor(ctx context.Context, constraint string) (pollKey, co
 	secCfg, ok := htcondor.GetSecurityConfigFromContext(ctx)
 	if user := htcondor.GetAuthenticatedUserFromContext(ctx); user != "" {
 		pollCtx = htcondor.WithAuthenticatedUser(pollCtx, user)
+		pollCtx = ownerscope.CopyUserScope(pollCtx, ctx)
 	}
 
 	if ok && secCfg.SecurityTag != "" {

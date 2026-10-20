@@ -173,6 +173,7 @@ func (s *Handler) authenticateAPIKey(r *http.Request, raw string) (context.Conte
 
 	ctx := r.Context()
 	ctx = htcondor.WithAuthenticatedUser(ctx, row.Creator)
+	ctx = s.withPlacementOwnerScope(ctx, nil, row.Creator)
 	ctx = withAPIKeyScopes(ctx, row.Scopes)
 	ctx = withAPIKeyMarker(ctx)
 

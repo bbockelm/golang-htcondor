@@ -288,7 +288,7 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 	// unidentifiable caller is fatal for a template and harmless for a
 	// fixed base, which buildDestination decides.
 	var owner string
-	if caller, err := s.liveJobCaller(ctx); err == nil {
+	if caller, err := s.localJobCaller(ctx); err == nil {
 		owner = caller.Owner
 	}
 

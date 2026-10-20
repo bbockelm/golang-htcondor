@@ -153,7 +153,7 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 		// The same owner confinement every read tool applies: a non-admin
 		// caller's view of "what is going wrong" is their own jobs.
 		if !scope.AllUsers {
-			constraint = fmt.Sprintf("Owner == %s", classadStringLit(scope.Owner))
+			constraint = scope.clause
 		}
 	}
 

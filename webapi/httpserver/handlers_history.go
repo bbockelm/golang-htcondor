@@ -521,7 +521,7 @@ func (s *Handler) historyOwnerScope(ctx context.Context, r *http.Request, constr
 	// scopeToOwner re-serializes the caller's constraint so it cannot
 	// escape the enclosing AND; an unparseable one is rejected rather
 	// than widened.
-	scoped, err := scopeToOwner(ownerFromActor(actor), constraint)
+	scoped, err := scopeToActor(ctx, actor, constraint)
 	if err != nil {
 		return "", false, fmt.Errorf("invalid constraint: %w", err)
 	}

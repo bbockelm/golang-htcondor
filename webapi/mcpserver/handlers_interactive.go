@@ -168,6 +168,21 @@ func (s *Server) liveJobCaller(ctx context.Context) (interactive.Caller, error) 
 	return interactive.Caller{Actor: actor, Owner: owner}, nil
 }
 
+// localJobCaller is liveJobCaller for what is filed under the caller's
+// bare name -- interactive sessions, share URLs redeemed as that name in
+// UID_DOMAIN, a per-user staging directory -- and so is refused to a
+// placementd account in another domain (placementOutsideUIDDomain).
+func (s *Server) localJobCaller(ctx context.Context) (interactive.Caller, error) {
+	caller, err := s.liveJobCaller(ctx)
+	if err != nil {
+		return caller, err
+	}
+	if s.placementOutsideUIDDomain(ctx, caller.Actor) {
+		return interactive.Caller{}, errOutsideUIDDomain
+	}
+	return caller, nil
+}
+
 // interactiveManager returns the session manager, or an error naming
 // why this server has none.
 func (s *Server) interactiveManager() (*interactive.Manager, error) {
@@ -182,7 +197,7 @@ func (s *Server) toolInteractiveSessionStart(ctx context.Context, args map[strin
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.liveJobCaller(ctx)
+	caller, err := s.localJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -225,7 +240,7 @@ func (s *Server) toolInteractiveSessionExec(ctx context.Context, args map[string
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.liveJobCaller(ctx)
+	caller, err := s.localJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +286,7 @@ func (s *Server) toolInteractiveSessionList(ctx context.Context, _ map[string]in
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.liveJobCaller(ctx)
+	caller, err := s.localJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +331,7 @@ func (s *Server) toolInteractiveSessionStop(ctx context.Context, args map[string
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.liveJobCaller(ctx)
+	caller, err := s.localJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}

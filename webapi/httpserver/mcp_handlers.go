@@ -193,6 +193,7 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 		}
 		if actor != "" {
 			ctx = htcondor.WithAuthenticatedUser(ctx, actor)
+			ctx = h.withPlacementOwnerScope(ctx, nil, actor)
 		}
 		return ctx, nil, true
 	}
@@ -259,6 +260,7 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	}
 	if actor != "" {
 		ctx = htcondor.WithAuthenticatedUser(ctx, actor)
+		ctx = h.withPlacementOwnerScope(ctx, nil, actor)
 	} else {
 		h.logger.Warn(logging.DestinationHTTP, "Could not resolve the caller's schedd identity; owner-scoped tools will refuse this call", "oauth2_user", username)
 	}

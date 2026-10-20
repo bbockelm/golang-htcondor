@@ -56,12 +56,12 @@ func (s *Server) toolCreateOutputDownloadURL(ctx context.Context, args map[strin
 	// download URL is a bearer capability that streams that user's files
 	// to whoever holds it, and it outlives the call. The REST endpoint
 	// that mints these makes the same check for the same reason.
-	caller, err := s.liveJobCaller(ctx)
+	caller, err := s.localJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
 	ownerScope := func(c string) (string, error) {
-		return fmt.Sprintf("(%s) && %s", c, s.ownerClause(caller.Owner)), nil
+		return fmt.Sprintf("(%s) && %s", c, s.callerClause(ctx, caller.Actor, caller.Owner)), nil
 	}
 
 	ttl := shareurl.ClampTTL(shareurl.KindOutput, ttlSecondsArg(args))

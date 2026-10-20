@@ -1414,7 +1414,7 @@ func (s *Server) toolQueryJobs(ctx context.Context, args map[string]interface{})
 	scoped := constraint
 	if owner != "" {
 		var err error
-		if scoped, err = ownerScopedConstraint(owner, constraint); err != nil {
+		if scoped, err = ownerScopedConstraint(scope, constraint); err != nil {
 			return nil, err
 		}
 	}

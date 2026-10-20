@@ -57,12 +57,12 @@ func (s *Server) toolCreateInputUploadURL(ctx context.Context, args map[string]i
 	// does not get one for another user's job by being an admin. This
 	// also answers the stdio case, where there is no actor on the context
 	// because the server IS the user.
-	caller, err := s.liveJobCaller(ctx)
+	caller, err := s.localJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
 	ownerScope := func(c string) (string, error) {
-		return fmt.Sprintf("(%s) && %s", c, s.ownerClause(caller.Owner)), nil
+		return fmt.Sprintf("(%s) && %s", c, s.callerClause(ctx, caller.Actor, caller.Owner)), nil
 	}
 
 	ttl := shareurl.ClampTTL(shareurl.KindInput, ttlSecondsArg(args))

@@ -322,7 +322,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		// own -- so the listing is unscoped as far as the mirror and the
 		// schedd's own MyJobs filter are concerned, and confined by
 		// this constraint alone.
-		scoped, serr := scopeToOwnerOrProjects(ownerFromActor(actor), leadProjects, constraint)
+		scoped, serr := scopeToActorOrProjects(ctx, actor, leadProjects, constraint)
 		if serr != nil {
 			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid constraint: %v", serr))
 			return
@@ -353,7 +353,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		// constraint is the one thing the schedd can only evaluate, so
 		// the restriction goes there; FetchMyJobs stays as defense in
 		// depth.
-		scoped, serr := scopeToOwner(ownerFromActor(owner), constraint)
+		scoped, serr := scopeToActor(ctx, owner, constraint)
 		if serr != nil {
 			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid constraint: %v", serr))
 			return
@@ -1228,7 +1228,7 @@ func (s *Handler) jobsOwnerScope(ctx context.Context, r *http.Request, raw strin
 		}
 		return andScope(fmt.Sprintf("User == %s", classadStringLit(user)), raw)
 	}
-	return scopeToOwner(owner, raw)
+	return scopeToActor(ctx, actor, raw)
 }
 
 // ownerFromActor maps an authenticated actor to the value HTCondor
@@ -1267,7 +1267,7 @@ func localReadOwnerScope(ctx context.Context, raw string, all bool) (string, err
 	if all {
 		return raw, nil
 	}
-	return scopeToOwner(ownerFromActor(actor), raw)
+	return scopeToActor(ctx, actor, raw)
 }
 
 // jobOwnerScope confines a single-job request to the caller's own job,
@@ -1310,7 +1310,7 @@ func (s *Handler) jobsReadScope(ctx context.Context, r *http.Request, jobs strin
 		if owner == "" {
 			return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")
 		}
-		return scopeToOwnerOrProjects(ownerFromActor(owner), projects, jobs)
+		return scopeToActorOrProjects(ctx, owner, projects, jobs)
 	}
 	return s.jobsOwnerScope(ctx, r, jobs, jobScopeRead)
 }
