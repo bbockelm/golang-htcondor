@@ -72,7 +72,24 @@ test('an archived job compares its peak memory with similar jobs', async ({ page
   const memory = page.getByTestId('memory-estimate');
   await expect(memory.getByText('Peaked at 7.2 GB')).toBeVisible();
   await expect(memory.getByText('Similar jobs peaked at about 5.9 GB; 9 in 10 stayed under 6.9 GB.')).toBeVisible();
-  // A finished job is not compared with its request, nor called above usual.
+  // A finished job is not compared with its request in words, nor called
+  // above usual; its request is drawn, as on the similar-jobs plot.
   await expect(memory.getByText(/requested/)).toHaveCount(0);
   await expect(memory.getByText('More memory than usual')).toHaveCount(0);
+  const bar = memory.getByTestId('memory-range-bar');
+  await expect(bar.locator('[data-part="job-end"]')).toHaveClass(/bg-green-700/);
+  await expect(bar.locator('[data-part="ref"]')).toBeVisible();
+  await memory.getByRole('button', { name: 'How to read' }).click();
+  await expect(memory.getByTestId('range-legend').getByRole('listitem')).toHaveText([
+    'Most similar jobs', 'Half of similar jobs', 'Typical', 'This job', 'Requested',
+  ]);
+
+  // The similar jobs' memory, drawn the same way.
+  await page.getByTestId('job-related').getByRole('button', { name: 'Similar jobs' }).click();
+  const plot = page.getByTestId('memory-spread-plot');
+  for (const name of ['band', 'box', 'tick', 'job', 'ref']) {
+    await expect(plot.locator(`[data-part="${name}"]`)).toHaveClass(
+      (await bar.locator(`[data-part="${name}"]`).getAttribute('class'))!,
+    );
+  }
 });

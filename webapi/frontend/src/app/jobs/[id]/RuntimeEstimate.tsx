@@ -10,7 +10,8 @@
 
 import { useQuery } from '@tanstack/react-query';
 
-import { RuntimeRangeBar } from '@/components/RuntimeRangeBar';
+import { RangePlot } from '@/components/RangePlot';
+import { chartEntries, HowToRead } from '@/components/RangeLegend';
 import { api, type RuntimeEstimate } from '@/lib/api';
 
 import { runtimeCard } from './runtimeCard';
@@ -83,11 +84,24 @@ export function RuntimeEstimateView({
         {card.rough && <RoughChip />}
       </p>
       <div>
-        <RuntimeRangeBar {...card.bar} rough={card.rough} longer={card.longer} />
+        <RangePlot
+          band={card.bar.band}
+          tick={card.bar.tick}
+          job={card.bar.elapsed}
+          jobCapped={card.bar.elapsedCapped}
+          rough={card.rough}
+          unusual={card.longer}
+          testID="runtime-range-bar"
+        />
         <div className="flex justify-between gap-3 text-xs text-gray-600 tabular-nums">
           <span>{card.axis.left}</span>
           {card.axis.middle && <span className="text-center">{card.axis.middle}</span>}
           <span className="text-right">{card.axis.right}</span>
+        </div>
+        <div className="mt-1">
+          <HowToRead
+            entries={chartEntries({ rough: card.rough, job: card.bar.elapsed !== undefined, canBeUnusual: true })}
+          />
         </div>
       </div>
       {card.lines.map((line) => {

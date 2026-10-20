@@ -41,7 +41,7 @@ describe('memoryCard', () => {
       'Similar jobs peaked at about 1.2 GB; 9 in 10 stayed under 2 GB.',
       'All 12 similar jobs stayed under the 4 GB requested.',
     ]);
-    expect(c.bar.elapsed).toBeCloseTo(1100 / memoryAxisMax(mem(), 1100));
+    expect(c.bar.elapsed).toBeCloseTo(1100 / memoryAxisMax(mem(), 1100, 4096));
     expect(c.above).toBe(false);
   });
 
@@ -51,6 +51,15 @@ describe('memoryCard', () => {
     expect(c.headline).toBe('Peak so far 58.6 GB');
     expect(c.bar.elapsedCapped).toBe(true);
     expect(c.axis.right).toBe('peak 58.6 GB');
+  });
+
+  it('draws the middle half and the request on the same axis', () => {
+    const c = memoryCard(mem({ peak_mib: 1100, requested_mib: 4096, above_requested: 0 }), 2)!;
+    const max = memoryAxisMax(mem(), 1100, 4096);
+    expect(c.bar.box).toEqual({ from: 1000 / max, to: 1500 / max });
+    expect(c.bar.refs).toEqual([{ at: 4096 / max, label: 'Requested' }]);
+    // A request far past everything else is left off rather than squashing the rest.
+    expect(memoryCard(mem({ requested_mib: 500_000, above_requested: 0 }), 1)!.bar.refs).toBeUndefined();
   });
 
   it('never calls a job above usual unless it is running', () => {

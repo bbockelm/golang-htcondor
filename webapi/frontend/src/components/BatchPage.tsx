@@ -13,6 +13,7 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, type DisplayStatus } from '@/lib/api';
+import { RangePlot } from '@/components/RangePlot';
 import { BatchProgressBar } from '@/components/BatchProgressBar';
 import { BatchUsagePanel } from '@/components/BatchUsagePanel';
 import { BatchTimeLeftCell, JobTimeLeftCell } from '@/components/TimeLeft';
@@ -219,21 +220,22 @@ export function DagSection({ batch }: { batch: BatchResponse }) {
 
 // --- Finished jobs ---
 
-// RuntimeStrip draws finished jobs' run times on an axis from zero:
-// whiskers p10 to p90, a tick at the median, a dot at the longest.
+// RuntimeStrip draws finished jobs' run times with the marks every
+// range chart uses (RangePlot): a band where most of them land (p10 to
+// p90), a tick at the typical one, and a grey dot at the longest. There
+// is no "this job" here -- the strip describes the batch -- so the
+// longest run gets a neutral dot of its own rather than the job fill.
 function RuntimeStrip({ r }: { r: NonNullable<FinishedStats['runtime']> }) {
   const max = Math.max(r.max, r.p90) * 1.05 || 1;
-  const at = (s: number) => `${Math.min(100, (s / max) * 100).toFixed(2)}%`;
+  const at = (s: number) => Math.min(1, s / max);
   return (
-    <div className="relative h-6" aria-hidden="true" data-testid="runtime-strip">
-      <div className="absolute inset-x-0 top-3 h-px bg-gray-300" />
+    <RangePlot band={{ from: at(r.p10), to: at(r.p90) }} tick={at(r.p50)} testID="runtime-strip">
       <div
-        className="absolute top-2 h-2 rounded-sm bg-[#86b6ef]"
-        style={{ left: at(r.p10), width: `max(3px, calc(${at(r.p90)} - ${at(r.p10)}))` }}
+        data-part="longest"
+        className="absolute top-2 z-10 size-3 -translate-x-1/2 rounded-full bg-gray-700 ring-2 ring-white"
+        style={{ left: `${(at(r.max) * 100).toFixed(2)}%` }}
       />
-      <div className="absolute top-1 h-4 w-0.5 bg-[#184f95]" style={{ left: at(r.p50) }} />
-      <div className="absolute top-[9px] h-2 w-2 -translate-x-1/2 rounded-full bg-gray-700" style={{ left: at(r.max) }} />
-    </div>
+    </RangePlot>
   );
 }
 

@@ -99,11 +99,15 @@ export function axisMax(r: Pick<RuntimeEstimate, 'estimate_seconds' | 'p90_secon
 export interface BarGeometry {
   // The usual range; absent when there is none to draw.
   band?: { from: number; to: number };
+  // The middle half, for a chart that knows it (the memory card).
+  box?: { from: number; to: number };
   tick: number;
   // How long the job has run so far, for a running job.
   elapsed?: number;
   // The elapsed time ran past the end of the axis and was cut there.
   elapsedCapped?: boolean;
+  // Labelled lines, such as the job's memory request.
+  refs?: { at: number; label: string }[];
 }
 
 const frac = (s: number, max: number) => Math.min(1, Math.max(0, s / max));

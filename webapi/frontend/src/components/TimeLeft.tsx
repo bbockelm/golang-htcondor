@@ -5,6 +5,7 @@
 // lives in lib/timeLeft.
 
 import { RoughChip } from '@/app/jobs/[id]/RuntimeEstimate';
+import { RangePlot } from '@/components/RangePlot';
 import type { DagNodeCounts } from '@/lib/batches';
 import {
   batchTimeLeft,
@@ -112,31 +113,26 @@ export function JobTimeLeftCell({
         </div>
       )}
       {t.sub && <div className="mt-0.5 text-[11px] text-gray-500">{t.sub}</div>}
-      {bar && <RangeBar g={bar} />}
+      {bar && <RangeBar g={bar} rough={t.rough} />}
     </div>
   );
 }
 
-// RangeBar is one job on its batch's shared axis: the usual range as a
-// band, the typical run as a tick, and how far a running job has got as
-// a fill -- amber once it is past nearly every comparable run.
-function RangeBar({ g }: { g: NonNullable<ReturnType<typeof rangeBar>> }) {
+// RangeBar is one job on its batch's shared axis, drawn with the same
+// marks as the job page's run time card: the usual range as a band, the
+// typical run as a tick, and how far a running job has got as a fill --
+// amber once it is past nearly every comparable run.
+function RangeBar({ g, rough }: { g: NonNullable<ReturnType<typeof rangeBar>>; rough?: boolean }) {
   return (
-    <div className="relative mt-1 hidden h-2.5 w-36 sm:block" aria-hidden>
-      <div className="absolute inset-x-0 top-[4px] h-0.5 rounded-sm bg-gray-200" />
-      <div
-        className="absolute top-[2px] h-1.5 rounded-sm bg-sky-200"
-        style={{ left: `${g.bandLeft}%`, width: `${g.bandWidth}%` }}
+    <div className="mt-1 hidden w-36 sm:block">
+      <RangePlot
+        size="sm"
+        band={{ from: g.bandLeft / 100, to: (g.bandLeft + g.bandWidth) / 100 }}
+        tick={g.tick / 100}
+        job={g.elapsed !== undefined ? g.elapsed / 100 : undefined}
+        rough={rough}
+        unusual={g.overrun}
       />
-      {g.elapsed !== undefined && (
-        <div
-          className={`absolute left-0 top-[2px] h-1.5 rounded-sm ${g.overrun ? 'bg-amber-600/85' : 'bg-emerald-600'}`}
-          style={{ width: `${g.elapsed}%` }}
-        />
-      )}
-      {!g.overrun && (
-        <div className="absolute top-0 h-2.5 w-0.5 bg-sky-700" style={{ left: `${g.tick}%` }} />
-      )}
     </div>
   );
 }

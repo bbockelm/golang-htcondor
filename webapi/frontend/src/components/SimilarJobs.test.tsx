@@ -63,7 +63,7 @@ describe('SimilarJobs', () => {
     const rows = screen.getAllByRole('row').slice(1);
     expect(rows).toHaveLength(41);
     expect(within(rows[0]).getByRole('link')).toHaveAttribute('href', '/archive/81200.0');
-    expect(screen.getByTestId('spread-mark')).toBeInTheDocument();
+    expect(screen.getByTestId('runtime-spread-plot').querySelector('[data-part="job-end"]')).toBeInTheDocument();
     expect(screen.getByText(/This job so far: 50m/)).toBeInTheDocument();
   });
 
@@ -170,8 +170,8 @@ describe('the spreads', () => {
     expect(memory).toHaveTextContent(
       'Half of these 9 jobs peaked at 1,000 MB to 1.5 GB (typically 1.2 GB); 9 in 10 stayed under 2 GB. This job so far: 6.1 GB. Requested: 2 GB.',
     );
-    expect(within(memory).getByTestId('memory-spread-mark')).toBeInTheDocument();
-    expect(within(memory).getByTestId('memory-spread-ref')).toBeInTheDocument();
+    expect((memory.querySelector('[data-part="job-end"]') as HTMLElement)).toBeInTheDocument();
+    expect((memory.querySelector('[data-part="ref"]') as HTMLElement)).toBeInTheDocument();
     expect(within(memory).getByText('Requested')).toBeInTheDocument();
   });
 
@@ -180,20 +180,20 @@ describe('the spreads', () => {
     const memory = screen.getByTestId('memory-spread');
     // The axis reaches past the largest of them: the job's peak.
     const left = (el: HTMLElement) => parseFloat(el.style.left);
-    expect(left(within(memory).getByTestId('memory-spread-mark'))).toBeCloseTo(100 / 1.15, 1);
-    expect(left(within(memory).getByTestId('memory-spread-ref'))).toBeCloseTo((2048 / (6246 * 1.15)) * 100, 1);
+    expect(left((memory.querySelector('[data-part="job-end"]') as HTMLElement))).toBeCloseTo(100 / 1.15, 1);
+    expect(left((memory.querySelector('[data-part="ref"]') as HTMLElement))).toBeCloseTo((2048 / (6246 * 1.15)) * 100, 1);
   });
 
   it('stretches the axis to a request larger than everything else', () => {
     render(<MemorySpread memory={q} mark={{ mib: 3000, label: 'This job' }} requestedMiB={8192} />);
     const memory = screen.getByTestId('memory-spread');
-    expect(parseFloat(within(memory).getByTestId('memory-spread-ref').style.left)).toBeCloseTo(100 / 1.15, 1);
+    expect(parseFloat((memory.querySelector('[data-part="ref"]') as HTMLElement).style.left)).toBeCloseTo(100 / 1.15, 1);
   });
 
   it('draws no mark or request line without them', () => {
     render(<MemorySpread memory={q} />);
-    expect(screen.queryByTestId('memory-spread-mark')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('memory-spread-ref')).not.toBeInTheDocument();
+    expect(screen.getByTestId('memory-spread').querySelector('[data-part="job"]')).not.toBeInTheDocument();
+    expect(screen.getByTestId('memory-spread').querySelector('[data-part="ref"]')).not.toBeInTheDocument();
   });
 });
 

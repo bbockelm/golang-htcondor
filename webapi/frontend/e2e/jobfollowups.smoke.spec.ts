@@ -362,6 +362,25 @@ test('a job using more memory than usual says so on its page', async ({ page }) 
   await expect(memory.getByText('Peak so far 6.1 GB')).toBeVisible();
   await expect(memory.getByText('Similar jobs peaked at about 1.2 GB; 9 in 10 stayed under 2 GB.')).toBeVisible();
   await expect(memory.getByText('All 30 similar jobs stayed under the 4 GB requested.')).toBeVisible();
+  // Drawn as every such chart is: amber fill and dot, the middle half, the request.
+  const bar = memory.getByTestId('memory-range-bar');
+  await expect(bar.locator('[data-part="job-end"]')).toHaveClass(/bg-amber-600/);
+  await expect(bar.locator('[data-part="box"]')).toBeVisible();
+  await expect(bar.locator('[data-part="ref"]')).toBeVisible();
+  const how = memory.getByRole('button', { name: 'How to read' });
+  await expect(how).toHaveAttribute('aria-expanded', 'false');
+  await how.click();
+  await expect(how).toHaveAttribute('aria-expanded', 'true');
+  await expect(memory.getByTestId('range-legend').getByRole('listitem')).toHaveText([
+    'Most similar jobs', 'Half of similar jobs', 'Typical', 'This job', 'This job, unusually high', 'Requested',
+  ]);
+  // The run time card's key has no middle half and no request.
+  const runtime = page.getByTestId('runtime-estimate');
+  await runtime.getByRole('button', { name: 'How to read' }).click();
+  await expect(runtime.getByTestId('range-legend').getByRole('listitem')).toHaveText([
+    'Most similar jobs', 'Typical', 'This job', 'This job, unusually high',
+  ]);
+  await expect(runtime.getByTestId('runtime-range-bar').locator('[data-part="job-end"]')).toHaveClass(/bg-green-700/);
   // The run time card beside it is within its usual time.
   await expect(page.getByTestId('runtime-estimate').getByText('Longer than usual')).toHaveCount(0);
 });
