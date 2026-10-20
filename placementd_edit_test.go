@@ -447,6 +447,77 @@ func TestPlacementdAPIVersion(t *testing.T) {
 	}
 }
 
+// Two access points' placementds in one collector, the other one's listed
+// first.
+func versionAds(t *testing.T) (foreign, local *classad.ClassAd) {
+	t.Helper()
+	foreign = mustAd(t, map[string]any{
+		"Name": "other-ap.example.org", "Machine": "other-ap.example.org",
+		"MyAddress": "<10.0.0.2:9618?sock=placementd_9_9>", PlacementdAPIVersionAttr: 2,
+	})
+	local = mustAd(t, map[string]any{
+		"Name": "this-ap.example.org", "Machine": "this-ap.example.org",
+		"MyAddress": "<10.0.0.1:9618?sock=placementd_1_1>",
+	})
+	return foreign, local
+}
+
+// The version is the placementd's this client uses, never whichever ad the
+// collector lists first.
+func TestSelectPlacementdAdByAddress(t *testing.T) {
+	foreign, local := versionAds(t)
+	ads := []*classad.ClassAd{foreign, local}
+
+	got := SelectPlacementdAd(ads, "10.0.0.1:9618?sock=placementd_1_1", nil)
+	if got != local {
+		t.Fatalf("selected %v, want this access point's ad", got)
+	}
+	if v := PlacementdAPIVersion(got); v != 1 {
+		t.Errorf("version = %d, want this access point's 1, not the other's 2", v)
+	}
+
+	// The address the client has matches no ad: nothing, not the first ad.
+	if got := SelectPlacementdAd(ads, "<10.0.0.1:9618?sock=placementd_2_2>", nil); got != nil {
+		t.Errorf("an unmatched address selected %v", got)
+	}
+	if got := SelectPlacementdAd([]*classad.ClassAd{foreign}, "<10.0.0.1:9618?sock=placementd_1_1>", nil); got != nil {
+		t.Errorf("only another access point's ad, selected %v", got)
+	}
+}
+
+// When the address is stale, accept identifies the daemon; an ambiguous
+// answer is no answer.
+func TestSelectPlacementdAdByAccept(t *testing.T) {
+	foreign, local := versionAds(t)
+	ads := []*classad.ClassAd{foreign, local}
+	onThisHost := func(ad *classad.ClassAd) bool {
+		m, _ := ad.EvaluateAttrString("Machine")
+		return m == "this-ap.example.org"
+	}
+	if got := SelectPlacementdAd(ads, "<10.0.0.1:9618?sock=placementd_2_2>", onThisHost); got != local {
+		t.Errorf("selected %v, want this access point's ad", got)
+	}
+	if got := SelectPlacementdAd([]*classad.ClassAd{foreign}, "", onThisHost); got != nil {
+		t.Errorf("only another access point's ad, selected %v", got)
+	}
+	admitAll := func(*classad.ClassAd) bool { return true }
+	if got := SelectPlacementdAd(ads, "", admitAll); got != nil {
+		t.Errorf("two admitted ads selected %v", got)
+	}
+}
+
+func TestPlacementdAdProjectionCarriesWhatIsRead(t *testing.T) {
+	for _, want := range []string{"MyAddress", "Name", "Machine", PlacementdAPIVersionAttr} {
+		found := false
+		for _, a := range PlacementdAdProjection() {
+			found = found || a == want
+		}
+		if !found {
+			t.Errorf("%s missing from %v", want, PlacementdAdProjection())
+		}
+	}
+}
+
 func TestPlacementErrorNames(t *testing.T) {
 	want := map[int]string{
 		13: "not_found", 14: "version_mismatch", 15: "owned_by_other_source",

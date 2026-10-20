@@ -256,6 +256,31 @@ func (l *placementdLocator) accessPointHosts(ctx context.Context) map[string]boo
 	return hosts
 }
 
+// owns returns the test that a PlacementD ad is the placementd this locator
+// accepts — the operator's by Name, else one on this access point's host —
+// for matching an ad when its address alone does not. Nil when that cannot
+// be told: the operator configured an address, or this access point's host
+// is unknown.
+func (l *placementdLocator) owns(ctx context.Context) func(*classad.ClassAd) bool {
+	if name := strings.TrimSpace(l.name); name != "" {
+		if strings.HasPrefix(name, "<") {
+			return nil
+		}
+		return func(ad *classad.ClassAd) bool {
+			n, _ := ad.EvaluateAttrString("Name")
+			return strings.EqualFold(n, name)
+		}
+	}
+	hosts := l.accessPointHosts(ctx)
+	if len(hosts) == 0 {
+		return nil
+	}
+	return func(ad *classad.ClassAd) bool {
+		h := placementdHost(ad)
+		return h != "" && hosts[h]
+	}
+}
+
 // placementdHost is the host a PlacementD ad says its daemon runs on: its
 // Machine, else the host part of its Name.
 func placementdHost(ad *classad.ClassAd) string {
