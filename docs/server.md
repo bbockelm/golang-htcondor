@@ -2577,6 +2577,13 @@ removed, expired or pointed at another account ends the session; changed
 grants and projects are taken up. OAuth2 grants of the account are
 re-checked the same way on refresh.
 
+The session's groups -- which decide the web UI's access and admin groups
+and project leads -- follow `HTTP_API_GROUP_SOURCE`. With `token`, they are
+the provider's groups claim. With a local source (`system`, `file:<path>`),
+they are that source's groups for the part of the account before `@` when
+the account is in `UID_DOMAIN`, and none for an account in any other
+domain; the provider's groups claim is not used.
+
 Some features need a local Unix account and are refused for these
 sessions: credential storage in the credd (`/api/v1/creds/*`), the SSH
 gateway and SSH certificates, superuser mode, token exchange of their
