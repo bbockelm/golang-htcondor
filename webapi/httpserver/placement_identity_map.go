@@ -126,6 +126,89 @@ func splitPlacementdStrategy(all []idmap.Strategy) (local []idmap.Strategy, plac
 	return local, placementdFirst, placementd
 }
 
+// placementMapping is what the placementd's map says about one identity.
+type placementMapping struct {
+	// Account is the account the map points the identity at; it may be
+	// empty on a daemon that reports none.
+	Account        string
+	Authorizations []string
+	// Projects are the account's projects, the default first.
+	Projects []string
+	// ExpiresAt is when the mapping stops being honored; zero for never.
+	ExpiresAt time.Time
+	// Expired is the daemon's own verdict, independent of ExpiresAt.
+	Expired bool
+}
+
+// expired reports whether the mapping is no longer honored at now.
+func (m *placementMapping) expired(now time.Time) bool {
+	return m.Expired || (!m.ExpiresAt.IsZero() && !m.ExpiresAt.After(now))
+}
+
+// placementMappingFor reads the placementd's map entry for identity. It
+// returns nil, with no error, when the map has none.
+//
+// The account must come from the map, never from a token: PLACEMENT_QUERY_USERS'
+// ApUserId is the subject of the identity's newest unexpired token, which
+// keeps naming the old account after the identity is re-pointed. A daemon
+// with the directory commands is asked for the identity's own entry. An
+// older one only answers PLACEMENT_QUERY_USERS; there MappedAccount, when
+// the daemon sends it, is the map's account, and ApUserId is used only when
+// it does not.
+func (h *Handler) placementMappingFor(ctx context.Context, identity string) (*placementMapping, error) {
+	if h.placementAPIVersion(ctx) >= htcondor.PlacementdAPIVersionDirectory {
+		objs, err := h.placementd.Query(ctx, htcondor.PlacementQuery{
+			TargetType: htcondor.PlacementTargetIdentity,
+			Key:        identity,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range objs {
+			id := o.Identity
+			if id == nil || id.Identity != identity {
+				continue
+			}
+			m := &placementMapping{
+				Account:        id.Account,
+				Authorizations: slices.Clone(id.Authorizations),
+				Projects:       slices.Clone(id.Projects),
+				ExpiresAt:      id.ExpiresAt,
+				Expired:        id.Expired,
+			}
+			if i := slices.Index(m.Projects, id.DefaultProject); i > 0 {
+				m.Projects = slices.Insert(slices.Delete(m.Projects, i, i+1), 0, id.DefaultProject)
+			}
+			return m, nil
+		}
+		return nil, nil
+	}
+
+	users, err := h.placementd.QueryUsers(ctx, identity)
+	if err != nil {
+		return nil, err
+	}
+	for _, u := range users {
+		if u.UserName != identity {
+			continue
+		}
+		if !u.Authorized {
+			return nil, nil
+		}
+		account := u.APUserID
+		if u.MappedAccount != "" {
+			account = u.MappedAccount
+		}
+		return &placementMapping{
+			Account:        account,
+			Authorizations: slices.Clone(u.Authorizations),
+			Projects:       slices.Clone(u.Projects),
+			ExpiresAt:      u.MappingExpiration,
+		}, nil
+	}
+	return nil, nil
+}
+
 // lookupPlacementAccount asks the placementd which account identity maps to.
 // It returns nil, with no error, when the identity is not mapped, is
 // expired, names no account, or holds no level this server mints: none of
@@ -135,36 +218,28 @@ func (h *Handler) lookupPlacementAccount(ctx context.Context, identity string) (
 		return nil, nil
 	}
 	ctx = htcondor.WithDaemonCredential(ctx, "placementd identity mapping: the sign-in identity's own account")
-	users, err := h.placementd.QueryUsers(ctx, identity)
+	m, err := h.placementMappingFor(ctx, identity)
 	if err != nil {
 		return nil, err
 	}
-	for _, u := range users {
-		if u.UserName != identity {
-			continue
-		}
-		if !u.Authorized || u.APUserID == "" || !strings.Contains(u.APUserID, "@") {
-			return nil, nil
-		}
-		if !u.MappingExpiration.IsZero() && !u.MappingExpiration.After(time.Now()) {
-			return nil, nil
-		}
-		info := &PlacementAccountInfo{
-			Account:          u.APUserID,
-			Authorizations:   slices.Clone(u.Authorizations),
-			Projects:         slices.Clone(u.Projects),
-			MappingExpiresAt: u.MappingExpiration,
-			CheckedAt:        time.Now(),
-		}
-		if len(info.Projects) > 0 {
-			info.Project = info.Projects[0]
-		}
-		if len(info.Levels()) == 0 {
-			return nil, nil
-		}
-		return info, nil
+	now := time.Now()
+	if m == nil || m.Account == "" || !strings.Contains(m.Account, "@") || m.expired(now) {
+		return nil, nil
 	}
-	return nil, nil
+	info := &PlacementAccountInfo{
+		Account:          m.Account,
+		Authorizations:   m.Authorizations,
+		Projects:         m.Projects,
+		MappingExpiresAt: m.ExpiresAt,
+		CheckedAt:        now,
+	}
+	if len(info.Projects) > 0 {
+		info.Project = info.Projects[0]
+	}
+	if len(info.Levels()) == 0 {
+		return nil, nil
+	}
+	return info, nil
 }
 
 // placementdMapLogin tries the placementd mapping for a login.

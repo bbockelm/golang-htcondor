@@ -790,8 +790,13 @@ func TestAccessRequestApprovalUpgradesTheSession(t *testing.T) {
 	if ops := v2.edits[0]; ops[len(ops)-1].Fields["Identity"] != newbieIdentity || v2.opts[0].OnBehalfOf != "root" {
 		t.Fatalf("batch = %+v %+v", ops, v2.opts[0])
 	}
-	// What the placementd now answers for the identity.
+	// What the placementd now answers for the identity: its directory
+	// entry is what the session maps by.
 	s.onboard()
+	v2.identities[newbieIdentity] = &htcondor.PlacementIdentity{
+		Identity: newbieIdentity, Account: newbieAcct, Authorizations: []string{"READ", "WRITE"},
+		Projects: []string{"Physics"}, DefaultProject: "Physics",
+	}
 
 	resp, rec := s.me(t, newbie)
 	if resp.PlacementOnly || resp.Username != newbieAcct {
