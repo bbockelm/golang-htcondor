@@ -603,6 +603,9 @@ func (h *Handler) placementDeviceDeny(w http.ResponseWriter, r *http.Request, ra
 		h.writeError(w, http.StatusBadRequest, "The code must look like XXXX-XXXX.")
 		return
 	}
+	if !h.placementDeviceAllow(w, r, session) {
+		return
+	}
 	grant, err := store.byUserCode(r.Context(), code)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "Could not read the request.")
@@ -636,6 +639,11 @@ func (h *Handler) placementDeviceLookup(w http.ResponseWriter, r *http.Request, 
 		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	session, ok := h.getAnySessionFromRequest(r)
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
 	store := h.placementOnboard.devices
 	if store == nil {
 		h.writeError(w, http.StatusServiceUnavailable, "Placement tokens are not available on this server.")
@@ -644,6 +652,9 @@ func (h *Handler) placementDeviceLookup(w http.ResponseWriter, r *http.Request, 
 	code := normalizePlacementUserCode(rawCode)
 	if code == "" {
 		h.writeError(w, http.StatusBadRequest, "The code must look like XXXX-XXXX.")
+		return
+	}
+	if !h.placementDeviceAllow(w, r, session) {
 		return
 	}
 	grant, err := store.byUserCode(r.Context(), code)
@@ -666,6 +677,26 @@ func (h *Handler) placementDeviceLookup(w http.ResponseWriter, r *http.Request, 
 		State:      state,
 		ExpiresAt:  time.Unix(grant.ExpiresAt, 0).UTC(),
 	})
+}
+
+// placementDeviceAllow spends one attempt of the device-code budgets for a
+// lookup or denial of a user code, or answers 429 and reports false. Each
+// names a code, so each is a guess at one: these spend the same per-address
+// and per-person budgets as the device verification page, keyed the same
+// way, so a person cannot sweep codes through one path while the other is
+// limited.
+func (h *Handler) placementDeviceAllow(w http.ResponseWriter, r *http.Request, session *SessionData) bool {
+	key := session.Username
+	if key == "" {
+		key = placementApproverBinding(session.PlacementIdentity)
+	}
+	if h.sshConsentAllow(r, key) {
+		return true
+	}
+	h.logger.Warn(logging.DestinationSecurity, "Rate-limiting device code lookups",
+		"username", session.Username, "identity", session.PlacementIdentity)
+	h.writeError(w, http.StatusTooManyRequests, "Too many attempts. Wait a moment and try again.")
+	return false
 }
 
 func placementDeviceClientName(clientID string) string {

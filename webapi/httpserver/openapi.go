@@ -1676,7 +1676,8 @@ const openAPISchema = `{
         "parameters": [{"name": "user_code", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z]{4}-[A-Za-z]{4}$"}}],
         "responses": {
           "200": {"description": "Request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementDeviceRequest"}}}},
-          "404": {"description": "Unknown code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+          "404": {"description": "Unknown code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "429": {"description": "Too many code attempts", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },
@@ -1689,7 +1690,8 @@ const openAPISchema = `{
         "parameters": [{"name": "user_code", "in": "path", "required": true, "schema": {"type": "string"}}],
         "responses": {
           "200": {"description": "Canceled"},
-          "404": {"description": "Unknown code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+          "404": {"description": "Unknown code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "429": {"description": "Too many code attempts", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },
