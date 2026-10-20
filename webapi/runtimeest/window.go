@@ -135,11 +135,61 @@ func (w *window) before(t int64, size int, scratch *[]float32) []float32 {
 
 // above returns the window's values greater than x, ascending.
 func (w *window) above(x float64) []float32 {
-	i := len(w.sorted)
-	for i > 0 && float64(w.sorted[i-1]) > x {
+	return aboveIn(w.sorted, x)
+}
+
+// aboveIn returns the values of ascending sorted greater than x.
+func aboveIn(sorted []float32, x float64) []float32 {
+	i := len(sorted)
+	for i > 0 && float64(sorted[i-1]) > x {
 		i--
 	}
-	return w.sorted[i:]
+	return sorted[i:]
+}
+
+// answersFrom reports whether one of the values the window answers from
+// was recorded exactly as e.
+func (w *window) answersFrom(e entry) bool {
+	for k := range len(w.sorted) {
+		if w.newest(k) == e {
+			return true
+		}
+	}
+	return false
+}
+
+// atLeast returns the values of ascending sorted at or above x.
+func atLeast(sorted []float32, x float64) []float32 {
+	i := len(sorted)
+	for i > 0 && float64(sorted[i-1]) >= x {
+		i--
+	}
+	return sorted[i:]
+}
+
+// without is the runtimes and known peaks the window answers from, each
+// ascending, less one run recorded exactly as own, if it answers from
+// such a run: a finished job's own, so that it is not compared with
+// itself. Both slices are new.
+func (w *window) without(own entry) (runtimes, peaks []float32) {
+	n := len(w.sorted)
+	runtimes = make([]float32, 0, n)
+	peaks = make([]float32, 0, len(w.mem))
+	skipped := false
+	for k := range n {
+		e := w.newest(k)
+		if !skipped && e == own {
+			skipped = true
+			continue
+		}
+		runtimes = append(runtimes, e.v)
+		if e.mem > 0 {
+			peaks = append(peaks, e.mem)
+		}
+	}
+	slices.Sort(runtimes)
+	slices.Sort(peaks)
+	return runtimes, peaks
 }
 
 // quantileOf interpolates the q-quantile of sorted values (the R-7

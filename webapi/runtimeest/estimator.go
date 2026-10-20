@@ -144,7 +144,8 @@ type Result struct {
 	// ExceededHistory is true when the job has already run longer than
 	// nearly every comparable job, so there is no honest remaining time
 	// to give. The estimate and bounds are then what history said before
-	// the job started.
+	// the job started. For a finished job it says the same of its whole
+	// run (see judgeFinished).
 	ExceededHistory bool `json:"exceeded_history"`
 	// Memory is what the same group's runs peaked at, and how this job
 	// compares. Absent when none of them has a known peak.
@@ -185,6 +186,14 @@ type Query struct {
 	// and RequestMemoryMiB its RequestMemory, both MiB, 0 when unknown.
 	PeakMemoryMiB    float64
 	RequestMemoryMiB float64
+	// Finished is set for a job that completed normally (HistoryRecord
+	// accepts it), with the runtime and completion time the estimator
+	// reads it with. Its PeakMemoryMiB is then its final peak. It is
+	// estimated as a waiting job is, and judged unusual or not as
+	// judgeFinished says.
+	Finished  bool
+	Runtime   float64
+	Completed int64
 }
 
 // QueryAttrs are the job attributes QueryFromAd reads.
@@ -205,6 +214,10 @@ func QueryFromAd(ad *classad.ClassAd, now time.Time) Query {
 	q := Query{Features: FeaturesFromAd(ad), RequestMemoryMiB: requestMemoryMiB(ad)}
 	q.PeakMemoryMiB, _ = PeakMemoryMiB(ad)
 	status, _ := intAttr(ad, "JobStatus")
+	if status == 4 {
+		q.Runtime, q.Completed, q.Finished = HistoryRecord(ad)
+		return q
+	}
 	if status != 2 {
 		return q
 	}
@@ -463,7 +476,11 @@ func (s *state) candidatesAsOf(k Keys, t int64, cfg Config) [numLevels]float64 {
 // candidates returns each level's estimate for keys from everything it
 // holds, NaN where the level does not apply or has too few samples, and
 // the window behind each.
-func (s *state) candidates(k Keys) ([numLevels]float64, [numLevels]*window) {
+//
+// self, when set, is a finished job's own run: a level whose group holds
+// nothing else does not apply to it. Its own cluster, say, when it was
+// the cluster's only job -- a group of one compares the job with itself.
+func (s *state) candidates(k Keys, self *entry) ([numLevels]float64, [numLevels]*window) {
 	var preds [numLevels]float64
 	var wins [numLevels]*window
 	for l := range s.groups {
@@ -471,7 +488,12 @@ func (s *state) candidates(k Keys) ([numLevels]float64, [numLevels]*window) {
 		if k.k[l] == "" {
 			continue
 		}
-		if w := s.groups[l][k.k[l]]; w.len() >= minSamples {
+		w := s.groups[l][k.k[l]]
+		n := w.len()
+		if self != nil && n > 0 && w.answersFrom(*self) {
+			n--
+		}
+		if n >= minSamples {
 			preds[l], wins[l] = w.median(), w
 		}
 	}
@@ -521,7 +543,11 @@ func (e *Estimator) Estimate(q Query) Result {
 	if !q.Features.Estimated() {
 		return Result{Model: s.model(), Reason: ReasonNotEstimated}
 	}
-	p := s.prepare(DeriveKeys(q.Features), viewOf(q), !e.cfg.noPoolCache)
+	var self *entry
+	if q.Finished {
+		self = q.ownRun()
+	}
+	p := s.prepare(DeriveKeys(q.Features), viewOf(q), !e.cfg.noPoolCache, self)
 	return p.finish(q, s.model())
 }
 
@@ -563,7 +589,7 @@ func (e *Estimator) EstimateMany(qs []Query) []Result {
 		if !l.set || !sameFeatures(&q.Features, l.f) {
 			k := DeriveKeys(q.Features)
 			if !l.set || k != l.k {
-				l.k, l.p = k, s.prepare(k, v, !e.cfg.noPoolCache)
+				l.k, l.p = k, s.prepare(k, v, !e.cfg.noPoolCache, nil)
 			}
 			l.set, l.f = true, &q.Features
 		}
@@ -600,8 +626,10 @@ type prepared struct {
 
 // prepare chooses the level for keys in view v and works out its
 // estimate and bounds. cache says whether bounds may use the pool cache.
-func (s *state) prepare(keys Keys, v view, cache bool) prepared {
-	preds, wins := s.candidates(keys)
+//
+// self, when set, is a finished job's own run (see candidates).
+func (s *state) prepare(keys Keys, v view, cache bool, self *entry) prepared {
+	preds, wins := s.candidates(keys, self)
 	var own *ownerState
 	if keys.owner != "" {
 		own = s.owners[keys.owner]
@@ -654,7 +682,49 @@ func (p *prepared) finish(q Query, m Model) Result {
 	res.P10Seconds = seconds(p10)
 	res.P90Seconds = seconds(p90)
 	res.Memory = memoryOf(&q, p.w, p.lvl)
+	if q.Finished {
+		p.judgeFinished(&q, &res)
+	}
 	return res
+}
+
+// ownRun is the window entry the estimator recorded for a finished job's
+// own run, as Batch.Add records it.
+func (q *Query) ownRun() *entry {
+	return &entry{v: float32(q.Runtime), mem: peakEntry(q.PeakMemoryMiB), at: clampUnix32(q.Completed)}
+}
+
+// judgeFinished says whether a finished job was unusual, by the rules a
+// running job is judged by, applied to its final runtime and peak:
+//
+//   - Runtime: a running job has outrun its history (ExceededHistory)
+//     once it has run at least as long as its group's median and fewer
+//     than minLonger of the group's runs lasted longer. That test is made
+//     of a job that is still going, which will end after the moment it is
+//     asked about: at elapsed time t, a run that lasted exactly t is
+//     already shorter than it will be. A finished runtime is the end, so
+//     the equivalent test is that it is longer than the median and fewer
+//     than minLonger runs lasted at least as long. Taken unchanged, a job
+//     that ran exactly as long as every other run would be called longer
+//     than usual.
+//   - Memory: peakAboveUsual, on its final peak.
+//
+// A finished job has normally been read into the very group it is judged
+// against. While that group still answers from its run -- found by the
+// runtime, peak and completion time the estimator recorded -- the run is
+// left out of what the job is compared with, so a job is not measured
+// against itself, and a group holding nothing else does not answer for it
+// at all (candidates). The figures the Result shows (estimate, bounds,
+// memory quantiles) still include it, as the similar-jobs view of the
+// group does, so the two agree.
+func (p *prepared) judgeFinished(q *Query, res *Result) {
+	runtimes, peaks := p.w.without(*q.ownRun())
+	if len(runtimes) > 0 {
+		res.ExceededHistory = q.Runtime > quantileOf(runtimes, 0.5) && len(atLeast(runtimes, q.Runtime)) < minLonger
+	}
+	if res.Memory != nil {
+		res.Memory.AboveUsual = peakAboveUsual(q.PeakMemoryMiB, peaks, p.lvl)
+	}
 }
 
 // bounds returns the 10th and 90th percentile around est.
@@ -850,6 +920,11 @@ var HistoryAttrs = slices.Clip(append(append(slices.Clone(FeatureAttrs),
 	"ExitCode", "ExitBySignal", "JobStatus", "QDate", "JobCurrentStartDate", "JobStartDate",
 	"GlobalJobId"), PeakMemoryAttrs...))
 
+// FinishedQueryAttrs are what QueryFromAd reads of a finished job's
+// history record: QueryAttrs, and what HistoryRecord needs to read its
+// runtime and completion as the estimator did.
+var FinishedQueryAttrs = slices.Clip(slices.Concat(QueryAttrs, HistoryAttrs))
+
 // CompletedRuntime is how long a finished job ran, and whether it is a
 // job whose runtime says anything about the next one like it.
 //
@@ -961,10 +1036,7 @@ func (b *Batch) Add(c Completion) {
 	if sub <= 0 {
 		sub, start = at, at
 	}
-	var mem float32
-	if c.PeakMemoryMiB > 0 && !math.IsInf(c.PeakMemoryMiB, 0) {
-		mem = float32(c.PeakMemoryMiB)
-	}
+	mem := peakEntry(c.PeakMemoryMiB)
 	b.recs = append(b.recs, record{
 		keys:      k,
 		runtime:   float32(c.Runtime),

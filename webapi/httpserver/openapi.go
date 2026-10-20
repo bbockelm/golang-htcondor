@@ -2429,7 +2429,7 @@ const openAPISchema = `{
     "/jobs/{jobId}/runtime-estimate": {
       "get": {
         "summary": "Estimate how long a job will run",
-        "description": "How long the job is likely to run in total, with a likely range, estimated from the runtimes of the same owner's similar jobs that have already completed (the same cluster, command line, batch name, submit directory or program, or the owner's jobs as a whole, chosen by which has predicted that owner's jobs best), always of the same universe and, for a DAG node, from DAG nodes only. Other users' jobs never answer: an owner with no comparable finished job gets no estimate. For a running job, also how long it has run and how long it likely has left. memory says what the same group's runs peaked at, and how the job's own peak compares. A job that has left the queue is answered from its history record, as it would have been estimated when submitted. Built from the htcondordb mirror's job history, refreshed every few minutes; it never reveals another job's command, id or owner. Always 200 for a job the caller can see: when no estimate can be made, available is false and reason says why (disabled, model_warming_up, insufficient_history, not_estimated).",
+        "description": "How long the job is likely to run in total, with a likely range, estimated from the runtimes of the same owner's similar jobs that have already completed (the same cluster, command line, batch name, submit directory or program, or the owner's jobs as a whole, chosen by which has predicted that owner's jobs best), always of the same universe and, for a DAG node, from DAG nodes only. Other users' jobs never answer: an owner with no comparable finished job gets no estimate. For a running job, also how long it has run and how long it likely has left. memory says what the same group's runs peaked at, and how the job's own peak compares. A job that has left the queue is answered from its history record, as it would have been estimated when submitted, from groups holding runs other than its own; exceeded_history and memory.above_usual then say whether its run was unusual. Built from the htcondordb mirror's job history, refreshed every few minutes; it never reveals another job's command, id or owner. Always 200 for a job the caller can see: when no estimate can be made, available is false and reason says why (disabled, model_warming_up, insufficient_history, not_estimated).",
         "operationId": "getJobRuntimeEstimate",
         "parameters": [
           {
@@ -2468,7 +2468,7 @@ const openAPISchema = `{
                     "rough": {"type": "boolean", "description": "The estimate came from a broad group (level cmd or owner), which is right far less often than the specific ones; present it as a rough guess."},
                     "elapsed_seconds": {"type": "number", "description": "How long the current execution has run. Present only while the job is running."},
                     "remaining_seconds": {"type": "number", "description": "estimate_seconds less elapsed_seconds. Absent when the job is not running or has exceeded its history."},
-                    "exceeded_history": {"type": "boolean", "description": "The job has run longer than nearly every comparable job, so no remaining time is given; the estimate and range are what history said before it started."},
+                    "exceeded_history": {"type": "boolean", "description": "The job has run longer than nearly every comparable job, so no remaining time is given; the estimate and range are what history said before it started. For a finished job: its runtime was longer than the comparable runs' median and fewer than 3 of them lasted at least as long (its own run left out)."},
                     "memory": {
                       "type": "object",
                       "description": "What the runs of the group that answered peaked at, in MiB, over those with a known peak. Absent when none has one.",
@@ -2479,7 +2479,7 @@ const openAPISchema = `{
                         "requested_mib": {"type": "number", "description": "The job's RequestMemory, evaluated. Absent when it does not evaluate to a positive number."},
                         "above_requested": {"type": "integer", "description": "How many of the group's runs peaked above requested_mib."},
                         "rough": {"type": "boolean", "description": "The same as the estimate's rough: the group is a broad one."},
-                        "above_usual": {"type": "boolean", "description": "The job is running, the group is a specific one (not rough) with at least 5 known peaks, and the job's peak so far is at least 1.25 times the group's p90 and at least 256 MiB above it."}
+                        "above_usual": {"type": "boolean", "description": "The job is running or finished, the group is a specific one (not rough) with at least 5 known peaks, and the job's peak (so far) is at least 1.25 times the group's p90 and at least 256 MiB above it. A finished job's own run is left out of the group it is compared with."}
                       }
                     },
                     "model": {
