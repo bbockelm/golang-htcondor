@@ -545,20 +545,22 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the submit file before handing it over. The fatal class is
-	// refused outright -- those submit files have no outcome except a job
-	// that holds or runs wrong, and letting one through only moves the
-	// failure somewhere less legible. The rest become warnings on the
-	// response.
+	// Read the submit file before handing it over, and report what it
+	// says rather than acting on it. The MCP server has run these checks
+	// since the macro-expansion footgun was found; this path had none at
+	// all, which is how the web assistant came to submit jobs whose
+	// output went nowhere.
 	//
-	// The MCP server has done this since the macro-expansion footgun was
-	// found; this path had no check at all, which is how the web
-	// assistant came to submit jobs whose output went nowhere.
-	insp := submitlint.Inspect(req.SubmitFile)
-	if insp.Fatal != nil {
-		s.writeError(w, http.StatusBadRequest, insp.Fatal.Error())
-		return
-	}
+	// Everything is advisory here, including the class submit_job refuses
+	// outright. The two surfaces differ because their callers do: an MCP
+	// agent cannot populate a spool directory it has no filesystem
+	// access to, so `executable = /bin/sleep` with the default
+	// transfer_executable has no working outcome for it. A REST caller
+	// may well be on the submit host, and this endpoint has accepted
+	// that submit file since it existed. Turning an accepted request
+	// into a 400 would break working clients to prevent a hold they may
+	// not even get.
+	warnings := submitlint.Inspect(req.SubmitFile).Advisory()
 
 	clusterID, procAds, err := s.submitJob(ctx, req.SubmitFile)
 	if err != nil {
@@ -574,17 +576,17 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		jobIDs[i] = fmt.Sprintf("%d.%d", cluster, proc)
 	}
 
-	if len(insp.Warnings) > 0 {
+	if len(warnings) > 0 {
 		s.logger.Info(logging.DestinationHTTP, "Submit file warnings",
 			"user", htcondor.GetAuthenticatedUserFromContext(ctx),
 			"cluster", clusterID,
-			"warnings", strings.Join(insp.Warnings, "; "))
+			"warnings", strings.Join(warnings, "; "))
 	}
 
 	s.writeJSON(w, http.StatusCreated, JobSubmitResponse{
 		ClusterID: clusterID,
 		JobIDs:    jobIDs,
-		Warnings:  insp.Warnings,
+		Warnings:  warnings,
 	})
 }
 

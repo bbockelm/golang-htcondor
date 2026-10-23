@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
 )
 
 // postSubmit posts a submit file to /api/v1/jobs as alice and returns the
@@ -29,43 +31,56 @@ func postSubmit(t *testing.T, f *twoOwnerFixture, submitFile string) *httptest.R
 	return rec
 }
 
-// TestRESTSubmitRejectsFatalSubmitFiles: the submit-file checks ran on the
-// MCP path only, so a submit file MCP refuses outright went through the
-// REST path -- the one the web UI and its assistant post to -- and became
-// a job that holds on file transfer with a message about errno 2.
+// TestRESTSubmitDoesNotRefuseWhatMCPRefuses: submit_job rejects a
+// system-path executable with the default transfer_executable, because
+// the agent it serves cannot put that file in the job's spool. A REST
+// caller may be on the submitting host, and this endpoint has accepted
+// that submit file since it existed -- several of this repo's own
+// integration tests submit `executable = /bin/sleep` exactly this way --
+// so here the same finding is advice, not a refusal.
 //
-// The fixture's schedd accepts no submissions, so a submit file that got
-// past the lint fails with a transport error instead. That is what makes
-// this test meaningful: it can only pass if the rejection happened before
-// the schedd was reached.
-func TestRESTSubmitRejectsFatalSubmitFiles(t *testing.T) {
+// The fixture's schedd accepts no submissions, so this reaches it and
+// fails there. Any 400 would mean the diagnostic had become a rejection.
+func TestRESTSubmitDoesNotRefuseWhatMCPRefuses(t *testing.T) {
 	f := twoOwnerScheddServer(t)
 	rec := postSubmit(t, f,
-		"executable = /bin/bash\narguments = -c \"echo hi\"\n"+
+		"executable = /bin/sleep\narguments = 60\n"+
 			"output = run.out\nerror = run.err\nlog = run.log\nqueue 1\n")
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for a submit file with no working outcome, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "transfer_executable") {
-		t.Errorf("the rejection should say what to fix, got: %s", rec.Body.String())
+	if rec.Code == http.StatusBadRequest {
+		t.Fatalf("a submit file this endpoint has always accepted must not become a 400: %s",
+			rec.Body.String())
 	}
 }
 
-// TestRESTSubmitDoesNotRejectWarnings: a submit file that merely discards
-// its output is a job someone may well have meant to submit, so it is
-// advice, not a refusal. This one has to get past the lint and fail at the
-// schedd -- any 400 here would mean warnings had become rejections.
-func TestRESTSubmitDoesNotRejectWarnings(t *testing.T) {
-	f := twoOwnerScheddServer(t)
-	rec := postSubmit(t, f,
-		"executable = /bin/bash\ntransfer_executable = false\narguments = -c \"echo hi\"\nqueue 1\n")
-
-	if rec.Code == http.StatusBadRequest {
-		t.Fatalf("a submit file with only warnings must not be refused, got 400: %s", rec.Body.String())
+// TestAdvisoryCarriesTheFatalDiagnostic: downgrading the refusal must not
+// mean dropping what it said. The caller still has to be told that their
+// job is heading for a file-transfer hold.
+func TestAdvisoryCarriesTheFatalDiagnostic(t *testing.T) {
+	insp := submitlint.Inspect(
+		"executable = /bin/sleep\noutput = run.out\nerror = run.err\nlog = run.log\nqueue 1\n")
+	if insp.Fatal == nil {
+		t.Fatal("expected a fatal diagnostic for a system-path executable")
 	}
-	if strings.Contains(rec.Body.String(), "transfer_executable") {
-		t.Errorf("this submit file has nothing fatal wrong with it: %s", rec.Body.String())
+	advisory := insp.Advisory()
+	if len(advisory) == 0 || !strings.Contains(advisory[0], "transfer_executable") {
+		t.Fatalf("the fatal diagnostic should lead the advice, got %v", advisory)
+	}
+	if len(advisory) != len(insp.Warnings)+1 {
+		t.Errorf("advice should be the warnings plus the fatal one, got %v", advisory)
+	}
+}
+
+// TestAdvisoryIsJustTheWarningsWhenNothingIsFatal guards the other half:
+// no empty leading entry, no duplication.
+func TestAdvisoryIsJustTheWarningsWhenNothingIsFatal(t *testing.T) {
+	insp := submitlint.Inspect("executable = run.sh\nqueue 1\n")
+	if insp.Fatal != nil {
+		t.Fatalf("unexpected fatal: %v", insp.Fatal)
+	}
+	if got := len(insp.Advisory()); got != len(insp.Warnings) {
+		t.Errorf("advice should be exactly the warnings, got %d for %d warnings",
+			got, len(insp.Warnings))
 	}
 }
 

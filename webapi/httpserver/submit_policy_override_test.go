@@ -43,7 +43,7 @@ func TestSubmitRefusesCustomAttributeAnOverrideControls(t *testing.T) {
 	}
 
 	before := accepted.Load()
-	w := post("executable = /bin/true\ntransfer_executable = false\n+AccountingGroup = \"evil\"\nqueue\n")
+	w := post("executable = /bin/true\n+AccountingGroup = \"evil\"\nqueue\n")
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "AccountingGroup") {
 		t.Fatalf("submit setting +AccountingGroup was answered %d, want 400 naming it: %s", w.Code, w.Body.String())
 	}
@@ -51,7 +51,7 @@ func TestSubmitRefusesCustomAttributeAnOverrideControls(t *testing.T) {
 		t.Errorf("the refused submit reached the schedd (%d connection(s))", n)
 	}
 
-	w = post("executable = /bin/true\ntransfer_executable = false\n+ProjectName = \"mine\"\nqueue\n")
+	w = post("executable = /bin/true\n+ProjectName = \"mine\"\nqueue\n")
 	if w.Code == http.StatusBadRequest {
 		t.Fatalf("a submit with an unrelated custom attribute was refused: %s", w.Body.String())
 	}

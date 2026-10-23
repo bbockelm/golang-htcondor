@@ -49,6 +49,27 @@ type Inspection struct {
 	Warnings []string
 }
 
+// Advisory is every diagnostic as plain advice: the warnings, with the
+// fatal one, if any, in front.
+//
+// It exists because "fatal" is a property of the caller, not of the submit
+// file. submit_job refuses an executable under /bin with the default
+// transfer_executable because the agent it serves has no way to put that
+// file in the job's spool -- it is not on the submitting host and cannot
+// get there. A REST caller may be sitting on that host, and the REST
+// endpoint has accepted exactly these submit files since it existed, so
+// there the same finding is something to mention rather than grounds to
+// refuse a request that used to work.
+//
+// A surface that wants to refuse reads Fatal directly; this is for the
+// ones that want to tell the caller and carry on.
+func (i Inspection) Advisory() []string {
+	if i.Fatal == nil {
+		return i.Warnings
+	}
+	return append([]string{i.Fatal.Error()}, i.Warnings...)
+}
+
 // systemExecutablePrefixes are directories whose contents belong to the
 // machine, not to the submitter: an executable under one of these can
 // never be supplied through upload_job_input, so naming one while
