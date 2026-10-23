@@ -247,43 +247,15 @@ func (s *Server) readSkillResource(uri string) (interface{}, error) {
 // skillsInstructions is the section added to the initialize response when
 // a deployment publishes skills.
 //
-// It names them inline rather than only pointing at a tool. An agent reads
-// the instructions before deciding anything, so the catalogue is what makes
-// it recognise that a task is covered here; a bare "call skills_list" is
-// advice it has no reason to take until after it has already guessed.
+// The catalogue itself lives in the skills package, because the browser
+// chat assistant publishes the same skills to the same site's users and
+// has to describe them the same way. Only the sentence about how to read
+// one is written here: skills_get and skill://<id> exist on this surface
+// and nowhere else.
 func skillsInstructions(lib *skills.Library) string {
-	if lib.Len() == 0 {
-		return ""
-	}
-
-	var b strings.Builder
-	b.WriteString("## Site skills\n\n")
-	fmt.Fprintf(&b, "This access point publishes %d site-authored skill(s): its own "+
-		"documentation for how work is done here -- local conventions, queue policy, "+
-		"which resources to request, worked procedures.\n\n", lib.Len())
-	b.WriteString("**Consult the relevant skill before using other tools** when a task " +
-		"touches any of the subjects below. They describe choices specific to this site " +
-		"that general HTCondor knowledge will contradict or omit. Read one with the " +
-		"`skills_get` tool, or the resource `skill://<id>`; the full catalogue is " +
-		"`skills_list` and the resource `skill://index.json`.\n\n")
-
-	const maxListed = 60
-	listed := lib.List()
-	truncated := false
-	if len(listed) > maxListed {
-		listed, truncated = listed[:maxListed], true
-	}
-	for _, sk := range listed {
-		if d := strings.TrimSpace(sk.Description); d != "" {
-			fmt.Fprintf(&b, "- `%s` -- %s: %s\n", sk.ID, sk.Name, d)
-		} else {
-			fmt.Fprintf(&b, "- `%s` -- %s\n", sk.ID, sk.Name)
-		}
-	}
-	if truncated {
-		fmt.Fprintf(&b, "\n(%d more; call `skills_list` for the rest.)\n", lib.Len()-maxListed)
-	}
-	return b.String()
+	return lib.Instructions(
+		"Read one with the `skills_get` tool, or the resource `skill://<id>`; " +
+			"the full catalogue is `skills_list` and the resource `skill://index.json`.")
 }
 
 // SetSkillsDir loads (or reloads) the skill library from disk.
@@ -434,4 +406,19 @@ func (s *Server) stopSkillsReload() {
 		return
 	}
 	s.skillsStopOnce.Do(func() { close(s.skillsStop) })
+}
+
+// Skills is the site skill library this server currently serves, for
+// another surface on the same deployment to publish the same skills.
+//
+// A getter, not a snapshot: the library is replaced on a reconfigure and
+// by the reload poll, and a caller holding the pointer from startup would
+// keep serving a checkout the operator has already replaced. Never nil in
+// the sense that matters -- every Library method is nil-safe, so an
+// unconfigured deployment reads as an empty library rather than a panic.
+func (s *Server) Skills() *skills.Library {
+	if s == nil {
+		return nil
+	}
+	return s.skillsLibrary()
 }

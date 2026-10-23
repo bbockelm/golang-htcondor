@@ -51,6 +51,7 @@ type reconfigTarget interface {
 	SetProjectLeadsGroup(string)
 	SetMCPSkillsDir(string)
 	SetMCPDisabledTools(string)
+	SetChatInstructions(string)
 	// ReloadAPAssignment re-reads the access point assignment's files
 	// (the mapfile, the REST token) and drops cached answers.
 	ReloadAPAssignment()
@@ -125,6 +126,15 @@ var reconfigParams = []reconfigParam{
 	{
 		name:  "HTTP_API_MCP_SKILLS_DIR",
 		apply: func(s reconfigTarget, v string) { s.SetMCPSkillsDir(v) },
+	},
+	// The web chat assistant's half of MCP_INSTRUCTIONS: the operator's
+	// own rules, handed to the model on every turn. Re-read on every
+	// reconfigure rather than only when the path changes, because the
+	// usual reason to reload is that the file's contents were edited --
+	// the same reasoning as HTTP_API_MCP_SKILLS_DIR above.
+	{
+		name:  "HTTP_API_LLM_OPERATOR_INSTRUCTIONS_FILE",
+		apply: func(s reconfigTarget, v string) { s.SetChatInstructions(v) },
 	},
 	{
 		name:  "HTTP_API_WEBUI_ACCESS_GROUP",

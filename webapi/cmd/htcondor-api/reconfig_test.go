@@ -37,6 +37,7 @@ func (f *fakeTarget) SetWebUIAdminGroups(v string)   { f.record("webui_admin", v
 func (f *fakeTarget) SetSuperuserGroups(v string)    { f.record("superuser", v) }
 func (f *fakeTarget) SetMCPSkillsDir(v string)       { f.record("skills_dir", v) }
 func (f *fakeTarget) SetMCPDisabledTools(v string)   { f.record("disabled_tools", v) }
+func (f *fakeTarget) SetChatInstructions(v string)   { f.record("chat_instructions", v) }
 func (f *fakeTarget) ReloadAPAssignment()            { f.record("ap_assignment_reload", "") }
 func (f *fakeTarget) SetProjectLeadsFile(v string)   { f.record("project_leads_file", v) }
 func (f *fakeTarget) SetProjectLeadsGroup(v string)  { f.record("project_leads_group", v) }

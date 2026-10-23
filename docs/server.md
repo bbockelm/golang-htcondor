@@ -1527,6 +1527,15 @@ metrics key.
 - `GET /api/v1/chat/scope?page=<page>&scope=<mine|everyone>` — which jobs
   the assistant would see for this caller on that page
 
+The assistant is given the same two pieces of site-specific text an MCP
+agent is: the operator's own rules from
+`HTTP_API_LLM_OPERATOR_INSTRUCTIONS_FILE`, and the catalogue of the site
+skills published by `HTTP_API_MCP_SKILLS_DIR`, which it reads with a
+`get_site_skill` tool. One library serves both surfaces, so a skill added
+to the checkout reaches web users and agents together, and both describe
+it the same way. Both are read on every turn, so a `condor_reconfig` --
+or the skills reload poll -- lands on sessions already open.
+
 **MCP** (when enabled via `HTTP_API_ENABLE_MCP=true`)
 - The OAuth2 endpoints do not depend on this; see
   [When OAuth2 is served](#authentication).
@@ -2771,7 +2780,7 @@ Frequently-used knobs:
 | `HTTP_API_LLM_API_URL` | Override the upstream Anthropic Messages endpoint (proxy / gateway). The full URL of the `/v1/messages` route. |
 | `HTTP_API_LLM_MODEL` | Override the default Claude model. With a gateway, the model name as the gateway knows it. |
 | `HTTP_API_LLM_AUTH_SCHEME` | How the key is sent: `x-api-key` (default; what api.anthropic.com reads) or `bearer` (`Authorization: Bearer`, what an OpenAI-style gateway fronting the Messages API, such as Envoy AI Gateway or LiteLLM, authenticates). |
-| `HTTP_API_LLM_OPERATOR_INSTRUCTIONS_FILE` | Site-policy text appended to every chat system prompt. |
+| `HTTP_API_LLM_OPERATOR_INSTRUCTIONS_FILE` | Site-policy text appended to every chat system prompt, last, so it outranks the standard prompts. Re-read on `condor_reconfig`, whether or not the path changed; a read that fails keeps the previous text. Like the API key file, it must not be world-accessible. |
 | `PRIVATE_NETWORK_NAME` | This host's private network name. When it equals a daemon's advertised `PrivNet`, that daemon is dialed directly instead of through its CCB broker. Defaults to `$(FULL_HOSTNAME)`, as in C++. See [Reaching jobs behind CCB](#reaching-jobs-behind-ccb). |
 | `HTTP_API_SHARED_PORT` | Open an inbound HTCondor port (a port or `host:port`, e.g. `9618`) so this server can be reached by execute nodes behind a Condor Connection Broker. Off by default. See [Reaching jobs behind CCB](#reaching-jobs-behind-ccb). |
 | `HTTP_API_SHARED_PORT_ADDRESS` | The `host` or `host:port` execute nodes should dial to reach that port, when it differs from what this process binds — behind NAT, a container port map, or a Kubernetes Service. Defaults to `TCP_FORWARDING_HOST`, else `FULL_HOSTNAME`, paired with the listen port. |

@@ -221,7 +221,14 @@ type Handler struct {
 	// chatEngine is non-nil when HTTP_API_LLM_API_KEY_FILE is
 	// configured AND MCP is enabled. The chat handler at
 	// /api/v1/chat uses it; everything else ignores it.
-	chatEngine         *chat.Engine
+	chatEngine *chat.Engine
+	// chatOperatorFile is the path HTTP_API_LLM_INSTRUCTIONS_FILE named,
+	// kept so a reconfigure can re-read it; chatOperatorText is what it
+	// last held. Stored rather than closed over because the operator
+	// edits the file and runs condor_reconfig expecting the assistant to
+	// change its mind, which is how the MCP surface has always behaved.
+	chatOperatorFile   string
+	chatOperatorText   atomic.Pointer[string]
 	metricsRegistry    *metricsd.Registry
 	prometheusExporter *metricsd.PrometheusExporter
 	// httpMetrics holds the prometheus/client_golang registry plus the
@@ -2095,8 +2102,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to load operator chat instructions: %w", err)
 			}
+			h.chatOperatorFile = cfg.LLMOperatorInstructionsFile
+			h.chatOperatorText.Store(&operatorAddendum)
 			tools := h.buildChatTools()
-			h.chatEngine = chat.NewEngine(llm, tools, chatPageInstructions(), operatorAddendum)
+			h.chatEngine = chat.NewEngine(llm, tools, chatPageInstructions(), h.siteChatGuidance)
 			// Per-tool-call telemetry so operators can spot tools
 			// that systematically inflate token cost. Logs at INFO
 			// so it stays out of the way under normal use but
