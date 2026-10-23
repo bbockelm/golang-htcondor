@@ -20,7 +20,11 @@ func placementOnlyExpectedAllowed(path string) bool {
 	case "/api/v1/auth/me", "/api/v1/auth/logout", "/login", "/logout",
 		"/auth/device_authorization", "/auth/code", "/auth/cancel_device",
 		"/mcp/oauth2/device/verify", "/oauth2/device/verify",
+		"/api/v1/webui/branding", "/branding.css",
 		"/placement", "/placement/", "/placement/device", "/placement/device/":
+		return true
+	}
+	if strings.HasPrefix(path, "/branding/") {
 		return true
 	}
 	return path == "/api/v1/placement/me" || strings.HasPrefix(path, "/api/v1/placement/me/")

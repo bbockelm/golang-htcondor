@@ -1953,6 +1953,14 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// HTTP_API_MCP_ACCESS_GROUP, which is what gated the browser before
 	// these were separate knobs.
 	webuiAccessGroup, _ := cfg.Get("HTTP_API_WEBUI_ACCESS_GROUP")
+	// Site branding. Every one of these is optional; unset leaves the
+	// web UI exactly as it ships. See webapi/httpserver/branding.go.
+	webuiSiteName, _ := cfg.Get("HTTP_API_WEBUI_SITE_NAME")
+	webuiSiteTagline, _ := cfg.Get("HTTP_API_WEBUI_SITE_TAGLINE")
+	webuiFooterLogos, _ := cfg.Get("HTTP_API_WEBUI_FOOTER_LOGOS")
+	webuiBrandingDir, _ := cfg.Get("HTTP_API_WEBUI_BRANDING_DIR")
+	webuiCustomCSS, _ := cfg.Get("HTTP_API_WEBUI_CUSTOM_CSS")
+	webuiFavicon, _ := cfg.Get("HTTP_API_WEBUI_FAVICON")
 
 	// Superuser mode is gated on its own group, not on the admin-UI group:
 	// reading the admin pages and acting as any user on the access point are
@@ -2242,6 +2250,12 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPAdminUsers:              mcpCfg.adminUsers,
 		WebUIAdminGroup:            webuiAdminGroup,
 		WebUIAccessGroup:           webuiAccessGroup,
+		WebUISiteName:              webuiSiteName,
+		WebUISiteTagline:           webuiSiteTagline,
+		WebUIFooterLogos:           webuiFooterLogos,
+		WebUIBrandingDir:           webuiBrandingDir,
+		WebUICustomCSS:             webuiCustomCSS,
+		WebUIFavicon:               webuiFavicon,
 		SuperuserGroup:             strings.TrimSpace(superuserGroup),
 		ProjectLeadsFile:           strings.TrimSpace(projectLeadsFile),
 		ProjectLeadsGroup:          strings.TrimSpace(projectLeadsGroup),

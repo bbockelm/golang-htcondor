@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
 )
 
 // A placement-only session belongs to somebody who signed in but maps to no
@@ -35,6 +36,10 @@ var placementOnlyAPIPaths = map[string]bool{
 	// handler checks which).
 	mcpDeviceVerifyPath:   true,
 	webUIDeviceVerifyPath: true,
+	// The chrome of the placement pages this session does reach: what
+	// the site is called and what goes in its footer.
+	brandingPath:  true,
+	webui.CSSPath: true,
 }
 
 // placementOnlyPages are the web UI pages a placement-only session may load.
@@ -50,6 +55,9 @@ func placementOnlyAllowed(urlPath, pattern string) bool {
 		return true
 	}
 	if urlPath == "/api/v1/placement/me" || strings.HasPrefix(urlPath, "/api/v1/placement/me/") {
+		return true
+	}
+	if strings.HasPrefix(urlPath, brandingAssetPrefix) {
 		return true
 	}
 	if pattern != "/" {

@@ -384,7 +384,10 @@ type Handler struct {
 	// HTCondor IDTOKENs presented to /mcp/message.
 	mcpActors        mcpActorCache
 	webuiAdminGroups *groupSet // Required for Web UI admin pages (empty = no admin UI)
-	metricsPublic    bool      // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
+	// branding is the site's presentation of the web UI: its name, its
+	// footer logos, its colours. Reloadable; see branding.go.
+	branding      *brandingState
+	metricsPublic bool // When true, /metrics serves unauthenticated (default: requires `metrics`-scope API key)
 	// mirrorReaders caches, per username, whether the schedd accepts a
 	// session or user-header caller at READ. See mirrorReadVerified.
 	mirrorReaders mcpActorCache
@@ -1042,7 +1045,25 @@ type HandlerConfig struct {
 	// from MCP. Comma-separated; HTTP_API_WEBUI_ACCESS_GROUP. Empty falls
 	// back to MCPAccessGroup.
 	WebUIAccessGroup string
-	EnableIDP        bool // Enable built-in IDP (always enabled in demo mode)
+
+	// Web UI branding. All optional; unset leaves the pages exactly as
+	// they ship. See branding.go and HTTP_API_WEBUI_SITE_NAME and
+	// friends.
+	WebUISiteName    string
+	WebUISiteTagline string
+	// WebUIFooterLogos is a JSON array of {"src","alt","href"}. Empty
+	// keeps the shipped CHTC/Morgridge/UW band; "[]" removes it.
+	WebUIFooterLogos string
+	// WebUIBrandingDir is served read-only under /branding/.
+	WebUIBrandingDir string
+	// WebUICustomCSS is a stylesheet served at /branding.css and loaded
+	// after the app's own.
+	WebUICustomCSS string
+	// WebUIFavicon is a URL for the tab icon, normally one of the files
+	// in WebUIBrandingDir.
+	WebUIFavicon string
+
+	EnableIDP bool // Enable built-in IDP (always enabled in demo mode)
 	// SpoolBufferDir is where cluster-wide uploads buffer their tar.
 	// Empty selects the system temp directory.
 	SpoolBufferDir string
@@ -1873,6 +1894,14 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	}
 	h.webuiAdminGroups = newGroupSet(cfg.WebUIAdminGroup)
 	h.webuiAccessGroups = newGroupSet(cfg.WebUIAccessGroup)
+	h.branding = newBrandingState(logger, brandingOptions{
+		SiteName:    cfg.WebUISiteName,
+		SiteTagline: cfg.WebUISiteTagline,
+		FooterLogos: cfg.WebUIFooterLogos,
+		Favicon:     cfg.WebUIFavicon,
+		Dir:         cfg.WebUIBrandingDir,
+		CSSFile:     cfg.WebUICustomCSS,
+	})
 
 	// Parsed once, here, so a malformed policy stops the daemon at startup
 	// rather than at the first person's login.
@@ -2371,7 +2400,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// middleware entirely for proxy paths and let the upstream
 	// response control its own headers.
 	if !isTransparentProxyPath(r.URL.Path) {
-		applySecurityHeaders(w)
+		// The site's own logo origins widen img-src; see
+		// brandingSnapshot.imgSrc.
+		applySecurityHeaders(w, h.branding.snapshot().imgSrc)
 	}
 	// Bound every request body, for the same reason again: a route added
 	// later inherits it. Routes that need more (uploads, MCP) or less say
@@ -2633,12 +2664,21 @@ func (h *Handler) isUserHeaderTrustedSource(r *http.Request) bool {
 //
 // The frame-ancestors directive in CSP duplicates X-Frame-Options
 // for browsers that honor CSP only; both are cheap to send.
-func applySecurityHeaders(w http.ResponseWriter) {
+//   - img-src is widened by the origins of any absolute logo URLs the
+//     site configured (HTTP_API_WEBUI_FOOTER_LOGOS, HTTP_API_WEBUI_FAVICON).
+//     Without that, a logo hosted on the university's own web server
+//     would be refused by the policy and the operator would see an
+//     empty footer and a console message. Only those origins, and only
+//     for images.
+func applySecurityHeaders(w http.ResponseWriter, brandingImgSrc string) {
 	h := w.Header()
 	if h.Get("Content-Security-Policy") == "" {
+		if brandingImgSrc != "" {
+			brandingImgSrc = " " + brandingImgSrc
+		}
 		h.Set("Content-Security-Policy",
 			"default-src 'self'; "+
-				"img-src 'self' data: blob:; "+
+				"img-src 'self' data: blob:"+brandingImgSrc+"; "+
 				"style-src 'self' 'unsafe-inline'; "+
 				"script-src 'self' 'unsafe-inline'; "+
 				"object-src 'none'; "+

@@ -345,6 +345,15 @@ type Config struct {
 	// WebUIAccessGroup gates web interface login; empty falls back to
 	// MCPAccessGroup. Comma-separated.
 	WebUIAccessGroup string
+	// Web UI branding: the site's own name, footer logos, images,
+	// stylesheet and tab icon. All optional; unset leaves the pages as
+	// they ship. See HandlerConfig and httpserver/branding.go.
+	WebUISiteName    string
+	WebUISiteTagline string
+	WebUIFooterLogos string
+	WebUIBrandingDir string
+	WebUICustomCSS   string
+	WebUIFavicon     string
 	// SpoolBufferDir is where a cluster-wide upload buffers its tar
 	// before fanning it out to each proc. Empty selects the system temp
 	// directory.
@@ -560,6 +569,12 @@ func NewServer(cfg Config) (*Server, error) {
 		CreddAddress:                cfg.CreddAddress,
 		MCPAdminUsers:               cfg.MCPAdminUsers,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,
+		WebUISiteName:               cfg.WebUISiteName,
+		WebUISiteTagline:            cfg.WebUISiteTagline,
+		WebUIFooterLogos:            cfg.WebUIFooterLogos,
+		WebUIBrandingDir:            cfg.WebUIBrandingDir,
+		WebUICustomCSS:              cfg.WebUICustomCSS,
+		WebUIFavicon:                cfg.WebUIFavicon,
 		WebUIAccessGroup:            cfg.WebUIAccessGroup,
 		SpoolBufferDir:              cfg.SpoolBufferDir,
 		SuperuserGroup:              cfg.SuperuserGroup,
