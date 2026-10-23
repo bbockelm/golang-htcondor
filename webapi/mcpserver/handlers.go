@@ -26,6 +26,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
+	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -1220,9 +1221,9 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 	// schedd accepts without complaint (see issue #183), and an error
 	// here is far cheaper for the caller than a submit/hold/diagnose
 	// cycle.
-	insp := inspectSubmitFile(submitFile)
-	if insp.fatal != nil {
-		return nil, insp.fatal
+	insp := submitlint.Inspect(submitFile)
+	if insp.Fatal != nil {
+		return nil, insp.Fatal
 	}
 
 	// Site policy applies to the agent surface too: a requirement an
@@ -1248,7 +1249,7 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 	// here is the whole of the surprise reported in af-mcp-platform#268 --
 	// one upload released proc 0 and procs 1-4 stayed held.
 	var fanOut string
-	if insp.needsSpooling && len(procAds) > 1 {
+	if insp.NeedsSpooling && len(procAds) > 1 {
 		cluster, _ := procAds[0].EvaluateAttrInt("ClusterId")
 		fanOut = fmt.Sprintf(`
    NOTE: this submission has %d procs, and HTCondor spools input PER PROC.
@@ -1261,7 +1262,7 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 	}
 
 	var nextSteps string
-	if insp.needsSpooling {
+	if insp.NeedsSpooling {
 		nextSteps = fmt.Sprintf(`
 
 NEXT STEPS:
@@ -1313,12 +1314,12 @@ First job ID for status checks: %s`, s.waitStepText(), jobIDs[0])
 		"cluster_id":   clusterID,
 		"job_ids":      jobIDs,
 		"proc_count":   len(jobIDs),
-		"needs_upload": insp.needsSpooling,
+		"needs_upload": insp.NeedsSpooling,
 	}
-	if len(insp.warnings) > 0 {
-		metadata["warnings"] = insp.warnings
+	if len(insp.Warnings) > 0 {
+		metadata["warnings"] = insp.Warnings
 	}
-	warningNote := formatSubmitWarnings(insp.warnings)
+	warningNote := formatSubmitWarnings(insp.Warnings)
 
 	return withStructured(map[string]interface{}{
 		"content": []map[string]interface{}{

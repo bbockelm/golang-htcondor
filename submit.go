@@ -423,6 +423,34 @@ func parseUniverse(univ string) int {
 	}
 }
 
+// QueueCount reports how many job processes this submit file queues.
+//
+// It is the submit parser's own answer, iterator included, which is the
+// only place the question can be answered correctly: the queue statement
+// has half a dozen forms, and `queue 2 x in (a, b)` is four processes
+// while `queue name from ((rows))` is as many as there are rows. A caller
+// that counts by re-reading the text gets some of those forms wrong, and
+// the ones it gets wrong are the multi-process ones that matter.
+func (sf *SubmitFile) QueueCount() int {
+	return sf.queueCount
+}
+
+// QueueVars reports the variable names the queue statement binds per row,
+// in the order the statement lists them. Empty when the statement binds
+// none, which is the common `queue` and `queue N`.
+//
+// The caller gets a copy: the names belong to the parsed submit file and
+// outlive the call, and a caller that sorted or appended to them in place
+// would be editing that file's own state.
+func (sf *SubmitFile) QueueVars() []string {
+	if len(sf.queueVars) == 0 {
+		return nil
+	}
+	out := make([]string, len(sf.queueVars))
+	copy(out, sf.queueVars)
+	return out
+}
+
 // MakeJobAd creates a ClassAd for a single job
 // This is the main transformation from submit file to job ClassAd
 // queueVars contains variable substitutions from the queue statement

@@ -8,6 +8,8 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+
+	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
 )
 
 // The two submit-file mistakes reported from a live demo, each of which
@@ -63,9 +65,9 @@ func TestSubmitRejectsSystemExecutableWithoutTransferFlag(t *testing.T) {
 // expanded away before bash ever sees it, the job runs, and the command
 // is quietly wrong — there is no error at submit time to notice.
 func TestSubmitWarnsAboutMacroExpansionInArguments(t *testing.T) {
-	warnings := warnUndefinedMacros(
+	warnings := submitlint.Inspect(
 		"executable = /bin/bash\ntransfer_executable = False\n" +
-			"arguments = \"-c 'echo $(hostname)'\"\nqueue\n")
+			"arguments = \"-c 'echo $(hostname)'\"\noutput = out.txt\nerror = err.txt\nlog = job.log\nqueue\n").Warnings
 	if len(warnings) == 0 {
 		t.Fatal("no warning for $(hostname) in arguments")
 	}

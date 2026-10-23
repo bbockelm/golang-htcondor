@@ -25,6 +25,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
+	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -177,6 +178,14 @@ type JobSubmitResponse struct {
 	// Assignment is the caller's AP assignment the submission followed
 	// (multi-AP mode only).
 	Assignment *apassign.Assignment `json:"assignment,omitempty"`
+	// Warnings are submitlint diagnostics about the submit file: things
+	// that parsed and submitted fine but almost certainly do not do what
+	// the submitter meant, most importantly output the job is about to
+	// throw away. The job is already in the queue by the time these are
+	// known, so they are advice about whether to remove and resubmit it,
+	// not an error -- which is why they ride on a 201 rather than
+	// replacing it with a 400.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // JobEditRequest represents a job edit request
@@ -536,6 +545,23 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the submit file before handing it over, and report what it
+	// says rather than acting on it. The MCP server has run these checks
+	// since the macro-expansion footgun was found; this path had none at
+	// all, which is how the web assistant came to submit jobs whose
+	// output went nowhere.
+	//
+	// Everything is advisory here, including the class submit_job refuses
+	// outright. The two surfaces differ because their callers do: an MCP
+	// agent cannot populate a spool directory it has no filesystem
+	// access to, so `executable = /bin/sleep` with the default
+	// transfer_executable has no working outcome for it. A REST caller
+	// may well be on the submit host, and this endpoint has accepted
+	// that submit file since it existed. Turning an accepted request
+	// into a 400 would break working clients to prevent a hold they may
+	// not even get.
+	warnings := submitlint.Inspect(req.SubmitFile).Advisory()
+
 	clusterID, procAds, err := s.submitJob(ctx, req.SubmitFile)
 	if err != nil {
 		s.writeSubmitFailure(ctx, w, err)
@@ -550,9 +576,17 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		jobIDs[i] = fmt.Sprintf("%d.%d", cluster, proc)
 	}
 
+	if len(warnings) > 0 {
+		s.logger.Info(logging.DestinationHTTP, "Submit file warnings",
+			"user", htcondor.GetAuthenticatedUserFromContext(ctx),
+			"cluster", clusterID,
+			"warnings", strings.Join(warnings, "; "))
+	}
+
 	s.writeJSON(w, http.StatusCreated, JobSubmitResponse{
 		ClusterID: clusterID,
 		JobIDs:    jobIDs,
+		Warnings:  warnings,
 	})
 }
 

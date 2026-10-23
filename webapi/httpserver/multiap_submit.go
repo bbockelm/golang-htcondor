@@ -15,6 +15,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
 )
 
 // Submission and credentials in multi-AP mode.
@@ -117,6 +118,10 @@ func (h *Handler) handleMultiSubmitJob(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "submit_file is required")
 		return
 	}
+	// Same read of the submit file as the single-AP path, and advisory
+	// for the same reason: this endpoint has accepted these submit files
+	// since it existed, and a 400 would break working clients.
+	warnings := submitlint.Inspect(req.SubmitFile).Advisory()
 	m, a, err := h.multi.svc.SubmitTarget(ctx, h.jobAssignRequest(ctx, r, user), r.URL.Query().Get("schedd"))
 	if err != nil {
 		h.multiAPError(w, err)
@@ -145,7 +150,7 @@ func (h *Handler) handleMultiSubmitJob(w http.ResponseWriter, r *http.Request) {
 		h.writeSubmitFailure(ctx, w, err)
 		return
 	}
-	resp := JobSubmitResponse{ClusterID: clusterID, Schedd: m.Name, Assignment: &a}
+	resp := JobSubmitResponse{ClusterID: clusterID, Schedd: m.Name, Assignment: &a, Warnings: warnings}
 	for _, ad := range procAds {
 		cluster, _ := ad.EvaluateAttrInt("ClusterId")
 		proc, _ := ad.EvaluateAttrInt("ProcId")
@@ -158,7 +163,8 @@ func (h *Handler) handleMultiSubmitJob(w http.ResponseWriter, r *http.Request) {
 		resp.JobIDs = []string{}
 	}
 	h.logger.Info(logging.DestinationHTTP, "Submitted to the assigned access point",
-		"user", user, "access_point", m.Name, "cluster", clusterID, "procs", len(procAds), "assignment_source", a.Source)
+		"user", user, "access_point", m.Name, "cluster", clusterID, "procs", len(procAds),
+		"assignment_source", a.Source, "submit_warnings", len(warnings))
 	h.writeJSON(w, http.StatusCreated, resp)
 }
 
