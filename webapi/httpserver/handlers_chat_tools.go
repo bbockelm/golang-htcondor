@@ -41,7 +41,11 @@ type chatTool struct {
 	// Use snake_case page identifiers matching what the SPA sends in
 	// Request.Page (e.g. "jobs", "submit").
 	pages []string
-	exec  func(ctx context.Context, actor string, input json.RawMessage) (string, error)
+	// available gates the tool on how the deployment is configured, as
+	// distinct from which page is open. Nil means always available,
+	// which is what all but the site-skill reader are.
+	available func() bool
+	exec      func(ctx context.Context, actor string, input json.RawMessage) (string, error)
 	// describe, for a confirm tool, adds facts to the approval card (see
 	// chat.ConfirmationDescriber). Optional.
 	describe func(ctx context.Context, actor string, input json.RawMessage) map[string]any
@@ -53,6 +57,9 @@ func (t *chatTool) InputSchema() json.RawMessage { return t.schema }
 func (t *chatTool) ClientSide() bool             { return t.clientSide }
 func (t *chatTool) RequiresConfirmation() bool   { return t.confirm }
 func (t *chatTool) AvailablePages() []string     { return t.pages }
+func (t *chatTool) Available() bool {
+	return t.available == nil || t.available()
+}
 func (t *chatTool) DescribeConfirmation(ctx context.Context, actor string, in json.RawMessage) map[string]any {
 	if t.describe == nil {
 		return nil
@@ -629,7 +636,8 @@ func (s *Handler) buildChatTools() []chat.Tool {
 		toolReadJobOutput(),
 		s.toolRunInJob(),
 		s.toolEditJobAttribute(),
-		// Universal (read-only pool data; no page tag).
+		// Universal (read-only site documentation and pool data; no page tag).
+		s.toolGetSiteSkill(),
 		s.toolQuerySlots(),
 		// Universal: the user's own finished jobs, analysed.
 		s.toolAnalyzeUtilization(),

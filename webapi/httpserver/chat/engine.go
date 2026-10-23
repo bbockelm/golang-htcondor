@@ -55,6 +55,21 @@ type ConfirmationDescriber interface {
 	DescribeConfirmation(ctx context.Context, actor string, input json.RawMessage) map[string]any
 }
 
+// ConditionalTool is implemented by a tool whose usefulness depends on
+// how the deployment is configured, rather than on which page the user is
+// looking at. The engine asks before advertising it, on every turn, so a
+// tool can appear and disappear as the server is reconfigured.
+//
+// The case it exists for is the site skill reader: a deployment that
+// publishes no skills has nothing for it to read, and advertising a tool
+// whose every call returns "this access point publishes no site skills"
+// spends context to offer the model a dead end. A tool that does not
+// implement this is always available, which is what nearly all of them
+// are.
+type ConditionalTool interface {
+	Available() bool
+}
+
 // Request is one /api/v1/chat call. Messages is the full conversation
 // history (browser sends every turn so the server is stateless). Each
 // message's content is the AI-SDK shape — see request_message.go.
@@ -117,7 +132,18 @@ type Engine struct {
 	client           *AnthropicClient
 	tools            map[string]Tool
 	pageInstructions map[string]string
-	operatorAddendum string
+	// siteGuidance supplies the text this deployment publishes about
+	// itself -- the operator's own instructions and the site skill
+	// catalogue -- read fresh on every turn.
+	//
+	// A function rather than a string because both of its inputs change
+	// under a running server: condor_reconfig rewrites the operator's
+	// instructions, and the skill library is reloaded when its checkout
+	// moves. The MCP surface has always picked those up without a
+	// restart; a string captured at construction would have made this
+	// one the surface where a correction did not land, which is the
+	// drift this is meant to remove. Optional: nil means no site text.
+	siteGuidance func() string
 	// telemetry is fired once per successfully-executed server-side
 	// tool call with the tool name, result byte length, whether the
 	// engine had to truncate, and the actor (typically the
@@ -144,16 +170,22 @@ type TelemetryFunc func(toolName, actor string, bytes int, truncated bool)
 // tools that are universally tagged. Operators looking to add a third
 // page should register tools and add an entry here together.
 //
-// operatorAddendum is freeform text supplied by the server admin via
-// configuration. It's appended to the system prompt on every turn,
-// regardless of page. Use it for site-specific rules ("we don't allow
-// LongJob requests over 24h", "our preferred default is Singularity")
-// — anything you'd hand to an in-house user-help operator.
+// siteGuidance returns what this deployment publishes about itself: the
+// operator's freeform instructions from configuration, and the catalogue
+// of site-authored skills. It's appended to the system prompt on every
+// turn, regardless of page, and last, so an operator can correct anything
+// the standard prompts say. Use it for site-specific rules ("we don't
+// allow LongJob requests over 24h", "our preferred default is
+// Singularity") — anything you'd hand to an in-house user-help operator.
+//
+// Called once per turn rather than read once at construction, so a
+// reconfigure or a reloaded skills checkout reaches live sessions. Nil is
+// allowed and means this deployment publishes nothing of its own.
 func NewEngine(
 	client *AnthropicClient,
 	tools []Tool,
 	pageInstructions map[string]string,
-	operatorAddendum string,
+	siteGuidance func() string,
 ) *Engine {
 	registry := make(map[string]Tool, len(tools))
 	for _, t := range tools {
@@ -170,7 +202,7 @@ func NewEngine(
 		client:           client,
 		tools:            registry,
 		pageInstructions: pi,
-		operatorAddendum: operatorAddendum,
+		siteGuidance:     siteGuidance,
 	}
 }
 
@@ -568,6 +600,9 @@ func (e *Engine) toolsForPage(page string) ([]Tool, []AnthropicTool) {
 		if !toolAvailableOnPage(t, page) {
 			continue
 		}
+		if c, ok := t.(ConditionalTool); ok && !c.Available() {
+			continue
+		}
 		tools = append(tools, t)
 		schemas = append(schemas, AnthropicTool{
 			Name:        t.Name(),
@@ -665,10 +700,10 @@ manual step they should take instead — don't pretend you did it.
 	b.WriteString(time.Now().UTC().Format("2006-01-02"))
 	b.WriteString(".\n")
 
-	if e.operatorAddendum != "" {
-		b.WriteString("\n--- Site operator instructions (highest priority) ---\n")
-		b.WriteString(e.operatorAddendum)
-		if !strings.HasSuffix(e.operatorAddendum, "\n") {
+	if e.siteGuidance != nil {
+		if site := strings.TrimRight(e.siteGuidance(), "\n"); site != "" {
+			b.WriteString("\n--- This site's own instructions (highest priority) ---\n")
+			b.WriteString(site)
 			b.WriteString("\n")
 		}
 	}

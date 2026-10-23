@@ -85,6 +85,10 @@ func TestChatToolsOnReadOnlyPages(t *testing.T) {
 	readOnly := map[string]bool{
 		"analyze_issues": true, "analyze_utilization": true, "query_slots": true,
 		"doc_job_attributes": true, "doc_search": true, "query_jobs_archive": true,
+		// Reads one of the site's own Markdown documents. Untagged for
+		// the same reason the doc lookups are: a site skill about the
+		// local GPU partition is as relevant here as anywhere.
+		"get_site_skill": true,
 	}
 	for page, want := range map[string][]string{
 		"issues":      {"analyze_issues", "set_constraint", "query_slots", "analyze_utilization"},

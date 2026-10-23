@@ -512,7 +512,7 @@ func withChatEngine(t *testing.T, f *twoOwnerFixture, llm *fakeAnthropic) {
 	if err != nil || client == nil {
 		t.Fatalf("NewAnthropicClient: %v", err)
 	}
-	f.s.chatEngine = chat.NewEngine(client, f.s.buildChatTools(), chatPageInstructions(), "")
+	f.s.chatEngine = chat.NewEngine(client, f.s.buildChatTools(), chatPageInstructions(), nil)
 }
 
 func postChat(t *testing.T, f *twoOwnerFixture, auth func(*http.Request), body map[string]any) string {

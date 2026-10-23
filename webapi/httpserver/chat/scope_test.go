@@ -31,7 +31,7 @@ func TestScopeFromDefaultsToMine(t *testing.T) {
 
 // The prompt's scope paragraph follows the resolved scope.
 func TestSystemPromptScopeStatement(t *testing.T) {
-	e := NewEngine(nil, nil, nil, "")
+	e := NewEngine(nil, nil, nil, nil)
 	everyone := e.systemPromptForPage("jobs", nil, "", Scope{Requested: ScopeEveryone, Effective: ScopeEveryone, ActOnOthers: true})
 	if !strings.Contains(everyone, "cover every user's jobs") || !strings.Contains(everyone, "names\nthe job's owner") {
 		t.Errorf("everyone scope:\n%s", everyone)

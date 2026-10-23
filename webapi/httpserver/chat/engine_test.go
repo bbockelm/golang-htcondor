@@ -58,7 +58,7 @@ func (f *fakeTool) Execute(_ context.Context, actor string, in json.RawMessage) 
 // expected.
 func TestResolvePendingApprovalsExecutesApproved(t *testing.T) {
 	tool := &fakeTool{name: "remove_job", confirm: true, returnValue: `{"removed":1}`}
-	engine := NewEngine(nil /* anthropic client unused */, []Tool{tool}, nil, "")
+	engine := NewEngine(nil /* anthropic client unused */, []Tool{tool}, nil, nil)
 
 	// Hand-craft an Anthropic-shape history with an unfinished
 	// tool_use waiting for a tool_result.
@@ -127,7 +127,7 @@ func TestResolvePendingApprovalsExecutesApproved(t *testing.T) {
 // doesn't side-execute tool_uses behind the user's back.
 func TestResolvePendingApprovalsLeavesUnapprovedAlone(t *testing.T) {
 	tool := &fakeTool{name: "remove_job", confirm: true}
-	engine := NewEngine(nil, []Tool{tool}, nil, "")
+	engine := NewEngine(nil, []Tool{tool}, nil, nil)
 
 	msgs := []AnthropicMessage{
 		{Role: "user", Content: []AnthropicContentBlock{{Type: "text", Text: "remove"}}},
@@ -156,7 +156,7 @@ func TestResolvePendingApprovalsLeavesUnapprovedAlone(t *testing.T) {
 // tool_result on a previous round. Re-running would be a bug.
 func TestResolvePendingApprovalsSkipsAlreadyResolved(t *testing.T) {
 	tool := &fakeTool{name: "remove_job", confirm: true}
-	engine := NewEngine(nil, []Tool{tool}, nil, "")
+	engine := NewEngine(nil, []Tool{tool}, nil, nil)
 
 	msgs := []AnthropicMessage{
 		{Role: "assistant", Content: []AnthropicContentBlock{
@@ -277,7 +277,7 @@ func TestEngineFiltersToolsByPage(t *testing.T) {
 	submitOnly := &fakeTool{name: "set_template_body", pages: []string{"submit"}}
 	universal := &fakeTool{name: "doc_search"} // pages nil = everywhere
 
-	engine := NewEngine(nil, []Tool{jobsOnly, submitOnly, universal}, nil, "")
+	engine := NewEngine(nil, []Tool{jobsOnly, submitOnly, universal}, nil, nil)
 
 	cases := []struct {
 		page        string
@@ -349,7 +349,7 @@ func TestSystemPromptComposition(t *testing.T) {
 		"jobs":   "JOBS_INSTRUCTIONS_MARKER",
 		"submit": "SUBMIT_INSTRUCTIONS_MARKER",
 	}
-	engine := NewEngine(nil, nil, pageInstr, "OPERATOR_RULES_MARKER")
+	engine := NewEngine(nil, nil, pageInstr, func() string { return "OPERATOR_RULES_MARKER" })
 
 	t.Run("known page includes its suffix and the operator addendum", func(t *testing.T) {
 		got := engine.systemPromptForPage("jobs", nil, "", Scope{})
@@ -381,11 +381,11 @@ func TestSystemPromptComposition(t *testing.T) {
 		}
 	})
 
-	t.Run("empty operator addendum produces no operator block", func(t *testing.T) {
-		bare := NewEngine(nil, nil, pageInstr, "")
+	t.Run("no site guidance produces no site block", func(t *testing.T) {
+		bare := NewEngine(nil, nil, pageInstr, nil)
 		got := bare.systemPromptForPage("jobs", nil, "", Scope{})
-		if strings.Contains(got, "Site operator instructions") {
-			t.Errorf("bare engine emitted operator block despite empty addendum:\n%s", got)
+		if strings.Contains(got, "site's own instructions") {
+			t.Errorf("bare engine emitted a site block despite no site guidance:\n%s", got)
 		}
 	})
 

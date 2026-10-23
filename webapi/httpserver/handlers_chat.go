@@ -11,6 +11,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
+	"github.com/bbockelm/golang-htcondor/webapi/skills"
 )
 
 // loadOperatorChatInstructions reads optional site-operator extra
@@ -176,4 +177,72 @@ func (s *Handler) handleChatInfo(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": true,
 	})
+}
+
+// siteChatGuidance is what this deployment publishes about itself, as the
+// chat engine appends it to every turn's system prompt.
+//
+// Two things, in the order a reader needs them: the operator's own
+// instructions, then the catalogue of site-authored skills. Both are read
+// at call time rather than captured, so an operator who edits either and
+// runs condor_reconfig sees the assistant change its mind without
+// restarting the daemon and dropping every live session.
+//
+// The skills half is the same catalogue the MCP server puts in its
+// initialize response, from the same library, differing only in the
+// sentence naming how to read one -- a chat tool here, an MCP tool and a
+// resource URI there. An access point that publishes a skill about its GPU
+// partition was telling that to agents arriving over MCP and not to the
+// user sitting in front of its web UI.
+func (s *Handler) siteChatGuidance() string {
+	var parts []string
+	if p := s.chatOperatorText.Load(); p != nil {
+		if text := strings.TrimSpace(*p); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if catalogue := s.chatSkills().Instructions(
+		"Read one in full with the `get_site_skill` tool before answering."); catalogue != "" {
+		parts = append(parts, strings.TrimRight(catalogue, "\n"))
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// chatSkills is the site skill library, or nil when this deployment
+// publishes none. Every Library method is nil-safe, so callers need no
+// guard.
+//
+// Read through the MCP server because that is where the library lives: it
+// owns the directory, the reload poll and the reconfigure hook. Taking a
+// second copy here would mean two libraries reloading on different
+// schedules and a user being told something an agent is not.
+func (s *Handler) chatSkills() *skills.Library {
+	if s.mcpServer == nil {
+		return nil
+	}
+	return s.mcpServer.Skills()
+}
+
+// SetChatInstructions re-reads the operator's chat instructions file.
+//
+// Called on every reconfigure, not only when the configured path changes:
+// the usual reason to reload is that the file's contents were edited,
+// which a diff of the setting cannot see -- the same reasoning as
+// SetMCPSkillsDir. A read that fails leaves the previous text in place; a
+// file that has momentarily gone missing should not silently strip the
+// assistant of the site's rules mid-session.
+//
+// No-op when chat is not enabled, since there is then no engine to tell.
+func (s *Handler) SetChatInstructions(path string) {
+	if s.chatEngine == nil {
+		return
+	}
+	s.chatOperatorFile = path
+	text, err := loadOperatorChatInstructions(path)
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Keeping the previous chat instructions",
+			"path", path, "error", err)
+		return
+	}
+	s.chatOperatorText.Store(&text)
 }
