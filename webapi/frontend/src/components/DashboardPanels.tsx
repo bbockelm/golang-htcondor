@@ -150,15 +150,16 @@ export function RecentActivity({ activity }: { activity: DashboardActivity }) {
       // The archive, not the queue: a finished job is gone from the
       // queue within seconds, so "all of them" only exists in history.
       allHref: archiveDrilldown(`CompletionDate >= ${since}`, 'recently completed jobs'),
-      // The queue only holds finished jobs until the reaper takes them,
-      // so without the archive this is the last few seconds rather than
-      // the last hour. Saying which keeps a short list from reading as a
-      // quiet access point.
+      // This list covers the last hour when history can be read and the
+      // last few seconds when it cannot. Saying which keeps a short list
+      // from reading as a quiet access point. What is missing underneath
+      // is ours to fix, not the viewer's to diagnose: they are told what
+      // they are looking at, and the admin page says why.
       note: activity.completed_available && activity.completed_partial
-        ? 'only what the queue still holds — the history mirror is not answering'
+        ? 'incomplete — older completions could not be listed'
         : undefined,
       unavailable: !activity.completed_available
-        ? 'needs the htcondordb history mirror'
+        ? 'not available'
         : undefined,
     },
   ];
@@ -170,10 +171,12 @@ export function RecentActivity({ activity }: { activity: DashboardActivity }) {
         <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
           Recent activity
         </h2>
-        <span className="text-xs text-gray-400">
-          from the {activity.source}
-          {activity.computed_at > 0 && <> · {ago(activity.computed_at)} ago</>}
-        </span>
+        {/* How old the snapshot is, which a cached one is by design.
+            Which component answered is not the viewer's question -- it
+            changes nothing they can do, and the admin page reports it. */}
+        {activity.computed_at > 0 && (
+          <span className="text-xs text-gray-400">updated {ago(activity.computed_at)} ago</span>
+        )}
       </div>
 
       {!anything && (

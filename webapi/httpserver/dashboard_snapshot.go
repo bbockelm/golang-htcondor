@@ -437,8 +437,16 @@ func dashboardCacheKey(owner string, ownedByMe bool) string {
 // both, the archive's copy being the one with the outcome attributes.
 //
 // A failure here leaves the queue's answer in place rather than emptying
-// the list: partial and labelled beats absent.
+// the list: partial and labelled beats absent. Callers only get this far
+// on a read that succeeded, so reaching it at all is the archive
+// answering -- including when it answers with no rows. "Nothing finished
+// in the window" is a real answer, and a common one: an idle access
+// point has none, and so does one whose finished jobs are all still
+// sitting in the queue. Marking that case partial told the viewer the
+// mirror was broken when it had just told us the truth.
 func (act *DashboardActivity) mergeArchivedCompletions(archived []RecentJob) {
+	act.CompletedAvailable = true
+	act.CompletedPartial = false
 	if len(archived) == 0 {
 		return
 	}
@@ -481,8 +489,4 @@ func (act *DashboardActivity) mergeArchivedCompletions(archived []RecentJob) {
 		merged = merged[:recentPerList]
 	}
 	act.RecentlyCompleted = merged
-	act.CompletedAvailable = true
-	// The archive answered, so this is no longer just the last few
-	// seconds the queue happened to be holding.
-	act.CompletedPartial = false
 }

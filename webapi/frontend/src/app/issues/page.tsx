@@ -213,7 +213,6 @@ export default function IssuesPage() {
 
       {data && (
         <p className="text-xs text-gray-400">
-          {data.source ? `Read from the ${data.source}. ` : ''}
           Problems are grouped by what their messages have in common, not by
           hold code: one cause produces thousands of distinct messages, and a
           dozen codes cover everything that can go wrong.
