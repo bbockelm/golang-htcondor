@@ -51,6 +51,14 @@ func newRESTOAuth2Handler(t *testing.T) *Handler {
 // introspection in createAuthenticatedContext succeeds.
 func mintRESTAccessToken(t *testing.T, h *Handler, subject string, scopes []string) string {
 	t.Helper()
+	return mintRESTAccessTokenFor(t, h, subject, "", scopes)
+}
+
+// mintRESTAccessTokenFor is mintRESTAccessToken for a grant that the
+// placementd sign-in identity approved, as consent and device approval
+// record it. An empty identity is a grant that names none.
+func mintRESTAccessTokenFor(t *testing.T, h *Handler, subject, identity string, scopes []string) string {
+	t.Helper()
 	ctx := context.Background()
 	// getTokenSession reloads the client by id, so it must exist.
 	if _, err := h.oauth2Provider.GetStorage().GetDB().ExecContext(ctx,
@@ -59,6 +67,7 @@ func mintRESTAccessToken(t *testing.T, h *Handler, subject string, scopes []stri
 		t.Fatalf("seed client: %v", err)
 	}
 	session := DefaultOpenIDConnectSession(subject)
+	session.PlacementIdentity = identity
 	ar := fosite.NewAccessRequest(session)
 	ar.Client = &fosite.DefaultClient{ID: "vscode-client"}
 	for _, s := range scopes {

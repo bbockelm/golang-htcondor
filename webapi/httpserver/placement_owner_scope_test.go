@@ -97,16 +97,17 @@ func TestPlacementdAccountReadsOnlyItsOwnUser(t *testing.T) {
 			r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec // test cookie
 		}
 	}
-	// A bearer for the account, granted after a placementd session signed
-	// in as it.
+	// A bearer for the account, granted by the identity of a placementd
+	// session that signed in as it.
+	const placedIdentity = "alice@idp.example"
 	if err := server.recordPlacementSubject(context.Background(), &SessionData{
-		Username: placedAlice, PlacementIdentity: "alice@idp.example", IdentitySource: identitySourcePlacementd,
+		Username: placedAlice, PlacementIdentity: placedIdentity, IdentitySource: identitySourcePlacementd,
 		Placement: &PlacementAccountInfo{Account: placedAlice, Authorizations: []string{"READ"}},
 	}); err != nil {
 		t.Fatalf("recordPlacementSubject: %v", err)
 	}
-	bearer := mintRESTAccessToken(t, server.Handler, placedAlice, []string{"condor:/READ"})
-	mcpBearer := mintRESTAccessToken(t, server.Handler, placedAlice, []string{"mcp:read", "condor:/READ"})
+	bearer := mintRESTAccessTokenFor(t, server.Handler, placedAlice, placedIdentity, []string{"condor:/READ"})
+	mcpBearer := mintRESTAccessTokenFor(t, server.Handler, placedAlice, placedIdentity, []string{"mcp:read", "condor:/READ"})
 	localSID, _, err := server.sessionStore.Create("alice")
 	if err != nil {
 		t.Fatalf("session create: %v", err)
