@@ -700,6 +700,12 @@ export interface SubmitResponse {
   job_ids: string[];
   // Multi-AP mode: the access point the jobs went to.
   schedd?: string;
+  // Diagnostics about the submit file: things that submitted fine but
+  // almost certainly do not do what the submitter meant, most often
+  // output the job is about to throw away. Advisory, not errors -- the
+  // jobs are already queued -- so they ride back on the success
+  // response. Absent from servers that predate them.
+  warnings?: string[];
 }
 
 export interface ShareOutputResponse {
