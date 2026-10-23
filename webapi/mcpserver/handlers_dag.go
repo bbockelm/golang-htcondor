@@ -19,6 +19,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/dagman"
 	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
+	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
 )
 
 // A DAGMan workflow submitted from here is an ordinary scheduler-universe
@@ -464,11 +465,11 @@ func lintNodeDescriptions(parsed *dagman.DAG, files map[string]string) []string 
 	var notes []string
 	prelude := dagSuppliedMacros(parsed)
 	for _, d := range namedSubmitDescriptions(parsed, files) {
-		insp := inspectSubmitFile(prelude + submitBodyForLint(d.body))
-		if insp.fatal != nil {
-			notes = append(notes, fmt.Sprintf("warning: %s: %s", d.name, insp.fatal.Error()))
+		insp := submitlint.Inspect(prelude + submitBodyForLint(d.body))
+		if insp.Fatal != nil {
+			notes = append(notes, fmt.Sprintf("warning: %s: %s", d.name, insp.Fatal.Error()))
 		}
-		for _, w := range insp.warnings {
+		for _, w := range insp.Warnings {
 			notes = append(notes, fmt.Sprintf("warning: %s: %s", d.name, w))
 		}
 	}

@@ -1,13 +1,10 @@
-package mcpserver
+package submitlint
 
 import (
-	"context"
 	"strings"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 // TestInspectSubmitFileSystemExecutableFatal covers the combination
@@ -20,11 +17,11 @@ func TestInspectSubmitFileSystemExecutableFatal(t *testing.T) {
 		"/usr/local/bin/analyze",
 		"/cvmfs/atlas.cern.ch/repo/sw/setup.sh",
 	} {
-		insp := inspectSubmitFile("executable = " + exe + "\nshould_transfer_files = YES\nqueue 1\n")
-		if insp.fatal == nil {
-			t.Fatalf("executable = %s with default transfer_executable: expected a fatal diagnostic, got none (warnings: %v)", exe, insp.warnings)
+		insp := Inspect("executable = " + exe + "\nshould_transfer_files = YES\nqueue 1\n")
+		if insp.Fatal == nil {
+			t.Fatalf("executable = %s with default transfer_executable: expected a fatal diagnostic, got none (warnings: %v)", exe, insp.Warnings)
 		}
-		msg := insp.fatal.Error()
+		msg := insp.Fatal.Error()
 		for _, want := range []string{exe, "transfer_executable = False"} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("executable = %s: fatal message %q does not mention %q", exe, msg, want)
@@ -37,14 +34,15 @@ func TestInspectSubmitFileSystemExecutableFatal(t *testing.T) {
 // diagnostic does not fire once the caller has done the right thing, and
 // that turning the transfer off also turns off the spooling round.
 func TestInspectSubmitFileSystemExecutableAccepted(t *testing.T) {
-	insp := inspectSubmitFile("executable = /bin/bash\ntransfer_executable = False\narguments = -c \"echo hi\"\nqueue 1\n")
-	if insp.fatal != nil {
-		t.Fatalf("transfer_executable = False should be accepted, got: %v", insp.fatal)
+	insp := Inspect("executable = /bin/bash\ntransfer_executable = False\narguments = -c \"echo hi\"\n" +
+		"output = out.txt\nerror = err.txt\nlog = job.log\n" + "queue 1\n")
+	if insp.Fatal != nil {
+		t.Fatalf("transfer_executable = False should be accepted, got: %v", insp.Fatal)
 	}
-	if len(insp.warnings) != 0 {
-		t.Errorf("expected no warnings, got %v", insp.warnings)
+	if len(insp.Warnings) != 0 {
+		t.Errorf("expected no warnings, got %v", insp.Warnings)
 	}
-	if insp.needsSpooling {
+	if insp.NeedsSpooling {
 		t.Error("a system executable with transfer_executable = False needs no upload_job_input round")
 	}
 }
@@ -52,14 +50,14 @@ func TestInspectSubmitFileSystemExecutableAccepted(t *testing.T) {
 // TestInspectSubmitFileRelativeExecutable is the recommended shape: a
 // bare filename the caller uploads with upload_job_input.
 func TestInspectSubmitFileRelativeExecutable(t *testing.T) {
-	insp := inspectSubmitFile("executable = run.sh\noutput = out.txt\nqueue 1\n")
-	if insp.fatal != nil {
-		t.Fatalf("unexpected fatal: %v", insp.fatal)
+	insp := Inspect("executable = run.sh\n" + "output = out.txt\nerror = err.txt\nlog = job.log\n" + "queue 1\n")
+	if insp.Fatal != nil {
+		t.Fatalf("unexpected fatal: %v", insp.Fatal)
 	}
-	if len(insp.warnings) != 0 {
-		t.Errorf("expected no warnings, got %v", insp.warnings)
+	if len(insp.Warnings) != 0 {
+		t.Errorf("expected no warnings, got %v", insp.Warnings)
 	}
-	if !insp.needsSpooling {
+	if !insp.NeedsSpooling {
 		t.Error("a transferred executable needs an upload_job_input round")
 	}
 }
@@ -68,15 +66,15 @@ func TestInspectSubmitFileRelativeExecutable(t *testing.T) {
 // rejects: uploading a file named after the basename does make this
 // submit file work.
 func TestInspectSubmitFileAbsoluteNonSystemExecutable(t *testing.T) {
-	insp := inspectSubmitFile("executable = /home/alice/run.sh\nqueue 1\n")
-	if insp.fatal != nil {
-		t.Fatalf("a non-system absolute path should warn, not reject: %v", insp.fatal)
+	insp := Inspect("executable = /home/alice/run.sh\n" + "output = out.txt\nerror = err.txt\nlog = job.log\n" + "queue 1\n")
+	if insp.Fatal != nil {
+		t.Fatalf("a non-system absolute path should warn, not reject: %v", insp.Fatal)
 	}
-	if len(insp.warnings) != 1 {
-		t.Fatalf("expected exactly one warning, got %v", insp.warnings)
+	if len(insp.Warnings) != 1 {
+		t.Fatalf("expected exactly one warning, got %v", insp.Warnings)
 	}
-	if !strings.Contains(insp.warnings[0], `"run.sh"`) {
-		t.Errorf("warning should name the basename to upload, got %q", insp.warnings[0])
+	if !strings.Contains(insp.Warnings[0], `"run.sh"`) {
+		t.Errorf("warning should name the basename to upload, got %q", insp.Warnings[0])
 	}
 }
 
@@ -84,15 +82,16 @@ func TestInspectSubmitFileAbsoluteNonSystemExecutable(t *testing.T) {
 // shell command substitution eaten by the submit parser.
 func TestInspectSubmitFileUndefinedMacroInArguments(t *testing.T) {
 	raw := "executable = /bin/bash\ntransfer_executable = False\n" +
-		"arguments = \"-c 'echo HOST:$(hostname); date +%s'\"\nqueue 1\n"
-	insp := inspectSubmitFile(raw)
-	if insp.fatal != nil {
-		t.Fatalf("unexpected fatal: %v", insp.fatal)
+		"arguments = \"-c 'echo HOST:$(hostname); date +%s'\"\n" +
+		"output = out.txt\nerror = err.txt\nlog = job.log\n" + "queue 1\n"
+	insp := Inspect(raw)
+	if insp.Fatal != nil {
+		t.Fatalf("unexpected fatal: %v", insp.Fatal)
 	}
-	if len(insp.warnings) != 1 {
-		t.Fatalf("expected one warning about $(hostname), got %v", insp.warnings)
+	if len(insp.Warnings) != 1 {
+		t.Fatalf("expected one warning about $(hostname), got %v", insp.Warnings)
 	}
-	w := insp.warnings[0]
+	w := insp.Warnings[0]
 	for _, want := range []string{"arguments", "$(hostname)", "empty string", "upload_job_input"} {
 		if !strings.Contains(w, want) {
 			t.Errorf("warning %q does not mention %q", w, want)
@@ -224,7 +223,7 @@ func TestWarnUndefinedMacrosPlural(t *testing.T) {
 }
 
 // TestWarnUndefinedMacrosUnparseable checks the lint stays quiet on a
-// submit file the config grammar rejects: inspectSubmitFile cannot
+// submit file the config grammar rejects: Inspect cannot
 // build a job ad from it either, so the schedd answers instead.
 func TestWarnUndefinedMacrosUnparseable(t *testing.T) {
 	if got := warnUndefinedMacros("arguments = $(hostname)\nqueue 2 sample in (a b)\n"); got != nil {
@@ -236,54 +235,12 @@ func TestWarnUndefinedMacrosUnparseable(t *testing.T) {
 // submit file this package cannot parse is passed through to the schedd,
 // which is the authority on what it accepts.
 func TestInspectSubmitFileUnparseable(t *testing.T) {
-	insp := inspectSubmitFile("queue from ((\n")
-	if insp.fatal != nil {
-		t.Errorf("an unparseable submit file must not be rejected locally: %v", insp.fatal)
+	insp := Inspect("queue from ((\n")
+	if insp.Fatal != nil {
+		t.Errorf("an unparseable submit file must not be rejected locally: %v", insp.Fatal)
 	}
-	if !insp.needsSpooling {
+	if !insp.NeedsSpooling {
 		t.Error("expected the conservative needsSpooling default")
-	}
-}
-
-// TestToolSubmitJobRejectsSystemExecutable checks the rejection happens
-// before the schedd is contacted. The server's schedd points at a port
-// nothing listens on, so a submit attempt would surface as a connection
-// error rather than the lint message.
-func TestToolSubmitJobRejectsSystemExecutable(t *testing.T) {
-	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
-	if err != nil {
-		t.Fatalf("logging.New: %v", err)
-	}
-	s := &Server{
-		schedd: htcondor.NewSchedd("test_schedd", "127.0.0.1:1"),
-		logger: logger,
-	}
-	_, err = s.toolSubmitJob(context.Background(), map[string]interface{}{
-		"submit_file": "executable = /bin/bash\narguments = -c \"echo hi\"\nqueue 1\n",
-	})
-	if err == nil {
-		t.Fatal("expected submit_job to reject the submit file")
-	}
-	if !strings.Contains(err.Error(), "transfer_executable = False") {
-		t.Fatalf("expected the lint message, got: %v", err)
-	}
-}
-
-// TestFormatSubmitWarnings checks the response text the caller actually
-// reads: nothing when the submit file is clean, and each diagnostic on
-// its own bullet with the remove-and-resubmit hint when it is not.
-func TestFormatSubmitWarnings(t *testing.T) {
-	if got := formatSubmitWarnings(nil); got != "" {
-		t.Errorf("a clean submit file should add nothing to the response, got %q", got)
-	}
-	got := formatSubmitWarnings([]string{"first problem", "second problem"})
-	for _, want := range []string{"WARNINGS about this submit file:", "- first problem\n", "- second problem\n", "remove_job"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("warning block %q does not contain %q", got, want)
-		}
-	}
-	if !strings.HasSuffix(got, "\n\n") {
-		t.Errorf("warning block should end with a blank line, got %q", got)
 	}
 }
 

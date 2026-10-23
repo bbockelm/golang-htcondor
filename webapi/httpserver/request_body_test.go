@@ -42,7 +42,7 @@ func fakeScheddListener(t *testing.T) (string, *atomic.Int64) {
 // submitBody is a JSON submit request whose submit file is padded to n
 // bytes.
 func submitBody(n int) string {
-	return `{"submit_file":"executable = /bin/true\n` + strings.Repeat("#", n) + `\nqueue\n"}`
+	return `{"submit_file":"executable = /bin/true\ntransfer_executable = false\n` + strings.Repeat("#", n) + `\nqueue\n"}`
 }
 
 // A request body past the default limit is refused with 413 before the

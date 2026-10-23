@@ -10,6 +10,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/agentguide"
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
 )
@@ -142,11 +143,20 @@ BULK REMOVE WORKFLOW (remove_jobs):
 // submitPageInstructions is appended to the chat system prompt when the
 // SPA reports `page=submit`.
 //
+// The middle of it is not written here: agentguide.SubmitOutput() carries
+// the rules for output, error and log, because the MCP server states the
+// same rules to the agents it serves and the two must not drift. See the
+// package comment on agentguide for what that drift cost.
+//
 // === KEEP IN SYNC WITH frontend/src/app/submit/page.tsx ===
 // If you remove a section, rename a state field a tool writes to, or
 // change the submit flow, update the matching language here so the LLM
 // doesn't hallucinate UI affordances.
-const submitPageInstructions = `The user is on the job-submission page. They are assembling
+func submitPageInstructions() string {
+	return submitPageInstructionsHead + "\n" + agentguide.SubmitOutput() + "\n" + submitPageInstructionsTail
+}
+
+const submitPageInstructionsHead = `The user is on the job-submission page. They are assembling
 one or more HTCondor jobs but have NOT submitted yet. The page has four sections:
   1. Template — pick from a library or write a custom submit-file body
   2. Table — one row per job, columns named by template variables
@@ -215,8 +225,13 @@ IMPORTANT RULES for set_template_body:
     submit and the user will see a red error. Just write everything ABOVE the queue.
   - Templates are reusable scaffolds; rows in the table are the per-job parameters.
     Don't try to encode the per-job differences in the body — they belong in rows.
+`
 
-BEFORE writing a custom body from scratch: call list_submit_templates first. The
+// submitPageInstructionsTail is the rest of the submission-page prompt.
+// The split exists so agentguide.SubmitOutput() lands between the two: the
+// rules for what set_template_body writes belong next to the rules for how
+// to call it, not in a footnote after the template-saving instructions.
+const submitPageInstructionsTail = `BEFORE writing a custom body from scratch: call list_submit_templates first. The
 catalog already contains common scaffolds (sleep, hello-world, simple Python,
 GPU jobs, etc.).
 
@@ -563,7 +578,7 @@ and point to the files the job transferred back, wherever its submit file sent t
 func chatPageInstructions() map[string]string {
 	return map[string]string{
 		"jobs":           jobsPageInstructions,
-		"submit":         submitPageInstructions,
+		"submit":         submitPageInstructions(),
 		"job-detail":     jobDetailPageInstructions,
 		"archive-detail": archiveDetailPageInstructions,
 		"archive":        archivePageInstructions,

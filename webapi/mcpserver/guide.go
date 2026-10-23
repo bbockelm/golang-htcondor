@@ -5,6 +5,8 @@ import (
 	"embed"
 	"fmt"
 	"strings"
+
+	"github.com/bbockelm/golang-htcondor/webapi/agentguide"
 )
 
 // The agent guide: the long-form "how to use these tools" text, served by
@@ -46,6 +48,19 @@ func guideTopicNames() []string {
 	return names
 }
 
+// guideAppendix is the text a topic ends with that is shared with the
+// other agent surface on this server rather than written here.
+//
+// The browser chat assistant on the submission page writes submit
+// descriptions too, and the rules it must follow are the same ones an MCP
+// agent must follow. Keeping those in agentguide and appending them means
+// a correction lands on both surfaces at once; the alternative, which this
+// replaces, was two copies that drifted until one of them was missing the
+// rule entirely.
+var guideAppendix = map[string]func() string{
+	"submit_files": agentguide.SubmitOutput,
+}
+
 func guideText(topic string) (string, bool) {
 	for _, t := range guideTopics {
 		if t.name == topic {
@@ -53,7 +68,11 @@ func guideText(topic string) (string, bool) {
 			if err != nil {
 				return "", false
 			}
-			return string(b), true
+			text := string(b)
+			if appendix, ok := guideAppendix[topic]; ok {
+				text = strings.TrimRight(text, "\n") + "\n\n" + appendix()
+			}
+			return text, true
 		}
 	}
 	return "", false

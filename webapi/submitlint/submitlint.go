@@ -1,4 +1,14 @@
-package mcpserver
+// Package submitlint reads a submit file before it is handed to the schedd
+// and reports what the caller needs to know but cannot see: whether the job
+// will sit held until its input is uploaded, and the constructs that parse
+// cleanly while guaranteeing the job does not do what was meant.
+//
+// It lives apart from any one surface because every surface that accepts a
+// submit file needs it. The MCP server has used it since the macro-expansion
+// and transfer_executable footguns were found; the web submission page,
+// which an LLM also writes submit descriptions for, submitted straight to
+// the schedd with no check at all until these diagnostics were shared.
+package submitlint
 
 import (
 	"fmt"
@@ -6,51 +16,37 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/PelicanPlatform/classad/classad"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 )
 
-// submitInspection is what a pre-submit read of a submit file tells us:
-// whether the job will need an upload_job_input round to leave the HELD
-// state, plus any constructs that parse cleanly but almost certainly do
-// not do what the caller meant.
+// Inspection is what a pre-submit read of a submit file tells us: whether
+// the job will need an input upload to leave the HELD state, plus any
+// constructs that parse cleanly but almost certainly do not do what the
+// caller meant.
 //
 // Both diagnostic classes exist because HTCondor's submit language has
-// two footguns that an agent cannot discover from a successful submit:
+// footguns that a caller cannot discover from a successful submit:
 // `$(...)` is macro-expanded by the submit parser before the shell ever
-// sees it, and a system-path executable is spool-copied unless
-// transfer_executable is turned off. The first produces a job that runs
-// with silently corrupted arguments; the second produces a hold whose
-// reason reads like a generic file-transfer failure. See
+// sees it, a system-path executable is spool-copied unless
+// transfer_executable is turned off, and an unset output, error or log
+// discards that stream rather than defaulting to anything. The first
+// produces a job that runs with silently corrupted arguments, the second a
+// hold whose reason reads like a generic file-transfer failure, and the
+// third a job that appears to have printed nothing. See
 // https://github.com/bbockelm/golang-htcondor/issues/183.
-type submitInspection struct {
-	// needsSpooling reports whether the caller must call
+type Inspection struct {
+	// NeedsSpooling reports whether the caller must call
 	// upload_job_input before the job can run.
-	needsSpooling bool
-	// fatal is a submit-file mistake that cannot produce a working
+	NeedsSpooling bool
+	// Fatal is a submit-file mistake that cannot produce a working
 	// job, so submit_job rejects the request instead of submitting.
-	fatal error
-	// warnings are non-fatal diagnostics surfaced in the submit_job
+	Fatal error
+	// Warnings are non-fatal diagnostics surfaced in the submit_job
 	// response.
-	warnings []string
-}
-
-// formatSubmitWarnings renders the non-fatal diagnostics for the
-// submit_job response. It leads the response text rather than trailing
-// it: the job is already submitted by the time these are known, so the
-// caller has to decide whether to remove and resubmit it.
-func formatSubmitWarnings(warnings []string) string {
-	if len(warnings) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("WARNINGS about this submit file:\n")
-	for _, w := range warnings {
-		fmt.Fprintf(&b, "- %s\n", w)
-	}
-	b.WriteString("The job was submitted anyway; remove it with remove_job and resubmit if a warning " +
-		"describes a mistake.\n\n")
-	return b.String()
+	Warnings []string
 }
 
 // systemExecutablePrefixes are directories whose contents belong to the
@@ -70,26 +66,45 @@ var systemExecutablePrefixes = []string{
 	"/cvmfs/",
 }
 
-// inspectSubmitFile parses the submit file the way condor_submit would
+// Inspect parses the submit file the way condor_submit would
 // and reports what submit_job needs to know before and after handing it
 // to the schedd. A submit file this package cannot parse yields a
 // conservative inspection (spooling assumed, no diagnostics) rather than
 // an error: the schedd is the authority on what it accepts, and refusing
 // to submit over a local parse failure would be worse than letting the
 // schedd answer.
-func inspectSubmitFile(raw string) submitInspection {
-	insp := submitInspection{needsSpooling: true}
+func Inspect(raw string) Inspection {
+	insp := Inspection{NeedsSpooling: true}
 
 	sf, err := htcondor.ParseSubmitFile(strings.NewReader(raw))
 	if err != nil {
 		return insp
 	}
-	// Proc 0 of an arbitrary cluster: the attributes read below do not
+	// Proc 0 of an arbitrary cluster: most attributes read below do not
 	// depend on the job ID, and the real cluster is not known until
 	// after the submit.
 	ad, err := sf.MakeJobAd(htcondor.JobID{Cluster: 1, Proc: 0}, nil)
 	if err != nil {
 		return insp
+	}
+	// A second pair of ads, resolved for two different processes, used only
+	// to ask whether a file name varies per process. Comparing two resolved
+	// ads answers that for any macro the submit parser understands, where
+	// matching $(ProcId) in the raw text would answer it only for the
+	// spellings thought of here -- $(Process), $(Step), $(Row), $(ItemIndex)
+	// and a queue variable all vary too.
+	//
+	// Their queue variables are bound to per-process sentinels rather than
+	// left nil, because nil expands every one of them to the same empty
+	// string: `output = $(name).out` would resolve to ".out" for both
+	// processes and be reported as a collision, which is the opposite of the
+	// truth. These two ads feed only that comparison -- the checks below
+	// keep reading `ad`, so a sentinel can never be mistaken for a real
+	// executable or input file.
+	rowA, errA := sf.MakeJobAd(htcondor.JobID{Cluster: 1, Proc: 0}, queueVarSentinels(sf, "a"))
+	rowB, errB := sf.MakeJobAd(htcondor.JobID{Cluster: 1, Proc: 1}, queueVarSentinels(sf, "b"))
+	if errA != nil || errB != nil {
+		rowA, rowB = nil, nil
 	}
 
 	// TransferExecutable defaults to true.
@@ -100,16 +115,150 @@ func inspectSubmitFile(raw string) submitInspection {
 	transferInput, _ := ad.EvaluateAttrString("TransferInput")
 	// Input is stdin redirection; the file has to be spooled too.
 	stdinFile, _ := ad.EvaluateAttrString("Input")
-	insp.needsSpooling = transferExec || transferInput != "" || stdinFile != ""
+	insp.NeedsSpooling = transferExec || transferInput != "" || stdinFile != ""
 
 	cmd, _ := ad.EvaluateAttrString("Cmd")
 	if err := checkExecutableTransfer(cmd, transferExec); err != nil {
-		insp.fatal = err
+		insp.Fatal = err
 		return insp
 	}
-	insp.warnings = append(insp.warnings, warnExecutableTransfer(cmd, transferExec)...)
-	insp.warnings = append(insp.warnings, warnUndefinedMacros(raw)...)
+	insp.Warnings = append(insp.Warnings, warnExecutableTransfer(cmd, transferExec)...)
+	insp.Warnings = append(insp.Warnings, warnUndefinedMacros(raw)...)
+	insp.Warnings = append(insp.Warnings, warnDiscardedOutput(ad, rowA, rowB, sf.QueueCount())...)
 	return insp
+}
+
+// discardedStream describes one of the three submit commands whose
+// absence throws data away rather than defaulting to something useful.
+type discardedStream struct {
+	// command is the submit-file keyword, as a caller would write it.
+	command string
+	// attr is the job-ad attribute the keyword becomes, which is what is
+	// read back here: by then the submit parser has resolved defaults and
+	// expanded macros, so this is the value the job will really run with.
+	attr string
+	// loss is what the job no longer has, phrased as a consequence.
+	loss string
+}
+
+var discardedStreams = []discardedStream{
+	{"output", "Out", "the job's stdout is discarded"},
+	{"error", "Err", "the job's stderr is discarded"},
+	{"log", "UserLog", "nothing records when the job started, how often it was evicted, " +
+		"or why it stopped"},
+}
+
+// warnDiscardedOutput reports streams this submit file throws away.
+//
+// This is the mistake with no second chance. A held job can be released and
+// a corrupted command line can be resubmitted, but output that was never
+// written is not recoverable at any price: the only remedy is to run the
+// work again, which for a job that ran for hours is the expensive kind of
+// again. It is invisible from the outcome, too -- a job whose stdout went
+// nowhere looks exactly like a job that printed nothing -- so if this check
+// does not raise it, nothing will.
+//
+// Leaving the command out and writing /dev/null are reported as the same
+// thing because HTCondor makes them the same thing: an unset output or
+// error resolves to /dev/null in the job ad, which is why this reads the
+// resolved value rather than looking for the assignment.
+func warnDiscardedOutput(ad, rowA, rowB *classad.ClassAd, procs int) []string {
+	var lost []string
+	for _, st := range discardedStreams {
+		val := strings.TrimSpace(mustString(ad, st.attr))
+		if val != "" && !isNullDevice(val) {
+			continue
+		}
+		if val == "" {
+			lost = append(lost, fmt.Sprintf("%s is not set, so %s", st.command, st.loss))
+			continue
+		}
+		lost = append(lost, fmt.Sprintf("%s is %s, so %s", st.command, val, st.loss))
+	}
+	if len(lost) == 0 {
+		return collidingOutputNames(rowA, rowB, procs)
+	}
+	return append([]string{fmt.Sprintf(
+		"this submit file throws away output that cannot be recovered afterwards: %s. "+
+			"None of output, error and log defaults to a file -- an unset output or error "+
+			"resolves to /dev/null, and an unset log means no log at all. Set all three to "+
+			"real file names (output = run-$(ProcId).out, error = run-$(ProcId).err, "+
+			"log = run.log); the only way to get this job's output now is to run it again.",
+		strings.Join(lost, "; "))}, collidingOutputNames(rowA, rowB, procs)...)
+}
+
+// mustString reads a string-valued attribute, treating an attribute that is
+// absent or not a string as absent. Every attribute read here is one the
+// submit parser writes as a path or does not write at all.
+func mustString(ad *classad.ClassAd, attr string) string {
+	val, _ := ad.EvaluateAttrString(attr)
+	return val
+}
+
+// isNullDevice recognises the ways a submit file spells "throw it away".
+// Only the device itself: a file genuinely named dev-null.txt is not this.
+func isNullDevice(path string) bool {
+	switch strings.TrimSpace(path) {
+	case "/dev/null", "NUL", "nul":
+		return true
+	}
+	return false
+}
+
+// collidingOutputNames reports a multi-process submission whose output and
+// error names come out the same for every process.
+//
+// The last writer wins and the rest of the run is lost, which reads to the
+// person who submitted it as "most of my jobs produced nothing" rather than
+// as a submit-file mistake. It is checked separately from the discard
+// warnings because a submit file can have this one while setting all three
+// commands to perfectly good names.
+//
+// Whether a name varies is decided by resolving it for two different
+// processes and comparing, so it is the submit parser's own answer rather
+// than a guess from the macro text.
+func collidingOutputNames(rowA, rowB *classad.ClassAd, procs int) []string {
+	if procs < 2 || rowA == nil || rowB == nil {
+		return nil
+	}
+	var fixed []string
+	for _, st := range discardedStreams[:2] { // output and error; one shared log is correct
+		val := strings.TrimSpace(mustString(rowA, st.attr))
+		if val == "" || isNullDevice(val) {
+			continue // already covered by warnDiscardedOutput
+		}
+		if strings.TrimSpace(mustString(rowB, st.attr)) != val {
+			continue // varies per process, which is the point
+		}
+		fixed = append(fixed, st.command+" = "+val)
+	}
+	if len(fixed) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("this submit file queues %d processes but %s does not vary per process, "+
+		"so every process writes the same file and only the last one to finish survives. "+
+		"Put $(ProcId) in the name (output = run-$(ProcId).out).",
+		procs, strings.Join(fixed, " and "))}
+}
+
+// queueVarSentinels binds every variable the queue statement supplies to a
+// value unique to one process, so that resolving the same submit file twice
+// shows which file names actually depend on the row and which do not.
+//
+// The values are deliberately meaningless. Nothing reads them; only whether
+// the two resolutions differ is read, and a real row's values are not
+// knowable here anyway -- `queue from <file>` reads a file on the
+// submitting host, which this server cannot see.
+func queueVarSentinels(sf *htcondor.SubmitFile, suffix string) map[string]string {
+	names := sf.QueueVars()
+	if len(names) == 0 {
+		return nil
+	}
+	vars := make(map[string]string, len(names))
+	for _, name := range names {
+		vars[name] = "row-" + suffix
+	}
+	return vars
 }
 
 // checkExecutableTransfer rejects the one executable/transfer_executable
