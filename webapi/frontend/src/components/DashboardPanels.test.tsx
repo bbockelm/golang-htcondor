@@ -106,14 +106,14 @@ describe('RecentActivity', () => {
       />,
     );
     // Recently submitted is empty because nothing was submitted: "none".
-    // Recently completed is empty because the queue destroys finished
-    // jobs and no archive answered: that is a gap in what we can see,
-    // and reporting it as "none" would be a confident wrong answer.
-    expect(screen.getByText(/needs the htcondordb history mirror/)).toBeInTheDocument();
+    // Recently completed is empty because nothing could answer: that is
+    // a gap in what we can see, and reporting it as "none" would be a
+    // confident wrong answer.
+    expect(screen.getByText('not available')).toBeInTheDocument();
     expect(screen.getAllByText('none').length).toBeGreaterThan(0);
   });
 
-  it('warns when the completed list is only what the queue still holds', () => {
+  it('warns when the completed list is missing its older half', () => {
     render(
       <RecentActivity
         activity={activity({
@@ -124,7 +124,7 @@ describe('RecentActivity', () => {
     );
     // A short list here is otherwise indistinguishable from a quiet
     // access point, when in fact it is a few seconds of visibility.
-    expect(screen.getByText(/the history mirror is not answering/)).toBeInTheDocument();
+    expect(screen.getByText(/incomplete/)).toBeInTheDocument();
   });
 
   it('does not warn about partial data when the archive did answer', () => {
@@ -136,7 +136,7 @@ describe('RecentActivity', () => {
         })}
       />,
     );
-    expect(screen.queryByText(/history mirror is not answering/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/incomplete/)).not.toBeInTheDocument();
   });
 
   it('links each job to its detail page', () => {
@@ -151,9 +151,21 @@ describe('RecentActivity', () => {
     expect(screen.getByText('slot1@host')).toBeInTheDocument();
   });
 
-  it('names what answered, because a cached snapshot is minutes old by design', () => {
+  it('says how old the snapshot is, because a cached one is minutes old by design', () => {
+    render(
+      <RecentActivity
+        activity={activity({ computed_at: Math.floor(Date.now() / 1000) - 180 })}
+      />,
+    );
+    expect(screen.getByText(/updated 3m ago/)).toBeInTheDocument();
+  });
+
+  // Which component answered is not the viewer's question: it changes
+  // nothing they can do, and naming it sent one reader debugging a
+  // healthy database.
+  it('does not name the component that answered', () => {
     render(<RecentActivity activity={activity({ source: 'htcondordb mirror' })} />);
-    expect(screen.getByText(/htcondordb mirror/)).toBeInTheDocument();
+    expect(screen.queryByText(/htcondordb/)).not.toBeInTheDocument();
   });
 });
 
