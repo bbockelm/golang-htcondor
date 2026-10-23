@@ -132,7 +132,29 @@ test('multi-AP: submitting sends the chosen access point and the job ids that co
   await button.click();
   await expect.poll(() => posted.length).toBe(1);
   expect(new URL(posted[0]).searchParams.get('schedd')).toBe('ap2.smoke.example');
-  await expect(page).toHaveURL(/\/jobs\/7\.0(%40|@)ap2\.smoke\.example/);
+
+  // Submitting no longer navigates: the draft has to survive so the user
+  // can change it and send another, which is what this page is for. The
+  // batch is offered in a separate tab instead.
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('Submitted 1 job')).toBeVisible();
+  await expect(dialog.getByText(/ap2\.smoke\.example/)).toBeVisible();
+  await expect(page).toHaveURL(/\/submit$/);
+
+  // A multi-AP batch can span access points, so it has no page of its
+  // own; the jobs listing filtered to the cluster is where it goes.
+  const view = dialog.getByRole('link', { name: 'View batch' });
+  await expect(view).toHaveAttribute('target', '_blank');
+  const href = await view.getAttribute('href');
+  expect(href).not.toBeNull();
+  expect(new URL(href as string, page.url()).searchParams.get('constraint')).toBe('ClusterId == 7');
+
+  // "Submit more" closes it and leaves the page exactly as it was.
+  await dialog.getByRole('button', { name: 'Submit more' }).click();
+  await expect(page.getByRole('dialog')).toBeHidden();
+  await expect(page).toHaveURL(/\/submit$/);
+  await expect(page.getByRole('button', { name: /^Submit batch/ })).toBeEnabled();
 });
 
 test('multi-AP: the access points page marks where the caller may submit', async ({ page }) => {

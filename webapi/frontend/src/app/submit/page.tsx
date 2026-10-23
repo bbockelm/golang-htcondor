@@ -27,18 +27,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useRouter } from 'next/navigation';
 import {
   api,
   ApiError,
   MAX_TEMPLATE_INPUT_FILE_BYTES,
   submitTargets,
+  type SubmitResponse,
   type Template,
   type TemplateColumn,
   type TemplateInputFile,
 } from '@/lib/api';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { SubmitTarget } from '@/components/SubmitTarget';
+import { SubmittedDialog } from '@/components/SubmittedDialog';
 import { Dropzone, type DroppedFile } from '@/components/Dropzone';
 import {
   ResourceRequestPanel,
@@ -175,7 +176,6 @@ echo "Hello from job $1@$(hostname)"
 };
 
 export default function SubmitPage() {
-  const router = useRouter();
   const queryClient = useQueryClient();
 
   // --- Template section state ---------------------------------------
@@ -544,6 +544,12 @@ export default function SubmitPage() {
   }, [mode, tableSource, uploadFiles.length, firstColumnName, active.contents]);
 
   // --- Submit -------------------------------------------------------
+  // The post-submit dialog's subject: the response of the submission
+  // just made, or null when there is none to report. The dialog is
+  // modal, so this clears on dismissal and nowhere else -- the draft
+  // cannot have changed underneath it.
+  const [submitted, setSubmitted] = useState<SubmitResponse | null>(null);
+
   const submit = useMutation({
     mutationFn: async () => {
       // If the user filled in (or kept) the resources widget, those
@@ -631,7 +637,14 @@ export default function SubmitPage() {
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
-      router.push(`/jobs/${res.job_ids[0]}`);
+      // Ask rather than navigate. Submitting used to send the user
+      // straight to the first job's page, which threw the draft away:
+      // the next iteration of a template meant walking back here and
+      // rebuilding it from nothing. The two things people do after a
+      // submit are look at what they sent and send another, and only
+      // one of them wants this page gone -- so the batch opens in its
+      // own tab and this one keeps the draft either way.
+      setSubmitted(res);
     },
   });
 
@@ -1492,6 +1505,12 @@ export default function SubmitPage() {
         </div>
       </ChatHighlight>
 
+      {submitted && (
+        <SubmittedDialog
+          result={submitted}
+          onDismiss={() => setSubmitted(null)}
+        />
+      )}
       {saveDialog && (
         <SaveTemplateDialog
           initial={saveDialog.initial}
