@@ -382,6 +382,8 @@ var multiAPReadPaths = map[string]bool{
 	"/api/v1/auth/me":              true,
 	"/api/v1/version":              true,
 	"/api/v1/chat/info":            true,
+	// The web UI's own chrome, which says nothing about a schedd.
+	brandingPath: true,
 }
 
 // multiAPJobSubroutes are the registered /api/v1/jobs/<name> routes that

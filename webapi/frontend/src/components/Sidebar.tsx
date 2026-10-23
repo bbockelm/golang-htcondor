@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { useBranding } from '@/lib/branding';
 import { placementAdmin } from '@/lib/placementAdmin';
 import { CountBadge } from './CountBadge';
 import { ProjectSwitcher } from './ProjectSwitcher';
@@ -81,6 +82,7 @@ export function Sidebar({
   onClose,
 }: SidebarProps) {
   const pathname = usePathname();
+  const branding = useBranding();
   // Pending access requests, beside the admin Placement link.
   const pendingRequests = useQuery({
     queryKey: ['placement', 'requests', 'count'],
@@ -108,9 +110,13 @@ export function Sidebar({
         }`}
       >
         <div className="flex items-center justify-between border-b border-white/10 px-4 py-5">
-          <div>
-            <div className="text-base font-semibold">HTCondor</div>
-            <div className="text-xs text-gray-400">Access Point</div>
+          <div className="min-w-0">
+            <div className="truncate text-base font-semibold" title={branding.site_name}>
+              {branding.site_name}
+            </div>
+            {branding.site_tagline && (
+              <div className="truncate text-xs text-gray-400">{branding.site_tagline}</div>
+            )}
           </div>
           <button
             type="button"

@@ -55,13 +55,14 @@ if grep -q -- '--- SKIP' "$log"; then
 	failed=1
 fi
 
-# Every TestEmbedded_* is read from the source, so a test added there is
-# held to the same requirement without editing this list.
+# Every TestEmbedded_* is read from the source, so a test added to either
+# package is held to the same requirement without editing this list.
 expected=(TestIconIsServed)
 while IFS= read -r name; do
 	expected+=("$name")
 done < <(sed -n 's/^func \(TestEmbedded_[A-Za-z0-9_]*\)(.*/\1/p' \
-	webapi/condordocs/embedded_integration_test.go)
+	webapi/condordocs/embedded_integration_test.go \
+	webapi/httpserver/webui/*_test.go)
 
 if [ "${#expected[@]}" -lt 2 ]; then
 	echo "::error::found no TestEmbedded_* tests in webapi/condordocs/embedded_integration_test.go"

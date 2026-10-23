@@ -296,6 +296,7 @@ var routePatterns = []routePattern{
 	{exact: "/api/v1/whoami", template: "/api/v1/whoami"},
 	{exact: "/api/v1/auth/me", template: "/api/v1/auth/me"},
 	{exact: "/api/v1/auth/logout", template: "/api/v1/auth/logout"},
+	{exact: "/api/v1/webui/branding", template: "/api/v1/webui/branding"},
 	{exact: "/login", template: "/login"},
 	{exact: "/logout", template: "/logout"},
 

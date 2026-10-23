@@ -83,11 +83,21 @@ func (h *Handler) setupRoutes() {
 	// Root handler: serve the embedded SPA when the frontend is compiled in,
 	// otherwise fall back to the legacy welcome page.
 	if webui.IsEmbedded() {
-		spa := webui.NewSPAHandler()
+		spa := webui.NewSPAHandler(webui.WithBranding(h.branding.current))
 		mux.Handle("/", spa)
 	} else {
 		mux.HandleFunc("/", h.handleWelcome)
 	}
+
+	// Site branding. Registered whether or not anything is configured:
+	// the endpoint answers with the defaults, and the two asset routes
+	// 404 -- which is a clearer answer to an operator checking their
+	// paths than a route that is not there at all. None of the three
+	// authenticates; they are the chrome of the login page as much as
+	// of the pages behind it.
+	mux.Handle(brandingPath, cors(http.HandlerFunc(h.handleWebUIBranding)))
+	mux.HandleFunc(webui.CSSPath, h.handleBrandingCSS)
+	mux.HandleFunc(brandingAssetPrefix, h.handleBrandingAsset)
 
 	// /.well-known/ is discovery space, never SPA content. Without this
 	// the root handler above answers every unregistered probe under it

@@ -20,6 +20,8 @@ import type { UtilJobSort } from '../../src/lib/utilization';
 import { BATCH_FIXTURES, batchJobsFixture } from '../../src/lib/batchPage.fixture';
 import type { BatchJobSort } from '../../src/lib/batchPage';
 import type { MetricsResponse } from '../../src/lib/metrics';
+import type { Branding } from '../../src/lib/branding';
+import { DEFAULT_BRANDING } from '../../src/lib/branding';
 import type { DrainEstimates } from '../../src/lib/drain';
 import { pinClock, SMOKE_NOW } from './clock';
 import { serveDynamicRoutes } from './dynamicRoutes';
@@ -322,6 +324,12 @@ export const emptyDrainFixture: DrainEstimates = {
   machines: [],
 };
 
+// An unconfigured deployment's branding: the values the frontend also
+// falls back to on its own. A test for a site's own branding injects
+// window.__HTCONDOR_BRANDING__ instead; this is here so the suite's
+// pages never see the 501 below.
+export const brandingFixture: Branding = DEFAULT_BRANDING;
+
 export async function installApiFixtures(page: Page, opts: { multiAP?: boolean } = {}) {
   // Every timestamp here is relative to SMOKE_NOW, so the page has to be
   // living at that instant too.
@@ -332,6 +340,10 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
   const table: Record<string, unknown> = {
     '/api/v1/whoami': { authenticated: true, user: 'e2e@test.htcondor.org' },
     '/api/v1/auth/me': sessionFixture,
+    // What the pages call themselves. The Go server normally writes
+    // this into the HTML; `serve out` cannot, so the SPA asks for it.
+    // Unbranded, which is what the suite's assertions expect to see.
+    '/api/v1/webui/branding': brandingFixture,
     '/api/v1/jobs': jobsFixture,
     '/api/v1/issues': issuesFixture,
     '/api/v1/dashboard': dashboardFixture,

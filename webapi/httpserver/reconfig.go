@@ -103,6 +103,47 @@ func (h *Handler) SetWebUIAccessGroups(raw string) { h.webuiAccessGroups.set(raw
 // restart as well as change who reaches it.
 func (h *Handler) SetWebUIAdminGroups(raw string) { h.webuiAdminGroups.set(raw) }
 
+// The web UI's branding is dynamic.
+//
+// Each setting is read when a page or an asset is served and nothing is
+// built from any of it, so a site can try a logo, a colour or a name and
+// see the result on the next page load. The two that name files --
+// the branding directory and the stylesheet -- are re-checked here as
+// well, which is how a path that was wrong at startup starts working
+// without a restart.
+
+// SetWebUISiteName installs the name in the sidebar and the browser tab.
+func (h *Handler) SetWebUISiteName(v string) {
+	h.branding.update(func(o *brandingOptions) { o.SiteName = v })
+}
+
+// SetWebUISiteTagline installs the line under the name in the sidebar.
+func (h *Handler) SetWebUISiteTagline(v string) {
+	h.branding.update(func(o *brandingOptions) { o.SiteTagline = v })
+}
+
+// SetWebUIFooterLogos installs the footer's institutional band. A value
+// that does not parse leaves the previous band in place and says so in
+// the log.
+func (h *Handler) SetWebUIFooterLogos(v string) {
+	h.branding.update(func(o *brandingOptions) { o.FooterLogos = v })
+}
+
+// SetWebUIBrandingDir installs the directory served under /branding/.
+func (h *Handler) SetWebUIBrandingDir(v string) {
+	h.branding.update(func(o *brandingOptions) { o.Dir = v })
+}
+
+// SetWebUICustomCSS installs the stylesheet served at /branding.css.
+func (h *Handler) SetWebUICustomCSS(v string) {
+	h.branding.update(func(o *brandingOptions) { o.CSSFile = v })
+}
+
+// SetWebUIFavicon installs the browser tab icon.
+func (h *Handler) SetWebUIFavicon(v string) {
+	h.branding.update(func(o *brandingOptions) { o.Favicon = v })
+}
+
 // SetSuperuserGroups installs the groups permitted to use superuser mode.
 //
 // Membership only. Superuser mode builds a policy object and a signing

@@ -34,6 +34,12 @@ func (f *fakeTarget) SetMCPAdminGroups(v string)     { f.record("mcp_admin", v) 
 func (f *fakeTarget) SetMCPSuperuserGroups(v string) { f.record("mcp_superuser", v) }
 func (f *fakeTarget) SetWebUIAccessGroups(v string)  { f.record("webui_access", v) }
 func (f *fakeTarget) SetWebUIAdminGroups(v string)   { f.record("webui_admin", v) }
+func (f *fakeTarget) SetWebUISiteName(v string)      { f.record("webui_site_name", v) }
+func (f *fakeTarget) SetWebUISiteTagline(v string)   { f.record("webui_site_tagline", v) }
+func (f *fakeTarget) SetWebUIFooterLogos(v string)   { f.record("webui_footer_logos", v) }
+func (f *fakeTarget) SetWebUIBrandingDir(v string)   { f.record("webui_branding_dir", v) }
+func (f *fakeTarget) SetWebUICustomCSS(v string)     { f.record("webui_custom_css", v) }
+func (f *fakeTarget) SetWebUIFavicon(v string)       { f.record("webui_favicon", v) }
 func (f *fakeTarget) SetSuperuserGroups(v string)    { f.record("superuser", v) }
 func (f *fakeTarget) SetMCPSkillsDir(v string)       { f.record("skills_dir", v) }
 func (f *fakeTarget) SetMCPDisabledTools(v string)   { f.record("disabled_tools", v) }

@@ -46,6 +46,12 @@ type reconfigTarget interface {
 	SetMCPSuperuserGroups(string)
 	SetWebUIAccessGroups(string)
 	SetWebUIAdminGroups(string)
+	SetWebUISiteName(string)
+	SetWebUISiteTagline(string)
+	SetWebUIFooterLogos(string)
+	SetWebUIBrandingDir(string)
+	SetWebUICustomCSS(string)
+	SetWebUIFavicon(string)
 	SetSuperuserGroups(string)
 	SetProjectLeadsFile(string)
 	SetProjectLeadsGroup(string)
@@ -133,6 +139,36 @@ var reconfigParams = []reconfigParam{
 	{
 		name:  "HTTP_API_WEBUI_ADMIN_GROUP",
 		apply: func(s reconfigTarget, v string) { s.SetWebUIAdminGroups(v) },
+	},
+
+	// Web UI branding. Read when a page is served and nothing built
+	// from any of it, so an operator trying their logos and colours out
+	// sees each attempt on the next page load rather than on the next
+	// restart. The file-valued ones are re-checked, so a path that was
+	// wrong at startup starts working here.
+	{
+		name:  "HTTP_API_WEBUI_SITE_NAME",
+		apply: func(s reconfigTarget, v string) { s.SetWebUISiteName(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_SITE_TAGLINE",
+		apply: func(s reconfigTarget, v string) { s.SetWebUISiteTagline(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_FOOTER_LOGOS",
+		apply: func(s reconfigTarget, v string) { s.SetWebUIFooterLogos(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_BRANDING_DIR",
+		apply: func(s reconfigTarget, v string) { s.SetWebUIBrandingDir(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_CUSTOM_CSS",
+		apply: func(s reconfigTarget, v string) { s.SetWebUICustomCSS(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_FAVICON",
+		apply: func(s reconfigTarget, v string) { s.SetWebUIFavicon(v) },
 	},
 	// Membership only: superuser mode is built at startup, so this cannot
 	// switch it on in a running daemon. Emptying it does switch it off.
