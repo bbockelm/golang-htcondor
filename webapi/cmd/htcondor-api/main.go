@@ -2508,10 +2508,13 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	releaseDir := filepath.Dir(filepath.Dir(condorMasterPath))
 	log.Printf("Detected HTCondor release directory: %s", releaseDir)
 
+	// A condor_placementd, when this HTCondor has one; see demo_placementd.go.
+	placement := setUpDemoPlacement(tempDir, logger)
+
 	// Write mini condor configuration
 	// Note: HTCondor will auto-generate signing keys when condor_master starts
 	configFile := filepath.Join(tempDir, "condor_config")
-	if err := writeMiniCondorConfig(configFile, tempDir, releaseDir); err != nil {
+	if err := writeMiniCondorConfig(configFile, tempDir, releaseDir, placement); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 	if err := os.Setenv("CONDOR_CONFIG", configFile); err != nil {
@@ -2543,6 +2546,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	}
 
 	log.Printf("HTCondor is ready! Collector address: %s", collectorAddr)
+	placement.waitForAddressFile(tempDir, 30*time.Second, logger)
 
 	uidDomain := ""
 	trustDomain := ""
@@ -2627,6 +2631,9 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	httpBaseURL := loadHTTPBaseURL(cfg, *listenAddr, useTLS)
 	log.Printf("HTTP base URL: %s (public: %q)", httpBaseURL, publicBaseURL(cfg))
 
+	placement.printBanner(os.Stdout, httpBaseURL)
+	demoIdentityMap, demoPasswdFile := placement.identityMap()
+
 	// LLM / chat-feature config. Zero-strings = chat disabled.
 	demoLLMKeyFile, demoLLMURL, demoLLMModel, demoLLMAuthScheme, demoLLMOperatorInstructions := loadLLMConfig(cfg)
 
@@ -2669,7 +2676,12 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		EnableIDP:          true,
 		// Demo mode only: gives the browser tests a non-admin identity
 		// to check authorization boundaries against.
-		SeedDemoUser:          true,
+		SeedDemoUser: true,
+		// With a placementd: an account with no access, to show the
+		// request-access flow, and the identity map that sends it there.
+		SeedDemoPlacementUser: placement != nil,
+		IdentityMapStrategies: demoIdentityMap,
+		IdentityMapPasswdFile: demoPasswdFile,
 		IDPIssuer:             httpBaseURL,
 		JupyterWorkDir:        loadJupyterWorkDir(cfg),
 		JupyterMaxLifetimeSec: loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_MAX_LIFETIME_SEC", defaultJupyterMaxLifetimeSec),
@@ -2826,7 +2838,9 @@ func sshToJobTemplate() string {
 }
 
 // writeMiniCondorConfig writes a minimal HTCondor configuration for a personal condor
-func writeMiniCondorConfig(configFile, localDir, releaseDir string) error {
+//
+// placement, when not nil, adds the demo's condor_placementd.
+func writeMiniCondorConfig(configFile, localDir, releaseDir string, placement *demoPlacement) error {
 	// Determine LIBEXEC directory by looking for condor_shared_port
 	var libexecDir string
 	sharedPortPath, err := exec.LookPath("condor_shared_port")
@@ -2893,7 +2907,7 @@ LIB = $(RELEASE_DIR)/lib
 %s%s
 
 # Run all daemons locally
-DAEMON_LIST = MASTER, COLLECTOR, NEGOTIATOR, SCHEDD, STARTD
+DAEMON_LIST = MASTER, COLLECTOR, NEGOTIATOR, SCHEDD, STARTD%s
 
 # Use only local system resources
 START = TRUE
@@ -2952,7 +2966,7 @@ MEMORY = 2048
 # Logging
 MAX_DEFAULT_LOG = 10000000
 MAX_NUM_DEFAULT_LOG = 3
-`, localDir, releaseDir, sbinLine, libexecLine, sshTemplateLine)
+%s`, localDir, releaseDir, sbinLine, libexecLine, placement.daemonListEntry(), sshTemplateLine, placement.condorConfig())
 
 	//nolint:gosec // Config file needs to be readable by condor daemons
 	return os.WriteFile(configFile, []byte(config), 0644)
