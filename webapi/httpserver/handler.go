@@ -462,6 +462,7 @@ type Handler struct {
 	idpLoginLimiter     *LoginRateLimiter // IDP login attempts per source address
 	idpLoginByUser      *LoginRateLimiter // IDP login attempts per username
 	seedDemoUser        bool              // Seed the non-admin "user" account (demo mode only)
+	seedDemoNewbie      bool              // Seed the "newbie" account with no access (demo mode with a placementd)
 	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
 	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
 	wg                  sync.WaitGroup    // WaitGroup to track background goroutines
@@ -1079,6 +1080,11 @@ type HandlerConfig struct {
 	// It exists so tests have two identities to check authorization
 	// boundaries with: an admin, and someone who is not.
 	SeedDemoUser bool
+	// SeedDemoPlacementUser additionally seeds "newbie", an IDP account
+	// that maps to no local account and that the placementd does not
+	// map: signing in as it shows the placement access-request flow.
+	// Demo mode only, and only when demo mode runs a condor_placementd.
+	SeedDemoPlacementUser bool
 	// IDPDBPath is deprecated; the IDP shares the unified DBPath.
 	// Retained as an unused field so existing callers keep compiling
 	// during the transition.
@@ -2098,6 +2104,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"refresh_token_lifespan", idpRefreshLifespan)
 		h.idpProvider = idpProvider
 		h.seedDemoUser = cfg.SeedDemoUser
+		h.seedDemoNewbie = cfg.SeedDemoPlacementUser
 		// Failed logins: 5 a minute per source address, and 10 per
 		// username so a guesser spreading attempts across many
 		// addresses still meets a limit. See handleIDPLoginSubmit.
@@ -4077,7 +4084,48 @@ func (h *Handler) initializeIDPUsers(ctx context.Context) error {
 			return err
 		}
 	}
+	if h.seedDemoNewbie {
+		if err := h.initializeDemoNewbie(ctx); err != nil {
+			return err
+		}
+	}
 
+	return nil
+}
+
+// initializeDemoNewbie seeds "newbie", an account nobody has granted
+// anything: demo mode maps it to no local account and the demo
+// placementd's map file does not name it, so signing in as it gives a
+// placement-only session with the access-request form. Its password is
+// printed under its own label, NewbiePassword, for the same reason the
+// non-admin user's is.
+func (h *Handler) initializeDemoNewbie(ctx context.Context) error {
+	const name = "newbie"
+	exists, err := h.idpProvider.storage.UserExists(ctx, name)
+	if err != nil {
+		return fmt.Errorf("failed to check if demo user %s exists: %w", name, err)
+	}
+	if exists {
+		return nil
+	}
+	password, err := generateRandomPassword(16)
+	if err != nil {
+		return fmt.Errorf("failed to generate demo user %s password: %w", name, err)
+	}
+	if err := h.idpProvider.storage.CreateUser(ctx, name, password, "active"); err != nil {
+		return fmt.Errorf("failed to create demo user %s: %w", name, err)
+	}
+
+	fmt.Printf("\n")
+	fmt.Printf("========================================\n")
+	fmt.Printf("IDP Credentials With No Access\n")
+	fmt.Printf("========================================\n")
+	fmt.Printf("Username: %s\n", name)
+	fmt.Printf("NewbiePassword: %s\n", password)
+	fmt.Printf("========================================\n")
+	fmt.Printf("\n")
+
+	h.logger.Info(logging.DestinationHTTP, "Created IDP demo user", "username", name)
 	return nil
 }
 
