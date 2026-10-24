@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import {
   JOB_STATUS_LABEL,
+  type DisplayStatus,
   type DashboardActivity,
   type ExitCodeCount,
   type HoldReasonCount,
@@ -11,6 +12,8 @@ import {
 } from '@/lib/api';
 import type { ActivityStreamState } from '@/lib/useActivityStream';
 import { archiveDrilldown, jobsDrilldown, statusConstraint } from '@/lib/drilldown';
+import { STATUS_CHIP } from '@/components/StatusStrip';
+import { statusPillCls } from '@/lib/statusPill';
 
 // The dashboard's panels, split out of app/page.tsx so they can be
 // rendered one state at a time in a test. They cannot live in the page
@@ -43,7 +46,7 @@ export function HoldReasons({ activity }: { activity: DashboardActivity }) {
             held, counted by when they entered that state -- so a job
             released by policy since leaves the count, which is why the
             numbers were seen to fall on their own. Saying both is also
-            what separates this panel from the HELD tile. */}
+            what separates this panel from the HELD chip. */}
         <span className="text-xs text-gray-400">
           {activity.hold_window_seconds
             ? `still held, entered in the last ${duration(activity.hold_window_seconds)}`
@@ -285,85 +288,100 @@ export const STATUS_LABEL_BY_KEY: Record<string, string> = {
   suspended: JOB_STATUS_LABEL[7],
 };
 
-export function StatCard({
-  label,
-  value,
-  primary,
-  href,
-}: {
-  label: string;
-  value: number;
-  primary?: boolean;
-  href?: string;
-}) {
-  const body = (
-    <>
-      <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
-      <div className="mt-1 text-2xl font-semibold text-gray-900">
-        {value.toLocaleString()}
-      </div>
-    </>
-  );
-  const cls = `block rounded-lg border p-4 ${
-    primary ? 'border-brand-200 bg-brand-50' : 'border-gray-200 bg-white'
-  }`;
+// StatusRow is every status the queue can be in, on one line.
+//
+// This was a grid of five large tiles plus a separate "Other statuses"
+// box -- two rows of chrome and a list, to carry eight numbers that each
+// fit in a chip. The same numbers appear as a chip row on /jobs, /users
+// and /archive already, so the dashboard was the one page spelling this
+// vocabulary differently as well as the one spending the most space on
+// it.
+//
+// The chips here NAVIGATE rather than filter: there is no list on this
+// page to narrow, and the question a count raises is "which ones".
+// Appearance is shared with the filtering strip (STATUS_CHIP) so the two
+// read as one control in two moods rather than two controls.
+const STATUS_ROW_ORDER = [
+  'running',
+  'idle',
+  'uploading',
+  'transferring_output',
+  'held',
+  'suspended',
+  'completed',
+  'removed',
+] as const;
 
-  // A tile with nothing in it links nowhere: sending someone to an empty
-  // list is a worse answer than not offering the link.
-  if (!href || value === 0) {
-    return <div className={cls}>{body}</div>;
-  }
-  return (
-    <Link href={href} className={`${cls} transition-colors hover:border-brand-300 hover:bg-brand-50`}>
-      {body}
-    </Link>
-  );
+// The dashboard's status keys are the server's, which differ from the
+// queue's DisplayStatus vocabulary in exactly one name. Mapping here
+// rather than renaming either side keeps the colour shared without
+// changing a wire field.
+function pillKeyFor(key: string): DisplayStatus {
+  if (key === 'transferring_output') return 'transferring';
+  return (STATUS_ROW_ORDER as readonly string[]).includes(key)
+    ? (key as DisplayStatus)
+    : 'unknown';
 }
 
-export function OtherStatuses({ byStatus }: { byStatus: Record<string, number> }) {
-  const known = new Set([
-    'idle',
-    'running',
-    'held',
-    'completed',
-    'removed',
-    'transferring_output',
-    'suspended',
-    'uploading',
-  ]);
-  const extras = Object.entries(byStatus).filter(
-    ([key, n]) => n > 0 && !['idle', 'running', 'held', 'completed'].includes(key),
-  );
-  if (extras.length === 0) return null;
+export function StatusRow({
+  byStatus,
+  total,
+}: {
+  byStatus: Record<string, number>;
+  total: number;
+}) {
+  // Known statuses in a fixed order, then anything the server reported
+  // that this build does not know about -- shown rather than dropped,
+  // because a status we cannot name is still jobs somebody owns.
+  const known = new Set<string>(STATUS_ROW_ORDER);
+  const keys = [
+    ...STATUS_ROW_ORDER.filter((k) => (byStatus[k] ?? 0) > 0),
+    ...Object.keys(byStatus).filter((k) => !known.has(k) && (byStatus[k] ?? 0) > 0),
+  ];
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <div className="text-xs uppercase tracking-wide text-gray-500 mb-2">
-        Other statuses
-      </div>
-      <ul className="text-sm text-gray-700 space-y-1">
-        {extras.map(([key, n]) => (
-          <li key={key} className="flex justify-between">
-            {statusConstraint(key) ? (
-              <Link
-                href={jobsDrilldown(
-                  statusConstraint(key) as string,
-                  `${(STATUS_LABEL_BY_KEY[key] ?? key).toLowerCase()} jobs`,
-                )}
-                className="hover:underline"
-              >
-                {STATUS_LABEL_BY_KEY[key] ?? key}
-              </Link>
-            ) : (
-              <span>{STATUS_LABEL_BY_KEY[key] ?? key}</span>
-            )}
-            <span className="font-medium">{n.toLocaleString()}</span>
-            {!known.has(key) && (
-              <span className="ml-2 text-gray-400 text-xs">(unmapped)</span>
-            )}
-          </li>
-        ))}
-      </ul>
+    <div className="flex flex-wrap items-center gap-1.5" aria-label="Jobs by status">
+      <Link
+        href="/jobs"
+        className={`${STATUS_CHIP} bg-gray-800 text-white hover:bg-gray-700`}
+        aria-label={`All statuses, ${total} ${total === 1 ? 'job' : 'jobs'}`}
+      >
+        All
+        <span className="font-semibold text-gray-300">{total.toLocaleString()}</span>
+      </Link>
+
+      {keys.map((key) => {
+        const n = byStatus[key] ?? 0;
+        const label = STATUS_LABEL_BY_KEY[key] ?? key;
+        const constraint = statusConstraint(key);
+        const cls = `${STATUS_CHIP} ${statusPillCls(pillKeyFor(key))}`;
+        const body = (
+          <>
+            {label}
+            <span className="font-semibold">{n.toLocaleString()}</span>
+          </>
+        );
+        // An unmapped status has no constraint that would select exactly
+        // it, and a link that quietly shows the wrong jobs is worse than
+        // no link -- the same rule the tiles followed.
+        if (!constraint) {
+          return (
+            <span key={key} className={cls} title="No drill-down for this status">
+              {body}
+            </span>
+          );
+        }
+        return (
+          <Link
+            key={key}
+            href={jobsDrilldown(constraint, `${label.toLowerCase()} jobs`)}
+            className={`${cls} hover:ring-1 hover:ring-gray-400`}
+            aria-label={`${label}, ${n} ${n === 1 ? 'job' : 'jobs'}`}
+          >
+            {body}
+          </Link>
+        );
+      })}
     </div>
   );
 }
@@ -456,7 +474,7 @@ const ACTIVITY_TONE: Record<string, string> = {
   removed: 'text-gray-500',
 };
 
-// Goodput answers the question the tiles cannot: of the work that
+// Goodput answers the question the status row cannot: of the work that
 // actually ran, how much of it survived.
 //
 // The wall-clock split is the part worth reading. Ten thousand jobs

@@ -7,13 +7,10 @@ import {
   Goodput,
   HoldReasons,
   LiveTicker,
-  OtherStatuses,
   RecentActivity,
-  StatCard,
-  STATUS_LABEL_BY_KEY,
+  StatusRow,
 } from '@/components/DashboardPanels';
 import { useActivityStream } from '@/lib/useActivityStream';
-import { jobsDrilldown, statusConstraint } from '@/lib/drilldown';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 import { AccessPointsTable } from '@/components/AccessPointsTable';
 
@@ -99,11 +96,12 @@ function AuthenticatedDashboard({
   // data from it, and a mirror-less deployment simply renders no ticker.
   const live = useActivityStream(ownedByMe);
 
-  // Two queries, not one, so the page paints in stages: the tiles are a
-  // single aggregate against the mirror and land in a few milliseconds,
-  // while the panels below cost a hold breakdown and four windowed
-  // lookups. Combined, everything waited for the slowest of those --
-  // which is what made the page feel slow after the panels were added.
+  // Two queries, not one, so the page paints in stages: the status row
+  // is a single aggregate against the mirror and lands in a few
+  // milliseconds, while the panels below cost a hold breakdown and four
+  // windowed lookups. Combined, everything waited for the slowest of
+  // those -- which is what made the page feel slow after the panels were
+  // added.
   const { data, isLoading, error } = useQuery({
     queryKey: ['dashboard', scope],
     queryFn: () => api.dashboard({ owned_by_me: ownedByMe }),
@@ -119,7 +117,7 @@ function AuthenticatedDashboard({
   });
 
   // An older server still answers /dashboard with both halves; prefer
-  // the dedicated response and fall back to what the tiles carried.
+  // the dedicated response and fall back to what the counts carried.
   const activity = panels?.activity ?? data?.activity;
   const goodput = panels?.goodput ?? data?.goodput;
 
@@ -143,22 +141,7 @@ function AuthenticatedDashboard({
 
       {data && (
         <>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-            <StatCard label="Total" value={data.jobs_total} primary href="/jobs" />
-            {(['idle', 'running', 'held', 'completed'] as const).map((key) => (
-              <StatCard
-                key={key}
-                label={STATUS_LABEL_BY_KEY[key]}
-                value={data.jobs_by_status[key] ?? 0}
-                href={jobsDrilldown(
-                  statusConstraint(key) as string,
-                  `${STATUS_LABEL_BY_KEY[key].toLowerCase()} jobs`,
-                )}
-              />
-            ))}
-          </div>
-
-          <OtherStatuses byStatus={data.jobs_by_status} />
+          <StatusRow byStatus={data.jobs_by_status} total={data.jobs_total} />
 
           <LiveTicker {...live} />
 
