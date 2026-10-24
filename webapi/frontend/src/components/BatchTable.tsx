@@ -109,6 +109,14 @@ function dagNodes(b: Batch, progress: BatchProgressResult | undefined): DagNodeC
   return b.dagNodes;
 }
 
+// batchFinished: every job in the batch has finished. Removing such a
+// batch would record each of its clean runs as removed, so the row
+// offers Archive in Remove's place.
+function batchFinished(b: Batch): boolean {
+  const present = Object.entries(b.statusCounts).filter(([, n]) => n > 0);
+  return present.length > 0 && present.every(([k]) => k === 'completed');
+}
+
 // Live usage for the 'usage' detail, keyed by BatchJob.id.
 export interface RunningUsage {
   byJob: ReadonlyMap<string, JobUsage>;
@@ -277,8 +285,37 @@ export function BatchTable({
     },
   });
 
+  // Archive is what Remove is for a job that already finished: it
+  // retires the job into history with the outcome it had, where
+  // removing it would record a clean run as removed. The schedd takes
+  // up to a minute to act on it, so the row does not disappear on the
+  // click.
+  const archiveJobMut = useMutation({
+    mutationFn: (jobID: string) => api.jobs.retire(jobID),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      onChange();
+    },
+  });
+
+  // Narrowed to the finished jobs of the batch. The constraint matters:
+  // the batch may have picked up a new job since the row was drawn, and
+  // clearing LeaveJobInQueue on one still running would lose its output.
+  const archiveBatchMut = useMutation({
+    mutationFn: (b: Batch) =>
+      api.jobs.retireByConstraint(`(${b.removeConstraint}) && JobStatus == 4`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      onChange();
+    },
+  });
+
   const removeError =
-    removeBatchMut.error ?? removeJobMut.error ?? releaseJobMut.error;
+    removeBatchMut.error ??
+    removeJobMut.error ??
+    releaseJobMut.error ??
+    archiveJobMut.error ??
+    archiveBatchMut.error;
 
   // Multi-AP mode adds the Access point column. The running view trades
   // Submitted for its second bar: two bars and their text do not fit
@@ -333,14 +370,22 @@ export function BatchTable({
     highlighted,
     onToggle: () => toggle(batchKey(b)),
     onRemoveBatch: () => removeBatchMut.mutate(b),
+    onArchiveBatch: () => archiveBatchMut.mutate(b),
     onRemoveJob: (jobID: string) => removeJobMut.mutate(jobID),
+    onArchiveJob: (jobID: string) => archiveJobMut.mutate(jobID),
     onReleaseJob: (jobID: string) => releaseJobMut.mutate(jobID),
     pendingBatch:
       removeBatchMut.isPending &&
       !!removeBatchMut.variables &&
       batchKey(removeBatchMut.variables) === batchKey(b),
+    pendingArchiveBatch:
+      archiveBatchMut.isPending &&
+      !!archiveBatchMut.variables &&
+      batchKey(archiveBatchMut.variables) === batchKey(b),
     pendingJob: removeJobMut.variables,
     pendingJobActive: removeJobMut.isPending,
+    pendingArchive: archiveJobMut.variables,
+    pendingArchiveActive: archiveJobMut.isPending,
     pendingRelease: releaseJobMut.variables,
     pendingReleaseActive: releaseJobMut.isPending,
     now,
@@ -367,7 +412,12 @@ export function BatchTable({
           {/* Failure message is shared between Remove and Release —
               both kinds of mutation surface here, label with whichever
               actually failed so the user can tell what happened. */}
-          {releaseJobMut.error ? 'Release' : 'Remove'} failed:{' '}
+          {releaseJobMut.error
+            ? 'Release'
+            : archiveJobMut.error || archiveBatchMut.error
+              ? 'Archive'
+              : 'Remove'}{' '}
+          failed:{' '}
           {removeError instanceof ApiError
             ? removeError.message
             : String(removeError)}
@@ -527,11 +577,16 @@ function BatchRow({
   highlighted,
   onToggle,
   onRemoveBatch,
+  onArchiveBatch,
   onRemoveJob,
+  onArchiveJob,
   onReleaseJob,
   pendingBatch,
+  pendingArchiveBatch,
   pendingJob,
   pendingJobActive,
+  pendingArchive,
+  pendingArchiveActive,
   pendingRelease,
   pendingReleaseActive,
   now,
@@ -549,11 +604,16 @@ function BatchRow({
   highlighted: string | null;
   onToggle: () => void;
   onRemoveBatch: () => void;
+  onArchiveBatch: () => void;
   onRemoveJob: (jobID: string) => void;
+  onArchiveJob: (jobID: string) => void;
   onReleaseJob: (jobID: string) => void;
   pendingBatch: boolean;
+  pendingArchiveBatch: boolean;
   pendingJob: string | undefined;
   pendingJobActive: boolean;
+  pendingArchive: string | undefined;
+  pendingArchiveActive: boolean;
   pendingRelease: string | undefined;
   pendingReleaseActive: boolean;
   // Unix seconds, for running and waiting times.
@@ -694,14 +754,23 @@ function BatchRow({
                 menu: it is the action people come to the row for, and it
                 arms a confirmation in place. Multi-AP mode serves reads
                 only, so there the menu is all there is. */}
-            {!multiAP && (
-              <ConfirmButton
-                compact
-                onConfirm={onRemoveBatch}
-                pending={pendingBatch}
-                title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
-              />
-            )}
+            {!multiAP &&
+              (batchFinished(batch) ? (
+                <ConfirmButton
+                  compact
+                  label="Archive"
+                  onConfirm={onArchiveBatch}
+                  pending={pendingArchiveBatch}
+                  title={`Archive batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'}) — move it to history and delete the files kept for it here`}
+                />
+              ) : (
+                <ConfirmButton
+                  compact
+                  onConfirm={onRemoveBatch}
+                  pending={pendingBatch}
+                  title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
+                />
+              ))}
             <RowMenu label={`More actions for batch ${batch.name}`} items={batchMenuItems(batch, multiAP)} />
           </div>
         </td>
@@ -718,9 +787,12 @@ function BatchRow({
               jobs={batch.jobs}
               highlighted={highlighted}
               onRemoveJob={onRemoveJob}
+              onArchiveJob={onArchiveJob}
               onReleaseJob={onReleaseJob}
               pendingJob={pendingJob}
               pendingJobActive={pendingJobActive}
+              pendingArchive={pendingArchive}
+              pendingArchiveActive={pendingArchiveActive}
               pendingRelease={pendingRelease}
               pendingReleaseActive={pendingReleaseActive}
               now={now}
@@ -746,11 +818,16 @@ type BatchRowProps = {
   highlighted: string | null;
   onToggle: () => void;
   onRemoveBatch: () => void;
+  onArchiveBatch: () => void;
   onRemoveJob: (jobID: string) => void;
+  onArchiveJob: (jobID: string) => void;
   onReleaseJob: (jobID: string) => void;
   pendingBatch: boolean;
+  pendingArchiveBatch: boolean;
   pendingJob: string | undefined;
   pendingJobActive: boolean;
+  pendingArchive: string | undefined;
+  pendingArchiveActive: boolean;
   pendingRelease: string | undefined;
   pendingReleaseActive: boolean;
   now: number;
@@ -799,7 +876,9 @@ function BatchCard(props: BatchRowProps) {
     expanded,
     onToggle,
     onRemoveBatch,
+    onArchiveBatch,
     pendingBatch,
+    pendingArchiveBatch,
     now,
     estimates,
   } = props;
@@ -860,13 +939,21 @@ function BatchCard(props: BatchRowProps) {
           {/* Actions in the card's top corner, where a thumb finds them,
               rather than a row of their own. */}
           <div className="flex shrink-0 items-center gap-2">
-            {!multiAP && (
-              <ConfirmButton
-                onConfirm={onRemoveBatch}
-                pending={pendingBatch}
-                title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
-              />
-            )}
+            {!multiAP &&
+              (batchFinished(batch) ? (
+                <ConfirmButton
+                  label="Archive"
+                  onConfirm={onArchiveBatch}
+                  pending={pendingArchiveBatch}
+                  title={`Archive batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'}) — move it to history and delete the files kept for it here`}
+                />
+              ) : (
+                <ConfirmButton
+                  onConfirm={onRemoveBatch}
+                  pending={pendingBatch}
+                  title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
+                />
+              ))}
             <RowMenu touch label={`More actions for batch ${batch.name}`} items={batchMenuItems(batch, multiAP)} />
           </div>
         </div>
@@ -959,6 +1046,51 @@ function HoldSummaryBlock({ summary }: { summary: HoldSummary | undefined }) {
   );
 }
 
+// JobAction is the destructive action beside one job, which is a
+// different action depending on whether the job is still going.
+//
+// A finished job is archived: that retires it into history with the
+// outcome it had. Removing it would get it out of the queue too, but
+// records it as removed, so a clean run would be counted as a failure
+// by anything that reads history afterwards. Either way the files kept
+// for the job on the access point go with it, which is why both arm a
+// confirmation.
+function JobAction({
+  job,
+  onRemove,
+  onArchive,
+  pendingRemove,
+  pendingArchive,
+  compact,
+}: {
+  job: BatchJob;
+  onRemove: (id: string) => void;
+  onArchive: (id: string) => void;
+  pendingRemove: boolean;
+  pendingArchive: boolean;
+  compact?: boolean;
+}) {
+  if (job.display.key === 'completed') {
+    return (
+      <ConfirmButton
+        compact={compact}
+        label="Archive"
+        onConfirm={() => onArchive(job.id)}
+        pending={pendingArchive}
+        title={`Archive job ${job.id} — move it to history and delete the files kept for it here`}
+      />
+    );
+  }
+  return (
+    <ConfirmButton
+      compact={compact}
+      onConfirm={() => onRemove(job.id)}
+      pending={pendingRemove}
+      title={`Remove job ${job.id}`}
+    />
+  );
+}
+
 // JobCards is the jobs of an open batch card: one compact entry each,
 // with the actions a job row has.
 function JobCards({
@@ -968,9 +1100,12 @@ function JobCards({
   multiAP,
   highlighted,
   onRemoveJob,
+  onArchiveJob,
   onReleaseJob,
   pendingJob,
   pendingJobActive,
+  pendingArchive,
+  pendingArchiveActive,
   pendingRelease,
   pendingReleaseActive,
   now,
@@ -1052,10 +1187,12 @@ function JobCards({
                     {pendingReleaseActive && pendingRelease === j.id ? '…' : 'Release'}
                   </button>
                 )}
-                <ConfirmButton
-                  onConfirm={() => onRemoveJob(j.id)}
-                  pending={pendingJobActive && pendingJob === j.id}
-                  title={`Remove job ${j.id}`}
+                <JobAction
+                  job={j}
+                  onRemove={onRemoveJob}
+                  onArchive={onArchiveJob}
+                  pendingRemove={pendingJobActive && pendingJob === j.id}
+                  pendingArchive={pendingArchiveActive && pendingArchive === j.id}
                 />
               </div>
             )}
@@ -1142,9 +1279,12 @@ function JobsSubTable({
   jobs,
   highlighted,
   onRemoveJob,
+  onArchiveJob,
   onReleaseJob,
   pendingJob,
   pendingJobActive,
+  pendingArchive,
+  pendingArchiveActive,
   pendingRelease,
   pendingReleaseActive,
   now,
@@ -1156,9 +1296,12 @@ function JobsSubTable({
   jobs: BatchJob[];
   highlighted: string | null;
   onRemoveJob: (id: string) => void;
+  onArchiveJob: (id: string) => void;
   onReleaseJob: (id: string) => void;
   pendingJob: string | undefined;
   pendingJobActive: boolean;
+  pendingArchive: string | undefined;
+  pendingArchiveActive: boolean;
   pendingRelease: string | undefined;
   pendingReleaseActive: boolean;
   // Unix seconds, for running and waiting times.
@@ -1330,11 +1473,15 @@ function JobsSubTable({
                           : 'Release'}
                       </button>
                     )}
-                    <ConfirmButton
+                    <JobAction
                       compact
-                      onConfirm={() => onRemoveJob(j.id)}
-                      pending={pendingJobActive && pendingJob === j.id}
-                      title={`Remove job ${j.id}`}
+                      job={j}
+                      onRemove={onRemoveJob}
+                      onArchive={onArchiveJob}
+                      pendingRemove={pendingJobActive && pendingJob === j.id}
+                      pendingArchive={
+                        pendingArchiveActive && pendingArchive === j.id
+                      }
                     />
                   </div>
                 </td>

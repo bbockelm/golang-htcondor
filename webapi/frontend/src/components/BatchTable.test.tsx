@@ -6,19 +6,30 @@ import type { JobRuntimeEstimate, RuntimeEstimates } from '@/lib/api';
 // Every table asks for its jobs' runtime estimates; by default the server
 // has none to give, which leaves the Time left column out.
 const runtimeEstimates = vi.fn();
+const retire = vi.fn();
+const retireByConstraint = vi.fn();
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
   return {
     ...actual,
     api: {
       ...actual.api,
-      jobs: { ...actual.api.jobs, runtimeEstimates: (...a: unknown[]) => runtimeEstimates(...a) },
+      jobs: {
+        ...actual.api.jobs,
+        runtimeEstimates: (...a: unknown[]) => runtimeEstimates(...a),
+        retire: (...a: unknown[]) => retire(...a),
+        retireByConstraint: (...a: unknown[]) => retireByConstraint(...a),
+      },
     },
   };
 });
 beforeEach(() => {
   runtimeEstimates.mockReset();
   runtimeEstimates.mockResolvedValue({ available: false, reason: 'disabled' } satisfies RuntimeEstimates);
+  retire.mockReset();
+  retire.mockResolvedValue({});
+  retireByConstraint.mockReset();
+  retireByConstraint.mockResolvedValue({});
 });
 
 import { BatchTable } from './BatchTable';
@@ -605,5 +616,57 @@ describe('BatchTable as cards', () => {
     expect(screen.queryByText('Release')).toBeNull();
     expect(screen.getByRole('button', { name: /More actions for batch/ })).toBeTruthy();
     expect(document.querySelector('a[href^="/batches/"]')).toBeNull();
+  });
+});
+
+// A finished job is still in the queue because it was told to wait for
+// its output to be collected. Removing it is how the UI used to get it
+// into history, and that records a clean run as removed -- the archive
+// then counts a success as a failure, for good. Archive is the same
+// gesture without the lie.
+describe('finished jobs are archived, not removed', () => {
+  const finished: ClassAd[] = [
+    { ClusterId: 50, ProcId: 0, JobStatus: 4, Owner: 'alice', Cmd: '/bin/done', CompletionDate: 9000 },
+  ];
+  const mixed: ClassAd[] = [
+    { ClusterId: 60, ProcId: 0, JobStatus: 4, Owner: 'alice', Cmd: '/bin/a', JobBatchName: 'mix' },
+    { ClusterId: 60, ProcId: 1, JobStatus: 2, Owner: 'alice', Cmd: '/bin/a', JobBatchName: 'mix' },
+  ];
+
+  it('offers Archive on a finished job and Remove on one still going', () => {
+    const batches = groupIntoBatches(mixed);
+    table({ batches, expanded: new Set(batches.map((b) => b.batchID)) });
+    expect(screen.getAllByTitle(/Archive job 60\.0/).length).toBeGreaterThan(0);
+    expect(screen.getAllByTitle(/Remove job 60\.1/).length).toBeGreaterThan(0);
+    // The finished job must not also offer Remove: that is the action
+    // this replaces, not one it sits beside.
+    expect(screen.queryByTitle('Remove job 60.0')).toBeNull();
+  });
+
+  it('archives the job rather than removing it', async () => {
+    const batches = groupIntoBatches(finished);
+    table({ batches, expanded: new Set(batches.map((b) => b.batchID)) });
+    fireEvent.click(screen.getAllByTitle(/Archive job 50\.0/)[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Confirm' })[0]);
+    await waitFor(() => expect(retire).toHaveBeenCalledWith('50.0'));
+  });
+
+  it('archives a batch whose jobs have all finished, narrowed to the finished ones', async () => {
+    const batches = groupIntoBatches(finished);
+    table({ batches });
+    expect(screen.queryByTitle(/Remove batch/)).toBeNull();
+    fireEvent.click(screen.getAllByTitle(/Archive batch/)[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Confirm' })[0]);
+    // The constraint matters: a job that joined the batch since the row
+    // was drawn and is still running would lose its output.
+    await waitFor(() => expect(retireByConstraint).toHaveBeenCalled());
+    expect(retireByConstraint.mock.calls[0][0]).toContain('JobStatus == 4');
+  });
+
+  it('keeps Remove on a batch that still has a job going', () => {
+    const batches = groupIntoBatches(mixed);
+    table({ batches });
+    expect(screen.getAllByTitle(/Remove batch/).length).toBeGreaterThan(0);
+    expect(screen.queryByTitle(/Archive batch/)).toBeNull();
   });
 });
