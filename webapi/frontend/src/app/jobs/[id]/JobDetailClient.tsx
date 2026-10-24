@@ -104,6 +104,11 @@ export default function JobDetailClient(_props: {
   // Status 3 = Removed, 4 = Completed. Don't offer Remove for those.
   const status = data ? num(data.JobStatus) : undefined;
   const isTerminal = status === 3 || status === 4;
+  // A job that finished is still here because it was told to wait for
+  // its output to be collected. Archive is how the reader says they
+  // have it: the job retires into history as the success it was, where
+  // removing it would record it as removed.
+  const isFinished = status === 4;
   // Status 5 = Held. Surface a Release button so the user doesn't
   // have to drop to the CLI to un-hold a job.
   const isHeld = status === 5;
@@ -113,6 +118,14 @@ export default function JobDetailClient(_props: {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
       router.push('/jobs');
+    },
+  });
+
+  const archiveMut = useMutation({
+    mutationFn: () => api.jobs.retire(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      queryClient.invalidateQueries({ queryKey: ['job', id] });
     },
   });
 
@@ -183,6 +196,14 @@ export default function JobDetailClient(_props: {
               {holdMut.isPending ? 'Holding…' : 'Hold'}
             </button>
           )}
+          {isFinished && data && !archiveMut.isSuccess && (
+            <ConfirmButton
+              label="Archive"
+              onConfirm={() => archiveMut.mutate()}
+              pending={archiveMut.isPending}
+              title={`Archive job ${id} — move it to history and delete the files kept for it here`}
+            />
+          )}
           {!isTerminal && data && (
             <ConfirmButton
               onConfirm={() => removeMut.mutate()}
@@ -192,6 +213,29 @@ export default function JobDetailClient(_props: {
           )}
         </div>
       </div>
+
+      {/* The schedd retires the job on its next sweep rather than on
+          this click, so the page cannot just navigate to the archive
+          record: it is not there yet. Say what will happen instead of
+          leaving the button to look like it did nothing. */}
+      {archiveMut.isSuccess && (
+        <div className="rounded-sm border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+          Archived. It moves to{' '}
+          <Link href={`/archive/${id}`} className="text-brand-700 hover:underline">
+            your job history
+          </Link>{' '}
+          shortly, and its files here are removed with it.
+        </div>
+      )}
+
+      {archiveMut.error && (
+        <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          Archive failed:{' '}
+          {archiveMut.error instanceof ApiError
+            ? archiveMut.error.message
+            : String(archiveMut.error)}
+        </div>
+      )}
 
       {holdMut.error && (
         <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">

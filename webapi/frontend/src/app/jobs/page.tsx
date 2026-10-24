@@ -438,8 +438,12 @@ export default function JobsPage() {
         scope={ownedByMe ? 'mine' : 'everyone'}
         hooks={chatHooks}
         headerLabel="Job assistant"
-        togglerLabel="Ask about your jobs"
-        pageHelp={`Ask things like "how many of my jobs are held?", "why is my last batch stuck?", or "release everything that's held with code 13".`}
+        togglerLabel={ownedByMe ? 'Ask about your jobs' : 'Ask about jobs'}
+        pageHelp={
+          ownedByMe
+            ? `Ask things like "how many of my jobs are held?", "why is my last batch stuck?", or "release everything that's held with code 13".`
+            : `Ask things like "how many jobs are held?", "which batch is stuck?", or "who has the most held jobs?".`
+        }
         onServerToolComplete={handleServerToolComplete}
       />
 

@@ -1852,6 +1852,38 @@ export const api = {
         body: JSON.stringify({ constraint, reason }),
       }),
 
+    // Retire one finished job from the queue into history.
+    //
+    // A job submitted through this interface is kept in the queue after
+    // it finishes, so its output can still be fetched. Clearing
+    // LeaveJobInQueue lets the schedd retire it, which writes it to
+    // history with the outcome it actually had. Removing it would also
+    // get it out of the queue, but records it as removed -- so a job
+    // that exited cleanly would be counted as a failure ever after.
+    //
+    // The value is a bare ClassAd expression string, which the server
+    // passes through verbatim (see encodeJobAttributeValue).
+    // Named retire, not archive: jobs.archive() above already means
+    // "list the archive". This is the UI's Archive action.
+    retire: (id: string): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ attributes: { LeaveJobInQueue: 'false' } }),
+      }),
+
+    // Retire every finished job matching a constraint. The caller
+    // narrows to finished jobs itself: a running job with
+    // LeaveJobInQueue cleared would vanish from the queue the moment it
+    // finished, before anyone could fetch its output.
+    retireByConstraint: (constraint: string): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          constraint,
+          attributes: { LeaveJobInQueue: 'false' },
+        }),
+      }),
+
     // Hold a single job. The Go side maps this to condor_hold for the
     // matching cluster.proc: the job stops (or stops being scheduled)
     // and moves to JobStatus=5, from where release() puts it back.

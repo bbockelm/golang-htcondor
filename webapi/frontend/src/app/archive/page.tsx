@@ -38,6 +38,7 @@ import {
   scheddOf,
   type ClassAd,
   type HistoryListResponse,
+  type JobListResponse,
   type Sources,
 } from '@/lib/api';
 import { useMultiAP } from '@/lib/multiap';
@@ -132,6 +133,10 @@ export default function ArchivePage() {
   const urlConstraint = searchParams.get('constraint') ?? undefined;
   const why = searchParams.get('why') ?? undefined;
   const [schedd, setSchedd] = useState(searchParams.get('schedd') ?? '');
+  // Finished jobs that have not left the queue are not history records
+  // and are not in the table below. Off by default: this page answers
+  // "what did I run", and most of the time nothing is waiting.
+  const [showWaiting, setShowWaiting] = useState(false);
 
   // The drill-in constraint and a user expression both narrow; ANDing
   // them keeps the banner's promise true while the user refines inside
@@ -326,9 +331,20 @@ export default function ArchivePage() {
         scope={ownedByMe ? 'mine' : 'everyone'}
         hooks={chatHooks}
         headerLabel="Archive assistant"
-        togglerLabel="Ask about your job history"
-        pageHelp={`Ask things like "show my failed jobs from yesterday", "how long did the training-run batch take?", or "find that python job I ran on Tuesday".`}
+        togglerLabel={ownedByMe ? 'Ask about your job history' : 'Ask about job history'}
+        pageHelp={
+          ownedByMe
+            ? `Ask things like "show my failed jobs from yesterday", "how long did the training-run batch take?", or "find that python job I ran on Tuesday".`
+            : `Ask things like "show failed jobs from yesterday", "how long did the training-run batch take?", or "who ran the most jobs this week?".`
+        }
         onServerToolComplete={handleServerToolComplete}
+      />
+
+      <WaitingToArchive
+        show={showWaiting}
+        onShow={setShowWaiting}
+        ownedByMe={ownedByMe}
+        schedd={schedd || undefined}
       />
 
       {urlConstraint && (
@@ -645,4 +661,151 @@ function str(v: unknown): string | undefined {
   if (v === undefined || v === null) return undefined;
   if (typeof v === 'string') return undefined;
   return String(v);
+}
+
+
+// WaitingToArchive lists the finished jobs that are still in the queue.
+//
+// They are the one thing a reader of this page can be looking for and
+// not find: a job submitted here is kept after it finishes so its
+// output can still be fetched, and until it is archived there is no
+// history record of it to list. Opt-in, because it is a second query
+// and on most visits the answer is empty.
+function WaitingToArchive({
+  show,
+  onShow,
+  ownedByMe,
+  schedd,
+}: {
+  show: boolean;
+  onShow: (v: boolean) => void;
+  ownedByMe: boolean;
+  schedd?: string;
+}) {
+  const { data, isLoading, error } = useQuery<JobListResponse, Error>({
+    queryKey: ['jobs', 'waiting-to-archive', ownedByMe, schedd],
+    queryFn: () =>
+      api.jobs.list({
+        constraint: 'JobStatus == 4',
+        owned_by_me: ownedByMe,
+        schedd,
+        // Narrow on purpose: this is a sidebar to the page, not the
+        // page. Everything it shows is one click from its job page.
+        projection: 'ClusterId,ProcId,Owner,Cmd,Args,CompletionDate,ExitCode',
+        limit: 200,
+      }),
+    enabled: show,
+  });
+  const jobs = data?.jobs ?? [];
+
+  return (
+    <div className="rounded border border-gray-200 bg-gray-50 px-3 py-2">
+      <label className="flex items-center gap-2 text-sm text-gray-700">
+        <input
+          type="checkbox"
+          checked={show}
+          onChange={(e) => onShow(e.target.checked)}
+          className="h-4 w-4 rounded-sm border-gray-300"
+        />
+        Also show finished jobs still in the queue
+      </label>
+      {show && (
+        <>
+          <p className="mt-1.5 text-xs text-gray-500">
+            A job submitted through this interface is kept after it finishes so
+            its output can still be fetched, and it has no history record until
+            it is archived. These are those jobs; archiving one from its job
+            page moves it into the table below.
+          </p>
+          {isLoading && <p className="mt-2 text-xs text-gray-400">Loading…</p>}
+          {error && (
+            <p className="mt-2 text-xs text-red-700">
+              Could not read the queue: {error.message}
+            </p>
+          )}
+          {!isLoading && !error && jobs.length === 0 && (
+            <p className="mt-2 text-xs text-gray-500">
+              None — every finished job is in the history below.
+            </p>
+          )}
+          {jobs.length > 0 && (
+            <table className="mt-2 w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-wide text-gray-500">
+                  <th className="px-2 py-1 font-medium">Job</th>
+                  {!ownedByMe && <th className="px-2 py-1 font-medium">User</th>}
+                  <th className="px-2 py-1 font-medium">Finished</th>
+                  <th className="px-2 py-1 font-medium">Command</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {jobs.map((ad) => {
+                  const id = waitingJobID(ad);
+                  const finished = numAttr(ad.CompletionDate);
+                  const cmd = typeof ad.Cmd === 'string' ? ad.Cmd : undefined;
+                  const args = typeof ad.Args === 'string' ? ad.Args : undefined;
+                  const owner = typeof ad.Owner === 'string' ? ad.Owner : undefined;
+                  return (
+                    <tr key={id ?? JSON.stringify(ad)}>
+                      <td className="px-2 py-1 font-mono text-xs">
+                        {id ? (
+                          <Link href={`/jobs/${id}`} className="text-brand-700 hover:underline">
+                            {id}
+                          </Link>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                      {!ownedByMe && (
+                        <td className="px-2 py-1 text-xs text-gray-700">{owner ?? '—'}</td>
+                      )}
+                      <td className="px-2 py-1 whitespace-nowrap text-xs text-gray-500">
+                        {finished ? new Date(finished * 1000).toLocaleString() : '—'}
+                      </td>
+                      <td className="max-w-md truncate px-2 py-1 text-xs text-gray-700">
+                        {cmd ? (
+                          <span className="font-mono">
+                            {cmd}
+                            {args ? ' ' + args : ''}
+                          </span>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          {data?.has_more && (
+            <p className="mt-1.5 text-xs text-gray-500">
+              Showing the first {jobs.length.toLocaleString()}; more are waiting.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// waitingJobID: the queue's own job_id when it sent one, else built
+// from the ad. The archive's jobIdOf only knows the first form.
+function waitingJobID(ad: ClassAd): string | undefined {
+  const given = jobIdOf(ad);
+  if (given) return given;
+  const cluster = numAttr(ad.ClusterId);
+  const proc = numAttr(ad.ProcId);
+  if (cluster === undefined || proc === undefined) return undefined;
+  return `${cluster}.${proc}`;
+}
+
+// numAttr reads a ClassAd attribute that should be a number, whichever
+// of the two shapes the API used for it.
+function numAttr(v: unknown): number | undefined {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) {
+    return Number(v);
+  }
+  return undefined;
 }
