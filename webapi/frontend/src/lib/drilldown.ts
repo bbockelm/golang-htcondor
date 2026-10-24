@@ -31,7 +31,7 @@ export function archiveDrilldown(constraint: string, why: string): string {
  *
  *  Mirrors dashboardStatusName on the server, which is the only reason
  *  these tiles add up: a job held solely because its input is still
- *  spooling is counted as "uploading" rather than HELD, so the HELD tile
+ *  spooling is counted as "uploading" rather than HELD, so the HELD chip
  *  has to exclude it here too or the drill-down returns more jobs than
  *  the tile claimed. */
 export function statusConstraint(key: string): string | null {
