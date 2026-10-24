@@ -2784,6 +2784,21 @@ async function mergeTemplateAndUserFiles(
   return out;
 }
 
+// emptyTable is what "no rows filled in" looks like: the one blank row
+// the table always keeps, because a table with zero rows would submit
+// zero jobs and offer nowhere to type.
+function emptyTable(columns: TemplateColumn[]): string[][] {
+  return [columns.map(() => '')];
+}
+
+// isEmptyTable reports whether the table is back to that state. It
+// decides both whether Clear has anything to do and whether Undo is
+// still safe to offer -- once the user has typed anything, restoring
+// the cleared rows would throw away the new work instead of the old.
+function isEmptyTable(rows: string[][]): boolean {
+  return rows.length === 1 && rows[0].every((cell) => cell.trim() === '');
+}
+
 // ----------------------------------------------------------------------
 // Table section: one row per job. Column headers come from the active
 // template; the user fills cells.
@@ -2811,6 +2826,12 @@ function TableSection({
   setCount: (n: number) => void;
 }) {
   const columnNames = columns.map((c) => c.name);
+  // The rows Clear discarded, kept so one misclick is not the end of a
+  // hand-typed parameter sweep. Undo is offered only while the table is
+  // still untouched (see isEmptyTable), so it expires on its own the
+  // moment the user starts typing again -- no timer, and no way for it
+  // to overwrite work done after the clear.
+  const [cleared, setCleared] = useState<string[][] | null>(null);
   // Count mode is always available even when the template has no
   // columns — that's the single-job fallback the page used to render
   // hardcoded; we now expose it as the explicit "Run N copies" option.
@@ -2951,7 +2972,40 @@ function TableSection({
             >
               × Duplicate all
             </button>
+            {/* Clearing row by row is the per-row × , which stops at the
+                last row and cannot empty it -- so a 50-row sweep took 49
+                clicks and still left a filled row behind. */}
+            <button
+              type="button"
+              onClick={() => {
+                setCleared(rows);
+                setRows(emptyTable(columns));
+              }}
+              disabled={isEmptyTable(rows)}
+              className="rounded-sm border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:hover:bg-white"
+              title="Empty every row and start the table over"
+            >
+              Clear table
+            </button>
           </div>
+          {/* Also gated on the column count: switching template between
+              the clear and the undo would otherwise restore values under
+              headers they were never typed for. */}
+          {cleared && cleared[0]?.length === columns.length && isEmptyTable(rows) && (
+            <p className="text-xs text-gray-500">
+              Cleared {cleared.length} row{cleared.length === 1 ? '' : 's'}.{' '}
+              <button
+                type="button"
+                onClick={() => {
+                  setRows(cleared);
+                  setCleared(null);
+                }}
+                className="font-medium text-brand-700 underline hover:text-brand-800"
+              >
+                Undo
+              </button>
+            </p>
+          )}
         </div>
       )}
     </SectionCard>
