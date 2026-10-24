@@ -80,7 +80,43 @@ Demo mode spins up a mini HTCondor (`condor_master` as a subprocess
 in a temp directory), provisions an `admin` IDP user (the random
 password is printed to stdout on first start), and starts the API
 server at `https://localhost:8080`. The bundled SPA — including the
-admin pages and the chat assistant — is served from `/`.
+admin pages and the chat assistant — is served from `/`. A second,
+non-admin IDP user, `user`, is provisioned the same way (its password
+is printed as `UserPassword:`).
+
+#### Placement in demo mode
+
+When the HTCondor on `PATH` includes a `condor_placementd` (in the
+`SBIN` directory beside `condor_master`, or anywhere on `PATH`),
+`htcondor-api -demo` adds `PLACEMENTD` to the mini HTCondor's `DAEMON_LIST` so the
+placement features can be tried locally: the placement token page, the
+device flow, and the admin Directory and access requests. Without one
+it logs `no condor_placementd found; placement features are off in demo
+mode` and nothing else changes. (Released HTCondor packages put
+`condor_placementd` in the `condor-test` package, not `condor`.)
+
+With a placementd, demo mode also:
+
+- writes a map file that maps the IDP users `admin` and `user` to the
+  accounts `admin` and `user` with `READ,WRITE` and the project `Demo`,
+  and an authorizations file defining `READ` and `WRITE`;
+- sets `SEC_USE_TOKENS_DATABASE` and `SEC_ACCEPT_CAPABILITY_TOKENS`, so
+  the pool accepts the tokens the placementd issues;
+- maps sign-ins with `HTTP_API_IDENTITY_MAP = username, placementd`,
+  against a passwd file of its own that lists only `admin` and `user`.
+  Those two sign in exactly as they do without a placementd; anyone
+  else is looked up in the placementd;
+- provisions a third IDP user, `newbie` (password printed as
+  `NewbiePassword:`), whom nothing maps. Signing in as `newbie` gives a
+  placement-only session with the access request form. Approve the
+  request as `admin` on the Requests tab of `/admin/placement`, and
+  `newbie`'s session becomes a full one;
+- prints the placement URLs alongside the credentials.
+
+The token page and device flow work with any placementd. The Directory,
+and approving access requests, need a placementd that speaks API
+version 2; with an older one the admin page lists users instead of the
+Directory, and requests can be filed but not approved there.
 
 The same flag works for the MCP binary:
 
