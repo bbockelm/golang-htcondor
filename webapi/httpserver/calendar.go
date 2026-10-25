@@ -16,9 +16,16 @@ package httpserver
 //     removed job has no CompletionDate at all, so bucketing on it does
 //     not merely mis-sort removals, it drops every one of them --
 //     measured over seven days of production history as ~15 removals
-//     against a true 26,798. EnteredHistoryTime is stamped on every
-//     record by the mirror as it ingests, and htcondordb zone-maps it
-//     precisely so a windowed read prunes whole segments.
+//     against a true 26,798.
+//
+//     EnteredHistoryTime is the mirror's own "when did this leave the
+//     queue" stamp, written on every record it archives: the job's
+//     terminal-status transition (EnteredCurrentStatus), falling back to
+//     CompletionDate and then to the ingest clock. A removed job has the
+//     first of those even though it has none of the second, which is
+//     what makes it the one attribute both halves of the chart can be
+//     cut on. htcondordb zone-maps it precisely so a windowed read
+//     prunes whole segments instead of scanning.
 //
 //  2. One query per status, narrowed by a constraint -- never one
 //     aggregate carrying a per-aggregate FILTER. COUNT(*) FILTER (WHERE
@@ -59,21 +66,31 @@ const calendarBucket = int64(24 * time.Hour / time.Second)
 // Window bounds. The default is a quarter, which is the span the view
 // exists to show.
 //
-// The cap is measured, not guessed. On a 1M-record history archive of
-// realistic ad width, with the columnar accelerator on (which htcondordb
-// turns on by default), one owner-scoped day-series costs about 10ms at
-// 7 days, 30ms at 30, 50-95ms at 90 and 180-335ms at 365 -- linear in
-// the records the window covers. So a 400-day calendar is roughly a
-// second of archive work there, and about five on a 5M-record archive:
-// paid once per calendarRefresh per scope, inside calendarComputeTimeout
-// with room to spare. Past a year or so the window stops buying a reader
-// anything a day-wide column can show, so this is where the cost and the
-// usefulness run out together.
+// The cap is measured, not guessed. On history archives of realistic ad
+// width spanning 400 days, with the columnar accelerator on (which
+// htcondordb turns on by default), one owner-scoped day-series costs:
 //
-// Without the accelerator the same work is a full record scan -- 1.3-1.6s
-// at 90 days and 5.3-6.1s at 365 on that same archive -- which is a
-// property of the mirror rather than of this code, and the reason the
-// cost is bounded by a cache and a cap rather than assumed small.
+//	window     1M records     3M records
+//	   7d      9-15ms         ~78ms
+//	  30d      20-35ms        ~113ms
+//	  90d      51-95ms        ~200ms
+//	 180d      94-161ms       ~345ms
+//	 365d      183-335ms      1.0-2.0s
+//
+// So the three archive series of a year-long calendar are about a second
+// at 1M and three to four at 3M -- scaling with the records the window
+// covers rather than with the number of days -- and a 5M-record archive
+// extrapolates to under ten. That is paid once per calendarRefresh per
+// scope and sits inside calendarComputeTimeout with room to spare. Past
+// a year the window also stops buying a reader anything a day-wide
+// column can show, so cost and usefulness run out at about the same
+// place, and this is it.
+//
+// Without the accelerator the same work is a full record scan: 1.3-1.6s
+// at 90 days and 5.3-6.1s at 365 on the 1M archive, 19-20s at 365 on the
+// 3M one. That is a property of the mirror rather than of this code, and
+// it is why the cost is bounded by a cache and a cap rather than assumed
+// small.
 const (
 	calendarDefaultDays = 90
 	calendarMaxDays     = 400
@@ -139,11 +156,14 @@ type CalendarQueueDepth struct {
 // Reported rather than left implicit because a drill-down has to ask the
 // same question the figure answered, and the obvious guesses are wrong.
 // The finished and removed series are bucketed on EnteredHistoryTime --
-// when the mirror ingested the record -- NOT on CompletionDate, which a
-// removed job does not have at all, and not on EnteredCurrentStatus. A
-// job that completed at 23:50 and was ingested at 00:05 is in the next
-// day here, so a drill-down constrained on CompletionDate selects a
-// different set than the number it was reached from and reads as a bug.
+// the stamp described in the file header -- NOT on CompletionDate, which
+// a removed job does not have at all, and not on EnteredCurrentStatus,
+// which EnteredHistoryTime only usually equals. The two normally agree
+// to the second and occasionally do not: a job whose terminal transition
+// and completion straddle midnight, or one stamped from the ingest clock
+// after a backlog drain, lands on a different day here than a constraint
+// on CompletionDate would put it, and the drill-down then shows a total
+// that disagrees with the number it was reached from.
 //
 // The submitted series is the one place the attribute is not the whole
 // story: it is a union of the history archive and the live queue, both

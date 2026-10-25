@@ -78,13 +78,17 @@ func seedCalendarHistory(ctx context.Context, t *testing.T, dbc *dbrpc.Client, n
 		// One of each on day 1.
 		{calendarTestOwner, 4, d(1) + 100, d(1) + 50, d(1) + 90},
 		{calendarTestOwner, 3, d(1) + 200, d(1) + 50, 0},
-		// The midnight straddler: it finished at 23:53 on day 2 and was
-		// ingested five minutes later, on day 1. It belongs to day 1
-		// here, because that is the day this buckets on -- and a
-		// drill-down that asked for day 1 by CompletionDate instead
-		// would not find it, which is the disagreement bucketed_on
-		// exists to prevent. Submitted on day 2, so it also pins that
-		// the submit day and the history day are read independently.
+		// The midnight straddler: CompletionDate says 23:53 on day 2,
+		// EnteredHistoryTime says five minutes later, on day 1. The two
+		// normally agree to the second; they come apart when the
+		// terminal transition and the completion fall either side of
+		// midnight, or when the stamp came from the ingest clock after a
+		// backlog drain. It belongs to day 1 here, because that is the
+		// day this buckets on -- and a drill-down that asked day 1 for a
+		// CompletionDate would not find it, which is the disagreement
+		// bucketed_on exists to prevent. Submitted on day 2, so it also
+		// pins that the submit day and the history day are read
+		// independently.
 		{calendarTestOwner, 4, d(1) + 300, d(2) + 100, d(2) + 86000},
 		// One finished today.
 		{calendarTestOwner, 4, d(0) + 60, d(0) + 10, d(0) + 50},
