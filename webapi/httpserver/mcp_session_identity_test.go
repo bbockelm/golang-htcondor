@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/toolstats"
+	"github.com/bbockelm/golang-htcondor/webapi/usagestats"
 )
 
 // postMCPWith sends one JSON-RPC message and returns the recorder, so a
@@ -41,7 +41,7 @@ func postMCPWith(t *testing.T, s *Server, body, sessionID, userAgent string) *ht
 // this feature exists to avoid relying on.
 func TestTheServerAssignsASessionIdAtInitialize(t *testing.T) {
 	s := newMCPTransportServer(t, false)
-	t.Cleanup(func() { s.StopToolStats() })
+	t.Cleanup(func() { s.StopUsageStats() })
 
 	rec := postMCPWith(t, s,
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+
@@ -64,7 +64,7 @@ func TestTheServerAssignsASessionIdAtInitialize(t *testing.T) {
 // harness the client declared -- not to its HTTP library.
 func TestAToolCallIsAttributedToTheDeclaredHarness(t *testing.T) {
 	s := newMCPTransportServer(t, false)
-	t.Cleanup(func() { s.StopToolStats() })
+	t.Cleanup(func() { s.StopUsageStats() })
 
 	rec := postMCPWith(t, s,
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+
@@ -82,7 +82,7 @@ func TestAToolCallIsAttributedToTheDeclaredHarness(t *testing.T) {
 
 	var got string
 	for k, e := range s.toolStats.Snapshot() {
-		if k.Tool == "definitely_not_a_tool" && e.Calls > 0 {
+		if k.Name == "definitely_not_a_tool" && e.Calls > 0 {
 			got = k.Client
 		}
 	}
@@ -95,7 +95,7 @@ func TestAToolCallIsAttributedToTheDeclaredHarness(t *testing.T) {
 // forgotten, still gets counted -- against its User-Agent.
 func TestTheUserAgentRemainsTheFallback(t *testing.T) {
 	s := newMCPTransportServer(t, false)
-	t.Cleanup(func() { s.StopToolStats() })
+	t.Cleanup(func() { s.StopUsageStats() })
 
 	postMCPWith(t, s,
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":`+
@@ -104,7 +104,7 @@ func TestTheUserAgentRemainsTheFallback(t *testing.T) {
 
 	var got string
 	for k, e := range s.toolStats.Snapshot() {
-		if k.Tool == "definitely_not_a_tool" && e.Calls > 0 {
+		if k.Name == "definitely_not_a_tool" && e.Calls > 0 {
 			got = k.Client
 		}
 	}
@@ -117,7 +117,7 @@ func TestTheUserAgentRemainsTheFallback(t *testing.T) {
 // change under it on every request.
 func TestAnExistingSessionIdIsLeftAlone(t *testing.T) {
 	s := newMCPTransportServer(t, false)
-	t.Cleanup(func() { s.StopToolStats() })
+	t.Cleanup(func() { s.StopUsageStats() })
 
 	rec := postMCPWith(t, s,
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`,
@@ -130,7 +130,7 @@ func TestAnExistingSessionIdIsLeftAlone(t *testing.T) {
 // Two initialises must not collide, or two clients share one attribution.
 func TestAssignedSessionIdsAreUnique(t *testing.T) {
 	s := newMCPTransportServer(t, false)
-	t.Cleanup(func() { s.StopToolStats() })
+	t.Cleanup(func() { s.StopUsageStats() })
 
 	seen := map[string]bool{}
 	for i := 0; i < 25; i++ {
@@ -148,7 +148,7 @@ func TestAssignedSessionIdsAreUnique(t *testing.T) {
 // Assigning a session must not disturb the initialize response itself.
 func TestInitializeStillAnswersNormally(t *testing.T) {
 	s := newMCPTransportServer(t, false)
-	t.Cleanup(func() { s.StopToolStats() })
+	t.Cleanup(func() { s.StopUsageStats() })
 
 	rec := postMCPWith(t, s,
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+
@@ -168,7 +168,7 @@ func TestInitializeStillAnswersNormally(t *testing.T) {
 // The store still has to exist for any of this to be observable.
 func TestSessionIdentityDoesNotRequireAStore(t *testing.T) {
 	s := newMCPTransportServer(t, false)
-	t.Cleanup(func() { s.StopToolStats() })
+	t.Cleanup(func() { s.StopUsageStats() })
 	s.toolStats = nil
 	rec := postMCPWith(t, s,
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`,
@@ -178,4 +178,4 @@ func TestSessionIdentityDoesNotRequireAStore(t *testing.T) {
 	}
 }
 
-var _ = toolstats.OutcomeOK
+var _ = usagestats.OutcomeOK

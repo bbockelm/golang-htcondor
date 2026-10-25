@@ -156,7 +156,7 @@ func clientInfoFromInitialize(params json.RawMessage) string {
 // would need editing every time a new MCP client appears, and would
 // silently report the new one as "other" until somebody noticed. The
 // bounding that keeps the Prometheus label space finite happens in the
-// toolstats package, over observed call volume, and applies to any
+// usagestats package, over observed call volume, and applies to any
 // value however it was spelled. What happens here is only sanitising:
 // a label value has to be printable, bounded in length, and free of the
 // characters that would make the exposition format ambiguous.

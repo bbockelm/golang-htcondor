@@ -1,5 +1,10 @@
-// Package toolstats counts MCP tool calls: which tool, for whom, from
-// which client harness, with what outcome and how long it took.
+// Package usagestats counts calls to this server: which tool or
+// endpoint, for whom, from which client, with what outcome and how
+// long it took.
+//
+// One Store counts one KIND of call -- MCP tool calls, or REST API
+// requests -- and a Spec (spec.go) holds everything that differs
+// between them. Everything below is common to both.
 //
 // It owns the numbers rather than handing them to a prometheus
 // CounterVec, for one reason: they have to survive a restart. A
@@ -25,36 +30,12 @@
 //
 // Nothing here is in the request path's critical section for longer
 // than a map lookup and a few adds under a mutex.
-package toolstats
+package usagestats
 
 import (
 	"sort"
 	"sync"
 	"time"
-)
-
-// Outcome values. Bounded on purpose: this is a Prometheus label, and
-// the set of things that can happen to a tool call is small and known.
-const (
-	// OutcomeOK is a tool that ran and returned a result.
-	OutcomeOK = "ok"
-	// OutcomeError is a tool that ran and failed. It covers both a tool
-	// returning an error and the request being rejected after dispatch
-	// began; what it does NOT cover is a malformed request that never
-	// named a tool, which is not attributable to one.
-	OutcomeError = "error"
-	// OutcomeUnknownTool is a call that named a tool this server does
-	// not have. Its own outcome rather than an error, because it says
-	// the caller's catalogue is wrong -- a stale client, or an agent
-	// inventing a name -- which is a different problem from a tool
-	// that ran and failed.
-	OutcomeUnknownTool = "unknown_tool"
-	// OutcomeRefused is a tool call rejected before the tool ran --
-	// today, one disabled by configuration. Separated from "error"
-	// because it says something about the deployment rather than about
-	// the call: a dashboard that lumps them together reports a policy
-	// decision as a malfunction.
-	OutcomeRefused = "refused"
 )
 
 // UnknownUser and UnknownClient are the recorded values when a call
@@ -88,12 +69,14 @@ const OtherLabel = "other"
 // holds at most this many series plus the one overflow bucket.
 const DefaultMaxSeries = 10000
 
-// MaxToolNameLength bounds a recorded tool name.
+// MaxNameLength bounds a recorded tool or endpoint name.
 //
 // The name is caller-supplied on the unknown-tool path and the MCP body
 // limit is 16 MB, so without this one request could store a megabyte of
 // text -- three times over, once in the row and again in each index.
-const MaxToolNameLength = 64
+// REST names come from a fixed route table and are already short, but
+// the clamp is applied to both rather than trusted to stay that way.
+const MaxNameLength = 64
 
 // DefaultMaxLabelValues bounds the distinct values any single label can
 // contribute to /metrics. It is a safety valve, not a policy: it sits
@@ -118,7 +101,9 @@ var DurationBuckets = []float64{
 // Key identifies one counted series. Every field is recorded verbatim;
 // the bounding to a label space happens at render time.
 type Key struct {
-	Tool    string
+	// Name is what was called: the tool name for MCP, or
+	// "METHOD /route/template" for REST. The spec's Noun says which.
+	Name    string
 	User    string
 	Client  string
 	Outcome string
@@ -154,6 +139,12 @@ func (e *Entry) clone() Entry {
 //
 // The zero value is not usable; call New.
 type Store struct {
+	// spec is the vocabulary this store counts in. Immutable after
+	// New: the table it flushes to and the metric names it renders
+	// under both come from here, and a store that changed kind
+	// mid-life would write one kind's rows into the other's table.
+	spec Spec
+
 	mu sync.Mutex
 	m  map[Key]*Entry
 
@@ -196,9 +187,10 @@ type Store struct {
 	loadFailed bool
 }
 
-// New returns an empty Store.
-func New() *Store {
+// New returns an empty Store counting the kind spec describes.
+func New(spec Spec) *Store {
 	return &Store{
+		spec:           spec,
 		m:              map[Key]*Entry{},
 		dirtyKeys:      map[Key]struct{}{},
 		maxLabelValues: DefaultMaxLabelValues,
@@ -220,13 +212,13 @@ func (s *Store) SetMaxLabelValues(n int) {
 	s.maxLabelValues = n
 }
 
-// Record counts one tool call.
+// Record counts one call.
 //
 // Empty user or client are recorded as UnknownUser / UnknownClient:
 // a call with no identity is a fact worth counting, and dropping it
 // would make the totals disagree with the server's own logs.
-func (s *Store) Record(tool, user, client, outcome string, d time.Duration) {
-	if tool == "" {
+func (s *Store) Record(name, user, client, outcome string, d time.Duration) {
+	if name == "" {
 		// Nothing to attribute this to. A tools/call whose params did
 		// not parse never named a tool, and inventing a bucket for it
 		// would put protocol errors in the same table as tool results.
@@ -238,15 +230,21 @@ func (s *Store) Record(tool, user, client, outcome string, d time.Duration) {
 	if client == "" {
 		client = UnknownClient
 	}
-	if outcome == "" {
-		outcome = OutcomeError
+	// An outcome outside the spec's vocabulary is folded into its
+	// default rather than stored. Outcome is a Prometheus label whose
+	// values are supposed to be a closed set, and a caller passing a
+	// new one -- a typo, or a kind's constant used against the other
+	// kind's store -- would otherwise widen that set permanently, in
+	// the durable table as well as in the scrape.
+	if !s.spec.knownOutcome(outcome) {
+		outcome = s.spec.DefaultOutcome
 	}
-	// The tool name is caller-supplied on the unknown-tool path. Clamp
-	// it before it becomes a map key, a primary key and a label.
-	if len(tool) > MaxToolNameLength {
-		tool = tool[:MaxToolNameLength]
+	// The name is caller-supplied on the unknown-tool path. Clamp it
+	// before it becomes a map key, a primary key and a label.
+	if len(name) > MaxNameLength {
+		name = name[:MaxNameLength]
 	}
-	key := Key{Tool: tool, User: user, Client: client, Outcome: outcome}
+	key := Key{Name: name, User: user, Client: client, Outcome: outcome}
 
 	// A negative duration means a clock that went backwards mid-call.
 	// Clamp rather than discard: the call happened, and a negative
@@ -265,7 +263,7 @@ func (s *Store) Record(tool, user, client, outcome string, d time.Duration) {
 			// the call: the totals stay correct, and only the detail
 			// is lost. Folding every field means the overflow cannot
 			// itself mint combinations.
-			key = Key{Tool: OtherLabel, User: OtherLabel, Client: OtherLabel, Outcome: outcome}
+			key = Key{Name: OtherLabel, User: OtherLabel, Client: OtherLabel, Outcome: outcome}
 			e = s.m[key]
 		}
 		if e == nil {
@@ -494,3 +492,6 @@ func (s *Store) LoadFailed() bool {
 	defer s.mu.Unlock()
 	return s.loadFailed
 }
+
+// Spec returns the vocabulary this store counts in.
+func (s *Store) Spec() Spec { return s.spec }

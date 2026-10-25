@@ -1144,7 +1144,7 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 			// means a stale catalogue or a hallucinated name -- and it
 			// is not the same event as a tool that ran and failed.
 			// The name is caller-controlled, which is why the tool
-			// label is bounded like the others (see toolstats).
+			// label is bounded like the others (see usagestats).
 			s.recordToolCall(ctx, request.Name, toolstatsOutcomeUnknownTool, time.Since(started))
 			return nil, protocolErrorf("unknown tool: %s", request.Name)
 		}

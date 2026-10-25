@@ -489,5 +489,17 @@ func (s *Handler) getAnySessionFromRequest(r *http.Request) (*SessionData, bool)
 		return nil, false
 	}
 
+	// Usage counting learns who this is here rather than in
+	// createAuthenticatedContext, because many endpoints -- the whole
+	// admin surface among them -- authenticate from the session alone
+	// and never build a schedd context. This is the one place every
+	// one of them passes through.
+	//
+	// The session cookie is this server's own sign-in, and the
+	// single-page app is the only thing that holds one, so it also
+	// settles what the client is.
+	noteRESTActor(r.Context(), session.Username)
+	noteRESTClient(r.Context(), restClientWebUI)
+
 	return session, true
 }

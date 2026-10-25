@@ -1,4 +1,4 @@
-package toolstats
+package usagestats
 
 import (
 	"unicode/utf8"
@@ -6,13 +6,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Namespace and subsystem match the server's existing metrics, so these
-// names sit alongside htcondor_api_http_* rather than inventing a
-// second naming scheme on the same endpoint.
-const (
-	namespace = "htcondor_api"
-	subsystem = "mcp"
-)
+// namespace matches the server's existing metrics, so these names sit
+// alongside htcondor_api_http_* rather than inventing a second naming
+// scheme on the same endpoint. The subsystem and the middle word come
+// from the Store's Spec: htcondor_api_mcp_tool_* and
+// htcondor_api_rest_endpoint_*.
+const namespace = "htcondor_api"
 
 // Collector renders a Store as Prometheus metrics.
 //
@@ -57,36 +56,31 @@ func NewCollector(store *Store) *Collector { return NewCollectorWithOptions(stor
 // NewCollectorWithOptions builds a collector that can omit the user
 // label. See Collector.omitUser.
 func NewCollectorWithOptions(store *Store, omitUser bool) *Collector {
+	spec := store.Spec()
+	// The metric name's middle word is the spec's noun, so MCP's
+	// counters keep the htcondor_api_mcp_tool_* names dashboards
+	// already reference and REST's land on names of their own.
+	name := func(suffix string) string {
+		return prometheus.BuildFQName(namespace, spec.Subsystem, spec.Noun+"_"+suffix)
+	}
 	return &Collector{
 		store:    store,
 		omitUser: omitUser,
 		callsDesc: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, subsystem, "tool_calls_total"),
-			"MCP tool calls, by tool, user, client harness and outcome (ok/error/refused). "+
-				"Resumed from the persisted totals at startup, so this counts the lifetime of the "+
-				"deployment rather than of the process.",
-			[]string{"tool", "user", "client", "outcome"}, nil,
+			name("calls_total"), spec.CallsHelp,
+			[]string{spec.Noun, "user", "client", "outcome"}, nil,
 		),
 		durationDesc: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, subsystem, "tool_duration_seconds"),
-			"MCP tool call duration. Labelled by tool, client and outcome but NOT by user: "+
-				"how long a tool takes is a property of the tool and the pool, not of who asked, "+
-				"and a histogram carries fourteen series per label combination.",
-			[]string{"tool", "client", "outcome"}, nil,
+			name("duration_seconds"), spec.DurationHelp,
+			[]string{spec.Noun, "client", "outcome"}, nil,
 		),
 		lastCallDesc: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, subsystem, "tool_last_call_timestamp_seconds"),
-			"Unix timestamp of the most recent call to each tool. Only tools that have been "+
-				"called appear here, so this answers \"how long since this was used\" and not "+
-				"\"is this tool used at all\" -- a tool nobody has ever called has no series.",
-			[]string{"tool"}, nil,
+			name("last_call_timestamp_seconds"), spec.LastCallHelp,
+			[]string{spec.Noun}, nil,
 		),
 		usersDesc: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, subsystem, "tool_users"),
-			"Distinct users that have called each tool, over the whole retained history. "+
-				"Counted over the verbatim user names, so it stays accurate even where the user "+
-				"label has collapsed to \"other\" or been turned off.",
-			[]string{"tool"}, nil,
+			name("users"), spec.UsersHelp,
+			[]string{spec.Noun}, nil,
 		),
 	}
 }
@@ -96,6 +90,7 @@ func (c *Collector) Describe(_ chan<- *prometheus.Desc) {}
 
 // Collect renders the store.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
+	spec := c.store.Spec()
 	snap := c.store.Snapshot()
 	c.store.mu.Lock()
 	limit := c.store.maxLabelValues
@@ -105,11 +100,11 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	// ever bites it is the quiet series that collapse.
 	userTotals := map[string]uint64{}
 	clientTotals := map[string]uint64{}
-	toolTotals := map[string]uint64{}
+	nameTotals := map[string]uint64{}
 	for k, e := range snap {
 		userTotals[k.User] += e.Calls
 		clientTotals[k.Client] += e.Calls
-		toolTotals[k.Tool] += e.Calls
+		nameTotals[k.Name] += e.Calls
 	}
 	userLabel := labelSpace(userTotals, limit)
 	if c.omitUser {
@@ -118,20 +113,21 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		userLabel = nil
 	}
 	clientLabel := labelSpace(clientTotals, limit)
-	// The tool name is bounded too, which looks odd for a value drawn
-	// from a fixed catalogue of ~46 -- until a client calls a tool that
-	// does not exist. Those are counted (OutcomeUnknownTool), the name
-	// is whatever the caller sent, and an agent inventing names would
-	// otherwise mint a label value per hallucination. Ordering by call
-	// volume means the real tools are never the ones collapsed.
-	toolLabel := labelSpace(toolTotals, limit)
+	// The name is bounded too, which looks odd for a value drawn from
+	// a fixed catalogue -- ~46 tools, or a closed route table -- until
+	// a client calls a tool that does not exist. Those are counted
+	// (OutcomeUnknownTool), the name is whatever the caller sent, and
+	// an agent inventing names would otherwise mint a label value per
+	// hallucination. Ordering by call volume means the real ones are
+	// never the ones collapsed.
+	nameLabel := labelSpace(nameTotals, limit)
 
 	// Aggregate onto the label space. Two different verbatim users can
 	// land on the same label -- both collapsed to "other" -- and their
 	// counts have to be summed, not emitted twice: a duplicate label
 	// set is a collection error that drops the whole scrape.
-	type callKey struct{ tool, user, client, outcome string }
-	type histKey struct{ tool, client, outcome string }
+	type callKey struct{ name, user, client, outcome string }
+	type histKey struct{ name, client, outcome string }
 
 	calls := map[callKey]uint64{}
 	hists := map[histKey]*Entry{}
@@ -143,10 +139,10 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		if userLabel != nil {
 			renderedUser = userLabel[k.User]
 		}
-		ck := callKey{toolLabel[k.Tool], renderedUser, clientLabel[k.Client], k.Outcome}
+		ck := callKey{nameLabel[k.Name], renderedUser, clientLabel[k.Client], k.Outcome}
 		calls[ck] += e.Calls
 
-		hk := histKey{toolLabel[k.Tool], clientLabel[k.Client], k.Outcome}
+		hk := histKey{nameLabel[k.Name], clientLabel[k.Client], k.Outcome}
 		h := hists[hk]
 		if h == nil {
 			h = &Entry{Buckets: make([]uint64, len(DurationBuckets))}
@@ -161,15 +157,16 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		if !e.LastCall.IsZero() {
-			tl, ts := toolLabel[k.Tool], float64(e.LastCall.Unix())
+			tl, ts := nameLabel[k.Name], float64(e.LastCall.Unix())
 			if ts > lastCall[tl] {
 				lastCall[tl] = ts
 			}
 		}
 
-		// Counted over the VERBATIM name, which is the whole point of
-		// this gauge: it stays right when the label has collapsed.
-		tl := toolLabel[k.Tool]
+		// Counted over the VERBATIM user name, which is the whole
+		// point of this gauge: it stays right when the label has
+		// collapsed.
+		tl := nameLabel[k.Name]
 		if users[tl] == nil {
 			users[tl] = map[string]struct{}{}
 		}
@@ -180,27 +177,32 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 
 	for k, n := range calls {
 		ch <- prometheus.MustNewConstMetric(c.callsDesc, prometheus.CounterValue,
-			float64(n), safeLabel(k.tool), safeLabel(k.user), safeLabel(k.client), k.outcome)
+			float64(n), safeLabel(k.name), safeLabel(k.user), safeLabel(k.client), k.outcome)
 	}
 
-	for k, e := range hists {
-		cum := make(map[float64]uint64, len(DurationBuckets))
-		var running uint64
-		for i, b := range DurationBuckets {
-			running += e.Buckets[i]
-			cum[b] = running
+	// A kind whose latency another metric already publishes does not
+	// get a second histogram here; it still has the durations, in the
+	// store and in the table, which is what the admin page reads.
+	if spec.ExportDurations {
+		for k, e := range hists {
+			cum := make(map[float64]uint64, len(DurationBuckets))
+			var running uint64
+			for i, b := range DurationBuckets {
+				running += e.Buckets[i]
+				cum[b] = running
+			}
+			ch <- prometheus.MustNewConstHistogram(c.durationDesc,
+				e.Calls, e.DurationSum, cum, safeLabel(k.name), safeLabel(k.client), k.outcome)
 		}
-		ch <- prometheus.MustNewConstHistogram(c.durationDesc,
-			e.Calls, e.DurationSum, cum, safeLabel(k.tool), safeLabel(k.client), k.outcome)
 	}
 
-	for tool, ts := range lastCall {
-		ch <- prometheus.MustNewConstMetric(c.lastCallDesc, prometheus.GaugeValue, ts, safeLabel(tool))
+	for name, ts := range lastCall {
+		ch <- prometheus.MustNewConstMetric(c.lastCallDesc, prometheus.GaugeValue, ts, safeLabel(name))
 	}
 
-	for tool, set := range users {
+	for name, set := range users {
 		ch <- prometheus.MustNewConstMetric(c.usersDesc, prometheus.GaugeValue,
-			float64(len(set)), safeLabel(tool))
+			float64(len(set)), safeLabel(name))
 	}
 }
 

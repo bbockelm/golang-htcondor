@@ -2085,9 +2085,10 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			strings.TrimSpace(v) == "1"
 	}
 
-	// MCP tool-call statistics. Both knobs have working defaults; they
-	// exist for an operator who has measured a reason to change them.
-	toolStatsFlush := time.Duration(0)
+	// Usage statistics -- MCP tool calls and REST API requests. The
+	// knobs have working defaults and govern both kinds; they exist
+	// for an operator who has measured a reason to change them.
+	usageStatsFlush := time.Duration(0)
 	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_FLUSH_INTERVAL"); ok {
 		d, err := time.ParseDuration(strings.TrimSpace(v))
 		if err != nil || d <= 0 {
@@ -2095,15 +2096,15 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 				"Ignoring HTTP_API_TOOL_STATS_FLUSH_INTERVAL; expected a positive duration like 5m",
 				"value", v, "error", err)
 		} else {
-			toolStatsFlush = d
+			usageStatsFlush = d
 		}
 	}
-	toolStatsOmitUser := false
+	usageStatsOmitUser := false
 	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_OMIT_USER"); ok {
-		toolStatsOmitUser = strings.EqualFold(strings.TrimSpace(v), "true") ||
+		usageStatsOmitUser = strings.EqualFold(strings.TrimSpace(v), "true") ||
 			strings.TrimSpace(v) == "1"
 	}
-	toolStatsMaxSeries := 0
+	usageStatsMaxSeries := 0
 	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_MAX_SERIES"); ok {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err != nil || n <= 0 {
@@ -2111,7 +2112,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 				"Ignoring HTTP_API_TOOL_STATS_MAX_SERIES; expected a positive integer",
 				"value", v, "error", err)
 		} else {
-			toolStatsMaxSeries = n
+			usageStatsMaxSeries = n
 		}
 	}
 	utilizationMaxJobs := 0
@@ -2125,7 +2126,15 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			utilizationMaxJobs = n
 		}
 	}
-	toolStatsMaxLabels := 0
+	// REST counting is on by default. It is separable because the web
+	// UI polls: an operator who finds the volume not worth the rows
+	// can turn it off and keep the MCP counting.
+	restStatsEnabled := true
+	if v, ok := cfg.Get("HTTP_API_REST_STATS"); ok {
+		t := strings.TrimSpace(v)
+		restStatsEnabled = !strings.EqualFold(t, "false") && t != "0"
+	}
+	usageStatsMaxLabels := 0
 	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_MAX_LABEL_VALUES"); ok {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err != nil || n <= 0 {
@@ -2133,7 +2142,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 				"Ignoring HTTP_API_TOOL_STATS_MAX_LABEL_VALUES; expected a positive integer",
 				"value", v, "error", err)
 		} else {
-			toolStatsMaxLabels = n
+			usageStatsMaxLabels = n
 		}
 	}
 
@@ -2293,10 +2302,11 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		LLMAuthScheme:               llmAuthScheme,
 		LLMOperatorInstructionsFile: llmOperatorInstructions,
 		MetricsPublic:               metricsPublic,
-		ToolStatsFlushInterval:      toolStatsFlush,
-		ToolStatsMaxLabelValues:     toolStatsMaxLabels,
-		ToolStatsOmitUser:           toolStatsOmitUser,
-		ToolStatsMaxSeries:          toolStatsMaxSeries,
+		UsageStatsFlushInterval:     usageStatsFlush,
+		UsageStatsMaxLabelValues:    usageStatsMaxLabels,
+		UsageStatsOmitUser:          usageStatsOmitUser,
+		UsageStatsMaxSeries:         usageStatsMaxSeries,
+		RESTStatsEnabled:            restStatsEnabled,
 		UtilizationMaxJobs:          utilizationMaxJobs,
 		RuntimeEstimateInterval:     runtimeEstimateInterval,
 		RuntimeEstimateBackfill:     runtimeEstimateBackfill,

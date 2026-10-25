@@ -173,6 +173,11 @@ func (s *Handler) authenticateAPIKey(r *http.Request, raw string) (context.Conte
 
 	ctx := r.Context()
 	ctx = htcondor.WithAuthenticatedUser(ctx, row.Creator)
+	// A key acts as its creator, so the actor is the creator and the
+	// client is the key: without the second half every scripted caller
+	// would be indistinguishable from that person's browser.
+	noteRESTActor(ctx, row.Creator)
+	noteRESTClient(ctx, restClientAPIKeyPrefix+" "+row.Name)
 	ctx = s.withPlacementOwnerScope(ctx, nil, row.Creator)
 	ctx = withAPIKeyScopes(ctx, row.Scopes)
 	ctx = withAPIKeyMarker(ctx)

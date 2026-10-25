@@ -1,4 +1,4 @@
-package toolstats
+package usagestats
 
 import (
 	"math"
@@ -10,29 +10,50 @@ import (
 // Matching is exact: these are values the caller picked from the
 // summary's own Options, not search terms.
 type Filter struct {
-	Tool   string `json:"tool,omitempty"`
+	// Name is the tool or endpoint to narrow to. Spelled generically
+	// rather than per kind so one filter type serves both; the spec's
+	// Noun is what the UI labels it with.
+	Name   string `json:"name,omitempty"`
 	User   string `json:"user,omitempty"`
 	Client string `json:"client,omitempty"`
 }
 
 func (f Filter) matches(k Key) bool {
-	return (f.Tool == "" || f.Tool == k.Tool) &&
+	return (f.Name == "" || f.Name == k.Name) &&
 		(f.User == "" || f.User == k.User) &&
 		(f.Client == "" || f.Client == k.Client)
 }
 
-// UsageRow is the aggregate of every series sharing one tool, user or
-// client -- or, for Summary.Totals, of every series in the summary.
+// UsageRow is the aggregate of every series sharing one tool,
+// endpoint, user or client -- or, for Summary.Totals, of every series
+// in the summary.
 type UsageRow struct {
-	// Name is the tool, user or client the row aggregates. Empty on
-	// the totals row.
+	// Name is the tool, endpoint, user or client the row aggregates.
+	// Empty on the totals row. It is the VALUE a filter matches on,
+	// so it is always the string the store recorded.
 	Name string `json:"name,omitempty"`
 
-	Calls       uint64 `json:"calls"`
-	OK          uint64 `json:"ok"`
-	Error       uint64 `json:"error"`
-	Refused     uint64 `json:"refused"`
-	UnknownTool uint64 `json:"unknown_tool"`
+	// Label is what to show instead of Name, when the recorded value
+	// is an identifier a reader should not have to decode -- today,
+	// an OAuth2 client id resolved to the client's name.
+	//
+	// Separate from Name rather than replacing it because the two have
+	// different jobs: Name goes back to the server as a filter and has
+	// to stay exactly what was recorded, while Label is for the
+	// reader and may change when an admin renames something.
+	Label string `json:"label,omitempty"`
+
+	Calls uint64 `json:"calls"`
+
+	// Outcomes counts the calls per outcome. A map rather than a field
+	// per outcome because the vocabulary belongs to the spec: MCP has
+	// four outcomes and REST six, and a struct that named them all
+	// would give each kind columns the other can never fill.
+	//
+	// Every outcome in the spec is present, zero included, so a
+	// renderer can read the row without checking for absent keys and a
+	// column never silently disappears on a quiet day.
+	Outcomes map[string]uint64 `json:"outcomes"`
 
 	// Users and Clients are distinct identities behind the row. The
 	// placeholders for "no identity" (UnknownUser/UnknownClient) and
@@ -58,20 +79,34 @@ type UsageRow struct {
 	LastCall *time.Time `json:"last_call"`
 }
 
-// Options lists every tool, user and client in the store, unfiltered and
-// sorted, so a caller can offer them as filter choices while a filter
-// is in force.
+// Options lists every name, user and client in the store, unfiltered
+// and sorted, so a caller can offer them as filter choices while a
+// filter is in force.
 type Options struct {
-	Tools   []string `json:"tools"`
+	Names   []string `json:"names"`
 	Users   []string `json:"users"`
 	Clients []string `json:"clients"`
 }
 
 // Summary is a snapshot aggregated for display.
 type Summary struct {
+	// Kind and Noun say which vocabulary this summary is in, so the
+	// renderer does not have to know which endpoint it asked.
+	Kind string `json:"kind"`
+	Noun string `json:"noun"`
+	// Title is Noun capitalised, for a column heading.
+	Title string `json:"title"`
+	// Outcomes is the spec's vocabulary in display order: the columns,
+	// left to right.
+	Outcomes []string `json:"outcomes"`
+
+	// ClientLabels maps a recorded client string to its display label,
+	// for the entries in Options.Clients that have one.
+	ClientLabels map[string]string `json:"client_labels,omitempty"`
+
 	Filter   Filter     `json:"filter"`
 	Totals   UsageRow   `json:"totals"`
-	ByTool   []UsageRow `json:"by_tool"`
+	ByName   []UsageRow `json:"by_name"`
 	ByUser   []UsageRow `json:"by_user"`
 	ByClient []UsageRow `json:"by_client"`
 	Options  Options    `json:"options"`
@@ -88,9 +123,15 @@ type accumulator struct {
 	last     time.Time
 }
 
-func newAccumulator(name string) *accumulator {
+func newAccumulator(name string, outcomes []string) *accumulator {
+	// Seeded with every outcome at zero: a column the spec defines
+	// should read 0, not vanish, on a day nothing hit it.
+	counts := make(map[string]uint64, len(outcomes))
+	for _, o := range outcomes {
+		counts[o] = 0
+	}
 	return &accumulator{
-		row:     UsageRow{Name: name},
+		row:     UsageRow{Name: name, Outcomes: counts},
 		buckets: make([]uint64, len(DurationBuckets)),
 		users:   map[string]struct{}{},
 		clients: map[string]struct{}{},
@@ -99,15 +140,12 @@ func newAccumulator(name string) *accumulator {
 
 func (a *accumulator) add(k Key, e *Entry) {
 	a.row.Calls += e.Calls
-	switch k.Outcome {
-	case OutcomeOK:
-		a.row.OK += e.Calls
-	case OutcomeError:
-		a.row.Error += e.Calls
-	case OutcomeRefused:
-		a.row.Refused += e.Calls
-	case OutcomeUnknownTool:
-		a.row.UnknownTool += e.Calls
+	// A row persisted under an outcome the spec has since dropped
+	// still counts toward Calls; it just has no column of its own.
+	// Adding a key for it would put a column on the page that the
+	// vocabulary no longer admits.
+	if _, ok := a.row.Outcomes[k.Outcome]; ok {
+		a.row.Outcomes[k.Outcome] += e.Calls
 	}
 	a.sum += e.DurationSum
 
@@ -171,46 +209,50 @@ func percentile(buckets []uint64, total uint64, q float64) (at, over *float64) {
 	return nil, &v
 }
 
-// Summarize aggregates a snapshot by tool, by user and by client, plus
+// Summarize aggregates a snapshot by name, by user and by client, plus
 // overall totals, over the series matching f. Rows are ordered busiest
 // first, ties by name. Options always reflect the whole snapshot.
-func Summarize(snap map[Key]Entry, f Filter) Summary {
-	totals := newAccumulator("")
-	byTool := map[string]*accumulator{}
+func Summarize(spec Spec, snap map[Key]Entry, f Filter) Summary {
+	totals := newAccumulator("", spec.Outcomes)
+	byName := map[string]*accumulator{}
 	byUser := map[string]*accumulator{}
 	byClient := map[string]*accumulator{}
-	tools, users, clients := map[string]struct{}{}, map[string]struct{}{}, map[string]struct{}{}
+	names, users, clients := map[string]struct{}{}, map[string]struct{}{}, map[string]struct{}{}
 
 	add := func(m map[string]*accumulator, name string, k Key, e *Entry) {
 		a := m[name]
 		if a == nil {
-			a = newAccumulator(name)
+			a = newAccumulator(name, spec.Outcomes)
 			m[name] = a
 		}
 		a.add(k, e)
 	}
 
 	for k, e := range snap {
-		tools[k.Tool] = struct{}{}
+		names[k.Name] = struct{}{}
 		users[k.User] = struct{}{}
 		clients[k.Client] = struct{}{}
 		if !f.matches(k) {
 			continue
 		}
 		totals.add(k, &e)
-		add(byTool, k.Tool, k, &e)
+		add(byName, k.Name, k, &e)
 		add(byUser, k.User, k, &e)
 		add(byClient, k.Client, k, &e)
 	}
 
 	return Summary{
+		Kind:     spec.Kind,
+		Noun:     spec.Noun,
+		Title:    spec.Title,
+		Outcomes: spec.Outcomes,
 		Filter:   f,
 		Totals:   totals.finish(),
-		ByTool:   rows(byTool),
+		ByName:   rows(byName),
 		ByUser:   rows(byUser),
 		ByClient: rows(byClient),
 		Options: Options{
-			Tools:   sortedKeys(tools),
+			Names:   sortedKeys(names),
 			Users:   sortedKeys(users),
 			Clients: sortedKeys(clients),
 		},
