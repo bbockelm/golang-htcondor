@@ -200,6 +200,10 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/utilization/workflow", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationWorkflow))))
 	mux.Handle("/api/v1/batches/", cors(h.requireCondorScope(http.HandlerFunc(h.handleBatch)))) // /api/v1/batches/{id}[/jobs]: one /jobs row over its whole life
 	mux.Handle("/api/v1/utilization/apply", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationApply))))
+	// Per-day submitted / completed / removed / in-queue counts over
+	// months, from the mirror's history archive. Owner-scoped like
+	// everything else that reads it.
+	mux.Handle("/api/v1/calendar", cors(h.requireCondorScope(http.HandlerFunc(h.handleCalendar))))
 	mux.Handle("/api/v1/dashboard/activity", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboardActivity))))
 	mux.Handle("/api/v1/dashboard/activity/stream", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboardActivityStream))))
 

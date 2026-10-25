@@ -495,11 +495,16 @@ type Handler struct {
 	// across viewers and reused while the granularity slider moves.
 	issueCacheOnce sync.Once
 	issueCacheVal  *issueCache
-	token          string             // Token for daemon authentication
-	mux            *http.ServeMux     // HTTP request multiplexer
-	routePatterns  []string           // every pattern setupRoutes registered
-	ctx            context.Context    // Context for background goroutines
-	cancelFunc     context.CancelFunc // Function to cancel background goroutines
+	// calendarCache holds the calendar view's day series, shared across
+	// viewers with the same scope and window. Built lazily, like the
+	// caches above.
+	calendarCacheOnce sync.Once
+	calendarCacheVal  *sharedCache[*CalendarResponse]
+	token             string             // Token for daemon authentication
+	mux               *http.ServeMux     // HTTP request multiplexer
+	routePatterns     []string           // every pattern setupRoutes registered
+	ctx               context.Context    // Context for background goroutines
+	cancelFunc        context.CancelFunc // Function to cancel background goroutines
 
 	// utilizationCache holds the Utilization page's analyses, shared by
 	// everyone asking the same question for five minutes.
