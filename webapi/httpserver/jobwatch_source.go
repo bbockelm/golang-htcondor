@@ -9,8 +9,18 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 )
+
+// watchHistoryConstraint selects owner's archived jobs that finished at
+// or after since. The window as written prunes nothing -- an || of two
+// times, one of them not zone-mapped -- so it is also restated on
+// EnteredHistoryTime, which the archive can prune on.
+func watchHistoryConstraint(owner string, since int64) string {
+	return dbmirror.WithHistoryFloor(fmt.Sprintf("(Owner == %s) && (EnteredCurrentStatus >= %d || CompletionDate >= %d)",
+		classadStringLit(owner), since, since))
+}
 
 // watchSource feeds the job-watch evaluator.
 //
@@ -112,9 +122,7 @@ func (s watchSource) History(ctx context.Context, owner string, attrs []string, 
 	// durable record, and the stream is an observation of it in flight.
 	var archiveErr error
 	if s.h.dbMirror.Enabled() {
-		constraint := fmt.Sprintf("(Owner == %s) && (EnteredCurrentStatus >= %d || CompletionDate >= %d)",
-			classadStringLit(owner), since.Unix(), since.Unix())
-		archiveErr = s.streamMirror(ctx, "history", constraint, attrs, limit, emit)
+		archiveErr = s.streamMirror(ctx, "history", watchHistoryConstraint(owner, since.Unix()), attrs, limit, emit)
 	} else {
 		archiveErr = fmt.Errorf("no htcondordb mirror is configured")
 	}

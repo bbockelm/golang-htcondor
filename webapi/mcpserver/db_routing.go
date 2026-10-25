@@ -113,6 +113,9 @@ func readMirrorHistory(ctx context.Context, dbc historyMirror, constraint string
 	// order key out still needs it fetched to sort on; it is removed again
 	// before the records go back.
 	attrs, addedOrderAttr := withHistoryOrderAttr(projection)
+	// A window on QDate or another job time is restated on the order key,
+	// which the archive can prune on.
+	constraint = dbmirror.WithHistoryFloor(constraint)
 
 	rows, err := dbc.QueryRawProject(ctx, mirrorHistoryTable, constraint, attrs, limit+1)
 	if err != nil {

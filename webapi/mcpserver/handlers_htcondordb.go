@@ -56,7 +56,9 @@ const historyArchiveTable = "history"
 // reports that more matches exist rather than that the page happened to
 // be full.
 func queryHistoryArchive(ctx context.Context, dbc *dbrpc.Client, constraint string, projection []string, limit int) (rows []string, hasMore bool, err error) {
-	rows, err = dbc.QueryRawProject(ctx, historyArchiveTable, constraint, projection, limit+1)
+	// A window on QDate or another job time is restated on
+	// EnteredHistoryTime, which the archive can prune on.
+	rows, err = dbc.QueryRawProject(ctx, historyArchiveTable, dbmirror.WithHistoryFloor(constraint), projection, limit+1)
 	if err != nil {
 		return nil, false, err
 	}

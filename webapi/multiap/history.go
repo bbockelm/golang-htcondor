@@ -106,12 +106,35 @@ func tupleBefore(k histKey) string {
 }
 
 // definedAfter selects rows with an EnteredHistoryTime that come after k.
+//
+// "T < t || (T == t && rest)" is written "T <= t && (T < t || rest)":
+// the two evaluate to the same value for every T, including undefined,
+// an error and NaN, because T <= t is the disjunction of the other two
+// comparisons and each of the three is undefined or an error exactly
+// when the others are. The second form hands the archive a top-level
+// "EnteredHistoryTime <= t" to prune segments with; it gets nothing from
+// a top-level ||. Nothing below the time is hoisted: ScheddName is
+// ordered with strcmp, which is no probe, and ClusterId orders rows only
+// within one ScheddName, so no bound on it holds across the page.
 func definedAfter(k *histKey) string {
 	if k == nil {
 		return attrEnteredHistory + " isnt undefined"
 	}
-	return fmt.Sprintf("(%s isnt undefined && (%s < %d || (%s == %d && %s)))",
+	return fmt.Sprintf("(%s isnt undefined && %s <= %d && (%s < %d || %s))",
 		attrEnteredHistory, attrEnteredHistory, k.T, attrEnteredHistory, k.T, tupleBefore(*k))
+}
+
+// definedAfterWithin is definedAfter with the lower bound on
+// EnteredHistoryTime that the caller's constraint implies (see
+// dbmirror.HistoryFloor), when there is one. The hub's rows need not all
+// carry EnteredHistoryTime, so the bound is added only here, where the
+// attribute is already required to be defined; the rows without one are
+// read without it.
+func definedAfterWithin(k *histKey, floor int64, hasFloor bool) string {
+	if !hasFloor {
+		return definedAfter(k)
+	}
+	return fmt.Sprintf("(%s && %s >= %d)", definedAfter(k), attrEnteredHistory, floor)
 }
 
 // undefinedAfter selects rows without an EnteredHistoryTime that come
@@ -178,13 +201,21 @@ func (s *Service) ListHistory(ctx context.Context, req ListRequest) ([]Row, *Lis
 		proj = keyProj
 	}
 	and := func(c string) string { return "(" + scope + ") && " + c }
+	floor, hasFloor := dbmirror.HistoryFloor(scope)
+	// The whole-ad refetch reads a key range rather than the page's rows,
+	// so it states the floor too, or a stamped row the page was chosen
+	// without would come back in it.
+	fetchScope := scope
+	if hasFloor {
+		fetchScope = fmt.Sprintf("(%s) && (%s is undefined || %s >= %d)", scope, attrEnteredHistory, attrEnteredHistory, floor)
+	}
 
 	var rows []histRow
 	if after == nil || !after.Undef {
 		// One past the page: more than limit rows back says the defined
 		// region does not end on this page.
 		top, err := s.historyQuery(func(yield func(string) bool) error {
-			texts, err := dbc.TopK(ctx, TableHistory, and(definedAfter(after)), proj, attrEnteredHistory, true, limit+1)
+			texts, err := dbc.TopK(ctx, TableHistory, and(definedAfterWithin(after, floor, hasFloor)), proj, attrEnteredHistory, true, limit+1)
 			if s.noteRead(ctx, err) != nil {
 				return err
 			}
@@ -225,7 +256,7 @@ func (s *Service) ListHistory(ctx context.Context, req ListRequest) ([]Row, *Lis
 				res.HasMore = true
 				res.NextPageToken = encodeHistoryToken(keyOf(out[len(out)-1]))
 			}
-			return s.wholeAds(ctx, dbc, scope, after, out, req.Projection, res)
+			return s.wholeAds(ctx, dbc, fetchScope, after, out, req.Projection, res)
 		}
 		rows = top
 	}
@@ -236,7 +267,7 @@ func (s *Service) ListHistory(ctx context.Context, req ListRequest) ([]Row, *Lis
 		return nil, nil, err
 	}
 	out, res := cutHistory(append(rows, undef...), limit, res)
-	return s.wholeAds(ctx, dbc, scope, after, out, req.Projection, res)
+	return s.wholeAds(ctx, dbc, fetchScope, after, out, req.Projection, res)
 }
 
 // afterKey selects rows strictly after k in newest-first order.

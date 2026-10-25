@@ -851,11 +851,8 @@ func (s *Handler) toolQueryJobsArchive() chat.Tool {
 				return "", err
 			}
 			if args.BeforeCluster > 0 {
-				cursorPredicate := fmt.Sprintf(
-					"(ClusterId < %d || (ClusterId == %d && ProcId < %d))",
-					args.BeforeCluster, args.BeforeCluster, args.BeforeProc,
-				)
-				constraint = fmt.Sprintf("(%s) && %s", constraint, cursorPredicate)
+				constraint = fmt.Sprintf("(%s) && %s", constraint,
+					historyCursorPredicate(args.BeforeCluster, args.BeforeProc))
 			}
 
 			schedd := s.getSchedd()

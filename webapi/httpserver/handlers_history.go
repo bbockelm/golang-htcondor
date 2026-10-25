@@ -86,6 +86,26 @@ func (s *Handler) handleJobTransfers(w http.ResponseWriter, r *http.Request) {
 	s.handleHistoryQuery(w, r, opts)
 }
 
+// historyCursorPredicate selects the records strictly before
+// (cluster, proc) in (ClusterId, ProcId) order.
+//
+// It is the textbook keyset predicate
+//
+//	ClusterId < C || (ClusterId == C && ProcId < P)
+//
+// with "ClusterId <= C" hoisted out as a conjunct of its own. The two
+// evaluate to the same value for every ClusterId and ProcId -- undefined,
+// error, a string, a real, absent -- because ClusterId <= C is the
+// disjunction of the other two comparisons and each of the three is
+// undefined or an error exactly when the others are. The hoisted form is
+// the one the htcondordb archive can use: its planner turns a top-level
+// "ClusterId <= C" into an index or zone-map probe, and gets nothing from
+// a top-level ||, so the textbook form reads the whole archive to find
+// each page. The schedd evaluates either form the same way.
+func historyCursorPredicate(cluster, proc int) string {
+	return fmt.Sprintf("ClusterId <= %d && (ClusterId < %d || ProcId < %d)", cluster, cluster, proc)
+}
+
 // handleHistoryQuery is the common handler for all history query types
 //
 //nolint:gocyclo // Complex function for handling history streaming with error cases
@@ -112,9 +132,8 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 	// history by ANDing in a "strictly older than the last record I
 	// saw" predicate. The (ClusterId, ProcId) tuple is the natural
 	// sort key — schedd-assigned, monotonically increasing per
-	// cluster, and each cluster/proc is unique. The OR-of-pairs form
-	// is the standard SQL keyset pagination idiom and is parseable
-	// by the schedd's classad expression evaluator.
+	// cluster, and each cluster/proc is unique. See
+	// historyCursorPredicate for its form.
 	//
 	// HistoryQueryOptions.Since is NOT what we want here — that's
 	// "stop scanning when matched" (newer-than semantics). For
@@ -137,10 +156,7 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 				return
 			}
 		}
-		cursorPredicate := fmt.Sprintf(
-			"(ClusterId < %d || (ClusterId == %d && ProcId < %d))",
-			beforeCluster, beforeCluster, beforeProc,
-		)
+		cursorPredicate := historyCursorPredicate(beforeCluster, beforeProc)
 		// AND the cursor with the user-supplied constraint. Wrap
 		// both in parens so operator precedence in the user's
 		// expression doesn't accidentally break the cursor predicate.

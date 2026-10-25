@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -46,6 +47,18 @@ func TestWatchSourceScopesByOwner(t *testing.T) {
 	got := classadStringLit(`alice" || true || "`)
 	if strings.Count(got, `"`)-strings.Count(got, `\"`) != 2 {
 		t.Errorf("owner literal is not safely quoted: %s", got)
+	}
+}
+
+// TestWatchHistoryConstraintIsPrunable: the finished-since window is an
+// || the archive cannot probe, so the read also bounds EnteredHistoryTime.
+func TestWatchHistoryConstraintIsPrunable(t *testing.T) {
+	const since = 1757000000
+	got := watchHistoryConstraint("alice", since)
+	want := fmt.Sprintf(`((Owner == "alice") && (EnteredCurrentStatus >= %d || CompletionDate >= %d)) && EnteredHistoryTime >= %d`,
+		since, since, since-86400)
+	if got != want {
+		t.Errorf("watchHistoryConstraint = %q, want %q", got, want)
 	}
 }
 
