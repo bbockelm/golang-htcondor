@@ -303,6 +303,7 @@ var routePatterns = []routePattern{
 	// Dashboard / version / health
 	{exact: "/api/v1/dashboard", template: "/api/v1/dashboard"},
 	{exact: "/api/v1/dashboard/activity", template: "/api/v1/dashboard/activity"},
+	{exact: "/api/v1/calendar", template: "/api/v1/calendar"},
 	{exact: "/api/v1/issues", template: "/api/v1/issues"},
 	{exact: "/api/v1/utilization", template: "/api/v1/utilization"},
 	{exact: "/api/v1/utilization/jobs", template: "/api/v1/utilization/jobs"},

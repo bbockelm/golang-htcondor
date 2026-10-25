@@ -323,6 +323,56 @@ export interface DashboardActivityResponse {
   goodput?: GoodputSummary;
 }
 
+/** One day of this access point's work.
+ *
+ *  A day with nothing in it is still sent, with zeros. That is what lets
+ *  the calendar show "nothing happened on the 9th" as a different thing
+ *  from "nobody could tell us about the 9th" -- a missing day is a gap,
+ *  and the two must not look alike. */
+export interface CalendarDay {
+  /** Midnight UTC, unix seconds. Ascending. */
+  day: number;
+  submitted: number;
+  completed: number;
+  removed: number;
+  /** How deep the queue was. Usually not a count -- see
+   *  CalendarQueueDepth. */
+  in_queue: number;
+}
+
+/** Where the per-day queue depth came from.
+ *
+ *  `derived` means the depth was worked back from today's real count by
+ *  walking the daily flows: every step backwards carries whatever the
+ *  flows missed, so the further back a figure is, the less it is worth.
+ *  `anchor` is that real count -- the one figure in the series that was
+ *  counted rather than worked out. */
+export interface CalendarQueueDepth {
+  derived: boolean;
+  anchor: number;
+}
+
+/** Per-day job activity over a long window.
+ *
+ *  `enabled: false` means this deployment keeps no history to count. The
+ *  panel then renders nothing at all: an empty calendar that never fills
+ *  reads as broken rather than absent. */
+export interface CalendarResponse {
+  enabled: boolean;
+  /** Absent when disabled. One entry per day in the window, ascending,
+   *  including the days nothing happened. */
+  days?: CalendarDay[];
+  window_days?: number;
+  queue_depth?: CalendarQueueDepth;
+  /** What answered, and when. */
+  source?: string;
+  computed_at?: number;
+  /** True when part of the window could not be counted; `note` says
+   *  what is missing. */
+  partial?: boolean;
+  note?: string;
+}
+
 // --- htcondordb mirror ---
 //
 // The mirror answers job and history reads that would otherwise hit the
@@ -1543,6 +1593,22 @@ export const api = {
     }
     const q = qs.toString();
     return fetchJSON(`${BASE}/dashboard/activity${q ? "?" + q : ""}`);
+  },
+
+  // Per-day counts over a long window, for the dashboard's calendar.
+  // Separate from the activity half because it is answered from the
+  // history mirror over months rather than from the queue over an hour,
+  // and it changes about once a day.
+  calendar: (params: {
+    days: number;
+    owned_by_me?: boolean;
+  }): Promise<CalendarResponse> => {
+    const qs = new URLSearchParams();
+    qs.set("days", String(params.days));
+    if (params.owned_by_me !== undefined) {
+      qs.set("owned_by_me", String(params.owned_by_me));
+    }
+    return fetchJSON(`${BASE}/calendar?${qs.toString()}`);
   },
 
   // How well finished jobs used what they reserved, per workflow, with

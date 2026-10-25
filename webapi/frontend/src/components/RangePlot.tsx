@@ -38,8 +38,13 @@ export const RANGE_TOKENS = {
 } as const;
 
 // Stripes for a rough guess's band: two greys, wide enough to read as a
-// pattern at 12px tall.
-export const HATCH = 'repeating-linear-gradient(-45deg, #d1d5db 0 4px, #f3f4f6 4px 8px)';
+// pattern at 12px tall. Hatching means one thing everywhere in this app
+// -- the figure under it was not counted -- so the two greys are
+// exported for the charts that have to draw the same stripes in SVG,
+// where a CSS gradient is not available.
+export const HATCH_STRIPE = '#d1d5db';
+export const HATCH_GAP = '#f3f4f6';
+export const HATCH = `repeating-linear-gradient(-45deg, ${HATCH_STRIPE} 0 4px, ${HATCH_GAP} 4px 8px)`;
 
 export interface RangePlotProps {
   // All positions are fractions of the plot's width, 0..1.
