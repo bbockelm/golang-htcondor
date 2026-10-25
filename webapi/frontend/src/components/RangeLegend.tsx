@@ -1,15 +1,31 @@
 'use client';
 
-// "How to read" for the charts RangePlot draws: a small toggle beside a
-// chart that opens a key to its marks, inline. Its swatches are drawn
-// from RangePlot's own tokens, so the key cannot drift from the chart.
-// Each chart lists only the marks it can show.
+// "How to read" for this app's charts: a small toggle beside a chart
+// that opens a key to its marks, inline. Its swatches are drawn from the
+// charts' own tokens, so the key cannot drift from the chart. Each chart
+// lists only the marks it can show.
+//
+// Shared rather than per-chart on purpose: a mark that means "not
+// counted" on the job page has to mean that on the dashboard too, and
+// has to look the same there. The entries below cover the range plots
+// (a job against its peers) and the dashboard calendar (a day's work).
 
 import { useId, useState } from 'react';
 
+import { DAY_RAMP } from '@/lib/calendar';
 import { HATCH, RANGE_TOKENS } from './RangePlot';
 
-export type LegendEntry = 'band' | 'box' | 'tick' | 'job' | 'jobUnusual' | 'rough' | 'requested';
+export type LegendEntry =
+  | 'band'
+  | 'box'
+  | 'tick'
+  | 'job'
+  | 'jobUnusual'
+  | 'rough'
+  | 'requested'
+  | 'count'
+  | 'none'
+  | 'uncounted';
 
 // What each mark means, in the user's terms.
 export const LEGEND_TEXT: Record<LegendEntry, string> = {
@@ -20,10 +36,28 @@ export const LEGEND_TEXT: Record<LegendEntry, string> = {
   jobUnusual: 'This job, unusually high',
   rough: 'Rough guess',
   requested: 'Requested',
+  count: 'More jobs, darker',
+  none: 'No jobs that day',
+  uncounted: 'Not counted',
 };
 
 // The order the key lists marks in, whatever order a chart names them.
-const ORDER: LegendEntry[] = ['band', 'box', 'tick', 'rough', 'job', 'jobUnusual', 'requested'];
+// The calendar's marks sit before the rough-guess band: a calendar
+// names what a square is before it explains which line is a guess, and
+// no range plot draws the three of them, so the range plots' own order
+// is unchanged.
+const ORDER: LegendEntry[] = [
+  'band',
+  'box',
+  'tick',
+  'count',
+  'none',
+  'uncounted',
+  'rough',
+  'job',
+  'jobUnusual',
+  'requested',
+];
 
 // Swatch is one mark in miniature, 20px wide.
 export function Swatch({ entry }: { entry: LegendEntry }) {
@@ -71,6 +105,38 @@ export function Swatch({ entry }: { entry: LegendEntry }) {
       return (
         <span className={frame} data-swatch="requested">
           <span className={`absolute left-1/2 top-0 h-3.5 border-l border-dashed ${RANGE_TOKENS.ref}`} />
+        </span>
+      );
+    // The calendar's marks. A day is a square, so these are squares --
+    // the shape says which chart the key belongs to, while the fills are
+    // the same ones everything else uses for an amount and for a figure
+    // nobody counted.
+    case 'count':
+      return (
+        <span className={frame} data-swatch="count">
+          <span
+            className="absolute inset-y-0 left-0 w-3.5 rounded-[2px]"
+            style={{
+              backgroundImage: `linear-gradient(to right, ${DAY_RAMP.map(
+                (c, i) => `${c} ${(i * 100) / DAY_RAMP.length}% ${((i + 1) * 100) / DAY_RAMP.length}%`,
+              ).join(', ')})`,
+            }}
+          />
+        </span>
+      );
+    case 'none':
+      return (
+        <span className={frame} data-swatch="none">
+          <span className="absolute inset-y-0 left-0 w-3.5 rounded-[2px] bg-gray-100 ring-1 ring-inset ring-gray-200" />
+        </span>
+      );
+    case 'uncounted':
+      return (
+        <span className={frame} data-swatch="uncounted">
+          <span
+            className="absolute inset-y-0 left-0 w-3.5 rounded-[2px]"
+            style={{ backgroundImage: HATCH }}
+          />
         </span>
       );
   }

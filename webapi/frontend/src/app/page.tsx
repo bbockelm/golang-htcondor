@@ -10,6 +10,8 @@ import {
   RecentActivity,
   StatusRow,
 } from '@/components/DashboardPanels';
+import { CalendarPanel } from '@/components/CalendarPanel';
+import { CALENDAR_DAYS } from '@/lib/calendar';
 import { useActivityStream } from '@/lib/useActivityStream';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 import { AccessPointsTable } from '@/components/AccessPointsTable';
@@ -116,6 +118,21 @@ function AuthenticatedDashboard({
     refetchInterval: 30_000,
   });
 
+  // The calendar is a third query: a quarter of per-day counts out of
+  // the history mirror is the slowest thing on the page, and a day's
+  // figures change about once a day, so it neither holds the panels
+  // above it nor polls with them. The scope is in the key, as it is for
+  // the others -- without it, switching to Everyone would redraw the
+  // same person's calendar.
+  const { data: calendar } = useQuery({
+    queryKey: ['calendar', scope],
+    queryFn: () => api.calendar({ days: CALENDAR_DAYS, owned_by_me: ownedByMe }),
+    refetchInterval: 300_000,
+    // A server that does not serve this will not serve it on the second
+    // ask either, and the panel renders nothing where it cannot answer.
+    retry: false,
+  });
+
   // An older server still answers /dashboard with both halves; prefer
   // the dedicated response and fall back to what the counts carried.
   const activity = panels?.activity ?? data?.activity;
@@ -157,6 +174,8 @@ function AuthenticatedDashboard({
               <p className="text-sm text-gray-400">Loading recent activity...</p>
             )
           )}
+
+          <CalendarPanel calendar={calendar} />
 
           <div>
             <Link

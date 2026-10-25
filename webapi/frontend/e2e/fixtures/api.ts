@@ -23,6 +23,7 @@ import type { MetricsResponse } from '../../src/lib/metrics';
 import type { Branding } from '../../src/lib/branding';
 import { DEFAULT_BRANDING } from '../../src/lib/branding';
 import type { DrainEstimates } from '../../src/lib/drain';
+import { calendarFixture } from './calendar';
 import { pinClock, SMOKE_NOW } from './clock';
 import { serveDynamicRoutes } from './dynamicRoutes';
 
@@ -348,6 +349,8 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
     '/api/v1/issues': issuesFixture,
     '/api/v1/dashboard': dashboardFixture,
     '/api/v1/dashboard/activity': dashboardActivityFixture,
+    // A quarter of per-day counts, for the dashboard's calendar.
+    '/api/v1/calendar': calendarFixture,
     // The archive is where every drill-down into finished work lands.
     '/api/v1/jobs/archive': {
       ads: [
@@ -417,6 +420,7 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
     // does not serve.
     delete table['/api/v1/dashboard'];
     delete table['/api/v1/dashboard/activity'];
+    delete table['/api/v1/calendar'];
   }
 
   await page.route('**/api/v1/**', async (route) => {
