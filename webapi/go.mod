@@ -3,7 +3,7 @@ module github.com/bbockelm/golang-htcondor/webapi
 go 1.26.0
 
 require (
-	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
+	github.com/RoaringBitmap/roaring/v2 v2.29.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/bbockelm/gosssd v0.0.4 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -37,7 +37,7 @@ require (
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-isatty v0.0.23 // indirect
@@ -92,7 +92,7 @@ require (
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect
@@ -108,10 +108,10 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad v0.31.5
-	github.com/PelicanPlatform/classad/collections v0.29.6
-	github.com/PelicanPlatform/classad/db v0.29.6
-	github.com/PelicanPlatform/classad/dbrpc v0.29.6
+	github.com/PelicanPlatform/classad v0.32.0
+	github.com/PelicanPlatform/classad/collections v0.32.0
+	github.com/PelicanPlatform/classad/db v0.32.0
+	github.com/PelicanPlatform/classad/dbrpc v0.32.0
 	github.com/bbockelm/cedar v0.7.12-0.20261017165254-d864685fa29e
 	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
 	github.com/glebarez/sqlite v1.11.0
