@@ -28,6 +28,11 @@ import (
 // and passed.
 type testHistoryMirror struct {
 	srv *dbrpc.Server
+	cat *db.Catalog
+	// wrap, when set, wraps the server's end of each session, so a test
+	// can make the mirror answer some requests the way a different
+	// server version would.
+	wrap func(dbrpc.MsgConn) dbrpc.MsgConn
 }
 
 func newHistoryMirror(t *testing.T) *testHistoryMirror {
@@ -52,14 +57,18 @@ func newHistoryMirror(t *testing.T) *testHistoryMirror {
 	}
 	srv := dbrpc.NewServerCatalog(cat)
 	t.Cleanup(func() { srv.Close(); _ = cat.Close() })
-	return &testHistoryMirror{srv: srv}
+	return &testHistoryMirror{srv: srv, cat: cat}
 }
 
 // dial opens a session over a fresh pipe, in the shape Server.dbClient
 // returns.
 func (m *testHistoryMirror) dial(context.Context) (*dbrpc.Client, func(), *dbmirror.Info, error) {
 	c, s := net.Pipe()
-	go func() { _ = m.srv.ServeConn(dbrpc.NewStreamConn(s)) }()
+	sconn := dbrpc.NewStreamConn(s)
+	if m.wrap != nil {
+		sconn = m.wrap(sconn)
+	}
+	go func() { _ = m.srv.ServeConn(sconn) }()
 	cl := dbrpc.NewClient(dbrpc.NewStreamConn(c))
 	return cl, func() { _ = cl.Close() }, &dbmirror.Info{Name: "test-mirror"}, nil
 }

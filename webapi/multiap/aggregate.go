@@ -8,6 +8,13 @@ import (
 	"github.com/PelicanPlatform/classad/dbrpc"
 )
 
+// MaxAggregateGroupCols is the most GROUP BY columns htcondordb accepts
+// in one aggregate request. Past it the server refuses the frame as
+// malformed, which the client reports as a bad request -- and, for an
+// archive, as a server too old for archive aggregates -- so a caller
+// checks it first, where the actual reason can be given.
+const MaxAggregateGroupCols = 1024
+
 // Aggregate counts the caller's jobs (table "jobs") or history records
 // ("history") on the hub, grouped by groupBy, under the same self-scope
 // and AP filter as a listing. Group by ScheddName to count per AP.
@@ -20,6 +27,9 @@ func (s *Service) Aggregate(ctx context.Context, user, table, constraint string,
 	}
 	if table != TableJobs && table != TableHistory {
 		return nil, Sources{}, errorf(http.StatusBadRequest, "multi-AP mode aggregates %q or %q, not %q", TableJobs, TableHistory, table)
+	}
+	if len(groupBy) > MaxAggregateGroupCols {
+		return nil, Sources{}, errorf(http.StatusBadRequest, "group_by names %d attributes; at most %d are allowed", len(groupBy), MaxAggregateGroupCols)
 	}
 	ctx = s.PinHub(ctx)
 	v := s.snapshot(ctx)

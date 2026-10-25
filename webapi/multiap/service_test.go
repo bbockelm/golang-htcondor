@@ -558,4 +558,18 @@ func TestAggregateSelfScoped(t *testing.T) {
 	if _, _, err := s.Aggregate(ctx, "alice@d", "users", "", nil, ""); StatusOf(err) != http.StatusBadRequest {
 		t.Errorf("unknown table: err = %v", err)
 	}
+	// More group columns than the hub accepts is the caller's mistake,
+	// said as such -- not the hub's "bad request", which for an archive
+	// reads as a hub too old to aggregate one.
+	cols := make([]string, MaxAggregateGroupCols+1)
+	for i := range cols {
+		cols[i] = fmt.Sprintf("Attr%d", i)
+	}
+	if _, _, err := s.Aggregate(ctx, "alice@d", "history", "", cols, ""); StatusOf(err) != http.StatusBadRequest ||
+		!strings.Contains(err.Error(), "group_by") {
+		t.Errorf("too many group columns: err = %v, want a 400 naming group_by", err)
+	}
+	if _, _, err := s.Aggregate(ctx, "alice@d", "history", "", cols[:MaxAggregateGroupCols], ""); err != nil {
+		t.Errorf("%d group columns: %v", MaxAggregateGroupCols, err)
+	}
 }
