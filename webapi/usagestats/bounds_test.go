@@ -1,4 +1,4 @@
-package toolstats
+package usagestats
 
 import (
 	"strings"
@@ -17,7 +17,7 @@ import (
 // name the CALLER sent, so an authenticated client looping tools/call
 // with random names grew both without limit.
 func TestTheStoreItselfIsBounded(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.SetMaxSeries(100)
 	for i := 0; i < 20000; i++ {
 		s.Record(randomName(i), "alice", "cc", OutcomeUnknownTool, time.Millisecond)
@@ -30,7 +30,7 @@ func TestTheStoreItselfIsBounded(t *testing.T) {
 
 // Folding must not lose calls: only the detail goes.
 func TestFoldingKeepsTheTotals(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.SetMaxSeries(10)
 	for i := 0; i < 500; i++ {
 		s.Record(randomName(i), "alice", "cc", OutcomeUnknownTool, time.Millisecond)
@@ -47,14 +47,14 @@ func TestFoldingKeepsTheTotals(t *testing.T) {
 // The overflow bucket must not itself mint combinations, or the cap
 // leaks one series per distinct user or client that arrives after it.
 func TestTheOverflowBucketIsASingleSeries(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.SetMaxSeries(5)
 	for i := 0; i < 200; i++ {
 		s.Record(randomName(i), randomName(i+1000), randomName(i+2000), OutcomeOK, time.Millisecond)
 	}
 	n := 0
 	for k := range s.Snapshot() {
-		if k.Tool == OtherLabel {
+		if k.Name == OtherLabel {
 			n++
 		}
 	}
@@ -66,17 +66,17 @@ func TestTheOverflowBucketIsASingleSeries(t *testing.T) {
 // The tool name is caller-supplied with a 16 MB body limit behind it,
 // and lands in a map key, a primary key and two indexes.
 func TestALongToolNameIsClamped(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Record(strings.Repeat("a", 100000), "alice", "cc", OutcomeUnknownTool, time.Millisecond)
 	for k := range s.Snapshot() {
-		if len(k.Tool) > MaxToolNameLength {
-			t.Errorf("stored a %d-character tool name", len(k.Tool))
+		if len(k.Name) > MaxNameLength {
+			t.Errorf("stored a %d-character tool name", len(k.Name))
 		}
 	}
 }
 
 func TestSetMaxSeriesRefusesToRemoveTheBound(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	for _, n := range []int{0, -5} {
 		s.SetMaxSeries(n)
 		if s.maxSeries != DefaultMaxSeries {
@@ -91,7 +91,7 @@ func TestSetMaxSeriesRefusesToRemoveTheBound(t *testing.T) {
 // 200 with a silently truncated body -- a different subset each time,
 // which Prometheus reads as repeated counter resets.
 func TestOneInvalidUTF8ValueDoesNotEmptyTheEndpoint(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	for i := 0; i < 5; i++ {
 		s.Record("query_jobs", "alice", "cc", OutcomeOK, time.Millisecond)
 	}
@@ -119,7 +119,7 @@ func TestOneInvalidUTF8ValueDoesNotEmptyTheEndpoint(t *testing.T) {
 }
 
 func TestTheInvalidValueIsLabelledAsSuch(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Record("t", "bad\xffuser", "cc", OutcomeOK, time.Millisecond)
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(NewCollector(s))
@@ -140,7 +140,7 @@ func TestTheInvalidValueIsLabelledAsSuch(t *testing.T) {
 // A site that does not want usernames on a potentially public endpoint
 // can turn the label off and keep every other number.
 func TestTheUserLabelCanBeTurnedOff(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Record("query_jobs", "alice", "cc", OutcomeOK, time.Millisecond)
 	s.Record("query_jobs", "bob", "cc", OutcomeOK, time.Millisecond)
 

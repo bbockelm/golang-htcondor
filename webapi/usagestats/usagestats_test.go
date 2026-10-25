@@ -1,4 +1,4 @@
-package toolstats
+package usagestats
 
 import (
 	"fmt"
@@ -11,7 +11,7 @@ import (
 )
 
 func TestRecordCountsCallsAndDuration(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Record("query_jobs", "bbockelm", "claude-code/2.1", OutcomeOK, 300*time.Millisecond)
 	s.Record("query_jobs", "bbockelm", "claude-code/2.1", OutcomeOK, 700*time.Millisecond)
 
@@ -45,7 +45,7 @@ func TestRecordPlacesEachCallInExactlyOneBucket(t *testing.T) {
 		{"zero", 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := New()
+			s := New(MCPSpec())
 			s.Record("t", "u", "c", OutcomeOK, tc.d)
 			e := s.Snapshot()[Key{"t", "u", "c", OutcomeOK}]
 
@@ -72,7 +72,7 @@ func TestRecordPlacesEachCallInExactlyOneBucket(t *testing.T) {
 }
 
 func TestRecordFillsInMissingIdentity(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Record("get_job", "", "", OutcomeOK, time.Second)
 	if _, ok := s.Snapshot()[Key{"get_job", UnknownUser, UnknownClient, OutcomeOK}]; !ok {
 		t.Errorf("an unidentified call was not recorded as unknown: %+v", s.Snapshot())
@@ -82,7 +82,7 @@ func TestRecordFillsInMissingIdentity(t *testing.T) {
 // A tools/call whose params did not parse never named a tool. Counting
 // it would put protocol errors in the same table as tool results.
 func TestRecordIgnoresACallWithNoTool(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Record("", "u", "c", OutcomeError, time.Second)
 	if n := len(s.Snapshot()); n != 0 {
 		t.Errorf("recorded %d series for a call that named no tool", n)
@@ -93,7 +93,7 @@ func TestRecordIgnoresACallWithNoTool(t *testing.T) {
 // must not reach the histogram sum, which every later reader derives
 // an average from.
 func TestRecordClampsANegativeDuration(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Record("t", "u", "c", OutcomeOK, -5*time.Second)
 	e := s.Snapshot()[Key{"t", "u", "c", OutcomeOK}]
 	if e.DurationSum != 0 {
@@ -143,7 +143,7 @@ func TestLabelSpaceIsDeterministicOnTies(t *testing.T) {
 }
 
 func TestSetMaxLabelValuesRefusesToDisableTheBound(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	for _, n := range []int{0, -1} {
 		s.SetMaxLabelValues(n)
 		if s.maxLabelValues != DefaultMaxLabelValues {
@@ -159,7 +159,7 @@ func TestSetMaxLabelValuesRefusesToDisableTheBound(t *testing.T) {
 // collection error that drops the WHOLE scrape -- not just the
 // offending metric.
 func TestCollectSumsCollapsedSeriesRatherThanEmittingThemTwice(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.SetMaxLabelValues(1)
 	s.Record("query_jobs", "alice", "cc", OutcomeOK, time.Second) // busiest, keeps its name
 	s.Record("query_jobs", "alice", "cc", OutcomeOK, time.Second)
@@ -193,7 +193,7 @@ func TestCollectSumsCollapsedSeriesRatherThanEmittingThemTwice(t *testing.T) {
 // The distinct-user gauge is counted over the VERBATIM names, so it
 // stays right exactly where the label has stopped being able to say so.
 func TestUserGaugeCountsRealUsersEvenWhenTheLabelCollapsed(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.SetMaxLabelValues(1)
 	for _, u := range []string{"alice", "bob", "carol"} {
 		s.Record("query_jobs", u, "cc", OutcomeOK, time.Second)
@@ -219,7 +219,7 @@ func TestUserGaugeCountsRealUsersEvenWhenTheLabelCollapsed(t *testing.T) {
 // An "unknown" user is not a user. Counting it would report a tool
 // nobody has authenticated against as having one user.
 func TestUserGaugeDoesNotCountTheUnknownUser(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Record("get_job", "", "cc", OutcomeOK, time.Second)
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(NewCollector(s))
@@ -237,7 +237,7 @@ func TestUserGaugeDoesNotCountTheUnknownUser(t *testing.T) {
 // The histogram must be cumulative and its count must cover calls that
 // fell past the last boundary -- otherwise prometheus rejects it.
 func TestCollectHistogramIsCumulativeAndCountsEveryCall(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Record("watch_jobs", "u", "cc", OutcomeOK, 10*time.Millisecond)
 	s.Record("watch_jobs", "u", "cc", OutcomeOK, 2*time.Second)
 	s.Record("watch_jobs", "u", "cc", OutcomeOK, 20*time.Minute) // past the last bucket
@@ -275,7 +275,7 @@ func TestCollectHistogramIsCumulativeAndCountsEveryCall(t *testing.T) {
 // The duration histogram deliberately carries no user label: fourteen
 // series per user per tool is the blowup this split exists to avoid.
 func TestDurationHistogramCarriesNoUserLabel(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Record("t", "alice", "cc", OutcomeOK, time.Second)
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(NewCollector(s))
@@ -293,7 +293,7 @@ func TestDurationHistogramCarriesNoUserLabel(t *testing.T) {
 }
 
 func TestLoadResizesBucketsWhenTheBoundariesChanged(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Load(map[Key]Entry{
 		{"t", "u", "c", OutcomeOK}: {Calls: 7, Buckets: []uint64{1, 2}}, // a shorter, older array
 	})
@@ -312,7 +312,7 @@ func TestLoadResizesBucketsWhenTheBoundariesChanged(t *testing.T) {
 // A snapshot handed out must not alias the live state, or a flush in
 // progress would read counts that changed underneath it.
 func TestSnapshotDoesNotAliasLiveState(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.Record("t", "u", "c", OutcomeOK, time.Second)
 	snap := s.Snapshot()
 	s.Record("t", "u", "c", OutcomeOK, time.Second)
@@ -348,7 +348,7 @@ func labelValue(m *dto.Metric, name string) string {
 // which is surprising enough to be worth saying on the metric itself.
 func TestHelpTextSaysTheCounterSurvivesRestart(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	s := New()
+	s := New(MCPSpec())
 	s.Record("t", "u", "c", OutcomeOK, time.Second)
 	reg.MustRegister(NewCollector(s))
 	families, _ := reg.Gather()
@@ -368,7 +368,7 @@ func TestHelpTextSaysTheCounterSurvivesRestart(t *testing.T) {
 // is recorded under whatever name the caller sent. Ordering by volume
 // is what keeps the real tools from being the ones collapsed.
 func TestHallucinatedToolNamesCannotMintUnboundedLabels(t *testing.T) {
-	s := New()
+	s := New(MCPSpec())
 	s.SetMaxLabelValues(2)
 	for i := 0; i < 10; i++ {
 		s.Record("query_jobs", "u", "c", OutcomeOK, time.Second)

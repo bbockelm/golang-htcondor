@@ -46,7 +46,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/templates"
-	"github.com/bbockelm/golang-htcondor/webapi/toolstats"
+	"github.com/bbockelm/golang-htcondor/webapi/usagestats"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/oauth2"
@@ -398,13 +398,22 @@ type Handler struct {
 	apVerdicts    apVerdicts
 	// probeCannotRun logs, once, that member trust probes cannot run.
 	probeCannotRun sync.Once
-	// toolStats counts MCP tool calls for /metrics and for the durable
-	// table in the application database. See toolstats.go.
-	toolStats              *toolstats.Store
-	toolStatsFlushInterval time.Duration
-	toolStatsStop          chan struct{}
-	toolStatsStopOnce      sync.Once
-	toolStatsOmitUser      bool
+	// toolStats counts MCP tool calls and restStats counts REST API
+	// requests, for /metrics and for the durable tables in the
+	// application database. Two stores rather than one because the two
+	// kinds have different outcome vocabularies and different tables;
+	// everything else about them is shared. See usagestats.go.
+	toolStats *usagestats.Store
+	restStats *usagestats.Store
+	// restStatsClients resolves an OAuth2 client id to the name the
+	// admin Clients page shows, for the REST summary. See
+	// rest_usage.go.
+	restStatsClients *clientNameCache
+
+	usageStatsFlushInterval time.Duration
+	usageStatsStop          chan struct{}
+	usageStatsStopOnce      sync.Once
+	usageStatsOmitUser      bool
 
 	htcondorConfig *config.Config // HTCondor config snapshot, surfaced read-only on the admin info page
 	// clientConfig is the configuration this server's HTCondor clients
@@ -753,24 +762,30 @@ type HandlerConfig struct {
 
 	JobQueueLogPath string // schedd job_queue.log to mirror for /api/v1/jobs/watch (optional)
 	EnableMetrics   bool   // Enable /metrics endpoint (default: true if Collector is set)
-	// ToolStatsFlushInterval is how often MCP tool-call counters are
-	// written to the application database. Zero means
-	// DefaultToolStatsFlushInterval; the counters are also flushed at
+	// UsageStatsFlushInterval is how often the call counters -- MCP
+	// tool calls and REST API requests alike -- are written to the
+	// application database. Zero means
+	// DefaultUsageStatsFlushInterval; the counters are also flushed at
 	// shutdown regardless.
-	ToolStatsFlushInterval time.Duration
-	// ToolStatsMaxLabelValues caps the distinct values any single
-	// /metrics label may take for tool statistics. Zero means
-	// toolstats.DefaultMaxLabelValues. The durable table is unaffected:
+	UsageStatsFlushInterval time.Duration
+	// UsageStatsMaxLabelValues caps the distinct values any single
+	// /metrics label may take for usage statistics. Zero means
+	// usagestats.DefaultMaxLabelValues. The durable table is unaffected:
 	// it always records the verbatim user and client.
-	ToolStatsMaxLabelValues int
-	// ToolStatsOmitUser renders every /metrics user label as a single
+	UsageStatsMaxLabelValues int
+	// UsageStatsOmitUser renders every /metrics user label as a single
 	// placeholder. The durable table still records the real name. See
-	// toolstats.Collector.
-	ToolStatsOmitUser bool
-	// ToolStatsMaxSeries caps how many distinct series the store holds
-	// at all -- which bounds memory and the table, not just the scrape.
-	// Zero means toolstats.DefaultMaxSeries.
-	ToolStatsMaxSeries int
+	// usagestats.Collector.
+	UsageStatsOmitUser bool
+	// UsageStatsMaxSeries caps how many distinct series each store
+	// holds at all -- which bounds memory and the table, not just the
+	// scrape. Zero means usagestats.DefaultMaxSeries.
+	UsageStatsMaxSeries int
+	// RESTStatsEnabled counts REST API requests the same way MCP tool
+	// calls are counted. Separable from the MCP counting because the
+	// web UI polls, so this is the kind whose volume an operator might
+	// actually object to.
+	RESTStatsEnabled bool
 	// UtilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS: the most jobs
 	// one utilization analysis may read. Zero means the default (a
 	// million).
@@ -1569,15 +1584,25 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// disabled (no Collector configured). The metricsdAdapter is
 	// registered later, after metricsRegistry is built.
 	h.httpMetricsState = newHTTPMetrics()
-	h.toolStats = toolstats.New()
-	h.toolStatsFlushInterval = cfg.ToolStatsFlushInterval
-	if cfg.ToolStatsMaxLabelValues > 0 {
-		h.toolStats.SetMaxLabelValues(cfg.ToolStatsMaxLabelValues)
+	h.toolStats = usagestats.New(usagestats.MCPSpec())
+	// REST counting is on unless an operator turns it off. Left nil,
+	// every path that touches it is a no-op -- the middleware records
+	// nothing, no collector is registered, no table is written, and
+	// the admin page reports the kind as not enabled.
+	if cfg.RESTStatsEnabled {
+		h.restStats = usagestats.New(usagestats.RESTSpec())
+		h.restStatsClients = newClientNameCache()
 	}
-	if cfg.ToolStatsMaxSeries > 0 {
-		h.toolStats.SetMaxSeries(cfg.ToolStatsMaxSeries)
+	h.usageStatsFlushInterval = cfg.UsageStatsFlushInterval
+	for _, store := range h.usageStores() {
+		if cfg.UsageStatsMaxLabelValues > 0 {
+			store.SetMaxLabelValues(cfg.UsageStatsMaxLabelValues)
+		}
+		if cfg.UsageStatsMaxSeries > 0 {
+			store.SetMaxSeries(cfg.UsageStatsMaxSeries)
+		}
 	}
-	h.toolStatsOmitUser = cfg.ToolStatsOmitUser
+	h.usageStatsOmitUser = cfg.UsageStatsOmitUser
 	h.utilizationMaxJobs = cfg.UtilizationMaxJobs
 	// The mirror's own state is exported at scrape time from whatever
 	// discovery last saw, so /metrics answers "is the htcondordb
@@ -2360,9 +2385,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// Note: Routes will be set up by the Server or by the user calling SetupRoutes
 	h.mux = http.NewServeMux()
 
-	// Statistics last: everything it reads (the database, the metrics
-	// registry, the MCP server it counts for) is built by now.
-	h.startToolStats()
+	// Statistics last: everything they read (the database, the metrics
+	// registry, the MCP server they count for) is built by now.
+	h.startUsageStats()
 
 	return h, nil
 }
@@ -2401,6 +2426,53 @@ func (h *Handler) ensureOAuth2ClientRegistered(clientID, _ /* clientSecret */, _
 // embeddable widget) but the secure defaults are present until
 // explicitly changed.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	name := restUsageName(r.Method, r.URL.Path)
+	if h.restStats == nil || name == "" {
+		h.serveHTTP(w, r)
+		return
+	}
+	// Outermost on purpose, around the gates below as well as around
+	// the mux. A request the CSRF check or the placement gate turns
+	// away never reaches a handler, and those refusals are exactly
+	// what an operator looking at a spike of "denied" needs to see.
+	//
+	// The record goes in before anything can authenticate, because
+	// what fills it in -- createAuthenticatedContext, several frames
+	// down -- can only reach it through the request's context.
+	call := &restCall{}
+	r = r.WithContext(withRESTCall(r.Context(), call))
+	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	start := time.Now()
+	defer func() {
+		// Deferred rather than written after the call, so a handler
+		// that panics is still counted -- and counted as a failure.
+		//
+		// This server installs no panic-recovery middleware, so a
+		// panic unwinds past here to net/http, which closes the
+		// connection without ever setting a status. The recorder
+		// would still be holding its default 200, so without this a
+		// crashing endpoint appears on the page as a healthy one,
+		// which is the opposite of what the page is for.
+		//
+		// recover() is called directly by this deferred function,
+		// which is the only place it does anything, and the panic is
+		// re-raised so net/http handles it exactly as before: this
+		// counts the crash, it does not swallow it.
+		status := rec.status
+		if p := recover(); p != nil {
+			status = http.StatusInternalServerError
+			defer panic(p)
+		}
+		// The User-Agent is the last resort, not the first: an
+		// authenticated caller has already said what it is, and a
+		// request that never authenticated has nothing else to go on.
+		call.setClient(restClientFromUserAgent(r.UserAgent()))
+		h.recordRESTCall(name, call, status, time.Since(start))
+	}()
+	h.serveHTTP(rec, r)
+}
+
+func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// Don't impose our security headers on transparent reverse-proxy
 	// paths. JupyterLab in particular needs `script-src
 	// 'unsafe-eval'` (it compiles JSON schemas at runtime via
@@ -3039,7 +3111,7 @@ func (h *Handler) Stop(ctx context.Context) error {
 	// context, but the counters it writes are only complete while the
 	// server has stopped accepting calls and not yet torn down the
 	// database handle.
-	h.StopToolStats()
+	h.StopUsageStats()
 
 	// Cancel the handler's context if it's not already done.
 	h.cancelFunc()

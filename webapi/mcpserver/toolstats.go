@@ -50,7 +50,7 @@ func (s *Server) recordToolCall(ctx context.Context, tool, outcome string, d tim
 	s.stats.Record(tool, htcondor.GetAuthenticatedUserFromContext(ctx), client, outcome, d)
 }
 
-// The outcome strings, duplicated from the toolstats package rather
+// The outcome strings, duplicated from the usagestats package rather
 // than imported: see the ToolStatsRecorder comment on why this package
 // does not depend on it. They are a wire contract between the two and
 // are pinned by a test that fails if either side renames one.

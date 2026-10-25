@@ -1443,15 +1443,21 @@ export interface AdminLogsResponse {
   entries: LogEntry[] | null;
 }
 
-// One aggregate of MCP tool calls: per tool, per user, per client, or
-// (with no name) the totals.
+// One aggregate of counted calls: per tool or endpoint, per user, per
+// client, or (with no name) the totals.
 export interface UsageRow {
+  // The recorded value. This is what a filter matches on, so it goes
+  // back to the server unchanged.
   name?: string;
+  // What to show instead of name, when the recorded value is an
+  // identifier a reader should not have to decode (an OAuth2 client
+  // id resolved to that client's name).
+  label?: string;
   calls: number;
-  ok: number;
-  error: number;
-  refused: number;
-  unknown_tool: number;
+  // Calls per outcome. The vocabulary differs by kind -- MCP has four
+  // outcomes, REST six -- and the summary says which ones to expect,
+  // so the columns come from the server rather than from this file.
+  outcomes: Record<string, number>;
   // Distinct identities behind the row, not counting calls that carried
   // none.
   users: number;
@@ -1465,22 +1471,46 @@ export interface UsageRow {
   last_call: string | null;
 }
 
+// Which kind of call a usage query is about: MCP tool calls, or REST
+// API requests.
+export type UsageKind = "mcp" | "rest";
+
 export interface UsageFilter {
-  tool?: string;
+  // The tool or endpoint, whichever this kind counts.
+  name?: string;
   user?: string;
   client?: string;
 }
 
+// One tab: a kind and whether this server is counting it.
+export interface AdminUsageKind {
+  kind: string;
+  label: string;
+  enabled: boolean;
+}
+
 export interface AdminUsageResponse {
   enabled: boolean;
+  // Every kind this server knows about, present whether or not the
+  // requested one is enabled, so the tabs come from the server.
+  kinds?: AdminUsageKind[];
   // The rest is present only when enabled.
+  kind?: string;
+  // The singular word for what `name` holds ("tool", "endpoint") and
+  // its capitalised form, for the column heading.
+  noun?: string;
+  title?: string;
+  // The outcome columns, left to right.
+  outcomes?: string[];
+  // Display names for the recorded client strings that have one.
+  client_labels?: Record<string, string>;
   filter?: UsageFilter;
   totals?: UsageRow;
-  by_tool?: UsageRow[];
+  by_name?: UsageRow[];
   by_user?: UsageRow[];
   by_client?: UsageRow[];
-  // Every tool, user and client, unaffected by the filter.
-  options?: { tools: string[]; users: string[]; clients: string[] };
+  // Every name, user and client, unaffected by the filter.
+  options?: { names: string[]; users: string[]; clients: string[] };
 }
 
 export interface AdminCondorConfigEntry {
@@ -2374,15 +2404,16 @@ export const api = {
       }),
     logs: (limit?: number): Promise<AdminLogsResponse> =>
       fetchJSON(`${BASE}/admin/logs${limit ? `?limit=${limit}` : ""}`),
-    // MCP tool-call statistics, optionally narrowed to one tool, user
-    // and/or client. Aggregated server-side, including the filtered view.
-    usage: (filter?: UsageFilter): Promise<AdminUsageResponse> => {
-      const qs = new URLSearchParams();
-      if (filter?.tool) qs.set("tool", filter.tool);
+    // Call statistics for one kind -- MCP tool calls or REST API
+    // requests -- optionally narrowed to one tool/endpoint, user
+    // and/or client. Aggregated server-side, including the filtered
+    // view.
+    usage: (kind: UsageKind, filter?: UsageFilter): Promise<AdminUsageResponse> => {
+      const qs = new URLSearchParams({ kind });
+      if (filter?.name) qs.set("name", filter.name);
       if (filter?.user) qs.set("user", filter.user);
       if (filter?.client) qs.set("client", filter.client);
-      const q = qs.toString();
-      return fetchJSON(`${BASE}/admin/usage${q ? "?" + q : ""}`);
+      return fetchJSON(`${BASE}/admin/usage?${qs.toString()}`);
     },
     // Read the running HTCondor config (admin only). The backend
     // sorts keys case-insensitively and redacts password/secret/api-

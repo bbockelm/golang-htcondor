@@ -1,4 +1,4 @@
-package toolstats_test
+package usagestats_test
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
-	"github.com/bbockelm/golang-htcondor/webapi/toolstats"
+	"github.com/bbockelm/golang-htcondor/webapi/usagestats"
 )
 
 // openDB builds the real application database, migrations and all.
@@ -37,16 +37,16 @@ func TestCountersSurviveARestart(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	before := toolstats.New()
-	before.Record("query_jobs", "bbockelm", "claude-code/2.1", toolstats.OutcomeOK, 250*time.Millisecond)
-	before.Record("query_jobs", "bbockelm", "claude-code/2.1", toolstats.OutcomeOK, 2*time.Second)
-	before.Record("submit_job", "alice", "cursor/0.4", toolstats.OutcomeError, 90*time.Millisecond)
+	before := usagestats.New(usagestats.MCPSpec())
+	before.Record("query_jobs", "bbockelm", "claude-code/2.1", usagestats.OutcomeOK, 250*time.Millisecond)
+	before.Record("query_jobs", "bbockelm", "claude-code/2.1", usagestats.OutcomeOK, 2*time.Second)
+	before.Record("submit_job", "alice", "cursor/0.4", usagestats.OutcomeError, 90*time.Millisecond)
 	if err := before.Flush(ctx, db); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
 
 	// A new process, the same database.
-	after := toolstats.New()
+	after := usagestats.New(usagestats.MCPSpec())
 	if err := after.LoadFrom(ctx, db); err != nil {
 		t.Fatalf("LoadFrom: %v", err)
 	}
@@ -88,28 +88,28 @@ func TestCountingResumesFromTheRestoredTotals(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	first := toolstats.New()
+	first := usagestats.New(usagestats.MCPSpec())
 	for i := 0; i < 5; i++ {
-		first.Record("get_job", "u", "c", toolstats.OutcomeOK, time.Second)
+		first.Record("get_job", "u", "c", usagestats.OutcomeOK, time.Second)
 	}
 	if err := first.Flush(ctx, db); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
 
-	second := toolstats.New()
+	second := usagestats.New(usagestats.MCPSpec())
 	if err := second.LoadFrom(ctx, db); err != nil {
 		t.Fatalf("LoadFrom: %v", err)
 	}
-	second.Record("get_job", "u", "c", toolstats.OutcomeOK, time.Second)
+	second.Record("get_job", "u", "c", usagestats.OutcomeOK, time.Second)
 	if err := second.Flush(ctx, db); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
 
-	third := toolstats.New()
+	third := usagestats.New(usagestats.MCPSpec())
 	if err := third.LoadFrom(ctx, db); err != nil {
 		t.Fatalf("LoadFrom: %v", err)
 	}
-	if got := third.Snapshot()[toolstats.Key{Tool: "get_job", User: "u", Client: "c", Outcome: toolstats.OutcomeOK}].Calls; got != 6 {
+	if got := third.Snapshot()[usagestats.Key{Name: "get_job", User: "u", Client: "c", Outcome: usagestats.OutcomeOK}].Calls; got != 6 {
 		t.Errorf("calls after restart = %d, want 6", got)
 	}
 }
@@ -121,8 +121,8 @@ func TestFlushingTwiceDoesNotDoubleTheTotals(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	s := toolstats.New()
-	s.Record("t", "u", "c", toolstats.OutcomeOK, time.Second)
+	s := usagestats.New(usagestats.MCPSpec())
+	s.Record("t", "u", "c", usagestats.OutcomeOK, time.Second)
 	if err := s.Flush(ctx, db); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
@@ -145,8 +145,8 @@ func TestFlushWritesNothingWhenNothingWasRecorded(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	s := toolstats.New()
-	s.Record("t", "u", "c", toolstats.OutcomeOK, time.Second)
+	s := usagestats.New(usagestats.MCPSpec())
+	s.Record("t", "u", "c", usagestats.OutcomeOK, time.Second)
 	if err := s.Flush(ctx, db); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
@@ -174,12 +174,12 @@ func TestLoadDoesNotArmAFlush(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	seed := toolstats.New()
-	seed.Record("t", "u", "c", toolstats.OutcomeOK, time.Second)
+	seed := usagestats.New(usagestats.MCPSpec())
+	seed.Record("t", "u", "c", usagestats.OutcomeOK, time.Second)
 	if err := seed.Flush(ctx, db); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
-	fresh := toolstats.New()
+	fresh := usagestats.New(usagestats.MCPSpec())
 	if err := fresh.LoadFrom(ctx, db); err != nil {
 		t.Fatalf("LoadFrom: %v", err)
 	}
@@ -208,8 +208,8 @@ func TestAFailedFlushIsRetriedOnTheNextTick(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	s := toolstats.New()
-	s.Record("t", "u", "c", toolstats.OutcomeOK, time.Second)
+	s := usagestats.New(usagestats.MCPSpec())
+	s.Record("t", "u", "c", usagestats.OutcomeOK, time.Second)
 
 	// Renamed rather than dropped, so the table comes back exactly as
 	// the migration built it without having to unwind goose's record of
@@ -242,7 +242,7 @@ func TestLoadFromATableThatDoesNotExistIsNotAnError(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `DROP TABLE mcp_tool_stats`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
-	s := toolstats.New()
+	s := usagestats.New(usagestats.MCPSpec())
 	if err := s.LoadFrom(ctx, db); err != nil {
 		t.Errorf("LoadFrom on a missing table = %v, want nil", err)
 	}
@@ -251,8 +251,8 @@ func TestLoadFromATableThatDoesNotExistIsNotAnError(t *testing.T) {
 // Both calls must tolerate a server built without a database at all --
 // the stdio MCP server has none.
 func TestNilDatabaseIsAcceptedSilently(t *testing.T) {
-	s := toolstats.New()
-	s.Record("t", "u", "c", toolstats.OutcomeOK, time.Second)
+	s := usagestats.New(usagestats.MCPSpec())
+	s.Record("t", "u", "c", usagestats.OutcomeOK, time.Second)
 	if err := s.LoadFrom(context.Background(), nil); err != nil {
 		t.Errorf("LoadFrom(nil) = %v", err)
 	}
@@ -268,11 +268,11 @@ func TestStoredRowsKeepTheVerbatimIdentity(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	s := toolstats.New()
+	s := usagestats.New(usagestats.MCPSpec())
 	s.SetMaxLabelValues(1) // force the Prometheus label space to collapse
-	s.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Second)
-	s.Record("query_jobs", "bob", "cc", toolstats.OutcomeOK, time.Second)
-	s.Record("query_jobs", "carol", "cc", toolstats.OutcomeOK, time.Second)
+	s.Record("query_jobs", "alice", "cc", usagestats.OutcomeOK, time.Second)
+	s.Record("query_jobs", "bob", "cc", usagestats.OutcomeOK, time.Second)
+	s.Record("query_jobs", "carol", "cc", usagestats.OutcomeOK, time.Second)
 	if err := s.Flush(ctx, db); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
@@ -315,9 +315,9 @@ func TestAFlushWritesOnlyWhatChanged(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	s := toolstats.New()
-	s.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Second)
-	s.Record("submit_job", "alice", "cc", toolstats.OutcomeOK, time.Second)
+	s := usagestats.New(usagestats.MCPSpec())
+	s.Record("query_jobs", "alice", "cc", usagestats.OutcomeOK, time.Second)
+	s.Record("submit_job", "alice", "cc", usagestats.OutcomeOK, time.Second)
 	if err := s.Flush(ctx, db); err != nil {
 		t.Fatalf("seed flush: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestAFlushWritesOnlyWhatChanged(t *testing.T) {
 	}
 
 	// Only one of the two series moves.
-	s.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Second)
+	s.Record("query_jobs", "alice", "cc", usagestats.OutcomeOK, time.Second)
 	if err := s.Flush(ctx, db); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
@@ -363,9 +363,9 @@ func TestAFailedLoadNeverOverwritesTheStoredTotals(t *testing.T) {
 	ctx := context.Background()
 
 	// A deployment with real history.
-	seed := toolstats.New()
+	seed := usagestats.New(usagestats.MCPSpec())
 	for i := 0; i < 50000; i++ {
-		seed.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
+		seed.Record("query_jobs", "alice", "cc", usagestats.OutcomeOK, time.Millisecond)
 	}
 	if err := seed.Flush(ctx, db); err != nil {
 		t.Fatalf("seed flush: %v", err)
@@ -375,18 +375,18 @@ func TestAFailedLoadNeverOverwritesTheStoredTotals(t *testing.T) {
 	// contended connection, a timeout or a schema surprise has. (A
 	// missing table is a different, benign case: nothing to destroy.)
 	hideColumn(t, db)
-	restarted := toolstats.New()
+	restarted := usagestats.New(usagestats.MCPSpec())
 	if err := restarted.LoadFrom(ctx, db); err == nil {
 		t.Fatal("LoadFrom succeeded against an unreadable table")
 	}
 	showColumn(t, db)
 
 	// One call, then a flush. THIS is what used to destroy the record.
-	restarted.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
+	restarted.Record("query_jobs", "alice", "cc", usagestats.OutcomeOK, time.Millisecond)
 	err := restarted.Flush(ctx, db)
 	if err == nil {
 		t.Error("the flush went ahead after a failed load")
-	} else if !toolstats.ErrFlushWithoutLoad(err) {
+	} else if !usagestats.ErrFlushWithoutLoad(err) {
 		t.Errorf("flush error = %v; want the deliberate refusal", err)
 	}
 
@@ -407,16 +407,16 @@ func TestRecoveryAddsTheCallsCountedWhileTheRecordWasUnreadable(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	seed := toolstats.New()
+	seed := usagestats.New(usagestats.MCPSpec())
 	for i := 0; i < 100; i++ {
-		seed.Record("get_job", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
+		seed.Record("get_job", "alice", "cc", usagestats.OutcomeOK, time.Millisecond)
 	}
 	if err := seed.Flush(ctx, db); err != nil {
 		t.Fatalf("seed flush: %v", err)
 	}
 
 	hideColumn(t, db)
-	restarted := toolstats.New()
+	restarted := usagestats.New(usagestats.MCPSpec())
 	if err := restarted.LoadFrom(ctx, db); err == nil {
 		t.Fatal("LoadFrom succeeded against an unreadable table")
 	}
@@ -425,7 +425,7 @@ func TestRecoveryAddsTheCallsCountedWhileTheRecordWasUnreadable(t *testing.T) {
 	}
 	// Seven calls happen while the record is unreadable.
 	for i := 0; i < 7; i++ {
-		restarted.Record("get_job", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
+		restarted.Record("get_job", "alice", "cc", usagestats.OutcomeOK, time.Millisecond)
 	}
 	showColumn(t, db)
 
@@ -456,9 +456,9 @@ func TestOneUnreadableRowDoesNotDiscardTheRest(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 
-	seed := toolstats.New()
-	seed.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Second)
-	seed.Record("submit_job", "bob", "cc", toolstats.OutcomeOK, time.Second)
+	seed := usagestats.New(usagestats.MCPSpec())
+	seed.Record("query_jobs", "alice", "cc", usagestats.OutcomeOK, time.Second)
+	seed.Record("submit_job", "bob", "cc", usagestats.OutcomeOK, time.Second)
 	if err := seed.Flush(ctx, db); err != nil {
 		t.Fatalf("seed flush: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestOneUnreadableRowDoesNotDiscardTheRest(t *testing.T) {
 		t.Fatalf("insert bad row: %v", err)
 	}
 
-	fresh := toolstats.New()
+	fresh := usagestats.New(usagestats.MCPSpec())
 	err := fresh.LoadFrom(ctx, db)
 	if err == nil {
 		t.Error("the skipped row was not reported")
@@ -482,7 +482,7 @@ func TestOneUnreadableRowDoesNotDiscardTheRest(t *testing.T) {
 	}
 
 	// And the bad row is left alone rather than rewritten or dropped.
-	fresh.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Second)
+	fresh.Record("query_jobs", "alice", "cc", usagestats.OutcomeOK, time.Second)
 	if err := fresh.Flush(ctx, db); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
@@ -504,7 +504,7 @@ func TestAMissingTableStillAllowsFlushingLater(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `ALTER TABLE mcp_tool_stats RENAME TO hidden`); err != nil {
 		t.Fatalf("hide: %v", err)
 	}
-	s := toolstats.New()
+	s := usagestats.New(usagestats.MCPSpec())
 	if err := s.LoadFrom(ctx, db); err != nil {
 		t.Fatalf("LoadFrom on a missing table = %v, want nil", err)
 	}
@@ -514,7 +514,7 @@ func TestAMissingTableStillAllowsFlushingLater(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `ALTER TABLE hidden RENAME TO mcp_tool_stats`); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-	s.Record("t", "u", "c", toolstats.OutcomeOK, time.Second)
+	s.Record("t", "u", "c", usagestats.OutcomeOK, time.Second)
 	if err := s.Flush(ctx, db); err != nil {
 		t.Errorf("Flush after a missing-table load = %v, want nil", err)
 	}
@@ -536,5 +536,100 @@ func showColumn(t *testing.T, db *sql.DB) {
 	if _, err := db.ExecContext(context.Background(),
 		`ALTER TABLE mcp_tool_stats RENAME COLUMN calls_hidden TO calls`); err != nil {
 		t.Fatalf("show column: %v", err)
+	}
+}
+
+// TestEveryKindRoundTripsAgainstItsShippedTable is the test that the
+// generalization needed.
+//
+// The SQL is built from the spec's table and column names, so a spec
+// naming a table that does not exist -- a typo, or a migration that
+// was never written -- fails at runtime rather than at compile time,
+// and fails SILENTLY: a missing table reads as "nothing persisted
+// yet", which is indistinguishable from a new deployment. This drives
+// every kind through a real write and a real read.
+func TestEveryKindRoundTripsAgainstItsShippedTable(t *testing.T) {
+	ctx := context.Background()
+	for _, spec := range usagestats.Specs() {
+		t.Run(spec.Kind, func(t *testing.T) {
+			db := openDB(t)
+
+			before := usagestats.New(spec)
+			// Its own vocabulary, not a shared guess: an outcome from
+			// the wrong kind would be folded into the default and the
+			// read-back would still "pass".
+			first, last := spec.Outcomes[0], spec.Outcomes[len(spec.Outcomes)-1]
+			before.Record("alpha", "alice", "curl", first, 250*time.Millisecond)
+			before.Record("alpha", "alice", "curl", first, 2*time.Second)
+			before.Record("beta", "bob", "web UI", last, 90*time.Millisecond)
+			if err := before.Flush(ctx, db); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+
+			after := usagestats.New(spec)
+			if err := after.LoadFrom(ctx, db); err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			got := after.Snapshot()
+			// Two series: the two alpha calls share a key.
+			if len(got) != 2 {
+				t.Fatalf("series = %d, want 2; the table did not round-trip: %+v", len(got), got)
+			}
+			alpha := got[usagestats.Key{Name: "alpha", User: "alice", Client: "curl", Outcome: first}]
+			if alpha.Calls != 2 {
+				t.Errorf("alpha calls = %d, want 2", alpha.Calls)
+			}
+			if alpha.DurationSum < 2.2 || alpha.DurationSum > 2.3 {
+				t.Errorf("alpha duration sum = %v, want ~2.25", alpha.DurationSum)
+			}
+			if len(alpha.Buckets) == 0 {
+				t.Error("alpha lost its distribution; the buckets column did not round-trip")
+			}
+			if alpha.LastCall.IsZero() {
+				t.Error("alpha lost its last-call timestamp")
+			}
+		})
+	}
+}
+
+// Two kinds in one database must not read each other's rows. They
+// share the code that builds the SQL, so a spec field left at its
+// zero value would point both at one table and silently merge them.
+func TestKindsDoNotShareRows(t *testing.T) {
+	ctx := context.Background()
+	db := openDB(t)
+
+	mcp := usagestats.New(usagestats.MCPSpec())
+	mcp.Record("query_jobs", "alice", "claude-code", usagestats.OutcomeOK, time.Millisecond)
+	if err := mcp.Flush(ctx, db); err != nil {
+		t.Fatalf("mcp flush: %v", err)
+	}
+
+	rest := usagestats.New(usagestats.RESTSpec())
+	rest.Record("GET /api/v1/jobs", "bob", "curl", usagestats.OutcomeOK, time.Millisecond)
+	if err := rest.Flush(ctx, db); err != nil {
+		t.Fatalf("rest flush: %v", err)
+	}
+
+	for _, c := range []struct {
+		name  string
+		store *usagestats.Store
+		want  string
+	}{
+		{"mcp", usagestats.New(usagestats.MCPSpec()), "query_jobs"},
+		{"rest", usagestats.New(usagestats.RESTSpec()), "GET /api/v1/jobs"},
+	} {
+		if err := c.store.LoadFrom(ctx, db); err != nil {
+			t.Fatalf("%s load: %v", c.name, err)
+		}
+		snap := c.store.Snapshot()
+		if len(snap) != 1 {
+			t.Errorf("%s loaded %d series, want only its own: %+v", c.name, len(snap), snap)
+		}
+		for k := range snap {
+			if k.Name != c.want {
+				t.Errorf("%s loaded %q, want %q", c.name, k.Name, c.want)
+			}
+		}
 	}
 }

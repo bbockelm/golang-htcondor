@@ -12,14 +12,14 @@ import (
 
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
-	"github.com/bbockelm/golang-htcondor/webapi/toolstats"
+	"github.com/bbockelm/golang-htcondor/webapi/usagestats"
 )
 
 // statsHandler builds a real Handler against a real application
 // database. The point of these tests is the WIRING -- a store that
 // counts perfectly but was never handed to the MCP server, or a
 // collector that was never registered, would pass every unit test in
-// the toolstats package and ship a feature that does nothing.
+// the usagestats package and ship a feature that does nothing.
 func statsHandler(t *testing.T) *Handler {
 	t.Helper()
 	return statsHandlerAt(t, filepath.Join(t.TempDir(), "app.db"))
@@ -27,15 +27,25 @@ func statsHandler(t *testing.T) *Handler {
 
 func statsHandlerAt(t *testing.T, dbPath string) *Handler {
 	t.Helper()
+	return statsHandlerWith(t, dbPath, false)
+}
+
+// statsHandlerWith builds the handler the way the daemon does, so the
+// store, its collector and its flush are wired by startUsageStats
+// rather than by the test. rest switches on REST counting, which is
+// off here by default so the rest of the package is unaffected by it.
+func statsHandlerWith(t *testing.T, dbPath string, rest bool) *Handler {
+	t.Helper()
 	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
 	if err != nil {
 		t.Fatalf("logging.New: %v", err)
 	}
 	h, err := NewHandler(HandlerConfig{
-		ScheddName:   "test-schedd",
-		ScheddAddr:   "127.0.0.1:9618",
-		Logger:       logger,
-		OAuth2DBPath: dbPath,
+		ScheddName:       "test-schedd",
+		ScheddAddr:       "127.0.0.1:9618",
+		Logger:           logger,
+		OAuth2DBPath:     dbPath,
+		RESTStatsEnabled: rest,
 	})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
@@ -52,7 +62,7 @@ func statsHandlerAt(t *testing.T, dbPath string) *Handler {
 // pass every other test in this file and count nothing in production.
 func TestARealMCPCallIsCounted(t *testing.T) {
 	s := newMCPTransportServer(t, false)
-	t.Cleanup(func() { s.StopToolStats() })
+	t.Cleanup(func() { s.StopUsageStats() })
 
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call",` +
 		`"params":{"name":"definitely_not_a_tool","arguments":{}}}`
@@ -68,15 +78,15 @@ func TestARealMCPCallIsCounted(t *testing.T) {
 	snap := s.toolStats.Snapshot()
 	var found bool
 	for k, e := range snap {
-		if k.Tool == "definitely_not_a_tool" && e.Calls > 0 {
+		if k.Name == "definitely_not_a_tool" && e.Calls > 0 {
 			found = true
 			// The harness identified itself only by User-Agent, which
 			// is the fallback this call exercises.
 			if k.Client != "integration-probe-1.0" {
 				t.Errorf("client = %q, want integration-probe-1.0", k.Client)
 			}
-			if k.Outcome != toolstats.OutcomeUnknownTool {
-				t.Errorf("outcome = %q, want %q", k.Outcome, toolstats.OutcomeUnknownTool)
+			if k.Outcome != usagestats.OutcomeUnknownTool {
+				t.Errorf("outcome = %q, want %q", k.Outcome, usagestats.OutcomeUnknownTool)
 			}
 		}
 	}
@@ -88,9 +98,9 @@ func TestARealMCPCallIsCounted(t *testing.T) {
 // The collector has to be registered, or /metrics never mentions it.
 func TestToolCallsAppearOnTheMetricsRegistry(t *testing.T) {
 	h := statsHandler(t)
-	t.Cleanup(func() { h.StopToolStats() })
+	t.Cleanup(func() { h.StopUsageStats() })
 
-	h.toolStats.Record("query_jobs", "bbockelm", "claude-code/2.1", toolstats.OutcomeOK, 150*time.Millisecond)
+	h.toolStats.Record("query_jobs", "bbockelm", "claude-code/2.1", usagestats.OutcomeOK, 150*time.Millisecond)
 
 	families, err := h.httpMetricsState.registry.Gather()
 	if err != nil {
@@ -118,8 +128,8 @@ func TestToolCallsAppearOnTheMetricsRegistry(t *testing.T) {
 // so one scrape config and one dashboard covers both.
 func TestToolMetricNamesMatchTheServersNamespace(t *testing.T) {
 	h := statsHandler(t)
-	t.Cleanup(func() { h.StopToolStats() })
-	h.toolStats.Record("t", "u", "c", toolstats.OutcomeOK, time.Second)
+	t.Cleanup(func() { h.StopUsageStats() })
+	h.toolStats.Record("t", "u", "c", usagestats.OutcomeOK, time.Second)
 
 	families, err := h.httpMetricsState.registry.Gather()
 	if err != nil {
@@ -138,10 +148,10 @@ func TestToolMetricNamesMatchTheServersNamespace(t *testing.T) {
 func TestShutdownPersistsTheCounters(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "app.db")
 	h := statsHandlerAt(t, dbPath)
-	h.toolStats.Record("submit_job", "bbockelm", "claude-code/2.1", toolstats.OutcomeOK, time.Second)
-	h.toolStats.Record("submit_job", "bbockelm", "claude-code/2.1", toolstats.OutcomeError, 2*time.Second)
+	h.toolStats.Record("submit_job", "bbockelm", "claude-code/2.1", usagestats.OutcomeOK, time.Second)
+	h.toolStats.Record("submit_job", "bbockelm", "claude-code/2.1", usagestats.OutcomeError, 2*time.Second)
 
-	// Through the real lifecycle, not StopToolStats directly: the thing
+	// Through the real lifecycle, not StopUsageStats directly: the thing
 	// at risk is that Stop forgets to flush, and a test calling the
 	// flush itself could not see that. Stop needs the context Start
 	// installs, so the handler is actually started -- on a throwaway
@@ -201,9 +211,9 @@ func TestShutdownPersistsTheCounters(t *testing.T) {
 // Shutdown can run from more than one signal path.
 func TestStopToolStatsIsIdempotent(t *testing.T) {
 	h := statsHandler(t)
-	h.toolStats.Record("t", "u", "c", toolstats.OutcomeOK, time.Second)
-	h.StopToolStats()
-	h.StopToolStats() // must not panic on a closed channel
+	h.toolStats.Record("t", "u", "c", usagestats.OutcomeOK, time.Second)
+	h.StopUsageStats()
+	h.StopUsageStats() // must not panic on a closed channel
 }
 
 // A restart resumes: this is the whole point of persisting, so it is
@@ -226,9 +236,9 @@ func TestANewHandlerResumesTheCountersFromDisk(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 	for i := 0; i < 3; i++ {
-		first.toolStats.Record("get_job", "bbockelm", "cc", toolstats.OutcomeOK, time.Second)
+		first.toolStats.Record("get_job", "bbockelm", "cc", usagestats.OutcomeOK, time.Second)
 	}
-	first.StopToolStats()
+	first.StopUsageStats()
 	if err := first.db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -237,19 +247,19 @@ func TestANewHandlerResumesTheCountersFromDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler (restart): %v", err)
 	}
-	t.Cleanup(func() { second.StopToolStats() })
+	t.Cleanup(func() { second.StopUsageStats() })
 
-	got := second.toolStats.Snapshot()[toolstats.Key{
-		Tool: "get_job", User: "bbockelm", Client: "cc", Outcome: toolstats.OutcomeOK,
+	got := second.toolStats.Snapshot()[usagestats.Key{
+		Name: "get_job", User: "bbockelm", Client: "cc", Outcome: usagestats.OutcomeOK,
 	}]
 	if got.Calls != 3 {
 		t.Errorf("after restart calls = %d, want 3; the counters did not resume", got.Calls)
 	}
 
 	// And they keep counting from there rather than beside it.
-	second.toolStats.Record("get_job", "bbockelm", "cc", toolstats.OutcomeOK, time.Second)
-	got = second.toolStats.Snapshot()[toolstats.Key{
-		Tool: "get_job", User: "bbockelm", Client: "cc", Outcome: toolstats.OutcomeOK,
+	second.toolStats.Record("get_job", "bbockelm", "cc", usagestats.OutcomeOK, time.Second)
+	got = second.toolStats.Snapshot()[usagestats.Key{
+		Name: "get_job", User: "bbockelm", Client: "cc", Outcome: usagestats.OutcomeOK,
 	}]
 	if got.Calls != 4 {
 		t.Errorf("calls = %d, want 4", got.Calls)
@@ -259,7 +269,7 @@ func TestANewHandlerResumesTheCountersFromDisk(t *testing.T) {
 // Statistics must never be the reason a server will not boot.
 func TestAServerStartsEvenWhenTheStatsTableIsUnusable(t *testing.T) {
 	h := statsHandler(t)
-	t.Cleanup(func() { h.StopToolStats() })
+	t.Cleanup(func() { h.StopUsageStats() })
 
 	if _, err := h.db.ExecContext(context.Background(), `DROP TABLE mcp_tool_stats`); err != nil {
 		t.Fatalf("drop: %v", err)
@@ -269,8 +279,8 @@ func TestAServerStartsEvenWhenTheStatsTableIsUnusable(t *testing.T) {
 	if err := h.toolStats.LoadFrom(context.Background(), h.db); err != nil {
 		t.Errorf("LoadFrom on a missing table = %v, want nil", err)
 	}
-	h.toolStats.Record("t", "u", "c", toolstats.OutcomeOK, time.Second)
-	h.flushToolStatsOnce("test") // logs, does not panic or fail the test
+	h.toolStats.Record("t", "u", "c", usagestats.OutcomeOK, time.Second)
+	h.flushUsageStatsOnce("test") // logs, does not panic or fail the test
 }
 
 // TestAFlushRetriesAReadThatFailedAtStartup covers the recovery half.
@@ -286,29 +296,29 @@ func TestAFlushRetriesAReadThatFailedAtStartup(t *testing.T) {
 	// A deployment with history.
 	seed := statsHandlerAt(t, dbPath)
 	for i := 0; i < 40; i++ {
-		seed.toolStats.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
+		seed.toolStats.Record("query_jobs", "alice", "cc", usagestats.OutcomeOK, time.Millisecond)
 	}
-	seed.StopToolStats()
+	seed.StopUsageStats()
 	if err := seed.db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
 	// Restart, and break the read with the table still present.
 	h := statsHandlerAt(t, dbPath)
-	t.Cleanup(func() { h.StopToolStats() })
+	t.Cleanup(func() { h.StopUsageStats() })
 	if _, err := h.db.ExecContext(context.Background(),
 		`ALTER TABLE mcp_tool_stats RENAME COLUMN calls TO calls_hidden`); err != nil {
 		t.Fatalf("hide column: %v", err)
 	}
-	h.toolStats = toolstats.New()
+	h.toolStats = usagestats.New(usagestats.MCPSpec())
 	if err := h.toolStats.LoadFrom(context.Background(), h.db); err == nil {
 		t.Fatal("LoadFrom succeeded against an unreadable table")
 	}
 
 	// Calls happen while the record cannot be read; the flush must not
 	// write them over the history.
-	h.toolStats.Record("query_jobs", "alice", "cc", toolstats.OutcomeOK, time.Millisecond)
-	h.flushToolStatsOnce("while unreadable")
+	h.toolStats.Record("query_jobs", "alice", "cc", usagestats.OutcomeOK, time.Millisecond)
+	h.flushUsageStatsOnce("while unreadable")
 
 	if _, err := h.db.ExecContext(context.Background(),
 		`ALTER TABLE mcp_tool_stats RENAME COLUMN calls_hidden TO calls`); err != nil {
@@ -316,7 +326,7 @@ func TestAFlushRetriesAReadThatFailedAtStartup(t *testing.T) {
 	}
 
 	// Now it can be read: the flush re-reads, merges and persists.
-	h.flushToolStatsOnce("after recovery")
+	h.flushUsageStatsOnce("after recovery")
 
 	var calls int
 	if err := h.db.QueryRowContext(context.Background(),

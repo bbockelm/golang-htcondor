@@ -1443,10 +1443,22 @@ at `/openapi.json`.
 - `GET /metrics` — Prometheus exposition (requires the `metrics`
   scope unless `HTTP_API_METRICS_PUBLIC=true`)
 
-### MCP tool-call statistics
+### Usage statistics
 
-`/metrics` also reports what the MCP surface is being asked to do, in
-the same `htcondor_api` namespace as the HTTP metrics:
+The server counts what it is asked to do, in two kinds that work the
+same way and are reported side by side: **MCP tool calls** and **REST
+API requests**. Both are attributed to a user and a client, both
+survive a restart, and both appear on `/metrics` and on the admin
+**Usage** page.
+
+Everything below -- the persistence, the label bounds, the admin page,
+the `HTTP_API_TOOL_STATS_*` knobs -- applies to both unless it says
+otherwise.
+
+#### MCP tool calls
+
+`/metrics` reports what the MCP surface is being asked to do, in the
+same `htcondor_api` namespace as the HTTP metrics:
 
 | Metric | Type | Labels | Answers |
 | --- | --- | --- | --- |
@@ -1475,6 +1487,67 @@ to and serves no `/metrics`.
 The duration histogram carries no `user` label: how long a tool takes is
 a property of the tool and the pool, and a histogram costs fourteen
 series per label combination.
+
+#### REST API requests
+
+The same treatment for the HTTP API. `/metrics` carries:
+
+| Metric | Type | Labels | Answers |
+| --- | --- | --- | --- |
+| `htcondor_api_rest_endpoint_calls_total` | counter | `endpoint`, `user`, `client`, `outcome` | which endpoints are called, by whom, from what |
+| `htcondor_api_rest_endpoint_users` | gauge | `endpoint` | how many distinct people call each one |
+| `htcondor_api_rest_endpoint_last_call_timestamp_seconds` | gauge | `endpoint` | whether an endpoint is used at all |
+
+`endpoint` is the method and the route template together, as
+`GET /api/v1/jobs/{id}`. The method is part of it because `GET` and
+`DELETE` on one path are different operations carrying different risk.
+The template is the same one `htcondor_api_http_requests_total` uses, so
+a job id never becomes a label.
+
+`outcome` is finer-grained than the HTTP status class, split by what an
+operator would do about it:
+
+| `outcome` | Status | Means |
+| --- | --- | --- |
+| `ok` | 2xx, 3xx | served, redirects included -- the sign-in flow is mostly redirects |
+| `denied` | 401, 403 | refused by authentication or authorization |
+| `not_found` | 404 | usually a stale client, or a job that has left the queue |
+| `rate_limited` | 429 | policy working under load |
+| `client_error` | other 4xx | a request this server understood and judged wrong |
+| `error` | 5xx | this server failing |
+
+`client` is resolved rather than taken raw, so it stays bounded and
+readable:
+
+| Recorded as | When |
+| --- | --- |
+| `web UI` | authenticated with this server's session cookie -- the single-page app |
+| `oauth:<client_id>` | a bearer from a registered OAuth2 client |
+| `api key: <name>` | an `htca-v1-` API key |
+| the `User-Agent` product token | anything else, version stripped (`curl/8.4.0` becomes `curl`) |
+
+The version is dropped on purpose: keeping it would mint a series per
+client upgrade. The OAuth2 **id** is stored rather than the client's
+name so that renaming a client does not split its history in two; the
+admin page shows the name beside it.
+
+Only `/api/v1/` is counted. Health probes, static assets and the
+sign-in redirects are not the REST API, and the MCP endpoints have
+their own counters -- counting them here too would double them on one
+page.
+
+There is no REST duration histogram on `/metrics`:
+`htcondor_api_http_request_duration_seconds` already publishes this
+server's latency by method and route, and a second one would add a
+bucket series per `(endpoint, client, outcome)` to say the same thing.
+Durations are still counted and still persisted, and the admin page's
+mean and p95 come from them.
+
+Set `HTTP_API_REST_STATS=false` to turn REST counting off and keep the
+MCP counting. It is the kind whose volume an operator might object to:
+the web UI polls.
+
+#### Persistence and bounds
 
 **If the stored totals cannot be read, nothing is written.** A flush
 replaces a series' whole total rather than adding to it, which is only
@@ -1512,6 +1585,24 @@ SELECT tool, outcome, SUM(calls) AS calls FROM mcp_tool_stats
  WHERE outcome <> 'ok' GROUP BY tool, outcome ORDER BY calls DESC;
 ```
 
+REST requests are in `rest_endpoint_stats`, with the same columns and
+`endpoint` in place of `tool`:
+
+```sql
+-- Who is being turned away, and from what?
+SELECT actor, endpoint, SUM(calls) AS calls FROM rest_endpoint_stats
+ WHERE outcome = 'denied' GROUP BY actor, endpoint ORDER BY calls DESC;
+
+-- Which integrations call this server?
+SELECT client, SUM(calls) AS calls FROM rest_endpoint_stats
+ GROUP BY client ORDER BY calls DESC;
+```
+
+A separate table rather than a kind column on the first: the two have
+different outcome vocabularies, and their volumes differ by orders of
+magnitude, so sharing one would put every MCP query behind a scan of
+the web UI's polling.
+
 A Prometheus label value is a time series, so each of `tool`, `user` and
 `client` is capped at 1000 distinct values on `/metrics`
 (`HTTP_API_TOOL_STATS_MAX_LABEL_VALUES`). Past the cap the quietest
@@ -1530,30 +1621,46 @@ bound exists at all.
 ### The admin Usage page
 
 The web UI's **Usage** page (`/admin/usage`, admin only) shows the same
-counts with real user and client names: totals, then calls per tool, per
-user and per client, each split by outcome with distinct users or
-clients, mean duration, an approximate p95 and the time of the last
-call. Clicking a row, or choosing from the selectors, narrows every
-table to that tool, user or client.
+counts with real user and client names, on a tab per kind: totals, then
+calls per tool or endpoint, per user and per client, each split by
+outcome with distinct users or clients, mean duration, an approximate
+p95 and the time of the last call. Clicking a row, or choosing from the
+selectors, narrows every table. Each tab keeps its own filter.
 
-It reads `GET /api/v1/admin/usage`, which answers from the live
-in-memory counts, so it includes calls not yet written to the database.
-On a server with no application database it returns
-`{"enabled": false}`. Rows look like:
+It reads `GET /api/v1/admin/usage?kind=mcp|rest`, which answers from the
+live in-memory counts, so it includes calls not yet written to the
+database. Without `kind` it answers about MCP. An unrecognised `kind` is
+a 400; a kind this server is not counting returns
+`{"enabled": false}` along with the list of kinds. Rows look like:
 
 ```json
-{"name": "query_jobs", "calls": 412, "ok": 400, "error": 9, "refused": 0,
- "unknown_tool": 3, "users": 7, "clients": 2, "avg_seconds": 0.21,
- "p95_seconds": 0.5, "last_call": "2026-10-08T14:02:11Z"}
+{"name": "query_jobs", "calls": 412, "users": 7, "clients": 2,
+ "outcomes": {"ok": 400, "error": 9, "refused": 0, "unknown_tool": 3},
+ "avg_seconds": 0.21, "p95_seconds": 0.5,
+ "last_call": "2026-10-08T14:02:11Z"}
 ```
+
+`outcomes` is keyed by the kind's own vocabulary, and the response's
+`outcomes` array gives it in display order -- so the page draws its
+columns from the server rather than hard-coding either kind's.
 
 `p95_seconds` is the upper edge of the duration bucket holding the 95th
 percentile. When that lies past the last edge (300 s), it is `null` and
 `p95_over_seconds` gives the edge instead. `users` and `clients` do not
 count calls that carried no identity (`unknown`) or the overflow bucket
-(`other`). The response also carries `totals`, `by_tool`, `by_user`,
-`by_client`, the `filter` in force, and `options` (every tool, user
-and client, unfiltered).
+(`other`).
+
+The response also carries `totals`, `by_name`, `by_user`, `by_client`,
+the `filter` in force, `options` (every name, user and client,
+unfiltered), `kinds` (the tabs), and `noun`/`title` (what the first
+column is called for this kind).
+
+`name` is always the value the server recorded, because it is what a
+filter matches on. Where that value is an identifier -- an
+`oauth:<client_id>` -- the row also carries a `label` with the client's
+name, and `client_labels` maps the same ids for the selector. The name
+is resolved when the page is loaded, not when the call was counted: the
+request path should not pay a database read for a label.
 
 ### Usernames on /metrics
 
@@ -1569,15 +1676,16 @@ Set `HTTP_API_TOOL_STATS_OMIT_USER=true` to render every user label as
 `omitted`. Counts and every other metric are unaffected, and the
 application database still records the real name, so the admin page and
 the SQL queries above keep working — both are gated on more than a
-metrics key.
+metrics key. It applies to both kinds.
 
 **Admin** (gated on `WebUIAdminGroup` membership)
 - `/api/v1/admin/oauth2/clients`, `/api/v1/admin/oauth2/tokens`
 - `/api/v1/admin/api-keys`, `/api/v1/admin/api-keys/{key_id}`
 - `/api/v1/admin/logs`, `/api/v1/admin/condor-config`
-- `GET /api/v1/admin/usage` — MCP tool-call statistics by tool, user and
-  client (`?tool=`, `?user=`, `?client=` narrow them); see
-  [MCP tool-call statistics](#mcp-tool-call-statistics)
+- `GET /api/v1/admin/usage` — call statistics by tool or endpoint, user
+  and client. `?kind=mcp|rest` picks the kind (default `mcp`);
+  `?name=`, `?user=`, `?client=` narrow them. See
+  [Usage statistics](#usage-statistics)
 
 **Placement** (admin-gated; only when a `condor_placementd` is reachable)
 - `GET /api/v1/placement/status` — feature probe; answers even with no
@@ -2846,12 +2954,13 @@ Frequently-used knobs:
 | `HTTP_API_PROJECT_LEADS_FILE` | File naming each project's leads, who may use superuser mode on jobs whose `ProjectName` they lead. Re-read when it changes and on SIGHUP. See [Project leads](#project-leads). |
 | `HTTP_API_PROJECT_LEADS_GROUP` | Group-name pattern containing `{project}`, e.g. `{project}-leads`; members of the group it names for a project lead that project. Reloaded on SIGHUP. See [Project leads](#project-leads). |
 | `HTTP_API_METRICS_PUBLIC` | `true` to disable the API-key gate on `/metrics`. Default off — Prometheus must present an API key with the `metrics` scope. |
-| `HTTP_API_TOOL_STATS_FLUSH_INTERVAL` | How often MCP tool-call counters are written to the application database (e.g. `5m`). Default `5m`; they are also written at shutdown. See [MCP tool-call statistics](#mcp-tool-call-statistics). |
-| `HTTP_API_TOOL_STATS_MAX_LABEL_VALUES` | Cap on distinct values per `/metrics` label for tool statistics. Default `1000`; past it the quietest values render as `other`, while the database keeps them all. |
+| `HTTP_API_TOOL_STATS_FLUSH_INTERVAL` | How often the usage counters are written to the application database (e.g. `5m`). Default `5m`; they are also written at shutdown. Governs both kinds. See [Usage statistics](#usage-statistics). |
+| `HTTP_API_TOOL_STATS_MAX_LABEL_VALUES` | Cap on distinct values per `/metrics` label for usage statistics. Default `1000`; past it the quietest values render as `other`, while the database keeps them all. |
 | `HTTP_API_UTILIZATION_MAX_JOBS` | Most finished jobs one Utilization analysis (`GET /api/v1/utilization`) may read; a larger `limit` is clamped to it. Default `1000000`. An analysis holds about 250 bytes per job while it runs, so the default is about a quarter of a gigabyte at peak; the cached result is the answer, not the jobs. Read at startup. |
 | `HTTP_API_RUNTIME_ESTIMATE_INTERVAL` | How often [runtime estimates](#runtime-estimates) read newly completed jobs from the htcondordb mirror (a duration, e.g. `5m`). Default `5m`; `0` turns runtime estimates off entirely. Without a mirror they are off whatever this says. Read at startup. |
 | `HTTP_API_RUNTIME_ESTIMATE_BACKFILL` | How much job history runtime estimates read at startup, and how long a group of similar jobs is remembered without a new completion. Default `168h`. At most 500,000 of the newest records are read; the log says when that cap is hit. Read at startup. |
-| `HTTP_API_TOOL_STATS_MAX_SERIES` | Cap on distinct tool-call combinations held in memory and in the database. Default `10000`; past it new combinations fold into `other`. This is what bounds memory and disk. |
+| `HTTP_API_TOOL_STATS_MAX_SERIES` | Cap on distinct call combinations held in memory and in the database, per kind. Default `10000`; past it new combinations fold into `other`. This is what bounds memory and disk. |
+| `HTTP_API_REST_STATS` | `false` turns off the counting of REST API requests, keeping the MCP counting. Default on. See [REST API requests](#rest-api-requests). |
 | `HTTP_API_TOOL_STATS_OMIT_USER` | `true` renders every `/metrics` user label as `omitted`, for a site that does not want account names on a scrapeable endpoint. The database still records them. See [Usernames on /metrics](#usernames-on-metrics). |
 | `HTTP_API_ENABLE_MCP` | Enable the MCP endpoint (`/mcp`), the `/mcp/oauth2/*` spelling of the OAuth2 endpoints, and the `mcp:read`/`mcp:write` scopes in OAuth2 metadata. Required by the chat assistant. OAuth2 itself is served whenever the web UI **or** MCP is enabled, so a web UI with this off still logs people in and serves the device flow. |
 | `HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS` | JSON array of trusted external issuers for RFC 8693 token exchange (see [Token exchange](#token-exchange-rfc-8693)). Unset disables external exchange. |

@@ -121,19 +121,23 @@ type Config struct {
 	// /api/v1/jobs/watch (SSE) from it. Empty disables the jobs watch endpoint.
 	JobQueueLogPath string
 	EnableMetrics   bool // Enable /metrics endpoint (default: true if Collector is set)
-	// ToolStatsFlushInterval is how often MCP tool-call counters are
-	// written to the application database. Zero means the default.
-	ToolStatsFlushInterval time.Duration
-	// ToolStatsMaxLabelValues caps distinct values per /metrics label
-	// for tool statistics. Zero means the default.
-	ToolStatsMaxLabelValues int
-	// ToolStatsOmitUser renders every /metrics user label as a single
+	// UsageStatsFlushInterval is how often the call counters -- MCP
+	// tool calls and REST API requests alike -- are written to the
+	// application database. Zero means the default.
+	UsageStatsFlushInterval time.Duration
+	// UsageStatsMaxLabelValues caps distinct values per /metrics label
+	// for usage statistics. Zero means the default.
+	UsageStatsMaxLabelValues int
+	// UsageStatsOmitUser renders every /metrics user label as a single
 	// placeholder, for a site that does not want usernames on a
 	// potentially public endpoint. The durable table is unaffected.
-	ToolStatsOmitUser bool
-	// ToolStatsMaxSeries caps how many distinct tool-call series are
-	// held at all. Zero means the default.
-	ToolStatsMaxSeries int
+	UsageStatsOmitUser bool
+	// UsageStatsMaxSeries caps how many distinct series each kind
+	// holds at all. Zero means the default.
+	UsageStatsMaxSeries int
+	// RESTStatsEnabled counts REST API requests the same way MCP tool
+	// calls are counted (HTTP_API_REST_STATS).
+	RESTStatsEnabled bool
 	// UtilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS: the most jobs
 	// one /api/v1/utilization analysis may read. Zero means the default.
 	UtilizationMaxJobs int
@@ -491,10 +495,11 @@ func NewServer(cfg Config) (*Server, error) {
 		JobQueueLogPath:             cfg.JobQueueLogPath,
 		EnableMetrics:               cfg.EnableMetrics,
 		MetricsPublic:               cfg.MetricsPublic,
-		ToolStatsFlushInterval:      cfg.ToolStatsFlushInterval,
-		ToolStatsMaxLabelValues:     cfg.ToolStatsMaxLabelValues,
-		ToolStatsOmitUser:           cfg.ToolStatsOmitUser,
-		ToolStatsMaxSeries:          cfg.ToolStatsMaxSeries,
+		UsageStatsFlushInterval:     cfg.UsageStatsFlushInterval,
+		UsageStatsMaxLabelValues:    cfg.UsageStatsMaxLabelValues,
+		UsageStatsOmitUser:          cfg.UsageStatsOmitUser,
+		UsageStatsMaxSeries:         cfg.UsageStatsMaxSeries,
+		RESTStatsEnabled:            cfg.RESTStatsEnabled,
 		UtilizationMaxJobs:          cfg.UtilizationMaxJobs,
 		RuntimeEstimateInterval:     cfg.RuntimeEstimateInterval,
 		RuntimeEstimateBackfill:     cfg.RuntimeEstimateBackfill,
@@ -1486,6 +1491,11 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 						// scope-checkable, and an OAuth2 grant approved
 						// for less than it asks for looks unscoped.
 						ctx = withAPIKeyScopes(ctx, ar.GetGrantedScopes())
+						// The grant names the integration that sent
+						// this request, which is the one place a REST
+						// call says what it is rather than leaving us
+						// to guess from a User-Agent.
+						noteRESTClient(ctx, oauthClientLabel(ar))
 						// Remember both, so the next request for this
 						// bearer resolves the same way this one did.
 						s.tokenCache.SetCondorCredential(token, condorCredential, ar.GetGrantedScopes())
@@ -1625,6 +1635,10 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	}
 	ctx = htcondor.WithAuthenticatedUser(ctx, username)
 	ctx = s.withPlacementOwnerScope(ctx, r, username)
+	// Every credential kind that is not the API key short-circuit
+	// above lands here, so this is the one place REST usage counting
+	// has to learn who the caller is.
+	noteRESTActor(ctx, username)
 
 	return ctx, nil
 }

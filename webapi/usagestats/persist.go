@@ -1,4 +1,4 @@
-package toolstats
+package usagestats
 
 import (
 	"context"
@@ -47,9 +47,9 @@ func (s *Store) readRows(ctx context.Context, db *sql.DB) (map[Key]Entry, error)
 	if db == nil {
 		return nil, nil
 	}
-	rows, err := db.QueryContext(ctx,
-		`SELECT tool, actor, client, outcome, calls, duration_sum_seconds, buckets, last_call_at
-		   FROM mcp_tool_stats`)
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(
+		`SELECT %s, actor, client, outcome, calls, duration_sum_seconds, buckets, last_call_at
+		   FROM %s`, s.spec.NameColumn, s.spec.Table))
 	if err != nil {
 		if isMissingTable(err) {
 			// Nothing to read and nothing to destroy: a database that
@@ -57,7 +57,7 @@ func (s *Store) readRows(ctx context.Context, db *sql.DB) (map[Key]Entry, error)
 			return map[Key]Entry{}, nil
 		}
 		s.markLoadFailed()
-		return nil, fmt.Errorf("toolstats: load: %w", err)
+		return nil, fmt.Errorf("usagestats: load: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -70,7 +70,7 @@ func (s *Store) readRows(ctx context.Context, db *sql.DB) (map[Key]Entry, error)
 			bucketsJSON string
 			lastCall    int64
 		)
-		if err := rows.Scan(&k.Tool, &k.User, &k.Client, &k.Outcome,
+		if err := rows.Scan(&k.Name, &k.User, &k.Client, &k.Outcome,
 			&e.Calls, &e.DurationSum, &bucketsJSON, &lastCall); err != nil {
 			// Skip the row, keep the rest. SQLite is dynamically
 			// typed, so a single cell holding the wrong kind of value
@@ -101,10 +101,10 @@ func (s *Store) readRows(ctx context.Context, db *sql.DB) (map[Key]Entry, error)
 		// prefix of the table rather than the table. Loading it would
 		// make the store disagree with the rows a flush overwrites.
 		s.markLoadFailed()
-		return nil, fmt.Errorf("toolstats: load: %w", err)
+		return nil, fmt.Errorf("usagestats: load: %w", err)
 	}
 	if skipped > 0 {
-		return out, fmt.Errorf("toolstats: load: %d unreadable row(s) skipped; %d loaded",
+		return out, fmt.Errorf("usagestats: load: %d unreadable row(s) skipped; %d loaded",
 			skipped, len(out))
 	}
 	return out, nil
@@ -149,40 +149,41 @@ func (s *Store) Flush(ctx context.Context, db *sql.DB) error {
 func (s *Store) flush(ctx context.Context, db *sql.DB, snap map[Key]Entry) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("toolstats: flush: %w", err)
+		return fmt.Errorf("usagestats: flush: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO mcp_tool_stats
-		   (tool, actor, client, outcome, calls, duration_sum_seconds, buckets, last_call_at)
+	stmt, err := tx.PrepareContext(ctx, fmt.Sprintf(
+		`INSERT INTO %[1]s
+		   (%[2]s, actor, client, outcome, calls, duration_sum_seconds, buckets, last_call_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(tool, actor, client, outcome) DO UPDATE SET
+		 ON CONFLICT(%[2]s, actor, client, outcome) DO UPDATE SET
 		   calls                = excluded.calls,
 		   duration_sum_seconds = excluded.duration_sum_seconds,
 		   buckets              = excluded.buckets,
-		   last_call_at         = excluded.last_call_at`)
+		   last_call_at         = excluded.last_call_at`,
+		s.spec.Table, s.spec.NameColumn))
 	if err != nil {
-		return fmt.Errorf("toolstats: flush: %w", err)
+		return fmt.Errorf("usagestats: flush: %w", err)
 	}
 	defer func() { _ = stmt.Close() }()
 
 	for k, e := range snap {
 		buckets, err := json.Marshal(e.Buckets)
 		if err != nil {
-			return fmt.Errorf("toolstats: flush: %w", err)
+			return fmt.Errorf("usagestats: flush: %w", err)
 		}
 		var last int64
 		if !e.LastCall.IsZero() {
 			last = e.LastCall.Unix()
 		}
-		if _, err := stmt.ExecContext(ctx, k.Tool, k.User, k.Client, k.Outcome,
+		if _, err := stmt.ExecContext(ctx, k.Name, k.User, k.Client, k.Outcome,
 			e.Calls, e.DurationSum, string(buckets), last); err != nil {
-			return fmt.Errorf("toolstats: flush: %w", err)
+			return fmt.Errorf("usagestats: flush: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("toolstats: flush: %w", err)
+		return fmt.Errorf("usagestats: flush: %w", err)
 	}
 	return nil
 }
@@ -198,7 +199,7 @@ func isMissingTable(err error) bool {
 // record that could not be read. Counting continues in memory, and a
 // later successful load lets the flush resume -- see LoadFailed.
 var errFlushWithoutLoad = errors.New(
-	"toolstats: refusing to flush: the persisted totals could not be read, " +
+	"usagestats: refusing to flush: the persisted totals could not be read, " +
 		"so writing would replace them with this process's counts alone")
 
 // ErrFlushWithoutLoad reports whether err is that refusal, so a caller

@@ -2,16 +2,46 @@ import type { UsageRow } from "@/lib/api";
 
 // Display helpers for the admin usage page.
 
-export const OUTCOME_LABELS = {
+// Column headings for every outcome either kind can report. Which of
+// them a table shows is the server's call -- the summary carries its
+// own vocabulary in display order -- so this is a lookup, not a list:
+// adding an outcome server-side without touching this file gives a
+// column headed with the raw value rather than no column at all.
+const OUTCOME_LABELS: Record<string, string> = {
   ok: "OK",
+  // MCP.
   error: "Error",
   refused: "Refused",
   unknown_tool: "Unknown tool",
-} as const;
+  // REST.
+  denied: "Denied",
+  not_found: "Not found",
+  rate_limited: "Rate limited",
+  client_error: "Bad request",
+};
 
-export type Outcome = keyof typeof OUTCOME_LABELS;
+/** outcomeLabel is the column heading for an outcome. */
+export function outcomeLabel(outcome: string): string {
+  return OUTCOME_LABELS[outcome] ?? outcome;
+}
 
-export const OUTCOMES = Object.keys(OUTCOME_LABELS) as Outcome[];
+/**
+ * outcomeTone says whether an outcome should read as trouble.
+ *
+ * "ok" is plain and everything else is amber -- including the ones
+ * that are policy working rather than anything breaking. They are
+ * still the rows an operator is scanning for, and colouring "denied"
+ * like a success would bury the one number that explains a support
+ * ticket.
+ */
+export function outcomeTone(outcome: string): string {
+  return outcome === "ok" ? "" : "text-amber-700";
+}
+
+/** outcomeCount reads one outcome off a row, tolerating an absent key. */
+export function outcomeCount(row: UsageRow, outcome: string): number {
+  return row.outcomes?.[outcome] ?? 0;
+}
 
 /** formatSeconds renders a duration at a precision a reader can use. */
 export function formatSeconds(s: number): string {
