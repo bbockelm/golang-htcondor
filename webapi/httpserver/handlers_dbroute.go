@@ -190,8 +190,9 @@ func (s *Handler) historyFromMirror(ctx context.Context, w http.ResponseWriter, 
 
 	// No cursor: an archive answers "the newest K" in one shot, and the
 	// endpoint's own before_cluster/before_proc cursor rides in the
-	// constraint.
-	return s.streamMirrorRows(ctx, w, "history", constraint, opts.Projection, opts.Limit,
+	// constraint. A window on QDate or another job time is restated on
+	// EnteredHistoryTime, which the archive can prune on.
+	return s.streamMirrorRows(ctx, w, "history", dbmirror.WithHistoryFloor(constraint), opts.Projection, opts.Limit,
 		"ads", dbmirror.Provenance(info, d.Note), nil)
 }
 
