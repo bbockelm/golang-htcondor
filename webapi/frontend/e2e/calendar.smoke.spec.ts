@@ -78,8 +78,11 @@ test('a day drills through to the jobs it counted', async ({ page }) => {
   await cell.click();
   await expect(page).toHaveURL(/\/archive\?constraint=/);
   const constraint = new URL(page.url()).searchParams.get('constraint') ?? '';
+  // On EnteredHistoryTime: the drill-down has to match on the attribute
+  // the server bucketed the day by, or the list that opens disagrees with
+  // the figure that was clicked.
   expect(constraint).toBe(
-    `JobStatus == 4 && CompletionDate >= ${CALENDAR_PAST_DAY} && CompletionDate < ${CALENDAR_PAST_DAY_END}`,
+    `JobStatus == 4 && EnteredHistoryTime >= ${CALENDAR_PAST_DAY} && EnteredHistoryTime < ${CALENDAR_PAST_DAY_END}`,
   );
   // The page says what it was asked, rather than leaving an unexplained
   // filter on an archive listing.

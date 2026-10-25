@@ -210,23 +210,37 @@ export function dayHref(
   const when = dayLabel(cell.day);
   switch (flow) {
     case 'submitted': {
+      // The one square no single page reproduces. The server counts a day's
+      // submissions from the archive AND the live queue unioned, because a
+      // job submitted three weeks ago and still idle is in the queue while
+      // one submitted this morning may already be archived -- and neither
+      // page holds both. So the link narrows, and says which half it shows
+      // rather than claiming the square's total.
       const constraint = `QDate >= ${from} && QDate < ${to}`;
-      const why = `jobs submitted ${when}`;
       return opts.inProgress
-        ? jobsDrilldown(constraint, why)
-        : archiveDrilldown(constraint, why);
+        ? jobsDrilldown(constraint, `jobs submitted ${when} and still in the queue`)
+        : archiveDrilldown(constraint, `jobs submitted ${when} that have finished`);
     }
+    // Both finished flows match on EnteredHistoryTime, because that is the
+    // attribute the server bucketed them by -- it reports which, per series,
+    // in `bucketed_on`. Matching on anything else asks a different question
+    // from the one the square answered, and the drill-down's total then
+    // disagrees with the figure that was clicked.
+    //
+    // It is also the attribute to want. A removed job often has no
+    // CompletionDate at all, so matching on one selects none of them. And
+    // every producer of the history archive zone-maps EnteredHistoryTime,
+    // so a day-range on it prunes whole segments; CompletionDate is zone-
+    // mapped by the schedd and CEDAR syncs but not by the history importer,
+    // so on an imported history that window would scan the lot.
     case 'completed':
       return archiveDrilldown(
-        `JobStatus == 4 && CompletionDate >= ${from} && CompletionDate < ${to}`,
+        `JobStatus == 4 && EnteredHistoryTime >= ${from} && EnteredHistoryTime < ${to}`,
         `jobs that finished ${when}`,
       );
     case 'removed':
-      // EnteredCurrentStatus, not CompletionDate: a removed job often
-      // has no completion date at all, and matching on one would select
-      // none of them.
       return archiveDrilldown(
-        `JobStatus == 3 && EnteredCurrentStatus >= ${from} && EnteredCurrentStatus < ${to}`,
+        `JobStatus == 3 && EnteredHistoryTime >= ${from} && EnteredHistoryTime < ${to}`,
         `jobs removed ${when}`,
       );
   }

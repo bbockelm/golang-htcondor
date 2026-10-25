@@ -77,8 +77,9 @@ describe('CalendarPanel', () => {
       'href',
       expect.stringContaining('/archive?constraint='),
     );
+    // On EnteredHistoryTime, which is what the server bucketed the day by.
     expect(decodeURIComponent(finished.getAttribute('href')!)).toContain(
-      `CompletionDate >= ${MONDAY} && CompletionDate < ${MONDAY + DAY_SECONDS}`,
+      `EnteredHistoryTime >= ${MONDAY} && EnteredHistoryTime < ${MONDAY + DAY_SECONDS}`,
     );
   });
 

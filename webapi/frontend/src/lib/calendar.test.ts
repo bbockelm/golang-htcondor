@@ -169,6 +169,13 @@ describe('dayHref', () => {
     expect(href).toContain('/jobs?constraint=');
   });
 
+  // The next two pin the attribute to the one the server bucketed the day
+  // by, which it reports per series in `bucketed_on`. The drill-down has to
+  // ask the question the number answered: match a finished job on
+  // CompletionDate instead and the list that opens disagrees with the
+  // figure that was clicked -- and a removed job often has no
+  // CompletionDate at all, so that list would come back empty. If the
+  // server ever changes what it buckets by, these change with it.
   it('sends finished work to the archive, never to the queue', () => {
     // A finished job lives in the queue for seconds and in the archive
     // thereafter, so /jobs would land on "not found".
@@ -176,17 +183,17 @@ describe('dayHref', () => {
     expect(href.startsWith('/archive?')).toBe(true);
     const constraint = decodeURIComponent(new URL(href, 'http://x').searchParams.get('constraint')!);
     expect(constraint).toBe(
-      `JobStatus == 4 && CompletionDate ${bounds}CompletionDate < ${WEDNESDAY + DAY_SECONDS}`,
+      `JobStatus == 4 && EnteredHistoryTime ${bounds}EnteredHistoryTime < ${
+        WEDNESDAY + DAY_SECONDS
+      }`,
     );
   });
 
   it('matches removed jobs on when they were removed', () => {
-    // A removed job often has no CompletionDate at all, so matching on
-    // one would select none of them.
     const href = dayHref('removed', counted({ removed: 2 }), { inProgress: false })!;
     const constraint = decodeURIComponent(new URL(href, 'http://x').searchParams.get('constraint')!);
     expect(constraint).toBe(
-      `JobStatus == 3 && EnteredCurrentStatus ${bounds}EnteredCurrentStatus < ${
+      `JobStatus == 3 && EnteredHistoryTime ${bounds}EnteredHistoryTime < ${
         WEDNESDAY + DAY_SECONDS
       }`,
     );
