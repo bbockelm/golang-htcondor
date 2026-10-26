@@ -2,7 +2,7 @@ package mcpserver
 
 import (
 	"context"
-
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +13,7 @@ import (
 	"github.com/PelicanPlatform/classad/dbrpc"
 
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
 // htcondordbEnabled reports whether the DB-backed tools can run
@@ -162,6 +163,9 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 			}
 		}
 	}
+	if len(groupBy) > maxAggregateGroupCols {
+		return nil, fmt.Errorf("group_by names %d attributes; at most %d are allowed", len(groupBy), maxAggregateGroupCols)
+	}
 
 	dbc, closer, info, err := s.dbClient(ctx)
 	if err != nil {
@@ -182,9 +186,9 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 	}
 	defer closer()
 
-	aggRows, err := dbc.AggregateTable(ctx, table, constraint, groupBy, []dbrpc.AggSpec{{Func: dbrpc.AggCount, Arg: "*"}})
+	aggRows, err := aggregateMirrorTable(ctx, dbc, table, constraint, groupBy, []dbrpc.AggSpec{{Func: dbrpc.AggCount, Arg: "*"}})
 	if err != nil {
-		return nil, fmt.Errorf("aggregate query failed: %w", err)
+		return nil, err
 	}
 
 	var b strings.Builder
@@ -206,6 +210,61 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 	b.WriteString("\n" + scope.Note())
 	return structuredTextResult(b.String(),
 		aggregateStructured(groups, groupBy, table, "htcondordb", false)), nil
+}
+
+// mirrorArchiveTables are the mirror tables htcondordb keeps as ARCHIVES
+// (append-only) rather than plain tables.
+//
+// The two take different aggregate ops. AggregateTable sends the table
+// op, which a mirror resolves to an archive of the same name only since
+// it was taught to; an older one answers "no such table: history" while
+// every projection read of that name -- query_history_db included --
+// works. ArchiveAggregate is the archive's own op and reduces through the
+// same engine, so the answer does not depend on which mirror is asked.
+var mirrorArchiveTables = map[string]bool{
+	historyArchiveTable: true,
+	"epoch_history":     true,
+	"job_metrics":       true,
+}
+
+// maxAggregateGroupCols is the mirror's GROUP BY column limit; see
+// multiap.MaxAggregateGroupCols.
+const maxAggregateGroupCols = multiap.MaxAggregateGroupCols
+
+// aggregateMirrorTable runs a GROUP BY over the mirror table named table,
+// by the op its kind takes (see mirrorArchiveTables).
+func aggregateMirrorTable(ctx context.Context, dbc *dbrpc.Client, table, constraint string, groupBy []string, aggs []dbrpc.AggSpec) ([]dbrpc.AggRow, error) {
+	if !mirrorArchiveTables[table] {
+		rows, err := dbc.AggregateTable(ctx, table, constraint, groupBy, aggs)
+		if err != nil {
+			return nil, fmt.Errorf("aggregate query failed: %w", err)
+		}
+		return rows, nil
+	}
+	rows, err := dbc.ArchiveAggregate(ctx, table, constraint, groupBy, aggs)
+	var se *dbrpc.ServerError
+	switch {
+	case err == nil:
+		return rows, nil
+	case errors.As(err, &se) && strings.HasPrefix(se.Msg, "no such archive: "):
+		// A mirror that keeps this table as an ordinary one. Not what
+		// htcondordb builds, but the table op answers it.
+		rows, err = dbc.AggregateTable(ctx, table, constraint, groupBy, aggs)
+		if err != nil {
+			return nil, fmt.Errorf("aggregate query failed: %w", err)
+		}
+		return rows, nil
+	case errors.Is(err, dbrpc.ErrArchiveAggregateUnsupported):
+		// No fallback: a mirror without the archive op does not resolve
+		// an archive for the table op either.
+		msg := fmt.Sprintf("this htcondordb mirror is too old to aggregate the %q archive; it needs upgrading", table)
+		if table == historyArchiveTable {
+			msg += " (query_history_db can still list completed jobs)"
+		}
+		return nil, errors.New(msg)
+	default:
+		return nil, fmt.Errorf("aggregate query failed: %w", err)
+	}
 }
 
 // aggregateStructured is the aggregate_jobs payload, shared by the mirror
