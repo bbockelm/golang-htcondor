@@ -634,20 +634,28 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 	// lookup is what consumes it.
 	ctx := WithRequestedRedirectURI(r.Context(), r.URL.Query().Get("redirect_uri"))
 
-	// The placement scope is granted through the device flow only, where
-	// the approving identity is recorded.
-	if isPlacementGrant(strings.Fields(r.FormValue("scope"))) {
-		h.writeOAuthError(w, http.StatusBadRequest, "invalid_scope",
-			"The placement scope is granted through the device authorization flow only")
-		return
-	}
-
 	// Filter requested scopes to only those allowed for the client
 	filteredReq, err := h.filterRequestedScopes(ctx, r)
 	if err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Failed to filter scopes", "error", err)
 		// Continue with original request if filtering fails
 		filteredReq = r
+	}
+
+	// The placement scope is granted through the device flow only, where
+	// the approving identity is recorded.
+	//
+	// Checked after the scope filter, not before it. A client that may not
+	// hold placement at all has it dropped here like any other scope it is
+	// not allowed, and the rest of its request proceeds; only a client whose
+	// own scope list carries placement -- placement_client -- is told it
+	// came through the wrong flow. Refusing on the raw request instead meant
+	// any client that merely named the scope was refused outright, which is
+	// what every client does when the server advertises it.
+	if isPlacementGrant(strings.Fields(filteredReq.FormValue("scope"))) {
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_scope",
+			"The placement scope is granted through the device authorization flow only")
+		return
 	}
 
 	// Parse authorization request
@@ -1546,6 +1554,15 @@ func generateRandomString(length int) string {
 // only request the scopes the server advertises, so without it here they
 // never ask for a refresh token and silently end up with access-token-
 // only sessions that force a full re-auth on every expiry.
+//
+// The placement scope is deliberately absent. It is not a scope a user
+// authorizes: placement_client obtains it through the device grant alone,
+// and that client carries it in its own stored scope list
+// (seedPlacementClient), which is what the device endpoint filters
+// against. Advertising it had no client to serve and broke every other
+// one -- a client asks for each scope the server advertises, so claude.ai
+// and Claude Code began sending "placement" to /authorize, which refuses
+// it, and every browser authorization failed with invalid_scope.
 var oauth2AdvertisedScopes = []string{
 	"openid", "profile", "email",
 	"offline_access",
@@ -1570,9 +1587,6 @@ var oauth2AdvertisedScopes = []string{
 	// decision; the scopes only lengthened the consent page, and
 	// mapCondorScopesToAuthz no longer puts them in a minted token.
 	"condor:/READ", "condor:/WRITE",
-	// The placement scope: a device-flow grant for placement-client that
-	// may request a placement token and nothing else (placement_scope.go).
-	placementScope,
 }
 
 // mcpOnlyScopes are the scopes advertised only where MCP is served.

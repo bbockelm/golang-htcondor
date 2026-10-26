@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ory/fosite"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
@@ -125,8 +127,10 @@ func TestPlacementClientIsSeeded(t *testing.T) {
 		!slices.Contains(c.GetGrantTypes(), deviceCodeGrant) || !slices.Contains(c.GetGrantTypes(), "refresh_token") {
 		t.Errorf("placement_client = public %v scopes %v grants %v", c.IsPublic(), c.GetScopes(), c.GetGrantTypes())
 	}
-	if !slices.Contains(oauth2AdvertisedScopes, placementScope) {
-		t.Error("the placement scope is not advertised")
+	// And it is not advertised: placement_client knows the scope, and no
+	// other client may ask for it. See oauth2AdvertisedScopes.
+	if slices.Contains(oauth2AdvertisedScopes, placementScope) {
+		t.Error("the placement scope is advertised")
 	}
 }
 
@@ -188,16 +192,16 @@ func TestPlacementDeviceGrantActsForTheApprovingIdentity(t *testing.T) {
 }
 
 // The placement device flow needs OAuth2, not MCP: with the web UI on and
-// MCP off, placement_client is seeded, the scope is advertised, and its
-// device flow ends in a placement token from /api/v1/placement/me/token.
+// MCP off, placement_client is seeded and its device flow ends in a
+// placement token from /api/v1/placement/me/token.
 func TestPlacementDeviceFlowWithWebUIAndWithoutMCP(t *testing.T) {
 	fake := newOnboardFake()
 	s := placementOAuthServerWith(t, fake, true, false)
 	if s.oauth2Provider == nil {
 		t.Fatal("no OAuth2 provider with the web UI on and MCP off")
 	}
-	if !slices.Contains(s.advertisedScopes(), placementScope) {
-		t.Errorf("the placement scope is not advertised: %v", s.advertisedScopes())
+	if slices.Contains(s.advertisedScopes(), placementScope) {
+		t.Errorf("the placement scope is advertised: %v", s.advertisedScopes())
 	}
 	if path := s.oauth2EndpointPath("device/authorize"); strings.HasPrefix(path, "/mcp/") {
 		t.Fatalf("device authorization advertised at %s without MCP", path)
@@ -332,5 +336,68 @@ func TestPlacementGrantRefreshFollowsThePlacementd(t *testing.T) {
 				t.Errorf("the grant's access token still works after %s", tc.name)
 			}
 		})
+	}
+}
+
+// The regression the advertised placement scope caused: an MCP client asks
+// for every scope the discovery document lists, so advertising placement
+// made each one send "placement" to /authorize, where it was refused --
+// every browser authorization failed with invalid_scope and no agent could
+// re-authorize. The scope is not advertised, and a client that names it
+// anyway has it filtered out like any other scope it may not hold.
+func TestAdvertisedScopesAuthorizeWithPlacementNamed(t *testing.T) {
+	s := placementOAuthServer(t, newOnboardFake())
+
+	rec := s.do(t, nil, http.MethodGet, "/.well-known/oauth-authorization-server", "")
+	var meta struct {
+		Scopes []string `json:"scopes_supported"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &meta) != nil {
+		t.Fatalf("metadata: %d %s", rec.Code, rec.Body.String())
+	}
+	if slices.Contains(meta.Scopes, placementScope) {
+		t.Errorf("scopes_supported advertises the placement scope: %v", meta.Scopes)
+	}
+
+	const clientID, redirect = "advertised-scope-client", "http://127.0.0.1/callback"
+	if err := s.oauth2Provider.GetStorage().CreateClient(context.Background(), &fosite.DefaultClient{
+		ID:            clientID,
+		RedirectURIs:  []string{redirect},
+		GrantTypes:    []string{"authorization_code", "refresh_token"},
+		ResponseTypes: []string{"code"},
+		Scopes:        meta.Scopes,
+		Public:        true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// What a client does with a discovery document that still lists
+	// placement: ask for everything, placement among it.
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		s.oauth2EndpointPath("authorize")+"?"+url.Values{
+			"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {redirect},
+			"scope":                 {strings.Join(append(slices.Clone(meta.Scopes), placementScope), " ")},
+			"state":                 {"clientstate123"},
+			"code_challenge":        {"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"},
+			"code_challenge_method": {"S256"},
+		}.Encode(), nil)
+	req.AddCookie(s.userCookie(t, "alice", aliceIdentity))
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusFound || strings.Contains(rr.Body.String(), "invalid_scope") {
+		t.Fatalf("authorize: %d %s %q", rr.Code, rr.Body.String(), rr.Header().Get("Location"))
+	}
+	loc, err := url.Parse(rr.Header().Get("Location"))
+	if err != nil || loc.Query().Get("state") == "" {
+		t.Fatalf("authorize did not reach consent: %q", rr.Header().Get("Location"))
+	}
+
+	// And placement is not in the grant it would approve.
+	ar, ok := s.oauth2StateStore.Get(loc.Query().Get("state"))
+	if !ok {
+		t.Fatal("no stored authorize request")
+	}
+	if slices.Contains(ar.GetRequestedScopes(), placementScope) {
+		t.Errorf("the stored request asks for %v", ar.GetRequestedScopes())
 	}
 }
