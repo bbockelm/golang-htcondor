@@ -59,7 +59,7 @@ const (
 	// the cursor opcode a paginated read needs.
 	ReasonNoPagination Reason = "no_pagination"
 
-	// The last three are query shape: this particular request cannot be
+	// The last four are query shape: this particular request cannot be
 	// served from the mirror no matter how healthy it is. Not transient
 	// — retrying changes nothing, the caller has to ask differently.
 
@@ -69,6 +69,11 @@ const (
 	// ReasonPageToken is set when the rest of this walk belongs to the
 	// schedd.
 	ReasonPageToken Reason = "page_token"
+	// ReasonPageTokenExpired is set when the mirror can no longer resume the
+	// walk a page token continues: it has reclaimed what the walk's snapshot
+	// reads. The token is dead on every backend; the caller restarts the
+	// listing without it.
+	ReasonPageTokenExpired Reason = "page_token_expired" //nolint:gosec // G101: a reason label, not a credential.
 	// ReasonNoOwnerScope is set when the schedd has not identified the
 	// caller. A mirror read skips the schedd handshake, so it is not
 	// offered to a caller the schedd has not already accepted -- and a
@@ -83,7 +88,7 @@ const (
 // deployment's (503, and worth retrying).
 func (r Reason) QueryShape() bool {
 	switch r {
-	case ReasonUnsupportedQuery, ReasonPageToken, ReasonNoOwnerScope:
+	case ReasonUnsupportedQuery, ReasonPageToken, ReasonPageTokenExpired, ReasonNoOwnerScope:
 		return true
 	}
 	return false

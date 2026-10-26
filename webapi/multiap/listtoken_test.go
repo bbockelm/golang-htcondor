@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+
+	"github.com/PelicanPlatform/classad/dbrpc"
 )
 
 // TestJobsTokenIsBoundToItsHub: a job list token names the hub that
@@ -62,5 +64,19 @@ func TestJobsTokenIsBoundToItsHub(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("%s returned %d times", id, n)
 		}
+	}
+}
+
+// TestExpiredJobsTokenAsksForRestart: a hub that can no longer resume a
+// token's cursor answers before any row, and the list reports it as a
+// 400 asking the caller to restart -- not a 503 that invites retrying a
+// token that will fail the same way every time.
+func TestExpiredJobsTokenAsksForRestart(t *testing.T) {
+	expired := fmt.Errorf("reading: %w", &dbrpc.ServerError{Msg: "cursor expired: collections: the cursor's snapshot has been reclaimed"})
+	if err := hubReadError(expired); err.Status != http.StatusBadRequest || err.Reason != ReasonRestartPaging {
+		t.Fatalf("expired cursor: %d %q, want 400 %q", err.Status, err.Reason, ReasonRestartPaging)
+	}
+	if err := hubReadError(&dbrpc.ServerError{Msg: "no such table: jobs"}); err.Status != http.StatusServiceUnavailable || err.Reason != "" {
+		t.Fatalf("another server error: %d %q, want a 503", err.Status, err.Reason)
 	}
 }
