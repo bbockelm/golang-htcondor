@@ -571,7 +571,7 @@ func (s *Service) ListJobs(ctx context.Context, req ListRequest, yield func(Row)
 	}
 	if err != nil {
 		if res.Returned == 0 && !stopped {
-			return nil, errorf(http.StatusServiceUnavailable, "reading the federation hub: %v", err)
+			return nil, hubReadError(err)
 		}
 		res.Err = err
 		return res, nil

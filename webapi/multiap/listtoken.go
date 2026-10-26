@@ -28,7 +28,8 @@ import (
 // the hub's name base64url-encoded and the cursor a dbmirror token.
 const jobsTokenPrefix = "jh1:"
 
-// ReasonRestartPaging is the reason of a page token another hub issued.
+// ReasonRestartPaging is the reason of a page token that cannot be resumed:
+// one another hub issued, or one whose walk the hub can no longer read.
 const ReasonRestartPaging = "restart_pagination"
 
 func encodeJobsToken(hub string, c dbrpc.SeqCursor) string {
@@ -65,4 +66,18 @@ func decodeJobsToken(token, hub string) (dbrpc.SeqCursor, error) {
 		return dbrpc.SeqCursor{}, errorf(http.StatusBadRequest, "unreadable page token: %v", err)
 	}
 	return c, nil
+}
+
+// hubReadError is the error for a job list read that failed before any
+// row. A hub refusing to resume the token's cursor -- it has reclaimed
+// what the walk's snapshot reads -- is the caller's to restart, a 400
+// with ReasonRestartPaging: the token fails the same way however often
+// it is retried, so a 503 would invite retrying it forever. Anything else
+// is the hub being unavailable.
+func hubReadError(err error) *Error {
+	if dbmirror.CursorExpired(err) {
+		return &Error{Status: http.StatusBadRequest, Reason: ReasonRestartPaging,
+			Msg: "this page token has expired; restart pagination from the first page (omit page_token)"}
+	}
+	return errorf(http.StatusServiceUnavailable, "reading the federation hub: %v", err)
 }

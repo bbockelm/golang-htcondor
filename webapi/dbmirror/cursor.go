@@ -3,7 +3,9 @@ package dbmirror
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 )
@@ -59,4 +61,18 @@ func DecodeCursor(token string) (dbrpc.SeqCursor, error) {
 		return dbrpc.SeqCursor{}, fmt.Errorf("malformed htcondordb page token: %w", err)
 	}
 	return dbrpc.SeqCursor{Shard: t.Shard, Snapshot: t.Snapshot, Seq: t.Seq, Key: t.Key}, nil
+}
+
+// cursorExpiredPrefix opens the message of the mirror's refusal to resume a cursor whose
+// snapshot it has since reclaimed. It is the wire contract dbrpc's own ErrCursorExpired
+// classifies on, matched here directly so the check works against any client library version.
+const cursorExpiredPrefix = "cursor expired: "
+
+// CursorExpired reports whether err is the mirror refusing to resume a page token's cursor
+// because the versions its snapshot sees have been reclaimed -- the lease on the walk ran
+// out, or the mirror restarted. The refusal arrives before any row. The token can never be
+// resumed: the caller must restart the listing without it.
+func CursorExpired(err error) bool {
+	var se *dbrpc.ServerError
+	return errors.As(err, &se) && strings.HasPrefix(se.Msg, cursorExpiredPrefix)
 }

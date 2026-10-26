@@ -409,7 +409,12 @@ func (m *mirrorRowStream) readFailed(err error) *dbmirror.Decision {
 	m.h.logger.Debug(logging.DestinationHTTP, "htcondordb mirror query failed before any row; using the schedd",
 		"table", m.table, "error", err, "failure", m.failure)
 	note, reason := m.failure, dbmirror.ReasonBadRow
-	if err != nil {
+	switch {
+	case dbmirror.CursorExpired(err):
+		// Not a failing mirror: the page token outlived the walk it continues.
+		// Retrying it fails the same way, so it is the caller's to restart.
+		note, reason = "the page token has expired; retry the query without a page token", dbmirror.ReasonPageTokenExpired
+	case err != nil:
 		note, reason = err.Error(), dbmirror.ReasonQueryFailed
 	}
 	return &dbmirror.Decision{Reason: reason, Note: note}

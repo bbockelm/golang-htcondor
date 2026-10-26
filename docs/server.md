@@ -2687,7 +2687,11 @@ What a switch does to each consumer:
   is a position in one hub's change log and names that hub; asked of
   another, it is refused with a 400 (`reason`: `restart_pagination`), and
   the listing must start over from the first page. Back on the hub that
-  issued it, it resumes. History tokens (`/api/v1/jobs/archive`) are
+  issued it, it resumes. A token also expires: the hub keeps the snapshot
+  a listing reads for a lease period (ten minutes by default) from when
+  the listing reached each shard, and across a hub restart not at all.
+  A token whose snapshot the hub has since reclaimed is refused the same
+  way, with a 400 and `restart_pagination`. History tokens (`/api/v1/jobs/archive`) are
   ordered by the job's values, which every hub orders alike, and carry
   on across a switch.
 - **Watches** are evaluated one owner's pass at a time, each pass pinned
