@@ -2785,7 +2785,12 @@ placement-only included -- approves it. The access token then calls `GET
 `Authorization: Bearer`, and nothing else: every other route refuses it.
 The identity it acts for is the one that approved it, recorded on the
 grant. `placement` cannot be combined with any other scope, and is granted
-through the device flow only. Each refresh re-reads the identity from the
+through the device flow only. It is deliberately absent from
+`scopes_supported` in the discovery documents: `placement_client` knows the
+scope and the device endpoint checks it against that client's own scope
+list, while an MCP client asks for every scope the server advertises, so
+advertising it would send `placement` to `/authorize` -- which refuses it --
+and break every browser authorization. Each refresh re-reads the identity from the
 placementd and ends the grant when the identity is gone or expired, or the
 account's schedd user record is disabled. The legacy paths above keep
 working for older clients.
