@@ -298,10 +298,22 @@ func (s *Handler) fetchUserInfo(ctx context.Context, accessToken string) (*UserI
 	return userInfo, nil
 }
 
+// signInFailed ends a failed sign-in with a styled HTML page.
+//
+// Every exit below is reached by a browser following the identity
+// provider's redirect, so a JSON body is the wrong thing to hand back: the
+// person sees a raw object, and the one audience that could act on the
+// detail -- an operator reading the log -- already has it. detail carries
+// the specific cause under the heading, empty when there is nothing to add.
+func (s *Handler) signInFailed(w http.ResponseWriter, statusCode int, message, detail string) {
+	s.renderResultPage(w, statusCode, "Sign-in failed", "#f44336", "Sign-in failed", message, detail)
+}
+
 // handleOAuth2Callback handles the OAuth2 callback from the IDP
 func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	if s.oauth2Provider == nil || s.oauth2Config == nil {
-		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		s.signInFailed(w, http.StatusInternalServerError,
+			"Single sign-on is not configured on this server.", "")
 		return
 	}
 
@@ -316,12 +328,22 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		errorDesc := r.URL.Query().Get("error_description")
 		s.logger.Error(logging.DestinationHTTP, "OAuth2 callback error from IDP",
 			"error", errorParam, "error_description", errorDesc)
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %s", errorDesc))
+		// The identity provider's own words, not ours: saying only that
+		// sign-in failed would hide the one detail that explains it, and
+		// an administrator is usually the person hitting this.
+		detail := errorDesc
+		if detail == "" {
+			detail = errorParam
+		}
+		s.signInFailed(w, http.StatusUnauthorized,
+			"The identity provider refused this sign-in.", detail)
 		return
 	}
 
 	if state == "" || code == "" {
-		s.writeError(w, http.StatusBadRequest, "Missing state or code parameter")
+		s.signInFailed(w, http.StatusBadRequest,
+			"This sign-in link is incomplete.",
+			"Start again from the page you were trying to reach.")
 		return
 	}
 
@@ -331,7 +353,9 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	entry, ok := s.oauth2StateStore.Take(state)
 	if !ok {
 		s.logger.Error(logging.DestinationHTTP, "Invalid or expired OAuth2 state", "state", state)
-		s.writeError(w, http.StatusBadRequest, "Invalid or expired state parameter")
+		s.signInFailed(w, http.StatusBadRequest,
+			"This sign-in has expired or was already used.",
+			"Start again from the page you were trying to reach.")
 		return
 	}
 	// The browser completing the login must be the one that started it;
@@ -341,8 +365,9 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn(logging.DestinationHTTP,
 			"Refusing OAuth2 callback from a browser that did not start the login",
 			"state", state, "bound", entry.BrowserBinding != "")
-		s.writeError(w, http.StatusBadRequest,
-			"This sign-in was not started in this browser; start it again")
+		s.signInFailed(w, http.StatusBadRequest,
+			"This sign-in was not started in this browser.",
+			"Start again in the browser you want to sign in with.")
 		return
 	}
 	ar, originalURL := entry.AuthorizeRequest, entry.OriginalURL
@@ -364,7 +389,8 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	token, err := s.oauth2Config.Exchange(ctx, code)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to exchange code for token", "error", err)
-		s.writeError(w, http.StatusUnauthorized, "Failed to exchange authorization code")
+		s.signInFailed(w, http.StatusUnauthorized,
+			"Could not complete the sign-in with the identity provider.", "")
 		return
 	}
 
@@ -373,7 +399,8 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	userInfo, err := s.fetchUserInfo(ctx, token.AccessToken)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to fetch user info", "error", err)
-		s.writeError(w, http.StatusUnauthorized, "Failed to fetch user information")
+		s.signInFailed(w, http.StatusUnauthorized,
+			"Could not read your account from the identity provider.", "")
 		return
 	}
 
@@ -382,7 +409,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	if err := s.evaluateLoginRequirements(userInfo.Claims); err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "Login refused by OAuth2 requirements",
 			"requirements", s.oauth2RequirementsText, "claims_returned", claimNames(userInfo.Claims))
-		s.writeError(w, http.StatusForbidden, err.Error())
+		s.signInFailed(w, http.StatusForbidden, "This account may not sign in here.", err.Error())
 		return
 	}
 
@@ -393,8 +420,9 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		// operator cannot tell which from the log.
 		s.logger.Error(logging.DestinationHTTP, "User info missing subject claim",
 			"claim", s.oauth2UsernameClaim, "claims_returned", claimNames(userInfo.Claims))
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf(
-			"Invalid user information: the identity provider returned no %q claim", s.oauth2UsernameClaim))
+		s.signInFailed(w, http.StatusUnauthorized,
+			"The identity provider did not say who you are.",
+			fmt.Sprintf("It returned no %q claim.", s.oauth2UsernameClaim))
 		return
 	}
 
