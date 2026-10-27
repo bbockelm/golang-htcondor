@@ -298,6 +298,29 @@ func (s *Handler) fetchUserInfo(ctx context.Context, accessToken string) (*UserI
 	return userInfo, nil
 }
 
+// refusedScopeHint turns an invalid_scope refusal into something its
+// reader can act on, or "" for any other error.
+//
+// The provider says which scope it would not give; it cannot say that the
+// list came from this server's configuration, which is the part an
+// administrator needs. CILogon is the case in point: it approves scopes
+// per client and began *rejecting* an unapproved one where it used to
+// ignore it silently, so a pool that had worked for years started refusing
+// every login the day the provider was upgraded, naming a scope nobody had
+// touched.
+//
+// Naming the scopes discloses nothing: they were in the authorize URL this
+// browser just followed.
+func refusedScopeHint(errorParam string, requested []string) string {
+	if errorParam != "invalid_scope" || len(requested) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"This server asked for %q. Each of those has to be approved for its client at the provider; "+
+			"set HTTP_API_OAUTH2_SCOPES to the ones that are.",
+		strings.Join(requested, " "))
+}
+
 // signInFailed ends a failed sign-in with a styled HTML page.
 //
 // Every exit below is reached by a browser following the identity
@@ -334,6 +357,9 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		detail := errorDesc
 		if detail == "" {
 			detail = errorParam
+		}
+		if hint := refusedScopeHint(errorParam, s.oauth2Config.Scopes); hint != "" {
+			detail += " " + hint
 		}
 		s.signInFailed(w, http.StatusUnauthorized,
 			"The identity provider refused this sign-in.", detail)

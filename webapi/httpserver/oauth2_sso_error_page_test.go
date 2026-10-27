@@ -82,6 +82,44 @@ func TestSSOCallbackRefusalRendersAPage(t *testing.T) {
 	}
 }
 
+// An invalid_scope refusal names the scopes this server asked for and the
+// setting that holds them. The provider says which scope it refused; only
+// this server knows where the list came from, and without that an operator
+// is left hunting -- which is exactly what happened when CILogon began
+// rejecting unapproved scopes it had previously ignored.
+func TestSSOCallbackInvalidScopeNamesTheRequestedScopes(t *testing.T) {
+	s := ssoErrorPageServer(t)
+	target := webUICallbackPath + "?" + url.Values{
+		"error":             {"invalid_scope"},
+		"error_description": {`Unrecognized scope "profile"`},
+	}.Encode()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "openid profile email") {
+		t.Errorf("the page does not name the scopes this server asked for: %s", body)
+	}
+	if !strings.Contains(body, "HTTP_API_OAUTH2_SCOPES") {
+		t.Errorf("the page does not name the setting that holds them: %s", body)
+	}
+}
+
+// The hint is for invalid_scope alone: on any other refusal it would be
+// noise pointing at the wrong setting.
+func TestSSOCallbackHintIsOnlyForScopeRefusals(t *testing.T) {
+	if got := refusedScopeHint("access_denied", []string{"openid", "profile"}); got != "" {
+		t.Errorf("access_denied produced a scope hint: %q", got)
+	}
+	if got := refusedScopeHint("invalid_scope", nil); got != "" {
+		t.Errorf("with no configured scopes there is nothing to name: %q", got)
+	}
+	if got := refusedScopeHint("invalid_scope", []string{"openid", "profile"}); got == "" {
+		t.Error("invalid_scope produced no hint")
+	}
+}
+
 // The provider's reason is escaped, not injected: an IdP that returns
 // markup in error_description cannot put it in this page.
 func TestSSOCallbackRefusalEscapesTheProvidersText(t *testing.T) {
