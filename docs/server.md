@@ -84,6 +84,27 @@ admin pages and the chat assistant — is served from `/`. A second,
 non-admin IDP user, `user`, is provisioned the same way (its password
 is printed as `UserPassword:`).
 
+#### Running demo mode as root
+
+Demo mode is meant to be run as an ordinary user, and as one it needs
+nothing from the machine. Run as root it needs two system accounts,
+because root is the only case in which HTCondor changes uid:
+
+- **`condor`** — the daemons open their logs as this account, so the
+  demo's temp directory is handed to it. Without it `condor_master`
+  dies with `Cannot open log file` before writing a line.
+- **`nobody`** — a schedd started by root resolves every submitter to
+  a real OS account before it will create a cluster, and the demo's
+  identities (`admin`, `user`, `newbie`) are IdP accounts that exist
+  in no passwd file. Demo mode sets `AP_GENERIC_OS_USERS = nobody` so
+  they all run their jobs as that one account instead of needing
+  system accounts of their own.
+
+Both are checked at startup, before `condor_master` is launched, and a
+missing one is reported by name. Note that as root every demo
+identity's jobs run as the same account and so are not isolated from
+each other; running as an ordinary user avoids this entirely.
+
 #### Placement in demo mode
 
 When the HTCondor on `PATH` includes a `condor_placementd` (in the

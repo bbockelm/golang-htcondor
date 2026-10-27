@@ -2493,18 +2493,10 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 
 	logger.Info(logging.DestinationGeneral, "Using temporary directory", "path", tempDir)
 
-	// Create required directories for HTCondor
-	logDir := filepath.Join(tempDir, "log")
-	if err := os.MkdirAll(logDir, 0750); err != nil {
-		return fmt.Errorf("failed to create log directory: %w", err)
-	}
-	spoolDir := filepath.Join(tempDir, "spool")
-	if err := os.MkdirAll(spoolDir, 0750); err != nil {
-		return fmt.Errorf("failed to create spool directory: %w", err)
-	}
-	executeDir := filepath.Join(tempDir, "execute")
-	if err := os.MkdirAll(executeDir, 0750); err != nil {
-		return fmt.Errorf("failed to create execute directory: %w", err)
+	// Create required directories for HTCondor, and -- when this is a root
+	// demo -- arrange them for the accounts that will use them.
+	if err := createDemoTree(tempDir, logger); err != nil {
+		return err
 	}
 
 	// Find condor_master to determine release directory
@@ -2976,7 +2968,8 @@ MEMORY = 2048
 # Logging
 MAX_DEFAULT_LOG = 10000000
 MAX_NUM_DEFAULT_LOG = 3
-%s`, localDir, releaseDir, sbinLine, libexecLine, placement.daemonListEntry(), sshTemplateLine, placement.condorConfig())
+%s%s`, localDir, releaseDir, sbinLine, libexecLine, placement.daemonListEntry(), sshTemplateLine, placement.condorConfig(),
+		demoGenericOSUsersConfig(os.Geteuid()))
 
 	//nolint:gosec // Config file needs to be readable by condor daemons
 	return os.WriteFile(configFile, []byte(config), 0644)
