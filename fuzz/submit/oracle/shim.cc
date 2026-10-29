@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -82,6 +83,50 @@ void emit_ad(std::string &out, int cluster, int proc, ClassAd *ad, bool include_
 	}
 }
 
+// prepare does the setup condor_submit does before it materializes anything:
+// a hash with the filesystem checks disabled, a fixed submit time and user, the
+// parse up to the queue line, and the queue statement's item list.
+//
+// ms is built here because it must outlive the parse but can only be
+// constructed once buf holds the text.
+//
+// Returns 1 on success, 0 if the submit file was rejected (err is set).
+int prepare(const char *text, SubmitHash &hash, std::string &buf, MACRO_SOURCE &src,
+            std::unique_ptr<MacroStreamMemoryFile> &ms, SubmitStepFromQArgs &ssqa,
+            std::string &err) {
+	hash.init(JSM_CONDOR_SUBMIT);
+	hash.setDisableFileChecks(true);
+	hash.setFakeFileCreationChecks(true);
+	hash.setScheddVersion(CondorVersion());
+	if (hash.init_base_ad(kSubmitTime, kSubmitUser) != 0) {
+		err = "init_base_ad failed";
+		return 0;
+	}
+
+	insert_source("fuzz", hash.macros(), src);
+	buf = text ? text : "";
+	ms = std::make_unique<MacroStreamMemoryFile>(buf.c_str(), (ssize_t)buf.size(), src);
+
+	char *qline = nullptr;
+	int rval = hash.parse_up_to_q_line(*ms, err, &qline);
+	if (rval != 0) {
+		if (err.empty()) err = "parse error";
+		return 0;
+	}
+	hash.optimize();
+
+	const char *queue_args = qline ? SubmitHash::is_queue_statement(qline) : nullptr;
+	if ((rval = ssqa.init(queue_args, err)) != 0) {
+		if (err.empty()) err = "queue statement error";
+		return 0;
+	}
+	if ((rval = ssqa.load_items(*ms, true, err)) != 0) {
+		if (err.empty()) err = "queue item error";
+		return 0;
+	}
+	return 1;
+}
+
 } // namespace
 
 extern "C" int submit_make_ads(const char *text, int mode, int max_procs, char **out) {
@@ -92,40 +137,12 @@ extern "C" int submit_make_ads(const char *text, int mode, int max_procs, char *
 		}
 
 		SubmitHash hash;
-		hash.init(JSM_CONDOR_SUBMIT);
-		// Never touch the filesystem: a fuzzer-authored executable or input file
-		// must not make the oracle's answer depend on what happens to exist.
-		hash.setDisableFileChecks(true);
-		hash.setFakeFileCreationChecks(true);
-		hash.setScheddVersion(CondorVersion());
-		if (hash.init_base_ad(kSubmitTime, kSubmitUser) != 0) {
-			*out = strdup("init_base_ad failed");
-			return 0;
-		}
-
+		std::string buf, err;
 		MACRO_SOURCE src = {false, false, 0, 0, 0, 0};
-		insert_source("fuzz", hash.macros(), src);
-
-		std::string buf(text ? text : "");
-		MacroStreamMemoryFile ms(buf.c_str(), (ssize_t)buf.size(), src);
-
-		std::string errmsg;
-		char *qline = nullptr;
-		int rval = hash.parse_up_to_q_line(ms, errmsg, &qline);
-		if (rval != 0) {
-			*out = strdup(errmsg.empty() ? "parse error" : errmsg.c_str());
-			return 0;
-		}
-		hash.optimize();
-
+		std::unique_ptr<MacroStreamMemoryFile> ms;
 		SubmitStepFromQArgs ssqa(hash);
-		const char *queue_args = qline ? SubmitHash::is_queue_statement(qline) : nullptr;
-		if ((rval = ssqa.init(queue_args, errmsg)) != 0) {
-			*out = strdup(errmsg.empty() ? "queue statement error" : errmsg.c_str());
-			return 0;
-		}
-		if ((rval = ssqa.load_items(ms, true, errmsg)) != 0) {
-			*out = strdup(errmsg.empty() ? "queue item error" : errmsg.c_str());
+		if (!prepare(text, hash, buf, src, ms, ssqa, err)) {
+			*out = strdup(err.c_str());
 			return 0;
 		}
 
@@ -135,6 +152,7 @@ extern "C" int submit_make_ads(const char *text, int mode, int max_procs, char *
 		const bool placement = (mode == SUBMIT_ORACLE_MODE_PLACEMENT);
 		std::string result;
 		JOB_ID_KEY jid;
+		int rval = 0;
 		int item_index = 0, step = 0, n = 0;
 		bool truncated = false;
 
@@ -180,6 +198,86 @@ extern "C" int submit_make_ads(const char *text, int mode, int max_procs, char *
 			free(*out);
 			*out = nullptr;
 		}
+		return -1;
+	}
+}
+
+extern "C" int submit_factory_info(const char *text, int max_items, char **out) {
+	*out = nullptr;
+	try {
+		if (max_items <= 0) {
+			max_items = 16;
+		}
+
+		SubmitHash hash;
+		std::string buf, err;
+		MACRO_SOURCE src = {false, false, 0, 0, 0, 0};
+		std::unique_ptr<MacroStreamMemoryFile> ms;
+		SubmitStepFromQArgs ssqa(hash);
+		if (!prepare(text, hash, buf, src, ms, ssqa, err)) {
+			*out = strdup(err.c_str());
+			return 0;
+		}
+
+		std::string result;
+
+		// want_factory_submit reads max_materialize, else max_idle (or its
+		// alternate spelling), and is the whole of the client-side decision.
+		long long max_materialize = 0;
+		const bool factory = hash.want_factory_submit(max_materialize);
+		result += factory ? "#factory 1\n" : "#factory 0\n";
+		if (factory) {
+			result += "#max_materialize " + std::to_string(max_materialize) + "\n";
+		}
+
+		const auto &vars = ssqa.vars();
+		result += "#vars ";
+		for (size_t i = 0; i < vars.size(); ++i) {
+			if (i) result += ",";
+			result += vars[i];
+		}
+		result += "\n";
+
+		// The digest: the submit file reduced to what the schedd needs to
+		// expand each proc itself. This is the payload a factory submission
+		// sends in place of per-proc ads.
+		std::string digest;
+		hash.make_digest(digest, 1, vars, 0);
+		result += "#digest\n";
+		result += digest;
+		if (!digest.empty() && digest.back() != '\n') {
+			result += "\n";
+		}
+		result += "#enddigest\n";
+
+		// The itemdata rows condor_submit would send with send_Itemdata.
+		// This runs AFTER make_digest: next_selected(set_live=true) sets the
+		// queue statement's loop variables, and a digest built afterwards
+		// captures the last row's values instead of the macro references.
+		int n = 0;
+		JOB_ID_KEY jid;
+		int item_index = 0, step = 0;
+		ssqa.begin(JOB_ID_KEY(1, 0), false);
+		std::vector<std::string> rows;
+		while (ssqa.next_selected(jid, item_index, step, true) > 0 && n < max_items) {
+			const char *item = hash.lookup("Item");
+			rows.push_back(item ? item : "");
+			++n;
+		}
+		result += "#items " + std::to_string(rows.size()) + "\n";
+		for (const auto &r : rows) {
+			result += "#item\x1f";
+			result += r;
+			result += "\n";
+		}
+
+
+		*out = strdup(result.c_str());
+		return *out ? 1 : -1;
+	} catch (const std::exception &e) {
+		*out = strdup(e.what());
+		return -1;
+	} catch (...) {
 		return -1;
 	}
 }

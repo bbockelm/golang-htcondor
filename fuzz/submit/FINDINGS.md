@@ -61,6 +61,35 @@ and silently drops everything else, so a job asking for a custom resource is
 submitted without the request. Also found by the fuzzer, from
 `request_A0 = queue`.
 
+## Late materialization is not implemented, and its keywords are dropped
+
+`max_materialize`, `max_idle` and `materialize_max_idle` make `condor_submit`
+submit a **job factory**: it sends the cluster ad, a submit digest and the
+itemdata rows, and the schedd materializes procs itself, keeping at most
+`max_idle` of them idle at a time. None of this needs a schedd to check —
+`want_factory_submit()` and `make_digest()` are `SubmitHash` methods.
+
+Measured, for `max_materialize = 2 / queue 5`:
+
+```
+cpp: factory=true  max_materialize=2  + a digest for the schedd to expand
+go:  5 fully materialized proc ads
+```
+
+All three spellings behave the same. `SubmitFile.SubmitLate` is named for the
+feature but does not implement it: it builds the same per-proc ads `Submit`
+does, with `ProcAds[0]` relabelled as the cluster ad.
+
+Worse than the missing feature: **Go drops `JobMaterializeMaxIdle` and
+`JobMaterializeLimit` from the ad entirely.** Even a schedd willing to
+materialize lazily would be told nothing, so a submission that asked to be
+throttled is silently submitted unthrottled. That part is a small fix
+independent of implementing factories.
+
+The digest keeps macro references unexpanded (`arguments=$(item)`), which is
+what lets the schedd vary them per proc; a test asserts that, because a digest
+with the values baked in would materialize every proc identically.
+
 ## Parse-acceptance divergence
 
 Reported by `TestSeedParseAcceptance`, which logs rather than fails — these are

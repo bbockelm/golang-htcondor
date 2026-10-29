@@ -21,6 +21,12 @@ statement, calling `make_job_ad` per proc — and can emit either:
 |------|---------------|----------------|
 | `ModeAds` | each proc's complete job ad, parent chain merged | `condor_submit -dry-run` |
 | `ModePlacement` | the cluster ad plus each proc's own attributes, after `fold_job_into_base_ad` | what the schedd actually stores per ad |
+| `Factory()` | the factory decision, materialize limit, loop variables, itemdata rows and submit digest | what a late-materialization submit sends instead of proc ads |
+
+`Factory()` needs no schedd either: whether a submission is a factory, its
+limit, the itemdata and the digest are all computed client-side by
+`SubmitHash`. Only the schedd's expansion of the digest would need one, and
+that is the schedd's behavior rather than the parser's.
 
 `ModeAds` is what the fuzz target compares today. `ModePlacement` exists and is
 verified, but the Go side of that comparison is not wired up yet — see

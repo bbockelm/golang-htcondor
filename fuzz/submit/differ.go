@@ -78,6 +78,9 @@ var knownDivergent = map[string]string{
 	"cmd":           "C++ resolves the executable against Iwd into an absolute path; Go stores the relative name as written. Found by the fuzzer, not by a seed.",
 	"userlog":       "C++ resolves the log path against Iwd into an absolute path; Go stores the relative name as written.",
 
+	"jobmaterializemaxidle": "max_idle sets it in C++; Go drops the keyword, so a submission that asked for late materialization records nothing.",
+	"jobmaterializelimit":   "max_materialize sets it in C++; Go drops the keyword.",
+
 	// Attributes only the Go side produces.
 	"transferexecutable": "Go always sets it; C++ only when the submit file asks.",
 	"emailattributes":    "Go sets it; C++ has no such attribute here.",

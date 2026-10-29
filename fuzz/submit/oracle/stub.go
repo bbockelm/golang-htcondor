@@ -59,3 +59,31 @@ const (
 func Keywords() []Keyword {
 	panic("oracle.Keywords: built without the libcondor_utils tag")
 }
+
+// FactoryInfo is what condor_submit would send for a late-materialization
+// (job factory) submission: the client-side decision, the materialize limit,
+// the queue statement's loop variables and itemdata rows, and the submit
+// digest the schedd expands per proc.
+type FactoryInfo struct {
+	// OK is false when the C++ side rejected the submit file; Err holds why.
+	OK bool
+	// Factory is want_factory_submit(): the submission is a job factory
+	// because the file set max_materialize, max_idle or materialize_max_idle.
+	Factory bool
+	// MaxMaterialize is the limit, INT_MAX when only max_idle was given.
+	MaxMaterialize int64
+	// Vars are the queue statement's loop variables.
+	Vars []string
+	// Items are the itemdata rows, capped by the caller's maxItems.
+	Items []string
+	// Digest is the submit digest, which keeps macro references unexpanded
+	// so the schedd can expand them per proc.
+	Digest string
+	Err    string
+	Panic  bool
+}
+
+// Factory panics: callers must check Available before invoking the oracle.
+func Factory(string, int) FactoryInfo {
+	panic("oracle.Factory: built without the libcondor_utils tag")
+}

@@ -49,6 +49,27 @@ extern "C" {
 int submit_make_ads(const char *text, int mode, int max_procs, char **out);
 
 /*
+ * Report what condor_submit would send for a LATE-MATERIALIZATION (job factory)
+ * submission of this file, instead of materialized job ads.
+ *
+ * No schedd is involved: whether a submission is a factory, its materialize
+ * limit, the submit digest the schedd later expands per proc, and the itemdata
+ * rows are all computed client-side by SubmitHash. Only the schedd's expansion
+ * of the digest would need one, and that is the schedd's behavior, not the
+ * parser's.
+ *
+ * Output:
+ *    "#factory <0|1>\n"          want_factory_submit()
+ *    "#max_materialize <n>\n"    only when factory
+ *    "#vars <v1,v2,...>\n"       the queue statement's loop variables
+ *    "#items <n>\n" then one "#item\x1f<row>\n" per itemdata row
+ *    "#digest\n" then the digest text, then "#enddigest\n"
+ *
+ * Return value matches submit_make_ads.
+ */
+int submit_factory_info(const char *text, int max_items, char **out);
+
+/*
  * Emit HTCondor's own submit-keyword table, so the fuzzer's vocabulary comes
  * from the parser being tested rather than a hand-maintained list that drifts.
  *

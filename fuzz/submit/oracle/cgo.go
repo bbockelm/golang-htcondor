@@ -159,3 +159,85 @@ func Keywords() []Keyword {
 	}
 	return kws
 }
+
+// FactoryInfo is what condor_submit would send for a late-materialization
+// (job factory) submission: the client-side decision, the materialize limit,
+// the queue statement's loop variables and itemdata rows, and the submit
+// digest the schedd expands per proc.
+type FactoryInfo struct {
+	// OK is false when the C++ side rejected the submit file; Err holds why.
+	OK bool
+	// Factory is want_factory_submit(): the submission is a job factory
+	// because the file set max_materialize, max_idle or materialize_max_idle.
+	Factory bool
+	// MaxMaterialize is the limit, INT_MAX when only max_idle was given.
+	MaxMaterialize int64
+	// Vars are the queue statement's loop variables.
+	Vars []string
+	// Items are the itemdata rows, capped by the caller's maxItems.
+	Items []string
+	// Digest is the submit digest, which keeps macro references unexpanded
+	// so the schedd can expand them per proc.
+	Digest string
+	Err    string
+	Panic  bool
+}
+
+// Factory reports what a late-materialization submission of text would send.
+// No schedd is involved: SubmitHash computes all of it client-side.
+func Factory(text string, maxItems int) FactoryInfo {
+	cppMu.Lock()
+	defer cppMu.Unlock()
+
+	ctext := C.CString(text)
+	defer C.free(unsafe.Pointer(ctext))
+
+	var out *C.char
+	rc := C.submit_factory_info(ctext, C.int(maxItems), &out)
+	var raw string
+	if out != nil {
+		raw = C.GoString(out)
+		C.submit_oracle_free(out)
+	}
+	switch rc {
+	case 1:
+		return parseFactoryInfo(raw)
+	case 0:
+		return FactoryInfo{Err: raw}
+	default:
+		return FactoryInfo{Panic: true, Err: raw}
+	}
+}
+
+func parseFactoryInfo(raw string) FactoryInfo {
+	fi := FactoryInfo{OK: true}
+	var digest strings.Builder
+	inDigest := false
+	for _, line := range strings.Split(raw, "\n") {
+		switch {
+		case line == "#digest":
+			inDigest = true
+		case line == "#enddigest":
+			inDigest = false
+		case inDigest:
+			digest.WriteString(line)
+			digest.WriteString("\n")
+		case line == "#factory 1":
+			fi.Factory = true
+		case strings.HasPrefix(line, "#max_materialize "):
+			n, err := strconv.ParseInt(strings.TrimPrefix(line, "#max_materialize "), 10, 64)
+			if err == nil {
+				fi.MaxMaterialize = n
+			}
+		case strings.HasPrefix(line, "#vars "):
+			v := strings.TrimPrefix(line, "#vars ")
+			if v != "" {
+				fi.Vars = strings.Split(v, ",")
+			}
+		case strings.HasPrefix(line, "#item\x1f"):
+			fi.Items = append(fi.Items, strings.TrimPrefix(line, "#item\x1f"))
+		}
+	}
+	fi.Digest = strings.TrimSuffix(digest.String(), "\n")
+	return fi
+}
