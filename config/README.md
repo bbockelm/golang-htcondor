@@ -397,7 +397,14 @@ If you modify the grammar in `parser.y`, regenerate the parser:
 ```bash
 cd config
 go run golang.org/x/tools/cmd/goyacc@latest -o parser.go parser.y
+goimports -w parser.go   # goyacc emits a second import statement
+rm -f y.output           # goyacc's debug listing, not a build input
 ```
+
+goyacc writes `import __yyfmt__ "fmt"` as its own statement outside the
+import block, which the `go-imports` pre-commit hook rewrites; running it
+here keeps the commit from being rejected. The committed `parser.go` has the
+merged form.
 
 ## Contributing
 

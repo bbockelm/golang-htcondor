@@ -2376,13 +2376,17 @@ func (sf *SubmitFile) pushMacroContext(jobID JobID, queueVars map[string]string)
 
 	// Set Item, Step, Row if they're in queueVars
 	// These are used with queue from/in statements
+	//
+	// Item is NOT an alias for ItemIndex. It is the default name of the
+	// queue statement's loop variable, so it holds the item's VALUE, and the
+	// loop above already set it when the statement named no variable of its
+	// own. A statement that did name one leaves Item unset, which is what
+	// HTCondor does: $(Item) is empty under `queue 2 x in (a, b)`.
 	if itemIndex, ok := queueVars["ItemIndex"]; ok {
 		sf.cfg.Set("ItemIndex", itemIndex)
-		sf.cfg.Set("Item", itemIndex) // Alias for ItemIndex
 	} else {
 		// If not in queue vars, default to process ID
 		sf.cfg.Set("ItemIndex", strconv.Itoa(jobID.Proc))
-		sf.cfg.Set("Item", strconv.Itoa(jobID.Proc))
 	}
 
 	if step, ok := queueVars["Step"]; ok {

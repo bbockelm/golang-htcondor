@@ -417,6 +417,61 @@ queue_statement:
 			File:     $5,
 		}
 	}
+	| QUEUE IN item_list
+	{
+		// "queue in (item1, item2)" -- the loop variable may be omitted, and
+		// then it is Item, the same default HTCondor uses.
+		$$ = &QueueStatement{
+			Count:    0, // Determined by item count
+			VarNames: []string{"Item"},
+			Items:    $3,
+		}
+	}
+	| QUEUE queue_count IN item_list
+	{
+		// "queue N in (item1, item2)" -- N jobs per item.
+		$$ = &QueueStatement{
+			Count:    $2,
+			VarNames: []string{"Item"},
+			Items:    $4,
+		}
+	}
+	| QUEUE FROM IDENT
+	{
+		// "queue from file" -- loop variable omitted, so Item.
+		$$ = &QueueStatement{
+			Count:    0, // Determined by file
+			VarNames: []string{"Item"},
+			File:     $3,
+		}
+	}
+	| QUEUE FROM STRING
+	{
+		// "queue from file" (quoted path)
+		$$ = &QueueStatement{
+			Count:    0,
+			VarNames: []string{"Item"},
+			File:     $3,
+		}
+	}
+	| QUEUE queue_count FROM IDENT
+	{
+		// "queue N from file"
+		$$ = &QueueStatement{
+			Count:    $2,
+			VarNames: []string{"Item"},
+			File:     $4,
+		}
+	}
+	| QUEUE queue_count FROM STRING
+	{
+		// "queue N from file" (quoted path)
+		$$ = &QueueStatement{
+			Count:    $2,
+			VarNames: []string{"Item"},
+			File:     $4,
+		}
+	}
 	| QUEUE var_list IN item_list
 	{
 		// "queue var in (item1, item2, item3)"
