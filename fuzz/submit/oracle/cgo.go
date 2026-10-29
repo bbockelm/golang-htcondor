@@ -26,6 +26,8 @@ package oracle
 import "C"
 
 import (
+	"strconv"
+	"strings"
 	"sync"
 	"unsafe"
 )
@@ -88,4 +90,72 @@ func MakeAds(text string, mode Mode, maxProcs int) Result {
 	default:
 		return Result{Panic: true, Err: s}
 	}
+}
+
+// Keyword is one entry of HTCondor's own submit-keyword table.
+type Keyword struct {
+	// Key is the submit-file command, e.g. "request_cpus".
+	Key string
+	// Attr is the job attribute it sets, empty when there is no single one.
+	Attr string
+	// Opts is the SimpleSubmitKeyword flag word: value type, file role and
+	// special-parsing bits.
+	Opts int
+}
+
+// Bits of Keyword.Opts, from SimpleSubmitKeyword in submit_utils.cpp.
+//
+// The value type is the low five bits; f_as_expr is the absence of all of them,
+// so a keyword with none of these takes a ClassAd expression. The bits above
+// that are modifiers, not types: they say the keyword is an alternate spelling
+// of another, or that using it is an error, not what shape its value has.
+const (
+	KeyAsBool   = 0x01
+	KeyAsInt    = 0x02
+	KeyAsUint   = 0x04
+	KeyAsString = 0x08
+	KeyAsList   = 0x10
+	KeyTypeMask = 0x1f
+
+	KeyStripQuotes = 0x20  // f_strip_quotes
+	KeyError       = 0x40  // f_error: using this keyword is rejected
+	KeyAltName     = 0x80  // f_alt_name: another spelling of a previous keyword
+	KeyFileMask    = 0x700 // f_filemask: the value names a file
+	KeySpecial     = 0x20000
+)
+
+// Keywords returns the submit-keyword table the linked HTCondor exposes via
+// get_submit_keywords(), so the fuzzer's vocabulary comes from the parser under
+// test rather than a hand-maintained list. Returns nil if the table looks wrong.
+func Keywords() []Keyword {
+	cppMu.Lock()
+	defer cppMu.Unlock()
+
+	var out *C.char
+	rc := C.submit_keyword_table(&out)
+	if out == nil {
+		return nil
+	}
+	s := C.GoString(out)
+	C.submit_oracle_free(out)
+	if rc != 1 {
+		return nil
+	}
+
+	var kws []Keyword
+	for _, line := range strings.Split(s, "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\x1f")
+		if len(parts) != 3 {
+			continue
+		}
+		opts, err := strconv.Atoi(parts[2])
+		if err != nil {
+			continue
+		}
+		kws = append(kws, Keyword{Key: parts[0], Attr: parts[1], Opts: opts})
+	}
+	return kws
 }

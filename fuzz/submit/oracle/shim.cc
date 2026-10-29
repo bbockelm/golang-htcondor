@@ -20,7 +20,18 @@
 #include <utility>
 #include <vector>
 
+// SimpleSubmitKeyword lives in submit_utils.cpp rather than the header, while
+// get_submit_keywords() is declared in the header. condor_submit's own
+// submit_help.cpp resolves that by redeclaring the struct; this does the same.
+struct SimpleSubmitKeyword {
+	char const *key;
+	char const *attr;
+	int opts;
+};
+
+
 namespace {
+
 
 // A fixed submit time and user, so two runs of the same input agree and the Go
 // side can be handed the same values. Any attribute derived from the clock or
@@ -169,6 +180,46 @@ extern "C" int submit_make_ads(const char *text, int mode, int max_procs, char *
 			free(*out);
 			*out = nullptr;
 		}
+		return -1;
+	}
+}
+
+extern "C" int submit_keyword_table(char **out) {
+	*out = nullptr;
+	try {
+		const SimpleSubmitKeyword *table = get_submit_keywords();
+		if (!table) {
+			return -1;
+		}
+
+		std::vector<std::string> lines;
+		for (const SimpleSubmitKeyword *k = table; k->key || k->attr; ++k) {
+			std::string line;
+			line += k->key ? k->key : "";
+			line += '\x1f';
+			line += k->attr ? k->attr : "";
+			line += '\x1f';
+			line += std::to_string(k->opts);
+			lines.push_back(std::move(line));
+		}
+		// SimpleSubmitKeyword is defined in submit_utils.cpp, not the header,
+		// so this file redeclares it -- which is what condor_submit's own
+		// submit_help.cpp does to call get_submit_keywords(). A layout change
+		// upstream would show up as garbage rather than a compile error, so
+		// sanity-check that the table looks like keywords before trusting it.
+		if (lines.size() < 50) {
+			return -1;
+		}
+		std::sort(lines.begin(), lines.end());
+
+		std::string result;
+		for (const auto &l : lines) {
+			result += l;
+			result += '\n';
+		}
+		*out = strdup(result.c_str());
+		return *out ? 1 : -1;
+	} catch (...) {
 		return -1;
 	}
 }

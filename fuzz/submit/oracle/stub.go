@@ -31,3 +31,31 @@ type Result struct {
 func MakeAds(string, Mode, int) Result {
 	panic("oracle.MakeAds: built without the libcondor_utils tag")
 }
+
+// Keyword mirrors the cgo build's type so callers compile either way.
+type Keyword struct {
+	Key  string
+	Attr string
+	Opts int
+}
+
+// Bits of Keyword.Opts, mirroring the cgo build.
+const (
+	KeyAsBool   = 0x01
+	KeyAsInt    = 0x02
+	KeyAsUint   = 0x04
+	KeyAsString = 0x08
+	KeyAsList   = 0x10
+	KeyTypeMask = 0x1f
+
+	KeyStripQuotes = 0x20
+	KeyError       = 0x40
+	KeyAltName     = 0x80
+	KeyFileMask    = 0x700
+	KeySpecial     = 0x20000
+)
+
+// Keywords panics: callers must check Available before invoking the oracle.
+func Keywords() []Keyword {
+	panic("oracle.Keywords: built without the libcondor_utils tag")
+}

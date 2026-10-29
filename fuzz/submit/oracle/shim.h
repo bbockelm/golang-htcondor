@@ -48,6 +48,19 @@ extern "C" {
  */
 int submit_make_ads(const char *text, int mode, int max_procs, char **out);
 
+/*
+ * Emit HTCondor's own submit-keyword table, so the fuzzer's vocabulary comes
+ * from the parser being tested rather than a hand-maintained list that drifts.
+ *
+ * Lines are "<keyword>\x1f<attribute>\x1f<opts>\n", sorted, where <opts> is the
+ * SimpleSubmitKeyword flag word (value type, file role, special parsing).
+ * <attribute> is empty for keywords with no single target attribute.
+ *
+ * Returns 1 on success, -1 if the table looks wrong (see shim.cc). Caller must
+ * submit_oracle_free() the result.
+ */
+int submit_keyword_table(char **out);
+
 /* Free a string previously returned via submit_make_ads's out parameter. */
 void submit_oracle_free(char *p);
 
