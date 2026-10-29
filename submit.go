@@ -91,8 +91,14 @@ type JobID struct {
 type SubmitResult struct {
 	ClusterID int
 	NumProcs  int
+
+	// ClusterAd is the same ad as ProcAds[0], not a separate one. The first
+	// proc's ad is what becomes the cluster ad: it is sent in full at proc id
+	// -1, and every later proc ad is reduced to what differs from it. It is
+	// not a template assembled from the attributes all procs share.
 	ClusterAd *classad.ClassAd
-	ProcAds   []*classad.ClassAd
+
+	ProcAds []*classad.ClassAd
 }
 
 // Universe constants matching HTCondor
