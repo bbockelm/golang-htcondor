@@ -5,7 +5,8 @@
 #   source hack/submit-fuzz-env.sh
 #   go test -tags libcondor_utils ./fuzz/submit/...
 #
-# See hack/htcondor-oracle-env.sh for HTCONDOR_SRC / HTCONDOR_BUILD.
-# shellcheck source=hack/htcondor-oracle-env.sh
-. "$(dirname "${BASH_SOURCE[0]}")/htcondor-oracle-env.sh"
-htcondor_oracle_env submit_utils.cpp
+# Everything is in hack/htcondor-oracle-env.sh, shared with the config fuzzer;
+# this only names the translation unit whose compile flags to copy. See there
+# for HTCONDOR_SRC / HTCONDOR_BUILD.
+ORACLE_TU=submit_utils.cpp ORACLE_LABEL=submit-fuzz-env \
+	. "$(dirname "${BASH_SOURCE[0]}")/htcondor-oracle-env.sh"
