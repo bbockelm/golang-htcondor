@@ -1,0 +1,184 @@
+name: Nightly fuzz
+
+# Differential fuzzing against HTCondor's main branch, so divergences
+# introduced upstream show up here rather than at the next release bump.
+# The "Config fuzz" workflow covers pull requests against a pinned
+# release; this one is the moving-target counterpart.
+#
+# A failure opens (or comments on) an issue -- see
+# .github/scripts/nightly-fuzz-issue.sh for the dedup rule.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+on:
+  # 07:41 UTC: off the top of the hour, where scheduled runs queue behind
+  # everyone else's cron, and early enough that a failure is waiting at
+  # the start of the US working day.
+  schedule:
+    - cron: '41 7 * * *'
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: 'go test -fuzztime per target'
+        required: false
+        default: '10m'
+      htcondor_ref:
+        description: 'HTCondor ref to build the oracle from'
+        required: false
+        default: 'main'
+
+env:
+  # Unlike Config fuzz, which pins a release, this one tracks the branch.
+  HTCONDOR_REF: ${{ inputs.htcondor_ref || 'main' }}
+
+jobs:
+  nightly-fuzz:
+    name: Nightly fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        check-latest: true
+        go-version-file: .go-version
+        cache: true
+
+    - name: Set HTCondor tree locations
+      run: |
+        {
+          echo "HTCONDOR_SRC=$RUNNER_TEMP/htcondor"
+          echo "HTCONDOR_BUILD=$RUNNER_TEMP/htcondor-build"
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache"
+          echo "FUZZ_LOG_DIR=$GITHUB_WORKSPACE/fuzz-logs"
+          echo "CACHE_WEEK=$(date -u +%G-%V)"
+        } >> "$GITHUB_ENV"
+
+    # Resolved before the clone so the issue can name a commit even when
+    # the build itself is what failed. Overwritten below with the commit
+    # actually built, in case the branch moved in between.
+    - name: Resolve the HTCondor commit
+      run: |
+        sha="$(git ls-remote https://github.com/htcondor/htcondor.git "$HTCONDOR_REF" | cut -f1)"
+        echo "HTCONDOR_SHA=${sha:-unknown}" >> "$GITHUB_ENV"
+        echo "$HTCONDOR_REF is $sha"
+
+    # The ref moves, so the compiled objects differ run to run and no key
+    # can hit exactly. The key rotates weekly instead: the first run of a
+    # week misses and saves, the rest of the week hits and saves nothing,
+    # which keeps one ~1 GB entry per week inside the repository's cache
+    # budget while leaving ccache warm.
+    - name: Restore ccache
+      id: ccache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/ccache
+        key: condor-utils-ccache-nightly-${{ runner.os }}-${{ hashFiles('.github/scripts/build-condor-utils.sh') }}-${{ env.CACHE_WEEK }}
+        restore-keys: |
+          condor-utils-ccache-nightly-${{ runner.os }}-${{ hashFiles('.github/scripts/build-condor-utils.sh') }}-
+          condor-utils-ccache-nightly-${{ runner.os }}-
+
+    - name: Build libcondor_utils
+      id: build
+      continue-on-error: true
+      env:
+        INSTALL_DEPS: '1'
+      run: .github/scripts/build-condor-utils.sh
+
+    - name: Record the HTCondor commit built
+      if: steps.build.outcome == 'success'
+      run: echo "HTCONDOR_SHA=$(git -C "$HTCONDOR_SRC" rev-parse HEAD)" >> "$GITHUB_ENV"
+
+    - name: Save ccache
+      if: steps.ccache.outputs.cache-hit != 'true' && steps.build.outcome == 'success'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/ccache
+        key: ${{ steps.ccache.outputs.cache-primary-key }}
+
+    # Each target reports its own status rather than failing the job, so
+    # one broken target still lets the other run and all of them land in
+    # a single issue.
+    - name: Config fuzz
+      id: config
+      if: steps.build.outcome == 'success'
+      env:
+        FUZZTIME: ${{ inputs.fuzztime || '10m' }}
+      run: |
+        set +e
+        .github/scripts/nightly-fuzz-ci.sh config "$FUZZTIME"
+        rc=$?
+        case "$rc" in
+          0) echo "status=passed" >> "$GITHUB_OUTPUT" ;;
+          78) echo "status=skipped" >> "$GITHUB_OUTPUT" ;;
+          *) echo "status=failed" >> "$GITHUB_OUTPUT" ;;
+        esac
+
+    # fuzz/submit is landing separately; nightly-fuzz-ci.sh reports 78
+    # (skipped) until it is on main.
+    - name: Submit fuzz
+      id: submit
+      if: steps.build.outcome == 'success'
+      env:
+        FUZZTIME: ${{ inputs.fuzztime || '10m' }}
+      run: |
+        set +e
+        .github/scripts/nightly-fuzz-ci.sh submit "$FUZZTIME"
+        rc=$?
+        case "$rc" in
+          0) echo "status=passed" >> "$GITHUB_OUTPUT" ;;
+          78) echo "status=skipped" >> "$GITHUB_OUTPUT" ;;
+          *) echo "status=failed" >> "$GITHUB_OUTPUT" ;;
+        esac
+
+    - name: Collect failures
+      id: collect
+      env:
+        BUILD_OUTCOME: ${{ steps.build.outcome }}
+        CONFIG_STATUS: ${{ steps.config.outputs.status }}
+        SUBMIT_STATUS: ${{ steps.submit.outputs.status }}
+      run: |
+        failed=""
+        if [ "$BUILD_OUTCOME" = failure ]; then failed="$failed build"; fi
+        if [ "$CONFIG_STATUS" = failed ]; then failed="$failed config"; fi
+        if [ "$SUBMIT_STATUS" = failed ]; then failed="$failed submit"; fi
+        failed="${failed# }"
+        echo "failed=$failed" >> "$GITHUB_OUTPUT"
+        echo "failing targets: ${failed:-none}"
+
+    - name: Upload logs and failing inputs
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: nightly-fuzz-artifacts
+        path: |
+          fuzz-logs/
+          fuzz/config/testdata/fuzz/
+          fuzz/submit/testdata/fuzz/
+        if-no-files-found: ignore
+
+    - name: Open or update the failure issue
+      if: steps.collect.outputs.failed != ''
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_REPO: ${{ github.repository }}
+        FAILED_TARGETS: ${{ steps.collect.outputs.failed }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: .github/scripts/nightly-fuzz-issue.sh
+
+    - name: Fail the job
+      if: steps.collect.outputs.failed != ''
+      env:
+        FAILED_TARGETS: ${{ steps.collect.outputs.failed }}
+      run: |
+        echo "::error::nightly differential fuzz failed: $FAILED_TARGETS"
+        exit 1

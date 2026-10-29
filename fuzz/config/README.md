@@ -78,5 +78,30 @@ ccache-cached), runs the seed table and committed corpus (failing if
 `config-fuzz-failing-inputs` artifact; drop it into
 `fuzz/config/testdata/fuzz/FuzzConfigParseExpand/` to reproduce.
 
+### Nightly, against HTCondor main
+
+`.github/workflows/nightly-fuzz.yml` runs the same targets at 07:41 UTC against
+HTCondor's `main` branch instead of a pinned release, so divergences introduced
+upstream surface before the next release bump.
+`.github/scripts/nightly-fuzz-ci.sh <target> <fuzztime>` runs one target; it
+exits 78 when `fuzz/<target>` is not in the tree, which is how the submit
+fuzzer stays optional until it lands.
+
+A failure runs `.github/scripts/nightly-fuzz-issue.sh`, which reports it in
+`bbockelm/golang-htcondor`:
+
+- Dedup key: the `nightly-fuzz` label. If an open issue carries it, the run
+  comments on that issue; otherwise it opens one. A failure that persists for
+  weeks therefore grows one thread, not one issue per night. Do not put that
+  label on an unrelated issue, or the reports go there.
+- Every body also carries the `<!-- nightly-differential-fuzz -->` marker, so
+  the issues stay findable by body search if the label is ever removed.
+- The issue names the HTCondor commit the oracle was built from. Fuzzing a
+  moving branch means a divergence can be an upstream change rather than a bug
+  here, and the commit is what makes that diagnosable.
+- When the failure clears nothing happens: the issue stays open and a human
+  closes it. Closing it while the failure persists means the next run opens a
+  fresh one.
+
 Without the tag, the package builds against `stub.go` and the tests skip — so
 `go build ./...` / `go vet ./...` / non-fuzz CI stay green everywhere.
