@@ -52,7 +52,7 @@ trap 'rm -f "$body"' EXIT
 	echo "| Run | $run_url |"
 	echo
 	echo "The oracle is built from a moving branch, so a divergence reported here can be a change in HTCondor rather than a bug in the Go parser."
-	echo "Reproduce against the commit above before treating it as ours: \`HTCONDOR_REF=$sha .github/scripts/build-condor-utils.sh\`."
+	echo "Reproduce against the commit above before treating it as ours: check that commit out, then point \`HTCONDOR_SRC\` at it and run \`.github/scripts/build-condor-utils.sh\` (\`HTCONDOR_REF\` is cloned with \`git clone --branch\`, which takes no bare commit)."
 } >"$body"
 
 # Reproducers go/test writes are new files under <pkg>/testdata/fuzz/; the
