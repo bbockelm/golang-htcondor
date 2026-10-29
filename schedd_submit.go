@@ -692,6 +692,36 @@ func selectAttributes(ad, dedupAgainst *classad.ClassAd, keep attrPlacement) []s
 	return selected
 }
 
+// SendJobAttributes sends every attribute of ad to one job, (clusterID,
+// procID), with no attention to which ad the schedd will actually store each
+// one in.
+//
+// Deprecated: use SendClusterAttributes and SendProcAttributes instead. This
+// sends a cluster's shared attributes once per proc rather than once to the
+// cluster ad, which costs a round trip per attribute per proc and leaves each
+// proc holding its own copy, so condor_qedit on the cluster id does not reach
+// those jobs. Owner, User and ProjectName sent this way for proc > 0 are
+// discarded by the schedd, which reports success. The behavior is kept as it
+// was for callers that depend on it.
+func (q *QmgmtConnection) SendJobAttributes(ctx context.Context, clusterID, procID int, ad *classad.ClassAd) error {
+	if !q.inTransaction {
+		return fmt.Errorf("must be in a transaction to send job attributes")
+	}
+
+	for _, attr := range ad.GetAttributes() {
+		expr, ok := ad.Lookup(attr)
+		if !ok || expr == nil {
+			continue
+		}
+
+		if err := q.SetAttribute(ctx, clusterID, procID, attr, expr.String(), 0); err != nil {
+			return fmt.Errorf("failed to set attribute %s: %w", attr, err)
+		}
+	}
+
+	return nil
+}
+
 // QMGMT Protocol Implementation Notes:
 //
 // The queue management protocol (QMGMT) is used for job submission and modification.

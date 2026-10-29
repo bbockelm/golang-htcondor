@@ -472,7 +472,7 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	_ = ad.Set("JobStatus", 1)
 
 	// QDate: Unix epoch seconds at the moment of submission. HTCondor's
-	// own condor_submit sets this on the client side before SendJobAttributes,
+	// own condor_submit sets this on the client side before sending the ad,
 	// and downstream tooling (the web UI's "Submitted" column, condor_q
 	// formatting, history records) expects it to be present. Without
 	// QDate the schedd doesn't backfill, so the field stays undefined
