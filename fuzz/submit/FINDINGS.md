@@ -80,11 +80,17 @@ All three spellings behave the same. `SubmitFile.SubmitLate` is named for the
 feature but does not implement it: it builds the same per-proc ads `Submit`
 does, with `ProcAds[0]` relabelled as the cluster ad.
 
-Worse than the missing feature: **Go drops `JobMaterializeMaxIdle` and
-`JobMaterializeLimit` from the ad entirely.** Even a schedd willing to
-materialize lazily would be told nothing, so a submission that asked to be
-throttled is silently submitted unthrottled. That part is a small fix
-independent of implementing factories.
+Worse than the missing feature: **Go drops `JobMaterializeMaxIdle`.** Both
+`max_idle` and `materialize_max_idle` set it in C++ and neither does in Go, so
+even a schedd willing to materialize lazily would be told nothing and a
+submission that asked to be throttled is silently submitted unthrottled. That
+part is a small fix independent of implementing factories.
+
+`max_materialize` is different and is **not** a divergence: it never becomes an
+ad attribute on either side. `want_factory_submit` reads it and `condor_submit`
+passes it to `set_Factory()` as a protocol argument, so there is nothing on the
+ad to compare. The test asserts the oracle really does set an attribute before
+checking Go for it, so a case like this cannot be mistaken for a Go bug again.
 
 The digest keeps macro references unexpanded (`arguments=$(item)`), which is
 what lets the schedd vary them per proc; a test asserts that, because a digest

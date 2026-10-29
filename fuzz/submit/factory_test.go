@@ -105,15 +105,31 @@ func TestGoHasNoLateMaterialization(t *testing.T) {
 func TestFactoryAttributesReachTheClusterAd(t *testing.T) {
 	requireOracle(t)
 
+	// max_materialize is deliberately absent: it never becomes an ad
+	// attribute. want_factory_submit reads it and condor_submit passes it to
+	// set_Factory(), so there is nothing on the ad to compare. Verified
+	// against the oracle, which emits no JobMaterialize* for it.
 	cases := []struct {
 		input string
 		attr  string
 	}{
 		{"executable = /bin/sleep\nmax_idle = 5\nqueue\n", "JobMaterializeMaxIdle"},
-		{"executable = /bin/sleep\nmax_materialize = 2\nqueue\n", "JobMaterializeLimit"},
+		{"executable = /bin/sleep\nmaterialize_max_idle = 3\nqueue\n", "JobMaterializeMaxIdle"},
 	}
 	for _, c := range cases {
-		t.Run(c.attr, func(t *testing.T) {
+		t.Run(strings.ReplaceAll(firstLine(c.input), " ", "_")+"_"+c.attr, func(t *testing.T) {
+			cpp := oracle.MakeAds(c.input, oracle.ModeAds, MaxProcs)
+			if !cpp.OK {
+				t.Fatalf("oracle rejected the file: %s", cpp.Err)
+			}
+			cppAds, err := ParseCanon(cpp.Ads)
+			if err != nil {
+				t.Fatalf("malformed oracle output: %v", err)
+			}
+			if _, ok := lookupFold(cppAds.ByKey[AdKey{Cluster: ClusterID, Proc: 0}], c.attr); !ok {
+				t.Fatalf("the C++ parser does not set %s either, so there is nothing to compare", c.attr)
+			}
+
 			goRes := GoMakeAds(c.input)
 			if !goRes.OK {
 				t.Fatalf("Go parser rejected the file: %s", goRes.Err)
