@@ -3,6 +3,7 @@ package htcondor
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
@@ -465,24 +466,255 @@ func (q *QmgmtConnection) DestroyCluster(ctx context.Context, clusterID int) err
 	return fmt.Errorf("DestroyCluster not yet implemented")
 }
 
-// SendJobAttributes sends all attributes from a ClassAd to the schedd for a specific job
-// This iterates through the ClassAd and calls SetAttribute for each attribute
+// Attribute names and values this file sends explicitly, ahead of the
+// generic attribute loop.
+const (
+	attrClusterID = "ClusterId"
+	attrProcID    = "ProcId"
+	attrJobStatus = "JobStatus"
+
+	// clusterAdProcID is the proc id of a cluster's own ad.
+	clusterAdProcID = -1
+)
+
+// jobStatus* constants mirror HTCondor's JobStatus enum
+// (src/condor_includes/proc.h). A job is submitted as idle unless its ad says
+// otherwise.
+const (
+	jobStatusIdle    = 1
+	jobStatusRunning = 2
+	jobStatusRemoved = 3
+	jobStatusHeld    = 5
+)
+
+// attrPlacement says which ad an attribute is obliged to live in. It mirrors
+// HTCondor's aForcedSetAttrs table (condor_schedd.V6/qmgmt_common.cpp): the
+// schedd keeps cluster-wide identity and universe on the cluster ad and
+// per-job identity and state on the proc ad, and ignores or redirects writes
+// that arrive on the wrong one.
+type attrPlacement int
+
+const (
+	// placeAny means the attribute may live in either ad.
+	placeAny attrPlacement = iota
+	// placeCluster means the attribute belongs only in the cluster ad.
+	placeCluster
+	// placeProc means the attribute belongs only in a proc ad.
+	placeProc
+)
+
+// forcedAttrPlacement maps attribute names to the ad they are obliged to live
+// in. Keys are lowercase because ClassAd attribute names are case-insensitive;
+// look up through placementOf rather than indexing this directly.
+//
+// NTDomain and User are in the schedd's copy of this table but not in
+// condor_submit's. They are here because the schedd silently drops them when
+// they arrive on a proc ad with a proc id above zero -- it reports success
+// and stores nothing -- which is a worse outcome than putting them where they
+// belong.
+var forcedAttrPlacement = map[string]attrPlacement{
+	"clusterid":   placeCluster,
+	"jobsetid":    placeCluster,
+	"jobsetname":  placeCluster,
+	"jobstatus":   placeProc,
+	"jobuniverse": placeCluster,
+	"ntdomain":    placeCluster,
+	"owner":       placeCluster,
+	"procid":      placeProc,
+	"user":        placeCluster,
+}
+
+// placementOf reports which ad attrName is obliged to live in.
+func placementOf(attrName string) attrPlacement {
+	return forcedAttrPlacement[strings.ToLower(attrName)]
+}
+
+// sentAheadOfLoop holds the attributes SendClusterAttributes and
+// SendProcAttributes send explicitly before the generic loop, so that the
+// loop does not send them a second time.
+var sentAheadOfLoop = map[string]struct{}{
+	"clusterid": {},
+	"procid":    {},
+	"jobstatus": {},
+}
+
+// SendClusterAttributes sends an ad to a cluster's own ad, at proc id -1.
+//
+// Everything a submission shares across its procs belongs here. The schedd
+// chains each proc ad to its cluster ad, so an attribute set here shows
+// through on every proc of the cluster, and QUERY_JOB_ADS merges the chain
+// before returning a proc ad, so a reader cannot tell the difference. What it
+// does change: the queue holds one copy of the attribute instead of one per
+// proc, and `condor_qedit <clusterid> Attr=Value` reaches every job in the
+// cluster -- which it cannot do for an attribute that each proc carries its
+// own copy of, because the proc's own value wins.
+//
+// ClusterId is sent first, as condor_submit does. Attributes obliged to live
+// in a proc ad are skipped.
+func (q *QmgmtConnection) SendClusterAttributes(ctx context.Context, clusterID int, ad *classad.ClassAd) error {
+	if !q.inTransaction {
+		return fmt.Errorf("must be in a transaction to send cluster attributes")
+	}
+
+	if err := q.SetAttributeInt(ctx, clusterID, clusterAdProcID, attrClusterID, clusterID, 0); err != nil {
+		return fmt.Errorf("failed to set %s for cluster %d: %w", attrClusterID, clusterID, err)
+	}
+
+	return q.sendAdAttributes(ctx, clusterID, clusterAdProcID, ad, nil, placeCluster)
+}
+
+// SendProcAttributes sends an ad to a single proc of a cluster.
+//
+// clusterAd, when non-nil, is the ad already sent to the cluster at proc id
+// -1. Any attribute of ad whose value is structurally identical to the
+// cluster ad's is left out, because the proc inherits it through the chain.
+// Pass nil to send every attribute, which is only correct when no cluster ad
+// was sent for this cluster.
+//
+// ProcId and JobStatus are sent first and unconditionally. ProcId identifies
+// the ad. JobStatus has to be present in the proc ad itself even when the
+// cluster ad carries the same value, because the schedd computes its
+// per-cluster and per-owner totals by state from the proc ads and gets them
+// wrong when it is missing.
+//
+// Attributes obliged to live in the cluster ad are skipped. The schedd will
+// not accept Owner, User or ProjectName on a proc whose id is above zero: it
+// logs at D_FULLDEBUG and returns success without storing them, so sending
+// them there is a silent no-op, not an error the caller would see.
+func (q *QmgmtConnection) SendProcAttributes(ctx context.Context, clusterID, procID int, ad, clusterAd *classad.ClassAd) error {
+	if !q.inTransaction {
+		return fmt.Errorf("must be in a transaction to send job attributes")
+	}
+	if procID < 0 {
+		return fmt.Errorf("invalid proc id %d: use SendClusterAttributes to send a cluster ad", procID)
+	}
+
+	if err := q.SetAttributeInt(ctx, clusterID, procID, attrProcID, procID, 0); err != nil {
+		return fmt.Errorf("failed to set %s for job %d.%d: %w", attrProcID, clusterID, procID, err)
+	}
+
+	// Read the status from the proc ad, falling back to the cluster ad and
+	// then to IDLE, the way condor_submit reads it back through the chain.
+	status := int64(jobStatusIdle)
+	for _, src := range []*classad.ClassAd{ad, clusterAd} {
+		if src == nil {
+			continue
+		}
+		if found, ok := src.EvaluateAttrInt(attrJobStatus); ok {
+			status = found
+			break
+		}
+	}
+	if err := q.SetAttributeInt(ctx, clusterID, procID, attrJobStatus, int(status), 0); err != nil {
+		return fmt.Errorf("failed to set %s for job %d.%d: %w", attrJobStatus, clusterID, procID, err)
+	}
+
+	return q.sendAdAttributes(ctx, clusterID, procID, ad, clusterAd, placeProc)
+}
+
+// sendAdAttributes sends every attribute of ad that belongs in the ad
+// identified by (clusterID, procID), as one SetAttribute call each.
+//
+// keep is the placement this ad accepts: an attribute forced to the other
+// placement is skipped. dedupAgainst, when non-nil, is an ad already sent
+// whose values this one inherits; a structurally identical value is not
+// resent.
+//
+// Nothing here mutates ad. Callers hand the generated proc ads out after
+// submission -- SubmitRemote returns them for file spooling, which reads Cmd
+// and the transfer lists back off them -- so dropping a deduplicated
+// attribute from the ad itself would empty out the spool's allow-set and lose
+// the files in silence.
+func (q *QmgmtConnection) sendAdAttributes(
+	ctx context.Context,
+	clusterID, procID int,
+	ad, dedupAgainst *classad.ClassAd,
+	keep attrPlacement,
+) error {
+	for _, attr := range selectAttributes(ad, dedupAgainst, keep) {
+		expr, ok := ad.Lookup(attr)
+		if !ok || expr == nil {
+			continue
+		}
+		if err := q.SetAttribute(ctx, clusterID, procID, attr, expr.String(), 0); err != nil {
+			return fmt.Errorf("failed to set attribute %s: %w", attr, err)
+		}
+	}
+
+	return nil
+}
+
+// selectAttributes returns the names of the attributes of ad that belong in an
+// ad of the given placement and are not already covered, in the order ad holds
+// them.
+//
+// An attribute is left out when it is sent ahead of the loop (ClusterId,
+// ProcId, JobStatus), when it is obliged to live in the other kind of ad, or
+// when dedupAgainst is non-nil and already holds a structurally identical
+// value -- a chained proc ad inherits that value, so resending it would only
+// add a second copy to the queue.
+//
+// An attribute that dedupAgainst holds and ad does not is *not* reported:
+// there is no way to hide a cluster ad's attribute from a chained proc ad by
+// leaving it out, and condor_submit has the same behavior. Submissions whose
+// procs differ in which attributes are present at all -- a value-conditional
+// one like container_image, where a queue item expands to the empty string --
+// therefore inherit the first proc's value rather than having none.
+func selectAttributes(ad, dedupAgainst *classad.ClassAd, keep attrPlacement) []string {
+	if ad == nil {
+		return nil
+	}
+
+	attrs := ad.GetAttributes()
+	selected := make([]string, 0, len(attrs))
+	for _, attr := range attrs {
+		if _, sent := sentAheadOfLoop[strings.ToLower(attr)]; sent {
+			continue
+		}
+		if place := placementOf(attr); place != placeAny && place != keep {
+			continue
+		}
+
+		expr, ok := ad.Lookup(attr)
+		if !ok || expr == nil {
+			continue
+		}
+
+		if dedupAgainst != nil {
+			if parent, ok := dedupAgainst.Lookup(attr); ok && expr.Equal(parent) {
+				continue
+			}
+		}
+
+		selected = append(selected, attr)
+	}
+
+	return selected
+}
+
+// SendJobAttributes sends every attribute of ad to one job, (clusterID,
+// procID), with no attention to which ad the schedd will actually store each
+// one in.
+//
+// Deprecated: use SendClusterAttributes and SendProcAttributes instead. This
+// sends a cluster's shared attributes once per proc rather than once to the
+// cluster ad, which costs a round trip per attribute per proc and leaves each
+// proc holding its own copy, so condor_qedit on the cluster id does not reach
+// those jobs. Owner, User and ProjectName sent this way for proc > 0 are
+// discarded by the schedd, which reports success. The behavior is kept as it
+// was for callers that depend on it.
 func (q *QmgmtConnection) SendJobAttributes(ctx context.Context, clusterID, procID int, ad *classad.ClassAd) error {
 	if !q.inTransaction {
 		return fmt.Errorf("must be in a transaction to send job attributes")
 	}
 
-	// Iterate through all attributes in the ClassAd and send them
 	for _, attr := range ad.GetAttributes() {
 		expr, ok := ad.Lookup(attr)
 		if !ok || expr == nil {
 			continue
 		}
 
-		// Convert the expression to a string representation
-		valueStr := expr.String()
-
-		if err := q.SetAttribute(ctx, clusterID, procID, attr, valueStr, 0); err != nil {
+		if err := q.SetAttribute(ctx, clusterID, procID, attr, expr.String(), 0); err != nil {
 			return fmt.Errorf("failed to set attribute %s: %w", attr, err)
 		}
 	}

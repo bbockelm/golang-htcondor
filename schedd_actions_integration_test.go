@@ -9,14 +9,6 @@ import (
 	"time"
 )
 
-// jobStatus* constants mirror HTCondor's JobStatus enum (src/condor_includes/proc.h).
-const (
-	jobStatusIdle    = 1
-	jobStatusRunning = 2
-	jobStatusRemoved = 3
-	jobStatusHeld    = 5
-)
-
 // connectLifecycleSchedd starts a personal condor via the harness and returns a
 // Schedd handle plus a bound context. It centralizes the boilerplate shared by
 // the action lifecycle integration tests.

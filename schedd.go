@@ -625,7 +625,10 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 		return "", submissionErr
 	}
 
-	// Submit each proc
+	// Submit each proc. The first proc's ad becomes the cluster ad: it is
+	// sent in full at proc id -1, and from then on each proc ad carries only
+	// what differs from it. See SendClusterAttributes for why.
+	var clusterAd *classad.ClassAd
 	for i, procAd := range submitResult.ProcAds {
 		procID, err := qmgmt.NewProc(ctx, clusterID)
 		if err != nil {
@@ -633,8 +636,17 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 			return "", submissionErr
 		}
 
+		// Send the cluster ad before the first proc ad, as condor_submit does.
+		if procID == 0 {
+			if err := qmgmt.SendClusterAttributes(ctx, clusterID, procAd); err != nil {
+				submissionErr = fmt.Errorf("failed to set attributes for cluster %d: %w", clusterID, err)
+				return "", submissionErr
+			}
+			clusterAd = procAd
+		}
+
 		// Send job attributes
-		if err := qmgmt.SendJobAttributes(ctx, clusterID, procID, procAd); err != nil {
+		if err := qmgmt.SendProcAttributes(ctx, clusterID, procID, procAd, clusterAd); err != nil {
 			submissionErr = fmt.Errorf("failed to set attributes for proc %d: %w", i, err)
 			return "", submissionErr
 		}
@@ -732,7 +744,14 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 		}
 	}
 
-	// Submit each proc
+	// Submit each proc. The first proc's ad becomes the cluster ad: it is
+	// sent in full at proc id -1, and from then on each proc ad carries only
+	// what differs from it. See SendClusterAttributes for why.
+	//
+	// The ads themselves are left whole -- deduplication decides what to send,
+	// not what the ad holds -- because resultProcAds goes back to the caller
+	// for file spooling, which reads Cmd and the transfer lists off them.
+	var clusterAd *classad.ClassAd
 	resultProcAds := make([]*classad.ClassAd, len(submitResult.ProcAds))
 	for i, procAd := range submitResult.ProcAds {
 		procID, err := qmgmt.NewProc(ctx, clusterIDInt)
@@ -745,8 +764,17 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 		_ = procAd.Set("ClusterId", int64(clusterIDInt))
 		_ = procAd.Set("ProcId", int64(procID))
 
+		// Send the cluster ad before the first proc ad, as condor_submit does.
+		if procID == 0 {
+			if err := qmgmt.SendClusterAttributes(ctx, clusterIDInt, procAd); err != nil {
+				submissionErr = fmt.Errorf("failed to set attributes for cluster %d: %w", clusterIDInt, err)
+				return 0, nil, submissionErr
+			}
+			clusterAd = procAd
+		}
+
 		// Send job attributes
-		if err := qmgmt.SendJobAttributes(ctx, clusterIDInt, procID, procAd); err != nil {
+		if err := qmgmt.SendProcAttributes(ctx, clusterIDInt, procID, procAd, clusterAd); err != nil {
 			submissionErr = fmt.Errorf("failed to set attributes for proc %d: %w", i, err)
 			return 0, nil, submissionErr
 		}

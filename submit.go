@@ -91,8 +91,14 @@ type JobID struct {
 type SubmitResult struct {
 	ClusterID int
 	NumProcs  int
+
+	// ClusterAd is the same ad as ProcAds[0], not a separate one. The first
+	// proc's ad is what becomes the cluster ad: it is sent in full at proc id
+	// -1, and every later proc ad is reduced to what differs from it. It is
+	// not a template assembled from the attributes all procs share.
 	ClusterAd *classad.ClassAd
-	ProcAds   []*classad.ClassAd
+
+	ProcAds []*classad.ClassAd
 }
 
 // Universe constants matching HTCondor
@@ -466,7 +472,7 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	_ = ad.Set("JobStatus", 1)
 
 	// QDate: Unix epoch seconds at the moment of submission. HTCondor's
-	// own condor_submit sets this on the client side before SendJobAttributes,
+	// own condor_submit sets this on the client side before sending the ad,
 	// and downstream tooling (the web UI's "Submitted" column, condor_q
 	// formatting, history records) expects it to be present. Without
 	// QDate the schedd doesn't backfill, so the field stays undefined

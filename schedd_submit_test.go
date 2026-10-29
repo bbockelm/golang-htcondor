@@ -102,8 +102,15 @@ func TestScheddSubmitIntegration(t *testing.T) {
 
 		t.Logf("Created proc ID: %d", procID)
 
-		// Send all job attributes (Owner will be set automatically based on SetEffectiveOwner)
-		if err := qmgmt.SendJobAttributes(ctx, clusterID, procID, jobAd); err != nil {
+		// Send the shared attributes to the cluster ad, then the proc ad,
+		// which deduplicates against it and so carries only ProcId and
+		// JobStatus for a single-proc cluster. (Owner will be set
+		// automatically based on SetEffectiveOwner.)
+		if err := qmgmt.SendClusterAttributes(ctx, clusterID, jobAd); err != nil {
+			_ = qmgmt.AbortTransaction(ctx)
+			t.Fatalf("Failed to send cluster attributes: %v", err)
+		}
+		if err := qmgmt.SendProcAttributes(ctx, clusterID, procID, jobAd, jobAd); err != nil {
 			_ = qmgmt.AbortTransaction(ctx)
 			t.Fatalf("Failed to send job attributes: %v", err)
 		}
