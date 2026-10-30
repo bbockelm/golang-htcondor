@@ -47,18 +47,17 @@ if [ ! -d "$pkg" ] || [ ! -f "$envscript" ]; then
 	exit 78
 fi
 
-# go test -fuzz takes one target, so a package with two Fuzz functions
-# needs this script taught which one. Reading the name out of the package
-# keeps the nightly run working when a target is renamed.
-fuzzname="$(sed -nE 's/^func (Fuzz[A-Za-z0-9_]*)\(.*/\1/p' "$pkg"/*_test.go | sort -u)"
-if [ -z "$fuzzname" ]; then
+# Read the targets out of the package rather than hardcoding them, so the
+# nightly keeps working when one is renamed or added. go test -fuzz takes a
+# single target, so several are run in turn and the budget is split between
+# them -- a package that grows a target should fuzz each one less, not stop
+# fuzzing.
+fuzznames="$(sed -nE 's/^func (Fuzz[A-Za-z0-9_]*)\(.*/\1/p' "$pkg"/*_test.go | sort -u)"
+if [ -z "$fuzznames" ]; then
 	echo "::error::no Fuzz function found in $pkg" >&2
 	exit 1
 fi
-if [ "$(printf '%s\n' "$fuzzname" | wc -l)" -ne 1 ]; then
-	echo "::error::$pkg has more than one Fuzz function: $(echo "$fuzzname" | tr '\n' ' ')" >&2
-	exit 1
-fi
+ntargets="$(printf '%s\n' "$fuzznames" | wc -l | tr -d ' ')"
 
 export GOWORK=off
 
@@ -93,8 +92,34 @@ if [ "$rc" -ne 0 ]; then
 	exit 1
 fi
 
-echo "nightly-fuzz: $target fuzzing $fuzzname for $fuzztime"
-go test -tags libcondor_utils -run '^$' -fuzz "^$fuzzname\$" \
-	-fuzztime "$fuzztime" -fuzzcachedir "$corpus" "./$pkg/" 2>&1 | tee -a "$log"
-rc="${PIPESTATUS[0]}"
-[ "$rc" -eq 0 ] || exit 1
+# Split the budget evenly. A duration is only split when it is given in
+# whole seconds or minutes; anything else (an execution count like 100000x,
+# or a unit this does not parse) is handed to each target unchanged, which
+# costs wall clock rather than silently fuzzing for the wrong length.
+per="$fuzztime"
+if [ "$ntargets" -gt 1 ]; then
+	case "$fuzztime" in
+	*s) n=${fuzztime%s}; [ "$n" -eq "$n" ] 2>/dev/null && per="$(( n / ntargets > 0 ? n / ntargets : 1 ))s" ;;
+	*m) n=${fuzztime%m}; [ "$n" -eq "$n" ] 2>/dev/null && per="$(( n * 60 / ntargets > 0 ? n * 60 / ntargets : 1 ))s" ;;
+	esac
+fi
+
+failed=""
+while IFS= read -r fuzzname; do
+	[ -n "$fuzzname" ] || continue
+	echo "nightly-fuzz: $target fuzzing $fuzzname for $per"
+	go test -tags libcondor_utils -run '^$' -fuzz "^$fuzzname\$" \
+		-fuzztime "$per" -fuzzcachedir "$corpus" "./$pkg/" 2>&1 | tee -a "$log"
+	if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+		failed="$failed $fuzzname"
+	fi
+done <<EOF
+$fuzznames
+EOF
+
+# Every target runs even when an earlier one fails, so one bad target does
+# not hide a finding in another; the issue body names them all.
+if [ -n "$failed" ]; then
+	echo "::error::$target fuzz targets failed:$failed" | tee -a "$log"
+	exit 1
+fi
