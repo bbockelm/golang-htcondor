@@ -187,8 +187,15 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 	// 2. Execute assignments to build the config
 
 	// First pass: parse to get statements including queue
+	//
+	// ParseStrict, not Parse: a line HTCondor rejects fails the whole submit
+	// file there, and the lenient mode here does not. The grammar has no error
+	// production, so a syntax error stops the parse, but a default reduction
+	// has usually already stored the statements read up to that point — which
+	// Parse then returns with a nil error. A submit file with one bad line
+	// silently lost that line and every command after it.
 	lexer := config.NewLexer(strings.NewReader(expanded))
-	stmts, err := config.Parse(lexer)
+	stmts, err := config.ParseStrict(lexer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse submit file: %w", err)
 	}

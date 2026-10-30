@@ -197,8 +197,12 @@ func TestLexerNumbers(t *testing.T) {
 		{"-3.14", "-3.14"},
 	}
 
+	// A number is only a number away from the start of a statement: the first
+	// token on a line is a parameter name, and HTCondor lets one start with a
+	// digit. "queue" puts the lexer past the statement start.
 	for _, tt := range tests {
-		lex := NewLexer(strings.NewReader(tt.input))
+		lex := NewLexer(strings.NewReader("queue " + tt.input))
+		lex.NextToken() // QUEUE
 		tok := lex.NextToken()
 
 		if tok.Token != NUMBER {
@@ -231,5 +235,69 @@ func TestLexerComplexValue(t *testing.T) {
 	expected := "condor.cs.wisc.edu, $(HOSTNAME), stork.cs.wisc.edu"
 	if tok.Lit != expected {
 		t.Errorf("Expected %q, got %q", expected, tok.Lit)
+	}
+}
+
+// TestLexerStatementStartNames pins the lexer to HTCondor's parameter-name
+// rule rather than Go's identifier rule. config.cpp scans the name at the
+// start of a line as the run of characters before the first whitespace or
+// operator and then checks it with is_valid_param_name(), whose charset is
+// condor_isidchar(): [A-Za-z0-9_./]. Nothing says the first character has to
+// be a letter, so `0 = x` names a macro "0".
+//
+// The values are what libcondor_utils 26.2.0 does with the same submit files;
+// see fuzz/submit.
+func TestLexerStatementStartNames(t *testing.T) {
+	for _, tt := range []struct {
+		input string
+		name  string
+		value string
+	}{
+		{"0 = x\n", "0", "x"},
+		{"0abc = x\n", "0abc", "x"},
+		{"456.789 = x\n", "456.789", "x"},
+		{"_x = 1\n", "_x", "1"},
+		{"a/b = 1\n", "a/b", "1"},
+		{"foo.bar = 1\n", "foo.bar", "1"},
+		{"0 : x\n", "0", "x"}, // ':' assigns, the same as '='
+	} {
+		lex := NewLexer(strings.NewReader(tt.input))
+		name := lex.NextToken()
+		if name.Token != IDENT || name.Lit != tt.name {
+			t.Errorf("input=%q: name token=%d lit=%q, want IDENT %q",
+				tt.input, name.Token, name.Lit, tt.name)
+			continue
+		}
+		val := lex.NextToken()
+		if val.Token != ASSIGN || val.Lit != tt.value {
+			t.Errorf("input=%q: value token=%d lit=%q, want ASSIGN %q",
+				tt.input, val.Token, val.Lit, tt.value)
+		}
+	}
+}
+
+// TestLexerValueTrimsCarriageReturn pins the other half of the same rule:
+// getline_implementation trims the line with isspace() before it is split into
+// name and value, so a file written on Windows produces the same values as one
+// written on Unix. A '\r' away from the end of the line is not trailing
+// whitespace and survives.
+func TestLexerValueTrimsCarriageReturn(t *testing.T) {
+	for _, tt := range []struct {
+		input string
+		value string
+	}{
+		{"executable = /bin/sleep\r\n", "/bin/sleep"},
+		{"executable =\r/bin/sleep\n", "/bin/sleep"},
+		{"executable = /bin/sleep \r\n", "/bin/sleep"},
+		{"executable = /bin/sl\reep\n", "/bin/sl\reep"},
+		{"executable = /bin/sleep\v\f\n", "/bin/sleep"},
+	} {
+		lex := NewLexer(strings.NewReader(tt.input))
+		lex.NextToken() // the name
+		val := lex.NextToken()
+		if val.Token != ASSIGN || val.Lit != tt.value {
+			t.Errorf("input=%q: token=%d lit=%q, want ASSIGN %q",
+				tt.input, val.Token, val.Lit, tt.value)
+		}
 	}
 }

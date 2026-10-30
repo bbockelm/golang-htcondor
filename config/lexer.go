@@ -359,7 +359,7 @@ func (l *Lexer) readUntilNewline() string {
 	l.buf.Reset()
 
 	// Skip leading whitespace
-	for l.ch == ' ' || l.ch == '\t' {
+	for isLineSpace(l.ch) {
 		l.readChar()
 	}
 
@@ -372,12 +372,12 @@ func (l *Lexer) readUntilNewline() string {
 			// Trim trailing whitespace before the backslash
 			s := l.buf.String()
 			l.buf.Reset()
-			l.buf.WriteString(strings.TrimRight(s, " \t"))
+			l.buf.WriteString(strings.TrimRight(s, lineSpace))
 			l.buf.WriteRune(' ')
 			l.readChar() // Skip backslash
 			l.readChar() // Skip newline
 			// Skip leading whitespace on next line
-			for l.ch == ' ' || l.ch == '\t' {
+			for isLineSpace(l.ch) {
 				l.readChar()
 			}
 		case l.ch == '\\' && l.peekChar() == '\r':
@@ -385,14 +385,14 @@ func (l *Lexer) readUntilNewline() string {
 			// Trim trailing whitespace before the backslash
 			s := l.buf.String()
 			l.buf.Reset()
-			l.buf.WriteString(strings.TrimRight(s, " \t"))
+			l.buf.WriteString(strings.TrimRight(s, lineSpace))
 			l.buf.WriteRune(' ')
 			l.readChar() // Skip backslash
 			l.readChar() // Skip \r
 			if l.ch == '\n' {
 				l.readChar() // Skip \n
 			}
-			for l.ch == ' ' || l.ch == '\t' {
+			for isLineSpace(l.ch) {
 				l.readChar()
 			}
 		default:
@@ -401,7 +401,7 @@ func (l *Lexer) readUntilNewline() string {
 		}
 	}
 
-	return strings.TrimRight(l.buf.String(), " \t")
+	return strings.TrimRight(l.buf.String(), lineSpace)
 }
 
 // readQueueItemList consumes a queue statement's parenthesised item list and
@@ -810,8 +810,14 @@ func (l *Lexer) NextToken() *TokenInfo {
 
 	default:
 		switch {
-		case isIdentStart(l.ch):
-			tok.Lit = l.readIdentifier()
+		case isIdentStart(l.ch) || (atStmtStart && isParamNameChar(l.ch)):
+			if atStmtStart {
+				// A statement begins with a parameter name, which HTCondor
+				// allows to start with a digit; see readParamName.
+				tok.Lit = l.readParamName()
+			} else {
+				tok.Lit = l.readIdentifier()
+			}
 			if l.badMacroRef {
 				l.badMacroRef = false
 				tok.Token = ILLEGAL
@@ -880,9 +886,63 @@ func (l *Lexer) ReadValue() string {
 	return l.readUntilNewline()
 }
 
+// lineSpace is every character HTCondor's reader treats as whitespace inside a
+// line. getline_implementation trims a line with isspace(), so a config or
+// submit file written on Windows loses its carriage return before the line is
+// ever split into name and value; trimming only " \t" left it on the end of
+// the value, which is how `executable = /bin/sleep\r\n` produced a Cmd of
+// "/bin/sleep\r". '\n' is not in the set because it terminates the value.
+const lineSpace = " \t\r\v\f"
+
+// isLineSpace is lineSpace as a predicate.
+func isLineSpace(ch rune) bool {
+	return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\v' || ch == '\f'
+}
+
 // isIdentStart returns true if the rune can start an identifier
 func isIdentStart(ch rune) bool {
 	return unicode.IsLetter(ch) || ch == '_'
+}
+
+// isParamNameChar reports whether ch may appear in a parameter name, matching
+// condor_isidchar() in config.cpp: alphanumerics plus '_', '.' and '/'.
+func isParamNameChar(ch rune) bool {
+	return unicode.IsLetter(ch) || unicode.IsDigit(ch) || ch == '_' || ch == '.' || ch == '/'
+}
+
+// readParamName reads the name at the start of a statement.
+//
+// HTCondor scans the name as the run of characters before the first whitespace
+// or operator and then checks it against is_valid_param_name(), whose charset
+// is condor_isidchar()'s. There is no number token in the config or submit
+// language: `0 = x` defines a macro named "0" and `a/b = 1` one named "a/b",
+// both of which condor_submit accepts.
+//
+// Lexing those as NUMBER and ILLEGAL made the assignment vanish, and with it
+// every statement after it: the grammar has no error production, so the parse
+// stops, and a default reduction has usually already stored the statements
+// seen so far, so Parse returned a truncated file with no error at all.
+//
+// A $(...) macro reference may appear in the name, for the same reason
+// readIdentifier accepts one.
+func (l *Lexer) readParamName() string {
+	l.buf.Reset()
+	for {
+		if isParamNameChar(l.ch) {
+			l.buf.WriteRune(l.ch)
+			l.readChar()
+			continue
+		}
+		if l.ch == '$' && l.peekChar() == '(' {
+			if !l.readMacroRefInto(&l.buf) {
+				l.badMacroRef = true
+				break
+			}
+			continue
+		}
+		break
+	}
+	return l.buf.String()
 }
 
 // readMacroRefInto copies a $(...) macro reference into buf, brackets

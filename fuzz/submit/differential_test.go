@@ -33,6 +33,28 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\narguments = $(Process)\nqueue 3\n"},
 	{input: "executable = /bin/sleep\noutput = out.$(Process)\nerror = err.$(Process)\nlog = j.log\nqueue 2\n"},
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\nqueue\n"},
+	{input: "executable = /bin/sleep\n+Note = \"a   \\\n   b\"\nqueue\n",
+		reason: "whitespace before a line-continuation backslash: getline_implementation keeps it and joins the next line with nothing, so C++ gets \"a   b\"; Go trims it and inserts one space, giving \"a b\"."},
+
+	// --- parity: line endings and parameter names ---
+	// A submit file written on Windows. getline_implementation trims the
+	// line with isspace(), so the carriage return never reaches the value.
+	{input: "executable = /bin/sleep\r\nrequest_cpus = 1\r\nrequest_memory = 128\r\narguments = a\r\nlog = j.log\r\nqueue\r\n"},
+	{input: "\r\nexecutable = /bin/sleep\r\n\r\narguments = a\r\nqueue\r\n"},
+	// A '\r' away from the end of the line is not trailing whitespace and
+	// survives on both sides.
+	{input: "executable = /bin/sl\reep\nqueue\n"},
+	{input: "executable = /bin/sleep\narguments =\ra\nqueue\n"},
+	// is_valid_param_name() accepts any run of [A-Za-z0-9_./], with no
+	// restriction on the first character, so all of these name macros.
+	{input: "executable = /bin/sleep\n0 = x\narguments = $(0)\nlog = j.log\nqueue\n"},
+	{input: "executable = /bin/sleep\n0abc = x\narguments = $(0abc)\nqueue\n"},
+	{input: "executable = /bin/sleep\n_x = 1\narguments = $(_x)\nqueue\n"},
+	{input: "executable = /bin/sleep\na/b = 1\narguments = $(a/b)\nqueue\n"},
+	{input: "executable = /bin/sleep\nfoo.bar = 1\narguments = $(foo.bar)\nqueue\n"},
+	// A character outside that set makes the name illegal, and HTCondor
+	// fails the whole file rather than skipping the line.
+	{input: "executable = /bin/sleep\na-b = 1\nlog = j.log\nqueue\n"},
 
 	// --- parity: path resolution ---
 	// A relative executable or log is resolved to an absolute path, and
