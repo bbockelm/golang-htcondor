@@ -4,8 +4,10 @@
 package htcondor
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"regexp"
 	"runtime"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PelicanPlatform/classad/ast"
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/version"
@@ -1831,34 +1834,12 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 		}
 	}
 
-	// max_retries - number of times to retry on failure
-	if maxRetries, ok := sf.submitCommand("max_retries"); ok {
-		if intRetries, err := parseInt(maxRetries); err == nil {
-			_ = ad.Set("MaxRetries", intRetries)
-		}
-	}
-
-	// retry_until - expression (or integer exit code) for when to stop
-	// retrying. condor_submit stores it unevaluated, and the schedd's retry
-	// handling evaluates it, so it is an expression here too.
-	if retryUntil, ok := sf.submitCommand("retry_until"); ok {
-		if err := setExprAttr(ad, "RetryUntil", "retry_until", retryUntil); err != nil {
-			return err
-		}
-	}
-
-	// success_exit_code - the exit status that counts as success.
-	//
-	// The attribute is JobSuccessExitCode; "SuccessExitCode" (what this
-	// set before) is not an attribute HTCondor reads, so the setting had
-	// no effect. It also has to be an integer, not the raw string: the
-	// shadow compares it against ExitCode, and when_to_transfer_output =
-	// ON_SUCCESS is gated on that comparison.
-	if successCode, ok := sf.submitCommand("success_exit_code"); ok {
-		if n, err := strconv.ParseInt(strings.TrimSpace(successCode), 10, 64); err == nil {
-			_ = ad.Set("JobSuccessExitCode", n)
-		}
-	}
+	// max_retries, retry_until and success_exit_code are not independent
+	// settings: each one on its own turns retries on, and the three
+	// together decide JobMaxRetries, JobSuccessExitCode and the
+	// OnExitRemove expression. setJobRetries builds all of that in one
+	// place, after the +Attr pass, because it has to see an OnExitRemove
+	// the submitter set directly.
 
 	// leave_in_queue - keep job in queue after completion. Documented as a
 	// ClassAd boolean expression, and the schedd evaluates it against the
@@ -2469,12 +2450,9 @@ func (sf *SubmitFile) setPeriodicExpressions(ad *classad.ClassAd) error {
 		}
 	}
 
-	// on_exit_hold - Hold job based on exit condition
-	if onExitHold, ok := sf.submitCommand("on_exit_hold"); ok {
-		if err := setExprAttr(ad, "OnExitHold", "on_exit_hold", onExitHold); err != nil {
-			return err
-		}
-	}
+	// on_exit_hold is not handled here: condor_submit reads it in
+	// SetJobRetries, where the retry settings can override it. See
+	// setJobRetries.
 
 	// on_exit_hold_reason - Reason for on_exit hold
 	if onExitHoldReason, ok := sf.submitCommand("on_exit_hold_reason"); ok {
@@ -2488,69 +2466,419 @@ func (sf *SubmitFile) setPeriodicExpressions(ad *classad.ClassAd) error {
 		}
 	}
 
-	// on_exit_remove - Remove job based on exit condition
-	if onExitRemove, ok := sf.submitCommand("on_exit_remove"); ok {
-		if err := setExprAttr(ad, "OnExitRemove", "on_exit_remove", onExitRemove); err != nil {
-			return err
-		}
+	// on_exit_remove is likewise SetJobRetries' to write.
+	if err := sf.setJobRetries(ad); err != nil {
+		return err
 	}
 
 	return sf.setCronAndDeferral(ad)
 }
 
-// setCronAndDeferral sets the cron_* and deferral_* attributes. Split out of
-// setPeriodicExpressions only to keep that function's branch count in hand;
-// nothing here is policy.
+// Deferral timing defaults, from JOB_DEFERRAL_WINDOW_DEFAULT and
+// JOB_DEFERRAL_PREP_TIME_DEFAULT in HTCondor's submit_utils.h. condor_submit
+// writes both attributes onto every deferred job, so a job that asks for a
+// schedule but no window still carries the pair the starter reads.
+const (
+	deferralWindowDefault   = 0
+	deferralPrepTimeDefault = 300
+)
+
+// cronScheduleAttrs are the five schedule fields, each stored as a STRING:
+// the value is cron field syntax (`*/2`, `1-5`, `0,30`), not a number.
+var cronScheduleAttrs = []struct{ command, attr string }{
+	{"cron_minute", "CronMinute"},
+	{"cron_hour", "CronHour"},
+	{"cron_day_of_month", "CronDayOfMonth"},
+	{"cron_month", "CronMonth"},
+	{"cron_day_of_week", "CronDayOfWeek"},
+}
+
+// deferralTriggerAttrs are the attributes whose presence makes a job a
+// deferred job, in the order SubmitHash::NeedsJobDeferral checks them. Once
+// one of them is on the ad, the window and prep time are written too --
+// defaulted when the submit file is silent about them.
+var deferralTriggerAttrs = []string{
+	"CronMinute", "CronHour", "CronDayOfMonth", "CronMonth", "CronDayOfWeek",
+	"DeferralTime",
+}
+
+// setCronAndDeferral sets the cron_* and deferral_* attributes, following
+// SubmitHash::SetJobDeferral.
+//
+// Three things here are not obvious from the submit commands' names:
+//
+//   - cron_window and deferral_window are two spellings of ONE attribute,
+//     DeferralWindow, and cron_prep_time and deferral_prep_time are two
+//     spellings of DeferralPrepTime. There is no CronWindow or CronPrepTime
+//     job attribute; writing those names left the schedule in the ad and the
+//     timing nowhere the starter looks, so a cron job never deferred. The
+//     cron_ spelling wins when both are given.
+//   - the window and the prep time are written only for a job that is
+//     actually deferred -- one with a cron schedule or a deferral_time. A
+//     cron_window on its own sets nothing.
+//   - the timing values are expressions, not integers: `(time() + 3600)` is a
+//     legal deferral_time. A LITERAL one has to be a non-negative integer,
+//     and condor_submit rejects the submit file when it is not.
 func (sf *SubmitFile) setCronAndDeferral(ad *classad.ClassAd) error {
-	// cron_* parameters for job deferral
-	if cronMinute, ok := sf.submitCommand("cron_minute"); ok {
-		_ = ad.Set("CronMinute", cronMinute)
-	}
-	if cronHour, ok := sf.submitCommand("cron_hour"); ok {
-		_ = ad.Set("CronHour", cronHour)
-	}
-	if cronDayOfMonth, ok := sf.submitCommand("cron_day_of_month"); ok {
-		_ = ad.Set("CronDayOfMonth", cronDayOfMonth)
-	}
-	if cronMonth, ok := sf.submitCommand("cron_month"); ok {
-		_ = ad.Set("CronMonth", cronMonth)
-	}
-	if cronDayOfWeek, ok := sf.submitCommand("cron_day_of_week"); ok {
-		_ = ad.Set("CronDayOfWeek", cronDayOfWeek)
-	}
-	if cronPrepTime, ok := sf.submitCommand("cron_prep_time"); ok {
-		if intPrepTime, err := parseInt(cronPrepTime); err == nil {
-			_ = ad.Set("CronPrepTime", intPrepTime)
-		}
-	}
-	if cronWindow, ok := sf.submitCommand("cron_window"); ok {
-		if intWindow, err := parseInt(cronWindow); err == nil {
-			_ = ad.Set("CronWindow", intWindow)
+	for _, c := range cronScheduleAttrs {
+		if v := sf.submitParam(c.command, ""); v != "" {
+			_ = ad.Set(c.attr, v)
 		}
 	}
 
-	// deferral_time - Defer job start until specified time
-	if deferralTime, ok := sf.submitCommand("deferral_time"); ok {
-		if intTime, err := parseInt(deferralTime); err == nil {
-			_ = ad.Set("DeferralTime", intTime)
+	if v := sf.submitParam("deferral_time", "DeferralTime"); v != "" {
+		if err := setDeferralExpr(ad, "DeferralTime", "deferral_time", v); err != nil {
+			return err
 		}
 	}
 
-	// deferral_window - Time window for deferred job
-	if deferralWindow, ok := sf.submitCommand("deferral_window"); ok {
-		if intWindow, err := parseInt(deferralWindow); err == nil {
-			_ = ad.Set("DeferralWindow", intWindow)
+	deferred := false
+	for _, attr := range deferralTriggerAttrs {
+		if _, ok := ad.Lookup(attr); ok {
+			deferred = true
+			break
 		}
 	}
+	if !deferred {
+		return nil
+	}
 
-	// deferral_prep_time - Preparation time before deferral
-	if deferralPrepTime, ok := sf.submitCommand("deferral_prep_time"); ok {
-		if intPrepTime, err := parseInt(deferralPrepTime); err == nil {
-			_ = ad.Set("DeferralPrepTime", intPrepTime)
+	window := sf.submitParam("cron_window", "CronWindow")
+	command := "cron_window"
+	if window == "" {
+		window, command = sf.submitParam("deferral_window", "DeferralWindow"), "deferral_window"
+	}
+	if window != "" {
+		if err := setDeferralExpr(ad, "DeferralWindow", command, window); err != nil {
+			return err
 		}
+	} else {
+		_ = ad.Set("DeferralWindow", int64(deferralWindowDefault))
+	}
+
+	prep := sf.submitParam("cron_prep_time", "CronPrepTime")
+	command = "cron_prep_time"
+	if prep == "" {
+		prep, command = sf.submitParam("deferral_prep_time", "DeferralPrepTime"), "deferral_prep_time"
+	}
+	if prep != "" {
+		if err := setDeferralExpr(ad, "DeferralPrepTime", command, prep); err != nil {
+			return err
+		}
+	} else {
+		_ = ad.Set("DeferralPrepTime", int64(deferralPrepTimeDefault))
 	}
 
 	return nil
+}
+
+// setDeferralExpr stores one deferral timing value as an expression and
+// applies the check SetJobDeferral applies: a value that is a literal has to
+// be a non-negative integer. A non-literal expression is stored unchecked,
+// since only the starter can evaluate it.
+func setDeferralExpr(ad *classad.ClassAd, attr, command, value string) error {
+	expr, err := classad.ParseExpr(value)
+	if err != nil {
+		return fmt.Errorf("%s = %s is invalid, must eval to a non-negative integer", command, value)
+	}
+	if n, isInt, isLiteral := literalInteger(value); isLiteral && (!isInt || n < 0) {
+		return fmt.Errorf("%s = %s is invalid, must eval to a non-negative integer", command, value)
+	}
+	_ = ad.Set(attr, expr)
+	return nil
+}
+
+// defaultJobMaxRetries is the built-in default of the DEFAULT_JOB_MAX_RETRIES
+// config knob: how many times a job retries when the submit file turned
+// retries on without saying how many.
+const defaultJobMaxRetries = 2
+
+// retryExprPrefix is the fixed head of the OnExitRemove expression
+// condor_submit builds for a retrying job: stop once the job has completed
+// more times than it is allowed to retry, or once it exits with a code that
+// counts as done. The exit-code half is filled in by setJobRetries.
+const retryExprPrefix = "NumJobCompletions > JobMaxRetries || ExitCode =?= "
+
+// setJobRetries writes JobMaxRetries, JobSuccessExitCode, OnExitHold and
+// OnExitRemove, following SubmitHash::SetJobRetries.
+//
+// The four settings are entangled, which is why they are not handled where
+// their submit commands are read:
+//
+//   - max_retries, success_exit_code and retry_until each turn retries ON by
+//     themselves. With retries on, a job that did not say max_retries still
+//     gets JobMaxRetries (DEFAULT_JOB_MAX_RETRIES), and one that did not say
+//     on_exit_hold still gets OnExitHold = false.
+//   - retry_until is NOT a job attribute. A plain integer becomes a futility
+//     exit code (`ExitCode =?= 42`); anything else is used as the expression
+//     it is. Either way it is folded into OnExitRemove, and a job ad carrying
+//     a RetryUntil attribute is carrying something nothing reads.
+//   - with retries on, OnExitRemove is REPLACED by the generated expression,
+//     and the submitter's own on_exit_remove is OR'd onto the end of it.
+//     Keeping only the submitter's expression -- which is what the Go parser
+//     did -- removes the job on its first failure, so it never retries.
+//
+// An OnExitRemove the submitter set directly, with +OnExitRemove or
+// MY.OnExitRemove, is left alone unless success_exit_code or retry_until
+// asked for a change. That is why this runs after the +Attr pass.
+func (sf *SubmitFile) setJobRetries(ad *classad.ClassAd) error {
+	erc := sf.submitParam("on_exit_remove", "OnExitRemove")
+	ehc := sf.submitParam("on_exit_hold", "OnExitHold")
+
+	enableRetries := false
+
+	var numRetries int64
+	numRetriesSpecified := false
+	if v := sf.submitParam("max_retries", "JobMaxRetries"); v != "" {
+		n, ok := evalLongParam(v)
+		if !ok {
+			return fmt.Errorf("max_retries = %s is invalid, must eval to an integer", v)
+		}
+		numRetries, numRetriesSpecified, enableRetries = n, true, true
+	}
+
+	var successCode int64
+	successExitCodeSet := false
+	if v := sf.submitParam("success_exit_code", "JobSuccessExitCode"); v != "" {
+		n, ok := evalLongParam(v)
+		if !ok || n < math.MinInt32 || n >= math.MaxInt32 {
+			return fmt.Errorf("success_exit_code = %s is invalid, must eval to an integer", v)
+		}
+		successCode, successExitCodeSet, enableRetries = n, true, true
+	}
+
+	retryUntil := sf.submitParam("retry_until", "")
+	if retryUntil != "" {
+		enableRetries = true
+	}
+
+	if !enableRetries {
+		if err := setExprAttr(ad, "OnExitRemove", "on_exit_remove", erc); err != nil {
+			return err
+		}
+		return setExprAttr(ad, "OnExitHold", "on_exit_hold", ehc)
+	}
+
+	if retryUntil != "" {
+		folded, err := foldRetryUntil(retryUntil)
+		if err != nil {
+			return err
+		}
+		retryUntil = folded
+	}
+
+	if !numRetriesSpecified {
+		if _, ok := ad.Lookup("JobMaxRetries"); !ok {
+			numRetries, numRetriesSpecified = defaultJobMaxRetries, true
+		}
+	}
+	if numRetriesSpecified {
+		_ = ad.Set("JobMaxRetries", numRetries)
+	}
+
+	if ehc == "" {
+		if _, ok := ad.Lookup("OnExitHold"); !ok {
+			_ = ad.Set("OnExitHold", false)
+		}
+	} else if err := setExprAttr(ad, "OnExitHold", "on_exit_hold", ehc); err != nil {
+		return err
+	}
+
+	// An OnExitRemove already on the ad stands, unless success_exit_code or
+	// retry_until named a change to it.
+	if _, ok := ad.Lookup("OnExitRemove"); ok && !successExitCodeSet && retryUntil == "" {
+		return nil
+	}
+
+	codeCheck := strconv.FormatInt(successCode, 10)
+	if successExitCodeSet {
+		_ = ad.Set("JobSuccessExitCode", successCode)
+		codeCheck = "JobSuccessExitCode"
+	}
+	if retryUntil != "" {
+		codeCheck += " || " + retryUntil
+	}
+
+	onExitRemove := retryExprPrefix + codeCheck
+	if erc != "" {
+		wrapped, err := wrapExprForOr(erc)
+		if err != nil {
+			return fmt.Errorf("on_exit_remove = %s is invalid, it must be a boolean expression", erc)
+		}
+		onExitRemove += " || " + wrapped
+	}
+	return setExprAttr(ad, "OnExitRemove", "on_exit_remove", onExitRemove)
+}
+
+// foldRetryUntil turns a retry_until value into the clause that goes into
+// OnExitRemove.
+//
+// A value that names no attribute and evaluates to an integer is a futility
+// exit code -- the code that means "do not bother retrying" -- so it becomes
+// a comparison against ExitCode. Everything else is used as the boolean
+// expression it is.
+func foldRetryUntil(value string) (string, error) {
+	invalid := fmt.Errorf("retry_until = %s is invalid, it must be an integer or boolean expression", value)
+
+	expr, err := classad.ParseExpr(value)
+	if err != nil {
+		return "", invalid
+	}
+	scratch := classad.New()
+	if len(scratch.ExternalRefs(expr)) == 0 && len(scratch.InternalRefs(expr)) == 0 {
+		if code, ok := evalLongParam(value); ok {
+			if code < math.MinInt32 || code > math.MaxInt32 {
+				return "", invalid
+			}
+			return "ExitCode =?= " + strconv.FormatInt(code, 10), nil
+		}
+	}
+	wrapped, werr := wrapExprForOr(value)
+	if werr != nil {
+		return "", invalid
+	}
+	return wrapped, nil
+}
+
+// wrapExprForOr parenthesizes an expression only when it would otherwise
+// lose its grouping under an `||` joined onto it -- WrapExprTreeInParensForOp
+// in compat_classad_util.cpp.
+//
+// Every ClassAd operator binds at least as tightly as `||` except the ternary
+// `? :`, so the ternary is the only shape that needs the parentheses. Adding
+// them anywhere else would change the expression TREE (`a || (b || c)` rather
+// than `(a || b) || c`) even though the value is the same.
+func wrapExprForOr(value string) (string, error) {
+	expr, err := classad.ParseExpr(value)
+	if err != nil {
+		return "", err
+	}
+	scratch := classad.New()
+	scratch.InsertExpr("X", expr)
+	tree := scratch.AST()
+	if tree == nil || len(tree.Attributes) != 1 {
+		return "(" + value + ")", nil
+	}
+	if _, ternary := tree.Attributes[0].Value.(*ast.ConditionalExpr); ternary {
+		return "(" + value + ")", nil
+	}
+	return value, nil
+}
+
+// submitParam reads a submit command the way SubmitHash::submit_param does: a
+// command whose value expands to nothing counts as UNSET, and an empty
+// primary suppresses the alternate spelling rather than deferring to it.
+// Pass "" for altKey when the command has no alternate.
+func (sf *SubmitFile) submitParam(key, altKey string) string {
+	var (
+		v  string
+		ok bool
+	)
+	if altKey == "" {
+		v, ok = sf.submitCommand(key)
+	} else {
+		v, ok = sf.submitCommandAlt(key, altKey)
+	}
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+// evalLongParam is string_is_long_param (condor_config.cpp): a plain decimal
+// integer, or failing that an expression evaluated in an empty scope, with
+// booleans and reals coerced to an integer the way EvalInteger coerces them.
+// It is what lets `max_retries = 2+3` mean five.
+func evalLongParam(value string) (int64, bool) {
+	s := strings.TrimSpace(value)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err == nil {
+		return n, true
+	}
+	if errors.Is(err, strconv.ErrRange) {
+		// strtoll saturates rather than failing, and so does ParseInt:
+		// n already holds the saturated value.
+		return n, true
+	}
+	expr, perr := classad.ParseExpr(s)
+	if perr != nil {
+		return 0, false
+	}
+	v := expr.Eval(classad.New())
+	switch {
+	case v.IsInteger():
+		i, _ := v.IntValue()
+		return i, true
+	case v.IsBool():
+		b, _ := v.BoolValue()
+		if b {
+			return 1, true
+		}
+		return 0, true
+	case v.IsReal():
+		f, _ := v.RealValue()
+		return int64(f), true
+	}
+	return 0, false
+}
+
+// literalInteger reports whether a value is a ClassAd LITERAL -- a constant
+// with no operators, parentheses aside -- and if so whether it is an integer
+// and what its value is. It is the Go side of ExprTreeIsLiteral followed by
+// Value::IsIntegerValue, which is how condor_submit decides whether a timing
+// value is something it can range-check at submit time.
+//
+// `1 + 1` is deliberately NOT a literal: condor_submit stores it unchecked
+// and lets the starter evaluate it.
+func literalInteger(value string) (n int64, isInt bool, isLiteral bool) {
+	s := stripOuterParens(value)
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return i, true, true
+	}
+	switch {
+	case strings.EqualFold(s, "true"), strings.EqualFold(s, "false"),
+		strings.EqualFold(s, "undefined"), strings.EqualFold(s, "error"):
+		return 0, false, true
+	case len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"':
+		return 0, false, true
+	}
+	if _, err := strconv.ParseFloat(s, 64); err == nil {
+		return 0, false, true
+	}
+	return 0, false, false
+}
+
+// stripOuterParens removes parentheses that wrap the whole expression, the
+// way ExprTreeIsLiteral dives through PARENTHESES_OP nodes. A leading '(' that
+// closes before the end -- `(a) + (b)` -- wraps only part of the expression
+// and is left alone.
+func stripOuterParens(s string) string {
+	for {
+		s = strings.TrimSpace(s)
+		if len(s) < 2 || s[0] != '(' || s[len(s)-1] != ')' {
+			return s
+		}
+		depth := 0
+		wrapsAll := true
+		for i := 0; i < len(s); i++ {
+			switch s[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 && i != len(s)-1 {
+					wrapsAll = false
+				}
+			}
+			if !wrapsAll {
+				break
+			}
+		}
+		if !wrapsAll {
+			return s
+		}
+		s = s[1 : len(s)-1]
+	}
 }
 
 // setAutoAttributes sets auto-generated attributes

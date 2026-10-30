@@ -110,6 +110,78 @@ var seeds = []seedCase{
 	{input: ""},
 	{input: "queue\n"},
 
+	// --- parity: cron / deferral scheduling ---
+	// cron_window and cron_prep_time are spellings of DeferralWindow and
+	// DeferralPrepTime; a deferred job always carries both, defaulted when
+	// the file is silent; and a timing value is an expression, not an int.
+	{input: "executable = /bin/sleep\ncron_minute = 0\nqueue\n"},
+	{input: "executable = /bin/sleep\ncron_minute = 0\ncron_hour = */2\ncron_day_of_month = *\ncron_month = *\ncron_day_of_week = *\ncron_window = 60\ncron_prep_time = 30\nqueue\n"},
+	{input: "executable = /bin/sleep\ndeferral_time = 1700000000\nqueue\n"},
+	{input: "executable = /bin/sleep\ndeferral_time = 1700000000\ndeferral_window = 120\ndeferral_prep_time = 45\nqueue\n"},
+	{input: "executable = /bin/sleep\ndeferral_time = (time() + 3600)\nqueue\n"},
+	// cron_ wins over deferral_ for the same attribute, and the alternate
+	// spellings CronWindow / DeferralPrepTime reach it too.
+	{input: "executable = /bin/sleep\ncron_minute = 0\ncron_window = 60\ndeferral_window = 999\ncron_prep_time = 30\ndeferral_prep_time = 999\nqueue\n"},
+	{input: "executable = /bin/sleep\ncron_minute = 0\ndeferral_window = 7\nCronWindow = 9\nqueue\n"},
+	{input: "executable = /bin/sleep\ncron_minute = 0\nDeferralPrepTime = 11\nqueue\n"},
+	// Timing without a schedule sets nothing at all.
+	{input: "executable = /bin/sleep\ncron_window = 60\ncron_prep_time = 30\nqueue\n"},
+	{input: "executable = /bin/sleep\ndeferral_window = 120\ndeferral_prep_time = 45\nqueue\n"},
+	// An empty value is not a value: the window falls back to its default
+	// and an empty cron_minute leaves the job undeferred.
+	{input: "executable = /bin/sleep\ncron_minute = 0\ncron_window =\nqueue\n"},
+	{input: "executable = /bin/sleep\ncron_minute =\nqueue\n"},
+	{input: "executable = /bin/sleep\ncron_minute = 0\ncron_window = 1+1\nqueue\n"},
+
+	// --- parity: job retries ---
+	// Each of max_retries, retry_until and success_exit_code turns retries
+	// on by itself, and OnExitRemove becomes the generated expression.
+	{input: "executable = /bin/sleep\nmax_retries = 3\nqueue\n"},
+	{input: "executable = /bin/sleep\nretry_until = 42\nqueue\n"},
+	{input: "executable = /bin/sleep\nsuccess_exit_code = 5\nqueue\n"},
+	{input: "executable = /bin/sleep\nmax_retries = 0\nqueue\n"},
+	{input: "executable = /bin/sleep\nmax_retries = -1\nqueue\n"},
+	{input: "executable = /bin/sleep\nmax_retries = 2+3\nqueue\n"},
+	// retry_until: a constant is a futility exit code, anything naming an
+	// attribute is the expression it is, and a ternary keeps its parens.
+	{input: "executable = /bin/sleep\nretry_until = 1+1\nqueue\n"},
+	{input: "executable = /bin/sleep\nretry_until = true\nqueue\n"},
+	{input: "executable = /bin/sleep\nretry_until = 1.9\nqueue\n"},
+	{input: "executable = /bin/sleep\nretry_until = -1\nqueue\n"},
+	{input: "executable = /bin/sleep\nretry_until = undefined\nqueue\n"},
+	{input: "executable = /bin/sleep\nretry_until = JobStatus\nqueue\n"},
+	{input: "executable = /bin/sleep\nretry_until = ExitCode == 7\nqueue\n"},
+	{input: "executable = /bin/sleep\nmax_retries = 3\nretry_until = ExitCode == 7 || ExitCode == 8\nqueue\n"},
+	{input: "executable = /bin/sleep\nretry_until = (ExitCode > 0) && (JobStatus < 5)\nqueue\n"},
+	{input: "executable = /bin/sleep\nmax_retries = 1\nretry_until = ExitCode > 0 ? true : false\nqueue\n"},
+	// The submitter's on_exit_remove is OR'd onto the generated expression,
+	// never kept on its own. A top-level || in what the submitter wrote
+	// must NOT gain parentheses -- C++ left-associates it onto the chain,
+	// and wrapping it would regroup the tree -- while a ternary must.
+	{input: "executable = /bin/sleep\nmax_retries = 3\non_exit_remove = ExitCode == 0 || ExitCode == 1\nqueue\n"},
+	{input: "executable = /bin/sleep\nmax_retries = 3\non_exit_remove = ExitCode > 0 ? true : false\nqueue\n"},
+	{input: "executable = /bin/sleep\nretry_until = ExitCode == 7\non_exit_remove = ExitCode == 0 || JobStatus == 4\nqueue\n"},
+	{input: "executable = /bin/sleep\nretry_until = 42\non_exit_remove = ExitCode == 0\nqueue\n"},
+	{input: "executable = /bin/sleep\nsuccess_exit_code = 7\non_exit_remove = ExitCode == 0\nqueue\n"},
+	{input: "executable = /bin/sleep\non_exit_remove = ExitCode == 0\nqueue\n"},
+	{input: "executable = /bin/sleep\nmax_retries = 3\non_exit_remove = ExitCode == 0\nqueue\n"},
+	{input: "executable = /bin/sleep\nmax_retries = 3\non_exit_remove = ExitCode == 0 || ExitCode == 1\nretry_until = 42\nqueue\n"},
+	{input: "executable = /bin/sleep\nsuccess_exit_code = 5\non_exit_remove = ExitCode == 0\nqueue\n"},
+	{input: "executable = /bin/sleep\non_exit_remove =\nmax_retries = 2\nqueue\n"},
+	{input: "executable = /bin/sleep\nmax_retries = 3\nsuccess_exit_code = 5\nretry_until = 42\non_exit_remove = (ExitCode == 1)\non_exit_hold = (ExitCode == 2)\nqueue\n"},
+	// on_exit_hold is SetJobRetries' too: retries default it to false.
+	{input: "executable = /bin/sleep\non_exit_hold = ExitCode == 3\nqueue\n"},
+	{input: "executable = /bin/sleep\non_exit_hold = ExitCode == 3\nmax_retries = 2\nqueue\n"},
+	{input: "executable = /bin/sleep\nOnExitHold = ExitCode == 3\nmax_retries = 2\nqueue\n"},
+	// An OnExitRemove or JobMaxRetries the submitter set directly stands,
+	// and the alternate submit spellings reach the same attributes.
+	{input: "executable = /bin/sleep\nMY.OnExitRemove = ExitCode == 9\nmax_retries = 3\nqueue\n"},
+	{input: "executable = /bin/sleep\nOnExitRemove = ExitCode == 9\nmax_retries = 3\nqueue\n"},
+	{input: "executable = /bin/sleep\nJobMaxRetries = 4\nqueue\n"},
+	{input: "executable = /bin/sleep\nMY.JobMaxRetries = 9\nretry_until = 7\nqueue\n"},
+	// Both families in one file, over two procs.
+	{input: "executable = /bin/sleep\ncron_minute = 0\ncron_window = 60\nmax_retries = 2\nretry_until = 9\non_exit_remove = ExitCode == 4\nqueue 2\n"},
+
 	// --- parity, exercising inline queue item lists ---
 	// Whitespace separates items exactly as a comma does, so none of these
 	// lists produces an item with two fields.
