@@ -120,11 +120,11 @@ real, but failing on them would bury the semantic findings above.
 the submit code reach `param()` as a result. The shim did not, so those lookups
 ran against an uninitialized config. Two consequences, both fixed:
 
-- A submit file as short as `container_image = docker://busybox` + `queue`
-  **segfaulted** inside `make_job_ad`, taking the whole fuzz process down. Real
-  `condor_submit` parses the same file fine. This looked like a crash in
-  `libcondor_utils` and was reported as one twice; it was the oracle's
-  environment differing from the tool's.
+- `make_job_ad` dereferenced what `param()` returned, so a submit file as short
+  as `container_image = docker://busybox` + `queue` took the whole fuzz process
+  down. Real `condor_submit` parses the same file fine. The oracle was missing
+  a step the tool performs, and it was twice mistaken for a bug in
+  `libcondor_utils` on that evidence.
 - The oracle emitted **fewer** attributes than `condor_submit` does, so real
   divergences were invisible. Initializing config surfaced exactly one:
   `JobLeaseDuration`, which C++ sets to 2400 and Go omits (confirmed against
