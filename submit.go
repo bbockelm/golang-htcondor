@@ -1939,10 +1939,15 @@ func (sf *SubmitFile) setCustomAttributes(ad *classad.ClassAd) error {
 		}
 		value = strings.TrimSpace(value)
 		if value == "" {
-			// `+Foo =` with nothing after it: the user asked for no
-			// value, which is not the same as asking for an empty
-			// string. Leave the attribute off the ad entirely.
-			continue
+			// `+Foo =` with nothing after it, or a value that expanded
+			// to nothing, sets the attribute to the ClassAd literal
+			// `undefined` rather than leaving it off the ad. That is
+			// also what submit's `-Foo = <anything>` form does, which
+			// is why it is not the inverse of `+Foo`: a job that asked
+			// for Foo to be undefined carries Foo, and an expression
+			// reading it sees undefined instead of an inherited value
+			// from the cluster ad.
+			value = "undefined"
 		}
 
 		expr, err := classad.ParseExpr(value)

@@ -43,13 +43,14 @@ func TestExpandInlineQueueBlocks_Errors(t *testing.T) {
 }
 
 // TestParseErrorIncludesPosition confirms the line/col-aware Error()
-// hook lights up. Asks the parser to consume `from /raw/path` outside
-// the inline-block pre-processor's notice (we emit it directly as a
-// queue line so there's no `((` to trigger expansion). Pre-pre-fix,
-// the error was a bare "syntax error"; the new error includes the
-// line and column of the offending `/`.
+// hook lights up. Pre-pre-fix, the error was a bare "syntax error"; the
+// new error includes the line and column of the offending character.
+// The input is a parameter name with a '-' in it, which HTCondor's
+// is_valid_param_name() rejects and so does this parser -- an unquoted
+// path after `from` no longer serves, because that is an item file's
+// name now, exactly as condor_submit reads it.
 func TestParseErrorIncludesPosition(t *testing.T) {
-	body := "executable = /bin/true\nqueue x from /raw/path\n"
+	body := "executable = /bin/true\na-b = 1\nqueue\n"
 	_, err := ParseSubmitFile(strings.NewReader(body))
 	if err == nil {
 		t.Fatalf("expected parse error, got nil")

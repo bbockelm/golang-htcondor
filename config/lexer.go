@@ -360,7 +360,26 @@ func (l *Lexer) readMacro() string {
 	return l.buf.String()
 }
 
-// readUntilNewline reads until end of line (for values)
+// readUntilNewline reads until end of line (for values), joining
+// continuation lines the way HTCondor's getline_implementation does.
+//
+// Each PHYSICAL line is trimmed of trailing whitespace first, and only then
+// is its last character tested for a backslash. So a backslash with spaces
+// after it still continues the line, a run of spaces BEFORE the backslash is
+// part of the value, and the next line -- trimmed of its own leading
+// whitespace -- is joined straight on with nothing between the two. For
+//
+//	+Note = "a   \
+//	   b"
+//
+// the value is "a   b": the three spaces survive and no separator is
+// inserted. Files written with exactly one space before the backslash agree
+// whichever rule is used, which is how a space-inserting version of this
+// went unnoticed.
+//
+// A '#' is NOT a comment here: HTCondor only treats '#' as a comment at the
+// start of a line, so a '#' inside a value (e.g. "K = v # note") is literal
+// and kept.
 func (l *Lexer) readUntilNewline() string {
 	l.buf.Reset()
 
@@ -369,45 +388,118 @@ func (l *Lexer) readUntilNewline() string {
 		l.readChar()
 	}
 
-	// Read until newline, handling line continuation. A '#' is NOT a comment
-	// here: HTCondor only treats '#' as a comment at the start of a line, so a
-	// '#' inside a value (e.g. "K = v # note") is literal and kept.
-	for l.ch != '\n' && l.ch != 0 {
-		switch {
-		case l.ch == '\\' && l.peekChar() == '\n':
-			// Trim trailing whitespace before the backslash
-			s := l.buf.String()
-			l.buf.Reset()
-			l.buf.WriteString(strings.TrimRight(s, lineSpace))
-			l.buf.WriteRune(' ')
-			l.readChar() // Skip backslash
-			l.readChar() // Skip newline
-			// Skip leading whitespace on next line
-			for isLineSpace(l.ch) {
-				l.readChar()
-			}
-		case l.ch == '\\' && l.peekChar() == '\r':
-			// Handle Windows line endings
-			// Trim trailing whitespace before the backslash
-			s := l.buf.String()
-			l.buf.Reset()
-			l.buf.WriteString(strings.TrimRight(s, lineSpace))
-			l.buf.WriteRune(' ')
-			l.readChar() // Skip backslash
-			l.readChar() // Skip \r
-			if l.ch == '\n' {
-				l.readChar() // Skip \n
-			}
-			for isLineSpace(l.ch) {
-				l.readChar()
-			}
-		default:
+	// lineStart is where the current physical line's text begins. Trailing
+	// whitespace is only ever trimmed back to there, so an earlier line's
+	// trailing spaces -- which were kept because a backslash followed them
+	// -- are never revisited. The backslash test, by contrast, looks at the
+	// whole buffer, exactly as getline_implementation's `end_ptr[-1]` does:
+	// an empty continuation line leaves the previous line's last character
+	// as the one tested.
+	lineStart := 0
+	for {
+		for l.ch != '\n' && l.ch != 0 {
 			l.buf.WriteRune(l.ch)
 			l.readChar()
 		}
+		line := l.buf.String()
+		line = line[:lineStart] + strings.TrimRight(line[lineStart:], lineSpace)
+		if l.ch == 0 || !strings.HasSuffix(line, "\\") {
+			// End of input continues nothing: there is no next line to
+			// join on.
+			return line
+		}
+		// Drop the backslash and join the next line on directly.
+		line = line[:len(line)-1]
+		l.buf.Reset()
+		l.buf.WriteString(line)
+		lineStart = len(line)
+		l.readChar() // skip the newline
+		for isLineSpace(l.ch) {
+			l.readChar()
+		}
+	}
+}
+
+// lexQueueTail reads everything after an `in` or `from` keyword in a queue
+// statement and returns it as one token, or nil when the keyword ends the
+// line and ordinary lexing should take over.
+//
+// Parentheses are optional. HTCondor anchors the parse on the keyword and
+// takes the rest of the line as the item list, splitting it on whitespace and
+// commas for `in` and taking it whole as the item file's name for `from`; a
+// '(' only selects the bracketed forms readQueueItemList handles. The name
+// after `from` is therefore the whole trimmed remainder, quotes and embedded
+// spaces included, because HTCondor never tokenizes it.
+//
+// A leading qualifier -- a '[' slice, or `files`/`dirs`/`any`/`table` -- is
+// rejected rather than read as an item: HTCondor acts on those, and this
+// parser implements none of them, so taking them for items would silently
+// produce the wrong jobs. The qualifier has to be followed on the same line
+// by whitespace or '(' to count as one, which is HTCondor's own rule: its
+// token scan only recognizes a keyword when something terminates it, so
+// `queue in files` is the single item "files".
+func (l *Lexer) lexQueueTail(mode queueItemsMode) *TokenInfo {
+	if l.ch == 0 || l.ch == '\n' {
+		return nil
+	}
+	tok := &TokenInfo{Line: l.line, Col: l.col}
+	if l.ch == '(' {
+		tok.Lit = "("
+		items, ok := l.readQueueItemList(mode)
+		if !ok {
+			// Ran to end of file without the closing ')'.
+			tok.Token = ILLEGAL
+			return tok
+		}
+		tok.Token = ITEMS
+		tok.Items = items
+		return tok
 	}
 
-	return strings.TrimRight(l.buf.String(), lineSpace)
+	if mode == queueItemsFrom && (l.ch == '"' || l.ch == '\'') {
+		// A quoted item file. HTCondor does not strip these quotes -- the
+		// name it opens is `"items.txt"`, quotes and all -- but this parser
+		// has always read a quoted path as a path, and it is the only way
+		// callers have to name a file whose path contains a space. Left as
+		// a deliberate divergence, recorded in fuzz/submit/FINDINGS.md.
+		// Falling through here reaches the ordinary string lexing, escapes
+		// included.
+		return nil
+	}
+
+	rest := l.readUntilNewline()
+	tok.Lit = rest
+	if queueTailHasQualifier(rest) {
+		tok.Token = ILLEGAL
+		return tok
+	}
+	if mode == queueItemsFrom {
+		// `from` never splits: the remainder names one item file.
+		tok.Token = STRING
+		return tok
+	}
+	tok.Token = ITEMS
+	tok.Items = splitQueueItems(rest)
+	return tok
+}
+
+// queueTailHasQualifier reports whether an unparenthesised queue tail begins
+// with one of the qualifiers this parser does not implement. See lexQueueTail
+// for why a qualifier at the very end of the line is not one.
+func queueTailHasQualifier(rest string) bool {
+	end := strings.IndexAny(rest, " \t\v\f\r(")
+	if end < 0 {
+		return false
+	}
+	word := rest[:end]
+	if strings.HasPrefix(word, "[") {
+		return true
+	}
+	switch strings.ToLower(word) {
+	case "files", "dirs", "any", "table":
+		return true
+	}
+	return false
 }
 
 // readQueueItemList consumes a queue statement's parenthesised item list and
@@ -633,25 +725,16 @@ func (l *Lexer) NextToken() *TokenInfo {
 		}
 	}
 
-	// An `in` or `from` keyword in a queue statement may be followed by a
-	// parenthesised item list, which HTCondor splits itself rather than
-	// handing to a grammar; readQueueItemList does the same and yields the
-	// members as one ITEMS token. Anything else (a file name after `from`,
-	// end of line) falls through to ordinary lexing.
+	// Everything after an `in` or `from` keyword in a queue statement is the
+	// item list (or, for `from`, the item file), which HTCondor reads with a
+	// character scan of its own rather than handing to a grammar;
+	// lexQueueTail does the same and yields one token. Only an `in` or
+	// `from` with nothing after it falls through to ordinary lexing.
 	if l.queueItems != queueItemsNone {
 		mode := l.queueItems
 		l.queueItems = queueItemsNone
 		l.skipWhitespace()
-		if l.ch == '(' {
-			tok := &TokenInfo{Line: l.line, Col: l.col, Lit: "("}
-			items, ok := l.readQueueItemList(mode)
-			if !ok {
-				// Ran to end of file without the closing ')'.
-				tok.Token = ILLEGAL
-				return tok
-			}
-			tok.Token = ITEMS
-			tok.Items = items
+		if tok := l.lexQueueTail(mode); tok != nil {
 			return tok
 		}
 	}
@@ -674,6 +757,33 @@ func (l *Lexer) NextToken() *TokenInfo {
 	l.prevIdentAssignable = false
 	l.inInclude = false
 	l.afterPlus = false
+
+	// The token after a '+' or '-' is a job attribute name, which HTCondor
+	// reads before it knows whether the name is legal and never validates --
+	// see isAttrNameChar. It is lexed here rather than in the switch below
+	// so that a name starting with a quote, a digit or punctuation is still
+	// read as a name, and so a name spelled like a keyword stays a name.
+	if afterPlus {
+		tok.Lit = l.readAttrName()
+		if l.badMacroRef {
+			l.badMacroRef = false
+			tok.Token = ILLEGAL
+			return tok
+		}
+		tok.Token = IDENT
+		return tok
+	}
+
+	// submit's `-Attr = value` form, the counterpart of `+Attr = value`. It
+	// is only a statement opener; a '-' anywhere else keeps its ordinary
+	// meaning (a negative number, say).
+	if atStmtStart && l.ch == '-' && isAttrNameChar(l.peekChar()) {
+		tok.Token = MINUS
+		tok.Lit = "-"
+		l.readChar()
+		l.afterPlus = true
+		return tok
+	}
 
 	switch l.ch {
 	case 0:
@@ -769,7 +879,7 @@ func (l *Lexer) NextToken() *TokenInfo {
 		// "0.5", which condor_submit accepts.
 		tok.Lit = "+"
 		l.readChar()
-		if isParamNameChar(l.ch) {
+		if isAttrNameChar(l.ch) {
 			tok.Token = PLUS
 			l.afterPlus = true
 		} else {
@@ -822,13 +932,22 @@ func (l *Lexer) NextToken() *TokenInfo {
 
 	default:
 		switch {
-		case isIdentStart(l.ch) || ((atStmtStart || afterPlus) && isParamNameChar(l.ch)):
-			if atStmtStart || afterPlus {
-				// A statement begins with a parameter name, and the token
-				// after '+' is a job attribute name. HTCondor reads both
-				// with the same scan, which allows a leading digit; see
+		case isIdentStart(l.ch) || (atStmtStart && isParamNameChar(l.ch)):
+			if atStmtStart {
+				// A statement begins with a parameter name, which HTCondor
+				// scans with a charset that allows a leading digit; see
 				// readParamName.
 				tok.Lit = l.readParamName()
+				if tok.Lit == "" {
+					// A letter that is not a parameter-name character --
+					// one outside ASCII. The name is illegal and the file
+					// fails, so report the character and move past it
+					// rather than scanning it again forever.
+					tok.Token = ILLEGAL
+					tok.Lit = string(l.ch)
+					l.readChar()
+					return tok
+				}
 			} else {
 				tok.Lit = l.readIdentifier()
 			}
@@ -920,8 +1039,43 @@ func isIdentStart(ch rune) bool {
 
 // isParamNameChar reports whether ch may appear in a parameter name, matching
 // condor_isidchar() in config.cpp: alphanumerics plus '_', '.' and '/'.
+//
+// The charset is ASCII, deliberately: condor_isidchar() compares against
+// 'a'..'z', 'A'..'Z' and '0'..'9', so a name with a letter outside ASCII --
+// `café = 1` -- fails is_valid_param_name() and HTCondor rejects the whole
+// file. Reading it with unicode.IsLetter instead made such a file parse here
+// and define a macro nothing else would ever see. A job ATTRIBUTE name is a
+// different question: `+café = 1` is accepted, because the '+' form skips
+// that check entirely (isAttrNameChar).
 func isParamNameChar(ch rune) bool {
-	return unicode.IsLetter(ch) || unicode.IsDigit(ch) || ch == '_' || ch == '.' || ch == '/'
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+		(ch >= '0' && ch <= '9') || ch == '_' || ch == '.' || ch == '/'
+}
+
+// isAttrNameChar reports whether ch can appear in a `+Attr`/`-Attr` job
+// attribute name.
+//
+// HTCondor scans a name as the run of characters before the first whitespace
+// or operator ('=' or ':'), and for the '+' and '-' forms it never checks
+// what it scanned against is_valid_param_name() -- it just prefixes "MY." and
+// stores it. So `+a-b = 7` makes an attribute literally named a-b, where the
+// same name without the '+' fails the file.
+func isAttrNameChar(ch rune) bool {
+	switch ch {
+	case 0, '\n', '=', ':':
+		return false
+	}
+	return !isLineSpace(ch)
+}
+
+// readAttrName reads a `+Attr`/`-Attr` job attribute name.
+func (l *Lexer) readAttrName() string {
+	l.buf.Reset()
+	for isAttrNameChar(l.ch) {
+		l.buf.WriteRune(l.ch)
+		l.readChar()
+	}
+	return l.buf.String()
 }
 
 // readParamName reads the name at the start of a statement.

@@ -112,6 +112,131 @@ func TestLexerLineContinuation(t *testing.T) {
 	}
 }
 
+// TestLexerContinuationKeepsWhitespace pins the rule the two tests above
+// cannot see, because both write exactly one space before the backslash and
+// so agree whether the run is kept or replaced by a separator.
+//
+// getline_implementation trims the physical line with isspace() and only
+// THEN tests its last character for a backslash. So whitespace before the
+// backslash is part of the value, nothing is inserted in its place, and
+// whitespace AFTER the backslash still continues the line.
+func TestLexerContinuationKeepsWhitespace(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"run before the backslash is kept", "FOO = a   \\\n   b", "a   b"},
+		{"nothing is inserted", "FOO = a\\\nb", "ab"},
+		{"tabs count too", "FOO = a\t\t\\\n\t\tb", "a\t\tb"},
+		{"whitespace after the backslash still continues", "FOO = a \\   \nb", "a b"},
+		{"a blank continuation line ends the value", "FOO = a   \\\n\nB = 1", "a   "},
+		{"an empty left half contributes no separator", "FOO =\\\nbar", "bar"},
+		{"the backslash test spans the whole logical line", "FOO = a\\\\\n\nb", "ab"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lex := NewLexer(strings.NewReader(tt.input))
+			lex.NextToken() // FOO
+			tok := lex.NextToken()
+			if tok.Token != ASSIGN {
+				t.Fatalf("expected ASSIGN, got %d", tok.Token)
+			}
+			if tok.Lit != tt.want {
+				t.Errorf("input %q: got %q, want %q", tt.input, tok.Lit, tt.want)
+			}
+		})
+	}
+}
+
+// TestLexerAttributeNames pins the name scan for submit's +Attr and -Attr
+// forms. Parse_macros prefixes "MY." to whatever it scanned before the first
+// whitespace or operator and never runs is_valid_param_name() on it, so the
+// charset is wider than a macro name's -- and a '-' opener is a token in its
+// own right.
+func TestLexerAttributeNames(t *testing.T) {
+	tests := []struct {
+		input    string
+		wantTok  int
+		wantName string
+		wantVal  string
+	}{
+		{"+a-b = 7", PLUS, "a-b", "7"},
+		{"+0.5 = 7", PLUS, "0.5", "7"},
+		{"+a*b = 7", PLUS, "a*b", "7"},
+		{"+A =", PLUS, "A", ""},
+		{"-Foo = 7", MINUS, "Foo", "7"},
+		{"-a-b = 7", MINUS, "a-b", "7"},
+		{"-1 = 7", MINUS, "1", "7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			lex := NewLexer(strings.NewReader(tt.input))
+			tok := lex.NextToken()
+			if tok.Token != tt.wantTok {
+				t.Fatalf("first token: got %d, want %d", tok.Token, tt.wantTok)
+			}
+			name := lex.NextToken()
+			if name.Token != IDENT || name.Lit != tt.wantName {
+				t.Fatalf("name: got %d %q, want IDENT %q", name.Token, name.Lit, tt.wantName)
+			}
+			val := lex.NextToken()
+			if val.Token != ASSIGN || val.Lit != tt.wantVal {
+				t.Errorf("value: got %d %q, want ASSIGN %q", val.Token, val.Lit, tt.wantVal)
+			}
+		})
+	}
+}
+
+// TestLexerQueueTailWithoutParens pins the item-list scan. HTCondor anchors
+// on the in/from keyword and takes the rest of the line, so parentheses are
+// optional; a qualifier only counts as one when something on the line
+// terminates it.
+func TestLexerQueueTailWithoutParens(t *testing.T) {
+	tests := []struct {
+		input     string
+		wantTok   int
+		wantItems []string
+		wantLit   string
+	}{
+		{input: "queue in a b", wantTok: ITEMS, wantItems: []string{"a", "b"}},
+		{input: "queue in 0 00", wantTok: ITEMS, wantItems: []string{"0", "00"}},
+		{input: "queue in a, b , c", wantTok: ITEMS, wantItems: []string{"a", "b", "c"}},
+		{input: "queue in a b # c", wantTok: ITEMS, wantItems: []string{"a", "b", "#", "c"}},
+		{input: "queue in a)", wantTok: ITEMS, wantItems: []string{"a)"}},
+		{input: "queue in files", wantTok: ITEMS, wantItems: []string{"files"}},
+		{input: "queue in [1:2]", wantTok: ITEMS, wantItems: []string{"[1:2]"}},
+		{input: "queue in files x", wantTok: ILLEGAL},
+		{input: "queue in [1:2] x", wantTok: ILLEGAL},
+		{input: "queue from a b", wantTok: STRING, wantLit: "a b"},
+		{input: "queue from table x", wantTok: ILLEGAL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			lex := NewLexer(strings.NewReader(tt.input))
+			lex.NextToken() // queue
+			lex.NextToken() // in / from
+			tok := lex.NextToken()
+			if tok.Token != tt.wantTok {
+				t.Fatalf("got token %d (%q), want %d", tok.Token, tok.Lit, tt.wantTok)
+			}
+			if tt.wantItems != nil {
+				if len(tok.Items) != len(tt.wantItems) {
+					t.Fatalf("got items %q, want %q", tok.Items, tt.wantItems)
+				}
+				for i := range tt.wantItems {
+					if tok.Items[i] != tt.wantItems[i] {
+						t.Fatalf("got items %q, want %q", tok.Items, tt.wantItems)
+					}
+				}
+			}
+			if tt.wantLit != "" && tok.Lit != tt.wantLit {
+				t.Errorf("got lit %q, want %q", tok.Lit, tt.wantLit)
+			}
+		})
+	}
+}
+
 func TestLexerKeywords(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -230,8 +355,10 @@ func TestLexerComplexValue(t *testing.T) {
 		t.Errorf("Expected ASSIGN, got %d", tok.Token)
 	}
 
-	// Line continuation removes the backslash-newline and trailing whitespace before it,
-	// then replaces with a single space. Leading whitespace on the continuation line is skipped.
+	// Line continuation drops the backslash-newline and the continuation
+	// line's leading whitespace, and joins what is left on directly. The
+	// single space in the result is the one written before the backslash,
+	// not a separator the lexer inserted -- see TestLexerContinuationKeepsWhitespace.
 	expected := "condor.cs.wisc.edu, $(HOSTNAME), stork.cs.wisc.edu"
 	if tok.Lit != expected {
 		t.Errorf("Expected %q, got %q", expected, tok.Lit)

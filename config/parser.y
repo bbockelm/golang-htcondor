@@ -104,13 +104,15 @@ func (q *QueueStatement) statement() {}
 %token <str> IF ELIF ELSE ENDIF DEFINED VERSION
 %token <str> INCLUDE USE TRUE FALSE YES NO ERROR WARNING IFEXIST COMMAND INTO
 %token <str> QUEUE FROM IN MATCHING
-// ITEMS is a whole parenthesised queue item list, already split by the lexer.
-// HTCondor's rules for that split are character-level rather than token-level
-// -- the list ends at the last ')' on the line, a ')' elsewhere is an ordinary
-// character, and quotes are not special -- so the grammar takes the result
-// rather than the punctuation.
+// ITEMS is a whole queue item list, already split by the lexer. HTCondor's
+// rules for that split are character-level rather than token-level -- the
+// parentheses are optional, a bracketed list ends at the last ')' on the
+// line, a ')' elsewhere is an ordinary character, and quotes are not special
+// -- so the grammar takes the result rather than the punctuation. The same
+// goes for the item file after `from`, which arrives as a STRING holding the
+// whole remainder of the line.
 %token <strlist> ITEMS
-%token COLON LPAREN RPAREN LBRACK RBRACK COMMA PLUS
+%token COLON LPAREN RPAREN LBRACK RBRACK COMMA PLUS MINUS
 %token EOF ILLEGAL COMMENT
 
 %type <stmts> config_file statement_list
@@ -185,6 +187,20 @@ assignment:
 		$$ = &Assignment{
 			Name:        $2,
 			Value:       $3,
+			ClassAdExpr: true,
+		}
+	}
+	| MINUS identifier ASSIGN
+	{
+		// -Attribute = expr, submit's other job-attribute form. It is not
+		// the inverse of +Attribute and it does not remove anything: the
+		// right-hand side is read and thrown away, and the attribute is
+		// stored with an empty value, which reaches the job ad as
+		// `Attribute = undefined`. A later -Attribute therefore overrides
+		// an earlier +Attribute.
+		$$ = &Assignment{
+			Name:        $2,
+			Value:       "",
 			ClassAdExpr: true,
 		}
 	}
