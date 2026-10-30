@@ -61,6 +61,13 @@ func FuzzSubmitGenerated(f *testing.F) {
 			t.Skip("oversized script; the generator caps the file anyway")
 		}
 		src := v.Generate(data)
+
+		// Bracket the whole iteration: a worker that dies anywhere in here --
+		// in the oracle, in the Go parser, or in the comparison -- leaves this
+		// behind naming the input, which is otherwise unrecoverable.
+		oracle.JournalEnter("FuzzSubmitGenerated", src)
+		defer oracle.JournalLeave()
+
 		fresh, _, skip := check(t, src)
 		if skip {
 			return

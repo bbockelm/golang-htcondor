@@ -76,6 +76,9 @@ func MakeAds(text string, mode Mode, maxProcs int) Result {
 	cppMu.Lock()
 	defer cppMu.Unlock()
 
+	journalEnter("MakeAds", text)
+	defer journalLeave()
+
 	ctext := C.CString(text)
 	defer C.free(unsafe.Pointer(ctext))
 
@@ -203,6 +206,9 @@ type FactoryInfo struct {
 func Factory(text string, maxItems int, itemsFilename string) FactoryInfo {
 	cppMu.Lock()
 	defer cppMu.Unlock()
+
+	journalEnter("Factory", text)
+	defer journalLeave()
 
 	ctext := C.CString(text)
 	defer C.free(unsafe.Pointer(ctext))
