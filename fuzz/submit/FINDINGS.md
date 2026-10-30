@@ -316,7 +316,8 @@ default memory and CPUs.
 ## Keywords the Go parser ignores outside their universe
 
 `docker_image` and `container_service_names` are set by Go whatever the
-universe; C++ honours them only for a container or docker job.
+universe; C++ honours them only for a container or docker job. `container_image`
+and `WantSIF` join them, below.
 
 ## Keywords with no Go implementation at all
 
@@ -332,13 +333,29 @@ cron/deferral attributes, `kill_sig` and its siblings, `core_size`,
 DAGMan bookkeeping, `on_exit_hold`, `on_exit_remove`, `periodic_vacate` and
 the `*_subcode` reasons.
 
-## A crash in the oracle, not in either parser
+## The container image
 
-`container_image = <anything>` segfaults the in-process oracle. It is not a
-divergence and not reachable from `condor_submit`:
-`process_container_input_files` iterates
-`StringTokenIterator(param("CONTAINER_SHARED_FS"), ",")`, the shim loads no
-config so `param()` returns null, and `StringTokenIterator::end()` calls
-`strlen(nullptr)`. A real `condor_submit` always has that param's `/cvmfs`
-default. The keyword is excluded from the generator's vocabulary with that
-reason; the container universe is still generated, using `docker_image`.
+`container_image` was out of the generator's vocabulary until the shim called
+`config()`; see the section above. It is in now, which takes coverage to 255 of
+258 — what is left is `getenv`, its alternate spelling and the `f_error`
+`request_gpu_memory`, none of which can be compared.
+
+It diverged immediately, three ways:
+
+- **`ContainerImage` is a basename in C++, a path in Go.** Once C++ decides to
+  transfer the image it rewrites the attribute to `condor_basename` of the
+  path, because that is what the file transfer will leave in the sandbox, and
+  it only does any of this for a container job. Go stores the path as written,
+  in any universe. The starter is told to run a path the sandbox does not have.
+- **`ContainerImageFullPath` is C++-only.** It is where C++ keeps the
+  submit-side path when it rewrites `ContainerImage`, and it is what late
+  materialization reads to build each proc's input transfer list. Go sets
+  nothing, so a transferred image carries no record of where it came from.
+- **`WantSIF` is set whatever the universe.** C++ sets exactly one of `WantSIF`,
+  `WantDockerImage` and `WantSandboxImage`, chosen from the image type, and only
+  inside the container-universe block.
+
+The decision tree C++ walks before any of that — `transfer_container = false`,
+a `CONTAINER_SHARED_FS` prefix, a `docker://` or `oras://` URL, each setting
+`ContainerImageSource` and returning without transferring — has no Go
+counterpart either; `ContainerImageSource` was already recorded.
