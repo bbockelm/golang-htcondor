@@ -138,13 +138,13 @@ func TestFactoryAttributesReachTheClusterAd(t *testing.T) {
 			if !ok {
 				t.Fatal("Go produced no proc 0 ad")
 			}
-			// Asserted as a KNOWN gap, the way the rest of this package
-			// records divergence: when Go starts carrying the attribute this
-			// fails, and the entry should be promoted to a parity check.
-			if v, present := lookupFold(attrs, c.attr); present {
-				t.Errorf("Go now sets %s = %s; promote this to a parity assertion and drop it from knownDivergent", c.attr, v)
-			} else {
-				t.Logf("known: Go drops %s, so nothing records that the file asked for late materialization", c.attr)
+			cppVal, _ := lookupFold(cppAds.ByKey[AdKey{Cluster: ClusterID, Proc: 0}], c.attr)
+			goVal, present := lookupFold(attrs, c.attr)
+			if !present {
+				t.Fatalf("Go drops %s, so nothing records that the file asked to be throttled", c.attr)
+			}
+			if !sameValue(cppVal, goVal) {
+				t.Errorf("%s: cpp=%s go=%s", c.attr, cppVal, goVal)
 			}
 		})
 	}
