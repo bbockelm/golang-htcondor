@@ -217,6 +217,55 @@ var seeds = []seedCase{
 	// Both families in one file, over two procs.
 	{input: "executable = /bin/sleep\ncron_minute = 0\ncron_window = 60\nmax_retries = 2\nretry_until = 9\non_exit_remove = ExitCode == 4\nqueue 2\n"},
 
+	// --- parity: automatic memory retry ---
+	// The three shapes of the on-evict transform: one value, a sequence,
+	// and an increment capped by a ceiling. Only the last two leave
+	// anything on the ad besides the transform body.
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory = 2048\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory = 128, 256, 512\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_max = 4096\nretry_request_memory_increase = 128\nqueue\n"},
+	// An increment with no ceiling has nothing to grow, so the value is
+	// evaluated once against the request the job starts with.
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_increase = 128\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_increase = RequestMemory * 2\nqueue\n"},
+	// A ceiling on its own is a single retry value, NOT a MaxRequestMemory.
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_max = 4096\nqueue\n"},
+	// `request_memory = a, b` is the short spelling of the same thing, and
+	// it supersedes the retry_ commands because condor_submit never reads
+	// them in that case.
+	{input: "executable = /bin/sleep\nrequest_memory = 100, 400\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100, 200, 400\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100, 400\nretry_request_memory = 8192\nqueue\n"},
+	// The list form supersedes retry_request_memory_increase.
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory = 128, 256, 512\nretry_request_memory_increase = 64\nqueue\n"},
+	// Sizes carry units, and the result is rounded UP to whole MiB.
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory = 512K, 2M, 1G\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 2.5G\nretry_request_memory = 3G\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_increase = 1.5G\nretry_request_memory_max = 8G\nqueue\n"},
+	// The last value of a sequence, and a ceiling, may be an expression
+	// the schedd evaluates at retry time rather than a number. Its text
+	// goes into the transform body, so its SPELLING has to be HTCondor's
+	// own: `MAX({ a,b }) * 2`, not `MAX({a, b}) * 2`.
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory = MAX({RequestMemory, MemoryUsage}) * 2\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory = 128, MAX({RequestMemory, MemoryUsage}) * 2\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory = 2 * 1024\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory = ifThenElse(0, \"str\", RequestMemory)\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_max = MemoryUsage * 4\nretry_request_memory_increase = 128\nqueue\n"},
+	// A request_memory that is not a size takes the whole family out of
+	// play: there is no number for the transform to grow from.
+	{input: "executable = /bin/sleep\nrequest_memory = ifThenElse(true, 100, 200)\nretry_request_memory_max = 4096\nretry_request_memory_increase = 128\nqueue\n"},
+	// With no request_memory at all the configured default is the number
+	// the retry grows from, so the family still applies.
+	{input: "executable = /bin/sleep\nretry_request_memory = 128, 256\nqueue\n"},
+	{input: "executable = /bin/sleep\nretry_request_memory_max = 4096\nretry_request_memory_increase = 128\nqueue\n"},
+	// An empty value is not a value.
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory =\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_max =\nretry_request_memory_increase = 128\nqueue\n"},
+	// A directly set TransformOnEvict stands: the +Attr pass runs last.
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory = 256\n+TransformOnEvict = \"Foo\"\nqueue\n"},
+	// Both the transform body and the growing expression reach every proc.
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_max = 4096\nretry_request_memory_increase = 128\nqueue 2\n"},
+
 	// --- parity, exercising inline queue item lists ---
 	// Whitespace separates items exactly as a comma does, so none of these
 	// lists produces an item with two fields.

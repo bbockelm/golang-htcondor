@@ -1565,14 +1565,19 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 	// scales from bytes, so request_memory = 4GB is RequestMemory = 4096.
 	// A VM job with no request_memory asks for the memory its VM is
 	// given, ahead of any configured default, as condor_submit does.
+	// setRequestMemory, not setRequestSize: a memory request is the one
+	// request that can also carry automatic retry (retry_request_memory
+	// and its siblings), which condor_submit reads only once it has a
+	// size to grow from. The VM branch deliberately does not: its
+	// request is an expression, so there is nothing to grow.
 	if v, ok := sf.submitCommand("request_memory"); ok {
-		if err := setRequestSize(ad, "RequestMemory", v, unitMiB); err != nil {
+		if err := sf.setRequestMemory(ad, v); err != nil {
 			return err
 		}
 	} else if _, vm := sf.submitCommand("vm_memory"); vm && sf.universe == UniverseVM {
 		_ = setExprAttr(ad, "RequestMemory", "request_memory", "MY.VM_Memory")
 	} else if v, ok := sf.requestDefault("request_memory"); ok {
-		if err := setRequestSize(ad, "RequestMemory", v, unitMiB); err != nil {
+		if err := sf.setRequestMemory(ad, v); err != nil {
 			return fmt.Errorf("JOB_DEFAULT_REQUESTMEMORY: %w", err)
 		}
 	}
