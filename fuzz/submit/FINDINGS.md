@@ -41,15 +41,13 @@ syntax), Go emits `Args` (V1). The two attributes are parsed differently by the
 starter — V1 splits on whitespace, V2 honors quoting — so the attribute *name*
 is semantic, not cosmetic.
 
-**`Cmd` is relative.** C++ resolves the executable against `Iwd` into an
-absolute path; Go stores it as written. A job whose `executable` is relative
-therefore records a path that only resolves from the submit directory. The
-fuzzer found this one unprompted, within seconds, from a mutated seed
-(`eXeCutABle=0queue`).
-
-**`UserLog` is relative.** C++ resolves `log = j.log` against `Iwd` into an
-absolute path; Go stores `"j.log"` as written. Whoever opens the log later
-resolves it against their own working directory.
+**`Cmd` and `UserLog` were relative.** FIXED. C++ resolved the executable and
+the log into absolute paths and Go stored them as written, so a job whose
+`executable` or `log` was relative recorded a path that only resolved from the
+submit directory. The fuzzer found the `Cmd` half unprompted, within seconds,
+from a mutated seed (`eXeCutABle=0queue`). `cmd`, `userlog` and `iwd` are
+compared now; the rule they follow is written up in `submit.go` alongside
+`fullPath`.
 
 **`queue 2 in (a b)` produces the wrong number of jobs.** C++ makes 4 procs
 (2 per item over 2 items); Go makes 2.
@@ -95,6 +93,23 @@ checking Go for it, so a case like this cannot be mistaken for a Go bug again.
 The digest keeps macro references unexpanded (`arguments=$(item)`), which is
 what lets the schedd vary them per proc; a test asserts that, because a digest
 with the values baked in would materialize every proc identically.
+
+## Exposed by comparing `Cmd` and `UserLog`
+
+Neither is about paths. Both were invisible while `cmd` and `userlog` were
+excused wholesale, and both live in the `config` package rather than in
+`submit.go`. They are recorded as seed reasons.
+
+**A CRLF submit file keeps the carriage return.** `readValue` in
+`config/lexer.go` trims only spaces and tabs off a value, so a file with
+Windows line endings yields `Cmd = "/bin/sleep\r"` and a `UserLog` that names
+a file nobody can open. `condor_submit` reads the same file and drops the
+`\r`.
+
+**A macro whose name starts with a digit truncates the parse.** `0 = x` in a
+submit file makes the Go parser drop that assignment *and every submit command
+after it* — the remaining lines never reach the ad, silently. C++ accepts the
+file and keeps both the macro and what follows it.
 
 ## Parse-acceptance divergence
 

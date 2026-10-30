@@ -21,7 +21,6 @@ var hostDerived = map[string]string{
 	"filesystemdomain":     "the parsing host's FILESYSTEM_DOMAIN",
 	"owner":                "the account running the parse",
 	"user":                 "the account running the parse",
-	"iwd":                  "the process's working directory",
 	"globaljobid":          "embeds the schedd name and submit time",
 	// These four are computed by stat()ing the executable, which the oracle
 	// deliberately does not do (setDisableFileChecks), so neither side has a
@@ -75,8 +74,6 @@ var knownDivergent = map[string]string{
 	"arguments":     `the other half of the Args/Arguments naming split above.`,
 	"requestcpus":   "when the submit file does not say, Go synthesizes RequestCpus=1; C++ sets nothing and lets the negotiator apply the pool default.",
 	"requestmemory": "when the submit file does not say, Go synthesizes RequestMemory=128; C++ sets nothing.",
-	"cmd":           "C++ resolves the executable against Iwd into an absolute path; Go stores the relative name as written. Found by the fuzzer, not by a seed.",
-	"userlog":       "C++ resolves the log path against Iwd into an absolute path; Go stores the relative name as written.",
 
 	"jobmaterializemaxidle": "max_idle and materialize_max_idle both set it in C++; Go drops both keywords, so a submission that asked to be throttled records nothing. max_materialize is NOT an ad attribute -- it is a set_Factory() argument -- so there is nothing to compare for it here.",
 

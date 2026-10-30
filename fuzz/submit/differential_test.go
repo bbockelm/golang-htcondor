@@ -40,6 +40,26 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\nqueue name from (\n  x\n  y\n)\n",
 		reason: "inline `from ( ... )` item list: C++ accepts it, Go's parser rejects the open paren."},
 
+	// --- parity: path resolution ---
+	// A relative executable or log is resolved to an absolute path, and
+	// initialdir moves the log but NOT the executable. Both parsers run
+	// in this process, so they see the same working directory and the
+	// resolved values are compared exactly.
+	{input: "executable = sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nlog = j.log\nqueue\n"},
+	{input: "executable = sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nlog = j.log\ninitialdir = testdata\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nlog = /var/tmp/j.log\ninitialdir = /tmp\nqueue\n"},
+	{input: "executable = ./sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nlog = ./d/../j.log\nqueue\n"},
+	{input: "executable = sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\ntransfer_executable = false\nqueue\n"},
+	{input: "executable = sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nlog =\nqueue\n"},
+
+	// Divergences the path comparison exposed: with cmd and userlog
+	// compared, two bugs that have nothing to do with paths now show up
+	// through them. Both are in the config layer, not in submit.go.
+	{input: "executable = /bin/sleep\r\nrequest_cpus = 1\r\nrequest_memory = 128\r\narguments = a\r\nlog = j.log\r\nqueue\r\n",
+		reason: "CRLF submit file: the Go config lexer trims only spaces and tabs off a value, so Cmd and UserLog keep the carriage return. condor_submit drops it."},
+	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\n0 = x\nlog = j.log\nqueue\n",
+		reason: "a macro whose name starts with a digit: the Go parser drops that assignment AND every submit command after it, so log never reaches the ad. C++ accepts the file."},
+
 	// --- parity, exercising specific commands ---
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nMY.Foo = 1\n+Bar = \"two\"\nqueue\n"},
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = $(X)\nX = 7\nqueue\n"},
