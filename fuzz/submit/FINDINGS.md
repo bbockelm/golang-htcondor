@@ -87,22 +87,22 @@ The digest keeps macro references unexpanded (`arguments=$(item)`), which is
 what lets the schedd vary them per proc; a test asserts that, because a digest
 with the values baked in would materialize every proc identically.
 
-## Exposed by comparing `Cmd` and `UserLog`
+## Line assembly
 
-Neither is about paths. Both were invisible while `cmd` and `userlog` were
-excused wholesale, and both live in the `config` package rather than in
-`submit.go`. They are recorded as seed reasons.
+**Whitespace before a line-continuation backslash.** `getline_implementation`
+trims the physical line with `isspace()` *and then* looks for the trailing
+backslash, so whitespace sitting before the backslash is kept, and the
+continuation is joined on with nothing between — the next line's leading
+whitespace having been trimmed in turn. For
 
-**A CRLF submit file keeps the carriage return.** `readValue` in
-`config/lexer.go` trims only spaces and tabs off a value, so a file with
-Windows line endings yields `Cmd = "/bin/sleep\r"` and a `UserLog` that names
-a file nobody can open. `condor_submit` reads the same file and drops the
-`\r`.
+```
++Note = "a   \
+   b"
+```
 
-**A macro whose name starts with a digit truncates the parse.** `0 = x` in a
-submit file makes the Go parser drop that assignment *and every submit command
-after it* — the remaining lines never reach the ad, silently. C++ accepts the
-file and keeps both the macro and what follows it.
+C++ produces `"a   b"`; Go trims the run to nothing and inserts one space,
+producing `"a b"`. Files with exactly one space before the backslash agree by
+coincidence, which is why this hid for so long.
 
 ## Parse-acceptance divergence
 
@@ -169,6 +169,49 @@ resource was submitted without the request. Found by the fuzzer, from
 exactly as written, value stored as an expression. The `request`
 `knownDivergentPrefix` entry that excused it is gone, so these attributes are
 compared from here on.
+
+**A submit file written on Windows kept its carriage returns.**
+`getline_implementation` trims the whole line with `isspace()` before it is
+split into name and value, so the `\r` of a CRLF ending never reaches a value.
+The Go lexer trimmed only `" \t"`, so
+
+```
+executable = /bin/sleep\r\n
+```
+
+gave `Cmd = "/bin/sleep\r"` — a path that cannot be executed — and `log = j.log`
+a `UserLog` nobody can open. The lexer now trims and skips HTCondor's set
+(`" \t\r\v\f"`, `\n` excluded because it ends the value) at both ends of a
+value. A `\r` away from the end of the line is not trailing whitespace and is
+still kept, on both sides.
+
+**A macro name starting with a digit silently truncated the file.**
+`is_valid_param_name()` accepts any run of `condor_isidchar()`
+(`[A-Za-z0-9_./]`) and says nothing about the first character, so `0 = x`,
+`0abc = x` and `a/b = 1` all name macros and `condor_submit` accepts them. The
+Go lexer read `0` as a number and `/` as illegal, the grammar rejected the
+line, and — because it has no error production and a default reduction had
+already stored the statements read so far — `config.Parse` returned the
+*truncated* file with a nil error. A user who wrote one line the lexer disliked
+lost that line and every submit command after it, without being told.
+
+Two changes. The lexer now scans the first token of a statement as HTCondor
+scans a name: the run of name characters before the first whitespace or
+operator. And `ParseSubmitFile` uses `config.ParseStrict`, so a line that is
+genuinely bad fails the file the way HTCondor's does, instead of being returned
+as a short one. An illegal name such as `a-b = 1` is rejected by both sides.
+
+The same charset governs a job **attribute** name, which `+Attr` and `MY.Attr`
+both reach — `Parse_macros` builds `"MY." + name` from the same scan, without
+running `is_valid_param_name` on it. `+0 = 7`, `+0.5 = 7` and `MY.0 = 7` all
+set attributes in C++; Go rejected the first two (a separate site: the lexer
+required a Go identifier after the `+`) and, before the statement-start fix,
+dropped the third. The token after a `+` is now read with the same scan.
+
+What remains, recorded as seed reasons: `+a-b = 7` makes an attribute `a-b` in
+C++, since that form skips validation, where Go rejects the file; and submit's
+`-Attr` form has no `-` token in the Go lexer at all, so `-Foo = 7` is rejected
+where C++ accepts it.
 
 ## Cosmetic
 
