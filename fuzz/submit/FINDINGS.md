@@ -175,3 +175,112 @@ compared from here on.
 `Rank`: C++ emits the real `0.0`, Go the integer `0`. Same value, different
 ClassAd type — listed because a type difference can still change an expression
 that consumes it.
+
+# Findings from the generated corpus
+
+Everything below came from `FuzzSubmitGenerated` and its fixed sweep, which
+build submit files from HTCondor's own keyword table instead of mutating text.
+Coverage went from 17 of 258 submit keywords to 253, and the comparison then
+reached 167 attributes it had never seen.
+
+Each one is recorded in `knownDivergentGenerated` in `differ.go`, so a fix
+turns the sweep red and gets promoted the same way as everything above.
+
+## Go writes the submit keyword's name as the attribute name
+
+This is the largest class and the most misleading, because the ad looks
+populated and nothing reads it. A job submitted through the Go parser carries
+the setting under a name HTCondor does not use:
+
+| submit command | HTCondor attribute | Go attribute |
+|---|---|---|
+| `vm_memory` | `JobVMMemory` | `VM_Memory` |
+| `vm_type` | `JobVMType` | `VM_Type` |
+| `vm_vcpus` | `JobVM_VCPUs` | `VM_VCPUs` |
+| `vm_networking` | `JobVMNetworking` | `VM_Networking` |
+| `vm_networking_type` | `JobVMNetworkingType` | `VM_NetworkingType` |
+| `vm_checkpoint` | `JobVMCheckpoint` | `VM_Checkpoint` |
+| `vm_macaddr` | `JobVM_MACADDR` | `VM_MACAddr` |
+| `vm_disk` | `VMPARAM_vm_disk` | `VM_Disk` |
+| `xen_kernel` | `VMPARAM_Xen_Kernel` | `Xen_Kernel` |
+| `xen_root`, `xen_initrd`, `xen_kernel_params` | `VMPARAM_*` | keyword name |
+| `cron_window` | `DeferralWindow` | `CronWindow` |
+| `cron_prep_time` | `DeferralPrepTime` | `CronPrepTime` |
+| `max_retries` | `JobMaxRetries` | `MaxRetries` |
+| `retry_until` | folded into `OnExitRemove` | `RetryUntil` |
+| `machine_count` | `MinHosts` / `MaxHosts` | `MachineCount` |
+| `remote_initialdir` | `RemoteIwd` | `RemoteInitialDir` |
+| `accounting_group_user` | `AcctGroupUser` | `AccountingGroupUser` |
+| `checkpoint_exit_code` | `SuccessCheckpointExitCode` | `CheckpointExitCode` |
+| `concurrency_limits_expr` | `ConcurrencyLimits` | `ConcurrencyLimitsExpr` |
+| container/docker job | `WantContainer` + `WantDockerImage` | `WantDocker` |
+
+A cron job submitted through Go therefore never defers, a parallel job asks
+for one machine, a `max_retries` job never retries, and a VM job runs with
+default memory and CPUs.
+
+## Values that differ where both sides set the attribute
+
+- **`AccountingGroup` loses the user.** C++ appends the submitting user
+  (`Proj-1` becomes `Proj-1.<user>`); Go stores the group as written, so the
+  accountant charges a different entity.
+- **`OnExitRemove` is not rewritten.** With `max_retries` or `retry_until`
+  set, C++ *replaces* `OnExitRemove` with the retry expression it builds. Go
+  keeps the user's expression, and the job does not retry.
+- **`KillSig` becomes a number.** C++ keeps the name (`"SIGTERM"`); Go
+  converts it to `15`. Same for `remove_kill_sig`.
+- **`JobLeaseDuration` floor.** C++ raises a short lease to its 20-second
+  minimum; Go stores whatever was written.
+- **Quote stripping.** `file_remaps`, `on_exit_hold_reason` and
+  `periodic_hold_reason` are `f_strip_quotes` keywords: C++ removes the
+  surrounding quotes, Go keeps them inside the stored string.
+- **List canonicalization, in both directions.** `concurrency_limits` and
+  `ec2_tag_names` are `f_as_list`, so C++ canonicalizes the separators and Go
+  does not; `encrypt_input_files` and its three siblings are `f_as_string`, so
+  C++ stores them verbatim and Go canonicalizes. The negotiator and the file
+  transfer both match these literally.
+- **A filename containing a space** survives in `TransferInput` on the C++
+  side and is split away by Go, so the file is never transferred.
+- **`mount_under_scratch`** stays a string in C++; Go coerces it to a boolean.
+- **`want_graceful_removal = undefined`** stays undefined in C++; Go coerces
+  it to `false`.
+- **`stream_input` / `stream_output` / `stream_error`** produce opposite
+  `TransferIn`/`TransferOut`/`TransferErr` booleans, so one side streams the
+  stream and the other transfers it.
+- **Iwd resolution, again.** The known `Cmd`/`UserLog` finding generalizes to
+  every path-valued keyword the Go parser does implement:
+  `azure_auth_file`, `gce_auth_file`, `gce_json_file`, `ec2_user_data_file`,
+  `ec2_key_pair_file` and the access-key files. C++ resolves them against
+  `Iwd`; Go stores them as written.
+- **`Env` vs `Environment`.** The Args/Arguments naming split has a twin: for
+  V1-shaped environments Go emits `Env`, C++ emits `Environment`.
+
+## Keywords the Go parser ignores outside their universe
+
+`docker_image` and `container_service_names` are set by Go whatever the
+universe; C++ honours them only for a container or docker job.
+
+## Keywords with no Go implementation at all
+
+About 120 attributes are set by C++ and by nothing in Go. The full list is in
+`knownDivergentGenerated`; the families are the EC2/GCE/Azure grid settings,
+the tool-daemon (TDP) settings, the buffer settings, the Java settings, the
+noop-job settings, the parallel-script settings, the submit-event notes, the
+cron/deferral attributes, `kill_sig` and its siblings, `core_size`,
+`stack_size`, `keep_claim_idle`, `max_job_retirement_time`,
+`next_job_start_delay`, `allowed_execute_duration`, `allowed_job_duration`,
+`manifest`, `output_destination`, `output_directory`, `scitokens_file`,
+`project_name`, `primary_unix_group`, `jobset`, `dag_node_name` and the
+DAGMan bookkeeping, `on_exit_hold`, `on_exit_remove`, `periodic_vacate` and
+the `*_subcode` reasons.
+
+## A crash in the oracle, not in either parser
+
+`container_image = <anything>` segfaults the in-process oracle. It is not a
+divergence and not reachable from `condor_submit`:
+`process_container_input_files` iterates
+`StringTokenIterator(param("CONTAINER_SHARED_FS"), ",")`, the shim loads no
+config so `param()` returns null, and `StringTokenIterator::end()` calls
+`strlen(nullptr)`. A real `condor_submit` always has that param's `/cvmfs`
+default. The keyword is excluded from the generator's vocabulary with that
+reason; the container universe is still generated, using `docker_image`.

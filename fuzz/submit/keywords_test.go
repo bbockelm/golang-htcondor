@@ -25,14 +25,31 @@ func TestKeywordCoverage(t *testing.T) {
 		t.Fatal("submit keyword table came back empty; the struct layout may have changed upstream")
 	}
 
-	corpus := strings.ToLower(strings.Join(seedInputs(), "\n"))
-	var covered, missing []string
+	seedCorpus := strings.ToLower(strings.Join(seedInputs(), "\n"))
+
+	// The generator's reach is measured over the same fixed corpus the
+	// regression sweep uses, so this number is reproducible rather than a
+	// function of how long the fuzzer last ran.
+	v := genVocab(t)
+	var gen strings.Builder
+	for _, data := range generatedCorpus(2000) {
+		gen.WriteString(strings.ToLower(v.Generate(data)))
+		gen.WriteByte('\n')
+	}
+	genCorpus := gen.String()
+
+	var seedCovered, bothCovered, missing []string
 	for _, kw := range kws {
 		if kw.Key == "" {
 			continue
 		}
-		if strings.Contains(corpus, strings.ToLower(kw.Key)) {
-			covered = append(covered, kw.Key)
+		k := strings.ToLower(kw.Key)
+		inSeed := strings.Contains(seedCorpus, k)
+		if inSeed {
+			seedCovered = append(seedCovered, kw.Key)
+		}
+		if inSeed || strings.Contains(genCorpus, k) {
+			bothCovered = append(bothCovered, kw.Key)
 		} else {
 			missing = append(missing, kw.Key)
 		}
@@ -40,7 +57,8 @@ func TestKeywordCoverage(t *testing.T) {
 	sort.Strings(missing)
 
 	t.Logf("submit keywords in this HTCondor: %d", len(kws))
-	t.Logf("exercised by the seed corpus: %d", len(covered))
+	t.Logf("exercised by the seed corpus: %d", len(seedCovered))
+	t.Logf("exercised by seeds + generator: %d", len(bothCovered))
 	t.Logf("not exercised: %d", len(missing))
 	const show = 40
 	if len(missing) > show {
