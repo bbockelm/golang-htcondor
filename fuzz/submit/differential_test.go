@@ -352,6 +352,42 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\narguments = A$(Item)B\nqueue 2 in ()\n"},
 	{input: "executable = /bin/sleep\narguments = A$(Item)B\nqueue x in ()\n"},
 
+	// --- parity: the tool daemon (TDP) ---
+	// tool_daemon_cmd is the gate for the whole family, the paths are stored
+	// as written, and the argument spelling decides the attribute.
+	{input: "executable = /bin/sleep\ntool_daemon_cmd = /usr/bin/strace\ntool_daemon_args = -f -p 1\ntool_daemon_input = in.txt\ntool_daemon_output = out.txt\ntool_daemon_error = err.txt\nsuspend_job_at_exec = true\nqueue\n"},
+	{input: "executable = /bin/sleep\ntool_daemon_cmd = tdp.sh\ntool_daemon_arguments = -f -p 1\nqueue\n"},
+	{input: "executable = /bin/sleep\ntool_daemon_cmd = tdp.sh\ntool_daemon_arguments = \"-f 'a b' c\"\nqueue\n"},
+	{input: "executable = /bin/sleep\ntool_daemon_cmd = tdp.sh\ntool_daemon_arguments2 = \"-f 'a b'\"\nqueue\n"},
+	// Runs of whitespace between V1 arguments collapse on the way through
+	// the ArgList, and an escaped quote survives as a literal one.
+	{input: "executable = /bin/sleep\ntool_daemon_cmd = tdp.sh\ntool_daemon_args = -a    -b\t-c\nqueue\n"},
+	{input: "executable = /bin/sleep\ntool_daemon_cmd = tdp.sh\ntool_daemon_args = -m \\\"a\\\"\nqueue\n"},
+	// Without tool_daemon_cmd the rest of the family is not read at all --
+	// not even far enough to notice the two argument spellings together,
+	// which is an error when the daemon IS named.
+	{input: "executable = /bin/sleep\ntool_daemon_args = -f\ntool_daemon_input = in.txt\ntool_daemon_output = out.txt\nsuspend_job_at_exec = true\nqueue\n"},
+	{input: "executable = /bin/sleep\ntool_daemon_args = -f\ntool_daemon_arguments = -g\nqueue\n"},
+	// The attribute names double as submit keywords.
+	{input: "executable = /bin/sleep\nToolDaemonCmd = tdp.sh\nToolDaemonArgs = -f\nToolDaemonOutput = out.txt\nqueue\n"},
+
+	// --- parity: the buffer settings ---
+	// All three are expressions, so an arithmetic value reaches the ad whole.
+	{input: "executable = /bin/sleep\nbuffer_files = \"a.txt = b.txt\"\nbuffer_size = 1024\nbuffer_block_size = 2 * 1024\nqueue\n"},
+	{input: "executable = /bin/sleep\nbuffer_size = 524288\nqueue\n"},
+
+	// --- parity: the noop job ---
+	{input: "executable = /bin/sleep\nnoop_job = true\nnoop_job_exit_code = 42\nnoop_job_exit_signal = 9\nqueue\n"},
+	{input: "executable = /bin/sleep\nnoop_job = (JobStatus == 1)\nqueue\n"},
+
+	// --- parity: the java settings ---
+	// Neither jar_files nor the java VM arguments are gated on the java
+	// universe: condor_submit reads both from every job.
+	{input: "executable = /bin/sleep\njar_files = a.jar, b.jar\njava_vm_arguments = -Xmx128m -server\nqueue\n"},
+	{input: "executable = /bin/sleep\njava_vm_args = \"-Xmx128m -Dx='a b'\"\nqueue\n"},
+	{input: "universe = java\nexecutable = Main\njar_files = app.jar\narguments = MyClass\njava_vm_arguments = -Xmx128m\nqueue\n"},
+	{input: "universe = java\nexecutable = Main\njar_files = app.jar\narguments = MyClass\njava_vm_arguments2 = \"-server -Dx='a b'\"\nqueue\n"},
+
 	// --- parity: vm universe ---
 	// These pin the attribute names and the gating SetVMParams applies.
 	// vm_type decides how much of the rest condor_submit reads at all, and
