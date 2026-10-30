@@ -473,6 +473,12 @@ func FuzzSubmitAds(f *testing.F) {
 		if knownDivergentSeed(src) {
 			t.Skip("known divergent seed; see its reason in the seeds table")
 		}
+
+		// Bracket the whole iteration: a worker that dies anywhere in here --
+		// in the oracle, in the Go parser, or in the comparison -- leaves this
+		// behind naming the input, which is otherwise unrecoverable.
+		oracle.JournalEnter("FuzzSubmitAds", src)
+		defer oracle.JournalLeave()
 		// A submit file is text. Feeding the oracle arbitrary bytes tests the
 		// lexers' handling of garbage, which the ClassAd and config fuzzers
 		// already cover, and crowds out the semantic comparison this is for.
