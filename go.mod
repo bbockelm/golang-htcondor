@@ -3,7 +3,7 @@ module github.com/bbockelm/golang-htcondor
 go 1.26.0
 
 require (
-	github.com/PelicanPlatform/classad v0.31.5
+	github.com/PelicanPlatform/classad v0.33.3
 	github.com/PelicanPlatform/classad/collections v0.29.6
 	github.com/bbockelm/cedar v0.7.12-0.20261017165254-d864685fa29e
 	github.com/bbockelm/gosssd v0.0.4

@@ -78,20 +78,9 @@ var seeds = []seedCase{
 	{input: "I = $INT(0;)\n"},                                       // a trailing ';' is not one expression -> ""
 	{input: "Z = $EVAL(.0)\nR = $EVAL(1.5)\nL = $EVAL({1, 1+1})\n"}, // ClassAdUnParser forms: 0.0, 1.500000000000000E+00, { 1,1 + 1 }
 
-	// --- known divergences: these must still disagree ---
-	{
-		input: "L = $EVAL({1, 1+ .A0})\n",
-		reason: "a leading dot on an attribute reference is dropped when the Go " +
-			"classad package parses the expression, so the unparsed form loses it: " +
-			"Go gives { 1,1 + A0 } where C++ gives { 1,1 + .A0 }. In C++ an " +
-			"AttributeReference carries an `absolute` flag and resolves against the " +
-			"root ad rather than the current one, so the two forms are different " +
-			"lookups inside a nested or chained ad. The drop is at parse time, not " +
-			"unparse: ParseExprOld(\".x.y\") already reads back as \"x.y\", while " +
-			"\"a.b\" and \"MY.Foo\" keep theirs. Fixing it means teaching " +
-			"github.com/PelicanPlatform/classad a root scope, so this is recorded " +
-			"here rather than fixed in this repository.",
-	},
+	// A leading dot is a root-scope reference, not decoration: it survives the
+	// round trip and resolves against the outermost ad (classad v0.33.3).
+	{input: "L = $EVAL({1, 1+ .A0})\n"},
 }
 
 // divergence runs both engines on the same preluded source and returns a
