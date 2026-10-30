@@ -47,7 +47,8 @@ go test -tags libcondor_utils -c -o /tmp/subfuzz.test ./fuzz/submit/
 To fuzz:
 
 ```sh
-hack/submit-fuzz.sh 10m
+hack/submit-fuzz.sh 10m                       # FuzzSubmitAds
+hack/submit-fuzz.sh 10m FuzzSubmitGenerated   # the generated target
 ```
 
 Both build the test binary and run it directly rather than using `go test`.
@@ -55,6 +56,53 @@ On macOS, SIP strips `DYLD_LIBRARY_PATH` when `go test` re-execs its workers,
 and `libcondor_utils`' install name carries no `@rpath` prefix, so embedded
 rpaths do not help — the binary has to be exec'd by something that still has
 the library path.
+
+## The two fuzz targets
+
+`FuzzSubmitAds` mutates submit **text**, starting from the hand-written seeds.
+
+`FuzzSubmitGenerated` mutates the **script a generator reads** (`gen.go`). The
+generator takes the fuzzer's bytes as a series of decisions -- which keyword to
+emit, which shape of value, which queue statement -- and its vocabulary comes
+from `oracle.Keywords()`, which is HTCondor's own submit-keyword table as the
+linked `SubmitHash` sees it. A keyword added upstream therefore enters the
+generator with no change here.
+
+The reason for the second target is measurable: `TestKeywordCoverage` counts
+how much of HTCondor's vocabulary a corpus reaches.
+
+| corpus | keywords reached (of 258 in 26.2.0) |
+|--------|-------------------------------------|
+| hand-written seeds | 17 |
+| seeds + generator | 253 |
+
+The gap is keywords whose values have a syntax of their own, which byte
+mutation does not produce: a `cron_minute` needs a cron field, a
+`grid_resource` needs a grid type and its arguments, a `request_memory` needs
+a size. `gen.go` writes real generators for those families -- cron fields
+(`*`, ranges, lists, steps, per-field bounds), grid resources, sizes with
+`K`/`M`/`G`/`T` units, file paths and file lists, ClassAd expressions,
+enumerations whose value set SubmitHash checks (`notification`,
+`when_to_transfer_output`, `kill_sig`, ...), attribute-name lists, environment
+and remap strings -- and falls back to the keyword's declared type
+(`f_as_bool` / `f_as_int` / `f_as_uint` / `f_as_string` / `f_as_list`, and
+`f_as_expr` as the default) for the rest.
+
+It also picks a universe first and draws only from the keywords that universe
+allows, emitting whatever that universe requires (`grid_resource` for grid,
+`vm_type` for vm, the class name for java), because SubmitHash rejects the
+file otherwise and the family is never compared. Two spellings of one
+attribute are never written into the same file, which is what keeps an
+`f_alt_err` pair -- where using both spellings is an error -- apart.
+
+Generation is a pure function of the input bytes, so a fuzz reproducer is the
+bytes.
+
+Five keywords are deliberately out of the vocabulary, each recorded in
+`Vocab.Skipped`: `request_gpu_memory` and `request_gpus_memory` (flagged
+`f_error`, SubmitHash rejects them), `getenv` and `get_env` (they read the
+host environment, which only the C++ side is allowed to do here), and
+`container_image` (it crashes the oracle -- see FINDINGS.md).
 
 ## How a divergence is judged
 
@@ -67,6 +115,8 @@ into one of three buckets, all of them explicit in `differ.go`:
   is deliberately short and each entry says why.
 - **`knownDivergent`** — the two parsers genuinely disagree today. Each entry
   records what the difference is. This table *is* the inventory of Go/C++ drift.
+- **`knownDivergentGenerated`** — the same thing for what the generated target
+  found. Kept separate only so the provenance of a finding stays visible.
 - **everything else** — must match. Values are compared structurally (parsed as
   ClassAd expressions), so unparser formatting differences are not divergences.
 
