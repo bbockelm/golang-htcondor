@@ -3044,6 +3044,19 @@ func (sf *SubmitFile) submitCommand(key string) (string, bool) {
 	return sf.cfg.Get(key)
 }
 
+// Command returns the value the submit file assigned to a submit command,
+// macro-expanded but otherwise exactly as written, and whether the file
+// assigned it at all.
+//
+// This is what the submitter typed, which is not always what the job ad
+// records. `executable = run.sh` reads back here as "run.sh" while the ad's
+// Cmd has been resolved to an absolute path, so a caller asking whether the
+// submitter named a path on a machine or a file they intend to upload has to
+// ask here rather than read Cmd.
+func (sf *SubmitFile) Command(key string) (string, bool) {
+	return sf.submitCommand(key)
+}
+
 // submitCommandAlt reads a submit-file command that has a second
 // accepted spelling, mirroring
 // SubmitHash::submit_param(name, alt_name) in

@@ -695,6 +695,33 @@ func parseJobAdsForSpooling(jobAds []*classad.ClassAd) ([]procID, map[procID]*jo
 	return jobIDs, jobInfoMap, nil
 }
 
+// systemExecutablePrefixes are directories whose contents belong to the
+// machine, not to the submitter: an executable under one of these can never
+// be supplied through an upload, so it is never part of a spool file list.
+// Deliberately narrower than "any absolute path" -- an absolute path into a
+// home or project directory CAN be satisfied by uploading a file with the
+// same basename.
+var systemExecutablePrefixes = []string{
+	"/bin/",
+	"/sbin/",
+	"/lib/",
+	"/lib64/",
+	"/usr/",
+	"/opt/",
+	"/cvmfs/",
+}
+
+// IsSystemExecutablePath reports whether an executable path names a file the
+// machine owns rather than one the submitter can supply.
+func IsSystemExecutablePath(cmd string) bool {
+	for _, prefix := range systemExecutablePrefixes {
+		if strings.HasPrefix(cmd, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // getInputFilesFromJobAd extracts the set of files that need to be transferred for a job.
 // This includes TransferInput and the executable if TransferExecutable is true.
 func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
@@ -711,13 +738,17 @@ func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 		inputFileSet[f] = true
 	}
 
-	// Also include the executable if TransferExecutable is true (the default)
-	// AND Cmd is a relative path. Absolute paths refer to the worker's
-	// filesystem (e.g. "/bin/echo"), not the caller's input FS, so we'd
-	// have nothing meaningful to spool — and the caller's FS lookup of the
-	// basename would fail with "file does not exist". This matches
-	// condor_submit's actual behavior, which only writes TransferExecutable
-	// to the ad when the user explicitly sets transfer_executable.
+	// Also include the executable if TransferExecutable is true (the
+	// default) and the executable is something the caller could have
+	// supplied. "Relative" used to be the test for that, but it stopped
+	// working when the submit parser began resolving the executable
+	// against the submitting directory the way condor_submit does: Cmd is
+	// absolute now whether the submit file said "run.sh" or
+	// "/home/alice/run.sh". What still separates the two cases is whether
+	// the path is machine-owned — /bin/echo cannot be uploaded under any
+	// name, while an absolute path into a home or project directory is
+	// satisfied by uploading its basename, which is exactly what
+	// submitlint tells a caller to do.
 	transferExe := true // default is true
 	transferExePresent := false
 	if expr, ok := ad.Lookup("TransferExecutable"); ok {
@@ -736,7 +767,7 @@ func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 			cmdValue = cmd
 		}
 	}
-	if transferExe && cmdValue != "" && !path.IsAbs(cmdValue) {
+	if transferExe && cmdValue != "" && !IsSystemExecutablePath(cmdValue) {
 		inputFileSet[path.Base(cmdValue)] = true
 	}
 

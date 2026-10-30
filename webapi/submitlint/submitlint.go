@@ -70,23 +70,6 @@ func (i Inspection) Advisory() []string {
 	return append([]string{i.Fatal.Error()}, i.Warnings...)
 }
 
-// systemExecutablePrefixes are directories whose contents belong to the
-// machine, not to the submitter: an executable under one of these can
-// never be supplied through upload_job_input, so naming one while
-// leaving transfer_executable at its default of true is always a
-// mistake. Deliberately narrower than "any absolute path" — an absolute
-// path into a home or project directory *can* be satisfied by uploading
-// a file with the same basename, so that case only warns.
-var systemExecutablePrefixes = []string{
-	"/bin/",
-	"/sbin/",
-	"/lib/",
-	"/lib64/",
-	"/usr/",
-	"/opt/",
-	"/cvmfs/",
-}
-
 // Inspect parses the submit file the way condor_submit would
 // and reports what submit_job needs to know before and after handing it
 // to the schedd. A submit file this package cannot parse yields a
@@ -138,7 +121,12 @@ func Inspect(raw string) Inspection {
 	stdinFile, _ := ad.EvaluateAttrString("Input")
 	insp.NeedsSpooling = transferExec || transferInput != "" || stdinFile != ""
 
-	cmd, _ := ad.EvaluateAttrString("Cmd")
+	// The executable AS WRITTEN, not the ad's Cmd. The submit parser
+	// resolves a relative executable against the submitting directory,
+	// exactly as condor_submit does, so Cmd is absolute whatever the
+	// caller typed and cannot answer what these two checks ask: whether
+	// the caller named a path on a machine or a file they will upload.
+	cmd, _ := sf.Command("executable")
 	if err := checkExecutableTransfer(cmd, transferExec); err != nil {
 		insp.Fatal = err
 		return insp
@@ -286,7 +274,7 @@ func queueVarSentinels(sf *htcondor.SubmitFile, suffix string) map[string]string
 // combination that has no working outcome: a machine-owned path that
 // HTCondor will rewrite to a spool location the caller cannot populate.
 func checkExecutableTransfer(cmd string, transferExec bool) error {
-	if !transferExec || !isSystemExecutablePath(cmd) {
+	if !transferExec || !htcondor.IsSystemExecutablePath(cmd) {
 		return nil
 	}
 	return fmt.Errorf("submit file rejected: executable = %s is a system path, but transfer_executable is not set "+
@@ -303,22 +291,13 @@ func checkExecutableTransfer(cmd string, transferExec bool) error {
 // spooled. Unlike the system-path case this can work, but only if the
 // upload names the basename, so say so.
 func warnExecutableTransfer(cmd string, transferExec bool) []string {
-	if !transferExec || !strings.HasPrefix(cmd, "/") || isSystemExecutablePath(cmd) {
+	if !transferExec || !strings.HasPrefix(cmd, "/") || htcondor.IsSystemExecutablePath(cmd) {
 		return nil
 	}
 	return []string{fmt.Sprintf("executable = %s is an absolute path and transfer_executable is not set "+
 		"(it defaults to true), so HTCondor expects the executable to be spooled: upload_job_input must include "+
 		"a file named %q (with is_executable set). If the file already exists on the execute node, "+
 		"set transfer_executable = False instead.", cmd, path.Base(cmd))}
-}
-
-func isSystemExecutablePath(cmd string) bool {
-	for _, prefix := range systemExecutablePrefixes {
-		if strings.HasPrefix(cmd, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 // macroReference matches a `$(NAME)` or `$(NAME:default)` submit-file
