@@ -556,11 +556,12 @@ table are fixed; see "Fixed" below.
 - **`stream_input` / `stream_output` / `stream_error`** produce opposite
   `TransferIn`/`TransferOut`/`TransferErr` booleans, so one side streams the
   stream and the other transfers it.
-- **Iwd resolution, again.** The known `Cmd`/`UserLog` finding generalizes to
-  every path-valued keyword the Go parser does implement:
-  `azure_auth_file`, `gce_auth_file`, `gce_json_file`, `ec2_user_data_file`,
-  `ec2_key_pair_file` and the access-key files. C++ resolves them against
-  `Iwd`; Go stores them as written.
+- **Iwd resolution, again.** The `Cmd`/`UserLog` finding generalized to every
+  path-valued keyword the Go parser implements; see "Grid credential and data
+  files were stored as written" under "Fixed". What is left of it is the
+  `aws_`/`gs_`/`s3_` spellings of the access-key files, which Go does not
+  implement at all — and which C++ does *not* resolve, since they are plain
+  `f_as_string` table entries rather than grid keywords.
 - **`Env` vs `Environment`.** The Args/Arguments naming split has a twin: for
   V1-shaped environments Go emits `Env`, C++ emits `Environment`.
 
@@ -584,6 +585,49 @@ noop-job settings, the parallel-script settings, the submit-event notes,
 DAGMan bookkeeping, `periodic_vacate` and the `*_subcode` reasons.
 
 ## Fixed
+
+**Grid credential and data files were stored as written.** `SetGridParams`
+runs every cloud credential and data file it reads through `full_path`, so the
+job ad records an absolute path: `EC2AccessKeyId`, `EC2SecretAccessKey`,
+`EC2KeyPairFile`, `EC2UserDataFile`, `GceAuthFile`, `GceJsonFile` and
+`AzureAuthFile`. Go stored the submitter's text. The gridmanager that later
+opens one of these is a daemon in its own working directory, not the directory
+`condor_submit` ran in, so `gce_auth_file = auth.json` reached it as a bare
+name resolved against the wrong directory — a credential the job could not
+read, for a file that was sitting in the submit directory all along.
+
+Resolution is against `Iwd`, not against the submitting directory the
+executable uses, so `initialdir` moves these files and does not move the
+executable. The two mechanisms behind this are worth keeping apart, because
+only one of them is a table. `SimpleSubmitKeyword` carries an `f_filemask`
+field and `do_simple_commands` resolves every `f_as_string` keyword that has
+one — but that is just `log`, `dagman_log`, `output_directory` and
+`starter_log` (plus `executable`, which is also `f_special` and so resolves
+against the submitting directory instead). The grid files carry no mask at
+all; `SetGridParams` calls `full_path` on each by hand. Reading the mask would
+have said they were ordinary strings.
+`TestFileRoleKeywordsAreAccountedFor` guards the half that is a table: a new
+`f_filemask` keyword upstream now fails that test instead of silently
+diverging.
+
+Three more behaviors came out of porting the resolution, all measured against
+`SubmitHash`. `ec2_key_pair_file` is a second accepted spelling of
+`ec2_keypair_file`, which Go did not know. A named `ec2_keypair` makes the
+file meaningless, and C++ warns and drops it rather than recording a path the
+gridmanager would write a new key to; Go recorded both. And one EC2 credential
+value is not a filename at all: `FROM INSTANCE` tells the gridmanager to use
+the instance's own IAM role, is matched without regard to case, and setting
+either half of the credential to it sets both — so resolving it would have
+turned "use the IAM role" into a path to a file that does not exist.
+
+What is deliberately left: the `aws_`/`gs_`/`s3_` spellings of the access-key
+files, which Go does not implement. They are not a resolution gap — they are
+plain `f_as_string` entries in the keyword table, so `SetSimpleJobParams`
+stores them verbatim and overwrites whatever `SetGridParams` resolved earlier
+in `make_job_ad`. `gce_metadata_file`, `output_directory`, `starter_log`,
+`dagman_log`, `x509userproxy` and `scitokens_file` are resolved by C++ too,
+but Go implements none of them, so they stay in the "no Go implementation"
+list rather than here.
 
 **A cron job never deferred, and a cron job's timing went nowhere.** There is
 no `CronWindow` or `CronPrepTime` job attribute: `cron_window` and
