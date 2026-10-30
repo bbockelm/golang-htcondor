@@ -1812,26 +1812,6 @@ var localSubmitUser = sync.OnceValue(func() string {
 	return os.Getenv("USER")
 })
 
-// setMaterializationLimits records what a submit file asked for about late
-// materialization.
-//
-// max_idle and materialize_max_idle both set JobMaterializeMaxIdle, the number
-// of procs a job factory may leave idle before the schedd stops materializing
-// more; SubmitHash stores it as an expression (f_as_expr in
-// prunable_keywords), with materialize_max_idle as the alternate spelling.
-//
-// max_materialize deliberately has no counterpart: it never becomes a job
-// attribute on either side. HTCondor reads it in want_factory_submit and
-// passes it to SetJobFactory as the materialize limit, so setting it on the ad
-// here would be a divergence rather than a fix.
-func (sf *SubmitFile) setMaterializationLimits(ad *classad.ClassAd) error {
-	maxIdle, ok := sf.submitCommandAlt("max_idle", "materialize_max_idle")
-	if !ok {
-		return nil
-	}
-	return setExprAttr(ad, "JobMaterializeMaxIdle", "max_idle", maxIdle)
-}
-
 // setJobStatusControl sets job status and control attributes
 func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 	// hold - initial hold state
