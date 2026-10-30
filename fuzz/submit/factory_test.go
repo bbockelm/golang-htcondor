@@ -82,6 +82,10 @@ var factorySeeds = []struct {
 	// side DOES define it once a job ad is built, which makes this the seed
 	// that fails if the digest is ever built after the first row goes live.
 	{"itemindex", "executable = /bin/sleep\noutput = o.$(ItemIndex).$(Process)\nmax_idle = 2\nqueue item in (alpha beta)\n"},
+	// on_evict_checks and the transform bodies its tags name are left out
+	// of the digest; a transform body no tag names is not.
+	{"on_evict_checks", "executable = /bin/sleep\non_evict_checks = chk\ntransform_body_chk = SET Foo $(Process)\nmax_idle = 2\nqueue 3\n"},
+	{"unreferenced transform body", "executable = /bin/sleep\ntransform_body_other = SET Foo $(Process)\nmax_idle = 2\nqueue 3\n"},
 }
 
 // TestFactoryOracleReportsLateMaterialization pins what the C++ side decides,

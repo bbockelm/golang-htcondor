@@ -224,6 +224,29 @@ func TestDigestOmitsGetenvAndRequirements(t *testing.T) {
 	}
 }
 
+// TestDigestOmitsOnlyTheNamedTransformBodies pins the narrow half of the
+// on_evict_checks rule. Its transform bodies are left out of the digest
+// because expanding the tag list and the bodies in step is not something the
+// digest format supports -- but only the bodies whose tag the list names. A
+// transform body nothing names is an ordinary key and belongs in the digest;
+// dropping it would silently lose a transform the job asked for.
+func TestDigestOmitsOnlyTheNamedTransformBodies(t *testing.T) {
+	f := parseFactory(t, "executable = /bin/sleep\n"+
+		"on_evict_checks = chk\n"+
+		"transform_body_chk = SET Foo $(Process)\n"+
+		"transform_body_other = SET Bar $(Process)\n"+
+		"max_idle = 2\nqueue 3\n")
+	if strings.Contains(f.body, "transform_body_chk") {
+		t.Errorf("digest keeps the transform body on_evict_checks names:\n%s", f.body)
+	}
+	if strings.Contains(strings.ToLower(f.body), "on_evict_checks") {
+		t.Errorf("digest keeps on_evict_checks:\n%s", f.body)
+	}
+	if !strings.Contains(f.body, "transform_body_other=SET Bar $(Process)") {
+		t.Errorf("digest dropped a transform body no tag names:\n%s", f.body)
+	}
+}
+
 // TestDigestDefinesItemWhenThereAreNoRows pins a detail that is easy to miss
 // and impossible to guess: condor_submit reads the first row before it builds
 // the digest, and reading from an empty list defines the macro Item as empty.

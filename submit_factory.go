@@ -68,9 +68,32 @@ var digestOmittedKeys = map[string]struct{}{
 	"transformonevict": {},
 }
 
-// transformBodyPrefixes are the two spellings of the per-tag transform bodies
-// that on_evict_checks names; they are omitted alongside it.
+// transformBodyPrefixes are the two spellings of the per-tag transform
+// bodies. A body is omitted only when on_evict_checks names its tag: one that
+// nothing names is an ordinary key and stays.
 var transformBodyPrefixes = []string{"transform_body_", "transformbody_"}
+
+// digestOmitSet is the set of keys this submit file keeps out of its digest,
+// lowercased. It is the fixed list plus the transform bodies on_evict_checks
+// names, which is why it is per-file rather than a constant.
+func (sf *SubmitFile) digestOmitSet() map[string]struct{} {
+	omit := make(map[string]struct{}, len(digestOmittedKeys)+4)
+	for key := range digestOmittedKeys {
+		omit[key] = struct{}{}
+	}
+	tags, ok := sf.submitCommandAlt("on_evict_checks", "TransformOnEvict")
+	if !ok {
+		return omit
+	}
+	for _, tag := range strings.FieldsFunc(tags, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\r' || r == '\n'
+	}) {
+		for _, prefix := range transformBodyPrefixes {
+			omit[prefix+strings.ToLower(tag)] = struct{}{}
+		}
+	}
+	return omit
+}
 
 // JobFactory is what a late-materialization submission sends to the schedd in
 // place of per-proc job ads.
@@ -328,8 +351,9 @@ func (sf *SubmitFile) makeDigest(clusterID int, vars []string, noItems bool) (st
 		return "", fmt.Errorf("failed to get current working directory: %w", err)
 	}
 
+	omit := sf.digestOmitSet()
 	for _, key := range sf.digestKeys(noItems) {
-		if digestOmits(key) {
+		if _, omitted := omit[strings.ToLower(key)]; omitted {
 			continue
 		}
 		if strings.HasPrefix(key, "$") {
@@ -417,20 +441,6 @@ func skipKnobSet(vars []string, clusterID int) map[string]struct{} {
 		skip["clusterid"] = struct{}{}
 	}
 	return skip
-}
-
-// digestOmits reports whether a key never belongs in a digest.
-func digestOmits(key string) bool {
-	lower := strings.ToLower(key)
-	if _, omit := digestOmittedKeys[lower]; omit {
-		return true
-	}
-	for _, prefix := range transformBodyPrefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 // keyIsPrunable reports whether a key may be dropped from a digest when its
