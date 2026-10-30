@@ -1558,7 +1558,7 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 			return err
 		}
 	} else if _, vm := sf.submitCommand("vm_memory"); vm && sf.universe == UniverseVM {
-		_ = setExprAttr(ad, "RequestMemory", "request_memory", "MY.VM_Memory")
+		_ = setExprAttr(ad, "RequestMemory", "request_memory", "MY.JobVMMemory")
 	} else if v, ok := sf.requestDefault("request_memory"); ok {
 		if err := setRequestSize(ad, "RequestMemory", v, unitMiB); err != nil {
 			return fmt.Errorf("JOB_DEFAULT_REQUESTMEMORY: %w", err)
@@ -2075,7 +2075,7 @@ func parseSizeWithUnits(s string, base int64) (int64, bool) {
 // setSizeAttr assigns a size-valued job attribute. A parseable size becomes
 // the integer count of base units; anything else is stored as a ClassAd
 // expression, which is what condor_submit does (AssignJobExpr) for values
-// like "request_memory = ifThenElse(...)" or "MY.VM_Memory".
+// like "request_memory = ifThenElse(...)" or "MY.JobVMMemory".
 //
 // The case that matters is the third one. Dropping an unparseable value --
 // what the old code did, by guarding on "err == nil" and falling through --
@@ -2302,70 +2302,95 @@ func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
 	return nil
 }
 
-// setVMParams sets VM universe specific parameters
+// setVMParams sets the VM universe attributes, mirroring SetVMParams() in
+// condor_utils/submit_utils.cpp.
+//
+// The attribute names are HTCondor's own, not the submit keywords': vm_memory
+// is JobVMMemory, vm_vcpus is JobVM_VCPUS, vm_disk is VMPARAM_vm_Disk and the
+// xen_* keywords become VMPARAM_Xen_*. Nothing reads an attribute named after
+// the keyword, so a VM job carrying those would run with the default memory
+// and CPU count.
+//
+// vm_type decides how much of the rest condor_submit even reads: the xen_*
+// keywords only for "xen", vm_disk only for "xen" or "kvm", and the
+// networking type only when networking is on. Checkpoint, networking and VNC
+// land in the ad whether or not the submit file mentions them.
 func (sf *SubmitFile) setVMParams(ad *classad.ClassAd) error {
-	// vm_type - Required: type of VM (kvm, xen, vmware)
-	if vmType, ok := sf.submitCommand("vm_type"); ok {
-		_ = ad.Set("VM_Type", vmType)
+	// vm_type - Required: type of VM (kvm, xen). Stored lower-cased.
+	vmType := ""
+	if v, ok := sf.submitCommand("vm_type"); ok {
+		vmType = strings.ToLower(v)
+		_ = ad.Set("JobVMType", vmType)
 	}
 
-	// vm_memory - Memory for the VM in MiB
-	if vmMemory, ok := sf.submitCommand("vm_memory"); ok {
-		if err := setSizeAttr(ad, "VM_Memory", vmMemory, unitMiB); err != nil {
+	// vm_checkpoint - Enable checkpointing
+	checkpoint := false
+	if v, ok := sf.submitCommand("vm_checkpoint"); ok {
+		checkpoint = parseBool(v, false)
+	}
+	_ = ad.Set("JobVMCheckpoint", checkpoint)
+
+	// vm_networking - Enable networking for VM
+	networking := false
+	if v, ok := sf.submitCommand("vm_networking"); ok {
+		networking = parseBool(v, false)
+	}
+	_ = ad.Set("JobVMNetworking", networking)
+
+	// vm_networking_type - Type of networking (nat, bridge, ...), read only
+	// when networking is on.
+	if networking {
+		if v, ok := sf.submitCommand("vm_networking_type"); ok {
+			_ = ad.Set("JobVMNetworkingType", v)
+		}
+	}
+
+	// vm_vnc - Attach a VNC console
+	vnc := false
+	if v, ok := sf.submitCommand("vm_vnc"); ok {
+		vnc = parseBool(v, false)
+	}
+	_ = ad.Set("JobVMVNCConsole", vnc)
+
+	// vm_memory - Memory for the VM in MiB. condor_submit gives the keyword
+	// a built-in default of $(Request_Memory), so a VM job that only asks
+	// for request_memory gives its VM that much memory.
+	if vmMemory, ok := sf.submitCommandAlt2("vm_memory", "request_memory", "requestmemory"); ok {
+		if err := setSizeAttr(ad, "JobVMMemory", vmMemory, unitMiB); err != nil {
 			return err
 		}
 	}
 
-	// vm_disk - Disk space for VM
-	if vmDisk, ok := sf.submitCommand("vm_disk"); ok {
-		_ = ad.Set("VM_Disk", vmDisk)
+	// vm_vcpus - Number of virtual CPUs, with a floor of 1. Its built-in
+	// default is $(Request_CPUs), and the default is the macro's TEXT rather
+	// than the evaluated request, so "request_cpus = 2*2" leaves the VM with
+	// 2 CPUs, not 4.
+	vcpus := 1
+	if v, ok := sf.submitCommandAlt2("vm_vcpus", "request_cpus", "requestcpus"); ok {
+		vcpus = vmVCPUs(v)
 	}
-
-	// vm_networking - Enable networking for VM
-	if vmNet, ok := sf.submitCommand("vm_networking"); ok {
-		_ = ad.Set("VM_Networking", parseBool(vmNet, false))
-	}
-
-	// vm_networking_type - Type of networking (nat, bridge, none)
-	if vmNetType, ok := sf.submitCommand("vm_networking_type"); ok {
-		_ = ad.Set("VM_NetworkingType", vmNetType)
-	}
+	_ = ad.Set("JobVM_VCPUS", vcpus)
 
 	// vm_macaddr - MAC address for VM
 	if vmMac, ok := sf.submitCommand("vm_macaddr"); ok {
-		_ = ad.Set("VM_MACAddr", vmMac)
+		_ = ad.Set("JobVM_MACADDR", vmMac)
 	}
 
-	// vm_checkpoint - Enable checkpointing
-	if vmCheckpoint, ok := sf.submitCommand("vm_checkpoint"); ok {
-		_ = ad.Set("VM_Checkpoint", parseBool(vmCheckpoint, false))
+	// vm_no_output_vm - Do not transfer the VM files back
+	if v, ok := sf.submitCommand("vm_no_output_vm"); ok {
+		_ = ad.Set("VMPARAM_No_Output_VM", parseBool(v, false))
 	}
 
-	// vm_vcpus - Number of virtual CPUs
-	if vmVCPUs, ok := sf.submitCommand("vm_vcpus"); ok {
-		if intVCPUs, err := parseInt(vmVCPUs); err == nil {
-			_ = ad.Set("VM_VCPUs", intVCPUs)
+	if vmType == vmTypeXen {
+		sf.setXenParams(ad)
+	}
+
+	// vm_disk - the VM's disk images, "<file>:<device>:<permission>" per
+	// disk. Only xen and kvm have one.
+	if vmType == vmTypeXen || vmType == vmTypeKVM {
+		if vmDisk, ok := sf.submitCommand("vm_disk"); ok {
+			_ = ad.Set("VMPARAM_vm_Disk", vmDisk)
 		}
-	}
-
-	// xen_kernel - Xen kernel image
-	if xenKernel, ok := sf.submitCommand("xen_kernel"); ok {
-		_ = ad.Set("Xen_Kernel", xenKernel)
-	}
-
-	// xen_initrd - Xen initial ramdisk
-	if xenInitrd, ok := sf.submitCommand("xen_initrd"); ok {
-		_ = ad.Set("Xen_Initrd", xenInitrd)
-	}
-
-	// xen_root - Xen root device
-	if xenRoot, ok := sf.submitCommand("xen_root"); ok {
-		_ = ad.Set("Xen_Root", xenRoot)
-	}
-
-	// xen_kernel_params - Xen kernel parameters
-	if xenParams, ok := sf.submitCommand("xen_kernel_params"); ok {
-		_ = ad.Set("Xen_KernelParams", xenParams)
 	}
 
 	// vmware_dir - VMware working directory
@@ -2384,6 +2409,104 @@ func (sf *SubmitFile) setVMParams(ad *classad.ClassAd) error {
 	}
 
 	return nil
+}
+
+// The vm_type values that have parameters of their own.
+const (
+	vmTypeXen = "xen"
+	vmTypeKVM = "kvm"
+)
+
+// The two xen_kernel values that name something other than a kernel file:
+// "included" means the disk image boots itself, "vmx" asks for hardware
+// virtualization instead. Either one means there is no kernel file, so
+// xen_initrd and xen_root do not apply.
+const (
+	xenKernelIncluded = "included"
+	xenKernelHWVT     = "vmx"
+)
+
+// setXenParams sets the VMPARAM_Xen_* attributes from the xen_* keywords.
+// condor_submit reads them only for a Xen VM; under any other vm_type the
+// keywords are silently dropped.
+func (sf *SubmitFile) setXenParams(ad *classad.ClassAd) {
+	xenKernel, ok := sf.submitCommand("xen_kernel")
+	if !ok {
+		return
+	}
+	_ = ad.Set("VMPARAM_Xen_Kernel", xenKernel)
+
+	// "vmx" is a request for hardware virtualization rather than a kernel,
+	// and the requirements expression keys off the attribute.
+	kernel := strings.ToLower(xenKernel)
+	if kernel == xenKernelHWVT {
+		_ = ad.Set("JobVMHardwareVT", true)
+	}
+	realKernelFile := kernel != xenKernelIncluded && kernel != xenKernelHWVT
+
+	// xen_initrd and xen_root describe a real kernel file; with "included"
+	// or "vmx" there is none, and condor_submit does not read them.
+	if realKernelFile {
+		if xenInitrd, ok := sf.submitCommand("xen_initrd"); ok {
+			_ = ad.Set("VMPARAM_Xen_Initrd", xenInitrd)
+		}
+		if xenRoot, ok := sf.submitCommand("xen_root"); ok {
+			_ = ad.Set("VMPARAM_Xen_Root", xenRoot)
+		}
+	}
+
+	// xen_kernel_params keeps one layer of quoting off the value.
+	if xenParams, ok := sf.submitCommand("xen_kernel_params"); ok {
+		_ = ad.Set("VMPARAM_Xen_Kernel_Params", trimOneQuotePair(xenParams))
+	}
+}
+
+// trimOneQuotePair mirrors trim_quotes() (condor_utils/stl_string_utils.cpp):
+// a leading and a trailing quote are each dropped on their own, so `"a b` and
+// `a b'` lose theirs as surely as `"a b"` does. A string shorter than two
+// characters is left alone.
+func trimOneQuotePair(s string) string {
+	if len(s) < 2 {
+		return s
+	}
+	if s[0] == '"' || s[0] == '\'' {
+		s = s[1:]
+	}
+	if n := len(s); n > 0 && (s[n-1] == '"' || s[n-1] == '\'') {
+		s = s[:n-1]
+	}
+	return s
+}
+
+// vmVCPUs mirrors condor_submit's vm_vcpus handling: (int)strtol() of the
+// value, floored at 1. strtol takes the leading decimal digits and yields 0
+// for anything else, and the cast to int truncates to 32 bits, so "abc", "0",
+// "-3" and "4294967296" all come out as 1.
+func vmVCPUs(raw string) int {
+	s := strings.TrimLeft(raw, " \t\n\v\f\r")
+	i := 0
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	digits := i
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == digits {
+		return 1
+	}
+	v, err := strconv.ParseInt(s[:i], 10, 64)
+	if err != nil {
+		// strtol saturates at LONG_MAX/LONG_MIN, and truncating either to
+		// int lands below the floor.
+		return 1
+	}
+	// The truncation is the point: it is what C++'s (int) cast does.
+	n := int32(v) //nolint:gosec // G115: deliberate, see above
+	if n > 1 {
+		return int(n)
+	}
+	return 1
 }
 
 // setParallelParams sets parallel/MPI universe specific parameters
@@ -3531,4 +3654,15 @@ func (sf *SubmitFile) submitCommandAlt(key, altKey string) (string, bool) {
 		return value, true
 	}
 	return sf.submitCommand(altKey)
+}
+
+// submitCommandAlt2 is submitCommandAlt with a second fallback, for the two
+// VM keywords whose built-in default is itself a macro reference with its own
+// default: vm_memory defaults to $(Request_Memory), which defaults to
+// $(RequestMemory), so all three spellings have to be tried in turn.
+func (sf *SubmitFile) submitCommandAlt2(key, altKey, altKey2 string) (string, bool) {
+	if value, ok := sf.submitCommandAlt(key, altKey); ok {
+		return value, true
+	}
+	return sf.submitCommand(altKey2)
 }

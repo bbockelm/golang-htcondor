@@ -256,6 +256,29 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\narguments = A$(Item)B\nqueue in ()\n"},
 	{input: "executable = /bin/sleep\narguments = A$(Item)B\nqueue 2 in ()\n"},
 	{input: "executable = /bin/sleep\narguments = A$(Item)B\nqueue x in ()\n"},
+
+	// --- parity: vm universe ---
+	// These pin the attribute names and the gating SetVMParams applies.
+	// vm_type decides how much of the rest condor_submit reads at all, and
+	// is stored lower-cased.
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = KVM\nvm_memory = 2G\nvm_vcpus = 4\nvm_macaddr = 00:11:22:33:44:55\nvm_vnc = true\nvm_no_output_vm = true\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nqueue\n"},
+	// The networking type is read only when networking is on.
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_networking_type = bridge\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_networking = true\nvm_networking_type = bridge\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_networking = true\nvm_checkpoint = true\nwhen_to_transfer_output = ON_EXIT_OR_EVICT\nexecutable = /bin/sleep\nqueue\n"},
+	// vm_memory defaults to $(Request_Memory) and vm_vcpus to $(Request_CPUs),
+	// and the default is the macro's text: 2*2 is two CPUs, not four.
+	{input: "universe = vm\nvm_type = kvm\nvm_disk = d.img:vda:w\nrequest_memory = 1024\nrequest_cpus = 2*2\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_disk = d.img:vda:w\nRequestMemory = 777\nRequestCpus = 6\nexecutable = /bin/sleep\nqueue\n"},
+	// The xen_* keywords belong to a Xen VM; under kvm they are dropped.
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nxen_kernel = /boot/vmlinuz\nxen_root = /dev/sda1\nxen_initrd = /boot/initrd\nxen_kernel_params = ro\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = xen\nvm_memory = 512\nvm_disk = d.img:vda:w\nxen_kernel = /boot/vmlinuz\nxen_root = /dev/sda1\nxen_initrd = /boot/initrd\nxen_kernel_params = \"ro quiet\"\nexecutable = /bin/sleep\nqueue\n"},
+	// "included" boots from the disk image and "vmx" asks for hardware
+	// virtualization; neither is a kernel file, so initrd and root do not
+	// apply, and "vmx" turns on JobVMHardwareVT.
+	{input: "universe = vm\nvm_type = xen\nvm_memory = 512\nvm_disk = d.img:vda:w\nxen_kernel = included\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = xen\nvm_memory = 512\nvm_disk = d.img:vda:w\nxen_kernel = vmx\nexecutable = /bin/sleep\nqueue\n"},
 }
 
 func requireOracle(t testing.TB) {
