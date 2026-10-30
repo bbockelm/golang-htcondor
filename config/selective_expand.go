@@ -134,7 +134,7 @@ func (e *expander) selectiveExpand(value string, skip func(string) bool) (string
 // knob the function reads still holds a reference skip is protecting.
 func (e *expander) canEvaluate(id int, body string, skip func(string) bool, pending *int) bool {
 	check := func(index int) bool {
-		name, ok := nthListItem(body, ',', index)
+		name, ok := nthListItem(body, index)
 		if !ok {
 			return true
 		}
@@ -155,8 +155,8 @@ func (e *expander) canEvaluate(id int, body string, skip func(string) bool, pend
 	// $CHOICE(INDEX,LIST) with exactly two arguments reads the second as a
 	// knob name too; with more, the arguments are the list itself.
 	if id == macroChoice {
-		if _, more := nthListItem(body, ',', 2); !more {
-			if _, ok := nthListItem(body, ',', 1); ok && !check(1) {
+		if _, more := nthListItem(body, 2); !more {
+			if _, ok := nthListItem(body, 1); ok && !check(1) {
 				return false
 			}
 		}

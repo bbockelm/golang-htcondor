@@ -553,7 +553,7 @@ func (e *expander) randomInteger(body string) string {
 }
 
 func (e *expander) choice(body string) (string, error) {
-	ival, ok := nthListItem(body, ',', 0)
+	ival, ok := nthListItem(body, 0)
 	if !ok {
 		ival = ""
 	}
@@ -565,7 +565,7 @@ func (e *expander) choice(body string) (string, error) {
 	if !isInt || index < 0 || index >= math.MaxInt32 {
 		index = 0
 	}
-	lval, ok := nthListItem(body, ',', 1)
+	lval, ok := nthListItem(body, 1)
 	if !ok {
 		return "", nil
 	}
@@ -583,19 +583,23 @@ func (e *expander) choice(body string) (string, error) {
 	} else {
 		items = strings.TrimLeft(items, " \t\n\v\f\r")
 	}
-	item, ok := nthListItem(items, ',', int(index))
+	item, ok := nthListItem(items, int(index))
 	if !ok {
 		return "", nil
 	}
 	return item, nil
 }
 
-// nthListItem is nth_list_item with trimming: the index'th sep-separated
+// nthListItem is nth_list_item with trimming: the index'th comma-separated
 // item of list, without surrounding whitespace.
-func nthListItem(list string, sep byte, index int) (string, bool) {
+//
+// The separator is fixed because comma is the only one HTCondor's macro
+// functions use it with -- the argument lists of $CHOICE, $SUBSTR and the
+// rest are comma separated.
+func nthListItem(list string, index int) (string, bool) {
 	p := 0
 	for ii := 0; ; ii++ {
-		e := strings.IndexByte(list[p:], sep)
+		e := strings.IndexByte(list[p:], ',')
 		end := len(list)
 		if e >= 0 {
 			end = p + e
