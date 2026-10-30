@@ -183,5 +183,9 @@ func (q *QmgmtConnection) sendFactory(ctx context.Context, f *JobFactory) error 
 		}
 		itemsFilename = name
 	}
-	return q.SetJobFactory(ctx, f.ClusterID, f.MaxMaterialize, "", f.Digest(itemsFilename))
+	digest, err := f.Digest(itemsFilename)
+	if err != nil {
+		return err
+	}
+	return q.SetJobFactory(ctx, f.ClusterID, f.MaxMaterialize, "", digest)
 }

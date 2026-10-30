@@ -194,7 +194,11 @@ func TestGoLateMaterializationMatchesCondorSubmit(t *testing.T) {
 			if len(f.Items) > 0 {
 				itemsFile = spooledItems
 			}
-			if got := f.Digest(itemsFile); got != fi.Digest {
+			got, err := f.Digest(itemsFile)
+			if err != nil {
+				t.Fatalf("Digest: %v", err)
+			}
+			if got != fi.Digest {
 				t.Errorf("submit digest differs\n--- go ---\n%s\n--- cpp ---\n%s", got, fi.Digest)
 			}
 		})

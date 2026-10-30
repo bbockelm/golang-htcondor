@@ -135,9 +135,19 @@ type JobFactory struct {
 //
 // itemsFilename is the path SendMaterializeData reported for the spooled
 // itemdata; the queue statement at the end of the digest reads the rows back
-// from it. Pass "" when there are no items, in which case the queue statement
-// is a plain count.
-func (f *JobFactory) Digest(itemsFilename string) string {
+// from it. It must be empty when and only when there are no Items: a digest
+// built for rows but naming no file carries a queue statement the schedd
+// reads as a plain count, so it would materialize one job with no row
+// instead of one job per row -- a whole cluster quietly wrong rather than a
+// failure anyone would see. That is an error here instead.
+func (f *JobFactory) Digest(itemsFilename string) (string, error) {
+	switch {
+	case len(f.Items) > 0 && itemsFilename == "":
+		return "", fmt.Errorf("factory for cluster %d has %d itemdata rows but no spooled filename to read them from", f.ClusterID, len(f.Items))
+	case len(f.Items) == 0 && itemsFilename != "":
+		return "", fmt.Errorf("factory for cluster %d has no itemdata rows but was given the spooled filename %q", f.ClusterID, itemsFilename)
+	}
+
 	var b strings.Builder
 	b.WriteString(f.body)
 
@@ -162,7 +172,7 @@ func (f *JobFactory) Digest(itemsFilename string) string {
 		b.WriteString(itemsFilename)
 	}
 	b.WriteString("\n")
-	return b.String()
+	return b.String(), nil
 }
 
 // WantFactory reports whether the submit file asks to be submitted as a job

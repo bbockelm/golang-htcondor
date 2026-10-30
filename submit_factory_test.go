@@ -166,7 +166,10 @@ func TestDigestKeepsPerProcReferences(t *testing.T) {
 		t.Errorf("digest body:\n got %q\nwant %q", got, wantBody)
 	}
 
-	digest := f.Digest("/spool/1/items")
+	digest, err := f.Digest("/spool/1/items")
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
 	if !strings.HasSuffix(digest, "\nQueue 1 item from /spool/1/items\n") {
 		t.Errorf("digest does not end with the queue statement the schedd iterates:\n%s", digest)
 	}
@@ -322,11 +325,29 @@ func TestFactoryQueueStatement(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := parseFactory(t, c.input)
-			digest := f.Digest(c.itemsFile)
+			digest, err := f.Digest(c.itemsFile)
+			if err != nil {
+				t.Fatalf("Digest: %v", err)
+			}
 			if !strings.HasSuffix(digest, c.want) {
 				t.Errorf("digest ends %q, want it to end %q", lastLines(digest, 2), c.want)
 			}
 		})
+	}
+}
+
+// TestDigestRejectsAnItemsFilenameMismatch pins the guard. A digest built for
+// rows but naming no file says "Queue 1 item", which the schedd reads as one
+// job with no row rather than one job per row -- the whole cluster quietly
+// wrong. The caller has to be told instead.
+func TestDigestRejectsAnItemsFilenameMismatch(t *testing.T) {
+	withRows := parseFactory(t, "executable = /bin/sleep\nmax_idle = 2\nqueue item in (a b)\n")
+	if _, err := withRows.Digest(""); err == nil {
+		t.Error("a factory with rows accepted an empty itemdata filename")
+	}
+	withoutRows := parseFactory(t, "executable = /bin/sleep\nmax_idle = 2\nqueue 3\n")
+	if _, err := withoutRows.Digest("/spool/1/items"); err == nil {
+		t.Error("a factory with no rows accepted an itemdata filename")
 	}
 }
 
