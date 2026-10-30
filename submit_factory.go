@@ -317,7 +317,9 @@ func (sf *SubmitFile) itemdataRows() ([]string, error) {
 // noItems says the queue statement iterates a count rather than a list. That
 // matters because condor_submit reads the first row before building the
 // digest, and reading from an empty list defines the macro Item as empty --
-// which lands in the digest, since Item is not a prunable keyword.
+// which lands in the digest, since Item is not a prunable keyword. The
+// definition is an assignment, so it also replaces a value the submit file
+// gave Item.
 func (sf *SubmitFile) makeDigest(clusterID int, vars []string, noItems bool) (string, error) {
 	var b strings.Builder
 
@@ -371,6 +373,12 @@ func (sf *SubmitFile) makeDigest(clusterID int, vars []string, noItems bool) (st
 			continue // a meta parameter, not a submit command
 		}
 		raw, _ := sf.cfg.RawValue(key)
+		if noItems && strings.EqualFold(key, "Item") {
+			// A countless queue statement defines Item as empty, and it
+			// does so by assignment: a value the submit file gave Item is
+			// replaced, not kept.
+			raw = ""
+		}
 		rhs, pending, err := sf.cfg.SelectiveExpand(raw, func(name string) bool {
 			_, protected := skip[strings.ToLower(name)]
 			return protected
@@ -411,10 +419,12 @@ func writeDigestEntry(b *strings.Builder, key, rhs string) {
 // HTCondor's macro table holds them.
 //
 // The submit file's own assignments are sorted case-insensitively, because
-// the hash is sorted once the file has been read. Item comes after them
-// rather than among them: condor_submit defines it when it reads the first
-// row, which is after that sort, and an unsorted tail is where the macro
-// table puts anything defined later.
+// the hash is sorted once the file has been read. An Item the file did not
+// assign comes after them rather than among them: condor_submit defines it
+// when it reads the first row, which is after that sort, and an unsorted tail
+// is where the macro table puts anything defined later. An Item the file did
+// assign is already in the table, so it keeps its sorted position and only
+// its value is replaced.
 func (sf *SubmitFile) digestKeys(noItems bool) []string {
 	keys := make([]string, 0, len(sf.assigned)+1)
 	var hasItem bool

@@ -86,6 +86,11 @@ var factorySeeds = []struct {
 	// of the digest; a transform body no tag names is not.
 	{"on_evict_checks", "executable = /bin/sleep\non_evict_checks = chk\ntransform_body_chk = SET Foo $(Process)\nmax_idle = 2\nqueue 3\n"},
 	{"unreferenced transform body", "executable = /bin/sleep\ntransform_body_other = SET Foo $(Process)\nmax_idle = 2\nqueue 3\n"},
+	// A submit file that assigns Item itself: the empty definition a
+	// countless queue statement would add updates that key in place rather
+	// than appending, so Item stays in sorted position either way.
+	{"file assigns Item, no rows", "executable = /bin/sleep\nItem = mine\narguments = $(Item)\nmax_idle = 2\nqueue 3\n"},
+	{"file assigns Item, with rows", "executable = /bin/sleep\nItem = mine\nmax_idle = 2\nqueue thing in (a b)\n"},
 }
 
 // TestFactoryOracleReportsLateMaterialization pins what the C++ side decides,

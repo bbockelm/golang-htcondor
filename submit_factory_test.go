@@ -264,6 +264,14 @@ func TestDigestDefinesItemWhenThereAreNoRows(t *testing.T) {
 	if !strings.Contains(withoutRows.body, "Item=\n") {
 		t.Errorf("a queue statement with no rows should define Item as empty:\n%s", withoutRows.body)
 	}
+
+	// The definition is an assignment, so it replaces a value the file gave
+	// Item rather than deferring to it. Keeping "mine" here would hand the
+	// schedd a macro the submitter's own jobs never saw.
+	fileAssigned := parseFactory(t, "executable = /bin/sleep\nItem = mine\nmax_idle = 2\nqueue 3\n")
+	if !strings.Contains(fileAssigned.body, "Item=\n") {
+		t.Errorf("a file-assigned Item should be replaced by the empty definition:\n%s", fileAssigned.body)
+	}
 }
 
 // TestItemdataRowEncoding pins the wire form of the itemdata.
