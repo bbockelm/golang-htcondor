@@ -1,8 +1,9 @@
 // The VM universe attributes. Every expectation here is also pinned against
-// HTCondor's own SubmitHash by a seed in fuzz/submit/differential_test.go,
-// which CI cannot run because it needs a local HTCondor build; this file is
-// the regression net that runs everywhere. The one case the oracle cannot
-// pin is marked where it appears.
+// HTCondor's own SubmitHash by a seed in fuzz/submit/differential_test.go.
+// That comparison runs in a job of its own, which builds libcondor_utils from
+// source and only on changes that touch the parser; this file runs in the
+// ordinary test job on every change and needs no HTCondor. The one case the
+// oracle cannot pin is marked where it appears.
 package htcondor
 
 import (
