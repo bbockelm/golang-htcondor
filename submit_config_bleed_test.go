@@ -96,7 +96,7 @@ queue 1
 	if err != nil {
 		t.Fatalf("ParseSubmitFile: %v", err)
 	}
-	if !sf.assigned["MAX_TRANSFER_INPUT_MB"] {
+	if _, ok := sf.assigned["MAX_TRANSFER_INPUT_MB"]; !ok {
 		t.Error("a name assigned inside a conditional was not recorded")
 	}
 }

@@ -54,13 +54,6 @@ resolves it against their own working directory.
 **`queue 2 in (a b)` produces the wrong number of jobs.** C++ makes 4 procs
 (2 per item over 2 items); Go makes 2.
 
-**`request_<resource>` is generic, and Go only knows three.** `request_foo = N`
-becomes `RequestFoo` in C++ — that is how custom resources (GPUs, licenses,
-site-defined slots) are requested. Go understands `cpus`, `memory` and `disk`
-and silently drops everything else, so a job asking for a custom resource is
-submitted without the request. Also found by the fuzzer, from
-`request_A0 = queue`.
-
 ## Late materialization is not implemented, and its keywords are dropped
 
 `max_materialize`, `max_idle` and `materialize_max_idle` make `condor_submit`
@@ -123,6 +116,24 @@ Mostly per-job bookkeeping the schedd would otherwise fill in
 
 `TransferExecutable`, `EmailAttributes`, `JobRunCount`, and a `RequestDisk`
 that C++ places on the cluster ad as a `MAX(...)` expression instead.
+
+`RequestGpuMemory`: Go turns `request_gpu_memory = 8GB` into
+`RequestGpuMemory = 8192`. C++ lists `request_gpu_memory` and
+`request_gpus_memory` as disallowed keywords (`f_error` in
+`prunable_keywords`), warns that `gpus_minimum_memory` was probably meant, and
+sets nothing.
+
+## Fixed
+
+**`request_<resource>` is generic, and Go only knew three.** `request_foo = N`
+becomes `RequestFoo` in C++ — that is how custom resources (licenses,
+site-defined slot types) are requested. Go understood `cpus`, `memory`, `disk`
+and `gpus` and silently dropped everything else, so a job asking for a custom
+resource was submitted without the request. Found by the fuzzer, from
+`request_A0 = queue`. Go now runs the same generic pass: `Request` plus the tag
+exactly as written, value stored as an expression. The `request`
+`knownDivergentPrefix` entry that excused it is gone, so these attributes are
+compared from here on.
 
 ## Cosmetic
 

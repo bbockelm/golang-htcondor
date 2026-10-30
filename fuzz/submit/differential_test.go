@@ -50,6 +50,18 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\npriority = 5\nqueue\n"},
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nperiodic_remove = (JobStatus == 5)\nqueue\n"},
 	{input: "# just a comment\nexecutable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nqueue\n"},
+	// request_<tag> with no dedicated handling. request_A0 is the input
+	// the fuzzer found the generic-request gap from.
+	{input: "executable = /bin/sleep\nrequest_A0 = 3\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_licenses = 4\nrequest_my_thing = 5\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_slots = 2*2\nrequest_bandwidth = \"high\"\nqueue\n"},
+	{input: "executable = /bin/sleep\nRequest_Foo = 5\nrequest_foo = 6\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_colors = undefined\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_f = 5\nrequest__foo = 6\nrequest_1 = 7\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_cpu = 2\nrequest_gpu = 2\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequest_gpus_memory = 100\nqueue\n"},
+	{input: "executable = /bin/sleep\n+Requestfoo = 9\nrequest_foo = 3\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_shards = $(Process)+1\nqueue 2\n"},
 	{input: "executable = /bin/sleep\nqueue 0\n"},
 	{input: ""},
 	{input: "queue\n"},
