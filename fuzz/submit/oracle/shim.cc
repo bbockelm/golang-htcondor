@@ -91,9 +91,37 @@ void emit_ad(std::string &out, int cluster, int proc, ClassAd *ad, bool include_
 // constructed once buf holds the text.
 //
 // Returns 1 on success, 0 if the submit file was rejected (err is set).
+// ensure_config initializes HTCondor's global config exactly once.
+//
+// condor_submit calls config() before it ever builds a SubmitHash, and parts of
+// the submit code reach param() as a result. Without it those lookups run
+// against an uninitialized config: a submit file as short as
+//
+//     container_image = docker://busybox
+//     queue
+//
+// segfaults inside make_job_ad. Real condor_submit parses the same file fine,
+// so this was the oracle's environment differing from the tool's, not a bug in
+// SubmitHash.
+//
+// CONDOR_CONFIG is forced to an empty file so param() answers from built-in
+// defaults only. The oracle must give the same answer on a developer laptop
+// with a populated /etc/condor and on a CI runner with none, and reading the
+// host's real configuration would break that.
+void ensure_config() {
+	static bool done = false;
+	if (done) {
+		return;
+	}
+	done = true;
+	setenv("CONDOR_CONFIG", "/dev/null", 1);
+	config();
+}
+
 int prepare(const char *text, SubmitHash &hash, std::string &buf, MACRO_SOURCE &src,
             std::unique_ptr<MacroStreamMemoryFile> &ms, SubmitStepFromQArgs &ssqa,
             std::string &err) {
+	ensure_config();
 	hash.init(JSM_CONDOR_SUBMIT);
 	hash.setDisableFileChecks(true);
 	hash.setFakeFileCreationChecks(true);
@@ -285,6 +313,7 @@ extern "C" int submit_factory_info(const char *text, int max_items, char **out) 
 extern "C" int submit_keyword_table(char **out) {
 	*out = nullptr;
 	try {
+		ensure_config();
 		const SimpleSubmitKeyword *table = get_submit_keywords();
 		if (!table) {
 			return -1;

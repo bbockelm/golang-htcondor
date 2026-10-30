@@ -99,6 +99,26 @@ real, but failing on them would bury the semantic findings above.
 - `queue name from ( ... )` — C++ accepts an inline `from (...)` list; Go
   rejects the open paren.
 
+## The oracle was under-reporting until it called config()
+
+`condor_submit` calls `config()` before it builds a `SubmitHash`, and parts of
+the submit code reach `param()` as a result. The shim did not, so those lookups
+ran against an uninitialized config. Two consequences, both fixed:
+
+- A submit file as short as `container_image = docker://busybox` + `queue`
+  **segfaulted** inside `make_job_ad`, taking the whole fuzz process down. Real
+  `condor_submit` parses the same file fine. This looked like a crash in
+  `libcondor_utils` and was reported as one twice; it was the oracle's
+  environment differing from the tool's.
+- The oracle emitted **fewer** attributes than `condor_submit` does, so real
+  divergences were invisible. Initializing config surfaced exactly one:
+  `JobLeaseDuration`, which C++ sets to 2400 and Go omits (confirmed against
+  `condor_submit -dry-run`, not just the oracle).
+
+`CONDOR_CONFIG` is forced to an empty file so `param()` answers from built-in
+defaults only — the oracle has to give the same answer on a laptop with a
+populated `/etc/condor` as on a CI runner with none.
+
 ## Attributes C++ sets and Go does not
 
 Mostly per-job bookkeeping the schedd would otherwise fill in
