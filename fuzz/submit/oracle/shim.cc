@@ -95,15 +95,16 @@ void emit_ad(std::string &out, int cluster, int proc, ClassAd *ad, bool include_
 // ensure_config initializes HTCondor's global config exactly once.
 //
 // condor_submit calls config() before it ever builds a SubmitHash, and parts of
-// the submit code reach param() as a result. Without it those lookups run
-// against an uninitialized config: a submit file as short as
+// the submit code reach param() as a result. Without this step those lookups
+// run against an uninitialized config, which both suppresses attributes the
+// tool would set and leaves make_job_ad dereferencing what param() returned --
+// a submit file as short as
 //
 //     container_image = docker://busybox
 //     queue
 //
-// segfaults inside make_job_ad. Real condor_submit parses the same file fine,
-// so this was the oracle's environment differing from the tool's, not a bug in
-// SubmitHash.
+// was enough. Real condor_submit parses that file fine; the oracle was simply
+// missing a step the tool performs.
 //
 // CONDOR_CONFIG is forced to an empty file so param() answers from built-in
 // defaults only. The oracle must give the same answer on a developer laptop
