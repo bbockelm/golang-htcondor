@@ -35,6 +35,11 @@ import (
 // Available reports whether the C++ oracle is linked in (it is, under this tag).
 const Available = true
 
+// SubmitUser is the submitting account the oracle is pinned to
+// (kSubmitUser in shim.cc). The Go side has to be given the same one:
+// the accounting group a job is charged to is built from it.
+const SubmitUser = "fuzzuser"
+
 // Mode selects what the oracle emits.
 type Mode int
 

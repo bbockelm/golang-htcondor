@@ -220,7 +220,6 @@ Mostly per-job bookkeeping the schedd would otherwise fill in
 `TotalSuspensions`), but several are not:
 
 - `MyType = "Job"` and `TargetType = "Machine"` — absent from Go's ads.
-- `MaxHosts` / `MinHosts` — C++ defaults both to 1.
 - `JobPrio`, `JobNotification`, `LeaveJobInQueue` — C++ defaults them.
 - `Environment` — C++ always emits it (empty when unspecified); Go omits it
   when the submit file is silent.
@@ -383,6 +382,69 @@ sweep, `VMPARAM_Xen_Kernel`, `_Root`, `_Initrd` and `_Kernel_Params` go from
 never reaching an accepted ad to 15 or so each.
 `submit_vm_test.go` is the same ground covered without the oracle, for CI.
 
+**The accounting group was charged to the wrong entity.** The accountant
+reads `AccountingGroup` as `<group>.<user>`, so a value with no dot in it is
+a submitter *alias*, not a group. Go stored `accounting_group = Proj-1`
+verbatim, which charged a submitter named `Proj-1` and left the real group's
+quota, priority factor and share untouched — the job ran outside the group it
+said it belonged to. C++ completes the group with a user and always has:
+`accounting_group_user` when the file gives one, otherwise the submitting
+account (`SubmitHash::init_base_ad`'s `submit_username`, which is
+`condor_submit`'s `my_username()`). Nothing looks for a dot already in the
+group, so `accounting_group = Proj.bob` becomes `Proj.bob.<user>`, a nested
+group. `accounting_group_user` alone, with no group, charges that user by
+name. `AcctGroup` and `AcctGroupUser` are written alongside, and neither
+existed in Go's ads.
+
+`nice_user` came with it: it is shorthand for `accounting_group =
+$(NICE_USER_ACCOUNTING_GROUP_NAME)` (default `nice-user`) plus a default
+`MaxJobRetirementTime` of 0, and a `nice_user` job with a group of its own
+keeps its group and ignores the flag. Go set a `NiceUser` attribute HTCondor
+does not read and no accounting group at all, so a job asking to be run at
+low priority was charged — and scheduled — as an ordinary one.
+
+The submitting account is host-derived, so the Go parser now takes it as a
+parse option (`SubmitParseOptions.SubmitUser`) and falls back to the account
+running the parse, the way `condor_submit` does. The fuzzer passes
+`oracle.SubmitUser`, the same name the shim pins the C++ side to, which is
+what makes `AccountingGroup` comparable at all.
+
+**A docker image did not make a container job.** `WantDocker` marks the
+docker *universe* and nothing else; `docker_image` on its own is an implicit
+**container** job, which C++ marks with `WantContainer` plus the image-kind
+flag `WantDockerImage`. Go wrote `WantDocker` for every `docker_image`
+whatever the universe, so a `universe = container` job (and a plain vanilla
+one naming an image) asked for a docker execute node instead of a container
+one — on an Apptainer-only pool, the OSPool and CHTC norm, it matches
+nothing and sits idle. Go also wrote the flag for universes that ignore the
+keyword entirely; the want-flags are now set only where the container
+topping applies (vanilla and local), which is the rule `SetUniverse` follows.
+
+That universe gate was also the recorded `WantSIF` divergence: Go classified
+a `container_image` correctly but wrote the flag for a vm, grid or scheduler
+job too, where C++ never reads the keyword. `WantSIF`, `WantDockerImage` and
+`WantSandboxImage` now agree for every image kind in every universe, so all
+three are compared from here on. `ContainerImage` itself still diverges, over
+the basename rewrite.
+
+**`machine_count` asked for one machine.** It is not an attribute: HTCondor
+turns it into the `MinHosts`/`MaxHosts` pair the dedicated scheduler reads,
+and only for a parallel or MPI job. Go wrote `MachineCount`, which nothing
+reads, and the pair defaulted to 1 — a parallel job that asked for 16
+machines got one. `node_count` is the alternate spelling. Every other
+universe gets the default pair of 1, which Go did not write either; MPI is
+the one universe with no default, because an MPI job must say how many
+machines it wants.
+
+**Three more attributes nothing read.** `remote_initialdir` is `RemoteIwd`
+(stored as written — it names a directory on a machine this one knows
+nothing about, so it is not resolved against `Iwd`), `checkpoint_exit_code`
+is `SuccessCheckpointExitCode`, and both `concurrency_limits` and
+`concurrency_limits_expr` are `ConcurrencyLimits`. A job that named a
+concurrency limit consumed none of it and was throttled by nothing; the list
+form is lower-cased, sorted and comma-joined now, because the negotiator
+looks the names up literally and `"A, b"` is not the key `"a,b"`.
+
 **`request_<resource>` is generic, and Go only knew three.** `request_foo = N`
 becomes `RequestFoo` in C++ — that is how custom resources (licenses,
 site-defined slot types) are requested. Go understood `cpus`, `memory`, `disk`
@@ -515,27 +577,18 @@ turns the sweep red and gets promoted the same way as everything above.
 
 ## Go writes the submit keyword's name as the attribute name
 
-This is the largest class and the most misleading, because the ad looks
-populated and nothing reads it. A job submitted through the Go parser carries
-the setting under a name HTCondor does not use:
+This was the largest class and the most misleading, because the ad looks
+populated and nothing reads it: a job submitted through the Go parser carried
+the setting under a name HTCondor does not use.
 
-| submit command | HTCondor attribute | Go attribute |
-|---|---|---|
-| `machine_count` | `MinHosts` / `MaxHosts` | `MachineCount` |
-| `remote_initialdir` | `RemoteIwd` | `RemoteInitialDir` |
-| `accounting_group_user` | `AcctGroupUser` | `AccountingGroupUser` |
-| `checkpoint_exit_code` | `SuccessCheckpointExitCode` | `CheckpointExitCode` |
-| `concurrency_limits_expr` | `ConcurrencyLimits` | `ConcurrencyLimitsExpr` |
-| container/docker job | `WantContainer` + `WantDockerImage` | `WantDocker` |
-
-A parallel job asks for one machine. The cron, retry and VM/Xen rows of this
-table are fixed; see "Fixed" below.
+Every member of it is fixed: the cron and retry attributes, the VM and Xen
+family, the accounting group, the container want-flags, the machine count,
+`remote_initialdir`, `checkpoint_exit_code` and the concurrency limits. See
+"Fixed" above for what each one did to a job, and `differ.go` for the drift
+that is left.
 
 ## Values that differ where both sides set the attribute
 
-- **`AccountingGroup` loses the user.** C++ appends the submitting user
-  (`Proj-1` becomes `Proj-1.<user>`); Go stores the group as written, so the
-  accountant charges a different entity.
 - **`KillSig` becomes a number.** C++ keeps the name (`"SIGTERM"`); Go
   converts it to `15`. Same for `remove_kill_sig`.
 - **`JobLeaseDuration` floor.** C++ raises a short lease to its 20-second
@@ -543,11 +596,11 @@ table are fixed; see "Fixed" below.
 - **Quote stripping.** `file_remaps`, `on_exit_hold_reason` and
   `periodic_hold_reason` are `f_strip_quotes` keywords: C++ removes the
   surrounding quotes, Go keeps them inside the stored string.
-- **List canonicalization, in both directions.** `concurrency_limits` and
-  `ec2_tag_names` are `f_as_list`, so C++ canonicalizes the separators and Go
-  does not; `encrypt_input_files` and its three siblings are `f_as_string`, so
-  C++ stores them verbatim and Go canonicalizes. The negotiator and the file
-  transfer both match these literally.
+- **List canonicalization, in both directions.** `ec2_tag_names` is
+  `f_as_list`, so C++ canonicalizes the separators and Go does not;
+  `encrypt_input_files` and its three siblings are `f_as_string`, so C++
+  stores them verbatim and Go canonicalizes. The file transfer matches these
+  literally.
 - **A filename containing a space** survives in `TransferInput` on the C++
   side and is split away by Go, so the file is never transferred.
 - **`mount_under_scratch`** stays a string in C++; Go coerces it to a boolean.
@@ -568,7 +621,7 @@ table are fixed; see "Fixed" below.
 
 `docker_image` and `container_service_names` are set by Go whatever the
 universe; C++ honours them only for a container or docker job. `container_image`
-and `WantSIF` join them, below.
+joins them, below. The want-flags no longer do — see the fixed material.
 
 ## Keywords with no Go implementation at all
 
@@ -653,7 +706,8 @@ attributes, which now agree.
 258 — what is left is `getenv`, its alternate spelling and the `f_error`
 `request_gpu_memory`, none of which can be compared.
 
-It diverged immediately, three ways:
+It diverged immediately, three ways. Two are still open; the third, the
+image-kind want-flag, is in the fixed material above:
 
 - **`ContainerImage` is a basename in C++, a path in Go.** Once C++ decides to
   transfer the image it rewrites the attribute to `condor_basename` of the
@@ -664,10 +718,6 @@ It diverged immediately, three ways:
   submit-side path when it rewrites `ContainerImage`, and it is what late
   materialization reads to build each proc's input transfer list. Go sets
   nothing, so a transferred image carries no record of where it came from.
-- **`WantSIF` is set whatever the universe.** C++ sets exactly one of `WantSIF`,
-  `WantDockerImage` and `WantSandboxImage`, chosen from the image type, and only
-  inside the container-universe block.
-
 The decision tree C++ walks before any of that — `transfer_container = false`,
 a `CONTAINER_SHARED_FS` prefix, a `docker://` or `oras://` URL, each setting
 `ContainerImageSource` and returning without transferring — has no Go

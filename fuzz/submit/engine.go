@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
 )
 
 // ClusterID is the cluster both sides submit into. The C++ shim hard-codes it,
@@ -34,6 +35,11 @@ type GoResult struct {
 // must not reach the machine. The C++ oracle is given no such switch, which
 // makes those constructs a known, documented divergence rather than something
 // to compare.
+//
+// SubmitUser is pinned to the same account the oracle is (oracle.SubmitUser).
+// It is host-derived on both sides -- condor_submit takes it from the machine
+// it runs on -- and it is what an accounting group is completed with, so
+// without pinning it AccountingGroup could not be compared at all.
 func GoMakeAds(text string) (res GoResult) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -41,7 +47,8 @@ func GoMakeAds(text string) (res GoResult) {
 		}
 	}()
 
-	sf, err := htcondor.ParseSubmitFile(strings.NewReader(text))
+	sf, err := htcondor.ParseSubmitFileWithOptions(strings.NewReader(text),
+		htcondor.SubmitParseOptions{SubmitUser: oracle.SubmitUser})
 	if err != nil {
 		return GoResult{Err: err.Error()}
 	}
