@@ -104,6 +104,12 @@ func (q *QueueStatement) statement() {}
 %token <str> IF ELIF ELSE ENDIF DEFINED VERSION
 %token <str> INCLUDE USE TRUE FALSE YES NO ERROR WARNING IFEXIST COMMAND INTO
 %token <str> QUEUE FROM IN MATCHING
+// ITEMS is a whole parenthesised queue item list, already split by the lexer.
+// HTCondor's rules for that split are character-level rather than token-level
+// -- the list ends at the last ')' on the line, a ')' elsewhere is an ordinary
+// character, and quotes are not special -- so the grammar takes the result
+// rather than the punctuation.
+%token <strlist> ITEMS
 %token COLON LPAREN RPAREN LBRACK RBRACK COMMA PLUS
 %token EOF ILLEGAL COMMENT
 
@@ -113,7 +119,7 @@ func (q *QueueStatement) statement() {}
 %type <elseif> elif_clause
 %type <str> condition include_type identifier path_or_command
 %type <intval> queue_count
-%type <strlist> var_list item_list item_list_items
+%type <strlist> var_list item_list
 
 %%
 
@@ -381,6 +387,44 @@ queue_statement:
 			Count: $2,
 		}
 	}
+	| QUEUE FROM item_list
+	{
+		// "queue from ( ... )" -- an inline item list rather than a file.
+		// Unlike "in", "from" does not split a line into fields, so each
+		// line of the list is one item.
+		$$ = &QueueStatement{
+			Count:    0, // Determined by item count
+			VarNames: []string{"Item"},
+			Items:    $3,
+		}
+	}
+	| QUEUE var_list FROM item_list
+	{
+		// "queue var1, var2 from ( ... )"
+		$$ = &QueueStatement{
+			Count:    0, // Determined by item count
+			VarNames: $2,
+			Items:    $4,
+		}
+	}
+	| QUEUE queue_count FROM item_list
+	{
+		// "queue N from ( ... )"
+		$$ = &QueueStatement{
+			Count:    $2,
+			VarNames: []string{"Item"},
+			Items:    $4,
+		}
+	}
+	| QUEUE queue_count var_list FROM item_list
+	{
+		// "queue N var1, var2 from ( ... )"
+		$$ = &QueueStatement{
+			Count:    $2,
+			VarNames: $3,
+			Items:    $5,
+		}
+	}
 	| QUEUE var_list FROM IDENT
 	{
 		// "queue var1, var2 from file"
@@ -543,31 +587,9 @@ var_list:
 	}
 
 item_list:
-	LPAREN RPAREN
+	ITEMS
 	{
-		$$ = []string{}
-	}
-	| LPAREN item_list_items RPAREN
-	{
-		$$ = $2
-	}
-
-item_list_items:
-	IDENT
-	{
-		$$ = []string{$1}
-	}
-	| STRING
-	{
-		$$ = []string{$1}
-	}
-	| item_list_items COMMA IDENT
-	{
-		$$ = append($1, $3)
-	}
-	| item_list_items COMMA STRING
-	{
-		$$ = append($1, $3)
+		$$ = $1
 	}
 
 %%
@@ -611,6 +633,8 @@ func (p *parser) Lex(lval *yySymType) int {
 	switch tok.Token {
 	case IDENT, STRING, NUMBER, ASSIGN:
 		lval.str = tok.Lit
+	case ITEMS:
+		lval.strlist = tok.Items
 	}
 
 	return int(tok.Token)

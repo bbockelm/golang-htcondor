@@ -118,16 +118,17 @@ const QUEUE = 57367
 const FROM = 57368
 const IN = 57369
 const MATCHING = 57370
-const COLON = 57371
-const LPAREN = 57372
-const RPAREN = 57373
-const LBRACK = 57374
-const RBRACK = 57375
-const COMMA = 57376
-const PLUS = 57377
-const EOF = 57378
-const ILLEGAL = 57379
-const COMMENT = 57380
+const ITEMS = 57371
+const COLON = 57372
+const LPAREN = 57373
+const RPAREN = 57374
+const LBRACK = 57375
+const RBRACK = 57376
+const COMMA = 57377
+const PLUS = 57378
+const EOF = 57379
+const ILLEGAL = 57380
+const COMMENT = 57381
 
 var yyToknames = [...]string{
 	"$end",
@@ -158,6 +159,7 @@ var yyToknames = [...]string{
 	"FROM",
 	"IN",
 	"MATCHING",
+	"ITEMS",
 	"COLON",
 	"LPAREN",
 	"RPAREN",
@@ -176,7 +178,7 @@ const yyEofCode = 1
 const yyErrCode = 2
 const yyInitialStackSize = 16
 
-//line parser.y:573
+//line parser.y:595
 
 // parser holds the state for the parser
 type parser struct {
@@ -217,6 +219,8 @@ func (p *parser) Lex(lval *yySymType) int {
 	switch tok.Token {
 	case IDENT, STRING, NUMBER, ASSIGN:
 		lval.str = tok.Lit
+	case ITEMS:
+		lval.strlist = tok.Items
 	}
 
 	return int(tok.Token)
@@ -296,48 +300,49 @@ var yyExca = [...]int8{
 
 const yyPrivate = 57344
 
-const yyLast = 178
+const yyLast = 193
 
 var yyAct = [...]int8{
-	2, 70, 40, 79, 19, 103, 96, 97, 14, 80,
-	77, 78, 20, 21, 22, 15, 23, 24, 25, 26,
-	16, 17, 27, 28, 29, 18, 48, 71, 61, 83,
-	84, 67, 68, 94, 82, 12, 19, 69, 56, 69,
-	14, 60, 30, 114, 20, 21, 22, 15, 23, 24,
-	25, 26, 16, 17, 27, 28, 29, 18, 107, 38,
-	37, 108, 55, 54, 43, 53, 85, 12, 11, 53,
-	92, 52, 41, 42, 63, 80, 98, 99, 101, 46,
-	100, 31, 45, 102, 39, 93, 106, 65, 64, 66,
-	81, 50, 49, 51, 112, 113, 62, 19, 44, 109,
-	95, 14, 47, 111, 110, 20, 21, 22, 15, 23,
-	24, 25, 26, 16, 17, 27, 28, 29, 18, 104,
-	105, 19, 90, 91, 57, 14, 88, 89, 12, 20,
-	21, 22, 15, 23, 24, 25, 26, 16, 17, 27,
-	28, 29, 18, 86, 87, 19, 74, 75, 13, 32,
-	72, 73, 12, 20, 21, 33, 34, 23, 24, 25,
-	26, 35, 36, 27, 28, 29, 59, 58, 76, 10,
-	9, 8, 7, 6, 5, 4, 3, 1,
+	2, 67, 40, 80, 19, 49, 102, 61, 14, 81,
+	78, 79, 20, 21, 22, 15, 23, 24, 25, 26,
+	16, 17, 27, 28, 29, 18, 104, 105, 87, 88,
+	71, 72, 53, 96, 52, 70, 12, 73, 53, 73,
+	56, 60, 38, 37, 93, 94, 85, 86, 55, 54,
+	11, 70, 74, 64, 48, 50, 51, 68, 69, 30,
+	63, 65, 66, 31, 83, 84, 46, 89, 39, 70,
+	45, 70, 82, 92, 95, 90, 91, 43, 62, 100,
+	44, 99, 70, 47, 101, 41, 42, 75, 76, 103,
+	106, 81, 97, 98, 59, 58, 19, 57, 107, 13,
+	14, 77, 109, 110, 20, 21, 22, 15, 23, 24,
+	25, 26, 16, 17, 27, 28, 29, 18, 10, 9,
+	8, 7, 19, 6, 5, 4, 14, 3, 12, 108,
+	20, 21, 22, 15, 23, 24, 25, 26, 16, 17,
+	27, 28, 29, 18, 1, 0, 0, 19, 0, 0,
+	0, 14, 0, 0, 12, 20, 21, 22, 15, 23,
+	24, 25, 26, 16, 17, 27, 28, 29, 18, 0,
+	0, 0, 19, 0, 0, 0, 32, 0, 0, 12,
+	20, 21, 33, 34, 23, 24, 25, 26, 35, 36,
+	27, 28, 29,
 }
 
 var yyPact = [...]int16{
-	-1000, -1000, 117, -1000, -1000, -1000, -1000, -1000, -1000, -1000,
-	-1000, 35, 141, 55, 60, 94, 77, 74, 65, -1000,
-	-1000, -1000, 40, -1000, -1000, -1000, -1000, -1000, -1000, -1000,
-	-1000, 31, -1000, -1000, -1000, -1000, -1000, -1000, -1000, 162,
-	-1000, -2, 92, -1000, -1000, -1000, -1000, 61, 5, -3,
-	146, 142, -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000,
-	0, 86, 29, 3, -3, 139, 122, 118, -3, 81,
-	-1000, 2, -1000, -1000, -1000, -1000, 66, -1000, -1000, -1000,
-	60, -26, -1000, 115, -3, -1000, -1000, -1000, -1000, -1000,
-	-1000, -1000, -1000, -1000, -1000, 27, -1000, -1000, -1000, -1000,
-	-1000, 93, -1000, -1000, -1000, -1000, -1000, -1000, 90, 32,
-	-1000, 117, -1000, -1000, -1000,
+	-32768, -32768, 143, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+	-32768, 52, 168, 38, 73, 76, 65, 61, 28, -32768,
+	-32768, -32768, 26, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+	-32768, 33, -32768, -32768, -32768, -32768, -32768, -32768, -32768, 90,
+	-32768, -24, 74, -32768, -32768, -32768, -32768, 34, 53, 4,
+	6, 83, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+	0, 68, 59, 42, 2, 6, 71, -32768, -32768, -32768,
+	-32768, 40, 6, 29, -32768, -32768, -32768, 82, -32768, -32768,
+	-32768, 73, -26, -32768, -32768, -32768, -32768, 22, 6, -32768,
+	-32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768, -32768,
+	118, -32768, -32768, -32768, -32768, -32768, -32768, 92, -32768, 143,
+	-32768,
 }
 
 var yyPgo = [...]uint8{
-	0, 177, 0, 176, 175, 174, 173, 172, 171, 170,
-	169, 168, 3, 2, 148, 68, 124, 102, 26, 1,
-	100,
+	0, 144, 0, 127, 125, 124, 123, 121, 120, 119,
+	118, 101, 3, 2, 99, 50, 97, 83, 5, 1,
 }
 
 var yyR1 = [...]int8{
@@ -347,8 +352,8 @@ var yyR1 = [...]int8{
 	5, 16, 16, 14, 14, 14, 6, 6, 6, 6,
 	11, 11, 12, 13, 13, 13, 7, 8, 9, 10,
 	10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
-	10, 10, 10, 10, 10, 10, 10, 17, 18, 18,
-	19, 19, 20, 20, 20, 20,
+	10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+	10, 17, 18, 18, 19,
 }
 
 var yyR2 = [...]int8{
@@ -357,24 +362,24 @@ var yyR2 = [...]int8{
 	1, 1, 1, 1, 1, 1, 1, 1, 2, 2,
 	3, 1, 1, 1, 2, 2, 7, 5, 6, 4,
 	1, 2, 3, 4, 3, 1, 2, 2, 2, 1,
-	2, 4, 4, 5, 5, 3, 4, 3, 3, 4,
-	4, 4, 5, 3, 3, 4, 4, 1, 1, 3,
-	2, 3, 1, 1, 3, 3,
+	2, 3, 4, 4, 5, 4, 4, 5, 5, 3,
+	4, 3, 3, 4, 4, 4, 5, 3, 3, 4,
+	4, 1, 1, 3, 1,
 }
 
 var yyChk = [...]int16{
-	-1000, -1, -2, -3, -4, -5, -6, -7, -8, -9,
-	-10, -15, 35, -14, 8, 15, 20, 21, 25, 4,
+	-32768, -1, -2, -3, -4, -5, -6, -7, -8, -9,
+	-10, -15, 36, -14, 8, 15, 20, 21, 25, 4,
 	12, 13, 14, 16, 17, 18, 19, 22, 23, 24,
-	7, -15, 8, 14, 15, 20, 21, 5, 4, 29,
-	-13, 12, 13, 4, 4, 5, 5, -17, -18, 27,
-	26, 28, 6, 4, 23, 22, 7, -16, 5, 4,
-	-2, 30, 4, -18, 27, 26, 28, 26, 27, 34,
-	-19, 30, 4, 5, 4, 5, -11, 10, 11, -12,
-	9, 4, 5, 26, 27, -19, 4, 5, 4, 5,
-	4, 5, -19, 4, 31, -20, 4, 5, 10, 11,
-	-12, -2, -13, 31, 4, 5, -19, 31, 34, -2,
-	11, -2, 4, 5, 11,
+	7, -15, 8, 14, 15, 20, 21, 5, 4, 30,
+	-13, 12, 13, 4, 4, 5, 5, -17, 26, -18,
+	27, 28, 6, 4, 23, 22, 7, -16, 5, 4,
+	-2, 31, 4, 26, -18, 27, 28, -19, 4, 5,
+	29, 26, 27, 35, -19, 4, 5, -11, 10, 11,
+	-12, 9, 4, 5, -19, 4, 5, 26, 27, -19,
+	4, 5, -19, 4, 5, -19, 4, 10, 11, -12,
+	-2, -13, 32, -19, 4, 5, -19, -2, 11, -2,
+	11,
 }
 
 var yyDef = [...]int8{
@@ -383,13 +388,13 @@ var yyDef = [...]int8{
 	15, 16, -2, 19, 20, 21, 22, 25, 26, 27,
 	11, 0, 14, 17, 18, 23, 24, 28, 29, 0,
 	2, 0, 0, 45, 46, 47, 48, 50, 0, 0,
-	0, 0, 67, 68, 34, 35, 12, 30, 31, 32,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	55, 0, 57, 58, 63, 64, 0, 2, 39, 40,
-	0, 0, 44, 0, 0, 56, 59, 60, 65, 66,
-	51, 52, 61, 69, 70, 0, 72, 73, 2, 37,
-	41, 0, 2, 43, 53, 54, 62, 71, 0, 0,
-	38, 42, 74, 75, 36,
+	0, 0, 71, 72, 34, 35, 12, 30, 31, 32,
+	0, 0, 0, 0, 0, 0, 0, 51, 61, 62,
+	74, 0, 0, 0, 59, 67, 68, 0, 2, 39,
+	40, 0, 0, 44, 53, 63, 64, 0, 0, 60,
+	69, 70, 52, 55, 56, 65, 73, 2, 37, 41,
+	0, 2, 43, 54, 57, 58, 66, 0, 38, 42,
+	36,
 }
 
 var yyTok1 = [...]int8{
@@ -400,7 +405,7 @@ var yyTok2 = [...]int8{
 	2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
 	12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
 	22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-	32, 33, 34, 35, 36, 37, 38,
+	32, 33, 34, 35, 36, 37, 38, 39,
 }
 
 var yyTok3 = [...]int8{
@@ -446,7 +451,7 @@ func yyNewParser() yyParser {
 	return &yyParserImpl{}
 }
 
-const yyFlag = -1000
+const yyFlag = -32768
 
 func yyTokname(c int) string {
 	if c >= 1 && c-1 < len(yyToknames) {
@@ -746,67 +751,67 @@ yydefault:
 
 	case 1:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:122
+//line parser.y:128
 		{
 			yylex.(*parser).result = yyDollar[1].stmts
 		}
 	case 2:
 		yyDollar = yyS[yypt-0 : yypt+1]
-//line parser.y:128
+//line parser.y:134
 		{
 			yyVAL.stmts = []Statement{}
 		}
 	case 3:
 		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:132
+//line parser.y:138
 		{
 			yyVAL.stmts = append(yyDollar[1].stmts, yyDollar[2].stmt)
 		}
 	case 4:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:138
+//line parser.y:144
 		{
 			yyVAL.stmt = yyDollar[1].stmt
 		}
 	case 5:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:142
+//line parser.y:148
 		{
 			yyVAL.stmt = yyDollar[1].stmt
 		}
 	case 6:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:146
+//line parser.y:152
 		{
 			yyVAL.stmt = yyDollar[1].stmt
 		}
 	case 7:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:150
+//line parser.y:156
 		{
 			yyVAL.stmt = yyDollar[1].stmt
 		}
 	case 8:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:154
+//line parser.y:160
 		{
 			yyVAL.stmt = yyDollar[1].stmt
 		}
 	case 9:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:158
+//line parser.y:164
 		{
 			yyVAL.stmt = yyDollar[1].stmt
 		}
 	case 10:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:162
+//line parser.y:168
 		{
 			yyVAL.stmt = yyDollar[1].stmt
 		}
 	case 11:
 		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:168
+//line parser.y:174
 		{
 			// The value is stored in $2 (ASSIGN token's Lit field)
 			yyVAL.stmt = &Assignment{
@@ -816,7 +821,7 @@ yydefault:
 		}
 	case 12:
 		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:176
+//line parser.y:182
 		{
 			// +Attribute = expr - ClassAd expression to be integrated into job
 			// Strip the + prefix and mark as ClassAd expression
@@ -828,97 +833,97 @@ yydefault:
 		}
 	case 13:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:197
+//line parser.y:203
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 14:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:200
+//line parser.y:206
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 15:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:201
+//line parser.y:207
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 16:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:202
+//line parser.y:208
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 17:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:203
+//line parser.y:209
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 18:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:204
+//line parser.y:210
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 19:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:205
+//line parser.y:211
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 20:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:206
+//line parser.y:212
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 21:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:207
+//line parser.y:213
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 22:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:208
+//line parser.y:214
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 23:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:209
+//line parser.y:215
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 24:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:210
+//line parser.y:216
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 25:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:211
+//line parser.y:217
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 26:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:212
+//line parser.y:218
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 27:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:213
+//line parser.y:219
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 28:
 		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:217
+//line parser.y:223
 		{
 			yyVAL.stmt = &IncludeDirective{
 				Type: yyDollar[1].str,
@@ -927,7 +932,7 @@ yydefault:
 		}
 	case 29:
 		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:224
+//line parser.y:230
 		{
 			yyVAL.stmt = &IncludeDirective{
 				Type: yyDollar[1].str,
@@ -936,7 +941,7 @@ yydefault:
 		}
 	case 30:
 		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:231
+//line parser.y:237
 		{
 			// Check if path ends with | to determine if it's a command
 			path := yyDollar[3].str
@@ -957,37 +962,37 @@ yydefault:
 		}
 	case 31:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:252
+//line parser.y:258
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 32:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:256
+//line parser.y:262
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 33:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:262
+//line parser.y:268
 		{
 			yyVAL.str = "include"
 		}
 	case 34:
 		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:266
+//line parser.y:272
 		{
 			yyVAL.str = "include_command"
 		}
 	case 35:
 		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:270
+//line parser.y:276
 		{
 			yyVAL.str = "include_ifexist"
 		}
 	case 36:
 		yyDollar = yyS[yypt-7 : yypt+1]
-//line parser.y:276
+//line parser.y:282
 		{
 			yyVAL.stmt = &Conditional{
 				Condition:   yyDollar[2].str,
@@ -998,7 +1003,7 @@ yydefault:
 		}
 	case 37:
 		yyDollar = yyS[yypt-5 : yypt+1]
-//line parser.y:285
+//line parser.y:291
 		{
 			yyVAL.stmt = &Conditional{
 				Condition:   yyDollar[2].str,
@@ -1009,7 +1014,7 @@ yydefault:
 		}
 	case 38:
 		yyDollar = yyS[yypt-6 : yypt+1]
-//line parser.y:294
+//line parser.y:300
 		{
 			yyVAL.stmt = &Conditional{
 				Condition:   yyDollar[2].str,
@@ -1020,7 +1025,7 @@ yydefault:
 		}
 	case 39:
 		yyDollar = yyS[yypt-4 : yypt+1]
-//line parser.y:303
+//line parser.y:309
 		{
 			yyVAL.stmt = &Conditional{
 				Condition:   yyDollar[2].str,
@@ -1031,19 +1036,19 @@ yydefault:
 		}
 	case 40:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:314
+//line parser.y:320
 		{
 			yyVAL.elseifs = []ElseIf{yyDollar[1].elseif}
 		}
 	case 41:
 		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:318
+//line parser.y:324
 		{
 			yyVAL.elseifs = append(yyDollar[1].elseifs, yyDollar[2].elseif)
 		}
 	case 42:
 		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:324
+//line parser.y:330
 		{
 			yyVAL.elseif = ElseIf{
 				Condition: yyDollar[2].str,
@@ -1052,25 +1057,25 @@ yydefault:
 		}
 	case 43:
 		yyDollar = yyS[yypt-4 : yypt+1]
-//line parser.y:333
+//line parser.y:339
 		{
 			yyVAL.str = fmt.Sprintf("defined(%s)", yyDollar[3].str)
 		}
 	case 44:
 		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:337
+//line parser.y:343
 		{
 			yyVAL.str = fmt.Sprintf("version %s %s", yyDollar[2].str, yyDollar[3].str)
 		}
 	case 45:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:341
+//line parser.y:347
 		{
 			yyVAL.str = yyDollar[1].str
 		}
 	case 46:
 		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:347
+//line parser.y:353
 		{
 			yyVAL.stmt = &UseDirective{
 				Role: yyDollar[2].str,
@@ -1078,7 +1083,7 @@ yydefault:
 		}
 	case 47:
 		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:355
+//line parser.y:361
 		{
 			yyVAL.stmt = &ErrorDirective{
 				Message: yyDollar[2].str,
@@ -1086,7 +1091,7 @@ yydefault:
 		}
 	case 48:
 		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:363
+//line parser.y:369
 		{
 			yyVAL.stmt = &WarningDirective{
 				Message: yyDollar[2].str,
@@ -1094,7 +1099,7 @@ yydefault:
 		}
 	case 49:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:371
+//line parser.y:377
 		{
 			// Simple "queue" with default count of 1
 			yyVAL.stmt = &QueueStatement{
@@ -1103,7 +1108,7 @@ yydefault:
 		}
 	case 50:
 		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:378
+//line parser.y:384
 		{
 			// "queue N" - queue N jobs
 			yyVAL.stmt = &QueueStatement{
@@ -1111,8 +1116,54 @@ yydefault:
 			}
 		}
 	case 51:
+		yyDollar = yyS[yypt-3 : yypt+1]
+//line parser.y:391
+		{
+			// "queue from ( ... )" -- an inline item list rather than a file.
+			// Unlike "in", "from" does not split a line into fields, so each
+			// line of the list is one item.
+			yyVAL.stmt = &QueueStatement{
+				Count:    0, // Determined by item count
+				VarNames: []string{"Item"},
+				Items:    yyDollar[3].strlist,
+			}
+		}
+	case 52:
 		yyDollar = yyS[yypt-4 : yypt+1]
-//line parser.y:385
+//line parser.y:402
+		{
+			// "queue var1, var2 from ( ... )"
+			yyVAL.stmt = &QueueStatement{
+				Count:    0, // Determined by item count
+				VarNames: yyDollar[2].strlist,
+				Items:    yyDollar[4].strlist,
+			}
+		}
+	case 53:
+		yyDollar = yyS[yypt-4 : yypt+1]
+//line parser.y:411
+		{
+			// "queue N from ( ... )"
+			yyVAL.stmt = &QueueStatement{
+				Count:    yyDollar[2].intval,
+				VarNames: []string{"Item"},
+				Items:    yyDollar[4].strlist,
+			}
+		}
+	case 54:
+		yyDollar = yyS[yypt-5 : yypt+1]
+//line parser.y:420
+		{
+			// "queue N var1, var2 from ( ... )"
+			yyVAL.stmt = &QueueStatement{
+				Count:    yyDollar[2].intval,
+				VarNames: yyDollar[3].strlist,
+				Items:    yyDollar[5].strlist,
+			}
+		}
+	case 55:
+		yyDollar = yyS[yypt-4 : yypt+1]
+//line parser.y:429
 		{
 			// "queue var1, var2 from file"
 			yyVAL.stmt = &QueueStatement{
@@ -1121,9 +1172,9 @@ yydefault:
 				File:     yyDollar[4].str,
 			}
 		}
-	case 52:
+	case 56:
 		yyDollar = yyS[yypt-4 : yypt+1]
-//line parser.y:394
+//line parser.y:438
 		{
 			// "queue var1, var2 from file" (with quoted path)
 			yyVAL.stmt = &QueueStatement{
@@ -1132,9 +1183,9 @@ yydefault:
 				File:     yyDollar[4].str,
 			}
 		}
-	case 53:
+	case 57:
 		yyDollar = yyS[yypt-5 : yypt+1]
-//line parser.y:403
+//line parser.y:447
 		{
 			// "queue N var1, var2 from file"
 			yyVAL.stmt = &QueueStatement{
@@ -1143,9 +1194,9 @@ yydefault:
 				File:     yyDollar[5].str,
 			}
 		}
-	case 54:
+	case 58:
 		yyDollar = yyS[yypt-5 : yypt+1]
-//line parser.y:412
+//line parser.y:456
 		{
 			// "queue N var1, var2 from file" (with quoted path)
 			yyVAL.stmt = &QueueStatement{
@@ -1154,9 +1205,9 @@ yydefault:
 				File:     yyDollar[5].str,
 			}
 		}
-	case 55:
+	case 59:
 		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:421
+//line parser.y:465
 		{
 			// "queue in (item1, item2)" -- the loop variable may be omitted, and
 			// then it is Item, the same default HTCondor uses.
@@ -1166,9 +1217,9 @@ yydefault:
 				Items:    yyDollar[3].strlist,
 			}
 		}
-	case 56:
+	case 60:
 		yyDollar = yyS[yypt-4 : yypt+1]
-//line parser.y:431
+//line parser.y:475
 		{
 			// "queue N in (item1, item2)" -- N jobs per item.
 			yyVAL.stmt = &QueueStatement{
@@ -1177,9 +1228,9 @@ yydefault:
 				Items:    yyDollar[4].strlist,
 			}
 		}
-	case 57:
+	case 61:
 		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:440
+//line parser.y:484
 		{
 			// "queue from file" -- loop variable omitted, so Item.
 			yyVAL.stmt = &QueueStatement{
@@ -1188,9 +1239,9 @@ yydefault:
 				File:     yyDollar[3].str,
 			}
 		}
-	case 58:
+	case 62:
 		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:449
+//line parser.y:493
 		{
 			// "queue from file" (quoted path)
 			yyVAL.stmt = &QueueStatement{
@@ -1199,9 +1250,9 @@ yydefault:
 				File:     yyDollar[3].str,
 			}
 		}
-	case 59:
+	case 63:
 		yyDollar = yyS[yypt-4 : yypt+1]
-//line parser.y:458
+//line parser.y:502
 		{
 			// "queue N from file"
 			yyVAL.stmt = &QueueStatement{
@@ -1210,9 +1261,9 @@ yydefault:
 				File:     yyDollar[4].str,
 			}
 		}
-	case 60:
+	case 64:
 		yyDollar = yyS[yypt-4 : yypt+1]
-//line parser.y:467
+//line parser.y:511
 		{
 			// "queue N from file" (quoted path)
 			yyVAL.stmt = &QueueStatement{
@@ -1221,9 +1272,9 @@ yydefault:
 				File:     yyDollar[4].str,
 			}
 		}
-	case 61:
+	case 65:
 		yyDollar = yyS[yypt-4 : yypt+1]
-//line parser.y:476
+//line parser.y:520
 		{
 			// "queue var in (item1, item2, item3)"
 			yyVAL.stmt = &QueueStatement{
@@ -1232,9 +1283,9 @@ yydefault:
 				Items:    yyDollar[4].strlist,
 			}
 		}
-	case 62:
+	case 66:
 		yyDollar = yyS[yypt-5 : yypt+1]
-//line parser.y:485
+//line parser.y:529
 		{
 			// "queue N var in (item1, item2)"
 			yyVAL.stmt = &QueueStatement{
@@ -1243,9 +1294,9 @@ yydefault:
 				Items:    yyDollar[5].strlist,
 			}
 		}
-	case 63:
+	case 67:
 		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:494
+//line parser.y:538
 		{
 			// "queue matching pattern"
 			yyVAL.stmt = &QueueStatement{
@@ -1253,9 +1304,9 @@ yydefault:
 				File:  yyDollar[3].str, // Pattern stored in File field
 			}
 		}
-	case 64:
+	case 68:
 		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:502
+//line parser.y:546
 		{
 			// "queue matching pattern" (with quoted pattern)
 			yyVAL.stmt = &QueueStatement{
@@ -1263,9 +1314,9 @@ yydefault:
 				File:  yyDollar[3].str, // Pattern stored in File field
 			}
 		}
-	case 65:
+	case 69:
 		yyDollar = yyS[yypt-4 : yypt+1]
-//line parser.y:510
+//line parser.y:554
 		{
 			// "queue N matching pattern"
 			yyVAL.stmt = &QueueStatement{
@@ -1273,9 +1324,9 @@ yydefault:
 				File:  yyDollar[4].str, // Pattern stored in File field
 			}
 		}
-	case 66:
+	case 70:
 		yyDollar = yyS[yypt-4 : yypt+1]
-//line parser.y:518
+//line parser.y:562
 		{
 			// "queue N matching pattern" (with quoted pattern)
 			yyVAL.stmt = &QueueStatement{
@@ -1283,62 +1334,32 @@ yydefault:
 				File:  yyDollar[4].str, // Pattern stored in File field
 			}
 		}
-	case 67:
+	case 71:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:528
+//line parser.y:572
 		{
 			// Convert string number to int
 			var count int
 			fmt.Sscanf(yyDollar[1].str, "%d", &count)
 			yyVAL.intval = count
 		}
-	case 68:
-		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:537
-		{
-			yyVAL.strlist = []string{yyDollar[1].str}
-		}
-	case 69:
-		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:541
-		{
-			yyVAL.strlist = append(yyDollar[1].strlist, yyDollar[3].str)
-		}
-	case 70:
-		yyDollar = yyS[yypt-2 : yypt+1]
-//line parser.y:547
-		{
-			yyVAL.strlist = []string{}
-		}
-	case 71:
-		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:551
-		{
-			yyVAL.strlist = yyDollar[2].strlist
-		}
 	case 72:
 		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:557
+//line parser.y:581
 		{
 			yyVAL.strlist = []string{yyDollar[1].str}
 		}
 	case 73:
-		yyDollar = yyS[yypt-1 : yypt+1]
-//line parser.y:561
+		yyDollar = yyS[yypt-3 : yypt+1]
+//line parser.y:585
 		{
-			yyVAL.strlist = []string{yyDollar[1].str}
+			yyVAL.strlist = append(yyDollar[1].strlist, yyDollar[3].str)
 		}
 	case 74:
-		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:565
+		yyDollar = yyS[yypt-1 : yypt+1]
+//line parser.y:591
 		{
-			yyVAL.strlist = append(yyDollar[1].strlist, yyDollar[3].str)
-		}
-	case 75:
-		yyDollar = yyS[yypt-3 : yypt+1]
-//line parser.y:569
-		{
-			yyVAL.strlist = append(yyDollar[1].strlist, yyDollar[3].str)
+			yyVAL.strlist = yyDollar[1].strlist
 		}
 	}
 	goto yystack /* stack new state and value */

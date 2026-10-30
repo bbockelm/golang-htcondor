@@ -262,29 +262,62 @@ queue inputfile in (exp1.dat, exp2.dat, exp3.dat, exp4.dat, exp5.dat)
 	}
 }
 
+// TestMacroExpansionMultipleVariables covers the two loop variables of a
+// `queue x, y in (...)` statement. Each form's proc count was measured against
+// HTCondor's own parser (fuzz/submit).
+//
+// A single-line list splits on whitespace as well as commas and gives quotes
+// no meaning, so the eight-member list below is eight items of one field each,
+// not four of two. An "in" list splits every line that way, inline or not.
+// Items with several fields come from "from", which takes each line whole.
 func TestMacroExpansionMultipleVariables(t *testing.T) {
-	submit := `
+	const head = `
 universe = vanilla
 executable = /bin/process
 arguments = --x $(xval) --y $(yval)
 output = result_$(xval)_$(yval).out
 error = result_$(xval)_$(yval).err
 log = multi.log
-queue xval, yval in ("1 10", "2 20", "3 30", "4 40")
 `
 
-	sf, err := ParseSubmitFile(strings.NewReader(submit))
-	if err != nil {
-		t.Fatalf("Failed to parse submit file: %v", err)
+	tests := []struct {
+		name  string
+		queue string
+		procs int
+	}{
+		{
+			name:  "single line",
+			queue: `queue xval, yval in ("1 10", "2 20", "3 30", "4 40")`,
+			procs: 8,
+		},
+		{
+			name:  "multi line in",
+			queue: "queue xval, yval in (\n1 10\n2 20\n3 30\n4 40\n)",
+			procs: 8,
+		},
+		{
+			name:  "multi line from",
+			queue: "queue xval, yval from (\n1 10\n2 20\n3 30\n4 40\n)",
+			procs: 4,
+		},
 	}
 
-	result, err := sf.Submit(14000)
-	if err != nil {
-		t.Fatalf("Submit failed: %v", err)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sf, err := ParseSubmitFile(strings.NewReader(head + tc.queue + "\n"))
+			if err != nil {
+				t.Fatalf("Failed to parse submit file: %v", err)
+			}
 
-	if result.NumProcs != 4 {
-		t.Errorf("Expected 4 procs, got %d", result.NumProcs)
+			result, err := sf.Submit(14000)
+			if err != nil {
+				t.Fatalf("Submit failed: %v", err)
+			}
+
+			if result.NumProcs != tc.procs {
+				t.Errorf("Expected %d procs, got %d", tc.procs, result.NumProcs)
+			}
+		})
 	}
 }
 

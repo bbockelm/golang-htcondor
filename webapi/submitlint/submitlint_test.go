@@ -226,7 +226,9 @@ func TestWarnUndefinedMacrosPlural(t *testing.T) {
 // submit file the config grammar rejects: Inspect cannot
 // build a job ad from it either, so the schedd answers instead.
 func TestWarnUndefinedMacrosUnparseable(t *testing.T) {
-	if got := warnUndefinedMacros("arguments = $(hostname)\nqueue 2 sample in (a b)\n"); got != nil {
+	// An item list with no closing ')' is still rejected; a whitespace-
+	// separated one is not, so it no longer serves as the unparseable case.
+	if got := warnUndefinedMacros("arguments = $(hostname)\nqueue 2 sample in (a b\n"); got != nil {
 		t.Errorf("expected no warnings from an unparseable submit file, got %v", got)
 	}
 }
