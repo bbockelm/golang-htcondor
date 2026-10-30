@@ -2732,12 +2732,13 @@ func (sf *SubmitFile) MakeProcAd(clusterID int, procID int, queueVars map[string
 // whatever the job count. For any other file there is nothing to late
 // materialize, so this builds the same per-proc ads Submit does.
 func (sf *SubmitFile) SubmitLate(clusterID int) (*SubmitResult, error) {
-	// The factory is built first and from a submit hash in which no loop
-	// variable is live yet, because the digest has to keep $(item) and the
-	// rest written as references for the schedd to expand per proc. Build
-	// it after the cluster ad below and the first row's values would be
-	// baked into the digest, making every materialized job a copy of the
-	// first.
+	// Built before the cluster ad, as condor_submit builds it. condor_submit
+	// has to: it reads the first row without making the loop variables live,
+	// because its digest is a dump of a macro table that a live row would
+	// have written into. This does not have to -- the digest protects the
+	// per-proc knobs by name during expansion, so it comes out the same
+	// wherever the iterator is -- but the order is kept so the two can be
+	// read against each other.
 	factory, err := sf.Factory(clusterID)
 	if err != nil {
 		return nil, err

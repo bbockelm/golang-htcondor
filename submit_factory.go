@@ -261,9 +261,10 @@ func (sf *SubmitFile) Factory(clusterID int) (*JobFactory, error) {
 	}
 	f.MaxMaterialize = int(materialize)
 
-	// The digest is built before any loop variable is live. A digest built
-	// after would hold the first row's values in place of the references,
-	// and every job the factory made would be a copy of the first.
+	// The per-proc knobs are protected by name while the digest expands, so
+	// $(item) and $(Process) survive into it whether or not a row happens to
+	// be live. condor_submit gets the same result by building the digest
+	// before it makes one live.
 	f.body, err = sf.makeDigest(clusterID, f.Vars, len(f.Items) == 0)
 	if err != nil {
 		return nil, err
