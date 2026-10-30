@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+#
+# Run one differential fuzz target against the C++ oracle built by
+# build-condor-utils.sh. Used by both fuzz workflows: "Differential fuzz"
+# builds the oracle from a pinned HTCondor release, "Nightly fuzz" from
+# HTCondor's main branch.
+#
+#   differential-fuzz-ci.sh <config|submit> <fuzztime>
+#
+# Exit status:
+#   0   seeds and fuzzing passed
+#   1   the committed cases failed, or the oracle was not linked in
+#   2   usage error
+#   3   the committed cases passed and fuzzing found something new
+#
+# 1 and 3 are separated because they mean different things to a reviewer. 1 is
+# a regression: a case already in the tree changed its answer, which is the
+# author's to fix. 3 is a discovery -- fuzzing is a search, and what it finds
+# is almost never related to the change under review. Blocking a pull request
+# on 3 would hand every author someone else's finding, so the pull-request
+# workflow annotates it and the nightly, whose whole job is to search, fails
+# on it.
+#
+# Environment:
+#   FUZZ_LOG_DIR  where to write differential-fuzz-<target>.log (default: repo root)
+set -uo pipefail
+
+target="${1:-}"
+fuzztime="${2:-}"
+
+# The test that proves the oracle was reached for this target. Without it
+# the differential tests skip, the package passes, and a green run proves
+# nothing -- so its PASS is required rather than merely hoped for.
+case "$target" in
+config) sentinel=TestConfigSeeds ;;
+submit) sentinel=TestSeedsHaveNoFreshDivergence ;;
+*)
+	echo "usage: $0 <config|submit> <fuzztime>" >&2
+	exit 2
+	;;
+esac
+if [ -z "$fuzztime" ]; then
+	echo "usage: $0 <config|submit> <fuzztime>" >&2
+	exit 2
+fi
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT" || exit 2
+
+pkg="fuzz/$target"
+envscript="hack/$target-fuzz-env.sh"
+
+if [ ! -d "$pkg" ] || [ ! -f "$envscript" ]; then
+	echo "::error::$pkg or $envscript is missing" >&2
+	exit 1
+fi
+
+# Read the targets out of the package rather than hardcoding them, so this
+# keeps working when one is renamed or added. go test -fuzz takes a single
+# target, so several are run in turn and the budget is split between them --
+# a package that grows a target should fuzz each one less, not stop fuzzing.
+fuzznames="$(sed -nE 's/^func (Fuzz[A-Za-z0-9_]*)\(.*/\1/p' "$pkg"/*_test.go | sort -u)"
+if [ -z "$fuzznames" ]; then
+	echo "::error::no Fuzz function found in $pkg" >&2
+	exit 1
+fi
+ntargets="$(printf '%s\n' "$fuzznames" | wc -l | tr -d ' ')"
+
+export GOWORK=off
+
+log="${FUZZ_LOG_DIR:-$ROOT}/differential-fuzz-$target.log"
+mkdir -p "$(dirname "$log")"
+: >"$log"
+
+# The cgo flags for the oracle, the same way a developer sets them up.
+# shellcheck disable=SC1090
+if ! source "$envscript"; then
+	echo "::error::$envscript failed; the $target oracle is not usable" >&2
+	exit 1
+fi
+
+echo "differential-fuzz: $target seeds"
+go test -count=1 -tags libcondor_utils -v "./$pkg/" 2>&1 | tee -a "$log"
+rc="${PIPESTATUS[0]}"
+
+if ! grep -q -- "--- PASS: $sentinel" "$log"; then
+	echo "::error::$sentinel did not pass: the $target differential tests did not reach the C++ oracle" | tee -a "$log"
+	exit 1
+fi
+if [ "$rc" -ne 0 ]; then
+	exit 1
+fi
+
+# Split the budget evenly. A duration is only split when it is given in
+# whole seconds or minutes; anything else (an execution count like 100000x,
+# or a unit this does not parse) is handed to each target unchanged, which
+# costs wall clock rather than silently fuzzing for the wrong length.
+per="$fuzztime"
+if [ "$ntargets" -gt 1 ]; then
+	case "$fuzztime" in
+	*s) n=${fuzztime%s}; [ "$n" -eq "$n" ] 2>/dev/null && per="$(( n / ntargets > 0 ? n / ntargets : 1 ))s" ;;
+	*m) n=${fuzztime%m}; [ "$n" -eq "$n" ] 2>/dev/null && per="$(( n * 60 / ntargets > 0 ? n * 60 / ntargets : 1 ))s" ;;
+	esac
+fi
+
+# The corpus the run grows lives in $GOCACHE/fuzz, which the Go build cache
+# action already carries between runs; a failing input is written under
+# $pkg/testdata/fuzz/ as a committable reproducer, which the workflow
+# uploads.
+failed=""
+while IFS= read -r fuzzname; do
+	[ -n "$fuzzname" ] || continue
+	echo "differential-fuzz: $target fuzzing $fuzzname for $per"
+	go test -tags libcondor_utils -run '^$' -fuzz "^$fuzzname\$" \
+		-fuzztime "$per" "./$pkg/" 2>&1 | tee -a "$log"
+	if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+		failed="$failed $fuzzname"
+	fi
+done <<EOF
+$fuzznames
+EOF
+
+# Every target runs even when an earlier one fails, so one bad target does
+# not hide a finding in another; the issue body names them all.
+if [ -n "$failed" ]; then
+	echo "::warning::$target fuzzing found a new case:$failed (see the uploaded testdata)" | tee -a "$log"
+	exit 3
+fi
