@@ -2386,142 +2386,85 @@ func parseRemaps(remaps string) map[string]string {
 	return result
 }
 
-// setGridParams sets grid universe specific parameters
+// setGridParams sets the grid universe attributes, mirroring SetGridParams()
+// in condor_utils/submit_utils.cpp.
 //
-//nolint:gocyclo // Complex function required for grid universe parameter handling
+// Two rules govern the family. The whole function is skipped outside the grid
+// universe, so ec2_elastic_ip in a vanilla job reaches no attribute at all.
+// And within it, the grid TYPE -- the first word of grid_resource -- decides
+// only which settings are REQUIRED and whether a job gets the implicit Name
+// tag; every other keyword is read whatever the type, so a `batch slurm` job
+// that names an AMI still carries EC2AmiID.
+//
+// The attribute names are HTCondor's own and several do not follow from the
+// keyword: ec2_ebs_volumes is EC2ElasticBlockStorageVolumes,
+// ec2_parameter_names is EC2ParamNames, and ec2_elastic_ip and ec2_vpc_ip end
+// in a lower-case "Ip". The grid manager reads those names and nothing else,
+// so a job carrying the keyword's own spelling would launch an instance with
+// no elastic IP and no volumes attached.
+//
+// What this does NOT do is reject a file. condor_submit aborts a submission
+// whose grid type is missing a required setting -- an ec2 job with no AMI or
+// no credentials, a gce job with no image, an azure job missing any of five
+// -- and it validates the ec2_ebs_volumes syntax. Acceptance is the caller's
+// policy here, so those files parse and the attributes they did name land in
+// the ad.
+//
+//nolint:gocyclo // one keyword per branch, mirroring SetGridParams
 func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
-	// The cloud credential and data files below name files on the
-	// SUBMITTING machine, and SetGridParams records each one as an absolute
-	// path so the gridmanager can open it whatever directory it is running
-	// in. See resolveAgainstIwd.
+	// Several of the family name files, which condor_submit resolves against
+	// Iwd the way it resolves Cmd and UserLog.
 	iwd, err := sf.jobIwd()
 	if err != nil {
 		return err
 	}
 
 	// grid_resource - Required for grid universe
-	if gridResource, ok := sf.submitCommand("grid_resource"); ok {
+	if gridResource, ok := sf.submitCommandAlt("grid_resource", "GridResource"); ok {
 		_ = ad.Set("GridResource", gridResource)
 	}
-
-	// EC2 parameters
-	if ec2AmiID, ok := sf.submitCommand("ec2_ami_id"); ok {
-		_ = ad.Set("EC2AmiID", ec2AmiID)
-	}
-	if ec2InstanceType, ok := sf.submitCommand("ec2_instance_type"); ok {
-		_ = ad.Set("EC2InstanceType", ec2InstanceType)
-	}
-	if ec2KeyPair, ok := sf.submitCommand("ec2_keypair"); ok {
-		_ = ad.Set("EC2KeyPair", ec2KeyPair)
-	}
-	// The keypair itself wins: a file naming a keypair to CREATE is
-	// meaningless once one is named, so SetGridParams warns and drops
-	// ec2_keypair_file. The file is written by the gridmanager, so its
-	// path is resolved like the ones it reads.
-	if ec2KeyPairFile, ok := sf.submitCommandAlt("ec2_keypair_file", "ec2_key_pair_file"); ok {
-		if _, haveKeyPair := ad.Lookup("EC2KeyPair"); !haveKeyPair {
-			_ = ad.Set("EC2KeyPairFile", resolveAgainstIwd(ec2KeyPairFile, iwd))
-		}
-	}
-	// Both halves of the EC2 credential name a file, except for the one
-	// value that names no file at all: useInstanceRole tells the
-	// gridmanager to take the credentials from the instance's own IAM
-	// role, and setting either half to it sets both.
-	if ec2AccessKeyID, ok := sf.submitCommand("ec2_access_key_id"); ok {
-		if strings.EqualFold(ec2AccessKeyID, useInstanceRole) {
-			_ = ad.Set("EC2AccessKeyId", useInstanceRole)
-			_ = ad.Set("EC2SecretAccessKey", useInstanceRole)
-		} else {
-			_ = ad.Set("EC2AccessKeyId", resolveAgainstIwd(ec2AccessKeyID, iwd))
-		}
-	}
-	if ec2SecretAccessKey, ok := sf.submitCommand("ec2_secret_access_key"); ok {
-		if strings.EqualFold(ec2SecretAccessKey, useInstanceRole) {
-			_ = ad.Set("EC2AccessKeyId", useInstanceRole)
-			_ = ad.Set("EC2SecretAccessKey", useInstanceRole)
-		} else {
-			_ = ad.Set("EC2SecretAccessKey", resolveAgainstIwd(ec2SecretAccessKey, iwd))
-		}
-	}
-	if ec2SecurityGroups, ok := sf.submitCommand("ec2_security_groups"); ok {
-		_ = ad.Set("EC2SecurityGroups", ec2SecurityGroups)
-	}
-	if ec2SecurityIDs, ok := sf.submitCommand("ec2_security_ids"); ok {
-		_ = ad.Set("EC2SecurityIDs", ec2SecurityIDs)
-	}
-	if ec2SpotPrice, ok := sf.submitCommand("ec2_spot_price"); ok {
-		_ = ad.Set("EC2SpotPrice", ec2SpotPrice)
-	}
-	if ec2UserData, ok := sf.submitCommand("ec2_user_data"); ok {
-		_ = ad.Set("EC2UserData", ec2UserData)
-	}
-	if ec2UserDataFile, ok := sf.submitCommand("ec2_user_data_file"); ok {
-		_ = ad.Set("EC2UserDataFile", resolveAgainstIwd(ec2UserDataFile, iwd))
+	// The grid type is the first word of the resource, which may have come
+	// from the base ad rather than this file.
+	gridType := ""
+	if gr, ok := ad.EvaluateAttrString("GridResource"); ok {
+		gridType, _, _ = strings.Cut(gr, " ")
+		gridType = strings.ToLower(gridType)
 	}
 
-	// GCE parameters
-	if gceImage, ok := sf.submitCommand("gce_image"); ok {
-		_ = ad.Set("GceImage", gceImage)
+	// ARC parameters
+	if arcRte, ok := sf.submitCommandAlt("arc_rte", "ArcRte"); ok {
+		_ = ad.Set("ArcRte", arcRte)
 	}
-	if gceMachineType, ok := sf.submitCommand("gce_machine_type"); ok {
-		_ = ad.Set("GceMachineType", gceMachineType)
-	}
-	if gceAccount, ok := sf.submitCommand("gce_account"); ok {
-		_ = ad.Set("GceAccount", gceAccount)
-	}
-	if gceAuthFile, ok := sf.submitCommand("gce_auth_file"); ok {
-		_ = ad.Set("GceAuthFile", resolveAgainstIwd(gceAuthFile, iwd))
-	}
-	if gceJSONFile, ok := sf.submitCommand("gce_json_file"); ok {
-		_ = ad.Set("GceJsonFile", resolveAgainstIwd(gceJSONFile, iwd))
-	}
-	if gceMetadata, ok := sf.submitCommand("gce_metadata"); ok {
-		_ = ad.Set("GceMetadata", gceMetadata)
-	}
-
-	// Azure parameters
-	if azureImage, ok := sf.submitCommand("azure_image"); ok {
-		_ = ad.Set("AzureImage", azureImage)
-	}
-	if azureSize, ok := sf.submitCommand("azure_size"); ok {
-		_ = ad.Set("AzureSize", azureSize)
-	}
-	if azureLocation, ok := sf.submitCommand("azure_location"); ok {
-		_ = ad.Set("AzureLocation", azureLocation)
-	}
-	if azureAuthFile, ok := sf.submitCommand("azure_auth_file"); ok {
-		_ = ad.Set("AzureAuthFile", resolveAgainstIwd(azureAuthFile, iwd))
-	}
-	if azureAdminUsername, ok := sf.submitCommand("azure_admin_username"); ok {
-		_ = ad.Set("AzureAdminUsername", azureAdminUsername)
-	}
-	if azureAdminKey, ok := sf.submitCommand("azure_admin_key"); ok {
-		_ = ad.Set("AzureAdminKey", azureAdminKey)
+	if arcResources, ok := sf.submitCommandAlt("arc_resources", "ArcResources"); ok {
+		_ = ad.Set("ArcResources", arcResources)
 	}
 
 	// Batch system parameters (PBS, LSF, SGE, Slurm, etc.)
-	if batchQueue, ok := sf.submitCommand("batch_queue"); ok {
-		_ = ad.Set("BatchQueue", batchQueue)
+	if batchExtraArgs, ok := sf.submitCommandAlt("batch_extra_submit_args", "BatchExtraSubmitArgs"); ok {
+		_ = ad.Set("BatchExtraSubmitArgs", batchExtraArgs)
 	}
-	if batchProject, ok := sf.submitCommand("batch_project"); ok {
+	if batchProject, ok := sf.submitCommandAlt("batch_project", "BatchProject"); ok {
 		_ = ad.Set("BatchProject", batchProject)
 	}
-	if batchRuntime, ok := sf.submitCommand("batch_runtime"); ok {
+	if batchQueue, ok := sf.submitCommandAlt("batch_queue", "BatchQueue"); ok {
+		_ = ad.Set("BatchQueue", batchQueue)
+	}
+	if batchRuntime, ok := sf.submitCommandAlt("batch_runtime", "BatchRuntime"); ok {
 		if intRuntime, err := parseInt(batchRuntime); err == nil {
 			_ = ad.Set("BatchRuntime", intRuntime)
 		}
 	}
-	if batchExtraArgs, ok := sf.submitCommand("batch_extra_submit_args"); ok {
-		_ = ad.Set("BatchExtraSubmitArgs", batchExtraArgs)
-	}
 
-	// ARC parameters
-	if arcRte, ok := sf.submitCommand("arc_rte"); ok {
-		_ = ad.Set("ArcRte", arcRte)
-	}
-	if arcResources, ok := sf.submitCommand("arc_resources"); ok {
-		_ = ad.Set("ArcResources", arcResources)
-	}
+	sf.setEC2Credentials(ad, iwd)
+	sf.setEC2Params(ad, iwd)
+
+	// EC2 tags and GCE labels. Both are name/value pairs collected from a
+	// prefixed keyword, and both get the implicit Name tag on an ec2 job.
+	sf.setGridAVPairs(ad, "ec2_tag_", "EC2Tag", "ec2_tag_names", "EC2TagNames", gridType)
+	sf.setGridAVPairs(ad, "cloud_label_", "CloudLabel", "cloud_label_names", "CloudLabelNames", gridType)
+
+	sf.setGCEParams(ad, iwd)
+	sf.setAzureParams(ad, iwd)
 
 	// Delegate credentials
 	if delegateJobGSI, ok := sf.submitCommand("delegate_job_gsi_credentials_lifetime"); ok {
@@ -2531,6 +2474,310 @@ func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
 	}
 
 	return nil
+}
+
+// ec2InstanceRole is the value that tells the grid manager to take its
+// credentials from the instance role it is already running under instead of
+// reading a key file. Naming it under either key sets BOTH halves of the
+// credential pair, since a role supplies both at once.
+const ec2InstanceRole = "FROM INSTANCE"
+
+// setEC2Credentials reads the EC2 access key pair.
+//
+// Each half has two spellings: ec2_access_key_id names a file that is
+// resolved against Iwd, while aws_access_key_id_file (and its s3_ and gs_
+// aliases) is a plain keyword that SetSimpleJobExprs assigns verbatim AFTER
+// this runs -- so the simple table's value, not this one, is what the job
+// ends up carrying when the file uses one of those spellings.
+func (sf *SubmitFile) setEC2Credentials(ad *classad.ClassAd, iwd string) {
+	for _, cred := range []struct{ key, altKey, attr string }{
+		{"ec2_access_key_id", "aws_access_key_id_file", "EC2AccessKeyId"},
+		{"ec2_secret_access_key", "aws_secret_access_key_file", "EC2SecretAccessKey"},
+	} {
+		value, ok := sf.submitCommandAlt(cred.key, cred.attr)
+		if !ok {
+			value, ok = sf.submitCommandAlt(cred.altKey, cred.attr)
+		}
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(value, ec2InstanceRole) {
+			_ = ad.Set("EC2AccessKeyId", ec2InstanceRole)
+			_ = ad.Set("EC2SecretAccessKey", ec2InstanceRole)
+			continue
+		}
+		_ = ad.Set(cred.attr, fullPath(value, iwd))
+	}
+}
+
+// setEC2Params reads the rest of the EC2 family.
+//
+//nolint:gocyclo // one keyword per branch, mirroring SetGridParams
+func (sf *SubmitFile) setEC2Params(ad *classad.ClassAd, iwd string) {
+	// ec2_keypair names a key pair already registered with EC2;
+	// ec2_keypair_file names where to WRITE a generated one, so naming both
+	// is a contradiction and the file loses.
+	if keyPair, ok := sf.submitCommandAlt2("ec2_keypair", "EC2KeyPair", "ec2_keyp_air"); ok {
+		_ = ad.Set("EC2KeyPair", keyPair)
+	}
+	if keyPairFile, ok := sf.submitCommandAlt2("ec2_keypair_file", "EC2KeyPairFile", "ec2_key_pair_file"); ok {
+		if _, taken := ad.Lookup("EC2KeyPair"); !taken {
+			_ = ad.Set("EC2KeyPairFile", fullPath(keyPairFile, iwd))
+		}
+	}
+
+	for _, kw := range []struct{ key, attr string }{
+		{"ec2_security_groups", "EC2SecurityGroups"},
+		{"ec2_security_ids", "EC2SecurityIDs"},
+		{"ec2_ami_id", "EC2AmiID"},
+		{"ec2_instance_type", "EC2InstanceType"},
+		{"ec2_vpc_subnet", "EC2VpcSubnet"},
+		{"ec2_vpc_ip", "EC2VpcIp"},
+		{"ec2_elastic_ip", "EC2ElasticIp"},
+		{"ec2_availability_zone", "EC2AvailabilityZone"},
+		{"ec2_ebs_volumes", "EC2ElasticBlockStorageVolumes"},
+		{"ec2_spot_price", "EC2SpotPrice"},
+		{"ec2_block_device_mapping", "EC2BlockDeviceMapping"},
+		{"ec2_user_data", "EC2UserData"},
+	} {
+		if value, ok := sf.submitCommandAlt(kw.key, kw.attr); ok {
+			_ = ad.Set(kw.attr, value)
+		}
+	}
+
+	if userDataFile, ok := sf.submitCommandAlt("ec2_user_data_file", "EC2UserDataFile"); ok {
+		_ = ad.Set("EC2UserDataFile", fullPath(userDataFile, iwd))
+	}
+
+	// An instance profile is named by ARN or by name, never both -- and
+	// condor_submit keeps the name only when the ARN is there too.
+	if arn, ok := sf.submitCommandAlt("ec2_iam_profile_arn", "EC2IamProfileArn"); ok {
+		_ = ad.Set("EC2IamProfileArn", arn)
+	}
+	if name, ok := sf.submitCommandAlt("ec2_iam_profile_name", "EC2IamProfileName"); ok {
+		if _, haveArn := ad.Lookup("EC2IamProfileArn"); haveArn {
+			_ = ad.Set("EC2IamProfileName", name)
+		}
+	}
+
+	sf.setEC2RunInstancesParams(ad)
+}
+
+// setEC2RunInstancesParams passes arbitrary RunInstances parameters through.
+// Each ec2_parameter_<Name> becomes EC2Param_<Name>, and the names are
+// collected into EC2ParamNames because ClassAd attribute names are
+// case-insensitive while EC2's parameter names are not.
+//
+// ec2_parameter_names may list names of its own, and the ones found by the
+// prefix scan are appended to that list. The de-duplication compares a listed
+// name with its dots turned into underscores against the raw scanned name, so
+// a name containing a dot never matches itself and is listed twice.
+func (sf *SubmitFile) setEC2RunInstancesParams(ad *classad.ClassAd) {
+	const prefix = "ec2_parameter_"
+	const namesKey = "ec2_parameter_names"
+
+	var paramNames []string
+	if listed, ok := sf.submitCommandAlt(namesKey, "EC2ParamNames"); ok {
+		paramNames = splitAVList(listed)
+	} else if existing, ok := ad.EvaluateAttrString("EC2ParamNames"); ok {
+		paramNames = splitAVList(existing)
+	}
+
+	for _, key := range sf.assignedWithPrefix(prefix) {
+		if strings.EqualFold(key, namesKey) {
+			continue
+		}
+		name := key[len(prefix):]
+		value, ok := sf.submitCommand(key)
+		if !ok {
+			continue
+		}
+		_ = ad.Set("EC2Param_"+name, value)
+
+		found := false
+		for _, existing := range paramNames {
+			if strings.EqualFold(strings.ReplaceAll(existing, ".", "_"), name) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			paramNames = append(paramNames, name)
+		}
+	}
+
+	if len(paramNames) > 0 {
+		_ = ad.Set("EC2ParamNames", strings.Join(paramNames, ", "))
+	}
+}
+
+// setGridAVPairs collects one family of name/value pairs -- EC2 tags, GCE
+// labels -- from the <prefix><Name> keywords and the list keyword that names
+// them, and records the names under listAttr.
+//
+// A pair may be written with either the submit prefix (ec2_tag_Foo) or the
+// attribute prefix (EC2TagFoo), and the list keyword itself is passed over by
+// skipping any name starting with "Names".
+//
+// On an ec2 job the executable is only a label, so condor_submit also tags the
+// instance with it under <prefix>Name, which is what the AWS console shows as
+// the instance's name. WantNameTag = false turns that off.
+func (sf *SubmitFile) setGridAVPairs(ad *classad.ClassAd, submitPrefix, attrPrefix, listKey, listAttr, gridType string) {
+	var names []string
+	if listed, ok := sf.submitCommandAlt(listKey, listAttr); ok {
+		names = splitAVList(listed)
+	} else if existing, ok := ad.EvaluateAttrString(listAttr); ok {
+		names = splitAVList(existing)
+	}
+
+	for _, key := range sf.assignedWithPrefix(submitPrefix, attrPrefix) {
+		var name string
+		switch {
+		case len(key) > len(submitPrefix) && strings.EqualFold(key[:len(submitPrefix)], submitPrefix):
+			name = key[len(submitPrefix):]
+		case len(key) > len(attrPrefix) && strings.EqualFold(key[:len(attrPrefix)], attrPrefix):
+			name = key[len(attrPrefix):]
+		default:
+			continue
+		}
+		if len(name) >= 5 && strings.EqualFold(name[:5], "Names") {
+			continue
+		}
+		if !containsNameFold(names, name) {
+			names = append(names, name)
+		}
+	}
+
+	for _, name := range names {
+		value, ok := sf.submitCommandAlt(submitPrefix+name, attrPrefix+name)
+		if !ok {
+			// Only reachable when the names came from the base ad.
+			continue
+		}
+		_ = ad.Set(attrPrefix+name, value)
+	}
+
+	if gridType == "ec2" && !containsNameFold(names, "Name") {
+		if parseBool(sf.submitParam("WantNameTag", ""), true) {
+			if cmd, ok := ad.EvaluateAttrString("Cmd"); ok {
+				_ = ad.Set(attrPrefix+"Name", cmd)
+			}
+		}
+	}
+
+	if len(names) > 0 {
+		_ = ad.Set(listAttr, strings.Join(names, ","))
+	}
+}
+
+// setGCEParams reads the GCE family.
+func (sf *SubmitFile) setGCEParams(ad *classad.ClassAd, iwd string) {
+	for _, kw := range []struct{ key, attr string }{
+		{"gce_auth_file", "GceAuthFile"},
+		{"gce_metadata_file", "GceMetadataFile"},
+		{"gce_json_file", "GceJsonFile"},
+	} {
+		if value, ok := sf.submitCommandAlt(kw.key, kw.attr); ok {
+			_ = ad.Set(kw.attr, fullPath(value, iwd))
+		}
+	}
+	for _, kw := range []struct{ key, attr string }{
+		{"gce_account", "GceAccount"},
+		{"gce_image", "GceImage"},
+		{"gce_machine_type", "GceMachineType"},
+	} {
+		if value, ok := sf.submitCommandAlt(kw.key, kw.attr); ok {
+			_ = ad.Set(kw.attr, value)
+		}
+	}
+	// The metadata list is re-joined from its comma-separated fields, which
+	// drops the spacing the submitter wrote: "a=1, b=2" is stored "a=1,b=2",
+	// and the metadata server is handed the name " b" otherwise.
+	if metadata, ok := sf.submitCommandAlt("gce_metadata", "GceMetadata"); ok {
+		_ = ad.Set("GceMetadata", strings.Join(splitOnCommas(metadata), ","))
+	}
+	if preemptible, ok := sf.submitCommandAlt("gce_preemptible", "GcePreemptible"); ok {
+		_ = ad.Set("GcePreemptible", parseBool(preemptible, false))
+	}
+}
+
+// setAzureParams reads the Azure family.
+func (sf *SubmitFile) setAzureParams(ad *classad.ClassAd, iwd string) {
+	if authFile, ok := sf.submitCommandAlt("azure_auth_file", "AzureAuthFile"); ok {
+		_ = ad.Set("AzureAuthFile", fullPath(authFile, iwd))
+	}
+	for _, kw := range []struct{ key, attr string }{
+		{"azure_image", "AzureImage"},
+		{"azure_location", "AzureLocation"},
+		{"azure_size", "AzureSize"},
+		{"azure_admin_username", "AzureAdminUsername"},
+		{"azure_admin_key", "AzureAdminKey"},
+	} {
+		if value, ok := sf.submitCommandAlt(kw.key, kw.attr); ok {
+			_ = ad.Set(kw.attr, value)
+		}
+	}
+}
+
+// assignedWithPrefix returns the names the submit file assigned that start
+// with any of the given prefixes, case-insensitively, in a fixed order.
+//
+// The order is the sorted one HTCondor's own macro table walks in, and it is
+// observable: it decides the order of the names in EC2TagNames and
+// EC2ParamNames.
+func (sf *SubmitFile) assignedWithPrefix(prefixes ...string) []string {
+	var keys []string
+	for _, name := range sf.assigned {
+		for _, prefix := range prefixes {
+			if len(name) > len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {
+				keys = append(keys, name)
+				break
+			}
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		li, lj := strings.ToLower(keys[i]), strings.ToLower(keys[j])
+		if li != lj {
+			return li < lj
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
+
+// splitAVList splits a list of names the way HTCondor's split() does by
+// default: on commas and whitespace, discarding empty fields.
+func splitAVList(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\r' || r == '\n'
+	})
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
+}
+
+// splitOnCommas splits on commas only, discarding empty fields, the way
+// HTCondor's split(s, ",") does.
+func splitOnCommas(s string) []string {
+	var out []string
+	for _, field := range strings.Split(s, ",") {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			out = append(out, field)
+		}
+	}
+	return out
+}
+
+// containsNameFold reports whether list holds name, ignoring case.
+func containsNameFold(list []string, name string) bool {
+	for _, item := range list {
+		if strings.EqualFold(item, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // setVMParams sets the VM universe attributes, mirroring SetVMParams() in
@@ -3742,9 +3989,29 @@ func (sf *SubmitFile) setExtendedJobExprs(ad *classad.ClassAd) error {
 		}
 	}
 
-	// ec2_tag_names - EC2 tags to apply (grid universe)
-	if ec2Tags, ok := sf.submitCommand("ec2_tag_names"); ok {
-		_ = ad.Set("EC2TagNames", ec2Tags)
+	// The presigned-URL credential keywords are plain entries in
+	// HTCondor's simple table rather than part of the grid family, so they
+	// are read whatever the universe -- a vanilla job transferring an s3://
+	// input needs them -- and they are stored exactly as written, with no
+	// Iwd resolution. They share the EC2 attributes, and the later spelling
+	// wins when a file names more than one, including over the absolute
+	// path setGridParams resolved for a grid job.
+	for _, cred := range []struct{ key, attr string }{
+		{"aws_access_key_id_file", "EC2AccessKeyId"},
+		{"aws_secret_access_key_file", "EC2SecretAccessKey"},
+		{"s3_access_key_id_file", "EC2AccessKeyId"},
+		{"s3_secret_access_key_file", "EC2SecretAccessKey"},
+		{"gs_access_key_id_file", "EC2AccessKeyId"},
+		{"gs_secret_access_key_file", "EC2SecretAccessKey"},
+	} {
+		if value, ok := sf.submitCommandAlt(cred.key, cred.attr); ok {
+			_ = ad.Set(cred.attr, value)
+		}
+	}
+
+	// aws_region - the region presigned S3 URLs are signed for
+	if awsRegion, ok := sf.submitCommandAlt("aws_region", "AWSRegion"); ok {
+		_ = ad.Set("AWSRegion", awsRegion)
 	}
 
 	// allowed_execute_duration - maximum execution time
