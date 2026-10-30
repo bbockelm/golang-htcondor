@@ -720,6 +720,41 @@ func fullPath(name, base string) string {
 	return compressPath("/" + base + "/" + name)
 }
 
+// useInstanceRole is USE_INSTANCE_ROLE_MAGIC_STRING from
+// src/condor_includes/condor_constants.h: the value an EC2 credential
+// keyword takes instead of a filename when the gridmanager should use the
+// IAM role of the instance it is running on.
+const useInstanceRole = "FROM INSTANCE"
+
+// resolveAgainstIwd returns name resolved against the job's Iwd, which is
+// what SubmitHash's plain full_path(name) does.
+//
+// Which keywords get this treatment is not a property of the value and
+// cannot be inferred from it; HTCondor decides it in two separate places,
+// and only one of them is a table:
+//
+//   - SimpleSubmitKeyword's table carries an f_filemask field, and
+//     do_simple_commands runs every f_as_string keyword that has one
+//     through full_path. Today that is `log`, `dagman_log`,
+//     `output_directory` and `starter_log`. Of those the Go parser
+//     implements only `log`, which setStandardFiles resolves.
+//   - SetGridParams resolves the cloud credential and data files one call
+//     at a time, with no flag to read: the keywords below.
+//
+// `executable` is in the table with f_filemask too, but it is also
+// f_special and so never reaches that loop: SetExecutable resolves it
+// against the SUBMITTING directory rather than Iwd. See resolveExecutable.
+//
+// An empty value is left alone. full_path("") would produce the Iwd with a
+// trailing separator, and submit_param hands SetGridParams nothing for an
+// empty keyword in the first place.
+func resolveAgainstIwd(name, iwd string) string {
+	if name == "" {
+		return name
+	}
+	return fullPath(name, iwd)
+}
+
 // jobIwd returns the job's initial working directory: ComputeIWD resolves a
 // relative initialdir against the submitting directory and falls back to
 // that directory outright when the submit file names none.
@@ -2355,6 +2390,15 @@ func parseRemaps(remaps string) map[string]string {
 //
 //nolint:gocyclo // Complex function required for grid universe parameter handling
 func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
+	// The cloud credential and data files below name files on the
+	// SUBMITTING machine, and SetGridParams records each one as an absolute
+	// path so the gridmanager can open it whatever directory it is running
+	// in. See resolveAgainstIwd.
+	iwd, err := sf.jobIwd()
+	if err != nil {
+		return err
+	}
+
 	// grid_resource - Required for grid universe
 	if gridResource, ok := sf.submitCommand("grid_resource"); ok {
 		_ = ad.Set("GridResource", gridResource)
@@ -2370,14 +2414,34 @@ func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
 	if ec2KeyPair, ok := sf.submitCommand("ec2_keypair"); ok {
 		_ = ad.Set("EC2KeyPair", ec2KeyPair)
 	}
-	if ec2KeyPairFile, ok := sf.submitCommand("ec2_keypair_file"); ok {
-		_ = ad.Set("EC2KeyPairFile", ec2KeyPairFile)
+	// The keypair itself wins: a file naming a keypair to CREATE is
+	// meaningless once one is named, so SetGridParams warns and drops
+	// ec2_keypair_file. The file is written by the gridmanager, so its
+	// path is resolved like the ones it reads.
+	if ec2KeyPairFile, ok := sf.submitCommandAlt("ec2_keypair_file", "ec2_key_pair_file"); ok {
+		if _, haveKeyPair := ad.Lookup("EC2KeyPair"); !haveKeyPair {
+			_ = ad.Set("EC2KeyPairFile", resolveAgainstIwd(ec2KeyPairFile, iwd))
+		}
 	}
+	// Both halves of the EC2 credential name a file, except for the one
+	// value that names no file at all: useInstanceRole tells the
+	// gridmanager to take the credentials from the instance's own IAM
+	// role, and setting either half to it sets both.
 	if ec2AccessKeyID, ok := sf.submitCommand("ec2_access_key_id"); ok {
-		_ = ad.Set("EC2AccessKeyId", ec2AccessKeyID)
+		if strings.EqualFold(ec2AccessKeyID, useInstanceRole) {
+			_ = ad.Set("EC2AccessKeyId", useInstanceRole)
+			_ = ad.Set("EC2SecretAccessKey", useInstanceRole)
+		} else {
+			_ = ad.Set("EC2AccessKeyId", resolveAgainstIwd(ec2AccessKeyID, iwd))
+		}
 	}
 	if ec2SecretAccessKey, ok := sf.submitCommand("ec2_secret_access_key"); ok {
-		_ = ad.Set("EC2SecretAccessKey", ec2SecretAccessKey)
+		if strings.EqualFold(ec2SecretAccessKey, useInstanceRole) {
+			_ = ad.Set("EC2AccessKeyId", useInstanceRole)
+			_ = ad.Set("EC2SecretAccessKey", useInstanceRole)
+		} else {
+			_ = ad.Set("EC2SecretAccessKey", resolveAgainstIwd(ec2SecretAccessKey, iwd))
+		}
 	}
 	if ec2SecurityGroups, ok := sf.submitCommand("ec2_security_groups"); ok {
 		_ = ad.Set("EC2SecurityGroups", ec2SecurityGroups)
@@ -2392,7 +2456,7 @@ func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
 		_ = ad.Set("EC2UserData", ec2UserData)
 	}
 	if ec2UserDataFile, ok := sf.submitCommand("ec2_user_data_file"); ok {
-		_ = ad.Set("EC2UserDataFile", ec2UserDataFile)
+		_ = ad.Set("EC2UserDataFile", resolveAgainstIwd(ec2UserDataFile, iwd))
 	}
 
 	// GCE parameters
@@ -2406,10 +2470,10 @@ func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
 		_ = ad.Set("GceAccount", gceAccount)
 	}
 	if gceAuthFile, ok := sf.submitCommand("gce_auth_file"); ok {
-		_ = ad.Set("GceAuthFile", gceAuthFile)
+		_ = ad.Set("GceAuthFile", resolveAgainstIwd(gceAuthFile, iwd))
 	}
 	if gceJSONFile, ok := sf.submitCommand("gce_json_file"); ok {
-		_ = ad.Set("GceJsonFile", gceJSONFile)
+		_ = ad.Set("GceJsonFile", resolveAgainstIwd(gceJSONFile, iwd))
 	}
 	if gceMetadata, ok := sf.submitCommand("gce_metadata"); ok {
 		_ = ad.Set("GceMetadata", gceMetadata)
@@ -2426,7 +2490,7 @@ func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
 		_ = ad.Set("AzureLocation", azureLocation)
 	}
 	if azureAuthFile, ok := sf.submitCommand("azure_auth_file"); ok {
-		_ = ad.Set("AzureAuthFile", azureAuthFile)
+		_ = ad.Set("AzureAuthFile", resolveAgainstIwd(azureAuthFile, iwd))
 	}
 	if azureAdminUsername, ok := sf.submitCommand("azure_admin_username"); ok {
 		_ = ad.Set("AzureAdminUsername", azureAdminUsername)
