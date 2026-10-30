@@ -9,8 +9,17 @@
 #
 # Exit status:
 #   0   seeds and fuzzing passed
-#   1   seeds or fuzzing failed, or the oracle was not linked in
+#   1   the committed cases failed, or the oracle was not linked in
 #   2   usage error
+#   3   the committed cases passed and fuzzing found something new
+#
+# 1 and 3 are separated because they mean different things to a reviewer. 1 is
+# a regression: a case already in the tree changed its answer, which is the
+# author's to fix. 3 is a discovery -- fuzzing is a search, and what it finds
+# is almost never related to the change under review. Blocking a pull request
+# on 3 would hand every author someone else's finding, so the pull-request
+# workflow annotates it and the nightly, whose whole job is to search, fails
+# on it.
 #
 # Environment:
 #   FUZZ_LOG_DIR  where to write differential-fuzz-<target>.log (default: repo root)
@@ -114,6 +123,6 @@ EOF
 # Every target runs even when an earlier one fails, so one bad target does
 # not hide a finding in another; the issue body names them all.
 if [ -n "$failed" ]; then
-	echo "::error::$target fuzz targets failed:$failed" | tee -a "$log"
-	exit 1
+	echo "::warning::$target fuzzing found a new case:$failed (see the uploaded testdata)" | tee -a "$log"
+	exit 3
 fi

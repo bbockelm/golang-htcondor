@@ -110,7 +110,10 @@ jobs:
 
     # Each target reports its own status rather than failing the job, so a
     # divergence in one parser still lets the other run and both land in the
-    # same log.
+    # same log. Exit 3 means the committed cases passed and fuzzing found
+    # something new; that is a discovery rather than a regression in this
+    # change, so it is annotated and uploaded but does not fail the job. The
+    # nightly run fails on it.
     - name: Config fuzz
       id: config
       env:
@@ -141,7 +144,17 @@ jobs:
         if-no-files-found: ignore
 
     - name: Fail the job
-      if: steps.config.outputs.rc != '0' || steps.submit.outputs.rc != '0'
+      if: |
+        (steps.config.outputs.rc != '0' && steps.config.outputs.rc != '3') ||
+        (steps.submit.outputs.rc != '0' && steps.submit.outputs.rc != '3')
       run: |
-        echo "::error::differential fuzz failed (config=${{ steps.config.outputs.rc }} submit=${{ steps.submit.outputs.rc }})"
+        echo "::error::differential fuzz regression (config=${{ steps.config.outputs.rc }} submit=${{ steps.submit.outputs.rc }}); 3 means fuzzing found something new, anything else means a committed case changed its answer"
         exit 1
+
+    # Separate from the failure above so a discovery is visible on a green run
+    # instead of being silent. The inputs are in the uploaded artifact; commit
+    # one to fuzz/<target>/testdata/fuzz/ to turn it into a committed case.
+    - name: Note what fuzzing found
+      if: steps.config.outputs.rc == '3' || steps.submit.outputs.rc == '3'
+      run: |
+        echo "::warning::fuzzing found a new case (config=${{ steps.config.outputs.rc }} submit=${{ steps.submit.outputs.rc }}); see the differential-fuzz-failing-inputs artifact"

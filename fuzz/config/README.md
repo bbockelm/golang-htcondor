@@ -80,6 +80,13 @@ first fails, so a divergence in one parser does not hide one in the other. A
 failing input is uploaded as the `differential-fuzz-failing-inputs` artifact;
 drop it into `fuzz/<target>/testdata/fuzz/<FuzzTarget>/` to reproduce.
 
+A committed case that changes its answer fails the job; something fuzzing
+finds for the first time is annotated instead. Fuzzing is a search, and what a
+search turns up is almost never related to the change under review, so blocking
+on it would hand every author someone else's finding. Commit the input from the
+artifact to make it a committed case, which does block from then on. The
+nightly run, whose whole job is to search, fails on both.
+
 ### Nightly, against HTCondor main
 
 `.github/workflows/nightly-fuzz.yml` runs the same targets at 07:41 UTC against
