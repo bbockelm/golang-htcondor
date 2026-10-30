@@ -333,6 +333,56 @@ else could refer to. The charset is ASCII here now. A job **attribute** name
 is the opposite case and was already right: `+café = 1` is accepted by both,
 because the `+` form skips the check.
 
+**The VM and Xen keywords were stored under their own names.** `vm_memory`
+wrote `VM_Memory`, `vm_vcpus` wrote `VM_VCPUs`, `vm_disk` wrote `VM_Disk` and
+the `xen_*` keywords wrote `Xen_*`. Nothing in HTCondor reads any of those, so
+the submit file looked honoured and the vmgahp built the VM from its own
+defaults: a job that asked for 8 GB and 4 CPUs got whatever the execute node
+defaults to, with no error anywhere to say the request had been dropped. The
+attributes are HTCondor's now — `JobVMMemory`, `JobVM_VCPUS`, `JobVMType`,
+`JobVMNetworking`, `JobVMNetworkingType`, `JobVMCheckpoint`, `JobVM_MACADDR`,
+`JobVMVNCConsole`, `VMPARAM_vm_Disk`, `VMPARAM_No_Output_VM` and
+`VMPARAM_Xen_*` — and the `RequestMemory` a VM job inherits from its VM points
+at `MY.JobVMMemory` rather than at an attribute that does not exist.
+
+Four things the names alone did not cover, each read off `SetVMParams()` and
+confirmed against the oracle:
+
+- **`vm_type` gates the rest.** It is stored lower-cased, and it decides what
+  `condor_submit` reads at all: the `xen_*` keywords only for `xen`, `vm_disk`
+  only for `xen` or `kvm`. Under any other type those keywords are silently
+  dropped, and Go now drops them too. `vm_networking_type` is read only when
+  `vm_networking` is on.
+- **Three attributes are always present.** `JobVMCheckpoint`,
+  `JobVMNetworking` and `JobVMVNCConsole` land in every VM job ad, false when
+  the submit file says nothing, and `JobVM_VCPUS` defaults to 1.
+- **`vm_memory` and `vm_vcpus` fall back to the request.** The submit macro
+  table gives them built-in defaults of `$(Request_Memory)` and
+  `$(Request_CPUs)`, so a VM job that only sets `request_memory` gives its VM
+  that much memory. The fallback is the macro's *text*, not the evaluated
+  request, so `request_cpus = 2*2` leaves the VM with two CPUs.
+- **`xen_kernel` is not always a file.** `included` boots the kernel out of
+  the disk image and `vmx` asks for hardware virtualization; neither is a
+  kernel file, so `xen_initrd` and `xen_root` do not apply to them, and `vmx`
+  sets `JobVMHardwareVT`. `xen_kernel_params` loses one layer of quoting.
+
+`vm_vnc` and `vm_no_output_vm`, which Go had no code for at all, are
+implemented as part of the same pass.
+
+The generator used to write only a kvm VM, on the reasoning that xen needs a
+kernel and a root device of its own. That is about booting a VM; `SubmitHash`
+decides textually and stats nothing, so `xen_kernel = included` or `vmx` needs
+no companion at all and any other value is simply *taken for* a kernel file,
+which only makes `xen_root` required. The vm prelude now picks a type and
+emits that type's companions, so the whole `VMPARAM_Xen_*` family is compared
+by the oracle-backed sweep rather than by hand-written expectations. The
+keyword-coverage count does not move -- it counts a keyword as reached when it
+appears in the corpus text, and `xen_kernel` appeared all along, in files
+SubmitHash then rejected. What moves is what is compared: over the 600-file
+sweep, `VMPARAM_Xen_Kernel`, `_Root`, `_Initrd` and `_Kernel_Params` go from
+never reaching an accepted ad to 15 or so each.
+`submit_vm_test.go` is the same ground covered without the oracle, for CI.
+
 **`request_<resource>` is generic, and Go only knew three.** `request_foo = N`
 becomes `RequestFoo` in C++ — that is how custom resources (licenses,
 site-defined slot types) are requested. Go understood `cpus`, `memory`, `disk`
@@ -471,16 +521,6 @@ the setting under a name HTCondor does not use:
 
 | submit command | HTCondor attribute | Go attribute |
 |---|---|---|
-| `vm_memory` | `JobVMMemory` | `VM_Memory` |
-| `vm_type` | `JobVMType` | `VM_Type` |
-| `vm_vcpus` | `JobVM_VCPUs` | `VM_VCPUs` |
-| `vm_networking` | `JobVMNetworking` | `VM_Networking` |
-| `vm_networking_type` | `JobVMNetworkingType` | `VM_NetworkingType` |
-| `vm_checkpoint` | `JobVMCheckpoint` | `VM_Checkpoint` |
-| `vm_macaddr` | `JobVM_MACADDR` | `VM_MACAddr` |
-| `vm_disk` | `VMPARAM_vm_disk` | `VM_Disk` |
-| `xen_kernel` | `VMPARAM_Xen_Kernel` | `Xen_Kernel` |
-| `xen_root`, `xen_initrd`, `xen_kernel_params` | `VMPARAM_*` | keyword name |
 | `machine_count` | `MinHosts` / `MaxHosts` | `MachineCount` |
 | `remote_initialdir` | `RemoteIwd` | `RemoteInitialDir` |
 | `accounting_group_user` | `AcctGroupUser` | `AccountingGroupUser` |
@@ -488,8 +528,8 @@ the setting under a name HTCondor does not use:
 | `concurrency_limits_expr` | `ConcurrencyLimits` | `ConcurrencyLimitsExpr` |
 | container/docker job | `WantContainer` + `WantDockerImage` | `WantDocker` |
 
-A parallel job asks for one machine and a VM job runs with default memory
-and CPUs. The cron and retry rows of this table are fixed; see "Fixed" below.
+A parallel job asks for one machine. The cron, retry and VM/Xen rows of this
+table are fixed; see "Fixed" below.
 
 ## Values that differ where both sides set the attribute
 
