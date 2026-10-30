@@ -262,10 +262,6 @@ the setting under a name HTCondor does not use:
 | `vm_disk` | `VMPARAM_vm_disk` | `VM_Disk` |
 | `xen_kernel` | `VMPARAM_Xen_Kernel` | `Xen_Kernel` |
 | `xen_root`, `xen_initrd`, `xen_kernel_params` | `VMPARAM_*` | keyword name |
-| `cron_window` | `DeferralWindow` | `CronWindow` |
-| `cron_prep_time` | `DeferralPrepTime` | `CronPrepTime` |
-| `max_retries` | `JobMaxRetries` | `MaxRetries` |
-| `retry_until` | folded into `OnExitRemove` | `RetryUntil` |
 | `machine_count` | `MinHosts` / `MaxHosts` | `MachineCount` |
 | `remote_initialdir` | `RemoteIwd` | `RemoteInitialDir` |
 | `accounting_group_user` | `AcctGroupUser` | `AccountingGroupUser` |
@@ -273,18 +269,14 @@ the setting under a name HTCondor does not use:
 | `concurrency_limits_expr` | `ConcurrencyLimits` | `ConcurrencyLimitsExpr` |
 | container/docker job | `WantContainer` + `WantDockerImage` | `WantDocker` |
 
-A cron job submitted through Go therefore never defers, a parallel job asks
-for one machine, a `max_retries` job never retries, and a VM job runs with
-default memory and CPUs.
+A parallel job asks for one machine and a VM job runs with default memory
+and CPUs. The cron and retry rows of this table are fixed; see "Fixed" below.
 
 ## Values that differ where both sides set the attribute
 
 - **`AccountingGroup` loses the user.** C++ appends the submitting user
   (`Proj-1` becomes `Proj-1.<user>`); Go stores the group as written, so the
   accountant charges a different entity.
-- **`OnExitRemove` is not rewritten.** With `max_retries` or `retry_until`
-  set, C++ *replaces* `OnExitRemove` with the retry expression it builds. Go
-  keeps the user's expression, and the job does not retry.
 - **`KillSig` becomes a number.** C++ keeps the name (`"SIGTERM"`); Go
   converts it to `15`. Same for `remove_kill_sig`.
 - **`JobLeaseDuration` floor.** C++ raises a short lease to its 20-second
@@ -324,14 +316,76 @@ and `WantSIF` join them, below.
 About 120 attributes are set by C++ and by nothing in Go. The full list is in
 `knownDivergentGenerated`; the families are the EC2/GCE/Azure grid settings,
 the tool-daemon (TDP) settings, the buffer settings, the Java settings, the
-noop-job settings, the parallel-script settings, the submit-event notes, the
-cron/deferral attributes, `kill_sig` and its siblings, `core_size`,
+noop-job settings, the parallel-script settings, the submit-event notes,
+`kill_sig` and its siblings, `core_size`,
 `stack_size`, `keep_claim_idle`, `max_job_retirement_time`,
 `next_job_start_delay`, `allowed_execute_duration`, `allowed_job_duration`,
 `manifest`, `output_destination`, `output_directory`, `scitokens_file`,
 `project_name`, `primary_unix_group`, `jobset`, `dag_node_name` and the
-DAGMan bookkeeping, `on_exit_hold`, `on_exit_remove`, `periodic_vacate` and
-the `*_subcode` reasons.
+DAGMan bookkeeping, `periodic_vacate` and the `*_subcode` reasons.
+
+## Fixed
+
+**A cron job never deferred, and a cron job's timing went nowhere.** There is
+no `CronWindow` or `CronPrepTime` job attribute: `cron_window` and
+`deferral_window` are two spellings of `DeferralWindow`, and `cron_prep_time`
+and `deferral_prep_time` two spellings of `DeferralPrepTime`, with the `cron_`
+spelling winning when a file uses both. Go wrote the submit keyword's own name,
+so a job submitted with `cron_minute = 0` and `cron_window = 600` reached the
+starter with its schedule but no window and no prep time: the starter that
+missed the execute time by a second had no slack to run in, and no warning that
+the window it was told about had been dropped. Three more pieces of the same
+family. A deferred job always carries **both** timing attributes, with
+`DeferralWindow = 0` and `DeferralPrepTime = 300` defaulted in when the file is
+silent. The timing values are *expressions*, so `deferral_time = (time() +
+3600)` is legal and Go's `parseInt` was dropping it on the floor. And Go wrote
+`DeferralWindow` for a file with no schedule at all, where condor_submit writes
+nothing. `cron_minute` and its four siblings were always right, and still are.
+
+**A `max_retries` job never retried.** Three separate bugs, all in one
+expression. The count went to `MaxRetries`, which nothing reads, instead of
+`JobMaxRetries`. `retry_until` became a `RetryUntil` attribute, which is not an
+attribute at all in HTCondor -- a plain integer there is a *futility exit code*
+and becomes `ExitCode =?= <code>`, anything else is a boolean expression, and
+either way it is folded into `OnExitRemove`. And `OnExitRemove` itself was left
+as the submitter wrote it, where condor_submit replaces it with
+
+```
+NumJobCompletions > JobMaxRetries || ExitCode =?= <success code> [ || <retry_until> ] [ || <on_exit_remove> ]
+```
+
+so the job that was supposed to be retried was removed from the queue on its
+first failure instead. The three settings are entangled in ways the keyword
+table does not show: each of `max_retries`, `success_exit_code` and
+`retry_until` turns retries on by itself, retries also default `JobMaxRetries`
+to `DEFAULT_JOB_MAX_RETRIES` (2) and `OnExitHold` to `false`, and
+`success_exit_code` makes the expression compare against `JobSuccessExitCode`
+rather than baking the number in. An `OnExitRemove` the submitter set directly
+with `+OnExitRemove` or `MY.OnExitRemove` is left alone, unless
+`success_exit_code` or `retry_until` asked for a change -- which is why this
+has to run after the `+Attr` pass rather than where its submit commands are
+read.
+
+The submitter's `on_exit_remove` is OR'd onto the end of the generated
+expression, and the parenthesization of that join is load-bearing: every
+ClassAd operator binds at least as tightly as `||` except the ternary, so
+parenthesizing anything else would regroup `(a || b) || c` into `a || (b || c)`
+-- the same value, a different tree. Only a ternary gets parentheses, which is
+what `WrapExprTreeInParensForOp` does.
+
+Both families now evaluate their values the way condor_submit does rather than
+scanning a number off the front: `max_retries = 2+3` is five, and
+`retry_until = 1+1` is exit code 2. Both also reject what condor_submit
+rejects -- a negative `cron_window`, a non-integer `max_retries`, a
+`retry_until` outside int range -- instead of silently dropping the setting.
+Measured over the 600-file generated sweep, this added no file that
+condor_submit accepts and the Go parser refuses.
+
+What is deliberately left: `ScheddInterval`. C++ writes it only so the
+deferral clause of its generated `Requirements` can read it, and Go generates
+neither that clause nor a `Requirements` resembling C++'s. It belongs with the
+`Requirements` divergence at the top of this file, not with the cron
+attributes, which now agree.
 
 ## The container image
 

@@ -208,6 +208,22 @@ cron_window = 600
 	if ad == nil {
 		t.Fatal("Expected non-nil job ad")
 	}
+
+	for attr, want := range map[string]string{
+		"CronMinute":       `"0"`,
+		"CronHour":         `"2"`,
+		"DeferralWindow":   "600",
+		"DeferralPrepTime": "300",
+	} {
+		expr, ok := ad.Lookup(attr)
+		if !ok {
+			t.Errorf("%s is missing; want %s", attr, want)
+			continue
+		}
+		if got := expr.String(); got != want {
+			t.Errorf("%s = %s; want %s", attr, got, want)
+		}
+	}
 }
 
 func TestDeferralParameters(t *testing.T) {
@@ -233,6 +249,21 @@ deferral_prep_time = 300
 
 	if ad == nil {
 		t.Fatal("Expected non-nil job ad")
+	}
+
+	for attr, want := range map[string]string{
+		"DeferralTime":     "1640000000",
+		"DeferralWindow":   "3600",
+		"DeferralPrepTime": "300",
+	} {
+		expr, ok := ad.Lookup(attr)
+		if !ok {
+			t.Errorf("%s is missing; want %s", attr, want)
+			continue
+		}
+		if got := expr.String(); got != want {
+			t.Errorf("%s = %s; want %s", attr, got, want)
+		}
 	}
 }
 
