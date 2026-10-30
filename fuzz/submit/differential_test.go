@@ -33,12 +33,6 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\narguments = $(Process)\nqueue 3\n"},
 	{input: "executable = /bin/sleep\noutput = out.$(Process)\nerror = err.$(Process)\nlog = j.log\nqueue 2\n"},
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\nqueue\n"},
-	{input: "executable = /bin/sleep\n+Note = \"a   \\\n   b\"\nqueue\n",
-		reason: "whitespace before a line-continuation backslash: getline_implementation keeps it and joins the next line with nothing, so C++ gets \"a   b\"; Go trims it and inserts one space, giving \"a b\"."},
-	{input: "executable = /bin/sleep\n+a-b = 7\nqueue\n",
-		reason: "`+Attr` attribute name with a '-': C++ prefixes \"MY.\" to whatever it scanned, without running is_valid_param_name, so it makes an attribute named a-b; Go rejects the file."},
-	{input: "executable = /bin/sleep\n-Foo = 7\nqueue\n",
-		reason: "submit's `-Attr` form, which C++ stores as an empty value; the Go lexer has no '-' token at all and rejects the file."},
 
 	// --- parity: line endings and parameter names ---
 	// The first two were the known divergences the Cmd/UserLog comparison
@@ -71,6 +65,47 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\n+0abc = 7\n+0.5 = 7\nqueue\n"},
 	{input: "executable = /bin/sleep\nMY.0 = 7\nMY.0abc = 7\nqueue\n"},
 	{input: "executable = /bin/sleep\n+a.b = 7\n+a/b = 7\nqueue\n"},
+	// A letter outside ASCII is not a parameter-name character, so a macro
+	// named with one fails the file -- but the +Attr form never validates
+	// the name, so the same letter is fine in a job attribute.
+	{input: "executable = /bin/sleep\n\u00e9 = 7\nqueue\n"},
+	{input: "executable = /bin/sleep\n+caf\u00e9 = 7\nqueue\n"},
+	// `+Attr` skips name validation entirely, so the attribute name may
+	// hold characters a macro name may not.
+	{input: "executable = /bin/sleep\n+a-b = 7\nqueue\n"},
+	// submit's `-Attr` form. It is not the inverse of `+Attr`: it stores an
+	// empty value, which reaches the ad as `undefined`, and a later `-Attr`
+	// overrides an earlier `+Attr`.
+	{input: "executable = /bin/sleep\n-Foo = 7\nqueue\n"},
+	{input: "executable = /bin/sleep\n-a-b = 7\n-1 = 7\nqueue\n"},
+	{input: "executable = /bin/sleep\n+Foo = 7\n-Foo = 9\nqueue\n"},
+	// An empty value is the same thing: `undefined`, not "leave it off".
+	{input: "executable = /bin/sleep\n+A =\n+B = \nMY.C =\nqueue\n"},
+	{input: "executable = /bin/sleep\n+A = $(nosuch)\nqueue\n"},
+
+	// --- parity: line continuation ---
+	// Each physical line is trimmed of trailing whitespace BEFORE the text
+	// is tested for a trailing backslash, so whitespace before the
+	// backslash is part of the value, the next line is joined on with
+	// nothing between, and whitespace AFTER the backslash still continues
+	// the line. One space before the backslash agrees under either rule,
+	// which is how a space-inserting version of this hid.
+	{input: "executable = /bin/sleep\n+Note = \"a   \\\n   b\"\nqueue\n"},
+	{input: "executable = /bin/sleep\n+Note = \"a\\\nb\"\nqueue\n"},
+	{input: "executable = /bin/sleep\n+Note = \"a\t\t\\\n\t\tb\"\nqueue\n"},
+	{input: "executable = /bin/sleep\n+Note = \"a \\   \nb\"\nqueue\n"},
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in a\\\n b\n"},
+	// The join contributes nothing on either side: with an empty left half
+	// the executable is the continuation line itself, not a path with a
+	// leading space in it.
+	{input: "eXeCutABle=\\\nqueue\n"},
+	// The backslash test looks at the whole logical line so far, not just
+	// the physical line that was read last, so an empty continuation line
+	// leaves the character before it as the one tested.
+	{input: "executable = /bin/sleep\nX = a\\\\\n\nb\n+Note = \"[$(X)]\"\nqueue\n"},
+	// A continuation inside a multi-line item list is assembled before the
+	// list is split, on both sides.
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in (\na \\\nb\nc\n)\n"},
 
 	// --- parity: path resolution ---
 	// A relative executable or log is resolved to an absolute path, and
@@ -197,6 +232,30 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\nqueue name from (\n  x\n  y\n)\n"},
 	{input: "executable = /bin/sleep\narguments = $(x) $(y)\nqueue x, y from (\n1 2\n3 4\n)\n"},
 	{input: "executable = /bin/sleep\narguments = $(x) $(y)\nqueue x, y from (\n1 2 3\n4\n)\n"},
+
+	// --- parity, exercising item lists written without parentheses ---
+	// HTCondor anchors the parse on the `in` keyword and takes the rest of
+	// the line as the list, so the parentheses are decoration.
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in a b\n"},
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in 0 00\n"},
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in a, b , c\n"},
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue 2 in a b\n"},
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue x in a  b\n"},
+	{input: "executable = /bin/sleep\narguments = $(x) $(y)\nqueue x,y in a b, c d\n"},
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in\ta\tb\n"},
+	// Without a list to delimit, ')' and '#' are ordinary item characters.
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in a)\n"},
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in a b # c\n"},
+	// A qualifier is only a qualifier when something on the line terminates
+	// it; at the end of the line it is an ordinary item.
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in files\n"},
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in table\n"},
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in [1:2]\n"},
+	// An item list that is empty queues the count with every loop variable
+	// expanding to nothing, rather than queueing nothing.
+	{input: "executable = /bin/sleep\narguments = A$(Item)B\nqueue in ()\n"},
+	{input: "executable = /bin/sleep\narguments = A$(Item)B\nqueue 2 in ()\n"},
+	{input: "executable = /bin/sleep\narguments = A$(Item)B\nqueue x in ()\n"},
 }
 
 func requireOracle(t testing.TB) {

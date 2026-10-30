@@ -399,12 +399,14 @@ func createIteratorFromQueue(qs *config.QueueStatement, access queueFileAccess) 
 	}
 
 	// Determine which type of queue statement this is
-	hasVars := len(qs.VarNames) > 0
 	hasItems := len(qs.Items) > 0
 	hasFile := qs.File != ""
 
-	if !hasVars && !hasItems && !hasFile {
-		// Simple: queue [N]
+	if !hasItems && !hasFile {
+		// Simple: queue [N]. Loop variables with no items behind them --
+		// `queue x in ()` -- are this case too: HTCondor queues the count
+		// and leaves every loop variable expanding to nothing, rather than
+		// queueing nothing at all.
 		return newSimpleIterator(count), nil
 	}
 

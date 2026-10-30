@@ -41,6 +41,14 @@ syntax), Go emits `Args` (V1). The two attributes are parsed differently by the
 starter — V1 splits on whitespace, V2 honors quoting — so the attribute *name*
 is semantic, not cosmetic.
 
+The values differ too, which the `args`/`arguments` entries in
+`knownDivergent` currently hide: C++ runs the text through `ArgList` and gets
+back a canonical form, so `arguments = a  b` is `"a b"` on the C++ side and
+`"a  b"` on the Go side, and trailing whitespace — which only a line
+continuation can produce, since the reader trims the line otherwise — is
+dropped by C++ and kept by Go. Fixing the naming split will expose this, so it
+is written down here rather than discovered twice.
+
 **`Cmd` and `UserLog` were relative.** FIXED. C++ resolved the executable and
 the log into absolute paths and Go stored them as written, so a job whose
 `executable` or `log` was relative recorded a path that only resolved from the
@@ -87,32 +95,37 @@ The digest keeps macro references unexpanded (`arguments=$(item)`), which is
 what lets the schedd vary them per proc; a test asserts that, because a digest
 with the values baked in would materialize every proc identically.
 
-## Line assembly
-
-**Whitespace before a line-continuation backslash.** `getline_implementation`
-trims the physical line with `isspace()` *and then* looks for the trailing
-backslash, so whitespace sitting before the backslash is kept, and the
-continuation is joined on with nothing between — the next line's leading
-whitespace having been trimmed in turn. For
-
-```
-+Note = "a   \
-   b"
-```
-
-C++ produces `"a   b"`; Go trims the run to nothing and inserts one space,
-producing `"a b"`. Files with exactly one space before the backslash agree by
-coincidence, which is why this hid for so long.
-
 ## Parse-acceptance divergence
 
 Reported by `TestSeedParseAcceptance`, which logs rather than fails — these are
-real, but failing on them would bury the semantic findings above.
+real, but failing on them would bury the semantic findings above. No seed
+reaches it today.
 
-- `queue name in (alice bob)` — C++ accepts a space-separated inline item list;
-  Go's parser requires commas and rejects the file.
-- `queue name from ( ... )` — C++ accepts an inline `from (...)` list; Go
-  rejects the open paren.
+## A quoted item file keeps its quotes in C++
+
+`queue from "items.txt"` opens a file whose name is `"items.txt"`, quotes
+included: `parse_queue_args` takes the remainder of the line as the name and
+never looks at quoting. This parser strips them, deliberately: a quoted path
+is the only way a caller can name a file whose path contains a space, and the
+API has read it that way since before this comparison existed. Neither side
+can open a file the other would, so the fuzzer sees both reject the file and
+nothing is hidden by the choice.
+
+## The queue line is not macro-expanded
+
+`SubmitHash::parse_q_args` runs `expand_macro()` over the whole queue line
+before it parses anything, so a macro can produce the item list itself:
+
+```
+L = a b
+queue in ($(L))
+```
+
+is two procs in C++ and one -- whose item is the literal text `$(L)` -- in Go.
+The same goes for `queue from $(F)`, where C++ opens the file `$(F)` names and
+Go looks for a file called `$(F)`. Expanding the queue line needs the macro
+table at lex time, which this parser does not have at that point, so it is
+recorded rather than fixed.
 
 ## The oracle was under-reporting until it called config()
 
@@ -174,6 +187,101 @@ that C++ places on the cluster ad as a `MAX(...)` expression instead.
 sets nothing.
 
 ## Fixed
+
+**An inline item list had to be parenthesised.** HTCondor anchors the queue
+parse on the `in`/`from` keyword and takes the rest of the line as the item
+list -- `parse_queue_args` only looks for a `(` to decide whether the list is
+bracketed or spans lines, never to decide whether there is one. So
+`queue in a b` is two jobs, and `queue 2 in a b` is four. Go's grammar
+required the parentheses and failed the file, which for a submit file that
+was *not* rejected elsewhere meant the user got an error where
+`condor_submit` would have run their jobs. `queue in 0 00` was the fuzzer's
+reproducer; `queue name in (alice bob)` and `queue name from ( ... )`, both
+listed here as parse-acceptance divergences, had already been fixed by the
+split-items change and are parity seeds now.
+
+The tail of an `in`/`from` is read by the lexer now, the way HTCondor reads
+it: split on whitespace and commas for `in`, taken whole -- quotes, spaces
+and all -- as the item file's name for `from`. Two details the oracle settled:
+a leading `files`/`dirs`/`any`/`table` or `[slice]` only counts as a qualifier
+when something on the line terminates it, so `queue in files` is the single
+item "files" while `queue in files x` is an error; and an item list that is
+empty (`queue 2 in ()`) queues the count with every loop variable expanding to
+nothing, rather than queueing nothing at all -- Go used to reject that file
+outright. The qualifiers themselves are still unimplemented, and a queue line
+that uses one is now rejected rather than read as items, because reading
+`[1:2]` as an item would silently submit the wrong jobs.
+
+**Whitespace before a line-continuation backslash.** `getline_implementation`
+trims the physical line with `isspace()` *and then* looks for the trailing
+backslash, so whitespace sitting before the backslash is kept, the
+continuation is joined on with nothing between — the next line's leading
+whitespace having been trimmed in turn — and whitespace *after* the backslash
+still continues the line. For
+
+```
++Note = "a   \
+   b"
+```
+
+C++ produces `"a   b"`; Go trimmed the run to nothing and inserted one space,
+producing `"a b"`, so any value assembled across lines — an `arguments`, a
+`requirements`, a `transfer_input_files` list — reached the job with different
+text than `condor_submit` would have given it. Files with exactly one space
+before the backslash agree by coincidence, which is why this hid for so long,
+and why both of the lexer's continuation tests passed throughout.
+
+The inserted space was the same bug seen from the other end, and the fuzzer
+found that end too, in
+
+```
+eXeCutABle=\
+queue
+```
+
+where C++ contributes nothing between the two halves and resolves `Cmd` to
+`<iwd>/queue`, while Go contributed its separator and produced `<iwd>/ queue`
+— a path with a space in it, which cannot exist. One rule covers both: the
+join never inserts anything, and what survives around it is decided by the
+trim that has already happened on each side.
+
+The lexer now follows that physical-line model: trim the line back to where
+it started, then test its last character for the backslash, then join the
+next line — itself trimmed of its leading whitespace — straight on.
+
+Two further rules fell out of writing it that way, each with a test. A blank
+continuation line ends the value and does not re-trim what came before it, so
+`X = v   \` followed by an empty line keeps the three spaces. And the
+backslash test looks at the whole logical line assembled so far, not at the
+physical line just read — `end_ptr[-1]` in the C++ — so `X = a\\` followed by
+an empty line and then `b` continues onto `b` rather than stopping.
+
+**`+a-b = 7`, `-Foo = 7`, and `+A =`.** All three are the same code path in
+`Parse_macros`: a submit line whose name begins with `+` or `-` becomes
+`insert_macro("MY." + name+1, (*name=='+') ? rhs : "")`, with no
+`is_valid_param_name()` anywhere. Three consequences, none of which Go had:
+
+- the attribute name is whatever was scanned before the first whitespace or
+  operator, so `+a-b = 7` makes an attribute literally named `a-b` — a name
+  the same file may not give a macro. Go rejected the file.
+- `-Attr` is **not** the inverse of `+Attr` and removes nothing: it stores an
+  empty value, and `SetForcedAttributes` turns an empty value into the literal
+  `undefined`. `-Foo = 7` puts `Foo = undefined` on the ad, and a `-Foo` after
+  a `+Foo` overrides it. The Go lexer had no `-` token at that position at all
+  and rejected the file.
+- an empty value means the same thing whichever sigil wrote it, so `+A =`,
+  `MY.A =` and `+A = $(nosuch)` all set `A = undefined`. Go left the attribute
+  off the ad, which is a different answer for any expression that reads it:
+  absent means the attribute is inherited from the cluster ad, `undefined`
+  means it is not.
+
+**A non-ASCII parameter name was accepted.** `condor_isidchar()` compares
+against `'a'..'z'`, `'A'..'Z'` and `'0'..'9', so `café = 1` fails
+`is_valid_param_name()` and HTCondor rejects the file; the Go lexer read the
+name with `unicode.IsLetter` and accepted it, defining a macro that nothing
+else could refer to. The charset is ASCII here now. A job **attribute** name
+is the opposite case and was already right: `+café = 1` is accepted by both,
+because the `+` form skips the check.
 
 **`request_<resource>` is generic, and Go only knew three.** `request_foo = N`
 becomes `RequestFoo` in C++ — that is how custom resources (licenses,
