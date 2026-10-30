@@ -103,15 +103,6 @@ var excluded = map[string]string{
 	// sides would differ by the contents of the fuzzer's own environment.
 	"getenv":  "reads the host environment; the Go side runs with AllowLocalAccess off",
 	"get_env": "reads the host environment; the Go side runs with AllowLocalAccess off",
-	// SIGSEGV in the oracle, not a Go/C++ divergence: SetContainerSpecial ->
-	// process_container_input_files iterates
-	// StringTokenIterator(param("CONTAINER_SHARED_FS"), ","), and the shim
-	// loads no config, so param() returns null and StringTokenIterator::end()
-	// calls strlen(nullptr). A real condor_submit always has the param's
-	// /cvmfs default, so the crash is a hole in the oracle rather than a bug
-	// a submitter can reach. The container universe is still generated, using
-	// docker_image, which does not take that path.
-	"container_image": "crashes the in-process oracle; see FINDINGS.md",
 	// SubmitHash opens and parses the proxy, so the result depends on what is
 	// on the fuzzing host rather than on the submit file.
 	"x509userproxy": "reads and validates an X.509 proxy file off the host",
@@ -229,9 +220,7 @@ func universePrelude(u string) []string {
 	case "parallel":
 		return []string{"machine_count = 2"}
 	case "container":
-		// docker_image rather than container_image: see the exclusion note on
-		// container_image in `excluded`.
-		return []string{"docker_image = debian:12"}
+		return []string{"container_image = docker://busybox"}
 	case "docker":
 		return []string{"docker_image = debian:12"}
 	}
