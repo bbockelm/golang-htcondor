@@ -8,6 +8,7 @@
 #include "condor_config.h"
 #include "condor_attributes.h"
 #include "submit_utils.h"
+#include "submit_protocol.h"
 #include "condor_version.h"
 
 #include "shim.h"
@@ -231,7 +232,7 @@ extern "C" int submit_make_ads(const char *text, int mode, int max_procs, char *
 	}
 }
 
-extern "C" int submit_factory_info(const char *text, int max_items, char **out) {
+extern "C" int submit_factory_info(const char *text, int max_items, const char *items_filename, char **out) {
 	*out = nullptr;
 	try {
 		if (max_items <= 0) {
@@ -248,7 +249,25 @@ extern "C" int submit_factory_info(const char *text, int max_items, char **out) 
 			return 0;
 		}
 
+		const int cluster = 1;
 		std::string result;
+
+		// The order below is condor_submit's (submit.cpp, the want_factory
+		// branch) and it is load-bearing:
+		//
+		//   begin(set_live=false) then next_raw(set_live=false) loads the
+		//   first row WITHOUT pushing the loop variables into the submit
+		//   hash. A digest built once they are live has that row's values
+		//   baked into it -- `arguments=a 0` instead of
+		//   `arguments=$(item) $(Process)` -- and every proc the schedd
+		//   materializes would then be the first one.
+		ssqa.begin(JOB_ID_KEY(cluster, 0), false);
+		JOB_ID_KEY jid;
+		int item_index = 0, step = 0;
+		if (ssqa.next_raw(jid, item_index, step, false) < 0) {
+			*out = strdup("queue iteration failed");
+			return 0;
+		}
 
 		// want_factory_submit reads max_materialize, else max_idle (or its
 		// alternate spelling), and is the whole of the client-side decision.
@@ -256,7 +275,14 @@ extern "C" int submit_factory_info(const char *text, int max_items, char **out) 
 		const bool factory = hash.want_factory_submit(max_materialize);
 		result += factory ? "#factory 1\n" : "#factory 0\n";
 		if (factory) {
+			// condor_submit's clamp: an unspecified limit becomes INT_MAX,
+			// then the total job count, then at least one.
+			int total_procs = ssqa.selected_job_count();
+			if (max_materialize <= 0) max_materialize = INT_MAX;
+			max_materialize = MIN(max_materialize, total_procs);
+			max_materialize = MAX(max_materialize, 1);
 			result += "#max_materialize " + std::to_string(max_materialize) + "\n";
+			result += "#total_procs " + std::to_string(total_procs) + "\n";
 		}
 
 		const auto &vars = ssqa.vars();
@@ -267,31 +293,25 @@ extern "C" int submit_factory_info(const char *text, int max_items, char **out) 
 		}
 		result += "\n";
 
-		// The digest: the submit file reduced to what the schedd needs to
-		// expand each proc itself. This is the payload a factory submission
-		// sends in place of per-proc ads.
-		std::string digest;
-		hash.make_digest(digest, 1, vars, 0);
-		result += "#digest\n";
-		result += digest;
-		if (!digest.empty() && digest.back() != '\n') {
-			result += "\n";
-		}
-		result += "#enddigest\n";
-
-		// The itemdata rows condor_submit would send with send_Itemdata.
-		// This runs AFTER make_digest: next_selected(set_live=true) sets the
-		// queue statement's loop variables, and a digest built afterwards
-		// captures the last row's values instead of the macro references.
-		int n = 0;
-		JOB_ID_KEY jid;
-		int item_index = 0, step = 0;
-		ssqa.begin(JOB_ID_KEY(1, 0), false);
+		// The itemdata rows, encoded by the same function that feeds
+		// SendMaterializeData: multi-field rows are split and rejoined with
+		// the ASCII unit separator, and every row ends in a newline. The
+		// newline is stripped here only because the report is line-oriented.
+		//
+		// This consumes m_fea.items_idx, so it runs before anything that
+		// iterates the rows again.
 		std::vector<std::string> rows;
-		while (ssqa.next_selected(jid, item_index, step, true) > 0 && n < max_items) {
-			const char *item = hash.lookup("Item");
-			rows.push_back(item ? item : "");
+		ssqa.m_fea.items_idx = 0;
+		std::string row;
+		int rrv = 0, n = 0;
+		while (n < max_items && (rrv = AbstractScheddQ::next_rowdata(&ssqa.m_fea, row)) == 1) {
+			while (!row.empty() && row.back() == '\n') { row.pop_back(); }
+			rows.push_back(row);
 			++n;
+		}
+		if (rrv < 0) {
+			*out = strdup("itemdata row encoding failed");
+			return 0;
 		}
 		result += "#items " + std::to_string(rows.size()) + "\n";
 		for (const auto &r : rows) {
@@ -300,6 +320,36 @@ extern "C" int submit_factory_info(const char *text, int max_items, char **out) 
 			result += "\n";
 		}
 
+		// The digest: the submit file reduced to what the schedd needs to
+		// expand each proc itself. This is the payload a factory submission
+		// sends in place of per-proc ads.
+		std::string digest;
+		hash.make_digest(digest, cluster, vars, 0);
+
+		// send_Itemdata spools the rows at the schedd and rewrites the queue
+		// statement to read them back from the file the schedd named, so the
+		// queue statement appended below says `from <that file>` rather than
+		// carrying an inline item list the digest never contains. There is no
+		// schedd here, so the caller supplies the name.
+		if (!ssqa.m_fea.items.empty()) {
+			ssqa.m_fea.foreach_mode = foreach_from;
+			ssqa.m_fea.items_filename = items_filename ? items_filename : "";
+		}
+
+		// Without this the digest has no queue statement and the schedd would
+		// not know how to iterate. condor_submit appends it after
+		// send_Itemdata and before set_Factory.
+		if (append_queue_statement(digest, ssqa.m_fea) < 0) {
+			*out = strdup("append_queue_statement failed");
+			return 0;
+		}
+
+		result += "#digest\n";
+		result += digest;
+		if (!digest.empty() && digest.back() != '\n') {
+			result += "\n";
+		}
+		result += "#enddigest\n";
 
 		*out = strdup(result.c_str());
 		return *out ? 1 : -1;

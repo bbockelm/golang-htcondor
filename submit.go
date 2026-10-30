@@ -76,6 +76,10 @@ type SubmitFile struct {
 	queueCount    int
 	queueVars     []string
 	queueIterator SubmitIterator
+	// queueStmt is the queue statement as parsed, kept because a late
+	// materialization digest has to write the statement back out for the
+	// schedd to iterate. Nil when the file has no queue statement.
+	queueStmt *config.QueueStatement
 }
 
 // SubmitIterator provides iteration over queue items
@@ -106,6 +110,13 @@ type SubmitResult struct {
 	ClusterAd *classad.ClassAd
 
 	ProcAds []*classad.ClassAd
+
+	// Factory is set when the submission is a job factory: the submit file
+	// asked for late materialization with max_materialize, max_idle or
+	// materialize_max_idle. ProcAds is then empty, because a factory
+	// submission sends no proc ads -- it sends this instead and the schedd
+	// materializes the procs itself. Nil for an ordinary submission.
+	Factory *JobFactory
 }
 
 // Universe constants matching HTCondor
@@ -255,6 +266,7 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 		sf.queueIterator = iterator
 		sf.queueCount = iterator.Count()
 		sf.queueVars = queueStmt.VarNames
+		sf.queueStmt = queueStmt
 	} else {
 		// No queue statement means queue 1
 		sf.queueIterator = newSimpleIterator(1)
@@ -3042,42 +3054,50 @@ func (sf *SubmitFile) MakeProcAd(clusterID int, procID int, queueVars map[string
 	return sf.MakeJobAd(jobID, queueVars)
 }
 
-// SubmitLate performs late materialization submission
-// This creates a cluster ad template and individual proc ads with only differing attributes
-// This is more efficient for large job submissions
+// SubmitLate submits the jobs from this submit file as a job factory when
+// the file asks to be submitted as one, and exactly as Submit does when it
+// does not.
+//
+// A file that sets max_materialize, max_idle or materialize_max_idle is
+// asking the schedd to materialize its procs itself. For one, the result
+// carries a Factory and no proc ads: the submission is the cluster ad, the
+// itemdata rows and the submit digest, which is a handful of round trips
+// whatever the job count. For any other file there is nothing to late
+// materialize, so this builds the same per-proc ads Submit does.
 func (sf *SubmitFile) SubmitLate(clusterID int) (*SubmitResult, error) {
+	// Built before the cluster ad, as condor_submit builds it. condor_submit
+	// has to: it reads the first row without making the loop variables live,
+	// because its digest is a dump of a macro table that a live row would
+	// have written into. This does not have to -- the digest protects the
+	// per-proc knobs by name during expansion, so it comes out the same
+	// wherever the iterator is -- but the order is kept so the two can be
+	// read against each other.
+	factory, err := sf.Factory(clusterID)
+	if err != nil {
+		return nil, err
+	}
+	if factory == nil {
+		return sf.Submit(clusterID)
+	}
+
 	result := &SubmitResult{
 		ClusterID: clusterID,
 		NumProcs:  sf.queueCount,
-		ProcAds:   make([]*classad.ClassAd, 0, sf.queueCount),
+		Factory:   factory,
 	}
 
-	// Create cluster ad (template for all procs)
-	// For now, we use proc 0 as the cluster ad template
-	proc := 0
-	sf.queueIterator.Next()
-	queueVars := sf.queueIterator.Values()
-
+	// condor_submit still sends a cluster ad, built with the first row's
+	// loop variables live, and the schedd chains every proc it materializes
+	// to it.
+	queueVars := map[string]string{}
+	if sf.queueIterator.Next() {
+		queueVars = sf.queueIterator.Values()
+	}
 	clusterAd, err := sf.MakeJobAd(JobID{Cluster: clusterID, Proc: 0}, queueVars)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cluster ad: %w", err)
 	}
 	result.ClusterAd = clusterAd
-	result.ProcAds = append(result.ProcAds, clusterAd)
-	proc++
-
-	// Create remaining proc ads
-	for sf.queueIterator.Next() {
-		queueVars := sf.queueIterator.Values()
-
-		procAd, err := sf.MakeProcAd(clusterID, proc, queueVars)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create proc %d ad: %w", proc, err)
-		}
-
-		result.ProcAds = append(result.ProcAds, procAd)
-		proc++
-	}
 
 	return result, nil
 }

@@ -70,11 +70,15 @@ type FactoryInfo struct {
 	// Factory is want_factory_submit(): the submission is a job factory
 	// because the file set max_materialize, max_idle or materialize_max_idle.
 	Factory bool
-	// MaxMaterialize is the limit, INT_MAX when only max_idle was given.
+	// MaxMaterialize is the limit sent to SetJobFactory, after
+	// condor_submit's clamp.
 	MaxMaterialize int64
+	// TotalProcs is how many jobs the queue statement asks for.
+	TotalProcs int64
 	// Vars are the queue statement's loop variables.
 	Vars []string
-	// Items are the itemdata rows, capped by the caller's maxItems.
+	// Items are the itemdata rows as SendMaterializeData would send them,
+	// capped by the caller's maxItems.
 	Items []string
 	// Digest is the submit digest, which keeps macro references unexpanded
 	// so the schedd can expand them per proc.
@@ -84,6 +88,6 @@ type FactoryInfo struct {
 }
 
 // Factory panics: callers must check Available before invoking the oracle.
-func Factory(string, int) FactoryInfo {
+func Factory(string, int, string) FactoryInfo {
 	panic("oracle.Factory: built without the libcondor_utils tag")
 }

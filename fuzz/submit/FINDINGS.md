@@ -60,40 +60,90 @@ compared now; the rule they follow is written up in `submit.go` alongside
 **`queue 2 in (a b)` produces the wrong number of jobs.** C++ makes 4 procs
 (2 per item over 2 items); Go makes 2.
 
-## Late materialization is not implemented, and its keywords are dropped
+## Late materialization
 
 `max_materialize`, `max_idle` and `materialize_max_idle` make `condor_submit`
 submit a **job factory**: it sends the cluster ad, a submit digest and the
 itemdata rows, and the schedd materializes procs itself, keeping at most
 `max_idle` of them idle at a time. None of this needs a schedd to check —
-`want_factory_submit()` and `make_digest()` are `SubmitHash` methods.
+`want_factory_submit()` and `make_digest()` are `SubmitHash` methods, so the
+oracle reports the whole client half.
 
-Measured, for `max_materialize = 2 / queue 5`:
+This was a gap and is now implemented. `SubmitFile.SubmitLate` sends a factory
+when the file asks for one and materializes procs itself when it does not;
+`Schedd.Submit` uses it when the schedd advertises `LateMaterialize`, and
+falls back to eager materialization when the schedd refuses or is too old,
+which is what `condor_submit` does — those keywords ask for a factory, they do
+not insist on one. `TestGoLateMaterializationMatchesCondorSubmit` compares the
+decision, the limit, the loop variables, the itemdata rows and the digest
+against the oracle for every seed in `factorySeeds`.
 
-```
-cpp: factory=true  max_materialize=2  + a digest for the schedd to expand
-go:  5 fully materialized proc ads
-```
-
-All three spellings behave the same. `SubmitFile.SubmitLate` is named for the
-feature but does not implement it: it builds the same per-proc ads `Submit`
-does, with `ProcAds[0]` relabelled as the cluster ad.
-
-Worse than the missing feature: **Go drops `JobMaterializeMaxIdle`.** Both
-`max_idle` and `materialize_max_idle` set it in C++ and neither does in Go, so
-even a schedd willing to materialize lazily would be told nothing and a
-submission that asked to be throttled is silently submitted unthrottled. That
-part is a small fix independent of implementing factories.
-
-`max_materialize` is different and is **not** a divergence: it never becomes an
-ad attribute on either side. `want_factory_submit` reads it and `condor_submit`
-passes it to `set_Factory()` as a protocol argument, so there is nothing on the
-ad to compare. The test asserts the oracle really does set an attribute before
+`max_materialize` is **not** an ad attribute on either side.
+`want_factory_submit` reads it and `condor_submit` passes it to
+`set_Factory()` as a protocol argument, so there is nothing on the ad to
+compare. The test asserts the oracle really does set an attribute before
 checking Go for it, so a case like this cannot be mistaken for a Go bug again.
 
-The digest keeps macro references unexpanded (`arguments=$(item)`), which is
-what lets the schedd vary them per proc; a test asserts that, because a digest
-with the values baked in would materialize every proc identically.
+### What the digest turned up
+
+**The itemdata filename is the one thing a client cannot compute.** The queue
+statement at the end of the digest reads the rows back from a file the *schedd*
+named in its reply to `SendMaterializeData`, so the digest can only be finished
+after the rows have been sent. `oracle.Factory` takes that filename as an
+argument to stand in for the schedd; `JobFactory.Digest` takes it for real.
+
+**`queue 5` puts `Item=` in the digest.** `condor_submit` reads the first row
+before building the digest, and reading from an empty list defines the macro
+`Item` as empty. `Item` is not a prunable keyword, so that empty definition
+lands in the digest. Nothing documents it and nothing would suggest it; it came
+out of running the oracle.
+
+It is a definition, not a default: a submit file that sets `Item = mine` and
+then writes `queue 5` has that value **replaced** by the empty one, so the
+digest carries `Item=` and the schedd never sees `mine`. Go kept the file's
+value until a seed caught it. Where the key sits also follows from this —
+an `Item` the file assigned keeps its sorted position, while one only the
+empty definition created lands in the table's unsorted tail, after every key
+the file wrote.
+
+**`$(ItemIndex)` is frozen to `0` for every job the factory makes.**
+`ItemIndex` and `Row` are two names for one macro in the submit hash, but
+`per_proc_keys` protects only `Row`, so `ItemIndex` is expanded while the
+digest is built — and no row is live then, so it takes the unlive default,
+`0`. A submit file numbering its output with `$(ItemIndex)` therefore gets
+`o.0` on every proc under late materialization and the real row number
+without it. Go matches it, because a digest that differed would be the worse
+bug.
+
+**Keys are written in the macro table's order, which is sorted
+case-insensitively — except for the tail.** `Item` above is appended after the
+sort, because the hash is sorted when the file has been read and `Item` is
+defined after that.
+
+**The inline item list splits on whitespace as well as commas.**
+`queue a,b in (1 2, 3 4)` is four rows of one field, not two of two. The `from`
+form splits on lines, so `from (1 2\n3 4\n)` is the two-field case.
+
+### What is not covered
+
+The digest expands any macro that is not per-proc, which includes the submit
+hash's own *defaults* — `ARCH`, `OPSYS*`, `Day`, `Month`, `JobId`,
+`JobListId`, `IsLinux`, `IsWindows`, `Request_CPUs`, `Request_Memory`. Go's
+config does not define that family, so a submit file referring to one of them
+would produce a different digest. `ItemIndex` was the member of it this work
+hit and fixed; the rest are untested in either direction and are a submit-wide
+difference rather than a factory one, since the same expansion feeds an
+ordinary job ad.
+
+`SubmitRemote` does not use factories. Remote submission spools files per proc
+and hands the proc ads back to the caller to do it, and a factory has no proc
+ads to hand back.
+
+A queue statement slice (`queue x from [1:10] file`) would belong in the
+digest's queue statement. The Go grammar does not accept one, so
+`JobFactory` reads the field rather than assuming it is empty, and a grammar
+that learns to accept one writes it out instead of silently submitting every
+row.
 
 ## Parse-acceptance divergence
 

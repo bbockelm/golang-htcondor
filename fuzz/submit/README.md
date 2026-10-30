@@ -23,10 +23,15 @@ statement, calling `make_job_ad` per proc — and can emit either:
 | `ModePlacement` | the cluster ad plus each proc's own attributes, after `fold_job_into_base_ad` | what the schedd actually stores per ad |
 | `Factory()` | the factory decision, materialize limit, loop variables, itemdata rows and submit digest | what a late-materialization submit sends instead of proc ads |
 
-`Factory()` needs no schedd either: whether a submission is a factory, its
+`Factory()` needs almost no schedd: whether a submission is a factory, its
 limit, the itemdata and the digest are all computed client-side by
-`SubmitHash`. Only the schedd's expansion of the digest would need one, and
-that is the schedd's behavior rather than the parser's.
+`SubmitHash`. The exception is the path the schedd spools the itemdata to,
+which the queue statement at the end of the digest names and which the real
+`send_Itemdata` learns from the schedd's reply — `Factory()` takes it as an
+argument so the report is deterministic. The schedd's *expansion* of the
+digest is its behavior rather than the parser's, and
+`TestSubmitLateMaterializesThroughTheSchedd` in the root package covers that
+against a real one.
 
 `ModeAds` is what the fuzz target compares today. `ModePlacement` exists and is
 verified, but the Go side of that comparison is not wired up yet — see

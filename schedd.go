@@ -618,11 +618,41 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 		return "", submissionErr
 	}
 
-	// Generate job ads from the submit file
-	submitResult, err := submitFile.Submit(clusterID)
+	// Generate job ads from the submit file.
+	//
+	// A file asking for late materialization is submitted as a job factory
+	// when the schedd accepts one: the schedd gets the cluster ad, the
+	// itemdata and a submit digest, and materializes the procs itself. When
+	// the schedd refuses or is too old to know about factories, the
+	// submission falls back to materializing every proc here, which is what
+	// condor_submit does -- max_materialize and max_idle ask for a factory,
+	// they do not insist on one.
+	generate := submitFile.Submit
+	if qmgmt.AllowsLateMaterialize() {
+		generate = submitFile.SubmitLate
+	}
+	submitResult, err := generate(clusterID)
 	if err != nil {
 		submissionErr = fmt.Errorf("failed to generate job ads: %w", err)
 		return "", submissionErr
+	}
+
+	if factory := submitResult.Factory; factory != nil {
+		// The itemdata goes first, because the digest's queue statement
+		// names the file the schedd spooled it to.
+		if err := qmgmt.sendFactory(ctx, factory); err != nil {
+			submissionErr = fmt.Errorf("failed to submit job factory for cluster %d: %w", clusterID, err)
+			return "", submissionErr
+		}
+		if err := qmgmt.SendClusterAttributes(ctx, clusterID, submitResult.ClusterAd); err != nil {
+			submissionErr = fmt.Errorf("failed to set attributes for cluster %d: %w", clusterID, err)
+			return "", submissionErr
+		}
+		if err := qmgmt.CommitTransaction(ctx); err != nil {
+			submissionErr = fmt.Errorf("failed to commit transaction: %w", err)
+			return "", submissionErr
+		}
+		return fmt.Sprintf("%d", clusterID), nil
 	}
 
 	// Submit each proc. The first proc's ad becomes the cluster ad: it is

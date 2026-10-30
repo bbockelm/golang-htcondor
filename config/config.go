@@ -1339,3 +1339,18 @@ func SplitConfigList(list string) []string {
 
 	return parts
 }
+
+// RawValue returns a parameter's stored value with no macro expansion, and
+// whether it is defined. Names match case-insensitively, as everywhere else.
+//
+// Get is what almost every caller wants. This is for the one that has to see
+// the macro references themselves rather than what they expand to: a submit
+// digest sends the unexpanded text to the schedd, which expands it once per
+// job it materializes.
+func (c *Config) RawValue(key string) (string, bool) {
+	actual, ok := c.resolveKey(c.scopedLookupKey(key))
+	if !ok {
+		return "", false
+	}
+	return c.values[actual], true
+}

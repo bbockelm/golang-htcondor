@@ -170,30 +170,42 @@ type FactoryInfo struct {
 	// Factory is want_factory_submit(): the submission is a job factory
 	// because the file set max_materialize, max_idle or materialize_max_idle.
 	Factory bool
-	// MaxMaterialize is the limit, INT_MAX when only max_idle was given.
+	// MaxMaterialize is the limit sent to SetJobFactory, after
+	// condor_submit's clamp: an unspecified limit becomes the total job
+	// count, and the result is never below one.
 	MaxMaterialize int64
+	// TotalProcs is how many jobs the queue statement asks for.
+	TotalProcs int64
 	// Vars are the queue statement's loop variables.
 	Vars []string
-	// Items are the itemdata rows, capped by the caller's maxItems.
+	// Items are the itemdata rows as SendMaterializeData would send them --
+	// multi-field rows joined with \x1f -- minus the newline each carries on
+	// the wire. Capped by the caller's maxItems.
 	Items []string
 	// Digest is the submit digest, which keeps macro references unexpanded
-	// so the schedd can expand them per proc.
+	// so the schedd can expand them per proc, and ends with the queue
+	// statement the schedd iterates.
 	Digest string
 	Err    string
 	Panic  bool
 }
 
 // Factory reports what a late-materialization submission of text would send.
-// No schedd is involved: SubmitHash computes all of it client-side.
-func Factory(text string, maxItems int) FactoryInfo {
+//
+// itemsFilename stands in for the spooled itemdata path the schedd returns
+// from SendMaterializeData, which the queue statement at the end of the digest
+// names; it is ignored when the queue statement has no items.
+func Factory(text string, maxItems int, itemsFilename string) FactoryInfo {
 	cppMu.Lock()
 	defer cppMu.Unlock()
 
 	ctext := C.CString(text)
 	defer C.free(unsafe.Pointer(ctext))
+	cfile := C.CString(itemsFilename)
+	defer C.free(unsafe.Pointer(cfile))
 
 	var out *C.char
-	rc := C.submit_factory_info(ctext, C.int(maxItems), &out)
+	rc := C.submit_factory_info(ctext, C.int(maxItems), cfile, &out)
 	var raw string
 	if out != nil {
 		raw = C.GoString(out)
@@ -229,6 +241,11 @@ func parseFactoryInfo(raw string) FactoryInfo {
 			if err == nil {
 				fi.MaxMaterialize = n
 			}
+		case strings.HasPrefix(line, "#total_procs "):
+			n, err := strconv.ParseInt(strings.TrimPrefix(line, "#total_procs "), 10, 64)
+			if err == nil {
+				fi.TotalProcs = n
+			}
 		case strings.HasPrefix(line, "#vars "):
 			v := strings.TrimPrefix(line, "#vars ")
 			if v != "" {
@@ -238,6 +255,10 @@ func parseFactoryInfo(raw string) FactoryInfo {
 			fi.Items = append(fi.Items, strings.TrimPrefix(line, "#item\x1f"))
 		}
 	}
-	fi.Digest = strings.TrimSuffix(digest.String(), "\n")
+	// Every line of the digest region is written back with the newline it
+	// had, so this is the digest byte for byte -- including the trailing
+	// newline append_queue_statement leaves on it, which the schedd's parser
+	// needs to see the queue statement as a complete line.
+	fi.Digest = digest.String()
 	return fi
 }
