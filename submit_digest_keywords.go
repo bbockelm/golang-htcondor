@@ -6,8 +6,9 @@ package htcondor
 // submit command and the job attribute it sets, which is what
 // is_prunable_keyword() searches.
 //
-// Do not hand-edit. fuzz/submit's TestDigestKeywordsMatchOracle compares this
-// set against the linked HTCondor and prints the replacement when they drift.
+// Not hand-maintained. fuzz/submit's TestDigestKeywordsMatchOracle compares
+// this set against the linked HTCondor and names every keyword that is in one
+// and not the other, which is what to add or remove here when upstream moves.
 
 // digestPrunableKeywords is the set of names a submit digest may drop.
 //
