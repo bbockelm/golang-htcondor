@@ -384,6 +384,57 @@ var seeds = []seedCase{
 	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_vcpus = abc\nexecutable = /bin/sleep\nqueue\n"},
 	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_vcpus = 2 cpus\nexecutable = /bin/sleep\nqueue\n"},
 	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_vcpus = 4294967296\nexecutable = /bin/sleep\nqueue\n"},
+	// --- parity: grid universe ---
+	// The grid TYPE is the first word of grid_resource, and it governs only
+	// which settings are required and whether the job gets the implicit Name
+	// tag. Every other keyword in the family is read whatever the type, so a
+	// batch job that names an AMI carries EC2AmiID all the same.
+	//
+	// The generated sweep only ever writes `grid_resource = batch slurm`, so
+	// everything here that depends on the ec2, gce or azure type -- the
+	// implicit Name tag most of all -- is reachable from the seeds alone.
+	{input: "universe = grid\ngrid_resource = batch slurm\nexecutable = /bin/sleep\nbatch_queue = q\nbatch_project = p\nbatch_runtime = 60\nbatch_extra_submit_args = --exclusive\nqueue\n"},
+	{input: "universe = grid\ngrid_resource = batch slurm\nexecutable = /bin/sleep\nec2_ami_id = ami-dead\nec2_elastic_ip = 1.2.3.4\nec2_vpc_ip = 10.0.0.1\nec2_vpc_subnet = subnet-1\nec2_user_data_file = ud.txt\nqueue\n"},
+	// An ec2 job must name an AMI and both halves of its credentials, or
+	// condor_submit refuses the file.
+	{input: "universe = grid\ngrid_resource = ec2 https://ec2.example.com/\nexecutable = myjob\nec2_access_key_id = akid.txt\nec2_secret_access_key = skey.txt\nec2_ami_id = ami-dead\nec2_instance_type = m1.small\nqueue\n"},
+	// "FROM INSTANCE" under either half sets BOTH, and is kept verbatim
+	// rather than resolved against Iwd the way a key file is.
+	{input: "universe = grid\ngrid_resource = ec2 https://ec2.example.com/\nexecutable = myjob\nec2_access_key_id = FROM INSTANCE\nec2_ami_id = ami-dead\nqueue\n"},
+	{input: "universe = grid\ngrid_resource = ec2 https://ec2.example.com/\nexecutable = myjob\nec2_secret_access_key = from instance\nec2_ami_id = ami-dead\nqueue\n"},
+	// ec2_keypair names a pair already registered with EC2 and
+	// ec2_keypair_file names where to write a generated one, so naming both
+	// drops the file; and an instance profile NAME is kept only alongside
+	// its ARN.
+	{input: "universe = grid\ngrid_resource = ec2 https://ec2.example.com/\nexecutable = myjob\nec2_access_key_id = FROM INSTANCE\nec2_ami_id = ami-dead\nec2_keypair = kp\nec2_keypair_file = kp.out\nec2_iam_profile_name = prof\nqueue\n"},
+	{input: "universe = grid\ngrid_resource = ec2 https://ec2.example.com/\nexecutable = myjob\nec2_access_key_id = FROM INSTANCE\nec2_ami_id = ami-dead\nec2_key_pair_file = kp.out\nec2_iam_profile_arn = arn:aws:iam::1:instance-profile/p\nec2_iam_profile_name = prof\nqueue\n"},
+	// Tags and labels: a name list, pairs written under either the submit
+	// or the attribute prefix, and the implicit Name tag an ec2 job gets
+	// from its executable unless WantNameTag says otherwise.
+	{input: "universe = grid\ngrid_resource = ec2 https://ec2.example.com/\nexecutable = myjob\nec2_access_key_id = FROM INSTANCE\nec2_ami_id = ami-dead\nec2_tag_names = t1 t2\nec2_tag_t1 = v1\nEC2Tagzed = v3\ncloud_label_x = lv\nqueue\n"},
+	{input: "universe = grid\ngrid_resource = ec2 https://ec2.example.com/\nexecutable = myjob\nec2_access_key_id = FROM INSTANCE\nec2_ami_id = ami-dead\nWantNameTag = false\nec2_tag_names = a, b\nqueue\n"},
+	{input: "universe = grid\ngrid_resource = ec2 https://ec2.example.com/\nexecutable = myjob\nec2_access_key_id = FROM INSTANCE\nec2_ami_id = ami-dead\nec2_tag_Name = mine\nqueue\n"},
+	// Arbitrary RunInstances parameters. The names are joined with ", "
+	// where tag names are joined with ",", and a name holding a dot never
+	// matches itself in the de-duplication, so it is listed twice.
+	{input: "universe = grid\ngrid_resource = ec2 https://ec2.example.com/\nexecutable = myjob\nec2_access_key_id = FROM INSTANCE\nec2_ami_id = ami-dead\nWantNameTag = false\nec2_parameter_names = Zed foo.bar\nec2_parameter_Alpha = 1\nec2_parameter_foo.bar = 2\nqueue\n"},
+	// A gce job must name an image and a machine type. gce_metadata is
+	// re-joined from its fields, which drops the spacing.
+	{input: "universe = grid\ngrid_resource = gce https://gce.example.com/ proj zone\nexecutable = myjob\ngce_image = img\ngce_machine_type = n1-standard-1\ngce_account = acct\ngce_auth_file = auth.txt\ngce_json_file = j.json\ngce_metadata_file = md.txt\ngce_metadata = a=1, b=2\ngce_preemptible = true\nqueue\n"},
+	// An azure job must name all five of image, location, size and the
+	// admin credentials.
+	{input: "universe = grid\ngrid_resource = azure sub-id\nexecutable = myjob\nazure_image = img\nazure_location = westus2\nazure_size = Standard_A1\nazure_admin_username = u\nazure_admin_key = k.pub\nazure_auth_file = auth.json\nqueue\n"},
+	// The presigned-URL credential keywords are not part of the grid
+	// family: they are read in any universe, share the EC2 attributes, and
+	// are stored exactly as written. The last spelling in HTCondor's table
+	// wins, which is the gs_ one.
+	{input: "executable = /bin/sleep\naws_region = us-east-1\naws_access_key_id_file = akid.txt\naws_secret_access_key_file = skey.txt\nqueue\n"},
+	{input: "executable = /bin/sleep\naws_access_key_id_file = akid.txt\ns3_access_key_id_file = s3kid.txt\ngs_access_key_id_file = gskid.txt\nqueue\n"},
+	// ... and in a grid job the verbatim value overrides the absolute path
+	// the grid pass resolved.
+	{input: "universe = grid\ngrid_resource = ec2 https://ec2.example.com/\nexecutable = myjob\naws_access_key_id_file = akid.txt\naws_secret_access_key_file = skey.txt\nec2_ami_id = ami-dead\nWantNameTag = false\nqueue\n"},
+	// Outside the grid universe none of the family is read at all.
+	{input: "executable = /bin/sleep\nec2_elastic_ip = 1.2.3.4\nec2_keypair_file = kp.out\ngce_image = img\nazure_size = Standard_A1\nqueue\n"},
 }
 
 func requireOracle(t testing.TB) {

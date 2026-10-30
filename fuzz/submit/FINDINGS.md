@@ -638,6 +638,12 @@ that is left.
   `encrypt_input_files` and its three siblings are `f_as_string`, so C++
   stores them verbatim and Go canonicalizes. The file transfer matches these
   literally.
+
+- **List canonicalization, in both directions.** `concurrency_limits` is
+  `f_as_list`, so C++ canonicalizes the separators and Go does not;
+  `encrypt_input_files` and its three siblings are `f_as_string`, so C++
+  stores them verbatim and Go canonicalizes. The negotiator and the file
+  transfer both match these literally.
 - **A filename containing a space** survives in `TransferInput` on the C++
   side and is split away by Go, so the file is never transferred.
 - **`mount_under_scratch`** stays a string in C++; Go coerces it to a boolean.
@@ -652,6 +658,11 @@ that is left.
   `aws_`/`gs_`/`s3_` spellings of the access-key files, which Go does not
   implement at all — and which C++ does *not* resolve, since they are plain
   `f_as_string` table entries rather than grid keywords.
+
+- **Iwd resolution, again.** The known `Cmd`/`UserLog` finding generalizes to
+  every path-valued keyword the Go parser does implement. C++ resolves them
+  against `Iwd`; Go stores them as written. The grid family's own file
+  keywords are fixed, below.
 - **`Env` vs `Environment`.** The Args/Arguments naming split has a twin: for
   V1-shaped environments Go emits `Env`, C++ emits `Environment`.
 
@@ -663,8 +674,8 @@ joins them, below. The want-flags no longer do — see the fixed material.
 
 ## Keywords with no Go implementation at all
 
-About 120 attributes are set by C++ and by nothing in Go. The full list is in
-`knownDivergentGenerated`; the families are the EC2/GCE/Azure grid settings,
+About 100 attributes are set by C++ and by nothing in Go. The full list is in
+`knownDivergentGenerated`; the families are
 the tool-daemon (TDP) settings, the buffer settings, the Java settings, the
 noop-job settings, the parallel-script settings, the submit-event notes,
 `kill_sig` and its siblings, `core_size`,
@@ -718,6 +729,68 @@ in `make_job_ad`. `gce_metadata_file`, `output_directory`, `starter_log`,
 `dagman_log`, `x509userproxy` and `scitokens_file` are resolved by C++ too,
 but Go implements none of them, so they stay in the "no Go implementation"
 list rather than here.
+
+**Every cloud setting a grid job named went nowhere.** The whole EC2, GCE and
+Azure family -- 21 attributes -- was read by condor_submit and by nothing in
+Go, so a job that named an AMI, an availability zone, a VPC subnet, an elastic
+IP, an EBS volume list, a block device mapping, an IAM profile, a GCE metadata
+file or a preemptible flag reached the grid manager with none of it. The
+instance came up in the provider's default zone, on the default subnet, with
+no volumes attached and no elastic IP, and nothing in the submission said so.
+Worse for the credentials: `ec2_access_key_id` and `ec2_secret_access_key`
+name key FILES, which condor_submit resolves against `Iwd`, and Go set
+neither -- so an EC2 job had no credentials at all and the grid manager had
+nothing to sign a RunInstances call with.
+
+What the C++ turned out to say, against assumptions worth writing down:
+
+- The grid TYPE -- the first word of `grid_resource` -- gates far less than it
+  looks. It decides which settings are REQUIRED (an ec2 job needs an AMI and
+  both credentials, a gce job an image and a machine type, an azure job all
+  five of image, location, size, admin username and admin key) and whether the
+  job gets the implicit Name tag. Every other keyword in the family is read
+  whatever the type, so `grid_resource = batch slurm` plus `ec2_ami_id` still
+  puts `EC2AmiID` in the ad. Writing them only for a matching grid type would
+  have been its own divergence.
+- Four attribute names do not follow from their keyword:
+  `ec2_ebs_volumes` is `EC2ElasticBlockStorageVolumes`, `ec2_parameter_names`
+  is `EC2ParamNames`, and `ec2_elastic_ip` and `ec2_vpc_ip` end in a
+  lower-case `Ip` where every sibling is capitalized. Attribute names fold
+  case, so only the first two would have broken a job -- but they would have
+  broken it silently.
+- `aws_region` and the `aws_`/`s3_`/`gs_` key-file keywords are NOT part of
+  the grid family at all. They are plain entries in HTCondor's simple keyword
+  table, read in every universe, stored verbatim with no `Iwd` resolution --
+  and read AFTER the grid pass, so in a grid job the verbatim value overwrites
+  the absolute path the grid pass resolved. A vanilla job transferring an
+  `s3://` input needs them, which is why they are not universe-gated.
+- `"FROM INSTANCE"` under either half of the credential pair sets BOTH halves,
+  and is kept as the magic string rather than resolved as a path.
+- `ec2_keypair_file` is dropped when `ec2_keypair` is also set, and
+  `ec2_iam_profile_name` is kept only when `ec2_iam_profile_arn` is set too.
+- EC2 tags and GCE labels are collected from `ec2_tag_<Name>` /
+  `cloud_label_<Name>` -- either the submit prefix or the attribute prefix --
+  merged with the names the list keyword gave, and recorded in an order that
+  is observable: the sorted order HTCondor's macro table walks in. An ec2 job
+  also gets its executable as the implicit `Name` tag, which is what the AWS
+  console shows as the instance name, unless `WantNameTag = false`.
+- Arbitrary RunInstances parameters (`ec2_parameter_<Name>` to
+  `EC2Param_<Name>`) join their names with `", "` where tag names join with
+  `","`, and the de-duplication compares a listed name with its dots turned
+  into underscores against the raw scanned name -- so a name holding a dot
+  never matches itself and is listed twice. Reproduced as written.
+- `gce_metadata` is re-joined from its comma-separated fields, dropping the
+  spacing: `a=1, b=2` is stored `a=1,b=2`, or the metadata server is handed a
+  key named `" b"`.
+
+Acceptance is unchanged: condor_submit aborts a submission whose grid type is
+missing a required setting, and validates the `ec2_ebs_volumes` syntax, and
+the Go parser still does neither.
+
+The generated sweep can never reach any of this beyond `grid_resource = batch
+slurm`, which is the only grid prelude the generator writes, so the ec2, gce
+and azure shapes -- and the implicit Name tag above all -- are covered by
+seeds instead.
 
 **A cron job never deferred, and a cron job's timing went nowhere.** There is
 no `CronWindow` or `CronPrepTime` job attribute: `cron_window` and
