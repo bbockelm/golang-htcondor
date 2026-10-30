@@ -35,11 +35,20 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\nqueue\n"},
 	{input: "executable = /bin/sleep\n+Note = \"a   \\\n   b\"\nqueue\n",
 		reason: "whitespace before a line-continuation backslash: getline_implementation keeps it and joins the next line with nothing, so C++ gets \"a   b\"; Go trims it and inserts one space, giving \"a b\"."},
+	{input: "executable = /bin/sleep\n+a-b = 7\nqueue\n",
+		reason: "`+Attr` attribute name with a '-': C++ prefixes \"MY.\" to whatever it scanned, without running is_valid_param_name, so it makes an attribute named a-b; Go rejects the file."},
+	{input: "executable = /bin/sleep\n-Foo = 7\nqueue\n",
+		reason: "submit's `-Attr` form, which C++ stores as an empty value; the Go lexer has no '-' token at all and rejects the file."},
 
 	// --- parity: line endings and parameter names ---
+	// The first two were the known divergences the Cmd/UserLog comparison
+	// exposed; they are parity assertions now. The rest pin the rules they
+	// turned on, which libcondor_utils 26.2.0 answered for each case.
+	//
 	// A submit file written on Windows. getline_implementation trims the
 	// line with isspace(), so the carriage return never reaches the value.
 	{input: "executable = /bin/sleep\r\nrequest_cpus = 1\r\nrequest_memory = 128\r\narguments = a\r\nlog = j.log\r\nqueue\r\n"},
+	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\n0 = x\nlog = j.log\nqueue\n"},
 	{input: "\r\nexecutable = /bin/sleep\r\n\r\narguments = a\r\nqueue\r\n"},
 	// A '\r' away from the end of the line is not trailing whitespace and
 	// survives on both sides.
@@ -55,6 +64,13 @@ var seeds = []seedCase{
 	// A character outside that set makes the name illegal, and HTCondor
 	// fails the whole file rather than skipping the line.
 	{input: "executable = /bin/sleep\na-b = 1\nlog = j.log\nqueue\n"},
+	// The same charset governs a job attribute name, which `+Attr` and
+	// `MY.Attr` both reach. HTCondor builds "MY." + the name scanned after
+	// the '+' without further validation.
+	{input: "executable = /bin/sleep\n+0 = 7\nqueue\n"},
+	{input: "executable = /bin/sleep\n+0abc = 7\n+0.5 = 7\nqueue\n"},
+	{input: "executable = /bin/sleep\nMY.0 = 7\nMY.0abc = 7\nqueue\n"},
+	{input: "executable = /bin/sleep\n+a.b = 7\n+a/b = 7\nqueue\n"},
 
 	// --- parity: path resolution ---
 	// A relative executable or log is resolved to an absolute path, and
@@ -67,14 +83,6 @@ var seeds = []seedCase{
 	{input: "executable = ./sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nlog = ./d/../j.log\nqueue\n"},
 	{input: "executable = sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\ntransfer_executable = false\nqueue\n"},
 	{input: "executable = sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nlog =\nqueue\n"},
-
-	// Divergences the path comparison exposed: with cmd and userlog
-	// compared, two bugs that have nothing to do with paths now show up
-	// through them. Both are in the config layer, not in submit.go.
-	{input: "executable = /bin/sleep\r\nrequest_cpus = 1\r\nrequest_memory = 128\r\narguments = a\r\nlog = j.log\r\nqueue\r\n",
-		reason: "CRLF submit file: the Go config lexer trims only spaces and tabs off a value, so Cmd and UserLog keep the carriage return. condor_submit drops it."},
-	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\n0 = x\nlog = j.log\nqueue\n",
-		reason: "a macro whose name starts with a digit: the Go parser drops that assignment AND every submit command after it, so log never reaches the ad. C++ accepts the file."},
 
 	// --- parity, exercising specific commands ---
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nMY.Foo = 1\n+Bar = \"two\"\nqueue\n"},

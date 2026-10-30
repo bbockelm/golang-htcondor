@@ -84,6 +84,12 @@ type Lexer struct {
 	stmtStart           bool
 	prevIdentAssignable bool
 
+	// afterPlus is true for the token right after a '+', the attribute name
+	// of submit's `+Attr = expr`. HTCondor reads that name with the same
+	// scan it uses for a parameter name, so it gets the same charset here;
+	// see readParamName.
+	afterPlus bool
+
 	// inQueue is true from the QUEUE keyword to the end of its line. It
 	// scopes the item-list handling below to queue statements, so the
 	// `in`/`from` keywords keep their ordinary meaning elsewhere.
@@ -663,9 +669,11 @@ func (l *Lexer) NextToken() *TokenInfo {
 	atStmtStart := l.stmtStart
 	colonAssignable := l.prevIdentAssignable
 	wasInInclude := l.inInclude
+	afterPlus := l.afterPlus
 	l.stmtStart = false
 	l.prevIdentAssignable = false
 	l.inInclude = false
+	l.afterPlus = false
 
 	switch l.ch {
 	case 0:
@@ -756,10 +764,14 @@ func (l *Lexer) NextToken() *TokenInfo {
 		// `+F = 1` illegal — and, because the parser has no error
 		// production for it, made the whole line disappear without a
 		// diagnostic.
+		// The name is read with HTCondor's charset, not Go's identifier
+		// rule: `+0 = 7` and `+0.5 = 7` set job attributes named "0" and
+		// "0.5", which condor_submit accepts.
 		tok.Lit = "+"
 		l.readChar()
-		if isIdentStart(l.ch) {
+		if isParamNameChar(l.ch) {
 			tok.Token = PLUS
+			l.afterPlus = true
 		} else {
 			tok.Token = ILLEGAL
 		}
@@ -810,10 +822,12 @@ func (l *Lexer) NextToken() *TokenInfo {
 
 	default:
 		switch {
-		case isIdentStart(l.ch) || (atStmtStart && isParamNameChar(l.ch)):
-			if atStmtStart {
-				// A statement begins with a parameter name, which HTCondor
-				// allows to start with a digit; see readParamName.
+		case isIdentStart(l.ch) || ((atStmtStart || afterPlus) && isParamNameChar(l.ch)):
+			if atStmtStart || afterPlus {
+				// A statement begins with a parameter name, and the token
+				// after '+' is a job attribute name. HTCondor reads both
+				// with the same scan, which allows a leading digit; see
+				// readParamName.
 				tok.Lit = l.readParamName()
 			} else {
 				tok.Lit = l.readIdentifier()

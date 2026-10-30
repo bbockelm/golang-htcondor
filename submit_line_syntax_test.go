@@ -22,18 +22,22 @@ import (
 func TestSubmitCarriageReturnsAreNotPartOfValues(t *testing.T) {
 	ad := mustJobAd(t, "executable = /bin/sleep\r\nlog = j.log\r\narguments = a b\r\nqueue\r\n")
 
-	for _, tc := range []struct{ attr, want string }{
-		{"Cmd", `"/bin/sleep"`},
-		{"UserLog", `"j.log"`},
-	} {
-		expr, ok := ad.Lookup(tc.attr)
-		if !ok {
-			t.Errorf("%s missing from the job ad", tc.attr)
-			continue
-		}
-		if got := expr.String(); got != tc.want {
-			t.Errorf("%s = %s, want %s", tc.attr, got, tc.want)
-		}
+	cmd, ok := ad.Lookup("Cmd")
+	if !ok {
+		t.Fatal("Cmd missing from the job ad")
+	}
+	if got, want := cmd.String(), `"/bin/sleep"`; got != want {
+		t.Errorf("Cmd = %s, want %s", got, want)
+	}
+
+	// UserLog is resolved against Iwd, so only its tail is fixed here; the
+	// carriage return would land at the very end of it.
+	log, ok := ad.Lookup("UserLog")
+	if !ok {
+		t.Fatal("UserLog missing from the job ad")
+	}
+	if got := log.String(); !strings.HasSuffix(got, `/j.log"`) {
+		t.Errorf("UserLog = %s, want it to end in /j.log", got)
 	}
 }
 
@@ -88,8 +92,38 @@ func TestSubmitMacroNamesOutsideIdentifierStart(t *testing.T) {
 			if !ok {
 				t.Fatal("UserLog missing: the assignment after the macro was dropped")
 			}
-			if got, want := expr.String(), `"j.log"`; got != want {
-				t.Errorf("UserLog = %s, want %s", got, want)
+			// Resolved against Iwd, so match the tail.
+			if got := expr.String(); !strings.HasSuffix(got, `/j.log"`) {
+				t.Errorf("UserLog = %s, want it to end in /j.log", got)
+			}
+		})
+	}
+}
+
+// The same charset governs a job attribute name. `+Attr` and `MY.Attr` both
+// end up as "MY." plus the scanned name, so an attribute may begin with a
+// digit too; condor_submit sets `0` and `0.5` for these files.
+func TestSubmitAttributeNamesOutsideIdentifierStart(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		submit string
+		attr   string
+	}{
+		{"plus digit", "executable = /bin/sleep\n+0 = 7\nqueue\n", "0"},
+		{"plus digit then letters", "executable = /bin/sleep\n+0abc = 7\nqueue\n", "0abc"},
+		{"plus dotted digits", "executable = /bin/sleep\n+0.5 = 7\nqueue\n", "0.5"},
+		{"plus slash", "executable = /bin/sleep\n+a/b = 7\nqueue\n", "a/b"},
+		{"my digit", "executable = /bin/sleep\nMY.0 = 7\nqueue\n", "0"},
+		{"my digit then letters", "executable = /bin/sleep\nMY.0abc = 7\nqueue\n", "0abc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ad := mustJobAd(t, tc.submit)
+			expr, ok := ad.Lookup(tc.attr)
+			if !ok {
+				t.Fatalf("%s missing from the job ad", tc.attr)
+			}
+			if got, want := expr.String(), "7"; got != want {
+				t.Errorf("%s = %s, want %s", tc.attr, got, want)
 			}
 		})
 	}

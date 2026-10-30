@@ -201,6 +201,18 @@ operator. And `ParseSubmitFile` uses `config.ParseStrict`, so a line that is
 genuinely bad fails the file the way HTCondor's does, instead of being returned
 as a short one. An illegal name such as `a-b = 1` is rejected by both sides.
 
+The same charset governs a job **attribute** name, which `+Attr` and `MY.Attr`
+both reach — `Parse_macros` builds `"MY." + name` from the same scan, without
+running `is_valid_param_name` on it. `+0 = 7`, `+0.5 = 7` and `MY.0 = 7` all
+set attributes in C++; Go rejected the first two (a separate site: the lexer
+required a Go identifier after the `+`) and, before the statement-start fix,
+dropped the third. The token after a `+` is now read with the same scan.
+
+What remains, recorded as seed reasons: `+a-b = 7` makes an attribute `a-b` in
+C++, since that form skips validation, where Go rejects the file; and submit's
+`-Attr` form has no `-` token in the Go lexer at all, so `-Foo = 7` is rejected
+where C++ accepts it.
+
 ## Cosmetic
 
 `Rank`: C++ emits the real `0.0`, Go the integer `0`. Same value, different
