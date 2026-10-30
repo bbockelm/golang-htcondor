@@ -134,6 +134,21 @@ ran against an uninitialized config. Two consequences, both fixed:
 defaults only — the oracle has to give the same answer on a laptop with a
 populated `/etc/condor` as on a CI runner with none.
 
+## java universe replaces Cmd with the JVM
+
+For `universe = java`, C++ puts the JVM from `param("JAVA")` in `Cmd` and passes
+the submitted class through `Args`; Go leaves the resolved executable in `Cmd`,
+so the job would try to run the class file itself rather than a JVM.
+
+This is recorded in `knownDivergentInUniverse`, which excuses an attribute only
+inside one universe, rather than in `knownDivergent`, which would have excused
+`Cmd` everywhere and undone the path comparison that found it. The universe is
+read from the **C++** ad, so a Go bug that drops `JobUniverse` cannot also hand
+itself an excuse.
+
+It surfaced only once two changes were both in: comparing `Cmd` at all, and a
+generator that emits java submit files.
+
 ## Attributes C++ sets and Go does not
 
 Mostly per-job bookkeeping the schedd would otherwise fill in
