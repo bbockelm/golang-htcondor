@@ -98,3 +98,41 @@ func seedInputs() []string {
 	}
 	return out
 }
+
+// pathKeywords is the f_filemask half of HTCondor's path resolution: the
+// keywords whose table entry carries a file role, which do_simple_commands
+// runs through full_path so the job ad records an absolute path.
+//
+// It is a short list because the mask is NOT how most path-valued keywords
+// are marked. The cloud credential and data files -- gce_auth_file,
+// azure_auth_file, ec2_user_data_file and the rest -- carry no mask at all;
+// SetGridParams calls full_path on each of them by hand, and reading the
+// mask would say they are ordinary strings. The two mechanisms have to be
+// ported separately, so this test can only guard the one that is a table.
+//
+// The value says what the Go parser does with each, and the test fails when
+// a keyword appears upstream that is in neither state. A new f_filemask
+// keyword that Go silently stored as written would otherwise only show up
+// as a value divergence under an attribute name nobody was looking at.
+var pathKeywords = map[string]string{
+	"executable":       "resolved by resolveExecutable, against the SUBMITTING directory rather than Iwd: the entry is f_special, so it never reaches do_simple_commands",
+	"log":              "resolved against Iwd by setStandardFiles",
+	"dagman_log":       "not implemented by the Go parser; see knownDivergentGenerated[dagmannodeslog]",
+	"output_directory": "not implemented by the Go parser; see knownDivergentGenerated[outputdirectory]",
+	"starter_log":      "not implemented by the Go parser; see knownDivergentGenerated[jobstarterlog]",
+}
+
+func TestFileRoleKeywordsAreAccountedFor(t *testing.T) {
+	requireOracle(t)
+
+	for _, kw := range oracle.Keywords() {
+		if kw.Opts&oracle.KeyFileMask == 0 {
+			continue
+		}
+		key := strings.ToLower(kw.Key)
+		if _, known := pathKeywords[key]; !known {
+			t.Errorf("submit keyword %q (attribute %s) carries a file role (%#x) and nothing here says what the Go parser does with it: SubmitHash resolves it against Iwd, so decide whether the Go parser does too and record it in pathKeywords",
+				kw.Key, kw.Attr, kw.Opts&oracle.KeyFileMask)
+		}
+	}
+}
