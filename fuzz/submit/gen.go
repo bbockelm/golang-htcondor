@@ -207,12 +207,42 @@ var aliasOf = map[string]string{
 // universePrelude is what a universe needs before its own keywords mean
 // anything. Without it SubmitHash rejects the file ("grid universe requires
 // grid_resource") and the keywords in that family are never compared.
-func universePrelude(u string) []string {
+//
+// It draws from the stream, because for vm the required companions depend on
+// the vm_type it picks, so the choice has to be part of the generated file.
+func universePrelude(u string, s *stream) []string {
 	switch u {
 	case "grid":
 		return []string{"grid_resource = batch slurm"}
 	case "vm":
-		return []string{"vm_type = kvm", "vm_memory = 512", "vm_disk = d.img:vda:w"}
+		// Which keywords a VM needs depends on its type, and SubmitHash
+		// decides that textually: xen_kernel = included or vmx needs nothing
+		// further, while any other value is taken for a kernel file and then
+		// xen_root is required. Nothing is ever stat'd, so a xen VM is as
+		// reachable from here as a kvm one -- which is what puts the whole
+		// VMPARAM_Xen_* family in front of the oracle.
+		vm := []string{"vm_memory = 512", "vm_disk = d.img:vda:w"}
+		switch s.intn(10) {
+		case 0, 1, 2:
+			return append([]string{"vm_type = kvm"}, vm...)
+		case 3:
+			return append([]string{"vm_type = xen", "xen_kernel = included"}, vm...)
+		case 4:
+			return append([]string{"vm_type = xen", "xen_kernel = vmx"}, vm...)
+		default:
+			// A kernel file is what makes xen_root required and xen_initrd
+			// legal -- with "included" or "vmx" SubmitHash rejects the file
+			// for using initrd -- so the whole family is written here rather
+			// than left to the draw, which would land it in a rejected file
+			// as often as not. The paths are never opened.
+			return append([]string{
+				"vm_type = xen",
+				"xen_kernel = /boot/vmlinuz",
+				"xen_root = /dev/sda1",
+				"xen_initrd = /boot/initrd.img",
+				"xen_kernel_params = \"ro console=hvc0\"",
+			}, vm...)
+		}
 	case "java":
 		// Java universe takes the class to run as its arguments, and
 		// SubmitHash rejects the file outright without them.
@@ -246,14 +276,15 @@ func (v *Vocab) Generate(data []byte) string {
 
 	b.WriteString("universe = " + u + "\n")
 	b.WriteString("executable = " + executableFor(u, s) + "\n")
-	for _, line := range universePrelude(u) {
+	prelude := universePrelude(u, s)
+	for _, line := range prelude {
 		b.WriteString(line + "\n")
 	}
 
 	// usedAttr keeps two spellings of one attribute out of the same file; for
 	// the handful of keywords that set no single attribute, the key stands in.
 	usedAttr := map[string]bool{"cmd": true}
-	for _, line := range universePrelude(u) {
+	for _, line := range prelude {
 		if k, _, ok := strings.Cut(line, " ="); ok {
 			usedAttr[strings.ToLower(k)] = true
 		}
@@ -392,9 +423,10 @@ var byName = map[string]func(*stream) string{
 	"kill_sig":              enum("SIGTERM", "SIGKILL", "SIGUSR1", "15"),
 	"remove_kill_sig":       enum("SIGTERM", "SIGKILL", "9"),
 	"hold_kill_sig":         enum("SIGTERM", "SIGQUIT"),
-	// Only kvm: xen and vmware need their own required keywords, and without
-	// them SubmitHash rejects the file before any vm keyword is compared.
-	"vm_type":             enum("kvm"),
+	// Unreachable: the vm prelude writes vm_type itself, since the rest of
+	// what the file needs depends on which type it picks. Kept so a vm_type
+	// drawn from a future vocabulary still has a value.
+	"vm_type":             enum("kvm", "xen"),
 	"vm_networking_type":  enum("nat", "bridge"),
 	"docker_pull_policy":  enum("always", "missing"),
 	"docker_network_type": enum("host", "none", "bridge"),

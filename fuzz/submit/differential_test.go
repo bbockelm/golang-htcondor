@@ -279,6 +279,16 @@ var seeds = []seedCase{
 	// apply, and "vmx" turns on JobVMHardwareVT.
 	{input: "universe = vm\nvm_type = xen\nvm_memory = 512\nvm_disk = d.img:vda:w\nxen_kernel = included\nexecutable = /bin/sleep\nqueue\n"},
 	{input: "universe = vm\nvm_type = xen\nvm_memory = 512\nvm_disk = d.img:vda:w\nxen_kernel = vmx\nexecutable = /bin/sleep\nqueue\n"},
+	// ... and a xen_root written anyway is read by neither.
+	{input: "universe = vm\nvm_type = xen\nvm_memory = 512\nvm_disk = d.img:vda:w\nxen_kernel = included\nxen_root = /dev/sda1\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = xen\nvm_memory = 512\nvm_disk = d.img:vda:w\nxen_kernel = vmx\nxen_root = /dev/sda1\nexecutable = /bin/sleep\nqueue\n"},
+	// vm_vcpus is (int)strtol() of the value with a floor of 1: the leading
+	// digits, 0 for anything else, and a 32-bit truncation on the way.
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_vcpus = 0\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_vcpus = -3\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_vcpus = abc\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_vcpus = 2 cpus\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_vcpus = 4294967296\nexecutable = /bin/sleep\nqueue\n"},
 }
 
 func requireOracle(t testing.TB) {

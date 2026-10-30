@@ -73,8 +73,8 @@ how much of HTCondor's vocabulary a corpus reaches.
 
 | corpus | keywords reached (of 258 in 26.2.0) |
 |--------|-------------------------------------|
-| hand-written seeds | 19 |
-| seeds + generator | 254 |
+| hand-written seeds | 50 |
+| seeds + generator | 255 |
 
 The seed figure moves as seeds are added; the test prints both every run.
 
@@ -93,7 +93,10 @@ and remap strings -- and falls back to the keyword's declared type
 It also picks a universe first and draws only from the keywords that universe
 allows, emitting whatever that universe requires (`grid_resource` for grid,
 `vm_type` for vm, the class name for java), because SubmitHash rejects the
-file otherwise and the family is never compared. Two spellings of one
+file otherwise and the family is never compared. For vm the requirement
+depends on the type it picks, so the prelude picks one and emits that type's
+companions: a xen VM gets a `xen_kernel`, and a kernel-file one gets the
+`xen_root` that makes it legal. Two spellings of one
 attribute are never written into the same file, which is what keeps an
 `f_alt_err` pair -- where using both spellings is an error -- apart.
 

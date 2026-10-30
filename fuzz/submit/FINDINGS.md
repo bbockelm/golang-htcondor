@@ -317,10 +317,16 @@ confirmed against the oracle:
   sets `JobVMHardwareVT`. `xen_kernel_params` loses one layer of quoting.
 
 `vm_vnc` and `vm_no_output_vm`, which Go had no code for at all, are
-implemented as part of the same pass. The generator only ever writes a kvm VM
-— xen needs a kernel and a root device of its own — so the xen cases are
-pinned by hand-written seeds and by `submit_vm_test.go`, which needs no
-oracle.
+implemented as part of the same pass.
+
+The generator used to write only a kvm VM, on the reasoning that xen needs a
+kernel and a root device of its own. That is about booting a VM; `SubmitHash`
+decides textually and stats nothing, so `xen_kernel = included` or `vmx` needs
+no companion at all and any other value is simply *taken for* a kernel file,
+which only makes `xen_root` required. The vm prelude now picks a type and
+emits that type's companions, so the whole `VMPARAM_Xen_*` family is compared
+by the oracle-backed sweep rather than by hand-written expectations.
+`submit_vm_test.go` is the same ground covered without the oracle, for CI.
 
 **`request_<resource>` is generic, and Go only knew three.** `request_foo = N`
 becomes `RequestFoo` in C++ — that is how custom resources (licenses,

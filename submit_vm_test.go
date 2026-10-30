@@ -1,3 +1,8 @@
+// The VM universe attributes. Every expectation here is also pinned against
+// HTCondor's own SubmitHash by a seed in fuzz/submit/differential_test.go,
+// which CI cannot run because it needs a local HTCondor build; this file is
+// the regression net that runs everywhere. The one case the oracle cannot
+// pin is marked where it appears.
 package htcondor
 
 import (
@@ -102,7 +107,7 @@ func TestVMBooleanDefaults(t *testing.T) {
 // vm_vcpus is the leading integer of the value with a floor of 1, and it is
 // always in the ad.
 func TestVMVCPUs(t *testing.T) {
-	for value, want := range map[string]int64{"4": 4, "0": 1, "-3": 1, "abc": 1, "2 cpus": 2} {
+	for value, want := range map[string]int64{"4": 4, "0": 1, "-3": 1, "abc": 1, "2 cpus": 2, "4294967296": 1} {
 		ad := vmAd(t, vmKVMPrelude+"vm_vcpus = "+value+"\nqueue\n")
 		vmWantInt(t, ad, "JobVM_VCPUS", want)
 	}
@@ -153,20 +158,30 @@ func TestXenParams(t *testing.T) {
 }
 
 // "included" boots the kernel out of the disk image and "vmx" asks for
-// hardware virtualization; neither is a kernel file, so initrd and root do
-// not apply to it.
+// hardware virtualization. Neither is a kernel file, so there is no root
+// device to name and a xen_root written anyway is read by nobody; "vmx" turns
+// on JobVMHardwareVT.
 func TestXenKernelWithoutAKernelFile(t *testing.T) {
-	tail := "vm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nxen_root = /dev/sda1\nxen_initrd = /boot/initrd\nqueue\n"
+	tail := "vm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nxen_root = /dev/sda1\nqueue\n"
 
 	ad := vmAd(t, "universe = vm\nvm_type = xen\nxen_kernel = included\n"+tail)
 	vmWantString(t, ad, "VMPARAM_Xen_Kernel", "included")
 	vmWantAbsent(t, ad, "VMPARAM_Xen_Root")
-	vmWantAbsent(t, ad, "VMPARAM_Xen_Initrd")
 	vmWantAbsent(t, ad, "JobVMHardwareVT")
 
 	ad = vmAd(t, "universe = vm\nvm_type = xen\nxen_kernel = vmx\n"+tail)
 	vmWantString(t, ad, "VMPARAM_Xen_Kernel", "vmx")
 	vmWantAbsent(t, ad, "VMPARAM_Xen_Root")
-	vmWantAbsent(t, ad, "VMPARAM_Xen_Initrd")
 	vmWantBool(t, ad, "JobVMHardwareVT", true)
+}
+
+// The one case the oracle cannot pin, because the two sides disagree about
+// accepting the file rather than about the ad: condor_submit rejects
+// xen_initrd without a kernel file ("To use xen_initrd, xen_kernel should be
+// a real kernel file"), where the Go parser accepts the file and drops the
+// keyword. This asserts Go's own behavior, not parity.
+func TestXenInitrdWithoutAKernelFileIsDropped(t *testing.T) {
+	ad := vmAd(t, "universe = vm\nvm_type = xen\nxen_kernel = included\nvm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nxen_initrd = /boot/initrd\nqueue\n")
+	vmWantString(t, ad, "VMPARAM_Xen_Kernel", "included")
+	vmWantAbsent(t, ad, "VMPARAM_Xen_Initrd")
 }
