@@ -720,41 +720,6 @@ func fullPath(name, base string) string {
 	return compressPath("/" + base + "/" + name)
 }
 
-// useInstanceRole is USE_INSTANCE_ROLE_MAGIC_STRING from
-// src/condor_includes/condor_constants.h: the value an EC2 credential
-// keyword takes instead of a filename when the gridmanager should use the
-// IAM role of the instance it is running on.
-const useInstanceRole = "FROM INSTANCE"
-
-// resolveAgainstIwd returns name resolved against the job's Iwd, which is
-// what SubmitHash's plain full_path(name) does.
-//
-// Which keywords get this treatment is not a property of the value and
-// cannot be inferred from it; HTCondor decides it in two separate places,
-// and only one of them is a table:
-//
-//   - SimpleSubmitKeyword's table carries an f_filemask field, and
-//     do_simple_commands runs every f_as_string keyword that has one
-//     through full_path. Today that is `log`, `dagman_log`,
-//     `output_directory` and `starter_log`. Of those the Go parser
-//     implements only `log`, which setStandardFiles resolves.
-//   - SetGridParams resolves the cloud credential and data files one call
-//     at a time, with no flag to read: the keywords below.
-//
-// `executable` is in the table with f_filemask too, but it is also
-// f_special and so never reaches that loop: SetExecutable resolves it
-// against the SUBMITTING directory rather than Iwd. See resolveExecutable.
-//
-// An empty value is left alone. full_path("") would produce the Iwd with a
-// trailing separator, and submit_param hands SetGridParams nothing for an
-// empty keyword in the first place.
-func resolveAgainstIwd(name, iwd string) string {
-	if name == "" {
-		return name
-	}
-	return fullPath(name, iwd)
-}
-
 // jobIwd returns the job's initial working directory: ComputeIWD resolves a
 // relative initialdir against the submitting directory and falls back to
 // that directory outright when the submit file names none.
@@ -2414,6 +2379,16 @@ func parseRemaps(remaps string) map[string]string {
 func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
 	// Several of the family name files, which condor_submit resolves against
 	// Iwd the way it resolves Cmd and UserLog.
+	//
+	// Which keywords get that treatment is not a property of the value and
+	// cannot be inferred from it. HTCondor decides it in two separate places
+	// and only one of them is a table: SimpleSubmitKeyword carries an
+	// f_filemask field that do_simple_commands reads (today only `log`,
+	// `dagman_log`, `output_directory` and `starter_log`), while SetGridParams
+	// resolves the cloud credential and data files one call at a time, with no
+	// flag to read. `executable` is in the table with f_filemask as well, but
+	// it is f_special too and so never reaches that loop -- SetExecutable
+	// resolves it against the SUBMITTING directory rather than Iwd.
 	iwd, err := sf.jobIwd()
 	if err != nil {
 		return err
