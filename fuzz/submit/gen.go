@@ -647,10 +647,19 @@ func quoted(v string) func(*stream) string {
 // the keyword table, so this is the most-used generator: periodic_*, on_exit_*,
 // rank, the retry_* family and everything else with no type bit set.
 func expr(s *stream) string {
+	// No time(): most keywords store an expression unevaluated, where the two
+	// sides agree, but some fold it -- retry_until is evaluated into
+	// OnExitRemove -- and the two parsers read the clock at their own instant.
+	// A file whose comparison depends on which second it ran in is a generator
+	// bug, not a finding: it fails at whatever rate the sweep straddles a
+	// second boundary, on whichever change happens to be in CI. fuzz/config
+	// leaves out $RANDOM_CHOICE and $RANDOM_INTEGER for the same reason.
+	// epochTime still exercises time() where the value is stored rather than
+	// folded.
 	leaf := func() string {
 		return pick(s, []string{"0", "1", "42", "true", "false", "undefined",
 			"JobStatus", "ExitCode", "NumJobStarts", "RequestMemory",
-			"MemoryUsage", `"str"`, "time()", "$(Process)", "$(ClusterId)"})
+			"MemoryUsage", `"str"`, "$(Process)", "$(ClusterId)"})
 	}
 	switch s.intn(6) {
 	case 0:
