@@ -396,15 +396,20 @@ var byName = map[string]func(*stream) string{
 	// --- enumerations: a value outside the set is rejected ---
 	"notification":            enum("Always", "Complete", "Error", "Never"),
 	"when_to_transfer_output": enum("ON_EXIT", "ON_EXIT_OR_EVICT", "ON_SUCCESS"),
-	"should_transfer_files":   enum("YES", "IF_NEEDED", "YES", "IF_NEEDED", "YES", "NO"),
-	"kill_sig":                enum("SIGTERM", "SIGKILL", "SIGUSR1", "15"),
-	"remove_kill_sig":         enum("SIGTERM", "SIGKILL", "9"),
-	"hold_kill_sig":           enum("SIGTERM", "SIGQUIT"),
-	"vm_type":                 enum("kvm"),
-	"vm_networking_type":      enum("nat", "bridge"),
-	"docker_pull_policy":      enum("always", "missing"),
-	"docker_network_type":     enum("host", "none", "bridge"),
-	"transfer_container":      boolean,
+	// NO contradicts every transfer_* keyword in the same file, and SubmitHash
+	// rejects the contradiction, so it is listed once among five entries
+	// rather than one of three: still generated, but not in a third of files.
+	"should_transfer_files": enum("YES", "IF_NEEDED", "YES", "IF_NEEDED", "YES", "NO"),
+	"kill_sig":              enum("SIGTERM", "SIGKILL", "SIGUSR1", "15"),
+	"remove_kill_sig":       enum("SIGTERM", "SIGKILL", "9"),
+	"hold_kill_sig":         enum("SIGTERM", "SIGQUIT"),
+	// Only kvm: xen and vmware need their own required keywords, and without
+	// them SubmitHash rejects the file before any vm keyword is compared.
+	"vm_type":             enum("kvm"),
+	"vm_networking_type":  enum("nat", "bridge"),
+	"docker_pull_policy":  enum("always", "missing"),
+	"docker_network_type": enum("host", "none", "bridge"),
+	"transfer_container":  boolean,
 
 	// --- structured strings ---
 	"environment":             environment,
