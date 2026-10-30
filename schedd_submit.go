@@ -59,14 +59,19 @@ const (
 //  9. CommitTransaction (10007)
 //  10. CloseSocket (10028)
 type QmgmtConnection struct {
-	address            string
-	htcondorClient     *client.HTCondorClient
-	stream             *stream.Stream
-	authenticatedUser  string // User from authentication negotiation
-	inTransaction      bool
-	hasJobsets         bool //nolint:unused // Will be used when implementing jobsets
-	allowsLateMat      bool //nolint:unused // Will be used when implementing late materialization
-	lateMaterializeVer int  //nolint:unused // Will be used when implementing late materialization
+	address           string
+	htcondorClient    *client.HTCondorClient
+	stream            *stream.Stream
+	authenticatedUser string // User from authentication negotiation
+	inTransaction     bool
+	hasJobsets        bool //nolint:unused // Will be used when implementing jobsets
+	// allowsLateMat is the schedd's LateMaterialize capability: whether it
+	// will accept a job factory at all. lateMaterializeVer is the protocol
+	// version it advertises, zero when it advertised none, which is how a
+	// schedd too old to know about factories is told apart from one that
+	// knows and refuses.
+	allowsLateMat      bool
+	lateMaterializeVer int
 }
 
 // NewQmgmtConnection establishes a queue management connection to the schedd
@@ -149,9 +154,6 @@ func newQmgmtConnection(ctx context.Context, cfg *config.Config, address string)
 		return nil, fmt.Errorf("failed to read capabilities ClassAd: %w", err)
 	}
 
-	// TODO: Parse capabilities to set hasJobsets, allowsLateMat, lateMaterializeVer
-	_ = capabilities
-
 	q := &QmgmtConnection{
 		address:           address,
 		htcondorClient:    htcondorClient,
@@ -159,9 +161,36 @@ func newQmgmtConnection(ctx context.Context, cfg *config.Config, address string)
 		authenticatedUser: negotiation.User, // Store authenticated user
 		inTransaction:     true,             // GetCapabilities implicitly starts a transaction
 	}
+	q.readCapabilities(capabilities)
 
 	// Success!
 	return q, nil
+}
+
+// readCapabilities records the parts of the schedd's capability ad this
+// client acts on. It mirrors ActualScheddQ::init_capabilities.
+//
+// A capability the ad does not mention reads as absent rather than as false,
+// which matters for LateMaterialize: a schedd old enough not to mention it
+// cannot be told apart from one that refuses by the boolean alone, so the
+// version is what records that it knew about factories at all.
+func (q *QmgmtConnection) readCapabilities(capabilities *classad.ClassAd) {
+	if capabilities == nil {
+		return
+	}
+	if allows, ok := capabilities.EvaluateAttrBool("LateMaterialize"); ok {
+		q.allowsLateMat = allows
+		// The schedd knows the feature; record which protocol it speaks.
+		// Anything from 128 up is not a version the C++ client accepts
+		// either, and it falls back to 1.
+		q.lateMaterializeVer = 1
+		if ver, ok := capabilities.EvaluateAttrInt("LateMaterializeVersion"); ok && ver < 128 {
+			q.lateMaterializeVer = int(ver)
+		}
+	}
+	if useJobsets, ok := capabilities.EvaluateAttrBool("UseJobsets"); ok {
+		q.hasJobsets = useJobsets
+	}
 }
 
 // Close disconnects from the schedd queue

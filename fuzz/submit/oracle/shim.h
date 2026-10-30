@@ -52,22 +52,30 @@ int submit_make_ads(const char *text, int mode, int max_procs, char **out);
  * Report what condor_submit would send for a LATE-MATERIALIZATION (job factory)
  * submission of this file, instead of materialized job ads.
  *
- * No schedd is involved: whether a submission is a factory, its materialize
- * limit, the submit digest the schedd later expands per proc, and the itemdata
- * rows are all computed client-side by SubmitHash. Only the schedd's expansion
- * of the digest would need one, and that is the schedd's behavior, not the
- * parser's.
+ * Almost no schedd is involved: whether a submission is a factory, its
+ * materialize limit, the submit digest the schedd later expands per proc, and
+ * the itemdata rows are all computed client-side by SubmitHash. The one thing
+ * that is not is the name of the file the schedd spools the itemdata to, which
+ * the real send_Itemdata learns from the schedd's reply and writes into the
+ * queue statement at the end of the digest. `items_filename` stands in for it
+ * so the report is deterministic; it is ignored when the queue statement has
+ * no items.
  *
  * Output:
  *    "#factory <0|1>\n"          want_factory_submit()
- *    "#max_materialize <n>\n"    only when factory
+ *    "#max_materialize <n>\n"    only when factory, after condor_submit's clamp
+ *    "#total_procs <n>\n"        only when factory
  *    "#vars <v1,v2,...>\n"       the queue statement's loop variables
- *    "#items <n>\n" then one "#item\x1f<row>\n" per itemdata row
- *    "#digest\n" then the digest text, then "#enddigest\n"
+ *    "#items <n>\n" then one "#item\x1f<row>\n" per itemdata row, each row
+ *                               encoded as SendMaterializeData would send it
+ *                               (fields joined with \x1f) minus its newline
+ *    "#digest\n" then the digest text, then "#enddigest\n". The digest ends
+ *                               with the queue statement append_queue_statement
+ *                               adds, which is what the schedd iterates.
  *
  * Return value matches submit_make_ads.
  */
-int submit_factory_info(const char *text, int max_items, char **out);
+int submit_factory_info(const char *text, int max_items, const char *items_filename, char **out);
 
 /*
  * Emit HTCondor's own submit-keyword table, so the fuzzer's vocabulary comes

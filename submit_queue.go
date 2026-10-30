@@ -436,3 +436,15 @@ func createIteratorFromQueue(qs *config.QueueStatement, access queueFileAccess) 
 
 	return nil, fmt.Errorf("invalid queue statement: cannot determine iterator type")
 }
+
+// rawItemSource is implemented by the iterators that read a list of rows, so
+// a late-materialization submission can send those rows to the schedd
+// untouched rather than the loop-variable values they split into. The schedd
+// does its own splitting when it materializes a proc.
+type rawItemSource interface {
+	rawItems() []string
+}
+
+func (l *listIterator) rawItems() []string     { return l.items }
+func (f *fileIterator) rawItems() []string     { return f.lines }
+func (m *matchingIterator) rawItems() []string { return m.files }
