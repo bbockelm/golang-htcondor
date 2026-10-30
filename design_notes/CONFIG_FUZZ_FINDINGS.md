@@ -100,7 +100,30 @@ is now a parity seed (condor 25.14.1 values):
 | `$INT(0;)` | `` (trailing `;` rejected) | accepted; was worked around in `parseConfigExpr` |
 | `$EVAL(.0)`, `$EVAL(1.5)` | `0.0`, `1.500000000000000E+00` (ClassAdUnParser) | `0`, `1.5` (`Value.String`) |
 
-Still open in the library, reachable through `$EVAL` but not yet hit by the
+### A leading dot is dropped at parse time
+
+The first one of these the fuzzer has actually caught in CI, rather than by
+inspection. `$EVAL({1, 1+ .A0})` expands to `{ 1,1 + A0 }` in Go and
+`{ 1,1 + .A0 }` in HTCondor.
+
+The dot is lost when the expression is parsed, not when it is printed:
+`ParseExprOld(".x.y")` already reads back as `x.y`, while `a.b` and `MY.Foo`
+keep theirs. The library has no concept to put it in — `ast.AttributeScope` is
+`NoScope`/`MyScope`/`TargetScope`/`ParentScope`, and `ParseScopedIdentifier`
+only inspects dots at an index greater than zero.
+
+In C++ a leading dot is not decoration. `AttributeReference` carries an
+`absolute` flag, and `attrrefs.cpp` resolves it as
+`current = absolute ? state.rootAd : state.curAd` — so `.Foo` reads the root ad
+and `Foo` reads the current one. Those are different lookups inside a nested ad
+or a chained proc-over-cluster ad, which is how every HTCondor job ad is built.
+Not verified: whether the old-syntax parser sets that flag, or only the new one.
+The divergence holds either way.
+
+Recorded as a known-divergence seed, so it flips red and gets promoted if the
+library learns a root scope.
+
+Still open in the library and reachable through `$EVAL`, but not yet hit by the
 fuzzer in CI-length runs: libclassad stops evaluating 400 levels deep (Go:
 2000), so deeply nested expressions differ; Go changes the case of non-ASCII
 letters in `toUpper`/`toLower`/`stricmp`/`stringListIMember` where libclassad
