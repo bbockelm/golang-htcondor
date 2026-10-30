@@ -228,6 +228,67 @@ C++, since that form skips validation, where Go rejects the file; and submit's
 `-Attr` form has no `-` token in the Go lexer at all, so `-Foo = 7` is rejected
 where C++ accepts it.
 
+**A job evicted for using too much memory was never retried with more.** That
+is what `retry_request_memory`, `retry_request_memory_max` and
+`retry_request_memory_increase` are for, and the Go parser implemented none of
+them, so a submit file that asked for automatic retry got a job that went on
+hold on its first eviction exactly as if the file had never mentioned it.
+
+The feature is not a policy expression. The job carries a job **transform**, as
+text, in `TransformBody_RequestMemory`, and names `RequestMemory` in
+`TransformOnEvict` so the schedd runs that transform when the job is vacated.
+The transform's own `REQUIREMENTS` line is what keeps it from firing on every
+eviction: it runs only for vacate sub-code 102, the one that means the job went
+over its memory request. A body nothing names in `TransformOnEvict` is never
+run, which is why both halves have to be written.
+
+Four things the keyword names do not show:
+
+- **`retry_request_memory_max` alone is not a maximum.** It is a single retry
+  value, and the job ad gets no `MaxRequestMemory` at all — just
+  `SET RequestMemory <value>`. `MaxRequestMemory` and `NextRequestMemory`
+  appear only when an *increase* is given as well, because they are the two
+  halves of `EVALSET RequestMemory MIN({NextRequestMemory, MaxRequestMemory})`.
+  `NextRequestMemory` is an expression **over** `RequestMemory`
+  (`RequestMemory + 128`), which is what makes each retry larger than the last;
+  the ceiling is what stops it.
+- **An increase with no ceiling is not an expression.** There is nothing to
+  stop it growing, so condor_submit evaluates it once, against the request the
+  job starts with, and stores the single number: `request_memory = 100` with
+  `retry_request_memory_increase = 128` is `SET RequestMemory 228`, not
+  `RequestMemory + 128`.
+- **`request_memory = 100, 2048` is the same feature**, a second value on the
+  request itself, and it supersedes the `retry_` commands because
+  condor_submit never reads them in that case. A list of three or more values
+  of either spelling becomes `RetryRequestMemory` plus an index the transform
+  walks. Go rejected the comma outright before this, so the file did not parse.
+- **The whole family is reachable only when `request_memory` is a size.**
+  `request_memory = ifThenElse(...)` or a VM job's `MY.VM_Memory` takes it out
+  of play, since the transform has no number to grow from.
+
+The transform body is **text inside a job attribute**, which makes the
+spelling of any expression in it load-bearing in a way an expression-valued
+attribute's is not. `retry_request_memory = MAX({RequestMemory, MemoryUsage})
+* 2` has to reach the schedd as `MAX({ RequestMemory,MemoryUsage }) * 2`, the
+way HTCondor's own unparser writes it, where Go's `Expr.String()` writes
+`(MAX({RequestMemory, MemoryUsage}) * 2)` — same tree, different text, and the
+differ caught it. Both sides also reject what the other rejects: a sequence
+that does not increase, an increment that is zero or negative, and an increment
+that is an expression naming no `RequestMemory` (`MemoryUsage * 2` would hand
+every retry the same value).
+
+Deliberately left: the disk half of the same C++ function — `retry_request_disk`
+and the second value of `request_disk = a, b` — and `on_evict_checks`, which is
+the other writer of `TransformOnEvict`. Because `on_evict_checks` is still
+unimplemented, `transformonevict` stays in `knownDivergentGenerated` and the
+sweep cannot compare it; `TestOnEvictMemoryTransformMatchesOracle` compares it
+directly on files that use no `on_evict_checks`, so what the retry family
+writes there is checked even though the sweep skips the attribute. The
+`SUBMIT_REQUEST_MISSING_UNITS` warning, and the warning that
+`retry_request_memory_increase` is ignored when the list form is used, are not
+reproduced: the Go parser has nowhere to put a warning, and neither changes the
+ad.
+
 ## Cosmetic
 
 `Rank`: C++ emits the real `0.0`, Go the integer `0`. Same value, different
