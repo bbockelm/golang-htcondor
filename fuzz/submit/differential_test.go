@@ -33,12 +33,6 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\narguments = $(Process)\nqueue 3\n"},
 	{input: "executable = /bin/sleep\noutput = out.$(Process)\nerror = err.$(Process)\nlog = j.log\nqueue 2\n"},
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\nqueue\n"},
-	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nqueue 2 in (a b)\n",
-		reason: "proc count: `queue 2 in (a b)` is 2 jobs per item over 2 items = 4 procs in C++; Go makes 2."},
-	{input: "executable = /bin/sleep\nqueue name in (alice bob)\n",
-		reason: "space-separated inline item list: C++ accepts it, Go's parser requires commas and rejects the file."},
-	{input: "executable = /bin/sleep\nqueue name from (\n  x\n  y\n)\n",
-		reason: "inline `from ( ... )` item list: C++ accepts it, Go's parser rejects the open paren."},
 
 	// --- parity, exercising specific commands ---
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nMY.Foo = 1\n+Bar = \"two\"\nqueue\n"},
@@ -53,6 +47,22 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\nqueue 0\n"},
 	{input: ""},
 	{input: "queue\n"},
+
+	// --- parity, exercising inline queue item lists ---
+	// Whitespace separates items exactly as a comma does, so none of these
+	// lists produces an item with two fields.
+	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nqueue 2 in (a b)\n"},
+	{input: "executable = /bin/sleep\nqueue name in (alice bob)\n"},
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in (a b, c d)\n"},
+	{input: "executable = /bin/sleep\narguments = $(x) $(y)\nqueue x, y in (1 2, 3 4)\n"},
+	// The list ends at the last ')' on the line, so the first one here is an
+	// item rather than a syntax error.
+	{input: "executable = /bin/sleep\narguments = $(Item)\nqueue in(A  ))\n"},
+	// Inline `from ( ... )`: unlike `in`, it takes each line whole, so these
+	// are the item lists that do fill a second loop variable.
+	{input: "executable = /bin/sleep\nqueue name from (\n  x\n  y\n)\n"},
+	{input: "executable = /bin/sleep\narguments = $(x) $(y)\nqueue x, y from (\n1 2\n3 4\n)\n"},
+	{input: "executable = /bin/sleep\narguments = $(x) $(y)\nqueue x, y from (\n1 2 3\n4\n)\n"},
 }
 
 func requireOracle(t testing.TB) {

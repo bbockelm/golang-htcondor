@@ -38,6 +38,14 @@ type TokenInfo struct {
 	Lit   string
 	Line  int
 	Col   int
+
+	// Items carries the already-split members of a queue statement's
+	// parenthesised item list, and is set only on an ITEMS token. The
+	// split happens in the lexer because HTCondor's rules for it are
+	// character-level rather than token-level: the list runs to the last
+	// ')' on the line, a ')' anywhere else is an ordinary character, and
+	// quotes are not special.
+	Items []string
 }
 
 // Lexer tokenizes HTCondor configuration input
@@ -75,7 +83,26 @@ type Lexer struct {
 	// their ':' (e.g. `include : file`) stays a COLON.
 	stmtStart           bool
 	prevIdentAssignable bool
+
+	// inQueue is true from the QUEUE keyword to the end of its line. It
+	// scopes the item-list handling below to queue statements, so the
+	// `in`/`from` keywords keep their ordinary meaning elsewhere.
+	inQueue bool
+	// queueItems is set when an `in` or `from` keyword was just lexed
+	// inside a queue statement, so the next token may be an item list.
+	queueItems queueItemsMode
 }
+
+// queueItemsMode says which foreach keyword introduced an item list, which
+// decides how the list's text is split: `in` splits every line into tokens,
+// `from` takes each line whole.
+type queueItemsMode int
+
+const (
+	queueItemsNone queueItemsMode = iota
+	queueItemsIn
+	queueItemsFrom
+)
 
 // NewLexer creates a new lexer
 func NewLexer(r io.Reader) *Lexer {
@@ -377,6 +404,89 @@ func (l *Lexer) readUntilNewline() string {
 	return strings.TrimRight(l.buf.String(), " \t")
 }
 
+// readQueueItemList consumes a queue statement's parenthesised item list and
+// returns its members, already split. l.ch must be the opening '('. ok is
+// false when a multi-line list ran to end of file without its closing ')'.
+//
+// The shape of the list is decided by the whole first line, not by matching
+// parentheses: if that line's last character is ')' the list is a single-line
+// one between the first '(' and that last ')', and otherwise it continues on
+// following lines until one that begins with ')'. A ')' anywhere else is an
+// ordinary character and ends up inside an item, so `queue in (a ) b)` is the
+// three items "a", ")" and "b". A list whose body then still begins with '('
+// is a multi-line list that happened to end its first line with ')'.
+func (l *Lexer) readQueueItemList(mode queueItemsMode) ([]string, bool) {
+	from := mode == queueItemsFrom
+
+	first := strings.TrimRight(l.readUntilNewline(), " \t\r")
+	body := first
+	singleLine := false
+	if len(first) >= 2 && strings.HasSuffix(first, ")") {
+		body = first[1 : len(first)-1]
+		singleLine = true
+	}
+	if strings.HasPrefix(body, "(") {
+		// A second '(' means the list spans lines; the text after it is
+		// still the start of the list.
+		body = body[1:]
+		singleLine = false
+	}
+	body = strings.TrimLeft(body, " \t\r")
+
+	if singleLine {
+		if from {
+			// `queue from (a b)` is one item, not two: `from` never
+			// splits a line.
+			return []string{body}, true
+		}
+		return splitQueueItems(body), true
+	}
+
+	items := []string{}
+	if body != "" {
+		if from {
+			items = append(items, body)
+		} else {
+			items = append(items, splitQueueItems(body)...)
+		}
+	}
+	for {
+		if l.ch == '\n' {
+			l.readChar()
+		}
+		if l.ch == 0 {
+			return nil, false // end of file before the closing ')'
+		}
+		line := strings.TrimSpace(l.readUntilNewline())
+		switch {
+		case strings.HasPrefix(line, "#"):
+			// Comments inside the list are skipped, and unlike a blank
+			// line they do not contribute an item.
+		case strings.HasPrefix(line, ")"):
+			return items, true
+		case from:
+			// Every line is one item, blank lines included.
+			items = append(items, line)
+		default:
+			items = append(items, splitQueueItems(line)...)
+		}
+	}
+}
+
+// splitQueueItems splits one line of an `in` item list into its members.
+// Commas and whitespace are both separators, runs of them collapse, and
+// quotes carry no meaning: `queue in ("a b" c)` is the three items `"a`,
+// `b"` and `c`.
+func splitQueueItems(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		switch r {
+		case ',', ' ', '\t', '\r', '\n':
+			return true
+		}
+		return false
+	})
+}
+
 // readHeredoc reads a heredoc value starting with @=TAG
 func (l *Lexer) readHeredoc() string {
 	l.buf.Reset()
@@ -517,6 +627,29 @@ func (l *Lexer) NextToken() *TokenInfo {
 		}
 	}
 
+	// An `in` or `from` keyword in a queue statement may be followed by a
+	// parenthesised item list, which HTCondor splits itself rather than
+	// handing to a grammar; readQueueItemList does the same and yields the
+	// members as one ITEMS token. Anything else (a file name after `from`,
+	// end of line) falls through to ordinary lexing.
+	if l.queueItems != queueItemsNone {
+		mode := l.queueItems
+		l.queueItems = queueItemsNone
+		l.skipWhitespace()
+		if l.ch == '(' {
+			tok := &TokenInfo{Line: l.line, Col: l.col, Lit: "("}
+			items, ok := l.readQueueItemList(mode)
+			if !ok {
+				// Ran to end of file without the closing ')'.
+				tok.Token = ILLEGAL
+				return tok
+			}
+			tok.Token = ITEMS
+			tok.Items = items
+			return tok
+		}
+	}
+
 	l.skipWhitespace()
 
 	tok := &TokenInfo{
@@ -540,6 +673,7 @@ func (l *Lexer) NextToken() *TokenInfo {
 
 	case '\n':
 		l.stmtStart = true // the next token begins a new statement
+		l.inQueue = false  // a queue statement does not span lines
 		l.readChar()
 		return l.NextToken() // Skip newlines and get next token
 
@@ -700,6 +834,16 @@ func (l *Lexer) NextToken() *TokenInfo {
 					}
 				case IF, ELIF:
 					l.afterIfOrElif = true
+				case QUEUE:
+					l.inQueue = true
+				case IN:
+					if l.inQueue {
+						l.queueItems = queueItemsIn
+					}
+				case FROM:
+					if l.inQueue {
+						l.queueItems = queueItemsFrom
+					}
 				case ERROR, WARNING:
 					// Only treat as directive if followed by ':' or whitespace then message
 					// If followed by '=', treat as regular identifier for assignment

@@ -425,3 +425,143 @@ queue matching "nonexistent*.txt"
 		t.Errorf("Expected 0 procs, got %d", result.NumProcs)
 	}
 }
+
+// TestSplitItemColumns pins how one item is spread over several loop
+// variables. The expectations were measured against HTCondor's own parser
+// with the differential harness in fuzz/submit.
+//
+// The last variable takes everything that is left rather than just the next
+// field, commas separate columns as well as whitespace, a short row pads with
+// empty strings -- and an item that is empty once trimmed yields no columns
+// at all, which is how a blank row leaves the loop variables holding the
+// previous row's values.
+func TestSplitItemColumns(t *testing.T) {
+	tests := []struct {
+		item string
+		cols int
+		want []string
+	}{
+		{item: "1 2 3", cols: 2, want: []string{"1", "2 3"}},
+		{item: "1 2 3", cols: 3, want: []string{"1", "2", "3"}},
+		{item: "1,2,3", cols: 2, want: []string{"1", "2,3"}},
+		{item: "a, b", cols: 2, want: []string{"a", "b"}},
+		{item: "1 2", cols: 3, want: []string{"1", "2", ""}},
+		{item: "  a  b  ", cols: 2, want: []string{"a", "b"}},
+		{item: "a b", cols: 1, want: []string{"a b"}},
+		{item: "", cols: 2, want: nil},
+		{item: "   ", cols: 2, want: nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.item, func(t *testing.T) {
+			got := splitItemColumns(tc.item, tc.cols)
+			if len(got) != len(tc.want) {
+				t.Fatalf("splitItemColumns(%q, %d) = %q, want %q", tc.item, tc.cols, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("splitItemColumns(%q, %d) = %q, want %q", tc.item, tc.cols, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestQueueInlineItemListValues walks whole submit files and checks the value
+// each loop variable takes per proc, which is what a job actually sees. The
+// expectations were measured against HTCondor's own parser.
+func TestQueueInlineItemListValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		queue string
+		want  []map[string]string
+	}{
+		{
+			name:  "whitespace list, one variable",
+			queue: "queue name in (alice bob)",
+			want: []map[string]string{
+				{"name": "alice"},
+				{"name": "bob"},
+			},
+		},
+		{
+			name:  "whitespace list, two variables: the second never gets a value",
+			queue: "queue x, y in (1 2, 3 4)",
+			want: []map[string]string{
+				{"x": "1", "y": ""},
+				{"x": "2", "y": ""},
+				{"x": "3", "y": ""},
+				{"x": "4", "y": ""},
+			},
+		},
+		{
+			name:  "a count repeats each item in turn",
+			queue: "queue 2 in (a b)",
+			want: []map[string]string{
+				{"Item": "a"},
+				{"Item": "a"},
+				{"Item": "b"},
+				{"Item": "b"},
+			},
+		},
+		{
+			name:  "an inline 'from' list fills both variables",
+			queue: "queue x, y from (\n1 2\n3 4\n)",
+			want: []map[string]string{
+				{"x": "1", "y": "2"},
+				{"x": "3", "y": "4"},
+			},
+		},
+		{
+			name:  "the last variable takes the rest of the row",
+			queue: "queue x, y from (\n1 2 3\n)",
+			want: []map[string]string{
+				{"x": "1", "y": "2 3"},
+			},
+		},
+		{
+			name:  "a short row pads with empty strings",
+			queue: "queue x, y from (\n1 2\n3\n)",
+			want: []map[string]string{
+				{"x": "1", "y": "2"},
+				{"x": "3", "y": ""},
+			},
+		},
+		{
+			name:  "a blank row keeps the previous row's values",
+			queue: "queue x, y from (\n1 2\n\n)",
+			want: []map[string]string{
+				{"x": "1", "y": "2"},
+				{"x": "1", "y": "2"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sf, err := ParseSubmitFile(strings.NewReader(
+				"universe = vanilla\nexecutable = /bin/true\n" + tc.queue + "\n"))
+			if err != nil {
+				t.Fatalf("Failed to parse: %v", err)
+			}
+			it := sf.queueIterator
+			if it == nil {
+				t.Fatal("no queue iterator was built")
+			}
+			var got []map[string]string
+			for it.Next() {
+				got = append(got, it.Values())
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("expected %d procs, got %d (%v)", len(tc.want), len(got), got)
+			}
+			for i, want := range tc.want {
+				for name, v := range want {
+					if got[i][name] != v {
+						t.Errorf("proc %d: $(%s) = %q, want %q", i, name, got[i][name], v)
+					}
+				}
+			}
+		})
+	}
+}
