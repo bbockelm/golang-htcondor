@@ -1124,16 +1124,18 @@ var fileTransferOutputTable = []struct {
 	{"ON_EXIT", ftoOnExit}, {"ONEXIT", ftoOnExit},
 	{"NONE", ftoNone}, {"NULL", ftoNone},
 	{"ON_SUCCESS", ftoOnSuccess}, {"ONSUCCESS", ftoOnSuccess},
-	// NEVER and FALSE are not in HTCondor's table and are not in its
-	// error message either, but condor_submit accepts both as "no
-	// output transfer": its tables are arrays of fixed-size structs
-	// terminated by an entry whose name is empty, FileTransferOutput-
-	// Translation has no such entry, and the lookup walks into whatever
-	// is laid out after it. Rejecting them would turn submit files
-	// condor_submit accepts today into errors, and accepting them costs
-	// nothing -- the value is never written to the job ad, since
-	// WhenToTransferOutput is only set when files might be transferred.
-	{"NEVER", ftoNone}, {"FALSE", ftoNone},
+	// These eight are the whole set. condor_submit also answers for a
+	// few names that are not in its table -- NEVER and FALSE among them
+	// -- but not consistently: its translation tables are arrays of
+	// fixed-size structs terminated by an entry whose name is empty,
+	// FileTransferOutputTranslation has no such entry, and the lookup
+	// walks off the end into whatever the build laid out after it. The
+	// answer differs between HTCondor versions in both directions:
+	// 25.14.1 reads NEVER as a value that CONTRADICTS
+	// should_transfer_files = NO, and 26.2.0 reads it as the value that
+	// AGREES with it, so each version rejects the file the other
+	// accepts. There is no behavior here to mirror, so these names are
+	// rejected like any other unknown value.
 }
 
 func shouldTransferFilesNum(s string) (shouldTransferFiles, bool) {

@@ -979,11 +979,21 @@ refuses -- `NO` with a real `when_to_transfer_output`, a transferring job with
 `NEVER`, `IF_NEEDED` with `ON_EXIT_OR_EVICT`, and `NO` alongside
 `transfer_input_files`/`transfer_output_files` -- are refused now too, and
 `ON_EXIT_OR_EVICT` on its own promotes an un-chosen `IF_NEEDED` to `YES` the
-way condor_submit does. `when_to_transfer_output = NEVER` and `= FALSE` are
-accepted as "no transfer", which HTCondor's own table does not list but
-`condor_submit` takes: its translation tables are fixed-size arrays with no
-terminating entry, so the lookup reads into whatever follows. Rejecting them
-would break submit files that work today.
+way condor_submit does.
+
+One value is deliberately not mirrored. `when_to_transfer_output = NEVER` gets
+an answer out of condor_submit that its own table does not define: the
+translation tables are arrays of fixed-size structs terminated by an entry
+whose name is empty, `FileTransferOutputTranslation` has no such entry, and
+the lookup walks off the end into whatever the build laid out after it. The
+two HTCondor versions this harness has run against disagree in opposite
+directions -- 25.14.1 reads `NEVER` as a value that *contradicts*
+`should_transfer_files = NO` and rejects the pair, 26.2.0 reads it as the
+value that *agrees* and accepts it -- so each version rejects the file the
+other takes. There is no behavior to copy, and the Go parser rejects the name
+like any other unknown value. This was caught by CI rather than locally: the
+two oracles are different HTCondor versions, and the local one alone made the
+wrong answer look right.
 
 `transfer_input_files` and `transfer_output_files` each answer to a second
 spelling, the attribute's own name (`TransferInputFiles`,
