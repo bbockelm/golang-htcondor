@@ -98,10 +98,11 @@ attribute are never written into the same file, which is what keeps an
 Generation is a pure function of the input bytes, so a fuzz reproducer is the
 bytes.
 
-Five keywords are deliberately out of the vocabulary, each recorded in
+Six keywords are deliberately out of the vocabulary, each recorded in
 `Vocab.Skipped`: `request_gpu_memory` and `request_gpus_memory` (flagged
 `f_error`, SubmitHash rejects them), `getenv` and `get_env` (they read the
-host environment, which only the C++ side is allowed to do here), and
+host environment, which only the C++ side is allowed to do here),
+`x509userproxy` (SubmitHash reads and validates the proxy off the host), and
 `container_image` (it crashes the oracle -- see FINDINGS.md).
 
 ## How a divergence is judged

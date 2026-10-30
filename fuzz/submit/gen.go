@@ -117,9 +117,10 @@ var excluded = map[string]string{
 	"x509userproxy": "reads and validates an X.509 proxy file off the host",
 }
 
-// specialGroup extracts the f_special group id from a keyword's flag word.
-// submit_utils.cpp packs it as f_special (0x20000) plus a group number in
+// The f_special group ids, masked out of a keyword's flag word.
+// submit_utils.cpp packs the group as f_special (0x20000) plus a number in
 // 0x1F000; the group is what says a keyword is grid-only, vm-only and so on.
+// Only the ones that restrict a keyword to a universe are named here.
 const (
 	specialMask     = 0x3F000
 	specialGrid     = 0x20000 + 0x03000
