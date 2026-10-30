@@ -225,7 +225,6 @@ var attributesToIgnore = map[string]bool{
 	// Go-only attributes: set by this library, absent from condor_submit's
 	// ad, so only their value comparison is suppressed.
 	"TransferExecutable": true,
-	"EmailAttributes":    true,
 	"TransferInput":      true,
 	"ContainerImage":     true, // Docker universe
 	"JobRunCount":        true,

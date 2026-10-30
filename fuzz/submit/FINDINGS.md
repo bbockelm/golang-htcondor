@@ -644,11 +644,19 @@ that is left.
   `encrypt_input_files` and its three siblings are `f_as_string`, so C++
   stores them verbatim and Go canonicalizes. The negotiator and the file
   transfer both match these literally.
+
+- **Quotes around a hold reason.** `on_exit_hold_reason` and
+  `periodic_hold_reason` are assigned as EXPRESSIONS, so a quoted reason
+  becomes a ClassAd string with no quotes in its value; Go stores the text it
+  was given and the quotes end up inside the string. Both belong to
+  `SetPeriodicExpressions`, not to the simple-keyword pass.
+- **`concurrency_limits` and `ec2_tag_names`** are not list-flagged keywords:
+  `SetConcurrencyLimits` lower-cases, validates and SORTS the names, and
+  `handleAVPairs` collects the EC2 tags from the `ec2_tag_<Name>` macros as
+  well. Go stores the text it was given in both cases, and the negotiator
+  matches limit names literally.
 - **A filename containing a space** survives in `TransferInput` on the C++
   side and is split away by Go, so the file is never transferred.
-- **`mount_under_scratch`** stays a string in C++; Go coerces it to a boolean.
-- **`want_graceful_removal = undefined`** stays undefined in C++; Go coerces
-  it to `false`.
 - **`stream_input` / `stream_output` / `stream_error`** produce opposite
   `TransferIn`/`TransferOut`/`TransferErr` booleans, so one side streams the
   stream and the other transfers it.
@@ -684,6 +692,16 @@ noop-job settings, the parallel-script settings, the submit-event notes,
 `manifest`, `output_destination`, `output_directory`, `scitokens_file`,
 `project_name`, `primary_unix_group`, `jobset`, `dag_node_name` and the
 DAGMan bookkeeping, `periodic_vacate` and the `*_subcode` reasons.
+
+The families still in `knownDivergentGenerated` are the EC2/GCE/Azure grid
+settings, the tool-daemon (TDP) settings, `kill_sig` and its siblings,
+`scitokens_file`, `project_name`, `periodic_vacate` and the `*_subcode`
+reasons. The buffer, Java, noop-job, parallel-script and submit-event-note
+families, `core_size`, `stack_size`, `keep_claim_idle`,
+`max_job_retirement_time`, `next_job_start_delay`, the `allowed_*_duration`
+pair, `manifest`, `output_destination`, `output_directory`,
+`primary_unix_group`, `jobset` and `dag_node_name` were all on this list and
+are fixed; see "Fixed" below.
 
 ## Fixed
 
@@ -791,6 +809,72 @@ The generated sweep can never reach any of this beyond `grid_resource = batch
 slurm`, which is the only grid prelude the generator writes, so the ec2, gce
 and azure shapes -- and the implicit Name tag above all -- are covered by
 seeds instead.
+
+**Fifty-five settings went to the wrong place, or nowhere, because the value's
+shape was decided keyword by keyword.** HTCondor does not decide it keyword by
+keyword. `SimpleSubmitKeyword` packs a flag word per keyword -- the value type
+in the low five bits (`f_as_bool`, `f_as_int`, `f_as_uint`, `f_as_string`,
+`f_as_list`), plus `f_strip_quotes`, `f_alt_name` and a file role -- and
+`do_simple_commands` walks the table applying them. Ninety-six keywords are
+handled that way; the Go parser had a hand-written block for forty-nine of
+them and nothing at all for the other forty-seven. Each block decided for
+itself what the value was, so the shape came out wrong in both directions at
+once:
+
+- **`encrypt_input_files` and its three siblings are `f_as_string`,** stored
+  exactly as written. Go canonicalized them, stripping the space after each
+  comma. The file transfer matches these names literally, so a file the
+  submitter listed as `a.txt, b.txt` was looked for under a name the submit
+  file never contained.
+- **`email_attributes` is the one `f_as_list` keyword in the whole table,**
+  and its separators ARE canonicalized. Go never read the keyword at all; what
+  it wrote to `EmailAttributes` was the `notification` setting, a different
+  keyword entirely, so every job carried `EmailAttributes = "NEVER"` and the
+  attributes the submitter asked to have mailed were dropped.
+- **`mount_under_scratch` is `f_as_string | f_strip_quotes`,** a directory
+  list. Go ran it through `parseBool`, which turns `/tmp,/var/tmp` into
+  `true`.
+- **A value that was not a plain integer was dropped.** Eighteen of the blocks
+  ran `parseInt` and skipped the attribute when it failed, but nineteen of
+  these keywords are `f_as_expr` and the integer ones accept an expression
+  too: `max_job_retirement_time = 3600 * 2`, `keep_claim_idle =
+  $(MinJobRuntime)` and `allowed_job_duration = 60 * 60 * 24` all parsed, all
+  set nothing, and the job ran with no limit instead of the one it asked for.
+- **An empty value set the attribute to empty,** where `submit_param` returns
+  nothing for it and HTCondor leaves the attribute off the ad entirely.
+- **`checkpoint_exit_code` and `remote_initialdir` went to
+  `CheckpointExitCode` and `RemoteInitialDir`,** which are not attributes
+  HTCondor reads; the real ones are `SuccessCheckpointExitCode` and
+  `RemoteIwd`. A self-checkpointing job's success exit code meant nothing and
+  a `remote_initialdir` moved no job.
+- **`jar_files` was written only for a java job,** and `log` was the only
+  file-role keyword resolved against `Iwd`: `starter_log`, `dagman_log` and
+  `output_directory` carry a file role too and were not written at all.
+
+The fix is the table, not the forty-nine blocks. `simpleSubmitKeywords` in
+`submit_simple_keywords.go` carries all ninety-six rows with their flags, and
+one pass applies them the way `do_simple_commands` does.
+`TestSimpleKeywordTableMatchesOracle` checks every field of every row against
+the table the linked `libcondor_utils` actually carries, so a keyword added
+upstream fails as a missing row rather than as a job ad nobody reads, and
+`TestSimpleKeywordValueShapes` pins one keyword per flag against the oracle,
+so the flags are shown to be acted on rather than merely recorded.
+
+Three things this fuzzer had recorded backwards, all of them checkable against
+`get_submit_keywords()`: `concurrency_limits` and `ec2_tag_names` are not
+`f_as_list` (they are `f_special_concurr` and `f_special_grid`, with list
+handling of their own), and `file_remaps`, `on_exit_hold_reason` and
+`periodic_hold_reason` are not `f_strip_quotes` (they are `f_as_expr`, and the
+quotes vanish because the value is parsed as an expression rather than stored
+as text). `file_remaps` is in the simple pass and is fixed with the rest; the
+other four are not, and are recorded above with what they actually do.
+
+Where it stops is the `f_special` bit, which the table itself carries. The
+attributes a `SetXXX` method DERIVES are still Go's to catch up on:
+`JobStarterDebug` defaulting to true when `starter_log` is set, the
+20-second `JobLeaseDuration` floor, and the `Requirements` clauses that read
+`TransferCheckpointFiles` and `CudaVersion` all live in `SetAutoAttributes`
+and `SetRequirements`, which run after this pass.
 
 **A cron job never deferred, and a cron job's timing went nowhere.** There is
 no `CronWindow` or `CronPrepTime` job attribute: `cron_window` and
