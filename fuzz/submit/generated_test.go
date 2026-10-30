@@ -3,6 +3,7 @@
 package fuzzsubmit
 
 import (
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -158,5 +159,42 @@ func TestGeneratorSkipsRejectedKeywords(t *testing.T) {
 	}
 	for k, why := range v.Skipped {
 		t.Logf("not generated: %s (%s)", k, why)
+	}
+}
+
+// TestGeneratedDivergencesStillDiverge is knownDivergentGenerated's half of
+// what TestKnownDivergencesStillDiverge does for the hand-written table: it
+// reports which recorded findings the fixed sweep no longer reproduces, so a
+// fix on the Go side shows up as an entry to delete rather than sitting in the
+// table forever.
+//
+// It logs rather than fails. An entry can go quiet because the Go parser was
+// fixed (delete it) or because the generator stopped producing the keyword
+// that triggers it (a generator change, not a parser change), and only a human
+// can tell those apart.
+func TestGeneratedDivergencesStillDiverge(t *testing.T) {
+	requireOracle(t)
+	v := genVocab(t)
+
+	seen := map[string]bool{}
+	for _, data := range generatedCorpus(600) {
+		_, s, skip := check(t, v.Generate(data))
+		if skip {
+			continue
+		}
+		for attr := range s {
+			seen[attr] = true
+		}
+	}
+	var quiet []string
+	for attr := range knownDivergentGenerated {
+		if !seen[attr] {
+			quiet = append(quiet, attr)
+		}
+	}
+	sort.Strings(quiet)
+	t.Logf("%d of %d recorded divergences reproduced", len(knownDivergentGenerated)-len(quiet), len(knownDivergentGenerated))
+	if len(quiet) > 0 {
+		t.Logf("not reproduced by this sweep (check whether the Go parser was fixed): %v", quiet)
 	}
 }
