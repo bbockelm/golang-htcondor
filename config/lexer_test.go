@@ -210,6 +210,14 @@ func TestLexerQueueTailWithoutParens(t *testing.T) {
 		{input: "queue in [1:2] x", wantTok: ILLEGAL},
 		{input: "queue from a b", wantTok: STRING, wantLit: "a b"},
 		{input: "queue from table x", wantTok: ILLEGAL},
+		// The item file's name is the remainder verbatim: a quote is an
+		// ordinary filename character, so these name files whose names
+		// begin and end with one. A path containing a space is written
+		// unquoted, and that is the only spelling that finds the file.
+		{input: `queue from "items.txt"`, wantTok: STRING, wantLit: `"items.txt"`},
+		{input: "queue from 'items.txt'", wantTok: STRING, wantLit: "'items.txt'"},
+		{input: `queue from /a dir/items.txt`, wantTok: STRING, wantLit: `/a dir/items.txt`},
+		{input: `queue from x"y".txt`, wantTok: STRING, wantLit: `x"y".txt`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {

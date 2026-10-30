@@ -388,36 +388,16 @@ func expandInlineQueueBlocks(in string) (string, []string, error) {
 			return "", nil, fmt.Errorf("close temp queue file: %w", cerr)
 		}
 		temps = append(temps, tmp.Name())
-		// Wrap the temp path in double quotes — the parser's grammar
-		// for `queue ... from <path>` only accepts an IDENT (no
-		// slashes, dots, etc.) or a STRING. Tempfile paths almost
-		// always contain `/` and `-`, neither of which lex as part of
-		// an IDENT.
-		out = append(out, fmt.Sprintf(`%s %s`, queuePrefix, quoteSubmitFilePath(tmp.Name())))
+		// The path goes in bare. Everything after `from` is the item
+		// file's name verbatim, trimmed and otherwise untouched, so a
+		// path holding `/`, `-`, a space or a quote needs no quoting --
+		// and must not be given any, since quotes would become part of
+		// the name. This used to wrap the path in double quotes because
+		// the grammar accepted only an IDENT or a STRING there, which is
+		// no longer how the tail is read.
+		out = append(out, queuePrefix+" "+tmp.Name())
 	}
 	return strings.Join(out, "\n"), temps, nil
-}
-
-// quoteSubmitFilePath wraps a filesystem path in double quotes for
-// inclusion in a submit-file token slot that accepts STRING. Backslash
-// and double-quote inside the path get escaped; tempfile paths from
-// os.CreateTemp on common platforms never contain either, but we
-// defend against them so the helper is reusable.
-func quoteSubmitFilePath(p string) string {
-	var sb strings.Builder
-	sb.Grow(len(p) + 2)
-	sb.WriteByte('"')
-	for _, r := range p {
-		switch r {
-		case '\\', '"':
-			sb.WriteByte('\\')
-			sb.WriteRune(r)
-		default:
-			sb.WriteRune(r)
-		}
-	}
-	sb.WriteByte('"')
-	return sb.String()
 }
 
 // parseUniverse converts universe string to integer constant

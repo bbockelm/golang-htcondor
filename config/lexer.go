@@ -427,9 +427,15 @@ func (l *Lexer) readUntilNewline() string {
 // Parentheses are optional. HTCondor anchors the parse on the keyword and
 // takes the rest of the line as the item list, splitting it on whitespace and
 // commas for `in` and taking it whole as the item file's name for `from`; a
-// '(' only selects the bracketed forms readQueueItemList handles. The name
-// after `from` is therefore the whole trimmed remainder, quotes and embedded
-// spaces included, because HTCondor never tokenizes it.
+// '(' only selects the bracketed forms readQueueItemList handles.
+//
+// The name after `from` is the whole trimmed remainder, verbatim:
+// `parse_queue_args` assigns it and trims it, and nothing else ever looks at
+// it, so there is no quote processing of any kind. A quote is an ordinary
+// filename character wherever it appears -- `queue from "items.txt"` opens a
+// file whose name begins and ends with a double quote -- and a path that
+// contains a space is written WITHOUT quotes, which is the only spelling that
+// works.
 //
 // A leading qualifier -- a '[' slice, or `files`/`dirs`/`any`/`table` -- is
 // rejected rather than read as an item: HTCondor acts on those, and this
@@ -454,17 +460,6 @@ func (l *Lexer) lexQueueTail(mode queueItemsMode) *TokenInfo {
 		tok.Token = ITEMS
 		tok.Items = items
 		return tok
-	}
-
-	if mode == queueItemsFrom && (l.ch == '"' || l.ch == '\'') {
-		// A quoted item file. HTCondor does not strip these quotes -- the
-		// name it opens is `"items.txt"`, quotes and all -- but this parser
-		// has always read a quoted path as a path, and it is the only way
-		// callers have to name a file whose path contains a space. Left as
-		// a deliberate divergence, recorded in fuzz/submit/FINDINGS.md.
-		// Falling through here reaches the ordinary string lexing, escapes
-		// included.
-		return nil
 	}
 
 	rest := l.readUntilNewline()
