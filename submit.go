@@ -9,11 +9,13 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/user"
 	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PelicanPlatform/classad/ast"
@@ -71,6 +73,10 @@ type SubmitFile struct {
 	// took from JOB_DEFAULT_REQUESTDISK, or "" when it took none. Reset
 	// by every setResourceRequests; see defaultDiskEvaluates.
 	defaultDisk string
+	// submitUser is the account the submission is charged to, which the
+	// accounting group is built from. Empty means the parse was given
+	// none and falls back to the account running it; see submitUserName.
+	submitUser string
 
 	// Queue statement information
 	queueCount    int
@@ -160,6 +166,21 @@ type SubmitParseOptions struct {
 	// request_memory, request_disk or request_gpus. Nil uses HTCondor's
 	// built-in defaults.
 	Params SubmitParams
+
+	// SubmitUser is the account the submission is charged to: the user
+	// condor_submit would have taken from the host it ran on and passed
+	// to SubmitHash::init_base_ad. It is what an accounting group is
+	// completed with -- `accounting_group = Proj` becomes
+	// `AccountingGroup = "Proj.<SubmitUser>"`, because the accountant
+	// reads that attribute as <group>.<user> and a bare group name is a
+	// submitter alias rather than a group.
+	//
+	// Empty falls back to the account running the parse, which is right
+	// for a tool submitting on its own user's behalf. A daemon parsing a
+	// submit file it received for someone else must set this to the
+	// authenticated submitter, or the group is charged to the daemon's
+	// own account.
+	SubmitUser string
 }
 
 // ParseSubmitFile parses a submit file from a reader. The parse cannot
@@ -241,6 +262,7 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 		universe:   UniverseVanilla, // Default
 		queueCount: 1,               // Default if no queue statement
 		params:     opts.Params,
+		submitUser: opts.SubmitUser,
 	}
 
 	// Set universe if specified. Read through submitCommand like every
@@ -611,14 +633,16 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		if err := sf.setVMParams(ad); err != nil {
 			return nil, err
 		}
-	case UniverseParallel:
-		if err := sf.setParallelParams(ad); err != nil {
-			return nil, err
-		}
 	case UniverseJava:
 		if err := sf.setJavaParams(ad); err != nil {
 			return nil, err
 		}
+	}
+
+	// MinHosts/MaxHosts: the machine count for a parallel job, the
+	// default pair of 1 for everything else.
+	if err := sf.setHostCounts(ad); err != nil {
+		return nil, err
 	}
 
 	// Set periodic expressions (all universes)
@@ -1217,21 +1241,39 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 	// docker_image or container_image. These are distinct runtimes and
 	// must not be conflated: the starter selects the proc from the
 	// WantDocker / WantContainer flag (starter.cpp LookupBool), so a job
-	// that set DockerImage but not WantDocker would silently run as a
-	// plain vanilla job. Set exactly the image attribute and want-flag
-	// for the keyword the caller used, mirroring condor_submit.
+	// that set an image but no want-flag would silently run as a plain
+	// vanilla job. Set exactly the image attribute and want-flags
+	// condor_submit sets, which is not one pair but two cases.
+	//
+	// WantDocker marks the DOCKER UNIVERSE and nothing else: it is the
+	// flag the docker starter reads, and `universe = docker` is the only
+	// way to get it. docker_image on its own does NOT mean a docker
+	// job -- condor_submit treats any image keyword outside that
+	// universe as an implicit CONTAINER job, so it writes WantContainer
+	// together with WantDockerImage, the image-kind flag. A job marked
+	// WantDocker instead is asking for a docker execute node rather than
+	// a container one, and on an Apptainer-only pool (the OSPool norm)
+	// it matches nothing.
 	if img, ok := sf.submitCommand("docker_image"); ok && img != "" {
 		_ = ad.Set("DockerImage", img)
-		_ = ad.Set("WantDocker", true)
+		switch {
+		case sf.isDockerUniverse():
+			_ = ad.Set("WantDocker", true)
+		case sf.containerToppingApplies():
+			_ = ad.Set("WantContainer", true)
+			_ = ad.Set("WantDockerImage", true)
+		}
 	} else if img, ok := sf.submitCommand("container_image"); ok && img != "" {
 		_ = ad.Set("ContainerImage", img)
-		_ = ad.Set("WantContainer", true)
-		// The image-kind flag is what actually turns the container
-		// runtime on in the starter (WantContainer alone does not on an
-		// Apptainer node). condor_submit sets exactly one of these from
-		// the image type; mirror that.
-		wantAttr, _ := containerImageKind(img)
-		_ = ad.Set(wantAttr, true)
+		if sf.containerToppingApplies() {
+			_ = ad.Set("WantContainer", true)
+			// The image-kind flag is what actually turns the container
+			// runtime on in the starter (WantContainer alone does not on
+			// an Apptainer node). condor_submit sets exactly one of
+			// these from the image type; mirror that.
+			wantAttr, _ := containerImageKind(img)
+			_ = ad.Set(wantAttr, true)
+		}
 	}
 
 	// docker_network_type or container_network
@@ -1295,6 +1337,25 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 	}
 
 	return nil
+}
+
+// isDockerUniverse reports whether the submit file asked for
+// `universe = docker`, the one case that gets WantDocker. parseUniverse
+// has already folded it into VANILLA by the time the ad is built, so the
+// spelling is the only thing left to read it from.
+func (sf *SubmitFile) isDockerUniverse() bool {
+	univ, ok := sf.submitCommand("universe")
+	return ok && strings.EqualFold(strings.TrimSpace(univ), "docker")
+}
+
+// containerToppingApplies reports whether an image keyword makes this a
+// container job. The container topping is only honoured for a vanilla or
+// local job (`universe = container` and an unset universe are both
+// vanilla here); a grid, vm, java or scheduler job carrying an image
+// keyword gets no want-flag at all, because condor_submit never looks at
+// the keyword there.
+func (sf *SubmitFile) containerToppingApplies() bool {
+	return sf.universe == UniverseVanilla || sf.universe == UniverseLocal
 }
 
 // containerImageCapability returns the TARGET capability a container
@@ -1529,6 +1590,26 @@ func setExprAttr(ad *classad.ClassAd, attr, command, value string) error {
 	return nil
 }
 
+// canonicalConcurrencyLimits renders a concurrency_limits value the way
+// SubmitHash::SetConcurrencyLimits stores it: lower-cased, split on
+// HTCondor's list separators (comma, space, tab, CR, LF) with the items
+// trimmed, sorted, and rejoined with commas.
+//
+// Canonicalizing matters because the negotiator looks the names up
+// literally -- "A, b" and "a,b" are two different sets of keys, and a
+// job whose limits are spelled differently from the configuration's
+// consumes nothing and is throttled by nothing.
+func canonicalConcurrencyLimits(value string) string {
+	items := strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\r' || r == '\n'
+	})
+	if len(items) == 0 {
+		return ""
+	}
+	sort.Strings(items)
+	return strings.Join(items, ",")
+}
+
 // setResourceRequests sets the request_* attributes, the way
 // condor_submit's SetRequestResources does (condor_utils/submit_utils.cpp).
 //
@@ -1755,23 +1836,95 @@ func (sf *SubmitFile) setRank(ad *classad.ClassAd) error {
 	return nil
 }
 
-// setOwnership sets owner and accounting attributes
+// setOwnership sets owner and accounting attributes, mirroring
+// SubmitHash::SetAccountingGroup in src/condor_utils/submit_utils.cpp.
+//
+// The attribute the accountant reads is AccountingGroup, and it reads it
+// as "<group>.<user>": a value with no dot in it is a submitter ALIAS,
+// not a group, so storing `accounting_group = Proj` verbatim charges a
+// submitter named Proj rather than the group's quota. The group is
+// therefore always completed with a user -- accounting_group_user when
+// the file gives one, otherwise the submitting account. Nothing here
+// looks for a dot already in the group: HTCondor appends regardless, so
+// `accounting_group = Proj.bob` charges "Proj.bob.<user>", a nested
+// group, and that is the behavior a job gets today.
+//
+// AcctGroup and AcctGroupUser are written alongside it (HTCondor calls
+// them "currently unused", but they are what a job transform or a
+// schedd-side policy matches on). accounting_group_user alone, with no
+// group, means the submission is charged to that user by name.
 func (sf *SubmitFile) setOwnership(ad *classad.ClassAd) error {
 	// Owner - do not set a placeholder as this causes a failure
 	// instead of being ignored.
 
-	// Accounting group
-	if group, ok := sf.submitCommand("accounting_group"); ok {
-		_ = ad.Set("AccountingGroup", group)
+	group, hasGroup := sf.submitCommand("accounting_group")
+
+	// nice_user is shorthand for accounting_group =
+	// $(NICE_USER_ACCOUNTING_GROUP_NAME). A nice_user job with no group
+	// of its own is charged to that group, which is what makes it
+	// preemptable; one that names a group keeps its group and the
+	// nice_user flag is ignored.
+	if nu, ok := sf.submitCommand("nice_user"); ok && parseBool(nu, false) {
+		if !hasGroup {
+			group, hasGroup = sf.niceUserGroup(), true
+		}
+		// Backward-compatibility hack from HTCondor: nice_user jobs are
+		// preemptable. setJobStatusControl runs after this and lets an
+		// explicit max_job_retirement_time overwrite it, which is the
+		// order condor_submit uses.
+		_ = ad.Set("MaxJobRetirementTime", 0)
 	}
 
-	// Accounting group user
-	if user, ok := sf.submitCommand("accounting_group_user"); ok {
-		_ = ad.Set("AccountingGroupUser", user)
+	groupUser, hasGroupUser := sf.submitCommand("accounting_group_user")
+	if !hasGroup && !hasGroupUser {
+		return nil
+	}
+	if !hasGroupUser {
+		groupUser = sf.submitUserName()
+	}
+
+	_ = ad.Set("AcctGroupUser", groupUser)
+	if hasGroup {
+		_ = ad.Set("AcctGroup", group)
+		_ = ad.Set("AccountingGroup", group+"."+groupUser)
+	} else {
+		_ = ad.Set("AccountingGroup", groupUser)
 	}
 
 	return nil
 }
+
+// niceUserGroup is the accounting group a nice_user job is charged to:
+// HTCondor's NICE_USER_ACCOUNTING_GROUP_NAME knob, whose built-in
+// default is "nice-user".
+func (sf *SubmitFile) niceUserGroup() string {
+	if sf != nil && sf.params != nil {
+		if v, ok := sf.params.Get("NICE_USER_ACCOUNTING_GROUP_NAME"); ok {
+			return v
+		}
+	}
+	return "nice-user"
+}
+
+// submitUserName is the account the submission is charged to: the
+// SubmitUser the parse was given, or the account running the parse,
+// which is what condor_submit passes to init_base_ad.
+func (sf *SubmitFile) submitUserName() string {
+	if sf != nil && sf.submitUser != "" {
+		return sf.submitUser
+	}
+	return localSubmitUser()
+}
+
+// localSubmitUser reports the account this process runs as, the way
+// condor_submit's my_username() does. Looked up once: it cannot change
+// under us, and user.Current may reach NSS.
+var localSubmitUser = sync.OnceValue(func() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return os.Getenv("USER")
+})
 
 // setMaterializationLimits records what a submit file asked for about late
 // materialization.
@@ -1883,16 +2036,33 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 		}
 	}
 
-	// concurrency_limits - resources this job needs
+	return sf.setConcurrencyLimits(ad)
+}
+
+// setConcurrencyLimits records the concurrency limits the job consumes,
+// mirroring SubmitHash::SetConcurrencyLimits.
+//
+// concurrency_limits and concurrency_limits_expr are two spellings of
+// ONE attribute, ConcurrencyLimits, which is what the negotiator reads;
+// a job that carried them anywhere else consumed no limit and was
+// throttled by nothing. The list form is canonicalized -- lower-cased,
+// split, sorted, rejoined with commas -- because the negotiator looks
+// the names up literally and "A, b" is not the key "a,b". The
+// expression form is stored unevaluated, for the negotiator to evaluate
+// against the job ad.
+//
+// The list form wins when both are present, matching condor_submit's
+// precedence (which also rejects the file outright).
+func (sf *SubmitFile) setConcurrencyLimits(ad *classad.ClassAd) error {
 	if concLimits, ok := sf.submitCommand("concurrency_limits"); ok {
-		_ = ad.Set("ConcurrencyLimits", concLimits)
+		if limits := canonicalConcurrencyLimits(concLimits); limits != "" {
+			_ = ad.Set("ConcurrencyLimits", limits)
+		}
+		return nil
 	}
-
-	// concurrency_limits_expr - expression for concurrency limits
 	if concExpr, ok := sf.submitCommand("concurrency_limits_expr"); ok {
-		_ = ad.Set("ConcurrencyLimitsExpr", concExpr)
+		return setExprAttr(ad, "ConcurrencyLimits", "concurrency_limits_expr", concExpr)
 	}
-
 	return nil
 }
 
@@ -2526,19 +2696,45 @@ func vmVCPUs(raw string) int {
 	return 1
 }
 
-// setParallelParams sets parallel/MPI universe specific parameters
-func (sf *SubmitFile) setParallelParams(ad *classad.ClassAd) error {
-	// machine_count - Required: number of machines/nodes needed
-	if machineCount, ok := sf.submitCommand("machine_count"); ok {
-		if intCount, err := parseInt(machineCount); err == nil {
-			_ = ad.Set("MachineCount", intCount)
+// setHostCounts gives a job the MinHosts/MaxHosts pair HTCondor writes
+// for it, in SubmitHash::SetParallelParams and SetAutoAttributes.
+//
+// machine_count names a count of MACHINES, and this pair is what records
+// it -- there is no MachineCount attribute on a job ad, so a job that
+// carried the count under that name asked for the default of one machine
+// however many it requested. The count is read only for a parallel or
+// MPI job; every other universe ignores the keyword entirely and takes
+// the default pair of 1. `node_count` is the alternate spelling, which
+// condor_submit reads only when machine_count is absent.
+//
+// MPI is the one universe with no default, because an MPI job must say
+// how many machines it wants.
+func (sf *SubmitFile) setHostCounts(ad *classad.ClassAd) error {
+	if sf.universe == UniverseParallel {
+		if count, ok := sf.submitCommandAlt("machine_count", "node_count"); ok {
+			// atoi, not a strict parse: HTCondor reads the count with
+			// atoi(), which takes the leading digits and ignores the rest.
+			if intCount, err := parseInt(count); err == nil {
+				_ = ad.Set("MinHosts", intCount)
+				_ = ad.Set("MaxHosts", intCount)
+				return nil
+			}
 		}
 	}
-
-	// request_cpus for parallel jobs means CPUs per node
-	// This is already handled by setResourceRequests, but we may need special handling
-
+	if sf.isMPIUniverse() {
+		return nil
+	}
+	_ = ad.Set("MinHosts", 1)
+	_ = ad.Set("MaxHosts", 1)
 	return nil
+}
+
+// isMPIUniverse reports whether the submit file asked for the MPI
+// universe. Go maps `universe = mpi` onto UniverseParallel, so the
+// spelling is the only thing left to read it from.
+func (sf *SubmitFile) isMPIUniverse() bool {
+	univ, ok := sf.submitCommand("universe")
+	return ok && strings.EqualFold(strings.TrimSpace(univ), "mpi")
 }
 
 // setJavaParams sets Java universe specific parameters
@@ -3312,9 +3508,13 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 		}
 	}
 
-	// remote_initial_dir - initial directory on remote machine
+	// remote_initialdir - initial directory on the remote machine.
+	// HTCondor's attribute is RemoteIwd, and the value is stored exactly
+	// as written: it names a directory on a machine this one knows
+	// nothing about, so it is not resolved against the submit Iwd the
+	// way `initialdir` is.
 	if remoteDir, ok := sf.submitCommand("remote_initialdir"); ok {
-		_ = ad.Set("RemoteInitialDir", remoteDir)
+		_ = ad.Set("RemoteIwd", remoteDir)
 	}
 
 	// JobNotification - when to send email
@@ -3517,10 +3717,13 @@ func (sf *SubmitFile) setExtendedJobExprs(ad *classad.ClassAd) error {
 		}
 	}
 
-	// checkpoint_exit_code - exit code that indicates checkpoint
+	// checkpoint_exit_code - the exit code with which the job signals it
+	// has taken a checkpoint. HTCondor's attribute is
+	// SuccessCheckpointExitCode, which is what the starter and the
+	// checkpoint job transforms look for.
 	if checkpointCode, ok := sf.submitCommand("checkpoint_exit_code"); ok {
 		if intCode, err := parseInt(checkpointCode); err == nil {
-			_ = ad.Set("CheckpointExitCode", intCode)
+			_ = ad.Set("SuccessCheckpointExitCode", intCode)
 		}
 	}
 

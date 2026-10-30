@@ -256,8 +256,11 @@ func TestCustomAttributeCannotBeatAnOverride(t *testing.T) {
 
 	got := mustApply(t, p, "executable = /bin/true\naccounting_group = evil\n+ProjectName = \"mine\"\nqueue\n")
 	ad := jobAd(t, got)
-	if ad["accountinggroup"] != `"grp_site"` {
-		t.Errorf("AccountingGroup = %s, want the override's value\n%s", ad["accountinggroup"], got)
+	// The submit engine completes an accounting group with the
+	// submitting user, so the attribute is "<group>.<user>" rather than
+	// the bare group; what matters here is whose group it is.
+	if !strings.HasPrefix(ad["accountinggroup"], `"grp_site.`) {
+		t.Errorf("AccountingGroup = %s, want the override's group\n%s", ad["accountinggroup"], got)
 	}
 	if ad["projectname"] != `"mine"` {
 		t.Errorf("an unrelated custom attribute was lost: ProjectName = %q", ad["projectname"])

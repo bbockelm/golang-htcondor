@@ -141,6 +141,52 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequest_gpus_memory = 100\nqueue\n"},
 	{input: "executable = /bin/sleep\n+Requestfoo = 9\nrequest_foo = 3\nqueue\n"},
 	{input: "executable = /bin/sleep\nrequest_shards = $(Process)+1\nqueue 2\n"},
+
+	// --- parity: the attribute a submit command actually lands in ---
+	// Each of these was a case where the Go parser wrote the submit
+	// keyword's own name, or the right name with the wrong value.
+	//
+	// machine_count is MinHosts/MaxHosts, and only for a parallel job;
+	// every other universe gets the default pair of 1.
+	{input: "executable = /bin/sleep\nuniverse = parallel\nmachine_count = 4\nqueue\n"},
+	{input: "executable = /bin/sleep\nuniverse = parallel\nnode_count = 3\nqueue\n"},
+	{input: "executable = /bin/sleep\nmachine_count = 4\nqueue\n"},
+	// The accounting group is completed with a user, and the oracle and
+	// the Go parser are given the same one (oracle.SubmitUser).
+	{input: "executable = /bin/sleep\naccounting_group = Proj-1\nqueue\n"},
+	{input: "executable = /bin/sleep\naccounting_group = Proj-1\naccounting_group_user = alice\nqueue\n"},
+	{input: "executable = /bin/sleep\naccounting_group_user = alice\nqueue\n"},
+	// A group that already carries a user is appended to anyway.
+	{input: "executable = /bin/sleep\naccounting_group = Proj.bob\nqueue\n"},
+	// nice_user is shorthand for the NICE_USER_ACCOUNTING_GROUP_NAME
+	// group, and is ignored when the file names a group of its own.
+	{input: "executable = /bin/sleep\nnice_user = true\nqueue\n"},
+	{input: "executable = /bin/sleep\nnice_user = true\naccounting_group = Grp\nqueue\n"},
+	{input: "executable = /bin/sleep\nnice_user = true\nmax_job_retirement_time = 300\nqueue\n"},
+	// remote_initialdir is RemoteIwd, stored as written; it names a
+	// directory on a machine this one knows nothing about.
+	{input: "executable = /bin/sleep\nremote_initialdir = /scratch/foo\nqueue\n"},
+	{input: "executable = /bin/sleep\nremote_initialdir = rel/dir\nqueue\n"},
+	// checkpoint_exit_code is SuccessCheckpointExitCode.
+	{input: "executable = /bin/sleep\ncheckpoint_exit_code = 77\nqueue\n"},
+	// Both concurrency_limits spellings land in ConcurrencyLimits; the
+	// list form is lower-cased, sorted and comma-joined.
+	{input: "executable = /bin/sleep\nconcurrency_limits_expr = strcat(\"lic\", \":2\")\nqueue\n"},
+	{input: "executable = /bin/sleep\nconcurrency_limits = B, a , C\nqueue\n"},
+	{input: "executable = /bin/sleep\nconcurrency_limits = lic:2, db:3\nqueue\n"},
+	// WantDocker means the docker universe and nothing else; an image
+	// keyword anywhere else is an implicit container job.
+	{input: "executable = /bin/sleep\nuniverse = docker\ndocker_image = busybox\nqueue\n"},
+	{input: "executable = /bin/sleep\nuniverse = container\ndocker_image = busybox\nqueue\n"},
+	{input: "executable = /bin/sleep\ndocker_image = busybox\nqueue\n"},
+	{input: "executable = /bin/sleep\nuniverse = local\ndocker_image = busybox\nqueue\n"},
+	// The image-kind flag follows the image, and follows it only where
+	// the container topping applies.
+	{input: "executable = /bin/sleep\nuniverse = container\ncontainer_image = ./img.sif\nqueue\n"},
+	{input: "executable = /bin/sleep\ncontainer_image = docker://alpine:3.19\nqueue\n"},
+	{input: "executable = /bin/sleep\ncontainer_image = ./sandboxdir\nqueue\n"},
+	{input: "executable = /bin/sleep\nuniverse = grid\ngrid_resource = batch slurm\ncontainer_image = ./img.sif\nqueue\n"},
+	{input: "executable = /bin/sleep\nuniverse = scheduler\ncontainer_image = ./img.sif\nqueue\n"},
 	{input: "executable = /bin/sleep\nqueue 0\n"},
 	{input: ""},
 	{input: "queue\n"},
