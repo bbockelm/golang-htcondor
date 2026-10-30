@@ -73,8 +73,10 @@ how much of HTCondor's vocabulary a corpus reaches.
 
 | corpus | keywords reached (of 258 in 26.2.0) |
 |--------|-------------------------------------|
-| hand-written seeds | 17 |
-| seeds + generator | 253 |
+| hand-written seeds | 19 |
+| seeds + generator | 254 |
+
+The seed figure moves as seeds are added; the test prints both every run.
 
 The gap is keywords whose values have a syntax of their own, which byte
 mutation does not produce: a `cron_minute` needs a cron field, a
