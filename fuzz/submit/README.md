@@ -76,7 +76,11 @@ how much of HTCondor's vocabulary a corpus reaches.
 | hand-written seeds | 50 |
 | seeds + generator | 255 |
 
-The seed figure moves as seeds are added; the test prints both every run.
+The seed figure moves as seeds are added; the test prints both every run. It
+counts a keyword as reached when it appears in the corpus text, which is not
+the same as reaching the comparison: a keyword SubmitHash rejects the file
+for, in the combination the generator happened to write, is counted here and
+compared nowhere.
 
 The gap is keywords whose values have a syntax of their own, which byte
 mutation does not produce: a `cron_minute` needs a cron field, a

@@ -325,7 +325,12 @@ decides textually and stats nothing, so `xen_kernel = included` or `vmx` needs
 no companion at all and any other value is simply *taken for* a kernel file,
 which only makes `xen_root` required. The vm prelude now picks a type and
 emits that type's companions, so the whole `VMPARAM_Xen_*` family is compared
-by the oracle-backed sweep rather than by hand-written expectations.
+by the oracle-backed sweep rather than by hand-written expectations. The
+keyword-coverage count does not move -- it counts a keyword as reached when it
+appears in the corpus text, and `xen_kernel` appeared all along, in files
+SubmitHash then rejected. What moves is what is compared: over the 600-file
+sweep, `VMPARAM_Xen_Kernel`, `_Root`, `_Initrd` and `_Kernel_Params` go from
+never reaching an accepted ad to 15 or so each.
 `submit_vm_test.go` is the same ground covered without the oracle, for CI.
 
 **`request_<resource>` is generic, and Go only knew three.** `request_foo = N`
