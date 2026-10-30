@@ -634,8 +634,153 @@ func (sf *SubmitFile) setExecutable(ad *classad.ClassAd) error {
 		return fmt.Errorf("executable is required")
 	}
 
-	_ = ad.Set("Cmd", exec)
+	cmd, err := sf.resolveExecutable(exec)
+	if err != nil {
+		return err
+	}
+	_ = ad.Set("Cmd", cmd)
 	return nil
+}
+
+// Path resolution.
+//
+// HTCondor records the executable and the user log as absolute paths, so a
+// job's ad does not depend on the directory the submitter happened to be in
+// when they ran condor_submit. The rule lives in SubmitHash::full_path and
+// SubmitHash::ComputeIWD in src/condor_utils/submit_utils.cpp; the three
+// functions below are a port of it.
+//
+// Which paths get resolved is not uniform, and the differences are
+// deliberate -- see resolveExecutable and setStandardFiles.
+
+// compressPath performs the only normalization SubmitHash::compress_path
+// does: runs of directory separators collapse to one. "." and ".."
+// components are left exactly where they are, so "a/./b" stays "a/./b" and
+// HTCondor's own ad for that job carries the dot. Matching that matters
+// more than producing a prettier path, since the ad is what the shadow and
+// the starter later compare and open.
+//
+// Backslash counts as a separator here because compress_path treats both,
+// on every platform.
+func compressPath(path string) string {
+	var b strings.Builder
+	b.Grow(len(path))
+	prevSep := false
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		sep := c == '/' || c == '\\'
+		if sep && prevSep {
+			continue
+		}
+		b.WriteByte(c)
+		prevSep = sep
+	}
+	return b.String()
+}
+
+// fullPath resolves name against base the way SubmitHash::full_path does on
+// a POSIX host: a name that already starts at the root keeps its own path,
+// anything else is joined to base, and the result is only slash-collapsed.
+//
+// Note what this does NOT do. It does not check the filesystem, resolve
+// symlinks or fold away "..", and it has no notion of a URL: full_path
+// treats "http://host/x" as a relative name like any other and HTCondor
+// stores the join. A Go parser that special-cased URLs here would hand the
+// schedd a different ad than condor_submit does for the same file.
+func fullPath(name, base string) string {
+	if strings.HasPrefix(name, "/") {
+		return compressPath("/" + name)
+	}
+	return compressPath("/" + base + "/" + name)
+}
+
+// jobIwd returns the job's initial working directory: ComputeIWD resolves a
+// relative initialdir against the submitting directory and falls back to
+// that directory outright when the submit file names none.
+//
+// ComputeIWD also refuses a directory it cannot stat, which this does not:
+// rejecting a submit file over the state of the parsing host's filesystem
+// is condor_submit's business, not a library parser's.
+func (sf *SubmitFile) jobIwd() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current working directory: %w", err)
+	}
+	dir, ok := sf.submitCommandAlt("initialdir", "iwd")
+	if !ok {
+		dir, _ = sf.submitCommandAlt("initial_dir", "job_iwd")
+	}
+	if dir == "" {
+		return compressPath(cwd), nil
+	}
+	if strings.HasPrefix(dir, "/") {
+		return compressPath(dir), nil
+	}
+	// dircat: the directory loses its trailing separators, the name its
+	// leading ones, and one separator joins them.
+	return compressPath(strings.TrimRight(cwd, "/\\") + "/" + strings.TrimLeft(dir, "/\\")), nil
+}
+
+// resolveExecutable returns the path Cmd records for the executable named
+// in the submit file.
+//
+// Two things about SetExecutable are easy to get wrong. It resolves against
+// the SUBMITTING directory rather than against Iwd -- full_path(ename,
+// /*use_iwd=*/false) -- so initialdir moves the job's working directory and
+// its log without moving where the executable was found. And it resolves
+// only when the executable is being transferred: a job that is not sending
+// its executable is naming a path on the execute machine, and rewriting
+// that against a submit-side directory would name a file that does not
+// exist there. The universes whose "executable" is not a file at all --
+// vm, and the ec2/gce/azure grid types, where it is just a job name --
+// reach the same branch by having their transfer forced off.
+func (sf *SubmitFile) resolveExecutable(name string) (string, error) {
+	if !sf.transfersExecutable() {
+		return name, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current working directory: %w", err)
+	}
+	return fullPath(name, cwd), nil
+}
+
+// transfersExecutable reports whether SetExecutable would transfer the
+// executable, which is what decides whether Cmd is resolved.
+//
+// The test on transfer_executable is deliberately not parseBool: SetExecutable
+// turns transfer off only for a value whose first character is 'f' or 'F',
+// so "transfer_executable = 0" leaves it ON there. Reading it as a boolean
+// here would resolve one set of submit files differently from condor_submit.
+func (sf *SubmitFile) transfersExecutable() bool {
+	if !sf.executableIsAFile() {
+		return false
+	}
+	te, ok := sf.submitCommand("transfer_executable")
+	if !ok || te == "" {
+		return true
+	}
+	return te[0] != 'f' && te[0] != 'F'
+}
+
+// executableIsAFile reports whether the submit file's "executable" names a
+// file on the submitting host at all. For vm universe and the ec2, gce and
+// azure grid types it is only the job's name, and SetExecutable marks those
+// ignore_it -- which forces transfer off and leaves Cmd exactly as written.
+func (sf *SubmitFile) executableIsAFile() bool {
+	if sf.universe == UniverseVM {
+		return false
+	}
+	if sf.universe != UniverseGrid {
+		return true
+	}
+	res, _ := sf.submitCommand("grid_resource")
+	gridType, _, _ := strings.Cut(strings.TrimSpace(res), " ")
+	switch strings.ToLower(gridType) {
+	case "ec2", "gce", "azure":
+		return false
+	}
+	return true
 }
 
 // setArguments sets the arguments attribute
@@ -863,9 +1008,18 @@ func (sf *SubmitFile) setStandardFiles(ad *classad.ClassAd) error {
 		}
 	}
 
-	// Log
-	if logFile, ok := sf.submitCommand("log"); ok {
-		_ = ad.Set("UserLog", logFile)
+	// Log. The user log is one of the file-role keywords in
+	// SimpleSubmitKeyword's table (f_logfile), and do_simple_commands
+	// runs every one of those through full_path, so a relative name is
+	// recorded against Iwd. The three standard streams above are NOT:
+	// SetStdin/SetStdout/SetStderr keep the name as written, and the
+	// starter resolves it in the sandbox.
+	if logFile, ok := sf.submitCommand("log"); ok && logFile != "" {
+		iwd, err := sf.jobIwd()
+		if err != nil {
+			return err
+		}
+		_ = ad.Set("UserLog", fullPath(logFile, iwd))
 	}
 
 	return nil
@@ -2394,15 +2548,12 @@ func (sf *SubmitFile) setCronAndDeferral(ad *classad.ClassAd) error {
 
 // setAutoAttributes sets auto-generated attributes
 func (sf *SubmitFile) setAutoAttributes(ad *classad.ClassAd) error {
-	// IWD (Initial Working Directory) - defaults to current working directory
-	iwd, ok := sf.submitCommand("initialdir")
-	if !ok || iwd == "" {
-		// If not specified, use current working directory
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("failed to get current working directory: %w", err)
-		}
-		iwd = cwd
+	// IWD (Initial Working Directory). Absolute even when the submit
+	// file gives a relative initialdir or none at all, which is what
+	// every path recorded against it -- UserLog above all -- depends on.
+	iwd, err := sf.jobIwd()
+	if err != nil {
+		return err
 	}
 	_ = ad.Set("Iwd", iwd)
 
@@ -3003,6 +3154,19 @@ func (sf *SubmitFile) submitCommand(key string) (string, bool) {
 		return "", false
 	}
 	return sf.cfg.Get(key)
+}
+
+// Command returns the value the submit file assigned to a submit command,
+// macro-expanded but otherwise exactly as written, and whether the file
+// assigned it at all.
+//
+// This is what the submitter typed, which is not always what the job ad
+// records. `executable = run.sh` reads back here as "run.sh" while the ad's
+// Cmd has been resolved to an absolute path, so a caller asking whether the
+// submitter named a path on a machine or a file they intend to upload has to
+// ask here rather than read Cmd.
+func (sf *SubmitFile) Command(key string) (string, bool) {
+	return sf.submitCommand(key)
 }
 
 // submitCommandAlt reads a submit-file command that has a second
