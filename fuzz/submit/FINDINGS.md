@@ -90,6 +90,14 @@ before building the digest, and reading from an empty list defines the macro
 lands in the digest. Nothing documents it and nothing would suggest it; it came
 out of running the oracle.
 
+It is a definition, not a default: a submit file that sets `Item = mine` and
+then writes `queue 5` has that value **replaced** by the empty one, so the
+digest carries `Item=` and the schedd never sees `mine`. Go kept the file's
+value until a seed caught it. Where the key sits also follows from this —
+an `Item` the file assigned keeps its sorted position, while one only the
+empty definition created lands in the table's unsorted tail, after every key
+the file wrote.
+
 **`$(ItemIndex)` is frozen to `0` for every job the factory makes.**
 `ItemIndex` and `Row` are two names for one macro in the submit hash, but
 `per_proc_keys` protects only `Row`, so `ItemIndex` is expanded while the
