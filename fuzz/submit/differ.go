@@ -3,6 +3,7 @@ package fuzzsubmit
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -335,20 +336,25 @@ func Compare(cpp, goAds Ads) (fresh []Divergence, seenKnown map[string]bool) {
 			fresh = append(fresh, Divergence{Ad: key, Attr: "#ad", Kind: "only-cpp"})
 			continue
 		}
+		// The universe comes from the C++ ad: it is the side that decides
+		// what the universe means, and a Go bug that drops JobUniverse must
+		// not also hand itself an excuse.
+		universe, _ := universeOf(c)
+
 		for _, n := range namesFold(c) {
 			cv, _ := lookupFold(c, n)
 			gv, present := lookupFold(g, n)
 			switch {
 			case !present:
-				record(&fresh, seenKnown, Divergence{Ad: key, Attr: n, Cpp: cv, Kind: "only-cpp"})
+				record(&fresh, seenKnown, universe, Divergence{Ad: key, Attr: n, Cpp: cv, Kind: "only-cpp"})
 			case !sameValue(cv, gv):
-				record(&fresh, seenKnown, Divergence{Ad: key, Attr: n, Cpp: cv, Go: gv, Kind: "value"})
+				record(&fresh, seenKnown, universe, Divergence{Ad: key, Attr: n, Cpp: cv, Go: gv, Kind: "value"})
 			}
 		}
 		for _, n := range namesFold(g) {
 			if _, present := lookupFold(c, n); !present {
 				gv, _ := lookupFold(g, n)
-				record(&fresh, seenKnown, Divergence{Ad: key, Attr: n, Go: gv, Kind: "only-go"})
+				record(&fresh, seenKnown, universe, Divergence{Ad: key, Attr: n, Go: gv, Kind: "only-go"})
 			}
 		}
 	}
@@ -356,8 +362,42 @@ func Compare(cpp, goAds Ads) (fresh []Divergence, seenKnown map[string]bool) {
 	return fresh, seenKnown
 }
 
-func record(fresh *[]Divergence, seenKnown map[string]bool, d Divergence) {
+// knownDivergentInUniverse excuses an attribute only inside one job universe.
+//
+// It exists so a quirk of a single universe cannot excuse that attribute
+// everywhere. Putting "cmd" in knownDivergent would have undone the Cmd/UserLog
+// path comparison, which is the whole point of having it compared.
+var knownDivergentInUniverse = map[int]map[string]string{
+	universeJava: {
+		"cmd": "for universe = java C++ replaces Cmd with the JVM from param(\"JAVA\") and passes the submitted class through Args; Go leaves the resolved executable in Cmd, so the job would run the class file instead of a JVM.",
+	},
+}
+
+// universeJava is CONDOR_UNIVERSE_JAVA (condor_includes/condor_universe.h).
+const universeJava = 10
+
+// universeOf reports the JobUniverse an ad resolves to. The attribute is an
+// integer literal in both parsers' output, so no evaluation is needed.
+func universeOf(attrs map[string]string) (int, bool) {
+	v, ok := lookupFold(attrs, "JobUniverse")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func record(fresh *[]Divergence, seenKnown map[string]bool, universe int, d Divergence) {
 	attr := strings.ToLower(d.Attr)
+	if byAttr, ok := knownDivergentInUniverse[universe]; ok {
+		if _, known := byAttr[attr]; known {
+			seenKnown[attr] = true
+			return
+		}
+	}
 	if _, skip := hostDerived[attr]; skip {
 		return
 	}
