@@ -154,7 +154,7 @@ blue
 universe = vanilla
 executable = /bin/echo
 arguments = $(color)
-queue color from "` + dataFile + `"
+queue color from ` + dataFile + `
 `
 
 	sf, err := ParseSubmitFileWithOptions(strings.NewReader(submit), SubmitParseOptions{AllowLocalAccess: true})
@@ -192,7 +192,7 @@ item2
 universe = vanilla
 executable = /bin/echo
 arguments = $(name)
-queue 3 name from "` + dataFile + `"
+queue 3 name from ` + dataFile + `
 `
 
 	sf, err := ParseSubmitFileWithOptions(strings.NewReader(submit), SubmitParseOptions{AllowLocalAccess: true})
@@ -363,7 +363,7 @@ blue triangle
 universe = vanilla
 executable = /bin/echo
 arguments = "$(color) $(shape)"
-queue color, shape from "` + dataFile + `"
+queue color, shape from ` + dataFile + `
 `
 
 	sf, err := ParseSubmitFileWithOptions(strings.NewReader(submit), SubmitParseOptions{AllowLocalAccess: true})

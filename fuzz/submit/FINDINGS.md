@@ -151,15 +151,22 @@ Reported by `TestSeedParseAcceptance`, which logs rather than fails — these ar
 real, but failing on them would bury the semantic findings above. No seed
 reaches it today.
 
-## A quoted item file keeps its quotes in C++
+## `queue matching` has the quoting and the lexing bugs `from` just lost
 
-`queue from "items.txt"` opens a file whose name is `"items.txt"`, quotes
-included: `parse_queue_args` takes the remainder of the line as the name and
-never looks at quoting. This parser strips them, deliberately: a quoted path
-is the only way a caller can name a file whose path contains a space, and the
-API has read it that way since before this comparison existed. Neither side
-can open a file the other would, so the fuzzer sees both reject the file and
-nothing is hidden by the choice.
+`queue matching "<glob>"` globs the pattern *with* the quotes in C++, and
+`queue matching <glob>` — unquoted — is the spelling that works. Measured
+against the oracle, with a directory holding two `.txt` files:
+
+```
+queue matching DIR/*.txt     cpp: 2 procs      go: syntax error at the '/'
+queue matching "DIR/*.txt"   cpp: 0 matches    go: globs DIR/*.txt
+```
+
+So both halves of the `from` finding below apply again to `matching`, which
+still goes through the old `MATCHING IDENT | MATCHING STRING` grammar rules.
+Fixing it also means handling the `files`/`dirs`/`any` qualifiers, which this
+parser does not implement, so it is recorded here rather than folded into the
+`from` change.
 
 ## The queue line is not macro-expanded
 
@@ -236,6 +243,36 @@ that C++ places on the cluster ad as a `MAX(...)` expression instead.
 sets nothing.
 
 ## Fixed
+
+**A quoted item file had its quotes stripped.** `queue from "items.txt"`
+opens a file whose name *begins and ends with a double quote* in C++:
+`parse_queue_args` assigns the remainder of the line to `items_filename`,
+trims it, and hands it to `Open_macro_source`; nothing between ever looks at
+quoting. Measured against the oracle, with the files really on disk:
+
+```
+queue from DIR/plain.txt          cpp: 2 procs   (the file is found)
+queue from "DIR/plain.txt"        cpp: can't open file "DIR/plain.txt"
+queue from DIR/"quoted.txt"       cpp: 2 procs   (a file named "quoted.txt")
+queue from DIR/has space.txt      cpp: 2 procs
+queue from "DIR/has space.txt"    cpp: can't open file "DIR/has space.txt"
+```
+
+Single quotes behave identically, and a quote anywhere else in the line is an
+ordinary filename character. The last two lines are the ones worth keeping in
+mind: **a path containing a space is written without quotes**, and that is the
+only spelling that works. This parser used to strip a surrounding quote pair,
+which was recorded here as a chosen divergence on the grounds that quoting was
+the only way to express such a path. That reasoning was wrong -- the verbatim
+rule *is* how such a path is expressed -- so the stripping is gone and the two
+parsers agree.
+
+The one thing that depended on the stripping was internal: the pre-pass that
+rewrites `queue VARS from ((rows))` into `queue VARS from <tempfile>` quoted
+the temp path, because the grammar once accepted only an IDENT or a STRING
+there. It writes the path bare now. A temp path containing a space is pinned
+by a test of its own, since every temp directory a developer is likely to have
+is space-free and nothing else would notice.
 
 **An inline item list had to be parenthesised.** HTCondor anchors the queue
 parse on the `in`/`from` keyword and takes the rest of the line as the item

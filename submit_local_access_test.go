@@ -102,7 +102,10 @@ func TestParseSubmitFileNoItemdataFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fromFile := "executable = /bin/true\nqueue x from \"" + items + "\"\n"
+	// The path is written bare: everything after `from` is the item file's
+	// name verbatim, so quoting it would name a file whose name starts and
+	// ends with a quote.
+	fromFile := "executable = /bin/true\nqueue x from " + items + "\n"
 	if _, err := ParseSubmitFile(strings.NewReader(fromFile)); err == nil {
 		t.Error("expected `queue ... from <file>` to be refused")
 	}
