@@ -45,6 +45,7 @@ var knownDivergent = map[string]string{
 	// Attributes only the C++ side produces. Most are per-job bookkeeping
 	// counters the schedd would otherwise fill in, but several change behavior.
 	"environment":              "C++ always sets it (empty when unspecified); Go omits it when the submit file says nothing.",
+	"jobleaseduration":         "C++ sets JobLeaseDuration (2400 by default, from JOB_DEFAULT_LEASE_DURATION); Go omits it. A job ad with no lease tells the schedd not to hold the claim across a disconnect.",
 	"jobprio":                  "C++ defaults JobPrio to 0; Go omits it.",
 	"jobnotification":          "C++ defaults it; Go omits it.",
 	"leavejobinqueue":          "C++ defaults it to false; Go omits it.",
