@@ -50,12 +50,16 @@ var (
 // SubmitFile represents a parsed HTCondor submit file
 type SubmitFile struct {
 	cfg *config.Config
-	// assigned is the set of names the submit file itself assigned,
-	// upper-cased. cfg cannot answer that question: it is seeded with
-	// HTCondor's param_info defaults, so a submit command that shares a
-	// name with a config knob reads as "set" even when the file never
-	// mentioned it. See submitCommand.
-	assigned map[string]bool
+	// assigned maps the upper-cased name of every command the submit
+	// file itself assigned to the spelling it was first written with.
+	// cfg cannot answer whether the file assigned a name: it is seeded
+	// with HTCondor's param_info defaults, so a submit command that
+	// shares a name with a config knob reads as "set" even when the
+	// file never mentioned it. See submitCommand. The original spelling
+	// is kept because request_<resource> carries the resource tag's
+	// capitalization into the job attribute; see
+	// setCustomResourceRequests.
+	assigned map[string]string
 	universe int
 	// params answers the configuration knobs condor_submit reads with
 	// param(); nil means HTCondor's built-in defaults. See SubmitParams.
@@ -530,6 +534,12 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 
 	// Set request_* resources
 	if err := sf.setResourceRequests(ad); err != nil {
+		return nil, err
+	}
+
+	// Set the request_<resource> commands that have no dedicated
+	// handling. Before setCustomAttributes, which outranks them.
+	if err := sf.setCustomResourceRequests(ad); err != nil {
 		return nil, err
 	}
 
@@ -1448,6 +1458,93 @@ func setRequestCount(ad *classad.ClassAd, attr, raw string) error {
 		return nil
 	}
 	return setCountAttr(ad, attr, raw)
+}
+
+// requestKeywordPrefix is SUBMIT_KEY_RequestPrefix: every submit
+// command that asks for a machine resource starts with it.
+const requestKeywordPrefix = "request_"
+
+// specialRequestKeywords are the request_<tag> commands that do not
+// reach the generic path, lower-cased.
+//
+// The first six are SubmitHash::is_special_request_resource(): each has
+// its own setter, which is why request_cpus is an amount of CPUs in
+// RequestCpus and not an expression in RequestCpus the way a custom tag
+// would be. request_cpu and request_gpu are there to be caught: they
+// are the singular misspellings, and condor_submit warns and sets
+// nothing rather than inventing a "Cpu" resource.
+//
+// The last two are the request_ entries flagged f_error in
+// prunable_keywords. They are likely attempts to constrain GPU memory,
+// which is gpus_minimum_memory; condor_submit warns and, again, sets
+// nothing.
+var specialRequestKeywords = map[string]bool{
+	"request_cpus":        true,
+	"request_cpu":         true,
+	"request_gpus":        true,
+	"request_gpu":         true,
+	"request_disk":        true,
+	"request_memory":      true,
+	"request_gpu_memory":  true,
+	"request_gpus_memory": true,
+}
+
+// setCustomResourceRequests sets Request<Tag> for every
+// request_<tag> command with no dedicated handling, the way
+// SubmitHash::SetRequestResources does in
+// src/condor_utils/submit_utils.cpp.
+//
+// request_<tag> is generic: the attribute name is the literal
+// "Request" followed by the command name with "request_" cut off,
+// keeping the tag's capitalization exactly as the file wrote it. So
+// request_A0 is RequestA0, request_licenses is Requestlicenses (not
+// RequestLicenses) and Request_Foo is RequestFoo. That is how a job
+// asks for a resource the pool defines itself -- licenses, site slot
+// types -- and the startd advertises the matching Target<Tag>.
+//
+// The value is stored as a ClassAd expression, unevaluated and with no
+// unit scaling: request_slots = 2*2 is the expression 2 * 2, and
+// "undefined" is the undefined literal rather than an instruction to
+// leave the attribute out, which is what it means for request_cpus and
+// the other three. A value that is not an expression at all --
+// request_foo = 10GB -- is an error, as it is for condor_submit.
+//
+// A tag shorter than two characters, or one starting with an
+// underscore, is not a resource request and is passed over.
+func (sf *SubmitFile) setCustomResourceRequests(ad *classad.ClassAd) error {
+	upperPrefix := strings.ToUpper(requestKeywordPrefix)
+	commands := make([]string, 0, len(sf.assigned))
+	for upper, name := range sf.assigned {
+		if !strings.HasPrefix(upper, upperPrefix) {
+			continue
+		}
+		if specialRequestKeywords[strings.ToLower(name)] {
+			continue
+		}
+		tag := name[len(requestKeywordPrefix):]
+		if len(tag) < 2 || tag[0] == '_' {
+			continue
+		}
+		commands = append(commands, name)
+	}
+	// Assign in a fixed order so a submit file always builds the same
+	// ad; the C++ side walks a hash table, where the order is its own
+	// business because no two tags can collide.
+	sort.Strings(commands)
+
+	for _, name := range commands {
+		value, ok := sf.submitCommand(name)
+		if !ok {
+			continue
+		}
+		attr := "Request" + name[len(requestKeywordPrefix):]
+		expr, err := classad.ParseExpr(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("%s: %q is not a valid ClassAd expression: %w", name, value, err)
+		}
+		_ = ad.Set(attr, expr)
+	}
+	return nil
 }
 
 // setNotification sets notification preference
@@ -2834,7 +2931,8 @@ func (sf *SubmitFile) setExtendedJobExprs(ad *classad.ClassAd) error {
 }
 
 // assignedNames collects every name the submit file assigns, including
-// inside conditionals, upper-cased for case-insensitive lookup.
+// inside conditionals, keyed upper-cased for case-insensitive lookup
+// and holding the spelling the file used.
 //
 // A name that appears only in a branch that did not execute is still
 // counted. That is deliberate: the alternative is to inspect cfg, which
@@ -2842,8 +2940,8 @@ func (sf *SubmitFile) setExtendedJobExprs(ad *classad.ClassAd) error {
 // for a knob of the same name" -- exactly the confusion this exists to
 // remove. Over-counting yields a value the user did write somewhere;
 // under-counting would silently resurrect the config default.
-func assignedNames(stmts []config.Statement) map[string]bool {
-	names := make(map[string]bool)
+func assignedNames(stmts []config.Statement) map[string]string {
+	names := make(map[string]string)
 	var walk func([]config.Statement)
 	walk = func(list []config.Statement) {
 		for _, stmt := range list {
@@ -2852,7 +2950,18 @@ func assignedNames(stmts []config.Statement) map[string]bool {
 				// AssignedName, not st.Name: `+Foo = 1` defines the
 				// macro MY.Foo and does NOT make Foo a submit command
 				// the file set.
-				names[strings.ToUpper(config.AssignedName(st))] = true
+				name := config.AssignedName(st)
+				// First spelling wins, as insert_macro does: it keeps
+				// the name already in the macro set and replaces only
+				// the value, so
+				//
+				//	request_Foo = 1
+				//	request_FOO = 2
+				//
+				// is RequestFoo = 2, not RequestFOO = 2.
+				if _, seen := names[strings.ToUpper(name)]; !seen {
+					names[strings.ToUpper(name)] = name
+				}
 			case *config.Conditional:
 				walk(st.ThenBlock)
 				for _, ei := range st.ElseIfBlock {
@@ -2887,7 +2996,10 @@ func assignedNames(stmts []config.Statement) map[string]bool {
 // name are separate things. Macro expansion still sees the whole config,
 // so $(SOME_KNOB) inside a submit file keeps working.
 func (sf *SubmitFile) submitCommand(key string) (string, bool) {
-	if sf == nil || !sf.assigned[strings.ToUpper(key)] {
+	if sf == nil {
+		return "", false
+	}
+	if _, ok := sf.assigned[strings.ToUpper(key)]; !ok {
 		return "", false
 	}
 	return sf.cfg.Get(key)

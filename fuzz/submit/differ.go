@@ -85,16 +85,20 @@ var knownDivergent = map[string]string{
 	"emailattributes":    "Go sets it; C++ has no such attribute here.",
 	"jobruncount":        "Go sets it; C++ does not.",
 	"requestdisk":        "C++ puts a MAX(...) expression on the cluster ad; Go emits its own value on the proc.",
+	"requestgpumemory":   "Go turns request_gpu_memory into RequestGpuMemory; C++ lists request_gpu_memory as a disallowed keyword (f_error in prunable_keywords), warns that gpus_minimum_memory was probably meant, and sets no attribute.",
 }
 
 // knownDivergentPrefix covers families of attributes whose names are not fixed,
 // so they cannot be listed by name. Checked after knownDivergent.
+//
+// Empty: the one family that was here, Request<Tag> from a generic
+// request_<tag> command, now agrees. Keeping the entry would have gone on
+// excusing every Request* attribute the Go side failed to produce, which is
+// the whole class of bug the fix was for.
 var knownDivergentPrefix = []struct {
 	prefix string
 	reason string
-}{
-	{"request", `request_<resource> is generic in HTCondor: any "request_foo = N" becomes RequestFoo, which is how custom resources (GPUs, licenses, site-defined slots) are asked for. Go only understands cpus/memory/disk and silently drops the rest.`},
-}
+}{}
 
 // Divergence is one attribute the two sides disagree about.
 type Divergence struct {
