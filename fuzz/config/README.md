@@ -69,23 +69,26 @@ test binary directly so `DYLD_LIBRARY_PATH` survives.
 
 ## CI
 
-`.github/workflows/config-fuzz.yml` runs on changes to `config/`, `fuzz/config/`
-and these scripts, weekly, and on demand. It builds `condor_utils` from the
-HTCondor release named in `HTCONDOR_REF` (`.github/scripts/build-condor-utils.sh`,
-ccache-cached), runs the seed table and committed corpus (failing if
-`TestConfigSeeds` skipped, i.e. the oracle was not linked), then fuzzes for 2m
-(`fuzztime` input on dispatch). A failing input is uploaded as the
-`config-fuzz-failing-inputs` artifact; drop it into
-`fuzz/config/testdata/fuzz/FuzzConfigParseExpand/` to reproduce.
+`.github/workflows/differential-fuzz.yml` runs both this fuzzer and the submit
+one on changes to `config/`, `fuzz/`, the submit parser and these scripts,
+weekly, and on demand. It builds `condor_utils` once from the HTCondor release
+named in `HTCONDOR_REF` (`.github/scripts/build-condor-utils.sh`, ccache-cached),
+then runs each target: the seed table and committed corpus first (failing if the
+target's sentinel test did not pass, i.e. the oracle was not linked), then
+fuzzing for 2m (`fuzztime` input on dispatch). Both targets run even when the
+first fails, so a divergence in one parser does not hide one in the other. A
+failing input is uploaded as the `differential-fuzz-failing-inputs` artifact;
+drop it into `fuzz/<target>/testdata/fuzz/<FuzzTarget>/` to reproduce.
 
 ### Nightly, against HTCondor main
 
 `.github/workflows/nightly-fuzz.yml` runs the same targets at 07:41 UTC against
 HTCondor's `main` branch instead of a pinned release, so divergences introduced
 upstream surface before the next release bump.
-`.github/scripts/nightly-fuzz-ci.sh <target> <fuzztime>` runs one target; it
-exits 78 when `fuzz/<target>` is not in the tree, which is how the submit
-fuzzer stays optional until it lands.
+`.github/scripts/differential-fuzz-ci.sh <target> <fuzztime>` runs one target,
+and is what both workflows call. It discovers the package's `Fuzz*` functions
+rather than naming one, splitting the time budget between them, so a target
+added upstream of it is fuzzed without a change here.
 
 A failure runs `.github/scripts/nightly-fuzz-issue.sh`, which reports it in
 `bbockelm/golang-htcondor`:

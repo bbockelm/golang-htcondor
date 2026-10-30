@@ -1,31 +1,30 @@
 #!/usr/bin/env bash
 #
 # Run one differential fuzz target against the C++ oracle built by
-# build-condor-utils.sh. Used by the nightly workflow, which builds the
-# oracle from HTCondor's main branch rather than a pinned release.
+# build-condor-utils.sh. Used by both fuzz workflows: "Differential fuzz"
+# builds the oracle from a pinned HTCondor release, "Nightly fuzz" from
+# HTCondor's main branch.
 #
-#   nightly-fuzz-ci.sh <config|submit> <fuzztime>
+#   differential-fuzz-ci.sh <config|submit> <fuzztime>
 #
 # Exit status:
 #   0   seeds and fuzzing passed
 #   1   seeds or fuzzing failed, or the oracle was not linked in
 #   2   usage error
-#   78  the target is not in this tree (see below); nothing was run
-#
-# The submit fuzzer lands in its own change. Until it is on main this
-# script reports 78 for it so the nightly run still covers the config
-# fuzzer instead of failing on a missing package.
 #
 # Environment:
-#   FUZZ_LOG_DIR  where to write nightly-fuzz-<target>.log (default: repo root)
-#   RUNNER_TEMP   parent of the fuzz corpus cache dir (default: $TMPDIR)
+#   FUZZ_LOG_DIR  where to write differential-fuzz-<target>.log (default: repo root)
 set -uo pipefail
 
 target="${1:-}"
 fuzztime="${2:-}"
 
+# The test that proves the oracle was reached for this target. Without it
+# the differential tests skip, the package passes, and a green run proves
+# nothing -- so its PASS is required rather than merely hoped for.
 case "$target" in
-config | submit) ;;
+config) sentinel=TestConfigSeeds ;;
+submit) sentinel=TestSeedsHaveNoFreshDivergence ;;
 *)
 	echo "usage: $0 <config|submit> <fuzztime>" >&2
 	exit 2
@@ -43,15 +42,14 @@ pkg="fuzz/$target"
 envscript="hack/$target-fuzz-env.sh"
 
 if [ ! -d "$pkg" ] || [ ! -f "$envscript" ]; then
-	echo "::notice::$pkg or $envscript is not in this tree; skipping the $target fuzz target"
-	exit 78
+	echo "::error::$pkg or $envscript is missing" >&2
+	exit 1
 fi
 
-# Read the targets out of the package rather than hardcoding them, so the
-# nightly keeps working when one is renamed or added. go test -fuzz takes a
-# single target, so several are run in turn and the budget is split between
-# them -- a package that grows a target should fuzz each one less, not stop
-# fuzzing.
+# Read the targets out of the package rather than hardcoding them, so this
+# keeps working when one is renamed or added. go test -fuzz takes a single
+# target, so several are run in turn and the budget is split between them --
+# a package that grows a target should fuzz each one less, not stop fuzzing.
 fuzznames="$(sed -nE 's/^func (Fuzz[A-Za-z0-9_]*)\(.*/\1/p' "$pkg"/*_test.go | sort -u)"
 if [ -z "$fuzznames" ]; then
 	echo "::error::no Fuzz function found in $pkg" >&2
@@ -61,7 +59,7 @@ ntargets="$(printf '%s\n' "$fuzznames" | wc -l | tr -d ' ')"
 
 export GOWORK=off
 
-log="${FUZZ_LOG_DIR:-$ROOT}/nightly-fuzz-$target.log"
+log="${FUZZ_LOG_DIR:-$ROOT}/differential-fuzz-$target.log"
 mkdir -p "$(dirname "$log")"
 : >"$log"
 
@@ -72,20 +70,12 @@ if ! source "$envscript"; then
 	exit 1
 fi
 
-# Keep the evolving corpus out of the checkout. A failing input is still
-# written under $pkg/testdata/fuzz/ as a committable reproducer.
-corpus="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/nightly-fuzz-corpus-$target"
-mkdir -p "$corpus"
-
-echo "nightly-fuzz: $target seeds"
+echo "differential-fuzz: $target seeds"
 go test -count=1 -tags libcondor_utils -v "./$pkg/" 2>&1 | tee -a "$log"
 rc="${PIPESTATUS[0]}"
 
-# Without the oracle linked the differential tests skip and the package
-# passes, so a green run proves nothing. Both fuzz packages word the skip
-# the same way.
-if grep -q 'needs the C++ oracle' "$log"; then
-	echo "::error::the $target differential tests skipped: the C++ oracle was not linked in" | tee -a "$log"
+if ! grep -q -- "--- PASS: $sentinel" "$log"; then
+	echo "::error::$sentinel did not pass: the $target differential tests did not reach the C++ oracle" | tee -a "$log"
 	exit 1
 fi
 if [ "$rc" -ne 0 ]; then
@@ -104,12 +94,16 @@ if [ "$ntargets" -gt 1 ]; then
 	esac
 fi
 
+# The corpus the run grows lives in $GOCACHE/fuzz, which the Go build cache
+# action already carries between runs; a failing input is written under
+# $pkg/testdata/fuzz/ as a committable reproducer, which the workflow
+# uploads.
 failed=""
 while IFS= read -r fuzzname; do
 	[ -n "$fuzzname" ] || continue
-	echo "nightly-fuzz: $target fuzzing $fuzzname for $per"
+	echo "differential-fuzz: $target fuzzing $fuzzname for $per"
 	go test -tags libcondor_utils -run '^$' -fuzz "^$fuzzname\$" \
-		-fuzztime "$per" -fuzzcachedir "$corpus" "./$pkg/" 2>&1 | tee -a "$log"
+		-fuzztime "$per" "./$pkg/" 2>&1 | tee -a "$log"
 	if [ "${PIPESTATUS[0]}" -ne 0 ]; then
 		failed="$failed $fuzzname"
 	fi

@@ -1,7 +1,8 @@
-name: Config fuzz
+name: Differential fuzz
 
-# Differential fuzzing of the Go config parser against HTCondor's own C++
-# parser (libcondor_utils), built from source. See fuzz/config/README.md.
+# Differential fuzzing of the Go config-file and submit-file parsers against
+# HTCondor's own C++ parsers (libcondor_utils), built from source. See
+# fuzz/config/README.md and fuzz/submit/README.md.
 #
 # The token needs nothing beyond reading the checkout.
 # One in-flight run per pull request; pushes to main and scheduled runs
@@ -18,20 +19,24 @@ on:
     branches: [ main ]
     paths:
       - 'config/**'
-      - 'fuzz/config/**'
-      - 'hack/config-fuzz*'
-      - '.github/workflows/config-fuzz.yml'
+      - 'fuzz/**'
+      - 'submit*.go'
+      - 'schedd_submit*.go'
+      - 'hack/*-fuzz*'
+      - '.github/workflows/differential-fuzz.yml'
       - '.github/scripts/build-condor-utils.sh'
-      - '.github/scripts/config-fuzz-ci.sh'
+      - '.github/scripts/differential-fuzz-ci.sh'
   pull_request:
     branches: [ main ]
     paths:
       - 'config/**'
-      - 'fuzz/config/**'
-      - 'hack/config-fuzz*'
-      - '.github/workflows/config-fuzz.yml'
+      - 'fuzz/**'
+      - 'submit*.go'
+      - 'schedd_submit*.go'
+      - 'hack/*-fuzz*'
+      - '.github/workflows/differential-fuzz.yml'
       - '.github/scripts/build-condor-utils.sh'
-      - '.github/scripts/config-fuzz-ci.sh'
+      - '.github/scripts/differential-fuzz-ci.sh'
   # Weekly, so the corpus keeps growing and HTCondor-side drift shows up
   # even when nothing here changes.
   schedule:
@@ -50,8 +55,8 @@ env:
   HTCONDOR_REF: v25.14.1
 
 jobs:
-  config-fuzz:
-    name: Config fuzz
+  differential-fuzz:
+    name: Differential fuzz
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
@@ -72,6 +77,7 @@ jobs:
           echo "HTCONDOR_SRC=$RUNNER_TEMP/htcondor"
           echo "HTCONDOR_BUILD=$RUNNER_TEMP/htcondor-build"
           echo "CCACHE_DIR=$RUNNER_TEMP/ccache"
+          echo "FUZZ_LOG_DIR=$GITHUB_WORKSPACE/fuzz-logs"
         } >> "$GITHUB_ENV"
 
     # The HTCondor ref is pinned, so the compiled objects do not change
@@ -102,18 +108,40 @@ jobs:
         path: ${{ runner.temp }}/ccache
         key: ${{ steps.ccache.outputs.cache-primary-key }}
 
-    - name: Seeds and committed corpus
-      run: .github/scripts/config-fuzz-ci.sh seeds
-
-    - name: Fuzz
+    # Each target reports its own status rather than failing the job, so a
+    # divergence in one parser still lets the other run and both land in the
+    # same log.
+    - name: Config fuzz
+      id: config
       env:
         FUZZTIME: ${{ inputs.fuzztime || '2m' }}
-      run: .github/scripts/config-fuzz-ci.sh fuzz "$FUZZTIME"
+      run: |
+        set +e
+        .github/scripts/differential-fuzz-ci.sh config "$FUZZTIME"
+        echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+    - name: Submit fuzz
+      id: submit
+      env:
+        FUZZTIME: ${{ inputs.fuzztime || '2m' }}
+      run: |
+        set +e
+        .github/scripts/differential-fuzz-ci.sh submit "$FUZZTIME"
+        echo "rc=$?" >> "$GITHUB_OUTPUT"
 
     - name: Upload failing inputs
-      if: failure()
+      if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
-        name: config-fuzz-failing-inputs
-        path: fuzz/config/testdata/fuzz/
+        name: differential-fuzz-failing-inputs
+        path: |
+          fuzz-logs/
+          fuzz/config/testdata/fuzz/
+          fuzz/submit/testdata/fuzz/
         if-no-files-found: ignore
+
+    - name: Fail the job
+      if: steps.config.outputs.rc != '0' || steps.submit.outputs.rc != '0'
+      run: |
+        echo "::error::differential fuzz failed (config=${{ steps.config.outputs.rc }} submit=${{ steps.submit.outputs.rc }})"
+        exit 1

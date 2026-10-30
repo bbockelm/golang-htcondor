@@ -21,7 +21,7 @@
 #   HTCONDOR_REF     the ref the oracle was built from
 #   HTCONDOR_SHA     the commit that ref resolved to
 #   RUN_URL          link to the workflow run
-#   FUZZ_LOG_DIR     directory holding nightly-fuzz-<target>.log
+#   FUZZ_LOG_DIR     directory holding differential-fuzz-<target>.log
 #   FUZZ_LABEL       dedup label (default: nightly-fuzz)
 set -euo pipefail
 
@@ -86,7 +86,7 @@ fi
 } >>"$body"
 
 for t in $FAILED_TARGETS; do
-	log="$logdir/nightly-fuzz-$t.log"
+	log="$logdir/differential-fuzz-$t.log"
 	{
 		echo
 		echo "### $t"

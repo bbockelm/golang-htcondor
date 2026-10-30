@@ -2,7 +2,7 @@ name: Nightly fuzz
 
 # Differential fuzzing against HTCondor's main branch, so divergences
 # introduced upstream show up here rather than at the next release bump.
-# The "Config fuzz" workflow covers pull requests against a pinned
+# The "Differential fuzz" workflow covers pull requests against a pinned
 # release; this one is the moving-target counterpart.
 #
 # A failure opens (or comments on) an issue -- see
@@ -115,16 +115,13 @@ jobs:
         FUZZTIME: ${{ inputs.fuzztime || '10m' }}
       run: |
         set +e
-        .github/scripts/nightly-fuzz-ci.sh config "$FUZZTIME"
-        rc=$?
-        case "$rc" in
-          0) echo "status=passed" >> "$GITHUB_OUTPUT" ;;
-          78) echo "status=skipped" >> "$GITHUB_OUTPUT" ;;
-          *) echo "status=failed" >> "$GITHUB_OUTPUT" ;;
-        esac
+        .github/scripts/differential-fuzz-ci.sh config "$FUZZTIME"
+        if [ $? -eq 0 ]; then
+          echo "status=passed" >> "$GITHUB_OUTPUT"
+        else
+          echo "status=failed" >> "$GITHUB_OUTPUT"
+        fi
 
-    # fuzz/submit is landing separately; nightly-fuzz-ci.sh reports 78
-    # (skipped) until it is on main.
     - name: Submit fuzz
       id: submit
       if: steps.build.outcome == 'success'
@@ -132,13 +129,12 @@ jobs:
         FUZZTIME: ${{ inputs.fuzztime || '10m' }}
       run: |
         set +e
-        .github/scripts/nightly-fuzz-ci.sh submit "$FUZZTIME"
-        rc=$?
-        case "$rc" in
-          0) echo "status=passed" >> "$GITHUB_OUTPUT" ;;
-          78) echo "status=skipped" >> "$GITHUB_OUTPUT" ;;
-          *) echo "status=failed" >> "$GITHUB_OUTPUT" ;;
-        esac
+        .github/scripts/differential-fuzz-ci.sh submit "$FUZZTIME"
+        if [ $? -eq 0 ]; then
+          echo "status=passed" >> "$GITHUB_OUTPUT"
+        else
+          echo "status=failed" >> "$GITHUB_OUTPUT"
+        fi
 
     - name: Collect failures
       id: collect
