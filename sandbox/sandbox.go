@@ -73,19 +73,40 @@ func CreateInputSandboxTar(ctx context.Context, jobAd *classad.ClassAd, w io.Wri
 		}
 	}()
 
-	// Get TransferExecutable flag
-	transferExec, ok := classad.GetAs[bool](jobAd, "TransferExecutable")
+	// TransferExecutable: ABSENT MEANS TRUE.
+	//
+	// condor_submit writes the attribute only to turn the transfer off --
+	// SetExecutable assigns false for a `transfer_executable` whose first
+	// character is `f`, and for the universes where the executable is only
+	// the job's name -- so an ordinary job's ad does not carry it at all,
+	// and every other reader in this repository defaults it to true
+	// (schedd.go's configureRemoteJobAd, schedd_transfer.go's allow-set).
+	//
+	// Requiring the attribute to be PRESENT silently left the executable
+	// out of the sandbox. It was invisible for as long as this library's
+	// own submit parser wrote `TransferExecutable = true` on every job,
+	// which it no longer does; an ad from condor_submit, or from anything
+	// else, would always have hit it.
+	transferExec, saidSo := true, false
+	if v, ok := classad.GetAs[bool](jobAd, "TransferExecutable"); ok {
+		transferExec, saidSo = v, true
+	}
 
 	// Add executable if needed
-	if ok && transferExec {
+	if transferExec {
 		execPath, ok := classad.GetAs[string](jobAd, "Cmd")
-		if !ok {
+		switch {
+		case ok:
+			if err := addFileToTar(tw, execPath, iwd, userName, mgr); err != nil {
+				return fmt.Errorf("failed to add executable %s: %w", execPath, err)
+			}
+		case saidSo:
+			// The ad asked for the executable and did not say which:
+			// a contradiction worth reporting.
 			return fmt.Errorf("TransferExecutable is true but Cmd is missing")
 		}
-
-		if err := addFileToTar(tw, execPath, iwd, userName, mgr); err != nil {
-			return fmt.Errorf("failed to add executable %s: %w", execPath, err)
-		}
+		// An ad with neither attribute names no executable to send, which
+		// is not a contradiction -- there is simply nothing to add.
 	}
 
 	// Add stdin file if specified.
