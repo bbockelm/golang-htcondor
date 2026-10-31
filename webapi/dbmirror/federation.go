@@ -162,7 +162,8 @@ func (l *Locator) ClientFor(ctx context.Context, info *Info) (*dbrpc.Client, fun
 	if err != nil {
 		return nil, nil, fmt.Errorf("connecting to htcondordb at %s: %w", info.Address, err)
 	}
-	return dbrpc.NewClient(dbrpc.NewCedarConn(ctx, cl.GetStream())), func() { _ = cl.Close() }, nil
+	return dbrpc.NewClient(dbrpc.NewCedarConn(ctx, cl.GetStream()), dbrpc.WithPeerSessionAttrs(peerAttrs(cl))),
+		func() { _ = cl.Close() }, nil
 }
 
 // Hubs lists every federation hub the collector advertises -- every

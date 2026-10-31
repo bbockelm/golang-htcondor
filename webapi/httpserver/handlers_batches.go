@@ -589,8 +589,16 @@ func (s *Handler) readBatchHistory(ctx context.Context, r *http.Request, scope s
 		n++
 		return true
 	}
+	// Discard a partial read so a retry on a different opcode does not decode
+	// the same records twice. finish() stops the first decoder's workers; its
+	// records go with it.
+	reset := func() {
+		_ = dec.finish()
+		dec = newBatchDecoder()
+		n, truncated = 0, false
+	}
 	if s.mirrorAllowed(ctx, r) == nil {
-		err := s.batchMirrorHistory(ctx, fmt.Sprintf("(%s) && EnteredHistoryTime >= %d", scope, since), func(row string) bool {
+		err := s.batchMirrorHistory(ctx, fmt.Sprintf("(%s) && EnteredHistoryTime >= %d", scope, since), reset, func(row string) bool {
 			if !take() {
 				return false
 			}
@@ -636,7 +644,7 @@ func (s *Handler) readBatchHistory(ctx context.Context, r *http.Request, scope s
 
 // batchMirrorHistory streams the mirror's history rows matching
 // constraint, newest first, if the mirror may answer.
-func (s *Handler) batchMirrorHistory(ctx context.Context, constraint string, yield func(string) bool) error {
+func (s *Handler) batchMirrorHistory(ctx context.Context, constraint string, reset func(), yield func(string) bool) error {
 	info, err := s.dbMirror.Discover(ctx)
 	if err != nil {
 		return err
@@ -649,7 +657,10 @@ func (s *Handler) batchMirrorHistory(ctx context.Context, constraint string, yie
 		return err
 	}
 	defer closer()
-	return dbc.QueryRawProjectStream(ctx, "history", constraint, batchProjection, batchHistoryLimit+1, yield)
+	// batchProjection carries utilization.Projection(), and the records go to
+	// utilization.JobReader -- the same evaluator the Utilization page feeds,
+	// which has always read these with the closure.
+	return streamEvaluatedRows(ctx, dbc, "history", constraint, batchProjection, batchHistoryLimit+1, reset, yield)
 }
 
 // batchDecoder parses history rows into records on every core. Parsing
