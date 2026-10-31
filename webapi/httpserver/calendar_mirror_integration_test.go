@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PelicanPlatform/classad/collections"
 	"github.com/PelicanPlatform/classad/db"
 	"github.com/PelicanPlatform/classad/dbrpc"
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -475,5 +476,125 @@ func TestCalendarFromMirrorCountsUnusableSubmitDates(t *testing.T) {
 	if total == 0 {
 		t.Errorf("no completed jobs on any day; a corrupt QDate must not remove the job from the "+
 			"EnteredHistoryTime-bucketed series: %+v", resp.Days)
+	}
+}
+
+// TestCalendarQueryShapeStaysColumnar is the anti-vacuity test for the whole
+// calendar: it asserts the query SHAPE the panel sends is answered by the
+// columnar accelerator rather than by the per-record scan.
+//
+// Every other test here checks the ANSWER. None checks which strategy produced
+// it, and the two are not the same thing -- a fall to the scan returns the
+// identical numbers, just two orders of magnitude slower. That blind spot is
+// not hypothetical: on a production access point the calendar was unusable for
+// a day because the running binary linked a classad too old to have the
+// columnar GROUP BY at all, and every test was green throughout.
+//
+// The other fixtures here hold a handful of records in one unsealed segment,
+// where the accelerator is never built, so this one seeds enough rows at a
+// small segment size to seal and then asks the server to analyze -- the same
+// pass the scheduled optimizer runs.
+func TestCalendarQueryShapeStaysColumnar(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("integration test (forks a real htcondordb)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	now := time.Now()
+	h := mirrorForCalendar(ctx, t, now)
+	dbc, closer, _, err := h.dbMirror.Client(ctx)
+	if err != nil {
+		t.Fatalf("mirror client: %v", err)
+	}
+	defer closer()
+
+	// Zone-mapped like production's history, but with a segment size small
+	// enough that a few thousand records seal several segments. A separate
+	// table so the day-counting fixtures above are untouched.
+	const table = "history_tier"
+	if cerr := dbc.CreateArchiveTable(ctx, table, db.ArchiveConfig{
+		ZoneAttrs:   []string{"CompletionDate", "EnteredHistoryTime"},
+		SegmentSize: 1 << 16,
+	}); cerr != nil && !strings.Contains(cerr.Error(), "exists") {
+		t.Fatalf("creating %s: %v", table, cerr)
+	}
+
+	const rows = 6000
+	base := calDay(now, 3)
+	for i := 0; i < rows; i++ {
+		eht := base + int64(i%(3*86400))
+		ad := fmt.Sprintf("ClusterId = %d\nProcId = 0\nOwner = %q\nJobStatus = 4\n"+
+			"QDate = %d\nEnteredHistoryTime = %d\nCompletionDate = %d\n"+
+			"ExitCode = 0\nExitBySignal = false\nRemoteWallClockTime = 60",
+			20000+i, calendarTestOwner, eht-600, eht, eht)
+		if aerr := dbc.ArchiveAppend(ctx, table, ad); aerr != nil {
+			t.Fatalf("append %d: %v", i, aerr)
+		}
+	}
+
+	// Build the accelerator. schema.rebuild is the action that DERIVES the
+	// columnar schema and columnarizes sealed segments; "analyze" explicitly
+	// does not re-encode data already on disk, so on its own it leaves every
+	// sealed segment on the record path (which is how the first draft of this
+	// test reported tier=scan over all 6000 rows).
+	if out, aerr := dbc.AdminTable(ctx, table, "schema.rebuild"); aerr != nil {
+		t.Fatalf("schema.rebuild %s: %v (out=%q)", table, aerr, out)
+	} else {
+		t.Logf("schema.rebuild: %s", out)
+	}
+	if out, aerr := dbc.AdminTable(ctx, table, "analyze"); aerr != nil {
+		t.Fatalf("analyze %s: %v (out=%q)", table, aerr, out)
+	}
+
+	// The calendar's own shape: window on EnteredHistoryTime, one bucketed
+	// group column, a single unfiltered COUNT(*). Built here from the same
+	// helpers the handler uses so a change to the shape reaches this test.
+	start := calDay(now, 4)
+	end := calDay(now, -1)
+	qs := calendarQueries("true", start, end)
+	var shaped *calendarQuery
+	for i := range qs {
+		if qs[i].Series == seriesCompleted {
+			shaped = &qs[i]
+			break
+		}
+	}
+	if shaped == nil {
+		t.Fatal("no completed series in the calendar's queries")
+	}
+
+	var stats collections.ScanStats
+	rowsOut, qerr := dbc.ArchiveAggregateStats(ctx, table, shaped.Constraint, shaped.Groups, shaped.Aggs, &stats)
+	if qerr != nil {
+		t.Fatalf("aggregate with stats: %v", qerr)
+	}
+	t.Logf("tier=%v columnDecided=%d reassembled=%d rows=%d",
+		stats.Tier, stats.RecordsColumnDecided, stats.RecordsReassembled, len(rowsOut))
+
+	// Tier is the authoritative signal, not the record counters. A bucketed
+	// COUNT(*) over a zone-mapped attribute can be answered from per-segment
+	// metadata alone, which reads NO records -- so columnDecided and
+	// reassembled are both legitimately 0 on a healthy answer, and asserting
+	// columnDecided > 0 fails on success. Anything at or better than columnar
+	// is a pass; TierScan is the failure, and TierUnreported means the server
+	// did not say, which is not an answer either.
+	switch stats.Tier {
+	case collections.TierMatchNone, collections.TierIndex, collections.TierColumnar:
+		// Fine: metadata, index, or the columnar accelerator answered.
+	case collections.TierScan:
+		t.Errorf("the calendar's query shape fell to the per-record scan (reassembled %d of %d rows). "+
+			"The panel still shows the right numbers and is orders of magnitude slower, which is "+
+			"exactly the failure this test exists to catch", stats.RecordsReassembled, rows)
+	default:
+		t.Errorf("the server reported tier %v for the calendar's query shape; with the accelerator "+
+			"built it should name a strategy", stats.Tier)
+	}
+	// A per-record fall-back inside an otherwise-columnar answer is the same
+	// cliff in miniature, so it is held to zero rather than left unchecked.
+	if stats.RecordsReassembled > 0 {
+		t.Errorf("reassembled %d records; the shape should be answered from columns and metadata alone",
+			stats.RecordsReassembled)
 	}
 }
