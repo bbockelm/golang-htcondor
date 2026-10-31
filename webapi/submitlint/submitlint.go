@@ -127,11 +127,15 @@ func Inspect(raw string) Inspection {
 	// caller typed and cannot answer what these two checks ask: whether
 	// the caller named a path on a machine or a file they will upload.
 	cmd, _ := sf.Command("executable")
-	if err := checkExecutableTransfer(cmd, transferExec); err != nil {
+	// The RAW transfer_executable value, for the diagnostics: a caller who
+	// wrote one that does not turn the transfer off has a different problem
+	// from one who wrote nothing, and needs to be told which.
+	rawTransferExec, _ := sf.Command("transfer_executable")
+	if err := checkExecutableTransfer(cmd, transferExec, rawTransferExec); err != nil {
 		insp.Fatal = err
 		return insp
 	}
-	insp.Warnings = append(insp.Warnings, warnExecutableTransfer(cmd, transferExec)...)
+	insp.Warnings = append(insp.Warnings, warnExecutableTransfer(cmd, transferExec, rawTransferExec)...)
 	insp.Warnings = append(insp.Warnings, warnUndefinedMacros(raw)...)
 	insp.Warnings = append(insp.Warnings, warnDiscardedOutput(ad, rowA, rowB, sf.QueueCount())...)
 	return insp
@@ -273,31 +277,31 @@ func queueVarSentinels(sf *htcondor.SubmitFile, suffix string) map[string]string
 // checkExecutableTransfer rejects the one executable/transfer_executable
 // combination that has no working outcome: a machine-owned path that
 // HTCondor will rewrite to a spool location the caller cannot populate.
-func checkExecutableTransfer(cmd string, transferExec bool) error {
+func checkExecutableTransfer(cmd string, transferExec bool, rawTransferExec string) error {
 	if !transferExec || !htcondor.IsSystemExecutablePath(cmd) {
 		return nil
 	}
-	return fmt.Errorf("submit file rejected: executable = %s is a system path, but transfer_executable is not set "+
-		"(it defaults to true), so HTCondor spool-copies the executable from the submit directory. "+
+	return fmt.Errorf("submit file rejected: executable = %s is a system path, but %s "+
+		"so HTCondor spool-copies the executable from the submit directory. "+
 		"That copy does not exist, and the job would go on hold with "+
 		"\"Transfer input files failure ... (errno 2) No such file or directory\" "+
 		"(HoldReasonCode 13, HoldReasonSubCode 2) instead of running.\n"+
 		"Fix: add \"transfer_executable = False\" to run the %s already installed on the execute node. "+
 		"To ship your own program instead, set executable to a bare filename (e.g. \"executable = %s\") "+
-		"and upload it with upload_job_input", cmd, path.Base(cmd), path.Base(cmd))
+		"and upload it with upload_job_input", cmd, transferExecPhrase(rawTransferExec), path.Base(cmd), path.Base(cmd))
 }
 
 // warnExecutableTransfer flags an absolute-path executable that will be
 // spooled. Unlike the system-path case this can work, but only if the
 // upload names the basename, so say so.
-func warnExecutableTransfer(cmd string, transferExec bool) []string {
+func warnExecutableTransfer(cmd string, transferExec bool, rawTransferExec string) []string {
 	if !transferExec || !strings.HasPrefix(cmd, "/") || htcondor.IsSystemExecutablePath(cmd) {
 		return nil
 	}
-	return []string{fmt.Sprintf("executable = %s is an absolute path and transfer_executable is not set "+
-		"(it defaults to true), so HTCondor expects the executable to be spooled: upload_job_input must include "+
+	return []string{fmt.Sprintf("executable = %s is an absolute path and %s "+
+		"so HTCondor expects the executable to be spooled: upload_job_input must include "+
 		"a file named %q (with is_executable set). If the file already exists on the execute node, "+
-		"set transfer_executable = False instead.", cmd, path.Base(cmd))}
+		"set transfer_executable = False instead.", cmd, transferExecPhrase(rawTransferExec), path.Base(cmd))}
 }
 
 // macroReference matches a `$(NAME)` or `$(NAME:default)` submit-file
@@ -438,4 +442,28 @@ func findMacroReferences(value string) []string {
 		names = append(names, value[loc[2]:loc[3]])
 	}
 	return names
+}
+
+// transferExecPhrase says WHY the executable is being transferred, which is
+// not the same sentence in the two cases that reach it.
+//
+// condor_submit turns the transfer off only for a transfer_executable whose
+// FIRST CHARACTER is 'f' or 'F' (SetExecutable tests exactly that), so
+// "transfer_executable = NO" -- or "no", or "0" -- reads as a value it does
+// not recognise and leaves the transfer ON. Telling such a caller that the
+// setting "is not set" sends them looking for a line they already wrote;
+// this names the value back to them instead.
+func transferExecPhrase(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "transfer_executable is not set (it defaults to true),"
+	}
+	if trimmed[0] == 'f' || trimmed[0] == 'F' {
+		// Not reachable while transferExec is true, but keep the sentence
+		// honest if it ever is.
+		return "transfer_executable is off,"
+	}
+	return fmt.Sprintf("transfer_executable = %s does NOT turn the transfer off "+
+		"(condor_submit tests only the first character of the value, so false/False/F work "+
+		"and NO/no/0 do not),", trimmed)
 }
