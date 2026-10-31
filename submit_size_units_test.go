@@ -149,7 +149,8 @@ func TestSubmitSizeUnitsOtherAttributes(t *testing.T) {
 	ad := mustJobAd(t, `
 universe = vanilla
 executable = /bin/echo
-request_gpu_memory = 8GB
+request_gpus = 1
+gpus_minimum_memory = 8GB
 image_size = 2MB
 executable_size = 512k
 disk_usage = 1GB
@@ -159,14 +160,28 @@ disk_usage = 1GB
 		attr string
 		want int64
 	}{
-		{"RequestGpuMemory", 8192}, // MiB base
-		{"ImageSize", 2048},        // KiB base
-		{"ExecutableSize", 512},    // KiB base
-		{"DiskUsage", 1048576},     // KiB base
+		{"GPUsMinMemory", 8192}, // MiB base
+		{"ImageSize", 2048},     // KiB base
+		{"ExecutableSize", 512}, // KiB base
+		{"DiskUsage", 1048576},  // KiB base
 	} {
 		if got, ok := ad.EvaluateAttrInt(tc.attr); !ok || got != tc.want {
 			t.Errorf("%s = %d (ok=%v), want %d", tc.attr, got, ok, tc.want)
 		}
+	}
+
+	// request_gpu_memory used to be in the list above. It is not a submit
+	// command -- HTCondor's keyword table flags it f_error, and
+	// condor_submit answers it with "did you mean gpus_minimum_memory?"
+	// and no attribute -- so the size parsing it was standing in for is
+	// exercised through the keyword that does constrain GPU memory.
+	noSuchKeyword := mustJobAd(t, `
+universe = vanilla
+executable = /bin/echo
+request_gpu_memory = 8GB
+`)
+	if got, ok := noSuchKeyword.EvaluateAttrInt("RequestGpuMemory"); ok {
+		t.Errorf("RequestGpuMemory = %d; request_gpu_memory is not a submit command and writes nothing", got)
 	}
 }
 
