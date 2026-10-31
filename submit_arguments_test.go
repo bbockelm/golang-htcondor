@@ -99,9 +99,12 @@ func TestArgumentsNewStyle(t *testing.T) {
 			expected: `one "two" spacey' '''quoted''' 'argument`,
 		},
 		{
+			// A tab is a separator in the V2 form, like a space, and the
+			// arguments are rejoined with single spaces -- verified
+			// against condor_submit.
 			name:     "tabs as delimiters",
 			args:     "\"one\ttwo\tthree\"",
-			expected: "one\ttwo\tthree",
+			expected: "one two three",
 		},
 		{
 			name:     "empty argument",
@@ -208,16 +211,20 @@ func TestArgumentsComplexCases(t *testing.T) {
 		expected string
 	}{
 		{
+			// Whitespace between arguments is a separator, so a value of
+			// nothing but whitespace is no arguments at all.
 			name:     "new style - only spaces",
 			args:     `"   "`,
 			attrName: "Arguments",
-			expected: `   `,
+			expected: ``,
 		},
 		{
+			// Same: the list is parsed and written back out, so the
+			// padding is gone and the doubled space is one separator.
 			name:     "new style - leading/trailing spaces",
 			args:     `"  arg1  arg2  "`,
 			attrName: "Arguments",
-			expected: `  arg1  arg2  `,
+			expected: `arg1 arg2`,
 		},
 		{
 			name:     "old style - backslashes",

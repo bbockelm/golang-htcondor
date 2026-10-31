@@ -36,18 +36,11 @@ set them, Go writes `RequestCpus = 1` and `RequestMemory = 128`; C++ writes
 neither and lets the negotiator apply the pool's defaults. A pool whose default
 request differs from 1/128 silently gets the wrong one.
 
-**`Args` vs `Arguments`.** For empty arguments C++ emits `Arguments` (V2
-syntax), Go emits `Args` (V1). The two attributes are parsed differently by the
-starter — V1 splits on whitespace, V2 honors quoting — so the attribute *name*
-is semantic, not cosmetic.
-
-The values differ too, which the `args`/`arguments` entries in
-`knownDivergent` currently hide: C++ runs the text through `ArgList` and gets
-back a canonical form, so `arguments = a  b` is `"a b"` on the C++ side and
-`"a  b"` on the Go side, and trailing whitespace — which only a line
-continuation can produce, since the reader trims the line otherwise — is
-dropped by C++ and kept by Go. Fixing the naming split will expose this, so it
-is written down here rather than discovered twice.
+**`Args` vs `Arguments`.** FIXED, including the value difference this entry
+predicted: running the text through `ArgList` canonicalises it, so
+`arguments = a  b` is `"a b"` and not `"a  b"`. Both halves are under "Fixed"
+below. The prediction was worth making -- the naming fix did expose the value
+difference, exactly here.
 
 **`Cmd` and `UserLog` were relative.** FIXED. C++ resolved the executable and
 the log into absolute paths and Go stored them as written, so a job whose
@@ -849,6 +842,36 @@ Two attributes were going the other way: `JobRunCount`, which the schedd
 owns, and the five real-valued counters, which now hold the same real `0.0`
 as C++ and are recorded only because the harness renders a whole-number real
 without its decimal point — the same entry `rank` has.
+
+**The environment was stored as the submit file wrote it.** The submit value
+and the job attribute are different encodings, and the parser's job is to
+convert between them. The submit file writes V1 (`A=1;B=2`, with the
+delimiter auto-detected) or V2 (the whole list in double quotes); the ad
+carries `Environment` in V2 RAW -- no surrounding quotes, each entry quoted
+per CHARACTER by `append_arg`, so `A=x y` is stored as `A=x' 'y` -- or `Env`
+in V1 raw with an `EnvDelim` beside it naming the delimiter, which Go never
+wrote at all.
+
+Which attribute is written is a preference rather than a capability:
+condor_submit writes V2 unless the submitter used the `env` keyword with a
+V1 value. Go decided by whether the VALUE looked quoted, so
+`environment = A=1;B=2` -- the common form -- was stored under `Env`
+verbatim where condor_submit stores `Environment = "A=1 B=2"`.
+
+Three more things fall out of `Env` being a `std::map` and are reproduced
+because the resulting STRING is what the starter reads: the variables come
+out sorted by name, a repeated name collapses to its last value, and an
+entry with no `=` is a submit error rather than a variable.
+
+**`Arguments` versus `Args` for an empty command line.** The attribute NAME
+says which encoding the ad carries -- `Args` is V1, split on whitespace with
+backslash escapes; `Arguments` is V2, where single quotes group an argument
+containing spaces -- and the starter splits the two differently. A submit
+file that says nothing about arguments gets `Arguments = ""`, the V2 name,
+because an empty ArgList was never V1 input. Go wrote `Args = ""`.
+
+`arguments2` was also unimplemented, and `arguments` with `arguments2`
+without `allow_arguments_v1` is now the submit error it is in condor_submit.
 
 **A keyword written under its job attribute's name was ignored.**
 `condor_submit` reads most keywords with `submit_param(name, attr)`, so the
