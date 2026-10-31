@@ -77,6 +77,17 @@ type SubmitFile struct {
 	// accounting group is built from. Empty means the parse was given
 	// none and falls back to the account running it; see submitUserName.
 	submitUser string
+	// submitTime is the QDate every proc of one submission shares, in Unix
+	// seconds, or 0 before the submission has been stamped.
+	//
+	// condor_submit reads the clock once and hands that one value to
+	// init_base_ad, so every proc of a cluster carries the same QDate.
+	// Reading the clock per proc instead gives a multi-proc submission two
+	// QDates whenever it straddles a second boundary, which makes one
+	// cluster look submitted at two different times to anything that groups
+	// or sorts by it, and leaves QDate on the proc ads because it no longer
+	// matches the cluster ad and so does not fold away.
+	submitTime int64
 
 	// Queue statement information
 	queueCount    int
@@ -485,6 +496,18 @@ func (sf *SubmitFile) QueueVars() []string {
 	return out
 }
 
+// stampSubmitTime returns the submission's QDate, reading the clock on the
+// first call and returning that same value afterwards. Submit and SubmitLate
+// clear it so a SubmitFile submitted twice stamps each submission separately;
+// a caller driving MakeClusterAd and MakeProcAd itself gets one value across
+// the pair without having to ask for it.
+func (sf *SubmitFile) stampSubmitTime() int64 {
+	if sf.submitTime == 0 {
+		sf.submitTime = time.Now().Unix()
+	}
+	return sf.submitTime
+}
+
 // MakeJobAd creates a ClassAd for a single job
 // This is the main transformation from submit file to job ClassAd
 // queueVars contains variable substitutions from the queue statement
@@ -505,7 +528,7 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	// formatting, history records) expects it to be present. Without
 	// QDate the schedd doesn't backfill, so the field stays undefined
 	// and clients render nothing.
-	_ = ad.Set("QDate", time.Now().Unix())
+	_ = ad.Set("QDate", sf.stampSubmitTime())
 
 	// SubmitVersion + CondorPlatform: condor_submit stamps these
 	// onto every base job (submit_utils.cpp around ATTR_SUBMIT_VERSION).
@@ -3765,6 +3788,9 @@ func submitURLScheme(s string) (string, bool) {
 // Submit submits the jobs from this submit file
 // Returns the cluster ID and number of procs created
 func (sf *SubmitFile) Submit(clusterID int) (*SubmitResult, error) {
+	// One submission, one QDate: see stampSubmitTime.
+	sf.submitTime = 0
+
 	result := &SubmitResult{
 		ClusterID: clusterID,
 		NumProcs:  sf.queueCount,
@@ -3874,6 +3900,9 @@ func (sf *SubmitFile) MakeProcAd(clusterID int, procID int, queueVars map[string
 // whatever the job count. For any other file there is nothing to late
 // materialize, so this builds the same per-proc ads Submit does.
 func (sf *SubmitFile) SubmitLate(clusterID int) (*SubmitResult, error) {
+	// One submission, one QDate: see stampSubmitTime.
+	sf.submitTime = 0
+
 	// Built before the cluster ad, as condor_submit builds it. condor_submit
 	// has to: it reads the first row without making the loop variables live,
 	// because its digest is a dump of a macro table that a live row would
