@@ -643,6 +643,13 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
+	// Derive the GPU constraint expression, which reads the job ad rather
+	// than the submit file and so has to run after everything that can
+	// write a GPU attribute onto it.
+	if err := sf.setGPUResourceRequirements(ad); err != nil {
+		return nil, err
+	}
+
 	// Set auto-generated attributes (should be last)
 	if err := sf.setAutoAttributes(ad); err != nil {
 		return nil, err
@@ -1793,9 +1800,10 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 		}
 	}
 
-	// Specific GPU properties
-	if gpuProps, ok := sf.submitCommand("require_gpus"); ok {
-		_ = ad.Set("RequireGpus", gpuProps)
+	// The GPU property constraints, which are read only once the job has
+	// asked for a GPU.
+	if err := sf.setGPUPropertyConstraints(ad); err != nil {
+		return err
 	}
 
 	return nil

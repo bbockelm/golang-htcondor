@@ -435,6 +435,99 @@ var seeds = []seedCase{
 	{input: "universe = grid\ngrid_resource = ec2 https://ec2.example.com/\nexecutable = myjob\naws_access_key_id_file = akid.txt\naws_secret_access_key_file = skey.txt\nec2_ami_id = ami-dead\nWantNameTag = false\nqueue\n"},
 	// Outside the grid universe none of the family is read at all.
 	{input: "executable = /bin/sleep\nec2_elastic_ip = 1.2.3.4\nec2_keypair_file = kp.out\ngce_image = img\nazure_size = Standard_A1\nqueue\n"},
+
+	// --- parity: the GPU request keywords ---
+	// The generated sweep reaches these keywords but rarely in the one
+	// combination that makes them do anything: SetRequestGpus reads them
+	// only when the file ALSO asked for a GPU, and the derived RequireGPUs
+	// needs two of them at once to show its shape. The seeds pin both.
+	//
+	// Without a request_gpus the keywords set nothing at all, however many
+	// of them a file carries.
+	{input: "executable = /bin/sleep\ngpus_minimum_capability = 7.5\ngpus_maximum_capability = 8.0\ngpus_minimum_memory = 4G\ngpus_minimum_runtime = 12.1\nrequire_gpus = Capability > 5\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = undefined\ngpus_minimum_capability = 7.5\nqueue\n"},
+	// One at a time, so each clause of the derived expression is pinned on
+	// its own.
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_capability = 7.5\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_maximum_capability = 8.0\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_memory = 4G\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_runtime = 12.1\nqueue\n"},
+	// All four, which is where the ORDER and the left-associative grouping
+	// of the `&&` chain are visible.
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_capability = 7.5\ngpus_maximum_capability = 8.0\ngpus_minimum_memory = 4G\ngpus_minimum_runtime = 12.1\nqueue\n"},
+	// gpus_minimum_memory is a MB quantity with the usual unit suffixes,
+	// rounded up, and falls back to an expression when it is not a size.
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_memory = 4000\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_memory = 2.5G\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_memory = 1T\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_memory = SomeAttr + 1\nqueue\n"},
+	// gpus_minimum_runtime is a CUDA version in "x" or "x.y" form,
+	// canonicalized to x*1000 + y*10. A number already past 1000 with no
+	// minor part is taken to be canonical; a minor part of 100 or more, or
+	// anything that is not a version, stays an expression.
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_runtime = 12\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_runtime = 12010\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_runtime = 1000\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_runtime = .5\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_runtime = 12.100\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_runtime = SomeAttr\nqueue\n"},
+	// A require_gpus the submitter wrote is an EXPRESSION, and the derived
+	// clauses are AND'd onto it -- except for a property it already
+	// mentions, which it keeps to itself. TARGET.Capability names the
+	// machine ad rather than the GPU and suppresses nothing; MY.Capability
+	// and a bare lower-case capability both do suppress.
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = DriverVersion > 11\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = DriverVersion > 11\ngpus_minimum_capability = 7.5\ngpus_minimum_memory = 4G\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = Capability > 5\ngpus_minimum_capability = 7.5\ngpus_minimum_memory = 4G\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = capability > 5\ngpus_minimum_capability = 7.5\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = MY.Capability > 5\ngpus_minimum_capability = 7.5\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = TARGET.Capability > 5\ngpus_minimum_capability = 7.5\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = foo(Capability)\ngpus_minimum_capability = 7.5\nqueue\n"},
+	// The parenthesization of that join is load-bearing: only a `||` or a
+	// ternary binds more loosely than the `&&` it is about to sit under,
+	// and parenthesizing anything else would regroup the tree.
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = GlobalMemoryMb > 100 || DriverVersion > 11\ngpus_minimum_runtime = 12.1\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = Capability ? 1 : 2\ngpus_minimum_memory = 4G\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = DriverVersion > 11 && SomeAttr > 1\ngpus_minimum_runtime = 12.1\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = (Capability > 5)\ngpus_minimum_memory = 4G\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nrequire_gpus = !DriverVersion\ngpus_minimum_memory = 4G\nqueue\n"},
+	// Each keyword answers to its attribute name as a second spelling, and
+	// the derivation reads the AD, so a `+GPUsMinCapability` reaches it
+	// even though the KEYWORD would have needed a request_gpus first.
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\nGPUsMinCapability = 7.5\nRequireGPUs = DriverVersion > 11\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1\n+GPUsMinCapability = 7.5\n+GPUsMinMemory = 100\nqueue\n"},
+	{input: "executable = /bin/sleep\nMY.RequestGPUs = 1\nMY.GPUsMinCapability = 7.5\nqueue\n"},
+	{input: "executable = /bin/sleep\n+RequestGPUs = 1\ngpus_minimum_capability = 7.5\nqueue\n"},
+
+	// --- parity: cuda_version ---
+	// The keyword reaches the ad as a string and SetRequirements rewrites
+	// it as an integer -- with a DIFFERENT encoding from
+	// gpus_minimum_runtime's, however alike the two look: "12.1" is 12001
+	// here and 12010 there.
+	{input: "executable = /bin/sleep\ncuda_version = 12.1\nqueue\n"},
+	{input: "executable = /bin/sleep\ncuda_version = 11.2\nqueue\n"},
+	{input: "executable = /bin/sleep\ncuda_version = 12\nqueue\n"},
+	{input: "executable = /bin/sleep\ncuda_version = 999\nqueue\n"},
+	{input: "executable = /bin/sleep\ncuda_version = 1000\nqueue\n"},
+	{input: "executable = /bin/sleep\ncuda_version = 12010\nqueue\n"},
+	{input: "executable = /bin/sleep\ncuda_version = 0\nqueue\n"},
+	// %u is unsigned, so a negative wraps rather than failing.
+	{input: "executable = /bin/sleep\ncuda_version = -1\nqueue\n"},
+	// The conversion lives inside SetRequirements, so it is skipped
+	// wherever that function returns early with a Requirements expression
+	// it was handed -- and a value it would otherwise reject survives.
+	{input: "executable = /bin/sleep\ncuda_version = 12.1\nrequirements = true\nqueue\n"},
+	{input: "executable = /bin/sleep\ncuda_version = 12.1\n+Requirements = true\nqueue\n"},
+	{input: "executable = /bin/sleep\ncuda_version = 12.1\nMY.Requirements = true\nqueue\n"},
+	{input: "executable = /bin/sleep\ncuda_version = junk\n+Requirements = true\nqueue\n"},
+	{input: "executable = /bin/sleep\ncuda_version = 12.1\nFACTORY.Requirements = true\nqueue\n"},
+	// A non-Condor-C grid job gets no generated requirements at all, and
+	// so keeps the string; a Condor-C one does not.
+	{input: "universe = grid\ngrid_resource = batch slurm\nexecutable = myjob\ncuda_version = 12.1\nqueue\n"},
+	{input: "universe = grid\ngrid_resource = batch slurm\nexecutable = myjob\ncuda_version = junk\nqueue\n"},
+	{input: "universe = grid\ngrid_resource = condor host host\nexecutable = myjob\ncuda_version = 12.1\nqueue\n"},
+	{input: "executable = /bin/sleep\nuniverse = scheduler\ncuda_version = 12.1\nqueue\n"},
+	{input: "executable = /bin/sleep\nuniverse = local\ncuda_version = 12.1\nqueue\n"},
 }
 
 func requireOracle(t testing.TB) {
