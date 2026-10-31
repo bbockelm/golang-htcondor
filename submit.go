@@ -567,11 +567,6 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
-	// Set notification
-	if err := sf.setNotification(ad); err != nil {
-		return nil, err
-	}
-
 	// Set rank
 	if err := sf.setRank(ad); err != nil {
 		return nil, err
@@ -579,11 +574,6 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 
 	// Set owner and accounting
 	if err := sf.setOwnership(ad); err != nil {
-		return nil, err
-	}
-
-	// Record what the file asked for about late materialization.
-	if err := sf.setMaterializationLimits(ad); err != nil {
 		return nil, err
 	}
 
@@ -622,6 +612,14 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	// MinHosts/MaxHosts: the machine count for a parallel job, the
 	// default pair of 1 for everything else.
 	if err := sf.setHostCounts(ad); err != nil {
+		return nil, err
+	}
+
+	// The keywords whose job attribute and value shape come straight from
+	// HTCondor's own keyword table. SubmitHash runs this pass after the
+	// universe-specific setters and before the job-deferral pass, which
+	// reads the Cron* attributes it writes.
+	if err := sf.setSimpleSubmitKeywords(ad); err != nil {
 		return nil, err
 	}
 
@@ -1034,19 +1032,11 @@ func (sf *SubmitFile) setStandardFiles(ad *classad.ClassAd) error {
 		}
 	}
 
-	// Log. The user log is one of the file-role keywords in
-	// SimpleSubmitKeyword's table (f_logfile), and do_simple_commands
-	// runs every one of those through full_path, so a relative name is
-	// recorded against Iwd. The three standard streams above are NOT:
-	// SetStdin/SetStdout/SetStderr keep the name as written, and the
-	// starter resolves it in the sandbox.
-	if logFile, ok := sf.submitCommand("log"); ok && logFile != "" {
-		iwd, err := sf.jobIwd()
-		if err != nil {
-			return err
-		}
-		_ = ad.Set("UserLog", fullPath(logFile, iwd))
-	}
+	// The three standard streams keep the name as written:
+	// SetStdin/SetStdout/SetStderr do no path resolution and the starter
+	// resolves the name in the sandbox. The user log is the opposite --
+	// a file-role keyword (f_logfile) in the simple-keyword table, which
+	// resolves it against Iwd -- and is written there, not here.
 
 	return nil
 }
@@ -1156,61 +1146,9 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	}
 	_ = ad.Set("TransferExecutable", transferExec)
 
-	// encrypt_input_files - comma-separated list of files to encrypt
-	if eif, ok := sf.submitCommand("encrypt_input_files"); ok {
-		files := parseFileList(eif)
-		if len(files) > 0 {
-			_ = ad.Set("EncryptInputFiles", strings.Join(files, ","))
-		}
-	}
-
-	// encrypt_output_files - comma-separated list of files to encrypt
-	if eof, ok := sf.submitCommand("encrypt_output_files"); ok {
-		files := parseFileList(eof)
-		if len(files) > 0 {
-			_ = ad.Set("EncryptOutputFiles", strings.Join(files, ","))
-		}
-	}
-
-	// dont_encrypt_input_files - comma-separated list
-	if deif, ok := sf.submitCommand("dont_encrypt_input_files"); ok {
-		files := parseFileList(deif)
-		if len(files) > 0 {
-			_ = ad.Set("DontEncryptInputFiles", strings.Join(files, ","))
-		}
-	}
-
-	// dont_encrypt_output_files - comma-separated list
-	if deof, ok := sf.submitCommand("dont_encrypt_output_files"); ok {
-		files := parseFileList(deof)
-		if len(files) > 0 {
-			_ = ad.Set("DontEncryptOutputFiles", strings.Join(files, ","))
-		}
-	}
-
-	// transfer_plugins - semicolon-separated list
-	if tp, ok := sf.submitCommand("transfer_plugins"); ok {
-		plugins := strings.Split(tp, ";")
-		var cleanPlugins []string
-		for _, p := range plugins {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				cleanPlugins = append(cleanPlugins, p)
-			}
-		}
-		if len(cleanPlugins) > 0 {
-			_ = ad.Set("TransferPlugins", strings.Join(cleanPlugins, ";"))
-		}
-	}
-
 	// skip_filechecks - don't check if input files exist
 	if sfc, ok := sf.submitCommand("skip_filechecks"); ok {
 		_ = ad.Set("SkipFileChecks", parseBool(sfc, false))
-	}
-
-	// preserve_relative_paths
-	if prp, ok := sf.submitCommand("preserve_relative_paths"); ok {
-		_ = ad.Set("PreserveRelativePaths", parseBool(prp, false))
 	}
 
 	return nil
@@ -1256,10 +1194,10 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 		}
 	}
 
-	// docker_network_type or container_network
-	if network, ok := sf.submitCommand("docker_network_type"); ok {
-		_ = ad.Set("DockerNetworkType", network)
-	} else if network, ok := sf.submitCommand("container_network"); ok {
+	// container_network. docker_network_type writes the same attribute
+	// through the simple-keyword table; this spelling is not one of
+	// HTCondor's keywords.
+	if network, ok := sf.submitCommand("container_network"); ok {
 		_ = ad.Set("DockerNetworkType", network)
 	}
 
@@ -1276,11 +1214,6 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 		}
 	}
 
-	// docker_pull_policy
-	if policy, ok := sf.submitCommand("docker_pull_policy"); ok {
-		_ = ad.Set("DockerPullPolicy", policy)
-	}
-
 	// container_service_names - comma-separated list
 	if services, ok := sf.submitCommand("container_service_names"); ok {
 		serviceList := parseFileList(services)
@@ -1294,21 +1227,10 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 		_ = ad.Set("RequireContainer", parseBool(rc, false))
 	}
 
-	// container_target_dir - working directory inside container
-	if targetDir, ok := sf.submitCommand("container_target_dir"); ok {
-		_ = ad.Set("ContainerTargetDir", targetDir)
-	}
-
-	// docker_mount_volumes or mount_under_scratch
+	// docker_mount_volumes. mount_under_scratch is a keyword of its own
+	// and goes through the simple-keyword table, which keeps it a string.
 	if mv, ok := sf.submitCommand("docker_mount_volumes"); ok {
 		_ = ad.Set("DockerMountVolumes", parseBool(mv, true))
-	} else if mus, ok := sf.submitCommand("mount_under_scratch"); ok {
-		_ = ad.Set("MountUnderScratch", parseBool(mus, true))
-	}
-
-	// Additional docker-specific options
-	if override, ok := sf.submitCommand("docker_override_entrypoint"); ok {
-		_ = ad.Set("DockerOverrideEntrypoint", parseBool(override, false))
 	}
 
 	// container_image_sha256
@@ -1789,22 +1711,6 @@ func (sf *SubmitFile) setCustomResourceRequests(ad *classad.ClassAd) error {
 	return nil
 }
 
-// setNotification sets notification preference
-func (sf *SubmitFile) setNotification(ad *classad.ClassAd) error {
-	notification := "NEVER"
-	if notif, ok := sf.submitCommand("notification"); ok {
-		notification = strings.ToUpper(notif)
-	}
-	_ = ad.Set("EmailAttributes", notification)
-
-	// Set email address if provided
-	if email, ok := sf.submitCommand("notify_user"); ok {
-		_ = ad.Set("NotifyUser", email)
-	}
-
-	return nil
-}
-
 // setRank sets the rank expression
 func (sf *SubmitFile) setRank(ad *classad.ClassAd) error {
 	if rank, ok := sf.submitCommand("rank"); ok {
@@ -1906,26 +1812,6 @@ var localSubmitUser = sync.OnceValue(func() string {
 	return os.Getenv("USER")
 })
 
-// setMaterializationLimits records what a submit file asked for about late
-// materialization.
-//
-// max_idle and materialize_max_idle both set JobMaterializeMaxIdle, the number
-// of procs a job factory may leave idle before the schedd stops materializing
-// more; SubmitHash stores it as an expression (f_as_expr in
-// prunable_keywords), with materialize_max_idle as the alternate spelling.
-//
-// max_materialize deliberately has no counterpart: it never becomes a job
-// attribute on either side. HTCondor reads it in want_factory_submit and
-// passes it to SetJobFactory as the materialize limit, so setting it on the ad
-// here would be a divergence rather than a fix.
-func (sf *SubmitFile) setMaterializationLimits(ad *classad.ClassAd) error {
-	maxIdle, ok := sf.submitCommandAlt("max_idle", "materialize_max_idle")
-	if !ok {
-		return nil
-	}
-	return setExprAttr(ad, "JobMaterializeMaxIdle", "max_idle", maxIdle)
-}
-
 // setJobStatusControl sets job status and control attributes
 func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 	// hold - initial hold state
@@ -1958,30 +1844,9 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 		}
 	}
 
-	// priority - user priority for job
-	if priority, ok := sf.submitCommand("priority"); ok {
-		if intPriority, err := parseInt(priority); err == nil {
-			_ = ad.Set("JobPrio", intPriority)
-		}
-	}
-
 	// nice_user - reduce priority to be nice
 	if niceUser, ok := sf.submitCommand("nice_user"); ok {
 		_ = ad.Set("NiceUser", parseBool(niceUser, false))
-	}
-
-	// max_job_retirement_time - time to allow for graceful shutdown
-	if maxRetire, ok := sf.submitCommand("max_job_retirement_time"); ok {
-		if intRetire, err := parseInt(maxRetire); err == nil {
-			_ = ad.Set("MaxJobRetirementTime", intRetire)
-		}
-	}
-
-	// job_max_vacate_time - time for job to vacate before killing
-	if maxVacate, ok := sf.submitCommand("job_max_vacate_time"); ok {
-		if intVacate, err := parseInt(maxVacate); err == nil {
-			_ = ad.Set("JobMaxVacateTime", intVacate)
-		}
 	}
 
 	// max_retries, retry_until and success_exit_code are not independent
@@ -1999,20 +1864,6 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 	if leaveInQueue, ok := sf.submitCommand("leave_in_queue"); ok {
 		if err := setExprAttr(ad, "LeaveJobInQueue", "leave_in_queue", leaveInQueue); err != nil {
 			return err
-		}
-	}
-
-	// keep_claim_idle - keep claim after job completes
-	if keepClaim, ok := sf.submitCommand("keep_claim_idle"); ok {
-		if intKeep, err := parseInt(keepClaim); err == nil {
-			_ = ad.Set("KeepClaimIdle", intKeep)
-		}
-	}
-
-	// job_lease_duration - how long schedd can keep job leased
-	if leaseDuration, ok := sf.submitCommand("job_lease_duration"); ok {
-		if intLease, err := parseInt(leaseDuration); err == nil {
-			_ = ad.Set("JobLeaseDuration", intLease)
 		}
 	}
 
@@ -3005,11 +2856,6 @@ func (sf *SubmitFile) isMPIUniverse() bool {
 
 // setJavaParams sets Java universe specific parameters
 func (sf *SubmitFile) setJavaParams(ad *classad.ClassAd) error {
-	// jar_files - JAR files to include
-	if jarFiles, ok := sf.submitCommand("jar_files"); ok {
-		_ = ad.Set("JarFiles", jarFiles)
-	}
-
 	// java_vm_args - Arguments for the JVM
 	if javaVMArgs, ok := sf.submitCommand("java_vm_args"); ok {
 		_ = ad.Set("JavaVMArgs", javaVMArgs)
@@ -3090,16 +2936,6 @@ const (
 	deferralPrepTimeDefault = 300
 )
 
-// cronScheduleAttrs are the five schedule fields, each stored as a STRING:
-// the value is cron field syntax (`*/2`, `1-5`, `0,30`), not a number.
-var cronScheduleAttrs = []struct{ command, attr string }{
-	{"cron_minute", "CronMinute"},
-	{"cron_hour", "CronHour"},
-	{"cron_day_of_month", "CronDayOfMonth"},
-	{"cron_month", "CronMonth"},
-	{"cron_day_of_week", "CronDayOfWeek"},
-}
-
 // deferralTriggerAttrs are the attributes whose presence makes a job a
 // deferred job, in the order SubmitHash::NeedsJobDeferral checks them. Once
 // one of them is on the ad, the window and prep time are written too --
@@ -3127,12 +2963,6 @@ var deferralTriggerAttrs = []string{
 //     legal deferral_time. A LITERAL one has to be a non-negative integer,
 //     and condor_submit rejects the submit file when it is not.
 func (sf *SubmitFile) setCronAndDeferral(ad *classad.ClassAd) error {
-	for _, c := range cronScheduleAttrs {
-		if v := sf.submitParam(c.command, ""); v != "" {
-			_ = ad.Set(c.attr, v)
-		}
-	}
-
 	if v := sf.submitParam("deferral_time", "DeferralTime"); v != "" {
 		if err := setDeferralExpr(ad, "DeferralTime", "deferral_time", v); err != nil {
 			return err
@@ -3774,15 +3604,6 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 		}
 	}
 
-	// remote_initialdir - initial directory on the remote machine.
-	// HTCondor's attribute is RemoteIwd, and the value is stored exactly
-	// as written: it names a directory on a machine this one knows
-	// nothing about, so it is not resolved against the submit Iwd the
-	// way `initialdir` is.
-	if remoteDir, ok := sf.submitCommand("remote_initialdir"); ok {
-		_ = ad.Set("RemoteIwd", remoteDir)
-	}
-
 	// JobNotification - when to send email
 	if notification, ok := sf.submitCommand("notification"); ok {
 		// Convert notification string to integer code
@@ -3851,40 +3672,9 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 		_ = ad.Set(std.streamAttr, parseBool(stream, false))
 	}
 
-	// JobDescription - human-readable description of job
-	if desc, ok := sf.submitCommand("description"); ok {
-		_ = ad.Set("JobDescription", desc)
-	}
-
 	// copy_to_spool - copy files to spool directory
 	if copyToSpool, ok := sf.submitCommand("copy_to_spool"); ok {
 		_ = ad.Set("CopyToSpool", parseBool(copyToSpool, false))
-	}
-
-	// buffer_size - I/O buffer size
-	if bufSize, ok := sf.submitCommand("buffer_size"); ok {
-		if intSize, err := parseInt(bufSize); err == nil {
-			_ = ad.Set("BufferSize", intSize)
-		}
-	}
-
-	// buffer_block_size - I/O buffer block size
-	if blockSize, ok := sf.submitCommand("buffer_block_size"); ok {
-		if intSize, err := parseInt(blockSize); err == nil {
-			_ = ad.Set("BufferBlockSize", intSize)
-		}
-	}
-
-	// JobBatchName - batch name for grouping jobs
-	if batchName, ok := sf.submitCommand("batch_name"); ok {
-		_ = ad.Set("JobBatchName", batchName)
-	}
-
-	// StackSize - stack size in KB
-	if stackSize, ok := sf.submitCommand("stack_size"); ok {
-		if intSize, err := parseInt(stackSize); err == nil {
-			_ = ad.Set("StackSize", intSize)
-		}
 	}
 
 	return nil
@@ -3895,141 +3685,9 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 //
 //nolint:gocyclo // Complex function required for extended job expression handling
 func (sf *SubmitFile) setExtendedJobExprs(ad *classad.ClassAd) error {
-	// append_files - files to append instead of truncate
-	if appendFiles, ok := sf.submitCommand("append_files"); ok {
-		_ = ad.Set("AppendFiles", appendFiles)
-	}
-
-	// compress_files - files to compress before transfer
-	if compressFiles, ok := sf.submitCommand("compress_files"); ok {
-		_ = ad.Set("CompressFiles", compressFiles)
-	}
-
-	// fetch_files - files to fetch from submit machine
-	if fetchFiles, ok := sf.submitCommand("fetch_files"); ok {
-		_ = ad.Set("FetchFiles", fetchFiles)
-	}
-
-	// local_files - files that should not be transferred
-	if localFiles, ok := sf.submitCommand("local_files"); ok {
-		_ = ad.Set("LocalFiles", localFiles)
-	}
-
-	// file_remaps - remap file paths
-	if fileRemaps, ok := sf.submitCommand("file_remaps"); ok {
-		_ = ad.Set("FileRemaps", fileRemaps)
-	}
-
-	// want_graceful_removal - request graceful removal
-	if wantGraceful, ok := sf.submitCommand("want_graceful_removal"); ok {
-		_ = ad.Set("WantGracefulRemoval", parseBool(wantGraceful, false))
-	}
-
-	// job_max_vacate_time - max time for vacating (already in setJobStatusControl, but keep for completeness)
-	if maxVacate, ok := sf.submitCommand("job_max_vacate_time"); ok {
-		if intVacate, err := parseInt(maxVacate); err == nil {
-			_ = ad.Set("JobMaxVacateTime", intVacate)
-		}
-	}
-
-	// run_as_owner - run as the submitting user
-	if runAsOwner, ok := sf.submitCommand("run_as_owner"); ok {
-		_ = ad.Set("RunAsOwner", parseBool(runAsOwner, false))
-	}
-
-	// load_profile - load user profile before running
-	if loadProfile, ok := sf.submitCommand("load_profile"); ok {
-		_ = ad.Set("LoadProfile", parseBool(loadProfile, false))
-	}
-
-	// JobAdInformationAttrs - attributes to include in job ad information
-	if infoAttrs, ok := sf.submitCommand("job_ad_information_attrs"); ok {
-		_ = ad.Set("JobAdInformationAttrs", infoAttrs)
-	}
-
-	// want_io_proxy - request I/O proxy
-	if wantProxy, ok := sf.submitCommand("want_io_proxy"); ok {
-		_ = ad.Set("WantIOProxy", parseBool(wantProxy, false))
-	}
-
-	// job_machine_attrs - machine attributes to record in job ad
-	if machAttrs, ok := sf.submitCommand("job_machine_attrs"); ok {
-		_ = ad.Set("JobMachineAttrs", machAttrs)
-	}
-
-	// job_machine_attrs_history_length - how many machine attrs to keep
-	if histLen, ok := sf.submitCommand("job_machine_attrs_history_length"); ok {
-		if intLen, err := parseInt(histLen); err == nil {
-			_ = ad.Set("JobMachineAttrsHistoryLength", intLen)
-		}
-	}
-
-	// The presigned-URL credential keywords are plain entries in
-	// HTCondor's simple table rather than part of the grid family, so they
-	// are read whatever the universe -- a vanilla job transferring an s3://
-	// input needs them -- and they are stored exactly as written, with no
-	// Iwd resolution. They share the EC2 attributes, and the later spelling
-	// wins when a file names more than one, including over the absolute
-	// path setGridParams resolved for a grid job.
-	for _, cred := range []struct{ key, attr string }{
-		{"aws_access_key_id_file", "EC2AccessKeyId"},
-		{"aws_secret_access_key_file", "EC2SecretAccessKey"},
-		{"s3_access_key_id_file", "EC2AccessKeyId"},
-		{"s3_secret_access_key_file", "EC2SecretAccessKey"},
-		{"gs_access_key_id_file", "EC2AccessKeyId"},
-		{"gs_secret_access_key_file", "EC2SecretAccessKey"},
-	} {
-		if value, ok := sf.submitCommandAlt(cred.key, cred.attr); ok {
-			_ = ad.Set(cred.attr, value)
-		}
-	}
-
-	// aws_region - the region presigned S3 URLs are signed for
-	if awsRegion, ok := sf.submitCommandAlt("aws_region", "AWSRegion"); ok {
-		_ = ad.Set("AWSRegion", awsRegion)
-	}
-
-	// allowed_execute_duration - maximum execution time
-	if maxDuration, ok := sf.submitCommand("allowed_execute_duration"); ok {
-		if intDuration, err := parseInt(maxDuration); err == nil {
-			_ = ad.Set("AllowedExecuteDuration", intDuration)
-		}
-	}
-
-	// allowed_job_duration - maximum total job duration
-	if maxJobDuration, ok := sf.submitCommand("allowed_job_duration"); ok {
-		if intDuration, err := parseInt(maxJobDuration); err == nil {
-			_ = ad.Set("AllowedJobDuration", intDuration)
-		}
-	}
-
-	// checkpoint_exit_code - the exit code with which the job signals it
-	// has taken a checkpoint. HTCondor's attribute is
-	// SuccessCheckpointExitCode, which is what the starter and the
-	// checkpoint job transforms look for.
-	if checkpointCode, ok := sf.submitCommand("checkpoint_exit_code"); ok {
-		if intCode, err := parseInt(checkpointCode); err == nil {
-			_ = ad.Set("SuccessCheckpointExitCode", intCode)
-		}
-	}
-
 	// want_checkpoint - request checkpoint capability
 	if wantCheckpoint, ok := sf.submitCommand("want_checkpoint"); ok {
 		_ = ad.Set("WantCheckpoint", parseBool(wantCheckpoint, false))
-	}
-
-	// max_transfer_input_mb - maximum input file transfer size in MB
-	if maxInputMB, ok := sf.submitCommand("max_transfer_input_mb"); ok {
-		if intMB, err := parseInt(maxInputMB); err == nil {
-			_ = ad.Set("MaxTransferInputMB", intMB)
-		}
-	}
-
-	// max_transfer_output_mb - maximum output file transfer size in MB
-	if maxOutputMB, ok := sf.submitCommand("max_transfer_output_mb"); ok {
-		if intMB, err := parseInt(maxOutputMB); err == nil {
-			_ = ad.Set("MaxTransferOutputMB", intMB)
-		}
 	}
 
 	// preserve_relative_executable - keep relative path for executable
