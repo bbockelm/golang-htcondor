@@ -82,16 +82,24 @@ if [ ${#missing[@]} -gt 0 ]; then
   exit 1
 fi
 
-# -parallel is how many t.Parallel tests one package binary runs at once,
-# and it defaults to GOMAXPROCS -- 4 on this runner. These tests are not
-# CPU-bound: each one starts a pool and then waits on daemon startup,
-# negotiator cycles and job execution, so four at a time left the cores
-# mostly idle while the package took eight minutes on its own.
+# Left at the default -parallel, which is GOMAXPROCS -- 4 on this runner.
 #
-# 8 was measured, on httpserver alone at a 4-CPU limit: 1346s at the
-# default 4, 689s at 8. 16 was tried and is worse -- 851s, and four tests
-# failed, starved rather than broken (client timeouts awaiting headers,
-# and a shadow/starter i/o error). Past about two pools per core the
-# pools fight each other for CPU and every test slows down: the sum of
-# per-test times was 1743s at 8 and 3950s at 16.
-GOWORK=off gotestsum -- -tags=integration -timeout=25m -parallel 8 "${PACKAGES[@]}"
+# Raising it is tempting, because these tests are not CPU-bound: each
+# one starts a pool and then waits on daemon startup, negotiator cycles
+# and job execution. Measured on httpserver alone at a 4-CPU limit, 8
+# ran it in 601-689s against 1346s at the default. It is not safe,
+# though: of five runs at 8, two failed, and 16 was worse still at 851s
+# with four failures.
+#
+# The failures are starvation rather than any shared state -- every pool
+# is per-test with its own directory and dynamic ports. Past roughly two
+# pools per core they fight for CPU, and a starved pool does not simply
+# run slow: one run timed out talking to its own daemons, and another
+# had a job it expected to sit Idle go Running and another Held, so the
+# aggregate counts came out wrong. Oversubscribing this suite trades a
+# green run for a plausible-looking wrong answer.
+#
+# What made the package faster without that risk was giving the serial
+# integration tests t.Parallel, so they share the gate instead of each
+# holding it alone.
+GOWORK=off gotestsum -- -tags=integration -timeout=25m "${PACKAGES[@]}"
