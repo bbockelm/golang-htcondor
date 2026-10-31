@@ -204,21 +204,6 @@ ran against an uninitialized config. Two consequences, both fixed:
 defaults only — the oracle has to give the same answer on a laptop with a
 populated `/etc/condor` as on a CI runner with none.
 
-## java universe replaces Cmd with the JVM
-
-For `universe = java`, C++ puts the JVM from `param("JAVA")` in `Cmd` and passes
-the submitted class through `Args`; Go leaves the resolved executable in `Cmd`,
-so the job would try to run the class file itself rather than a JVM.
-
-This is recorded in `knownDivergentInUniverse`, which excuses an attribute only
-inside one universe, rather than in `knownDivergent`, which would have excused
-`Cmd` everywhere and undone the path comparison that found it. The universe is
-read from the **C++** ad, so a Go bug that drops `JobUniverse` cannot also hand
-itself an excuse.
-
-It surfaced only once two changes were both in: comparing `Cmd` at all, and a
-generator that emits java submit files.
-
 ## Attributes C++ sets and Go does not
 
 Two are left, and both are deliberate:
@@ -849,6 +834,34 @@ Two attributes were going the other way: `JobRunCount`, which the schedd
 owns, and the five real-valued counters, which now hold the same real `0.0`
 as C++ and are recorded only because the harness renders a whole-number real
 without its decimal point — the same entry `rank` has.
+
+**A java job was built to execute its own class file.** A java job's
+`executable` is the entry CLASS, not a program, and the class to run is named
+in `arguments`. `SetTransferFiles` turns that into something the starter can
+run: the class goes on the transfer list, `Cmd` becomes the literal string
+`"java"` -- which the execute machine resolves against its own JAVA
+configuration, so the JVM is the execute node's -- and `TransferExecutable`
+goes false, because the file transfer renames executables and a renamed class
+file is not the class the JVM was asked for.
+
+Go did none of it, so the ad said to EXECUTE `Hello.class`, and nothing put
+the file in the sandbox either. `jar_files` rides on the same list, split on
+COMMAS, so `jar_files = a.jar b.jar` is one entry naming a file with a space
+in it -- HTCondor's reading, matched here.
+
+None of it happens for a job that transfers nothing: the class is expected to
+be on the execute machine already, `Cmd` stays as given, and
+`TransferExecutable` is left alone. And a java job that names no class is a
+submit error, which Go used to accept.
+
+**`TransferExecutable` was written for every job.** `SetExecutable` assigns it
+only when the keyword's FIRST CHARACTER is `f` or `F`, so
+`transfer_executable = true` writes no attribute and an absent one means the
+executable is transferred. Go wrote `true` everywhere: the same behaviour
+spelled differently, but a different ad -- a transform or a constraint asking
+whether the attribute is there gets a different answer, and so does anything
+diffing the two parsers. The first-character test is reproduced quirks and
+all: `f`, `False` and `fnord` turn the transfer off, `0` does not.
 
 **A keyword written under its job attribute's name was ignored.**
 `condor_submit` reads most keywords with `submit_param(name, attr)`, so the
