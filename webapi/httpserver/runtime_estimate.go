@@ -51,7 +51,12 @@ type runtimeHistorySource interface {
 	// History streams projected history records whose
 	// EnteredHistoryTime is at or after since (unix seconds), newest
 	// first, at most limit of them.
-	History(ctx context.Context, since int64, limit int, yield func(*classad.ClassAd)) error
+	//
+	// reset discards whatever yield has accumulated. A source may have to
+	// start the read again -- the mirror retries on a different opcode
+	// against a server too old for the first -- and without it the records
+	// read before the retry are counted twice.
+	History(ctx context.Context, since int64, limit int, reset func(), yield func(*classad.ClassAd)) error
 }
 
 // mirrorRuntimeHistory reads the mirror's history archive.
@@ -78,7 +83,7 @@ func runtimeHistoryGate(info *dbmirror.Info) dbmirror.Decision {
 // A row that will not parse is skipped. Unlike a job watch, where a
 // missing row reads as a finished job, a missing completion here only
 // costs the estimator one sample.
-func (m mirrorRuntimeHistory) History(ctx context.Context, since int64, limit int, yield func(*classad.ClassAd)) error {
+func (m mirrorRuntimeHistory) History(ctx context.Context, since int64, limit int, reset func(), yield func(*classad.ClassAd)) error {
 	if !m.locator.Enabled() {
 		return errors.New("no htcondordb mirror is configured")
 	}
@@ -95,7 +100,12 @@ func (m mirrorRuntimeHistory) History(ctx context.Context, since int64, limit in
 	}
 	defer closer()
 	constraint := fmt.Sprintf("EnteredHistoryTime >= %d && JobStatus == 4", since)
-	return dbc.QueryRawProjectStream(ctx, "history", constraint, runtimeest.HistoryAttrs, limit, func(row string) bool {
+	// HistoryAttrs carries RequestMemory and the peak-memory attributes, which
+	// the estimator evaluates; PeakMemoryAttrs already hand-carries
+	// ResidentSetSize because MemoryUsage is normally an expression over it.
+	// The closure does that generally, and for whatever else this site stores
+	// as an expression.
+	return streamEvaluatedRows(ctx, dbc, "history", constraint, runtimeest.HistoryAttrs, limit, reset, func(row string) bool {
 		if ad, perr := classad.ParseOld(row); perr == nil {
 			yield(ad)
 		}
@@ -186,7 +196,13 @@ func (r *runtimeRefresher) Refresh(ctx context.Context) error {
 	newest := since
 	atNewest := make(map[string]struct{})
 	rows, skipped := 0, 0
-	err := r.src.History(ctx, since, r.maxRows+1, func(ad *classad.ClassAd) {
+	reset := func() {
+		batch = runtimeest.NewBatch()
+		newest = since
+		atNewest = make(map[string]struct{})
+		rows, skipped = 0, 0
+	}
+	err := r.src.History(ctx, since, r.maxRows+1, reset, func(ad *classad.ClassAd) {
 		rows++
 		if rows > r.maxRows {
 			// The probe row past the cap: it says the cap was hit, and,

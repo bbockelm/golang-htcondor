@@ -42,7 +42,7 @@ func (f *fakeRuntimeHistory) setErr(err error) {
 	f.err = err
 }
 
-func (f *fakeRuntimeHistory) History(_ context.Context, since int64, limit int, yield func(*classad.ClassAd)) error {
+func (f *fakeRuntimeHistory) History(_ context.Context, since int64, limit int, _ func(), yield func(*classad.ClassAd)) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sinces = append(f.sinces, since)
@@ -319,7 +319,7 @@ func TestRuntimeEstimatesDisabled(t *testing.T) {
 func TestMirrorRuntimeHistoryHonoursTheGate(t *testing.T) {
 	cfg := config.NewEmpty()
 	loc := dbmirror.NewLocatorWithOptions(nil, cfg, dbmirror.Options{})
-	err := mirrorRuntimeHistory{locator: loc, gate: runtimeHistoryGate}.History(context.Background(), 0, 10, func(*classad.ClassAd) {})
+	err := mirrorRuntimeHistory{locator: loc, gate: runtimeHistoryGate}.History(context.Background(), 0, 10, nil, func(*classad.ClassAd) {})
 	if err == nil {
 		t.Error("an unconfigured mirror was read")
 	}

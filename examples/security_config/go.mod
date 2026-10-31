@@ -3,7 +3,7 @@ module github.com/bbockelm/golang-htcondor/examples/security_config
 go 1.26.0
 
 require (
-	github.com/bbockelm/cedar v0.7.12-0.20261017165254-d864685fa29e
+	github.com/bbockelm/cedar v0.7.12
 	github.com/bbockelm/golang-htcondor v0.0.0-20251113012241-ab2a8efb0537
 )
 
@@ -18,9 +18,9 @@ require (
 	github.com/jcmturner/gokrb5/v8 v8.4.4 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
 

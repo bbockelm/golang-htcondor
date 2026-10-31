@@ -27,6 +27,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/dbrpc"
 
+	cedarclient "github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -802,7 +803,8 @@ func (l *Locator) Client(ctx context.Context) (*dbrpc.Client, func(), *Info, err
 		return nil, nil, nil, err
 	}
 	l.recordDial(nil)
-	return dbrpc.NewClient(dbrpc.NewCedarConn(ctx, cl.GetStream())), func() { _ = cl.Close() }, info, nil
+	return dbrpc.NewClient(dbrpc.NewCedarConn(ctx, cl.GetStream()), dbrpc.WithPeerSessionAttrs(peerAttrs(cl))),
+		func() { _ = cl.Close() }, info, nil
 }
 
 // RecordDialForTest records a connection outcome without dialing, so a
@@ -1118,7 +1120,30 @@ func Provenance(info *Info, reason string) string {
 // misconfigured signing key is visible rather than silently reducing the
 // mirror to whatever else it can negotiate.
 func (l *Locator) securityConfig(ctx context.Context, address string) (*security.SecurityConfig, error) {
-	return l.securityConfigForCommand(ctx, address, SessionCommand)
+	sec, err := l.securityConfigForCommand(ctx, address, SessionCommand)
+	if err != nil {
+		return nil, err
+	}
+	// Capture what the mirror says about its dbrpc protocol, so a read can ask
+	// what the server supports rather than issuing a request to find out. Only
+	// on the session command: the status command is not a dbrpc session.
+	sec.WantSessionAttrs = dbrpc.ClientSessionAttrNames()
+	return sec, nil
+}
+
+// peerAttrs is what the mirror advertised, or nil for a connection that never
+// handshook. Reaching through the negotiation inline dereferences nil on such a
+// connection; nil here reads as a mirror that advertised nothing, which is what
+// one too old to advertise looks like.
+func peerAttrs(cl *cedarclient.HTCondorClient) map[string]string {
+	if cl == nil {
+		return nil
+	}
+	neg := cl.GetSecurityNegotiation()
+	if neg == nil {
+		return nil
+	}
+	return neg.SessionAttrs
 }
 
 // securityConfigForCommand is securityConfig for a specific command. The status

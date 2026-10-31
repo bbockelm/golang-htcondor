@@ -89,11 +89,21 @@ func (s *Handler) lookupFinishedJob(ctx context.Context, r *http.Request, constr
 // top-level conjunct it prunes on); else the schedd, with the window
 // written for a history file that may not record EnteredHistoryTime
 // (see scheddEnteredHistory).
-func (s *Handler) streamHistory(ctx context.Context, r *http.Request, scope string, since int64, projection []string, limit int, yield func(*classad.ClassAd) bool) error {
+func (s *Handler) streamHistory(ctx context.Context, r *http.Request, scope string, since int64, projection []string, limit int, reset func(), yield func(*classad.ClassAd) bool) error {
 	if s.mirrorAllowed(ctx, r) == nil {
 		yielded := 0
 		stopped := false
-		err := s.streamMirrorHistory(ctx, fmt.Sprintf("(%s) && EnteredHistoryTime >= %d", scope, since), projection, limit,
+		// Undo a partial mirror read, for both the caller's accumulator and
+		// this function's own record of what it handed over. Only the mirror's
+		// opcode retry uses it; the schedd fallback below still refuses to
+		// start again once a row has gone out, since it cannot take them back.
+		mirrorReset := func() {
+			yielded, stopped = 0, false
+			if reset != nil {
+				reset()
+			}
+		}
+		err := s.streamMirrorHistory(ctx, fmt.Sprintf("(%s) && EnteredHistoryTime >= %d", scope, since), projection, limit, mirrorReset,
 			func(ad *classad.ClassAd) bool {
 				yielded++
 				if !yield(ad) {
@@ -133,7 +143,7 @@ func (s *Handler) streamHistory(ctx context.Context, r *http.Request, scope stri
 }
 
 // streamMirrorHistory reads the mirror's history archive, newest first.
-func (s *Handler) streamMirrorHistory(ctx context.Context, constraint string, projection []string, limit int, yield func(*classad.ClassAd) bool) error {
+func (s *Handler) streamMirrorHistory(ctx context.Context, constraint string, projection []string, limit int, reset func(), yield func(*classad.ClassAd) bool) error {
 	info, err := s.dbMirror.Discover(ctx)
 	if err != nil {
 		return err
@@ -146,7 +156,9 @@ func (s *Handler) streamMirrorHistory(ctx context.Context, constraint string, pr
 		return err
 	}
 	defer closer()
-	return dbc.QueryRawProjectStream(ctx, "history", constraint, projection, limit, func(row string) bool {
+	// Callers evaluate what comes back -- runtimeest.HistoryRecord and
+	// utilization.FromAd -- so the projection needs its closure.
+	return streamEvaluatedRows(ctx, dbc, "history", constraint, projection, limit, reset, func(row string) bool {
 		ad, perr := classad.ParseOld(row)
 		if perr != nil {
 			return true
@@ -363,24 +375,26 @@ func (s *Handler) similarMembers(ctx context.Context, r *http.Request, ad *class
 		return nil, err
 	}
 	var members []SimilarJob
-	err = s.streamHistory(ctx, r, scope, since, runtimeest.HistoryAttrs, similarScanLimit, func(h *classad.ClassAd) bool {
-		runtime, completed, ok := runtimeest.HistoryRecord(h)
-		if !ok || !runtimeest.InGroup(h, keys, level) {
-			return true
-		}
-		c, _ := h.EvaluateAttrInt("ClusterId")
-		p, _ := h.EvaluateAttrInt("ProcId")
-		job := SimilarJob{ID: fmt.Sprintf("%d.%d", c, p), Cluster: c, Proc: p, Completed: completed, Runtime: runtime}
-		if q, ok := h.EvaluateAttrInt("QDate"); ok && q > 0 {
-			job.Submitted = &q
-		}
-		if mib, ok := runtimeest.PeakMemoryMiB(h); ok {
-			mib = math.Round(mib)
-			job.PeakMemoryMiB = &mib
-		}
-		members = append(members, job)
-		return len(members) < maxJobs
-	})
+	err = s.streamHistory(ctx, r, scope, since, runtimeest.HistoryAttrs, similarScanLimit,
+		func() { members = nil },
+		func(h *classad.ClassAd) bool {
+			runtime, completed, ok := runtimeest.HistoryRecord(h)
+			if !ok || !runtimeest.InGroup(h, keys, level) {
+				return true
+			}
+			c, _ := h.EvaluateAttrInt("ClusterId")
+			p, _ := h.EvaluateAttrInt("ProcId")
+			job := SimilarJob{ID: fmt.Sprintf("%d.%d", c, p), Cluster: c, Proc: p, Completed: completed, Runtime: runtime}
+			if q, ok := h.EvaluateAttrInt("QDate"); ok && q > 0 {
+				job.Submitted = &q
+			}
+			if mib, ok := runtimeest.PeakMemoryMiB(h); ok {
+				mib = math.Round(mib)
+				job.PeakMemoryMiB = &mib
+			}
+			members = append(members, job)
+			return len(members) < maxJobs
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -472,15 +486,17 @@ func (s *Handler) workflowHasHistory(ctx context.Context, r *http.Request, owner
 	}
 	since := time.Now().Add(-workflowHistoryDays * 24 * time.Hour).Unix()
 	found, read := false, 0
-	err = s.streamHistory(ctx, r, scope, since, workflowIdentityAttrs, workflowScanLimit, func(ad *classad.ClassAd) bool {
-		read++
-		j := utilization.FromAd(ad, "")
-		if utilization.Finished(&j) && utilization.InWorkflow(&j, key) {
-			found = true
-			return false
-		}
-		return true
-	})
+	err = s.streamHistory(ctx, r, scope, since, workflowIdentityAttrs, workflowScanLimit,
+		func() { found, read = false, 0 },
+		func(ad *classad.ClassAd) bool {
+			read++
+			j := utilization.FromAd(ad, "")
+			if utilization.Finished(&j) && utilization.InWorkflow(&j, key) {
+				found = true
+				return false
+			}
+			return true
+		})
 	if err != nil {
 		return nil, err
 	}
