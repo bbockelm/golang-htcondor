@@ -2128,12 +2128,21 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 		}
 	}
 
-	// GPU memory per device (MiB)
-	if gpuMem, ok := sf.submitCommand("request_gpu_memory"); ok {
-		if err := setSizeAttr(ad, "RequestGpuMemory", gpuMem, unitMiB); err != nil {
-			return err
-		}
-	}
+	// request_gpu_memory is NOT a submit command, and neither is
+	// request_gpus_memory. Both are rows in HTCondor's keyword table
+	// flagged f_error, and SetRequestResources answers them with a
+	// warning -- "did you mean gpus_minimum_memory?" -- and no attribute
+	// at all.
+	//
+	// Writing RequestGpuMemory for them was worse than ignoring them: it
+	// is an attribute nothing in HTCondor reads, so the job looked like it
+	// carried a GPU memory constraint and was matched as though it had
+	// asked for nothing. The keyword that does constrain GPU memory is
+	// gpus_minimum_memory, which setGPUPropertyConstraints handles and
+	// which turns into a RequireGPUs clause the negotiator evaluates.
+	//
+	// There is no warning here because this parser has nowhere to put one;
+	// the attribute's absence is the whole behaviour.
 
 	// The GPU property constraints, which are read only once the job has
 	// asked for a GPU.
