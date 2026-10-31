@@ -105,12 +105,7 @@ var knownDivergent = map[string]string{
 //nolint:gosec // G101: attribute names, not secrets
 var knownDivergentGenerated = map[string]string{
 	"commoninputfiles":                  "the Go parser does not implement `transfer_common_input`: C++ sets this attribute, Go sets nothing.",
-	"containerimage":                    "once C++ decides to transfer the image it rewrites ContainerImage to the image's basename, which is what the file transfer will put in the sandbox; Go stores the path as written, and in any universe, so the starter is told to run a path the sandbox does not have.",
-	"containerimagefullpath":            "C++ keeps the submit-side path here when it rewrites ContainerImage to a basename; it is what late materialization reads to build each proc's input transfer list. Go sets nothing, so a transferred image has no record of where it came from.",
-	"containerimagesource":              "C++ records where the container image comes from (local/docker/transfer); Go has no equivalent.",
-	"containerservicenames":             "Go sets ContainerServiceNames whatever the universe; C++ only honours `container_service_names` for a container job.",
 	"delegatejobgsicredentialslifetime": "the Go parser does not implement `DelegateJobGSICredentialsLifetime`: C++ sets this attribute, Go sets nothing.",
-	"dockerimage":                       "Go sets DockerImage whatever the universe; C++ only honours `docker_image` for a container or docker job.",
 	"env":                               "empty-ish or V1 environments: Go emits Env (V1), C++ emits Environment (V2). The attribute NAME differs, which changes how the starter splits it -- the same split as Args/Arguments.",
 	"gpusmaxcapability":                 "the Go parser does not implement `gpus_maximum_capability`: C++ sets this attribute, Go sets nothing.",
 	"gpusmincapability":                 "the Go parser does not implement `gpus_minimum_capability`: C++ sets this attribute, Go sets nothing.",
@@ -118,7 +113,7 @@ var knownDivergentGenerated = map[string]string{
 	"projectname":                       "the Go parser does not implement `project_name`: C++ sets this attribute, Go sets nothing.",
 	"scheddinterval":                    "DELIBERATELY NOT FIXED. Any of CronMinutes/CronHours/CronDaysOfMonth/CronMonths/CronDayOfWeek/DeferralTime makes SetRequirements copy SCHEDD_INTERVAL into the job, and it does so for one reason, stated where it does it: the deferral clause it is about to append to Requirements names ScheddInterval. Nothing else reads the attribute -- the schedd's updateSchedDInterval (schedd.cpp) only REFRESHES jobs that already carry it. Go does not generate that Requirements clause (see knownDivergent[requirements]), so writing ScheddInterval here would add an attribute no Go-built ad reads and sign the job up for a job-queue write on every schedd WalkJobQueue. It belongs with the Requirements work, not before it.",
 	"scitokensfile":                     "the Go parser does not implement `scitokens_file`: C++ sets this attribute, Go sets nothing.",
-	"transferinput":                     "the Go parser drops most of the keywords that feed TransferInput, and where it does write it, a filename containing a space is split away rather than kept as one entry.",
+	"transferinput":                     "a container job's image now reaches TransferInput; the keywords that feed it from a java job -- the entry class and jar_files -- are still added by C++ and by nothing in Go, and a filename containing a space is split away rather than kept as one entry.",
 	"transferoutputremaps":              "C++ keeps the remap string verbatim; Go rewrites it, dropping the spaces around = and ;.",
 	"transformonevict":                  "the Go parser does not implement `on_evict_checks`, the other writer of this attribute, so it cannot be compared file by file. What the memory retry family writes to it IS checked against the oracle, in TestOnEvictMemoryTransformMatchesOracle.",
 	"wantparallelscheduling":            "the Go parser does not implement `WantParallelScheduling`: C++ sets this attribute, Go sets nothing.",

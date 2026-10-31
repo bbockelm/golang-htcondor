@@ -463,8 +463,8 @@ That universe gate was also the recorded `WantSIF` divergence: Go classified
 a `container_image` correctly but wrote the flag for a vm, grid or scheduler
 job too, where C++ never reads the keyword. `WantSIF`, `WantDockerImage` and
 `WantSandboxImage` now agree for every image kind in every universe, so all
-three are compared from here on. `ContainerImage` itself still diverges, over
-the basename rewrite.
+three are compared from here on. `ContainerImage` itself followed later, in
+the generated corpus's fixed material.
 
 **`machine_count` asked for one machine.** It is not an attribute: HTCondor
 turns it into the `MinHosts`/`MaxHosts` pair the dedicated scheduler reads,
@@ -692,12 +692,6 @@ that is left.
   `Iwd`; Go stores them as written.
 - **`Env` vs `Environment`.** The Args/Arguments naming split has a twin: for
   V1-shaped environments Go emits `Env`, C++ emits `Environment`.
-
-## Keywords the Go parser ignores outside their universe
-
-`docker_image` and `container_service_names` are set by Go whatever the
-universe; C++ honours them only for a container or docker job. `container_image`
-joins them, below. The want-flags no longer do — see the fixed material.
 
 ## Keywords with no Go implementation at all
 
@@ -1401,24 +1395,67 @@ else would notice the generator dropping it.
 
 ## The container image
 
-`container_image` was out of the generator's vocabulary until the shim called
-`config()`; see the section above. It is in now, which takes coverage to 255 of
-258 — what is left is `getenv`, its alternate spelling and the `f_error`
-`request_gpu_memory`, none of which can be compared.
+**The container image, and the transfer list it belongs on.** `container_image`
+was out of the generator's vocabulary until the shim called `config()`; see the
+section above. It went in, and diverged immediately — six attributes' worth,
+which is the whole of what condor_submit does with a container image.
 
-It diverged immediately, three ways. Two are still open; the third, the
-image-kind want-flag, is in the fixed material above:
+Once condor_submit decides to transfer the image, the name the starter must run
+is the name the transfer leaves in the sandbox, so it rewrites `ContainerImage`
+to `condor_basename` of the path. Go stored the path as written, which told the
+starter to run a path the sandbox does not have: an `apptainer` that exits
+"image not found" on every slot the job matches, with a job ad that names the
+image correctly as far as the submitter can see. The submit-side path moves to
+`ContainerImageFullPath`, which Go did not set at all — that attribute is what
+late materialization reads to build each proc's input transfer list, so a
+factory submission had nothing to build one from.
 
-- **`ContainerImage` is a basename in C++, a path in Go.** Once C++ decides to
-  transfer the image it rewrites the attribute to `condor_basename` of the
-  path, because that is what the file transfer will leave in the sandbox, and
-  it only does any of this for a container job. Go stores the path as written,
-  in any universe. The starter is told to run a path the sandbox does not have.
-- **`ContainerImageFullPath` is C++-only.** It is where C++ keeps the
-  submit-side path when it rewrites `ContainerImage`, and it is what late
-  materialization reads to build each proc's input transfer list. Go sets
-  nothing, so a transferred image carries no record of where it came from.
-The decision tree C++ walks before any of that — `transfer_container = false`,
-a `CONTAINER_SHARED_FS` prefix, a `docker://` or `oras://` URL, each setting
-`ContainerImageSource` and returning without transferring — has no Go
-counterpart either; `ContainerImageSource` was already recorded.
+The image was also missing from `TransferInput`, which is the other half of the
+same bug and the reason this was recorded rather than fixed when it was found:
+the attribute alone is not the fix. condor_submit appends the image to the
+input list after whatever `transfer_input_files` named, and a job without it
+reached the execute node with no image to run.
+
+Which of those happens at all is a decision tree, and `ContainerImageSource`
+records where the image came from: `transfer_container = false` and a
+`CONTAINER_SHARED_FS` prefix match both mean the image is already on the
+execute node ("local"), and a `docker://` or `oras://` URL means the runtime
+pulls it ("docker"/"oras"); each returns without transferring. Otherwise the
+source is the image's own URL scheme, or "cedar" for a plain path. A common
+image — `container_is_common`, `CONTAINER_IMAGES_COMMON_BY_DEFAULT` or
+`CONTAINER_REGEX_COMMON_BY_DEFAULT` — is named as an input catalog
+(`_x_catalog_container_<hash>` plus `CommonInputCatalogs`) rather than copied
+per job, keyed by a SHA-256 of the image's full path so two DAG nodes using
+different images with the same basename do not collide.
+
+`DockerImage` and `ContainerServiceNames` were set whatever the universe.
+condor_submit reads neither keyword outside a docker or container job, so a
+grid or scheduler job carried an image attribute condor_submit leaves off
+entirely. `ContainerServiceNames` is stored verbatim rather than canonicalized,
+and every service it names must have a `<service>_container_port` — a service
+with no port is one nothing can reach, and the name alone would have the startd
+publish an endpoint the job never listens on, so condor_submit refuses the file
+and so does this parser now. The port lands in `<service>_ContainerPort`, which
+Go wrote nowhere.
+
+Both image keywords answer to the job attribute's own name as a second
+spelling (`ContainerImage`, `DockerImage`), which Go ignored, and both have
+their quotes stripped before the want-flag is read from them — though not
+before `process_container_input_files` reads the raw value again, which is why a
+quoted image's basename keeps one of the quotes. The three image schemes
+HTCondor has no runtime for (`instance://`, `library://`, `shub://`), the
+docker universe's refusal of `container_image`, naming both images at once, and
+a container job with no image are all rejections now rather than ads nobody can
+run.
+
+These cases are pinned by `TestContainerAdsMatchOracle` and
+`TestContainerRefusalsMatchOracle` rather than by the generated sweep. The
+sweep does reach all six attributes — five of them went quiet in
+`TestGeneratedDivergencesStillDiverge` when this landed, and `transferinput`
+stays for the java half — but which branch of the decision tree a generated
+file reaches is an accident of the corpus bytes, and acceptance is asserted
+nowhere there: `check()` skips any file one side rejected.
+
+What is deliberately left: the rest of `transferinput`. A java job's entry
+class and its `jar_files` are appended to the input list by condor_submit and
+by nothing here.
