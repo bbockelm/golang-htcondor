@@ -221,20 +221,28 @@ generator that emits java submit files.
 
 ## Attributes C++ sets and Go does not
 
-Mostly per-job bookkeeping the schedd would otherwise fill in
-(`CommittedTime`, `Cumulative*`, `Num*`, `*SuspensionTime`, `RemoteSysCpu`,
-`ExitStatus`, `ExitBySignal`, `CurrentHosts`, `LastSuspensionTime`,
-`TotalSuspensions`), but several are not:
+Two are left, and both are deliberate:
 
-- `MyType = "Job"` and `TargetType = "Machine"` — absent from Go's ads.
-- `JobPrio`, `JobNotification`, `LeaveJobInQueue` — C++ defaults them.
+- `JobSubmitMethod` — C++ writes 0, which is `JSM_CONDOR_SUBMIT`. The
+  attribute names the TOOL a job came from, and `proc.h` has no value for
+  "a Go program using this library", so writing anything there would
+  attribute these jobs to a tool that never saw them.
 - `Environment` — C++ always emits it (empty when unspecified); Go omits it
-  when the submit file is silent.
+  when the submit file is silent. It belongs with the `Env`/`Environment`
+  V1-versus-V2 work, not before it.
+
+Everything else that was here — the per-job bookkeeping (`CommittedTime`,
+`Cumulative*`, `Num*`, `*SuspensionTime`, `RemoteSysCpu`, `ExitStatus`,
+`ExitBySignal`, `CurrentHosts`, `LastSuspensionTime`, `TotalSuspensions`),
+`MyType`/`TargetType`, and the `JobPrio`/`JobNotification`/`LeaveJobInQueue`/
+`JobLeaseDuration` defaults — is under "Fixed" below.
 
 ## Attributes Go sets and C++ does not
 
-`TransferExecutable`, `EmailAttributes`, `JobRunCount`, and a `RequestDisk`
-that C++ places on the cluster ad as a `MAX(...)` expression instead.
+`TransferExecutable`, `EmailAttributes`, and a `RequestDisk` that C++ places
+on the cluster ad as a `MAX(...)` expression instead. (`JobRunCount` was
+here and is fixed: it is the schedd's, from the job's shadow exceptions, and
+Go no longer writes a 0 that claimed the job had run no times.)
 
 `RequestGpuMemory`: Go turns `request_gpu_memory = 8GB` into
 `RequestGpuMemory = 8192`. C++ lists `request_gpu_memory` and
@@ -758,6 +766,67 @@ run to run from the same submit file.
 **A filename containing a space** was listed as split away by Go. It no
 longer reproduces: `transfer_input_files = a b, c.txt` gives
 `"a b,c.txt"` on both sides.
+
+**C++ enforces its JobLeaseDuration floor on one proc.** `job_lease_duration
+= 1` with `queue 3` gives proc 0 the corrected 20 and procs 1 and 2 the
+uncorrected 1, out of a single submit file:
+
+```
+cpp 1.0  JobLeaseDuration = 20      go 1.0  20
+cpp 1.1  JobLeaseDuration = 1       go 1.1  20
+cpp 1.2  JobLeaseDuration = 1       go 1.2  20
+```
+
+`already_warned_job_lease_too_small` is a flag for not repeating a warning,
+and it gates the VALUE CORRECTION as well as the warning: declared around
+line 667 of `submit_utils.cpp`, tested at 3598, set at 3603, never reset. So
+"JobLeaseDuration less than 20 seconds is not allowed, using 20 instead" is
+printed once and applied once, and every proc after the first keeps a lease
+the code has just said is not allowed.
+
+Go applies the floor to every proc. Reproducing the drift would mean
+reproducing the flag, so it is recorded instead -- the second instance of
+this shape, after the std-file transfer drift above: a submit-time value that
+depends on which proc is being built.
+
+**A fresh job ad said nothing about its own state.** `condor_submit` writes
+about twenty attributes into every job ad before it reads a single submit
+command (`SubmitHash::init_base_ad`): the run-time bookkeeping, zeroed. How
+much CPU the job has used, how many times it has been suspended, started,
+held or checkpointed, what it exited with. Go wrote four of them and left
+the rest out.
+
+The schedd does not create these — it updates what the ad already carries —
+so an absent one reads as UNDEFINED to everything that looks at the job.
+`condor_q -l` shows nothing for it; `condor_q -constraint 'RemoteUserCpu >
+60'` does not match a job that has used no CPU, because UNDEFINED is not
+less than 60 either; and a policy expression doing arithmetic on one gets
+UNDEFINED, which propagates, so `RemoteUserCpu > 3600` is neither true nor
+false. The types matter as much: the CPU and wall-clock counters are reals,
+because that is what the shadow writes into them later, and a consumer
+reading one with an integer lookup gets nothing from a real.
+
+With them came four defaults from `SetAutoAttributes` and friends, each one
+an attribute whose ABSENCE means something different from its default:
+
+- `CurrentHosts = 0` and `JobPrio = 0`.
+- `JobNotification`, always written, from the keyword or
+  `JOB_DEFAULT_NOTIFICATION`, else NEVER. Go also accepted values
+  `condor_submit` refuses — it compares the five words and nothing else, so
+  `notification = 2` is an error, not NOTIFY_COMPLETE — and ignored the
+  attribute's own spelling, `JobNotification`.
+- `LeaveJobInQueue = false` for a local submission. (A submission that
+  SPOOLS its files gets a ten-day expression instead; this parser has no
+  remote-spooling mode to write it for.)
+- `JobLeaseDuration` from `JOB_DEFAULT_LEASE_DURATION` (2400) for a job that
+  can reconnect — vanilla, java, parallel and vm, per `universeCanReconnect`.
+  The lease is what lets a job survive a disconnect, so a job ad with none
+  turns a network blip into a lost execution.
+
+Two attributes were going the other way: `JobRunCount`, which the schedd
+owns, and the five real-valued counters, which now hold the same real `0.0`
+as C++ and are recorded only because the harness renders a whole-number real
+without its decimal point — the same entry `rank` has.
 
 **A keyword written under its job attribute's name was ignored.**
 `condor_submit` reads most keywords with `submit_param(name, attr)`, so the

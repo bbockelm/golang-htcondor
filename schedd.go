@@ -763,12 +763,20 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 		return 0, nil, submissionErr
 	}
 
+	// Whether the submit FILE named leave_in_queue, under either spelling.
+	// The parser's default for it is a local submission's, which a spooling
+	// submission has to replace; see configureRemoteJobAd.
+	_, submitterSetLeaveInQueue := submitFile.Command("leave_in_queue")
+	if !submitterSetLeaveInQueue {
+		_, submitterSetLeaveInQueue = submitFile.Command("LeaveJobInQueue")
+	}
+
 	var jobsWithoutSpooling []*classad.ClassAd
 
 	// For remote submission, configure job attributes similar to HTCondor's behavior
 	// This mimics what condor_submit does when using the -name option (remote submission)
 	for _, procAd := range submitResult.ProcAds {
-		needsSpooling := configureRemoteJobAd(procAd)
+		needsSpooling := configureRemoteJobAd(procAd, submitterSetLeaveInQueue)
 		if !needsSpooling {
 			jobsWithoutSpooling = append(jobsWithoutSpooling, procAd)
 		}
@@ -839,7 +847,14 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 }
 
 // configureRemoteJobAd sets up job attributes for remote submission and determines if spooling is needed.
-func configureRemoteJobAd(procAd *classad.ClassAd) bool {
+//
+// submitterSetLeaveInQueue says whether the submit file named leave_in_queue
+// itself. It has to be asked rather than read off the ad: the parser writes
+// the default condor_submit writes for a LOCAL submission (false -- the job
+// leaves the queue when it finishes), and a spooling submission needs the
+// opposite, because the job has to stay long enough for its output to be
+// fetched. Only the submitter's own value outranks that.
+func configureRemoteJobAd(procAd *classad.ClassAd, submitterSetLeaveInQueue bool) bool {
 	// Set ShouldTransferFiles to YES if not already set
 	if expr, ok := procAd.Lookup("ShouldTransferFiles"); !ok || expr == nil {
 		_ = procAd.Set("ShouldTransferFiles", "YES")
@@ -893,7 +908,7 @@ func configureRemoteJobAd(procAd *classad.ClassAd) bool {
 
 	// Set LeaveJobInQueue expression for remote jobs
 	// Keep job in queue for 10 days after completion to allow output retrieval
-	if expr, ok := procAd.Lookup("LeaveJobInQueue"); !ok || expr == nil {
+	if !submitterSetLeaveInQueue {
 		leaveInQueueExpr, _ := classad.ParseExpr("JobStatus == 4 && (CompletionDate =?= UNDEFINED || CompletionDate == 0 || ((time() - CompletionDate) < 864000))")
 		_ = procAd.Set("LeaveJobInQueue", leaveInQueueExpr)
 	}

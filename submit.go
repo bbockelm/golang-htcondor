@@ -536,6 +536,10 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	// Set job status (1 = idle)
 	_ = ad.Set("JobStatus", 1)
 
+	// The run-time bookkeeping condor_submit zeroes before it reads a
+	// single submit command, so a keyword can overwrite any of it.
+	sf.setSubmitTimeDefaults(ad)
+
 	// QDate: Unix epoch seconds at the moment of submission. HTCondor's
 	// own condor_submit sets this on the client side before sending the ad,
 	// and downstream tooling (the web UI's "Submitted" column, condor_q
@@ -2410,10 +2414,19 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 	// job ad (e.g. `JobStatus == 4 && (time() - CompletionDate) < 864000`),
 	// so it cannot go through parseBool: every non-literal expression
 	// collapsed to false and the job left the queue immediately.
-	if leaveInQueue, ok := sf.submitCommand("leave_in_queue"); ok {
+	if leaveInQueue, ok := sf.simpleKeywordParam("leave_in_queue", "LeaveJobInQueue"); ok {
 		if err := setExprAttr(ad, "LeaveJobInQueue", "leave_in_queue", leaveInQueue); err != nil {
 			return err
 		}
+	} else if _, ok := ad.Lookup("LeaveJobInQueue"); !ok {
+		// A job nobody said anything about leaves the queue when it is
+		// done, and condor_submit says so rather than leaving the schedd
+		// to assume it: SetLeaveInQueue writes false for a local
+		// submission. (A submission that SPOOLS its files gets a
+		// ten-day expression there instead, so the submitter has time to
+		// fetch the output -- this parser has no remote-spooling mode to
+		// write it for.)
+		_ = ad.Set("LeaveJobInQueue", false)
 	}
 
 	return sf.setConcurrencyLimits(ad)
@@ -4138,21 +4151,23 @@ func (sf *SubmitFile) setAutoAttributes(ad *classad.ClassAd) error {
 	// CurrentHosts - Machines currently running the job
 	// This is managed by the schedd
 
-	// NumJobStarts - Number of times job has started
-	// Initialize to 0
-	_ = ad.Set("NumJobStarts", 0)
+	// NumJobStarts, NumRestarts and NumSystemHolds are zeroed with the
+	// rest of the bookkeeping, in setSubmitTimeDefaults.
+	//
+	// JobRunCount is not written at all. condor_submit does not set it --
+	// the schedd does, from the job's shadow exceptions -- and writing a 0
+	// here said the job had run no times when the attribute's absence is
+	// what says that.
 
-	// NumRestarts - Number of times job has been restarted
-	// Initialize to 0
-	_ = ad.Set("NumRestarts", 0)
-
-	// NumSystemHolds - Number of times placed on hold by system
-	// Initialize to 0
-	_ = ad.Set("NumSystemHolds", 0)
-
-	// JobRunCount - Number of times job has run
-	// Initialize to 0
-	_ = ad.Set("JobRunCount", 0)
+	// The counters below are only defaulted when nothing else set them,
+	// which is where SetAutoAttributes writes them: after the keywords.
+	if _, ok := ad.Lookup("CurrentHosts"); !ok {
+		_ = ad.Set("CurrentHosts", 0)
+	}
+	if _, ok := ad.Lookup("JobPrio"); !ok {
+		_ = ad.Set("JobPrio", 0)
+	}
+	sf.setDefaultJobLease(ad)
 
 	// The starter ignores the checkpoint exit code unless the job also
 	// asks for file transfer on checkpoint, so condor_submit turns the
@@ -4685,26 +4700,10 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 		}
 	}
 
-	// JobNotification - when to send email
-	if notification, ok := sf.submitCommand("notification"); ok {
-		// Convert notification string to integer code
-		notifCode := 0
-		switch strings.ToLower(notification) {
-		case "always":
-			notifCode = 1
-		case "complete":
-			notifCode = 2
-		case "error":
-			notifCode = 3
-		case "never":
-			notifCode = 0
-		default:
-			// Try parsing as integer
-			if intNotif, err := parseInt(notification); err == nil {
-				notifCode = intNotif
-			}
-		}
-		_ = ad.Set("JobNotification", notifCode)
+	// JobNotification: always written, from the keyword or the pool's
+	// default. See setNotification.
+	if err := sf.setNotification(ad); err != nil {
+		return err
 	}
 
 	// WantRemoteIO - request remote I/O

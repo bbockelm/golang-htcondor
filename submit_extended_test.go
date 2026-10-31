@@ -104,6 +104,12 @@ queue
 	// Simple job expression attributes should be set
 }
 
+// The numeric forms this used to accept ("1", "2") are gone on purpose.
+// SubmitHash::SetNotification compares the five WORDS and nothing else, and
+// refuses the submit file over anything else -- verified against the linked
+// libcondor_utils -- so a number was a value condor_submit would never have
+// produced. See TestJobNotification, which pins the words, the attribute's
+// own spelling, the default, and both ways it is refused.
 func TestNotificationTypes(t *testing.T) {
 	tests := []struct {
 		notification string
@@ -113,8 +119,7 @@ func TestNotificationTypes(t *testing.T) {
 		{"complete", "Notify on completion"},
 		{"error", "Notify on error"},
 		{"never", "Never notify"},
-		{"1", "Numeric: always"},
-		{"2", "Numeric: complete"},
+		{"start", "Notify on start"},
 	}
 
 	for _, tt := range tests {
