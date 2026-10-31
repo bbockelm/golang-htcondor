@@ -600,6 +600,16 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
+	// The transforms the schedd applies when the job is evicted.
+	//
+	// Before the resource requests, because the retry_request_memory
+	// family appends ITS tag to the same list (addTransformOnEvict) and
+	// SetOnEvictExpressions overwrites the list outright. Run the other
+	// way round, the built-in transform's tag is written and then thrown
+	// away, leaving a TransformBody_RequestMemory nothing names -- and a
+	// body nothing names is never run.
+	sf.setOnEvictChecks(ad)
+
 	// Set request_* resources
 	if err := sf.setResourceRequests(ad); err != nil {
 		return nil, err
