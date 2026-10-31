@@ -77,6 +77,12 @@ type SubmitFile struct {
 	// accounting group is built from. Empty means the parse was given
 	// none and falls back to the account running it; see submitUserName.
 	submitUser string
+	// localAccess is SubmitParseOptions.AllowLocalAccess, kept because a
+	// few of condor_submit's keywords read the submitting process's
+	// ENVIRONMENT rather than the submit file -- `use_scitokens` falls
+	// back to BEARER_TOKEN_FILE. That is the same host access the option
+	// gates for $ENV() and `include command`, so it answers for it too.
+	localAccess bool
 	// submitTime is the QDate every proc of one submission shares, in Unix
 	// seconds, or 0 before the submission has been stamped.
 	//
@@ -268,12 +274,13 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 	}
 
 	sf := &SubmitFile{
-		cfg:        cfg,
-		assigned:   assignedNames(configStmts),
-		universe:   UniverseVanilla, // Default
-		queueCount: 1,               // Default if no queue statement
-		params:     opts.Params,
-		submitUser: opts.SubmitUser,
+		cfg:         cfg,
+		assigned:    assignedNames(configStmts),
+		universe:    UniverseVanilla, // Default
+		queueCount:  1,               // Default if no queue statement
+		params:      opts.Params,
+		submitUser:  opts.SubmitUser,
+		localAccess: opts.AllowLocalAccess,
 	}
 
 	// Set universe if specified. Read through submitCommand like every
@@ -519,6 +526,12 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	_ = ad.Set("ProcId", jobID.Proc)
 	_ = ad.Set("JobUniverse", sf.universe)
 
+	// WantParallelScheduling goes with the universe: SetUniverse writes it,
+	// and only when it is true. It is written here, before the `+Attr` pass,
+	// for the same reason C++ writes it in SetUniverse -- a
+	// `+WantParallelScheduling` has to be able to overwrite it.
+	sf.setParallelSchedulingFlag(ad)
+
 	// Set job status (1 = idle)
 	_ = ad.Set("JobStatus", 1)
 
@@ -600,6 +613,12 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 
 	// Set owner and accounting
 	if err := sf.setOwnership(ad); err != nil {
+		return nil, err
+	}
+
+	// The credential settings, which condor_submit reads for every job
+	// whatever the universe (SetGSICredentials).
+	if err := sf.setGSICredentials(ad); err != nil {
 		return nil, err
 	}
 
@@ -2249,14 +2268,24 @@ func (sf *SubmitFile) setOwnership(ad *classad.ClassAd) error {
 	// Owner - do not set a placeholder as this causes a failure
 	// instead of being ignored.
 
-	group, hasGroup := sf.submitCommand("accounting_group")
+	// Every keyword here is read with submit_param(name, attr), so the job
+	// ATTRIBUTE's name is an accepted spelling of the submit command:
+	// `AccountingGroup = grp` in a submit file is this keyword, not a
+	// custom attribute, and `NiceUser = true` is nice_user. Reading only
+	// the submit spelling left a file written the other way with no
+	// accounting group at all -- and a nice_user job that was not nice.
+	if project, ok := sf.simpleKeywordParam("project_name", "ProjectName"); ok {
+		_ = ad.Set("ProjectName", project)
+	}
+
+	group, hasGroup := sf.simpleKeywordParam("accounting_group", "AccountingGroup")
 
 	// nice_user is shorthand for accounting_group =
 	// $(NICE_USER_ACCOUNTING_GROUP_NAME). A nice_user job with no group
 	// of its own is charged to that group, which is what makes it
 	// preemptable; one that names a group keeps its group and the
 	// nice_user flag is ignored.
-	if nu, ok := sf.submitCommand("nice_user"); ok && parseBool(nu, false) {
+	if nu, ok := sf.simpleKeywordParam("nice_user", "NiceUser"); ok && parseBool(nu, false) {
 		if !hasGroup {
 			group, hasGroup = sf.niceUserGroup(), true
 		}
@@ -2267,7 +2296,7 @@ func (sf *SubmitFile) setOwnership(ad *classad.ClassAd) error {
 		_ = ad.Set("MaxJobRetirementTime", 0)
 	}
 
-	groupUser, hasGroupUser := sf.submitCommand("accounting_group_user")
+	groupUser, hasGroupUser := sf.simpleKeywordParam("accounting_group_user", "AcctGroupUser")
 	if !hasGroup && !hasGroupUser {
 		return nil
 	}
@@ -3325,26 +3354,72 @@ func vmVCPUs(raw string) int {
 // the default pair of 1. `node_count` is the alternate spelling, which
 // condor_submit reads only when machine_count is absent.
 //
-// MPI is the one universe with no default, because an MPI job must say
-// how many machines it wants.
+// A job that asks for a count of machines must say how many: a parallel or
+// MPI job with neither a count nor a MaxHosts of its own is a submit error,
+// which is what condor_submit does with it ("No machine_count specified!").
+//
+// `WantParallelScheduling = true` puts a job of ANY universe on this path --
+// it is how a vanilla job asks the dedicated scheduler to schedule it -- so
+// the count is read, and required, there too.
 func (sf *SubmitFile) setHostCounts(ad *classad.ClassAd) error {
-	if sf.universe == UniverseParallel {
-		if count, ok := sf.submitCommandAlt("machine_count", "node_count"); ok {
-			// atoi, not a strict parse: HTCondor reads the count with
-			// atoi(), which takes the leading digits and ignores the rest.
-			if intCount, err := parseInt(count); err == nil {
-				_ = ad.Set("MinHosts", intCount)
-				_ = ad.Set("MaxHosts", intCount)
-				return nil
-			}
-		}
-	}
-	if sf.isMPIUniverse() {
+	if sf.universe != UniverseParallel && !sf.wantParallelScheduling() {
+		_ = ad.Set("MinHosts", 1)
+		_ = ad.Set("MaxHosts", 1)
 		return nil
 	}
-	_ = ad.Set("MinHosts", 1)
-	_ = ad.Set("MaxHosts", 1)
-	return nil
+	if count, ok := sf.submitCommandAlt("machine_count", "node_count"); ok {
+		// atoi, not a strict parse: HTCondor reads the count with
+		// atoi(), which takes the leading digits and ignores the rest.
+		if intCount, err := parseInt(count); err == nil {
+			_ = ad.Set("MinHosts", intCount)
+			_ = ad.Set("MaxHosts", intCount)
+			return nil
+		}
+	}
+	// condor_submit has one escape here -- a MaxHosts the ad already
+	// carries -- and it is not reachable from a submit file. SetParallelParams
+	// runs before the `+Attr` pass, so `+MaxHosts = 3` is not yet in the ad
+	// and C++ aborts over it too (verified against the oracle); the only ad
+	// that does carry one is the cluster ad a materialized proc is chained
+	// to, and this parser builds no proc ads from a cluster ad.
+	return fmt.Errorf("no machine_count specified for a %s job", sf.hostCountKind())
+}
+
+// hostCountKind names, for the error above, which of the three ways a job
+// got onto the machine-count path it took.
+func (sf *SubmitFile) hostCountKind() string {
+	switch {
+	case sf.isMPIUniverse():
+		return "MPI universe"
+	case sf.universe == UniverseParallel:
+		return "parallel universe"
+	default:
+		return "WantParallelScheduling"
+	}
+}
+
+// setParallelSchedulingFlag writes WantParallelScheduling when the submit
+// file asked for it. A false is not written at all, matching SetUniverse.
+func (sf *SubmitFile) setParallelSchedulingFlag(ad *classad.ClassAd) {
+	if sf.wantParallelScheduling() {
+		_ = ad.Set("WantParallelScheduling", true)
+	}
+}
+
+// wantParallelScheduling reports whether the submit file set
+// WantParallelScheduling, the keyword that asks the dedicated scheduler to
+// schedule a job that is not in the parallel universe.
+//
+// Its only spelling is the job attribute's: condor_submit reads it with
+// submit_param_bool(ATTR_WANT_PARALLEL_SCHEDULING, NULL, false), passing no
+// alternate name, so `want_parallel_scheduling` is not a submit command.
+func (sf *SubmitFile) wantParallelScheduling() bool {
+	value, ok := sf.submitCommand("WantParallelScheduling")
+	if !ok {
+		return false
+	}
+	b, _ := evalBoolParam(value)
+	return b
 }
 
 // setParallelSandbox turns on the two things a parallel job needs from the

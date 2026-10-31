@@ -719,35 +719,68 @@ that is left.
 
 ## Keywords with no Go implementation at all
 
-About 100 attributes are set by C++ and by nothing in Go. The full list is in
-`knownDivergentGenerated`; the families are
-the tool-daemon (TDP) settings, the buffer settings, the Java settings, the
-noop-job settings, the parallel-script settings, the submit-event notes,
-
-About 110 attributes are set by C++ and by nothing in Go. The full list is in
-`knownDivergentGenerated`; the families are the EC2/GCE/Azure grid settings,
-the parallel-script settings, the submit-event notes,
-`kill_sig` and its siblings, `core_size`,
-`stack_size`, `keep_claim_idle`, `max_job_retirement_time`,
-`next_job_start_delay`, `allowed_execute_duration`, `allowed_job_duration`,
-`manifest`, `output_directory`, `scitokens_file`,
-`project_name`, `primary_unix_group`, `jobset`, `dag_node_name` and the
-DAGMan bookkeeping, `periodic_vacate` and the `*_subcode` reasons.
-
-The families still in `knownDivergentGenerated` are the EC2/GCE/Azure grid
-settings, the tool-daemon (TDP) settings, `scitokens_file` and
-`project_name`. The buffer, Java, noop-job, parallel-script and
-submit-event-note families, the whole `kill_sig` family, `periodic_vacate`,
-the `*_subcode` pair, `core_size`, `stack_size`, `keep_claim_idle`,
+What is left in `knownDivergentGenerated` under this heading is the
+EC2/GCE/Azure grid settings and the container-image family. Every other
+family that was here is fixed and is under "Fixed" below: the tool-daemon
+(TDP), buffer, Java, noop-job, parallel-script and submit-event-note
+families, the whole `kill_sig` family, `periodic_vacate`, the `*_subcode`
+pair, `core_size`, `stack_size`, `keep_claim_idle`,
 `max_job_retirement_time`, `next_job_start_delay`, the `allowed_*_duration`
 pair, `manifest`, `output_destination`, `output_directory`,
-`primary_unix_group`, `jobset`, `dag_node_name` and the GPU request family
-were all on this list and are fixed; see "Fixed" below.
+`primary_unix_group`, `jobset`, `dag_node_name`, the GPU request family,
+`scitokens_file`, `project_name`, `delegate_job_GSI_credentials_lifetime`
+and `WantParallelScheduling`.
 
-The tool-daemon (TDP), buffer, noop-job and Java families were in this list
-and are below under "Fixed".
+The count this section used to open with ("about 110 attributes") was stated
+twice, from two different sweeps, and both numbers were stale by the time
+they were written. The map is the list; a sweep of it is in
+`TestAuditKnownEntries` terms rather than prose.
 
 ## Fixed
+
+**A keyword written under its job attribute's name was ignored.**
+`condor_submit` reads most keywords with `submit_param(name, attr)`, so the
+ATTRIBUTE's name is an accepted spelling of the submit command:
+`AccountingGroup = grp` is the `accounting_group` keyword, not a custom
+attribute, and `NiceUser = true` is `nice_user`. The Go parser read only the
+submit spelling for the accounting-group family, so a file written the other
+way got no accounting group at all.
+
+For `NiceUser` that is not cosmetic. Since 8.9.9 `nice_user` is shorthand for
+`accounting_group = $(NICE_USER_ACCOUNTING_GROUP_NAME)` plus
+`MaxJobRetirementTime = 0` — that group and that retirement time are the
+whole mechanism. A job that asked for it under the attribute spelling was
+charged to the submitter directly and kept its default retirement time: not
+preemptable, not nice, and nothing in the ad to say the request had been
+dropped. The simple-keyword pass already followed this rule (it uses
+`submit_param(name, attr)`); the hand-written setters beside it did not.
+
+**`project_name`, `scitokens_file` and `delegate_job_GSI_credentials_lifetime`.**
+All three are `f_special_*` rows in HTCondor's keyword table, which means the
+table does not write them and a hand-coded setter does — `SetAccountingGroup`
+for the project, `SetGSICredentials` for the other two — so implementing the
+table left them unwritten. `ScitokensFile` is what the schedd reads to refresh
+a job's token, and it is the crossing of `use_scitokens` (`use_scitoken` is the
+alternate spelling) with whether a file was named: `false` suppresses a named
+file, `auto` writes one if there is one and never fails, `true` with nothing to
+point at aborts the submission. The path is stored as a full path against Iwd.
+`BEARER_TOKEN_FILE`, which `condor_submit` falls back to, is the submitting
+process's environment, so this parser answers it only under
+`AllowLocalAccess` — the same gate as `$ENV()` and `include command`.
+
+**`WantParallelScheduling` is a machine-count keyword.** It is how a job of
+any universe asks the dedicated scheduler to schedule it, and `SetUniverse`
+writes it (only when true, and only read under the attribute's own spelling —
+`submit_param_bool(ATTR_WANT_PARALLEL_SCHEDULING, NULL, false)` passes no
+alternate name). Setting it puts the job on `SetParallelParams`' path, so
+`machine_count` is read for a vanilla job too, and a job on that path with
+neither a count nor a `MaxHosts` already in the ad is a submit ERROR
+("No machine_count specified!"). Go accepted all three of those files and
+wrote `MinHosts = MaxHosts = 1`. The one escape — a `MaxHosts` the ad already
+carries — is not reachable from a submit file: `SetParallelParams` runs before
+the `+Attr` pass, so `+MaxHosts = 3` is not yet there and C++ aborts over it
+too, which the oracle confirms. The only ad that does carry one is the cluster
+ad a materialized proc chains to.
 
 **The kill-signal family named no signal.** `KillSig`, `RemoveKillSig` and
 `HoldKillSig` hold a signal NAME — the starter and the shadow read the
