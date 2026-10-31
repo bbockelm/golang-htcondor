@@ -31,7 +31,17 @@ import (
 // to read. Either way the test skips, saying so. It runs once
 // HTCONDORDB_BINARY names an htcondordb that federates job_metrics.
 func TestMultiAPJobMetricsEndToEnd(t *testing.T) {
-	t.Parallel()
+	// NOT t.Parallel(). Each of the five multi-AP end-to-end tests stands up
+	// two access points -- two schedds, two collectors, four htcondordb
+	// daemons and an API server apiece -- and running them against each
+	// other starves the federation hub on a four-CPU runner: the second AP
+	// never reaches it, and the test times out with
+	// "the federation hub does not hold this access point".
+	//
+	// They were parallelised, and the result was this test failing on two
+	// unrelated pull requests within four minutes of each other. The rest of
+	// the package stays parallel; it is these five, and the daemon count
+	// they bring, that do not fit alongside everything else.
 	if testing.Short() {
 		t.Skip("integration test (runs two schedds, three htcondordb daemons and an API server)")
 	}
