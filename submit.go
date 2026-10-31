@@ -564,13 +564,16 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
-	// Set file transfer settings
-	if err := sf.setFileTransfer(ad); err != nil {
+	// Set container/docker settings. Before setFileTransfer, which is
+	// where condor_submit decides whether the container image has to be
+	// carried to the execute node and rewrites ContainerImage to the
+	// name the transfer will leave in the sandbox.
+	if err := sf.setContainerSettings(ad); err != nil {
 		return nil, err
 	}
 
-	// Set container/docker settings
-	if err := sf.setContainerSettings(ad); err != nil {
+	// Set file transfer settings
+	if err := sf.setFileTransfer(ad); err != nil {
 		return nil, err
 	}
 
@@ -1588,7 +1591,15 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 		_ = ad.Set("WhenToTransferOutput", fileTransferOutputName(when))
 	}
 
-	if inSpecified {
+	// A container job's image is an input file like any other: once
+	// condor_submit decides to transfer it, it goes on the end of this
+	// list, after whatever the submit file named. Without it the job
+	// reaches the execute node with no image to run.
+	imageAdded, err := sf.processContainerInputFiles(ad, &inFileList)
+	if err != nil {
+		return err
+	}
+	if inSpecified || imageAdded {
 		// Join with commas for ClassAd string list format
 		_ = ad.Set("TransferInput", strings.Join(inFileList, ","))
 	}
@@ -1650,12 +1661,12 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 
 // setContainerSettings sets container/docker related attributes
 func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
-	// docker_image or container_image. These are distinct runtimes and
-	// must not be conflated: the starter selects the proc from the
-	// WantDocker / WantContainer flag (starter.cpp LookupBool), so a job
-	// that set an image but no want-flag would silently run as a plain
-	// vanilla job. Set exactly the image attribute and want-flags
-	// condor_submit sets, which is not one pair but two cases.
+	// Whether this is a docker job, a container job or neither decides
+	// every attribute below, and nothing below is written for a job
+	// that is neither. The two runtimes must not be conflated: the
+	// starter selects the proc from the WantDocker / WantContainer flag
+	// (starter.cpp LookupBool), so a job that set an image but no
+	// want-flag would silently run as a plain vanilla job.
 	//
 	// WantDocker marks the DOCKER UNIVERSE and nothing else: it is the
 	// flag the docker starter reads, and `universe = docker` is the only
@@ -1666,26 +1677,12 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 	// WantDocker instead is asking for a docker execute node rather than
 	// a container one, and on an Apptainer-only pool (the OSPool norm)
 	// it matches nothing.
-	if img, ok := sf.submitCommand("docker_image"); ok && img != "" {
-		_ = ad.Set("DockerImage", img)
-		switch {
-		case sf.isDockerUniverse():
-			_ = ad.Set("WantDocker", true)
-		case sf.containerToppingApplies():
-			_ = ad.Set("WantContainer", true)
-			_ = ad.Set("WantDockerImage", true)
-		}
-	} else if img, ok := sf.submitCommand("container_image"); ok && img != "" {
-		_ = ad.Set("ContainerImage", img)
-		if sf.containerToppingApplies() {
-			_ = ad.Set("WantContainer", true)
-			// The image-kind flag is what actually turns the container
-			// runtime on in the starter (WantContainer alone does not on
-			// an Apptainer node). condor_submit sets exactly one of
-			// these from the image type; mirror that.
-			wantAttr, _ := containerImageKind(img)
-			_ = ad.Set(wantAttr, true)
-		}
+	isDocker, isContainer, err := sf.containerJobRoles()
+	if err != nil {
+		return err
+	}
+	if err := sf.setContainerImages(ad, isDocker, isContainer); err != nil {
+		return err
 	}
 
 	// container_network. docker_network_type writes the same attribute
@@ -1708,12 +1705,9 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 		}
 	}
 
-	// container_service_names - comma-separated list
-	if services, ok := sf.submitCommand("container_service_names"); ok {
-		serviceList := parseFileList(services)
-		if len(serviceList) > 0 {
-			_ = ad.Set("ContainerServiceNames", strings.Join(serviceList, ","))
-		}
+	// container_service_names, and the port each service listens on.
+	if err := sf.setContainerServices(ad, isDocker, isContainer); err != nil {
+		return err
 	}
 
 	// require_container - force use of container
@@ -1742,16 +1736,6 @@ func (sf *SubmitFile) setContainerSettings(ad *classad.ClassAd) error {
 func (sf *SubmitFile) isDockerUniverse() bool {
 	univ, ok := sf.submitCommand("universe")
 	return ok && strings.EqualFold(strings.TrimSpace(univ), "docker")
-}
-
-// containerToppingApplies reports whether an image keyword makes this a
-// container job. The container topping is only honoured for a vanilla or
-// local job (`universe = container` and an unset universe are both
-// vanilla here); a grid, vm, java or scheduler job carrying an image
-// keyword gets no want-flag at all, because condor_submit never looks at
-// the keyword there.
-func (sf *SubmitFile) containerToppingApplies() bool {
-	return sf.universe == UniverseVanilla || sf.universe == UniverseLocal
 }
 
 // containerImageCapability returns the TARGET capability a container
