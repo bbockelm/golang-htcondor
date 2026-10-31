@@ -23,7 +23,7 @@ func TestToolSubmitJobRejectsSystemExecutable(t *testing.T) {
 		logger: logger,
 	}
 	_, err = s.toolSubmitJob(context.Background(), map[string]interface{}{
-		"submit_file": "executable = /bin/bash\narguments = -c \"echo hi\"\nqueue 1\n",
+		"submit_file": "executable = /bin/bash\narguments = -c \\\"echo hi\\\"\nqueue 1\n",
 	})
 	if err == nil {
 		t.Fatal("expected submit_job to reject the submit file")
