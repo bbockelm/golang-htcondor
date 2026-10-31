@@ -1189,6 +1189,56 @@ generator has to draw independently. `RequireGPUs` reached five,
 `GPUsMinCapability` one. The keyword coverage count says 255 of 258 either
 way, which is the gap that number cannot see.
 
+**A vm job's transfer settings are not the submitter's.** `SetUniverse` writes
+`ShouldTransferFiles` and `WhenToTransferOutput` back into the submit macros
+for a vm universe job and returns, before `SetTransferFiles` reads anything --
+so the override is total and the resolution above never sees what the file
+wrote. A VM job always transfers, because the snapshot disks a vmware job
+writes and `vm_cdrom_files` have to come back to the submit machine and there
+is nowhere else for them to go. `when_to_transfer_output` is `ON_EXIT`, or
+`ON_EXIT_OR_EVICT` when `vm_checkpoint` is on, whichever of the two the file
+asked for.
+
+Go honoured the submitter instead, four ways. A VM job that asked for
+`ON_EXIT_OR_EVICT` kept it, where condor_submit gives `ON_EXIT`. A VM job that
+asked for `should_transfer_files = NO` got `ShouldTransferFiles = "NO"` and no
+`WhenToTransferOutput` at all -- a VM job that would never move its disk
+images back. A `vm_checkpoint` job got `ON_EXIT`, so the image it checkpointed
+on eviction was not transferred, which is the whole point of checkpointing it.
+And the values the override discards were being validated first, so a VM job
+with `should_transfer_files = MAYBE`, or with `NO` alongside
+`transfer_input_files`, was rejected where condor_submit accepts it.
+
+This is not the `ShouldTransferFiles` DEFAULT above. That one is about what a
+silent submit file gets; this is a universe overriding what the submit file
+said, and the forced value is `YES` in both parsers now.
+
+The one thing the submitter still controls is the conflict check:
+`vm_checkpoint` together with `vm_networking` is refused unless the file
+itself wrote `when_to_transfer_output = ON_EXIT_OR_EVICT`, an absent, wrong or
+unparsable value all failing it alike. That check reads the submit file, not
+the override, so it has to run before it.
+
+`vm_checkpoint` and `vm_networking` are read with the attribute spelling as
+well (`JobVMCheckpoint`, `JobVMNetworking`), which Go read nowhere -- so
+`JobVMCheckpoint = true` also reached the ad as `false`. Both now go through
+one helper shared with `setVMParams`, so the flag the override acts on and the
+flag the job ad records cannot disagree.
+
+How this was missed is the more useful part. Every one of these cases was
+quiet in the generated sweep when the transfer work landed, and only appeared
+when a later PR changed the GENERATOR -- `keywordDeps`, plus dropping a java
+universe gate -- which shifted which files the corpus draws. "Not reproduced
+by this sweep" is a statement about the generator's current shape, not about
+the parsers, and it moves whenever the generator does. These cases are seeds
+and named test files now, so no later generator change can take them away
+again.
+
+Still left: a non-boolean `vm_checkpoint` (`vm_checkpoint = banana`) is
+refused by condor_submit's `submit_param_bool` and read as `false` here. That
+belongs with the submit-wide question of which bad values are rejected rather
+than with the transfer settings.
+
 ## The container image
 
 `container_image` was out of the generator's vocabulary until the shim called

@@ -89,6 +89,23 @@ var transferFiles = []string{
 	"executable = /bin/sleep\nrequirements = TARGET.HasJobTransferPlugins\ntransfer_input_files = osdf:///a/b\nqueue\n",
 	"executable = /bin/sleep\nrequirements = TARGET.HasFileTransferPluginMethods isnt undefined\ntransfer_input_files = osdf:///a/b\nqueue\n",
 
+	// vm universe: SetUniverse forces both settings and throws away what
+	// the file asked for. The submitter's ON_EXIT_OR_EVICT is discarded
+	// without vm_checkpoint, and applied without being asked for with it.
+	"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nqueue\n",
+	"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nwhen_to_transfer_output = ON_EXIT_OR_EVICT\nqueue\n",
+	"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nshould_transfer_files = NO\nqueue\n",
+	"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nshould_transfer_files = NO\ntransfer_input_files = a.txt\nqueue\n",
+	"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_checkpoint = true\nqueue\n",
+	"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_checkpoint = true\nwhen_to_transfer_output = ON_EXIT\nqueue\n",
+	"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nJobVMCheckpoint = true\nqueue\n",
+	"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_checkpoint = true\nvm_networking = true\nwhen_to_transfer_output = ON_EXIT_OR_EVICT\nqueue\n",
+	"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_checkpoint = true\nvm_networking = true\nwhen_to_transfer_output = ALWAYS\nqueue\n",
+	// Values that are hard errors elsewhere are accepted here, because
+	// the override replaces them before anything checks them.
+	"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nshould_transfer_files = MAYBE\nqueue\n",
+	"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nwhen_to_transfer_output = SOMETIME\nqueue\n",
+
 	// The standard streams: stream vs transfer, and the null file.
 	"executable = /bin/sleep\ninput = in.txt\noutput = out.txt\nerror = err.txt\nstream_input = true\nstream_output = true\nstream_error = true\nqueue\n",
 	"executable = /bin/sleep\noutput = out.txt\nstream_output = false\nqueue\n",
@@ -164,6 +181,14 @@ func TestTransferContradictionsAreRejected(t *testing.T) {
 		"executable = /bin/sleep\nshould_transfer_files = IF_NEEDED\nwhen_to_transfer_output = ON_EXIT_OR_EVICT\nqueue\n",
 		"executable = /bin/sleep\nshould_transfer_files = NO\ntransfer_input_files = a.txt\nqueue\n",
 		"executable = /bin/sleep\nshould_transfer_files = NO\ntransfer_output_files = \"\"\nqueue\n",
+		// vm_checkpoint with vm_networking is refused unless the file
+		// itself asked for ON_EXIT_OR_EVICT; an absent, wrong or
+		// unparsable value all fail it.
+		"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_checkpoint = true\nvm_networking = true\nqueue\n",
+		"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_checkpoint = true\nvm_networking = true\nwhen_to_transfer_output = ON_EXIT\nqueue\n",
+		"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_checkpoint = true\nvm_networking = true\nwhen_to_transfer_output = SOMETIME\nqueue\n",
+		"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_checkpoint = TRUE\nvm_networking = 1\nqueue\n",
+		"universe = vm\nexecutable = /bin/sleep\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nJobVMCheckpoint = true\nJobVMNetworking = true\nqueue\n",
 	} {
 		t.Run(strings.ReplaceAll(transferCaseName(src), " ", "_"), func(t *testing.T) {
 			if cpp := oracle.MakeAds(src, oracle.ModeAds, MaxProcs); cpp.OK {

@@ -1181,6 +1181,67 @@ func fileTransferOutputName(v fileTransferOutput) string {
 	return ""
 }
 
+// vmCheckpoint and vmNetworking report the two VM flags that decide a VM
+// job's file transfer settings.
+//
+// Both are read with the submit keyword first and the attribute name
+// second, the way SetUniverse reads them
+// (submit_param_bool(SUBMIT_KEY_VM_Checkpoint, ATTR_JOB_VM_CHECKPOINT,
+// false)). They are shared by the transfer override below and by
+// setVMParams so that the flag the override acts on and the flag the job
+// ad records can never disagree.
+func (sf *SubmitFile) vmCheckpoint() bool {
+	v, ok := sf.submitCommandAlt("vm_checkpoint", "JobVMCheckpoint")
+	return ok && parseBool(v, false)
+}
+
+func (sf *SubmitFile) vmNetworking() bool {
+	v, ok := sf.submitCommandAlt("vm_networking", "JobVMNetworking")
+	return ok && parseBool(v, false)
+}
+
+// resolveVMTransferMode applies the file transfer settings SetUniverse
+// forces on a vm universe job, discarding whatever the submit file asked
+// for.
+//
+// A VM job always transfers files, whatever should_transfer_files says:
+// the snapshot disks a vmware job writes, and vm_cdrom_files, have to
+// come back to the submit machine, and there is nowhere else for them to
+// go. SetUniverse does this by writing YES and the matching
+// when_to_transfer_output back into the submit macros before
+// SetTransferFiles ever reads them, so the override is total -- a VM job
+// with `should_transfer_files = NO` gets YES, and a VM job with a
+// should_transfer_files or when_to_transfer_output value that would be a
+// hard error in any other universe is accepted, because the bad value is
+// overwritten before anything validates it.
+//
+// This is not the recorded ShouldTransferFiles DEFAULT divergence. That
+// one is about what a silent submit file gets; this is a universe
+// overriding what the submit file actually said.
+//
+// The one thing the submitter still controls is the checkpoint case.
+// vm_checkpoint asks for ON_EXIT_OR_EVICT so the checkpointed image is
+// written out on eviction; vm_networking alongside it is accepted only
+// when the file asked for ON_EXIT_OR_EVICT itself, which is condor's way
+// of making the submitter acknowledge that the two interact.
+func (sf *SubmitFile) resolveVMTransferMode() (shouldTransferFiles, fileTransferOutput, error) {
+	if !sf.vmCheckpoint() {
+		return stfYes, ftoOnExit, nil
+	}
+	if sf.vmNetworking() {
+		// Read before the override, so this sees what the submitter
+		// wrote rather than what SetUniverse is about to write. An
+		// absent or unparsable value fails the check just as a wrong
+		// one does.
+		raw, ok := sf.submitCommandAlt("WhenToTransferOutput", "when_to_transfer_output")
+		v, valid := fileTransferOutputNum(raw)
+		if !ok || !valid || v != ftoOnExitOrEvict {
+			return 0, 0, fmt.Errorf("vm_checkpoint and vm_networking together require an explicit when_to_transfer_output = ON_EXIT_OR_EVICT")
+		}
+	}
+	return stfYes, ftoOnExitOrEvict, nil
+}
+
 // resolveTransferMode decides should_transfer_files and
 // when_to_transfer_output together, the way SubmitHash::SetTransferFiles
 // does (src/condor_utils/submit_utils.cpp).
@@ -1210,6 +1271,13 @@ func fileTransferOutputName(v fileTransferOutput) string {
 // "did the submitter choose this?" flag the C++ keeps, so the
 // interactions below behave identically either way.
 func (sf *SubmitFile) resolveTransferMode(inFilesSpecified, outFilesSpecified bool) (shouldTransferFiles, fileTransferOutput, error) {
+	// A vm universe job never gets this far in condor_submit: SetUniverse
+	// has already overwritten both settings, so none of the reading,
+	// canonicalizing or checking below ever sees what the file wrote.
+	if sf.universe == UniverseVM {
+		return sf.resolveVMTransferMode()
+	}
+
 	should := stfYes
 	defaultShould := true
 	if raw, ok := sf.submitCommandAlt("ShouldTransferFiles", "should_transfer_files"); ok {
@@ -2829,18 +2897,18 @@ func (sf *SubmitFile) setVMParams(ad *classad.ClassAd) error {
 		_ = ad.Set("JobVMType", vmType)
 	}
 
-	// vm_checkpoint - Enable checkpointing
-	checkpoint := false
-	if v, ok := sf.submitCommand("vm_checkpoint"); ok {
-		checkpoint = parseBool(v, false)
-	}
+	// vm_checkpoint - Enable checkpointing.
+	//
+	// Read through the shared helper, which also honours the attribute
+	// spelling (JobVMCheckpoint) that SetUniverse accepts. The same
+	// helper decides the job's forced file transfer settings, so a file
+	// using that spelling cannot end up with a job ad saying it does not
+	// checkpoint next to transfer settings that say it does.
+	checkpoint := sf.vmCheckpoint()
 	_ = ad.Set("JobVMCheckpoint", checkpoint)
 
 	// vm_networking - Enable networking for VM
-	networking := false
-	if v, ok := sf.submitCommand("vm_networking"); ok {
-		networking = parseBool(v, false)
-	}
+	networking := sf.vmNetworking()
 	_ = ad.Set("JobVMNetworking", networking)
 
 	// vm_networking_type - Type of networking (nat, bridge, ...), read only
