@@ -42,7 +42,7 @@ func TestSubmitRejectsSystemExecutableWithoutTransferFlag(t *testing.T) {
 	s := footgunServer(t)
 
 	_, err := s.toolSubmitJob(context.Background(), map[string]interface{}{
-		"submit_file": "executable = /bin/bash\narguments = -c \"echo hi\"\nqueue\n",
+		"submit_file": "executable = /bin/bash\narguments = -c \\\"echo hi\\\"\nqueue\n",
 	})
 	if err == nil {
 		t.Fatal("expected the submit to be rejected before it reached the schedd")

@@ -34,7 +34,7 @@ func TestInspectSubmitFileSystemExecutableFatal(t *testing.T) {
 // diagnostic does not fire once the caller has done the right thing, and
 // that turning the transfer off also turns off the spooling round.
 func TestInspectSubmitFileSystemExecutableAccepted(t *testing.T) {
-	insp := Inspect("executable = /bin/bash\ntransfer_executable = False\narguments = -c \"echo hi\"\n" +
+	insp := Inspect("executable = /bin/bash\ntransfer_executable = False\narguments = -c \\\"echo hi\\\"\n" +
 		"output = out.txt\nerror = err.txt\nlog = job.log\n" + "queue 1\n")
 	if insp.Fatal != nil {
 		t.Fatalf("transfer_executable = False should be accepted, got: %v", insp.Fatal)

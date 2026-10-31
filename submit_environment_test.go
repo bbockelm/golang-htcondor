@@ -46,23 +46,29 @@ queue
 	}
 }
 
-// TestLegacyEnvironmentGoesToEnv: the unquoted form is V1, which HTCondor
-// reads from `Env` with an auto-detected delimiter. Left in `Environment`
-// it is parsed as space-delimited V2, and `A=1;B=2` becomes the single
-// variable A with the value "1;B=2".
-func TestLegacyEnvironmentGoesToEnv(t *testing.T) {
+// TestLegacyEnvironmentIsConvertedToV2: the unquoted form is V1, and
+// condor_submit CONVERTS it rather than storing the text. `A=1;B=2` becomes
+// `Environment = "A=1 B=2"` -- V2 raw, where the separator is a space.
+//
+// This test used to assert the opposite, that a V1 value belongs under `Env`.
+// The danger it was guarding against is real -- V1 text left under the V2
+// attribute name is read as one variable whose value contains the rest -- but
+// the answer is to convert, which is what SetEnvironment does. `Env` is
+// written only for the `env` keyword with a V1 value, and then with an
+// EnvDelim beside it; see TestEnvironmentIsReEncoded.
+func TestLegacyEnvironmentIsConvertedToV2(t *testing.T) {
 	ad := mustJobAd(t, `executable = /bin/true
 environment = A=1;B=2
 queue
 `)
-	if _, ok := ad.EvaluateAttrString("Environment"); ok {
-		t.Error("a V1 environment was stored as Environment, where it is parsed as space-delimited V2")
+	if _, ok := ad.EvaluateAttrString("Env"); ok {
+		t.Error("the `environment` keyword wrote Env; condor_submit writes Environment for it")
 	}
-	got, ok := ad.EvaluateAttrString("Env")
+	got, ok := ad.EvaluateAttrString("Environment")
 	if !ok {
-		t.Fatal("a V1 environment was not stored as Env")
+		t.Fatal("Environment is missing")
 	}
-	if got != "A=1;B=2" {
-		t.Errorf("Env = %q", got)
+	if got != "A=1 B=2" {
+		t.Errorf("Environment = %q, want %q", got, "A=1 B=2")
 	}
 }

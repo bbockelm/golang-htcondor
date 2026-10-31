@@ -880,121 +880,60 @@ func (sf *SubmitFile) executableIsAFile() bool {
 	return true
 }
 
-// setArguments sets the arguments attribute
-// HTCondor supports two styles of argument quoting:
-// 1. Old style: no surrounding quotes, uses Args attribute, backslash escapes quotes
-// 2. New style: surrounded by double quotes, uses Arguments attribute
+// setArguments stores the job's command line, mirroring
+// SubmitHash::SetArguments.
+//
+// HTCondor has two encodings and the ATTRIBUTE NAME says which one the ad
+// carries: Args is V1, where the arguments are split on whitespace and a
+// backslash escapes a quote, and Arguments is V2, where the whole list is
+// written in double quotes and single quotes group an argument containing
+// spaces. The starter splits the two differently, so writing the V1 name
+// around a V2 string hands the job a different command line.
+//
+// Which one is written follows the INPUT: `arguments = a b` is V1 and comes
+// out as Args; `arguments = "a b"` is V2 and comes out as Arguments; and
+// `arguments2` is V2 whatever it looks like. A submit file that says nothing
+// gets `Arguments = ""` -- the V2 name -- because an empty ArgList was never
+// V1 input. Go wrote `Args = ""` there, which is the V1 name for the same
+// empty list, and an attribute name that disagrees with condor_submit's is
+// the kind of difference that only shows up on the execute node.
 func (sf *SubmitFile) setArguments(ad *classad.ClassAd) error {
-	// Check both "arguments" and "args"
-	args, ok := sf.submitCommand("arguments")
-	if !ok {
-		args, ok = sf.submitCommand("args")
+	args1, hasArgs1 := sf.submitCommandAlt("arguments", "args")
+	// No alternate name for arguments2: ATTR_JOB_ARGUMENTS2 is the same
+	// attribute as ATTR_JOB_ARGUMENTS1's alternate, which would make the
+	// two keywords indistinguishable.
+	args2, hasArgs2 := sf.submitCommand("arguments2")
+	if hasArgs1 && hasArgs2 && !parseBool(sf.submitParam("allow_arguments_v1", ""), false) {
+		return fmt.Errorf("if you wish to specify both arguments and arguments2, " +
+			"you must also specify allow_arguments_v1 = true")
 	}
 
-	if !ok || args == "" {
-		_ = ad.Set("Args", "")
-		return nil
-	}
-
-	// Detect style by checking if the argument string is surrounded by double quotes
-	trimmed := strings.TrimSpace(args)
-	isNewStyle := strings.HasPrefix(trimmed, `"`) && strings.HasSuffix(trimmed, `"`) && len(trimmed) >= 2
-
-	if isNewStyle {
-		// New style: remove outer quotes and process
-		inner := trimmed[1 : len(trimmed)-1]
-		processed := processNewStyleArguments(inner)
-		_ = ad.Set("Arguments", processed)
-	} else {
-		// Old style: process backslash escapes then set Args
-		processed := processOldStyleArguments(args)
-		_ = ad.Set("Args", processed)
-	}
-
-	return nil
-}
-
-// processOldStyleArguments processes old style argument quoting
-// In old style: backslash escapes double quotes: \" becomes "
-// This matches HTCondor's V1 argument parsing
-func processOldStyleArguments(s string) string {
-	// Replace backslash-escaped double quotes
-	return strings.ReplaceAll(s, `\"`, `"`)
-}
-
-// processNewStyleArguments processes new style argument quoting
-// In new style (string already has outer quotes removed):
-//   - Double quotes are escaped by doubling: "" becomes "
-//   - Single quotes delimit arguments with embedded spaces
-//   - Special characters (space, tab, newline, single quote) are wrapped in single quotes
-//   - When starting a quoted section, if the previous character is already a quote,
-//     erase it first to combine sections (this prevents repeated quotes)
-//   - Doubled single quotes (”) become a single literal quote
-//   - This creates the V2 storage format that HTCondor's executor can parse
-//   - Backslash has no special meaning
-func processNewStyleArguments(s string) string {
-	var result strings.Builder
-	inSingleQuote := false
-	i := 0
-
-	for i < len(s) {
-		ch := s[i]
-
-		switch {
-		case ch == '"' && i+1 < len(s) && s[i+1] == '"':
-			// Doubled double quote -> single double quote
-			result.WriteByte('"')
-			i += 2
-
-		case ch == '\'' && i+1 < len(s) && s[i+1] == '\'':
-			// Doubled single quote - represents a literal single quote
-			// Apply the combining logic: if previous char is ', erase it first
-			resultStr := result.String()
-			if len(resultStr) > 0 && resultStr[len(resultStr)-1] == '\'' {
-				// Erase the trailing quote to combine sections
-				result.Reset()
-				result.WriteString(resultStr[:len(resultStr)-1])
-			} else {
-				// Start a new quoted section
-				result.WriteByte('\'')
-			}
-			// Write the escaped quote (two quotes)
-			result.WriteString("''")
-			// End the quoted section
-			result.WriteByte('\'')
-			i += 2
-
-		case ch == '\'':
-			// Single quote - toggle quote mode
-			inSingleQuote = !inSingleQuote
-			// Don't write the single quote delimiter itself
-			i++
-
-		case (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') && inSingleQuote:
-			// Whitespace inside single quotes - wrap in quotes
-			// Apply the combining logic: if previous char is ', erase it first
-			resultStr := result.String()
-			if len(resultStr) > 0 && resultStr[len(resultStr)-1] == '\'' {
-				// Erase the trailing quote to combine sections
-				result.Reset()
-				result.WriteString(resultStr[:len(resultStr)-1])
-			} else {
-				// Start a new quoted section
-				result.WriteByte('\'')
-			}
-			// Write the whitespace character
-			result.WriteByte(ch)
-			// End the quoted section
-			result.WriteByte('\'')
-			i++
-
-		default:
-			result.WriteByte(ch)
-			i++
+	switch {
+	case hasArgs2:
+		args, err := parseArgsV2Quoted(args2)
+		if err != nil {
+			return fmt.Errorf("failed to parse arguments2: %w", err)
 		}
+		_ = ad.Set("Arguments", joinArgsV2(args))
+	case hasArgs1 && args1 != "":
+		// Parsed into arguments and written back out, not passed through:
+		// condor_submit's ArgList canonicalises as it goes, so the doubled
+		// space in `arguments = a  b` is one separator and the stored value
+		// is `a b`. Keeping the text gave the job an extra empty argument's
+		// worth of whitespace that condor_submit would have dropped.
+		args, wasV1, err := parseArgsV1WackedOrV2Quoted(args1)
+		if err != nil {
+			return fmt.Errorf("failed to parse arguments: %w", err)
+		}
+		if wasV1 {
+			_ = ad.Set("Args", joinArgsV1(args))
+		} else {
+			_ = ad.Set("Arguments", joinArgsV2(args))
+		}
+	default:
+		_ = ad.Set("Arguments", "")
 	}
-
-	return result.String()
+	return nil
 }
 
 // --- ArgList, as condor_utils/condor_arglist.cpp implements it ---
@@ -1197,49 +1136,6 @@ func joinArgsV2(args []string) string {
 		}
 	}
 	return result.String()
-}
-
-// setEnvironment sets the environment attribute.
-//
-// The submit-file value and the job-ad value are not the same string, and
-// storing one as the other loses the environment silently -- the job runs,
-// with variables named things like `"PATH`.
-//
-// HTCondor reads the ad with Env::MergeFrom (condor_utils/env.cpp): the
-// `Environment` attribute is parsed as V2 RAW, and `Env` as V1. Neither
-// accepts the surrounding double quotes that mark the V2 form in a SUBMIT
-// FILE. So `environment = "A=1 B=2"` has to reach the ad as `A=1 B=2`,
-// with the doubled `""` escapes collapsed; and the unquoted legacy form
-// belongs under `Env`, where the delimiter is auto-detected, rather than
-// under `Environment`, where a `;`-separated list would become one
-// variable whose value contains the rest.
-func (sf *SubmitFile) setEnvironment(ad *classad.ClassAd) error {
-	env, ok := sf.submitCommand("environment")
-	if !ok {
-		env, ok = sf.submitCommand("env")
-	}
-	if !ok || env == "" {
-		return nil
-	}
-
-	if raw, isV2 := envV2Raw(env); isV2 {
-		_ = ad.Set("Environment", raw)
-		return nil
-	}
-	_ = ad.Set("Env", env)
-	return nil
-}
-
-// envV2Raw converts the submit file's V2 environment form -- the whole
-// list wrapped in double quotes, with `""` standing for a literal quote --
-// into the V2 raw form the job ad carries. Reports false for anything that
-// is not in the V2 form.
-func envV2Raw(env string) (string, bool) {
-	trimmed := strings.TrimSpace(env)
-	if len(trimmed) < 2 || !strings.HasPrefix(trimmed, `"`) || !strings.HasSuffix(trimmed, `"`) {
-		return "", false
-	}
-	return strings.ReplaceAll(trimmed[1:len(trimmed)-1], `""`, `"`), true
 }
 
 // unixNullFile is UNIX_NULL_FILE from the C++ submit code
