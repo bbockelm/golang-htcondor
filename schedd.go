@@ -845,8 +845,16 @@ func configureRemoteJobAd(procAd *classad.ClassAd) bool {
 		_ = procAd.Set("ShouldTransferFiles", "YES")
 	}
 
-	// Ensure WhenToTransferOutput is set
-	if expr, ok := procAd.Lookup("WhenToTransferOutput"); !ok || expr == nil {
+	// Ensure WhenToTransferOutput is set -- unless the job turned file
+	// transfer off, where the two attributes together would say both
+	// that the job does not transfer files and that it transfers them on
+	// exit. condor_submit refuses that combination outright rather than
+	// pick one, so a job that reaches here with ShouldTransferFiles = NO
+	// keeps the shape condor_submit would have given it: no
+	// WhenToTransferOutput at all.
+	stf, _ := procAd.EvaluateAttrString("ShouldTransferFiles")
+	transfers := !strings.EqualFold(stf, "NO") && !strings.EqualFold(stf, "NEVER") && !strings.EqualFold(stf, "FALSE")
+	if expr, ok := procAd.Lookup("WhenToTransferOutput"); transfers && (!ok || expr == nil) {
 		_ = procAd.Set("WhenToTransferOutput", "ON_EXIT")
 	}
 

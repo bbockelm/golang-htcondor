@@ -1080,35 +1080,217 @@ func (sf *SubmitFile) stdioTransferIt(transferCmd string) bool {
 	return parseBool(value, true)
 }
 
+// shouldTransferFiles is ShouldTransferFiles_t from
+// src/condor_utils/enum_utils.h.
+type shouldTransferFiles int
+
+const (
+	stfNo shouldTransferFiles = iota + 1
+	stfYes
+	stfIfNeeded
+)
+
+// fileTransferOutput is FileTransferOutput_t from the same header.
+type fileTransferOutput int
+
+const (
+	ftoNone fileTransferOutput = iota
+	ftoOnExit
+	ftoOnExitOrEvict
+	ftoOnSuccess
+)
+
+// The two translation tables, in HTCondor's order
+// (src/condor_utils/enum_utils.cpp). Order is load-bearing twice over:
+// a name is matched case-insensitively against the first row that has it,
+// and the canonical spelling written to the job ad is the FIRST row
+// carrying the value, which is how `should_transfer_files = always`
+// reaches the ad as "YES" and `when_to_transfer_output = ONEXIT` as
+// "ON_EXIT".
+var shouldTransferFilesTable = []struct {
+	name string
+	val  shouldTransferFiles
+}{
+	{"YES", stfYes}, {"TRUE", stfYes}, {"ALWAYS", stfYes},
+	{"NO", stfNo}, {"FALSE", stfNo}, {"NEVER", stfNo},
+	{"IF_NEEDED", stfIfNeeded}, {"AUTO", stfIfNeeded},
+}
+
+var fileTransferOutputTable = []struct {
+	name string
+	val  fileTransferOutput
+}{
+	{"ON_EXIT_OR_EVICT", ftoOnExitOrEvict}, {"ALWAYS", ftoOnExitOrEvict},
+	{"ON_EXIT", ftoOnExit}, {"ONEXIT", ftoOnExit},
+	{"NONE", ftoNone}, {"NULL", ftoNone},
+	{"ON_SUCCESS", ftoOnSuccess}, {"ONSUCCESS", ftoOnSuccess},
+	// These eight are the whole set. condor_submit also answers for a
+	// few names that are not in its table -- NEVER and FALSE among them
+	// -- but not consistently: its translation tables are arrays of
+	// fixed-size structs terminated by an entry whose name is empty,
+	// FileTransferOutputTranslation has no such entry, and the lookup
+	// walks off the end into whatever the build laid out after it. The
+	// answer differs between HTCondor versions in both directions:
+	// 25.14.1 reads NEVER as a value that CONTRADICTS
+	// should_transfer_files = NO, and 26.2.0 reads it as the value that
+	// AGREES with it, so each version rejects the file the other
+	// accepts. There is no behavior here to mirror, so these names are
+	// rejected like any other unknown value.
+}
+
+func shouldTransferFilesNum(s string) (shouldTransferFiles, bool) {
+	for _, row := range shouldTransferFilesTable {
+		if strings.EqualFold(row.name, s) {
+			return row.val, true
+		}
+	}
+	return 0, false
+}
+
+func shouldTransferFilesName(v shouldTransferFiles) string {
+	for _, row := range shouldTransferFilesTable {
+		if row.val == v {
+			return row.name
+		}
+	}
+	return ""
+}
+
+func fileTransferOutputNum(s string) (fileTransferOutput, bool) {
+	for _, row := range fileTransferOutputTable {
+		if strings.EqualFold(row.name, s) {
+			return row.val, true
+		}
+	}
+	return 0, false
+}
+
+func fileTransferOutputName(v fileTransferOutput) string {
+	for _, row := range fileTransferOutputTable {
+		if row.val == v {
+			return row.name
+		}
+	}
+	return ""
+}
+
+// resolveTransferMode decides should_transfer_files and
+// when_to_transfer_output together, the way SubmitHash::SetTransferFiles
+// does (src/condor_utils/submit_utils.cpp).
+//
+// They are one decision, not two. Each defaults to a value that makes
+// sense only in the light of the other, each can be written with several
+// spellings that collapse onto a handful of values, and four combinations
+// are contradictory enough that condor_submit refuses the file rather
+// than guess. Treating them as independent strings -- which is what the
+// Go parser did -- let a job reach the schedd saying both that it does
+// not transfer files and that it transfers them on exit.
+//
+// Both are read attribute-name-first: SetTransferFiles asks for
+// submit_param(ATTR_SHOULD_TRANSFER_FILES, SUBMIT_KEY_ShouldTransferFiles),
+// so `ShouldTransferFiles` in the submit file outranks
+// `should_transfer_files`.
+//
+// inFilesSpecified and outFilesSpecified are SetTransferFiles'
+// in_files_specified / out_files_specified: they only matter for the
+// should_transfer_files = NO check at the end.
+//
+// The DEFAULT for should_transfer_files is deliberately left as this
+// package has always had it (YES, where condor_submit uses IF_NEEDED);
+// changing it changes which machines a job matches on a shared-filesystem
+// pool, and that decision is not this function's to make. Everything
+// else here follows condor_submit, and the default feeds the same
+// "did the submitter choose this?" flag the C++ keeps, so the
+// interactions below behave identically either way.
+func (sf *SubmitFile) resolveTransferMode(inFilesSpecified, outFilesSpecified bool) (shouldTransferFiles, fileTransferOutput, error) {
+	should := stfYes
+	defaultShould := true
+	if raw, ok := sf.submitCommandAlt("ShouldTransferFiles", "should_transfer_files"); ok {
+		v, valid := shouldTransferFilesNum(raw)
+		if !valid {
+			return 0, 0, fmt.Errorf("invalid value (%s) for ShouldTransferFiles: specify YES, NO, or IF_NEEDED", raw)
+		}
+		should = v
+		defaultShould = false
+	}
+
+	if should == stfNo && (inFilesSpecified || outFilesSpecified) {
+		return 0, 0, fmt.Errorf("transfer_input_files/transfer_output_files name files to transfer, but should_transfer_files is NO")
+	}
+
+	when := ftoOnExit
+	defaultWhen := true
+	if raw, ok := sf.submitCommandAlt("WhenToTransferOutput", "when_to_transfer_output"); ok {
+		v, valid := fileTransferOutputNum(raw)
+		if !valid {
+			return 0, 0, fmt.Errorf("invalid value (%s) for WhenToTransferOutput: specify ON_EXIT or ON_EXIT_OR_EVICT", raw)
+		}
+		when = v
+		defaultWhen = false
+	}
+
+	// A file that turned transfer off and said nothing about when gets
+	// the consistent answer rather than the contradiction below.
+	if !defaultShould && defaultWhen && should == stfNo {
+		when = ftoNone
+	}
+
+	if (should == stfNo) != (when == ftoNone) {
+		return 0, 0, fmt.Errorf("WhenToTransferOutput specified as %s yet ShouldTransferFiles defined as %s",
+			fileTransferOutputName(when), shouldTransferFilesName(should))
+	}
+
+	// ON_EXIT_OR_EVICT cannot work with IF_NEEDED, so a submitter who
+	// asked for the first and left the second alone gets YES.
+	if defaultShould && when == ftoOnExitOrEvict && should == stfIfNeeded {
+		should = stfYes
+	}
+	if when == ftoOnExitOrEvict && should == stfIfNeeded {
+		return 0, 0, fmt.Errorf(`"when_to_transfer_output = ON_EXIT_OR_EVICT" and "should_transfer_files = IF_NEEDED" are incompatible`)
+	}
+
+	return should, when, nil
+}
+
 // setFileTransfer sets file transfer related attributes
 func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
-	// should_transfer_files
-	if stf, ok := sf.submitCommand("should_transfer_files"); ok {
-		_ = ad.Set("ShouldTransferFiles", strings.ToUpper(stf))
-	} else {
-		// Default: YES
-		_ = ad.Set("ShouldTransferFiles", "YES")
-	}
-
-	// when_to_transfer_output
-	if wto, ok := sf.submitCommand("when_to_transfer_output"); ok {
-		_ = ad.Set("WhenToTransferOutput", strings.ToUpper(wto))
-	} else {
-		_ = ad.Set("WhenToTransferOutput", "ON_EXIT")
-	}
-
 	// transfer_input_files - parse comma-separated list.
 	//
-	// Empty stays unset, unlike transfer_output_files above. That
+	// Empty stays unset, unlike transfer_output_files below. That
 	// asymmetry is condor's, not ours: `transfer_input_files = ""`
 	// emits no TransferInput attribute at all, while
 	// `transfer_output_files = ""` emits TransferOutput = "".
-	if tif, ok := sf.submitCommand("transfer_input_files"); ok {
-		files := parseFileList(tif)
-		if len(files) > 0 {
-			// Join with commas for ClassAd string list format
-			_ = ad.Set("TransferInput", strings.Join(files, ","))
-		}
+	//
+	// Both lists answer to a second spelling, the attribute's own name.
+	// SetTransferFiles reads them as submit_param(SUBMIT_KEY_Transfer-
+	// InputFiles, SUBMIT_KEY_TransferInputFilesAlt), and the alternate is
+	// literally "TransferInputFiles" (submit_utils.h). A submit file
+	// using that spelling named files condor_submit transfers and the Go
+	// parser did not, so the job ran without them.
+	inFiles, inSpecified := sf.submitCommandAlt("transfer_input_files", "TransferInputFiles")
+	inFileList := parseFileList(inFiles)
+	// in_files_specified in SetTransferFiles is "the list had entries",
+	// not "the command was present": an empty list leaves it false.
+	inSpecified = inSpecified && len(inFileList) > 0
+
+	outFiles, outSpecified := sf.submitCommandAlt("transfer_output_files", "TransferOutputFiles")
+
+	should, when, err := sf.resolveTransferMode(inSpecified, outSpecified)
+	if err != nil {
+		return err
+	}
+	_ = ad.Set("ShouldTransferFiles", shouldTransferFilesName(should))
+	// WhenToTransferOutput is written only when the job might transfer.
+	// With should_transfer_files = NO condor_submit leaves the attribute
+	// off entirely; writing "ON_EXIT" there describes a job that
+	// transfers output, which is the opposite of what the file asked for.
+	if should != stfNo {
+		_ = ad.Set("WhenToTransferOutput", fileTransferOutputName(when))
+	}
+
+	if inSpecified {
+		// Join with commas for ClassAd string list format
+		_ = ad.Set("TransferInput", strings.Join(inFileList, ","))
 	}
 
 	// transfer_output_files - parse comma-separated list.
@@ -1121,9 +1303,9 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	// for a job that builds a large artifact it is the difference between
 	// transferring nothing and transferring gigabytes.
 	//
-	// transfer_input_files is deliberately not symmetric here; see below.
-	if tof, ok := sf.submitCommand("transfer_output_files"); ok {
-		_ = ad.Set("TransferOutput", strings.Join(parseFileList(tof), ","))
+	// transfer_input_files is deliberately not symmetric here; see above.
+	if outSpecified {
+		_ = ad.Set("TransferOutput", strings.Join(parseFileList(outFiles), ","))
 	}
 
 	// transfer_output_remaps - format: "name1=path1;name2=path2"
@@ -1137,6 +1319,18 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 			}
 			_ = ad.Set("TransferOutputRemaps", strings.Join(remapStrs, ";"))
 		}
+	}
+
+	// output_destination - a URL the sandbox's output is written to
+	// instead of being sent back to the submit machine.
+	//
+	// Stored exactly as written, quotes included: it is an f_as_string
+	// keyword in SubmitHash's table, and `output_destination =
+	// "https://x/y"` reaches the job ad with the quotes still on it --
+	// which is also why that spelling leaves the value looking like no
+	// URL at all and contributes no transfer-plugin method.
+	if dest, ok := sf.submitCommand("output_destination"); ok {
+		_ = ad.Set("OutputDestination", dest)
 	}
 
 	// transfer_executable
@@ -3370,7 +3564,194 @@ func (sf *SubmitFile) setAutoAttributes(ad *classad.ClassAd) error {
 	// Initialize to 0
 	_ = ad.Set("JobRunCount", 0)
 
+	// The starter ignores the checkpoint exit code unless the job also
+	// asks for file transfer on checkpoint, so condor_submit turns the
+	// flag on for any job that named one (SubmitHash::SetAutoAttributes).
+	// Without it a self-checkpointing job exited with its checkpoint
+	// code, nothing was transferred, and the exit looked like an
+	// ordinary one.
+	if _, ok := sf.submitCommand("checkpoint_exit_code"); ok {
+		_ = ad.Set("WantFTOnCheckpoint", true)
+	} else if _, ok := ad.Lookup("SuccessCheckpointExitCode"); ok {
+		_ = ad.Set("WantFTOnCheckpoint", true)
+	}
+
+	sf.setTransferPluginMethods(ad)
+
 	return nil
+}
+
+// transferPluginGate reports whether this job is one condor_submit would
+// derive WantTransferPluginMethods for.
+//
+// SetRequirements only reaches that derivation when mightTransfer() is
+// true for the universe (vanilla, mpi, parallel, java and vm -- not
+// grid, local or scheduler), when ShouldTransferFiles is not NO, and
+// when the submitter's own `requirements` does not already name
+// HasFileTransfer or HasJobTransferPlugins.
+func (sf *SubmitFile) transferPluginGate(ad *classad.ClassAd) bool {
+	switch sf.universe {
+	case UniverseVanilla, UniverseParallel, UniverseJava, UniverseVM:
+	default:
+		// MPI has no constant here and parseUniverse never yields it.
+		return false
+	}
+
+	if should, ok := ad.EvaluateAttrString("ShouldTransferFiles"); ok {
+		if v, valid := shouldTransferFilesNum(should); valid && v == stfNo {
+			return false
+		}
+	}
+
+	// condor_submit decides this from the attribute references it pulls
+	// out of the parsed Requirements; naming either attribute suppresses
+	// the generated transfer clause and the attribute with it, whether
+	// the reference is bare, TARGET.-qualified or MY.-qualified. Matching
+	// the identifier in the text the submitter wrote reaches the same
+	// answer without a second expression walk.
+	req, ok := sf.submitCommand("requirements")
+	if !ok {
+		return true
+	}
+	return !namesIdentifier(req, "HasFileTransfer") && !namesIdentifier(req, "HasJobTransferPlugins")
+}
+
+// namesIdentifier reports whether expr contains name as a whole
+// identifier, ignoring case. A longer attribute that merely starts with
+// the same letters -- HasFileTransferPluginMethods, which condor_submit
+// counts separately -- must not match.
+func namesIdentifier(expr, name string) bool {
+	isWord := func(c byte) bool {
+		return c == '_' || (c >= '0' && c <= '9') ||
+			(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	}
+	lower, target := strings.ToLower(expr), strings.ToLower(name)
+	for i := 0; ; {
+		j := strings.Index(lower[i:], target)
+		if j < 0 {
+			return false
+		}
+		start := i + j
+		end := start + len(target)
+		beforeOK := start == 0 || !isWord(lower[start-1])
+		afterOK := end == len(lower) || !isWord(lower[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		i = start + 1
+	}
+}
+
+// setTransferPluginMethods writes WantTransferPluginMethods: the file
+// transfer plugin methods the job NEEDS but does not bring with it.
+//
+// condor_submit builds it in SetRequirements from the URL schemes it
+// finds in TransferInput, OutputDestination and the right-hand sides of
+// TransferOutputRemaps, minus the methods the job supplies itself in
+// TransferPlugins -- which is the direction that is easy to get
+// backwards: transfer_plugins SUBTRACTS from this list rather than
+// filling it. The startd advertises HasFileTransferPluginMethods, so a
+// job that never says it needs `osdf` can match a machine with no osdf
+// plugin and fail its input transfer there.
+//
+// It runs after the custom-attribute pass for the same reason the C++
+// does: `+TransferInput = "http://..."` names a URL the job will fetch
+// just as much as transfer_input_files does.
+func (sf *SubmitFile) setTransferPluginMethods(ad *classad.ClassAd) {
+	if !sf.transferPluginGate(ad) {
+		return
+	}
+
+	// Methods the job brings. TransferPlugins is "TAR=mytarplugin;
+	// HTTP,HTTPS=myhttpplugin": each group before its "=" is a list of
+	// method names, separated by commas or whitespace.
+	supplied := map[string]bool{}
+	if plugins, ok := ad.EvaluateAttrString("TransferPlugins"); ok {
+		for _, group := range strings.Split(plugins, ";") {
+			eq := strings.Index(group, "=")
+			if eq < 0 {
+				continue
+			}
+			for _, m := range strings.FieldsFunc(group[:eq], func(r rune) bool {
+				return r == ',' || r == ' ' || r == '\t'
+			}) {
+				supplied[strings.ToLower(m)] = true
+			}
+		}
+	}
+
+	// Methods the job needs, in the order condor_submit visits them. The
+	// set is case-insensitive and keeps the first spelling it saw.
+	var wanted []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		scheme, ok := submitURLScheme(s)
+		if !ok || supplied[strings.ToLower(scheme)] || seen[strings.ToLower(scheme)] {
+			return
+		}
+		seen[strings.ToLower(scheme)] = true
+		wanted = append(wanted, scheme)
+	}
+
+	if files, ok := ad.EvaluateAttrString("TransferInput"); ok {
+		for _, f := range strings.Split(files, ",") {
+			add(f)
+		}
+	}
+	if dest, ok := ad.EvaluateAttrString("OutputDestination"); ok {
+		add(dest)
+	}
+	if remaps, ok := ad.EvaluateAttrString("TransferOutputRemaps"); ok {
+		for _, remap := range strings.Split(remaps, ";") {
+			if eq := strings.Index(remap, "="); eq >= 0 {
+				add(strings.TrimSpace(remap[eq+1:]))
+			}
+		}
+	}
+
+	if len(wanted) == 0 {
+		return
+	}
+	sort.Slice(wanted, func(i, j int) bool {
+		return strings.ToLower(wanted[i]) < strings.ToLower(wanted[j])
+	})
+	_ = ad.Set("WantTransferPluginMethods", strings.Join(wanted, ","))
+}
+
+// submitURLScheme mirrors IsUrl() and getURLType(url, true) from
+// src/condor_utils/condor_url.cpp: it reports the scheme of a string
+// HTCondor would treat as a URL, and whether it is one at all.
+//
+// HTCondor is stricter than RFC 3986 here -- it insists on the "//"
+// authority marker and on something after it -- and the scheme it
+// reports is the part AFTER the last '+', '-' or '.', so a
+// `chtc+https://` URL needs the `https` plugin. Case is preserved,
+// because the attribute is built from the spelling the submitter used.
+func submitURLScheme(s string) (string, bool) {
+	isAlpha := func(c byte) bool {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	}
+	if s == "" || !isAlpha(s[0]) {
+		return "", false
+	}
+	isSchemeChar := func(c byte) bool {
+		return isAlpha(c) || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.'
+	}
+	i := 1
+	for i < len(s) && isSchemeChar(s[i]) {
+		i++
+	}
+	if i+3 >= len(s) || s[i] != ':' || s[i+1] != '/' || s[i+2] != '/' {
+		return "", false
+	}
+	start := 0
+	for j := i; j > 0; j-- {
+		if c := s[j]; c == '+' || c == '-' || c == '.' {
+			start = j + 1
+			break
+		}
+	}
+	return s[start:i], true
 }
 
 // Submit submits the jobs from this submit file

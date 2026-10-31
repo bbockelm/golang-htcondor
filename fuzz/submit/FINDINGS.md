@@ -671,6 +671,20 @@ that is left.
   every path-valued keyword the Go parser does implement. C++ resolves them
   against `Iwd`; Go stores them as written. The grid family's own file
   keywords are fixed, below.
+
+- **List canonicalization, in both directions.** `concurrency_limits` and
+  `ec2_tag_names` are `f_as_list`, so C++ canonicalizes the separators and Go
+  does not; `encrypt_input_files` and its three siblings are `f_as_string`, so
+  C++ stores them verbatim and Go canonicalizes. The negotiator and the file
+  transfer both match these literally.
+- **`mount_under_scratch`** stays a string in C++; Go coerces it to a boolean.
+- **`want_graceful_removal = undefined`** stays undefined in C++; Go coerces
+  it to `false`.
+- **Iwd resolution, again.** The known `Cmd`/`UserLog` finding generalizes to
+  every path-valued keyword the Go parser does implement:
+  `azure_auth_file`, `gce_auth_file`, `gce_json_file`, `ec2_user_data_file`,
+  `ec2_key_pair_file` and the access-key files. C++ resolves them against
+  `Iwd`; Go stores them as written.
 - **`Env` vs `Environment`.** The Args/Arguments naming split has a twin: for
   V1-shaped environments Go emits `Env`, C++ emits `Environment`.
 
@@ -689,7 +703,7 @@ noop-job settings, the parallel-script settings, the submit-event notes,
 `kill_sig` and its siblings, `core_size`,
 `stack_size`, `keep_claim_idle`, `max_job_retirement_time`,
 `next_job_start_delay`, `allowed_execute_duration`, `allowed_job_duration`,
-`manifest`, `output_destination`, `output_directory`, `scitokens_file`,
+`manifest`, `output_directory`, `scitokens_file`,
 `project_name`, `primary_unix_group`, `jobset`, `dag_node_name` and the
 DAGMan bookkeeping, `periodic_vacate` and the `*_subcode` reasons.
 
@@ -936,6 +950,107 @@ deferral clause of its generated `Requirements` can read it, and Go generates
 neither that clause nor a `Requirements` resembling C++'s. It belongs with the
 `Requirements` divergence at the top of this file, not with the cron
 attributes, which now agree.
+
+**The file transfer family.** `should_transfer_files` and
+`when_to_transfer_output` are one decision in `SetTransferFiles`, not two
+independent strings, and the Go parser treated them as two. Four things
+followed from that.
+
+A job with `should_transfer_files = NO` carried `WhenToTransferOutput =
+"ON_EXIT"` anyway. condor_submit writes no `WhenToTransferOutput` at all in
+that case -- it turns the default into `NEVER` precisely so the attribute can
+be left off -- and the two attributes together said both that the job did not
+transfer files and that it transferred them on exit. The same pair in a submit
+file is a contradiction condor_submit refuses to resolve, so a job the Go
+parser built could not have been submitted by `condor_submit` at all; what the
+shadow then did with it depended on which attribute it read first. The remote
+spool path in `schedd.go` was filling the same attribute in, and no longer
+does when the job turned transfer off.
+
+Neither value was canonicalized or checked. The two settings have eight and
+ten accepted spellings that collapse onto three and four values --
+`should_transfer_files = always` is `"YES"`, `when_to_transfer_output = ONEXIT`
+is `"ON_EXIT"` -- and Go upper-cased whatever was written and stored that, so a
+startd policy or a `TARGET` expression matching `"YES"` literally did not match
+the job that asked for `ALWAYS`. Go also accepted `should_transfer_files =
+MAYBE`, and the quoted `"YES"` that condor_submit rejects because the quotes
+are part of the value. The four contradictory combinations condor_submit
+refuses -- `NO` with a real `when_to_transfer_output`, a transferring job with
+`NEVER`, `IF_NEEDED` with `ON_EXIT_OR_EVICT`, and `NO` alongside
+`transfer_input_files`/`transfer_output_files` -- are refused now too, and
+`ON_EXIT_OR_EVICT` on its own promotes an un-chosen `IF_NEEDED` to `YES` the
+way condor_submit does.
+
+One value is deliberately not mirrored. `when_to_transfer_output = NEVER` gets
+an answer out of condor_submit that its own table does not define: the
+translation tables are arrays of fixed-size structs terminated by an entry
+whose name is empty, `FileTransferOutputTranslation` has no such entry, and
+the lookup walks off the end into whatever the build laid out after it. The
+two HTCondor versions this harness has run against disagree in opposite
+directions -- 25.14.1 reads `NEVER` as a value that *contradicts*
+`should_transfer_files = NO` and rejects the pair, 26.2.0 reads it as the
+value that *agrees* and accepts it -- so each version rejects the file the
+other takes. There is no behavior to copy, and the Go parser rejects the name
+like any other unknown value. This was caught by CI rather than locally: the
+two oracles are different HTCondor versions, and the local one alone made the
+wrong answer look right.
+
+`transfer_input_files` and `transfer_output_files` each answer to a second
+spelling, the attribute's own name (`TransferInputFiles`,
+`TransferOutputFiles`). A submit file using it named files condor_submit
+transfers and Go did not write down at all, so the job ran without its input.
+
+**`WantTransferPluginMethods` was missing entirely, and `transfer_plugins`
+points the other way.** It is the list of file-transfer plugin methods the job
+NEEDS, derived from the URL schemes in `TransferInput`, `OutputDestination`
+and the right-hand sides of `TransferOutputRemaps` -- minus the ones the job
+brings itself in `transfer_plugins`, which *subtracts* from the list rather
+than filling it. The startd advertises `HasFileTransferPluginMethods`, so
+without the attribute a job needing `osdf` matched a machine with no osdf
+plugin and failed its input transfer there. The scheme is the part after the
+last `+`, `-` or `.`, so `chtc+https://` needs `https`; HTCondor's URL test is
+stricter than RFC 3986 and wants an authority marker with something after it.
+condor_submit derives this inside `SetRequirements`, after the `+Attr` pass
+and only for a universe that might transfer, with `ShouldTransferFiles` not
+`NO`, and only when the submitter's own `requirements` does not already name
+`HasFileTransfer` or `HasJobTransferPlugins` -- all four gates are mirrored.
+`output_destination` is written now as well, because the derivation reads it;
+it is stored verbatim, quotes included, which is also why the quoted spelling
+contributes no method.
+
+**`WantFTOnCheckpoint`.** The starter ignores a job's checkpoint exit code
+unless the job also asks for file transfer on checkpoint, so condor_submit
+sets the flag for any job that named one. Go set nothing, so a
+self-checkpointing job exited with its checkpoint code, nothing was
+transferred, and the exit looked like an ordinary one.
+
+**`TransferIn`/`TransferOut`/`TransferErr` and `StreamIn`/`StreamOut`/
+`StreamErr` already agreed** and their rows are deleted rather than fixed:
+compared directly against the oracle over the 600-file generated sweep and
+over hand-written files reaching each branch of `CheckStdFile`, the two sides
+produce the same booleans and the same presence. So does a
+`transfer_input_files` entry containing a space. What still differs in
+`TransferInput` is narrower than the old row said: a container job's image and
+a java job's entry class and `jar_files` are added to the list by C++ and by
+nothing in Go.
+
+These cases are pinned by `TestTransferAttributesMatchOracle` and
+`TestTransferContradictionsAreRejected` rather than by the generated sweep.
+The sweep reached almost none of them -- whether a 600-file corpus contains a
+`should_transfer_files = NO` file condor_submit still accepts is an accident
+of the generator -- so a green sweep said nothing about this family either
+way.
+
+What is deliberately left: the **`ShouldTransferFiles` default** at the top of
+this file. Everything above canonicalizes and checks the value the submitter
+wrote; which value a silent submit file gets (`YES` here, `IF_NEEDED` in
+condor_submit) changes which machines a job matches on a shared-filesystem
+pool and is not this change's to make. The default feeds the same "did the
+submitter choose this?" flag condor_submit keeps, so every interaction above
+behaves identically under either one. Also left: `TransferPlugins` is stored
+verbatim by C++ and re-joined by Go, which drops the spaces around the `;`
+separators -- the same `f_as_string` question as the `encrypt_*_files` lists,
+and it belongs with them.
 
 ## The container image
 
