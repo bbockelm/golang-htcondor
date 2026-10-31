@@ -670,9 +670,25 @@ that is left.
   matches limit names literally.
 - **A filename containing a space** survives in `TransferInput` on the C++
   side and is split away by Go, so the file is never transferred.
-- **`stream_input` / `stream_output` / `stream_error`** produce opposite
-  `TransferIn`/`TransferOut`/`TransferErr` booleans, so one side streams the
-  stream and the other transfers it.
+- **`transfer_input` / `transfer_output` / `transfer_error` with no file
+  named** get one answer for proc 0 and a different one for every proc after
+  it -- from C++, for a single submit file. `SetStdout` reads the transfer
+  flag out of the job ad before applying the keyword, and only consults the
+  std file `if (value || ! job->Lookup(ATTR_JOB_OUTPUT))`. Proc 0 has neither,
+  so the empty file name clears the flag and `TransferOut = false` is written
+  -- into the cluster ad. Proc 1 inherits that false, the keyword's `true`
+  now differs from it, and the std-file check is skipped because the ad
+  already carries `Out`, so proc 1 and everything after it get
+  `TransferOut = true` plus a `StreamOut = false` that proc 0 does not have.
+  The same holds for stdin and stderr. Go writes proc 0's answer for every
+  proc; reproducing the drift would mean reproducing the stale state that
+  causes it. `TestStdFileTransferMatchesOracle` pins both halves: every file
+  that names its std files agrees attribute for attribute, and in the
+  divergent case Go is self-consistent across procs and matches C++ on proc 0.
+
+  The earlier reading of this, that the three `stream_*` keywords produce
+  opposite `Transfer*` booleans, no longer reproduces: with the file named or
+  not, both sides now write the same values.
 - **Iwd resolution, again.** The `Cmd`/`UserLog` finding generalized to every
   path-valued keyword the Go parser implements; see "Grid credential and data
   files were stored as written" under "Fixed". What is left of it is the
