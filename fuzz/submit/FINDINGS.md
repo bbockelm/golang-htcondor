@@ -668,8 +668,6 @@ that is left.
   `handleAVPairs` collects the EC2 tags from the `ec2_tag_<Name>` macros as
   well. Go stores the text it was given in both cases, and the negotiator
   matches limit names literally.
-- **A filename containing a space** survives in `TransferInput` on the C++
-  side and is split away by Go, so the file is never transferred.
 - **`transfer_input` / `transfer_output` / `transfer_error` with no file
   named** get one answer for proc 0 and a different one for every proc after
   it -- from C++, for a single submit file. `SetStdout` reads the transfer
@@ -733,10 +731,33 @@ and `WantParallelScheduling`.
 
 The count this section used to open with ("about 110 attributes") was stated
 twice, from two different sweeps, and both numbers were stale by the time
-they were written. The map is the list; a sweep of it is in
-`TestAuditKnownEntries` terms rather than prose.
+they were written. The map is the list: a count written here is stale the
+next time one is fixed, and nothing keeps prose in sync with it.
 
 ## Fixed
+
+**A tool daemon was never transferred.** `SetTransferFiles` adds
+`ToolDaemonCmd`, and `ToolDaemonInput` if there is one, to the job's transfer
+list -- the order-dependency list at the top of `submit_utils.cpp` says
+"SetTDP >> SetTransferFiles" for exactly this. Go wrote the TDP attributes and
+not the files, so a job that asked to run under `strace` reached the execute
+node with a `ToolDaemonCmd` naming a path that was not in its sandbox.
+
+Two details came with it, both verified against the oracle: a tool daemon
+alone does not CREATE a transfer list (the attribute is still written only
+when the submit file named files of its own), and nothing is added when
+`should_transfer_files = NO`.
+
+**`TransferOutputRemaps` was parsed and rebuilt.** It is stored verbatim --
+trimmed, one layer of quotes off, and appended to any remaps condor_submit
+generated itself; the shadow is what splits it when the job finishes.
+Rebuilding it dropped the spaces around the separators, and went through a Go
+MAP, so a file with two or more remaps produced a different attribute value
+run to run from the same submit file.
+
+**A filename containing a space** was listed as split away by Go. It no
+longer reproduces: `transfer_input_files = a b, c.txt` gives
+`"a b,c.txt"` on both sides.
 
 **A keyword written under its job attribute's name was ignored.**
 `condor_submit` reads most keywords with `submit_param(name, attr)`, so the

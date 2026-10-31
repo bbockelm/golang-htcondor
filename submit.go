@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1624,6 +1625,20 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	if err != nil {
 		return err
 	}
+
+	// A tool daemon's binary is an input file too, and so is the file it
+	// reads. SetTransferFiles adds ToolDaemonCmd and ToolDaemonInput to the
+	// list it is about to write, so a job that asked to run under strace
+	// reaches the execute node with strace in its sandbox; without them the
+	// starter has a ToolDaemonCmd naming a path that is not there.
+	//
+	// condor_submit reads them off the job ad, because SetTDP runs first
+	// (the order-dependency list at the top of submit_utils.cpp says
+	// "SetTDP >> SetTransferFiles"). Here the TDP family is written after
+	// this point, so the keywords are read instead -- setToolDaemon stores
+	// them verbatim, so it is the same value either way.
+	sf.addToolDaemonInputFiles(&inFileList, should)
+
 	if inSpecified || imageAdded {
 		// Join with commas for ClassAd string list format
 		_ = ad.Set("TransferInput", strings.Join(inFileList, ","))
@@ -1644,16 +1659,20 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 		_ = ad.Set("TransferOutput", strings.Join(parseFileList(outFiles), ","))
 	}
 
-	// transfer_output_remaps - format: "name1=path1;name2=path2"
-	if tor, ok := sf.submitCommand("transfer_output_remaps"); ok {
-		remaps := parseRemaps(tor)
-		if len(remaps) > 0 {
-			// Format as ClassAd string with semicolons
-			var remapStrs []string
-			for src, dst := range remaps {
-				remapStrs = append(remapStrs, src+"="+dst)
-			}
-			_ = ad.Set("TransferOutputRemaps", strings.Join(remapStrs, ";"))
+	// transfer_output_remaps is stored VERBATIM, trimmed and with one layer
+	// of surrounding quotes taken off (trim_and_strip_quotes_in_place), and
+	// nothing else. SetTransferFiles does not parse it -- it appends the
+	// submitter's text to any remaps condor_submit generated itself -- and
+	// the shadow is what splits it, on `;` and `=`, when the job finishes.
+	//
+	// Parsing and rebuilding it here did two things wrong. It dropped the
+	// spaces around the separators, so a remap the submitter wrote as
+	// `out.txt = final.txt` came out `out.txt=final.txt`; and it went
+	// through a MAP, so two or more remaps came out in Go's map iteration
+	// order -- a different attribute value run to run from one submit file.
+	if tor, ok := sf.simpleKeywordParam("transfer_output_remaps", "TransferOutputRemaps"); ok {
+		if remaps := trimAndStripSubmitQuotes(tor); remaps != "" {
+			_ = ad.Set("TransferOutputRemaps", remaps)
 		}
 	}
 
@@ -2687,6 +2706,35 @@ func parseFileList(list string) []string {
 	return files
 }
 
+// addToolDaemonInputFiles appends the tool daemon's binary, and the file it
+// reads, to a job's transfer list.
+//
+// Neither is added when the job transfers nothing (should_transfer_files =
+// NO), and ToolDaemonInput rides on ToolDaemonCmd: condor_submit looks for
+// it only once it has found a daemon to run. A path already on the list is
+// not added twice.
+//
+// One thing is deliberately NOT done here: making the list exist. The
+// attribute is still written only when the submit file named files of its
+// own (or a container image was added), which means a tool daemon alone does
+// not produce a TransferInput -- condor_submit's behaviour, verified against
+// the oracle, and not obviously what was intended.
+func (sf *SubmitFile) addToolDaemonInputFiles(inFileList *[]string, should shouldTransferFiles) {
+	if should == stfNo {
+		return
+	}
+	cmd := sf.submitParam("tool_daemon_cmd", "ToolDaemonCmd")
+	if cmd == "" {
+		return
+	}
+	for _, file := range []string{cmd, sf.submitParam("tool_daemon_input", "ToolDaemonInput")} {
+		if file == "" || slices.Contains(*inFileList, file) {
+			continue
+		}
+		*inFileList = append(*inFileList, file)
+	}
+}
+
 // trimSubmitQuotes removes one matching pair of surrounding double quotes
 // from a submit command's value, the way condor_submit does:
 // `transfer_output_files = "a.txt, b.txt"` names two files, not one file
@@ -2706,30 +2754,6 @@ func trimSubmitQuotes(s string) string {
 		return t[1 : len(t)-1]
 	}
 	return t
-}
-
-// parseRemaps parses transfer_output_remaps format: "name1=path1;name2=path2"
-// Returns a map of source -> destination paths
-func parseRemaps(remaps string) map[string]string {
-	result := make(map[string]string)
-	// Strip outer quotes if present (submit file often wraps value in quotes)
-	remaps = strings.Trim(remaps, "\"")
-	pairs := strings.Split(remaps, ";")
-	for _, pair := range pairs {
-		pair = strings.TrimSpace(pair)
-		if pair == "" {
-			continue
-		}
-		parts := strings.SplitN(pair, "=", 2)
-		if len(parts) == 2 {
-			src := strings.TrimSpace(parts[0])
-			dst := strings.TrimSpace(parts[1])
-			if src != "" && dst != "" {
-				result[src] = dst
-			}
-		}
-	}
-	return result
 }
 
 // setGridParams sets the grid universe attributes, mirroring SetGridParams()
