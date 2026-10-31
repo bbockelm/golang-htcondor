@@ -1,1 +1,1 @@
-C++ zeroes the accounting counters; Go omits them.
+as remotewallclocktime: the same real 0.0 on both sides, rendered without its decimal point by the harness.

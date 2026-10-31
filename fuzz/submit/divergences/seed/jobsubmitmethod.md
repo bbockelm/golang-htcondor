@@ -1,1 +1,1 @@
-C++ records how the job was submitted; Go omits it.
+DELIBERATELY NOT FIXED. C++ writes 0, which is JSM_CONDOR_SUBMIT in condor_includes/proc.h -- the attribute names the TOOL a job came from, and 0 means condor_submit. A job built by this library did not come from condor_submit, and proc.h has no value for "a Go program using golang-htcondor" (JSM_USER_SET, 100, is for a submitter setting it by hand), so writing anything here would make condor_q and the schedd's own reporting attribute these jobs to a tool that never saw them.
