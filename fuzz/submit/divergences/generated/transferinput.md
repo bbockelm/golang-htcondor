@@ -1,1 +1,1 @@
-a container job's image now reaches TransferInput; the keywords that feed it from a java job -- the entry class and jar_files -- are still added by C++ and by nothing in Go, and a filename containing a space is split away rather than kept as one entry.
+a java job's entry class and its jar_files are added to the transfer list by C++ and by nothing in Go. That is the rest of the java-universe work: the same block in SetTransferFiles also rewrites Cmd to "java" and turns TransferExecutable off, which is the universe/java/cmd entry, so the two are one change.
