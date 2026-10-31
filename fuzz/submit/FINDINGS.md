@@ -626,13 +626,15 @@ that is left.
 
 ## Values that differ where both sides set the attribute
 
-- **`KillSig` becomes a number.** C++ keeps the name (`"SIGTERM"`); Go
-  converts it to `15`. Same for `remove_kill_sig`.
 - **`JobLeaseDuration` floor.** C++ raises a short lease to its 20-second
   minimum; Go stores whatever was written.
-- **Quote stripping.** `file_remaps`, `on_exit_hold_reason` and
-  `periodic_hold_reason` are `f_strip_quotes` keywords: C++ removes the
-  surrounding quotes, Go keeps them inside the stored string.
+- **Quote stripping.** `file_remaps` is an `f_strip_quotes` keyword: C++
+  removes the surrounding quotes, Go keeps them inside the stored string.
+  `on_exit_hold_reason` and `periodic_hold_reason` were listed here too and
+  do not belong: `oracle.Keywords()` reports them as
+  `f_as_expr | f_special_periodic`, nothing strips anything, and the quotes
+  vanish because the value is parsed. See "A hold reason was stored as text"
+  under "Fixed".
 - **List canonicalization, in both directions.** `ec2_tag_names` is
   `f_as_list`, so C++ canonicalizes the separators and Go does not;
   `encrypt_input_files` and its three siblings are `f_as_string`, so C++
@@ -645,11 +647,6 @@ that is left.
   stores them verbatim and Go canonicalizes. The negotiator and the file
   transfer both match these literally.
 
-- **Quotes around a hold reason.** `on_exit_hold_reason` and
-  `periodic_hold_reason` are assigned as EXPRESSIONS, so a quoted reason
-  becomes a ClassAd string with no quotes in its value; Go stores the text it
-  was given and the quotes end up inside the string. Both belong to
-  `SetPeriodicExpressions`, not to the simple-keyword pass.
 - **`concurrency_limits` and `ec2_tag_names`** are not list-flagged keywords:
   `SetConcurrencyLimits` lower-cases, validates and SORTS the names, and
   `handleAVPairs` collects the EC2 tags from the `ec2_tag_<Name>` macros as
@@ -708,16 +705,79 @@ noop-job settings, the parallel-script settings, the submit-event notes,
 DAGMan bookkeeping, `periodic_vacate` and the `*_subcode` reasons.
 
 The families still in `knownDivergentGenerated` are the EC2/GCE/Azure grid
-settings, the tool-daemon (TDP) settings, `kill_sig` and its siblings,
-`scitokens_file`, `project_name`, `periodic_vacate` and the `*_subcode`
-reasons. The buffer, Java, noop-job, parallel-script and submit-event-note
-families, `core_size`, `stack_size`, `keep_claim_idle`,
+settings, the tool-daemon (TDP) settings, `scitokens_file` and
+`project_name`. The buffer, Java, noop-job, parallel-script and
+submit-event-note families, the whole `kill_sig` family, `periodic_vacate`,
+the `*_subcode` pair, `core_size`, `stack_size`, `keep_claim_idle`,
 `max_job_retirement_time`, `next_job_start_delay`, the `allowed_*_duration`
 pair, `manifest`, `output_destination`, `output_directory`,
 `primary_unix_group`, `jobset`, `dag_node_name` and the GPU request family
 were all on this list and are fixed; see "Fixed" below.
 
 ## Fixed
+
+**The kill-signal family named no signal.** `KillSig`, `RemoveKillSig` and
+`HoldKillSig` hold a signal NAME — the starter and the shadow read the
+attribute as a string and look the name up again — and the Go parser wrote
+whatever the submit file said: `kill_sig = SIGTERM` became the integer `15`,
+and `kill_sig = 15` stayed `15`. Neither is a name the starter can resolve,
+so the job was killed with the default signal rather than the one the
+submitter chose; `hold_kill_sig` was not implemented at all, so a job held by
+`condor_hold` never got its signal.
+
+`SubmitHash::fixupKillSigName` decides between a number and a name with
+`atoi()`: a non-zero result is a signal number and is replaced by the name
+`signalName()` gives it, and anything else is looked up as a name, matched
+without regard to case and stored upper-cased. The `SIG` prefix is part of
+the name (`kill_sig = TERM` is refused), and a value that is neither — an
+unknown name, `0`, a number past the end of the table — makes `condor_submit`
+refuse the submit file, which Go now does too rather than storing it.
+
+The numbers are the submit HOST's, which is the part that cannot be guessed:
+`SIGUSR1` is 10 on Linux and 30 on macOS, `SIGCHLD` 17 and 20, `SIGIO` 29 and
+23, and `SIGEMT`/`SIGINFO` exist only on the BSDs, so `kill_sig = 17` is a
+different signal on each. The Go table is built from `syscall`'s constants for
+that reason, and `TestKillSigNumberMatchesOracle` drives every number from -5
+to 70 past the linked `SubmitHash` so a platform mistake fails rather than
+passing on whichever host ran the suite. HTCondor's table is a fixed list of
+names rather than the platform's: `SIGPWR`, `SIGSTKFLT`, `SIGPOLL`,
+`SIGRTMIN` and the `SIGIOT`/`SIGCLD` aliases are real signals that
+`condor_submit` refuses, and the Go parser refuses them too. (The read-past-
+the-end hazard in `enum_utils.cpp` does not apply here — `sig_name.cpp`'s
+table carries a `{ -1, "\0" }` terminator and both loops stop on it.)
+
+`kill_sig` also has a universe-dependent default that Go did not have. A
+vanilla job gets no `KillSig` at all, which leaves the starter to choose — for
+a docker or container job, the image's own stop signal — and every other
+universe gets `"SIGTERM"`, without which a scheduler- or local-universe
+shadow has no signal to send on `condor_rm`. `remove_kill_sig` and
+`hold_kill_sig` have no default. Alongside it, `kill_sig_timeout` is read with
+`atoi()` and written whenever the command is present, so `kill_sig_timeout =
+abc` is a zero timeout rather than, as Go had it, no attribute.
+
+**A hold reason was stored as text, and a subcode was dropped.**
+`SetPeriodicExpressions` assigns every one of its commands as an EXPRESSION,
+the reasons and the subcodes included. Go stored the reasons as the text it
+was given, so `periodic_hold_reason = "too slow"` reached the ad as a string
+whose own first and last characters were quotes and `condor_q -hold` showed
+them; and it stored a subcode only when the value parsed as an integer, so
+`periodic_hold_subcode = 1+2` became `1` and `on_exit_hold_subcode =
+ExitCode` became nothing. A subcode is what a release policy compares against
+(`HoldReasonSubCode == 42`), so a dropped one left the job held forever.
+
+`periodic_vacate` was not implemented at all: a job that asked to be
+evicted and requeued on a condition simply ran on.
+
+All eight commands take their own attribute name as a second accepted
+spelling — `submit_param(SUBMIT_KEY_x, ATTR_x)` — so `PeriodicHoldReason =
+"x"` now works the way `periodic_hold_reason = "x"` does, as it does in
+`condor_submit`. A value that is not a ClassAd expression refuses the submit
+file on both sides.
+
+The earlier note calling the two reasons `f_strip_quotes` keywords was wrong:
+`oracle.Keywords()` reports `f_as_expr | f_special_periodic` for both, nothing
+strips a quote, and the quotes disappear only because the value is parsed and
+the quotes are a string literal's delimiters.
 
 **Grid credential and data files were stored as written.** `SetGridParams`
 runs every cloud credential and data file it reads through `full_path`, so the

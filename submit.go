@@ -3070,58 +3070,42 @@ func (sf *SubmitFile) setJavaParams(ad *classad.ClassAd) error {
 	return nil
 }
 
-// setPeriodicExpressions sets periodic hold/remove/release expressions
+// setPeriodicExpressions writes the periodic and on-exit policy family the
+// way SubmitHash::SetPeriodicExpressions does
+// (condor_utils/submit_utils.cpp).
+//
+// Every attribute here is assigned as an EXPRESSION, the reasons and the
+// subcodes included. That is what makes `periodic_hold_reason = "too slow"`
+// come out as the ClassAd string "too slow" rather than a string whose own
+// first and last characters are quotes: nothing strips the quotes, the value
+// is parsed and the quotes are the literal's delimiters. The difference
+// shows up wherever the reason is read back -- condor_q -hold and the
+// HoldReason the schedd copies onto the job both carried the extra quotes --
+// and the subcodes are worse, since a subcode stored as a string is not the
+// number a policy expression comparing against it expects.
+//
+// The alternate spelling of each command is its own attribute name, so
+// `PeriodicHoldReason = "x"` is as good as `periodic_hold_reason = "x"`.
 func (sf *SubmitFile) setPeriodicExpressions(ad *classad.ClassAd) error {
-	// periodic_hold - Expression to periodically hold job
-	if periodicHold, ok := sf.submitCommand("periodic_hold"); ok {
-		if err := setExprAttr(ad, "PeriodicHold", "periodic_hold", periodicHold); err != nil {
+	// on_exit_hold and on_exit_remove are deliberately absent: condor_submit
+	// reads both in SetJobRetries, where the retry settings can override
+	// them. See setJobRetries.
+	for _, p := range []struct{ command, alt, attr string }{
+		{"periodic_hold", "PeriodicHold", "PeriodicHold"},
+		{"periodic_hold_reason", "PeriodicHoldReason", "PeriodicHoldReason"},
+		{"periodic_hold_subcode", "PeriodicHoldSubCode", "PeriodicHoldSubCode"},
+		{"periodic_release", "PeriodicRelease", "PeriodicRelease"},
+		{"periodic_remove", "PeriodicRemove", "PeriodicRemove"},
+		{"periodic_vacate", "PeriodicVacate", "PeriodicVacate"},
+		{"on_exit_hold_reason", "OnExitHoldReason", "OnExitHoldReason"},
+		{"on_exit_hold_subcode", "OnExitHoldSubCode", "OnExitHoldSubCode"},
+	} {
+		value := sf.submitParam(p.command, p.alt)
+		if err := setExprAttr(ad, p.attr, p.command, value); err != nil {
 			return err
 		}
 	}
 
-	// periodic_hold_reason - Reason string when periodic hold triggers
-	if holdReason, ok := sf.submitCommand("periodic_hold_reason"); ok {
-		_ = ad.Set("PeriodicHoldReason", holdReason)
-	}
-
-	// periodic_hold_subcode - Subcode when periodic hold triggers
-	if holdSubcode, ok := sf.submitCommand("periodic_hold_subcode"); ok {
-		if intSubcode, err := parseInt(holdSubcode); err == nil {
-			_ = ad.Set("PeriodicHoldSubCode", intSubcode)
-		}
-	}
-
-	// periodic_release - Expression to periodically release held job
-	if periodicRelease, ok := sf.submitCommand("periodic_release"); ok {
-		if err := setExprAttr(ad, "PeriodicRelease", "periodic_release", periodicRelease); err != nil {
-			return err
-		}
-	}
-
-	// periodic_remove - Expression to periodically remove job
-	if periodicRemove, ok := sf.submitCommand("periodic_remove"); ok {
-		if err := setExprAttr(ad, "PeriodicRemove", "periodic_remove", periodicRemove); err != nil {
-			return err
-		}
-	}
-
-	// on_exit_hold is not handled here: condor_submit reads it in
-	// SetJobRetries, where the retry settings can override it. See
-	// setJobRetries.
-
-	// on_exit_hold_reason - Reason for on_exit hold
-	if onExitHoldReason, ok := sf.submitCommand("on_exit_hold_reason"); ok {
-		_ = ad.Set("OnExitHoldReason", onExitHoldReason)
-	}
-
-	// on_exit_hold_subcode - Subcode for on_exit hold
-	if onExitHoldSubcode, ok := sf.submitCommand("on_exit_hold_subcode"); ok {
-		if intSubcode, err := parseInt(onExitHoldSubcode); err == nil {
-			_ = ad.Set("OnExitHoldSubCode", intSubcode)
-		}
-	}
-
-	// on_exit_remove is likewise SetJobRetries' to write.
 	if err := sf.setJobRetries(ad); err != nil {
 		return err
 	}
@@ -3937,33 +3921,50 @@ func (sf *SubmitFile) expandSubmitMacros(value string, jobID JobID, queueVars ma
 	return result
 }
 
-// setSignalHandling sets signal handling attributes for the job
+// setSignalHandling writes the kill-signal family the way
+// SubmitHash::SetKillSig does (condor_utils/submit_utils.cpp).
+//
+// Every one of these attributes holds a signal NAME, not a number -- see
+// fixupKillSigName, which does the conversion and the validation.
+//
+// `kill_sig` alone has a default, and it depends on the universe: a vanilla
+// job gets no KillSig at all, and every other universe gets "SIGTERM". The
+// difference is not cosmetic. The vanilla starter decides the soft-kill
+// signal for itself (SIGTERM for a bare job, but the container runtime's own
+// stop signal for a docker or container job), so writing "SIGTERM" onto a
+// vanilla job overrides a choice the starter was meant to make, while leaving
+// it off a scheduler- or local-universe job leaves the shadow with no signal
+// to send on condor_rm.
 func (sf *SubmitFile) setSignalHandling(ad *classad.ClassAd) error {
-	// kill_sig - signal to use when killing job
-	if killSig, ok := sf.submitCommand("kill_sig"); ok {
-		// Can be a signal name (SIGTERM) or number (15)
-		if intSig, err := parseInt(killSig); err == nil {
-			_ = ad.Set("KillSig", intSig)
-		} else {
-			// Try as string (signal name)
-			_ = ad.Set("KillSig", killSig)
+	killSig, err := fixupKillSigName("kill_sig", sf.submitParam("kill_sig", "KillSig"))
+	if err != nil {
+		return err
+	}
+	if killSig == "" && sf.universe != UniverseVanilla {
+		killSig = "SIGTERM"
+	}
+	if killSig != "" {
+		_ = ad.Set("KillSig", killSig)
+	}
+
+	for _, sig := range []struct{ command, alt, attr string }{
+		{"remove_kill_sig", "RemoveKillSig", "RemoveKillSig"},
+		{"hold_kill_sig", "HoldKillSig", "HoldKillSig"},
+	} {
+		name, err := fixupKillSigName(sig.command, sf.submitParam(sig.command, sig.alt))
+		if err != nil {
+			return err
+		}
+		if name != "" {
+			_ = ad.Set(sig.attr, name)
 		}
 	}
 
-	// remove_kill_sig - signal to use when removing job
-	if removeSig, ok := sf.submitCommand("remove_kill_sig"); ok {
-		if intSig, err := parseInt(removeSig); err == nil {
-			_ = ad.Set("RemoveKillSig", intSig)
-		} else {
-			_ = ad.Set("RemoveKillSig", removeSig)
-		}
-	}
-
-	// kill_sig_timeout - how long to wait after kill signal before using SIGKILL
-	if killTimeout, ok := sf.submitCommand("kill_sig_timeout"); ok {
-		if intTimeout, err := parseInt(killTimeout); err == nil {
-			_ = ad.Set("KillSigTimeout", intTimeout)
-		}
+	// kill_sig_timeout is read with atoi(), so a value that is not a
+	// number is 0 rather than an error, and the attribute is written
+	// whenever the command is present at all.
+	if timeout := sf.submitParam("kill_sig_timeout", "KillSigTimeout"); timeout != "" {
+		_ = ad.Set("KillSigTimeout", cAtoi(timeout))
 	}
 
 	return nil
