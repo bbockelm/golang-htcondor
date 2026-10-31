@@ -736,6 +736,28 @@ next time one is fixed, and nothing keeps prose in sync with it.
 
 ## Fixed
 
+**`on_evict_checks` was not implemented.** It names submit-side transforms
+the schedd runs when a job is evicted -- TAGS, not expressions, each with a
+body written under `transform_body_<tag>` and usually spanning several lines.
+The pair reaches the ad as `TransformOnEvict` (the tags that had a body) and
+`TransformBody_<tag>` (the body, its lines joined with 0x1e, because a
+newline cannot live in a ClassAd string in the job queue). Go wrote none of
+it, so a job asking to be transformed on eviction was submitted without the
+transform and the schedd had nothing to run.
+
+A tag with no body is dropped from the list and the list is still written,
+empty -- `on_evict_checks = nosuch` gives `TransformOnEvict = ""` -- and
+comment and blank lines are dropped from a body, so a block can be written
+the way a configuration file is.
+
+The ORDER against the built-in memory transform is the part worth keeping:
+`retry_request_memory` appends its own tag to the same list, and
+SetOnEvictExpressions overwrites the list outright, so the explicit tags have
+to be written first. The other way round the built-in tag is written and then
+thrown away, leaving a `TransformBody_RequestMemory` that nothing names --
+and a body nothing names is never run. The oracle is what settled it:
+`"memck RequestMemory"`, in that order.
+
 **A tool daemon was never transferred.** `SetTransferFiles` adds
 `ToolDaemonCmd`, and `ToolDaemonInput` if there is one, to the job's transfer
 list -- the order-dependency list at the top of `submit_utils.cpp` says
