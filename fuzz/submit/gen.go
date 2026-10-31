@@ -112,11 +112,17 @@ var excluded = map[string]string{
 // submit_utils.cpp packs the group as f_special (0x20000) plus a number in
 // 0x1F000; the group is what says a keyword is grid-only, vm-only and so on.
 // Only the ones that restrict a keyword to a universe are named here.
+//
+// f_special_java is deliberately NOT one of them. The group says which SetXXX
+// method reads the keyword, not which universe it belongs to, and
+// SetJavaVMArgs runs for every job: `java_vm_args` in a vanilla file sets
+// JavaVMArgs just as it does in a java one. Treating the group as a universe
+// kept those keywords out of every file but the rare java one, which is how
+// the V1 spelling went uncompared.
 const (
 	specialMask     = 0x3F000
 	specialGrid     = 0x20000 + 0x03000
 	specialVM       = 0x20000 + 0x04000
-	specialJava     = 0x20000 + 0x05000
 	specialParallel = 0x20000 + 0x0D000
 )
 
@@ -164,8 +170,6 @@ func NewVocab(kws []oracle.Keyword) *Vocab {
 			e.universe = "grid"
 		case specialVM:
 			e.universe = "vm"
-		case specialJava:
-			e.universe = "java"
 		case specialParallel:
 			e.universe = "parallel"
 		}
@@ -480,15 +484,26 @@ var byName = map[string]func(*stream) string{
 
 	// Shapes the per-keyword sweep showed SubmitHash rejecting for the value
 	// the keyword's declared type alone would have produced.
-	"allow_arguments_v1":               boolean, // listed twice upstream, once as a string
-	"allow_environment_v1":             boolean,
-	"use_scitoken":                     enum("false"), // true needs a token the oracle cannot read
-	"use_scitokens":                    enum("false"),
-	"use_x509userproxy":                enum("false"),
-	"buffer_files":                     quoted("a.txt = b.txt"),
-	"environment2":                     enum(`"A=1 B=2"`, `"ONE=1 TWO='a b'"`, `""`),
-	"java_vm_args":                     enum(`"-Xmx128m -Xms64m"`, `"-server"`),
-	"java_vm_arguments2":               enum(`"-Xmx128m -Xms64m"`, `"-server"`),
+	"allow_arguments_v1":   boolean, // listed twice upstream, once as a string
+	"allow_environment_v1": boolean,
+	"use_scitoken":         enum("false"), // true needs a token the oracle cannot read
+	"use_scitokens":        enum("false"),
+	"use_x509userproxy":    enum("false"),
+	"buffer_files":         quoted("a.txt = b.txt"),
+	"environment2":         enum(`"A=1 B=2"`, `"ONE=1 TWO='a b'"`, `""`),
+	// A quoted value is V2 and lands in JavaVMArguments, an unquoted one is
+	// V1 and lands in JavaVMArgs. Generating only the first leaves half the
+	// keyword uncompared.
+	"java_vm_args":       enum(`"-Xmx128m -Xms64m"`, `"-server"`, "-server", "-Xmx128m -Xms64m"),
+	"java_vm_arguments":  enum(`"-Xmx128m -Xms64m"`, "-server", "-Xmx128m -Xms64m"),
+	"java_vm_arguments2": enum(`"-Xmx128m -Xms64m"`, `"-server"`),
+	// The same split for the tool daemon. tool_daemon_arguments2 is V2 only:
+	// SubmitHash rejects a value that is not a double-quoted string, so the
+	// unquoted shape the tool_daemon_ family otherwise draws never reached
+	// an ad at all.
+	"tool_daemon_args":                 enum("x", "a b", "a,b", `"-f 'a b'"`),
+	"tool_daemon_arguments":            enum("x", "a b", "a,b", `"-f 'a b'"`),
+	"tool_daemon_arguments2":           enum(`"-f 'a b'"`, `"-x"`, `"a b c"`),
 	"image_size":                       enum("1", "1024", "65536"), // must be positive
 	"vm_memory":                        enum("128", "512", "4096"), // megabytes, not a size string
 	"job_machine_attrs_history_length": exitCode,                   // a small count; UINT_MAX is rejected
@@ -501,6 +516,18 @@ var byName = map[string]func(*stream) string{
 // keyword reach the ad instead of aborting the parse.
 var keywordDeps = map[string][]string{
 	"ec2_ebs_volumes": {"ec2_availability_zone = us-east-1a"},
+
+	// tool_daemon_cmd is the gate for the whole TDP family: without it
+	// SubmitHash does not read any of the others, so a file naming only
+	// tool_daemon_input compares nothing. That is how tool_daemon_input
+	// stayed out of the comparison while the rest of the family was in it.
+	"tool_daemon_args":       {"tool_daemon_cmd = /usr/bin/strace"},
+	"tool_daemon_arguments":  {"tool_daemon_cmd = /usr/bin/strace"},
+	"tool_daemon_arguments2": {"tool_daemon_cmd = /usr/bin/strace"},
+	"tool_daemon_input":      {"tool_daemon_cmd = /usr/bin/strace"},
+	"tool_daemon_output":     {"tool_daemon_cmd = /usr/bin/strace"},
+	"tool_daemon_error":      {"tool_daemon_cmd = /usr/bin/strace"},
+	"suspend_job_at_exec":    {"tool_daemon_cmd = /usr/bin/strace"},
 }
 
 // byFamily catches keywords whose name follows a pattern, so a new sibling

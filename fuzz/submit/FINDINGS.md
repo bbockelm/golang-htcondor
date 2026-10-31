@@ -697,6 +697,10 @@ About 100 attributes are set by C++ and by nothing in Go. The full list is in
 `knownDivergentGenerated`; the families are
 the tool-daemon (TDP) settings, the buffer settings, the Java settings, the
 noop-job settings, the parallel-script settings, the submit-event notes,
+
+About 110 attributes are set by C++ and by nothing in Go. The full list is in
+`knownDivergentGenerated`; the families are the EC2/GCE/Azure grid settings,
+the parallel-script settings, the submit-event notes,
 `kill_sig` and its siblings, `core_size`,
 `stack_size`, `keep_claim_idle`, `max_job_retirement_time`,
 `next_job_start_delay`, `allowed_execute_duration`, `allowed_job_duration`,
@@ -713,6 +717,9 @@ the `*_subcode` pair, `core_size`, `stack_size`, `keep_claim_idle`,
 pair, `manifest`, `output_destination`, `output_directory`,
 `primary_unix_group`, `jobset`, `dag_node_name` and the GPU request family
 were all on this list and are fixed; see "Fixed" below.
+
+The tool-daemon (TDP), buffer, noop-job and Java families were in this list
+and are below under "Fixed".
 
 ## Fixed
 
@@ -1238,6 +1245,60 @@ Still left: a non-boolean `vm_checkpoint` (`vm_checkpoint = banana`) is
 refused by condor_submit's `submit_param_bool` and read as `false` here. That
 belongs with the submit-wide question of which bad values are rejected rather
 than with the transfer settings.
+
+**A noop job ran.** `noop_job` and its two exit keywords set nothing at all on
+the Go side. A noop job is one the schedd completes at submission without ever
+running it, with the exit code and signal the submit file names; with
+`IsNoopJob` dropped, a job submitted as a placeholder -- a DAGMan node stubbed
+out, a pipeline step being skipped -- was dispatched to a machine and actually
+executed. The two exit keywords are the other half: a noop job that was meant
+to report a failure (`noop_job_exit_code = 1`) reported success instead. All
+three are *expressions* in condor_submit, so `noop_job = (ClusterId > 100)` is
+a legal thing to write.
+
+**A tool daemon never ran.** The whole TDP family -- `tool_daemon_cmd`, its
+input, output and error redirections, both argument spellings and
+`suspend_job_at_exec` -- was dropped, so a job submitted to run under a
+debugger, a profiler or `strace` ran bare instead, with nothing in the ad to
+say the tool was ever asked for. `tool_daemon_cmd` is the gate for the rest:
+condor_submit does not read any other keyword in the family without it, which
+means a file naming only `tool_daemon_args` must set nothing, and must not
+even report the two argument spellings used together -- an error only when the
+daemon itself is named. The paths are stored exactly as written:
+`check_and_universalize_path` rewrites mapped drive letters on Windows and
+does nothing anywhere else, so there is no `Iwd` resolution in this family.
+
+**The JVM was handed an argument with the quotes still on it, and only in the
+java universe.** Go gated `jar_files` and `java_vm_args` on
+`universe = java`; condor_submit reads both from the plain keyword table for
+every job. Inside the java universe it was worse than absent: the value was
+stored verbatim under `JavaVMArgs`, so `java_vm_args = "-Xmx128m -Xms64m"`
+reached the starter as the V1 string `"-Xmx128m -Xms64m"` *including* the
+double quotes, which splits on whitespace into `"-Xmx128m` and `-Xms64m"` and
+fails the JVM at startup. condor_submit runs the value through the `ArgList`
+instead: a value that opens with a double quote is V2 and lands in
+`JavaVMArguments`, anything else is V1 and lands in `JavaVMArgs`. That is the
+same name-is-semantic split as `Args`/`Arguments`, and the tool daemon has it
+too (`ToolDaemonArgs` / `ToolDaemonArguments`). Both round trips are lossy on
+purpose and now match: V1 collapses runs of whitespace between arguments,
+while V2 re-quotes the characters that would otherwise split an argument, so
+`"-f 'a b' c"` comes back as `-f a' 'b c`.
+
+**The buffer settings were integers.** `buffer_size` and `buffer_block_size`
+were stored only when the whole value scanned as an integer, and `buffer_files`
+not at all. All three are `f_as_expr` in condor_submit, so
+`buffer_size = 2 * 1024` was silently dropped rather than stored.
+
+Two generator bugs were in the way of ever seeing this. `tool_daemon_arguments2`
+is V2-only -- SubmitHash rejects a value that is not a double-quoted string --
+and the generator wrote the unquoted shape the rest of the `tool_daemon_`
+family uses, so every file containing it was rejected. And `f_special_java` was
+read as "java universe only", which kept `java_vm_args` out of every file but
+the rare java one; the group says which `SetXXX` method reads a keyword, not
+which universe it belongs to. `TestGeneratedCorpusReachesTheseFamilies` now
+asserts the sweep puts each of these sixteen attributes in front of the oracle,
+since an attribute that agrees leaves `knownDivergentGenerated` and nothing
+else would notice the generator dropping it.
 
 ## The container image
 

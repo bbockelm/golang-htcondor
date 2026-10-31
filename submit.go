@@ -626,10 +626,10 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		if err := sf.setVMParams(ad); err != nil {
 			return nil, err
 		}
-	case UniverseJava:
-		if err := sf.setJavaParams(ad); err != nil {
-			return nil, err
-		}
+	}
+
+	if err := sf.setUngatedFamilies(ad); err != nil {
+		return nil, err
 	}
 
 	// MinHosts/MaxHosts: the machine count for a parallel job, the
@@ -951,6 +951,208 @@ func processNewStyleArguments(s string) string {
 		}
 	}
 
+	return result.String()
+}
+
+// --- ArgList, as condor_utils/condor_arglist.cpp implements it ---
+//
+// The tool-daemon and java-VM argument keywords go through HTCondor's ArgList
+// rather than being stored as typed. A value is V2 when it opens with a double
+// quote and V1 otherwise, and the round trip through the list is lossy in both
+// directions on purpose: V1 collapses runs of whitespace between arguments,
+// and V2 re-quotes an argument that contains a space so the starter can find
+// its boundaries again.
+
+// isV2QuotedArgs reports whether a submit value is in V2 syntax.
+//
+// Only the LEADING quote decides, exactly as ArgList::IsV2QuotedString does.
+// A value that opens with a quote and never closes one is a V2 string that
+// fails to parse, not a V1 string.
+func isV2QuotedArgs(s string) bool {
+	s = strings.TrimLeft(s, " \t\n\v\f\r")
+	return strings.HasPrefix(s, `"`)
+}
+
+// parseArgsV2Quoted is ArgList::AppendArgsV2Quoted: a double-quoted string
+// whose interior doubled quotes stand for one quote, split into arguments.
+func parseArgsV2Quoted(value string) ([]string, error) {
+	if !isV2QuotedArgs(value) {
+		return nil, fmt.Errorf("expecting a double-quoted string (V2 format)")
+	}
+	raw, err := v2QuotedToV2Raw(value)
+	if err != nil {
+		return nil, err
+	}
+	return splitArgsV2(raw)
+}
+
+// parseArgsV1WackedOrV2Quoted is ArgList::AppendArgsV1WackedOrV2Quoted, which
+// is what reads the keyword a submit file is most likely to use. It reports
+// which syntax the value turned out to be in, because that is what decides
+// which attribute the result is stored under.
+func parseArgsV1WackedOrV2Quoted(value string) (args []string, wasV1 bool, err error) {
+	if isV2QuotedArgs(value) {
+		args, err = parseArgsV2Quoted(value)
+		return args, false, err
+	}
+	raw, err := v1WackedToV1Raw(value)
+	if err != nil {
+		return nil, true, err
+	}
+	return splitArgsV1(raw), true, nil
+}
+
+// v2QuotedToV2Raw strips the surrounding quotes and unescapes the doubled
+// ones. Anything after the closing quote but whitespace is an error, which is
+// how a half-quoted value is caught rather than silently truncated.
+func v2QuotedToV2Raw(value string) (string, error) {
+	rest := strings.TrimLeft(value, " \t\n\v\f\r")
+	rest = rest[1:] // the opening quote; isV2QuotedArgs checked it
+	var raw strings.Builder
+	terminated := false
+	for len(rest) > 0 {
+		c := rest[0]
+		if c != '"' {
+			raw.WriteByte(c)
+			rest = rest[1:]
+			continue
+		}
+		rest = rest[1:]
+		if len(rest) > 0 && rest[0] == '"' {
+			raw.WriteByte('"')
+			rest = rest[1:]
+			continue
+		}
+		terminated = true
+		break
+	}
+	if !terminated {
+		return "", fmt.Errorf("unterminated double-quote")
+	}
+	if strings.TrimLeft(rest, " \t\n\v\f\r") != "" {
+		return "", fmt.Errorf("unexpected characters following the closing double-quote: %q", rest)
+	}
+	return raw.String(), nil
+}
+
+// v1WackedToV1Raw unescapes \" and rejects a bare double quote, which in V1
+// syntax has no meaning and so is a submit error rather than a literal.
+func v1WackedToV1Raw(value string) (string, error) {
+	var raw strings.Builder
+	for i := 0; i < len(value); i++ {
+		switch {
+		case value[i] == '\\' && i+1 < len(value) && value[i+1] == '"':
+			raw.WriteByte('"')
+			i++
+		case value[i] == '"':
+			return "", fmt.Errorf("found an illegal unescaped double-quote: %s", value[i:])
+		default:
+			raw.WriteByte(value[i])
+		}
+	}
+	return raw.String(), nil
+}
+
+// splitArgsV1 is ArgList::AppendArgsV1Raw_unix: whitespace separates
+// arguments and nothing quotes, so a V1 value cannot carry an argument with a
+// space in it.
+func splitArgsV1(raw string) []string {
+	return strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+}
+
+// splitArgsV2 is split_args(): whitespace separates arguments, single quotes
+// group one, and a doubled single quote inside a group is a literal quote.
+func splitArgsV2(raw string) ([]string, error) {
+	var (
+		args   []string
+		buf    strings.Builder
+		parsed bool
+	)
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '\'':
+			parsed = true
+			i++
+			closed := false
+			for i < len(raw) {
+				if raw[i] != '\'' {
+					buf.WriteByte(raw[i])
+					i++
+					continue
+				}
+				if i+1 < len(raw) && raw[i+1] == '\'' {
+					buf.WriteByte('\'')
+					i += 2
+					continue
+				}
+				closed = true
+				break
+			}
+			if !closed {
+				return nil, fmt.Errorf("unbalanced quote in %q", raw)
+			}
+		case ' ', '\t', '\n', '\r':
+			if parsed {
+				parsed = false
+				args = append(args, buf.String())
+				buf.Reset()
+			}
+		default:
+			parsed = true
+			buf.WriteByte(raw[i])
+		}
+	}
+	if parsed {
+		args = append(args, buf.String())
+	}
+	return args, nil
+}
+
+// joinArgsV1 is ArgList::GetArgsStringV1Raw: the arguments separated by one
+// space each. The arguments came from a whitespace split, so none of them can
+// contain the whitespace that would make this unrepresentable.
+func joinArgsV1(args []string) string {
+	return strings.Join(args, " ")
+}
+
+// joinArgsV2 is join_args(): each argument appended, with the characters that
+// would otherwise split it wrapped in single quotes. A quoted run is extended
+// rather than reopened, so adjacent special characters produce one quoted
+// section instead of a repeated quote.
+func joinArgsV2(args []string) string {
+	var result strings.Builder
+	for _, arg := range args {
+		if result.Len() > 0 {
+			result.WriteByte(' ')
+		}
+		if arg == "" {
+			result.WriteString("''")
+			continue
+		}
+		for i := 0; i < len(arg); i++ {
+			c := arg[i]
+			if c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\'' {
+				result.WriteByte(c)
+				continue
+			}
+			if s := result.String(); len(s) > 0 && s[len(s)-1] == '\'' {
+				// Combine with the quoted section that just ended rather
+				// than opening a second one.
+				trimmed := s[:len(s)-1]
+				result.Reset()
+				result.WriteString(trimmed)
+			} else {
+				result.WriteByte('\'')
+			}
+			if c == '\'' {
+				result.WriteByte('\'') // repeated to escape it
+			}
+			result.WriteByte(c)
+			result.WriteByte('\'')
+		}
+	}
 	return result.String()
 }
 
@@ -3147,17 +3349,184 @@ func (sf *SubmitFile) isMPIUniverse() bool {
 	return ok && strings.EqualFold(strings.TrimSpace(univ), "mpi")
 }
 
-// setJavaParams sets Java universe specific parameters
-func (sf *SubmitFile) setJavaParams(ad *classad.ClassAd) error {
-	// java_vm_args - Arguments for the JVM
-	if javaVMArgs, ok := sf.submitCommand("java_vm_args"); ok {
-		_ = ad.Set("JavaVMArgs", javaVMArgs)
+// setUngatedFamilies stores the families condor_submit reads for every job,
+// whatever the universe. Their keywords look universe-specific -- a tool
+// daemon, a JVM's arguments, a list of jars -- but condor_submit reads all of
+// them from every submit file, and writing one only inside its apparent
+// universe is a divergence in its own right.
+func (sf *SubmitFile) setUngatedFamilies(ad *classad.ClassAd) error {
+	if err := sf.setToolDaemon(ad); err != nil {
+		return err
+	}
+	if err := sf.setBufferNoopAndJarFiles(ad); err != nil {
+		return err
+	}
+	return sf.setJavaVMArgs(ad)
+}
+
+// setBufferNoopAndJarFiles stores three groups condor_submit reads straight
+// out of its keyword table, with no universe gate and no type conversion.
+//
+// The buffer settings and the noop-job settings are expressions, not numbers:
+// `buffer_size = 1024 * 1024` is legal, and a reader that scans an integer
+// off the front drops it. jar_files is a plain string wherever it appears;
+// SetTransferFiles is what notices the jars, and only for a java job.
+func (sf *SubmitFile) setBufferNoopAndJarFiles(ad *classad.ClassAd) error {
+	exprs := []struct{ command, attr string }{
+		{"buffer_files", "BufferFiles"},
+		{"buffer_size", "BufferSize"},
+		{"buffer_block_size", "BufferBlockSize"},
+		// A noop job never runs: the schedd completes it at submission with
+		// the exit code and signal named here, so dropping either one
+		// reports the wrong outcome for a job that stood in for a real one.
+		{"noop_job", "IsNoopJob"},
+		{"noop_job_exit_code", "NoopJobExitCode"},
+		{"noop_job_exit_signal", "NoopJobExitSignal"},
+	}
+	for _, e := range exprs {
+		v := sf.submitParam(e.command, e.attr)
+		if v == "" {
+			continue
+		}
+		if err := setExprAttr(ad, e.attr, e.command, v); err != nil {
+			return err
+		}
 	}
 
-	// For Java universe, the "executable" is actually the main class
-	// The actual executable is the JVM, which HTCondor provides
-	// We may need to transform Cmd to JavaMainClass
+	if jarFiles := sf.submitParam("jar_files", "JarFiles"); jarFiles != "" {
+		_ = ad.Set("JarFiles", jarFiles)
+	}
+	return nil
+}
 
+// setJavaVMArgs stores the arguments handed to the JVM itself, as
+// condor_submit's SetJavaVMArgs does.
+//
+// It is not gated on the java universe: condor_submit reads these keywords
+// for every job, and the starter is what decides whether a JVM is involved.
+//
+// `java_vm_args` and `java_vm_arguments` are two spellings of one setting and
+// using both is an error; `java_vm_arguments2` is the V2 form, which may only
+// accompany one of the others when allow_arguments_v1 says so.
+func (sf *SubmitFile) setJavaVMArgs(ad *classad.ClassAd) error {
+	return sf.setArgListAttrs(ad, argListKeywords{
+		v1:      "java_vm_args",
+		v1Ext:   "java_vm_arguments",
+		v2:      "java_vm_arguments2",
+		v1Attr:  "JavaVMArgs",
+		v2Attr:  "JavaVMArguments",
+		altAttr: "JavaVMArgs",
+	})
+}
+
+// setToolDaemon stores the tool-daemon (TDP) settings, as condor_submit's
+// SetTDP does.
+//
+// tool_daemon_cmd is the gate: without it condor_submit does not look at the
+// rest of the family at all, so a file that names only arguments or a
+// redirection sets nothing -- and does not even report using both argument
+// spellings, which is an error when the daemon itself is named.
+//
+// The paths are stored exactly as written. SetTDP passes each through
+// check_and_universalize_path, which rewrites mapped drive letters on Windows
+// and does nothing anywhere else, so there is no Iwd resolution here.
+func (sf *SubmitFile) setToolDaemon(ad *classad.ClassAd) error {
+	cmd := sf.submitParam("tool_daemon_cmd", "ToolDaemonCmd")
+	if cmd == "" {
+		return nil
+	}
+	_ = ad.Set("ToolDaemonCmd", cmd)
+
+	for _, f := range []struct{ command, attr string }{
+		{"tool_daemon_input", "ToolDaemonInput"},
+		{"tool_daemon_output", "ToolDaemonOutput"},
+		{"tool_daemon_error", "ToolDaemonError"},
+	} {
+		if v := sf.submitParam(f.command, f.attr); v != "" {
+			_ = ad.Set(f.attr, v)
+		}
+	}
+
+	// suspend_job_at_exec has no other reader: condor_submit records it only
+	// here, alongside the daemon that is meant to attach to the stopped job.
+	if v := sf.submitParam("suspend_job_at_exec", "SuspendJobAtExec"); v != "" {
+		_ = ad.Set("SuspendJobAtExec", parseBool(v, false))
+	}
+
+	return sf.setArgListAttrs(ad, argListKeywords{
+		v1:      "tool_daemon_args",
+		v1Ext:   "tool_daemon_arguments",
+		v2:      "tool_daemon_arguments2",
+		v1Attr:  "ToolDaemonArgs",
+		v2Attr:  "ToolDaemonArguments",
+		altAttr: "ToolDaemonArgs",
+	})
+}
+
+// argListKeywords names one family of argument keywords and the two
+// attributes it can land in.
+//
+// Which of the two it lands in is semantic rather than cosmetic: the V1
+// attribute is a flat string the starter splits on whitespace, while the V2
+// attribute carries single-quoted grouping, so an argument containing a space
+// survives only under the V2 name. That is the same split as Args/Arguments.
+type argListKeywords struct {
+	v1     string // the backward-compatible spelling
+	v1Ext  string // the current spelling; the two are mutually exclusive
+	v2     string // the V2 spelling, which must be a double-quoted string
+	v1Attr string
+	v2Attr string
+	// altAttr is the attribute name that also works as a submit keyword for
+	// v1Ext, the way condor_submit's submit_param() takes an alternate name.
+	altAttr string
+}
+
+// setArgListAttrs is the half of condor_submit's SetArguments that the
+// tool-daemon and java-VM families repeat: read the three spellings, reject
+// the combinations condor_submit rejects, and store the result under the V1
+// or the V2 attribute depending on which syntax the value was written in.
+func (sf *SubmitFile) setArgListAttrs(ad *classad.ClassAd, kw argListKeywords) error {
+	v1 := sf.submitParam(kw.v1, "")
+	v1Ext := sf.submitParam(kw.v1Ext, kw.altAttr)
+	v2 := sf.submitParam(kw.v2, "")
+
+	if v1 != "" && v1Ext != "" {
+		return fmt.Errorf("you specified a value for both %s and %s", kw.v1, kw.v1Ext)
+	}
+	if v1Ext != "" {
+		v1 = v1Ext
+	}
+	if v2 != "" && v1 != "" && !parseBool(sf.submitParam("allow_arguments_v1", ""), false) {
+		return fmt.Errorf("if you wish to specify both %s and %s, you must also specify allow_arguments_v1 = true",
+			kw.v1Ext, kw.v2)
+	}
+
+	var (
+		args  []string
+		wasV1 bool
+		err   error
+	)
+	switch {
+	case v2 != "":
+		args, err = parseArgsV2Quoted(v2)
+	case v1 != "":
+		args, wasV1, err = parseArgsV1WackedOrV2Quoted(v1)
+	default:
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to parse %s: %w", kw.v1Ext, err)
+	}
+
+	if wasV1 {
+		if value := joinArgsV1(args); value != "" {
+			_ = ad.Set(kw.v1Attr, value)
+		}
+		return nil
+	}
+	if value := joinArgsV2(args); value != "" {
+		_ = ad.Set(kw.v2Attr, value)
+	}
 	return nil
 }
 
