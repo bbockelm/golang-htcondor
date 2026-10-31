@@ -1,0 +1,1 @@
+a container job's image now reaches TransferInput; the keywords that feed it from a java job -- the entry class and jar_files -- are still added by C++ and by nothing in Go, and a filename containing a space is split away rather than kept as one entry.

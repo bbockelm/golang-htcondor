@@ -1,0 +1,1 @@
+the Go parser does not implement `on_evict_checks`, the other writer of this attribute, so it cannot be compared file by file. What the memory retry family writes to it IS checked against the oracle, in TestOnEvictMemoryTransformMatchesOracle.

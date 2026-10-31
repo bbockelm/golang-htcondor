@@ -1,0 +1,1 @@
+for universe = java C++ replaces Cmd with the JVM from param("JAVA") and passes the submitted class through Args; Go leaves the resolved executable in Cmd, so the job would run the class file instead of a JVM.

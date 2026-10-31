@@ -7,119 +7,6 @@ import (
 	"strings"
 )
 
-// hostDerived are attributes whose value comes from the clock, the machine or
-// the account running the parse rather than from the submit file. The two sides
-// cannot agree on them by construction -- the C++ oracle is pinned to a fixed
-// submit time and user, and the Go parser reads the real clock -- so they are
-// never compared. This list must stay SHORT and justified: every name here is a
-// hole in the oracle.
-var hostDerived = map[string]string{
-	"qdate":                "submit time; the oracle is pinned to a fixed clock",
-	"enteredcurrentstatus": "submit time",
-	"condorversion":        "version of the binary that parsed the file",
-	"condorplatform":       "platform of the binary that parsed the file",
-	"submitversion":        "version of the binary that parsed the file",
-	"filesystemdomain":     "the parsing host's FILESYSTEM_DOMAIN",
-	"owner":                "the account running the parse",
-	"user":                 "the account running the parse",
-	"globaljobid":          "embeds the schedd name and submit time",
-	// These four are computed by stat()ing the executable, which the oracle
-	// deliberately does not do (setDisableFileChecks), so neither side has a
-	// meaningful value to compare.
-	"diskusage":           "stat of the executable",
-	"executablesize":      "stat of the executable",
-	"imagesize":           "stat of the executable",
-	"transferinputsizemb": "stat of the input files",
-}
-
-// knownDivergent are attributes the two parsers genuinely disagree about today.
-// Each entry is a finding, not an excuse: the reason says what the difference
-// is, so the list reads as the inventory of Go/C++ submit drift. Removing an
-// entry is how a fix gets locked in -- see TestKnownDivergencesStillDiverge,
-// which fails when one of these starts agreeing.
-var knownDivergent = map[string]string{
-	"shouldtransferfiles": `C++ defaults to "IF_NEEDED", Go to "YES". Changes whether the job transfers files when it lands on a machine sharing a filesystem.`,
-	"requirements":        `different expressions entirely: C++ pins TARGET.Arch/OpSys to the submitting machine's values and adds Disk and FileSystemDomain||HasFileTransfer clauses; Go emits "isnt undefined" for Arch/OpSys and adds a TARGET.Cpus clause.`,
-	"rank":                `both sides store the same real 0.0; the harness renders the Go side with Expr.String(), which drops a whole-number real's decimal point, so it reads as the integer 0. The harness's rendering, not the parser's value.`,
-
-	// Attributes only the C++ side produces. Most are per-job bookkeeping
-	// counters the schedd would otherwise fill in, but several change behavior.
-	"environment":              "C++ always sets it (empty when unspecified); Go omits it when the submit file says nothing.",
-	"jobleaseduration":         "C++ sets JobLeaseDuration (2400 by default, from JOB_DEFAULT_LEASE_DURATION); Go omits it. A job ad with no lease tells the schedd not to hold the claim across a disconnect.",
-	"jobprio":                  "C++ defaults JobPrio to 0; Go omits it.",
-	"jobnotification":          "C++ defaults it; Go omits it.",
-	"leavejobinqueue":          "C++ defaults it to false; Go omits it.",
-	"mytype":                   `C++ sets MyType = "Job"; Go omits it.`,
-	"targettype":               `C++ sets TargetType = "Machine"; Go omits it.`,
-	"exitstatus":               "C++ defaults it to 0; Go omits it.",
-	"exitbysignal":             "C++ defaults it to false; Go omits it.",
-	"currenthosts":             "C++ defaults it to 0; Go omits it.",
-	"jobsubmitmethod":          "C++ records how the job was submitted; Go omits it.",
-	"numckpts":                 "C++ zeroes the checkpoint counters; Go omits them.",
-	"numjobcompletions":        "C++ zeroes the completion counter; Go omits it.",
-	"lastsuspensiontime":       "C++ zeroes the suspension counters; Go omits them.",
-	"totalsuspensions":         "C++ zeroes the suspension counters; Go omits them.",
-	"committedtime":            "C++ zeroes the accounting counters; Go omits them.",
-	"committedslottime":        "C++ zeroes the accounting counters; Go omits them.",
-	"committedsuspensiontime":  "C++ zeroes the accounting counters; Go omits them.",
-	"cumulativeslottime":       "C++ zeroes the accounting counters; Go omits them.",
-	"cumulativesuspensiontime": "C++ zeroes the accounting counters; Go omits them.",
-	"cumulativeremotesyscpu":   "C++ zeroes the accounting counters; Go omits them.",
-	"cumulativeremoteusercpu":  "C++ zeroes the accounting counters; Go omits them.",
-	"remotesyscpu":             "C++ zeroes the accounting counters; Go omits them.",
-	"remoteusercpu":            "C++ zeroes the accounting counters; Go omits them.",
-	"remotewallclocktime":      "C++ zeroes the accounting counters; Go omits them.",
-
-	"args":          `empty arguments: C++ emits Arguments (V2 syntax), Go emits Args (V1). The attribute NAME differs, which changes how the starter splits them.`,
-	"arguments":     `the other half of the Args/Arguments naming split above.`,
-	"requestcpus":   "when the submit file does not say, Go synthesizes RequestCpus=1; C++ sets nothing and lets the negotiator apply the pool default.",
-	"requestmemory": "when the submit file does not say, Go synthesizes RequestMemory=128; C++ sets nothing.",
-
-	// Attributes only the Go side produces.
-	"transferexecutable": "Go always sets it; C++ only when the submit file asks.",
-	"jobruncount":        "Go sets it; C++ does not.",
-	"requestdisk":        "C++ puts a MAX(...) expression on the cluster ad; Go emits its own value on the proc.",
-	"requestgpumemory":   "Go turns request_gpu_memory into RequestGpuMemory; C++ lists request_gpu_memory as a disallowed keyword (f_error in prunable_keywords), warns that gpus_minimum_memory was probably meant, and sets no attribute.",
-}
-
-// knownDivergentGenerated is the inventory the keyword-table generator added
-// (see gen.go). The hand-written seed corpus reached 17 of HTCondor's 258
-// submit keywords; generating files from the keyword table reached most of the
-// rest, and these are what the comparison found there. They are divided three
-// ways by what the difference IS:
-//
-//   - the Go parser has no code for the keyword, so the setting is silently
-//     dropped from the job;
-//   - the Go parser writes the SUBMIT KEYWORD's name as the attribute name
-//     where HTCondor writes the job attribute (VM_Memory vs JobVMMemory,
-//     CronWindow vs DeferralWindow). The ad looks populated and nothing reads
-//     it. Both halves of such a pair are listed, under each name;
-//   - both sides write the attribute and the VALUES differ.
-//
-// Kept separate from knownDivergent above so the provenance of a finding stays
-// visible; record() consults both.
-//
-// gosec flags this map for "hardcoded credentials": the keys are ClassAd
-// attribute names, several of which are named after cloud credentials.
-//
-//nolint:gosec // G101: attribute names, not secrets
-var knownDivergentGenerated = map[string]string{
-	"commoninputfiles":     "the Go parser does not implement `transfer_common_input`: C++ sets this attribute, Go sets nothing.",
-	"env":                  "empty-ish or V1 environments: Go emits Env (V1), C++ emits Environment (V2). The attribute NAME differs, which changes how the starter splits it -- the same split as Args/Arguments.",
-	"gpusmaxcapability":    "the Go parser does not implement `gpus_maximum_capability`: C++ sets this attribute, Go sets nothing.",
-	"gpusmincapability":    "the Go parser does not implement `gpus_minimum_capability`: C++ sets this attribute, Go sets nothing.",
-	"scheddinterval":       "DELIBERATELY NOT FIXED. Any of CronMinutes/CronHours/CronDaysOfMonth/CronMonths/CronDayOfWeek/DeferralTime makes SetRequirements copy SCHEDD_INTERVAL into the job, and it does so for one reason, stated where it does it: the deferral clause it is about to append to Requirements names ScheddInterval. Nothing else reads the attribute -- the schedd's updateSchedDInterval (schedd.cpp) only REFRESHES jobs that already carry it. Go does not generate that Requirements clause (see knownDivergent[requirements]), so writing ScheddInterval here would add an attribute no Go-built ad reads and sign the job up for a job-queue write on every schedd WalkJobQueue. It belongs with the Requirements work, not before it.",
-	"streamerr":            "same as streamout, for stderr.",
-	"streamin":             "same as streamout, for stdin.",
-	"streamout":            "`transfer_output = true` with no `output` keyword: C++ writes StreamOut on every proc BUT THE FIRST, because SetStdout only consults the std file when the ad does not already carry one, and by proc 1 the cluster ad does. Go writes proc 0's answer for every proc. Compared directly, on files that name their std files, in TestStdFileTransferMatchesOracle.",
-	"transfererr":          "same as transferout, for stderr.",
-	"transferin":           "same as transferout, for stdin.",
-	"transferinput":        "a container job's image now reaches TransferInput; the keywords that feed it from a java job -- the entry class and jar_files -- are still added by C++ and by nothing in Go, and a filename containing a space is split away rather than kept as one entry.",
-	"transferout":          "`transfer_output = true` with no `output` keyword: C++ writes false on proc 0 and true on every proc after it, from the same stale-state path as streamout. Go writes false throughout. Compared directly in TestStdFileTransferMatchesOracle.",
-	"transferoutputremaps": "C++ keeps the remap string verbatim; Go rewrites it, dropping the spaces around = and ;.",
-	"transformonevict":     "the Go parser does not implement `on_evict_checks`, the other writer of this attribute, so it cannot be compared file by file. What the memory retry family writes to it IS checked against the oracle, in TestOnEvictMemoryTransformMatchesOracle.",
-}
-
 // knownDivergentPrefix covers families of attributes whose names are not fixed,
 // so they cannot be listed by name. Checked after knownDivergent.
 //
@@ -203,17 +90,6 @@ func Compare(cpp, goAds Ads) (fresh []Divergence, seenKnown map[string]bool) {
 	}
 	sort.Slice(fresh, func(i, j int) bool { return fresh[i].String() < fresh[j].String() })
 	return fresh, seenKnown
-}
-
-// knownDivergentInUniverse excuses an attribute only inside one job universe.
-//
-// It exists so a quirk of a single universe cannot excuse that attribute
-// everywhere. Putting "cmd" in knownDivergent would have undone the Cmd/UserLog
-// path comparison, which is the whole point of having it compared.
-var knownDivergentInUniverse = map[int]map[string]string{
-	universeJava: {
-		"cmd": "for universe = java C++ replaces Cmd with the JVM from param(\"JAVA\") and passes the submitted class through Args; Go leaves the resolved executable in Cmd, so the job would run the class file instead of a JVM.",
-	},
 }
 
 // universeJava is CONDOR_UNIVERSE_JAVA (condor_includes/condor_universe.h).
