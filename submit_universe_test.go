@@ -54,6 +54,9 @@ vm_networking = true
 vm_networking_type = nat
 vm_vcpus = 4
 vm_checkpoint = true
+# Required: condor_submit refuses vm_checkpoint together with
+# vm_networking unless the file asks for ON_EXIT_OR_EVICT itself.
+when_to_transfer_output = ON_EXIT_OR_EVICT
 executable = /bin/echo
 arguments = test
 `

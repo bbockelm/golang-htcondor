@@ -362,6 +362,28 @@ var seeds = []seedCase{
 	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_networking_type = bridge\nexecutable = /bin/sleep\nqueue\n"},
 	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_networking = true\nvm_networking_type = bridge\nexecutable = /bin/sleep\nqueue\n"},
 	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nvm_networking = true\nvm_checkpoint = true\nwhen_to_transfer_output = ON_EXIT_OR_EVICT\nexecutable = /bin/sleep\nqueue\n"},
+	// SetUniverse forces a vm job's transfer settings and discards what
+	// the file asked for, so these seeds pin the override rather than the
+	// submitter's value. The generated sweep reaches them only by
+	// accident -- it took a change to the GENERATOR, which shifted which
+	// files the corpus draws, to produce the ON_EXIT_OR_EVICT one at all
+	// -- which is the reason they are written down here instead.
+	//
+	// A VM job always transfers: ShouldTransferFiles = YES even when the
+	// file says NO, and when_to_transfer_output is ON_EXIT unless
+	// vm_checkpoint asks for ON_EXIT_OR_EVICT.
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nwhen_to_transfer_output = ON_EXIT_OR_EVICT\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nshould_transfer_files = NO\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nvm_checkpoint = true\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nvm_checkpoint = true\nwhen_to_transfer_output = ON_EXIT\nqueue\n"},
+	// The attribute spelling of vm_checkpoint counts as well.
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nJobVMCheckpoint = true\nqueue\n"},
+	// The override runs before anything validates the two settings, so a
+	// value that is a hard error in any other universe is accepted here.
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nshould_transfer_files = MAYBE\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nwhen_to_transfer_output = SOMETIME\nqueue\n"},
+	{input: "universe = vm\nvm_type = kvm\nvm_memory = 512\nvm_disk = d.img:vda:w\nexecutable = /bin/sleep\nshould_transfer_files = NO\ntransfer_input_files = a.txt\nqueue\n"},
 	// vm_memory defaults to $(Request_Memory) and vm_vcpus to $(Request_CPUs),
 	// and the default is the macro's text: 2*2 is two CPUs, not four.
 	{input: "universe = vm\nvm_type = kvm\nvm_disk = d.img:vda:w\nrequest_memory = 1024\nrequest_cpus = 2*2\nexecutable = /bin/sleep\nqueue\n"},
