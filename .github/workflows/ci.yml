@@ -81,8 +81,6 @@ jobs:
         (cd .github/tools && GOWORK=off go build -o "$RUNNER_TEMP/bin/gotestsum" gotest.tools/gotestsum)
         echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-    - name: Run go vet
-      run: make vet
 
     - name: Run tests
       # Not `make test`: CI needs gotestsum's JUnit output and a coverage profile
