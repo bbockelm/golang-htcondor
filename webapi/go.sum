@@ -39,8 +39,8 @@ dmitri.shuralyov.com/gpu/mtl v0.0.0-20190408044501-666a987793e9/go.mod h1:H6x//7
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
 github.com/Masterminds/semver/v3 v3.1.1/go.mod h1:VPu/7SZ7ePZ3QOrcuXROw5FAcLl4a0cBrbBpGY/8hQs=
-github.com/PelicanPlatform/classad v0.32.1 h1:NfDd5jJtx+E0eccEe4n1ebiEcu3warEvUjcduT4HbxQ=
-github.com/PelicanPlatform/classad v0.32.1/go.mod h1:PEBQZp1N+KqUcAPMWhHqdCq+P5OSEYT2V14SeiXVM04=
+github.com/PelicanPlatform/classad v0.33.3 h1:nO2NcvRq7z9/4nu3f9XpH4DCUyiC+wOBOgBm1xrtdDw=
+github.com/PelicanPlatform/classad v0.33.3/go.mod h1:PEBQZp1N+KqUcAPMWhHqdCq+P5OSEYT2V14SeiXVM04=
 github.com/PelicanPlatform/classad/collections v0.32.1 h1:CqySXxGEIo7UNzqa0vRcGdMNxxHxPoZkpcfuM0bgeAc=
 github.com/PelicanPlatform/classad/collections v0.32.1/go.mod h1:V5tnYyaH0MVIOsqODgo9OAtjvd2iDa88xMu+xMJa3oQ=
 github.com/PelicanPlatform/classad/db v0.32.1 h1:I8GkH7pJ2jG7q+kMxGpbSeqhpAY/YDOD2OIZR0DzDWk=

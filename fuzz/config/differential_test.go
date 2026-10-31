@@ -77,6 +77,10 @@ var seeds = []seedCase{
 	{input: "I = $INT(\"\x7f\xb4\" > \"\x7f\x84\")\n"},              // strings compare as bytes -> 1
 	{input: "I = $INT(0;)\n"},                                       // a trailing ';' is not one expression -> ""
 	{input: "Z = $EVAL(.0)\nR = $EVAL(1.5)\nL = $EVAL({1, 1+1})\n"}, // ClassAdUnParser forms: 0.0, 1.500000000000000E+00, { 1,1 + 1 }
+
+	// A leading dot is a root-scope reference, not decoration: it survives the
+	// round trip and resolves against the outermost ad (classad v0.33.3).
+	{input: "L = $EVAL({1, 1+ .A0})\n"},
 }
 
 // divergence runs both engines on the same preluded source and returns a
