@@ -108,10 +108,10 @@ require (
 )
 
 require (
-	github.com/PelicanPlatform/classad v0.33.3
-	github.com/PelicanPlatform/classad/collections v0.33.3
-	github.com/PelicanPlatform/classad/db v0.33.3
-	github.com/PelicanPlatform/classad/dbrpc v0.33.3
+	github.com/PelicanPlatform/classad v0.34.0
+	github.com/PelicanPlatform/classad/collections v0.34.0
+	github.com/PelicanPlatform/classad/db v0.34.0
+	github.com/PelicanPlatform/classad/dbrpc v0.34.0
 	github.com/bbockelm/cedar v0.7.12
 	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
 	github.com/glebarez/sqlite v1.11.0

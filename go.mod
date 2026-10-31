@@ -3,8 +3,8 @@ module github.com/bbockelm/golang-htcondor
 go 1.26.0
 
 require (
-	github.com/PelicanPlatform/classad v0.33.3
-	github.com/PelicanPlatform/classad/collections v0.29.6
+	github.com/PelicanPlatform/classad v0.34.0
+	github.com/PelicanPlatform/classad/collections v0.34.0
 	github.com/bbockelm/cedar v0.7.12
 	github.com/bbockelm/gosssd v0.0.4
 	github.com/glebarez/go-sqlite v1.23.0
@@ -17,7 +17,7 @@ require (
 )
 
 require (
-	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
+	github.com/RoaringBitmap/roaring/v2 v2.29.0 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgraph-io/ristretto/v2 v2.4.2 // indirect
@@ -29,7 +29,7 @@ require (
 	github.com/jcmturner/gofork v1.7.6 // indirect
 	github.com/jcmturner/gokrb5/v8 v8.4.4 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/mattn/go-isatty v0.0.23 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect

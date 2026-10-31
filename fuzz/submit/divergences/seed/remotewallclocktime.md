@@ -1,1 +1,0 @@
-both sides write the real 0.0; the harness renders the Go side with Expr.String(), which drops a whole-number real's decimal point, so it reads as the integer 0. The harness's rendering, not the parser's value -- as with rank.
