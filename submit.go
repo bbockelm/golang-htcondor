@@ -638,6 +638,12 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
+	// The parallel universe's two implied settings. Before the keyword
+	// pass, which is what `want_io_proxy` goes through.
+	if err := sf.setParallelSandbox(ad); err != nil {
+		return nil, err
+	}
+
 	// The keywords whose job attribute and value shape come straight from
 	// HTCondor's own keyword table. SubmitHash runs this pass after the
 	// universe-specific setters and before the job-deferral pass, which
@@ -2339,11 +2345,6 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 		}
 	}
 
-	// nice_user - reduce priority to be nice
-	if niceUser, ok := sf.submitCommand("nice_user"); ok {
-		_ = ad.Set("NiceUser", parseBool(niceUser, false))
-	}
-
 	// max_retries, retry_until and success_exit_code are not independent
 	// settings: each one on its own turns retries on, and the three
 	// together decide JobMaxRetries, JobSuccessExitCode and the
@@ -3341,6 +3342,39 @@ func (sf *SubmitFile) setHostCounts(ad *classad.ClassAd) error {
 	return nil
 }
 
+// setParallelSandbox turns on the two things a parallel job needs from the
+// schedd and the starter: a spool directory of its own, and the I/O proxy.
+//
+// SubmitHash::SetParallelParams assigns both unconditionally for
+// CONDOR_UNIVERSE_PARALLEL, and the MPI universe does NOT get them -- it is a
+// separate universe number there, even though this parser maps both spellings
+// onto UniverseParallel.
+//
+// WantIOProxy is what makes chirp reachable, which is how a parallel job's
+// sshd is set up; JobRequiresSandbox tells the schedd to give the job a spool
+// directory to do it in (SpooledJobFiles::jobRequiresSpoolDirectory). The
+// schedd assumes a spool directory for parallel jobs when the attribute is
+// absent, so the consequence of leaving it off is not that spooling stops --
+// it is that the attribute a transform or a policy expression reads comes back
+// undefined.
+//
+// Neither is written over a value the job already has. C++ reaches the same
+// place from the other direction: it assigns early and lets the `want_io_proxy`
+// keyword and the `+Attr` pass overwrite it, and here the keyword pass still
+// runs after this one while `+Attr` has already run.
+func (sf *SubmitFile) setParallelSandbox(ad *classad.ClassAd) error {
+	if sf.universe != UniverseParallel || sf.isMPIUniverse() {
+		return nil
+	}
+	if _, ok := ad.Lookup("WantIOProxy"); !ok {
+		_ = ad.Set("WantIOProxy", true)
+	}
+	if _, ok := ad.Lookup("JobRequiresSandbox"); !ok {
+		_ = ad.Set("JobRequiresSandbox", true)
+	}
+	return nil
+}
+
 // isMPIUniverse reports whether the submit file asked for the MPI
 // universe. Go maps `universe = mpi` onto UniverseParallel, so the
 // spelling is the only thing left to read it from.
@@ -4029,6 +4063,8 @@ func (sf *SubmitFile) setAutoAttributes(ad *classad.ClassAd) error {
 	}
 
 	sf.setTransferPluginMethods(ad)
+	sf.deriveStarterDebug(ad)
+	sf.applyJobLeaseFloor(ad)
 
 	return nil
 }
@@ -4204,6 +4240,91 @@ func submitURLScheme(s string) (string, bool) {
 		}
 	}
 	return s[start:i], true
+}
+
+// deriveStarterDebug turns the starter's own debug log on for a job that
+// asked for the log file but not for the flags to write it with:
+// SubmitHash::SetAutoAttributes defaults JobStarterDebug to true whenever
+// JobStarterLog is set and JobStarterDebug is not, which means "use the
+// pool's STARTER_DEBUG flags". Without it the file named by `starter_log` is
+// never written, so a submitter debugging a job gets an empty hand.
+//
+// The trigger is read from the submit keywords rather than from the ad
+// because of WHERE SetAutoAttributes sits: it runs before the `+Attr` pass,
+// so `+JobStarterLog = "x"` does not derive anything on the C++ side, and
+// reading the ad here -- after this parser's `+Attr` pass -- would.
+// simpleKeywordParam is the same gate the keyword pass itself uses, including
+// its second accepted spelling (the attribute name) and its rule that a value
+// expanding to nothing means the file did not set it.
+func (sf *SubmitFile) deriveStarterDebug(ad *classad.ClassAd) {
+	if _, ok := sf.simpleKeywordParam("starter_log", "JobStarterLog"); !ok {
+		return
+	}
+	if _, ok := sf.simpleKeywordParam("starter_debug", "JobStarterDebug"); ok {
+		return
+	}
+	_ = ad.Set("JobStarterDebug", true)
+}
+
+// jobLeaseFloor is the shortest job lease condor_submit will record. A lease
+// below it is rejected with a warning and replaced
+// (SubmitHash::ReportCommonMistakes), because a claim lease of a few seconds
+// expires before the schedd can reconnect to a disconnected job and the job
+// is thrown back into the queue instead of resuming.
+const jobLeaseFloor = 20
+
+// applyJobLeaseFloor raises a short job_lease_duration to jobLeaseFloor.
+//
+// Only a literal number is raised, and only after truncation toward zero:
+// ReportCommonMistakes tests the expression with ExprTreeIsLiteralNumber into
+// a long long, so `19.9` is 19 and is raised while `0.5` is 0 and is left
+// alone, `4 + 5` is not a literal at all and is stored unchecked, and a
+// quoted "5" is a string rather than a number. Zero and negative values are
+// left alone too: they are the documented ways to ask for no lease.
+//
+// Gated on the submit keyword for the same reason deriveStarterDebug is: the
+// C++ check runs before the `+Attr` pass, so `+JobLeaseDuration = 5` keeps
+// its 5.
+func (sf *SubmitFile) applyJobLeaseFloor(ad *classad.ClassAd) {
+	if _, ok := sf.simpleKeywordParam("job_lease_duration", "JobLeaseDuration"); !ok {
+		return
+	}
+	expr, ok := ad.Lookup("JobLeaseDuration")
+	if !ok || expr == nil {
+		return
+	}
+	n, isNum := literalNumberTruncated(expr.String())
+	if isNum && n > 0 && n < jobLeaseFloor {
+		_ = ad.Set("JobLeaseDuration", jobLeaseFloor)
+	}
+}
+
+// literalNumberTruncated is ExprTreeIsLiteralNumber(expr, long long &): a
+// ClassAd literal that is a number, with a real truncated toward zero and a
+// boolean counted as 0 or 1. A string literal is not a number, and anything
+// built with an operator is not a literal.
+func literalNumberTruncated(value string) (int64, bool) {
+	s := stripOuterParens(value)
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return i, true
+	}
+	switch {
+	case strings.EqualFold(s, "true"):
+		return 1, true
+	case strings.EqualFold(s, "false"):
+		return 0, true
+	}
+	// A real. ParseFloat also accepts spellings ClassAd's lexer does not
+	// ("inf", "0x1p3"), so those are turned away rather than truncated into
+	// a number the C++ side never saw.
+	if strings.ContainsAny(s, "xXpPnNiI") {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return 0, false
+	}
+	return int64(f), true
 }
 
 // Submit submits the jobs from this submit file

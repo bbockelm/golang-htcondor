@@ -586,6 +586,16 @@ var seeds = []seedCase{
 	{input: "universe = grid\ngrid_resource = condor host host\nexecutable = myjob\ncuda_version = 12.1\nqueue\n"},
 	{input: "executable = /bin/sleep\nuniverse = scheduler\ncuda_version = 12.1\nqueue\n"},
 	{input: "executable = /bin/sleep\nuniverse = local\ncuda_version = 12.1\nqueue\n"},
+	// --- parity: attributes condor_submit derives rather than reads ---
+	// None of these comes from a keyword, so the keyword-table comparison
+	// says nothing about them; the whole-ad comparison does.
+	// TestDerivedAttributesMatchOracle takes each one apart.
+	{input: "executable = /bin/sleep\nstarter_log = s.log\nqueue\n"},
+	{input: "executable = /bin/sleep\nstarter_log = s.log\nstarter_debug = D_FULLDEBUG\nqueue\n"},
+	{input: "universe = parallel\nexecutable = /bin/sleep\nmachine_count = 2\nqueue\n"},
+	{input: "universe = parallel\nexecutable = /bin/sleep\nmachine_count = 2\nwant_io_proxy = false\nqueue\n"},
+	{input: "executable = /bin/sleep\nnice_user = true\nqueue\n"},
+	{input: "executable = /bin/sleep\nnice_user = false\nqueue\n"},
 }
 
 func requireOracle(t testing.TB) {

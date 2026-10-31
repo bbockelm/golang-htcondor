@@ -438,7 +438,9 @@ $(NICE_USER_ACCOUNTING_GROUP_NAME)` (default `nice-user`) plus a default
 `MaxJobRetirementTime` of 0, and a `nice_user` job with a group of its own
 keeps its group and ignores the flag. Go set a `NiceUser` attribute HTCondor
 does not read and no accounting group at all, so a job asking to be run at
-low priority was charged — and scheduled — as an ordinary one.
+low priority was charged — and scheduled — as an ordinary one. The stray
+`NiceUser` outlived that fix and is gone too; see "`nice_user` left a
+`NiceUser` attribute behind" below.
 
 The submitting account is host-derived, so the Go parser now takes it as a
 parse option (`SubmitParseOptions.SubmitUser`) and falls back to the account
@@ -635,6 +637,12 @@ that is left.
   `f_as_expr | f_special_periodic`, nothing strips anything, and the quotes
   vanish because the value is parsed. See "A hold reason was stored as text"
   under "Fixed".
+
+- **`KillSig` becomes a number.** C++ keeps the name (`"SIGTERM"`); Go
+  converts it to `15`. Same for `remove_kill_sig`.
+- **Quote stripping.** `file_remaps`, `on_exit_hold_reason` and
+  `periodic_hold_reason` are `f_strip_quotes` keywords: C++ removes the
+  surrounding quotes, Go keeps them inside the stored string.
 - **List canonicalization, in both directions.** `ec2_tag_names` is
   `f_as_list`, so C++ canonicalizes the separators and Go does not;
   `encrypt_input_files` and its three siblings are `f_as_string`, so C++
@@ -785,6 +793,87 @@ The earlier note calling the two reasons `f_strip_quotes` keywords was wrong:
 `oracle.Keywords()` reports `f_as_expr | f_special_periodic` for both, nothing
 strips a quote, and the quotes disappear only because the value is parsed and
 the quotes are a string literal's delimiters.
+
+**The starter log was asked for and never written.** `starter_log` names the
+file the starter writes its own debug log to, and `starter_debug` names the
+flags. `SubmitHash::SetAutoAttributes` defaults `JobStarterDebug` to true
+whenever `JobStarterLog` is set and `JobStarterDebug` is not, which means "use
+the pool's `STARTER_DEBUG` flags". Go wrote both keywords and neither default,
+so a job submitted with `starter_log` alone carried the filename and nothing
+that would ever write to it: the submitter debugging a job got an empty hand
+and no indication why.
+
+Where this is derived from matters as much as what it is.
+`SetAutoAttributes` runs before `SetForcedAttributes`, so a `JobStarterLog`
+that arrived as `+JobStarterLog` derives nothing — the C++ side has not
+applied it yet. Go's `+Attr` pass runs earlier than C++'s, so reading the ad
+here would have derived a `JobStarterDebug` C++ never writes. The Go
+derivation reads the submit keywords through the same gate the keyword pass
+uses instead, which also gets the keyword's second spelling (the attribute
+name) and its rule that a value expanding to nothing means the file did not
+set it: `starter_debug =` is "not set" and the default still applies, while
+`starter_log =` sets nothing at all.
+
+**A job lease of a few seconds was recorded as asked.** `job_lease_duration`
+is how long the schedd may hold a claim while it is disconnected from the job.
+`SubmitHash::ReportCommonMistakes` warns that a lease under 20 seconds "is not
+allowed" and replaces it with 20; Go stored whatever was written, so
+`job_lease_duration = 5` produced a lease that expires before a reconnect can
+happen and the job is thrown back into the queue instead of resuming.
+
+The test is narrower than it looks and is worth stating exactly, because every
+piece of it is observable. It is `ExprTreeIsLiteralNumber` into a `long long`,
+then `> 0 && < 20`. A real is TRUNCATED toward zero first, so `19.9` is 19 and
+is raised while `0.5` is 0 and is left alone. A boolean is a number, so
+`job_lease_duration = true` is 1 and becomes 20. A string is not, so `"5"`
+stays `"5"`. Nothing built with an operator is a literal, so `4 + 5` is stored
+unchecked. Zero and negative values are left alone — they are the documented
+ways to ask for no lease. And the check runs before the `+Attr` pass, so
+`+JobLeaseDuration = 5` keeps its 5.
+
+Two things about this one the sweep cannot tell you. First, the comparison
+never sees it: C++ gives every job a `JobLeaseDuration` from
+`JOB_DEFAULT_LEASE_DURATION` and Go does not, so the attribute sits in
+`knownDivergent` and is skipped even on the files that name a lease.
+`TestDerivedAttributesMatchOracle` compares it directly, which is the only
+reason the fix is checked at all. Second, condor_submit 26.2.0 clamps at most
+ONE proc per submission: the clamp is inside the `already_warned_job_lease_too_small`
+guard, which is a warning-dedup flag and is never reset, so
+`job_lease_duration = 5` with `queue 3` leaves procs 1 and 2 at 5. Go raises
+every proc. That is a deliberate departure — replicating the one-shot would
+mean writing a lease HTCondor's own message calls not allowed — and it is the
+one piece of this attribute the two sides still disagree about.
+
+**A parallel job got no I/O proxy and no sandbox.** `SetParallelParams`
+assigns `WantIOProxy` and `JobRequiresSandbox` for `CONDOR_UNIVERSE_PARALLEL`,
+and only for that universe — the MPI universe is a different universe number
+there and gets neither, even though this parser maps both submit spellings
+onto `UniverseParallel`. `WantIOProxy` is what makes chirp reachable, which is
+how a parallel job's `sshd` is set up; `JobRequiresSandbox` is read by
+`SpooledJobFiles::jobRequiresSpoolDirectory`, which assumes a spool directory
+for a parallel job when the attribute is absent — so what the missing
+attribute costs is not the spool directory but the value a transform or a
+policy expression reads, which came back undefined.
+
+Both are written only when the job does not already carry them. C++ reaches
+the same place from the other side: it assigns early and lets the
+`want_io_proxy` keyword and the `+Attr` pass overwrite, and here the keyword
+pass still runs afterwards while `+Attr` has already run. `want_io_proxy =
+false` on a parallel job therefore still wins, on both sides. The
+`knownDivergentGenerated` entry for `WantIOProxy` claimed the keyword was not
+implemented at all, which had stopped being true; the derived default was the
+part that was still missing.
+
+**`nice_user` left a `NiceUser` attribute behind.** `nice_user` is shorthand
+for an accounting group and a default `MaxJobRetirementTime` of 0, and that
+part was fixed with the accounting group work above. What outlived it was a
+`NiceUser` attribute Go wrote whenever the keyword appeared — including
+`nice_user = false`, which wrote `NiceUser = false`. condor_submit writes no
+such attribute: `ATTR_NICE_USER_deprecated` is a submit keyword's second
+accepted spelling and a thing `SetAutoAttributes` reads, never a thing
+condor_submit assigns. A job ad carrying it told any `SYSTEM_STARTD_JOB_ATTRS`
+reader, job transform or policy expression that the job's nice-user state was
+a fact of the ad, when the only record of it is the accounting group.
 
 **Grid credential and data files were stored as written.** `SetGridParams`
 runs every cloud credential and data file it reads through `full_path`, so the
@@ -951,11 +1040,12 @@ as text). `file_remaps` is in the simple pass and is fixed with the rest; the
 other four are not, and are recorded above with what they actually do.
 
 Where it stops is the `f_special` bit, which the table itself carries. The
-attributes a `SetXXX` method DERIVES are still Go's to catch up on:
-`JobStarterDebug` defaulting to true when `starter_log` is set, the
-20-second `JobLeaseDuration` floor, and the `Requirements` clauses that read
-`TransferCheckpointFiles` and `CudaVersion` all live in `SetAutoAttributes`
-and `SetRequirements`, which run after this pass.
+attributes a `SetXXX` method DERIVES live in `SetAutoAttributes`,
+`ReportCommonMistakes`, `SetParallelParams` and `SetRequirements`, which run
+after this pass; `JobStarterDebug`, the 20-second `JobLeaseDuration` floor and
+the parallel universe's two implied settings are fixed below, and what is left
+is the `Requirements` clauses that read `TransferCheckpointFiles` and
+`CudaVersion`.
 
 **A cron job never deferred, and a cron job's timing went nowhere.** There is
 no `CronWindow` or `CronPrepTime` job attribute: `cron_window` and
@@ -1012,11 +1102,20 @@ rejects -- a negative `cron_window`, a non-integer `max_retries`, a
 Measured over the 600-file generated sweep, this added no file that
 condor_submit accepts and the Go parser refuses.
 
-What is deliberately left: `ScheddInterval`. C++ writes it only so the
-deferral clause of its generated `Requirements` can read it, and Go generates
-neither that clause nor a `Requirements` resembling C++'s. It belongs with the
-`Requirements` divergence at the top of this file, not with the cron
-attributes, which now agree.
+What is deliberately left: `ScheddInterval`. Any of `CronMinutes`,
+`CronHours`, `CronDaysOfMonth`, `CronMonths`, `CronDayOfWeek` or
+`DeferralTime` makes `SetRequirements` copy `SCHEDD_INTERVAL` into the job —
+`deferral_time` alone is enough, so it is not a cron-only thing — and it does
+so for exactly one reason, stated at the assignment: the deferral clause it is
+about to append to `Requirements` names the attribute. Nothing else reads it.
+The schedd's `updateSchedDInterval` only REFRESHES jobs that already carry it,
+so a job without it is not missing anything; a job WITH it earns a job-queue
+write on every `WalkJobQueue`. Go generates neither that clause nor a
+`Requirements` resembling C++'s, so writing `ScheddInterval` would add an
+attribute no Go-built ad reads and buy the job that write for nothing. It
+belongs with the `Requirements` divergence at the top of this file.
+`TestScheddIntervalIsNotDerived` pins both halves of that: C++ still writes it,
+Go still does not.
 
 **The file transfer family.** `should_transfer_files` and
 `when_to_transfer_output` are one decision in `SetTransferFiles`, not two
