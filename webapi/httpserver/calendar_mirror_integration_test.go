@@ -414,3 +414,66 @@ func TestCalendarFromMirrorReportsAShortArchive(t *testing.T) {
 		t.Errorf("otheruser's completions = %d, want 1", total)
 	}
 }
+
+// TestCalendarFromMirrorCountsUnusableSubmitDates covers the shape a production
+// archive was found in: a record whose QDate is not a date at all, because the
+// field's bytes were scrambled. Such a job IS counted by the completed series --
+// that buckets on EnteredHistoryTime, which was intact -- but it can land on no
+// submit day, so the two halves of the panel disagree by exactly that many.
+//
+// The value used is one of the two actually observed (4096; the other was
+// 16777216), not a round number, because what makes this corruption hard to
+// notice is precisely that it looks like a plausible integer rather than garbage.
+//
+// Asserts the INTERNAL count, not the note: a scrambled field is an operator's
+// problem and is deliberately kept out of the panel (see calendar.go).
+func TestCalendarFromMirrorCountsUnusableSubmitDates(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("integration test (forks a real htcondordb)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	now := time.Now()
+	h := mirrorForCalendar(ctx, t, now)
+	dbc, closer, _, err := h.dbMirror.Client(ctx)
+	if err != nil {
+		t.Fatalf("mirror client: %v", err)
+	}
+	defer closer()
+
+	eht := calDay(now, 2) + 7200
+	ad := fmt.Sprintf("ClusterId = 9999\nProcId = 0\nOwner = %q\nJobStatus = 4\n"+
+		"QDate = 4096\nEnteredHistoryTime = %d\nCompletionDate = %d\n"+
+		"ExitCode = 0\nExitBySignal = false\nRemoteWallClockTime = 60",
+		calendarTestOwner, eht, eht)
+	if err := dbc.ArchiveAppend(ctx, "history", ad); err != nil {
+		t.Fatalf("append the corrupt-QDate record: %v", err)
+	}
+
+	resp, cerr := h.calendarFromMirror(ctx, calendarTestOwner, true, 5)
+	if cerr != nil {
+		t.Fatalf("calendarFromMirror: %v", cerr)
+	}
+
+	if resp.UnusableSubmit != 1 {
+		t.Errorf("UnusableSubmit = %d, want 1: a QDate of 4096 is not a submit day and must be counted, "+
+			"not silently dropped", resp.UnusableSubmit)
+	}
+	// It must NOT reach the panel: nothing a chart's reader can act on.
+	if strings.Contains(resp.Note, "submit date") {
+		t.Errorf("note = %q; a scrambled mirror field must stay out of the panel", resp.Note)
+	}
+	// And it must still be counted where its attribute IS intact. Dropping it
+	// from the EnteredHistoryTime-bucketed series too would be a second bug
+	// hiding behind the first.
+	total := 0
+	for _, d := range resp.Days {
+		total += d.Completed
+	}
+	if total == 0 {
+		t.Errorf("no completed jobs on any day; a corrupt QDate must not remove the job from the "+
+			"EnteredHistoryTime-bucketed series: %+v", resp.Days)
+	}
+}

@@ -203,7 +203,25 @@ type CalendarResponse struct {
 	// the mirror answered only part of it.
 	Partial bool   `json:"partial"`
 	Note    string `json:"note"`
+	// UnusableSubmit is how many jobs could not be placed on any submit
+	// day because their QDate is not a date (see calendarQDateFloor).
+	// NOT serialized: it is a mirror-integrity fact for the operator's log
+	// and for tests, not something a chart's reader can do anything with.
+	UnusableSubmit int `json:"-"`
 }
+
+// calendarQDateFloor is the earliest a QDate bucket can be and still be a
+// DATE. It is a corruption check, not a retention policy: a real submit time
+// on this pool is 2020 or later, while a QDate whose bytes have been
+// scrambled reads as a small integer -- 4096 and 16777216 were both observed
+// on a production archive, landing in January and July 1970. Anything below
+// this floor is a field that is no longer a timestamp, and a job holding one
+// cannot be attributed to a submit day at all.
+//
+// Deliberately absolute rather than relative to the window: a job may sit in
+// the queue for months and legitimately carry a submit day long before the
+// window starts, so "older than the window" says nothing about corruption.
+const calendarQDateFloor = 946684800 // 2000-01-01
 
 // calendarSeries names one of the day-series, for a note and for a test
 // to assert the right query was built for the right thing.
@@ -388,6 +406,9 @@ func (s *Handler) calendarFromMirror(ctx context.Context, owner string, ownedByM
 	}
 
 	var missing []string
+	// unusableSubmit counts jobs the submitted series could not place on
+	// any day because their QDate is not a date (see calendarQDateFloor).
+	unusableSubmit := 0
 	// earliest is the first day in the window any history row landed on,
 	// which the reach probe below needs to say anything useful.
 	earliest := int64(-1)
@@ -425,6 +446,27 @@ func (s *Handler) calendarFromMirror(ctx context.Context, owner string, ownedByM
 			}
 			day := index(bucket)
 			if day == nil {
+				// A bucket outside the window has no row. For the
+				// submitted series that is how a job submitted before
+				// the window is left out, which is correct -- but it is
+				// ALSO where a job whose QDate is corrupt disappears,
+				// because a scrambled timestamp buckets to 1970 and 1970
+				// is outside every window this serves. The two are
+				// indistinguishable to index(), so they are separated
+				// here by the floor and the unusable ones are counted.
+				//
+				// Counted here rather than excluded by the query on
+				// purpose. Adding `QDate > floor` to the constraint is
+				// faster (measured: 540ms -> 390ms on a 90-day window of
+				// 5.5M rows) and returns the SAME per-day numbers, since
+				// these rows were already being discarded -- but it also
+				// makes them invisible, and a series quietly short by
+				// 10% is worse than one that takes 150ms longer and says
+				// so.
+				if bucket < calendarQDateFloor &&
+					(q.Series == seriesSubmittedHistory || q.Series == seriesSubmittedLive) {
+					unusableSubmit += int(n)
+				}
 				continue
 			}
 			switch q.Series {
@@ -454,6 +496,25 @@ func (s *Handler) calendarFromMirror(ctx context.Context, owner string, ownedByM
 			missing = append(missing,
 				"the derived queue depth ran below zero on some days, so jobs left the queue without entering history")
 		}
+	}
+
+	// A job whose submit date is corrupt is counted in completed or removed
+	// -- those bucket on EnteredHistoryTime, which is intact -- but cannot
+	// appear in submitted, so the panel's two halves disagree by exactly
+	// this many.
+	//
+	// Deliberately NOT reported in Note. Note is for a reader of the chart,
+	// and every other thing it says is something they can act on or at least
+	// understand ("the archive does not reach back that far"). A scrambled
+	// field in the mirror is neither: there is nothing a viewer can do about
+	// it, and naming it in the panel would turn every chart into a bug
+	// report. It is an operator's problem, so it goes to the operator's log,
+	// and to UnusableSubmit for a test to assert on.
+	resp.UnusableSubmit = unusableSubmit
+	if unusableSubmit > 0 {
+		s.logger.Warn(logging.DestinationHTTP,
+			"calendar: jobs in this window have no usable submit date, so the submitted series is short by that many",
+			"jobs", unusableSubmit, "window_days", days, "floor", calendarQDateFloor)
 	}
 
 	// Does the archive cover the whole window? Only worth asking when
