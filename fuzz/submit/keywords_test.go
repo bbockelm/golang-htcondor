@@ -119,7 +119,7 @@ var pathKeywords = map[string]string{
 	"log":              "resolved against Iwd by setStandardFiles",
 	"dagman_log":       "not implemented by the Go parser; see knownDivergentGenerated[dagmannodeslog]",
 	"output_directory": "not implemented by the Go parser; see knownDivergentGenerated[outputdirectory]",
-	"starter_log":      "not implemented by the Go parser; see knownDivergentGenerated[jobstarterlog]",
+	"starter_log":      "resolved against Iwd by the simple-keyword pass, which also derives JobStarterDebug from it",
 }
 
 func TestFileRoleKeywordsAreAccountedFor(t *testing.T) {
