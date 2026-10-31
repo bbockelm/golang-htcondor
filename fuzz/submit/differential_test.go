@@ -669,31 +669,108 @@ func TestSeedsHaveNoFreshDivergence(t *testing.T) {
 	}
 }
 
-// TestKnownDivergencesStillDiverge keeps the knownDivergent ATTRIBUTE table
-// honest, the way the reason strings keep the seed table honest. Every entry
-// listed here must still diverge; when one starts agreeing, the Go side was
-// fixed and the entry should be deleted so the fix cannot silently regress.
-func TestKnownDivergencesStillDiverge(t *testing.T) {
+// TestRecordedDivergencesStillDiverge is what makes a recorded divergence an
+// inventory rather than a list of excuses: every entry under divergences/ has
+// to still reproduce, and one that has stopped is a fix nobody locked in.
+//
+// It sweeps the seeds and the whole generated corpus, and for each entry asks
+// two questions in order:
+//
+//   - did the attribute DIVERGE anywhere? then the entry is still earning its
+//     place and nothing is reported;
+//   - was the attribute produced by either parser at all? then it is being
+//     compared and it agrees -- the entry is stale and the test fails, naming
+//     the file to delete.
+//
+// An attribute neither side ever produced is reported without failing: the
+// sweep never reached the keyword that writes it, so it says nothing about
+// whether the entry is still true. Four stale entries had accumulated by the
+// time this test was written, each from a fix that deleted the code but not
+// the entry, and nothing noticed.
+//
+// host/ is exempt: those are not divergences but attributes the comparison
+// skips outright, so they are never "seen to diverge" by construction. So is
+// an entry whose file says "Sweep cannot prove this:" -- one the merged-ad
+// comparison cannot see, or whose triggering submit file the generator does
+// not write. Those are reported with the reason, and the reason has to name
+// what checks the entry instead.
+func TestRecordedDivergencesStillDiverge(t *testing.T) {
 	requireOracle(t)
 
-	seen := make(map[string]bool)
-	for _, sc := range seeds {
-		_, s, skip := check(t, sc.input)
-		if skip {
-			continue
+	diverged := map[string]bool{}
+	produced := map[string]bool{}
+
+	sweep := func(src string) {
+		cpp := oracle.MakeAds(src, oracle.ModeAds, MaxProcs)
+		if !cpp.OK {
+			return
 		}
-		for attr := range s {
-			seen[attr] = true
+		cppAds, err := ParseCanon(cpp.Ads)
+		if err != nil {
+			return
+		}
+		goRes := GoMakeAds(src)
+		if !goRes.OK {
+			return
+		}
+		for _, key := range cppAds.Keys() {
+			for _, n := range namesFold(cppAds.ByKey[key]) {
+				produced[n] = true
+			}
+			if g, ok := goRes.Ads.ByKey[key]; ok {
+				for _, n := range namesFold(g) {
+					produced[n] = true
+				}
+			}
+		}
+		_, seen := Compare(cppAds, goRes.Ads)
+		for attr := range seen {
+			diverged[attr] = true
 		}
 	}
-	// Only attributes a basic submit file always produces are asserted; the
-	// rest of the table depends on which commands a seed uses.
-	for _, attr := range []string{"shouldtransferfiles", "requirements", "rank", "mytype", "targettype"} {
-		if !seen[attr] {
-			t.Errorf("%q no longer diverges from the C++ parser: delete it from knownDivergent so the fix is locked in", attr)
+
+	for _, sc := range seeds {
+		sweep(sc.input)
+	}
+	v := genVocab(t)
+	for _, data := range generatedCorpus(auditCorpusSize) {
+		sweep(v.Generate(data))
+	}
+
+	for dir, entries := range map[string]map[string]string{
+		"seed":      knownDivergent,
+		"generated": knownDivergentGenerated,
+	} {
+		for attr := range entries {
+			switch {
+			case diverged[attr]:
+			case sweepExempt[attr] != "":
+				t.Logf("%s/%s.md: exempt -- %s", dir, attr, sweepExempt[attr])
+			case produced[attr]:
+				t.Errorf("%s/%s.md: %q agrees with the C++ parser now -- delete the file so the fix is locked in",
+					dir, attr, attr)
+			default:
+				t.Logf("%s/%s.md: unverified, neither parser produced %q anywhere in the sweep",
+					dir, attr, attr)
+			}
+		}
+	}
+	for universe, entries := range knownDivergentInUniverse {
+		for attr := range entries {
+			if !diverged[attr] && produced[attr] && sweepExempt[attr] == "" {
+				t.Errorf("universe/%d/%s.md: %q agrees with the C++ parser now -- delete the file", universe, attr, attr)
+			}
 		}
 	}
 }
+
+// auditCorpusSize is how much of the generated corpus the sweep above reads.
+// It is larger than the corpus the divergence tests use, because this one
+// reasons from an ABSENCE: an attribute that never diverged in the files it
+// read is reported as fixed, so reading too few files turns a divergence the
+// sweep merely missed into a failure. At this size the four stale entries it
+// first found were stable across runs, and every live entry reproduced.
+const auditCorpusSize = 1500
 
 // TestSeedParseAcceptance reports, without failing, which seeds the two sides
 // disagree about accepting. That disagreement is real and worth knowing, but it
