@@ -31,6 +31,7 @@ import (
 // which reads JOB_EPOCH_HISTORY without the second schedd's local name,
 // so in this one-pool harness only the first schedd's file is its own.
 func TestMultiAPWatchesEndToEnd(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (runs two schedds, three htcondordb daemons and an API server)")
 	}

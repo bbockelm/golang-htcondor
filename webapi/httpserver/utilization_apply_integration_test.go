@@ -27,6 +27,7 @@ import (
 //
 //nolint:gocyclo // one end-to-end scenario, read top to bottom
 func TestUtilizationApplyIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

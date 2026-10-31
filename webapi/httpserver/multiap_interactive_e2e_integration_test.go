@@ -55,6 +55,7 @@ func (e *e2eSession) on(t *testing.T, schedd string) []string {
 }
 
 func TestMultiAPInteractiveEndToEnd(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (runs two schedds, three htcondordb daemons and an API server)")
 	}

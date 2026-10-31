@@ -116,6 +116,7 @@ func TestRESTClusterUpload(t *testing.T) {
 // these routes raise it for themselves. Both framings, each with a body
 // past the default: an override that did not take effect answers 413.
 func TestRESTUploadAboveDefaultBodyLimit(t *testing.T) {
+	t.Parallel()
 	env := setupRESTUpload(t)
 
 	// A shell script padded with comments: still runnable, and big.

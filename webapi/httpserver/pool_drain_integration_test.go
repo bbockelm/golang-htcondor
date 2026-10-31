@@ -36,6 +36,7 @@ func (r scheddRunningJobs) RunningJobs(ctx context.Context, attrs []string, limi
 // the ones a startd publishes, the job's GlobalJobId matches its slot's,
 // and its schedd name is the one the schedd advertises.
 func TestPoolDrainAgainstARealPool(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (starts a real pool)")
 	}

@@ -38,6 +38,11 @@ import (
 // Before the fix the stored session never learned its cluster id, so the new
 // process adopted it as cluster 0, found no such job, and reaped it on the
 // first list -- (a) fails.
+//
+// Deliberately not t.Parallel: the restart has to come up on the same
+// address, so the test closes an ephemeral listener and binds that exact
+// port again. Run alongside other tests, another one's ":0" bind can take
+// the port in that window and hold it past relisten's retry.
 func TestJupyterSessionSurvivesAPIServerRestart(t *testing.T) {
 	ji := setupJupyterIntegration(t)
 	client, baseURL, created := ji.client, ji.baseURL, ji.created
@@ -221,6 +226,9 @@ func setupJupyterIntegration(t *testing.T) *jupyterIntegration {
 // Before the reconnect grace period the drop closed the session on the
 // spot: the helper's redial was refused, the refused helper ended its job,
 // and the session was gone from the list.
+//
+// Deliberately not t.Parallel: it shares setupJupyterIntegration's fixed
+// listen address with the restart test above, for the same reason.
 func TestJupyterSessionSurvivesATunnelDrop(t *testing.T) {
 	ji := setupJupyterIntegration(t)
 	client, baseURL, created := ji.client, ji.baseURL, ji.created

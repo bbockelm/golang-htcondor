@@ -147,6 +147,7 @@ func getJSON(ctx context.Context, t *testing.T, s *Server, path string, auth fun
 }
 
 func TestMirrorReadsAreOwnerScopedAgainstARealMirror(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}

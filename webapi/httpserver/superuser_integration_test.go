@@ -86,6 +86,7 @@ func TestSuperuserModeEndToEnd(t *testing.T) {
 // Requires root AND a condor account, so it skips almost everywhere. The
 // root-integration-test CI job is where it actually runs.
 func TestSuperuserModeEndToEndAsCondor(t *testing.T) {
+	t.Parallel()
 	if os.Geteuid() != 0 {
 		t.Skip("needs root: HTCondor only treats the daemon's own OS user as the condor identity when it was started by root")
 	}
