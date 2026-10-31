@@ -237,12 +237,6 @@ on the cluster ad as a `MAX(...)` expression instead. (`JobRunCount` was
 here and is fixed: it is the schedd's, from the job's shadow exceptions, and
 Go no longer writes a 0 that claimed the job had run no times.)
 
-`RequestGpuMemory`: Go turns `request_gpu_memory = 8GB` into
-`RequestGpuMemory = 8192`. C++ lists `request_gpu_memory` and
-`request_gpus_memory` as disallowed keywords (`f_error` in
-`prunable_keywords`), warns that `gpus_minimum_memory` was probably meant, and
-sets nothing.
-
 ## Fixed
 
 **A quoted item file had its quotes stripped.** `queue from "items.txt"`
@@ -758,6 +752,17 @@ to be written first. The other way round the built-in tag is written and then
 thrown away, leaving a `TransformBody_RequestMemory` that nothing names --
 and a body nothing names is never run. The oracle is what settled it:
 `"memck RequestMemory"`, in that order.
+
+**`request_gpu_memory` is not a submit command.** It and `request_gpus_memory`
+are rows in HTCondor's keyword table flagged `f_error`, and
+`SetRequestResources` answers them with a warning -- "did you mean
+gpus_minimum_memory?" -- and no attribute at all. Go turned
+`request_gpu_memory = 8GB` into `RequestGpuMemory = 8192`, which is worse
+than ignoring it: nothing in HTCondor reads that attribute, so the job looked
+like it carried a GPU memory constraint and was matched as though it had
+asked for nothing. The keyword that does constrain GPU memory is
+`gpus_minimum_memory`, which becomes a `RequireGPUs` clause the negotiator
+evaluates.
 
 **A tool daemon was never transferred.** `SetTransferFiles` adds
 `ToolDaemonCmd`, and `ToolDaemonInput` if there is one, to the job's transfer
