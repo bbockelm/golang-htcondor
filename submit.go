@@ -2206,14 +2206,35 @@ func (sf *SubmitFile) setCustomResourceRequests(ad *classad.ClassAd) error {
 	return nil
 }
 
-// setRank sets the rank expression
+// setRank stores the job's Rank, mirroring SubmitHash::SetRank.
+//
+// Rank is an EXPRESSION -- the negotiator evaluates it against each
+// candidate machine ad -- so `rank = Memory` has to reach the ad as the
+// attribute reference Memory, not as the string "Memory". A string is
+// truthy nonsense to the matchmaker: it ranks every machine identically
+// and silently throws away the submitter's preference. The expression is
+// parsed here so an unparsable one is a submit error, which is what
+// condor_submit does with it (AssignJobExpr aborts the submission).
+//
+// `preferences` is the keyword's historical spelling and C++ still reads
+// it as the alternate name. An empty value, from either spelling, takes
+// the default rather than erroring: submit_param hands SetRank an empty
+// string, which it treats as "nothing was said" and falls through to
+// AssignJobVal(ATTR_RANK, 0.0).
 func (sf *SubmitFile) setRank(ad *classad.ClassAd) error {
-	if rank, ok := sf.submitCommand("rank"); ok {
-		_ = ad.Set("Rank", rank)
-	} else {
-		// Default rank
-		_ = ad.Set("Rank", 0.0)
+	rank, ok := sf.submitCommandAlt("rank", "preferences")
+	if ok {
+		rank = strings.TrimSpace(rank)
 	}
+	if !ok || rank == "" {
+		_ = ad.Set("Rank", 0.0)
+		return nil
+	}
+	expr, err := classad.ParseExpr(rank)
+	if err != nil {
+		return fmt.Errorf("rank: %q is not a valid ClassAd expression: %w", rank, err)
+	}
+	_ = ad.Set("Rank", expr)
 	return nil
 }
 

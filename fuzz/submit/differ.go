@@ -40,7 +40,7 @@ var hostDerived = map[string]string{
 var knownDivergent = map[string]string{
 	"shouldtransferfiles": `C++ defaults to "IF_NEEDED", Go to "YES". Changes whether the job transfers files when it lands on a machine sharing a filesystem.`,
 	"requirements":        `different expressions entirely: C++ pins TARGET.Arch/OpSys to the submitting machine's values and adds Disk and FileSystemDomain||HasFileTransfer clauses; Go emits "isnt undefined" for Arch/OpSys and adds a TARGET.Cpus clause.`,
-	"rank":                `C++ emits the real 0.0, Go the integer 0. Same value, different ClassAd type.`,
+	"rank":                `both sides store the same real 0.0; the harness renders the Go side with Expr.String(), which drops a whole-number real's decimal point, so it reads as the integer 0. The harness's rendering, not the parser's value.`,
 
 	// Attributes only the C++ side produces. Most are per-job bookkeeping
 	// counters the schedd would otherwise fill in, but several change behavior.
