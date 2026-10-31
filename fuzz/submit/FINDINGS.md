@@ -714,8 +714,8 @@ reasons. The buffer, Java, noop-job, parallel-script and submit-event-note
 families, `core_size`, `stack_size`, `keep_claim_idle`,
 `max_job_retirement_time`, `next_job_start_delay`, the `allowed_*_duration`
 pair, `manifest`, `output_destination`, `output_directory`,
-`primary_unix_group`, `jobset` and `dag_node_name` were all on this list and
-are fixed; see "Fixed" below.
+`primary_unix_group`, `jobset`, `dag_node_name` and the GPU request family
+were all on this list and are fixed; see "Fixed" below.
 
 ## Fixed
 
@@ -1051,6 +1051,83 @@ behaves identically under either one. Also left: `TransferPlugins` is stored
 verbatim by C++ and re-joined by Go, which drops the spaces around the `;`
 separators -- the same `f_as_string` question as the `encrypt_*_files` lists,
 and it belongs with them.
+
+**A GPU job asked for a GPU with no constraints at all.** Six keywords, and
+one attribute nothing reads a keyword for. `gpus_minimum_capability`,
+`gpus_maximum_capability`, `gpus_minimum_memory` and `gpus_minimum_runtime`
+set nothing in Go; `require_gpus` was stored as a *string*, so the startd
+would have been comparing text to a number; and `cuda_version` stayed the
+string the submitter wrote. Every behavior below was measured against
+libcondor_utils 26.2.0.
+
+The derived attribute is `RequireGPUs`, and it is the one that bites. The other
+attributes are only bounds: nothing reads `GPUsMinCapability` on its own. What
+the startd evaluates against each GPU's property ad is `RequireGPUs`, and
+`SetResourceRequirements` is where the bounds turn into it:
+
+```
+Capability >= GPUsMinCapability && Capability <= GPUsMaxCapability
+    && GlobalMemoryMb >= GPUsMinMemory && MaxSupportedVersion >= GPUsMinRuntime
+```
+
+one clause per bound that is set, in exactly that order, joined with `&&`.
+The order is load-bearing because `&&` is left-associative, so a different
+order is a different tree even though it is the same value — the same reason
+the `on_exit_remove` join above is careful about parentheses. A job that
+reached the pool without this asked for *a* GPU and matched any card, however
+old, however small, whatever runtime it supported.
+
+Everything about the family is conditional on something, and none of it is
+guessable from the names:
+
+- **All five property keywords are gated on `request_gpus`.** The block that
+  reads them is inside `if (job->Lookup(ATTR_REQUEST_GPUS))`, so a file with
+  `gpus_minimum_capability` and no `request_gpus` — or with `request_gpus =
+  undefined`, which assigns nothing — sets no attribute at all. A later
+  `+RequestGPUs` does not reopen it: the custom attributes are applied after
+  that pass. But `SetResourceRequirements` runs *after* them and reads the
+  AD, so `+GPUsMinCapability` on a job that did use the `request_gpus` keyword
+  does reach the derived expression.
+- **A submitter's own `require_gpus` keeps any property it already
+  mentions.** The references are classified against a stand-in property ad, so
+  `require_gpus = Capability > 5` suppresses the `Capability` clause and the
+  `GlobalMemoryMb` one is still added. The classification is
+  case-insensitive, follows into function arguments, counts `MY.Capability`
+  and does *not* count `TARGET.Capability`, which names the machine ad rather
+  than the GPU.
+- **The join parenthesizes only `||` and the ternary**, which are the two
+  shapes that bind more loosely than the `&&` about to sit above them.
+- **`gpus_minimum_memory` is a MB quantity** with the usual `K`/`M`/`G`/`T`
+  suffixes, rounded up, falling back to an expression when it is not a size.
+- **`gpus_minimum_runtime` is a version** in `x` or `x.y` form, canonicalized
+  to `x*1000 + y*10`, so `12.1` is `12010`. It is read with `StrIsProcId`,
+  the job-id parser, which is why `.5` is 50 and `1.-1` is 1000. A number
+  already past 1000 with no minor part is taken to be canonical and kept.
+- **`cuda_version` uses a DIFFERENT encoding**, however alike the two look:
+  `x*1000 + y`, so `12.1` is `12001` where `gpus_minimum_runtime = 12.1` is
+  `12010`. It reaches the ad as a string from the simple-keyword pass and
+  `SetRequirements` rewrites it, with `%u`, so `-1` wraps to 4294967295
+  rather than failing. A value in neither form fails the submit outright —
+  *unless* `SetRequirements` returned early, which it does for a `+Requirements`
+  or `MY.Requirements`, a `FACTORY.Requirements`, or a grid job whose type is
+  not `condor`. In each of those the string survives untouched and the
+  rejection never happens.
+
+What is left is the int-versus-real printing of a whole-number real, which is
+the `Rank` entry at the top of this file in a second place: `gpus_minimum_capability
+= 8.0` is a real on both sides, and Go's `Expr.String()` prints it `8`, which
+reads back as an integer. `GPUsMinCapability` and `GPUsMaxCapability` stay in
+`knownDivergentGenerated` for that alone, so
+`TestGPURequestKeywordsMatchOracle` compares the whole family directly —
+presence, value and the derived expression — and requires the two cases that
+hides to be the same NUMBER. The entries go when the unparser does.
+
+Seeds carry this family rather than the sweep. Of 362 generated files the
+oracle accepted, `GPUsMinRuntime` reached an ad in **none**: the keyword is in
+the vocabulary, but it only does anything alongside a `request_gpus` the
+generator has to draw independently. `RequireGPUs` reached five,
+`GPUsMinCapability` one. The keyword coverage count says 255 of 258 either
+way, which is the gap that number cannot see.
 
 ## The container image
 
