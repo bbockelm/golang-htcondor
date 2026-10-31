@@ -274,7 +274,10 @@ func TestMacroExpansionMultipleVariables(t *testing.T) {
 	const head = `
 universe = vanilla
 executable = /bin/process
-arguments = --x $(xval) --y $(yval)
+# The items below carry literal double quotes -- that is the point of the
+# "eight items of one field each" note above -- and an unescaped quote inside
+# an argument makes condor_submit refuse the submit file, so the expansion is
+# exercised through the file names rather than through arguments.
 output = result_$(xval)_$(yval).out
 error = result_$(xval)_$(yval).err
 log = multi.log
