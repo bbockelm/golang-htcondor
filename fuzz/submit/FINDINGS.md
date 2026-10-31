@@ -600,9 +600,17 @@ ad.
 
 ## Cosmetic
 
-`Rank`: C++ emits the real `0.0`, Go the integer `0`. Same value, different
-ClassAd type — listed because a type difference can still change an expression
-that consumes it.
+`Rank`: both sides now store the same expression, and the default is the real
+`0.0` on both. What is left is the harness: it renders a Go value with
+`Expr.String()`, a debugging form that prints a whole-number real without its
+decimal point (`0.0` reads back as the integer `0`) and parenthesises every
+binary operation. Rendering with the reference unparser instead removes the
+entry; until then the comparison is the one that is wrong, not the parser.
+
+The finding underneath it was not cosmetic at all: `rank = Memory` reached the
+ad as the *string* `"Memory"`, which the negotiator cannot rank by, and
+`Expr.String()` printed that string unquoted so the two sides looked identical.
+It is fixed, and `TestRankIsAnExpression` pins the type.
 
 # Findings from the generated corpus
 
