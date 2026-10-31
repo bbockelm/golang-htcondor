@@ -1640,6 +1640,10 @@ func removeJob(t *testing.T, client *http.Client, baseURL, user, jobID string) {
 }
 
 // TestHTTPAPIRateLimiting tests that rate limiting works correctly with HTTP API
+//
+// Deliberately not t.Parallel: it sets CONDOR_CONFIG and reloads the
+// default config, which caches a process-global rate limiter from this
+// test's deliberately tiny limits. See the note at the setenv below.
 func TestHTTPAPIRateLimiting(t *testing.T) {
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {

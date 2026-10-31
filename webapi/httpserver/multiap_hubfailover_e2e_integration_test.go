@@ -34,6 +34,7 @@ const (
 )
 
 func TestMultiAPHubFailoverEndToEnd(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (runs two schedds, four htcondordb daemons and an API server)")
 	}

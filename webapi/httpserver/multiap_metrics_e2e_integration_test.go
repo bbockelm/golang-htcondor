@@ -31,6 +31,7 @@ import (
 // to read. Either way the test skips, saying so. It runs once
 // HTCONDORDB_BINARY names an htcondordb that federates job_metrics.
 func TestMultiAPJobMetricsEndToEnd(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (runs two schedds, three htcondordb daemons and an API server)")
 	}

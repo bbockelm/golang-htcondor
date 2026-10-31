@@ -135,6 +135,7 @@ var (
 )
 
 func TestMultiAPEndToEnd(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (runs two schedds, three htcondordb daemons and an API server)")
 	}
