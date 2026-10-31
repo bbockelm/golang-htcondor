@@ -51,6 +51,23 @@ var seeds = []seedCase{
 	{input: "FOO = bar\n0\n"},                      // a bad line among good ones fails the whole parse in compat
 	{input: "foo bar\n"},                           // no operator: a config file rejects it (Parse_macros), as Go does
 
+	// --- known divergence ---
+	{
+		// Found by FuzzConfigParseExpand.
+		input: "0=$EVAL({0 .A})",
+		reason: "a selector on a numeric literal: HTCondor's unparser writes text " +
+			"its own parser cannot read. Both sides parse `0 .A` as attribute A " +
+			"selected from 0, and both are right about that; C++ then unparses it " +
+			"as `0.A`, with no space, and `$EVAL({0.A})` comes back EMPTY -- its " +
+			"lexer reads `0.` as a real and chokes on the `A`. Go keeps the space, " +
+			"so `{ 0 .A }` parses back to the expression it came from. Go's output " +
+			"round-trips and C++'s does not, so this one is recorded rather than " +
+			"matched. (Go has its own instance of the same shape, reachable only " +
+			"from an expression this config language cannot write: `(0).A` " +
+			"unparses to `0.A`, which Go's parser then rejects. That belongs in " +
+			"the ClassAd library, not here.)",
+	},
+
 	// --- former divergences, fixed; each checked against condor 25.14.1 ---
 	{input: "DN = $DIRNAME(/a/b/c)\n"},             // -> /a/b/ (param()'s expand_macro has $DIRNAME)
 	{input: "BN = $BASENAME(/a/b/c)\n"},            // -> c
