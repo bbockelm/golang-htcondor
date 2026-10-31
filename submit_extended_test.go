@@ -198,6 +198,9 @@ func TestJavaKeystoreParameters(t *testing.T) {
 	submit := `
 universe = java
 executable = MyApp
+# A java job names the class to run in arguments; condor_submit refuses one
+# that does not, so this is part of the smallest valid java submit file.
+arguments = MyApp
 jar_files = myapp.jar
 java_vm_args = -Xmx1024m
 keystore_file = /path/to/keystore.jks

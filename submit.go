@@ -853,7 +853,7 @@ func (sf *SubmitFile) transfersExecutable() bool {
 	if !sf.executableIsAFile() {
 		return false
 	}
-	te, ok := sf.submitCommand("transfer_executable")
+	te, ok := sf.simpleKeywordParam("transfer_executable", "TransferExecutable")
 	if !ok || te == "" {
 		return true
 	}
@@ -893,7 +893,7 @@ func (sf *SubmitFile) setArguments(ad *classad.ClassAd) error {
 
 	if !ok || args == "" {
 		_ = ad.Set("Args", "")
-		return nil
+		return sf.requireJavaClass(ad)
 	}
 
 	// Detect style by checking if the argument string is surrounded by double quotes
@@ -911,7 +911,9 @@ func (sf *SubmitFile) setArguments(ad *classad.ClassAd) error {
 		_ = ad.Set("Args", processed)
 	}
 
-	return nil
+	// SetArguments ends with the java check, because the class to run is an
+	// argument: a java job that named none is refused here.
+	return sf.requireJavaClass(ad)
 }
 
 // processOldStyleArguments processes old style argument quoting
@@ -1653,6 +1655,14 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	// them verbatim, so it is the same value either way.
 	sf.addToolDaemonInputFiles(&inFileList, should)
 
+	// A java job's entry class and jar files go on the list too, and the
+	// job is rewritten to run the JVM; see applyJavaUniverse. Like the
+	// tool daemon, they ride on a list the submit file asked for: C++
+	// appends them and then writes the attribute only when the submit file
+	// named files of its own, so a java job with no transfer_input_files
+	// carries no TransferInput at all.
+	sf.applyJavaUniverse(ad, &inFileList, should)
+
 	if inSpecified || imageAdded {
 		// Join with commas for ClassAd string list format
 		_ = ad.Set("TransferInput", strings.Join(inFileList, ","))
@@ -1702,12 +1712,20 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 		_ = ad.Set("OutputDestination", dest)
 	}
 
-	// transfer_executable
-	transferExec := true
-	if te, ok := sf.submitCommand("transfer_executable"); ok {
-		transferExec = parseBool(te, true)
+	// TransferExecutable is written only to turn the transfer OFF, and
+	// transfersExecutable already answers when that is: the keyword whose
+	// first character is `f`, and the universes where the executable is
+	// only the job's NAME (vm, and the ec2/gce/azure grid types), where
+	// SetExecutable forces it off.
+	//
+	// An absent attribute means the executable IS transferred, so writing
+	// `true` for every job -- which is what this did -- is the same
+	// behaviour spelled differently but a different ad: a transform or a
+	// constraint that asks whether the attribute is there gets a different
+	// answer, and so does anything diffing the two parsers' output.
+	if !sf.transfersExecutable() {
+		_ = ad.Set("TransferExecutable", false)
 	}
-	_ = ad.Set("TransferExecutable", transferExec)
 
 	// skip_filechecks - don't check if input files exist
 	if sfc, ok := sf.submitCommand("skip_filechecks"); ok {

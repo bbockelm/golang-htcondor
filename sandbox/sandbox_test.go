@@ -1268,3 +1268,43 @@ func TestExtractOutputSandboxHonorsOwnersPathsOutsideIwd(t *testing.T) {
 	verifyFileContent(t, f.abs, "remapped to an absolute path")
 	verifyFileContent(t, filepath.Join(f.iwd, "b.txt"), "stays in Iwd")
 }
+
+// TestInputSandboxTreatsAbsentTransferExecutableAsTrue pins the default that
+// decides whether a job's executable reaches the execute node.
+//
+// condor_submit writes TransferExecutable only to turn the transfer OFF, so
+// an ordinary job's ad does not carry it -- and HTCondor reads an absent one
+// as true. Requiring it to be PRESENT left the executable out of the input
+// sandbox, which the integration test caught as "Expected file script.sh not
+// found in tarball". It was invisible for as long as this library's own
+// submit parser wrote `TransferExecutable = true` on every job; an ad from
+// condor_submit, or from anything else, would always have hit it.
+func TestInputSandboxTreatsAbsentTransferExecutableAsTrue(t *testing.T) {
+	inputDir := t.TempDir()
+	createTestFile(t, filepath.Join(inputDir, "script.sh"), "#!/bin/sh\necho hi\n", 0o700)
+
+	jobAd := classad.New()
+	_ = jobAd.Set("Iwd", inputDir)
+	_ = jobAd.Set("Owner", getTestUsername())
+	_ = jobAd.Set("Cmd", filepath.Join(inputDir, "script.sh"))
+	// No TransferExecutable: the shape condor_submit produces.
+
+	var buf bytes.Buffer
+	if err := CreateInputSandboxTar(context.Background(), jobAd, &buf); err != nil {
+		t.Fatalf("CreateInputSandboxTar failed: %v", err)
+	}
+	names := tarEntryNames(t, &buf)
+	if len(names) != 1 || names[0] != "script.sh" {
+		t.Errorf("tar contains %v, want [script.sh]", names)
+	}
+
+	// An explicit false still means false.
+	_ = jobAd.Set("TransferExecutable", false)
+	buf.Reset()
+	if err := CreateInputSandboxTar(context.Background(), jobAd, &buf); err != nil {
+		t.Fatalf("CreateInputSandboxTar failed: %v", err)
+	}
+	if names := tarEntryNames(t, &buf); len(names) != 0 {
+		t.Errorf("tar contains %v with TransferExecutable = false, want nothing", names)
+	}
+}

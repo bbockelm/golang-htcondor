@@ -1,1 +1,0 @@
-a java job's entry class and its jar_files are added to the transfer list by C++ and by nothing in Go. That is the rest of the java-universe work: the same block in SetTransferFiles also rewrites Cmd to "java" and turns TransferExecutable off, which is the universe/java/cmd entry, so the two are one change.
