@@ -199,3 +199,49 @@ func TestSelectAttributesNilAd(t *testing.T) {
 		t.Errorf("selectAttributes(nil) = %v, want nil", got)
 	}
 }
+
+// The resource requests ride on the cluster ad, which is where condor_submit
+// puts them: measured against the oracle in placement mode, a `queue 2`
+// submission carries RequestCpus, RequestMemory and RequestDisk at proc id
+// -1 and nothing at proc 1, and gives proc 1 its own RequestDisk only when
+// the value actually differs there (`request_disk = $(Process)GB`).
+//
+// Here that falls out of the dedup rather than a forced placement: proc 0's
+// ad becomes the cluster ad, and a later proc whose value matches the
+// cluster's is skipped. The requests are placeAny, so this test is what says
+// they land in one place and not on every proc -- one copy in the queue, and
+// a `condor_qedit <clusterid> RequestMemory=...` that reaches the whole
+// cluster instead of being shadowed by each proc's own copy.
+func TestResourceRequestsRideOnTheClusterAd(t *testing.T) {
+	cluster := adWith(t,
+		attr{"ClusterId", int64(42)},
+		attr{"ProcId", int64(0)},
+		attr{"Cmd", "/bin/sleep"},
+		attr{"RequestCpus", int64(1)},
+		attr{"RequestMemory", int64(128)},
+		attr{"RequestDisk", exprOf(t, "MAX({1024, (TransferInputSizeMB+1) * 1.25}) * 1024")},
+	)
+	wantSelected(t, "cluster", selectAttributes(cluster, nil, placeCluster),
+		"Cmd", "RequestCpus", "RequestMemory", "RequestDisk")
+
+	// A proc that asks for the same resources adds nothing.
+	same := adWith(t,
+		attr{"ProcId", int64(1)},
+		attr{"Cmd", "/bin/sleep"},
+		attr{"RequestCpus", int64(1)},
+		attr{"RequestMemory", int64(128)},
+		attr{"RequestDisk", exprOf(t, "MAX({1024, (TransferInputSizeMB+1) * 1.25}) * 1024")},
+	)
+	wantSelected(t, "proc-same", selectAttributes(same, cluster, placeProc))
+
+	// A proc that asks for more carries only what differs, as condor_submit's
+	// proc 1 carries only its own RequestDisk.
+	differs := adWith(t,
+		attr{"ProcId", int64(1)},
+		attr{"Cmd", "/bin/sleep"},
+		attr{"RequestCpus", int64(1)},
+		attr{"RequestMemory", int64(128)},
+		attr{"RequestDisk", int64(1048576)},
+	)
+	wantSelected(t, "proc-differs", selectAttributes(differs, cluster, placeProc), "RequestDisk")
+}

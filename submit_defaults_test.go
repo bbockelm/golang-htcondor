@@ -219,3 +219,55 @@ func TestSubmitParamsContext(t *testing.T) {
 		t.Error("nil params should leave the context alone")
 	}
 }
+
+// Each request keyword also answers to its job attribute's name, because
+// SetRequestResources reads submit_param(SUBMIT_KEY_Request*, ATTR_REQUEST_*).
+// A file using that spelling asked for a request condor_submit honours, and
+// reading only the lowercase keyword gave the job the configured default
+// instead -- a request the submitter never made, which the pool then matched
+// and billed them for.
+func TestRequestAttributeSpelling(t *testing.T) {
+	ad := defaultsJobAd(t, "RequestMemory = 777\nRequestCpus = 6\nRequestDisk = 4096\nRequestGpus = 2\n"+defaultsVanilla, nil)
+	wantInt(t, ad, "RequestMemory", 777)
+	wantInt(t, ad, "RequestCpus", 6)
+	wantInt(t, ad, "RequestDisk", 4096)
+	wantInt(t, ad, "RequestGpus", 2)
+}
+
+// The keyword's own name is read first, so a file carrying both spellings
+// is the keyword's value, not the attribute's.
+func TestRequestKeywordOutranksAttributeSpelling(t *testing.T) {
+	ad := defaultsJobAd(t, "request_memory = 100\nRequestMemory = 777\n"+defaultsVanilla, nil)
+	wantInt(t, ad, "RequestMemory", 100)
+}
+
+// "undefined" through the attribute spelling leaves the request off, as it
+// does through the keyword.
+func TestRequestAttributeSpellingUndefined(t *testing.T) {
+	ad := defaultsJobAd(t, "RequestMemory = undefined\n"+defaultsVanilla, nil)
+	wantAbsent(t, ad, "RequestMemory")
+}
+
+// A submit file that says nothing about transfer gets IF_NEEDED, as
+// SetTransferFiles does. YES would make the job transfer its files even
+// onto a machine sharing the submitter's filesystem, and the generated
+// Requirements reads this value to decide whether to offer that machine
+// the choice at all.
+func TestShouldTransferFilesDefaultsToIfNeeded(t *testing.T) {
+	ad := defaultsJobAd(t, defaultsVanilla, nil)
+	got, ok := ad.EvaluateAttrString("ShouldTransferFiles")
+	if !ok || got != "IF_NEEDED" {
+		t.Errorf("ShouldTransferFiles = %q (ok=%v), want IF_NEEDED", got, ok)
+	}
+}
+
+// ON_EXIT_OR_EVICT cannot work with IF_NEEDED, so a file that asks for the
+// first and leaves the second alone gets YES rather than the error a file
+// naming both would get.
+func TestOnExitOrEvictPromotesDefaultToYes(t *testing.T) {
+	ad := defaultsJobAd(t, "when_to_transfer_output = ON_EXIT_OR_EVICT\n"+defaultsVanilla, nil)
+	got, ok := ad.EvaluateAttrString("ShouldTransferFiles")
+	if !ok || got != "YES" {
+		t.Errorf("ShouldTransferFiles = %q (ok=%v), want YES", got, ok)
+	}
+}

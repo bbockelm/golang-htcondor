@@ -12,9 +12,11 @@ found on its first run.
 
 These change what the job does, not just what the ad looks like.
 
-**`ShouldTransferFiles` default.** C++ defaults to `"IF_NEEDED"`, Go to
-`"YES"`. On a pool where the submit and execute nodes share a filesystem, the
-C++ default skips the transfer and the Go default forces it.
+**`ShouldTransferFiles` default.** FIXED. C++ defaults to `"IF_NEEDED"`, Go
+defaulted to `"YES"`. On a pool where the submit and execute nodes share a
+filesystem, the C++ default skips the transfer and the Go default forced it.
+The default is IF_NEEDED here now, which also turned the `ON_EXIT_OR_EVICT`
+promotion below from dead code into the branch it was written to be.
 
 **`Requirements` is a different expression.** For the same file:
 
@@ -31,10 +33,37 @@ filesystem-domain clauses, and adds a Cpus clause C++ does not have. A job
 submitted through Go can match machines `condor_submit` would have excluded,
 and vice versa.
 
-**`RequestCpus` / `RequestMemory` synthesis.** When the submit file does not
-set them, Go writes `RequestCpus = 1` and `RequestMemory = 128`; C++ writes
-neither and lets the negotiator apply the pool's defaults. A pool whose default
-request differs from 1/128 silently gets the wrong one.
+**The resource requests.** FIXED, and the entry had it backwards. `1` and
+`128` are not Go's invention: they are `JOB_DEFAULT_REQUESTCPUS` and
+`JOB_DEFAULT_REQUESTMEMORY`, which `SetRequestResources` reads for a file that
+names no request, so C++ writes them too. What was left when the defaults were
+measured rather than assumed was one real bug and one measurement artifact.
+
+The bug: **each request keyword also answers to its job attribute's name**,
+because `SetRequestResources` reads every one of them as
+`submit_param(SUBMIT_KEY_Request*, ATTR_REQUEST_*)`. Reading only the lowercase
+keyword meant a file saying `RequestMemory = 777` got `RequestMemory = 128` --
+the configured default, a request the submitter never made and the pool then
+matched and billed them for. `RequestCpus`, `RequestDisk` and `RequestGpus`
+were the same, and so was `RequestMemory = undefined`, which has to leave the
+attribute off and instead left the default on. The keyword still outranks the
+attribute spelling, as `submit_param` tries its first name first.
+
+The artifact: the rest of the difference was the two unparsers. `2 * 2` against
+`(2 * 2)`, `ifThenElse(true,100,200)` against `ifThenElse(true, 100, 200)`,
+`1.250000000000000E+00` against `1.25` -- the same tree, spelled differently,
+which `sameValue` has always compared through `Expr.Equal` and a hand-written
+probe comparing the strings does not. Two of these three entries existed only
+because the probe that found them compared text.
+
+`RequestDisk`'s entry claimed a third thing -- that C++ puts its `MAX(...)` on
+the cluster ad while Go puts a value on the proc. The first half is right and
+the second is not: measured in the oracle's placement mode, C++ carries all
+three requests at proc id -1 and gives proc 1 its own only when the value
+differs there, and this engine reaches the same placement by a different route,
+because proc 0's ad becomes the cluster ad and a later proc that matches it is
+deduped away. `TestResourceRequestsRideOnTheClusterAd` pins that, since the
+requests are `placeAny` and nothing else said where they land.
 
 **`Args` vs `Arguments`.** FIXED, including the value difference this entry
 predicted: running the text through `ArgList` canonicalises it, so
@@ -1398,13 +1427,16 @@ The sweep reached almost none of them -- whether a 600-file corpus contains a
 of the generator -- so a green sweep said nothing about this family either
 way.
 
-What is deliberately left: the **`ShouldTransferFiles` default** at the top of
-this file. Everything above canonicalizes and checks the value the submitter
-wrote; which value a silent submit file gets (`YES` here, `IF_NEEDED` in
-condor_submit) changes which machines a job matches on a shared-filesystem
-pool and is not this change's to make. The default feeds the same "did the
+What this change deliberately left, and a later one did: the
+**`ShouldTransferFiles` default** at the top of this file. Everything above
+canonicalizes and checks the value the submitter wrote, and which value a
+silent submit file gets changes which machines a job matches on a
+shared-filesystem pool, so it was held back to a change of its own. It is
+`IF_NEEDED` now, as condor_submit has it. The default feeds the same "did the
 submitter choose this?" flag condor_submit keeps, so every interaction above
-behaves identically under either one. Also left: `TransferPlugins` is stored
+behaves identically under either one -- except the `ON_EXIT_OR_EVICT`
+promotion, which only ever fires when the default is the `IF_NEEDED` that
+cannot be combined with it. Also left: `TransferPlugins` is stored
 verbatim by C++ and re-joined by Go, which drops the spaces around the `;`
 separators -- the same `f_as_string` question as the `encrypt_*_files` lists,
 and it belongs with them.
