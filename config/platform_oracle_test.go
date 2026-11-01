@@ -62,6 +62,14 @@ func condorConfigVal(t *testing.T, name string) (string, bool) {
 
 func TestPlatformMacrosMatchCondorConfigVal(t *testing.T) {
 	if _, err := exec.LookPath("condor_config_val"); err != nil {
+		// A skip is the right answer on a machine with no HTCondor, and the
+		// wrong one in the container that has it: this is the only check of
+		// the Linux values, so a silent skip there would report a comparison
+		// that never happened. The Docker test job sets this to say the tool
+		// must be present.
+		if os.Getenv("HTCONDOR_REQUIRE_CONFIG_ORACLE") != "" {
+			t.Fatal("condor_config_val is not on PATH, but HTCONDOR_REQUIRE_CONFIG_ORACLE says it should be")
+		}
 		t.Skip("condor_config_val not available")
 	}
 
