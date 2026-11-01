@@ -580,12 +580,21 @@ ad.
 
 ## Cosmetic
 
-`Rank`: both sides now store the same expression, and the default is the real
-`0.0` on both. What is left is the harness: it renders a Go value with
-`Expr.String()`, a debugging form that prints a whole-number real without its
-decimal point (`0.0` reads back as the integer `0`) and parenthesises every
-binary operation. Rendering with the reference unparser instead removes the
-entry; until then the comparison is the one that is wrong, not the parser.
+`Rank`: both sides store the same expression, and the default is the real
+`0.0` on both. What was left was the harness, which rendered a Go value with
+`Expr.String()` -- a debugging form that prints a whole-number real without
+its decimal point (`0.0` reads back as the integer `0`) and parenthesises
+every binary operation. The harness renders with `Expr.Unparse()` now, the
+reference unparser, and the entry is gone along with the five real-valued
+counters and the two GPU capability attributes that were recorded for the
+same reason and nothing else. Eight of the inventory's entries were this one
+rendering choice.
+
+That is worth stating plainly, because for as long as it stood it argued the
+wrong way about the parser: a comparison that cannot print one side's values
+faithfully manufactures differences, and eight of them looked like parser
+bugs. The underlying `rank` finding was real; the eight recorded entries that
+outlived it were the harness describing itself.
 
 The finding underneath it was not cosmetic at all: `rank = Memory` reached the
 ad as the *string* `"Memory"`, which the negotiator cannot rank by, and
@@ -829,9 +838,9 @@ an attribute whose ABSENCE means something different from its default:
   turns a network blip into a lost execution.
 
 Two attributes were going the other way: `JobRunCount`, which the schedd
-owns, and the five real-valued counters, which now hold the same real `0.0`
-as C++ and are recorded only because the harness renders a whole-number real
-without its decimal point — the same entry `rank` has.
+owns, and the five real-valued counters, which hold the same real `0.0` as
+C++ and were recorded only because the harness rendered a whole-number real
+without its decimal point. They are gone with the switch to `Expr.Unparse()`.
 
 **The environment was stored as the submit file wrote it.** The submit value
 and the job attribute are different encodings, and the parser's job is to
@@ -1483,14 +1492,17 @@ guessable from the names:
   not `condor`. In each of those the string survives untouched and the
   rejection never happens.
 
-What is left is the int-versus-real printing of a whole-number real, which is
-the `Rank` entry at the top of this file in a second place: `gpus_minimum_capability
-= 8.0` is a real on both sides, and Go's `Expr.String()` prints it `8`, which
-reads back as an integer. `GPUsMinCapability` and `GPUsMaxCapability` stay in
-`knownDivergentGenerated` for that alone, so
+What was left was the int-versus-real printing of a whole-number real, the
+`Rank` entry at the top of this file in a second place: `gpus_minimum_capability
+= 8.0` is a real on both sides, and Go's `Expr.String()` printed it `8`, which
+reads back as an integer. `GPUsMinCapability` and `GPUsMaxCapability` were
+recorded for that alone, which is why
 `TestGPURequestKeywordsMatchOracle` compares the whole family directly —
 presence, value and the derived expression — and requires the two cases that
-hides to be the same NUMBER. The entries go when the unparser does.
+hid to be the same NUMBER. Both entries are gone now that the harness
+unparses. Their recorded prose had drifted to say the keywords were
+unimplemented, which they have not been since `submit_gpu.go` landed; the
+direct test is what kept that from mattering.
 
 Seeds carry this family rather than the sweep. Of 362 generated files the
 oracle accepted, `GPUsMinRuntime` reached an ad in **none**: the keyword is in

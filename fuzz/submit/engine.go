@@ -69,7 +69,12 @@ func GoMakeAds(text string) (res GoResult) {
 			if !ok || expr == nil {
 				continue
 			}
-			attrs[name] = expr.String()
+			// Unparse, not String: String renders a whole-number real
+			// without its decimal point, so the real 0.0 that both parsers
+			// store for Rank and the CPU counters read back as the integer
+			// 0 on the Go side only. That is the harness's rendering and
+			// never was a difference in the ads.
+			attrs[name] = expr.Unparse()
 		}
 		ads.ByKey[AdKey{Cluster: ClusterID, Proc: proc}] = attrs
 	}
