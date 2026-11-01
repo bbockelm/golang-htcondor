@@ -1429,13 +1429,13 @@ func (sf *SubmitFile) resolveVMTransferMode() (shouldTransferFiles, fileTransfer
 // in_files_specified / out_files_specified: they only matter for the
 // should_transfer_files = NO check at the end.
 //
-// The DEFAULT for should_transfer_files is deliberately left as this
-// package has always had it (YES, where condor_submit uses IF_NEEDED);
-// changing it changes which machines a job matches on a shared-filesystem
-// pool, and that decision is not this function's to make. Everything
-// else here follows condor_submit, and the default feeds the same
-// "did the submitter choose this?" flag the C++ keeps, so the
-// interactions below behave identically either way.
+// The DEFAULT for should_transfer_files is IF_NEEDED, as it is in
+// SetTransferFiles. It decides what a submit file that says nothing gets,
+// and it is load-bearing twice over: IF_NEEDED lets the job match a
+// machine in the submitter's FileSystemDomain and use the shared
+// filesystem there instead of transferring, and it is the value the
+// generated Requirements reads to decide whether to offer the machine
+// that choice at all.
 func (sf *SubmitFile) resolveTransferMode(inFilesSpecified, outFilesSpecified bool) (shouldTransferFiles, fileTransferOutput, error) {
 	// A vm universe job never gets this far in condor_submit: SetUniverse
 	// has already overwritten both settings, so none of the reading,
@@ -1444,7 +1444,7 @@ func (sf *SubmitFile) resolveTransferMode(inFilesSpecified, outFilesSpecified bo
 		return sf.resolveVMTransferMode()
 	}
 
-	should := stfYes
+	should := stfIfNeeded
 	defaultShould := true
 	if raw, ok := sf.submitCommandAlt("ShouldTransferFiles", "should_transfer_files"); ok {
 		v, valid := shouldTransferFilesNum(raw)
@@ -1982,7 +1982,7 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 	// names no request_cpus asks for one CPU per node whatever
 	// JOB_DEFAULT_REQUESTCPUS says: SetParallelParams assigns 1 before
 	// the default is looked at, to keep pre-8.9 behaviour.
-	if v, ok := sf.submitCommand("request_cpus"); ok {
+	if v, ok := sf.simpleKeywordParam("request_cpus", "RequestCpus"); ok {
 		if err := setRequestCount(ad, "RequestCpus", v); err != nil {
 			return err
 		}
@@ -2003,7 +2003,7 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 	// and its siblings), which condor_submit reads only once it has a
 	// size to grow from. The VM branch deliberately does not: its
 	// request is an expression, so there is nothing to grow.
-	if v, ok := sf.submitCommand("request_memory"); ok {
+	if v, ok := sf.simpleKeywordParam("request_memory", "RequestMemory"); ok {
 		if err := sf.setRequestMemory(ad, v); err != nil {
 			return err
 		}
@@ -2017,7 +2017,7 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 
 	// Disk in KiB. Same rule with a KiB base: request_disk = 10GB is
 	// RequestDisk = 10485760.
-	if v, ok := sf.submitCommand("request_disk"); ok {
+	if v, ok := sf.simpleKeywordParam("request_disk", "RequestDisk"); ok {
 		if err := setRequestSize(ad, "RequestDisk", v, unitKiB); err != nil {
 			return err
 		}
@@ -2032,7 +2032,7 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 
 	// GPUs. HTCondor ships no default, so a job that names none asks for
 	// none unless the site configured JOB_DEFAULT_REQUESTGPUS.
-	if v, ok := sf.submitCommand("request_gpus"); ok {
+	if v, ok := sf.simpleKeywordParam("request_gpus", "RequestGpus"); ok {
 		if err := setRequestCount(ad, "RequestGpus", v); err != nil {
 			return err
 		}

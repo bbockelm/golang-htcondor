@@ -237,9 +237,8 @@ var attributesToIgnore = map[string]bool{
 	"Arguments": true,
 
 	// Values that genuinely differ and are known to.
-	"Environment":         true, // MASKS: condor_submit always emits Environment (""), and the V1/V2 forms differ
-	"ShouldTransferFiles": true, // MASKS: condor_submit defaults to IF_NEEDED, this library to YES
-	"Requirements":        true, // complex expressions do not render identically
+	"Environment":  true, // MASKS: condor_submit always emits Environment (""), and the V1/V2 forms differ
+	"Requirements": true, // complex expressions do not render identically
 }
 
 // compareClassAds compares two ClassAds and reports differences, ignoring certain attributes
