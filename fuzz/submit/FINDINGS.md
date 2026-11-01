@@ -18,7 +18,7 @@ filesystem, the C++ default skips the transfer and the Go default forced it.
 The default is IF_NEEDED here now, which also turned the `ON_EXIT_OR_EVICT`
 promotion below from dead code into the branch it was written to be.
 
-**`Requirements` is a different expression.** For the same file:
+**`Requirements` is a different expression.** FIXED. It was:
 
 ```
 cpp: (TARGET.Arch == "<submit arch>") && (TARGET.OpSys == "<submit opsys>")
@@ -28,10 +28,75 @@ go:  ((TARGET.Arch isnt undefined) && (TARGET.OpSys isnt undefined))
      && (TARGET.Memory >= RequestMemory) && (TARGET.Cpus >= RequestCpus)
 ```
 
-Go does not pin Arch/OpSys to the submitting machine, drops the Disk and
-filesystem-domain clauses, and adds a Cpus clause C++ does not have. A job
-submitted through Go can match machines `condor_submit` would have excluded,
-and vice versa.
+Go did not pin Arch/OpSys to the submitting machine, dropped the Disk and
+filesystem-domain clauses, and added a Cpus clause C++ does not have. A job
+submitted through Go could match machines `condor_submit` would have excluded,
+and vice versa. `SetRequirements` is mirrored clause for clause now, and the
+generated corpus agrees on every file: **0 mismatches** over the seeds and
+1500 generated submit files.
+
+Four things had to be true before any of it could match.
+
+**It had to run last.** `SetRequirements` is the last call in condor_submit's
+sequence, after the requests, the deferral schedule, the transfer mode, the
+`+Attr` pass and `SetResourceRequirements`. Almost every clause is about an
+attribute one of those just wrote, so it reads the finished AD. Running it
+early is what left it reading `request_memory` out of the submit file -- and
+missing the same request made any other way.
+
+**The clauses have floors.** A clause naming a request attribute is added only
+when the request asks for more than the floor: `RequestCpus = 1` adds nothing,
+`RequestCpus = 2` adds `(TARGET.Cpus >= RequestCpus)`, and the test is on a
+LITERAL -- an expression has no value at submit time, so it always gets its
+clause. Memory's floor is 1 and disk's is 0. A clause demanding at least one
+CPU excludes no machine while making every Requirements longer, and a clause
+over an attribute the job does not carry is undefined, which makes the whole
+expression undefined and the job unmatchable.
+
+**The submitter's own requirements suppresses the generated clause** about the
+same machine attribute, which is why `requirements = TARGET.Memory > 8000` is
+a replacement rather than an addition -- except that it is not, for Memory
+specifically. `SetRequirements` computes `checks_mem` and then uses it for
+nothing but a deprecation warning, so the memory clause is ANDed on anyway.
+Arch, OpSys, Disk, Cpus and the custom resource tags all suppress properly.
+The classification is `GetExprReferences`': a TARGET-scoped reference is a
+machine attribute, an unqualified one is too unless it is one of the three the
+C++ seeds into its scratch ad, and a MY-scoped one is the job's own.
+
+**The disk clause carries a version test.** For a vanilla job it is
+`(versionGE(split(TARGET.CondorVersion)[1], "25.12.0") || (TARGET.Disk >= RequestDisk))`,
+because a starter that new adjusts RequestDisk itself for common files and the
+job should not also enforce it. No other clause is version-gated that way.
+
+Smaller things the comparison settled:
+
+- A custom resource keeps the CASING the submitter used, because the attribute
+  is built from the keyword's own suffix: `request_fpgas` makes `Requestfpgas`
+  and asks about `TARGET.fpgas`, while `request_FPGAs` makes `RequestFPGAs`.
+  The GPU clause comes out of this same loop -- there is no GPU-specific path
+  in `SetRequirements` at all.
+- `scheddinterval` retired with this change, exactly as its entry predicted.
+  The attribute exists only because the deferral window expression names it,
+  and writing that expression is what obliges the job to carry it.
+- The `cuda_version` clause was missing even though the conversion that feeds
+  it was already implemented: `finalizeCUDAVersion` turned "12.1" into 12001
+  and nothing required a machine that supports it. The two are one decision in
+  condor_submit and are one decision here now.
+- A scheduler- or local-universe job takes the machine clauses after all. This
+  parser used to drop them, with a failure message claiming a schedd ad does
+  not carry Arch, OpSys, Disk or Memory. `Scheduler::publish` assigns every one
+  of them; what it does not assign is `HasFileTransfer` or `FileSystemDomain`,
+  and those are the clauses that silently killed DAGMan. condor_submit drops
+  exactly those, via `mightTransfer(JobUniverse)`, and so does this.
+
+**`OPSYS` was the legacy name.** Pinning `TARGET.OpSys` to the submitting
+machine only works if the machine's own name for itself is right, and it was
+not: this library reported `OSX`, which `arch.cpp` assigns to `opsys_legacy`
+while `opsys` is `macOS`. `ARCH` was wrong in the same direction -- `ARM64`
+where HTCondor has no arm64 mapping at all and passes uname's value through,
+giving `arm64` on Apple silicon and `aarch64` on Linux. Harmless while the
+clause only asked whether the attribute was defined; a job that matches nothing
+once the clause names a value.
 
 **The resource requests.** FIXED, and the entry had it backwards. `1` and
 `128` are not Go's invention: they are `JOB_DEFAULT_REQUESTCPUS` and

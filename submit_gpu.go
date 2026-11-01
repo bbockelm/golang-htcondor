@@ -370,6 +370,7 @@ func collectMyScopeRefs(e ast.Expr, seen map[string]bool) {
 // accepting a value it would otherwise reject -- when the Requirements
 // expression is being taken from somewhere else entirely.
 func (sf *SubmitFile) finalizeCUDAVersion(ad *classad.ClassAd) error {
+	sf.cudaClause = false
 	if !sf.generatesRequirements() {
 		return nil
 	}
@@ -382,6 +383,8 @@ func (sf *SubmitFile) finalizeCUDAVersion(ad *classad.ClassAd) error {
 		return fmt.Errorf("cuda_version must be of the form 'x' or 'x.y', where x and y are positive integers")
 	}
 	_ = ad.Set("CUDAVersion", ver)
+	// The clause belongs to this conversion, and setRequirements adds it.
+	sf.cudaClause = true
 	return nil
 }
 

@@ -74,6 +74,15 @@ type SubmitFile struct {
 	// took from JOB_DEFAULT_REQUESTDISK, or "" when it took none. Reset
 	// by every setResourceRequests; see defaultDiskEvaluates.
 	defaultDisk string
+
+	// cudaClause records that finalizeCUDAVersion converted a cuda_version
+	// into the integer the startd compares against, which is the same
+	// condition under which SetRequirements adds the CUDAVersion clause to
+	// Requirements. The conversion and the clause are one decision in
+	// condor_submit, so they stay one decision here: a CUDAVersion that
+	// arrived already numeric -- through +CUDAVersion rather than the
+	// keyword -- is not converted there and takes no clause either.
+	cudaClause bool
 	// submitUser is the account the submission is charged to, which the
 	// accounting group is built from. Empty means the parse was given
 	// none and falls back to the account running it; see submitUserName.
@@ -595,11 +604,6 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
-	// Set requirements
-	if err := sf.setRequirements(ad); err != nil {
-		return nil, err
-	}
-
 	// The transforms the schedd applies when the job is evicted.
 	//
 	// Before the resource requests, because the retry_request_memory
@@ -716,8 +720,20 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
-	// Set auto-generated attributes (should be last)
+	// Set auto-generated attributes
 	if err := sf.setAutoAttributes(ad); err != nil {
+		return nil, err
+	}
+
+	// Requirements last, as SetRequirements is last in condor_submit's own
+	// sequence. Almost every clause it generates is about an attribute
+	// something above has just written -- the resource requests, the
+	// transfer mode, the deferral schedule, a +Attr the submitter forced on,
+	// the GPU constraint -- so it has to read the finished ad rather than the
+	// submit commands. Running it early is what left it reading
+	// `request_memory` out of the submit file and missing the same request
+	// made any other way.
+	if err := sf.setRequirements(ad); err != nil {
 		return nil, err
 	}
 
@@ -1710,16 +1726,6 @@ func (sf *SubmitFile) isDockerUniverse() bool {
 	return ok && strings.EqualFold(strings.TrimSpace(univ), "docker")
 }
 
-// containerImageCapability returns the TARGET capability a container
-// image's execute node must advertise, classifying the image the way
-// HTCondor's image_type_from_string does: a "docker:" repo needs
-// HasDockerURL, a ".sif" file needs HasSIF, and anything else (a sandbox
-// directory) needs HasSandboxImage.
-func containerImageCapability(image string) string {
-	_, capability := containerImageKind(image)
-	return capability
-}
-
 // containerImageKind classifies a container_image the way HTCondor's
 // image_type_from_string does, returning both the job attribute that
 // enables the runtime for that image kind (WantDockerImage / WantSIF /
@@ -1742,175 +1748,6 @@ func containerImageKind(image string) (wantAttr, capability string) {
 	default:
 		return "WantSandboxImage", "TARGET.HasSandboxImage =?= true"
 	}
-}
-
-// setRequirements sets the Requirements expression
-func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
-	var reqParts []string
-
-	// Start with user-specified requirements
-	if req, ok := sf.submitCommand("requirements"); ok {
-		reqParts = append(reqParts, "("+req+")")
-	}
-
-	// A scheduler- or local-universe job is never matched to a machine.
-	// The schedd evaluates its Requirements against the SCHEDD's own ad
-	// (Scheduler::jobCanRun, condor_schedd.V6/schedd.cpp: EvalBool with the
-	// job as MY and scheduler.publish()'s ad as TARGET), and undefined is
-	// treated as false.
-	//
-	// That ad is not empty: Scheduler::publish assigns Arch, OpSys,
-	// OpSysVer, Memory, Disk and Cpus, so TARGET.Arch and friends would
-	// actually resolve. What it does NOT assign is HasFileTransfer -- and
-	// that is the clause that silently killed the job: the transfer clause
-	// evaluated to undefined, Requirements went false, and the job sat Idle
-	// forever with nothing in the log but "SchedUniverseJobsIdle = 1".
-	// FileSystemDomain and the GPU attributes are absent from the schedd ad
-	// too.
-	//
-	// condor_submit does not add the transfer clauses for these universes
-	// either. SetRequirements (condor_utils/submit_utils.cpp) has no early
-	// return; the HasFileTransfer / FileSystemDomain / per-file-encryption
-	// clauses are gated on mightTransfer(JobUniverse), which is true only
-	// for vanilla, mpi, parallel, java and vm.
-	//
-	// Dropping the rest of the machine clauses as well (Arch, OpSys,
-	// Memory, Disk) goes further than condor_submit does, and is safe: a
-	// job that is never matched has no use for them, and jobCanRun skips
-	// the Requirements check entirely when the attribute is absent. What
-	// the user wrote in `requirements` is kept, since that IS evaluated.
-	if sf.universe == UniverseScheduler || sf.universe == UniverseLocal {
-		return sf.finishRequirements(ad, reqParts)
-	}
-
-	// Add TARGET.OpSys check for non-grid jobs
-	if sf.universe != UniverseGrid {
-		// Target type requirement - must be a machine (not another job, etc.)
-		reqParts = append(reqParts, "(TARGET.Arch =!= UNDEFINED)")
-		reqParts = append(reqParts, "(TARGET.OpSys =!= UNDEFINED)")
-	}
-
-	// The resource clauses each name a request attribute, so each is
-	// added only when the job will carry that attribute: a clause over
-	// an attribute left unset ("undefined") is itself undefined, and a
-	// job whose Requirements is undefined matches nothing.
-
-	// Add TARGET.Disk check if we're transferring files
-	if stf, ok := sf.submitCommand("should_transfer_files"); ok {
-		if _, disk := sf.requestValue("request_disk"); disk && strings.ToUpper(stf) == "YES" {
-			reqParts = append(reqParts, "(TARGET.Disk >= RequestDisk)")
-		}
-	}
-
-	// Add memory requirement check if specified
-	if v, ok := sf.submitCommand("request_memory"); ok && !isUndefinedRequest(v) {
-		reqParts = append(reqParts, "(TARGET.Memory >= RequestMemory)")
-	}
-
-	// Add CPU requirement check if specified
-	if v, ok := sf.submitCommand("request_cpus"); ok && !isUndefinedRequest(v) {
-		reqParts = append(reqParts, "(TARGET.Cpus >= RequestCpus)")
-	}
-
-	// Add the GPU requirement for a GPU request, the configured default
-	// included: a job that asks for GPUs because the site said every job
-	// does must not land on a slot without one.
-	if reqGpus, ok := sf.requestValue("request_gpus"); ok {
-		if intGpus, err := parseInt(reqGpus); err == nil && intGpus > 0 {
-			reqParts = append(reqParts, "(TARGET.Gpus >= RequestGpus)")
-		}
-	}
-
-	// Add specific OpSys requirement if specified
-	if reqOpsys, ok := sf.submitCommand("request_opsys"); ok {
-		reqParts = append(reqParts, fmt.Sprintf("(TARGET.OpSys == %q)", reqOpsys))
-	}
-
-	// Add specific Arch requirement if specified
-	if reqArch, ok := sf.submitCommand("request_arch"); ok {
-		reqParts = append(reqParts, fmt.Sprintf("(TARGET.Arch == %q)", reqArch))
-	}
-
-	// Add the container/docker requirement, mirroring HTCondor's
-	// submit_utils.cpp SetRequirements. A docker job needs HasDocker; a
-	// container job needs HasContainer AND the capability for the image
-	// kind (HasDockerURL / HasSIF / HasSandboxImage). The container form
-	// is runtime-agnostic on purpose -- a node with Apptainer that can
-	// pull a docker repo advertises HasDockerURL -- so it is not pinned
-	// to Docker (or to Singularity/Apptainer specifically).
-	if _, ok := sf.submitCommand("docker_image"); ok {
-		reqParts = append(reqParts, "(TARGET.HasDocker =?= true)")
-	} else if img, ok := sf.submitCommand("container_image"); ok {
-		reqParts = append(reqParts, "(TARGET.HasContainer =?= true && "+containerImageCapability(img)+")")
-	}
-
-	// Require container support if explicitly requested.
-	if rc, ok := sf.submitCommand("require_container"); ok {
-		if parseBool(rc, false) {
-			reqParts = append(reqParts, "(TARGET.HasContainer =?= true)")
-		}
-	}
-
-	// Add file system domain requirements
-	if fsDomain, ok := sf.submitCommand("file_system_domain"); ok {
-		reqParts = append(reqParts, fmt.Sprintf("(TARGET.FileSystemDomain == %q)", fsDomain))
-	}
-
-	// Add HasFileTransfer requirement if needed
-	if stf, ok := sf.submitCommand("should_transfer_files"); ok {
-		if strings.ToUpper(stf) == "YES" {
-			reqParts = append(reqParts, "(TARGET.HasFileTransfer)")
-		}
-	}
-
-	return sf.finishRequirements(ad, reqParts)
-}
-
-// finishRequirements joins the collected clauses and sets Requirements.
-// Split out so the universes that take none of the machine-oriented
-// clauses share the one place that writes the attribute.
-func (sf *SubmitFile) finishRequirements(ad *classad.ClassAd, reqParts []string) error {
-	if len(reqParts) == 0 {
-		// Nothing to require -- a scheduler- or local-universe job that
-		// named no requirements of its own. Set TRUE rather than leaving
-		// the attribute off.
-		//
-		// The distinction matters outside matchmaking. A schedd can carry
-		// SUBMIT_REQUIREMENT_<name> expressions that reference the job's
-		// Requirements, and an absent attribute makes those evaluate to
-		// undefined rather than false. The OSPool access point has one:
-		//
-		//     SUBMIT_REQUIREMENT_ModulesWarning = ! unresolved(Requirements, "HAS_MODULES")
-		//
-		// With no Requirements attribute that is `! undefined`, which is
-		// not a boolean, and the schedd refuses the whole transaction --
-		// "CommitTransaction failed: Submit requirement ModulesWarning
-		// evaluated to non-boolean". Every DAGMan submission to such an
-		// access point failed, because the manager job is exactly the
-		// case that reaches here with nothing to require.
-		//
-		// condor_submit never produces a job without Requirements; its
-		// SetRequirements always assigns the attribute. Writing TRUE is
-		// the honest equivalent for a universe that is never matched to a
-		// machine, and it cannot change what the job matches: the schedd
-		// skips the check when it is absent and passes it when it is TRUE.
-		trueExpr, err := classad.ParseExpr("true")
-		if err != nil {
-			return fmt.Errorf("failed to parse the default requirements expression: %w", err)
-		}
-		_ = ad.Set("Requirements", trueExpr)
-		return nil
-	}
-
-	requirements := strings.Join(reqParts, " && ")
-	// Requirements is an expression, not a string - parse it
-	reqExpr, err := classad.ParseExpr(requirements)
-	if err != nil {
-		return fmt.Errorf("failed to parse requirements expression: %w", err)
-	}
-	_ = ad.Set("Requirements", reqExpr)
-
-	return nil
 }
 
 // setExprAttr stores a submit command whose value is a ClassAd expression,

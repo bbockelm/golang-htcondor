@@ -876,23 +876,54 @@ func detectMemorySysctl() int {
 }
 
 // goArchToHTCondorArch converts Go's GOARCH to HTCondor ARCH format
+// It mirrors sysapi_condor_arch (condor_sysapi/arch.cpp), which maps a handful
+// of uname machine names and otherwise passes uname's value through UNCHANGED.
+// That fallthrough is the part worth naming: HTCondor has no arm64 case at all,
+// so ARCH is the lowercase "arm64" on Apple silicon and "aarch64" on Linux,
+// never "ARM64". The value goes into the Requirements of every job built here
+// -- `TARGET.Arch == "<this>"` -- and a spelling no startd advertises is a job
+// that matches nothing.
 func goArchToHTCondorArch(goarch string) string {
+	return htcondorArch(unameMachine(goarch))
+}
+
+// htcondorArch maps a uname machine name as sysapi_condor_arch does.
+func htcondorArch(machine string) string {
+	switch machine {
+	case "i386", "i486", "i586", "i686":
+		return "INTEL"
+	case "x86_64", "amd64":
+		return "X86_64"
+	case "ia64":
+		return "IA64"
+	case "Power Macintosh", "ppc", "ppc32":
+		return "PPC"
+	case "ppc64":
+		return "PPC64"
+	default:
+		// Unknown, just use what uname gave -- including arm64, aarch64,
+		// ppc64le and s390x, none of which HTCondor renames.
+		return machine
+	}
+}
+
+// unameMachine is the machine name uname reports, which is what
+// sysapi_condor_arch reads. GOARCH is a build-time constant with its own
+// spellings, so it is translated to uname's where the two differ.
+func unameMachine(goarch string) string {
 	switch goarch {
 	case "amd64":
-		return "X86_64"
+		return "x86_64"
 	case "386":
-		return "INTEL"
+		return "i386"
 	case "arm64":
-		return "ARM64"
-	case "arm":
-		return "ARM"
-	case "ppc64", "ppc64le":
-		return "PPC64"
-	case "s390x":
-		return "S390X"
+		// uname says arm64 on Darwin and aarch64 on Linux.
+		if runtime.GOOS == "darwin" {
+			return "arm64"
+		}
+		return "aarch64"
 	default:
-		// Return uppercase version as fallback
-		return strings.ToUpper(goarch)
+		return goarch
 	}
 }
 
@@ -902,7 +933,10 @@ func goOSToHTCondorOS(goos string) string {
 	case "linux":
 		return "LINUX"
 	case "darwin":
-		return "OSX"
+		// OSX is OPSYS_LEGACY, not OPSYS: arch.cpp sets opsys = "macOS" and
+		// opsys_legacy = "OSX", and a modern macOS startd advertises
+		// OpSys = "macOS", so requiring "OSX" matches nothing.
+		return "macOS"
 	case "windows":
 		return "WINDOWS"
 	case "freebsd":

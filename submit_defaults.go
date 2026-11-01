@@ -131,22 +131,6 @@ func (sf *SubmitFile) requestDefault(command string) (string, bool) {
 	return v, true
 }
 
-// requestValue is what a request_* command effectively says: the submit
-// file's value if it gave one, otherwise the configured default. False
-// means the job will carry no such request -- including the value
-// "undefined", which condor_submit takes as "leave the attribute unset"
-// whether the user wrote it or the default did.
-func (sf *SubmitFile) requestValue(command string) (string, bool) {
-	v, ok := sf.simpleKeywordParam(command, requestAttrName(command))
-	if !ok {
-		v, ok = sf.requestDefault(command)
-	}
-	if !ok || isUndefinedRequest(v) {
-		return "", false
-	}
-	return v, true
-}
-
 func isUndefinedRequest(v string) bool {
 	return strings.EqualFold(strings.TrimSpace(v), "undefined")
 }
@@ -197,25 +181,4 @@ func (sf *SubmitFile) defaultDiskEvaluates(ad *classad.ClassAd) error {
 			"for this job, and there is no built-in default to use instead", sf.defaultDisk)
 	}
 	return setSizeAttr(ad, "RequestDisk", builtin, unitKiB)
-}
-
-// requestAttrName is the job attribute a request_* command also answers to.
-//
-// SetRequestResources reads each of these as submit_param(SUBMIT_KEY_Request*,
-// ATTR_REQUEST_*), so `RequestMemory = 777` in a submit file is the request,
-// not a custom attribute. Reading only the lowercase keyword left such a file
-// with the configured default -- 128 where the submitter asked for 777 -- and
-// the job was matched and billed for a request it never made.
-func requestAttrName(command string) string {
-	if attr, ok := requestAttrNames[command]; ok {
-		return attr
-	}
-	return command
-}
-
-var requestAttrNames = map[string]string{
-	"request_cpus":   "RequestCpus",
-	"request_memory": "RequestMemory",
-	"request_disk":   "RequestDisk",
-	"request_gpus":   "RequestGpus",
 }
