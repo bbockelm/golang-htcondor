@@ -121,13 +121,16 @@ func TestDerivedAttributesMatchOracle(t *testing.T) {
 	}
 }
 
-// TestScheddIntervalIsNotDerived pins the one entry in this slice that was
-// deliberately left alone. condor_submit writes ScheddInterval only to feed
-// the deferral clause of the Requirements it generates, which this parser
-// does not generate, so the attribute stays absent on the Go side on
-// purpose. If the Requirements work later adds that clause, this test is
-// what says the attribute has to come with it.
-func TestScheddIntervalIsNotDerived(t *testing.T) {
+// TestScheddIntervalMatchesOracle is what the entry this used to pin turned
+// into. condor_submit writes ScheddInterval only to feed the deferral clause
+// of the Requirements it generates; this parser did not generate that clause,
+// so the attribute was deliberately absent, and this test said the attribute
+// had to come with the clause if the clause ever arrived.
+//
+// It has, so the two sides are compared instead: a deferred job carries the
+// attribute on both, with the same value, because the window expression names
+// it and an expression over an attribute the job does not carry is undefined.
+func TestScheddIntervalMatchesOracle(t *testing.T) {
 	requireOracle(t)
 
 	for _, src := range []string{
@@ -150,8 +153,14 @@ func TestScheddIntervalIsNotDerived(t *testing.T) {
 		if !goRes.OK {
 			t.Fatalf("Go parser rejected the file: %s", goRes.Err)
 		}
-		if v, has := lookupFold(goRes.Ads.ByKey[key], "ScheddInterval"); has {
-			t.Errorf("%q: Go now writes ScheddInterval=%s; it is only useful with the deferral clause of Requirements, so add that clause and promote this to a comparison", firstLine(src), v)
+		cppVal, _ := lookupFold(cppAds.ByKey[key], "ScheddInterval")
+		goVal, has := lookupFold(goRes.Ads.ByKey[key], "ScheddInterval")
+		if !has {
+			t.Errorf("%q: Go writes no ScheddInterval, but its Requirements deferral clause names it, so the clause is undefined and the job never runs", firstLine(src))
+			continue
+		}
+		if !sameValue(cppVal, goVal) {
+			t.Errorf("%q: ScheddInterval cpp=%s go=%s", firstLine(src), cppVal, goVal)
 		}
 	}
 }

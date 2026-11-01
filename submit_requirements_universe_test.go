@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// TestSchedulerUniverseRequirementsHaveNoMachineClauses pins the fix for a
-// job that submits cleanly and then never runs.
+// TestSchedulerUniverseTakesNoTransferClauses pins the fix for a job that
+// submits cleanly and then never runs.
 //
 // The schedd does not matchmake a scheduler- or local-universe job. It
 // evaluates the job's Requirements against its OWN ad (Scheduler::jobCanRun,
@@ -19,12 +19,19 @@ import (
 // transfer clauses here either: SetRequirements gates them on
 // mightTransfer(JobUniverse), true only for vanilla/mpi/parallel/java/vm.
 //
-// Dropping the remaining machine clauses too is deliberate and safe: the job
-// is never matched, and jobCanRun skips the check entirely when Requirements
-// is absent. The only symptom of getting this wrong is the job sitting Idle
-// with "SchedUniverseJobsIdle = 1" repeating in the schedd log, which is why
-// this is worth a test rather than a comment.
-func TestSchedulerUniverseRequirementsHaveNoMachineClauses(t *testing.T) {
+// This test used to drop the remaining machine clauses as well, and to say in
+// its failure message that a schedd ad does not have them. That was more than
+// the bug called for and the reason given was wrong: measured against
+// condor_submit, a scheduler-universe job gets
+// `(TARGET.Arch == ...) && (TARGET.OpSys == ...) && (TARGET.Disk >= RequestDisk)
+// && (TARGET.Memory >= RequestMemory)` and nothing else, and every one of those
+// attributes is on the schedd ad. So the clauses are kept now, and what this
+// test pins is the part that actually broke: the transfer clauses.
+//
+// The only symptom of getting this wrong is the job sitting Idle with
+// "SchedUniverseJobsIdle = 1" repeating in the schedd log, which is why this is
+// worth a test rather than a comment.
+func TestSchedulerUniverseTakesNoTransferClauses(t *testing.T) {
 	for _, universe := range []string{"scheduler", "local"} {
 		t.Run(universe, func(t *testing.T) {
 			sf, err := ParseSubmitFile(strings.NewReader(
@@ -54,10 +61,17 @@ func TestSchedulerUniverseRequirementsHaveNoMachineClauses(t *testing.T) {
 				t.Fatal("Requirements is absent; it must be present and TRUE")
 			}
 			got := expr.String()
-			for _, forbidden := range []string{"HasFileTransfer", "TARGET.Arch", "TARGET.OpSys", "TARGET.Disk", "TARGET.Memory"} {
+			for _, forbidden := range []string{"HasFileTransfer", "HasJobTransferPlugins", "FileSystemDomain"} {
 				if strings.Contains(got, forbidden) {
 					t.Errorf("Requirements = %s\ncontains %s, which a schedd ad does not have: "+
-						"the job would never start", got, forbidden)
+						"the clause is undefined, Requirements goes false, and the job never starts", got, forbidden)
+				}
+			}
+			// The clauses condor_submit does emit here are kept, so this job
+			// is matched against the schedd ad on the same terms.
+			for _, wanted := range []string{"TARGET.Arch", "TARGET.OpSys"} {
+				if !strings.Contains(got, wanted) {
+					t.Errorf("Requirements = %s\nis missing %s, which condor_submit emits here", got, wanted)
 				}
 			}
 		})
@@ -127,10 +141,11 @@ func TestSchedulerUniverseKeepsUserRequirements(t *testing.T) {
 // Every DAGMan submission to that access point failed this way, because
 // the manager job is precisely the case that asks for nothing.
 //
-// TRUE keeps the property the test above checks -- no machine clauses a
-// schedd ad cannot satisfy -- while giving such expressions something
-// defined to read.
-func TestSchedulerUniverseRequirementsAreTrueNotAbsent(t *testing.T) {
+// What matters is that the attribute is THERE for such an expression to read.
+// It was TRUE when this universe took no clauses at all; now it carries the
+// same clauses condor_submit emits, so the test asserts presence and a
+// well-defined boolean rather than a particular expression.
+func TestSchedulerUniverseRequirementsAreNotAbsent(t *testing.T) {
 	for _, universe := range []string{"scheduler", "local"} {
 		t.Run(universe, func(t *testing.T) {
 			sf, err := ParseSubmitFile(strings.NewReader(
@@ -150,8 +165,8 @@ func TestSchedulerUniverseRequirementsAreTrueNotAbsent(t *testing.T) {
 				t.Fatal("Requirements is absent: a SUBMIT_REQUIREMENT that " +
 					"references it evaluates to non-boolean and the submit is refused")
 			}
-			if got := strings.ToLower(expr.String()); got != "true" {
-				t.Errorf("Requirements = %s, want true", expr.String())
+			if strings.TrimSpace(expr.String()) == "" {
+				t.Errorf("Requirements = %s, want an expression a SUBMIT_REQUIREMENT can read", expr.String())
 			}
 		})
 	}
