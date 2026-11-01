@@ -277,3 +277,36 @@ func TestUndefinedMacroWarningKnowsTheCustomAttrNamespace(t *testing.T) {
 		}
 	})
 }
+
+// TestInspectNamesAnIneffectiveTransferExecutable pins the diagnostic for a
+// trap this repository's own integration tests fell into.
+//
+// condor_submit turns the executable transfer off only for a
+// transfer_executable whose FIRST CHARACTER is 'f' or 'F' -- SetExecutable
+// tests exactly that -- so `transfer_executable = NO` leaves the transfer ON
+// and a system-path executable is spool-copied from a submit directory that
+// has no such file. The job then holds with "Transfer input files failure".
+//
+// Telling that caller the setting "is not set" sends them looking for a line
+// they already wrote, so the message names the value back to them.
+func TestInspectNamesAnIneffectiveTransferExecutable(t *testing.T) {
+	insp := Inspect("executable = /bin/bash\ntransfer_executable = NO\nqueue 1\n")
+	if insp.Fatal == nil {
+		t.Fatal("transfer_executable = NO with a system executable should be rejected")
+	}
+	msg := insp.Fatal.Error()
+	for _, want := range []string{"transfer_executable = NO", "does NOT turn the transfer off", "first character"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("rejection does not mention %q: %s", want, msg)
+		}
+	}
+
+	// The wording for a caller who really did write nothing is unchanged.
+	insp = Inspect("executable = /bin/bash\nqueue 1\n")
+	if insp.Fatal == nil {
+		t.Fatal("a system executable with no transfer_executable should be rejected")
+	}
+	if !strings.Contains(insp.Fatal.Error(), "is not set") {
+		t.Errorf("rejection should say the setting is not set: %s", insp.Fatal)
+	}
+}

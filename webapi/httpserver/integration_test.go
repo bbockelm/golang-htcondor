@@ -177,7 +177,11 @@ func TestHTTPAPIIntegration(t *testing.T) {
 arguments = script.sh
 transfer_input_files = input.txt, script.sh
 transfer_output_files = output.txt
-transfer_executable = NO
+# "NO" does NOT turn the transfer off: SetExecutable tests only the first
+# character of the value, so false/False/F work and NO/no/0 leave it on.
+# With /bin/bash as the executable, the wrong spelling holds the job on a
+# transfer failure, which is what condor_submit does with it too.
+transfer_executable = false
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 queue`
@@ -374,7 +378,11 @@ func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
 arguments = script.sh
 transfer_input_files = input.txt, script.sh
 transfer_output_files = output.txt
-transfer_executable = NO
+# "NO" does NOT turn the transfer off: SetExecutable tests only the first
+# character of the value, so false/False/F work and NO/no/0 leave it on.
+# With /bin/bash as the executable, the wrong spelling holds the job on a
+# transfer failure, which is what condor_submit does with it too.
+transfer_executable = false
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 queue`
