@@ -449,20 +449,38 @@ func (c *Config) initBuiltins() {
 		c.Set("DETECTED_MEMORY", fmt.Sprintf("%d", memory))
 	}
 
-	// Architecture and OS detection
-	c.Set("ARCH", goArchToHTCondorArch(runtime.GOARCH))
-	c.Set("OPSYS", goOSToHTCondorOS(runtime.GOOS))
-
-	osVersion := detectOSVersion()
-	if osVersion != "" {
-		c.Set("OPSYS_VER", osVersion)
-		c.Set("OPSYS_AND_VER", goOSToHTCondorOS(runtime.GOOS)+osVersion)
+	// The platform family, under the names real_config inserts them. These
+	// were OPSYS_VER and OPSYS_AND_VER here, which HTCondor defines under no
+	// name at all -- a config file asking for $(OPSYSANDVER) got nothing --
+	// and the rest of the family was missing. See platform.go.
+	plat := detectPlatform()
+	c.Set("ARCH", plat.Arch)
+	c.Set("OPSYS", plat.Opsys)
+	setIfNotEmpty(c, "OPSYSLEGACY", plat.Legacy)
+	setIfNotEmpty(c, "OPSYSNAME", plat.Name)
+	setIfNotEmpty(c, "OPSYSSHORTNAME", plat.Short)
+	setIfNotEmpty(c, "OPSYSLONGNAME", plat.Long)
+	setIfNotEmpty(c, "OPSYSANDVER", plat.AndVer)
+	if plat.Ver > 0 {
+		c.Set("OPSYSVER", fmt.Sprintf("%d", plat.Ver))
+	}
+	if plat.MajorVer > 0 {
+		c.Set("OPSYSMAJORVER", fmt.Sprintf("%d", plat.MajorVer))
 	}
 
-	// UNAME values
-	unameArch, unameOpsys := getUnameValues()
-	c.Set("UNAME_ARCH", unameArch)
-	c.Set("UNAME_OPSYS", unameOpsys)
+	// UNAME_* and UTSNAME_* are uname's own values, NOT HTCondor's renaming
+	// of them: sysapi_uname_arch returns buf.machine untouched, so UNAME_ARCH
+	// is "arm64" where ARCH is also "arm64" but "x86_64" where ARCH is
+	// "X86_64". Uppercasing them, as this package used to, made UNAME_OPSYS
+	// read DARWIN where HTCondor says Darwin.
+	uts := unameValues()
+	setIfNotEmpty(c, "UNAME_ARCH", uts.Machine)
+	setIfNotEmpty(c, "UNAME_OPSYS", uts.Sysname)
+	setIfNotEmpty(c, "UTSNAME_SYSNAME", uts.Sysname)
+	setIfNotEmpty(c, "UTSNAME_NODENAME", uts.Nodename)
+	setIfNotEmpty(c, "UTSNAME_RELEASE", uts.Release)
+	setIfNotEmpty(c, "UTSNAME_VERSION", uts.Version)
+	setIfNotEmpty(c, "UTSNAME_MACHINE", uts.Machine)
 
 	// Process information
 	c.Set("PID", fmt.Sprintf("%d", os.Getpid()))
@@ -875,18 +893,6 @@ func detectMemorySysctl() int {
 	return int(bytes / (1024 * 1024))
 }
 
-// goArchToHTCondorArch converts Go's GOARCH to HTCondor ARCH format
-// It mirrors sysapi_condor_arch (condor_sysapi/arch.cpp), which maps a handful
-// of uname machine names and otherwise passes uname's value through UNCHANGED.
-// That fallthrough is the part worth naming: HTCondor has no arm64 case at all,
-// so ARCH is the lowercase "arm64" on Apple silicon and "aarch64" on Linux,
-// never "ARM64". The value goes into the Requirements of every job built here
-// -- `TARGET.Arch == "<this>"` -- and a spelling no startd advertises is a job
-// that matches nothing.
-func goArchToHTCondorArch(goarch string) string {
-	return htcondorArch(unameMachine(goarch))
-}
-
 // htcondorArch maps a uname machine name as sysapi_condor_arch does.
 func htcondorArch(machine string) string {
 	switch machine {
@@ -950,80 +956,6 @@ func goOSToHTCondorOS(goos string) string {
 	default:
 		return strings.ToUpper(goos)
 	}
-}
-
-// detectOSVersion returns the major OS version
-func detectOSVersion() string {
-	switch runtime.GOOS {
-	case "linux":
-		return detectLinuxVersion()
-	case "darwin":
-		return detectDarwinVersion()
-	case "windows":
-		return detectWindowsVersion()
-	default:
-		return ""
-	}
-}
-
-// detectLinuxVersion detects Linux version from /etc/os-release
-func detectLinuxVersion() string {
-	data, err := os.ReadFile("/etc/os-release")
-	if err != nil {
-		return ""
-	}
-
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "VERSION_ID=") {
-			version := strings.TrimPrefix(line, "VERSION_ID=")
-			version = strings.Trim(version, "\"")
-			// Return major version only
-			if idx := strings.Index(version, "."); idx > 0 {
-				return version[:idx]
-			}
-			return version
-		}
-	}
-	return ""
-}
-
-// detectDarwinVersion detects macOS version
-func detectDarwinVersion() string {
-	cmd := exec.CommandContext(context.Background(), "sw_vers", "-productVersion")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	version := strings.TrimSpace(string(output))
-	// Return major version only
-	if idx := strings.Index(version, "."); idx > 0 {
-		return version[:idx]
-	}
-	return version
-}
-
-// detectWindowsVersion detects Windows version
-func detectWindowsVersion() string {
-	// Use ver command or fallback
-	cmd := exec.CommandContext(context.Background(), "cmd", "/c", "ver")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	// Parse output like "Microsoft Windows [Version 10.0.19041.1234]"
-	str := string(output)
-	if idx := strings.Index(str, "Version "); idx >= 0 {
-		versionStr := str[idx+8:]
-		if idx2 := strings.Index(versionStr, "]"); idx2 >= 0 {
-			versionStr = versionStr[:idx2]
-		}
-		// Extract major version
-		if idx3 := strings.Index(versionStr, "."); idx3 > 0 {
-			return versionStr[:idx3]
-		}
-	}
-	return ""
 }
 
 // LoadFromEnvironment loads configuration from the process environment.
@@ -1387,4 +1319,14 @@ func (c *Config) RawValue(key string) (string, bool) {
 		return "", false
 	}
 	return c.values[actual], true
+}
+
+// setIfNotEmpty sets a macro only when there is a value for it. An absent
+// macro expands to nothing, which is what HTCondor does when sysapi could not
+// determine the value; a macro set to the empty string is a different thing to
+// anything testing whether it is defined.
+func setIfNotEmpty(c *Config, name, value string) {
+	if value != "" {
+		c.Set(name, value)
+	}
 }

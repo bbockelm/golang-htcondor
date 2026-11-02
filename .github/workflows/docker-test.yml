@@ -128,6 +128,7 @@ jobs:
           -w /workspace \
           -e GOCACHE=/workspace/.gocache/build \
           -e GOMODCACHE=/workspace/.gocache/mod \
+          -e HTCONDOR_REQUIRE_CONFIG_ORACLE=1 \
           golang-htcondor:test-${{ matrix.tag }} \
           /bin/sh -c "
             set -e
