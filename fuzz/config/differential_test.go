@@ -22,9 +22,76 @@ func requireOracle(t testing.TB) {
 // design_notes/CONFIG_FUZZ_FINDINGS.md): the
 // test asserts it still diverges, so if the Go side is fixed to match HTCondor
 // the case flips and we get told to promote it to parity.
+//
+// class, on a known divergence, names the FAMILY the input belongs to. Without
+// one, only this exact input is recognized, and the fuzzer re-reports the same
+// finding under every mutation of it -- which is what we want while the
+// divergence is still ours to fix, and noise once it is not.
 type seedCase struct {
 	input  string
 	reason string
+	class  *divergenceClass
+}
+
+// divergenceClass recognizes a divergence by its SHAPE rather than by the
+// input that produced it. A recorded class is matched against every divergence
+// the fuzzer finds, and a match is not reported: the finding is one we already
+// have, reached from a different input.
+//
+// A class is a decision that a whole family will not be fixed, so each one is
+// written as narrowly as the family allows and is pinned from both sides --
+// TestDivergenceClassesMatchTheirSeeds proves it still recognizes the seed it
+// was written for, and TestDivergenceClassesRejectOtherShapes proves it does
+// not quietly swallow anything else.
+type divergenceClass struct {
+	name string
+	// match sees the two canonical tables from a comparison where the two
+	// sides disagreed.
+	match func(goTable, cppTable string) bool
+}
+
+// selectorSpacing is the unparser difference recorded against
+// `0=$EVAL({0 .A})`: C++ writes a selector on a numeric literal with no space
+// before the dot, producing text its own lexer then rejects, and Go keeps the
+// space. Every input that reaches an expression of this shape -- and the
+// fuzzer reaches a fresh one most nights, since one character of mutation is
+// enough -- produces the same two tables modulo that space.
+var selectorSpacing = divergenceClass{
+	name: "C++ drops the space before a selector dot",
+	match: func(goTable, cppTable string) bool {
+		return goTable != cppTable && stripSpaceBeforeDot(goTable) == cppTable
+	},
+}
+
+// stripSpaceBeforeDot removes the blanks immediately before each '.'. Only the
+// Go side is rewritten, so the reverse shape -- C++ keeping a space Go drops --
+// is a divergence this class does not recognize, and is reported.
+func stripSpaceBeforeDot(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '.' {
+			trimmed := strings.TrimRight(b.String(), " \t")
+			b.Reset()
+			b.WriteString(trimmed)
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// recognize returns the recorded class that accounts for this divergence, or
+// nil when it is a new one.
+func recognize(res divergenceResult) *divergenceClass {
+	for _, sc := range seeds {
+		if sc.class == nil {
+			continue
+		}
+		if sc.class.match(res.goTable, res.cppTable) {
+			return sc.class
+		}
+	}
+	return nil
 }
 
 // seeds double as the fuzz seed corpus. Non-deterministic constructs
@@ -66,6 +133,7 @@ var seeds = []seedCase{
 			"from an expression this config language cannot write: `(0).A` " +
 			"unparses to `0.A`, which Go's parser then rejects. That belongs in " +
 			"the ClassAd library, not here.)",
+		class: &selectorSpacing,
 	},
 
 	// --- former divergences, fixed; each checked against condor 25.14.1 ---
@@ -111,32 +179,47 @@ var seeds = []seedCase{
 //     reads out of bounds or crashes (config.ErrHTCondorUndefined). The Go
 //     engine runs first to find these, so the oracle never sees them;
 //   - a C++ exception escaped.
-func divergence(input string) (desc, skip string) {
+func divergence(input string) divergenceResult {
 	if strings.IndexByte(input, 0) >= 0 {
-		return "", "NUL byte (the oracle takes a C string)"
+		return divergenceResult{skip: "NUL byte (the oracle takes a C string)"}
 	}
 	full := Prelude(input)
 	goRes := GoParseExpand(full)
 	if goRes.Uncomparable != "" {
-		return "", goRes.Uncomparable
+		return divergenceResult{skip: goRes.Uncomparable}
 	}
 	cppRes := oracle.ParseExpand(full)
 	if cppRes.Panic {
-		return "", "C++ oracle exception"
+		return divergenceResult{skip: "C++ oracle exception"}
 	}
 
 	if goRes.Parsed != cppRes.Parsed {
-		return fmt.Sprintf("parse-acceptance: go.parsed=%v cpp.parsed=%v", goRes.Parsed, cppRes.Parsed), ""
+		return divergenceResult{desc: fmt.Sprintf("parse-acceptance: go.parsed=%v cpp.parsed=%v", goRes.Parsed, cppRes.Parsed)}
 	}
 	if !goRes.Parsed {
-		return "", "" // both rejected — agree
+		return divergenceResult{} // both rejected — agree
 	}
-	g := StripRefEnv(Canon(goRes.Table))
-	c := StripRefEnv(Canon(cppRes.Table))
-	if g != c {
-		return "expanded-table:\n--- go ---\n" + g + "--- cpp ---\n" + c + "--- first diff ---\n" + firstDiff(g, c), ""
+	res := divergenceResult{
+		goTable:  StripRefEnv(Canon(goRes.Table)),
+		cppTable: StripRefEnv(Canon(cppRes.Table)),
 	}
-	return "", ""
+	if res.goTable != res.cppTable {
+		res.desc = "expanded-table:\n--- go ---\n" + res.goTable + "--- cpp ---\n" + res.cppTable +
+			"--- first diff ---\n" + firstDiff(res.goTable, res.cppTable)
+	}
+	return res
+}
+
+// divergenceResult is one comparison: desc is non-empty when the two sides
+// disagree, skip when the input could not be compared at all, and the two
+// tables are the canonical output each side produced (empty when neither ran,
+// which is why a class matcher never sees a skipped or parse-acceptance case
+// as a pair of differing tables).
+type divergenceResult struct {
+	desc     string
+	skip     string
+	goTable  string
+	cppTable string
 }
 
 func firstDiff(a, b string) string {
@@ -169,17 +252,17 @@ func TestConfigSeeds(t *testing.T) {
 	for i, sc := range seeds {
 		sc := sc
 		t.Run(fmt.Sprintf("seed%02d", i), func(t *testing.T) {
-			desc, skip := divergence(sc.input)
-			if skip != "" {
-				t.Errorf("seed is not comparable (%s):\n%s", skip, indent(sc.input))
+			res := divergence(sc.input)
+			if res.skip != "" {
+				t.Errorf("seed is not comparable (%s):\n%s", res.skip, indent(sc.input))
 			}
 			switch {
-			case sc.reason == "" && desc != "":
-				t.Errorf("unexpected divergence on:\n%s\n%s", indent(sc.input), desc)
-			case sc.reason != "" && desc == "":
+			case sc.reason == "" && res.desc != "":
+				t.Errorf("unexpected divergence on:\n%s\n%s", indent(sc.input), res.desc)
+			case sc.reason != "" && res.desc == "":
 				t.Errorf("known divergence now AGREES — promote to parity and remove reason:\n%s\nwas: %s",
 					indent(sc.input), sc.reason)
-			case sc.reason != "" && desc != "":
+			case sc.reason != "" && res.desc != "":
 				t.Logf("known divergence (expected): %s\ninput:\n%s", sc.reason, indent(sc.input))
 			}
 		})
@@ -187,8 +270,10 @@ func TestConfigSeeds(t *testing.T) {
 }
 
 // knownDivergentInputs lets the fuzz target skip the exact seeds we already
-// know diverge, so it doesn't just rediscover them. (Mutated inputs that hit
-// the same class still surface — that is the point.)
+// know diverge without paying for the comparison. A mutation of one of them
+// still runs, and is then weighed against the recorded classes by recognize:
+// a known divergence with no class is reported again, because it is one we
+// still mean to fix.
 var knownDivergentInputs = func() map[string]bool {
 	m := make(map[string]bool)
 	for _, sc := range seeds {
@@ -212,10 +297,87 @@ func FuzzConfigParseExpand(f *testing.F) {
 		if len(input) > 8192 || knownDivergentInputs[input] {
 			t.Skip()
 		}
-		desc, skip := divergence(input)
-		if skip != "" || desc == "" {
+		res := divergence(input)
+		if res.skip != "" || res.desc == "" {
 			return
 		}
-		t.Errorf("Go vs HTCondor config divergence:\ninput:\n%s\n%s", indent(input), desc)
+		if c := recognize(res); c != nil {
+			// Already recorded, reached from another input. Reporting it
+			// would fail the nightly every night on a divergence nobody
+			// intends to fix, and bury the run's real findings.
+			t.Skipf("known divergence class: %s", c.name)
+		}
+		t.Errorf("Go vs HTCondor config divergence:\ninput:\n%s\n%s", indent(input), res.desc)
 	})
+}
+
+// TestDivergenceClassesMatchTheirSeeds runs each classed seed and checks that
+// its own class recognizes the divergence it produces. Without this a matcher
+// could drift until it matches nothing, and the fuzzer would go back to
+// reporting the family every night with nobody noticing why.
+func TestDivergenceClassesMatchTheirSeeds(t *testing.T) {
+	requireOracle(t)
+	for _, sc := range seeds {
+		if sc.class == nil {
+			continue
+		}
+		t.Run(sc.class.name, func(t *testing.T) {
+			res := divergence(sc.input)
+			if res.skip != "" || res.desc == "" {
+				t.Fatalf("seed no longer diverges, so its class cannot be checked:\n%s", indent(sc.input))
+			}
+			if recognize(res) != sc.class {
+				t.Errorf("%q does not recognize its own seed:\n%s\n%s",
+					sc.class.name, indent(sc.input), res.desc)
+			}
+		})
+	}
+}
+
+// TestDivergenceClassesRejectOtherShapes is the other half: a class that
+// matched too much would silently swallow real findings, and a fuzz run that
+// reports nothing looks exactly like a clean one. Each pair below is a
+// divergence that must still be reported.
+func TestDivergenceClassesRejectOtherShapes(t *testing.T) {
+	cases := []struct {
+		name     string
+		goTable  string
+		cppTable string
+	}{
+		{"agreement is not a divergence", "A\x1f{ 0.B }\n", "A\x1f{ 0.B }\n"},
+		{"neither side ran", "", ""},
+		{"a different value", "A\x1f1\n", "A\x1f2\n"},
+		{"a different selector", "A\x1f{ 0 .B }\n", "A\x1f{ 0 .C }\n"},
+		{"the space is ours to drop, not theirs", "A\x1f{ 0.B }\n", "A\x1f{ 0 .B }\n"},
+		{"a space somewhere else entirely", "A\x1f0.5\n", "A\x1f 0.5\n"},
+		{"one attribute of two still differs", "A\x1f{ 0 .B }\nC\x1f1\n", "A\x1f{ 0.B }\nC\x1f2\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := divergenceResult{goTable: tc.goTable, cppTable: tc.cppTable}
+			if c := recognize(res); c != nil {
+				t.Errorf("recognized as %q, so this divergence would never be reported", c.name)
+			}
+		})
+	}
+}
+
+// TestStripSpaceBeforeDot pins the rewrite selectorSpacing is built on.
+func TestStripSpaceBeforeDot(t *testing.T) {
+	cases := map[string]string{
+		"{ 0 .B }":   "{ 0.B }",
+		"{ 0   .B }": "{ 0.B }",
+		"{ 0\t.B }":  "{ 0.B }",
+		"{ 0.B }":    "{ 0.B }",
+		"1.5":        "1.5",
+		" .A0":       ".A0",
+		"a . b":      "a. b",
+		"no dots":    "no dots",
+		"":           "",
+	}
+	for in, want := range cases {
+		if got := stripSpaceBeforeDot(in); got != want {
+			t.Errorf("stripSpaceBeforeDot(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
