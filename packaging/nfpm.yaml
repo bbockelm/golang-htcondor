@@ -39,8 +39,81 @@ contents:
     file_info:
       mode: 0644
 
+  # server.md links to its sibling pages by relative path; ship the set.
   - src: docs/server.md
     dst: /usr/share/doc/htcondor-api/server.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-agents.md
+    dst: /usr/share/doc/htcondor-api/server-agents.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-api.md
+    dst: /usr/share/doc/htcondor-api/server-api.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-auth.md
+    dst: /usr/share/doc/htcondor-api/server-auth.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-branding.md
+    dst: /usr/share/doc/htcondor-api/server-branding.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-config.md
+    dst: /usr/share/doc/htcondor-api/server-config.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-estimates.md
+    dst: /usr/share/doc/htcondor-api/server-estimates.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-interactive.md
+    dst: /usr/share/doc/htcondor-api/server-interactive.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-metrics.md
+    dst: /usr/share/doc/htcondor-api/server-metrics.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-multi-ap.md
+    dst: /usr/share/doc/htcondor-api/server-multi-ap.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-networking.md
+    dst: /usr/share/doc/htcondor-api/server-networking.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-placement.md
+    dst: /usr/share/doc/htcondor-api/server-placement.md
+    type: doc
+    file_info:
+      mode: 0644
+
+  - src: docs/server-ssh-gateway.md
+    dst: /usr/share/doc/htcondor-api/server-ssh-gateway.md
     type: doc
     file_info:
       mode: 0644
