@@ -1364,6 +1364,70 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 
 }
 
+// mcpEnabled reports whether HTTP_API_ENABLE_MCP turns MCP on. Off unless
+// set.
+//
+// Read as a boolean, not compared against the single spelling "true":
+// HTCondor configuration is conventionally written `HTTP_API_ENABLE_MCP =
+// True`, and that spelling used to mean off -- which, while the OAuth2
+// settings were read only with MCP, also meant nobody could log in, with
+// nothing in the log to say why.
+func mcpEnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_ENABLE_MCP")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_ENABLE_MCP=%q: must be a boolean", raw)
+	}
+	return v
+}
+
+// oauth2SettingNames are the settings whose presence means an operator
+// meant this server to log people in through an identity provider.
+var oauth2SettingNames = []string{
+	"HTTP_API_OAUTH2_ISSUER",
+	"HTTP_API_OAUTH2_IDP",
+	"HTTP_API_OAUTH2_CLIENT_ID",
+	"HTTP_API_OAUTH2_AUTH_URL",
+	"HTTP_API_OAUTH2_TOKEN_URL",
+}
+
+// configuredOAuth2Settings returns the OAuth2 settings this configuration
+// gives a value, in the order of oauth2SettingNames.
+func configuredOAuth2Settings(cfg *config.Config) []string {
+	var configured []string
+	for _, name := range oauth2SettingNames {
+		if v, ok := cfg.Get(name); ok && strings.TrimSpace(v) != "" {
+			configured = append(configured, name)
+		}
+	}
+	return configured
+}
+
+// warnUnservedOAuth2 says so when OAuth2 is configured on a server that
+// serves neither the web UI nor MCP, the two surfaces that use it.
+//
+// The settings are read only for those surfaces, so without them an
+// operator's issuer, client and identity provider go nowhere: the first
+// sign of it is a browser login answered with "no OAuth2 provider
+// configured" by a server whose configuration plainly names one. Naming
+// the two conditions here puts the reason in the log at startup, where it
+// can be acted on.
+func warnUnservedOAuth2(cfg *config.Config, logger *logging.Logger) {
+	configured := configuredOAuth2Settings(cfg)
+	if len(configured) == 0 {
+		return
+	}
+	logger.Warn(logging.DestinationHTTP,
+		"OAuth2 is configured but this server serves neither the web UI nor MCP, "+
+			"so the OAuth2 settings are ignored and logins will be refused. "+
+			"Set HTTP_API_ENABLE_MCP = true, or run a build that embeds the web UI "+
+			"(built with -tags embed_frontend).",
+		"configured", strings.Join(configured, ", "))
+}
+
 // loadMCPConfig loads the MCP and OAuth2 configuration from HTCondor
 // config.
 //
@@ -1377,7 +1441,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 	config := mcpConfig{}
 
 	// Check if MCP should be enabled from config
-	if mcpEnable, ok := cfg.Get("HTTP_API_ENABLE_MCP"); ok && mcpEnable == "true" {
+	if mcpEnabled(cfg) {
 		config.enabled = true
 		logger.Info(logging.DestinationHTTP, "MCP enabled via configuration")
 	}
@@ -1394,6 +1458,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
 
 	if !config.enabled && !webUIEnabled {
+		warnUnservedOAuth2(cfg, logger)
 		return config
 	}
 
@@ -1745,11 +1810,48 @@ func loadAPAssignmentConfig(cfg *config.Config) (apassign.Config, error) {
 	return out, nil
 }
 
+// flagWasSet reports whether the named flag was given on the command line,
+// as opposed to carrying its compiled-in default.
+func flagWasSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
 // getHTTPConfig extracts HTTP API configuration from config
-func getHTTPConfig(cfg *config.Config) (listenAddrResult, mcpListenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile string) {
+//
+// An explicit -listen outranks HTTP_API_LISTEN_ADDR. Typing a flag is the
+// more deliberate of the two and the one an operator reaches for to
+// override what the config files say -- usually to try a port while the
+// config is being worked out -- so config winning meant the flag did
+// nothing at all, with nothing said about why. HTTP_API_LISTEN_ADDR still
+// beats the flag's default, which is how the config sets the address in
+// the ordinary case.
+//
+// HTTP_API_LISTEN is honored as well, because this documentation named it
+// for months while nothing read it: an operator who set it got a server
+// on the default port and no indication of why. The setting is
+// HTTP_API_LISTEN_ADDR, which wins if both are present, and the other
+// spelling says so in the log.
+func getHTTPConfig(cfg *config.Config, logger *logging.Logger) (listenAddrResult, mcpListenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile string) {
 	listenAddrResult = *listenAddr
-	if addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR"); ok && addr != "" {
-		listenAddrResult = addr
+	if !flagWasSet("listen") {
+		addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR")
+		if !ok || strings.TrimSpace(addr) == "" {
+			if alias, aliasOK := cfg.Get("HTTP_API_LISTEN"); aliasOK && strings.TrimSpace(alias) != "" {
+				addr, ok = alias, true
+				logger.Warn(logging.DestinationHTTP,
+					"HTTP_API_LISTEN is an alias; the setting is named HTTP_API_LISTEN_ADDR",
+					"address", strings.TrimSpace(alias))
+			}
+		}
+		if ok && strings.TrimSpace(addr) != "" {
+			listenAddrResult = strings.TrimSpace(addr)
+		}
 	}
 	mcpListenAddrResult, _ = cfg.Get("HTTP_API_MCP_LISTEN_ADDR")
 	tlsCertFile, _ = cfg.Get("HTTP_API_TLS_CERT")
@@ -1933,7 +2035,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	scheddNameValue, scheddAddrValue, scheddHostValue := getScheddConfig(cfg)
 
 	// Get HTTP API configuration
-	listenAddrFromConfig, mcpListenAddrFromConfig, tlsCertFile, tlsKeyFile, tlsCACertFile := getHTTPConfig(cfg)
+	listenAddrFromConfig, mcpListenAddrFromConfig, tlsCertFile, tlsKeyFile, tlsCACertFile := getHTTPConfig(cfg, logger)
 
 	// Get timeout configuration
 	readTimeout, writeTimeout, idleTimeout := getTimeoutConfig(cfg)
@@ -2398,22 +2500,34 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			}()
 		}
 
-		// Under condor_master the listener above is the master's socket,
-		// which carries CEDAR commands. It is not a port a browser can be
-		// pointed at, and the master cannot be asked to hand one down, so
-		// a configured HTTP_API_LISTEN_ADDR has to be bound here as well --
-		// including 443, which is why this may need to re-raise.
+		// Behind shared port the listener above is a CEDAR socket: the
+		// endpoint condor_master handed down, or one this daemon
+		// registered with condor_shared_port itself when no socket was
+		// inherited. Neither is a port a browser can be pointed at, and
+		// neither can be asked to become one, so the configured HTTP
+		// address has to be bound here as well -- including 443, which is
+		// why this may need to re-raise.
+		//
+		// The test is "did we bind that address ourselves", not "was the
+		// socket inherited": a self-registered shared-port endpoint is
+		// not inherited either, and asking the narrower question left the
+		// HTTP port unbound whenever USE_SHARED_PORT was on and no socket
+		// came down from the master -- the server came up serving nothing
+		// anyone could reach, and turning shared port off "fixed" it.
 		//
 		// Started before the primary listener so a failure to bind is
 		// reported at startup rather than after the server is already
 		// serving. It serves nothing until the handler is started, which
 		// is what ServeListenerWithCert does below.
-		if d.AdoptedInheritedListener() && strings.TrimSpace(listenAddrFromConfig) != "" {
+		if !d.BoundFallbackListener() && strings.TrimSpace(listenAddrFromConfig) != "" {
 			extra, lerr := listenMaybePrivileged(listenAddrFromConfig, logger)
 			if lerr != nil {
-				return fmt.Errorf("binding HTTP_API_LISTEN_ADDR %s: %w", listenAddrFromConfig, lerr)
+				return fmt.Errorf("binding the HTTP listen address %s: %w", listenAddrFromConfig, lerr)
 			}
 			defer func() { _ = extra.Close() }()
+			logger.Info(logging.DestinationHTTP,
+				"serving HTTP on its own address alongside the shared-port endpoint",
+				"address", extra.Addr().String())
 			go func() {
 				if err := server.ServeAdditionalListener(extra, cert, key); err != nil &&
 					!errors.Is(err, http.ErrServerClosed) {

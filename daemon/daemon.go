@@ -83,6 +83,7 @@ type Daemon struct {
 	sharedPortName       string // shared-port "sock" id, set by Listener when adopted or self-registered
 	sharedPortAdvertised string // advertised sinful when self-registered (master address unavailable)
 	adoptedInherited     bool   // Listener returned an inherited socket (shared-port or #119), not the fallback
+	boundFallback        bool   // Listener returned the caller's fallback bind, not a shared-port/inherited socket
 	stopAlive            func()
 	onReconfig           []func(*config.Config)
 
@@ -297,20 +298,45 @@ func (d *Daemon) Listener(fallback func() (net.Listener, error)) (net.Listener, 
 	if fallback == nil {
 		return nil, fmt.Errorf("daemon: no shared-port listener inherited and no fallback provided")
 	}
-	return fallback()
+	ln, err := fallback()
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	d.boundFallback = true
+	d.mu.Unlock()
+	return ln, nil
 }
 
 // AdoptedInheritedListener reports whether Listener returned a socket inherited from
 // condor_master (a shared-port endpoint or a pre-created command socket, issue #119)
-// rather than the caller's fallback bind. It lets a daemon that also wants its own
-// directly-dialable port (e.g. a CCB advertising a public address) decide whether to bind
-// that extra listener: under the master the inherited socket is the managed command port,
-// so the explicit -listen port is an *additional* listener; standalone, the fallback already
-// bound -listen, so binding it again would collide. Valid only after Listener has been called.
+// rather than one it bound itself. Valid only after Listener has been called.
+//
+// A daemon deciding whether to bind its own directly-dialable port wants
+// BoundFallbackListener instead: a self-registered shared-port socket is not inherited,
+// yet it leaves that port unbound just the same.
 func (d *Daemon) AdoptedInheritedListener() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.adoptedInherited
+}
+
+// BoundFallbackListener reports whether Listener bound the caller's fallback -- the
+// daemon's own directly-dialable address -- rather than returning a socket it got from
+// elsewhere: an inherited one (shared-port endpoint or pre-created command socket) or a
+// shared-port socket it self-registered.
+//
+// This is the question a daemon that also wants its own port has to ask. Only the
+// fallback binds that address; every other outcome leaves it unbound, and both of the
+// others hand back a socket that carries CEDAR through condor_shared_port, which no
+// browser can be pointed at. AdoptedInheritedListener answers a narrower question (was
+// it inherited) and says nothing about self-registration, so a daemon that used it to
+// decide skipped its own port whenever shared port was on but no socket was inherited.
+// Valid only after Listener has been called.
+func (d *Daemon) BoundFallbackListener() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.boundFallback
 }
 
 // SharedPortName returns the shared-port "sock" id this daemon listens on (the
