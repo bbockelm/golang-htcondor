@@ -1364,6 +1364,70 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 
 }
 
+// mcpEnabled reports whether HTTP_API_ENABLE_MCP turns MCP on. Off unless
+// set.
+//
+// Read as a boolean, not compared against the single spelling "true":
+// HTCondor configuration is conventionally written `HTTP_API_ENABLE_MCP =
+// True`, and that spelling used to mean off -- which, while the OAuth2
+// settings were read only with MCP, also meant nobody could log in, with
+// nothing in the log to say why.
+func mcpEnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_ENABLE_MCP")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_ENABLE_MCP=%q: must be a boolean", raw)
+	}
+	return v
+}
+
+// oauth2SettingNames are the settings whose presence means an operator
+// meant this server to log people in through an identity provider.
+var oauth2SettingNames = []string{
+	"HTTP_API_OAUTH2_ISSUER",
+	"HTTP_API_OAUTH2_IDP",
+	"HTTP_API_OAUTH2_CLIENT_ID",
+	"HTTP_API_OAUTH2_AUTH_URL",
+	"HTTP_API_OAUTH2_TOKEN_URL",
+}
+
+// configuredOAuth2Settings returns the OAuth2 settings this configuration
+// gives a value, in the order of oauth2SettingNames.
+func configuredOAuth2Settings(cfg *config.Config) []string {
+	var configured []string
+	for _, name := range oauth2SettingNames {
+		if v, ok := cfg.Get(name); ok && strings.TrimSpace(v) != "" {
+			configured = append(configured, name)
+		}
+	}
+	return configured
+}
+
+// warnUnservedOAuth2 says so when OAuth2 is configured on a server that
+// serves neither the web UI nor MCP, the two surfaces that use it.
+//
+// The settings are read only for those surfaces, so without them an
+// operator's issuer, client and identity provider go nowhere: the first
+// sign of it is a browser login answered with "no OAuth2 provider
+// configured" by a server whose configuration plainly names one. Naming
+// the two conditions here puts the reason in the log at startup, where it
+// can be acted on.
+func warnUnservedOAuth2(cfg *config.Config, logger *logging.Logger) {
+	configured := configuredOAuth2Settings(cfg)
+	if len(configured) == 0 {
+		return
+	}
+	logger.Warn(logging.DestinationHTTP,
+		"OAuth2 is configured but this server serves neither the web UI nor MCP, "+
+			"so the OAuth2 settings are ignored and logins will be refused. "+
+			"Set HTTP_API_ENABLE_MCP = true, or run a build that embeds the web UI "+
+			"(built with -tags embed_frontend).",
+		"configured", strings.Join(configured, ", "))
+}
+
 // loadMCPConfig loads the MCP and OAuth2 configuration from HTCondor
 // config.
 //
@@ -1377,7 +1441,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 	config := mcpConfig{}
 
 	// Check if MCP should be enabled from config
-	if mcpEnable, ok := cfg.Get("HTTP_API_ENABLE_MCP"); ok && mcpEnable == "true" {
+	if mcpEnabled(cfg) {
 		config.enabled = true
 		logger.Info(logging.DestinationHTTP, "MCP enabled via configuration")
 	}
@@ -1394,6 +1458,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
 
 	if !config.enabled && !webUIEnabled {
+		warnUnservedOAuth2(cfg, logger)
 		return config
 	}
 
