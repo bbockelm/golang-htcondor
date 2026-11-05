@@ -59,25 +59,37 @@ type divergenceClass struct {
 var selectorSpacing = divergenceClass{
 	name: "C++ drops the space before a selector dot",
 	match: func(goTable, cppTable string) bool {
-		return goTable != cppTable && stripSpaceBeforeDot(goTable) == cppTable
+		return goTable != cppTable && cppDropsSpaceBeforeDot(goTable, cppTable)
 	},
 }
 
-// stripSpaceBeforeDot removes the blanks immediately before each '.'. Only the
-// Go side is rewritten, so the reverse shape -- C++ keeping a space Go drops --
-// is a divergence this class does not recognize, and is reported.
-func stripSpaceBeforeDot(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] == '.' {
-			trimmed := strings.TrimRight(b.String(), " \t")
-			b.Reset()
-			b.WriteString(trimmed)
+// cppDropsSpaceBeforeDot reports whether the C++ table is the Go table with
+// blanks deleted at SOME of the places where Go wrote them before a '.'. Some
+// rather than all is the point: a value can carry a dot the unparser never
+// touches, as `0=0 .$EVAL({0 .A})` does, where both sides keep the space
+// outside the expression and only C++ drops the one inside it.
+//
+// Nothing else may differ, and the blanks may only go missing on the C++ side,
+// so the reverse shape -- C++ keeping a space Go drops -- is a divergence this
+// class does not recognize, and is reported.
+func cppDropsSpaceBeforeDot(goTable, cppTable string) bool {
+	i, j := 0, 0
+	for i < len(goTable) && j < len(cppTable) {
+		if goTable[i] == cppTable[j] {
+			i++
+			j++
+			continue
 		}
-		b.WriteByte(s[i])
+		k := i
+		for k < len(goTable) && (goTable[k] == ' ' || goTable[k] == '\t') {
+			k++
+		}
+		if k == i || k == len(goTable) || goTable[k] != '.' {
+			return false
+		}
+		i = k
 	}
-	return b.String()
+	return i == len(goTable) && j == len(cppTable)
 }
 
 // recognize returns the recorded class that accounts for this divergence, or
@@ -134,6 +146,15 @@ var seeds = []seedCase{
 			"unparses to `0.A`, which Go's parser then rejects. That belongs in " +
 			"the ClassAd library, not here.)",
 		class: &selectorSpacing,
+	},
+	{
+		// Found by FuzzConfigParseExpand, after the class above was recorded:
+		// the same unparser difference with a second dot in the value that
+		// neither side rewrites. Kept as a seed so the class is pinned against
+		// the shape where C++ drops one space and keeps another.
+		input:  "0=0 .$EVAL({0 .A})",
+		reason: "selectorSpacing, reached with a dot outside the expression",
+		class:  &selectorSpacing,
 	},
 
 	// --- former divergences, fixed; each checked against condor 25.14.1 ---
@@ -362,22 +383,30 @@ func TestDivergenceClassesRejectOtherShapes(t *testing.T) {
 	}
 }
 
-// TestStripSpaceBeforeDot pins the rewrite selectorSpacing is built on.
-func TestStripSpaceBeforeDot(t *testing.T) {
-	cases := map[string]string{
-		"{ 0 .B }":   "{ 0.B }",
-		"{ 0   .B }": "{ 0.B }",
-		"{ 0\t.B }":  "{ 0.B }",
-		"{ 0.B }":    "{ 0.B }",
-		"1.5":        "1.5",
-		" .A0":       ".A0",
-		"a . b":      "a. b",
-		"no dots":    "no dots",
-		"":           "",
+// TestCppDropsSpaceBeforeDot pins the walk selectorSpacing is built on.
+func TestCppDropsSpaceBeforeDot(t *testing.T) {
+	cases := []struct {
+		goTable  string
+		cppTable string
+		want     bool
+	}{
+		{"{ 0 .B }", "{ 0.B }", true},
+		{"{ 0   .B }", "{ 0.B }", true},
+		{"{ 0   .B }", "{ 0 .B }", true}, // part of the run, not all of it
+		{"{ 0\t.B }", "{ 0.B }", true},
+		{"0 .{ 0 .A }", "0 .{ 0.A }", true}, // only the dot inside the expression
+		{"{ 0 .B }{ 0 .C }", "{ 0.B }{ 0.C }", true},
+		{"{ 0.B }", "{ 0 .B }", false}, // the space is ours to drop, not theirs
+		{"a b", "ab", false},           // a blank not before a dot
+		{"a .b", "a .c", false},        // a real difference alongside
+		{"a .b", "a .b", true},         // identical: the caller rules this out
+		{"", "", true},
+		{"a .b", "", false},
 	}
-	for in, want := range cases {
-		if got := stripSpaceBeforeDot(in); got != want {
-			t.Errorf("stripSpaceBeforeDot(%q) = %q, want %q", in, got, want)
+	for _, tc := range cases {
+		if got := cppDropsSpaceBeforeDot(tc.goTable, tc.cppTable); got != tc.want {
+			t.Errorf("cppDropsSpaceBeforeDot(%q, %q) = %v, want %v",
+				tc.goTable, tc.cppTable, got, tc.want)
 		}
 	}
 }
