@@ -275,9 +275,8 @@ Matching is case-insensitive.
 further, and take lists on the same terms. The write group also decides
 `condor:/WRITE`: a user it denies `mcp:write` is denied that too.
 
-Web interface access and MCP access are **separate**. They were one knob,
-so granting somebody the browser necessarily granted them MCP; a site can
-now let its staff open the pages without also letting them drive the AP
+Web interface access and MCP access are **separate**, so a site can let
+its staff open the pages without also letting them drive the access point
 through an agent:
 
 ```
@@ -288,8 +287,8 @@ HTTP_API_SUPERUSER_GROUP    = chtc_admin
 ```
 
 `HTTP_API_WEBUI_ACCESS_GROUP` falls back to `HTTP_API_MCP_ACCESS_GROUP`
-when unset, so a deployment that was using the MCP group to gate the
-browser keeps that behaviour rather than being silently opened.
+when unset: leaving it out narrows the browser to the MCP group rather
+than opening it to everybody.
 
 All of these are re-read on **`condor_reconfig` / SIGHUP** -- each is only
 a membership test on a request, with nothing built from it. A login

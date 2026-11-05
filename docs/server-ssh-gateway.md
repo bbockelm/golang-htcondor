@@ -290,10 +290,10 @@ Each configured name appears in the line twice, as `name` and `[name]:*`, becaus
 OpenSSH looks a host up as `[name]:port` for any port but 22 — and this gateway
 defaults to 2222.
 
-The bare host key is still offered alongside it, so a client that pinned the key
-before certificates existed keeps connecting and notices nothing. A client that
-holds the CA line negotiates the certificate instead; OpenSSH prefers whichever
-algorithm it already knows something about for that host.
+The bare host key is still offered alongside the certificate, so a client that
+pinned that key keeps connecting and notices nothing. A client that holds the CA
+line negotiates the certificate instead; OpenSSH prefers whichever algorithm it
+already knows something about for that host.
 
 Certificates last 12 hours by default and never more than 24. That is not
 conservatism for its own sake: **there is no revocation**. No CRL, no OCSP, no
@@ -317,10 +317,7 @@ certificates usually work:
 
 - **`scp` and `sftp` work**, and so does anything else that asks for a
   subsystem: the gateway forwards the request to the job, whose sshd serves its
-  own `Subsystem` directive. This was documented as impossible, on the belief
-  that the forced command in `condor_ssh_to_job_shell_setup` turns a subsystem
-  request into `eval sftp`. It does not — a probe against a real job gets a
-  genuine `SSH_FXP_VERSION` reply from a real `sftp-server`.
+  own `Subsystem` directive.
 - **The device flow needs somewhere to prompt.** `BatchMode=yes` declines
   keyboard-interactive outright, and a client with no terminal has nowhere to
   show the code; both want a certificate instead. A remote terminal is not
