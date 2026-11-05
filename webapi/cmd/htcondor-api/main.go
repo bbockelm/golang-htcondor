@@ -1745,10 +1745,30 @@ func loadAPAssignmentConfig(cfg *config.Config) (apassign.Config, error) {
 	return out, nil
 }
 
+// flagWasSet reports whether the named flag was given on the command line,
+// as opposed to carrying its compiled-in default.
+func flagWasSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
 // getHTTPConfig extracts HTTP API configuration from config
+//
+// An explicit -listen outranks HTTP_API_LISTEN_ADDR. Typing a flag is the
+// more deliberate of the two and the one an operator reaches for to
+// override what the config files say -- usually to try a port while the
+// config is being worked out -- so config winning meant the flag did
+// nothing at all, with nothing said about why. HTTP_API_LISTEN_ADDR still
+// beats the flag's default, which is how the config sets the address in
+// the ordinary case.
 func getHTTPConfig(cfg *config.Config) (listenAddrResult, mcpListenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile string) {
 	listenAddrResult = *listenAddr
-	if addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR"); ok && addr != "" {
+	if addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR"); ok && addr != "" && !flagWasSet("listen") {
 		listenAddrResult = addr
 	}
 	mcpListenAddrResult, _ = cfg.Get("HTTP_API_MCP_LISTEN_ADDR")
@@ -2398,22 +2418,34 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			}()
 		}
 
-		// Under condor_master the listener above is the master's socket,
-		// which carries CEDAR commands. It is not a port a browser can be
-		// pointed at, and the master cannot be asked to hand one down, so
-		// a configured HTTP_API_LISTEN_ADDR has to be bound here as well --
-		// including 443, which is why this may need to re-raise.
+		// Behind shared port the listener above is a CEDAR socket: the
+		// endpoint condor_master handed down, or one this daemon
+		// registered with condor_shared_port itself when no socket was
+		// inherited. Neither is a port a browser can be pointed at, and
+		// neither can be asked to become one, so the configured HTTP
+		// address has to be bound here as well -- including 443, which is
+		// why this may need to re-raise.
+		//
+		// The test is "did we bind that address ourselves", not "was the
+		// socket inherited": a self-registered shared-port endpoint is
+		// not inherited either, and asking the narrower question left the
+		// HTTP port unbound whenever USE_SHARED_PORT was on and no socket
+		// came down from the master -- the server came up serving nothing
+		// anyone could reach, and turning shared port off "fixed" it.
 		//
 		// Started before the primary listener so a failure to bind is
 		// reported at startup rather than after the server is already
 		// serving. It serves nothing until the handler is started, which
 		// is what ServeListenerWithCert does below.
-		if d.AdoptedInheritedListener() && strings.TrimSpace(listenAddrFromConfig) != "" {
+		if !d.BoundFallbackListener() && strings.TrimSpace(listenAddrFromConfig) != "" {
 			extra, lerr := listenMaybePrivileged(listenAddrFromConfig, logger)
 			if lerr != nil {
-				return fmt.Errorf("binding HTTP_API_LISTEN_ADDR %s: %w", listenAddrFromConfig, lerr)
+				return fmt.Errorf("binding the HTTP listen address %s: %w", listenAddrFromConfig, lerr)
 			}
 			defer func() { _ = extra.Close() }()
+			logger.Info(logging.DestinationHTTP,
+				"serving HTTP on its own address alongside the shared-port endpoint",
+				"address", extra.Addr().String())
 			go func() {
 				if err := server.ServeAdditionalListener(extra, cert, key); err != nil &&
 					!errors.Is(err, http.ErrServerClosed) {
