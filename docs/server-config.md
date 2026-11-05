@@ -22,7 +22,7 @@ otherwise switch it on for deployments that never asked.
 
 | Knob | Purpose |
 | --- | --- |
-| `HTTP_API_LISTEN` | Listen address; default `:8080`. |
+| `HTTP_API_LISTEN_ADDR` | Listen address; default `:8080`. Bound in addition to the shared-port endpoint under `condor_master`. `-listen` on the command line overrides it. |
 | `HTTP_API_BASE_URL` | Externally-visible URL for OAuth2 redirects + share links. |
 | `HTTP_API_DB_PATH` | Unified SQLite DB (sessions, OAuth2, IDP, templates, API keys). Default `$(LOCAL_DIR)/htcondor-api.db`. |
 | `HTTP_API_SIGNING_KEY` | Pool signing key for minting per-request tokens. Defaults to `SEC_TOKEN_POOL_SIGNING_KEY_FILE`. |

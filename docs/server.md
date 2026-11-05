@@ -164,6 +164,31 @@ $ curl http://localhost:9618/healthz
 {"status":"ok"}
 ```
 
+#### Its own HTTP port
+
+The shared port carries HTTP, but it is the pool's CEDAR port: it is not
+where you point a browser, and not where a certificate for this server's
+hostname belongs. So whenever the server is behind shared port — the
+endpoint `condor_master` hands down, or one it registers with
+`condor_shared_port` itself when no socket is inherited — it *also* binds
+its own address:
+
+```condor
+HTTP_API_LISTEN_ADDR = :443
+```
+
+Binding 443 needs the privilege, which the server re-raises for that bind
+alone before going back to `condor`. The log names the address it took:
+
+```
+serving HTTP on its own address alongside the shared-port endpoint address=[::]:443
+```
+
+`-listen` on the command line overrides `HTTP_API_LISTEN_ADDR`, for trying
+an address without editing the configuration. Turning `USE_SHARED_PORT`
+off is not a way to get this port — it only costs the pool its shared-port
+routing to this daemon.
+
 ### Standalone
 
 ```bash
@@ -205,7 +230,7 @@ Set these first:
 | --- | --- |
 | `HTTP_API_KEK_FILE` | Master Key Encryption Key, under which the server seals its long-lived secrets. The RPM's drop-in names one, and the daemon then refuses to start until that file exists — neither the package nor the daemon will create it: `openssl rand -hex 32 > <path> && chmod 0600 <path>`. Left unset entirely, those secrets sit in the database in plaintext and startup says so. |
 | `HTTP_API_BASE_URL` | The externally-visible URL. OAuth2 redirects and share links are built from it. |
-| `HTTP_API_LISTEN` | Listen address; default `:8080`. Not needed under `condor_master` with shared port. |
+| `HTTP_API_LISTEN_ADDR` | Listen address; default `:8080`. Bound in addition to the shared-port endpoint under `condor_master`, and the address a browser uses — see [Its own HTTP port](#its-own-http-port). |
 | `HTTP_API_SIGNING_KEY` | Pool signing key, for minting per-request tokens. Defaults to `SEC_TOKEN_POOL_SIGNING_KEY_FILE`. |
 | `HTTP_API_DB_PATH` | SQLite database holding sessions, OAuth2 state, the IDP, templates and API keys. Default `$(LOCAL_DIR)/htcondor-api.db`. |
 

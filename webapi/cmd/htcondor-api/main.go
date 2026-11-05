@@ -1766,10 +1766,27 @@ func flagWasSet(name string) bool {
 // nothing at all, with nothing said about why. HTTP_API_LISTEN_ADDR still
 // beats the flag's default, which is how the config sets the address in
 // the ordinary case.
-func getHTTPConfig(cfg *config.Config) (listenAddrResult, mcpListenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile string) {
+//
+// HTTP_API_LISTEN is honored as well, because this documentation named it
+// for months while nothing read it: an operator who set it got a server
+// on the default port and no indication of why. The setting is
+// HTTP_API_LISTEN_ADDR, which wins if both are present, and the other
+// spelling says so in the log.
+func getHTTPConfig(cfg *config.Config, logger *logging.Logger) (listenAddrResult, mcpListenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile string) {
 	listenAddrResult = *listenAddr
-	if addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR"); ok && addr != "" && !flagWasSet("listen") {
-		listenAddrResult = addr
+	if !flagWasSet("listen") {
+		addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR")
+		if !ok || strings.TrimSpace(addr) == "" {
+			if alias, aliasOK := cfg.Get("HTTP_API_LISTEN"); aliasOK && strings.TrimSpace(alias) != "" {
+				addr, ok = alias, true
+				logger.Warn(logging.DestinationHTTP,
+					"HTTP_API_LISTEN is an alias; the setting is named HTTP_API_LISTEN_ADDR",
+					"address", strings.TrimSpace(alias))
+			}
+		}
+		if ok && strings.TrimSpace(addr) != "" {
+			listenAddrResult = strings.TrimSpace(addr)
+		}
 	}
 	mcpListenAddrResult, _ = cfg.Get("HTTP_API_MCP_LISTEN_ADDR")
 	tlsCertFile, _ = cfg.Get("HTTP_API_TLS_CERT")
@@ -1953,7 +1970,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	scheddNameValue, scheddAddrValue, scheddHostValue := getScheddConfig(cfg)
 
 	// Get HTTP API configuration
-	listenAddrFromConfig, mcpListenAddrFromConfig, tlsCertFile, tlsKeyFile, tlsCACertFile := getHTTPConfig(cfg)
+	listenAddrFromConfig, mcpListenAddrFromConfig, tlsCertFile, tlsKeyFile, tlsCACertFile := getHTTPConfig(cfg, logger)
 
 	// Get timeout configuration
 	readTimeout, writeTimeout, idleTimeout := getTimeoutConfig(cfg)
