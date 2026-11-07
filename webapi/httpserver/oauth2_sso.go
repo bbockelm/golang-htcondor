@@ -367,26 +367,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	errorParam := r.URL.Query().Get("error")
 
 	if errorParam != "" {
-		errorDesc := r.URL.Query().Get("error_description")
-		s.logger.Error(logging.DestinationHTTP, "OAuth2 callback error from IDP",
-			"error", errorParam, "error_description", errorDesc)
-		// The identity provider's own words, not ours: saying only that
-		// sign-in failed would hide the one detail that explains it, and
-		// an administrator is usually the person hitting this.
-		detail := errorDesc
-		if detail == "" {
-			detail = errorParam
-		}
-		// A refusal over a scope this server added by itself is ours to
-		// undo, not the operator's to debug.
-		if s.dropOfflineAccessAndRetry(w, r, errorParam, errorDesc, state) {
-			return
-		}
-		if hint := refusedScopeHint(errorParam, s.upstreamAuthScopes()); hint != "" {
-			detail += " " + hint
-		}
-		s.signInFailed(w, http.StatusUnauthorized,
-			"The identity provider refused this sign-in.", detail)
+		s.reportCallbackRefusal(w, r, errorParam, state)
 		return
 	}
 
@@ -1145,4 +1126,35 @@ func refusalCouldBeOfflineAccess(errorDesc string, requested []string) bool {
 		}
 	}
 	return true
+}
+
+// reportCallbackRefusal ends a sign-in the provider refused, either by
+// retrying it without a scope this server added or by showing the
+// person what the provider said.
+//
+// Split out of handleOAuth2Callback, which is long enough that one more
+// branch in it is one too many.
+func (s *Handler) reportCallbackRefusal(w http.ResponseWriter, r *http.Request, errorParam, state string) {
+	errorDesc := r.URL.Query().Get("error_description")
+	s.logger.Error(logging.DestinationHTTP, "OAuth2 callback error from IDP",
+		"error", errorParam, "error_description", errorDesc)
+
+	// A refusal over a scope this server added by itself is ours to
+	// undo, not the operator's to debug.
+	if s.dropOfflineAccessAndRetry(w, r, errorParam, errorDesc, state) {
+		return
+	}
+
+	// The identity provider's own words, not ours: saying only that
+	// sign-in failed would hide the one detail that explains it, and
+	// an administrator is usually the person hitting this.
+	detail := errorDesc
+	if detail == "" {
+		detail = errorParam
+	}
+	if hint := refusedScopeHint(errorParam, s.upstreamAuthScopes()); hint != "" {
+		detail += " " + hint
+	}
+	s.signInFailed(w, http.StatusUnauthorized,
+		"The identity provider refused this sign-in.", detail)
 }

@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"net/http/httptest"
 	"net/url"
 	"slices"
@@ -16,7 +17,7 @@ import (
 // drive the scope negotiation.
 func offlineHandler(t *testing.T, scopes []string, optIn bool) *Handler {
 	t.Helper()
-	h := &Handler{
+	h := &Handler{ //nolint:gosec // G101: test credentials
 		oauth2Config: &oauth2.Config{
 			ClientID:    "c",
 			RedirectURL: "https://ap/callback",
@@ -63,7 +64,7 @@ func TestRefusedOfflineAccessIsAbsorbedAndRetried(t *testing.T) {
 	h.oauth2StateStore.StoreForBrowser(state, nil, "/jobs", "bind")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/callback?error=invalid_scope&state="+state, nil)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/callback?error=invalid_scope&state="+state, nil)
 	if !h.dropOfflineAccessAndRetry(w, r, "invalid_scope", "", state) {
 		t.Fatal("an invalid_scope refusal of a scope this server added was not absorbed")
 	}
@@ -84,12 +85,12 @@ func TestRefusedOfflineAccessIsAbsorbedAndRetried(t *testing.T) {
 func TestSecondRefusalIsNotAbsorbed(t *testing.T) {
 	h := offlineHandler(t, []string{"openid", "offline_access"}, true)
 	w1 := httptest.NewRecorder()
-	r1 := httptest.NewRequest("GET", "/callback?error=invalid_scope", nil)
+	r1 := httptest.NewRequestWithContext(context.Background(), "GET", "/callback?error=invalid_scope", nil)
 	if !h.dropOfflineAccessAndRetry(w1, r1, "invalid_scope", "", "") {
 		t.Fatal("first refusal was not absorbed")
 	}
 	w2 := httptest.NewRecorder()
-	r2 := httptest.NewRequest("GET", "/callback?error=invalid_scope", nil)
+	r2 := httptest.NewRequestWithContext(context.Background(), "GET", "/callback?error=invalid_scope", nil)
 	if h.dropOfflineAccessAndRetry(w2, r2, "invalid_scope", "", "") {
 		t.Error("a second refusal was absorbed too; it is about a scope this server did not add")
 	}
@@ -101,7 +102,7 @@ func TestSecondRefusalIsNotAbsorbed(t *testing.T) {
 func TestOperatorConfiguredOfflineAccessIsNotDropped(t *testing.T) {
 	h := offlineHandler(t, []string{"openid", "offline_access"}, false) // not opted in by us
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/callback?error=invalid_scope", nil)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/callback?error=invalid_scope", nil)
 	if h.dropOfflineAccessAndRetry(w, r, "invalid_scope", "", "") {
 		t.Error("withdrew a scope the operator asked for")
 	}
@@ -115,7 +116,7 @@ func TestOperatorConfiguredOfflineAccessIsNotDropped(t *testing.T) {
 func TestOtherRefusalsAreNotAbsorbed(t *testing.T) {
 	h := offlineHandler(t, []string{"openid", "offline_access"}, true)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/callback?error=access_denied", nil)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/callback?error=access_denied", nil)
 	if h.dropOfflineAccessAndRetry(w, r, "access_denied", "", "") {
 		t.Error("absorbed a refusal that had nothing to do with scopes")
 	}
@@ -133,7 +134,7 @@ func TestRetryWillNotFollowAnOffsiteTarget(t *testing.T) {
 	h.oauth2StateStore.StoreForBrowser(state, nil, "https://evil.example/pwn", "bind")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/callback?error=invalid_scope&state="+state, nil)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/callback?error=invalid_scope&state="+state, nil)
 	if !h.dropOfflineAccessAndRetry(w, r, "invalid_scope", "", state) {
 		t.Fatal("refusal was not absorbed")
 	}
@@ -149,7 +150,7 @@ func TestRetryWillNotFollowAnOffsiteTarget(t *testing.T) {
 func TestRefusalNamingAnotherScopeIsLeftAlone(t *testing.T) {
 	h := offlineHandler(t, []string{"openid", "profile", "email", "offline_access"}, true)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/callback?error=invalid_scope", nil)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/callback?error=invalid_scope", nil)
 	desc := `Malformed scope parameter. Unrecognized scope "profile"`
 	if h.dropOfflineAccessAndRetry(w, r, "invalid_scope", desc, "") {
 		t.Error("absorbed a refusal that named profile; retrying without offline_access fixes nothing")
@@ -163,7 +164,7 @@ func TestRefusalNamingAnotherScopeIsLeftAlone(t *testing.T) {
 func TestRefusalNamingOfflineAccessIsAbsorbed(t *testing.T) {
 	h := offlineHandler(t, []string{"openid", "offline_access"}, true)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/callback?error=invalid_scope", nil)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/callback?error=invalid_scope", nil)
 	if !h.dropOfflineAccessAndRetry(w, r, "invalid_scope", `Unrecognized scope "offline_access"`, "") {
 		t.Error("a refusal naming offline_access was not absorbed")
 	}
