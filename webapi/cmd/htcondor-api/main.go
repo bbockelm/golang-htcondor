@@ -1599,10 +1599,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 		logger.Info(logging.DestinationMCP, "MCP tools disabled by configuration", "patterns", disabled)
 	}
 
-	config.disableSecretRedaction = !mcpRedactSecretsEnabled(cfg)
-	if rules, ok := cfg.Get("HTTP_API_MCP_REDACT_DISABLED_RULES"); ok {
-		config.redactDisabledRules = rules
-	}
+	loadMCPRedaction(cfg, &config)
 
 	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
 		config.instructions = instructions
@@ -3472,6 +3469,21 @@ func mcpCIMDEnabled(cfg *config.Config) bool {
 		log.Fatalf("invalid HTTP_API_MCP_CIMD=%q: must be a boolean", raw)
 	}
 	return v
+}
+
+// loadMCPRedaction reads the two credential-masking settings.
+//
+// Its own function rather than four lines in loadMCPConfig because
+// loadMCPConfig is at the cyclomatic-complexity limit the linter
+// enforces, and these were the branches that crossed it. Every setting
+// added to that function from now on needs the same treatment; it is a
+// long sequence of independent reads and there is nothing to be gained
+// by having them all in one body.
+func loadMCPRedaction(cfg *config.Config, into *mcpConfig) {
+	into.disableSecretRedaction = !mcpRedactSecretsEnabled(cfg)
+	if rules, ok := cfg.Get("HTTP_API_MCP_REDACT_DISABLED_RULES"); ok {
+		into.redactDisabledRules = rules
+	}
 }
 
 // mcpRedactSecretsEnabled reports whether MCP tool results have
