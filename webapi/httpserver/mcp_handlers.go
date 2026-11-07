@@ -723,7 +723,7 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 			h.oauth2StateStore.StoreForBrowser(state, ar, "", binding)
 
 			// Build authorization URL
-			authURL := h.oauth2Config.AuthCodeURL(state)
+			authURL := h.authCodeURL(state)
 
 			h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for authentication",
 				"client_id", ar.GetClient().GetID(), "state", state, "auth_url", authURL)
@@ -2055,7 +2055,7 @@ func (h *Handler) deviceVerifyGet(w http.ResponseWriter, r *http.Request) {
 		h.oauth2StateStore.StoreForBrowser(state, nil, returnURL, binding)
 
 		// Build authorization URL
-		authURL := h.oauth2Config.AuthCodeURL(state)
+		authURL := h.authCodeURL(state)
 
 		h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for device verification authentication",
 			"state", state, "auth_url", authURL, "return_url", returnURL)

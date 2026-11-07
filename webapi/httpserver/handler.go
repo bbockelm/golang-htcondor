@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -215,6 +216,15 @@ type Handler struct {
 	// about a user after they have gone home. See upstream_refresh.go.
 	upstreamRefreshMode UpstreamRefreshMode
 	upstreamRefresh     *upstreamRefreshStore
+	// offlineAccessOptIn records that THIS server added offline_access to
+	// the upstream scope request, rather than the operator listing it.
+	// Only a scope we added is one we may quietly drop again; an
+	// operator who asked for it gets the refusal reported instead.
+	offlineAccessOptIn bool
+	// offlineAccessRefused latches when the provider has rejected
+	// offline_access, so every later sign-in asks without it. See
+	// dropOfflineAccessAndRetry.
+	offlineAccessRefused atomic.Bool
 	// tokenRetentionFor is how long a dead token row is kept before being
 	// deleted. Negative keeps them forever; zero means the default.
 	tokenRetentionFor time.Duration
@@ -2062,6 +2072,25 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			if len(scopes) == 0 {
 				scopes = []string{"openid", "profile", "email"}
 			}
+			// Ask for offline_access wherever this server is willing to
+			// keep the resulting refresh token, which is what lets
+			// upstreamUserInfoOracle re-check membership for a
+			// token-sourced deployment. Without it the oracle is
+			// registered and permanently silent: the provider never
+			// returns a credential, so there is nothing to ask with.
+			//
+			// Adding it can be refused -- a provider that approves
+			// scopes per client rejects one the client does not hold,
+			// and some reject the whole authorization rather than
+			// ignoring the scope. That is survivable rather than
+			// breaking, because the first such refusal latches
+			// offlineAccessRefused and every sign-in after it asks
+			// without the scope. Turn it off outright with
+			// HTTP_API_UPSTREAM_REFRESH = off.
+			if h.upstreamRefreshMode != UpstreamRefreshOff && !slices.Contains(scopes, "offline_access") {
+				scopes = append(append([]string{}, scopes...), "offline_access")
+				h.offlineAccessOptIn = true
+			}
 
 			h.oauth2Config = &oauth2.Config{
 				ClientID:     cfg.OAuth2ClientID,
@@ -3412,7 +3441,7 @@ func (h *Handler) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	h.oauth2StateStore.StoreForBrowser(state, nil, originalURL, binding)
 
 	// Build authorization URL
-	authURL := h.oauth2Config.AuthCodeURL(state)
+	authURL := h.authCodeURL(state)
 
 	h.logger.Info(logging.DestinationHTTP, "Redirecting unauthenticated browser to login",
 		"original_url", originalURL, "state", state, "auth_url", authURL)
