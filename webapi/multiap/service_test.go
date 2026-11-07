@@ -14,6 +14,7 @@ import (
 	"github.com/PelicanPlatform/classad/dbrpc"
 
 	"github.com/bbockelm/golang-htcondor/jobid"
+	"github.com/bbockelm/golang-htcondor/webapi/aggregate"
 	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 )
@@ -541,9 +542,12 @@ func TestAggregateSelfScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Labelled the way the MCP tool labels them: a group's identity is its
+	// ClassAd text, so a string group arrives quoted and an AP named
+	// ap1.example.org keys as "ap1.example.org" until it is rendered.
 	got := map[string]string{}
 	for _, r := range rows {
-		got[strings.Join(r.Group, "/")] = strings.Join(r.Values, ",")
+		got[strings.Join(aggregate.GroupLabels(r), "/")] = strings.Join(r.Values, ",")
 	}
 	if got["ap1.example.org"] != "2" || got["ap2.example.org"] != "1" || len(got) != 2 {
 		t.Errorf("alice's jobs per AP = %v, want ap1=2 ap2=1", got)

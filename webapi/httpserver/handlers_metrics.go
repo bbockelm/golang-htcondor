@@ -34,6 +34,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 
+	"github.com/bbockelm/golang-htcondor/webapi/aggregate"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/utilization"
 )
@@ -218,7 +219,7 @@ func metricsResult(table string, def metricsTableDef, bucket int64, cols []metri
 			break
 		}
 		out := make([]string, 0, len(row.Group)+len(row.Values))
-		out = append(out, row.Group...)
+		out = append(out, aggregate.GroupLabels(row)...)
 		out = append(out, row.Values...)
 		resp.Rows = append(resp.Rows, out)
 	}
