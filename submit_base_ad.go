@@ -19,14 +19,18 @@ import (
 // attribute that is absent reads as undefined to everything that looks.
 //
 // That matters because these are what the usual reports are built from.
-// `condor_q -l` shows nothing for an undefined RemoteUserCpu, a `condor_q
-// -constraint 'RemoteUserCpu > 60'` does not match a job that has no such
-// attribute rather than one that has used no CPU, and an expression that
-// does arithmetic on one gets UNDEFINED rather than a number -- which
-// propagates, so a policy expression like `RemoteUserCpu > 3600` is neither
-// true nor false. Writing them at submit time is how condor_submit makes a
-// fresh job's state readable, and it is one assignment per attribute rather
-// than any derivation, which is why they are listed rather than computed.
+// `condor_q -l` shows nothing for an undefined RemoteUserCpu. A threshold
+// query cannot tell the two apart -- `RemoteUserCpu > 60` is FALSE at 0.0
+// and UNDEFINED when the attribute is absent, and condor_q matches only on
+// TRUE, so neither one matches -- but its inverse can: a constraint that
+// should hold for a job that has not run yet, `RemoteUserCpu <= 60` or any
+// negation, matches when the attribute is there and matches nothing when it
+// is not. Arithmetic is worse, because one undefined term carries:
+// `RemoteUserCpu + RemoteSysCpu > 3600` is neither true nor false, and an
+// ifThenElse over it reaches neither branch. Writing them at submit time is
+// how condor_submit makes a fresh job's state readable, and it is one
+// assignment per attribute rather than any derivation, which is why they
+// are listed rather than computed.
 //
 // It runs first, so every keyword the submit file sets overwrites what is
 // here -- the same order as C++, where these go in the base ad the proc ad is
