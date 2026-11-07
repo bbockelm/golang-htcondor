@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -497,5 +498,22 @@ func TestServiceKeyPoolWriteRequiresExpiry(t *testing.T) {
 	maxLifetime := 365 * 24 * time.Hour
 	if err := validateServiceKeyExpiry([]string{scopePoolWrite}, true, nil, maxLifetime); err == nil {
 		t.Error("a service key carrying pool:write was allowed to never expire")
+	}
+}
+
+// Every scope that grants power over other people's work must be in
+// privilegedScopes, which is what makes the consent page render it
+// unchecked and warn about it. The list is deliberately explicit, so a
+// new entitlement is only covered if somebody added it -- this test is
+// what makes forgetting fail loudly.
+func TestEveryEntitlementIsPrivilegedOnTheConsentPage(t *testing.T) {
+	for _, sc := range entitlementScopes {
+		if !privilegedScopes[sc] {
+			t.Errorf("%s grants power over other users but is not in privilegedScopes, "+
+				"so a consent page would render it ticked by default", sc)
+		}
+		if desc := getScopeDescription(sc); desc == "" || strings.HasPrefix(desc, "Access with scope:") {
+			t.Errorf("%s has no consent-page description; it would read %q", sc, desc)
+		}
 	}
 }

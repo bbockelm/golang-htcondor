@@ -50,10 +50,52 @@ ALTER TABLE api_keys ADD COLUMN service BOOLEAN NOT NULL DEFAULT 0;
 -- entitlement with a live session to get the key at all.
 ALTER TABLE api_keys ADD COLUMN entitlements_checked_at TIMESTAMP;
 
+-- Restore anything a previous rollback set aside, so down-then-up is a
+-- round trip rather than a quiet demotion.
+--
+-- Without this a rollback past this migration turns every service key
+-- into an ordinary one. That failure is silent in the worst way: the
+-- key goes on authenticating, and its entitlement lapses an hour later
+-- for a reason nothing connects back to the rollback.
+--
+-- The table is created here too, so this runs on a first upgrade (where
+-- it is empty and does nothing) exactly as it does after a rollback.
+CREATE TABLE IF NOT EXISTS api_keys_service_preserved (
+    key_id TEXT PRIMARY KEY,
+    service BOOLEAN NOT NULL DEFAULT 0,
+    entitlements_checked_at TIMESTAMP
+);
+
+UPDATE api_keys
+   SET service = COALESCE(
+           (SELECT p.service FROM api_keys_service_preserved p WHERE p.key_id = api_keys.key_id),
+           service),
+       entitlements_checked_at = COALESCE(
+           (SELECT p.entitlements_checked_at FROM api_keys_service_preserved p WHERE p.key_id = api_keys.key_id),
+           entitlements_checked_at);
+
+-- Consumed, so a later rollback starts from the current state rather
+-- than resurrecting a stale one.
+DELETE FROM api_keys_service_preserved;
+
 -- +goose StatementEnd
 
 -- +goose Down
 -- +goose StatementBegin
+
+-- Set aside what the rebuild below is about to drop, so re-applying
+-- this migration restores it instead of defaulting it away. Only rows
+-- that carry something worth keeping.
+CREATE TABLE IF NOT EXISTS api_keys_service_preserved (
+    key_id TEXT PRIMARY KEY,
+    service BOOLEAN NOT NULL DEFAULT 0,
+    entitlements_checked_at TIMESTAMP
+);
+
+INSERT OR REPLACE INTO api_keys_service_preserved (key_id, service, entitlements_checked_at)
+SELECT key_id, service, entitlements_checked_at
+  FROM api_keys
+ WHERE service = 1 OR entitlements_checked_at IS NOT NULL;
 
 -- SQLite before 3.35 cannot DROP COLUMN, and the table is small, so the
 -- down migration rebuilds it. Column order matches the 0004 definition

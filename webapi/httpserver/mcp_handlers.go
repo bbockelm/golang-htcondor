@@ -843,6 +843,14 @@ var signInScopes = map[string]bool{
 var privilegedScopes = map[string]bool{
 	"mcp:admin":     true,
 	"mcp:superuser": true,
+	// The same two powers under the names that say what they grant.
+	// Listed here before they can be requested through OAuth2 at all --
+	// today they are mintable only on an API key -- because the cost of
+	// listing a scope that never reaches a consent page is nothing, and
+	// the cost of the reverse is a client granted power over everyone's
+	// jobs by a box that was ticked for it.
+	scopePoolRead:  true,
+	scopePoolWrite: true,
 }
 
 func getScopeDescription(scope string) string {
@@ -855,6 +863,8 @@ func getScopeDescription(scope string) string {
 		"mcp:write":             "Full access to submit and manage HTCondor jobs via MCP protocol",
 		"mcp:admin":             "Read every user's jobs, not only your own",
 		"mcp:superuser":         "Change any user's jobs: remove, hold, release, edit",
+		scopePoolRead:           "Read every user's jobs, not only your own",
+		scopePoolWrite:          "Change any user's jobs: remove, hold, release, edit",
 		"condor:/READ":          "HTCondor READ authorization - allows reading job and daemon information",
 		"condor:/WRITE":         "HTCondor WRITE authorization - allows submitting and managing jobs",
 		"condor:/ADMINISTRATOR": "HTCondor ADMINISTRATOR authorization - full administrative access",

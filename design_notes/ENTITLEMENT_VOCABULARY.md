@@ -50,8 +50,8 @@ the rest. "Carried by" is which credential kinds can hold it.
 | `condor:/ADMINISTRATOR`, `/CONFIG`, `/DAEMON`, `/NEGOTIATOR` | — | Nothing. **[OPEN]**, below | |
 | `metrics` | API key | `/metrics` (Prometheus exposition). | unchanged |
 | `placement` | OAuth2 | The placement API. Held only by the seeded placement client, never advertised. | unchanged |
-| `pool:read` | API key, OAuth2 | Read every user's records. New; see *Already using one of these names*. | **[OPEN]** name |
-| `pool:write` | API key, OAuth2 | Act on every user's records. New. | **[OPEN]** name |
+| `pool:read` | API key | Read every user's records. New; see *Already using one of these names*. | **[OPEN]** name |
+| `pool:write` | API key | Act on every user's records. New. | **[OPEN]** name |
 
 Three things that table makes visible and prose did not:
 
@@ -138,23 +138,40 @@ Three rules, and they are the point of the table:
 
 #### Entitlement is not a grant
 
-`MCP_ADMIN_USERS` **is not carried forward.** It does not gate a
+The rule above is what `MCP_ADMIN_USERS` breaks. It does not gate a
 request; it hands the read tier directly to any caller on the list whose
 credential states no scopes. That is a permission appearing on a
 credential that never asked for it and whose holder never consented to
-it, which is exactly what the scope vocabulary exists to prevent.
+it, which is the thing the scope vocabulary exists to prevent.
 
-`HTTP_API_POOL_READ_USERS` replaces it in name only. The semantics are
-different: being listed means a request for `pool:read` *may be
-granted*, and a credential that never requests it never carries it.
+**It stays, deprecated, with its current behaviour intact.** Removing it
+would log out working stdio integrations on upgrade, and the people
+running them did nothing wrong. What does not happen is carrying its
+semantics forward: `HTTP_API_POOL_READ_USERS` is not its replacement in
+meaning, only in subject matter.
 
-**This is a behaviour change, and the only one in this document that
-silently removes a power.** A deployment relying on `MCP_ADMIN_USERS`
-today has unscoped stdio callers reading every user's jobs; after this
-they read their own until something requests `pool:read` for them. That
-is the correct end state and it will look like a regression to whoever
-hits it, so it needs a release note and a startup warning naming the
-replacement, not a silent swap.
+| | `MCP_ADMIN_USERS` (deprecated) | `HTTP_API_POOL_READ_USERS` |
+| --- | --- | --- |
+| Effect of being listed | **holds** the read tier | **may request** `pool:read` |
+| Applies to | a credential stating no scopes | any credential |
+| Needs a request | no | yes |
+| Needs consent | no | yes, where consent applies |
+
+So the two can coexist without contradiction, and a deployment moves at
+its own pace: list people under the new knob, have their tooling request
+the scope, then drop the old one.
+
+**[OPEN]** What the deprecation actually does. Options: (a) a startup
+line naming the replacement, behaviour unchanged — lowest friction, and
+the old knob stays indefinitely; (b) the same plus a removal release
+named in the message. The existing startup warnings for this knob are
+already the precedent for (a).
+
+**[OPEN]** Whether a credential that *could* request `pool:read` but did
+not should be told so. Saying nothing is what produced the report this
+work started from; saying something on every request is noise. The MCP
+scope challenge below is the mechanism that answers this properly for
+`/mcp`, and nothing answers it for REST.
 
 ### Internal names
 
@@ -257,22 +274,57 @@ supported configuration, not a trick.
 
 ## Compatibility
 
-Config knobs and granted scopes are public API, so nothing is deleted:
+Config knobs and granted scopes are public API, so nothing is deleted.
+Old config names stay accepted as aliases with a startup line naming the
+replacement; stored `granted_scopes` rows carrying `mcp:admin` or
+`mcp:superuser` keep resolving to the corresponding power, because a
+grant must not lose its power to an upgrade and a refresh must not
+silently narrow it; the old scope strings stay advertised so existing
+clients requesting them keep working. Each alias is pinned with a test,
+not left to inspection.
 
-- Old config names stay accepted as aliases, with a startup line naming
-  the replacement. This follows the existing precedent for
-  `MCP_ADMIN_USERS`, which already logs when its meaning has narrowed.
-- Stored `granted_scopes` rows carrying `mcp:admin` / `mcp:superuser`
-  keep resolving to the corresponding power. A grant must not lose its
-  power because the server was upgraded, and a refresh must not silently
-  narrow it.
-- The old scope strings stay advertised in OAuth2 metadata, so existing
-  clients requesting them keep working. Note the trap recorded in
-  `oauth2AdvertisedScopes`: a client asks for every scope the server
-  advertises, so *removing* one from that list is what breaks clients,
-  and *adding* an unapproved one is what breaks providers. Both
-  directions of that list are load-bearing.
-- Aliasing is pinned with a test per alias, not left to inspection.
+Note the trap recorded on `oauth2AdvertisedScopes`: a client asks for
+every scope the server advertises, so *removing* one from that list is
+what breaks clients, and *adding* an unapproved one is what breaks
+providers. Both directions are load-bearing.
+
+### What an existing deployment sees on upgrade
+
+Walked through, surface by surface. The short answer is that nothing in
+the shipped work changes behaviour for a credential that exists today,
+with one deliberate exception.
+
+| Thing that exists today | On upgrade |
+| --- | --- |
+| An API key minted before this | Untouched. It carries no `pool:*` scope — none existed — so the entitlement path is skipped entirely and costs it not even a lookup. |
+| An OAuth2 grant carrying `mcp:admin` / `mcp:superuser` | Still honoured, on REST and MCP alike. The `pool:*` scopes were added beside them, not in place of them. |
+| A refresh of such a grant | Unchanged. Re-authorization re-runs the group policy it always did. |
+| A CIMD client | Unchanged. Its requestable set is recomputed from the advertised list, which did not change. |
+| `MCP_ADMIN_USERS` | Unchanged, deprecated. See above. |
+| A browser session | Unchanged. |
+| An upstream SSO login | **Changes:** the next authorization also asks for `offline_access`. A provider that refuses it has that refusal absorbed and the sign-in retried without it, so a login that worked keeps working. This is the one deliberate exception. |
+
+### The rollback, which is where it nearly went wrong
+
+Migration 0030 adds two columns, and SQLite before 3.35 cannot drop a
+column, so the down migration rebuilds the table. A rebuild that
+forgets a column loses it silently — and the loss here is the bad kind:
+a service key demoted to an ordinary key goes on authenticating, then
+loses its entitlement an hour later for a reason nothing connects back
+to the rollback.
+
+So the down migration sets the dropped values aside and the up
+migration restores them. Down-then-up is a round trip, pinned by
+`TestServiceKeySurvivesDownAndUp`, which also asserts the keys
+themselves survive the downgrade — a rollback that logs everybody's
+automation out is worse than whatever it is rolling back.
+
+On the older code a key carrying `pool:read` is simply a key with a
+scope nothing reads: scopes are validated at mint, not at use, so it
+keeps working as an ordinary key. Forward compatibility is the weaker
+direction, as usual: a *new* admin UI posting `service: true` to an
+*old* server gets a 400, because the create handler rejects unknown
+fields. That is an upgrade-order constraint, not a data hazard.
 
 ## What this does not change
 

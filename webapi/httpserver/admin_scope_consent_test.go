@@ -46,16 +46,46 @@ func renderConsentFor(t *testing.T, h *Handler, groups, requested []string) stri
 	return rec.Body.String()
 }
 
-// TestPrivilegedScopesAreAdvertised: a client only asks for scopes the
-// server advertises, so an unadvertised scope cannot be requested by
-// anything -- which is what left the whole admin/superuser tier
-// unreachable rather than merely unused.
-func TestPrivilegedScopesAreAdvertised(t *testing.T) {
+// TestPrivilegedScopesAreReachable: a privileged scope nothing can ask
+// for is not a safety feature, it is dead vocabulary -- which is what
+// left the whole admin/superuser tier unreachable rather than merely
+// unused.
+//
+// There are two ways to reach one, and a scope needs only one of them.
+// An OAuth2 client asks for what the server advertises, so an OAuth2
+// scope must be in oauth2AdvertisedScopes. An API key is minted
+// directly by an administrator and never goes through an authorization
+// flow at all, so an API-key scope must be in validScopes instead. The
+// pool:* entitlements are mintable today and not advertised; whether
+// they should also become OAuth2 scopes is open (see
+// design_notes/ENTITLEMENT_VOCABULARY.md), and this test is written so
+// that answering it either way does not require editing the test.
+func TestPrivilegedScopesAreReachable(t *testing.T) {
 	advertised := make(map[string]bool, len(oauth2AdvertisedScopes))
 	for _, scope := range oauth2AdvertisedScopes {
 		advertised[scope] = true
 	}
 	for scope := range privilegedScopes {
+		_, mintable := validScopes[scope]
+		if !advertised[scope] && !mintable {
+			t.Errorf("%s is privileged but neither advertised nor mintable, "+
+				"so nothing can ever request it", scope)
+		}
+	}
+}
+
+// And the OAuth2 half of that keeps its stronger form: a privileged
+// scope an OAuth2 grant can carry must stay advertised, or every client
+// holding it fails to refresh.
+func TestOAuth2PrivilegedScopesStayAdvertised(t *testing.T) {
+	advertised := make(map[string]bool, len(oauth2AdvertisedScopes))
+	for _, scope := range oauth2AdvertisedScopes {
+		advertised[scope] = true
+	}
+	for _, scope := range []string{"mcp:admin", "mcp:superuser"} {
+		if !privilegedScopes[scope] {
+			t.Errorf("%s is no longer marked privileged", scope)
+		}
 		if !advertised[scope] {
 			t.Errorf("%s is not advertised, so no client can request it", scope)
 		}
