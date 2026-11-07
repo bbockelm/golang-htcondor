@@ -90,6 +90,20 @@ int submit_factory_info(const char *text, int max_items, const char *items_filen
  */
 int submit_keyword_table(char **out);
 
+/*
+ * Report the linked HTCondor's own version string -- CondorVersion(), the same
+ * one the shim hands SubmitHash::setScheddVersion.
+ *
+ * The oracle is built from a moving branch in the nightly and from a pinned
+ * release in pull-request CI, so a report has to say which HTCondor produced
+ * it. What BEHAVIOR to expect of that HTCondor is decided by probing it, not
+ * by reading this string: upstream backports across release branches, so a
+ * version number does not tell you whether a given change is present.
+ *
+ * Returns 1 on success. Caller must submit_oracle_free() the result.
+ */
+int submit_oracle_version(char **out);
+
 /* Free a string previously returned via submit_make_ads's out parameter. */
 void submit_oracle_free(char *p);
 

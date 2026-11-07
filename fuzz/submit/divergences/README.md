@@ -38,6 +38,35 @@ and the sweep reports it instead of failing. The reason has to name what does
 check the entry, so the marker cannot become a way to park an entry nothing
 looks at.
 
+## When the entry is about one HTCondor and not another
+
+The oracle is a pinned release in pull-request CI and HTCondor's `main` branch
+in the nightly, so the same entry can be right against one and wrong against
+the other. An entry that is about one upstream change says so on its last
+line:
+
+```
+Oracle: has HTCONDOR-3998
+Oracle: lacks HTCONDOR-3998
+```
+
+`has` is for upstream drift: condor_submit changed, the Go side has not caught
+up, and the entry must not excuse anything against the pinned oracle that
+still behaves the old way. `lacks` is the same entry after the Go side is
+fixed ahead of the release — now it is the PIN that disagrees. An entry with
+no marker applies to every oracle, which is right for a divergence that is
+ours rather than a difference between two HTCondors.
+
+The ticket has to be one `oracleTraits` probes for, in `oracle_traits.go`, and
+the probe asks the oracle what it DOES rather than what version it is:
+upstream backports across release branches, so one change reaches a 25.x patch
+release and a 26.x release with no version number between them that separates
+the two.
+
+An entry whose marker does not match the linked oracle is dropped before any
+comparison runs, so it neither excuses a divergence that oracle should not
+produce nor is swept as stale.
+
 ## Removing one
 
 Delete the file. That is how a fix gets locked in:

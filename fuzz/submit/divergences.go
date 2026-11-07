@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"sort"
 	"strings"
 )
 
@@ -79,6 +80,30 @@ var knownDivergentInUniverse map[int]map[string]string
 //nolint:unused // read by TestRecordedDivergencesStillDiverge, which builds
 var sweepExempt map[string]string
 
+// entryTrait holds, per attribute, the one upstream change its entry is about
+// and which side of that change it belongs to -- written as a last line in the
+// entry's file:
+//
+//	Oracle: has <ticket>
+//	Oracle: lacks <ticket>
+//
+// An entry without one applies to every oracle, which is right for a
+// divergence that is ours rather than a difference between two HTCondors.
+// activateDivergences drops the entries whose trait does not match the linked
+// oracle, before any test consults them.
+//
+// only under the libcondor_utils tag.
+//
+//nolint:unused // read by activateDivergences, which runs from TestMain
+var entryTrait map[string]traitReq
+
+// traitReq is one entry's requirement: the ticket naming an upstream change,
+// and whether the entry applies when the oracle HAS it.
+type traitReq struct {
+	ticket string
+	has    bool
+}
+
 // divergenceLoadErr is why the entries above are empty, if they are.
 // TestDivergenceEntriesLoad reports it; nothing else can, because a test
 // helper package cannot refuse to build.
@@ -104,6 +129,7 @@ func init() {
 func loadDivergences() error {
 	hostDerived = map[string]string{}
 	sweepExempt = map[string]string{}
+	entryTrait = map[string]traitReq{}
 	knownDivergent = map[string]string{}
 	knownDivergentGenerated = map[string]string{}
 	knownDivergentInUniverse = map[int]map[string]string{}
@@ -125,7 +151,7 @@ func loadDivergences() error {
 		if !strings.HasSuffix(rel, ".md") {
 			return fmt.Errorf("divergences/%s: every entry is a .md file", rel)
 		}
-		reason, exempt, err := readDivergence(p)
+		reason, exempt, trait, err := readDivergence(p)
 		if err != nil {
 			return err
 		}
@@ -136,6 +162,9 @@ func loadDivergences() error {
 		attr := strings.TrimSuffix(parts[len(parts)-1], ".md")
 		if exempt != "" {
 			sweepExempt[attr] = exempt
+		}
+		if trait != nil {
+			entryTrait[attr] = *trait
 		}
 		switch {
 		case len(parts) == 2 && byKind[parts[0]] != nil:
@@ -159,29 +188,113 @@ func loadDivergences() error {
 	})
 }
 
-// sweepExemptPrefix introduces the optional last line of an entry's file; see
-// sweepExempt.
-const sweepExemptPrefix = "Sweep cannot prove this:"
+// sweepExemptPrefix and oracleTraitPrefix introduce the optional last lines of
+// an entry's file; see sweepExempt and entryTrait.
+const (
+	sweepExemptPrefix = "Sweep cannot prove this:"
+	oracleTraitPrefix = "Oracle:"
+)
 
-// readDivergence reads one entry: the file's contents are the reason, and an
-// optional last line starting with sweepExemptPrefix is returned separately
-// rather than as part of it.
-func readDivergence(p string) (reason, exempt string, err error) {
+// readDivergence reads one entry: the file's contents are the reason, and the
+// optional marker lines at the end are returned separately rather than as part
+// of it. Either marker may come last, so they are peeled off in a loop.
+func readDivergence(p string) (reason, exempt string, trait *traitReq, err error) {
 	b, err := divergenceFiles.ReadFile(p)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
-	if last := len(lines) - 1; last >= 0 && strings.HasPrefix(lines[last], sweepExemptPrefix) {
-		exempt = strings.TrimSpace(strings.TrimPrefix(lines[last], sweepExemptPrefix))
-		if exempt == "" {
-			return "", "", fmt.Errorf("%s: %q needs a reason after it", p, sweepExemptPrefix)
+	for len(lines) > 0 {
+		last := lines[len(lines)-1]
+		switch {
+		case strings.HasPrefix(last, sweepExemptPrefix):
+			if exempt != "" {
+				return "", "", nil, fmt.Errorf("%s: two %q lines", p, sweepExemptPrefix)
+			}
+			exempt = strings.TrimSpace(strings.TrimPrefix(last, sweepExemptPrefix))
+			if exempt == "" {
+				return "", "", nil, fmt.Errorf("%s: %q needs a reason after it", p, sweepExemptPrefix)
+			}
+		case strings.HasPrefix(last, oracleTraitPrefix):
+			if trait != nil {
+				return "", "", nil, fmt.Errorf("%s: an entry is about at most one upstream change", p)
+			}
+			req, terr := parseTraitReq(strings.TrimPrefix(last, oracleTraitPrefix))
+			if terr != nil {
+				return "", "", nil, fmt.Errorf("%s: %w", p, terr)
+			}
+			trait = req
+		default:
+			// Not a marker, so the reason ends here.
+			return finishReason(p, lines, exempt, trait)
 		}
-		lines = lines[:last]
+		lines = lines[:len(lines)-1]
 	}
-	reason = strings.TrimRight(strings.Join(lines, "\n"), "\n")
+	return finishReason(p, lines, exempt, trait)
+}
+
+// finishReason joins what is left of an entry's file after its marker lines
+// were peeled off, and refuses an entry that is nothing but markers.
+func finishReason(p string, lines []string, exempt string, trait *traitReq) (string, string, *traitReq, error) {
+	reason := strings.TrimRight(strings.Join(lines, "\n"), "\n")
 	if strings.TrimSpace(reason) == "" {
-		return "", "", fmt.Errorf("%s: an entry's file is its reason, and this one is empty", p)
+		return "", "", nil, fmt.Errorf("%s: an entry's file is its reason, and this one is empty", p)
 	}
-	return reason, exempt, nil
+	return reason, exempt, trait, nil
+}
+
+// parseTraitReq reads "has <ticket>" or "lacks <ticket>". The ticket has to be
+// one oracleTraits probes for, so a typo cannot quietly park an entry on a
+// trait nothing decides.
+func parseTraitReq(s string) (*traitReq, error) {
+	fields := strings.Fields(s)
+	if len(fields) != 2 {
+		return nil, fmt.Errorf("%q takes `has <ticket>` or `lacks <ticket>`, got %q", oracleTraitPrefix, strings.TrimSpace(s))
+	}
+	req := traitReq{ticket: fields[1]}
+	switch fields[0] {
+	case "has":
+		req.has = true
+	case "lacks":
+		req.has = false
+	default:
+		return nil, fmt.Errorf("%q takes `has` or `lacks`, got %q", oracleTraitPrefix, fields[0])
+	}
+	for _, tr := range oracleTraits {
+		if tr.ticket == req.ticket {
+			return &req, nil
+		}
+	}
+	return nil, fmt.Errorf("%q is not a ticket oracleTraits probes for", req.ticket)
+}
+
+// activateDivergences drops the entries that do not apply to the linked
+// oracle, and returns their attribute names for the run's log.
+//
+// Dropping is what keeps the two oracles honest in both directions. An entry
+// recording upstream drift must not excuse anything against the pinned oracle,
+// which does not have the change; once the Go side is fixed ahead of a release
+// the same entry flips to `lacks`, and must not excuse anything against the
+// oracle that does. Either way the entry that does not apply is gone before a
+// comparison runs, so TestRecordedDivergencesStillDiverge never sweeps it
+// either.
+//
+//nolint:unused // called by TestMain, which builds only under the tag
+func activateDivergences(have map[string]bool) []string {
+	var dropped []string
+	for attr, req := range entryTrait {
+		if have[req.ticket] == req.has {
+			continue
+		}
+		delete(knownDivergent, attr)
+		delete(knownDivergentGenerated, attr)
+		delete(hostDerived, attr)
+		delete(sweepExempt, attr)
+		for _, byAttr := range knownDivergentInUniverse {
+			delete(byAttr, attr)
+		}
+		dropped = append(dropped, attr)
+	}
+	sort.Strings(dropped)
+	return dropped
 }

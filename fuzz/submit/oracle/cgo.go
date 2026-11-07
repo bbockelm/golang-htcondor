@@ -132,6 +132,28 @@ const (
 	KeySpecial     = 0x20000
 )
 
+// Version returns the linked HTCondor's own version string, the full
+// "$CondorVersion: ..." banner. It is for reporting WHICH oracle produced a
+// result; what behavior to expect of it is decided by probing, because
+// upstream backports changes across release branches and a version number
+// does not say whether a given change is present.
+func Version() string {
+	cppMu.Lock()
+	defer cppMu.Unlock()
+
+	var out *C.char
+	rc := C.submit_oracle_version(&out)
+	if out == nil {
+		return ""
+	}
+	s := C.GoString(out)
+	C.submit_oracle_free(out)
+	if rc != 1 {
+		return ""
+	}
+	return s
+}
+
 // Keywords returns the submit-keyword table the linked HTCondor exposes via
 // get_submit_keywords(), so the fuzzer's vocabulary comes from the parser under
 // test rather than a hand-maintained list. Returns nil if the table looks wrong.
