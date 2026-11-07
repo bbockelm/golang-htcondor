@@ -101,6 +101,46 @@ jobs:
         flags: unittests
         fail_ci_if_error: false
 
+  # Everything this repo ships is built with CGO_ENABLED=0: the release
+  # binaries, the container, and `make build`. The job above cannot be,
+  # because `-race` requires cgo on linux/amd64 ("go: -race requires cgo"),
+  # so it tests the one configuration that is never shipped. On darwin the
+  # race detector works without cgo, which is why this is easy to miss
+  # locally.
+  #
+  # droppriv is the whole of the difference -- it holds every
+  # cgo-conditional file in all three modules -- and the two sides are
+  # near-inverses rather than variants. With cgo, selectBestGroupLookup is
+  # one line, because glibc walks nsswitch.conf itself. Without it, this
+  # package does that walk: the nsswitch-ordered chain, the SSSD protocol
+  # client, and the degraded-group handling, none of which the job above
+  # ever compiles. Testing that package here is enough; narrowing to it is
+  # what lets this job skip the HTCondor install and finish in a minute.
+  #
+  # No -race, for the reason above. Adding it would silently turn cgo back
+  # on and this job back into a duplicate of the one above.
+  test-nocgo:
+    name: Test (nocgo)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        check-latest: true
+        go-version-file: .go-version
+        cache: true
+        cache-dependency-path: go.sum
+
+    - name: Run droppriv tests without cgo
+      env:
+        CGO_ENABLED: '0'
+        GOWORK: off
+      run: go test -count=1 -v ./droppriv/...
+
   lint:
     # The label keeps these names stable ("Lint (.)", "Lint (webapi)") rather
     # than letting the matrix append every dimension to them.

@@ -16,13 +16,35 @@ type SSSDLookupStrategy struct {
 }
 
 // NewSSSDLookup creates a new SSSD lookup strategy using gosssd.
+//
+// The caller's context bounds construction and nothing more, so it is
+// deliberately not handed to the client. gosssd closes the socket when
+// the context it was built with is done and then refuses to redial
+// through it, so a client built on a context that ends -- a request's, or
+// the five-second construction deadline this is called with -- is dead
+// from the moment that context expires, and stays dead for the life of
+// the process. The symptom is every lookup failing with "context
+// canceled" while `id` on the same host answers normally. The dial is
+// bounded by the client's own timeout instead.
 func NewSSSDLookup(ctx context.Context) (*SSSDLookupStrategy, error) {
-	client := gosssd.NewClient(gosssd.WithContext(ctx))
+	return newSSSDLookupAt(ctx, "")
+}
+
+// newSSSDLookupAt is NewSSSDLookup against a given socket, so a test can
+// point it somewhere other than the system's. An empty path is the
+// default socket.
+func newSSSDLookupAt(_ context.Context, socketPath string) (*SSSDLookupStrategy, error) {
+	var opts []gosssd.ClientOption
+	if socketPath == "" {
+		socketPath = gosssd.DefaultNSSSocketPath
+	} else {
+		opts = append(opts, gosssd.WithSocketPath(socketPath))
+	}
+	client := gosssd.NewClient(opts...)
 
 	// Test connectivity by connecting
-	err := client.ConnectContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("SSSD not available: %w", err)
+	if err := client.Connect(); err != nil {
+		return nil, fmt.Errorf("SSSD not available at %s: %w", socketPath, err)
 	}
 
 	return &SSSDLookupStrategy{client: client}, nil
@@ -30,9 +52,9 @@ func NewSSSDLookup(ctx context.Context) (*SSSDLookupStrategy, error) {
 
 // LookupUser looks up a user using SSSD via gosssd.
 //
-// The context is unused: gosssd's request calls take none, carrying
-// instead the one the client was constructed with. Named _ so that is
-// visible rather than looking like an oversight.
+// The context is unused: gosssd's request calls take none, and the
+// client deliberately carries none either (see NewSSSDLookup). Named _
+// so that is visible rather than looking like an oversight.
 func (s *SSSDLookupStrategy) LookupUser(_ context.Context, username string) (*UserInfo, error) {
 	user, err := s.client.GetUserByName(username)
 	if err != nil {
