@@ -373,6 +373,22 @@ func (s *Handler) handlePoolSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// This summary looks like an aggregate but names a slot's owner in
+	// every row, so it is as revealing as a listing and is governed the
+	// same way. The caller's own constraint is checked; the
+	// dynamic-slot exclusion ANDed in above is this server's.
+	privileged := s.seesAllJobs(r.Context(), r, jobScopeRead)
+	if s.poolQueryPolicy.Refuses(privileged) {
+		s.writeError(w, http.StatusForbidden,
+			"Pool queries are restricted to administrators at this site")
+		return
+	}
+	if err := s.poolQueryPolicy.CheckConstraint(privileged, "StartdAd",
+		r.URL.Query().Get("constraint")); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	// Under the caller's credential: the bare request context has none, so
 	// the query would be refused before it reached the collector.
 	ctx, needsRedirect, err := s.requireAuthentication(r)
@@ -404,5 +420,15 @@ func (s *Handler) handlePoolSummary(w http.ResponseWriter, r *http.Request) {
 		ads = append(ads, result.Ad)
 	}
 
-	s.writeJSON(w, http.StatusOK, aggregatePoolSummary(ads))
+	summary := aggregatePoolSummary(ads)
+	// The counts stay; the names come out. A restricted caller still
+	// learns how busy the pool is, which is what this endpoint is for.
+	if s.poolQueryPolicy.Restricts(privileged) {
+		for i := range summary.Nodes {
+			for j := range summary.Nodes[i].Slots {
+				summary.Nodes[i].Slots[j].RemoteOwner = ""
+			}
+		}
+	}
+	s.writeJSON(w, http.StatusOK, summary)
 }

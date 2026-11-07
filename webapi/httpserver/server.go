@@ -23,6 +23,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/poolpolicy"
 	"github.com/ory/fosite"
 )
 
@@ -349,9 +350,14 @@ type Config struct {
 	MCPSkillsReloadInterval time.Duration
 	// MCPSkillsDir publishes a directory of site-authored Markdown skills
 	// to agents. Empty disables the feature.
-	MCPSkillsDir    string
-	MCPAdminUsers   []string // Authenticated subjects exempt from the MCP owner-scope wrapper
-	WebUIAdminGroup string   // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
+	MCPSkillsDir  string
+	MCPAdminUsers []string // Authenticated subjects exempt from the MCP owner-scope wrapper
+
+	// PoolQueryPolicy restricts which collector attributes a caller
+	// without the cross-user read privilege may read. Nil means no
+	// restriction. See webapi/poolpolicy.
+	PoolQueryPolicy *poolpolicy.Policy
+	WebUIAdminGroup string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
 	// WebUIAccessGroup gates web interface login; empty falls back to
 	// MCPAccessGroup. Comma-separated.
 	WebUIAccessGroup string
@@ -585,6 +591,7 @@ func NewServer(cfg Config) (*Server, error) {
 		RequiredCredentials:         cfg.RequiredCredentials,
 		CreddAddress:                cfg.CreddAddress,
 		MCPAdminUsers:               cfg.MCPAdminUsers,
+		PoolQueryPolicy:             cfg.PoolQueryPolicy,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,
 		WebUISiteName:               cfg.WebUISiteName,
 		WebUISiteTagline:            cfg.WebUISiteTagline,

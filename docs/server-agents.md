@@ -131,11 +131,70 @@ a context the site does not control.
 
 Whether that matters is a site decision and depends on what the pool's
 ads carry; a site that puts personal data in custom machine attributes
-is exposing more than the attributes listed above. Today the controls
-are coarse: narrow `HTTP_API_MCP_ACCESS_GROUP`, or withdraw `query_pool`
-with `HTTP_API_MCP_DISABLED_TOOLS`. Note that withdrawing the MCP tool
-does not close the REST path, which the web UI's pool page uses and
-which any holder of an API token can call directly.
+is exposing more than the attributes listed above.
+
+`HTTP_API_POOL_QUERY_IDENTITY` is the control:
+
+```
+# open (default) | restricted | admin
+HTTP_API_POOL_QUERY_IDENTITY = restricted
+```
+
+- **`open`** is the default and today's behaviour: every authorized
+  caller reads what `condor_status` would show them. Upgrading changes
+  nothing until this is set.
+- **`restricted`** confines callers *without* the cross-user read
+  privilege to attributes that describe machines rather than the people
+  on them. Administrators are unaffected.
+- **`admin`** requires that privilege for any pool query at all.
+
+The privilege is the same one that decides whether a caller may read
+other users' jobs — `HTTP_API_WEBUI_ADMIN_GROUP`, the `mcp:admin` scope,
+or `MCP_ADMIN_USERS`; see [Authorization
+groups](server-auth.md#authorization-groups). Someone who may already
+read everyone's jobs is not restricted here.
+
+Under `restricted`:
+
+- The attribute list is an **allowlist**, not a list of attributes to
+  strip. A denylist cannot be made complete, because a site advertises
+  whatever it likes from `STARTD_ATTRS`, and naming the attributes that
+  carry personal data would mean knowing every site's custom ones. An
+  attribute nobody listed is withheld, which is the safe direction to be
+  wrong in.
+- `HTTP_API_POOL_QUERY_EXTRA_ATTRS` adds a site's own known-safe
+  attributes to it:
+
+  ```
+  HTTP_API_POOL_QUERY_EXTRA_ATTRS = GLIDEIN_Site, GLIDEIN_ResourceName
+  ```
+
+- **Submitter ads are refused outright.** Every submitter ad names one
+  user — that is all a submitter ad is — so there is no redacted form of
+  one that still answers anything.
+- Constraints are checked, not only output. A constraint is an oracle
+  for an attribute it never returns: `RemoteOwner == "someone@example.edu"`
+  answers "is that person running anywhere" from the result count alone.
+- A projection naming a withheld attribute is **refused**, not quietly
+  shortened. An attribute silently dropped comes back absent, which
+  reads as "this slot has no owner" rather than "you may not see it",
+  and an agent will report the first as fact.
+
+Applied wherever a caller chooses what to read: the `query_pool` tool,
+`/api/v1/collector/ads/`, the `/api/v1/collector/watch` stream, and
+`/api/v1/collector/pool-summary`. Restricting the MCP tool alone would
+be no restriction, because the REST endpoints answer the same question
+with the same credentials. This server's own aggregate reads — drain
+estimates, utilization, match analysis — are unaffected; they count
+rather than publish.
+
+On the web UI's pool page, a session that may not see slot owners is
+told so: the Owner column reads "not shown" rather than going blank,
+which would look like an idle machine.
+
+A value this server does not understand **fails closed** to `admin`, and
+logs. Restricting pool queries by accident is noticed and corrected in
+minutes; quietly publishing identities is not noticed at all.
 
 
 ## Masking credentials in tool results

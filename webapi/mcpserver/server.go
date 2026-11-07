@@ -24,6 +24,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/bbockelm/golang-htcondor/webapi/poolpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/skills"
@@ -144,6 +145,11 @@ type Server struct {
 	// takes its JOB_DEFAULT_REQUEST* values from, so that the two agree.
 	// Shared with the REST server when it built this one.
 	apPolicy *appolicy.Cache
+
+	// poolPolicy restricts which collector attributes a caller without
+	// the cross-user read privilege may read. Never nil after
+	// NewServer. See webapi/poolpolicy.
+	poolPolicy *poolpolicy.Policy
 	// policySourceFn replaces the schedd the policy is read from, so the
 	// tool and the submit defaults can be tested without one. nil reads
 	// through scheddFor.
@@ -469,6 +475,10 @@ type Config struct {
 	// server passes its own so both surfaces submit with the same
 	// defaults and read each access point once; nil creates one.
 	APPolicy *appolicy.Cache
+
+	// PoolPolicy restricts which collector attributes an unprivileged
+	// caller reads through query_pool. Nil means no restriction.
+	PoolPolicy *poolpolicy.Policy
 }
 
 // NewServer creates a new MCP server
@@ -574,6 +584,9 @@ func NewServer(cfg Config) (*Server, error) {
 		watchMaxWait:       cfg.WatchMaxWait,
 		build:              buildSettingsFromConfig(cfg),
 		apPolicy:           cfg.APPolicy,
+		// Never nil: query_pool asks the policy rather than checking for
+		// one, so an unconfigured server holds an open policy instead.
+		poolPolicy: cmpOrOpen(cfg.PoolPolicy),
 	}
 	if s.apPolicy == nil {
 		s.apPolicy = appolicy.NewCache()
@@ -1003,4 +1016,13 @@ func (s *Server) getSchedd() *htcondor.Schedd {
 		}
 	}
 	return s.schedd
+}
+
+// cmpOrOpen supplies the unrestricted policy when none was configured, so
+// no call site has to distinguish "no policy" from "policy that allows".
+func cmpOrOpen(p *poolpolicy.Policy) *poolpolicy.Policy {
+	if p != nil {
+		return p
+	}
+	return poolpolicy.New(poolpolicy.ModeOpen, nil)
 }

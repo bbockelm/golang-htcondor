@@ -258,6 +258,10 @@ var reconfigParams = []reconfigParam{
 	// startup, so they need their setters before they can move up.
 	{name: "MCP_ADMIN_USERS"},
 
+	// Pool query policy, compiled into the attribute allowlist at startup.
+	{name: "HTTP_API_POOL_QUERY_IDENTITY"},
+	{name: "HTTP_API_POOL_QUERY_EXTRA_ATTRS"},
+
 	// Submit-time policy, compiled into the submit policy at startup.
 	{name: "HTTP_API_SUBMIT_FILE_DEFAULTS"},
 	{name: "HTTP_API_SUBMIT_FILE_OVERRIDES"},
