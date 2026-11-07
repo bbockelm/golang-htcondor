@@ -27,6 +27,13 @@ type GoResult struct {
 	Panic bool
 }
 
+// goBehavior is which HTCondor's condor_submit the Go side is asked to
+// emulate: the one the oracle turned out to be, settled by TestMain from the
+// probes. The zero value is the behavior of the releases this library has
+// always produced, which is what a run without an oracle compares nothing
+// against anyway.
+var goBehavior htcondor.SubmitBehavior
+
 // GoMakeAds parses text with the Go submit parser and returns the resulting
 // job ads.
 //
@@ -48,7 +55,7 @@ func GoMakeAds(text string) (res GoResult) {
 	}()
 
 	sf, err := htcondor.ParseSubmitFileWithOptions(strings.NewReader(text),
-		htcondor.SubmitParseOptions{SubmitUser: oracle.SubmitUser})
+		htcondor.SubmitParseOptions{SubmitUser: oracle.SubmitUser, Behavior: goBehavior})
 	if err != nil {
 		return GoResult{Err: err.Error()}
 	}

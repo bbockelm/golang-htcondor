@@ -5,20 +5,47 @@ import (
 	"testing"
 )
 
-// TestEveryTraitIsNamed keeps oracleTraits from accumulating probes nothing
-// uses. A trait is a claim about the oracle that only earns its keep by
-// deciding whether some entry applies; one no entry names is either a fix that
-// landed and took its entry with it, or a probe written ahead of the entry it
-// was for.
-func TestEveryTraitIsNamed(t *testing.T) {
+// TestEveryTraitIsUsed keeps oracleTraits from accumulating probes nothing
+// consults. A trait is a claim about the oracle, and it earns its keep one of
+// two ways: an entry names it, so it decides whether that divergence applies,
+// or goBehaviorFor reads it, so it decides what the Go side produces. A trait
+// doing neither is a fix that landed and took its entry with it, or a probe
+// written ahead of the work it was for.
+//
+// The second half is checked by running goBehaviorFor rather than by looking
+// for the ticket in the source, so a trait that is mentioned there but wired
+// to nothing still fails.
+func TestEveryTraitIsUsed(t *testing.T) {
 	named := map[string]bool{}
 	for _, req := range entryTrait {
 		named[req.ticket] = true
 	}
+	off := goBehaviorFor(map[string]bool{})
 	for _, tr := range oracleTraits {
-		if !named[tr.ticket] {
-			t.Errorf("no entry names %s (%s), so nothing decides anything from it -- delete the trait or write the entry",
-				tr.ticket, tr.what)
+		if named[tr.ticket] || goBehaviorFor(map[string]bool{tr.ticket: true}) != off {
+			continue
+		}
+		t.Errorf("nothing consults %s (%s): no entry names it and it changes no Go behavior -- delete the trait, write the entry, or wire it",
+			tr.ticket, tr.what)
+	}
+}
+
+// TestImplementedTraitsHaveNoEntry is the rule that keeps the two mechanisms
+// from overlapping. Once a trait drives the Go side, the two parsers agree
+// against either oracle and the entry that recorded the difference is a stale
+// excuse -- one that would hide a real regression in the gate it was replaced
+// by.
+func TestImplementedTraitsHaveNoEntry(t *testing.T) {
+	off := goBehaviorFor(map[string]bool{})
+	for _, tr := range oracleTraits {
+		if goBehaviorFor(map[string]bool{tr.ticket: true}) == off {
+			continue
+		}
+		for attr, req := range entryTrait {
+			if req.ticket == tr.ticket {
+				t.Errorf("%s is implemented on the Go side, so %s.md excuses a difference that no longer exists -- delete it",
+					tr.ticket, attr)
+			}
 		}
 	}
 }
