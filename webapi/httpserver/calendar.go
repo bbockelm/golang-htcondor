@@ -51,6 +51,7 @@ import (
 	"github.com/PelicanPlatform/classad/dbrpc"
 
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/aggregate"
 )
 
 // calendarBucket is one day, in seconds: the bucket width every series
@@ -653,10 +654,7 @@ func deriveQueueDepth(days []CalendarDay, anchor int) (clamped bool) {
 // aggregate every calendar query asks for, tolerating a row shaped
 // otherwise rather than indexing into it.
 func firstGroup(r dbrpc.AggRow) string {
-	if len(r.Group) == 0 {
-		return ""
-	}
-	return r.Group[0]
+	return aggregate.GroupLabel(r, 0)
 }
 
 func firstValue(r dbrpc.AggRow) string {

@@ -8,6 +8,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/jobid"
+	"github.com/bbockelm/golang-htcondor/webapi/aggregate"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
@@ -360,11 +361,11 @@ func (s *Server) multiAggregateTool(ctx context.Context, args map[string]interfa
 	groups := make([]map[string]interface{}, 0, len(rows))
 	for _, r := range rows {
 		if len(groupBy) > 0 {
-			fmt.Fprintf(&b, "  %s = %s\n", strings.Join(r.Group, "/"), strings.Join(r.Values, ","))
+			fmt.Fprintf(&b, "  %s = %s\n", strings.Join(aggregate.GroupLabels(r), "/"), strings.Join(r.Values, ","))
 		} else {
 			fmt.Fprintf(&b, "  count = %s\n", strings.Join(r.Values, ","))
 		}
-		groups = append(groups, map[string]interface{}{"key": r.Group, "count": strings.Join(r.Values, ",")})
+		groups = append(groups, map[string]interface{}{"key": aggregate.GroupLabels(r), "count": strings.Join(r.Values, ",")})
 	}
 	b.WriteString(sourcesNote(sources) + "\n" + OwnerScope{Owner: user}.Note())
 	structured := aggregateStructured(groups, groupBy, table, "hub", false)

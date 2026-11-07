@@ -8,6 +8,7 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/aggregate"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/dbrpc"
@@ -200,11 +201,11 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 	groups := make([]map[string]interface{}, 0, len(aggRows))
 	for _, r := range aggRows {
 		if len(groupBy) > 0 {
-			fmt.Fprintf(&b, "  %s = %s\n", strings.Join(r.Group, "/"), strings.Join(r.Values, ","))
+			fmt.Fprintf(&b, "  %s = %s\n", strings.Join(aggregate.GroupLabels(r), "/"), strings.Join(r.Values, ","))
 		} else {
 			fmt.Fprintf(&b, "  count = %s\n", strings.Join(r.Values, ","))
 		}
-		groups = append(groups, map[string]interface{}{"key": r.Group, "count": strings.Join(r.Values, ",")})
+		groups = append(groups, map[string]interface{}{"key": aggregate.GroupLabels(r), "count": strings.Join(r.Values, ",")})
 	}
 	b.WriteString(freshnessNote(info))
 	b.WriteString("\n" + scope.Note())

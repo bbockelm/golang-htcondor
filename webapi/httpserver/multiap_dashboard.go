@@ -14,6 +14,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/aggregate"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
@@ -112,7 +113,7 @@ func (s *Handler) handleMultiDashboard(w http.ResponseWriter, r *http.Request) {
 			status := dashboardStatusName(js, hrc)
 			resp.JobsByStatus[status] += n
 			resp.JobsTotal += n
-			if ap := per[strings.ToLower(strings.Trim(row.Group[0], `"`))]; ap != nil {
+			if ap := per[strings.ToLower(aggregate.GroupLabel(row, 0))]; ap != nil {
 				ap.JobsByStatus[status] += n
 				ap.JobsTotal += n
 			}
