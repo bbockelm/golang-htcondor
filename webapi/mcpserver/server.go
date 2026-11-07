@@ -72,6 +72,10 @@ type Server struct {
 	// atomically because a reconfigure can install a new one while a
 	// tools/list or a tool call is being served.
 	disabledTools atomic.Pointer[disabledToolMatcher]
+	// redaction is the credential-masking policy applied to tool
+	// results. Swapped atomically for the same reason. See
+	// redact_tools.go.
+	redaction atomic.Pointer[redactionState]
 	// catalogGen counts changes to what a caller would be served -- the
 	// instructions and the tool catalogue built beside them. The SDK
 	// transport caches a server per scope set, and this is how those
@@ -290,6 +294,22 @@ type Config struct {
 	// credential is only useful in that one.
 	CreddFor     func(ctx context.Context) htcondor.CreddClient
 	Instructions string // Server-level instructions provided to all agents in the MCP initialize response
+	// DisableSecretRedaction turns off the masking of credential-shaped
+	// text in tool results (HTTP_API_MCP_REDACT_SECRETS = false).
+	//
+	// Stated negatively, as net/http states DisableCompression, so that
+	// the zero value is the protective one. A Config built without
+	// thinking about this -- in a test, or by a caller written before
+	// the field existed -- gets masking, and the only way to be without
+	// it is to ask. The other spelling fails open, and it fails open
+	// silently. See redact_tools.go.
+	DisableSecretRedaction bool
+
+	// RedactDisabledRules (HTTP_API_MCP_REDACT_DISABLED_RULES) names
+	// masking rules this site does not want, as globs over rule ids, for
+	// a site whose output trips one of them.
+	RedactDisabledRules string
+
 	// DisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
 	// offer, as path.Match patterns separated by commas or whitespace.
 	// See disabled_tools.go.
@@ -580,6 +600,7 @@ func NewServer(cfg Config) (*Server, error) {
 		}
 	}
 	s.SetDisabledTools(cfg.DisabledTools)
+	s.SetSecretRedaction(!cfg.DisableSecretRedaction, cfg.RedactDisabledRules)
 	s.SetInstructions(cfg.Instructions)
 	if s.dbMirror == nil && schedd == nil {
 		s.dbMirror = dbmirror.NewLocator(nil, nil)

@@ -144,10 +144,14 @@ func die(earlyBuf *logging.EarlyBuffer, what string, err error) {
 
 // mcpConfig holds MCP-related configuration
 type mcpConfig struct {
-	enabled                bool
-	skillsDir              string
-	skillsReloadInterval   time.Duration
-	disabledTools          string
+	enabled              bool
+	skillsDir            string
+	skillsReloadInterval time.Duration
+	disabledTools        string
+	// disableSecretRedaction is HTTP_API_MCP_REDACT_SECRETS = false.
+	// Negative so the zero value is the protective one.
+	disableSecretRedaction bool
+	redactDisabledRules    string
 	oauth2DBPath           string
 	oauth2Issuer           string
 	oauth2ClientID         string
@@ -1569,6 +1573,11 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 		logger.Info(logging.DestinationMCP, "MCP tools disabled by configuration", "patterns", disabled)
 	}
 
+	config.disableSecretRedaction = !mcpRedactSecretsEnabled(cfg)
+	if rules, ok := cfg.Get("HTTP_API_MCP_REDACT_DISABLED_RULES"); ok {
+		config.redactDisabledRules = rules
+	}
+
 	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
 		config.instructions = instructions
 		logger.Info(logging.DestinationMCP, "MCP instructions configured", "length", len(instructions))
@@ -2356,6 +2365,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPSuperuserGroup:          mcpCfg.mcpSuperuserGroup,
 		MCPInstructions:            mcpCfg.instructions,
 		MCPDisabledTools:           mcpCfg.disabledTools,
+		MCPDisableSecretRedaction:  mcpCfg.disableSecretRedaction,
+		MCPRedactDisabledRules:     mcpCfg.redactDisabledRules,
 		MCPSkillsDir:               mcpCfg.skillsDir,
 		MCPSkillsReloadInterval:    mcpCfg.skillsReloadInterval,
 		MCPAdminUsers:              mcpCfg.adminUsers,
@@ -3432,6 +3443,28 @@ func mcpCIMDEnabled(cfg *config.Config) bool {
 	v, err := strconv.ParseBool(strings.TrimSpace(raw))
 	if err != nil {
 		log.Fatalf("invalid HTTP_API_MCP_CIMD=%q: must be a boolean", raw)
+	}
+	return v
+}
+
+// mcpRedactSecretsEnabled reports whether MCP tool results have
+// credential-shaped text masked before they are returned.
+//
+// Default true. The tools that return a job's own output are the one
+// place this server hands a caller bytes nobody here wrote, and the
+// caller is usually a model, so a job that prints its credential puts it
+// in a context window and from there in a transcript. Masking it is not
+// a security boundary -- a job can encode its way past any pattern --
+// and defaults on for the same reason a build log's masking does: the
+// common case is not an attacker.
+func mcpRedactSecretsEnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_MCP_REDACT_SECRETS")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return true
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_MCP_REDACT_SECRETS=%q: must be a boolean", raw)
 	}
 	return v
 }
