@@ -314,7 +314,7 @@ func (s *Handler) utilizationScope(ctx context.Context, r *http.Request, ownedBy
 	ownedByMe = s.resolveOwnerScope(ctx, r, ownedByMe)
 	var leadProjects []string
 	if requestedEveryone && ownedByMe {
-		leadProjects = s.projectLeadReadProjects(r)
+		leadProjects = s.projectLeadReadProjects(ctx, r)
 	}
 	if !ownedByMe {
 		return "true", true, 0, nil

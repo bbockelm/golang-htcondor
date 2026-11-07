@@ -340,7 +340,7 @@ func subscribeFeed(s *Handler, cluster, proc int64) (<-chan jobWatchUpdateSource
 // back unchanged and pay nothing. Cancelling is how the stream ends: its loop
 // already returns on ctx.Done.
 func (s *Handler) watchLeadAccess(ctx context.Context, r *http.Request, cluster, proc int) context.Context {
-	if len(s.projectLeadReadProjects(r)) == 0 {
+	if len(s.projectLeadReadProjects(ctx, r)) == 0 {
 		return ctx
 	}
 	interval := s.jobWatchRecheck

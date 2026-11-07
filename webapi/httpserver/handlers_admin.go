@@ -44,19 +44,33 @@ func (s *Handler) isWebUIAdmin(r *http.Request) bool {
 	return s.webuiAdminGroups.allows(session.Groups)
 }
 
-// projectLeadReadProjects returns the projects whose jobs this browser
-// session may read beyond its own, because it leads them. Nil for a session
-// that leads nothing, for an admin session (which already reads everyone's),
-// and for a bearer-token caller (lead read scope is a browser-session
-// feature; a bearer is confined to its own jobs, see seesAllJobs).
+// projectLeadReadProjects returns the projects whose jobs this caller may
+// read beyond its own, because it leads them. Nil for a caller that leads
+// nothing and for one that already reads everyone's.
+//
+// Decided by WHO the caller is, never by how the credential arrived, which
+// is the rule seesAllJobs follows. It did not always: lead reads were a
+// browser-session feature, so the same person with a bearer token silently
+// lost sight of their own projects -- a listing that simply narrowed, with
+// nothing saying why. That is the failure this server was reported for on
+// the admin path, and it was still live here.
+//
+// A session answers from the groups stored at login. Any other credential
+// answers from the identity it authenticated as, plus whatever groups the
+// system can report for it. Where groups come from the token there are
+// none to report, and the leads FILE still resolves: its entries name
+// users as well as groups, so a lead named outright keeps their projects
+// on a bearer. Only the group-pattern half goes quiet, which is the same
+// limit every group-derived answer has in that deployment.
 //
 // Not gated on superuser mode being armed, following the admin read path,
 // which is not armed-gated either: seeing a project's jobs is the
 // prerequisite for deciding whether to act on one, and arming is the step
 // that changes what an action does. Read visibility also does not depend on
 // superuser mode being usable at all (no signing key needed), only on leads
-// being configured.
-func (s *Handler) projectLeadReadProjects(r *http.Request) []string {
+// being configured. Acting on another user's job stays session-only and
+// armed; see mayUseSuperuserMode, whose reasoning this does not touch.
+func (s *Handler) projectLeadReadProjects(ctx context.Context, r *http.Request) []string {
 	if !s.projectLeads.configured() {
 		return nil
 	}
@@ -66,11 +80,23 @@ func (s *Handler) projectLeadReadProjects(r *http.Request) []string {
 		// offered in multi-AP mode: a lead sees their own jobs.
 		return nil
 	}
-	session, ok := s.getSessionFromRequest(r)
-	if !ok || s.isWebUIAdmin(r) {
+	if session, ok := s.getSessionFromRequest(r); ok {
+		if s.isWebUIAdmin(r) {
+			return nil
+		}
+		return s.projectLeads.LedProjects(session.Username, session.Groups)
+	}
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" {
 		return nil
 	}
-	return s.projectLeads.LedProjects(session.Username, session.Groups)
+	// A caller that already reads every user's jobs needs no project
+	// narrowing, and would only be confused by one.
+	if s.seesAllJobs(ctx, r, jobScopeRead) {
+		return nil
+	}
+	groups, _ := s.liveGroupsFor(ctx, actor)
+	return s.projectLeads.LedProjects(ownerFromActor(actor), groups)
 }
 
 // jobScopeTier is which cross-user power a job request needs. Reading
@@ -221,26 +247,48 @@ func (s *Handler) identityIsWebUIAdmin(ctx context.Context, actor string) bool {
 // window; the second is a denial, which takes effect at once. See
 // apikey_entitlements.go.
 func (s *Handler) liveGroupEntitlement(ctx context.Context, actor string) (granted, answered bool) {
-	if !s.webuiAdminGroups.configured() || !s.localIdentity.sourcesGroups() {
+	if !s.webuiAdminGroups.configured() {
 		return false, false
+	}
+	groups, answered := s.liveGroupsFor(ctx, actor)
+	if !answered {
+		return false, false
+	}
+	return s.webuiAdminGroups.grants(groups), true
+}
+
+// liveGroupsFor reads actor's group membership from the system, and says
+// whether anything was able to report it.
+//
+// Separate from liveGroupEntitlement because membership is useful for
+// more than one question: that one asks whether the groups carry the
+// admin group, and the project-lead path asks which projects they lead.
+// Both need the same "could this be answered at all" distinction, and
+// neither should re-derive the account name from the actor.
+//
+// Nil groups with answered=true is a real answer -- this person is in
+// no groups. Nil with answered=false means nothing could say.
+func (s *Handler) liveGroupsFor(ctx context.Context, actor string) (groups []string, answered bool) {
+	if !s.localIdentity.sourcesGroups() {
+		return nil, false
 	}
 	account := actor
 	if i := strings.LastIndex(actor, "@"); i >= 0 {
 		if s.uidDomain == "" || !strings.EqualFold(actor[i+1:], s.uidDomain) {
 			// Another realm's identity. This machine's accounts say
 			// nothing about them, which is silence rather than a no.
-			return false, false
+			return nil, false
 		}
 		account = actor[:i]
 	}
 	if account == "" {
-		return false, false
+		return nil, false
 	}
-	groups, err := s.localIdentity.groups.LookupGroups(ctx, account)
+	found, err := s.localIdentity.groups.LookupGroups(ctx, account)
 	if err != nil {
-		return false, false
+		return nil, false
 	}
-	return s.webuiAdminGroups.grants(groups), true
+	return found, true
 }
 
 // resolveOwnerScope settles whether a request asking for other people's
