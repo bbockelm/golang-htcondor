@@ -162,6 +162,37 @@ func gatherOracleFacts() (oracleFacts, error) {
 	return f, nil
 }
 
+// oracleHas is the probe result, settled by TestMain: per ticket, whether the
+// linked oracle carries that upstream change. It is read by the tests that
+// have to know which HTCondor they are comparing against, and is empty when
+// no oracle is linked.
+//
+//nolint:unused // set by TestMain and read by the tagged tests
+var oracleHas map[string]bool
+
+// keywordsAheadOfOracle are the submit keywords the Go parser knows and an
+// older HTCondor does not, each with the ticket that added it upstream.
+//
+// Parsing one of these is not gated. A submit file naming `annex_name` means
+// the same thing wherever it is submitted, and a library that refuses it
+// against an older access point would be wrong about the FILE rather than
+// faithful to the access point -- the ad it builds is what the schedd is
+// asked to store, and an attribute an older schedd ignores costs nothing.
+//
+// So the Go table is legitimately ahead of a pinned oracle, and
+// TestSimpleKeywordTableMatchesOracle has to be told which rows that applies
+// to. Each one is allowed only while the oracle LACKS the named change: once
+// the pin moves, the allowance stops applying and the row is compared like
+// every other.
+//
+//nolint:unused // read by TestSimpleKeywordTableMatchesOracle
+var keywordsAheadOfOracle = map[string]string{
+	"annex_name":         "HTCONDOR-2015",
+	"restrict_to_annex":  "HTCONDOR-2015",
+	"min_condor_version": "HTCONDOR-3065",
+	"max_condor_version": "HTCONDOR-3065",
+}
+
 // probeOracleTraits reports, per ticket, whether the linked oracle has that
 // change.
 func probeOracleTraits(f oracleFacts) map[string]bool {
