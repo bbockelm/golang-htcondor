@@ -3027,11 +3027,10 @@ func (s *Handler) handleCollectorAdsByType(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Get effective projection if none specified
-	if len(projection) == 0 {
-		projection = htcondor.DefaultCollectorProjection()
-	} else if len(projection) == 1 && projection[0] == "*" {
-		projection = nil // nil means all attributes
-	}
+	// What the caller actually asked for, kept before the defaults
+	// below overwrite it: the site's attribute policy judges the
+	// request, not what this handler filled in on its behalf.
+	requestedProjection := append([]string(nil), projection...)
 
 	// Map common ad type names
 	var queryAdType string
@@ -3055,6 +3054,42 @@ func (s *Handler) handleCollectorAdsByType(w http.ResponseWriter, r *http.Reques
 	default:
 		// Try to use the ad type as-is
 		queryAdType = adType
+	}
+
+	// The site's restriction on reading other users' details out of
+	// collector ads. Enforced here rather than only in the MCP tool
+	// because this endpoint answers the same question with the same
+	// credentials: a tool refused by one and served by the other would
+	// be no restriction at all.
+	privileged := s.seesAllJobs(ctx, r, jobScopeRead)
+	if s.poolQueryPolicy.Refuses(privileged) {
+		s.writeError(w, http.StatusForbidden,
+			"Pool queries are restricted to administrators at this site")
+		return
+	}
+	if err := s.poolQueryPolicy.CheckAdType(privileged, queryAdType); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if err := s.poolQueryPolicy.CheckProjection(privileged, queryAdType, requestedProjection); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if err := s.poolQueryPolicy.CheckConstraint(privileged, queryAdType, constraint); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	if len(projection) == 0 {
+		// A restricted caller's default cannot be the library's, which
+		// would be narrowed later by nothing: it becomes the allowlist.
+		if s.poolQueryPolicy.Restricts(privileged) {
+			projection = s.poolQueryPolicy.AllowedAttrs(queryAdType)
+		} else {
+			projection = htcondor.DefaultCollectorProjection()
+		}
+	} else if len(projection) == 1 && projection[0] == "*" {
+		projection = nil // nil means all attributes
 	}
 
 	// Start streaming query

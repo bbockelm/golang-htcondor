@@ -53,6 +53,23 @@ func (h *Handler) handleCollectorWatch(w http.ResponseWriter, r *http.Request) {
 	constraint := r.URL.Query().Get("constraint")
 	cursor := cursorFromRequest(r)
 
+	// This stream sends whole ads -- there is no projection to clamp --
+	// so under a restricted policy each one is filtered on the way out.
+	privileged := h.seesAllJobs(ctx, r, jobScopeRead)
+	if h.poolQueryPolicy.Refuses(privileged) {
+		h.writeError(w, http.StatusForbidden,
+			"Pool queries are restricted to administrators at this site")
+		return
+	}
+	if err := h.poolQueryPolicy.CheckAdType(privileged, adType); err != nil {
+		h.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if err := h.poolQueryPolicy.CheckConstraint(privileged, adType, constraint); err != nil {
+		h.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	flusher, ok := sseSetup(w)
 	if !ok {
 		h.writeError(w, http.StatusInternalServerError, "server does not support streaming")
@@ -84,7 +101,8 @@ func (h *Handler) handleCollectorWatch(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if err := writeWatchSSE(w, flusher, sseKind(ev.Kind.String()), watchKeyString(ev.Key), ev.Ad, ev.Cursor, ""); err != nil {
+			ad := h.poolQueryPolicy.FilterClassAd(privileged, adType, ev.Ad)
+			if err := writeWatchSSE(w, flusher, sseKind(ev.Kind.String()), watchKeyString(ev.Key), ad, ev.Cursor, ""); err != nil {
 				return
 			}
 		}

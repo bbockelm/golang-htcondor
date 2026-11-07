@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/PelicanPlatform/classad/ast"
+	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/parser"
 )
 
@@ -181,4 +182,29 @@ func attrHint(p *Policy, adType string) string {
 		return strings.Join(attrs[:max], ", ") + ", and others"
 	}
 	return strings.Join(attrs, ", ")
+}
+
+// FilterClassAd returns an ad holding only the attributes a restricted
+// caller may read. The collector watch stream has no projection to clamp
+// -- it sends whole ads as they change -- so this is its control point.
+//
+// A new ad rather than Delete on the one passed in: the ad belongs to
+// whatever cached or streamed it, and may be read by other watchers at the
+// same time. Mutating it to serve one caller would redact it for everyone
+// and race while doing so.
+func (p *Policy) FilterClassAd(privileged bool, adType string, ad *classad.ClassAd) *classad.ClassAd {
+	if !p.Restricts(privileged) || ad == nil {
+		return ad
+	}
+	allowed := p.allowed(adType)
+	out := classad.New()
+	for _, name := range ad.GetAttributes() {
+		if !allowed[strings.ToLower(name)] {
+			continue
+		}
+		if expr, ok := ad.Lookup(name); ok && expr != nil {
+			out.InsertExpr(name, expr)
+		}
+	}
+	return out
 }

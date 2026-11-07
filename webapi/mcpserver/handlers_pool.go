@@ -306,9 +306,23 @@ func (s *Server) toolQueryPool(ctx context.Context, args map[string]interface{})
 		return nil, fmt.Errorf("query_pool needs a collector, and this server has none configured")
 	}
 
+	// The site's restriction on who may read what about other users.
+	// Decided once per call: the privilege is the same cross-user read
+	// tier every other tool asks about, so an administrator reading the
+	// pool sees exactly what they see everywhere else.
+	privileged := s.allowsAllUsers(ctx, htcondor.GetAuthenticatedUserFromContext(ctx), tierRead)
+	if s.poolPolicy.Refuses(privileged) {
+		return nil, fmt.Errorf("pool queries are restricted to administrators at this site " +
+			"(HTTP_API_POOL_QUERY_IDENTITY = admin). Ask what your own jobs are doing instead, " +
+			"or ask an administrator for the pool's state")
+	}
+
 	adTypeArg, _ := args["ad_type"].(string)
 	kind, err := lookupPoolAdKind(adTypeArg)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.poolPolicy.CheckAdType(privileged, kind.adType); err != nil {
 		return nil, err
 	}
 
@@ -333,14 +347,19 @@ func (s *Server) toolQueryPool(ctx context.Context, args map[string]interface{})
 	if _, err := classad.ParseExpr(constraint); err != nil {
 		return nil, fmt.Errorf("invalid constraint %q: %w", constraint, err)
 	}
+	// Checked as well as the output being filtered: a constraint is an
+	// oracle for an attribute it never returns.
+	if err := s.poolPolicy.CheckConstraint(privileged, kind.adType, constraint); err != nil {
+		return nil, err
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, poolQueryTimeout)
 	defer cancel()
 
 	if mode == "list" {
-		return s.queryPoolList(ctx, src, kind, constraint, args)
+		return s.queryPoolList(ctx, src, kind, constraint, args, privileged)
 	}
-	return s.queryPoolSummary(ctx, src, kind, constraint, args)
+	return s.queryPoolSummary(ctx, src, kind, constraint, args, privileged)
 }
 
 // privateAttrArg refuses a private attribute named in an attribute-list
@@ -356,9 +375,12 @@ func privateAttrArg(arg string, attrs []string) error {
 }
 
 func (s *Server) queryPoolList(ctx context.Context, src poolAdSource, kind *poolAdKind, constraint string,
-	args map[string]interface{}) (interface{}, error) {
+	args map[string]interface{}, privileged bool) (interface{}, error) {
 	requested := stringListArg(args, "projection")
 	if err := privateAttrArg("projection", requested); err != nil {
+		return nil, err
+	}
+	if err := s.poolPolicy.CheckProjection(privileged, kind.adType, requested); err != nil {
 		return nil, err
 	}
 	// Always an explicit projection: an empty one would mean the
@@ -449,13 +471,18 @@ func renderPoolList(kind *poolAdKind, constraint string, ads []*classad.ClassAd,
 }
 
 func (s *Server) queryPoolSummary(ctx context.Context, src poolAdSource, kind *poolAdKind, constraint string,
-	args map[string]interface{}) (interface{}, error) {
+	args map[string]interface{}, privileged bool) (interface{}, error) {
 	groupBy := kind.groupBy
 	if _, given := args["group_by"]; given {
 		// An explicit empty list is a request for one total.
 		groupBy = stringListArg(args, "group_by")
 	}
 	if err := privateAttrArg("group_by", groupBy); err != nil {
+		return nil, err
+	}
+	// group_by is as revealing as a projection: counting by RemoteOwner
+	// is a list of who is running, arrived at by a different route.
+	if err := s.poolPolicy.CheckProjection(privileged, kind.adType, groupBy); err != nil {
 		return nil, err
 	}
 
