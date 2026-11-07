@@ -402,4 +402,14 @@ extern "C" int submit_keyword_table(char **out) {
 	}
 }
 
+extern "C" int submit_oracle_version(char **out) {
+	*out = nullptr;
+	try {
+		*out = strdup(CondorVersion());
+		return *out ? 1 : -1;
+	} catch (...) {
+		return -1;
+	}
+}
+
 extern "C" void submit_oracle_free(char *p) { free(p); }

@@ -96,3 +96,7 @@ type FactoryInfo struct {
 func Factory(string, int, string) FactoryInfo {
 	panic("oracle.Factory: built without the libcondor_utils tag")
 }
+
+// Version mirrors the cgo build's function. No oracle is linked, so there is
+// no HTCondor to report.
+func Version() string { return "" }
