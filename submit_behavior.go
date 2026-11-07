@@ -16,11 +16,16 @@ package htcondor
 // getting. Each field names the upstream change it follows and the first
 // release that carries it.
 //
-// Fields are set individually rather than derived from a version number.
-// HTCondor backports across release branches, so one change reaches a 25.x
-// patch release and a 26.x release with no version between them that
-// separates the two, and a caller who knows their access point is better
-// placed to decide than a table in here would be.
+// SubmitBehaviorFor is how to set one: it maps an HTCondor release to the
+// behavior of that release's condor_submit, including a version string read
+// straight from a schedd ad. The fields below say what each choice IS, which
+// is what makes them reviewable and testable, but choosing a correct
+// combination by hand means knowing which upstream change went into which
+// release -- so they are the vocabulary and SubmitBehaviorFor is the
+// sentence.
+//
+// Setting a field directly is still allowed, and is the way to follow one
+// change without the others.
 type SubmitBehavior struct {
 	// OmitExitStatus leaves ExitStatus out of the job ad.
 	//
