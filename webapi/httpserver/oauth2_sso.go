@@ -1019,7 +1019,17 @@ func (s *Handler) resolveLoginIdentity(w http.ResponseWriter, r *http.Request, l
 // So the refusal is recoverable rather than fatal. The first one
 // latches, the browser is sent back to where it was going, and the
 // sign-in it restarts asks without the scope. The operator is left with
-// a warning naming what happened and a pool that still works.
+// a warning naming what happened and an access point that still works.
+//
+// That covers a refusal the provider REDIRECTS to this server's
+// callback, which is what a provider does when the client_id and
+// redirect_uri check out, and what CILogon does -- refusedScopeHint
+// reads such an error off the callback and predates this. It does not
+// cover a provider that answers the authorize request with a direct
+// 4xx instead: that reply goes to the browser and never reaches any
+// handler here, so the person sees the provider's error page and the
+// latch is never set. An operator whose provider behaves that way sets
+// HTTP_API_UPSTREAM_REFRESH = off.
 
 // upstreamAuthScopes is what to ask the provider for on this sign-in:
 // the configured scopes, less offline_access once the provider has

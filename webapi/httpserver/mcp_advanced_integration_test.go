@@ -1394,7 +1394,13 @@ func (s *mockSSOStorage) GetClient(ctx context.Context, clientID string) (fosite
 		RedirectURIs:  redirectURIs,
 		GrantTypes:    []string{"authorization_code"},
 		ResponseTypes: []string{"code"},
-		Scopes:        []string{"openid", "profile", "email"},
+		// offline_access because this server asks for it on every
+		// sign-in unless HTTP_API_UPSTREAM_REFRESH is off, and a
+		// provider refuses an authorization naming a scope its client
+		// is not registered for. A provider that approves it is what
+		// these tests are about; one that refuses it is covered by the
+		// offline_access tests instead.
+		Scopes: []string{"openid", "profile", "email", "offline_access"},
 	}, nil
 }
 
