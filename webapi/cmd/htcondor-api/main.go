@@ -40,6 +40,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/poolpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/sharedportrouter"
 )
 
@@ -189,6 +190,10 @@ type mcpConfig struct {
 	mcpSuperuserGroup string
 	instructions      string
 	adminUsers        []string
+	// Which collector attributes an unprivileged caller may read, and
+	// the attributes this site has declared safe on top of the defaults.
+	poolQueryMode       poolpolicy.Mode
+	poolQueryExtraAttrs []string
 	// Token lifespans for the embedded MCP issuer. Zero means "use the package
 	// default" (1h access, 30d refresh).
 	oauth2AccessTokenLifespan  time.Duration
@@ -1548,6 +1553,27 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 		logger.Info(logging.DestinationMCP, "MCP admin users configured", "count", len(config.adminUsers))
 	}
 
+	// Which collector attributes an unprivileged caller may read.
+	//
+	// A bad value fails CLOSED. This setting exists to withhold data, so
+	// a typo that left the pool open would be the one failure that
+	// matters; refusing pool queries outright is noticed and fixed in
+	// minutes, while quietly publishing identities is not noticed at all.
+	if v, ok := cfg.Get("HTTP_API_POOL_QUERY_IDENTITY"); ok && strings.TrimSpace(v) != "" {
+		mode, err := poolpolicy.ParseMode(v)
+		if err != nil {
+			mode = poolpolicy.ModeAdmin
+			logger.Error(logging.DestinationHTTP,
+				"HTTP_API_POOL_QUERY_IDENTITY is not a value this server understands; "+
+					"pool queries are restricted to administrators until it is corrected",
+				"value", v, "error", err)
+		}
+		config.poolQueryMode = mode
+	}
+	if v, ok := cfg.Get("HTTP_API_POOL_QUERY_EXTRA_ATTRS"); ok && strings.TrimSpace(v) != "" {
+		config.poolQueryExtraAttrs = splitCommaList(v)
+	}
+
 	// Load server-level instructions for MCP agents
 	// A directory of site-authored Markdown skills to publish to agents.
 	// Typically a checkout of the site's documentation repository.
@@ -2359,6 +2385,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPSkillsDir:               mcpCfg.skillsDir,
 		MCPSkillsReloadInterval:    mcpCfg.skillsReloadInterval,
 		MCPAdminUsers:              mcpCfg.adminUsers,
+		PoolQueryPolicy:            poolpolicy.New(mcpCfg.poolQueryMode, mcpCfg.poolQueryExtraAttrs),
 		WebUIAdminGroup:            webuiAdminGroup,
 		WebUIAccessGroup:           webuiAccessGroup,
 		WebUISiteName:              webuiSiteName,

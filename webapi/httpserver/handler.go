@@ -41,6 +41,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/bbockelm/golang-htcondor/webapi/poolpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
@@ -369,6 +370,10 @@ type Handler struct {
 	// How often that directory is re-read; zero leaves reloads to reconfigure.
 	mcpSkillsReloadInterval time.Duration
 	mcpAdminUsers           []string // Authenticated subjects exempt from the MCP owner-scope wrapper
+	// poolQueryPolicy restricts which collector attributes an
+	// unprivileged caller reads. Never nil after NewHandler; an
+	// unconfigured server holds an open policy.
+	poolQueryPolicy *poolpolicy.Policy
 	// mcpServer handles /mcp/message. One long-lived instance: it holds
 	// the validated-token cache and the collector-backed metrics/DB
 	// wiring, all of which a per-request server would throw away. Every
@@ -1059,7 +1064,13 @@ type HandlerConfig struct {
 	// from the owner-scope wrapper, so they can query and act on other
 	// users' jobs. Match is exact against the authenticated actor
 	// (typically "user@uid.domain"). Empty = no admins (default).
-	MCPAdminUsers   []string
+	MCPAdminUsers []string
+
+	// PoolQueryPolicy restricts which collector attributes a caller
+	// without the cross-user read privilege may read. Nil means no
+	// restriction, which is what HTTP_API_POOL_QUERY_IDENTITY defaults
+	// to. See webapi/poolpolicy.
+	PoolQueryPolicy *poolpolicy.Policy
 	WebUIAdminGroup string // Group(s) required for Web UI admin pages (empty disables admin UI). Comma-separated; HTTP_API_WEBUI_ADMIN_GROUP.
 
 	// WebUIAccessGroup gates logging in to the web interface, separately
@@ -2300,6 +2311,13 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		mcpMulti, mcpMultiConstraint = h.multi.svc, h.multi.constraint
 		mcpCreddFor = h.creddForContext
 	}
+	// Never nil: every call site asks the policy rather than checking
+	// for one, so an unconfigured server holds an open policy instead.
+	h.poolQueryPolicy = cfg.PoolQueryPolicy
+	if h.poolQueryPolicy == nil {
+		h.poolQueryPolicy = poolpolicy.New(poolpolicy.ModeOpen, nil)
+	}
+
 	mcpServer, err := mcpserver.NewServer(mcpserver.Config{
 		// Multi-AP mode: the read tools over the hub, and nothing that
 		// needs a single schedd.
@@ -2342,6 +2360,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		DagmanPath:              h.dagmanPath,
 		DagmanEnvironment:       h.dagmanEnv,
 		APPolicy:                h.apPolicy,
+		PoolPolicy:              h.poolQueryPolicy,
 		InteractiveRequirements: h.interactiveRequirements,
 		Build:                   h.build,
 		CCB:                     h.ccbDialer,
