@@ -8,7 +8,7 @@ line between them is drawn here rather than left to be inferred:
 
 | Landed | Proposed |
 | --- | --- |
-| `ap:read` and `ap:write` exist, mintable on an API key and grantable through OAuth2 | every rename below |
+| `anyuser:read` and `anyuser:write` exist, mintable on an API key and grantable through OAuth2 | every rename below |
 | Both are advertised, consent-unchecked, and gated on the groups their older spellings answer to | the `*_GROUPS` / `*_USERS` scheme |
 | Entitlements are granted at mint and re-verified on use (service keys) | splitting `HTTP_API_WEBUI_ADMIN_GROUP` |
 | `MCP_ADMIN_USERS` keeps its behaviour | deprecating it in earnest |
@@ -56,16 +56,16 @@ the rest. "Carried by" is which credential kinds can hold it.
 | `offline_access` | OAuth2 | A refresh token. Requested from the upstream provider by default unless `HTTP_API_UPSTREAM_REFRESH` is `off`. | unchanged |
 | `mcp:read` | OAuth2 | Read through `/mcp`. | **[OPEN]**, below |
 | `mcp:write` | OAuth2 | Submit and manage through `/mcp`. | **[OPEN]**, below |
-| `mcp:admin` | OAuth2 | Read **every** user's jobs on this access point, on REST and MCP alike. | → `ap:read` |
-| `mcp:superuser` | OAuth2 | Act on **every** user's jobs on this access point. | → `ap:write` |
+| `mcp:admin` | OAuth2 | Read **every** user's jobs on this access point, on REST and MCP alike. | → `anyuser:read` |
+| `mcp:superuser` | OAuth2 | Act on **every** user's jobs on this access point. | → `anyuser:write` |
 | `condor:/READ` | OAuth2, API key | HTCondor READ, carried into the minted IDTOKEN as an authorization limit. | unchanged |
 | `condor:/WRITE` | OAuth2, API key | HTCondor WRITE, same mechanism. Not a superset of READ. | unchanged |
 | `condor:/ADVERTISE_STARTD`, `_SCHEDD`, `_MASTER` | OAuth2 | Nothing. Deprecated, kept only so existing grants can refresh; dropped from a grant at its next authorization. | unchanged |
 | `condor:/ADMINISTRATOR`, `/CONFIG`, `/DAEMON`, `/NEGOTIATOR` | — | Nothing. **[OPEN]**, below | |
 | `metrics` | API key | `/metrics` (Prometheus exposition). | unchanged |
 | `placement` | OAuth2 | The placement API. Held only by the seeded placement client, never advertised. | unchanged |
-| `ap:read` | API key, OAuth2 | Read every user's jobs on this access point. See *Already using one of these names*. | **[OPEN]** name |
-| `ap:write` | API key, OAuth2 | Act on every user's jobs on this access point. | **[OPEN]** name |
+| `anyuser:read` | API key, OAuth2 | Read every user's jobs on this access point. See *Already using one of these names*. | **[OPEN]** name |
+| `anyuser:write` | API key, OAuth2 | Act on every user's jobs on this access point. | **[OPEN]** name |
 
 Three things that table makes visible and prose did not:
 
@@ -86,7 +86,7 @@ reads like a capability.
 
 **[OPEN]** `condor:/WRITE` does not imply `condor:/READ`, and
 `mcp:superuser` does not imply `mcp:admin`. Two separate instances of
-the same surprise, and whatever is decided for `ap:write` should
+the same surprise, and whatever is decided for `anyuser:write` should
 probably be decided for `condor:/WRITE` at the same time or deliberately
 not.
 
@@ -112,19 +112,19 @@ meaning and nothing else.
 
 | Today | Proposed | Grants |
 | --- | --- | --- |
-| `mcp:admin` | `ap:read` | read every user's jobs on this access point |
-| `mcp:superuser` | `ap:write` | act on every user's jobs on this access point |
+| `mcp:admin` | `anyuser:read` | read every user's jobs on this access point |
+| `mcp:superuser` | `anyuser:write` | act on every user's jobs on this access point |
 
 Dropping the surface name from the scope is the point. The scope names a
 power, not a door; honouring it on both REST and MCP is then obviously
 correct rather than the leak it currently looks like.
 
-**[OPEN]** `ap:write` vs `pool:mutate`. `write` pairs with `read` and
+**[OPEN]** `anyuser:write` vs `pool:mutate`. `write` pairs with `read` and
 matches `condor:/WRITE`; `mutate` matches the internal `jobScopeMutate`
 and avoids implying the HTCondor WRITE authorization level. Weak
 preference for `write`.
 
-**[OPEN]** Whether `ap:write` should imply `ap:read`. Making write
+**[OPEN]** Whether `anyuser:write` should imply `anyuser:read`. Making write
 imply read is the conventional reading, but it silently widens every
 existing `mcp:superuser` grant on upgrade.
 
@@ -135,8 +135,8 @@ request it**. Never who holds it.
 
 | Entitlement | Groups | Users |
 | --- | --- | --- |
-| `ap:read` | `HTTP_API_AP_READ_GROUPS` | `HTTP_API_AP_READ_USERS` |
-| `ap:write` | `HTTP_API_AP_WRITE_GROUPS` | `HTTP_API_AP_WRITE_USERS` |
+| `anyuser:read` | `HTTP_API_ANYUSER_READ_GROUPS` | `HTTP_API_ANYUSER_READ_USERS` |
+| `anyuser:write` | `HTTP_API_ANYUSER_WRITE_GROUPS` | `HTTP_API_ANYUSER_WRITE_USERS` |
 | `mcp:read` | `HTTP_API_MCP_READ_GROUPS` | `HTTP_API_MCP_READ_USERS` |
 | `mcp:write` | `HTTP_API_MCP_WRITE_GROUPS` | `HTTP_API_MCP_WRITE_USERS` |
 | reach `/mcp` at all | `HTTP_API_MCP_ACCESS_GROUPS` | `HTTP_API_MCP_ACCESS_USERS` |
@@ -169,12 +169,12 @@ it, which is the thing the scope vocabulary exists to prevent.
 **It stays, deprecated, with its current behaviour intact.** Removing it
 would log out working stdio integrations on upgrade, and the people
 running them did nothing wrong. What does not happen is carrying its
-semantics forward: `HTTP_API_AP_READ_USERS` is not its replacement in
+semantics forward: `HTTP_API_ANYUSER_READ_USERS` is not its replacement in
 meaning, only in subject matter.
 
-| | `MCP_ADMIN_USERS` (deprecated) | `HTTP_API_AP_READ_USERS` |
+| | `MCP_ADMIN_USERS` (deprecated) | `HTTP_API_ANYUSER_READ_USERS` |
 | --- | --- | --- |
-| Effect of being listed | **holds** the read tier | **may request** `ap:read` |
+| Effect of being listed | **holds** the read tier | **may request** `anyuser:read` |
 | Applies to | a credential stating no scopes | any credential |
 | Needs a request | no | yes |
 | Needs consent | no | yes, where consent applies |
@@ -189,7 +189,7 @@ the old knob stays indefinitely; (b) the same plus a removal release
 named in the message. The existing startup warnings for this knob are
 already the precedent for (a).
 
-**[OPEN]** Whether a credential that *could* request `ap:read` but did
+**[OPEN]** Whether a credential that *could* request `anyuser:read` but did
 not should be told so. Saying nothing is what produced the report this
 work started from; saying something on every request is noise. The MCP
 scope challenge below is the mechanism that answers this properly for
@@ -245,11 +245,11 @@ decision passes through; renaming it is cosmetic and low priority.
 
 ## Already using one of these names
 
-`ap:read` and `ap:write` are live: mintable on an API key
+`anyuser:read` and `anyuser:write` are live: mintable on an API key
 (`validScopes`), grantable through OAuth2 (`getScopesForGroups`),
 advertised (`oauth2AdvertisedScopes`), and privileged on the consent
 page (`privilegedScopes`). Each is referenced through one constant
-(`scopeAPRead`, `scopeAPWrite` in `apikey_entitlements.go`), so
+(`scopeAnyUserRead`, `scopeAnyUserWrite` in `apikey_entitlements.go`), so
 settling on different names is two edits.
 
 Advertising them was the step with teeth. `getScopesForGroups` ends in
@@ -264,7 +264,7 @@ that true.
 It carries no compatibility burden *yet*: no grant outside this server
 has ever been issued with it. That stops being true at the first release
 that ships it, so the naming question above is worth closing before
-then. **[OPEN]** by the same token: if `ap:read` is the wrong name,
+then. **[OPEN]** by the same token: if `anyuser:read` is the wrong name,
 say so now rather than after it has been minted into keys in the field.
 
 ## The MCP scope challenge, and what `scopes_supported` is for
@@ -371,8 +371,8 @@ with one deliberate exception.
 
 | Thing that exists today | On upgrade |
 | --- | --- |
-| An API key minted before this | Untouched. It carries no `ap:*` scope — none existed — so the entitlement path is skipped entirely and costs it not even a lookup. |
-| An OAuth2 grant carrying `mcp:admin` / `mcp:superuser` | Still honoured, on REST and MCP alike. The `ap:*` scopes were added beside them, not in place of them. |
+| An API key minted before this | Untouched. It carries no `anyuser:*` scope — none existed — so the entitlement path is skipped entirely and costs it not even a lookup. |
+| An OAuth2 grant carrying `mcp:admin` / `mcp:superuser` | Still honoured, on REST and MCP alike. The `anyuser:*` scopes were added beside them, not in place of them. |
 | A refresh of such a grant | Unchanged. Re-authorization re-runs the group policy it always did. |
 | A CIMD client | Unchanged. Its requestable set is recomputed from the advertised list, which did not change. |
 | `MCP_ADMIN_USERS` | Unchanged, deprecated. See above. |
@@ -394,7 +394,7 @@ migration restores them. Down-then-up is a round trip, pinned by
 themselves survive the downgrade — a rollback that logs everybody's
 automation out is worse than whatever it is rolling back.
 
-On the older code a key carrying `ap:read` is simply a key with a
+On the older code a key carrying `anyuser:read` is simply a key with a
 scope nothing reads: scopes are validated at mint, not at use, so it
 keeps working as an ordinary key. Forward compatibility is the weaker
 direction, as usual: a *new* admin UI posting `service: true` to an
@@ -414,7 +414,7 @@ flagged as such.
 Ordered so that each step is separately revertible and only one of them
 can change what anybody can do.
 
-1. **Done.** `ap:read` / `ap:write` exist beside `mcp:admin` /
+1. **Done.** `anyuser:read` / `anyuser:write` exist beside `mcp:admin` /
    `mcp:superuser`, on the same group policy. No power moved.
 2. **Settle the names.** Cheapest now: two constants, no grant in the
    field carries them outside this server. After the first release it is
@@ -443,7 +443,7 @@ project:
   worse consent page.
 - **Not a replacement for the schedd's ACLs.** Every scope here narrows
   what this server will do on a caller's behalf. HTCondor still decides
-  what it will accept, and a `ap:write` grant is worth nothing against
+  what it will accept, and a `anyuser:write` grant is worth nothing against
   a schedd that refuses the identity.
 - **Not an audit mechanism.** Impersonation already writes its own audit
   trail; nothing here changes what is recorded.

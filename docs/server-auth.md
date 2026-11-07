@@ -16,7 +16,7 @@ Three authentication channels, in precedence order:
    `condor:/*` scope; a `metrics`-only key is refused everywhere but
    `/metrics` and `/readyz`. Mint via the admin UI at
    `/admin/api-keys`, or `POST /api/v1/admin/api-keys`. A key may
-   also carry the `ap:read` entitlement; see
+   also carry the `anyuser:read` entitlement; see
    [Service keys and entitlements](#service-keys-and-entitlements).
 2. **OAuth2 / OIDC** — for browsers and MCP clients. The server
    embeds its own IDP (`/idp/*`) and also accepts upstream OIDC
@@ -37,7 +37,7 @@ session.
 ## Service keys and entitlements
 
 Most API-key scopes name a door: `metrics` is `/metrics`, `condor:/READ`
-is the routes that query HTCondor. The `ap:*` scopes are different.
+is the routes that query HTCondor. The `anyuser:*` scopes are different.
 They name whose records the key may reach once inside -- every user's,
 rather than its creator's -- which makes them claims about a **person**,
 not about a key. People lose entitlements, so these are not simply
@@ -48,8 +48,8 @@ and `condor:/WRITE` do not:
 
 | Scope | Grants |
 | --- | --- |
-| `ap:read` | Read every user's records. |
-| `ap:write` | Act on every user's records: remove, hold, release, edit. |
+| `anyuser:read` | Read every user's records. |
+| `anyuser:write` | Act on every user's records: remove, hold, release, edit. |
 
 Everything below applies to both.
 
@@ -89,7 +89,7 @@ year). Re-minting is how the entitlement is re-attested, and the expiry
 is what makes somebody do it. Revoke one early by deleting it, as with
 any key.
 
-Granting a `ap:*` scope requires holding it: an administrator cannot
+Granting a `anyuser:*` scope requires holding it: an administrator cannot
 mint a key more entitled than they are.
 
 Which model to pick is a question about revocation, not convenience. A

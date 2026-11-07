@@ -83,7 +83,7 @@ func TestOAuth2PrivilegedScopesStayAdvertised(t *testing.T) {
 	for _, scope := range oauth2AdvertisedScopes {
 		advertised[scope] = true
 	}
-	for _, scope := range []string{"mcp:admin", "mcp:superuser", scopeAPRead, scopeAPWrite} {
+	for _, scope := range []string{"mcp:admin", "mcp:superuser", scopeAnyUserRead, scopeAnyUserWrite} {
 		if !privilegedScopes[scope] {
 			t.Errorf("%s is no longer marked privileged", scope)
 		}
@@ -104,9 +104,9 @@ func TestPrivilegedScopesAreOfferedUnchecked(t *testing.T) {
 	h := consentTestHandler(t, "condor-admins", "condor-supers")
 	page := renderConsentFor(t, h,
 		[]string{"condor-admins", "condor-supers"},
-		[]string{"openid", "mcp:read", "mcp:admin", "mcp:superuser", scopeAPRead, scopeAPWrite})
+		[]string{"openid", "mcp:read", "mcp:admin", "mcp:superuser", scopeAnyUserRead, scopeAnyUserWrite})
 
-	for _, scope := range []string{"mcp:admin", "mcp:superuser", scopeAPRead, scopeAPWrite} {
+	for _, scope := range []string{"mcp:admin", "mcp:superuser", scopeAnyUserRead, scopeAnyUserWrite} {
 		i := strings.Index(page, `value="`+scope+`"`)
 		if i < 0 {
 			t.Fatalf("%s was not offered to a member of its group:\n%s", scope, page)
@@ -148,7 +148,7 @@ func TestUngrantableScopesAreNotOffered(t *testing.T) {
 	requested := []string{"openid", "mcp:read", "mcp:admin", "mcp:superuser"}
 
 	page := renderConsentFor(t, h, []string{"some-other-group"}, requested)
-	for _, scope := range []string{"mcp:admin", "mcp:superuser", scopeAPRead, scopeAPWrite} {
+	for _, scope := range []string{"mcp:admin", "mcp:superuser", scopeAnyUserRead, scopeAnyUserWrite} {
 		if strings.Contains(page, `value="`+scope+`"`) {
 			t.Errorf("%s was offered to a user outside its group", scope)
 		}
@@ -197,14 +197,14 @@ func TestDeviceConsentFiltersUngrantableScopes(t *testing.T) {
 // grants an unrecognized scope unconditionally, so a scope advertised
 // without a case of its own is handed to every client that asks for it.
 //
-// That is the whole hazard of this change: ap:read and ap:write
+// That is the whole hazard of this change: anyuser:read and anyuser:write
 // went from unreachable to requestable by anyone, and the only thing
 // between "requestable" and "granted" is the switch above.
 func TestAdvertisedPrivilegedScopesAreNotGrantedByDefault(t *testing.T) {
 	h := consentTestHandler(t, "condor-admins", "condor-supers")
 
 	outsider := []string{"users"}
-	for _, scope := range []string{"mcp:admin", "mcp:superuser", scopeAPRead, scopeAPWrite} {
+	for _, scope := range []string{"mcp:admin", "mcp:superuser", scopeAnyUserRead, scopeAnyUserWrite} {
 		got := h.getScopesForGroups(outsider, []string{scope})
 		if slices.Contains(got, scope) {
 			t.Errorf("%s was granted to a user in none of the privileged groups: %v", scope, got)
@@ -213,23 +213,23 @@ func TestAdvertisedPrivilegedScopesAreNotGrantedByDefault(t *testing.T) {
 
 	// And the entitled user does get them, or the advertisement is a
 	// promise the server never keeps.
-	if got := h.getScopesForGroups([]string{"condor-admins"}, []string{scopeAPRead}); !slices.Contains(got, scopeAPRead) {
-		t.Errorf("an admin-group member was not granted %s: %v", scopeAPRead, got)
+	if got := h.getScopesForGroups([]string{"condor-admins"}, []string{scopeAnyUserRead}); !slices.Contains(got, scopeAnyUserRead) {
+		t.Errorf("an admin-group member was not granted %s: %v", scopeAnyUserRead, got)
 	}
-	if got := h.getScopesForGroups([]string{"condor-supers"}, []string{scopeAPWrite}); !slices.Contains(got, scopeAPWrite) {
-		t.Errorf("a superuser-group member was not granted %s: %v", scopeAPWrite, got)
+	if got := h.getScopesForGroups([]string{"condor-supers"}, []string{scopeAnyUserWrite}); !slices.Contains(got, scopeAnyUserWrite) {
+		t.Errorf("a superuser-group member was not granted %s: %v", scopeAnyUserWrite, got)
 	}
 	// Neither implies the other.
-	if got := h.getScopesForGroups([]string{"condor-admins"}, []string{scopeAPWrite}); slices.Contains(got, scopeAPWrite) {
-		t.Errorf("the admin group was granted %s: %v", scopeAPWrite, got)
+	if got := h.getScopesForGroups([]string{"condor-admins"}, []string{scopeAnyUserWrite}); slices.Contains(got, scopeAnyUserWrite) {
+		t.Errorf("the admin group was granted %s: %v", scopeAnyUserWrite, got)
 	}
 }
 
 // With no privileged group configured at all, nobody gets them --
 // "unset" means nobody, not everybody, for a cross-user power.
-func TestAPScopesNeedAConfiguredGroup(t *testing.T) {
+func TestAnyUserScopesNeedAConfiguredGroup(t *testing.T) {
 	h := consentTestHandler(t, "", "")
-	for _, scope := range []string{scopeAPRead, scopeAPWrite} {
+	for _, scope := range []string{scopeAnyUserRead, scopeAnyUserWrite} {
 		if got := h.getScopesForGroups([]string{"anyone"}, []string{scope}); slices.Contains(got, scope) {
 			t.Errorf("%s was granted with no group configured: %v", scope, got)
 		}

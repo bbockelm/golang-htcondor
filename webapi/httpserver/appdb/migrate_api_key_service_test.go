@@ -37,7 +37,7 @@ func TestServiceKeySurvivesDownAndUp(t *testing.T) {
 
 	if _, err := db.ExecContext(ctx,
 		`INSERT INTO api_keys (key_id, secret_hash, name, scopes_json, creator, service)
-		 VALUES ('svc000000001','h','automation','["ap:read"]','alice',1),
+		 VALUES ('svc000000001','h','automation','["anyuser:read"]','alice',1),
 		        ('ord000000001','h','mine','["metrics"]','alice',0)`); err != nil {
 		t.Fatalf("insert: %v", err)
 	}

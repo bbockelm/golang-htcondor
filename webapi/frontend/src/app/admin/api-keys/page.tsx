@@ -152,7 +152,7 @@ function NewKeyForm({
   // the only thing the two key models differ about. The form surfaces
   // the choice only once one is selected, so a key for /metrics is
   // still a two-field form.
-  const entitlementScopes = ['ap:read', 'ap:write'];
+  const entitlementScopes = ['anyuser:read', 'anyuser:write'];
   const entitled = Array.from(scopes).some((s) => entitlementScopes.includes(s));
   // A service key holding an entitlement has nothing but its expiry
   // bounding it, so the server refuses one that never expires. Saying so

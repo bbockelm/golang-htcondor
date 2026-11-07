@@ -173,22 +173,22 @@ func (s *Handler) seesAllJobsByPolicy(ctx context.Context, r *http.Request, tier
 		if _, ok := scopes[scopeMCPSuperuser]; ok {
 			return true
 		}
-		// ap:write is the same power under the name of what it
-		// grants. Not implied by ap:read, exactly as mcp:superuser is
+		// anyuser:write is the same power under the name of what it
+		// grants. Not implied by anyuser:read, exactly as mcp:superuser is
 		// not implied by mcp:admin: seeing every user's jobs and acting
 		// on them are separate grants.
-		_, ok := scopes[scopeAPWrite]
+		_, ok := scopes[scopeAnyUserWrite]
 		return ok
 	}
 	if scoped {
 		if _, ok := scopes[scopeMCPAdmin]; ok {
 			return true
 		}
-		// ap:read is the same power named for what it grants rather
+		// anyuser:read is the same power named for what it grants rather
 		// than for the surface that first needed it. An API key carries
 		// it only after resolveAPIKeyEntitlements has confirmed the key
 		// is still entitled to it on this request.
-		_, ok := scopes[scopeAPRead]
+		_, ok := scopes[scopeAnyUserRead]
 		return ok
 	}
 	return slices.ContainsFunc(s.mcpAdminUsers, func(u string) bool { return authz.SameUser(u, actor) })

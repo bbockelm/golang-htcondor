@@ -185,7 +185,7 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 			if s.mcpSuperuserGroups.configured() && s.mcpSuperuserGroups.allows(userGroups) {
 				grantedScopes = append(grantedScopes, scope)
 			}
-		case scopeAPRead:
+		case scopeAnyUserRead:
 			// The same power as mcp:admin under the name of what it
 			// grants, so it answers to the same group until the two
 			// settings are split apart.
@@ -198,9 +198,9 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 			if s.mcpAdminGroups.configured() && s.mcpAdminGroups.allows(userGroups) {
 				grantedScopes = append(grantedScopes, scope)
 			}
-		case scopeAPWrite:
+		case scopeAnyUserWrite:
 			// Likewise mcp:superuser, and likewise not implied by
-			// ap:read.
+			// anyuser:read.
 			if s.mcpSuperuserGroups.configured() && s.mcpSuperuserGroups.allows(userGroups) {
 				grantedScopes = append(grantedScopes, scope)
 			}

@@ -114,13 +114,13 @@ func TestEntitlementsUntouchedWithoutEntitlementScope(t *testing.T) {
 // source and never will be.
 func TestServiceKeyHoldsEntitlementWithNoLiveSource(t *testing.T) {
 	h := entitlementHandler(t, nil) // no account database
-	row := insertKey(t, h, "alice", []string{scopeAPRead, "condor:/READ"}, true,
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead, "condor:/READ"}, true,
 		time.Now().Add(-30*24*time.Hour)) // and last confirmed a month ago
 
 	got := resolve(t, h, row)
-	if !slices.Contains(got, scopeAPRead) {
+	if !slices.Contains(got, scopeAnyUserRead) {
 		t.Errorf("service key lost %s (got %v); it is granted at mint and held for the key's life",
-			scopeAPRead, got)
+			scopeAnyUserRead, got)
 	}
 }
 
@@ -128,11 +128,11 @@ func TestServiceKeyHoldsEntitlementWithNoLiveSource(t *testing.T) {
 // the staleness window has passed. Silence is not consent forever.
 func TestOrdinaryKeyLosesStaleEntitlementWithNoLiveSource(t *testing.T) {
 	h := entitlementHandler(t, nil)
-	row := insertKey(t, h, "alice", []string{scopeAPRead, "condor:/READ"}, false,
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead, "condor:/READ"}, false,
 		time.Now().Add(-2*time.Hour)) // older than the default one-hour window
 
 	got := resolve(t, h, row)
-	if slices.Contains(got, scopeAPRead) {
+	if slices.Contains(got, scopeAnyUserRead) {
 		t.Errorf("stale entitlement survived with nothing able to confirm it: %v", got)
 	}
 	if !slices.Contains(got, "condor:/READ") {
@@ -144,9 +144,9 @@ func TestOrdinaryKeyLosesStaleEntitlementWithNoLiveSource(t *testing.T) {
 // absent source is a grace period rather than an outage.
 func TestOrdinaryKeyKeepsFreshEntitlementWithNoLiveSource(t *testing.T) {
 	h := entitlementHandler(t, nil)
-	row := insertKey(t, h, "alice", []string{scopeAPRead}, false, time.Now().Add(-time.Minute))
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead}, false, time.Now().Add(-time.Minute))
 
-	if got := resolve(t, h, row); !slices.Contains(got, scopeAPRead) {
+	if got := resolve(t, h, row); !slices.Contains(got, scopeAnyUserRead) {
 		t.Errorf("entitlement confirmed a minute ago was withheld: %v", got)
 	}
 }
@@ -156,11 +156,11 @@ func TestOrdinaryKeyKeepsFreshEntitlementWithNoLiveSource(t *testing.T) {
 func TestOrdinaryKeyConfirmedByLiveGroups(t *testing.T) {
 	groups := &fakeGroups{groups: map[string][]string{"alice": {"condor-admins"}}}
 	h := entitlementHandler(t, groups)
-	row := insertKey(t, h, "alice", []string{scopeAPRead}, false,
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead}, false,
 		time.Now().Add(-30*24*time.Hour))
 
 	got := resolve(t, h, row)
-	if !slices.Contains(got, scopeAPRead) {
+	if !slices.Contains(got, scopeAnyUserRead) {
 		t.Errorf("live group membership did not restore a stale entitlement: %v", got)
 	}
 	// A confirmation restarts the window, so the next request inside the
@@ -180,10 +180,10 @@ func TestOrdinaryKeyConfirmedByLiveGroups(t *testing.T) {
 func TestOrdinaryKeyDeniedByLiveGroups(t *testing.T) {
 	groups := &fakeGroups{groups: map[string][]string{"alice": {"users"}}}
 	h := entitlementHandler(t, groups)
-	row := insertKey(t, h, "alice", []string{scopeAPRead, "metrics"}, false, time.Now())
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead, "metrics"}, false, time.Now())
 
 	got := resolve(t, h, row)
-	if slices.Contains(got, scopeAPRead) {
+	if slices.Contains(got, scopeAnyUserRead) {
 		t.Errorf("a creator out of the group kept the entitlement: %v", got)
 	}
 	if !slices.Contains(got, "metrics") {
@@ -196,9 +196,9 @@ func TestOrdinaryKeyDeniedByLiveGroups(t *testing.T) {
 func TestUnreadableGroupSourceIsSilenceNotDenial(t *testing.T) {
 	groups := &fakeGroups{err: context.DeadlineExceeded}
 	h := entitlementHandler(t, groups)
-	row := insertKey(t, h, "alice", []string{scopeAPRead}, false, time.Now().Add(-time.Minute))
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead}, false, time.Now().Add(-time.Minute))
 
-	if got := resolve(t, h, row); !slices.Contains(got, scopeAPRead) {
+	if got := resolve(t, h, row); !slices.Contains(got, scopeAnyUserRead) {
 		t.Errorf("an unreadable group source revoked a fresh entitlement: %v", got)
 	}
 }
@@ -215,7 +215,7 @@ func TestExpiredServiceKeyDoesNotAuthenticate(t *testing.T) {
 	past := time.Now().Add(-time.Minute)
 	if _, err := h.apiKeyStore.Insert(context.Background(),
 		minted.KeyID, minted.SecretHash, "k", "alice",
-		[]string{scopeAPRead}, &past, true); err != nil {
+		[]string{scopeAnyUserRead}, &past, true); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	if _, err := h.apiKeyStore.LookupActive(context.Background(), minted.KeyID); err == nil {
@@ -228,7 +228,7 @@ func TestExpiredServiceKeyDoesNotAuthenticate(t *testing.T) {
 func TestEntitlementVerifiedOncePerRequest(t *testing.T) {
 	groups := &fakeGroups{groups: map[string][]string{"alice": {"condor-admins"}}}
 	h := entitlementHandler(t, groups)
-	row := insertKey(t, h, "alice", []string{scopeAPRead}, false, time.Time{})
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead}, false, time.Time{})
 
 	ctx, first := h.resolveAPIKeyEntitlements(context.Background(), row)
 	ctx2, second := h.resolveAPIKeyEntitlements(ctx, row)
@@ -249,36 +249,36 @@ func TestMemoIsPerKey(t *testing.T) {
 		"bob":   {"users"},
 	}}
 	h := entitlementHandler(t, groups)
-	aliceRow := insertKey(t, h, "alice", []string{scopeAPRead}, false, time.Time{})
-	bobRow := insertKey(t, h, "bob", []string{scopeAPRead}, false, time.Time{})
+	aliceRow := insertKey(t, h, "alice", []string{scopeAnyUserRead}, false, time.Time{})
+	bobRow := insertKey(t, h, "bob", []string{scopeAnyUserRead}, false, time.Time{})
 
 	ctx, alice := h.resolveAPIKeyEntitlements(context.Background(), aliceRow)
-	if !slices.Contains(alice, scopeAPRead) {
+	if !slices.Contains(alice, scopeAnyUserRead) {
 		t.Fatalf("alice lost her entitlement: %v", alice)
 	}
 	_, bob := h.resolveAPIKeyEntitlements(ctx, bobRow)
-	if slices.Contains(bob, scopeAPRead) {
+	if slices.Contains(bob, scopeAnyUserRead) {
 		t.Errorf("bob was served alice's cached verdict: %v", bob)
 	}
 }
 
-// ap:read is what makes a key see past its creator's own jobs, so the
+// anyuser:read is what makes a key see past its creator's own jobs, so the
 // owner-scoping gate has to honour it. Without this the whole feature
 // records an entitlement nothing consults.
 func TestPoolReadGrantsCrossUserReads(t *testing.T) {
 	h := entitlementHandler(t, nil)
 	h.logger = nil
 
-	ctx := withAPIKeyScopes(context.Background(), []string{scopeAPRead})
+	ctx := withAPIKeyScopes(context.Background(), []string{scopeAnyUserRead})
 	ctx = htcondor.WithAuthenticatedUser(ctx, "alice")
 	if !h.seesAllJobsByPolicy(ctx, requestWithBearer(t, ""), jobScopeRead) {
-		t.Error("a credential granted ap:read was still confined to its own jobs")
+		t.Error("a credential granted anyuser:read was still confined to its own jobs")
 	}
 
 	// And it is the read tier only: acting on other users' jobs is a
 	// separate power this scope does not carry.
 	if h.seesAllJobsByPolicy(ctx, requestWithBearer(t, ""), jobScopeMutate) {
-		t.Error("ap:read granted the mutate tier")
+		t.Error("anyuser:read granted the mutate tier")
 	}
 }
 
@@ -287,18 +287,18 @@ func TestPoolReadGrantsCrossUserReads(t *testing.T) {
 // a standing grant.
 func TestServiceKeyEntitlementRequiresExpiry(t *testing.T) {
 	maxLifetime := 365 * 24 * time.Hour
-	if err := validateServiceKeyExpiry([]string{scopeAPRead}, true, nil, maxLifetime); err == nil {
+	if err := validateServiceKeyExpiry([]string{scopeAnyUserRead}, true, nil, maxLifetime); err == nil {
 		t.Error("a service key carrying an entitlement was allowed to never expire")
 	}
 
 	// Beyond the cap is refused too, or the expiry is a formality.
 	far := time.Now().Add(2 * maxLifetime)
-	if err := validateServiceKeyExpiry([]string{scopeAPRead}, true, &far, maxLifetime); err == nil {
+	if err := validateServiceKeyExpiry([]string{scopeAnyUserRead}, true, &far, maxLifetime); err == nil {
 		t.Error("a service key was allowed an expiry past the server's cap")
 	}
 
 	ok := time.Now().Add(24 * time.Hour)
-	if err := validateServiceKeyExpiry([]string{scopeAPRead}, true, &ok, maxLifetime); err != nil {
+	if err := validateServiceKeyExpiry([]string{scopeAnyUserRead}, true, &ok, maxLifetime); err != nil {
 		t.Errorf("a bounded service key was refused: %v", err)
 	}
 }
@@ -311,7 +311,7 @@ func TestExpiryRuleOnlyBindsFrozenEntitlements(t *testing.T) {
 	if err := validateServiceKeyExpiry([]string{"metrics"}, true, nil, maxLifetime); err != nil {
 		t.Errorf("a service key with no entitlement was forced to expire: %v", err)
 	}
-	if err := validateServiceKeyExpiry([]string{scopeAPRead}, false, nil, maxLifetime); err != nil {
+	if err := validateServiceKeyExpiry([]string{scopeAnyUserRead}, false, nil, maxLifetime); err != nil {
 		t.Errorf("an ordinary key was forced to expire: %v", err)
 	}
 }
@@ -321,13 +321,13 @@ func TestExpiryRuleOnlyBindsFrozenEntitlements(t *testing.T) {
 // still looking. Silence here is how the original report happened.
 func TestMintNoteWarnsWhenEntitlementCannotBeConfirmed(t *testing.T) {
 	h := entitlementHandler(t, nil) // groups come from the token
-	note := h.mintNote(context.Background(), "alice", []string{scopeAPRead}, false)
+	note := h.mintNote(context.Background(), "alice", []string{scopeAnyUserRead}, false)
 	if note == "" {
 		t.Error("no note for an entitlement that will lapse unattended")
 	}
 
 	// A service key is the answer to that problem, so it gets no note.
-	if n := h.mintNote(context.Background(), "alice", []string{scopeAPRead}, true); n != "" {
+	if n := h.mintNote(context.Background(), "alice", []string{scopeAnyUserRead}, true); n != "" {
 		t.Errorf("service key warned about lapsing: %q", n)
 	}
 	// Neither does a key with nothing to lapse.
@@ -338,7 +338,7 @@ func TestMintNoteWarnsWhenEntitlementCannotBeConfirmed(t *testing.T) {
 	// Where the entitlement CAN be re-verified there is nothing to warn
 	// about: the key keeps working as long as its creator qualifies.
 	live := entitlementHandler(t, &fakeGroups{groups: map[string][]string{"alice": {"condor-admins"}}})
-	if n := live.mintNote(context.Background(), "alice", []string{scopeAPRead}, false); n != "" {
+	if n := live.mintNote(context.Background(), "alice", []string{scopeAnyUserRead}, false); n != "" {
 		t.Errorf("warned about lapsing in a deployment that can re-verify: %q", n)
 	}
 }
@@ -365,9 +365,9 @@ func TestOraclesNotConsultedWhileEntitlementIsFresh(t *testing.T) {
 	oracle := &countingOracle{status: UserStatusRevoked, reason: "disabled"}
 	h := entitlementHandler(t, nil) // no group source, so oracles are the only live source
 	h.revocationOracles = []RevocationOracle{oracle}
-	row := insertKey(t, h, "alice", []string{scopeAPRead}, false, time.Now().Add(-time.Minute))
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead}, false, time.Now().Add(-time.Minute))
 
-	if got := resolve(t, h, row); !slices.Contains(got, scopeAPRead) {
+	if got := resolve(t, h, row); !slices.Contains(got, scopeAnyUserRead) {
 		t.Errorf("a fresh entitlement was withheld: %v", got)
 	}
 	if oracle.calls != 0 {
@@ -382,11 +382,11 @@ func TestOraclesConsultedOnceEntitlementIsStale(t *testing.T) {
 	oracle := &countingOracle{status: UserStatusRevoked, reason: "disabled by an admin"}
 	h := entitlementHandler(t, nil)
 	h.revocationOracles = []RevocationOracle{oracle}
-	row := insertKey(t, h, "alice", []string{scopeAPRead, "metrics"}, false,
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead, "metrics"}, false,
 		time.Now().Add(-2*time.Hour))
 
 	got := resolve(t, h, row)
-	if slices.Contains(got, scopeAPRead) {
+	if slices.Contains(got, scopeAnyUserRead) {
 		t.Errorf("a revoked user kept the entitlement: %v", got)
 	}
 	if !slices.Contains(got, "metrics") {
@@ -403,9 +403,9 @@ func TestActiveOracleRenewsStaleEntitlement(t *testing.T) {
 	oracle := &countingOracle{status: UserStatusActive}
 	h := entitlementHandler(t, nil)
 	h.revocationOracles = []RevocationOracle{oracle}
-	row := insertKey(t, h, "alice", []string{scopeAPRead}, false, time.Now().Add(-2*time.Hour))
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead}, false, time.Now().Add(-2*time.Hour))
 
-	if got := resolve(t, h, row); !slices.Contains(got, scopeAPRead) {
+	if got := resolve(t, h, row); !slices.Contains(got, scopeAnyUserRead) {
 		t.Errorf("an oracle vouched for the user but the entitlement was withheld: %v", got)
 	}
 	after, err := h.apiKeyStore.LookupActive(context.Background(), row.KeyID)
@@ -423,9 +423,9 @@ func TestLiveGroupsAnswerWithoutAskingOracles(t *testing.T) {
 	oracle := &countingOracle{status: UserStatusRevoked}
 	h := entitlementHandler(t, &fakeGroups{groups: map[string][]string{"alice": {"condor-admins"}}})
 	h.revocationOracles = []RevocationOracle{oracle}
-	row := insertKey(t, h, "alice", []string{scopeAPRead}, false, time.Now().Add(-30*24*time.Hour))
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead}, false, time.Now().Add(-30*24*time.Hour))
 
-	if got := resolve(t, h, row); !slices.Contains(got, scopeAPRead) {
+	if got := resolve(t, h, row); !slices.Contains(got, scopeAnyUserRead) {
 		t.Errorf("live membership did not settle it: %v", got)
 	}
 	if oracle.calls != 0 {
@@ -439,9 +439,9 @@ func TestServiceKeyAsksNoOracles(t *testing.T) {
 	oracle := &countingOracle{status: UserStatusRevoked}
 	h := entitlementHandler(t, nil)
 	h.revocationOracles = []RevocationOracle{oracle}
-	row := insertKey(t, h, "alice", []string{scopeAPRead}, true, time.Now().Add(-30*24*time.Hour))
+	row := insertKey(t, h, "alice", []string{scopeAnyUserRead}, true, time.Now().Add(-30*24*time.Hour))
 
-	if got := resolve(t, h, row); !slices.Contains(got, scopeAPRead) {
+	if got := resolve(t, h, row); !slices.Contains(got, scopeAnyUserRead) {
 		t.Errorf("service key lost its entitlement: %v", got)
 	}
 	if oracle.calls != 0 {
@@ -449,46 +449,46 @@ func TestServiceKeyAsksNoOracles(t *testing.T) {
 	}
 }
 
-// ap:write carries the mutate tier, and carries it alone: seeing
+// anyuser:write carries the mutate tier, and carries it alone: seeing
 // every user's jobs and acting on them are separate grants, so neither
 // scope implies the other.
 func TestPoolWriteGrantsCrossUserMutationOnly(t *testing.T) {
 	h := entitlementHandler(t, nil)
 
 	write := htcondor.WithAuthenticatedUser(
-		withAPIKeyScopes(context.Background(), []string{scopeAPWrite}), "alice")
+		withAPIKeyScopes(context.Background(), []string{scopeAnyUserWrite}), "alice")
 	if !h.seesAllJobsByPolicy(write, requestWithBearer(t, ""), jobScopeMutate) {
-		t.Error("ap:write did not grant the mutate tier")
+		t.Error("anyuser:write did not grant the mutate tier")
 	}
 	if h.seesAllJobsByPolicy(write, requestWithBearer(t, ""), jobScopeRead) {
-		t.Error("ap:write granted the read tier; the two are separate grants")
+		t.Error("anyuser:write granted the read tier; the two are separate grants")
 	}
 
 	read := htcondor.WithAuthenticatedUser(
-		withAPIKeyScopes(context.Background(), []string{scopeAPRead}), "alice")
+		withAPIKeyScopes(context.Background(), []string{scopeAnyUserRead}), "alice")
 	if h.seesAllJobsByPolicy(read, requestWithBearer(t, ""), jobScopeMutate) {
-		t.Error("ap:read granted the mutate tier")
+		t.Error("anyuser:read granted the mutate tier")
 	}
 }
 
-// ap:write is an entitlement, so it is re-verified on an ordinary key
-// and held for the life of a service key, exactly as ap:read is.
+// anyuser:write is an entitlement, so it is re-verified on an ordinary key
+// and held for the life of a service key, exactly as anyuser:read is.
 // Without this it would be minted and then trusted forever.
 func TestPoolWriteIsAnEntitlement(t *testing.T) {
-	if !isEntitlementScope(scopeAPWrite) {
-		t.Fatal("ap:write is not treated as an entitlement, so it is never re-verified")
+	if !isEntitlementScope(scopeAnyUserWrite) {
+		t.Fatal("anyuser:write is not treated as an entitlement, so it is never re-verified")
 	}
 
 	h := entitlementHandler(t, nil)
-	stale := insertKey(t, h, "alice", []string{scopeAPWrite, "metrics"}, false,
+	stale := insertKey(t, h, "alice", []string{scopeAnyUserWrite, "metrics"}, false,
 		time.Now().Add(-2*time.Hour))
-	if got := resolve(t, h, stale); slices.Contains(got, scopeAPWrite) {
-		t.Errorf("a stale ap:write survived with nothing able to confirm it: %v", got)
+	if got := resolve(t, h, stale); slices.Contains(got, scopeAnyUserWrite) {
+		t.Errorf("a stale anyuser:write survived with nothing able to confirm it: %v", got)
 	}
 
-	svc := insertKey(t, h, "alice", []string{scopeAPWrite}, true, time.Now().Add(-2*time.Hour))
-	if got := resolve(t, h, svc); !slices.Contains(got, scopeAPWrite) {
-		t.Errorf("a service key lost ap:write: %v", got)
+	svc := insertKey(t, h, "alice", []string{scopeAnyUserWrite}, true, time.Now().Add(-2*time.Hour))
+	if got := resolve(t, h, svc); !slices.Contains(got, scopeAnyUserWrite) {
+		t.Errorf("a service key lost anyuser:write: %v", got)
 	}
 }
 
@@ -496,8 +496,8 @@ func TestPoolWriteIsAnEntitlement(t *testing.T) {
 // mutate tier must still expire.
 func TestServiceKeyPoolWriteRequiresExpiry(t *testing.T) {
 	maxLifetime := 365 * 24 * time.Hour
-	if err := validateServiceKeyExpiry([]string{scopeAPWrite}, true, nil, maxLifetime); err == nil {
-		t.Error("a service key carrying ap:write was allowed to never expire")
+	if err := validateServiceKeyExpiry([]string{scopeAnyUserWrite}, true, nil, maxLifetime); err == nil {
+		t.Error("a service key carrying anyuser:write was allowed to never expire")
 	}
 }
 

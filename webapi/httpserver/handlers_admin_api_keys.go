@@ -87,12 +87,12 @@ var validScopes = map[string]string{
 	// act needs both scopes selected.
 	"condor:/WRITE": "Act on the creator's jobs (submit, hold, release, remove). Does not grant READ; select both to query as well.",
 
-	// An ENTITLEMENT rather than an endpoint: it says whose records the
-	// key may see, not which door it may knock on. Granted only to a
-	// minter who holds it, and re-verified on use unless the key is a
+	// ENTITLEMENTS rather than endpoints: they say whose jobs the key
+	// may reach, not which door it may knock on. Granted only to a
+	// minter who holds them, and re-verified on use unless the key is a
 	// service key. See apikey_entitlements.go.
-	scopeAPRead:  "Read every user's records, not just the creator's. Granted only to an administrator who holds it; on a key that is not a service key it lapses when the creator's entitlement does.",
-	scopeAPWrite: "Act on every user's records: remove, hold, release, edit. Does not grant ap:read; select both to see them as well. Same entitlement rules as ap:read.",
+	scopeAnyUserRead:  "Read any user's jobs on this access point, not just the creator's. Granted only to an administrator who holds it; on a key that is not a service key it lapses when the creator's entitlement does.",
+	scopeAnyUserWrite: "Act on any user's jobs on this access point: remove, hold, release, edit. Does not grant anyuser:read; select both to see them as well. Same entitlement rules as anyuser:read.",
 }
 
 // handleAdminListAPIKeys handles GET /api/v1/admin/api-keys.

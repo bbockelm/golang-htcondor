@@ -58,7 +58,7 @@ import (
 // forever either, or a deployment with no live source has simply
 // reinvented the frozen grant. Silence expires.
 
-// scopeAPRead is the entitlement to read every user's jobs on this
+// scopeAnyUserRead is the entitlement to read every user's jobs on this
 // access point, granted to an API key at mint.
 //
 // An ACCESS POINT, not the pool: these scopes reach the queue of the
@@ -74,25 +74,25 @@ import (
 // so settling on a different one is a single edit, and it is safe to
 // rename until the first release that ships it because no grant
 // carrying it exists yet.
-const scopeAPRead = "ap:read"
+const scopeAnyUserRead = "anyuser:read"
 
-// scopeAPWrite is the entitlement to act on every user's jobs on this
+// scopeAnyUserWrite is the entitlement to act on every user's jobs on this
 // access point:
-// remove, hold, release, edit. The mutate tier to scopeAPRead's read
+// remove, hold, release, edit. The mutate tier to scopeAnyUserRead's read
 // tier, and not a superset of it -- a key expected to both see and act
 // across users needs both, the same way condor:/READ and condor:/WRITE
 // are selected separately.
 //
-// PROVISIONAL NAME, on the same terms as scopeAPRead.
-const scopeAPWrite = "ap:write"
+// PROVISIONAL NAME, on the same terms as scopeAnyUserRead.
+const scopeAnyUserWrite = "anyuser:write"
 
 // entitlementScopes are the scopes this file governs: the ones that
 // are claims about a person rather than about a key, and so are
 // re-verified on use for an ordinary key.
 //
 // A var rather than a const so the set is in one place when the
-// vocabulary rework adds ap:write to it.
-var entitlementScopes = []string{scopeAPRead, scopeAPWrite}
+// vocabulary rework adds anyuser:write to it.
+var entitlementScopes = []string{scopeAnyUserRead, scopeAnyUserWrite}
 
 // defaultEntitlementTTL bounds how long an ordinary key's entitlement
 // is honored with no successful live verification.
@@ -260,7 +260,7 @@ func (s *Handler) entitlementIsFresh(row *apiKeyRow) bool {
 // removed, leaving the endpoint scopes intact.
 //
 // Withholding rather than failing the request: a key that has lost
-// ap:read is still a perfectly good key for its creator's own jobs,
+// anyuser:read is still a perfectly good key for its creator's own jobs,
 // and the caller should see their own records rather than a 403 they
 // cannot act on. The log line above is where the difference is
 // explained.
