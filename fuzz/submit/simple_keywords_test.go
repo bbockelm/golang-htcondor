@@ -60,9 +60,17 @@ func TestSimpleKeywordTableMatchesOracle(t *testing.T) {
 		}
 	}
 	for key, g := range got {
-		if _, ok := want[key]; !ok {
-			t.Errorf("%s is in the Go table (%s, opts %#x) and is not a non-special keyword of HTCondor's", key, g.attr, g.opts)
+		if _, ok := want[key]; ok {
+			continue
 		}
+		// A keyword this oracle predates is not a mistake in the Go table;
+		// see keywordsAheadOfOracle. The allowance lapses on its own once
+		// the oracle carries the change, so the row cannot stay unchecked.
+		if ticket, ahead := keywordsAheadOfOracle[key]; ahead && !oracleHas[ticket] {
+			t.Logf("%s (%s, opts %#x): this oracle predates %s", key, g.attr, g.opts, ticket)
+			continue
+		}
+		t.Errorf("%s is in the Go table (%s, opts %#x) and is not a non-special keyword of HTCondor's", key, g.attr, g.opts)
 	}
 }
 

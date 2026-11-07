@@ -139,6 +139,8 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 		answer += "CUDAVersion <= TARGET.CUDAMaxSupportedVersion"
 	}
 
+	sf.addCondorVersionRequirements(ad, refs, add)
+
 	if boolAttr(ad, "OCUWanted") {
 		if answer != "" {
 			answer += " && "
@@ -168,6 +170,34 @@ func (sf *SubmitFile) platformChecksSettled(refs map[string]bool, isDocker, isCo
 		refs["opsyslongname"] || refs["opsysshortname"] || refs["opsysname"] ||
 		refs["opsyslegacy"]
 	return arch, opsys
+}
+
+// addCondorVersionRequirements adds the clauses for min_condor_version and
+// max_condor_version: the job runs only on an EP whose version is at least the
+// one, and below the other.
+//
+// Both are skipped when the submitter's own Requirements already says
+// something about TARGET.CondorVersion, on the usual rule that an automatic
+// clause does not second-guess one the submitter wrote.
+//
+// They are also skipped for the local and scheduler universes, where the job
+// is run by the schedd and no EP version is ever compared -- condor_submit
+// warns and drops the clause rather than writing one that would make the job
+// unmatchable. The clause references the job's OWN attribute by bare name, so
+// the comparison is against whatever the submit file put there.
+func (sf *SubmitFile) addCondorVersionRequirements(ad *classad.ClassAd, refs map[string]bool, add func(string)) {
+	if refs["condorversion"] {
+		return
+	}
+	if sf.universe == UniverseLocal || sf.universe == UniverseScheduler {
+		return
+	}
+	if v, ok := ad.EvaluateAttrString("MinCondorVersion"); ok && v != "" {
+		add("versionGE(split(TARGET.CondorVersion)[1], MinCondorVersion)")
+	}
+	if v, ok := ad.EvaluateAttrString("MaxCondorVersion"); ok && v != "" {
+		add("versionLT(split(TARGET.CondorVersion)[1], MaxCondorVersion)")
+	}
 }
 
 // addPlatformRequirements adds the clauses that put the job on a machine that
