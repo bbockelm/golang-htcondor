@@ -75,10 +75,11 @@ func (c *Collection) SetAttribute(key, name, value string) error {
 	}
 
 	// Parse the value as a ClassAd expression using OLD-ClassAd string semantics: a
-	// job_queue.log is old-format text, so a string value may carry an unrecognized escape
-	// that old ClassAd keeps literally -- e.g. a TransferInput filename with an escaped comma
-	// or space ("...\,\ ...") so it does not split the transfer list. Strict ParseExpr rejects
-	// those and the whole attribute is dropped; ParseExprOld preserves them.
+	// job_queue.log is old-format text, where a string literal gets no escape interpretation
+	// at all, so a backslash in it is a backslash -- e.g. a TransferInput filename with an
+	// escaped comma or space ("...\,\ ...") so it does not split the transfer list. Strict
+	// parsing reads the same text as new ClassAd and interprets those escapes away, which
+	// silently changes the value; ParseExprOld keeps it as the schedd wrote it.
 	expr, err := classad.ParseExprOld(value)
 	if err != nil {
 		return fmt.Errorf("failed to parse attribute value %q: %w", value, err)
