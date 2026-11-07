@@ -12,9 +12,9 @@ import (
 // counters are reals, because that is what the shadow writes into them later
 // and a consumer reading one with an integer lookup gets nothing from a real;
 // the rest are integers. An absent attribute is worse than either: it reads
-// as UNDEFINED, so `condor_q -constraint 'RemoteUserCpu > 60'` does not match
-// a job that has used no CPU, and a policy expression doing arithmetic on one
-// is neither true nor false.
+// as UNDEFINED, so a constraint that should hold for a job that has not run
+// yet -- `RemoteUserCpu <= 60`, or any negation -- matches nothing, and a
+// policy expression doing arithmetic on one is neither true nor false.
 func TestSubmitTimeDefaults(t *testing.T) {
 	sf, err := ParseSubmitFile(strings.NewReader("executable = /bin/true\nqueue\n"))
 	if err != nil {
