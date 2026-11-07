@@ -17,6 +17,7 @@ import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
 import { FilterControls, type FilterMode } from '@/components/FilterControls';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
+import { usePoolIdentityRestricted } from '@/lib/usePoolIdentity';
 import {
   parseSlot,
   groupByMachine,
@@ -26,7 +27,7 @@ import {
   gibNum,
   pct,
   textHaystack,
-  SLOT_PROJECTION,
+  slotProjection,
   type Slot,
   type NodeGroup,
   type PoolSummary,
@@ -68,12 +69,17 @@ export default function PoolPage() {
     ? `(${excludeDynamic}) && (${constraint})`
     : excludeDynamic;
 
+  // Whether this session may be told who is running on a slot. It
+  // changes the projection, not just the rendering: an attribute the
+  // caller may not read is refused rather than trimmed.
+  const identityRestricted = usePoolIdentityRestricted();
+
   const { data, isLoading, error, isFetching } = useQuery({
-    queryKey: ['pool-slots', effectiveConstraint],
+    queryKey: ['pool-slots', effectiveConstraint, identityRestricted],
     queryFn: () =>
       api.collector.list({
         adType: 'startd',
-        projection: SLOT_PROJECTION,
+        projection: slotProjection(identityRestricted),
         limit: '*',
         constraint: effectiveConstraint,
       }),
@@ -611,12 +617,13 @@ function NodeRow({
   // small, so node.slots has none. When a node is expanded, fetch its full
   // slot list — dynamic slots included — for just that machine. This is a
   // narrow query and only runs while the row is open.
+  const identityRestricted = usePoolIdentityRestricted();
   const { data: detail, isFetching: detailFetching } = useQuery({
-    queryKey: ['pool-node-slots', node.machine],
+    queryKey: ['pool-node-slots', node.machine, identityRestricted],
     queryFn: () =>
       api.collector.list({
         adType: 'startd',
-        projection: SLOT_PROJECTION,
+        projection: slotProjection(identityRestricted),
         limit: '*',
         constraint: `Machine == ${JSON.stringify(node.machine)}`,
       }),
@@ -697,6 +704,7 @@ function SlotSubTable({
   drainSlots?: Map<string, DrainSlot>;
   now?: Date;
 }) {
+  const identityRestricted = usePoolIdentityRestricted();
   const ordered = [...slots].sort((a, b) => a.name.localeCompare(b.name));
   return (
     <table className="min-w-full text-xs tabular-nums">
@@ -710,7 +718,17 @@ function SlotSubTable({
           <th className="px-2 py-1 text-right">CPUs</th>
           <th className="px-2 py-1 text-right">Memory</th>
           <th className="px-2 py-1 text-right">GPUs</th>
-          <th className="px-2 py-1 text-left">Owner</th>
+          <th className="px-2 py-1 text-left">
+            Owner
+            {identityRestricted && (
+              <span
+                className="ml-1 font-normal text-gray-400"
+                title="This site does not show which user is running on a slot."
+              >
+                (not shown)
+              </span>
+            )}
+          </th>
           {drainSlots && <th className="px-2 py-1 text-left">Submitted from</th>}
           {drainSlots && <th className="px-2 py-1 text-left">Expected end</th>}
         </tr>
