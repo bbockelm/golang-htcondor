@@ -336,7 +336,7 @@ func (s *Handler) adminUsername(r *http.Request) string {
 // The rule applies only to a service key that actually carries an
 // entitlement. A service key scoped to /metrics is freezing nothing
 // about a person and has no more reason to expire than any other key.
-func validateServiceKeyExpiry(scopes []string, service bool, expiresAt *time.Time, max time.Duration) error {
+func validateServiceKeyExpiry(scopes []string, service bool, expiresAt *time.Time, maxLifetime time.Duration) error {
 	if !service || len(heldEntitlements(scopes)) == 0 {
 		return nil
 	}
@@ -344,8 +344,8 @@ func validateServiceKeyExpiry(scopes []string, service bool, expiresAt *time.Tim
 		return fmt.Errorf("a service key carrying an entitlement must set expires_at; " +
 			"re-minting it is how the entitlement is re-attested")
 	}
-	if expiresAt.After(time.Now().Add(max)) {
-		return fmt.Errorf("expires_at is further out than this server allows for a service key (%s)", max)
+	if expiresAt.After(time.Now().Add(maxLifetime)) {
+		return fmt.Errorf("expires_at is further out than this server allows for a service key (%s)", maxLifetime)
 	}
 	return nil
 }

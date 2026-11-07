@@ -285,19 +285,19 @@ func TestPoolReadGrantsCrossUserReads(t *testing.T) {
 // one without an expiry has to be refused rather than quietly producing
 // a standing grant.
 func TestServiceKeyEntitlementRequiresExpiry(t *testing.T) {
-	max := 365 * 24 * time.Hour
-	if err := validateServiceKeyExpiry([]string{scopePoolRead}, true, nil, max); err == nil {
+	maxLifetime := 365 * 24 * time.Hour
+	if err := validateServiceKeyExpiry([]string{scopePoolRead}, true, nil, maxLifetime); err == nil {
 		t.Error("a service key carrying an entitlement was allowed to never expire")
 	}
 
 	// Beyond the cap is refused too, or the expiry is a formality.
-	far := time.Now().Add(2 * max)
-	if err := validateServiceKeyExpiry([]string{scopePoolRead}, true, &far, max); err == nil {
+	far := time.Now().Add(2 * maxLifetime)
+	if err := validateServiceKeyExpiry([]string{scopePoolRead}, true, &far, maxLifetime); err == nil {
 		t.Error("a service key was allowed an expiry past the server's cap")
 	}
 
 	ok := time.Now().Add(24 * time.Hour)
-	if err := validateServiceKeyExpiry([]string{scopePoolRead}, true, &ok, max); err != nil {
+	if err := validateServiceKeyExpiry([]string{scopePoolRead}, true, &ok, maxLifetime); err != nil {
 		t.Errorf("a bounded service key was refused: %v", err)
 	}
 }
@@ -306,11 +306,11 @@ func TestServiceKeyEntitlementRequiresExpiry(t *testing.T) {
 // such: a service key that freezes nothing needs no expiry, and an
 // ordinary key is re-verified on use so it needs none either.
 func TestExpiryRuleOnlyBindsFrozenEntitlements(t *testing.T) {
-	max := 365 * 24 * time.Hour
-	if err := validateServiceKeyExpiry([]string{"metrics"}, true, nil, max); err != nil {
+	maxLifetime := 365 * 24 * time.Hour
+	if err := validateServiceKeyExpiry([]string{"metrics"}, true, nil, maxLifetime); err != nil {
 		t.Errorf("a service key with no entitlement was forced to expire: %v", err)
 	}
-	if err := validateServiceKeyExpiry([]string{scopePoolRead}, false, nil, max); err != nil {
+	if err := validateServiceKeyExpiry([]string{scopePoolRead}, false, nil, maxLifetime); err != nil {
 		t.Errorf("an ordinary key was forced to expire: %v", err)
 	}
 }
