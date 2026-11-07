@@ -91,8 +91,8 @@ var validScopes = map[string]string{
 	// key may see, not which door it may knock on. Granted only to a
 	// minter who holds it, and re-verified on use unless the key is a
 	// service key. See apikey_entitlements.go.
-	scopePoolRead:  "Read every user's records, not just the creator's. Granted only to an administrator who holds it; on a key that is not a service key it lapses when the creator's entitlement does.",
-	scopePoolWrite: "Act on every user's records: remove, hold, release, edit. Does not grant pool:read; select both to see them as well. Same entitlement rules as pool:read.",
+	scopeAPRead:  "Read every user's records, not just the creator's. Granted only to an administrator who holds it; on a key that is not a service key it lapses when the creator's entitlement does.",
+	scopeAPWrite: "Act on every user's records: remove, hold, release, edit. Does not grant ap:read; select both to see them as well. Same entitlement rules as ap:read.",
 }
 
 // handleAdminListAPIKeys handles GET /api/v1/admin/api-keys.
@@ -225,7 +225,7 @@ func (s *Handler) handleAdminCreateAPIKey(w http.ResponseWriter, r *http.Request
 	// not hand out what they do not hold. requireAdmin has already
 	// established the session this reads; the check is written out
 	// rather than left implicit because it is the one line that has to
-	// change when service administration and pool reads stop being the
+	// change when service administration and cross-user reads stop being the
 	// same group.
 	for _, sc := range heldEntitlements(req.Scopes) {
 		if !s.isWebUIAdmin(r) {

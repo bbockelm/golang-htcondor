@@ -34,7 +34,7 @@ import (
 // An endpoint scope is a fact about the key and never changes: a key
 // minted for /metrics is a key for /metrics until it is revoked. An
 // entitlement is a fact about a PERSON -- that they are entitled to
-// read the pool -- and people lose entitlements. A key that froze one
+// read every user's jobs -- and people lose entitlements. A key that froze one
 // at mint and never looked again is the "refresh replayed grants
 // forever" bug in a new place.
 //
@@ -58,8 +58,15 @@ import (
 // forever either, or a deployment with no live source has simply
 // reinvented the frozen grant. Silence expires.
 
-// scopePoolRead is the entitlement to read every user's records,
-// granted to an API key at mint.
+// scopeAPRead is the entitlement to read every user's jobs on this
+// access point, granted to an API key at mint.
+//
+// An ACCESS POINT, not the pool: these scopes reach the queue of the
+// schedd this server fronts -- in multi-AP mode, the one a request was
+// routed to and no other -- and confer nothing over machines, the
+// collector or the negotiator. HTTP_API_POOL_QUERY_* is the knob that
+// governs the genuinely pool-scoped thing, which is why these are not
+// called pool:*.
 //
 // PROVISIONAL NAME. The entitlement vocabulary is being reworked (see
 // design_notes/ENTITLEMENT_VOCABULARY.md); this is the name that
@@ -67,30 +74,31 @@ import (
 // so settling on a different one is a single edit, and it is safe to
 // rename until the first release that ships it because no grant
 // carrying it exists yet.
-const scopePoolRead = "pool:read"
+const scopeAPRead = "ap:read"
 
-// scopePoolWrite is the entitlement to act on every user's records:
-// remove, hold, release, edit. The mutate tier to scopePoolRead's read
+// scopeAPWrite is the entitlement to act on every user's jobs on this
+// access point:
+// remove, hold, release, edit. The mutate tier to scopeAPRead's read
 // tier, and not a superset of it -- a key expected to both see and act
 // across users needs both, the same way condor:/READ and condor:/WRITE
 // are selected separately.
 //
-// PROVISIONAL NAME, on the same terms as scopePoolRead.
-const scopePoolWrite = "pool:write"
+// PROVISIONAL NAME, on the same terms as scopeAPRead.
+const scopeAPWrite = "ap:write"
 
 // entitlementScopes are the scopes this file governs: the ones that
 // are claims about a person rather than about a key, and so are
 // re-verified on use for an ordinary key.
 //
 // A var rather than a const so the set is in one place when the
-// vocabulary rework adds pool:write to it.
-var entitlementScopes = []string{scopePoolRead, scopePoolWrite}
+// vocabulary rework adds ap:write to it.
+var entitlementScopes = []string{scopeAPRead, scopeAPWrite}
 
 // defaultEntitlementTTL bounds how long an ordinary key's entitlement
 // is honored with no successful live verification.
 //
 // One hour is short on purpose. It is the window in which a person who
-// has just lost their group membership can still read the pool through
+// has just lost their group membership can still read everyone's jobs through
 // a key they left behind, in a deployment that gave this server no way
 // to notice. A deployment that wants an unattended credential to keep
 // working past it is describing a service key, and should mint one --
@@ -252,7 +260,7 @@ func (s *Handler) entitlementIsFresh(row *apiKeyRow) bool {
 // removed, leaving the endpoint scopes intact.
 //
 // Withholding rather than failing the request: a key that has lost
-// pool:read is still a perfectly good key for its creator's own jobs,
+// ap:read is still a perfectly good key for its creator's own jobs,
 // and the caller should see their own records rather than a 403 they
 // cannot act on. The log line above is where the difference is
 // explained.
@@ -267,7 +275,7 @@ func withoutEntitlements(scopes []string) []string {
 }
 
 // verifyEntitlement asks whatever live source this deployment has
-// whether this key's creator is still entitled to read the pool.
+// whether this key's creator is still entitled to read every user's jobs.
 //
 // Two sources, and they cost very different amounts, which is why the
 // order here is not simply "most authoritative first":

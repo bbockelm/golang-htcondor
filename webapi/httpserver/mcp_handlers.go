@@ -849,8 +849,8 @@ var privilegedScopes = map[string]bool{
 	// listing a scope that never reaches a consent page is nothing, and
 	// the cost of the reverse is a client granted power over everyone's
 	// jobs by a box that was ticked for it.
-	scopePoolRead:  true,
-	scopePoolWrite: true,
+	scopeAPRead:  true,
+	scopeAPWrite: true,
 }
 
 func getScopeDescription(scope string) string {
@@ -863,8 +863,8 @@ func getScopeDescription(scope string) string {
 		"mcp:write":             "Full access to submit and manage HTCondor jobs via MCP protocol",
 		"mcp:admin":             "Read every user's jobs, not only your own",
 		"mcp:superuser":         "Change any user's jobs: remove, hold, release, edit",
-		scopePoolRead:           "Read every user's jobs, not only your own",
-		scopePoolWrite:          "Change any user's jobs: remove, hold, release, edit",
+		scopeAPRead:             "Read every user's jobs, not only your own",
+		scopeAPWrite:            "Change any user's jobs: remove, hold, release, edit",
 		"condor:/READ":          "HTCondor READ authorization - allows reading job and daemon information",
 		"condor:/WRITE":         "HTCondor WRITE authorization - allows submitting and managing jobs",
 		"condor:/ADMINISTRATOR": "HTCondor ADMINISTRATOR authorization - full administrative access",
@@ -1487,8 +1487,8 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		// without the group membership simply does not receive them.
 		"mcp:admin":     true,
 		"mcp:superuser": true,
-		scopePoolRead:   true,
-		scopePoolWrite:  true,
+		scopeAPRead:     true,
+		scopeAPWrite:    true,
 		// READ and WRITE only: they are the condor levels a token from
 		// this server can carry (mapCondorScopesToAuthz). Any other was
 		// accepted here, shown pre-ticked on the consent page, and
@@ -1598,7 +1598,7 @@ var oauth2AdvertisedScopes = []string{
 	// policy their older spellings answer to, so advertising them adds
 	// a name rather than a privilege. The consent page renders them
 	// unchecked, as it does any privileged scope.
-	scopePoolRead, scopePoolWrite,
+	scopeAPRead, scopeAPWrite,
 	// READ and WRITE only. The ADVERTISE_* levels were advertised as
 	// scopes and no tool checked them. advertise_to_collector sends the
 	// ad with the caller's own per-request credential, so whether that
