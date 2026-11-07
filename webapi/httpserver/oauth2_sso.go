@@ -185,6 +185,25 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 			if s.mcpSuperuserGroups.configured() && s.mcpSuperuserGroups.allows(userGroups) {
 				grantedScopes = append(grantedScopes, scope)
 			}
+		case scopePoolRead:
+			// The same power as mcp:admin under the name of what it
+			// grants, so it answers to the same group until the two
+			// settings are split apart.
+			//
+			// A case of its own rather than a fallthrough, because the
+			// default branch below grants an unrecognized scope
+			// unconditionally: advertising an entitlement without
+			// landing here would hand cross-user reads to any client
+			// that asked.
+			if s.mcpAdminGroups.configured() && s.mcpAdminGroups.allows(userGroups) {
+				grantedScopes = append(grantedScopes, scope)
+			}
+		case scopePoolWrite:
+			// Likewise mcp:superuser, and likewise not implied by
+			// pool:read.
+			if s.mcpSuperuserGroups.configured() && s.mcpSuperuserGroups.allows(userGroups) {
+				grantedScopes = append(grantedScopes, scope)
+			}
 		default:
 			// condor:/WRITE is the same authorization as mcp:write --
 			// both mint an IDTOKEN carrying WRITE -- so it follows the

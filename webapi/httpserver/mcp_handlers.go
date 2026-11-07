@@ -1487,6 +1487,8 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		// without the group membership simply does not receive them.
 		"mcp:admin":     true,
 		"mcp:superuser": true,
+		scopePoolRead:   true,
+		scopePoolWrite:  true,
 		// READ and WRITE only: they are the condor levels a token from
 		// this server can carry (mapCondorScopesToAuthz). Any other was
 		// accepted here, shown pre-ticked on the consent page, and
@@ -1590,6 +1592,13 @@ var oauth2AdvertisedScopes = []string{
 	// can be given an access point to look after without being given its
 	// owner's ability to remove anybody's jobs.
 	"mcp:admin", "mcp:superuser",
+	// The same two powers named for what they grant. Advertised so an
+	// OAuth2 client can request them at all -- a client asks only for
+	// what the server advertises -- and granted on exactly the group
+	// policy their older spellings answer to, so advertising them adds
+	// a name rather than a privilege. The consent page renders them
+	// unchecked, as it does any privileged scope.
+	scopePoolRead, scopePoolWrite,
 	// READ and WRITE only. The ADVERTISE_* levels were advertised as
 	// scopes and no tool checked them. advertise_to_collector sends the
 	// ad with the caller's own per-request credential, so whether that

@@ -1,8 +1,22 @@
 # Entitlement vocabulary
 
-Status: **draft, for iteration.** Nothing here is implemented except
-`pool:read`. Open questions are marked **[OPEN]** and are the parts most
-worth arguing about.
+Status: **draft, for iteration.** Open questions are marked **[OPEN]**
+and are the parts most worth arguing about.
+
+The document mixes work that has landed with work that has not, so the
+line between them is drawn here rather than left to be inferred:
+
+| Landed | Proposed |
+| --- | --- |
+| `pool:read` and `pool:write` exist, mintable on an API key and grantable through OAuth2 | every rename below |
+| Both are advertised, consent-unchecked, and gated on the groups their older spellings answer to | the `*_GROUPS` / `*_USERS` scheme |
+| Entitlements are granted at mint and re-verified on use (service keys) | splitting `HTTP_API_WEBUI_ADMIN_GROUP` |
+| `MCP_ADMIN_USERS` keeps its behaviour | deprecating it in earnest |
+| | both MCP scope-challenge fixes |
+
+Nothing landed changes a power anyone holds today: the two new scopes
+answer to the same groups as `mcp:admin` and `mcp:superuser`, so they
+add a name, not a privilege.
 
 ## The problem
 
@@ -50,8 +64,8 @@ the rest. "Carried by" is which credential kinds can hold it.
 | `condor:/ADMINISTRATOR`, `/CONFIG`, `/DAEMON`, `/NEGOTIATOR` | — | Nothing. **[OPEN]**, below | |
 | `metrics` | API key | `/metrics` (Prometheus exposition). | unchanged |
 | `placement` | OAuth2 | The placement API. Held only by the seeded placement client, never advertised. | unchanged |
-| `pool:read` | API key | Read every user's records. New; see *Already using one of these names*. | **[OPEN]** name |
-| `pool:write` | API key | Act on every user's records. New. | **[OPEN]** name |
+| `pool:read` | API key, OAuth2 | Read every user's records. New; see *Already using one of these names*. | **[OPEN]** name |
+| `pool:write` | API key, OAuth2 | Act on every user's records. New. | **[OPEN]** name |
 
 Three things that table makes visible and prose did not:
 
@@ -173,6 +187,48 @@ work started from; saying something on every request is noise. The MCP
 scope challenge below is the mechanism that answers this properly for
 `/mcp`, and nothing answers it for REST.
 
+#### How a `*_USERS` list is actually checked
+
+Every authorization decision today runs through `groupSet.allows(groups)`
+— a set of configured group names against the groups a caller carries.
+A user list answers a different question, about identity rather than
+membership, so it needs a second check beside that one rather than a
+value stuffed into the same set.
+
+The shape that fits what already exists:
+
+```
+type principalSet struct {
+    groups *groupSet   // HTTP_API_X_GROUPS
+    users  []string    // HTTP_API_X_USERS
+}
+
+func (p *principalSet) allows(actor string, groups []string) bool
+```
+
+`allows` is true when the group set allows the groups **or** the actor
+matches a user entry. Three details that are not free choices:
+
+- **Identity comparison is `authz.SameUser`,** which already handles the
+  `@` and the domain fold. A bare `alice` does not match
+  `alice@uid.domain`; this is the trap that bit `MCP_ADMIN_USERS`, and
+  it should be documented at the knob rather than discovered.
+- **`configured()` means either half is non-empty.** The existing
+  "unset means nobody" rule for a cross-user privilege has to keep
+  holding, and a deployment that names only users must not read as
+  unconfigured.
+- **The group half still needs a group source.** With
+  `HTTP_API_GROUP_SOURCE = token` and no groups in the token, the users
+  half is the only half that works — which is a large part of why it
+  should exist at all.
+
+**[OPEN]** Whether a user list also applies where a *session* is the
+caller. The group half is checked against `session.Groups`; the user
+half would be checked against `session.Username`, which is well defined
+but means a knob that reads as "service configuration" also grants
+browser powers. I think yes, for consistency, but it is worth saying
+out loud.
+
 ### Internal names
 
 `jobScopeRead` / `jobScopeMutate` already name the axes correctly and
@@ -181,10 +237,21 @@ decision passes through; renaming it is cosmetic and low priority.
 
 ## Already using one of these names
 
-API-key service keys ship `pool:read` as a mintable entitlement
-(`scopePoolRead` in `apikey_entitlements.go`). It is the only live use
-of the proposed vocabulary, and it is deliberately referenced through
-one constant so settling on a different name is a single edit.
+`pool:read` and `pool:write` are live: mintable on an API key
+(`validScopes`), grantable through OAuth2 (`getScopesForGroups`),
+advertised (`oauth2AdvertisedScopes`), and privileged on the consent
+page (`privilegedScopes`). Each is referenced through one constant
+(`scopePoolRead`, `scopePoolWrite` in `apikey_entitlements.go`), so
+settling on different names is two edits.
+
+Advertising them was the step with teeth. `getScopesForGroups` ends in
+a default branch that grants an unrecognized scope unconditionally, so
+a scope advertised without a case of its own is handed to every client
+that asks. They therefore answer to `HTTP_API_MCP_ADMIN_GROUP` and
+`HTTP_API_MCP_SUPERUSER_GROUP` — the groups their older spellings
+already answer to — until those settings are renamed.
+`TestAdvertisedPrivilegedScopesAreNotGrantedByDefault` is what keeps
+that true.
 
 It carries no compatibility burden *yet*: no grant outside this server
 has ever been issued with it. That stops being true at the first release
@@ -336,8 +403,39 @@ flagged as such.
 
 ## Sequencing
 
-1. Introduce the new names as aliases; both spellings work. No behavior
-   change, so it can land on its own.
-2. Move internal call sites and documentation to the new names.
-3. Decide and execute the `WEBUI_ADMIN` split, which is the only step
-   with a behavior change and deserves its own release note.
+Ordered so that each step is separately revertible and only one of them
+can change what anybody can do.
+
+1. **Done.** `pool:read` / `pool:write` exist beside `mcp:admin` /
+   `mcp:superuser`, on the same group policy. No power moved.
+2. **Settle the names.** Cheapest now: two constants, no grant in the
+   field carries them outside this server. After the first release it is
+   a compatibility exercise instead.
+3. **Introduce `principalSet` and the `*_GROUPS` / `*_USERS` pairs** as
+   aliases of the current settings, both spellings accepted, old names
+   logging their replacement. Still no behaviour change — a `*_USERS`
+   list that nobody is on grants nobody anything.
+4. **Move internal call sites and documentation** to the new names.
+5. **Deprecate `MCP_ADMIN_USERS` in earnest**: keep the behaviour, name
+   the replacement at startup, and give the removal a release.
+6. **Split `HTTP_API_WEBUI_ADMIN_GROUP`.** The only step that changes a
+   power. Its own release note.
+
+The two MCP scope-challenge fixes are independent of all six and can
+land whenever; the `scopes_supported` trim is the one worth doing soon,
+since it is live over-requesting rather than a naming problem.
+
+## What this is not
+
+Worth stating, because each has come up and each would be a different
+project:
+
+- **Not per-tool or per-route scopes.** The axes are reach and action,
+  not endpoint. A scope per tool is a much larger vocabulary and a much
+  worse consent page.
+- **Not a replacement for the schedd's ACLs.** Every scope here narrows
+  what this server will do on a caller's behalf. HTCondor still decides
+  what it will accept, and a `pool:write` grant is worth nothing against
+  a schedd that refuses the identity.
+- **Not an audit mechanism.** Impersonation already writes its own audit
+  trail; nothing here changes what is recorded.
