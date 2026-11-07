@@ -447,3 +447,55 @@ func TestServiceKeyAsksNoOracles(t *testing.T) {
 		t.Errorf("service key triggered %d oracle calls; want 0", oracle.calls)
 	}
 }
+
+// pool:write carries the mutate tier, and carries it alone: seeing
+// every user's jobs and acting on them are separate grants, so neither
+// scope implies the other.
+func TestPoolWriteGrantsCrossUserMutationOnly(t *testing.T) {
+	h := entitlementHandler(t, nil)
+
+	write := htcondor.WithAuthenticatedUser(
+		withAPIKeyScopes(context.Background(), []string{scopePoolWrite}), "alice")
+	if !h.seesAllJobsByPolicy(write, requestWithBearer(t, ""), jobScopeMutate) {
+		t.Error("pool:write did not grant the mutate tier")
+	}
+	if h.seesAllJobsByPolicy(write, requestWithBearer(t, ""), jobScopeRead) {
+		t.Error("pool:write granted the read tier; the two are separate grants")
+	}
+
+	read := htcondor.WithAuthenticatedUser(
+		withAPIKeyScopes(context.Background(), []string{scopePoolRead}), "alice")
+	if h.seesAllJobsByPolicy(read, requestWithBearer(t, ""), jobScopeMutate) {
+		t.Error("pool:read granted the mutate tier")
+	}
+}
+
+// pool:write is an entitlement, so it is re-verified on an ordinary key
+// and held for the life of a service key, exactly as pool:read is.
+// Without this it would be minted and then trusted forever.
+func TestPoolWriteIsAnEntitlement(t *testing.T) {
+	if !isEntitlementScope(scopePoolWrite) {
+		t.Fatal("pool:write is not treated as an entitlement, so it is never re-verified")
+	}
+
+	h := entitlementHandler(t, nil)
+	stale := insertKey(t, h, "alice", []string{scopePoolWrite, "metrics"}, false,
+		time.Now().Add(-2*time.Hour))
+	if got := resolve(t, h, stale); slices.Contains(got, scopePoolWrite) {
+		t.Errorf("a stale pool:write survived with nothing able to confirm it: %v", got)
+	}
+
+	svc := insertKey(t, h, "alice", []string{scopePoolWrite}, true, time.Now().Add(-2*time.Hour))
+	if got := resolve(t, h, svc); !slices.Contains(got, scopePoolWrite) {
+		t.Errorf("a service key lost pool:write: %v", got)
+	}
+}
+
+// Minting it is bounded the same way: a service key that freezes the
+// mutate tier must still expire.
+func TestServiceKeyPoolWriteRequiresExpiry(t *testing.T) {
+	maxLifetime := 365 * 24 * time.Hour
+	if err := validateServiceKeyExpiry([]string{scopePoolWrite}, true, nil, maxLifetime); err == nil {
+		t.Error("a service key carrying pool:write was allowed to never expire")
+	}
+}

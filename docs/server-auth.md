@@ -37,11 +37,21 @@ session.
 ## Service keys and entitlements
 
 Most API-key scopes name a door: `metrics` is `/metrics`, `condor:/READ`
-is the routes that query HTCondor. `pool:read` is different. It names
-whose records the key may see once inside -- every user's, rather than
-its creator's -- which makes it a claim about a **person**, not about a
-key. People lose entitlements, so this one is not simply stored and
-trusted forever.
+is the routes that query HTCondor. The `pool:*` scopes are different.
+They name whose records the key may reach once inside -- every user's,
+rather than its creator's -- which makes them claims about a **person**,
+not about a key. People lose entitlements, so these are not simply
+stored and trusted forever.
+
+There are two, and neither implies the other, exactly as `condor:/READ`
+and `condor:/WRITE` do not:
+
+| Scope | Grants |
+| --- | --- |
+| `pool:read` | Read every user's records. |
+| `pool:write` | Act on every user's records: remove, hold, release, edit. |
+
+Everything below applies to both.
 
 A key is minted in one of two models, and the difference between them is
 how that claim is kept honest.
@@ -79,8 +89,8 @@ year). Re-minting is how the entitlement is re-attested, and the expiry
 is what makes somebody do it. Revoke one early by deleting it, as with
 any key.
 
-Granting `pool:read` requires holding it: an administrator cannot mint a
-key more entitled than they are.
+Granting a `pool:*` scope requires holding it: an administrator cannot
+mint a key more entitled than they are.
 
 Which model to pick is a question about revocation, not convenience. A
 credential that should stop working when its holder changes roles is an

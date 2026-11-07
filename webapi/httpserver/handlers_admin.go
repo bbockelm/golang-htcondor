@@ -170,7 +170,14 @@ func (s *Handler) seesAllJobsByPolicy(ctx context.Context, r *http.Request, tier
 	}
 	scopes, scoped := scopedCredential(ctx)
 	if tier == jobScopeMutate {
-		_, ok := scopes[scopeMCPSuperuser]
+		if _, ok := scopes[scopeMCPSuperuser]; ok {
+			return true
+		}
+		// pool:write is the same power under the name of what it
+		// grants. Not implied by pool:read, exactly as mcp:superuser is
+		// not implied by mcp:admin: seeing every user's jobs and acting
+		// on them are separate grants.
+		_, ok := scopes[scopePoolWrite]
 		return ok
 	}
 	if scoped {

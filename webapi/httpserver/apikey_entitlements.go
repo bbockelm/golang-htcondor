@@ -69,13 +69,22 @@ import (
 // carrying it exists yet.
 const scopePoolRead = "pool:read"
 
+// scopePoolWrite is the entitlement to act on every user's records:
+// remove, hold, release, edit. The mutate tier to scopePoolRead's read
+// tier, and not a superset of it -- a key expected to both see and act
+// across users needs both, the same way condor:/READ and condor:/WRITE
+// are selected separately.
+//
+// PROVISIONAL NAME, on the same terms as scopePoolRead.
+const scopePoolWrite = "pool:write"
+
 // entitlementScopes are the scopes this file governs: the ones that
 // are claims about a person rather than about a key, and so are
 // re-verified on use for an ordinary key.
 //
 // A var rather than a const so the set is in one place when the
 // vocabulary rework adds pool:write to it.
-var entitlementScopes = []string{scopePoolRead}
+var entitlementScopes = []string{scopePoolRead, scopePoolWrite}
 
 // defaultEntitlementTTL bounds how long an ordinary key's entitlement
 // is honored with no successful live verification.
@@ -327,7 +336,9 @@ func (s *Handler) askOracles(ctx context.Context, actor string) (entitlementVerd
 			}
 			return entitlementDenied, reason
 		}
-		if decision.Status == UserStatusActive && !slices.Contains(decision.DeniedScopes, scopePoolRead) {
+		if decision.Status == UserStatusActive && !slices.ContainsFunc(entitlementScopes, func(sc string) bool {
+			return slices.Contains(decision.DeniedScopes, sc)
+		}) {
 			return entitlementConfirmed, ""
 		}
 	}

@@ -91,7 +91,8 @@ var validScopes = map[string]string{
 	// key may see, not which door it may knock on. Granted only to a
 	// minter who holds it, and re-verified on use unless the key is a
 	// service key. See apikey_entitlements.go.
-	scopePoolRead: "Read every user's records, not just the creator's. Granted only to an administrator who holds it; on a key that is not a service key it lapses when the creator's entitlement does.",
+	scopePoolRead:  "Read every user's records, not just the creator's. Granted only to an administrator who holds it; on a key that is not a service key it lapses when the creator's entitlement does.",
+	scopePoolWrite: "Act on every user's records: remove, hold, release, edit. Does not grant pool:read; select both to see them as well. Same entitlement rules as pool:read.",
 }
 
 // handleAdminListAPIKeys handles GET /api/v1/admin/api-keys.

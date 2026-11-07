@@ -50,7 +50,8 @@ the rest. "Carried by" is which credential kinds can hold it.
 | `condor:/ADMINISTRATOR`, `/CONFIG`, `/DAEMON`, `/NEGOTIATOR` | — | Nothing. **[OPEN]**, below | |
 | `metrics` | API key | `/metrics` (Prometheus exposition). | unchanged |
 | `placement` | OAuth2 | The placement API. Held only by the seeded placement client, never advertised. | unchanged |
-| `pool:read` | API key | Read every user's records. New; see *Already using one of these names*. | **[OPEN]** name |
+| `pool:read` | API key, OAuth2 | Read every user's records. New; see *Already using one of these names*. | **[OPEN]** name |
+| `pool:write` | API key, OAuth2 | Act on every user's records. New. | **[OPEN]** name |
 
 Three things that table makes visible and prose did not:
 
@@ -107,35 +108,53 @@ existing `mcp:superuser` grant on upgrade.
 
 ### Configuration
 
-| Today | Proposed | Means |
+Two knobs per entitlement, and they mean the same thing: **who may
+request it**. Never who holds it.
+
+| Entitlement | Groups | Users |
 | --- | --- | --- |
-| `HTTP_API_MCP_ADMIN_GROUP` | `HTTP_API_POOL_READ_GROUP` | who may be granted `pool:read` |
-| `HTTP_API_MCP_SUPERUSER_GROUP` | `HTTP_API_POOL_WRITE_GROUP` | who may be granted `pool:write` |
-| `HTTP_API_SUPERUSER_GROUP` | `HTTP_API_IMPERSONATION_GROUP` | who may act as another user |
-| `HTTP_API_WEBUI_ADMIN_GROUP` | `HTTP_API_SERVICE_ADMIN_GROUP` | who may administer this service |
-| `MCP_ADMIN_USERS` | `HTTP_API_POOL_READ_USERS` | unscoped-caller fallback for `pool:read` |
+| `pool:read` | `HTTP_API_POOL_READ_GROUPS` | `HTTP_API_POOL_READ_USERS` |
+| `pool:write` | `HTTP_API_POOL_WRITE_GROUPS` | `HTTP_API_POOL_WRITE_USERS` |
+| `mcp:read` | `HTTP_API_MCP_READ_GROUPS` | `HTTP_API_MCP_READ_USERS` |
+| `mcp:write` | `HTTP_API_MCP_WRITE_GROUPS` | `HTTP_API_MCP_WRITE_USERS` |
+| reach `/mcp` at all | `HTTP_API_MCP_ACCESS_GROUPS` | `HTTP_API_MCP_ACCESS_USERS` |
+| reach the web UI at all | `HTTP_API_WEBUI_ACCESS_GROUPS` | `HTTP_API_WEBUI_ACCESS_USERS` |
+| administer this service | `HTTP_API_SERVICE_ADMIN_GROUPS` | `HTTP_API_SERVICE_ADMIN_USERS` |
+| act as another user | `HTTP_API_IMPERSONATION_GROUPS` | `HTTP_API_IMPERSONATION_USERS` |
+| lead a project | `HTTP_API_PROJECT_LEADS_GROUPS` | `HTTP_API_PROJECT_LEADS_USERS` |
 
-**[OPEN]** The `HTTP_API_WEBUI_ADMIN_GROUP` split is the highest-value
-and highest-risk item, and the only one here that can break a running
-deployment. Today it grants *both* cross-user tiers *and* service
-administration, because nobody ever decided it should — the powers were
-merged by being spelled the same. Splitting it means an existing
-deployment's single group has to become two settings, and the compatible
-reading (one name keeps granting all three) preserves exactly the
-conflation we are trying to remove.
+Three rules, and they are the point of the table:
 
-1. **Alias, keep conflated.** `HTTP_API_WEBUI_ADMIN_GROUP` continues to
-   grant all three. New deployments use the new names. Zero breakage,
-   but the old name stays a trap forever.
-2. **Alias, warn, migrate.** The old name keeps granting all three *and*
-   logs at startup naming the three settings that replace it. After a
-   deprecation window it grants only service administration.
+1. **Every `*_GROUPS` has a matching `*_USERS`.** Naming one person
+   should not require inventing a group for them, and a deployment with
+   no group source at all should still be able to say who may do what.
+2. **Both are plural, and both are lists.** The existing names are
+   singular (`HTTP_API_WEBUI_ADMIN_GROUP`) while already accepting a
+   list, which reads as a single group and is not one.
+3. **Membership confers the ability to REQUEST a scope, never the
+   scope.** A credential gets a power only by being granted it, at
+   consent or at mint, and only if its holder was entitled to ask. This
+   is the whole correction below.
 
-Leaning 2. **[OPEN]** — needs your call.
+#### Entitlement is not a grant
 
-**[OPEN]** `MCP_ADMIN_USERS` is the only knob without the `HTTP_API_`
-prefix. Renaming it fixes that inconsistency but is a second breaking
-change layered on the first. It may be better left alone.
+`MCP_ADMIN_USERS` **is not carried forward.** It does not gate a
+request; it hands the read tier directly to any caller on the list whose
+credential states no scopes. That is a permission appearing on a
+credential that never asked for it and whose holder never consented to
+it, which is exactly what the scope vocabulary exists to prevent.
+
+`HTTP_API_POOL_READ_USERS` replaces it in name only. The semantics are
+different: being listed means a request for `pool:read` *may be
+granted*, and a credential that never requests it never carries it.
+
+**This is a behaviour change, and the only one in this document that
+silently removes a power.** A deployment relying on `MCP_ADMIN_USERS`
+today has unscoped stdio callers reading every user's jobs; after this
+they read their own until something requests `pool:read` for them. That
+is the correct end state and it will look like a regression to whoever
+hits it, so it needs a release note and a startup warning naming the
+replacement, not a silent swap.
 
 ### Internal names
 
@@ -155,6 +174,86 @@ has ever been issued with it. That stops being true at the first release
 that ships it, so the naming question above is worth closing before
 then. **[OPEN]** by the same token: if `pool:read` is the wrong name,
 say so now rather than after it has been minted into keys in the field.
+
+## The MCP scope challenge, and what `scopes_supported` is for
+
+Found while reviewing this: the server has two defects against the
+**2025-11-25** MCP authorization spec. We implement **2025-06-18**,
+which says nothing about either, so neither is a violation today — but
+both will become one, and one of them is already the cause of real
+over-permissioning.
+
+### We never send `scope`, so clients ask for everything
+
+`addWWWAuthenticateHeader` emits `realm`, `error`, `error_description`
+and `resource_metadata`. It does not emit `scope`.
+
+The 2025-11-25 spec's Scope Selection Strategy is explicit about what a
+client does then:
+
+1. Use the `scope` parameter from the `WWW-Authenticate` challenge.
+2. **If `scope` is absent, request every scope in `scopes_supported`.**
+
+Our `scopes_supported` is `oauth2AdvertisedScopes`, which includes
+`mcp:admin` and `mcp:superuser`. So every compliant client — claude.ai's
+included — asks for cross-user admin powers on every authorization, and
+the only thing standing between that request and a grant is the consent
+page and the group policy.
+
+That is the same objection as `MCP_ADMIN_USERS`, arriving by a different
+road: a permission being requested because nothing said not to.
+
+The spec also states what the field is meant to hold: `scopes_supported`
+"is intended to represent the **minimal set of scopes necessary for
+basic functionality**", with anything further obtained through step-up.
+Ours is the maximal set.
+
+The comment on `oauth2AdvertisedScopes` explains why the admin scopes
+were added to it: unadvertised, nothing ever requested them, so the
+two-tier privilege model was dead in practice. That reasoning was right
+under 2025-06-18, which offered no other way to reach them. 2025-11-25
+offers the step-up challenge, which is the mechanism that was missing.
+
+**Proposal.** Advertise the minimal set — `openid`, `profile`, `email`,
+`offline_access`, `mcp:read`, `condor:/READ` — and name the rest in the
+challenge when a request actually needs them. Keep every scope
+*requestable*, because `cimdClientScopes` recomputes a CIMD client's
+allowed set from the advertised list on every request, so dropping one
+from `scopes_supported` must not drop it from what may be asked for.
+Those are two different lists today only by accident.
+
+**[OPEN]** Whether to do this before or after the rename. It is
+independent of the vocabulary, and arguably more urgent.
+
+### We return 403 without saying what was missing
+
+`seesAllJobsByPolicy` narrows a request silently: a caller without the
+entitlement gets their own records and no indication that a wider view
+exists or what would buy it. The spec's runtime insufficient-scope
+response is `403` plus
+`error="insufficient_scope"`, `scope="<what this request needs>"` and
+`resource_metadata`, and a client **SHOULD** respond with a step-up
+authorization.
+
+Silent narrowing is what produced the original report that started this
+work. For REST the right answer is still to narrow — a dashboard that
+403s because it cannot see everyone is worse than one that shows you
+your own jobs — but **on `/mcp` the challenge is the correct response**,
+because an MCP client can act on it and a browser cannot.
+
+**[OPEN]** Which surfaces challenge and which narrow. My view: `/mcp`
+challenges, REST narrows and keeps saying so in the response body
+(`owned_by_me`), and `/api/v1/*` called with a bearer that *could* step
+up is a third case worth thinking about rather than guessing at.
+
+### Clients must treat the challenge as authoritative
+
+Worth recording because it is the part that makes the above safe:
+clients **MUST** treat challenged scopes as authoritative for the
+current request, and **MUST NOT** assume any set relationship between
+them and `scopes_supported` — subset, superset or disjoint are all
+allowed. So a minimal `scopes_supported` plus an accurate challenge is a
+supported configuration, not a trick.
 
 ## Compatibility
 
