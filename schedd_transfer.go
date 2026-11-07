@@ -374,6 +374,13 @@ func (t *tarSink) Mkdir(name string) error {
 // fsys: Filesystem containing the files to upload
 // Returns: error if the upload fails
 func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.ClassAd, fsys fs.FS) error {
+	if err := s.spoolJobFilesFromFS(ctx, jobAds, fsys); err != nil {
+		return err
+	}
+	return s.afterSpool(ctx, jobAds)
+}
+
+func (s *Schedd) spoolJobFilesFromFS(ctx context.Context, jobAds []*classad.ClassAd, fsys fs.FS) error {
 	if len(jobAds) == 0 {
 		return fmt.Errorf("no job ads provided")
 	}
@@ -566,6 +573,13 @@ func (s *Schedd) sendJobFiles(ctx context.Context, cedarStream *stream.Stream, _
 // r: Reader providing the tar archive
 // Returns: error if the upload fails
 func (s *Schedd) SpoolJobFilesFromTar(ctx context.Context, jobAds []*classad.ClassAd, r io.Reader) error {
+	if err := s.spoolJobFilesFromTar(ctx, jobAds, r); err != nil {
+		return err
+	}
+	return s.afterSpool(ctx, jobAds)
+}
+
+func (s *Schedd) spoolJobFilesFromTar(ctx context.Context, jobAds []*classad.ClassAd, r io.Reader) error {
 	if len(jobAds) == 0 {
 		return fmt.Errorf("no job ads provided")
 	}
