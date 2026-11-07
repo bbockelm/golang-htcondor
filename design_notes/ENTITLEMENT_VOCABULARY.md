@@ -64,8 +64,8 @@ the rest. "Carried by" is which credential kinds can hold it.
 | `condor:/ADMINISTRATOR`, `/CONFIG`, `/DAEMON`, `/NEGOTIATOR` | — | Nothing. **[OPEN]**, below | |
 | `metrics` | API key | `/metrics` (Prometheus exposition). | unchanged |
 | `placement` | OAuth2 | The placement API. Held only by the seeded placement client, never advertised. | unchanged |
-| `anyuser:read` | API key, OAuth2 | Read every user's jobs on this access point. See *Already using one of these names*. | **[OPEN]** name |
-| `anyuser:write` | API key, OAuth2 | Act on every user's jobs on this access point. | **[OPEN]** name |
+| `anyuser:read` | API key, OAuth2 | Read every user's jobs on this access point. See *Already using one of these names*. | settled |
+| `anyuser:write` | API key, OAuth2 | Act on every user's jobs on this access point. | settled |
 
 Three things that table makes visible and prose did not:
 
@@ -264,8 +264,14 @@ that true.
 It carries no compatibility burden *yet*: no grant outside this server
 has ever been issued with it. That stops being true at the first release
 that ships it, so the naming question above is worth closing before
-then. **[OPEN]** by the same token: if `anyuser:read` is the wrong name,
-say so now rather than after it has been minted into keys in the field.
+then. **Settled**: `anyuser:*` names whose jobs rather than which
+component, which `ap:*` did not and `pool:*` got wrong outright.
+`alluser`/`allusers` was rejected for colliding with HTCondor user
+records (`condor_qusers`, `QUERY_USERREC_ADS`), and `world:*` for
+inverting the Unix sense — *world-readable* says who may read **your**
+thing, not whose things **you** may read, and a scope string travels
+alone in logs, config and a `WWW-Authenticate` challenge without its
+description beside it.
 
 ## The MCP scope challenge, and what `scopes_supported` is for
 
