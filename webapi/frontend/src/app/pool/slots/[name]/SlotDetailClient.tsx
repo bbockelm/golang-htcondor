@@ -9,6 +9,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api, ApiError, type ClassAd } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
 import { parseSlot, slotStateStyle, gib, gpuDevices } from '@/lib/pool';
+import { usePoolIdentityRestricted } from '@/lib/usePoolIdentity';
 
 export default function SlotDetailClient() {
   const { name } = useResolvedParams<{ name: string }>('/pool/slots/[name]');
@@ -24,6 +25,7 @@ export default function SlotDetailClient() {
     retry: false,
   });
 
+  const identityRestricted = usePoolIdentityRestricted();
   const slot = data ? parseSlot(data) : null;
   const notFound = error instanceof ApiError && error.status === 404;
 
@@ -78,7 +80,18 @@ export default function SlotDetailClient() {
               <Field label="CPUs">{slot.cpus ?? '—'}</Field>
               <Field label="Memory">{gib(slot.memoryMB)}</Field>
               <Field label="GPUs">{slot.gpus ?? '—'}</Field>
-              <Field label="Owner">{slot.remoteOwner ?? '—'}</Field>
+              <Field label="Owner">
+                {identityRestricted ? (
+                  <span
+                    className="text-gray-400"
+                    title="This site does not show which user is running on a slot."
+                  >
+                    not shown
+                  </span>
+                ) : (
+                  (slot.remoteOwner ?? '—')
+                )}
+              </Field>
               <Field label="Arch">{slot.arch ?? '—'}</Field>
               <Field label="OS">{slot.opsys ?? '—'}</Field>
             </dl>

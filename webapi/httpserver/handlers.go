@@ -3251,6 +3251,26 @@ func (s *Handler) handleCollectorAdByName(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// The site's restriction on reading other users' details. An empty
+	// projection here means the ad's full contents, which is the widest
+	// read this endpoint offers, so a restricted caller gets the
+	// allowlist as their default rather than everything.
+	privileged := s.seesAllJobs(ctx, r, jobScopeRead)
+	if s.poolQueryPolicy.Refuses(privileged) {
+		s.writeError(w, http.StatusForbidden,
+			"Pool queries are restricted to administrators at this site")
+		return
+	}
+	if err := s.poolQueryPolicy.CheckAdType(privileged, queryAdType); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if err := s.poolQueryPolicy.CheckProjection(privileged, queryAdType, projection); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	projection = s.poolQueryPolicy.ClampProjection(privileged, queryAdType, projection)
+
 	// Build constraint for specific ad by name
 	constraint := fmt.Sprintf("%s == %q", nameAttr, name)
 

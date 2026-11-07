@@ -109,9 +109,9 @@ export function parseSlot(ad: ClassAd): Slot {
   };
 }
 
-// The projection the /pool query requests. Keep in sync with parseSlot;
-// note the capital-GPU spelling the startd actually publishes.
-export const SLOT_PROJECTION = [
+// What the /pool query requests about a machine. Keep in sync with
+// parseSlot; note the capital-GPU spelling the startd actually publishes.
+const SLOT_ATTRS = [
   'Name',
   'Machine',
   'SlotType',
@@ -129,12 +129,28 @@ export const SLOT_PROJECTION = [
   'NumDynamicSlots',
   'State',
   'Activity',
-  'RemoteOwner',
   'AssignedGPUs',
   'Arch',
   'OpSys',
   'OpSysAndVer',
-].join(',');
+];
+
+// Who is running on the slot, which a site can withhold from users who
+// are not administrators (HTTP_API_POOL_QUERY_IDENTITY). Asked for
+// separately because a projection naming an attribute the caller may not
+// read is REFUSED, not trimmed: requesting it anyway would not blank the
+// Owner column, it would empty the whole page.
+const SLOT_IDENTITY_ATTRS = ['RemoteOwner'];
+
+// slotProjection returns the attributes to request. `restricted` comes
+// from the session (pool_identity_restricted); it only decides what to
+// ask for, and the server enforces the same rule on what it answers.
+export function slotProjection(restricted: boolean): string {
+  return (restricted ? SLOT_ATTRS : [...SLOT_ATTRS, ...SLOT_IDENTITY_ATTRS]).join(',');
+}
+
+// The unrestricted projection, for callers with no session to consult.
+export const SLOT_PROJECTION = slotProjection(false);
 
 export interface ResourceUsage {
   usedCpus: number;

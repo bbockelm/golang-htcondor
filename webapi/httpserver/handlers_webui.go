@@ -69,6 +69,13 @@ type AuthMeResponse struct {
 	// Placement is the session's placement identity, present when this
 	// server issues placement tokens and the session has one.
 	Placement *PlacementSessionInfo `json:"placement,omitempty"`
+	// PoolIdentityRestricted reports that this session may not read who
+	// is running on a slot, so the pool pages can say so rather than
+	// render an empty column that reads as "nobody is running here".
+	//
+	// Advisory, for rendering only. The restriction is enforced on every
+	// collector read regardless of what the SPA does with this.
+	PoolIdentityRestricted bool `json:"pool_identity_restricted,omitempty"`
 }
 
 // PlacementSessionInfo is the placement identity of a session.
@@ -149,6 +156,11 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// Whether this session may see who is running on a slot. Asked of
+	// the same policy the collector reads go through, so the page and
+	// the data it renders cannot disagree about what is withheld.
+	resp.PoolIdentityRestricted = s.poolQueryPolicy.Restricts(s.seesAllJobs(r.Context(), r, jobScopeRead))
 
 	s.writeJSON(w, http.StatusOK, resp)
 }
