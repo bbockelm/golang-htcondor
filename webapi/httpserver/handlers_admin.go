@@ -174,7 +174,14 @@ func (s *Handler) seesAllJobsByPolicy(ctx context.Context, r *http.Request, tier
 		return ok
 	}
 	if scoped {
-		_, ok := scopes[scopeMCPAdmin]
+		if _, ok := scopes[scopeMCPAdmin]; ok {
+			return true
+		}
+		// pool:read is the same power named for what it grants rather
+		// than for the surface that first needed it. An API key carries
+		// it only after resolveAPIKeyEntitlements has confirmed the key
+		// is still entitled to it on this request.
+		_, ok := scopes[scopePoolRead]
 		return ok
 	}
 	return slices.ContainsFunc(s.mcpAdminUsers, func(u string) bool { return authz.SameUser(u, actor) })
@@ -190,24 +197,43 @@ func (s *Handler) seesAllJobsByPolicy(ctx context.Context, r *http.Request, tier
 // their own jobs while the account database is unreachable; the
 // alternative is guessing.
 func (s *Handler) identityIsWebUIAdmin(ctx context.Context, actor string) bool {
+	granted, _ := s.liveGroupEntitlement(ctx, actor)
+	return granted
+}
+
+// liveGroupEntitlement is identityIsWebUIAdmin with the two reasons for
+// a "no" told apart: granted says whether the groups the system reports
+// right now carry the admin group, and answered says whether anything
+// was able to report them at all.
+//
+// Everything that only needs a yes/no goes through identityIsWebUIAdmin
+// and is unaffected. The distinction matters to one caller: an API
+// key's entitlement is re-verified on use, and "this deployment has no
+// group source" must not be read there as "this person was removed from
+// the group". The first is silence, which expires against a staleness
+// window; the second is a denial, which takes effect at once. See
+// apikey_entitlements.go.
+func (s *Handler) liveGroupEntitlement(ctx context.Context, actor string) (granted, answered bool) {
 	if !s.webuiAdminGroups.configured() || !s.localIdentity.sourcesGroups() {
-		return false
+		return false, false
 	}
 	account := actor
 	if i := strings.LastIndex(actor, "@"); i >= 0 {
 		if s.uidDomain == "" || !strings.EqualFold(actor[i+1:], s.uidDomain) {
-			return false
+			// Another realm's identity. This machine's accounts say
+			// nothing about them, which is silence rather than a no.
+			return false, false
 		}
 		account = actor[:i]
 	}
 	if account == "" {
-		return false
+		return false, false
 	}
 	groups, err := s.localIdentity.groups.LookupGroups(ctx, account)
 	if err != nil {
-		return false
+		return false, false
 	}
-	return s.webuiAdminGroups.grants(groups)
+	return s.webuiAdminGroups.grants(groups), true
 }
 
 // resolveOwnerScope settles whether a request asking for other people's

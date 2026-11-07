@@ -17,7 +17,7 @@ func TestAPIKeyStoreInsertLookup(t *testing.T) {
 	exp := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	createdAt, err := store.Insert(context.Background(),
 		"abcdefabcdef", "fakehash", "test-key", "alice",
-		[]string{"metrics"}, &exp)
+		[]string{"metrics"}, &exp, false)
 	if err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestAPIKeyStoreLookupExpired(t *testing.T) {
 	store := &apiKeyStore{db: newTestDB(t, filepath.Join(t.TempDir(), "ak.db"))}
 	past := time.Now().Add(-time.Hour).UTC()
 	if _, err := store.Insert(context.Background(),
-		"deadbeefdead", "h", "n", "alice", []string{"metrics"}, &past); err != nil {
+		"deadbeefdead", "h", "n", "alice", []string{"metrics"}, &past, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	_, err := store.LookupActive(context.Background(), "deadbeefdead")
@@ -76,7 +76,7 @@ func TestAPIKeyStoreLookupExpired(t *testing.T) {
 func TestAPIKeyStoreSoftDelete(t *testing.T) {
 	store := &apiKeyStore{db: newTestDB(t, filepath.Join(t.TempDir(), "ak.db"))}
 	if _, err := store.Insert(context.Background(),
-		"aaabbbcccddd", "h", "n", "alice", []string{"metrics"}, nil); err != nil {
+		"aaabbbcccddd", "h", "n", "alice", []string{"metrics"}, nil, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 
@@ -111,7 +111,7 @@ func TestAPIKeyStoreSoftDelete(t *testing.T) {
 func TestAPIKeyStoreSoftDeleteCrossOwner(t *testing.T) {
 	store := &apiKeyStore{db: newTestDB(t, filepath.Join(t.TempDir(), "ak.db"))}
 	if _, err := store.Insert(context.Background(),
-		"bbbbbbbbbbbb", "h", "n", "bob", []string{"metrics"}, nil); err != nil {
+		"bbbbbbbbbbbb", "h", "n", "bob", []string{"metrics"}, nil, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	if err := store.SoftDelete(context.Background(), "bbbbbbbbbbbb", "alice"); !errors.Is(err, errAPIKeyNotFound) {

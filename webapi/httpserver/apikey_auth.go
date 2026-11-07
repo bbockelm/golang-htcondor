@@ -179,7 +179,13 @@ func (s *Handler) authenticateAPIKey(r *http.Request, raw string) (context.Conte
 	noteRESTActor(ctx, row.Creator)
 	noteRESTClient(ctx, restClientAPIKeyPrefix+" "+row.Name)
 	ctx = s.withPlacementOwnerScope(ctx, nil, row.Creator)
-	ctx = withAPIKeyScopes(ctx, row.Scopes)
+	// Not row.Scopes: an entitlement scope is a claim about the
+	// creator, not about the key, so it is re-checked here rather than
+	// taken on the key's word. A service key keeps what it was granted;
+	// an ordinary key keeps it only while its creator still has it. See
+	// apikey_entitlements.go.
+	ctx, scopes := s.resolveAPIKeyEntitlements(ctx, row)
+	ctx = withAPIKeyScopes(ctx, scopes)
 	ctx = withAPIKeyMarker(ctx)
 
 	// A key carrying condor:/* scopes gets a schedd credential, limited
@@ -197,7 +203,8 @@ func (s *Handler) authenticateAPIKey(r *http.Request, raw string) (context.Conte
 		s.logger.Debug(logging.DestinationSecurity, "Authenticated via API key",
 			"key_id", row.KeyID,
 			"creator", row.Creator,
-			"scopes", row.Scopes,
+			"service", row.Service,
+			"scopes", scopes,
 		)
 	}
 	return ctx, nil

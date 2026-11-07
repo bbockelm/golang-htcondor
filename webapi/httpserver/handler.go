@@ -267,10 +267,18 @@ type Handler struct {
 	// token exchange. Nil when no issuers are configured. See
 	// oauth2_token_exchange_ext.go.
 	extIssuers          *extIssuerValidator
-	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
-	cookieSessionCaches *TokenCache       // One private session cache per session-cookie user (see sessionCacheFor)
-	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
-	apiKeyStore         *apiKeyStore      // API-key store: admin-mintable bearer tokens for non-interactive callers
+	tokenCache          *TokenCache   // Cache of validated tokens and their session caches (includes username)
+	cookieSessionCaches *TokenCache   // One private session cache per session-cookie user (see sessionCacheFor)
+	sessionStore        *SessionStore // HTTP session store for browser-based authentication
+	apiKeyStore         *apiKeyStore  // API-key store: admin-mintable bearer tokens for non-interactive callers
+	// apiKeyEntitlementTTL is HTTP_API_API_KEY_ENTITLEMENT_TTL: how long
+	// an ordinary API key's entitlement stands with nothing able to
+	// confirm it. Zero means defaultEntitlementTTL.
+	apiKeyEntitlementTTL time.Duration
+	// serviceKeyMaxTTL is HTTP_API_SERVICE_KEY_MAX_LIFETIME: the cap on
+	// how far out a service key's expiry may be set. Zero means
+	// defaultServiceKeyMaxLifetime.
+	serviceKeyMaxTTL    time.Duration
 	oauth2Provider      *OAuth2Provider   // OAuth2 provider for MCP endpoints
 	oauth2Config        *oauth2.Config    // OAuth2 client config for SSO
 	oauth2StateStore    *OAuth2StateStore // State storage for OAuth2 SSO flow
@@ -1173,6 +1181,10 @@ type HandlerConfig struct {
 
 	// TokenRetention is HTTP_API_TOKEN_RETENTION. See Config.
 	TokenRetention string
+	// APIKeyEntitlementTTL is HTTP_API_API_KEY_ENTITLEMENT_TTL. See Config.
+	APIKeyEntitlementTTL time.Duration
+	// ServiceKeyMaxLifetime is HTTP_API_SERVICE_KEY_MAX_LIFETIME. See Config.
+	ServiceKeyMaxLifetime time.Duration
 
 	// MCPMaxRequestDuration is the hard stop on an MCP request that is
 	// still making progress (HTTP_API_MCP_MAX_REQUEST_DURATION). While a
@@ -1812,6 +1824,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if mode != UpstreamRefreshOff {
 		h.upstreamRefresh = &upstreamRefreshStore{db: h.db, sealer: sealer, logger: logger}
 	}
+	h.apiKeyEntitlementTTL = cfg.APIKeyEntitlementTTL
+	h.serviceKeyMaxTTL = cfg.ServiceKeyMaxLifetime
 	retention, err := ParseTokenRetention(cfg.TokenRetention)
 	if err != nil {
 		return nil, fmt.Errorf("invalid HTTP_API_TOKEN_RETENTION: %w", err)

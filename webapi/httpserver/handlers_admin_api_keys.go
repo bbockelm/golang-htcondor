@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -25,6 +26,15 @@ type adminAPIKeyDTO struct {
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	DeletedAt  *time.Time `json:"deleted_at,omitempty"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	// Service distinguishes an automation's credential from the
+	// minter's own. Shown in the listing because the two are revoked
+	// differently and an operator auditing keys needs to tell them
+	// apart at a glance.
+	Service bool `json:"service"`
+	// EntitlementsCheckedAt is when this key's entitlements were last
+	// confirmed. Omitted for a key that carries none, and meaningless
+	// for a service key, which holds them without re-confirmation.
+	EntitlementsCheckedAt *time.Time `json:"entitlements_checked_at,omitempty"`
 }
 
 // rowToAdminDTO drops the secret_hash and renames fields to JSON-
@@ -41,7 +51,20 @@ func rowToAdminDTO(r apiKeyRow) adminAPIKeyDTO {
 		ExpiresAt:  r.ExpiresAt,
 		DeletedAt:  r.DeletedAt,
 		LastUsedAt: r.LastUsedAt,
+		Service:    r.Service,
+
+		EntitlementsCheckedAt: entitlementsCheckedFor(r),
 	}
+}
+
+// entitlementsCheckedFor reports the last-verified timestamp only where
+// it means something: a key with no entitlement has nothing to verify,
+// and a service key is not verified at all.
+func entitlementsCheckedFor(r apiKeyRow) *time.Time {
+	if r.Service || len(heldEntitlements(r.Scopes)) == 0 {
+		return nil
+	}
+	return r.EntitlementsCheckedAt
 }
 
 // validScopes is the closed set of scope strings an API key can be
@@ -63,6 +86,12 @@ var validScopes = map[string]string{
 	// authorizations one-to-one, so a key expected to both query and
 	// act needs both scopes selected.
 	"condor:/WRITE": "Act on the creator's jobs (submit, hold, release, remove). Does not grant READ; select both to query as well.",
+
+	// An ENTITLEMENT rather than an endpoint: it says whose records the
+	// key may see, not which door it may knock on. Granted only to a
+	// minter who holds it, and re-verified on use unless the key is a
+	// service key. See apikey_entitlements.go.
+	scopePoolRead: "Read every user's records, not just the creator's. Granted only to an administrator who holds it; on a key that is not a service key it lapses when the creator's entitlement does.",
 }
 
 // handleAdminListAPIKeys handles GET /api/v1/admin/api-keys.
@@ -102,9 +131,16 @@ func (s *Handler) handleAdminListAPIKeys(w http.ResponseWriter, r *http.Request)
 // for "never expires". `scopes` MUST be non-empty (a key with no
 // scope can't authorize anything).
 type adminAPIKeyCreateRequest struct {
-	Name      string     `json:"name"`
-	Scopes    []string   `json:"scopes"`
+	Name   string   `json:"name"`
+	Scopes []string `json:"scopes"`
+	// ExpiresAt is RFC 3339, or omitted for "never expires". A service
+	// key may not omit it.
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// Service marks this key as an automation's credential rather than
+	// the minter's own. It changes how the key's entitlements are held
+	// -- granted once here instead of re-verified on every use -- which
+	// is why it also requires an expiry.
+	Service bool `json:"service,omitempty"`
 }
 
 // adminAPIKeyCreateResponse contains the FULL minted key — show it
@@ -112,6 +148,12 @@ type adminAPIKeyCreateRequest struct {
 // metadata DTO without the secret.
 type adminAPIKeyCreateResponse struct {
 	APIKey adminAPIKeyDTO `json:"api_key"`
+	// Note is a plain-language caveat about the key just minted, or
+	// empty when there is none. Said here because the mint request is
+	// the last moment anybody is looking: an entitlement that will
+	// lapse unattended is not something to discover from a dashboard
+	// that quietly narrowed.
+	Note string `json:"note,omitempty"`
 	// Key is the wire-format value the user pastes into the
 	// Authorization header. Returned ONCE in the create response
 	// and never recoverable afterward.
@@ -178,6 +220,23 @@ func (s *Handler) handleAdminCreateAPIKey(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusBadRequest, "expires_at must be in the future")
 		return
 	}
+	// An entitlement is granted from the minter's own, so a minter may
+	// not hand out what they do not hold. requireAdmin has already
+	// established the session this reads; the check is written out
+	// rather than left implicit because it is the one line that has to
+	// change when service administration and pool reads stop being the
+	// same group.
+	for _, sc := range heldEntitlements(req.Scopes) {
+		if !s.isWebUIAdmin(r) {
+			s.writeError(w, http.StatusForbidden,
+				fmt.Sprintf("granting %s requires holding it yourself", sc))
+			return
+		}
+	}
+	if err := validateServiceKeyExpiry(req.Scopes, req.Service, req.ExpiresAt, s.serviceKeyMaxLifetime()); err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	minted, err := apikey.Mint()
 	if err != nil {
@@ -186,7 +245,7 @@ func (s *Handler) handleAdminCreateAPIKey(w http.ResponseWriter, r *http.Request
 		return
 	}
 	createdAt, err := s.apiKeyStore.Insert(r.Context(),
-		minted.KeyID, minted.SecretHash, req.Name, creator, req.Scopes, req.ExpiresAt)
+		minted.KeyID, minted.SecretHash, req.Name, creator, req.Scopes, req.ExpiresAt, req.Service)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "API key insert failed", "error", err, "creator", creator)
 		s.writeError(w, http.StatusInternalServerError, "Failed to persist API key")
@@ -194,7 +253,7 @@ func (s *Handler) handleAdminCreateAPIKey(w http.ResponseWriter, r *http.Request
 	}
 	s.logger.Info(logging.DestinationHTTP, "API key minted",
 		"key_id", minted.KeyID, "creator", creator,
-		"scopes", req.Scopes, "name", req.Name)
+		"scopes", req.Scopes, "name", req.Name, "service", req.Service)
 
 	dto := adminAPIKeyDTO{
 		KeyID:     minted.KeyID,
@@ -203,10 +262,12 @@ func (s *Handler) handleAdminCreateAPIKey(w http.ResponseWriter, r *http.Request
 		Creator:   creator,
 		CreatedAt: createdAt,
 		ExpiresAt: req.ExpiresAt,
+		Service:   req.Service,
 	}
 	s.writeJSON(w, http.StatusCreated, adminAPIKeyCreateResponse{
 		APIKey: dto,
 		Key:    minted.Full,
+		Note:   s.mintNote(r.Context(), creator, req.Scopes, req.Service),
 	})
 }
 
@@ -262,4 +323,60 @@ func (s *Handler) adminUsername(r *http.Request) string {
 		return u
 	}
 	return ""
+}
+
+// validateServiceKeyExpiry enforces the one rule that makes a service
+// key's frozen entitlement safe to grant: it has to end.
+//
+// A service key holds its entitlements without further proof, so the
+// expiry is the only thing bounding them -- "never expires" is exactly
+// the property that turns a convenience into a standing grant nobody
+// revisits, and re-minting is how the entitlement gets re-attested.
+//
+// The rule applies only to a service key that actually carries an
+// entitlement. A service key scoped to /metrics is freezing nothing
+// about a person and has no more reason to expire than any other key.
+func validateServiceKeyExpiry(scopes []string, service bool, expiresAt *time.Time, max time.Duration) error {
+	if !service || len(heldEntitlements(scopes)) == 0 {
+		return nil
+	}
+	if expiresAt == nil {
+		return fmt.Errorf("a service key carrying an entitlement must set expires_at; " +
+			"re-minting it is how the entitlement is re-attested")
+	}
+	if expiresAt.After(time.Now().Add(max)) {
+		return fmt.Errorf("expires_at is further out than this server allows for a service key (%s)", max)
+	}
+	return nil
+}
+
+// serviceKeyMaxLifetime caps how far out a service key's expiry may be
+// set.
+func (s *Handler) serviceKeyMaxLifetime() time.Duration {
+	if s.serviceKeyMaxTTL > 0 {
+		return s.serviceKeyMaxTTL
+	}
+	return defaultServiceKeyMaxLifetime
+}
+
+// mintNote warns about a key that will not behave the way the person
+// minting it is likely to expect, or returns "" when it will.
+//
+// The case worth saying out loud: an entitlement on a key that is not a
+// service key, in a deployment with no way to re-verify it. That key
+// works when its minter tests it and stops working an hour later, with
+// no error -- the listing it feeds simply narrows to one user's
+// records. Nothing about the request says so, so the response does.
+func (s *Handler) mintNote(ctx context.Context, creator string, scopes []string, service bool) string {
+	if service || len(heldEntitlements(scopes)) == 0 {
+		return ""
+	}
+	if _, answered := s.liveGroupEntitlement(ctx, creator); answered {
+		return ""
+	}
+	return fmt.Sprintf(
+		"This key's entitlement will lapse %s after it is minted: this server has no way to confirm "+
+			"that you still hold it, and an unconfirmed entitlement is not honored indefinitely. "+
+			"A credential meant to run unattended should be minted as a service key.",
+		s.entitlementTTL())
 }

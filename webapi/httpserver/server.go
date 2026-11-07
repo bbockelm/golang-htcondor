@@ -328,6 +328,15 @@ type Config struct {
 	// "off" keeps them forever. See oauth2_retention.go.
 	TokenRetention string
 
+	// APIKeyEntitlementTTL is HTTP_API_API_KEY_ENTITLEMENT_TTL: how long
+	// an API key that is not a service key may keep an entitlement that
+	// nothing has been able to confirm. Zero takes the default.
+	APIKeyEntitlementTTL time.Duration
+	// ServiceKeyMaxLifetime is HTTP_API_SERVICE_KEY_MAX_LIFETIME: the
+	// furthest out a service key's expiry may be set. Zero takes the
+	// default.
+	ServiceKeyMaxLifetime time.Duration
+
 	// MCPAdminGroup / MCPSuperuserGroup gate the two cross-user MCP
 	// privileges. Empty means NOBODY, not everybody -- see
 	// HandlerConfig for why these invert the default above.
@@ -587,6 +596,8 @@ func NewServer(cfg Config) (*Server, error) {
 		UpstreamRefresh:             cfg.UpstreamRefresh,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,
 		TokenRetention:              cfg.TokenRetention,
+		APIKeyEntitlementTTL:        cfg.APIKeyEntitlementTTL,
+		ServiceKeyMaxLifetime:       cfg.ServiceKeyMaxLifetime,
 		MCPUseSDKTransport:          cfg.MCPUseSDKTransport,
 		RequiredCredentials:         cfg.RequiredCredentials,
 		CreddAddress:                cfg.CreddAddress,

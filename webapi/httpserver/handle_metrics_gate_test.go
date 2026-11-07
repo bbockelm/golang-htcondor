@@ -78,7 +78,7 @@ func TestMetricsGateRejectsKeyWithoutScope(t *testing.T) {
 	// does); we just want the key to authenticate but lack metrics.
 	if _, err := h.apiKeyStore.Insert(context.Background(),
 		minted.KeyID, minted.SecretHash, "wrong-scope-key", "alice",
-		[]string{"some-other-scope"}, nil); err != nil {
+		[]string{"some-other-scope"}, nil, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	r := httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil)
@@ -99,7 +99,7 @@ func TestMetricsGateAcceptsValidKey(t *testing.T) {
 	minted, _ := apikey.Mint()
 	if _, err := h.apiKeyStore.Insert(context.Background(),
 		minted.KeyID, minted.SecretHash, "prom", "alice",
-		[]string{"metrics"}, nil); err != nil {
+		[]string{"metrics"}, nil, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	r := httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil)
