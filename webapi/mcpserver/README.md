@@ -16,6 +16,10 @@ A Model Context Protocol (MCP) server for managing HTCondor jobs. This server ex
 
 The Model Context Protocol (MCP) is an open standard that enables AI assistants to securely interact with external data sources and tools. MCP servers expose specific capabilities (called "tools" and "resources") that AI assistants can discover and use.
 
+## What this server is not
+
+This server is not a sandbox. An agent reaching it holds the privileges of whoever authenticated, which are the privileges HTCondor already grants that person. Submitting a DAG runs its PRE/POST scripts on the access point as that user, the interactive session tools hand back a shell, and pool queries describe other users' running jobs. Before enabling MCP for a site, read [MCP is not a sandbox](../../docs/server-agents.md#mcp-is-not-a-sandbox), which covers what that means in practice and which controls actually constrain it.
+
 ## Installation
 
 ```bash
@@ -201,6 +205,10 @@ constraint excludes dynamic slots. Slots that do not advertise an
 attribute are counted under `missing`, not added as zero. Claim ids and
 other private attributes are never returned and cannot be named in any
 argument.
+
+Slot and submitter ads describe other users: who is running where, their
+project, and their jobs' resource use. See [Pool queries and other users'
+identities](../../docs/server-agents.md#pool-queries-and-other-users-identities).
 
 ### get_access_point_policy
 
