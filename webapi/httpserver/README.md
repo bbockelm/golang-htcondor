@@ -652,6 +652,12 @@ HTTP_API_MCP_SUPERUSER_GROUP = mcp-superusers
 #
 # `whoami` reports which of these applied, and why, for a given caller.
 MCP_ADMIN_USERS = alice@example.edu, ops@example.edu
+
+# Which collector attributes a caller without the cross-user read
+# privilege may read: open (default), restricted, admin. See
+# docs/server-agents.md#pool-queries-and-other-users-identities.
+HTTP_API_POOL_QUERY_IDENTITY = restricted
+HTTP_API_POOL_QUERY_EXTRA_ATTRS = GLIDEIN_Site
 ```
 
 **OIDC Discovery:**

@@ -207,8 +207,7 @@ other private attributes are never returned and cannot be named in any
 argument.
 
 Slot and submitter ads describe other users: who is running where, their
-project, and their jobs' resource use. See [Pool queries and other users'
-identities](../../docs/server-agents.md#pool-queries-and-other-users-identities).
+project, and their jobs' resource use. `HTTP_API_POOL_QUERY_IDENTITY` confines a caller without the cross-user read privilege to attributes describing machines rather than people, and refuses submitter ads outright; `admin` requires that privilege for any pool query. See [Pool queries and other users' identities](../../docs/server-agents.md#pool-queries-and-other-users-identities).
 
 ### get_access_point_policy
 
