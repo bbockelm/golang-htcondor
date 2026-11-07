@@ -27,6 +27,7 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		have := probeOracleTraits(facts)
+		goBehavior = goBehaviorFor(have)
 		fmt.Fprintf(os.Stderr, "oracle %s\ntraits:%s\n", oracle.Version(), describeTraits(have))
 		if dropped := activateDivergences(have); len(dropped) > 0 {
 			fmt.Fprintf(os.Stderr, "entries not applicable to this oracle: %s\n", strings.Join(dropped, " "))

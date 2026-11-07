@@ -46,18 +46,12 @@ func (sf *SubmitFile) setSubmitTimeDefaults(ad *classad.ClassAd) {
 	// integers: the shadow writes fractional seconds into them, and a
 	// consumer that reads one with an integer lookup gets nothing from a
 	// real. 0.0 keeps the type the same from the start.
-	for _, attr := range []string{
+	reals := []string{
 		"RemoteWallClockTime",
-		"RemoteUserCpu",
-		"RemoteSysCpu",
 		"CumulativeRemoteUserCpu",
 		"CumulativeRemoteSysCpu",
-	} {
-		_ = ad.Set(attr, 0.0)
 	}
-
-	for _, attr := range []string{
-		"ExitStatus",
+	ints := []string{
 		"NumCkpts",
 		"NumJobStarts",
 		"NumJobCompletions",
@@ -67,14 +61,32 @@ func (sf *SubmitFile) setSubmitTimeDefaults(ad *classad.ClassAd) {
 		"CommittedSlotTime",
 		"CumulativeSlotTime",
 		"TotalSuspensions",
-		"LastSuspensionTime",
 		"CumulativeSuspensionTime",
 		"CommittedSuspensionTime",
-	} {
-		_ = ad.Set(attr, 0)
 	}
 
-	_ = ad.Set("ExitBySignal", false)
+	// The four HTCONDOR-3998 stopped initializing, and the one
+	// HTCONDOR-4020 did. They are listed here rather than in the lists
+	// above so that what a release dropped is visible as a group, and so
+	// that the ones it KEPT -- RemoteWallClockTime and the Cumulative*
+	// counters, which are read the same way -- are visibly not in it.
+	if !sf.behavior.OmitZeroedRunTimeCounters {
+		reals = append(reals, "RemoteUserCpu", "RemoteSysCpu")
+		ints = append(ints, "LastSuspensionTime")
+	}
+	if !sf.behavior.OmitExitStatus {
+		ints = append(ints, "ExitStatus")
+	}
+
+	for _, attr := range reals {
+		_ = ad.Set(attr, 0.0)
+	}
+	for _, attr := range ints {
+		_ = ad.Set(attr, 0)
+	}
+	if !sf.behavior.OmitZeroedRunTimeCounters {
+		_ = ad.Set("ExitBySignal", false)
+	}
 }
 
 // notificationCodes are the five words `notification` accepts, mapped to the

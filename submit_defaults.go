@@ -105,8 +105,16 @@ func (sf *SubmitFile) param(name string) (string, bool) {
 // defaults apply to this job at all. condor_submit turns them off for
 // grid jobs bound for a batch system through the blahp (grid_resource
 // "batch ..."): that job's resources are the remote batch system's
-// business, not this pool's.
+// business, not this pool's. Newer releases turn them off for the local
+// and scheduler universes too.
 func (sf *SubmitFile) usesDefaultResourceParams() bool {
+	// A local- or scheduler-universe job is never matched to a startd, so
+	// a default request only puts a number in the ad that nothing reads;
+	// see SubmitBehavior.OmitLocalAndSchedulerResourceDefaults.
+	if sf.behavior.OmitLocalAndSchedulerResourceDefaults &&
+		(sf.universe == UniverseLocal || sf.universe == UniverseScheduler) {
+		return false
+	}
 	if sf.universe != UniverseGrid {
 		return true
 	}

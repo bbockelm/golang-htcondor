@@ -149,6 +149,27 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 	return sf.assignRequirements(ad, answer)
 }
 
+// platformChecksSettled reports whether Arch and OpSys need no automatic
+// clause: either the submitter's own Requirements already names one, or the
+// job is of a kind for which the clause says nothing.
+//
+// A container or docker job settles OpSys by asking for the runtime instead.
+// A local- or scheduler-universe job is run by the schedd rather than matched
+// to a startd, so both clauses describe a machine nothing consults -- and the
+// schedd's own ad does not advertise what they ask for. Treating them as
+// already checked is how condor_submit suppresses them; see
+// SubmitBehavior.OmitLocalAndSchedulerMachineChecks.
+func (sf *SubmitFile) platformChecksSettled(refs map[string]bool, isDocker, isContainer bool) (arch, opsys bool) {
+	runsOnTheSchedd := sf.behavior.OmitLocalAndSchedulerMachineChecks &&
+		(sf.universe == UniverseLocal || sf.universe == UniverseScheduler)
+	arch = runsOnTheSchedd || refs["arch"]
+	opsys = isContainer || isDocker || runsOnTheSchedd ||
+		refs["opsys"] || refs["opsysandver"] ||
+		refs["opsyslongname"] || refs["opsysshortname"] || refs["opsysname"] ||
+		refs["opsyslegacy"]
+	return arch, opsys
+}
+
 // addPlatformRequirements adds the clauses that put the job on a machine that
 // can run its executable at all: the submitting machine's platform, and
 // whatever runtime the universe needs.
@@ -158,10 +179,7 @@ func (sf *SubmitFile) setRequirements(ad *classad.ClassAd) error {
 // container or docker job counts as having checked OpSys, since its image
 // carries its own.
 func (sf *SubmitFile) addPlatformRequirements(ad *classad.ClassAd, refs map[string]bool, add func(string), isDocker, isContainer bool) {
-	checksArch := refs["arch"]
-	checksOpSys := isContainer || isDocker || refs["opsys"] || refs["opsysandver"] ||
-		refs["opsyslongname"] || refs["opsysshortname"] || refs["opsysname"] ||
-		refs["opsyslegacy"]
+	checksArch, checksOpSys := sf.platformChecksSettled(refs, isDocker, isContainer)
 
 	switch {
 	case sf.universe == UniverseJava:
@@ -276,13 +294,22 @@ func (sf *SubmitFile) addDiskRequirement(ad *classad.ClassAd, refs map[string]bo
 			return
 		}
 		if sf.universe == UniverseVanilla {
-			add("(versionGE(split(TARGET.CondorVersion)[1], \"25.12.0\") || (TARGET.Disk >= RequestDisk))")
+			// Common-files transfer means RequestDisk no longer describes
+			// what the job puts on the slot, so the clause is first
+			// version-guarded and then dropped; see
+			// SubmitBehavior.OmitVanillaDiskClause.
+			if !sf.behavior.OmitVanillaDiskClause {
+				add("(versionGE(split(TARGET.CondorVersion)[1], \"25.12.0\") || (TARGET.Disk >= RequestDisk))")
+			}
 		} else {
 			add("(TARGET.Disk >= RequestDisk)")
 		}
 	case sf.universe == UniverseVM:
 		// A VM's disk is the whole slot's, not the slot's share.
 		add("(TARGET.TotalDisk >= DiskUsage)")
+	case sf.universe == UniverseScheduler && sf.behavior.OmitLocalAndSchedulerMachineChecks:
+		// A scheduler job runs in the user's own space; there is no
+		// TARGET.Disk for it to be compared against.
 	default:
 		add("(TARGET.Disk >= DiskUsage)")
 	}
@@ -462,7 +489,7 @@ func (sf *SubmitFile) appendTransferRequirements(ad *classad.ClassAd, refs map[s
 			addVersionCheck = true
 		}
 	}
-	if addVersionCheck {
+	if addVersionCheck && !sf.behavior.OmitTransferVersionCheck {
 		answer += " && versioncmp( split(TARGET.CondorVersion)[1], \"8.9.7\" ) >= 0"
 	}
 

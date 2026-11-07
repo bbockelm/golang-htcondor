@@ -87,6 +87,9 @@ type SubmitFile struct {
 	// accounting group is built from. Empty means the parse was given
 	// none and falls back to the account running it; see submitUserName.
 	submitUser string
+	// behavior is SubmitParseOptions.Behavior: which release's
+	// condor_submit this parse emulates where they differ.
+	behavior SubmitBehavior
 	// localAccess is SubmitParseOptions.AllowLocalAccess, kept because a
 	// few of condor_submit's keywords read the submitting process's
 	// ENVIRONMENT rather than the submit file -- `use_scitokens` falls
@@ -208,6 +211,11 @@ type SubmitParseOptions struct {
 	// authenticated submitter, or the group is charged to the daemon's
 	// own account.
 	SubmitUser string
+
+	// Behavior selects the choices condor_submit makes differently in
+	// different HTCondor releases. The zero value is the behavior this
+	// library has always produced; see SubmitBehavior.
+	Behavior SubmitBehavior
 }
 
 // ParseSubmitFile parses a submit file from a reader. The parse cannot
@@ -291,6 +299,7 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 		params:      opts.Params,
 		submitUser:  opts.SubmitUser,
 		localAccess: opts.AllowLocalAccess,
+		behavior:    opts.Behavior,
 	}
 
 	// Set universe if specified. Read through submitCommand like every
@@ -2188,7 +2197,7 @@ func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
 		if err := setExprAttr(ad, "LeaveJobInQueue", "leave_in_queue", leaveInQueue); err != nil {
 			return err
 		}
-	} else if _, ok := ad.Lookup("LeaveJobInQueue"); !ok {
+	} else if _, ok := ad.Lookup("LeaveJobInQueue"); !ok && !sf.behavior.OmitLeaveJobInQueueDefault {
 		// A job nobody said anything about leaves the queue when it is
 		// done, and condor_submit says so rather than leaving the schedd
 		// to assume it: SetLeaveInQueue writes false for a local

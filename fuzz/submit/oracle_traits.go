@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
 )
 
@@ -169,6 +170,31 @@ func probeOracleTraits(f oracleFacts) map[string]bool {
 		have[tr.ticket] = tr.probe(f)
 	}
 	return have
+}
+
+// goBehaviorFor is the other half of a trait: having probed what the oracle
+// does, the Go side is asked to do the same thing.
+//
+// This is what makes a version-gated fix land without a red window. Once a
+// behavior is gated and wired here, the two parsers agree against BOTH
+// oracles -- the pinned release and HTCondor main -- and the entries that
+// recorded the difference are deleted rather than flipped. An entry stays
+// only for a difference the Go side cannot yet produce either way.
+//
+// A trait with no field here is not yet implemented on the Go side; its
+// entries carry the difference instead.
+func goBehaviorFor(have map[string]bool) htcondor.SubmitBehavior {
+	return htcondor.SubmitBehavior{
+		OmitExitStatus:             have["HTCONDOR-4020"],
+		OmitZeroedRunTimeCounters:  have["HTCONDOR-3998"],
+		OmitLeaveJobInQueueDefault: have["HTCONDOR-3998"],
+
+		OmitVanillaDiskClause:    have["HTCONDOR-3932"],
+		OmitTransferVersionCheck: have["HTCONDOR-3932"],
+
+		OmitLocalAndSchedulerMachineChecks:    have["HTCONDOR-3926"],
+		OmitLocalAndSchedulerResourceDefaults: have["HTCONDOR-3926"],
+	}
 }
 
 // describeTraits renders the probe result for the test log, so a run says
