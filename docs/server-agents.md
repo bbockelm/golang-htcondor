@@ -22,6 +22,64 @@ Who may drive the access point through MCP is
 `HTTP_API_MCP_WRITE_GROUP`; see
 [Authorization groups](server-auth.md#authorization-groups).
 
+## MCP is not a sandbox
+
+Enabling MCP hands an agent the access point with the privileges of
+whoever authenticated to it. Those privileges are the ones HTCondor
+already grants that person, unchanged — so everything an agent can do
+here, that user could already do from a shell on this machine. What
+changes is the speed, the volume, and the absence of the pause a person
+takes before doing something unwise.
+
+This is worth stating plainly to whoever turns MCP on, because "the
+agent acts as the user" undersells it:
+
+- **Submitting a job is running code.** A DAG's PRE and POST scripts are
+  supplied as file contents and run on the access point as the
+  submitting user. An agent that can submit a DAG can therefore read
+  that user's home directory — `.git-credentials`, SSH private keys,
+  cloud tokens — write what it finds into a file, and read the file back
+  as ordinary job output. `exec_in_job`, the interactive session tools
+  and `condor_ssh_to_job` reach a shell by shorter routes.
+- **A job reaches whatever that user's jobs reach.** Where the site
+  mounts shared or staging storage into jobs, an agent's job gets that
+  mount with that user's rights on it, deletion included.
+- **Nothing here reviews the size of a request.** Agents ask for what
+  they estimate they need, and will request several hundred CPU hours
+  without raising it as a decision. What bounds that is the pool's own
+  policy, not this server.
+- **Pool queries describe other people.** Slot and submitter ads carry
+  the names, projects and running jobs of everyone else in the pool.
+  That is what `condor_status` tells any user, but an agent can pull all
+  of it remotely in one call — see [Pool queries and other users'
+  identities](#pool-queries-and-other-users-identities).
+
+None of this is a flaw in the protocol, and none of it is fixed by the
+agent being well behaved or by the client prompting before each tool
+call. A user who wants the thing done will approve the prompt, and the
+request that led there may not have been the user's own. The controls
+that hold are the ones enforced on this side:
+
+- `HTTP_API_MCP_ACCESS_GROUP`, narrowed by `HTTP_API_MCP_READ_GROUP` and
+  `HTTP_API_MCP_WRITE_GROUP`, decides who may drive the access point and
+  whether they may change anything or only look. A read-only grant is a
+  real reduction and is worth being the default for most people.
+- `HTTP_API_MCP_DISABLED_TOOLS` withdraws tools the site does not want
+  offered at all — see [Disabling tools](#disabling-tools) below. It
+  raises the cost of a shell but does not remove it: withdrawing
+  `exec_in_job` and `interactive_session_*` still leaves `submit_dag`,
+  and withdrawing that still leaves plain `submit_job`, which can name
+  the local or scheduler universe and so run on the access point. Code
+  execution is what a job *is*; it is not a tool that can be switched
+  off while job submission remains.
+- HTCondor's own policy on the access point and the pool, which is where
+  a limit of this kind has to be expressed. `SUBMIT_REQUIREMENT_NAMES`
+  on the schedd can refuse universes or resource requests a site does
+  not want; the pool's policy governs what jobs may mount and whether
+  `condor_ssh_to_job` is permitted. These bind an agent exactly as they
+  bind a person, which is the reason to put a site's limits there rather
+  than hoping the agent respects them.
+
 ## Disabling tools
 
 Some tools cannot work at some sites for reasons this server cannot see.
@@ -52,6 +110,32 @@ A pattern that is not a valid glob is logged as an error and ignored,
 leaving the tools it was meant to disable still offered — check the log
 after setting one.
 
+
+## Pool queries and other users' identities
+
+`query_pool` and the REST endpoints under `/api/v1/collector/ads/`
+answer what `condor_status` answers, which includes attributes
+describing other people's work. A busy slot ad names the user running on
+it (`RemoteOwner`, `RemoteUser`), often their project (`RemoteProject`),
+the access point they submitted from, the job's id and start time, and
+how it is behaving — memory, CPU and GPU usage. A submitter ad is
+nothing but identity: one ad per user with jobs in the pool.
+
+Any caller authorized for MCP or the HTTP API can read these, and can
+choose the attributes returned: the projection is free-form, `*` returns
+every attribute a slot ad carries, and a constraint can test attributes
+whether or not they are returned. The same is true of a person running
+`condor_status`. The difference an agent makes is bulk and reach — every
+slot in the pool, in one call, from anywhere the API is reachable, into
+a context the site does not control.
+
+Whether that matters is a site decision and depends on what the pool's
+ads carry; a site that puts personal data in custom machine attributes
+is exposing more than the attributes listed above. Today the controls
+are coarse: narrow `HTTP_API_MCP_ACCESS_GROUP`, or withdraw `query_pool`
+with `HTTP_API_MCP_DISABLED_TOOLS`. Note that withdrawing the MCP tool
+does not close the REST path, which the web UI's pool page uses and
+which any holder of an API token can call directly.
 
 ## Site skills
 
