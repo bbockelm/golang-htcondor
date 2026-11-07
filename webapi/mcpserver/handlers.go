@@ -1163,6 +1163,12 @@ func (s *Server) finishToolCall(ctx context.Context, name, traceID string, start
 	// an empty collection came out as JSON null.
 	if err == nil {
 		result = s.finalizeToolResult(name, result)
+
+		// Mask credential-shaped text last of all, so that a tool added
+		// later is covered without anybody remembering to cover it, and
+		// so that the shape the contract step has just promised is
+		// still the shape that goes out. See redact_tools.go.
+		result = s.redactToolResult(name, result)
 	}
 
 	// Log the outcome either way. A failing tool used to produce no log

@@ -57,6 +57,8 @@ type reconfigTarget interface {
 	SetProjectLeadsGroup(string)
 	SetMCPSkillsDir(string)
 	SetMCPDisabledTools(string)
+	SetMCPRedactSecrets(string)
+	SetMCPRedactDisabledRules(string)
 	SetChatInstructions(string)
 	// ReloadAPAssignment re-reads the access point assignment's files
 	// (the mapfile, the REST token) and drops cached answers.
@@ -90,6 +92,26 @@ var reconfigParams = []reconfigParam{
 		name: "HTTP_API_MCP_DISABLED_TOOLS",
 		apply: func(s reconfigTarget, v string) {
 			s.SetMCPDisabledTools(v)
+		},
+	},
+
+	// Credential masking on MCP tool results. Both settings only decide
+	// which rules a result is run through, and the rule set is rebuilt on
+	// the reconfigure goroutine and swapped atomically, so a change takes
+	// effect on the next tool call. Dynamic for the same reason the
+	// disabled-tool list is: a site that discovers its output is leaking
+	// a credential, or that a rule is eating something it needs, should
+	// not have to restart the daemon to say so.
+	{
+		name: "HTTP_API_MCP_REDACT_SECRETS",
+		apply: func(s reconfigTarget, v string) {
+			s.SetMCPRedactSecrets(v)
+		},
+	},
+	{
+		name: "HTTP_API_MCP_REDACT_DISABLED_RULES",
+		apply: func(s reconfigTarget, v string) {
+			s.SetMCPRedactDisabledRules(v)
 		},
 	},
 

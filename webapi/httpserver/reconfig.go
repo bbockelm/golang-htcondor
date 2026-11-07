@@ -1,6 +1,11 @@
 package httpserver
 
-import "github.com/bbockelm/golang-htcondor/logging"
+import (
+	"strconv"
+	"strings"
+
+	"github.com/bbockelm/golang-htcondor/logging"
+)
 
 // Dynamic parameters: the setters a reconfigure (SIGHUP, or condor_reconfig via
 // DC_RECONFIG) calls on an already-running server.
@@ -54,6 +59,61 @@ func (h *Handler) SetMCPDisabledTools(spec string) {
 		return
 	}
 	h.mcpServer.SetDisabledTools(spec)
+}
+
+// SetMCPRedactSecrets turns credential masking on tool results on or off.
+//
+// The two masking settings are applied together because the rule set is
+// built from both, and a reconfigure delivers one parameter at a time --
+// so each setter records its own and re-applies the pair.
+//
+// No-op when MCP is disabled, since there is then no server to tell.
+func (h *Handler) SetMCPRedactSecrets(spec string) {
+	if h.mcpServer == nil {
+		return
+	}
+	h.mcpDisableSecretRedaction = !h.reconfigBool("HTTP_API_MCP_REDACT_SECRETS", spec, true)
+	h.applyMCPRedaction()
+}
+
+// reconfigBool parses a boolean setting delivered by a reconfigure,
+// keeping def when it is unset or unparseable.
+//
+// Startup fails hard on a malformed boolean, because an operator who got
+// one wrong should find out before the daemon is serving. A reconfigure
+// cannot do that -- the daemon is already up and holding connections --
+// so a typo keeps the previous meaning and is logged. Which value a typo
+// falls back to is the whole decision here, and for masking it is "on":
+// the alternative is a setting that silently stops protecting anything
+// and reads, in the config file, as though it still does.
+func (h *Handler) reconfigBool(name, spec string, def bool) bool {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return def
+	}
+	v, err := strconv.ParseBool(spec)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP,
+			"Reconfigure: ignoring a setting that is not a boolean; keeping the default",
+			"setting", name, "value", spec, "default", def)
+		return def
+	}
+	return v
+}
+
+// SetMCPRedactDisabledRules installs the site's turned-off masking rules.
+//
+// No-op when MCP is disabled, since there is then no server to tell.
+func (h *Handler) SetMCPRedactDisabledRules(spec string) {
+	if h.mcpServer == nil {
+		return
+	}
+	h.mcpRedactDisabledRules = spec
+	h.applyMCPRedaction()
+}
+
+func (h *Handler) applyMCPRedaction() {
+	h.mcpServer.SetSecretRedaction(!h.mcpDisableSecretRedaction, h.mcpRedactDisabledRules)
 }
 
 // The authorization group lists are dynamic.

@@ -46,8 +46,12 @@ func TestEverySubmitSiteAppliesThePolicy(t *testing.T) {
 // MCP server, or agent submissions would skip site policy that every
 // other surface honours.
 func TestMCPServerInheritsTheSubmitPolicy(t *testing.T) {
-	src := mustRead(t, "handler.go")
-	if !strings.Contains(src, "SubmitPolicy:   h.submitPolicy,") {
+	// Whitespace-collapsed, because the field's alignment in the struct
+	// literal is gofmt's business: adding a longer field name beside it
+	// re-indents this line, and a test that failed for that would be
+	// reporting the policy as unwired when it was not.
+	src := strings.Join(strings.Fields(mustRead(t, "handler.go")), " ")
+	if !strings.Contains(src, "SubmitPolicy: h.submitPolicy,") {
 		t.Error("the MCP server is built without the submit policy; agent submissions would bypass it")
 	}
 }

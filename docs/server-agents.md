@@ -137,6 +137,95 @@ with `HTTP_API_MCP_DISABLED_TOOLS`. Note that withdrawing the MCP tool
 does not close the REST path, which the web UI's pool page uses and
 which any holder of an API token can call directly.
 
+
+## Masking credentials in tool results
+
+Several tools hand a caller bytes a job produced, and a job's output is
+whatever the job wrote. A job that runs `cat $_CONDOR_CREDS/<service>.use`,
+or whose framework logs the configuration it just loaded, puts that
+credential in its stdout, and `get_job_stdout` then returns it. So do
+`get_job_output`, `tail_job_output` and `exec_in_job`. The caller is
+usually a model, so the credential lands in a context window, and from
+there in a transcript and a provider's logs.
+
+The server masks credential-shaped text in every tool result before
+returning it:
+
+```
+# On by default. Set false to return job output exactly as written.
+HTTP_API_MCP_REDACT_SECRETS = true
+```
+
+A masked value is replaced with `[REDACTED:<rule>]` and the result says
+so, both in the text an agent reads and as a `redaction` object in the
+structured payload. Nothing else in the result is altered.
+
+**This is not a security boundary**, and it is not one of the controls
+in [MCP is not a sandbox](#mcp-is-not-a-sandbox). A job runs arbitrary
+code as the submitting user, so anything that can print a credential can
+also encode it past any pattern — reverse it, base64 it, print it a
+character at a time. An agent that wants a credential will get one.
+
+What this stops is the accident: a stack trace, a debug log, a `curl
+-v`, a framework announcing its configuration at startup. It is the same
+bargain a CI system's log masking makes, and worth the same amount.
+
+### What is recognised
+
+Formats are matched by structure, prefix or field name. There is no
+entropy heuristic: job output is full of checksums, UUIDs, accession
+numbers and base64 payloads, and a filter that ate those would be one
+you turned off.
+
+Where part of a credential is not secret, that part is kept:
+
+- **JWTs** — SciTokens, WLCG tokens, HTCondor IDTOKENs, OIDC id tokens —
+  keep their header and claims and lose only the signature. The issuer,
+  subject, scopes and expiry are usually the answer to whatever the
+  output is being read for, and a token cannot be replayed without its
+  signature. A JOSE token with more segments is encrypted and goes whole.
+- **X.509 proxies and other PEM blocks** keep their certificates and lose
+  the private key. The certificate chain is public and is the diagnosable
+  half; a block whose `-----END-----` line is missing, because the output
+  was cut off mid-key, is masked to the end of the text.
+- **URLs** keep everything but the credential: a password in the userinfo,
+  or the signing parameter of a presigned S3, GCS, Azure or Pelican URL.
+  Which object a transfer failed on is the reason anyone is reading it.
+
+The rest is masked whole: a field whose name says its value is a
+credential (`access_token`, `refresh_token`, `client_secret`,
+`AWS_SECRET_ACCESS_KEY`, `password`, and the other spellings of those),
+an `Authorization` header's credential, a base64-wrapped Kerberos
+credential cache or keytab, and the published issuer prefixes — GitHub,
+GitLab, Slack, AWS, Google, OpenAI, Anthropic, Hugging Face, Docker Hub,
+npm, PyPI, Stripe, SendGrid, Atlassian, DigitalOcean, age.
+
+Two things are deliberately left alone. `create_output_download_url`,
+`create_input_upload_url` and `create_watch_url` return URLs this server
+has just minted for the caller; masking those would hand back a link that
+cannot be redeemed. And a credential the job transformed before printing
+it is not recognised, by construction.
+
+### Turning off a rule
+
+A site whose output trips one rule can turn off that rule rather than the
+whole mechanism:
+
+```
+# Globs over rule ids, commas or whitespace.
+HTTP_API_MCP_REDACT_DISABLED_RULES = kerberos-credential github-*
+```
+
+The rule id is the one that appears in the marker, so a result that
+masked something it should not have names the rule to disable. A pattern
+matching no rule is logged as an error — check the log after setting one,
+since otherwise a typo leaves the rule in force and looks like it did not
+work.
+
+Both settings are applied on SIGHUP (or `condor_reconfig`), including for
+sessions already connected.
+
+
 ## Site skills
 
 A site can publish its own documentation to agents: how work is actually

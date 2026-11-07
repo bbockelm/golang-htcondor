@@ -337,6 +337,12 @@ type Config struct {
 	// MCPDisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
 	// offer, as path.Match patterns separated by commas or whitespace.
 	MCPDisabledTools string
+	// MCPDisableSecretRedaction turns off credential masking on MCP tool
+	// results (HTTP_API_MCP_REDACT_SECRETS = false).
+	MCPDisableSecretRedaction bool
+	// MCPRedactDisabledRules (HTTP_API_MCP_REDACT_DISABLED_RULES) names
+	// masking rules to turn off, as globs over rule ids.
+	MCPRedactDisabledRules string
 	// MCPSkillsReloadInterval is how often that directory is re-read so a
 	// checkout updated underneath this process is noticed without a
 	// reconfigure. Zero disables the poll.
@@ -568,6 +574,8 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPSuperuserGroup:           cfg.MCPSuperuserGroup,
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPDisabledTools:            cfg.MCPDisabledTools,
+		MCPDisableSecretRedaction:   cfg.MCPDisableSecretRedaction,
+		MCPRedactDisabledRules:      cfg.MCPRedactDisabledRules,
 		MCPSkillsDir:                cfg.MCPSkillsDir,
 		MCPSkillsReloadInterval:     cfg.MCPSkillsReloadInterval,
 		UpstreamRefresh:             cfg.UpstreamRefresh,

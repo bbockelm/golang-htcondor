@@ -365,7 +365,12 @@ type Handler struct {
 	revocationOracles []RevocationOracle
 	mcpInstructions   string // Server-level instructions provided to agents via MCP initialize
 	mcpDisabledTools  string // HTTP_API_MCP_DISABLED_TOOLS: tools this site cannot offer
-	mcpSkillsDir      string // Directory of site-authored Markdown skills (empty disables)
+	// HTTP_API_MCP_REDACT_SECRETS / _DISABLED_RULES: credential masking
+	// on tool results. Both are kept because the two settings are
+	// applied together and a reconfigure delivers one at a time.
+	mcpDisableSecretRedaction bool
+	mcpRedactDisabledRules    string
+	mcpSkillsDir              string // Directory of site-authored Markdown skills (empty disables)
 	// How often that directory is re-read; zero leaves reloads to reconfigure.
 	mcpSkillsReloadInterval time.Duration
 	mcpAdminUsers           []string // Authenticated subjects exempt from the MCP owner-scope wrapper
@@ -1049,6 +1054,13 @@ type HandlerConfig struct {
 	// MCPDisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
 	// offer, as path.Match patterns separated by commas or whitespace.
 	MCPDisabledTools string
+	// MCPDisableSecretRedaction turns off credential masking on MCP tool
+	// results (HTTP_API_MCP_REDACT_SECRETS = false). Negative so that the
+	// zero value is the protective one; see mcpserver.Config.
+	MCPDisableSecretRedaction bool
+	// MCPRedactDisabledRules (HTTP_API_MCP_REDACT_DISABLED_RULES) names
+	// masking rules to turn off, as globs over rule ids.
+	MCPRedactDisabledRules string
 	// MCPSkillsReloadInterval is how often to re-read MCPSkillsDir.
 	MCPSkillsReloadInterval time.Duration
 	// MCPSkillsDir is a directory of site-authored Markdown skills to
@@ -2070,6 +2082,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.mcpUseSDK = cfg.MCPUseSDKTransport
 		h.mcpInstructions = cfg.MCPInstructions
 		h.mcpDisabledTools = cfg.MCPDisabledTools
+		h.mcpDisableSecretRedaction = cfg.MCPDisableSecretRedaction
+		h.mcpRedactDisabledRules = cfg.MCPRedactDisabledRules
 		h.mcpSkillsDir = cfg.MCPSkillsDir
 		h.mcpSkillsReloadInterval = cfg.MCPSkillsReloadInterval
 		h.mcpAdminUsers = cfg.MCPAdminUsers
@@ -2325,7 +2339,10 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		AdminUsers:     h.mcpAdminUsers,
 		Instructions:   h.mcpInstructions,
 		DisabledTools:  h.mcpDisabledTools,
-		SubmitPolicy:   h.submitPolicy,
+
+		DisableSecretRedaction: h.mcpDisableSecretRedaction,
+		RedactDisabledRules:    h.mcpRedactDisabledRules,
+		SubmitPolicy:           h.submitPolicy,
 		// The same preparation every REST submit path runs (see
 		// Handler.submitJob), handed over so the agent tools and the
 		// interactive sessions the SSH gateway creates get it too. One
