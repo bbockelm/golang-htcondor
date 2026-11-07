@@ -1437,39 +1437,14 @@ func warnUnservedOAuth2(cfg *config.Config, logger *logging.Logger) {
 		"configured", strings.Join(configured, ", "))
 }
 
-// loadMCPConfig loads the MCP and OAuth2 configuration from HTCondor
-// config.
+// loadOAuth2Config reads the OAuth2 settings into config.
 //
-// The OAuth2 settings are read whenever the web UI or MCP is served,
-// because the web UI logs people in through OAuth2 whether or not MCP is
-// on. They used to be read only with HTTP_API_ENABLE_MCP, so a web UI
-// with MCP off silently ignored its issuer, its identity provider, its
-// access groups and its identity mapping. Only the MCP settings proper
-// still wait for MCP.
-func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled bool, logger *logging.Logger) mcpConfig {
-	config := mcpConfig{}
-
-	// Check if MCP should be enabled from config
-	if mcpEnabled(cfg) {
-		config.enabled = true
-		logger.Info(logging.DestinationHTTP, "MCP enabled via configuration")
-	}
-
-	// Resolve the unified application database path. This is the shared
-	// application DB (sessions, OAuth2, IDP, API keys) — NOT MCP-specific —
-	// so it must be resolved whether or not MCP is enabled; otherwise an
-	// operator's HTTP_API_DB_PATH is silently ignored and the server falls
-	// back to the default location. The OAuth2DBPath alias on the Config
-	// struct is no longer a silent fallback (see loadDBPath); a deprecation
-	// warning is logged when the legacy HTTP_API_OAUTH2_DB_PATH is set
-	// without HTTP_API_DB_PATH.
-	config.oauth2DBPath = loadDBPath(cfg, logger)
-	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
-
-	if !config.enabled && !webUIEnabled {
-		warnUnservedOAuth2(cfg, logger)
-		return config
-	}
+// They are split out from loadMCPConfig because they answer a different
+// question: these are read whenever the web UI or MCP is served, since the
+// web UI logs people in through OAuth2 either way, while the MCP settings
+// proper are read only when MCP is on. loadMCPConfig returns between the two
+// for a server that serves neither.
+func loadOAuth2Config(cfg *config.Config, config *mcpConfig, listenAddrFromConfig string, webUIEnabled bool, logger *logging.Logger) {
 
 	// Load OAuth2 issuer
 	config.oauth2Issuer = loadOAuth2Issuer(cfg, listenAddrFromConfig)
@@ -1509,7 +1484,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 	// Identity mapping: the provider's subject is not always the name of
 	// the account that owns the jobs, and what a person may do is not
 	// always in the token. Off unless asked for.
-	loadIdentityMapping(cfg, &config, logger)
+	loadIdentityMapping(cfg, config, logger)
 
 	// Load username claim name (default: "sub")
 	// Login policy as a ClassAd expression over the token's claims. Parsed
@@ -1527,7 +1502,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 	}
 
 	// Load access control groups
-	loadAccessControlGroups(cfg, &config, logger)
+	loadAccessControlGroups(cfg, config, logger)
 
 	// Load token lifespans (zero means "use the httpserver-package default")
 	config.oauth2AccessTokenLifespan = loadTokenLifespan(cfg, "HTTP_API_OAUTH2_ACCESS_TOKEN_LIFESPAN", logger)
@@ -1543,6 +1518,43 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 		logger.Info(logging.DestinationHTTP, "OAuth2 maximum grant lifetime", "duration", config.oauth2MaxGrantLifetime)
 	}
 	config.oauth2RevocationOracles = loadRevocationOracles(cfg, logger)
+}
+
+// loadMCPConfig loads the MCP and OAuth2 configuration from HTCondor
+// config.
+//
+// The OAuth2 settings are read whenever the web UI or MCP is served,
+// because the web UI logs people in through OAuth2 whether or not MCP is
+// on. They used to be read only with HTTP_API_ENABLE_MCP, so a web UI
+// with MCP off silently ignored its issuer, its identity provider, its
+// access groups and its identity mapping. Only the MCP settings proper
+// still wait for MCP.
+func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled bool, logger *logging.Logger) mcpConfig {
+	config := mcpConfig{}
+
+	// Check if MCP should be enabled from config
+	if mcpEnabled(cfg) {
+		config.enabled = true
+		logger.Info(logging.DestinationHTTP, "MCP enabled via configuration")
+	}
+
+	// Resolve the unified application database path. This is the shared
+	// application DB (sessions, OAuth2, IDP, API keys) — NOT MCP-specific —
+	// so it must be resolved whether or not MCP is enabled; otherwise an
+	// operator's HTTP_API_DB_PATH is silently ignored and the server falls
+	// back to the default location. The OAuth2DBPath alias on the Config
+	// struct is no longer a silent fallback (see loadDBPath); a deprecation
+	// warning is logged when the legacy HTTP_API_OAUTH2_DB_PATH is set
+	// without HTTP_API_DB_PATH.
+	config.oauth2DBPath = loadDBPath(cfg, logger)
+	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
+
+	if !config.enabled && !webUIEnabled {
+		warnUnservedOAuth2(cfg, logger)
+		return config
+	}
+
+	loadOAuth2Config(cfg, &config, listenAddrFromConfig, webUIEnabled, logger)
 
 	if !config.enabled {
 		return config
