@@ -43,6 +43,48 @@ type SubmitBehavior struct {
 	// neither true nor false. See setSubmitTimeDefaults.
 	OmitZeroedRunTimeCounters bool
 
+	// OmitVanillaDiskClause leaves the automatic disk clause out of a
+	// vanilla job's Requirements.
+	//
+	// condor_submit added `TARGET.Disk >= RequestDisk` so a job would only
+	// match a machine with room for it. Common-files transfer made that
+	// wrong -- RequestDisk no longer describes what the job puts on the
+	// slot -- and the clause was first guarded by a startd version check
+	// and then, by HTCONDOR-3932, dropped for vanilla jobs entirely.
+	//
+	// Only vanilla. Every other universe still gets the clause.
+	OmitVanillaDiskClause bool
+
+	// OmitTransferVersionCheck leaves the `versioncmp(..., "8.9.7") >= 0`
+	// clause out of Requirements.
+	//
+	// condor_submit added it for a job using checkpoint files, relative
+	// path preservation or `when_to_transfer_output = ON_SUCCESS`, none of
+	// which a pre-8.9.7 startd understands. HTCONDOR-3932 removed it:
+	// nothing that old is still running, and the clause excluded any
+	// machine whose CondorVersion it could not parse.
+	OmitTransferVersionCheck bool
+
+	// OmitLocalAndSchedulerMachineChecks leaves Arch, OpSys and the disk
+	// clause out of Requirements for the local and scheduler universes.
+	//
+	// Those jobs are run by the schedd rather than matched to a startd, so
+	// the clauses describe a machine that is never consulted -- and the
+	// schedd's own ad does not advertise what they ask for. HTCONDOR-3926
+	// stopped emitting them, which also means a job with nothing else to
+	// say gets `Requirements = true` rather than an expression about a
+	// machine it will never match.
+	OmitLocalAndSchedulerMachineChecks bool
+
+	// OmitLocalAndSchedulerResourceDefaults applies no
+	// JOB_DEFAULT_REQUEST{CPUS,MEMORY,DISK,GPUS} to a local- or
+	// scheduler-universe job.
+	//
+	// HTCONDOR-3926 turned UseDefaultResourceParams off for them, for the
+	// same reason: no startd ever reads the request, so a default only
+	// puts a number in the ad that nothing acts on.
+	OmitLocalAndSchedulerResourceDefaults bool
+
 	// OmitLeaveJobInQueueDefault writes no LeaveJobInQueue for a job whose
 	// submit file does not set one.
 	//

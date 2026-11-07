@@ -188,6 +188,12 @@ func goBehaviorFor(have map[string]bool) htcondor.SubmitBehavior {
 		OmitExitStatus:             have["HTCONDOR-4020"],
 		OmitZeroedRunTimeCounters:  have["HTCONDOR-3998"],
 		OmitLeaveJobInQueueDefault: have["HTCONDOR-3998"],
+
+		OmitVanillaDiskClause:    have["HTCONDOR-3932"],
+		OmitTransferVersionCheck: have["HTCONDOR-3932"],
+
+		OmitLocalAndSchedulerMachineChecks:    have["HTCONDOR-3926"],
+		OmitLocalAndSchedulerResourceDefaults: have["HTCONDOR-3926"],
 	}
 }
 
