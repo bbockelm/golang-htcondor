@@ -57,7 +57,8 @@ func newFakeSSSD(t *testing.T, gids []uint32) *fakeSSSD {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	path := filepath.Join(dir, "nss")
-	ln, err := net.Listen("unix", path)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "unix", path)
 	if err != nil {
 		t.Fatalf("listen on %s: %v", path, err)
 	}
@@ -108,7 +109,7 @@ func (f *fakeSSSD) serve(conn net.Conn, gids []uint32) {
 		switch command {
 		case gosssd.SSS_NSS_INITGR:
 			body = make([]byte, 8+4*len(gids))
-			binary.LittleEndian.PutUint32(body[0:4], uint32(len(gids)))
+			binary.LittleEndian.PutUint32(body[0:4], uint32(len(gids))) // #nosec G115 - fixed-size test fixture
 			for i, gid := range gids {
 				binary.LittleEndian.PutUint32(body[8+4*i:], gid)
 			}
@@ -127,7 +128,7 @@ func (f *fakeSSSD) serve(conn net.Conn, gids []uint32) {
 		}
 
 		resp := make([]byte, 16+len(body))
-		binary.LittleEndian.PutUint32(resp[0:4], uint32(len(resp)))
+		binary.LittleEndian.PutUint32(resp[0:4], uint32(len(resp))) // #nosec G115 - fixed-size test fixture
 		binary.LittleEndian.PutUint32(resp[4:8], command)
 		binary.LittleEndian.PutUint32(resp[8:12], status)
 		copy(resp[16:], body)
