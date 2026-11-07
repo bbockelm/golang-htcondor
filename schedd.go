@@ -899,11 +899,45 @@ func configureRemoteJobAd(procAd *classad.ClassAd, submitterSetLeaveInQueue bool
 		}
 	}
 
+	// A submitter who asked for `hold = true` has to still have a held
+	// job at the end of this, and the next three lines are about to
+	// overwrite the hold that says so.
+	//
+	// A spooling submission cannot simply keep the submitter's hold: the
+	// schedd creates the job's spool directory only for a job committed
+	// HELD with hold code 16, and rewrites Iwd to point at it when that
+	// hold is released. Submit with any other hold and the job has
+	// nowhere for its files to go.
+	//
+	// JobStatusOnRelease is what reconciles the two. The schedd reads it
+	// in releaseJobRaw and sends the job to that status instead of IDLE,
+	// in the same transaction that ends the spooling hold -- so the job
+	// goes from the spooling hold straight to held, and is never idle
+	// for an instant in between. Holding the job ourselves after the
+	// release cannot do that: the release and the hold would be two
+	// transactions with matchmaking free to run between them, and a job
+	// that matched in that window would start, which is the bug.
+	if status, ok := procAd.EvaluateAttrInt("JobStatus"); ok && status == jobStatusHeld {
+		_ = procAd.Set(attrJobStatusOnRelease, int64(jobStatusHeld))
+		// What the hold is for, carried across the release, which moves
+		// HoldReason aside along with the rest of the spooling hold.
+		// Restoring it afterwards is the one part of this a client
+		// cannot do by writing attributes -- HoldReason is protected --
+		// so it is done with a hold action; see restoreSubmitHolds.
+		if _, already := procAd.Lookup(attrSubmitHoldReason); !already {
+			reason, ok := procAd.EvaluateAttrString("HoldReason")
+			if !ok || reason == "" {
+				reason = defaultSubmitHoldReason
+			}
+			_ = procAd.Set(attrSubmitHoldReason, reason)
+		}
+	}
+
 	// Remote jobs start in HELD status with SpoolingInput hold reason
 	// JobStatus: 5 = HELD
-	_ = procAd.Set("JobStatus", int64(5))
+	_ = procAd.Set("JobStatus", int64(jobStatusHeld))
 	// HoldReasonCode: 16 = SpoolingInput
-	_ = procAd.Set("HoldReasonCode", int64(16))
+	_ = procAd.Set("HoldReasonCode", int64(holdCodeSpoolingInput))
 	_ = procAd.Set("HoldReason", "Spooling input data files")
 
 	// Set LeaveJobInQueue expression for remote jobs
@@ -915,3 +949,46 @@ func configureRemoteJobAd(procAd *classad.ClassAd, submitterSetLeaveInQueue bool
 
 	return needsSpooling
 }
+
+// Submitting a job that is meant to stay held.
+//
+// `hold = true` in a submit file means the job must not start until
+// somebody releases it. A spooling submission -- which is every
+// submission through SubmitRemote -- has its own hold to contend with,
+// and until this existed the submitter's hold was simply overwritten:
+// the job went to the schedd held for spooling, the schedd released that
+// hold when the files arrived, and the job ran. Nothing reported it.
+//
+// Upstream condor_submit refuses the combination outright ("Cannot set
+// hold to 'true' when using -remote or -spool"). That is a defensible
+// answer for a CLI and a poor one here, where "submit it held so I can
+// look at it before it runs" is a thing agents and users genuinely want
+// and no other submit path offers: holding a job right after submitting
+// it is a race, and a job can match in under two seconds.
+const (
+	// holdCodeSpoolingInput is CONDOR_HOLD_CODE::SpoolingInput. The
+	// schedd keys the creation of a job's spool directory on this exact
+	// code, so a spooling submission has to use it whatever else it
+	// wants the job's hold to say.
+	holdCodeSpoolingInput = 16
+
+	// attrJobStatusOnRelease is the schedd's own attribute for "when
+	// this hold ends, go to this status rather than idle". Read in
+	// releaseJobRaw and deleted by the release, so it fires once.
+	attrJobStatusOnRelease = "JobStatusOnRelease"
+
+	// attrSubmitHoldReason records why the submitter wanted the job
+	// held, because the hold that would have said so is overwritten by
+	// the spooling hold and then moved aside by its release.
+	//
+	// Durable, and on the job rather than in this process, so that the
+	// reason survives for whichever call spools the job -- SubmitRemote
+	// does it itself for a job with no input files, and the caller does
+	// it for every other job.
+	attrSubmitHoldReason = "SubmitHoldReason"
+
+	// defaultSubmitHoldReason matches what condor_submit writes for a
+	// local `hold = true`, so a job held this way reads the same in
+	// condor_q however it was submitted.
+	defaultSubmitHoldReason = "submitted on hold at user's request"
+)

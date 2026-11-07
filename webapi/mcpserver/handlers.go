@@ -1267,8 +1267,41 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 `, len(procAds), jobIDs[0], s.clusterArgsText(ctx, cluster))
 	}
 
+	// A job submitted with `hold = true` ends up held and stays held,
+	// so the two branches below -- both of which promise the caller an
+	// idle job -- would be telling an agent to wait for something that
+	// is never going to happen.
+	submittedOnHold := len(procAds) > 0 && htcondor.SubmittedOnHold(procAds[0])
+
 	var nextSteps string
-	if insp.NeedsSpooling {
+	switch {
+	case submittedOnHold && insp.NeedsSpooling:
+		nextSteps = fmt.Sprintf(`
+
+NEXT STEPS:
+1. This job was submitted with hold = true. It is HELD (JobStatus=5) for
+   input spooling right now, and it will STAY held once spooling finishes --
+   it will not become idle and it will not start on its own.
+2. You MUST still call upload_job_input to complete spooling, even if the only
+   file is the executable. Spooling is what gives the job its working
+   directory.%s
+3. After upload_job_input the job remains HELD, with the hold reason you asked
+   for. Nothing will run it until you call release_job.
+4. Call release_job when you want it to run; it goes to IDLE and matches from
+   there. Until then analyze_job_match and get_job work on it safely.
+
+First job ID for status checks: %s`, fanOut, jobIDs[0])
+	case submittedOnHold:
+		nextSteps = fmt.Sprintf(`
+
+NEXT STEPS:
+1. This job was submitted with hold = true. It is HELD (JobStatus=5) and will
+   stay that way -- it will not become idle and it will not start on its own.
+2. Call release_job when you want it to run; it goes to IDLE and matches from
+   there. Until then analyze_job_match and get_job work on it safely.
+
+First job ID for status checks: %s`, jobIDs[0])
+	case insp.NeedsSpooling:
 		nextSteps = fmt.Sprintf(`
 
 NEXT STEPS:
@@ -1289,7 +1322,7 @@ Job Status Values:
 - 5 = Held (waiting for input files or user action)
 
 First job ID for status checks: %s`, fanOut, s.waitStepText(), jobIDs[0])
-	} else {
+	default:
 		nextSteps = fmt.Sprintf(`
 
 NEXT STEPS:
