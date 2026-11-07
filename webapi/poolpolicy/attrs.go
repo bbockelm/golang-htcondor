@@ -177,9 +177,9 @@ func (p *Policy) walk(e ast.Expr, allowed map[string]bool, adType string) error 
 // message stays readable.
 func attrHint(p *Policy, adType string) string {
 	attrs := p.AllowedAttrs(adType)
-	const max = 12
-	if len(attrs) > max {
-		return strings.Join(attrs[:max], ", ") + ", and others"
+	const maxListed = 12
+	if len(attrs) > maxListed {
+		return strings.Join(attrs[:maxListed], ", ") + ", and others"
 	}
 	return strings.Join(attrs, ", ")
 }
