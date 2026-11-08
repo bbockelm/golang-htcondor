@@ -3,13 +3,16 @@ package fuzzsubmit
 import (
 	"strings"
 	"testing"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
 // TestEveryTraitIsUsed keeps oracleTraits from accumulating probes nothing
-// consults. A trait is a claim about the oracle, and it earns its keep one of
-// two ways: an entry names it, so it decides whether that divergence applies,
-// or goBehaviorFor reads it, so it decides what the Go side produces. A trait
-// doing neither is a fix that landed and took its entry with it, or a probe
+// consults. A trait is a claim about the oracle, and it earns its keep by
+// deciding something: whether a recorded divergence applies, which keyword
+// rows this parser may be ahead on, which digest keywords it may be behind
+// on, or what the Go side produces. A trait deciding none of those is a fix
+// that landed and took its entry with it, or a probe
 // written ahead of the work it was for.
 //
 // The second half is checked by running goBehaviorFor rather than by looking
@@ -20,12 +23,21 @@ func TestEveryTraitIsUsed(t *testing.T) {
 	for _, req := range entryTrait {
 		named[req.ticket] = true
 	}
+	// The other places a trait decides something: which keyword rows this
+	// parser is allowed to be ahead on, and which digest keywords it is
+	// allowed to be behind on.
+	for _, ticket := range keywordsAheadOfOracle {
+		named[ticket] = true
+	}
+	for _, ticket := range digestKeywordsBehindOracle {
+		named[ticket] = true
+	}
 	off := goBehaviorFor(map[string]bool{})
 	for _, tr := range oracleTraits {
 		if named[tr.ticket] || goBehaviorFor(map[string]bool{tr.ticket: true}) != off {
 			continue
 		}
-		t.Errorf("nothing consults %s (%s): no entry names it and it changes no Go behavior -- delete the trait, write the entry, or wire it",
+		t.Errorf("nothing consults %s (%s): nothing names it and it changes no Go behavior -- delete the trait, record what it explains, or wire it",
 			tr.ticket, tr.what)
 	}
 }
@@ -136,4 +148,28 @@ func withEntries(t *testing.T, entries map[string]traitReq, body func()) {
 		knownDivergent[attr] = "fake entry for " + attr
 	}
 	body()
+}
+
+// TestDigestAllowanceIsNotDead guards the one thing that cannot be checked
+// against a pinned oracle: the allowance names keywords only a newer HTCondor
+// has, so no local run ever exercises it.
+//
+// What a local run CAN prove is that each entry is still about something. An
+// entry for a keyword this library has started pruning is dead and hides the
+// fact that it was fixed; an entry naming a ticket no trait probes for would
+// never be honored at all, and would read as an explanation while explaining
+// nothing.
+func TestDigestAllowanceIsNotDead(t *testing.T) {
+	probed := map[string]bool{}
+	for _, tr := range oracleTraits {
+		probed[tr.ticket] = true
+	}
+	for name, ticket := range digestKeywordsBehindOracle {
+		if htcondor.DigestKeywordIsPrunable(name) {
+			t.Errorf("%s is pruned now, so its allowance explains nothing -- delete the entry", name)
+		}
+		if !probed[ticket] {
+			t.Errorf("%s names %s, which no trait probes for, so the allowance can never apply", name, ticket)
+		}
+	}
 }

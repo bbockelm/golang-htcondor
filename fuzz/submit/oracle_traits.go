@@ -103,6 +103,11 @@ var oracleTraits = []oracleTrait{
 		probe:  func(f oracleFacts) bool { _, ok := f.keyword["min_condor_version"]; return ok },
 	},
 	{
+		ticket: "HTCONDOR-3955",
+		what:   "common_input_files is spelled require_common_files",
+		probe:  func(f oracleFacts) bool { _, ok := f.keyword["require_common_files"]; return ok },
+	},
+	{
 		ticket: "HTCONDOR-4053",
 		what:   "the batch cpu/node submit commands exist",
 		probe:  func(f oracleFacts) bool { _, ok := f.keyword["batch_whole_nodes"]; return ok },
@@ -191,6 +196,44 @@ var keywordsAheadOfOracle = map[string]string{
 	"restrict_to_annex":  "HTCONDOR-2015",
 	"min_condor_version": "HTCONDOR-3065",
 	"max_condor_version": "HTCONDOR-3065",
+}
+
+// digestKeywordsBehindOracle are names a newer HTCondor prunes from a submit
+// digest and this library does not prune yet, each with the change that added
+// the keyword upstream.
+//
+// Leaving a key in the digest is the SAFE direction. A pruned key is one the
+// schedd takes from the cluster ad instead of the digest, so keeping it only
+// makes the digest larger than it needs to be -- every proc still gets the
+// right value. The opposite, pruning a key HTCondor keeps, could drop a
+// per-proc value, and that direction is still an error here.
+//
+// An entry is honored only while the oracle HAS the named change, so it
+// lapses by itself if the pin moves to an HTCondor without it. Pruning these
+// for real is a separate change: it means deciding, per keyword, that this
+// library puts the attribute in the cluster ad in every case the schedd would
+// have read it from the digest.
+//
+//nolint:unused // read by TestDigestKeywordsMatchOracle
+var digestKeywordsBehindOracle = map[string]string{
+	"annex_name":           "HTCONDOR-2015",
+	"restrict_to_annex":    "HTCONDOR-2015",
+	"targetannexname":      "HTCONDOR-2015",
+	"restricttoannex":      "HTCONDOR-2015",
+	"min_condor_version":   "HTCONDOR-3065",
+	"max_condor_version":   "HTCONDOR-3065",
+	"mincondorversion":     "HTCONDOR-3065",
+	"maxcondorversion":     "HTCONDOR-3065",
+	"batch_cpu_count":      "HTCONDOR-4053",
+	"batch_cpus_per_node":  "HTCONDOR-4053",
+	"batch_node_count":     "HTCONDOR-4053",
+	"batch_whole_nodes":    "HTCONDOR-4053",
+	"batchcpucount":        "HTCONDOR-4053",
+	"batchcpuspernode":     "HTCONDOR-4053",
+	"batchnodecount":       "HTCONDOR-4053",
+	"batchwholenodes":      "HTCONDOR-4053",
+	"require_common_files": "HTCONDOR-3955",
+	"common_input_files":   "HTCONDOR-3955",
 }
 
 // probeOracleTraits reports, per ticket, whether the linked oracle has that
