@@ -86,6 +86,13 @@ export interface UtilRequest {
   // grows after a hold); typical/min/max are then the STARTING request.
   adaptive?: boolean;
   expression?: string; // the typical formula as written, when adaptive
+  // The jobs were submitted with a memory retry ladder
+  // (retry_request_memory): typical/min/max are then the FIRST rung, and
+  // retry_mib the largest rung any of them reached. A request an
+  // eviction raised is not one anybody chose, so the page names the rung
+  // the submit file asked for and says what it retries at.
+  retry?: boolean;
+  retry_mib?: number;
 }
 
 export interface UtilBatchPoint {
@@ -132,6 +139,9 @@ export interface UtilAdvice {
   applies?: boolean;
   // The edit it makes, when it applies.
   change?: { attribute: 'RequestMemory' | 'RequestCpus' | 'RequestDisk' | 'RequestGPUs'; value: number };
+  // Why it cannot be applied, when it cannot. Absent for advice that was
+  // never about editing a request.
+  why_not_applied?: string;
 }
 
 export interface UtilSavings {
@@ -526,6 +536,11 @@ export interface StripGeometry {
   max: number;
   // The largest job used more than the typical request.
   over: boolean;
+  // ...and the workflow's retry ladder covers it, so the job was rerun
+  // rather than held. Going over a request the ladder was built to
+  // absorb is what the ladder is FOR; it should not read the same as a
+  // job that went over everything the workflow asked for.
+  overRetried: boolean;
   trackMax: number;
 }
 
@@ -551,6 +566,7 @@ export function stripGeometry(
     p90: at(dist.p90),
     max: at(dist.max),
     over: req !== null && dist.max > req,
+    overRetried: req !== null && dist.max > req && (retryRungOf(request) ?? 0) >= dist.max,
     trackMax,
   };
 }
@@ -902,13 +918,75 @@ const ADAPTIVE_GROWS: Record<UtilAdaptiveResource, string> = {
  * formula, "starts at 2 GB, grows after a memory hold". The starting value
  * alone would read as the request, which it is only until the first hold.
  */
-export function requestPhrase(resource: UtilAdaptiveResource, value: string, adaptive: boolean | undefined): string {
-  return adaptive ? `starts at ${value}, ${ADAPTIVE_GROWS[resource]}` : value;
+export function requestPhrase(
+  resource: UtilAdaptiveResource,
+  value: string,
+  req: RequestShape,
+): string {
+  if (adaptiveOf(req)) return `starts at ${value}, ${ADAPTIVE_GROWS[resource]}`;
+  const retry = retryRungOf(req);
+  if (retry !== null) return `${value}, retried at ${formatMiB(retry)}`;
+  return value;
 }
 
 /** requestMarkerLabel is the short form for a chart's "requested" line. */
-export function requestMarkerLabel(value: string, adaptive: boolean | undefined): string {
-  return adaptive ? `requested ${value}, grows` : `requested ${value}`;
+export function requestMarkerLabel(value: string, req: RequestShape): string {
+  if (adaptiveOf(req)) return `requested ${value}, grows`;
+  const retry = retryRungOf(req);
+  if (retry !== null) return `requested ${value}, retries at ${formatMiB(retry)}`;
+  return `requested ${value}`;
+}
+
+/**
+ * RequestShape is what the phrase helpers need. They used to take the
+ * adaptive flag alone; a ladder needs two more fields, and passing the
+ * request itself keeps the call sites from having to know which.
+ *
+ * A bare boolean is still accepted, because a caller that genuinely has
+ * only the flag -- the "today" line, which asserts adaptive -- should not
+ * have to invent a request to say so.
+ */
+export type RequestShape = UtilRequest | boolean | null | undefined;
+
+function adaptiveOf(req: RequestShape): boolean {
+  return typeof req === 'boolean' ? req : req?.adaptive === true;
+}
+
+/**
+ * hasLadder reports whether the request describes a retry ladder worth
+ * naming: one whose retry rung is above the request itself.
+ */
+export function hasLadder(req: UtilRequest | null | undefined): boolean {
+  return retryRungOf(req) !== null;
+}
+
+/**
+ * memoryHistogramNote explains what the request line on the peak-memory
+ * histogram is, when it is not simply "the request".
+ *
+ * Three cases and they are different sentences: a formula's line is where
+ * the request STARTS, a ladder's is the FIRST of several, and a workflow
+ * whose jobs asked for various amounts has a line at the most common one.
+ */
+export function memoryHistogramNote(req: UtilRequest | null | undefined): string | undefined {
+  if (!req) return undefined;
+  if (req.adaptive) {
+    return `The memory request ${requestPhrase('memory', formatMiB(req.typical), req)}; the line is where it starts.`;
+  }
+  if (hasLadder(req)) {
+    return `The memory request ${requestPhrase('memory', formatMiB(req.typical), req)}; the line is the first request, not the retry.`;
+  }
+  if (req.distinct > 1) {
+    return `Requests ranged from ${formatMiB(req.min)} to ${formatMiB(req.max)}; the line is the most common.`;
+  }
+  return undefined;
+}
+
+/** retryRungOf is the ladder's top rung, or null when there is no ladder. */
+function retryRungOf(req: RequestShape): number | null {
+  if (typeof req === 'boolean' || !req || req.retry !== true) return null;
+  const rung = req.retry_mib ?? 0;
+  return rung > req.typical ? rung : null;
 }
 
 // --- Applying advice to waiting jobs ---
@@ -975,7 +1053,7 @@ export function applyPlan(
       changes.push({
         advice: a,
         attr: `request_${kind}`,
-        from: requestPhrase(kind, now, req?.adaptive),
+        from: requestPhrase(kind, now, req),
         to,
         adaptive: waitingAdaptive.includes(kind),
       });

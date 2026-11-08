@@ -131,7 +131,10 @@ export function ApplyPanel({
               Not applied to waiting jobs:
               <ul className="ml-4 list-disc">
                 {plan.blocked.map((a) => (
-                  <li key={a.id}>{a.title}</li>
+                  <li key={a.id}>
+                    {a.title}
+                    {a.why_not_applied ? <span className="text-gray-500"> — {a.why_not_applied}</span> : null}
+                  </li>
                 ))}
               </ul>
             </div>

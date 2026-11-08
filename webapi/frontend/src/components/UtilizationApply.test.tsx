@@ -121,6 +121,36 @@ describe('ApplyPanel', () => {
     expect(screen.getByTestId('apply-blocked')).toHaveTextContent('Your jobs fit GPUs with 8 GB of memory');
   });
 
+  // A retry is set up at submit time, so a memory-retry recommendation
+  // is never an edit to a waiting job. Since the sizing fix these are
+  // common rather than rare, and a bare title under "not applied" leaves
+  // the reader to guess why the button is missing.
+  it('says WHY a suggestion cannot be applied, when the server says', () => {
+    const w: UtilWorkflow = {
+      ...assemble,
+      advice: [
+        ...assemble.advice,
+        {
+          id: 'memory-retry',
+          resource: 'memory',
+          severity: 'warn',
+          title: 'Request 1 GB of memory and retry at 4 GB',
+          detail: '',
+          submit: ['request_memory = 1024MB', 'retry_request_memory = 4096MB'],
+          saves: null,
+          confidence: 'high',
+          applies: false,
+          why_not_applied: 'Setting up a retry takes a new submission: it cannot be added to jobs already waiting.',
+        },
+      ],
+    };
+    renderPanel(w, 40, ['memory']);
+    fireEvent.click(screen.getByRole('button', { name: 'Review the changes' }));
+    const blocked = screen.getByTestId('apply-blocked');
+    expect(blocked).toHaveTextContent('Request 1 GB of memory and retry at 4 GB');
+    expect(blocked).toHaveTextContent('it cannot be added to jobs already waiting');
+  });
+
   it('shows a formula request as not changed, unticked, and leaves its advice out of the request', async () => {
     const spy = vi.spyOn(api, 'utilizationApply').mockResolvedValue({ ...ok, edited: 40 });
     renderPanel(assemble, 40, ['memory']);

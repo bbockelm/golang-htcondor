@@ -97,7 +97,9 @@ func adviseWorkflow(w *Workflow, jobs []*Job, plan *memoryPlan, completedWalls [
 		if attr, value, ok := out[i].RequestChange(); ok {
 			out[i].Applies = true
 			out[i].Change = &Change{Attribute: attr, Value: value}
+			continue
 		}
+		out[i].WhyNotApplied = out[i].whyNotApplied()
 	}
 	if out == nil {
 		out = []Advice{}
@@ -116,6 +118,18 @@ func (a Advice) appliesToQueue() bool {
 		return false
 	}
 	return a.ID != "memory-retry"
+}
+
+// whyNotApplied is what the page says in place of an apply button, or
+// empty for advice that was never about editing a request.
+func (a Advice) whyNotApplied() string {
+	if a.request <= 0 || a.changes == "" {
+		return ""
+	}
+	if a.ID == "memory-retry" {
+		return "Setting up a retry takes a new submission: it cannot be added to jobs already waiting."
+	}
+	return ""
 }
 
 // RequestChange is the Request* attribute an advice changes and its new

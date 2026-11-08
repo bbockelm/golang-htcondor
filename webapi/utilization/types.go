@@ -124,6 +124,15 @@ type Request struct {
 	// Expression the most common formula (memory only).
 	Adaptive   bool   `json:"adaptive"`
 	Expression string `json:"expression,omitempty"`
+	// Retry says most jobs were submitted with a memory retry ladder
+	// (retry_request_memory). Typical, Min and Max are then the FIRST
+	// rung -- what the submit file asked for -- and RetryMiB the largest
+	// rung a job of this workflow actually reached. A request that an
+	// eviction raised is not one anybody chose, so a page describing
+	// these jobs as "requested RetryMiB" would be describing the policy
+	// rather than the workflow.
+	Retry    bool    `json:"retry,omitempty"`
+	RetryMiB float64 `json:"retry_mib,omitempty"`
 }
 
 // BatchPoint is one submission: a cluster, or for a DAG the whole run of
@@ -191,6 +200,11 @@ type Advice struct {
 	// and Change is that edit.
 	Applies bool    `json:"applies"`
 	Change  *Change `json:"change,omitempty"`
+	// WhyNotApplied says, for advice that Applies is false for, what
+	// stops it. A page that can only say "not applied" leaves the reader
+	// to guess whether the advice is wrong, the jobs are gone, or the
+	// change is one no edit can make.
+	WhyNotApplied string `json:"why_not_applied,omitempty"`
 
 	// request is the new request the advice asks for, in the units of
 	// the request named by changes (cores, MiB, KiB, GPUs); zero when it

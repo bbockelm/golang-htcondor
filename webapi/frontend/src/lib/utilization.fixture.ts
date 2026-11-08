@@ -157,6 +157,10 @@ interface WorkflowSpec {
   pRestart: number;
   gpuMedian?: number;
   gpuMemMedian?: number; // MiB
+  // The workflow was submitted with retry_request_memory: reqMem is then
+  // the first rung and this the rung it retries at. The page names both,
+  // and the range strip reads a peak this covers as the ladder working.
+  retryMemMiB?: number;
   advice: (ctx: AdviceContext) => UtilAdvice[];
 }
 
@@ -325,6 +329,10 @@ function buildWorkflow(spec: WorkflowSpec): UtilWorkflow {
   const disk = distribution(nonNull(jobs.map((j) => j.disk)));
   const wall = distribution(jobs.map((j) => j.wall));
   const reqMem = requestOf(jobs.map((j) => j.reqMem));
+  if (reqMem && spec.retryMemMiB && spec.retryMemMiB > reqMem.typical) {
+    reqMem.retry = true;
+    reqMem.retry_mib = spec.retryMemMiB;
+  }
   const reqCpu = requestOf(jobs.map((j) => j.reqCpu));
   const reqDisk = requestOf(jobs.map((j) => j.reqDisk));
   const curve = memoryCurve(jobs, reqMem?.typical ?? 0);
@@ -482,6 +490,13 @@ const SPECS: WorkflowSpec[] = [
             : [`request_memory = ${submitMem(recMib)}`],
           saves: { unit: 'gib_hours', amount: curveSaves(ctx) },
           confidence: ctx.confidence,
+          ...(retry
+            ? {
+                applies: false,
+                why_not_applied:
+                  'Setting up a retry takes a new submission: it cannot be added to jobs already waiting.',
+              }
+            : {}),
         },
         {
           id: 'disk-lower',
@@ -660,6 +675,56 @@ const SPECS: WorkflowSpec[] = [
         submit: [],
         saves: null,
         confidence: 'low',
+      },
+    ],
+  },
+  // A workflow that already uses retry_request_memory: it asks for 1 GB
+  // and retries at 4 GB, so a minority of its jobs are evicted and rerun
+  // larger. It exists so the page's ladder rendering has something to
+  // show -- the request marker naming both rungs, the range strip
+  // reading a covered peak as the ladder working rather than a job that
+  // did not fit, and a recommendation that cannot be applied to waiting
+  // jobs because a retry is set up at submit time.
+  {
+    key: 'wf-sieve',
+    name: 'sieve-reads',
+    executable: 'sieve.py',
+    owner: 'bob',
+    is_dag: false,
+    seed: 57,
+    jobs: 240,
+    batches: 4,
+    clusterBase: 81400,
+    reqMem: () => 1024,
+    retryMemMiB: 4 * MIB_PER_GIB,
+    reqCpu: () => 1,
+    reqDisk: 2 * KIB_PER_GIB,
+    // A long right tail: most jobs sit well under 1 GB, a few need far
+    // more, which is the shape a ladder is for.
+    memMedian: 620,
+    memSigma: 0.85,
+    coresMedian: 0.9,
+    diskMedian: 0.4 * KIB_PER_GIB,
+    wallMedian: 1800,
+    wallSigma: 0.4,
+    pFailed: 0.01,
+    pRemoved: 0,
+    pRestart: 0.12,
+    advice: (ctx) => [
+      {
+        id: 'memory-retry',
+        resource: 'memory',
+        severity: 'warn',
+        title: 'Request 1 GB of memory and retry at 4 GB',
+        detail:
+          `These jobs already retry at a larger memory request: some of ${ctx.n.toLocaleString('en-US')} outgrew 1 GB and were rerun. ` +
+          `95% peaked at or below ${gb(ctx.memory?.p95 ?? 0)}; the largest peaked at ${gb(ctx.memory?.max ?? 0)}.`,
+        submit: ['request_memory = 1024MB', 'retry_request_memory = 4096MB'],
+        saves: null,
+        confidence: ctx.confidence,
+        applies: false,
+        why_not_applied:
+          'Setting up a retry takes a new submission: it cannot be added to jobs already waiting.',
       },
     ],
   },
