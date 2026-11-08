@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PelicanPlatform/classad/classad"
+
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/startd"
 	"github.com/bbockelm/golang-htcondor/webapi/reservation"
 )
 
@@ -113,17 +116,94 @@ func TestStartIsReadAsAnExpression(t *testing.T) {
 		if !strings.Contains(expr, "ReservationE2EMarker") {
 			t.Errorf("%s reported START as %q, which does not contain the site's own expression", machine, expr)
 		}
-		// And the provisioning decision follows from it.
-		if !reservation.ProvisionNeeded(expr) {
-			t.Errorf("%s: a START with no reservation clause did not read as needing provisioning: %q", machine, expr)
+		// And the provisioning decision follows from it: this execute
+		// point has a START of its own and does not consult the sieve,
+		// so a reservation would hold it to no effect.
+		if reservation.Provisioned(expr) {
+			t.Errorf("%s: a START with no reservation clause read as provisioned: %q", machine, expr)
 		}
-		composed := reservation.ComposeStart(expr)
-		if reservation.ProvisionNeeded(composed) {
-			t.Errorf("%s: the composed expression still reads as needing provisioning: %q", machine, composed)
+	}
+}
+
+// TestStartCannotBePushed is why the stanza has to be in the execute
+// point's configuration rather than installed by the access point.
+//
+// A startd republishes START from its own configuration every time it
+// refreshes its ad, so an attribute named START merged into the machine
+// ad is overwritten within seconds. Nothing reports a failure: the push
+// is accepted, the other attributes in it stick, and the machine goes
+// on admitting everything while a controller counts it as held.
+//
+// If this ever stops being true -- if a pushed START survives -- the
+// access point could provision execute points itself, and this test is
+// where that is noticed.
+func TestStartCannotBePushed(t *testing.T) {
+	const siteStart = `START = (TARGET.ReservationE2EMarker =?= true)`
+	_, coll := harness(t, siteStart+"\nSEC_ENABLE_REMOTE_ADMINISTRATION = True\n")
+	waitForSlots(t, coll)
+
+	ads, _, err := coll.QueryAdsWithOptions(context.Background(), "StartdAd", "", &htcondor.QueryOptions{
+		Limit: 100, Projection: []string{"*"}, PrivateAttributes: true,
+	})
+	if err != nil {
+		t.Fatalf("querying slots: %v", err)
+	}
+	var withCap *classad.ClassAd
+	for _, ad := range ads {
+		if v, ok := ad.EvaluateAttrString(startd.AdminCapabilityAttr); ok && v != "" {
+			withCap = ad
+			break
 		}
-		if !strings.Contains(composed, "ReservationE2EMarker") {
-			t.Errorf("%s: composing dropped the site's own policy: %q", machine, composed)
+	}
+	if withCap == nil {
+		t.Fatal("no slot ad carried an administrative capability")
+	}
+	admin, err := startd.NewAdminFromAd(withCap, true, nil)
+	if err != nil {
+		t.Fatalf("NewAdminFromAd: %v", err)
+	}
+
+	// Push a START alongside an operand, so a push that did nothing at
+	// all is distinguishable from one that landed everything but START.
+	update := classad.New()
+	_ = update.Set("ReservationE2EPushedMarker", int64(99))
+	pushed, err := classad.ParseExpr(`(TARGET.ReservationE2EMarker =?= true) && ( ReservationStart ?: True )`)
+	if err != nil {
+		t.Fatalf("parsing the START to push: %v", err)
+	}
+	update.InsertExpr("START", pushed)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := admin.UpdateMachineAd(ctx, update); err != nil {
+		t.Fatalf("UpdateMachineAd: %v", err)
+	}
+
+	machine, _ := withCap.EvaluateAttrString("Machine")
+	deadline := time.Now().Add(45 * time.Second)
+	var landed bool
+	for time.Now().Before(deadline) {
+		time.Sleep(3 * time.Second)
+		fresh, _, qerr := coll.QueryAdsWithOptions(context.Background(), "StartdAd", "", &htcondor.QueryOptions{
+			Limit: 100, Projection: []string{"*"},
+		})
+		if qerr != nil {
+			t.Fatalf("re-querying slots: %v", qerr)
 		}
+		for _, ad := range fresh {
+			if m, _ := ad.EvaluateAttrString("Machine"); m != machine {
+				continue
+			}
+			if v, ok := ad.EvaluateAttrInt("ReservationE2EPushedMarker"); ok && v == 99 {
+				landed = true
+			}
+			if e, ok := ad.Lookup("START"); ok && e != nil && reservation.Provisioned(e.String()) {
+				t.Fatalf("a pushed START survived on %s (%s); the access point could provision execute points itself and this package should be changed to do so", machine, e)
+			}
+		}
+	}
+	if !landed {
+		t.Fatal("the push never reached the slot ad at all, so this test proved nothing about START")
 	}
 }
 

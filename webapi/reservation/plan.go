@@ -33,6 +33,12 @@ type Tick struct {
 type Hold struct {
 	Machine  string
 	Deadline time.Time
+	// Until is when the reservation this machine is held for ends.
+	// Past it the machine is the pool's again, whether or not anybody
+	// is left to say so -- which is the point: the attribute it becomes
+	// cannot be deleted, so it has to stop meaning something on its
+	// own.
+	Until time.Time
 	// For names the reservations this machine is held for, soonest bell
 	// first. Only the earliest deadline reaches the pool; the rest are
 	// here so an operator can see why a machine is held.
@@ -151,7 +157,7 @@ func (p Policy) Plan(t Tick, cfg PlanConfig) Plan {
 	}
 	allocs := p.Assign(t.Machines, demands, t.Now)
 
-	wantHold := map[string]time.Time{}
+	wantHold := map[string]Hold{}
 	holdFor := map[string][]string{}
 	for _, alloc := range allocs {
 		a := byID[alloc.ID]
@@ -161,24 +167,36 @@ func (p Policy) Plan(t Tick, cfg PlanConfig) Plan {
 		// Past the bell the seats are taken, not drained towards.
 		if a.phase != PhasePlanning {
 			out.Evict = append(out.Evict, evictionsFor(alloc, a.spec.ID)...)
+		} else if a.window.Bell().Sub(t.Now) <= p.Forgive {
+			// Inside the forgiveness window, holding buys nothing and
+			// costs admissions: anything started from here is under the
+			// line at the bell anyway. This is the same reason there is
+			// no quiet period.
 			continue
 		}
-		// Inside the forgiveness window a tag changes nothing: anything
-		// started from here is cheap to evict at the bell anyway.
-		if a.window.Bell().Sub(t.Now) <= p.Forgive {
-			continue
-		}
-		hold := machinesToHold(alloc)
-		for _, name := range hold {
-			if cur, ok := wantHold[name]; !ok || a.window.Bell().Before(cur) {
-				wantHold[name] = a.window.Bell()
+		// Every other phase holds. Before the bell that is the drain;
+		// after it, it is what keeps a seat the project frees with the
+		// project instead of handing it back to the pool while the
+		// window is still open.
+		for _, name := range machinesToHold(alloc) {
+			if cur, ok := wantHold[name]; !ok || a.window.Bell().Before(cur.Deadline) {
+				// The pushed triple always comes from one reservation,
+				// the one whose bell is soonest. Mixing a deadline from
+				// one with a window end from another would hold a
+				// machine for a project at a time neither asked for.
+				wantHold[name] = Hold{
+					Machine:  name,
+					Deadline: a.window.Bell(),
+					Until:    a.window.End,
+				}
 			}
 			holdFor[name] = append(holdFor[name], alloc.ID)
 		}
 	}
 
-	for name, deadline := range wantHold {
-		out.Hold = append(out.Hold, Hold{Machine: name, Deadline: deadline, For: holdFor[name]})
+	for name, h := range wantHold {
+		h.For = holdFor[name]
+		out.Hold = append(out.Hold, h)
 	}
 	sort.Slice(out.Hold, func(i, j int) bool { return out.Hold[i].Machine < out.Hold[j].Machine })
 
