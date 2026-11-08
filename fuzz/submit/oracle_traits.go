@@ -225,6 +225,9 @@ func goBehaviorFor(have map[string]bool) htcondor.SubmitBehavior {
 
 		OmitLocalAndSchedulerMachineChecks:    have["HTCONDOR-3926"],
 		OmitLocalAndSchedulerResourceDefaults: have["HTCONDOR-3926"],
+
+		OmitRemoteIOKeywords:      have["HTCONDOR-3998-remoteio"],
+		OmitContainerIsCommonAttr: have["HTCONDOR-3932-container"],
 	}
 }
 

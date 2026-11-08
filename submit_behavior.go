@@ -90,6 +90,28 @@ type SubmitBehavior struct {
 	// puts a number in the ad that nothing acts on.
 	OmitLocalAndSchedulerResourceDefaults bool
 
+	// OmitRemoteIOKeywords stops the standard-universe RemoteIO submit
+	// commands from writing anything.
+	//
+	// HTCONDOR-3998 removed the RemoteIO code and its eight keywords:
+	// buffer_size, buffer_files, buffer_block_size, file_remaps,
+	// fetch_files, compress_files, append_files and local_files. Standard
+	// universe has been gone for years and nothing read the attributes.
+	//
+	// The commands are still ACCEPTED, because an unrecognized submit
+	// command is an ordinary macro rather than an error, which is what a
+	// newer condor_submit does with them too. They simply write no job
+	// attribute.
+	OmitRemoteIOKeywords bool
+
+	// OmitContainerIsCommonAttr stops container_is_common from writing the
+	// ContainerIsCommon job attribute.
+	//
+	// HTCONDOR-3932 kept the submit command and moved it to the container
+	// handling with no attribute of its own, so the value steers how the
+	// submission is built without appearing in the ad under that name.
+	OmitContainerIsCommonAttr bool
+
 	// OmitLeaveJobInQueueDefault writes no LeaveJobInQueue for a job whose
 	// submit file does not set one.
 	//

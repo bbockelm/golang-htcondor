@@ -42,7 +42,7 @@ func TestSimpleKeywordTableMatchesOracle(t *testing.T) {
 	}
 
 	got := make(map[string]row)
-	for _, kw := range htcondor.SimpleSubmitKeywords() {
+	for _, kw := range htcondor.SimpleSubmitKeywordsFor(goBehavior) {
 		if _, dup := got[kw.Key]; dup {
 			t.Errorf("%s appears twice in the Go table", kw.Key)
 		}

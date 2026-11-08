@@ -29,6 +29,10 @@ func TestToolDaemonBufferNoopJavaMatchOracle(t *testing.T) {
 		src    string
 		want   map[string]string // attribute -> the value the oracle must have
 		absent []string          // attributes neither side may set
+		// removedBy names the upstream change that deleted this family.
+		// An oracle carrying it writes none of these attributes, so the
+		// case has nothing to compare and is skipped rather than failed.
+		removedBy string
 	}{{
 		name: "tdp_full",
 		src: "executable = /bin/sleep\ntool_daemon_cmd = /usr/bin/strace\n" +
@@ -94,7 +98,8 @@ func TestToolDaemonBufferNoopJavaMatchOracle(t *testing.T) {
 		},
 	}, {
 		// All three buffer settings are expressions, so arithmetic survives.
-		name: "buffer_settings",
+		name:      "buffer_settings",
+		removedBy: "HTCONDOR-3998-remoteio",
 		src: "executable = /bin/sleep\nbuffer_files = \"a.txt = b.txt\"\n" +
 			"buffer_size = 1024\nbuffer_block_size = 2 * 1024\nqueue\n",
 		want: map[string]string{
@@ -142,6 +147,9 @@ func TestToolDaemonBufferNoopJavaMatchOracle(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.removedBy != "" && oracleHas[tc.removedBy] {
+				t.Skipf("this oracle carries %s, which removed the keywords this case is about", tc.removedBy)
+			}
 			cpp := oracle.MakeAds(tc.src, oracle.ModeAds, MaxProcs)
 			if !cpp.OK {
 				t.Fatalf("oracle rejected the file: %s", cpp.Err)
@@ -227,9 +235,16 @@ func TestGeneratedCorpusReachesTheseFamilies(t *testing.T) {
 		"ToolDaemonCmd", "ToolDaemonArgs", "ToolDaemonArguments",
 		"ToolDaemonInput", "ToolDaemonOutput", "ToolDaemonError",
 		"SuspendJobAtExec",
-		"BufferFiles", "BufferSize", "BufferBlockSize",
 		"IsNoopJob", "NoopJobExitCode", "NoopJobExitSignal",
 		"JarFiles", "JavaVMArgs", "JavaVMArguments",
+	}
+	// The buffer family exists only until HTCONDOR-3998 removes the
+	// keywords that write it. Asking an oracle that has that change to
+	// produce them would fail on every generated file, so the requirement
+	// follows the keywords rather than being dropped outright -- against an
+	// older oracle the sweep still has to reach them.
+	if !oracleHas["HTCONDOR-3998-remoteio"] {
+		want = append(want, "BufferFiles", "BufferSize", "BufferBlockSize")
 	}
 
 	seen := map[string]bool{}

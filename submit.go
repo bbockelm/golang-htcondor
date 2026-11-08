@@ -3314,6 +3314,13 @@ func (sf *SubmitFile) setBufferNoopAndJarFiles(ad *classad.ClassAd) error {
 		{"noop_job_exit_signal", "NoopJobExitSignal"},
 	}
 	for _, e := range exprs {
+		// The buffer settings are written here AND carry a row in the
+		// simple keyword table, so both sites have to answer to the same
+		// gate; remoteIOKeywords is the one list they share. See
+		// SubmitBehavior.OmitRemoteIOKeywords.
+		if sf.behavior.OmitRemoteIOKeywords && remoteIOKeywords[e.command] {
+			continue
+		}
 		v := sf.submitParam(e.command, e.attr)
 		if v == "" {
 			continue
