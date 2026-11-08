@@ -172,4 +172,80 @@ func TestDigestAllowanceIsNotDead(t *testing.T) {
 			t.Errorf("%s names %s, which no trait probes for, so the allowance can never apply", name, ticket)
 		}
 	}
+
+	// The other direction, held to the same standard: an entry here is
+	// about a keyword this library prunes, so one that is no longer in the
+	// prunable table explains nothing either.
+	for name, ticket := range digestKeywordsAheadOfOracle {
+		if !htcondor.DigestKeywordIsPrunable(name) {
+			t.Errorf("%s is not in the prunable table, so its allowance explains nothing -- delete the entry", name)
+		}
+		if !probed[ticket] {
+			t.Errorf("%s names %s, which no trait probes for, so the allowance can never apply", name, ticket)
+		}
+		if other, both := digestKeywordsBehindOracle[name]; both {
+			t.Errorf("%s is recorded in both directions (%s and %s); one of them is wrong", name, ticket, other)
+		}
+	}
+}
+
+// TestDigestKeywordClassification exercises both allowances without an
+// oracle, which is the only place they can be exercised at all: each one is
+// about a keyword table only an HTCondor newer than the pinned one has, so
+// every run that links an oracle takes the other branch. Left unpinned, an
+// allowance that excused too much or nothing would be found by the nightly
+// and nowhere else.
+func TestDigestKeywordClassification(t *testing.T) {
+	// Real entries, so the test moves with the tables rather than with a
+	// fixture: one from each allowance, plus a name in neither.
+	const (
+		behindName = "annex_name"  // the oracle has it, we do not prune it
+		aheadName  = "buffer_size" // we prune it, a newer oracle dropped it
+		newName    = "not_a_keyword_this_library_knows"
+	)
+	if _, ok := digestKeywordsBehindOracle[behindName]; !ok {
+		t.Fatalf("%s is no longer a recorded allowance; pick another entry", behindName)
+	}
+	if _, ok := digestKeywordsAheadOfOracle[aheadName]; !ok {
+		t.Fatalf("%s is no longer a recorded allowance; pick another entry", aheadName)
+	}
+
+	// An oracle that knows behindName and newName, and has dropped
+	// aheadName; this library prunes aheadName and not the other two.
+	want := map[string]bool{behindName: true, newName: true}
+	prunable := []string{aheadName}
+
+	all := map[string]bool{}
+	for _, tr := range oracleTraits {
+		all[tr.ticket] = true
+	}
+
+	withTraits := classifyDigestKeywords(want, prunable, all)
+	if len(withTraits.missing) != 1 || withTraits.missing[0] != newName {
+		t.Errorf("a keyword nothing accounts for must be reported, got missing=%v", withTraits.missing)
+	}
+	if len(withTraits.extra) != 0 {
+		t.Errorf("the recorded keyword must not be reported, got extra=%v", withTraits.extra)
+	}
+	if len(withTraits.behind) != 1 || withTraits.behind[0] != behindName {
+		t.Errorf("want behind=[%s], got %v", behindName, withTraits.behind)
+	}
+	if len(withTraits.ahead) != 1 || withTraits.ahead[0] != aheadName {
+		t.Errorf("want ahead=[%s], got %v", aheadName, withTraits.ahead)
+	}
+
+	// The same two tables against an oracle that carries neither change:
+	// both allowances lapse and both differences are findings again. This
+	// is the half that keeps an allowance from excusing a difference the
+	// pinned oracle should never produce.
+	none := classifyDigestKeywords(want, prunable, map[string]bool{})
+	if len(none.behind) != 0 || len(none.ahead) != 0 {
+		t.Errorf("no trait is present, so neither allowance applies: behind=%v ahead=%v", none.behind, none.ahead)
+	}
+	if len(none.missing) != 2 {
+		t.Errorf("want both unpruned keywords reported, got missing=%v", none.missing)
+	}
+	if len(none.extra) != 1 || none.extra[0] != aheadName {
+		t.Errorf("want extra=[%s], got %v", aheadName, none.extra)
+	}
 }
