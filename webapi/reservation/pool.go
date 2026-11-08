@@ -30,6 +30,10 @@ var SlotProjection = []string{
 	"Name", "Machine", "SlotType", "PartitionableSlot", "DynamicSlot", "BackfillSlot",
 	"State", "Activity", "Cpus", "GPUs", "Memory", "Disk",
 	"JobStart", "RemoteProject", "GlobalJobId",
+	// MyAddress is how the actuator reaches the startd that owns the
+	// slot. Without it a census is read-only: there is nothing to
+	// connect to.
+	"MyAddress",
 }
 
 // slotLimit caps one census query. A pool larger than this is reported
@@ -107,6 +111,7 @@ func MachinesFromAds(ads []*classad.ClassAd) []Machine {
 			m.Free = m.Free.add(s.res)
 		case s.dynamic || s.occupied:
 			m.Dslots = append(m.Dslots, Dslot{
+				Slot:    s.name,
 				Started: s.started,
 				Res:     s.res,
 				Project: s.project,
@@ -125,6 +130,8 @@ func MachinesFromAds(ads []*classad.ClassAd) []Machine {
 
 // slot is one slot ad, reduced to what the census uses.
 type slot struct {
+	// name is the slot ad's Name, which the startd evicts by.
+	name          string
 	machine       string
 	res           Resources
 	started       time.Time
@@ -148,14 +155,13 @@ func slotFromAd(ad *classad.ClassAd) slot {
 		return v
 	}
 
-	s := slot{machine: str("Machine")}
+	s := slot{name: str("Name"), machine: str("Machine")}
 	if s.machine == "" {
 		// Fall back to the slot name's host half: "slot1_3@host".
-		name := str("Name")
-		if i := strings.LastIndexByte(name, '@'); i >= 0 {
-			s.machine = name[i+1:]
+		if i := strings.LastIndexByte(s.name, '@'); i >= 0 {
+			s.machine = s.name[i+1:]
 		} else {
-			s.machine = name
+			s.machine = s.name
 		}
 	}
 

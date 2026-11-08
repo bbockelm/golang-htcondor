@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,57 +18,16 @@ type fakeStarts struct {
 func (f *fakeStarts) Starts(context.Context) (map[string]string, error) { return f.starts, f.err }
 
 type fakeWriter struct {
-	wrote map[string]string
-	err   error
+	probed []string
+	err    error
 }
 
-func (w *fakeWriter) SetStart(_ context.Context, m, expr string) error {
+func (w *fakeWriter) Probe(_ context.Context, m string) error {
 	if w.err != nil {
 		return w.err
 	}
-	if w.wrote == nil {
-		w.wrote = map[string]string{}
-	}
-	w.wrote[m] = expr
+	w.probed = append(w.probed, m)
 	return nil
-}
-
-func TestProvisionNeeded(t *testing.T) {
-	for _, tc := range []struct {
-		name, start string
-		want        bool
-	}{
-		{"plain site policy", "Owner =?= \"alice\"", true},
-		{"already composed", "(Owner =?= \"alice\") && ( ReservationStart ?: True )", false},
-		{"hand-written in another spelling", "ReservationStart =?= undefined || ReservationStart", false},
-		// START absent means the startd did not answer, not that the site
-		// has no policy. Composing against nothing would replace the real
-		// policy with the clause alone.
-		{"absent", "", false},
-		{"whitespace", "   ", false},
-	} {
-		if got := ProvisionNeeded(tc.start); got != tc.want {
-			t.Errorf("%s: ProvisionNeeded(%q) = %v, want %v", tc.name, tc.start, got, tc.want)
-		}
-	}
-}
-
-// TestComposeStartParenthesisesTheSitePolicy: a top-level || in the
-// site's expression would otherwise swallow the clause, and the machine
-// would admit anything while looking held.
-func TestComposeStartParenthesisesTheSitePolicy(t *testing.T) {
-	got := ComposeStart("A || B")
-	if !strings.HasPrefix(got, "(A || B) &&") {
-		t.Errorf("ComposeStart(%q) = %q, want the site expression parenthesised", "A || B", got)
-	}
-	if !strings.Contains(got, StartClause) {
-		t.Errorf("composed expression lost the clause: %q", got)
-	}
-	// Composing is idempotent in the sense that matters: the result no
-	// longer needs provisioning.
-	if ProvisionNeeded(got) {
-		t.Errorf("a composed expression still reads as needing provisioning: %q", got)
-	}
 }
 
 func newProber(starts map[string]string, w *fakeWriter) *Prober {
@@ -79,57 +39,92 @@ func newProber(starts map[string]string, w *fakeWriter) *Prober {
 	}
 }
 
-func TestVisitProvisionsAMachineThatNeedsIt(t *testing.T) {
+// TestVisitNamesAnUnprovisionedExecutePoint. An execute point whose
+// START never consults the sieve is held, reports as held, and admits
+// everything anyway. Nothing else in the system can tell, so naming it
+// here is the only way an operator finds out.
+func TestVisitNamesAnUnprovisionedExecutePoint(t *testing.T) {
 	w := &fakeWriter{}
 	p := newProber(map[string]string{"ep1": `Owner =?= "alice"`}, w)
 	probe, err := p.Visit(context.Background())
 	if err != nil {
 		t.Fatalf("Visit: %v", err)
 	}
-	if probe.Outcome != ProbeProvisioned {
-		t.Fatalf("outcome = %q, want provisioned", probe.Outcome)
+	if probe.Outcome != ProbeUnprovisioned {
+		t.Fatalf("outcome = %q, want unprovisioned", probe.Outcome)
 	}
-	got := w.wrote["ep1"]
-	if !strings.Contains(got, `Owner =?= "alice"`) {
-		t.Errorf("the site's own policy was not carried into %q", got)
+	if !strings.Contains(probe.Detail, `Owner =?= "alice"`) {
+		t.Errorf("the probe does not report the execute point's own START: %q", probe.Detail)
 	}
-	if !strings.Contains(got, StartClause) {
-		t.Errorf("the clause was not added: %q", got)
+
+	h := p.Health()
+	if !h.Healthy {
+		// This access point is working. What is missing is a line in
+		// somebody else's configuration file.
+		t.Errorf("an unprovisioned execute point made this access point read as unhealthy")
+	}
+	if !slices.Contains(h.Unprovisioned, "ep1") {
+		t.Errorf("health does not name the unprovisioned machine: %+v", h)
+	}
+	if h.Stanza != StartStanza {
+		t.Errorf("health carries stanza %q, want the one to paste", h.Stanza)
 	}
 }
 
-// TestVisitWritesOnlyOneMachine: the whole point of the pacing is that a
-// pool is not rewritten in one go.
+// TestVisitAcceptsAProvisionedExecutePoint, in whatever spelling the
+// site wrote the clause: the attribute name is what matters.
+func TestVisitAcceptsAProvisionedExecutePoint(t *testing.T) {
+	for name, start := range map[string]string{
+		"the stanza as documented": `(Owner =?= "alice") && ( ReservationStart ?: True )`,
+		"an older spelling":        `ReservationStart =?= undefined || ReservationStart`,
+		"lowercase":                `(Foo) && (reservationstart ?: 1)`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := &fakeWriter{}
+			p := newProber(map[string]string{"ep1": start}, w)
+			probe, err := p.Visit(context.Background())
+			if err != nil {
+				t.Fatalf("Visit: %v", err)
+			}
+			if probe.Outcome != ProbeOK {
+				t.Errorf("outcome = %q, want ok", probe.Outcome)
+			}
+			if len(p.Health().Unprovisioned) != 0 {
+				t.Errorf("a provisioned execute point was reported as missing the stanza")
+			}
+		})
+	}
+}
+
+// TestVisitWritesOnlyOneMachine: the whole point of the pacing is that
+// a pool is not written to in one go.
 func TestVisitWritesOnlyOneMachine(t *testing.T) {
 	starts := map[string]string{}
 	for _, n := range []string{"ep1", "ep2", "ep3", "ep4", "ep5"} {
-		starts[n] = `Owner =?= "alice"`
+		starts[n] = StartStanza
 	}
 	w := &fakeWriter{}
 	p := newProber(starts, w)
 	if _, err := p.Visit(context.Background()); err != nil {
 		t.Fatalf("Visit: %v", err)
 	}
-	if len(w.wrote) != 1 {
-		t.Errorf("one visit wrote %d machines, want 1", len(w.wrote))
+	if len(w.probed) != 1 {
+		t.Errorf("one visit wrote to %d machines, want 1", len(w.probed))
 	}
 }
 
-// TestVisitStillProbesAnAlreadyProvisionedMachine: the write is how we
-// learn whether this access point may still update machine ads at all.
-func TestVisitStillProbesAnAlreadyProvisionedMachine(t *testing.T) {
-	composed := ComposeStart(`Owner =?= "alice"`)
+// TestVisitWritesEvenWhenNothingNeedsChanging: the write is how this
+// access point learns it may still update machine ads at all. A check
+// that only connected would prove nothing -- the startd accepts the
+// connection either way.
+func TestVisitWritesEvenWhenNothingNeedsChanging(t *testing.T) {
 	w := &fakeWriter{}
-	p := newProber(map[string]string{"ep1": composed}, w)
-	probe, err := p.Visit(context.Background())
-	if err != nil {
+	p := newProber(map[string]string{"ep1": StartStanza}, w)
+	if _, err := p.Visit(context.Background()); err != nil {
 		t.Fatalf("Visit: %v", err)
 	}
-	if probe.Outcome != ProbeAlreadySet {
-		t.Errorf("outcome = %q, want already-set", probe.Outcome)
-	}
-	if w.wrote["ep1"] != composed {
-		t.Errorf("the probe changed the expression: %q", w.wrote["ep1"])
+	if len(w.probed) != 1 {
+		t.Errorf("a provisioned execute point was not written to, so permission was never tested")
 	}
 }
 
@@ -138,7 +133,7 @@ func TestVisitStillProbesAnAlreadyProvisionedMachine(t *testing.T) {
 // every class starts on a pool that was never drained.
 func TestVisitSurfacesADeniedWrite(t *testing.T) {
 	w := &fakeWriter{err: errors.New("DENIED: not authorized to update machine ad")}
-	p := newProber(map[string]string{"ep1": `Owner =?= "alice"`}, w)
+	p := newProber(map[string]string{"ep1": StartStanza}, w)
 	probe, err := p.Visit(context.Background())
 	if err != nil {
 		t.Fatalf("Visit returned a fatal error for a denied write: %v", err)
@@ -168,8 +163,26 @@ func TestVisitSkipsAMachineWithNoStart(t *testing.T) {
 	if probe.Outcome != ProbeNoStart {
 		t.Errorf("outcome = %q, want no-start", probe.Outcome)
 	}
-	if len(w.wrote) != 0 {
-		t.Errorf("wrote to a machine whose START was unknown: %v", w.wrote)
+	if len(p.Health().Unprovisioned) != 0 {
+		// A missing START means the census did not ask for it, not that
+		// the operator forgot the stanza. Naming the machine would send
+		// them to edit a file that is already right.
+		t.Errorf("a machine whose START was unknown was reported as missing the stanza")
+	}
+}
+
+// TestHealthDeduplicatesAndSorts: a machine probed twice over the
+// remembered window is named once, so the admin page shows a list of
+// execute points rather than a list of visits.
+func TestHealthDeduplicatesAndSorts(t *testing.T) {
+	p := newProber(nil, &fakeWriter{})
+	for _, m := range []string{"ep2", "ep1", "ep2"} {
+		p.record(Probe{Machine: m, Outcome: ProbeUnprovisioned})
+	}
+	h := p.Health()
+	want := []string{"ep1", "ep2"}
+	if !slices.Equal(h.Unprovisioned, want) {
+		t.Errorf("Unprovisioned = %v, want %v", h.Unprovisioned, want)
 	}
 }
 
@@ -195,6 +208,9 @@ func TestHealthIsCleanBeforeAnyProbe(t *testing.T) {
 	h := p.Health()
 	if !h.Healthy || h.Outcome != "" || !h.CheckedAt.IsZero() {
 		t.Errorf("health before any probe = %+v, want clean and unchecked", h)
+	}
+	if len(h.Unprovisioned) != 0 {
+		t.Errorf("health names execute points before anything was probed: %v", h.Unprovisioned)
 	}
 }
 

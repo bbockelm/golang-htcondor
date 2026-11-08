@@ -31,14 +31,37 @@ type Jobs interface {
 // implementation talks to startds over CEDAR, which is not something a
 // test should need.
 //
-// Hold pushes an absolute deadline rather than a flag: the machine
-// attribute it becomes cannot be deleted and has no expiry, so a deadline
-// in the past stops constraining anything on its own and a controller
-// that dies leaves the pool recoverable.
+// Hold pushes absolute times rather than a flag: the machine attributes
+// they become cannot be deleted and have no expiry, so a time in the
+// past stops constraining anything on its own and a controller that
+// dies leaves the pool recoverable.
 type Actuator interface {
-	Hold(ctx context.Context, machine string, deadline time.Time, project string) error
+	Hold(ctx context.Context, h HoldRequest) error
 	Release(ctx context.Context, machine string) error
-	Evict(ctx context.Context, machine string, dslot int) error
+	Evict(ctx context.Context, e EvictRequest) error
+}
+
+// HoldRequest is one machine to put under a reservation.
+type HoldRequest struct {
+	Machine string
+	// Deadline is the bell: nothing may start here that will not have
+	// finished by then.
+	Deadline time.Time
+	// Until is when the reservation ends and the machine is the pool's
+	// again.
+	Until time.Time
+	// Project is the ProjectName whose jobs the machine is held for.
+	Project string
+}
+
+// EvictRequest is one running job to preempt.
+//
+// Slot is the slot ad's Name, which is how the startd that owns it
+// names the claim. Machine is carried for the error message and to
+// find the execute point; the startd does the rest by name.
+type EvictRequest struct {
+	Machine string
+	Slot    string
 }
 
 // Specs supplies the reservations to act on.
@@ -132,14 +155,14 @@ func (c *Controller) Tick(ctx context.Context) (TickResult, error) {
 		Running: running, Tagged: held, Need: need,
 	}
 	res.Plan = policy.Plan(tick, c.Config)
-	res.Errs = append(res.Errs, c.apply(ctx, res.Plan, specs, &res)...)
+	res.Errs = append(res.Errs, c.apply(ctx, res.Plan, specs, machines, &res)...)
 	return res, nil
 }
 
 // apply pushes a plan. Releases go first so a machine moving from one
 // reservation to another is never briefly held for neither, and evictions
 // go last so nothing is preempted for a seat that was not secured.
-func (c *Controller) apply(ctx context.Context, plan Plan, specs []*Spec, res *TickResult) []error {
+func (c *Controller) apply(ctx context.Context, plan Plan, specs []*Spec, machines []Machine, res *TickResult) []error {
 	project := map[string]string{}
 	for _, s := range specs {
 		if s != nil {
@@ -163,26 +186,53 @@ func (c *Controller) apply(ctx context.Context, plan Plan, specs []*Spec, res *T
 	}
 	for _, h := range plan.Hold {
 		// The project of the reservation whose bell is soonest, which is
-		// the deadline being pushed.
+		// the one whose deadline and window end are being pushed.
 		var p string
 		if len(h.For) > 0 {
 			p = project[h.For[0]]
 		}
-		if err := c.Actuator.Hold(ctx, h.Machine, h.Deadline, p); err != nil {
+		if err := c.Actuator.Hold(ctx, HoldRequest{
+			Machine: h.Machine, Deadline: h.Deadline, Until: h.Until, Project: p,
+		}); err != nil {
 			fail(fmt.Errorf("holding %s: %w", h.Machine, err))
 			continue
 		}
 		res.Held++
 	}
 	for _, e := range plan.Evict {
-		if err := c.Actuator.Evict(ctx, e.Machine, e.Dslot); err != nil {
-			fail(fmt.Errorf("evicting %s slot %d: %w", e.Machine, e.Dslot, err))
+		slot := slotName(machines, e)
+		if slot == "" {
+			// A census built without slot names cannot evict. Say so
+			// rather than guessing at which d-slot of the machine the
+			// index meant: vacating the wrong one preempts somebody
+			// who was not in the way and leaves the one that was.
+			fail(fmt.Errorf("evicting %s d-slot %d: the census carries no slot name", e.Machine, e.Dslot))
+			continue
+		}
+		if err := c.Actuator.Evict(ctx, EvictRequest{Machine: e.Machine, Slot: slot}); err != nil {
+			fail(fmt.Errorf("evicting %s: %w", slot, err))
 			continue
 		}
 		res.Evicted++
 	}
 	sort.Slice(errs, func(i, j int) bool { return errs[i].Error() < errs[j].Error() })
 	return errs
+}
+
+// slotName resolves an eviction's (machine, d-slot index) against the
+// census the plan was made from. Empty when the census does not name
+// that slot.
+func slotName(machines []Machine, e Eviction) string {
+	for _, m := range machines {
+		if m.Name != e.Machine {
+			continue
+		}
+		if e.Dslot < 0 || e.Dslot >= len(m.Dslots) {
+			return ""
+		}
+		return m.Dslots[e.Dslot].Slot
+	}
+	return ""
 }
 
 // Run ticks until ctx is cancelled. A tick that fails to read the pool is
