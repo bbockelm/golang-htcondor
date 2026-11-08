@@ -9,59 +9,62 @@ import (
 	"time"
 )
 
-// StartClause is what a held execute point's START must contain for the
-// sieve to govern it.
+// An execute point has to be told to consult the sieve before any of
+// this governs it, and that has to be done in its configuration:
 //
-// `?:` is the ClassAd defaulting operator: ReservationStart when it is
-// defined, True when it is not. An execute point with no reservation on
-// it is therefore unconstrained.
-const StartClause = `( ReservationStart ?: True )`
-
-// startMarker is what ProvisionNeeded looks for. It is the operand name
-// rather than the whole clause, so an operator who wrote the stanza into
-// their own config by hand -- in any spelling -- is left alone.
-const startMarker = "ReservationStart"
-
-// ProvisionNeeded reports whether an execute point's published START has
-// to be rewritten before the sieve can govern it.
+//	START = $(START) && ( ReservationStart ?: True )
 //
-// An empty expression is never provisioned. START missing from a slot ad
-// means the census asked for it and the startd did not answer, and
-// composing against nothing would replace whatever the site's real
-// policy is with the reservation clause alone.
-func ProvisionNeeded(start string) bool {
-	start = strings.TrimSpace(start)
-	if start == "" {
-		return false
-	}
-	return !strings.Contains(start, startMarker)
+// It cannot be pushed. A startd republishes START from its own
+// configuration every time it refreshes its ad, so an attribute named
+// START merged into the machine ad is overwritten within seconds and
+// the machine goes on admitting everything while a controller counts it
+// as held. The operands the sieve reads are pushed, and they stay; only
+// START itself behaves this way.
+//
+// So this file does two things instead of provisioning. It reports
+// which permissible execute points are not carrying the stanza, which
+// is a line the operator has to add and until then a reservation
+// silently holds nothing. And it confirms this access point may still
+// update machine ads, which is the other way reservations fail with
+// nothing to show for it.
+
+// Provisioner writes the sieve to one execute point.
+//
+// Writing it is the probe: the startd answers a request it cannot act
+// on the same way it answers one it can, so a check that connects
+// without writing proves only that the connection was accepted.
+// Writing the sieve is idempotent -- it is a constant, and the operands
+// that give it meaning are not touched.
+type Provisioner interface {
+	Probe(ctx context.Context, machine string) error
 }
 
-// ComposeStart is the expression to push: the execute point's own START,
-// as published, with the reservation clause ANDed on.
-//
-// The site's expression is parenthesised. A top-level || in it would
-// otherwise swallow the clause and the machine would admit anything
-// while appearing to be held.
-func ComposeStart(current string) string {
-	return "(" + strings.TrimSpace(current) + ") && " + StartClause
+// StartSource reports each candidate execute point's published START,
+// unevaluated. The census query must ask for the expression rather than
+// its value: a slot ad's START evaluates to true or false, and a
+// provisioning decision taken on "false" would be nonsense.
+type StartSource interface {
+	Starts(ctx context.Context) (map[string]string, error)
 }
 
 // ProbeOutcome is what one visit to an execute point found.
 type ProbeOutcome string
 
 const (
-	// ProbeProvisioned means START was rewritten to include the clause.
-	ProbeProvisioned ProbeOutcome = "provisioned"
-	// ProbeAlreadySet means it already referenced the clause.
-	ProbeAlreadySet ProbeOutcome = "already-set"
-	// ProbeDenied means the push was refused. This is the one an
+	// ProbeOK means the execute point carries the stanza and accepted a
+	// write.
+	ProbeOK ProbeOutcome = "ok"
+	// ProbeUnprovisioned means the write was accepted but the execute
+	// point's START does not consult the sieve, so holding it has no
+	// effect. The operator has to add StartStanza to its configuration.
+	ProbeUnprovisioned ProbeOutcome = "unprovisioned"
+	// ProbeDenied means the write was refused. This is the one an
 	// operator has to see: without the authorisation to update machine
 	// ads, every reservation silently holds nothing.
 	ProbeDenied ProbeOutcome = "denied"
 	// ProbeUnreachable means the execute point did not answer.
 	ProbeUnreachable ProbeOutcome = "unreachable"
-	// ProbeNoStart means the slot ad carried no START to compose against.
+	// ProbeNoStart means the slot ad carried no START to judge.
 	ProbeNoStart ProbeOutcome = "no-start"
 )
 
@@ -71,40 +74,27 @@ type Probe struct {
 	Machine string
 	Outcome ProbeOutcome
 	// Detail carries the error when the outcome is a failure, and the
-	// composed expression when one was pushed, so an operator can see
-	// exactly what was written to their pool.
+	// execute point's own START when it is not provisioned, so an
+	// operator can see what they are adding the stanza to.
 	Detail string
 }
 
-// OK reports whether the probe found a usable execute point.
-func (p Probe) OK() bool { return p.Outcome == ProbeProvisioned || p.Outcome == ProbeAlreadySet }
+// OK reports whether the probe found an execute point a reservation can
+// actually govern.
+func (p Probe) OK() bool { return p.Outcome == ProbeOK }
 
-// Provisioner writes START to one execute point.
-type Provisioner interface {
-	// SetStart pushes a START expression to a machine's ad.
-	SetStart(ctx context.Context, machine, expr string) error
-}
-
-// StartSource reports each candidate execute point's published START,
-// unevaluated. The census query must ask for the expression rather than
-// its value: a slot ad's START evaluates to true or false, and composing
-// against "false" would wedge the machine.
-type StartSource interface {
-	Starts(ctx context.Context) (map[string]string, error)
-}
-
-// Prober visits one execute point at a time, provisioning START where it
-// is missing and confirming the pool still accepts updates where it is
-// not.
+// Prober visits one execute point at a time, confirming that the pool
+// still accepts updates from this access point and that the execute
+// points carry the stanza.
 //
 // It is deliberately slow. Visiting one randomly chosen machine per
 // interval spreads the write load over the pool, and -- with the jitter
 // below -- keeps several access points running their own controllers
-// from converging on the same machine at the same moment. They would not
-// corrupt each other if they did: the composition is deterministic, so
-// two controllers pushing the same machine push identical bytes. The
-// jitter is to keep the pool from seeing a thundering herd at the top of
-// every interval.
+// from converging on the same machine at the same moment. They would
+// not corrupt each other if they did: the sieve is a constant, so two
+// controllers probing the same machine write identical bytes. The
+// jitter is to keep the pool from seeing a thundering herd at the top
+// of every interval.
 type Prober struct {
 	Source StartSource
 	Writer Provisioner
@@ -172,29 +162,26 @@ func (p *Prober) Visit(ctx context.Context) (Probe, error) {
 	name := names[p.intn(len(names))]
 
 	probe := Probe{At: p.now(), Machine: name}
-	start := starts[name]
+	start := strings.TrimSpace(starts[name])
+
+	// Permission first. Whether the stanza is there is a fact about the
+	// operator's configuration; whether this access point may write is
+	// a fact about whether any of this works at all.
+	if err := p.Writer.Probe(ctx, name); err != nil {
+		probe.Outcome, probe.Detail = ProbeDenied, err.Error()
+		p.record(probe)
+		return probe, nil
+	}
+
 	switch {
-	case strings.TrimSpace(start) == "":
+	case start == "":
 		probe.Outcome = ProbeNoStart
 		probe.Detail = "the slot ad carried no START expression"
-	case ProvisionNeeded(start):
-		expr := ComposeStart(start)
-		if err := p.Writer.SetStart(ctx, name, expr); err != nil {
-			probe.Outcome, probe.Detail = ProbeDenied, err.Error()
-			break
-		}
-		probe.Outcome, probe.Detail = ProbeProvisioned, expr
+	case !Provisioned(start):
+		probe.Outcome = ProbeUnprovisioned
+		probe.Detail = start
 	default:
-		// Already carries the clause. Push it back unchanged: an
-		// identical write is the only way to learn whether this access
-		// point may still update machine ads, and without that
-		// authorisation every reservation would hold nothing while
-		// looking healthy.
-		if err := p.Writer.SetStart(ctx, name, start); err != nil {
-			probe.Outcome, probe.Detail = ProbeDenied, err.Error()
-			break
-		}
-		probe.Outcome = ProbeAlreadySet
+		probe.Outcome = ProbeOK
 	}
 	p.record(probe)
 	return probe, nil
@@ -216,36 +203,55 @@ func (p *Prober) Recent() []Probe {
 
 // Health summarises the recent probes for the admin page.
 type Health struct {
-	// Healthy is false when the most recent visit failed.
+	// Healthy is false when the most recent visit could not write.
 	Healthy bool   `json:"healthy"`
 	Outcome string `json:"outcome,omitempty"`
 	Machine string `json:"machine,omitempty"`
 	Detail  string `json:"detail,omitempty"`
 	// CheckedAt is when the last visit happened; zero when none has.
 	CheckedAt time.Time `json:"checked_at,omitempty"`
-	// Provisioned counts execute points this process has rewritten.
-	Provisioned int `json:"provisioned"`
+	// Unprovisioned names the execute points seen recently whose START
+	// does not consult the sieve. Holding one has no effect, so this is
+	// the difference between a reservation that works and one that
+	// looks like it does.
+	Unprovisioned []string `json:"unprovisioned,omitempty"`
+	// Stanza is the line those execute points are missing, so the admin
+	// page can show what to add rather than describe it.
+	Stanza string `json:"stanza,omitempty"`
 }
 
 // Health reports what the admin page should say.
 //
-// An access point that cannot update machine ads is the failure worth
-// surfacing: nothing errors, no reservation complains, and every class
-// quietly starts on a pool that was never drained.
+// Two things fail silently and only show up here. An access point that
+// cannot update machine ads: nothing errors, no reservation complains,
+// and every class starts on a pool that was never drained. And an
+// execute point whose START never consults the sieve: it is held, it
+// reports as held, and it admits everything anyway.
 func (p *Prober) Health() Health {
-	h := Health{Healthy: true}
+	h := Health{Healthy: true, Stanza: StartStanza}
+	// Deduplicated over the remembered visits, so a machine probed
+	// twice is named once, and one that has since been fixed drops off
+	// as the window rolls forward.
+	seen := map[string]bool{}
 	for _, probe := range p.last {
-		if probe.Outcome == ProbeProvisioned {
-			h.Provisioned++
+		if probe.Outcome == ProbeUnprovisioned && !seen[probe.Machine] {
+			seen[probe.Machine] = true
+			h.Unprovisioned = append(h.Unprovisioned, probe.Machine)
 		}
 	}
+	sort.Strings(h.Unprovisioned)
 	if len(p.last) == 0 {
 		return h
 	}
 	last := p.last[len(p.last)-1]
 	h.Outcome, h.Machine, h.CheckedAt = string(last.Outcome), last.Machine, last.At
-	if !last.OK() {
+	switch last.Outcome {
+	case ProbeDenied, ProbeUnreachable:
 		h.Healthy, h.Detail = false, last.Detail
+	case ProbeUnprovisioned:
+		// Not unhealthy: this access point is working, and what is
+		// missing is a line in somebody else's configuration file.
+		h.Detail = last.Detail
 	}
 	return h
 }

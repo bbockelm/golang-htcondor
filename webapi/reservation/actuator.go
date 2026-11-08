@@ -235,10 +235,10 @@ func (a *PoolActuator) Release(ctx context.Context, machine string) error {
 	return a.push(ctx, machine, ReleaseAd())
 }
 
-// SetStart satisfies Provisioner by confirming the execute point still
-// accepts a push -- see ProbeAd for why the probe writes rather than
-// merely connecting.
-func (a *PoolActuator) SetStart(ctx context.Context, machine, _ string) error {
+// Probe satisfies Provisioner by writing the sieve, which is the only
+// way to learn whether this access point may still update machine ads
+// -- see ProbeAd.
+func (a *PoolActuator) Probe(ctx context.Context, machine string) error {
 	return a.push(ctx, machine, ProbeAd())
 }
 
