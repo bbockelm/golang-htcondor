@@ -2618,6 +2618,25 @@ func (sf *SubmitFile) setGridParams(ad *classad.ClassAd) error {
 	if batchProject, ok := sf.submitCommandAlt("batch_project", "BatchProject"); ok {
 		_ = ad.Set("BatchProject", batchProject)
 	}
+	// The cpu and node requests HTCONDOR-4053 added, passed to the remote
+	// batch system by the gridmanager. All four are EXPRESSIONS on the C++
+	// side -- including batch_whole_nodes, which the keyword table marks as
+	// a bool but SetGridParams assigns with AssignJobExpr -- so a value like
+	// `2 * $(NodeCount)` survives to the ad instead of being flattened.
+	for _, e := range []struct{ command, attr string }{
+		{"batch_cpu_count", "BatchCpuCount"},
+		{"batch_cpus_per_node", "BatchCpusPerNode"},
+		{"batch_node_count", "BatchNodeCount"},
+		{"batch_whole_nodes", "BatchWholeNodes"},
+	} {
+		v, ok := sf.submitCommandAlt(e.command, e.attr)
+		if !ok {
+			continue
+		}
+		if err := setExprAttr(ad, e.attr, e.command, v); err != nil {
+			return err
+		}
+	}
 	if batchQueue, ok := sf.submitCommandAlt("batch_queue", "BatchQueue"); ok {
 		_ = ad.Set("BatchQueue", batchQueue)
 	}
