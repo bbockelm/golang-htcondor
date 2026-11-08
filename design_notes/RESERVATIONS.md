@@ -4,6 +4,10 @@
 
 Implemented across a stack of PRs, including the estimate stamping.
 
+The intended direction is to hold the capacity with HTCondor's own
+persistent claims instead of with machine attributes this pushes by
+hand. See "Building this on OCUs"; none of it is built.
+
 ## The problem
 
 A class needs N cores at a fixed time. The pool is full of other
@@ -346,119 +350,143 @@ tell. The backstop is that eviction does not consult it: a job that lied
 its way onto a reserved core is preempted at the bell like any other.
 
 
-## Why not OCUs
+## Building this on OCUs
 
-HTCondor has a mechanism that looks like the answer and is half of it.
+The design above holds machines with attributes it pushes into their
+machine ads. HTCondor has a mechanism for the same job -- **OCUs**,
+Owned Capacity Units -- and the intended direction is to move onto it.
+This section is what that would mean, what it costs, and what in
+HTCondor has to change first. None of it is built.
 
-An **OCU** (Owned Capacity Unit, HTCONDOR-3031, in since 24.10) is a
-persistent claim the schedd holds on a user's behalf. It is created out
-of band -- `htcondor ocu create`, or `Schedd.create_ocu` -- rather than
-submitted as a job, it is matched by the negotiator like an idle job,
-and once granted it is **never given back**: when the job on it
-finishes, the schedd keeps the claim and looks for another of that
-user's jobs to put on it. Jobs opt in with `OCUWanted`; jobs belonging
-to somebody else opt in to *borrowing* an idle one with `OCUWilling`,
-and are vacated when the owner wants it back.
+### What an OCU is
 
-That is exactly the half of this problem the rest of this document does
-badly, and none of the half it does well.
+A persistent claim the schedd holds for a user. Created out of band
+(`htcondor ocu create`, `Schedd.create_ocu`), negotiated like an idle
+job, and **never given back**: when its job ends the schedd keeps the
+claim and looks for another of that user's jobs. Jobs opt in with
+`OCUWanted`; other users' jobs borrow an idle one with `OCUWilling`.
 
-### What it does, measured
+Measured against 26.2.0: the claim really does persist, sitting
+`Claimed Idle` indefinitely and never returning to the pool, and an
+`OCUWilling` job really does backfill it while a plain job submitted at
+the same moment never runs.
 
-Against 26.2.0, one execute point with one CPU, so the contest for the
-slot is unambiguous:
+### Why it is the right shape
+
+A reservation **is** a persistent claim scoped to an owner and a
+project, which is what an OCU is. Everything this design builds by hand
+-- `ReservationStart`, `ReservationDeadline`, `ReservationUntil`,
+`ReservationProject`, the actuator that pushes them, the `START` stanza
+every execute point needs, the prober that checks for it -- exists only
+because the claim is not held by HTCondor. Hand it over and all of that
+is deleted.
+
+It also fixes the worst property of the current contract. Machine
+attributes cannot be deleted and have no expiry, which is why every
+value here is an absolute time. A claim has an owner and a lifetime of
+its own, so none of that applies.
+
+### Per access point, on purpose
+
+An OCU lives in one schedd's user record, so a reservation built on
+OCUs serves the jobs of one access point. **That is the intended
+model**, not a limitation to work around: a class submits from the
+access point it was given, and a reservation that silently spanned
+access points would hold capacity for jobs its owner cannot see.
+
+It is a real difference from what is built now, which holds machines by
+machine attribute and so serves any access point's jobs. Anything
+relying on that has to be re-examined before the move.
+
+### How the capacity is acquired: drain, then cancel
+
+An OCU does not drain anything. It is negotiated like an idle job and
+waits for capacity to come free, with no deadline and no preference for
+machines about to turn over. Something has to free the capacity for it,
+and that something is `condor_drain`.
+
+Draining is a better fit than it first appears:
+
+- `DRAIN_JOBS` is ADMINISTRATOR, which the administrative capability an
+  execute point publishes already covers. Nothing to configure per node.
+- The drain request carries its own `StartExpr`. **The sieve ships with
+  each drain** rather than living in `DEFAULT_DRAINING_START_EXPR` or in
+  a machine attribute, so it stops being persistent state. This is
+  strictly better than pushing it.
+- While draining, `START` is the drain's expression, so only work the
+  sieve admits may start.
+
+Three things about draining decide the algorithm, and none is obvious:
+
+**1. The retirement clock starts when the JOB started, not when the
+drain started.** `evalRetirementRemaining` is
+`MaxJobRetirementTime - getJobTotalRunTime()`. So at drain start a job
+older than `MAXJOBRETIREMENTTIME` has zero retirement and is preempted
+at once, while a job that just began gets the remainder. That is exactly
+inverted from this design's cost rule, which says killing a young job is
+free and killing an old one is not: retirement sacrifices the oldest
+work first.
+
+With the default `MAXJOBRETIREMENTTIME = 0` a graceful drain preempts
+everything immediately -- the naive "kill at the bell", six hours early.
+A site with a large `MAXJOBRETIREMENTTIME` instead gets "stop admitting,
+let what is running finish", which is precisely the behaviour this
+design wants. **So the value of `MAXJOBRETIREMENTTIME` on the execute
+points decides whether this approach is cheap or ruinous**, and it has
+to be checked before anything is drained.
+
+**2. A running job that matches the drain's `StartExpr` is treated as
+interruptible.** `retirementExpired` replaces such a job's own
+retirement with the coordinated drain deadline. So the sieve does not
+only govern admission; it also classifies what is already there.
+
+**3. A completed drain takes the capacity back.** When every claimed
+slot was accepted while draining, `checkForDrainCompletion` declares
+final draining: `START` is set to false, claim ids are invalidated,
+`MaxJobRetirementTime` is overridden to 0, and **all claims are
+released -- including the OCU's**. Draining means "empty this machine",
+not "give this machine to someone".
+
+So the controller must **cancel the drain once the OCU has its seats**,
+before the last pre-existing job finishes. `CANCEL_DRAIN_JOBS` restores
+the normal `START` and does not release claims, so the OCU keeps what it
+took. Losing that race costs the claim and nothing worse: the OCU
+re-negotiates.
+
+### Choosing borrowers by estimate rather than by consent
+
+`OCUWilling` is preemption-based backfill: let anyone in, kill them when
+the owner shows up. This design's own measurements say that is the
+expensive way -- 7.6 jobs older than half an hour discarded per class
+start.
+
+A borrower chosen by the runtime estimate costs nothing at handover,
+because it was already going to end. That is the same sieve, applied to
+borrowing rather than to admission, and it belongs **on the OCU**: only
+the OCU knows when its seats are next wanted. Not configuration -- two
+reservations on one pool want different answers.
+
+### What has to change in HTCondor
 
 | | |
 |---|---|
-| The claim persists across jobs | **Yes.** It sat `Claimed Idle` with `OCU = true` indefinitely after its job ended, and never returned to the pool. |
-| It is acquired by a deadline | **No.** It is negotiated like any idle job: it waits for capacity to come free. |
-| It drains or preempts to get the claim | **No.** |
-| It can be scoped to a project | **No.** `create_ocu` with a project name is refused: `Owner not found: cs301`. OCUs hang off a user record. |
-| Consenting jobs backfill an idle claim | **Yes.** An `OCUWilling` job ran on it; a plain job submitted at the same moment never did, for the life of the test. |
-| The owner gets it back | **Not as documented.** See below. |
+| An OCU claim must say whose it is | An idle claim carries no owner, so every job -- the owner's own included -- reads as somebody else's and is refused unless it declares `OCUWilling`. The owner cannot take back its own claim; a borrower can hold it indefinitely. |
+| OCUs must be matchable to draining slots | `(Draining =!= true)` is ANDed onto every OCU request, so drained capacity can never reach the OCU it was drained for. |
+| An OCU must be able to say who may borrow it | Today the only gate is the borrower's own `OCUWilling`. |
+| Borrower eviction must be bounded and ordered | It takes *every* borrowed claim of a submitter whenever the owner is short by even one seat, in match-table order, with a fast vacate. |
 
-The last one is worth stating precisely because it is the whole point of
-the mechanism. With a borrower running, an `OCUWanted` job of the
-claim's own owner stayed idle indefinitely while the borrower was
-vacated and re-matched ten times in a minute. A second job carrying
-**both** `OCUWanted` and `OCUWilling` took the claim as soon as the
-borrower was removed, and the schedd counted it as an owner activation.
+The first says "whose claim is this", which is not the question
+`RemoteOwner`/`RemoteProject` answer -- those say who is running on a
+slot now, and writing them for an idle claim makes the schedd treat it
+as occupied and tear it down.
 
-So in this build the matching gate and the accounting disagree. The gate
-(`FindRunnableJob`) compares the claim's `RemoteOwner`/`RemoteProject`
-against the job's, and an idle OCU claim carries neither, so every job
-falls into the "somebody else's OCU claim" branch and is refused unless
-it says `OCUWilling`. The eviction loop meanwhile counts `OCUWanted`
-jobs, so it fires correctly and preempts the borrower -- which then wins
-the re-match, being the older `OCUWilling` job. The claim churns and
-nobody is served.
+### What stays
 
-### Why it is not a substitute
-
-The hard part here is **acquisition by a deadline**. A class needs N
-cores at 14:00, and the pool is full. An OCU does not drain anything; it
-waits in the negotiator's queue like any other idle request. On a busy
-pool a reservation made at 08:00 would accumulate claims slowly, in
-whatever order capacity happened to free up, with no way to say "by
-14:00" and no way to prefer the machines that will turn over. And while
-it waits it idles every core it has taken.
-
-The measurements above say what that costs: a core spends 20.1% of its
-wall clock on a job younger than `FORGIVE`, so a pool of 134 cores frees
-about one core every few minutes by luck. Reaching 48 held machines by a
-bell six hours out is feasible by luck; reaching them by a bell two
-hours out is not.
-
-### The twist that would help
-
-They compose, and the composition is better than either.
-
-- **Before the bell**, the sieve is the right instrument. It drains by
-  *prediction*: admit only work that finishes in time, which costs no
-  idle capacity as long as the queue has short work in it.
-- **During the window**, the OCU is the right instrument. A persistent
-  claim restricted to its owner is what `ReservationUntil` and
-  `ReservationProject` are imitating, badly, in a machine ad that cannot
-  be deleted -- and `OCUWilling` gives the reservation something this
-  design has no answer for at all: *consented* backfill of a seat the
-  class is not using, instead of refusing the core to everybody.
-
-The deeper point is about the backfill rule. `OCUWilling` is
-preemption-based: let anyone in and kill them when the owner shows up.
-This document's whole cost model says that is the expensive way --
-7.6 jobs older than half an hour discarded per class start. The sieve is
-prediction-based: let in only what finishes in time, and preempt nobody.
-**A borrower chosen by the estimate rather than by consent is strictly
-better than either**: the claim stays busy, and the handover costs
-nothing because the borrower was already going to end.
-
-In HTCondor terms that is a small change in one place -- when
-`FindRunnableJob` considers a job for somebody else's OCU claim, also
-require that it fit before that reservation's next bell. The estimate
-already exists; what it lacks is anywhere to be consulted inside the
-schedd.
-
-### What would have to change first
-
-In rough order of how much it blocks:
-
-1. **Project-scoped OCUs.** Seats belong to a class, not to a user, and
-   students do not share an account. The matching code already compares
-   `RemoteProject`, so this is closer than it looks; `create_ocu`
-   refusing a project name is the gap.
-2. **The owner can take back its own claim.** An `OCUWanted` job has to
-   match its own OCU without also declaring itself preemptible, and has
-   to win against the borrower it just displaced.
-3. **A deadline on the request.** Without one an OCU cannot be asked for
-   by 14:00, which is the whole requirement.
-4. **Multi-access-point reach.** OCUs live in one schedd's user record.
-   A class whose students submit from several access points needs the
-   claims where their jobs are, or a way to share them.
-
-None of that is this repository's to change, and none of it is needed
-for what is built here. It is recorded because the first three would
-each let this subsystem delete code rather than add it, and because
-anyone reading this design will ask the question.
+The estimator and the bucket stamping, unchanged: the sieve is the same
+expression whether it arrives in a drain request or a machine
+attribute, and it still needs `RuntimeP90Bucket` on the idle queue. The
+window arithmetic, the lead, the forgiveness rule and the cost model
+are all independent of how the claim is held.
 
 
 ## Open questions

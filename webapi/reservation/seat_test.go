@@ -18,7 +18,7 @@ queue
 
 func seatSpec(submit string) *Spec {
 	return &Spec{
-		ID: "cs301", Project: "cs301-f26", Submit: submit,
+		ID: "cs301", Owner: "prof-moriarty", Project: "cs301-f26", Submit: submit,
 		Seats: 35, Standing: 4,
 		Duration: time.Hour, Lead: 6 * time.Hour, Hold: 15 * time.Minute,
 		Enabled: true,

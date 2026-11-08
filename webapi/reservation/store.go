@@ -46,16 +46,17 @@ func (s *Store) Put(ctx context.Context, spec *Spec) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO reservations
-			(id, project, submit, seats, standing, duration_s, lead_s, hold_s,
+			(id, owner, project, submit, seats, standing, duration_s, lead_s, hold_s,
 			 schedule, timezone, enabled, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
+			owner=excluded.owner,
 			project=excluded.project, submit=excluded.submit, seats=excluded.seats,
 			standing=excluded.standing, duration_s=excluded.duration_s,
 			lead_s=excluded.lead_s, hold_s=excluded.hold_s, schedule=excluded.schedule,
 			timezone=excluded.timezone, enabled=excluded.enabled,
 			updated_at=CURRENT_TIMESTAMP`,
-		spec.ID, spec.Project, spec.Submit, spec.Seats, spec.Standing,
+		spec.ID, spec.Owner, spec.Project, spec.Submit, spec.Seats, spec.Standing,
 		int64(spec.Duration/time.Second), int64(spec.Lead/time.Second),
 		int64(spec.Hold/time.Second), spec.Schedule.String(), zone, enabled)
 	if err != nil {
@@ -64,7 +65,7 @@ func (s *Store) Put(ctx context.Context, spec *Spec) error {
 	return nil
 }
 
-const selectColumns = `id, project, submit, seats, standing, duration_s, lead_s, hold_s, schedule, timezone, enabled`
+const selectColumns = `id, owner, project, submit, seats, standing, duration_s, lead_s, hold_s, schedule, timezone, enabled`
 
 // Get reads one reservation. It returns ErrNotFound when there is no such
 // row.
@@ -118,7 +119,7 @@ func scanSpec(sc scanner) (*Spec, error) {
 		cron, zone         string
 		enabled            int
 	)
-	if err := sc.Scan(&spec.ID, &spec.Project, &spec.Submit, &spec.Seats, &spec.Standing,
+	if err := sc.Scan(&spec.ID, &spec.Owner, &spec.Project, &spec.Submit, &spec.Seats, &spec.Standing,
 		&durS, &leadS, &holdS, &cron, &zone, &enabled); err != nil {
 		return nil, err
 	}

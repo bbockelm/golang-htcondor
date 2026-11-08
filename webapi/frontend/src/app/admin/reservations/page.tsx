@@ -50,6 +50,7 @@ function localZone(): string {
 function blankReservation(): AdminReservation {
   return {
     id: '',
+    owner: '',
     project: '',
     // Something that renders: the server refuses a submit file with no
     // executable, since a seat with no Cmd matches nothing.
@@ -321,7 +322,10 @@ function ReservationRows({
       <tr className="hover:bg-gray-50" data-testid={`reservation-${res.id}`}>
         <td className="px-3 py-2">
           <span className="font-medium text-gray-900">{res.id}</span>
-          <span className="block text-xs text-gray-500">{res.project}</span>
+          <span className="block text-xs text-gray-500">
+            {res.project}
+            {res.owner ? ` · ${res.owner}` : ''}
+          </span>
         </td>
         <td className="px-3 py-2">
           <span className="font-mono text-xs text-gray-900">{res.schedule}</span>
@@ -592,6 +596,7 @@ function ReservationForm({
   onCancel: () => void;
 }) {
   const [id, setId] = useState(initial.id);
+  const [owner, setOwner] = useState(initial.owner);
   const [project, setProject] = useState(initial.project);
   const [schedule, setSchedule] = useState(initial.schedule);
   const [timezone, setTimezone] = useState(initial.timezone);
@@ -606,6 +611,7 @@ function ReservationForm({
   const send = () => {
     onSubmit({
       id: id.trim(),
+      owner: owner.trim(),
       project: project.trim(),
       submit,
       seats: Number(seats) || 0,
@@ -643,6 +649,21 @@ function ReservationForm({
             className={`${inputCls} disabled:bg-gray-100 disabled:text-gray-500`}
           />
         </label>
+        <div className="block text-xs">
+          <label className="block">
+            <span className="block text-gray-700">Owner</span>
+            <input
+              type="text"
+              value={owner}
+              onChange={(e) => setOwner(e.target.value)}
+              placeholder="jsmith"
+              className={inputCls}
+            />
+          </label>
+          <span className="mt-1 block text-gray-500">
+            Who the capacity is held for.
+          </span>
+        </div>
         <div className="block text-xs">
           <label className="block">
             <span className="block text-gray-700">Project</span>
