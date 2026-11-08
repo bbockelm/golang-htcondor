@@ -236,6 +236,92 @@ var digestKeywordsBehindOracle = map[string]string{
 	"common_input_files":   "HTCONDOR-3955",
 }
 
+// digestKeywordsAheadOfOracle are names in this library's prunable-keyword
+// table that a newer HTCondor does not have at all, because the change named
+// here removed the submit keyword. It is the mirror of
+// digestKeywordsBehindOracle: there the oracle knows a keyword we do not
+// prune, here we prune a keyword the oracle no longer knows.
+//
+// Neither parser can put one of these in a digest. condor_submit does not
+// recognize the keyword, and this library stops accepting it under the same
+// trait, so the entry in the prunable table is inert rather than wrong. It is
+// left in place because the table is generated for every HTCondor this
+// library talks to, and an older schedd still writes digests with these keys.
+//
+// As with the other direction, an entry is honored only while the oracle HAS
+// the named change.
+//
+//nolint:unused // read by TestDigestKeywordsMatchOracle
+var digestKeywordsAheadOfOracle = map[string]string{
+	"append_files":      "HTCONDOR-3998-remoteio",
+	"appendfiles":       "HTCONDOR-3998-remoteio",
+	"buffer_block_size": "HTCONDOR-3998-remoteio",
+	"bufferblocksize":   "HTCONDOR-3998-remoteio",
+	"buffer_files":      "HTCONDOR-3998-remoteio",
+	"bufferfiles":       "HTCONDOR-3998-remoteio",
+	"buffer_size":       "HTCONDOR-3998-remoteio",
+	"buffersize":        "HTCONDOR-3998-remoteio",
+	"compress_files":    "HTCONDOR-3998-remoteio",
+	"compressfiles":     "HTCONDOR-3998-remoteio",
+	"fetch_files":       "HTCONDOR-3998-remoteio",
+	"fetchfiles":        "HTCONDOR-3998-remoteio",
+	"file_remaps":       "HTCONDOR-3998-remoteio",
+	"fileremaps":        "HTCONDOR-3998-remoteio",
+	"local_files":       "HTCONDOR-3998-remoteio",
+	"localfiles":        "HTCONDOR-3998-remoteio",
+	"containeriscommon": "HTCONDOR-3932-container",
+}
+
+// digestKeywordDiff is one comparison of the two prunable-keyword tables, in
+// four buckets: the two differences that are errors and the two an upstream
+// change accounts for.
+type digestKeywordDiff struct {
+	missing []string // the oracle has it, we do not prune it, nothing excuses that
+	extra   []string // we prune it, the oracle has no such keyword, nothing excuses that
+	behind  []string // ditto missing, but a trait this oracle has accounts for it
+	ahead   []string // ditto extra, but a trait this oracle has accounts for it
+}
+
+// classifyDigestKeywords splits the two tables into those buckets. It takes
+// the oracle's keyword set, this library's prunable names and the probed
+// traits as arguments rather than reading them, because the two allowances
+// only ever fire against an HTCondor newer than the pinned one: no run with
+// an oracle attached exercises them, and without this seam nothing local
+// could. See TestDigestKeywordClassification.
+func classifyDigestKeywords(want map[string]bool, prunable []string, have map[string]bool) digestKeywordDiff {
+	var d digestKeywordDiff
+	for name := range want {
+		if htcondor.DigestKeywordIsPrunable(name) {
+			continue
+		}
+		// A keyword this HTCondor has and we do not prune yet is the safe
+		// direction; see digestKeywordsBehindOracle.
+		if ticket, known := digestKeywordsBehindOracle[name]; known && have[ticket] {
+			d.behind = append(d.behind, name)
+			continue
+		}
+		d.missing = append(d.missing, name)
+	}
+	for _, name := range prunable {
+		if want[name] {
+			continue
+		}
+		// A keyword this HTCondor has dropped entirely: neither side can
+		// put it in a digest, so the table naming it is inert. See
+		// digestKeywordsAheadOfOracle.
+		if ticket, known := digestKeywordsAheadOfOracle[name]; known && have[ticket] {
+			d.ahead = append(d.ahead, name)
+			continue
+		}
+		d.extra = append(d.extra, name)
+	}
+	sort.Strings(d.missing)
+	sort.Strings(d.extra)
+	sort.Strings(d.behind)
+	sort.Strings(d.ahead)
+	return d
+}
+
 // probeOracleTraits reports, per ticket, whether the linked oracle has that
 // change.
 func probeOracleTraits(f oracleFacts) map[string]bool {

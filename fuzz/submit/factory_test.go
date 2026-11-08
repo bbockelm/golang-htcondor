@@ -4,7 +4,6 @@ package fuzzsubmit
 
 import (
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 
@@ -251,35 +250,18 @@ func TestDigestKeywordsMatchOracle(t *testing.T) {
 		t.Fatal("the oracle returned no keywords")
 	}
 
-	var missing, extra, behind []string
-	for name := range want {
-		if htcondor.DigestKeywordIsPrunable(name) {
-			continue
-		}
-		// A keyword this HTCondor has and we do not prune yet is the safe
-		// direction; see digestKeywordsBehindOracle.
-		if ticket, known := digestKeywordsBehindOracle[name]; known && oracleHas[ticket] {
-			behind = append(behind, name)
-			continue
-		}
-		missing = append(missing, name)
+	d := classifyDigestKeywords(want, htcondor.DigestPrunableKeywordNames(), oracleHas)
+	if len(d.behind) > 0 {
+		t.Logf("%d keywords this HTCondor prunes that we do not yet, each recorded: %v", len(d.behind), d.behind)
 	}
-	for _, name := range htcondor.DigestPrunableKeywordNames() {
-		if !want[name] {
-			extra = append(extra, name)
-		}
+	if len(d.ahead) > 0 {
+		t.Logf("%d keywords this HTCondor no longer has, each recorded: %v", len(d.ahead), d.ahead)
 	}
-	sort.Strings(missing)
-	sort.Strings(extra)
-	sort.Strings(behind)
-	if len(behind) > 0 {
-		t.Logf("%d keywords this HTCondor prunes that we do not yet, each recorded: %v", len(behind), behind)
+	if len(d.missing) > 0 {
+		t.Errorf("%d keywords HTCondor prunes that Go does not: %v", len(d.missing), d.missing)
 	}
-	if len(missing) > 0 {
-		t.Errorf("%d keywords HTCondor prunes that Go does not: %v", len(missing), missing)
-	}
-	if len(extra) > 0 {
-		t.Errorf("%d keywords Go prunes that HTCondor does not: %v", len(extra), extra)
+	if len(d.extra) > 0 {
+		t.Errorf("%d keywords Go prunes that HTCondor does not: %v", len(d.extra), d.extra)
 	}
 }
 
