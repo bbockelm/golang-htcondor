@@ -72,10 +72,16 @@ time", for a waiting or running job when there is an estimate, and
 nothing otherwise.
 
 `elapsed_seconds` and `remaining_seconds` appear only for a running job.
-A running job that has outlived the typical run is re-estimated from the
-runs in its group that lasted at least as long; once it has outlived
-nearly all of them, `exceeded_history` is true and no remaining time is
-given. When there is no estimate the response is still 200, with
+A running job is re-estimated from the runs in its group that lasted
+longer than it already has, whenever at least 3 of them did: having
+survived this long is information from the first second, not only once
+the job passes the median. The upper bound is never narrowed by that
+conditioning, which is drawn from a truncated sample and is too tight.
+Once the job has outlived all but a couple of the group's runs there is
+nothing left to condition on, and if it has also passed the median,
+`exceeded_history` is true and no remaining time is given.
+
+When there is no estimate the response is still 200, with
 `available: false` and a `reason`: `disabled`, `model_warming_up` (the
 history has not been read yet), `insufficient_history` (the owner has no
 recently finished job of the same kind), or

@@ -391,6 +391,155 @@ func TestRunningJobs(t *testing.T) {
 	}
 }
 
+// skewed is a history whose longer runs are far longer than its
+// median: 10, 20, 30, 100, 200, 300, 400, median 100.
+func skewed(e *Estimator, f Features) {
+	var jobs []job
+	for i, rt := range []float64{10, 20, 30, 100, 200, 300, 400} {
+		jobs = append(jobs, job{f, rt, t0.Add(time.Duration(i) * time.Second)})
+	}
+	ingest(e, jobs...)
+}
+
+// A running job is re-estimated from the runs that lasted longer than
+// it already has whatever its elapsed time, not only once it has passed
+// the median: having survived is information from the first second.
+func TestConditioningAppliesBelowTheMedian(t *testing.T) {
+	e := New(Config{})
+	f := feat("alice", "sim")
+	skewed(e, f)
+
+	// Waiting: the group's median, unconditioned.
+	if r := e.Estimate(Query{Features: f}); r.EstimateSeconds != 100 {
+		t.Fatalf("waiting job: %+v", r)
+	}
+
+	// Running 50s, well short of the median: re-estimated from the runs
+	// longer than 50s (100, 200, 300, 400), whose median is 250.
+	r := e.Estimate(Query{Features: f, Running: true, Elapsed: 50})
+	if r.EstimateSeconds != 250 {
+		t.Errorf("below the median: estimate %v, want the conditioned 250", r.EstimateSeconds)
+	}
+	if r.RemainingSeconds == nil || *r.RemainingSeconds != 200 {
+		t.Errorf("below the median: remaining %+v, want 200", r)
+	}
+	if r.ExceededHistory {
+		t.Errorf("below the median: %+v", r)
+	}
+	if r.P10Seconds > r.EstimateSeconds || r.P90Seconds < r.EstimateSeconds {
+		t.Errorf("bounds out of order: %+v", r)
+	}
+
+	// The estimate rises as the job survives: each conditioning drops
+	// the runs it has outlasted. Only while there are enough longer
+	// runs left to condition on; past that the job has exceeded its
+	// history and the estimate is what history said to begin with.
+	var last float64
+	for _, elapsed := range []float64{0, 25, 50, 150} {
+		got := e.Estimate(Query{Features: f, Running: true, Elapsed: elapsed})
+		if got.ExceededHistory {
+			t.Fatalf("elapsed %v: unexpectedly exceeded: %+v", elapsed, got)
+		}
+		if got.EstimateSeconds < last {
+			t.Errorf("elapsed %v: estimate %v fell below %v", elapsed, got.EstimateSeconds, last)
+		}
+		last = got.EstimateSeconds
+	}
+}
+
+// ExceededHistory still means what it meant: the job has run at least
+// as long as the group's unconditioned median and fewer than minLonger
+// of the group's runs lasted longer. Conditioning below the median does
+// not set it.
+func TestExceededHistoryUnchangedByConditioning(t *testing.T) {
+	e := New(Config{})
+	f := feat("alice", "sim")
+	var jobs []job
+	// 10, 20, 1000, 2000: median 510, and only two runs above 100.
+	for i, rt := range []float64{10, 20, 1000, 2000} {
+		jobs = append(jobs, job{f, rt, t0.Add(time.Duration(i) * time.Second)})
+	}
+	ingest(e, jobs...)
+
+	// Short of the median with too few longer runs to condition on: no
+	// conditioning, and not exceeded either.
+	r := e.Estimate(Query{Features: f, Running: true, Elapsed: 100})
+	if r.ExceededHistory {
+		t.Errorf("below the median with too few longer runs: %+v", r)
+	}
+	if r.EstimateSeconds != 510 {
+		t.Errorf("below the median with too few longer runs: estimate %v, want the unconditioned 510", r.EstimateSeconds)
+	}
+	if r.RemainingSeconds == nil || *r.RemainingSeconds != 410 {
+		t.Errorf("remaining time: %+v, want 410", r)
+	}
+
+	// Past the median with too few longer runs: exceeded, and the
+	// estimate is what history said before the job started.
+	r = e.Estimate(Query{Features: f, Running: true, Elapsed: 1500})
+	if !r.ExceededHistory || r.RemainingSeconds != nil {
+		t.Errorf("past the median with too few longer runs: %+v", r)
+	}
+	if r.EstimateSeconds != 510 {
+		t.Errorf("exceeded job: estimate %v, want 510", r.EstimateSeconds)
+	}
+
+	// Past the median with enough longer runs: conditioned, not
+	// exceeded.
+	e2 := New(Config{})
+	skewed(e2, f)
+	r = e2.Estimate(Query{Features: f, Running: true, Elapsed: 150})
+	if r.ExceededHistory {
+		t.Errorf("past the median with enough longer runs: %+v", r)
+	}
+	if r.EstimateSeconds != 300 {
+		t.Errorf("past the median: estimate %v, want the conditioned 300", r.EstimateSeconds)
+	}
+}
+
+// Conditioning never narrows the upper bound. The conditional 90th
+// percentile is drawn from a truncated sample and is too tight: taken
+// alone it made running jobs overrun their p90 more often, not less.
+func TestConditioningNeverNarrowsP90(t *testing.T) {
+	e := New(Config{noPoolCache: true})
+	f := feat("alice", "sim")
+	skewed(e, f)
+	// Wide prediction errors, so the unconditioned upper bound is well
+	// above anything the group's own runs reach.
+	own := e.st.owners["alice"]
+	for i := range 60 {
+		own.resid[viewStart].add(float32(2*float64(i)/59), 0, 256, 256) // 0 .. 2
+	}
+	uncond := e.st.prepare(DeriveKeys(f), viewStart, false, nil)
+
+	// The fixture is only a test of the rule if conditioning would
+	// otherwise pull the bound in.
+	condP90 := quantileOf(aboveIn([]float32{10, 20, 30, 100, 200, 300, 400}, 50), 0.9)
+	if !(condP90 < uncond.p90) {
+		t.Fatalf("fixture does not narrow: conditioned p90 %v, unconditioned %v", condP90, uncond.p90)
+	}
+
+	r := e.Estimate(Query{Features: f, Running: true, Elapsed: 50})
+	if r.EstimateSeconds != 250 {
+		t.Fatalf("conditioning did not apply: %+v", r)
+	}
+	if r.P90Seconds != seconds(uncond.p90) {
+		t.Errorf("p90 %v was narrowed by conditioning; want the unconditioned %v", r.P90Seconds, seconds(uncond.p90))
+	}
+
+	// At every elapsed time, running or waiting, the upper bound holds
+	// the unconditioned bound and the estimate.
+	for _, elapsed := range []float64{0, 5, 50, 99, 100, 150, 250, 350, 400, 500} {
+		got := e.Estimate(Query{Features: f, Running: true, Elapsed: elapsed})
+		if got.P90Seconds < seconds(uncond.p90) {
+			t.Errorf("elapsed %v: p90 %v below the unconditioned %v", elapsed, got.P90Seconds, seconds(uncond.p90))
+		}
+		if got.P90Seconds < got.EstimateSeconds {
+			t.Errorf("elapsed %v: p90 %v below the estimate %v", elapsed, got.P90Seconds, got.EstimateSeconds)
+		}
+	}
+}
+
 func TestQueryFromAd(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	q := QueryFromAd(adFrom(t, `Owner = "a"
