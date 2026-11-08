@@ -133,8 +133,26 @@ func TestSeatsOnNeverTakesAnotherReservationsSeat(t *testing.T) {
 		Name:   "ep1",
 		Dslots: []Dslot{{Started: now.Add(-time.Minute), Res: one, Project: "other"}},
 	}
-	if seats := pol.SeatsOn(m, one, bell, now); len(seats) != 0 {
+	held := Policy{Forgive: pol.Forgive, Reserved: map[string]bool{"other": true}}
+	if seats := held.SeatsOn(m, one, bell, now); len(seats) != 0 {
 		t.Errorf("took a seat belonging to another reservation: %+v", seats)
+	}
+}
+
+// TestSeatsOnEvictsOrdinaryProjectJobs: a slot ad carries RemoteProject for
+// any job whose submitter named a project. Only projects that actually hold
+// a reservation are protected -- treating every project-tagged job as
+// untouchable would make most of a busy pool look unevictable while
+// reserving nothing.
+func TestSeatsOnEvictsOrdinaryProjectJobs(t *testing.T) {
+	bell := now.Add(2 * time.Hour)
+	m := Machine{
+		Name:   "ep1",
+		Dslots: []Dslot{{Started: now.Add(-time.Minute), Res: one, Project: "someone-elses-accounting-tag"}},
+	}
+	held := Policy{Forgive: pol.Forgive, Reserved: map[string]bool{"cs301": true}}
+	if seats := held.SeatsOn(m, one, bell, now); len(seats) != 1 {
+		t.Errorf("an ordinary project-tagged job was treated as a reserved seat: %+v", seats)
 	}
 }
 

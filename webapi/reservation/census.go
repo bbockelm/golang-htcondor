@@ -97,6 +97,20 @@ type Machine struct {
 type Policy struct {
 	// Forgive is the age below which evicting a job costs nothing.
 	Forgive time.Duration
+	// Reserved names the projects that hold seats of their own. A job
+	// running under one of them is somebody's seat and is never evicted
+	// to make another.
+	//
+	// Only these projects are protected. A slot ad carries RemoteProject
+	// for any job whose submitter named a project, and treating every
+	// one of those as untouchable would make most of a busy pool look
+	// unevictable while reserving nothing.
+	Reserved map[string]bool
+}
+
+// reservedSeat reports whether d is a seat some reservation already holds.
+func (p Policy) reservedSeat(d Dslot) bool {
+	return d.Project != "" && p.Reserved[d.Project]
 }
 
 // AgeAtClass is how long d will have been running at the bell. For an idle
@@ -140,10 +154,17 @@ type Seat struct {
 	Waste time.Duration
 	// Guaranteed is true when every eviction is free at the bell.
 	Guaranteed bool
+	// TimeLeft is how soon the machine is predicted to free a slot. A
+	// tag only governs the next admission, so of two equally cheap
+	// seats the one on a machine about to turn over is worth more: a
+	// machine that never frees up never makes an admission decision and
+	// its tag does nothing.
+	TimeLeft time.Duration
 }
 
 // SeatsOn enumerates the seats m could offer for need at the bell, cheapest
-// first. A d-slot already serving another reservation is never evicted.
+// first. A d-slot already serving a reservation (see Policy.Reserved) is
+// never evicted to make room for another.
 //
 // Seats are built greedily from the cheapest evictions, which is the same
 // order the bell uses, so the census and the eviction agree.
@@ -155,8 +176,8 @@ func (p Policy) SeatsOn(m Machine, need Resources, bell, now time.Time) []Seat {
 	}
 	var cands []cand
 	for i, d := range m.Dslots {
-		if d.Project != "" {
-			continue // already somebody's seat
+		if p.reservedSeat(d) {
+			continue // already some reservation's seat
 		}
 		cands = append(cands, cand{i, p.ProjectedWaste(d, bell, now), d.Res})
 	}
@@ -187,7 +208,8 @@ func (p Policy) SeatsOn(m Machine, need Resources, bell, now time.Time) []Seat {
 					allFree = false
 				}
 			}
-			out = append(out, Seat{Machine: m.Name, Evict: ev, Waste: waste, Guaranteed: allFree})
+			out = append(out, Seat{Machine: m.Name, Evict: ev, Waste: waste,
+				Guaranteed: allFree, TimeLeft: m.soonestFree()})
 			pool = subtract(pool, need)
 			continue
 		}
@@ -197,6 +219,27 @@ func (p Policy) SeatsOn(m Machine, need Resources, bell, now time.Time) []Seat {
 		pool = pool.add(cands[used].res)
 		used++
 	}
+}
+
+// soonestFree is how long until m is predicted to free a slot. An idle
+// machine, or one whose estimate is unknown, is treated as free now.
+func (m Machine) soonestFree() time.Duration {
+	if len(m.Dslots) == 0 {
+		return 0
+	}
+	best := time.Duration(-1)
+	for _, d := range m.Dslots {
+		if d.Started.IsZero() {
+			return 0
+		}
+		if d.Remaining > 0 && (best < 0 || d.Remaining < best) {
+			best = d.Remaining
+		}
+	}
+	if best < 0 {
+		return 0
+	}
+	return best
 }
 
 func subtract(r, o Resources) Resources {
@@ -268,8 +311,14 @@ func (p Policy) Assign(machines []Machine, demands []Demand, now time.Time) []Al
 				alloc.Seats = append(alloc.Seats, s)
 			}
 		}
+		// Cheapest first, then soonest to free up: among seats that cost
+		// the same to take, a tag is worth more on a machine that will
+		// actually turn over before the bell.
 		sort.SliceStable(alloc.Seats, func(a, b int) bool {
-			return alloc.Seats[a].Waste < alloc.Seats[b].Waste
+			if alloc.Seats[a].Waste != alloc.Seats[b].Waste {
+				return alloc.Seats[a].Waste < alloc.Seats[b].Waste
+			}
+			return alloc.Seats[a].TimeLeft < alloc.Seats[b].TimeLeft
 		})
 		if len(alloc.Seats) > d.Seats {
 			alloc.Seats = alloc.Seats[:d.Seats]
