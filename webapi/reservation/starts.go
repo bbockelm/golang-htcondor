@@ -52,7 +52,8 @@ func usableStart(text string) bool {
 	if text == "" {
 		return false
 	}
-	return !(len(text) >= 2 && strings.HasPrefix(text, `"`) && strings.HasSuffix(text, `"`))
+	quoted := len(text) >= 2 && strings.HasPrefix(text, `"`) && strings.HasSuffix(text, `"`)
+	return !quoted
 }
 
 // StartsFromAds collapses slot ads to one START per machine.
