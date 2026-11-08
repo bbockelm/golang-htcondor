@@ -329,3 +329,91 @@ func TestSingleRungLadderIsFoundWithoutAnIndex(t *testing.T) {
 		t.Error("no climber found: a job requesting more than the first rung in a ladder workflow climbed it")
 	}
 }
+
+// TestLadderIsFlaggedOnTheRequestSummary: the page needs a structured
+// signal, not only the advice prose. Without it a request marker reads
+// "requested 1 GB" and never mentions the rung the ladder retries at.
+func TestLadderIsFlaggedOnTheRequestSummary(t *testing.T) {
+	var reader JobReader
+	jobs := make([]Job, 0, 200)
+	for i := range 200 {
+		s := fitted
+		if i%3 == 0 {
+			s = climbedOnce
+		}
+		jobs = append(jobs, reader.FromAd(ladderAd(i, s, true), ""))
+	}
+	req := Analyze(jobs, Options{Days: 30}).Workflows[0].Memory.Request
+	if req == nil {
+		t.Fatal("no request summary")
+	}
+	if !req.Retry {
+		t.Error("Retry not set on a workflow where two jobs in three carry a ladder")
+	}
+	if req.RetryMiB != ladderRetry {
+		t.Errorf("RetryMiB = %.0f, want the largest rung reached, %.0f", req.RetryMiB, ladderRetry)
+	}
+	if req.Typical != ladderBase {
+		t.Errorf("Typical = %.0f, want the first rung %.0f", req.Typical, ladderBase)
+	}
+}
+
+// TestNoLadderLeavesTheFlagOff keeps the flag off the ordinary path, so
+// a page can treat it as "this workflow retries" rather than as noise.
+func TestNoLadderLeavesTheFlagOff(t *testing.T) {
+	var reader JobReader
+	jobs := make([]Job, 0, 200)
+	for i := range 200 {
+		jobs = append(jobs, reader.FromAd(ladderAd(i, fitted, false), ""))
+	}
+	req := Analyze(jobs, Options{Days: 30}).Workflows[0].Memory.Request
+	if req == nil {
+		t.Fatal("no request summary")
+	}
+	if req.Retry || req.RetryMiB != 0 {
+		t.Errorf("Retry = %v / RetryMiB = %.0f on a workflow with no ladder", req.Retry, req.RetryMiB)
+	}
+}
+
+// TestRetryAdviceSaysWhyItCannotBeApplied: a retry is set up at submit
+// time, so it is not an edit to a queued job. The page has to be able to
+// say that instead of listing a title under "not applied".
+func TestRetryAdviceSaysWhyItCannotBeApplied(t *testing.T) {
+	var reader JobReader
+	jobs := make([]Job, 0, 200)
+	for i := range 200 {
+		s := fitted
+		if i%3 == 0 {
+			s = climbedOnce
+		}
+		jobs = append(jobs, reader.FromAd(ladderAd(i, s, true), ""))
+	}
+	w := Analyze(jobs, Options{Days: 30}).Workflows[0]
+	a := adviceByResource(w, ResourceMemory)
+	if a == nil {
+		t.Fatal("no memory advice")
+	}
+	if a.ID != "memory-retry" {
+		t.Fatalf("advice id = %q, want memory-retry", a.ID)
+	}
+	if a.Applies {
+		t.Error("a retry recommendation was offered as an edit to queued jobs")
+	}
+	if a.WhyNotApplied == "" {
+		t.Error("no reason given for advice the page cannot apply")
+	}
+}
+
+// TestAppliedAdviceCarriesNoReason: the field is for advice that cannot
+// be applied, so an ordinary recommendation must leave it empty.
+func TestAppliedAdviceCarriesNoReason(t *testing.T) {
+	jobs := append(jobsAt(30, 1, 700, 4096), jobsAt(30, 100, 800, 4096)...)
+	w := onlyWorkflow(t, jobs)
+	a := adviceByResource(w, ResourceMemory)
+	if a == nil || !a.Applies {
+		t.Skipf("fixture produced no applicable memory advice (%+v)", a)
+	}
+	if a.WhyNotApplied != "" {
+		t.Errorf("applicable advice carries a reason it was not applied: %q", a.WhyNotApplied)
+	}
+}

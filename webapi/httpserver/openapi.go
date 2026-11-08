@@ -83,7 +83,9 @@ const openAPISchema = `{
           "min": {"type": "number"}, "max": {"type": "number"},
           "distinct": {"type": "integer"},
           "adaptive": {"type": "boolean", "description": "Most jobs wrote the request as a formula over their own usage; typical/min/max are then its starting value."},
-          "expression": {"type": "string", "description": "The most common formula, when adaptive (memory only)."}
+          "expression": {"type": "string", "description": "The most common formula, when adaptive (memory only)."},
+          "retry": {"type": "boolean", "description": "Most jobs were submitted with a memory retry ladder (retry_request_memory); typical/min/max are then the FIRST rung."},
+          "retry_mib": {"type": "number", "description": "The largest rung any of those jobs reached, when above typical."}
         }
       },
       "UtilResourceSummary": {
@@ -110,7 +112,8 @@ const openAPISchema = `{
           "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
           "applies": {"type": "boolean", "description": "POST /utilization/apply can apply this advice to waiting jobs."},
           "change": {"type": "object", "description": "The edit apply would make, present exactly when applies.", "properties": {
-            "attribute": {"type": "string", "enum": ["RequestMemory", "RequestCpus", "RequestDisk", "RequestGPUs"]}, "value": {"type": "number"}}}
+            "attribute": {"type": "string", "enum": ["RequestMemory", "RequestCpus", "RequestDisk", "RequestGPUs"]}, "value": {"type": "number"}}},
+          "why_not_applied": {"type": "string", "description": "What stops this advice being applied to waiting jobs. Present only for request-changing advice that applies is false for."}
         }
       },
       "UtilShape": {

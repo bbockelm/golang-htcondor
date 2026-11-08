@@ -1018,7 +1018,7 @@ export function OutcomeScatter({
           ))}
           {request && (
             <LegendKey color={UTIL_COLOR.request} shape="line" dashed>
-              {requestMarkerLabel(formatMiB(request.typical), request.adaptive)}
+              {requestMarkerLabel(formatMiB(request.typical), request)}
             </LegendKey>
           )}
         </>
@@ -1321,7 +1321,9 @@ const RPAD = 6;
  * request: the track runs from zero to the request or the largest job,
  * whichever is bigger; the tick is the request, the box the middle half
  * of jobs, the whisker the 10th to 90th percentile, and the dot the
- * largest job -- red when it went over the request.
+ * largest job -- red when it went over the request, and the retry colour
+ * when a retry ladder covered it, which is the ladder working rather
+ * than a job that did not fit.
  */
 export function RangeStrip({
   request,
@@ -1341,7 +1343,8 @@ export function RangeStrip({
   const text =
     `${label}: ${request ? `requested ${format(request.typical)}; ` : ''}` +
     `middle half of jobs used ${format(dist.p25)}–${format(dist.p75)}; ` +
-    `largest ${format(dist.max)}${g.over ? ', more than requested' : ''}.`;
+    `largest ${format(dist.max)}` +
+    `${g.overRetried ? ', more than the first request — the retry covers it' : g.over ? ', more than requested' : ''}.`;
   return (
     <svg
       viewBox={`0 0 ${RW} ${RH}`}
@@ -1351,6 +1354,7 @@ export function RangeStrip({
       aria-label={text}
       className="block max-w-full"
       data-over={g.over ? 'true' : 'false'}
+      data-over-retried={g.overRetried ? 'true' : 'false'}
     >
       <title>{text}</title>
       <line x1={xs(0)} x2={xs(1)} y1={mid} y2={mid} stroke={UTIL_COLOR.track} strokeWidth={4} strokeLinecap="round" />
@@ -1378,7 +1382,7 @@ export function RangeStrip({
         cx={xs(g.max)}
         cy={mid}
         r={4}
-        fill={g.over ? UTIL_COLOR.over : UTIL_COLOR.used}
+        fill={g.overRetried ? UTIL_COLOR.retry : g.over ? UTIL_COLOR.over : UTIL_COLOR.used}
         stroke="#ffffff"
         strokeWidth={1.5}
         data-testid="strip-max"

@@ -433,6 +433,7 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	w.CPU = CPUStats{Request: summarizeRequest(cpuReq), CoresUsed: distribution(cores), Efficiency: distribution(eff)}
 	w.Disk = DiskStats{Request: summarizeRequest(diskReq), UsedKiB: distribution(diskUsed)}
 	markAdaptive(w.Memory.Request, g.jobs, AdaptiveMemory)
+	markRetryLadder(w.Memory.Request, g.jobs)
 	markAdaptive(w.CPU.Request, g.jobs, AdaptiveCpus)
 	markAdaptive(w.Disk.Request, g.jobs, AdaptiveDisk)
 	w.GPU = gpuStats(g.jobs)
@@ -451,6 +452,37 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 
 // markAdaptive flags a request summary as adaptive when most of the jobs
 // behind it wrote that request as a formula, and names the formula.
+// markRetryLadder flags a request summary whose jobs were submitted with
+// a memory retry ladder, and records the largest rung any of them
+// reached.
+//
+// It is the companion of markAdaptive and uses the same majority rule, so
+// the flag and the advice that names the ladder cannot disagree about
+// whether a workflow has one.
+func markRetryLadder(r *Request, jobs []*Job) {
+	if r == nil {
+		return
+	}
+	ladder, total := 0, 0
+	highest := 0.0
+	for _, j := range jobs {
+		total++
+		if !j.MemoryRetry {
+			continue
+		}
+		ladder++
+		// The request in force for the run that finished: the first rung
+		// for a job that never climbed, the rung it ended on otherwise.
+		if v := j.RequestMemory; v.OK() && v.V() > highest {
+			highest = v.V()
+		}
+	}
+	r.Retry = ladder*2 > total
+	if r.Retry && highest > r.Typical {
+		r.RetryMiB = highest
+	}
+}
+
 func markAdaptive(r *Request, jobs []*Job, bit uint8) {
 	if r == nil {
 		return

@@ -46,6 +46,8 @@ import {
   type UtilResourceSummary,
   requestMarkerLabel,
   requestPhrase,
+  hasLadder,
+  memoryHistogramNote,
   type UtilWorkflow,
   type UtilWorkflowSummary,
   type UtilAdaptiveResource,
@@ -1224,7 +1226,7 @@ export function GpuSection({
             unit="plain"
             markers={
               cpuRequest
-                ? [{ value: cpuRequest.typical, label: requestMarkerLabel(formatCores(cpuRequest.typical), cpuRequest.adaptive), kind: 'request' }]
+                ? [{ value: cpuRequest.typical, label: requestMarkerLabel(formatCores(cpuRequest.typical), cpuRequest), kind: 'request' }]
                 : []
             }
             note="A GPU job that keeps every requested core busy may be holding its GPU back."
@@ -1279,7 +1281,7 @@ export function WorkflowDetail({
   const memReq = w.memory.request;
   const rec = w.memory_curve.find((p) => p.is_recommended);
   const memMarkers: ChartMarker[] = [];
-  if (memReq) memMarkers.push({ value: memReq.typical, label: requestMarkerLabel(formatMiB(memReq.typical), memReq.adaptive), kind: 'request' });
+  if (memReq) memMarkers.push({ value: memReq.typical, label: requestMarkerLabel(formatMiB(memReq.typical), memReq), kind: 'request' });
   // The suggestion only earns a marker when it differs from what was
   // asked for; a second line on top of the first says nothing.
   if (rec && (!memReq || rec.request_mib !== memReq.typical)) {
@@ -1288,14 +1290,16 @@ export function WorkflowDetail({
   if (rec?.retry_mib) memMarkers.push({ value: rec.retry_mib, label: `retry ${formatMiB(rec.retry_mib)}`, kind: 'retry' });
 
   const tpCard = throughputAdviceId(w);
-  // A suggestion about a request that is a formula says so: "request
-  // 3 GB" reads differently against "starts at 2 GB, grows".
+  // A suggestion about a request that is not a plain number says so:
+  // "request 3 GB" reads differently against "starts at 2 GB, grows", and
+  // differently again against "1 GB, retried at 4 GB" -- where the reader
+  // is already doing most of what the suggestion asks for.
   const adviceContext = (a: UtilAdvice): string | undefined => {
     const req = a.resource === 'memory' ? w.memory.request : a.resource === 'cpu' ? w.cpu.request : a.resource === 'disk' ? w.disk.request : null;
-    if (!req?.adaptive) return undefined;
+    if (!req || !(req.adaptive || hasLadder(req))) return undefined;
     const kind = a.resource === 'cpu' ? 'cpus' : (a.resource as 'memory' | 'disk');
     const now = kind === 'memory' ? formatMiB(req.typical) : kind === 'disk' ? formatKiB(req.typical) : formatCores(req.typical);
-    return `The ${kind === 'cpus' ? 'CPU' : kind} request today ${requestPhrase(kind, now, true)}.`;
+    return `The ${kind === 'cpus' ? 'CPU' : kind} request today ${requestPhrase(kind, now, req)}.`;
   };
   // For a workflow of GPU jobs only, the GPU section already shows the
   // cores histogram; the CPU section keeps only what it adds.
@@ -1413,13 +1417,7 @@ export function WorkflowDetail({
               markers={memMarkers}
               shadeFrom={rec && rec.retry_fraction > 0 ? rec.request_mib : undefined}
               shadeLabel={rec?.retry_mib ? `would rerun at ${formatMiB(rec.retry_mib)}` : 'would rerun'}
-              note={
-                memReq?.adaptive
-                  ? `The memory request ${requestPhrase('memory', formatMiB(memReq.typical), true)}; the line is where it starts.`
-                  : memReq && memReq.distinct > 1
-                    ? `Requests ranged from ${formatMiB(memReq.min)} to ${formatMiB(memReq.max)}; the line is the most common.`
-                    : undefined
-              }
+              note={memoryHistogramNote(memReq)}
             />
             {w.memory_curve.length > 0 ? (
               <MemoryCurve points={w.memory_curve} />
@@ -1471,7 +1469,7 @@ export function WorkflowDetail({
                 onBin={pick('cores', 'CPU cores busy', formatCores)}
                 selected={selected('cores')}
                 unit="plain"
-                markers={cpuReq ? [{ value: cpuReq.typical, label: requestMarkerLabel(formatCores(cpuReq.typical), cpuReq.adaptive), kind: 'request' }] : []}
+                markers={cpuReq ? [{ value: cpuReq.typical, label: requestMarkerLabel(formatCores(cpuReq.typical), cpuReq), kind: 'request' }] : []}
               />
             )}
             <TrendChart
@@ -1500,7 +1498,7 @@ export function WorkflowDetail({
                 onBin={pick('disk', 'disk use', formatKiB)}
                 selected={selected('disk')}
                 unit="kib"
-                markers={diskReq ? [{ value: diskReq.typical, label: requestMarkerLabel(formatKiB(diskReq.typical), diskReq.adaptive), kind: 'request' }] : []}
+                markers={diskReq ? [{ value: diskReq.typical, label: requestMarkerLabel(formatKiB(diskReq.typical), diskReq), kind: 'request' }] : []}
               />
             )}
           </div>

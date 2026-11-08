@@ -11,6 +11,9 @@ import {
   parseDays,
   rankAdvice,
   stripGeometry,
+  requestPhrase,
+  requestMarkerLabel,
+  memoryHistogramNote,
   usedFraction,
   throughputStatement,
   throughputAdviceId,
@@ -180,6 +183,84 @@ describe('stripGeometry', () => {
   it('draws nothing without a distribution', () => {
     expect(stripGeometry(request, null)).toBeNull();
   });
+
+  // A workflow with retry_request_memory asks for the first rung and
+  // retries higher. Its jobs going over the first rung is the ladder
+  // working, not a job that did not fit, and the strip has to tell the
+  // two apart -- otherwise the fix that made `typical` the first rung
+  // paints every such workflow critical.
+  const laddered = { typical: 1024, min: 1024, max: 1024, distinct: 1, retry: true, retry_mib: 4096 };
+
+  it('marks a peak the retry ladder covers as retried, not over', () => {
+    const g = stripGeometry(laddered, dist({ p25: 800, p75: 900, max: 3500 }))!;
+    expect(g.over).toBe(true);
+    expect(g.overRetried).toBe(true);
+  });
+
+  it('still flags a peak that went past the whole ladder', () => {
+    const g = stripGeometry(laddered, dist({ p25: 800, p75: 900, max: 5000 }))!;
+    expect(g.over).toBe(true);
+    expect(g.overRetried).toBe(false);
+  });
+
+  it('leaves a workflow with no ladder alone', () => {
+    const g = stripGeometry(request, dist({ p25: 3000, p75: 3500, max: 5000 }))!;
+    expect(g.over).toBe(true);
+    expect(g.overRetried).toBe(false);
+  });
+});
+
+describe('requestPhrase and requestMarkerLabel', () => {
+  const plain = { typical: 4096, min: 4096, max: 4096, distinct: 1 };
+  const laddered = { typical: 1024, min: 1024, max: 1024, distinct: 1, retry: true, retry_mib: 4096 };
+  const formula = { typical: 2048, min: 2048, max: 2048, distinct: 1, adaptive: true };
+
+  it('says a plain request plainly', () => {
+    expect(requestPhrase('memory', '4 GB', plain)).toBe('4 GB');
+    expect(requestMarkerLabel('4 GB', plain)).toBe('requested 4 GB');
+  });
+
+  it('names the rung a ladder retries at', () => {
+    expect(requestPhrase('memory', '1 GB', laddered)).toBe('1 GB, retried at 4 GB');
+    expect(requestMarkerLabel('1 GB', laddered)).toBe('requested 1 GB, retries at 4 GB');
+  });
+
+  it('keeps saying a formula grows', () => {
+    expect(requestPhrase('memory', '2 GB', formula)).toBe('starts at 2 GB, grows after a memory hold');
+    expect(requestMarkerLabel('2 GB', formula)).toBe('requested 2 GB, grows');
+  });
+
+  it('still takes a bare flag, for a caller that has only that', () => {
+    expect(requestPhrase('memory', '2 GB', true)).toBe('starts at 2 GB, grows after a memory hold');
+    expect(requestMarkerLabel('2 GB', undefined)).toBe('requested 2 GB');
+  });
+
+  it('ignores a ladder whose rung is not above the request', () => {
+    const odd = { ...laddered, retry_mib: 1024 };
+    expect(requestMarkerLabel('1 GB', odd)).toBe('requested 1 GB');
+  });
+});
+
+describe('memoryHistogramNote', () => {
+  it('says a ladder line is the first request, not the retry', () => {
+    const note = memoryHistogramNote({ typical: 1024, min: 1024, max: 1024, distinct: 1, retry: true, retry_mib: 4096 });
+    expect(note).toContain('retried at 4 GB');
+    expect(note).toContain('the first request, not the retry');
+  });
+
+  it('still says a formula line is where the request starts', () => {
+    const note = memoryHistogramNote({ typical: 2048, min: 2048, max: 2048, distinct: 1, adaptive: true });
+    expect(note).toContain('where it starts');
+  });
+
+  it('falls back to the spread when requests varied', () => {
+    expect(memoryHistogramNote({ typical: 2048, min: 1024, max: 4096, distinct: 3 })).toContain('ranged from');
+  });
+
+  it('says nothing about a single plain request', () => {
+    expect(memoryHistogramNote({ typical: 2048, min: 2048, max: 2048, distinct: 1 })).toBeUndefined();
+    expect(memoryHistogramNote(null)).toBeUndefined();
+  });
 });
 
 describe('fixture', () => {
@@ -288,7 +369,8 @@ describe('filters', () => {
   it('matches name, executable and owner, ignoring case', () => {
     expect(filterWorkflows(ws, 'BLAST').map((w) => w.key)).toEqual(['wf-blast']);
     expect(filterWorkflows(ws, 'train.py').map((w) => w.key)).toEqual(['wf-train']);
-    expect(filterWorkflows(ws, 'bob').map((w) => w.key)).toEqual(['wf-assemble']);
+    // bob owns two: the owner filter matches both, in fixture order.
+    expect(filterWorkflows(ws, 'bob').map((w) => w.key)).toEqual(['wf-assemble', 'wf-sieve']);
     expect(filterWorkflows(ws, '  ')).toBe(ws);
   });
 
