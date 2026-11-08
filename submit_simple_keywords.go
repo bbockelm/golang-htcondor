@@ -57,9 +57,46 @@ type SimpleSubmitKeyword struct {
 // row if the row before it matched", and several keywords share an attribute,
 // where the last one present wins.
 func SimpleSubmitKeywords() []SimpleSubmitKeyword {
-	out := make([]SimpleSubmitKeyword, len(simpleSubmitKeywords))
-	copy(out, simpleSubmitKeywords)
+	return SimpleSubmitKeywordsFor(SubmitBehavior{})
+}
+
+// SimpleSubmitKeywordsFor is SimpleSubmitKeywords for one release's
+// condor_submit: the rows whose keywords that release still writes an
+// attribute for.
+//
+// HTCondor deletes submit commands as the features behind them go. A deleted
+// command does not become an error -- an unrecognized one is an ordinary
+// submit macro -- so what changes is only that it stops writing its job
+// attribute, which is what dropping its row here does.
+func SimpleSubmitKeywordsFor(b SubmitBehavior) []SimpleSubmitKeyword {
+	out := make([]SimpleSubmitKeyword, 0, len(simpleSubmitKeywords))
+	for _, kw := range simpleSubmitKeywords {
+		if b.OmitRemoteIOKeywords && remoteIOKeywords[kw.Key] {
+			continue
+		}
+		if b.OmitContainerIsCommonAttr && kw.Key == "container_is_common" {
+			continue
+		}
+		out = append(out, kw)
+	}
 	return out
+}
+
+// remoteIOKeywords are the submit commands HTCONDOR-3998 removed with the
+// standard-universe RemoteIO code; see SubmitBehavior.OmitRemoteIOKeywords.
+//
+// None of them is the alternate spelling of another, so dropping them cannot
+// disturb the kwAltName pairing that makes the table order load-bearing --
+// TestRemoteIOKeywordsAreNotAltNames holds that.
+var remoteIOKeywords = map[string]bool{
+	"buffer_size":       true,
+	"buffer_files":      true,
+	"buffer_block_size": true,
+	"file_remaps":       true,
+	"fetch_files":       true,
+	"compress_files":    true,
+	"append_files":      true,
+	"local_files":       true,
 }
 
 // simpleSubmitKeywords is the non-special part of HTCondor's prunable_keywords
@@ -193,7 +230,7 @@ var simpleSubmitKeywords = []SimpleSubmitKeyword{
 //     is suppressed rather than used.
 func (sf *SubmitFile) setSimpleSubmitKeywords(ad *classad.ClassAd) error {
 	lastOneExisted := false
-	for _, kw := range simpleSubmitKeywords {
+	for _, kw := range SimpleSubmitKeywordsFor(sf.behavior) {
 		if kw.Opts&kwAltName != 0 && lastOneExisted {
 			lastOneExisted = false
 			continue

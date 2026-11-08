@@ -69,6 +69,16 @@ var submitBehaviorReleases = []struct {
 		},
 	},
 	{
+		ticket: "HTCONDOR-3998-remoteio",
+		since:  []string{"26.2.0"},
+		apply:  func(b *SubmitBehavior) { b.OmitRemoteIOKeywords = true },
+	},
+	{
+		ticket: "HTCONDOR-3932-container",
+		since:  []string{"25.15.16", "26.0.2", "26.2.0"},
+		apply:  func(b *SubmitBehavior) { b.OmitContainerIsCommonAttr = true },
+	},
+	{
 		ticket: "HTCONDOR-3932",
 		since:  []string{"25.15.16", "26.0.2", "26.2.0"},
 		apply: func(b *SubmitBehavior) {
