@@ -1,5 +1,9 @@
 import type { Page } from '@playwright/test';
-import type { AdminReservation, AdminReservationWindow } from '../../src/lib/api';
+import type {
+  AdminReservation,
+  AdminReservationHealth,
+  AdminReservationWindow,
+} from '../../src/lib/api';
 import { SMOKE_NOW } from './clock';
 
 // The admin reservations API, as a server with an application database
@@ -74,9 +78,21 @@ export interface ReservationFixtures {
   stored: () => AdminReservation[];
 }
 
+// A pool where everything is as it should be. A test that wants a
+// warning passes its own.
+export const healthyFixture: AdminReservationHealth = {
+  running: true,
+  healthy: true,
+  outcome: 'ok',
+  machine: 'wn01.example.edu',
+  checked_at: '2026-10-14T11:58:00-05:00',
+  stanza: 'START = $(START) && ( ReservationStart ?: True )',
+};
+
 export async function installReservationFixtures(
   page: Page,
   initial: AdminReservation[] = [cs301Fixture, astroFixture],
+  health: AdminReservationHealth = healthyFixture,
 ): Promise<ReservationFixtures> {
   const writes: { method: string; path: string; body: unknown }[] = [];
   let store = initial.map((r) => ({ ...r }));
@@ -88,6 +104,13 @@ export async function installReservationFixtures(
     const rest = path.replace(/^\/api\/v1\/admin\/reservations\/?/, '');
     const [id, tail] = rest.split('/');
 
+    // Before the collection branch: the glob matches this path too, and
+    // answering it with a reservation list leaves the page unable to
+    // warn about anything.
+    if (req.method() === 'GET' && id === 'health') {
+      await route.fulfill({ json: health });
+      return;
+    }
     if (req.method() === 'GET' && tail === 'windows') {
       const res = store.find((r) => r.id === id);
       if (!res) {
