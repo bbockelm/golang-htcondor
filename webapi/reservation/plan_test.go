@@ -123,7 +123,8 @@ func TestPlanStopsHoldingInsideForgive(t *testing.T) {
 	}
 }
 
-// TestPlanEvictsOnlyAtTheBell.
+// TestPlanEvictsOnlyAtTheBell: nothing is preempted before the bell,
+// and at it the seats are taken.
 func TestPlanEvictsOnlyAtTheBell(t *testing.T) {
 	spec := planSpec(t, "cs301", "cs301-f26", "0 14 * * 1")
 	tick := planTick(t, spec, busyMachines(10, 3*time.Hour, 20*time.Hour), nil)
@@ -132,13 +133,43 @@ func TestPlanEvictsOnlyAtTheBell(t *testing.T) {
 	if len(plan.Evict) != spec.Seats {
 		t.Fatalf("evicted %d slots at the bell, want %d", len(plan.Evict), spec.Seats)
 	}
-	if len(plan.Hold) != 0 {
-		t.Errorf("still holding machines at the bell: %v", plan.Hold)
-	}
 	for _, e := range plan.Evict {
 		if e.Reservation != "cs301" {
 			t.Errorf("eviction attributed to %q", e.Reservation)
 		}
+	}
+}
+
+// TestPlanHoldsThroughTheWindow: a machine whose seat was just taken is
+// still held, until the window ends.
+//
+// Releasing it at the bell is what the planner used to do, and it hands
+// the machine back to the pool at the moment the reservation starts
+// using it: the first seat the project finishes with is refilled by
+// somebody else's job, and the window the drain paid for leaks away one
+// seat at a time.
+//
+// The deadline pushed is the bell, which is now in the past, so the
+// sieve stops admitting on an estimate and admits the project alone.
+func TestPlanHoldsThroughTheWindow(t *testing.T) {
+	spec := planSpec(t, "cs301", "cs301-f26", "0 14 * * 1")
+	tick := planTick(t, spec, busyMachines(10, 3*time.Hour, 20*time.Hour), nil)
+	bell := planNow.Add(6 * time.Hour)
+	tick.Now = bell
+	plan := planPolicy().Plan(tick, DefaultPlanConfig())
+	if len(plan.Hold) == 0 {
+		t.Fatalf("held nothing during the window")
+	}
+	for _, h := range plan.Hold {
+		if !h.Deadline.Equal(bell) {
+			t.Errorf("%s: deadline %v, want the bell %v", h.Machine, h.Deadline, bell)
+		}
+		if want := bell.Add(spec.Duration); !h.Until.Equal(want) {
+			t.Errorf("%s: until %v, want the window end %v", h.Machine, h.Until, want)
+		}
+	}
+	if len(plan.Untag) != 0 {
+		t.Errorf("released %v during the window", plan.Untag)
 	}
 }
 

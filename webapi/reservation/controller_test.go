@@ -3,6 +3,7 @@ package reservation
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,14 +41,17 @@ type fakeActuator struct {
 	calls   []call
 	failOn  string
 	ordered []string
+	holds   []HoldRequest
+	evicted []string
 }
 
-func (a *fakeActuator) Hold(_ context.Context, m string, _ time.Time, p string) error {
+func (a *fakeActuator) Hold(_ context.Context, h HoldRequest) error {
 	a.ordered = append(a.ordered, "hold")
-	if a.failOn == m {
+	if a.failOn == h.Machine {
 		return errors.New("startd unreachable")
 	}
-	a.calls = append(a.calls, call{"hold", m, 0, p})
+	a.calls = append(a.calls, call{"hold", h.Machine, 0, h.Project})
+	a.holds = append(a.holds, h)
 	return nil
 }
 func (a *fakeActuator) Release(_ context.Context, m string) error {
@@ -55,9 +59,10 @@ func (a *fakeActuator) Release(_ context.Context, m string) error {
 	a.calls = append(a.calls, call{"release", m, 0, ""})
 	return nil
 }
-func (a *fakeActuator) Evict(_ context.Context, m string, d int) error {
+func (a *fakeActuator) Evict(_ context.Context, e EvictRequest) error {
 	a.ordered = append(a.ordered, "evict")
-	a.calls = append(a.calls, call{"evict", m, d, ""})
+	a.calls = append(a.calls, call{"evict", e.Machine, 0, ""})
+	a.evicted = append(a.evicted, e.Slot)
 	return nil
 }
 
@@ -71,8 +76,13 @@ func seatSizedMachines(n int, age, left time.Duration) []Machine {
 	out := make([]Machine, 0, n)
 	for i := range n {
 		out = append(out, Machine{
-			Name:   string(rune('a'+i)) + "-ep",
-			Dslots: []Dslot{{Started: planNow.Add(-age), Res: seatRes, Remaining: left}},
+			Name: string(rune('a'+i)) + "-ep",
+			Dslots: []Dslot{{
+				Slot:      "slot1_1@" + string(rune('a'+i)) + "-ep",
+				Started:   planNow.Add(-age),
+				Res:       seatRes,
+				Remaining: left,
+			}},
 		})
 	}
 	return out
@@ -159,11 +169,13 @@ func TestControllerOrdersTheActuation(t *testing.T) {
 	}
 }
 
-// TestControllerEvictsAtTheBellOnly.
+// TestControllerEvictsAtTheBell, and holds the machines it took the
+// seats from for the project until the window ends.
 func TestControllerEvictsAtTheBell(t *testing.T) {
 	spec := planSpec(t, "cs301", "cs301-f26", "0 14 * * 1")
 	machines := seatSizedMachines(10, 3*time.Hour, 20*time.Hour)
-	c, act := ctl(t, spec, machines, nil, fakeJobs{}, planNow.Add(6*time.Hour))
+	bell := planNow.Add(6 * time.Hour)
+	c, act := ctl(t, spec, machines, nil, fakeJobs{}, bell)
 	res, err := c.Tick(context.Background())
 	if err != nil {
 		t.Fatalf("Tick: %v", err)
@@ -171,10 +183,64 @@ func TestControllerEvictsAtTheBell(t *testing.T) {
 	if res.Evicted != spec.Seats {
 		t.Errorf("evicted %d, want %d", res.Evicted, spec.Seats)
 	}
-	for _, call := range act.calls {
-		if call.verb == "hold" {
-			t.Errorf("held %s at the bell", call.machine)
+	if len(act.holds) == 0 {
+		t.Fatalf("held nothing at the bell, so a freed seat goes back to the pool")
+	}
+	for _, h := range act.holds {
+		if h.Project != spec.Project {
+			t.Errorf("%s held for %q, want %q", h.Machine, h.Project, spec.Project)
 		}
+		if want := bell.Add(spec.Duration); !h.Until.Equal(want) {
+			t.Errorf("%s: until %v, want the window end %v", h.Machine, h.Until, want)
+		}
+	}
+}
+
+// TestControllerEvictsBySlotName: the startd vacates a claim by the
+// slot ad's Name. An index into the census means nothing to it, and
+// vacating the wrong slot preempts somebody who was not in the way
+// while leaving the one that was.
+func TestControllerEvictsBySlotName(t *testing.T) {
+	spec := planSpec(t, "cs301", "cs301-f26", "0 14 * * 1")
+	machines := seatSizedMachines(10, 3*time.Hour, 20*time.Hour)
+	c, act := ctl(t, spec, machines, nil, fakeJobs{}, planNow.Add(6*time.Hour))
+	if _, err := c.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if len(act.evicted) == 0 {
+		t.Fatalf("evicted nothing")
+	}
+	for _, slot := range act.evicted {
+		if !strings.Contains(slot, "@") {
+			t.Errorf("vacated %q, which is not a slot name", slot)
+		}
+	}
+}
+
+// TestControllerRefusesToEvictWithoutASlotName: a census built without
+// slot names has nothing to vacate by, and guessing is worse than
+// failing.
+func TestControllerRefusesToEvictWithoutASlotName(t *testing.T) {
+	spec := planSpec(t, "cs301", "cs301-f26", "0 14 * * 1")
+	machines := seatSizedMachines(10, 3*time.Hour, 20*time.Hour)
+	for i := range machines {
+		for j := range machines[i].Dslots {
+			machines[i].Dslots[j].Slot = ""
+		}
+	}
+	c, act := ctl(t, spec, machines, nil, fakeJobs{}, planNow.Add(6*time.Hour))
+	res, err := c.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if res.Evicted != 0 {
+		t.Errorf("evicted %d slots with no name to evict by", res.Evicted)
+	}
+	if len(act.evicted) != 0 {
+		t.Errorf("vacated %v", act.evicted)
+	}
+	if res.Err() == nil {
+		t.Errorf("reported no error for evictions it could not make")
 	}
 }
 

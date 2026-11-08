@@ -72,6 +72,11 @@ func (r Resources) seats(need Resources) int {
 
 // Dslot is one running job as the census sees it.
 type Dslot struct {
+	// Slot is the slot ad's Name ("slot1_3@host"), which is how a
+	// d-slot is named to the startd that owns it. Empty in a census
+	// built without it, which makes the slot unevictable rather than
+	// evicting the wrong one.
+	Slot string
 	// Started is when this execution began. Zero means the slot is idle.
 	Started time.Time
 	// Res is what the job holds.
