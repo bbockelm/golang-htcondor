@@ -316,6 +316,121 @@ re-stamping can be rate-limited to a budget per tick without any
 correctness risk — which is the knob to have before turning it on.
 
 
+## Why not OCUs
+
+HTCondor has a mechanism that looks like the answer and is half of it.
+
+An **OCU** (Owned Capacity Unit, HTCONDOR-3031, in since 24.10) is a
+persistent claim the schedd holds on a user's behalf. It is created out
+of band -- `htcondor ocu create`, or `Schedd.create_ocu` -- rather than
+submitted as a job, it is matched by the negotiator like an idle job,
+and once granted it is **never given back**: when the job on it
+finishes, the schedd keeps the claim and looks for another of that
+user's jobs to put on it. Jobs opt in with `OCUWanted`; jobs belonging
+to somebody else opt in to *borrowing* an idle one with `OCUWilling`,
+and are vacated when the owner wants it back.
+
+That is exactly the half of this problem the rest of this document does
+badly, and none of the half it does well.
+
+### What it does, measured
+
+Against 26.2.0, one execute point with one CPU, so the contest for the
+slot is unambiguous:
+
+| | |
+|---|---|
+| The claim persists across jobs | **Yes.** It sat `Claimed Idle` with `OCU = true` indefinitely after its job ended, and never returned to the pool. |
+| It is acquired by a deadline | **No.** It is negotiated like any idle job: it waits for capacity to come free. |
+| It drains or preempts to get the claim | **No.** |
+| It can be scoped to a project | **No.** `create_ocu` with a project name is refused: `Owner not found: cs301`. OCUs hang off a user record. |
+| Consenting jobs backfill an idle claim | **Yes.** An `OCUWilling` job ran on it; a plain job submitted at the same moment never did, for the life of the test. |
+| The owner gets it back | **Not as documented.** See below. |
+
+The last one is worth stating precisely because it is the whole point of
+the mechanism. With a borrower running, an `OCUWanted` job of the
+claim's own owner stayed idle indefinitely while the borrower was
+vacated and re-matched ten times in a minute. A second job carrying
+**both** `OCUWanted` and `OCUWilling` took the claim as soon as the
+borrower was removed, and the schedd counted it as an owner activation.
+
+So in this build the matching gate and the accounting disagree. The gate
+(`FindRunnableJob`) compares the claim's `RemoteOwner`/`RemoteProject`
+against the job's, and an idle OCU claim carries neither, so every job
+falls into the "somebody else's OCU claim" branch and is refused unless
+it says `OCUWilling`. The eviction loop meanwhile counts `OCUWanted`
+jobs, so it fires correctly and preempts the borrower -- which then wins
+the re-match, being the older `OCUWilling` job. The claim churns and
+nobody is served.
+
+### Why it is not a substitute
+
+The hard part here is **acquisition by a deadline**. A class needs N
+cores at 14:00, and the pool is full. An OCU does not drain anything; it
+waits in the negotiator's queue like any other idle request. On a busy
+pool a reservation made at 08:00 would accumulate claims slowly, in
+whatever order capacity happened to free up, with no way to say "by
+14:00" and no way to prefer the machines that will turn over. And while
+it waits it idles every core it has taken.
+
+The measurements above say what that costs: a core spends 20.1% of its
+wall clock on a job younger than `FORGIVE`, so a pool of 134 cores frees
+about one core every few minutes by luck. Reaching 48 held machines by a
+bell six hours out is feasible by luck; reaching them by a bell two
+hours out is not.
+
+### The twist that would help
+
+They compose, and the composition is better than either.
+
+- **Before the bell**, the sieve is the right instrument. It drains by
+  *prediction*: admit only work that finishes in time, which costs no
+  idle capacity as long as the queue has short work in it.
+- **During the window**, the OCU is the right instrument. A persistent
+  claim restricted to its owner is what `ReservationUntil` and
+  `ReservationProject` are imitating, badly, in a machine ad that cannot
+  be deleted -- and `OCUWilling` gives the reservation something this
+  design has no answer for at all: *consented* backfill of a seat the
+  class is not using, instead of refusing the core to everybody.
+
+The deeper point is about the backfill rule. `OCUWilling` is
+preemption-based: let anyone in and kill them when the owner shows up.
+This document's whole cost model says that is the expensive way --
+7.6 jobs older than half an hour discarded per class start. The sieve is
+prediction-based: let in only what finishes in time, and preempt nobody.
+**A borrower chosen by the estimate rather than by consent is strictly
+better than either**: the claim stays busy, and the handover costs
+nothing because the borrower was already going to end.
+
+In HTCondor terms that is a small change in one place -- when
+`FindRunnableJob` considers a job for somebody else's OCU claim, also
+require that it fit before that reservation's next bell. The estimate
+already exists; what it lacks is anywhere to be consulted inside the
+schedd.
+
+### What would have to change first
+
+In rough order of how much it blocks:
+
+1. **Project-scoped OCUs.** Seats belong to a class, not to a user, and
+   students do not share an account. The matching code already compares
+   `RemoteProject`, so this is closer than it looks; `create_ocu`
+   refusing a project name is the gap.
+2. **The owner can take back its own claim.** An `OCUWanted` job has to
+   match its own OCU without also declaring itself preemptible, and has
+   to win against the borrower it just displaced.
+3. **A deadline on the request.** Without one an OCU cannot be asked for
+   by 14:00, which is the whole requirement.
+4. **Multi-access-point reach.** OCUs live in one schedd's user record.
+   A class whose students submit from several access points needs the
+   claims where their jobs are, or a way to share them.
+
+None of that is this repository's to change, and none of it is needed
+for what is built here. It is recorded because the first three would
+each let this subsystem delete code rather than add it, and because
+anyone reading this design will ask the question.
+
+
 ## Open questions
 
 - An exceeded job's estimate snaps back to the unconditioned median
