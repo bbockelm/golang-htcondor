@@ -23,6 +23,7 @@ const MON_1200 = '2026-10-19T12:00:00-05:00';
 
 export const cs301Fixture: AdminReservation = {
   id: 'cs301',
+  owner: 'jsmith',
   project: 'cs301-f26',
   submit: 'executable = /usr/bin/jupyter\nrequest_cpus = 4\nrequest_gpus = 1\nrequest_memory = 16384\nqueue\n',
   seats: 48,
@@ -37,6 +38,7 @@ export const cs301Fixture: AdminReservation = {
 
 export const astroFixture: AdminReservation = {
   id: 'astro-lab',
+  owner: 'kpatel',
   project: 'astro-lab',
   submit: 'executable = /usr/bin/python3\nrequest_cpus = 8\nrequest_memory = 32768\nqueue\n',
   seats: 16,

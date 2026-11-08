@@ -94,7 +94,7 @@ func (e *resEnv) mux() *http.ServeMux {
 
 func goodReservation() reservationJSON {
 	return reservationJSON{
-		ID: "cs301", Project: "cs301-f26", Submit: testSeatSubmit,
+		ID: "cs301", Owner: "prof-moriarty", Project: "cs301-f26", Submit: testSeatSubmit,
 		Seats: 35, Standing: 4,
 		DurationSeconds: 3600, LeadSeconds: 21600, HoldSeconds: 900,
 		Schedule: "0 14 * * 1,3", Timezone: "UTC", Enabled: true,

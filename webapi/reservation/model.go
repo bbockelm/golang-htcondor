@@ -15,6 +15,16 @@ type Spec struct {
 	// attributes after reservations would accumulate dead keys on every
 	// execute point until it restarts.
 	ID string
+	// Owner is the person the capacity is held for -- the teacher of
+	// the class, not the students.
+	//
+	// Separate from Project because they answer different questions.
+	// Project is what a job carries to claim a seat; Owner is who the
+	// reservation belongs to. HTCondor's own persistent claims hang off
+	// a user record and are matched against both, so a claim held for
+	// an owner serves that owner's jobs and any job of the owner's
+	// project -- which is exactly a class and its students.
+	Owner string
 	// Project is the ProjectName a job must carry to take a seat.
 	Project string
 	// Submit is the submit file describing the seat. It is rendered to a
@@ -48,6 +58,9 @@ func (s *Spec) Validate() error {
 	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
 	if s.ID == "" {
 		add("ID is required")
+	}
+	if s.Owner == "" {
+		add("Owner is required: it is who the capacity is held for")
 	}
 	if s.Project == "" {
 		add("Project is required: it is what lets a job claim a seat")

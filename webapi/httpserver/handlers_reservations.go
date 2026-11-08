@@ -19,6 +19,7 @@ import (
 // will get it wrong eventually.
 type reservationJSON struct {
 	ID              string `json:"id"`
+	Owner           string `json:"owner"`
 	Project         string `json:"project"`
 	Submit          string `json:"submit"`
 	Seats           int    `json:"seats"`
@@ -41,7 +42,7 @@ type windowJSON struct {
 
 func toReservationJSON(s *reservation.Spec) reservationJSON {
 	out := reservationJSON{
-		ID: s.ID, Project: s.Project, Submit: s.Submit,
+		ID: s.ID, Owner: s.Owner, Project: s.Project, Submit: s.Submit,
 		Seats: s.Seats, Standing: s.Standing,
 		DurationSeconds: int64(s.Duration / time.Second),
 		LeadSeconds:     int64(s.Lead / time.Second),
@@ -73,7 +74,8 @@ func (j reservationJSON) toSpec() (*reservation.Spec, error) {
 		return nil, err
 	}
 	return &reservation.Spec{
-		ID: strings.TrimSpace(j.ID), Project: strings.TrimSpace(j.Project), Submit: j.Submit,
+		ID: strings.TrimSpace(j.ID), Owner: strings.TrimSpace(j.Owner),
+		Project: strings.TrimSpace(j.Project), Submit: j.Submit,
 		Seats: j.Seats, Standing: j.Standing,
 		Duration: time.Duration(j.DurationSeconds) * time.Second,
 		Lead:     time.Duration(j.LeadSeconds) * time.Second,

@@ -9,7 +9,7 @@ import (
 func testSpec(t *testing.T, expr string) *Spec {
 	t.Helper()
 	return &Spec{
-		ID: "cs301", Project: "cs301-f26", Submit: "executable = /bin/true\nqueue\n",
+		ID: "cs301", Owner: "prof-moriarty", Project: "cs301-f26", Submit: "executable = /bin/true\nqueue\n",
 		Seats: 35, Standing: 4,
 		Duration: time.Hour, Lead: 6 * time.Hour, Hold: 15 * time.Minute,
 		Schedule: mustSchedule(t, expr, time.UTC), Enabled: true,
@@ -138,5 +138,28 @@ func TestWindowsHonoursHorizon(t *testing.T) {
 	}
 	if got := s.Windows(from, 0, 30*time.Minute); len(got) != 0 {
 		t.Errorf("a zero horizon gave %d windows, want 0", len(got))
+	}
+}
+
+// TestSpecRequiresAnOwner: the owner is who the capacity is held for,
+// and it is not the project. A reservation with a project and no owner
+// names the seats but nobody to hold them for.
+func TestSpecRequiresAnOwner(t *testing.T) {
+	s := seatSpec("executable = /bin/true\nqueue\n")
+	s.Owner = ""
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("a reservation with no owner was accepted")
+	}
+	if !strings.Contains(err.Error(), "Owner") {
+		t.Errorf("error does not name the missing field: %v", err)
+	}
+
+	// An owner is not a substitute for a project, nor the other way
+	// round: both are required, and they answer different questions.
+	s = seatSpec("executable = /bin/true\nqueue\n")
+	s.Project = ""
+	if err := s.Validate(); err == nil {
+		t.Error("a reservation with an owner but no project was accepted")
 	}
 }

@@ -1588,6 +1588,8 @@ export interface AdminAPIKeyCreateResponse {
 // eventually. The page renders them as hours and minutes.
 export interface AdminReservation {
   id: string;
+  // Who the capacity is held for -- the teacher, not the students.
+  owner: string;
   project: string;
   submit: string;
   seats: number;
