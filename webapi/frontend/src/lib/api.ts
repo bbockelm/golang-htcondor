@@ -1614,7 +1614,11 @@ export interface AdminReservationHealth {
   machine?: string;
   detail?: string;
   checked_at?: string;
-  provisioned?: number;
+  // Execute points seen recently whose START does not consult the
+  // reservation expression. Holding one has no effect.
+  unprovisioned?: string[];
+  // The configuration line those execute points are missing.
+  stanza?: string;
 }
 
 export interface AdminReservationWindow {

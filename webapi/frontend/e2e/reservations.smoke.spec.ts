@@ -168,3 +168,62 @@ test('reservations: disable and delete', async ({ page }) => {
 
   expect(errors).toEqual([]);
 });
+
+// The two ways a reservation holds nothing while looking fine. Neither
+// shows up anywhere else: no reservation reports an error, no job
+// fails, and every class quietly starts on a pool that was never
+// drained.
+
+test('reservations: a refused machine-ad update is surfaced', async ({ page }) => {
+  const errors = watchForErrors(page);
+  await installReservationFixtures(page, undefined, {
+    running: true,
+    healthy: false,
+    outcome: 'denied',
+    machine: 'wn07.example.edu',
+    detail: 'startd: CA_UPDATE_MACHINE_AD refused (NotAuthorized): denied',
+    checked_at: '2026-10-14T11:58:00-05:00',
+  });
+
+  await page.goto('/admin/reservations');
+  await expect(page.getByText('could not update wn07.example.edu')).toBeVisible();
+  await expect(page.getByText('NotAuthorized')).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('reservations: execute points without the stanza are named, with the line to add', async ({
+  page,
+}) => {
+  const errors = watchForErrors(page);
+  await installReservationFixtures(page, undefined, {
+    running: true,
+    // Healthy on purpose: this access point is working. What is missing
+    // is a line in somebody else's configuration file, and saying the
+    // access point is broken sends an admin to the wrong place.
+    healthy: true,
+    outcome: 'unprovisioned',
+    machine: 'wn04.example.edu',
+    unprovisioned: ['wn04.example.edu', 'wn09.example.edu'],
+    stanza: 'START = $(START) && ( ReservationStart ?: True )',
+    checked_at: '2026-10-14T11:58:00-05:00',
+  });
+
+  await page.goto('/admin/reservations');
+  await expect(
+    page.getByText('2 execute points are not set up for reservations'),
+  ).toBeVisible();
+  await expect(page.getByText('START = $(START) && ( ReservationStart ?: True )')).toBeVisible();
+  await expect(page.getByText('wn04.example.edu')).toBeVisible();
+  await expect(page.getByText('wn09.example.edu')).toBeVisible();
+  // The access point itself is fine, so the other banner must not fire.
+  await expect(page.getByText('could not update')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test('reservations: a healthy pool shows no warning at all', async ({ page }) => {
+  await installReservationFixtures(page);
+  await page.goto('/admin/reservations');
+  await expect(page.getByRole('heading', { name: 'Reservations' })).toBeVisible();
+  await expect(page.getByText('not set up for reservations')).toHaveCount(0);
+  await expect(page.getByText('could not update')).toHaveCount(0);
+});

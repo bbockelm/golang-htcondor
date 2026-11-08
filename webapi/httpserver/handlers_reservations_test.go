@@ -331,3 +331,92 @@ type deniedWriter struct{}
 func (deniedWriter) Probe(context.Context, string) error {
 	return errors.New("DENIED: not authorized to update machine ad")
 }
+
+// TestReservationHealthNamesUnprovisionedExecutePoints: an execute
+// point whose START never consults the sieve is held, reports as held,
+// and admits everything anyway. Nothing else in the system can tell, so
+// this endpoint is where an operator finds out -- with the line to add.
+func TestReservationHealthNamesUnprovisionedExecutePoints(t *testing.T) {
+	env := newResEnv(t)
+	p := &reservation.Prober{
+		Source: startsFor("ep1", `Owner =?= "alice"`),
+		Writer: acceptingWriter{},
+	}
+	if _, err := p.Visit(context.Background()); err != nil {
+		t.Fatalf("Visit: %v", err)
+	}
+	env.h.reservationProber = p
+
+	w := env.do(t, http.MethodGet, "/api/v1/admin/reservations/health", env.admin, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", w.Code, w.Body)
+	}
+	var got struct {
+		Running       bool     `json:"running"`
+		Healthy       bool     `json:"healthy"`
+		Unprovisioned []string `json:"unprovisioned"`
+		Stanza        string   `json:"stanza"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Healthy {
+		// This access point is working; what is missing is a line in
+		// somebody else's configuration file.
+		t.Errorf("an unprovisioned execute point made the access point read as unhealthy: %+v", got)
+	}
+	if len(got.Unprovisioned) != 1 || got.Unprovisioned[0] != "ep1" {
+		t.Errorf("unprovisioned = %v, want [ep1]", got.Unprovisioned)
+	}
+	if !strings.Contains(got.Stanza, "ReservationStart") {
+		t.Errorf("health does not carry the line to add: %q", got.Stanza)
+	}
+}
+
+type acceptingWriter struct{}
+
+func (acceptingWriter) Probe(context.Context, string) error { return nil }
+
+// TestStartReservationsIsOffUnlessConfigured: a reservation holds
+// capacity by evicting other people's jobs, so nothing starts because
+// somebody upgraded.
+func TestStartReservationsIsOffUnlessConfigured(t *testing.T) {
+	env := newResEnv(t)
+	env.h.reservationProber = nil
+	env.h.reservationsEnabled = false
+	env.h.startReservations(t.Context())
+	if env.h.reservationProber != nil {
+		t.Errorf("the prober started although reservations are disabled")
+	}
+
+	// Enabled but with no collector to read: there is nothing to
+	// administer, and starting a loop that fails every minute is worse
+	// than not starting it.
+	env.h.reservationsEnabled = true
+	env.h.collector = nil
+	env.h.startReservations(t.Context())
+	if env.h.reservationProber != nil {
+		t.Errorf("the prober started with no collector to read")
+	}
+}
+
+// TestStampingNeedsTheEstimator: the stamps come from the runtime
+// estimator, so there is nothing to write without it. Starting the loop
+// anyway would write nothing every five minutes while the admin page
+// reported a running stamper.
+func TestStampingNeedsTheEstimator(t *testing.T) {
+	env := newResEnv(t)
+	env.h.reservationStamper = nil
+	env.h.reservationsEnabled = true
+	env.h.runtimeEst = nil
+	env.h.startReservationStamping(t.Context())
+	if env.h.reservationStamper != nil {
+		t.Errorf("stamping started with no runtime estimator to stamp from")
+	}
+
+	env.h.reservationsEnabled = false
+	env.h.startReservationStamping(t.Context())
+	if env.h.reservationStamper != nil {
+		t.Errorf("stamping started although reservations are disabled")
+	}
+}

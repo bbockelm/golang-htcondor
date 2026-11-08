@@ -122,6 +122,11 @@ export default function AdminReservationsPage() {
   });
   const unhealthy =
     health.data?.running && health.data?.healthy === false ? health.data : null;
+  // Separate from unhealthy on purpose. This access point is working;
+  // these execute points are not configured to consult the reservation
+  // expression, so holding them does nothing. Telling an admin their
+  // access point is broken would send them to look in the wrong place.
+  const unprovisioned = health.data?.unprovisioned ?? [];
 
   return (
     <div className="max-w-6xl space-y-4">
@@ -150,6 +155,30 @@ export default function AdminReservationsPage() {
               {unhealthy.detail}
             </p>
           )}
+        </div>
+      )}
+
+      {unprovisioned.length > 0 && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <h2 className="text-sm font-semibold text-amber-900">
+            {unprovisioned.length === 1
+              ? '1 execute point is not set up for reservations'
+              : `${unprovisioned.length} execute points are not set up for reservations`}
+          </h2>
+          <p className="mt-1 text-sm text-amber-800">
+            Reservations cannot hold these machines. Add this line to their
+            configuration:
+          </p>
+          {health.data?.stanza && (
+            <pre className="mt-2 overflow-x-auto rounded bg-amber-100 p-2 font-mono text-xs text-amber-900">
+              {health.data.stanza}
+            </pre>
+          )}
+          <ul className="mt-2 font-mono text-xs break-words text-amber-900">
+            {unprovisioned.map((machine) => (
+              <li key={machine}>{machine}</li>
+            ))}
+          </ul>
         </div>
       )}
 
