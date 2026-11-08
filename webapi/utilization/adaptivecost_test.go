@@ -146,6 +146,44 @@ func TestAdaptiveCostIsExactWhenTheRecordCanSplitIt(t *testing.T) {
 	}
 }
 
+// TestAdaptiveIsNotFlattenedWhenItIsWorking is the regression this
+// exists for: a workflow whose formula is doing its job must not be told
+// to drop it for one flat request, whatever share of its jobs regrow.
+//
+// One flat request that fits the largest job reserves that much for
+// every job, and these mostly peak well under it. Charging the regrow
+// twice made the formula look like the expensive one and produced a
+// saving of some seventy GiB-hours for abandoning the cheaper mechanism.
+//
+// The recommendation may still be a BETTER rerun than the one in force
+// -- the formula regrows to 1.5x the peak it measured, where sizing from
+// the peak directly is tighter -- and that is a different thing from
+// flattening.
+//
+// At a one-in-two regrow rate the flat request and the formula come out
+// within half a percent of each other, and which one the sizing picks
+// turns on a tiebreak rather than on the arithmetic this pins. That case
+// is left out deliberately.
+func TestAdaptiveIsNotFlattenedWhenItIsWorking(t *testing.T) {
+	for _, share := range []int{5, 3} {
+		t.Run(fmt.Sprintf("one-in-%d-regrows", share), func(t *testing.T) {
+			plan, _ := adaptiveWorkflow(t, share, adaptiveRegrown)
+			if plan.retry <= 0 {
+				t.Errorf("recommended a flat %.0f MiB and no rerun at all; the formula already reruns these jobs",
+					plan.recommended)
+			}
+			if plan.recommended >= plan.single {
+				t.Errorf("recommended %.0f MiB, the request that fits every job -- that is the flattening",
+					plan.recommended)
+			}
+			if plan.recommendedCost >= plan.currentCost {
+				t.Errorf("recommended %.0f MiB at %.0f MiB-hours against the %.0f the formula reserves: it costs MORE",
+					plan.recommended, plan.recommendedCost, plan.currentCost)
+			}
+		})
+	}
+}
+
 // TestAdaptiveIsFlattenedWhenItIsWasteful is the other side: a job that
 // burns a long run before it is held wastes more than a larger request
 // would, and the advice must still say so. Without this the fix above
@@ -227,5 +265,48 @@ func TestAdaptiveHoldCountIsRead(t *testing.T) {
 		if j.HeldForMemory != (holds > 0) {
 			t.Errorf("held = %v for %d holds", j.HeldForMemory, holds)
 		}
+	}
+}
+
+// TestFormulaStartIsLoweredWhenItIsTooHigh: a formula that starts at 2
+// GB for jobs that mostly peak near 800 MiB wastes more than a gigabyte
+// on four jobs in five. Starting it lower and letting the formula catch
+// the tail -- which it already catches -- is the whole saving.
+//
+// What blocked that advice was the cap on how often a recommendation may
+// send a job back for a second run. The cap is there so nobody is handed
+// a retry they did not ask for; a workflow whose formula already reruns
+// one job in five has asked for it, and holding it to one in ten leaves
+// only a flat request that costs MORE than what it runs today.
+func TestFormulaStartIsLoweredWhenItIsTooHigh(t *testing.T) {
+	var reader JobReader
+	const n = 200
+	cheap := adaptiveShape{wall: 3600, committed: 3600, peak: 800, truth: adaptiveStart}
+	samples := make([]memoryJob, 0, n)
+	for i := range n {
+		s := cheap
+		if i%5 == 0 {
+			s = adaptiveRegrown
+		}
+		j := reader.FromAd(adaptiveAd(i, s), "")
+		if mj, ok := memorySample(&j); ok {
+			samples = append(samples, mj)
+		}
+	}
+	plan := planMemory(samples)
+	if plan == nil {
+		t.Fatal("planMemory returned nil")
+	}
+	if plan.recommendedCost >= plan.currentCost {
+		t.Errorf("recommended %.0f MiB at %.0f MiB-hours against the %.0f it reserves today: the advice costs MORE than doing nothing",
+			plan.recommended, plan.recommendedCost, plan.currentCost)
+	}
+	if plan.recommended >= plan.typical {
+		t.Errorf("recommended %.0f MiB, no lower than the %.0f the formula starts at", plan.recommended, plan.typical)
+	}
+	// The cap must come from what the workflow already does, not the
+	// constant: one job in five regrows, so one in five is allowed.
+	if got, want := plan.maxRetryFraction(), 0.20; math.Abs(got-want) > 0.001 {
+		t.Errorf("retry cap %.2f, want the %.2f the formula already runs at", got, want)
 	}
 }

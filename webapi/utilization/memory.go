@@ -249,13 +249,25 @@ func settleLadder(jobs []memoryJob) float64 {
 // workflow that already reruns at a higher rate and has decided the
 // trade is worth it -- there, applying it rules out the configuration in
 // force and leaves only a flat request, which is how advice came to tell
-// people to undo a working ladder. So the floor is what they are already
+// people to undo a working ladder, and to tell a workflow whose formula
+// starts too high to raise it. So the floor is what they are already
 // running at.
 func (p *memoryPlan) maxRetryFraction() float64 {
-	if p.ladderJobs*2 <= p.n || p.n == 0 {
+	if p.n == 0 {
 		return maxRetryFraction
 	}
-	return max(maxRetryFraction, float64(p.climbed)/float64(p.n))
+	// Both mechanisms count. A retry ladder reruns a job that climbs a
+	// rung; an adaptive formula reruns one that outgrows its start. A
+	// workflow where most jobs carry one of them is already running at
+	// that rate, whichever it is.
+	rerun := 0
+	if p.ladderJobs*2 > p.n {
+		rerun = p.climbed
+	}
+	if p.adaptiveJobs*2 > p.n {
+		rerun = max(rerun, p.outgrewStart)
+	}
+	return max(maxRetryFraction, float64(rerun)/float64(p.n))
 }
 
 // planMemory sizes a workflow's memory from its finished jobs. It returns
