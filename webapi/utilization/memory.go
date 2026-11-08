@@ -270,6 +270,13 @@ func (p *memoryPlan) maxRetryFraction() float64 {
 	return max(maxRetryFraction, float64(rerun)/float64(p.n))
 }
 
+// rerunning reports whether most of the workflow's jobs carry a
+// mechanism that reruns one that outgrows its request -- a retry ladder,
+// or a request written as a formula over the job's own usage.
+func (p *memoryPlan) rerunning() bool {
+	return p.n > 0 && (p.ladderJobs*2 > p.n || p.adaptiveJobs*2 > p.n)
+}
+
 // planMemory sizes a workflow's memory from its finished jobs. It returns
 // nil when there are too few to size from.
 func planMemory(jobs []memoryJob) *memoryPlan {
@@ -413,6 +420,18 @@ func (p *memoryPlan) keepCurrent() {
 			p.curve[i].RetryMiB = nil
 		}
 	}
+	p.mark(p.typical)
+}
+
+// keepMechanism marks the workflow's own request as the recommendation
+// and leaves the curve alone.
+//
+// Unlike keepCurrent, some of these jobs did NOT fit that request: they
+// were rerun at a larger one. So the curve's point for it keeps the
+// retry it is paired with, and the rest of the curve still shows what
+// the alternatives would have cost.
+func (p *memoryPlan) keepMechanism() {
+	p.recommended, p.recommendedCost = p.typical, p.currentCost
 	p.mark(p.typical)
 }
 

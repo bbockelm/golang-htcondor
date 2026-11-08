@@ -38,6 +38,9 @@ type ladderShape struct {
 	index     int  // RetryRequestMemoryIndex; 0 means the attribute is absent
 	list      bool // the record carries a RetryRequestMemory list
 	ckpts     int
+	// lost marks a job the ladder did not save: it outgrew the top rung
+	// and was removed for it, rather than finishing at a larger request.
+	lost bool
 	// truth is what the job really reserved, MiB-hours.
 	truth float64
 }
@@ -52,6 +55,12 @@ var (
 	// SET -- so only TransformOnEvict says there is a ladder at all.
 	climbedOnce = ladderShape{request: ladderRetry, starts: 2, wall: 7200, committed: 4200,
 		peak: 3400, truth: ladderBase*(3000.0/3600) + ladderRetry*(4200.0/3600)}
+	// roomy never climbed either, but uses a fraction of the first rung.
+	// A workflow of these has a cheaper ladder available to it, where one
+	// of `fitted` is already sized about right and the only advice the
+	// sizing can give is the ladder it already runs.
+	roomy = ladderShape{request: ladderBase, starts: 1, wall: 3600, committed: 3600,
+		peak: 200, truth: ladderBase * 1}
 	// climbedTwice is the list form, `retry_request_memory = 2 GB, 4 GB`.
 	// CommittedTime covers only the run that finished, so the two runs
 	// before it sat at two different rungs and the wall clock cannot be
@@ -84,13 +93,19 @@ func ladderAd(i int, s ladderShape, ladder bool) *classad.ClassAd {
 	if s.ckpts > 0 {
 		extra += fmt.Sprintf("NumCkpts = %d\n", s.ckpts)
 	}
+	status := 4
+	if s.lost {
+		status = 3
+		extra += fmt.Sprintf("VacateReasonCode = %d\nVacateReasonSubCode = %d\n",
+			holdOutOfResources, subcodeMemory)
+	}
 	text := fmt.Sprintf(`ClusterId = 100
 ProcId = %d
 Owner = "alice"
 JobBatchName = "ladder"
 Cmd = "/home/alice/run.sh"
 JobUniverse = 5
-JobStatus = 4
+JobStatus = %d
 ExitCode = 0
 QDate = 1760000000
 JobStartDate = 1760000100
@@ -106,7 +121,7 @@ CommittedTime = %g
 CumulativeRemoteUserCpu = %g
 CumulativeRemoteSysCpu = 0.0
 NumJobStarts = %d
-%s`, i, 1760000000+int(s.wall), 1760000000+int(s.wall),
+%s`, i, status, 1760000000+int(s.wall), 1760000000+int(s.wall),
 		s.request, s.peak+float64(i%200), s.wall, s.committed, s.wall*0.8, s.starts, extra)
 	ad, err := classad.ParseOld(text)
 	if err != nil {
@@ -378,11 +393,16 @@ func TestNoLadderLeavesTheFlagOff(t *testing.T) {
 // TestRetryAdviceSaysWhyItCannotBeApplied: a retry is set up at submit
 // time, so it is not an edit to a queued job. The page has to be able to
 // say that instead of listing a title under "not applied".
+//
+// The jobs that never climb use a fifth of the first rung, so there is a
+// cheaper ladder to recommend. A workflow whose ladder is already sized
+// right gets no advice at all to not apply (see
+// TestLadderAlreadySizedGetsNoAdvice).
 func TestRetryAdviceSaysWhyItCannotBeApplied(t *testing.T) {
 	var reader JobReader
 	jobs := make([]Job, 0, 200)
 	for i := range 200 {
-		s := fitted
+		s := roomy
 		if i%3 == 0 {
 			s = climbedOnce
 		}
@@ -415,5 +435,87 @@ func TestAppliedAdviceCarriesNoReason(t *testing.T) {
 	}
 	if a.WhyNotApplied != "" {
 		t.Errorf("applicable advice carries a reason it was not applied: %q", a.WhyNotApplied)
+	}
+}
+
+// TestLadderAlreadySizedGetsNoAdvice: when the sizing's best answer is
+// the ladder the workflow already runs, there is nothing to say.
+//
+// It used to be said anyway, as a warning: "Request 1 GB of memory and
+// retry at 4 GB" to someone whose submit file already says exactly that,
+// because a peak above the request reads as urgent everywhere else. Here
+// the jobs that peaked above it were rerun and finished.
+func TestLadderAlreadySizedGetsNoAdvice(t *testing.T) {
+	var reader JobReader
+	jobs := make([]Job, 0, 200)
+	for i := range 200 {
+		s := fitted
+		if i%3 == 0 {
+			s = climbedOnce
+		}
+		jobs = append(jobs, reader.FromAd(ladderAd(i, s, true), ""))
+	}
+	w := Analyze(jobs, Options{Days: 30}).Workflows[0]
+	a := adviceByResource(w, ResourceMemory)
+	if a == nil {
+		t.Fatal("no memory advice")
+	}
+	if a.Severity != SeverityInfo {
+		t.Errorf("severity %q for a ladder that is already sized right: %q / %q",
+			a.Severity, a.Title, a.Detail)
+	}
+	if len(a.Submit) > 0 {
+		t.Errorf("submit lines %q; the workflow already has that configuration", a.Submit)
+	}
+	if a.Saves != nil {
+		t.Errorf("claimed %v saved by changing nothing", a.Saves)
+	}
+	// The curve marks what they run, not a point the advice declined to
+	// push: a page reading "fits" beside a different mark contradicts
+	// itself. The point keeps its retry, because these jobs needed one.
+	var marked *MemoryCurvePoint
+	for i := range w.MemoryCurve {
+		if w.MemoryCurve[i].IsRecommended {
+			marked = &w.MemoryCurve[i]
+		}
+	}
+	if marked == nil || marked.RequestMiB != ladderBase {
+		t.Fatalf("marked point = %+v, want the first rung %.0f", marked, ladderBase)
+	}
+	if marked.RetryMiB == nil {
+		t.Error("the marked point dropped its retry, on a workflow where a third of the jobs needed one")
+	}
+}
+
+// TestLadderThatRanOutStillWarns: the quiet case above is for a ladder
+// that CAUGHT the jobs which outgrew their request. One that ran out of
+// rungs did not -- those jobs were removed, and everything they had done
+// went with them.
+//
+// Raising the ceiling reserves more memory, not less, so this advice can
+// never pay for itself in reserved hours. It has to be given anyway.
+func TestLadderThatRanOutStillWarns(t *testing.T) {
+	ranOut := ladderShape{request: ladderRetry, starts: 2, wall: 7200, committed: 0,
+		peak: 5000, lost: true, truth: ladderBase*1 + ladderRetry*1}
+	var reader JobReader
+	jobs := make([]Job, 0, 200)
+	for i := range 200 {
+		s := fitted
+		if i%4 == 0 {
+			s = ranOut
+		}
+		jobs = append(jobs, reader.FromAd(ladderAd(i, s, true), ""))
+	}
+	w := Analyze(jobs, Options{Days: 30}).Workflows[0]
+	a := adviceByResource(w, ResourceMemory)
+	if a == nil {
+		t.Fatal("no memory advice")
+	}
+	if a.Severity != SeverityWarn {
+		t.Errorf("severity %q with a quarter of the jobs removed for outgrowing the top rung: %q / %q",
+			a.Severity, a.Title, a.Detail)
+	}
+	if len(a.Submit) == 0 {
+		t.Error("no submit lines; the ladder needs a larger ceiling and the page has to name it")
 	}
 }

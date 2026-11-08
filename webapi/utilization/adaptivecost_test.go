@@ -310,3 +310,34 @@ func TestFormulaStartIsLoweredWhenItIsTooHigh(t *testing.T) {
 		t.Errorf("retry cap %.2f, want the %.2f the formula already runs at", got, want)
 	}
 }
+
+// TestFormulaIsLeftAloneWhenTheAlternativeTies: at a one-in-two regrow
+// rate the flat request and the formula land within half a percent of
+// each other. Trading one for the other costs a new submission and gives
+// up the rerun, so near enough the same memory bill is not a reason.
+func TestFormulaIsLeftAloneWhenTheAlternativeTies(t *testing.T) {
+	var reader JobReader
+	jobs := make([]Job, 0, 200)
+	for i := range 200 {
+		s := adaptiveFit
+		if i%2 == 0 {
+			s = adaptiveRegrown
+		}
+		jobs = append(jobs, reader.FromAd(adaptiveAd(i, s), ""))
+	}
+	w := onlyWorkflow(t, jobs)
+	a := adviceByResource(w, ResourceMemory)
+	if a == nil {
+		t.Fatal("no memory advice")
+	}
+	if a.Severity != SeverityInfo {
+		t.Errorf("severity %q over a difference of under a percent: %q / %q",
+			a.Severity, a.Title, a.Detail)
+	}
+	if a.Saves != nil {
+		t.Errorf("claimed %v saved, where the alternative reserves MORE", a.Saves)
+	}
+	if len(a.Submit) > 0 {
+		t.Errorf("submit lines %q for a change not worth making", a.Submit)
+	}
+}

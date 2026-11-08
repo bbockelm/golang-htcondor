@@ -37,6 +37,17 @@ const (
 	memoryLowerCost = 0.8
 )
 
+// mechanismSaving is how much cheaper a recommendation must be before it
+// is worth proposing to a workflow that already reruns a job which
+// outgrows its request.
+//
+// Replacing a retry ladder or a usage formula is not an edit to a
+// queued job -- it takes a new submission -- and what replaces it is a
+// flat request with no tail protection, where today a job above the
+// request is rerun rather than stopped. For that, near enough the same
+// memory bill is not a reason.
+const mechanismSaving = 0.05
+
 // GPU thresholds. "Unused" is practically zero for practically every job,
 // which usually means the program never found the GPU; "idle" is a
 // median under 40%: a GPU is the dearest thing a job reserves, and one
@@ -222,8 +233,22 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 		title += " and retry at " + submitSize(plan.retry)
 	}
 
+	// A job that outgrew its request on a workflow which reruns it -- a
+	// retry ladder, or a request written as a formula over the job's own
+	// usage -- was not lost: it finished, at a larger request. A peak
+	// above the request is therefore not the urgent case here that it is
+	// elsewhere, and where the alternative saves nothing worth having
+	// there is nothing to say.
+	//
+	// A hold is how a formula reruns a job, so it is not a job lost for
+	// those workflows. A ladder reruns on eviction, so for those it is.
+	// Jobs that really were stopped are urgent whatever the fix costs.
+	settled := plan.rerunning() && plan.exceeded == 0 &&
+		(holds == 0 || plan.adaptiveJobs*2 > plan.n) &&
+		plan.recommendedCost > (1-mechanismSaving)*plan.currentFloor
+
 	switch {
-	case holds > 0 || plan.exceeded > 0 || plan.maxPeak > plan.typical:
+	case !settled && (holds > 0 || plan.exceeded > 0 || plan.maxPeak > plan.typical):
 		// Some jobs did not fit. That is the urgent case: those jobs were
 		// held or restarted, and everything they had done was lost.
 		a.ID, a.Severity, a.Title = "memory-raise", SeverityWarn, title
@@ -245,15 +270,23 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 		a.Detail = fmt.Sprintf("%s Most jobs requested %s.%s", evidence, sizeMiB(plan.typical), retryNote)
 	default:
 		a.ID, a.Severity = "memory-ok", SeverityInfo
-		a.Title = "Memory request fits your jobs"
-		a.Detail = fmt.Sprintf("%s Most jobs requested %s, close to what they need.", evidence, sizeMiB(plan.typical))
 		a.Submit = []string{}
 		a.Saves = nil
 		a.request = 0
-		// Every job fits the current request (the case above catches any
-		// that did not), so it is what the curve marks: a page showing
-		// "fits" beside a different recommended point contradicts itself.
-		plan.keepCurrent()
+		// Whichever request the advice settles on is what the curve
+		// marks: a page showing "fits" beside a different recommended
+		// point contradicts itself.
+		if settled {
+			a.Title = "Memory setup fits your jobs"
+			a.Detail = evidence + " Changing it would not save enough to be worth it."
+			plan.keepMechanism()
+		} else {
+			// Every job fit the current request -- the case above
+			// catches any that did not -- so no retry goes with it.
+			a.Title = "Memory request fits your jobs"
+			a.Detail = fmt.Sprintf("%s Most jobs requested %s, close to what they need.", evidence, sizeMiB(plan.typical))
+			plan.keepCurrent()
+		}
 	}
 	return a
 }
