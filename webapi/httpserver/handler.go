@@ -43,6 +43,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/poolpolicy"
+	"github.com/bbockelm/golang-htcondor/webapi/reservation"
 	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
@@ -266,6 +267,16 @@ type Handler struct {
 	// advertisement only when mcpEnabled. See HandlerConfig.WebUIEnabled.
 	webUIEnabled bool
 	mcpEnabled   bool
+	// reservationsEnabled gates the whole reservation subsystem.
+	reservationsEnabled bool
+	// reservationEPConstraint limits which startds reservations may draw
+	// seats from; empty means all of them.
+	reservationEPConstraint string
+	// reservationProber provisions START on execute points and checks
+	// this access point may still write to them. Nil when nothing is
+	// running it, which the health endpoint reports as "not running"
+	// rather than as healthy.
+	reservationProber *reservation.Prober
 	// mcpCIMDEnabled advertises Client ID Metadata Document support in the MCP
 	// OAuth2 discovery document (the resolver itself lives in the provider's
 	// storage). See oauth2_cimd.go.
@@ -840,6 +851,17 @@ type HandlerConfig struct {
 	// EnableMCP serves the MCP protocol endpoint (/mcp) and nothing
 	// else: OAuth2 is decided by OAuth2Enabled, which this is half of.
 	EnableMCP bool
+
+	// Reservations turns the reservation subsystem on: the admin API,
+	// the admin page and the controller that holds pool capacity ahead
+	// of a scheduled window. Off unless configured, because holding
+	// capacity means evicting other people's jobs.
+	Reservations bool
+
+	// ReservationEPConstraint limits which execute points a reservation
+	// may draw seats from, as a ClassAd expression evaluated against the
+	// slot ad. Empty means every startd the collector reports.
+	ReservationEPConstraint string
 	// WebUIEnabled says this server serves the web UI. OAuth2 -- the
 	// authorization server, its metadata, the device flow and the SSO
 	// login -- is served when this or EnableMCP is set: MCP gates only
@@ -1413,6 +1435,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		mcpBaseURL:                strings.TrimSpace(cfg.MCPBaseURL),
 		webUIEnabled:              cfg.WebUIEnabled,
 		mcpEnabled:                cfg.EnableMCP,
+		reservationsEnabled:       cfg.Reservations,
+		reservationEPConstraint:   cfg.ReservationEPConstraint,
 		mcpCIMDEnabled:            cfg.MCPCIMDEnabled,
 		mcpDCRDisabled:            cfg.MCPDCRDisabled,
 		ccbDialer:                 cfg.CCB,

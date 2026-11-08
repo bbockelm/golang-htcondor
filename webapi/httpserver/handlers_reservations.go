@@ -85,7 +85,7 @@ func (j reservationJSON) toSpec() (*reservation.Spec, error) {
 // handleAdminReservations serves the collection: GET lists, POST creates or
 // replaces.
 func (s *Handler) handleAdminReservations(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requireReservations(w) || !s.requireAdmin(w, r) {
 		return
 	}
 	store := s.reservationStore()
@@ -132,7 +132,7 @@ func (s *Handler) handleAdminReservations(w http.ResponseWriter, r *http.Request
 // handleAdminReservation serves one reservation by ID, and its upcoming
 // windows at .../windows.
 func (s *Handler) handleAdminReservation(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requireReservations(w) || !s.requireAdmin(w, r) {
 		return
 	}
 	store := s.reservationStore()
@@ -223,6 +223,50 @@ func (s *Handler) serveReservationWindows(w http.ResponseWriter, r *http.Request
 // than this is free either way, because anything started in it is still
 // cheap to evict at the next bell.
 const reservationForgive = 30 * time.Minute
+
+// reservationHealthJSON is what the admin page reads to decide whether
+// to warn.
+type reservationHealthJSON struct {
+	// Running is false when no prober is wired up, which is not the same
+	// as healthy: nothing has been checked.
+	Running bool `json:"running"`
+	reservation.Health
+}
+
+// handleAdminReservationHealth answers whether this access point can
+// still do what a reservation needs.
+//
+// The failure worth surfacing is an access point that may not update
+// machine ads. Nothing errors, no reservation complains, and every class
+// starts on a pool that was never drained -- so the only place it can
+// show up is here.
+func (s *Handler) handleAdminReservationHealth(w http.ResponseWriter, r *http.Request) {
+	if !s.requireReservations(w) || !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	out := reservationHealthJSON{}
+	if s.reservationProber != nil {
+		out.Running, out.Health = true, s.reservationProber.Health()
+	}
+	s.writeJSON(w, http.StatusOK, out)
+}
+
+// requireReservations refuses when the subsystem is switched off. The
+// check comes before the admin check so an operator who has not enabled
+// reservations is told that, rather than being told they are not an
+// admin.
+func (s *Handler) requireReservations(w http.ResponseWriter) bool {
+	if !s.reservationsEnabled {
+		s.writeError(w, http.StatusServiceUnavailable,
+			"Reservations are disabled. Set HTTP_API_RESERVATIONS = true to enable.")
+		return false
+	}
+	return true
+}
 
 // reservationStore is the reservation table on the application database.
 // Store holds no state beyond the handle, so building one per request is

@@ -44,8 +44,14 @@ type SlotQuerier interface {
 }
 
 // Census reads the pool and returns one Machine per execute node.
-func Census(ctx context.Context, q SlotQuerier) ([]Machine, error) {
-	ads, _, err := q.QueryAdsWithOptions(ctx, "StartdAd", SlotConstraint, &htcondor.QueryOptions{
+//
+// only, when not empty, is a site expression naming the execute points
+// reservations may draw seats from -- a class should take the teaching
+// nodes, not whatever the collector happens to report. It is ANDed with
+// SlotConstraint and sent to the collector rather than filtered here, so
+// a large pool is not read in full to discard most of it.
+func Census(ctx context.Context, q SlotQuerier, only string) ([]Machine, error) {
+	ads, _, err := q.QueryAdsWithOptions(ctx, "StartdAd", censusConstraint(only), &htcondor.QueryOptions{
 		Limit:      slotLimit,
 		Projection: SlotProjection,
 	})
@@ -53,6 +59,16 @@ func Census(ctx context.Context, q SlotQuerier) ([]Machine, error) {
 		return nil, err
 	}
 	return MachinesFromAds(ads), nil
+}
+
+// censusConstraint ANDs the site's execute-point expression onto the
+// census's own, parenthesised so a top-level || in the site expression
+// cannot swallow it.
+func censusConstraint(only string) string {
+	if strings.TrimSpace(only) == "" {
+		return SlotConstraint
+	}
+	return "(" + SlotConstraint + ") && (" + strings.TrimSpace(only) + ")"
 }
 
 // MachinesFromAds groups slot ads by machine.

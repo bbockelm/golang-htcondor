@@ -172,6 +172,9 @@ export interface Session {
   // A session with no local account, which reaches only the placement
   // pages.
   placement_only?: boolean;
+  // This server runs the reservation subsystem, so the admin page for
+  // it is offered. Advisory: the endpoints refuse regardless when off.
+  reservations?: boolean;
   // The site withholds who is running on a slot from this session.
   // Advisory: it decides what the pool pages ask for and what they say,
   // while the server enforces the rule on every collector read.
@@ -1602,6 +1605,18 @@ export interface AdminReservation {
 // AdminReservationWindow is one upcoming hold, as the preview shows it.
 // `plan_from` is when the controller starts steering other people's jobs
 // away, which is the part a cron expression hides.
+export interface AdminReservationHealth {
+  // False when nothing is probing the pool, which is not the same as
+  // healthy: nothing has been checked.
+  running: boolean;
+  healthy?: boolean;
+  outcome?: string;
+  machine?: string;
+  detail?: string;
+  checked_at?: string;
+  provisioned?: number;
+}
+
 export interface AdminReservationWindow {
   start: string;
   end: string;
@@ -2517,6 +2532,12 @@ export const api = {
       fetchJSON(`${BASE}/admin/reservations/${encodeURIComponent(id)}`, {
         method: "DELETE",
       }),
+    // Whether this access point can still do what a reservation needs.
+    // The failure worth surfacing is losing the authorisation to update
+    // machine ads: nothing errors, no reservation complains, and every
+    // class starts on a pool that was never drained.
+    reservationHealth: (): Promise<AdminReservationHealth> =>
+      fetchJSON(`${BASE}/admin/reservations/health`),
     // When the reservation next holds seats, over the coming `days`
     // (default a fortnight). A cron expression is unreadable; this is
     // what it means.

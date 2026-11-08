@@ -111,6 +111,18 @@ export default function AdminReservationsPage() {
 
   const reservations = list.data?.reservations ?? [];
 
+  // Polled rather than read once: the authorisation can be taken away
+  // while the page is open, and an admin looking at a healthy-looking
+  // list should find out.
+  const health = useQuery({
+    queryKey: ['admin', 'reservations', 'health'],
+    queryFn: api.admin.reservationHealth,
+    refetchInterval: 60_000,
+    retry: false,
+  });
+  const unhealthy =
+    health.data?.running && health.data?.healthy === false ? health.data : null;
+
   return (
     <div className="max-w-6xl space-y-4">
       <div>
@@ -122,6 +134,24 @@ export default function AdminReservationsPage() {
           by carrying the project as their ProjectName.
         </p>
       </div>
+
+      {unhealthy && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <h2 className="text-sm font-semibold text-amber-900">
+            This access point could not update {unhealthy.machine || 'an execute point'}
+          </h2>
+          <p className="mt-1 text-sm text-amber-800">
+            Reservations hold capacity by writing to execute points. Until this
+            is fixed, every reservation below will look healthy and hold
+            nothing.
+          </p>
+          {unhealthy.detail && (
+            <p className="mt-2 font-mono text-xs break-words text-amber-900">
+              {unhealthy.detail}
+            </p>
+          )}
+        </div>
+      )}
 
       {list.isLoading && <p className="text-gray-400">Loading…</p>}
 

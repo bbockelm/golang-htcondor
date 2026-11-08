@@ -85,8 +85,12 @@ of holding will reach the seats.
 One stanza, once, on the EPs. Nothing in it changes per reservation.
 
 ```
-START = $(START) && ( ReservationStart =?= undefined || ReservationStart )
+START = $(START) && ( ReservationStart ?: True )
 ```
+
+`?:` is the ClassAd defaulting operator: it yields `ReservationStart` when
+that is defined and `True` when it is not, so an execute point with no
+reservation on it is unconstrained.
 
 The controller pushes `ReservationStart` as a complete expression, plus
 the operands it refers to, into the machine ad.
@@ -105,6 +109,26 @@ because they shape everything above:
   attribute name**. The operands use a small fixed set of reusable slots,
   so a semester of classes does not leave hundreds of dead keys on every
   execute point.
+
+## Turning it on
+
+Off unless configured. A reservation holds capacity by evicting other
+people's jobs, so no site starts doing that because it upgraded.
+
+| Setting | |
+|---|---|
+| `HTTP_API_RESERVATIONS` | `True` runs the subsystem: the admin API, the admin page and the controller. |
+| `HTTP_API_RESERVATION_EP_CONSTRAINT` | A ClassAd expression over the slot ad limiting which execute points reservations may draw seats from. Empty means every startd the collector reports. |
+
+Most sites will want the constraint. A class should take the teaching
+nodes, not whatever the collector happens to report:
+
+```
+HTTP_API_RESERVATION_EP_CONSTRAINT = TeachingNode =?= True
+```
+
+With the subsystem off the endpoints answer `503` naming the setting, and
+the admin page is not offered at all.
 
 ## Administering them
 
