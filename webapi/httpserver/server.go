@@ -218,6 +218,14 @@ type Config struct {
 	// shares the unified DBPath. Kept so existing callers compile.
 	TemplateUserStoreDBPath string //nolint:unused // back-compat; ignored.
 	EnableMCP               bool   // Serve MCP at /mcp. See HandlerConfig.EnableMCP.
+	// Reservations turns the reservation subsystem on: the admin API,
+	// the admin page and the controller that holds pool capacity. Off
+	// unless configured, because it evicts other people's jobs.
+	Reservations bool
+	// ReservationEPConstraint limits which execute points a reservation
+	// may draw seats from, as a ClassAd expression over the slot ad.
+	// Empty means every startd the collector reports.
+	ReservationEPConstraint string
 	// WebUIEnabled says this server serves the web UI, which needs
 	// OAuth2 whether or not MCP is on. See HandlerConfig.WebUIEnabled.
 	WebUIEnabled bool
@@ -530,6 +538,8 @@ func NewServer(cfg Config) (*Server, error) {
 		MetricsCacheTTL:             cfg.MetricsCacheTTL,
 		Logger:                      cfg.Logger,
 		EnableMCP:                   cfg.EnableMCP,
+		Reservations:                cfg.Reservations,
+		ReservationEPConstraint:     cfg.ReservationEPConstraint,
 		WebUIEnabled:                cfg.WebUIEnabled,
 		DBPath:                      cfg.DBPath,
 		KEKFilePath:                 cfg.KEKFilePath,

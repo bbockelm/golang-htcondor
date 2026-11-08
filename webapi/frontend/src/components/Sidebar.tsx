@@ -20,6 +20,9 @@ interface SidebarProps {
   // Several access points behind this server: only the pages that mode
   // serves are offered.
   multiAP?: boolean;
+  // This server runs the reservation subsystem, so its admin page is
+  // offered. Off unless configured.
+  reservations?: boolean;
   // This session can request a placement token.
   placement?: boolean;
   // A placement-assigned account's projects and the selected one.
@@ -62,6 +65,7 @@ const PLACEMENT_NAV = [{ href: '/placement', label: 'Placement token' }];
 
 const ADMIN_NAV = [
   { href: '/admin/placement', label: 'Placement' },
+  { href: '/admin/reservations', label: 'Reservations' },
   { href: '/admin/clients', label: 'OAuth2 Clients' },
   { href: '/admin/tokens', label: 'OAuth2 Tokens' },
   { href: '/admin/api-keys', label: 'API Keys' },
@@ -75,6 +79,7 @@ export function Sidebar({
   superuserAllowed,
   superuserActive,
   multiAP,
+  reservations,
   placement,
   placementProjects,
   placementProject,
@@ -157,7 +162,12 @@ export function Sidebar({
               <div className="mb-1 mt-5 px-3 text-[10px] uppercase tracking-wider text-gray-500">
                 Admin
               </div>
-              {ADMIN_NAV.filter((item) => !multiAP || item.href !== '/admin/placement').map((item) => (
+              {ADMIN_NAV.filter(
+                (item) =>
+                  (!multiAP || item.href !== '/admin/placement') &&
+                  // Reservations are off unless the server runs them.
+                  (reservations || item.href !== '/admin/reservations'),
+              ).map((item) => (
                 <NavLink
                   key={item.href}
                   href={item.href}

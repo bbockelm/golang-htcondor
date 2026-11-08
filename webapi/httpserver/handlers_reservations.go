@@ -85,7 +85,7 @@ func (j reservationJSON) toSpec() (*reservation.Spec, error) {
 // handleAdminReservations serves the collection: GET lists, POST creates or
 // replaces.
 func (s *Handler) handleAdminReservations(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requireReservations(w) || !s.requireAdmin(w, r) {
 		return
 	}
 	store := s.reservationStore()
@@ -132,7 +132,7 @@ func (s *Handler) handleAdminReservations(w http.ResponseWriter, r *http.Request
 // handleAdminReservation serves one reservation by ID, and its upcoming
 // windows at .../windows.
 func (s *Handler) handleAdminReservation(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requireReservations(w) || !s.requireAdmin(w, r) {
 		return
 	}
 	store := s.reservationStore()
@@ -223,6 +223,19 @@ func (s *Handler) serveReservationWindows(w http.ResponseWriter, r *http.Request
 // than this is free either way, because anything started in it is still
 // cheap to evict at the next bell.
 const reservationForgive = 30 * time.Minute
+
+// requireReservations refuses when the subsystem is switched off. The
+// check comes before the admin check so an operator who has not enabled
+// reservations is told that, rather than being told they are not an
+// admin.
+func (s *Handler) requireReservations(w http.ResponseWriter) bool {
+	if !s.reservationsEnabled {
+		s.writeError(w, http.StatusServiceUnavailable,
+			"Reservations are disabled. Set HTTP_API_RESERVATIONS = true to enable.")
+		return false
+	}
+	return true
+}
 
 // reservationStore is the reservation table on the application database.
 // Store holds no state beyond the handle, so building one per request is

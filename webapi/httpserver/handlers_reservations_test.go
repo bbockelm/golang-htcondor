@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +44,9 @@ func newResEnv(t *testing.T) *resEnv {
 		db:               db,
 		sessionStore:     createTestSessionStore(t, time.Hour),
 		webuiAdminGroups: newGroupSet("web-admins"),
+		// The subsystem is off unless configured; these tests are about
+		// what it does when an operator has turned it on.
+		reservationsEnabled: true,
 	}
 	env := &resEnv{h: h}
 	var mkErr error
@@ -150,6 +154,31 @@ func TestReservationsRejectBadInput(t *testing.T) {
 		}
 		if w.Body.Len() == 0 {
 			t.Errorf("%s: rejected with no reason", tc.name)
+		}
+	}
+}
+
+// TestReservationsOffByDefault: the subsystem holds pool capacity by
+// evicting other people's jobs, so it does nothing until an operator
+// turns it on -- and says so rather than looking like an auth failure.
+func TestReservationsOffByDefault(t *testing.T) {
+	env := newResEnv(t)
+	env.h.reservationsEnabled = false
+	for _, tc := range []struct {
+		method, target string
+	}{
+		{http.MethodGet, "/api/v1/admin/reservations"},
+		{http.MethodPost, "/api/v1/admin/reservations"},
+		{http.MethodGet, "/api/v1/admin/reservations/cs301"},
+		{http.MethodDelete, "/api/v1/admin/reservations/cs301"},
+		{http.MethodGet, "/api/v1/admin/reservations/cs301/windows"},
+	} {
+		w := env.do(t, tc.method, tc.target, env.admin, goodReservation())
+		if w.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s %s: status %d, want 503", tc.method, tc.target, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "HTTP_API_RESERVATIONS") {
+			t.Errorf("%s %s: the refusal does not name the setting: %s", tc.method, tc.target, w.Body)
 		}
 	}
 }
