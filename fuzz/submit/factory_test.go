@@ -251,11 +251,18 @@ func TestDigestKeywordsMatchOracle(t *testing.T) {
 		t.Fatal("the oracle returned no keywords")
 	}
 
-	var missing, extra []string
+	var missing, extra, behind []string
 	for name := range want {
-		if !htcondor.DigestKeywordIsPrunable(name) {
-			missing = append(missing, name)
+		if htcondor.DigestKeywordIsPrunable(name) {
+			continue
 		}
+		// A keyword this HTCondor has and we do not prune yet is the safe
+		// direction; see digestKeywordsBehindOracle.
+		if ticket, known := digestKeywordsBehindOracle[name]; known && oracleHas[ticket] {
+			behind = append(behind, name)
+			continue
+		}
+		missing = append(missing, name)
 	}
 	for _, name := range htcondor.DigestPrunableKeywordNames() {
 		if !want[name] {
@@ -264,6 +271,10 @@ func TestDigestKeywordsMatchOracle(t *testing.T) {
 	}
 	sort.Strings(missing)
 	sort.Strings(extra)
+	sort.Strings(behind)
+	if len(behind) > 0 {
+		t.Logf("%d keywords this HTCondor prunes that we do not yet, each recorded: %v", len(behind), behind)
+	}
 	if len(missing) > 0 {
 		t.Errorf("%d keywords HTCondor prunes that Go does not: %v", len(missing), missing)
 	}
