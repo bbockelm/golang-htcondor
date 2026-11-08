@@ -373,7 +373,12 @@ func TestConfigSeeds(t *testing.T) {
 // still runs, and is then weighed against the recorded classes by recognize:
 // a known divergence with no class is reported again, because it is one we
 // still mean to fix.
-var knownDivergentInputs = func() map[string]bool {
+//
+// It is built when the fuzz target starts rather than at package init: which
+// seeds diverge HERE depends on the probed traits, and those are not settled
+// until TestMain has run. Built at init, every oracle-scoped seed reads as
+// agreeing and is left out of the set.
+func knownDivergentInputs() map[string]bool {
 	m := make(map[string]bool)
 	for _, sc := range seeds {
 		if sc.divergesHere() {
@@ -381,7 +386,7 @@ var knownDivergentInputs = func() map[string]bool {
 		}
 	}
 	return m
-}()
+}
 
 // FuzzConfigParseExpand is the coverage-guided differential target. Run with:
 //
@@ -392,8 +397,9 @@ func FuzzConfigParseExpand(f *testing.F) {
 	for _, sc := range seeds {
 		f.Add(sc.input)
 	}
+	known := knownDivergentInputs()
 	f.Fuzz(func(t *testing.T, input string) {
-		if len(input) > 8192 || knownDivergentInputs[input] {
+		if len(input) > 8192 || known[input] {
 			t.Skip()
 		}
 		res := divergence(input)
@@ -486,32 +492,67 @@ func TestTripleQuoteClassIsLiveOnlyForOraclesThatHaveIt(t *testing.T) {
 	res := divergenceResult{goTable: "0\x1f\n", cppTable: "0\x1f0\n"}
 	const input = `0=$INT("""">"")`
 
-	restore := withAllTraits()
-	if got := recognize(input, res); got != &tripleQuote {
-		t.Errorf("against an oracle that has HTCONDOR-3993 this is the recorded family, got %v", got)
-	}
-	// Two quotes are not three: an ordinary quoted value is not this family
-	// however the tables differ.
-	if got := recognize(`0=$INT("a">"b")`, res); got == &tripleQuote {
-		t.Error("an input without three consecutive quotes is not this family")
-	}
-	restore()
+	t.Run("an oracle that has it", func(t *testing.T) {
+		defer withAllTraits()()
+		if got := recognize(input, res); got != &tripleQuote {
+			t.Errorf("against an oracle that has HTCONDOR-3993 this is the recorded family, got %v", got)
+		}
+		// Two quotes are not three: an ordinary quoted value is not this
+		// family however the tables differ.
+		if got := recognize(`0=$INT("a">"b")`, res); got == &tripleQuote {
+			t.Error("an input without three consecutive quotes is not this family")
+		}
+	})
 
-	oracleHas = map[string]bool{}
-	if got := recognize(input, res); got != nil {
-		t.Errorf("against an oracle without the change this must be reported, not excused as %q", got.name)
-	}
+	t.Run("an oracle that does not", func(t *testing.T) {
+		defer withTraits(nil)()
+		if got := recognize(input, res); got != nil {
+			t.Errorf("against an oracle without the change this must be reported, not excused as %q", got.name)
+		}
+	})
+}
+
+// TestKnownDivergentInputsFollowTheProbe pins the set the fuzz target skips
+// to the traits, in both directions. An oracle-scoped seed belongs in it only
+// against the oracle it was recorded against; against the other one the two
+// sides agree, the comparison is worth paying for, and a divergence there is
+// a finding.
+func TestKnownDivergentInputsFollowTheProbe(t *testing.T) {
+	const scoped = `0=$INT("""">"")`
+
+	func() {
+		defer withAllTraits()()
+		if !knownDivergentInputs()[scoped] {
+			t.Error("an oracle that has the change diverges on this seed, so the fuzz target should skip it")
+		}
+	}()
+
+	func() {
+		defer withTraits(nil)()
+		if knownDivergentInputs()[scoped] {
+			t.Error("an oracle without the change agrees here, so this seed must still be compared")
+		}
+	}()
 }
 
 // withAllTraits makes every recorded trait read as present, and returns a
 // function that puts back what was probed.
 func withAllTraits() func() {
-	saved := oracleHas
 	all := map[string]bool{}
 	for _, tr := range oracleTraits {
 		all[tr.ticket] = true
 	}
-	oracleHas = all
+	return withTraits(all)
+}
+
+// withTraits swaps in a trait set for the duration of one test and returns
+// the function that puts back what was probed. Every override goes through
+// here, and the returned function is deferred: a test that leaves the traits
+// swapped changes which oracle EVERY later test and the fuzz seed corpus
+// believe they are facing, which TestMain checks for at the end of the run.
+func withTraits(have map[string]bool) func() {
+	saved := oracleHas
+	oracleHas = have
 	return func() { oracleHas = saved }
 }
 
