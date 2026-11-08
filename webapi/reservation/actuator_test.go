@@ -35,7 +35,7 @@ func itoa(v int64) string { return strconv.FormatInt(v, 10) }
 // actuator would fall back to this process's own credentials on every
 // machine in a pool that was publishing capabilities the whole time.
 func TestActuatorAsksForPrivateAttributes(t *testing.T) {
-	q := &fakeQuerier{ads: ads(t, capAd("wn01"))}
+	q := &fakeQuerier{ads: ads(t, capAd())}
 	a := &PoolActuator{Query: q}
 
 	if err := a.Hold(context.Background(), HoldRequest{
@@ -66,7 +66,7 @@ func TestActuatorAsksForPrivateAttributes(t *testing.T) {
 // seats from the execute points the site named, and administering one
 // outside that set is beyond what the operator agreed to.
 func TestActuatorHonoursTheExecutePointConstraint(t *testing.T) {
-	q := &fakeQuerier{ads: ads(t, capAd("wn01"))}
+	q := &fakeQuerier{ads: ads(t, capAd())}
 	a := &PoolActuator{Query: q, Only: `HasTeachingNodes =?= true`}
 	_ = a.Release(context.Background(), "wn01")
 	if q.constraint == SlotConstraint {
@@ -82,7 +82,7 @@ func TestActuatorHonoursTheExecutePointConstraint(t *testing.T) {
 // count a machine as held that nothing was ever pushed to, and the
 // class would start on a pool that was never drained.
 func TestActuatorReportsAnUnknownMachine(t *testing.T) {
-	q := &fakeQuerier{ads: ads(t, capAd("wn01"))}
+	q := &fakeQuerier{ads: ads(t, capAd())}
 	a := &PoolActuator{Query: q}
 	err := a.Release(context.Background(), "wn99")
 	if err == nil {
@@ -120,7 +120,7 @@ PartitionableSlot = true`)}
 // is re-minted on every collector update, so one read cannot serve a
 // controller that runs for days.
 func TestActuatorRereadsCapabilities(t *testing.T) {
-	q := &countingQuerier{fakeQuerier: fakeQuerier{ads: ads(t, capAd("wn01"))}}
+	q := &countingQuerier{fakeQuerier: fakeQuerier{ads: ads(t, capAd())}}
 	now := time.Unix(1_762_600_000, 0)
 	a := &PoolActuator{Query: q, Refresh: 5 * time.Minute, Now: func() time.Time { return now }}
 
@@ -185,7 +185,12 @@ Machine = "` + machine + `"
 ` + AttrProject + ` = "` + project + `"`
 }
 
-func capAd(machine string) string {
+// capAd is one slot ad carrying an administrative capability. The
+// machine name is fixed: these tests are about what the actuator asks
+// for and what it does with the answer, not about which machine
+// answered.
+func capAd() string {
+	const machine = "wn01"
 	return `Name = "slot1@` + machine + `"
 Machine = "` + machine + `"
 MyAddress = "<127.0.0.1:19618>"
