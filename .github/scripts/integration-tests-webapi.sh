@@ -59,7 +59,7 @@ set -euo pipefail
 # caches under the bind-mounted workspace.
 cd webapi
 
-PACKAGES=(./httpserver/ ./mcpserver/ ./cmd/htcondor-api/ ./jupytertunnel/ ./interactive/)
+PACKAGES=(./httpserver/ ./mcpserver/ ./cmd/htcondor-api/ ./jupytertunnel/ ./interactive/ ./reservation/)
 
 # The list above is hand-maintained, so check it against the tree rather
 # than trusting it. A package whose tests are all behind the integration
