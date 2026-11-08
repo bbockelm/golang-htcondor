@@ -226,6 +226,9 @@ type Config struct {
 	// may draw seats from, as a ClassAd expression over the slot ad.
 	// Empty means every startd the collector reports.
 	ReservationEPConstraint string
+	// ReservationStampBudget caps how many cluster ads one stamping
+	// pass writes. Zero takes the package default.
+	ReservationStampBudget int
 	// WebUIEnabled says this server serves the web UI, which needs
 	// OAuth2 whether or not MCP is on. See HandlerConfig.WebUIEnabled.
 	WebUIEnabled bool
@@ -540,6 +543,7 @@ func NewServer(cfg Config) (*Server, error) {
 		EnableMCP:                   cfg.EnableMCP,
 		Reservations:                cfg.Reservations,
 		ReservationEPConstraint:     cfg.ReservationEPConstraint,
+		ReservationStampBudget:      cfg.ReservationStampBudget,
 		WebUIEnabled:                cfg.WebUIEnabled,
 		DBPath:                      cfg.DBPath,
 		KEKFilePath:                 cfg.KEKFilePath,
