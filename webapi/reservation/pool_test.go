@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -401,7 +402,7 @@ Cpus = 4
 Memory = 8192
 Disk = 1048576`)}
 
-	got, err := Census(context.Background(), q)
+	got, err := Census(context.Background(), q, "")
 	if err != nil {
 		t.Fatalf("Census: %v", err)
 	}
@@ -434,9 +435,32 @@ Disk = 1048576`)}
 	}
 }
 
+// TestCensusConstraintNarrowsToTheSiteExpression: the site's expression
+// reaches the collector ANDed with the census's own, parenthesised so a
+// top-level || in it cannot swallow the backfill exclusion.
+func TestCensusConstraintNarrowsToTheSiteExpression(t *testing.T) {
+	for _, tc := range []struct{ only, want string }{
+		{"", SlotConstraint},
+		{"  ", SlotConstraint},
+		{"TeachingNode =?= True", "(" + SlotConstraint + ") && (TeachingNode =?= True)"},
+		{"A || B", "(" + SlotConstraint + ") && (A || B)"},
+	} {
+		if got := censusConstraint(tc.only); got != tc.want {
+			t.Errorf("censusConstraint(%q) = %q, want %q", tc.only, got, tc.want)
+		}
+	}
+	q := &fakeQuerier{}
+	if _, err := Census(context.Background(), q, "TeachingNode =?= True"); err != nil {
+		t.Fatalf("Census: %v", err)
+	}
+	if !strings.Contains(q.constraint, "TeachingNode") {
+		t.Errorf("the site expression did not reach the collector: %q", q.constraint)
+	}
+}
+
 func TestCensusPropagatesError(t *testing.T) {
 	boom := errors.New("collector unreachable")
-	if _, err := Census(context.Background(), &fakeQuerier{err: boom}); !errors.Is(err, boom) {
+	if _, err := Census(context.Background(), &fakeQuerier{err: boom}, ""); !errors.Is(err, boom) {
 		t.Errorf("Census error = %v, want %v", err, boom)
 	}
 }

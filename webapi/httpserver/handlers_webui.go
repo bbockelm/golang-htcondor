@@ -76,6 +76,10 @@ type AuthMeResponse struct {
 	// Advisory, for rendering only. The restriction is enforced on every
 	// collector read regardless of what the SPA does with this.
 	PoolIdentityRestricted bool `json:"pool_identity_restricted,omitempty"`
+	// Reservations reports that this server runs the reservation
+	// subsystem, so the SPA offers the admin page for it. Advisory: the
+	// endpoints refuse regardless when it is off.
+	Reservations bool `json:"reservations,omitempty"`
 }
 
 // PlacementSessionInfo is the placement identity of a session.
@@ -160,6 +164,7 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	// Whether this session may see who is running on a slot. Asked of
 	// the same policy the collector reads go through, so the page and
 	// the data it renders cannot disagree about what is withheld.
+	resp.Reservations = s.reservationsEnabled
 	resp.PoolIdentityRestricted = s.poolQueryPolicy.Restricts(s.seesAllJobs(r.Context(), r, jobScopeRead))
 
 	s.writeJSON(w, http.StatusOK, resp)
