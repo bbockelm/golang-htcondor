@@ -62,6 +62,7 @@ const PLACEMENT_NAV = [{ href: '/placement', label: 'Placement token' }];
 
 const ADMIN_NAV = [
   { href: '/admin/placement', label: 'Placement' },
+  { href: '/admin/reservations', label: 'Reservations' },
   { href: '/admin/clients', label: 'OAuth2 Clients' },
   { href: '/admin/tokens', label: 'OAuth2 Tokens' },
   { href: '/admin/api-keys', label: 'API Keys' },
