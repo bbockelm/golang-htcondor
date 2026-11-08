@@ -1,0 +1,235 @@
+package httpserver
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/reservation"
+)
+
+// reservationJSON is a reservation as the admin UI sends and receives it.
+//
+// Durations are seconds rather than Go duration strings: the form has
+// number inputs, and a client that has to parse "6h0m0s" to put 6 in a box
+// will get it wrong eventually.
+type reservationJSON struct {
+	ID              string `json:"id"`
+	Project         string `json:"project"`
+	Submit          string `json:"submit"`
+	Seats           int    `json:"seats"`
+	Standing        int    `json:"standing"`
+	DurationSeconds int64  `json:"duration_seconds"`
+	LeadSeconds     int64  `json:"lead_seconds"`
+	HoldSeconds     int64  `json:"hold_seconds"`
+	Schedule        string `json:"schedule"`
+	Timezone        string `json:"timezone"`
+	Enabled         bool   `json:"enabled"`
+}
+
+// windowJSON is one upcoming hold.
+type windowJSON struct {
+	Start       time.Time `json:"start"`
+	End         time.Time `json:"end"`
+	PlanFrom    time.Time `json:"plan_from"`
+	Occurrences int       `json:"occurrences"`
+}
+
+func toReservationJSON(s *reservation.Spec) reservationJSON {
+	out := reservationJSON{
+		ID: s.ID, Project: s.Project, Submit: s.Submit,
+		Seats: s.Seats, Standing: s.Standing,
+		DurationSeconds: int64(s.Duration / time.Second),
+		LeadSeconds:     int64(s.Lead / time.Second),
+		HoldSeconds:     int64(s.Hold / time.Second),
+		Enabled:         s.Enabled,
+	}
+	if s.Schedule != nil {
+		out.Schedule = s.Schedule.String()
+		if loc := s.Schedule.Location(); loc != nil {
+			out.Timezone = loc.String()
+		}
+	}
+	return out
+}
+
+// toSpec builds a Spec, reporting a bad schedule or zone as a client error
+// rather than a 500: the admin mistyped something and should be told what.
+func (j reservationJSON) toSpec() (*reservation.Spec, error) {
+	loc := time.Local
+	if tz := strings.TrimSpace(j.Timezone); tz != "" && tz != "Local" {
+		l, err := time.LoadLocation(tz)
+		if err != nil {
+			return nil, errors.New("unknown time zone " + strconv.Quote(tz))
+		}
+		loc = l
+	}
+	sched, err := reservation.ParseSchedule(j.Schedule, loc)
+	if err != nil {
+		return nil, err
+	}
+	return &reservation.Spec{
+		ID: strings.TrimSpace(j.ID), Project: strings.TrimSpace(j.Project), Submit: j.Submit,
+		Seats: j.Seats, Standing: j.Standing,
+		Duration: time.Duration(j.DurationSeconds) * time.Second,
+		Lead:     time.Duration(j.LeadSeconds) * time.Second,
+		Hold:     time.Duration(j.HoldSeconds) * time.Second,
+		Schedule: sched, Enabled: j.Enabled,
+	}, nil
+}
+
+// handleAdminReservations serves the collection: GET lists, POST creates or
+// replaces.
+func (s *Handler) handleAdminReservations(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	store := s.reservationStore()
+	if store == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "Reservations are not available: the application database is not open")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		specs, err := store.List(r.Context())
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to list reservations", "error", err)
+			s.writeError(w, http.StatusInternalServerError, "Failed to list reservations")
+			return
+		}
+		out := make([]reservationJSON, 0, len(specs))
+		for _, spec := range specs {
+			out = append(out, toReservationJSON(spec))
+		}
+		s.writeJSON(w, http.StatusOK, map[string]any{"reservations": out})
+	case http.MethodPost:
+		var body reservationJSON
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			s.writeError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
+			return
+		}
+		spec, err := body.toSpec()
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// Put validates and renders the submit file, so everything wrong
+		// with the reservation comes back to the form at once.
+		if err := store.Put(r.Context(), spec); err != nil {
+			s.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.writeJSON(w, http.StatusOK, toReservationJSON(spec))
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+// handleAdminReservation serves one reservation by ID, and its upcoming
+// windows at .../windows.
+func (s *Handler) handleAdminReservation(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	store := s.reservationStore()
+	if store == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "Reservations are not available: the application database is not open")
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/reservations/")
+	id, tail, _ := strings.Cut(rest, "/")
+	if id == "" {
+		s.writeError(w, http.StatusBadRequest, "Reservation ID is required")
+		return
+	}
+	if tail == "windows" {
+		s.serveReservationWindows(w, r, store, id)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		spec, err := store.Get(r.Context(), id)
+		if errors.Is(err, reservation.ErrNotFound) {
+			s.writeError(w, http.StatusNotFound, "No such reservation")
+			return
+		}
+		if err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to read reservation", "id", id, "error", err)
+			s.writeError(w, http.StatusInternalServerError, "Failed to read reservation")
+			return
+		}
+		s.writeJSON(w, http.StatusOK, toReservationJSON(spec))
+	case http.MethodDelete:
+		if err := store.Delete(r.Context(), id); err != nil {
+			s.logger.Error(logging.DestinationHTTP, "Failed to delete reservation", "id", id, "error", err)
+			s.writeError(w, http.StatusInternalServerError, "Failed to delete reservation")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+// defaultWindowHorizon is how far ahead the preview looks when the caller
+// does not say. Two weeks covers a fortnightly timetable.
+const defaultWindowHorizon = 14 * 24 * time.Hour
+
+// serveReservationWindows previews when a reservation will actually hold
+// seats. A cron expression is hard to read, so the form shows what it
+// means rather than asking the admin to trust it.
+func (s *Handler) serveReservationWindows(w http.ResponseWriter, r *http.Request, store *reservation.Store, id string) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	spec, err := store.Get(r.Context(), id)
+	if errors.Is(err, reservation.ErrNotFound) {
+		s.writeError(w, http.StatusNotFound, "No such reservation")
+		return
+	}
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to read reservation", "id", id, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "Failed to read reservation")
+		return
+	}
+	horizon := defaultWindowHorizon
+	if raw := r.URL.Query().Get("days"); raw != "" {
+		days, err := strconv.Atoi(raw)
+		if err != nil || days < 1 || days > 365 {
+			s.writeError(w, http.StatusBadRequest, "days must be between 1 and 365")
+			return
+		}
+		horizon = time.Duration(days) * 24 * time.Hour
+	}
+	now := time.Now()
+	windows := spec.Windows(now, horizon, reservationForgive)
+	out := make([]windowJSON, 0, len(windows))
+	for _, win := range windows {
+		out = append(out, windowJSON{
+			Start: win.Start, End: win.End, Occurrences: win.Occurrences,
+			PlanFrom: win.Start.Add(-spec.Lead),
+		})
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"windows": out})
+}
+
+// reservationForgive is the age below which evicting a job is treated as
+// free. It decides whether two occurrences are one hold: a gap shorter
+// than this is free either way, because anything started in it is still
+// cheap to evict at the next bell.
+const reservationForgive = 30 * time.Minute
+
+// reservationStore is the reservation table on the application database.
+// Store holds no state beyond the handle, so building one per request is
+// free and avoids another field to initialise in the right order.
+func (s *Handler) reservationStore() *reservation.Store {
+	if s.db == nil {
+		return nil
+	}
+	return reservation.NewStore(s.db)
+}

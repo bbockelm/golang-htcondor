@@ -225,6 +225,10 @@ func (h *Handler) setupRoutes() {
 	// can return appropriate status codes (503 when the admin UI is
 	// not configured, 403 when the user lacks the group, 401 when
 	// no session is present).
+	// Reservations: recurring holds of pool capacity for a project.
+	// Admin-gated inside the handlers like the rest of /api/v1/admin.
+	mux.Handle("/api/v1/admin/reservations", cors(http.HandlerFunc(h.handleAdminReservations)))
+	mux.Handle("/api/v1/admin/reservations/", cors(http.HandlerFunc(h.handleAdminReservation)))
 	mux.Handle("/api/v1/admin/oauth2/clients", cors(http.HandlerFunc(h.handleAdminListClients)))
 	// The per-client path carries both the delete and the notes edit;
 	// split here so each handler can stay about one verb.
