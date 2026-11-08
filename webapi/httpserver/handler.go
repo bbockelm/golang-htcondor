@@ -272,10 +272,10 @@ type Handler struct {
 	// reservationEPConstraint limits which startds reservations may draw
 	// seats from; empty means all of them.
 	reservationEPConstraint string
-	// reservationProber provisions START on execute points and checks
-	// this access point may still write to them. Nil when nothing is
-	// running it, which the health endpoint reports as "not running"
-	// rather than as healthy.
+	// reservationProber checks that this access point may still update
+	// machine ads, and names the execute points whose START does not
+	// consult the sieve. Nil when nothing is running it, which the
+	// health endpoint reports as "not running" rather than as healthy.
 	reservationProber *reservation.Prober
 	// mcpCIMDEnabled advertises Client ID Metadata Document support in the MCP
 	// OAuth2 discovery document (the resolver itself lives in the provider's
@@ -2983,6 +2983,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	h.startJobWatchNudge(h.ctx)
 	h.startJupyterSweeper(h.ctx)
 	h.startRuntimeEstimates(h.ctx)
+	h.startReservations(h.ctx)
 
 	return nil
 }
