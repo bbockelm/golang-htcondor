@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bbockelm/golang-htcondor/webapi/reservation"
 
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
@@ -73,12 +76,20 @@ func (e *resEnv) do(t *testing.T, method, target, sid string, body any) *httptes
 		r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid}) //nolint:gosec
 	}
 	w := httptest.NewRecorder()
-	if target == "/api/v1/admin/reservations" {
-		e.h.handleAdminReservations(w, r)
-	} else {
-		e.h.handleAdminReservation(w, r)
-	}
+	// Routed through a mux registered exactly as routes.go does, so the
+	// precedence that makes "health" a route rather than a reservation
+	// ID is what these tests actually exercise.
+	e.mux().ServeHTTP(w, r)
 	return w
+}
+
+// mux mirrors the three reservation registrations in routes.go.
+func (e *resEnv) mux() *http.ServeMux {
+	m := http.NewServeMux()
+	m.HandleFunc("/api/v1/admin/reservations", e.h.handleAdminReservations)
+	m.HandleFunc("/api/v1/admin/reservations/health", e.h.handleAdminReservationHealth)
+	m.HandleFunc("/api/v1/admin/reservations/", e.h.handleAdminReservation)
+	return m
 }
 
 func goodReservation() reservationJSON {
@@ -243,4 +254,80 @@ func TestReservationWindowsPreview(t *testing.T) {
 	if w := env.do(t, http.MethodGet, "/api/v1/admin/reservations/nope/windows", env.admin, nil); w.Code != http.StatusNotFound {
 		t.Errorf("windows for a missing reservation: status %d, want 404", w.Code)
 	}
+}
+
+// TestReservationHealthReportsNotRunning: no prober is not the same as
+// healthy. An admin page that said "fine" when nothing had been checked
+// would hide exactly the failure this endpoint exists for.
+func TestReservationHealthReportsNotRunning(t *testing.T) {
+	env := newResEnv(t)
+	w := env.do(t, http.MethodGet, "/api/v1/admin/reservations/health", env.admin, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", w.Code, w.Body)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if running, _ := got["running"].(bool); running {
+		t.Errorf("reported running with no prober wired: %v", got)
+	}
+}
+
+// TestReservationHealthSurfacesADeniedWrite is the whole point: an
+// access point that may not update machine ads must say so here.
+func TestReservationHealthSurfacesADeniedWrite(t *testing.T) {
+	env := newResEnv(t)
+	p := &reservation.Prober{
+		Source: startsFor("ep1", `Owner =?= "alice"`),
+		Writer: deniedWriter{},
+	}
+	if _, err := p.Visit(context.Background()); err != nil {
+		t.Fatalf("Visit: %v", err)
+	}
+	env.h.reservationProber = p
+
+	w := env.do(t, http.MethodGet, "/api/v1/admin/reservations/health", env.admin, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", w.Code, w.Body)
+	}
+	var got struct {
+		Running bool   `json:"running"`
+		Healthy bool   `json:"healthy"`
+		Machine string `json:"machine"`
+		Detail  string `json:"detail"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Running || got.Healthy {
+		t.Errorf("health = %+v, want running and unhealthy", got)
+	}
+	if got.Machine != "ep1" || !strings.Contains(got.Detail, "not authorized") {
+		t.Errorf("health does not name the machine and reason: %+v", got)
+	}
+}
+
+// TestReservationHealthNeedsAdmin.
+func TestReservationHealthNeedsAdmin(t *testing.T) {
+	env := newResEnv(t)
+	if w := env.do(t, http.MethodGet, "/api/v1/admin/reservations/health", env.user, nil); w.Code != http.StatusForbidden {
+		t.Errorf("non-admin got %d, want 403", w.Code)
+	}
+}
+
+type staticStarts map[string]string
+
+func (s staticStarts) Starts(context.Context) (map[string]string, error) {
+	return map[string]string(s), nil
+}
+
+func startsFor(machine, start string) reservation.StartSource {
+	return staticStarts{machine: start}
+}
+
+type deniedWriter struct{}
+
+func (deniedWriter) SetStart(context.Context, string, string) error {
+	return errors.New("DENIED: not authorized to update machine ad")
 }
