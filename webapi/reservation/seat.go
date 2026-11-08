@@ -59,3 +59,32 @@ func (s *Spec) CheckSubmit() error {
 	}
 	return nil
 }
+
+// SeatResources is the shape of one seat: what a job rendered from the
+// reservation's submit file asks for.
+//
+// A resource the submit file does not request is zero, which makes it
+// unconstraining when seats are counted. Memory and disk are MB, matching
+// Resources; condor_submit normalises request_memory and request_disk to
+// MB and KiB respectively, so disk is scaled.
+//
+// When the census adapter lands this should collapse onto its SeatShape
+// rather than reading the ad a second way.
+func (s *Spec) SeatResources() (Resources, error) {
+	ad, err := s.SeatAd()
+	if err != nil {
+		return Resources{}, err
+	}
+	num := func(attr string) float64 {
+		if v, ok := ad.EvaluateAttrNumber(attr); ok && v > 0 {
+			return v
+		}
+		return 0
+	}
+	return Resources{
+		Cpus:     int(num("RequestCpus")),
+		Gpus:     int(num("RequestGpus")),
+		MemoryMB: int64(num("RequestMemory")),
+		DiskMB:   int64(num("RequestDisk")) / 1024,
+	}, nil
+}
