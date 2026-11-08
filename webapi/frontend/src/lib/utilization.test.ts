@@ -191,22 +191,41 @@ describe('stripGeometry', () => {
   // paints every such workflow critical.
   const laddered = { typical: 1024, min: 1024, max: 1024, distinct: 1, retry: true, retry_mib: 4096 };
 
-  it('marks a peak the retry ladder covers as retried, not over', () => {
+  it('marks a peak the retry ladder covers as covered, not over', () => {
     const g = stripGeometry(laddered, dist({ p25: 800, p75: 900, max: 3500 }))!;
     expect(g.over).toBe(true);
-    expect(g.overRetried).toBe(true);
+    expect(g.overCovered).toBe(true);
   });
 
   it('still flags a peak that went past the whole ladder', () => {
     const g = stripGeometry(laddered, dist({ p25: 800, p75: 900, max: 5000 }))!;
     expect(g.over).toBe(true);
-    expect(g.overRetried).toBe(false);
+    expect(g.overCovered).toBe(false);
   });
 
   it('leaves a workflow with no ladder alone', () => {
     const g = stripGeometry(request, dist({ p25: 3000, p75: 3500, max: 5000 }))!;
     expect(g.over).toBe(true);
-    expect(g.overRetried).toBe(false);
+    expect(g.overCovered).toBe(false);
+  });
+
+  // A request written as a formula over the job's own usage names no
+  // ceiling: it grows to whatever the job was measured using. So every
+  // peak above where it starts is one it grew past, however high.
+  const formula = { typical: 2048, min: 2048, max: 2048, distinct: 1, adaptive: true };
+
+  it('covers any peak above the start of a formula request', () => {
+    for (const max of [2600, 40000]) {
+      const g = stripGeometry(formula, dist({ p25: 800, p75: 900, max }))!;
+      expect(g.over).toBe(true);
+      expect(g.overCovered).toBe(true);
+    }
+  });
+
+  it('leaves a formula request alone below its start', () => {
+    const g = stripGeometry(formula, dist({ p25: 800, p75: 900, max: 1500 }))!;
+    expect(g.over).toBe(false);
+    expect(g.overCovered).toBe(false);
   });
 });
 

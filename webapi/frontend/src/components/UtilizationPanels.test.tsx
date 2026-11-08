@@ -220,6 +220,22 @@ describe('RangeStrip', () => {
     // And says so in words, for anyone not reading the colour.
     expect(container.querySelector('svg')).toHaveAccessibleName(/largest 2600 MB, more than requested/);
   });
+
+  // Over the first request on a workflow that reruns the job with more
+  // is not the critical case: it finished. It gets its own colour, and
+  // the words say which case it is.
+  it.each([
+    ['a retry ladder', { ...request, typical: 1024, retry: true, retry_mib: 4096 }],
+    ['a formula request', { ...request, adaptive: true }],
+  ])('marks a peak %s covers in its own colour, not red', (_name, req) => {
+    const { container } = render(
+      <RangeStrip request={req} dist={{ ...base, max: 2600 }} format={fmt} label="Peak memory" />,
+    );
+    const dot = container.querySelector('[data-testid="strip-max"]');
+    expect(dot).toHaveAttribute('fill', UTIL_COLOR.covered);
+    expect(dot).not.toHaveAttribute('fill', UTIL_COLOR.over);
+    expect(container.querySelector('svg')).toHaveAccessibleName(/it ran again with more/);
+  });
 });
 
 describe('MemoryCurve', () => {

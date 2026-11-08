@@ -536,11 +536,11 @@ export interface StripGeometry {
   max: number;
   // The largest job used more than the typical request.
   over: boolean;
-  // ...and the workflow's retry ladder covers it, so the job was rerun
-  // rather than held. Going over a request the ladder was built to
-  // absorb is what the ladder is FOR; it should not read the same as a
-  // job that went over everything the workflow asked for.
-  overRetried: boolean;
+  // ...and the workflow reruns a job that does, so it finished at a
+  // larger request rather than being stopped. Going over a request the
+  // workflow was built to grow past is what that setup is FOR; it should
+  // not read the same as a job that went over everything asked for.
+  overCovered: boolean;
   trackMax: number;
 }
 
@@ -566,7 +566,7 @@ export function stripGeometry(
     p90: at(dist.p90),
     max: at(dist.max),
     over: req !== null && dist.max > req,
-    overRetried: req !== null && dist.max > req && (retryRungOf(request) ?? 0) >= dist.max,
+    overCovered: req !== null && dist.max > req && coversAbove(request, dist.max),
     trackMax,
   };
 }
@@ -983,6 +983,21 @@ export function memoryHistogramNote(req: UtilRequest | null | undefined): string
 }
 
 /** retryRungOf is the ladder's top rung, or null when there is no ladder. */
+/**
+ * coversAbove reports whether the workflow would have run a job that
+ * peaked this high again, with more memory, rather than stopping it.
+ *
+ * A ladder names the rung it would have climbed to, so it covers a peak
+ * up to that rung and no further. A request written as a formula over
+ * the job's own usage names no ceiling: it grows to whatever the job was
+ * measured using, so any peak above where it starts is one it grew past.
+ */
+function coversAbove(req: RequestShape, peak: number): boolean {
+  if (adaptiveOf(req)) return true;
+  const rung = retryRungOf(req);
+  return rung !== null && rung >= peak;
+}
+
 function retryRungOf(req: RequestShape): number | null {
   if (typeof req === 'boolean' || !req || req.retry !== true) return null;
   const rung = req.retry_mib ?? 0;
