@@ -399,3 +399,24 @@ func TestStartReservationsIsOffUnlessConfigured(t *testing.T) {
 		t.Errorf("the prober started with no collector to read")
 	}
 }
+
+// TestStampingNeedsTheEstimator: the stamps come from the runtime
+// estimator, so there is nothing to write without it. Starting the loop
+// anyway would write nothing every five minutes while the admin page
+// reported a running stamper.
+func TestStampingNeedsTheEstimator(t *testing.T) {
+	env := newResEnv(t)
+	env.h.reservationStamper = nil
+	env.h.reservationsEnabled = true
+	env.h.runtimeEst = nil
+	env.h.startReservationStamping(t.Context())
+	if env.h.reservationStamper != nil {
+		t.Errorf("stamping started with no runtime estimator to stamp from")
+	}
+
+	env.h.reservationsEnabled = false
+	env.h.startReservationStamping(t.Context())
+	if env.h.reservationStamper != nil {
+		t.Errorf("stamping started although reservations are disabled")
+	}
+}

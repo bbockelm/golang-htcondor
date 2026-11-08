@@ -277,6 +277,13 @@ type Handler struct {
 	// consult the sieve. Nil when nothing is running it, which the
 	// health endpoint reports as "not running" rather than as healthy.
 	reservationProber *reservation.Prober
+	// reservationStamper writes the runtime estimate onto idle cluster
+	// ads. Without it a held machine admits nothing but the reserved
+	// project, so a drain costs the whole machine rather than nothing.
+	reservationStamper *reservation.Stamper
+	// reservationStampBudget caps the cluster ads one stamping pass
+	// writes; zero takes the package default.
+	reservationStampBudget int
 	// mcpCIMDEnabled advertises Client ID Metadata Document support in the MCP
 	// OAuth2 discovery document (the resolver itself lives in the provider's
 	// storage). See oauth2_cimd.go.
@@ -858,6 +865,10 @@ type HandlerConfig struct {
 	// capacity means evicting other people's jobs.
 	Reservations bool
 
+	// ReservationStampBudget caps how many cluster ads one stamping
+	// pass writes. Zero takes the package default.
+	ReservationStampBudget int
+
 	// ReservationEPConstraint limits which execute points a reservation
 	// may draw seats from, as a ClassAd expression evaluated against the
 	// slot ad. Empty means every startd the collector reports.
@@ -1437,6 +1448,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		mcpEnabled:                cfg.EnableMCP,
 		reservationsEnabled:       cfg.Reservations,
 		reservationEPConstraint:   cfg.ReservationEPConstraint,
+		reservationStampBudget:    cfg.ReservationStampBudget,
 		mcpCIMDEnabled:            cfg.MCPCIMDEnabled,
 		mcpDCRDisabled:            cfg.MCPDCRDisabled,
 		ccbDialer:                 cfg.CCB,
@@ -2984,6 +2996,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	h.startJupyterSweeper(h.ctx)
 	h.startRuntimeEstimates(h.ctx)
 	h.startReservations(h.ctx)
+	h.startReservationStamping(h.ctx)
 
 	return nil
 }

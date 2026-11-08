@@ -1423,6 +1423,24 @@ func reservationEPConstraint(cfg *config.Config) string {
 	return strings.TrimSpace(raw)
 }
 
+// reservationStampBudget caps how many cluster ads one stamping pass
+// writes. Zero takes the package default.
+//
+// The write is per cluster, not per job, so the default covers an idle
+// queue far larger than most access points have. It exists for a queue
+// that is pathological rather than merely large.
+func reservationStampBudget(cfg *config.Config) int {
+	raw, ok := cfg.Get("HTTP_API_RESERVATION_STAMP_BUDGET")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		log.Fatalf("invalid HTTP_API_RESERVATION_STAMP_BUDGET=%q: must be a non-negative integer", raw)
+	}
+	return n
+}
+
 // oauth2SettingNames are the settings whose presence means an operator
 // meant this server to log people in through an identity provider.
 var oauth2SettingNames = []string{
@@ -2381,6 +2399,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		EnableMCP:                mcpCfg.enabled,
 		Reservations:             reservationsEnabled(cfg),
 		ReservationEPConstraint:  reservationEPConstraint(cfg),
+		ReservationStampBudget:   reservationStampBudget(cfg),
 		WebUIEnabled:             webUIEnabled,
 		// DBPath is the canonical name; OAuth2DBPath kept for back-compat.
 		DBPath:                     mcpCfg.oauth2DBPath,

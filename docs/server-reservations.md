@@ -148,6 +148,36 @@ starts on a pool that was never drained. The admin page's health check
 writes to one randomly chosen execute point every few minutes for no
 other reason than to notice.
 
+## What the access point writes to the queue
+
+Reservations need idle jobs to carry an upper bound on how long they
+would run — `RuntimeP90Bucket`, in seconds, rounded up to half an hour.
+A held execute point refuses a job without one, so **without this a
+drain costs the whole machine rather than nothing**.
+
+The access point writes it, every five minutes, from the runtime
+estimator. It writes the **cluster** ad: a proc inherits the attribute
+from its cluster, including for matchmaking, and an idle queue has far
+fewer clusters than jobs — 43,567 jobs in 371 clusters on the access
+point this was measured on. So a full pass over a large queue is a few
+hundred writes, not tens of thousands.
+
+A cluster is stamped with the largest estimate among its idle procs, so
+a mixed cluster is described by its longest job and never admits one
+that will not fit.
+
+Falling behind is safe: a held machine refuses a job with no stamp and
+accepts one with a stale stamp, so a budget too small for the queue
+costs admissions and never lets the wrong job in.
+
+Two consequences worth knowing before you turn it on. The attribute is
+referenced by the execute points' `START`, so the negotiator may split
+autoclusters on it — which is why the estimate is bucketed to half an
+hour rather than answered to the second. And a submitter can set it
+themselves; the sieve cannot tell. Eviction does not consult it, so a
+job that lies its way onto a reserved core is preempted at the bell like
+any other.
+
 ## Turning it on
 
 Off unless configured. A reservation holds capacity by evicting other
@@ -156,6 +186,7 @@ people's jobs, so no site starts doing that because it upgraded.
 | Setting | |
 |---|---|
 | `HTTP_API_RESERVATIONS` | `True` runs the subsystem: the admin API, the admin page and the controller. |
+| `HTTP_API_RESERVATION_STAMP_BUDGET` | How many cluster ads one stamping pass writes. Defaults to 2000, which covers a far larger queue than most access points have. |
 | `HTTP_API_RESERVATION_EP_CONSTRAINT` | A ClassAd expression over the slot ad limiting which execute points reservations may draw seats from. Empty means every startd the collector reports. |
 
 Most sites will want the constraint. A class should take the teaching
