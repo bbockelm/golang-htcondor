@@ -251,8 +251,8 @@ function NewKeyForm({
             <span>
               <span className="font-medium">Me</span>
               <span className="block text-gray-500">
-                Reads the whole pool for as long as I am entitled to. Stops
-                doing so when I am not.
+                Authorizations are tied to my account; will stop working if my
+                account&apos;s privileges are revoked.
               </span>
             </span>
           </label>
@@ -267,8 +267,8 @@ function NewKeyForm({
             <span>
               <span className="font-medium">A service</span>
               <span className="block text-gray-500">
-                Reads the whole pool until the key expires, whatever happens to
-                my own access. Must expire; mint it again to renew.
+                Authorizations last until the key expires, even if my
+                account&apos;s privileges are revoked.
               </span>
             </span>
           </label>

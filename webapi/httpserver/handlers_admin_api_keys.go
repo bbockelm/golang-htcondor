@@ -91,8 +91,8 @@ var validScopes = map[string]string{
 	// may reach, not which door it may knock on. Granted only to a
 	// minter who holds them, and re-verified on use unless the key is a
 	// service key. See apikey_entitlements.go.
-	scopeAnyUserRead:  "Read any user's jobs on this access point, not just the creator's. Granted only to an administrator who holds it; on a key that is not a service key it lapses when the creator's entitlement does.",
-	scopeAnyUserWrite: "Act on any user's jobs on this access point: remove, hold, release, edit. Does not grant anyuser:read; select both to see them as well. Same entitlement rules as anyuser:read.",
+	scopeAnyUserRead:  "Read any user's jobs on this access point, not just the creator's.",
+	scopeAnyUserWrite: "Act on any user's jobs on this access point: remove, hold, release, edit. Does not grant anyuser:read; select both to see them as well.",
 }
 
 // handleAdminListAPIKeys handles GET /api/v1/admin/api-keys.
