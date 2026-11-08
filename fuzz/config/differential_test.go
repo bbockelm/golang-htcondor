@@ -31,7 +31,16 @@ type seedCase struct {
 	input  string
 	reason string
 	class  *divergenceClass
+	// oracle, when set, says which side of one upstream change this case
+	// belongs to. A recorded divergence whose requirement the linked oracle
+	// does not meet is expected to AGREE instead of being skipped, so both
+	// oracles are asserted rather than one going unchecked.
+	oracle *oracleReq
 }
+
+// divergesHere reports whether this seed is expected to diverge against the
+// oracle that is actually linked.
+func (sc seedCase) divergesHere() bool { return sc.reason != "" && sc.oracle.met() }
 
 // divergenceClass recognizes a divergence by its SHAPE rather than by the
 // input that produced it. A recorded class is matched against every divergence
@@ -46,8 +55,33 @@ type seedCase struct {
 type divergenceClass struct {
 	name string
 	// match sees the two canonical tables from a comparison where the two
-	// sides disagreed.
+	// sides disagreed. A nil match accepts any pair, which is only safe
+	// with an input predicate narrow enough to stand on its own.
 	match func(goTable, cppTable string) bool
+	// input, when set, must also accept the input that produced the
+	// divergence. It is for a family defined by what was WRITTEN rather
+	// than by how the two tables differ -- an upstream change to the
+	// language itself, where the tables can differ in any number of ways
+	// but only one kind of source reaches it.
+	input func(string) bool
+	// oracle, when set, limits the class to oracles on one side of an
+	// upstream change, so it cannot excuse a divergence an HTCondor
+	// without that change should never produce.
+	oracle *oracleReq
+}
+
+// accepts reports whether this class accounts for a divergence.
+func (c *divergenceClass) accepts(input string, res divergenceResult) bool {
+	if !c.oracle.met() {
+		return false
+	}
+	if c.input != nil && !c.input(input) {
+		return false
+	}
+	if c.match != nil && !c.match(res.goTable, res.cppTable) {
+		return false
+	}
+	return c.match != nil || c.input != nil
 }
 
 // selectorSpacing is the unparser difference recorded against
@@ -92,14 +126,36 @@ func cppDropsSpaceBeforeDot(goTable, cppTable string) bool {
 	return i == len(goTable) && j == len(cppTable)
 }
 
+// tripleQuote is the language change HTCONDOR-3993 made: three double-quotes
+// in a row now switch classic ClassAd parsing to new-ClassAd quoting rules.
+// An HTCondor that knows the marker reads `""""` as a quote opening a
+// new-style string; one that does not chokes on it.
+//
+// The two tables can differ in any number of ways as a result -- a value
+// expands or does not, a macro function reads its argument or returns
+// nothing -- so this class is defined by what was WRITTEN rather than by how
+// the tables differ. That is only safe because the trigger is narrow: three
+// consecutive double-quotes do not appear in config by accident, and the
+// class is further limited to oracles that actually carry the change.
+//
+// Go's classic-ClassAd lexer does not implement the marker. Until it does --
+// which is a change in the ClassAd library this parser sits on, and one that
+// alters how input that parses today is read -- this records the difference
+// rather than hiding it.
+var tripleQuote = divergenceClass{
+	name:   "C++ reads three double-quotes as a new-ClassAd string marker",
+	input:  func(s string) bool { return strings.Contains(s, `"""`) },
+	oracle: &oracleReq{ticket: "HTCONDOR-3993", has: true},
+}
+
 // recognize returns the recorded class that accounts for this divergence, or
 // nil when it is a new one.
-func recognize(res divergenceResult) *divergenceClass {
+func recognize(input string, res divergenceResult) *divergenceClass {
 	for _, sc := range seeds {
 		if sc.class == nil {
 			continue
 		}
-		if sc.class.match(res.goTable, res.cppTable) {
+		if sc.class.accepts(input, res) {
 			return sc.class
 		}
 	}
@@ -155,6 +211,20 @@ var seeds = []seedCase{
 		input:  "0=0 .$EVAL({0 .A})",
 		reason: "selectorSpacing, reached with a dot outside the expression",
 		class:  &selectorSpacing,
+	},
+
+	{
+		// Found by FuzzConfigParseExpand, and upstream rather than ours.
+		input: `0=$INT("""">"")`,
+		reason: "HTCONDOR-3993 made three double-quotes a marker that switches " +
+			"classic ClassAd parsing to new-ClassAd quoting. C++ reads the rest " +
+			"as a new-style string and $INT gets a value it can parse; Go's " +
+			"lexer has no such marker, chokes, and the macro expands to " +
+			"nothing. Implementing it means changing how `\"\"\"\"` is read in " +
+			"the ClassAd library this parser sits on, which changes input that " +
+			"parses today -- so it is recorded here rather than quietly fixed.",
+		class:  &tripleQuote,
+		oracle: &oracleReq{ticket: "HTCONDOR-3993", has: true},
 	},
 
 	// --- former divergences, fixed; each checked against condor 25.14.1 ---
@@ -278,13 +348,21 @@ func TestConfigSeeds(t *testing.T) {
 				t.Errorf("seed is not comparable (%s):\n%s", res.skip, indent(sc.input))
 			}
 			switch {
-			case sc.reason == "" && res.desc != "":
+			case !sc.divergesHere() && res.desc != "":
+				if sc.reason != "" {
+					t.Errorf("this oracle is on the other side of %s, so the two should AGREE here:\n%s\n%s",
+						sc.oracle.ticket, indent(sc.input), res.desc)
+					break
+				}
 				t.Errorf("unexpected divergence on:\n%s\n%s", indent(sc.input), res.desc)
-			case sc.reason != "" && res.desc == "":
+			case sc.divergesHere() && res.desc == "":
 				t.Errorf("known divergence now AGREES — promote to parity and remove reason:\n%s\nwas: %s",
 					indent(sc.input), sc.reason)
-			case sc.reason != "" && res.desc != "":
+			case sc.divergesHere():
 				t.Logf("known divergence (expected): %s\ninput:\n%s", sc.reason, indent(sc.input))
+			case sc.reason != "":
+				t.Logf("recorded divergence, not applicable to this oracle (%s): %s",
+					sc.oracle.ticket, sc.reason)
 			}
 		})
 	}
@@ -298,7 +376,7 @@ func TestConfigSeeds(t *testing.T) {
 var knownDivergentInputs = func() map[string]bool {
 	m := make(map[string]bool)
 	for _, sc := range seeds {
-		if sc.reason != "" {
+		if sc.divergesHere() {
 			m[sc.input] = true
 		}
 	}
@@ -322,7 +400,7 @@ func FuzzConfigParseExpand(f *testing.F) {
 		if res.skip != "" || res.desc == "" {
 			return
 		}
-		if c := recognize(res); c != nil {
+		if c := recognize(input, res); c != nil {
 			// Already recorded, reached from another input. Reporting it
 			// would fail the nightly every night on a divergence nobody
 			// intends to fix, and bury the run's real findings.
@@ -343,11 +421,14 @@ func TestDivergenceClassesMatchTheirSeeds(t *testing.T) {
 			continue
 		}
 		t.Run(sc.class.name, func(t *testing.T) {
+			if !sc.divergesHere() {
+				t.Skipf("this oracle is on the other side of %s, so the seed does not diverge here", sc.oracle.ticket)
+			}
 			res := divergence(sc.input)
 			if res.skip != "" || res.desc == "" {
 				t.Fatalf("seed no longer diverges, so its class cannot be checked:\n%s", indent(sc.input))
 			}
-			if recognize(res) != sc.class {
+			if recognize(sc.input, res) != sc.class {
 				t.Errorf("%q does not recognize its own seed:\n%s\n%s",
 					sc.class.name, indent(sc.input), res.desc)
 			}
@@ -360,27 +441,78 @@ func TestDivergenceClassesMatchTheirSeeds(t *testing.T) {
 // reports nothing looks exactly like a clean one. Each pair below is a
 // divergence that must still be reported.
 func TestDivergenceClassesRejectOtherShapes(t *testing.T) {
+	// Every class is made live for this test, whichever oracle is linked.
+	// A class limited to an upstream change the local oracle does not have
+	// would otherwise accept nothing, and each case below would pass
+	// without exercising anything -- the quiet way a rejection test stops
+	// testing rejection.
+	defer withAllTraits()()
+
 	cases := []struct {
 		name     string
+		input    string
 		goTable  string
 		cppTable string
 	}{
-		{"agreement is not a divergence", "A\x1f{ 0.B }\n", "A\x1f{ 0.B }\n"},
-		{"neither side ran", "", ""},
-		{"a different value", "A\x1f1\n", "A\x1f2\n"},
-		{"a different selector", "A\x1f{ 0 .B }\n", "A\x1f{ 0 .C }\n"},
-		{"the space is ours to drop, not theirs", "A\x1f{ 0.B }\n", "A\x1f{ 0 .B }\n"},
-		{"a space somewhere else entirely", "A\x1f0.5\n", "A\x1f 0.5\n"},
-		{"one attribute of two still differs", "A\x1f{ 0 .B }\nC\x1f1\n", "A\x1f{ 0.B }\nC\x1f2\n"},
+		{"agreement is not a divergence", "A=1", "A\x1f{ 0.B }\n", "A\x1f{ 0.B }\n"},
+		{"neither side ran", "A=1", "", ""},
+		{"a different value", "A=1", "A\x1f1\n", "A\x1f2\n"},
+		{"a different selector", "A=1", "A\x1f{ 0 .B }\n", "A\x1f{ 0 .C }\n"},
+		{"the space is ours to drop, not theirs", "A=1", "A\x1f{ 0.B }\n", "A\x1f{ 0 .B }\n"},
+		{"a space somewhere else entirely", "A=1", "A\x1f0.5\n", "A\x1f 0.5\n"},
+		{"one attribute of two still differs", "A=1", "A\x1f{ 0 .B }\nC\x1f1\n", "A\x1f{ 0.B }\nC\x1f2\n"},
+		// Two quotes are not three: the input predicate of the
+		// triple-quote class must not reach an ordinary quoted value.
+		{"a plain quoted string", `A="x"`, "A\x1f\n", "A\x1fx\n"},
+		{"an empty string pair", `A=""`, "A\x1f\n", "A\x1fy\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			res := divergenceResult{goTable: tc.goTable, cppTable: tc.cppTable}
-			if c := recognize(res); c != nil {
+			if c := recognize(tc.input, res); c != nil {
 				t.Errorf("recognized as %q, so this divergence would never be reported", c.name)
 			}
 		})
 	}
+}
+
+// TestTripleQuoteClassIsLiveOnlyForOraclesThatHaveIt pins both halves of an
+// oracle-scoped class: it accounts for the family against an HTCondor that
+// carries the change, and accounts for nothing at all against one that does
+// not -- where such a divergence would be a real finding about this parser
+// rather than a difference between two HTCondors.
+func TestTripleQuoteClassIsLiveOnlyForOraclesThatHaveIt(t *testing.T) {
+	// Any table difference; the class is defined by the input.
+	res := divergenceResult{goTable: "0\x1f\n", cppTable: "0\x1f0\n"}
+	const input = `0=$INT("""">"")`
+
+	restore := withAllTraits()
+	if got := recognize(input, res); got != &tripleQuote {
+		t.Errorf("against an oracle that has HTCONDOR-3993 this is the recorded family, got %v", got)
+	}
+	// Two quotes are not three: an ordinary quoted value is not this family
+	// however the tables differ.
+	if got := recognize(`0=$INT("a">"b")`, res); got == &tripleQuote {
+		t.Error("an input without three consecutive quotes is not this family")
+	}
+	restore()
+
+	oracleHas = map[string]bool{}
+	if got := recognize(input, res); got != nil {
+		t.Errorf("against an oracle without the change this must be reported, not excused as %q", got.name)
+	}
+}
+
+// withAllTraits makes every recorded trait read as present, and returns a
+// function that puts back what was probed.
+func withAllTraits() func() {
+	saved := oracleHas
+	all := map[string]bool{}
+	for _, tr := range oracleTraits {
+		all[tr.ticket] = true
+	}
+	oracleHas = all
+	return func() { oracleHas = saved }
 }
 
 // TestCppDropsSpaceBeforeDot pins the walk selectorSpacing is built on.
