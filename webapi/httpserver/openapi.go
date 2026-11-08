@@ -2641,7 +2641,7 @@ const openAPISchema = `{
                     "job_id": {"type": "string"},
                     "available": {"type": "boolean"},
                     "reason": {"type": "string", "enum": ["disabled", "model_warming_up", "insufficient_history", "not_estimated"], "description": "Why there is no estimate; absent when available. insufficient_history: the owner has no recently finished job of the same kind. not_estimated: the job is a scheduler- or local-universe job, such as a DAG's workflow manager (DAGMan), which is never estimated."},
-                    "estimate_seconds": {"type": "number", "description": "Expected total runtime. For a running job that has outlived the typical run, re-estimated from the comparable runs that lasted at least as long."},
+                    "estimate_seconds": {"type": "number", "description": "Expected total runtime. For a running job, re-estimated from the comparable runs that lasted longer than it already has, whenever at least 3 of them did."},
                     "p10_seconds": {"type": "number", "description": "Lower end of the likely range: about 10% of comparable jobs finish sooner."},
                     "p90_seconds": {"type": "number", "description": "Upper end of the likely range: about 90% of comparable jobs finish by then. Drawn from past estimation errors made at the same point in a job's life (waiting or running)."},
                     "basis": {

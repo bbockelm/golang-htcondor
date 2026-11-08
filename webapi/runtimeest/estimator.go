@@ -64,7 +64,7 @@ const (
 	// whole, which a higher floor fell back to.
 	minSamples = 1
 	// minLonger is how many runs longer than a running job's elapsed time
-	// its group needs to re-estimate it once it has outlived the median.
+	// its group needs to re-estimate it from them.
 	minLonger = 3
 	// minResiduals is how many past prediction errors the bounds need
 	// before they are drawn from errors rather than the group's spread.
@@ -118,8 +118,8 @@ type Result struct {
 	// Reason says why, when Available is false. See the Reason* constants.
 	Reason string `json:"reason,omitempty"`
 	// EstimateSeconds is the expected total runtime. For a running job
-	// that has outlived its group's median it is re-estimated from the
-	// group's runs that lasted at least as long.
+	// it is re-estimated from the group's runs that lasted longer than
+	// it already has, whenever enough of them did.
 	EstimateSeconds float64 `json:"estimate_seconds,omitempty"`
 	// P10Seconds and P90Seconds bound the runtime: about 80% of jobs
 	// finish between them. Drawn from past prediction errors made at
@@ -659,16 +659,25 @@ func (p *prepared) finish(q Query, m Model) Result {
 	if q.Running {
 		elapsed := q.Elapsed
 		res.ElapsedSeconds = &elapsed
-		if elapsed >= est {
-			// The job has outlived the typical run. What history says
-			// now is what the runs that lasted at least this long did.
-			if longer := p.w.above(elapsed); len(longer) >= minLonger {
-				est = quantileOf(longer, 0.5)
-				p90 = math.Max(quantileOf(longer, 0.9), est)
-				p10 = math.Min(quantileOf(longer, 0.1), est)
-			} else {
-				res.ExceededHistory = true
-			}
+		// Having survived this long is information whatever the elapsed
+		// time: what history says now is what the runs that lasted
+		// longer than the job already has did. Conditioning only once
+		// the job passed the median left the estimate of nearly every
+		// running job ignoring that it had survived at all, and on a
+		// replayed access point it ran about a third short on remaining
+		// time one hour in.
+		if longer := p.w.above(elapsed); len(longer) >= minLonger {
+			est = quantileOf(longer, 0.5)
+			// The upper bound is never narrowed by conditioning: the
+			// conditional 90th percentile comes from a truncated sample
+			// and is too tight, and taking it alone made jobs exceed
+			// their p90 more often, not less.
+			p90 = math.Max(math.Max(quantileOf(longer, 0.9), p.p90), est)
+			p10 = math.Min(quantileOf(longer, 0.1), est)
+		} else if elapsed >= p.est {
+			// The job has outlived the typical run and there is no
+			// longer a sample of longer runs to re-estimate it from.
+			res.ExceededHistory = true
 		}
 		if !res.ExceededHistory {
 			// A lower bound below what the job has already run is not
