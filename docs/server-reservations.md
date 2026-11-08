@@ -82,7 +82,8 @@ of holding will reach the seats.
 
 ## Configuring the execute points
 
-One stanza, once, on the EPs. Nothing in it changes per reservation.
+One stanza, once, in the EPs' configuration. Nothing in it changes per
+reservation.
 
 ```
 START = $(START) && ( ReservationStart ?: True )
@@ -92,23 +93,60 @@ START = $(START) && ( ReservationStart ?: True )
 that is defined and `True` when it is not, so an execute point with no
 reservation on it is unconstrained.
 
-The controller pushes `ReservationStart` as a complete expression, plus
-the operands it refers to, into the machine ad.
+**This line has to be in the configuration file.** The access point
+cannot install it for you. A startd republishes `START` from its own
+configuration every time it refreshes its ad, so a pushed `START` is
+overwritten within seconds — and nothing reports a failure. The push is
+accepted, the other attributes in it stick, and the machine goes on
+admitting everything while the controller counts it as held.
 
-Three things about that mechanism are worth knowing before you deploy it,
-because they shape everything above:
+The admin page names any permissible execute point it finds without the
+stanza, and shows the line to add. Until you add it, a reservation on
+that machine does nothing.
+
+### What the controller does push
+
+`ReservationStart` — the sieve itself — plus the operands it reads.
+Those are ordinary attributes and they do stick. Three things about that
+mechanism are worth knowing before you deploy it, because they shape
+everything above:
 
 - The attributes are **merged per attribute** into one ad shared by every
   slot on the machine. Holding is per machine, not per slot.
 - There is **no delete path and no expiry**. An attribute pushed this way
   lives until the startd restarts. That is why the controller pushes
-  absolute deadlines rather than flags: a deadline in the past stops
-  constraining anything by itself, so a controller that dies leaves the
-  pool to recover on its own.
+  absolute times rather than flags: a time in the past stops constraining
+  anything by itself, so a controller that dies leaves the pool to
+  recover on its own.
 - For the same reason, **no reservation's name ever appears in an
   attribute name**. The operands use a small fixed set of reusable slots,
   so a semester of classes does not leave hundreds of dead keys on every
   execute point.
+
+| Attribute | |
+|---|---|
+| `ReservationStart` | the sieve |
+| `ReservationDeadline` | the bell, unix seconds. Nothing starts that will not have finished by then. |
+| `ReservationUntil` | the end of the window, unix seconds. Past it the machine is the pool's again. |
+| `ReservationProject` | the `ProjectName` whose jobs the machine is held for. |
+
+### Authorization
+
+The access point administers an execute point with the capability that
+execute point publishes to the collector
+(`SEC_ENABLE_REMOTE_ADMINISTRATION`, on by default). The collector hands
+it only to a client authorized at ADMINISTRATOR level.
+
+So the access point needs **ADMINISTRATOR at the collector**, and the
+execute points need nothing beyond the stanza. If your site has turned
+remote administration off, the access point's own identity needs
+`ALLOW_WRITE` and `ALLOW_ADMINISTRATOR` on every execute point instead.
+
+An access point that has lost that authorization is the failure worth
+watching for: nothing errors, no reservation complains, and every class
+starts on a pool that was never drained. The admin page's health check
+writes to one randomly chosen execute point every few minutes for no
+other reason than to notice.
 
 ## Turning it on
 

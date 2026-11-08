@@ -2,8 +2,8 @@
 
 ## Status
 
-Implemented across a stack of PRs; the actuator (pushing to startds) and
-the estimate stamping are not yet written. See "Not yet built" below.
+Implemented across a stack of PRs. The estimate stamping is not yet
+written; see "Not yet built" below.
 
 ## The problem
 
@@ -90,6 +90,18 @@ Each tick (60 s):
    is never briefly held for neither. Holds next. Evictions last, so
    nothing is preempted for a seat that was not secured.
 
+Holding continues *through* the window, not just up to the bell. A
+machine released at the bell goes back to the pool at the moment the
+reservation starts using it: the first seat the project finishes with is
+refilled by somebody else, and the window the drain paid for leaks away
+one seat at a time. During the window the pushed deadline is the bell,
+now in the past, so the sieve stops admitting on an estimate and admits
+the project alone.
+
+Inside the last `FORGIVE` before the bell nothing is held, for the same
+reason there is no quiet period: anything started from there is under
+the line at the bell anyway, and holding only costs admissions.
+
 ### Why over-provision
 
 Holding exactly as many machines as seats leaves no room for the ones
@@ -127,6 +139,15 @@ with the pool silently.
 | `Cpus`, `GPUs`, `Memory` (MiB), `Disk` (KiB) | capacity |
 | `JobStart` | when the running job started. `ATTR_JOB_START`, published by `Claim::publish`. **Not** `JobStartDate`, which is the job ad's — reading the wrong one makes every job look brand new and the whole pool look free to evict. |
 | `RemoteProject` | the running job's project. The job-side spelling is `ProjectName`; the startd copies it across. |
+| `MyAddress` | where to send a command. A census without it is read-only. |
+| `START` | read **unevaluated**, to decide whether the execute point carries the stanza. A slot ad's `START` evaluates to true or false, and judging on that would be nonsense. |
+| `_condor_PrivRemoteAdminCapability` | the administrative session. Private: the query must ask for it and be authorized at ADMINISTRATOR, or it silently comes back absent. |
+
+A d-slot's `Name` is what an eviction is made by: the startd vacates a
+claim by slot name, so a census that does not carry it cannot evict at
+all. It refuses rather than guessing which d-slot an index meant —
+vacating the wrong one preempts somebody who was not in the way and
+leaves the one who was.
 
 Backfill slots are excluded: their resources are already counted as free
 on the partitionable slot they came from, and counting them twice lets a
@@ -134,18 +155,32 @@ reservation promise the same core once per counting.
 
 ### Written to machine ads
 
-Pushed with `CA_UPDATE_MACHINE_AD`. Three properties of that mechanism
+| Attribute | |
+|---|---|
+| `ReservationStart` | the sieve |
+| `ReservationDeadline` | the bell, unix seconds |
+| `ReservationUntil` | the end of the window, unix seconds |
+| `ReservationProject` | whose seats these are |
+
+Pushed with `CA_UPDATE_MACHINE_AD`. Four properties of that mechanism
 constrain everything above, and none is discoverable from the API
 surface:
 
 - **The merge is per attribute into one ad shared by every slot.**
   Holding is per machine, not per slot.
 - **There is no delete path and no expiry.** An attribute lives until the
-  startd restarts. Hence deadlines are *absolute*, not flags: one left
-  behind by a dead controller stops constraining anything by itself.
+  startd restarts. Hence times are *absolute*, not flags: one left behind
+  by a dead controller stops constraining anything by itself.
 - **Therefore no reservation's name may appear in an attribute name.** A
   semester of classes would otherwise leave hundreds of dead keys on
-  every execute point. Operands use a small fixed set of reusable slots.
+  every execute point.
+- **`START` cannot be pushed.** Every other attribute becomes an operand
+  of the slot's own expression evaluation and stays there. `START` alone
+  is republished from the startd's configuration on every refresh, so a
+  pushed one is overwritten within seconds — silently: the push is
+  accepted and the other attributes in it stick. `TestStartCannotBePushed`
+  measures this against 26.2.0, and asserts that a non-`START` attribute
+  from the same push *did* land, so "the push did nothing" is excluded.
 
 The wire command is `CA_AUTH_CMD` = **1000**, not `CA_UPDATE_MACHINE_AD`
 = 1009. 1009 only names the verb string carried inside the ad, which the
@@ -154,16 +189,68 @@ request ad also carries `MyType = "Command"` and `TargetType = "Reply"`,
 and the startd merges the `Command` attribute itself into every slot ad
 because `updateExtrasClassAd` does not exclude it.
 
+### Authorization
+
+Every command rides `_condor_PrivRemoteAdminCapability`, the
+ADMINISTRATOR session each DaemonCore daemon mints for itself and ships
+to the collector when `SEC_ENABLE_REMOTE_ADMINISTRATION` is on (default
+true). Its `ValidCommands` is `GetCommandsInAuthLevel(ADMINISTRATOR,
+true)`, which walks ADMINISTRATOR -> WRITE -> READ and so covers both
+`CA_AUTH_CMD` (registered at WRITE) and `VACATE_CLAIM` (ADMINISTRATOR).
+
+The collector moves it into the private ad and sends it only to a query
+that asks for private attributes and verifies at ADMINISTRATOR. So the
+access point needs ADMINISTRATOR *at the collector*, and the execute
+points need nothing configured beyond the stanza below.
+
+It lives half an hour and is re-minted on every collector update, so it
+is re-read on an interval and once more after a denial: an expired
+capability and lost authorization are otherwise the same error.
+
 ### The EP config
 
 ```
 START = $(START) && ( ReservationStart ?: True )
 ```
 
-One stanza, once, never changed per reservation. The controller pushes
-`ReservationStart` as a complete expression plus the operands it refers
-to. Composed deterministically from the same inputs by every controller,
-so concurrent pushes are byte-identical and racing is harmless.
+One stanza, once, in the execute point's configuration file, never
+changed per reservation. It cannot be installed remotely, so the
+prober's job is to *detect* execute points without it and name them on
+the admin page. (`DC_CONFIG_RUNTIME` would set it, but needs
+`ENABLE_RUNTIME_CONFIG` plus a `SETTABLE_ATTRS` entry on each execute
+point, which is more site configuration than writing the line.)
+
+### The sieve
+
+```
+( time() >= ( ReservationUntil ?: 0 ) )
+|| ( ( ReservationProject ?: "" ) != "" && TARGET.ProjectName =?= ReservationProject )
+|| ( ( TARGET.RuntimeP90Bucket ?: -1 ) >= 0
+     && time() + TARGET.RuntimeP90Bucket <= ( ReservationDeadline ?: 0 ) )
+```
+
+A constant, so concurrent pushes are byte-identical and racing is
+harmless. Three decisions in it are not obvious:
+
+- **Operators only, no functions.** `strlen` is a ClassAd function in
+  HTCondor's C++ and absent from the Go implementation that composes and
+  tests this. A sieve that parses differently in the two places is worse
+  than a wordier one.
+- **No large sentinel for an unstamped job.** An "effectively infinite"
+  runtime is only infinite relative to the deadline, and a deadline far
+  enough out makes it finite again. The `>= 0` guard also refuses a
+  *negative* estimate, which would otherwise be admitted.
+- **The project clause is guarded on a non-empty project.** With
+  `ReservationProject` absent, the bare comparison is
+  `undefined =?= undefined`, which is **true**, so an unguarded sieve
+  admits every job that names no project. An empty string does not
+  reproduce it, so a test that sets `""` passes against the broken
+  version.
+
+A submitter can write `RuntimeP90Bucket` themselves and the sieve cannot
+tell. The backstop is that eviction does not consult it: a job that lied
+its way onto a reserved core is preempted at the bell like any other.
+
 
 ## What it costs
 
@@ -199,14 +286,35 @@ spends on a job younger than `FORGIVE` — computable in one pass over
 
 ## Not yet built
 
-- The actuator. The `Actuator` interface exists; the CEDAR client to
-  implement it does not yet live anywhere (it was wrongly proposed for
-  the cedar library, which is protocol framing rather than uses of it).
-- `RuntimeP90Bucket` stamping on idle jobs. The sieve refuses unstamped
-  jobs on a held machine, so this is the whole idle queue, not just the
-  jobs that might match. Throughput against a real schedd is unmeasured
-  and is the biggest open risk.
-- Auto-provisioning the `START` stanza, and the periodic permission probe.
+`RuntimeP90Bucket` stamping on idle jobs. The sieve refuses unstamped
+jobs on a held machine, so this is the whole idle queue, not just the
+jobs that might match.
+
+Measured against 25 days of ap2001 history, reconstructing the standing
+idle population hour by hour:
+
+| standing idle jobs | |
+|---|---|
+| median | 43,600 |
+| p90 | 133,000 |
+| peak | 174,000 |
+
+So the one-time backfill is tens of thousands of `SetAttribute` calls,
+and it is a *lower bound* — history holds only jobs that eventually ran.
+Steady state is 33,600 completions/day, about 0.4 first stamps a second.
+
+Re-stamping is the harder half. Comparing each job's bucket at submit
+with its bucket just before it started — two samples per job, so again a
+lower bound — 44.7% change at least once, and among jobs idle more than
+a day it is 89%. The queue is dominated by long-waiting jobs, so on a
+daily timescale this approaches re-stamping everything.
+
+Two consequences for whoever writes it. The backfill wants batched
+`SetAttribute` under one transaction rather than the obvious loop. And
+because the sieve refuses a *missing* stamp but accepts a *stale* one,
+re-stamping can be rate-limited to a budget per tick without any
+correctness risk — which is the knob to have before turning it on.
+
 
 ## Open questions
 
