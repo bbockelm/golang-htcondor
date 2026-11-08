@@ -40,6 +40,7 @@ export const UTIL_COLOR = {
   request: '#5d5d5d', // ink-600: the current request
   recommended: '#008300', // palette green: the suggested request, a good thing
   retry: '#eda100', // palette yellow: jobs that would rerun
+  covered: '#1baf7a', // palette teal: a peak the workflow reruns a job to clear
   retryLine: '#c98500', // a step darker so the line shows over its own bars
   over: '#d03b3b', // status critical: a job above its request
   grid: '#e7e7e7', // ink-100
@@ -1344,7 +1345,7 @@ export function RangeStrip({
     `${label}: ${request ? `requested ${format(request.typical)}; ` : ''}` +
     `middle half of jobs used ${format(dist.p25)}–${format(dist.p75)}; ` +
     `largest ${format(dist.max)}` +
-    `${g.overRetried ? ', more than the first request — the retry covers it' : g.over ? ', more than requested' : ''}.`;
+    `${g.overCovered ? ', more than the first request; it ran again with more' : g.over ? ', more than requested' : ''}.`;
   return (
     <svg
       viewBox={`0 0 ${RW} ${RH}`}
@@ -1354,7 +1355,7 @@ export function RangeStrip({
       aria-label={text}
       className="block max-w-full"
       data-over={g.over ? 'true' : 'false'}
-      data-over-retried={g.overRetried ? 'true' : 'false'}
+      data-over-covered={g.overCovered ? 'true' : 'false'}
     >
       <title>{text}</title>
       <line x1={xs(0)} x2={xs(1)} y1={mid} y2={mid} stroke={UTIL_COLOR.track} strokeWidth={4} strokeLinecap="round" />
@@ -1382,7 +1383,7 @@ export function RangeStrip({
         cx={xs(g.max)}
         cy={mid}
         r={4}
-        fill={g.overRetried ? UTIL_COLOR.retry : g.over ? UTIL_COLOR.over : UTIL_COLOR.used}
+        fill={g.overCovered ? UTIL_COLOR.covered : g.over ? UTIL_COLOR.over : UTIL_COLOR.used}
         stroke="#ffffff"
         strokeWidth={1.5}
         data-testid="strip-max"
@@ -1413,6 +1414,9 @@ export function RangeStripKey() {
       </LegendKey>
       <LegendKey color={UTIL_COLOR.over} shape="dot">
         largest job, over its request
+      </LegendKey>
+      <LegendKey color={UTIL_COLOR.covered} shape="dot">
+        largest job, over its first request but rerun with more
       </LegendKey>
     </div>
   );

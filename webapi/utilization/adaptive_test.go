@@ -63,8 +63,15 @@ func TestFromAdWithoutRaw(t *testing.T) {
 	}
 }
 
-// adaptiveJobs is n one-hour jobs whose request starts at 2 GB and was
-// 1.5x their peak in force.
+// adaptiveJobs is n jobs whose request starts at 2 GB and was 1.5x their
+// peak in force. One run of each takes an hour.
+//
+// A job that outgrew the start was held and run again, so its record
+// holds TWO runs: RemoteWallClockTime sums them, and CommittedTime is
+// the one that finished, since a run that ends in a hold commits
+// nothing. A real record looks like this, and a fixture that gave such a
+// job one hour of wall clock would be describing a job that was rerun
+// for free.
 func adaptiveJobs(n int, startCluster int64, peak float64) []Job {
 	inForce := 2048.0
 	if peak > 2048 {
@@ -75,6 +82,11 @@ func adaptiveJobs(n int, startCluster int64, peak float64) []Job {
 		jobs[i].Adaptive = AdaptiveMemory
 		jobs[i].RequestMemoryStart = f(2048)
 		jobs[i].MemoryFormula = chtcFormula
+		jobs[i].CommittedTime = f(3600)
+		if peak > 2048 {
+			jobs[i].Wall = 7200
+			jobs[i].MemoryHolds, jobs[i].NumJobStarts = 1, 2
+		}
 	}
 	return jobs
 }
@@ -113,10 +125,13 @@ func TestAdaptiveRequestSizedFromStart(t *testing.T) {
 	if a.Saves == nil || a.Saves.Amount != round((90200-76800)/1024.0, 1) {
 		t.Errorf("saves = %+v, want (90200-76800)/1024 GiB-h", a.Saves)
 	}
-	// Allocated hours count the request in force for the run that
-	// finished: 15*2048 + 10*3900.
+	// Allocated hours charge each run at the request it actually held:
+	// the 15 that fit, one hour at 2 GB; the 10 that outgrew it, an hour
+	// at 2 GB thrown away and an hour at 3900 that counted. It is the
+	// same 90,200 MiB-h the saving is measured from, because it is the
+	// same quantity.
 	for _, s := range w.Resources {
-		if s.Resource == ResourceMemory && s.AllocatedHours != 15*2048+10*3900 {
+		if s.Resource == ResourceMemory && s.AllocatedHours != 15*2048+10*(2048+3900) {
 			t.Errorf("allocated = %v", s.AllocatedHours)
 		}
 	}

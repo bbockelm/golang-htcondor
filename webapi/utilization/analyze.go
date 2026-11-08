@@ -251,6 +251,33 @@ func lostToRestarts(j *Job) float64 {
 	return lost
 }
 
+// memoryMiBHours is what the pool reserved for one job, MiB-hours.
+//
+// RequestMemory is the request in force for the run that FINISHED and
+// Wall sums every run, so their product charges a job's whole life at
+// the largest request it ever held. A job stopped for outgrowing its
+// memory and rerun at a larger one spent the earlier run at the smaller
+// request. CommittedTime is the run that finished -- a run that ends in
+// a hold or an eviction commits nothing -- so the rest is the run that
+// was stopped, and it is charged where it sat.
+//
+// Only where the record names the request the job started at. An
+// adaptive formula does, in RequestMemoryStart. A retry ladder does not:
+// it REWRITES RequestMemory, so a climber's first rung is recoverable
+// only from the other jobs of its workflow (see settleLadder), which a
+// per-job figure cannot see. Those stay charged at the rung they ended
+// on, which is the most the record alone supports.
+func (j *Job) memoryMiBHours() float64 {
+	wh := hours(j.Wall)
+	inForce := j.RequestMemory.V()
+	start := j.RequestMemoryStart
+	stopped := hours(lostToRestarts(j))
+	if !start.OK() || start.V() >= inForce || stopped <= 0 || stopped >= wh {
+		return inForce * wh
+	}
+	return start.V()*stopped + inForce*(wh-stopped)
+}
+
 // resourceSummaries is the time-weighted reserved-versus-used figure for
 // each resource. GPU appears only when some job asked for one.
 func resourceSummaries(jobs []*Job) []ResourceSummary {
@@ -271,10 +298,11 @@ func resourceSummaries(jobs []*Job) []ResourceSummary {
 			}
 		}
 		if j.RequestMemory.OK() {
-			mem.alloc += j.RequestMemory.V() * wh
+			mib := j.memoryMiBHours()
+			mem.alloc += mib
 			if j.MemoryUsage.OK() {
 				mem.used += j.MemoryUsage.V() * wh
-				mem.allocMeasured += j.RequestMemory.V() * wh
+				mem.allocMeasured += mib
 				mem.measured++
 			}
 		}
@@ -616,15 +644,6 @@ func memorySample(j *Job) (memoryJob, bool) {
 	if !start.OK() {
 		mj.request, mj.startUnknown = 0, true
 	}
-	if mj.climbed {
-		mj.climbs = int(j.RetryClimbs)
-	}
-	if j.RetryClimbs > 1 {
-		// Two or more climbs: CommittedTime covers only the last run, so
-		// the runs before it sat at two different rungs and the wall
-		// clock cannot be split between them from this record.
-		mj.multiClimb = true
-	}
 	switch {
 	case j.Status == statusCompleted && j.MemoryUsage.OK():
 		mj.peak = j.MemoryUsage.V()
@@ -634,7 +653,32 @@ func memorySample(j *Job) (memoryJob, bool) {
 	default:
 		return memoryJob{}, false
 	}
+	mj.reruns = memoryReruns(j, mj)
 	return mj, true
+}
+
+// memoryReruns is how many times the job was stopped for outgrowing its
+// memory and started again at a larger request.
+//
+// A ladder records it, in the rung index. An adaptive formula does not:
+// it regrows on a memory hold, holds are not always on the record (see
+// holdsFromAd), and what says the job was rerun is a peak above the
+// start -- the request in force could not have grown past the start
+// otherwise. Where the holds ARE counted they say how many times.
+//
+// A job restarted for some other reason -- preempted, its machine lost
+// -- is not counted. Those runs are not reruns the request can prevent:
+// a larger request would not have saved them, so the whole wall clock
+// is honestly the job's.
+func memoryReruns(j *Job, mj memoryJob) int {
+	n := 0
+	if mj.climbed {
+		n = max(int(j.RetryClimbs), 1)
+	}
+	if j.isAdaptive(AdaptiveMemory) && mj.outgrows(mj.request) {
+		n = max(n, 1, int(j.MemoryHolds))
+	}
+	return n
 }
 
 // batches is one point per submission, the most recent maxBatches,

@@ -186,6 +186,13 @@ type Job struct {
 	// sets no index, and those jobs are found by their request instead
 	// (see settleLadder).
 	RetryClimbs int16
+	// MemoryHolds is how many times the job was held for outgrowing its
+	// memory, from NumHoldsByReason. An adaptive request grows on each
+	// such hold and the job runs again, so this is that mechanism's
+	// count of reruns as RetryClimbs is a ladder's. Zero alongside
+	// HeldForMemory means the record says a hold happened without
+	// saying how many.
+	MemoryHolds int16
 }
 
 // Num is an optional number: present with a value, or absent. Absent is
@@ -426,15 +433,17 @@ func fromAd(ad *classad.ClassAd, schedd string, r *JobReader) Job {
 	j.GPUDeviceMemory = numAttr(ad, "MachineAttrGPUs_GlobalMemoryMb0")
 
 	j.readRetryLadder(ad)
-	j.HeldForMemory, j.HeldForDisk = holdsFromAd(ad)
+	j.MemoryHolds, j.HeldForDisk = holdsFromAd(ad)
+	j.HeldForMemory = j.MemoryHolds > 0
 	vacated := numAttr(ad, "VacateReasonCode")
 	vacatedSub := numAttr(ad, "VacateReasonSubCode")
 	j.ExceededMemory = j.HeldForMemory || outgrew(vacated, vacatedSub, subcodeMemory)
 	return j
 }
 
-// holdsFromAd reports whether a job was held at least once for exceeding
-// its memory or its disk request.
+// holdsFromAd reports how many times a job was held for exceeding its
+// memory request, and whether it was ever held for exceeding its disk
+// request.
 //
 // No one attribute says so. HoldReasonCode/SubCode describe the job's
 // current hold and survive into history when a held job is removed; on a
@@ -446,23 +455,43 @@ func fromAd(ad *classad.ClassAd, schedd string, r *JobReader) Job {
 // subcode is taken to be memory: until disk enforcement arrived it was
 // the only meaning that code had, and memory is still by far the common
 // one. A recorded disk subcode says otherwise.
-func holdsFromAd(ad *classad.ClassAd) (memory, disk bool) {
+func holdsFromAd(ad *classad.ClassAd) (memory int16, disk bool) {
 	code := numAttr(ad, "HoldReasonCode")
 	sub := numAttr(ad, "HoldReasonSubCode")
 	lastCode := numAttr(ad, "LastHoldReasonCode")
 	lastSub := numAttr(ad, "LastHoldReasonSubCode")
-	memory = outgrew(code, sub, subcodeMemory) || outgrew(lastCode, lastSub, subcodeMemory)
+	if outgrew(code, sub, subcodeMemory) || outgrew(lastCode, lastSub, subcodeMemory) {
+		// The codes say one hold happened, never how many.
+		memory = 1
+	}
 	disk = outgrew(code, sub, subcodeDisk) || outgrew(lastCode, lastSub, subcodeDisk)
-	if !memory && !disk {
-		if v := ad.EvaluateAttr("NumHoldsByReason"); v.IsClassAd() {
-			if inner, err := v.ClassAdValue(); err == nil && inner != nil {
-				if n, ok := inner.EvaluateAttrNumber("JobOutOfResources"); ok && n > 0 {
-					memory = true
-				}
-			}
-		}
+	// Where the count is recorded it is the better answer, and it is the
+	// only place a second hold shows at all. A disk hold with nothing
+	// saying memory keeps the count for disk, as before.
+	onlyDisk := memory == 0 && disk
+	if n := outOfResourceHolds(ad); n > memory && !onlyDisk {
+		memory = n
 	}
 	return memory, disk
+}
+
+// outOfResourceHolds is NumHoldsByReason's JobOutOfResources count, or
+// zero. It is a nested ad, and absent in a record old enough to predate
+// it or written by a schedd that did not keep it.
+func outOfResourceHolds(ad *classad.ClassAd) int16 {
+	v := ad.EvaluateAttr("NumHoldsByReason")
+	if !v.IsClassAd() {
+		return 0
+	}
+	inner, err := v.ClassAdValue()
+	if err != nil || inner == nil {
+		return 0
+	}
+	n, ok := inner.EvaluateAttrNumber("JobOutOfResources")
+	if !ok || n <= 0 {
+		return 0
+	}
+	return small[int16](int64(n))
 }
 
 // outgrew reports whether a (code, subcode) pair records exceeding the
