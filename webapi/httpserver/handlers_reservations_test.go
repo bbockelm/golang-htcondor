@@ -328,6 +328,6 @@ func startsFor(machine, start string) reservation.StartSource {
 
 type deniedWriter struct{}
 
-func (deniedWriter) SetStart(context.Context, string, string) error {
+func (deniedWriter) Probe(context.Context, string) error {
 	return errors.New("DENIED: not authorized to update machine ad")
 }
