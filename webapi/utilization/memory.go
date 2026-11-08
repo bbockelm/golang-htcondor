@@ -66,6 +66,54 @@ type memoryJob struct {
 	inForce  float64
 	// held marks a job with a memory hold recorded.
 	held bool
+
+	// ladder marks a job submitted with a memory retry ladder, and
+	// climbed one that is known to have used it -- evicted for memory and
+	// rerun at a larger request. startUnknown says its first rung is not
+	// in its own record and planMemory must supply it.
+	ladder       bool
+	climbed      bool
+	startUnknown bool
+	// committedHours is CommittedTime, which is the wall clock of the run
+	// that FINISHED. checkpointed and multiClimb are the two reasons it
+	// cannot be used to split a climber's wall clock between its rungs:
+	// a checkpointing job commits work from the runs before the eviction
+	// too (HTCondor only ever ADDS to CommittedTime; it is never reset
+	// after submit), and a job that climbed twice spent its uncommitted
+	// time at two different rungs.
+	committedHours float64
+	checkpointed   bool
+	multiClimb     bool
+	// climbs is how many times the job was evicted for memory and rerun.
+	climbs int
+}
+
+// natural is the wall clock of ONE full run of the job.
+//
+// wallHours is every run summed, so for a job that was rerun it is
+// already two runs' worth; costing a hypothetical retry against it would
+// charge four runs for a job that takes two. The run that finished is the
+// honest length, and CommittedTime is exactly that where it can be
+// trusted; otherwise the runs are assumed equal, which is the assumption
+// the eviction policy itself makes.
+func (j memoryJob) natural() float64 {
+	switch {
+	case !j.climbed:
+		return j.wallHours
+	case j.splittable():
+		return j.committedHours
+	case j.climbs > 0:
+		return j.wallHours / float64(j.climbs+1)
+	default:
+		return j.wallHours / 2
+	}
+}
+
+// splittable reports whether the job's wall clock can be divided between
+// the rung it started at and the rung it finished at.
+func (j memoryJob) splittable() bool {
+	return j.climbed && !j.checkpointed && !j.multiClimb &&
+		j.committedHours > 0 && j.committedHours < j.wallHours
 }
 
 // outgrows reports whether the job would exceed a request.
@@ -101,7 +149,17 @@ type memoryPlan struct {
 	heldAbove, heldBelow       int
 	// exceeded counts jobs stopped for outgrowing their request.
 	exceeded int
-	curve    []MemoryCurvePoint
+	// ladderJobs were submitted with a memory retry ladder and climbed of
+	// them used it. baseRung is the rung they all start at.
+	ladderJobs, climbed int
+	baseRung            float64
+	// currentFloor is currentCost with every unsplittable climber costed
+	// at its FIRST rung rather than its last: the lower bound of what the
+	// workflow reserved, where currentCost is the upper. A saving is only
+	// claimed against the floor, so a recommendation never undercuts a
+	// number this could not pin down (see memoryAdvice).
+	currentFloor float64
+	curve        []MemoryCurvePoint
 }
 
 // expectedCost is the memory reserved, in MiB-hours, if every job asked
@@ -116,16 +174,87 @@ type memoryPlan struct {
 func expectedCost(jobs []memoryJob, request, retry float64) (cost, retryFraction float64) {
 	over := 0
 	for _, j := range jobs {
-		cost += request * j.wallHours
+		run := j.natural()
+		cost += request * run
 		if j.outgrows(request) {
 			over++
-			cost += retry * j.wallHours
+			cost += retry * run
 		}
 	}
 	if len(jobs) > 0 {
 		retryFraction = float64(over) / float64(len(jobs))
 	}
 	return cost, retryFraction
+}
+
+// settleLadder fills in the first rung of a retry ladder, which no job
+// that climbed it carries, and marks the jobs that climbed a single-rung
+// ladder -- which sets no index, so until here they look like jobs that
+// simply asked for more.
+//
+// The first rung is recoverable because the jobs that never climbed still
+// hold it: every job of the workflow started there. The smallest request
+// among them IS it. Where no such job exists -- a workflow where every
+// job outgrew its first request -- there is nothing to recover it from,
+// and the climbers keep the rung they ended on, which costs the sizing
+// its precision rather than its correctness.
+//
+// It returns the rung, or zero when the workflow has no ladder.
+func settleLadder(jobs []memoryJob) float64 {
+	ladder := false
+	base := math.Inf(1)
+	for _, j := range jobs {
+		if j.ladder {
+			ladder = true
+		}
+		if !j.climbed && !j.startUnknown && j.request > 0 && j.request < base {
+			base = j.request
+		}
+	}
+	if !ladder || math.IsInf(base, 1) {
+		for i := range jobs {
+			if jobs[i].startUnknown {
+				jobs[i].request = jobs[i].inForce
+				jobs[i].startUnknown = false
+			}
+		}
+		return 0
+	}
+	for i := range jobs {
+		j := &jobs[i]
+		if j.startUnknown {
+			j.request, j.startUnknown = base, false
+		}
+		// The single-rung form leaves no index, so a job sitting above
+		// the first rung in a ladder workflow is one that climbed it.
+		if !j.climbed && j.ladder && j.inForce > base {
+			j.climbed, j.request, j.climbs = true, base, 1
+		}
+		if j.climbed && j.peak <= j.request {
+			// It was evicted for outgrowing this rung, so its true peak
+			// is above it however the high-water mark came out.
+			j.peak, j.atLeast = j.request, true
+		}
+	}
+	return base
+}
+
+// maxRetryFraction is how many jobs this workflow's recommendation may
+// send to a retry.
+//
+// The constant is a bound on PROPOSING a retry: past one in ten the
+// reruns are a large share of a workflow's wall clock, and that is a lot
+// to ask of someone who is not doing it yet. It is the wrong bound for a
+// workflow that already retries at a higher rate and has decided the
+// trade is worth it -- there, applying it rules out the configuration in
+// force and leaves only a flat request, which is how advice came to tell
+// people to undo a working ladder. So the floor is what they are already
+// running at.
+func (p *memoryPlan) maxRetryFraction() float64 {
+	if p.ladderJobs*2 <= p.n || p.n == 0 {
+		return maxRetryFraction
+	}
+	return max(maxRetryFraction, float64(p.climbed)/float64(p.n))
 }
 
 // planMemory sizes a workflow's memory from its finished jobs. It returns
@@ -137,18 +266,48 @@ func planMemory(jobs []memoryJob) *memoryPlan {
 	peaks := make([]float64, len(jobs))
 	requests := make([]float64, len(jobs))
 	plan := &memoryPlan{n: len(jobs)}
+	plan.baseRung = settleLadder(jobs)
 	for i, j := range jobs {
 		peaks[i] = j.peak
 		requests[i] = j.request
-		plan.currentCost += j.request * j.wallHours
+		switch {
+		case !j.climbed:
+			plan.currentCost += j.request * j.wallHours
+			plan.currentFloor += j.request * j.wallHours
+		case j.splittable():
+			// Exactly what the job reserved: the first rung for the run
+			// that was stopped, the last for the run that finished.
+			cost := j.request*(j.wallHours-j.committedHours) + j.inForce*j.committedHours
+			plan.currentCost += cost
+			plan.currentFloor += cost
+		default:
+			// The split is not in the record. Charge the whole run at the
+			// last rung for the upper bound and at the first for the
+			// lower, and let the advice refuse to claim the difference.
+			plan.currentCost += j.inForce * j.wallHours
+			plan.currentFloor += j.request * j.wallHours
+		}
+		if j.ladder {
+			plan.ladderJobs++
+		}
+		if j.climbed {
+			plan.climbed++
+		}
 		// An adaptive request is a retry by another name: a job that
 		// outgrows the start is held and rerun at the grown request. It
 		// is costed the way a retry is, the stopped run at full length.
+		//
+		// Costed at the full wall clock at BOTH values, which overstates
+		// a job whose two runs shared one wall clock between them -- the
+		// same overstatement a ladder used to get. It is left alone here:
+		// the formula is a different mechanism with its own settled
+		// model, and changing what it reports is not this change.
 		if j.adaptive {
 			plan.adaptiveJobs++
 			if j.outgrows(j.request) {
 				plan.outgrewStart++
 				plan.currentCost += j.inForce * j.wallHours
+				plan.currentFloor += j.inForce * j.wallHours
 			}
 		}
 		switch {
@@ -203,7 +362,7 @@ func planMemory(jobs []memoryJob) *memoryPlan {
 			point.RetryMiB = ptr(retry, 0)
 		}
 		plan.curve = append(plan.curve, point)
-		if frac > maxRetryFraction {
+		if frac > plan.maxRetryFraction() {
 			continue
 		}
 		// An equal reservation goes to the one with fewer reruns, then to

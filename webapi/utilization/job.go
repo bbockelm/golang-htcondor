@@ -62,7 +62,10 @@ const (
 // because MemoryUsage is normally recorded as an expression over it,
 // ((ResidentSetSize+1023)/1024), and evaluates to nothing without it.
 // The Last* and Vacate* pairs are where a released or retried job's
-// reason for being stopped survives (see FromAd).
+// reason for being stopped survives (see FromAd). TransformOnEvict and
+// the Retry*/Max* attributes are how a retry_request_memory ladder
+// survives: the retry REWRITES RequestMemory, so the record of a job
+// that climbed carries only the rung it ended on (see readRetryLadder).
 func Projection() []string {
 	return []string{
 		"ClusterId", "ProcId", "Owner", "JobBatchName", "DAGManJobId",
@@ -73,7 +76,8 @@ func Projection() []string {
 		"MemoryUsage", "ResidentSetSize", "ResidentSetSize_RAW", "DiskUsage", "DiskUsage_RAW",
 		"RemoteWallClockTime", "RemoteUserCpu", "RemoteSysCpu",
 		"CumulativeRemoteUserCpu", "CumulativeRemoteSysCpu", "CommittedTime",
-		"NumJobStarts", "NumHoldsByReason",
+		"NumJobStarts", "NumHoldsByReason", "NumCkpts",
+		"TransformOnEvict", "RetryRequestMemory", "RetryRequestMemoryIndex", "MaxRequestMemory",
 		"HoldReasonCode", "HoldReasonSubCode", "LastHoldReasonCode", "LastHoldReasonSubCode",
 		"VacateReasonCode", "VacateReasonSubCode",
 		"GPUsAverageUsage", "GPUsUsage", "GPUsMemoryUsage", "GPUsMinMemory", "MachineAttrGPUs_GlobalMemoryMb0",
@@ -165,6 +169,23 @@ type Job struct {
 	RequestDiskStart   Num
 	// MemoryFormula is an adaptive RequestMemory as written.
 	MemoryFormula string
+
+	// MemoryRetry marks a job submitted with a memory retry ladder:
+	// retry_request_memory, or retry_request_memory_increase. Such a job
+	// started at a SMALLER request than the one its record shows, and the
+	// workflow is already doing what memory advice would otherwise
+	// propose.
+	MemoryRetry bool
+	// Checkpointed marks a job that checkpointed at least once, which is
+	// what stops CommittedTime dividing its wall clock between the rungs
+	// (see memoryJob.committedHours).
+	Checkpointed bool
+	// RetryClimbs is how many rungs the job is KNOWN to have climbed,
+	// from RetryRequestMemoryIndex. Zero means either that it never
+	// climbed or that the record cannot say: the single-rung spelling
+	// sets no index, and those jobs are found by their request instead
+	// (see settleLadder).
+	RetryClimbs int16
 }
 
 // Num is an optional number: present with a value, or absent. Absent is
@@ -404,6 +425,7 @@ func fromAd(ad *classad.ClassAd, schedd string, r *JobReader) Job {
 	// SlotWeight.
 	j.GPUDeviceMemory = numAttr(ad, "MachineAttrGPUs_GlobalMemoryMb0")
 
+	j.readRetryLadder(ad)
 	j.HeldForMemory, j.HeldForDisk = holdsFromAd(ad)
 	vacated := numAttr(ad, "VacateReasonCode")
 	vacatedSub := numAttr(ad, "VacateReasonSubCode")
@@ -559,6 +581,57 @@ func (j *Job) readAdaptive(ad *classad.ClassAd, reader *JobReader) {
 	j.settleRequests()
 }
 
+// readRetryLadder records whether the job was submitted with a memory
+// retry ladder, and how far up it got.
+//
+// retry_request_memory installs an ON-EVICT job transform whose body
+// REWRITES RequestMemory (SetBuiltInOnEvictCheck in HTCondor's
+// submit_utils.cpp). So the attribute that says the job HAS a ladder is
+// TransformOnEvict, which names the attributes the transform sets, and
+// the attribute that says the job USED it is RetryRequestMemoryIndex,
+// which the transform creates on the first eviction and not before.
+//
+// Three spellings reach here. A ladder of several rungs leaves
+// RetryRequestMemory and the index. A single retry value leaves neither:
+// the transform body is a plain SET, so only TransformOnEvict is left,
+// and which jobs climbed has to be read off the requests themselves (see
+// settleLadder). The increment form leaves MaxRequestMemory. All three
+// set TransformOnEvict, which is why that is the attribute this keys on.
+//
+// The rungs themselves are NOT read. Submit builds RetryRequestMemory
+// from the retries alone, so the list cannot name the request a job
+// started at -- the one piece the sizing needs -- and keeping it would
+// cost a slice per job for nothing.
+func (j *Job) readRetryLadder(ad *classad.ClassAd) {
+	if on, ok := ad.EvaluateAttrString("TransformOnEvict"); ok && namesRequestMemory(on) {
+		j.MemoryRetry = true
+	} else if _, ok := ad.EvaluateAttrNumber("MaxRequestMemory"); ok {
+		j.MemoryRetry = true
+	} else if e, ok := ad.Lookup("RetryRequestMemory"); ok && e != nil {
+		j.MemoryRetry = true
+	}
+	if idx, ok := ad.EvaluateAttrNumber("RetryRequestMemoryIndex"); ok && idx >= 1 {
+		// An index without a transform is still a ladder: a record old
+		// enough to predate TransformOnEvict, or one whose cluster half
+		// did not reach the mirror.
+		j.MemoryRetry = true
+		j.RetryClimbs = small[int16](int64(idx))
+	}
+	j.Checkpointed = intAttr(ad, "NumCkpts") > 0
+}
+
+// namesRequestMemory reports whether a TransformOnEvict list names
+// RequestMemory. It is a space-separated attribute list, built by
+// is_attr_in_attr_list on the submit side.
+func namesRequestMemory(list string) bool {
+	for _, name := range strings.Fields(list) {
+		if strings.EqualFold(strings.TrimSuffix(name, ","), "RequestMemory") {
+			return true
+		}
+	}
+	return false
+}
+
 // adaptiveReq is one Request* attribute readAdaptive looks at.
 type adaptiveReq struct {
 	name  string
@@ -616,14 +689,32 @@ func (j *Job) settleRequests() {
 // isAdaptive reports whether bit is set in the job's adaptive requests.
 func (j *Job) isAdaptive(bit uint8) bool { return j.Adaptive&bit != 0 }
 
-// startMemory is the request the job started with: the formula's
-// starting value for an adaptive request, else the request itself.
+// startMemory is the request the job's FIRST run held, which is the one
+// the user chose and the one advice must be compared with.
+//
+// For an adaptive request that is the formula's starting value. For a
+// job that climbed a retry ladder it is the original request, which the
+// rewrite replaced and no attribute of the record carries, so this
+// returns absent and planMemory fills it in from the workflow.
 func (j *Job) startMemory() Num {
 	if j.isAdaptive(AdaptiveMemory) && j.RequestMemoryStart.OK() {
 		return j.RequestMemoryStart
 	}
+	if j.climbedLadder() {
+		// Absent on purpose. The rung it started at is the ORIGINAL
+		// request_memory, which the rewrite replaced and the ladder list
+		// does not carry -- submit builds that list from the retries
+		// alone. planMemory recovers it from the workflow.
+		return 0
+	}
 	return j.RequestMemory
 }
+
+// climbedLadder reports whether the job is KNOWN to have been evicted for
+// memory and rerun at a larger request. The index is the only per-job
+// attribute that says so; the single-rung form sets none, and those jobs
+// are found by their request instead (see settleLadder).
+func (j *Job) climbedLadder() bool { return j.RetryClimbs >= 1 }
 
 // startDisk is startMemory for disk.
 func (j *Job) startDisk() Num {

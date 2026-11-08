@@ -357,6 +357,9 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	diskReq, diskUsed := make([]float64, 0, n), make([]float64, 0, n)
 	memJobs := make([]memoryJob, 0, n)
 	var restartLost float64
+	// laddered holds the jobs whose first rung is the workflow's rather
+	// than their own (see startForSummary).
+	var laddered []*Job
 	for _, j := range g.jobs {
 		w.WallHours += hours(j.Wall)
 		switch {
@@ -384,7 +387,11 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 			}
 		}
 
-		if start := j.startMemory(); start.OK() {
+		if j.MemoryRetry {
+			// Which rung this job STARTED at depends on the workflow's,
+			// which planMemory has not worked out yet. Held over.
+			laddered = append(laddered, j)
+		} else if start := j.startMemory(); start.OK() {
 			memReq = append(memReq, start.V())
 		}
 		if mj, ok := memorySample(j); ok {
@@ -410,6 +417,18 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	w.WallHours = round(w.WallHours, 3)
 	w.Restarts.LostHours = round(hours(restartLost), 3)
 	w.Wall = distribution(walls)
+	// The sizing comes first now: it is what recovers a retry ladder's
+	// first rung, and the request summary has to describe the same rung.
+	plan := planMemory(memJobs)
+	baseRung := 0.0
+	if plan != nil {
+		baseRung = plan.baseRung
+	}
+	for _, j := range laddered {
+		if start, ok := startForSummary(j, baseRung); ok {
+			memReq = append(memReq, start)
+		}
+	}
 	w.Memory = MemoryStats{Request: summarizeRequest(memReq), PeakMiB: distribution(peaks)}
 	w.CPU = CPUStats{Request: summarizeRequest(cpuReq), CoresUsed: distribution(cores), Efficiency: distribution(eff)}
 	w.Disk = DiskStats{Request: summarizeRequest(diskReq), UsedKiB: distribution(diskUsed)}
@@ -418,13 +437,12 @@ func buildWorkflow(g *group, opts Options) (Workflow, occupancyPair) {
 	markAdaptive(w.Disk.Request, g.jobs, AdaptiveDisk)
 	w.GPU = gpuStats(g.jobs)
 
-	plan := planMemory(memJobs)
 	w.MemoryCurve = []MemoryCurvePoint{}
 	if plan != nil {
 		w.MemoryCurve = plan.curve
 	}
 	w.Advice = adviseWorkflow(&w, g.jobs, plan, walls)
-	w.Batches = batches(g)
+	w.Batches = batches(g, baseRung)
 	w.Samples = samples(g.jobs)
 	var occ occupancyPair
 	w.Throughput, occ = workflowThroughput(&w, g.jobs, plan, memJobs, opts.Machines)
@@ -498,6 +516,37 @@ func gpuStats(jobs []*Job) *GPUStats {
 	return g
 }
 
+// startForSummary is the request a job contributes to a request summary:
+// the one its first run held. A job that climbed a retry ladder carries
+// no such attribute -- the rewrite replaced it -- so it takes the
+// workflow's first rung, which planMemory recovered.
+//
+// Without the fallback a climber would drop out of the summary entirely
+// and the chart would describe only the jobs that fitted.
+func startForSummary(j *Job, base float64) (float64, bool) {
+	if j.MemoryRetry && base > 0 {
+		// Either spelling of the ladder, and the reason this cannot be
+		// decided from the job alone: a request standing ABOVE the
+		// workflow's first rung is one the eviction transform wrote, not
+		// one anybody chose. The multi-rung spelling says so per job with
+		// an index; the single-rung spelling says nothing at all.
+		if r := j.RequestMemory; !r.OK() || r.V() > base {
+			return base, true
+		}
+	}
+	if start := j.startMemory(); start.OK() {
+		return start.V(), true
+	}
+	// A climber in a workflow too small to have recovered its first rung.
+	// It reports the rung it ENDED on, which is wrong but is what shipped
+	// before; dropping it instead would describe the workflow with only
+	// the jobs that fitted, which is worse.
+	if r := j.RequestMemory; r.OK() {
+		return r.V(), true
+	}
+	return 0, false
+}
+
 // memorySample is the job as memory sizing sees it, if it should see it
 // at all.
 //
@@ -513,13 +562,37 @@ func gpuStats(jobs []*Job) *GPUStats {
 // An adaptive request is sized from where it starts: that is the request
 // the user chose, and the one each job's first run held. Its value in
 // force is what a rerun after a hold held (see planMemory).
+//
+// A retry ladder is the same idea with the rungs written out, and one
+// difference: the first rung is in no attribute of the record, so a job
+// that climbed one rung comes back with its start UNSET and planMemory
+// supplies the workflow's. Such a job is still a sample -- leaving it out
+// would size the next submission from the jobs that happened to fit,
+// which is the mistake the ladder exists to prevent.
 func memorySample(j *Job) (memoryJob, bool) {
 	start := j.startMemory()
-	if !start.OK() || !j.RequestMemory.OK() {
+	if !j.RequestMemory.OK() {
+		return memoryJob{}, false
+	}
+	if !start.OK() && !j.climbedLadder() {
 		return memoryJob{}, false
 	}
 	mj := memoryJob{wallHours: hours(j.Wall), request: start.V(), inForce: j.RequestMemory.V(),
-		adaptive: j.isAdaptive(AdaptiveMemory), held: j.HeldForMemory}
+		adaptive: j.isAdaptive(AdaptiveMemory), held: j.HeldForMemory,
+		ladder: j.MemoryRetry, climbed: j.climbedLadder(), checkpointed: j.Checkpointed,
+		committedHours: hours(orZero(j.CommittedTime))}
+	if !start.OK() {
+		mj.request, mj.startUnknown = 0, true
+	}
+	if mj.climbed {
+		mj.climbs = int(j.RetryClimbs)
+	}
+	if j.RetryClimbs > 1 {
+		// Two or more climbs: CommittedTime covers only the last run, so
+		// the runs before it sat at two different rungs and the wall
+		// clock cannot be split between them from this record.
+		mj.multiClimb = true
+	}
 	switch {
 	case j.Status == statusCompleted && j.MemoryUsage.OK():
 		mj.peak = j.MemoryUsage.V()
@@ -534,7 +607,7 @@ func memorySample(j *Job) (memoryJob, bool) {
 
 // batches is one point per submission, the most recent maxBatches,
 // oldest first.
-func batches(g *group) []BatchPoint {
+func batches(g *group, baseRung float64) []BatchPoint {
 	// Which batches: only the most recent maxBatches are reported, so
 	// their summaries are all that is computed. A workflow of a million
 	// jobs in ten thousand clusters would otherwise build ten thousand
@@ -588,8 +661,8 @@ func batches(g *group) []BatchPoint {
 		var memReq, peaks, cpuReq, cores, gpuReq, gpuUtil []float64
 		walls := make([]float64, 0, len(jobs))
 		for _, j := range jobs {
-			if start := j.startMemory(); start.OK() {
-				memReq = append(memReq, start.V())
+			if start, ok := startForSummary(j, baseRung); ok {
+				memReq = append(memReq, start)
 			}
 			if mj, ok := memorySample(j); ok {
 				peaks = append(peaks, mj.peak)
