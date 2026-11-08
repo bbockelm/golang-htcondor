@@ -1572,6 +1572,45 @@ export interface AdminAPIKeyCreateResponse {
   note?: string;
 }
 
+// AdminReservation is a recurring hold of pool capacity for a project.
+//
+// The controller starts holding cores back `lead_seconds` before a window
+// opens, frees `seats` of them by the bell, keeps the unclaimed ones for
+// `hold_seconds`, and keeps `standing` seats between windows. A job takes
+// a seat by carrying `project` as its ProjectName; the seat's shape comes
+// from `submit`.
+//
+// Durations are seconds on the wire because the form has number inputs: a
+// client that has to parse "6h0m0s" to put 6 in a box will get it wrong
+// eventually. The page renders them as hours and minutes.
+export interface AdminReservation {
+  id: string;
+  project: string;
+  submit: string;
+  seats: number;
+  standing: number;
+  duration_seconds: number;
+  lead_seconds: number;
+  hold_seconds: number;
+  // A five-field cron expression, read in `timezone`.
+  schedule: string;
+  // An IANA zone name, or "Local" for the server's own.
+  timezone: string;
+  enabled: boolean;
+}
+
+// AdminReservationWindow is one upcoming hold, as the preview shows it.
+// `plan_from` is when the controller starts steering other people's jobs
+// away, which is the part a cron expression hides.
+export interface AdminReservationWindow {
+  start: string;
+  end: string;
+  plan_from: string;
+  // How many scheduled starts this window covers: consecutive
+  // occurrences close enough together are held as one.
+  occurrences: number;
+}
+
 // --- Client ---
 
 export const api = {
@@ -2460,6 +2499,36 @@ export const api = {
       fetchJSON(`${BASE}/admin/api-keys/${encodeURIComponent(keyID)}`, {
         method: "DELETE",
       }),
+    // Reservations: recurring holds of pool capacity for a project.
+    // Admin-only, and 503 when the server has no application database.
+    listReservations: (): Promise<{ reservations: AdminReservation[] }> =>
+      fetchJSON(`${BASE}/admin/reservations`),
+    // Create or replace, keyed on `id`. The server validates eagerly --
+    // the cron expression, the zone, the submit file, standing against
+    // seats -- and answers 400 with a human-readable reason, which the
+    // form shows verbatim rather than inventing its own wording.
+    putReservation: (res: AdminReservation): Promise<AdminReservation> =>
+      fetchJSON(`${BASE}/admin/reservations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(res),
+      }),
+    deleteReservation: (id: string): Promise<void> =>
+      fetchJSON(`${BASE}/admin/reservations/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }),
+    // When the reservation next holds seats, over the coming `days`
+    // (default a fortnight). A cron expression is unreadable; this is
+    // what it means.
+    reservationWindows: (
+      id: string,
+      days?: number,
+    ): Promise<{ windows: AdminReservationWindow[] }> =>
+      fetchJSON(
+        `${BASE}/admin/reservations/${encodeURIComponent(id)}/windows${
+          days ? `?days=${days}` : ""
+        }`,
+      ),
   },
 
   dbmirror: {
