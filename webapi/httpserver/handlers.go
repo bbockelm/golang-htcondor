@@ -305,7 +305,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// projects'. See projectLeadReadProjects.
 	var leadProjects []string
 	if requestedEveryone && ownedByMe {
-		leadProjects = s.projectLeadReadProjects(r)
+		leadProjects = s.projectLeadReadProjects(ctx, r)
 	}
 
 	// The identity the schedd attributes to this caller. Needed for the
@@ -1339,7 +1339,7 @@ func (s *Handler) jobReadScope(ctx context.Context, r *http.Request, cluster, pr
 
 // jobsReadScope is jobReadScope for a constraint naming any set of jobs.
 func (s *Handler) jobsReadScope(ctx context.Context, r *http.Request, jobs string) (string, error) {
-	if projects := s.projectLeadReadProjects(r); len(projects) > 0 {
+	if projects := s.projectLeadReadProjects(ctx, r); len(projects) > 0 {
 		owner := htcondor.GetAuthenticatedUserFromContext(ctx)
 		if owner == "" {
 			return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")

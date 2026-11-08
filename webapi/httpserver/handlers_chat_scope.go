@@ -73,7 +73,7 @@ func (s *Handler) resolveChatScope(ctx context.Context, r *http.Request, page, r
 		return sc
 	}
 	if view.leads {
-		if projects := s.projectLeadReadProjects(r); len(projects) > 0 {
+		if projects := s.projectLeadReadProjects(ctx, r); len(projects) > 0 {
 			sc.Effective = chat.ScopeProjects
 			sc.Projects = projects
 		}

@@ -185,6 +185,25 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 			if s.mcpSuperuserGroups.configured() && s.mcpSuperuserGroups.allows(userGroups) {
 				grantedScopes = append(grantedScopes, scope)
 			}
+		case scopeAnyUserRead:
+			// The same power as mcp:admin under the name of what it
+			// grants, so it answers to the same group until the two
+			// settings are split apart.
+			//
+			// A case of its own rather than a fallthrough, because the
+			// default branch below grants an unrecognized scope
+			// unconditionally: advertising an entitlement without
+			// landing here would hand cross-user reads to any client
+			// that asked.
+			if s.mcpAdminGroups.configured() && s.mcpAdminGroups.allows(userGroups) {
+				grantedScopes = append(grantedScopes, scope)
+			}
+		case scopeAnyUserWrite:
+			// Likewise mcp:superuser, and likewise not implied by
+			// anyuser:read.
+			if s.mcpSuperuserGroups.configured() && s.mcpSuperuserGroups.allows(userGroups) {
+				grantedScopes = append(grantedScopes, scope)
+			}
 		default:
 			// condor:/WRITE is the same authorization as mcp:write --
 			// both mint an IDTOKEN carrying WRITE -- so it follows the
@@ -348,21 +367,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	errorParam := r.URL.Query().Get("error")
 
 	if errorParam != "" {
-		errorDesc := r.URL.Query().Get("error_description")
-		s.logger.Error(logging.DestinationHTTP, "OAuth2 callback error from IDP",
-			"error", errorParam, "error_description", errorDesc)
-		// The identity provider's own words, not ours: saying only that
-		// sign-in failed would hide the one detail that explains it, and
-		// an administrator is usually the person hitting this.
-		detail := errorDesc
-		if detail == "" {
-			detail = errorParam
-		}
-		if hint := refusedScopeHint(errorParam, s.oauth2Config.Scopes); hint != "" {
-			detail += " " + hint
-		}
-		s.signInFailed(w, http.StatusUnauthorized,
-			"The identity provider refused this sign-in.", detail)
+		s.reportCallbackRefusal(w, r, errorParam, state)
 		return
 	}
 
@@ -994,4 +999,172 @@ func (s *Handler) resolveLoginIdentity(w http.ResponseWriter, r *http.Request, l
 		return m, true
 	}
 	return m, false
+}
+
+// Asking for offline_access, and surviving being told no.
+//
+// This server adds offline_access to the upstream scope request unless
+// HTTP_API_UPSTREAM_REFRESH is off, because the refresh token it brings
+// back is the only thing that lets upstreamUserInfoOracle re-check a
+// token-sourced deployment's group membership. Nothing else this server
+// holds can answer that question.
+//
+// The scope is not always available to ask for. A provider that
+// approves scopes per client rejects one the client has not been
+// granted, and CILogon in particular moved from ignoring an unapproved
+// scope to refusing the whole authorization -- which, for a request
+// this server composed rather than the operator, would mean a config
+// nobody edited started refusing every sign-in.
+//
+// So the refusal is recoverable rather than fatal. The first one
+// latches, the browser is sent back to where it was going, and the
+// sign-in it restarts asks without the scope. The operator is left with
+// a warning naming what happened and an access point that still works.
+//
+// That covers a refusal the provider REDIRECTS to this server's
+// callback, which is what a provider does when the client_id and
+// redirect_uri check out, and what CILogon does -- refusedScopeHint
+// reads such an error off the callback and predates this. It does not
+// cover a provider that answers the authorize request with a direct
+// 4xx instead: that reply goes to the browser and never reaches any
+// handler here, so the person sees the provider's error page and the
+// latch is never set. An operator whose provider behaves that way sets
+// HTTP_API_UPSTREAM_REFRESH = off.
+
+// upstreamAuthScopes is what to ask the provider for on this sign-in:
+// the configured scopes, less offline_access once the provider has
+// refused it.
+func (s *Handler) upstreamAuthScopes() []string {
+	scopes := s.oauth2Config.Scopes
+	if !s.offlineAccessOptIn || !s.offlineAccessRefused.Load() {
+		return scopes
+	}
+	out := make([]string, 0, len(scopes))
+	for _, sc := range scopes {
+		if sc != "offline_access" {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
+// authCodeURL builds the provider's authorization URL for state, asking
+// for upstreamAuthScopes rather than whatever was frozen into
+// oauth2Config at startup.
+//
+// Every browser sign-in goes through here, so the latch takes effect on
+// the next redirect rather than at the next restart.
+func (s *Handler) authCodeURL(state string) string {
+	scopes := s.upstreamAuthScopes()
+	if len(scopes) == len(s.oauth2Config.Scopes) {
+		return s.oauth2Config.AuthCodeURL(state)
+	}
+	return s.oauth2Config.AuthCodeURL(state,
+		oauth2.SetAuthURLParam("scope", strings.Join(scopes, " ")))
+}
+
+// dropOfflineAccessAndRetry handles an authorization the provider
+// refused over a scope this server added by itself.
+//
+// Reports whether it took the request over. When it did, the response
+// is already written: the browser is on its way back to where it was
+// headed, which restarts the sign-in with the narrower scope rather
+// than showing somebody an error for a decision they did not make.
+//
+// It can only fire once. The latch it sets removes offline_access from
+// the next request, so a second refusal is no longer one this server
+// caused and falls through to the ordinary error page.
+func (s *Handler) dropOfflineAccessAndRetry(w http.ResponseWriter, r *http.Request, errorParam, errorDesc, state string) bool {
+	if errorParam != "invalid_scope" || !s.offlineAccessOptIn {
+		return false
+	}
+	if !refusalCouldBeOfflineAccess(errorDesc, s.upstreamAuthScopes()) {
+		return false
+	}
+	if !s.offlineAccessRefused.CompareAndSwap(false, true) {
+		// Already latched, so this sign-in did not ask for it and the
+		// refusal is about something else.
+		return false
+	}
+
+	s.logger.Warn(logging.DestinationHTTP,
+		"The identity provider refused offline_access; retrying this sign-in without it",
+		"consequence", "group membership will not be re-checked between logins for this provider",
+		"hint", "approve offline_access for this client at the provider, "+
+			"or set HTTP_API_UPSTREAM_REFRESH = off to stop asking")
+
+	// Back to where the browser was going. The state entry is consumed
+	// either way: it named one authorization attempt and that attempt is
+	// over.
+	target := "/"
+	if state != "" {
+		if entry, ok := s.oauth2StateStore.Take(state); ok && entry != nil && isSafeLocalRedirect(entry.OriginalURL) {
+			target = entry.OriginalURL
+		}
+	}
+	http.Redirect(w, r, target, http.StatusFound)
+	return true
+}
+
+// refusalCouldBeOfflineAccess reports whether an invalid_scope refusal
+// might be about offline_access, and so might be fixed by asking
+// without it.
+//
+// Providers name the scope they would not give: CILogon's reads
+// `Unrecognized scope "profile"`. Where the name is one of the OTHER
+// scopes we asked for, dropping offline_access fixes nothing and costs
+// the operator the one message that would have told them what to fix --
+// the exact failure the invalid_scope hint exists to explain. So a
+// refusal that names somebody else is left alone.
+//
+// An unrecognizable description is treated as "might be": the retry
+// costs one redirect, and if it was something else the second refusal
+// lands on the error page with the description intact.
+func refusalCouldBeOfflineAccess(errorDesc string, requested []string) bool {
+	desc := strings.ToLower(errorDesc)
+	if strings.Contains(desc, "offline_access") {
+		return true
+	}
+	for _, sc := range requested {
+		if sc == "offline_access" {
+			continue
+		}
+		if sc != "" && strings.Contains(desc, strings.ToLower(sc)) {
+			// The provider named a different scope. Asking without
+			// offline_access would not change its mind.
+			return false
+		}
+	}
+	return true
+}
+
+// reportCallbackRefusal ends a sign-in the provider refused, either by
+// retrying it without a scope this server added or by showing the
+// person what the provider said.
+//
+// Split out of handleOAuth2Callback, which is long enough that one more
+// branch in it is one too many.
+func (s *Handler) reportCallbackRefusal(w http.ResponseWriter, r *http.Request, errorParam, state string) {
+	errorDesc := r.URL.Query().Get("error_description")
+	s.logger.Error(logging.DestinationHTTP, "OAuth2 callback error from IDP",
+		"error", errorParam, "error_description", errorDesc)
+
+	// A refusal over a scope this server added by itself is ours to
+	// undo, not the operator's to debug.
+	if s.dropOfflineAccessAndRetry(w, r, errorParam, errorDesc, state) {
+		return
+	}
+
+	// The identity provider's own words, not ours: saying only that
+	// sign-in failed would hide the one detail that explains it, and
+	// an administrator is usually the person hitting this.
+	detail := errorDesc
+	if detail == "" {
+		detail = errorParam
+	}
+	if hint := refusedScopeHint(errorParam, s.upstreamAuthScopes()); hint != "" {
+		detail += " " + hint
+	}
+	s.signInFailed(w, http.StatusUnauthorized,
+		"The identity provider refused this sign-in.", detail)
 }

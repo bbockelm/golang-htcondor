@@ -23,6 +23,14 @@ type apiKeyRow struct {
 	ExpiresAt  *time.Time
 	DeletedAt  *time.Time
 	LastUsedAt *time.Time
+	// Service marks a key as belonging to an automation rather than to
+	// the person who minted it. It decides which of the two
+	// entitlement models below applies; see apikey_entitlements.go.
+	Service bool
+	// EntitlementsCheckedAt is when this key's entitlements were last
+	// confirmed against a live source. Seeded at mint. Only consulted
+	// for a key that is not a service key.
+	EntitlementsCheckedAt *time.Time
 }
 
 // apiKeyStore wraps the api_keys table. The Handler holds one and
@@ -46,16 +54,18 @@ var errAPIKeyNotFound = errors.New("api key not found, expired, or revoked")
 func (s *apiKeyStore) LookupActive(ctx context.Context, keyID string) (*apiKeyRow, error) {
 	row := &apiKeyRow{}
 	var scopesJSON string
-	var expiresAt, deletedAt, lastUsedAt sql.NullTime
+	var expiresAt, deletedAt, lastUsedAt, checkedAt sql.NullTime
 	err := s.db.QueryRowContext(ctx,
 		`SELECT key_id, secret_hash, name, scopes_json, creator,
-		        created_at, expires_at, deleted_at, last_used_at
+		        created_at, expires_at, deleted_at, last_used_at,
+		        service, entitlements_checked_at
 		   FROM api_keys
 		  WHERE key_id = ?`,
 		keyID,
 	).Scan(
 		&row.KeyID, &row.SecretHash, &row.Name, &scopesJSON, &row.Creator,
 		&row.CreatedAt, &expiresAt, &deletedAt, &lastUsedAt,
+		&row.Service, &checkedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errAPIKeyNotFound
@@ -83,6 +93,9 @@ func (s *apiKeyStore) LookupActive(ctx context.Context, keyID string) (*apiKeyRo
 	if lastUsedAt.Valid {
 		row.LastUsedAt = &lastUsedAt.Time
 	}
+	if checkedAt.Valid {
+		row.EntitlementsCheckedAt = &checkedAt.Time
+	}
 	return row, nil
 }
 
@@ -91,7 +104,7 @@ func (s *apiKeyStore) LookupActive(ctx context.Context, keyID string) (*apiKeyRo
 // Returns the row's created_at as a courtesy (for the create-key
 // response). No retry on conflict — key_id collisions are 1-in-2^48,
 // not something to engineer for.
-func (s *apiKeyStore) Insert(ctx context.Context, keyID, secretHash, name, creator string, scopes []string, expiresAt *time.Time) (time.Time, error) {
+func (s *apiKeyStore) Insert(ctx context.Context, keyID, secretHash, name, creator string, scopes []string, expiresAt *time.Time, service bool) (time.Time, error) {
 	scopesJSON, err := json.Marshal(scopes)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("api_keys marshal scopes: %w", err)
@@ -101,10 +114,15 @@ func (s *apiKeyStore) Insert(ctx context.Context, keyID, secretHash, name, creat
 	if expiresAt != nil {
 		exp = sql.NullTime{Time: *expiresAt, Valid: true}
 	}
+	// entitlements_checked_at is seeded with the mint time because
+	// minting IS a verification: the caller held a live session whose
+	// groups proved the entitlement being recorded. Leaving it NULL
+	// would make a key that was just proven look unverified.
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO api_keys (key_id, secret_hash, name, scopes_json, creator, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		keyID, secretHash, name, string(scopesJSON), creator, now, exp,
+		`INSERT INTO api_keys (key_id, secret_hash, name, scopes_json, creator,
+		                       created_at, expires_at, service, entitlements_checked_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		keyID, secretHash, name, string(scopesJSON), creator, now, exp, service, now,
 	)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("api_keys insert: %w", err)
@@ -123,7 +141,8 @@ func (s *apiKeyStore) Insert(ctx context.Context, keyID, secretHash, name, creat
 func (s *apiKeyStore) ListByCreator(ctx context.Context, creator string) ([]apiKeyRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT key_id, secret_hash, name, scopes_json, creator,
-		        created_at, expires_at, deleted_at, last_used_at
+		        created_at, expires_at, deleted_at, last_used_at,
+		        service, entitlements_checked_at
 		   FROM api_keys
 		  WHERE creator = ?
 		  ORDER BY created_at DESC`,
@@ -137,10 +156,11 @@ func (s *apiKeyStore) ListByCreator(ctx context.Context, creator string) ([]apiK
 	for rows.Next() {
 		var r apiKeyRow
 		var scopesJSON string
-		var expiresAt, deletedAt, lastUsedAt sql.NullTime
+		var expiresAt, deletedAt, lastUsedAt, checkedAt sql.NullTime
 		if err := rows.Scan(
 			&r.KeyID, &r.SecretHash, &r.Name, &scopesJSON, &r.Creator,
 			&r.CreatedAt, &expiresAt, &deletedAt, &lastUsedAt,
+			&r.Service, &checkedAt,
 		); err != nil {
 			return nil, fmt.Errorf("api_keys scan: %w", err)
 		}
@@ -155,6 +175,9 @@ func (s *apiKeyStore) ListByCreator(ctx context.Context, creator string) ([]apiK
 		}
 		if lastUsedAt.Valid {
 			r.LastUsedAt = &lastUsedAt.Time
+		}
+		if checkedAt.Valid {
+			r.EntitlementsCheckedAt = &checkedAt.Time
 		}
 		out = append(out, r)
 	}
@@ -199,6 +222,22 @@ func (s *apiKeyStore) SoftDelete(ctx context.Context, keyID, creator string) err
 func (s *apiKeyStore) TouchLastUsed(ctx context.Context, keyID string) {
 	_, _ = s.db.ExecContext(ctx,
 		`UPDATE api_keys SET last_used_at = ? WHERE key_id = ?`,
+		time.Now().UTC(), keyID,
+	)
+}
+
+// MarkEntitlementsChecked records that this key's entitlements were just
+// confirmed against a live source, which restarts the staleness window
+// in apikey_entitlements.go.
+//
+// Best-effort, like TouchLastUsed: a failed write costs one more check
+// on the next request, which is the behaviour we would have had anyway
+// without the column. Denying a request whose entitlement was just
+// verified because the bookkeeping write failed would be strictly
+// worse.
+func (s *apiKeyStore) MarkEntitlementsChecked(ctx context.Context, keyID string) {
+	_, _ = s.db.ExecContext(ctx,
+		`UPDATE api_keys SET entitlements_checked_at = ? WHERE key_id = ?`,
 		time.Now().UTC(), keyID,
 	)
 }

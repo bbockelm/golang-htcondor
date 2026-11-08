@@ -258,6 +258,11 @@ var reconfigParams = []reconfigParam{
 	// startup, so they need their setters before they can move up.
 	{name: "MCP_ADMIN_USERS"},
 
+	// API-key entitlement policy, read per request but off the Handler's
+	// own fields, which are set once at construction.
+	{name: "HTTP_API_API_KEY_ENTITLEMENT_TTL"},
+	{name: "HTTP_API_SERVICE_KEY_MAX_LIFETIME"},
+
 	// Pool query policy, compiled into the attribute allowlist at startup.
 	{name: "HTTP_API_POOL_QUERY_IDENTITY"},
 	{name: "HTTP_API_POOL_QUERY_EXTRA_ATTRS"},

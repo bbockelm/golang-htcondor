@@ -723,7 +723,7 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 			h.oauth2StateStore.StoreForBrowser(state, ar, "", binding)
 
 			// Build authorization URL
-			authURL := h.oauth2Config.AuthCodeURL(state)
+			authURL := h.authCodeURL(state)
 
 			h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for authentication",
 				"client_id", ar.GetClient().GetID(), "state", state, "auth_url", authURL)
@@ -843,6 +843,14 @@ var signInScopes = map[string]bool{
 var privilegedScopes = map[string]bool{
 	"mcp:admin":     true,
 	"mcp:superuser": true,
+	// The same two powers under the names that say what they grant.
+	// Listed here before they can be requested through OAuth2 at all --
+	// today they are mintable only on an API key -- because the cost of
+	// listing a scope that never reaches a consent page is nothing, and
+	// the cost of the reverse is a client granted power over everyone's
+	// jobs by a box that was ticked for it.
+	scopeAnyUserRead:  true,
+	scopeAnyUserWrite: true,
 }
 
 func getScopeDescription(scope string) string {
@@ -855,6 +863,8 @@ func getScopeDescription(scope string) string {
 		"mcp:write":             "Full access to submit and manage HTCondor jobs via MCP protocol",
 		"mcp:admin":             "Read every user's jobs, not only your own",
 		"mcp:superuser":         "Change any user's jobs: remove, hold, release, edit",
+		scopeAnyUserRead:        "Read every user's jobs, not only your own",
+		scopeAnyUserWrite:       "Change any user's jobs: remove, hold, release, edit",
 		"condor:/READ":          "HTCondor READ authorization - allows reading job and daemon information",
 		"condor:/WRITE":         "HTCondor WRITE authorization - allows submitting and managing jobs",
 		"condor:/ADMINISTRATOR": "HTCondor ADMINISTRATOR authorization - full administrative access",
@@ -1475,8 +1485,10 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		// Requestable, but only granted to members of the configured
 		// group -- see getScopesForGroups. A client asking for them
 		// without the group membership simply does not receive them.
-		"mcp:admin":     true,
-		"mcp:superuser": true,
+		"mcp:admin":       true,
+		"mcp:superuser":   true,
+		scopeAnyUserRead:  true,
+		scopeAnyUserWrite: true,
 		// READ and WRITE only: they are the condor levels a token from
 		// this server can carry (mapCondorScopesToAuthz). Any other was
 		// accepted here, shown pre-ticked on the consent page, and
@@ -1580,6 +1592,13 @@ var oauth2AdvertisedScopes = []string{
 	// can be given an access point to look after without being given its
 	// owner's ability to remove anybody's jobs.
 	"mcp:admin", "mcp:superuser",
+	// The same two powers named for what they grant. Advertised so an
+	// OAuth2 client can request them at all -- a client asks only for
+	// what the server advertises -- and granted on exactly the group
+	// policy their older spellings answer to, so advertising them adds
+	// a name rather than a privilege. The consent page renders them
+	// unchecked, as it does any privileged scope.
+	scopeAnyUserRead, scopeAnyUserWrite,
 	// READ and WRITE only. The ADVERTISE_* levels were advertised as
 	// scopes and no tool checked them. advertise_to_collector sends the
 	// ad with the caller's own per-request credential, so whether that
@@ -2036,7 +2055,7 @@ func (h *Handler) deviceVerifyGet(w http.ResponseWriter, r *http.Request) {
 		h.oauth2StateStore.StoreForBrowser(state, nil, returnURL, binding)
 
 		// Build authorization URL
-		authURL := h.oauth2Config.AuthCodeURL(state)
+		authURL := h.authCodeURL(state)
 
 		h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for device verification authentication",
 			"state", state, "auth_url", authURL, "return_url", returnURL)

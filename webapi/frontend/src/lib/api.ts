@@ -1550,6 +1550,13 @@ export interface AdminAPIKey {
   expires_at?: string;
   deleted_at?: string;
   last_used_at?: string;
+  // A service key belongs to an automation rather than to the admin who
+  // minted it, and holds its entitlements for its whole life instead of
+  // having them re-checked on use.
+  service: boolean;
+  // When this key's entitlements were last confirmed. Absent on a key
+  // that carries none and on a service key, which is not re-checked.
+  entitlements_checked_at?: string;
 }
 
 // AdminAPIKeyCreateResponse carries the only-shown-once full key
@@ -1559,6 +1566,10 @@ export interface AdminAPIKey {
 export interface AdminAPIKeyCreateResponse {
   api_key: AdminAPIKey;
   key: string;
+  // A caveat about the key just minted, when there is one: shown
+  // alongside the key, since minting is the last moment anybody is
+  // looking at it.
+  note?: string;
 }
 
 // --- Client ---
@@ -2438,6 +2449,7 @@ export const api = {
       name: string;
       scopes: string[];
       expires_at?: string;
+      service?: boolean;
     }): Promise<AdminAPIKeyCreateResponse> =>
       fetchJSON(`${BASE}/admin/api-keys`, {
         method: "POST",

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -215,6 +216,15 @@ type Handler struct {
 	// about a user after they have gone home. See upstream_refresh.go.
 	upstreamRefreshMode UpstreamRefreshMode
 	upstreamRefresh     *upstreamRefreshStore
+	// offlineAccessOptIn records that THIS server added offline_access to
+	// the upstream scope request, rather than the operator listing it.
+	// Only a scope we added is one we may quietly drop again; an
+	// operator who asked for it gets the refusal reported instead.
+	offlineAccessOptIn bool
+	// offlineAccessRefused latches when the provider has rejected
+	// offline_access, so every later sign-in asks without it. See
+	// dropOfflineAccessAndRetry.
+	offlineAccessRefused atomic.Bool
 	// tokenRetentionFor is how long a dead token row is kept before being
 	// deleted. Negative keeps them forever; zero means the default.
 	tokenRetentionFor time.Duration
@@ -267,10 +277,18 @@ type Handler struct {
 	// token exchange. Nil when no issuers are configured. See
 	// oauth2_token_exchange_ext.go.
 	extIssuers          *extIssuerValidator
-	tokenCache          *TokenCache       // Cache of validated tokens and their session caches (includes username)
-	cookieSessionCaches *TokenCache       // One private session cache per session-cookie user (see sessionCacheFor)
-	sessionStore        *SessionStore     // HTTP session store for browser-based authentication
-	apiKeyStore         *apiKeyStore      // API-key store: admin-mintable bearer tokens for non-interactive callers
+	tokenCache          *TokenCache   // Cache of validated tokens and their session caches (includes username)
+	cookieSessionCaches *TokenCache   // One private session cache per session-cookie user (see sessionCacheFor)
+	sessionStore        *SessionStore // HTTP session store for browser-based authentication
+	apiKeyStore         *apiKeyStore  // API-key store: admin-mintable bearer tokens for non-interactive callers
+	// apiKeyEntitlementTTL is HTTP_API_API_KEY_ENTITLEMENT_TTL: how long
+	// an ordinary API key's entitlement stands with nothing able to
+	// confirm it. Zero means defaultEntitlementTTL.
+	apiKeyEntitlementTTL time.Duration
+	// serviceKeyMaxTTL is HTTP_API_SERVICE_KEY_MAX_LIFETIME: the cap on
+	// how far out a service key's expiry may be set. Zero means
+	// defaultServiceKeyMaxLifetime.
+	serviceKeyMaxTTL    time.Duration
 	oauth2Provider      *OAuth2Provider   // OAuth2 provider for MCP endpoints
 	oauth2Config        *oauth2.Config    // OAuth2 client config for SSO
 	oauth2StateStore    *OAuth2StateStore // State storage for OAuth2 SSO flow
@@ -1173,6 +1191,10 @@ type HandlerConfig struct {
 
 	// TokenRetention is HTTP_API_TOKEN_RETENTION. See Config.
 	TokenRetention string
+	// APIKeyEntitlementTTL is HTTP_API_API_KEY_ENTITLEMENT_TTL. See Config.
+	APIKeyEntitlementTTL time.Duration
+	// ServiceKeyMaxLifetime is HTTP_API_SERVICE_KEY_MAX_LIFETIME. See Config.
+	ServiceKeyMaxLifetime time.Duration
 
 	// MCPMaxRequestDuration is the hard stop on an MCP request that is
 	// still making progress (HTTP_API_MCP_MAX_REQUEST_DURATION). While a
@@ -1812,6 +1834,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if mode != UpstreamRefreshOff {
 		h.upstreamRefresh = &upstreamRefreshStore{db: h.db, sealer: sealer, logger: logger}
 	}
+	h.apiKeyEntitlementTTL = cfg.APIKeyEntitlementTTL
+	h.serviceKeyMaxTTL = cfg.ServiceKeyMaxLifetime
 	retention, err := ParseTokenRetention(cfg.TokenRetention)
 	if err != nil {
 		return nil, fmt.Errorf("invalid HTTP_API_TOKEN_RETENTION: %w", err)
@@ -2047,6 +2071,25 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			scopes := cfg.OAuth2Scopes
 			if len(scopes) == 0 {
 				scopes = []string{"openid", "profile", "email"}
+			}
+			// Ask for offline_access wherever this server is willing to
+			// keep the resulting refresh token, which is what lets
+			// upstreamUserInfoOracle re-check membership for a
+			// token-sourced deployment. Without it the oracle is
+			// registered and permanently silent: the provider never
+			// returns a credential, so there is nothing to ask with.
+			//
+			// Adding it can be refused -- a provider that approves
+			// scopes per client rejects one the client does not hold,
+			// and some reject the whole authorization rather than
+			// ignoring the scope. That is survivable rather than
+			// breaking, because the first such refusal latches
+			// offlineAccessRefused and every sign-in after it asks
+			// without the scope. Turn it off outright with
+			// HTTP_API_UPSTREAM_REFRESH = off.
+			if h.upstreamRefreshMode != UpstreamRefreshOff && !slices.Contains(scopes, "offline_access") {
+				scopes = append(append([]string{}, scopes...), "offline_access")
+				h.offlineAccessOptIn = true
 			}
 
 			h.oauth2Config = &oauth2.Config{
@@ -3398,7 +3441,7 @@ func (h *Handler) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	h.oauth2StateStore.StoreForBrowser(state, nil, originalURL, binding)
 
 	// Build authorization URL
-	authURL := h.oauth2Config.AuthCodeURL(state)
+	authURL := h.authCodeURL(state)
 
 	h.logger.Info(logging.DestinationHTTP, "Redirecting unauthenticated browser to login",
 		"original_url", originalURL, "state", state, "auth_url", authURL)

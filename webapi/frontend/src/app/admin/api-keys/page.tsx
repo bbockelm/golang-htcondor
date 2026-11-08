@@ -139,12 +139,25 @@ function NewKeyForm({
     name: string;
     scopes: string[];
     expires_at?: string;
+    service?: boolean;
   }) => void;
 }) {
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<Set<string>>(new Set());
   const [expiresInDays, setExpiresInDays] = useState<string>('never');
+  const [service, setService] = useState(false);
   const scopeNames = Object.keys(validScopes);
+
+  // An entitlement scope says whose records the key may read, which is
+  // the only thing the two key models differ about. The form surfaces
+  // the choice only once one is selected, so a key for /metrics is
+  // still a two-field form.
+  const entitlementScopes = ['anyuser:read', 'anyuser:write'];
+  const entitled = Array.from(scopes).some((s) => entitlementScopes.includes(s));
+  // A service key holding an entitlement has nothing but its expiry
+  // bounding it, so the server refuses one that never expires. Saying so
+  // here beats a round-trip to find out.
+  const needsExpiry = service && entitled && expiresInDays === 'never';
 
   const submit = () => {
     const trimmed = name.trim();
@@ -161,7 +174,7 @@ function NewKeyForm({
         ).toISOString();
       }
     }
-    onSubmit({ name: trimmed, scopes: Array.from(scopes), expires_at });
+    onSubmit({ name: trimmed, scopes: Array.from(scopes), expires_at, service });
   };
 
   return (
@@ -222,11 +235,55 @@ function NewKeyForm({
           </div>
         </div>
       </div>
+      {entitled && (
+        <div className="mt-3 rounded-sm border border-gray-200 bg-gray-50 p-3 text-xs">
+          <span className="block font-medium text-gray-900">
+            Who does this key belong to?
+          </span>
+          <label className="mt-2 flex items-start gap-2">
+            <input
+              type="radio"
+              name="keymodel"
+              checked={!service}
+              onChange={() => setService(false)}
+              className="mt-0.5 border-gray-300"
+            />
+            <span>
+              <span className="font-medium">Me</span>
+              <span className="block text-gray-500">
+                Reads the whole pool for as long as I am entitled to. Stops
+                doing so when I am not.
+              </span>
+            </span>
+          </label>
+          <label className="mt-2 flex items-start gap-2">
+            <input
+              type="radio"
+              name="keymodel"
+              checked={service}
+              onChange={() => setService(true)}
+              className="mt-0.5 border-gray-300"
+            />
+            <span>
+              <span className="font-medium">A service</span>
+              <span className="block text-gray-500">
+                Reads the whole pool until the key expires, whatever happens to
+                my own access. Must expire; mint it again to renew.
+              </span>
+            </span>
+          </label>
+          {needsExpiry && (
+            <span className="mt-2 block text-red-600">
+              Choose an expiry for a service key.
+            </span>
+          )}
+        </div>
+      )}
       <div className="mt-3 flex items-center gap-3">
         <button
           type="button"
           onClick={submit}
-          disabled={busy || !name.trim() || scopes.size === 0}
+          disabled={busy || !name.trim() || scopes.size === 0 || needsExpiry}
           className="rounded-sm bg-brand-600 px-3 py-1 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
         >
           {busy ? 'Minting…' : 'Mint key'}
@@ -271,6 +328,11 @@ function NewKeyShown({
         Copy this key now. It will NEVER be shown again — losing it means
         revoking and minting a new one.
       </p>
+      {minted.note && (
+        <p className="mt-2 rounded-sm bg-amber-50 px-2 py-1 text-xs text-amber-900">
+          {minted.note}
+        </p>
+      )}
       <div className="mt-2 flex gap-2">
         <input
           type="text"
@@ -310,7 +372,14 @@ function APIKeyRow({
   const revoked = !!apiKey.deleted_at;
   return (
     <tr className={`hover:bg-gray-50 ${revoked ? 'opacity-50' : ''}`}>
-      <td className="px-3 py-2">{apiKey.name}</td>
+      <td className="px-3 py-2">
+        {apiKey.name}
+        {apiKey.service && (
+          <span className="ml-2 inline-flex rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-800">
+            Service
+          </span>
+        )}
+      </td>
       <td className="px-3 py-2 font-mono text-xs text-gray-700">
         htca-v1-{apiKey.key_id}…
       </td>

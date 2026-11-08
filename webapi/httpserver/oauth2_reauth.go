@@ -302,22 +302,25 @@ func (h *Handler) reevaluateSubjectWith(ctx context.Context, username string, gr
 	// A user removed from condor-writers upstream still carries
 	// "condor-writers" here and still passes.
 	//
-	// That gap is deliberate, not an oversight. Reading live membership
-	// means holding a live credential to the upstream IDP (an upstream
-	// refresh token) or a separate directory binding, neither of which
-	// this server has. Membership changes are covered instead by the
-	// revocation oracles below, by the admin revoke endpoint, and
-	// ultimately by the lifetime cap in reauthorizeGrant — which is the only mechanism
-	// that bounds exposure with no cooperation from anything else.
+	// Reading live membership means holding something this server can
+	// re-read a user with: the account database, or a live credential to
+	// the identity provider. Two oracles below do exactly that, and
+	// between them they cover the gap wherever a deployment has either:
 	//
-	// That future live-membership source now exists, where the
-	// deployment has one: with HTTP_API_GROUP_SOURCE=system, groups come
-	// from the account database rather than the token, so they can be
-	// re-read here without any upstream credential. systemGroupOracle
-	// does exactly what this paragraph described -- see
-	// identity_group_oracle.go -- and is registered among the oracles
-	// below. The gap above remains real for token-sourced groups, which
-	// is the default and the only option in a container.
+	//   - systemGroupOracle (identity_group_oracle.go) re-reads the
+	//     account database. Registered when HTTP_API_GROUP_SOURCE names
+	//     a local source, which is also what makes those groups
+	//     authoritative at login.
+	//   - upstreamUserInfoOracle (upstream_oracle.go) asks the provider
+	//     itself, with the refresh token it issued at login. Registered
+	//     when HTTP_API_UPSTREAM_REFRESH keeps one and the provider
+	//     released offline_access.
+	//
+	// Where neither applies -- token-sourced groups, and a provider that
+	// releases no refresh token -- the gap is real and deliberate. It is
+	// covered then by the admin revoke endpoint and ultimately by the
+	// lifetime cap in reauthorizeGrant, which is the only mechanism that
+	// bounds exposure with no cooperation from anything else.
 	//
 	// A nil list means the user authenticated by a path that asserts no
 	// groups (the trusted user header, say), so there is no policy to

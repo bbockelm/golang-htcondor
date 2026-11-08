@@ -815,7 +815,7 @@ func TestProjectLeadReadScope(t *testing.T) {
 	}
 
 	lead := env.session("alice")
-	if got := env.h.projectLeadReadProjects(env.request(http.MethodGet, "/", lead, nil)); !reflect.DeepEqual(got, []string{"Physics"}) {
+	if got := env.h.projectLeadReadProjects(context.Background(), env.request(http.MethodGet, "/", lead, nil)); !reflect.DeepEqual(got, []string{"Physics"}) {
 		t.Fatalf("projectLeadReadProjects = %v", got)
 	}
 	for name, want := range map[string]bool{"own": true, "project": true, "other": false, "none": false} {
@@ -827,7 +827,7 @@ func TestProjectLeadReadScope(t *testing.T) {
 	}
 
 	nonLead := env.session("mallory")
-	if got := env.h.projectLeadReadProjects(env.request(http.MethodGet, "/", nonLead, nil)); got != nil {
+	if got := env.h.projectLeadReadProjects(context.Background(), env.request(http.MethodGet, "/", nonLead, nil)); got != nil {
 		t.Errorf("non-lead got read projects %v", got)
 	}
 	if evalConstraint(t, read(nonLead, 2), ads["project"]) {
@@ -835,7 +835,7 @@ func TestProjectLeadReadScope(t *testing.T) {
 	}
 
 	admin := env.session("alice", "web-admins")
-	if got := env.h.projectLeadReadProjects(env.request(http.MethodGet, "/", admin, nil)); got != nil {
+	if got := env.h.projectLeadReadProjects(context.Background(), env.request(http.MethodGet, "/", admin, nil)); got != nil {
 		t.Errorf("an admin should not be narrowed to projects, got %v", got)
 	}
 }
@@ -1288,5 +1288,75 @@ func TestJobWatchEndsWhenSessionGoes(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("the watch kept streaming after the session was deleted")
+	}
+}
+
+// A project lead is a person, not a browser tab. The same person
+// holding a bearer token leads the same projects.
+//
+// Before this, lead reads were a browser-session feature: a bearer
+// carried no session, so projectLeadReadProjects returned nil and the
+// listing silently narrowed to the caller's own jobs with nothing
+// saying why. That is the failure this server was reported for on the
+// admin path, still live here, and the rule seesAllJobs already
+// follows -- decided by who the caller is, never by how the credential
+// arrived.
+func TestProjectLeadReadIsIdentityBasedNotSessionBased(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.h.webuiAdminGroups = newGroupSet("web-admins")
+
+	// The browser session, which worked before and must keep working.
+	lead := env.session("alice")
+	bySession := env.h.projectLeadReadProjects(context.Background(),
+		env.request(http.MethodGet, "/", lead, nil))
+	if !reflect.DeepEqual(bySession, []string{"Physics"}) {
+		t.Fatalf("session lead = %v, want [Physics]", bySession)
+	}
+
+	// The same person on a bearer: no session, identity from the
+	// request context. The leads file names her outright, so no group
+	// source is needed to answer.
+	ctx := htcondor.WithAuthenticatedUser(context.Background(), "alice")
+	byIdentity := env.h.projectLeadReadProjects(ctx,
+		env.request(http.MethodGet, "/", "", nil))
+	if !reflect.DeepEqual(byIdentity, bySession) {
+		t.Errorf("the same person got %v on a bearer and %v in a browser", byIdentity, bySession)
+	}
+}
+
+// A bearer for somebody who leads nothing still leads nothing.
+func TestProjectLeadBearerWhoLeadsNothingGetsNothing(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.h.webuiAdminGroups = newGroupSet("web-admins")
+
+	ctx := htcondor.WithAuthenticatedUser(context.Background(), "bob")
+	if got := env.h.projectLeadReadProjects(ctx, env.request(http.MethodGet, "/", "", nil)); got != nil {
+		t.Errorf("bob leads nothing but got %v", got)
+	}
+}
+
+// An unauthenticated request leads nothing: there is no identity to
+// resolve, and nil is the only honest answer.
+func TestProjectLeadUnauthenticatedGetsNothing(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.h.webuiAdminGroups = newGroupSet("web-admins")
+
+	if got := env.h.projectLeadReadProjects(context.Background(),
+		env.request(http.MethodGet, "/", "", nil)); got != nil {
+		t.Errorf("an unauthenticated caller got %v", got)
+	}
+}
+
+// Leads stay off in multi-AP mode on every credential, not just on
+// sessions: the configuration names no access point, so a lead's
+// cross-user read would reach every AP alike.
+func TestProjectLeadStaysOffInMultiAPForBearers(t *testing.T) {
+	env := newLeadTestEnv(t, "", "Physics alice\n", "")
+	env.h.webuiAdminGroups = newGroupSet("web-admins")
+	env.h.multi = &multiAPMode{}
+
+	ctx := htcondor.WithAuthenticatedUser(context.Background(), "alice")
+	if got := env.h.projectLeadReadProjects(ctx, env.request(http.MethodGet, "/", "", nil)); got != nil {
+		t.Errorf("multi-AP bearer got lead projects %v", got)
 	}
 }

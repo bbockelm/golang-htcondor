@@ -15,7 +15,9 @@ Three authentication channels, in precedence order:
    reach HTCondor. A key acts as its creator only if it carries a
    `condor:/*` scope; a `metrics`-only key is refused everywhere but
    `/metrics` and `/readyz`. Mint via the admin UI at
-   `/admin/api-keys`, or `POST /api/v1/admin/api-keys`.
+   `/admin/api-keys`, or `POST /api/v1/admin/api-keys`. A key may
+   also carry the `anyuser:read` entitlement; see
+   [Service keys and entitlements](#service-keys-and-entitlements).
 2. **OAuth2 / OIDC** — for browsers and MCP clients. The server
    embeds its own IDP (`/idp/*`) and also accepts upstream OIDC
    providers via `HTTP_API_OAUTH2_*` config. An access token this
@@ -31,6 +33,69 @@ Three authentication channels, in precedence order:
 A separate browser-session cookie is used for the SPA UI; it sits
 on top of (2) — the IDP issues the token; the cookie carries the
 session.
+
+## Service keys and entitlements
+
+Most API-key scopes name a door: `metrics` is `/metrics`, `condor:/READ`
+is the routes that query HTCondor. The `anyuser:*` scopes are different.
+They name whose records the key may reach once inside -- every user's,
+rather than its creator's -- which makes them claims about a **person**,
+not about a key. People lose entitlements, so these are not simply
+stored and trusted forever.
+
+There are two, and neither implies the other, exactly as `condor:/READ`
+and `condor:/WRITE` do not:
+
+| Scope | Grants |
+| --- | --- |
+| `anyuser:read` | Read every user's records. |
+| `anyuser:write` | Act on every user's records: remove, hold, release, edit. |
+
+Everything below applies to both.
+
+A key is minted in one of two models, and the difference between them is
+how that claim is kept honest.
+
+**An ordinary key** belongs to the administrator who minted it and
+tracks them. Its entitlement is re-checked on use against whatever live
+source the deployment has:
+
+- With `HTTP_API_GROUP_SOURCE = system` (or `file:`), membership is read
+  from the account database on each request. A creator who leaves the
+  group loses the entitlement at once; the key keeps its other scopes
+  and sees its creator's own records.
+- With `HTTP_API_GROUP_SOURCE = token` -- the default, and the only
+  option in a container -- there is nothing to re-read. Those groups
+  came from a token presented at a login that is over. The entitlement
+  is then honoured only while a successful check is recent, bounded by
+  `HTTP_API_API_KEY_ENTITLEMENT_TTL` (default one hour), and lapses
+  after that. The key goes on working; it just stops seeing past its
+  creator's own records.
+
+An unreachable account database is silence rather than a denial: it
+leaves the entitlement in place for the rest of the window instead of
+revoking everybody at once.
+
+**A service key** (`"service": true` at mint) belongs to an automation
+rather than to a person. Its entitlement is granted once, at mint --
+the only moment the minter's entitlement can be proven, since they are
+then holding a live session -- and held for the life of the key.
+Nothing re-checks it in between, because an automation has no next
+login at which to re-prove anything.
+
+That is why a service key carrying an entitlement **must** set
+`expires_at`, capped by `HTTP_API_SERVICE_KEY_MAX_LIFETIME` (default one
+year). Re-minting is how the entitlement is re-attested, and the expiry
+is what makes somebody do it. Revoke one early by deleting it, as with
+any key.
+
+Granting a `anyuser:*` scope requires holding it: an administrator cannot
+mint a key more entitled than they are.
+
+Which model to pick is a question about revocation, not convenience. A
+credential that should stop working when its holder changes roles is an
+ordinary key. A credential that belongs to a service and should be
+rotated on a schedule is a service key.
 
 ## When OAuth2 is served
 
@@ -132,6 +197,8 @@ whitespace around each entry is ignored.
 | Knob | Default | Effect |
 | --- | --- | --- |
 | `HTTP_API_GROUP_SOURCE` | `token` | Comma-separated list of `token`, `system` (or `unix`), and `file:<path>`. |
+| `HTTP_API_API_KEY_ENTITLEMENT_TTL` | `1h` | How long an ordinary API key keeps an entitlement that nothing has been able to confirm. Does not apply to a service key. |
+| `HTTP_API_SERVICE_KEY_MAX_LIFETIME` | `8760h` | The furthest out a service key carrying an entitlement may set `expires_at`. |
 
 | Source | Reads |
 | --- | --- |

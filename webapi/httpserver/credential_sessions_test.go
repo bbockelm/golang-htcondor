@@ -184,7 +184,7 @@ func TestAPIKeySessionsArePrivate(t *testing.T) {
 			t.Fatalf("Mint: %v", err)
 		}
 		if _, err := h.apiKeyStore.Insert(context.Background(),
-			minted.KeyID, minted.SecretHash, "test", "alice@test.example.org", scopes, nil); err != nil {
+			minted.KeyID, minted.SecretHash, "test", "alice@test.example.org", scopes, nil, false); err != nil {
 			t.Fatalf("Insert: %v", err)
 		}
 		return minted.Full

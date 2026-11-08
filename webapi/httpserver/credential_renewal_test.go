@@ -114,7 +114,7 @@ func TestCredentialRenewalEndsWithItsSource(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := h.apiKeyStore.Insert(context.Background(), minted.KeyID, minted.SecretHash, "test",
-			"alice@test.example.org", []string{"condor:/READ"}, nil); err != nil {
+			"alice@test.example.org", []string{"condor:/READ"}, nil, false); err != nil {
 			t.Fatal(err)
 		}
 		ctx, err := h.authenticateAPIKey(requestWithBearer(t, minted.Full), minted.Full)

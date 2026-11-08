@@ -2311,6 +2311,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	mcpMaxRequestDuration := loadMCPMaxRequestDuration(cfg, logger)
 	upstreamRefresh := loadUpstreamRefresh(cfg, logger)
 	tokenRetention := loadTokenRetention(cfg, logger)
+	apiKeyEntitlementTTL := loadPositiveDuration(cfg, "HTTP_API_API_KEY_ENTITLEMENT_TTL", logger)
+	serviceKeyMaxLifetime := loadPositiveDuration(cfg, "HTTP_API_SERVICE_KEY_MAX_LIFETIME", logger)
 	mcpUseSDKTransport := loadMCPUseSDKTransport(cfg, logger)
 	requiredCredentials := loadRequiredCredentials(cfg, logger)
 	jobQueueLogPath := resolveJobQueueLog(cfg, logger)
@@ -2467,6 +2469,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPMaxRequestDuration:       mcpMaxRequestDuration,
 		UpstreamRefresh:             upstreamRefresh,
 		TokenRetention:              tokenRetention,
+		APIKeyEntitlementTTL:        apiKeyEntitlementTTL,
+		ServiceKeyMaxLifetime:       serviceKeyMaxLifetime,
 		MCPUseSDKTransport:          mcpUseSDKTransport,
 		RequiredCredentials:         requiredCredentials,
 		CreddAddress:                creddAddress,
@@ -4134,4 +4138,37 @@ func placementDeviceClients(cfg *config.Config) *string {
 		return nil
 	}
 	return &v
+}
+
+// loadPositiveDuration reads a duration setting that must carry a unit
+// and must be positive, or is absent and leaves the built-in default in
+// place (returning zero).
+//
+// Refusing to start on a bad value rather than falling back: these
+// settings bound how long a credential keeps a power it can no longer
+// prove, and a typo that silently reverts to the default is the kind of
+// thing nobody notices until it matters.
+func loadPositiveDuration(cfg *config.Config, name string, logger *logging.Logger) time.Duration {
+	raw, ok := cfg.Get(name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	raw = strings.TrimSpace(raw)
+	if err := validateDurationHasUnit(raw); err != nil {
+		logger.Error(logging.DestinationHTTP, "Invalid duration: refusing to start",
+			"setting", name, "value", raw, "error", err)
+		log.Fatalf("invalid %s=%q: %v", name, raw, err)
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		logger.Error(logging.DestinationHTTP, "Failed to parse duration: refusing to start",
+			"setting", name, "value", raw, "error", err)
+		log.Fatalf("invalid %s=%q: %v", name, raw, err)
+	}
+	if d <= 0 {
+		logger.Error(logging.DestinationHTTP, "Duration must be positive: refusing to start",
+			"setting", name, "value", raw)
+		log.Fatalf("invalid %s=%q: must be positive", name, raw)
+	}
+	return d
 }
