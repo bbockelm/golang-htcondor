@@ -3,6 +3,7 @@ package htcondor
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/commands"
@@ -254,7 +255,7 @@ func TestAdTypeCommandTargetConsistency(t *testing.T) {
 // the collector ignores -- so every query fetched all attributes of every
 // ad and a whole-pool query ballooned to tens of MB.
 func TestCreateQueryAdProjectionAttrName(t *testing.T) {
-	ad := createQueryAd("StartdAd", nil, []string{"Name", "Machine", "Cpus"}, 0)
+	ad := createQueryAd("StartdAd", nil, []string{"Name", "Machine", "Cpus"}, 0, false)
 
 	got, ok := ad.EvaluateAttrString("Projection")
 	if !ok {
@@ -271,8 +272,49 @@ func TestCreateQueryAdProjectionAttrName(t *testing.T) {
 // TestCreateQueryAdNoProjection: with no projection requested, neither
 // attribute is set (the collector returns its default set).
 func TestCreateQueryAdNoProjection(t *testing.T) {
-	ad := createQueryAd("StartdAd", nil, nil, 0)
+	ad := createQueryAd("StartdAd", nil, nil, 0, false)
 	if _, ok := ad.EvaluateAttrString("Projection"); ok {
 		t.Error("empty projection should not set a Projection attribute")
+	}
+}
+
+// TestQueryAdAsksForPrivateAttributes: the collector filters a daemon's
+// private attributes out of every reply unless the query ad says
+// otherwise, so the flag has to reach the wire under the name the
+// collector reads (ATTR_SEND_PRIVATE_ATTRIBUTES).
+func TestQueryAdAsksForPrivateAttributes(t *testing.T) {
+	ad := createQueryAd("StartdAd", nil, nil, 0, true)
+	got, ok := ad.EvaluateAttrBool("SendPrivateAttributes")
+	if !ok {
+		t.Fatalf("query ad has no SendPrivateAttributes attribute")
+	}
+	if !got {
+		t.Errorf("SendPrivateAttributes = false, want true")
+	}
+}
+
+// TestQueryAdOmitsPrivateAttributesByDefault: an ordinary query must not
+// ask. These attributes are bearer credentials, and a request for them
+// is logged by the collector.
+func TestQueryAdOmitsPrivateAttributesByDefault(t *testing.T) {
+	ad := createQueryAd("StartdAd", nil, nil, 0, false)
+	if _, ok := ad.Lookup("SendPrivateAttributes"); ok {
+		t.Errorf("an ordinary query ad asked for private attributes")
+	}
+}
+
+// TestApplyStreamDefaultsKeepsEveryField is the guard the comment on
+// ApplyStreamDefaults describes: a defaults helper that rebuilds its
+// struct silently drops fields added later. Set every field to a
+// non-zero value and check all of them survive.
+func TestApplyStreamDefaultsKeepsEveryField(t *testing.T) {
+	in := &StreamOptions{
+		BufferSize:        7,
+		WriteTimeout:      3 * time.Second,
+		PrivateAttributes: true,
+	}
+	got := in.ApplyStreamDefaults()
+	if got != *in {
+		t.Errorf("ApplyStreamDefaults() = %+v, want %+v", got, *in)
 	}
 }
