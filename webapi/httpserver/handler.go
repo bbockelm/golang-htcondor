@@ -43,6 +43,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/poolpolicy"
+	"github.com/bbockelm/golang-htcondor/webapi/reservation"
 	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
@@ -271,6 +272,11 @@ type Handler struct {
 	// reservationEPConstraint limits which startds reservations may draw
 	// seats from; empty means all of them.
 	reservationEPConstraint string
+	// reservationProber provisions START on execute points and checks
+	// this access point may still write to them. Nil when nothing is
+	// running it, which the health endpoint reports as "not running"
+	// rather than as healthy.
+	reservationProber *reservation.Prober
 	// mcpCIMDEnabled advertises Client ID Metadata Document support in the MCP
 	// OAuth2 discovery document (the resolver itself lives in the provider's
 	// storage). See oauth2_cimd.go.
