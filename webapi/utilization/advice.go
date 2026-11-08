@@ -180,12 +180,19 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 	if hasRetry {
 		a.Submit = append(a.Submit, "retry_request_memory = "+submitSize(plan.retry))
 	}
-	if plan.currentCost > plan.recommendedCost {
-		a.Saves = &Savings{Unit: UnitGiBHours, Amount: round((plan.currentCost-plan.recommendedCost)/1024, 1)}
+	// Against the FLOOR, not the upper bound. Where a climber's wall
+	// clock could not be split between its rungs, currentCost charges the
+	// whole run at the larger one, and a saving measured from that is a
+	// saving against a number the record does not support.
+	if plan.currentFloor > plan.recommendedCost {
+		a.Saves = &Savings{Unit: UnitGiBHours, Amount: round((plan.currentFloor-plan.recommendedCost)/1024, 1)}
 	}
 
 	evidence := fmt.Sprintf("95%% of %s jobs peaked at or below %s; the largest peaked at %s.",
 		count(plan.n), sizeMiB(plan.p95), sizeMiB(plan.maxPeak))
+	if plan.ladderJobs*2 > plan.n {
+		evidence = ladderEvidence(plan) + " " + evidence
+	}
 	if plan.adaptiveJobs*2 > plan.n {
 		// The jobs' request is a formula that starts small and grows
 		// after a hold; say so, since "most jobs requested X" would be
@@ -216,7 +223,7 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 			a.Detail = fmt.Sprintf("%s That is more than the %s most jobs requested.", evidence, sizeMiB(plan.typical))
 		}
 		a.Detail += retryNote
-	case plan.recommendedCost < memoryLowerCost*plan.currentCost:
+	case plan.recommendedCost < memoryLowerCost*plan.currentFloor:
 		a.ID, a.Severity, a.Title = "memory-lower", SeveritySuggest, title
 		if hasRetry {
 			a.ID = "memory-retry"
@@ -235,6 +242,26 @@ func memoryAdvice(plan *memoryPlan, holds int) *Advice {
 		plan.keepCurrent()
 	}
 	return a
+}
+
+// ladderEvidence names the retry ladder the workflow already has, so the
+// advice reads as a change to it rather than as news.
+//
+// Without this the prose is wrong in both directions: "most jobs
+// requested 4 GB" would quote the rung the climbers ENDED on, and a
+// recommendation to retry would propose what the submit file already
+// says.
+func ladderEvidence(plan *memoryPlan) string {
+	if plan.climbed == 0 {
+		return fmt.Sprintf("These jobs already retry at a larger memory request; none of the %s needed it.",
+			count(plan.n))
+	}
+	start := "their first request"
+	if plan.baseRung > 0 {
+		start = sizeMiB(plan.baseRung)
+	}
+	return fmt.Sprintf("These jobs already retry at a larger memory request: %s of %s outgrew %s and were rerun.",
+		count(plan.climbed), count(plan.n), start)
 }
 
 // adaptiveEvidence describes a formula request's holds.
