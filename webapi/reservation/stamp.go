@@ -145,6 +145,12 @@ type Stamper struct {
 	// Budget is the most cluster ads one pass writes. Zero means
 	// DefaultStampBudget.
 	Budget int
+	// Horizon is the furthest ahead any reservation looks -- the
+	// longest lead among them. Estimates are capped one grain beyond
+	// it, because the sieve cannot tell two values apart once both are
+	// past the bell, and every distinct value costs autocluster
+	// splitting across the whole pool. Zero means no cap.
+	Horizon func() time.Duration
 
 	last StampResult
 }
