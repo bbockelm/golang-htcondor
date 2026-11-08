@@ -1393,6 +1393,36 @@ func mcpEnabled(cfg *config.Config) bool {
 	return v
 }
 
+// reservationsEnabled reports whether HTTP_API_RESERVATIONS turns the
+// reservation subsystem on. Off unless set: a reservation holds pool
+// capacity by evicting other people's jobs, which no site should start
+// doing because it upgraded.
+//
+// Read as a boolean rather than compared against "true", since HTCondor
+// configuration is conventionally written `HTTP_API_RESERVATIONS = True`.
+func reservationsEnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_RESERVATIONS")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_RESERVATIONS=%q: must be a boolean", raw)
+	}
+	return v
+}
+
+// reservationEPConstraint is the ClassAd expression limiting which
+// execute points reservations may draw seats from. Empty means all of
+// them.
+//
+// A site will usually want this: a class should take the teaching nodes,
+// not whatever the collector happens to report.
+func reservationEPConstraint(cfg *config.Config) string {
+	raw, _ := cfg.Get("HTTP_API_RESERVATION_EP_CONSTRAINT")
+	return strings.TrimSpace(raw)
+}
+
 // oauth2SettingNames are the settings whose presence means an operator
 // meant this server to log people in through an identity provider.
 var oauth2SettingNames = []string{
@@ -2349,6 +2379,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		Collector:                collector,
 		Logger:                   logger,
 		EnableMCP:                mcpCfg.enabled,
+		Reservations:             reservationsEnabled(cfg),
+		ReservationEPConstraint:  reservationEPConstraint(cfg),
 		WebUIEnabled:             webUIEnabled,
 		// DBPath is the canonical name; OAuth2DBPath kept for back-compat.
 		DBPath:                     mcpCfg.oauth2DBPath,

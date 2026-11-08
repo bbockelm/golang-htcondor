@@ -172,6 +172,9 @@ export interface Session {
   // A session with no local account, which reaches only the placement
   // pages.
   placement_only?: boolean;
+  // This server runs the reservation subsystem, so the admin page for
+  // it is offered. Advisory: the endpoints refuse regardless when off.
+  reservations?: boolean;
   // The site withholds who is running on a slot from this session.
   // Advisory: it decides what the pool pages ask for and what they say,
   // while the server enforces the rule on every collector read.
