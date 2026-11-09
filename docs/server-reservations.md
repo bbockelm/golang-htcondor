@@ -148,6 +148,33 @@ starts on a pool that was never drained. The admin page's health check
 writes to one randomly chosen execute point every few minutes for no
 other reason than to notice.
 
+The access point also says how many execute points it can administer,
+on its first read of the pool and whenever the answer changes:
+
+```
+reservations: all 48 execute points published an administrative capability
+reservations: 31 of 48 execute points published an administrative capability; the rest are commanded as this access point
+reservations: none of 48 execute points published an administrative capability, so every command goes as this access point; check that it holds ADMINISTRATOR at the collector and that the execute points have SEC_ENABLE_REMOTE_ADMINISTRATION
+```
+
+The last is an error, because it is the state in which nothing works
+and nothing else says so. Without a capability the command is still
+sent, as the access point itself, and an execute point that never
+agreed to take orders from it refuses at authentication — closing the
+connection without a reply, so the access point sees a read error
+rather than a denial. Every failed command now names which credentials
+it carried:
+
+```
+sent with this access point's own credentials, because the execute point published no administrative capability: startd: reading the CA_UPDATE_MACHINE_AD reply: ... EOF
+```
+
+That is the difference between fixing the collector's authorization and
+fixing an execute point's configuration, and it is not visible from the
+execute point's own log: on the startd side a capability that was used
+shows as `PERMISSION GRANTED to collector-side@matchsession`, and a
+fallback shows only `DC_AUTHENTICATE: Command not authorized`.
+
 ## What the access point writes to the queue
 
 Reservations need idle jobs to carry an upper bound on how long they
