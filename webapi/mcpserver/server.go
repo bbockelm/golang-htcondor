@@ -90,13 +90,15 @@ type Server struct {
 	// poll knows what to look at. Atomic because a reconfigure can change
 	// it while the poll is running.
 	skillsDir atomic.Pointer[string]
-	// skillsStop halts the reload poll; nil when none was started.
+	// skillsStop halts the reload poll and skillsDone is closed once it
+	// has stopped; both nil when none was started.
 	// stats counts tool calls; nil when the embedder wants none.
 	stats ToolStatsRecorder
 	// clients remembers what each MCP session declared at initialize,
 	// which is the only place MCP names the calling harness.
 	clients        *clientRegistry
 	skillsStop     chan struct{}
+	skillsDone     chan struct{}
 	skillsStopOnce sync.Once
 	signingKeyPath string
 	// shareSigner mints the signed upload URLs create_input_upload_url
