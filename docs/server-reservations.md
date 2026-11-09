@@ -170,13 +170,23 @@ Falling behind is safe: a held machine refuses a job with no stamp and
 accepts one with a stale stamp, so a budget too small for the queue
 costs admissions and never lets the wrong job in.
 
-Two consequences worth knowing before you turn it on. The attribute is
-referenced by the execute points' `START`, so the negotiator may split
-autoclusters on it — which is why the estimate is bucketed to half an
-hour rather than answered to the second. And a submitter can set it
-themselves; the sieve cannot tell. Eviction does not consult it, so a
-job that lies its way onto a reserved core is preempted at the bell like
-any other.
+Two consequences worth knowing before you turn it on.
+
+**The attribute splits autoclusters.** It is referenced by the execute
+points' `START`, so the negotiator reports it to the schedd as a
+significant attribute and the schedd groups jobs by it. That cost falls
+on the whole pool. Two things keep it small: the estimate is rounded up
+to half an hour, and it is capped one grain beyond the longest
+reservation's lead — past that the sieve cannot tell two values apart
+anyway. On the queue this was measured against, that is 7,765 distinct
+values unrounded, 194 rounded, and 13 capped.
+
+Raising a reservation's lead widens the cap, so a longer lead costs a
+little more matchmaking.
+
+**A submitter can set the attribute themselves** and the sieve cannot
+tell. Eviction does not consult it, so a job that lies its way onto a
+reserved core is preempted at the bell like any other.
 
 ## Turning it on
 

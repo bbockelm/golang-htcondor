@@ -301,3 +301,85 @@ func TestProvisioned(t *testing.T) {
 		}
 	}
 }
+
+// TestBucketCapped: the attribute is referenced by the execute points'
+// START, so the negotiator makes it a significant attribute and the
+// schedd splits autoclusters on it. The number of distinct values is a
+// cost the whole pool pays, and rounding alone does not control it --
+// measured on a real idle queue, rounding took 7,765 distinct estimates
+// to 194, which is still far too many.
+//
+// Capping is exact, not approximate: the sieve asks only whether a job
+// finishes before the bell, and the bell is never further away than a
+// lead, so every value past the horizon is the same answer.
+func TestBucketCapped(t *testing.T) {
+	const h6 = 6 * time.Hour
+	cases := []struct {
+		name    string
+		in      time.Duration
+		horizon time.Duration
+		want    int64
+	}{
+		{"under the horizon is untouched", 90 * time.Minute, h6, 5400},
+		{"at the horizon is untouched", h6, h6, 6 * 3600},
+		{"just over the horizon clamps", h6 + time.Minute, h6, 6*3600 + 1800},
+		{"far over the horizon clamps to the same value", 30 * 24 * time.Hour, h6, 6*3600 + 1800},
+		{"a week and a month land on one value", 7 * 24 * time.Hour, h6, 6*3600 + 1800},
+		{"no horizon means no cap", 30 * 24 * time.Hour, 0, 30 * 24 * 3600},
+		{"short jobs are unaffected", time.Second, h6, 1800},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := BucketCapped(tc.in, tc.horizon); got != tc.want {
+				t.Errorf("BucketCapped(%v, %v) = %d, want %d", tc.in, tc.horizon, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBucketCappedStillFailsTheSieve is why the cap is one grain beyond
+// the horizon rather than exactly it. A job capped to the horizon would
+// compare equal against a deadline exactly a horizon away and be
+// admitted -- turning "we cannot tell how long this is" into "it fits".
+func TestBucketCappedStillFailsTheSieve(t *testing.T) {
+	const horizon = 6 * time.Hour
+	now := time.Now()
+	bell := now.Add(horizon)
+
+	machine := HoldAd(bell, bell.Add(time.Hour), "cs301")
+	job := jobAd(map[string]any{
+		AttrBucket: BucketCapped(30*24*time.Hour, horizon),
+	})
+	if admits(t, machine, job) {
+		t.Errorf("a month-long job capped to the horizon was admitted to a machine draining for a bell exactly a horizon away")
+	}
+}
+
+// TestBucketCappedCollapsesTheTail is the measurement the cap exists
+// for, reproduced in miniature: a spread of long estimates becomes one
+// value.
+func TestBucketCappedCollapsesTheTail(t *testing.T) {
+	const horizon = 6 * time.Hour
+	// Half-hour steps out to three days: the grain the estimates are
+	// rounded to, so this counts every value the sieve could ever see.
+	distinct := map[int64]bool{}
+	for g := 1; g <= 144; g++ {
+		distinct[BucketCapped(time.Duration(g)*BucketGrain, horizon)] = true
+	}
+	// 0.5h..6h is 12 values, plus the one everything longer collapses to.
+	if len(distinct) != 13 {
+		t.Errorf("144 half-hour estimates produced %d distinct values, want 13", len(distinct))
+	}
+
+	uncapped := map[int64]bool{}
+	for g := 1; g <= 144; g++ {
+		uncapped[Bucket(time.Duration(g)*BucketGrain)] = true
+	}
+	if len(uncapped) != 144 {
+		t.Errorf("rounding alone produced %d distinct values, want 144", len(uncapped))
+	}
+	if len(uncapped) <= len(distinct) {
+		t.Errorf("capping did not reduce the cardinality: %d uncapped vs %d capped",
+			len(uncapped), len(distinct))
+	}
+}
