@@ -86,8 +86,15 @@ func (f *actionScopeFixture) call(ctx context.Context, t *testing.T, name string
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	// A default, not a cap: a caller that already set a deadline knows
+	// something this helper does not. The sandbox-streaming tests push
+	// hundreds of megabytes through a race-instrumented binary and need
+	// longer than any ordinary tool call should ever take.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
 	resp := f.server.HandleMessage(ctx, &MCPMessage{JSONRPC: "2.0", ID: 1, Method: "tools/call", Params: params})
 	if resp.Error != nil {
 		t.Fatalf("%s: protocol error %v", name, resp.Error)

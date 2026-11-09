@@ -125,8 +125,22 @@ func runSandboxTool(t *testing.T, tool string, size int64) sandboxRun {
 		sandboxFile("after.txt", 10, 'a', &sent))
 	alice := f.as(t, "alice", "mcp:read")
 
+	// These runs move the whole sandbox through a race-instrumented
+	// binary on a shared runner, where a gigabyte takes far longer than
+	// any ordinary tool call. The helper's 30-second default is right
+	// for those and far too tight for this: the same call that takes
+	// about two seconds on a developer's machine has been measured at
+	// 32 in CI, which is a timeout rather than a bug and has failed
+	// unrelated pull requests repeatedly.
+	//
+	// Scaled by the payload rather than raised to a flat number, so a
+	// tool that genuinely hangs still fails promptly on the small case.
+	budget := 30*time.Second + time.Duration(size>>23)*time.Second // ~8 MiB/s floor
+	ctx, cancel := context.WithTimeout(alice, budget)
+	defer cancel()
+
 	stop := heapPeak(t)
-	text, isErr := f.call(alice, t, tool, map[string]interface{}{"job_id": "3.0"})
+	text, isErr := f.call(ctx, t, tool, map[string]interface{}{"job_id": "3.0"})
 	run := sandboxRun{text: text, peak: stop(), sent: sent.Load()}
 	t.Logf("%s over a %d MiB file: peak heap growth %d KiB, %d KiB sent", tool, size>>20, run.peak>>10, run.sent>>10)
 	if isErr {
