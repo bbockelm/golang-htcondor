@@ -749,11 +749,28 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	return ad, nil
 }
 
-// setExecutable sets the executable attribute
+// setExecutable sets the executable attribute.
+//
+// A job with no executable is an error in most universes and ordinary in
+// two: SetExecutable lets a docker or container job through without one,
+// because the image carries the command. Such a job gets Cmd = "" and its
+// transfer forced off, which is the ignore_it path -- not Cmd resolved
+// against the submitting directory, which is what resolving an empty name
+// would produce and what would make the attribute depend on where the
+// submitter happened to be standing.
 func (sf *SubmitFile) setExecutable(ad *classad.ClassAd) error {
 	exec, ok := sf.submitCommand("executable")
 	if !ok {
-		return fmt.Errorf("executable is required")
+		// An executable the ad already carries -- from a base ad, say --
+		// is left exactly as it is.
+		if _, have := ad.Lookup("Cmd"); have {
+			return nil
+		}
+		if !sf.executableIsOptional() {
+			return fmt.Errorf("executable is required")
+		}
+		_ = ad.Set("Cmd", "")
+		return nil
 	}
 
 	cmd, err := sf.resolveExecutable(exec)
@@ -762,6 +779,18 @@ func (sf *SubmitFile) setExecutable(ad *classad.ClassAd) error {
 	}
 	_ = ad.Set("Cmd", cmd)
 	return nil
+}
+
+// executableIsOptional reports whether this job may have no executable at
+// all: a docker or container job, where the image supplies the command.
+//
+// An error deciding the roles is not reported here. setContainerSettings
+// is the one that reports it, and reporting it from both would turn one
+// bad submit file into two different messages depending on which ran
+// first.
+func (sf *SubmitFile) executableIsOptional() bool {
+	isDocker, isContainer, err := sf.containerJobRoles()
+	return err == nil && (isDocker || isContainer)
 }
 
 // Path resolution.
@@ -886,11 +915,19 @@ func (sf *SubmitFile) transfersExecutable() bool {
 }
 
 // executableIsAFile reports whether the submit file's "executable" names a
-// file on the submitting host at all. For vm universe and the ec2, gce and
-// azure grid types it is only the job's name, and SetExecutable marks those
-// ignore_it -- which forces transfer off and leaves Cmd exactly as written.
+// file on the submitting host at all -- SetExecutable's ignore_it, which
+// forces transfer off and leaves Cmd exactly as written.
+//
+// Three cases reach it. For vm universe and the ec2, gce and azure grid
+// types the value is only the job's name. For a docker or container job
+// that named no executable there is no value to transfer.
 func (sf *SubmitFile) executableIsAFile() bool {
 	if sf.universe == UniverseVM {
+		return false
+	}
+	// A docker or container job that named no executable has nothing to
+	// transfer, and SetExecutable reaches ignore_it the same way.
+	if _, named := sf.submitCommand("executable"); !named && sf.executableIsOptional() {
 		return false
 	}
 	if sf.universe != UniverseGrid {
@@ -4666,7 +4703,33 @@ func assignedNames(stmts []config.Statement) map[string]string {
 // condor_submit, where a submit command and a config macro of the same
 // name are separate things. Macro expansion still sees the whole config,
 // so $(SOME_KNOB) inside a submit file keeps working.
+//
+// An assignment that expands to nothing reads as ABSENT, because
+// submit_param ends with
+//
+//	if( * pval_expanded == '\0' ) { free(pval_expanded); return NULL; }
+//
+// and so hands every one of its callers the same NULL for `executable =`
+// as for a file that never mentions the executable. That is why an empty
+// executable on a container job comes out as Cmd = "" rather than as the
+// submitting directory: the empty value never reaches full_path.
 func (sf *SubmitFile) submitCommand(key string) (string, bool) {
+	value, ok := sf.assignedCommand(key)
+	if !ok || value == "" {
+		return "", false
+	}
+	return value, true
+}
+
+// assignedCommand is submitCommand without the last of submit_param's two
+// tests: it reports whether the submit file ASSIGNED the name, and hands
+// back whatever that expanded to, empty or not.
+//
+// The two tests are separate because submit_param applies them at different
+// points, and the alternate-name lookup falls between them. Only
+// submitCommandAlt and the callers that genuinely ask "did the submitter
+// write this name" want this one.
+func (sf *SubmitFile) assignedCommand(key string) (string, bool) {
 	if sf == nil {
 		return "", false
 	}
@@ -4706,11 +4769,20 @@ func (sf *SubmitFile) Command(key string) (string, bool) {
 // suppresses the alternate instead of deferring to it, and checkStdFile
 // then canonicalizes the unnamed stream to /dev/null -- and the order
 // the two appear in the file makes no difference.
+//
+// Which is why this cannot be written as submitCommand twice: that reads
+// the empty primary as absent and goes on to the alternate. Presence
+// picks the name; emptiness is judged once, afterwards, on whichever name
+// was picked.
 func (sf *SubmitFile) submitCommandAlt(key, altKey string) (string, bool) {
-	if value, ok := sf.submitCommand(key); ok {
-		return value, true
+	value, ok := sf.assignedCommand(key)
+	if !ok {
+		value, ok = sf.assignedCommand(altKey)
 	}
-	return sf.submitCommand(altKey)
+	if !ok || value == "" {
+		return "", false
+	}
+	return value, true
 }
 
 // submitCommandAlt2 is submitCommandAlt with a second fallback, for the two
@@ -4718,8 +4790,15 @@ func (sf *SubmitFile) submitCommandAlt(key, altKey string) (string, bool) {
 // default: vm_memory defaults to $(Request_Memory), which defaults to
 // $(RequestMemory), so all three spellings have to be tried in turn.
 func (sf *SubmitFile) submitCommandAlt2(key, altKey, altKey2 string) (string, bool) {
-	if value, ok := sf.submitCommandAlt(key, altKey); ok {
-		return value, true
+	value, ok := sf.assignedCommand(key)
+	if !ok {
+		value, ok = sf.assignedCommand(altKey)
 	}
-	return sf.submitCommand(altKey2)
+	if !ok {
+		value, ok = sf.assignedCommand(altKey2)
+	}
+	if !ok || value == "" {
+		return "", false
+	}
+	return value, true
 }
