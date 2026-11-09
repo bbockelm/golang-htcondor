@@ -2,30 +2,36 @@
 
 // Reservations — recurring holds of pool capacity for a project.
 //
-// A reservation is, mostly, a class. The controller starts holding cores
-// back `lead` before the window opens, frees `seats` of them by the bell,
-// keeps the unclaimed ones for `hold`, and keeps `standing` seats between
-// windows so the project's people can work. A job takes a seat by
-// carrying the reservation's project as its ProjectName; the shape of a
-// seat comes from the submit file.
+// A reservation holds slots of a stated shape, on a schedule. The
+// controller starts holding cores back `lead` before a reservation
+// begins, has `seats` slots free by the time it does, keeps the
+// unclaimed ones for `hold`, and keeps `standing` slots between
+// occurrences so the project's people can work in between. A job uses a
+// reservation by carrying its project as ProjectName; the shape of one
+// slot comes from the submit file.
 //
-// Two things drive the design:
+// Three things drive the design:
 //
-//   * The windows preview is the page. A five-field cron expression is
+//   * The schedule preview is the page. A five-field cron expression is
 //     not readable, so the table does not ask anyone to trust one: it
-//     shows the next occurrences, and for each, both the bell and the
+//     shows the next occurrences, and for each, both the start and the
 //     drain. The drain is when other people's jobs start being steered
-//     away, hours before the class notices anything, so it is given the
-//     same weight as the class time rather than hidden in a lead field.
+//     away, hours before the project notices anything, so it is given
+//     the same weight as the start rather than hidden in a lead field.
 //     For the same reason the form asks for the schedule the way a
 //     calendar asks for a repeating event -- starts, repeats, ends --
 //     and keeps the expression itself in a box beneath, where it can be
 //     read, and typed, by anyone who needs cron to say something the
 //     controls cannot.
+//   * The form is sections rather than one column of boxes. Its fields
+//     answer four separate questions -- who it is for, when it runs, how
+//     much it holds, what one slot looks like -- and on a phone the
+//     whole form is one column however it is written, so the headings
+//     are what makes it readable there at all.
 //   * The server validates eagerly -- the cron, the zone, the submit
-//     file, standing against seats -- and answers 400 with the reason.
-//     The form shows that text verbatim. Restating it here in our own
-//     words would drift from what the server actually enforces.
+//     file, `standing` against `seats` -- and answers 400 with the
+//     reason. The form shows that text verbatim. Restating it here in
+//     our own words would drift from what the server actually enforces.
 
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -48,6 +54,17 @@ import {
   type ScheduleDraft,
 } from '@/lib/recurrence';
 import { RecurrencePicker, ScheduleRow } from '@/components/RecurrencePicker';
+import {
+  ResourceRequestPanel,
+  type ResourceRequest,
+} from '@/components/ResourceRequest';
+import { SubmitLinesField } from '@/components/SubmitLinesField';
+import {
+  parseReservationSubmit,
+  renderReservationSubmit,
+  withResourceRequest,
+  type ReservationSubmit,
+} from '@/lib/reservationSubmit';
 
 // The browser's own zone, as the default for a new reservation: most
 // reservations are for the pool the operator is sitting in.
@@ -65,7 +82,7 @@ function blankReservation(): AdminReservation {
     owner: '',
     project: '',
     // Something that renders: the server refuses a submit file with no
-    // executable, since a seat with no Cmd matches nothing.
+    // executable, since a slot with no Cmd matches nothing.
     submit: 'executable = /usr/bin/python3\nrequest_cpus = 1\nrequest_memory = 4096\nqueue\n',
     seats: 20,
     standing: 0,
@@ -152,10 +169,10 @@ export default function AdminReservationsPage() {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Reservations</h1>
         <p className="text-sm text-gray-500">
-          Recurring holds of pool capacity for a project — a class, a
-          demonstration, a deadline. The controller starts draining ahead of
-          each window so the seats are free by the bell, and jobs claim them
-          by carrying the project as their ProjectName.
+          Capacity held for a project on a schedule — a course, a
+          demonstration, a deadline. The access point starts draining ahead
+          of each reservation so the slots are free when it begins, and jobs
+          use them by carrying the project as their ProjectName.
         </p>
       </div>
 
@@ -253,9 +270,7 @@ export default function AdminReservationsPage() {
       )}
 
       {!unavailable && list.data && reservations.length === 0 && (
-        <p className="text-sm text-gray-500">
-          No reservations yet. Nothing is being held back from the pool.
-        </p>
+        <p className="text-sm text-gray-500">No reservations yet.</p>
       )}
 
       {reservations.length > 0 && (
@@ -265,9 +280,9 @@ export default function AdminReservationsPage() {
               <tr>
                 <th className="px-3 py-2">Reservation</th>
                 <th className="px-3 py-2">Schedule</th>
-                <th className="px-3 py-2">Window</th>
+                <th className="px-3 py-2">Length</th>
                 <th className="px-3 py-2">Drains from</th>
-                <th className="px-3 py-2">Seats</th>
+                <th className="px-3 py-2">Slots</th>
                 <th className="px-3 py-2">Standing</th>
                 <th className="px-3 py-2">State</th>
                 <th className="px-3 py-2"></th>
@@ -357,8 +372,8 @@ function ReservationRows({
           {formatHoursMinutes(res.duration_seconds)}
           <span className="block text-gray-500">
             {res.hold_seconds > 0
-              ? `held ${formatHoursMinutes(res.hold_seconds)} past the bell`
-              : 'unclaimed seats released at the bell'}
+              ? `unclaimed slots held ${formatHoursMinutes(res.hold_seconds)} past the start`
+              : 'unclaimed slots released at the start'}
           </span>
         </td>
         <td className="px-3 py-2 text-xs text-gray-700">
@@ -410,7 +425,7 @@ function ReservationRows({
               confirmLabel="Delete"
               onConfirm={onDelete}
               pending={deleting}
-              title={`Delete reservation "${res.id}" — the pool stops holding seats for ${res.project}`}
+              title={`Delete reservation "${res.id}" — the pool stops holding slots for ${res.project}`}
             />
           </div>
         </td>
@@ -427,8 +442,8 @@ function ReservationRows({
 }
 
 // How far ahead the preview looks. A fortnight is the server's own
-// default and covers a fortnightly timetable; a month answers "does this
-// stop at the end of term?".
+// default and covers a fortnightly schedule; a month answers "does this
+// stop, and when?".
 const HORIZONS = [7, 14, 30];
 
 function WindowsPreview({ res }: { res: AdminReservation }) {
@@ -469,7 +484,7 @@ function WindowsPreview({ res }: { res: AdminReservation }) {
 
       {!res.enabled && (
         <p className="mt-1 text-xs text-amber-700">
-          This reservation is disabled: these are the windows it would hold if
+          This reservation is disabled: these are the holds it would place if
           it were enabled. Nothing is being drained for it.
         </p>
       )}
@@ -482,7 +497,7 @@ function WindowsPreview({ res }: { res: AdminReservation }) {
       )}
       {windows.data && rows.length === 0 && (
         <p className="mt-2 text-xs text-gray-500">
-          No windows in the next {days} days.
+          Nothing scheduled in the next {days} days.
         </p>
       )}
 
@@ -492,7 +507,7 @@ function WindowsPreview({ res }: { res: AdminReservation }) {
             <thead className="text-left text-gray-500">
               <tr>
                 <th className="py-1 pr-6 font-medium">Draining starts</th>
-                <th className="py-1 pr-6 font-medium">Seats held</th>
+                <th className="py-1 pr-6 font-medium">Slots held</th>
                 <th className="py-1 font-medium">Until</th>
               </tr>
             </thead>
@@ -504,13 +519,13 @@ function WindowsPreview({ res }: { res: AdminReservation }) {
           </table>
           <p className="mt-2 text-xs text-gray-500">
             Draining is when other people&apos;s jobs stop being sent to the
-            machines these seats will come from — {formatHoursMinutes(res.lead_seconds)}{' '}
-            before each bell.{' '}
+            machines these slots will come from — {formatHoursMinutes(res.lead_seconds)}{' '}
+            before each start.{' '}
             {res.hold_seconds > 0
-              ? `Seats stay reserved for ${res.project} until ${formatHoursMinutes(
+              ? `Slots stay reserved for ${res.project} until ${formatHoursMinutes(
                   res.hold_seconds,
-                )} past the bell, then unclaimed ones go back to the pool.`
-              : `Seats unclaimed by ${res.project} at the bell go straight back to the pool.`}
+                )} past the start, then unclaimed ones go back to the pool.`
+              : `Slots unclaimed by ${res.project} at the start go straight back to the pool.`}
           </p>
         </>
       )}
@@ -528,7 +543,7 @@ function WindowRow({
   const start = new Date(win.start);
   const end = new Date(win.end);
   const planFrom = new Date(win.plan_from);
-  // The drain and the bell read as one sentence only if the day is
+  // The drain and the start read as one sentence only if the day is
   // stated once; when they fall on different days, say both.
   const sameDay = dayKey(planFrom, timezone) === dayKey(start, timezone);
   return (
@@ -628,11 +643,19 @@ function ReservationForm({
   const [timezone, setTimezone] = useState(initial.timezone);
   const [seats, setSeats] = useState(String(initial.seats));
   const [standing, setStanding] = useState(String(initial.standing));
-  const [submit, setSubmit] = useState(initial.submit);
   const [enabled, setEnabled] = useState(initial.enabled);
   const [duration, setDuration] = useState(splitHoursMinutes(initial.duration_seconds));
   const [lead, setLead] = useState(splitHoursMinutes(initial.lead_seconds));
   const [hold, setHold] = useState(splitHoursMinutes(initial.hold_seconds));
+  // The submit file, as fields where they can give it back exactly and
+  // as text where they cannot -- see src/lib/reservationSubmit.ts.
+  // `fields` is the live state whenever it is not null; `text` is what
+  // the other mode holds.
+  const [fields, setFields] = useState<ReservationSubmit | null>(() =>
+    parseReservationSubmit(initial.submit),
+  );
+  const [text, setText] = useState(initial.submit);
+  const submit = fields ? renderReservationSubmit(fields) : text;
 
   const send = () => {
     const zone = timezone.trim();
@@ -664,52 +687,54 @@ function ReservationForm({
         {existing ? `Edit ${initial.id}` : 'New reservation'}
       </h2>
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        <label className="block text-xs">
-          <span className="block text-gray-700">Name</span>
-          <input
-            type="text"
-            value={id}
-            // Saving under a new ID would leave the old reservation in
-            // place and quietly double the hold, so an existing one is
-            // renamed by deleting and recreating it.
-            disabled={existing}
-            onChange={(e) => setId(e.target.value)}
-            placeholder="cs301-fall"
-            className={`${inputCls} disabled:bg-gray-100 disabled:text-gray-500`}
-          />
-        </label>
-        <div className="block text-xs">
-          <label className="block">
-            <span className="block text-gray-700">Owner</span>
+      <FormSection title="Reservation">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <label className="block text-xs">
+            <span className="block text-gray-700">Name</span>
             <input
               type="text"
-              value={owner}
-              onChange={(e) => setOwner(e.target.value)}
-              placeholder="jsmith"
-              className={inputCls}
+              value={id}
+              // Saving under a new ID would leave the old reservation in
+              // place and quietly double the hold, so an existing one is
+              // renamed by deleting and recreating it.
+              disabled={existing}
+              onChange={(e) => setId(e.target.value)}
+              placeholder="cs301-fall"
+              className={`${inputCls} disabled:bg-gray-100 disabled:text-gray-500`}
             />
           </label>
-          <span className="mt-1 block text-gray-500">
-            Who the capacity is held for.
-          </span>
+          <div className="block text-xs">
+            <label className="block">
+              <span className="block text-gray-700">Owner</span>
+              <input
+                type="text"
+                value={owner}
+                onChange={(e) => setOwner(e.target.value)}
+                placeholder="jsmith"
+                className={inputCls}
+              />
+            </label>
+            <span className="mt-1 block text-gray-500">
+              Who the capacity is held for.
+            </span>
+          </div>
+          <div className="block text-xs">
+            <label className="block">
+              <span className="block text-gray-700">Project</span>
+              <input
+                type="text"
+                value={project}
+                onChange={(e) => setProject(e.target.value)}
+                placeholder="cs301-f26"
+                className={inputCls}
+              />
+            </label>
+            <span className="mt-1 block text-gray-500">
+              A job must be in this project to use the reservation.
+            </span>
+          </div>
         </div>
-        <div className="block text-xs">
-          <label className="block">
-            <span className="block text-gray-700">Project</span>
-            <input
-              type="text"
-              value={project}
-              onChange={(e) => setProject(e.target.value)}
-              placeholder="cs301-f26"
-              className={inputCls}
-            />
-          </label>
-          <span className="mt-1 block text-gray-500">
-            A job takes a seat by carrying this as its ProjectName.
-          </span>
-        </div>
-        <label className="flex items-start gap-2 pt-5 text-xs">
+        <label className="flex items-start gap-2 text-xs">
           <input
             type="checkbox"
             checked={enabled}
@@ -723,98 +748,108 @@ function ReservationForm({
             </span>
           </span>
         </label>
-      </div>
+      </FormSection>
 
-      <div className="mt-3 rounded-sm border border-gray-200 bg-gray-50 p-3">
+      <FormSection title="Schedule">
+        {/* The recurrence controls: start, repeat, end, and the cron
+            expression behind them. */}
         <RecurrencePicker
           value={schedule}
           onChange={setSchedule}
           timezone={timezone.trim()}
         />
-        <div className="mt-3">
-          <ScheduleRow label="Time zone" htmlFor="reservation-timezone">
-            <input
-              id="reservation-timezone"
-              type="text"
-              value={timezone}
-              onChange={(e) => setTimezone(e.target.value)}
-              list="reservation-timezones"
-              placeholder="America/Chicago"
-              className="w-full rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400 sm:max-w-xs"
-            />
-            <TimezoneOptions />
-            <span className="mt-1 block text-xs text-gray-500">
-              Every date and time above is read here, so a window keeps its
-              clock time across a daylight-saving change.
-            </span>
-          </ScheduleRow>
-        </div>
-      </div>
-
-      <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        <label className="block text-xs">
-          <span className="block text-gray-700">Seats</span>
+        <ScheduleRow label="Time zone" htmlFor="reservation-timezone">
           <input
-            type="number"
-            min={1}
-            value={seats}
-            onChange={(e) => setSeats(e.target.value)}
-            className={inputCls}
+            id="reservation-timezone"
+            type="text"
+            value={timezone}
+            onChange={(e) => setTimezone(e.target.value)}
+            list="reservation-timezones"
+            placeholder="America/Chicago"
+            className="w-full rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400 sm:max-w-xs"
           />
-        </label>
-        <div className="block text-xs">
-          <label className="block">
-            <span className="block text-gray-700">Standing seats</span>
-            <input
-              type="number"
-              min={0}
-              value={standing}
-              onChange={(e) => setStanding(e.target.value)}
-              className={inputCls}
-            />
-          </label>
-          <span className="mt-1 block text-gray-500">Kept between windows.</span>
+          <TimezoneOptions />
+          <span className="mt-1 block text-xs text-gray-500">
+            Every date and time above is read here, so a reservation keeps its
+            clock time across a daylight-saving change.
+          </span>
+        </ScheduleRow>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <HoursMinutesField
+            label="Reservation length"
+            hint="How long the capacity is held, each time the schedule comes round."
+            value={duration}
+            onChange={setDuration}
+          />
         </div>
-      </div>
+      </FormSection>
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        <HoursMinutesField
-          label="Window length"
-          hint="How long one window lasts."
-          value={duration}
-          onChange={setDuration}
-        />
-        <HoursMinutesField
-          label="Drain lead"
-          hint="How far ahead of the bell the controller starts holding cores back."
-          value={lead}
-          onChange={setLead}
-        />
-        <HoursMinutesField
-          label="Hold after the bell"
-          hint="How long unclaimed seats stay reserved once the window opens."
-          value={hold}
-          onChange={setHold}
-        />
-      </div>
+      <FormSection title="Capacity">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="block text-xs">
+            <label className="block">
+              <span className="block text-gray-700">Slots</span>
+              <input
+                type="number"
+                min={1}
+                value={seats}
+                onChange={(e) => setSeats(e.target.value)}
+                className={inputCls}
+              />
+            </label>
+            <span className="mt-1 block text-gray-500">
+              Held while the reservation is running.
+            </span>
+          </div>
+          <div className="block text-xs">
+            <label className="block">
+              <span className="block text-gray-700">Standing slots</span>
+              <input
+                type="number"
+                min={0}
+                value={standing}
+                onChange={(e) => setStanding(e.target.value)}
+                className={inputCls}
+              />
+            </label>
+            <span className="mt-1 block text-gray-500">
+              Kept for the project between reservations.
+            </span>
+          </div>
+        </div>
+      </FormSection>
 
-      <div className="mt-3 block text-xs">
-        <label className="block">
-          <span className="block text-gray-700">Submit file</span>
-          <textarea
-            value={submit}
-            onChange={(e) => setSubmit(e.target.value)}
-            rows={8}
-            spellCheck={false}
-            className={`${inputCls} font-mono`}
+      <FormSection
+        title="Draining"
+        hint="Other people's jobs stop being sent to the machines these slots will come from ahead of each start, so the slots are free when the reservation begins."
+      >
+        <div className="grid gap-3 sm:grid-cols-3">
+          <HoursMinutesField
+            label="Drain lead"
+            hint="How far ahead of each start the draining begins."
+            value={lead}
+            onChange={setLead}
           />
-        </label>
-        <span className="mt-1 block text-gray-500">
-          The shape of one seat. It is run through the real submit machinery,
-          so anything that will not render is refused here rather than hours
-          later in a drain.
-        </span>
-      </div>
+          <HoursMinutesField
+            label="Hold after the start"
+            hint="How long unclaimed slots stay reserved for the project."
+            value={hold}
+            onChange={setHold}
+          />
+        </div>
+      </FormSection>
+
+      <FormSection
+        title="Slot shape"
+        hint="This submit file describes one slot the reservation holds. It is not submitted as a job."
+      >
+        <SubmitFileField
+          fields={fields}
+          text={text}
+          onFields={setFields}
+          onText={setText}
+        />
+      </FormSection>
 
       {error && (
         <p
@@ -825,7 +860,7 @@ function ReservationForm({
         </p>
       )}
 
-      <div className="mt-3 flex items-center gap-3">
+      <div className="mt-3 flex flex-wrap items-center gap-3">
         <button
           type="button"
           onClick={send}
@@ -842,6 +877,113 @@ function ReservationForm({
           Cancel
         </button>
       </div>
+    </div>
+  );
+}
+
+// A labelled group of fields. The form is one column on a phone however
+// it is written, so these headings are the only thing that says where
+// one question ends and the next begins.
+function FormSection({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <fieldset className="mt-3 rounded-sm border border-gray-200 px-3 pb-3">
+      <legend className="px-1 text-xs font-medium uppercase tracking-wide text-gray-500">
+        {title}
+      </legend>
+      {hint && <p className="mb-3 text-xs text-gray-500">{hint}</p>}
+      <div className="space-y-3">{children}</div>
+    </fieldset>
+  );
+}
+
+// The submit file, as the resource request the submit and interactive
+// pages already ask for, plus the lines that panel has no field for.
+//
+// A reservation stores a submit file, not a set of numbers, so the two
+// modes are not interchangeable: the fields show only over a file they
+// can give back byte for byte, and anything else is edited as text.
+// That check is parseReservationSubmit's, and it is the reason opening a
+// reservation and pressing Save cannot reformat its submit file.
+function SubmitFileField({
+  fields,
+  text,
+  onFields,
+  onText,
+}: {
+  fields: ReservationSubmit | null;
+  text: string;
+  onFields: (next: ReservationSubmit | null) => void;
+  onText: (next: string) => void;
+}) {
+  if (fields) {
+    return (
+      <div className="space-y-3" data-testid="reservation-submit-fields">
+        <ResourceRequestPanel
+          value={fields.request}
+          onChange={(r: ResourceRequest) => onFields(withResourceRequest(fields, r))}
+        />
+        <SubmitLinesField
+          label="Other submit commands"
+          note=""
+          hint={
+            <>
+              One <code className="font-mono">name = value</code> per line; the
+              executable is one of them.
+            </>
+          }
+          placeholder={'executable = /usr/bin/python3\n+WantWholeMachine = true'}
+          value={fields.extraLines}
+          onChange={(v) => onFields({ ...fields, extraLines: v })}
+        />
+        <button
+          type="button"
+          onClick={() => {
+            onText(renderReservationSubmit(fields));
+            onFields(null);
+          }}
+          className="rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50"
+        >
+          Edit as text
+        </button>
+      </div>
+    );
+  }
+
+  const asFields = parseReservationSubmit(text);
+  return (
+    <div className="space-y-2" data-testid="reservation-submit-text">
+      <label className="block text-xs">
+        <span className="block text-gray-700">Submit file</span>
+        <textarea
+          value={text}
+          onChange={(e) => onText(e.target.value)}
+          rows={8}
+          spellCheck={false}
+          className={`${inputCls} font-mono`}
+        />
+      </label>
+      {asFields ? (
+        <button
+          type="button"
+          onClick={() => onFields(asFields)}
+          className="rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50"
+        >
+          Use fields
+        </button>
+      ) : (
+        <p className="text-xs text-gray-500">
+          Edited as text: the fields would not give this file back exactly as
+          it is written.
+        </p>
+      )}
     </div>
   );
 }
@@ -876,7 +1018,7 @@ function HoursMinutesField({
           max={59}
           // Quarter hours on the spinner, which is what almost every
           // one of these is set to. A step is not a restriction: a
-          // 50-minute class is a real timetable, and typing 50 still
+          // 50-minute reservation is a real one, and typing 50 still
           // works -- a list of 0/15/30/45 would make that value
           // unreachable and rewrite it on the next save.
           step={15}

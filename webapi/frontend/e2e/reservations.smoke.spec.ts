@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 import { installApiFixtures } from './fixtures/api';
-import { installReservationFixtures } from './fixtures/reservations';
+import { cs301Fixture, installReservationFixtures } from './fixtures/reservations';
 import type { AdminReservation } from '../src/lib/api';
 
 // The admin reservations page against mocked responses.
@@ -37,7 +37,7 @@ test('reservations: the list shows each hold and its shape', async ({ page }) =>
   await expect(cs301).toContainText('America/Chicago');
   // Seconds on the wire, hours and minutes on the page.
   await expect(cs301).toContainText('1 h');
-  await expect(cs301).toContainText('held 15 min past the bell');
+  await expect(cs301).toContainText('unclaimed slots held 15 min past the start');
   await expect(cs301).toContainText('6 h before');
   await expect(cs301).toContainText('48');
   await expect(cs301).toContainText('Enabled');
@@ -50,7 +50,7 @@ test('reservations: the list shows each hold and its shape', async ({ page }) =>
   expect(errors).toEqual([]);
 });
 
-test('reservations: the preview names the drain and the bell separately', async ({ page }) => {
+test('reservations: the preview names the drain and the start separately', async ({ page }) => {
   const errors = watchForErrors(page);
   await installReservationFixtures(page);
 
@@ -63,9 +63,9 @@ test('reservations: the preview names the drain and the bell separately', async 
   const preview = page.getByTestId('windows-cs301');
   await expect(preview).toBeVisible();
   await expect(preview.getByRole('columnheader', { name: 'Draining starts' })).toBeVisible();
-  await expect(preview.getByRole('columnheader', { name: 'Seats held' })).toBeVisible();
+  await expect(preview.getByRole('columnheader', { name: 'Slots held' })).toBeVisible();
 
-  // Thursday's window: the bell is 2:00 PM, and with a six-hour lead the
+  // Thursday's hold: the reservation starts at 2:00 PM, and with a six-hour lead the
   // pool starts being steered away from those machines at 8:00 AM.
   const thursday = preview.getByRole('row').nth(1);
   await expect(thursday).toContainText('Oct 15');
@@ -117,20 +117,20 @@ test("reservations: a rejected save shows the server's own reason", async ({ pag
 
   // Fix it, and set the two durations in hours and minutes. The minute
   // boxes step in quarter hours, which is a spinner's increment and not
-  // a restriction: a 50-minute class still types.
+  // a restriction: a 50-minute reservation still types.
   await form.getByLabel('Schedule', { exact: true }).fill('0 10 * * 2');
-  await expect(form.getByLabel('Window length minutes')).toHaveAttribute('step', '15');
-  await form.getByLabel('Window length hours').fill('1');
-  await form.getByLabel('Window length minutes').fill('50');
-  await expect(form.getByLabel('Window length minutes')).toHaveValue('50');
-  await form.getByLabel('Window length minutes').fill('30');
+  await expect(form.getByLabel('Reservation length minutes')).toHaveAttribute('step', '15');
+  await form.getByLabel('Reservation length hours').fill('1');
+  await form.getByLabel('Reservation length minutes').fill('50');
+  await expect(form.getByLabel('Reservation length minutes')).toHaveValue('50');
+  await form.getByLabel('Reservation length minutes').fill('30');
   await form.getByLabel('Drain lead hours').fill('4');
   await form.getByLabel('Drain lead minutes').fill('0');
-  // Not exact: a wrapping label's accessible name picks up the
-  // textarea's own contents.
-  await form
-    .getByLabel('Submit file')
-    .fill('executable = /usr/bin/python3\nqueue\n');
+  // The slot's shape is the same resource request the submit page asks
+  // for, since the file a new reservation starts from is one the fields
+  // can state.
+  await expect(form.getByTestId('reservation-submit-fields')).toBeVisible();
+  await form.getByLabel('CPUs').fill('2');
   await form.getByRole('button', { name: 'Create reservation' }).click();
 
   const row = page.getByTestId('reservation-phys200');
@@ -143,12 +143,17 @@ test("reservations: a rejected save shows the server's own reason", async ({ pag
   expect(created.duration_seconds).toBe(5400);
   expect(created.lead_seconds).toBe(4 * 3600);
   expect(created.schedule).toBe('0 10 * * 2');
+  // Only the number that was typed changed; the rest of the file is the
+  // one the form opened on.
+  expect(created.submit).toBe(
+    'executable = /usr/bin/python3\nrequest_cpus = 2\nrequest_memory = 4096\nqueue\n',
+  );
 
   // A save opens the preview on what was saved: the schedule was typed
   // as cron a second ago, so this is when it is worth reading.
   const preview = page.getByTestId('windows-phys200');
   await expect(preview).toBeVisible();
-  // Four hours before the 2:00 PM bell.
+  // Four hours before the 2:00 PM start.
   await expect(preview.getByRole('row').nth(1)).toContainText('10:00 AM');
 
   // The refused save is a 400 by design, and the browser logs every
@@ -231,6 +236,69 @@ test('reservations: a healthy pool shows no warning at all', async ({ page }) =>
   await expect(page.getByRole('heading', { name: 'Reservations' })).toBeVisible();
   await expect(page.getByText('not set up for reservations')).toHaveCount(0);
   await expect(page.getByText('could not update')).toHaveCount(0);
+});
+
+// What the submit file does on the way in and out. It is stored as a
+// file and parsed by the server, so the fields are shown only over a
+// file they can hand back unchanged; everything else is text. Saving
+// without touching it has to return the stored bytes either way.
+
+test('reservations: a submit file the fields can state is saved unchanged', async ({
+  page,
+}) => {
+  const errors = watchForErrors(page);
+  const { writes } = await installReservationFixtures(page);
+
+  await page.goto('/admin/reservations');
+  await page.getByTestId('reservation-cs301').getByRole('button', { name: 'Edit' }).click();
+  const form = page.getByTestId('reservation-form');
+
+  const fields = form.getByTestId('reservation-submit-fields');
+  await expect(fields).toBeVisible();
+  await expect(fields.getByLabel('CPUs')).toHaveValue('4');
+  await expect(fields.getByLabel('Memory (MiB)', { exact: true })).toHaveValue('16384');
+  await expect(fields.getByLabel('GPUs', { exact: true })).toHaveValue('1');
+  // Whatever the fields have no box for is still in the file, and still
+  // editable.
+  await expect(fields.getByRole('textbox', { name: /Other submit commands/ })).toHaveValue(
+    'executable = /usr/bin/jupyter',
+  );
+
+  await form.getByRole('button', { name: 'Save changes' }).click();
+
+  const saved = writes.filter((w) => w.method === 'POST').pop()!
+    .body as AdminReservation;
+  expect(saved.submit).toBe(cs301Fixture.submit);
+
+  expect(errors).toEqual([]);
+});
+
+test('reservations: a submit file the fields would reformat stays text', async ({
+  page,
+}) => {
+  const errors = watchForErrors(page);
+  // The same commands, written without the spaces the fields would put
+  // back. Nothing about it is invalid; it simply is not the form's own
+  // spelling, and a save must not make it so.
+  const stored = 'executable = /bin/sleep\nrequest_cpus=4\nqueue\n';
+  const { writes } = await installReservationFixtures(page, [
+    { ...cs301Fixture, submit: stored },
+  ]);
+
+  await page.goto('/admin/reservations');
+  await page.getByTestId('reservation-cs301').getByRole('button', { name: 'Edit' }).click();
+  const form = page.getByTestId('reservation-form');
+
+  await expect(form.getByTestId('reservation-submit-fields')).toHaveCount(0);
+  await expect(form.getByTestId('reservation-submit-text')).toBeVisible();
+  await expect(form.getByText('Edited as text')).toBeVisible();
+
+  await form.getByRole('button', { name: 'Save changes' }).click();
+  const saved = writes.filter((w) => w.method === 'POST').pop()!
+    .body as AdminReservation;
+  expect(saved.submit).toBe(stored);
+
+  expect(errors).toEqual([]);
 });
 
 test('reservations: the schedule is picked, and the expression follows', async ({
