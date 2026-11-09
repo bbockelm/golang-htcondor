@@ -65,6 +65,69 @@ func Census(ctx context.Context, q SlotQuerier, only string) ([]Machine, error) 
 	return MachinesFromAds(ads), nil
 }
 
+// ViewProjection is what one tick reads: the census attributes plus the
+// three a held machine publishes. The union is sent once rather than
+// the two halves separately -- see ReadPool.
+var ViewProjection = append(append([]string{}, SlotProjection...),
+	AttrDeadline, AttrUntil, AttrProject)
+
+// View is everything one controller tick reads from the pool, taken
+// from a single collector query.
+type View struct {
+	// Machines is the census.
+	Machines []Machine
+	// Held is the deadline currently pushed to each held machine.
+	Held map[string]time.Time
+	// Running counts each project's running jobs across the pool.
+	Running map[string]int
+}
+
+// ReadPool reads the pool once and derives everything a tick needs.
+//
+// The three parts used to be three collector queries -- the census,
+// what is held, and running-by-project -- against the same ad type with
+// the same constraint, differing only in projection, and the third
+// re-ran the first verbatim. One query is not only a third of the dials
+// but the only way the three agree: read separately they are three
+// different moments, so a machine could be censused and then not be in
+// the held map, or a job could be counted running and already be gone,
+// and the plan would be built from a pool that never existed.
+//
+// now is when "held" is judged, since a deadline in the past holds
+// nothing.
+func ReadPool(ctx context.Context, q SlotQuerier, only string, now time.Time) (View, error) {
+	ads, _, err := q.QueryAdsWithOptions(ctx, "StartdAd", censusConstraint(only), &htcondor.QueryOptions{
+		Limit:      slotLimit,
+		Projection: ViewProjection,
+	})
+	if err != nil {
+		return View{}, err
+	}
+	machines := MachinesFromAds(ads)
+	return View{
+		Machines: machines,
+		Held:     heldFromAds(ads, now),
+		Running:  RunningByProject(machines),
+	}, nil
+}
+
+// RunningByProject counts each project's running jobs in a census.
+//
+// A reservation's seats are pool-wide: a job that landed from another
+// access point is still a seat its project holds, so this counts the
+// dynamic slots the pool reports rather than this access point's queue.
+func RunningByProject(machines []Machine) map[string]int {
+	out := map[string]int{}
+	for _, m := range machines {
+		for _, d := range m.Dslots {
+			if d.Project != "" && !d.Started.IsZero() {
+				out[d.Project]++
+			}
+		}
+	}
+	return out
+}
+
 // censusConstraint ANDs the site's execute-point expression onto the
 // census's own, parenthesised so a top-level || in the site expression
 // cannot swallow it.

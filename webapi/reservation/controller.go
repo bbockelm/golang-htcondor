@@ -9,7 +9,20 @@ import (
 	"time"
 )
 
+// Source reads everything one tick needs in a single pass, so the parts
+// agree with each other and cost one collector query between them. See
+// ReadPool, which is the implementation the access point uses.
+type Source interface {
+	// Read returns the pool as of now, which is when a deadline is
+	// judged to still hold.
+	Read(ctx context.Context, now time.Time) (View, error)
+}
+
 // Pool is the controller's view of the execute points.
+//
+// Deprecated: set Controller.Source instead. Machines and Held are two
+// collector queries over the same ads at two different moments; Source
+// reads them once, together, and cannot disagree with itself.
 type Pool interface {
 	// Machines is the current census.
 	Machines(ctx context.Context) ([]Machine, error)
@@ -23,6 +36,10 @@ type Pool interface {
 
 // Jobs reports what each project is already running. A project's own
 // running jobs are seats it already holds.
+//
+// Deprecated: set Controller.Source instead. The only implementation
+// re-ran the census to count dynamic slots, which View.Running now
+// derives from the census the tick already has.
 type Jobs interface {
 	RunningByProject(ctx context.Context) (map[string]int, error)
 }
@@ -77,9 +94,18 @@ type Specs interface {
 // restart, a missed push or a second controller, and the disagreement
 // would be invisible.
 type Controller struct {
-	Policy   Policy
-	Config   PlanConfig
-	Pool     Pool
+	Policy Policy
+	Config PlanConfig
+	// Source is the one-pass read. When it is set, Pool and Jobs are
+	// not consulted.
+	Source Source
+	// Pool is the superseded two-query read.
+	//
+	// Deprecated: set Source.
+	Pool Pool
+	// Jobs is the superseded running-job count.
+	//
+	// Deprecated: set Source.
 	Jobs     Jobs
 	Specs    Specs
 	Actuator Actuator
@@ -130,10 +156,10 @@ func (c *Controller) Tick(ctx context.Context) (TickResult, error) {
 		return res, fmt.Errorf("listing reservations: %w", err)
 	}
 
-	// With nothing reserved and a pool already confirmed clean, every
-	// read below would return the same nothing. Listing the store is
-	// local; reading the pool is not, and a reservation holds capacity
-	// by evicting other people's jobs, so a subsystem nobody is using
+	// With nothing reserved and a pool already confirmed clean, the read
+	// below would return the same nothing. Listing the store is local;
+	// reading the pool is not, and a reservation holds capacity by
+	// evicting other people's jobs, so a subsystem nobody is using
 	// should be invisible from outside this process.
 	engaged := Engaged(specs, c.now(), c.Policy.Forgive, SettleAfter)
 	if !engaged && c.clean {
@@ -141,18 +167,11 @@ func (c *Controller) Tick(ctx context.Context) (TickResult, error) {
 		return res, nil
 	}
 
-	machines, err := c.Pool.Machines(ctx)
+	view, err := c.read(ctx)
 	if err != nil {
-		return res, fmt.Errorf("reading the pool: %w", err)
+		return res, err
 	}
-	held, err := c.Pool.Held(ctx)
-	if err != nil {
-		return res, fmt.Errorf("reading what is already held: %w", err)
-	}
-	running, err := c.Jobs.RunningByProject(ctx)
-	if err != nil {
-		return res, fmt.Errorf("counting running jobs: %w", err)
-	}
+	machines, held, running := view.Machines, view.Held, view.Running
 
 	// Only projects that actually hold a reservation are protected from
 	// eviction. Every project-tagged job would be far too many.
@@ -188,6 +207,36 @@ func (c *Controller) Tick(ctx context.Context) (TickResult, error) {
 	// landed before anything stops.
 	c.clean = !engaged && len(held) == 0 && len(res.Errs) == 0
 	return res, nil
+}
+
+// read takes the pool, preferring the single-pass Source and falling
+// back to the deprecated Pool/Jobs pair.
+//
+// The fallback is kept because Pool and Jobs are exported and something
+// outside this repo may still set them. It is the old behaviour exactly,
+// three reads and all: a caller that has not moved to Source should get
+// what it had, not a quiet half-migration.
+func (c *Controller) read(ctx context.Context) (View, error) {
+	if c.Source != nil {
+		view, err := c.Source.Read(ctx, c.now())
+		if err != nil {
+			return View{}, fmt.Errorf("reading the pool: %w", err)
+		}
+		return view, nil
+	}
+	machines, err := c.Pool.Machines(ctx)
+	if err != nil {
+		return View{}, fmt.Errorf("reading the pool: %w", err)
+	}
+	held, err := c.Pool.Held(ctx)
+	if err != nil {
+		return View{}, fmt.Errorf("reading what is already held: %w", err)
+	}
+	running, err := c.Jobs.RunningByProject(ctx)
+	if err != nil {
+		return View{}, fmt.Errorf("counting running jobs: %w", err)
+	}
+	return View{Machines: machines, Held: held, Running: running}, nil
 }
 
 // apply pushes a plan. Releases go first so a machine moving from one
