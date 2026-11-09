@@ -156,6 +156,15 @@ func TestReservationsRejectBadInput(t *testing.T) {
 		{"standing over seats", func(r *reservationJSON) { r.Standing = 99 }},
 		{"submit that will not render", func(r *reservationJSON) { r.Submit = "request_cpus = 1\nqueue\n" }},
 		{"no seats", func(r *reservationJSON) { r.Seats = 0 }},
+		{"unparseable start", func(r *reservationJSON) { r.StartsAt = "next tuesday" }},
+		{"unparseable end", func(r *reservationJSON) { r.EndsAt = "2026-09-01" }},
+		{"an end and a count at once", func(r *reservationJSON) {
+			r.StartsAt, r.EndsAt, r.Occurrences = "2026-09-01T00:00:00Z", "2026-12-18T00:00:00Z", 15
+		}},
+		{"a count with no start", func(r *reservationJSON) { r.Occurrences = 15 }},
+		{"a start after the end", func(r *reservationJSON) {
+			r.StartsAt, r.EndsAt = "2026-12-18T00:00:00Z", "2026-09-01T00:00:00Z"
+		}},
 	} {
 		body := goodReservation()
 		tc.mut(&body)
@@ -418,5 +427,110 @@ func TestStampingNeedsTheEstimator(t *testing.T) {
 	env.h.startReservationStamping(t.Context())
 	if env.h.reservationStamper != nil {
 		t.Errorf("stamping started although reservations are disabled")
+	}
+}
+
+// TestReservationRecurrenceBoundsRoundTrip: the form sends a term as
+// RFC3339 and an empty string for "no bound", and has to get back what
+// it sent -- a term that quietly became "for ever" between the form and
+// the table is a class holding capacity after it finished.
+func TestReservationRecurrenceBoundsRoundTrip(t *testing.T) {
+	env := newResEnv(t)
+
+	// Unbounded first: the fields are present and empty, not missing.
+	if w := env.do(t, http.MethodPost, "/api/v1/admin/reservations", env.admin, goodReservation()); w.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", w.Code, w.Body)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(env.do(t, http.MethodGet, "/api/v1/admin/reservations/cs301", env.admin, nil).Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, field := range []string{"starts_at", "ends_at"} {
+		if got, ok := raw[field]; !ok || got != "" {
+			t.Errorf("unbounded %s = %v (present %v), want an empty string", field, got, ok)
+		}
+	}
+	if got, ok := raw["occurrences"]; !ok || got != float64(0) {
+		t.Errorf("unbounded occurrences = %v (present %v), want 0", got, ok)
+	}
+
+	term := goodReservation()
+	term.StartsAt = "2026-09-01T08:00:00Z"
+	term.EndsAt = "2026-12-18T17:00:00Z"
+	if w := env.do(t, http.MethodPost, "/api/v1/admin/reservations", env.admin, term); w.Code != http.StatusOK {
+		t.Fatalf("create with a term: %d %s", w.Code, w.Body)
+	}
+	var got reservationJSON
+	if err := json.Unmarshal(env.do(t, http.MethodGet, "/api/v1/admin/reservations/cs301", env.admin, nil).Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.StartsAt != term.StartsAt || got.EndsAt != term.EndsAt {
+		t.Errorf("term round-tripped as %q..%q, want %q..%q", got.StartsAt, got.EndsAt, term.StartsAt, term.EndsAt)
+	}
+
+	counted := goodReservation()
+	counted.StartsAt = term.StartsAt
+	counted.Occurrences = 15
+	if w := env.do(t, http.MethodPost, "/api/v1/admin/reservations", env.admin, counted); w.Code != http.StatusOK {
+		t.Fatalf("create with a count: %d %s", w.Code, w.Body)
+	}
+	if err := json.Unmarshal(env.do(t, http.MethodGet, "/api/v1/admin/reservations/cs301", env.admin, nil).Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Occurrences != 15 || got.EndsAt != "" {
+		t.Errorf("count round-tripped as %d occurrences, ends_at %q", got.Occurrences, got.EndsAt)
+	}
+}
+
+// TestReservationWindowsPreviewHonoursTheBounds: the preview is what the
+// admin checks the term against, so it has to show the recurrence
+// stopping rather than the cron expression running on.
+func TestReservationWindowsPreviewHonoursTheBounds(t *testing.T) {
+	env := newResEnv(t)
+	windows := func(t *testing.T) []windowJSON {
+		t.Helper()
+		w := env.do(t, http.MethodGet, "/api/v1/admin/reservations/cs301/windows?days=21", env.admin, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("windows: %d %s", w.Code, w.Body)
+		}
+		var got struct {
+			Windows []windowJSON `json:"windows"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return got.Windows
+	}
+
+	if w := env.do(t, http.MethodPost, "/api/v1/admin/reservations", env.admin, goodReservation()); w.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", w.Code, w.Body)
+	}
+	if n := len(windows(t)); n < 5 {
+		t.Fatalf("unbounded preview has %d windows over 21 days, want at least 5", n)
+	}
+
+	ended := goodReservation()
+	ended.EndsAt = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	if w := env.do(t, http.MethodPost, "/api/v1/admin/reservations", env.admin, ended); w.Code != http.StatusOK {
+		t.Fatalf("create ended: %d %s", w.Code, w.Body)
+	}
+	if n := len(windows(t)); n != 0 {
+		t.Errorf("a reservation whose term ended yesterday previews %d windows", n)
+	}
+
+	later := goodReservation()
+	later.StartsAt = time.Now().Add(14 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	if w := env.do(t, http.MethodPost, "/api/v1/admin/reservations", env.admin, later); w.Code != http.StatusOK {
+		t.Fatalf("create future: %d %s", w.Code, w.Body)
+	}
+	start := time.Now().Add(14 * 24 * time.Hour)
+	got := windows(t)
+	if len(got) == 0 {
+		t.Fatal("a term opening in a fortnight previews nothing inside 21 days; the check below would prove nothing")
+	}
+	for _, win := range got {
+		if win.Start.Before(start) {
+			t.Errorf("preview shows a window at %v, before the term opens at %v", win.Start, start)
+		}
 	}
 }

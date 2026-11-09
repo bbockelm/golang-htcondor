@@ -21,6 +21,17 @@ one hold: releasing cores between them and draining again costs more than
 keeping them, and a gap shorter than the forgiveness threshold is free
 either way.
 
+A recurrence can be bounded. A cron expression says when a reservation
+happens but not for how long it goes on, so a class booked for one term
+would otherwise hold capacity every Monday for ever. A reservation may
+have a **start**, and then either an **end** or a number of
+**occurrences** — one or the other, since they say the same thing two
+ways, and a count needs a start to count from. An occurrence that begins
+before the end runs its full duration: a class is not cut short because
+the term ended between its bell and its last minute. The count counts
+scheduled starts rather than windows, so fifteen lectures is fifteen
+lectures even where two of them merge into one hold.
+
 ## The cost rule
 
 Evicting a job that has run less than **30 minutes** is treated as free.
@@ -241,7 +252,14 @@ until its window has closed and the machines it held have been released,
 and the stamping pass and the probe wake twenty minutes ahead of that,
 so the queue is stamped and the pool's configuration is confirmed before
 the first machine is held. A standing reservation — one with seats held
-whether or not a class is in session — engages it permanently.
+whether or not a class is in session — engages it throughout its
+recurrence.
+
+Outside its recurrence a reservation engages nothing at all, standing
+seats included. A term that is over is the case worth being deliberate
+about: its windows have stopped coming and nobody is watching it any
+more, so a reservation left in the table goes quiet rather than holding
+part of the pool for a class that finished.
 
 Deleting or disabling a reservation that is holding machines still
 releases them: the controller goes quiet only after a pass that found
@@ -279,6 +297,7 @@ the form rather than surfacing hours later in a drain.
 The page previews the upcoming windows for a schedule, showing both when
 seats are held and when the controller would start draining for each.
 A cron expression is unreadable; nobody should have to take it on trust.
+The preview stops where the recurrence does, so a term reads as a term.
 
 Schedules are read in a named IANA zone, so a class at 14:00 stays at
 14:00 when the offset changes under it.

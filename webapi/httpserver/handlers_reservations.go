@@ -29,7 +29,16 @@ type reservationJSON struct {
 	HoldSeconds     int64  `json:"hold_seconds"`
 	Schedule        string `json:"schedule"`
 	Timezone        string `json:"timezone"`
-	Enabled         bool   `json:"enabled"`
+	// StartsAt and EndsAt bound the recurrence, RFC3339, empty for
+	// unbounded. Strings rather than times because "no end date" has to
+	// be expressible, and an omitted JSON time decodes to the zero year
+	// rather than to nothing.
+	StartsAt string `json:"starts_at"`
+	EndsAt   string `json:"ends_at"`
+	// Occurrences ends the recurrence after a number of scheduled
+	// starts instead of on a date. Zero is unlimited.
+	Occurrences int  `json:"occurrences"`
+	Enabled     bool `json:"enabled"`
 }
 
 // windowJSON is one upcoming hold.
@@ -47,15 +56,46 @@ func toReservationJSON(s *reservation.Spec) reservationJSON {
 		DurationSeconds: int64(s.Duration / time.Second),
 		LeadSeconds:     int64(s.Lead / time.Second),
 		HoldSeconds:     int64(s.Hold / time.Second),
+		Occurrences:     s.Occurrences,
 		Enabled:         s.Enabled,
 	}
+	loc := time.Local
 	if s.Schedule != nil {
 		out.Schedule = s.Schedule.String()
-		if loc := s.Schedule.Location(); loc != nil {
-			out.Timezone = loc.String()
+		if l := s.Schedule.Location(); l != nil {
+			loc, out.Timezone = l, l.String()
 		}
 	}
+	// The bounds go out in the schedule's zone. They are instants
+	// either way, but a term that starts on the 26th should not read as
+	// the 25th to an admin whose class is in another zone from the
+	// browser they are reading it in.
+	out.StartsAt = formatBound(s.Starts, loc)
+	out.EndsAt = formatBound(s.Ends, loc)
 	return out
+}
+
+// formatBound renders an absent bound as the empty string: a form with
+// no end date has to be able to say so.
+func formatBound(t time.Time, loc *time.Location) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.In(loc).Format(time.RFC3339)
+}
+
+// parseBound reads one bound, naming the field so a mistyped date comes
+// back to the box it was typed in.
+func parseBound(field, raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, errors.New(field + " must be an RFC3339 time such as 2026-09-01T00:00:00Z, got " + strconv.Quote(raw))
+	}
+	return t, nil
 }
 
 // toSpec builds a Spec, reporting a bad schedule or zone as a client error
@@ -73,6 +113,14 @@ func (j reservationJSON) toSpec() (*reservation.Spec, error) {
 	if err != nil {
 		return nil, err
 	}
+	starts, err := parseBound("starts_at", j.StartsAt)
+	if err != nil {
+		return nil, err
+	}
+	ends, err := parseBound("ends_at", j.EndsAt)
+	if err != nil {
+		return nil, err
+	}
 	return &reservation.Spec{
 		ID: strings.TrimSpace(j.ID), Owner: strings.TrimSpace(j.Owner),
 		Project: strings.TrimSpace(j.Project), Submit: j.Submit,
@@ -81,6 +129,7 @@ func (j reservationJSON) toSpec() (*reservation.Spec, error) {
 		Lead:     time.Duration(j.LeadSeconds) * time.Second,
 		Hold:     time.Duration(j.HoldSeconds) * time.Second,
 		Schedule: sched, Enabled: j.Enabled,
+		Starts: starts, Ends: ends, Occurrences: j.Occurrences,
 	}, nil
 }
 

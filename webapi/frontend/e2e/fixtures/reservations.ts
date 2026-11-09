@@ -34,6 +34,11 @@ export const cs301Fixture: AdminReservation = {
   schedule: '0 14 * * 1,3',
   timezone: 'America/Chicago',
   enabled: true,
+  // Mondays and Wednesdays from the start of term to the end of it:
+  // the shape the picker exists to draw.
+  starts_at: '2026-09-02T14:00:00-05:00',
+  ends_at: '2026-12-11T23:59:59-06:00',
+  occurrences: 0,
 };
 
 export const astroFixture: AdminReservation = {
@@ -49,6 +54,9 @@ export const astroFixture: AdminReservation = {
   schedule: '30 9 * * 5',
   timezone: 'America/Chicago',
   enabled: false,
+  starts_at: '',
+  ends_at: '',
+  occurrences: 0,
 };
 
 // The two windows every reservation previews, with the drain derived

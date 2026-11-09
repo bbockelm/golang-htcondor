@@ -17,6 +17,11 @@
 //     drain. The drain is when other people's jobs start being steered
 //     away, hours before the class notices anything, so it is given the
 //     same weight as the class time rather than hidden in a lead field.
+//     For the same reason the form asks for the schedule the way a
+//     calendar asks for a repeating event -- starts, repeats, ends --
+//     and keeps the expression itself in a box beneath, where it can be
+//     read, and typed, by anyone who needs cron to say something the
+//     controls cannot.
 //   * The server validates eagerly -- the cron, the zone, the submit
 //     file, standing against seats -- and answers 400 with the reason.
 //     The form shows that text verbatim. Restating it here in our own
@@ -36,6 +41,13 @@ import {
   hoursMinutesToSeconds,
   splitHoursMinutes,
 } from '@/lib/reservation';
+import {
+  describeBounds,
+  draftFromReservation,
+  recurrenceToBounds,
+  type ScheduleDraft,
+} from '@/lib/recurrence';
+import { RecurrencePicker, ScheduleRow } from '@/components/RecurrencePicker';
 
 // The browser's own zone, as the default for a new reservation: most
 // reservations are for the pool the operator is sitting in.
@@ -64,6 +76,12 @@ function blankReservation(): AdminReservation {
     schedule: '',
     timezone: localZone(),
     enabled: true,
+    // Unbounded until somebody says otherwise: a new reservation that
+    // quietly started today and ran out after a term would be a
+    // surprise nobody asked for.
+    starts_at: '',
+    ends_at: '',
+    occurrences: 0,
   };
 }
 
@@ -317,6 +335,7 @@ function ReservationRows({
   busy: boolean;
   deleting: boolean;
 }) {
+  const bounds = describeBounds(res);
   return (
     <>
       <tr className="hover:bg-gray-50" data-testid={`reservation-${res.id}`}>
@@ -330,6 +349,9 @@ function ReservationRows({
         <td className="px-3 py-2">
           <span className="font-mono text-xs text-gray-900">{res.schedule}</span>
           <span className="block text-xs text-gray-500">{res.timezone}</span>
+          {/* A schedule with a start or an end is otherwise invisible
+              here: the expression looks the same either way. */}
+          {bounds && <span className="block text-xs text-gray-500">{bounds}</span>}
         </td>
         <td className="px-3 py-2 text-xs text-gray-700">
           {formatHoursMinutes(res.duration_seconds)}
@@ -598,7 +620,11 @@ function ReservationForm({
   const [id, setId] = useState(initial.id);
   const [owner, setOwner] = useState(initial.owner);
   const [project, setProject] = useState(initial.project);
-  const [schedule, setSchedule] = useState(initial.schedule);
+  // The schedule, the picker state behind it, and which of the two is
+  // in charge, as one value -- see src/lib/recurrence.ts.
+  const [schedule, setSchedule] = useState<ScheduleDraft>(() =>
+    draftFromReservation(initial),
+  );
   const [timezone, setTimezone] = useState(initial.timezone);
   const [seats, setSeats] = useState(String(initial.seats));
   const [standing, setStanding] = useState(String(initial.standing));
@@ -609,6 +635,7 @@ function ReservationForm({
   const [hold, setHold] = useState(splitHoursMinutes(initial.hold_seconds));
 
   const send = () => {
+    const zone = timezone.trim();
     onSubmit({
       id: id.trim(),
       owner: owner.trim(),
@@ -619,9 +646,12 @@ function ReservationForm({
       duration_seconds: hoursMinutesToSeconds(duration.hours, duration.minutes),
       lead_seconds: hoursMinutesToSeconds(lead.hours, lead.minutes),
       hold_seconds: hoursMinutesToSeconds(hold.hours, hold.minutes),
-      schedule: schedule.trim(),
-      timezone: timezone.trim(),
+      schedule: schedule.cron.trim(),
+      timezone: zone,
       enabled,
+      // The bounds are read in the reservation's own zone, so they are
+      // written with that zone's offset rather than the browser's.
+      ...recurrenceToBounds(schedule.rec, zone),
     });
   };
 
@@ -695,64 +725,55 @@ function ReservationForm({
         </label>
       </div>
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        <div className="block text-xs">
-          <label className="block">
-            <span className="block text-gray-700">Schedule</span>
+      <div className="mt-3 rounded-sm border border-gray-200 bg-gray-50 p-3">
+        <RecurrencePicker
+          value={schedule}
+          onChange={setSchedule}
+          timezone={timezone.trim()}
+        />
+        <div className="mt-3">
+          <ScheduleRow label="Time zone" htmlFor="reservation-timezone">
             <input
-              type="text"
-              value={schedule}
-              onChange={(e) => setSchedule(e.target.value)}
-              placeholder="0 14 * * 1,3"
-              className={`${inputCls} font-mono`}
-            />
-          </label>
-          <span className="mt-1 block text-gray-500">
-            Cron: minute, hour, day of month, month, day of week.
-          </span>
-        </div>
-        <div className="block text-xs">
-          <label className="block">
-            <span className="block text-gray-700">Time zone</span>
-            <input
+              id="reservation-timezone"
               type="text"
               value={timezone}
               onChange={(e) => setTimezone(e.target.value)}
               list="reservation-timezones"
               placeholder="America/Chicago"
-              className={inputCls}
+              className="w-full rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400 sm:max-w-xs"
             />
-          </label>
-          <TimezoneOptions />
-          <span className="mt-1 block text-gray-500">
-            The schedule is read here, so a window keeps its clock time
-            across a daylight-saving change.
-          </span>
+            <TimezoneOptions />
+            <span className="mt-1 block text-xs text-gray-500">
+              Every date and time above is read here, so a window keeps its
+              clock time across a daylight-saving change.
+            </span>
+          </ScheduleRow>
         </div>
-        <div className="grid grid-cols-2 gap-3">
-          <label className="block text-xs">
-            <span className="block text-gray-700">Seats</span>
+      </div>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+        <label className="block text-xs">
+          <span className="block text-gray-700">Seats</span>
+          <input
+            type="number"
+            min={1}
+            value={seats}
+            onChange={(e) => setSeats(e.target.value)}
+            className={inputCls}
+          />
+        </label>
+        <div className="block text-xs">
+          <label className="block">
+            <span className="block text-gray-700">Standing seats</span>
             <input
               type="number"
-              min={1}
-              value={seats}
-              onChange={(e) => setSeats(e.target.value)}
+              min={0}
+              value={standing}
+              onChange={(e) => setStanding(e.target.value)}
               className={inputCls}
             />
           </label>
-          <div className="block text-xs">
-            <label className="block">
-              <span className="block text-gray-700">Standing seats</span>
-              <input
-                type="number"
-                min={0}
-                value={standing}
-                onChange={(e) => setStanding(e.target.value)}
-                className={inputCls}
-              />
-            </label>
-            <span className="mt-1 block text-gray-500">Kept between windows.</span>
-          </div>
+          <span className="mt-1 block text-gray-500">Kept between windows.</span>
         </div>
       </div>
 
@@ -853,6 +874,12 @@ function HoursMinutesField({
           type="number"
           min={0}
           max={59}
+          // Quarter hours on the spinner, which is what almost every
+          // one of these is set to. A step is not a restriction: a
+          // 50-minute class is a real timetable, and typing 50 still
+          // works -- a list of 0/15/30/45 would make that value
+          // unreachable and rewrite it on the next save.
+          step={15}
           aria-label={`${label} minutes`}
           value={String(value.minutes)}
           onChange={(e) => onChange({ ...value, minutes: Number(e.target.value) })}
