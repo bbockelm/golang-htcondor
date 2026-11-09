@@ -31,13 +31,42 @@ export const cs301Fixture: AdminReservation = {
   duration_seconds: 3600,
   lead_seconds: 6 * 3600,
   hold_seconds: 15 * 60,
-  schedule: '0 14 * * 1,3',
-  timezone: 'America/Chicago',
-  enabled: true,
   // Mondays and Wednesdays from the start of term to the end of it:
   // the shape the picker exists to draw.
+  schedule_kind: 'recurrence',
+  schedule: '',
+  recurrence: {
+    freq: 'weekly',
+    interval: 1,
+    by_weekday: [1, 3],
+    time_of_day: '14:00',
+  },
+  timezone: 'America/Chicago',
+  enabled: true,
   starts_at: '2026-09-02T14:00:00-05:00',
   ends_at: '2026-12-11T23:59:59-06:00',
+  occurrences: 0,
+};
+
+
+export const alwaysFixture: AdminReservation = {
+  id: 'openlab',
+  owner: 'rsingh',
+  project: 'openlab',
+  submit: 'executable = /usr/bin/python3\nrequest_cpus = 2\nrequest_memory = 8192\nqueue\n',
+  seats: 8,
+  standing: 2,
+  // No window, so none of the three durations describe anything.
+  duration_seconds: 0,
+  lead_seconds: 0,
+  hold_seconds: 0,
+  schedule_kind: 'always',
+  schedule: '',
+  recurrence: null,
+  timezone: 'America/Chicago',
+  enabled: true,
+  starts_at: '',
+  ends_at: '',
   occurrences: 0,
 };
 
@@ -51,7 +80,9 @@ export const astroFixture: AdminReservation = {
   duration_seconds: 2 * 3600 + 30 * 60,
   lead_seconds: 90 * 60,
   hold_seconds: 0,
+  schedule_kind: 'cron',
   schedule: '30 9 * * 5',
+  recurrence: null,
   timezone: 'America/Chicago',
   enabled: false,
   starts_at: '',
@@ -63,6 +94,9 @@ export const astroFixture: AdminReservation = {
 // from the reservation's own lead so a test can assert the lead it just
 // typed came back.
 function windowsFor(res: AdminReservation): AdminReservationWindow[] {
+  // An always-on reservation has no windows at all: it never stops
+  // holding, so there is nothing upcoming to list.
+  if (res.schedule_kind === 'always') return [];
   const back = (iso: string) =>
     new Date(Date.parse(iso) - res.lead_seconds * 1000).toISOString();
   return [
@@ -82,8 +116,13 @@ function windowsFor(res: AdminReservation): AdminReservationWindow[] {
 }
 
 export interface ReservationFixtures {
-  // Every write the page sent, in order.
+  // Every write the page sent, in order. Window previews are not
+  // writes and are not in here: the form asks for one on every change,
+  // and a test looking for the reservation it just saved would find a
+  // preview instead.
   writes: { method: string; path: string; body: unknown }[];
+  // Every draft the form asked for a preview of, in order.
+  previews: AdminReservation[];
   // The server's view, for a test that wants to assert what was stored.
   stored: () => AdminReservation[];
 }
@@ -101,10 +140,11 @@ export const healthyFixture: AdminReservationHealth = {
 
 export async function installReservationFixtures(
   page: Page,
-  initial: AdminReservation[] = [cs301Fixture, astroFixture],
+  initial: AdminReservation[] = [cs301Fixture, astroFixture, alwaysFixture],
   health: AdminReservationHealth = healthyFixture,
 ): Promise<ReservationFixtures> {
   const writes: { method: string; path: string; body: unknown }[] = [];
+  const previews: AdminReservation[] = [];
   let store = initial.map((r) => ({ ...r }));
 
   await page.route('**/api/v1/admin/reservations**', async (route) => {
@@ -121,13 +161,25 @@ export async function installReservationFixtures(
       await route.fulfill({ json: health });
       return;
     }
+    // The draft preview, which takes a whole reservation in the body
+    // and writes nothing.
+    if (req.method() === 'POST' && id === 'windows') {
+      const draft = (req.postDataJSON?.() ?? {}) as AdminReservation;
+      previews.push(draft);
+      await route.fulfill({
+        json: { windows: windowsFor(draft), schedule_kind: draft.schedule_kind || 'cron' },
+      });
+      return;
+    }
     if (req.method() === 'GET' && tail === 'windows') {
       const res = store.find((r) => r.id === id);
       if (!res) {
         await route.fulfill({ status: 404, json: { error: 'Not Found', message: 'No such reservation' } });
         return;
       }
-      await route.fulfill({ json: { windows: windowsFor(res) } });
+      await route.fulfill({
+        json: { windows: windowsFor(res), schedule_kind: res.schedule_kind || 'cron' },
+      });
       return;
     }
     if (req.method() === 'GET') {
@@ -141,11 +193,14 @@ export async function installReservationFixtures(
       return;
     }
     // POST: create or replace, with the server's eager validation. Only
-    // the cron is checked here -- enough to prove the page shows the
+    // the schedule is checked here -- enough to prove the page shows the
     // server's own wording rather than inventing its own.
     const body = (req.postDataJSON?.() ?? {}) as AdminReservation;
     writes.push({ method: 'POST', path, body });
-    if (body.schedule.split(/\s+/).filter(Boolean).length !== 5) {
+    if (
+      (body.schedule_kind === 'cron' || body.schedule_kind === '') &&
+      body.schedule.split(/\s+/).filter(Boolean).length !== 5
+    ) {
       await route.fulfill({
         status: 400,
         json: {
@@ -163,7 +218,7 @@ export async function installReservationFixtures(
     await route.fulfill({ json: body });
   });
 
-  return { writes, stored: () => store };
+  return { writes, previews, stored: () => store };
 }
 
 // Exported so a test can state when "now" is without importing the clock

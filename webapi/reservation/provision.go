@@ -238,7 +238,7 @@ type Health struct {
 //
 // Two things fail silently and only show up here. An access point that
 // cannot update machine ads: nothing errors, no reservation complains,
-// and every class starts on a pool that was never drained. And an
+// and every window opens on a pool that was never drained. And an
 // execute point whose START never consults the sieve: it is held, it
 // reports as held, and it admits everything anyway.
 func (p *Prober) Health() Health {

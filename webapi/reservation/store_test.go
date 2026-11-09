@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -255,5 +256,94 @@ func TestStoreRoundTripsTheRecurrenceBounds(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	} else if !got.Ends.IsZero() {
 		t.Errorf("a cleared end read back as %v", got.Ends)
+	}
+}
+
+// recurrenceStoredSpec is a reservation timed by the structured form.
+func recurrenceStoredSpec(t *testing.T, id string) *Spec {
+	t.Helper()
+	s := seatSpec(gpuSeat)
+	s.ID = id
+	s.Kind, s.Schedule = KindRecurrence, nil
+	s.Recurrence = mustRecurrence(t, Recurrence{
+		Freq: FreqMonthly, Interval: 2, BySetPos: -1, ByWeekday: []int{5}, TimeOfDay: "14:00",
+	}, time.UTC)
+	s.Starts = time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)
+	return s
+}
+
+// TestStoreRoundTripsARecurrence: the structured form is stored as JSON
+// and validated again on the way back, so what the controller enumerates
+// is what the admin asked for rather than whatever decoded.
+func TestStoreRoundTripsARecurrence(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	want := recurrenceStoredSpec(t, "cs301")
+	if err := st.Put(ctx, want); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, err := st.Get(ctx, "cs301")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ScheduleKind() != KindRecurrence {
+		t.Fatalf("schedule kind round-tripped as %q", got.ScheduleKind())
+	}
+	if got.Recurrence == nil {
+		t.Fatal("the recurrence did not round-trip at all")
+	}
+	if got.Recurrence.String() != want.Recurrence.String() {
+		t.Errorf("recurrence round-tripped as %q, want %q", got.Recurrence, want.Recurrence)
+	}
+	if got.Recurrence.Location().String() != "UTC" {
+		t.Errorf("the zone round-tripped as %q", got.Recurrence.Location())
+	}
+	// The real test of the round trip is that it still enumerates the
+	// same days, which is the only thing the controller asks of it.
+	from := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	if a, b := stamps(got.Windows(from, 120*24*time.Hour, recurForgive)), stamps(want.Windows(from, 120*24*time.Hour, recurForgive)); !reflect.DeepEqual(a, b) {
+		t.Errorf("the stored recurrence enumerates %v, the original %v", a, b)
+	}
+	// A row whose schedule kind names a recurrence it does not have is
+	// reported rather than quietly loaded as a reservation that never
+	// happens.
+	if _, err := st.db.ExecContext(ctx, `UPDATE reservations SET recurrence = '' WHERE id = ?`, "cs301"); err != nil {
+		t.Fatalf("clearing the recurrence: %v", err)
+	}
+	if _, err := st.Get(ctx, "cs301"); err == nil {
+		t.Error("a recurrence row with no recurrence loaded without complaint")
+	}
+}
+
+// TestStoreRoundTripsAnAlwaysOnReservation: it has no schedule text to
+// parse, and parsing the empty string left in the column would fail
+// every read.
+func TestStoreRoundTripsAnAlwaysOnReservation(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	want := seatSpec(gpuSeat)
+	want.ID = "jupyter"
+	want.Kind, want.Schedule = KindAlways, nil
+	want.Duration, want.Lead, want.Hold = 0, 0, 0
+	want.Zone = time.UTC
+
+	if err := st.Put(ctx, want); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, err := st.Get(ctx, "jupyter")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ScheduleKind() != KindAlways {
+		t.Errorf("schedule kind round-tripped as %q", got.ScheduleKind())
+	}
+	if got.Schedule != nil || got.Recurrence != nil {
+		t.Errorf("an always-on reservation came back with a timing: %v / %v", got.Schedule, got.Recurrence)
+	}
+	if got.Standing != want.Standing || got.Seats != want.Seats {
+		t.Errorf("seats/standing round-tripped as %d/%d", got.Seats, got.Standing)
+	}
+	if got.Location().String() != "UTC" {
+		t.Errorf("the zone round-tripped as %q: an always-on reservation still has dates to render", got.Location())
 	}
 }

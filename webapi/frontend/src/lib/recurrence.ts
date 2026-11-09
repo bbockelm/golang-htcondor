@@ -1,54 +1,78 @@
-// A reservation's schedule, as a calendar asks for it rather than as
-// cron states it.
+// A reservation's timing, as a calendar asks for it.
 //
-// The schedule on the wire is a five-field cron expression, and the
-// server is the authority on what one may be. Nothing here parses cron
-// so the page can validate it; it parses cron so the page can offer a
-// recurrence picker over it, the way a calendar does: a start, a
-// repeat, and an end.
+// A reservation is timed in one of three ways, and which one is
+// authoritative is recorded rather than inferred: a structured
+// recurrence, a hand-typed cron expression, or nothing at all for one
+// that holds its capacity continuously.
 //
-// Two rules run through the whole file, and both exist to keep the
-// picker from quietly rewriting a schedule somebody typed.
+// The recurrence and the cron expression are **peers, not layers**.
+// Nothing here converts between them in either direction. A recurrence
+// says things cron cannot -- every other week, the last Friday of the
+// month -- so a converter would have to round exactly the schedules the
+// recurrence exists to express, and a page that displayed the rounded
+// version would be showing a schedule that is not the one being run.
 //
-//   * The picker is only ever shown over a cron it can reproduce
-//     exactly. `adoptCron` parses an expression, builds the picker
-//     state it implies, regenerates the cron from that state, and
-//     refuses the whole thing unless the result is the original string
-//     byte for byte. So `0 14 * * 3,1` and `0  14 * * 1,3` both fall
-//     through to the cron box: the picker would render them as
-//     `0 14 * * 1,3`, and opening a reservation and pressing Save is
-//     not an invitation to renumber its schedule.
-//   * Anything the picker cannot say, it declines to say. There is no
-//     every-other-week option because five-field cron has no way to
-//     express one -- `*/2` on the day-of-week field means "every other
-//     weekday", not "every other week" -- and an option that generated
-//     a schedule the operator did not ask for would be worse than no
-//     option.
+// That is also what makes the two freely interchangeable in the form.
+// Switching from the controls to the expression and back changes only
+// which one is authoritative; both stay in the draft, untouched, until
+// the reservation is saved. Clicking the wrong repeat is an undo away
+// rather than a reload.
 //
-// The bounds are separate from the recurrence. `starts_at`, `ends_at`
-// and `occurrences` are limits on a cron that otherwise runs forever;
-// they are not in the expression and cannot be, so an operator can set
-// them over a hand-written cron just as well as over a picked one.
+// The bounds are separate again. `starts_at`, `ends_at` and
+// `occurrences` limit a schedule that otherwise runs forever; they are
+// not part of either representation, so an operator can set them over a
+// hand-written expression just as well as over a picked recurrence.
 
-import type { AdminReservation } from '@/lib/api';
+import type { AdminReservation, WireRecurrence } from '@/lib/api';
 
-/** How a schedule repeats. `never` is one window and then nothing,
- *  which cron reaches only with a bound of one occurrence. */
-export type RepeatMode = 'never' | 'daily' | 'weekly' | 'monthly';
+/** Which timing a reservation is run from. The names are the wire's. */
+export type ScheduleKind = 'cron' | 'recurrence' | 'always';
+
+/** How a recurrence repeats. `once` is a daily recurrence bounded to a
+ *  single window -- the same thing the wire says, named as an operator
+ *  asks for it. */
+export type RepeatMode = 'once' | 'daily' | 'weekly' | 'monthly';
+
+/** Which way a monthly recurrence picks its days: by the date, or by
+ *  counting a kind of day within the month. The wire refuses both at
+ *  once, so the picker offers them as alternatives. */
+export type MonthlyMode = 'monthday' | 'setpos';
+
+/** What a set position counts when it is not counting one weekday. */
+export type DayKind = '' | 'day' | 'weekday' | 'weekend';
 
 /** When a schedule stops: never, on a date, or after a count. The three
  *  are exclusive because the server refuses two bounds at once. */
 export type EndMode = 'never' | 'on' | 'after';
 
+/** The one choice the repeat control offers, across all three timings.
+ *  They are alternatives to each other, so they are one radio group
+ *  rather than a kind and then a frequency. */
+export type RepeatChoice = 'always' | RepeatMode | 'custom';
+
 export interface Recurrence {
   /** `YYYY-MM-DD` in the reservation's zone, or "" for no start bound. */
   startDate: string;
-  /** `HH:MM`, 24-hour, in the reservation's zone. This is the cron's
-   *  minute and hour, not merely a bound. */
+  /** `HH:MM`, 24-hour, in the reservation's zone: the time of day
+   *  windows begin. */
   startTime: string;
   repeat: RepeatMode;
-  /** Days a weekly schedule fires on, 0 = Sunday through 6 = Saturday. */
+  /** The "every N" -- days, weeks or months. Above one it needs a start
+   *  date to count from. */
+  interval: number;
+  /** Days a weekly recurrence fires on, 0 = Sunday through 6 = Saturday. */
   weekdays: number[];
+  monthlyMode: MonthlyMode;
+  /** Days of the month a monthly recurrence fires on, 1 through 31. */
+  monthdays: number[];
+  /** 1..5 for first through fifth, -1 last, -2 next to last. */
+  setpos: number;
+  /** The weekday a set position counts, when it counts a weekday. Kept
+   *  alongside `dayKind` rather than in one field so that choosing "the
+   *  first weekday" and changing your mind does not forget which day
+   *  was picked. */
+  setposWeekday: number;
+  dayKind: DayKind;
   end: EndMode;
   /** `YYYY-MM-DD`, used when `end` is `on`. */
   endDate: string;
@@ -56,22 +80,18 @@ export interface Recurrence {
   occurrences: number;
 }
 
-/** The shape a cron expression has, when it has one the picker knows.
- *  `dayOfMonth` and `month` are null for the repeats that do not pin
- *  them. */
-export interface CronShape {
-  time: string;
-  repeat: RepeatMode;
-  weekdays: number[];
-  dayOfMonth: number | null;
-  month: number | null;
-}
-
 /** The three wire fields that bound a schedule. */
 export interface RecurrenceBounds {
   starts_at: string;
   ends_at: string;
   occurrences: number;
+}
+
+/** Everything the form sends about when a reservation runs. */
+export interface ScheduleFields extends RecurrenceBounds {
+  schedule_kind: ScheduleKind;
+  schedule: string;
+  recurrence: WireRecurrence | null;
 }
 
 // Mid-morning: a time that is plainly a choice, so a schedule left at
@@ -88,6 +108,29 @@ export const WEEKDAYS: readonly { index: number; letter: string; name: string }[
   { index: 4, letter: 'T', name: 'Thursday' },
   { index: 5, letter: 'F', name: 'Friday' },
   { index: 6, letter: 'S', name: 'Saturday' },
+] as const;
+
+/** The positions a monthly recurrence can count to. Negative counts from
+ *  the end, which is the only way to say "the last Friday" in a month
+ *  that may have four or five of them. */
+export const SET_POSITIONS: readonly { value: number; label: string }[] = [
+  { value: 1, label: 'First' },
+  { value: 2, label: 'Second' },
+  { value: 3, label: 'Third' },
+  { value: 4, label: 'Fourth' },
+  { value: 5, label: 'Fifth' },
+  { value: -1, label: 'Last' },
+  { value: -2, label: 'Next to last' },
+] as const;
+
+/** What a set position may count: one weekday, or a category of days.
+ *  One list because they are one choice -- "the first Monday" and "the
+ *  first weekday" are answers to the same question. */
+export const SETPOS_DAYS: readonly { value: string; label: string }[] = [
+  ...WEEKDAYS.map((d) => ({ value: String(d.index), label: d.name })),
+  { value: 'day', label: 'day' },
+  { value: 'weekday', label: 'weekday' },
+  { value: 'weekend', label: 'weekend day' },
 ] as const;
 
 function pad2(n: number): string {
@@ -116,125 +159,331 @@ function parseISODate(date: string): { year: number; month: number; day: number 
   return { year, month, day };
 }
 
-/** recurrenceToCron renders picker state as the expression that fires
- *  it, or null when the state does not describe a schedule yet -- a
- *  weekly repeat with no day ticked, a monthly one with no date to take
- *  the day of the month from. Null is a schedule the page leaves blank
- *  rather than a guess. */
-export function recurrenceToCron(r: Recurrence): string | null {
-  const t = parseTimeOfDay(r.startTime);
-  if (!t) return null;
-  const hm = `${t.minute} ${t.hour}`;
-  switch (r.repeat) {
-    case 'daily':
-      return `${hm} * * *`;
-    case 'weekly': {
-      const days = [...new Set(r.weekdays)].sort((a, b) => a - b);
-      if (days.length === 0) return null;
-      if (days.some((d) => !Number.isInteger(d) || d < 0 || d > 6)) return null;
-      return `${hm} * * ${days.join(',')}`;
-    }
-    case 'monthly': {
-      const d = parseISODate(r.startDate);
-      if (!d) return null;
-      return `${hm} ${d.day} * *`;
-    }
-    case 'never': {
-      // One window, pinned to its own date. Cron cannot say "once", so
-      // the expression repeats annually and the bound of a single
-      // occurrence is what actually stops it -- see recurrenceToBounds.
-      const d = parseISODate(r.startDate);
-      if (!d) return null;
-      return `${hm} ${d.day} ${d.month} *`;
-    }
-  }
+/** Ascending and without duplicates, which is the order occurrences
+ *  happen in rather than the order boxes were ticked in. The server
+ *  normalises the same way, so a reservation does not come back looking
+ *  different from what was sent. */
+function sortedUnique(values: number[]): number[] {
+  return [...new Set(values)].sort((a, b) => a - b);
 }
 
-function parseField(field: string, min: number, max: number): number | null {
-  if (!/^\d{1,2}$/.test(field)) return null;
-  const n = Number(field);
-  return n >= min && n <= max ? n : null;
-}
-
-/** parseCron recognises the handful of shapes the picker can draw, and
- *  returns null for every other legal expression.
- *
- *  It is deliberately strict about spelling as well as meaning. `7` and
- *  `SUN` both name Sunday to cron and neither is accepted, because the
- *  picker would redraw them as `0`; a step expression such as every
- *  fifteenth minute is a perfectly good schedule the picker has no
- *  control for. All of those keep their cron box. */
-export function parseCron(cron: string): CronShape | null {
-  const fields = cron.trim().split(/\s+/);
-  if (fields.length !== 5) return null;
-  const [minField, hourField, domField, monthField, dowField] = fields;
-
-  const minute = parseField(minField, 0, 59);
-  const hour = parseField(hourField, 0, 23);
-  if (minute === null || hour === null) return null;
-  const time = `${pad2(hour)}:${pad2(minute)}`;
-
-  const anyDom = domField === '*';
-  const anyMonth = monthField === '*';
-  const anyDow = dowField === '*';
-
-  if (anyDom && anyMonth && anyDow) {
-    return { time, repeat: 'daily', weekdays: [], dayOfMonth: null, month: null };
-  }
-  if (anyDom && anyMonth && !anyDow) {
-    const parts = dowField.split(',');
-    const days: number[] = [];
-    for (const part of parts) {
-      const d = parseField(part, 0, 6);
-      if (d === null) return null;
-      days.push(d);
-    }
-    // Ascending only: the picker has no way to show an order, so it
-    // would redraw `3,1` as `1,3`.
-    for (let i = 1; i < days.length; i++) {
-      if (days[i] <= days[i - 1]) return null;
-    }
-    return { time, repeat: 'weekly', weekdays: days, dayOfMonth: null, month: null };
-  }
-  if (!anyDom && anyMonth && anyDow) {
-    const day = parseField(domField, 1, 31);
-    if (day === null) return null;
-    return { time, repeat: 'monthly', weekdays: [], dayOfMonth: day, month: null };
-  }
-  if (!anyDom && !anyMonth && anyDow) {
-    const day = parseField(domField, 1, 31);
-    const month = parseField(monthField, 1, 12);
-    if (day === null || month === null) return null;
-    return { time, repeat: 'never', weekdays: [], dayOfMonth: day, month };
-  }
-  return null;
-}
-
-/** adoptCron merges a stored expression into picker state, or returns
- *  null when the picker cannot reproduce it exactly.
- *
- *  The regeneration check at the end is the whole point: without it the
- *  picker would open on an approximation of the stored schedule and
- *  write the approximation back on the next save. */
-export function adoptCron(cron: string, base: Recurrence): Recurrence | null {
-  const shape = parseCron(cron);
-  if (!shape) return null;
-  const next: Recurrence = {
-    ...base,
-    startTime: shape.time,
-    repeat: shape.repeat,
-    weekdays: shape.weekdays,
+/** defaultRecurrence is what a new reservation's controls start on:
+ *  weekly, with no day chosen yet, because a weekly reservation is what
+ *  almost every one of these is and guessing the day would be a
+ *  schedule nobody asked for. */
+export function defaultRecurrence(): Recurrence {
+  return {
+    startDate: '',
+    startTime: DEFAULT_START_TIME,
+    repeat: 'weekly',
+    interval: 1,
+    weekdays: [],
+    monthlyMode: 'monthday',
+    monthdays: [],
+    setpos: 1,
+    setposWeekday: 1,
+    dayKind: '',
+    end: 'never',
+    endDate: '',
+    occurrences: 1,
   };
-  if (shape.dayOfMonth !== null) {
-    // A monthly or one-off expression takes its day from the start
-    // date. With no start date, or one that disagrees, the picker has
-    // nowhere to show the day it would fire on.
-    const d = parseISODate(next.startDate);
-    if (!d || d.day !== shape.dayOfMonth) return null;
-    if (shape.month !== null && d.month !== shape.month) return null;
-  }
-  return recurrenceToCron(next) === cron.trim() ? next : null;
 }
+
+// --- The wire recurrence ---
+
+/** recurrenceToWire renders the controls as the recurrence the server
+ *  reads. Only the fields the chosen frequency admits are sent: the
+ *  server refuses a daily recurrence carrying weekdays, and rightly so,
+ *  since that is a weekly one wearing the wrong frequency. */
+export function recurrenceToWire(rec: Recurrence): WireRecurrence {
+  const base: WireRecurrence = {
+    // A one-off is a daily recurrence bounded to a single window. There
+    // is no "once" frequency on the wire, and inventing one here would
+    // be a fourth thing for the server to understand.
+    freq: rec.repeat === 'once' ? 'daily' : rec.repeat,
+    interval: rec.repeat === 'once' ? 1 : intervalOf(rec),
+    time_of_day: rec.startTime,
+  };
+  if (rec.repeat === 'weekly') {
+    return { ...base, by_weekday: sortedUnique(rec.weekdays) };
+  }
+  if (rec.repeat === 'monthly') {
+    if (rec.monthlyMode === 'setpos') {
+      return {
+        ...base,
+        by_setpos: rec.setpos,
+        // A set position counts one kind of day. With a category there
+        // is no weekday to send, and sending both is refused.
+        ...(rec.dayKind
+          ? { day_kind: rec.dayKind }
+          : { by_weekday: [rec.setposWeekday] }),
+      };
+    }
+    return { ...base, by_monthday: sortedUnique(rec.monthdays) };
+  }
+  return base;
+}
+
+function intervalOf(rec: Recurrence): number {
+  const n = Math.floor(rec.interval);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+/** canonicalWire is a stored recurrence in the spelling the controls
+ *  would send it in, so the two can be compared. Normalising both sides
+ *  is what keeps the comparison about meaning rather than about field
+ *  order or the order weekdays were listed in. */
+function canonicalWire(w: WireRecurrence): WireRecurrence {
+  const out: WireRecurrence = {
+    freq: w.freq,
+    interval: w.interval && w.interval > 0 ? Math.floor(w.interval) : 1,
+    time_of_day: w.time_of_day ?? '',
+  };
+  if (w.by_weekday?.length) out.by_weekday = sortedUnique(w.by_weekday);
+  if (w.by_monthday?.length) out.by_monthday = sortedUnique(w.by_monthday);
+  if (w.by_setpos) out.by_setpos = w.by_setpos;
+  if (w.day_kind) out.day_kind = w.day_kind;
+  return out;
+}
+
+function sameNumbers(a: number[] | undefined, b: number[] | undefined): boolean {
+  const x = a ?? [];
+  const y = b ?? [];
+  return x.length === y.length && x.every((v, i) => v === y[i]);
+}
+
+function sameWire(a: WireRecurrence, b: WireRecurrence): boolean {
+  return (
+    a.freq === b.freq &&
+    a.interval === b.interval &&
+    a.time_of_day === b.time_of_day &&
+    (a.by_setpos ?? 0) === (b.by_setpos ?? 0) &&
+    (a.day_kind ?? '') === (b.day_kind ?? '') &&
+    sameNumbers(a.by_weekday, b.by_weekday) &&
+    sameNumbers(a.by_monthday, b.by_monthday)
+  );
+}
+
+/** recurrenceFromWire reads a stored recurrence into the controls, and
+ *  says whether they can state it exactly.
+ *
+ *  The wire admits a few shapes the controls do not offer -- a monthly
+ *  recurrence listing weekdays with no position to count them to, for
+ *  one -- and those can only arrive from something other than this form.
+ *  Showing them as the nearest thing the controls can draw would make
+ *  opening a reservation and pressing Save a silent edit of its
+ *  schedule, so they are reported as inexact and kept verbatim instead.
+ */
+export function recurrenceFromWire(
+  w: WireRecurrence,
+  base: Recurrence,
+  occurrences: number,
+): { rec: Recurrence; exact: boolean } {
+  const canonical = canonicalWire(w);
+  const rec: Recurrence = {
+    ...base,
+    startTime: canonical.time_of_day || base.startTime,
+    repeat: canonical.freq,
+    interval: canonical.interval,
+  };
+  // A daily recurrence bounded to one window is a one-off, which is how
+  // an operator asked for it and how the controls should show it back.
+  if (canonical.freq === 'daily' && canonical.interval === 1 && occurrences === 1) {
+    rec.repeat = 'once';
+  }
+  if (canonical.freq === 'weekly') {
+    rec.weekdays = canonical.by_weekday ?? [];
+  }
+  if (canonical.freq === 'monthly') {
+    if (canonical.by_setpos) {
+      rec.monthlyMode = 'setpos';
+      rec.setpos = canonical.by_setpos;
+      rec.dayKind = canonical.day_kind ?? '';
+      if (canonical.by_weekday?.length === 1) {
+        rec.setposWeekday = canonical.by_weekday[0];
+      }
+    } else {
+      rec.monthlyMode = 'monthday';
+      rec.monthdays = canonical.by_monthday ?? [];
+    }
+  }
+  return { rec, exact: sameWire(recurrenceToWire(rec), canonical) };
+}
+
+// --- The draft the form holds ---
+//
+// All three timings live in the draft at once. Only `kind` says which
+// one is sent, so switching between them is reversible: the expression
+// somebody typed is still there when they come back from the controls,
+// and the controls are still set when they come back from the
+// expression.
+
+export interface ScheduleDraft {
+  kind: ScheduleKind;
+  rec: Recurrence;
+  /** What the expression box shows, and what goes on the wire for
+   *  `cron`. */
+  cron: string;
+  /** A stored recurrence the controls cannot state, kept exactly as it
+   *  came so that saving without touching the repeat does not rewrite
+   *  it. Cleared the moment a repeat control is used. */
+  stored: WireRecurrence | null;
+}
+
+/** draftFromReservation opens the form on a stored reservation. */
+export function draftFromReservation(res: AdminReservation): ScheduleDraft {
+  const zone = res.timezone;
+  const start = res.starts_at ? zonedDateTime(res.starts_at, zone) : null;
+  const end = res.ends_at ? zonedDateTime(res.ends_at, zone) : null;
+  const base: Recurrence = {
+    ...defaultRecurrence(),
+    startDate: start?.date ?? '',
+    startTime: start?.time ?? DEFAULT_START_TIME,
+    endDate: end?.date ?? '',
+    end: res.ends_at ? 'on' : res.occurrences > 0 ? 'after' : 'never',
+    occurrences: res.occurrences > 0 ? res.occurrences : 1,
+  };
+  // An empty kind is cron: that is what every reservation stored before
+  // the recurrence existed is, and the server reads it the same way.
+  const kind: ScheduleKind =
+    res.schedule_kind === 'recurrence' || res.schedule_kind === 'always'
+      ? res.schedule_kind
+      : 'cron';
+  if (kind === 'recurrence' && res.recurrence) {
+    const { rec, exact } = recurrenceFromWire(res.recurrence, base, res.occurrences);
+    return { kind, rec, cron: res.schedule, stored: exact ? null : res.recurrence };
+  }
+  return { kind, rec: base, cron: res.schedule, stored: null };
+}
+
+/** repeatChoice is which repeat control is selected. */
+export function repeatChoice(d: ScheduleDraft): RepeatChoice {
+  if (d.kind === 'always') return 'always';
+  if (d.kind === 'cron') return 'custom';
+  return d.rec.repeat;
+}
+
+/** withRepeatChoice applies the repeat control.
+ *
+ *  Nothing is discarded: the expression and the controls both stay in
+ *  the draft whichever is chosen, so this is reversible and a mistaken
+ *  click costs nothing. */
+export function withRepeatChoice(
+  d: ScheduleDraft,
+  choice: RepeatChoice,
+  zone: string,
+): ScheduleDraft {
+  if (choice === 'always') return { ...d, kind: 'always' };
+  if (choice === 'custom') return { ...d, kind: 'cron' };
+  return withRecurrence({ ...d, kind: 'recurrence' }, { ...d.rec, repeat: choice }, zone);
+}
+
+/** withRecurrence applies a change made in the repeat controls.
+ *
+ *  A stored recurrence these controls could not state is dropped here,
+ *  because using one of them is the operator saying to replace it. */
+export function withRecurrence(
+  d: ScheduleDraft,
+  rec: Recurrence,
+  zone: string,
+): ScheduleDraft {
+  return { ...settle(d, rec, zone), stored: null };
+}
+
+/** withBounds applies a change made in the start or end controls.
+ *
+ *  Bounds limit whichever schedule is in force rather than being part
+ *  of one, so setting one neither changes which schedule that is nor
+ *  touches a recurrence being kept verbatim. An operator who typed an
+ *  expression can still say when it stops. */
+export function withBounds(
+  d: ScheduleDraft,
+  rec: Recurrence,
+  zone: string,
+): ScheduleDraft {
+  return settle(d, rec, zone);
+}
+
+/** settle fills in what a newly chosen repeat needs before it describes
+ *  anything, where the operator can see and change it.
+ *
+ *  Each fill happens on the way into the state that needs it and not
+ *  again, which is the difference between a default and an override: a
+ *  value refilled on every edit cannot be cleared, and an operator
+ *  clearing a date the schedule needs is asking to be asked for it
+ *  rather than to have it put back. */
+function settle(d: ScheduleDraft, rec: Recurrence, zone: string): ScheduleDraft {
+  let next = rec;
+  if (next.repeat === 'once') {
+    // One window, which is the bound rather than the frequency.
+    next = { ...next, end: 'after', occurrences: 1 };
+  }
+  if (byMonthday(next) && !byMonthday(d.rec) && next.monthdays.length === 0) {
+    // The start date's own day of the month, which is the day somebody
+    // choosing "monthly" almost always means.
+    const on = parseISODate(next.startDate || todayInZone(zone));
+    if (on) next = { ...next, monthdays: [on.day] };
+  }
+  if (needsAnchor(next) && !needsAnchor(d.rec) && !next.startDate) {
+    next = { ...next, startDate: todayInZone(zone) };
+  }
+  return { ...d, rec: next };
+}
+
+function byMonthday(rec: Recurrence): boolean {
+  return rec.repeat === 'monthly' && rec.monthlyMode === 'monthday';
+}
+
+/** needsAnchor is whether this recurrence has to be counted from a
+ *  start date. "Every other week" means nothing until somebody says
+ *  which week, and a count of windows has no first one to count from. */
+function needsAnchor(rec: Recurrence): boolean {
+  if (rec.repeat === 'once') return true;
+  if (intervalOf(rec) > 1) return true;
+  return rec.end === 'after' && rec.occurrences > 0;
+}
+
+/** withCron is the expression box being typed in. */
+export function withCron(d: ScheduleDraft, cron: string): ScheduleDraft {
+  return { ...d, kind: 'cron', cron };
+}
+
+/** setposDayValue is the one value the position's day control holds: a
+ *  weekday index, or the category being counted. */
+export function setposDayValue(rec: Recurrence): string {
+  return rec.dayKind ? rec.dayKind : String(rec.setposWeekday);
+}
+
+/** withSetposDay reads that control back. A weekday clears the category
+ *  and a category leaves the weekday where it was, so changing your
+ *  mind twice returns to the same day. */
+export function withSetposDay(rec: Recurrence, value: string): Recurrence {
+  if (/^[0-6]$/.test(value)) {
+    return { ...rec, dayKind: '', setposWeekday: Number(value) };
+  }
+  if (value === 'day' || value === 'weekday' || value === 'weekend') {
+    return { ...rec, dayKind: value };
+  }
+  return rec;
+}
+
+/** toggleWeekday ticks or unticks one day of a weekly recurrence. */
+export function toggleWeekday(rec: Recurrence, day: number): Recurrence {
+  const weekdays = rec.weekdays.includes(day)
+    ? rec.weekdays.filter((d) => d !== day)
+    : sortedUnique([...rec.weekdays, day]);
+  return { ...rec, weekdays };
+}
+
+/** toggleMonthday ticks or unticks one day of the month. */
+export function toggleMonthday(rec: Recurrence, day: number): Recurrence {
+  const monthdays = rec.monthdays.includes(day)
+    ? rec.monthdays.filter((d) => d !== day)
+    : sortedUnique([...rec.monthdays, day]);
+  return { ...rec, monthdays };
+}
+
+// --- What the form sends ---
 
 /** recurrenceToBounds maps the start and end controls onto the three
  *  wire fields, in `zone`.
@@ -243,11 +492,10 @@ export function adoptCron(cron: string, base: Recurrence): Recurrence | null {
  *  the server requires; the end control is a radio group for that
  *  reason.
  *
- *  There is no special case for a schedule that does not repeat. Its
- *  bound of one occurrence is set when the operator picks that repeat
- *  (see `withRecurrence`), so it is state the picker shows rather than
- *  something this function infers -- which keeps it correct for a
- *  hand-written expression too. */
+ *  The start bound carries the recurrence's time of day even for the
+ *  timings that have no time-of-day control. It is an instant either
+ *  way, and rounding a stored bound to midnight because this form has
+ *  nowhere to show its time would be an edit nobody asked for. */
 export function recurrenceToBounds(r: Recurrence, zone: string): RecurrenceBounds {
   const starts_at = r.startDate
     ? zonedRFC3339(r.startDate, r.startTime || '00:00', zone)
@@ -274,42 +522,181 @@ export function recurrenceToBounds(r: Recurrence, zone: string): RecurrenceBound
   }
 }
 
-/** initialRecurrence is what the form opens on: the picker state a
- *  stored reservation implies, and whether its schedule has to stay in
- *  the cron box.
+/** scheduleFields is everything the form sends about when a reservation
+ *  runs.
  *
- *  `custom` means the expression is beyond the picker, so the picker is
- *  shown read-only and the cron box is the control. A reservation with
- *  no schedule at all is not custom -- it is a new one, and the picker
- *  is exactly what it wants. */
-export function initialRecurrence(res: AdminReservation): {
-  rec: Recurrence;
-  custom: boolean;
-} {
-  const zone = res.timezone;
-  const start = res.starts_at ? zonedDateTime(res.starts_at, zone) : null;
-  const end = res.ends_at ? zonedDateTime(res.ends_at, zone) : null;
-  const base: Recurrence = {
-    startDate: start?.date ?? '',
-    startTime: start?.time ?? DEFAULT_START_TIME,
-    repeat: 'weekly',
-    weekdays: [],
-    endDate: end?.date ?? '',
-    end: res.ends_at ? 'on' : res.occurrences > 0 ? 'after' : 'never',
-    occurrences: res.occurrences > 0 ? res.occurrences : 1,
-  };
-  if (!res.schedule.trim()) return { rec: base, custom: false };
-
-  const adopted = adoptCron(res.schedule, base);
-  if (!adopted) return { rec: base, custom: true };
-  // A one-off that is not bounded to one window is not a one-off: the
-  // annual expression behind it fires again next year. Showing it as
-  // "does not repeat" would make the next save impose a bound nobody
-  // asked for.
-  if (adopted.repeat === 'never' && res.occurrences !== 1) {
-    return { rec: base, custom: true };
+ *  The timings that are not authoritative go out empty rather than
+ *  populated. The server drops them anyway -- a reservation must not be
+ *  able to come back from the database timed by text that nothing
+ *  displayed -- and sending them would only make a stored reservation
+ *  disagree with what the page showed. */
+export function scheduleFields(d: ScheduleDraft, zone: string): ScheduleFields {
+  const bounds = recurrenceToBounds(d.rec, zone);
+  if (d.kind === 'always') {
+    return {
+      schedule_kind: 'always',
+      schedule: '',
+      recurrence: null,
+      ...bounds,
+      // An always-on reservation has no occurrences to count, so a
+      // count left over from another repeat is dropped rather than sent
+      // for the server to refuse.
+      occurrences: 0,
+    };
   }
-  return { rec: adopted, custom: false };
+  if (d.kind === 'recurrence') {
+    return {
+      schedule_kind: 'recurrence',
+      schedule: '',
+      recurrence: d.stored ?? recurrenceToWire(d.rec),
+      ...bounds,
+    };
+  }
+  return {
+    schedule_kind: 'cron',
+    schedule: d.cron.trim(),
+    recurrence: null,
+    ...bounds,
+  };
+}
+
+/** draftReservation is the whole reservation a preview is asked about:
+ *  the form's own values with its schedule applied. */
+export function draftReservation(
+  base: AdminReservation,
+  d: ScheduleDraft,
+  zone: string,
+): AdminReservation {
+  return { ...base, timezone: zone, ...scheduleFields(d, zone) };
+}
+
+/** Something the schedule still needs, and which control needs it. */
+export interface ScheduleNeed {
+  field: 'start' | 'repeat';
+  message: string;
+}
+
+/** scheduleNeeds names what the schedule still needs, in words that say
+ *  what to do about it, against the control to do it to.
+ *
+ *  These are the server's own rules, checked here because the operator
+ *  can see which control to fix and a 400 cannot point at one.
+ *  Everything else is still left to the server: this is the subset
+ *  where the form knows enough to name a box. */
+export function scheduleNeeds(d: ScheduleDraft): ScheduleNeed[] {
+  const out: ScheduleNeed[] = [];
+  const rec = d.rec;
+  const counting = rec.end === 'after' && rec.occurrences > 0;
+  if (d.kind !== 'always' && !rec.startDate) {
+    if (intervalOf(rec) > 1) {
+      out.push({
+        field: 'start',
+        message: `Repeating every ${intervalOf(rec)} ${unitPlural(rec)} needs a start date to count from.`,
+      });
+    } else if (counting) {
+      out.push({
+        field: 'start',
+        message: 'Ending after a number of windows needs a start date to count from.',
+      });
+    }
+  }
+  if (d.kind === 'recurrence' && !d.stored) {
+    if (rec.repeat === 'weekly' && rec.weekdays.length === 0) {
+      out.push({ field: 'repeat', message: 'Choose at least one day of the week.' });
+    }
+    if (
+      rec.repeat === 'monthly' &&
+      rec.monthlyMode === 'monthday' &&
+      rec.monthdays.length === 0
+    ) {
+      out.push({ field: 'repeat', message: 'Choose at least one day of the month.' });
+    }
+  }
+  return out;
+}
+
+function unitPlural(rec: Recurrence): string {
+  const n = intervalOf(rec);
+  const unit = rec.repeat === 'monthly' ? 'month' : rec.repeat === 'daily' ? 'day' : 'week';
+  return n === 1 ? unit : `${unit}s`;
+}
+
+// --- Rendering a schedule as words ---
+
+const SETPOS_WORDS = new Map(SET_POSITIONS.map((p) => [p.value, p.label.toLowerCase()]));
+
+function joinNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? '';
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+function ordinal(day: number): string {
+  const tens = day % 100;
+  if (tens >= 11 && tens <= 13) return `${day}th`;
+  switch (day % 10) {
+    case 1:
+      return `${day}st`;
+    case 2:
+      return `${day}nd`;
+    case 3:
+      return `${day}rd`;
+    default:
+      return `${day}th`;
+  }
+}
+
+/** describeRecurrence is a stored recurrence in words, for the list and
+ *  for the one case the controls cannot show. The server has its own
+ *  one-line rendering for logs; this is the one an operator reads. */
+export function describeRecurrence(w: WireRecurrence): string {
+  const c = canonicalWire(w);
+  const every = c.interval === 1 ? '' : `${c.interval} `;
+  switch (c.freq) {
+    case 'daily':
+      return `Every ${every}${c.interval === 1 ? 'day' : 'days'}`;
+    case 'weekly': {
+      const days = joinNames(
+        (c.by_weekday ?? []).map((d) => WEEKDAYS[d]?.name ?? String(d)),
+      );
+      const weeks = `Every ${every}${c.interval === 1 ? 'week' : 'weeks'}`;
+      return days ? `${weeks} on ${days}` : weeks;
+    }
+    case 'monthly': {
+      const months = `every ${every}${c.interval === 1 ? 'month' : 'months'}`;
+      if (c.by_setpos) {
+        const where = SETPOS_WORDS.get(c.by_setpos) ?? `position ${c.by_setpos}`;
+        const what = c.day_kind
+          ? c.day_kind === 'weekend'
+            ? 'weekend day'
+            : c.day_kind
+          : (WEEKDAYS[(c.by_weekday ?? [])[0]]?.name ?? 'day');
+        return `The ${where} ${what} of ${months}`;
+      }
+      if (c.by_monthday?.length) {
+        return `The ${joinNames(c.by_monthday.map(ordinal))} of ${months}`;
+      }
+      if (c.by_weekday?.length) {
+        return `Every ${joinNames(c.by_weekday.map((d) => WEEKDAYS[d]?.name ?? String(d)))} of ${months}`;
+      }
+      return months.charAt(0).toUpperCase() + months.slice(1);
+    }
+  }
+}
+
+/** describeSchedule is the schedule as the list shows it. A cron
+ *  expression is returned as it was typed: it is not prose and
+ *  pretending otherwise would mean reading it, which nothing here
+ *  does. */
+export function describeSchedule(res: AdminReservation): string {
+  switch (res.schedule_kind) {
+    case 'always':
+      return 'Always on';
+    case 'recurrence':
+      return res.recurrence ? describeRecurrence(res.recurrence) : 'No recurrence';
+    default:
+      return res.schedule;
+  }
 }
 
 // --- Zones ---
@@ -443,14 +830,14 @@ export function zonedDateTime(
   };
 }
 
-/** Today's date in `zone`, for the modes that need a date before they
+/** Today's date in `zone`, for the repeats that need one before they
  *  mean anything. */
 export function todayInZone(zone: string, now: number = Date.now()): string {
   const p = zoneParts(safeZone(zone), now);
   return `${String(p.year).padStart(4, '0')}-${pad2(p.month)}-${pad2(p.day)}`;
 }
 
-/** describeBounds is the one line the table adds under a schedule: what
+/** describeBounds is the one line the list adds under a schedule: what
  *  stops it, when anything does. Empty when nothing does, because a
  *  reservation that runs until somebody deletes it has nothing to say
  *  here. */
@@ -479,66 +866,34 @@ export function describeBounds(res: AdminReservation): string {
   return '';
 }
 
-// --- The draft the form holds ---
-//
-// The picker and the cron box are two views of one schedule, and which
-// of them is in charge is part of the state rather than something
-// inferred on each render. Inferring it is how a picker ends up
-// redrawing an expression somebody typed.
-
-export interface ScheduleDraft {
-  rec: Recurrence;
-  /** What goes on the wire, and what the cron box shows. */
-  cron: string;
-  /** True while the cron box is in charge: the repeat controls are
-   *  shown but read-only, and nothing regenerates the expression. */
-  custom: boolean;
+/** hasEnded says whether a schedule's end date has already passed. Only
+ *  the date bound answers this: a count of windows is resolved by
+ *  walking the schedule, which is the server's job and not something to
+ *  reimplement for a caption. */
+function hasEnded(res: AdminReservation, now: number): boolean {
+  if (!res.ends_at) return false;
+  const ms = Date.parse(res.ends_at);
+  return Number.isFinite(ms) && ms < now;
 }
 
-/** draftFromReservation opens the form on a stored reservation. */
-export function draftFromReservation(res: AdminReservation): ScheduleDraft {
-  const { rec, custom } = initialRecurrence(res);
-  return { rec, cron: res.schedule, custom };
-}
-
-/** withRecurrence applies a change made in the picker.
+/** whyNoWindows is what a preview with nothing in it means.
  *
- *  The start date and the end bound stay live even in custom mode,
- *  because they are bounds on the expression rather than part of it:
- *  an operator who hand-wrote a cron can still say when it stops. The
- *  repeat and the time of day are the expression, so in custom mode a
- *  change to them changes nothing. */
-export function withRecurrence(
-  d: ScheduleDraft,
-  rec: Recurrence,
-  zone: string,
-): ScheduleDraft {
-  if (d.custom) return { ...d, rec };
-  let next = rec;
-  // Monthly and one-off schedules take their day from the start date.
-  // Without one they generate nothing at all, so the date is filled in
-  // where the operator can see it rather than left blank.
-  if ((next.repeat === 'monthly' || next.repeat === 'never') && !next.startDate) {
-    next = { ...next, startDate: todayInZone(zone) };
+ *  An empty list is three different things, and reading them all as
+ *  "nothing upcoming" would report a reservation holding capacity right
+ *  now as one that does nothing. The kind comes from the preview rather
+ *  than from the form, so what is said describes the reservation the
+ *  windows were enumerated for. */
+export function whyNoWindows(
+  kind: ScheduleKind | '' | undefined,
+  res: AdminReservation,
+  days: number,
+  now: number = Date.now(),
+): string {
+  if (kind === 'always') {
+    return 'Capacity is held continuously, so there are no windows to list.';
   }
-  if (next.repeat === 'never') {
-    next = { ...next, end: 'after', occurrences: 1 };
+  if (hasEnded(res, now)) {
+    return 'This schedule has ended, so nothing further is held.';
   }
-  return { rec: next, cron: recurrenceToCron(next) ?? '', custom: false };
-}
-
-/** withCron is a hand-typed expression taking over. */
-export function withCron(d: ScheduleDraft, cron: string): ScheduleDraft {
-  return { rec: d.rec, cron, custom: true };
-}
-
-/** withPicker hands control back to the picker.
- *
- *  This is the only thing that overwrites a typed expression, and it
- *  happens because somebody pressed the control that says so. The
- *  picker adopts the typed cron where it can, so switching back keeps
- *  a schedule that was merely typed rather than picked. */
-export function withPicker(d: ScheduleDraft, zone: string): ScheduleDraft {
-  const rec = adoptCron(d.cron, d.rec) ?? d.rec;
-  return withRecurrence({ rec, cron: d.cron, custom: false }, rec, zone);
+  return `Nothing scheduled in the next ${days} days.`;
 }

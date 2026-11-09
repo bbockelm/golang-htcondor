@@ -1586,6 +1586,41 @@ export interface AdminAPIKeyCreateResponse {
 // Durations are seconds on the wire because the form has number inputs: a
 // client that has to parse "6h0m0s" to put 6 in a box will get it wrong
 // eventually. The page renders them as hours and minutes.
+// WireRecurrence is a structured recurrence: when a reservation's
+// windows begin, said the way a calendar says it rather than the way
+// cron does.
+//
+// It is a peer of the cron expression, not a layer over one. Nothing
+// converts between them in either direction, because a recurrence can
+// say things cron cannot -- every other week, the last Friday of the
+// month -- and a converter would round exactly those.
+export interface WireRecurrence {
+  freq: "daily" | "weekly" | "monthly";
+  // The "every N": days, weeks or months. Above one the server requires
+  // a start date, since "every other week" has no meaning until
+  // somebody says which week.
+  interval: number;
+  // Weekdays, 0 for Sunday through 6 for Saturday. Weekly needs it;
+  // monthly uses it as the weekday a set position counts.
+  by_weekday?: number[];
+  // Days of the month, 1 through 31. A day a month does not have is
+  // skipped, not moved to the end of it.
+  by_monthday?: number[];
+  // 1 through 5 for the first through fifth, -1 for the last, -2 for
+  // the next to last. 0 is unused.
+  by_setpos?: number;
+  // What a set position counts when it is not counting one weekday.
+  day_kind?: "" | "day" | "weekday" | "weekend";
+  // "HH:MM" on a 24-hour clock, read in the reservation's zone.
+  time_of_day: string;
+}
+
+// Which of a reservation's timings is authoritative. "cron" reads the
+// expression, "recurrence" the structure, "always" neither: capacity is
+// held continuously. An empty value is "cron", which is what every
+// reservation stored before the recurrence existed is.
+export type ScheduleKindWire = "cron" | "recurrence" | "always" | "";
+
 export interface AdminReservation {
   id: string;
   // Who the capacity is held for -- the teacher, not the students.
@@ -1597,8 +1632,14 @@ export interface AdminReservation {
   duration_seconds: number;
   lead_seconds: number;
   hold_seconds: number;
-  // A five-field cron expression, read in `timezone`.
+  schedule_kind: ScheduleKindWire;
+  // A five-field cron expression, read in `timezone`. Authoritative for
+  // `schedule_kind` "cron".
   schedule: string;
+  // The structured recurrence, authoritative for `schedule_kind`
+  // "recurrence". Null for the kinds that do not use one, so the form
+  // can tell "no recurrence" from an empty one.
+  recurrence: WireRecurrence | null;
   // An IANA zone name, or "Local" for the server's own.
   timezone: string;
   enabled: boolean;
@@ -1640,6 +1681,19 @@ export interface AdminReservationWindow {
   // How many scheduled starts this window covers: consecutive
   // occurrences close enough together are held as one.
   occurrences: number;
+}
+
+// AdminReservationWindows is what both previews answer with -- the saved
+// reservation's and the draft's.
+//
+// The kind comes back with the list because an empty list has two
+// meanings: an always-on reservation has no windows because it never
+// stops holding, and a finished one has none because it is over. A
+// preview that could not tell them apart would show "nothing upcoming"
+// for a reservation holding capacity right now.
+export interface AdminReservationWindows {
+  windows: AdminReservationWindow[];
+  schedule_kind?: ScheduleKindWire;
 }
 
 // --- Client ---
@@ -2560,11 +2614,32 @@ export const api = {
     reservationWindows: (
       id: string,
       days?: number,
-    ): Promise<{ windows: AdminReservationWindow[] }> =>
+    ): Promise<AdminReservationWindows> =>
       fetchJSON(
         `${BASE}/admin/reservations/${encodeURIComponent(id)}/windows${
           days ? `?days=${days}` : ""
         }`,
+      ),
+    // The same preview for a reservation that has not been saved yet.
+    //
+    // It takes the whole draft because the windows depend on more than
+    // the schedule: the duration decides where each one ends, the lead
+    // decides when draining would start, and the bounds decide which
+    // occurrences exist at all. The enumeration is the controller's
+    // own, which is the point -- a preview computed here would drift
+    // from what actually runs, and a preview that drifts is worse than
+    // no preview.
+    previewReservationWindows: (
+      res: AdminReservation,
+      days?: number,
+    ): Promise<AdminReservationWindows> =>
+      fetchJSON(
+        `${BASE}/admin/reservations/windows${days ? `?days=${days}` : ""}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(res),
+        },
       ),
   },
 

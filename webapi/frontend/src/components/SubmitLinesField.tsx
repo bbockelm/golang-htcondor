@@ -9,15 +9,28 @@
 // The server validates it (interactive.ValidateCallerSubmitLines): commands
 // that would define the session — executable, universe, queue, … — are
 // rejected, and operator site policy is applied after these lines regardless.
+//
+// The label, help text and placeholder are that launch's by default and
+// overridable, because the reservation form asks for the same thing of a
+// different subject: the lines a slot's submit file states beyond its
+// resource request, where the executable is required rather than refused.
 
 import { useId, useState } from 'react';
 
 export function SubmitLinesField({
   value,
   onChange,
+  label = 'Extra submit lines',
+  note = '(advanced — optional)',
+  hint,
+  placeholder = '+ProjectName = "MyProject"\nconcurrency_limits = mylimit:1',
 }: {
   value: string;
   onChange: (v: string) => void;
+  label?: string;
+  note?: string;
+  hint?: React.ReactNode;
+  placeholder?: string;
 }) {
   // Start open only if there is already text — a remembered draft should
   // not be hidden — otherwise collapsed (off by default).
@@ -34,28 +47,35 @@ export function SubmitLinesField({
         className="flex w-full items-center gap-2 text-left text-sm font-medium text-gray-700"
       >
         <span className="text-gray-400">{open ? '▾' : '▸'}</span>
-        Extra submit lines
-        <span className="font-normal text-xs text-gray-500">
-          (advanced — optional)
-        </span>
+        {label}
+        {note && (
+          <span className="font-normal text-xs text-gray-500">{note}</span>
+        )}
       </button>
 
       {open && (
         <div className="mt-3 space-y-1">
           <textarea
             id={id}
+            // The disclosure button is not a label, so without this the
+            // box has no accessible name at all.
+            aria-label={label}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             rows={4}
             spellCheck={false}
             className="w-full rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-xs"
-            placeholder={'+ProjectName = "MyProject"\nconcurrency_limits = mylimit:1'}
+            placeholder={placeholder}
           />
           <p className="text-xs text-gray-500">
-            Appended to the job&apos;s submit description, one{' '}
-            <code className="font-mono">name = value</code> per line.
-            Commands that define the session (executable, universe, queue,
-            …) are rejected; site policy still applies.
+            {hint ?? (
+              <>
+                Appended to the job&apos;s submit description, one{' '}
+                <code className="font-mono">name = value</code> per line.
+                Commands that define the session (executable, universe,
+                queue, …) are rejected; site policy still applies.
+              </>
+            )}
           </p>
         </div>
       )}

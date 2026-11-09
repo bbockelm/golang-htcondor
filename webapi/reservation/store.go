@@ -3,6 +3,7 @@ package reservation
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -19,6 +20,13 @@ var ErrNotFound = errors.New("reservation not found")
 // tzdata, say -- is reported rather than silently skipped, because a
 // reservation that quietly stops happening is worse than one that fails
 // loudly.
+//
+// A structured recurrence is stored as JSON in one column and validated
+// again on read, for the same reason: it is the admin's intent, and a
+// row that no longer describes enumerable occurrences has to say so.
+// Only the column the row's kind names is parsed, so switching a
+// reservation from cron to a recurrence does not require clearing the
+// text it no longer uses.
 type Store struct {
 	db *sql.DB
 }
@@ -37,38 +45,61 @@ func (s *Store) Put(ctx context.Context, spec *Spec) error {
 		return err
 	}
 	zone := "Local"
-	if loc := spec.Schedule.Location(); loc != nil {
+	if loc := spec.Location(); loc != nil {
 		zone = loc.String()
+	}
+	cron := ""
+	if spec.Schedule != nil {
+		cron = spec.Schedule.String()
+	}
+	recurrence, err := marshalRecurrence(spec.Recurrence)
+	if err != nil {
+		return fmt.Errorf("storing reservation %s: %w", spec.ID, err)
 	}
 	enabled := 0
 	if spec.Enabled {
 		enabled = 1
 	}
-	_, err := s.db.ExecContext(ctx, `
+	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO reservations
 			(id, owner, project, submit, seats, standing, duration_s, lead_s, hold_s,
-			 schedule, timezone, enabled, starts_unix, ends_unix, occurrences, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			 schedule, schedule_kind, recurrence, timezone, enabled,
+			 starts_unix, ends_unix, occurrences, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 			owner=excluded.owner,
 			project=excluded.project, submit=excluded.submit, seats=excluded.seats,
 			standing=excluded.standing, duration_s=excluded.duration_s,
 			lead_s=excluded.lead_s, hold_s=excluded.hold_s, schedule=excluded.schedule,
+			schedule_kind=excluded.schedule_kind, recurrence=excluded.recurrence,
 			timezone=excluded.timezone, enabled=excluded.enabled,
 			starts_unix=excluded.starts_unix, ends_unix=excluded.ends_unix,
 			occurrences=excluded.occurrences,
 			updated_at=CURRENT_TIMESTAMP`,
 		spec.ID, spec.Owner, spec.Project, spec.Submit, spec.Seats, spec.Standing,
 		int64(spec.Duration/time.Second), int64(spec.Lead/time.Second),
-		int64(spec.Hold/time.Second), spec.Schedule.String(), zone, enabled,
-		unixOrZero(spec.Starts), unixOrZero(spec.Ends), spec.Occurrences)
-	if err != nil {
+		int64(spec.Hold/time.Second), cron, string(spec.ScheduleKind()), recurrence, zone, enabled,
+		unixOrZero(spec.Starts), unixOrZero(spec.Ends), spec.Occurrences); err != nil {
 		return fmt.Errorf("storing reservation %s: %w", spec.ID, err)
 	}
 	return nil
 }
 
-const selectColumns = `id, owner, project, submit, seats, standing, duration_s, lead_s, hold_s, schedule, timezone, enabled, starts_unix, ends_unix, occurrences`
+// marshalRecurrence renders the structured timing for storage. An absent
+// one is the empty string rather than "null", so a cron row and a row
+// whose recurrence was cleared read back the same way.
+func marshalRecurrence(r *Recurrence) (string, error) {
+	if r == nil {
+		return "", nil
+	}
+	out, err := json.Marshal(r)
+	if err != nil {
+		return "", fmt.Errorf("encoding the recurrence: %w", err)
+	}
+	return string(out), nil
+}
+
+const selectColumns = `id, owner, project, submit, seats, standing, duration_s, lead_s, hold_s, schedule, schedule_kind, recurrence, timezone, enabled, starts_unix, ends_unix, occurrences`
 
 // Get reads one reservation. It returns ErrNotFound when there is no such
 // row.
@@ -120,14 +151,16 @@ func scanSpec(sc scanner) (*Spec, error) {
 		spec                 Spec
 		durS, leadS, holdS   int64
 		startsUnix, endsUnix int64
-		cron, zone           string
+		cron, kind, recur    string
+		zone                 string
 		enabled              int
 	)
 	if err := sc.Scan(&spec.ID, &spec.Owner, &spec.Project, &spec.Submit, &spec.Seats, &spec.Standing,
-		&durS, &leadS, &holdS, &cron, &zone, &enabled,
+		&durS, &leadS, &holdS, &cron, &kind, &recur, &zone, &enabled,
 		&startsUnix, &endsUnix, &spec.Occurrences); err != nil {
 		return nil, err
 	}
+	spec.Kind = ScheduleKind(kind)
 	spec.Duration = time.Duration(durS) * time.Second
 	spec.Lead = time.Duration(leadS) * time.Second
 	spec.Hold = time.Duration(holdS) * time.Second
@@ -141,14 +174,30 @@ func scanSpec(sc scanner) (*Spec, error) {
 		}
 		loc = l
 	}
-	sched, err := ParseSchedule(cron, loc)
-	if err != nil {
-		return nil, fmt.Errorf("reservation %s: schedule %q: %w", spec.ID, cron, err)
+	// Only the representation this row's kind names is parsed. A
+	// reservation switched from cron to a recurrence keeps the text it
+	// no longer reads, and refusing to load the row because that text
+	// has gone stale would take a working reservation out of service
+	// over a field nothing consults.
+	switch spec.ScheduleKind() {
+	case KindAlways:
+	case KindRecurrence:
+		rec, err := unmarshalRecurrence(recur, loc)
+		if err != nil {
+			return nil, fmt.Errorf("reservation %s: %w", spec.ID, err)
+		}
+		spec.Recurrence = rec
+	default:
+		sched, err := ParseSchedule(cron, loc)
+		if err != nil {
+			return nil, fmt.Errorf("reservation %s: schedule %q: %w", spec.ID, cron, err)
+		}
+		spec.Schedule = sched
 	}
-	spec.Schedule = sched
 	// The bounds are instants, but reading them in the schedule's zone
-	// is what makes a log line or a form field show the term starting
-	// on the day the admin typed.
+	// is what makes a log line or a form field show the reservation
+	// starting on the day the admin typed.
+	spec.Zone = loc
 	spec.Starts = timeOrZero(startsUnix, loc)
 	spec.Ends = timeOrZero(endsUnix, loc)
 	return &spec, nil
@@ -162,4 +211,26 @@ func timeOrZero(unix int64, loc *time.Location) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(unix, 0).In(loc)
+}
+
+// unmarshalRecurrence reads a stored recurrence back and validates it
+// again.
+//
+// Validating on read as well as on write is what catches a row written
+// by an older or a hand-edited copy of this code: the alternative is a
+// recurrence that enumerates nothing, which looks exactly like a
+// reservation that has run out, and so goes unnoticed.
+func unmarshalRecurrence(raw string, loc *time.Location) (*Recurrence, error) {
+	if raw == "" {
+		return nil, errors.New("the schedule kind is a recurrence but the row holds none")
+	}
+	var in Recurrence
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
+		return nil, fmt.Errorf("decoding the recurrence: %w", err)
+	}
+	rec, err := NewRecurrence(in, loc)
+	if err != nil {
+		return nil, fmt.Errorf("recurrence %s: %w", raw, err)
+	}
+	return rec, nil
 }
