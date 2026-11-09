@@ -29,6 +29,11 @@ import (
 // JobView is one idle job, reduced to what stamping decides from.
 type JobView struct {
 	Cluster int
+	// Owner is the identity the write is made as, taken from the job
+	// ad. A cluster whose owner is unknown is not stamped: the write
+	// is made as the job's owner editing their own job, so there is
+	// nobody to make it as.
+	Owner string
 	// Want is the estimate for this job, already bucketed; zero when
 	// the estimator could not say.
 	Want int64
@@ -44,7 +49,9 @@ type ClusterView struct {
 // Stamp is one cluster ad to write.
 type Stamp struct {
 	Cluster int
-	Bucket  int64
+	// Owner is who to make the write as.
+	Owner  string
+	Bucket int64
 	// Jobs is how many idle procs this write covers, for logging: it is
 	// the whole point of writing the cluster rather than the procs.
 	Jobs int
@@ -72,8 +79,15 @@ func PlanStamps(jobs []JobView, clusters []ClusterView, budget int) []Stamp {
 
 	want := map[int]int64{}
 	count := map[int]int{}
+	owner := map[int]string{}
 	var order []int
 	for _, j := range jobs {
+		if j.Owner == "" {
+			// Nobody to write as. Counted as unstampable by Pass
+			// rather than written as whoever this process happens to
+			// be: a stamp is an edit to somebody's job.
+			continue
+		}
 		if j.Want <= 0 {
 			// No estimate. Writing zero would be worse than writing
 			// nothing: the sieve reads a non-positive bucket as a
@@ -83,6 +97,7 @@ func PlanStamps(jobs []JobView, clusters []ClusterView, budget int) []Stamp {
 		}
 		if _, seen := want[j.Cluster]; !seen {
 			order = append(order, j.Cluster)
+			owner[j.Cluster] = j.Owner
 		}
 		if j.Want > want[j.Cluster] {
 			want[j.Cluster] = j.Want
@@ -99,6 +114,7 @@ func PlanStamps(jobs []JobView, clusters []ClusterView, budget int) []Stamp {
 		}
 		out = append(out, Stamp{
 			Cluster: cluster,
+			Owner:   owner[cluster],
 			Bucket:  w,
 			Jobs:    count[cluster],
 			New:     !stamped || h <= 0,
@@ -133,9 +149,30 @@ type IdleQueue interface {
 
 // StampWriter writes cluster-ad attributes.
 type StampWriter interface {
-	// Write sets RuntimeP90Bucket on each cluster ad, in one
-	// transaction where the implementation can.
-	Write(ctx context.Context, stamps []Stamp) error
+	// Write sets RuntimeP90Bucket on each cluster ad, as that cluster's
+	// owner, in one transaction per owner where the implementation can.
+	//
+	// It returns how many of the stamps were written. Writing as each
+	// owner separately means a pass can partly succeed: one user whose
+	// jobs the schedd will not let this process edit costs that user
+	// their stamps and nobody else theirs, and the count says so.
+	Write(ctx context.Context, stamps []Stamp) (int, error)
+}
+
+// ByOwner groups a plan into the writes each owner makes to their own
+// clusters, with the owners in a fixed order so two passes over the
+// same plan do the same thing in the same sequence.
+func ByOwner(stamps []Stamp) ([]string, map[string][]Stamp) {
+	out := map[string][]Stamp{}
+	var owners []string
+	for _, s := range stamps {
+		if _, seen := out[s.Owner]; !seen {
+			owners = append(owners, s.Owner)
+		}
+		out[s.Owner] = append(out[s.Owner], s)
+	}
+	sort.Strings(owners)
+	return owners, out
 }
 
 // Stamper keeps the idle queue stamped.
@@ -151,6 +188,11 @@ type Stamper struct {
 	// past the bell, and every distinct value costs autocluster
 	// splitting across the whole pool. Zero means no cap.
 	Horizon func() time.Duration
+	// Engaged gates the pass. Nil means every pass runs. A pass that is
+	// gated off reads nothing and writes nothing: stamping exists to
+	// make held machines usable, so with nothing held and nothing about
+	// to be, it is a write to every user's cluster ad for no reason.
+	Engaged Gate
 
 	last StampResult
 }
@@ -184,7 +226,14 @@ type StampResult struct {
 	// for. They stay refused by the sieve, so this is the share of the
 	// queue a reservation cannot use.
 	Unestimated int
-	Err         error
+	// Unowned is how many idle jobs carried no owner to write as. A
+	// stamp is an edit to somebody's job, made as them, so these are
+	// left alone.
+	Unowned int
+	// Quiescent is true when the pass did nothing because nothing is
+	// reserved. The queue was not read and nothing was written.
+	Quiescent bool
+	Err       error
 }
 
 func (s *Stamper) budget() int {
@@ -197,6 +246,20 @@ func (s *Stamper) budget() int {
 // Pass stamps what it can and reports what it did.
 func (s *Stamper) Pass(ctx context.Context) (StampResult, error) {
 	res := StampResult{At: time.Now()}
+
+	if s.Engaged != nil {
+		on, err := s.Engaged(ctx)
+		if err != nil {
+			res.Err = fmt.Errorf("deciding whether anything is reserved: %w", err)
+			s.record(res)
+			return res, res.Err
+		}
+		if !on {
+			res.Quiescent = true
+			s.record(res)
+			return res, nil
+		}
+	}
 
 	jobs, err := s.Queue.IdleJobs(ctx)
 	if err != nil {
@@ -215,6 +278,9 @@ func (s *Stamper) Pass(ctx context.Context) (StampResult, error) {
 	seen := map[int]bool{}
 	for _, j := range jobs {
 		seen[j.Cluster] = true
+		if j.Owner == "" {
+			res.Unowned++
+		}
 		if j.Want <= 0 {
 			res.Unestimated++
 		}
@@ -233,8 +299,21 @@ func (s *Stamper) Pass(ctx context.Context) (StampResult, error) {
 	res.Written = len(plan)
 
 	if len(plan) > 0 {
-		if err := s.Writer.Write(ctx, plan); err != nil {
-			res.Written, res.Covered = 0, 0
+		written, err := s.Writer.Write(ctx, plan)
+		if written < 0 || written > len(plan) {
+			written = 0
+		}
+		if written < len(plan) {
+			// Only the stamps that landed are claimed, and Covered is
+			// recomputed from them rather than scaled: the plan is
+			// ordered by how many jobs each write covers, so a share
+			// of the writes is not a share of the jobs.
+			res.Written, res.Covered = written, 0
+			for _, st := range plan[:written] {
+				res.Covered += st.Jobs
+			}
+		}
+		if err != nil {
 			res.Err = fmt.Errorf("writing %d cluster ads: %w", len(plan), err)
 			s.record(res)
 			return res, res.Err

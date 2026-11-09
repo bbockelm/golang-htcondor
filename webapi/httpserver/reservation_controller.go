@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -92,8 +93,9 @@ func (h *Handler) startReservations(ctx context.Context) {
 	}
 
 	actuator := &reservation.PoolActuator{
-		Query: h.collector,
-		Only:  h.reservationEPConstraint,
+		Query:    h.collector,
+		Only:     h.reservationEPConstraint,
+		OnReload: h.reportCapabilities(),
 		// Graceful: a vacated job takes its soft-kill signal and, if it
 		// checkpoints, writes one. The cost model says evicting a young
 		// job is free; it does not say throwing away a checkpoint it
@@ -105,6 +107,11 @@ func (h *Handler) startReservations(ctx context.Context) {
 		Source:   reservation.CollectorStarts{Query: h.collector, Only: h.reservationEPConstraint},
 		Writer:   actuator,
 		Interval: reservation.DefaultProbeInterval,
+		// Awake with the stamper rather than with the controller: an
+		// operator who has to add the stanza or grant the permission
+		// wants to hear about it before the bell, not at it.
+		Engaged: reservation.SpecGate(storeSpecs{h}, reservationForgiveDefault,
+			reservation.SettleAfter, reservation.StampWarmup, nil),
 	}
 	go h.reservationProber.Run(ctx, func(p reservation.Probe, err error) {
 		switch {
@@ -150,4 +157,87 @@ func (h *Handler) startReservations(ctx context.Context) {
 			h.logger.Warnf(logging.DestinationCollector, "reservation tick could not apply part of its plan: %v", err)
 		}
 	})
+}
+
+// capabilityLevel is how loudly a reading of the pool deserves to be
+// reported.
+type capabilityLevel int
+
+const (
+	capabilityOK capabilityLevel = iota
+	capabilityWarn
+	capabilityBroken
+)
+
+// capabilityReport decides what to say about one reading of the pool.
+//
+// Separated from the logging so the choice can be tested: the case that
+// matters is the silent one, where every command will go as this access
+// point and be refused by execute points that never agreed to take
+// orders from it.
+func capabilityReport(c reservation.Capabilities) (capabilityLevel, string) {
+	switch {
+	case c.Machines == 0:
+		return capabilityWarn, "reservations: no execute point matched, so there is nothing to hold"
+	case c.WithCapability == 0:
+		return capabilityBroken, fmt.Sprintf(
+			"reservations: none of %d execute points published an administrative capability, so every command goes as this access point; "+
+				"check that it holds ADMINISTRATOR at the collector and that the execute points have SEC_ENABLE_REMOTE_ADMINISTRATION",
+			c.Machines)
+	case c.Degraded():
+		return capabilityWarn, fmt.Sprintf(
+			"reservations: %d of %d execute points published an administrative capability; the rest are commanded as this access point",
+			c.WithCapability, c.Machines)
+	default:
+		return capabilityOK, fmt.Sprintf(
+			"reservations: all %d execute points published an administrative capability", c.Machines)
+	}
+}
+
+// reportCapabilities logs how many execute points this access point can
+// administer, on the first read of the pool and whenever the answer
+// changes.
+//
+// Without this the one thing an operator needs is invisible. A machine
+// that publishes no administrative capability is still commanded, with
+// this process's own credentials, and on most pools refused -- and the
+// refusal looks identical to a capability that was used and rejected.
+// Only the access point knows which it sent.
+//
+// Logged on change rather than every read: the pool is re-read every
+// few minutes and a steady state is not news.
+func (h *Handler) reportCapabilities() func(reservation.Capabilities) {
+	return h.capabilityReporter(func(level capabilityLevel, msg string) {
+		switch level {
+		case capabilityBroken:
+			h.logger.Errorf(logging.DestinationCollector, "%s", msg)
+		case capabilityWarn:
+			h.logger.Warnf(logging.DestinationCollector, "%s", msg)
+		default:
+			h.logger.Infof(logging.DestinationCollector, "%s", msg)
+		}
+	})
+}
+
+// capabilityReporter is reportCapabilities with the saying of it passed
+// in, so a test can read what would be said without a logger.
+func (h *Handler) capabilityReporter(say func(capabilityLevel, string)) func(reservation.Capabilities) {
+	var last reservation.Capabilities
+	first := true
+	return func(c reservation.Capabilities) {
+		same := !first &&
+			c.Machines == last.Machines &&
+			c.WithCapability == last.WithCapability &&
+			c.Usable == last.Usable &&
+			(c.Err == nil) == (last.Err == nil)
+		last, first = c, false
+		if same {
+			return
+		}
+		if c.Err != nil {
+			say(capabilityWarn, fmt.Sprintf("reservations: reading execute points: %v", c.Err))
+		}
+		level, msg := capabilityReport(c)
+		say(level, msg)
+	}
 }

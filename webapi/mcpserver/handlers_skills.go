@@ -385,7 +385,9 @@ func (s *Server) startSkillsReload(interval time.Duration) bool {
 	}
 
 	s.skillsStop = make(chan struct{})
+	s.skillsDone = make(chan struct{})
 	go func() {
+		defer close(s.skillsDone)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -400,12 +402,19 @@ func (s *Server) startSkillsReload(interval time.Duration) bool {
 	return true
 }
 
-// stopSkillsReload halts the poll. Idempotent, because Close is.
+// stopSkillsReload halts the poll and waits for it to be over.
+//
+// Waiting is the point: signalling alone leaves a reload that was
+// already reading the directory free to install its result afterwards,
+// so a caller that stops the poll and then changes the directory can
+// still have the old poll overwrite the library. The wait is bounded by
+// one directory read. Idempotent, because Close is.
 func (s *Server) stopSkillsReload() {
 	if s.skillsStop == nil {
 		return
 	}
 	s.skillsStopOnce.Do(func() { close(s.skillsStop) })
+	<-s.skillsDone
 }
 
 // Skills is the site skill library this server currently serves, for

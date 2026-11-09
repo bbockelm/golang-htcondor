@@ -126,26 +126,38 @@ func cppDropsSpaceBeforeDot(goTable, cppTable string) bool {
 	return i == len(goTable) && j == len(cppTable)
 }
 
-// tripleQuote is the language change HTCONDOR-3993 made: three double-quotes
-// in a row now switch classic ClassAd parsing to new-ClassAd quoting rules.
-// An HTCondor that knows the marker reads `""""` as a quote opening a
-// new-style string; one that does not chokes on it.
+// tripleQuote is the language change HTCONDOR-3993 made: three quotes in a
+// row now switch classic ClassAd parsing to new-ClassAd quoting rules. An
+// HTCondor that knows the marker reads `""""` as a quote opening a new-style
+// string; one that does not chokes on it.
+//
+// It covers BOTH quote characters. The change is one edit to the lexer's
+// tokenizeString(delim), which is called with `"` for a string literal and
+// with a single quote for a quoted attribute name, so three single quotes
+// are a marker as much as `"""` is. Upstream describes the change in terms
+// of double-quotes only; the nightly found the single-quote half of it.
 //
 // The two tables can differ in any number of ways as a result -- a value
 // expands or does not, a macro function reads its argument or returns
 // nothing -- so this class is defined by what was WRITTEN rather than by how
 // the tables differ. That is only safe because the trigger is narrow: three
-// consecutive double-quotes do not appear in config by accident, and the
-// class is further limited to oracles that actually carry the change.
+// consecutive quotes do not appear in config by accident, and the class is
+// further limited to oracles that actually carry the change.
 //
 // Go's classic-ClassAd lexer does not implement the marker. Until it does --
 // which is a change in the ClassAd library this parser sits on, and one that
 // alters how input that parses today is read -- this records the difference
 // rather than hiding it.
 var tripleQuote = divergenceClass{
-	name:   "C++ reads three double-quotes as a new-ClassAd string marker",
-	input:  func(s string) bool { return strings.Contains(s, `"""`) },
+	name:   "C++ reads three quotes as a new-ClassAd quoting marker",
+	input:  hasTripleQuote,
 	oracle: &oracleReq{ticket: "HTCONDOR-3993", has: true},
+}
+
+// hasTripleQuote reports whether s contains three of the SAME quote character
+// in a row. Three mixed quotes are not a marker, and must stay reportable.
+func hasTripleQuote(s string) bool {
+	return strings.Contains(s, `"""`) || strings.Contains(s, "'''")
 }
 
 // recognize returns the recorded class that accounts for this divergence, or
@@ -223,6 +235,23 @@ var seeds = []seedCase{
 			"nothing. Implementing it means changing how `\"\"\"\"` is read in " +
 			"the ClassAd library this parser sits on, which changes input that " +
 			"parses today -- so it is recorded here rather than quietly fixed.",
+		class:  &tripleQuote,
+		oracle: &oracleReq{ticket: "HTCONDOR-3993", has: true},
+	},
+	{
+		// Found by FuzzConfigParseExpand against HTCondor main, and the
+		// other half of the same change: the marker is read by the lexer's
+		// tokenizeString, which handles both quote characters, so three
+		// single quotes open a new-style QUOTED ATTRIBUTE NAME. `$EVAL`
+		// then has a name to look up, which is undefined, where Go's lexer
+		// chokes and the macro expands to nothing.
+		input: `0=$EVAL('''')`,
+		reason: "HTCONDOR-3993 reaches single quotes too: three of them switch " +
+			"classic ClassAd parsing to new-ClassAd quoting for an attribute " +
+			"name, so C++ reads an attribute and evaluates it to UNDEFINED " +
+			"while Go reads nothing. Same lexer change as the double-quote " +
+			"seed above, same reason for recording it rather than " +
+			"implementing it here.",
 		class:  &tripleQuote,
 		oracle: &oracleReq{ticket: "HTCONDOR-3993", has: true},
 	},
@@ -471,6 +500,11 @@ func TestDivergenceClassesRejectOtherShapes(t *testing.T) {
 		// triple-quote class must not reach an ordinary quoted value.
 		{"a plain quoted string", `A="x"`, "A\x1f\n", "A\x1fx\n"},
 		{"an empty string pair", `A=""`, "A\x1f\n", "A\x1fy\n"},
+		// The same, for the single-quote half of the marker.
+		{"a quoted attribute name", `A=$EVAL('b')`, "A\x1f\n", "A\x1fx\n"},
+		{"an empty quoted name", `A=$EVAL('')`, "A\x1f\n", "A\x1fy\n"},
+		// Three quotes, but not three of the SAME quote: not a marker.
+		{"mixed quotes", "A=\"'\"'", "A\x1f\n", "A\x1fy\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -501,6 +535,14 @@ func TestTripleQuoteClassIsLiveOnlyForOraclesThatHaveIt(t *testing.T) {
 		// family however the tables differ.
 		if got := recognize(`0=$INT("a">"b")`, res); got == &tripleQuote {
 			t.Error("an input without three consecutive quotes is not this family")
+		}
+		// The same lexer change, reached through the other quote character:
+		// a quoted attribute name rather than a string literal.
+		if got := recognize(`0=$EVAL('''')`, res); got != &tripleQuote {
+			t.Errorf("three single quotes are the same family, got %v", got)
+		}
+		if got := recognize(`0=$EVAL('a')`, res); got == &tripleQuote {
+			t.Error("one single-quoted attribute name is not this family")
 		}
 	})
 

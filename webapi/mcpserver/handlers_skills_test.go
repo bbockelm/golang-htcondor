@@ -469,7 +469,13 @@ func TestNoPollWhenTheIntervalIsZero(t *testing.T) {
 
 func TestCloseStopsThePoll(t *testing.T) {
 	root := skillsFixture(t)
-	s := skillsServerPolling(t, root, 5*time.Millisecond)
+	// An interval far shorter than one reload takes, so a reload is
+	// almost always in flight when Close is called. That is the only
+	// state this test can fail in -- a Close that merely signals lets
+	// the reload already reading the directory install what it finds.
+	// At an interval longer than the work, the poll is asleep at Close
+	// and the test passes however Close behaves.
+	s := skillsServerPolling(t, root, 50*time.Microsecond)
 
 	// Let it run at least one tick so we know it was alive to begin with.
 	eventually(t, "the poll to run once", func() bool {
