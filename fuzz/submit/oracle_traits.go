@@ -38,6 +38,10 @@ type oracleFacts struct {
 	// local is proc 0 of that same file in the local universe, where the
 	// resource defaults and the Requirements expression differ.
 	local map[string]string
+	// localCommonContainer is proc 0 of a LOCAL-universe job that asks
+	// for a common container image, which is the shape HTCONDOR-4003
+	// changed: before it, the request was honoured in any universe.
+	localCommonContainer map[string]string
 	// keyword is the oracle's own submit-keyword table, keyed by the
 	// lower-cased keyword.
 	keyword map[string]oracle.Keyword
@@ -113,6 +117,13 @@ var oracleTraits = []oracleTrait{
 		probe:  func(f oracleFacts) bool { _, ok := f.keyword["batch_whole_nodes"]; return ok },
 	},
 	{
+		ticket: "HTCONDOR-4003",
+		what:   "a container image is common only for a vanilla job",
+		probe: func(f oracleFacts) bool {
+			return !f.has(f.localCommonContainer, "CommonInputCatalogs")
+		},
+	},
+	{
 		ticket: "HTCONDOR-3932-container",
 		what:   "container_is_common is parsed specially and targets no attribute",
 		probe: func(f oracleFacts) bool {
@@ -126,6 +137,14 @@ var oracleTraits = []oracleTrait{
 // parses, so what the oracle writes into the ad is its own doing and not an
 // echo of the file.
 const probeMinimal = "executable = /bin/true\nqueue\n"
+
+// probeLocalCommonContainer asks for a common container image in a
+// universe that is not vanilla. An absolute path is used so the answer
+// does not depend on the directory the probe runs in.
+const probeLocalCommonContainer = "universe = local\n" +
+	"container_image = /x/foo.sif\n" +
+	"container_is_common = true\n" +
+	probeMinimal
 
 // gatherOracleFacts runs the oracle the few times the probes need.
 func gatherOracleFacts() (oracleFacts, error) {
@@ -153,6 +172,9 @@ func gatherOracleFacts() (oracleFacts, error) {
 		return f, err
 	}
 	if f.local, err = adOf("universe = local\n" + probeMinimal); err != nil {
+		return f, err
+	}
+	if f.localCommonContainer, err = adOf(probeLocalCommonContainer); err != nil {
 		return f, err
 	}
 
@@ -357,6 +379,8 @@ func goBehaviorFor(have map[string]bool) htcondor.SubmitBehavior {
 
 		OmitRemoteIOKeywords:      have["HTCONDOR-3998-remoteio"],
 		OmitContainerIsCommonAttr: have["HTCONDOR-3932-container"],
+
+		CommonContainerVanillaOnly: have["HTCONDOR-4003"],
 	}
 }
 

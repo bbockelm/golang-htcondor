@@ -112,6 +112,29 @@ type SubmitBehavior struct {
 	// submission is built without appearing in the ad under that name.
 	OmitContainerIsCommonAttr bool
 
+	// CommonContainerVanillaOnly decides a container image is COMMON
+	// only for a vanilla job.
+	//
+	// HTCONDOR-4003 narrowed it. container_is_common and the
+	// CONTAINER_IMAGES_COMMON_BY_DEFAULT and
+	// CONTAINER_REGEX_COMMON_BY_DEFAULT knobs were read in every
+	// universe, so a local-universe job asking for a common image got
+	// CommonInputCatalogs and no image in its input list -- naming a
+	// cached image on an execute node that a local job never reaches.
+	// The whole decision is now skipped outside vanilla, and the image
+	// is transferred like any other input file.
+	//
+	// Vanilla covers the container and docker universes, which are
+	// vanilla jobs carrying a want-flag.
+	//
+	// condor_submit skips the decision for a REMOTE submission too, and
+	// refuses common_input_files outside vanilla or on one. Neither has
+	// a counterpart here: this library builds the same ad however the
+	// caller intends to deliver it, and it does not implement
+	// common_input_files at all, so no job ad it builds carries the
+	// attribute that check reads.
+	CommonContainerVanillaOnly bool
+
 	// OmitLeaveJobInQueueDefault writes no LeaveJobInQueue for a job whose
 	// submit file does not set one.
 	//
