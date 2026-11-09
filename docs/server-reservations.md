@@ -166,6 +166,19 @@ A cluster is stamped with the largest estimate among its idle procs, so
 a mixed cluster is described by its longest job and never admits one
 that will not fit.
 
+**Each write is made as the owner of the job it edits**, on a
+short-lived credential minted for them from the pool's signing key —
+one connection and one transaction per owner. A job's own owner may
+already edit it, so this asks the schedd for no privilege over anyone's
+queue; the access point does **not** need to be a queue superuser, and
+making it one would be a far larger grant for the same result. A job
+whose ad carries neither `User` nor `Owner` is left unstamped rather
+than written as the access point.
+
+This needs a token signing key and a `TRUST_DOMAIN`. Without them there
+is no identity to write as, so stamping does not run at all and says so
+in the log.
+
 Falling behind is safe: a held machine refuses a job with no stamp and
 accepts one with a stale stamp, so a budget too small for the queue
 costs admissions and never lets the wrong job in.

@@ -127,7 +127,7 @@ func gateReturning(on bool) Gate {
 }
 
 func TestStamperDoesNothingWhileNothingIsReserved(t *testing.T) {
-	jobs := []JobView{{Cluster: 1, Want: 1800}, {Cluster: 2, Want: 3600}}
+	jobs := []JobView{{Owner: testOwner, Cluster: 1, Want: 1800}, {Owner: testOwner, Cluster: 2, Want: 3600}}
 
 	// Non-vacuous: with the gate open the same queue is read and written.
 	q := &countingQueue{fakeQueue: fakeQueue{jobs: jobs}}
