@@ -1602,6 +1602,16 @@ export interface AdminReservation {
   // An IANA zone name, or "Local" for the server's own.
   timezone: string;
   enabled: boolean;
+  // Bounds on a cron expression, which otherwise runs forever. RFC3339;
+  // "" for no bound either end.
+  //
+  // At most one of `ends_at` and `occurrences` may be set, and a count
+  // of occurrences needs a `starts_at` to count from -- there is no
+  // first window without one. The server refuses the rest.
+  starts_at: string;
+  ends_at: string;
+  // 0 for unlimited.
+  occurrences: number;
 }
 
 // AdminReservationWindow is one upcoming hold, as the preview shows it.
