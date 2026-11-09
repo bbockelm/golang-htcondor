@@ -26,6 +26,11 @@ type fakeJobs map[string]int
 
 func (f fakeJobs) RunningByProject(context.Context) (map[string]int, error) { return f, nil }
 
+// fakeSource is the one-pass read the controller now prefers.
+type fakeSource View
+
+func (f fakeSource) Read(context.Context, time.Time) (View, error) { return View(f), nil }
+
 type fakeSpecs []*Spec
 
 func (f fakeSpecs) List(context.Context) ([]*Spec, error) { return f, nil }
@@ -308,5 +313,58 @@ func TestSeatResources(t *testing.T) {
 	}
 	if got.DiskMB <= 0 {
 		t.Errorf("disk did not survive the KiB conversion: %+v", got)
+	}
+}
+
+// TestControllerPrefersSource: with Source set the deprecated Pool and
+// Jobs are not consulted at all. The Pool here fails on contact, so a
+// tick that still reached for it could not plan anything.
+func TestControllerPrefersSource(t *testing.T) {
+	spec := planSpec(t, "cs301", "cs301-f26", "0 14 * * 1")
+	act := &fakeActuator{}
+	c := &Controller{
+		Policy: Policy{Forgive: 30 * time.Minute},
+		Config: DefaultPlanConfig(),
+		Source: fakeSource{Machines: seatSizedMachines(20, time.Hour, 2*time.Hour)},
+		Pool:   &fakePool{err: errors.New("Pool was read although Source is set")},
+		Jobs:   fakeJobs{},
+		Specs:  fakeSpecs{spec}, Actuator: act,
+		Now: func() time.Time { return planNow },
+	}
+	res, err := c.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if res.Held == 0 {
+		t.Fatalf("held nothing from the Source view: %+v", res.Plan)
+	}
+}
+
+// TestControllerFallsBackToPoolAndJobs pins the deprecated pair.
+//
+// Pool and Jobs are exported, so something outside this repo may still
+// set them and nothing else. The fallback has to be the old behaviour
+// rather than a tick that quietly plans against an empty pool.
+func TestControllerFallsBackToPoolAndJobs(t *testing.T) {
+	spec := planSpec(t, "cs301", "cs301-f26", "0 14 * * 1")
+	c, act := ctl(t, spec, seatSizedMachines(20, time.Hour, 2*time.Hour), nil, fakeJobs{}, planNow)
+	if c.Source != nil {
+		t.Fatal("this test is about the path taken when Source is unset")
+	}
+	res, err := c.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if res.Held == 0 {
+		t.Fatalf("held nothing through Pool/Jobs: %+v", res.Plan)
+	}
+	var holds int
+	for _, call := range act.calls {
+		if call.verb == "hold" {
+			holds++
+		}
+	}
+	if holds != res.Held {
+		t.Errorf("actuator saw %d holds, tick reported %d", holds, res.Held)
 	}
 }

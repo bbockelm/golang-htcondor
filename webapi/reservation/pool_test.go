@@ -386,10 +386,12 @@ type fakeQuerier struct {
 	opts       *htcondor.QueryOptions
 	ads        []*classad.ClassAd
 	err        error
+	queries    int
 }
 
 func (f *fakeQuerier) QueryAdsWithOptions(_ context.Context, adType, constraint string, opts *htcondor.QueryOptions) ([]*classad.ClassAd, *htcondor.PageInfo, error) {
 	f.adType, f.constraint, f.opts = adType, constraint, opts
+	f.queries++
 	return f.ads, nil, f.err
 }
 
@@ -465,5 +467,85 @@ func TestCensusPropagatesError(t *testing.T) {
 	boom := errors.New("collector unreachable")
 	if _, err := Census(context.Background(), &fakeQuerier{err: boom}, ""); !errors.Is(err, boom) {
 		t.Errorf("Census error = %v, want %v", err, boom)
+	}
+}
+
+// TestReadPoolAsksOnce is the point of ReadPool: the census, what is
+// held, and running-by-project are one query, not three.
+//
+// Three reads of the same ad type with the same constraint were not
+// only three dials but three moments, and a plan built across them was
+// built from a pool that never existed at any one time.
+func TestReadPoolAsksOnce(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	q := &fakeQuerier{ads: ads(t, `Name = "slot1@wn10"
+Machine = "wn10"
+PartitionableSlot = true
+Cpus = 4
+Memory = 8192
+Disk = 1048576
+ReservationUntil = `+itoa(now.Add(time.Hour).Unix())+`
+ReservationDeadline = `+itoa(now.Add(30*time.Minute).Unix())+`
+ReservationProject = "chem"`, `Name = "slot1_1@wn10"
+Machine = "wn10"
+DynamicSlot = true
+Cpus = 2
+Memory = 4096
+State = "Claimed"
+Activity = "Busy"
+JobStart = `+itoa(now.Add(-time.Hour).Unix())+`
+RemoteProject = "chem"
+ReservationUntil = `+itoa(now.Add(time.Hour).Unix())+`
+ReservationDeadline = `+itoa(now.Add(30*time.Minute).Unix())+`
+ReservationProject = "chem"`)}
+
+	view, err := ReadPool(context.Background(), q, "", now)
+	if err != nil {
+		t.Fatalf("ReadPool: %v", err)
+	}
+	if q.queries != 1 {
+		t.Errorf("ReadPool made %d collector queries, want 1", q.queries)
+	}
+	if len(view.Machines) != 1 || view.Machines[0].Name != "wn10" {
+		t.Fatalf("census = %+v, want one machine wn10", view.Machines)
+	}
+	if got, want := view.Held["wn10"], now.Add(30*time.Minute); !got.Equal(want) {
+		t.Errorf("held deadline for wn10 = %v, want %v", got, want)
+	}
+	if view.Running["chem"] != 1 {
+		t.Errorf("running = %v, want chem to hold one seat", view.Running)
+	}
+}
+
+// TestReadPoolProjectsBothHalves: the one query has to ask for the
+// census attributes AND the three a held machine publishes. Asking for
+// only the census half would read every held machine as free, which is
+// the pool the controller would then drain again.
+func TestReadPoolProjectsBothHalves(t *testing.T) {
+	q := &fakeQuerier{}
+	if _, err := ReadPool(context.Background(), q, "", time.Now()); err != nil {
+		t.Fatalf("ReadPool: %v", err)
+	}
+	if q.opts == nil {
+		t.Fatal("ReadPool sent no query options, so no projection")
+	}
+	sent := map[string]bool{}
+	for _, a := range q.opts.Projection {
+		sent[a] = true
+	}
+	for _, want := range append(append([]string{}, SlotProjection...),
+		AttrDeadline, AttrUntil, AttrProject) {
+		if !sent[want] {
+			t.Errorf("projection is missing %q", want)
+		}
+	}
+}
+
+// TestReadPoolReportsTheQueryError: one failed read fails the tick
+// rather than planning against an empty pool.
+func TestReadPoolReportsTheQueryError(t *testing.T) {
+	boom := errors.New("collector down")
+	if _, err := ReadPool(context.Background(), &fakeQuerier{err: boom}, "", time.Now()); !errors.Is(err, boom) {
+		t.Fatalf("ReadPool error = %v, want %v", err, boom)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/reservation"
 )
@@ -24,49 +25,24 @@ const reservationTick = time.Minute
 // choosing, and it is also the grain the estimates are bucketed to.
 const reservationForgiveDefault = 30 * time.Minute
 
-// collectorPool is Controller.Pool backed by the collector.
+// collectorSource is Controller.Source backed by the collector.
 //
-// Both halves read the pool rather than remember anything. A controller
-// restarted mid-drain, a push that failed, and a deadline left by a
-// process that died all have to be visible before they can be
-// corrected.
-type collectorPool struct {
+// It reads rather than remembers. A controller restarted mid-drain, a
+// push that failed, and a deadline left by a process that died all have
+// to be visible before they can be corrected, and one that trusted its
+// own recollection would disagree with the pool silently.
+//
+// The census, what is held, and each project's running jobs come from a
+// single query. Counting running jobs from the pool rather than from
+// this access point's queue is deliberate: a reservation's seats are
+// pool-wide, so a student's job that landed from another access point
+// is still a seat the project holds.
+type collectorSource struct {
 	h *Handler
 }
 
-func (p collectorPool) Machines(ctx context.Context) ([]reservation.Machine, error) {
-	return reservation.Census(ctx, p.h.collector, p.h.reservationEPConstraint)
-}
-
-func (p collectorPool) Held(ctx context.Context) (map[string]time.Time, error) {
-	return reservation.HeldPool(ctx, p.h.collector, p.h.reservationEPConstraint, time.Now())
-}
-
-// collectorJobs counts each project's running jobs from the pool rather
-// than from this access point's queue.
-//
-// A reservation's seats are pool-wide: a student's job that landed from
-// another access point is still a seat the project holds, and counting
-// only this schedd's would make the controller drain for seats the
-// project already has.
-type collectorJobs struct {
-	h *Handler
-}
-
-func (j collectorJobs) RunningByProject(ctx context.Context) (map[string]int, error) {
-	machines, err := reservation.Census(ctx, j.h.collector, j.h.reservationEPConstraint)
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]int{}
-	for _, m := range machines {
-		for _, d := range m.Dslots {
-			if d.Project != "" && !d.Started.IsZero() {
-				out[d.Project]++
-			}
-		}
-	}
-	return out, nil
+func (s collectorSource) Read(ctx context.Context, now time.Time) (reservation.View, error) {
+	return reservation.ReadPool(ctx, s.h.collector, s.h.reservationEPConstraint, now)
 }
 
 // storeSpecs is Controller.Specs backed by the application database.
@@ -91,6 +67,16 @@ func (h *Handler) startReservations(ctx context.Context) {
 	if !h.reservationsEnabled || h.collector == nil {
 		return
 	}
+
+	// Marked once, here, because everything below runs on a timer off a
+	// context nobody else classifies: the census, the probe and the
+	// machine-ad writes are this daemon reading and steering the pool on
+	// its own authority, with no caller to act for. Without the mark they
+	// reach CEDAR unclassified and authenticate as this daemon by falling
+	// through, which is the same outcome by accident -- and the fallback
+	// is on its way to being refused outright.
+	ctx = htcondor.WithDaemonCredential(ctx,
+		"reservations: pool census and machine-ad updates")
 
 	actuator := &reservation.PoolActuator{
 		Query:    h.collector,
@@ -133,8 +119,7 @@ func (h *Handler) startReservations(ctx context.Context) {
 	controller := &reservation.Controller{
 		Policy:   reservation.Policy{Forgive: reservationForgiveDefault},
 		Config:   reservation.DefaultPlanConfig(),
-		Pool:     collectorPool{h},
-		Jobs:     collectorJobs{h},
+		Source:   collectorSource{h},
 		Specs:    storeSpecs{h},
 		Actuator: actuator,
 	}

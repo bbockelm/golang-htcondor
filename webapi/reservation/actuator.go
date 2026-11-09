@@ -359,6 +359,13 @@ func HeldPool(ctx context.Context, q SlotQuerier, only string, now time.Time) (m
 	if err != nil {
 		return nil, err
 	}
+	return heldFromAds(ads, now), nil
+}
+
+// heldFromAds is the ad-to-deadline half of HeldPool, split out so
+// ReadPool can derive the same map from the census it has already read
+// instead of asking the collector a second time. Same ads, same answer.
+func heldFromAds(ads []*classad.ClassAd, now time.Time) map[string]time.Time {
 	out := map[string]time.Time{}
 	for _, ad := range ads {
 		if ad == nil {
@@ -378,5 +385,5 @@ func HeldPool(ctx context.Context, q SlotQuerier, only string, now time.Time) (m
 			out[machine] = deadline
 		}
 	}
-	return out, nil
+	return out
 }
