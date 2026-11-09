@@ -105,6 +105,11 @@ func (h *Handler) startReservations(ctx context.Context) {
 		Source:   reservation.CollectorStarts{Query: h.collector, Only: h.reservationEPConstraint},
 		Writer:   actuator,
 		Interval: reservation.DefaultProbeInterval,
+		// Awake with the stamper rather than with the controller: an
+		// operator who has to add the stanza or grant the permission
+		// wants to hear about it before the bell, not at it.
+		Engaged: reservation.SpecGate(storeSpecs{h}, reservationForgiveDefault,
+			reservation.SettleAfter, reservation.StampWarmup, nil),
 	}
 	go h.reservationProber.Run(ctx, func(p reservation.Probe, err error) {
 		switch {

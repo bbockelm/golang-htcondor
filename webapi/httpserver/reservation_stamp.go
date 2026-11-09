@@ -185,6 +185,11 @@ func (h *Handler) startReservationStamping(ctx context.Context) {
 		Writer:  scheddStampWriter{h},
 		Budget:  h.reservationStampBudget,
 		Horizon: h.reservationHorizon,
+		// Ahead of the controller: the queue has to be stamped by the
+		// time the first machine is held, which is the start of the
+		// planning lead.
+		Engaged: reservation.SpecGate(storeSpecs{h}, reservationForgiveDefault,
+			reservation.SettleAfter, reservation.StampWarmup, nil),
 	}
 	go h.reservationStamper.Run(ctx, stampInterval, func(res reservation.StampResult, err error) {
 		if err != nil {

@@ -151,6 +151,11 @@ type Stamper struct {
 	// past the bell, and every distinct value costs autocluster
 	// splitting across the whole pool. Zero means no cap.
 	Horizon func() time.Duration
+	// Engaged gates the pass. Nil means every pass runs. A pass that is
+	// gated off reads nothing and writes nothing: stamping exists to
+	// make held machines usable, so with nothing held and nothing about
+	// to be, it is a write to every user's cluster ad for no reason.
+	Engaged Gate
 
 	last StampResult
 }
@@ -184,7 +189,10 @@ type StampResult struct {
 	// for. They stay refused by the sieve, so this is the share of the
 	// queue a reservation cannot use.
 	Unestimated int
-	Err         error
+	// Quiescent is true when the pass did nothing because nothing is
+	// reserved. The queue was not read and nothing was written.
+	Quiescent bool
+	Err       error
 }
 
 func (s *Stamper) budget() int {
@@ -197,6 +205,20 @@ func (s *Stamper) budget() int {
 // Pass stamps what it can and reports what it did.
 func (s *Stamper) Pass(ctx context.Context) (StampResult, error) {
 	res := StampResult{At: time.Now()}
+
+	if s.Engaged != nil {
+		on, err := s.Engaged(ctx)
+		if err != nil {
+			res.Err = fmt.Errorf("deciding whether anything is reserved: %w", err)
+			s.record(res)
+			return res, res.Err
+		}
+		if !on {
+			res.Quiescent = true
+			s.record(res)
+			return res, nil
+		}
+	}
 
 	jobs, err := s.Queue.IdleJobs(ctx)
 	if err != nil {

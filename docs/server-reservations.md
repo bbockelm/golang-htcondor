@@ -155,8 +155,8 @@ would run — `RuntimeP90Bucket`, in seconds, rounded up to half an hour.
 A held execute point refuses a job without one, so **without this a
 drain costs the whole machine rather than nothing**.
 
-The access point writes it, every five minutes, from the runtime
-estimator. It writes the **cluster** ad: a proc inherits the attribute
+The access point writes it, every five minutes while a reservation
+needs it, from the runtime estimator. It writes the **cluster** ad: a proc inherits the attribute
 from its cluster, including for matchmaking, and an idle queue has far
 fewer clusters than jobs — 43,567 jobs in 371 clusters on the access
 point this was measured on. So a full pass over a large queue is a few
@@ -187,6 +187,25 @@ little more matchmaking.
 **A submitter can set the attribute themselves** and the sieve cannot
 tell. Eviction does not consult it, so a job that lies its way onto a
 reserved core is preempted at the bell like any other.
+
+## When any of this runs
+
+Nothing here touches the pool or the queue while nothing is booked. With
+the subsystem switched on but no reservation engaged, the controller,
+the stamping pass and the configuration probe each read the reservation
+store — which is local — find nothing, and stop there. No collector
+query, no queue query, no write to anyone's cluster ad.
+
+A reservation engages the subsystem from the start of its planning lead
+until its window has closed and the machines it held have been released,
+and the stamping pass and the probe wake twenty minutes ahead of that,
+so the queue is stamped and the pool's configuration is confirmed before
+the first machine is held. A standing reservation — one with seats held
+whether or not a class is in session — engages it permanently.
+
+Deleting or disabling a reservation that is holding machines still
+releases them: the controller goes quiet only after a pass that found
+nothing reserved and read back a pool with nothing held.
 
 ## Turning it on
 
