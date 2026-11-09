@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/reservation"
 )
@@ -91,6 +92,16 @@ func (h *Handler) startReservations(ctx context.Context) {
 	if !h.reservationsEnabled || h.collector == nil {
 		return
 	}
+
+	// Marked once, here, because everything below runs on a timer off a
+	// context nobody else classifies: the census, the probe and the
+	// machine-ad writes are this daemon reading and steering the pool on
+	// its own authority, with no caller to act for. Without the mark they
+	// reach CEDAR unclassified and authenticate as this daemon by falling
+	// through, which is the same outcome by accident -- and the fallback
+	// is on its way to being refused outright.
+	ctx = htcondor.WithDaemonCredential(ctx,
+		"reservations: pool census and machine-ad updates")
 
 	actuator := &reservation.PoolActuator{
 		Query:    h.collector,

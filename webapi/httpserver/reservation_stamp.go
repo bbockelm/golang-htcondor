@@ -287,6 +287,12 @@ func (h *Handler) startReservationStamping(ctx context.Context) {
 			missingStampCredential(h.signingKeyPath, h.trustDomain))
 		return
 	}
+	// The daemon's own work, for the same reason startReservations is:
+	// a pass reads the idle queue on a timer, for nobody in particular.
+	// The writes are a separate question -- each stamp is sent as the
+	// job's owner, which attaches its own credential further down -- but
+	// the reads that find the work have no caller to act for.
+	ctx = htcondor.WithDaemonCredential(ctx, "reservations: stamping the idle queue")
 	h.reservationStamper = &reservation.Stamper{
 		Queue:   scheddIdleQueue{h},
 		Writer:  scheddStampWriter{h},
