@@ -336,14 +336,43 @@ written before stale ones, and why the plan is stable -- a budget too
 small for the queue then makes progress instead of rewriting a different
 arbitrary subset each pass.
 
-### The cost nobody should be surprised by
+### The autocluster cost, and the cap that pays it
 
-`RuntimeP90Bucket` is referenced by the execute points' `START`, so the
-negotiator may treat it as a significant attribute and split
-autoclusters on it. That is the reason the estimate is bucketed to
-`FORGIVE` (30 minutes) rather than answered to the second: the number of
-distinct values in play is a matchmaking cost, and this keeps it to a
-few dozen.
+`RuntimeP90Bucket` is referenced by the execute points' `START`. The
+negotiator collects the `TARGET.*` references it finds in the startd
+ads and sends them to the schedd as `AutoClusterAttrs`, so this
+attribute **will** be significant and the schedd **will** split
+autoclusters on it. That cost is paid by the whole pool, not just by
+the reservation.
+
+Two things keep it small, and the first is not enough on its own.
+Measured over 720,867 idle-job estimates on the access point this was
+built against:
+
+| | distinct values |
+|---|---|
+| raw `P90Seconds` | 7,765 |
+| rounded to the 30-minute grain | 194 |
+| **capped at the 6-hour lead** | **13** |
+
+Rounding is the obvious move and it is a 40x improvement, but 194
+distinct values is still far more autocluster splitting than this
+feature is worth.
+
+The cap is what makes it cheap, and it is **exact rather than
+approximate**: the sieve asks one question of this number -- does the
+job finish before the bell -- and the bell is never further away than
+the longest reservation's lead. Every value past that horizon is the
+same answer. Distinguishing them buys nothing and costs splits.
+
+Most of the saving is the tail. 63% of clusters estimate inside half an
+hour and 15.5% estimate past six hours; capping collapses that 15.5%
+to one value.
+
+The cap is one grain *beyond* the horizon, not at it. Capping exactly
+at the horizon would make a job of unknown length compare equal against
+a deadline exactly a horizon away and be admitted -- turning "we cannot
+tell how long this is" into "it fits".
 
 A submitter can also write the attribute themselves and the sieve cannot
 tell. The backstop is that eviction does not consult it: a job that lied

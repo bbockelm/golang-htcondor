@@ -49,6 +49,7 @@ func (q scheddIdleQueue) IdleJobs(ctx context.Context) ([]reservation.JobView, e
 		return nil, err
 	}
 	now := time.Now()
+	horizon := q.h.reservationHorizon()
 	out := make([]reservation.JobView, 0, len(ads))
 	for _, ad := range ads {
 		if ad == nil {
@@ -63,7 +64,8 @@ func (q scheddIdleQueue) IdleJobs(ctx context.Context) ([]reservation.JobView, e
 		// will have finished by the bell, and the median would break it
 		// half the time.
 		if res := est.Estimate(runtimeest.QueryFromAd(ad, now)); res.Available && res.P90Seconds > 0 {
-			view.Want = reservation.Bucket(time.Duration(res.P90Seconds) * time.Second)
+			view.Want = reservation.BucketCapped(
+				time.Duration(res.P90Seconds)*time.Second, horizon)
 		}
 		out = append(out, view)
 	}
@@ -94,6 +96,38 @@ func (q scheddIdleQueue) Clusters(ctx context.Context) ([]reservation.ClusterVie
 		out = append(out, reservation.ClusterView{Cluster: int(cluster), Have: have})
 	}
 	return out, nil
+}
+
+// reservationHorizon is the furthest ahead any enabled reservation
+// looks: the longest lead among them.
+//
+// Estimates are capped one grain beyond it. The sieve only asks whether
+// a job finishes before the bell, and the bell is never further away
+// than a lead, so every longer estimate is the same answer. Keeping
+// them distinct would split autoclusters for the whole pool and buy
+// nothing.
+//
+// Zero -- no reservations, or none enabled -- means no cap, which is
+// right: nothing is being held, so nothing is being refused.
+func (h *Handler) reservationHorizon() time.Duration {
+	store := h.reservationStore()
+	if store == nil {
+		return 0
+	}
+	specs, err := store.List(context.Background())
+	if err != nil {
+		// Capping needs a number we trust. Without one, stamp
+		// uncapped: a larger value is always safe for admission, it
+		// only costs matchmaking.
+		return 0
+	}
+	var longest time.Duration
+	for _, s := range specs {
+		if s != nil && s.Enabled && s.Lead > longest {
+			longest = s.Lead
+		}
+	}
+	return longest
 }
 
 // scheddStampWriter writes cluster-ad attributes over qmgmt.
@@ -147,9 +181,10 @@ func (h *Handler) startReservationStamping(ctx context.Context) {
 		return
 	}
 	h.reservationStamper = &reservation.Stamper{
-		Queue:  scheddIdleQueue{h},
-		Writer: scheddStampWriter{h},
-		Budget: h.reservationStampBudget,
+		Queue:   scheddIdleQueue{h},
+		Writer:  scheddStampWriter{h},
+		Budget:  h.reservationStampBudget,
+		Horizon: h.reservationHorizon,
 	}
 	go h.reservationStamper.Run(ctx, stampInterval, func(res reservation.StampResult, err error) {
 		if err != nil {

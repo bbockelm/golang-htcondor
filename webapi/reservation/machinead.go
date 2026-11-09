@@ -62,21 +62,61 @@ const AttrBucket = "RuntimeP90Bucket"
 
 // BucketGrain is what estimates are rounded up to.
 //
-// Matchmaking cost grows with the number of distinct values in play, and
-// an estimator that answers to the second would put a different number
-// on nearly every job. Half an hour is also the default forgiveness
-// threshold, so the coarsest useful grain and the cost rule agree.
+// This attribute is referenced by the execute points' START, so the
+// negotiator reports it to the schedd as a significant attribute and
+// the schedd splits autoclusters on it. The number of distinct values
+// in play is therefore a matchmaking cost, paid by the whole pool, and
+// it is the reason the estimate is bucketed rather than answered to the
+// second.
+//
+// Half an hour is also the default forgiveness threshold, so the
+// coarsest useful grain and the cost rule agree.
 const BucketGrain = 30 * time.Minute
 
 // Bucket rounds a duration up to the next BucketGrain, in seconds. A
 // non-positive duration is one grain: a job the estimator thinks takes
 // no time still occupies a core for a while.
+//
+// Prefer BucketCapped. Rounding alone is not enough: measured against
+// an access point's idle queue, rounding took 7,765 distinct estimates
+// down to 194, and 194 is still far more autocluster splitting than
+// this feature is worth.
 func Bucket(d time.Duration) int64 {
 	grains := int64(1)
 	if d > 0 {
 		grains = int64(math.Ceil(float64(d) / float64(BucketGrain)))
 	}
 	return grains * int64(BucketGrain/time.Second)
+}
+
+// BucketCapped is Bucket, clamped to one grain beyond horizon.
+//
+// The sieve asks one question of this number: does the job finish
+// before the bell. The bell is never further away than the longest
+// reservation's lead, so every value past that is the same answer --
+// "does not fit" -- and distinguishing them buys nothing while costing
+// autocluster splits. Capping is therefore exactly equivalent for
+// admission, not an approximation.
+//
+// On the queue measured above it takes 194 distinct values to 13 at a
+// six-hour lead, and to 5 at two hours. Most of the saving is the tail:
+// 15.5% of clusters estimate past six hours and collapse to one value.
+//
+// A horizon of zero means no cap, which is what a caller with no
+// reservations to size against should pass.
+func BucketCapped(d time.Duration, horizon time.Duration) int64 {
+	b := Bucket(d)
+	if horizon <= 0 {
+		return b
+	}
+	// One grain beyond the horizon, so the capped value still fails the
+	// sieve's comparison against a deadline exactly horizon away.
+	limit := (int64(math.Ceil(float64(horizon)/float64(BucketGrain))) + 1) *
+		int64(BucketGrain/time.Second)
+	if b > limit {
+		return limit
+	}
+	return b
 }
 
 // Sieve is the expression pushed as ReservationStart.
