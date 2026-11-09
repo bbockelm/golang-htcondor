@@ -422,7 +422,28 @@ func addCustomResourceRequirements(ad *classad.ClassAd, refs map[string]bool, ad
 		}
 		tags = append(tags, name)
 	}
-	sort.Strings(tags)
+	// Case-insensitively, because the order these clauses come out in is
+	// the order condor_submit WALKS THE JOB AD, and a ClassAd's
+	// attributes live in a map keyed case-insensitively. A byte sort put
+	// every capitalized tag ahead of every lower-case one, so
+	// `request_a0` and `Request_X0` produced the two clauses in the
+	// opposite order from condor_submit -- the same Requirements
+	// expression, but not the same string, and a transform or a test
+	// comparing the attribute sees two different job ads.
+	//
+	// Not every sort of names here is this one: envEntries sorts
+	// ENVIRONMENT VARIABLES, which are case-sensitive and which
+	// condor_submit also orders by byte.
+	sort.Slice(tags, func(i, j int) bool {
+		li, lj := strings.ToLower(tags[i]), strings.ToLower(tags[j])
+		if li != lj {
+			return li < lj
+		}
+		// Unreachable through a ClassAd, which cannot hold two
+		// attributes differing only in case. Here so the order is still
+		// defined if one ever arrives another way.
+		return tags[i] < tags[j]
+	})
 
 	for _, name := range tags {
 		tag := name[len(prefix):]
