@@ -85,6 +85,15 @@ type Controller struct {
 	Actuator Actuator
 	// Now is overridable for tests; nil means time.Now.
 	Now func() time.Time
+
+	// clean is the one thing a tick remembers: that the last one found
+	// nothing reserved and nothing held, so there is nothing for the
+	// next one to read the pool about. It is not memory of what was
+	// tagged -- that is still read back from the pool every tick -- it
+	// is memory that there was nothing to tag. A reservation appearing
+	// in the store clears it on the next tick, because the store is
+	// listed before the gate.
+	clean bool
 }
 
 // TickResult reports what one tick did, for logging and for the admin
@@ -97,6 +106,9 @@ type TickResult struct {
 	Released int
 	Evicted  int
 	Errs     []error
+	// Quiescent is true when the tick did nothing because nothing is
+	// reserved and nothing is held. The pool was not read.
+	Quiescent bool
 }
 
 // Err is the joined error of everything that failed to apply.
@@ -117,6 +129,18 @@ func (c *Controller) Tick(ctx context.Context) (TickResult, error) {
 	if err != nil {
 		return res, fmt.Errorf("listing reservations: %w", err)
 	}
+
+	// With nothing reserved and a pool already confirmed clean, every
+	// read below would return the same nothing. Listing the store is
+	// local; reading the pool is not, and a reservation holds capacity
+	// by evicting other people's jobs, so a subsystem nobody is using
+	// should be invisible from outside this process.
+	engaged := Engaged(specs, c.now(), c.Policy.Forgive, SettleAfter)
+	if !engaged && c.clean {
+		res.Quiescent = true
+		return res, nil
+	}
+
 	machines, err := c.Pool.Machines(ctx)
 	if err != nil {
 		return res, fmt.Errorf("reading the pool: %w", err)
@@ -156,6 +180,13 @@ func (c *Controller) Tick(ctx context.Context) (TickResult, error) {
 	}
 	res.Plan = policy.Plan(tick, c.Config)
 	res.Errs = append(res.Errs, c.apply(ctx, res.Plan, specs, machines, &res)...)
+
+	// Quiet down only once the pool says so. A reservation deleted or
+	// disabled while it held machines leaves them held, and this tick's
+	// plan is what releases them; held is what the pool reported before
+	// that, so the next tick reads once more and confirms the release
+	// landed before anything stops.
+	c.clean = !engaged && len(held) == 0 && len(res.Errs) == 0
 	return res, nil
 }
 

@@ -52,13 +52,45 @@ type PoolActuator struct {
 	Graceful bool
 	// Now is overridable for tests; nil means time.Now.
 	Now func() time.Time
+	// OnReload is called after each read of the pool, outside the
+	// lock, with what that read found. It exists so the operator can
+	// be told how many execute points are administrable: without a
+	// capability every command falls back to this process's own
+	// credentials, which on most pools means every command is refused
+	// and nothing says why.
+	OnReload func(Capabilities)
 
 	mu      sync.Mutex
 	admins  map[string]*startd.Admin
 	readAt  time.Time
 	cache   *startd.AdminOptions
 	lastErr error
+	caps    Capabilities
 }
+
+// Capabilities is what one read of the pool found.
+type Capabilities struct {
+	// At is when the read happened.
+	At time.Time
+	// Machines is how many execute points answered the query.
+	Machines int
+	// WithCapability is how many of them published an administrative
+	// capability. The rest are administrable only if they authorize
+	// this access point directly, which most pools do not.
+	WithCapability int
+	// Usable is how many this actuator can address at all. With
+	// RequireCapability it equals WithCapability; without it, every
+	// machine is kept and the ones with no capability will be tried
+	// with this process's own credentials.
+	Usable int
+	// Err is what went wrong reading, if anything.
+	Err error
+}
+
+// Degraded reports whether some execute point will be commanded as this
+// process rather than with a capability -- the state in which a refusal
+// says nothing about which of the two failed.
+func (c Capabilities) Degraded() bool { return c.WithCapability < c.Machines }
 
 // DefaultCapabilityRefresh is how often the pool is re-read for
 // capabilities. A capability lives half an hour; this leaves room for a
@@ -90,15 +122,14 @@ func (a *PoolActuator) refresh() time.Duration {
 	return DefaultCapabilityRefresh
 }
 
-// Refreshed is when the capabilities in hand were read, and how many
-// execute points answered with one. The admin page uses it: a pool that
-// has stopped publishing capabilities is a configuration change nobody
-// made on purpose, and the controller goes on planning correctly while
-// changing nothing.
-func (a *PoolActuator) Refreshed() (at time.Time, machines int, err error) {
+// Refreshed is what the last read of the pool found. A pool that has
+// stopped publishing capabilities is a configuration change nobody made
+// on purpose, and the controller goes on planning correctly while
+// changing nothing, so this is the only place it shows.
+func (a *PoolActuator) Refreshed() Capabilities {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.readAt, len(a.admins), a.lastErr
+	return a.caps
 }
 
 // admin finds the execute point that owns a machine, re-reading the
@@ -141,21 +172,29 @@ func (a *PoolActuator) reload(ctx context.Context) error {
 	if err != nil {
 		a.mu.Lock()
 		a.lastErr = err
+		a.caps = Capabilities{At: a.now(), Err: err}
 		a.mu.Unlock()
+		if a.OnReload != nil {
+			a.OnReload(a.Refreshed())
+		}
 		return fmt.Errorf("reading execute points: %w", err)
 	}
 
 	admins := map[string]*startd.Admin{}
 	opts := a.adminOptions()
 	var errs []error
+	caps := Capabilities{At: a.now()}
+	seen := map[string]bool{}
 	for _, ad := range ads {
 		if ad == nil {
 			continue
 		}
 		machine, _ := ad.EvaluateAttrString("Machine")
-		if machine == "" || admins[machine] != nil {
+		if machine == "" || seen[machine] {
 			continue
 		}
+		seen[machine] = true
+		caps.Machines++
 		admin, err := startd.NewAdminFromAd(ad, a.RequireCapability, opts)
 		if err != nil {
 			// One execute point that will not answer is not a reason to
@@ -163,12 +202,20 @@ func (a *PoolActuator) reload(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("%s: %w", machine, err))
 			continue
 		}
+		if admin.HasCapability() {
+			caps.WithCapability++
+		}
 		admins[machine] = admin
 	}
+	caps.Usable = len(admins)
+	caps.Err = errors.Join(errs...)
 
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.admins, a.readAt, a.lastErr = admins, a.now(), errors.Join(errs...)
+	a.admins, a.readAt, a.lastErr, a.caps = admins, caps.At, caps.Err, caps
+	a.mu.Unlock()
+	if a.OnReload != nil {
+		a.OnReload(caps)
+	}
 	return nil
 }
 
@@ -205,16 +252,43 @@ func (a *PoolActuator) push(ctx context.Context, machine string, ad *classad.Cla
 		return err
 	}
 	err = admin.UpdateMachineAd(ctx, ad)
-	if err == nil || !denied(err) {
-		return err
+	if err == nil {
+		return nil
+	}
+	if !denied(err) {
+		return annotate(admin, err)
 	}
 
 	a.invalidate()
 	admin, rerr := a.admin(ctx, machine)
 	if rerr != nil {
-		return errors.Join(err, rerr)
+		return errors.Join(annotate(admin, err), rerr)
 	}
-	return admin.UpdateMachineAd(ctx, ad)
+	return annotate(admin, admin.UpdateMachineAd(ctx, ad))
+}
+
+// annotate says which credentials a failed command was sent with.
+//
+// On every failure, not only the ones that arrive as a clean denial: an
+// execute point that refuses the command at authentication closes the
+// connection without a reply, so the usual shape of this failure is a
+// read error and not a denial at all. Which credentials it rode is what
+// decides whether to go and fix the collector's authorization or the
+// execute point's configuration, and nothing else in the message says.
+func annotate(admin *startd.Admin, err error) error {
+	if err == nil || admin == nil {
+		return err
+	}
+	return fmt.Errorf("%s: %w", credentialUsed(admin), err)
+}
+
+// credentialUsed names what a command was sent as, for a message an
+// operator has to act on.
+func credentialUsed(admin *startd.Admin) string {
+	if admin.HasCapability() {
+		return "sent with the execute point's administrative capability"
+	}
+	return "sent with this access point's own credentials, because the execute point published no administrative capability"
 }
 
 // denied reports whether an error was the execute point refusing on

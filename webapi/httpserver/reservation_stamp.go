@@ -2,9 +2,16 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/PelicanPlatform/classad/classad"
+
+	"github.com/bbockelm/cedar/security"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -30,11 +37,12 @@ type scheddIdleQueue struct {
 	h *Handler
 }
 
-// idleJobAttrs is what the estimator needs, plus the cluster id to
-// group by. The bucket itself is deliberately NOT read here: a proc
-// reports the value it inherits from its cluster, so reading it would
-// make an unstamped cluster look stamped.
-var idleJobAttrs = append(append([]string{}, runtimeest.QueryAttrs...), "ClusterId", "ProcId")
+// idleJobAttrs is what the estimator needs, the cluster id to group by,
+// and the identity to write as. The bucket itself is deliberately NOT
+// read here: a proc reports the value it inherits from its cluster, so
+// reading it would make an unstamped cluster look stamped.
+var idleJobAttrs = append(append([]string{}, runtimeest.QueryAttrs...),
+	"ClusterId", "ProcId", "User", "Owner")
 
 func (q scheddIdleQueue) IdleJobs(ctx context.Context) ([]reservation.JobView, error) {
 	est := q.h.runtimeEst
@@ -59,7 +67,7 @@ func (q scheddIdleQueue) IdleJobs(ctx context.Context) ([]reservation.JobView, e
 		if !ok {
 			continue
 		}
-		view := reservation.JobView{Cluster: int(cluster)}
+		view := reservation.JobView{Cluster: int(cluster), Owner: q.h.jobIdentity(ad)}
 		// P90, not the estimate: the sieve's promise is that the job
 		// will have finished by the bell, and the median would break it
 		// half the time.
@@ -130,31 +138,118 @@ func (h *Handler) reservationHorizon() time.Duration {
 	return longest
 }
 
+// jobIdentity is the identity to act as for a job: the fully qualified
+// name the schedd records as its owner.
+//
+// User is that name already; Owner is the bare account, which has to be
+// qualified with the UID domain to mean anything to the schedd. An ad
+// carrying neither is not stamped at all, rather than stamped as this
+// process.
+func (h *Handler) jobIdentity(ad *classad.ClassAd) string {
+	if user, ok := ad.EvaluateAttrString("User"); ok {
+		if user = strings.TrimSpace(user); strings.Contains(user, "@") {
+			return user
+		}
+	}
+	owner, ok := ad.EvaluateAttrString("Owner")
+	if !ok {
+		return ""
+	}
+	if owner = strings.TrimSpace(owner); owner == "" || h.uidDomain == "" {
+		return ""
+	}
+	return owner + "@" + h.uidDomain
+}
+
 // scheddStampWriter writes cluster-ad attributes over qmgmt.
+//
+// Each write is made as the owner of the cluster it edits, not as this
+// process. Stamping touches every user's jobs, and the alternative --
+// one connection with queue-superuser rights over the whole queue --
+// buys nothing: a job's own owner may already edit it, so acting as
+// them needs no privilege on the queue at all, and a bug here can only
+// mislabel a job with its owner's own estimate.
 type scheddStampWriter struct {
 	h *Handler
 }
 
-// Write sets the bucket on each cluster ad in one transaction.
+// ownerToken mints a short-lived credential naming one job owner.
 //
-// One transaction for the whole pass rather than one each: the schedd
+// The lifetime covers a single pass and nothing more: the token is used
+// immediately, on the connection opened for it, and never stored.
+func (w scheddStampWriter) ownerToken(owner string) (string, error) {
+	if w.h.signingKeyPath == "" || w.h.trustDomain == "" {
+		return "", fmt.Errorf("no signing key or trust domain, so nothing can be written as %s", owner)
+	}
+	now := time.Now()
+	return security.GenerateJWT(
+		filepath.Dir(w.h.signingKeyPath), filepath.Base(w.h.signingKeyPath),
+		owner, w.h.trustDomain, now.Unix(), now.Add(stampTokenLife).Unix(), nil)
+}
+
+// stampTokenLife is how long a stamping credential is good for. One
+// pass, with room for a slow schedd.
+const stampTokenLife = 5 * time.Minute
+
+// Write sets the bucket on each cluster ad, one connection per owner.
+//
+// One transaction per owner rather than one per cluster: the schedd
 // writes a job-queue record per attribute either way, but a single
-// commit means the queue is consistent between passes and the log is
-// fsynced once.
-func (w scheddStampWriter) Write(ctx context.Context, stamps []reservation.Stamp) error {
+// commit means that owner's clusters are consistent between passes and
+// the log is fsynced once for all of them.
+//
+// One owner's failure does not stop the others. A user whose token the
+// schedd will not accept, or whose jobs it will not let this process
+// edit, costs that user's clusters their stamp and nothing else.
+func (w scheddStampWriter) Write(ctx context.Context, stamps []reservation.Stamp) (int, error) {
 	if len(stamps) == 0 {
-		return nil
+		return 0, nil
 	}
 	addr := w.h.getSchedd().Address()
 	if addr == "" {
-		return fmt.Errorf("no schedd address")
+		return 0, fmt.Errorf("no schedd address")
 	}
-	conn, err := htcondor.NewQmgmtConnection(ctx, addr)
+	owners, byOwner := reservation.ByOwner(stamps)
+	var errs []error
+	written := 0
+	for _, owner := range owners {
+		if err := w.writeAs(ctx, addr, owner, byOwner[owner]); err != nil {
+			errs = append(errs, fmt.Errorf("as %s: %w", owner, err))
+			continue
+		}
+		written += len(byOwner[owner])
+	}
+	if len(errs) == len(owners) {
+		// Every owner failed, which is a fact about this process --
+		// the signing key, the trust domain, the schedd -- and not
+		// about any one user.
+		return 0, fmt.Errorf("no cluster ad could be stamped: %w", errors.Join(errs...))
+	}
+	return written, errors.Join(errs...)
+}
+
+// writeAs stamps one owner's clusters as that owner.
+func (w scheddStampWriter) writeAs(ctx context.Context, addr, owner string, stamps []reservation.Stamp) error {
+	token, err := w.ownerToken(owner)
+	if err != nil {
+		return err
+	}
+	secConfig, err := ConfigureSecurityForToken(token)
+	if err != nil {
+		return fmt.Errorf("configuring security: %w", err)
+	}
+	conn, err := htcondor.NewQmgmtConnection(htcondor.WithSecurityConfig(ctx, secConfig), addr)
 	if err != nil {
 		return fmt.Errorf("connecting to the schedd: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 
+	// Name ourselves as the owner we authenticated as, which is what
+	// the submit path does. It asks the schedd for no privilege it
+	// would not give the user at a shell.
+	if err := conn.SetEffectiveOwner(ctx, owner); err != nil {
+		return fmt.Errorf("setting the effective owner: %w", err)
+	}
 	for _, s := range stamps {
 		// Proc -1 is the cluster ad. Every proc of the cluster reads
 		// the attribute through it, including for matchmaking.
@@ -180,11 +275,28 @@ func (h *Handler) startReservationStamping(ctx context.Context) {
 	if !h.reservationsEnabled || h.runtimeEst == nil {
 		return
 	}
+	if h.signingKeyPath == "" || h.trustDomain == "" {
+		// Each stamp is written as the owner of the job it edits, and
+		// naming that owner to the schedd needs a credential this
+		// process can only mint with the pool's signing key. Without
+		// one there is no identity to write as, and writing as this
+		// process instead would need superuser rights over everyone's
+		// queue to do the same job.
+		h.logger.Warnf(logging.DestinationSchedd,
+			"reservations: no %s, so idle jobs cannot be stamped and a held machine will admit nothing",
+			missingStampCredential(h.signingKeyPath, h.trustDomain))
+		return
+	}
 	h.reservationStamper = &reservation.Stamper{
 		Queue:   scheddIdleQueue{h},
 		Writer:  scheddStampWriter{h},
 		Budget:  h.reservationStampBudget,
 		Horizon: h.reservationHorizon,
+		// Ahead of the controller: the queue has to be stamped by the
+		// time the first machine is held, which is the start of the
+		// planning lead.
+		Engaged: reservation.SpecGate(storeSpecs{h}, reservationForgiveDefault,
+			reservation.SettleAfter, reservation.StampWarmup, nil),
 	}
 	go h.reservationStamper.Run(ctx, stampInterval, func(res reservation.StampResult, err error) {
 		if err != nil {
@@ -196,6 +308,12 @@ func (h *Handler) startReservationStamping(ctx context.Context) {
 				"reservations: stamped %d cluster ads covering %d of %d idle jobs",
 				res.Written, res.Covered, res.Idle)
 		}
+		if res.Unowned > 0 {
+			// Neither User nor Owner on the job ad, so there is nobody
+			// to write as. Nothing here can fix it.
+			h.logger.Warnf(logging.DestinationSchedd,
+				"reservations: %d idle jobs carry no owner and cannot be stamped", res.Unowned)
+		}
 		if res.Deferred > 0 {
 			// The budget is smaller than the queue needs. Nothing is
 			// wrong, but the pool is not fully usable by a reservation
@@ -205,4 +323,17 @@ func (h *Handler) startReservationStamping(ctx context.Context) {
 				res.Deferred)
 		}
 	})
+}
+
+// missingStampCredential names what is absent, so the warning says what
+// to set rather than that something is unset.
+func missingStampCredential(signingKey, trustDomain string) string {
+	switch {
+	case signingKey == "" && trustDomain == "":
+		return "token signing key and no TRUST_DOMAIN"
+	case signingKey == "":
+		return "token signing key"
+	default:
+		return "TRUST_DOMAIN"
+	}
 }

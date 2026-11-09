@@ -148,6 +148,33 @@ starts on a pool that was never drained. The admin page's health check
 writes to one randomly chosen execute point every few minutes for no
 other reason than to notice.
 
+The access point also says how many execute points it can administer,
+on its first read of the pool and whenever the answer changes:
+
+```
+reservations: all 48 execute points published an administrative capability
+reservations: 31 of 48 execute points published an administrative capability; the rest are commanded as this access point
+reservations: none of 48 execute points published an administrative capability, so every command goes as this access point; check that it holds ADMINISTRATOR at the collector and that the execute points have SEC_ENABLE_REMOTE_ADMINISTRATION
+```
+
+The last is an error, because it is the state in which nothing works
+and nothing else says so. Without a capability the command is still
+sent, as the access point itself, and an execute point that never
+agreed to take orders from it refuses at authentication — closing the
+connection without a reply, so the access point sees a read error
+rather than a denial. Every failed command now names which credentials
+it carried:
+
+```
+sent with this access point's own credentials, because the execute point published no administrative capability: startd: reading the CA_UPDATE_MACHINE_AD reply: ... EOF
+```
+
+That is the difference between fixing the collector's authorization and
+fixing an execute point's configuration, and it is not visible from the
+execute point's own log: on the startd side a capability that was used
+shows as `PERMISSION GRANTED to collector-side@matchsession`, and a
+fallback shows only `DC_AUTHENTICATE: Command not authorized`.
+
 ## What the access point writes to the queue
 
 Reservations need idle jobs to carry an upper bound on how long they
@@ -155,8 +182,8 @@ would run — `RuntimeP90Bucket`, in seconds, rounded up to half an hour.
 A held execute point refuses a job without one, so **without this a
 drain costs the whole machine rather than nothing**.
 
-The access point writes it, every five minutes, from the runtime
-estimator. It writes the **cluster** ad: a proc inherits the attribute
+The access point writes it, every five minutes while a reservation
+needs it, from the runtime estimator. It writes the **cluster** ad: a proc inherits the attribute
 from its cluster, including for matchmaking, and an idle queue has far
 fewer clusters than jobs — 43,567 jobs in 371 clusters on the access
 point this was measured on. So a full pass over a large queue is a few
@@ -165,6 +192,19 @@ hundred writes, not tens of thousands.
 A cluster is stamped with the largest estimate among its idle procs, so
 a mixed cluster is described by its longest job and never admits one
 that will not fit.
+
+**Each write is made as the owner of the job it edits**, on a
+short-lived credential minted for them from the pool's signing key —
+one connection and one transaction per owner. A job's own owner may
+already edit it, so this asks the schedd for no privilege over anyone's
+queue; the access point does **not** need to be a queue superuser, and
+making it one would be a far larger grant for the same result. A job
+whose ad carries neither `User` nor `Owner` is left unstamped rather
+than written as the access point.
+
+This needs a token signing key and a `TRUST_DOMAIN`. Without them there
+is no identity to write as, so stamping does not run at all and says so
+in the log.
 
 Falling behind is safe: a held machine refuses a job with no stamp and
 accepts one with a stale stamp, so a budget too small for the queue
@@ -187,6 +227,25 @@ little more matchmaking.
 **A submitter can set the attribute themselves** and the sieve cannot
 tell. Eviction does not consult it, so a job that lies its way onto a
 reserved core is preempted at the bell like any other.
+
+## When any of this runs
+
+Nothing here touches the pool or the queue while nothing is booked. With
+the subsystem switched on but no reservation engaged, the controller,
+the stamping pass and the configuration probe each read the reservation
+store — which is local — find nothing, and stop there. No collector
+query, no queue query, no write to anyone's cluster ad.
+
+A reservation engages the subsystem from the start of its planning lead
+until its window has closed and the machines it held have been released,
+and the stamping pass and the probe wake twenty minutes ahead of that,
+so the queue is stamped and the pool's configuration is confirmed before
+the first machine is held. A standing reservation — one with seats held
+whether or not a class is in session — engages it permanently.
+
+Deleting or disabling a reservation that is holding machines still
+releases them: the controller goes quiet only after a pass that found
+nothing reserved and read back a pool with nothing held.
 
 ## Turning it on
 

@@ -101,6 +101,11 @@ type Prober struct {
 	// Interval is the floor between visits. The next visit is drawn
 	// uniformly from [Interval, 2*Interval).
 	Interval time.Duration
+	// Engaged gates the visit. Nil means every visit happens. A probe
+	// writes to a machine ad to learn whether it still may, which is
+	// worth doing before a reservation needs the answer and not worth
+	// doing on a pool nobody has booked.
+	Engaged Gate
 	// Now and Rand are overridable for tests.
 	Now  func() time.Time
 	Rand *rand.Rand
@@ -144,6 +149,15 @@ func (p *Prober) Wait() time.Duration {
 // Visit inspects one randomly chosen execute point and returns what it
 // found. It writes to at most one machine.
 func (p *Prober) Visit(ctx context.Context) (Probe, error) {
+	if p.Engaged != nil {
+		on, err := p.Engaged(ctx)
+		if err != nil {
+			return Probe{}, fmt.Errorf("deciding whether anything is reserved: %w", err)
+		}
+		if !on {
+			return Probe{}, nil
+		}
+	}
 	starts, err := p.Source.Starts(ctx)
 	if err != nil {
 		return Probe{}, fmt.Errorf("reading execute points: %w", err)
