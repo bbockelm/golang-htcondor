@@ -12,17 +12,16 @@
 //
 // Three things drive the design:
 //
-//   * The schedule preview is the page. A five-field cron expression is
-//     not readable, so the table does not ask anyone to trust one: it
-//     shows the next occurrences, and for each, both the start and the
+//   * The schedule preview is the page. A schedule is a rule and the
+//     days it lands on are the thing anybody actually cares about, so
+//     neither the list nor the form asks anyone to work them out: both
+//     show the next occurrences, and for each, both the start and the
 //     drain. The drain is when other people's jobs start being steered
 //     away, hours before the project notices anything, so it is given
 //     the same weight as the start rather than hidden in a lead field.
-//     For the same reason the form asks for the schedule the way a
-//     calendar asks for a repeating event -- starts, repeats, ends --
-//     and keeps the expression itself in a box beneath, where it can be
-//     read, and typed, by anyone who needs cron to say something the
-//     controls cannot.
+//     The form's preview is of the draft in the boxes, from the same
+//     enumeration the controller runs, and it is the quickest way to
+//     tell a schedule that says what was meant from one that does not.
 //   * The form is sections rather than one column of boxes. Its fields
 //     answer four separate questions -- who it is for, when it runs, how
 //     much it holds, what one slot looks like -- and on a phone the
@@ -33,7 +32,7 @@
 //     reason. The form shows that text verbatim. Restating it here in
 //     our own words would drift from what the server actually enforces.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError,
@@ -43,14 +42,18 @@ import {
 } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import {
+  carryHoursMinutes,
   formatHoursMinutes,
   hoursMinutesToSeconds,
   splitHoursMinutes,
 } from '@/lib/reservation';
 import {
   describeBounds,
+  describeSchedule,
   draftFromReservation,
-  recurrenceToBounds,
+  scheduleFields,
+  scheduleNeeds,
+  whyNoWindows,
   type ScheduleDraft,
 } from '@/lib/recurrence';
 import { RecurrencePicker, ScheduleRow } from '@/components/RecurrencePicker';
@@ -90,7 +93,12 @@ function blankReservation(): AdminReservation {
     // Six hours is where the measured benefit of leading saturates.
     lead_seconds: 6 * 3600,
     hold_seconds: 15 * 60,
+    // A new reservation is described by the repeat controls. The
+    // expression is still there to switch to, and switching back is
+    // free, so there is nothing to lose by starting on the controls.
+    schedule_kind: 'recurrence',
     schedule: '',
+    recurrence: null,
     timezone: localZone(),
     enabled: true,
     // Unbounded until somebody says otherwise: a new reservation that
@@ -362,10 +370,21 @@ function ReservationRows({
           </span>
         </td>
         <td className="px-3 py-2">
-          <span className="font-mono text-xs text-gray-900">{res.schedule}</span>
+          {/* Monospaced only for an expression. The other two timings
+              are sentences, and setting a sentence in a code face says
+              it is something to be read character by character. */}
+          <span
+            className={`text-xs text-gray-900 ${
+              res.schedule_kind === 'recurrence' || res.schedule_kind === 'always'
+                ? ''
+                : 'font-mono'
+            }`}
+          >
+            {describeSchedule(res)}
+          </span>
           <span className="block text-xs text-gray-500">{res.timezone}</span>
           {/* A schedule with a start or an end is otherwise invisible
-              here: the expression looks the same either way. */}
+              here: the schedule reads the same either way. */}
           {bounds && <span className="block text-xs text-gray-500">{bounds}</span>}
         </td>
         <td className="px-3 py-2 text-xs text-gray-700">
@@ -497,26 +516,13 @@ function WindowsPreview({ res }: { res: AdminReservation }) {
       )}
       {windows.data && rows.length === 0 && (
         <p className="mt-2 text-xs text-gray-500">
-          Nothing scheduled in the next {days} days.
+          {whyNoWindows(windows.data.schedule_kind, res, days)}
         </p>
       )}
 
       {rows.length > 0 && (
         <>
-          <table className="mt-2 min-w-full text-xs">
-            <thead className="text-left text-gray-500">
-              <tr>
-                <th className="py-1 pr-6 font-medium">Draining starts</th>
-                <th className="py-1 pr-6 font-medium">Slots held</th>
-                <th className="py-1 font-medium">Until</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((w) => (
-                <WindowRow key={w.start} win={w} timezone={res.timezone} />
-              ))}
-            </tbody>
-          </table>
+          <WindowsTable rows={rows} timezone={res.timezone} />
           <p className="mt-2 text-xs text-gray-500">
             Draining is when other people&apos;s jobs stop being sent to the
             machines these slots will come from — {formatHoursMinutes(res.lead_seconds)}{' '}
@@ -530,6 +536,34 @@ function WindowsPreview({ res }: { res: AdminReservation }) {
         </>
       )}
     </div>
+  );
+}
+
+// The upcoming holds, as a table. Shared by the saved reservation's
+// preview and the draft's, so the two cannot come to disagree about
+// what a window is or which of its times matter.
+function WindowsTable({
+  rows,
+  timezone,
+}: {
+  rows: AdminReservationWindow[];
+  timezone: string;
+}) {
+  return (
+    <table className="mt-2 min-w-full text-xs">
+      <thead className="text-left text-gray-500">
+        <tr>
+          <th className="py-1 pr-6 font-medium">Draining starts</th>
+          <th className="py-1 pr-6 font-medium">Slots held</th>
+          <th className="py-1 font-medium">Until</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((w) => (
+          <WindowRow key={w.start} win={w} timezone={timezone} />
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -611,6 +645,132 @@ function dayKey(d: Date, timezone: string): string {
   );
 }
 
+// How far ahead the form's own preview asks, and how much of the answer
+// it shows. A count rather than a horizon, because the question an
+// operator is asking of a draft is "are these the right days?" and five
+// of them answers it; the horizon is wide enough that a monthly
+// recurrence still produces a few.
+const DRAFT_HORIZON_DAYS = 90;
+const DRAFT_ROWS = 5;
+
+// useSettled holds a value still until it has stopped changing.
+function useSettled(value: string, ms: number): string {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), ms);
+    return () => clearTimeout(timer);
+  }, [value, ms]);
+  return settled;
+}
+
+// The next few occurrences of the reservation being written, from the
+// server.
+//
+// The enumeration is the controller's own, asked about this draft. A
+// preview computed in the browser would be a second implementation of
+// the schedule, and the first time the two disagreed the page would be
+// confidently showing an operator days that nothing is going to hold.
+function DraftWindowsPreview({
+  res,
+  blocked,
+}: {
+  res: AdminReservation;
+  // True while the schedule is missing something the form has already
+  // asked for. The server would refuse it, and repeating the refusal
+  // underneath the question would read as a second problem.
+  blocked: boolean;
+}) {
+  // Which draft this is, as far as the answer is concerned. The whole
+  // reservation goes in the request, but only these fields can change
+  // which days come back -- the schedule, its bounds, where each window
+  // ends and when draining would start -- so a keystroke in the submit
+  // file or the project name asks the server nothing.
+  const timing = JSON.stringify({
+    schedule_kind: res.schedule_kind,
+    schedule: res.schedule,
+    recurrence: res.recurrence,
+    starts_at: res.starts_at,
+    ends_at: res.ends_at,
+    occurrences: res.occurrences,
+    duration_seconds: res.duration_seconds,
+    lead_seconds: res.lead_seconds,
+    timezone: res.timezone,
+  });
+  const settled = useSettled(timing, 400);
+  const alwaysOn = res.schedule_kind === 'always';
+  const needsLength = !alwaysOn && res.duration_seconds <= 0;
+  const windows = useQuery({
+    queryKey: ['admin', 'reservation-window-preview', settled],
+    queryFn: () => api.admin.previewReservationWindows(res, DRAFT_HORIZON_DAYS),
+    enabled: !blocked && !needsLength,
+    retry: false,
+    // Keep the last answer on screen while the next one is fetched: the
+    // list is being read while it is being changed, and blanking it on
+    // every keystroke is how a preview becomes something to ignore.
+    placeholderData: (prev) => prev,
+  });
+
+  const rows = windows.data?.windows ?? [];
+  const shown = rows.slice(0, DRAFT_ROWS);
+  // Whether what is on screen is still the answer to what is in the
+  // boxes: false while a change is settling as well as while the
+  // request for it is in flight.
+  const behind = settled !== timing || (windows.isFetching && !!windows.data);
+
+  return (
+    <div data-testid="reservation-window-preview" className="rounded-sm bg-gray-50 px-3 py-2">
+      <h3 className="text-xs font-semibold text-gray-900">
+        Next occurrences
+        {res.timezone && (
+          <span className="ml-2 font-normal text-gray-500">times in {res.timezone}</span>
+        )}
+        {/* The last answer stays on screen while the next one is
+            fetched, so while that is happening the list has to say it
+            is behind the controls rather than look like the answer to
+            them. */}
+        {behind && <span className="ml-2 font-normal text-gray-500">updating…</span>}
+      </h3>
+
+      {needsLength && (
+        <p className="mt-1 text-xs text-gray-500">
+          Set a reservation length to see when this runs.
+        </p>
+      )}
+      {blocked && !needsLength && (
+        <p className="mt-1 text-xs text-gray-500">
+          Finish the schedule above to see when this runs.
+        </p>
+      )}
+      {windows.isFetching && !windows.data && (
+        <p className="mt-1 text-xs text-gray-400">Loading…</p>
+      )}
+      {windows.error && (
+        <p className="mt-1 whitespace-pre-line text-xs text-red-600">
+          {(windows.error as Error).message}
+        </p>
+      )}
+
+      {windows.data && shown.length === 0 && !blocked && !needsLength && (
+        <p className="mt-1 text-xs text-gray-500">
+          {whyNoWindows(windows.data.schedule_kind, res, DRAFT_HORIZON_DAYS)}
+        </p>
+      )}
+
+      {shown.length > 0 && (
+        <>
+          <WindowsTable rows={shown} timezone={res.timezone} />
+          {rows.length > shown.length && (
+            <p className="mt-1 text-xs text-gray-500">
+              And {rows.length - shown.length} more in the next{' '}
+              {DRAFT_HORIZON_DAYS} days.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 const inputCls =
   'mt-1 w-full rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400';
 
@@ -657,26 +817,32 @@ function ReservationForm({
   const [text, setText] = useState(initial.submit);
   const submit = fields ? renderReservationSubmit(fields) : text;
 
-  const send = () => {
-    const zone = timezone.trim();
-    onSubmit({
-      id: id.trim(),
-      owner: owner.trim(),
-      project: project.trim(),
-      submit,
-      seats: Number(seats) || 0,
-      standing: Number(standing) || 0,
-      duration_seconds: hoursMinutesToSeconds(duration.hours, duration.minutes),
-      lead_seconds: hoursMinutesToSeconds(lead.hours, lead.minutes),
-      hold_seconds: hoursMinutesToSeconds(hold.hours, hold.minutes),
-      schedule: schedule.cron.trim(),
-      timezone: zone,
-      enabled,
-      // The bounds are read in the reservation's own zone, so they are
-      // written with that zone's offset rather than the browser's.
-      ...recurrenceToBounds(schedule.rec, zone),
-    });
+  const zone = timezone.trim();
+  // The reservation the boxes currently describe. The same value is
+  // saved and previewed, so the preview can never be of a draft the
+  // Save button would not send.
+  const current: AdminReservation = {
+    id: id.trim(),
+    owner: owner.trim(),
+    project: project.trim(),
+    submit,
+    seats: Number(seats) || 0,
+    standing: Number(standing) || 0,
+    duration_seconds: hoursMinutesToSeconds(duration.hours, duration.minutes),
+    lead_seconds: hoursMinutesToSeconds(lead.hours, lead.minutes),
+    hold_seconds: hoursMinutesToSeconds(hold.hours, hold.minutes),
+    timezone: zone,
+    enabled,
+    // The schedule, and the bounds on it. The bounds are read in the
+    // reservation's own zone, so they are written with that zone's
+    // offset rather than the browser's.
+    ...scheduleFields(schedule, zone),
   };
+  // What the schedule still needs before the server could act on it.
+  // Saving over one of these is a 400 that names a rule rather than a
+  // box, so the form asks for it here instead.
+  const needs = scheduleNeeds(schedule);
+  const alwaysOn = schedule.kind === 'always';
 
   return (
     <div
@@ -774,14 +940,19 @@ function ReservationForm({
             clock time across a daylight-saving change.
           </span>
         </ScheduleRow>
-        <div className="grid gap-3 sm:grid-cols-3">
-          <HoursMinutesField
-            label="Reservation length"
-            hint="How long the capacity is held, each time the schedule comes round."
-            value={duration}
-            onChange={setDuration}
-          />
-        </div>
+        {/* A reservation held continuously has no window, so it has no
+            length. */}
+        {!alwaysOn && (
+          <div className="grid gap-3 sm:grid-cols-3">
+            <HoursMinutesField
+              label="Reservation length"
+              hint="How long the capacity is held, each time the schedule comes round."
+              value={duration}
+              onChange={setDuration}
+            />
+          </div>
+        )}
+        <DraftWindowsPreview res={current} blocked={needs.length > 0} />
       </FormSection>
 
       <FormSection title="Capacity">
@@ -813,31 +984,37 @@ function ReservationForm({
               />
             </label>
             <span className="mt-1 block text-gray-500">
-              Kept for the project between reservations.
+              Spare slots kept available at all times, on top of whatever the
+              project is already running, so the next person to arrive finds
+              one waiting. Never more than the number of slots above.
             </span>
           </div>
         </div>
       </FormSection>
 
-      <FormSection
-        title="Draining"
-        hint="Other people's jobs stop being sent to the machines these slots will come from ahead of each start, so the slots are free when the reservation begins."
-      >
-        <div className="grid gap-3 sm:grid-cols-3">
-          <HoursMinutesField
-            label="Drain lead"
-            hint="How far ahead of each start the draining begins."
-            value={lead}
-            onChange={setLead}
-          />
-          <HoursMinutesField
-            label="Hold after the start"
-            hint="How long unclaimed slots stay reserved for the project."
-            value={hold}
-            onChange={setHold}
-          />
-        </div>
-      </FormSection>
+      {/* Both of these describe what happens around a start, so a
+          reservation that never starts and never stops has neither. */}
+      {!alwaysOn && (
+        <FormSection
+          title="Draining"
+          hint="Other people's jobs stop being sent to the machines these slots will come from ahead of each start, so the slots are free when the reservation begins."
+        >
+          <div className="grid gap-3 sm:grid-cols-3">
+            <HoursMinutesField
+              label="Drain lead"
+              hint="How far ahead of each start the draining begins."
+              value={lead}
+              onChange={setLead}
+            />
+            <HoursMinutesField
+              label="Hold after the start"
+              hint="How long unclaimed slots stay reserved for the project."
+              value={hold}
+              onChange={setHold}
+            />
+          </div>
+        </FormSection>
+      )}
 
       <FormSection
         title="Slot shape"
@@ -863,12 +1040,21 @@ function ReservationForm({
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <button
           type="button"
-          onClick={send}
-          disabled={busy}
+          onClick={() => onSubmit(current)}
+          disabled={busy || needs.length > 0}
           className="rounded-sm bg-brand-600 px-3 py-1 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
         >
           {busy ? 'Saving…' : existing ? 'Save changes' : 'Create reservation'}
         </button>
+        {/* Repeated from the schedule section on purpose: on a phone the
+            button and the control it is waiting on are screens apart,
+            and a button that is disabled for no stated reason is worse
+            than one that fails. */}
+        {needs.length > 0 && (
+          <span className="text-xs text-amber-700">
+            {needs.map((n) => n.message).join(' ')}
+          </span>
+        )}
         <button
           type="button"
           onClick={onCancel}
@@ -1008,23 +1194,26 @@ function HoursMinutesField({
           min={0}
           aria-label={`${label} hours`}
           value={String(value.hours)}
-          onChange={(e) => onChange({ ...value, hours: Number(e.target.value) })}
+          onChange={(e) => onChange(carryHoursMinutes(Number(e.target.value), value.minutes))}
           className="w-20 rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
         />
         <span className="text-gray-500">h</span>
         <input
           type="number"
-          min={0}
-          max={59}
           // Quarter hours on the spinner, which is what almost every
           // one of these is set to. A step is not a restriction: a
           // 50-minute reservation is a real one, and typing 50 still
           // works -- a list of 0/15/30/45 would make that value
           // unreachable and rewrite it on the next save.
           step={15}
+          // No floor and no ceiling on this box, so the spinner can
+          // step past both and be read as the hour it means: up from 45
+          // is 60, which is the next hour at zero, and down from 0 is
+          // -15, which is the previous hour at 45. Clamping at 0 and 59
+          // instead is why the up arrow did nothing at 45.
           aria-label={`${label} minutes`}
           value={String(value.minutes)}
-          onChange={(e) => onChange({ ...value, minutes: Number(e.target.value) })}
+          onChange={(e) => onChange(carryHoursMinutes(value.hours, Number(e.target.value)))}
           className="w-20 rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400"
         />
         <span className="text-gray-500">min</span>

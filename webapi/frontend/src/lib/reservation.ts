@@ -30,6 +30,27 @@ export function hoursMinutesToSeconds(hours: number, minutes: number): number {
   return h * 3600 + m * 60;
 }
 
+// carryHoursMinutes is the pair of boxes read as one duration, so the
+// minute spinner behaves the way a clock does: stepping up from 45 is
+// the next hour at 00, and stepping down from 00 is the previous hour
+// at 45.
+//
+// The boxes step in quarter hours but do not restrict what may be
+// typed, so a minute value arrives here from three places -- the
+// spinner's own arithmetic, a keystroke, and a paste -- and all three
+// are handled the same way: the pair is summed and split again. A
+// spinner stepping up from 50 lands on 60, because 60 is the next
+// quarter hour above 50, and so reads as the next hour at 00; stepping
+// down from 50 lands on 45. A borrow with no hour left to take from
+// stops at zero rather than going negative, since a duration cannot.
+export function carryHoursMinutes(hours: number, minutes: number): HoursMinutes {
+  const h = Number.isFinite(hours) ? Math.trunc(hours) : 0;
+  const m = Number.isFinite(minutes) ? Math.trunc(minutes) : 0;
+  const total = h * 60 + m;
+  if (total <= 0) return { hours: 0, minutes: 0 };
+  return { hours: Math.floor(total / 60), minutes: total % 60 };
+}
+
 // formatHoursMinutes prints seconds for reading: "6 h", "1 h 30 min",
 // "45 min". Hours are not rolled up into days even past 24 -- a lead of
 // "36 h" is directly comparable with the 6 h default, where "1 d 12 h"
