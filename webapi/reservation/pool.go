@@ -50,8 +50,9 @@ type SlotQuerier interface {
 // Census reads the pool and returns one Machine per execute node.
 //
 // only, when not empty, is a site expression naming the execute points
-// reservations may draw seats from -- a class should take the teaching
-// nodes, not whatever the collector happens to report. It is ANDed with
+// reservations may draw capacity from -- a reservation for a course
+// should take the teaching nodes, not whatever the collector happens to
+// report. It is ANDed with
 // SlotConstraint and sent to the collector rather than filtered here, so
 // a large pool is not read in full to discard most of it.
 func Census(ctx context.Context, q SlotQuerier, only string) ([]Machine, error) {

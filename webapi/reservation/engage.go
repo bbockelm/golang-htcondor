@@ -38,16 +38,17 @@ const StampWarmup = 20 * time.Minute
 
 // Engaged reports whether any of specs needs the subsystem to act at now.
 //
-// A standing reservation is engaged throughout its recurrence: it holds
-// seats whether or not a class is in session. Every other spec is
+// A standing reservation is engaged throughout its recurrence: it keeps
+// capacity available whether or not a window is open. So is an always-on
+// reservation, which is all headroom and no window. Every other spec is
 // engaged from the start of its planning lead until settle past the end
 // of its window.
 //
-// Outside the recurrence nothing engages. A reservation whose term is
-// over is the case worth being deliberate about: its last window
-// produces nothing, but its standing seats would otherwise go on
-// holding part of the pool for a class that finished, with nobody left
-// to notice.
+// Outside the recurrence nothing engages. A reservation that has run out
+// is the case worth being deliberate about: its last window produces
+// nothing, but its standing capacity would otherwise go on holding part
+// of the pool for a reservation nobody is using any more, with nobody
+// left to notice.
 func Engaged(specs []*Spec, now time.Time, forgive, settle time.Duration) bool {
 	for _, s := range specs {
 		if s == nil || !s.Enabled {
@@ -55,6 +56,12 @@ func Engaged(specs []*Spec, now time.Time, forgive, settle time.Duration) bool {
 		}
 		if s.exhausted(now, settle) {
 			continue
+		}
+		if s.alwaysOn() && !now.Before(s.Starts) {
+			// An always-on reservation is engaged for as long as it is
+			// enabled. It has no windows to be between, so there is no
+			// moment at which the subsystem could correctly ignore it.
+			return true
 		}
 		if s.Standing > 0 && !now.Before(s.Starts) {
 			return true

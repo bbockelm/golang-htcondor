@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -83,11 +84,12 @@ func (e *resEnv) do(t *testing.T, method, target, sid string, body any) *httptes
 	return w
 }
 
-// mux mirrors the three reservation registrations in routes.go.
+// mux mirrors the reservation registrations in routes.go.
 func (e *resEnv) mux() *http.ServeMux {
 	m := http.NewServeMux()
 	m.HandleFunc("/api/v1/admin/reservations", e.h.handleAdminReservations)
 	m.HandleFunc("/api/v1/admin/reservations/health", e.h.handleAdminReservationHealth)
+	m.HandleFunc("/api/v1/admin/reservations/windows", e.h.handleAdminReservationWindowsPreview)
 	m.HandleFunc("/api/v1/admin/reservations/", e.h.handleAdminReservation)
 	return m
 }
@@ -532,5 +534,196 @@ func TestReservationWindowsPreviewHonoursTheBounds(t *testing.T) {
 		if win.Start.Before(start) {
 			t.Errorf("preview shows a window at %v, before the term opens at %v", win.Start, start)
 		}
+	}
+}
+
+// fortnightlyReservation is the request cron cannot express: a window
+// every other Tuesday.
+func fortnightlyReservation() reservationJSON {
+	j := goodReservation()
+	j.Schedule = ""
+	j.ScheduleKind = string(reservation.KindRecurrence)
+	j.Recurrence = &reservation.Recurrence{
+		Freq: reservation.FreqWeekly, Interval: 2, ByWeekday: []int{2}, TimeOfDay: "14:00",
+	}
+	j.StartsAt = "2026-03-03T00:00:00Z"
+	return j
+}
+
+func decodeWindows(t *testing.T, body []byte) windowsJSON {
+	t.Helper()
+	var got windowsJSON
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode windows: %v (body %s)", err, body)
+	}
+	return got
+}
+
+// TestReservationRecurrenceRoundTripsThroughTheAPI: the structured form
+// goes out the way it came in, because the admin page redisplays what it
+// posted and a field quietly dropped would read as a field the operator
+// never set.
+func TestReservationRecurrenceRoundTripsThroughTheAPI(t *testing.T) {
+	env := newResEnv(t)
+	if w := env.do(t, http.MethodPost, "/api/v1/admin/reservations", env.admin, fortnightlyReservation()); w.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", w.Code, w.Body)
+	}
+	w := env.do(t, http.MethodGet, "/api/v1/admin/reservations/cs301", env.admin, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get: %d %s", w.Code, w.Body)
+	}
+	var got reservationJSON
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ScheduleKind != "recurrence" {
+		t.Errorf("schedule_kind came back %q", got.ScheduleKind)
+	}
+	if got.Recurrence == nil {
+		t.Fatal("recurrence came back null")
+	}
+	if got.Recurrence.Freq != reservation.FreqWeekly || got.Recurrence.Interval != 2 ||
+		len(got.Recurrence.ByWeekday) != 1 || got.Recurrence.ByWeekday[0] != 2 ||
+		got.Recurrence.TimeOfDay != "14:00" {
+		t.Errorf("recurrence came back as %+v", got.Recurrence)
+	}
+	// The windows are the only thing anybody acts on, so check the
+	// stored reservation really lands on alternate Tuesdays.
+	w = env.do(t, http.MethodGet, "/api/v1/admin/reservations/cs301/windows?days=365", env.admin, nil)
+	wins := decodeWindows(t, w.Body.Bytes())
+	if len(wins.Windows) < 2 {
+		t.Fatalf("got %d windows over a year: %+v", len(wins.Windows), wins)
+	}
+	for i, win := range wins.Windows {
+		if win.Start.Weekday() != time.Tuesday {
+			t.Errorf("window %d starts on a %v", i, win.Start.Weekday())
+		}
+		if i > 0 {
+			if gap := win.Start.Sub(wins.Windows[i-1].Start); gap != 14*24*time.Hour {
+				t.Errorf("window %d is %v after the one before, want 336h", i, gap)
+			}
+		}
+	}
+}
+
+// TestReservationAlwaysKindHasNoWindows: an empty window list means two
+// different things, so the preview says which. A page that could not
+// tell them apart would show "nothing upcoming" for a reservation
+// holding capacity right now.
+func TestReservationAlwaysKindHasNoWindows(t *testing.T) {
+	env := newResEnv(t)
+	body := goodReservation()
+	body.ScheduleKind = string(reservation.KindAlways)
+	body.Schedule, body.DurationSeconds, body.LeadSeconds, body.HoldSeconds = "", 0, 0, 0
+	if w := env.do(t, http.MethodPost, "/api/v1/admin/reservations", env.admin, body); w.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", w.Code, w.Body)
+	}
+	w := env.do(t, http.MethodGet, "/api/v1/admin/reservations/cs301/windows", env.admin, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("windows: %d %s", w.Code, w.Body)
+	}
+	got := decodeWindows(t, w.Body.Bytes())
+	if len(got.Windows) != 0 {
+		t.Errorf("an always-on reservation listed %d windows", len(got.Windows))
+	}
+	if got.ScheduleKind != "always" {
+		t.Errorf("the preview reported schedule_kind %q", got.ScheduleKind)
+	}
+}
+
+// TestDraftWindowsPreviewMatchesTheSavedOne is the point of the draft
+// endpoint: it must be the same enumeration. A preview computed any
+// other way is how a form comes to show an operator a schedule that is
+// not the one that will run.
+func TestDraftWindowsPreviewMatchesTheSavedOne(t *testing.T) {
+	env := newResEnv(t)
+	body := fortnightlyReservation()
+	if w := env.do(t, http.MethodPost, "/api/v1/admin/reservations", env.admin, body); w.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", w.Code, w.Body)
+	}
+	saved := env.do(t, http.MethodGet, "/api/v1/admin/reservations/cs301/windows?days=90", env.admin, nil)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("saved windows: %d %s", saved.Code, saved.Body)
+	}
+	draft := env.do(t, http.MethodPost, "/api/v1/admin/reservations/windows?days=90", env.admin, body)
+	if draft.Code != http.StatusOK {
+		t.Fatalf("draft windows: %d %s", draft.Code, draft.Body)
+	}
+	want, got := decodeWindows(t, saved.Body.Bytes()), decodeWindows(t, draft.Body.Bytes())
+	if len(want.Windows) == 0 {
+		t.Fatal("the saved reservation previewed no windows, so there is nothing to compare")
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the draft previewed %+v, the saved reservation %+v", got, want)
+	}
+}
+
+// TestDraftWindowsPreviewNeedsOnlyTheTiming: a draft is previewed while
+// it is still being written, so withholding the preview over an empty
+// submit file would withhold it exactly when the recurrence is being
+// worked out.
+func TestDraftWindowsPreviewNeedsOnlyTheTiming(t *testing.T) {
+	env := newResEnv(t)
+	body := fortnightlyReservation()
+	body.ID, body.Owner, body.Project, body.Submit = "", "", "", ""
+	body.Seats, body.Standing = 0, 0
+	w := env.do(t, http.MethodPost, "/api/v1/admin/reservations/windows?days=60", env.admin, body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", w.Code, w.Body)
+	}
+	if got := decodeWindows(t, w.Body.Bytes()); len(got.Windows) == 0 {
+		t.Error("a half-written draft previewed nothing")
+	}
+	// Saving the same thing is still refused: the preview is lenient,
+	// the table is not.
+	if w := env.do(t, http.MethodPost, "/api/v1/admin/reservations", env.admin, body); w.Code != http.StatusBadRequest {
+		t.Errorf("saving a half-written reservation gave %d, want 400", w.Code)
+	}
+}
+
+// TestDraftWindowsPreviewRefusesWhatItCannotEnumerate: the 400 text is
+// shown to the operator verbatim, so it has to name what is wrong.
+func TestDraftWindowsPreviewRefusesWhatItCannotEnumerate(t *testing.T) {
+	env := newResEnv(t)
+	for _, tc := range []struct {
+		name string
+		mut  func(*reservationJSON)
+		want string
+	}{
+		{"weekly with no weekdays", func(j *reservationJSON) {
+			j.Recurrence = &reservation.Recurrence{Freq: reservation.FreqWeekly, TimeOfDay: "14:00"}
+		}, "needs by_weekday"},
+		{"an interval with no start date", func(j *reservationJSON) {
+			j.StartsAt = ""
+		}, "needs a start date"},
+		{"no recurrence at all", func(j *reservationJSON) {
+			j.Recurrence = nil
+		}, "recurrence is required"},
+		{"an unknown kind", func(j *reservationJSON) {
+			j.ScheduleKind = "fortnightly"
+		}, "not one of cron"},
+		{"no duration", func(j *reservationJSON) {
+			j.DurationSeconds = 0
+		}, "duration_seconds must be positive"},
+	} {
+		body := fortnightlyReservation()
+		tc.mut(&body)
+		w := env.do(t, http.MethodPost, "/api/v1/admin/reservations/windows", env.admin, body)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400 (body %s)", tc.name, w.Code, w.Body)
+			continue
+		}
+		if !strings.Contains(w.Body.String(), tc.want) {
+			t.Errorf("%s: body %s does not mention %q", tc.name, w.Body, tc.want)
+		}
+	}
+	// A GET is not a preview: the draft is a document, and the endpoint
+	// that takes one has to say so.
+	if w := env.do(t, http.MethodGet, "/api/v1/admin/reservations/windows", env.admin, nil); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET gave %d, want 405", w.Code)
+	}
+	// And it is admin-only like the rest of the collection.
+	if w := env.do(t, http.MethodPost, "/api/v1/admin/reservations/windows", env.user, fortnightlyReservation()); w.Code != http.StatusForbidden {
+		t.Errorf("a non-admin draft preview gave %d, want 403", w.Code)
 	}
 }

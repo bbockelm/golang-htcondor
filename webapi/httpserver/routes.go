@@ -228,8 +228,11 @@ func (h *Handler) setupRoutes() {
 	// Reservations: recurring holds of pool capacity for a project.
 	// Admin-gated inside the handlers like the rest of /api/v1/admin.
 	mux.Handle("/api/v1/admin/reservations", cors(http.HandlerFunc(h.handleAdminReservations)))
-	// Exact path first: "health" is not a reservation ID.
+	// Exact paths first: neither "health" nor "windows" is a
+	// reservation ID. The draft preview sits here rather than under an
+	// ID because the draft has not been saved and so has none.
 	mux.Handle("/api/v1/admin/reservations/health", cors(http.HandlerFunc(h.handleAdminReservationHealth)))
+	mux.Handle("/api/v1/admin/reservations/windows", cors(http.HandlerFunc(h.handleAdminReservationWindowsPreview)))
 	mux.Handle("/api/v1/admin/reservations/", cors(http.HandlerFunc(h.handleAdminReservation)))
 	mux.Handle("/api/v1/admin/oauth2/clients", cors(http.HandlerFunc(h.handleAdminListClients)))
 	// The per-client path carries both the delete and the notes edit;

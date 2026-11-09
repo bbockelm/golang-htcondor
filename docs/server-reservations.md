@@ -1,36 +1,125 @@
 # Reservations
 
-Holding pool capacity for a project at recurring times — a class, a demo,
-anything with a timetable — without throwing away work that was already
-running. Part of the [HTTP API + MCP server](server.md) documentation.
+Holding pool capacity for a project at recurring times — a course, a
+demo, anything with a timetable — or continuously, without throwing away
+work that was already running. Part of the [HTTP API + MCP server](server.md) documentation.
 
 ## What a reservation is
 
-A reservation names a **project**, a **seat** described by a submit file,
-how many seats it needs (`seats`), how many to keep between windows
-(`standing`), and a five-field cron **schedule** with a duration. Jobs
-claim a seat by carrying the project as their `ProjectName`.
+A reservation names a **project**, one **instance** described by a submit
+file, how much capacity it needs (`seats`), how much spare capacity to
+keep available (`standing`), and a **timing** with a duration. Jobs use
+the reservation by carrying the project as their `ProjectName`.
+
+`standing` is headroom, not a floor. It is how much *unused* capacity to
+keep on top of whatever the project is already running, capped by
+`seats`: with `standing = 2` and five instances in use, two more are held
+and idle, so the sixth user to arrive finds capacity waiting instead of
+waiting for the next controller tick and a drain after it. Running jobs
+do not count against it, and it is asked for exactly — the
+over-provisioning that precedes a window pays for machines that may not
+come good in time, and headroom has no moment it has to be good by.
 
 Each occurrence is a **window**. The moment it opens is the **bell**.
 Before the bell the controller holds cores back so the seats are cheap to
 free when it rings; after it, unclaimed seats stay reserved for the
 project for `hold` (15 minutes by default) and then return to the pool.
 
-Occurrences close together are one window. Two back-to-back classes are
+Occurrences close together are one window. Two back-to-back sessions are
 one hold: releasing cores between them and draining again costs more than
 keeping them, and a gap shorter than the forgiveness threshold is free
 either way.
 
-A recurrence can be bounded. A cron expression says when a reservation
-happens but not for how long it goes on, so a class booked for one term
+A recurrence can be bounded. A schedule says when a reservation happens
+but not for how long it goes on, so a reservation booked for one term
 would otherwise hold capacity every Monday for ever. A reservation may
 have a **start**, and then either an **end** or a number of
 **occurrences** — one or the other, since they say the same thing two
 ways, and a count needs a start to count from. An occurrence that begins
-before the end runs its full duration: a class is not cut short because
-the term ended between its bell and its last minute. The count counts
-scheduled starts rather than windows, so fifteen lectures is fifteen
-lectures even where two of them merge into one hold.
+before the end runs its full duration: a window that opened in time is
+not cut short because the recurrence ended part way through it. The count
+counts scheduled starts rather than windows, so fifteen sessions is
+fifteen sessions even where two of them merge into one hold.
+
+## How a reservation is timed
+
+`schedule_kind` says which of three timings is authoritative. A
+reservation stored before this field existed has no kind and is read as
+`cron`, which is what it already was.
+
+| `schedule_kind` | Timing | Field read |
+|---|---|---|
+| `cron` | A hand-typed five-field cron expression. | `schedule` |
+| `recurrence` | A structured recurrence. | `recurrence` |
+| `always` | None: capacity is held continuously. | neither |
+
+The two schedules are **peers, not layers**. Neither is derived from the
+other and nothing converts between them, because the recurrence is
+deliberately more expressive than cron: a step on cron's day-of-week
+field steps weekday *indices*, not weeks, and cron cannot count weekdays
+within a month at all. A converter would have to round "every other
+Tuesday" to an expression that runs on different days from the one the
+admin typed, and a lossy conversion used for display is how a page comes
+to show a schedule that is not the one being run.
+
+### The structured recurrence
+
+```json
+"schedule_kind": "recurrence",
+"recurrence": {
+  "freq": "weekly",
+  "interval": 2,
+  "by_weekday": [2],
+  "time_of_day": "14:00"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `freq` | `daily`, `weekly` or `monthly`. |
+| `interval` | The "every N" — days, weeks or months. Above one it needs a start date. |
+| `by_weekday` | Weekdays, `0` for Sunday through `6` for Saturday. Required for `weekly`. |
+| `by_monthday` | Days of the month, 1–31. |
+| `by_setpos` | `1`–`5` for first through fifth, `-1` last, `-2` next to last, `0` unused. |
+| `day_kind` | What `by_setpos` counts when it is not counting one weekday: `day`, `weekday` or `weekend`. |
+| `time_of_day` | `HH:MM` on a 24-hour clock, read in the reservation's zone. |
+
+So "every other Tuesday" is `weekly` with `interval: 2` and
+`by_weekday: [2]`; "the 1st and the 15th" is `monthly` with
+`by_monthday: [1, 15]`; "the last Friday of the month" is `monthly` with
+`by_setpos: -1` and `by_weekday: [5]`; and "the first weekday of the
+month" is `monthly` with `by_setpos: 1` and `day_kind: "weekday"`.
+
+Three rules are worth knowing because they are where a recurrence can
+surprise an operator:
+
+- **A day a period does not have is skipped, not moved.** There is no
+  31st of February and no fifth Monday in most months, so those months
+  hold no occurrence. Clamping to the 28th or taking the fourth Monday
+  would hold capacity on a day nobody booked.
+- **An interval is counted from the start date.** The week or month the
+  start date falls in is the first one the interval admits, whether or
+  not the start date is itself a matching day — so "every other week from
+  Wednesday the 4th, on Mondays" means the Monday of the 4th's week and
+  every second Monday after. A reservation with an interval above one and
+  no start date is refused: "every other week" has no meaning until
+  somebody says which week, and anchoring on an arbitrary instant would
+  pick the alternating weeks by accident.
+- **Times of day are wall clock.** 14:00 stays 14:00 across a daylight
+  saving change, so a fortnight across a spring-forward is 14 days on the
+  calendar and 335 hours on the clock. A time the spring-forward deleted
+  happens at the first instant it exists, never earlier than it says.
+
+### Always on
+
+`"schedule_kind": "always"` holds capacity continuously: no schedule, no
+windows, and none of `duration`, `lead` or `hold`, which describe a
+window it does not have. It is the standing rule with no window ever
+opening — `standing` unused instances kept available at all times, up to
+`seats` — so an always-on reservation with no standing capacity caps what
+the project may occupy and holds nothing of its own. It can still be
+bounded by a start and an end date; a count of occurrences is refused,
+since there are none to count.
 
 ## The cost rule
 
@@ -295,12 +384,32 @@ and whether the submit file actually renders — so a mistake comes back to
 the form rather than surfacing hours later in a drain.
 
 The page previews the upcoming windows for a schedule, showing both when
-seats are held and when the controller would start draining for each.
-A cron expression is unreadable; nobody should have to take it on trust.
-The preview stops where the recurrence does, so a term reads as a term.
+capacity is held and when the controller would start draining for each.
+Neither a cron expression nor a recurrence reads back easily; nobody
+should have to take one on trust. The preview stops where the recurrence
+does, so a reservation booked for a term reads as one.
 
-Schedules are read in a named IANA zone, so a class at 14:00 stays at
-14:00 when the offset changes under it.
+Two endpoints answer it, and they are the same enumeration:
+
+| Endpoint | For |
+|---|---|
+| `GET /api/v1/admin/reservations/{id}/windows` | A saved reservation. |
+| `POST /api/v1/admin/reservations/windows` | A draft in the request body, not yet saved. |
+
+Both take `?days=N` (1–365, two weeks by default) and answer
+`{"windows": [...], "schedule_kind": "..."}`. The kind goes with the list
+because an empty list has two meanings: an always-on reservation has no
+windows because it never stops holding, and a finished one has none
+because it is over.
+
+The draft form takes a whole reservation rather than a recurrence alone,
+because the windows depend on more than the recurrence — the duration
+decides where each one ends and the bounds decide which occurrences exist
+at all. It validates only the timing, so a draft can be previewed before
+the submit file is written, and it writes nothing.
+
+Schedules are read in a named IANA zone, so a reservation at 14:00 stays
+at 14:00 when the offset changes under it.
 
 ## Further reading
 

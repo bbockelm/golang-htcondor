@@ -257,6 +257,15 @@ type Demand struct {
 	Need  Resources
 	Seats int
 	Bell  time.Time
+	// Standing marks an ask for headroom between windows rather than
+	// for a window itself.
+	//
+	// Headroom has no moment it must be ready by, so it cannot be
+	// ordered against windows by time: its Bell is now, which would
+	// otherwise sort it ahead of everything. A window is a commitment
+	// at a time and spare capacity is not, so headroom is served last
+	// however soon it is wanted.
+	Standing bool
 }
 
 // Allocation is what Assign decided for one reservation.
@@ -281,7 +290,12 @@ type Allocation struct {
 // single global census wrong.
 func (p Policy) Assign(machines []Machine, demands []Demand, now time.Time) []Allocation {
 	ds := append([]Demand(nil), demands...)
-	sort.SliceStable(ds, func(a, b int) bool { return ds[a].Bell.Before(ds[b].Bell) })
+	sort.SliceStable(ds, func(a, b int) bool {
+		if ds[a].Standing != ds[b].Standing {
+			return !ds[a].Standing
+		}
+		return ds[a].Bell.Before(ds[b].Bell)
+	})
 
 	// taken[machine][dslot] marks a d-slot already promised, and freeLeft
 	// tracks unclaimed capacity already spoken for.

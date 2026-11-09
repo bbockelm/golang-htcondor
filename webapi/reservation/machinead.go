@@ -28,7 +28,7 @@ import (
 // a machine for the life of the startd with nobody left to clear it.
 //
 // It is also why no reservation's name appears in an attribute name. A
-// semester of classes would otherwise leave hundreds of dead keys on
+// a long run of reservations would otherwise leave hundreds of dead keys on
 // every execute point.
 const (
 	// AttrStart is the sieve: the expression the site's START is

@@ -35,8 +35,8 @@ const reservationForgiveDefault = 30 * time.Minute
 // The census, what is held, and each project's running jobs come from a
 // single query. Counting running jobs from the pool rather than from
 // this access point's queue is deliberate: a reservation's seats are
-// pool-wide, so a student's job that landed from another access point
-// is still a seat the project holds.
+// pool-wide, so a job that landed from another access point is still
+// capacity the project holds.
 type collectorSource struct {
 	h *Handler
 }
@@ -106,7 +106,7 @@ func (h *Handler) startReservations(ctx context.Context) {
 		case p.Outcome == reservation.ProbeDenied:
 			// The failure with no other symptom. Without authorization
 			// to update machine ads nothing errors, no reservation
-			// complains, and every class starts on a pool that was
+			// complains, and every window opens on a pool that was
 			// never drained.
 			h.logger.Errorf(logging.DestinationCollector,
 				"reservations: %s refused a machine-ad update, so reservations hold nothing: %s", p.Machine, p.Detail)

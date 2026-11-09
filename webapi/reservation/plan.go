@@ -83,6 +83,18 @@ type PlanConfig struct {
 // DefaultPlanConfig is the tuning the measurements were taken with.
 func DefaultPlanConfig() PlanConfig { return PlanConfig{HBuffer: 3, SwapGain: 0.75} }
 
+// StandingLease is how long a machine held for standing headroom is held
+// for before the hold has to be renewed.
+//
+// Headroom has no end date -- the reservation it belongs to may run for
+// a term or for ever -- but the attribute that holds a machine cannot be
+// deleted and does not expire, so a hold with no end would outlive the
+// controller that placed it and keep a machine out of the pool until
+// the startd restarted. The controller rewrites it on every tick, so a
+// lease of a few ticks' worth gives the machines back shortly after a
+// controller stops rather than keeping them indefinitely.
+const StandingLease = time.Hour
+
 // activeWindow is the window a spec is currently acting for, if any: the
 // one in progress, else the next one once its planning lead has started.
 func (s *Spec) activeWindow(now time.Time, forgive time.Duration) (Window, Phase, bool) {
@@ -94,6 +106,21 @@ func (s *Spec) activeWindow(now time.Time, forgive time.Duration) (Window, Phase
 		}
 	}
 	return Window{}, PhaseOff, false
+}
+
+// standingWindow is the synthetic window standing headroom is held
+// against.
+//
+// Headroom is wanted now rather than by some later moment, so the
+// deadline the machine is held to is now. That leaves the held machine
+// admitting the project's own jobs and nothing else, which is exactly
+// what an idle instance kept for the project is. The end is a lease
+// rather than a date because headroom has no end; see StandingLease.
+//
+// It covers no scheduled start, so Occurrences stays zero: an operator
+// reading the plan should not see a window that never happened.
+func (s *Spec) standingWindow(now time.Time) Window {
+	return Window{SpecID: s.ID, Start: now, End: now.Add(StandingLease)}
 }
 
 // Plan decides this tick: which machines to hold, which to release, and
@@ -116,9 +143,13 @@ func (p Policy) Plan(t Tick, cfg PlanConfig) Plan {
 		}
 		window, phase, ok := spec.activeWindow(t.Now, p.Forgive)
 		if !ok {
-			// Outside every window the standing seats still apply, but
-			// there is no bell to drain towards, so nothing is held.
-			continue
+			// Outside every window the standing headroom still applies.
+			// An always-on reservation is only ever in this case: it has
+			// no windows at all, so it is headroom and nothing else.
+			if !spec.standingApplies(t.Now) {
+				continue
+			}
+			window, phase = spec.standingWindow(t.Now), PhaseOff
 		}
 		want := spec.Target(phase, t.Running[spec.Project])
 		if want <= 0 {
@@ -152,7 +183,15 @@ func (p Policy) Plan(t Tick, cfg PlanConfig) Plan {
 		if a.phase == PhasePlanning {
 			seats = Want(a.want, 0)
 		}
-		demands = append(demands, Demand{ID: a.spec.ID, Need: a.need, Seats: seats, Bell: a.window.Bell()})
+		// Headroom is asked for exactly. Over-provisioning pays for the
+		// machines that do not come good in time, and headroom has no
+		// time it has to be good by: two spare instances means two, and
+		// asking for the over-provisioned count would hold three times
+		// that out of the pool for as long as the reservation lasts.
+		demands = append(demands, Demand{
+			ID: a.spec.ID, Need: a.need, Seats: seats,
+			Bell: a.window.Bell(), Standing: a.phase == PhaseOff,
+		})
 		byID[a.spec.ID] = a
 	}
 	allocs := p.Assign(t.Machines, demands, t.Now)
@@ -164,10 +203,17 @@ func (p Policy) Plan(t Tick, cfg PlanConfig) Plan {
 		if alloc.Short > 0 {
 			out.Short[alloc.ID] = alloc.Short
 		}
-		// Past the bell the seats are taken, not drained towards.
-		if a.phase != PhasePlanning {
+		// Past the bell the capacity is taken, not drained towards --
+		// except for headroom, which preempts nothing. Throwing away
+		// running work to create an idle instance spends something real
+		// for something nobody is waiting on yet; the headroom appears
+		// as the jobs on the held machine finish, which is what the
+		// hold is for.
+		// Headroom (PhaseOff) falls through both arms: it holds, and lets
+		// the machine drain on its own.
+		if a.phase == PhaseHolding || a.phase == PhaseOpen {
 			out.Evict = append(out.Evict, evictionsFor(alloc, a.spec.ID)...)
-		} else if a.window.Bell().Sub(t.Now) <= p.Forgive {
+		} else if a.phase == PhasePlanning && a.window.Bell().Sub(t.Now) <= p.Forgive {
 			// Inside the forgiveness window, holding buys nothing and
 			// costs admissions: anything started from here is under the
 			// line at the bell anyway. This is the same reason there is

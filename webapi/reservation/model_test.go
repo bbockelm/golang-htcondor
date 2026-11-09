@@ -103,26 +103,38 @@ func TestPhaseAt(t *testing.T) {
 	}
 }
 
+// TestTarget: Standing is headroom on top of what the project is using,
+// not a floor the running jobs count against. Somebody arriving between
+// windows should find an instance already held rather than wait for the
+// next tick and a drain after it, so running jobs do not cancel it out.
 func TestTarget(t *testing.T) {
-	s := testSpec(t, "0 14 * * 1") // Seats 35, Standing 4
+	s := testSpec(t, "0 14 * * 1")
+	s.Seats, s.Standing = 20, 2
 	for _, tc := range []struct {
 		name    string
 		phase   Phase
 		running int
 		want    int
 	}{
-		{"outside, nothing running", PhaseOff, 0, 4},
-		{"outside, some running count against the standing seats", PhaseOff, 3, 1},
-		{"outside, standing already covered", PhaseOff, 4, 0},
-		{"outside, project near its cap reserves nothing", PhaseOff, 34, 0},
-		{"outside, project at its cap reserves nothing", PhaseOff, 35, 0},
-		{"planning, nothing running", PhasePlanning, 0, 35},
-		{"planning, partly filled", PhasePlanning, 10, 25},
-		{"open, fully seated", PhaseOpen, 35, 0},
+		{"outside, nothing running", PhaseOff, 0, 2},
+		{"outside, five running still want two spare", PhaseOff, 5, 2},
+		{"outside, one place left under the cap", PhaseOff, 19, 1},
+		{"outside, at the cap", PhaseOff, 20, 0},
+		{"outside, over the cap", PhaseOff, 25, 0},
+		{"planning, nothing running", PhasePlanning, 0, 20},
+		{"planning, partly filled", PhasePlanning, 10, 10},
+		{"open, fully occupied", PhaseOpen, 20, 0},
 	} {
 		if got := s.Target(tc.phase, tc.running); got != tc.want {
 			t.Errorf("%s: target %d, want %d", tc.name, got, tc.want)
 		}
+	}
+	// Headroom is capped by the reservation, not by itself: a Standing
+	// larger than the room left cannot promise capacity the project may
+	// not occupy.
+	s.Standing = s.Seats
+	if got := s.Target(PhaseOff, 18); got != 2 {
+		t.Errorf("with standing at the cap and 18 running, target %d, want 2", got)
 	}
 	s.Enabled = false
 	if got := s.Target(PhasePlanning, 0); got != 0 {
