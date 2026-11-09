@@ -86,6 +86,14 @@ var containerFiles = []string{
 	"universe = container\ncontainer_image = osdf:///x/foo.sif\ncontainer_is_common = true\nexecutable = /bin/sleep\nqueue\n",
 	"universe = container\ncontainer_image = docker://busybox\ncontainer_is_common = true\nexecutable = /bin/sleep\nqueue\n",
 
+	// The same request outside vanilla, which HTCONDOR-4003 stopped
+	// honouring: a common image names a cache on an execute node, and a
+	// local job is never matched to one. An oracle that has the change
+	// transfers the image like any other input file, and one that does
+	// not still names a catalog -- the Go side follows whichever is
+	// linked, so this file compares equal against both.
+	"universe = local\ncontainer_image = /stash/img/foo.sif\ncontainer_is_common = true\nexecutable = /bin/sleep\nqueue\n",
+
 	// docker_image: on its own, alongside the container universe, and
 	// as the docker universe.
 	"universe = container\ndocker_image = busybox\nexecutable = /bin/sleep\nqueue\n",

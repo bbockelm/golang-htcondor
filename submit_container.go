@@ -338,7 +338,15 @@ func (sf *SubmitFile) processContainerInputFiles(ad *classad.ClassAd, inputFiles
 // An unusable regex is ignored rather than fatal, the way condor_submit
 // ignores it: it is the administrator's typo, and failing every submit
 // in the pool over it helps nobody.
+//
+// Outside vanilla the question is not asked at all under
+// CommonContainerVanillaOnly, and neither the keyword nor either knob is
+// read -- a common image names a cache on an execute node, which a job
+// that is not matched to one never reaches.
 func (sf *SubmitFile) containerImageIsCommon(image string) bool {
+	if sf.behavior.CommonContainerVanillaOnly && sf.universe != UniverseVanilla {
+		return false
+	}
 	common := false
 	if v, ok := sf.param("CONTAINER_IMAGES_COMMON_BY_DEFAULT"); ok {
 		if b, valid := evalBoolParam(strings.TrimSpace(v)); valid {

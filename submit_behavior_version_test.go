@@ -12,16 +12,18 @@ func TestSubmitBehaviorForKnownReleases(t *testing.T) {
 		OmitTransferVersionCheck: true, OmitLocalAndSchedulerMachineChecks: true,
 		OmitLocalAndSchedulerResourceDefaults: true,
 		OmitRemoteIOKeywords:                  true, OmitContainerIsCommonAttr: true,
+		CommonContainerVanillaOnly: true,
 	}
 	// The backported changes: HTCONDOR-3932, which covers both the
-	// Requirements clauses and container_is_common's attribute, and
-	// HTCONDOR-3926. They reached the 25.x feature line and the 26.0 LTS
-	// line. HTCONDOR-4020 and the two halves of HTCONDOR-3998 went to the
-	// 26.x feature line alone, which is what separates this from newest.
+	// Requirements clauses and container_is_common's attribute,
+	// HTCONDOR-3926, and HTCONDOR-4003. They reached the 25.x feature
+	// line and the 26.0 LTS line. HTCONDOR-4020 and the two halves of
+	// HTCONDOR-3998 went to the 26.x feature line alone, which is what
+	// separates this from newest.
 	backportedOnly := SubmitBehavior{
 		OmitVanillaDiskClause: true, OmitTransferVersionCheck: true,
 		OmitLocalAndSchedulerMachineChecks: true, OmitLocalAndSchedulerResourceDefaults: true,
-		OmitContainerIsCommonAttr: true,
+		OmitContainerIsCommonAttr: true, CommonContainerVanillaOnly: true,
 	}
 
 	cases := map[string]SubmitBehavior{
@@ -63,6 +65,7 @@ func TestSubmitBehaviorForIsMonotonicWithinASeries(t *testing.T) {
 			b.OmitVanillaDiskClause, b.OmitTransferVersionCheck,
 			b.OmitLocalAndSchedulerMachineChecks, b.OmitLocalAndSchedulerResourceDefaults,
 			b.OmitRemoteIOKeywords, b.OmitContainerIsCommonAttr,
+			b.CommonContainerVanillaOnly,
 		} {
 			if set {
 				n++
