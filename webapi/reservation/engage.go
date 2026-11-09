@@ -38,15 +38,25 @@ const StampWarmup = 20 * time.Minute
 
 // Engaged reports whether any of specs needs the subsystem to act at now.
 //
-// A standing reservation is always engaged: it holds seats whether or not
-// a class is in session. Every other spec is engaged from the start of
-// its planning lead until settle past the end of its window.
+// A standing reservation is engaged throughout its recurrence: it holds
+// seats whether or not a class is in session. Every other spec is
+// engaged from the start of its planning lead until settle past the end
+// of its window.
+//
+// Outside the recurrence nothing engages. A reservation whose term is
+// over is the case worth being deliberate about: its last window
+// produces nothing, but its standing seats would otherwise go on
+// holding part of the pool for a class that finished, with nobody left
+// to notice.
 func Engaged(specs []*Spec, now time.Time, forgive, settle time.Duration) bool {
 	for _, s := range specs {
 		if s == nil || !s.Enabled {
 			continue
 		}
-		if s.Standing > 0 {
+		if s.exhausted(now, settle) {
+			continue
+		}
+		if s.Standing > 0 && !now.Before(s.Starts) {
 			return true
 		}
 		if _, _, ok := s.activeWindow(now, forgive); ok {
@@ -61,6 +71,21 @@ func Engaged(specs []*Spec, now time.Time, forgive, settle time.Duration) bool {
 		}
 	}
 	return false
+}
+
+// exhausted reports whether the spec's recurrence is over and whatever
+// it held has had its chance to be released.
+//
+// The last occurrence may begin a moment before the recurrence ends and
+// still runs its full Duration, and releasing what it held is a tick
+// like any other, so the spec stays engaged for a window's length and a
+// settle past the end.
+func (s *Spec) exhausted(now time.Time, settle time.Duration) bool {
+	end, ok := s.recurrenceEnd()
+	if !ok {
+		return false
+	}
+	return !now.Before(end.Add(s.Duration + settle))
 }
 
 // Gate answers whether a loop should do its work this time round.

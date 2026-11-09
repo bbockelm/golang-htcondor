@@ -195,3 +195,65 @@ func TestStoreGetMissing(t *testing.T) {
 }
 
 var _ scanner = (*sql.Row)(nil)
+
+// TestStoreRoundTripsTheRecurrenceBounds: a term that ends has to
+// survive a restart. A bound that silently reverted to "for ever" on
+// the next read is the whole failure this guards against.
+func TestStoreRoundTripsTheRecurrenceBounds(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	// Unbounded first, so the bounded case below is not passing on a
+	// zero value the store never writes.
+	plain := storedSpec(t, "unbounded")
+	if err := st.Put(ctx, plain); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, err := st.Get(ctx, "unbounded")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.Starts.IsZero() || !got.Ends.IsZero() || got.Occurrences != 0 {
+		t.Errorf("an unbounded reservation read back as %v/%v/%d", got.Starts, got.Ends, got.Occurrences)
+	}
+
+	term := storedSpec(t, "term")
+	term.Starts = time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	term.Ends = time.Date(2026, 12, 18, 17, 0, 0, 0, time.UTC)
+	if err := st.Put(ctx, term); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, err = st.Get(ctx, "term")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.Starts.Equal(term.Starts) || !got.Ends.Equal(term.Ends) {
+		t.Errorf("term round-tripped as %v..%v, want %v..%v", got.Starts, got.Ends, term.Starts, term.Ends)
+	}
+
+	counted := storedSpec(t, "counted")
+	counted.Starts = term.Starts
+	counted.Occurrences = 15
+	if err := st.Put(ctx, counted); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, err = st.Get(ctx, "counted")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Occurrences != 15 || !got.Starts.Equal(counted.Starts) {
+		t.Errorf("counted round-tripped as %d occurrences from %v", got.Occurrences, got.Starts)
+	}
+
+	// Clearing a bound has to stick too, or an admin can never undo a
+	// term they typed by mistake.
+	term.Ends = time.Time{}
+	if err := st.Put(ctx, term); err != nil {
+		t.Fatalf("Put (clearing the end): %v", err)
+	}
+	if got, err = st.Get(ctx, "term"); err != nil {
+		t.Fatalf("Get: %v", err)
+	} else if !got.Ends.IsZero() {
+		t.Errorf("a cleared end read back as %v", got.Ends)
+	}
+}

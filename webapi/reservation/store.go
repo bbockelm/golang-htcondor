@@ -47,25 +47,28 @@ func (s *Store) Put(ctx context.Context, spec *Spec) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO reservations
 			(id, owner, project, submit, seats, standing, duration_s, lead_s, hold_s,
-			 schedule, timezone, enabled, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			 schedule, timezone, enabled, starts_unix, ends_unix, occurrences, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 			owner=excluded.owner,
 			project=excluded.project, submit=excluded.submit, seats=excluded.seats,
 			standing=excluded.standing, duration_s=excluded.duration_s,
 			lead_s=excluded.lead_s, hold_s=excluded.hold_s, schedule=excluded.schedule,
 			timezone=excluded.timezone, enabled=excluded.enabled,
+			starts_unix=excluded.starts_unix, ends_unix=excluded.ends_unix,
+			occurrences=excluded.occurrences,
 			updated_at=CURRENT_TIMESTAMP`,
 		spec.ID, spec.Owner, spec.Project, spec.Submit, spec.Seats, spec.Standing,
 		int64(spec.Duration/time.Second), int64(spec.Lead/time.Second),
-		int64(spec.Hold/time.Second), spec.Schedule.String(), zone, enabled)
+		int64(spec.Hold/time.Second), spec.Schedule.String(), zone, enabled,
+		unixOrZero(spec.Starts), unixOrZero(spec.Ends), spec.Occurrences)
 	if err != nil {
 		return fmt.Errorf("storing reservation %s: %w", spec.ID, err)
 	}
 	return nil
 }
 
-const selectColumns = `id, owner, project, submit, seats, standing, duration_s, lead_s, hold_s, schedule, timezone, enabled`
+const selectColumns = `id, owner, project, submit, seats, standing, duration_s, lead_s, hold_s, schedule, timezone, enabled, starts_unix, ends_unix, occurrences`
 
 // Get reads one reservation. It returns ErrNotFound when there is no such
 // row.
@@ -114,13 +117,15 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanSpec(sc scanner) (*Spec, error) {
 	var (
-		spec               Spec
-		durS, leadS, holdS int64
-		cron, zone         string
-		enabled            int
+		spec                 Spec
+		durS, leadS, holdS   int64
+		startsUnix, endsUnix int64
+		cron, zone           string
+		enabled              int
 	)
 	if err := sc.Scan(&spec.ID, &spec.Owner, &spec.Project, &spec.Submit, &spec.Seats, &spec.Standing,
-		&durS, &leadS, &holdS, &cron, &zone, &enabled); err != nil {
+		&durS, &leadS, &holdS, &cron, &zone, &enabled,
+		&startsUnix, &endsUnix, &spec.Occurrences); err != nil {
 		return nil, err
 	}
 	spec.Duration = time.Duration(durS) * time.Second
@@ -141,5 +146,20 @@ func scanSpec(sc scanner) (*Spec, error) {
 		return nil, fmt.Errorf("reservation %s: schedule %q: %w", spec.ID, cron, err)
 	}
 	spec.Schedule = sched
+	// The bounds are instants, but reading them in the schedule's zone
+	// is what makes a log line or a form field show the term starting
+	// on the day the admin typed.
+	spec.Starts = timeOrZero(startsUnix, loc)
+	spec.Ends = timeOrZero(endsUnix, loc)
 	return &spec, nil
+}
+
+// timeOrZero reverses unixOrZero: a bound is stored as zero when it is
+// absent, so that a row says "unbounded" the same way the zero
+// time.Time does and no reader has to special-case a NULL.
+func timeOrZero(unix int64, loc *time.Location) time.Time {
+	if unix == 0 {
+		return time.Time{}
+	}
+	return time.Unix(unix, 0).In(loc)
 }

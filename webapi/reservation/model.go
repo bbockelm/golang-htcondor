@@ -47,9 +47,35 @@ type Spec struct {
 	Hold time.Duration
 	// Schedule says when windows start.
 	Schedule *Schedule
+	// Starts is the first instant an occurrence may begin. The zero
+	// time means the recurrence has always been running.
+	Starts time.Time
+	// Ends is the instant past which no occurrence may begin. The zero
+	// time means the recurrence never stops.
+	//
+	// An occurrence beginning before Ends runs its full Duration: a
+	// class is not cut short because the term ended between its bell
+	// and its last minute.
+	Ends time.Time
+	// Occurrences is how many times the recurrence runs, counted from
+	// Starts. Zero means without limit.
+	//
+	// It counts scheduled starts rather than windows, because two
+	// classes close enough together are merged into one hold and
+	// "fifteen lectures" must still mean fifteen lectures.
+	Occurrences int
 	// Enabled is whether the controller acts on this reservation.
 	Enabled bool
 }
+
+// maxOccurrences bounds the count an admin may ask for.
+//
+// Resolving a count to an instant means walking the schedule one
+// occurrence at a time, so an unbounded count is an unbounded walk on
+// every tick. Weekly for a thousand weeks is nineteen years, which is
+// past the point where somebody should be booking a new reservation
+// instead.
+const maxOccurrences = 1000
 
 // Validate reports whether the spec describes something the controller can
 // act on.
@@ -89,7 +115,69 @@ func (s *Spec) Validate() error {
 	if s.Schedule == nil {
 		add("Schedule is required")
 	}
+	if s.Occurrences < 0 {
+		add("Occurrences cannot be negative, got %d", s.Occurrences)
+	}
+	if s.Occurrences > maxOccurrences {
+		add("Occurrences cannot exceed %d, got %d", maxOccurrences, s.Occurrences)
+	}
+	if s.Occurrences > 0 && !s.Ends.IsZero() {
+		add("give an end date or a number of occurrences, not both")
+	}
+	if s.Occurrences > 0 && s.Starts.IsZero() {
+		add("Occurrences needs a start date: counting occurrences means nothing without a first one")
+	}
+	if !s.Starts.IsZero() && !s.Ends.IsZero() && s.Starts.After(s.Ends) {
+		add("Starts (%s) is after Ends (%s)", s.Starts.Format(time.RFC3339), s.Ends.Format(time.RFC3339))
+	}
 	return errors.Join(errs...)
+}
+
+// recurrenceEnd is the instant from which no further occurrence begins,
+// and whether the recurrence has such an instant at all.
+//
+// A count of occurrences resolves to the start of the one after the
+// last, so both ways of bounding a recurrence answer the same
+// strictly-before comparison and nothing downstream has to know which
+// was given. The walk is bounded by maxOccurrences and by the
+// schedule's own search horizon.
+func (s *Spec) recurrenceEnd() (time.Time, bool) {
+	if s.Occurrences <= 0 || s.Schedule == nil || s.Starts.IsZero() {
+		return s.Ends, !s.Ends.IsZero()
+	}
+	at, ok := nextAtOrAfter(s.Schedule, s.Starts)
+	if !ok {
+		// The schedule fires nothing at all after Starts, so the count
+		// bounds nothing that the enumeration does not already.
+		return s.Ends, !s.Ends.IsZero()
+	}
+	for i := 1; i <= s.Occurrences && i <= maxOccurrences; i++ {
+		next, found := s.Schedule.Next(at)
+		if !found {
+			return s.Ends, !s.Ends.IsZero()
+		}
+		at = next
+	}
+	return at, true
+}
+
+// nextAtOrAfter is the first occurrence at or after t.
+//
+// Schedule.Next answers strictly after a whole minute, so stepping back
+// a minute is what includes an occurrence landing exactly on t -- and
+// the result has to be re-checked, because a t carrying seconds would
+// otherwise pick up the occurrence on the minute before it.
+func nextAtOrAfter(sched *Schedule, t time.Time) (time.Time, bool) {
+	for at := t.Add(-time.Minute); ; {
+		next, ok := sched.Next(at)
+		if !ok {
+			return time.Time{}, false
+		}
+		if !next.Before(t) {
+			return next, true
+		}
+		at = next
+	}
 }
 
 // Window is a contiguous period during which a spec holds its seats.
@@ -111,17 +199,38 @@ func (w Window) Bell() time.Time { return w.Start }
 
 // Windows lists the spec's windows beginning within horizon of from,
 // merging occurrences separated by forgive or less.
+//
+// Occurrences outside the recurrence -- before Starts, or at or after
+// the end its Ends or Occurrences resolves to -- do not exist, so a
+// reservation whose term is over produces nothing at all.
 func (s *Spec) Windows(from time.Time, horizon, forgive time.Duration) []Window {
 	if s.Schedule == nil || s.Duration <= 0 {
 		return nil
 	}
 	deadline := from.Add(horizon)
+	endsAt, bounded := s.recurrenceEnd()
 	var out []Window
 	at := from
+	if !s.Starts.IsZero() && at.Before(s.Starts) {
+		// Jump rather than walk. Next advances one occurrence at a
+		// time, and a per-minute schedule whose term begins next
+		// semester would otherwise cost a step for every minute
+		// between now and then.
+		at = s.Starts.Add(-time.Minute)
+	}
 	for {
 		start, ok := s.Schedule.Next(at)
 		if !ok || start.After(deadline) {
 			return out
+		}
+		if bounded && !start.Before(endsAt) {
+			return out
+		}
+		if start.Before(s.Starts) {
+			// Only reachable for a Starts carrying seconds, which the
+			// jump above lands a minute short of.
+			at = start
+			continue
 		}
 		end := start.Add(s.Duration)
 		if n := len(out); n > 0 && !start.After(out[n-1].End.Add(forgive)) {
