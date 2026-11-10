@@ -71,9 +71,11 @@ func TestUnknownAndUnsupportedUniversesAreRefused(t *testing.T) {
 		"standard", "1", // gone
 	} {
 		t.Run(univ, func(t *testing.T) {
+			// The parse is where it is caught: a file naming a universe
+			// nothing can run does not become valid later.
 			sf, err := ParseSubmitFile(strings.NewReader("universe = " + univ + "\nexecutable = /bin/true\nqueue\n"))
 			if err != nil {
-				t.Fatalf("ParseSubmitFile: %v", err)
+				return
 			}
 			if _, err := sf.Submit(1); err == nil {
 				t.Errorf("universe = %s was accepted; condor_submit refuses it", univ)

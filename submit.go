@@ -317,6 +317,9 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 	if univ, ok := sf.submitCommand("universe"); ok {
 		sf.universeRaw = univ
 		sf.universe, sf.universeKnown = parseUniverse(univ)
+		if err := sf.checkUniverse(); err != nil {
+			return nil, err
+		}
 	}
 
 	// Create iterator from queue statement
@@ -596,11 +599,14 @@ func isSupportedUniverse(n int) bool {
 // ran as vanilla rather than being caught as the typo it is, and
 // `universe = standard` produced a JobUniverse no shadow has been able to
 // run for years.
+//
+// Called from the parse rather than from MakeJobAd, which is earlier than
+// condor_submit decides it: there the universe is checked while the job ad
+// is being built. A file that names a universe nothing can run is not going
+// to become valid later, so the error may as well come from the call that
+// read the file. A file with no universe command at all never reaches here
+// and is vanilla.
 func (sf *SubmitFile) checkUniverse() error {
-	if sf.universeRaw == "" {
-		// No universe command at all: vanilla, and nothing to refuse.
-		return nil
-	}
 	if !sf.universeKnown {
 		return fmt.Errorf("unknown universe %q", strings.TrimSpace(sf.universeRaw))
 	}
@@ -659,9 +665,6 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	// Set basic job identifiers
 	_ = ad.Set("ClusterId", jobID.Cluster)
 	_ = ad.Set("ProcId", jobID.Proc)
-	if err := sf.checkUniverse(); err != nil {
-		return nil, err
-	}
 	_ = ad.Set("JobUniverse", sf.universe)
 
 	// WantParallelScheduling goes with the universe: SetUniverse writes it,
@@ -3379,10 +3382,10 @@ func (sf *SubmitFile) setHostCounts(ad *classad.ClassAd) error {
 // hostCountKind names, for the error above, which of the three ways a job
 // got onto the machine-count path it took.
 func (sf *SubmitFile) hostCountKind() string {
-	switch {
-	case sf.universe == UniverseMPI:
+	switch sf.universe {
+	case UniverseMPI:
 		return "MPI universe"
-	case sf.universe == UniverseParallel:
+	case UniverseParallel:
 		return "parallel universe"
 	default:
 		return "WantParallelScheduling"
