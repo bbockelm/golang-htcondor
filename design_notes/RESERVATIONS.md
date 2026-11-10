@@ -6,7 +6,9 @@ Implemented across a stack of PRs, including the estimate stamping.
 
 The intended direction is to hold the capacity with HTCondor's own
 persistent claims instead of with machine attributes this pushes by
-hand. See "Building this on OCUs"; none of it is built.
+hand. See "Building this on OCUs". The permanent-reservation half of
+that is built and switched off by default; the scheduled half is not
+built, and both are waiting on schedd fixes listed there.
 
 ## The problem
 
@@ -384,21 +386,39 @@ its way onto a reserved core is preempted at the bell like any other.
 The design above holds machines with attributes it pushes into their
 machine ads. HTCondor has a mechanism for the same job -- **OCUs**,
 Owned Capacity Units -- and the intended direction is to move onto it.
-This section is what that would mean, what it costs, and what in
-HTCondor has to change first. None of it is built.
+
+The move is in two steps, and only the first is built.
 
 ### What an OCU is
 
 A persistent claim the schedd holds for a user. Created out of band
-(`htcondor ocu create`, `Schedd.create_ocu`), negotiated like an idle
-job, and **never given back**: when its job ends the schedd keeps the
-claim and looks for another of that user's jobs. Jobs opt in with
-`OCUWanted`; other users' jobs borrow an idle one with `OCUWilling`.
+(`CREATE_OCU_FOR_USERREC`, `Schedd.create_ocu`, `Schedd.CreateOCU`),
+negotiated like an idle job, and meant never to be given back: when the
+job running on it ends, the schedd is to keep the claim and look for
+another of that user's jobs. "What a claim does not yet hold" below is
+how much of that is true today.
 
-Measured against 26.2.0: the claim really does persist, sitting
-`Claimed Idle` indefinitely and never returning to the pool, and an
-`OCUWilling` job really does backfill it while a plain job submitted at
-the same moment never runs.
+Three things about the management interface are not in the API surface,
+and all three were measured against 26.2.0:
+
+- **Creating or removing a claim needs more than WRITE.** The commands
+  are registered at WRITE and then checked again inside the handler:
+  the caller must be a queue super user or named in `OCU_SUPER_USERS`.
+  A caller with WRITE and neither gets a refusal from inside the
+  handler rather than from the security layer.
+- **The owner must already have a user record.** The schedd looks the
+  owner up by name and refuses a claim for a name it does not hold.
+  Records are created on a user's first submission, so a user who has
+  never submitted to this schedd cannot be given a claim.
+- **A claim with no `Submitter` is never negotiated for.** The claim is
+  only offered to the negotiator under a submitter whose owner set
+  contains it, and that set is populated from the `Submitter` attribute
+  on the create request. Without one the claim waits for ever and
+  nothing says why.
+
+The query command is `READ` with no further gate and no constraint in
+the protocol: it answers with every claim of every owner, so narrowing
+is the caller's job.
 
 ### Why it is the right shape
 
@@ -415,24 +435,136 @@ attributes cannot be deleted and have no expiry, which is why every
 value here is an absolute time. A claim has an owner and a lifetime of
 its own, so none of that applies.
 
-### Per access point, on purpose
+### Step one: permanent reservations
 
-An OCU lives in one schedd's user record, so a reservation built on
-OCUs serves the jobs of one access point. **That is the intended
-model**, not a limitation to work around: a class submits from the
-access point it was given, and a reservation that silently spanned
-access points would hold capacity for jobs its owner cannot see.
+An always-on reservation has no bell. It wants capacity from now on,
+with no deadline to drain towards and no moment at which anything has
+to be evicted -- which is exactly what an OCU already is.
 
-It is a real difference from what is built now, which holds machines by
-machine attribute and so serves any access point's jobs. Anything
-relying on that has to be re-examined before the move.
+So the always-on case needs none of the machinery the scheduled case
+does: no deadline, no sieve, no `START` stanza on each execute point,
+no prober, no estimate stamping, no eviction, and no drain. The whole
+controller is a count:
 
-### How the capacity is acquired: drain, then cancel
+- A reservation wants `Seats` claims and no more. Unlike the
+  machine-attribute path there is nothing to subtract for jobs already
+  running -- a claim running a job is still the same claim -- and
+  `Standing` does not apply, because a claim with no job on it already
+  *is* idle capacity kept for the project.
+- A claim whose reservation is gone, disabled or no longer always-on is
+  released. Nothing else releases one deliberately, so this is how
+  capacity is given back.
+- Shrinking releases the newest claims. The oldest are likeliest to
+  have settled onto a machine, and a claim given back has to be
+  re-acquired by waiting.
 
-An OCU does not drain anything. It is negotiated like an idle job and
-waits for capacity to come free, with no deadline and no preference for
-machines about to turn over. Something has to free the capacity for it,
-and that something is `condor_drain`.
+It is read-not-remembered like the rest of this design: the schedd's
+own list of claims is the record, compared every pass against what the
+reservations ask for.
+
+Switched on with `HTTP_API_RESERVATION_CLAIMS`, separately from
+`HTTP_API_RESERVATIONS` and off by default, because it changes where a
+running reservation's capacity comes from and because the schedd has to
+be configured to accept the request. With it on, the machine-attribute
+controller leaves always-on reservations alone -- otherwise both would
+hold the same reservation and every seat would be counted twice.
+
+### What a claim does not yet hold
+
+A claim is created, negotiated, and takes a dynamic slot, which it then
+holds: `Claimed/Idle`, with no `RemoteOwner` because nothing is running
+there, and `OCUState = I`. On an idle pool it holds it indefinitely.
+
+**It does not hold it against an ordinary job.** Measured against
+26.2.0 on a two-cpu pool, one cpu running a job and the claim holding
+the other:
+
+| | |
+|---|---|
+| t+20s | the claim holds `slot1_2`, `Claimed/Idle`, `OCUState = I` |
+| t+40s | a plain job -- no `OCUWanted`, no `OCUWilling` -- is submitted, and sits idle |
+| t+50s | that job is **running on `slot1_2`**, and `OCUState` is back to `U` |
+
+The schedd log is explicit about both ends of it:
+
+```
+19:16:43 Assigning match slot1_2@... for bbockelm@localhost to OCU 2
+19:17:14 (the plain job is submitted)
+19:17:18 Match record (slot1_2@... for bbockelm@localhost, -1.-1) deleted
+```
+
+Four seconds after an ordinary job enters the queue, the OCU's match
+record -- the one carrying the sentinel job id `-1.-1` -- is deleted,
+which releases the claim. The cpu that frees is then matched to that
+job. The claim itself survives in the user record and is re-negotiated
+for, but on a busy pool there is nothing left to take.
+
+So a persistent claim does not reserve anything: the next ordinary job
+takes the capacity.
+
+One guard against exactly this is present and cannot fire.
+`Scheduler::StartJob` opens with
+
+```cpp
+JobQueueJob * job = GetJobAd(rec->jid);
+// Don't try to start a "job" if we are claiming an OCU holder claim
+if (job == nullptr) {
+    if (getOCU(rec->jid) != nullptr) { return; }
+}
+```
+
+but `rec->jid` was reset to `{-1,-1}` when the claim was handed to the
+OCU, and `getOCU` looks an OCU up by id -- always a positive number
+from the cluster counter -- so `getOCU(-1)` is always null and the
+early return is unreachable. The real id is kept beside it in
+`rec->ocu_originator`. Whether that is the path the deletion takes was
+not established; that the guard is dead was.
+
+Whether a job *entitled* to the claim can be placed on it cannot be
+measured from outside while this holds. Both answers look identical --
+the job ends up on the claim's slot either way, because the claim is
+dropped and the slot is then matched like any other -- and the one
+signal that would separate them, `OCUState` reaching `R`, is
+unreachable. Reading `FindRunnableJob` says such jobs would be refused:
+it compares the claim's `RemoteOwner` and `RemoteProject` against the
+job's, and nothing sets either on an idle claim, so every job, the
+owner's included, reads as somebody else's and is required to be
+`OCUWilling`. That is a reading of the code, not a measurement.
+
+One further thing is stuck in consequence, and is worth fixing at the
+same time because it is what makes the rest hard to see: **`OCUState`
+can never reach `R`.** The schedd sets it by looking `OCUId` up on the
+match ad, and nothing anywhere puts `OCUId` there, so the transition is
+unreachable. A claim holding a machine and a claim running a job are
+indistinguishable from outside, and the only states ever observed are
+`U` and `I`.
+
+Worth knowing while measuring any of this: the collector's view of the
+partitionable slot lags the startd by an update interval, so "no cpus
+free" is briefly true before the claim has actually taken one. The
+claim's slot -- a dynamic slot that is `Claimed/Idle` with no
+`RemoteOwner` -- is the only reliable signal that it is holding
+anything.
+
+The query reply is otherwise complete: it returns the stored claim ad,
+which is the create request plus `OCUId` and `OCUName`, so whatever was
+sent at creation -- owner, project, the resource request -- comes back.
+
+Until the holding is fixed, a permanent reservation held this way holds
+nothing at all. That is why the switch is off by default, and it is the
+thing to fix before this is worth turning on.
+
+### Step two: scheduled reservations
+
+Not built, and it needs more than step one does. The difference is the
+bell: a scheduled reservation has a deadline, and a claim acquired by
+waiting does not respect deadlines.
+
+**How the capacity would be acquired: drain, then cancel.** An OCU does
+not drain anything. It is negotiated like an idle job and waits for
+capacity to come free, with no deadline and no preference for machines
+about to turn over. Something has to free the capacity for it, and that
+something is `condor_drain`.
 
 Draining is a better fit than it first appears:
 
@@ -462,7 +594,10 @@ A site with a large `MAXJOBRETIREMENTTIME` instead gets "stop admitting,
 let what is running finish", which is precisely the behaviour this
 design wants. **So the value of `MAXJOBRETIREMENTTIME` on the execute
 points decides whether this approach is cheap or ruinous**, and it has
-to be checked before anything is drained.
+to be checked before anything is drained. There is no "peaceful" drain
+the way there is a peaceful shutdown; graceful draining with an
+unbounded retirement time is the equivalent, and jobs admitted *while*
+draining get a retirement time of zero either way.
 
 **2. A running job that matches the drain's `StartExpr` is treated as
 interruptible.** `retirementExpired` replaces such a job's own
@@ -482,14 +617,11 @@ the normal `START` and does not release claims, so the OCU keeps what it
 took. Losing that race costs the claim and nothing worse: the OCU
 re-negotiates.
 
-### Choosing borrowers by estimate rather than by consent
-
-`OCUWilling` is preemption-based backfill: let anyone in, kill them when
-the owner shows up. This design's own measurements say that is the
-expensive way -- 7.6 jobs older than half an hour discarded per class
-start.
-
-A borrower chosen by the runtime estimate costs nothing at handover,
+**Choosing borrowers by estimate rather than by consent.** `OCUWilling`
+is preemption-based backfill: let anyone in, kill them when the owner
+shows up. This design's own measurements say that is the expensive way
+-- 7.6 jobs older than half an hour discarded per class start. A
+borrower chosen by the runtime estimate costs nothing at handover,
 because it was already going to end. That is the same sieve, applied to
 borrowing rather than to admission, and it belongs **on the OCU**: only
 the OCU knows when its seats are next wanted. Not configuration -- two
@@ -497,17 +629,25 @@ reservations on one pool want different answers.
 
 ### What has to change in HTCondor
 
+The first two block step one. The rest block step two.
+
 | | |
 |---|---|
-| An OCU claim must say whose it is | An idle claim carries no owner, so every job -- the owner's own included -- reads as somebody else's and is refused unless it declares `OCUWilling`. The owner cannot take back its own claim; a borrower can hold it indefinitely. |
-| OCUs must be matchable to draining slots | `(Draining =!= true)` is ANDed onto every OCU request, so drained capacity can never reach the OCU it was drained for. |
-| An OCU must be able to say who may borrow it | Today the only gate is the borrower's own `OCUWilling`. |
+| A claim must survive an ordinary job | Measured: a plain job entitled to nothing takes the claim's slot within a negotiation cycle, and the claim reverts to unmatched. Until this holds, nothing else here matters -- there is no capacity left to argue about. |
+| An idle claim must say whose it is | From reading `FindRunnableJob`: it compares the claim's `RemoteOwner` and `RemoteProject` against the job's, and nothing sets either on an idle claim, so every job -- the owner's own included -- reads as somebody else's. Setting them on the OCU's match ad where `ATTR_OCU` is already forced would do it. |
+| A claim must take the jobs it is entitled to | Not measurable until the first row is fixed: a job on the claim's slot and a job on a slot the claim just lost look identical from outside, and `OCUState` cannot distinguish them. |
+| An OCU must be able to say who may borrow it | Today the only gate is the borrower's own `OCUWilling`, which is any job of any user. A reservation's capacity should be borrowable on terms the reservation sets. |
+| OCUs must be matchable to draining slots | `(Draining =!= true)` is ANDed onto every OCU request in `ScheddNegotiate`, so drained capacity can never reach the OCU it was drained for. |
 | Borrower eviction must be bounded and ordered | It takes *every* borrowed claim of a submitter whenever the owner is short by even one seat, in match-table order, with a fast vacate. |
 
-The first says "whose claim is this", which is not the question
-`RemoteOwner`/`RemoteProject` answer -- those say who is running on a
-slot now, and writing them for an idle claim makes the schedd treat it
-as occupied and tear it down.
+One smaller one, worth fixing with the first because it is what makes
+the rest hard to see: `OCUState` can never reach `R`, because `OCUId`
+is never put on the match ad it is looked up from.
+
+The first row says "whose claim is this", which is not the question
+`RemoteOwner`/`RemoteProject` answer on a *slot* ad -- those say who is
+running on a slot now, and writing them into the stored claim ad makes
+the schedd treat it as occupied.
 
 ### What stays
 
@@ -516,6 +656,18 @@ expression whether it arrives in a drain request or a machine
 attribute, and it still needs `RuntimeP90Bucket` on the idle queue. The
 window arithmetic, the lead, the forgiveness rule and the cost model
 are all independent of how the claim is held.
+
+### Per access point, on purpose
+
+An OCU lives in one schedd's user record, so a reservation built on
+OCUs serves the jobs of one access point. **That is the intended
+model**, not a limitation to work around: a class submits from the
+access point it was given, and a reservation that silently spanned
+access points would hold capacity for jobs its owner cannot see.
+
+It is a real difference from what is built now, which holds machines by
+machine attribute and so serves any access point's jobs. Anything
+relying on that has to be re-examined before the move.
 
 
 ## Open questions

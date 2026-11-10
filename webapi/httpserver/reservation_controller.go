@@ -122,6 +122,11 @@ func (h *Handler) startReservations(ctx context.Context) {
 		Source:   collectorSource{h},
 		Specs:    storeSpecs{h},
 		Actuator: actuator,
+		// When the always-on reservations are held as persistent
+		// claims, this controller must not also hold them: the two
+		// would count the same seats twice and steer the same machines
+		// against each other.
+		ClaimsHoldAlwaysOn: h.reservationClaims,
 	}
 	go controller.Run(ctx, reservationTick, func(res reservation.TickResult, err error) {
 		if err != nil {

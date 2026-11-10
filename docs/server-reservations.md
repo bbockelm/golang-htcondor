@@ -364,6 +364,7 @@ people's jobs, so no site starts doing that because it upgraded.
 | `HTTP_API_RESERVATIONS` | `True` runs the subsystem: the admin API, the admin page and the controller. |
 | `HTTP_API_RESERVATION_STAMP_BUDGET` | How many cluster ads one stamping pass writes. Defaults to 2000, which covers a far larger queue than most access points have. |
 | `HTTP_API_RESERVATION_EP_CONSTRAINT` | A ClassAd expression over the slot ad limiting which execute points reservations may draw seats from. Empty means every startd the collector reports. |
+| `HTTP_API_RESERVATION_CLAIMS` | `True` holds always-on reservations as persistent claims on this access point's schedd instead of by pushing machine attributes. See below; off by default, and not yet useful — a claim does not currently survive an ordinary job. |
 
 Most sites will want the constraint. A class should take the teaching
 nodes, not whatever the collector happens to report:
@@ -374,6 +375,63 @@ HTTP_API_RESERVATION_EP_CONSTRAINT = TeachingNode =?= True
 
 With the subsystem off the endpoints answer `503` naming the setting, and
 the admin page is not offered at all.
+
+## Permanent reservations as persistent claims
+
+An always-on reservation has no bell, so it needs none of the machinery
+above: no deadline, no sieve, no `START` stanza, no estimate stamping
+and no eviction. It simply wants a fixed amount of capacity from now on,
+which is what HTCondor's own persistent claims — OCUs — already are.
+
+With `HTTP_API_RESERVATION_CLAIMS = True`, every enabled always-on
+reservation is held as `seats` claims on this access point's schedd.
+The reconciliation runs every two minutes and is a count: claims whose
+reservation is gone, disabled or no longer always-on are released,
+missing ones are asked for, and a reservation being shrunk gives up its
+newest claims first. Nothing is remembered between passes — the
+schedd's own list of claims is the record.
+
+Scheduled reservations are unaffected and stay on machine attributes.
+With the setting on, the machine-attribute controller stops acting on
+always-on reservations, so a seat is never held twice.
+
+### What the schedd needs
+
+Creating a claim is checked twice on the schedd side, and neither check
+is visible from the API server:
+
+- The access point must be a **queue super user** on that schedd, or
+  named in **`OCU_SUPER_USERS`**. The command is registered at `WRITE`
+  and then gated again inside the handler, so `WRITE` alone is refused.
+- The reservation's **owner must already have a user record**, which
+  the schedd creates on a user's first submission. An owner who has
+  never submitted here is refused.
+
+A claim is per access point by design. It lives in one schedd's user
+record, so it serves that access point's jobs — not the pool's.
+
+### Why it is off by default, and not yet useful
+
+Measured against HTCondor 26.2.0, a claim created this way **takes a
+slot and then loses it to the first ordinary job that comes along**. On
+a two-cpu pool with one cpu busy, the claim takes the other and holds
+it `Claimed/Idle`; a plain job submitted thirty seconds later — one
+declaring neither `OCUWanted` nor `OCUWilling` — is running on that
+slot ten seconds after that, and the claim is back to unmatched.
+
+Whether a job actually entitled to the claim — one declaring
+`OCUWilling`, or the owner's own `OCUWanted` job — can be placed on it
+is not answerable while that holds: a job on the claim and a job on a
+slot the claim just lost look the same from outside.
+
+So turning this on today reserves nothing. It is shipped switched off,
+with the reconciliation and the schedd client in place and tested, so
+that when the schedd holds a claim against ordinary work the remaining
+step is a configuration change rather than a feature.
+
+The design note has the measurements and the list of schedd fixes:
+[RESERVATIONS.md](../design_notes/RESERVATIONS.md), under "Building
+this on OCUs".
 
 ## Administering them
 

@@ -112,6 +112,16 @@ type Controller struct {
 	// Now is overridable for tests; nil means time.Now.
 	Now func() time.Time
 
+	// ClaimsHoldAlwaysOn says the always-on reservations are held as the
+	// schedd's own persistent claims, so this controller should leave
+	// them alone.
+	//
+	// Without it the two would both act on the same reservation: the
+	// claims would hold machines through HTCondor while this pushed
+	// deadlines at the same machines, and every seat would be counted
+	// twice. See the reservation package's claims.go.
+	ClaimsHoldAlwaysOn bool
+
 	// clean is the one thing a tick remembers: that the last one found
 	// nothing reserved and nothing held, so there is nothing for the
 	// next one to read the pool about. It is not memory of what was
@@ -147,6 +157,27 @@ func (c *Controller) now() time.Time {
 	return time.Now()
 }
 
+// mine drops the reservations somebody else is holding.
+//
+// Filtered here rather than inside Plan so the planning stays a pure
+// function of what it is given, and so the quiescence gate above sees
+// the same list the plan does -- a controller that had handed its only
+// reservation over to the claims should go quiet, not keep reading the
+// pool for a reservation it no longer acts on.
+func (c *Controller) mine(specs []*Spec) []*Spec {
+	if !c.ClaimsHoldAlwaysOn {
+		return specs
+	}
+	out := specs[:0:0]
+	for _, s := range specs {
+		if s != nil && s.alwaysOn() {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // Tick reads the pool, decides, and applies.
 func (c *Controller) Tick(ctx context.Context) (TickResult, error) {
 	var res TickResult
@@ -155,6 +186,7 @@ func (c *Controller) Tick(ctx context.Context) (TickResult, error) {
 	if err != nil {
 		return res, fmt.Errorf("listing reservations: %w", err)
 	}
+	specs = c.mine(specs)
 
 	// With nothing reserved and a pool already confirmed clean, the read
 	// below would return the same nothing. Listing the store is local;
