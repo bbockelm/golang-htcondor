@@ -9,13 +9,24 @@ import { useQuery } from '@tanstack/react-query';
 
 import { RangePlot } from '@/components/RangePlot';
 import { chartEntries, HowToRead } from '@/components/RangeLegend';
-import { api, type RuntimeMemory } from '@/lib/api';
+import { api, type ClassAd, type RuntimeMemory } from '@/lib/api';
+import { memoryLadder } from '@/lib/retryMemory';
 
 import { memoryCard } from './memoryCard';
 import { liveEstimateQuery, RoughChip } from './RuntimeEstimate';
 
-export function MemoryEstimateView({ memory, status }: { memory: RuntimeMemory | undefined; status: number | undefined }) {
-  const card = memoryCard(memory, status);
+export function MemoryEstimateView({
+  memory,
+  status,
+  job,
+}: {
+  memory: RuntimeMemory | undefined;
+  status: number | undefined;
+  // The job's ad, for the memory retry ladder: the card draws the
+  // request, and a climber's is the rung it finished on.
+  job?: ClassAd;
+}) {
+  const card = memoryCard(memory, status, memoryLadder(job));
   if (!card) return null;
   return (
     <section
@@ -79,10 +90,18 @@ export function MemoryEstimateView({ memory, status }: { memory: RuntimeMemory |
 
 // MemoryEstimateField shows a waiting or running job's card, from the
 // estimate the run time card reads.
-export function MemoryEstimateField({ jobID, status }: { jobID: string; status: number | undefined }) {
+export function MemoryEstimateField({
+  jobID,
+  status,
+  job,
+}: {
+  jobID: string;
+  status: number | undefined;
+  job?: ClassAd;
+}) {
   const { data } = useQuery(liveEstimateQuery(jobID, status));
   if ((status !== 1 && status !== 2) || !data?.available) return null;
-  return <MemoryEstimateView memory={data.memory} status={status} />;
+  return <MemoryEstimateView memory={data.memory} status={status} job={job} />;
 }
 
 // archivedEstimateQuery is how a finished job's page reads its estimate:
@@ -99,9 +118,17 @@ export function archivedEstimateQuery(jobID: string, status: number | undefined)
 }
 
 // ArchivedMemoryEstimate fetches and shows a finished job's card.
-export function ArchivedMemoryEstimate({ jobID, status }: { jobID: string; status: number | undefined }) {
+export function ArchivedMemoryEstimate({
+  jobID,
+  status,
+  job,
+}: {
+  jobID: string;
+  status: number | undefined;
+  job?: ClassAd;
+}) {
   const finished = status === 3 || status === 4;
   const { data } = useQuery(archivedEstimateQuery(jobID, status));
   if (!finished || !data?.available) return null;
-  return <MemoryEstimateView memory={data.memory} status={status} />;
+  return <MemoryEstimateView memory={data.memory} status={status} job={job} />;
 }

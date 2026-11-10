@@ -143,3 +143,19 @@ export function ladderTitle(ladder: MemoryLadder | undefined): string | undefine
     ? `${head} It has done so at least ${n} times, and the record stops counting there.`
     : `${head} It has done so ${n === 1 ? 'once' : `${n} times`}.`;
 }
+
+// ladderLine is the memory card's sentence: why the request drawn beside
+// the job's peak is not the request it started with. Nothing to say for a
+// job that never had to climb -- the resource table carries that -- so
+// this speaks only where the drawn request would otherwise mislead.
+export function ladderLine(
+  ladder: MemoryLadder | undefined,
+  requestedMiB: number | undefined,
+): string | undefined {
+  if (!climbedLadder(ladder)) return undefined;
+  const n = ladder!.climbs!;
+  const times = ladder!.atLeast ? `at least ${n} times` : n === 1 ? 'once' : `${n} times`;
+  const what =
+    requestedMiB !== undefined ? `The ${formatMiB(requestedMiB)} requested is` : 'The request shown is';
+  return `${what} where it ended up: it ran out of memory and started again at a larger request ${times}.`;
+}

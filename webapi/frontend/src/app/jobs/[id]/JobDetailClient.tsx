@@ -603,7 +603,7 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
         onShowSimilar={showSimilar}
       />
 
-      <MemoryEstimateField jobID={jobID} status={status} />
+      <MemoryEstimateField jobID={jobID} status={status} job={job} />
 
       <SimilarJobsSection
         jobID={jobID}
