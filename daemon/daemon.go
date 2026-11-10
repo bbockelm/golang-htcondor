@@ -422,7 +422,7 @@ func (d *Daemon) AdvertisedSinful() (string, bool) {
 	}
 	// Both paths, not just the master-derived one: a self-registered daemon takes its
 	// address from the shared_port server's ad file, which needs the alias just as much.
-	return withHostAlias(advertised, d.Config()), true
+	return WithHostAlias(advertised, d.Config()), true
 }
 
 // AdvertisedAddress is this daemon's externally reachable command address, unbracketed:
@@ -447,7 +447,7 @@ func (d *Daemon) AdvertisedAddress() string {
 	if ln == nil || ln.Addr() == nil {
 		return ""
 	}
-	return withHostAlias(ln.Addr().String(), d.Config())
+	return WithHostAlias(ln.Addr().String(), d.Config())
 }
 
 // deriveAdvertisedSinful builds this daemon's reachable address from the command address
@@ -475,7 +475,7 @@ func deriveAdvertisedSinful(serverAddr, sock string) (string, bool) {
 	return trimAngle(addresses.WithParam(serverAddr, "sock", sock)), true
 }
 
-// withHostAlias attaches the sinful "alias" parameter -- the host an SSL client checks
+// WithHostAlias attaches the sinful "alias" parameter -- the host an SSL client checks
 // the daemon's certificate against -- when addr does not already name one.
 //
 // Behind a shared port the address host is the shared-port server's IP, and HTCondor
@@ -491,7 +491,12 @@ func deriveAdvertisedSinful(serverAddr, sock string) (string, bool) {
 // other name -- a load balancer, a CNAME -- sets HOST_ALIAS and is believed, exactly as
 // in C++. WithParam applies HTCondor's own %XX escaping, so a value holding '?', '&' or
 // '=' cannot make the rest of the address parse as something else.
-func withHostAlias(addr string, cfg *config.Config) string {
+//
+// Exported because a daemon that advertises an address this package did not pick cannot
+// otherwise get the alias right: golang-ccb prefers a directly-bound public port for its
+// CCB contact, and copying three lines of this rule into it is how the bug it comes from
+// spread in the first place.
+func WithHostAlias(addr string, cfg *config.Config) string {
 	if cfg == nil || strings.TrimSpace(addr) == "" {
 		return addr
 	}

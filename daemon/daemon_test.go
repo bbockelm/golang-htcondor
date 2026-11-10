@@ -128,15 +128,15 @@ func TestWithHostAlias(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.NewEmpty()
 			cfg.Set("HOST_ALIAS", tc.alias)
-			if got := withHostAlias(tc.addr, cfg); got != tc.want {
-				t.Errorf("withHostAlias(%q, HOST_ALIAS=%q) = %q, want %q", tc.addr, tc.alias, got, tc.want)
+			if got := WithHostAlias(tc.addr, cfg); got != tc.want {
+				t.Errorf("WithHostAlias(%q, HOST_ALIAS=%q) = %q, want %q", tc.addr, tc.alias, got, tc.want)
 			}
 		})
 	}
 }
 
 func TestWithHostAliasNilConfig(t *testing.T) {
-	if got := withHostAlias("192.168.1.1:9618", nil); got != "192.168.1.1:9618" {
+	if got := WithHostAlias("192.168.1.1:9618", nil); got != "192.168.1.1:9618" {
 		t.Errorf("withHostAlias with nil config = %q, want the address unchanged", got)
 	}
 }
