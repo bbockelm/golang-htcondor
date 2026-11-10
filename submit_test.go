@@ -73,28 +73,47 @@ func TestParseUniverse(t *testing.T) {
 	tests := []struct {
 		input    string
 		expected int
+		known    bool
 	}{
-		{"vanilla", UniverseVanilla},
-		{"VANILLA", UniverseVanilla},
-		{"standard", UniverseStandard},
-		{"grid", UniverseGrid},
-		{"java", UniverseJava},
-		{"parallel", UniverseParallel},
-		{"mpi", UniverseParallel},
-		{"local", UniverseLocal},
-		{"vm", UniverseVM},
+		{"vanilla", UniverseVanilla, true},
+		{"VANILLA", UniverseVanilla, true},
+		{"standard", UniverseStandard, true},
+		{"grid", UniverseGrid, true},
+		{"java", UniverseJava, true},
+		{"parallel", UniverseParallel, true},
+		// mpi has a universe number of its own; it is not an alias.
+		{"mpi", UniverseMPI, true},
+		{"local", UniverseLocal, true},
+		{"vm", UniverseVM, true},
 		// docker and container are vanilla-universe toppings, not
 		// universes of their own (there is no universe 14).
-		{"docker", UniverseVanilla},
-		{"container", UniverseVanilla},
-		{"unknown", UniverseVanilla}, // Default
+		{"docker", UniverseVanilla, true},
+		{"container", UniverseVanilla, true},
+		// A number names a universe as well as a name does, and the
+		// digits need only be a prefix -- CondorUniverseNumberEx runs
+		// atoi first.
+		{"5", UniverseVanilla, true},
+		{"7", UniverseScheduler, true},
+		{" 7", UniverseScheduler, true},
+		{"+7", UniverseScheduler, true},
+		{"007", UniverseScheduler, true},
+		{"7.9", UniverseScheduler, true},
+		{"7junk", UniverseScheduler, true},
+		{"11", UniverseParallel, true},
+		// Recognized as a number, but no universe: the caller refuses it.
+		{"99", 99, true},
+		{"-1", -1, true},
+		// Neither a number nor a name.
+		{"unknown", UniverseVanilla, false},
+		{"vanillaX", UniverseVanilla, false},
+		{"0", UniverseVanilla, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			result := parseUniverse(tt.input)
-			if result != tt.expected {
-				t.Errorf("parseUniverse(%q) = %d, want %d", tt.input, result, tt.expected)
+			result, known := parseUniverse(tt.input)
+			if result != tt.expected || known != tt.known {
+				t.Errorf("parseUniverse(%q) = %d, %v; want %d, %v", tt.input, result, known, tt.expected, tt.known)
 			}
 		})
 	}

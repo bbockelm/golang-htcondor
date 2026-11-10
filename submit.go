@@ -90,6 +90,13 @@ type SubmitFile struct {
 	// behavior is SubmitParseOptions.Behavior: which release's
 	// condor_submit this parse emulates where they differ.
 	behavior SubmitBehavior
+	// universeRaw is the universe exactly as the file wrote it, and
+	// universeKnown says whether it named a universe at all. Both are for
+	// the two errors SetUniverse ends with, which need the spelling and
+	// need to tell "I don't know about that one" from "that one is not
+	// supported any more".
+	universeRaw   string
+	universeKnown bool
 	// localAccess is SubmitParseOptions.AllowLocalAccess, kept because a
 	// few of condor_submit's keywords read the submitting process's
 	// ENVIRONMENT rather than the submit file -- `use_scitokens` falls
@@ -161,6 +168,7 @@ const (
 	UniverseStandard  = 1
 	UniverseVanilla   = 5
 	UniverseScheduler = 7
+	UniverseMPI       = 8
 	UniverseGrid      = 9
 	UniverseJava      = 10
 	UniverseParallel  = 11
@@ -307,7 +315,11 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 	// today, but relying on that would make a future upstream addition
 	// silently change every job's universe.
 	if univ, ok := sf.submitCommand("universe"); ok {
-		sf.universe = parseUniverse(univ)
+		sf.universeRaw = univ
+		sf.universe, sf.universeKnown = parseUniverse(univ)
+		if err := sf.checkUniverse(); err != nil {
+			return nil, err
+		}
 	}
 
 	// Create iterator from queue statement
@@ -459,26 +471,55 @@ func expandInlineQueueBlocks(in string) (string, []string, error) {
 	return strings.Join(out, "\n"), temps, nil
 }
 
-// parseUniverse converts universe string to integer constant
-func parseUniverse(univ string) int {
+// parseUniverse converts universe string to integer constant.
+//
+// A NUMBER is accepted as well as a name, and is tried first, because
+// CondorUniverseNumberEx does exactly that:
+//
+//	if( atoi(univ) != 0) { return atoi(univ); }
+//	return CondorUniverseNumber(univ);
+//
+// So `universe = 7` is the scheduler universe, the same as `universe =
+// scheduler`, and reading only names made every numeric universe come out
+// as the vanilla default -- a scheduler- or parallel-universe job silently
+// handed to a startd instead.
+//
+// atoi's rules are C's, so the digits need only be a PREFIX: leading
+// whitespace and a sign are skipped, the run of digits ends the number,
+// and anything after it is ignored. `7`, ` 7`, `+7`, `007`, `7.9` and
+// `7junk` are all the scheduler universe.
+//
+// A number that names no universe is left to the name lookup below, which
+// ends at vanilla. condor_submit instead refuses the file -- an unknown
+// universe is an error there, by name or by number -- and this parser does
+// not, so the conservative reading is the one that does not invent a
+// JobUniverse no startd could match.
+func parseUniverse(univ string) (int, bool) {
+	if n, ok := cAtoiPrefix(univ); ok {
+		return n, true
+	}
 	univ = strings.ToLower(strings.TrimSpace(univ))
 	switch univ {
 	case "standard":
-		return UniverseStandard
+		return UniverseStandard, true
 	case "vanilla":
-		return UniverseVanilla
+		return UniverseVanilla, true
 	case "scheduler":
-		return UniverseScheduler
+		return UniverseScheduler, true
+	case "mpi":
+		// Its own universe number, not an alias for parallel: the two
+		// differ in what SetParallelParams gives them.
+		return UniverseMPI, true
 	case "grid":
-		return UniverseGrid
+		return UniverseGrid, true
 	case "java":
-		return UniverseJava
-	case "parallel", "mpi":
-		return UniverseParallel
+		return UniverseJava, true
+	case "parallel":
+		return UniverseParallel, true
 	case "local":
-		return UniverseLocal
+		return UniverseLocal, true
 	case "vm":
-		return UniverseVM
+		return UniverseVM, true
 	case "docker", "container":
 		// "docker" and "container" are not universes of their own -- in
 		// HTCondor they are vanilla-universe "toppings". condor_submit
@@ -488,10 +529,91 @@ func parseUniverse(univ string) int {
 		// container universe: 14 is CONDOR_UNIVERSE_MAX, a placeholder no
 		// shadow can run ("cannot support universe 14"), which is exactly
 		// what a JobUniverse of 14 produced.
-		return UniverseVanilla
+		return UniverseVanilla, true
 	default:
-		return UniverseVanilla
+		// Not a number and not a name. condor_submit stops here with
+		// "I don't know about the '%s' universe"; the caller reports it.
+		return UniverseVanilla, false
 	}
+}
+
+// cAtoiPrefix is atoi: skip leading whitespace, take an optional sign and
+// the run of decimal digits that follows, and ignore the rest. ok is false
+// when there are no digits, or when the value is zero -- which atoi also
+// returns for "not a number", and which CondorUniverseNumberEx treats as
+// "not a number" by falling through to the name lookup.
+func cAtoiPrefix(s string) (int, bool) {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\v' || s[i] == '\f') {
+		i++
+	}
+	neg := false
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		neg = s[i] == '-'
+		i++
+	}
+	start := i
+	n := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		n = n*10 + int(s[i]-'0')
+		if n > 1<<30 {
+			// Far past any universe number; stop before it overflows.
+			n = 1 << 30
+			for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+				i++
+			}
+			break
+		}
+		i++
+	}
+	if i == start {
+		return 0, false
+	}
+	if neg {
+		n = -n
+	}
+	return n, n != 0
+}
+
+// isSupportedUniverse reports whether n is a universe condor_submit will
+// still build a job for.
+//
+// It is the set of universes SetUniverse returns successfully from, which
+// is narrower than the set of universes that HAVE a number: standard (1) is
+// gone, and so is everything outside the range. A job in any other universe
+// is refused with "'%s' is not a supported universe".
+func isSupportedUniverse(n int) bool {
+	switch n {
+	case UniverseVanilla, UniverseScheduler, UniverseMPI, UniverseGrid,
+		UniverseJava, UniverseParallel, UniverseLocal, UniverseVM:
+		return true
+	}
+	return false
+}
+
+// checkUniverse is the two errors SetUniverse ends with, for a job whose
+// universe it never recognized or can no longer run.
+//
+// condor_submit refuses such a file outright, where this parser used to
+// fall back to vanilla and build a job anyway -- so `universe = vanillaX`
+// ran as vanilla rather than being caught as the typo it is, and
+// `universe = standard` produced a JobUniverse no shadow has been able to
+// run for years.
+//
+// Called from the parse rather than from MakeJobAd, which is earlier than
+// condor_submit decides it: there the universe is checked while the job ad
+// is being built. A file that names a universe nothing can run is not going
+// to become valid later, so the error may as well come from the call that
+// read the file. A file with no universe command at all never reaches here
+// and is vanilla.
+func (sf *SubmitFile) checkUniverse() error {
+	if !sf.universeKnown {
+		return fmt.Errorf("unknown universe %q", strings.TrimSpace(sf.universeRaw))
+	}
+	if !isSupportedUniverse(sf.universe) {
+		return fmt.Errorf("%q is not a supported universe", strings.TrimSpace(sf.universeRaw))
+	}
+	return nil
 }
 
 // QueueCount reports how many job processes this submit file queues.
@@ -1869,7 +1991,7 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 		if err := setRequestCount(ad, "RequestCpus", v); err != nil {
 			return err
 		}
-	} else if sf.universe == UniverseParallel {
+	} else if sf.universe == UniverseParallel || sf.universe == UniverseMPI {
 		_ = ad.Set("RequestCpus", int64(1))
 	} else if v, ok := sf.requestDefault("request_cpus"); ok {
 		if err := setRequestCount(ad, "RequestCpus", v); err != nil {
@@ -3234,7 +3356,7 @@ func vmVCPUs(raw string) int {
 // it is how a vanilla job asks the dedicated scheduler to schedule it -- so
 // the count is read, and required, there too.
 func (sf *SubmitFile) setHostCounts(ad *classad.ClassAd) error {
-	if sf.universe != UniverseParallel && !sf.wantParallelScheduling() {
+	if sf.universe != UniverseParallel && sf.universe != UniverseMPI && !sf.wantParallelScheduling() {
 		_ = ad.Set("MinHosts", 1)
 		_ = ad.Set("MaxHosts", 1)
 		return nil
@@ -3260,10 +3382,10 @@ func (sf *SubmitFile) setHostCounts(ad *classad.ClassAd) error {
 // hostCountKind names, for the error above, which of the three ways a job
 // got onto the machine-count path it took.
 func (sf *SubmitFile) hostCountKind() string {
-	switch {
-	case sf.isMPIUniverse():
+	switch sf.universe {
+	case UniverseMPI:
 		return "MPI universe"
-	case sf.universe == UniverseParallel:
+	case UniverseParallel:
 		return "parallel universe"
 	default:
 		return "WantParallelScheduling"
@@ -3315,7 +3437,7 @@ func (sf *SubmitFile) wantParallelScheduling() bool {
 // keyword and the `+Attr` pass overwrite it, and here the keyword pass still
 // runs after this one while `+Attr` has already run.
 func (sf *SubmitFile) setParallelSandbox(ad *classad.ClassAd) error {
-	if sf.universe != UniverseParallel || sf.isMPIUniverse() {
+	if sf.universe != UniverseParallel {
 		return nil
 	}
 	if _, ok := ad.Lookup("WantIOProxy"); !ok {
@@ -3325,14 +3447,6 @@ func (sf *SubmitFile) setParallelSandbox(ad *classad.ClassAd) error {
 		_ = ad.Set("JobRequiresSandbox", true)
 	}
 	return nil
-}
-
-// isMPIUniverse reports whether the submit file asked for the MPI
-// universe. Go maps `universe = mpi` onto UniverseParallel, so the
-// spelling is the only thing left to read it from.
-func (sf *SubmitFile) isMPIUniverse() bool {
-	univ, ok := sf.submitCommand("universe")
-	return ok && strings.EqualFold(strings.TrimSpace(univ), "mpi")
 }
 
 // setUngatedFamilies stores the families condor_submit reads for every job,

@@ -639,7 +639,7 @@ func (sf *SubmitFile) assignRequirements(ad *classad.ClassAd, answer string) err
 // forever with nothing in the log but "SchedUniverseJobsIdle = 1".
 func mightTransfer(universe int) bool {
 	switch universe {
-	case UniverseVanilla, UniverseJava, UniverseParallel, UniverseVM:
+	case UniverseVanilla, UniverseJava, UniverseParallel, UniverseMPI, UniverseVM:
 		return true
 	}
 	return false
