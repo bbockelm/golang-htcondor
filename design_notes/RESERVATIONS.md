@@ -475,9 +475,9 @@ A claim is created, negotiated, and takes a dynamic slot, which it then
 holds: `Claimed/Idle`, with no `RemoteOwner` because nothing is running
 there, and `OCUState = I`. On an idle pool it holds it indefinitely.
 
-**It does not hold it against an ordinary job.** Measured against
-26.2.0 on a two-cpu pool, one cpu running a job and the claim holding
-the other:
+**An idle claim does not hold it against an ordinary job.** Measured
+against 26.2.0 on a two-cpu pool of partitionable slots, one cpu
+running a job and the claim holding the other:
 
 | | |
 |---|---|
@@ -499,8 +499,18 @@ which releases the claim. The cpu that frees is then matched to that
 job. The claim itself survives in the user record and is re-negotiated
 for, but on a busy pool there is nothing left to take.
 
-So a persistent claim does not reserve anything: the next ordinary job
-takes the capacity.
+So an idle persistent claim does not reserve anything: the next
+ordinary job takes the capacity.
+
+It is not specific to partitionable slots. The obvious suspect is the
+code that reuses a partitionable slot's claim and carves a new dynamic
+slot from it, but a claim on a plain static slot is taken the same way
+-- so whatever gives the claim up is common to both.
+
+Whether a claim with a job already *running* on it is protected was not
+tested. Worth knowing before the fix is designed, though it does not
+change the conclusion here: a reservation's claims are idle by
+construction until its own users turn up.
 
 One guard against exactly this is present and cannot fire.
 `Scheduler::StartJob` opens with
@@ -633,7 +643,7 @@ The first two block step one. The rest block step two.
 
 | | |
 |---|---|
-| A claim must survive an ordinary job | Measured: a plain job entitled to nothing takes the claim's slot within a negotiation cycle, and the claim reverts to unmatched. Until this holds, nothing else here matters -- there is no capacity left to argue about. |
+| An idle claim must survive an ordinary job | Measured on both partitionable and static slots: a plain job entitled to nothing takes the claim's slot within a negotiation cycle, and the claim reverts to unmatched. Until this holds, nothing else here matters -- there is no capacity left to argue about. |
 | An idle claim must say whose it is | From reading `FindRunnableJob`: it compares the claim's `RemoteOwner` and `RemoteProject` against the job's, and nothing sets either on an idle claim, so every job -- the owner's own included -- reads as somebody else's. Setting them on the OCU's match ad where `ATTR_OCU` is already forced would do it. |
 | A claim must take the jobs it is entitled to | Not measurable until the first row is fixed: a job on the claim's slot and a job on a slot the claim just lost look identical from outside, and `OCUState` cannot distinguish them. |
 | An OCU must be able to say who may borrow it | Today the only gate is the borrower's own `OCUWilling`, which is any job of any user. A reservation's capacity should be borrowable on terms the reservation sets. |

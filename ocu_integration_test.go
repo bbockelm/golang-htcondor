@@ -151,10 +151,14 @@ func ocuFreeCpus(t *testing.T, h *CondorTestHarness) int {
 // pool that still has room.
 func ocuClaimSlot(t *testing.T, h *CondorTestHarness) string {
 	t.Helper()
+	return ocuSlotsMatching(t, h, `DynamicSlot && State == "Claimed" && Activity == "Idle" && RemoteOwner =?= undefined`)
+}
+
+// ocuSlotsMatching returns the one slot matching a constraint, or "".
+func ocuSlotsMatching(t *testing.T, h *CondorTestHarness, constraint string) string {
+	t.Helper()
 	//nolint:gosec,noctx // G204: fixed command in a test
-	cmd := exec.Command("condor_status",
-		"-constraint", `DynamicSlot && State == "Claimed" && Activity == "Idle" && RemoteOwner =?= undefined`,
-		"-af", "Name")
+	cmd := exec.Command("condor_status", "-constraint", constraint, "-af", "Name")
 	cmd.Env = append(os.Environ(), "CONDOR_CONFIG="+h.GetConfigFile())
 	out, err := cmd.CombinedOutput()
 	if err != nil {

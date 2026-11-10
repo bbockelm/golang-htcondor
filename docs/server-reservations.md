@@ -412,12 +412,17 @@ record, so it serves that access point's jobs — not the pool's.
 
 ### Why it is off by default, and not yet useful
 
-Measured against HTCondor 26.2.0, a claim created this way **takes a
-slot and then loses it to the first ordinary job that comes along**. On
-a two-cpu pool with one cpu busy, the claim takes the other and holds
-it `Claimed/Idle`; a plain job submitted thirty seconds later — one
-declaring neither `OCUWanted` nor `OCUWilling` — is running on that
-slot ten seconds after that, and the claim is back to unmatched.
+Measured against HTCondor 26.2.0, an idle claim created this way
+**takes a slot and then loses it to the first ordinary job that comes
+along**. On a two-cpu pool with one cpu busy, the claim takes the other
+and holds it `Claimed/Idle`; a plain job submitted thirty seconds later
+— one declaring neither `OCUWanted` nor `OCUWilling` — is running on
+that slot ten seconds after that, and the claim is back to unmatched.
+The same happens on static slots, so it is not something about carving
+a dynamic slot.
+
+A reservation's claims are idle by construction until its own users
+turn up, so this is exactly the case it depends on.
 
 Whether a job actually entitled to the claim — one declaring
 `OCUWilling`, or the owner's own `OCUWanted` job — can be placed on it
