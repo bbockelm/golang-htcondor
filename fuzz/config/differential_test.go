@@ -160,6 +160,139 @@ func hasTripleQuote(s string) bool {
 	return strings.Contains(s, `"""`) || strings.Contains(s, "'''")
 }
 
+// unaryMinusFold is the unparser difference recorded against
+// `0=$EVAL({- 0})`.
+//
+// C++'s lexer folds a sign into a numeric literal only when the two are
+// ADJACENT: `-0` is a negative literal, `- 0` is a unary-minus operator
+// applied to 0. Evaluating a list does not evaluate its elements -- the value
+// IS the unevaluated ExprList -- so unparsing the result unparses that
+// operator, and sink.cpp spells unary minus `" -"`, with a leading space.
+// `{- 0}` therefore comes back `{  -0 }`: the sign survives on a zero, and
+// there is a second space.
+//
+// Go folds the sign at unparse time whatever the spacing, so the element is a
+// literal: `{ 0 }`, with the integer zero unsigned and no operator spelling to
+// print.
+//
+// Recorded rather than fixed because the folding is wanted. A folded literal
+// is a VALUE -- it can be stored, indexed and compared as a number -- where a
+// unary-minus node is an expression that has to be evaluated on every read.
+// Keeping it is a deliberate choice for the database built on this library,
+// and matching C++ here would mean giving that up to reproduce the spelling
+// of an operator.
+//
+// Only unary MINUS on a NUMERIC LITERAL reaches this. `{+ 0}`, `{! 0}` and
+// `{~ 1}` agree, because Go folds none of those; `{- a}` agrees, because
+// there is no literal to fold onto; `{-0}` agrees, because C++ folds it too.
+var unaryMinusFold = divergenceClass{
+	name: "Go folds a unary minus onto a numeric literal, C++ keeps the operator",
+	match: func(goTable, cppTable string) bool {
+		return goTable != cppTable && foldUnaryMinus(cppTable) == goTable
+	},
+}
+
+// foldUnaryMinus rewrites C++'s rendering of a unary minus on a numeric
+// literal into Go's: the leading space of the `" -"` operator goes, and an
+// INTEGER -0 becomes 0. A real keeps its sign, because Go keeps it too
+// (`{- 0.0}` is `{ -0.0 }` on both sides but for the space).
+//
+// It rewrites only a space that sits immediately before a '-' that is
+// immediately followed by a digit, which is the one shape the operator
+// produces. `a - b` has a space after the minus and `a -b` has no digit, so
+// neither is touched: a real disagreement about either is still reported.
+func foldUnaryMinus(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' || i+2 >= len(s) || s[i+1] != '-' || !isASCIIDigit(s[i+2]) {
+			b.WriteByte(s[i])
+			continue
+		}
+		j := i + 2
+		for j < len(s) && isASCIIDigit(s[j]) {
+			j++
+		}
+		// A bare -0 is the integer zero, which Go writes unsigned. -0.
+		// or -0E is the start of a real, whose sign Go keeps.
+		if s[i+2:j] == "0" && (j >= len(s) || (s[j] != '.' && s[j] != 'E' && s[j] != 'e')) {
+			b.WriteByte('0')
+		} else {
+			b.WriteByte('-')
+			b.WriteString(s[i+2 : j])
+		}
+		i = j - 1
+	}
+	return b.String()
+}
+
+func isASCIIDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// parserDepth is the limit recorded against a very long chain of unary
+// operators inside a macro function, e.g. `0=$EVAL(!!!...!!”)`.
+//
+// C++'s ClassAd parser is recursive descent, so every nested operator is a C
+// stack frame, and src/classad/source.cpp caps the nesting at
+// MAX_PARSER_DEPTH = 500 to keep deep input from overflowing the stack.
+// Past it the parse FAILS, and a macro function whose argument does not parse
+// expands to nothing. Go's parser is table-driven (goyacc) with its stack on
+// the heap, so it has no such frame to run out of: it parses the chain and
+// evaluates it, and `$EVAL` returns the value.
+//
+// This is recorded rather than implemented because the limit is an artifact
+// of how the C++ parser is BUILT, not a rule of the language. The cut-off is
+// not even 500 operators -- it is 500 minus whatever the enclosing expression
+// already consumed, which for `$EVAL(...)` lands at 401 -- so matching it
+// would mean reproducing the shape of C++'s call chain, and would move with
+// any refactor of it. A limit on Go's side would be a defensible thing to
+// have for its own sake, but it would be a different limit at a different
+// place, and it would not make these two agree.
+//
+// Defined by what was WRITTEN, like tripleQuote: once the depth is exceeded
+// the whole argument is gone, so the two tables can differ in any way at all.
+// That is safe here because the trigger cannot occur by accident.
+var parserDepth = divergenceClass{
+	name:  "C++ refuses to parse past its recursive-descent depth limit",
+	input: hasDeepOperatorChain,
+}
+
+// deepOperatorChain is where hasDeepOperatorChain starts calling a run of
+// stacked unary operators deep.
+//
+// Deliberately well below the 401 that was measured for `$EVAL`, because the
+// cut-off depends on how deep the chain already sits when it starts, and a
+// chain somewhere more nested reaches the limit sooner. Being low costs
+// nothing: a class is only ever consulted about an input that ALREADY
+// diverged, so a chain this long that both sides handle is never excused by
+// it, and no config file written by a person has a run of 200 operators.
+const deepOperatorChain = 200
+
+// hasDeepOperatorChain reports whether s stacks that many unary operators.
+// Only the unary operators count: these are the ones that nest without
+// anything between them, so a run of them in the source is a run of nested
+// expressions, which is not true of any binary operator.
+//
+// Whitespace between them does not break the run. `! ! !0` is three nested
+// expressions exactly as `!!!0` is, and it reaches the same limit in the same
+// place -- the fuzzer found the spaced form the same night, and a predicate
+// that counted only adjacent characters reported it as something new.
+func hasDeepOperatorChain(s string) bool {
+	run := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '!', '~', '-', '+':
+			run++
+			if run >= deepOperatorChain {
+				return true
+			}
+		case ' ', '\t', '\r', '\n':
+			// does not nest, does not interrupt
+		default:
+			run = 0
+		}
+	}
+	return false
+}
+
 // recognize returns the recorded class that accounts for this divergence, or
 // nil when it is a new one.
 func recognize(input string, res divergenceResult) *divergenceClass {
@@ -254,6 +387,48 @@ var seeds = []seedCase{
 			"implementing it here.",
 		class:  &tripleQuote,
 		oracle: &oracleReq{ticket: "HTCONDOR-3993", has: true},
+	},
+
+	{
+		// Found by FuzzConfigParseExpand against HTCondor main, and
+		// reproduces against the pinned 25.14 oracle too, so it is ours
+		// rather than drift.
+		input: "0=$EVAL({- 0})",
+		reason: "C++ folds a sign into a numeric literal only when the two are " +
+			"ADJACENT, so `- 0` stays a unary-minus OPERATOR applied to 0. " +
+			"Evaluating a list does not evaluate its elements, so unparsing " +
+			"the result unparses that operator, which sink.cpp spells with a " +
+			"leading space: `{  -0 }`, sign intact on a zero. Go folds the " +
+			"sign whatever the spacing and writes the literal `{ 0 }`. The " +
+			"folding is wanted and is not going to change: a folded literal " +
+			"is a value that can be stored, indexed and compared as a number, " +
+			"where a unary-minus node is an expression to evaluate on every " +
+			"read.",
+		class: &unaryMinusFold,
+	},
+	{
+		// Found by FuzzConfigParseExpand. Not drift: it reproduces against
+		// the pinned 25.14 oracle too, at the same 401.
+		input: "0=$EVAL(" + strings.Repeat("!", 401) + "'')",
+		reason: "C++'s ClassAd parser is recursive descent and caps nesting at " +
+			"MAX_PARSER_DEPTH = 500 (src/classad/source.cpp) so that deep input " +
+			"cannot overflow the C stack. Past the cap the parse fails and $EVAL " +
+			"expands to nothing; Go's parser is table-driven with its stack on " +
+			"the heap, parses the chain, and evaluates it to UNDEFINED. The cap " +
+			"is a property of how that parser is built rather than of the " +
+			"language -- the cut-off here is 401 rather than 500 because the " +
+			"enclosing $EVAL has already spent the rest -- so it is recorded " +
+			"rather than reproduced.",
+		class: &parserDepth,
+	},
+
+	{
+		// The same limit reached with the operators spaced apart, which
+		// nests identically. Kept as a seed because the first version of
+		// the predicate counted only adjacent characters and missed it.
+		input:  "0=$EVAL(" + strings.Repeat(strings.Repeat("!", 120)+" ", 4) + "'')",
+		reason: "parserDepth, reached with whitespace between the operators",
+		class:  &parserDepth,
 	},
 
 	// --- former divergences, fixed; each checked against condor 25.14.1 ---
@@ -505,6 +680,18 @@ func TestDivergenceClassesRejectOtherShapes(t *testing.T) {
 		{"an empty quoted name", `A=$EVAL('')`, "A\x1f\n", "A\x1fy\n"},
 		// Three quotes, but not three of the SAME quote: not a marker.
 		{"mixed quotes", "A=\"'\"'", "A\x1f\n", "A\x1fy\n"},
+		// A few stacked operators are ordinary; only a run long enough to
+		// reach C++'s parser depth limit is the recorded family.
+		{"a short operator chain", "A=$EVAL(!!!!0)", "A\x1f0\n", "A\x1f1\n"},
+		// Long, but not a CHAIN: the operators are separated, so nothing
+		// nests and no parser runs out of depth.
+		{"many operators, not stacked", "A=$EVAL(" + strings.Repeat("0-", 300) + "0)", "A\x1f0\n", "A\x1f1\n"},
+		// The unary-minus fold rewrites the C++ side only, and only a space
+		// before a '-' that a digit follows. None of these is that shape.
+		{"a different number entirely", "A=1", "A\x1f{ 0 }\n", "A\x1f{  -1 }\n"},
+		{"the fold is ours, not theirs", "A=1", "A\x1f{  -0 }\n", "A\x1f{ 0 }\n"},
+		{"a binary minus, spaced", "A=1", "A\x1f{ a -b }\n", "A\x1f{ a - b }\n"},
+		{"a minus before a name, not a digit", "A=1", "A\x1f{ -a }\n", "A\x1f{  -a }\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
