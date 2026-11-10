@@ -843,18 +843,6 @@ func (e *expander) stringIsDouble(s string) (float64, bool) {
 	return 0, false
 }
 
-func truncToInt64(f float64) int64 {
-	switch {
-	case math.IsNaN(f):
-		return math.MinInt64
-	case f >= math.MaxInt64:
-		return math.MinInt64 // x86-64 cvttsd2si yields the "integer indefinite"
-	case f <= math.MinInt64:
-		return math.MinInt64
-	}
-	return int64(f)
-}
-
 // cStrtol parses like strtol(s, &end, 10): leading whitespace, an optional
 // sign and as many digits as there are. ok is false when there are none.
 func cStrtol(s string) (int64, bool) {
