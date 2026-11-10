@@ -319,6 +319,52 @@ describe('ResourceTable', () => {
     );
     expect(screen.getByText('50%')).toBeInTheDocument();
   });
+
+  // The reported case: a job submitted with retry_request_memory shows
+  // the rung it is on now, which reads as the size it asked for all
+  // along. 12428255.40559 had climbed three of six rungs and the table
+  // said only "8 GB".
+  it('says a memory request is a rung the job climbed to', () => {
+    render(
+      <ResourceTable
+        job={
+          {
+            RequestMemory: 8192,
+            MemoryUsage: 7000,
+            RetryRequestMemory: [2048, 4096, 8192, 16384, 32768, 65536],
+            RetryRequestMemoryIndex: 3,
+            TransformOnEvict: 'RequestMemory RetryRequestMemoryIndex',
+          } as unknown as ClassAd
+        }
+      />,
+    );
+    const cell = screen.getByText('8 GB');
+    expect(screen.getByText('after 3 restarts at more memory')).toBeInTheDocument();
+    expect(cell.closest('[title]')?.getAttribute('title')).toBe(
+      'Runs out of memory and starts again at the next of 2 GB, 4 GB, 8 GB, 16 GB, 32 GB, 64 GB. It has done so 3 times.',
+    );
+  });
+
+  it('says a ladder the job has not had to climb is there', () => {
+    render(
+      <ResourceTable
+        job={
+          {
+            RequestMemory: 2048,
+            MemoryUsage: 1024,
+            RetryRequestMemory: [4096, 8192],
+            TransformOnEvict: 'RequestMemory RetryRequestMemoryIndex',
+          } as unknown as ClassAd
+        }
+      />,
+    );
+    expect(screen.getByText('retries up to 8 GB')).toBeInTheDocument();
+  });
+
+  it('leaves a job without a ladder as it was', () => {
+    render(<ResourceTable job={{ RequestMemory: 2048, MemoryUsage: 1024 } as ClassAd} />);
+    expect(screen.queryByText(/restarts at more memory|retries up to/)).toBeNull();
+  });
 });
 
 describe('RequirementsSection', () => {
