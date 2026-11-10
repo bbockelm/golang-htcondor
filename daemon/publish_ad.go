@@ -57,7 +57,10 @@ func (d *Daemon) PublishAd(ad *classad.ClassAd) {
 	if m := configGet(cfg, "FULL_HOSTNAME"); m != "" {
 		ad.InsertAttrString("Machine", m)
 	}
-	if addr, ok := d.AdvertisedSinful(); ok && addr != "" {
+	// AdvertisedAddress, not AdvertisedSinful: the latter is empty for a daemon that is
+	// not behind a shared port, which left MyAddress off the ad entirely and is why each
+	// daemon used to overwrite it from its own listener in its augment callback.
+	if addr := d.AdvertisedAddress(); addr != "" {
 		ad.InsertAttrString("MyAddress", ensureAngle(addr))
 	}
 	if pnn := configGet(cfg, "PRIVATE_NETWORK_NAME"); pnn != "" {
