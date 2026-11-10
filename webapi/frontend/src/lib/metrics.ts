@@ -93,12 +93,6 @@ export interface SeriesPoint {
 export interface ExecutionSeries {
   run: number; // RunInstanceID
   points: SeriesPoint[];
-  // What this run asked for, from the samples' own max:Request* column.
-  // Set only when the runs did not all ask for the same thing -- a job on
-  // a memory retry ladder, or one whose request is a rule over its own
-  // usage -- where one reference line across the chart would be wrong for
-  // every run but the last.
-  request?: number;
 }
 export interface MetricSeries {
   key: string;
@@ -107,8 +101,7 @@ export interface MetricSeries {
   executions: ExecutionSeries[];
   // Requested amount as a reference line, in the same unit as the series.
   // Undefined when there is no sensible same-unit request (GPU: util vs a
-  // count), or when the request moved between runs and each one draws its
-  // own; in both cases requestedNote carries it as text instead.
+  // count), in which case requestedNote carries it as text instead.
   requested?: number;
   requestedNote?: string;
   // The request's expression, when the job wrote it as one.
@@ -214,13 +207,9 @@ export function buildJobMetrics(resp: MetricsResponse | undefined, job?: ClassAd
     if (valIdx === undefined) continue;
     const reqIdx = def.requestCol ? idx.get(def.requestCol) : undefined;
 
-    // Collect points per run, and what each run asked for. A job's
-    // request is NOT constant: retry_request_memory rewrites it on every
-    // eviction, and a request written as a rule over the job's own usage
-    // regrows the same way. Keeping one figure per run is what lets the
-    // chart draw the request each run actually had.
+    // Collect points per run, and the requested value (constant per job, so
+    // take the max seen).
     const byRun = new Map<number, SeriesPoint[]>();
-    const reqByRun = new Map<number, number>();
     let pointCount = 0;
     let maxValue = 0;
     let requested: number | undefined;
@@ -230,10 +219,8 @@ export function buildJobMetrics(resp: MetricsResponse | undefined, job?: ClassAd
       const run = toNum(row[runIdx]) ?? 0;
       if (reqIdx !== undefined) {
         const rq = toNum(row[reqIdx]);
-        if (rq !== undefined) {
-          if (requested === undefined || rq > requested) requested = rq;
-          const seen = reqByRun.get(run);
-          if (seen === undefined || rq > seen) reqByRun.set(run, rq);
+        if (rq !== undefined && (requested === undefined || rq > requested)) {
+          requested = rq;
         }
       }
       if (t === undefined || value === undefined) continue;
@@ -263,47 +250,15 @@ export function buildJobMetrics(resp: MetricsResponse | undefined, job?: ClassAd
       note: def.note,
     };
     const fromAd = jobRequest(job, def.requestAttr);
+    if (fromAd.value !== undefined) requested = fromAd.value;
     if (fromAd.expr) series.requestedExpr = fromAd.expr;
-    if (def.requestIsLine && movedBetweenRuns(executions, reqByRun)) {
-      // Each run draws its own request. The ad is no use here: it says
-      // what the job asks for NOW, which is the last run's figure and
-      // nothing about the runs before it. The caption describes what is
-      // drawn, so it reads off the same samples, and only reaches for
-      // the ad where the last run has no figure of its own.
-      for (const ex of executions) ex.request = reqByRun.get(ex.run);
-      const first = executions[0].request;
-      const last = executions[executions.length - 1].request ?? fromAd.value;
-      if (first !== undefined && last !== undefined) {
-        series.requestedNote = `Requested ${formatMetric(first, def.unit)} → ${formatMetric(last, def.unit)}`;
-      }
-    } else {
-      // One request throughout: the ad's reading is the better one, as
-      // it evaluates a rule the samples may not carry.
-      if (fromAd.value !== undefined) requested = fromAd.value;
-      if (requested !== undefined && requested > 0) {
-        if (def.requestIsLine) series.requested = requested;
-        else series.requestedNote = `Requested ${requested} GPU${requested === 1 ? '' : 's'}`;
-      }
+    if (requested !== undefined && requested > 0) {
+      if (def.requestIsLine) series.requested = requested;
+      else series.requestedNote = `Requested ${requested} GPU${requested === 1 ? '' : 's'}`;
     }
     out.push(series);
   }
   return out;
-}
-
-// movedBetweenRuns reports whether the runs asked for different amounts.
-// Every run has to have a sampled request before the answer can be yes: a
-// run the samples say nothing about is not evidence of a change, and
-// drawing a step from it would invent one.
-function movedBetweenRuns(executions: ExecutionSeries[], reqByRun: Map<number, number>): boolean {
-  if (executions.length < 2) return false;
-  let first: number | undefined;
-  for (const ex of executions) {
-    const r = reqByRun.get(ex.run);
-    if (r === undefined || r <= 0) return false;
-    if (first === undefined) first = r;
-    else if (r !== first) return true;
-  }
-  return false;
 }
 
 // The categorical hues for run attempts, in fixed order (validated for CVD

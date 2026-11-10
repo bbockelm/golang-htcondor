@@ -40,15 +40,6 @@ function memRows(n: number, run = 0): (string | number)[][] {
   ]);
 }
 
-// One run's worth of memory samples at a request of its own: the shape a
-// job on a retry ladder leaves, a run per rung.
-function rungRows(run: number, reqMem: number, n = 4): (string | number)[][] {
-  const t0 = 1000 + run * 10_000;
-  return Array.from({ length: n }, (_, i) => [
-    run, t0 + i * 900, reqMem / 2 + i * 100, 1.5, 0, 0, reqMem, 2, 0, 0,
-  ]);
-}
-
 describe('buildJobMetrics', () => {
   it('returns nothing when the feature is disabled', () => {
     expect(buildJobMetrics({ enabled: false, table: 'job_metrics' })).toEqual([]);
@@ -139,70 +130,5 @@ describe('jobMetricsSelector', () => {
     expect(sel).toEqual({ constraint: RATE_SAMPLE_GUARD, job_id: '12.3@ap2.example.org' });
     expect(sel?.constraint).not.toMatch(/ClusterId|ProcId/);
     expect(jobMetricsSelector('', true)).toBeUndefined();
-  });
-});
-
-// The reported case (12428255.40559): a job with
-// retry_request_memory = { 2048, ... 65536 } drew one dashed line at the
-// rung it finished on, so the runs it was killed on looked like runs that
-// had memory to spare.
-describe('a request that moved between runs', () => {
-  const climbed = () =>
-    buildJobMetrics(
-      resp([...rungRows(0, 2048), ...rungRows(1, 4096), ...rungRows(2, 8192)]),
-      { RequestMemory: 8192 },
-    ).find((s) => s.key === 'memory')!;
-
-  it('gives each run the request that run had', () => {
-    const mem = climbed();
-    expect(mem.executions.map((e) => e.request)).toEqual([2048, 4096, 8192]);
-  });
-
-  it('draws no single line across the chart', () => {
-    expect(climbed().requested).toBeUndefined();
-  });
-
-  it('says in the caption where the request started and ended', () => {
-    expect(climbed().requestedNote).toBe('Requested 2 GB → 8 GB');
-  });
-
-  it('captions from the samples it drew, not from the ad', () => {
-    // The ad is the request the job holds now. Where that is past the
-    // last run the samples caught, the caption would name a step the
-    // chart does not draw.
-    const mem = buildJobMetrics(
-      resp([...rungRows(0, 2048), ...rungRows(1, 4096), ...rungRows(2, 8192)]),
-      { RequestMemory: 16384 },
-    ).find((s) => s.key === 'memory')!;
-    expect(mem.requestedNote).toBe('Requested 2 GB → 8 GB');
-  });
-
-  it('leaves a job whose request never moved exactly as it was', () => {
-    const mem = buildJobMetrics(resp([...memRows(4, 0), ...memRows(4, 1)]), {
-      RequestMemory: 4096,
-    }).find((s) => s.key === 'memory')!;
-    expect(mem.requested).toBe(4096);
-    expect(mem.requestedNote).toBeUndefined();
-    expect(mem.executions.map((e) => e.request)).toEqual([undefined, undefined]);
-  });
-
-  it('does not read a run the samples say nothing about as a change', () => {
-    // reqMem 0 is the sampler having nothing to report, not a job that
-    // asked for nothing. One step drawn from it would invent a drop to
-    // the axis.
-    const mem = buildJobMetrics(
-      resp([...rungRows(0, 2048), ...rungRows(1, 0), ...rungRows(2, 8192)]),
-      { RequestMemory: 8192 },
-    ).find((s) => s.key === 'memory')!;
-    expect(mem.requested).toBe(8192);
-    expect(mem.executions.every((e) => e.request === undefined)).toBe(true);
-  });
-
-  it('keeps one line for a single run, whatever it asked for', () => {
-    const mem = buildJobMetrics(resp(rungRows(0, 2048, 5)), { RequestMemory: 2048 }).find(
-      (s) => s.key === 'memory',
-    )!;
-    expect(mem.requested).toBe(2048);
-    expect(mem.executions[0].request).toBeUndefined();
   });
 });

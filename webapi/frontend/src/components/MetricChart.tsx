@@ -36,12 +36,7 @@ export function MetricChart({ series }: { series: MetricSeries }) {
       if (p.t > tMax) tMax = p.t;
     }
   }
-  const dataMax = Math.max(
-    0,
-    ...allValues,
-    series.requested ?? 0,
-    ...series.executions.map((ex) => ex.request ?? 0),
-  );
+  const dataMax = Math.max(0, ...allValues, series.requested ?? 0);
   // Ticks are round numbers in the unit the axis is labelled in, and the
   // whole axis is labelled in one unit (see formatAxisTicks).
   const axisUnit: AxisUnit = series.unit === 'MB' ? 'mib' : series.unit === 'KB' ? 'kib' : 'plain';
@@ -57,20 +52,6 @@ export function MetricChart({ series }: { series: MetricSeries }) {
   const ys = (v: number) => PAD.top + PLOT_H - (yMax > 0 ? v / yMax : 0) * PLOT_H;
 
   const multi = series.executions.length > 1;
-
-  // Where each run's own request line runs from and to, for a job whose
-  // request moved between runs. The segments tile the axis rather than
-  // stopping at each run's last sample, so a run of one point still draws
-  // one and there is no gap between runs to read as a pause.
-  const stepped = series.executions.some((ex) => ex.request !== undefined);
-  const spanOf = (i: number) => {
-    const last = series.executions.length - 1;
-    const next = series.executions[i + 1]?.points[0]?.t;
-    return {
-      from: i === 0 ? tMin : (series.executions[i].points[0]?.t ?? tMin),
-      to: i === last || next === undefined ? tMax : next,
-    };
-  };
 
   return (
     <figure className="rounded-lg border border-gray-200 bg-white p-3">
@@ -129,41 +110,6 @@ export function MetricChart({ series }: { series: MetricSeries }) {
         <text x={W - PAD.right} y={H - 8} textAnchor="end" className="fill-gray-400 text-[10px]">
           {new Date(tMax * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
         </text>
-
-        {/* The request each run actually had, for a job whose request
-            moved between them: a retry ladder climbing a rung on every
-            eviction, or a rule over the job's own usage regrowing after
-            a hold. One line across the chart would sit at the last run's
-            request and read as the request every earlier run was killed
-            against. Grey and dashed like the single line, because it
-            means the same thing. */}
-        {stepped &&
-          series.executions.map((ex, i) => {
-            if (ex.request === undefined || ex.request > yMax) return null;
-            const { from, to } = spanOf(i);
-            const y = ys(ex.request);
-            return (
-              <g key={`req-${ex.run}`}>
-                <line
-                  x1={xs(from)}
-                  x2={xs(to)}
-                  y1={y}
-                  y2={y}
-                  className="stroke-gray-400"
-                  strokeWidth={1.5}
-                  strokeDasharray="4 3"
-                  data-testid="requested-step"
-                  data-run={ex.run}
-                  data-request={ex.request}
-                />
-                {i === series.executions.length - 1 && (
-                  <text x={xs(to)} y={y - 3} textAnchor="end" className="fill-gray-500 text-[10px]">
-                    requested
-                  </text>
-                )}
-              </g>
-            );
-          })}
 
         {/* requested reference line (same-unit metrics only) */}
         {series.requested !== undefined && series.requested <= yMax && (
