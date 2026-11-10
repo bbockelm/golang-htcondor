@@ -262,7 +262,7 @@ function ArchiveJobDetail({
           out, which is why there is no empty-state here. The job's final
           status means it never polls for updates. */}
       {/* What it peaked at against what similar jobs peaked at. */}
-      <ArchivedMemoryEstimate jobID={jobID} status={jobStatus} />
+      <ArchivedMemoryEstimate jobID={jobID} status={jobStatus} job={job} />
 
       <ResourceUsagePanel jobID={jobID} status={jobStatus} job={job} />
 

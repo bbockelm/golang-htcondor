@@ -23,6 +23,7 @@ import { OwnerLink } from '@/components/OwnerLink';
 import { chatScopeForJob } from '@/lib/users';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
 import { EVALUATED_KEY, gpusUsed, hasGpus, jobRequest } from '@/lib/jobRequests';
+import { ladderNote, ladderTitle, memoryLadder } from '@/lib/retryMemory';
 import { peakMemoryMiB } from '@/lib/similar';
 import { formatKiB, formatMiB } from '@/lib/utilization';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
@@ -602,7 +603,7 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
         onShowSimilar={showSimilar}
       />
 
-      <MemoryEstimateField jobID={jobID} status={status} />
+      <MemoryEstimateField jobID={jobID} status={status} job={job} />
 
       <SimilarJobsSection
         jobID={jobID}
@@ -1857,11 +1858,19 @@ export function ResourceTable({ job }: { job: ClassAd }) {
   const memory = jobRequest(job, 'RequestMemory');
   const disk = jobRequest(job, 'RequestDisk');
   const gpus = jobRequest(job, 'RequestGPUs');
+  // A job submitted with retry_request_memory asks for one size and runs
+  // at another: RequestMemory is the rung it is on now, not the one it
+  // started at. The number alone reads as the whole story, so say so.
+  const ladder = memoryLadder(job);
   const rows: {
     label: string;
     requested: string;
     // The request's expression, when it was written as one.
     requestedExpr?: string;
+    // A line under the request, and its longer reading on hover: what
+    // else shapes the number, such as a memory retry ladder.
+    requestedNote?: string;
+    requestedTitle?: string;
     used: string;
     // Raw numbers in one unit, for the proportion. Undefined where the
     // ad does not say, which draws no bar.
@@ -1881,6 +1890,8 @@ export function ResourceTable({ job }: { job: ClassAd }) {
       label: 'Memory',
       requested: fmtMiB(memory.value),
       requestedExpr: memory.expr,
+      requestedNote: ladderNote(ladder),
+      requestedTitle: ladderTitle(ladder),
       used: fmtMemoryUsed(job),
       reqN: memory.value,
       usedN: memoryUsedMiB(job),
@@ -1934,14 +1945,15 @@ export function ResourceTable({ job }: { job: ClassAd }) {
               <tr key={r.label}>
                 <td className="px-1.5 py-1.5 sm:px-3 font-medium text-gray-700">{r.label}</td>
                 <td className="px-1.5 py-1.5 sm:px-3 text-gray-900 tabular-nums">
-                  {r.requestedExpr ? (
-                    <span title={r.requestedExpr}>
-                      {r.requested}
+                  <span title={[r.requestedExpr, r.requestedTitle].filter(Boolean).join(' ') || undefined}>
+                    {r.requested}
+                    {r.requestedExpr && (
                       <span className="block text-[11px] font-normal text-gray-400">from expression</span>
-                    </span>
-                  ) : (
-                    r.requested
-                  )}
+                    )}
+                    {r.requestedNote && (
+                      <span className="block text-[11px] font-normal text-gray-400">{r.requestedNote}</span>
+                    )}
+                  </span>
                 </td>
                 <td className="px-1.5 py-1.5 sm:px-3 text-gray-900 tabular-nums">{r.used}</td>
                 <td className="px-1.5 py-1.5 sm:px-3">

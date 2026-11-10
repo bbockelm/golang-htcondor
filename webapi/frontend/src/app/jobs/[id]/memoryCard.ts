@@ -4,6 +4,7 @@
 // wording and every bar position is tested without rendering.
 
 import type { RuntimeMemory } from '@/lib/api';
+import { ladderLine, type MemoryLadder } from '@/lib/retryMemory';
 import { formatMiB } from '@/lib/utilization';
 
 import type { BarGeometry } from './runtimeCard';
@@ -86,7 +87,16 @@ const frac = (v: number, max: number) => Math.min(1, Math.max(0, v / max));
 // null when there is none. status is the job's: waiting (1) and running
 // (2) compare with the request, finished (3, 4) with what similar jobs
 // peaked at; anything else shows nothing.
-export function memoryCard(m: RuntimeMemory | undefined, status: number | undefined): MemoryCard | null {
+//
+// ladder is the job's memory retry ladder, where it has one. The card
+// draws the request as a mark beside the peak, and for a job that
+// climbed, that mark is the rung it finished on rather than the one it
+// was killed against -- so the ladder gets a line of its own.
+export function memoryCard(
+  m: RuntimeMemory | undefined,
+  status: number | undefined,
+  ladder?: MemoryLadder,
+): MemoryCard | null {
   if (!m || m.sample_count <= 0) return null;
   const live = status === 1 || status === 2;
   if (!live && status !== 3 && status !== 4) return null;
@@ -117,6 +127,7 @@ export function memoryCard(m: RuntimeMemory | undefined, status: number | undefi
   };
   const peers = `Similar jobs peaked at ${about} ${typical}; 9 in 10 stayed under ${formatMiB(m.p90_mib)}.`;
   const req = live ? requestLine(m) : undefined;
+  const climbed = ladderLine(ladder, m.requested_mib);
   // A waiting job has used nothing yet.
   const above = status !== 1 && m.above_usual;
 
@@ -127,7 +138,7 @@ export function memoryCard(m: RuntimeMemory | undefined, status: number | undefi
       headline: `Similar jobs ${live ? 'peak' : 'peaked'} at ${about} ${typical}`,
       bar,
       axis,
-      lines: req ? [req] : [],
+      lines: [climbed, req].filter((l): l is string => l !== undefined),
     };
   }
   return {
@@ -136,6 +147,6 @@ export function memoryCard(m: RuntimeMemory | undefined, status: number | undefi
     headline: status === 2 ? `Peak so far ${formatMiB(peak)}` : `Peaked at ${formatMiB(peak)}`,
     bar,
     axis,
-    lines: req ? [peers, req] : [peers],
+    lines: [peers, climbed, req].filter((l): l is string => l !== undefined),
   };
 }

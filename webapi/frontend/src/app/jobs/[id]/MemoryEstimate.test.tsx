@@ -5,6 +5,7 @@ import type { RuntimeMemory } from '@/lib/api';
 
 import { MemoryEstimateView } from './MemoryEstimate';
 import { memoryAxisMax, memoryCard, niceMiB, requestLine } from './memoryCard';
+import { memoryLadder } from '@/lib/retryMemory';
 
 // The job page's memory card: what similar jobs peaked at, the job's own
 // peak, and how many went past its request -- stated as facts.
@@ -126,5 +127,75 @@ describe('MemoryEstimateView', () => {
   it('renders nothing without figures', () => {
     const { container } = render(<MemoryEstimateView memory={undefined} status={2} />);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+// The reported case (12428255.40559): the card drew "Requested" at the
+// rung the job finished on, which reads as the size it asked for from
+// the start.
+describe('a job on a memory retry ladder', () => {
+  const climber = (over: Record<string, unknown> = {}) =>
+    memoryLadder({
+      RequestMemory: 8192,
+      RetryRequestMemory: [2048, 4096, 8192, 16384, 32768, 65536],
+      RetryRequestMemoryIndex: 3,
+      TransformOnEvict: 'RequestMemory RetryRequestMemoryIndex',
+      ...over,
+    } as never);
+
+  it('says the request it draws is where the job ended up', () => {
+    const c = memoryCard(mem({ peak_mib: 7000, requested_mib: 8192 }), 4, climber())!;
+    expect(c.lines).toContain(
+      'The 8 GB requested is where it ended up: it ran out of memory and started again at a larger request 3 times.',
+    );
+  });
+
+  it('keeps the line after what similar jobs did, not before it', () => {
+    const c = memoryCard(mem({ peak_mib: 7000, requested_mib: 8192 }), 4, climber())!;
+    expect(c.lines[0]).toMatch(/^Similar jobs peaked/);
+    expect(c.lines[1]).toMatch(/^The 8 GB requested is/);
+  });
+
+  it('leaves the count open where the index stops counting', () => {
+    const c = memoryCard(
+      mem({ peak_mib: 60000, requested_mib: 65536 }),
+      4,
+      climber({ RequestMemory: 65536, RetryRequestMemoryIndex: 5 }),
+    )!;
+    expect(c.lines[1]).toMatch(/started again at a larger request at least 5 times\.$/);
+  });
+
+  it('says nothing for a ladder the job never had to climb', () => {
+    const c = memoryCard(
+      mem({ peak_mib: 1100, requested_mib: 2048 }),
+      4,
+      climber({ RequestMemory: 2048, RetryRequestMemoryIndex: undefined }),
+    )!;
+    expect(c.lines.join(' ')).not.toMatch(/started again/);
+  });
+
+  it('says nothing for a job without a ladder', () => {
+    const c = memoryCard(mem({ peak_mib: 1100, requested_mib: 2048 }), 4)!;
+    expect(c.lines).toEqual(['Similar jobs peaked at about 1.2 GB; 9 in 10 stayed under 2 GB.']);
+  });
+
+  it('reaches the page', () => {
+    render(
+      <MemoryEstimateView
+        memory={mem({ peak_mib: 7000, requested_mib: 8192 })}
+        status={4}
+        job={
+          {
+            RequestMemory: 8192,
+            RetryRequestMemory: [2048, 4096, 8192, 16384, 32768, 65536],
+            RetryRequestMemoryIndex: 2,
+            TransformOnEvict: 'RequestMemory RetryRequestMemoryIndex',
+          } as never
+        }
+      />,
+    );
+    expect(
+      screen.getByText(/it ran out of memory and started again at a larger request 2 times\./),
+    ).toBeInTheDocument();
   });
 });
