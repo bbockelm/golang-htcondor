@@ -77,3 +77,75 @@ describe('MetricChart', () => {
     expect(tip).toMatch(/^Run 1 — 1,000 MB · /);
   });
 });
+
+// A job on a memory retry ladder: three runs, each asking for more than
+// the last, with no single request to draw across the chart.
+function climbingSeries(): MetricSeries {
+  const s = runsSeries(3);
+  const requests = [2048, 4096, 8192];
+  s.executions.forEach((ex, i) => {
+    ex.request = requests[i];
+    ex.points = ex.points.map((p) => ({ ...p, value: requests[i] - 100 }));
+  });
+  s.requestedNote = 'Requested 2 GB \u2192 8 GB';
+  return s;
+}
+
+describe('a request that moved between runs', () => {
+  it('draws a dashed segment per run at that run\'s request', () => {
+    const { container } = render(<MetricChart series={climbingSeries()} />);
+    const steps = [...container.querySelectorAll('[data-testid="requested-step"]')];
+    expect(steps.map((l) => l.getAttribute('data-request'))).toEqual(['2048', '4096', '8192']);
+    // Each sits lower on the page than the one before: a larger request
+    // is a higher line, and y grows downward.
+    const ys = steps.map((l) => Number(l.getAttribute('y1')));
+    expect(ys[0]).toBeGreaterThan(ys[1]);
+    expect(ys[1]).toBeGreaterThan(ys[2]);
+  });
+
+  it('tiles the segments across the axis, so each run has one under it', () => {
+    const { container } = render(<MetricChart series={climbingSeries()} />);
+    const steps = [...container.querySelectorAll('[data-testid="requested-step"]')];
+    for (let i = 0; i < steps.length; i++) {
+      const x1 = Number(steps[i].getAttribute('x1'));
+      const x2 = Number(steps[i].getAttribute('x2'));
+      expect(x2).toBeGreaterThan(x1);
+      if (i > 0) expect(x1).toBe(Number(steps[i - 1].getAttribute('x2')));
+    }
+  });
+
+  it('labels the steps once, not once per run', () => {
+    render(<MetricChart series={climbingSeries()} />);
+    expect(screen.getAllByText('requested')).toHaveLength(1);
+  });
+
+  it('says where the request started and ended', () => {
+    render(<MetricChart series={climbingSeries()} />);
+    expect(screen.getByText('Requested 2 GB \u2192 8 GB')).toBeInTheDocument();
+  });
+
+  it('still draws one line for a job whose request never moved', () => {
+    const s = runsSeries(3);
+    s.requested = 4096;
+    const { container } = render(<MetricChart series={s} />);
+    expect(container.querySelectorAll('[data-testid="requested-step"]')).toHaveLength(0);
+    expect(screen.getAllByText('requested')).toHaveLength(1);
+  });
+
+  it('stretches the axis to reach the largest run request', () => {
+    const s = climbingSeries();
+    s.executions[2].request = 40_000;
+    const { container } = render(<MetricChart series={s} />);
+    // All three still draw: an axis that stopped below the top request
+    // would hide the line the top run was killed against.
+    expect(container.querySelectorAll('[data-testid="requested-step"]')).toHaveLength(3);
+  });
+
+  it('skips a run the series gives no request for', () => {
+    const s = climbingSeries();
+    s.executions[1].request = undefined;
+    const { container } = render(<MetricChart series={s} />);
+    const steps = [...container.querySelectorAll('[data-testid="requested-step"]')];
+    expect(steps.map((l) => l.getAttribute('data-run'))).toEqual(['1', '3']);
+  });
+});
