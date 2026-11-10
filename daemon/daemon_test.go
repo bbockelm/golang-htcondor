@@ -115,6 +115,14 @@ func TestWithHostAlias(t *testing.T) {
 			"evil&sock=stolen",
 			"192.168.1.1:9618?alias=evil%26sock%3dstolen",
 		},
+		{
+			// '#' is legal in a sinful, so it is NOT escaped -- and a CCB contact is
+			// this address plus "#<id>", split on the last '#'.
+			"drops an alias holding a CCB hop separator",
+			"192.168.1.1:9618?sock=ccb",
+			"host.example#99",
+			"192.168.1.1:9618?sock=ccb",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

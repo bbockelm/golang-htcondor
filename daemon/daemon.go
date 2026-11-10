@@ -499,7 +499,11 @@ func withHostAlias(addr string, cfg *config.Config) string {
 		return addr
 	}
 	alias := configGet(cfg, "HOST_ALIAS")
-	if alias == "" {
+	// '#' is the one character that must be rejected rather than escaped: cedar's
+	// encoder treats it as safe (it is legal in a sinful), but a CCB contact string is
+	// this address followed by "#<id>" and is split on the LAST '#', so an alias
+	// carrying one would silently redirect the hop. No host name contains '#'.
+	if alias == "" || strings.ContainsRune(alias, '#') {
 		return addr
 	}
 	return trimAngle(addresses.WithParam(addr, "alias", alias))
