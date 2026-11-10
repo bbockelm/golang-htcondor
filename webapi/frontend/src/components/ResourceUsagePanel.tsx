@@ -23,6 +23,12 @@ import {
   jobMetricsSelector,
   unrecordedAP,
 } from '@/lib/metrics';
+import {
+  EPOCH_REQUEST_LIMIT,
+  EPOCH_REQUEST_PROJECTION,
+  epochConstraint,
+  runAds,
+} from '@/lib/epochRequests';
 import { MetricChart } from '@/components/MetricChart';
 
 export function ResourceUsagePanel({
@@ -58,7 +64,32 @@ export function ResourceUsagePanel({
       }),
   });
 
-  const series = useMemo(() => buildJobMetrics(data, job), [data, job]);
+  // What each run asked for. The job ad holds only the request in force
+  // now, so a job restarted at a larger one needs its per-run records to
+  // draw the request each run actually had.
+  //
+  // Single-AP only: in multi-AP mode a cluster.proc constraint does not
+  // name one job. An access point that keeps no epoch history answers
+  // with no ads, which is not a fault -- the chart falls back to the one
+  // reference line, as it does for every job that never moved its
+  // request.
+  const constraint = multiAP ? undefined : epochConstraint(jobID);
+  const { data: epochResp } = useQuery({
+    queryKey: ['job-epoch-requests', jobID],
+    enabled: constraint !== undefined,
+    retry: false,
+    refetchInterval: live ? 60_000 : false,
+    staleTime: live ? 0 : Infinity,
+    queryFn: () =>
+      api.jobs.epochs({
+        constraint,
+        projection: EPOCH_REQUEST_PROJECTION,
+        limit: EPOCH_REQUEST_LIMIT,
+      }),
+  });
+  const epochs = useMemo(() => runAds(epochResp), [epochResp]);
+
+  const series = useMemo(() => buildJobMetrics(data, job, epochs), [data, job, epochs]);
 
   // The whole section is invisible until there is something worth
   // showing -- unless the job's access point records no usage at all,

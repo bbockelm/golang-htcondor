@@ -9,6 +9,7 @@
 // disk/GPU appear only when the job actually used them.
 
 import type { ClassAd, Sources } from './api';
+import { runRequest } from './epochRequests';
 import { jobRequest, type RequestAttr } from './jobRequests';
 import { formatKiB, formatMiB } from './utilization';
 
@@ -93,6 +94,14 @@ export interface SeriesPoint {
 export interface ExecutionSeries {
   run: number; // RunInstanceID
   points: SeriesPoint[];
+  // What this run asked for, from its epoch_history record. Set only
+  // when the runs did not all ask for the same thing -- a job climbing a
+  // memory retry ladder -- where one reference line across the chart
+  // would be wrong for every run but the last.
+  //
+  // It never comes from the samples: see lib/epochRequests.ts for why
+  // they cannot say.
+  request?: number;
 }
 export interface MetricSeries {
   key: string;
@@ -101,7 +110,8 @@ export interface MetricSeries {
   executions: ExecutionSeries[];
   // Requested amount as a reference line, in the same unit as the series.
   // Undefined when there is no sensible same-unit request (GPU: util vs a
-  // count), in which case requestedNote carries it as text instead.
+  // count), or when the request moved between runs and each one draws its
+  // own; in both cases requestedNote carries it as text instead.
   requested?: number;
   requestedNote?: string;
   // The request's expression, when the job wrote it as one.
@@ -191,7 +201,11 @@ function toNum(v: string | undefined): number | undefined {
 // each Request* evaluates to in the job's ad, the same number the resource
 // table shows. The samples' own max:Request* columns are the fallback for an
 // ad that does not carry the request.
-export function buildJobMetrics(resp: MetricsResponse | undefined, job?: ClassAd): MetricSeries[] {
+export function buildJobMetrics(
+  resp: MetricsResponse | undefined,
+  job?: ClassAd,
+  epochs?: Map<number, ClassAd>,
+): MetricSeries[] {
   if (!resp || !resp.enabled || !resp.columns || !resp.rows) return [];
 
   const idx = new Map<string, number>();
@@ -250,15 +264,58 @@ export function buildJobMetrics(resp: MetricsResponse | undefined, job?: ClassAd
       note: def.note,
     };
     const fromAd = jobRequest(job, def.requestAttr);
-    if (fromAd.value !== undefined) requested = fromAd.value;
     if (fromAd.expr) series.requestedExpr = fromAd.expr;
-    if (requested !== undefined && requested > 0) {
-      if (def.requestIsLine) series.requested = requested;
-      else series.requestedNote = `Requested ${requested} GPU${requested === 1 ? '' : 's'}`;
+    const perRun = def.requestIsLine ? runRequests(executions, epochs, def.requestAttr) : undefined;
+    if (perRun) {
+      // Each run draws its own. The ad is no use here: it holds what the
+      // job asks for now, which is the last run's figure and nothing
+      // about the runs before it.
+      executions.forEach((ex, i) => {
+        ex.request = perRun[i];
+      });
+      series.requestedNote = `Requested ${formatMetric(perRun[0]!, def.unit)} → ${formatMetric(
+        perRun[perRun.length - 1]!,
+        def.unit,
+      )}`;
+    } else {
+      // One request throughout, or nothing to say which run held what:
+      // the ad's reading is the better one, as it evaluates a rule the
+      // samples do not carry.
+      if (fromAd.value !== undefined) requested = fromAd.value;
+      if (requested !== undefined && requested > 0) {
+        if (def.requestIsLine) series.requested = requested;
+        else series.requestedNote = `Requested ${requested} GPU${requested === 1 ? '' : 's'}`;
+      }
     }
     out.push(series);
   }
   return out;
+}
+
+// runRequests is what each run asked for, in the order the executions are
+// drawn -- or undefined, which means draw the one line instead.
+//
+// It answers only when EVERY run has a record saying what it asked for
+// and they do not all agree -- which takes at least two runs, so a job
+// that ran once is answered by the same test. A single run without a
+// record is enough to stand down: a step drawn from a gap would
+// attribute a request to a run on no evidence, which is the mistake this
+// replaced.
+function runRequests(
+  executions: ExecutionSeries[],
+  epochs: Map<number, ClassAd> | undefined,
+  name: RequestAttr,
+): number[] | undefined {
+  if (!epochs) return undefined;
+  const out: number[] = [];
+  let moved = false;
+  for (const ex of executions) {
+    const r = runRequest(epochs.get(ex.run), name);
+    if (r === undefined) return undefined;
+    if (out.length > 0 && r !== out[0]) moved = true;
+    out.push(r);
+  }
+  return moved ? out : undefined;
 }
 
 // The categorical hues for run attempts, in fixed order (validated for CVD
