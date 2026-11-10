@@ -266,10 +266,15 @@ var parserDepth = divergenceClass{
 // it, and no config file written by a person has a run of 200 operators.
 const deepOperatorChain = 200
 
-// hasDeepOperatorChain reports whether s stacks that many unary operators in a
-// row. Only the unary operators count: these are the ones that nest without
+// hasDeepOperatorChain reports whether s stacks that many unary operators.
+// Only the unary operators count: these are the ones that nest without
 // anything between them, so a run of them in the source is a run of nested
 // expressions, which is not true of any binary operator.
+//
+// Whitespace between them does not break the run. `! ! !0` is three nested
+// expressions exactly as `!!!0` is, and it reaches the same limit in the same
+// place -- the fuzzer found the spaced form the same night, and a predicate
+// that counted only adjacent characters reported it as something new.
 func hasDeepOperatorChain(s string) bool {
 	run := 0
 	for i := 0; i < len(s); i++ {
@@ -279,6 +284,8 @@ func hasDeepOperatorChain(s string) bool {
 			if run >= deepOperatorChain {
 				return true
 			}
+		case ' ', '\t', '\r', '\n':
+			// does not nest, does not interrupt
 		default:
 			run = 0
 		}
@@ -413,6 +420,15 @@ var seeds = []seedCase{
 			"enclosing $EVAL has already spent the rest -- so it is recorded " +
 			"rather than reproduced.",
 		class: &parserDepth,
+	},
+
+	{
+		// The same limit reached with the operators spaced apart, which
+		// nests identically. Kept as a seed because the first version of
+		// the predicate counted only adjacent characters and missed it.
+		input:  "0=$EVAL(" + strings.Repeat(strings.Repeat("!", 120)+" ", 4) + "'')",
+		reason: "parserDepth, reached with whitespace between the operators",
+		class:  &parserDepth,
 	},
 
 	// --- former divergences, fixed; each checked against condor 25.14.1 ---
