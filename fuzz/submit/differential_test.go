@@ -28,6 +28,26 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = $(Process)\nqueue 3\n"},
 	{input: "executable = /bin/sleep\nrequest_cpus = 1\nrequest_memory = 128\narguments = a\nuniverse = vanilla\nqueue 2\n"},
 
+	// Found by FuzzSubmitAds against HTCondor main, and reproduces against
+	// the pinned 25.14 oracle too, so it is not drift. Reported upstream;
+	// when it is fixed there this seed stops diverging and says so.
+	//
+	// No queue statement, because there cannot be one: the divergent line
+	// has to be LAST, and this parser rejects a command after `queue`. A
+	// file with no queue statement submits one job, which is what both
+	// sides do with this. isPlausibleSubmit screens it out of the fuzz
+	// target for the same reason -- TestSeedsHaveNoFreshDivergence is what
+	// holds it.
+	{
+		input: "executable = /bin/sleep\noutput = job.out   ",
+		reason: "condor_submit does not trim the last line of a file that ends " +
+			"without a newline, at either end, so Out keeps three trailing " +
+			"spaces and the job writes to a file whose name no one can type. " +
+			"getline_implementation (src/condor_utils/config.cpp) cannot tell " +
+			"that case from fgets running out of buffer, and skips the trim " +
+			"for both. See untrimmedFinalLine.",
+	},
+
 	// --- known divergences (findings) ---
 	{input: "executable = /bin/sleep\nqueue\n"},
 	{input: "executable = /bin/sleep\narguments = $(Process)\nqueue 3\n"},
@@ -820,6 +840,9 @@ func FuzzSubmitAds(f *testing.F) {
 		if !isPlausibleSubmit(src) {
 			t.Skip("not plausible submit text")
 		}
+		if untrimmedFinalLine(src) {
+			t.Skip("known: condor_submit does not trim an unterminated final line")
+		}
 		fresh, _, skip := check(t, src)
 		if skip {
 			return
@@ -842,6 +865,44 @@ func isPlausibleSubmit(src string) bool {
 		}
 	}
 	return strings.Contains(strings.ToLower(src), "queue")
+}
+
+// untrimmedFinalLine reports whether src ends in the one shape condor_submit
+// reads differently from this parser: a last line with no terminating newline
+// that carries whitespace at either end.
+//
+// getline_implementation in src/condor_utils/config.cpp assembles a logical
+// line by appending one physical line at a time, and trims each piece as it
+// goes. A piece that does not end in '\n' is taken to mean fgets ran out of
+// buffer, so it skips the trim and loops to read the rest -- correct for that
+// case, and wrong for the other way the same condition arises, which is the
+// file ending without a newline. The next read returns nothing, the function
+// returns the buffer it has, and that last piece was never trimmed at either
+// end. So `output = job.out   ` with no closing newline puts three spaces
+// inside the job's Out, and a last line that is INDENTED is a parse error,
+// because the macro's name keeps the indent.
+//
+// This parser trims it. The Go tree already ports the quirk faithfully --
+// config/reader.go's lineSource.getline has it, and the config fuzzer agrees
+// with the oracle on `T = v ` -- but the submit parser does not read lines
+// through that; it has its own character-level lexer, where the end of the
+// input is not a place that can decide anything. Teaching it the quirk means
+// changing that lexer for every submit file, so for now the shape is skipped
+// and the seed below pins that it still reproduces.
+//
+// Narrow on purpose. Only the final line matters, only when it is
+// unterminated, and only when trimming it would change anything -- a file
+// ending `queue` with no newline has nothing to trim and is still compared,
+// which is the overwhelmingly common way a submit file ends.
+func untrimmedFinalLine(src string) bool {
+	if src == "" || strings.HasSuffix(src, "\n") {
+		return false
+	}
+	last := src
+	if i := strings.LastIndexByte(src, '\n'); i >= 0 {
+		last = src[i+1:]
+	}
+	return last != strings.Trim(last, " \t\r\v\f")
 }
 
 func firstLine(s string) string {
