@@ -160,6 +160,73 @@ func hasTripleQuote(s string) bool {
 	return strings.Contains(s, `"""`) || strings.Contains(s, "'''")
 }
 
+// unaryMinusFold is the unparser difference recorded against
+// `0=$EVAL({- 0})`.
+//
+// C++'s lexer folds a sign into a numeric literal only when the two are
+// ADJACENT: `-0` is a negative literal, `- 0` is a unary-minus operator
+// applied to 0. Evaluating a list does not evaluate its elements -- the value
+// IS the unevaluated ExprList -- so unparsing the result unparses that
+// operator, and sink.cpp spells unary minus `" -"`, with a leading space.
+// `{- 0}` therefore comes back `{  -0 }`: the sign survives on a zero, and
+// there is a second space.
+//
+// Go folds the sign at unparse time whatever the spacing, so the element is a
+// literal: `{ 0 }`, with the integer zero unsigned and no operator spelling to
+// print.
+//
+// Recorded rather than fixed because the folding is wanted. A folded literal
+// is a VALUE -- it can be stored, indexed and compared as a number -- where a
+// unary-minus node is an expression that has to be evaluated on every read.
+// Keeping it is a deliberate choice for the database built on this library,
+// and matching C++ here would mean giving that up to reproduce the spelling
+// of an operator.
+//
+// Only unary MINUS on a NUMERIC LITERAL reaches this. `{+ 0}`, `{! 0}` and
+// `{~ 1}` agree, because Go folds none of those; `{- a}` agrees, because
+// there is no literal to fold onto; `{-0}` agrees, because C++ folds it too.
+var unaryMinusFold = divergenceClass{
+	name: "Go folds a unary minus onto a numeric literal, C++ keeps the operator",
+	match: func(goTable, cppTable string) bool {
+		return goTable != cppTable && foldUnaryMinus(cppTable) == goTable
+	},
+}
+
+// foldUnaryMinus rewrites C++'s rendering of a unary minus on a numeric
+// literal into Go's: the leading space of the `" -"` operator goes, and an
+// INTEGER -0 becomes 0. A real keeps its sign, because Go keeps it too
+// (`{- 0.0}` is `{ -0.0 }` on both sides but for the space).
+//
+// It rewrites only a space that sits immediately before a '-' that is
+// immediately followed by a digit, which is the one shape the operator
+// produces. `a - b` has a space after the minus and `a -b` has no digit, so
+// neither is touched: a real disagreement about either is still reported.
+func foldUnaryMinus(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' || i+2 >= len(s) || s[i+1] != '-' || !isASCIIDigit(s[i+2]) {
+			b.WriteByte(s[i])
+			continue
+		}
+		j := i + 2
+		for j < len(s) && isASCIIDigit(s[j]) {
+			j++
+		}
+		// A bare -0 is the integer zero, which Go writes unsigned. -0.
+		// or -0E is the start of a real, whose sign Go keeps.
+		if s[i+2:j] == "0" && (j >= len(s) || (s[j] != '.' && s[j] != 'E' && s[j] != 'e')) {
+			b.WriteByte('0')
+		} else {
+			b.WriteByte('-')
+			b.WriteString(s[i+2 : j])
+		}
+		i = j - 1
+	}
+	return b.String()
+}
+
+func isASCIIDigit(c byte) bool { return c >= '0' && c <= '9' }
+
 // parserDepth is the limit recorded against a very long chain of unary
 // operators inside a macro function, e.g. `0=$EVAL(!!!...!!”)`.
 //
@@ -315,6 +382,23 @@ var seeds = []seedCase{
 		oracle: &oracleReq{ticket: "HTCONDOR-3993", has: true},
 	},
 
+	{
+		// Found by FuzzConfigParseExpand against HTCondor main, and
+		// reproduces against the pinned 25.14 oracle too, so it is ours
+		// rather than drift.
+		input: "0=$EVAL({- 0})",
+		reason: "C++ folds a sign into a numeric literal only when the two are " +
+			"ADJACENT, so `- 0` stays a unary-minus OPERATOR applied to 0. " +
+			"Evaluating a list does not evaluate its elements, so unparsing " +
+			"the result unparses that operator, which sink.cpp spells with a " +
+			"leading space: `{  -0 }`, sign intact on a zero. Go folds the " +
+			"sign whatever the spacing and writes the literal `{ 0 }`. The " +
+			"folding is wanted and is not going to change: a folded literal " +
+			"is a value that can be stored, indexed and compared as a number, " +
+			"where a unary-minus node is an expression to evaluate on every " +
+			"read.",
+		class: &unaryMinusFold,
+	},
 	{
 		// Found by FuzzConfigParseExpand. Not drift: it reproduces against
 		// the pinned 25.14 oracle too, at the same 401.
@@ -586,6 +670,12 @@ func TestDivergenceClassesRejectOtherShapes(t *testing.T) {
 		// Long, but not a CHAIN: the operators are separated, so nothing
 		// nests and no parser runs out of depth.
 		{"many operators, not stacked", "A=$EVAL(" + strings.Repeat("0-", 300) + "0)", "A\x1f0\n", "A\x1f1\n"},
+		// The unary-minus fold rewrites the C++ side only, and only a space
+		// before a '-' that a digit follows. None of these is that shape.
+		{"a different number entirely", "A=1", "A\x1f{ 0 }\n", "A\x1f{  -1 }\n"},
+		{"the fold is ours, not theirs", "A=1", "A\x1f{  -0 }\n", "A\x1f{ 0 }\n"},
+		{"a binary minus, spaced", "A=1", "A\x1f{ a -b }\n", "A\x1f{ a - b }\n"},
+		{"a minus before a name, not a digit", "A=1", "A\x1f{ -a }\n", "A\x1f{  -a }\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
