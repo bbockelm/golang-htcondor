@@ -310,9 +310,12 @@ func Collect(ctx context.Context, src Source, opts Options) (*Set, error) {
 	set.EpochDuration = now().Sub(epochStart)
 	set.EpochCount = len(attempts)
 	if eerr != nil {
-		// A missing epoch history is a configuration fact, not an error:
-		// JOB_EPOCH_HISTORY is off by default. Say so and show the rest
-		// rather than failing whole.
+		// A missing epoch history is a configuration fact, not an error.
+		// JOB_EPOCH_HISTORY defaults to $(SPOOL)/epoch_history, so a
+		// current access point keeps one, but an older default, a pool
+		// that turned it off, or a mirror that does not tail the file
+		// all leave nothing to read. Say so and show the rest rather
+		// than failing whole.
 		//
 		// A read that ran out of time is a different thing from one that
 		// could not be made, and saying "so they are not included" about

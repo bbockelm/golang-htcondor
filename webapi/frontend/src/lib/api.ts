@@ -2053,6 +2053,35 @@ export const api = {
       return fetchJSON(`${BASE}/jobs/archive?${qs.toString()}`);
     },
 
+    // One record per run attempt, from JOB_EPOCH_HISTORY.
+    //
+    // The shadow writes these, from its own copy of the job ad -- the
+    // copy the schedd handed it when the run started. That is what makes
+    // them the only record of what a run actually requested: the schedd
+    // rewrites RequestMemory in the queue when the run ends (an eviction
+    // climbing a retry ladder, a hold regrowing a formula), so the queue
+    // and the samples taken from it speak for the NEXT run.
+    //
+    // An access point that keeps no per-run records answers with no ads,
+    // or fails the read outright -- a mirror that does not tail
+    // JOB_EPOCH_HISTORY declines it. Neither is a fault worth showing: a
+    // caller falls back to the one request the job ad carries.
+    epochs: (params: {
+      constraint?: string;
+      limit?: number | "*";
+      projection?: string;
+      // Multi-AP mode: one access point only.
+      schedd?: string;
+    }): Promise<HistoryListResponse> => {
+      const qs = new URLSearchParams();
+      if (params.constraint) qs.set("constraint", params.constraint);
+      if (params.limit !== undefined) qs.set("limit", String(params.limit));
+      if (params.projection) qs.set("projection", params.projection);
+      if (params.schedd) qs.set("schedd", params.schedd);
+      qs.set("stream_results", "false");
+      return fetchJSON(`${BASE}/jobs/epochs?${qs.toString()}`);
+    },
+
     // GET /api/v1/jobs/{id} returns the ClassAd JSON directly.
     get: (id: string): Promise<ClassAd> =>
       fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}`),

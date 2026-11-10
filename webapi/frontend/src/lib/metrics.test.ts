@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { ClassAd } from './api';
 import { EXPR_REQUEST_MEMORY, exprRequestJob } from './jobRequests.fixture';
 import {
   buildJobMetrics,
@@ -40,13 +41,24 @@ function memRows(n: number, run = 0): (string | number)[][] {
   ]);
 }
 
-// One run's worth of memory samples at a request of its own: the shape a
-// job on a retry ladder leaves, a run per rung.
-function rungRows(run: number, reqMem: number, n = 4): (string | number)[][] {
+// One run's worth of memory samples. reqMem is what the SAMPLES claim the
+// run asked for, which is not necessarily what it did -- see the suite
+// below.
+function runRows(run: number, reqMem: number, n = 4): (string | number)[][] {
   const t0 = 1000 + run * 10_000;
   return Array.from({ length: n }, (_, i) => [
-    run, t0 + i * 900, reqMem / 2 + i * 100, 1.5, 0, 0, reqMem, 2, 0, 0,
+    run, t0 + i * 900, 1000 + i * 100, 1.5, 0, 0, reqMem, 2, 0, 0,
   ]);
+}
+
+// The epoch_history records for a job, one per run, keyed as runAds keys
+// them.
+function epochs(...requests: (number | string | undefined)[]): Map<number, ClassAd> {
+  const m = new Map<number, ClassAd>();
+  requests.forEach((req, run) => {
+    if (req !== undefined) m.set(run, { RunInstanceID: run, RequestMemory: req } as ClassAd);
+  });
+  return m;
 }
 
 describe('buildJobMetrics', () => {
@@ -142,67 +154,85 @@ describe('jobMetricsSelector', () => {
   });
 });
 
-// The reported case (12428255.40559): a job with
-// retry_request_memory = { 2048, ... 65536 } drew one dashed line at the
-// rung it finished on, so the runs it was killed on looked like runs that
-// had memory to spare.
+// The reported case. A job with retry_request_memory climbed 2 GB -> 4 GB
+// -> 4 GB again -> 8 GB, and the chart drew the 8 GB line a run early,
+// because the sample that ends a run is taken as the schedd rewrites
+// RequestMemory for the next one. The samples below carry exactly that
+// damage; the epoch records carry the truth.
 describe('a request that moved between runs', () => {
-  const climbed = () =>
-    buildJobMetrics(
-      resp([...rungRows(0, 2048), ...rungRows(1, 4096), ...rungRows(2, 8192)]),
-      { RequestMemory: 8192 },
-    ).find((s) => s.key === 'memory')!;
+  // Run 2 really asked for 4096. Its samples say 8192: the on-evict
+  // transform had already written the next rung when the run's last
+  // sample was taken.
+  const damaged = () => resp([...runRows(0, 2048), ...runRows(1, 4096), ...runRows(2, 8192), ...runRows(3, 8192)]);
+  const truth = () => epochs(2048, 4096, 4096, 8192);
+  const mem = (e?: Map<number, ClassAd>) =>
+    buildJobMetrics(damaged(), { RequestMemory: 8192 }, e).find((s) => s.key === 'memory')!;
 
-  it('gives each run the request that run had', () => {
-    const mem = climbed();
-    expect(mem.executions.map((e) => e.request)).toEqual([2048, 4096, 8192]);
+  it('gives each run what its own record says it asked for', () => {
+    expect(mem(truth()).executions.map((e) => e.request)).toEqual([2048, 4096, 4096, 8192]);
+  });
+
+  it('does not take the request from the samples', () => {
+    // The sample column says run 2 asked for 8192. It did not.
+    const s = mem(truth());
+    expect(s.executions[2].request).toBe(4096);
+    expect(s.executions[2].request).not.toBe(8192);
   });
 
   it('draws no single line across the chart', () => {
-    expect(climbed().requested).toBeUndefined();
+    expect(mem(truth()).requested).toBeUndefined();
   });
 
   it('says in the caption where the request started and ended', () => {
-    expect(climbed().requestedNote).toBe('Requested 2 GB → 8 GB');
+    expect(mem(truth()).requestedNote).toBe('Requested 2 GB \u2192 8 GB');
   });
 
-  it('captions from the samples it drew, not from the ad', () => {
-    // The ad is the request the job holds now. Where that is past the
-    // last run the samples caught, the caption would name a step the
-    // chart does not draw.
-    const mem = buildJobMetrics(
-      resp([...rungRows(0, 2048), ...rungRows(1, 4096), ...rungRows(2, 8192)]),
-      { RequestMemory: 16384 },
-    ).find((s) => s.key === 'memory')!;
-    expect(mem.requestedNote).toBe('Requested 2 GB → 8 GB');
+  it('draws one line when there are no epoch records to go on', () => {
+    // An access point that keeps no epoch history, as the panel actually
+    // calls this: runAds always hands over a map, so the empty map -- not
+    // an absent argument -- is the path that runs in the browser. The
+    // samples are right there and still not used: they cannot say which
+    // run held what.
+    const s = mem(new Map());
+    expect(s.requested).toBe(8192);
+    expect(s.executions.every((e) => e.request === undefined)).toBe(true);
   });
 
-  it('leaves a job whose request never moved exactly as it was', () => {
-    const mem = buildJobMetrics(resp([...memRows(4, 0), ...memRows(4, 1)]), {
-      RequestMemory: 4096,
-    }).find((s) => s.key === 'memory')!;
-    expect(mem.requested).toBe(4096);
-    expect(mem.requestedNote).toBeUndefined();
-    expect(mem.executions.map((e) => e.request)).toEqual([undefined, undefined]);
+  it('draws one line when the panel passes no map at all', () => {
+    const s = mem(undefined);
+    expect(s.requested).toBe(8192);
+    expect(s.executions.every((e) => e.request === undefined)).toBe(true);
   });
 
-  it('does not read a run the samples say nothing about as a change', () => {
-    // reqMem 0 is the sampler having nothing to report, not a job that
-    // asked for nothing. One step drawn from it would invent a drop to
-    // the axis.
-    const mem = buildJobMetrics(
-      resp([...rungRows(0, 2048), ...rungRows(1, 0), ...rungRows(2, 8192)]),
-      { RequestMemory: 8192 },
-    ).find((s) => s.key === 'memory')!;
-    expect(mem.requested).toBe(8192);
-    expect(mem.executions.every((e) => e.request === undefined)).toBe(true);
+  it('stands down when a single run has no record', () => {
+    const s = mem(epochs(2048, 4096, undefined, 8192));
+    expect(s.requested).toBe(8192);
+    expect(s.executions.every((e) => e.request === undefined)).toBe(true);
   });
 
-  it('keeps one line for a single run, whatever it asked for', () => {
-    const mem = buildJobMetrics(resp(rungRows(0, 2048, 5)), { RequestMemory: 2048 }).find(
-      (s) => s.key === 'memory',
+  it('stands down when a run asks with a rule rather than a number', () => {
+    const rule = '/Expr(max({2048, 3 * MemoryUsage / 2}))/';
+    const s = mem(epochs(2048, rule, 4096, 8192));
+    expect(s.requested).toBe(8192);
+    expect(s.executions.every((e) => e.request === undefined)).toBe(true);
+  });
+
+  it('keeps one line for a job whose runs all asked the same', () => {
+    const s = buildJobMetrics(
+      resp([...runRows(0, 4096), ...runRows(1, 4096)]),
+      { RequestMemory: 4096 },
+      epochs(4096, 4096),
+    ).find((x) => x.key === 'memory')!;
+    expect(s.requested).toBe(4096);
+    expect(s.requestedNote).toBeUndefined();
+    expect(s.executions.every((e) => e.request === undefined)).toBe(true);
+  });
+
+  it('keeps one line for a job that only ran once', () => {
+    const s = buildJobMetrics(resp(runRows(0, 2048, 5)), { RequestMemory: 2048 }, epochs(2048)).find(
+      (x) => x.key === 'memory',
     )!;
-    expect(mem.requested).toBe(2048);
-    expect(mem.executions[0].request).toBeUndefined();
+    expect(s.requested).toBe(2048);
+    expect(s.executions[0].request).toBeUndefined();
   });
 });
