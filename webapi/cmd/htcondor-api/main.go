@@ -1412,6 +1412,26 @@ func reservationsEnabled(cfg *config.Config) bool {
 	return v
 }
 
+// reservationClaimsEnabled reports whether HTTP_API_RESERVATION_CLAIMS
+// turns on holding always-on reservations as the schedd's persistent
+// claims instead of as machine attributes.
+//
+// Separate from HTTP_API_RESERVATIONS, and off by default, because it
+// changes where a running reservation's capacity comes from and needs
+// the schedd configured to accept the request: the access point has to
+// be a queue super user there, or named in OCU_SUPER_USERS.
+func reservationClaimsEnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_RESERVATION_CLAIMS")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_RESERVATION_CLAIMS=%q: must be a boolean", raw)
+	}
+	return v
+}
+
 // reservationEPConstraint is the ClassAd expression limiting which
 // execute points reservations may draw seats from. Empty means all of
 // them.
@@ -2398,6 +2418,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		Logger:                   logger,
 		EnableMCP:                mcpCfg.enabled,
 		Reservations:             reservationsEnabled(cfg),
+		ReservationClaims:        reservationClaimsEnabled(cfg),
 		ReservationEPConstraint:  reservationEPConstraint(cfg),
 		ReservationStampBudget:   reservationStampBudget(cfg),
 		WebUIEnabled:             webUIEnabled,

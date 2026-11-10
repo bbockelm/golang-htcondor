@@ -272,6 +272,10 @@ type Handler struct {
 	// reservationEPConstraint limits which startds reservations may draw
 	// seats from; empty means all of them.
 	reservationEPConstraint string
+	// reservationClaims holds always-on reservations as the schedd's own
+	// persistent claims instead of as machine attributes. Off unless
+	// configured; see startReservationClaims.
+	reservationClaims bool
 	// reservationProber checks that this access point may still update
 	// machine ads, and names the execute points whose START does not
 	// consult the sieve. Nil when nothing is running it, which the
@@ -873,6 +877,13 @@ type HandlerConfig struct {
 	// may draw seats from, as a ClassAd expression evaluated against the
 	// slot ad. Empty means every startd the collector reports.
 	ReservationEPConstraint string
+
+	// ReservationClaims holds an always-on reservation's capacity as
+	// persistent claims on this access point's schedd rather than by
+	// pushing machine attributes. Off unless configured: it changes
+	// where a running reservation's capacity comes from, and the schedd
+	// has to be told to accept the request.
+	ReservationClaims bool
 	// WebUIEnabled says this server serves the web UI. OAuth2 -- the
 	// authorization server, its metadata, the device flow and the SSO
 	// login -- is served when this or EnableMCP is set: MCP gates only
@@ -1448,6 +1459,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		mcpEnabled:                cfg.EnableMCP,
 		reservationsEnabled:       cfg.Reservations,
 		reservationEPConstraint:   cfg.ReservationEPConstraint,
+		reservationClaims:         cfg.ReservationClaims,
 		reservationStampBudget:    cfg.ReservationStampBudget,
 		mcpCIMDEnabled:            cfg.MCPCIMDEnabled,
 		mcpDCRDisabled:            cfg.MCPDCRDisabled,
@@ -2997,6 +3009,7 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	h.startRuntimeEstimates(h.ctx)
 	h.startReservations(h.ctx)
 	h.startReservationStamping(h.ctx)
+	h.startReservationClaims(h.ctx)
 
 	return nil
 }

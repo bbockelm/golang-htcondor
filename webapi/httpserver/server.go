@@ -226,6 +226,10 @@ type Config struct {
 	// may draw seats from, as a ClassAd expression over the slot ad.
 	// Empty means every startd the collector reports.
 	ReservationEPConstraint string
+	// ReservationClaims holds an always-on reservation's capacity as
+	// persistent claims on this access point's schedd rather than by
+	// pushing machine attributes. Off unless configured.
+	ReservationClaims bool
 	// ReservationStampBudget caps how many cluster ads one stamping
 	// pass writes. Zero takes the package default.
 	ReservationStampBudget int
@@ -544,6 +548,7 @@ func NewServer(cfg Config) (*Server, error) {
 		Reservations:                cfg.Reservations,
 		ReservationEPConstraint:     cfg.ReservationEPConstraint,
 		ReservationStampBudget:      cfg.ReservationStampBudget,
+		ReservationClaims:           cfg.ReservationClaims,
 		WebUIEnabled:                cfg.WebUIEnabled,
 		DBPath:                      cfg.DBPath,
 		KEKFilePath:                 cfg.KEKFilePath,
