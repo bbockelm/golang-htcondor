@@ -188,8 +188,17 @@ describe('a request that moved between runs', () => {
   });
 
   it('draws one line when there are no epoch records to go on', () => {
-    // An access point that keeps no epoch history. The samples are right
-    // there and still not used: they cannot say which run held what.
+    // An access point that keeps no epoch history, as the panel actually
+    // calls this: runAds always hands over a map, so the empty map -- not
+    // an absent argument -- is the path that runs in the browser. The
+    // samples are right there and still not used: they cannot say which
+    // run held what.
+    const s = mem(new Map());
+    expect(s.requested).toBe(8192);
+    expect(s.executions.every((e) => e.request === undefined)).toBe(true);
+  });
+
+  it('draws one line when the panel passes no map at all', () => {
     const s = mem(undefined);
     expect(s.requested).toBe(8192);
     expect(s.executions.every((e) => e.request === undefined)).toBe(true);

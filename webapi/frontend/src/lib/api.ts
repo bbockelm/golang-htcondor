@@ -2062,9 +2062,10 @@ export const api = {
     // climbing a retry ladder, a hold regrowing a formula), so the queue
     // and the samples taken from it speak for the NEXT run.
     //
-    // An access point with no JOB_EPOCH_HISTORY configured answers with
-    // no ads. That is not a fault -- it is a pool that does not keep
-    // per-run records -- so callers fall back rather than reporting one.
+    // An access point that keeps no per-run records answers with no ads,
+    // or fails the read outright -- a mirror that does not tail
+    // JOB_EPOCH_HISTORY declines it. Neither is a fault worth showing: a
+    // caller falls back to the one request the job ad carries.
     epochs: (params: {
       constraint?: string;
       limit?: number | "*";

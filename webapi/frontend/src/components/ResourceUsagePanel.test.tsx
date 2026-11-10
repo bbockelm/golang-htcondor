@@ -11,11 +11,20 @@ import type { MetricsResponse } from '@/lib/metrics';
 type Sample = Record<string, number>;
 let samples: Sample[] = [];
 const query = vi.fn();
+// The per-run request read. An access point that keeps no epoch history
+// is the case this stands in for, and it is not a quiet one: the read
+// fails rather than coming back empty, which is why the default here
+// rejects.
+const epochs = vi.fn();
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
   return {
     ...actual,
-    api: { ...actual.api, metrics: { query: (...a: unknown[]) => query(...a) } },
+    api: {
+      ...actual.api,
+      metrics: { query: (...a: unknown[]) => query(...a) },
+      jobs: { ...actual.api.jobs, epochs: (...a: unknown[]) => epochs(...a) },
+    },
   };
 });
 
@@ -141,6 +150,32 @@ function steadyJobWithSpike(): Sample[] {
   return out;
 }
 
+// A job stopped for outgrowing its memory and started again at more: two
+// runs, the second asking for twice the first. The samples carry the
+// damage the real ones do -- run 1's last sample already holds run 2's
+// request, because the transform rewrote it as the shadow exited.
+function climbedJob(): Sample[] {
+  const base = { ClusterId: 7, ProcId: 0, RequestCpus: 1 };
+  const out: Sample[] = [];
+  for (let k = 0; k < 3; k++) {
+    out.push({
+      ...base,
+      RunInstanceID: 1,
+      SampleTime: T0 + k * 900,
+      MemoryUsage: 1800 + k * 50,
+      RequestMemory: k === 2 ? 4096 : 2048,
+    });
+  }
+  for (let k = 0; k < 3; k++) {
+    out.push({ ...base, RunInstanceID: 2, SampleTime: T0 + (k + 5) * 900, MemoryUsage: 3000 + k * 50, RequestMemory: 4096 });
+  }
+  return out;
+}
+
+const epochAds = (...reqs: number[]) => ({
+  ads: reqs.map((RequestMemory, i) => ({ RunInstanceID: i + 1, RequestMemory, EpochAdType: 'EPOCH' })),
+});
+
 function renderPanel(jobID = '7.0', multiAP = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -160,6 +195,8 @@ beforeEach(() => {
   samples = steadyJobWithSpike();
   query.mockReset();
   query.mockImplementation((_table: string, params: Parameters<typeof serve>[0]) => Promise.resolve(serve(params)));
+  epochs.mockReset();
+  epochs.mockRejectedValue(new Error('404: no epoch history'));
 });
 
 describe('ResourceUsagePanel', () => {
@@ -238,5 +275,80 @@ describe('ResourceUsagePanel', () => {
     const figure = (await screen.findByText('Memory')).closest('figure')!;
     // Seven buckets: the baseline and six periodic samples.
     expect(figure.querySelectorAll('circle')).toHaveLength(7);
+  });
+});
+
+// An access point without JOB_EPOCH_HISTORY cannot say what each run
+// asked for. The chart has to keep working on everything else it draws,
+// and fall back to the one request the ad does carry.
+describe('when the access point keeps no epoch history', () => {
+  it('still draws the usage it has', async () => {
+    renderPanel();
+    await screen.findByText('Memory');
+    expect(screen.getByText('CPU')).toBeInTheDocument();
+    expect(drawnCores().length).toBeGreaterThan(0);
+  });
+
+  it('draws the single requested line, not a step per run', async () => {
+    renderPanel();
+    const figure = (await screen.findByText('Memory')).closest('figure')!;
+    expect(figure.querySelectorAll('[data-testid="requested-step"]')).toHaveLength(0);
+    expect(figure.textContent).toMatch(/Requested /);
+    expect(figure.textContent).not.toMatch(/→/);
+  });
+
+  it('shows nothing about the failure', async () => {
+    renderPanel();
+    await screen.findByText('Memory');
+    expect(screen.queryByText(/epoch/i)).toBeNull();
+    expect(screen.queryByText(/404|error|could not/i)).toBeNull();
+  });
+
+  it('asks only once, and not again for the same job', async () => {
+    renderPanel();
+    await screen.findByText('Memory');
+    await waitFor(() => expect(epochs).toHaveBeenCalled());
+    const constraint = (epochs.mock.calls[0][0] as { constraint?: string }).constraint;
+    expect(constraint).toBe('ClusterId == 7 && ProcId == 0');
+  });
+});
+
+// The same job with its run records available. This is also what makes
+// the fallback tests above worth anything: without it they would pass on
+// a panel that could never draw a step at all.
+describe('when the access point keeps epoch history', () => {
+  it('draws a step per run at what that run asked for', async () => {
+    samples = climbedJob();
+    epochs.mockResolvedValue(epochAds(2048, 4096));
+    renderPanel();
+    const figure = (await screen.findByText('Memory')).closest('figure')!;
+    await waitFor(() =>
+      expect(figure.querySelectorAll('[data-testid="requested-step"]')).toHaveLength(2),
+    );
+    const drawn = [...figure.querySelectorAll('[data-testid="requested-step"]')].map((l) =>
+      l.getAttribute('data-request'),
+    );
+    expect(drawn).toEqual(['2048', '4096']);
+  });
+
+  it('says where the request started and ended', async () => {
+    samples = climbedJob();
+    epochs.mockResolvedValue(epochAds(2048, 4096));
+    renderPanel();
+    const figure = (await screen.findByText('Memory')).closest('figure')!;
+    await waitFor(() => expect(figure.textContent).toMatch(/Requested 2 GB → 4 GB/));
+  });
+
+  it('ignores what the samples claim run 1 asked for', async () => {
+    // Run 1's last sample says 4096. Its record says 2048.
+    samples = climbedJob();
+    epochs.mockResolvedValue(epochAds(2048, 4096));
+    renderPanel();
+    const figure = (await screen.findByText('Memory')).closest('figure')!;
+    await waitFor(() =>
+      expect(figure.querySelectorAll('[data-testid="requested-step"]')).toHaveLength(2),
+    );
+    const first = figure.querySelector('[data-testid="requested-step"]')!;
+    expect(first.getAttribute('data-request')).toBe('2048');
   });
 });
