@@ -10,9 +10,10 @@ import (
 // historyEndpoint is the schedd as a history peer: QUERY_SCHEDD_HISTORY, rate-limited by the
 // process's schedd limiter like every other schedd query.
 func (s *Schedd) historyEndpoint() historyEndpoint {
-	e := historyEndpoint{address: s.address, command: commands.QUERY_SCHEDD_HISTORY, daemon: "schedd"}
-	if m := getRateLimitManager(); m != nil {
-		e.rateLimit = m.WaitSchedd
+	e := historyEndpoint{address: s.address, cfg: s.cfg, command: commands.QUERY_SCHEDD_HISTORY, daemon: "schedd"}
+	if m := rateLimitManagerFor(s.cfg); m != nil {
+		key := s.rateLimitKey
+		e.rateLimit = func(ctx context.Context, username string) error { return m.WaitScheddFor(ctx, key, username) }
 	}
 	return e
 }

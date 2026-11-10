@@ -19,6 +19,7 @@ import (
 // test asserts the master log contains evidence of both commands when
 // condor_master is available.
 func TestMasterKeepAliveAndReady(t *testing.T) {
+	t.Parallel()
 	// Build the helper daemon binary
 	daemonDir := t.TempDir()
 	daemonSrc := filepath.Join(daemonDir, "daemon_main.go")

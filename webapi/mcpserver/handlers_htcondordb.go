@@ -2,17 +2,19 @@ package mcpserver
 
 import (
 	"context"
-
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/aggregate"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/dbrpc"
 
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
 // htcondordbEnabled reports whether the DB-backed tools can run
@@ -35,21 +37,53 @@ func (s *Server) dbClient(ctx context.Context) (*dbrpc.Client, func(), *dbmirror
 	if !s.htcondordbEnabled() {
 		return nil, nil, nil, fmt.Errorf("htcondordb tools unavailable: no collector or HTCondor config configured")
 	}
+	if s.dbClientFn != nil {
+		return s.dbClientFn(ctx)
+	}
 	return s.dbMirror.Client(ctx)
+}
+
+// historyArchiveTable is htcondordb's completed-job table. It is an
+// ARCHIVE (append-only, newest-first), not a plain table, and the two are
+// reached by different ops: opQuery -- dbrpc.Client.QueryTable and
+// QueryAsOfTable -- resolves plain tables and view backings only, and
+// answers "no such table: history" for an archive. The projection ops
+// resolve all three, which is why every history read here goes through
+// queryHistoryArchive.
+const historyArchiveTable = "history"
+
+// queryHistoryArchive reads up to limit matching ads from the history
+// archive, newest-archived first, with the projection applied server-side
+// (nil = every attribute). It asks for one row past limit, so hasMore
+// reports that more matches exist rather than that the page happened to
+// be full.
+func queryHistoryArchive(ctx context.Context, dbc *dbrpc.Client, constraint string, projection []string, limit int) (rows []string, hasMore bool, err error) {
+	// A window on QDate or another job time is restated on
+	// EnteredHistoryTime, which the archive can prune on.
+	rows, err = dbc.QueryRawProject(ctx, historyArchiveTable, dbmirror.WithHistoryFloor(constraint), projection, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(rows) > limit {
+		return rows[:limit], true, nil
+	}
+	return rows, false, nil
 }
 
 // toolQueryHistoryDB queries completed jobs from the htcondordb "history" archive. Owner-scoped:
 // a non-admin caller only ever sees their own completed jobs.
 func (s *Server) toolQueryHistoryDB(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	scope, _ := s.ownerScope(ctx, tierRead)
-	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"), tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, stringArg(args, "constraint"), tierRead)
+	if err != nil {
+		return nil, err
 	}
 	if constraint == "" {
 		constraint = "true"
 	}
 	limit := dbLimitArg(args)
+	// Unprojected, every row is the whole ad; see projection.go.
+	projection, projectionNote := projectionOrDefault(stringListArg(args, "projection"), defaultHistoryAttrs)
 
 	dbc, closer, info, err := s.dbClient(ctx)
 	if err != nil {
@@ -57,11 +91,12 @@ func (s *Server) toolQueryHistoryDB(ctx context.Context, args map[string]interfa
 	}
 	defer closer()
 
-	rows, err := dbc.QueryTable(ctx, "history", constraint, limit)
+	rows, hasMore, err := queryHistoryArchive(ctx, dbc, constraint, projection, limit)
 	if err != nil {
 		return nil, fmt.Errorf("history query failed: %w", err)
 	}
-	return dbTextResult("completed jobs (history archive)", rows, limit, info, scope), nil
+	return dbTextResult("completed jobs (history archive, most recently archived first)", rows, limit, hasMore,
+		projectionNote, info, scope), nil
 }
 
 // toolQueryJobsAsOf queries the live-jobs table as it was at a past instant (time-travel). Gated
@@ -69,9 +104,9 @@ func (s *Server) toolQueryHistoryDB(ctx context.Context, args map[string]interfa
 // ("-1h") relative to now.
 func (s *Server) toolQueryJobsAsOf(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	scope, _ := s.ownerScope(ctx, tierRead)
-	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"), tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, stringArg(args, "constraint"), tierRead)
+	if err != nil {
+		return nil, err
 	}
 	if constraint == "" {
 		constraint = "true"
@@ -91,11 +126,18 @@ func (s *Server) toolQueryJobsAsOf(ctx context.Context, args map[string]interfac
 		return nil, fmt.Errorf("this htcondordb database does not have time-travel enabled; cannot query historical state")
 	}
 
-	rows, err := dbc.QueryAsOfTable(ctx, "jobs", constraint, limit, asOf)
+	// One past the limit, so has_more means more matched, not that the
+	// page happened to be full.
+	rows, err := dbc.QueryAsOfTable(ctx, "jobs", constraint, limit+1, asOf)
 	if err != nil {
 		return nil, fmt.Errorf("time-travel query failed: %w", err)
 	}
-	return dbTextResult(fmt.Sprintf("jobs as of %s", asOf.UTC().Format(time.RFC3339)), rows, limit, info, scope), nil
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	return dbTextResult(fmt.Sprintf("jobs as of %s", asOf.UTC().Format(time.RFC3339)), rows, limit, hasMore,
+		"", info, scope), nil
 }
 
 // toolAggregateJobs runs a server-side GROUP BY over a table (default "jobs"), returning counts
@@ -103,9 +145,9 @@ func (s *Server) toolQueryJobsAsOf(ctx context.Context, args map[string]interfac
 // grouped result crosses the wire.
 func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	scope, _ := s.ownerScope(ctx, tierRead)
-	constraint, ok := s.scopeToOwner(ctx, stringArg(args, "constraint"), tierRead)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, stringArg(args, "constraint"), tierRead)
+	if err != nil {
+		return nil, err
 	}
 	if constraint == "" {
 		constraint = "true"
@@ -121,6 +163,9 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 				groupBy = append(groupBy, gs)
 			}
 		}
+	}
+	if len(groupBy) > maxAggregateGroupCols {
+		return nil, fmt.Errorf("group_by names %d attributes; at most %d are allowed", len(groupBy), maxAggregateGroupCols)
 	}
 
 	dbc, closer, info, err := s.dbClient(ctx)
@@ -142,9 +187,9 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 	}
 	defer closer()
 
-	aggRows, err := dbc.AggregateTable(ctx, table, constraint, groupBy, []dbrpc.AggSpec{{Func: dbrpc.AggCount, Arg: "*"}})
+	aggRows, err := aggregateMirrorTable(ctx, dbc, table, constraint, groupBy, []dbrpc.AggSpec{{Func: dbrpc.AggCount, Arg: "*"}})
 	if err != nil {
-		return nil, fmt.Errorf("aggregate query failed: %w", err)
+		return nil, err
 	}
 
 	var b strings.Builder
@@ -156,16 +201,71 @@ func (s *Server) toolAggregateJobs(ctx context.Context, args map[string]interfac
 	groups := make([]map[string]interface{}, 0, len(aggRows))
 	for _, r := range aggRows {
 		if len(groupBy) > 0 {
-			fmt.Fprintf(&b, "  %s = %s\n", strings.Join(r.Group, "/"), strings.Join(r.Values, ","))
+			fmt.Fprintf(&b, "  %s = %s\n", strings.Join(aggregate.GroupLabels(r), "/"), strings.Join(r.Values, ","))
 		} else {
 			fmt.Fprintf(&b, "  count = %s\n", strings.Join(r.Values, ","))
 		}
-		groups = append(groups, map[string]interface{}{"key": r.Group, "count": strings.Join(r.Values, ",")})
+		groups = append(groups, map[string]interface{}{"key": aggregate.GroupLabels(r), "count": strings.Join(r.Values, ",")})
 	}
 	b.WriteString(freshnessNote(info))
 	b.WriteString("\n" + scope.Note())
 	return structuredTextResult(b.String(),
 		aggregateStructured(groups, groupBy, table, "htcondordb", false)), nil
+}
+
+// mirrorArchiveTables are the mirror tables htcondordb keeps as ARCHIVES
+// (append-only) rather than plain tables.
+//
+// The two take different aggregate ops. AggregateTable sends the table
+// op, which a mirror resolves to an archive of the same name only since
+// it was taught to; an older one answers "no such table: history" while
+// every projection read of that name -- query_history_db included --
+// works. ArchiveAggregate is the archive's own op and reduces through the
+// same engine, so the answer does not depend on which mirror is asked.
+var mirrorArchiveTables = map[string]bool{
+	historyArchiveTable: true,
+	"epoch_history":     true,
+	"job_metrics":       true,
+}
+
+// maxAggregateGroupCols is the mirror's GROUP BY column limit; see
+// multiap.MaxAggregateGroupCols.
+const maxAggregateGroupCols = multiap.MaxAggregateGroupCols
+
+// aggregateMirrorTable runs a GROUP BY over the mirror table named table,
+// by the op its kind takes (see mirrorArchiveTables).
+func aggregateMirrorTable(ctx context.Context, dbc *dbrpc.Client, table, constraint string, groupBy []string, aggs []dbrpc.AggSpec) ([]dbrpc.AggRow, error) {
+	if !mirrorArchiveTables[table] {
+		rows, err := dbc.AggregateTable(ctx, table, constraint, groupBy, aggs)
+		if err != nil {
+			return nil, fmt.Errorf("aggregate query failed: %w", err)
+		}
+		return rows, nil
+	}
+	rows, err := dbc.ArchiveAggregate(ctx, table, constraint, groupBy, aggs)
+	var se *dbrpc.ServerError
+	switch {
+	case err == nil:
+		return rows, nil
+	case errors.As(err, &se) && strings.HasPrefix(se.Msg, "no such archive: "):
+		// A mirror that keeps this table as an ordinary one. Not what
+		// htcondordb builds, but the table op answers it.
+		rows, err = dbc.AggregateTable(ctx, table, constraint, groupBy, aggs)
+		if err != nil {
+			return nil, fmt.Errorf("aggregate query failed: %w", err)
+		}
+		return rows, nil
+	case errors.Is(err, dbrpc.ErrArchiveAggregateUnsupported):
+		// No fallback: a mirror without the archive op does not resolve
+		// an archive for the table op either.
+		msg := fmt.Sprintf("this htcondordb mirror is too old to aggregate the %q archive; it needs upgrading", table)
+		if table == historyArchiveTable {
+			msg += " (query_history_db can still list completed jobs)"
+		}
+		return nil, errors.New(msg)
+	default:
+		return nil, fmt.Errorf("aggregate query failed: %w", err)
+	}
 }
 
 // aggregateStructured is the aggregate_jobs payload, shared by the mirror
@@ -231,12 +331,13 @@ func parseAsOf(s string) (time.Time, error) {
 }
 
 // dbTextResult formats query rows (each an old-ClassAd text blob) into a text tool result with
-// a count, truncation note, and freshness annotation.
-func dbTextResult(title string, rows []string, limit int, info *dbmirror.Info, scope OwnerScope) interface{} {
+// a count, truncation note, and freshness annotation. hasMore is whether more rows matched than
+// were returned; note is appended after the records.
+func dbTextResult(title string, rows []string, limit int, hasMore bool, note string, info *dbmirror.Info, scope OwnerScope) interface{} {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d %s", len(rows), title)
-	if len(rows) >= limit {
-		fmt.Fprintf(&b, " (capped at limit=%d; narrow the constraint or raise the limit for more)", limit)
+	if hasMore {
+		fmt.Fprintf(&b, " (more matched; capped at limit=%d -- narrow the constraint or raise the limit for more)", limit)
 	}
 	b.WriteString(":\n\n")
 	// Parse each old-ClassAd blob into an ad for structuredContent. Best
@@ -249,13 +350,14 @@ func dbTextResult(title string, rows []string, limit int, info *dbmirror.Info, s
 			records = append(records, ad)
 		}
 	}
+	b.WriteString(note)
 	b.WriteString(freshnessNote(info))
 	b.WriteString("\n" + scope.Note())
 	return structuredTextResult(b.String(), map[string]interface{}{
 		"records":  records,
 		"count":    len(rows),
 		"source":   "htcondordb",
-		"has_more": len(rows) >= limit,
+		"has_more": hasMore,
 	})
 }
 

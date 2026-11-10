@@ -63,6 +63,16 @@ type whoamiReport struct {
 	Owner string `json:"confined_to_owner,omitempty"`
 	// AccessPoint is the schedd this server submits to.
 	AccessPoint string `json:"access_point,omitempty"`
+	// AccessPoints is how many access points a multi-AP server fronts.
+	AccessPoints int `json:"access_points,omitempty"`
+	// HomeAccessPoint is where a multi-AP server submits this caller's
+	// new work, and AlternateAccessPoints the others they may name;
+	// AssignmentSource is what decided it. AssignmentError says why
+	// there is no home access point.
+	HomeAccessPoint       string   `json:"home_access_point,omitempty"`
+	AlternateAccessPoints []string `json:"alternate_access_points,omitempty"`
+	AssignmentSource      string   `json:"assignment_source,omitempty"`
+	AssignmentError       string   `json:"assignment_error,omitempty"`
 	// Scopes are the OAuth scopes the caller's token carries, when the
 	// transport supplied them.
 	Scopes []string `json:"oauth_scopes,omitempty"`
@@ -79,11 +89,20 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 		Superuser:     s.allowsAllUsers(ctx, actor, tierMutate),
 	}
 	rep.AdminVia, rep.SuperuserVia = s.privilegeProvenance(ctx, actor)
-	if sc := s.getSchedd(); sc != nil {
+	if s.multi != nil {
+		rep.AccessPoints = len(s.multi.Registry.Members())
+		if actor != "" {
+			if a, err := s.multiHomeAP(ctx); err != nil {
+				rep.AssignmentError = err.Error()
+			} else {
+				rep.HomeAccessPoint, rep.AlternateAccessPoints, rep.AssignmentSource = a.Schedd, a.Alternates, a.Source
+			}
+		}
+	} else if sc := s.getSchedd(); sc != nil {
 		rep.AccessPoint = sc.Name()
 	}
-	if scopes := grantedScopesFromContext(ctx); scopes != nil {
-		rep.Scopes = append([]string(nil), scopes...)
+	if g := grantFromContext(ctx); g.scoped {
+		rep.Scopes = append([]string(nil), g.scopes...)
 		sort.Strings(rep.Scopes)
 	}
 
@@ -120,6 +139,16 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 	if rep.AccessPoint != "" {
 		fmt.Fprintf(&sb, "Access point: %s\n", rep.AccessPoint)
 	}
+	switch {
+	case rep.HomeAccessPoint != "":
+		fmt.Fprintf(&sb, "New work you submit goes to your home access point, %s", rep.HomeAccessPoint)
+		if len(rep.AlternateAccessPoints) > 0 {
+			fmt.Fprintf(&sb, "; you may also submit to %s by passing schedd", strings.Join(rep.AlternateAccessPoints, ", "))
+		}
+		sb.WriteString(".\n")
+	case rep.AssignmentError != "":
+		fmt.Fprintf(&sb, "You cannot submit here: %s\n", rep.AssignmentError)
+	}
 	if len(rep.Scopes) > 0 {
 		fmt.Fprintf(&sb, "Token scopes: %s\n", strings.Join(rep.Scopes, " "))
 	}
@@ -141,9 +170,10 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 // useful reason it was not granted.
 //
 // The unmatched-allowlist case is the one worth spelling out. An
-// MCP_ADMIN_USERS entry is compared verbatim against the identity the
-// schedd reports, so a value written with the wrong domain -- the schedd
-// name rather than UID_DOMAIN, say -- never matches, and the result is
+// MCP_ADMIN_USERS entry is compared against the identity the schedd
+// reports, which is the full user@domain (the domain in any case), so a
+// value written bare or with the wrong domain -- the schedd name rather
+// than UID_DOMAIN, say -- never matches, and the result is
 // indistinguishable from not being listed at all.
 func (s *Server) privilegeProvenance(ctx context.Context, actor string) (adminVia, superVia string) {
 	switch {
@@ -152,7 +182,7 @@ func (s *Server) privilegeProvenance(ctx context.Context, actor string) (adminVi
 	case hasScope(ctx, scopeMCPAdmin):
 		adminVia = "granted by the " + scopeMCPAdmin + " scope"
 	default:
-		_, listed := s.adminUsers[actor]
+		listed := s.isAdminUser(actor)
 		switch {
 		case listed && !scopedTransport(ctx):
 			adminVia = "listed in MCP_ADMIN_USERS"

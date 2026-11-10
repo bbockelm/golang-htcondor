@@ -213,13 +213,13 @@ func TestSDKServersAreRebuiltAfterAReconfigure(t *testing.T) {
 	s := sdkTestServer(t)
 	cache := newScopedServers(s.sdkServerFor, s.catalogGen.Load)
 
-	first := cache.get([]string{"mcp:read"})
-	if again := cache.get([]string{"mcp:read"}); again != first {
+	first := cache.get(scopedGrant([]string{"mcp:read"}))
+	if again := cache.get(scopedGrant([]string{"mcp:read"})); again != first {
 		t.Error("an unchanged catalogue rebuilt its server; the cache is doing nothing")
 	}
 
 	s.SetInstructions("site policy: ask an administrator first")
-	if after := cache.get([]string{"mcp:read"}); after == first {
+	if after := cache.get(scopedGrant([]string{"mcp:read"})); after == first {
 		t.Fatal("the cached server survived a reconfigure, so it still serves the old instructions")
 	}
 }

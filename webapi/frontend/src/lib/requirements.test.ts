@@ -4,7 +4,9 @@ import {
   splitConjuncts,
   standardLabels,
   summarizeRequirements,
+  unwrapExpr,
 } from './requirements';
+import { CONTAINER_GPU_NOTABLE, CONTAINER_GPU_REQUIREMENTS } from './requirements.fixture';
 
 // The real-world expression from a CHTC job pinned to one machine.
 const CHTC_EXAMPLE =
@@ -81,5 +83,57 @@ describe('splitConjuncts / normalizeClause', () => {
     expect(normalizeClause('(MY.WantGpuLab == true)')).toBe(
       'MY.WantGpuLab == true',
     );
+  });
+});
+
+describe('a Requirements expression as the API sends it', () => {
+  // Verbatim from a CHTC job page: the API wraps an unevaluated expression
+  // as "/Expr(...)/", the tree is left-nested ten deep, and it carries
+  // function calls with commas and string literals.
+  const fromApi =
+    '/Expr(((((((((((PoolName == "CHTC") || (substr(Machine, 0, 3) == "gzk")) && ((Machine != "txie-dsigpu4000.chtc.wisc.edu") && (Machine != "gpu4002.chtc.wisc.edu"))) && (Arch == "X86_64")) && HasContainer) && HasDockerURL) && (Memory >= RequestMemory)) && (Cpus >= RequestCpus)) && (countMatches(MY.RequireGPUs, AvailableGPUs) >= RequestGPUs)) && ((FileSystemDomain == MY.FileSystemDomain) || (HasFileTransfer && stringListIMember("osdf", HasFileTransferPluginMethods)))))/';
+
+  it('lists one line per real requirement', () => {
+    const s = summarizeRequirements(fromApi);
+    expect(s.notable).toEqual([
+      '(PoolName == "CHTC") || (substr(Machine, 0, 3) == "gzk")',
+      'Machine != "txie-dsigpu4000.chtc.wisc.edu"',
+      'Machine != "gpu4002.chtc.wisc.edu"',
+      'Arch == "X86_64"',
+      'HasContainer',
+      'HasDockerURL',
+      '(FileSystemDomain == MY.FileSystemDomain) || (HasFileTransfer && stringListIMember("osdf", HasFileTransferPluginMethods))',
+    ]);
+    expect(s.standard).toMatchObject({ memory: true, cpus: true, gpus: true });
+    expect(standardLabels(s.standard)).toEqual(['CPUs', 'memory', 'GPUs']);
+  });
+
+  it('shows the raw expression without the wrapper', () => {
+    expect(summarizeRequirements(fromApi).raw.startsWith('((((((((((PoolName')).toBe(true);
+    expect(unwrapExpr(fromApi).endsWith('HasFileTransferPluginMethods))))')).toBe(true);
+    expect(unwrapExpr('  Arch == "X86_64" ')).toBe('Arch == "X86_64"');
+  });
+
+  it('does not split on operators or parens inside a string literal', () => {
+    const s = summarizeRequirements('/Expr((Name == "a && (b") && (OpSys == "LINUX"))/');
+    expect(s.notable).toEqual(['Name == "a && (b"', 'OpSys == "LINUX"']);
+  });
+});
+
+describe('a container job that asks for a GPU', () => {
+  // The archive page showed no breakdown for a job with this Requirements.
+  // The parser was not the cause -- the page never rendered the section --
+  // but each form here is one a parser could plausibly trip on.
+  it('lists each notable clause and folds the resource checks into one line', () => {
+    const s = summarizeRequirements(CONTAINER_GPU_REQUIREMENTS);
+    expect(s.notable).toEqual(CONTAINER_GPU_NOTABLE);
+    expect(standardLabels(s.standard)).toEqual(['CPUs', 'memory', 'GPUs']);
+  });
+
+  it('keeps a clause it cannot take apart as its own text', () => {
+    // An unbalanced clause: listed as written, and the rest still broken down.
+    const s = summarizeRequirements('/Expr((TARGET.Cpus >= RequestCpus) && TARGET.HasContainer && (Foo == "x")/');
+    expect(s.standard.cpus).toBe(true);
+    expect(s.notable).toEqual(['HasContainer', '(Foo == "x"']);
   });
 });

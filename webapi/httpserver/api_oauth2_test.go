@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -277,53 +276,4 @@ func TestAPIRoutesWWWAuthenticateHeader(t *testing.T) {
 			t.Errorf("WWW-Authenticate header should contain 'Bearer', got: %s", wwwAuth)
 		}
 	})
-}
-
-// TestCollectorRoutesNoAuth verifies that collector routes don't require authentication
-func TestCollectorRoutesNoAuth(t *testing.T) {
-	// Create a logger
-	logger, err := logging.New(&logging.Config{
-		OutputPath: "stderr",
-	})
-	if err != nil {
-		t.Fatalf("Failed to create logger: %v", err)
-	}
-
-	// Create a mock collector
-	collector := htcondor.NewCollector("localhost:9618")
-
-	// Create server with collector but no auth
-	server, err := NewServer(Config{
-		ScheddName:   "test-schedd",
-		ScheddAddr:   "localhost:9618",
-		Collector:    collector,
-		Logger:       logger,
-		OAuth2DBPath: t.TempDir() + "/sessions.db",
-	})
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
-
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/collector/ads", nil)
-	w := httptest.NewRecorder()
-
-	// Use a context to avoid timeout issues with real collector
-	ctx, cancel := context.WithCancel(req.Context())
-	cancel() // Immediately cancel to avoid hanging
-	req = req.WithContext(ctx)
-
-	server.handleCollectorPath(w, req)
-
-	resp := w.Result()
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			t.Errorf("Failed to close response body: %v", err)
-		}
-	}()
-
-	// Collector endpoints should work without authentication
-	// They may fail for other reasons (no collector), but should not return 401
-	if resp.StatusCode == http.StatusUnauthorized {
-		t.Error("Collector endpoints should not require authentication")
-	}
 }

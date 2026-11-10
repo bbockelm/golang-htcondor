@@ -291,6 +291,7 @@ func startIdentityMappedServer(t *testing.T, ssoBaseURL, passwdPath, accessGroup
 func attemptSSOLogin(t *testing.T, baseURL, ssoBaseURL, username, password string) (int, string) {
 	t.Helper()
 	client := &http.Client{
+		Jar:           secureCookieJar(t),
 		Timeout:       30 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
@@ -419,6 +420,37 @@ func completeSSOLogin(t *testing.T, baseURL, ssoBaseURL, username, password stri
 		t.Fatalf("token endpoint returned %d: %s", resp.StatusCode, string(body))
 	}
 	return tok.AccessToken
+}
+
+// secureCookieJar is a browser's cookie jar for a harness that serves
+// plain http. The server's cookies are Secure, which net/http/cookiejar
+// will neither send nor (for the login binding) let a browser flow work
+// without, so the jar files and reads every http URL as its https twin.
+func secureCookieJar(t *testing.T) http.CookieJar {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookie jar: %v", err)
+	}
+	return httpsCookieJar{jar}
+}
+
+type httpsCookieJar struct{ http.CookieJar }
+
+func (j httpsCookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	j.CookieJar.SetCookies(asHTTPS(u), cookies)
+}
+
+func (j httpsCookieJar) Cookies(u *url.URL) []*http.Cookie {
+	return j.CookieJar.Cookies(asHTTPS(u))
+}
+
+func asHTTPS(u *url.URL) *url.URL {
+	c := *u
+	if c.Scheme == "http" {
+		c.Scheme = "https"
+	}
+	return &c
 }
 
 func mustGet(t *testing.T, c *http.Client, rawURL, what string) *http.Response {
@@ -605,12 +637,8 @@ func TestSSOReturnDoesNotFinishWithARedirect(t *testing.T) {
 // the mock IdP and returns what the callback answered with.
 func browserLoginReturn(t *testing.T, baseURL, ssoBaseURL, startURL, username, password string) (int, string) {
 	t.Helper()
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatalf("cookie jar: %v", err)
-	}
 	client := &http.Client{
-		Jar:           jar,
+		Jar:           secureCookieJar(t),
 		Timeout:       30 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}

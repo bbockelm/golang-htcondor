@@ -1,0 +1,1780 @@
+# Findings: Go submit parser vs C++ `SubmitHash`
+
+Everything here was produced by the differential harness in this package
+against `libcondor_utils 26.2.0`. Each entry is encoded in `differ.go`
+(`knownDivergent`) or in a seed's `reason`, so the test suite fails if one
+stops reproducing — a fix flips the case red and gets promoted to parity.
+
+None of these are regressions introduced by the harness; they are the drift it
+found on its first run.
+
+## Behavior-changing
+
+These change what the job does, not just what the ad looks like.
+
+**`ShouldTransferFiles` default.** FIXED. C++ defaults to `"IF_NEEDED"`, Go
+defaulted to `"YES"`. On a pool where the submit and execute nodes share a
+filesystem, the C++ default skips the transfer and the Go default forced it.
+The default is IF_NEEDED here now, which also turned the `ON_EXIT_OR_EVICT`
+promotion below from dead code into the branch it was written to be.
+
+**`Requirements` is a different expression.** FIXED. It was:
+
+```
+cpp: (TARGET.Arch == "<submit arch>") && (TARGET.OpSys == "<submit opsys>")
+     && (TARGET.Disk >= DiskUsage) && (TARGET.Memory >= RequestMemory)
+     && ((TARGET.FileSystemDomain == MY.FileSystemDomain) || (TARGET.HasFileTransfer))
+go:  ((TARGET.Arch isnt undefined) && (TARGET.OpSys isnt undefined))
+     && (TARGET.Memory >= RequestMemory) && (TARGET.Cpus >= RequestCpus)
+```
+
+Go did not pin Arch/OpSys to the submitting machine, dropped the Disk and
+filesystem-domain clauses, and added a Cpus clause C++ does not have. A job
+submitted through Go could match machines `condor_submit` would have excluded,
+and vice versa. `SetRequirements` is mirrored clause for clause now, and the
+generated corpus agrees on every file: **0 mismatches** over the seeds and
+1500 generated submit files.
+
+Four things had to be true before any of it could match.
+
+**It had to run last.** `SetRequirements` is the last call in condor_submit's
+sequence, after the requests, the deferral schedule, the transfer mode, the
+`+Attr` pass and `SetResourceRequirements`. Almost every clause is about an
+attribute one of those just wrote, so it reads the finished AD. Running it
+early is what left it reading `request_memory` out of the submit file -- and
+missing the same request made any other way.
+
+**The clauses have floors.** A clause naming a request attribute is added only
+when the request asks for more than the floor: `RequestCpus = 1` adds nothing,
+`RequestCpus = 2` adds `(TARGET.Cpus >= RequestCpus)`, and the test is on a
+LITERAL -- an expression has no value at submit time, so it always gets its
+clause. Memory's floor is 1 and disk's is 0. A clause demanding at least one
+CPU excludes no machine while making every Requirements longer, and a clause
+over an attribute the job does not carry is undefined, which makes the whole
+expression undefined and the job unmatchable.
+
+**The submitter's own requirements suppresses the generated clause** about the
+same machine attribute, which is why `requirements = TARGET.Memory > 8000` is
+a replacement rather than an addition -- except that it is not, for Memory
+specifically. `SetRequirements` computes `checks_mem` and then uses it for
+nothing but a deprecation warning, so the memory clause is ANDed on anyway.
+Arch, OpSys, Disk, Cpus and the custom resource tags all suppress properly.
+The classification is `GetExprReferences`': a TARGET-scoped reference is a
+machine attribute, an unqualified one is too unless it is one of the three the
+C++ seeds into its scratch ad, and a MY-scoped one is the job's own.
+
+**The disk clause carries a version test.** For a vanilla job it is
+`(versionGE(split(TARGET.CondorVersion)[1], "25.12.0") || (TARGET.Disk >= RequestDisk))`,
+because a starter that new adjusts RequestDisk itself for common files and the
+job should not also enforce it. No other clause is version-gated that way.
+
+Smaller things the comparison settled:
+
+- A custom resource keeps the CASING the submitter used, because the attribute
+  is built from the keyword's own suffix: `request_fpgas` makes `Requestfpgas`
+  and asks about `TARGET.fpgas`, while `request_FPGAs` makes `RequestFPGAs`.
+  The GPU clause comes out of this same loop -- there is no GPU-specific path
+  in `SetRequirements` at all.
+- `scheddinterval` retired with this change, exactly as its entry predicted.
+  The attribute exists only because the deferral window expression names it,
+  and writing that expression is what obliges the job to carry it.
+- The `cuda_version` clause was missing even though the conversion that feeds
+  it was already implemented: `finalizeCUDAVersion` turned "12.1" into 12001
+  and nothing required a machine that supports it. The two are one decision in
+  condor_submit and are one decision here now.
+- A scheduler- or local-universe job takes the machine clauses after all. This
+  parser used to drop them, with a failure message claiming a schedd ad does
+  not carry Arch, OpSys, Disk or Memory. `Scheduler::publish` assigns every one
+  of them; what it does not assign is `HasFileTransfer` or `FileSystemDomain`,
+  and those are the clauses that silently killed DAGMan. condor_submit drops
+  exactly those, via `mightTransfer(JobUniverse)`, and so does this.
+
+**`OPSYS` was the legacy name.** Pinning `TARGET.OpSys` to the submitting
+machine only works if the machine's own name for itself is right, and it was
+not: this library reported `OSX`, which `arch.cpp` assigns to `opsys_legacy`
+while `opsys` is `macOS`. `ARCH` was wrong in the same direction -- `ARM64`
+where HTCondor has no arm64 mapping at all and passes uname's value through,
+giving `arm64` on Apple silicon and `aarch64` on Linux. Harmless while the
+clause only asked whether the attribute was defined; a job that matches nothing
+once the clause names a value.
+
+**The resource requests.** FIXED, and the entry had it backwards. `1` and
+`128` are not Go's invention: they are `JOB_DEFAULT_REQUESTCPUS` and
+`JOB_DEFAULT_REQUESTMEMORY`, which `SetRequestResources` reads for a file that
+names no request, so C++ writes them too. What was left when the defaults were
+measured rather than assumed was one real bug and one measurement artifact.
+
+The bug: **each request keyword also answers to its job attribute's name**,
+because `SetRequestResources` reads every one of them as
+`submit_param(SUBMIT_KEY_Request*, ATTR_REQUEST_*)`. Reading only the lowercase
+keyword meant a file saying `RequestMemory = 777` got `RequestMemory = 128` --
+the configured default, a request the submitter never made and the pool then
+matched and billed them for. `RequestCpus`, `RequestDisk` and `RequestGpus`
+were the same, and so was `RequestMemory = undefined`, which has to leave the
+attribute off and instead left the default on. The keyword still outranks the
+attribute spelling, as `submit_param` tries its first name first.
+
+The artifact: the rest of the difference was the two unparsers. `2 * 2` against
+`(2 * 2)`, `ifThenElse(true,100,200)` against `ifThenElse(true, 100, 200)`,
+`1.250000000000000E+00` against `1.25` -- the same tree, spelled differently,
+which `sameValue` has always compared through `Expr.Equal` and a hand-written
+probe comparing the strings does not. Two of these three entries existed only
+because the probe that found them compared text.
+
+`RequestDisk`'s entry claimed a third thing -- that C++ puts its `MAX(...)` on
+the cluster ad while Go puts a value on the proc. The first half is right and
+the second is not: measured in the oracle's placement mode, C++ carries all
+three requests at proc id -1 and gives proc 1 its own only when the value
+differs there, and this engine reaches the same placement by a different route,
+because proc 0's ad becomes the cluster ad and a later proc that matches it is
+deduped away. `TestResourceRequestsRideOnTheClusterAd` pins that, since the
+requests are `placeAny` and nothing else said where they land.
+
+**`Args` vs `Arguments`.** FIXED, including the value difference this entry
+predicted: running the text through `ArgList` canonicalises it, so
+`arguments = a  b` is `"a b"` and not `"a  b"`. Both halves are under "Fixed"
+below. The prediction was worth making -- the naming fix did expose the value
+difference, exactly here.
+
+**`Cmd` and `UserLog` were relative.** FIXED. C++ resolved the executable and
+the log into absolute paths and Go stored them as written, so a job whose
+`executable` or `log` was relative recorded a path that only resolved from the
+submit directory. The fuzzer found the `Cmd` half unprompted, within seconds,
+from a mutated seed (`eXeCutABle=0queue`). `cmd`, `userlog` and `iwd` are
+compared now; the rule they follow is written up in `submit.go` alongside
+`fullPath`.
+
+**`queue 2 in (a b)` produces the wrong number of jobs.** C++ makes 4 procs
+(2 per item over 2 items); Go makes 2.
+
+## Late materialization
+
+`max_materialize`, `max_idle` and `materialize_max_idle` make `condor_submit`
+submit a **job factory**: it sends the cluster ad, a submit digest and the
+itemdata rows, and the schedd materializes procs itself, keeping at most
+`max_idle` of them idle at a time. None of this needs a schedd to check —
+`want_factory_submit()` and `make_digest()` are `SubmitHash` methods, so the
+oracle reports the whole client half.
+
+This was a gap and is now implemented. `SubmitFile.SubmitLate` sends a factory
+when the file asks for one and materializes procs itself when it does not;
+`Schedd.Submit` uses it when the schedd advertises `LateMaterialize`, and
+falls back to eager materialization when the schedd refuses or is too old,
+which is what `condor_submit` does — those keywords ask for a factory, they do
+not insist on one. `TestGoLateMaterializationMatchesCondorSubmit` compares the
+decision, the limit, the loop variables, the itemdata rows and the digest
+against the oracle for every seed in `factorySeeds`.
+
+`max_materialize` is **not** an ad attribute on either side.
+`want_factory_submit` reads it and `condor_submit` passes it to
+`set_Factory()` as a protocol argument, so there is nothing on the ad to
+compare. The test asserts the oracle really does set an attribute before
+checking Go for it, so a case like this cannot be mistaken for a Go bug again.
+
+### What the digest turned up
+
+**The itemdata filename is the one thing a client cannot compute.** The queue
+statement at the end of the digest reads the rows back from a file the *schedd*
+named in its reply to `SendMaterializeData`, so the digest can only be finished
+after the rows have been sent. `oracle.Factory` takes that filename as an
+argument to stand in for the schedd; `JobFactory.Digest` takes it for real.
+
+**`queue 5` puts `Item=` in the digest.** `condor_submit` reads the first row
+before building the digest, and reading from an empty list defines the macro
+`Item` as empty. `Item` is not a prunable keyword, so that empty definition
+lands in the digest. Nothing documents it and nothing would suggest it; it came
+out of running the oracle.
+
+It is a definition, not a default: a submit file that sets `Item = mine` and
+then writes `queue 5` has that value **replaced** by the empty one, so the
+digest carries `Item=` and the schedd never sees `mine`. Go kept the file's
+value until a seed caught it. Where the key sits also follows from this —
+an `Item` the file assigned keeps its sorted position, while one only the
+empty definition created lands in the table's unsorted tail, after every key
+the file wrote.
+
+**`$(ItemIndex)` is frozen to `0` for every job the factory makes.**
+`ItemIndex` and `Row` are two names for one macro in the submit hash, but
+`per_proc_keys` protects only `Row`, so `ItemIndex` is expanded while the
+digest is built — and no row is live then, so it takes the unlive default,
+`0`. A submit file numbering its output with `$(ItemIndex)` therefore gets
+`o.0` on every proc under late materialization and the real row number
+without it. Go matches it, because a digest that differed would be the worse
+bug.
+
+**Keys are written in the macro table's order, which is sorted
+case-insensitively — except for the tail.** `Item` above is appended after the
+sort, because the hash is sorted when the file has been read and `Item` is
+defined after that.
+
+**The inline item list splits on whitespace as well as commas.**
+`queue a,b in (1 2, 3 4)` is four rows of one field, not two of two. The `from`
+form splits on lines, so `from (1 2\n3 4\n)` is the two-field case.
+
+### What is not covered
+
+The digest expands any macro that is not per-proc, which includes the submit
+hash's own *defaults* — `ARCH`, `OPSYS*`, `Day`, `Month`, `JobId`,
+`JobListId`, `IsLinux`, `IsWindows`, `Request_CPUs`, `Request_Memory`. Go's
+config does not define that family, so a submit file referring to one of them
+would produce a different digest. `ItemIndex` was the member of it this work
+hit and fixed; the rest are untested in either direction and are a submit-wide
+difference rather than a factory one, since the same expansion feeds an
+ordinary job ad.
+
+`SubmitRemote` does not use factories. Remote submission spools files per proc
+and hands the proc ads back to the caller to do it, and a factory has no proc
+ads to hand back.
+
+A queue statement slice (`queue x from [1:10] file`) would belong in the
+digest's queue statement. The Go grammar does not accept one, so
+`JobFactory` reads the field rather than assuming it is empty, and a grammar
+that learns to accept one writes it out instead of silently submitting every
+row.
+
+## Parse-acceptance divergence
+
+Reported by `TestSeedParseAcceptance`, which logs rather than fails — these are
+real, but failing on them would bury the semantic findings above. No seed
+reaches it today.
+
+## `queue matching` has the quoting and the lexing bugs `from` just lost
+
+`queue matching "<glob>"` globs the pattern *with* the quotes in C++, and
+`queue matching <glob>` — unquoted — is the spelling that works. Measured
+against the oracle, with a directory holding two `.txt` files:
+
+```
+queue matching DIR/*.txt     cpp: 2 procs      go: syntax error at the '/'
+queue matching "DIR/*.txt"   cpp: 0 matches    go: globs DIR/*.txt
+```
+
+So both halves of the `from` finding below apply again to `matching`, which
+still goes through the old `MATCHING IDENT | MATCHING STRING` grammar rules.
+Fixing it also means handling the `files`/`dirs`/`any` qualifiers, which this
+parser does not implement, so it is recorded here rather than folded into the
+`from` change.
+
+## The queue line is not macro-expanded
+
+`SubmitHash::parse_q_args` runs `expand_macro()` over the whole queue line
+before it parses anything, so a macro can produce the item list itself:
+
+```
+L = a b
+queue in ($(L))
+```
+
+is two procs in C++ and one -- whose item is the literal text `$(L)` -- in Go.
+The same goes for `queue from $(F)`, where C++ opens the file `$(F)` names and
+Go looks for a file called `$(F)`. Expanding the queue line needs the macro
+table at lex time, which this parser does not have at that point, so it is
+recorded rather than fixed.
+
+## The oracle was under-reporting until it called config()
+
+`condor_submit` calls `config()` before it builds a `SubmitHash`, and parts of
+the submit code reach `param()` as a result. The shim did not, so those lookups
+ran against an uninitialized config. Two consequences, both fixed:
+
+- `make_job_ad` dereferenced what `param()` returned, so a submit file as short
+  as `container_image = docker://busybox` + `queue` took the whole fuzz process
+  down. Real `condor_submit` parses the same file fine. The oracle was missing
+  a step the tool performs, and it was twice mistaken for a bug in
+  `libcondor_utils` on that evidence.
+- The oracle emitted **fewer** attributes than `condor_submit` does, so real
+  divergences were invisible. Initializing config surfaced exactly one:
+  `JobLeaseDuration`, which C++ sets to 2400 and Go omits (confirmed against
+  `condor_submit -dry-run`, not just the oracle).
+
+`CONDOR_CONFIG` is forced to an empty file so `param()` answers from built-in
+defaults only — the oracle has to give the same answer on a laptop with a
+populated `/etc/condor` as on a CI runner with none.
+
+## Attributes C++ sets and Go does not
+
+Two are left, and both are deliberate:
+
+- `JobSubmitMethod` — C++ writes 0, which is `JSM_CONDOR_SUBMIT`. The
+  attribute names the TOOL a job came from, and `proc.h` has no value for
+  "a Go program using this library", so writing anything there would
+  attribute these jobs to a tool that never saw them.
+- `Environment` — C++ always emits it (empty when unspecified); Go omits it
+  when the submit file is silent. It belongs with the `Env`/`Environment`
+  V1-versus-V2 work, not before it.
+
+Everything else that was here — the per-job bookkeeping (`CommittedTime`,
+`Cumulative*`, `Num*`, `*SuspensionTime`, `RemoteSysCpu`, `ExitStatus`,
+`ExitBySignal`, `CurrentHosts`, `LastSuspensionTime`, `TotalSuspensions`),
+`MyType`/`TargetType`, and the `JobPrio`/`JobNotification`/`LeaveJobInQueue`/
+`JobLeaseDuration` defaults — is under "Fixed" below.
+
+## Attributes Go sets and C++ does not
+
+`TransferExecutable`, `EmailAttributes`, and a `RequestDisk` that C++ places
+on the cluster ad as a `MAX(...)` expression instead. (`JobRunCount` was
+here and is fixed: it is the schedd's, from the job's shadow exceptions, and
+Go no longer writes a 0 that claimed the job had run no times.)
+
+## Fixed
+
+**A quoted item file had its quotes stripped.** `queue from "items.txt"`
+opens a file whose name *begins and ends with a double quote* in C++:
+`parse_queue_args` assigns the remainder of the line to `items_filename`,
+trims it, and hands it to `Open_macro_source`; nothing between ever looks at
+quoting. Measured against the oracle, with the files really on disk:
+
+```
+queue from DIR/plain.txt          cpp: 2 procs   (the file is found)
+queue from "DIR/plain.txt"        cpp: can't open file "DIR/plain.txt"
+queue from DIR/"quoted.txt"       cpp: 2 procs   (a file named "quoted.txt")
+queue from DIR/has space.txt      cpp: 2 procs
+queue from "DIR/has space.txt"    cpp: can't open file "DIR/has space.txt"
+```
+
+Single quotes behave identically, and a quote anywhere else in the line is an
+ordinary filename character. The last two lines are the ones worth keeping in
+mind: **a path containing a space is written without quotes**, and that is the
+only spelling that works. This parser used to strip a surrounding quote pair,
+which was recorded here as a chosen divergence on the grounds that quoting was
+the only way to express such a path. That reasoning was wrong -- the verbatim
+rule *is* how such a path is expressed -- so the stripping is gone and the two
+parsers agree.
+
+The one thing that depended on the stripping was internal: the pre-pass that
+rewrites `queue VARS from ((rows))` into `queue VARS from <tempfile>` quoted
+the temp path, because the grammar once accepted only an IDENT or a STRING
+there. It writes the path bare now. A temp path containing a space is pinned
+by a test of its own, since every temp directory a developer is likely to have
+is space-free and nothing else would notice.
+
+**An inline item list had to be parenthesised.** HTCondor anchors the queue
+parse on the `in`/`from` keyword and takes the rest of the line as the item
+list -- `parse_queue_args` only looks for a `(` to decide whether the list is
+bracketed or spans lines, never to decide whether there is one. So
+`queue in a b` is two jobs, and `queue 2 in a b` is four. Go's grammar
+required the parentheses and failed the file, which for a submit file that
+was *not* rejected elsewhere meant the user got an error where
+`condor_submit` would have run their jobs. `queue in 0 00` was the fuzzer's
+reproducer; `queue name in (alice bob)` and `queue name from ( ... )`, both
+listed here as parse-acceptance divergences, had already been fixed by the
+split-items change and are parity seeds now.
+
+The tail of an `in`/`from` is read by the lexer now, the way HTCondor reads
+it: split on whitespace and commas for `in`, taken whole -- quotes, spaces
+and all -- as the item file's name for `from`. Two details the oracle settled:
+a leading `files`/`dirs`/`any`/`table` or `[slice]` only counts as a qualifier
+when something on the line terminates it, so `queue in files` is the single
+item "files" while `queue in files x` is an error; and an item list that is
+empty (`queue 2 in ()`) queues the count with every loop variable expanding to
+nothing, rather than queueing nothing at all -- Go used to reject that file
+outright. The qualifiers themselves are still unimplemented, and a queue line
+that uses one is now rejected rather than read as items, because reading
+`[1:2]` as an item would silently submit the wrong jobs.
+
+**Whitespace before a line-continuation backslash.** `getline_implementation`
+trims the physical line with `isspace()` *and then* looks for the trailing
+backslash, so whitespace sitting before the backslash is kept, the
+continuation is joined on with nothing between — the next line's leading
+whitespace having been trimmed in turn — and whitespace *after* the backslash
+still continues the line. For
+
+```
++Note = "a   \
+   b"
+```
+
+C++ produces `"a   b"`; Go trimmed the run to nothing and inserted one space,
+producing `"a b"`, so any value assembled across lines — an `arguments`, a
+`requirements`, a `transfer_input_files` list — reached the job with different
+text than `condor_submit` would have given it. Files with exactly one space
+before the backslash agree by coincidence, which is why this hid for so long,
+and why both of the lexer's continuation tests passed throughout.
+
+The inserted space was the same bug seen from the other end, and the fuzzer
+found that end too, in
+
+```
+eXeCutABle=\
+queue
+```
+
+where C++ contributes nothing between the two halves and resolves `Cmd` to
+`<iwd>/queue`, while Go contributed its separator and produced `<iwd>/ queue`
+— a path with a space in it, which cannot exist. One rule covers both: the
+join never inserts anything, and what survives around it is decided by the
+trim that has already happened on each side.
+
+The lexer now follows that physical-line model: trim the line back to where
+it started, then test its last character for the backslash, then join the
+next line — itself trimmed of its leading whitespace — straight on.
+
+Two further rules fell out of writing it that way, each with a test. A blank
+continuation line ends the value and does not re-trim what came before it, so
+`X = v   \` followed by an empty line keeps the three spaces. And the
+backslash test looks at the whole logical line assembled so far, not at the
+physical line just read — `end_ptr[-1]` in the C++ — so `X = a\\` followed by
+an empty line and then `b` continues onto `b` rather than stopping.
+
+**`+a-b = 7`, `-Foo = 7`, and `+A =`.** All three are the same code path in
+`Parse_macros`: a submit line whose name begins with `+` or `-` becomes
+`insert_macro("MY." + name+1, (*name=='+') ? rhs : "")`, with no
+`is_valid_param_name()` anywhere. Three consequences, none of which Go had:
+
+- the attribute name is whatever was scanned before the first whitespace or
+  operator, so `+a-b = 7` makes an attribute literally named `a-b` — a name
+  the same file may not give a macro. Go rejected the file.
+- `-Attr` is **not** the inverse of `+Attr` and removes nothing: it stores an
+  empty value, and `SetForcedAttributes` turns an empty value into the literal
+  `undefined`. `-Foo = 7` puts `Foo = undefined` on the ad, and a `-Foo` after
+  a `+Foo` overrides it. The Go lexer had no `-` token at that position at all
+  and rejected the file.
+- an empty value means the same thing whichever sigil wrote it, so `+A =`,
+  `MY.A =` and `+A = $(nosuch)` all set `A = undefined`. Go left the attribute
+  off the ad, which is a different answer for any expression that reads it:
+  absent means the attribute is inherited from the cluster ad, `undefined`
+  means it is not.
+
+**A non-ASCII parameter name was accepted.** `condor_isidchar()` compares
+against `'a'..'z'`, `'A'..'Z'` and `'0'..'9', so `café = 1` fails
+`is_valid_param_name()` and HTCondor rejects the file; the Go lexer read the
+name with `unicode.IsLetter` and accepted it, defining a macro that nothing
+else could refer to. The charset is ASCII here now. A job **attribute** name
+is the opposite case and was already right: `+café = 1` is accepted by both,
+because the `+` form skips the check.
+
+**The VM and Xen keywords were stored under their own names.** `vm_memory`
+wrote `VM_Memory`, `vm_vcpus` wrote `VM_VCPUs`, `vm_disk` wrote `VM_Disk` and
+the `xen_*` keywords wrote `Xen_*`. Nothing in HTCondor reads any of those, so
+the submit file looked honoured and the vmgahp built the VM from its own
+defaults: a job that asked for 8 GB and 4 CPUs got whatever the execute node
+defaults to, with no error anywhere to say the request had been dropped. The
+attributes are HTCondor's now — `JobVMMemory`, `JobVM_VCPUS`, `JobVMType`,
+`JobVMNetworking`, `JobVMNetworkingType`, `JobVMCheckpoint`, `JobVM_MACADDR`,
+`JobVMVNCConsole`, `VMPARAM_vm_Disk`, `VMPARAM_No_Output_VM` and
+`VMPARAM_Xen_*` — and the `RequestMemory` a VM job inherits from its VM points
+at `MY.JobVMMemory` rather than at an attribute that does not exist.
+
+Four things the names alone did not cover, each read off `SetVMParams()` and
+confirmed against the oracle:
+
+- **`vm_type` gates the rest.** It is stored lower-cased, and it decides what
+  `condor_submit` reads at all: the `xen_*` keywords only for `xen`, `vm_disk`
+  only for `xen` or `kvm`. Under any other type those keywords are silently
+  dropped, and Go now drops them too. `vm_networking_type` is read only when
+  `vm_networking` is on.
+- **Three attributes are always present.** `JobVMCheckpoint`,
+  `JobVMNetworking` and `JobVMVNCConsole` land in every VM job ad, false when
+  the submit file says nothing, and `JobVM_VCPUS` defaults to 1.
+- **`vm_memory` and `vm_vcpus` fall back to the request.** The submit macro
+  table gives them built-in defaults of `$(Request_Memory)` and
+  `$(Request_CPUs)`, so a VM job that only sets `request_memory` gives its VM
+  that much memory. The fallback is the macro's *text*, not the evaluated
+  request, so `request_cpus = 2*2` leaves the VM with two CPUs.
+- **`xen_kernel` is not always a file.** `included` boots the kernel out of
+  the disk image and `vmx` asks for hardware virtualization; neither is a
+  kernel file, so `xen_initrd` and `xen_root` do not apply to them, and `vmx`
+  sets `JobVMHardwareVT`. `xen_kernel_params` loses one layer of quoting.
+
+`vm_vnc` and `vm_no_output_vm`, which Go had no code for at all, are
+implemented as part of the same pass.
+
+The generator used to write only a kvm VM, on the reasoning that xen needs a
+kernel and a root device of its own. That is about booting a VM; `SubmitHash`
+decides textually and stats nothing, so `xen_kernel = included` or `vmx` needs
+no companion at all and any other value is simply *taken for* a kernel file,
+which only makes `xen_root` required. The vm prelude now picks a type and
+emits that type's companions, so the whole `VMPARAM_Xen_*` family is compared
+by the oracle-backed sweep rather than by hand-written expectations. The
+keyword-coverage count does not move -- it counts a keyword as reached when it
+appears in the corpus text, and `xen_kernel` appeared all along, in files
+SubmitHash then rejected. What moves is what is compared: over the 600-file
+sweep, `VMPARAM_Xen_Kernel`, `_Root`, `_Initrd` and `_Kernel_Params` go from
+never reaching an accepted ad to 15 or so each.
+`submit_vm_test.go` is the same ground covered without the oracle, for CI.
+
+**The accounting group was charged to the wrong entity.** The accountant
+reads `AccountingGroup` as `<group>.<user>`, so a value with no dot in it is
+a submitter *alias*, not a group. Go stored `accounting_group = Proj-1`
+verbatim, which charged a submitter named `Proj-1` and left the real group's
+quota, priority factor and share untouched — the job ran outside the group it
+said it belonged to. C++ completes the group with a user and always has:
+`accounting_group_user` when the file gives one, otherwise the submitting
+account (`SubmitHash::init_base_ad`'s `submit_username`, which is
+`condor_submit`'s `my_username()`). Nothing looks for a dot already in the
+group, so `accounting_group = Proj.bob` becomes `Proj.bob.<user>`, a nested
+group. `accounting_group_user` alone, with no group, charges that user by
+name. `AcctGroup` and `AcctGroupUser` are written alongside, and neither
+existed in Go's ads.
+
+`nice_user` came with it: it is shorthand for `accounting_group =
+$(NICE_USER_ACCOUNTING_GROUP_NAME)` (default `nice-user`) plus a default
+`MaxJobRetirementTime` of 0, and a `nice_user` job with a group of its own
+keeps its group and ignores the flag. Go set a `NiceUser` attribute HTCondor
+does not read and no accounting group at all, so a job asking to be run at
+low priority was charged — and scheduled — as an ordinary one. The stray
+`NiceUser` outlived that fix and is gone too; see "`nice_user` left a
+`NiceUser` attribute behind" below.
+
+The submitting account is host-derived, so the Go parser now takes it as a
+parse option (`SubmitParseOptions.SubmitUser`) and falls back to the account
+running the parse, the way `condor_submit` does. The fuzzer passes
+`oracle.SubmitUser`, the same name the shim pins the C++ side to, which is
+what makes `AccountingGroup` comparable at all.
+
+**A docker image did not make a container job.** `WantDocker` marks the
+docker *universe* and nothing else; `docker_image` on its own is an implicit
+**container** job, which C++ marks with `WantContainer` plus the image-kind
+flag `WantDockerImage`. Go wrote `WantDocker` for every `docker_image`
+whatever the universe, so a `universe = container` job (and a plain vanilla
+one naming an image) asked for a docker execute node instead of a container
+one — on an Apptainer-only pool, the OSPool and CHTC norm, it matches
+nothing and sits idle. Go also wrote the flag for universes that ignore the
+keyword entirely; the want-flags are now set only where the container
+topping applies (vanilla and local), which is the rule `SetUniverse` follows.
+
+That universe gate was also the recorded `WantSIF` divergence: Go classified
+a `container_image` correctly but wrote the flag for a vm, grid or scheduler
+job too, where C++ never reads the keyword. `WantSIF`, `WantDockerImage` and
+`WantSandboxImage` now agree for every image kind in every universe, so all
+three are compared from here on. `ContainerImage` itself followed later, in
+the generated corpus's fixed material.
+
+**`machine_count` asked for one machine.** It is not an attribute: HTCondor
+turns it into the `MinHosts`/`MaxHosts` pair the dedicated scheduler reads,
+and only for a parallel or MPI job. Go wrote `MachineCount`, which nothing
+reads, and the pair defaulted to 1 — a parallel job that asked for 16
+machines got one. `node_count` is the alternate spelling. Every other
+universe gets the default pair of 1, which Go did not write either; MPI is
+the one universe with no default, because an MPI job must say how many
+machines it wants.
+
+**Three more attributes nothing read.** `remote_initialdir` is `RemoteIwd`
+(stored as written — it names a directory on a machine this one knows
+nothing about, so it is not resolved against `Iwd`), `checkpoint_exit_code`
+is `SuccessCheckpointExitCode`, and both `concurrency_limits` and
+`concurrency_limits_expr` are `ConcurrencyLimits`. A job that named a
+concurrency limit consumed none of it and was throttled by nothing; the list
+form is lower-cased, sorted and comma-joined now, because the negotiator
+looks the names up literally and `"A, b"` is not the key `"a,b"`.
+
+**`request_<resource>` is generic, and Go only knew three.** `request_foo = N`
+becomes `RequestFoo` in C++ — that is how custom resources (licenses,
+site-defined slot types) are requested. Go understood `cpus`, `memory`, `disk`
+and `gpus` and silently dropped everything else, so a job asking for a custom
+resource was submitted without the request. Found by the fuzzer, from
+`request_A0 = queue`. Go now runs the same generic pass: `Request` plus the tag
+exactly as written, value stored as an expression. The `request`
+`knownDivergentPrefix` entry that excused it is gone, so these attributes are
+compared from here on.
+
+**A submit file written on Windows kept its carriage returns.**
+`getline_implementation` trims the whole line with `isspace()` before it is
+split into name and value, so the `\r` of a CRLF ending never reaches a value.
+The Go lexer trimmed only `" \t"`, so
+
+```
+executable = /bin/sleep\r\n
+```
+
+gave `Cmd = "/bin/sleep\r"` — a path that cannot be executed — and `log = j.log`
+a `UserLog` nobody can open. The lexer now trims and skips HTCondor's set
+(`" \t\r\v\f"`, `\n` excluded because it ends the value) at both ends of a
+value. A `\r` away from the end of the line is not trailing whitespace and is
+still kept, on both sides.
+
+**A macro name starting with a digit silently truncated the file.**
+`is_valid_param_name()` accepts any run of `condor_isidchar()`
+(`[A-Za-z0-9_./]`) and says nothing about the first character, so `0 = x`,
+`0abc = x` and `a/b = 1` all name macros and `condor_submit` accepts them. The
+Go lexer read `0` as a number and `/` as illegal, the grammar rejected the
+line, and — because it has no error production and a default reduction had
+already stored the statements read so far — `config.Parse` returned the
+*truncated* file with a nil error. A user who wrote one line the lexer disliked
+lost that line and every submit command after it, without being told.
+
+Two changes. The lexer now scans the first token of a statement as HTCondor
+scans a name: the run of name characters before the first whitespace or
+operator. And `ParseSubmitFile` uses `config.ParseStrict`, so a line that is
+genuinely bad fails the file the way HTCondor's does, instead of being returned
+as a short one. An illegal name such as `a-b = 1` is rejected by both sides.
+
+The same charset governs a job **attribute** name, which `+Attr` and `MY.Attr`
+both reach — `Parse_macros` builds `"MY." + name` from the same scan, without
+running `is_valid_param_name` on it. `+0 = 7`, `+0.5 = 7` and `MY.0 = 7` all
+set attributes in C++; Go rejected the first two (a separate site: the lexer
+required a Go identifier after the `+`) and, before the statement-start fix,
+dropped the third. The token after a `+` is now read with the same scan.
+
+What remains, recorded as seed reasons: `+a-b = 7` makes an attribute `a-b` in
+C++, since that form skips validation, where Go rejects the file; and submit's
+`-Attr` form has no `-` token in the Go lexer at all, so `-Foo = 7` is rejected
+where C++ accepts it.
+
+**A job evicted for using too much memory was never retried with more.** That
+is what `retry_request_memory`, `retry_request_memory_max` and
+`retry_request_memory_increase` are for, and the Go parser implemented none of
+them, so a submit file that asked for automatic retry got a job that went on
+hold on its first eviction exactly as if the file had never mentioned it.
+
+The feature is not a policy expression. The job carries a job **transform**, as
+text, in `TransformBody_RequestMemory`, and names `RequestMemory` in
+`TransformOnEvict` so the schedd runs that transform when the job is vacated.
+The transform's own `REQUIREMENTS` line is what keeps it from firing on every
+eviction: it runs only for vacate sub-code 102, the one that means the job went
+over its memory request. A body nothing names in `TransformOnEvict` is never
+run, which is why both halves have to be written.
+
+Four things the keyword names do not show:
+
+- **`retry_request_memory_max` alone is not a maximum.** It is a single retry
+  value, and the job ad gets no `MaxRequestMemory` at all — just
+  `SET RequestMemory <value>`. `MaxRequestMemory` and `NextRequestMemory`
+  appear only when an *increase* is given as well, because they are the two
+  halves of `EVALSET RequestMemory MIN({NextRequestMemory, MaxRequestMemory})`.
+  `NextRequestMemory` is an expression **over** `RequestMemory`
+  (`RequestMemory + 128`), which is what makes each retry larger than the last;
+  the ceiling is what stops it.
+- **An increase with no ceiling is not an expression.** There is nothing to
+  stop it growing, so condor_submit evaluates it once, against the request the
+  job starts with, and stores the single number: `request_memory = 100` with
+  `retry_request_memory_increase = 128` is `SET RequestMemory 228`, not
+  `RequestMemory + 128`.
+- **`request_memory = 100, 2048` is the same feature**, a second value on the
+  request itself, and it supersedes the `retry_` commands because
+  condor_submit never reads them in that case. A list of three or more values
+  of either spelling becomes `RetryRequestMemory` plus an index the transform
+  walks. Go rejected the comma outright before this, so the file did not parse.
+- **The whole family is reachable only when `request_memory` is a size.**
+  `request_memory = ifThenElse(...)` or a VM job's `MY.VM_Memory` takes it out
+  of play, since the transform has no number to grow from.
+
+The transform body is **text inside a job attribute**, which makes the
+spelling of any expression in it load-bearing in a way an expression-valued
+attribute's is not. `retry_request_memory = MAX({RequestMemory, MemoryUsage})
+* 2` has to reach the schedd as `MAX({ RequestMemory,MemoryUsage }) * 2`, the
+way HTCondor's own unparser writes it, where Go's `Expr.String()` writes
+`(MAX({RequestMemory, MemoryUsage}) * 2)` — same tree, different text, and the
+differ caught it. Both sides also reject what the other rejects: a sequence
+that does not increase, an increment that is zero or negative, and an increment
+that is an expression naming no `RequestMemory` (`MemoryUsage * 2` would hand
+every retry the same value).
+
+Deliberately left: the disk half of the same C++ function — `retry_request_disk`
+and the second value of `request_disk = a, b` — and `on_evict_checks`, which is
+the other writer of `TransformOnEvict`. Because `on_evict_checks` is still
+unimplemented, `transformonevict` stays in `knownDivergentGenerated` and the
+sweep cannot compare it; `TestOnEvictMemoryTransformMatchesOracle` compares it
+directly on files that use no `on_evict_checks`, so what the retry family
+writes there is checked even though the sweep skips the attribute. The
+`SUBMIT_REQUEST_MISSING_UNITS` warning, and the warning that
+`retry_request_memory_increase` is ignored when the list form is used, are not
+reproduced: the Go parser has nowhere to put a warning, and neither changes the
+ad.
+
+## Cosmetic
+
+`Rank`: both sides store the same expression, and the default is the real
+`0.0` on both. What was left was the harness, which rendered a Go value with
+`Expr.String()` -- a debugging form that prints a whole-number real without
+its decimal point (`0.0` reads back as the integer `0`) and parenthesises
+every binary operation. The harness renders with `Expr.Unparse()` now, the
+reference unparser, and the entry is gone along with the five real-valued
+counters and the two GPU capability attributes that were recorded for the
+same reason and nothing else. Eight of the inventory's entries were this one
+rendering choice.
+
+That is worth stating plainly, because for as long as it stood it argued the
+wrong way about the parser: a comparison that cannot print one side's values
+faithfully manufactures differences, and eight of them looked like parser
+bugs. The underlying `rank` finding was real; the eight recorded entries that
+outlived it were the harness describing itself.
+
+The finding underneath it was not cosmetic at all: `rank = Memory` reached the
+ad as the *string* `"Memory"`, which the negotiator cannot rank by, and
+`Expr.String()` printed that string unquoted so the two sides looked identical.
+It is fixed, and `TestRankIsAnExpression` pins the type.
+
+# Findings from the generated corpus
+
+Everything below came from `FuzzSubmitGenerated` and its fixed sweep, which
+build submit files from HTCondor's own keyword table instead of mutating text.
+Coverage went from 17 of 258 submit keywords to 253, and the comparison then
+reached 167 attributes it had never seen.
+
+Each one is recorded in `knownDivergentGenerated` in `differ.go`, so a fix
+turns the sweep red and gets promoted the same way as everything above.
+
+## Go writes the submit keyword's name as the attribute name
+
+This was the largest class and the most misleading, because the ad looks
+populated and nothing reads it: a job submitted through the Go parser carried
+the setting under a name HTCondor does not use.
+
+Every member of it is fixed: the cron and retry attributes, the VM and Xen
+family, the accounting group, the container want-flags, the machine count,
+`remote_initialdir`, `checkpoint_exit_code` and the concurrency limits. See
+"Fixed" above for what each one did to a job, and `differ.go` for the drift
+that is left.
+
+## Values that differ where both sides set the attribute
+
+- **`JobLeaseDuration` floor.** C++ raises a short lease to its 20-second
+  minimum; Go stores whatever was written.
+- **Quote stripping.** `file_remaps` is an `f_strip_quotes` keyword: C++
+  removes the surrounding quotes, Go keeps them inside the stored string.
+  `on_exit_hold_reason` and `periodic_hold_reason` were listed here too and
+  do not belong: `oracle.Keywords()` reports them as
+  `f_as_expr | f_special_periodic`, nothing strips anything, and the quotes
+  vanish because the value is parsed. See "A hold reason was stored as text"
+  under "Fixed".
+
+- **`KillSig` becomes a number.** C++ keeps the name (`"SIGTERM"`); Go
+  converts it to `15`. Same for `remove_kill_sig`.
+- **Quote stripping.** `file_remaps`, `on_exit_hold_reason` and
+  `periodic_hold_reason` are `f_strip_quotes` keywords: C++ removes the
+  surrounding quotes, Go keeps them inside the stored string.
+- **List canonicalization, in both directions.** `ec2_tag_names` is
+  `f_as_list`, so C++ canonicalizes the separators and Go does not;
+  `encrypt_input_files` and its three siblings are `f_as_string`, so C++
+  stores them verbatim and Go canonicalizes. The file transfer matches these
+  literally.
+
+- **List canonicalization, in both directions.** `concurrency_limits` is
+  `f_as_list`, so C++ canonicalizes the separators and Go does not;
+  `encrypt_input_files` and its three siblings are `f_as_string`, so C++
+  stores them verbatim and Go canonicalizes. The negotiator and the file
+  transfer both match these literally.
+
+- **`concurrency_limits` and `ec2_tag_names`** are not list-flagged keywords:
+  `SetConcurrencyLimits` lower-cases, validates and SORTS the names, and
+  `handleAVPairs` collects the EC2 tags from the `ec2_tag_<Name>` macros as
+  well. Go stores the text it was given in both cases, and the negotiator
+  matches limit names literally.
+- **`transfer_input` / `transfer_output` / `transfer_error` with no file
+  named** get one answer for proc 0 and a different one for every proc after
+  it -- from C++, for a single submit file. `SetStdout` reads the transfer
+  flag out of the job ad before applying the keyword, and only consults the
+  std file `if (value || ! job->Lookup(ATTR_JOB_OUTPUT))`. Proc 0 has neither,
+  so the empty file name clears the flag and `TransferOut = false` is written
+  -- into the cluster ad. Proc 1 inherits that false, the keyword's `true`
+  now differs from it, and the std-file check is skipped because the ad
+  already carries `Out`, so proc 1 and everything after it get
+  `TransferOut = true` plus a `StreamOut = false` that proc 0 does not have.
+  The same holds for stdin and stderr. Go writes proc 0's answer for every
+  proc; reproducing the drift would mean reproducing the stale state that
+  causes it. `TestStdFileTransferMatchesOracle` pins both halves: every file
+  that names its std files agrees attribute for attribute, and in the
+  divergent case Go is self-consistent across procs and matches C++ on proc 0.
+
+  The earlier reading of this, that the three `stream_*` keywords produce
+  opposite `Transfer*` booleans, no longer reproduces: with the file named or
+  not, both sides now write the same values.
+- **Iwd resolution, again.** The `Cmd`/`UserLog` finding generalized to every
+  path-valued keyword the Go parser implements; see "Grid credential and data
+  files were stored as written" under "Fixed". What is left of it is the
+  `aws_`/`gs_`/`s3_` spellings of the access-key files, which Go does not
+  implement at all — and which C++ does *not* resolve, since they are plain
+  `f_as_string` table entries rather than grid keywords.
+
+- **Iwd resolution, again.** The known `Cmd`/`UserLog` finding generalizes to
+  every path-valued keyword the Go parser does implement. C++ resolves them
+  against `Iwd`; Go stores them as written. The grid family's own file
+  keywords are fixed, below.
+
+- **List canonicalization, in both directions.** `concurrency_limits` and
+  `ec2_tag_names` are `f_as_list`, so C++ canonicalizes the separators and Go
+  does not; `encrypt_input_files` and its three siblings are `f_as_string`, so
+  C++ stores them verbatim and Go canonicalizes. The negotiator and the file
+  transfer both match these literally.
+- **`mount_under_scratch`** stays a string in C++; Go coerces it to a boolean.
+- **`want_graceful_removal = undefined`** stays undefined in C++; Go coerces
+  it to `false`.
+- **Iwd resolution, again.** The known `Cmd`/`UserLog` finding generalizes to
+  every path-valued keyword the Go parser does implement:
+  `azure_auth_file`, `gce_auth_file`, `gce_json_file`, `ec2_user_data_file`,
+  `ec2_key_pair_file` and the access-key files. C++ resolves them against
+  `Iwd`; Go stores them as written.
+- **`Env` vs `Environment`.** The Args/Arguments naming split has a twin: for
+  V1-shaped environments Go emits `Env`, C++ emits `Environment`.
+
+## Keywords with no Go implementation at all
+
+What is left in `knownDivergentGenerated` under this heading is the
+EC2/GCE/Azure grid settings and the container-image family. Every other
+family that was here is fixed and is under "Fixed" below: the tool-daemon
+(TDP), buffer, Java, noop-job, parallel-script and submit-event-note
+families, the whole `kill_sig` family, `periodic_vacate`, the `*_subcode`
+pair, `core_size`, `stack_size`, `keep_claim_idle`,
+`max_job_retirement_time`, `next_job_start_delay`, the `allowed_*_duration`
+pair, `manifest`, `output_destination`, `output_directory`,
+`primary_unix_group`, `jobset`, `dag_node_name`, the GPU request family,
+`scitokens_file`, `project_name`, `delegate_job_GSI_credentials_lifetime`
+and `WantParallelScheduling`.
+
+The count this section used to open with ("about 110 attributes") was stated
+twice, from two different sweeps, and both numbers were stale by the time
+they were written. The map is the list: a count written here is stale the
+next time one is fixed, and nothing keeps prose in sync with it.
+
+## Fixed
+
+**`on_evict_checks` was not implemented.** It names submit-side transforms
+the schedd runs when a job is evicted -- TAGS, not expressions, each with a
+body written under `transform_body_<tag>` and usually spanning several lines.
+The pair reaches the ad as `TransformOnEvict` (the tags that had a body) and
+`TransformBody_<tag>` (the body, its lines joined with 0x1e, because a
+newline cannot live in a ClassAd string in the job queue). Go wrote none of
+it, so a job asking to be transformed on eviction was submitted without the
+transform and the schedd had nothing to run.
+
+A tag with no body is dropped from the list and the list is still written,
+empty -- `on_evict_checks = nosuch` gives `TransformOnEvict = ""` -- and
+comment and blank lines are dropped from a body, so a block can be written
+the way a configuration file is.
+
+The ORDER against the built-in memory transform is the part worth keeping:
+`retry_request_memory` appends its own tag to the same list, and
+SetOnEvictExpressions overwrites the list outright, so the explicit tags have
+to be written first. The other way round the built-in tag is written and then
+thrown away, leaving a `TransformBody_RequestMemory` that nothing names --
+and a body nothing names is never run. The oracle is what settled it:
+`"memck RequestMemory"`, in that order.
+
+**`request_gpu_memory` is not a submit command.** It and `request_gpus_memory`
+are rows in HTCondor's keyword table flagged `f_error`, and
+`SetRequestResources` answers them with a warning -- "did you mean
+gpus_minimum_memory?" -- and no attribute at all. Go turned
+`request_gpu_memory = 8GB` into `RequestGpuMemory = 8192`, which is worse
+than ignoring it: nothing in HTCondor reads that attribute, so the job looked
+like it carried a GPU memory constraint and was matched as though it had
+asked for nothing. The keyword that does constrain GPU memory is
+`gpus_minimum_memory`, which becomes a `RequireGPUs` clause the negotiator
+evaluates.
+
+**A tool daemon was never transferred.** `SetTransferFiles` adds
+`ToolDaemonCmd`, and `ToolDaemonInput` if there is one, to the job's transfer
+list -- the order-dependency list at the top of `submit_utils.cpp` says
+"SetTDP >> SetTransferFiles" for exactly this. Go wrote the TDP attributes and
+not the files, so a job that asked to run under `strace` reached the execute
+node with a `ToolDaemonCmd` naming a path that was not in its sandbox.
+
+Two details came with it, both verified against the oracle: a tool daemon
+alone does not CREATE a transfer list (the attribute is still written only
+when the submit file named files of its own), and nothing is added when
+`should_transfer_files = NO`.
+
+**`TransferOutputRemaps` was parsed and rebuilt.** It is stored verbatim --
+trimmed, one layer of quotes off, and appended to any remaps condor_submit
+generated itself; the shadow is what splits it when the job finishes.
+Rebuilding it dropped the spaces around the separators, and went through a Go
+MAP, so a file with two or more remaps produced a different attribute value
+run to run from the same submit file.
+
+**A filename containing a space** was listed as split away by Go. It no
+longer reproduces: `transfer_input_files = a b, c.txt` gives
+`"a b,c.txt"` on both sides.
+
+**C++ enforces its JobLeaseDuration floor on one proc.** `job_lease_duration
+= 1` with `queue 3` gives proc 0 the corrected 20 and procs 1 and 2 the
+uncorrected 1, out of a single submit file:
+
+```
+cpp 1.0  JobLeaseDuration = 20      go 1.0  20
+cpp 1.1  JobLeaseDuration = 1       go 1.1  20
+cpp 1.2  JobLeaseDuration = 1       go 1.2  20
+```
+
+`already_warned_job_lease_too_small` is a flag for not repeating a warning,
+and it gates the VALUE CORRECTION as well as the warning: declared around
+line 667 of `submit_utils.cpp`, tested at 3598, set at 3603, never reset. So
+"JobLeaseDuration less than 20 seconds is not allowed, using 20 instead" is
+printed once and applied once, and every proc after the first keeps a lease
+the code has just said is not allowed.
+
+Go applies the floor to every proc. Reproducing the drift would mean
+reproducing the flag, so it is recorded instead -- the second instance of
+this shape, after the std-file transfer drift above: a submit-time value that
+depends on which proc is being built.
+
+**A fresh job ad said nothing about its own state.** `condor_submit` writes
+about twenty attributes into every job ad before it reads a single submit
+command (`SubmitHash::init_base_ad`): the run-time bookkeeping, zeroed. How
+much CPU the job has used, how many times it has been suspended, started,
+held or checkpointed, what it exited with. Go wrote four of them and left
+the rest out.
+
+The schedd does not create these — it updates what the ad already carries —
+so an absent one reads as UNDEFINED to everything that looks at the job.
+`condor_q -l` shows nothing for it; `condor_q -constraint 'RemoteUserCpu >
+60'` does not match a job that has used no CPU, because UNDEFINED is not
+less than 60 either; and a policy expression doing arithmetic on one gets
+UNDEFINED, which propagates, so `RemoteUserCpu > 3600` is neither true nor
+false. The types matter as much: the CPU and wall-clock counters are reals,
+because that is what the shadow writes into them later, and a consumer
+reading one with an integer lookup gets nothing from a real.
+
+With them came four defaults from `SetAutoAttributes` and friends, each one
+an attribute whose ABSENCE means something different from its default:
+
+- `CurrentHosts = 0` and `JobPrio = 0`.
+- `JobNotification`, always written, from the keyword or
+  `JOB_DEFAULT_NOTIFICATION`, else NEVER. Go also accepted values
+  `condor_submit` refuses — it compares the five words and nothing else, so
+  `notification = 2` is an error, not NOTIFY_COMPLETE — and ignored the
+  attribute's own spelling, `JobNotification`.
+- `LeaveJobInQueue = false` for a local submission. (A submission that
+  SPOOLS its files gets a ten-day expression instead; this parser has no
+  remote-spooling mode to write it for.)
+- `JobLeaseDuration` from `JOB_DEFAULT_LEASE_DURATION` (2400) for a job that
+  can reconnect — vanilla, java, parallel and vm, per `universeCanReconnect`.
+  The lease is what lets a job survive a disconnect, so a job ad with none
+  turns a network blip into a lost execution.
+
+Two attributes were going the other way: `JobRunCount`, which the schedd
+owns, and the five real-valued counters, which hold the same real `0.0` as
+C++ and were recorded only because the harness rendered a whole-number real
+without its decimal point. They are gone with the switch to `Expr.Unparse()`.
+
+**The environment was stored as the submit file wrote it.** The submit value
+and the job attribute are different encodings, and the parser's job is to
+convert between them. The submit file writes V1 (`A=1;B=2`, with the
+delimiter auto-detected) or V2 (the whole list in double quotes); the ad
+carries `Environment` in V2 RAW -- no surrounding quotes, each entry quoted
+per CHARACTER by `append_arg`, so `A=x y` is stored as `A=x' 'y` -- or `Env`
+in V1 raw with an `EnvDelim` beside it naming the delimiter, which Go never
+wrote at all.
+
+Which attribute is written is a preference rather than a capability:
+condor_submit writes V2 unless the submitter used the `env` keyword with a
+V1 value. Go decided by whether the VALUE looked quoted, so
+`environment = A=1;B=2` -- the common form -- was stored under `Env`
+verbatim where condor_submit stores `Environment = "A=1 B=2"`.
+
+Three more things fall out of `Env` being a `std::map` and are reproduced
+because the resulting STRING is what the starter reads: the variables come
+out sorted by name, a repeated name collapses to its last value, and an
+entry with no `=` is a submit error rather than a variable.
+
+**`Arguments` versus `Args` for an empty command line.** The attribute NAME
+says which encoding the ad carries -- `Args` is V1, split on whitespace with
+backslash escapes; `Arguments` is V2, where single quotes group an argument
+containing spaces -- and the starter splits the two differently. A submit
+file that says nothing about arguments gets `Arguments = ""`, the V2 name,
+because an empty ArgList was never V1 input. Go wrote `Args = ""`.
+
+`arguments2` was also unimplemented, and `arguments` with `arguments2`
+without `allow_arguments_v1` is now the submit error it is in condor_submit.
+
+**A java job was built to execute its own class file.** A java job's
+`executable` is the entry CLASS, not a program, and the class to run is named
+in `arguments`. `SetTransferFiles` turns that into something the starter can
+run: the class goes on the transfer list, `Cmd` becomes the literal string
+`"java"` -- which the execute machine resolves against its own JAVA
+configuration, so the JVM is the execute node's -- and `TransferExecutable`
+goes false, because the file transfer renames executables and a renamed class
+file is not the class the JVM was asked for.
+
+Go did none of it, so the ad said to EXECUTE `Hello.class`, and nothing put
+the file in the sandbox either. `jar_files` rides on the same list, split on
+COMMAS, so `jar_files = a.jar b.jar` is one entry naming a file with a space
+in it -- HTCondor's reading, matched here.
+
+None of it happens for a job that transfers nothing: the class is expected to
+be on the execute machine already, `Cmd` stays as given, and
+`TransferExecutable` is left alone. And a java job that names no class is a
+submit error, which Go used to accept.
+
+**`TransferExecutable` was written for every job.** `SetExecutable` assigns it
+only when the keyword's FIRST CHARACTER is `f` or `F`, so
+`transfer_executable = true` writes no attribute and an absent one means the
+executable is transferred. Go wrote `true` everywhere: the same behaviour
+spelled differently, but a different ad -- a transform or a constraint asking
+whether the attribute is there gets a different answer, and so does anything
+diffing the two parsers. The first-character test is reproduced quirks and
+all: `f`, `False` and `fnord` turn the transfer off, `0` does not.
+
+**A keyword written under its job attribute's name was ignored.**
+`condor_submit` reads most keywords with `submit_param(name, attr)`, so the
+ATTRIBUTE's name is an accepted spelling of the submit command:
+`AccountingGroup = grp` is the `accounting_group` keyword, not a custom
+attribute, and `NiceUser = true` is `nice_user`. The Go parser read only the
+submit spelling for the accounting-group family, so a file written the other
+way got no accounting group at all.
+
+For `NiceUser` that is not cosmetic. Since 8.9.9 `nice_user` is shorthand for
+`accounting_group = $(NICE_USER_ACCOUNTING_GROUP_NAME)` plus
+`MaxJobRetirementTime = 0` — that group and that retirement time are the
+whole mechanism. A job that asked for it under the attribute spelling was
+charged to the submitter directly and kept its default retirement time: not
+preemptable, not nice, and nothing in the ad to say the request had been
+dropped. The simple-keyword pass already followed this rule (it uses
+`submit_param(name, attr)`); the hand-written setters beside it did not.
+
+**`project_name`, `scitokens_file` and `delegate_job_GSI_credentials_lifetime`.**
+All three are `f_special_*` rows in HTCondor's keyword table, which means the
+table does not write them and a hand-coded setter does — `SetAccountingGroup`
+for the project, `SetGSICredentials` for the other two — so implementing the
+table left them unwritten. `ScitokensFile` is what the schedd reads to refresh
+a job's token, and it is the crossing of `use_scitokens` (`use_scitoken` is the
+alternate spelling) with whether a file was named: `false` suppresses a named
+file, `auto` writes one if there is one and never fails, `true` with nothing to
+point at aborts the submission. The path is stored as a full path against Iwd.
+`BEARER_TOKEN_FILE`, which `condor_submit` falls back to, is the submitting
+process's environment, so this parser answers it only under
+`AllowLocalAccess` — the same gate as `$ENV()` and `include command`.
+
+**`WantParallelScheduling` is a machine-count keyword.** It is how a job of
+any universe asks the dedicated scheduler to schedule it, and `SetUniverse`
+writes it (only when true, and only read under the attribute's own spelling —
+`submit_param_bool(ATTR_WANT_PARALLEL_SCHEDULING, NULL, false)` passes no
+alternate name). Setting it puts the job on `SetParallelParams`' path, so
+`machine_count` is read for a vanilla job too, and a job on that path with
+neither a count nor a `MaxHosts` already in the ad is a submit ERROR
+("No machine_count specified!"). Go accepted all three of those files and
+wrote `MinHosts = MaxHosts = 1`. The one escape — a `MaxHosts` the ad already
+carries — is not reachable from a submit file: `SetParallelParams` runs before
+the `+Attr` pass, so `+MaxHosts = 3` is not yet there and C++ aborts over it
+too, which the oracle confirms. The only ad that does carry one is the cluster
+ad a materialized proc chains to.
+
+**The kill-signal family named no signal.** `KillSig`, `RemoveKillSig` and
+`HoldKillSig` hold a signal NAME — the starter and the shadow read the
+attribute as a string and look the name up again — and the Go parser wrote
+whatever the submit file said: `kill_sig = SIGTERM` became the integer `15`,
+and `kill_sig = 15` stayed `15`. Neither is a name the starter can resolve,
+so the job was killed with the default signal rather than the one the
+submitter chose; `hold_kill_sig` was not implemented at all, so a job held by
+`condor_hold` never got its signal.
+
+`SubmitHash::fixupKillSigName` decides between a number and a name with
+`atoi()`: a non-zero result is a signal number and is replaced by the name
+`signalName()` gives it, and anything else is looked up as a name, matched
+without regard to case and stored upper-cased. The `SIG` prefix is part of
+the name (`kill_sig = TERM` is refused), and a value that is neither — an
+unknown name, `0`, a number past the end of the table — makes `condor_submit`
+refuse the submit file, which Go now does too rather than storing it.
+
+The numbers are the submit HOST's, which is the part that cannot be guessed:
+`SIGUSR1` is 10 on Linux and 30 on macOS, `SIGCHLD` 17 and 20, `SIGIO` 29 and
+23, and `SIGEMT`/`SIGINFO` exist only on the BSDs, so `kill_sig = 17` is a
+different signal on each. The Go table is built from `syscall`'s constants for
+that reason, and `TestKillSigNumberMatchesOracle` drives every number from -5
+to 70 past the linked `SubmitHash` so a platform mistake fails rather than
+passing on whichever host ran the suite. HTCondor's table is a fixed list of
+names rather than the platform's: `SIGPWR`, `SIGSTKFLT`, `SIGPOLL`,
+`SIGRTMIN` and the `SIGIOT`/`SIGCLD` aliases are real signals that
+`condor_submit` refuses, and the Go parser refuses them too. (The read-past-
+the-end hazard in `enum_utils.cpp` does not apply here — `sig_name.cpp`'s
+table carries a `{ -1, "\0" }` terminator and both loops stop on it.)
+
+`kill_sig` also has a universe-dependent default that Go did not have. A
+vanilla job gets no `KillSig` at all, which leaves the starter to choose — for
+a docker or container job, the image's own stop signal — and every other
+universe gets `"SIGTERM"`, without which a scheduler- or local-universe
+shadow has no signal to send on `condor_rm`. `remove_kill_sig` and
+`hold_kill_sig` have no default. Alongside it, `kill_sig_timeout` is read with
+`atoi()` and written whenever the command is present, so `kill_sig_timeout =
+abc` is a zero timeout rather than, as Go had it, no attribute.
+
+**A hold reason was stored as text, and a subcode was dropped.**
+`SetPeriodicExpressions` assigns every one of its commands as an EXPRESSION,
+the reasons and the subcodes included. Go stored the reasons as the text it
+was given, so `periodic_hold_reason = "too slow"` reached the ad as a string
+whose own first and last characters were quotes and `condor_q -hold` showed
+them; and it stored a subcode only when the value parsed as an integer, so
+`periodic_hold_subcode = 1+2` became `1` and `on_exit_hold_subcode =
+ExitCode` became nothing. A subcode is what a release policy compares against
+(`HoldReasonSubCode == 42`), so a dropped one left the job held forever.
+
+`periodic_vacate` was not implemented at all: a job that asked to be
+evicted and requeued on a condition simply ran on.
+
+All eight commands take their own attribute name as a second accepted
+spelling — `submit_param(SUBMIT_KEY_x, ATTR_x)` — so `PeriodicHoldReason =
+"x"` now works the way `periodic_hold_reason = "x"` does, as it does in
+`condor_submit`. A value that is not a ClassAd expression refuses the submit
+file on both sides.
+
+The earlier note calling the two reasons `f_strip_quotes` keywords was wrong:
+`oracle.Keywords()` reports `f_as_expr | f_special_periodic` for both, nothing
+strips a quote, and the quotes disappear only because the value is parsed and
+the quotes are a string literal's delimiters.
+
+**The starter log was asked for and never written.** `starter_log` names the
+file the starter writes its own debug log to, and `starter_debug` names the
+flags. `SubmitHash::SetAutoAttributes` defaults `JobStarterDebug` to true
+whenever `JobStarterLog` is set and `JobStarterDebug` is not, which means "use
+the pool's `STARTER_DEBUG` flags". Go wrote both keywords and neither default,
+so a job submitted with `starter_log` alone carried the filename and nothing
+that would ever write to it: the submitter debugging a job got an empty hand
+and no indication why.
+
+Where this is derived from matters as much as what it is.
+`SetAutoAttributes` runs before `SetForcedAttributes`, so a `JobStarterLog`
+that arrived as `+JobStarterLog` derives nothing — the C++ side has not
+applied it yet. Go's `+Attr` pass runs earlier than C++'s, so reading the ad
+here would have derived a `JobStarterDebug` C++ never writes. The Go
+derivation reads the submit keywords through the same gate the keyword pass
+uses instead, which also gets the keyword's second spelling (the attribute
+name) and its rule that a value expanding to nothing means the file did not
+set it: `starter_debug =` is "not set" and the default still applies, while
+`starter_log =` sets nothing at all.
+
+**A job lease of a few seconds was recorded as asked.** `job_lease_duration`
+is how long the schedd may hold a claim while it is disconnected from the job.
+`SubmitHash::ReportCommonMistakes` warns that a lease under 20 seconds "is not
+allowed" and replaces it with 20; Go stored whatever was written, so
+`job_lease_duration = 5` produced a lease that expires before a reconnect can
+happen and the job is thrown back into the queue instead of resuming.
+
+The test is narrower than it looks and is worth stating exactly, because every
+piece of it is observable. It is `ExprTreeIsLiteralNumber` into a `long long`,
+then `> 0 && < 20`. A real is TRUNCATED toward zero first, so `19.9` is 19 and
+is raised while `0.5` is 0 and is left alone. A boolean is a number, so
+`job_lease_duration = true` is 1 and becomes 20. A string is not, so `"5"`
+stays `"5"`. Nothing built with an operator is a literal, so `4 + 5` is stored
+unchecked. Zero and negative values are left alone — they are the documented
+ways to ask for no lease. And the check runs before the `+Attr` pass, so
+`+JobLeaseDuration = 5` keeps its 5.
+
+Two things about this one the sweep cannot tell you. First, the comparison
+never sees it: C++ gives every job a `JobLeaseDuration` from
+`JOB_DEFAULT_LEASE_DURATION` and Go does not, so the attribute sits in
+`knownDivergent` and is skipped even on the files that name a lease.
+`TestDerivedAttributesMatchOracle` compares it directly, which is the only
+reason the fix is checked at all. Second, condor_submit 26.2.0 clamps at most
+ONE proc per submission: the clamp is inside the `already_warned_job_lease_too_small`
+guard, which is a warning-dedup flag and is never reset, so
+`job_lease_duration = 5` with `queue 3` leaves procs 1 and 2 at 5. Go raises
+every proc. That is a deliberate departure — replicating the one-shot would
+mean writing a lease HTCondor's own message calls not allowed — and it is the
+one piece of this attribute the two sides still disagree about.
+
+**A parallel job got no I/O proxy and no sandbox.** `SetParallelParams`
+assigns `WantIOProxy` and `JobRequiresSandbox` for `CONDOR_UNIVERSE_PARALLEL`,
+and only for that universe — the MPI universe is a different universe number
+there and gets neither, even though this parser maps both submit spellings
+onto `UniverseParallel`. `WantIOProxy` is what makes chirp reachable, which is
+how a parallel job's `sshd` is set up; `JobRequiresSandbox` is read by
+`SpooledJobFiles::jobRequiresSpoolDirectory`, which assumes a spool directory
+for a parallel job when the attribute is absent — so what the missing
+attribute costs is not the spool directory but the value a transform or a
+policy expression reads, which came back undefined.
+
+Both are written only when the job does not already carry them. C++ reaches
+the same place from the other side: it assigns early and lets the
+`want_io_proxy` keyword and the `+Attr` pass overwrite, and here the keyword
+pass still runs afterwards while `+Attr` has already run. `want_io_proxy =
+false` on a parallel job therefore still wins, on both sides. The
+`knownDivergentGenerated` entry for `WantIOProxy` claimed the keyword was not
+implemented at all, which had stopped being true; the derived default was the
+part that was still missing.
+
+**`nice_user` left a `NiceUser` attribute behind.** `nice_user` is shorthand
+for an accounting group and a default `MaxJobRetirementTime` of 0, and that
+part was fixed with the accounting group work above. What outlived it was a
+`NiceUser` attribute Go wrote whenever the keyword appeared — including
+`nice_user = false`, which wrote `NiceUser = false`. condor_submit writes no
+such attribute: `ATTR_NICE_USER_deprecated` is a submit keyword's second
+accepted spelling and a thing `SetAutoAttributes` reads, never a thing
+condor_submit assigns. A job ad carrying it told any `SYSTEM_STARTD_JOB_ATTRS`
+reader, job transform or policy expression that the job's nice-user state was
+a fact of the ad, when the only record of it is the accounting group.
+
+**Grid credential and data files were stored as written.** `SetGridParams`
+runs every cloud credential and data file it reads through `full_path`, so the
+job ad records an absolute path: `EC2AccessKeyId`, `EC2SecretAccessKey`,
+`EC2KeyPairFile`, `EC2UserDataFile`, `GceAuthFile`, `GceJsonFile` and
+`AzureAuthFile`. Go stored the submitter's text. The gridmanager that later
+opens one of these is a daemon in its own working directory, not the directory
+`condor_submit` ran in, so `gce_auth_file = auth.json` reached it as a bare
+name resolved against the wrong directory — a credential the job could not
+read, for a file that was sitting in the submit directory all along.
+
+Resolution is against `Iwd`, not against the submitting directory the
+executable uses, so `initialdir` moves these files and does not move the
+executable. The two mechanisms behind this are worth keeping apart, because
+only one of them is a table. `SimpleSubmitKeyword` carries an `f_filemask`
+field and `do_simple_commands` resolves every `f_as_string` keyword that has
+one — but that is just `log`, `dagman_log`, `output_directory` and
+`starter_log` (plus `executable`, which is also `f_special` and so resolves
+against the submitting directory instead). The grid files carry no mask at
+all; `SetGridParams` calls `full_path` on each by hand. Reading the mask would
+have said they were ordinary strings.
+`TestFileRoleKeywordsAreAccountedFor` guards the half that is a table: a new
+`f_filemask` keyword upstream now fails that test instead of silently
+diverging.
+
+Three more behaviors came out of porting the resolution, all measured against
+`SubmitHash`. `ec2_key_pair_file` is a second accepted spelling of
+`ec2_keypair_file`, which Go did not know. A named `ec2_keypair` makes the
+file meaningless, and C++ warns and drops it rather than recording a path the
+gridmanager would write a new key to; Go recorded both. And one EC2 credential
+value is not a filename at all: `FROM INSTANCE` tells the gridmanager to use
+the instance's own IAM role, is matched without regard to case, and setting
+either half of the credential to it sets both — so resolving it would have
+turned "use the IAM role" into a path to a file that does not exist.
+
+What is deliberately left: the `aws_`/`gs_`/`s3_` spellings of the access-key
+files, which Go does not implement. They are not a resolution gap — they are
+plain `f_as_string` entries in the keyword table, so `SetSimpleJobParams`
+stores them verbatim and overwrites whatever `SetGridParams` resolved earlier
+in `make_job_ad`. `gce_metadata_file`, `output_directory`, `starter_log`,
+`dagman_log`, `x509userproxy` and `scitokens_file` are resolved by C++ too,
+but Go implements none of them, so they stay in the "no Go implementation"
+list rather than here.
+
+**Every cloud setting a grid job named went nowhere.** The whole EC2, GCE and
+Azure family -- 21 attributes -- was read by condor_submit and by nothing in
+Go, so a job that named an AMI, an availability zone, a VPC subnet, an elastic
+IP, an EBS volume list, a block device mapping, an IAM profile, a GCE metadata
+file or a preemptible flag reached the grid manager with none of it. The
+instance came up in the provider's default zone, on the default subnet, with
+no volumes attached and no elastic IP, and nothing in the submission said so.
+Worse for the credentials: `ec2_access_key_id` and `ec2_secret_access_key`
+name key FILES, which condor_submit resolves against `Iwd`, and Go set
+neither -- so an EC2 job had no credentials at all and the grid manager had
+nothing to sign a RunInstances call with.
+
+What the C++ turned out to say, against assumptions worth writing down:
+
+- The grid TYPE -- the first word of `grid_resource` -- gates far less than it
+  looks. It decides which settings are REQUIRED (an ec2 job needs an AMI and
+  both credentials, a gce job an image and a machine type, an azure job all
+  five of image, location, size, admin username and admin key) and whether the
+  job gets the implicit Name tag. Every other keyword in the family is read
+  whatever the type, so `grid_resource = batch slurm` plus `ec2_ami_id` still
+  puts `EC2AmiID` in the ad. Writing them only for a matching grid type would
+  have been its own divergence.
+- Four attribute names do not follow from their keyword:
+  `ec2_ebs_volumes` is `EC2ElasticBlockStorageVolumes`, `ec2_parameter_names`
+  is `EC2ParamNames`, and `ec2_elastic_ip` and `ec2_vpc_ip` end in a
+  lower-case `Ip` where every sibling is capitalized. Attribute names fold
+  case, so only the first two would have broken a job -- but they would have
+  broken it silently.
+- `aws_region` and the `aws_`/`s3_`/`gs_` key-file keywords are NOT part of
+  the grid family at all. They are plain entries in HTCondor's simple keyword
+  table, read in every universe, stored verbatim with no `Iwd` resolution --
+  and read AFTER the grid pass, so in a grid job the verbatim value overwrites
+  the absolute path the grid pass resolved. A vanilla job transferring an
+  `s3://` input needs them, which is why they are not universe-gated.
+- `"FROM INSTANCE"` under either half of the credential pair sets BOTH halves,
+  and is kept as the magic string rather than resolved as a path.
+- `ec2_keypair_file` is dropped when `ec2_keypair` is also set, and
+  `ec2_iam_profile_name` is kept only when `ec2_iam_profile_arn` is set too.
+- EC2 tags and GCE labels are collected from `ec2_tag_<Name>` /
+  `cloud_label_<Name>` -- either the submit prefix or the attribute prefix --
+  merged with the names the list keyword gave, and recorded in an order that
+  is observable: the sorted order HTCondor's macro table walks in. An ec2 job
+  also gets its executable as the implicit `Name` tag, which is what the AWS
+  console shows as the instance name, unless `WantNameTag = false`.
+- Arbitrary RunInstances parameters (`ec2_parameter_<Name>` to
+  `EC2Param_<Name>`) join their names with `", "` where tag names join with
+  `","`, and the de-duplication compares a listed name with its dots turned
+  into underscores against the raw scanned name -- so a name holding a dot
+  never matches itself and is listed twice. Reproduced as written.
+- `gce_metadata` is re-joined from its comma-separated fields, dropping the
+  spacing: `a=1, b=2` is stored `a=1,b=2`, or the metadata server is handed a
+  key named `" b"`.
+
+Acceptance is unchanged: condor_submit aborts a submission whose grid type is
+missing a required setting, and validates the `ec2_ebs_volumes` syntax, and
+the Go parser still does neither.
+
+The generated sweep can never reach any of this beyond `grid_resource = batch
+slurm`, which is the only grid prelude the generator writes, so the ec2, gce
+and azure shapes -- and the implicit Name tag above all -- are covered by
+seeds instead.
+
+**Fifty-five settings went to the wrong place, or nowhere, because the value's
+shape was decided keyword by keyword.** HTCondor does not decide it keyword by
+keyword. `SimpleSubmitKeyword` packs a flag word per keyword -- the value type
+in the low five bits (`f_as_bool`, `f_as_int`, `f_as_uint`, `f_as_string`,
+`f_as_list`), plus `f_strip_quotes`, `f_alt_name` and a file role -- and
+`do_simple_commands` walks the table applying them. Ninety-six keywords are
+handled that way; the Go parser had a hand-written block for forty-nine of
+them and nothing at all for the other forty-seven. Each block decided for
+itself what the value was, so the shape came out wrong in both directions at
+once:
+
+- **`encrypt_input_files` and its three siblings are `f_as_string`,** stored
+  exactly as written. Go canonicalized them, stripping the space after each
+  comma. The file transfer matches these names literally, so a file the
+  submitter listed as `a.txt, b.txt` was looked for under a name the submit
+  file never contained.
+- **`email_attributes` is the one `f_as_list` keyword in the whole table,**
+  and its separators ARE canonicalized. Go never read the keyword at all; what
+  it wrote to `EmailAttributes` was the `notification` setting, a different
+  keyword entirely, so every job carried `EmailAttributes = "NEVER"` and the
+  attributes the submitter asked to have mailed were dropped.
+- **`mount_under_scratch` is `f_as_string | f_strip_quotes`,** a directory
+  list. Go ran it through `parseBool`, which turns `/tmp,/var/tmp` into
+  `true`.
+- **A value that was not a plain integer was dropped.** Eighteen of the blocks
+  ran `parseInt` and skipped the attribute when it failed, but nineteen of
+  these keywords are `f_as_expr` and the integer ones accept an expression
+  too: `max_job_retirement_time = 3600 * 2`, `keep_claim_idle =
+  $(MinJobRuntime)` and `allowed_job_duration = 60 * 60 * 24` all parsed, all
+  set nothing, and the job ran with no limit instead of the one it asked for.
+- **An empty value set the attribute to empty,** where `submit_param` returns
+  nothing for it and HTCondor leaves the attribute off the ad entirely.
+- **`checkpoint_exit_code` and `remote_initialdir` went to
+  `CheckpointExitCode` and `RemoteInitialDir`,** which are not attributes
+  HTCondor reads; the real ones are `SuccessCheckpointExitCode` and
+  `RemoteIwd`. A self-checkpointing job's success exit code meant nothing and
+  a `remote_initialdir` moved no job.
+- **`jar_files` was written only for a java job,** and `log` was the only
+  file-role keyword resolved against `Iwd`: `starter_log`, `dagman_log` and
+  `output_directory` carry a file role too and were not written at all.
+
+The fix is the table, not the forty-nine blocks. `simpleSubmitKeywords` in
+`submit_simple_keywords.go` carries all ninety-six rows with their flags, and
+one pass applies them the way `do_simple_commands` does.
+`TestSimpleKeywordTableMatchesOracle` checks every field of every row against
+the table the linked `libcondor_utils` actually carries, so a keyword added
+upstream fails as a missing row rather than as a job ad nobody reads, and
+`TestSimpleKeywordValueShapes` pins one keyword per flag against the oracle,
+so the flags are shown to be acted on rather than merely recorded.
+
+Three things this fuzzer had recorded backwards, all of them checkable against
+`get_submit_keywords()`: `concurrency_limits` and `ec2_tag_names` are not
+`f_as_list` (they are `f_special_concurr` and `f_special_grid`, with list
+handling of their own), and `file_remaps`, `on_exit_hold_reason` and
+`periodic_hold_reason` are not `f_strip_quotes` (they are `f_as_expr`, and the
+quotes vanish because the value is parsed as an expression rather than stored
+as text). `file_remaps` is in the simple pass and is fixed with the rest; the
+other four are not, and are recorded above with what they actually do.
+
+Where it stops is the `f_special` bit, which the table itself carries. The
+attributes a `SetXXX` method DERIVES live in `SetAutoAttributes`,
+`ReportCommonMistakes`, `SetParallelParams` and `SetRequirements`, which run
+after this pass; `JobStarterDebug`, the 20-second `JobLeaseDuration` floor and
+the parallel universe's two implied settings are fixed below, and what is left
+is the `Requirements` clauses that read `TransferCheckpointFiles` and
+`CudaVersion`.
+
+**A cron job never deferred, and a cron job's timing went nowhere.** There is
+no `CronWindow` or `CronPrepTime` job attribute: `cron_window` and
+`deferral_window` are two spellings of `DeferralWindow`, and `cron_prep_time`
+and `deferral_prep_time` two spellings of `DeferralPrepTime`, with the `cron_`
+spelling winning when a file uses both. Go wrote the submit keyword's own name,
+so a job submitted with `cron_minute = 0` and `cron_window = 600` reached the
+starter with its schedule but no window and no prep time: the starter that
+missed the execute time by a second had no slack to run in, and no warning that
+the window it was told about had been dropped. Three more pieces of the same
+family. A deferred job always carries **both** timing attributes, with
+`DeferralWindow = 0` and `DeferralPrepTime = 300` defaulted in when the file is
+silent. The timing values are *expressions*, so `deferral_time = (time() +
+3600)` is legal and Go's `parseInt` was dropping it on the floor. And Go wrote
+`DeferralWindow` for a file with no schedule at all, where condor_submit writes
+nothing. `cron_minute` and its four siblings were always right, and still are.
+
+**A `max_retries` job never retried.** Three separate bugs, all in one
+expression. The count went to `MaxRetries`, which nothing reads, instead of
+`JobMaxRetries`. `retry_until` became a `RetryUntil` attribute, which is not an
+attribute at all in HTCondor -- a plain integer there is a *futility exit code*
+and becomes `ExitCode =?= <code>`, anything else is a boolean expression, and
+either way it is folded into `OnExitRemove`. And `OnExitRemove` itself was left
+as the submitter wrote it, where condor_submit replaces it with
+
+```
+NumJobCompletions > JobMaxRetries || ExitCode =?= <success code> [ || <retry_until> ] [ || <on_exit_remove> ]
+```
+
+so the job that was supposed to be retried was removed from the queue on its
+first failure instead. The three settings are entangled in ways the keyword
+table does not show: each of `max_retries`, `success_exit_code` and
+`retry_until` turns retries on by itself, retries also default `JobMaxRetries`
+to `DEFAULT_JOB_MAX_RETRIES` (2) and `OnExitHold` to `false`, and
+`success_exit_code` makes the expression compare against `JobSuccessExitCode`
+rather than baking the number in. An `OnExitRemove` the submitter set directly
+with `+OnExitRemove` or `MY.OnExitRemove` is left alone, unless
+`success_exit_code` or `retry_until` asked for a change -- which is why this
+has to run after the `+Attr` pass rather than where its submit commands are
+read.
+
+The submitter's `on_exit_remove` is OR'd onto the end of the generated
+expression, and the parenthesization of that join is load-bearing: every
+ClassAd operator binds at least as tightly as `||` except the ternary, so
+parenthesizing anything else would regroup `(a || b) || c` into `a || (b || c)`
+-- the same value, a different tree. Only a ternary gets parentheses, which is
+what `WrapExprTreeInParensForOp` does.
+
+Both families now evaluate their values the way condor_submit does rather than
+scanning a number off the front: `max_retries = 2+3` is five, and
+`retry_until = 1+1` is exit code 2. Both also reject what condor_submit
+rejects -- a negative `cron_window`, a non-integer `max_retries`, a
+`retry_until` outside int range -- instead of silently dropping the setting.
+Measured over the 600-file generated sweep, this added no file that
+condor_submit accepts and the Go parser refuses.
+
+What is deliberately left: `ScheddInterval`. Any of `CronMinutes`,
+`CronHours`, `CronDaysOfMonth`, `CronMonths`, `CronDayOfWeek` or
+`DeferralTime` makes `SetRequirements` copy `SCHEDD_INTERVAL` into the job —
+`deferral_time` alone is enough, so it is not a cron-only thing — and it does
+so for exactly one reason, stated at the assignment: the deferral clause it is
+about to append to `Requirements` names the attribute. Nothing else reads it.
+The schedd's `updateSchedDInterval` only REFRESHES jobs that already carry it,
+so a job without it is not missing anything; a job WITH it earns a job-queue
+write on every `WalkJobQueue`. Go generates neither that clause nor a
+`Requirements` resembling C++'s, so writing `ScheddInterval` would add an
+attribute no Go-built ad reads and buy the job that write for nothing. It
+belongs with the `Requirements` divergence at the top of this file.
+`TestScheddIntervalIsNotDerived` pins both halves of that: C++ still writes it,
+Go still does not.
+
+**The file transfer family.** `should_transfer_files` and
+`when_to_transfer_output` are one decision in `SetTransferFiles`, not two
+independent strings, and the Go parser treated them as two. Four things
+followed from that.
+
+A job with `should_transfer_files = NO` carried `WhenToTransferOutput =
+"ON_EXIT"` anyway. condor_submit writes no `WhenToTransferOutput` at all in
+that case -- it turns the default into `NEVER` precisely so the attribute can
+be left off -- and the two attributes together said both that the job did not
+transfer files and that it transferred them on exit. The same pair in a submit
+file is a contradiction condor_submit refuses to resolve, so a job the Go
+parser built could not have been submitted by `condor_submit` at all; what the
+shadow then did with it depended on which attribute it read first. The remote
+spool path in `schedd.go` was filling the same attribute in, and no longer
+does when the job turned transfer off.
+
+Neither value was canonicalized or checked. The two settings have eight and
+ten accepted spellings that collapse onto three and four values --
+`should_transfer_files = always` is `"YES"`, `when_to_transfer_output = ONEXIT`
+is `"ON_EXIT"` -- and Go upper-cased whatever was written and stored that, so a
+startd policy or a `TARGET` expression matching `"YES"` literally did not match
+the job that asked for `ALWAYS`. Go also accepted `should_transfer_files =
+MAYBE`, and the quoted `"YES"` that condor_submit rejects because the quotes
+are part of the value. The four contradictory combinations condor_submit
+refuses -- `NO` with a real `when_to_transfer_output`, a transferring job with
+`NEVER`, `IF_NEEDED` with `ON_EXIT_OR_EVICT`, and `NO` alongside
+`transfer_input_files`/`transfer_output_files` -- are refused now too, and
+`ON_EXIT_OR_EVICT` on its own promotes an un-chosen `IF_NEEDED` to `YES` the
+way condor_submit does.
+
+One value is deliberately not mirrored. `when_to_transfer_output = NEVER` gets
+an answer out of condor_submit that its own table does not define: the
+translation tables are arrays of fixed-size structs terminated by an entry
+whose name is empty, `FileTransferOutputTranslation` has no such entry, and
+the lookup walks off the end into whatever the build laid out after it. The
+two HTCondor versions this harness has run against disagree in opposite
+directions -- 25.14.1 reads `NEVER` as a value that *contradicts*
+`should_transfer_files = NO` and rejects the pair, 26.2.0 reads it as the
+value that *agrees* and accepts it -- so each version rejects the file the
+other takes. There is no behavior to copy, and the Go parser rejects the name
+like any other unknown value. This was caught by CI rather than locally: the
+two oracles are different HTCondor versions, and the local one alone made the
+wrong answer look right.
+
+`transfer_input_files` and `transfer_output_files` each answer to a second
+spelling, the attribute's own name (`TransferInputFiles`,
+`TransferOutputFiles`). A submit file using it named files condor_submit
+transfers and Go did not write down at all, so the job ran without its input.
+
+**`WantTransferPluginMethods` was missing entirely, and `transfer_plugins`
+points the other way.** It is the list of file-transfer plugin methods the job
+NEEDS, derived from the URL schemes in `TransferInput`, `OutputDestination`
+and the right-hand sides of `TransferOutputRemaps` -- minus the ones the job
+brings itself in `transfer_plugins`, which *subtracts* from the list rather
+than filling it. The startd advertises `HasFileTransferPluginMethods`, so
+without the attribute a job needing `osdf` matched a machine with no osdf
+plugin and failed its input transfer there. The scheme is the part after the
+last `+`, `-` or `.`, so `chtc+https://` needs `https`; HTCondor's URL test is
+stricter than RFC 3986 and wants an authority marker with something after it.
+condor_submit derives this inside `SetRequirements`, after the `+Attr` pass
+and only for a universe that might transfer, with `ShouldTransferFiles` not
+`NO`, and only when the submitter's own `requirements` does not already name
+`HasFileTransfer` or `HasJobTransferPlugins` -- all four gates are mirrored.
+`output_destination` is written now as well, because the derivation reads it;
+it is stored verbatim, quotes included, which is also why the quoted spelling
+contributes no method.
+
+**`WantFTOnCheckpoint`.** The starter ignores a job's checkpoint exit code
+unless the job also asks for file transfer on checkpoint, so condor_submit
+sets the flag for any job that named one. Go set nothing, so a
+self-checkpointing job exited with its checkpoint code, nothing was
+transferred, and the exit looked like an ordinary one.
+
+**`TransferIn`/`TransferOut`/`TransferErr` and `StreamIn`/`StreamOut`/
+`StreamErr` already agreed** and their rows are deleted rather than fixed:
+compared directly against the oracle over the 600-file generated sweep and
+over hand-written files reaching each branch of `CheckStdFile`, the two sides
+produce the same booleans and the same presence. So does a
+`transfer_input_files` entry containing a space. What still differs in
+`TransferInput` is narrower than the old row said: a container job's image and
+a java job's entry class and `jar_files` are added to the list by C++ and by
+nothing in Go.
+
+These cases are pinned by `TestTransferAttributesMatchOracle` and
+`TestTransferContradictionsAreRejected` rather than by the generated sweep.
+The sweep reached almost none of them -- whether a 600-file corpus contains a
+`should_transfer_files = NO` file condor_submit still accepts is an accident
+of the generator -- so a green sweep said nothing about this family either
+way.
+
+What this change deliberately left, and a later one did: the
+**`ShouldTransferFiles` default** at the top of this file. Everything above
+canonicalizes and checks the value the submitter wrote, and which value a
+silent submit file gets changes which machines a job matches on a
+shared-filesystem pool, so it was held back to a change of its own. It is
+`IF_NEEDED` now, as condor_submit has it. The default feeds the same "did the
+submitter choose this?" flag condor_submit keeps, so every interaction above
+behaves identically under either one -- except the `ON_EXIT_OR_EVICT`
+promotion, which only ever fires when the default is the `IF_NEEDED` that
+cannot be combined with it. Also left: `TransferPlugins` is stored
+verbatim by C++ and re-joined by Go, which drops the spaces around the `;`
+separators -- the same `f_as_string` question as the `encrypt_*_files` lists,
+and it belongs with them.
+
+**A GPU job asked for a GPU with no constraints at all.** Six keywords, and
+one attribute nothing reads a keyword for. `gpus_minimum_capability`,
+`gpus_maximum_capability`, `gpus_minimum_memory` and `gpus_minimum_runtime`
+set nothing in Go; `require_gpus` was stored as a *string*, so the startd
+would have been comparing text to a number; and `cuda_version` stayed the
+string the submitter wrote. Every behavior below was measured against
+libcondor_utils 26.2.0.
+
+The derived attribute is `RequireGPUs`, and it is the one that bites. The other
+attributes are only bounds: nothing reads `GPUsMinCapability` on its own. What
+the startd evaluates against each GPU's property ad is `RequireGPUs`, and
+`SetResourceRequirements` is where the bounds turn into it:
+
+```
+Capability >= GPUsMinCapability && Capability <= GPUsMaxCapability
+    && GlobalMemoryMb >= GPUsMinMemory && MaxSupportedVersion >= GPUsMinRuntime
+```
+
+one clause per bound that is set, in exactly that order, joined with `&&`.
+The order is load-bearing because `&&` is left-associative, so a different
+order is a different tree even though it is the same value — the same reason
+the `on_exit_remove` join above is careful about parentheses. A job that
+reached the pool without this asked for *a* GPU and matched any card, however
+old, however small, whatever runtime it supported.
+
+Everything about the family is conditional on something, and none of it is
+guessable from the names:
+
+- **All five property keywords are gated on `request_gpus`.** The block that
+  reads them is inside `if (job->Lookup(ATTR_REQUEST_GPUS))`, so a file with
+  `gpus_minimum_capability` and no `request_gpus` — or with `request_gpus =
+  undefined`, which assigns nothing — sets no attribute at all. A later
+  `+RequestGPUs` does not reopen it: the custom attributes are applied after
+  that pass. But `SetResourceRequirements` runs *after* them and reads the
+  AD, so `+GPUsMinCapability` on a job that did use the `request_gpus` keyword
+  does reach the derived expression.
+- **A submitter's own `require_gpus` keeps any property it already
+  mentions.** The references are classified against a stand-in property ad, so
+  `require_gpus = Capability > 5` suppresses the `Capability` clause and the
+  `GlobalMemoryMb` one is still added. The classification is
+  case-insensitive, follows into function arguments, counts `MY.Capability`
+  and does *not* count `TARGET.Capability`, which names the machine ad rather
+  than the GPU.
+- **The join parenthesizes only `||` and the ternary**, which are the two
+  shapes that bind more loosely than the `&&` about to sit above them.
+- **`gpus_minimum_memory` is a MB quantity** with the usual `K`/`M`/`G`/`T`
+  suffixes, rounded up, falling back to an expression when it is not a size.
+- **`gpus_minimum_runtime` is a version** in `x` or `x.y` form, canonicalized
+  to `x*1000 + y*10`, so `12.1` is `12010`. It is read with `StrIsProcId`,
+  the job-id parser, which is why `.5` is 50 and `1.-1` is 1000. A number
+  already past 1000 with no minor part is taken to be canonical and kept.
+- **`cuda_version` uses a DIFFERENT encoding**, however alike the two look:
+  `x*1000 + y`, so `12.1` is `12001` where `gpus_minimum_runtime = 12.1` is
+  `12010`. It reaches the ad as a string from the simple-keyword pass and
+  `SetRequirements` rewrites it, with `%u`, so `-1` wraps to 4294967295
+  rather than failing. A value in neither form fails the submit outright —
+  *unless* `SetRequirements` returned early, which it does for a `+Requirements`
+  or `MY.Requirements`, a `FACTORY.Requirements`, or a grid job whose type is
+  not `condor`. In each of those the string survives untouched and the
+  rejection never happens.
+
+What was left was the int-versus-real printing of a whole-number real, the
+`Rank` entry at the top of this file in a second place: `gpus_minimum_capability
+= 8.0` is a real on both sides, and Go's `Expr.String()` printed it `8`, which
+reads back as an integer. `GPUsMinCapability` and `GPUsMaxCapability` were
+recorded for that alone, which is why
+`TestGPURequestKeywordsMatchOracle` compares the whole family directly —
+presence, value and the derived expression — and requires the two cases that
+hid to be the same NUMBER. Both entries are gone now that the harness
+unparses. Their recorded prose had drifted to say the keywords were
+unimplemented, which they have not been since `submit_gpu.go` landed; the
+direct test is what kept that from mattering.
+
+Seeds carry this family rather than the sweep. Of 362 generated files the
+oracle accepted, `GPUsMinRuntime` reached an ad in **none**: the keyword is in
+the vocabulary, but it only does anything alongside a `request_gpus` the
+generator has to draw independently. `RequireGPUs` reached five,
+`GPUsMinCapability` one. The keyword coverage count says 255 of 258 either
+way, which is the gap that number cannot see.
+
+**A vm job's transfer settings are not the submitter's.** `SetUniverse` writes
+`ShouldTransferFiles` and `WhenToTransferOutput` back into the submit macros
+for a vm universe job and returns, before `SetTransferFiles` reads anything --
+so the override is total and the resolution above never sees what the file
+wrote. A VM job always transfers, because the snapshot disks a vmware job
+writes and `vm_cdrom_files` have to come back to the submit machine and there
+is nowhere else for them to go. `when_to_transfer_output` is `ON_EXIT`, or
+`ON_EXIT_OR_EVICT` when `vm_checkpoint` is on, whichever of the two the file
+asked for.
+
+Go honoured the submitter instead, four ways. A VM job that asked for
+`ON_EXIT_OR_EVICT` kept it, where condor_submit gives `ON_EXIT`. A VM job that
+asked for `should_transfer_files = NO` got `ShouldTransferFiles = "NO"` and no
+`WhenToTransferOutput` at all -- a VM job that would never move its disk
+images back. A `vm_checkpoint` job got `ON_EXIT`, so the image it checkpointed
+on eviction was not transferred, which is the whole point of checkpointing it.
+And the values the override discards were being validated first, so a VM job
+with `should_transfer_files = MAYBE`, or with `NO` alongside
+`transfer_input_files`, was rejected where condor_submit accepts it.
+
+This is not the `ShouldTransferFiles` DEFAULT above. That one is about what a
+silent submit file gets; this is a universe overriding what the submit file
+said, and the forced value is `YES` in both parsers now.
+
+The one thing the submitter still controls is the conflict check:
+`vm_checkpoint` together with `vm_networking` is refused unless the file
+itself wrote `when_to_transfer_output = ON_EXIT_OR_EVICT`, an absent, wrong or
+unparsable value all failing it alike. That check reads the submit file, not
+the override, so it has to run before it.
+
+`vm_checkpoint` and `vm_networking` are read with the attribute spelling as
+well (`JobVMCheckpoint`, `JobVMNetworking`), which Go read nowhere -- so
+`JobVMCheckpoint = true` also reached the ad as `false`. Both now go through
+one helper shared with `setVMParams`, so the flag the override acts on and the
+flag the job ad records cannot disagree.
+
+How this was missed is the more useful part. Every one of these cases was
+quiet in the generated sweep when the transfer work landed, and only appeared
+when a later PR changed the GENERATOR -- `keywordDeps`, plus dropping a java
+universe gate -- which shifted which files the corpus draws. "Not reproduced
+by this sweep" is a statement about the generator's current shape, not about
+the parsers, and it moves whenever the generator does. These cases are seeds
+and named test files now, so no later generator change can take them away
+again.
+
+Still left: a non-boolean `vm_checkpoint` (`vm_checkpoint = banana`) is
+refused by condor_submit's `submit_param_bool` and read as `false` here. That
+belongs with the submit-wide question of which bad values are rejected rather
+than with the transfer settings.
+
+**A noop job ran.** `noop_job` and its two exit keywords set nothing at all on
+the Go side. A noop job is one the schedd completes at submission without ever
+running it, with the exit code and signal the submit file names; with
+`IsNoopJob` dropped, a job submitted as a placeholder -- a DAGMan node stubbed
+out, a pipeline step being skipped -- was dispatched to a machine and actually
+executed. The two exit keywords are the other half: a noop job that was meant
+to report a failure (`noop_job_exit_code = 1`) reported success instead. All
+three are *expressions* in condor_submit, so `noop_job = (ClusterId > 100)` is
+a legal thing to write.
+
+**A tool daemon never ran.** The whole TDP family -- `tool_daemon_cmd`, its
+input, output and error redirections, both argument spellings and
+`suspend_job_at_exec` -- was dropped, so a job submitted to run under a
+debugger, a profiler or `strace` ran bare instead, with nothing in the ad to
+say the tool was ever asked for. `tool_daemon_cmd` is the gate for the rest:
+condor_submit does not read any other keyword in the family without it, which
+means a file naming only `tool_daemon_args` must set nothing, and must not
+even report the two argument spellings used together -- an error only when the
+daemon itself is named. The paths are stored exactly as written:
+`check_and_universalize_path` rewrites mapped drive letters on Windows and
+does nothing anywhere else, so there is no `Iwd` resolution in this family.
+
+**The JVM was handed an argument with the quotes still on it, and only in the
+java universe.** Go gated `jar_files` and `java_vm_args` on
+`universe = java`; condor_submit reads both from the plain keyword table for
+every job. Inside the java universe it was worse than absent: the value was
+stored verbatim under `JavaVMArgs`, so `java_vm_args = "-Xmx128m -Xms64m"`
+reached the starter as the V1 string `"-Xmx128m -Xms64m"` *including* the
+double quotes, which splits on whitespace into `"-Xmx128m` and `-Xms64m"` and
+fails the JVM at startup. condor_submit runs the value through the `ArgList`
+instead: a value that opens with a double quote is V2 and lands in
+`JavaVMArguments`, anything else is V1 and lands in `JavaVMArgs`. That is the
+same name-is-semantic split as `Args`/`Arguments`, and the tool daemon has it
+too (`ToolDaemonArgs` / `ToolDaemonArguments`). Both round trips are lossy on
+purpose and now match: V1 collapses runs of whitespace between arguments,
+while V2 re-quotes the characters that would otherwise split an argument, so
+`"-f 'a b' c"` comes back as `-f a' 'b c`.
+
+**The buffer settings were integers.** `buffer_size` and `buffer_block_size`
+were stored only when the whole value scanned as an integer, and `buffer_files`
+not at all. All three are `f_as_expr` in condor_submit, so
+`buffer_size = 2 * 1024` was silently dropped rather than stored.
+
+Two generator bugs were in the way of ever seeing this. `tool_daemon_arguments2`
+is V2-only -- SubmitHash rejects a value that is not a double-quoted string --
+and the generator wrote the unquoted shape the rest of the `tool_daemon_`
+family uses, so every file containing it was rejected. And `f_special_java` was
+read as "java universe only", which kept `java_vm_args` out of every file but
+the rare java one; the group says which `SetXXX` method reads a keyword, not
+which universe it belongs to. `TestGeneratedCorpusReachesTheseFamilies` now
+asserts the sweep puts each of these sixteen attributes in front of the oracle,
+since an attribute that agrees leaves `knownDivergentGenerated` and nothing
+else would notice the generator dropping it.
+
+## The container image
+
+**The container image, and the transfer list it belongs on.** `container_image`
+was out of the generator's vocabulary until the shim called `config()`; see the
+section above. It went in, and diverged immediately — six attributes' worth,
+which is the whole of what condor_submit does with a container image.
+
+Once condor_submit decides to transfer the image, the name the starter must run
+is the name the transfer leaves in the sandbox, so it rewrites `ContainerImage`
+to `condor_basename` of the path. Go stored the path as written, which told the
+starter to run a path the sandbox does not have: an `apptainer` that exits
+"image not found" on every slot the job matches, with a job ad that names the
+image correctly as far as the submitter can see. The submit-side path moves to
+`ContainerImageFullPath`, which Go did not set at all — that attribute is what
+late materialization reads to build each proc's input transfer list, so a
+factory submission had nothing to build one from.
+
+The image was also missing from `TransferInput`, which is the other half of the
+same bug and the reason this was recorded rather than fixed when it was found:
+the attribute alone is not the fix. condor_submit appends the image to the
+input list after whatever `transfer_input_files` named, and a job without it
+reached the execute node with no image to run.
+
+Which of those happens at all is a decision tree, and `ContainerImageSource`
+records where the image came from: `transfer_container = false` and a
+`CONTAINER_SHARED_FS` prefix match both mean the image is already on the
+execute node ("local"), and a `docker://` or `oras://` URL means the runtime
+pulls it ("docker"/"oras"); each returns without transferring. Otherwise the
+source is the image's own URL scheme, or "cedar" for a plain path. A common
+image — `container_is_common`, `CONTAINER_IMAGES_COMMON_BY_DEFAULT` or
+`CONTAINER_REGEX_COMMON_BY_DEFAULT` — is named as an input catalog
+(`_x_catalog_container_<hash>` plus `CommonInputCatalogs`) rather than copied
+per job, keyed by a SHA-256 of the image's full path so two DAG nodes using
+different images with the same basename do not collide.
+
+`DockerImage` and `ContainerServiceNames` were set whatever the universe.
+condor_submit reads neither keyword outside a docker or container job, so a
+grid or scheduler job carried an image attribute condor_submit leaves off
+entirely. `ContainerServiceNames` is stored verbatim rather than canonicalized,
+and every service it names must have a `<service>_container_port` — a service
+with no port is one nothing can reach, and the name alone would have the startd
+publish an endpoint the job never listens on, so condor_submit refuses the file
+and so does this parser now. The port lands in `<service>_ContainerPort`, which
+Go wrote nowhere.
+
+Both image keywords answer to the job attribute's own name as a second
+spelling (`ContainerImage`, `DockerImage`), which Go ignored, and both have
+their quotes stripped before the want-flag is read from them — though not
+before `process_container_input_files` reads the raw value again, which is why a
+quoted image's basename keeps one of the quotes. The three image schemes
+HTCondor has no runtime for (`instance://`, `library://`, `shub://`), the
+docker universe's refusal of `container_image`, naming both images at once, and
+a container job with no image are all rejections now rather than ads nobody can
+run.
+
+These cases are pinned by `TestContainerAdsMatchOracle` and
+`TestContainerRefusalsMatchOracle` rather than by the generated sweep. The
+sweep does reach all six attributes — five of them went quiet in
+`TestGeneratedDivergencesStillDiverge` when this landed, and `transferinput`
+stays for the java half — but which branch of the decision tree a generated
+file reaches is an accident of the corpus bytes, and acceptance is asserted
+nowhere there: `check()` skips any file one side rejected.
+
+What is deliberately left: the rest of `transferinput`. A java job's entry
+class and its `jar_files` are appended to the input list by condor_submit and
+by nothing here.

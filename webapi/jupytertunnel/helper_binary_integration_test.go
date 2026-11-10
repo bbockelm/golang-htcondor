@@ -93,7 +93,7 @@ func TestHelperBinaryEndToEnd(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		reg.Proxy(inst, upstream, w, r)
+		reg.Proxy(inst, upstream, w, r, nil)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

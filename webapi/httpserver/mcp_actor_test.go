@@ -1,7 +1,11 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/base64"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -99,7 +103,7 @@ func TestMCPActorResolveRateLimit(t *testing.T) {
 
 	allowed := 0
 	for i := 0; i < 500; i++ {
-		if c.allowResolve() {
+		if c.allowResolve("192.0.2.1") {
 			allowed++
 		}
 	}
@@ -110,6 +114,74 @@ func TestMCPActorResolveRateLimit(t *testing.T) {
 	// second, so anything near 500 means the limiter is not limiting.
 	if allowed > mcpActorResolveRate*2+2 {
 		t.Errorf("limiter allowed %d resolutions in a burst, want about %d", allowed, mcpActorResolveRate*2)
+	}
+}
+
+// TestMCPActorResolveRateLimitIsPerSource: one source using up its
+// budget must not use up anybody else's. With a single process-wide
+// budget, a client sending unknown bearers left every other caller
+// with no identity.
+func TestMCPActorResolveRateLimitIsPerSource(t *testing.T) {
+	var c mcpActorCache
+
+	for i := 0; i < 500; i++ {
+		c.allowResolve("192.0.2.1")
+	}
+	if c.allowResolve("192.0.2.1") {
+		t.Fatal("the flooding source is still being allowed resolutions")
+	}
+	if !c.allowResolve("198.51.100.7") {
+		t.Fatal("a different source was refused because another used up its budget")
+	}
+}
+
+// TestMCPActorResolveGlobalCeiling: many sources together are still
+// bounded, so rotating addresses does not buy unlimited handshakes.
+func TestMCPActorResolveGlobalCeiling(t *testing.T) {
+	var c mcpActorCache
+
+	allowed := 0
+	for i := 0; i < 1000; i++ {
+		if c.allowResolve(fmt.Sprintf("10.0.%d.%d", i/256, i%256)) {
+			allowed++
+		}
+	}
+	if allowed > mcpActorResolveGlobalRate*2+2 {
+		t.Errorf("allowed %d resolutions across many sources, want about %d", allowed, mcpActorResolveGlobalRate*2)
+	}
+}
+
+// TestMCPActorSourceTableIsBounded: the per-source table cannot be
+// grown without limit by a client that rotates addresses.
+func TestMCPActorSourceTableIsBounded(t *testing.T) {
+	var c mcpActorCache
+	for i := 0; i < mcpActorMaxSources+50; i++ {
+		c.allowResolve(fmt.Sprintf("src-%d", i))
+	}
+	c.mu.Lock()
+	n := len(c.sources)
+	c.mu.Unlock()
+	if n > mcpActorMaxSources {
+		t.Errorf("source table holds %d entries, cap is %d", n, mcpActorMaxSources)
+	}
+}
+
+// TestActorResolveSourceGroupsIPv6: one host holds a whole /64, so its
+// addresses share one budget; IPv4 addresses are their own.
+func TestActorResolveSourceGroupsIPv6(t *testing.T) {
+	src := func(remote string) string {
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+		r.RemoteAddr = remote
+		return actorResolveSource(r, nil)
+	}
+	if a, b := src("[2001:db8:1:2::1]:443"), src("[2001:db8:1:2:ffff::9]:443"); a != b {
+		t.Errorf("two addresses in one /64 got different sources: %q, %q", a, b)
+	}
+	if a, b := src("[2001:db8:1:2::1]:443"), src("[2001:db8:1:3::1]:443"); a == b {
+		t.Errorf("two /64s share a source: %q", a)
+	}
+	if a, b := src("192.0.2.1:1"), src("192.0.2.2:1"); a == b {
+		t.Errorf("two IPv4 addresses share a source: %q", a)
 	}
 }
 

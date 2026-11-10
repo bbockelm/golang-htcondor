@@ -32,9 +32,9 @@ import (
 // spooling, oldest proc first, confined to the caller's own jobs.
 func (s *Server) procsAwaitingInput(ctx context.Context, cluster int) ([]*classad.ClassAd, error) {
 	lim := spool.DefaultLimits()
-	constraint, ok := s.scopeToOwner(ctx, spool.AwaitingInputConstraint(cluster), tierMutate)
-	if !ok {
-		return nil, fmt.Errorf("authentication required")
+	constraint, err := s.scopeToOwner(ctx, spool.AwaitingInputConstraint(cluster), tierMutate)
+	if err != nil {
+		return nil, err
 	}
 	// One past the limit, so the caller can say how many remain rather
 	// than reporting a truncated list as the whole of it.
@@ -45,7 +45,7 @@ func (s *Server) procsAwaitingInput(ctx context.Context, cluster int) ([]*classa
 	if !ok {
 		return nil, fmt.Errorf("authentication required")
 	}
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query cluster %d: %w", cluster, err)
 	}
@@ -100,7 +100,7 @@ func (s *Server) uploadToCluster(
 		return nil, err
 	}
 
-	res := spool.FanOut(ctx, attempt, src, lim, s.getSchedd().SpoolJobFilesFromTar)
+	res := spool.FanOut(ctx, attempt, src, lim, s.scheddFor(ctx).SpoolJobFilesFromTar)
 	res.NotAttempted = planned.NotAttempted
 	res.Capped = planned.Capped
 

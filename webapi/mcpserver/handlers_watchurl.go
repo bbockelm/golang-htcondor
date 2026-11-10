@@ -71,12 +71,18 @@ func (s *Server) toolCreateWatchURL(ctx context.Context, args map[string]interfa
 
 	ttl := shareurl.ClampTTL(shareurl.KindWatch, ttlSecondsArg(args))
 	exp := time.Now().Add(ttl)
-	tok, err := s.shareSigner.Sign(shareurl.Payload{
+	payload := shareurl.Payload{
 		Owner: owner,
 		Exp:   exp.Unix(),
 		Kind:  shareurl.KindWatch,
 		Watch: watchID,
-	})
+	}
+	if s.multi != nil {
+		// A watch covers its owner's jobs on every AP; the token says so,
+		// inside the HMAC, and only a multi-AP server redeems it.
+		payload.Schedd = shareurl.AllAccessPoints
+	}
+	tok, err := s.shareSigner.Sign(payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign watch URL: %w", err)
 	}

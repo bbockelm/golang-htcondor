@@ -2,8 +2,12 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { useBranding } from '@/lib/branding';
+import { placementAdmin } from '@/lib/placementAdmin';
+import { CountBadge } from './CountBadge';
+import { ProjectSwitcher } from './ProjectSwitcher';
 
 interface SidebarProps {
   userName?: string;
@@ -13,8 +17,20 @@ interface SidebarProps {
   // privileges gated on separate groups.
   superuserAllowed?: boolean;
   superuserActive?: boolean;
-  // Mobile drawer state. On lg+ the sidebar is always visible and these
-  // are ignored.
+  // Several access points behind this server: only the pages that mode
+  // serves are offered.
+  multiAP?: boolean;
+  // This server runs the reservation subsystem, so its admin page is
+  // offered. Off unless configured.
+  reservations?: boolean;
+  // This session can request a placement token.
+  placement?: boolean;
+  // A placement-assigned account's projects and the selected one.
+  placementProjects?: string[];
+  placementProject?: string;
+  // Mobile drawer state. On lg+ the sidebar is always visible -- pinned
+  // to the viewport's height, so the account controls at its foot stay on
+  // screen however long the page -- and these are ignored.
   open: boolean;
   onClose: () => void;
 }
@@ -24,17 +40,36 @@ const NAV = [
   { href: '/jobs', label: 'Jobs' },
   { href: '/issues', label: 'Issues' },
   { href: '/archive', label: 'Archive' },
+  { href: '/utilization', label: 'Utilization' },
   { href: '/submit', label: 'Submit' },
   { href: '/interactive', label: 'Interactive' },
   { href: '/pool', label: 'Pool' },
   { href: '/info', label: 'Info' },
 ];
 
+// Multi-AP mode serves job and history reads, job actions, submit and
+// interactive work.
+const MULTI_AP_NAV = [
+  { href: '/', label: 'Dashboard' },
+  { href: '/jobs', label: 'Jobs' },
+  { href: '/archive', label: 'Archive' },
+  { href: '/utilization', label: 'Utilization' },
+  { href: '/submit', label: 'Submit' },
+  { href: '/interactive', label: 'Interactive' },
+  { href: '/aps', label: 'Access Points' },
+];
+
+// Offered when this server issues placement tokens and the session has a
+// placement identity.
+const PLACEMENT_NAV = [{ href: '/placement', label: 'Placement token' }];
+
 const ADMIN_NAV = [
   { href: '/admin/placement', label: 'Placement' },
+  { href: '/admin/reservations', label: 'Reservations' },
   { href: '/admin/clients', label: 'OAuth2 Clients' },
   { href: '/admin/tokens', label: 'OAuth2 Tokens' },
   { href: '/admin/api-keys', label: 'API Keys' },
+  { href: '/admin/usage', label: 'Usage' },
   { href: '/admin/logs', label: 'Logs' },
 ];
 
@@ -43,10 +78,24 @@ export function Sidebar({
   isAdmin,
   superuserAllowed,
   superuserActive,
+  multiAP,
+  reservations,
+  placement,
+  placementProjects,
+  placementProject,
   open,
   onClose,
 }: SidebarProps) {
   const pathname = usePathname();
+  const branding = useBranding();
+  // Pending access requests, beside the admin Placement link.
+  const pendingRequests = useQuery({
+    queryKey: ['placement', 'requests', 'count'],
+    queryFn: placementAdmin.pendingRequests,
+    enabled: !!isAdmin && !multiAP,
+    refetchInterval: 60_000,
+    retry: false,
+  });
 
   return (
     <>
@@ -61,14 +110,18 @@ export function Sidebar({
       />
 
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-60 shrink-0 flex-col border-r bg-ink-950 text-gray-100 transition-transform lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-60 shrink-0 flex-col border-r bg-ink-950 text-gray-100 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0 ${
           open ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
         <div className="flex items-center justify-between border-b border-white/10 px-4 py-5">
-          <div>
-            <div className="text-base font-semibold">HTCondor</div>
-            <div className="text-xs text-gray-400">Access Point</div>
+          <div className="min-w-0">
+            <div className="truncate text-base font-semibold" title={branding.site_name}>
+              {branding.site_name}
+            </div>
+            {branding.site_tagline && (
+              <div className="truncate text-xs text-gray-400">{branding.site_tagline}</div>
+            )}
           </div>
           <button
             type="button"
@@ -93,7 +146,7 @@ export function Sidebar({
         </div>
 
         <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
-          {NAV.map((item) => (
+          {[...(multiAP ? MULTI_AP_NAV : NAV), ...(placement ? PLACEMENT_NAV : [])].map((item) => (
             <NavLink
               key={item.href}
               href={item.href}
@@ -109,7 +162,12 @@ export function Sidebar({
               <div className="mb-1 mt-5 px-3 text-[10px] uppercase tracking-wider text-gray-500">
                 Admin
               </div>
-              {ADMIN_NAV.map((item) => (
+              {ADMIN_NAV.filter(
+                (item) =>
+                  (!multiAP || item.href !== '/admin/placement') &&
+                  // Reservations are off unless the server runs them.
+                  (reservations || item.href !== '/admin/reservations'),
+              ).map((item) => (
                 <NavLink
                   key={item.href}
                   href={item.href}
@@ -117,6 +175,9 @@ export function Sidebar({
                   onNavigate={onClose}
                 >
                   {item.label}
+                  {item.href === '/admin/placement' && (
+                    <CountBadge count={pendingRequests.data} label="pending access requests" />
+                  )}
                 </NavLink>
               ))}
             </>
@@ -129,6 +190,9 @@ export function Sidebar({
           {userName ? (
             <>
               <div className="truncate text-gray-300">{userName}</div>
+              {placementProjects && (
+                <ProjectSwitcher projects={placementProjects} project={placementProject} />
+              )}
               <button
                 type="button"
                 onClick={async () => {

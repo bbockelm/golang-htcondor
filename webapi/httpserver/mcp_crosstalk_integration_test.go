@@ -38,6 +38,7 @@ import (
 // regardless of the token, both callers would map to the same identity,
 // and the test would pass without proving anything.
 func TestMCPForwardedTokenNoCrossTalk(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
 	}
@@ -102,8 +103,7 @@ QUEUE_ALL_USERS_TRUSTED = True
 	}
 	cf.Close()
 
-	os.Setenv("CONDOR_CONFIG", configFile)
-	defer os.Unsetenv("CONDOR_CONFIG")
+	htcCfg := loadPoolConfig(t, configFile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -127,6 +127,7 @@ QUEUE_ALL_USERS_TRUSTED = True
 	// fails whenever anything else on the machine holds it.
 	listener, baseURL := listenLocal(t)
 	server, err := NewServer(Config{
+		ClientConfig:   htcCfg,
 		ListenAddr:     listener.Addr().String(),
 		ScheddName:     "local",
 		ScheddAddr:     scheddAddr,

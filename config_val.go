@@ -41,7 +41,7 @@ func (s *Schedd) ConfigVal(ctx context.Context, name string) (value string, ok b
 		return "", false, fmt.Errorf("meta-queries (%q) are not supported by ConfigVal", name)
 	}
 
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, int(commands.DC_CONFIG_VAL), "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, int(commands.DC_CONFIG_VAL), "CLIENT", s.address)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to create security config: %w", err)
 	}

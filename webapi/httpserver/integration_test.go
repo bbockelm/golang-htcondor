@@ -16,15 +16,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // TestHTTPAPIIntegration tests the full lifecycle of job submission via HTTP API in demo mode
 func TestHTTPAPIIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -70,10 +74,7 @@ func TestHTTPAPIIntegration(t *testing.T) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	// Set CONDOR_CONFIG environment variable and reload configuration
-	// This ensures we don't inherit rate limits from other tests
-	t.Setenv("CONDOR_CONFIG", configFile)
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	t.Log("Starting condor_master...")
@@ -104,7 +105,7 @@ func TestHTTPAPIIntegration(t *testing.T) {
 	serverAddr := "127.0.0.1:0"
 
 	// Create HTTP server with collector for collector tests
-	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
+	collector := htcondor.NewCollector(scheddAddr).WithConfig(htcCfg) // Use schedd address (shared port)
 
 	// Create a directory for the DB to avoid any interference from Condor
 	dbDir := filepath.Join(tempDir, "db")
@@ -115,6 +116,7 @@ func TestHTTPAPIIntegration(t *testing.T) {
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,
@@ -175,7 +177,11 @@ func TestHTTPAPIIntegration(t *testing.T) {
 arguments = script.sh
 transfer_input_files = input.txt, script.sh
 transfer_output_files = output.txt
-transfer_executable = NO
+# "NO" does NOT turn the transfer off: SetExecutable tests only the first
+# character of the value, so false/False/F work and NO/no/0 leave it on.
+# With /bin/bash as the executable, the wrong spelling holds the job on a
+# transfer failure, which is what condor_submit does with it too.
+transfer_executable = false
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 queue`
@@ -223,6 +229,7 @@ queue`
 
 // TestHTTPAPIMultipartUploadIntegration tests the multipart form-data upload endpoint
 func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -268,9 +275,7 @@ func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	// Set CONDOR_CONFIG environment variable and reload configuration
-	t.Setenv("CONDOR_CONFIG", configFile)
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	t.Log("Starting condor_master...")
@@ -301,7 +306,7 @@ func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
 	serverAddr := "127.0.0.1:0"
 
 	// Create HTTP server with collector for collector tests
-	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
+	collector := htcondor.NewCollector(scheddAddr).WithConfig(htcCfg) // Use schedd address (shared port)
 
 	// Create a directory for the DB to avoid any interference from Condor
 	dbDir := filepath.Join(tempDir, "db")
@@ -312,6 +317,7 @@ func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,
@@ -372,7 +378,11 @@ func TestHTTPAPIMultipartUploadIntegration(t *testing.T) {
 arguments = script.sh
 transfer_input_files = input.txt, script.sh
 transfer_output_files = output.txt
-transfer_executable = NO
+# "NO" does NOT turn the transfer off: SetExecutable tests only the first
+# character of the value, so false/False/F work and NO/no/0 leave it on.
+# With /bin/bash as the executable, the wrong spelling holds the job on a
+# transfer failure, which is what condor_submit does with it too.
+transfer_executable = false
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 queue`
@@ -855,6 +865,9 @@ MEMORY = 2048
 # Run jobs quickly in test mode
 SCHEDD_INTERVAL = 2
 NEGOTIATOR_INTERVAL = 3
+# The default NEGOTIATOR_CYCLE_DELAY (20s) is a floor between cycles
+# that RESCHEDULE does not bypass.
+NEGOTIATOR_CYCLE_DELAY = 1
 STARTER_UPDATE_INTERVAL = 5
 
 # Disable unwanted features for testing
@@ -896,6 +909,10 @@ func startCondorMaster(ctx context.Context, configFile, localDir string) (*exec.
 	// Redirect output for debugging
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// On ctx cancellation, ask for a fast shutdown rather than SIGKILL:
+	// the master's daemons are not in its process group and would outlive it.
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGQUIT) }
+	cmd.WaitDelay = 30 * time.Second
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start condor_master: %w", err)
@@ -904,33 +921,65 @@ func startCondorMaster(ctx context.Context, configFile, localDir string) (*exec.
 	return cmd, nil
 }
 
-// stopCondorMaster gracefully stops condor_master
+// stopCondorMaster stops condor_master and the daemons it started.
+//
+// SIGQUIT is DaemonCore's fast shutdown: the master stops its daemons and
+// exits once they are gone. The master does not handle SIGINT, so SIGINT
+// (or SIGKILL) ends it at once and leaves its daemons -- each in its own
+// session -- running with no parent.
 func stopCondorMaster(cmd *exec.Cmd, t *testing.T) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
 
 	t.Log("Stopping condor_master...")
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
-		t.Logf("Warning: failed to send interrupt: %v", err)
-		cmd.Process.Kill()
+	if err := cmd.Process.Signal(syscall.SIGQUIT); err != nil {
+		t.Logf("Warning: failed to send SIGQUIT: %v", err)
 		return
 	}
 
-	// Wait for process to exit with timeout
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
 	}()
 
 	select {
-	case <-time.After(10 * time.Second):
-		t.Log("condor_master did not stop gracefully, forcing kill")
+	case <-time.After(30 * time.Second):
+		t.Log("condor_master did not stop, killing the pool")
+		killMasterDaemons(cmd, t)
 		cmd.Process.Kill()
 		<-done
 	case err := <-done:
 		if err != nil {
 			t.Logf("condor_master exited with error: %v", err)
+		}
+	}
+}
+
+// killMasterDaemons SIGKILLs the daemons the master logged starting. Each
+// leads its own process group, so they are killed by group.
+func killMasterDaemons(cmd *exec.Cmd, t *testing.T) {
+	var localDir string
+	for _, kv := range cmd.Env {
+		if v, ok := strings.CutPrefix(kv, "_CONDOR_LOCAL_DIR="); ok {
+			localDir = v
+		}
+	}
+	if localDir == "" {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, "log", "MasterLog"))
+	if err != nil {
+		t.Logf("cannot read MasterLog to find daemons: %v", err)
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		_, rest, ok := strings.Cut(line, "pid and pgroup = ")
+		if !ok {
+			continue
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && pid > 1 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
 		}
 	}
 }
@@ -1132,6 +1181,7 @@ func waitForServer(baseURL string, timeout time.Duration) error {
 
 // TestJobHoldReleaseIntegration tests job hold and release functionality
 func TestJobHoldReleaseIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -1251,6 +1301,7 @@ queue`
 
 // TestBulkJobOperationsIntegration tests bulk hold and release by constraint
 func TestBulkJobOperationsIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -1354,6 +1405,7 @@ queue 3`
 
 // TestCollectorQueryIntegration tests collector query APIs
 func TestCollectorQueryIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -1365,59 +1417,57 @@ func TestCollectorQueryIntegration(t *testing.T) {
 
 	client := &http.Client{Timeout: 30 * time.Second}
 
-	// Test: Query all collector ads
-	t.Log("Testing collector ads query...")
-	resp, err := client.Get(fmt.Sprintf("%s/api/v1/collector/ads", baseURL))
-	if err != nil {
-		t.Fatalf("Failed to query collector ads: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
+	// query fetches a collector route as an authenticated user and fails
+	// on any error the response reports.
+	//
+	// The ads routes stream, so they answer 200 before the collector has
+	// said anything and report a failure in the body's "error" field. This
+	// test used to check only the status, and passed for as long as every
+	// one of these queries was refused for lack of a credential.
+	query := func(path string) CollectorAdsResponse {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, baseURL+path, nil)
+		if err != nil {
+			t.Fatalf("building %s: %v", path, err)
+		}
+		req.Header.Set("X-Test-User", "testuser")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("Collector query failed with status %d: %s", resp.StatusCode, string(body))
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s answered %d: %s", path, resp.StatusCode, body)
+		}
+		var got struct {
+			CollectorAdsResponse
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("GET %s: decoding %s: %v", path, body, err)
+		}
+		if got.Error != "" {
+			t.Fatalf("GET %s answered 200 but the query failed: %s", path, got.Error)
+		}
+		return got.CollectorAdsResponse
 	}
 
-	var adsResp CollectorAdsResponse
-	json.NewDecoder(resp.Body).Decode(&adsResp)
+	adsResp := query("/api/v1/collector/ads")
 	t.Logf("Found %d ads", len(adsResp.Ads))
 
-	// Test: Query schedd ads
-	t.Log("Testing schedd ads query...")
-	resp, err = client.Get(fmt.Sprintf("%s/api/v1/collector/ads/schedd", baseURL))
-	if err != nil {
-		t.Fatalf("Failed to query schedd ads: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("Schedd query failed with status %d: %s", resp.StatusCode, string(body))
+	// The mini condor runs a schedd, so its ad is there to be found: an
+	// empty answer here is a failure, not a quiet pool.
+	adsResp = query("/api/v1/collector/ads/schedd")
+	if len(adsResp.Ads) == 0 {
+		t.Fatal("no schedd ads, though the test pool runs a schedd")
 	}
 
-	json.NewDecoder(resp.Body).Decode(&adsResp)
-	t.Logf("Found %d schedd ads", len(adsResp.Ads))
-
-	// Test: Query with projection
-	t.Log("Testing collector query with projection...")
-	resp, err = client.Get(fmt.Sprintf("%s/api/v1/collector/ads/schedd?projection=Name,MyAddress", baseURL))
-	if err != nil {
-		t.Fatalf("Failed to query with projection: %v", err)
+	adsResp = query("/api/v1/collector/ads/schedd?projection=Name,MyAddress")
+	if len(adsResp.Ads) == 0 {
+		t.Fatal("no schedd ads with a projection, though the test pool runs a schedd")
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("Projection query failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	json.NewDecoder(resp.Body).Decode(&adsResp)
-	t.Logf("Found %d ads with projection", len(adsResp.Ads))
-	if len(adsResp.Ads) > 0 {
-		t.Logf("First ad attributes: %+v", adsResp.Ads[0])
-	}
-
-	t.Log("Collector query test completed successfully")
+	t.Logf("First ad attributes: %+v", adsResp.Ads[0])
 
 	_ = tempDir
 	_ = server
@@ -1466,6 +1516,7 @@ func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL
 		os.RemoveAll(tempDir)
 		t.Fatalf("Failed to write config: %v", err)
 	}
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1504,12 +1555,13 @@ func setupIntegrationTest(t *testing.T) (tempDir string, server *Server, baseURL
 	serverAddr := "127.0.0.1:0"
 
 	// Create collector pointing to local mini condor
-	collector := htcondor.NewCollector(collectorAddr)
+	collector := htcondor.NewCollector(collectorAddr).WithConfig(htcCfg)
 
 	// Set OAuth2DBPath to tempDir to avoid permission issues
 	oauth2DBPath := filepath.Join(tempDir, "sessions.db")
 
 	server, err = NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,
@@ -1596,6 +1648,10 @@ func removeJob(t *testing.T, client *http.Client, baseURL, user, jobID string) {
 }
 
 // TestHTTPAPIRateLimiting tests that rate limiting works correctly with HTTP API
+//
+// Deliberately not t.Parallel: it sets CONDOR_CONFIG and reloads the
+// default config, which caches a process-global rate limiter from this
+// test's deliberately tiny limits. See the note at the setenv below.
 func TestHTTPAPIRateLimiting(t *testing.T) {
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
@@ -1969,6 +2025,9 @@ NEGOTIATOR_DEBUG = D_FULLDEBUG
 # Fast polling for testing
 POLLING_INTERVAL = 5
 NEGOTIATOR_INTERVAL = 10
+# The default NEGOTIATOR_CYCLE_DELAY (20s) is a floor between cycles
+# that RESCHEDULE does not bypass.
+NEGOTIATOR_CYCLE_DELAY = 1
 UPDATE_INTERVAL = 5
 
 # Use only local system resources
@@ -1990,6 +2049,7 @@ ENABLE_WEB_SERVER = False
 
 // TestFileFetchIntegration tests fetching individual files from job output sandbox
 func TestFileFetchIntegration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -2034,9 +2094,7 @@ func TestFileFetchIntegration(t *testing.T) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	// Set CONDOR_CONFIG environment variable
-	t.Setenv("CONDOR_CONFIG", configFile)
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	t.Log("Starting condor_master...")
@@ -2064,7 +2122,7 @@ func TestFileFetchIntegration(t *testing.T) {
 	t.Logf("Using schedd address: %s", scheddAddr)
 
 	// Start HTTP server
-	server, baseURL := startTestHTTPServer(ctx, tempDir, scheddAddr, passwordsDir, t)
+	server, baseURL := startTestHTTPServer(ctx, htcCfg, tempDir, scheddAddr, passwordsDir, t)
 	defer server.Shutdown(ctx)
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -2210,7 +2268,7 @@ queue
 	})
 }
 
-func startTestHTTPServer(ctx context.Context, tempDir, scheddAddr, passwordsDir string, t *testing.T) (*Server, string) {
+func startTestHTTPServer(ctx context.Context, htcCfg *config.Config, tempDir, scheddAddr, passwordsDir string, t *testing.T) (*Server, string) {
 	t.Helper()
 
 	signingKeyPath := filepath.Join(passwordsDir, "POOL")
@@ -2220,7 +2278,7 @@ func startTestHTTPServer(ctx context.Context, tempDir, scheddAddr, passwordsDir 
 	serverAddr := "127.0.0.1:0"
 
 	// Create HTTP server with collector for collector tests
-	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
+	collector := htcondor.NewCollector(scheddAddr).WithConfig(htcCfg) // Use schedd address (shared port)
 
 	// Create a directory for the DB to avoid any interference from Condor
 	dbDir := filepath.Join(tempDir, "db")
@@ -2231,6 +2289,7 @@ func startTestHTTPServer(ctx context.Context, tempDir, scheddAddr, passwordsDir 
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,

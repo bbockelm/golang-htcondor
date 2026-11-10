@@ -37,6 +37,7 @@ type httpMetrics struct {
 	scheddQueryTotal  *prometheus.CounterVec
 	scheddQueryDur    prometheus.Histogram
 	authFailuresTotal *prometheus.CounterVec
+	utilizationPhase  *prometheus.HistogramVec
 	mirror            *mirrorMetrics
 }
 
@@ -101,6 +102,18 @@ func newHTTPMetrics() *httpMetrics {
 			Buckets:   prometheus.DefBuckets,
 		}),
 
+		utilizationPhase: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "utilization",
+				Name:      "phase_seconds",
+				Help:      "Time each phase of a utilization analysis took: read (query to last record), decode (summed across goroutines), decode_wait, analyze, summary, compress.",
+				// A million-job analysis runs to minutes.
+				Buckets: []float64{.01, .05, .1, .5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+			},
+			[]string{"phase"},
+		),
+
 		mirror: newMirrorMetrics(),
 
 		authFailuresTotal: prometheus.NewCounterVec(
@@ -121,6 +134,7 @@ func newHTTPMetrics() *httpMetrics {
 		m.scheddQueryTotal,
 		m.scheddQueryDur,
 		m.authFailuresTotal,
+		m.utilizationPhase,
 		m.mirror.decisions,
 		// The standard Go runtime + process collectors give us GC,
 		// goroutines, FD count, RSS — table stakes for any Go service.
@@ -282,13 +296,19 @@ var routePatterns = []routePattern{
 	{exact: "/api/v1/whoami", template: "/api/v1/whoami"},
 	{exact: "/api/v1/auth/me", template: "/api/v1/auth/me"},
 	{exact: "/api/v1/auth/logout", template: "/api/v1/auth/logout"},
+	{exact: "/api/v1/webui/branding", template: "/api/v1/webui/branding"},
 	{exact: "/login", template: "/login"},
 	{exact: "/logout", template: "/logout"},
 
 	// Dashboard / version / health
 	{exact: "/api/v1/dashboard", template: "/api/v1/dashboard"},
 	{exact: "/api/v1/dashboard/activity", template: "/api/v1/dashboard/activity"},
+	{exact: "/api/v1/calendar", template: "/api/v1/calendar"},
 	{exact: "/api/v1/issues", template: "/api/v1/issues"},
+	{exact: "/api/v1/utilization", template: "/api/v1/utilization"},
+	{exact: "/api/v1/utilization/jobs", template: "/api/v1/utilization/jobs"},
+	{exact: "/api/v1/utilization/workflow", template: "/api/v1/utilization/workflow"},
+	{exact: "/api/v1/utilization/apply", template: "/api/v1/utilization/apply"},
 	{exact: "/api/v1/version", template: "/api/v1/version"},
 	{exact: "/healthz", template: "/healthz"},
 	{exact: "/readyz", template: "/readyz"},
@@ -303,6 +323,7 @@ var routePatterns = []routePattern{
 	{exact: "/api/v1/jobs/transfers", template: "/api/v1/jobs/transfers"},
 	{exact: "/api/v1/jobs/hold", template: "/api/v1/jobs/hold"},
 	{exact: "/api/v1/jobs/release", template: "/api/v1/jobs/release"},
+	{exact: "/api/v1/jobs/runtime-estimates", template: "/api/v1/jobs/runtime-estimates"},
 
 	// Job item — order is critical: longest-prefix wins.
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/files/.+$`), template: "/api/v1/jobs/{id}/files/{name}"},
@@ -311,6 +332,9 @@ var routePatterns = []routePattern{
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/input/share$`), template: "/api/v1/jobs/{id}/input/share"},
 	{re: regexp.MustCompile(`^/api/v1/watches/[^/]+/share$`), template: "/api/v1/watches/{id}/share"},
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/(input|output|stdout|stderr|log|hold|release|ssh)$`), template: "/api/v1/jobs/{id}/{action}"},
+	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/runtime-estimate$`), template: "/api/v1/jobs/{id}/runtime-estimate"},
+	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+/similar$`), template: "/api/v1/jobs/{id}/similar"},
+	{re: regexp.MustCompile(`^/api/v1/utilization/for-job/[^/]+$`), template: "/api/v1/utilization/for-job/{id}"},
 	{re: regexp.MustCompile(`^/api/v1/jobs/[^/]+$`), template: "/api/v1/jobs/{id}"},
 
 	// Templates
@@ -335,6 +359,7 @@ var routePatterns = []routePattern{
 	// label since the paths under /admin/ are operator-only and
 	// scaling per-route adds little).
 	{re: regexp.MustCompile(`^/api/v1/collector/.*$`), template: "/api/v1/collector/*"},
+	{exact: "/api/v1/pool/drain-estimates", template: "/api/v1/pool/drain-estimates"},
 	{exact: "/api/v1/ping", template: "/api/v1/ping"},
 	{exact: "/api/v1/schedd/ping", template: "/api/v1/schedd/ping"},
 	{exact: "/api/v1/share/output", template: "/api/v1/share/output"},
@@ -344,6 +369,7 @@ var routePatterns = []routePattern{
 
 	// MCP / IDP — bucket aggressively; these aren't user-facing flows.
 	{re: regexp.MustCompile(`^/mcp/oauth2/.*$`), template: "/mcp/oauth2/*"},
+	{re: regexp.MustCompile(`^/oauth2/.*$`), template: "/oauth2/*"},
 	{exact: "/mcp", template: "/mcp"},
 	{exact: "/mcp/message", template: "/mcp/message"},
 	{re: regexp.MustCompile(`^/idp/.*$`), template: "/idp/*"},

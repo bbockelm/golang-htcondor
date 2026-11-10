@@ -1,125 +1,122 @@
 package httpserver
 
-import "github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
-
-// Where the OAuth2 SSO callback lives.
+// Where the OAuth2 endpoints live.
 //
 // Every OAuth2 endpoint sits under /mcp/ because MCP is what first needed
 // them. That reads correctly on a server whose only surface is MCP, and
 // oddly on one that also serves a web UI: a person logging in to the UI is
 // bounced through a URL naming a protocol they are not using.
 //
-// So the callback follows what the server actually serves. The rest of the
-// OAuth2 endpoints keep their paths: they are named in published metadata
-// (RFC 8414) and in registered clients, and moving them buys nothing that
-// the callback's visibility does.
+// So the advertised paths follow what the server actually serves: the
+// /mcp/oauth2/ spelling only where MCP is all there is, the plain
+// /oauth2/ one everywhere else. Where MCP is on, both are routed, because
+// clients registered against the old spelling keep it. Where MCP is off,
+// /mcp/ is not routed at all -- such a server never served OAuth2 under
+// that prefix, so nothing holds it.
 
 const (
 	// mcpCallbackPath is the callback on an MCP-only server, and remains
-	// served everywhere -- see OAuth2CallbackPath.
+	// served wherever MCP is -- see OAuth2CallbackPath.
 	mcpCallbackPath = "/mcp/oauth2/callback"
 	// webUICallbackPath is the callback when this server also serves the
-	// web UI.
+	// web UI, or does not serve MCP.
 	webUICallbackPath = "/oauth2/callback"
 
 	// mcpDeviceVerifyPath is where a device-flow user approves a login on
-	// an MCP-only server, and remains served everywhere.
+	// an MCP-only server, and remains served wherever MCP is.
 	mcpDeviceVerifyPath = "/mcp/oauth2/device/verify"
-	// webUIDeviceVerifyPath is the same page when this server also serves
-	// the web UI.
+	// webUIDeviceVerifyPath is the same page on every other server.
 	webUIDeviceVerifyPath = "/oauth2/device/verify"
 )
 
-// OAuth2CallbackPath is the path this server advertises as its redirect URI:
-// the plain one when the web UI is compiled in, the MCP-scoped one otherwise.
+// plainOAuth2Paths reports whether a server advertises its OAuth2
+// endpoints under /oauth2/ rather than /mcp/oauth2/.
 //
-// Both are always routed. A redirect URI is registered with the upstream
-// identity provider, and an authorization already in flight across a restart
-// or an upgrade comes back to whichever path it was started with; answering
-// only the current one would strand it.
-func OAuth2CallbackPath() string {
-	if webui.IsEmbedded() {
+// The /mcp/ spelling is kept only where MCP is the whole surface: that is
+// what such a server has always advertised. With a web UI the plain path
+// is what a person should see; without MCP the /mcp/ one is not routed.
+func plainOAuth2Paths(webUIEnabled, mcpEnabled bool) bool {
+	return webUIEnabled || !mcpEnabled
+}
+
+// OAuth2CallbackPath is the path a server with this surface advertises as
+// its redirect URI.
+//
+// Wherever MCP is on, both callback paths are routed. A redirect URI is
+// registered with the upstream identity provider, and an authorization
+// already in flight across a restart or an upgrade comes back to whichever
+// path it was started with; answering only the current one would strand
+// it.
+func OAuth2CallbackPath(webUIEnabled, mcpEnabled bool) string {
+	if plainOAuth2Paths(webUIEnabled, mcpEnabled) {
 		return webUICallbackPath
 	}
 	return mcpCallbackPath
 }
 
-// OAuth2DeviceVerifyPath is the path this server puts in a device
-// authorization's verification_uri: the plain one when the web UI is
-// compiled in, the MCP-scoped one otherwise.
+// deviceVerifyPathFor is the device verification page for a server that
+// does (plain) or does not advertise the plain OAuth2 paths.
 //
 // Same reasoning as OAuth2CallbackPath, and it matters more here. The
 // callback is a redirect a browser follows without reading; this URL is
 // printed in a terminal for a person to copy, and `ssh` users on a server
 // with a web UI were being sent to a path naming a protocol they are not
 // using.
-//
-// Both are always routed, for the same reason the callback's two are: a
-// device authorization issued before a restart or an upgrade carries the
-// URL it was issued with, and its user has up to ten minutes to open it.
-func OAuth2DeviceVerifyPath() string {
-	return deviceVerifyPathFor(webui.IsEmbedded())
-}
-
-// deviceVerifyPathFor is the choice itself, separated from how this build
-// answers it.
-//
-// Test builds do not embed the frontend, so a test calling
-// OAuth2DeviceVerifyPath() exercises one branch and asserts whichever
-// answer it got -- it passes against a function that ignores the flag
-// entirely. Found by mutation.
-func deviceVerifyPathFor(embedded bool) string {
-	if embedded {
+func deviceVerifyPathFor(plain bool) string {
+	if plain {
 		return webUIDeviceVerifyPath
 	}
 	return mcpDeviceVerifyPath
 }
 
-// deviceVerifyPath is the seam the device authorization composes its
-// verification_uri through.
-//
-// A variable rather than a direct call so a test can make it differ from
-// the default. Test builds do not embed the frontend, so every expression
-// that could stand in for it -- the exported function, the MCP constant,
-// a hardcoded string -- evaluates the same there, and a test comparing
-// them asserts nothing. Found by mutation: reverting the composition to a
-// hardcoded "/mcp/oauth2/device/verify" broke nothing.
-var deviceVerifyPath = OAuth2DeviceVerifyPath
-
-// oauth2EndpointPathFor is the choice for every other OAuth2 endpoint:
-// the plain path when the web UI is compiled in, the MCP-scoped one
-// otherwise.
-//
-// Separated from how this build answers it for the same reason
-// deviceVerifyPathFor is -- test builds do not embed the frontend, so a
-// test calling the exported wrapper exercises one branch and asserts
-// whichever answer it got, which passes against a function that ignores
-// the flag entirely.
-func oauth2EndpointPathFor(embedded bool, name string) string {
-	if embedded {
+// oauth2EndpointPathFor is the path of the named OAuth2 endpoint
+// ("authorize", "token", ...) for a server that does (plain) or does not
+// advertise the plain OAuth2 paths.
+func oauth2EndpointPathFor(plain bool, name string) string {
+	if plain {
 		return "/oauth2/" + name
 	}
 	return "/mcp/oauth2/" + name
 }
 
-// OAuth2EndpointPath is the path this server advertises for an OAuth2
+// plainOAuth2Paths reports whether this server advertises its OAuth2
+// endpoints under /oauth2/. See the package-level function.
+func (h *Handler) plainOAuth2Paths() bool {
+	return plainOAuth2Paths(h.webUIEnabled, h.mcpEnabled)
+}
+
+// oauth2EndpointPath is the path this server advertises for an OAuth2
 // endpoint, given its name ("authorize", "token", ...).
 //
 // Every OAuth2 endpoint sits under /mcp/ because MCP is what first
 // needed them, and the name has outlived the reason: these serve the web
-// UI, editor extensions and anything else that speaks OAuth2. The
-// callback and the device verification page already moved, being the
-// two a person reads; this is the rest.
+// UI, editor extensions and anything else that speaks OAuth2.
 //
-// Both paths are always routed. A client discovers these once and keeps
-// them -- a dynamically registered client may hold them for as long as
-// its registration lasts -- so withdrawing the old one would strand
-// every client that registered before the change.
-func OAuth2EndpointPath(name string) string {
-	return oauth2EndpointPathFor(webui.IsEmbedded(), name)
+// Where MCP is on, both paths are routed. A client discovers these once
+// and keeps them -- a dynamically registered client may hold them for as
+// long as its registration lasts -- so withdrawing the old one would
+// strand every client that registered before the change.
+func (h *Handler) oauth2EndpointPath(name string) string {
+	return oauth2EndpointPathFor(h.plainOAuth2Paths(), name)
 }
 
-// oauth2EndpointNames are the endpoints served under both prefixes.
+// oauth2CallbackPath is the redirect URI path this server advertises.
+func (h *Handler) oauth2CallbackPath() string {
+	return OAuth2CallbackPath(h.webUIEnabled, h.mcpEnabled)
+}
+
+// deviceVerifyPath is the path this server puts in a device
+// authorization's verification_uri.
+//
+// Wherever MCP is on, both are routed, for the same reason the callback's
+// two are: a device authorization issued before a restart or an upgrade
+// carries the URL it was issued with, and its user has up to ten minutes
+// to open it.
+func (h *Handler) deviceVerifyPath() string {
+	return deviceVerifyPathFor(h.plainOAuth2Paths())
+}
+
+// oauth2EndpointNames are the endpoints routed under each served prefix.
 // The callback and device verification page are routed separately,
 // having moved first.
 var oauth2EndpointNames = []string{

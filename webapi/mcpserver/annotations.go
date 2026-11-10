@@ -66,6 +66,7 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	"query_jobs":               readOnlyAnn(true),
 	"get_job":                  readOnlyAnn(true),
 	"analyze_job_match":        readOnlyAnn(true),
+	"query_pool":               readOnlyAnn(true),
 	"get_job_stdout":           readOnlyAnn(true),
 	"get_job_stderr":           readOnlyAnn(true),
 	"get_job_output":           readOnlyAnn(true),
@@ -73,6 +74,7 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	"query_job_epochs":         readOnlyAnn(true),
 	"query_transfer_history":   readOnlyAnn(true),
 	"query_history_db":         readOnlyAnn(true),
+	"list_access_points":       readOnlyAnn(true), // multi-AP mode
 	"query_jobs_as_of":         readOnlyAnn(true),
 	"aggregate_jobs":           readOnlyAnn(true),
 	"list_service_credentials": readOnlyAnn(true),
@@ -86,22 +88,28 @@ var toolAnnotations = map[string]*mcp.ToolAnnotations{
 
 	// --- read-only, closed world: static docs, skills, and this server's
 	// own version and watch bookkeeping ---
-	"condor_doc_job_attributes":     readOnlyAnn(false),
-	"condor_doc_machine_attributes": readOnlyAnn(false),
-	"condor_doc_submit_syntax":      readOnlyAnn(false),
-	"condor_doc_config_variables":   readOnlyAnn(false),
-	"condor_doc_search":             readOnlyAnn(false),
-	"skills_list":                   readOnlyAnn(false),
-	"skills_get":                    readOnlyAnn(false),
-	"get_version":                   readOnlyAnn(false),
-	"whoami":                        readOnlyAnn(false),
-	"check_watches":                 readOnlyAnn(false),
+	"doc_job_attributes":     readOnlyAnn(false),
+	"doc_machine_attributes": readOnlyAnn(false),
+	"doc_submit_syntax":      readOnlyAnn(false),
+	"doc_config_variables":   readOnlyAnn(false),
+	"doc_search":             readOnlyAnn(false),
+	"doc_guide":              readOnlyAnn(false),
+	"skills_list":            readOnlyAnn(false),
+	"skills_get":             readOnlyAnn(false),
+	"get_version":            readOnlyAnn(false),
+	"whoami":                 readOnlyAnn(false),
+	"check_watches":          readOnlyAnn(false),
 	// analyze_issues reads the queue and run-attempt history and groups
 	// what it finds. Open-world: what it reports depends on what the
 	// access point is doing, so two calls a minute apart legitimately
 	// differ.
 	"analyze_issues": readOnlyAnn(true),
-	"cancel_watch":   readOnlyAnn(false),
+	// analyze_utilization reads finished jobs and the pool's machines.
+	"analyze_utilization": readOnlyAnn(true),
+	// get_access_point_policy reads the schedd's configuration. Open-world:
+	// the answer is whatever the access point is configured with now.
+	"get_access_point_policy": readOnlyAnn(true),
+	"cancel_watch":            readOnlyAnn(false),
 
 	// --- destructive job-control surface (issue #391) ---
 	// submit_job is grouped here per the issue even though it only creates;

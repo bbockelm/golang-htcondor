@@ -7,14 +7,14 @@ import {
   Goodput,
   HoldReasons,
   LiveTicker,
-  OtherStatuses,
   RecentActivity,
-  StatCard,
-  STATUS_LABEL_BY_KEY,
+  StatusRow,
 } from '@/components/DashboardPanels';
+import { CalendarPanel } from '@/components/CalendarPanel';
+import { CALENDAR_DAYS } from '@/lib/calendar';
 import { useActivityStream } from '@/lib/useActivityStream';
-import { jobsDrilldown, statusConstraint } from '@/lib/drilldown';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
+import { AccessPointsTable } from '@/components/AccessPointsTable';
 
 export default function Dashboard() {
   const { data: session, isLoading: sessionLoading } = useQuery({
@@ -30,11 +30,38 @@ export default function Dashboard() {
     return <LandingPage />;
   }
 
+  if (session.multi_ap) {
+    return <MultiAPDashboard />;
+  }
+
   return (
     <AuthenticatedDashboard
       username={session.username ?? ''}
       isAdmin={!!session.is_admin}
     />
+  );
+}
+
+// MultiAPDashboard is the home page when this server fronts several
+// access points: where your jobs are, and how current each one is.
+function MultiAPDashboard() {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-baseline gap-3 flex-wrap">
+        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+        <span className="text-sm text-gray-500">
+          Your jobs on every access point.{' '}
+          <Link href="/jobs" className="text-brand-700 hover:underline">
+            Jobs
+          </Link>{' '}
+          ·{' '}
+          <Link href="/archive" className="text-brand-700 hover:underline">
+            Archive
+          </Link>
+        </span>
+      </div>
+      <AccessPointsTable />
+    </div>
   );
 }
 
@@ -71,11 +98,12 @@ function AuthenticatedDashboard({
   // data from it, and a mirror-less deployment simply renders no ticker.
   const live = useActivityStream(ownedByMe);
 
-  // Two queries, not one, so the page paints in stages: the tiles are a
-  // single aggregate against the mirror and land in a few milliseconds,
-  // while the panels below cost a hold breakdown and four windowed
-  // lookups. Combined, everything waited for the slowest of those --
-  // which is what made the page feel slow after the panels were added.
+  // Two queries, not one, so the page paints in stages: the status row
+  // is a single aggregate against the mirror and lands in a few
+  // milliseconds, while the panels below cost a hold breakdown and four
+  // windowed lookups. Combined, everything waited for the slowest of
+  // those -- which is what made the page feel slow after the panels were
+  // added.
   const { data, isLoading, error } = useQuery({
     queryKey: ['dashboard', scope],
     queryFn: () => api.dashboard({ owned_by_me: ownedByMe }),
@@ -90,8 +118,23 @@ function AuthenticatedDashboard({
     refetchInterval: 30_000,
   });
 
+  // The calendar is a third query: a quarter of per-day counts out of
+  // the history mirror is the slowest thing on the page, and a day's
+  // figures change about once a day, so it neither holds the panels
+  // above it nor polls with them. The scope is in the key, as it is for
+  // the others -- without it, switching to Everyone would redraw the
+  // same person's calendar.
+  const { data: calendar } = useQuery({
+    queryKey: ['calendar', scope],
+    queryFn: () => api.calendar({ days: CALENDAR_DAYS, owned_by_me: ownedByMe }),
+    refetchInterval: 300_000,
+    // A server that does not serve this will not serve it on the second
+    // ask either, and the panel renders nothing where it cannot answer.
+    retry: false,
+  });
+
   // An older server still answers /dashboard with both halves; prefer
-  // the dedicated response and fall back to what the tiles carried.
+  // the dedicated response and fall back to what the counts carried.
   const activity = panels?.activity ?? data?.activity;
   const goodput = panels?.goodput ?? data?.goodput;
 
@@ -115,22 +158,7 @@ function AuthenticatedDashboard({
 
       {data && (
         <>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-            <StatCard label="Total" value={data.jobs_total} primary href="/jobs" />
-            {(['idle', 'running', 'held', 'completed'] as const).map((key) => (
-              <StatCard
-                key={key}
-                label={STATUS_LABEL_BY_KEY[key]}
-                value={data.jobs_by_status[key] ?? 0}
-                href={jobsDrilldown(
-                  statusConstraint(key) as string,
-                  `${STATUS_LABEL_BY_KEY[key].toLowerCase()} jobs`,
-                )}
-              />
-            ))}
-          </div>
-
-          <OtherStatuses byStatus={data.jobs_by_status} />
+          <StatusRow byStatus={data.jobs_by_status} total={data.jobs_total} />
 
           <LiveTicker {...live} />
 
@@ -146,6 +174,8 @@ function AuthenticatedDashboard({
               <p className="text-sm text-gray-400">Loading recent activity...</p>
             )
           )}
+
+          <CalendarPanel calendar={calendar} />
 
           <div>
             <Link

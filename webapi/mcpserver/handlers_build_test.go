@@ -710,3 +710,27 @@ func TestBuildContainerNeedsExactlyOneRecipe(t *testing.T) {
 		})
 	}
 }
+
+// destination and name reach the generated submit file, inside a quoted
+// transfer_output_remaps value; a line break, a quote or a semicolon
+// would change what the file says rather than where the image goes.
+func TestBuildContainerRefusesSubmitBreakingDestination(t *testing.T) {
+	s := &Server{}
+	for _, args := range []map[string]interface{}{
+		{"name": "x.sif", "definition": "Bootstrap: docker\nFrom: alpine",
+			"destination": "osdf:///x/x.sif\nrequirements = false"},
+		{"name": "x.sif", "definition": "Bootstrap: docker\nFrom: alpine",
+			"destination": `osdf:///x/x.sif" ; other = /tmp/y`},
+		{"name": "x\".sif", "definition": "Bootstrap: docker\nFrom: alpine",
+			"destination": "osdf:///x/x.sif"},
+	} {
+		_, err := s.toolBuildContainer(context.Background(), args)
+		if err == nil || !strings.Contains(err.Error(), "line break") {
+			t.Errorf("args %q: err = %v, want a refusal naming the character", args, err)
+		}
+	}
+	if got, err := buildDestination("osdf:///chtc/staging/a/alice/x.sif", "", "x.sif", "alice"); err != nil ||
+		got != "osdf:///chtc/staging/a/alice/x.sif" {
+		t.Errorf("an ordinary destination: %q, %v", got, err)
+	}
+}

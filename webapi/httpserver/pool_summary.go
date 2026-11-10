@@ -27,7 +27,6 @@ import (
 	"math"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -366,12 +365,42 @@ func (s *Handler) handlePoolSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	constraint := `SlotType =!= "Dynamic"`
-	if userExpr := strings.TrimSpace(r.URL.Query().Get("constraint")); userExpr != "" {
-		constraint = fmt.Sprintf(`(%s) && (%s)`, constraint, userExpr)
+	// andScope re-serializes the caller's expression, so unbalanced
+	// parentheses cannot reach past the dynamic-slot exclusion.
+	constraint, err := andScope(`SlotType =!= "Dynamic"`, r.URL.Query().Get("constraint"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid constraint: %v", err))
+		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	// This summary looks like an aggregate but names a slot's owner in
+	// every row, so it is as revealing as a listing and is governed the
+	// same way. The caller's own constraint is checked; the
+	// dynamic-slot exclusion ANDed in above is this server's.
+	privileged := s.seesAllJobs(r.Context(), r, jobScopeRead)
+	if s.poolQueryPolicy.Refuses(privileged) {
+		s.writeError(w, http.StatusForbidden,
+			"Pool queries are restricted to administrators at this site")
+		return
+	}
+	if err := s.poolQueryPolicy.CheckConstraint(privileged, "StartdAd",
+		r.URL.Query().Get("constraint")); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	// Under the caller's credential: the bare request context has none, so
+	// the query would be refused before it reached the collector.
+	ctx, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	// Stream with no limit and accumulate: the aggregated result is small
@@ -391,5 +420,15 @@ func (s *Handler) handlePoolSummary(w http.ResponseWriter, r *http.Request) {
 		ads = append(ads, result.Ad)
 	}
 
-	s.writeJSON(w, http.StatusOK, aggregatePoolSummary(ads))
+	summary := aggregatePoolSummary(ads)
+	// The counts stay; the names come out. A restricted caller still
+	// learns how busy the pool is, which is what this endpoint is for.
+	if s.poolQueryPolicy.Restricts(privileged) {
+		for i := range summary.Nodes {
+			for j := range summary.Nodes[i].Slots {
+				summary.Nodes[i].Slots[j].RemoteOwner = ""
+			}
+		}
+	}
+	s.writeJSON(w, http.StatusOK, summary)
 }

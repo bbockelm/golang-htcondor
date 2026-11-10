@@ -8,6 +8,10 @@
 // three points (the sampler's floor is one point every ~15 min), and
 // disk/GPU appear only when the job actually used them.
 
+import type { ClassAd, Sources } from './api';
+import { jobRequest, type RequestAttr } from './jobRequests';
+import { formatKiB, formatMiB } from './utilization';
+
 export interface MetricsColumn {
   name: string;
   kind: 'group' | 'metric';
@@ -24,6 +28,10 @@ export interface MetricsResponse {
   columns?: MetricsColumn[];
   rows?: string[][];
   truncated?: boolean;
+  // Multi-AP mode: the job a job_id read was for, and how current the
+  // hub's copy of each access point is.
+  job?: { schedd: string; cluster: number; proc: number; job_id: string };
+  sources?: Sources;
 }
 
 // The query the job page issues. Kept beside the defs that read it back so
@@ -34,6 +42,50 @@ export const JOB_METRICS_AGG =
   'max:MemoryUsage,avg:CpuUtil,max:DiskUsage,avg:GpuUtil,' +
   'max:RequestMemory,max:RequestCpus,max:RequestDisk,max:RequestGpus';
 
+// Derived rates (CpuUtil, GpuUtil) are a counter's change divided by the
+// sample's SampleInterval, in seconds. Samples were once recorded with an
+// interval of about a second -- an ingest clock read just after the
+// previous sample rather than the starter's -- and a second's worth of
+// counter over one second reads as hundreds of cores on a one-core job.
+// Those rows are append-only and still in the store, and the chart
+// averages server-side per bucket, so a client can no longer pick them
+// out: the query has to leave them out. A sampler's real intervals are
+// minutes long. A run's first sample has no interval and no rates, and
+// stays (its memory and disk readings are good). The cost: a short-interval
+// sample's memory and disk readings go too, which a later sample's
+// high-water mark covers.
+export const RATE_MIN_SAMPLE_INTERVAL = 60;
+export const RATE_SAMPLE_GUARD = `(SampleInterval is undefined || SampleInterval >= ${RATE_MIN_SAMPLE_INTERVAL})`;
+
+// jobMetricsConstraint selects one job's samples for the charts.
+export function jobMetricsConstraint(cluster: number, proc: number): string {
+  return `ClusterId == ${cluster} && ProcId == ${proc} && ${RATE_SAMPLE_GUARD}`;
+}
+
+// jobMetricsSelector is how the job page's query names its job, or
+// undefined when the id cannot name one.
+//
+// In multi-AP mode a cluster.proc repeats across access points, so the
+// job goes as the server's complete job_id ("12.0@ap1") and the server
+// confines the samples to that access point; the id is passed whole,
+// never split here. In single-AP mode it is a constraint on the numbers.
+// parseInt (rather than Number) so an id carrying a suffix -- the archive
+// route builds keys like "12345.0@1790000000" -- still resolves, matching
+// how the archive detail page itself reads the id.
+export function jobMetricsSelector(
+  jobID: string,
+  multiAP: boolean,
+): { constraint: string; job_id?: string } | undefined {
+  if (multiAP) {
+    return jobID ? { constraint: RATE_SAMPLE_GUARD, job_id: jobID } : undefined;
+  }
+  const [clusterStr, procStr] = jobID.split('.');
+  const cluster = Number.parseInt(clusterStr, 10);
+  const proc = Number.parseInt(procStr ?? '0', 10);
+  if (!Number.isInteger(cluster) || !Number.isInteger(proc)) return undefined;
+  return { constraint: jobMetricsConstraint(cluster, proc) };
+}
+
 export interface SeriesPoint {
   t: number; // unix seconds (bucket start)
   value: number;
@@ -41,6 +93,12 @@ export interface SeriesPoint {
 export interface ExecutionSeries {
   run: number; // RunInstanceID
   points: SeriesPoint[];
+  // What this run asked for, from the samples' own max:Request* column.
+  // Set only when the runs did not all ask for the same thing -- a job on
+  // a memory retry ladder, or one whose request is a rule over its own
+  // usage -- where one reference line across the chart would be wrong for
+  // every run but the last.
+  request?: number;
 }
 export interface MetricSeries {
   key: string;
@@ -49,9 +107,12 @@ export interface MetricSeries {
   executions: ExecutionSeries[];
   // Requested amount as a reference line, in the same unit as the series.
   // Undefined when there is no sensible same-unit request (GPU: util vs a
-  // count), in which case requestedNote carries it as text instead.
+  // count), or when the request moved between runs and each one draws its
+  // own; in both cases requestedNote carries it as text instead.
   requested?: number;
   requestedNote?: string;
+  // The request's expression, when the job wrote it as one.
+  requestedExpr?: string;
   pointCount: number;
   // Caveat shown under the chart (e.g. the memory HWM ratchet).
   note?: string;
@@ -63,6 +124,9 @@ interface JobMetricDef {
   unit: string;
   valueCol: string;
   requestCol?: string;
+  // The job attribute the request comes from, read from the ad when the
+  // page has it (see buildJobMetrics).
+  requestAttr: RequestAttr;
   // Whether the request is the same unit as the value (so it can be a line).
   requestIsLine: boolean;
   // Require actual usage (> 0) before charting -- for disk/GPU, which are
@@ -78,9 +142,10 @@ const JOB_METRIC_DEFS: JobMetricDef[] = [
     unit: 'MB',
     valueCol: 'max_MemoryUsage',
     requestCol: 'max_RequestMemory',
+    requestAttr: 'RequestMemory',
     requestIsLine: true,
     requireData: false,
-    note: 'MemoryUsage is a high-water mark, not a live reading — the curve only rises, so it shows the peak a run ever needed rather than a working-set trace.',
+    note: 'Each point is the most memory the run had used by then.',
   },
   {
     key: 'cpu',
@@ -88,6 +153,7 @@ const JOB_METRIC_DEFS: JobMetricDef[] = [
     unit: 'cores',
     valueCol: 'avg_CpuUtil',
     requestCol: 'max_RequestCpus',
+    requestAttr: 'RequestCpus',
     requestIsLine: true,
     requireData: false,
   },
@@ -97,9 +163,10 @@ const JOB_METRIC_DEFS: JobMetricDef[] = [
     unit: 'KB',
     valueCol: 'max_DiskUsage',
     requestCol: 'max_RequestDisk',
+    requestAttr: 'RequestDisk',
     requestIsLine: true,
     requireData: true,
-    note: 'DiskUsage is a high-water mark for the current execution.',
+    note: 'Each point is the most disk the run had used by then.',
   },
   {
     key: 'gpu',
@@ -107,11 +174,12 @@ const JOB_METRIC_DEFS: JobMetricDef[] = [
     unit: 'GPU',
     valueCol: 'avg_GpuUtil',
     requestCol: 'max_RequestGpus',
+    requestAttr: 'RequestGPUs',
     // GpuUtil is a utilization fraction; RequestGpus is a device count, so
     // it cannot share the axis. Shown as a note instead of a line.
     requestIsLine: false,
     requireData: true,
-    note: 'Per-interval GPU utilization, de-averaged from the pool’s lifetime average.',
+    note: 'Each point is how busy the GPUs were over that interval.',
   },
 ];
 
@@ -125,7 +193,12 @@ function toNum(v: string | undefined): number | undefined {
 
 // buildJobMetrics turns the server response into the charts the page should
 // draw. Returns [] when the feature is off or nothing clears the gate.
-export function buildJobMetrics(resp: MetricsResponse | undefined): MetricSeries[] {
+//
+// job, when given, is where the "requested" reference comes from: the value
+// each Request* evaluates to in the job's ad, the same number the resource
+// table shows. The samples' own max:Request* columns are the fallback for an
+// ad that does not carry the request.
+export function buildJobMetrics(resp: MetricsResponse | undefined, job?: ClassAd): MetricSeries[] {
   if (!resp || !resp.enabled || !resp.columns || !resp.rows) return [];
 
   const idx = new Map<string, number>();
@@ -141,9 +214,13 @@ export function buildJobMetrics(resp: MetricsResponse | undefined): MetricSeries
     if (valIdx === undefined) continue;
     const reqIdx = def.requestCol ? idx.get(def.requestCol) : undefined;
 
-    // Collect points per run, and the requested value (constant per job, so
-    // take the max seen).
+    // Collect points per run, and what each run asked for. A job's
+    // request is NOT constant: retry_request_memory rewrites it on every
+    // eviction, and a request written as a rule over the job's own usage
+    // regrows the same way. Keeping one figure per run is what lets the
+    // chart draw the request each run actually had.
     const byRun = new Map<number, SeriesPoint[]>();
+    const reqByRun = new Map<number, number>();
     let pointCount = 0;
     let maxValue = 0;
     let requested: number | undefined;
@@ -153,8 +230,10 @@ export function buildJobMetrics(resp: MetricsResponse | undefined): MetricSeries
       const run = toNum(row[runIdx]) ?? 0;
       if (reqIdx !== undefined) {
         const rq = toNum(row[reqIdx]);
-        if (rq !== undefined && (requested === undefined || rq > requested)) {
-          requested = rq;
+        if (rq !== undefined) {
+          if (requested === undefined || rq > requested) requested = rq;
+          const seen = reqByRun.get(run);
+          if (seen === undefined || rq > seen) reqByRun.set(run, rq);
         }
       }
       if (t === undefined || value === undefined) continue;
@@ -183,43 +262,90 @@ export function buildJobMetrics(resp: MetricsResponse | undefined): MetricSeries
       pointCount,
       note: def.note,
     };
-    if (requested !== undefined && requested > 0) {
-      if (def.requestIsLine) series.requested = requested;
-      else series.requestedNote = `Requested ${requested} GPU${requested === 1 ? '' : 's'}`;
+    const fromAd = jobRequest(job, def.requestAttr);
+    if (fromAd.expr) series.requestedExpr = fromAd.expr;
+    if (def.requestIsLine && movedBetweenRuns(executions, reqByRun)) {
+      // Each run draws its own request. The ad is no use here: it says
+      // what the job asks for NOW, which is the last run's figure and
+      // nothing about the runs before it. The caption describes what is
+      // drawn, so it reads off the same samples, and only reaches for
+      // the ad where the last run has no figure of its own.
+      for (const ex of executions) ex.request = reqByRun.get(ex.run);
+      const first = executions[0].request;
+      const last = executions[executions.length - 1].request ?? fromAd.value;
+      if (first !== undefined && last !== undefined) {
+        series.requestedNote = `Requested ${formatMetric(first, def.unit)} → ${formatMetric(last, def.unit)}`;
+      }
+    } else {
+      // One request throughout: the ad's reading is the better one, as
+      // it evaluates a rule the samples may not carry.
+      if (fromAd.value !== undefined) requested = fromAd.value;
+      if (requested !== undefined && requested > 0) {
+        if (def.requestIsLine) series.requested = requested;
+        else series.requestedNote = `Requested ${requested} GPU${requested === 1 ? '' : 's'}`;
+      }
     }
     out.push(series);
   }
   return out;
 }
 
-// The categorical hues for run attempts, in fixed order (validated for CVD
-// on a light surface by the dataviz palette). More than this many runs on
-// one job is vanishingly rare; index past the end falls back to the last.
-export const RUN_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#4a3aa7'];
-
-export function runColor(i: number): string {
-  return RUN_COLORS[Math.min(i, RUN_COLORS.length - 1)];
+// movedBetweenRuns reports whether the runs asked for different amounts.
+// Every run has to have a sampled request before the answer can be yes: a
+// run the samples say nothing about is not evidence of a change, and
+// drawing a step from it would invent one.
+function movedBetweenRuns(executions: ExecutionSeries[], reqByRun: Map<number, number>): boolean {
+  if (executions.length < 2) return false;
+  let first: number | undefined;
+  for (const ex of executions) {
+    const r = reqByRun.get(ex.run);
+    if (r === undefined || r <= 0) return false;
+    if (first === undefined) first = r;
+    else if (r !== first) return true;
+  }
+  return false;
 }
 
-// formatMetric renders a value in the metric's unit, promoting bytes-ish
-// units to human scale. Memory is MB, disk is KB.
+// The categorical hues for run attempts, in fixed order (validated for CVD
+// on a light surface by the dataviz palette).
+export const RUN_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#4a3aa7'];
+
+// runColor cycles through the palette, so neighbouring runs always differ.
+// A job can run dozens of times (a restart on every eviction); clamping to
+// the last hue painted every run past the sixth the same colour. Runs a
+// palette apart share a hue, so the chart names the run in each tooltip.
+export function runColor(i: number): string {
+  const n = RUN_COLORS.length;
+  return RUN_COLORS[((i % n) + n) % n];
+}
+
+// formatMetric renders a value in the metric's unit. Memory (MiB) and disk
+// (KiB) go through formatMiB/formatKiB, the formatter the resource table
+// and the rest of the app use, so a request reads the same in the table,
+// the caption and a tooltip.
 export function formatMetric(value: number, unit: string): string {
   switch (unit) {
     case 'MB':
-      return value >= 1024
-        ? `${(value / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB`
-        : `${value.toLocaleString(undefined, { maximumFractionDigits: 0 })} MB`;
+      return formatMiB(value);
     case 'KB':
-      if (value >= 1024 * 1024)
-        return `${(value / 1024 / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB`;
-      if (value >= 1024)
-        return `${(value / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} MB`;
-      return `${value.toLocaleString(undefined, { maximumFractionDigits: 0 })} KB`;
+      return formatKiB(value);
     case 'cores':
-      return `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} cores`;
+      return `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${value === 1 ? 'core' : 'cores'}`;
     case 'GPU':
       return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
     default:
       return value.toLocaleString();
   }
+}
+
+// unrecordedAP names the job's access point when the server says it
+// keeps no resource metrics (sources.not_kept for job_metrics), so the
+// page can say so instead of showing nothing.
+export function unrecordedAP(resp: MetricsResponse | undefined): string | undefined {
+  const schedd = resp?.job?.schedd;
+  if (!schedd) return undefined;
+  const hit = resp?.sources?.not_kept?.find(
+    (n) => n.table === 'job_metrics' && n.schedd.toLowerCase() === schedd.toLowerCase(),
+  );
+  return hit ? hit.schedd : undefined;
 }

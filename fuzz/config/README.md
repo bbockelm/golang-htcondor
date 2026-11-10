@@ -7,11 +7,30 @@ expansion. Same idea as the golang-classads libclassad fuzzer.
 **Scope (mode #1):** a *pure* parse+expand differential — both engines parse
 with no `param_info.in` defaults (Go: `ConfigOptions{SkipDefaults: true}`; C++:
 a fresh `MACRO_SET` with a NULL defaults table and production option flags:
-`COLON_IS_META_ONLY | SMART_COM_IN_CONT | KEEP_DEFAULTS`). A fixed reference
+`COLON_IS_META_ONLY | SMART_COM_IN_CONT | KEEP_DEFAULTS`). The C++ side reads
+the input as a config file: `Parse_macros` over an in-memory
+`MacroStreamMemoryFile`, the same reader (trimming, `\` continuation) that
+`process_config_source` runs on a `FILE*`, and expands values with the
+`expand_macro` that `param()` uses, under old ClassAd semantics as production
+`config()` sets them. (Not `Parse_config_string`: that is the more lenient
+parser for metaknob bodies.) A fixed reference
 environment (`RefEnv` in `engine.go` — time constants, `FULL_HOSTNAME`,
 `DETECTED_*`, …) is prepended to every input so realistic sources resolve, and
 is stripped from the compared output. Comparing the `param_info.in` defaults
 table itself is a separate axis (mode #2), handled by a defaults-sync script.
+
+**No host access:** `include` and `include command` would read a host file or
+run a command. The shim refuses every include form
+(`CONFIG_OPT_NO_INCLUDE_FILE`) and the Go side parses with
+`ConfigOptions{NoInclude: true}`, so for both every include is a parse error
+(`TestGoSideNeverRunsInclude`).
+
+**Not compared:** inputs with a NUL byte, and inputs on which the Go side
+reports that HTCondor has no defined result (`config.ErrMacroLoop`,
+`config.ErrHTCondorUndefined`): reference cycles HTCondor never finishes
+expanding, and constructs on which it crashes or reads out of bounds. The Go
+engine runs first, so the oracle never sees them. See
+`design_notes/CONFIG_FUZZ_FINDINGS.md`.
 
 ## Layout
 
@@ -20,13 +39,20 @@ table itself is a separate axis (mode #2), handled by a defaults-sync script.
 - `engine.go` — Go side + `RefEnv` + canonical output.
 - `canon.go` — normalizes tables (case-insensitive keys, sorted).
 - `differential_test.go` — seed corpus + `FuzzConfigParseExpand` + known-divergence tracking.
-- `FINDINGS.md` — divergences found so far.
+- `design_notes/CONFIG_FUZZ_FINDINGS.md` — divergences found so far.
 
 ## Building / running
 
-The oracle needs HTCondor headers + `libcondor_utils`. On a local build tree,
-`hack/config-fuzz-env.sh` derives the CGO flags (and embeds rpaths so the test
-binary finds the dylib without `DYLD_LIBRARY_PATH`, which macOS SIP strips):
+The oracle needs HTCondor's internal headers (`condor_common.h` includes the
+cmake-generated `config.h`; `condor_config.h` ships in no package), so it is
+built against a configured HTCondor source tree, not an installed HTCondor.
+`hack/config-fuzz-env.sh` derives the CGO flags from that tree's
+`compile_commands.json` and takes the newest `libcondor_utils_*` from
+`release_dir/lib` (after `ninja install`) or else from `src/condor_utils` and
+`src/classad` (after `ninja condor_utils`). It embeds rpaths so the test binary
+finds the libraries without `DYLD_LIBRARY_PATH`, which macOS SIP strips, and
+sets `LD_LIBRARY_PATH`, which Linux needs because `libcondor_utils`'s own
+RUNPATH decides where its `libclassad` dependency is found:
 
 ```sh
 source hack/config-fuzz-env.sh          # override HTCONDOR_SRC / HTCONDOR_BUILD if needed
@@ -37,6 +63,55 @@ go test -tags libcondor_utils ./fuzz/config/ -run TestConfigSeeds
 # coverage-guided fuzzing
 go test -tags libcondor_utils -run x -fuzz FuzzConfigParseExpand ./fuzz/config/
 ```
+
+On macOS use `hack/config-fuzz.sh [fuzztime]` for fuzzing: it runs the compiled
+test binary directly so `DYLD_LIBRARY_PATH` survives.
+
+## CI
+
+`.github/workflows/differential-fuzz.yml` runs both this fuzzer and the submit
+one on changes to `config/`, `fuzz/`, the submit parser and these scripts,
+weekly, and on demand. It builds `condor_utils` once from the HTCondor release
+named in `HTCONDOR_REF` (`.github/scripts/build-condor-utils.sh`, ccache-cached),
+then runs each target: the seed table and committed corpus first (failing if the
+target's sentinel test did not pass, i.e. the oracle was not linked), then
+fuzzing for 2m (`fuzztime` input on dispatch). Both targets run even when the
+first fails, so a divergence in one parser does not hide one in the other. A
+failing input is uploaded as the `differential-fuzz-failing-inputs` artifact;
+drop it into `fuzz/<target>/testdata/fuzz/<FuzzTarget>/` to reproduce.
+
+A committed case that changes its answer fails the job; something fuzzing
+finds for the first time is annotated instead. Fuzzing is a search, and what a
+search turns up is almost never related to the change under review, so blocking
+on it would hand every author someone else's finding. Commit the input from the
+artifact to make it a committed case, which does block from then on. The
+nightly run, whose whole job is to search, fails on both.
+
+### Nightly, against HTCondor main
+
+`.github/workflows/nightly-fuzz.yml` runs the same targets at 07:41 UTC against
+HTCondor's `main` branch instead of a pinned release, so divergences introduced
+upstream surface before the next release bump.
+`.github/scripts/differential-fuzz-ci.sh <target> <fuzztime>` runs one target,
+and is what both workflows call. It discovers the package's `Fuzz*` functions
+rather than naming one, splitting the time budget between them, so a target
+added upstream of it is fuzzed without a change here.
+
+A failure runs `.github/scripts/nightly-fuzz-issue.sh`, which reports it in
+`bbockelm/golang-htcondor`:
+
+- Dedup key: the `nightly-fuzz` label. If an open issue carries it, the run
+  comments on that issue; otherwise it opens one. A failure that persists for
+  weeks therefore grows one thread, not one issue per night. Do not put that
+  label on an unrelated issue, or the reports go there.
+- Every body also carries the `<!-- nightly-differential-fuzz -->` marker, so
+  the issues stay findable by body search if the label is ever removed.
+- The issue names the HTCondor commit the oracle was built from. Fuzzing a
+  moving branch means a divergence can be an upstream change rather than a bug
+  here, and the commit is what makes that diagnosable.
+- When the failure clears nothing happens: the issue stays open and a human
+  closes it. Closing it while the failure persists means the next run opens a
+  fresh one.
 
 Without the tag, the package builds against `stub.go` and the tests skip — so
 `go build ./...` / `go vet ./...` / non-fuzz CI stay green everywhere.

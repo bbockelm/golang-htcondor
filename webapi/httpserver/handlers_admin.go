@@ -1,12 +1,14 @@
 package httpserver
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +16,8 @@ import (
 
 	"github.com/ory/fosite"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/authz"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -40,11 +44,257 @@ func (s *Handler) isWebUIAdmin(r *http.Request) bool {
 	return s.webuiAdminGroups.allows(session.Groups)
 }
 
+// projectLeadReadProjects returns the projects whose jobs this caller may
+// read beyond its own, because it leads them. Nil for a caller that leads
+// nothing and for one that already reads everyone's.
+//
+// Decided by WHO the caller is, never by how the credential arrived, which
+// is the rule seesAllJobs follows. It did not always: lead reads were a
+// browser-session feature, so the same person with a bearer token silently
+// lost sight of their own projects -- a listing that simply narrowed, with
+// nothing saying why. That is the failure this server was reported for on
+// the admin path, and it was still live here.
+//
+// A session answers from the groups stored at login. Any other credential
+// answers from the identity it authenticated as, plus whatever groups the
+// system can report for it. Where groups come from the token there are
+// none to report, and the leads FILE still resolves: its entries name
+// users as well as groups, so a lead named outright keeps their projects
+// on a bearer. Only the group-pattern half goes quiet, which is the same
+// limit every group-derived answer has in that deployment.
+//
+// Not gated on superuser mode being armed, following the admin read path,
+// which is not armed-gated either: seeing a project's jobs is the
+// prerequisite for deciding whether to act on one, and arming is the step
+// that changes what an action does. Read visibility also does not depend on
+// superuser mode being usable at all (no signing key needed), only on leads
+// being configured. Acting on another user's job stays session-only and
+// armed; see mayUseSuperuserMode, whose reasoning this does not touch.
+func (s *Handler) projectLeadReadProjects(ctx context.Context, r *http.Request) []string {
+	if !s.projectLeads.configured() {
+		return nil
+	}
+	if s.multi != nil {
+		// Leads are this server's configuration, with no access point in
+		// it; a lead's cross-user reads would reach every AP alike. Not
+		// offered in multi-AP mode: a lead sees their own jobs.
+		return nil
+	}
+	if session, ok := s.getSessionFromRequest(r); ok {
+		if s.isWebUIAdmin(r) {
+			return nil
+		}
+		return s.projectLeads.LedProjects(session.Username, session.Groups)
+	}
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" {
+		return nil
+	}
+	// A caller that already reads every user's jobs needs no project
+	// narrowing, and would only be confused by one.
+	if s.seesAllJobs(ctx, r, jobScopeRead) {
+		return nil
+	}
+	groups, _ := s.liveGroupsFor(ctx, actor)
+	return s.projectLeads.LedProjects(ownerFromActor(actor), groups)
+}
+
+// jobScopeTier is which cross-user power a job request needs. Reading
+// other users' jobs and changing them are different powers, as they are
+// on MCP (mcpserver.privTier), and every caller of seesAllJobs names one.
+type jobScopeTier int
+
+const (
+	// jobScopeRead covers reading other users' job ads, history, logs
+	// and sandboxes.
+	jobScopeRead jobScopeTier = iota
+	// jobScopeMutate covers acting on other users' jobs: remove, hold,
+	// release, edit, spool.
+	jobScopeMutate
+)
+
+// MCP scopes that carry the two tiers. An OAuth2 grant this server
+// issued carries its scopes onto REST requests too (withAPIKeyScopes),
+// and honouring them here is what makes one bearer see the same jobs
+// through /api/v1 and through /mcp.
+const (
+	scopeMCPAdmin     = "mcp:admin"
+	scopeMCPSuperuser = "mcp:superuser"
+)
+
+// seesAllJobs reports whether the caller of r may read (jobScopeRead) or
+// act on (jobScopeMutate) other users' jobs through the REST API. Every
+// owner-scoping decision on a job route comes here, so this is the rule:
+//
+// It is decided by who the caller is, never by how the credential
+// arrived. A browser session and a bearer token for the same person get
+// the same answer.
+//
+//   - A browser session whose groups include HTTP_API_WEBUI_ADMIN_GROUP:
+//     both tiers.
+//   - A browser session armed as a global superuser: the read tier. Its
+//     actions on other users' jobs go through impersonation
+//     (superuserActionContext, planSuperuserBulkAction), which re-scopes
+//     and audits each one itself.
+//   - Any other caller -- an IDTOKEN, an OAuth2 access token, an API
+//     key, a user-header request -- by the identity it authenticated as:
+//   - its groups, read from the system (HTTP_API_GROUP_SOURCE), include
+//     HTTP_API_WEBUI_ADMIN_GROUP: both tiers. Only an identity in this
+//     server's UID_DOMAIN is looked up, so a user of another realm
+//     never borrows a local account's groups.
+//   - its credential was granted mcp:admin: the read tier; mcp:superuser:
+//     the mutate tier. These are the grants MCP honours.
+//   - its credential states no scopes at all and it is listed in
+//     MCP_ADMIN_USERS: the read tier, MCP's rule for an unscoped caller.
+//
+// Everyone else is confined to their own jobs: Owner == ownerFromActor of
+// the authenticated identity.
+//
+// In multi-AP mode the answer is per access point. Everything above is
+// this server's own policy, and it is necessary but no longer
+// sufficient: the caller must also be in QUEUE_SUPER_USERS of the AP the
+// request was routed to, as read from that AP. An administrator who is a
+// queue superuser on ap1 reads and acts on other users' jobs there and
+// on no other AP. A request routed to no AP sees only its own jobs.
+func (s *Handler) seesAllJobs(ctx context.Context, r *http.Request, tier jobScopeTier) bool {
+	if !s.seesAllJobsByPolicy(ctx, r, tier) {
+		return false
+	}
+	if s.multi == nil {
+		return true
+	}
+	ap := routedSchedd(ctx)
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" {
+		if session, ok := s.getSessionFromRequest(r); ok {
+			actor = session.Username
+		}
+	}
+	return s.multi.svc.IsQueueSuperUser(ap, qualifyUser(actor, s.uidDomain))
+}
+
+// seesAllJobsByPolicy is this server's own half of seesAllJobs, which is
+// the whole of it in single-AP mode.
+func (s *Handler) seesAllJobsByPolicy(ctx context.Context, r *http.Request, tier jobScopeTier) bool {
+	if session, ok := s.getSessionFromRequest(r); ok {
+		if s.webuiAdminGroups.grants(session.Groups) {
+			return true
+		}
+		if tier != jobScopeRead {
+			return false
+		}
+		_, scope, _, armed, err := s.armedSuperuser(r)
+		return err == nil && armed && scope.Global
+	}
+
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" {
+		return false
+	}
+	if s.identityIsWebUIAdmin(ctx, actor) {
+		return true
+	}
+	scopes, scoped := scopedCredential(ctx)
+	if tier == jobScopeMutate {
+		if _, ok := scopes[scopeMCPSuperuser]; ok {
+			return true
+		}
+		// anyuser:write is the same power under the name of what it
+		// grants. Not implied by anyuser:read, exactly as mcp:superuser is
+		// not implied by mcp:admin: seeing every user's jobs and acting
+		// on them are separate grants.
+		_, ok := scopes[scopeAnyUserWrite]
+		return ok
+	}
+	if scoped {
+		if _, ok := scopes[scopeMCPAdmin]; ok {
+			return true
+		}
+		// anyuser:read is the same power named for what it grants rather
+		// than for the surface that first needed it. An API key carries
+		// it only after resolveAPIKeyEntitlements has confirmed the key
+		// is still entitled to it on this request.
+		_, ok := scopes[scopeAnyUserRead]
+		return ok
+	}
+	return slices.ContainsFunc(s.mcpAdminUsers, func(u string) bool { return authz.SameUser(u, actor) })
+}
+
+// identityIsWebUIAdmin reports whether actor's groups, as the system
+// reports them, include the Web UI admin group. It is the bearer-side
+// counterpart of the session check, which reads the groups stored at
+// login: a bearer carries no groups this server can trust, but where
+// groups come from the account database they can be read for anybody.
+//
+// A failed lookup is "not an admin". The cost is an admin confined to
+// their own jobs while the account database is unreachable; the
+// alternative is guessing.
+func (s *Handler) identityIsWebUIAdmin(ctx context.Context, actor string) bool {
+	granted, _ := s.liveGroupEntitlement(ctx, actor)
+	return granted
+}
+
+// liveGroupEntitlement is identityIsWebUIAdmin with the two reasons for
+// a "no" told apart: granted says whether the groups the system reports
+// right now carry the admin group, and answered says whether anything
+// was able to report them at all.
+//
+// Everything that only needs a yes/no goes through identityIsWebUIAdmin
+// and is unaffected. The distinction matters to one caller: an API
+// key's entitlement is re-verified on use, and "this deployment has no
+// group source" must not be read there as "this person was removed from
+// the group". The first is silence, which expires against a staleness
+// window; the second is a denial, which takes effect at once. See
+// apikey_entitlements.go.
+func (s *Handler) liveGroupEntitlement(ctx context.Context, actor string) (granted, answered bool) {
+	if !s.webuiAdminGroups.configured() {
+		return false, false
+	}
+	groups, answered := s.liveGroupsFor(ctx, actor)
+	if !answered {
+		return false, false
+	}
+	return s.webuiAdminGroups.grants(groups), true
+}
+
+// liveGroupsFor reads actor's group membership from the system, and says
+// whether anything was able to report it.
+//
+// Separate from liveGroupEntitlement because membership is useful for
+// more than one question: that one asks whether the groups carry the
+// admin group, and the project-lead path asks which projects they lead.
+// Both need the same "could this be answered at all" distinction, and
+// neither should re-derive the account name from the actor.
+//
+// Nil groups with answered=true is a real answer -- this person is in
+// no groups. Nil with answered=false means nothing could say.
+func (s *Handler) liveGroupsFor(ctx context.Context, actor string) (groups []string, answered bool) {
+	if !s.localIdentity.sourcesGroups() {
+		return nil, false
+	}
+	account := actor
+	if i := strings.LastIndex(actor, "@"); i >= 0 {
+		if s.uidDomain == "" || !strings.EqualFold(actor[i+1:], s.uidDomain) {
+			// Another realm's identity. This machine's accounts say
+			// nothing about them, which is silence rather than a no.
+			return nil, false
+		}
+		account = actor[:i]
+	}
+	if account == "" {
+		return nil, false
+	}
+	found, err := s.localIdentity.groups.LookupGroups(ctx, account)
+	if err != nil {
+		return nil, false
+	}
+	return found, true
+}
+
 // resolveOwnerScope settles whether a request asking for other people's
-// records may have them, given the owned_by_me it asked for. It is this
-// daemon's UI policy, not the schedd's: a browser session outside the
-// admin group is confined to its own records whatever it asked for,
-// while an admin session and a bearer-token caller are left alone.
+// records may have them, given the owned_by_me it asked for: a caller
+// that may not read everyone's jobs (seesAllJobs) is confined to its own
+// whatever it asked for.
 //
 // It says nothing about whether a read may be served from the htcondordb
 // mirror. That question is about identity, not group membership, and is
@@ -52,15 +302,8 @@ func (s *Handler) isWebUIAdmin(r *http.Request) bool {
 //
 // Both endpoints that offer a Mine/Everyone choice call this, so they
 // cannot drift on who is allowed what.
-func (s *Handler) resolveOwnerScope(r *http.Request, ownedByMe bool) bool {
-	if ownedByMe {
-		return true
-	}
-	if s.isWebUIAdmin(r) {
-		return false
-	}
-	_, hasSession := s.getSessionFromRequest(r)
-	return hasSession
+func (s *Handler) resolveOwnerScope(ctx context.Context, r *http.Request, ownedByMe bool) bool {
+	return ownedByMe || !s.seesAllJobs(ctx, r, jobScopeRead)
 }
 
 // confusing than helpful.
@@ -279,7 +522,8 @@ func (s *Handler) handleAdminUpdateClient(w http.ResponseWriter, r *http.Request
 	}
 
 	var req adminClientUpdateRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+	setBodyLimit(w, r, 1<<16)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
@@ -658,10 +902,42 @@ type AdminCondorConfigResponse struct {
 // stash credentials in env-derived knobs; redact anything that looks
 // secret-named to keep the admin readout safe to leave on screen.
 //
-// Match is case-insensitive and substring-based against the key.
+// Match is case-insensitive and substring-based against the key. KEK and
+// SALT are here for the key-encryption keys and salts a deployment may
+// configure: neither word says "secret", and either one, dumped, is.
 var sensitiveCondorKeyPattern = regexp.MustCompile(
-	`(?i)(PASSWORD|SECRET|PRIVATE_?KEY|API_?KEY|TOKEN|BEARER|CLIENT_?SECRET)`,
+	`(?i)(PASSWORD|SECRET|PRIVATE_?KEY|API_?KEY|TOKEN|BEARER|CLIENT_?SECRET|KEK|SALT)`,
 )
+
+// sensitiveCondorValuePatterns match VALUES that look like key material
+// whatever the knob is called: a PEM block, a JWT, or a long unbroken run
+// of hex or base64. A name-based list only knows the names someone
+// thought of; a secret pasted into an oddly named knob is still a secret.
+//
+// Tuned against HTCondor's own defaults, none of which match: paths
+// contain separators and start with one, expressions contain spaces or
+// parentheses, and nothing else is forty characters of one alphabet.
+var sensitiveCondorValuePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`-----BEGIN [A-Z ]+-----`),
+	regexp.MustCompile(`^eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),
+	regexp.MustCompile(`^[0-9a-fA-F]{32,}$`),
+	regexp.MustCompile(`^[A-Za-z0-9+_-][A-Za-z0-9+/_-]{39,}={0,2}$`),
+}
+
+// sensitiveCondorEntry reports whether a config entry's value must not be
+// shown, by its key or by the look of its value.
+func sensitiveCondorEntry(key, value string) bool {
+	if sensitiveCondorKeyPattern.MatchString(key) {
+		return true
+	}
+	value = strings.TrimSpace(value)
+	for _, re := range sensitiveCondorValuePatterns {
+		if re.MatchString(value) {
+			return true
+		}
+	}
+	return false
+}
 
 // handleAdminCondorConfig handles GET /api/v1/admin/condor-config.
 // Returns every key the HTCondor config object knows about, sorted
@@ -699,7 +975,8 @@ func (s *Handler) handleAdminCondorConfig(w http.ResponseWriter, r *http.Request
 		if !isDefault {
 			modified++
 		}
-		if sensitiveCondorKeyPattern.MatchString(k) {
+		val, _ := s.htcondorConfig.Get(k)
+		if sensitiveCondorEntry(k, val) {
 			// Still report default-ness for a redacted key: knowing
 			// whether a password knob was set at all is useful and
 			// leaks nothing about its value.
@@ -708,7 +985,6 @@ func (s *Handler) handleAdminCondorConfig(w http.ResponseWriter, r *http.Request
 			})
 			continue
 		}
-		val, _ := s.htcondorConfig.Get(k)
 		entries = append(entries, AdminCondorConfigEntry{
 			Key: k, Value: val, IsDefault: isDefault,
 		})
@@ -844,7 +1120,7 @@ func (s *Handler) handleAdminRevokeToken(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 	var req AdminRevokeTokenRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -942,7 +1218,7 @@ func (s *Handler) handleAdminSetTokenScopes(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 	var req AdminSetTokenScopesRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -969,6 +1245,12 @@ func (s *Handler) handleAdminSetTokenScopes(w http.ResponseWriter, r *http.Reque
 		s.logger.Error(logging.DestinationHTTP, "Failed to read a grant's scopes",
 			"client_id", grant.ClientID, "subject", grant.Subject, "error", err)
 		s.writeError(w, http.StatusInternalServerError, "Failed to read the token's scopes")
+		return
+	}
+	// A placement grant's scope set is fixed: it is what keeps its token
+	// to the placement endpoints (placement_scope.go caches it as such).
+	if isPlacementGrant(current) {
+		s.writeError(w, http.StatusConflict, "A placement token's scopes cannot be changed; revoke it instead.")
 		return
 	}
 
@@ -1083,7 +1365,7 @@ func (s *Handler) handleAdminRevokeTokens(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 	var req AdminRevokeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid request body")

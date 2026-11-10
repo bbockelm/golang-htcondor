@@ -43,6 +43,15 @@ type armedSession struct {
 	// note explains a fallback, when one happened. Surfaced to the
 	// operator so a silent downgrade in audit fidelity is not silent.
 	note string
+	// projectScoped records that the session was armed as a project lead
+	// rather than as a global superuser. It caps what the session may do
+	// for the rest of the arm: a lead later added to
+	// HTTP_API_SUPERUSER_GROUP does not become global without re-arming,
+	// because what they confirmed was the narrower mode. The projects
+	// themselves are deliberately NOT recorded here -- they are re-read on
+	// every action, so removing a lead takes effect immediately. See
+	// effectiveSuperuserScope.
+	projectScoped bool
 }
 
 func newSuperuserSessions(ttl time.Duration) *superuserSessions {

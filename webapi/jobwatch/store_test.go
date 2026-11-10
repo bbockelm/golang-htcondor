@@ -47,7 +47,7 @@ func TestWatchSurvivesARestart(t *testing.T) {
 	// The tracked set is the part that must survive: a job that finishes
 	// during an outage is neither still in the queue nor yet in history,
 	// so without its memory the watch misses it permanently.
-	if err := s.SaveProgress(ctx, w, Outcome{Tracked: []JobID{{42, 0}, {42, 1}}}); err != nil {
+	if err := s.SaveProgress(ctx, w, Outcome{Tracked: []JobID{{42, 0, ""}, {42, 1, ""}}}); err != nil {
 		t.Fatalf("SaveProgress: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestReloadedWatchEvaluates(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	w := register(t, s, "alice", EventDone, ModeAll)
-	if err := s.SaveProgress(ctx, w, Outcome{Tracked: []JobID{{42, 0}}}); err != nil {
+	if err := s.SaveProgress(ctx, w, Outcome{Tracked: []JobID{{42, 0, ""}}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -138,14 +138,14 @@ func TestFireIsIdempotent(t *testing.T) {
 	w := register(t, s, "alice", EventDone, ModeAny)
 
 	first := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
-	out := Outcome{Fires: true, Satisfied: 2, Matched: []JobRef{{JobID: JobID{42, 0}}}, Tracked: []JobID{{42, 0}}}
+	out := Outcome{Fires: true, Satisfied: 2, Matched: []JobRef{{JobID: JobID{42, 0, ""}}}, Tracked: []JobID{{42, 0, ""}}}
 	if err := s.Fire(ctx, w.ID, out, first); err != nil {
 		t.Fatalf("Fire: %v", err)
 	}
 
 	later := out
 	later.Satisfied = 99
-	later.Matched = []JobRef{{JobID: JobID{42, 7}}}
+	later.Matched = []JobRef{{JobID: JobID{42, 7, ""}}}
 	if err := s.Fire(ctx, w.ID, later, first.Add(time.Hour)); err != nil {
 		t.Fatalf("second Fire: %v", err)
 	}

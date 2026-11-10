@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import path from 'node:path';
 
 import { installApiFixtures } from './fixtures/api';
+import { SMOKE_NOW } from './fixtures/clock';
 
 // Fail-fast suite: does each page render against known-good data?
 //
@@ -33,7 +34,7 @@ function watchForErrors(page: import('@playwright/test').Page) {
   return errors;
 }
 
-for (const path of ['/', '/jobs', '/issues', '/submit', '/interactive']) {
+for (const path of ['/', '/jobs', '/issues', '/utilization', '/submit', '/interactive', '/aps']) {
   test(`renders ${path} without page errors`, async ({ page }) => {
     const errors = watchForErrors(page);
     const res = await page.goto(path);
@@ -127,6 +128,42 @@ test('the chat surface mounts without page errors', async ({ page }) => {
   expect(errors, 'chat surface raised page errors').toEqual([]);
 });
 
+// The newer pages carry the same assistant, gated only on chat/info: the
+// pill shows whatever the page's own data says, including nothing.
+for (const path of ['/issues', '/utilization', '/pool']) {
+  test(`${path} offers the chat assistant`, async ({ page }) => {
+    const errors = watchForErrors(page);
+    if (path === '/pool') {
+      await page.route('**/api/v1/collector/ads/**', (route) => route.fulfill({ json: { ads: [] } }));
+    }
+    await page.goto(path);
+    await expect(page.getByRole('button', { name: 'Open chat assistant' })).toBeVisible();
+    expect(errors, `${path} raised page errors`).toEqual([]);
+  });
+}
+
+// An archived job's page carries the assistant too, and opening it reads
+// which jobs the assistant sees without an uncaught error. (The page's
+// other panels ask for data these fixtures do not serve, so failed
+// requests are not counted.) The page is the /archive/_ placeholder, as
+// the Go SPA handler serves it for any id.
+test('an archived job offers the chat assistant', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  const placeholder = path.join(__dirname, '..', 'out', 'archive', '_.html');
+  await page.route('**/archive/39.0', async (route) => {
+    if (route.request().resourceType() !== 'document') {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({ path: placeholder, contentType: 'text/html; charset=utf-8' });
+  });
+  await page.goto('/archive/39.0');
+  await page.getByRole('button', { name: 'Open chat assistant' }).click();
+  await expect(page.getByText('The assistant only sees your own jobs.')).toBeVisible();
+  expect(errors, '/archive/39.0 raised page errors').toEqual([]);
+});
+
 // The dashboard's activity panels are fed by a separate half of the
 // response from the status tiles, and they render conditionally. A page
 // that fetched the response, drew the tiles, and dropped every activity
@@ -158,26 +195,30 @@ test('dashboard goodput panel binds the history summary', async ({ page }) => {
   await expect(page.getByText('exit 127')).toBeVisible();
 });
 
-// The tiles and the panels are two requests now, and the point of the
-// split is that the first does not wait for the second. Delaying the
-// activity response proves the tiles are not behind it: before the
+// The status counts and the panels are two requests now, and the point
+// of the split is that the first does not wait for the second. Delaying
+// the activity response proves the counts are not behind it: before the
 // split this page rendered nothing until every query had finished.
-test('status tiles render before the activity panels arrive', async ({ page }) => {
+test('status counts render before the activity panels arrive', async ({ page }) => {
   await page.route('**/api/v1/dashboard/activity*', async (route) => {
     await new Promise((r) => setTimeout(r, 3000));
     await route.fallback();
   });
   await page.goto('/');
 
-  // Visible well inside the 3s the panels are held back for.
-  await expect(page.getByText('Total')).toBeVisible({ timeout: 1500 });
+  // Visible well inside the 3s the panels are held back for. Matched by
+  // role and accessible name rather than the bare word "All", which is a
+  // common enough substring to match something else on the page later.
+  await expect(
+    page.getByRole('link', { name: /^All statuses,/ }),
+  ).toBeVisible({ timeout: 1500 });
   await expect(page.getByText(/Why jobs are held now/)).toBeHidden();
 
   // And they do arrive.
   await expect(page.getByText(/Why jobs are held now/)).toBeVisible({ timeout: 10000 });
 });
 
-// The hold breakdown covers a window and the HELD tile does not, so the
+// The hold breakdown covers a window and the HELD chip does not, so the
 // two are meant to disagree. Saying which span is the difference between
 // a reader trusting the panel and filing a bug about it.
 test('hold breakdown states the window it covers', async ({ page }) => {
@@ -247,7 +288,7 @@ async function openJobPage(
   await page.goto(`/jobs/${id}`);
 }
 
-const startedRecently = Math.floor(Date.now() / 1000) - 300;
+const startedRecently = SMOKE_NOW - 300;
 
 // A running DAGMan manager: scheduler universe, so the schedd refuses
 // GET_JOB_CONNECT_INFO for it (schedd.cpp:18673) and neither tail nor
@@ -451,8 +492,8 @@ const fanoutDagGraph = {
     { name: 'gather', group_id: 'gather', state: 'unready', source: 'status-file' },
   ],
   state_sources: ['status-file', 'queue'],
-  status_file_time: Math.floor(Date.now() / 1000) - 120,
-  fetched_at: new Date(Date.now() - 120_000).toISOString(),
+  status_file_time: SMOKE_NOW - 120,
+  fetched_at: new Date((SMOKE_NOW - 120) * 1000).toISOString(),
   took_ms: 1240,
 };
 
@@ -473,6 +514,10 @@ test('a DAGMan manager draws its collapsed workflow on request', async ({ page }
   await openJobPage(page, '90.0', fanoutManagerAd);
 
   await expect(page.getByRole('heading', { name: 'Workflow graph' })).toBeVisible();
+  // Its batch page, which is this workflow's, beside the graph.
+  await expect(
+    page.getByTestId('workflow-graph-panel').getByRole('link', { name: 'Open batch page' }),
+  ).toHaveAttribute('href', '/batches/90');
 
   // Explicit load: nothing is drawn until the user asks.
   const svg = page.locator('svg[role="img"]');
@@ -708,7 +753,7 @@ test('a job that has left the queue opens its archived record', async ({ page })
             Owner: 'e2e',
             JobStatus: 4,
             ExitCode: 0,
-            CompletionDate: Math.floor(Date.now() / 1000) - 120,
+            CompletionDate: SMOKE_NOW - 120,
             Cmd: '/bin/smoke-finished',
           },
         ],
@@ -788,4 +833,64 @@ test('a ready VS Code session offers the proxy URL', async ({ page }) => {
   const open = page.getByRole('link', { name: 'Open', exact: true });
   await expect(open).toBeVisible();
   await expect(open).toHaveAttribute('href', '/interactive/vscode/abc123');
+});
+
+// The utilization page binds when it names a workflow from the fixture,
+// and its drill-in is a query parameter, which only works in the static
+// export if the page reads it on the client.
+test('utilization page binds workflows and opens one', async ({ page }) => {
+  await page.goto('/utilization');
+  await expect(page.getByRole('row', { name: /^blast-search/ })).toBeVisible();
+  await page.getByRole('row', { name: /^blast-search/ }).click();
+  await expect(page).toHaveURL(/\?w=wf-blast/);
+  await expect(page.getByText('What each memory request would have reserved')).toBeVisible();
+});
+
+// The throughput estimate, in the cases the fixture holds: the pool-wide
+// headline, a workflow slots held back (multiplier and batch time), and
+// one whose jobs started promptly (no multiplier at all).
+test('utilization headline states the pool-wide throughput gain', async ({ page }) => {
+  await page.goto('/utilization');
+  const headline = page.getByTestId('throughput-headline');
+  await expect(headline).toContainText(/With all of these changes: up to \d+\.\d× as many jobs running at once\./);
+  await expect(headline).toContainText('Estimated from the machines currently in the pool.');
+});
+
+test('a slots-limited workflow leads with the multiplier and its last batch', async ({ page }) => {
+  await page.goto('/utilization?w=wf-blast');
+  const lead = page.getByTestId('throughput-lead');
+  await expect(lead).toContainText(/Up to \d+\.\d× as many of these jobs could run at once\./);
+  await expect(lead).toContainText(
+    /Your last batch of \d+ jobs took 14 h from submission to the last result; with these settings, about [\d.]+ h\./,
+  );
+  // One suggestion card carries the line, not every one.
+  await expect(page.getByTestId('advice-throughput')).toHaveCount(1);
+});
+
+test('a workflow whose jobs started promptly gets no multiplier', async ({ page }) => {
+  await page.goto('/utilization?w=wf-train');
+  const lead = page.getByTestId('throughput-lead');
+  await expect(lead).toHaveText('Your jobs started within 4 minutes, so this mainly frees the pool for others.');
+  await expect(page.getByTestId('advice-throughput')).toHaveCount(0);
+});
+
+test('a GPU workflow lists its GPU suggestions with their submit lines', async ({ page }) => {
+  await page.goto('/utilization?w=wf-train');
+  const idle = page.locator('[data-testid="advice"][data-advice-id="gpu-idle"]');
+  await expect(idle).toContainText('Keep the GPU busier');
+  await expect(idle).toContainText('Half of 58 jobs kept their GPUs busy 34% of the time or less.');
+  const memory = page.locator('[data-testid="advice"][data-advice-id="gpu-memory-small"]');
+  await expect(memory).toContainText('Lower the GPU memory minimum to 6 GB');
+  await expect(memory.locator('pre')).toHaveText('gpus_minimum_memory = 6 GB');
+});
+
+test('a suggestion copies its submit lines', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto('/utilization?w=wf-blast');
+  const card = page.getByTestId('advice').filter({ hasText: 'request_memory' }).first();
+  const lines = (await card.locator('pre').innerText()).trim();
+  expect(lines).toMatch(/^request_memory = \S+ MB\nretry_request_memory = \S+ MB$/);
+  await card.getByRole('button', { name: 'Copy' }).click();
+  await expect(card.getByRole('button', { name: 'Copied' })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(lines);
 });

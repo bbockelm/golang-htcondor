@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 // TestSpoolJobFilesFromTar_SingleJob tests spooling files from a tar archive for a single job
 func TestSpoolJobFilesFromTar_SingleJob(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -110,6 +112,7 @@ queue
 
 // TestSpoolJobFilesFromTar_MultipleJobs tests spooling files from a tar archive for multiple jobs
 func TestSpoolJobFilesFromTar_MultipleJobs(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -292,6 +295,7 @@ func TestSpoolJobFilesFromTar_EmptyJobAds(t *testing.T) {
 
 // TestSpoolJobFilesFromTar_FileFiltering tests that only files in TransferInput are processed
 func TestSpoolJobFilesFromTar_FileFiltering(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -389,6 +393,7 @@ queue
 
 // TestSpoolJobFilesFromTar_PathTraversal tests that files with path traversal are skipped
 func TestSpoolJobFilesFromTar_PathTraversal(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -469,18 +474,16 @@ queue
 		t.Fatalf("Failed to close tar writer: %v", err)
 	}
 
-	// Spool the files - path traversal attempts should be filtered out
+	// A traversal-shaped name refuses the whole upload.
 	spoolCtx, spoolCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer spoolCancel()
 
 	err = schedd.SpoolJobFilesFromTar(spoolCtx, procAds, bytes.NewReader(tarBuf.Bytes()))
-	if err != nil {
+	if !errors.Is(err, ErrInvalidTarEntry) {
 		harness.PrintScheddLog()
-		t.Fatalf("Failed to spool files: %v", err)
+		t.Fatalf("SpoolJobFilesFromTar = %v, want ErrInvalidTarEntry", err)
 	}
-
-	t.Logf("Successfully spooled files for job cluster %d", clusterIDInt)
-	t.Log("Path traversal protection test passed - dangerous paths were filtered out")
+	t.Logf("Path traversal refused for job cluster %d: %v", clusterIDInt, err)
 }
 
 // Helper function to check if a string contains a substring (case-insensitive)

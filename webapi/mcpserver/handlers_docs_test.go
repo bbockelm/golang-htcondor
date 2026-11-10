@@ -31,7 +31,7 @@ func TestToolCondorDocSearch_NotEmbedded(t *testing.T) {
 		t.Skip("docs are embedded; this path only fires when they aren't")
 	}
 	s := newDocTestServer(t)
-	_, err := s.toolCondorDocSearch(context.Background(), "condor_doc_job_attributes", map[string]interface{}{
+	_, err := s.toolCondorDocSearch(context.Background(), "doc_job_attributes", map[string]interface{}{
 		"query": "ClusterId",
 	})
 	if err == nil {
@@ -44,7 +44,7 @@ func TestToolCondorDocSearch_NotEmbedded(t *testing.T) {
 
 func TestToolCondorDocSearch_RequiresQuery(t *testing.T) {
 	s := newDocTestServer(t)
-	_, err := s.toolCondorDocSearch(context.Background(), "condor_doc_search", map[string]interface{}{})
+	_, err := s.toolCondorDocSearch(context.Background(), "doc_search", map[string]interface{}{})
 	if err == nil {
 		t.Fatal("expected error for missing query")
 	}
@@ -61,11 +61,11 @@ func TestCondorDocTools_Listed(t *testing.T) {
 		got[tool.Name] = true
 	}
 	want := []string{
-		"condor_doc_job_attributes",
-		"condor_doc_machine_attributes",
-		"condor_doc_submit_syntax",
-		"condor_doc_config_variables",
-		"condor_doc_search",
+		"doc_job_attributes",
+		"doc_machine_attributes",
+		"doc_submit_syntax",
+		"doc_config_variables",
+		"doc_search",
 	}
 	for _, name := range want {
 		if !got[name] {

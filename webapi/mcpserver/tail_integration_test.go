@@ -25,6 +25,7 @@ import (
 //
 // Run with: go test -tags=integration -run TestMCPTailJobOutputIntegration -v ./mcpserver/
 func TestMCPTailJobOutputIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

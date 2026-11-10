@@ -57,6 +57,7 @@ import (
 // -- the device authorization, the polling, the token, the introspection
 // that resolves the account -- is the real path.
 func TestSSHGatewayIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -248,6 +249,7 @@ queue
 // This is what a user gets from a bare `ssh gateway`, since the client
 // sends their local login and nothing about it looks like a job id.
 func TestSSHGatewayCreatesASessionOnDemand(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -421,6 +423,7 @@ func logInteractiveSessions(ctx context.Context, t *testing.T, server *Server, a
 // code, is what stops a caller reaching a job they do not own -- the
 // gateway deliberately does not second-guess it.
 func TestSSHGatewayRefusesSomeoneElsesJob(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -643,6 +646,7 @@ func portOf(addr string) (string, error) {
 // never shows the device prompt is what proves no browser was
 // involved.
 func TestSSHGatewayCertificateEndToEnd(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

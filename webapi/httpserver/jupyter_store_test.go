@@ -13,7 +13,9 @@ import (
 
 func newJupyterTestStore(t *testing.T) *jupyterStore {
 	t.Helper()
-	db, err := appdb.Open(filepath.Join(t.TempDir(), "app.db"))
+	path := filepath.Join(t.TempDir(), "app.db")
+	seedMigratedAppDB(path)
+	db, err := appdb.Open(path)
 	if err != nil {
 		t.Fatalf("appdb.Open: %v", err)
 	}
@@ -187,5 +189,30 @@ func TestLiveExcludesExpired(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].InstanceID != "new" {
 		t.Errorf("Live returned %+v, want only the unexpired session", rows)
+	}
+}
+
+// The first accepted dial marks the session connected, which is what a
+// restarted server reads to tell a reconnecting session from one whose job
+// has not started.
+func TestRollNonceMarksTheSessionConnected(t *testing.T) {
+	s := newJupyterTestStore(t)
+	ctx := context.Background()
+	if err := s.Put(ctx, jupyterSessionRow{
+		InstanceID: "abc", Owner: "alice", ClusterID: 7, NextNonce: []byte("one"),
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	rows, _ := s.Live(ctx, time.Now())
+	if len(rows) != 1 || rows[0].Connected {
+		t.Fatalf("a session nobody has dialed is marked connected: %+v", rows)
+	}
+	if ok, err := s.RollNonce(ctx, "abc", []byte("one"), []byte("two")); !ok || err != nil {
+		t.Fatalf("RollNonce: %v %v", ok, err)
+	}
+	rows, _ = s.Live(ctx, time.Now())
+	if len(rows) != 1 || !rows[0].Connected {
+		t.Errorf("an accepted dial did not mark the session connected: %+v", rows)
 	}
 }

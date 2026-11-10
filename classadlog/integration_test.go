@@ -44,6 +44,7 @@ func locateSchedd(t *testing.T, harness *htcondor.CondorTestHarness) *htcondor.D
 // 4. Verifies the Watch API receives notifications
 // 5. Polls to read the changes and finds the submitted job
 func TestWatchLogWithJobSubmission(t *testing.T) {
+	t.Parallel()
 	// Setup HTCondor test harness
 	harness := htcondor.SetupCondorHarness(t)
 

@@ -36,7 +36,7 @@ const openAPISchema = `{
     },
     {
       "name": "placement",
-      "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. Admin-only — the daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so these endpoints require membership in the web UI admin group. Absent a placementd, every one of them but /placement/status returns 503."
+      "description": "condor_placementd: issue and audit access-point credentials for identities that authenticate elsewhere. The daemon registers its commands at ADMINISTRATOR and this server calls it as the access point's own identity, so the admin endpoints (/placement/status, users, tokens, authorizations, login, records and admin) require membership in the web UI admin group. The /placement/me endpoints serve any signed-in browser session, including one with no local account; they always act for the session's own placement identity and never take one from the request. GET /placement/me and POST /placement/me/token also accept a bearer access token holding the placement scope, which this server's own RFC 8628 device grant issues to the client placement_client; such a token reaches nothing else. The legacy device flow older placement-client versions use is served outside /api/v1, at /auth/device_authorization, /auth/code and /auth/cancel_device, with placement-webapp's exact responses. Absent a placementd, every endpoint but /placement/status returns 503. The /placement/admin endpoints manage the placementd's directory (identities, accounts, projects, authorizations) and need a placementd advertising PlacementdApiVersion >= 2; against an older one they return 501, and /placement/status reports api_version so a UI can hide them. Every directory write is recorded in the placementd's history against the signed-in admin, never against a name taken from the request, with an optional change_comment."
     }
   ],
   "components": {
@@ -64,6 +64,170 @@ const openAPISchema = `{
       }
     },
     "schemas": {
+      "UtilDistribution": {
+        "type": "object",
+        "nullable": true,
+        "description": "Exact nearest-rank percentiles and a histogram of 12-30 contiguous bins (lo inclusive).",
+        "properties": {
+          "n": {"type": "integer"},
+          "min": {"type": "number"}, "p10": {"type": "number"}, "p25": {"type": "number"}, "p50": {"type": "number"},
+          "p75": {"type": "number"}, "p90": {"type": "number"}, "p95": {"type": "number"}, "p99": {"type": "number"}, "max": {"type": "number"},
+          "histogram": {"type": "array", "items": {"type": "object", "properties": {"lo": {"type": "number"}, "hi": {"type": "number"}, "count": {"type": "integer"}}}}
+        }
+      },
+      "UtilRequest": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "typical": {"type": "number", "description": "The most common requested value."},
+          "min": {"type": "number"}, "max": {"type": "number"},
+          "distinct": {"type": "integer"},
+          "adaptive": {"type": "boolean", "description": "Most jobs wrote the request as a formula over their own usage; typical/min/max are then its starting value."},
+          "expression": {"type": "string", "description": "The most common formula, when adaptive (memory only)."},
+          "retry": {"type": "boolean", "description": "Most jobs were submitted with a memory retry ladder (retry_request_memory); typical/min/max are then the FIRST rung."},
+          "retry_mib": {"type": "number", "description": "The largest rung any of those jobs reached, when above typical."}
+        }
+      },
+      "UtilResourceSummary": {
+        "type": "object",
+        "description": "Time-weighted: request x wall hours reserved, usage x wall hours used. Units are core-hours, MiB-hours, KiB-hours or GPU-hours.",
+        "properties": {
+          "resource": {"type": "string", "enum": ["cpu", "memory", "disk", "gpu"]},
+          "allocated_hours": {"type": "number"},
+          "used_hours": {"type": "number", "nullable": true, "description": "Over jobs whose usage was measured; null when none was."},
+          "allocated_hours_measured": {"type": "number", "description": "allocated_hours over only the measured jobs: the denominator for used_hours."},
+          "jobs_measured": {"type": "integer"}
+        }
+      },
+      "UtilAdvice": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string", "enum": ["memory-lower", "memory-retry", "memory-raise", "memory-ok", "cpus-lower", "cpus-raise", "disk-lower", "disk-raise", "gpu-idle", "gpu-unused", "gpus-lower", "gpu-cpu-bound", "gpu-memory-small", "gpu-memory-require", "gpu-memory-raise", "short-jobs", "restarts"]},
+          "resource": {"type": "string", "enum": ["cpu", "memory", "disk", "gpu", "runtime"]},
+          "severity": {"type": "string", "enum": ["info", "suggest", "warn"]},
+          "title": {"type": "string"},
+          "detail": {"type": "string"},
+          "submit": {"type": "array", "items": {"type": "string"}, "description": "Submit-file lines to paste."},
+          "saves": {"type": "object", "nullable": true, "properties": {"unit": {"type": "string", "enum": ["core_hours", "gib_hours", "gpu_hours"]}, "amount": {"type": "number"}}},
+          "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+          "applies": {"type": "boolean", "description": "POST /utilization/apply can apply this advice to waiting jobs."},
+          "change": {"type": "object", "description": "The edit apply would make, present exactly when applies.", "properties": {
+            "attribute": {"type": "string", "enum": ["RequestMemory", "RequestCpus", "RequestDisk", "RequestGPUs"]}, "value": {"type": "number"}}},
+          "why_not_applied": {"type": "string", "description": "What stops this advice being applied to waiting jobs. Present only for request-changing advice that applies is false for."}
+        }
+      },
+      "UtilShape": {
+        "type": "object",
+        "properties": {"cpus": {"type": "number"}, "memory_mib": {"type": "number"}, "disk_kib": {"type": "number"}, "gpus": {"type": "number"}}
+      },
+      "UtilThroughput": {
+        "type": "object",
+        "nullable": true,
+        "description": "Up-to estimate of how many more of these jobs could run at once with the suggested requests, from the shapes of the pool's execute machines. Null when no advice changes the request, under 20 finished jobs, or without pool data (multi-AP, or the collector could not be read).",
+        "properties": {
+          "current": {"$ref": "#/components/schemas/UtilShape"},
+          "suggested": {"$ref": "#/components/schemas/UtilShape"},
+          "retry_memory_mib": {"type": "number", "nullable": true},
+          "fit_current": {"type": "integer", "description": "Copies of the current shape the pool's machines hold at once."},
+          "fit_suggested": {"type": "integer"},
+          "gain": {"type": "number", "description": "Pool occupancy per unit of work, current over suggested, reruns included."},
+          "limited_by": {"type": "string", "enum": ["cpu", "memory", "disk", "gpu"]},
+          "wait_p50": {"type": "number", "description": "Median seconds from submission to first start."},
+          "slots_limited": {"type": "boolean", "description": "wait_p50 >= 900"},
+          "last_batch": {"type": "object", "nullable": true, "properties": {
+            "id": {"type": "integer"}, "jobs": {"type": "integer"},
+            "elapsed": {"type": "number", "description": "Seconds, first QDate to last CompletionDate."},
+            "estimated": {"type": "number", "description": "Seconds: max(longest job wall, elapsed / gain)."}}}
+        }
+      },
+      "UtilWorkflow": {
+        "type": "object",
+        "description": "Jobs grouped by (owner, batch name without a DAG +N suffix or else executable, executable, access point).",
+        "properties": {
+          "key": {"type": "string"},
+          "name": {"type": "string"},
+          "executable": {"type": "string"},
+          "owner": {"type": "string", "description": "Set when the scope covers more than one owner."},
+          "schedd": {"type": "string", "description": "Multi-AP mode."},
+          "is_dag": {"type": "boolean"},
+          "jobs": {"type": "integer"}, "succeeded": {"type": "integer"}, "failed": {"type": "integer"}, "removed": {"type": "integer"},
+          "wall_hours": {"type": "number"},
+          "wall": {"$ref": "#/components/schemas/UtilDistribution"},
+          "short_jobs": {"type": "integer"},
+          "restarts": {"type": "object", "properties": {"jobs": {"type": "integer"}, "lost_hours": {"type": "number"}}},
+          "holds": {"type": "object", "properties": {"memory": {"type": "integer"}, "disk": {"type": "integer"}}},
+          "resources": {"type": "array", "items": {"$ref": "#/components/schemas/UtilResourceSummary"}},
+          "memory": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "peak_mib": {"$ref": "#/components/schemas/UtilDistribution"}}},
+          "cpu": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "cores_used": {"$ref": "#/components/schemas/UtilDistribution"}, "efficiency": {"$ref": "#/components/schemas/UtilDistribution"}}},
+          "disk": {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/UtilRequest"}, "used_kib": {"$ref": "#/components/schemas/UtilDistribution"}}},
+          "gpu": {"type": "object", "nullable": true, "description": "Null when no job requested a GPU. Utilization is often unmeasured: only execute points running HTCondor's GPU monitor record it.", "properties": {
+            "request": {"$ref": "#/components/schemas/UtilRequest"},
+            "jobs": {"type": "integer", "description": "Jobs that requested at least one GPU."},
+            "measured": {"type": "integer", "description": "Of those, jobs with a utilization measurement."},
+            "utilization": {"$ref": "#/components/schemas/UtilDistribution"},
+            "memory_peak_mib": {"$ref": "#/components/schemas/UtilDistribution"},
+            "device_memory_mib": {"type": "number", "nullable": true, "description": "Typical memory of the GPUs the jobs ran on, when the pool records MachineAttrGPUs_GlobalMemoryMb0."},
+            "cores_used_while_gpu": {"$ref": "#/components/schemas/UtilDistribution"}}},
+          "memory_curve": {"type": "array", "description": "Expected reserved MiB-hours at each candidate request_memory; empty under 20 finished jobs.", "items": {"type": "object", "properties": {
+            "request_mib": {"type": "number"}, "retry_mib": {"type": "number", "nullable": true}, "reserved_mib_hours": {"type": "number"},
+            "retry_fraction": {"type": "number"}, "is_current": {"type": "boolean"}, "is_recommended": {"type": "boolean"}}}},
+          "advice": {"type": "array", "items": {"$ref": "#/components/schemas/UtilAdvice"}},
+          "batches": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "integer"}, "submitted": {"type": "integer"}, "jobs": {"type": "integer"},
+            "memory_request_mib": {"type": "number", "nullable": true}, "memory_p95_mib": {"type": "number", "nullable": true},
+            "cpu_request": {"type": "number", "nullable": true}, "cpu_cores_p50": {"type": "number", "nullable": true}, "wall_p50": {"type": "number", "nullable": true},
+            "gpu_request": {"type": "number", "nullable": true, "description": "Typical request_gpus of the batch's GPU jobs."},
+            "gpu_util_p50": {"type": "number", "nullable": true, "description": "Median fraction of the GPUs each job had kept busy."}}}},
+          "samples": {"type": "array", "items": {"type": "object", "properties": {
+            "job": {"type": "string", "description": "cluster.proc, as in /utilization/jobs rows."},
+            "memory_mib": {"type": "number", "nullable": true}, "wall": {"type": "number"}, "cores": {"type": "number", "nullable": true},
+            "disk_kib": {"type": "number", "nullable": true}, "outcome": {"type": "string", "enum": ["ok", "failed", "removed", "memory_exceeded"]}}}},
+          "throughput": {"$ref": "#/components/schemas/UtilThroughput"}
+        }
+      },
+      "UtilWorkflowSummary": {
+        "type": "object",
+        "description": "One row of the workflow list. Fields that are usually empty are omitted: name when it equals executable, is_dag when false, failed/removed when 0, the GPU request and use when no job requested GPUs, an advice brief's saves when none.",
+        "properties": {
+          "key": {"type": "string"}, "name": {"type": "string"}, "executable": {"type": "string", "description": "The program the jobs run: the script or command an interpreter or wrapper starts, not necessarily basename(Cmd)."},
+          "owner": {"type": "string"}, "schedd": {"type": "string"}, "is_dag": {"type": "boolean"},
+          "jobs": {"type": "integer"}, "succeeded": {"type": "integer"}, "failed": {"type": "integer"}, "removed": {"type": "integer"},
+          "wall_hours": {"type": "number"},
+          "holds": {"type": "object", "properties": {"memory": {"type": "integer"}, "disk": {"type": "integer"}}},
+          "request": {"type": "object", "properties": {"memory_mib": {"type": "number", "nullable": true}, "cpus": {"type": "number", "nullable": true},
+            "disk_kib": {"type": "number", "nullable": true}, "gpus": {"type": "number"},
+            "adaptive": {"type": "array", "items": {"type": "string", "enum": ["memory", "cpus", "disk", "gpus"]}}}},
+          "used": {"type": "object", "description": "used_hours / allocated_hours_measured per resource.", "properties": {
+            "cpu": {"type": "number", "nullable": true}, "memory": {"type": "number", "nullable": true}, "disk": {"type": "number", "nullable": true}, "gpu": {"type": "number", "nullable": true}}},
+          "gpu_hours": {"type": "number"}, "gain": {"type": "number"}, "slots_limited": {"type": "boolean"},
+          "advice": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "severity": {"type": "string"},
+            "saves": {"type": "object", "properties": {"unit": {"type": "string"}, "amount": {"type": "number"}}}}}}
+        }
+      },
+      "UtilizationResponse": {
+        "type": "object",
+        "properties": {
+          "since": {"type": "integer", "description": "Inclusive lower bound on EnteredHistoryTime, unix seconds."},
+          "until": {"type": "integer"},
+          "days": {"type": "integer"},
+          "jobs_considered": {"type": "integer"},
+          "truncated": {"type": "boolean", "description": "The limit was hit; the analysis covers the most recent jobs."},
+          "limit": {"type": "integer", "description": "The limit applied."},
+          "max_limit": {"type": "integer", "description": "The server's ceiling (HTTP_API_UTILIZATION_MAX_JOBS)."},
+          "owners": {"type": "array", "description": "Owners in the analysed jobs, most wall clock first; only for a scope that sees other users.", "items": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "jobs": {"type": "integer"}, "wall_hours": {"type": "number"}}}},
+          "overall": {"type": "object", "properties": {
+            "jobs": {"type": "integer"}, "wall_hours": {"type": "number"}, "badput_hours": {"type": "number"},
+            "resources": {"type": "array", "items": {"$ref": "#/components/schemas/UtilResourceSummary"}},
+            "throughput_gain": {"type": "number", "nullable": true, "description": "All workflows: total occupancy at current requests over that at suggested ones; workflows left unchanged count on both sides."}}},
+          "workflows": {"type": "array", "description": "Compact rows; one workflow's full detail is /utilization/workflow.", "items": {"$ref": "#/components/schemas/UtilWorkflowSummary"}},
+          "suggestions": {"type": "array", "description": "Advice from every workflow, ranked (severity, GPU-hour savings first, larger savings), at most 500.", "items": {"type": "object", "properties": {
+            "key": {"type": "string"}, "name": {"type": "string"}, "executable": {"type": "string"}, "owner": {"type": "string"},
+            "id": {"type": "string"}, "resource": {"type": "string"}, "severity": {"type": "string"}, "title": {"type": "string"},
+            "saves": {"type": "object", "nullable": true, "properties": {"unit": {"type": "string"}, "amount": {"type": "number"}}},
+            "confidence": {"type": "string"}}}}
+        }
+      },
       "App": {
         "type": "object",
         "required": ["id", "type", "job_id", "state"],
@@ -120,7 +284,34 @@ const openAPISchema = `{
             "items": {
               "type": "string"
             },
-            "description": "Array of job IDs in cluster.proc format"
+            "description": "Array of job IDs in cluster.proc format; in multi-AP mode, complete ids (cluster.proc@schedd)"
+          },
+          "schedd": {
+            "type": "string",
+            "description": "Multi-AP mode only: the access point the jobs were submitted to"
+          },
+          "jobs": {
+            "type": "array",
+            "description": "Multi-AP mode only: each job as schedd, cluster, proc and job_id",
+            "items": {
+              "type": "object",
+              "properties": {
+                "schedd": {"type": "string"},
+                "cluster": {"type": "integer"},
+                "proc": {"type": "integer"},
+                "job_id": {"type": "string"}
+              }
+            }
+          },
+          "assignment": {
+            "type": "object",
+            "description": "Multi-AP mode only: the caller's access point assignment the submission followed",
+            "properties": {
+              "schedd": {"type": "string"},
+              "alternates": {"type": "array", "items": {"type": "string"}},
+              "source": {"type": "string"},
+              "stale": {"type": "boolean"}
+            }
           }
         }
       },
@@ -253,6 +444,14 @@ const openAPISchema = `{
           "error": {
             "type": "string",
             "description": "Error message if an error occurred during streaming. When present in streaming mode, records up to the error were already sent."
+          },
+          "scan_limit_reached": {
+            "type": "boolean",
+            "description": "Present and true when the schedd stopped at its scan limit before finding as many records as requested: only the records_scanned most recent history records were examined, so older matches are not in the answer, even when it is empty. Raise scan_limit to search further back."
+          },
+          "records_scanned": {
+            "type": "integer",
+            "description": "How many history records the schedd examined; present with scan_limit_reached."
           }
         },
         "description": "History records response. In non-streaming mode, returns a JSON object with 'records' array. In streaming mode (stream_results=true), returns JSON Lines format with one record per line."
@@ -341,9 +540,9 @@ const openAPISchema = `{
       },
       "PlacementUser": {
         "type": "object",
-        "description": "A foreign identity known to the placementd, merged with its newest live token.",
+        "description": "A sign-in identity known to the placementd, merged with its newest live token.",
         "properties": {
-          "username": {"type": "string", "description": "Foreign identity, as it appears in the placementd map file."},
+          "username": {"type": "string", "description": "Sign-in identity, as it appears in the placementd map file."},
           "ap_user_id": {"type": "string", "description": "Local AP account the identity maps to; the token subject."},
           "token_expiration": {"type": "string", "format": "date-time", "description": "Expiration of this user's newest unexpired token. Absent when they hold none."},
           "mapping_expiration": {"type": "string", "format": "date-time", "description": "When the map-file entry stops being honored. Absent means never."},
@@ -357,7 +556,7 @@ const openAPISchema = `{
         "description": "An issued token as recorded by the placementd. The token string itself is not stored and is never returned here.",
         "properties": {
           "token_id": {"type": "string", "description": "The token's jti claim."},
-          "username": {"type": "string", "description": "Foreign identity the token was issued for."},
+          "username": {"type": "string", "description": "Sign-in identity the token was issued for."},
           "ap_user_id": {"type": "string", "description": "Local AP account named in the token's subject."},
           "requester": {"type": "string", "description": "Who asked for the token; differs from username only for instructor-issued tokens."},
           "authorizations": {"type": "array", "items": {"type": "string"}, "description": "The token's bounding set."},
@@ -380,7 +579,7 @@ const openAPISchema = `{
         "type": "object",
         "required": ["username"],
         "properties": {
-          "username": {"type": "string", "description": "Foreign identity to log in. Must appear in the placementd map file."},
+          "username": {"type": "string", "description": "Sign-in identity to log in. Must appear in the placementd map file."},
           "authorizations": {"type": "array", "items": {"type": "string"}, "description": "Narrows the token's bounding set. EVERY entry must be one the user is entitled to, or the whole request is refused. Omit for the user's full set."},
           "project": {"type": "string", "description": "Ties the token, and the jobs submitted with it, to an AP project the user is authorized for."},
           "requester": {"type": "string", "description": "Identity asking on the user's behalf. Must itself be mapped and hold the INSTRUCTOR authorization."}
@@ -491,7 +690,257 @@ const openAPISchema = `{
         "properties": {
           "available": {"type": "boolean"},
           "address": {"type": "string", "description": "Sinful string of the placementd in use."},
-          "reason": {"type": "string", "description": "Why the placementd is unavailable, when it is."}
+          "reason": {"type": "string", "description": "Why the placementd is unavailable, when it is."},
+          "api_version": {"type": "integer", "description": "The placementd's PlacementdApiVersion. 2 or more means the /placement/admin directory endpoints work."}
+        }
+      },
+      "PlacementEntityMeta": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string", "description": "Immutable uuid."},
+          "source": {"type": "string", "enum": ["mapfile", "internal"], "description": "Owner of the row. mapfile rows are read-only here until adopted."},
+          "version": {"type": "integer", "format": "int64", "description": "Changes on every change to the entity. Opaque: send it back as expected_version."},
+          "modification_id": {"type": "integer", "format": "int64", "description": "The entity's latest history entry."},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"},
+          "modified_by": {"type": "string"}
+        }
+      },
+      "PlacementIdentity": {
+        "allOf": [{"$ref": "#/components/schemas/PlacementEntityMeta"}, {"type": "object", "properties": {
+          "identity": {"type": "string", "description": "The identity, this type's key."},
+          "account_id": {"type": "string"},
+          "account": {"type": "string"},
+          "expires_at": {"type": "string", "format": "date-time", "description": "Absent means never."},
+          "expired": {"type": "boolean"},
+          "display_name": {"type": "string"},
+          "comment": {"type": "string"},
+          "authorizations": {"type": "array", "items": {"type": "string"}},
+          "projects": {"type": "array", "items": {"type": "string"}},
+          "default_project": {"type": "string"},
+          "last_token_expiration": {"type": "string", "format": "date-time"}
+        }}]
+      },
+      "PlacementAccount": {
+        "allOf": [{"$ref": "#/components/schemas/PlacementEntityMeta"}, {"type": "object", "properties": {
+          "name": {"type": "string"},
+          "authorizations": {"type": "array", "items": {"type": "string"}},
+          "projects": {"type": "array", "items": {"type": "string"}},
+          "default_project": {"type": "string"},
+          "identities": {"type": "array", "items": {"type": "string"}}
+        }}]
+      },
+      "PlacementProject": {
+        "allOf": [{"$ref": "#/components/schemas/PlacementEntityMeta"}, {"type": "object", "properties": {
+          "name": {"type": "string"},
+          "description": {"type": "string"},
+          "accounts": {"type": "array", "items": {"type": "string"}}
+        }}]
+      },
+      "PlacementAuthorizationRecord": {
+        "allOf": [{"$ref": "#/components/schemas/PlacementEntityMeta"}, {"type": "object", "properties": {
+          "name": {"type": "string"},
+          "label": {"type": "string"},
+          "color": {"type": "string"},
+          "description": {"type": "string"},
+          "requestable": {"type": "boolean"}
+        }}]
+      },
+      "PlacementEntityInput": {
+        "type": "object",
+        "description": "Writable fields. Identity: identity, account (name or id), expires_at (RFC 3339 or Unix seconds), display_name, comment. Account: name, authorizations, projects, default_project (lists replace the whole set). Project: name, description. Authorization: name, label, color, description, requestable. On PATCH only the fields present change, null clears a field, and expected_version guards against concurrent edits.",
+        "additionalProperties": true,
+        "properties": {
+          "expected_version": {"type": "integer", "format": "int64", "description": "PATCH only."},
+          "change_comment": {"type": "string", "description": "Recorded in the history with this change."}
+        }
+      },
+      "PlacementMapfileStatus": {
+        "type": "object",
+        "properties": {
+          "load_time": {"type": "string", "format": "date-time"},
+          "load_attempt_time": {"type": "string", "format": "date-time"},
+          "ok": {"type": "boolean"},
+          "quarantined": {"type": "integer"},
+          "conflicts": {"type": "integer"},
+          "user_mapfile": {"type": "string"},
+          "authorizations_mapfile": {"type": "string"},
+          "problems": {"type": "array", "items": {"type": "object", "properties": {
+            "kind": {"type": "string"}, "file": {"type": "string"}, "line": {"type": "integer"},
+            "key": {"type": "string"}, "message": {"type": "string"}
+          }}}
+        }
+      },
+      "PlacementEditResult": {
+        "type": "object",
+        "properties": {
+          "index": {"type": "integer"},
+          "id": {"type": "string"},
+          "version": {"type": "integer", "format": "int64"},
+          "warning": {"type": "string"},
+          "error_code": {"type": "integer"},
+          "error": {"type": "string"}
+        }
+      },
+      "PlacementEditResponse": {
+        "type": "object",
+        "properties": {
+          "committed": {"type": "boolean"},
+          "dry_run": {"type": "boolean"},
+          "results": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementEditResult"}}
+        }
+      },
+      "PlacementAdminError": {
+        "type": "object",
+        "properties": {
+          "error": {"type": "string"},
+          "message": {"type": "string"},
+          "code": {"type": "integer"},
+          "placement_code": {"type": "integer", "description": "The placementd's error code (13 not found, 14 version mismatch, 15 owned by the mapfile, 16 invalid argument, 17 still referenced, 18 duplicate, 19 unknown type)."},
+          "placement_error": {"type": "string"},
+          "owned_by": {"type": "string", "description": "Set to mapfile when the row must be adopted before it can change."},
+          "cascade_required": {"type": "boolean", "description": "The delete succeeds with cascade=true."},
+          "results": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementEditResult"}}
+        }
+      },
+      "PlacementModification": {
+        "type": "object",
+        "description": "One history entry: one entity changed by one batch or map file reload.",
+        "properties": {
+          "id": {"type": "integer", "format": "int64"},
+          "changeset_id": {"type": "integer", "format": "int64", "description": "Groups the entries one batch or reload made."},
+          "time": {"type": "string", "format": "date-time"},
+          "channel": {"type": "string", "enum": ["cedar", "mapfile", "migration"]},
+          "actor": {"type": "string", "description": "Who authenticated to the placementd."},
+          "on_behalf_of": {"type": "string", "description": "The admin the change was made for."},
+          "peer_address": {"type": "string"},
+          "comment": {"type": "string"},
+          "operation": {"type": "string", "enum": ["create", "update", "delete", "adopt", "reclaim", "handoff"]},
+          "entity_type": {"type": "string", "enum": ["identity", "account", "project", "authorization"]},
+          "entity_id": {"type": "string"},
+          "changes": {"type": "object", "description": "Changed fields by name, each {old, new}; null is absent or cleared, and grants are lists.", "additionalProperties": {"type": "object", "properties": {"old": {}, "new": {}}}}
+        }
+      },
+      "PlacementBatchRequest": {
+        "type": "object",
+        "required": ["operations"],
+        "properties": {
+          "dry_run": {"type": "boolean", "description": "Validate and report, then roll back."},
+          "change_comment": {"type": "string", "description": "Recorded in the history with this change."},
+          "operations": {"type": "array", "maxItems": 1000, "items": {"type": "object", "required": ["operation", "target_type"], "properties": {
+            "operation": {"type": "string", "enum": ["Create", "Update", "Delete", "Adopt"]},
+            "target_type": {"type": "string", "enum": ["Identity", "Account", "Project", "Authorization", "All"]},
+            "id": {"type": "string"},
+            "name": {"type": "string", "description": "Selector when id is absent, for an account, project or authorization."},
+            "identity": {"type": "string", "description": "Selector when id is absent, for an identity."},
+            "expected_version": {"type": "integer", "format": "int64"},
+            "cascade": {"type": "boolean"},
+            "fields": {"$ref": "#/components/schemas/PlacementEntityInput"}
+          }}}
+        }
+      },
+      "PlacementMe": {
+        "type": "object",
+        "description": "The signed-in session's placement identity, as the placementd sees it.",
+        "properties": {
+          "identity": {"type": "string", "description": "The identity sent to the placementd, derived at sign-in from HTTP_API_PLACEMENT_IDENTITY_CLAIMS. Empty when the provider supplied none."},
+          "display_name": {"type": "string"},
+          "authorized": {"type": "boolean", "description": "Whether the placementd will issue this identity a token."},
+          "expired": {"type": "boolean", "description": "Whether the identity's mapping has expired."},
+          "mapping_expiration": {"type": "string", "format": "date-time"},
+          "account": {"type": "string", "description": "The AP account tokens are issued for."},
+          "authorizations": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementAuthorization"}, "description": "The authorizations this identity may request."},
+          "projects": {"type": "array", "items": {"type": "object", "properties": {
+            "name": {"type": "string"}, "default": {"type": "boolean"},
+            "enabled": {"type": "boolean", "description": "False when the schedd's project record is disabled; no record counts as enabled."}}}},
+          "account_enabled": {"type": "boolean", "description": "False when the schedd's user record for account is disabled."},
+          "records_available": {"type": "boolean", "description": "False when the schedd could not be asked; the enabled flags then say nothing."}
+        }
+      },
+      "PlacementTokenRequest": {
+        "type": "object",
+        "required": ["project", "authorizations"],
+        "description": "A token request. It names no user; any field not listed here is refused.",
+        "properties": {
+          "project": {"type": "string"},
+          "authorizations": {"type": "array", "items": {"type": "string"}, "description": "Each must be one PlacementMe offers."},
+          "user_code": {"type": "string", "description": "Bind the token to this pending device request instead of returning it."}
+        }
+      },
+      "PlacementMeRequest": {
+        "type": "object",
+        "properties": {
+          "identity": {"type": "string"},
+          "display_name": {"type": "string"},
+          "email": {"type": "string"},
+          "request": {"nullable": true, "type": "object", "properties": {
+            "id": {"type": "integer"},
+            "status": {"type": "string", "enum": ["pending", "approved", "denied", "withdrawn"]},
+            "projects": {"type": "array", "items": {"type": "string"}},
+            "note": {"type": "string"},
+            "created_at": {"type": "string", "format": "date-time"},
+            "updated_at": {"type": "string", "format": "date-time"},
+            "decided_at": {"type": "string", "format": "date-time"},
+            "reason": {"type": "string", "description": "The administrator's reason, on a denial."},
+            "account": {"type": "string", "description": "The account access was granted as, on an approval."}
+          }}
+        }
+      },
+      "PlacementAccessRequest": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "identity": {"type": "string"},
+          "idp_subject": {"type": "string"},
+          "display_name": {"type": "string"},
+          "email": {"type": "string", "description": "Only when the provider marked it verified."},
+          "projects": {"type": "array", "items": {"type": "string"}},
+          "note": {"type": "string"},
+          "status": {"type": "string", "enum": ["pending", "approving", "approved", "denied", "withdrawn"]},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"},
+          "decided_by": {"type": "string"},
+          "decided_at": {"type": "string", "format": "date-time"},
+          "decision_note": {"type": "string"},
+          "account": {"type": "string"},
+          "changeset_id": {"type": "integer", "description": "The directory change set an approval made, when known."},
+          "suggested_account": {"type": "string", "description": "The identity's part before its last @, in UID_DOMAIN; only for an identity in a domain listed in HTTP_API_PLACEMENT_PREFILL_DOMAINS."}
+        }
+      },
+      "PlacementIssued": {
+        "type": "object",
+        "properties": {
+          "token": {"type": "string", "description": "The token. Absent when it was bound to a device request."},
+          "ap_user_id": {"type": "string"},
+          "issued_at": {"type": "string", "format": "date-time"},
+          "expires_at": {"type": "string", "format": "date-time"},
+          "project": {"type": "string"},
+          "authorizations": {"type": "array", "items": {"type": "string"}},
+          "user_config": {"type": "string", "description": "SCHEDD_HOST and COLLECTOR_HOST lines for ~/.condor/user_config."},
+          "device": {"$ref": "#/components/schemas/PlacementDeviceRequest"}
+        }
+      },
+      "PlacementDeviceRequest": {
+        "type": "object",
+        "properties": {
+          "user_code": {"type": "string"},
+          "client_id": {"type": "string"},
+          "client_name": {"type": "string"},
+          "state": {"type": "string", "enum": ["pending", "approved", "denied", "expired"]},
+          "expires_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "PlacementRecord": {
+        "type": "object",
+        "description": "The schedd's user or project record for a name the placementd hands out.",
+        "properties": {
+          "kind": {"type": "string", "enum": ["account", "project"]},
+          "name": {"type": "string"},
+          "found": {"type": "boolean", "description": "False when nothing has been submitted under the name yet."},
+          "enabled": {"type": "boolean"},
+          "disable_reason": {"type": "string"},
+          "stats": {"type": "object", "additionalProperties": {"type": "integer"}, "description": "NumIdle, NumRunning, NumHeld, NumSuspended, NumScheduler*, TotalCompletedJobs, TotalRemovedJobs, when published."},
+          "members": {"type": "array", "items": {"type": "string"}, "description": "Identities mapped to the account, or accounts in the project."}
         }
       }
     }
@@ -570,7 +1019,7 @@ const openAPISchema = `{
       "get": {
         "tags": ["metrics"],
         "summary": "Query time-series metrics",
-        "description": "A read-only, owner-scoped, time-bucketed aggregate over an htcondordb archive time-series table. The only table today is job_metrics; an unknown table is 404. The job page uses this to plot per-run memory/CPU/disk/GPU: group_by=RunInstanceID, bucket=15m, agg=max:MemoryUsage,avg:CpuUtil,max:DiskUsage,avg:GpuUtil plus the max:Request* reference lines, constraint=ClusterId == N && ProcId == M. The same surface answers fleet questions by grouping on other columns (Owner, ProjectName, admin-configured extras). MemoryUsage/DiskUsage are high-water marks, not instantaneous (see the design notes). A non-admin caller is confined to its own Owner. When the sampler is disabled the response is 200 with enabled=false and no rows.",
+        "description": "A read-only, owner-scoped, time-bucketed aggregate over an htcondordb archive time-series table. The only table today is job_metrics; an unknown table is 404. The job page uses this to plot per-run memory/CPU/disk/GPU: group_by=RunInstanceID, bucket=15m, agg=max:MemoryUsage,avg:CpuUtil,max:DiskUsage,avg:GpuUtil plus the max:Request* reference lines, constraint=ClusterId == N && ProcId == M. The same surface answers fleet questions by grouping on other columns (Owner, ProjectName, admin-configured extras). MemoryUsage/DiskUsage are high-water marks, not instantaneous (see the design notes). An aggregate over GpuUtil or GPUsAverageUsage counts only samples reporting no more GPUs busy than the job had. A non-admin caller is confined to its own Owner. When the sampler is disabled the response is 200 with enabled=false and no rows. In multi-AP mode the samples come from the federation hub, every caller (administrators too) is confined to its own User on the member access points, job_id selects one job, group_by gains ScheddName before ClusterId or ProcId, and the response carries job and sources; a hub that does not federate job_metrics answers enabled=false.",
         "operationId": "queryMetrics",
         "parameters": [
           {"name": "table", "in": "path", "required": true, "schema": {"type": "string", "enum": ["job_metrics"]}, "description": "The metrics table to read."},
@@ -579,7 +1028,9 @@ const openAPISchema = `{
           {"name": "bucket", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Time bucket width on the table's time attribute (SampleTime for job_metrics): a duration like '15m' or a number of seconds. Omit for no time bucketing."},
           {"name": "agg", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Comma-separated aggregates as func:Attr, e.g. 'max:MemoryUsage,avg:CpuUtil'. Functions: count (count:*), sum, avg, min, max."},
           {"name": "since", "in": "query", "required": false, "schema": {"type": "integer"}, "description": "Lower bound (inclusive) on the time attribute, unix seconds."},
-          {"name": "until", "in": "query", "required": false, "schema": {"type": "integer"}, "description": "Upper bound (inclusive) on the time attribute, unix seconds."}
+          {"name": "until", "in": "query", "required": false, "schema": {"type": "integer"}, "description": "Upper bound (inclusive) on the time attribute, unix seconds."},
+          {"name": "job_id", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Multi-AP mode: one job's samples, by its complete id (e.g. '123.0@ap1.example.org'). A bare cluster.proc is accepted when exactly one access point has that job of the caller's; on more it is a 409 listing candidates."},
+          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Multi-AP mode: one access point's samples."}
         ],
         "responses": {
           "200": {
@@ -599,7 +1050,14 @@ const openAPISchema = `{
                   "bucket_seconds": {"type": "integer"}
                 }}},
                 "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
-                "truncated": {"type": "boolean", "description": "True if the row cap was hit; narrow the query."}
+                "truncated": {"type": "boolean", "description": "True if the row cap was hit; narrow the query."},
+                "job": {"type": "object", "description": "Multi-AP mode, with job_id: the complete id read.", "properties": {
+                  "schedd": {"type": "string"},
+                  "cluster": {"type": "integer"},
+                  "proc": {"type": "integer"},
+                  "job_id": {"type": "string"}
+                }},
+                "sources": {"type": "object", "description": "Multi-AP mode: how current the hub's copy of each access point is, naming each whose job_metrics stream is down or not federated."}
               }
             }}}
           },
@@ -607,6 +1065,116 @@ const openAPISchema = `{
           "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "404": {"description": "Unknown metrics table", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "502": {"description": "The mirror could not be reached or the query failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/utilization": {
+      "get": {
+        "summary": "Resource utilization of finished jobs",
+        "description": "How well the caller's finished jobs (completed or removed, EnteredHistoryTime within the window) used the CPU, memory, disk and GPUs they reserved, grouped into workflows, with submit-file advice for the next submission. Read from a synchronized htcondordb mirror when one is current, else the schedd's history; at most limit (default 50,000) most recent jobs. A non-admin caller is confined to its own jobs whatever owned_by_me says. Cached for five minutes per scope and window. Memory is MiB, disk KiB, time seconds unless a field name says hours.",
+        "operationId": "getUtilization",
+        "parameters": [
+          {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "enum": [1, 7, 30], "default": 7}, "description": "Analysis window."},
+          {"name": "owned_by_me", "in": "query", "required": false, "schema": {"type": "boolean", "default": true}, "description": "false asks for everyone's jobs; honored only for administrators (a project lead gets own plus projects')."},
+          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Multi-AP mode: restrict to one access point."},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}, "description": "ClassAd expression ANDed with the scope and the window. One that does not parse is a 400 carrying the parser's message."},
+          {"name": "owners", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Comma-separated user names to narrow to. Implies owned_by_me=false unless that is given; intersected with what the caller may see, never widening it."},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "default": 50000}, "description": "Most finished jobs to analyse, most recent first. Clamped to HTTP_API_UTILIZATION_MAX_JOBS (default 1,000,000); the response reports the value applied."}
+        ],
+        "responses": {
+          "200": {"description": "The analysis; jobs_considered is 0 when there is nothing to analyse.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UtilizationResponse"}}}},
+          "400": {"description": "Bad parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "Job history could not be read", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "The mirror is required and could not answer", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/utilization/workflow": {
+      "get": {
+        "summary": "One utilization workflow in full",
+        "description": "One workflow's full detail -- distributions, samples, batches, memory curve, advice with text and submit lines, throughput -- from the cached analysis for the same days, owned_by_me, constraint, owners, limit and schedd, plus how many of the caller's jobs of it are idle in the queue now. Same scoping as /utilization; an unknown key is a 404.",
+        "operationId": "getUtilizationWorkflow",
+        "parameters": [
+          {"name": "w", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "enum": [1, 7, 30]}},
+          {"name": "owned_by_me", "in": "query", "required": false, "schema": {"type": "boolean"}},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "owners", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer"}},
+          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "The workflow.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "since": {"type": "integer"}, "until": {"type": "integer"}, "days": {"type": "integer"}, "truncated": {"type": "boolean"}, "limit": {"type": "integer"},
+            "workflow": {"$ref": "#/components/schemas/UtilWorkflow"},
+            "waiting_jobs": {"type": "integer", "nullable": true, "description": "The caller's idle jobs of this workflow; null in multi-AP mode or when the queue could not be read."}}}}}},
+          "400": {"description": "Bad parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No workflow with that key in this analysis", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/utilization/apply": {
+      "post": {
+        "summary": "Apply a workflow's suggestions to its waiting jobs",
+        "description": "Sets RequestMemory, RequestCpus, RequestDisk or RequestGPUs on the caller's idle jobs of the workflow, to the values in the server's own current advice (the body names advice ids, never values). Edits go through the job-edit path and its owner scope; an administrator's reach is the job-edit endpoints'. A request written as a formula over the job's usage is left as written and reported in skipped. memory-retry is declined: retry_request_memory is a submit-time on-evict transform that cannot be added to a queued job.",
+        "operationId": "applyUtilization",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["w", "advice"], "properties": {
+          "w": {"type": "string"}, "advice": {"type": "array", "items": {"type": "string"}},
+          "days": {"type": "integer"}, "owned_by_me": {"type": "boolean"}, "constraint": {"type": "string"}, "owners": {"type": "string"},
+          "limit": {"type": "integer"}, "schedd": {"type": "string"}}}}}},
+        "responses": {
+          "200": {"description": "What was done.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "edited": {"type": "integer"},
+            "set": {"type": "object", "additionalProperties": {"type": "number"}},
+            "declined": {"type": "array", "items": {"type": "object", "properties": {"advice": {"type": "string"}, "reason": {"type": "string"}}}},
+            "skipped": {"type": "array", "items": {"type": "object", "properties": {"job": {"type": "string"}, "reason": {"type": "string"}}}},
+            "failed": {"type": "array", "items": {"type": "object", "properties": {"job": {"type": "string"}, "reason": {"type": "string"}}}}}}}}},
+          "400": {"description": "Bad body, or an advice id not in the workflow's current advice", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No workflow with that key in this analysis", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "Multi-AP mode", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/utilization/jobs": {
+      "get": {
+        "summary": "Jobs of one utilization workflow",
+        "description": "The individual finished jobs of one workflow from /utilization, a page at a time. Pass the workflow key as w and the same days, owned_by_me, constraint, owners, limit and schedd the analysis used, so the jobs listed are the jobs analysed. Owner-scoped like /utilization: a key for someone else's workflow is a 404 for a caller who may not see it.",
+        "operationId": "getUtilizationJobs",
+        "parameters": [
+          {"name": "w", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Workflow key from /utilization."},
+          {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "enum": [1, 7, 30], "default": 7}},
+          {"name": "owned_by_me", "in": "query", "required": false, "schema": {"type": "boolean"}},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "owners", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1}},
+          {"name": "schedd", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "sort", "in": "query", "required": false, "schema": {"type": "string", "enum": ["completed", "submitted", "wall", "memory", "cores", "efficiency", "disk", "gpu"], "default": "completed"}, "description": "Jobs without a value sort last in either order; ties go by cluster, proc."},
+          {"name": "order", "in": "query", "required": false, "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"}},
+          {"name": "offset", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 0, "default": 0}},
+          {"name": "page_size", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}}
+        ],
+        "responses": {
+          "200": {"description": "One page of rows.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "key": {"type": "string"}, "total": {"type": "integer"}, "offset": {"type": "integer"},
+            "next_offset": {"type": "integer", "nullable": true}, "sort": {"type": "string"}, "order": {"type": "string"},
+            "truncated": {"type": "boolean"},
+            "jobs": {"type": "array", "items": {"type": "object", "properties": {
+              "id": {"type": "string"}, "cluster": {"type": "integer"}, "proc": {"type": "integer"}, "schedd": {"type": "string"},
+              "owner": {"type": "string"}, "submitted": {"type": "integer", "nullable": true}, "started": {"type": "integer", "nullable": true},
+              "completed": {"type": "integer", "nullable": true},
+              "outcome": {"type": "string", "enum": ["ok", "failed", "removed", "memory_exceeded"]},
+              "exit_code": {"type": "integer", "nullable": true}, "exit_by_signal": {"type": "boolean"}, "wall": {"type": "number"},
+              "request": {"type": "object", "properties": {"memory_mib": {"type": "number", "nullable": true}, "cpus": {"type": "number", "nullable": true}, "disk_kib": {"type": "number", "nullable": true}, "gpus": {"type": "number", "nullable": true}}},
+              "memory_peak_mib": {"type": "number", "nullable": true}, "cores_used": {"type": "number", "nullable": true},
+              "cpu_efficiency": {"type": "number", "nullable": true}, "disk_used_kib": {"type": "number", "nullable": true},
+              "gpu_utilization": {"type": "number", "nullable": true}, "gpu_memory_peak_mib": {"type": "number", "nullable": true},
+              "restarts": {"type": "integer"}, "held_for_memory": {"type": "boolean"}, "held_for_disk": {"type": "boolean"}}}}
+          }}}}},
+          "400": {"description": "Bad parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No workflow with that key in this analysis", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "Job history could not be read", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },
@@ -631,7 +1199,7 @@ const openAPISchema = `{
         "operationId": "listPlacementUsers",
         "tags": ["placement"],
         "parameters": [
-          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to one foreign identity. An unknown identity yields an empty list, not an error."}
+          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to one sign-in identity. An unknown identity yields an empty list, not an error."}
         ],
         "responses": {
           "200": {"description": "Users", "content": {"application/json": {"schema": {"type": "object", "properties": {"users": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementUser"}}}}}}},
@@ -649,7 +1217,7 @@ const openAPISchema = `{
         "operationId": "listPlacementTokens",
         "tags": ["placement"],
         "parameters": [
-          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to tokens issued for one foreign identity."},
+          {"name": "username", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to tokens issued for one sign-in identity."},
           {"name": "token_id", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Restrict to a single jti. Takes precedence over the other filters."},
           {"name": "valid_only", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Drop tokens that have already expired."}
         ],
@@ -683,7 +1251,7 @@ const openAPISchema = `{
     "/placement/login": {
       "post": {
         "summary": "Mint a placement token",
-        "description": "Ask the placementd for an IDToken for a foreign identity. Beyond returning the token this creates the AP user record -- and the project record, when a project is named -- in the schedd if they do not exist; a login against a DISABLED user or project fails rather than re-enabling it. The response is the only time the token is available. Requires membership in the web UI admin group.",
+        "description": "Ask the placementd for an IDToken for a sign-in identity. Beyond returning the token this creates the AP user record -- and the project record, when a project is named -- in the schedd if they do not exist; a login against a DISABLED user or project fails rather than re-enabling it. The response is the only time the token is available. Requires membership in the web UI admin group.",
         "operationId": "placementLogin",
         "tags": ["placement"],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementLoginRequest"}}}},
@@ -695,6 +1263,485 @@ const openAPISchema = `{
           "500": {"description": "The placementd could not record the token, or the connection was not encrypted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "502": {"description": "The placementd could not be reached, or its schedd leg failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/{kind}": {
+      "get": {
+        "summary": "List directory entities",
+        "description": "Identities, accounts, projects or authorizations, with each row's source and version. Requires membership in the web UI admin group.",
+        "operationId": "listPlacementEntities",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}},
+          {"name": "name", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Match one account, project or authorization by name. Not for identities."},
+          {"name": "identity", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Match one identity. Identities only."},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}, "description": "ClassAd expression evaluated against each entity ad."},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer"}}
+        ],
+        "responses": {
+          "200": {"description": "Entities, keyed by kind", "content": {"application/json": {"schema": {"type": "object", "additionalProperties": {"type": "array", "items": {"oneOf": [{"$ref": "#/components/schemas/PlacementIdentity"}, {"$ref": "#/components/schemas/PlacementAccount"}, {"$ref": "#/components/schemas/PlacementProject"}, {"$ref": "#/components/schemas/PlacementAuthorizationRecord"}]}}}}}},
+          "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "post": {
+        "summary": "Create a directory entity",
+        "description": "Creates an internal row. References (an identity's account, an account's projects and authorizations) must already exist. Requires membership in the web UI admin group.",
+        "operationId": "createPlacementEntity",
+        "tags": ["placement"],
+        "parameters": [{"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}}, {"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEntityInput"}}}},
+        "responses": {
+          "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "409": {"description": "Version mismatch, a mapfile-owned row (owned_by), a delete that needs cascade (cascade_required), or a duplicate name", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/{kind}/{id}": {
+      "get": {
+        "summary": "Get a directory entity",
+        "operationId": "getPlacementEntity",
+        "tags": ["placement"],
+        "parameters": [{"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}}, {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The entity uuid."}],
+        "responses": {
+          "200": {"description": "The entity", "content": {"application/json": {"schema": {"oneOf": [{"$ref": "#/components/schemas/PlacementIdentity"}, {"$ref": "#/components/schemas/PlacementAccount"}, {"$ref": "#/components/schemas/PlacementProject"}, {"$ref": "#/components/schemas/PlacementAuthorizationRecord"}]}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "patch": {
+        "summary": "Update a directory entity",
+        "description": "Changes only the fields present; null clears one. Send expected_version: a 409 means the row changed since it was read. Mapfile rows return 409 with owned_by=mapfile until adopted.",
+        "operationId": "updatePlacementEntity",
+        "tags": ["placement"],
+        "parameters": [{"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}}, {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The entity uuid."}, {"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEntityInput"}}}},
+        "responses": {
+          "200": {"description": "Updated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "409": {"description": "Version mismatch, a mapfile-owned row (owned_by), a delete that needs cascade (cascade_required), or a duplicate name", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "delete": {
+        "summary": "Delete a directory entity",
+        "description": "Refused with 409 and cascade_required=true while grants or identities reference the row, unless cascade=true.",
+        "operationId": "deletePlacementEntity",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}}, {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The entity uuid."}, {"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."},
+          {"name": "cascade", "in": "query", "required": false, "schema": {"type": "boolean"}},
+          {"name": "expected_version", "in": "query", "required": false, "schema": {"type": "integer", "format": "int64"}}
+        ],
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {"type": "object", "properties": {"change_comment": {"type": "string", "description": "Recorded in the history with this change."}}}}}},
+        "responses": {
+          "200": {"description": "Deleted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "409": {"description": "Version mismatch, a mapfile-owned row (owned_by), a delete that needs cascade (cascade_required), or a duplicate name", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/{kind}/{id}/adopt": {
+      "post": {
+        "summary": "Adopt a mapfile row",
+        "description": "Transfers ownership from the mapfile to the directory, so the row becomes editable. Adopting an account adopts its identities. While the key is still in the mapfile the next reload takes it back; the result carries a warning then.",
+        "operationId": "adoptPlacementEntity",
+        "tags": ["placement"],
+        "parameters": [{"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}}, {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The entity uuid."}, {"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."}],
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {"type": "object", "properties": {"expected_version": {"type": "integer", "format": "int64"}, "change_comment": {"type": "string", "description": "Recorded in the history with this change."}}}}}},
+        "responses": {
+          "200": {"description": "Adopted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "409": {"description": "Version mismatch, a mapfile-owned row (owned_by), a delete that needs cascade (cascade_required), or a duplicate name", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/adopt-all": {
+      "post": {
+        "summary": "Adopt every mapfile row",
+        "operationId": "adoptAllPlacementEntities",
+        "tags": ["placement"],
+        "parameters": [{"name": "dry_run", "in": "query", "required": false, "schema": {"type": "boolean"}, "description": "Validate and report, then roll back."}],
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {"type": "object", "properties": {"change_comment": {"type": "string", "description": "Recorded in the history with this change."}}}}}},
+        "responses": {
+          "200": {"description": "Adopted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/batch": {
+      "post": {
+        "summary": "Apply a batch of directory edits",
+        "description": "One atomic PLACEMENT_EDIT: every operation applies or none does. A failed batch answers with the first failure's status and every operation's result.",
+        "operationId": "placementBatch",
+        "tags": ["placement"],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementBatchRequest"}}}},
+        "responses": {
+          "200": {"description": "Applied, or validated on a dry run", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementEditResponse"}}}},
+          "400": {"description": "Invalid field, value or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "404": {"description": "No such entity, or a reference names none", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "409": {"description": "Version mismatch, a mapfile-owned row (owned_by), a delete that needs cascade (cascade_required), or a duplicate name", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/history": {
+      "get": {
+        "summary": "Directory history",
+        "description": "Changes to the directory, newest first: who made each, through which channel, and each field's old and new value. Entries outlive deleted entities.",
+        "operationId": "placementHistory",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "entity_id", "in": "query", "required": false, "schema": {"type": "string"}, "description": "One entity's uuid."},
+          {"name": "constraint", "in": "query", "required": false, "schema": {"type": "string"}, "description": "ClassAd expression evaluated against each entry."},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}}
+        ],
+        "responses": {
+          "200": {"description": "History, newest first", "content": {"application/json": {"schema": {"type": "object", "properties": {"history": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementModification"}}}}}}},
+          "400": {"description": "Invalid limit or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/{kind}/{id}/history": {
+      "get": {
+        "summary": "One entity's history",
+        "operationId": "placementEntityHistory",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["identities", "accounts", "projects", "authorizations"]}},
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The entity uuid."},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}}
+        ],
+        "responses": {
+          "200": {"description": "History, newest first", "content": {"application/json": {"schema": {"type": "object", "properties": {"history": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementModification"}}}}}}},
+          "400": {"description": "Invalid limit or expression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/requests": {
+      "get": {
+        "summary": "List access requests",
+        "description": "Requests from people whose identity the placementd does not map, newest first (at most 500). Requires membership in the web UI admin group. Display names, emails and notes are what the requester's provider and the requester gave.",
+        "operationId": "listPlacementAccessRequests",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "status", "in": "query", "required": false, "schema": {"type": "string", "enum": ["pending", "approving", "approved", "denied", "withdrawn", "all"], "default": "pending"}}
+        ],
+        "responses": {
+          "200": {"description": "Requests", "content": {"application/json": {"schema": {"type": "object", "properties": {"requests": {"type": "array", "items": {"$ref": "#/components/schemas/PlacementAccessRequest"}}, "pending": {"type": "integer", "description": "Every pending request, whatever the filter."}, "can_approve": {"type": "boolean", "description": "Whether the placementd serves the directory edits an approval needs."}}}}}},
+          "400": {"description": "Unknown status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/requests/count": {
+      "get": {
+        "summary": "Count pending access requests",
+        "operationId": "countPlacementAccessRequests",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Count", "content": {"application/json": {"schema": {"type": "object", "properties": {"pending": {"type": "integer"}}}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/requests/{id}": {
+      "get": {
+        "summary": "One access request",
+        "operationId": "getPlacementAccessRequest",
+        "tags": ["placement"],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "responses": {
+          "200": {"description": "Request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAccessRequest"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/requests/{id}/approve": {
+      "post": {
+        "summary": "Approve an access request",
+        "description": "One PLACEMENT_EDIT batch, made on behalf of the signed-in administrator with the change comment \"access request #<id>\" plus the comment given: the account is created if it does not exist, then the request's identity is created and mapped to it. An existing account is never changed, and is used only with attach_to_existing. While the batch runs the request is approving, and cannot be withdrawn or denied; it is marked approved only once the batch committed, and is pending again if it failed. dry_run (body or query) validates without changing anything.",
+        "operationId": "approvePlacementAccessRequest",
+        "tags": ["placement"],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["account"], "properties": {
+          "account": {"type": "string", "description": "user@domain. The user part may not be root, condor, condor_pool or a QUEUE_SUPER_USERS name."},
+          "attach_to_existing": {"type": "boolean", "description": "Confirms mapping the identity to an account that already exists. The account is never changed: authorizations, projects and default_project are then not used."},
+          "authorizations": {"type": "array", "items": {"type": "string"}},
+          "projects": {"type": "array", "items": {"type": "string"}},
+          "default_project": {"type": "string"},
+          "expires_at": {"type": "string", "format": "date-time", "nullable": true, "description": "When the identity's mapping stops being honored; absent or null for never. Must be in the future."},
+          "display_name": {"type": "string"},
+          "comment": {"type": "string", "maxLength": 2048},
+          "dry_run": {"type": "boolean"}
+        }}}}},
+        "responses": {
+          "200": {"description": "Approved, or validated on a dry run", "content": {"application/json": {"schema": {"allOf": [{"$ref": "#/components/schemas/PlacementEditResponse"}, {"type": "object", "properties": {"request": {"$ref": "#/components/schemas/PlacementAccessRequest"}}}]}}}},
+          "400": {"description": "Invalid body, or the placementd refused a field", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAdminError"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The request is not pending; the identity is already in the directory (identity_exists); or the account exists and attach_to_existing was not set (account_exists, with the account: its identities and grants)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/requests/{id}/deny": {
+      "post": {
+        "summary": "Deny an access request",
+        "description": "The reason is shown to the requester.",
+        "operationId": "denyPlacementAccessRequest",
+        "tags": ["placement"],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["reason"], "properties": {"reason": {"type": "string", "maxLength": 2048}}}}}},
+        "responses": {
+          "200": {"description": "Denied", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAccessRequest"}}}},
+          "400": {"description": "No reason, or an invalid body", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The request is not pending", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/requests/{id}/resolve": {
+      "post": {
+        "summary": "Mark an access request resolved",
+        "description": "Marks the request approved without changing the directory, for an identity given access some other way. Refused unless the placementd maps the identity now.",
+        "operationId": "resolvePlacementAccessRequest",
+        "tags": ["placement"],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "requestBody": {"required": false, "content": {"application/json": {"schema": {"type": "object", "properties": {"comment": {"type": "string", "maxLength": 2048}}}}}},
+        "responses": {
+          "200": {"description": "Resolved", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementAccessRequest"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No such request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The request is not pending, or the identity does not have access", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/admin/mapfile-status": {
+      "get": {
+        "summary": "Mapfile reload status",
+        "description": "The outcome of the placementd's last mapfile reload: when it loaded, how many keys were quarantined or reclaimed, and the problems found.",
+        "operationId": "placementMapfileStatus",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMapfileStatus"}}}},
+          "401": {"description": "Not authenticated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not an administrator", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "501": {"description": "The placementd does not support directory management", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The placementd could not be reached or returned an unexpected error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "No placementd is available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me": {
+      "get": {
+        "summary": "Your placement identity",
+        "description": "What the placementd says about the signed-in session's own identity, with the projects and authorizations it may request and the schedd's enabled flags. Any browser session.",
+        "operationId": "placementMe",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Identity", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMe"}}}},
+          "401": {"description": "Not signed in", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "Placement tokens are not available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me/token": {
+      "post": {
+        "summary": "Request a placement token for yourself",
+        "description": "Mints a token for the session's own identity (UserName and Requester are both the session's). Requires the X-Requested-With header. With user_code the token goes to that device request and is not returned.",
+        "operationId": "placementMeToken",
+        "tags": ["placement"],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementTokenRequest"}}}},
+        "responses": {
+          "201": {"description": "Token issued", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementIssued"}}}},
+          "400": {"description": "Malformed request, unknown field, or an authorization not offered", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "Not authorized, or the X-Requested-With header is missing", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Unknown device code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The device request was already answered or has expired", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "503": {"description": "Placement tokens are not available", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me/request": {
+      "get": {
+        "summary": "Your access request",
+        "description": "Your latest access request, or null, with the identity, name and email a new request would record. For a session whose placement identity the placementd does not map.",
+        "operationId": "placementMeRequest",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMeRequest"}}}},
+          "403": {"description": "The session has no placement identity", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "post": {
+        "summary": "Request access",
+        "description": "Files a request for the session's own identity; the body names none, and any field not listed is refused. Only for an identity the placementd does not map, one pending request at a time, and rate-limited per identity and per address. Requires the X-Requested-With header.",
+        "operationId": "placementMeRequestCreate",
+        "tags": ["placement"],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {
+          "projects": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 64}},
+          "note": {"type": "string", "description": "At most 2048 bytes."}
+        }}}}},
+        "responses": {
+          "201": {"description": "Filed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMeRequest"}}}},
+          "400": {"description": "Invalid body, or over a limit", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"description": "No placement identity, or the X-Requested-With header is missing", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "A request is already open, the identity already has access, or its access has expired (an administrator extends it)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "429": {"description": "Too many requests", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      },
+      "delete": {
+        "summary": "Withdraw your pending access request",
+        "operationId": "placementMeRequestWithdraw",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Withdrawn", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementMeRequest"}}}},
+          "409": {"description": "The request is being approved", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "No pending request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me/project": {
+      "post": {
+        "summary": "Select your project",
+        "description": "For a session signed in through the placementd identity mapping: the project its tokens name. Requires the X-Requested-With header.",
+        "operationId": "placementMeProject",
+        "tags": ["placement"],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["project"], "properties": {"project": {"type": "string"}}}}}},
+        "responses": {
+          "200": {"description": "Selected"},
+          "400": {"description": "Not one of the account's projects", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The session has no placementd account", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me/device/{user_code}": {
+      "get": {
+        "summary": "A pending device request",
+        "operationId": "placementDeviceRequest",
+        "tags": ["placement"],
+        "parameters": [{"name": "user_code", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[A-Za-z]{4}-[A-Za-z]{4}$"}}],
+        "responses": {
+          "200": {"description": "Request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementDeviceRequest"}}}},
+          "404": {"description": "Unknown code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "429": {"description": "Too many code attempts", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/me/device/{user_code}/deny": {
+      "post": {
+        "summary": "Deny a pending device request",
+        "description": "The client's next poll gets access_denied. A request already answered or expired is left as it is. Same as POST /auth/cancel_device. Requires the X-Requested-With header.",
+        "operationId": "placementDeviceDeny",
+        "tags": ["placement"],
+        "parameters": [{"name": "user_code", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "Canceled"},
+          "404": {"description": "Unknown code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "429": {"description": "Too many code attempts", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/records/projects": {
+      "get": {
+        "summary": "List placement projects",
+        "description": "Every project on a placementd map file line, with its schedd record's state. Requires membership in the web UI admin group.",
+        "operationId": "listPlacementProjects",
+        "tags": ["placement"],
+        "responses": {
+          "200": {"description": "Projects"}
+        }
+      }
+    },
+    "/placement/records/{kind}/{name}": {
+      "get": {
+        "summary": "A placement account's or project's schedd record",
+        "description": "The record, its job counters and who it belongs to. Only names the placementd hands out. Requires membership in the web UI admin group.",
+        "operationId": "getPlacementRecord",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["accounts", "projects"]}},
+          {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "Record", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementRecord"}}}},
+          "404": {"description": "Not a name the placementd hands out", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/placement/records/{kind}/{name}/{action}": {
+      "post": {
+        "summary": "Suspend or unsuspend a placement account or project",
+        "description": "DISABLE_USERREC or ENABLE_USERREC on the schedd. A suspension's reason is \"suspended by <admin> via web UI\". Requires membership in the web UI admin group.",
+        "operationId": "setPlacementRecordSuspended",
+        "tags": ["placement"],
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["accounts", "projects"]}},
+          {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "action", "in": "path", "required": true, "schema": {"type": "string", "enum": ["suspend", "unsuspend"]}}
+        ],
+        "responses": {
+          "200": {"description": "The record after the change", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlacementRecord"}}}},
+          "404": {"description": "Not a placement name, or the schedd has no record for it", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "502": {"description": "The schedd refused or could not be reached", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },
@@ -929,7 +1976,7 @@ const openAPISchema = `{
           {
             "name": "owned_by_me",
             "in": "query",
-            "description": "Filter jobs to only those owned by the authenticated user. Default: true for security. Set to false to see all jobs (requires appropriate permissions).",
+            "description": "Filter jobs to only those owned by the authenticated user. Default: true. Set to false to see all jobs; honoured only for an administrator, and every other caller, bearer token or browser session, gets its own jobs.",
             "required": false,
             "schema": {
               "type": "boolean",
@@ -974,6 +2021,15 @@ const openAPISchema = `{
         "summary": "Submit a job",
         "description": "Submit a new job to the schedd using SubmitRemote. Jobs are submitted with input file spooling enabled and start in HELD status until input files are uploaded via PUT /jobs/{jobId}/input. After uploading input files, poll GET /jobs/{jobId} to check job status (JobStatus: 1=Idle, 2=Running, 3=Removed, 4=Completed, 5=Held).",
         "operationId": "submitJob",
+        "parameters": [
+          {
+            "name": "schedd",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string"},
+            "description": "Multi-AP mode only: submit to this access point, which must be your home access point or one of its alternates (default: your home access point)"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1054,7 +2110,7 @@ const openAPISchema = `{
     "/jobs/{jobId}": {
       "get": {
         "summary": "Get job details",
-        "description": "Retrieve the ClassAd for a specific job",
+        "description": "Retrieve the ClassAd for a specific job. Attributes stored as expressions arrive as the string \"/Expr(...)/\". Alongside them, the member \"evaluated\" holds the number each of RequestCpus, RequestMemory, RequestDisk and RequestGPUs evaluates to in the job's own ad, so a request written as an expression (e.g. over MemoryUsage) can be read without a ClassAd evaluator; a request that does not evaluate to a number is left out.",
         "operationId": "getJob",
         "parameters": [
           {
@@ -1560,6 +2616,243 @@ const openAPISchema = `{
         }
       }
     },
+    "/jobs/{jobId}/runtime-estimate": {
+      "get": {
+        "summary": "Estimate how long a job will run",
+        "description": "How long the job is likely to run in total, with a likely range, estimated from the runtimes of the same owner's similar jobs that have already completed (the same cluster, command line, batch name, submit directory or program, or the owner's jobs as a whole, chosen by which has predicted that owner's jobs best), always of the same universe and, for a DAG node, from DAG nodes only. Other users' jobs never answer: an owner with no comparable finished job gets no estimate. For a running job, also how long it has run and how long it likely has left. memory says what the same group's runs peaked at, and how the job's own peak compares. A job that has left the queue is answered from its history record, as it would have been estimated when submitted, from groups holding runs other than its own; exceeded_history and memory.above_usual then say whether its run was unusual. Built from the htcondordb mirror's job history, refreshed every few minutes; it never reveals another job's command, id or owner. Always 200 for a job the caller can see: when no estimate can be made, available is false and reason says why (disabled, model_warming_up, insufficient_history, not_estimated).",
+        "operationId": "getJobRuntimeEstimate",
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "description": "Job ID in cluster.proc format (e.g., 23.4)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The estimate, or why there is none",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["job_id", "available", "exceeded_history", "model"],
+                  "properties": {
+                    "job_id": {"type": "string"},
+                    "available": {"type": "boolean"},
+                    "reason": {"type": "string", "enum": ["disabled", "model_warming_up", "insufficient_history", "not_estimated"], "description": "Why there is no estimate; absent when available. insufficient_history: the owner has no recently finished job of the same kind. not_estimated: the job is a scheduler- or local-universe job, such as a DAG's workflow manager (DAGMan), which is never estimated."},
+                    "estimate_seconds": {"type": "number", "description": "Expected total runtime. For a running job, re-estimated from the comparable runs that lasted longer than it already has, whenever at least 3 of them did."},
+                    "p10_seconds": {"type": "number", "description": "Lower end of the likely range: about 10% of comparable jobs finish sooner."},
+                    "p90_seconds": {"type": "number", "description": "Upper end of the likely range: about 90% of comparable jobs finish by then. Drawn from past estimation errors made at the same point in a job's life (waiting or running)."},
+                    "basis": {
+                      "type": "object",
+                      "properties": {
+                        "level": {"type": "string", "enum": ["cluster", "exact", "template", "batch", "iwd", "cmd", "owner"], "description": "Which group of the owner's completed jobs answered: the job's own cluster, the same command line, the same command line with numbers masked, the same batch name, the same submit directory, the same program, or all the owner's jobs. Every group holds only jobs of the same universe that are, like this one, DAG nodes or not."},
+                        "sample_count": {"type": "integer", "description": "How many recent runtimes that group holds."},
+                        "new_command": {"type": "boolean", "description": "None of the owner's recently completed jobs ran the same program. Absent when false."}
+                      }
+                    },
+                    "rough": {"type": "boolean", "description": "The estimate came from a broad group (level cmd or owner), which is right far less often than the specific ones; present it as a rough guess."},
+                    "elapsed_seconds": {"type": "number", "description": "How long the current execution has run. Present only while the job is running."},
+                    "remaining_seconds": {"type": "number", "description": "estimate_seconds less elapsed_seconds. Absent when the job is not running or has exceeded its history."},
+                    "exceeded_history": {"type": "boolean", "description": "The job has run longer than nearly every comparable job, so no remaining time is given; the estimate and range are what history said before it started. For a finished job: its runtime was longer than the comparable runs' median and fewer than 3 of them lasted at least as long (its own run left out)."},
+                    "memory": {
+                      "type": "object",
+                      "description": "What the runs of the group that answered peaked at, in MiB, over those with a known peak. Absent when none has one.",
+                      "properties": {
+                        "sample_count": {"type": "integer", "description": "How many of the group's runs have a known peak."},
+                        "p10_mib": {"type": "number"}, "p25_mib": {"type": "number"}, "p50_mib": {"type": "number"}, "p75_mib": {"type": "number"}, "p90_mib": {"type": "number"},
+                        "peak_mib": {"type": "number", "description": "The job's own peak so far (MemoryUsage, unrounded when the schedd keeps ResidentSetSize_RAW); for a finished job, its peak. Absent when none is recorded."},
+                        "requested_mib": {"type": "number", "description": "The job's RequestMemory, evaluated. Absent when it does not evaluate to a positive number."},
+                        "above_requested": {"type": "integer", "description": "How many of the group's runs peaked above requested_mib."},
+                        "rough": {"type": "boolean", "description": "The same as the estimate's rough: the group is a broad one."},
+                        "above_usual": {"type": "boolean", "description": "The job is running or finished, the group is a specific one (not rough) with at least 5 known peaks, and the job's peak (so far) is at least 1.25 times the group's p90 and at least 256 MiB above it. A finished job's own run is left out of the group it is compared with."}
+                      }
+                    },
+                    "model": {
+                      "type": "object",
+                      "properties": {
+                        "trained_through": {"type": "string", "format": "date-time", "description": "Completion time of the newest job the estimator has read."},
+                        "jobs_ingested": {"type": "integer"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid job ID",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "404": {
+            "description": "Job not found, or not the caller's",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "500": {
+            "description": "Failed to query the job",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
+    "/jobs/{jobId}/similar": {
+      "get": {
+        "summary": "The finished jobs behind a runtime estimate",
+        "description": "The job's group at one level of the runtime estimator -- by default the level that answered its estimate -- as the estimator files it: the owner's finished jobs that completed normally within the estimator's recency window, grouped by its own features and keys, newest first and at most its per-group sample bound. runtimes summarizes what the estimator holds for the group right now, which is what an estimate uses, and memory the same runs' peak memory in MiB (those with a known peak; null when none has one). The job is read with the same scope as GET /jobs/{jobId}: someone else's job is a 404, and the list holds only jobs the caller may read. Not available in multi-AP mode.",
+        "operationId": "getJobSimilar",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "level", "in": "query", "required": false, "schema": {"type": "string", "enum": ["cluster", "exact", "template", "batch", "iwd", "cmd", "owner"]}, "description": "A level that does not apply to the job is a 400."},
+          {"name": "offset", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 0, "default": 0}},
+          {"name": "page_size", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}}
+        ],
+        "responses": {
+          "200": {"description": "The group.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "job_id": {"type": "string"}, "level": {"type": "string"}, "description": {"type": "string"},
+            "estimate_level": {"type": "string", "nullable": true},
+            "levels": {"type": "array", "items": {"type": "object", "properties": {"level": {"type": "string"}, "description": {"type": "string"}, "applies": {"type": "boolean"}, "count": {"type": "integer", "nullable": true}}}},
+            "window": {"type": "object", "properties": {"days": {"type": "number"}, "max_jobs": {"type": "integer"}}},
+            "runtimes": {"type": "object", "nullable": true, "properties": {"count": {"type": "integer"}, "p10": {"type": "number"}, "p25": {"type": "number"}, "p50": {"type": "number"}, "p75": {"type": "number"}, "p90": {"type": "number"}}},
+            "memory": {"type": "object", "nullable": true, "properties": {"count": {"type": "integer"}, "p10": {"type": "number"}, "p25": {"type": "number"}, "p50": {"type": "number"}, "p75": {"type": "number"}, "p90": {"type": "number"}}},
+            "total": {"type": "integer"}, "offset": {"type": "integer"}, "next_offset": {"type": "integer", "nullable": true},
+            "jobs": {"type": "array", "items": {"type": "object", "properties": {
+              "id": {"type": "string"}, "cluster": {"type": "integer"}, "proc": {"type": "integer"}, "submitted": {"type": "integer", "nullable": true},
+              "completed": {"type": "integer"}, "runtime": {"type": "number"}, "exit_code": {"type": "integer"},
+              "peak_memory_mib": {"type": "number", "nullable": true}}}}}}}}},
+          "400": {"description": "Bad parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Job not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/batches/{batchId}": {
+      "get": {
+        "summary": "A batch: one row of the jobs page, over its whole life",
+        "description": "A DAG (every job sharing its JobBatchName, id the root DAGMan cluster), a named batch (one owner's jobs under one JobBatchName across clusters, id the smallest cluster) or a cluster, found by any of its cluster ids in the queue or in history. Identity and the constraint selecting its jobs; progress; jobs in the queue by status; finished-job outcomes, runtimes, wall/badput/core hours and memory from up to 100,000 history records, newest first; hold reasons grouped as on the Issues page; a DAG's DAG_* attributes; the Utilization workflows its jobs fall in. Same scope as GET /jobs/{jobId}: another user's batch is 404. Reused for 15 seconds. Not available in multi-AP mode.",
+        "operationId": "getBatch",
+        "parameters": [{"name": "batchId", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 0}, "description": "Any cluster id of the batch; the answer's id is the batch's own."}],
+        "responses": {
+          "200": {"description": "The batch.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "kind": {"type": "string", "enum": ["dag", "named", "cluster"]}, "id": {"type": "integer"}, "name": {"type": "string"},
+            "owner": {"type": "string"}, "constraint": {"type": "string"}, "remove_constraint": {"type": "string"},
+            "clusters": {"type": "array", "items": {"type": "integer"}}, "dagman_job_id": {"type": "string"},
+            "submitted": {"type": "integer"}, "first_start": {"type": "integer"}, "last_completion": {"type": "integer"},
+            "progress": {"type": "object"}, "live": {"type": "object", "additionalProperties": {"type": "integer"}},
+            "live_jobs": {"type": "integer"}, "live_truncated": {"type": "boolean"}, "finished": {"type": "object"},
+            "hold_reasons": {"type": "array", "items": {"type": "object"}}, "dag": {"type": "object"},
+            "workflows": {"type": "array", "items": {"type": "object"}}, "has_history": {"type": "boolean"}, "fetched_at": {"type": "integer"}}}}}},
+          "400": {"description": "Bad batch id", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Batch not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/batches/{batchId}/jobs": {
+      "get": {
+        "summary": "A batch's jobs, queued and finished",
+        "description": "The batch's jobs in the queue and its history records in one list. Default order: the queue first by id, then the finished, latest first. Rows without the sort key sort last.",
+        "operationId": "getBatchJobs",
+        "parameters": [
+          {"name": "batchId", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 0}},
+          {"name": "status", "in": "query", "schema": {"type": "string"}, "description": "Comma-separated: running, idle, uploading, transferring, held, suspended, completed, removed, unknown, live (every queued job), finished (every history record)."},
+          {"name": "sort", "in": "query", "schema": {"type": "string", "enum": ["default", "id", "status", "submitted", "started", "finished", "runtime", "exit", "peak_memory"]}},
+          {"name": "order", "in": "query", "schema": {"type": "string", "enum": ["asc", "desc"]}},
+          {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0}},
+          {"name": "page_size", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}}
+        ],
+        "responses": {
+          "200": {"description": "One page of jobs.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "id": {"type": "integer"}, "total": {"type": "integer"}, "offset": {"type": "integer"}, "next_offset": {"type": "integer", "nullable": true},
+            "live_truncated": {"type": "boolean"}, "history_truncated": {"type": "boolean"},
+            "jobs": {"type": "array", "items": {"type": "object"}}}}}}},
+          "400": {"description": "Bad batch id or query", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Batch not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/utilization/for-job/{jobId}": {
+      "get": {
+        "summary": "The Utilization workflow of a job",
+        "description": "The Utilization workflow a job -- waiting, running or finished -- belongs to, by the analysis's own identity and key, and whether that workflow has finished jobs in the last 30 days. Same scope as GET /jobs/{jobId}. Not available in multi-AP mode.",
+        "operationId": "getUtilizationForJob",
+        "parameters": [{"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The workflow.", "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "job_id": {"type": "string"}, "key": {"type": "string"}, "name": {"type": "string"}, "executable": {"type": "string"},
+            "owner": {"type": "string"}, "has_history": {"type": "boolean", "nullable": true}}}}}},
+          "400": {"description": "Bad job id", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "404": {"description": "Job not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/jobs/runtime-estimates": {
+      "post": {
+        "summary": "Estimate how long many jobs will run",
+        "description": "The runtime estimates of up to 5000 jobs in one request, for a listing: each shaped like GET /jobs/{jobId}/runtime-estimate without job_id and model, keyed by job id. Only jobs the caller may read that are waiting or running are answered; any other id (another user's job, a missing one, a held one) is absent. A read, authorized as one despite the POST. When the server has no estimator, or has not read its history yet, the answer is available false with reason disabled or model_warming_up and nothing is looked up.",
+        "operationId": "getJobsRuntimeEstimates",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["jobs"],
+                "properties": {
+                  "jobs": {"type": "array", "maxItems": 5000, "items": {"type": "string"}, "description": "Job ids in cluster.proc format."}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The estimates, or why there are none",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["available"],
+                  "properties": {
+                    "available": {"type": "boolean"},
+                    "reason": {"type": "string", "enum": ["disabled", "model_warming_up"]},
+                    "estimates": {"type": "object", "additionalProperties": {"type": "object", "description": "The single-job estimate's fields: available, reason, estimate_seconds, p10_seconds, p90_seconds, basis, rough, elapsed_seconds, remaining_seconds, exceeded_history. A DAGMan job (or any scheduler- or local-universe job) is answered with available false and reason not_estimated."}},
+                    "model": {
+                      "type": "object",
+                      "properties": {
+                        "trained_through": {"type": "string", "format": "date-time"},
+                        "jobs_ingested": {"type": "integer"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body or job ID",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "413": {
+            "description": "More than 5000 job ids",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "500": {
+            "description": "Failed to query the jobs",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
     "/jobs/{jobId}/ssh": {
       "get": {
         "summary": "Open an interactive SSH session inside a running job",
@@ -2046,7 +3339,7 @@ const openAPISchema = `{
     "/jobs/archive": {
       "get": {
         "summary": "Query job archive",
-        "description": "Query archived (completed) job records. Served from the schedd's history file, or from a synchronized htcondordb mirror when one is current and the schedd has identified the caller \u2014 the response's source field names which answered.",
+        "description": "Query archived (completed) job records. Served from the schedd's history file, or from a synchronized htcondordb mirror when one is current and the schedd has identified the caller \u2014 the response's source field names which answered. With projection=* each record also carries the member \"evaluated\", as GET /jobs/{jobId} describes; a projected record does not, since an expression evaluated without the attributes it reads gives a wrong number.",
         "operationId": "queryJobArchive",
         "parameters": [
           {
@@ -2080,7 +3373,7 @@ const openAPISchema = `{
           {
             "name": "owned_by_me",
             "in": "query",
-            "description": "Restrict the query to the authenticated user's own records. Default: false for API callers; always applied to a browser session that is not a Web UI admin. It does not affect whether an htcondordb mirror may answer \u2014 that turns on the schedd having identified the caller, and a mirror read is confined exactly as the request was.",
+            "description": "Restrict the query to the authenticated user's own records. Default: false; always applied to a caller that is not an administrator, bearer token or browser session alike. It does not affect whether an htcondordb mirror may answer \u2014 that turns on the schedd having identified the caller, and a mirror read is confined exactly as the request was.",
             "required": false,
             "schema": {
               "type": "boolean",
@@ -2643,6 +3936,115 @@ const openAPISchema = `{
         }
       }
     },
+    "/pool/drain-estimates": {
+      "get": {
+        "summary": "When each execute node would be empty if drained now",
+        "description": "For every execute node with running jobs (or that is draining): how long a drain started now would take to empty it. A drain lets each job run until it finishes or its retirement limit runs out, whichever is first. Retirement limits come from every claimed slot; expected finishing times exist only for jobs submitted from this access point, estimated from their owners' finished jobs. So a node whose jobs all have an estimate gets likely_empty_seconds; one with jobs from other access points gets at_least_seconds (the estimated part) and unknown_up_to_seconds (the latest retirement limit among the rest). The answer covers every user's jobs, is computed once for all callers, and is up to a minute old; seconds are counted from generated_at. Without ?machine the per-job slots are omitted. Not available in multi-AP mode.",
+        "operationId": "getPoolDrainEstimates",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "query",
+            "required": false,
+            "description": "Answer for this one machine (its Machine attribute, case-insensitive), with a row per running job.",
+            "schema": {"type": "string"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The estimates. When the latest refresh failed, the last good answer with stale true and error set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["generated_at", "age_seconds", "stale", "estimates_available", "summary", "machines"],
+                  "properties": {
+                    "generated_at": {"type": "string", "format": "date-time"},
+                    "age_seconds": {"type": "number"},
+                    "stale": {"type": "boolean", "description": "The latest refresh failed; this is the last answer that worked."},
+                    "error": {"type": "string", "description": "Why the answer is stale, or why it has no runtime estimates."},
+                    "estimates_available": {"type": "boolean", "description": "False when this access point does not estimate runtimes; the retirement bounds are still given."},
+                    "access_point": {"type": "string", "description": "This access point's schedd name, as it appears in GlobalJobId."},
+                    "summary": {
+                      "type": "object",
+                      "properties": {
+                        "machines": {"type": "integer"},
+                        "jobs_running": {"type": "integer"},
+                        "jobs_estimated": {"type": "integer"},
+                        "jobs_from_this_ap": {"type": "integer"},
+                        "cores_freeing_next_hour": {"type": "number", "description": "Cores held by estimated jobs expected to finish on their own within the hour. Jobs from this access point only."},
+                        "draining_nodes": {"type": "integer"},
+                        "draining_likely_empty_within_2h": {"type": "integer", "description": "Draining nodes all of whose jobs are expected to be gone within two hours."}
+                      }
+                    },
+                    "machines": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "machine": {"type": "string"},
+                          "draining": {"type": "boolean"},
+                          "jobs_total": {"type": "integer"},
+                          "jobs_estimated": {"type": "integer"},
+                          "jobs_from_this_ap": {"type": "integer"},
+                          "jobs_unknown_end": {"type": "integer", "description": "Jobs with no estimate whose retirement limit is more than a minute away."},
+                          "jobs_unknown_from_other_aps": {"type": "integer"},
+                          "likely_empty_seconds": {"type": "number", "description": "When the jobs with a known end are expected to be gone; 0 for a node with nothing running; absent when no job has a known end."},
+                          "likely_empty_at": {"type": "string", "format": "date-time"},
+                          "at_least_seconds": {"type": "number", "description": "Present when some jobs have an unknown end: likely_empty_seconds is then only a lower bound."},
+                          "at_most_seconds": {"type": "number", "description": "The latest a drain could take: the startd's ExpectedMachineGracefulDrainingCompletion, else the latest retirement deadline."},
+                          "at_most_at": {"type": "string", "format": "date-time"},
+                          "unknown_up_to_seconds": {"type": "number", "description": "The latest retirement deadline among the jobs with an unknown end."},
+                          "evicted_on_drain": {"type": "integer", "description": "Jobs a drain now would evict: their retirement limit ends before they would, or within a minute."},
+                          "exceeded": {"type": "integer", "description": "Jobs running longer than comparable jobs have."},
+                          "expected_ends": {
+                            "type": "array",
+                            "items": {"type": "object", "properties": {"seconds": {"type": "number"}, "usually_by_seconds": {"type": "number"}, "cpus": {"type": "number"}}}
+                          },
+                          "slots": {
+                            "type": "array",
+                            "description": "Only with ?machine.",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {"type": "string"},
+                                "owner": {"type": "string", "description": "RemoteOwner"},
+                                "cpus": {"type": "number"},
+                                "backfill": {"type": "boolean"},
+                                "submitted_from": {"type": "string", "description": "The schedd in the job's GlobalJobId."},
+                                "from_this_ap": {"type": "boolean"},
+                                "running_seconds": {"type": "number"},
+                                "expected_end": {"type": "string", "format": "date-time"},
+                                "usually_by": {"type": "string", "format": "date-time", "description": "When about 90% of comparable jobs have finished."},
+                                "exceeded": {"type": "boolean"},
+                                "retirement_deadline": {"type": "string", "format": "date-time"},
+                                "evicted_on_drain": {"type": "boolean"}
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "501": {
+            "description": "No collector configured, or multi-AP mode",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "502": {
+            "description": "The collector could not be read and there is no earlier answer",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
     "/collector/ads": {
       "get": {
         "summary": "Query collector for all ads",
@@ -3122,17 +4524,43 @@ func (s *Handler) handleOpenAPISchema(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	// Parse and re-encode to ensure valid JSON and pretty printing
-	var schema interface{}
+	var schema map[string]any
 	if err := json.Unmarshal([]byte(openAPISchema), &schema); err != nil {
 		s.writeError(w, http.StatusInternalServerError, "Failed to parse OpenAPI schema")
 		return
 	}
+	s.setOpenAPIOAuth2URLs(schema)
 
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(schema); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to encode OpenAPI schema", "error", err)
 	}
+}
+
+// setOpenAPIOAuth2URLs points the schema's OAuth2 security scheme at the
+// endpoints this server advertises. The literal in openAPISchema names
+// the /mcp/ spelling, which a server without MCP does not route.
+func (s *Handler) setOpenAPIOAuth2URLs(schema map[string]any) {
+	flow, ok := nestedMap(schema, "components", "securitySchemes", "oauth2", "flows", "authorizationCode")
+	if !ok {
+		return
+	}
+	flow["authorizationUrl"] = s.oauth2EndpointPath("authorize")
+	flow["tokenUrl"] = s.oauth2EndpointPath("token")
+}
+
+// nestedMap walks m through the named keys, each of which must hold an
+// object.
+func nestedMap(m map[string]any, keys ...string) (map[string]any, bool) {
+	for _, k := range keys {
+		next, ok := m[k].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		m = next
+	}
+	return m, true
 }
 
 // handleSwaggerUI serves the Swagger UI

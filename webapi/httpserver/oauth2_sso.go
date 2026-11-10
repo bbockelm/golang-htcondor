@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
+	"github.com/bbockelm/golang-htcondor/droppriv"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -116,7 +118,13 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 	// rather than an OIDC provider, and the id_token that once implied
 	// it is gone. A client that wants openid asks, and a registration
 	// made without a scope list already defaults to including it.
-	var grantedScopes []string
+	//
+	// Non-nil even when nothing is granted, so the grant is stored as
+	// an empty list rather than JSON null. What a token may do is
+	// decided by the transport marking it scoped, not by whether its
+	// list is nil, but an empty grant should read as one everywhere it
+	// is stored.
+	grantedScopes := []string{}
 	for _, scope := range requestedScopes {
 		if scope == "openid" {
 			grantedScopes = append(grantedScopes, scope)
@@ -129,6 +137,11 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 		switch scope {
 		case "openid":
 			// Already added
+			continue
+		case placementScope:
+			// Granted only by approving a placement device request,
+			// which records whose identity the grant acts for. A grant
+			// made through any other path would act for nobody.
 			continue
 		case "mcp:read":
 			switch {
@@ -147,19 +160,7 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 				grantedScopes = append(grantedScopes, scope)
 			}
 		case "mcp:write":
-			switch {
-			case s.mcpWriteGroups.configured():
-				// Specific write group configured — user must be in it
-				if s.mcpWriteGroups.allows(userGroups) {
-					grantedScopes = append(grantedScopes, scope)
-				}
-			case s.mcpAccessGroups.configured():
-				// No specific write group; fall back to access group (already validated)
-				if s.mcpAccessGroups.allows(userGroups) {
-					grantedScopes = append(grantedScopes, scope)
-				}
-			default:
-				// No groups configured — grant to any authenticated user
+			if s.writeScopeAllowed(userGroups) {
 				grantedScopes = append(grantedScopes, scope)
 			}
 		case "mcp:admin":
@@ -184,7 +185,38 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 			if s.mcpSuperuserGroups.configured() && s.mcpSuperuserGroups.allows(userGroups) {
 				grantedScopes = append(grantedScopes, scope)
 			}
+		case scopeAnyUserRead:
+			// The same power as mcp:admin under the name of what it
+			// grants, so it answers to the same group until the two
+			// settings are split apart.
+			//
+			// A case of its own rather than a fallthrough, because the
+			// default branch below grants an unrecognized scope
+			// unconditionally: advertising an entitlement without
+			// landing here would hand cross-user reads to any client
+			// that asked.
+			if s.mcpAdminGroups.configured() && s.mcpAdminGroups.allows(userGroups) {
+				grantedScopes = append(grantedScopes, scope)
+			}
+		case scopeAnyUserWrite:
+			// Likewise mcp:superuser, and likewise not implied by
+			// anyuser:read.
+			if s.mcpSuperuserGroups.configured() && s.mcpSuperuserGroups.allows(userGroups) {
+				grantedScopes = append(grantedScopes, scope)
+			}
 		default:
+			// condor:/WRITE is the same authorization as mcp:write --
+			// both mint an IDTOKEN carrying WRITE -- so it follows the
+			// same group policy. Granted unconditionally, it handed a
+			// user the write group denies mcp:write the same power
+			// under the other name. Case-insensitive because the
+			// mapping to an authorization level is.
+			if strings.EqualFold(scope, condorScopeWrite) {
+				if s.writeScopeAllowed(userGroups) {
+					grantedScopes = append(grantedScopes, scope)
+				}
+				continue
+			}
 			// Grant other scopes if requested (profile, email, condor:/*, etc.).
 			//
 			// Re: condor:/* scopes — these grant *narrowing* claims on
@@ -194,10 +226,10 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 			// they're in ALLOW_WRITE on the schedd side. See
 			// mapCondorScopesToAuthz for the full security model.
 			//
-			// Because of that narrowing semantics, granting condor:/*
-			// here without an explicit per-user group check is safe in
-			// today's deployment: a non-submitter who somehow obtains
-			// `condor:/WRITE` still can't submit. The audit-style
+			// The schedd's ACL is not this server's group policy,
+			// though, which is why condor:/WRITE is checked above.
+			// The other levels pass through: READ is left to the
+			// schedd's ACL, and the rest map to nothing. The audit-style
 			// concern ("user clicks Authorize on a malicious client
 			// asking for condor:/ADMINISTRATOR → admin token") is
 			// also addressed defensively in mapCondorScopesToAuthz,
@@ -208,6 +240,23 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 	}
 
 	return grantedScopes
+}
+
+// writeScopeAllowed is the group policy for a scope that grants WRITE:
+// the write group when one is configured, otherwise the access group,
+// otherwise any authenticated user.
+func (s *Handler) writeScopeAllowed(userGroups []string) bool {
+	switch {
+	case s.mcpWriteGroups.configured():
+		// Specific write group configured — user must be in it
+		return s.mcpWriteGroups.allows(userGroups)
+	case s.mcpAccessGroups.configured():
+		// No specific write group; fall back to access group (already validated)
+		return s.mcpAccessGroups.allows(userGroups)
+	default:
+		// No groups configured — grant to any authenticated user
+		return true
+	}
 }
 
 // fetchUserInfo fetches user information from the IDP user info endpoint
@@ -244,12 +293,15 @@ func (s *Handler) fetchUserInfo(ctx context.Context, accessToken string) (*UserI
 		Claims: claims,
 	}
 
-	s.logger.Info(logging.DestinationHTTP, "Fetched user info from IDP", "claims", claims)
-
 	// Extract standard claims
 	if sub, ok := claims[s.oauth2UsernameClaim].(string); ok {
 		userInfo.Subject = sub
 	}
+
+	// The claims are personal data (email, name, groups) and Info reaches
+	// the admin log view, so only the subject is logged there.
+	s.logger.Info(logging.DestinationHTTP, "Fetched user info from IDP", "subject", userInfo.Subject)
+	s.logger.Debug(logging.DestinationHTTP, "User info claims from IDP", "claims", claims)
 	if email, ok := claims["email"].(string); ok {
 		userInfo.Email = email
 	}
@@ -265,10 +317,45 @@ func (s *Handler) fetchUserInfo(ctx context.Context, accessToken string) (*UserI
 	return userInfo, nil
 }
 
+// refusedScopeHint turns an invalid_scope refusal into something its
+// reader can act on, or "" for any other error.
+//
+// The provider says which scope it would not give; it cannot say that the
+// list came from this server's configuration, which is the part an
+// administrator needs. CILogon is the case in point: it approves scopes
+// per client and began *rejecting* an unapproved one where it used to
+// ignore it silently, so a pool that had worked for years started refusing
+// every login the day the provider was upgraded, naming a scope nobody had
+// touched.
+//
+// Naming the scopes discloses nothing: they were in the authorize URL this
+// browser just followed.
+func refusedScopeHint(errorParam string, requested []string) string {
+	if errorParam != "invalid_scope" || len(requested) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"This server asked for %q. Each of those has to be approved for its client at the provider; "+
+			"set HTTP_API_OAUTH2_SCOPES to the ones that are.",
+		strings.Join(requested, " "))
+}
+
+// signInFailed ends a failed sign-in with a styled HTML page.
+//
+// Every exit below is reached by a browser following the identity
+// provider's redirect, so a JSON body is the wrong thing to hand back: the
+// person sees a raw object, and the one audience that could act on the
+// detail -- an operator reading the log -- already has it. detail carries
+// the specific cause under the heading, empty when there is nothing to add.
+func (s *Handler) signInFailed(w http.ResponseWriter, statusCode int, message, detail string) {
+	s.renderResultPage(w, statusCode, "Sign-in failed", "#f44336", "Sign-in failed", message, detail)
+}
+
 // handleOAuth2Callback handles the OAuth2 callback from the IDP
 func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	if s.oauth2Provider == nil || s.oauth2Config == nil {
-		s.writeError(w, http.StatusInternalServerError, "OAuth2 not configured")
+		s.signInFailed(w, http.StatusInternalServerError,
+			"Single sign-on is not configured on this server.", "")
 		return
 	}
 
@@ -280,25 +367,41 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	errorParam := r.URL.Query().Get("error")
 
 	if errorParam != "" {
-		errorDesc := r.URL.Query().Get("error_description")
-		s.logger.Error(logging.DestinationHTTP, "OAuth2 callback error from IDP",
-			"error", errorParam, "error_description", errorDesc)
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %s", errorDesc))
+		s.reportCallbackRefusal(w, r, errorParam, state)
 		return
 	}
 
 	if state == "" || code == "" {
-		s.writeError(w, http.StatusBadRequest, "Missing state or code parameter")
+		s.signInFailed(w, http.StatusBadRequest,
+			"This sign-in link is incomplete.",
+			"Start again from the page you were trying to reach.")
 		return
 	}
 
-	// Retrieve the stored authorize request and original URL
-	ar, originalURL, ok := s.oauth2StateStore.GetWithURL(state)
+	// Retrieve the stored authorize request and original URL. The entry
+	// is consumed either way, so a state presented by the wrong browser
+	// cannot then be retried from the right one.
+	entry, ok := s.oauth2StateStore.Take(state)
 	if !ok {
 		s.logger.Error(logging.DestinationHTTP, "Invalid or expired OAuth2 state", "state", state)
-		s.writeError(w, http.StatusBadRequest, "Invalid or expired state parameter")
+		s.signInFailed(w, http.StatusBadRequest,
+			"This sign-in has expired or was already used.",
+			"Start again from the page you were trying to reach.")
 		return
 	}
+	// The browser completing the login must be the one that started it;
+	// see login_binding.go. Checked before the code is redeemed, so a
+	// refused callback costs the IdP nothing and yields no session.
+	if !loginBoundToBrowser(r, entry.BrowserBinding) {
+		s.logger.Warn(logging.DestinationHTTP,
+			"Refusing OAuth2 callback from a browser that did not start the login",
+			"state", state, "bound", entry.BrowserBinding != "")
+		s.signInFailed(w, http.StatusBadRequest,
+			"This sign-in was not started in this browser.",
+			"Start again in the browser you want to sign in with.")
+		return
+	}
+	ar, originalURL := entry.AuthorizeRequest, entry.OriginalURL
 
 	// Check if this is a browser-initiated flow (no authorize request)
 	isBrowserFlow := (ar == nil)
@@ -317,7 +420,8 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	token, err := s.oauth2Config.Exchange(ctx, code)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to exchange code for token", "error", err)
-		s.writeError(w, http.StatusUnauthorized, "Failed to exchange authorization code")
+		s.signInFailed(w, http.StatusUnauthorized,
+			"Could not complete the sign-in with the identity provider.", "")
 		return
 	}
 
@@ -326,7 +430,8 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	userInfo, err := s.fetchUserInfo(ctx, token.AccessToken)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to fetch user info", "error", err)
-		s.writeError(w, http.StatusUnauthorized, "Failed to fetch user information")
+		s.signInFailed(w, http.StatusUnauthorized,
+			"Could not read your account from the identity provider.", "")
 		return
 	}
 
@@ -335,7 +440,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	if err := s.evaluateLoginRequirements(userInfo.Claims); err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "Login refused by OAuth2 requirements",
 			"requirements", s.oauth2RequirementsText, "claims_returned", claimNames(userInfo.Claims))
-		s.writeError(w, http.StatusForbidden, err.Error())
+		s.signInFailed(w, http.StatusForbidden, "This account may not sign in here.", err.Error())
 		return
 	}
 
@@ -346,8 +451,9 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		// operator cannot tell which from the log.
 		s.logger.Error(logging.DestinationHTTP, "User info missing subject claim",
 			"claim", s.oauth2UsernameClaim, "claims_returned", claimNames(userInfo.Claims))
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf(
-			"Invalid user information: the identity provider returned no %q claim", s.oauth2UsernameClaim))
+		s.signInFailed(w, http.StatusUnauthorized,
+			"The identity provider did not say who you are.",
+			fmt.Sprintf("It returned no %q claim.", s.oauth2UsernameClaim))
 		return
 	}
 
@@ -364,43 +470,27 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// the browser session, the OAuth2 session, and through the state
 	// store, the consent and device-approval flows.
 	subject := userInfo.Subject
-	if s.localIdentity != nil {
-		// A previously confirmed mapping, if this browser has one. It is
-		// re-confirmed against the live account database below, never
-		// trusted; what it avoids is the enumeration needed to discover
-		// the account from scratch, which a just-restarted daemon cannot
-		// do until its directory is answering.
-		hint := s.readIdentityCookie(r, subject)
-		account, groups, hinted, err := s.localIdentity.resolveWithHint(ctx, subject, userGroups, hint)
-		if err != nil {
-			// Refused, not degraded. See localIdentity's comment on why
-			// there is no fallback to the token's own claims.
-			s.logger.Warn(logging.DestinationHTTP,
-				"Refusing a login that maps to no single local account",
-				"oidc_subject", subject, "error", err)
-			// A browser is on the other end of the SSO callback, so this
-			// renders like the group-policy refusal next to it rather
-			// than handing the person a JSON object to read.
-			s.renderIdentityDeniedPage(w, err)
-			return
-		}
-		s.logger.Info(logging.DestinationHTTP, "Resolved the asserted identity locally",
-			"oidc_subject", subject, "account", account, "from_hint", hinted,
-			"groups", groups, "groups_from_system", s.localIdentity.sourcesGroups())
-
-		// Remember the mapping only when it was made with full knowledge
-		// of the account database. A hinted mapping is not re-issued: it
-		// was confirmed by name, which cannot rule out a second account
-		// claiming the same GECOS, so extending its life would launder a
-		// weaker check into a longer-lived claim.
-		if !hinted && s.localIdentity.indexIsComplete() {
-			s.setIdentityCookie(w, subject, account)
-		}
-		subject, userGroups = account, groups
+	// The identity this person presents to condor_placementd, taken from
+	// the provider's own claims before any local mapping: it is the
+	// left-hand column of the placementd's map file, not a local name.
+	placementID := placementIdentityFromClaims(userInfo.Claims, s.placementOnboard.identityClaims)
+	placementName := placementDisplayName(userInfo.Claims, s.placementOnboard.displayNameClaims)
+	li := loginIdentity{
+		subject: subject, groups: userGroups, placementID: placementID, placementName: placementName,
+		browser: isBrowserFlow, originalURL: originalURL,
 	}
+	// Kept only with a placement identity: it goes on an access request.
+	if placementID != "" {
+		li.email = placementEmail(userInfo.Claims)
+	}
+	mapped, handled := s.resolveLoginIdentity(w, r, li)
+	if handled {
+		return
+	}
+	subject, userGroups = mapped.subject, mapped.groups
 
-	s.logger.Info(logging.DestinationHTTP, "User authenticated via SSO",
-		"subject", subject, "groups", userGroups)
+	s.logger.Info(logging.DestinationHTTP, "User authenticated via SSO", "subject", subject)
+	s.logger.Debug(logging.DestinationHTTP, "SSO user groups", "subject", subject, "groups", userGroups)
 
 	// File the provider's refresh token, if it gave one. After the
 	// mapping, because it is keyed by the session subject -- the name a
@@ -414,10 +504,10 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// interface and MCP are separate grants: somebody may be entitled to
 	// open this AP's pages without being entitled to drive it through an
 	// agent, and the reverse.
-	accessErr := s.validateGroupAccess(userGroups)
-	required := s.mcpAccessGroups
+	accessErr, required, placementOnly := s.validateGroupAccess(userGroups), s.mcpAccessGroups, false
 	if isBrowserFlow {
-		accessErr, required = s.validateWebUIAccess(userGroups), s.webUIRequiredGroups()
+		placementOnly, accessErr = s.webUILoginAccess(li, mapped)
+		required = s.webUIRequiredGroups()
 	}
 	if accessErr != nil {
 		s.logger.Warn(logging.DestinationHTTP, "User denied access",
@@ -426,6 +516,10 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 			"surface", map[bool]string{true: "web-ui", false: "mcp"}[isBrowserFlow],
 			"error", accessErr)
 
+		if placementOnly {
+			s.startPlacementOnlySession(w, li, userInfo.Subject)
+			return
+		}
 		// A browser gets a page. This used to return the API's JSON error
 		// body, which is unreadable in a tab and gives somebody who has
 		// just logged in successfully nothing to act on.
@@ -442,9 +536,13 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// For browser flow, create session and redirect back to original URL
+	if isBrowserFlow && mapped.placement != nil {
+		s.startPlacementdSession(w, li, mapped, userInfo.Subject)
+		return
+	}
 	if isBrowserFlow {
 		// Create HTTP session cookie for browser-based authentication
-		sessionID, sessionData, err := s.sessionStore.Create(subject, userGroups)
+		sessionID, sessionData, err := s.sessionStore.CreateSession(browserSessionData(li, mapped))
 		if err != nil {
 			s.logger.Error(logging.DestinationHTTP, "Failed to create HTTP session",
 				"error", err, "subject", subject)
@@ -453,7 +551,7 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		}
 		s.setSessionCookie(w, sessionID, sessionData.ExpiresAt)
 		s.logger.Info(logging.DestinationHTTP, "Created HTTP session cookie for browser flow",
-			"subject", subject, "session_id", sessionID[:8]+"...",
+			"subject", subject, "session_key", sessionLogID(sessionID),
 			"expires_at", sessionData.ExpiresAt)
 
 		// Redirect back to original URL or default to root.
@@ -503,15 +601,19 @@ func (s *Handler) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 			fosite.ErrServerError.WithDescription("Failed to continue authorization"))
 		return
 	}
-	s.oauth2StateStore.StoreWithUsername(consentState, ar, "", subject, userGroups)
+	placementIdentity := ""
+	if mapped.placement != nil {
+		placementIdentity = li.placementID
+	}
+	s.oauth2StateStore.StoreForConsent(consentState, ar, subject, userGroups, placementIdentity)
 	s.oauth2StateStore.Remove(state)
 
 	s.logger.Info(logging.DestinationHTTP, "Authenticated via SSO, redirecting to consent",
-		"subject", subject, "groups", userGroups,
+		"subject", subject,
 		"client_id", ar.GetClient().GetID(),
 		"requested_scopes", ar.GetRequestedScopes())
 
-	http.Redirect(w, r, "/mcp/oauth2/consent?state="+url.QueryEscape(consentState), http.StatusFound)
+	http.Redirect(w, r, s.oauth2EndpointPath("consent")+"?state="+url.QueryEscape(consentState), http.StatusFound)
 }
 
 // handleLogin initiates the OAuth2 login flow
@@ -634,4 +736,435 @@ func (s *Handler) renderAccessDeniedPage(w http.ResponseWriter, required *groupS
 	}
 	s.renderResultPage(w, http.StatusForbidden, "Access denied", "#f44336",
 		"Access denied", message, sub)
+}
+
+// startPlacementOnlySession finishes a browser login for somebody who maps
+// to no local account: a placement-only session, then the placement page.
+//
+// The web UI's access group is not applied: it decides who may use this
+// access point's web interface, and this session reaches none of it. Whether
+// the person may have a placement token is the placementd's map file's
+// decision, made when they ask for one.
+//
+// The session keeps the provider's subject and groups, so the sign-in's
+// mapping can be re-run for it once the person is onboarded
+// (placement_session_upgrade.go).
+func (s *Handler) startPlacementOnlySession(w http.ResponseWriter, li loginIdentity, oidcSubject string) {
+	sessionID, sessionData, err := s.sessionStore.CreateSession(SessionData{
+		Groups:            li.groups,
+		PlacementIdentity: li.placementID,
+		DisplayName:       li.placementName,
+		Email:             li.email,
+		Scope:             sessionScopePlacement,
+		IDPSubject:        li.subject,
+	})
+	if err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to create a placement-only session",
+			"error", err, "oidc_subject", oidcSubject)
+		s.writeError(w, http.StatusInternalServerError, "Failed to create session")
+		return
+	}
+	s.setSessionCookie(w, sessionID, sessionData.ExpiresAt)
+	s.logger.Info(logging.DestinationHTTP, "Created a placement-only session for an identity with no local account",
+		"oidc_subject", oidcSubject, "identity", li.placementID, "session_key", sessionLogID(sessionID))
+
+	redirectURL := "/placement"
+	originalURL := li.originalURL
+	if isSafeLocalRedirect(originalURL) && (originalURL == "/placement" ||
+		strings.HasPrefix(originalURL, "/placement/") || strings.HasPrefix(originalURL, "/placement?")) {
+		redirectURL = originalURL
+	}
+	s.finishBrowserLogin(w, redirectURL)
+}
+
+// errNoPlacementAccount is a login the placementd maps to no account, where
+// the placementd is the only identity mapping.
+var errNoPlacementAccount = errors.New("the placement service maps this sign-in to no account on this access point")
+
+// loginIdentity is what the SSO callback knows when it maps a login.
+type loginIdentity struct {
+	subject, placementID, placementName, originalURL string
+	// email is the provider's, kept when there is a placement identity.
+	email   string
+	groups  []string
+	browser bool
+}
+
+// loginMapping is HTTP_API_IDENTITY_MAP's answer for a sign-in.
+type loginMapping struct {
+	// subject and groups are what the sign-in proceeds as: a local
+	// account and its groups, a placementd account and its groups (the
+	// provider's, or the system's when groups come from the system), or
+	// the provider's own subject when nothing translates it.
+	subject string
+	groups  []string
+	// placement is the account, when the placementd mapped the sign-in.
+	placement *PlacementAccountInfo
+	// placementOnly: no account, but a browser sign-in with a placement
+	// identity may have a placement-only session.
+	placementOnly bool
+	// refused, when set, is why the sign-in maps to no account and may
+	// not have a placement-only session either.
+	refused error
+	// local is set when a local strategy mapped the sign-in; hinted when
+	// it did so by confirming the identity cookie's hint, and remember
+	// when the mapping was made with full knowledge of the account
+	// database and is worth putting in that cookie.
+	local, hinted, remember bool
+}
+
+// mapLoginIdentity applies HTTP_API_IDENTITY_MAP to a sign-in: the local
+// strategies and condor_placementd, in the configured order. It decides
+// and does nothing else; the SSO callback and a placement-only session's
+// re-check (placement_session_upgrade.go) both act on its answer. hint is
+// a previously confirmed local account for li.subject, or "".
+func (s *Handler) mapLoginIdentity(ctx context.Context, li loginIdentity, hint string) loginMapping {
+	m := loginMapping{subject: li.subject, groups: li.groups}
+	mayPlacementOnly := func() bool {
+		return li.browser && li.placementID != "" && s.placementOnboardingEnabled(ctx)
+	}
+	// condor_placementd as a mapping (HTTP_API_IDENTITY_MAP = placementd):
+	// tried first when it is listed first, or when it is the only
+	// mapping; otherwise after the local strategies have failed.
+	po := &s.placementOnboard
+	if po.mapIdentity && (po.mapIdentityFirst || !s.localIdentity.mapsAccount()) {
+		m.placement = s.placementdMapLogin(ctx, li.placementID)
+	}
+	if m.placement == nil && po.mapIdentity && !s.localIdentity.mapsAccount() {
+		// placementd is the only mapping, and it maps nobody here.
+		if mayPlacementOnly() {
+			m.placementOnly = true
+		} else {
+			m.refused = errNoPlacementAccount
+		}
+		return m
+	}
+	if m.placement == nil && s.localIdentity != nil {
+		// A previously confirmed mapping, if this browser has one. It is
+		// re-confirmed against the live account database below, never
+		// trusted; what it avoids is the enumeration needed to discover
+		// the account from scratch, which a just-restarted daemon cannot
+		// do until its directory is answering.
+		account, groups, hinted, err := s.localIdentity.resolveWithHint(ctx, li.subject, li.groups, hint)
+		if err != nil && po.mapIdentity && !po.mapIdentityFirst {
+			m.placement = s.placementdMapLogin(ctx, li.placementID)
+		}
+		switch {
+		case m.placement != nil:
+			// Mapped by the placementd after the local strategies.
+		case err != nil:
+			// Somebody with no local account may still be here for a
+			// placement token. They get a session that reaches only
+			// that (placement_session_gate.go), with no username, so
+			// nothing can treat them as a local user. Otherwise refused,
+			// not degraded: see localIdentity's comment on why there is
+			// no fallback to the token's own claims.
+			if mayPlacementOnly() {
+				m.placementOnly = true
+			} else {
+				m.refused = err
+			}
+			return m
+		default:
+			// Remember the mapping only when it was made with full
+			// knowledge of the account database. A hinted mapping is not
+			// re-issued: it was confirmed by name, which cannot rule out
+			// a second account claiming the same GECOS, so extending its
+			// life would launder a weaker check into a longer-lived claim.
+			m.local, m.hinted = true, hinted
+			m.remember = !hinted && s.localIdentity.indexIsComplete()
+			m.subject, m.groups = account, groups
+		}
+	}
+	if m.placement != nil {
+		// The account is the placementd's answer for this identity and
+		// nothing else.
+		m.subject = m.placement.Account
+		if s.localIdentity.sourcesGroups() {
+			m.groups = s.placementAccountGroups(ctx, li, m.placement.Account)
+		}
+	}
+	return m
+}
+
+// placementAccountGroups is a placementd account's groups where groups come
+// from the system: the system's groups for the account's local part when
+// the account is in UID_DOMAIN, and none otherwise. The provider's groups
+// claim is never used. Those groups decide who is an administrator, so a
+// provider that could assert a group named like an admin group would
+// otherwise make any account it vouches for one. An account in another
+// domain is not the local account of the same name, and a failed lookup is
+// no groups: either way the session gets fewer permissions, never more.
+func (s *Handler) placementAccountGroups(ctx context.Context, li loginIdentity, account string) []string {
+	if len(li.groups) > 0 {
+		s.logger.Info(logging.DestinationSecurity, "Ignoring the identity provider's groups for a placementd account; groups come from the system",
+			"identity", li.placementID, "account", account, "provider_groups", len(li.groups))
+	}
+	i := strings.LastIndex(account, "@")
+	if i <= 0 || s.uidDomain == "" || !strings.EqualFold(account[i+1:], s.uidDomain) {
+		return nil
+	}
+	groups, err := s.localIdentity.groups.LookupGroups(ctx, account[:i])
+	var degraded *droppriv.DegradedError
+	switch {
+	case errors.As(err, &degraded):
+		s.logger.Warn(logging.DestinationHTTP,
+			"Group list is incomplete; this session may have fewer permissions than it should",
+			"account", account, "unavailable_source", degraded.Source,
+			"groups", degraded.Groups, "error", degraded.Err)
+		return degraded.Groups
+	case err != nil:
+		s.logger.Warn(logging.DestinationHTTP, "Could not read a placementd account's groups; it has none",
+			"account", account, "error", err)
+		return nil
+	}
+	return groups
+}
+
+// commitLoginMapping does what a mapped sign-in needs before anything is
+// issued for it: remembers a local mapping in the identity cookie, and
+// records a placementd account, so every token a grant of that subject ever
+// gets is bounded.
+func (s *Handler) commitLoginMapping(ctx context.Context, w http.ResponseWriter, li loginIdentity, m loginMapping) error {
+	if m.remember {
+		s.setIdentityCookie(w, li.subject, m.subject)
+	}
+	if m.placement == nil {
+		return nil
+	}
+	return s.recordPlacementSubject(ctx, &SessionData{
+		Username: m.subject, PlacementIdentity: li.placementID,
+		IdentitySource: identitySourcePlacementd, Placement: m.placement,
+	})
+}
+
+// webUILoginAccess applies the web interface's access group to a mapped
+// browser sign-in. placementOnly reports, when access is refused, that the
+// sign-in may still have a placement-only session: an account from the
+// placementd is not entitled to the web interface by the placementd alone,
+// but it may still get its token.
+func (s *Handler) webUILoginAccess(li loginIdentity, m loginMapping) (placementOnly bool, accessErr error) {
+	if err := s.validateWebUIAccess(m.groups); err != nil {
+		return m.placement != nil && li.placementID != "", err
+	}
+	return false, nil
+}
+
+// browserSessionData is the full session a mapped browser sign-in gets.
+func browserSessionData(li loginIdentity, m loginMapping) SessionData {
+	sd := SessionData{
+		Username:          m.subject,
+		Groups:            m.groups,
+		PlacementIdentity: li.placementID,
+		DisplayName:       li.placementName,
+		Email:             li.email,
+	}
+	if m.placement != nil {
+		sd.IdentitySource = identitySourcePlacementd
+		sd.Placement = m.placement
+	}
+	return sd
+}
+
+// resolveLoginIdentity maps a login (mapLoginIdentity) and acts on the
+// answer, returning it. handled reports that it already answered the
+// request (a placement-only session, or a refusal).
+func (s *Handler) resolveLoginIdentity(w http.ResponseWriter, r *http.Request, li loginIdentity) (loginMapping, bool) {
+	ctx := r.Context()
+	hint := ""
+	if s.localIdentity != nil {
+		hint = s.readIdentityCookie(r, li.subject)
+	}
+	m := s.mapLoginIdentity(ctx, li, hint)
+	switch {
+	case m.placementOnly:
+		s.startPlacementOnlySession(w, li, li.subject)
+		return m, true
+	case m.refused != nil:
+		s.logger.Warn(logging.DestinationHTTP, "Refusing a login that maps to no account",
+			"oidc_subject", li.subject, "identity", li.placementID, "error", m.refused)
+		// A browser is on the other end of the SSO callback, so this
+		// renders like the group-policy refusal next to it rather than
+		// handing the person a JSON object to read.
+		s.renderIdentityDeniedPage(w, m.refused)
+		return m, true
+	case m.local:
+		s.logger.Info(logging.DestinationHTTP, "Resolved the asserted identity locally",
+			"oidc_subject", li.subject, "account", m.subject, "from_hint", m.hinted,
+			"groups_from_system", s.localIdentity.sourcesGroups())
+	}
+	if err := s.commitLoginMapping(ctx, w, li, m); err != nil {
+		s.logger.Error(logging.DestinationHTTP, "Failed to record a placementd account", "error", err, "account", m.subject)
+		s.writeError(w, http.StatusInternalServerError, "Failed to complete sign-in")
+		return m, true
+	}
+	return m, false
+}
+
+// Asking for offline_access, and surviving being told no.
+//
+// This server adds offline_access to the upstream scope request unless
+// HTTP_API_UPSTREAM_REFRESH is off, because the refresh token it brings
+// back is the only thing that lets upstreamUserInfoOracle re-check a
+// token-sourced deployment's group membership. Nothing else this server
+// holds can answer that question.
+//
+// The scope is not always available to ask for. A provider that
+// approves scopes per client rejects one the client has not been
+// granted, and CILogon in particular moved from ignoring an unapproved
+// scope to refusing the whole authorization -- which, for a request
+// this server composed rather than the operator, would mean a config
+// nobody edited started refusing every sign-in.
+//
+// So the refusal is recoverable rather than fatal. The first one
+// latches, the browser is sent back to where it was going, and the
+// sign-in it restarts asks without the scope. The operator is left with
+// a warning naming what happened and an access point that still works.
+//
+// That covers a refusal the provider REDIRECTS to this server's
+// callback, which is what a provider does when the client_id and
+// redirect_uri check out, and what CILogon does -- refusedScopeHint
+// reads such an error off the callback and predates this. It does not
+// cover a provider that answers the authorize request with a direct
+// 4xx instead: that reply goes to the browser and never reaches any
+// handler here, so the person sees the provider's error page and the
+// latch is never set. An operator whose provider behaves that way sets
+// HTTP_API_UPSTREAM_REFRESH = off.
+
+// upstreamAuthScopes is what to ask the provider for on this sign-in:
+// the configured scopes, less offline_access once the provider has
+// refused it.
+func (s *Handler) upstreamAuthScopes() []string {
+	scopes := s.oauth2Config.Scopes
+	if !s.offlineAccessOptIn || !s.offlineAccessRefused.Load() {
+		return scopes
+	}
+	out := make([]string, 0, len(scopes))
+	for _, sc := range scopes {
+		if sc != "offline_access" {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
+// authCodeURL builds the provider's authorization URL for state, asking
+// for upstreamAuthScopes rather than whatever was frozen into
+// oauth2Config at startup.
+//
+// Every browser sign-in goes through here, so the latch takes effect on
+// the next redirect rather than at the next restart.
+func (s *Handler) authCodeURL(state string) string {
+	scopes := s.upstreamAuthScopes()
+	if len(scopes) == len(s.oauth2Config.Scopes) {
+		return s.oauth2Config.AuthCodeURL(state)
+	}
+	return s.oauth2Config.AuthCodeURL(state,
+		oauth2.SetAuthURLParam("scope", strings.Join(scopes, " ")))
+}
+
+// dropOfflineAccessAndRetry handles an authorization the provider
+// refused over a scope this server added by itself.
+//
+// Reports whether it took the request over. When it did, the response
+// is already written: the browser is on its way back to where it was
+// headed, which restarts the sign-in with the narrower scope rather
+// than showing somebody an error for a decision they did not make.
+//
+// It can only fire once. The latch it sets removes offline_access from
+// the next request, so a second refusal is no longer one this server
+// caused and falls through to the ordinary error page.
+func (s *Handler) dropOfflineAccessAndRetry(w http.ResponseWriter, r *http.Request, errorParam, errorDesc, state string) bool {
+	if errorParam != "invalid_scope" || !s.offlineAccessOptIn {
+		return false
+	}
+	if !refusalCouldBeOfflineAccess(errorDesc, s.upstreamAuthScopes()) {
+		return false
+	}
+	if !s.offlineAccessRefused.CompareAndSwap(false, true) {
+		// Already latched, so this sign-in did not ask for it and the
+		// refusal is about something else.
+		return false
+	}
+
+	s.logger.Warn(logging.DestinationHTTP,
+		"The identity provider refused offline_access; retrying this sign-in without it",
+		"consequence", "group membership will not be re-checked between logins for this provider",
+		"hint", "approve offline_access for this client at the provider, "+
+			"or set HTTP_API_UPSTREAM_REFRESH = off to stop asking")
+
+	// Back to where the browser was going. The state entry is consumed
+	// either way: it named one authorization attempt and that attempt is
+	// over.
+	target := "/"
+	if state != "" {
+		if entry, ok := s.oauth2StateStore.Take(state); ok && entry != nil && isSafeLocalRedirect(entry.OriginalURL) {
+			target = entry.OriginalURL
+		}
+	}
+	http.Redirect(w, r, target, http.StatusFound)
+	return true
+}
+
+// refusalCouldBeOfflineAccess reports whether an invalid_scope refusal
+// might be about offline_access, and so might be fixed by asking
+// without it.
+//
+// Providers name the scope they would not give: CILogon's reads
+// `Unrecognized scope "profile"`. Where the name is one of the OTHER
+// scopes we asked for, dropping offline_access fixes nothing and costs
+// the operator the one message that would have told them what to fix --
+// the exact failure the invalid_scope hint exists to explain. So a
+// refusal that names somebody else is left alone.
+//
+// An unrecognizable description is treated as "might be": the retry
+// costs one redirect, and if it was something else the second refusal
+// lands on the error page with the description intact.
+func refusalCouldBeOfflineAccess(errorDesc string, requested []string) bool {
+	desc := strings.ToLower(errorDesc)
+	if strings.Contains(desc, "offline_access") {
+		return true
+	}
+	for _, sc := range requested {
+		if sc == "offline_access" {
+			continue
+		}
+		if sc != "" && strings.Contains(desc, strings.ToLower(sc)) {
+			// The provider named a different scope. Asking without
+			// offline_access would not change its mind.
+			return false
+		}
+	}
+	return true
+}
+
+// reportCallbackRefusal ends a sign-in the provider refused, either by
+// retrying it without a scope this server added or by showing the
+// person what the provider said.
+//
+// Split out of handleOAuth2Callback, which is long enough that one more
+// branch in it is one too many.
+func (s *Handler) reportCallbackRefusal(w http.ResponseWriter, r *http.Request, errorParam, state string) {
+	errorDesc := r.URL.Query().Get("error_description")
+	s.logger.Error(logging.DestinationHTTP, "OAuth2 callback error from IDP",
+		"error", errorParam, "error_description", errorDesc)
+
+	// A refusal over a scope this server added by itself is ours to
+	// undo, not the operator's to debug.
+	if s.dropOfflineAccessAndRetry(w, r, errorParam, errorDesc, state) {
+		return
+	}
+
+	// The identity provider's own words, not ours: saying only that
+	// sign-in failed would hide the one detail that explains it, and
+	// an administrator is usually the person hitting this.
+	detail := errorDesc
+	if detail == "" {
+		detail = errorParam
+	}
+	if hint := refusedScopeHint(errorParam, s.upstreamAuthScopes()); hint != "" {
+		detail += " " + hint
+	}
+	s.signInFailed(w, http.StatusUnauthorized,
+		"The identity provider refused this sign-in.", detail)
 }

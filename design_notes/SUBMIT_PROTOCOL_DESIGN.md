@@ -22,7 +22,8 @@ Defines the `QmgmtConnection` type and methods for interacting with a schedd's q
 - `NewCluster()`: Allocates a new cluster ID
 - `NewProc()`: Allocates a new proc ID within a cluster
 - `SetAttribute()`: Sets an attribute on a job or cluster
-- `SendJobAttributes()`: Sends all attributes from a ClassAd to the schedd
+- `SendClusterAttributes()`: Sends an ad to the cluster's own ad, at proc id -1
+- `SendProcAttributes()`: Sends an ad to one proc, omitting what the cluster ad already holds
 
 **Protocol Constants:**
 ```go
@@ -272,7 +273,16 @@ if err != nil {
     log.Fatal(err)
 }
 
-if err := qmgmt.SendJobAttributes(ctx, clusterID, procID, jobAd); err != nil {
+// The first proc's ad is what becomes the cluster ad: send it in full at
+// proc id -1, then send the proc ad deduplicated against it, which leaves
+// proc 0 with nothing but ProcId and JobStatus. Later procs pass the same
+// cluster ad and so carry only what differs from it.
+if err := qmgmt.SendClusterAttributes(ctx, clusterID, jobAd); err != nil {
+    qmgmt.AbortTransaction(ctx)
+    log.Fatal(err)
+}
+
+if err := qmgmt.SendProcAttributes(ctx, clusterID, procID, jobAd, jobAd); err != nil {
     qmgmt.AbortTransaction(ctx)
     log.Fatal(err)
 }

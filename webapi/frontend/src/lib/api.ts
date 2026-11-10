@@ -4,16 +4,41 @@
 // the SPA; bearer tokens for programmatic use). All fetches include
 // credentials so the session cookie is sent with every request.
 
+import type { DrainEstimates } from "./drain";
 import type { MetricsResponse } from "./metrics";
+import type { BatchJobSort, BatchJobsResponse, BatchResponse } from "./batchPage";
+import type { SimilarJobsResponse, UtilizationForJob } from "./similar";
+import type {
+  UtilApplyRequest,
+  UtilApplyResponse,
+  UtilJobSort,
+  UtilJobsResponse,
+  UtilizationResponse,
+  UtilWorkflowDetail,
+  UtilizationResponseWire,
+} from "./utilization";
+import { normalizeUtilization } from "./utilization";
 
 const BASE = "/api/v1";
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  // Multi-AP mode: a 409 for a job id that exists on several access
+  // points lists them.
+  candidates?: JobCandidate[];
+  constructor(status: number, message: string, candidates?: JobCandidate[]) {
     super(message);
     this.status = status;
+    this.candidates = candidates;
   }
+}
+
+export interface JobCandidate {
+  schedd: string;
+  cluster: number;
+  proc: number;
+  job_id: string;
+  archived: boolean;
 }
 
 // fetchTextWithCap streams a text/plain endpoint and stops after `cap`
@@ -103,7 +128,11 @@ async function fetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
     // text and finally to the HTTP status line so the user always sees
     // *something* more specific than "500".
     const detail = body.message || body.error || res.statusText;
-    throw new ApiError(res.status, detail);
+    throw new ApiError(
+      res.status,
+      detail,
+      Array.isArray(body.candidates) ? body.candidates : undefined,
+    );
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -128,6 +157,68 @@ export interface Session {
   // explanation when that is not the operator themselves.
   superuser_identity?: string;
   superuser_note?: string;
+  // While armed: "global" (HTTP_API_SUPERUSER_GROUP) or "project" (a
+  // project lead), and for a project lead the projects actions may reach.
+  superuser_scope?: 'global' | 'project';
+  superuser_projects?: string[];
+  // Projects this session leads, armed or not. A lead may list their
+  // projects' jobs with the Everyone scope, as an admin may list all jobs.
+  project_lead_of?: string[];
+  // This server fronts several access points (schedds): job rows carry
+  // `schedd` and `job_id`.
+  multi_ap?: boolean;
+  // Multi-AP mode: where this session's new work goes.
+  assignment?: APAssignment;
+  // A session with no local account, which reaches only the placement
+  // pages.
+  placement_only?: boolean;
+  // This server runs the reservation subsystem, so the admin page for
+  // it is offered. Advisory: the endpoints refuse regardless when off.
+  reservations?: boolean;
+  // The site withholds who is running on a slot from this session.
+  // Advisory: it decides what the pool pages ask for and what they say,
+  // while the server enforces the rule on every collector read.
+  pool_identity_restricted?: boolean;
+  // The session's placement identity, when this server issues placement
+  // tokens.
+  placement?: PlacementSessionIdentity;
+}
+
+export interface PlacementSessionIdentity {
+  identity: string;
+  display_name?: string;
+  // Set when the session signed in as the account the placementd assigned
+  // to this identity: the account, the permissions on jobs it holds, its
+  // projects, and the one its work is charged to.
+  account?: string;
+  levels?: string[];
+  projects?: string[];
+  project?: string;
+}
+
+// APAssignment is where a caller's new work goes in multi-AP mode: the
+// home access point and the alternates they may name, or why there is
+// none.
+export interface APAssignment {
+  schedd?: string;
+  alternates?: string[];
+  source?: string;
+  stale?: boolean;
+  error?: string;
+  reason?: string;
+}
+
+// scheddQuery is the ?schedd= naming the access point a new piece of
+// work goes to, in multi-AP mode; empty for the default.
+export function scheddQuery(schedd?: string): string {
+  return schedd ? `?schedd=${encodeURIComponent(schedd)}` : '';
+}
+
+// submitTargets lists the access points a caller may submit to, home
+// first; empty when there is no assignment.
+export function submitTargets(a?: APAssignment): string[] {
+  if (!a?.schedd) return [];
+  return [a.schedd, ...(a.alternates ?? [])];
 }
 
 export interface SuperuserModeState {
@@ -141,6 +232,8 @@ export interface SuperuserModeState {
   actor_is_queue_superuser?: boolean;
   // Explains a fallback and how to fix it. Empty when acting as yourself.
   note?: string;
+  scope?: 'global' | 'project';
+  projects?: string[];
 }
 
 export interface RecentJob {
@@ -235,6 +328,56 @@ export interface DashboardStats {
 export interface DashboardActivityResponse {
   activity: DashboardActivity;
   goodput?: GoodputSummary;
+}
+
+/** One day of this access point's work.
+ *
+ *  A day with nothing in it is still sent, with zeros. That is what lets
+ *  the calendar show "nothing happened on the 9th" as a different thing
+ *  from "nobody could tell us about the 9th" -- a missing day is a gap,
+ *  and the two must not look alike. */
+export interface CalendarDay {
+  /** Midnight UTC, unix seconds. Ascending. */
+  day: number;
+  submitted: number;
+  completed: number;
+  removed: number;
+  /** How deep the queue was. Usually not a count -- see
+   *  CalendarQueueDepth. */
+  in_queue: number;
+}
+
+/** Where the per-day queue depth came from.
+ *
+ *  `derived` means the depth was worked back from today's real count by
+ *  walking the daily flows: every step backwards carries whatever the
+ *  flows missed, so the further back a figure is, the less it is worth.
+ *  `anchor` is that real count -- the one figure in the series that was
+ *  counted rather than worked out. */
+export interface CalendarQueueDepth {
+  derived: boolean;
+  anchor: number;
+}
+
+/** Per-day job activity over a long window.
+ *
+ *  `enabled: false` means this deployment keeps no history to count. The
+ *  panel then renders nothing at all: an empty calendar that never fills
+ *  reads as broken rather than absent. */
+export interface CalendarResponse {
+  enabled: boolean;
+  /** Absent when disabled. One entry per day in the window, ascending,
+   *  including the days nothing happened. */
+  days?: CalendarDay[];
+  window_days?: number;
+  queue_depth?: CalendarQueueDepth;
+  /** What answered, and when. */
+  source?: string;
+  computed_at?: number;
+  /** True when part of the window could not be counted; `note` says
+   *  what is missing. */
+  partial?: boolean;
+  note?: string;
 }
 
 // --- htcondordb mirror ---
@@ -336,9 +479,9 @@ export interface DBMirrorStatus {
 
 // --- Placement (condor_placementd) ---
 //
-// The placementd issues IDTokens to "foreign" identities -- users who
+// The placementd issues IDTokens to sign-in identities -- users who
 // authenticate somewhere else (a campus IdP, a course roster) and need a
-// credential for THIS access point. Its map file decides which foreign
+// credential for THIS access point. Its map file decides which sign-in
 // identity becomes which local AP account, which authorizations that
 // account may hold, and which projects it may charge to.
 //
@@ -352,9 +495,12 @@ export interface PlacementStatus {
   available: boolean;
   address?: string;
   reason?: string;
+  // The daemon's PlacementdApiVersion; 2+ serves the directory endpoints
+  // (lib/placementAdmin.ts).
+  api_version?: number;
 }
 
-// PlacementUser is a foreign identity, merged with its newest live token.
+// PlacementUser is a sign-in identity, merged with its newest live token.
 // `authorized: false` means the identity dropped out of the map file but
 // still holds an unexpired token: it keeps working until it expires, and
 // cannot be renewed.
@@ -391,6 +537,90 @@ export interface PlacementAuthorization {
   label?: string;
   color?: string;
   description?: string;
+}
+
+// PlacementMe is what the placementd says about the signed-in person.
+export interface PlacementMe {
+  identity: string;
+  display_name?: string;
+  authorized: boolean;
+  expired: boolean;
+  mapping_expiration?: string;
+  account?: string;
+  authorizations: PlacementAuthorization[];
+  projects: { name: string; default: boolean; enabled: boolean }[];
+  account_enabled: boolean;
+  records_available: boolean;
+}
+
+// PlacementAccessRequestStatus is where an access request stands.
+export type PlacementAccessRequestStatus = 'pending' | 'approved' | 'denied' | 'withdrawn';
+
+// PlacementMyRequest is the signed-in person's access request, as they see
+// it.
+export interface PlacementMyRequest {
+  id: number;
+  status: PlacementAccessRequestStatus;
+  projects: string[];
+  note?: string;
+  created_at: string;
+  updated_at: string;
+  decided_at?: string;
+  // The administrator's reason, on a denial.
+  reason?: string;
+  // The account access was granted as, on an approval.
+  account?: string;
+}
+
+// PlacementMyRequestState is the signed-in person's latest access request,
+// with what a new one would record about them.
+export interface PlacementMyRequestState {
+  identity: string;
+  display_name?: string;
+  email?: string;
+  request: PlacementMyRequest | null;
+}
+
+// PlacementIssued is a token issued to the signed-in person. `token` is
+// absent when it went to a device request instead.
+export interface PlacementIssued {
+  token?: string;
+  ap_user_id?: string;
+  issued_at?: string;
+  expires_at?: string;
+  project: string;
+  authorizations: string[];
+  user_config?: string;
+  device?: PlacementDeviceRequest;
+}
+
+// PlacementDeviceRequest is a pending device-flow request, as the
+// confirmation page shows it.
+export interface PlacementDeviceRequest {
+  user_code: string;
+  client_id: string;
+  client_name: string;
+  state: 'pending' | 'approved' | 'denied' | 'expired';
+  expires_at: string;
+}
+
+// PlacementRecord is the schedd's user or project record for a name the
+// placementd hands out.
+export interface PlacementRecord {
+  kind: 'account' | 'project';
+  name: string;
+  found: boolean;
+  enabled: boolean;
+  disable_reason?: string;
+  stats?: Record<string, number>;
+  members?: string[];
+}
+
+export interface PlacementProjectSummary {
+  name: string;
+  found: boolean;
+  enabled: boolean;
+  members: number;
 }
 
 // HTCondor returns ClassAds as JSON objects with arbitrary attributes.
@@ -433,6 +663,68 @@ export interface JobListResponse {
   source_note?: string;
   // A partial-result error; the ads before it are still valid.
   error?: string;
+  // Multi-AP mode only: which access points' data is not current.
+  sources?: Sources;
+}
+
+// Sources is the freshness of each access point behind a multi-AP read.
+// `degraded` lists every access point whose rows are not known to be
+// current: included as the hub holds them, or left out, by server policy.
+export interface Sources {
+  aps: number;
+  fresh: number;
+  degraded: DegradedSource[];
+  // Access points that keep no copy of a table the read used (a spoke
+  // without job_metrics or epoch history): no rows, and not a fault.
+  not_kept?: { schedd: string; table: string; reason?: string }[];
+}
+
+export interface DegradedSource {
+  schedd: string;
+  state: string; // stale | absent | untrusted | retiring
+  staleness_seconds?: number;
+  last_seen?: string;
+  reason?: string;
+}
+
+// One access point, as GET /api/v1/aps reports it.
+export interface AccessPoint {
+  schedd: string;
+  in_collector: boolean;
+  address?: string;
+  first_seen?: string;
+  last_seen?: string;
+  hub: {
+    state: string;
+    reason?: string;
+    staleness_seconds?: number;
+    last_seen?: string;
+    last_reset?: string;
+  };
+  // Whether the caller may submit here (home or alternate), and which is
+  // home.
+  submit?: boolean;
+  home?: boolean;
+}
+
+export interface AccessPointsResponse {
+  constraint: string;
+  aps: AccessPoint[];
+  assignment?: APAssignment;
+  sources: Sources;
+  registry?: { last_success?: string; last_error?: string };
+  hub: { reachable: boolean; last_success?: string; last_error?: string };
+}
+
+// In multi-AP mode every job row names its job completely: `schedd`,
+// `cluster`, `proc`, and `job_id` -- the text form to put in a URL.
+// Single-AP rows carry none of these.
+export function jobIdOf(ad: ClassAd): string | undefined {
+  return typeof ad.job_id === 'string' && ad.job_id !== '' ? ad.job_id : undefined;
+}
+
+export function scheddOf(ad: ClassAd): string | undefined {
+  return typeof ad.schedd === 'string' && ad.schedd !== '' ? ad.schedd : undefined;
 }
 
 // HistoryListResponse mirrors the Go HistoryListResponse struct in
@@ -440,6 +732,14 @@ export interface JobListResponse {
 // variant of /api/v1/jobs/archive returns this shape.
 export interface HistoryListResponse {
   ads: ClassAd[];
+  // Set when the schedd stopped at its scan limit before finding as many
+  // records as asked for: older matches were not searched.
+  scan_limit_reached?: boolean;
+  records_scanned?: number;
+  // Multi-AP mode pages history with a token instead of before_cluster.
+  has_more?: boolean;
+  next_page_token?: string;
+  sources?: Sources;
 }
 
 export interface VersionInfo {
@@ -453,7 +753,16 @@ export interface VersionInfo {
 
 export interface SubmitResponse {
   cluster_id: number;
+  // Complete ids ("1.0@ap2.example.org") in multi-AP mode.
   job_ids: string[];
+  // Multi-AP mode: the access point the jobs went to.
+  schedd?: string;
+  // Diagnostics about the submit file: things that submitted fine but
+  // almost certainly do not do what the submitter meant, most often
+  // output the job is about to throw away. Advisory, not errors -- the
+  // jobs are already queued -- so they ride back on the success
+  // response. Absent from servers that predate them.
+  warnings?: string[];
 }
 
 export interface ShareOutputResponse {
@@ -542,6 +851,8 @@ export interface JupyterCreateResponse {
   instance_id: string;
   cluster_id: string;
   proxy_path: string;
+  // The access point the session was placed on (multi-AP mode).
+  schedd?: string;
 }
 
 // JupyterInstanceSummary mirrors the Go-side struct in handlers_jupyter.go.
@@ -554,10 +865,17 @@ export interface JupyterCreateResponse {
 export interface JupyterInstanceSummary {
   instance_id: string;
   cluster_id?: string;
+  // The job as /jobs/[id] names it: cluster.0, or the complete id in
+  // multi-AP mode.
+  job_id?: string;
+  // The access point the session's job is on (multi-AP mode).
+  schedd?: string;
   image?: string;
   owner: string;
   created_at: string;
   connected: boolean;
+  // The helper was connected and its tunnel dropped; it is expected back.
+  reconnecting?: boolean;
   proxy_path: string;
   events_path: string;
   job_status?: number;
@@ -576,9 +894,12 @@ export interface JupyterInstanceSummary {
 // also look like a failure. `url` is only ever set when there is
 // genuinely something to open.
 export interface AppSummary {
+  // In multi-AP mode "<id>@<access point>".
   id: string;
   type: string;
   job_id: string;
+  // The access point the app is on (multi-AP mode).
+  schedd?: string;
   owner?: string;
   // waiting | starting | running | held | ended
   state: string;
@@ -638,6 +959,9 @@ export interface SSHConsentView {
   session_exists: boolean;
   can_create: boolean;
   job_id?: string;
+  // Multi-AP mode: the access point the existing session is on, or the
+  // one a new session would start on.
+  schedd?: string;
   status?: string;
   hold_reason?: string;
   hold_reason_code?: number;
@@ -664,6 +988,7 @@ export interface SSHConsentResult {
   approved: boolean;
   session?: string;
   job_id?: string;
+  schedd?: string;
   created: boolean;
 }
 
@@ -671,8 +996,9 @@ export interface InteractiveTerminalCreateResponse {
   instance_id: string;
   cluster_id: number;
   proc_id: number;
-  job_id: string; // "cluster.proc"
+  job_id: string; // "cluster.proc", the complete id in multi-AP mode
   batch_name: string;
+  schedd?: string;
 }
 
 // InteractiveTerminalSummary mirrors the Go-side struct returned by
@@ -683,6 +1009,8 @@ export interface InteractiveTerminalCreateResponse {
 export interface InteractiveTerminalSummary {
   instance_id: string;
   job_id: string;
+  // The access point the job is on (multi-AP mode).
+  schedd?: string;
   cluster_id: number;
   proc_id: number;
   batch_name: string;
@@ -889,6 +1217,84 @@ export interface DagGraphResponse {
   took_ms?: number;
 }
 
+// RuntimeEstimate is the JSON returned by
+// GET /api/v1/jobs/{id}/runtime-estimate: how long the job is likely to
+// run, from its owner's similar finished jobs. Mirrors runtimeest.Result
+// plus the job id; renames on the Go side must update this in lockstep.
+// The numbers are present only when available is true.
+export interface RuntimeEstimate {
+  job_id: string;
+  available: boolean;
+  reason?: "disabled" | "model_warming_up" | "insufficient_history" | "not_estimated";
+  estimate_seconds?: number;
+  p10_seconds?: number;
+  p90_seconds?: number;
+  // new_command: none of the owner's recently finished jobs ran the same
+  // program.
+  basis?: { level: RuntimeEstimateLevel; sample_count: number; new_command?: boolean };
+  // A broad group answered (cmd, owner or global): show it as a rough
+  // guess, not an expectation.
+  rough?: boolean;
+  // Only while the job runs; remaining_seconds is also absent once the
+  // job has run longer than its comparable jobs (exceeded_history).
+  elapsed_seconds?: number;
+  remaining_seconds?: number;
+  exceeded_history: boolean;
+  // What the same group's runs peaked at; absent when none has a known
+  // peak.
+  memory?: RuntimeMemory;
+  model: { trained_through?: string; jobs_ingested: number };
+}
+
+// RuntimeMemory mirrors runtimeest.MemoryEstimate: the peak memory of the
+// runs an estimate's group holds, in MiB, over those with a known peak.
+export interface RuntimeMemory {
+  sample_count: number;
+  p10_mib: number;
+  p25_mib: number;
+  p50_mib: number;
+  p75_mib: number;
+  p90_mib: number;
+  // The job's own peak so far; for a finished job, its peak.
+  peak_mib?: number;
+  // The job's RequestMemory, and how many of the group's runs peaked
+  // above it.
+  requested_mib?: number;
+  above_requested?: number;
+  rough: boolean;
+  // A running job already well past what nearly every run of a specific
+  // group peaked at.
+  above_usual: boolean;
+}
+
+// JobRuntimeEstimate is one job's entry in RuntimeEstimates: the
+// single-job answer without the job id and model.
+export type JobRuntimeEstimate = Omit<RuntimeEstimate, "job_id" | "model">;
+
+// RuntimeEstimates is the JSON returned by
+// POST /api/v1/jobs/runtime-estimates. estimates holds only the jobs the
+// caller may read that are waiting or running; any other id is absent.
+export interface RuntimeEstimates {
+  available: boolean;
+  reason?: "disabled" | "model_warming_up";
+  estimates?: Record<string, JobRuntimeEstimate>;
+  model?: { trained_through?: string; jobs_ingested: number };
+}
+
+// The most ids one runtime-estimates request may carry.
+export const MAX_RUNTIME_ESTIMATE_IDS = 5000;
+
+// RuntimeEstimateLevel is which group of finished jobs an estimate came
+// from, most specific first.
+export type RuntimeEstimateLevel =
+  | "cluster"
+  | "exact"
+  | "template"
+  | "batch"
+  | "iwd"
+  | "cmd"
+  | "owner";
+
 // MatchAnalysisResponse is the JSON returned by
 // GET /api/v1/jobs/{id}/match-analysis. The Go side wraps the analyzer's
 // Result struct in an envelope that also surfaces the raw Requirements
@@ -1044,6 +1450,76 @@ export interface AdminLogsResponse {
   entries: LogEntry[] | null;
 }
 
+// One aggregate of counted calls: per tool or endpoint, per user, per
+// client, or (with no name) the totals.
+export interface UsageRow {
+  // The recorded value. This is what a filter matches on, so it goes
+  // back to the server unchanged.
+  name?: string;
+  // What to show instead of name, when the recorded value is an
+  // identifier a reader should not have to decode (an OAuth2 client
+  // id resolved to that client's name).
+  label?: string;
+  calls: number;
+  // Calls per outcome. The vocabulary differs by kind -- MCP has four
+  // outcomes, REST six -- and the summary says which ones to expect,
+  // so the columns come from the server rather than from this file.
+  outcomes: Record<string, number>;
+  // Distinct identities behind the row, not counting calls that carried
+  // none.
+  users: number;
+  clients: number;
+  avg_seconds: number;
+  // Upper boundary of the histogram bucket holding the 95th percentile.
+  // null with p95_over_seconds set means "longer than that"; both
+  // absent means no call carried a duration distribution.
+  p95_seconds: number | null;
+  p95_over_seconds?: number;
+  last_call: string | null;
+}
+
+// Which kind of call a usage query is about: MCP tool calls, or REST
+// API requests.
+export type UsageKind = "mcp" | "rest";
+
+export interface UsageFilter {
+  // The tool or endpoint, whichever this kind counts.
+  name?: string;
+  user?: string;
+  client?: string;
+}
+
+// One tab: a kind and whether this server is counting it.
+export interface AdminUsageKind {
+  kind: string;
+  label: string;
+  enabled: boolean;
+}
+
+export interface AdminUsageResponse {
+  enabled: boolean;
+  // Every kind this server knows about, present whether or not the
+  // requested one is enabled, so the tabs come from the server.
+  kinds?: AdminUsageKind[];
+  // The rest is present only when enabled.
+  kind?: string;
+  // The singular word for what `name` holds ("tool", "endpoint") and
+  // its capitalised form, for the column heading.
+  noun?: string;
+  title?: string;
+  // The outcome columns, left to right.
+  outcomes?: string[];
+  // Display names for the recorded client strings that have one.
+  client_labels?: Record<string, string>;
+  filter?: UsageFilter;
+  totals?: UsageRow;
+  by_name?: UsageRow[];
+  by_user?: UsageRow[];
+  by_client?: UsageRow[];
+  // Every name, user and client, unaffected by the filter.
+  options?: { names: string[]; users: string[]; clients: string[] };
+}
+
 export interface AdminCondorConfigEntry {
   key: string;
   // Empty string when redacted=true (server scrubbed an apparent secret).
@@ -1077,6 +1553,13 @@ export interface AdminAPIKey {
   expires_at?: string;
   deleted_at?: string;
   last_used_at?: string;
+  // A service key belongs to an automation rather than to the admin who
+  // minted it, and holds its entitlements for its whole life instead of
+  // having them re-checked on use.
+  service: boolean;
+  // When this key's entitlements were last confirmed. Absent on a key
+  // that carries none and on a service key, which is not re-checked.
+  entitlements_checked_at?: string;
 }
 
 // AdminAPIKeyCreateResponse carries the only-shown-once full key
@@ -1086,6 +1569,131 @@ export interface AdminAPIKey {
 export interface AdminAPIKeyCreateResponse {
   api_key: AdminAPIKey;
   key: string;
+  // A caveat about the key just minted, when there is one: shown
+  // alongside the key, since minting is the last moment anybody is
+  // looking at it.
+  note?: string;
+}
+
+// AdminReservation is a recurring hold of pool capacity for a project.
+//
+// The controller starts holding cores back `lead_seconds` before a window
+// opens, frees `seats` of them by the bell, keeps the unclaimed ones for
+// `hold_seconds`, and keeps `standing` seats between windows. A job takes
+// a seat by carrying `project` as its ProjectName; the seat's shape comes
+// from `submit`.
+//
+// Durations are seconds on the wire because the form has number inputs: a
+// client that has to parse "6h0m0s" to put 6 in a box will get it wrong
+// eventually. The page renders them as hours and minutes.
+// WireRecurrence is a structured recurrence: when a reservation's
+// windows begin, said the way a calendar says it rather than the way
+// cron does.
+//
+// It is a peer of the cron expression, not a layer over one. Nothing
+// converts between them in either direction, because a recurrence can
+// say things cron cannot -- every other week, the last Friday of the
+// month -- and a converter would round exactly those.
+export interface WireRecurrence {
+  freq: "daily" | "weekly" | "monthly";
+  // The "every N": days, weeks or months. Above one the server requires
+  // a start date, since "every other week" has no meaning until
+  // somebody says which week.
+  interval: number;
+  // Weekdays, 0 for Sunday through 6 for Saturday. Weekly needs it;
+  // monthly uses it as the weekday a set position counts.
+  by_weekday?: number[];
+  // Days of the month, 1 through 31. A day a month does not have is
+  // skipped, not moved to the end of it.
+  by_monthday?: number[];
+  // 1 through 5 for the first through fifth, -1 for the last, -2 for
+  // the next to last. 0 is unused.
+  by_setpos?: number;
+  // What a set position counts when it is not counting one weekday.
+  day_kind?: "" | "day" | "weekday" | "weekend";
+  // "HH:MM" on a 24-hour clock, read in the reservation's zone.
+  time_of_day: string;
+}
+
+// Which of a reservation's timings is authoritative. "cron" reads the
+// expression, "recurrence" the structure, "always" neither: capacity is
+// held continuously. An empty value is "cron", which is what every
+// reservation stored before the recurrence existed is.
+export type ScheduleKindWire = "cron" | "recurrence" | "always" | "";
+
+export interface AdminReservation {
+  id: string;
+  // Who the capacity is held for -- the teacher, not the students.
+  owner: string;
+  project: string;
+  submit: string;
+  seats: number;
+  standing: number;
+  duration_seconds: number;
+  lead_seconds: number;
+  hold_seconds: number;
+  schedule_kind: ScheduleKindWire;
+  // A five-field cron expression, read in `timezone`. Authoritative for
+  // `schedule_kind` "cron".
+  schedule: string;
+  // The structured recurrence, authoritative for `schedule_kind`
+  // "recurrence". Null for the kinds that do not use one, so the form
+  // can tell "no recurrence" from an empty one.
+  recurrence: WireRecurrence | null;
+  // An IANA zone name, or "Local" for the server's own.
+  timezone: string;
+  enabled: boolean;
+  // Bounds on a cron expression, which otherwise runs forever. RFC3339;
+  // "" for no bound either end.
+  //
+  // At most one of `ends_at` and `occurrences` may be set, and a count
+  // of occurrences needs a `starts_at` to count from -- there is no
+  // first window without one. The server refuses the rest.
+  starts_at: string;
+  ends_at: string;
+  // 0 for unlimited.
+  occurrences: number;
+}
+
+// AdminReservationWindow is one upcoming hold, as the preview shows it.
+// `plan_from` is when the controller starts steering other people's jobs
+// away, which is the part a cron expression hides.
+export interface AdminReservationHealth {
+  // False when nothing is probing the pool, which is not the same as
+  // healthy: nothing has been checked.
+  running: boolean;
+  healthy?: boolean;
+  outcome?: string;
+  machine?: string;
+  detail?: string;
+  checked_at?: string;
+  // Execute points seen recently whose START does not consult the
+  // reservation expression. Holding one has no effect.
+  unprovisioned?: string[];
+  // The configuration line those execute points are missing.
+  stanza?: string;
+}
+
+export interface AdminReservationWindow {
+  start: string;
+  end: string;
+  plan_from: string;
+  // How many scheduled starts this window covers: consecutive
+  // occurrences close enough together are held as one.
+  occurrences: number;
+}
+
+// AdminReservationWindows is what both previews answer with -- the saved
+// reservation's and the draft's.
+//
+// The kind comes back with the list because an empty list has two
+// meanings: an always-on reservation has no windows because it never
+// stops holding, and a finished one has none because it is over. A
+// preview that could not tell them apart would show "nothing upcoming"
+// for a reservation holding capacity right now.
+export interface AdminReservationWindows {
+  windows: AdminReservationWindow[];
+  schedule_kind?: ScheduleKindWire;
 }
 
 // --- Client ---
@@ -1113,6 +1721,9 @@ export const api = {
     granularity?: number;
     include_ended?: boolean;
     owned_by_me?: boolean;
+    // A ClassAd expression over job attributes; only matching jobs'
+    // problems are counted. The server scopes it to the caller's jobs.
+    constraint?: string;
   }): Promise<IssuesResponse> => {
     const qs = new URLSearchParams();
     if (params?.window_seconds !== undefined)
@@ -1123,6 +1734,7 @@ export const api = {
       qs.set("include_ended", String(params.include_ended));
     if (params?.owned_by_me !== undefined)
       qs.set("owned_by_me", String(params.owned_by_me));
+    if (params?.constraint) qs.set("constraint", params.constraint);
     const q = qs.toString();
     return fetchJSON(`${BASE}/issues${q ? "?" + q : ""}`);
   },
@@ -1152,7 +1764,140 @@ export const api = {
     return fetchJSON(`${BASE}/dashboard/activity${q ? "?" + q : ""}`);
   },
 
+  // Per-day counts over a long window, for the dashboard's calendar.
+  // Separate from the activity half because it is answered from the
+  // history mirror over months rather than from the queue over an hour,
+  // and it changes about once a day.
+  calendar: (params: {
+    days: number;
+    owned_by_me?: boolean;
+  }): Promise<CalendarResponse> => {
+    const qs = new URLSearchParams();
+    qs.set("days", String(params.days));
+    if (params.owned_by_me !== undefined) {
+      qs.set("owned_by_me", String(params.owned_by_me));
+    }
+    return fetchJSON(`${BASE}/calendar?${qs.toString()}`);
+  },
+
+  // How well finished jobs used what they reserved, per workflow, with
+  // suggestions for the next submission. See lib/utilization.ts.
+  utilization: (params: {
+    days: number;
+    owned_by_me?: boolean;
+    schedd?: string;
+    // A ClassAd expression ANDed with the scope and the window.
+    constraint?: string;
+    // Narrow a pool-wide answer to these users.
+    owners?: string[];
+    // How many finished jobs to analyze; the server clamps to its ceiling.
+    limit?: number;
+  }): Promise<UtilizationResponse> => {
+    const qs = new URLSearchParams();
+    qs.set("days", String(params.days));
+    if (params.owned_by_me !== undefined)
+      qs.set("owned_by_me", String(params.owned_by_me));
+    if (params.schedd) qs.set("schedd", params.schedd);
+    if (params.constraint) qs.set("constraint", params.constraint);
+    if (params.owners && params.owners.length > 0)
+      qs.set("owners", params.owners.join(","));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    return fetchJSON<UtilizationResponseWire>(`${BASE}/utilization?${qs.toString()}`).then(
+      normalizeUtilization,
+    );
+  },
+
+  // One workflow in full -- histograms, advice text, throughput -- from
+  // the same analysis as the list, which carries only summaries.
+  utilizationWorkflow: (params: {
+    w: string;
+    days: number;
+    owned_by_me?: boolean;
+    schedd?: string;
+    constraint?: string;
+    owners?: string[];
+    limit?: number;
+  }): Promise<UtilWorkflowDetail> => {
+    const qs = new URLSearchParams();
+    qs.set("w", params.w);
+    qs.set("days", String(params.days));
+    if (params.owned_by_me !== undefined)
+      qs.set("owned_by_me", String(params.owned_by_me));
+    if (params.schedd) qs.set("schedd", params.schedd);
+    if (params.constraint) qs.set("constraint", params.constraint);
+    if (params.owners && params.owners.length > 0)
+      qs.set("owners", params.owners.join(","));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    return fetchJSON(`${BASE}/utilization/workflow?${qs.toString()}`);
+  },
+
+  // Apply a workflow's request-changing advice to its waiting jobs. The
+  // body names advice by id; the server writes its own values.
+  utilizationApply: (body: UtilApplyRequest): Promise<UtilApplyResponse> =>
+    fetchJSON(`${BASE}/utilization/apply`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  // One workflow's jobs, paged, from the same analysed set: pass the
+  // parameters the analysis used.
+  utilizationJobs: (params: {
+    w: string;
+    days: number;
+    owned_by_me?: boolean;
+    schedd?: string;
+    constraint?: string;
+    owners?: string[];
+    limit?: number;
+    sort?: UtilJobSort;
+    order?: "asc" | "desc";
+    offset?: number;
+    page_size?: number;
+  }): Promise<UtilJobsResponse> => {
+    const qs = new URLSearchParams();
+    qs.set("w", params.w);
+    qs.set("days", String(params.days));
+    if (params.owned_by_me !== undefined)
+      qs.set("owned_by_me", String(params.owned_by_me));
+    if (params.schedd) qs.set("schedd", params.schedd);
+    if (params.constraint) qs.set("constraint", params.constraint);
+    if (params.owners && params.owners.length > 0)
+      qs.set("owners", params.owners.join(","));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params.sort) qs.set("sort", params.sort);
+    if (params.order) qs.set("order", params.order);
+    if (params.offset) qs.set("offset", String(params.offset));
+    if (params.page_size) qs.set("page_size", String(params.page_size));
+    return fetchJSON(`${BASE}/utilization/jobs?${qs.toString()}`);
+  },
+
+  // One batch or DAG for /batches/<id>; any ClusterId of the batch
+  // resolves, and the answer's id is the canonical one.
+  batches: {
+    get: (id: number | string): Promise<BatchResponse> =>
+      fetchJSON(`${BASE}/batches/${encodeURIComponent(String(id))}`),
+    jobs: (
+      id: number | string,
+      params: { status?: string[]; sort?: BatchJobSort; order?: "asc" | "desc"; offset?: number; page_size?: number } = {},
+    ): Promise<BatchJobsResponse> => {
+      const qs = new URLSearchParams();
+      if (params.status && params.status.length) qs.set("status", params.status.join(","));
+      if (params.sort) qs.set("sort", params.sort);
+      if (params.order) qs.set("order", params.order);
+      if (params.offset) qs.set("offset", String(params.offset));
+      if (params.page_size) qs.set("page_size", String(params.page_size));
+      const q = qs.toString();
+      return fetchJSON(`${BASE}/batches/${encodeURIComponent(String(id))}/jobs${q ? "?" + q : ""}`);
+    },
+  },
+
   version: (): Promise<VersionInfo> => fetchJSON(`${BASE}/version`),
+
+  // Multi-AP mode: the access points this server fronts.
+  // kind asks where that kind of work would go ("interactive",
+  // "jupyter"); the assignment may differ by kind.
+  aps: (kind?: string): Promise<AccessPointsResponse> =>
+    fetchJSON(`${BASE}/aps${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`),
 
   // The SSH gateway's certificate authority and certificate issuer.
   //
@@ -1187,10 +1932,15 @@ export const api = {
         agg: string;
         since?: number;
         until?: number;
+        // Multi-AP mode: one job, by its complete job_id; one access point.
+        job_id?: string;
+        schedd?: string;
       },
     ): Promise<MetricsResponse> => {
       const qs = new URLSearchParams();
       if (params.constraint) qs.set("constraint", params.constraint);
+      if (params.job_id) qs.set("job_id", params.job_id);
+      if (params.schedd) qs.set("schedd", params.schedd);
       if (params.group_by) qs.set("group_by", params.group_by);
       if (params.bucket !== undefined) qs.set("bucket", String(params.bucket));
       qs.set("agg", params.agg);
@@ -1210,12 +1960,15 @@ export const api = {
       projection?: string;
       page_token?: string;
       owned_by_me?: boolean;
+      // Multi-AP mode: one access point only.
+      schedd?: string;
     }): Promise<JobListResponse> => {
       const qs = new URLSearchParams();
       if (params?.constraint) qs.set("constraint", params.constraint);
       if (params?.limit !== undefined) qs.set("limit", String(params.limit));
       if (params?.projection) qs.set("projection", params.projection);
       if (params?.page_token) qs.set("page_token", params.page_token);
+      if (params?.schedd) qs.set("schedd", params.schedd);
       if (params?.owned_by_me !== undefined)
         qs.set("owned_by_me", String(params.owned_by_me));
       const query = qs.toString();
@@ -1278,6 +2031,10 @@ export const api = {
       // `limit` — bumping limit re-scans records you already have.
       before_cluster?: number;
       before_proc?: number;
+      // Multi-AP mode: the previous page's next_page_token, and one
+      // access point only.
+      page_token?: string;
+      schedd?: string;
     }): Promise<HistoryListResponse> => {
       const qs = new URLSearchParams();
       if (params?.constraint) qs.set("constraint", params.constraint);
@@ -1290,6 +2047,8 @@ export const api = {
         qs.set("before_cluster", String(params.before_cluster));
       if (params?.before_proc !== undefined)
         qs.set("before_proc", String(params.before_proc));
+      if (params?.page_token) qs.set("page_token", params.page_token);
+      if (params?.schedd) qs.set("schedd", params.schedd);
       qs.set("stream_results", "false");
       return fetchJSON(`${BASE}/jobs/archive?${qs.toString()}`);
     },
@@ -1306,6 +2065,19 @@ export const api = {
 
     // Remove every job matching a ClassAd constraint expression. Used by
     // the batch listing's "Remove batch" action with `ClusterId == N`.
+    // Hold or release every job a constraint selects, as one action (a
+    // batch's Hold and Release).
+    holdByConstraint: (constraint: string, reason?: string): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs/hold`, {
+        method: "POST",
+        body: JSON.stringify({ constraint, reason }),
+      }),
+    releaseByConstraint: (constraint: string, reason?: string): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs/release`, {
+        method: "POST",
+        body: JSON.stringify({ constraint, reason }),
+      }),
+
     removeByConstraint: (
       constraint: string,
       reason?: string,
@@ -1313,6 +2085,38 @@ export const api = {
       fetchJSON(`${BASE}/jobs`, {
         method: "DELETE",
         body: JSON.stringify({ constraint, reason }),
+      }),
+
+    // Retire one finished job from the queue into history.
+    //
+    // A job submitted through this interface is kept in the queue after
+    // it finishes, so its output can still be fetched. Clearing
+    // LeaveJobInQueue lets the schedd retire it, which writes it to
+    // history with the outcome it actually had. Removing it would also
+    // get it out of the queue, but records it as removed -- so a job
+    // that exited cleanly would be counted as a failure ever after.
+    //
+    // The value is a bare ClassAd expression string, which the server
+    // passes through verbatim (see encodeJobAttributeValue).
+    // Named retire, not archive: jobs.archive() above already means
+    // "list the archive". This is the UI's Archive action.
+    retire: (id: string): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ attributes: { LeaveJobInQueue: 'false' } }),
+      }),
+
+    // Retire every finished job matching a constraint. The caller
+    // narrows to finished jobs itself: a running job with
+    // LeaveJobInQueue cleared would vanish from the queue the moment it
+    // finished, before anyone could fetch its output.
+    retireByConstraint: (constraint: string): Promise<unknown> =>
+      fetchJSON(`${BASE}/jobs`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          constraint,
+          attributes: { LeaveJobInQueue: 'false' },
+        }),
       }),
 
     // Hold a single job. The Go side maps this to condor_hold for the
@@ -1372,8 +2176,10 @@ export const api = {
         body: JSON.stringify({ constraint, attributes }),
       }),
 
-    submit: (submitFile: string): Promise<SubmitResponse> =>
-      fetchJSON(`${BASE}/jobs`, {
+    // schedd names the access point in multi-AP mode (the home access
+    // point when omitted).
+    submit: (submitFile: string, schedd?: string): Promise<SubmitResponse> =>
+      fetchJSON(`${BASE}/jobs${schedd ? `?schedd=${encodeURIComponent(schedd)}` : ''}`, {
         method: "POST",
         body: JSON.stringify({ submit_file: submitFile }),
       }),
@@ -1502,6 +2308,36 @@ export const api = {
       );
     },
 
+    // How long the job is likely to run. Always 200 for a job the
+    // caller can see; available is false when there is no estimate.
+    runtimeEstimate: (id: string): Promise<RuntimeEstimate> =>
+      fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/runtime-estimate`),
+
+    // The finished jobs a runtime estimate draws on, one group (level) at
+    // a time, newest first; see lib/similar.ts.
+    similar: (
+      id: string,
+      params: { level?: RuntimeEstimateLevel; offset?: number; page_size?: number } = {},
+    ): Promise<SimilarJobsResponse> => {
+      const qs = new URLSearchParams();
+      if (params.level) qs.set("level", params.level);
+      if (params.offset) qs.set("offset", String(params.offset));
+      if (params.page_size) qs.set("page_size", String(params.page_size));
+      const q = qs.toString();
+      return fetchJSON(`${BASE}/jobs/${encodeURIComponent(id)}/similar${q ? "?" + q : ""}`);
+    },
+
+    // The Utilization workflow a job belongs to.
+    utilizationWorkflow: (id: string): Promise<UtilizationForJob> =>
+      fetchJSON(`${BASE}/utilization/for-job/${encodeURIComponent(id)}`),
+
+    // Many jobs' estimates in one request, for the listing.
+    runtimeEstimates: (ids: string[]): Promise<RuntimeEstimates> =>
+      fetchJSON(`${BASE}/jobs/runtime-estimates`, {
+        method: "POST",
+        body: JSON.stringify({ jobs: ids }),
+      }),
+
     // Mint a short-lived public URL to share with someone else.
     shareOutput: (
       id: string,
@@ -1527,8 +2363,10 @@ export const api = {
   },
 
   jupyter: {
-    create: (req: JupyterCreateRequest): Promise<JupyterCreateResponse> =>
-      fetchJSON(`${BASE}/jupyter/instances`, {
+    // schedd names the access point in multi-AP mode (default: the
+    // caller's assignment).
+    create: (req: JupyterCreateRequest, schedd?: string): Promise<JupyterCreateResponse> =>
+      fetchJSON(`${BASE}/jupyter/instances${scheddQuery(schedd)}`, {
         method: "POST",
         body: JSON.stringify(req),
       }),
@@ -1553,8 +2391,8 @@ export const api = {
     // POST /api/v1/apps — submits a job that runs a VS Code server on a
     // Unix socket in its sandbox. Returns immediately, before the job
     // has a slot: poll get() for the state.
-    create: (req: AppCreateRequest): Promise<AppSummary> =>
-      fetchJSON(`${BASE}/apps`, {
+    create: (req: AppCreateRequest, schedd?: string): Promise<AppSummary> =>
+      fetchJSON(`${BASE}/apps${scheddQuery(schedd)}`, {
         method: "POST",
         body: JSON.stringify(req),
       }),
@@ -1579,8 +2417,9 @@ export const api = {
     // keep the watchdog happy.
     createTerminal: (
       req: InteractiveTerminalCreateRequest,
+      schedd?: string,
     ): Promise<InteractiveTerminalCreateResponse> =>
-      fetchJSON(`${BASE}/interactive/terminal`, {
+      fetchJSON(`${BASE}/interactive/terminal${scheddQuery(schedd)}`, {
         method: "POST",
         body: JSON.stringify(req),
       }),
@@ -1704,6 +2543,17 @@ export const api = {
       }),
     logs: (limit?: number): Promise<AdminLogsResponse> =>
       fetchJSON(`${BASE}/admin/logs${limit ? `?limit=${limit}` : ""}`),
+    // Call statistics for one kind -- MCP tool calls or REST API
+    // requests -- optionally narrowed to one tool/endpoint, user
+    // and/or client. Aggregated server-side, including the filtered
+    // view.
+    usage: (kind: UsageKind, filter?: UsageFilter): Promise<AdminUsageResponse> => {
+      const qs = new URLSearchParams({ kind });
+      if (filter?.name) qs.set("name", filter.name);
+      if (filter?.user) qs.set("user", filter.user);
+      if (filter?.client) qs.set("client", filter.client);
+      return fetchJSON(`${BASE}/admin/usage?${qs.toString()}`);
+    },
     // Read the running HTCondor config (admin only). The backend
     // sorts keys case-insensitively and redacts password/secret/api-
     // key/etc.-named values with `redacted:true`. Filtering is
@@ -1723,6 +2573,7 @@ export const api = {
       name: string;
       scopes: string[];
       expires_at?: string;
+      service?: boolean;
     }): Promise<AdminAPIKeyCreateResponse> =>
       fetchJSON(`${BASE}/admin/api-keys`, {
         method: "POST",
@@ -1733,6 +2584,63 @@ export const api = {
       fetchJSON(`${BASE}/admin/api-keys/${encodeURIComponent(keyID)}`, {
         method: "DELETE",
       }),
+    // Reservations: recurring holds of pool capacity for a project.
+    // Admin-only, and 503 when the server has no application database.
+    listReservations: (): Promise<{ reservations: AdminReservation[] }> =>
+      fetchJSON(`${BASE}/admin/reservations`),
+    // Create or replace, keyed on `id`. The server validates eagerly --
+    // the cron expression, the zone, the submit file, standing against
+    // seats -- and answers 400 with a human-readable reason, which the
+    // form shows verbatim rather than inventing its own wording.
+    putReservation: (res: AdminReservation): Promise<AdminReservation> =>
+      fetchJSON(`${BASE}/admin/reservations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(res),
+      }),
+    deleteReservation: (id: string): Promise<void> =>
+      fetchJSON(`${BASE}/admin/reservations/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }),
+    // Whether this access point can still do what a reservation needs.
+    // The failure worth surfacing is losing the authorisation to update
+    // machine ads: nothing errors, no reservation complains, and every
+    // class starts on a pool that was never drained.
+    reservationHealth: (): Promise<AdminReservationHealth> =>
+      fetchJSON(`${BASE}/admin/reservations/health`),
+    // When the reservation next holds seats, over the coming `days`
+    // (default a fortnight). A cron expression is unreadable; this is
+    // what it means.
+    reservationWindows: (
+      id: string,
+      days?: number,
+    ): Promise<AdminReservationWindows> =>
+      fetchJSON(
+        `${BASE}/admin/reservations/${encodeURIComponent(id)}/windows${
+          days ? `?days=${days}` : ""
+        }`,
+      ),
+    // The same preview for a reservation that has not been saved yet.
+    //
+    // It takes the whole draft because the windows depend on more than
+    // the schedule: the duration decides where each one ends, the lead
+    // decides when draining would start, and the bounds decide which
+    // occurrences exist at all. The enumeration is the controller's
+    // own, which is the point -- a preview computed here would drift
+    // from what actually runs, and a preview that drifts is worse than
+    // no preview.
+    previewReservationWindows: (
+      res: AdminReservation,
+      days?: number,
+    ): Promise<AdminReservationWindows> =>
+      fetchJSON(
+        `${BASE}/admin/reservations/windows${days ? `?days=${days}` : ""}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(res),
+        },
+      ),
   },
 
   dbmirror: {
@@ -1787,6 +2695,16 @@ export const api = {
     },
   },
 
+  pool: {
+    // drainEstimates answers when each execute node would be empty if
+    // drained now; with a machine, for that node alone, with its jobs.
+    // 501 (ApiError) with no collector or in multi-AP mode.
+    drainEstimates: (machine?: string): Promise<DrainEstimates> =>
+      fetchJSON(
+        `${BASE}/pool/drain-estimates${machine ? `?machine=${encodeURIComponent(machine)}` : ""}`,
+      ),
+  },
+
   placement: {
     // Probe first: a pool with no placementd returns available=false
     // rather than an error, and the nav entry is hidden on that.
@@ -1829,6 +2747,65 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(req),
       }),
+
+    // The signed-in person's own placement identity and what they may
+    // request. Any session, including one with no local account.
+    me: (): Promise<PlacementMe> => fetchJSON(`${BASE}/placement/me`),
+    // A token for the signed-in person. With userCode, the token goes to
+    // that pending device request instead of coming back here.
+    requestToken: (req: {
+      project: string;
+      authorizations: string[];
+      user_code?: string;
+    }): Promise<PlacementIssued> =>
+      fetchJSON(`${BASE}/placement/me/token`, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        body: JSON.stringify(req),
+      }),
+    // The signed-in person's access request: theirs is the only one they
+    // can read, file or withdraw.
+    myRequest: (): Promise<PlacementMyRequestState> => fetchJSON(`${BASE}/placement/me/request`),
+    requestAccess: (req: { projects: string[]; note: string }): Promise<PlacementMyRequestState> =>
+      fetchJSON(`${BASE}/placement/me/request`, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        body: JSON.stringify(req),
+      }),
+    withdrawRequest: (): Promise<PlacementMyRequestState> =>
+      fetchJSON(`${BASE}/placement/me/request`, {
+        method: "DELETE",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      }),
+    // Choose the project a placement-assigned account's work is charged to.
+    setProject: (project: string): Promise<{ project: string }> =>
+      fetchJSON(`${BASE}/placement/me/project`, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        body: JSON.stringify({ project }),
+      }),
+    deviceRequest: (userCode: string): Promise<PlacementDeviceRequest> =>
+      fetchJSON(`${BASE}/placement/me/device/${encodeURIComponent(userCode)}`),
+    denyDevice: (userCode: string): Promise<{ status: string }> =>
+      fetchJSON(`${BASE}/placement/me/device/${encodeURIComponent(userCode)}/deny`, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      }),
+
+    // Admin: the schedd records behind placement accounts and projects.
+    record: (kind: 'accounts' | 'projects', name: string): Promise<PlacementRecord> =>
+      fetchJSON(`${BASE}/placement/records/${kind}/${encodeURIComponent(name)}`),
+    setSuspended: (
+      kind: 'accounts' | 'projects',
+      name: string,
+      suspended: boolean,
+    ): Promise<PlacementRecord> =>
+      fetchJSON(
+        `${BASE}/placement/records/${kind}/${encodeURIComponent(name)}/${suspended ? 'suspend' : 'unsuspend'}`,
+        { method: "POST" },
+      ),
+    projects: (): Promise<{ projects: PlacementProjectSummary[] }> =>
+      fetchJSON(`${BASE}/placement/records/projects`),
   },
 
   chat: {
@@ -1842,12 +2819,37 @@ export const api = {
         if (!r.ok) throw new ApiError(r.status, r.statusText);
         return r.json();
       }),
+    // Which jobs the assistant's tools cover for this caller on a page,
+    // as the server resolves the page's Mine/Everyone request: the same
+    // resolution every chat request gets. See ChatScope.
+    scope: (page: string, scope: ChatScopeRequest): Promise<ChatScope> =>
+      fetchJSON(
+        `${BASE}/chat/scope?${new URLSearchParams({ page, scope }).toString()}`,
+      ),
     // The streaming endpoint is consumed by the AI SDK's useChat
     // hook (see ChatPanel). We don't expose a typed wrapper here —
     // useChat handles the request shape and stream parsing.
     streamURL: `${BASE}/chat`,
   },
 };
+
+// ChatScopeRequest is what a page asks the assistant to cover: the
+// position of its Mine/Everyone toggle. It is a request; the server
+// decides (ChatScope).
+export type ChatScopeRequest = "mine" | "everyone";
+
+// ChatScope is the server's resolution of a page's ChatScopeRequest for
+// this caller (GET /api/v1/chat/scope).
+export interface ChatScope {
+  // What the page asked for.
+  requested: ChatScopeRequest;
+  // What the assistant's tools cover: the caller's own jobs, every
+  // user's, or (a project lead) their own plus their projects'.
+  scope: "mine" | "everyone" | "projects";
+  projects?: string[];
+  // Whether the assistant may act on other users' jobs.
+  act_on_others: boolean;
+}
 
 // --- Helpers ---
 
@@ -1972,6 +2974,11 @@ export interface IssuesResponse {
   computed_at: number;
   granularity: number;
   include_ended: boolean;
+  // Whose jobs these are as applied; a caller that may not see
+  // everyone's gets its own whatever it asked for.
+  owned_by_me?: boolean;
+  // The expression filter as applied, or absent.
+  constraint?: string;
   // How much time one slice of a cluster's timeline covers.
   bucket_seconds?: number;
   source?: string;

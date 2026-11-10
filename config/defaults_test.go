@@ -129,3 +129,20 @@ func TestSkipDefaultsHasNoOpinion(t *testing.T) {
 		t.Errorf("DefaultValue must report nothing when defaults were skipped")
 	}
 }
+
+// BuiltinDefault answers without a Config, the same as a fresh Config's
+// DefaultValue: the generated table, patched by paramOverrides, looked
+// up without regard to case.
+func TestBuiltinDefault(t *testing.T) {
+	cfg := NewEmpty()
+	for _, name := range []string{"JOB_DEFAULT_REQUESTDISK", "job_default_requestmemory", "SEC_DEFAULT_CRYPTO_METHODS", "MAX_JOBS_PER_OWNER"} {
+		got, ok := BuiltinDefault(name)
+		want, wantOK := cfg.DefaultValue(name)
+		if got != want || ok != wantOK || !ok {
+			t.Errorf("BuiltinDefault(%q) = %q, %v; DefaultValue = %q, %v", name, got, ok, want, wantOK)
+		}
+	}
+	if v, ok := BuiltinDefault("JOB_DEFAULT_REQUESTGPUS"); ok {
+		t.Errorf("JOB_DEFAULT_REQUESTGPUS has no built-in default, got %q", v)
+	}
+}

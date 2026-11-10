@@ -46,9 +46,23 @@ type reconfigTarget interface {
 	SetMCPSuperuserGroups(string)
 	SetWebUIAccessGroups(string)
 	SetWebUIAdminGroups(string)
+	SetWebUISiteName(string)
+	SetWebUISiteTagline(string)
+	SetWebUIFooterLogos(string)
+	SetWebUIBrandingDir(string)
+	SetWebUICustomCSS(string)
+	SetWebUIFavicon(string)
 	SetSuperuserGroups(string)
+	SetProjectLeadsFile(string)
+	SetProjectLeadsGroup(string)
 	SetMCPSkillsDir(string)
 	SetMCPDisabledTools(string)
+	SetMCPRedactSecrets(string)
+	SetMCPRedactDisabledRules(string)
+	SetChatInstructions(string)
+	// ReloadAPAssignment re-reads the access point assignment's files
+	// (the mapfile, the REST token) and drops cached answers.
+	ReloadAPAssignment()
 }
 
 // reconfigParams is the table described above. It is deliberately a list of
@@ -78,6 +92,26 @@ var reconfigParams = []reconfigParam{
 		name: "HTTP_API_MCP_DISABLED_TOOLS",
 		apply: func(s reconfigTarget, v string) {
 			s.SetMCPDisabledTools(v)
+		},
+	},
+
+	// Credential masking on MCP tool results. Both settings only decide
+	// which rules a result is run through, and the rule set is rebuilt on
+	// the reconfigure goroutine and swapped atomically, so a change takes
+	// effect on the next tool call. Dynamic for the same reason the
+	// disabled-tool list is: a site that discovers its output is leaking
+	// a credential, or that a rule is eating something it needs, should
+	// not have to restart the daemon to say so.
+	{
+		name: "HTTP_API_MCP_REDACT_SECRETS",
+		apply: func(s reconfigTarget, v string) {
+			s.SetMCPRedactSecrets(v)
+		},
+	},
+	{
+		name: "HTTP_API_MCP_REDACT_DISABLED_RULES",
+		apply: func(s reconfigTarget, v string) {
+			s.SetMCPRedactDisabledRules(v)
 		},
 	},
 
@@ -121,6 +155,15 @@ var reconfigParams = []reconfigParam{
 		name:  "HTTP_API_MCP_SKILLS_DIR",
 		apply: func(s reconfigTarget, v string) { s.SetMCPSkillsDir(v) },
 	},
+	// The web chat assistant's half of MCP_INSTRUCTIONS: the operator's
+	// own rules, handed to the model on every turn. Re-read on every
+	// reconfigure rather than only when the path changes, because the
+	// usual reason to reload is that the file's contents were edited --
+	// the same reasoning as HTTP_API_MCP_SKILLS_DIR above.
+	{
+		name:  "HTTP_API_LLM_OPERATOR_INSTRUCTIONS_FILE",
+		apply: func(s reconfigTarget, v string) { s.SetChatInstructions(v) },
+	},
 	{
 		name:  "HTTP_API_WEBUI_ACCESS_GROUP",
 		apply: func(s reconfigTarget, v string) { s.SetWebUIAccessGroups(v) },
@@ -129,11 +172,53 @@ var reconfigParams = []reconfigParam{
 		name:  "HTTP_API_WEBUI_ADMIN_GROUP",
 		apply: func(s reconfigTarget, v string) { s.SetWebUIAdminGroups(v) },
 	},
+
+	// Web UI branding. Read when a page is served and nothing built
+	// from any of it, so an operator trying their logos and colours out
+	// sees each attempt on the next page load rather than on the next
+	// restart. The file-valued ones are re-checked, so a path that was
+	// wrong at startup starts working here.
+	{
+		name:  "HTTP_API_WEBUI_SITE_NAME",
+		apply: func(s reconfigTarget, v string) { s.SetWebUISiteName(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_SITE_TAGLINE",
+		apply: func(s reconfigTarget, v string) { s.SetWebUISiteTagline(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_FOOTER_LOGOS",
+		apply: func(s reconfigTarget, v string) { s.SetWebUIFooterLogos(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_BRANDING_DIR",
+		apply: func(s reconfigTarget, v string) { s.SetWebUIBrandingDir(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_CUSTOM_CSS",
+		apply: func(s reconfigTarget, v string) { s.SetWebUICustomCSS(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_FAVICON",
+		apply: func(s reconfigTarget, v string) { s.SetWebUIFavicon(v) },
+	},
 	// Membership only: superuser mode is built at startup, so this cannot
 	// switch it on in a running daemon. Emptying it does switch it off.
 	{
 		name:  "HTTP_API_SUPERUSER_GROUP",
 		apply: func(s reconfigTarget, v string) { s.SetSuperuserGroups(v) },
+	},
+	// Project leads. Membership tests only, like the groups above, with
+	// the same limit: they cannot switch superuser mode on in a daemon
+	// that started without it. The file is also re-read unconditionally
+	// in reconfigure(), since editing it is the usual reason to send one.
+	{
+		name:  "HTTP_API_PROJECT_LEADS_FILE",
+		apply: func(s reconfigTarget, v string) { s.SetProjectLeadsFile(v) },
+	},
+	{
+		name:  "HTTP_API_PROJECT_LEADS_GROUP",
+		apply: func(s reconfigTarget, v string) { s.SetProjectLeadsGroup(v) },
 	},
 
 	// --- Restart required (read once at startup) ---
@@ -173,6 +258,15 @@ var reconfigParams = []reconfigParam{
 	// startup, so they need their setters before they can move up.
 	{name: "MCP_ADMIN_USERS"},
 
+	// API-key entitlement policy, read per request but off the Handler's
+	// own fields, which are set once at construction.
+	{name: "HTTP_API_API_KEY_ENTITLEMENT_TTL"},
+	{name: "HTTP_API_SERVICE_KEY_MAX_LIFETIME"},
+
+	// Pool query policy, compiled into the attribute allowlist at startup.
+	{name: "HTTP_API_POOL_QUERY_IDENTITY"},
+	{name: "HTTP_API_POOL_QUERY_EXTRA_ATTRS"},
+
 	// Submit-time policy, compiled into the submit policy at startup.
 	{name: "HTTP_API_SUBMIT_FILE_DEFAULTS"},
 	{name: "HTTP_API_SUBMIT_FILE_OVERRIDES"},
@@ -199,10 +293,48 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_TOOL_STATS_MAX_SERIES"},
 	{name: "HTTP_API_TOOL_STATS_OMIT_USER"},
 
+	// The utilization page's ceiling on jobs per analysis, read when the
+	// handler is built.
+	{name: "HTTP_API_UTILIZATION_MAX_JOBS"},
+
+	// Placement onboarding, read when the handler is built.
+	{name: "HTTP_API_PLACEMENT_IDENTITY_CLAIMS"},
+	{name: "HTTP_API_PLACEMENT_DISPLAY_NAME_CLAIMS"},
+	{name: "HTTP_API_PLACEMENT_DEVICE_CLIENTS"},
+	{name: "HTTP_API_PLACEMENT_SCHEDD_HOST"},
+	{name: "HTTP_API_PLACEMENT_COLLECTOR_HOST"},
+	{name: "HTTP_API_PLACEMENT_PREFILL_DOMAINS"},
+	{name: "HTTP_API_PLACEMENT_REQUEST_RETENTION"},
+	// Which placementd discovery accepts, decided when the handler is
+	// built.
+	{name: "HTTP_API_PLACEMENTD_NAME"},
+	{name: "PLACEMENTD_HOST"},
+
 	// Mirror routing, resolved into a discovery locator at startup.
 	{name: "HTTP_API_DBMIRROR_NAME"},
 	{name: "HTTP_API_DBMIRROR_ADDRESS"},
 	{name: "HTTP_API_DBMIRROR_REQUIRED"},
+
+	// Multi-AP mode: which mode the server runs in, and what it reads
+	// from, are decided when the handler is built.
+	{name: "HTTP_API_SCHEDD_CONSTRAINT"},
+	{name: "HTTP_API_HUB_NAME"},
+	{name: "HTTP_API_HUB_ADDRESS"},
+	{name: "HTTP_API_MULTI_AP_STALE"},
+	{name: "HTTP_API_JOB_ID_CODEC"},
+	{name: "HTTP_API_BULK_FRESH_SECONDS"},
+	{name: "HTTP_API_HUB_SWITCH_SECONDS"},
+	{name: "HTTP_API_HUB_SWITCH_MARGIN"},
+	{name: "HTTP_API_HUB_FAIL_AFTER"},
+	{name: "HTTP_API_HUB_SETTLE_SECONDS"},
+	// The assignment chain is built at startup; the mapfile's and token
+	// file's contents are re-read on every reconfigure (see reconfigure).
+	{name: "HTTP_API_AP_ASSIGNMENT"},
+	{name: "HTTP_API_AP_ASSIGNMENT_DEFAULT"},
+	{name: "HTTP_API_AP_ASSIGNMENT_MAPFILE"},
+	{name: "HTTP_API_AP_ASSIGNMENT_REST_URL"},
+	{name: "HTTP_API_AP_ASSIGNMENT_REST_TOKEN_FILE"},
+	{name: "HTTP_API_AP_ASSIGNMENT_STALE_SECONDS"},
 }
 
 // reconfigWatcher remembers what each known parameter was set to, so a
@@ -245,6 +377,23 @@ func (w *reconfigWatcher) reconfigure(cfg *config.Config) {
 		if !slices.Contains(applied, "HTTP_API_MCP_SKILLS_DIR") {
 			applied = append(applied, "HTTP_API_MCP_SKILLS_DIR")
 		}
+	}
+
+	// Same for the project leads file: its contents live outside the
+	// configuration, so a diff of the path cannot see an edit to it.
+	if path := configValue(cfg, "HTTP_API_PROJECT_LEADS_FILE"); path != "" {
+		if !slices.Contains(applied, "HTTP_API_PROJECT_LEADS_FILE") {
+			w.srv.SetProjectLeadsFile(path)
+			applied = append(applied, "HTTP_API_PROJECT_LEADS_FILE")
+		}
+	}
+
+	// The access point assignment mapfile and REST token live outside the
+	// configuration too, and editing the mapfile is the usual reason to
+	// reconfigure a multi-AP server. The backends themselves are built
+	// at startup; their files are re-read here.
+	if configValue(cfg, "HTTP_API_SCHEDD_CONSTRAINT") != "" {
+		w.srv.ReloadAPAssignment()
 	}
 
 	// Values can be secrets, so log which parameters changed, never what

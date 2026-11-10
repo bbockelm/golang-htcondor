@@ -63,13 +63,13 @@ type Options struct {
 // this can be tens of thousands of rows, and HoldReason is already the
 // long one.
 var HoldProjection = append([]string{
-	"ClusterId", "ProcId", "Owner", "JobBatchName",
+	"ClusterId", "ProcId", "Owner", "ScheddName", "JobBatchName",
 	"HoldReason", "HoldReasonCode", "HoldReasonSubCode", "EnteredCurrentStatus",
 }, facetAttrs...)
 
 // EpochProjection is the attributes read per run attempt.
 var EpochProjection = append([]string{
-	"ClusterId", "ProcId", "Owner", "JobBatchName",
+	"ClusterId", "ProcId", "Owner", "ScheddName", "JobBatchName",
 	"VacateReason", "VacateReasonCode", "VacateReasonSubCode",
 	"EpochWriteDate", "JobCurrentStartDate", "NumShadowExceptions",
 	"EpochAdType",
@@ -278,10 +278,10 @@ func Collect(ctx context.Context, src Source, opts Options) (*Set, error) {
 	// is one problem recorded twice, once by each source -- which is
 	// what put the same job in two rows of the page with two different
 	// codes.
-	heldNow := make(map[[2]int64]bool, len(held))
+	heldNow := make(map[jobKey]bool, len(held))
 	for _, ad := range held {
 		rec := holdRecord(ad)
-		heldNow[[2]int64{rec.Cluster, rec.Proc}] = true
+		heldNow[jobKey{rec.Schedd, rec.Cluster, rec.Proc}] = true
 		set.Records = append(set.Records, rec)
 	}
 
@@ -343,7 +343,7 @@ func Collect(ctx context.Context, src Source, opts Options) (*Set, error) {
 		// it there. Only the hold half is deduplicated -- a job held now
 		// may also have failed to keep running earlier in the window,
 		// and those are different problems in different sections.
-		if rec.Kind == KindHold && heldNow[[2]int64{rec.Cluster, rec.Proc}] {
+		if rec.Kind == KindHold && heldNow[jobKey{rec.Schedd, rec.Cluster, rec.Proc}] {
 			continue
 		}
 		set.Records = append(set.Records, rec)
@@ -351,18 +351,26 @@ func Collect(ctx context.Context, src Source, opts Options) (*Set, error) {
 	return set, nil
 }
 
+// jobKey names a job: its access point (multi-AP mode; empty with one
+// schedd) and cluster.proc. Two APs' 1.0 are two jobs.
+type jobKey struct {
+	schedd        string
+	cluster, proc int64
+}
+
 // holdRecord turns a held job's ad into one occurrence.
 func holdRecord(ad *classad.ClassAd) Record {
 	cluster, _ := ad.EvaluateAttrInt("ClusterId")
 	proc, _ := ad.EvaluateAttrInt("ProcId")
 	owner, _ := ad.EvaluateAttrString("Owner")
+	schedd, _ := ad.EvaluateAttrString("ScheddName")
 	batch, _ := ad.EvaluateAttrString("JobBatchName")
 	reason, _ := ad.EvaluateAttrString("HoldReason")
 	code, _ := ad.EvaluateAttrInt("HoldReasonCode")
 	sub, _ := ad.EvaluateAttrInt("HoldReasonSubCode")
 	at, _ := ad.EvaluateAttrInt("EnteredCurrentStatus")
 	return Record{
-		Kind: KindHold, Message: reason, Owner: owner,
+		Kind: KindHold, Message: reason, Owner: owner, Schedd: schedd,
 		Cluster: cluster, Proc: proc, Batch: batch, At: at,
 		Code: code, SubCode: sub, Facets: facetsOf(ad),
 	}
@@ -386,6 +394,7 @@ func vacateRecord(ad *classad.ClassAd) (Record, bool) {
 	cluster, _ := ad.EvaluateAttrInt("ClusterId")
 	proc, _ := ad.EvaluateAttrInt("ProcId")
 	owner, _ := ad.EvaluateAttrString("Owner")
+	schedd, _ := ad.EvaluateAttrString("ScheddName")
 	batch, _ := ad.EvaluateAttrString("JobBatchName")
 	sub, _ := ad.EvaluateAttrInt("VacateReasonSubCode")
 	// When the attempt ended, falling back to when it started for a
@@ -401,7 +410,7 @@ func vacateRecord(ad *classad.ClassAd) (Record, bool) {
 		kind = KindRunFailure
 	}
 	return Record{
-		Kind: kind, Message: reason, Owner: owner,
+		Kind: kind, Message: reason, Owner: owner, Schedd: schedd,
 		Cluster: cluster, Proc: proc, Batch: batch, At: at,
 		Code: code, SubCode: sub, Facets: facetsOf(ad),
 	}, true

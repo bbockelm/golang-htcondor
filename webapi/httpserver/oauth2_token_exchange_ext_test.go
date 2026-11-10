@@ -190,3 +190,72 @@ func TestTokenExchangeExternalDisabled(t *testing.T) {
 		t.Error("external subject token must be refused when no issuers are configured")
 	}
 }
+
+// With groups read from the system, an external subject token's own groups
+// claim must not decide group-gated scopes: the mapped account's groups do,
+// as they do for an SSO login.
+func TestTokenExchangeExternalUsesSystemGroups(t *testing.T) {
+	server, _ := newProvenanceServer(t)
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	issuers, err := parseTrustedIssuers(`[{"issuer":"https://idp.example.org","jwks_uri":"https://idp.example.org/jwks","audience":"htcondor-mcp","identity_domain":"idp.example.org","allowed_scopes":["mcp:read","mcp:admin"]}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.extIssuers = newExtIssuerValidator(issuers,
+		func(_ context.Context, _ string) ([]byte, error) { return jwksJSON(t, key), nil })
+	server.mcpAdminGroups = newGroupSet("condor-admins")
+	system := &recordingGroups{byUser: map[string][]string{
+		"bob@idp.example.org":   {"users"},
+		"carol@idp.example.org": {"users", "condor-admins"},
+	}}
+	server.localIdentity = &localIdentity{groups: system, logger: server.logger}
+	secret := insertConfidentialClient(t, server, "gateway",
+		[]string{tokenExchangeGrantType}, []string{"mcp:read", "mcp:admin"})
+
+	exchange := func(sub string) (string, *Session) {
+		t.Helper()
+		now := time.Now()
+		rec := postTokenExchange(t, server, url.Values{
+			"grant_type": {tokenExchangeGrantType}, "client_id": {"gateway"}, "client_secret": {secret},
+			"subject_token_type": {tokenTypeJWT},
+			"subject_token": {signedJWT(t, key, map[string]any{
+				"iss": "https://idp.example.org", "sub": sub, "aud": "htcondor-mcp",
+				"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
+				"groups": []string{"condor-admins"},
+			})},
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("exchange for %s: %d %s", sub, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			AccessToken string `json:"access_token"`
+			Scope       string `json:"scope"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		ar, err := server.oauth2Provider.IntrospectAccessToken(context.Background(), resp.AccessToken)
+		if err != nil {
+			t.Fatalf("introspect: %v", err)
+		}
+		sess, _ := ar.GetSession().(*Session)
+		return resp.Scope, sess
+	}
+
+	// bob's token claims condor-admins; the system says otherwise.
+	scope, sess := exchange("bob")
+	if hasScope(scope, "mcp:admin") {
+		t.Errorf("bob was granted mcp:admin from the token's groups claim: %q", scope)
+	}
+	if !hasScope(scope, "mcp:read") {
+		t.Errorf("bob should keep mcp:read: %q", scope)
+	}
+	if sess == nil || len(sess.Groups) != 1 || sess.Groups[0] != "users" {
+		t.Errorf("bob's session groups = %v, want the system's [users]", sess)
+	}
+
+	// carol is an admin on the system, so the same request grants it.
+	if scope, _ := exchange("carol"); !hasScope(scope, "mcp:admin") {
+		t.Errorf("carol is in condor-admins on the system but got %q", scope)
+	}
+}

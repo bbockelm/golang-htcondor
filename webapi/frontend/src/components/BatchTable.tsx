@@ -3,13 +3,19 @@
 // The batch table shared by /jobs and /users/<owner>: one row per batch,
 // expandable to the jobs inside it, sortable by column, with the
 // submitting user shown when the listing spans more than one.
+//
+// Below 1024px the table becomes cards, the way the Utilization page's
+// workflow list does: a dozen columns beside a phone's or a tablet's
+// width is mostly sideways scrolling. A card carries the same facts
+// stacked, opens in place to the batch's usage and its jobs, and a sort
+// picker stands in for the column headers it no longer has.
 
 import { useCallback, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { api, ApiError, type DisplayStatus, type DisplayStatusInfo } from '@/lib/api';
-import { statusPillCls } from '@/app/jobs/[id]/JobDetailClient';
+import { humanDuration, statusPillCls, useNowTick } from '@/app/jobs/[id]/JobDetailClient';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import {
   SortableHeader,
@@ -18,25 +24,135 @@ import {
   type SortState,
 } from '@/components/SortableTable';
 import { BatchUsagePanel } from '@/components/BatchUsagePanel';
+import { RowMenu, type RowMenuItem } from '@/components/RowMenu';
+import { utilizationHref } from '@/lib/utilizationLink';
+import { useCards } from '@/lib/useNarrow';
+import { BatchProgressBar } from '@/components/BatchProgressBar';
+import {
+  BatchLongerThanUsual,
+  BatchMoreMemoryThanUsual,
+  BatchTimeLeftCell,
+  JobTimeLeftCell,
+} from '@/components/TimeLeft';
+import { estimateRequestJobs, rangeBarScale, timedStatus, type TimedJob } from '@/lib/timeLeft';
+import {
+  useRuntimeEstimates,
+  type EstimateRequestJob,
+  type RuntimeEstimatesState,
+} from '@/lib/useRuntimeEstimates';
+import { UsageBar } from '@/components/UsageBar';
+import {
+  progressFraction,
+  type BatchProgressResult,
+} from '@/lib/batchProgress';
+import {
+  displayHoldReason,
+  NO_REASON,
+  summarizeHoldReasons,
+  type HoldSummary,
+} from '@/lib/holdReasons';
+import type { BatchDetail } from '@/lib/batchView';
+import {
+  batchCpuReading,
+  batchMemoryReading,
+  jobCpuReading,
+  jobMemoryReading,
+  type JobUsage,
+  type UsageReading,
+} from '@/lib/runningUsage';
 import {
   statusRank,
   summarizeBatchUsage,
   BATCH_USAGE_PROJECTION,
   DISPLAY_STATUS_LABEL,
   DISPLAY_STATUS_ORDER,
+  batchKey,
+  batchPagePath,
   type Batch,
   type BatchJob,
+  type BatchKey,
+  type DagNodeCounts,
+  type JobTiming,
 } from '@/lib/batches';
 
-type BatchSortKey = 'batch' | 'owner' | 'jobs' | 'status' | 'submitted' | 'cmd';
+type BatchSortKey =
+  | 'batch'
+  | 'schedd'
+  | 'owner'
+  | 'jobs'
+  | 'progress'
+  | 'status'
+  | 'submitted'
+  | 'cmd'
+  | 'reason'
+  | 'memory'
+  | 'cpu';
+
+// timedJob pairs a job with its estimate. A job nobody asked about (past
+// the request's cap, or a DAGMan job) has none.
+function timedJob(j: BatchJob, est: RuntimeEstimatesState): TimedJob {
+  return { status: timedStatus(j), estimate: est.byId.get(j.id), dagman: j.dagman };
+}
+
+// isDagRow: a batch that is, or holds, a DAG -- its row describes nodes.
+function isDagRow(b: Batch): boolean {
+  return b.isDag || b.jobs.some((j) => j.dagman || j.dagNode);
+}
+
+// dagNodes is a DAG row's node counts: from the progress computed over
+// every loaded job when there is one, which a status filter cannot hide
+// the DAGMan job from, else from the row's own DAGMan job.
+function dagNodes(b: Batch, progress: BatchProgressResult | undefined): DagNodeCounts | undefined {
+  if (progress?.known && progress.unit === 'nodes') {
+    return { total: progress.total, done: progress.done, failed: progress.failed, queued: 0 };
+  }
+  return b.dagNodes;
+}
+
+// batchFinished: every job in the batch has finished. Removing such a
+// batch would record each of its clean runs as removed, so the row
+// offers Archive in Remove's place.
+function batchFinished(b: Batch): boolean {
+  const present = Object.entries(b.statusCounts).filter(([, n]) => n > 0);
+  return present.length > 0 && present.every(([k]) => k === 'completed');
+}
+
+// Live usage for the 'usage' detail, keyed by BatchJob.id.
+export interface RunningUsage {
+  byJob: ReadonlyMap<string, JobUsage>;
+  loading: boolean;
+}
+
+// Per-row values computed once per render of the table, for both the
+// cells and the sort.
+interface RowExtras {
+  progress?: BatchProgressResult;
+  hold?: HoldSummary;
+  memory?: UsageReading;
+  cpu?: UsageReading;
+}
 
 // Sorting reads a comparable value off the batch rather than the rendered
 // cell: sorting "Submitted" by its formatted text would put April before
 // January, and "Jobs" by its text would put 9 after 10.
-function batchSortValue(b: Batch, key: BatchSortKey): string | number | undefined {
+function batchSortValue(
+  b: Batch,
+  key: BatchSortKey,
+  x: RowExtras | undefined,
+): string | number | undefined {
   switch (key) {
+    case 'progress':
+      return progressFraction(x?.progress);
+    case 'reason':
+      return x?.hold ? displayHoldReason(x.hold.top.example) : undefined;
+    case 'memory':
+      return x?.memory?.sortValue;
+    case 'cpu':
+      return x?.cpu?.sortValue;
     case 'batch':
       return b.name;
+    case 'schedd':
+      return b.schedd;
     case 'owner':
       return b.owner;
     case 'jobs':
@@ -58,6 +174,10 @@ export function BatchTable({
   setExpanded,
   highlighted,
   onChange,
+  multiAP,
+  progress,
+  detail = 'command',
+  usage,
 }: {
   // Already grouped and filtered by the page: which jobs are in scope is
   // a page-level question (status chips, text filter, server constraint),
@@ -70,17 +190,53 @@ export function BatchTable({
   // Render the submitting user as a column. Off in the "Mine" view,
   // where every row would carry the same name.
   showOwner?: boolean;
-  expanded: Set<number>;
-  setExpanded: React.Dispatch<React.SetStateAction<Set<number>>>;
+  expanded: Set<BatchKey>;
+  setExpanded: React.Dispatch<React.SetStateAction<Set<BatchKey>>>;
   highlighted: string | null; // "cluster.proc" of the chat-highlighted job
   onChange: () => void;
+  // Multi-AP mode: show the access point column, and no actions -- the
+  // server serves reads only.
+  multiAP?: boolean;
+  // How far along each batch is, keyed by Batch.groupKey. Computed by the
+  // page from every job it loaded, not from `batches`, which may be
+  // status-filtered (see batchProgress.ts). Omit to leave the column out.
+  progress?: ReadonlyMap<string, BatchProgressResult>;
+  // What the last column shows; see BatchDetail.
+  detail?: BatchDetail;
+  // Required for detail="usage".
+  usage?: RunningUsage;
 }) {
   const queryClient = useQueryClient();
+  // Running and waiting times move on between refreshes of the listing.
+  const now = useNowTick(30_000);
+
+  const extras = useMemo(() => {
+    const m = new Map<BatchKey, RowExtras>();
+    for (const b of batches) {
+      const x: RowExtras = { progress: progress?.get(b.groupKey) };
+      if (detail === 'hold') {
+        x.hold = summarizeHoldReasons(
+          b.jobs.filter((j) => j.display.key === 'held').map((j) => j.holdReason),
+        );
+      } else if (detail === 'usage' && usage) {
+        const running = b.jobs.filter((j) => j.display.key === 'running');
+        x.memory = batchMemoryReading(running, usage.byJob);
+        x.cpu = batchCpuReading(running, usage.byJob);
+      }
+      m.set(batchKey(b), x);
+    }
+    return m;
+  }, [batches, progress, detail, usage]);
+
+  const sortValue = useCallback(
+    (b: Batch, key: BatchSortKey) => batchSortValue(b, key, extras.get(batchKey(b))),
+    [extras],
+  );
 
   // Newest first by default, which is what the page used to do
   // unconditionally and is still the order people expect to land in.
   const [sort, setSort] = useSortState<BatchSortKey>('submitted', 'desc');
-  const sorted = useSortedRows(batches, sort, batchSortValue);
+  const sorted = useSortedRows(batches, sort, sortValue);
 
   // Cap the initial render at 20 batches; the sentinel below the
   // table reveals the next 20 each time it scrolls into view.
@@ -93,7 +249,7 @@ export function BatchTable({
     shown: shownBatches,
   } = useInfiniteList(sorted, 20, resetKey);
 
-  const toggle = (id: number) =>
+  const toggle = (id: BatchKey) =>
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -129,10 +285,125 @@ export function BatchTable({
     },
   });
 
-  const removeError =
-    removeBatchMut.error ?? removeJobMut.error ?? releaseJobMut.error;
+  // Archive is what Remove is for a job that already finished: it
+  // retires the job into history with the outcome it had, where
+  // removing it would record a clean run as removed. The schedd takes
+  // up to a minute to act on it, so the row does not disappear on the
+  // click.
+  const archiveJobMut = useMutation({
+    mutationFn: (jobID: string) => api.jobs.retire(jobID),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      onChange();
+    },
+  });
 
-  const columns = showOwner ? 8 : 7;
+  // Narrowed to the finished jobs of the batch. The constraint matters:
+  // the batch may have picked up a new job since the row was drawn, and
+  // clearing LeaveJobInQueue on one still running would lose its output.
+  const archiveBatchMut = useMutation({
+    mutationFn: (b: Batch) =>
+      api.jobs.retireByConstraint(`(${b.removeConstraint}) && JobStatus == 4`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      onChange();
+    },
+  });
+
+  const removeError =
+    removeBatchMut.error ??
+    removeJobMut.error ??
+    releaseJobMut.error ??
+    archiveJobMut.error ??
+    archiveBatchMut.error;
+
+  // Multi-AP mode adds the Access point column. The running view trades
+  // Submitted for its second bar: two bars and their text do not fit
+  // beside it, and when a running batch was submitted is the least of
+  // what that view is for.
+  const showSubmitted = detail !== 'usage';
+
+  // Runtime estimates for the waiting and running jobs of the batches on
+  // screen, one request per refresh of the listing. Multi-AP mode has
+  // none, and the held view has no waiting or running jobs to ask about.
+  // The column appears once the server has said it can answer. DAGMan
+  // jobs are never estimated, so they are not asked about.
+  const estimatesWanted = !multiAP && detail !== 'hold';
+  const estimateJobs = useMemo<EstimateRequestJob[]>(
+    () => sorted.slice(0, shownBatches).flatMap((b) => estimateRequestJobs(b.jobs)),
+    [sorted, shownBatches],
+  );
+  const estimates = useRuntimeEstimates(estimateJobs, estimatesWanted);
+  const showTimeLeft = estimatesWanted && estimates.available === true;
+
+  const columns =
+    7 + (showOwner ? 1 : 0) + (progress ? 1 : 0) + (multiAP ? 1 : 0) + (showTimeLeft ? 1 : 0);
+
+  const cards = useCards();
+  // The cards' sort picker offers what the table's headers would.
+  const sortOptions: { key: BatchSortKey; label: string }[] = [
+    { key: 'submitted', label: 'Submitted' },
+    { key: 'batch', label: 'Name' },
+    ...(multiAP ? [{ key: 'schedd' as const, label: 'Access point' }] : []),
+    ...(showOwner ? [{ key: 'owner' as const, label: 'User' }] : []),
+    { key: 'jobs', label: 'Jobs' },
+    ...(progress ? [{ key: 'progress' as const, label: 'Progress' }] : []),
+    { key: 'status', label: 'Status' },
+    ...(detail === 'hold'
+      ? [{ key: 'reason' as const, label: 'Hold reason' }]
+      : detail === 'usage'
+        ? [
+            { key: 'memory' as const, label: 'Memory (peak)' },
+            { key: 'cpu' as const, label: 'CPU (recent)' },
+          ]
+        : [{ key: 'cmd' as const, label: 'Command' }]),
+  ];
+  const rowProps = (b: Batch) => ({
+    batch: b,
+    extras: extras.get(batchKey(b)),
+    showProgress: !!progress,
+    detail,
+    usage,
+    showOwner,
+    multiAP,
+    expanded: expanded.has(batchKey(b)),
+    highlighted,
+    onToggle: () => toggle(batchKey(b)),
+    onRemoveBatch: () => removeBatchMut.mutate(b),
+    onArchiveBatch: () => archiveBatchMut.mutate(b),
+    onRemoveJob: (jobID: string) => removeJobMut.mutate(jobID),
+    onArchiveJob: (jobID: string) => archiveJobMut.mutate(jobID),
+    onReleaseJob: (jobID: string) => releaseJobMut.mutate(jobID),
+    pendingBatch:
+      removeBatchMut.isPending &&
+      !!removeBatchMut.variables &&
+      batchKey(removeBatchMut.variables) === batchKey(b),
+    pendingArchiveBatch:
+      archiveBatchMut.isPending &&
+      !!archiveBatchMut.variables &&
+      batchKey(archiveBatchMut.variables) === batchKey(b),
+    pendingJob: removeJobMut.variables,
+    pendingJobActive: removeJobMut.isPending,
+    pendingArchive: archiveJobMut.variables,
+    pendingArchiveActive: archiveJobMut.isPending,
+    pendingRelease: releaseJobMut.variables,
+    pendingReleaseActive: releaseJobMut.isPending,
+    now,
+    estimates: showTimeLeft ? estimates : undefined,
+  });
+  const footer = totalBatches > 0 && (
+    <>
+      Showing {shownBatches.toLocaleString()} of {totalBatches.toLocaleString()} batches
+      {hasMoreBatches && (
+        <>
+          {' '}— scroll to load more, or{' '}
+          <button type="button" onClick={showAllBatches} className="text-brand-700 hover:underline">
+            show all
+          </button>
+        </>
+      )}
+    </>
+  );
 
   return (
     <div className="space-y-2">
@@ -141,12 +412,56 @@ export function BatchTable({
           {/* Failure message is shared between Remove and Release —
               both kinds of mutation surface here, label with whichever
               actually failed so the user can tell what happened. */}
-          {releaseJobMut.error ? 'Release' : 'Remove'} failed:{' '}
+          {releaseJobMut.error
+            ? 'Release'
+            : archiveJobMut.error || archiveBatchMut.error
+              ? 'Archive'
+              : 'Remove'}{' '}
+          failed:{' '}
           {removeError instanceof ApiError
             ? removeError.message
             : String(removeError)}
         </div>
       )}
+      {cards ? (
+        <>
+          {/* No column headers to tap as cards: the order is picked here. */}
+          <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+            <label className="flex items-center gap-1.5">
+              Sort by
+              <select
+                value={sort.key}
+                onChange={(e) => setSort({ key: e.target.value as BatchSortKey, direction: 'desc' })}
+                className="min-h-9 rounded-sm border border-gray-300 bg-white px-2 py-1 text-sm"
+              >
+                {sortOptions.map((o) => (
+                  <option key={o.key} value={o.key}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={() => setSort({ ...sort, direction: sort.direction === 'asc' ? 'desc' : 'asc' })}
+              className="min-h-9 min-w-9 rounded-sm border border-gray-300 bg-white px-2 py-1 text-sm"
+              aria-label={sort.direction === 'asc' ? 'Ascending; switch to descending' : 'Descending; switch to ascending'}
+            >
+              {sort.direction === 'asc' ? '▴' : '▾'}
+            </button>
+          </div>
+          <ul className="grid grid-cols-1 gap-2 md:grid-cols-2" data-testid="batch-cards">
+            {visibleBatches.map((b) => (
+              <BatchCard key={batchKey(b)} {...rowProps(b)} />
+            ))}
+          </ul>
+          {totalBatches > 0 && (
+            <div ref={batchSentinelRef} className="text-xs text-gray-500">
+              {footer}
+            </div>
+          )}
+        </>
+      ) : (
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
         <table className="min-w-full text-sm">
           <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
@@ -156,37 +471,37 @@ export function BatchTable({
               {/* The submitting user sits next to the batch name rather
                   than out past the command: on a pool-wide view it is the
                   first thing being scanned for. */}
+              {multiAP && (
+                <BatchHeader label="Access point" sortKey="schedd" sort={sort} onSort={setSort} />
+              )}
               {showOwner && (
                 <BatchHeader label="User" sortKey="owner" sort={sort} onSort={setSort} />
               )}
               <BatchHeader label="Jobs" sortKey="jobs" sort={sort} onSort={setSort} />
+              {progress && (
+                <BatchHeader label="Progress" sortKey="progress" sort={sort} onSort={setSort} />
+              )}
               <BatchHeader label="Status" sortKey="status" sort={sort} onSort={setSort} />
-              <BatchHeader label="Submitted" sortKey="submitted" sort={sort} onSort={setSort} />
-              <BatchHeader label="Command" sortKey="cmd" sort={sort} onSort={setSort} />
+              {showTimeLeft && <th className="px-3 py-2 text-left font-normal">Time left</th>}
+              {showSubmitted && (
+                <BatchHeader label="Submitted" sortKey="submitted" sort={sort} onSort={setSort} />
+              )}
+              {detail === 'hold' ? (
+                <BatchHeader label="Hold reason" sortKey="reason" sort={sort} onSort={setSort} />
+              ) : detail === 'usage' ? (
+                <>
+                  <BatchHeader label="Memory (peak)" sortKey="memory" sort={sort} onSort={setSort} />
+                  <BatchHeader label="CPU (recent)" sortKey="cpu" sort={sort} onSort={setSort} />
+                </>
+              ) : (
+                <BatchHeader label="Command" sortKey="cmd" sort={sort} onSort={setSort} />
+              )}
               <th className="px-3 py-2 w-1 text-right">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {visibleBatches.map((b) => (
-              <BatchRow
-                key={b.batchID}
-                batch={b}
-                showOwner={showOwner}
-                expanded={expanded.has(b.batchID)}
-                highlighted={highlighted}
-                onToggle={() => toggle(b.batchID)}
-                onRemoveBatch={() => removeBatchMut.mutate(b)}
-                onRemoveJob={(jobID) => removeJobMut.mutate(jobID)}
-                onReleaseJob={(jobID) => releaseJobMut.mutate(jobID)}
-                pendingBatch={
-                  removeBatchMut.isPending &&
-                  removeBatchMut.variables?.batchID === b.batchID
-                }
-                pendingJob={removeJobMut.variables}
-                pendingJobActive={removeJobMut.isPending}
-                pendingRelease={releaseJobMut.variables}
-                pendingReleaseActive={releaseJobMut.isPending}
-              />
+              <BatchRow key={batchKey(b)} {...rowProps(b)} columns={columns} />
             ))}
             {/* Sentinel + "showing N of M" footer. The sentinel <tr>
                 triggers IntersectionObserver to grow the visible
@@ -197,26 +512,14 @@ export function BatchTable({
             {totalBatches > 0 && (
               <tr ref={batchSentinelRef as unknown as React.Ref<HTMLTableRowElement>}>
                 <td colSpan={columns} className="px-3 py-2 text-xs text-gray-500">
-                  Showing {shownBatches.toLocaleString()} of{' '}
-                  {totalBatches.toLocaleString()} batches
-                  {hasMoreBatches && (
-                    <>
-                      {' '}— scroll to load more, or{' '}
-                      <button
-                        type="button"
-                        onClick={showAllBatches}
-                        className="text-brand-700 hover:underline"
-                      >
-                        show all
-                      </button>
-                    </>
-                  )}
+                  {footer}
                 </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+      )}
     </div>
   );
 }
@@ -254,7 +557,7 @@ export function UserPill({ owner }: { owner: string }) {
       // destination and must not do both.
       onClick={(e) => e.stopPropagation()}
       title={`Everything ${owner} is running`}
-      className="inline-flex max-w-[14rem] truncate rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800 hover:bg-indigo-200"
+      className="inline-block max-w-32 truncate rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800 hover:bg-indigo-200"
     >
       {owner}
     </Link>
@@ -263,33 +566,66 @@ export function UserPill({ owner }: { owner: string }) {
 
 function BatchRow({
   batch,
+  extras,
+  showProgress,
+  detail,
+  usage,
+  columns,
   showOwner,
+  multiAP,
   expanded,
   highlighted,
   onToggle,
   onRemoveBatch,
+  onArchiveBatch,
   onRemoveJob,
+  onArchiveJob,
   onReleaseJob,
   pendingBatch,
+  pendingArchiveBatch,
   pendingJob,
   pendingJobActive,
+  pendingArchive,
+  pendingArchiveActive,
   pendingRelease,
   pendingReleaseActive,
+  now,
+  estimates,
 }: {
   batch: Batch;
+  extras: RowExtras | undefined;
+  showProgress: boolean;
+  detail: BatchDetail;
+  usage: RunningUsage | undefined;
+  columns: number;
   showOwner?: boolean;
+  multiAP?: boolean;
   expanded: boolean;
   highlighted: string | null;
   onToggle: () => void;
   onRemoveBatch: () => void;
+  onArchiveBatch: () => void;
   onRemoveJob: (jobID: string) => void;
+  onArchiveJob: (jobID: string) => void;
   onReleaseJob: (jobID: string) => void;
   pendingBatch: boolean;
+  pendingArchiveBatch: boolean;
   pendingJob: string | undefined;
   pendingJobActive: boolean;
+  pendingArchive: string | undefined;
+  pendingArchiveActive: boolean;
   pendingRelease: string | undefined;
   pendingReleaseActive: boolean;
+  // Unix seconds, for running and waiting times.
+  now: number;
+  // Runtime estimates; undefined leaves the Time left column out.
+  estimates?: RuntimeEstimatesState;
 }) {
+  const timed = useMemo(
+    () => (estimates ? batch.jobs.map((j) => timedJob(j, estimates)) : undefined),
+    [batch.jobs, estimates],
+  );
+  const page = multiAP ? undefined : batchPagePath(batch);
   return (
     <>
       <tr
@@ -301,7 +637,27 @@ function BatchRow({
           <DisclosureCaret expanded={expanded} />
         </td>
         <td className="px-3 py-2 font-mono text-xs">
-          <span className="text-gray-900">{batch.name}</span>
+          {/* A long batch name would otherwise wrap at every hyphen and
+              squeeze the status pills into a column. */}
+          {page ? (
+            // The name goes to the batch's page; the rest of the row
+            // still opens it in place.
+            <Link
+              href={page}
+              onClick={(e) => e.stopPropagation()}
+              className="inline-block max-w-44 truncate align-bottom text-brand-700 hover:underline"
+              title={batch.name}
+            >
+              {batch.name}
+            </Link>
+          ) : (
+            <span
+              className="inline-block max-w-44 truncate align-bottom text-gray-900"
+              title={batch.name}
+            >
+              {batch.name}
+            </span>
+          )}
           {batch.isDag && (
             <span
               className="ml-2 rounded-sm bg-purple-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700"
@@ -314,6 +670,9 @@ function BatchRow({
             <span className="ml-2 text-gray-400">#{batch.batchID}</span>
           )}
         </td>
+        {multiAP && (
+          <td className="px-3 py-2 font-mono text-xs text-gray-700">{batch.schedd ?? '—'}</td>
+        )}
         {showOwner && (
           <td className="px-3 py-2">
             {batch.owner ? <UserPill owner={batch.owner} /> : <span className="text-gray-400">—</span>}
@@ -322,55 +681,536 @@ function BatchRow({
         <td className="px-3 py-2 text-gray-700 tabular-nums">
           {batch.jobCount}
         </td>
+        {showProgress && (
+          <td className="px-3 py-2">
+            <BatchProgressBar progress={extras?.progress} />
+          </td>
+        )}
         <td className="px-3 py-2">
           <StatusBreakdown counts={batch.statusCounts} />
+          <LongestRunning jobs={batch.jobs} now={now} />
+          {timed && <BatchLongerThanUsual jobs={timed} />}
+          {timed && <BatchMoreMemoryThanUsual jobs={timed} />}
         </td>
-        <td className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap">
-          {batch.submittedUnix
-            ? new Date(batch.submittedUnix * 1000).toLocaleString()
-            : '—'}
-        </td>
-        <td className="px-3 py-2 text-gray-700 max-w-md truncate">
-          {batch.cmd ? (
-            <span className="font-mono text-xs">
-              {batch.cmd}
-              {batch.args ? ' ' + batch.args : ''}
-            </span>
-          ) : (
-            '—'
-          )}
-        </td>
+        {estimates && timed && (
+          <td className="px-3 py-2">
+            <BatchTimeLeftCell
+              jobs={timed}
+              dag={isDagRow(batch) ? { nodes: dagNodes(batch, extras?.progress) } : undefined}
+              fetchedAt={estimates.fetchedAt}
+              now={now}
+            />
+          </td>
+        )}
+        {detail !== 'usage' && (
+          <td
+            className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap"
+            title={batch.submittedUnix ? new Date(batch.submittedUnix * 1000).toLocaleString() : undefined}
+          >
+            {batch.submittedUnix ? formatSubmitted(batch.submittedUnix) : '—'}
+          </td>
+        )}
+        {detail === 'hold' ? (
+          <td className="px-3 py-2 text-gray-700">
+            <HoldSummaryCell summary={extras?.hold} />
+          </td>
+        ) : detail === 'usage' ? (
+          <>
+            <td className="px-3 py-2">
+              <UsageBar reading={extras?.memory} loading={usage?.loading} stacked />
+            </td>
+            <td className="px-3 py-2">
+              <UsageBar reading={extras?.cpu} loading={usage?.loading} stacked />
+            </td>
+          </>
+        ) : (
+          <td className="px-3 py-2 text-gray-700">
+            {batch.cmd ? (
+              // The width is on a block inside the cell, not the cell: a
+              // table cell grows to fit its content whatever its
+              // max-width says, and a real command is an absolute path
+              // plus arguments, long enough on its own to push the
+              // Actions column off the page.
+              <div
+                className="max-w-48 truncate font-mono text-xs"
+                title={batch.args ? `${batch.cmd} ${batch.args}` : batch.cmd}
+              >
+                {batch.cmd}
+                {batch.args ? ' ' + batch.args : ''}
+              </div>
+            ) : (
+              '—'
+            )}
+          </td>
+        )}
         <td
           className="px-3 py-2 whitespace-nowrap text-right"
           // Stop the row's click handler from firing when the user
           // interacts with the action buttons.
           onClick={(e) => e.stopPropagation()}
         >
-          <ConfirmButton
-            compact
-            onConfirm={onRemoveBatch}
-            pending={pendingBatch}
-            title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
-          />
+          <div className="inline-flex items-center gap-1.5">
+            {/* Remove stays a button of its own rather than an item in the
+                menu: it is the action people come to the row for, and it
+                arms a confirmation in place. Multi-AP mode serves reads
+                only, so there the menu is all there is. */}
+            {!multiAP &&
+              (batchFinished(batch) ? (
+                <ConfirmButton
+                  compact
+                  label="Archive"
+                  onConfirm={onArchiveBatch}
+                  pending={pendingArchiveBatch}
+                  title={`Archive batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'}) — move it to history and delete the files kept for it here`}
+                />
+              ) : (
+                <ConfirmButton
+                  compact
+                  onConfirm={onRemoveBatch}
+                  pending={pendingBatch}
+                  title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
+                />
+              ))}
+            <RowMenu label={`More actions for batch ${batch.name}`} items={batchMenuItems(batch, multiAP)} />
+          </div>
         </td>
       </tr>
       {expanded && (
         <tr>
           <td className="px-3 py-2 bg-gray-50" />
-          <td colSpan={showOwner ? 7 : 6} className="bg-gray-50 p-0">
-            <BatchUsage batchID={batch.batchID} constraint={batch.removeConstraint} />
+          <td colSpan={columns - 1} className="bg-gray-50 p-0">
+            <BatchUsage batchID={batch.batchID} schedd={batch.schedd} constraint={batch.removeConstraint} />
             <JobsSubTable
+              multiAP={multiAP}
+              detail={detail}
+              usage={usage}
               jobs={batch.jobs}
               highlighted={highlighted}
               onRemoveJob={onRemoveJob}
+              onArchiveJob={onArchiveJob}
               onReleaseJob={onReleaseJob}
               pendingJob={pendingJob}
               pendingJobActive={pendingJobActive}
+              pendingArchive={pendingArchive}
+              pendingArchiveActive={pendingArchiveActive}
               pendingRelease={pendingRelease}
               pendingReleaseActive={pendingReleaseActive}
+              now={now}
+              estimates={estimates}
             />
           </td>
         </tr>
+      )}
+    </>
+  );
+}
+
+// The props a batch row and a batch card share.
+type BatchRowProps = {
+  batch: Batch;
+  extras: RowExtras | undefined;
+  showProgress: boolean;
+  detail: BatchDetail;
+  usage: RunningUsage | undefined;
+  showOwner?: boolean;
+  multiAP?: boolean;
+  expanded: boolean;
+  highlighted: string | null;
+  onToggle: () => void;
+  onRemoveBatch: () => void;
+  onArchiveBatch: () => void;
+  onRemoveJob: (jobID: string) => void;
+  onArchiveJob: (jobID: string) => void;
+  onReleaseJob: (jobID: string) => void;
+  pendingBatch: boolean;
+  pendingArchiveBatch: boolean;
+  pendingJob: string | undefined;
+  pendingJobActive: boolean;
+  pendingArchive: string | undefined;
+  pendingArchiveActive: boolean;
+  pendingRelease: string | undefined;
+  pendingReleaseActive: boolean;
+  now: number;
+  estimates?: RuntimeEstimatesState;
+};
+
+// batchMenuItems is a batch's ⋯ menu, the same in the table and on cards.
+// Multi-AP mode has no batch pages, even for a batch with no schedd.
+function batchMenuItems(batch: Batch, multiAP: boolean | undefined): RowMenuItem[] {
+  const page = multiAP ? undefined : batchPagePath(batch);
+  return [
+    ...(page ? [{ label: 'Open batch page', href: page }] : []),
+    {
+      label: 'Resource utilization',
+      href: utilizationHref({ constraint: batch.selectConstraint, schedd: batch.schedd }),
+    },
+  ];
+}
+
+function DagBadge() {
+  return (
+    <span className="ml-2 rounded-sm bg-purple-100 px-1.5 py-0.5 align-middle font-sans text-[10px] font-semibold uppercase tracking-wide text-purple-700">
+      DAG
+    </span>
+  );
+}
+
+// isControl says a tap landed on something with its own job -- a link, a
+// button, the menu -- rather than on the card, which a tap opens.
+function isControl(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest('a,button,select,input,[role="menu"]');
+}
+
+// BatchCard is a batch's row on a phone or tablet: the same facts
+// stacked, tapping anywhere outside a control to open it in place. Open,
+// it spans both columns of the grid, because its jobs need the width.
+function BatchCard(props: BatchRowProps) {
+  const {
+    batch,
+    extras,
+    showProgress,
+    detail,
+    usage,
+    showOwner,
+    multiAP,
+    expanded,
+    onToggle,
+    onRemoveBatch,
+    onArchiveBatch,
+    pendingBatch,
+    pendingArchiveBatch,
+    now,
+    estimates,
+  } = props;
+  const timed = useMemo(
+    () => (estimates ? batch.jobs.map((j) => timedJob(j, estimates)) : undefined),
+    [batch.jobs, estimates],
+  );
+  const command = batch.cmd ? (batch.args ? `${batch.cmd} ${batch.args}` : batch.cmd) : undefined;
+  const page = multiAP ? undefined : batchPagePath(batch);
+  return (
+    <li
+      data-testid="batch-card"
+      className={`min-w-0 rounded-lg border border-gray-200 bg-white ${expanded ? 'md:col-span-2' : ''}`}
+      onClick={(e) => {
+        if (!isControl(e.target)) onToggle();
+      }}
+    >
+      <div className="space-y-2 p-3">
+        <div className="flex items-start gap-2">
+          {page ? (
+            // The name goes to the batch's page, so the caret alone is
+            // the button; a tap anywhere else on the card still opens it.
+            <div className="flex min-h-9 min-w-0 flex-1 items-start gap-2">
+              <button
+                type="button"
+                onClick={onToggle}
+                aria-expanded={expanded}
+                aria-label={`Jobs in batch ${batch.name}`}
+                className="-m-2 flex min-h-9 min-w-9 shrink-0 items-start justify-center p-2 text-gray-400"
+              >
+                <span className="mt-0.5">
+                  <DisclosureCaret expanded={expanded} />
+                </span>
+              </button>
+              <span className="min-w-0 break-words font-mono text-sm font-medium">
+                <Link href={page} className="text-brand-700 hover:underline">
+                  {batch.name}
+                </Link>
+                {batch.isDag && <DagBadge />}
+              </span>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onToggle}
+              aria-expanded={expanded}
+              className="flex min-h-9 min-w-0 flex-1 items-start gap-2 text-left"
+            >
+              <span className="mt-0.5 text-gray-400">
+                <DisclosureCaret expanded={expanded} />
+              </span>
+              <span className="min-w-0 break-words font-mono text-sm font-medium text-gray-900">
+                {batch.name}
+                {batch.isDag && <DagBadge />}
+              </span>
+            </button>
+          )}
+          {/* Actions in the card's top corner, where a thumb finds them,
+              rather than a row of their own. */}
+          <div className="flex shrink-0 items-center gap-2">
+            {!multiAP &&
+              (batchFinished(batch) ? (
+                <ConfirmButton
+                  label="Archive"
+                  onConfirm={onArchiveBatch}
+                  pending={pendingArchiveBatch}
+                  title={`Archive batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'}) — move it to history and delete the files kept for it here`}
+                />
+              ) : (
+                <ConfirmButton
+                  onConfirm={onRemoveBatch}
+                  pending={pendingBatch}
+                  title={`Remove batch ${batch.name} (${batch.jobCount} job${batch.jobCount === 1 ? '' : 's'})`}
+                />
+              ))}
+            <RowMenu touch label={`More actions for batch ${batch.name}`} items={batchMenuItems(batch, multiAP)} />
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+          {batch.name !== String(batch.batchID) && <span>#{batch.batchID}</span>}
+          {showOwner && batch.owner && <UserPill owner={batch.owner} />}
+          {multiAP && batch.schedd && <span className="break-all font-mono">{batch.schedd}</span>}
+          <span className="tabular-nums">
+            {batch.jobCount.toLocaleString()} {batch.jobCount === 1 ? 'job' : 'jobs'}
+          </span>
+        </div>
+        {showProgress && <BatchProgressBar progress={extras?.progress} />}
+        <div>
+          <StatusBreakdown counts={batch.statusCounts} />
+          <LongestRunning jobs={batch.jobs} now={now} />
+          {detail !== 'usage' && batch.submittedUnix ? (
+            <div className="mt-0.5 text-[11px] text-gray-500">
+              submitted {formatSubmitted(batch.submittedUnix)}
+            </div>
+          ) : null}
+          {timed && <BatchLongerThanUsual jobs={timed} />}
+          {timed && <BatchMoreMemoryThanUsual jobs={timed} />}
+        </div>
+        {estimates && timed && (
+          <BatchTimeLeftCell
+            jobs={timed}
+            dag={isDagRow(batch) ? { nodes: dagNodes(batch, extras?.progress) } : undefined}
+            fetchedAt={estimates.fetchedAt}
+            now={now}
+          />
+        )}
+        {detail === 'hold' ? (
+          <HoldSummaryBlock summary={extras?.hold} />
+        ) : detail === 'usage' ? (
+          <dl className="grid grid-cols-[6.5rem_1fr] items-center gap-x-2 gap-y-1.5 text-xs text-gray-500">
+            <dt>Memory (peak)</dt>
+            <dd className="min-w-0">
+              <UsageBar reading={extras?.memory} loading={usage?.loading} stacked />
+            </dd>
+            <dt>CPU (recent)</dt>
+            <dd className="min-w-0">
+              <UsageBar reading={extras?.cpu} loading={usage?.loading} stacked />
+            </dd>
+          </dl>
+        ) : command ? (
+          // Truncated to a line until the card is open, then whole.
+          <div
+            className={`font-mono text-xs text-gray-700 ${expanded ? 'whitespace-pre-wrap break-all' : 'truncate'}`}
+            title={command}
+          >
+            {command}
+          </div>
+        ) : null}
+      </div>
+      {expanded && (
+        <div className="border-t border-gray-200 bg-gray-50">
+          {/* The usage table keeps its columns; on the narrowest phones it
+              scrolls inside the card rather than widening the page. */}
+          <div className="overflow-x-auto">
+            <BatchUsage batchID={batch.batchID} schedd={batch.schedd} constraint={batch.removeConstraint} />
+          </div>
+          <JobCards {...props} />
+        </div>
+      )}
+    </li>
+  );
+}
+
+// HoldSummaryBlock is HoldSummaryCell for a card, which has the width to
+// let the message wrap: three lines of it, the whole of it on hover.
+function HoldSummaryBlock({ summary }: { summary: HoldSummary | undefined }) {
+  if (!summary) return null;
+  const others = summary.otherReasons;
+  return (
+    <div className="text-xs text-gray-700">
+      <div className="line-clamp-3 break-words" title={summary.top.example}>
+        {displayHoldReason(summary.top.example)}
+      </div>
+      {(summary.held > 1 || others > 0) && (
+        <div className="mt-0.5 flex flex-wrap gap-x-2 text-gray-500">
+          {summary.held > 1 && <span className="tabular-nums">×{summary.top.count.toLocaleString()}</span>}
+          {others > 0 && (
+            <span>
+              +{others.toLocaleString()} other reason{others === 1 ? '' : 's'}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// JobAction is the destructive action beside one job, which is a
+// different action depending on whether the job is still going.
+//
+// A finished job is archived: that retires it into history with the
+// outcome it had. Removing it would get it out of the queue too, but
+// records it as removed, so a clean run would be counted as a failure
+// by anything that reads history afterwards. Either way the files kept
+// for the job on the access point go with it, which is why both arm a
+// confirmation.
+function JobAction({
+  job,
+  onRemove,
+  onArchive,
+  pendingRemove,
+  pendingArchive,
+  compact,
+}: {
+  job: BatchJob;
+  onRemove: (id: string) => void;
+  onArchive: (id: string) => void;
+  pendingRemove: boolean;
+  pendingArchive: boolean;
+  compact?: boolean;
+}) {
+  if (job.display.key === 'completed') {
+    return (
+      <ConfirmButton
+        compact={compact}
+        label="Archive"
+        onConfirm={() => onArchive(job.id)}
+        pending={pendingArchive}
+        title={`Archive job ${job.id} — move it to history and delete the files kept for it here`}
+      />
+    );
+  }
+  return (
+    <ConfirmButton
+      compact={compact}
+      onConfirm={() => onRemove(job.id)}
+      pending={pendingRemove}
+      title={`Remove job ${job.id}`}
+    />
+  );
+}
+
+// JobCards is the jobs of an open batch card: one compact entry each,
+// with the actions a job row has.
+function JobCards({
+  batch,
+  detail,
+  usage,
+  multiAP,
+  highlighted,
+  onRemoveJob,
+  onArchiveJob,
+  onReleaseJob,
+  pendingJob,
+  pendingJobActive,
+  pendingArchive,
+  pendingArchiveActive,
+  pendingRelease,
+  pendingReleaseActive,
+  now,
+  estimates,
+}: BatchRowProps) {
+  const jobs = batch.jobs;
+  const { visible, sentinelRef, showAll, hasMore, total, shown } = useInfiniteList(jobs, 25);
+  const timed = useMemo(
+    () => (estimates ? jobs.map((j) => timedJob(j, estimates)) : undefined),
+    [jobs, estimates],
+  );
+  const scale = useMemo(
+    () => (timed && estimates ? rangeBarScale(timed, estimates.fetchedAt, now) : 0),
+    [timed, estimates, now],
+  );
+  return (
+    <>
+      <ul className="divide-y divide-gray-200" data-testid="job-cards">
+        {visible.map((j) => (
+          <li
+            key={j.id}
+            data-testid="job-card"
+            className={`space-y-1.5 px-3 py-2 ${j.id === highlighted ? 'animate-pulse bg-yellow-100' : ''}`}
+          >
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+              <Link
+                href={`/jobs/${encodeURIComponent(j.id)}`}
+                className="font-mono text-sm text-brand-700 hover:underline"
+              >
+                {j.id}
+              </Link>
+              {j.nodeName && (
+                <span className="break-all text-gray-500" title="DAG node name">
+                  {j.nodeName}
+                </span>
+              )}
+              <span>
+                <JobStatusPill display={j.display} />
+                {j.timing && <JobTimingText timing={j.timing} now={now} />}
+              </span>
+            </div>
+            {estimates && estimates.requested.has(j.id) && (
+              <JobTimeLeftCell job={timedJob(j, estimates)} scale={scale} fetchedAt={estimates.fetchedAt} now={now} />
+            )}
+            {detail === 'hold' ? (
+              <div className="line-clamp-3 break-words text-xs text-gray-700" title={j.holdReason}>
+                {j.holdReason ? displayHoldReason(j.holdReason) : <span className="text-gray-400">{NO_REASON}</span>}
+              </div>
+            ) : detail === 'usage' ? (
+              <dl className="grid grid-cols-[6.5rem_1fr] items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+                <dt>Memory (peak)</dt>
+                <dd className="min-w-0">
+                  <JobUsageCell job={j} usage={usage} read={jobMemoryReading} />
+                </dd>
+                <dt>CPU (recent)</dt>
+                <dd className="min-w-0">
+                  <JobUsageCell job={j} usage={usage} read={jobCpuReading} />
+                </dd>
+              </dl>
+            ) : j.cmd ? (
+              <div
+                className="truncate font-mono text-xs text-gray-700"
+                title={j.args ? `${j.cmd} ${j.args}` : j.cmd}
+              >
+                {j.cmd}
+                {j.args ? ' ' + j.args : ''}
+              </div>
+            ) : null}
+            {!multiAP && (
+              <div className="flex flex-wrap justify-end gap-2">
+                {j.display.key === 'held' && (
+                  <button
+                    type="button"
+                    onClick={() => onReleaseJob(j.id)}
+                    disabled={pendingReleaseActive && pendingRelease === j.id}
+                    className="min-h-9 rounded-sm border border-brand-600 bg-white px-3 py-1.5 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
+                    title={`Release held job ${j.id}`}
+                  >
+                    {pendingReleaseActive && pendingRelease === j.id ? '…' : 'Release'}
+                  </button>
+                )}
+                <JobAction
+                  job={j}
+                  onRemove={onRemoveJob}
+                  onArchive={onArchiveJob}
+                  pendingRemove={pendingJobActive && pendingJob === j.id}
+                  pendingArchive={pendingArchiveActive && pendingArchive === j.id}
+                />
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+      {total > 0 && (
+        <div ref={sentinelRef} className="px-3 py-1.5 text-[11px] text-gray-500">
+          Showing {shown.toLocaleString()} of {total.toLocaleString()} jobs
+          {hasMore && (
+            <>
+              {' '}— scroll to load more, or{' '}
+              <button type="button" onClick={showAll} className="text-brand-700 hover:underline">
+                show all
+              </button>
+            </>
+          )}
+        </div>
       )}
     </>
   );
@@ -382,11 +1222,22 @@ function BatchRow({
 // usage attributes are worth real bytes per job on a 30k queue, and they
 // are only ever read for the one batch somebody opened. Same shape as
 // the pool page's per-node slot query.
-function BatchUsage({ batchID, constraint }: { batchID: number; constraint: string }) {
+function BatchUsage({
+  batchID,
+  schedd,
+  constraint,
+}: {
+  batchID: number;
+  schedd?: string;
+  constraint: string;
+}) {
   const { data, isFetching, error } = useQuery({
-    queryKey: ['batch-usage', batchID, constraint],
+    queryKey: ['batch-usage', batchID, schedd, constraint],
     queryFn: () =>
       api.jobs.list({
+        // The batch's access point: its constraint names a cluster id,
+        // which is unique only within one.
+        schedd,
         // The batch's own constraint, so a DAG's usage covers every node
         // and sub-DAG, not just the representative (root DAGMan) cluster.
         constraint,
@@ -422,23 +1273,41 @@ function BatchUsage({ batchID, constraint }: { batchID: number; constraint: stri
 }
 
 function JobsSubTable({
+  multiAP,
+  detail,
+  usage,
   jobs,
   highlighted,
   onRemoveJob,
+  onArchiveJob,
   onReleaseJob,
   pendingJob,
   pendingJobActive,
+  pendingArchive,
+  pendingArchiveActive,
   pendingRelease,
   pendingReleaseActive,
+  now,
+  estimates,
 }: {
+  multiAP?: boolean;
+  detail: BatchDetail;
+  usage: RunningUsage | undefined;
   jobs: BatchJob[];
   highlighted: string | null;
   onRemoveJob: (id: string) => void;
+  onArchiveJob: (id: string) => void;
   onReleaseJob: (id: string) => void;
   pendingJob: string | undefined;
   pendingJobActive: boolean;
+  pendingArchive: string | undefined;
+  pendingArchiveActive: boolean;
   pendingRelease: string | undefined;
   pendingReleaseActive: boolean;
+  // Unix seconds, for running and waiting times.
+  now: number;
+  // Runtime estimates; undefined leaves the Time left column out.
+  estimates?: RuntimeEstimatesState;
 }) {
   const router = useRouter();
   // Cap each expanded batch at 25 visible jobs initially; the
@@ -453,6 +1322,17 @@ function JobsSubTable({
     total: totalJobs,
     shown: shownJobs,
   } = useInfiniteList(jobs, 25);
+  // Every job's range bar is drawn on one axis, so they compare.
+  const timed = useMemo(
+    () => (estimates ? jobs.map((j) => timedJob(j, estimates)) : undefined),
+    [jobs, estimates],
+  );
+  const scale = useMemo(
+    () => (timed && estimates ? rangeBarScale(timed, estimates.fetchedAt, now) : 0),
+    [timed, estimates, now],
+  );
+  const subColumns =
+    2 + (estimates ? 1 : 0) + (detail !== 'usage' ? 1 : 0) + (detail === 'usage' ? 2 : 1) + (multiAP ? 0 : 1);
   return (
     <div className="border-t border-gray-200">
       <table className="min-w-full text-xs">
@@ -460,9 +1340,19 @@ function JobsSubTable({
           <tr>
             <th className="px-3 py-1.5">Job</th>
             <th className="px-3 py-1.5">Status</th>
-            <th className="px-3 py-1.5">Submitted</th>
-            <th className="px-3 py-1.5">Command</th>
-            <th className="px-3 py-1.5 w-1 text-right">Actions</th>
+            {estimates && <th className="px-3 py-1.5">Time left</th>}
+            {detail !== 'usage' && <th className="px-3 py-1.5">Submitted</th>}
+            {detail === 'hold' ? (
+              <th className="px-3 py-1.5">Hold reason</th>
+            ) : detail === 'usage' ? (
+              <>
+                <th className="px-3 py-1.5">Memory (peak)</th>
+                <th className="px-3 py-1.5">CPU (recent)</th>
+              </>
+            ) : (
+              <th className="px-3 py-1.5">Command</th>
+            )}
+            {!multiAP && <th className="px-3 py-1.5 w-1 text-right">Actions</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-200">
@@ -476,7 +1366,7 @@ function JobsSubTable({
               // <td> doesn't need to because the inner <Link> does
               // its own navigation and Next's router.push to the
               // same href is a no-op.
-              onClick={() => router.push(`/jobs/${j.id}`)}
+              onClick={() => router.push(`/jobs/${encodeURIComponent(j.id)}`)}
               className={
                 'cursor-pointer ' +
                 (j.id === highlighted
@@ -491,7 +1381,7 @@ function JobsSubTable({
               }>
               <td className="px-3 py-1.5 font-mono">
                 <Link
-                  href={`/jobs/${j.id}`}
+                  href={`/jobs/${encodeURIComponent(j.id)}`}
                   className="text-brand-700 hover:underline"
                 >
                   {j.id}
@@ -507,50 +1397,95 @@ function JobsSubTable({
               </td>
               <td className="px-3 py-1.5">
                 <JobStatusPill display={j.display} />
+                {j.timing && <JobTimingText timing={j.timing} now={now} />}
               </td>
-              <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap">
-                {j.submittedUnix
-                  ? new Date(j.submittedUnix * 1000).toLocaleString()
-                  : '—'}
-              </td>
-              <td className="px-3 py-1.5 text-gray-700 max-w-md truncate">
-                {j.cmd ? (
-                  <span className="font-mono">
-                    {j.cmd}
-                    {j.args ? ' ' + j.args : ''}
-                  </span>
-                ) : (
-                  '—'
-                )}
-              </td>
-              <td
-                className="px-3 py-1.5 text-right whitespace-nowrap"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="inline-flex items-center gap-1.5">
-                  {j.display.key === 'held' && (
-                    <button
-                      type="button"
-                      onClick={() => onReleaseJob(j.id)}
-                      disabled={
-                        pendingReleaseActive && pendingRelease === j.id
-                      }
-                      className="rounded-sm border border-brand-600 bg-white px-2 py-0.5 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
-                      title={`Release held job ${j.id}`}
-                    >
-                      {pendingReleaseActive && pendingRelease === j.id
-                        ? '…'
-                        : 'Release'}
-                    </button>
+              {estimates && (
+                <td className="px-3 py-1.5">
+                  {/* A job past the request's cap was not asked about:
+                      blank, not "no history". */}
+                  {estimates.requested.has(j.id) && (
+                    <JobTimeLeftCell
+                      job={timedJob(j, estimates)}
+                      scale={scale}
+                      fetchedAt={estimates.fetchedAt}
+                      now={now}
+                    />
                   )}
-                  <ConfirmButton
-                    compact
-                    onConfirm={() => onRemoveJob(j.id)}
-                    pending={pendingJobActive && pendingJob === j.id}
-                    title={`Remove job ${j.id}`}
-                  />
-                </div>
-              </td>
+                </td>
+              )}
+              {detail !== 'usage' && (
+                <td
+                  className="px-3 py-1.5 text-gray-500 whitespace-nowrap"
+                  title={j.submittedUnix ? new Date(j.submittedUnix * 1000).toLocaleString() : undefined}
+                >
+                  {j.submittedUnix ? formatSubmitted(j.submittedUnix) : '—'}
+                </td>
+              )}
+              {detail === 'hold' ? (
+                <td className="px-3 py-1.5 text-gray-700">
+                  <div className="max-w-sm truncate" title={j.holdReason}>
+                    {j.holdReason ? (
+                      displayHoldReason(j.holdReason)
+                    ) : (
+                      <span className="text-gray-400">{NO_REASON}</span>
+                    )}
+                  </div>
+                </td>
+              ) : detail === 'usage' ? (
+                <>
+                  <td className="px-3 py-1.5">
+                    <JobUsageCell job={j} usage={usage} read={jobMemoryReading} />
+                  </td>
+                  <td className="px-3 py-1.5">
+                    <JobUsageCell job={j} usage={usage} read={jobCpuReading} />
+                  </td>
+                </>
+              ) : (
+                <td className="px-3 py-1.5 text-gray-700 max-w-md truncate">
+                  {j.cmd ? (
+                    <span className="font-mono">
+                      {j.cmd}
+                      {j.args ? ' ' + j.args : ''}
+                    </span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+              )}
+              {!multiAP && (
+                <td
+                  className="px-3 py-1.5 text-right whitespace-nowrap"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="inline-flex items-center gap-1.5">
+                    {j.display.key === 'held' && (
+                      <button
+                        type="button"
+                        onClick={() => onReleaseJob(j.id)}
+                        disabled={
+                          pendingReleaseActive && pendingRelease === j.id
+                        }
+                        className="rounded-sm border border-brand-600 bg-white px-2 py-0.5 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50"
+                        title={`Release held job ${j.id}`}
+                      >
+                        {pendingReleaseActive && pendingRelease === j.id
+                          ? '…'
+                          : 'Release'}
+                      </button>
+                    )}
+                    <JobAction
+                      compact
+                      job={j}
+                      onRemove={onRemoveJob}
+                      onArchive={onArchiveJob}
+                      pendingRemove={pendingJobActive && pendingJob === j.id}
+                      pendingArchive={
+                        pendingArchiveActive && pendingArchive === j.id
+                      }
+                    />
+                  </div>
+                </td>
+              )}
             </tr>
           ))}
           {/* Same sentinel + show-all pattern as the batch table.
@@ -560,7 +1495,7 @@ function JobsSubTable({
               window scroll. */}
           {totalJobs > 0 && (
             <tr ref={jobSentinelRef as unknown as React.Ref<HTMLTableRowElement>}>
-              <td colSpan={5} className="px-3 py-1.5 text-[11px] text-gray-500">
+              <td colSpan={subColumns} className="px-3 py-1.5 text-[11px] text-gray-500">
                 Showing {shownJobs.toLocaleString()} of {totalJobs.toLocaleString()} jobs
                 {hasMoreJobs && (
                   <>
@@ -579,6 +1514,101 @@ function JobsSubTable({
           )}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// HoldSummaryCell is a batch's hold reasons in one line: a real message
+// from the most common kind, how many jobs it covers, and how many other
+// kinds there are. The message is truncated to the cell and whole in the
+// tooltip.
+function HoldSummaryCell({ summary }: { summary: HoldSummary | undefined }) {
+  if (!summary) return <span className="text-gray-400">—</span>;
+  const others = summary.otherReasons;
+  return (
+    <div className="flex items-baseline gap-1.5 whitespace-nowrap text-xs">
+      {/* A width on the message, not the cell: a table cell grows to fit
+          its content whatever its max-width says, and a hold message is
+          longer than the rest of the row put together. */}
+      <span className="max-w-[13rem] truncate" title={summary.top.example}>
+        {displayHoldReason(summary.top.example)}
+      </span>
+      {summary.held > 1 && (
+        <span
+          className="shrink-0 tabular-nums text-gray-500"
+          title={`${summary.top.count.toLocaleString()} of ${summary.held.toLocaleString()} held jobs`}
+        >
+          ×{summary.top.count.toLocaleString()}
+        </span>
+      )}
+      {others > 0 && (
+        <span className="shrink-0 text-gray-500">
+          +{others.toLocaleString()} other reason{others === 1 ? '' : 's'}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// JobUsageCell is one job's bar. A job the usage answer has not covered
+// yet reads as loading while the answer is on its way, and otherwise as
+// not reported -- never as a zero.
+function JobUsageCell({
+  job,
+  usage,
+  read,
+}: {
+  job: BatchJob;
+  usage: RunningUsage | undefined;
+  read: (u: JobUsage | undefined) => UsageReading;
+}) {
+  const u = usage?.byJob.get(job.id);
+  if (!u && usage?.loading) return <UsageBar reading={undefined} loading />;
+  return <UsageBar reading={read(u)} />;
+}
+
+// formatSubmitted is a submit time to the minute: seconds are noise in a
+// queue listing, and dropping them is what lets the row fit beside the
+// Progress and User columns. The cell's tooltip has the full time.
+function formatSubmitted(unix: number): string {
+  return new Date(unix * 1000).toLocaleString(undefined, {
+    dateStyle: 'short',
+    timeStyle: 'short',
+  });
+}
+
+// JobTimingText is how long a job has been in its current state, beside
+// its status: a running job's current run, an idle job's current wait.
+function JobTimingText({ timing, now }: { timing: JobTiming; now: number }) {
+  const d = humanDuration(now - timing.since);
+  return (
+    <span
+      className="ml-1.5 whitespace-nowrap text-[11px] tabular-nums text-gray-500"
+      title={timing.kind === 'running' ? `Running for ${d}` : `Waiting for ${d}`}
+    >
+      {d}
+    </span>
+  );
+}
+
+// LongestRunning is the longest current run among a batch's jobs, under
+// its status pills: the one number that says whether a batch's jobs are
+// minutes or days into their work.
+function LongestRunning({ jobs, now }: { jobs: BatchJob[]; now: number }) {
+  let earliest: number | undefined;
+  for (const j of jobs) {
+    if (j.timing?.kind === 'running' && (earliest === undefined || j.timing.since < earliest)) {
+      earliest = j.timing.since;
+    }
+  }
+  if (earliest === undefined) return null;
+  const d = humanDuration(now - earliest);
+  return (
+    <div
+      className="mt-0.5 whitespace-nowrap text-[11px] tabular-nums text-gray-500"
+      title={`The longest-running job in this batch has been running for ${d}`}
+    >
+      longest running {d}
     </div>
   );
 }
@@ -623,7 +1653,7 @@ function StatusPill({
   const label = DISPLAY_STATUS_LABEL[statusKey];
   return (
     <span
-      className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium tabular-nums ${statusPillCls(statusKey)}`}
+      className={`inline-flex whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium tabular-nums ${statusPillCls(statusKey)}`}
     >
       {count > 1 ? `${count} ` : ''}
       {label}

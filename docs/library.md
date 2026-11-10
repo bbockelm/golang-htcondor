@@ -117,6 +117,49 @@ plain `queue`, count form `queue 5`, parameter form
 `QueryWithOptions` is the preferred entry point; `Query` (the older
 form) stays for back-compatibility but applies no limits.
 
+### Submitting a job on hold
+
+`hold = true` works through `SubmitRemote`, and the job it produces is
+held and stays held — it is never idle, even momentarily, so it cannot
+match and start.
+
+```
+universe   = vanilla
+executable = /bin/true
+hold       = true
+hold_reason = waiting for the input dataset to land
+queue
+```
+
+This is worth saying because `condor_submit` refuses the combination
+outright ("Cannot set hold to 'true' when using -remote or -spool"), and
+because every submission through `SubmitRemote` spools. A spooling
+submission has a hold of its own: the schedd creates the job's spool
+directory only for a job committed held with hold code 16, and rewrites
+`Iwd` to point at it when that hold is released. So the submitter's hold
+cannot simply be left in place.
+
+What reconciles the two is `JobStatusOnRelease`, which tells the schedd
+where to send the job when a hold ends. The job is submitted with the
+spooling hold and `JobStatusOnRelease = 5`, and the schedd's release
+moves it straight to held in the same transaction. Holding the job after
+the release would not do: that is two transactions with matchmaking free
+to run in between, and a job can match in under two seconds.
+
+Two details differ from a local `condor_submit`:
+
+- The finished job's `HoldReasonCode` is 1 (`UserRequest`), not 15
+  (`SubmittedOnHold`). The release takes the hold reason with it, and
+  `HoldReason` is a protected attribute that only a queue superuser may
+  write — so the reason is put back with a hold action, and the schedd
+  records `UserRequest` for those. The reason text is the submitter's.
+- `hold_reason_code` from the submit file is not carried through, for
+  the same reason: the code a hold action records is not selectable.
+
+`SubmitHoldReason` on the job ad holds the reason the submitter asked
+for. It is set only on jobs submitted this way, and it survives the
+release, which is how the reason is recovered after it.
+
 ## Placementd
 
 `*htcondor.Placementd` talks to `condor_placementd`, the daemon that

@@ -29,14 +29,22 @@ import (
 type UpstreamRefreshMode string
 
 const (
-	// UpstreamRefreshAuto keeps and uses the credential when the provider
-	// hands one over, and does nothing when it does not.
+	// UpstreamRefreshAuto asks the provider for offline_access, then
+	// keeps and uses the credential when it hands one over and does
+	// nothing when it does not.
 	//
-	// The default, because whether a provider releases offline_access is
-	// the provider's decision and not every one will. What this server
-	// ASKS for is already the operator's to set (HTTP_API_OAUTH2_SCOPES);
-	// auto does not add to that request, so enabling this cannot break a
-	// login against a provider that rejects a scope it does not know.
+	// The default, because without the request there is nothing to keep:
+	// a provider releases a refresh token only to a client that asked,
+	// so a mode that would store one but never asks is a mode that never
+	// stores one. Whether the request is granted stays the provider's
+	// decision and not every one will grant it.
+	//
+	// Asking can itself be refused -- a provider that approves scopes per
+	// client may reject the whole authorization over a scope the client
+	// does not hold. That is recoverable rather than fatal: the first
+	// such refusal is absorbed and every sign-in after it asks without
+	// the scope. See dropOfflineAccessAndRetry in oauth2_sso.go. A
+	// deployment that would rather not ask at all sets off.
 	UpstreamRefreshAuto UpstreamRefreshMode = "auto"
 
 	// UpstreamRefreshOn is auto plus a complaint: a provider that returns
@@ -44,11 +52,11 @@ const (
 	// about, rather than a silent fallback to never checking.
 	UpstreamRefreshOn UpstreamRefreshMode = "on"
 
-	// UpstreamRefreshOff never stores the credential. For a deployment
-	// that would rather not hold one at all, which is a defensible
-	// position: it is a long-lived key to somebody else's identity
-	// provider, and the account-database path covers the same ground
-	// where an account database exists.
+	// UpstreamRefreshOff neither asks for offline_access nor stores the
+	// credential. For a deployment that would rather not hold one at
+	// all, which is a defensible position: it is a long-lived key to
+	// somebody else's identity provider, and the account-database path
+	// covers the same ground where an account database exists.
 	UpstreamRefreshOff UpstreamRefreshMode = "off"
 )
 
@@ -267,7 +275,7 @@ func (h *Handler) rememberUpstreamRefresh(ctx context.Context, subject, provider
 				"HTTP_API_UPSTREAM_REFRESH is on but the identity provider returned no refresh token; "+
 					"membership will not be re-checked for this user",
 				"subject", subject, "issuer", issuer,
-				"hint", "add offline_access to HTTP_API_OAUTH2_SCOPES, and check the provider releases it")
+				"hint", "this server asked for offline_access; check the provider approves it for this client")
 		}
 		// Still a delete: see Save. A provider that stops renewing has
 		// retired the old credential whatever the mode says.

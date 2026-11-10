@@ -22,6 +22,7 @@ import (
 // constraint that stopped being applied -- or was applied to a projected
 // ad that no longer carries the attribute -- fails here.
 func TestAggregateJobsAgainstARealSchedd(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
 	}
@@ -54,22 +55,7 @@ func TestAggregateJobsAgainstARealSchedd(t *testing.T) {
 	if err := writeMiniCondorConfig(configFile, tempDir, socketDir, passwordsDir, "test.htcondor.org", t); err != nil {
 		t.Fatalf("config: %v", err)
 	}
-	os.Setenv("CONDOR_CONFIG", configFile)
-	defer func() {
-		// Unset FIRST, then reload. htcondor caches the parsed default
-		// config in a process-global that nothing invalidates, so any
-		// test that points CONDOR_CONFIG at a mini-condor leaves that
-		// config loaded for every test after it. This one sets
-		// SEC_CLIENT_AUTHENTICATION_METHODS = FS,TOKEN, which is why
-		// TestConfigureSecurityForTokenAuthMethods then failed asserting
-		// SSL was among the defaults.
-		//
-		// The other integration tests have the same hazard and get away
-		// with it only because Go runs test files in name order and they
-		// sort after auth_test.go. This file sorts before it.
-		os.Unsetenv("CONDOR_CONFIG")
-		htcondor.ReloadDefaultConfig()
-	}()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -85,7 +71,7 @@ func TestAggregateJobsAgainstARealSchedd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schedd address: %v", err)
 	}
-	schedd := htcondor.NewSchedd("local", scheddAddr)
+	schedd := htcondor.NewSchedd("local", scheddAddr).WithConfig(htcCfg)
 
 	const submitted = 4
 	for i := 0; i < submitted; i++ {

@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,9 +12,10 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
 )
@@ -94,6 +96,9 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	if s.refusePlacementdShare(w, r) {
+		return
+	}
 
 	// Public shares need to act on behalf of the job owner at redeem time;
 	// that requires a signing key for JWT minting. Bail early with a
@@ -125,7 +130,7 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 	// Owner = authenticated user without "@uidDomain" — schedd's Owner
 	// attribute uses the bare username; we re-add the suffix at redeem
 	// time when minting the JWT.
-	owner := strings.SplitN(htcondor.GetAuthenticatedUserFromContext(ctx), "@", 2)[0]
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
 	if owner == "" {
 		s.writeError(w, http.StatusUnauthorized, "Could not determine authenticated user")
 		return
@@ -138,12 +143,11 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 	// download, but on a permissively-configured READ ACL it could
 	// succeed (and the audit log would show the requester as the
 	// downloader, hiding the actual data subject).
-	jobConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && Owner == %s",
-		cluster, proc, classadStringLit(owner))
-	// getSchedd, not the s.schedd snapshot: this server replaces its
+	jobConstraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && %s", cluster, proc, s.ownerClause(owner))
+	// scheddFor, not the s.schedd snapshot: this server replaces its
 	// schedd handle when the collector reports a new address, and a
 	// captured pointer keeps dialling a socket that no longer exists.
-	ads, _, qerr := s.getSchedd().QueryWithOptions(ctx, jobConstraint, &htcondor.QueryOptions{
+	ads, qerr := s.queryJobs(ctx, jobConstraint, &htcondor.QueryOptions{
 		Projection: []string{"ClusterId", "ProcId", "Owner"},
 		Limit:      1,
 	})
@@ -159,13 +163,21 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 		return
 	}
 
+	authz, err := shareurl.GrantAuthz(shareurl.KindOutput, callerToken(ctx))
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	exp := time.Now().Add(ttl)
 	tok, err := s.signShareToken(shareurl.Payload{
+		Schedd:  routedSchedd(ctx),
 		Cluster: cluster,
 		Proc:    proc,
 		Owner:   owner,
 		Exp:     exp.Unix(),
 		Kind:    shareurl.KindOutput,
+		Authz:   authz,
 	})
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to sign token: %v", err))
@@ -208,14 +220,24 @@ func (s *Handler) handleSharedOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, err := s.redeemContext(r, payload.Owner)
+	authz, err := shareurl.RedeemAuthz(payload)
+	if err != nil {
+		s.logger.Info(logging.DestinationHTTP, "Share token refused", "job_id", payload.JobID(), "error", err)
+		s.writeError(w, http.StatusForbidden, "This URL does not authorize this operation")
+		return
+	}
+	ctx, err := s.redeemContext(r, payload.Owner, authz)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to build redeem context", "error", err)
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if ctx, err = s.shareRedeemTarget(ctx, payload); err != nil {
+		s.writeShareTargetError(w, payload, err)
+		return
+	}
 
-	jobID := fmt.Sprintf("%d.%d", payload.Cluster, payload.Proc)
+	jobID := s.jobPathID(ctx, payload.Cluster, payload.Proc)
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", payload.Cluster, payload.Proc)
 
 	w.Header().Set("Content-Type", "application/x-tar")
@@ -227,7 +249,7 @@ func (s *Handler) handleSharedOutput(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 
-	errChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, w)
+	errChan := s.scheddFor(ctx).ReceiveJobSandbox(ctx, constraint, w)
 	if err := <-errChan; err != nil {
 		// Headers and body already started; just log.
 		s.logger.Error(logging.DestinationSchedd,
@@ -252,7 +274,7 @@ func requestedTTL(r *http.Request) time.Duration {
 
 // redeemContext builds the schedd-facing context a redeemed share token
 // acts under: a freshly minted, short-lived JWT for the token's owner,
-// cached and wrapped in a TOKEN-only SecurityConfig.
+// limited to authz, cached and wrapped in a TOKEN-only SecurityConfig.
 //
 // WithToken alone is not enough -- every schedd path reads the
 // SecurityConfig directly from ctx (see schedd_transfer.go,
@@ -261,7 +283,7 @@ func requestedTTL(r *http.Request) time.Duration {
 //
 // The returned errors are safe to show a caller: they name missing
 // server configuration, not anything about the token.
-func (s *Handler) redeemContext(r *http.Request, owner string) (context.Context, error) {
+func (s *Handler) redeemContext(r *http.Request, owner string, authz []string) (context.Context, error) {
 	// Re-add the @uidDomain suffix the schedd's Owner attribute lacks.
 	username := owner
 	if !strings.Contains(username, "@") {
@@ -274,15 +296,18 @@ func (s *Handler) redeemContext(r *http.Request, owner string) (context.Context,
 		return nil, fmt.Errorf("TRUST_DOMAIN not configured; cannot redeem share token")
 	}
 
+	// Limited to authz, which generateMCPAccessJWT refuses to leave
+	// empty: a token with no limits carries everything its subject may
+	// do, which is more than any share URL is for.
 	now := time.Now()
-	jwt, err := security.GenerateJWT(
+	jwt, err := generateMCPAccessJWT(
 		filepath.Dir(s.signingKeyPath),
 		filepath.Base(s.signingKeyPath),
 		username,
 		s.trustDomain,
 		now.Unix(),
 		now.Add(2*time.Minute).Unix(),
-		nil,
+		authz,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to authorize share token")
@@ -291,7 +316,7 @@ func (s *Handler) redeemContext(r *http.Request, owner string) (context.Context,
 	if err != nil {
 		return nil, fmt.Errorf("failed to authorize share token")
 	}
-	secConfig, err := ConfigureSecurityForTokenWithCacheAndFallback(jwt, entry.SessionCache, false)
+	secConfig, err := configureSecurityForToken(s.clientConfig, jwt, entry.SessionCache, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to authorize share token")
 	}
@@ -348,6 +373,9 @@ func (s *Handler) handleJobInputShare(w http.ResponseWriter, r *http.Request, jo
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	if s.refusePlacementdShare(w, r) {
+		return
+	}
 	if s.signingKeyPath == "" {
 		s.writeError(w, http.StatusNotImplemented,
 			"Share URLs require HTTP_API_SIGNING_KEY (or SEC_TOKEN_POOL_SIGNING_KEY_FILE) to be configured")
@@ -373,7 +401,7 @@ func (s *Handler) handleJobInputShare(w http.ResponseWriter, r *http.Request, jo
 
 	// Owner without "@uidDomain" -- the schedd's Owner attribute uses
 	// the bare username; redeemContext re-adds the suffix.
-	owner := strings.SplitN(htcondor.GetAuthenticatedUserFromContext(ctx), "@", 2)[0]
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
 	if owner == "" {
 		s.writeError(w, http.StatusUnauthorized, "Could not determine authenticated user")
 		return
@@ -383,7 +411,13 @@ func (s *Handler) handleJobInputShare(w http.ResponseWriter, r *http.Request, jo
 	// this a permissive schedd READ ACL would let someone mint a URL
 	// that writes into a job they do not own.
 	ownerScope := func(c string) (string, error) {
-		return fmt.Sprintf("(%s) && Owner == %s", c, classadStringLit(owner)), nil
+		return fmt.Sprintf("(%s) && %s", c, s.ownerClause(owner)), nil
+	}
+
+	authz, err := shareurl.GrantAuthz(shareurl.KindInput, callerToken(ctx))
+	if err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
 	}
 
 	procAds, remaining, err := s.procAdsToMintFor(ctx, target, ownerScope)
@@ -416,18 +450,20 @@ func (s *Handler) handleJobInputShare(w http.ResponseWriter, r *http.Request, jo
 			continue
 		}
 		tok, terr := s.signShareToken(shareurl.Payload{
+			Schedd:  routedSchedd(ctx),
 			Cluster: cluster,
 			Proc:    proc,
 			Owner:   owner,
 			Exp:     exp.Unix(),
 			Kind:    shareurl.KindInput,
+			Authz:   authz,
 		})
 		if terr != nil {
 			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to sign token: %v", terr))
 			return
 		}
 		uploads = append(uploads, ShareInputUpload{
-			JobID:         fmt.Sprintf("%d.%d", cluster, proc),
+			JobID:         s.jobPathID(ctx, cluster, proc),
 			URL:           fmt.Sprintf("%s/api/v1/share/input?t=%s", s.shareURLBase(r), tok),
 			ExpectedFiles: htcondor.SpoolInputAllowSet(ad),
 		})
@@ -467,7 +503,7 @@ func (s *Handler) procAdsToMintFor(
 	ownerScope func(string) (string, error),
 ) ([]*classad.ClassAd, int, error) {
 	if !target.AllProcs {
-		ad, err := fetchProcAdForSpoolWith(ctx, s.getSchedd(), target.Cluster, target.Proc,
+		ad, err := fetchProcAdForSpoolWith(ctx, s.scheddFor(ctx), target.Cluster, target.Proc,
 			ownerScope, jobInputShareProjection)
 		if err != nil || ad == nil {
 			return nil, 0, err
@@ -478,7 +514,7 @@ func (s *Handler) procAdsToMintFor(
 		return []*classad.ClassAd{ad}, 0, nil
 	}
 
-	ads, err := spool.FetchProcAdsAwaitingInput(ctx, s.getSchedd(), target.Cluster,
+	ads, err := spool.FetchProcAdsAwaitingInput(ctx, s.scheddFor(ctx), target.Cluster,
 		maxMintedURLs, ownerScope, jobInputShareProjection)
 	if err != nil {
 		return nil, 0, err
@@ -530,22 +566,36 @@ func (s *Handler) handleSharedInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, err := s.redeemContext(r, payload.Owner)
+	authz, err := shareurl.RedeemAuthz(payload)
+	if err != nil {
+		s.logger.Info(logging.DestinationHTTP, "Share token refused", "job_id", payload.JobID(), "error", err)
+		s.writeError(w, http.StatusForbidden, "This URL does not authorize this operation")
+		return
+	}
+	ctx, err := s.redeemContext(r, payload.Owner, authz)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to build redeem context", "error", err)
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if ctx, err = s.shareRedeemTarget(ctx, payload); err != nil {
+		s.writeShareTargetError(w, payload, err)
+		return
+	}
+	if s.multi != nil {
+		// The upload is applied when it finishes; see NoteWrite.
+		defer s.multi.svc.NoteWrite(routedSchedd(ctx))
+	}
 
-	jobID := payload.JobID()
+	jobID := s.jobPathID(ctx, payload.Cluster, payload.Proc)
 	// Scope the lookup to the token's owner even though the mint checked
 	// ownership. A schedd whose queue has been reset hands out cluster
 	// ids again from the start, so an outstanding token for 42.0 can
 	// outlive the job it was minted for and name somebody else's new one.
 	// Scoped, that token finds nothing instead of writing into it.
-	procAd, err := fetchProcAdForSpoolWith(ctx, s.getSchedd(), payload.Cluster, payload.Proc,
+	procAd, err := fetchProcAdForSpoolWith(ctx, s.scheddFor(ctx), payload.Cluster, payload.Proc,
 		func(c string) (string, error) {
-			return fmt.Sprintf("(%s) && Owner == %s", c, classadStringLit(payload.Owner)), nil
+			return fmt.Sprintf("(%s) && %s", c, s.ownerClause(payload.Owner)), nil
 		}, jobInputShareProjection)
 	if err != nil {
 		s.writeSpoolError(w, err)
@@ -569,13 +619,17 @@ func (s *Handler) handleSharedInput(w http.ResponseWriter, r *http.Request) {
 	// MaxBytesReader, not io.LimitReader: a LimitReader reports its cap
 	// as io.EOF, indistinguishable from the end of the upload, so an
 	// oversized body would spool as a silently truncated tar.
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	setBodyLimit(w, r, maxUploadBytes)
 	names := newTarNameRecorder()
 	body := io.TeeReader(r.Body, names)
 
-	if err := s.getSchedd().SpoolJobFilesFromTar(ctx, []*classad.ClassAd{procAd}, body); err != nil {
+	if err := s.scheddFor(ctx).SpoolJobFilesFromTar(ctx, []*classad.ClassAd{procAd}, body); err != nil {
 		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+			return
+		}
+		if errors.Is(err, htcondor.ErrInvalidTarEntry) {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid upload: %v", err))
 			return
 		}
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to spool job files: %v", err))
@@ -596,4 +650,99 @@ func (s *Handler) handleSharedInput(w http.ResponseWriter, r *http.Request) {
 			"job_id", jobID, "ignored", ignored, "expected", expected)
 	}
 	s.writeJSON(w, http.StatusOK, result)
+}
+
+// errShareNoSchedd is a share URL with no access point, redeemed by a
+// multi-AP server.
+var errShareNoSchedd = errors.New("this URL does not name an access point")
+
+// errShareOtherSchedd is a share URL naming another schedd, redeemed by
+// a single-AP server.
+var errShareOtherSchedd = errors.New("this URL is for another access point")
+
+// shareRedeemTarget routes a redeemed share URL to the AP it names. In
+// multi-AP mode the URL must carry one (its "s" member, signed with the
+// rest): a URL without it is refused, because guessing would act on
+// whichever AP has a job with that number. They are short-lived, so a
+// URL minted before this server fronted several APs simply expires. In
+// single-AP mode a URL that names an AP must name this server's schedd;
+// one without is unchanged.
+func (s *Handler) shareRedeemTarget(ctx context.Context, p *shareurl.Payload) (context.Context, error) {
+	if s.multi == nil {
+		if p.Schedd != "" {
+			if sch := s.getSchedd(); sch == nil || !strings.EqualFold(sch.Name(), p.Schedd) {
+				return nil, errShareOtherSchedd
+			}
+		}
+		return ctx, nil
+	}
+	if p.Schedd == "" {
+		return nil, errShareNoSchedd
+	}
+	m, err := s.multi.svc.Member(p.Schedd)
+	if err != nil {
+		return nil, err
+	}
+	// The AP's own verdict on the URL's owner, as for any routed action.
+	user, err := s.multi.svc.UserFor(p.Owner)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.multi.svc.AdmitTo(ctx, m, user); err != nil {
+		return nil, err
+	}
+	if p.Kind == shareurl.KindInput {
+		s.multi.svc.NoteWrite(m.Name)
+	}
+	id := jobid.ID{Schedd: m.Name, Cluster: int64(p.Cluster), Proc: int64(p.Proc)}
+	return multiap.WithTarget(ctx, multiap.Target{Member: m, ID: id}), nil
+}
+
+// writeShareTargetError answers a share URL that could not be routed.
+func (s *Handler) writeShareTargetError(w http.ResponseWriter, p *shareurl.Payload, err error) {
+	s.logger.Info(logging.DestinationHTTP, "Share token refused", "job_id", p.JobID(), "schedd", p.Schedd, "error", err)
+	switch {
+	case errors.Is(err, errShareNoSchedd), errors.Is(err, errShareOtherSchedd):
+		s.writeError(w, http.StatusForbidden, "This URL cannot be redeemed on this server: "+err.Error()+"; ask for a new one")
+	default:
+		// Whoever holds the URL is not authenticated: the status and the
+		// reason code, never the detail (a trust probe's error, say,
+		// names this server's trust domain).
+		status := multiap.StatusOf(err)
+		msg := "This URL's access point cannot be reached right now"
+		if multiap.ReasonOf(err) == multiap.ReasonUnknownAP {
+			msg = "This URL names an access point this server does not serve"
+		}
+		if multiap.ReasonOf(err) == multiap.ReasonDenied {
+			msg = "This URL's access point refuses its owner"
+		}
+		s.writeJSON(w, status, map[string]any{"error": http.StatusText(status), "code": status,
+			"message": msg, "reason": multiap.ReasonOf(err)})
+	}
+}
+
+// callerToken is the credential a request presents to HTCondor, which
+// bounds what a URL it mints may authorize. Empty when it presents none.
+func callerToken(ctx context.Context) string {
+	sec, ok := htcondor.GetSecurityConfigFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return sec.Token
+}
+
+// refusePlacementdShare refuses a share link for an account the placementd
+// assigned outside UID_DOMAIN: a link is redeemed as the job's Owner in
+// UID_DOMAIN, which would not be that account.
+func (s *Handler) refusePlacementdShare(w http.ResponseWriter, r *http.Request) bool {
+	sd, ok := s.placementdSession(r)
+	if !ok {
+		return false
+	}
+	if i := strings.LastIndex(sd.Placement.Account, "@"); i >= 0 && sd.Placement.Account[i+1:] == s.uidDomain {
+		return false
+	}
+	s.writeError(w, http.StatusForbidden,
+		"Share links are not available to accounts outside this access point's domain.")
+	return true
 }

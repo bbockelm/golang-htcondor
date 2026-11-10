@@ -1,6 +1,11 @@
 package httpserver
 
-import "github.com/bbockelm/golang-htcondor/logging"
+import (
+	"strconv"
+	"strings"
+
+	"github.com/bbockelm/golang-htcondor/logging"
+)
 
 // Dynamic parameters: the setters a reconfigure (SIGHUP, or condor_reconfig via
 // DC_RECONFIG) calls on an already-running server.
@@ -56,6 +61,61 @@ func (h *Handler) SetMCPDisabledTools(spec string) {
 	h.mcpServer.SetDisabledTools(spec)
 }
 
+// SetMCPRedactSecrets turns credential masking on tool results on or off.
+//
+// The two masking settings are applied together because the rule set is
+// built from both, and a reconfigure delivers one parameter at a time --
+// so each setter records its own and re-applies the pair.
+//
+// No-op when MCP is disabled, since there is then no server to tell.
+func (h *Handler) SetMCPRedactSecrets(spec string) {
+	if h.mcpServer == nil {
+		return
+	}
+	h.mcpDisableSecretRedaction = !h.reconfigBool("HTTP_API_MCP_REDACT_SECRETS", spec, true)
+	h.applyMCPRedaction()
+}
+
+// reconfigBool parses a boolean setting delivered by a reconfigure,
+// keeping def when it is unset or unparseable.
+//
+// Startup fails hard on a malformed boolean, because an operator who got
+// one wrong should find out before the daemon is serving. A reconfigure
+// cannot do that -- the daemon is already up and holding connections --
+// so a typo keeps the previous meaning and is logged. Which value a typo
+// falls back to is the whole decision here, and for masking it is "on":
+// the alternative is a setting that silently stops protecting anything
+// and reads, in the config file, as though it still does.
+func (h *Handler) reconfigBool(name, spec string, def bool) bool {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return def
+	}
+	v, err := strconv.ParseBool(spec)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP,
+			"Reconfigure: ignoring a setting that is not a boolean; keeping the default",
+			"setting", name, "value", spec, "default", def)
+		return def
+	}
+	return v
+}
+
+// SetMCPRedactDisabledRules installs the site's turned-off masking rules.
+//
+// No-op when MCP is disabled, since there is then no server to tell.
+func (h *Handler) SetMCPRedactDisabledRules(spec string) {
+	if h.mcpServer == nil {
+		return
+	}
+	h.mcpRedactDisabledRules = spec
+	h.applyMCPRedaction()
+}
+
+func (h *Handler) applyMCPRedaction() {
+	h.mcpServer.SetSecretRedaction(!h.mcpDisableSecretRedaction, h.mcpRedactDisabledRules)
+}
+
 // The authorization group lists are dynamic.
 //
 // They are the settings an operator most often gets wrong on a first
@@ -103,6 +163,47 @@ func (h *Handler) SetWebUIAccessGroups(raw string) { h.webuiAccessGroups.set(raw
 // restart as well as change who reaches it.
 func (h *Handler) SetWebUIAdminGroups(raw string) { h.webuiAdminGroups.set(raw) }
 
+// The web UI's branding is dynamic.
+//
+// Each setting is read when a page or an asset is served and nothing is
+// built from any of it, so a site can try a logo, a colour or a name and
+// see the result on the next page load. The two that name files --
+// the branding directory and the stylesheet -- are re-checked here as
+// well, which is how a path that was wrong at startup starts working
+// without a restart.
+
+// SetWebUISiteName installs the name in the sidebar and the browser tab.
+func (h *Handler) SetWebUISiteName(v string) {
+	h.branding.update(func(o *brandingOptions) { o.SiteName = v })
+}
+
+// SetWebUISiteTagline installs the line under the name in the sidebar.
+func (h *Handler) SetWebUISiteTagline(v string) {
+	h.branding.update(func(o *brandingOptions) { o.SiteTagline = v })
+}
+
+// SetWebUIFooterLogos installs the footer's institutional band. A value
+// that does not parse leaves the previous band in place and says so in
+// the log.
+func (h *Handler) SetWebUIFooterLogos(v string) {
+	h.branding.update(func(o *brandingOptions) { o.FooterLogos = v })
+}
+
+// SetWebUIBrandingDir installs the directory served under /branding/.
+func (h *Handler) SetWebUIBrandingDir(v string) {
+	h.branding.update(func(o *brandingOptions) { o.Dir = v })
+}
+
+// SetWebUICustomCSS installs the stylesheet served at /branding.css.
+func (h *Handler) SetWebUICustomCSS(v string) {
+	h.branding.update(func(o *brandingOptions) { o.CSSFile = v })
+}
+
+// SetWebUIFavicon installs the browser tab icon.
+func (h *Handler) SetWebUIFavicon(v string) {
+	h.branding.update(func(o *brandingOptions) { o.Favicon = v })
+}
+
 // SetSuperuserGroups installs the groups permitted to use superuser mode.
 //
 // Membership only. Superuser mode builds a policy object and a signing
@@ -112,10 +213,53 @@ func (h *Handler) SetWebUIAdminGroups(raw string) { h.webuiAdminGroups.set(raw) 
 // check goes through the group list.
 func (h *Handler) SetSuperuserGroups(raw string) {
 	h.superuserGroups.set(raw)
-	if h.superuserPolicy == nil && h.superuserGroups.configured() {
+	h.warnIfSuperuserNeedsRestart("HTTP_API_SUPERUSER_GROUP")
+}
+
+// SetProjectLeadsFile installs HTTP_API_PROJECT_LEADS_FILE and re-reads it.
+//
+// Called on every reconfigure, not only when the path changes: the usual
+// reason to reconfigure is that the file was edited. (The file is also
+// re-checked for changes on its own every few seconds, so an edit takes
+// effect without a reconfigure; this makes it immediate.)
+//
+// Like SetSuperuserGroups, this cannot switch superuser mode ON in a running
+// daemon that started without it.
+func (h *Handler) SetProjectLeadsFile(path string) {
+	h.projectLeads.SetFile(path)
+	h.warnIfSuperuserNeedsRestart("HTTP_API_PROJECT_LEADS_FILE")
+}
+
+// ReloadAPAssignment re-reads the access point assignment's files -- the
+// mapfile, the REST token file -- and drops cached answers, so an edited
+// mapfile places the next submission. A mapfile that no longer parses
+// keeps the last good map, and says so in the log. A no-op outside
+// multi-AP mode.
+func (h *Handler) ReloadAPAssignment() {
+	if h.multi == nil || h.multi.assign == nil {
+		return
+	}
+	if err := h.multi.assign.Reload(); err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Reconfigure: could not reload the access point assignment; keeping what was loaded",
+			"error", err)
+		return
+	}
+	h.logger.Info(logging.DestinationHTTP, "Reconfigure: reloaded the access point assignment",
+		"backends", h.multi.assign.Backends())
+}
+
+// SetProjectLeadsGroup installs HTTP_API_PROJECT_LEADS_GROUP.
+func (h *Handler) SetProjectLeadsGroup(pattern string) {
+	h.projectLeads.SetPattern(pattern)
+	h.warnIfSuperuserNeedsRestart("HTTP_API_PROJECT_LEADS_GROUP")
+}
+
+// warnIfSuperuserNeedsRestart says so when a reconfigure configured somebody
+// to use superuser mode on a daemon that started with it off.
+func (h *Handler) warnIfSuperuserNeedsRestart(param string) {
+	if h.superuserPolicy == nil && (h.superuserGroups.configured() || h.projectLeads.configured()) {
 		h.logger.Warn(logging.DestinationHTTP,
-			"HTTP_API_SUPERUSER_GROUP now names a group, but superuser mode was not started; "+
-				"it is built at startup and needs a restart to enable",
-			"groups", h.superuserGroups.String())
+			param+" now configures superuser mode, but it was not started; "+
+				"it is built at startup and needs a restart to enable")
 	}
 }

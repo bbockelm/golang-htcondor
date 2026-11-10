@@ -3,6 +3,7 @@ package htcondor
 import (
 	"archive/tar"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -74,7 +75,7 @@ func (s *Schedd) ReceiveJobSandbox(ctx context.Context, constraint string, w io.
 // doReceiveJobSandbox implements the actual transfer logic
 func (s *Schedd) doReceiveJobSandbox(ctx context.Context, constraint string, w io.Writer) error {
 	// Get SecurityConfig from context, HTCondor config, or defaults
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.TRANSFER_DATA_WITH_PERMS, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, commands.TRANSFER_DATA_WITH_PERMS, "CLIENT", s.address)
 	if err != nil {
 		return fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -373,6 +374,13 @@ func (t *tarSink) Mkdir(name string) error {
 // fsys: Filesystem containing the files to upload
 // Returns: error if the upload fails
 func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.ClassAd, fsys fs.FS) error {
+	if err := s.spoolJobFilesFromFS(ctx, jobAds, fsys); err != nil {
+		return err
+	}
+	return s.afterSpool(ctx, jobAds)
+}
+
+func (s *Schedd) spoolJobFilesFromFS(ctx context.Context, jobAds []*classad.ClassAd, fsys fs.FS) error {
 	if len(jobAds) == 0 {
 		return fmt.Errorf("no job ads provided")
 	}
@@ -432,7 +440,7 @@ func (s *Schedd) SpoolJobFilesFromFS(ctx context.Context, jobAds []*classad.Clas
 	// path at the top of this file) do the same; spooling without it
 	// makes the schedd reject the auth handshake with "no compatible
 	// tokens available".
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.SPOOL_JOB_FILES_WITH_PERMS, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, commands.SPOOL_JOB_FILES_WITH_PERMS, "CLIENT", s.address)
 	if err != nil {
 		return fmt.Errorf("failed to build security config: %w", err)
 	}
@@ -565,6 +573,13 @@ func (s *Schedd) sendJobFiles(ctx context.Context, cedarStream *stream.Stream, _
 // r: Reader providing the tar archive
 // Returns: error if the upload fails
 func (s *Schedd) SpoolJobFilesFromTar(ctx context.Context, jobAds []*classad.ClassAd, r io.Reader) error {
+	if err := s.spoolJobFilesFromTar(ctx, jobAds, r); err != nil {
+		return err
+	}
+	return s.afterSpool(ctx, jobAds)
+}
+
+func (s *Schedd) spoolJobFilesFromTar(ctx context.Context, jobAds []*classad.ClassAd, r io.Reader) error {
 	if len(jobAds) == 0 {
 		return fmt.Errorf("no job ads provided")
 	}
@@ -577,7 +592,7 @@ func (s *Schedd) SpoolJobFilesFromTar(ctx context.Context, jobAds []*classad.Cla
 
 	// Prepare security config from context (see SpoolJobFilesFromFS for
 	// the same rationale).
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, commands.SPOOL_JOB_FILES_WITH_PERMS, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, commands.SPOOL_JOB_FILES_WITH_PERMS, "CLIENT", s.address)
 	if err != nil {
 		return fmt.Errorf("failed to build security config: %w", err)
 	}
@@ -694,6 +709,33 @@ func parseJobAdsForSpooling(jobAds []*classad.ClassAd) ([]procID, map[procID]*jo
 	return jobIDs, jobInfoMap, nil
 }
 
+// systemExecutablePrefixes are directories whose contents belong to the
+// machine, not to the submitter: an executable under one of these can never
+// be supplied through an upload, so it is never part of a spool file list.
+// Deliberately narrower than "any absolute path" -- an absolute path into a
+// home or project directory CAN be satisfied by uploading a file with the
+// same basename.
+var systemExecutablePrefixes = []string{
+	"/bin/",
+	"/sbin/",
+	"/lib/",
+	"/lib64/",
+	"/usr/",
+	"/opt/",
+	"/cvmfs/",
+}
+
+// IsSystemExecutablePath reports whether an executable path names a file the
+// machine owns rather than one the submitter can supply.
+func IsSystemExecutablePath(cmd string) bool {
+	for _, prefix := range systemExecutablePrefixes {
+		if strings.HasPrefix(cmd, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // getInputFilesFromJobAd extracts the set of files that need to be transferred for a job.
 // This includes TransferInput and the executable if TransferExecutable is true.
 func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
@@ -710,13 +752,17 @@ func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 		inputFileSet[f] = true
 	}
 
-	// Also include the executable if TransferExecutable is true (the default)
-	// AND Cmd is a relative path. Absolute paths refer to the worker's
-	// filesystem (e.g. "/bin/echo"), not the caller's input FS, so we'd
-	// have nothing meaningful to spool — and the caller's FS lookup of the
-	// basename would fail with "file does not exist". This matches
-	// condor_submit's actual behavior, which only writes TransferExecutable
-	// to the ad when the user explicitly sets transfer_executable.
+	// Also include the executable if TransferExecutable is true (the
+	// default) and the executable is something the caller could have
+	// supplied. "Relative" used to be the test for that, but it stopped
+	// working when the submit parser began resolving the executable
+	// against the submitting directory the way condor_submit does: Cmd is
+	// absolute now whether the submit file said "run.sh" or
+	// "/home/alice/run.sh". What still separates the two cases is whether
+	// the path is machine-owned — /bin/echo cannot be uploaded under any
+	// name, while an absolute path into a home or project directory is
+	// satisfied by uploading its basename, which is exactly what
+	// submitlint tells a caller to do.
 	transferExe := true // default is true
 	transferExePresent := false
 	if expr, ok := ad.Lookup("TransferExecutable"); ok {
@@ -735,7 +781,7 @@ func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 			cmdValue = cmd
 		}
 	}
-	if transferExe && cmdValue != "" && !path.IsAbs(cmdValue) {
+	if transferExe && cmdValue != "" && !IsSystemExecutablePath(cmdValue) {
 		inputFileSet[path.Base(cmdValue)] = true
 	}
 
@@ -776,6 +822,52 @@ func SpoolInputAllowSet(ad *classad.ClassAd) []string {
 	return names
 }
 
+// ErrInvalidTarEntry is returned (wrapped) by SpoolJobFilesFromTar when an
+// entry's name is not a canonical path inside the sandbox. The upload is
+// abandoned before that entry is sent and without the final command, so
+// the schedd does not release the job.
+var ErrInvalidTarEntry = errors.New("invalid tar entry name")
+
+// validateSpoolEntryName refuses a tar entry name (a directory's without
+// its trailing "/") that is empty, absolute, not in canonical form
+// ("foo/../bar", "./x", "a//b"), contains a ".." segment, a backslash or
+// a NUL. The schedd refuses traversal itself; checking here means every
+// upload route refuses the same names, before the name is sent at all.
+func validateSpoolEntryName(name string) error {
+	var reason string
+	switch {
+	case name == "":
+		reason = "empty name"
+	case strings.ContainsRune(name, 0):
+		reason = "contains NUL byte"
+	case strings.ContainsRune(name, '\\'):
+		reason = "contains backslash"
+	case strings.HasPrefix(name, "/"):
+		reason = "absolute path"
+	case path.Clean(name) != name:
+		reason = fmt.Sprintf("not in canonical form (cleans to %q)", path.Clean(name))
+	case name == ".." || strings.HasPrefix(name, "../"):
+		reason = "contains '..' segment"
+	default:
+		return nil
+	}
+	return fmt.Errorf("%w %q: %s", ErrInvalidTarEntry, name, reason)
+}
+
+// dirInAllowSet reports whether dir is an allowed input or the parent of
+// one, which is the only reason to create it in the spool.
+func dirInAllowSet(allowed map[string]bool, dir string) bool {
+	if allowed[dir] {
+		return true
+	}
+	for name := range allowed {
+		if strings.HasPrefix(name, dir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // sendJobFilesFromTar processes the tar archive and sends files to schedd
 //
 //nolint:gocyclo // Complex function handling tar streaming, job switching, and file transfer protocol
@@ -806,6 +898,12 @@ func (s *Schedd) sendJobFilesFromTar(ctx context.Context, cedarStream *stream.St
 		}
 		if err != nil {
 			return fmt.Errorf("error reading tar: %w", err)
+		}
+
+		// Every name is checked, whatever its type and whether or not
+		// it would be sent: a bad name refuses the whole upload.
+		if err := validateSpoolEntryName(strings.TrimSuffix(header.Name, "/")); err != nil {
+			return err
 		}
 
 		// Handle directories - send mkdir command
@@ -876,8 +974,11 @@ func (s *Schedd) sendJobFilesFromTar(ctx context.Context, cedarStream *stream.St
 				}
 			}
 
-			// Send CommandMkdir
-			if dirName != "" && dirName != "." {
+			// Send CommandMkdir, for a directory an allowed input needs;
+			// files outside the allow-set are skipped below, and so are
+			// directories.
+			if dirName != "" && dirName != "." && currentJobInfo != nil &&
+				dirInAllowSet(currentJobInfo.inputFiles, dirName) {
 				log.Printf("Sending mkdir command for: %s", dirName)
 				msg := message.NewMessageForStream(cedarStream)
 				if err := msg.PutInt32(ctx, int32(CommandMkdir)); err != nil {

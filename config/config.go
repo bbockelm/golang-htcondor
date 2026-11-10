@@ -37,7 +37,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // ConfigOptions contains configuration parameters for creating a Config
@@ -54,13 +53,12 @@ type ConfigOptions struct {
 
 	// HTCondorCompat restricts the parser to HTCondor's exact grammar,
 	// disabling Go-only extensions so a config behaves the same here as under
-	// condor_config. Currently this gates the richer `if` conditions: HTCondor
-	// accepts only a bare boolean, `defined X`, or `version <op> x`, whereas Go
-	// also allows numeric/string comparisons and && / ||. Default (false) keeps
-	// the extensions; the differential config fuzzer sets this so it compares Go
-	// against HTCondor faithfully. (Other extensions — $DIRNAME/$BASENAME,
-	// nested-macro re-expansion — remain on even in compat for now and are
-	// tracked as intentional divergences.)
+	// condor_config. It gates the richer `if` conditions (HTCondor accepts
+	// only a bare boolean or number, `defined X` and `version <op> x`; Go
+	// also allows comparisons and && / ||) and the stripping of quotes
+	// around an include path, and makes a line ending in '+', which HTCondor
+	// reads past the end of, an ErrHTCondorUndefined error. The differential
+	// config fuzzer sets it.
 	HTCondorCompat bool
 
 	// NoLocalAccess, when true, refuses every parse-time construct that
@@ -74,15 +72,31 @@ type ConfigOptions struct {
 	// all three.
 	NoLocalAccess bool
 
+	// NoInclude, when true, refuses `include` and `include command`
+	// directives -- the half of NoLocalAccess that reads files and runs
+	// commands -- while still letting $ENV() read the environment. The
+	// differential config fuzzer uses it, with HTCondor's
+	// CONFIG_OPT_NO_INCLUDE_FILE on the C++ side, so a fuzz input never
+	// touches the host.
+	NoInclude bool
+
 	// SkipDefaults, when true, suppresses initBuiltins(): no param_info
 	// defaults, no param overrides, no time constants (SECOND/MINUTE/...), and
 	// no auto-detected macros (FULL_HOSTNAME, DETECTED_CPUS, TILDE, ...). The
 	// resulting Config contains only what the parsed source defines. This
-	// mirrors HTCondor's Parse_config_string on a fresh MACRO_SET with a NULL
+	// mirrors HTCondor reading a config file into a fresh MACRO_SET with a NULL
 	// defaults table, which is what the differential config fuzzer compares
 	// against; it is also useful for parsing standalone snippets whose meaning
 	// must not depend on host state.
 	SkipDefaults bool
+
+	// ConfigFile, when non-empty, is the root configuration file to read in
+	// place of $CONDOR_CONFIG and the default locations. The local
+	// configuration chain it names is read as usual, _CONDOR_* environment
+	// overrides still apply, and CONFIG_ROOT is its directory. It lets one
+	// process hold the configurations of several pools without touching the
+	// process environment.
+	ConfigFile string
 }
 
 // Config represents an HTCondor configuration with key-value pairs
@@ -91,14 +105,10 @@ type Config struct {
 	// folded maps an upper-cased key to the spelling actually stored in values,
 	// so a lookup can match the way HTCondor does: case-insensitively.
 	folded map[string]string
-	// Track macro evaluation depth to detect loops
-	evaluating map[string]bool
 	// Track included files to prevent cycles
 	includedFiles map[string]bool
 	// Configuration options
 	options ConfigOptions
-	// Track if we're executing inside a metaknob template
-	inMetaknob bool
 	// builtinDefaults is a snapshot of values as they stood at the end of
 	// initBuiltins — HTCondor's compiled-in param defaults plus the
 	// auto-detected macros. Anything differing from it afterwards came
@@ -106,7 +116,14 @@ type Config struct {
 	// nil when the Config was built with SkipDefaults, in which case
 	// "is this a default?" has no meaning and IsDefault reports false.
 	builtinDefaults map[string]string
+	// hosts answers the host-name lookups for HOSTNAME and FULL_HOSTNAME,
+	// remembering canonical names for the life of this Config.
+	hosts *memoHosts
 }
+
+// localHostSystem is the machine HOSTNAME and FULL_HOSTNAME are computed
+// from; tests replace it.
+var localHostSystem hostSystem = systemHosts{}
 
 // New creates a new Config from the runtime environment
 func New() (*Config, error) {
@@ -124,7 +141,6 @@ func NewEmpty() *Config {
 func NewEmptyWithOptions(opts ConfigOptions) *Config {
 	cfg := &Config{
 		values:        make(map[string]string),
-		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 		options:       opts,
 	}
@@ -145,7 +161,6 @@ func NewWithOptions(opts ConfigOptions) (*Config, error) {
 	cfg := &Config{
 		values:        make(map[string]string),
 		folded:        make(map[string]string),
-		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 		options:       opts,
 	}
@@ -168,7 +183,6 @@ func NewFromReader(r io.Reader) (*Config, error) {
 func NewFromReaderWithOptions(r io.Reader, opts ConfigOptions) (*Config, error) {
 	cfg := &Config{
 		values:        make(map[string]string),
-		evaluating:    make(map[string]bool),
 		includedFiles: make(map[string]bool),
 		options:       opts,
 	}
@@ -196,7 +210,7 @@ func (c *Config) putValue(key, value string) {
 	if c.folded == nil {
 		c.folded = make(map[string]string, len(c.values))
 	}
-	upper := strings.ToUpper(key)
+	upper := asciiUpper(key)
 	if previous, ok := c.folded[upper]; ok && previous != key {
 		delete(c.values, previous)
 	}
@@ -214,7 +228,7 @@ func (c *Config) resolveKey(key string) (string, bool) {
 	if _, ok := c.values[key]; ok {
 		return key, true
 	}
-	if actual, ok := c.folded[strings.ToUpper(key)]; ok {
+	if actual, ok := c.folded[asciiUpper(key)]; ok {
 		return actual, true
 	}
 	return "", false
@@ -242,35 +256,6 @@ func (c *Config) lookupValue(key string) (string, bool) {
 func (c *Config) hasKey(key string) bool {
 	_, ok := c.resolveKey(key)
 	return ok
-}
-
-// forExpansion returns a Config that shares this one's parsed values but
-// carries its own cycle-detection state.
-//
-// Macro expansion records the variables it is part-way through
-// resolving so it can spot a circular reference. That bookkeeping used
-// to live on the shared Config, which made Get — a read, called
-// per-connection from whatever goroutine is dialing — a concurrent
-// writer. Two callers expanding at once produced
-// "fatal error: concurrent map writes": not a panic, so nothing
-// recovers and the daemon simply dies. It was reported from a collector
-// after a dependency upgrade, and the same path is reachable from any
-// daemon that builds a security config per request.
-//
-// Locking would fix the crash and introduce a subtler bug: one
-// goroutine's in-progress marks would look like circular references to
-// another's unrelated expansion. The state has to be per-resolution,
-// not merely serialized.
-//
-// The copy is shallow on purpose. Expansion only ever writes
-// `evaluating`; `values` and the rest are read-only for its duration,
-// so sharing them costs nothing and the maps are pointers. Recursion
-// then inherits the fresh state for free, because every nested call is
-// a method on this copy.
-func (c *Config) forExpansion() *Config {
-	ec := *c
-	ec.evaluating = make(map[string]bool, 4)
-	return &ec
 }
 
 // Get retrieves a configuration value, honoring HTCondor's subsystem and
@@ -301,15 +286,29 @@ func (c *Config) Get(key string) (string, bool) {
 	}
 	val := c.values[actual]
 
-	// Expand macros and function macros in the value. Started from a
-	// per-call copy so concurrent Gets do not share cycle-detection
-	// state; see forExpansion.
-	expanded, err := c.forExpansion().expandMacrosWithFunctions(val)
+	// Expand macros and function macros in the value. Expansion keeps
+	// its state per call, so concurrent Gets are safe.
+	expanded, err := c.expandMacro(val)
 	if err != nil {
 		return val, true // Return unexpanded on error
 	}
 
 	return expanded, true
+}
+
+// GetChecked is Get, but reports an expansion that fails -- a reference
+// cycle (ErrMacroLoop) or a refused $ENV() -- instead of returning the raw
+// value.
+func (c *Config) GetChecked(key string) (string, bool, error) {
+	actual, ok := c.resolveKey(c.scopedLookupKey(key))
+	if !ok {
+		return "", false, nil
+	}
+	expanded, err := c.expandMacro(c.values[actual])
+	if err != nil {
+		return "", true, err
+	}
+	return expanded, true, nil
 }
 
 // scopedLookupKey returns the most specific map key that exists for the bare
@@ -342,21 +341,17 @@ func (c *Config) scopedLookupKey(key string) string {
 	return key
 }
 
-// Set sets a configuration value
+// Set sets a configuration value, as a `key = value` line in a config file
+// would: references to key itself ($(key), $(key:default)) are replaced by
+// its previous value (empty when it had none), and the rest of the value is
+// stored unexpanded.
 func (c *Config) Set(key, value string) {
-	// Check if this is a self-referential definition
-	if strings.Contains(value, "$("+key+")") {
-		// Expand the self-reference immediately
-		if actual, ok := c.resolveKey(key); ok {
-			oldVal := c.values[actual]
-			value = strings.ReplaceAll(value, "$("+key+")", oldVal)
-		} else {
-			// First definition, just remove the self-reference
-			value = strings.ReplaceAll(value, "$("+key+")", "")
-		}
+	if v, err := c.expandSelfMacro(value, key); err == nil {
+		value = v
 	}
-
-	c.putValue(key, value)
+	if err := c.insertMacro(key, value); err != nil {
+		c.putValue(key, value)
+	}
 }
 
 // Keys returns all configuration keys
@@ -399,11 +394,14 @@ func (c *Config) initBuiltins() {
 	c.Set("DAY", "86400")
 	c.Set("WEEK", "604800")
 
-	// Auto-detected values. FULL_HOSTNAME must be the fully-qualified name (as
-	// C++ HTCondor's get_local_fqdn produces), because configs routinely gate on
-	// it -- e.g. `"$(FULL_HOSTNAME)" == "host.example.org"`. os.Hostname() alone
-	// is often the short name, which would silently fail such comparisons.
-	short, fqdn := detectHostnames()
+	// Auto-detected values. HOSTNAME and FULL_HOSTNAME are computed as C++
+	// HTCondor computes them (localHostnames), so UID_DOMAIN and
+	// FILESYSTEM_DOMAIN, which default to $(FULL_HOSTNAME), and every config
+	// gated on `"$(FULL_HOSTNAME)" == "host.example.org"` agree with the C++
+	// daemons on the same machine. They are computed again once the
+	// configuration is read (applyLocalHostname).
+	c.hosts = &memoHosts{hostSystem: localHostSystem}
+	short, fqdn := localHostnames(c.Get, c.hosts)
 	c.Set("HOSTNAME", short)
 	c.Set("FULL_HOSTNAME", fqdn)
 
@@ -434,7 +432,11 @@ func (c *Config) initBuiltins() {
 	}
 
 	// Config root directory
-	c.Set("CONFIG_ROOT", getConfigRoot())
+	if c.options.ConfigFile != "" {
+		c.Set("CONFIG_ROOT", filepath.Dir(c.options.ConfigFile))
+	} else {
+		c.Set("CONFIG_ROOT", getConfigRoot())
+	}
 
 	// CPU and memory detection (Priority 2)
 	logicalCPUs, physicalCPUs := detectCPUs()
@@ -447,20 +449,38 @@ func (c *Config) initBuiltins() {
 		c.Set("DETECTED_MEMORY", fmt.Sprintf("%d", memory))
 	}
 
-	// Architecture and OS detection
-	c.Set("ARCH", goArchToHTCondorArch(runtime.GOARCH))
-	c.Set("OPSYS", goOSToHTCondorOS(runtime.GOOS))
-
-	osVersion := detectOSVersion()
-	if osVersion != "" {
-		c.Set("OPSYS_VER", osVersion)
-		c.Set("OPSYS_AND_VER", goOSToHTCondorOS(runtime.GOOS)+osVersion)
+	// The platform family, under the names real_config inserts them. These
+	// were OPSYS_VER and OPSYS_AND_VER here, which HTCondor defines under no
+	// name at all -- a config file asking for $(OPSYSANDVER) got nothing --
+	// and the rest of the family was missing. See platform.go.
+	plat := detectPlatform()
+	c.Set("ARCH", plat.Arch)
+	c.Set("OPSYS", plat.Opsys)
+	setIfNotEmpty(c, "OPSYSLEGACY", plat.Legacy)
+	setIfNotEmpty(c, "OPSYSNAME", plat.Name)
+	setIfNotEmpty(c, "OPSYSSHORTNAME", plat.Short)
+	setIfNotEmpty(c, "OPSYSLONGNAME", plat.Long)
+	setIfNotEmpty(c, "OPSYSANDVER", plat.AndVer)
+	if plat.Ver > 0 {
+		c.Set("OPSYSVER", fmt.Sprintf("%d", plat.Ver))
+	}
+	if plat.MajorVer > 0 {
+		c.Set("OPSYSMAJORVER", fmt.Sprintf("%d", plat.MajorVer))
 	}
 
-	// UNAME values
-	unameArch, unameOpsys := getUnameValues()
-	c.Set("UNAME_ARCH", unameArch)
-	c.Set("UNAME_OPSYS", unameOpsys)
+	// UNAME_* and UTSNAME_* are uname's own values, NOT HTCondor's renaming
+	// of them: sysapi_uname_arch returns buf.machine untouched, so UNAME_ARCH
+	// is "arm64" where ARCH is also "arm64" but "x86_64" where ARCH is
+	// "X86_64". Uppercasing them, as this package used to, made UNAME_OPSYS
+	// read DARWIN where HTCondor says Darwin.
+	uts := unameValues()
+	setIfNotEmpty(c, "UNAME_ARCH", uts.Machine)
+	setIfNotEmpty(c, "UNAME_OPSYS", uts.Sysname)
+	setIfNotEmpty(c, "UTSNAME_SYSNAME", uts.Sysname)
+	setIfNotEmpty(c, "UTSNAME_NODENAME", uts.Nodename)
+	setIfNotEmpty(c, "UTSNAME_RELEASE", uts.Release)
+	setIfNotEmpty(c, "UTSNAME_VERSION", uts.Version)
+	setIfNotEmpty(c, "UTSNAME_MACHINE", uts.Machine)
 
 	// Process information
 	c.Set("PID", fmt.Sprintf("%d", os.Getpid()))
@@ -526,6 +546,28 @@ func (c *Config) DefaultValue(key string) (string, bool) {
 	return "", false
 }
 
+// BuiltinDefault is HTCondor's built-in default for a knob -- the value
+// a Config starts with before any file is read -- or false when HTCondor
+// ships none. Like DefaultValue it is the raw, unexpanded string, and it
+// needs no Config: it answers for an HTCondor configuration this process
+// has not loaded, such as a remote daemon's.
+func BuiltinDefault(name string) (string, bool) {
+	for _, po := range paramOverrides {
+		if strings.EqualFold(po.Name, name) {
+			return po.Default, true
+		}
+	}
+	for _, pd := range paramDefaults {
+		if strings.EqualFold(pd.Name, name) {
+			if pd.Win32Default != "" && isWindows() {
+				return pd.Win32Default, true
+			}
+			return pd.Default, true
+		}
+	}
+	return "", false
+}
+
 // IsDefault reports whether key still holds the value HTCondor built in.
 //
 // False means the deployment set it: a config file, the environment, or a
@@ -549,66 +591,6 @@ func (c *Config) IsDefault(key string) bool {
 // isWindows checks if running on Windows
 func isWindows() bool {
 	return os.PathSeparator == '\\'
-}
-
-// detectHostnames returns the short hostname and the fully-qualified domain
-// name, mirroring C++ HTCondor's init_local_hostname_impl: start from
-// os.Hostname(); if it carries no domain, resolve the canonical name via DNS;
-// then split the short name off before the first dot.
-func detectHostnames() (short, fqdn string) {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		return host, host
-	}
-	fqdn = host
-	// Only pay for a DNS lookup when the hostname is unqualified -- a dotted
-	// os.Hostname() is already the FQDN (matching the C++ "already has a dot"
-	// fast path).
-	if !strings.Contains(host, ".") {
-		if resolved := resolveFQDN(host); resolved != "" {
-			fqdn = resolved
-		}
-	}
-	return shortFromFQDN(fqdn), fqdn
-}
-
-// shortFromFQDN returns the first DNS label of a (possibly qualified) name --
-// "ap43.uw.osg-htc.org" -> "ap43", "ap43" -> "ap43".
-func shortFromFQDN(fqdn string) string {
-	if i := strings.IndexByte(fqdn, '.'); i >= 0 {
-		return fqdn[:i]
-	}
-	return fqdn
-}
-
-// resolveFQDN approximates getaddrinfo(AI_CANONNAME) for an unqualified host:
-// try the canonical (CNAME) name first, then the reverse-DNS name of a resolved
-// address. Returns "" if no qualified name can be found. Bounded by a short
-// timeout so config initialization never blocks on slow/absent DNS.
-func resolveFQDN(host string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	r := net.DefaultResolver
-
-	if cname, err := r.LookupCNAME(ctx, host); err == nil {
-		if c := strings.TrimSuffix(cname, "."); strings.Contains(c, ".") {
-			return c
-		}
-	}
-	if addrs, err := r.LookupHost(ctx, host); err == nil {
-		for _, addr := range addrs {
-			names, err := r.LookupAddr(ctx, addr)
-			if err != nil {
-				continue
-			}
-			for _, n := range names {
-				if name := strings.TrimSuffix(n, "."); strings.Contains(name, ".") {
-					return name
-				}
-			}
-		}
-	}
-	return ""
 }
 
 // detectIPAddresses detects IP addresses from network interfaces
@@ -911,24 +893,43 @@ func detectMemorySysctl() int {
 	return int(bytes / (1024 * 1024))
 }
 
-// goArchToHTCondorArch converts Go's GOARCH to HTCondor ARCH format
-func goArchToHTCondorArch(goarch string) string {
+// htcondorArch maps a uname machine name as sysapi_condor_arch does.
+func htcondorArch(machine string) string {
+	switch machine {
+	case "i386", "i486", "i586", "i686":
+		return "INTEL"
+	case "x86_64", "amd64":
+		return "X86_64"
+	case "ia64":
+		return "IA64"
+	case "Power Macintosh", "ppc", "ppc32":
+		return "PPC"
+	case "ppc64":
+		return "PPC64"
+	default:
+		// Unknown, just use what uname gave -- including arm64, aarch64,
+		// ppc64le and s390x, none of which HTCondor renames.
+		return machine
+	}
+}
+
+// unameMachine is the machine name uname reports, which is what
+// sysapi_condor_arch reads. GOARCH is a build-time constant with its own
+// spellings, so it is translated to uname's where the two differ.
+func unameMachine(goarch string) string {
 	switch goarch {
 	case "amd64":
-		return "X86_64"
+		return "x86_64"
 	case "386":
-		return "INTEL"
+		return "i386"
 	case "arm64":
-		return "ARM64"
-	case "arm":
-		return "ARM"
-	case "ppc64", "ppc64le":
-		return "PPC64"
-	case "s390x":
-		return "S390X"
+		// uname says arm64 on Darwin and aarch64 on Linux.
+		if runtime.GOOS == "darwin" {
+			return "arm64"
+		}
+		return "aarch64"
 	default:
-		// Return uppercase version as fallback
-		return strings.ToUpper(goarch)
+		return goarch
 	}
 }
 
@@ -938,7 +939,10 @@ func goOSToHTCondorOS(goos string) string {
 	case "linux":
 		return "LINUX"
 	case "darwin":
-		return "OSX"
+		// OSX is OPSYS_LEGACY, not OPSYS: arch.cpp sets opsys = "macOS" and
+		// opsys_legacy = "OSX", and a modern macOS startd advertises
+		// OpSys = "macOS", so requiring "OSX" matches nothing.
+		return "macOS"
 	case "windows":
 		return "WINDOWS"
 	case "freebsd":
@@ -951,282 +955,6 @@ func goOSToHTCondorOS(goos string) string {
 		return "SOLARIS"
 	default:
 		return strings.ToUpper(goos)
-	}
-}
-
-// detectOSVersion returns the major OS version
-func detectOSVersion() string {
-	switch runtime.GOOS {
-	case "linux":
-		return detectLinuxVersion()
-	case "darwin":
-		return detectDarwinVersion()
-	case "windows":
-		return detectWindowsVersion()
-	default:
-		return ""
-	}
-}
-
-// detectLinuxVersion detects Linux version from /etc/os-release
-func detectLinuxVersion() string {
-	data, err := os.ReadFile("/etc/os-release")
-	if err != nil {
-		return ""
-	}
-
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "VERSION_ID=") {
-			version := strings.TrimPrefix(line, "VERSION_ID=")
-			version = strings.Trim(version, "\"")
-			// Return major version only
-			if idx := strings.Index(version, "."); idx > 0 {
-				return version[:idx]
-			}
-			return version
-		}
-	}
-	return ""
-}
-
-// detectDarwinVersion detects macOS version
-func detectDarwinVersion() string {
-	cmd := exec.CommandContext(context.Background(), "sw_vers", "-productVersion")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	version := strings.TrimSpace(string(output))
-	// Return major version only
-	if idx := strings.Index(version, "."); idx > 0 {
-		return version[:idx]
-	}
-	return version
-}
-
-// detectWindowsVersion detects Windows version
-func detectWindowsVersion() string {
-	// Use ver command or fallback
-	cmd := exec.CommandContext(context.Background(), "cmd", "/c", "ver")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	// Parse output like "Microsoft Windows [Version 10.0.19041.1234]"
-	str := string(output)
-	if idx := strings.Index(str, "Version "); idx >= 0 {
-		versionStr := str[idx+8:]
-		if idx2 := strings.Index(versionStr, "]"); idx2 >= 0 {
-			versionStr = versionStr[:idx2]
-		}
-		// Extract major version
-		if idx3 := strings.Index(versionStr, "."); idx3 > 0 {
-			return versionStr[:idx3]
-		}
-	}
-	return ""
-}
-
-// expandMacros expands $(VAR) references in a value
-//
-//nolint:unused // Reserved for future use
-func (c *Config) expandMacros(value string) (string, error) {
-	result := value
-	maxDepth := 100
-	depth := 0
-
-	for depth < maxDepth {
-		// Look for the next macro
-		dollarIdx := strings.Index(result, "$(")
-		if dollarIdx == -1 {
-			break // No more macros
-		}
-
-		// Find the matching closing paren (handling nested parens)
-		parenDepth := 1
-		endIdx := -1
-		for i := dollarIdx + 2; i < len(result); i++ {
-			if result[i] == '(' {
-				parenDepth++
-			} else if result[i] == ')' {
-				parenDepth--
-				if parenDepth == 0 {
-					endIdx = i
-					break
-				}
-			}
-		}
-
-		if endIdx == -1 {
-			return value, fmt.Errorf("unmatched parentheses in macro: %s", result[dollarIdx:])
-		}
-
-		// Extract the macro content
-		varName := result[dollarIdx+2 : endIdx]
-
-		// If varName contains a macro itself, recursively expand it first
-		if strings.Contains(varName, "$(") {
-			expanded, err := c.expandMacros(varName)
-			if err != nil {
-				return value, err
-			}
-			varName = expanded
-		}
-
-		// Handle metaknob parameter special syntax
-		// $(0), $(0?), $(0#), $(1), $(1?), $(1+), etc.
-		if len(varName) > 0 && varName[0] >= '0' && varName[0] <= '9' {
-			replacement := c.expandMetaknobParam(varName)
-			result = result[:dollarIdx] + replacement + result[endIdx+1:]
-			depth++
-			continue
-		}
-
-		// Handle default values VAR:default
-		parts := strings.SplitN(varName, ":", 2)
-		varName = parts[0]
-		defaultVal := ""
-		if len(parts) > 1 {
-			defaultVal = parts[1]
-		}
-
-		// $(DOLLAR) is a predefined macro that expands to a literal '$'.
-		// HTCondor handles it in expand_macro itself, independent of the
-		// defaults table, so it must resolve even in a defaults-free parse.
-		if strings.EqualFold(varName, "DOLLAR") {
-			result = result[:dollarIdx] + "$" + result[endIdx+1:]
-			depth++
-			continue
-		}
-
-		// Check for circular reference
-		if c.evaluating[strings.ToUpper(varName)] {
-			// Skip this macro to avoid infinite loop
-			result = result[:dollarIdx] + "$(" + varName + ")" + result[endIdx+1:]
-			break
-		}
-
-		c.evaluating[strings.ToUpper(varName)] = true
-
-		// Get value. Resolve through the subsystem/local-name scoping that Get()
-		// uses, so `$(IsMaster)` under SUBSYSTEM=MASTER expands via MASTER.IsMaster,
-		// and any `$(KNOB)` picks up a `SUBSYS.KNOB` override -- matching HTCondor,
-		// where macro expansion is subsystem-scoped.
-		replacement := defaultVal
-		if val, ok := c.lookupValue(varName); ok {
-			replacement = val
-		}
-
-		delete(c.evaluating, strings.ToUpper(varName))
-
-		// Replace the macro with its value
-		result = result[:dollarIdx] + replacement + result[endIdx+1:]
-		depth++
-	}
-
-	if depth >= maxDepth {
-		return value, fmt.Errorf("macro expansion depth exceeded")
-	}
-
-	return result, nil
-}
-
-// expandMetaknobParam expands metaknob parameter references
-// Supports: $(0), $(0?), $(0#), $(N), $(N?), $(N+) where N is 1-9
-func (c *Config) expandMetaknobParam(param string) string {
-	// Parse the parameter specification
-	// Format: N[?|#|+][:default]
-
-	// Check for default value
-	parts := strings.SplitN(param, ":", 2)
-	paramSpec := parts[0]
-	defaultVal := ""
-	if len(parts) > 1 {
-		defaultVal = parts[1]
-	}
-
-	if len(paramSpec) == 0 {
-		return defaultVal
-	}
-
-	// Extract the digit and any suffix
-	digit := paramSpec[0]
-	suffix := ""
-	if len(paramSpec) > 1 {
-		suffix = paramSpec[1:]
-	}
-
-	// Get the parameter number
-	paramNum := int(digit - '0')
-	if paramNum < 0 || paramNum > 9 {
-		// Not a valid metaknob parameter
-		if val, ok := c.values[param]; ok {
-			return val
-		}
-		return defaultVal
-	}
-
-	// Collect all available parameters (1-9)
-	// Note: We collect ALL parameters up to 9, including empty ones
-	// This is needed for cases like: use FEATURE : Knob(arg1, , arg3)
-	var allParams []string
-	maxParam := 0
-	for i := 1; i <= 9; i++ {
-		if val, ok := c.values[fmt.Sprintf("%d", i)]; ok {
-			allParams = append(allParams, val)
-			maxParam = i
-		} else {
-			// Still append empty to maintain indexing, but don't update maxParam
-			allParams = append(allParams, "")
-		}
-	}
-	// Trim to actual number of parameters passed
-	if maxParam > 0 {
-		allParams = allParams[:maxParam]
-	} else {
-		allParams = []string{}
-	}
-
-	// Handle special cases for $(0...)
-	if paramNum == 0 {
-		switch suffix {
-		case "?": // $(0?) - returns "1" if any args exist, "0" otherwise
-			if len(allParams) > 0 {
-				return "1"
-			}
-			return "0"
-
-		case "#": // $(0#) - returns the number of arguments
-			return fmt.Sprintf("%d", len(allParams))
-
-		default: // $(0) or $(0:default) - returns all arguments joined by ", "
-			if len(allParams) > 0 {
-				return strings.Join(allParams, ", ")
-			}
-			return defaultVal
-		}
-	}
-
-	// Handle $(N?), $(N+), $(N) for N = 1-9
-	switch suffix {
-	case "?": // $(N?) - returns "1" if parameter N exists and is non-empty, "0" otherwise
-		if paramNum <= len(allParams) && allParams[paramNum-1] != "" {
-			return "1"
-		}
-		return "0"
-
-	case "+": // $(N+) - returns parameters from N onwards, joined by ", "
-		if paramNum <= len(allParams) {
-			return strings.Join(allParams[paramNum-1:], ", ")
-		}
-		return defaultVal
-
-	default: // $(N) or $(N:default) - returns parameter N
-		if paramNum <= len(allParams) {
-			return allParams[paramNum-1]
-		}
-		return defaultVal
 	}
 }
 
@@ -1243,42 +971,37 @@ func (c *Config) LoadFromEnvironment() error {
 		return err
 	}
 	c.applyCondorEnvOverrides()
-	c.applyNetworkHostname()
+	c.applyLocalHostname()
 	return nil
 }
 
-// applyNetworkHostname honors the NETWORK_HOSTNAME knob the way C++
-// HTCondor does: when it is set, it is the fully-qualified name this
-// machine calls itself, and it overrides the DNS-detected FULL_HOSTNAME.
+// applyLocalHostname computes HOSTNAME and FULL_HOSTNAME again from the
+// configuration read so far, as C++ real_config does after the root config
+// file and again after the whole chain (reset_local_hostname and
+// reinsert_specials). NETWORK_HOSTNAME, DEFAULT_DOMAIN_NAME and NO_DNS are
+// normally set in a config file, often gated on the FULL_HOSTNAME the host
+// boots under, so their effect is only known once the files are read. Like
+// C++, it replaces a FULL_HOSTNAME or HOSTNAME a config file set.
 //
-// A site sets it when the OS/DNS hostname and the name HTCondor
+// A site sets NETWORK_HOSTNAME when the OS/DNS hostname and the name HTCondor
 // advertises differ -- e.g. a host whose DNS name is
 // path-ap2101.chtc.wisc.edu but whose schedd advertises itself as
-// ap1.facility.path-cc.io. Without this, FULL_HOSTNAME stays the DNS
-// name, and everything derived from it -- most visibly the default
-// schedd/daemon name used to look the daemon up in the collector, but
-// also UID_DOMAIN, FILESYSTEM_DOMAIN and the rest -- fails to match what
-// the C++ daemons actually advertise, so discovery times out.
+// ap1.facility.path-cc.io. Everything derived from FULL_HOSTNAME -- the
+// default daemon name used to find the daemon in the collector, UID_DOMAIN,
+// FILESYSTEM_DOMAIN -- must then follow it, or it fails to match what the
+// C++ daemons advertise.
 //
-// It runs last, after the whole config-file chain and the _CONDOR_*
-// environment overrides, because NETWORK_HOSTNAME is normally set from a
-// config file and often gated on the current FULL_HOSTNAME (a host is
-// still coming up under its DNS name when the file is read, then renames
-// itself). Its value is therefore only known once the files have been
-// read. C++ real_config does the same recompute for the same reason.
-func (c *Config) applyNetworkHostname() {
-	nh, ok := c.Get("NETWORK_HOSTNAME")
-	if !ok {
+// A Config built with SkipDefaults has no detected macros and gets none.
+func (c *Config) applyLocalHostname() {
+	if c.options.SkipDefaults {
 		return
 	}
-	nh = strings.TrimSpace(nh)
-	if nh == "" {
-		return
+	if c.hosts == nil {
+		c.hosts = &memoHosts{hostSystem: localHostSystem}
 	}
-	c.Set("FULL_HOSTNAME", nh)
-	// The short HOSTNAME is the first label of the full name, mirroring
-	// how C++ derives it and how detectHostnames splits the DNS name.
-	c.Set("HOSTNAME", shortFromFQDN(nh))
+	short, fqdn := localHostnames(c.Get, c.hosts)
+	c.Set("HOSTNAME", short)
+	c.Set("FULL_HOSTNAME", fqdn)
 }
 
 // loadConfigFileChain reads the root configuration file (CONDOR_CONFIG or a
@@ -1286,6 +1009,15 @@ func (c *Config) applyNetworkHostname() {
 // when CONDOR_CONFIG is "ONLY_ENV" or no root config file can be found; in both
 // cases the caller still applies the environment overrides afterward.
 func (c *Config) loadConfigFileChain() error {
+	// An explicit root file (ConfigOptions.ConfigFile) is read and nothing
+	// else is searched for.
+	if c.options.ConfigFile != "" {
+		if err := c.parseConfigFile(c.options.ConfigFile); err != nil {
+			return err
+		}
+		return c.loadLocalConfigChain()
+	}
+
 	// Locate the root configuration file: CONDOR_CONFIG, or a default location.
 	rootPath := os.Getenv("CONDOR_CONFIG")
 	if rootPath == "ONLY_ENV" {
@@ -1308,7 +1040,15 @@ func (c *Config) loadConfigFileChain() error {
 	if err := c.parseConfigFile(rootPath); err != nil {
 		return err
 	}
+	return c.loadLocalConfigChain()
+}
 
+// loadLocalConfigChain reads the local configuration chain that follows the
+// root configuration file.
+func (c *Config) loadLocalConfigChain() error {
+	// C++ inserts HOSTNAME and FULL_HOSTNAME after the root config file, so
+	// the local chain sees a DEFAULT_DOMAIN_NAME or NETWORK_HOSTNAME set there.
+	c.applyLocalHostname()
 	// HTCondor then reads the local configuration chain, with later sources
 	// overriding earlier ones: the LOCAL_CONFIG_DIR directories (config.d, files
 	// in lexicographic order) followed by the LOCAL_CONFIG_FILE list. Without
@@ -1564,4 +1304,29 @@ func SplitConfigList(list string) []string {
 	parts := strings.Fields(list)
 
 	return parts
+}
+
+// RawValue returns a parameter's stored value with no macro expansion, and
+// whether it is defined. Names match case-insensitively, as everywhere else.
+//
+// Get is what almost every caller wants. This is for the one that has to see
+// the macro references themselves rather than what they expand to: a submit
+// digest sends the unexpanded text to the schedd, which expands it once per
+// job it materializes.
+func (c *Config) RawValue(key string) (string, bool) {
+	actual, ok := c.resolveKey(c.scopedLookupKey(key))
+	if !ok {
+		return "", false
+	}
+	return c.values[actual], true
+}
+
+// setIfNotEmpty sets a macro only when there is a value for it. An absent
+// macro expands to nothing, which is what HTCondor does when sysapi could not
+// determine the value; a macro set to the empty string is a different thing to
+// anything testing whether it is defined.
+func setIfNotEmpty(c *Config, name, value string) {
+	if value != "" {
+		c.Set(name, value)
+	}
 }

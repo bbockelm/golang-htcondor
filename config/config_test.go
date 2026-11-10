@@ -269,7 +269,7 @@ func TestUnimplementedRuntimeMacros(t *testing.T) {
 
 		// Priority 2 (Session 3)
 		"DETECTED_CPUS", "DETECTED_PHYSICAL_CPUS", "DETECTED_CORES",
-		"DETECTED_MEMORY", "ARCH", "OPSYS", "OPSYS_VER", "OPSYS_AND_VER",
+		"DETECTED_MEMORY", "ARCH", "OPSYS", "OPSYSVER", "OPSYSANDVER",
 		"UNAME_ARCH", "UNAME_OPSYS",
 	}
 
@@ -282,8 +282,9 @@ func TestUnimplementedRuntimeMacros(t *testing.T) {
 	for _, key := range implementedMacros {
 		val, ok := cfg.Get(key)
 		if !ok || val == "" {
-			// OPSYS_VER and OPSYS_AND_VER may not be available on all platforms
-			if key == "OPSYS_VER" || key == "OPSYS_AND_VER" {
+			// OPSYSVER and OPSYSANDVER are unset where the OS version
+			// could not be determined.
+			if key == "OPSYSVER" || key == "OPSYSANDVER" {
 				t.Logf("  %s = <not available on this platform>", key)
 			} else {
 				t.Errorf("  %s = <not set> (expected to be implemented)", key)
@@ -630,47 +631,47 @@ func TestPriority2RuntimeMacros(t *testing.T) {
 		}
 	})
 
-	t.Run("OPSYS_VER", func(t *testing.T) {
-		val, ok := cfg.Get("OPSYS_VER")
+	// OPSYSVER, not OPSYS_VER: the underscored spellings were this package's
+	// own and HTCondor defines neither, so a config file asking for them got
+	// nothing. See TestInventedPlatformMacroNamesAreGone.
+	t.Run("OPSYSVER", func(t *testing.T) {
+		val, ok := cfg.Get("OPSYSVER")
 		if !ok {
-			t.Log("OPSYS_VER not set (may be unavailable on this platform)")
+			t.Log("OPSYSVER not set (the OS version was not determined on this platform)")
 			return
 		}
-		// Should be a version number (major version)
 		if _, err := strconv.Atoi(val); err != nil {
-			t.Errorf("OPSYS_VER = %q, want numeric version", val)
+			t.Errorf("OPSYSVER = %q, want numeric version", val)
 		}
 	})
 
-	t.Run("OPSYS_AND_VER", func(t *testing.T) {
-		val, ok := cfg.Get("OPSYS_AND_VER")
+	// OPSYSANDVER is the OS NAME plus the MAJOR version -- AlmaLinux9, not
+	// LINUX905 -- so it is built from OPSYSSHORTNAME and OPSYSMAJORVER
+	// rather than by concatenating OPSYS and OPSYSVER.
+	t.Run("OPSYSANDVER", func(t *testing.T) {
+		val, ok := cfg.Get("OPSYSANDVER")
 		if !ok {
-			t.Log("OPSYS_AND_VER not set (OPSYS_VER may be unavailable)")
+			t.Log("OPSYSANDVER not set (the OS version was not determined on this platform)")
 			return
 		}
-		// Should combine OPSYS and OPSYS_VER
-		opsys, _ := cfg.Get("OPSYS")
-		opsysVer, hasVer := cfg.Get("OPSYS_VER")
-		if hasVer {
-			expected := opsys + opsysVer
-			if val != expected {
-				t.Errorf("OPSYS_AND_VER = %q, want %q", val, expected)
-			}
+		short, hasShort := cfg.Get("OPSYSSHORTNAME")
+		major, hasMajor := cfg.Get("OPSYSMAJORVER")
+		if hasShort && hasMajor && val != short+major {
+			t.Errorf("OPSYSANDVER = %q, want %q", val, short+major)
 		}
 	})
 
-	// Test UNAME macros
+	// The UNAME macros are uname's own strings, NOT HTCondor's renaming of
+	// them. These subtests used to require uppercase, which is the bug they
+	// were written over: HTCondor publishes UNAME_OPSYS as "Darwin" and
+	// UNAME_ARCH as "arm64", and uppercasing them described no machine.
 	t.Run("UNAME_ARCH", func(t *testing.T) {
 		val, ok := cfg.Get("UNAME_ARCH")
 		if !ok {
 			t.Fatal("UNAME_ARCH not set")
 		}
-		if val == "" {
-			t.Error("UNAME_ARCH is empty")
-		}
-		// Should be uppercase
-		if val != strings.ToUpper(val) {
-			t.Errorf("UNAME_ARCH = %q, want uppercase", val)
+		if val != unameValues().Machine {
+			t.Errorf("UNAME_ARCH = %q, want uname's machine %q", val, unameValues().Machine)
 		}
 	})
 
@@ -679,12 +680,8 @@ func TestPriority2RuntimeMacros(t *testing.T) {
 		if !ok {
 			t.Fatal("UNAME_OPSYS not set")
 		}
-		if val == "" {
-			t.Error("UNAME_OPSYS is empty")
-		}
-		// Should be uppercase
-		if val != strings.ToUpper(val) {
-			t.Errorf("UNAME_OPSYS = %q, want uppercase", val)
+		if val != unameValues().Sysname {
+			t.Errorf("UNAME_OPSYS = %q, want uname's sysname %q", val, unameValues().Sysname)
 		}
 	})
 }

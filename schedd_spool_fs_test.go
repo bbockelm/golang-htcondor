@@ -46,18 +46,31 @@ func TestGetInputFilesFromJobAd(t *testing.T) {
 			want: []string{"htcondor-jupyter-helper", "jupyter-launch.sh", "jupyter-token"},
 		},
 		{
-			// Absolute Cmd refers to a worker-side system binary
-			// (e.g. /bin/echo), not anything the caller could provide
-			// through their input FS. Even with TransferExecutable=true,
-			// it must not be added to the spool list — otherwise the
-			// FS lookup fails with "file does not exist".
-			name: "absolute executable is excluded even when TransferExecutable=true",
+			// A system path (e.g. /bin/echo) is a worker-side binary,
+			// not anything the caller could provide through their input
+			// FS. Even with TransferExecutable=true it must not be added
+			// to the spool list — otherwise the FS lookup fails with
+			// "file does not exist".
+			name: "system executable is excluded even when TransferExecutable=true",
 			setup: func(ad *classad.ClassAd) {
 				_ = ad.Set("Cmd", "/bin/echo")
 				_ = ad.Set("TransferInput", "input1.txt,input2.dat")
 				_ = ad.Set("TransferExecutable", true)
 			},
 			want: []string{"input1.txt", "input2.dat"},
+		},
+		{
+			// Absolute but NOT machine-owned. The submit parser
+			// resolves every transferred executable against the
+			// submitting directory, so this is the shape an ordinary
+			// "executable = run.sh" now takes, and its basename is
+			// exactly what the caller uploads.
+			name: "absolute non-system executable is included",
+			setup: func(ad *classad.ClassAd) {
+				_ = ad.Set("Cmd", "/home/alice/project/run.sh")
+				_ = ad.Set("TransferExecutable", true)
+			},
+			want: []string{"run.sh"},
 		},
 		{
 			name: "transfer_executable=false, only TransferInput",

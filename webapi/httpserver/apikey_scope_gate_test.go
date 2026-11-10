@@ -20,7 +20,7 @@ func gateTestKey(t *testing.T, h *Handler, scopes []string) string {
 	}
 	if _, err := h.apiKeyStore.Insert(context.Background(),
 		minted.KeyID, minted.SecretHash, "gate-test", "alice",
-		scopes, nil); err != nil {
+		scopes, nil, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	return minted.Full

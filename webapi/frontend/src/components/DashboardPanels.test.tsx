@@ -5,9 +5,8 @@ import {
   Goodput,
   HoldReasons,
   LiveTicker,
-  OtherStatuses,
   RecentActivity,
-  StatCard,
+  StatusRow,
   ago,
   duration,
 } from './DashboardPanels';
@@ -106,14 +105,14 @@ describe('RecentActivity', () => {
       />,
     );
     // Recently submitted is empty because nothing was submitted: "none".
-    // Recently completed is empty because the queue destroys finished
-    // jobs and no archive answered: that is a gap in what we can see,
-    // and reporting it as "none" would be a confident wrong answer.
-    expect(screen.getByText(/needs the htcondordb history mirror/)).toBeInTheDocument();
+    // Recently completed is empty because nothing could answer: that is
+    // a gap in what we can see, and reporting it as "none" would be a
+    // confident wrong answer.
+    expect(screen.getByText('not available')).toBeInTheDocument();
     expect(screen.getAllByText('none').length).toBeGreaterThan(0);
   });
 
-  it('warns when the completed list is only what the queue still holds', () => {
+  it('warns when the completed list is missing its older half', () => {
     render(
       <RecentActivity
         activity={activity({
@@ -124,7 +123,7 @@ describe('RecentActivity', () => {
     );
     // A short list here is otherwise indistinguishable from a quiet
     // access point, when in fact it is a few seconds of visibility.
-    expect(screen.getByText(/the history mirror is not answering/)).toBeInTheDocument();
+    expect(screen.getByText(/incomplete/)).toBeInTheDocument();
   });
 
   it('does not warn about partial data when the archive did answer', () => {
@@ -136,7 +135,7 @@ describe('RecentActivity', () => {
         })}
       />,
     );
-    expect(screen.queryByText(/history mirror is not answering/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/incomplete/)).not.toBeInTheDocument();
   });
 
   it('links each job to its detail page', () => {
@@ -151,26 +150,59 @@ describe('RecentActivity', () => {
     expect(screen.getByText('slot1@host')).toBeInTheDocument();
   });
 
-  it('names what answered, because a cached snapshot is minutes old by design', () => {
+  it('says how old the snapshot is, because a cached one is minutes old by design', () => {
+    render(
+      <RecentActivity
+        activity={activity({ computed_at: Math.floor(Date.now() / 1000) - 180 })}
+      />,
+    );
+    expect(screen.getByText(/updated 3m ago/)).toBeInTheDocument();
+  });
+
+  // Which component answered is not the viewer's question: it changes
+  // nothing they can do, and naming it sent one reader debugging a
+  // healthy database.
+  it('does not name the component that answered', () => {
     render(<RecentActivity activity={activity({ source: 'htcondordb mirror' })} />);
-    expect(screen.getByText(/htcondordb mirror/)).toBeInTheDocument();
+    expect(screen.queryByText(/htcondordb/)).not.toBeInTheDocument();
   });
 });
 
-describe('OtherStatuses', () => {
-  it('omits the statuses the tiles already show', () => {
-    render(<OtherStatuses byStatus={{ idle: 5, running: 2, removed: 1 }} />);
-    // idle and running have their own tiles; repeating them here would
-    // double-count by eye.
-    expect(screen.queryByText(/Idle/)).not.toBeInTheDocument();
-    expect(screen.getByText(/Removed/)).toBeInTheDocument();
+describe('StatusRow', () => {
+  it('shows every non-empty status in one row, including the rarer ones', () => {
+    render(
+      <StatusRow
+        byStatus={{ idle: 5, running: 2, removed: 1, suspended: 3, transferring_output: 4 }}
+        total={15}
+      />,
+    );
+    // The old layout split these across a tile grid and an "Other
+    // statuses" box, so a suspended job was in a different place from an
+    // idle one. They are peers.
+    for (const name of [/Idle/, /Running/, /Removed/, /Suspended/, /Transferring Output/]) {
+      expect(screen.getByRole('link', { name })).toBeInTheDocument();
+    }
   });
 
-  it('renders nothing when there is nothing left over', () => {
-    const { container } = render(
-      <OtherStatuses byStatus={{ idle: 5, running: 2, held: 1, completed: 3 }} />,
+  it('omits a status nothing is in', () => {
+    render(<StatusRow byStatus={{ idle: 5, held: 0 }} total={5} />);
+    expect(screen.queryByText(/Held/)).not.toBeInTheDocument();
+  });
+
+  it('carries the total, which is not the sum of what it can name', () => {
+    render(<StatusRow byStatus={{ idle: 5 }} total={9} />);
+    expect(screen.getByRole('link', { name: /All statuses, 9 jobs/ })).toHaveAttribute(
+      'href',
+      '/jobs',
     );
-    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('shows a status it cannot name, without offering a wrong drill-down', () => {
+    render(<StatusRow byStatus={{ idle: 5, somethingNew: 2 }} total={7} />);
+    // Dropping it would hide jobs somebody owns; linking it would run a
+    // constraint that does not select it.
+    expect(screen.getByText(/somethingNew/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /somethingNew/ })).not.toBeInTheDocument();
   });
 });
 
@@ -467,16 +499,12 @@ describe('drilling in from the tiles and the panels', () => {
     ...over,
   });
 
-  it('a populated tile links to its jobs', () => {
-    render(<StatCard label="Held" value={7} href="/jobs?constraint=x" />);
-    expect(screen.getByRole('link', { name: /Held/ })).toHaveAttribute('href', '/jobs?constraint=x');
-  });
-
-  it('an empty tile links nowhere', () => {
-    render(<StatCard label="Held" value={0} href="/jobs?constraint=x" />);
-    // Sending someone to an empty list is a worse answer than not
-    // offering the link.
-    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+  it('a status chip links to the jobs in it', () => {
+    render(<StatusRow byStatus={{ held: 7 }} total={7} />);
+    const href = screen.getByRole('link', { name: /Held/ }).getAttribute('href') ?? '';
+    // The HELD chip must exclude the spooling pseudo-hold, or the
+    // drill-down returns more jobs than the chip claimed.
+    expect(decodeURIComponent(href)).toContain('JobStatus == 5 && HoldReasonCode =!= 16');
   });
 
   it('offers a way from a truncated list to the whole window', () => {

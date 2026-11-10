@@ -122,7 +122,10 @@ func TestSelfRegisterSharedPort(t *testing.T) {
 	}
 	defer func() { _ = ln.Close() }()
 
-	if want := "127.0.0.1:9618?sock=" + sock; advertised != want {
+	// The server ad's own parameters are carried over and only sock= is ours; dropping
+	// them took the IPv6 address and the certificate alias off every advertisement
+	// (issue #896).
+	if want := "127.0.0.1:9618?addrs=127.0.0.1-9618&noUDP&sock=" + sock; advertised != want {
 		t.Errorf("advertised = %q, want %q", advertised, want)
 	}
 	socketPath := filepath.Join(lock, "daemon_sock", sock)

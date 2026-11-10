@@ -184,7 +184,7 @@ func newTestCache(t *testing.T, d *fakeDialer, now func() time.Time) *Cache {
 	return c
 }
 
-var testKey = Key{Owner: "alice@example.com", Cluster: 12, Proc: 0}
+var testKey = Key{Owner: "alice@example.com", Credential: "cred-a", Cluster: 12, Proc: 0}
 
 // TestTransportIsReusedAcrossConnections is the whole point of the
 // package: the expensive handshake happens once, not once per
@@ -214,8 +214,8 @@ func TestTransportIsNotSharedAcrossOwners(t *testing.T) {
 	d := &fakeDialer{}
 	c := newTestCache(t, d, nil)
 
-	alice := Key{Owner: "alice@example.com", Cluster: 12, Proc: 0}
-	bob := Key{Owner: "bob@example.com", Cluster: 12, Proc: 0}
+	alice := Key{Owner: "alice@example.com", Credential: "cred-a", Cluster: 12, Proc: 0}
+	bob := Key{Owner: "bob@example.com", Credential: "cred-a", Cluster: 12, Proc: 0}
 
 	for _, k := range []Key{alice, bob} {
 		conn, err := c.DialJob(context.Background(), k, "tcp", "127.0.0.1:8080")
@@ -230,6 +230,77 @@ func TestTransportIsNotSharedAcrossOwners(t *testing.T) {
 	if c.Len() != 2 {
 		t.Errorf("cached %d transports, want 2", c.Len())
 	}
+}
+
+// TestTransportIsNotSharedAcrossCredentials is the same separation one
+// level down: the same owner reached by a different credential gets a
+// transport of its own, because the owner is what the caller was
+// resolved to and the transport is what one credential was allowed to
+// open.
+func TestTransportIsNotSharedAcrossCredentials(t *testing.T) {
+	d := &fakeDialer{}
+	c := newTestCache(t, d, nil)
+
+	first := Key{Owner: "alice@example.com", Credential: "cred-a", Cluster: 12, Proc: 0}
+	second := Key{Owner: "alice@example.com", Credential: "cred-b", Cluster: 12, Proc: 0}
+
+	for _, k := range []Key{first, second, first} {
+		conn, err := c.DialJob(context.Background(), k, "tcp", "127.0.0.1:8080")
+		if err != nil {
+			t.Fatalf("DialJob %s: %v", k, err)
+		}
+		_ = conn.Close()
+	}
+	if got := d.count(); got != 2 {
+		t.Errorf("dialled %d times for two credentials (one used twice), want 2", got)
+	}
+}
+
+// TestAnonymousKeyIsRefused: a key with no owner or no credential is
+// the one every unidentified caller would share, so nothing may be
+// dialled or cached under it -- by any of the ways into a transport.
+func TestAnonymousKeyIsRefused(t *testing.T) {
+	d := &fakeDialer{}
+	c := newTestCache(t, d, nil)
+	ctx := context.Background()
+
+	for _, k := range []Key{
+		{Owner: "", Credential: "cred-a", Cluster: 12, Proc: 0},
+		{Owner: "alice@example.com", Credential: "", Cluster: 12, Proc: 0},
+		{Cluster: 12, Proc: 0},
+	} {
+		if conn, err := c.DialJob(ctx, k, "tcp", "127.0.0.1:8080"); !errors.Is(err, ErrNoIdentity) {
+			if conn != nil {
+				_ = conn.Close()
+			}
+			t.Errorf("DialJob(%+v) error = %v, want ErrNoIdentity", k, err)
+		}
+		if _, err := c.Warm(ctx, k); !errors.Is(err, ErrNoIdentity) {
+			t.Errorf("Warm(%+v) error = %v, want ErrNoIdentity", k, err)
+		}
+		if _, release, err := c.Session(ctx, k); !errors.Is(err, ErrNoIdentity) {
+			if release != nil {
+				release()
+			}
+			t.Errorf("Session(%+v) error = %v, want ErrNoIdentity", k, err)
+		}
+		if _, err := c.ScratchDir(ctx, k); !errors.Is(err, ErrNoIdentity) {
+			t.Errorf("ScratchDir(%+v) error = %v, want ErrNoIdentity", k, err)
+		}
+	}
+	if got := d.count(); got != 0 {
+		t.Errorf("dialled %d times for anonymous keys, want 0", got)
+	}
+	if c.Len() != 0 {
+		t.Errorf("cached %d entries for anonymous keys, want 0", c.Len())
+	}
+
+	// And the owner's own key still works.
+	conn, err := c.DialJob(ctx, testKey, "tcp", "127.0.0.1:8080")
+	if err != nil {
+		t.Fatalf("DialJob(%s): %v", testKey, err)
+	}
+	_ = conn.Close()
 }
 
 // TestConcurrentFirstUseDialsOnce covers the thundering herd a page

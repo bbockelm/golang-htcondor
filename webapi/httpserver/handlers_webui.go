@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/bbockelm/golang-htcondor/webapi/ownerscope"
 )
 
 // AuthMeResponse describes the currently-authenticated browser session.
@@ -45,6 +48,52 @@ type AuthMeResponse struct {
 	// the operator themselves.
 	SuperuserIdentity string `json:"superuser_identity,omitempty"`
 	SuperuserNote     string `json:"superuser_note,omitempty"`
+	// SuperuserScope is "global" or "project" while the mode is armed, and
+	// SuperuserProjects the projects a project-scoped session may act in,
+	// so the banner can say which. Re-read on every request, as the
+	// actions themselves are.
+	SuperuserScope    string   `json:"superuser_scope,omitempty"`
+	SuperuserProjects []string `json:"superuser_projects,omitempty"`
+	// ProjectLeadOf lists the projects this session leads, armed or not.
+	// Leads may list their projects' jobs without arming, the way admins
+	// may list everyone's, so the UI offers them the same scope toggle.
+	ProjectLeadOf []string `json:"project_lead_of,omitempty"`
+	// MultiAP reports that this server fronts several access points; the
+	// SPA shows the AP column and offers only what that mode serves.
+	MultiAP bool `json:"multi_ap,omitempty"`
+	// Assignment is where this session's new work goes, in multi-AP mode.
+	Assignment *APAssignmentInfo `json:"assignment,omitempty"`
+	// PlacementOnly reports a session that maps to no local account and
+	// reaches only the placement pages.
+	PlacementOnly bool `json:"placement_only,omitempty"`
+	// Placement is the session's placement identity, present when this
+	// server issues placement tokens and the session has one.
+	Placement *PlacementSessionInfo `json:"placement,omitempty"`
+	// PoolIdentityRestricted reports that this session may not read who
+	// is running on a slot, so the pool pages can say so rather than
+	// render an empty column that reads as "nobody is running here".
+	//
+	// Advisory, for rendering only. The restriction is enforced on every
+	// collector read regardless of what the SPA does with this.
+	PoolIdentityRestricted bool `json:"pool_identity_restricted,omitempty"`
+	// Reservations reports that this server runs the reservation
+	// subsystem, so the SPA offers the admin page for it. Advisory: the
+	// endpoints refuse regardless when it is off.
+	Reservations bool `json:"reservations,omitempty"`
+}
+
+// PlacementSessionInfo is the placement identity of a session.
+type PlacementSessionInfo struct {
+	Identity    string `json:"identity"`
+	DisplayName string `json:"display_name,omitempty"`
+	// Account is set when the session signed in as the account the
+	// placementd assigned to Identity (HTTP_API_IDENTITY_MAP =
+	// placementd): the account, the permissions on jobs it holds, its
+	// projects and the one tokens are minted for.
+	Account  string   `json:"account,omitempty"`
+	Levels   []string `json:"levels,omitempty"`
+	Projects []string `json:"projects,omitempty"`
+	Project  string   `json:"project,omitempty"`
 }
 
 // handleAuthMe handles GET /api/v1/auth/me. Resolves the browser session
@@ -57,28 +106,66 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := AuthMeResponse{Authenticated: false}
+	resp := AuthMeResponse{Authenticated: false, MultiAP: s.multi != nil}
 
-	if session, ok := s.getSessionFromRequest(r); ok {
+	session, ok := s.getAnySessionFromRequest(r)
+	if ok && session.IsPlacementOnly() {
+		// Onboarded since signing in? Then this becomes a full session,
+		// under a new id (placement_session_upgrade.go).
+		if sessionID, err := getSessionCookie(r); err == nil {
+			if upgraded, r2 := s.upgradePlacementSession(w, r, sessionID, session); upgraded != nil {
+				session, r = upgraded, r2
+			}
+		}
+	}
+	if ok && session.IsPlacementOnly() {
+		// Nothing about a local account: there is none.
 		resp.Authenticated = true
+		resp.PlacementOnly = true
+		resp.Placement = &PlacementSessionInfo{Identity: session.PlacementIdentity, DisplayName: session.DisplayName}
+	} else if ok {
+		resp.Authenticated = true
+		if session.PlacementIdentity != "" && s.placementOnboardingEnabled(r.Context()) {
+			resp.Placement = &PlacementSessionInfo{Identity: session.PlacementIdentity, DisplayName: session.DisplayName}
+			if session.IsPlacementd() {
+				resp.Placement.Account = session.Placement.Account
+				resp.Placement.Levels = session.Placement.Levels()
+				resp.Placement.Projects = session.Placement.Projects
+				resp.Placement.Project = session.Placement.Project
+			}
+		}
 		resp.Username = session.Username
 		resp.Groups = session.Groups
 		if s.webuiAdminGroups.configured() {
 			resp.IsAdmin = s.webuiAdminGroups.allows(session.Groups)
 		}
+		resp.ProjectLeadOf = s.projectLeads.LedProjects(session.Username, session.Groups)
+		resp.Assignment = s.sessionAssignment(r, session)
 		resp.SuperuserAllowed = s.mayUseSuperuserMode(r)
 		if resp.SuperuserAllowed {
 			if sessionID, err := getSessionCookie(r); err == nil {
 				if armed, ok := s.superuserArmed.Armed(sessionID); ok {
-					resp.SuperuserActive = true
-					until := armed.until
-					resp.SuperuserExpiresAt = &until
-					resp.SuperuserIdentity = armed.identity
-					resp.SuperuserNote = armed.note
+					// Reported as the actions will see it, so the
+					// banner never claims more than the server grants.
+					scope := effectiveSuperuserScope(armed, s.superuserScopeFor(session))
+					if scope.allowed() {
+						resp.SuperuserActive = true
+						until := armed.until
+						resp.SuperuserExpiresAt = &until
+						resp.SuperuserIdentity = armed.identity
+						resp.SuperuserNote = armed.note
+						resp.SuperuserScope, resp.SuperuserProjects = scopeForResponse(scope)
+					}
 				}
 			}
 		}
 	}
+
+	// Whether this session may see who is running on a slot. Asked of
+	// the same policy the collector reads go through, so the page and
+	// the data it renders cannot disagree about what is withheld.
+	resp.Reservations = s.reservationsEnabled
+	resp.PoolIdentityRestricted = s.poolQueryPolicy.Restricts(s.seesAllJobs(r.Context(), r, jobScopeRead))
 
 	s.writeJSON(w, http.StatusOK, resp)
 }
@@ -102,6 +189,18 @@ type SuperuserModeResponse struct {
 	// Note explains a fallback when one happened, including how to fix it.
 	// Empty when the operator is acting as themselves.
 	Note string `json:"note,omitempty"`
+	// Scope is "global" or "project"; Projects lists the projects a
+	// project-scoped session may act in.
+	Scope    string   `json:"scope,omitempty"`
+	Projects []string `json:"projects,omitempty"`
+}
+
+// scopeForResponse renders a scope for the status endpoints.
+func scopeForResponse(scope superuserScope) (string, []string) {
+	if scope.Global {
+		return "global", nil
+	}
+	return "project", scope.Projects
 }
 
 // handleSuperuserMode handles POST /api/v1/admin/superuser.
@@ -118,7 +217,7 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.superuserModeAvailable() {
 		s.writeError(w, http.StatusServiceUnavailable,
-			"Superuser mode is not enabled on this server. It requires HTTP_API_SUPERUSER_GROUP and a pool signing key.")
+			"Superuser mode is not enabled on this server. It requires HTTP_API_SUPERUSER_GROUP or project leads, and a pool signing key.")
 		return
 	}
 	session, ok := s.getSessionFromRequest(r)
@@ -126,9 +225,13 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if !s.mayUseSuperuserMode(r) {
-		s.writeError(w, http.StatusForbidden,
-			fmt.Sprintf("Superuser mode requires membership in one of: %s", s.superuserGroups))
+	scope := s.superuserScopeFor(session)
+	if !scope.allowed() {
+		msg := "Superuser mode requires leading a project"
+		if s.superuserGroups.configured() {
+			msg = fmt.Sprintf("Superuser mode requires membership in one of: %s, or leading a project", s.superuserGroups)
+		}
+		s.writeError(w, http.StatusForbidden, msg)
 		return
 	}
 	sessionID, err := getSessionCookie(r)
@@ -137,7 +240,7 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	setBodyLimit(w, r, 1<<16)
 	var req SuperuserModeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -147,12 +250,16 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 	resp := SuperuserModeResponse{}
 	if req.Enabled {
 		armed := s.resolveImpersonationIdentity(r.Context(), session.Username)
+		// Global wins when the session holds both: it is the broader
+		// grant and the one the operator was given explicitly.
+		armed.projectScoped = !scope.Global
 		until := s.superuserArmed.Arm(sessionID, armed)
 		resp.Active = true
 		resp.ExpiresAt = &until
 		resp.Identity = armed.identity
 		resp.ActorIsQueueSuperUser = armed.actorIsSuperUser
 		resp.Note = armed.note
+		resp.Scope, resp.Projects = scopeForResponse(scope)
 		identity, isSuper := armed.identity, armed.actorIsSuperUser
 		// Arming is itself worth an audit record: it is the moment an
 		// operator took on the ability to act as anyone, and it may be
@@ -161,6 +268,8 @@ func (s *Handler) handleSuperuserMode(w http.ResponseWriter, r *http.Request) {
 			"actor", session.Username,
 			"authenticated_as", identity,
 			"actor_is_queue_superuser", isSuper,
+			"scope", resp.Scope,
+			"projects", resp.Projects,
 			"expires_at", until,
 			"remote_addr", r.RemoteAddr)
 	} else {
@@ -204,6 +313,10 @@ type DashboardResponse struct {
 	// archive means no rate, and an omitted field says that where a
 	// zeroed one would read as "everything failed".
 	Goodput *GoodputSummary `json:"goodput,omitempty"`
+	// APs and Sources are multi-AP mode's: the counts per access point,
+	// and which APs' data is not current (multiap_dashboard.go).
+	APs     []DashboardAP    `json:"aps,omitempty"`
+	Sources *multiap.Sources `json:"sources,omitempty"`
 }
 
 // holdReasonCodeSpoolingInput is HTCondor's "Spooling input data files"
@@ -259,6 +372,10 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	if s.multi != nil {
+		s.handleMultiDashboard(w, r)
+		return
+	}
 
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -270,7 +387,11 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	// The Owner value of the caller's jobs. A bearer's actor is
+	// qualified ("alice@domain") and a job's Owner is not. A placementd
+	// account is keyed and scoped by its full name (ownerKey).
+	owner := ownerKey(ctx, actor)
 
 	// Admins may opt into a pool-wide view via ?owned_by_me=false.
 	// Non-admins (and the default for everyone) get the my-jobs view.
@@ -283,7 +404,7 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			ownedByMe = parsed
 		}
 	}
-	if !ownedByMe && !s.isWebUIAdmin(r) {
+	if !ownedByMe && !s.seesAllJobs(ctx, r, jobScopeRead) {
 		ownedByMe = true
 	}
 
@@ -303,15 +424,22 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	opts := dashboardWalkOptions(owner, ownedByMe)
 
 	// The tiles are one aggregate against a mirror, so they do not wait
-	// on the panels. See countsFromMirror.
-	if snap, merr := s.countsFromMirror(ctx, owner, ownedByMe); merr == nil {
-		s.writeJSON(w, http.StatusOK, DashboardResponse{
-			Username:     owner,
-			JobsByStatus: snap.Counts,
-			JobsTotal:    snap.Total,
-		})
-		return
-	} else if s.dbMirror.Enabled() {
+	// on the panels. See countsFromMirror. Only for a caller the schedd
+	// accepts at READ; see mirrorReadVerified.
+	allowed := s.mirrorAllowed(ctx, r)
+	merr := allowed
+	if merr == nil {
+		var snap *dashboardSnapshot
+		if snap, merr = s.countsFromMirror(ctx, owner, ownedByMe); merr == nil {
+			s.writeJSON(w, http.StatusOK, DashboardResponse{
+				Username:     actor,
+				JobsByStatus: snap.Counts,
+				JobsTotal:    snap.Total,
+			})
+			return
+		}
+	}
+	if s.dbMirror.Enabled() {
 		s.logger.Debug(logging.DestinationHTTP,
 			"dashboard: mirror unavailable, falling back to the cached queue walk", "error", merr)
 	}
@@ -321,28 +449,34 @@ func (s *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// response did not double the load on the access point. One walk per
 	// interval per scope, keyed by owner because most viewers see only
 	// their own jobs; see dashboardCacheKey.
-	snap, err := s.dashboardSnapshotFor(ctx, owner, ownedByMe, opts)
+	snap, err := s.dashboardSnapshotFor(ctx, owner, ownedByMe, allowed == nil, opts)
 	if err != nil {
 		s.writeDashboardError(w, err)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, DashboardResponse{
-		Username:     owner,
+		Username:     actor,
 		JobsByStatus: snap.Counts,
 		JobsTotal:    snap.Total,
 	})
 }
 
 // dashboardSnapshotFor is the cached queue walk both dashboard endpoints
-// share when no mirror is answering.
-func (s *Handler) dashboardSnapshotFor(ctx context.Context, owner string, ownedByMe bool,
+// share when no mirror is answering. mirror says whether the caller may
+// be answered from the mirror at all (mirrorAllowed), which decides
+// whether the walk consults the archive; it is part of the cache key, so
+// a snapshot that did is never handed to a caller who may not.
+func (s *Handler) dashboardSnapshotFor(ctx context.Context, owner string, ownedByMe, mirror bool,
 	opts *htcondor.QueryOptions) (*dashboardSnapshot, error) {
 	key := dashboardCacheKey(owner, ownedByMe)
+	if !mirror {
+		key += "|schedd-only"
+	}
 	// walkCtx is the cache's, not this request's: the snapshot is shared,
 	// and the walk it protects is the expensive one. See
 	// sharedComputeContext.
 	return s.dashboards().get(ctx, key, func(walkCtx context.Context) (*dashboardSnapshot, error) {
-		return s.walkQueueForDashboard(walkCtx, opts, owner, ownedByMe)
+		return s.walkQueueForDashboard(walkCtx, opts, owner, ownedByMe, mirror)
 	})
 }
 
@@ -364,6 +498,10 @@ type DashboardActivityResponse struct {
 	// archive means no rate, and an omitted field says that where a
 	// zeroed one would read as "everything failed".
 	Goodput *GoodputSummary `json:"goodput,omitempty"`
+	// APs and Sources are multi-AP mode's: what finished per access
+	// point, and which APs' data is not current (multiap_dashboard.go).
+	APs     []DashboardAPActivity `json:"aps,omitempty"`
+	Sources *multiap.Sources      `json:"sources,omitempty"`
 }
 
 // dashboardWalkOptions is the projection the cached walk reads.
@@ -409,6 +547,10 @@ func (s *Handler) handleDashboardActivity(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	if s.multi != nil {
+		s.handleMultiDashboardActivity(w, r)
+		return
+	}
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
 		if needsRedirect {
@@ -418,29 +560,35 @@ func (s *Handler) handleDashboardActivity(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+	owner := ownerKey(ctx, htcondor.GetAuthenticatedUserFromContext(ctx))
 	ownedByMe := true
 	if v := r.URL.Query().Get("owned_by_me"); v != "" {
 		if parsed, perr := strconv.ParseBool(v); perr == nil {
 			ownedByMe = parsed
 		}
 	}
-	if !ownedByMe && !s.isWebUIAdmin(r) {
+	if !ownedByMe && !s.seesAllJobs(ctx, r, jobScopeRead) {
 		ownedByMe = true
 	}
 
-	if snap, merr := s.activityFromMirror(ctx, owner, ownedByMe); merr == nil {
-		s.writeJSON(w, http.StatusOK, DashboardActivityResponse{
-			Activity: snap.Activity,
-			Goodput:  snap.Goodput,
-		})
-		return
-	} else if s.dbMirror.Enabled() {
+	allowed := s.mirrorAllowed(ctx, r)
+	merr := allowed
+	if merr == nil {
+		var snap *dashboardSnapshot
+		if snap, merr = s.activityFromMirror(ctx, owner, ownedByMe); merr == nil {
+			s.writeJSON(w, http.StatusOK, DashboardActivityResponse{
+				Activity: snap.Activity,
+				Goodput:  snap.Goodput,
+			})
+			return
+		}
+	}
+	if s.dbMirror.Enabled() {
 		s.logger.Debug(logging.DestinationHTTP,
 			"dashboard activity: mirror unavailable, falling back to the cached queue walk", "error", merr)
 	}
 
-	snap, err := s.dashboardSnapshotFor(ctx, owner, ownedByMe, dashboardWalkOptions(owner, ownedByMe))
+	snap, err := s.dashboardSnapshotFor(ctx, owner, ownedByMe, allowed == nil, dashboardWalkOptions(owner, ownedByMe))
 	if err != nil {
 		s.writeDashboardError(w, err)
 		return
@@ -456,12 +604,19 @@ func (s *Handler) handleDashboardActivity(w http.ResponseWriter, r *http.Request
 // It is the expensive thing the dashboard does, which is why the caller
 // runs it behind a cache: on a busy access point this reads tens of
 // thousands of ads, and it used to do so on every open of the page.
-func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.QueryOptions, owner string, ownedByMe bool) (*dashboardSnapshot, error) {
+func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.QueryOptions, owner string, ownedByMe, mirror bool) (*dashboardSnapshot, error) {
 	streamOpts := &htcondor.StreamOptions{
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, "true", opts, streamOpts)
+	// FetchMyJobs asks the schedd for the caller's own jobs. A placementd
+	// account is held to its User by the constraint as well, as every
+	// other read of its jobs is.
+	constraint := "true"
+	if ownedByMe && ownerscope.UserScoped(ctx) {
+		constraint = ownerKeyClause(ctx, owner)
+	}
+	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +655,11 @@ func (s *Handler) walkQueueForDashboard(ctx context.Context, opts *htcondor.Quer
 	// has not got to. Ask the archive for the rest, when there is one:
 	// this is the mirror doing what it is for, and a failure here leaves
 	// the queue's shorter answer in place rather than emptying it.
-	if archived, aerr := s.recentlyCompletedFromArchive(ctx, owner, ownedByMe); aerr != nil {
+	archived, aerr := []RecentJob(nil), errors.New("the htcondordb mirror may not answer for this caller")
+	if mirror {
+		archived, aerr = s.recentlyCompletedFromArchive(ctx, owner, ownedByMe)
+	}
+	if aerr != nil {
 		s.logger.Debug(logging.DestinationHTTP,
 			"dashboard: no archive for recently-completed; showing what the queue still holds", "error", aerr)
 	} else {
@@ -523,7 +682,7 @@ func (s *Handler) recentlyCompletedFromArchive(ctx context.Context, owner string
 	}
 	constraint := "true"
 	if ownedByMe {
-		constraint = fmt.Sprintf("Owner == %s", classadStringLit(owner))
+		constraint = ownerKeyClause(ctx, owner)
 	}
 	dbc, closer, _, err := s.dbMirror.Client(ctx)
 	if err != nil {

@@ -45,6 +45,7 @@ import (
 //
 // Run with: go test -tags=integration -run TestMCPSubmitDagIntegration -v ./mcpserver/
 func TestMCPSubmitDagIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -523,6 +524,7 @@ JOB sleeper {
 // nothing reaches the queue. A unit test can see the error; only this can
 // see that no cluster was created.
 func TestMCPSubmitDagRefusesAnUnstartableWorkflowIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

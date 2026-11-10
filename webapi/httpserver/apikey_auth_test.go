@@ -49,7 +49,7 @@ func TestAuthenticateAPIKeyHappyPath(t *testing.T) {
 	}
 	if _, err := h.apiKeyStore.Insert(context.Background(),
 		minted.KeyID, minted.SecretHash, "test", "alice",
-		[]string{"metrics"}, nil); err != nil {
+		[]string{"metrics"}, nil, false); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	ctx, err := h.authenticateAPIKey(requestWithBearer(t, minted.Full), minted.Full)
@@ -78,7 +78,7 @@ func TestAuthenticateAPIKeyRejectsTamperedSecret(t *testing.T) {
 	minted, _ := apikey.Mint()
 	_, _ = h.apiKeyStore.Insert(context.Background(),
 		minted.KeyID, minted.SecretHash, "n", "alice",
-		[]string{"metrics"}, nil)
+		[]string{"metrics"}, nil, false)
 
 	// Replace the secret half with a different (still valid-shape)
 	// random secret. Parse should succeed; VerifySecret should fail.
@@ -98,7 +98,7 @@ func TestAuthenticateAPIKeyRejectsRevoked(t *testing.T) {
 	minted, _ := apikey.Mint()
 	_, _ = h.apiKeyStore.Insert(context.Background(),
 		minted.KeyID, minted.SecretHash, "n", "alice",
-		[]string{"metrics"}, nil)
+		[]string{"metrics"}, nil, false)
 	if err := h.apiKeyStore.SoftDelete(context.Background(), minted.KeyID, "alice"); err != nil {
 		t.Fatalf("SoftDelete: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestAuthenticateAPIKeyRejectsExpired(t *testing.T) {
 	past := time.Now().Add(-time.Microsecond)
 	_, _ = h.apiKeyStore.Insert(context.Background(),
 		minted.KeyID, minted.SecretHash, "n", "alice",
-		[]string{"metrics"}, &past)
+		[]string{"metrics"}, &past, false)
 	if _, err := h.authenticateAPIKey(requestWithBearer(t, minted.Full), minted.Full); err == nil {
 		t.Errorf("authenticateAPIKey accepted an expired key")
 	}

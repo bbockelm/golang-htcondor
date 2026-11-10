@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,11 +24,13 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // TestCreddHTTPIntegration exercises the credential endpoints against a running HTTP server
 // with a live mini-HTCondor instance. Uses the CEDAR-based credd client.
 func TestCreddHTTPIntegration(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
 	}
@@ -143,7 +146,12 @@ LOCAL_CREDMON_LOG = $(LOG)/LocalCredmonLog
 LOCAL_CREDMON_DEBUG = D_FULLDEBUG
 
 # Local credmon configuration parameters (shared by all providers)
-LOCAL_CREDMON_PROVIDERS = github,gitlab
+LOCAL_CREDMON_PROVIDERS = github,gitlab,localtok
+# localtok is the credd's own local-credmon service: the credd adds it to every
+# check-creds request and creates it when missing, as ap2001 does for
+# scitokens. It is not github or gitlab so the steps above that store those
+# by hand see the credd classify them as before.
+LOCAL_CREDMON_PROVIDER_NAMES = localtok
 LOCAL_CREDMON_KEY_FILE = %s
 LOCAL_CREDMON_ISSUER = https://test.htcondor.org
 LOCAL_CREDMON_AUDIENCE = https://github.com https://gitlab.com
@@ -164,8 +172,7 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 	}
 	f.Close()
 
-	t.Setenv("CONDOR_CONFIG", configFile)
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -193,9 +200,9 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 	t.Logf("Credd address: %s", creddAddr)
 
 	// Create CedarCredd client
-	creddClient := htcondor.NewCedarCredd(creddAddr)
+	creddClient := htcondor.NewCedarCredd(creddAddr).WithConfig(htcCfg)
 
-	server, baseURL := startTestHTTPServerWithCredd(ctx, tempDir, scheddAddr, passwordsDir, creddClient, t)
+	server, baseURL := startTestHTTPServerWithCredd(ctx, htcCfg, tempDir, scheddAddr, passwordsDir, creddClient, t)
 	defer func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
@@ -220,6 +227,14 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 		t.Fatalf("LOCAL_CREDMON daemon failed to become ready: %v", err)
 	}
 	t.Logf("✅ LOCAL_CREDMON daemon is ready")
+
+	// A user with no credentials: the credd answers the listing with "not
+	// found", which has to come back as an empty list, not an error.
+	userCtx := htcondor.WithAuthenticatedUser(ctx, currentUsername)
+	if creds, err := creddClient.ListServiceCreds(userCtx, htcondor.CredTypeOAuth, ""); err != nil || len(creds) != 0 {
+		t.Fatalf("listing with no credentials: got (%+v, %v), want an empty list", creds, err)
+	}
+	t.Logf("✅ Listing with no credentials is empty, not an error")
 
 	// Add service credential with refresh=true to create .top file for credmon
 	addBody := map[string]any{
@@ -443,6 +458,39 @@ LOCAL_CREDMON_SCAN_INTERVAL = 2s
 	if status.Exists {
 		t.Fatalf("expected credential to be deleted")
 	}
+
+	// Issue #576. The request condor_submit makes before every submit. Named
+	// or not -- a credd from HTCondor 25.13.2 on adds its local-credmon
+	// services to a request that names none, an older one only creates what
+	// is named -- the credd writes the request (.top, holding only the
+	// user's name) and holds its reply until the credmon has written the
+	// token.
+	checkCtx, checkCancel := context.WithTimeout(userCtx, 40*time.Second)
+	defer checkCancel()
+	for _, requests := range [][]htcondor.CredRequest{nil, {{Service: "localtok"}}} {
+		url, err := creddClient.CheckCreds(checkCtx, requests)
+		if err != nil || url != "" {
+			t.Fatalf("check-creds %+v: got (%q, %v), want (\"\", nil)", requests, url, err)
+		}
+	}
+	t.Logf("✅ check-creds created the local-credmon credential")
+
+	// A service the credd has no credmon for is refused, not created: that is
+	// the answer the bootstrap falls back to a placeholder on.
+	_, err = creddClient.CheckCreds(checkCtx, []htcondor.CredRequest{{Service: "nosuchservice"}})
+	var refusal *htcondor.CheckCredsRefusal
+	if !errors.As(err, &refusal) {
+		t.Fatalf("check-creds for a service with no credmon: got %v, want a CheckCredsRefusal", err)
+	}
+	t.Logf("✅ check-creds refuses a service with no credmon: %s", refusal.Reason)
+
+	// The .top the credd wrote is not JSON. A status query that names the
+	// service re-reads it as JSON and fails; this one must not.
+	localStatus, err := creddClient.GetServiceCredStatus(userCtx, htcondor.CredTypeOAuth, "localtok", "", "")
+	if err != nil || !localStatus.Exists {
+		t.Fatalf("status of the credd-created credential: got (%+v, %v), want it to exist", localStatus, err)
+	}
+	t.Logf("✅ Status reads a local-credmon credential without parsing its request file")
 }
 
 // waitForLocalCredmonReady waits for LOCAL_CREDMON daemon to signal readiness to condor_master
@@ -502,7 +550,7 @@ func getCreddAddress(tempDir string, timeout time.Duration) (string, error) {
 }
 
 // startTestHTTPServerWithCredd starts HTTP server with custom credd client
-func startTestHTTPServerWithCredd(ctx context.Context, tempDir, scheddAddr, passwordsDir string, creddClient htcondor.CreddClient, t *testing.T) (*Server, string) {
+func startTestHTTPServerWithCredd(ctx context.Context, htcCfg *config.Config, tempDir, scheddAddr, passwordsDir string, creddClient htcondor.CreddClient, t *testing.T) (*Server, string) {
 	t.Helper()
 
 	signingKeyPath := filepath.Join(passwordsDir, "POOL")
@@ -512,7 +560,7 @@ func startTestHTTPServerWithCredd(ctx context.Context, tempDir, scheddAddr, pass
 	serverAddr := "127.0.0.1:0"
 
 	// Create HTTP server with collector for collector tests
-	collector := htcondor.NewCollector(scheddAddr) // Use schedd address (shared port)
+	collector := htcondor.NewCollector(scheddAddr).WithConfig(htcCfg) // Use schedd address (shared port)
 
 	// Create a directory for the DB to avoid any interference from Condor
 	dbDir := filepath.Join(tempDir, "db")
@@ -523,6 +571,7 @@ func startTestHTTPServerWithCredd(ctx context.Context, tempDir, scheddAddr, pass
 	oauth2DBPath := filepath.Join(dbDir, "sessions.db")
 
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               scheddAddr,

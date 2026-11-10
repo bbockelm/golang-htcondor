@@ -690,7 +690,7 @@ func TestCCBStreamingReachesTheDial(t *testing.T) {
 				// Force the real dialer: the point is what IT asks for.
 				Dial: nil,
 			})
-			mgr.opts.Dial = sshDialer(func() ScheddClient {
+			mgr.opts.Dial = sshDialer(func(context.Context) ScheddClient {
 				return htcondor.NewSchedd("test", "127.0.0.1:1")
 			}, dialer)
 
@@ -1218,6 +1218,32 @@ func TestCreateRunsBeforeSubmitWithTheCallersContext(t *testing.T) {
 		// credd as this daemon rather than as the caller, and bootstrap
 		// the wrong person's credentials.
 		t.Error("BeforeSubmit did not receive the caller's context")
+	}
+}
+
+// The host's SubmitContext decides the context the job is submitted
+// under -- which is how the access point's request defaults reach the
+// submit engine -- and it derives from the caller's.
+func TestCreateSubmitsUnderTheHostsSubmitContext(t *testing.T) {
+	schedd := newFakeSchedd()
+	type derived struct{}
+	mgr, _ := testManager(t, schedd, Options{
+		SubmitContext: func(ctx context.Context) context.Context {
+			return context.WithValue(ctx, derived{}, true)
+		},
+	})
+	ctx := context.WithValue(context.Background(), ctxKey{}, "alice's request")
+	if _, err := mgr.Create(ctx, alice, CreateSpec{Name: "build"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	schedd.mu.Lock()
+	got := schedd.submitCtx
+	schedd.mu.Unlock()
+	if got == nil || got.Value(derived{}) != true {
+		t.Fatal("the job was not submitted under the host's SubmitContext")
+	}
+	if _, ok := got.Value(ctxKey{}).(string); !ok {
+		t.Error("the submit context does not derive from the caller's")
 	}
 }
 

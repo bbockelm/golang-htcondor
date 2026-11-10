@@ -195,10 +195,41 @@ func TestNoCompletionsAnywhereIsReportedHonestly(t *testing.T) {
 		t.Error("no completions should be invented")
 	}
 	// An archive that returns nothing is still an answer: it means
-	// nothing finished, which is different from not knowing.
+	// nothing finished, which is different from not knowing. Callers
+	// only merge after a read that succeeded, so this is the archive
+	// saying the window is empty.
 	got.mergeArchivedCompletions(nil)
-	if got.CompletedAvailable {
-		t.Error("an empty archive result should not flip availability on its own")
+	if !got.CompletedAvailable {
+		t.Error("the archive answered; an empty window is an answer, not a silence")
+	}
+	if got.CompletedPartial {
+		t.Error("the archive answered, so the list is not the queue's alone")
+	}
+}
+
+// TestEmptyArchiveAnswerIsNotPartial is the case that reaches a viewer:
+// a job finished through the web UI stays in the queue as Completed, so
+// the queue has the row and the archive truthfully has none. Before this
+// the panel told them the history mirror was not answering, and the
+// mirror took the blame for working correctly.
+func TestEmptyArchiveAnswerIsNotPartial(t *testing.T) {
+	a := newActivityCollector(0)
+	done := classad.New()
+	done.InsertAttr("ClusterId", int64(99))
+	done.InsertAttr("ProcId", int64(0))
+	done.InsertAttr("JobStatus", int64(4))
+	done.InsertAttr("CompletionDate", int64(5000))
+	done.InsertAttrString("Owner", "alice")
+	a.observe(done)
+
+	got := a.result(time.Now())
+	got.mergeArchivedCompletions(nil)
+
+	if got.CompletedPartial {
+		t.Error("the archive answered with an empty window; the panel must not blame the mirror")
+	}
+	if !got.CompletedAvailable || len(got.RecentlyCompleted) != 1 {
+		t.Errorf("the queue's completed job should survive the merge: %+v", got.RecentlyCompleted)
 	}
 }
 

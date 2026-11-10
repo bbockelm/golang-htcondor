@@ -2,11 +2,13 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ory/fosite"
 
+	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -111,6 +113,41 @@ func grantRevokedError(reason string) error {
 // A non-nil error means the caller must abandon the request; the grant has
 // already been revoked in storage by then.
 func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessRequester) error {
+	granted, err := h.reauthorizeGrant(ctx, ar)
+	if err != nil {
+		return err
+	}
+
+	// --- apply -----------------------------------------------------------
+	// fosite exposes no way to un-grant a scope through the AccessRequester
+	// interface, so reach the concrete request to replace the set. If the
+	// type ever changes upstream, the assertion fails closed-ish: the grant
+	// is not narrowed, which we log rather than silently accept.
+	if len(granted) != len(ar.GetGrantedScopes()) {
+		username := ar.GetSession().GetSubject()
+		req, ok := ar.(*fosite.AccessRequest)
+		if !ok {
+			h.logger.Error(logging.DestinationHTTP,
+				"Cannot narrow refreshed grant: unexpected AccessRequester type",
+				"username", username, "request_id", ar.GetID(),
+				"type", fmt.Sprintf("%T", ar))
+			reason := "unable to apply current authorization policy to this grant"
+			h.revokeGrant(ctx, ar.GetID(), username, reason)
+			return grantRevokedError(reason)
+		}
+		req.GrantedScope = fosite.Arguments(granted)
+	}
+
+	return nil
+}
+
+// reauthorizeGrant runs the checks reauthorizeRefreshGrant describes against
+// a stored grant and returns the scopes it may still carry, without applying
+// them. Token exchange mints from an existing grant just as refresh does, so
+// it runs the same checks against the grant behind its subject token.
+//
+// A non-nil error means the grant has been revoked in storage.
+func (h *Handler) reauthorizeGrant(ctx context.Context, ar fosite.Requester) ([]string, error) {
 	username := ar.GetSession().GetSubject()
 	granted := []string(ar.GetGrantedScopes())
 
@@ -123,7 +160,7 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 		h.logger.Warn(logging.DestinationHTTP,
 			"Refresh grant has a legacy session; reauthorization limited to the lifetime cap",
 			"username", username, "request_id", ar.GetID())
-		return nil
+		return granted, nil
 	}
 
 	// --- absolute lifetime cap ------------------------------------------
@@ -142,49 +179,162 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 			"username", username, "request_id", ar.GetID(),
 			"auth_time", sess.AuthTime, "age", age.Round(time.Minute))
 		h.revokeGrant(ctx, ar.GetID(), username, reason)
-		return grantRevokedError(reason)
+		return nil, grantRevokedError(reason)
 	}
 
+	// A placement grant (one holding the placement scope) is held to the placementd's current answer
+	// for its identity, and to nothing else: it carries no scope the group
+	// policy or the other oracles speak to. Other grants a placementd-mapped
+	// session approved name an identity too, and are re-checked below.
+	if isPlacementGrant(granted) {
+		reason, err := h.reauthorizePlacementIdentity(ctx, sess.PlacementIdentity, "")
+		if err != nil {
+			return nil, fosite.ErrTemporarilyUnavailable.WithHint(err.Error())
+		}
+		if reason != "" {
+			h.revokeGrant(ctx, ar.GetID(), username, reason)
+			return nil, grantRevokedError(reason)
+		}
+		return granted, nil
+	}
+
+	// A subject a placementd-mapped session authorized is re-read from
+	// the placementd for the identity that approved this grant, never for
+	// whichever identity of the account signed in last: unmapped or
+	// re-pointed ends the grant. A grant that names no identity, or one that
+	// never signed in as the account, has nothing to be re-read for and ends
+	// too.
+	identity := sess.PlacementIdentity
+	bound, err := h.placementSubjectBound(ctx, username, identity)
+	if errors.Is(err, errPlacementGrantIdentity) {
+		reason := err.Error()
+		h.revokeGrant(ctx, ar.GetID(), username, reason)
+		return nil, grantRevokedError(reason)
+	}
+	if err != nil {
+		return nil, fosite.ErrServerError.WithWrap(err)
+	}
+	if bound != nil {
+		ctx = withGrantIdentityContext(ctx, identity)
+		reason, err := h.reauthorizePlacementIdentity(ctx, identity, username)
+		if err != nil {
+			return nil, fosite.ErrTemporarilyUnavailable.WithHint(err.Error())
+		}
+		if reason != "" {
+			h.revokeGrant(ctx, ar.GetID(), username, reason)
+			return nil, grantRevokedError(reason)
+		}
+	}
+
+	granted, reason := h.reevaluateSubjectWith(ctx, username, sess.Groups, granted, ar.GetID(), bound != nil)
+	if reason != "" {
+		h.revokeGrant(ctx, ar.GetID(), username, reason)
+		return nil, grantRevokedError(reason)
+	}
+	return granted, nil
+}
+
+// reauthorizePlacementIdentity re-reads identity from the placementd and
+// returns why a grant resting on it must end, or "" when it may continue. With
+// wantAccount set, the identity must still map to that account, and the
+// stored bound for it is refreshed. The account's schedd user record being
+// disabled also ends the grant (the user-record oracle, applied to the
+// placementd account rather than a local name). An error means the
+// placementd could not be asked; the grant is neither continued nor revoked.
+func (h *Handler) reauthorizePlacementIdentity(ctx context.Context, identity, wantAccount string) (string, error) {
+	if identity == "" {
+		return "this grant names no sign-in identity", nil
+	}
+	if h.placementd == nil || !h.placementdReady(ctx) {
+		return "", errors.New("the placement service is not available")
+	}
+	pctx := htcondor.WithDaemonCredential(ctx, "placement grant refresh: the grant's own identity")
+	m, err := h.placementMappingFor(pctx, identity)
+	if err != nil {
+		return "", fmt.Errorf("asking the placement service about %s: %w", identity, err)
+	}
+	switch {
+	case m == nil:
+		h.updatePlacementSubject(ctx, wantAccount, identity, nil)
+		return "the sign-in identity is no longer authorized by the placement service", nil
+	case m.expired(time.Now()):
+		h.updatePlacementSubject(ctx, wantAccount, identity, nil)
+		return "the sign-in identity's access has expired", nil
+	case wantAccount != "" && m.Account != wantAccount:
+		h.updatePlacementSubject(ctx, wantAccount, identity, nil)
+		return "the sign-in identity now maps to a different account", nil
+	}
+	if wantAccount != "" {
+		h.updatePlacementSubject(ctx, wantAccount, identity, &PlacementAccountInfo{
+			Account: m.Account, Authorizations: m.Authorizations, MappingExpiresAt: m.ExpiresAt,
+		})
+	}
+	if m.Account != "" {
+		oracle := &UserRecordOracle{Lookup: h.placementUserRecordLookup, Logger: h.logger}
+		if decision, err := oracle.CheckAccount(ctx, m.Account); err == nil && decision.Status == UserStatusRevoked {
+			return decision.Reason, nil
+		}
+	}
+	return "", nil
+}
+
+// reevaluateSubject applies the current group policy and the revocation
+// oracles to username, holding groups, and returns what is left of granted.
+// A non-empty refusal means the subject may hold nothing at all.
+//
+// It revokes nothing: a refresh or exchange from a stored grant revokes that
+// grant on refusal, while an exchange of an external issuer's token has no
+// grant here to revoke. requestID is for the log only and may be empty.
+func (h *Handler) reevaluateSubject(ctx context.Context, username string, groups, granted []string, requestID string) (scopes []string, refusal string) {
+	return h.reevaluateSubjectWith(ctx, username, groups, granted, requestID, false)
+}
+
+// reevaluateSubjectWith is reevaluateSubject; placementdAccount marks a
+// subject that is an account the placementd assigned, which has no local
+// account for the system-groups oracle to find -- its absence there is not a
+// deletion -- and is checked against the placementd instead.
+func (h *Handler) reevaluateSubjectWith(ctx context.Context, username string, groups, granted []string, requestID string, placementdAccount bool) (scopes []string, refusal string) {
 	// --- group policy re-evaluation -------------------------------------
-	// IMPORTANT: sess.Groups is the membership list as of consent, not a
-	// live reading. Re-running the policy against it therefore catches
+	// IMPORTANT: for a stored grant, groups is the session's membership
+	// list as of consent, not a live reading. Re-running the policy against it therefore catches
 	// POLICY drift — an operator changing MCP_WRITE_GROUP, or adding an
 	// MCP_ACCESS_GROUP where there was none — but NOT MEMBERSHIP drift.
 	// A user removed from condor-writers upstream still carries
 	// "condor-writers" here and still passes.
 	//
-	// That gap is deliberate, not an oversight. Reading live membership
-	// means holding a live credential to the upstream IDP (an upstream
-	// refresh token) or a separate directory binding, neither of which
-	// this server has. Membership changes are covered instead by the
-	// revocation oracles below, by the admin revoke endpoint, and
-	// ultimately by the lifetime cap above — which is the only mechanism
-	// that bounds exposure with no cooperation from anything else.
+	// Reading live membership means holding something this server can
+	// re-read a user with: the account database, or a live credential to
+	// the identity provider. Two oracles below do exactly that, and
+	// between them they cover the gap wherever a deployment has either:
 	//
-	// That future live-membership source now exists, where the
-	// deployment has one: with HTTP_API_GROUP_SOURCE=system, groups come
-	// from the account database rather than the token, so they can be
-	// re-read here without any upstream credential. systemGroupOracle
-	// does exactly what this paragraph described -- see
-	// identity_group_oracle.go -- and is registered among the oracles
-	// below. The gap above remains real for token-sourced groups, which
-	// is the default and the only option in a container.
+	//   - systemGroupOracle (identity_group_oracle.go) re-reads the
+	//     account database. Registered when HTTP_API_GROUP_SOURCE names
+	//     a local source, which is also what makes those groups
+	//     authoritative at login.
+	//   - upstreamUserInfoOracle (upstream_oracle.go) asks the provider
+	//     itself, with the refresh token it issued at login. Registered
+	//     when HTTP_API_UPSTREAM_REFRESH keeps one and the provider
+	//     released offline_access.
+	//
+	// Where neither applies -- token-sourced groups, and a provider that
+	// releases no refresh token -- the gap is real and deliberate. It is
+	// covered then by the admin revoke endpoint and ultimately by the
+	// lifetime cap in reauthorizeGrant, which is the only mechanism that
+	// bounds exposure with no cooperation from anything else.
 	//
 	// A nil list means the user authenticated by a path that asserts no
 	// groups (the trusted user header, say), so there is no policy to
 	// re-run at all.
-	if sess.Groups != nil {
-		if err := h.validateGroupAccess(sess.Groups); err != nil {
-			reason := fmt.Sprintf("user no longer has required group membership: %v", err)
-			h.logger.Info(logging.DestinationHTTP, "Revoking refresh grant on lost group access",
-				"username", username, "request_id", ar.GetID(), "groups", sess.Groups)
-			h.revokeGrant(ctx, ar.GetID(), username, reason)
-			return grantRevokedError(reason)
+	if groups != nil {
+		if err := h.validateGroupAccess(groups); err != nil {
+			h.logger.Info(logging.DestinationHTTP, "Refusing grant on lost group access",
+				"username", username, "request_id", requestID, "groups", groups)
+			return nil, fmt.Sprintf("user no longer has required group membership: %v", err)
 		}
-		allowed := h.getScopesForGroups(sess.Groups, granted)
+		allowed := h.getScopesForGroups(groups, granted)
 		if narrowed := intersectScopes(granted, allowed); len(narrowed) != len(granted) {
-			h.logger.Info(logging.DestinationHTTP, "Narrowing refreshed grant to current group policy",
-				"username", username, "request_id", ar.GetID(),
+			h.logger.Info(logging.DestinationHTTP, "Narrowing grant to current group policy",
+				"username", username, "request_id", requestID,
 				"was", granted, "now", narrowed,
 				"dropped", subtractScopes(granted, narrowed))
 			granted = narrowed
@@ -193,6 +343,9 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 
 	// --- external oracles -----------------------------------------------
 	for _, oracle := range h.revocationOracles {
+		if placementdAccount && oracle.Name() == systemGroupOracleName {
+			continue
+		}
 		decision, err := oracle.Check(ctx, username, granted)
 		if err != nil {
 			// Fail open, loudly. An oracle that cannot answer must not
@@ -207,20 +360,19 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 			if reason == "" {
 				reason = fmt.Sprintf("access revoked by %s", oracle.Name())
 			}
-			h.logger.Info(logging.DestinationHTTP, "Revoking refresh grant on oracle verdict",
+			h.logger.Info(logging.DestinationHTTP, "Refusing grant on oracle verdict",
 				"oracle", oracle.Name(), "username", username,
-				"request_id", ar.GetID(), "reason", reason)
-			h.revokeGrant(ctx, ar.GetID(), username, reason)
-			return grantRevokedError(reason)
+				"request_id", requestID, "reason", reason)
+			return nil, reason
 		case UserStatusActive, UserStatusUnknown:
 			// Fall through to the per-scope denials below; an oracle may
 			// vouch for the user while still stripping individual scopes.
 		}
 		if len(decision.DeniedScopes) > 0 {
 			if narrowed := subtractScopes(granted, decision.DeniedScopes); len(narrowed) != len(granted) {
-				h.logger.Info(logging.DestinationHTTP, "Narrowing refreshed grant on oracle verdict",
+				h.logger.Info(logging.DestinationHTTP, "Narrowing grant on oracle verdict",
 					"oracle", oracle.Name(), "username", username,
-					"request_id", ar.GetID(),
+					"request_id", requestID,
 					"denied", decision.DeniedScopes, "now", narrowed,
 					"reason", decision.Reason)
 				granted = narrowed
@@ -228,26 +380,7 @@ func (h *Handler) reauthorizeRefreshGrant(ctx context.Context, ar fosite.AccessR
 		}
 	}
 
-	// --- apply -----------------------------------------------------------
-	// fosite exposes no way to un-grant a scope through the AccessRequester
-	// interface, so reach the concrete request to replace the set. If the
-	// type ever changes upstream, the assertion fails closed-ish: the grant
-	// is not narrowed, which we log rather than silently accept.
-	if len(granted) != len(ar.GetGrantedScopes()) {
-		req, ok := ar.(*fosite.AccessRequest)
-		if !ok {
-			h.logger.Error(logging.DestinationHTTP,
-				"Cannot narrow refreshed grant: unexpected AccessRequester type",
-				"username", username, "request_id", ar.GetID(),
-				"type", fmt.Sprintf("%T", ar))
-			reason := "unable to apply current authorization policy to this grant"
-			h.revokeGrant(ctx, ar.GetID(), username, reason)
-			return grantRevokedError(reason)
-		}
-		req.GrantedScope = fosite.Arguments(granted)
-	}
-
-	return nil
+	return granted, ""
 }
 
 // revokeGrant kills every token in a refresh chain. fosite preserves the

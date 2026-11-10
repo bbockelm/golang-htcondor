@@ -120,7 +120,7 @@ func TestDelegatedHistoryRoutingRequiresAnIdentity(t *testing.T) {
 	opts := &htcondor.HistoryQueryOptions{Backwards: true}
 
 	delegated := &Server{dbMirror: locator, delegated: true}
-	_, ok, d := delegated.tryHistoryFromDB(context.Background(), "true", opts, "job history")
+	_, ok, d := delegated.tryHistoryFromDB(context.Background(), "true", opts, "job history", false)
 	if ok {
 		t.Error("a delegated server must not answer an unidentified caller from the mirror")
 	}
@@ -131,13 +131,13 @@ func TestDelegatedHistoryRoutingRequiresAnIdentity(t *testing.T) {
 	// Same call over stdio gets as far as discovery instead of stopping
 	// at the identity check.
 	stdio := &Server{dbMirror: locator}
-	if _, _, d := stdio.tryHistoryFromDB(context.Background(), "true", opts, "job history"); d.Reason != dbmirror.ReasonNoMirror {
+	if _, _, d := stdio.tryHistoryFromDB(context.Background(), "true", opts, "job history", false); d.Reason != dbmirror.ReasonNoMirror {
 		t.Errorf("stdio: Reason = %q, want %q", d.Reason, dbmirror.ReasonNoMirror)
 	}
 
 	// And a delegated call WITH an identity is likewise not stopped there.
 	ctx := htcondor.WithAuthenticatedUser(context.Background(), "alice@uid.domain")
-	if _, _, d := delegated.tryHistoryFromDB(ctx, "true", opts, "job history"); d.Reason != dbmirror.ReasonNoMirror {
+	if _, _, d := delegated.tryHistoryFromDB(ctx, "true", opts, "job history", false); d.Reason != dbmirror.ReasonNoMirror {
 		t.Errorf("identified delegated caller: Reason = %q, want %q", d.Reason, dbmirror.ReasonNoMirror)
 	}
 }

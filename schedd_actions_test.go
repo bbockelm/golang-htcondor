@@ -2,6 +2,8 @@ package htcondor
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -152,5 +154,49 @@ func TestActOnJobsValidation(t *testing.T) {
 	}
 	if err.Error() != "must specify either constraint or ids" {
 		t.Errorf("Unexpected error message: %v", err)
+	}
+}
+
+// TestParseJobActionResultsIgnoresQueueSize is issue #576: TotalJobAds in an
+// action reply is the size of the whole queue, and it used to replace the
+// total whenever it was larger -- so removing two jobs on a busy access point
+// reported a total of 52926.
+func TestParseJobActionResultsIgnoresQueueSize(t *testing.T) {
+	ad := classad.New()
+	_ = ad.Set("TotalJobAds", int64(52926))
+	_ = ad.Set("result_total_1", int64(2))
+
+	if got := parseJobActionResults(ad).TotalJobs; got != 2 {
+		t.Errorf("TotalJobs = %d, want 2 (the jobs acted on, not the queue)", got)
+	}
+}
+
+// TestParseJobActionResultsIgnoresNegativeCounts: schedds built between
+// 2025-02-24 and 2026-04-14 publish result_total_6 uninitialized.
+func TestParseJobActionResultsIgnoresNegativeCounts(t *testing.T) {
+	ad := classad.New()
+	_ = ad.Set("result_total_1", int64(1))
+	_ = ad.Set("result_total_6", int64(-1748915244))
+
+	results := parseJobActionResults(ad)
+	if results.LimitExceeded != 0 || results.TotalJobs != 1 {
+		t.Errorf("got LimitExceeded=%d TotalJobs=%d, want 0 and 1", results.LimitExceeded, results.TotalJobs)
+	}
+}
+
+func TestJobActionRefusedError(t *testing.T) {
+	none := &JobActionRefusedError{Results: &JobActionResults{}}
+	if !errors.Is(none, ErrNoJobsMatched) {
+		t.Error("a refusal with nothing matched is not ErrNoJobsMatched")
+	}
+
+	held := &JobActionRefusedError{Results: &JobActionResults{AlreadyDone: 2, PermissionDenied: 1}}
+	if errors.Is(held, ErrNoJobsMatched) {
+		t.Error("a refusal of matched jobs reads as nothing matched")
+	}
+	for _, want := range []string{"3 matching", "2 already in that state", "1 permission denied"} {
+		if !strings.Contains(held.Error(), want) {
+			t.Errorf("%q does not say %q", held.Error(), want)
+		}
 	}
 }

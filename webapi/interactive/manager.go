@@ -9,7 +9,6 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -67,6 +66,20 @@ type Options struct {
 	// *htcondor.Schedd so the lease and lifecycle logic can be tested
 	// without a pool behind it.
 	Schedd func() ScheddClient
+	// ScheddFor, when set, returns the schedd that owns the job a call
+	// on ctx is about, and is what reaching into a running job dials
+	// through. A host fronting several schedds sets it, so a command run
+	// in a job goes to that job's schedd; without it Schedd is used.
+	ScheddFor func(ctx context.Context) ScheddClient
+
+	// APs, when set, puts the manager in front of several access points
+	// (see multiap.go): a session's access point is chosen once, at
+	// Create, and every later call on it goes there. ScheddFor is then
+	// required and Schedd is never called.
+	APs APs
+	// APTimeout bounds one access point's answer to a session listing
+	// with several access points. Defaults to DefaultAPTimeout.
+	APTimeout time.Duration
 
 	Logger  *logging.Logger
 	LogDest logging.Destination
@@ -158,6 +171,13 @@ type Options struct {
 	// submission to break.
 	BeforeSubmit func(ctx context.Context)
 
+	// SubmitContext, when set, derives the context a session's job is
+	// submitted under. The host attaches the access point's
+	// JOB_DEFAULT_REQUEST* values here (htcondor.WithSubmitParams), so a
+	// session that names no GPUs gets what any other job on that access
+	// point would. Like BeforeSubmit it must not fail the submission.
+	SubmitContext func(ctx context.Context) context.Context
+
 	// Now is the clock, for tests.
 	Now func() time.Time
 }
@@ -202,8 +222,11 @@ type session struct {
 	name       string
 	owner      string
 	instanceID string
-	cluster    int
-	proc       int
+	// ap is the access point the session's job is on, in multi-AP mode:
+	// its record, which every call on the session is sent to.
+	ap      string
+	cluster int
+	proc    int
 
 	shell Shell
 	// deadShells holds connections detached while commands were still
@@ -228,19 +251,24 @@ type session struct {
 	heartbeatOn   bool
 	stopHeartbeat chan struct{}
 
-	// secConfig is the credential the session was last reached with,
+	// credential is the credential the session was last reached with,
 	// kept so the manager can redial the job or remove it from a
 	// background goroutine that has no request context of its own.
 	// This is the same trust the WebSocket bridge takes by holding an
 	// authenticated ssh.Client open for the life of a terminal; the
-	// lease is what bounds how long it is held.
-	secConfig *security.SecurityConfig
+	// lease is what bounds how long it is held. It is kept with its
+	// renewer: the token itself lasts minutes and a lease runs for half
+	// an hour or more, so a copy of the token alone would be expired by
+	// the time the lease ran out.
+	credential *htcondor.CallerCredential
 }
 
 // Info is the caller-facing view of a session.
 type Info struct {
-	Name           string    `json:"name"`
-	JobID          string    `json:"job_id"`
+	Name  string `json:"name"`
+	JobID string `json:"job_id"`
+	// Schedd is the access point the session is on, in multi-AP mode.
+	Schedd         string    `json:"schedd,omitempty"`
 	ClusterID      int       `json:"cluster_id"`
 	ProcID         int       `json:"proc_id"`
 	JobStatus      int       `json:"job_status"`
@@ -255,6 +283,10 @@ type Info struct {
 	// the default the way it always did.
 	LeaseDuration time.Duration `json:"-"`
 	Attached      bool          `json:"attached"`
+	// Unverified marks a session reported from the federated catalog
+	// because its access point could not be asked; APError says why.
+	Unverified bool   `json:"-"`
+	APError    string `json:"access_point_error,omitempty"`
 }
 
 // CreateSpec describes a session to start.
@@ -296,6 +328,12 @@ type CreateSpec struct {
 	SubmitLines string
 
 	Lease time.Duration
+
+	// Schedd asks for the session on a particular access point, on a
+	// server that fronts several. Honored only as AP assignment allows;
+	// empty means the caller's home access point. Ignored with one
+	// schedd.
+	Schedd string
 }
 
 // ExecRequest is one command to run in a session.
@@ -326,6 +364,9 @@ type ExecResult struct {
 func NewManager(opts Options) (*Manager, error) {
 	if opts.Schedd == nil {
 		return nil, fmt.Errorf("interactive: Options.Schedd is required")
+	}
+	if opts.APs != nil && opts.ScheddFor == nil {
+		return nil, fmt.Errorf("interactive: Options.ScheddFor is required with Options.APs")
 	}
 	if opts.Logger == nil {
 		var err error
@@ -367,7 +408,12 @@ func NewManager(opts Options) (*Manager, error) {
 		opts.Now = time.Now
 	}
 	if opts.Dial == nil {
-		opts.Dial = sshDialer(opts.Schedd, opts.CCB)
+		scheddFor := opts.ScheddFor
+		if scheddFor == nil {
+			schedd := opts.Schedd
+			scheddFor = func(context.Context) ScheddClient { return schedd() }
+		}
+		opts.Dial = sshDialer(scheddFor, opts.CCB)
 	}
 	m := &Manager{
 		opts:     opts,
@@ -393,6 +439,9 @@ func (m *Manager) ScheddForTest() ScheddClient { return m.opts.Schedd() }
 // later, with a hold reason that names none of this. A host that means
 // to prepare something before a submit can assert that it did.
 func (m *Manager) HasBeforeSubmitForTest() bool { return m.opts.BeforeSubmit != nil }
+
+// HasSubmitContextForTest reports whether a host wired Options.SubmitContext.
+func (m *Manager) HasSubmitContextForTest() bool { return m.opts.SubmitContext != nil }
 
 func sessionKey(owner, name string) string { return owner + "\x00" + name }
 
@@ -479,6 +528,16 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		return nil, err
 	}
 
+	// The access point the session goes to: asked once, here, and stored
+	// on the session. Nothing after this asks again.
+	ap, submitCtx := "", ctx
+	if m.multi() {
+		var err error
+		if ap, submitCtx, err = m.opts.APs.Assign(ctx, caller, strings.TrimSpace(spec.Schedd)); err != nil {
+			return nil, err
+		}
+	}
+
 	// Serialized per (owner, name) across the check and the submit.
 	//
 	// The duplicate-name check and the per-owner limit below are both
@@ -495,7 +554,12 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 	// the in-process map: after a restart the map is empty but the
 	// jobs are not, and "you already have a session by that name" has
 	// to keep being true across that boundary.
-	existing, err := m.listAds(ctx, caller, "")
+	//
+	// With several access points, both are per owner across all of them
+	// (see multiap.go): every access point that may hold one of the
+	// caller's sessions is asked, and always the one this session is
+	// about to go to.
+	existing, answered, err := m.listAllAnswered(ctx, caller, "", ap)
 	if err != nil {
 		return nil, err
 	}
@@ -508,6 +572,21 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 	if len(existing) >= m.opts.MaxPerOwner {
 		return nil, fmt.Errorf("you already have %d interactive sessions, the per-user limit; stop one before starting another",
 			len(existing))
+	}
+	// This process's record of the name on another access point stands
+	// until that access point has said the session is gone: replacing it
+	// would strand the job there with no lease expiry. The listing above
+	// already counts a record on an access point that could not be
+	// asked; this keeps the record itself from being displaced whatever
+	// the listing said.
+	if m.multi() {
+		if sess := m.sessionFor(caller.Owner, spec.Name); sess != nil && sess.ap != "" &&
+			!strings.EqualFold(sess.ap, ap) && !answered[strings.ToLower(sess.ap)] {
+			return nil, fmt.Errorf("%w (job %s, on access point %s, which could not be asked whether it still exists); "+
+				"use it, or stop it first", &SessionExistsError{Name: spec.Name, Info: Info{Name: spec.Name, Schedd: sess.ap,
+				JobID: m.jobID(sess.ap, sess.cluster, sess.proc), ClusterID: sess.cluster, ProcID: sess.proc}},
+				m.jobID(sess.ap, sess.cluster, sess.proc), sess.ap)
+		}
 	}
 
 	instanceID, err := GenerateInstanceID()
@@ -557,18 +636,35 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		ExtraSubmitLines:      m.opts.ExtraSubmit,
 	})
 
-	schedd := m.opts.Schedd()
+	applied, err := m.opts.SubmitPolicy.Apply(submitFile)
+	if err != nil {
+		return nil, err
+	}
+
+	var schedd ScheddClient
+	if m.multi() {
+		schedd = m.opts.ScheddFor(submitCtx)
+	} else {
+		schedd = m.opts.Schedd()
+	}
 	if schedd == nil {
 		return nil, fmt.Errorf("no schedd configured")
 	}
 	// Whatever the host must do before one of its users' jobs reaches
 	// the schedd -- on this deployment, bootstrapping the credentials
-	// the access point demands. Under ctx, so it runs as the caller.
+	// the access point demands. Under ctx, so it runs as the caller (and,
+	// with several access points, against the assigned one's credd).
 	if m.opts.BeforeSubmit != nil {
-		m.opts.BeforeSubmit(ctx)
+		m.opts.BeforeSubmit(submitCtx)
 	}
 
-	clusterID, procAds, err := schedd.SubmitRemote(ctx, m.opts.SubmitPolicy.Apply(submitFile))
+	if m.opts.SubmitContext != nil {
+		submitCtx = m.opts.SubmitContext(submitCtx)
+	}
+
+	m.wrote(ap)
+	defer m.wrote(ap)
+	clusterID, procAds, err := schedd.SubmitRemote(submitCtx, applied)
 	if err != nil {
 		return nil, fmt.Errorf("schedd submit failed: %w", err)
 	}
@@ -579,10 +675,10 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 			Mode: 0o755,
 		},
 	}
-	if err := schedd.SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
+	if err := schedd.SpoolJobFilesFromFS(submitCtx, procAds, stage); err != nil {
 		// The job exists but can never run: remove it rather than
 		// leave the caller a held job they did not ask for.
-		m.removeJob(ctx, caller, clusterID, 0, "watchdog spooling failed")
+		m.removeJob(ctx, caller, ap, clusterID, 0, "watchdog spooling failed")
 		return nil, fmt.Errorf("schedd accepted the submit but spooling the watchdog failed: %w", err)
 	}
 
@@ -597,11 +693,12 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 		name:          spec.Name,
 		owner:         caller.Owner,
 		instanceID:    instanceID,
+		ap:            ap,
 		cluster:       clusterID,
 		proc:          procID,
 		leaseExpires:  m.opts.Now().Add(lease),
 		leaseDuration: lease,
-		secConfig:     securityConfigFrom(ctx),
+		credential:    callerCredentialFrom(ctx),
 	}
 
 	key := sessionKey(caller.Owner, spec.Name)
@@ -624,12 +721,13 @@ func (m *Manager) Create(ctx context.Context, caller Caller, spec CreateSpec) (*
 
 	m.log().Info(m.opts.LogDest, "interactive session created",
 		"session", spec.Name, "owner", caller.Owner,
-		"job_id", jobIDOf(clusterID, procID), "instance", instanceID,
+		"job_id", m.jobID(ap, clusterID, procID), "instance", instanceID,
 		"lease_seconds", int(lease.Seconds()))
 
 	info := &Info{
 		Name:         spec.Name,
-		JobID:        jobIDOf(clusterID, procID),
+		JobID:        m.jobID(ap, clusterID, procID),
+		Schedd:       ap,
 		ClusterID:    clusterID,
 		ProcID:       procID,
 		JobStatus:    jobStatusIdle,
@@ -644,7 +742,7 @@ func (m *Manager) List(ctx context.Context, caller Caller) ([]Info, error) {
 	if !caller.valid() {
 		return nil, fmt.Errorf("authentication required")
 	}
-	infos, err := m.listAds(ctx, caller, "")
+	infos, err := m.listAll(ctx, caller, "")
 	if err != nil {
 		return nil, err
 	}
@@ -806,7 +904,8 @@ func (m *Manager) Stop(ctx context.Context, caller Caller, name string) (*Info, 
 	}
 
 	m.forgetNamed(caller.Owner, name, "stopped by caller")
-	m.removeJob(ctx, caller, info.ClusterID, info.ProcID, "Interactive session stopped")
+	// The session's own access point, from its record.
+	m.removeJob(ctx, caller, info.Schedd, info.ClusterID, info.ProcID, "Interactive session stopped")
 
 	info.Status = "stopping"
 	return info, nil

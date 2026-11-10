@@ -93,10 +93,11 @@ func createExpiredTestJWTToken(subject, issuer string) string {
 func TestParseJWTExpiration(t *testing.T) {
 	t.Run("ValidToken", func(t *testing.T) {
 		token := createTestJWTToken(3600)
-		_, exp, err := parseJWTClaims(token)
+		claims, err := parseJWTClaims(token)
 		if err != nil {
 			t.Fatalf("Failed to parse JWT expiration: %v", err)
 		}
+		exp := claims.ExpiresAt.Time
 
 		// Should expire approximately 1 hour from now
 		expectedExp := time.Now().Add(3600 * time.Second)
@@ -108,10 +109,11 @@ func TestParseJWTExpiration(t *testing.T) {
 
 	t.Run("ExpiredToken", func(t *testing.T) {
 		token := createExpiredTestJWTToken("alice@test.domain", "test.domain")
-		_, exp, err := parseJWTClaims(token)
+		claims, err := parseJWTClaims(token)
 		if err != nil {
 			t.Fatalf("Failed to parse JWT expiration: %v", err)
 		}
+		exp := claims.ExpiresAt.Time
 
 		// Should be in the past
 		if !exp.Before(time.Now()) {
@@ -120,7 +122,7 @@ func TestParseJWTExpiration(t *testing.T) {
 	})
 
 	t.Run("InvalidFormat", func(t *testing.T) {
-		_, _, err := parseJWTClaims("invalid.token")
+		_, err := parseJWTClaims("invalid.token")
 		if err == nil {
 			t.Error("Expected error for invalid token format")
 		}
@@ -137,7 +139,7 @@ func TestParseJWTExpiration(t *testing.T) {
 		payloadB64 := base64.RawURLEncoding.EncodeToString(payloadBytes)
 
 		token := headerB64 + "." + payloadB64 + ".signature"
-		_, _, err := parseJWTClaims(token)
+		_, err := parseJWTClaims(token)
 		if err == nil {
 			t.Error("Expected error for missing exp claim")
 		}
@@ -272,22 +274,15 @@ func TestTokenCache(t *testing.T) {
 
 	t.Run("AutomaticExpiration", func(t *testing.T) {
 		cache := NewTokenCache()
+		clock := &fakeClock{t: time.Now()}
+		cache.now = clock.now
 
 		// The expiration is passed in rather than parsed out of a
-		// token, because a JWT's exp is whole seconds: exp is stamped
-		// as time.Now().Unix()+n, and Unix() truncates, so a token
-		// minted at .998 of a second and asked to live "1 second" lives
-		// 2ms. On a loaded CI runner even a few milliseconds between
-		// minting and adding it are enough for Add to reject it as
-		// "token is already expired" -- which is what failed on the
-		// arm64 job, and reproduces locally by minting just before a
-		// second boundary and pausing 3ms.
-		//
-		// AddValidated takes the expiration directly, so this asks for
-		// exactly the window it wants and is done in under a second.
-		const validity = 300 * time.Millisecond
+		// token, because a JWT's exp is whole seconds. AddValidated
+		// takes it directly, and the cache's clock is moved by hand.
+		const validity = 5 * time.Minute
 		if _, err := cache.AddValidated(createTestJWTToken(3600), "alice@test.domain",
-			time.Now().Add(validity)); err != nil {
+			clock.t.Add(validity)); err != nil {
 			t.Fatalf("Failed to add token: %v", err)
 		}
 
@@ -295,8 +290,7 @@ func TestTokenCache(t *testing.T) {
 			t.Errorf("Expected cache size 1, got %d", cache.Size())
 		}
 
-		// Removal is an exact time.AfterFunc, so a modest margin does.
-		time.Sleep(validity + 300*time.Millisecond)
+		clock.advance(validity + time.Second)
 
 		if cache.Size() != 0 {
 			t.Errorf("Expected cache size 0 after expiration, got %d", cache.Size())
@@ -496,7 +490,7 @@ func TestUserHeaderModeDoesNotOfferFS(t *testing.T) {
 // taggingHandler is the TestUserHeaderModeDoesNotOfferFS setup, reused
 // because the thing under test is what createAuthenticatedContext puts
 // on the context rather than anything about a particular route.
-func taggingHandler(t *testing.T) (*Handler, string) {
+func taggingHandler(t *testing.T) *Handler {
 	t.Helper()
 	keyDir := t.TempDir()
 	raw := []byte("session-tag-test-key")
@@ -523,12 +517,12 @@ func taggingHandler(t *testing.T) (*Handler, string) {
 		// The bearer path reaches for this; without it the branch
 		// under test panics before it runs.
 		tokenCache: NewTokenCache(),
-	}, keyDir
+	}
 }
 
 // A request with no bearer still gets one, by username.
 func TestUserHeaderRequestCarriesASessionTag(t *testing.T) {
-	h, _ := taggingHandler(t)
+	h := taggingHandler(t)
 	r := httptest.NewRequestWithContext(context.Background(), "GET", "/api/v1/jobs", nil)
 	r.Header.Set("X-Test-User", "alice")
 	ctx, err := h.createAuthenticatedContext(r)
@@ -602,7 +596,7 @@ func TestSetCondorCredentialIgnoresAnUnknownBearer(t *testing.T) {
 // it can present, and it falls through to the daemon's own credential.
 func TestResolveCachedBearerPrefersTheMintedCredential(t *testing.T) {
 	entry := &TokenCacheEntry{CondorCredential: "minted-idtoken", Scopes: []string{"condor:/WRITE"}}
-	cred, scopes := resolveCachedBearer(entry, "opaque-bearer")
+	cred, scopes, _ := resolveCachedBearer(entry, "opaque-bearer")
 	if cred != "minted-idtoken" {
 		t.Errorf("credential = %q, want the minted one", cred)
 	}
@@ -614,14 +608,14 @@ func TestResolveCachedBearerPrefersTheMintedCredential(t *testing.T) {
 // A bearer that is already a usable credential has none recorded, and
 // must still be used as itself.
 func TestResolveCachedBearerFallsBackToTheBearer(t *testing.T) {
-	cred, scopes := resolveCachedBearer(&TokenCacheEntry{}, "a-real-idtoken")
+	cred, scopes, scoped := resolveCachedBearer(&TokenCacheEntry{}, "a-real-idtoken")
 	if cred != "a-real-idtoken" {
 		t.Errorf("credential = %q, want the bearer", cred)
 	}
-	if scopes != nil {
-		t.Errorf("scopes = %v, want none", scopes)
+	if scopes != nil || scoped {
+		t.Errorf("scopes = %v, scoped = %v; want none, unscoped", scopes, scoped)
 	}
-	if cred, _ := resolveCachedBearer(nil, "a-real-idtoken"); cred != "a-real-idtoken" {
+	if cred, _, _ := resolveCachedBearer(nil, "a-real-idtoken"); cred != "a-real-idtoken" {
 		t.Errorf("a nil entry resolved to %q", cred)
 	}
 }
@@ -640,8 +634,28 @@ func TestRecordedCredentialIsWhatALaterRequestResolves(t *testing.T) {
 	if !ok {
 		t.Fatal("the bearer is not in the cache")
 	}
-	cred, scopes := resolveCachedBearer(entry, bearer)
-	if cred != "minted-idtoken" || len(scopes) != 1 {
-		t.Errorf("a later request resolved to %q / %v", cred, scopes)
+	cred, scopes, scoped := resolveCachedBearer(entry, bearer)
+	if cred != "minted-idtoken" || len(scopes) != 1 || !scoped {
+		t.Errorf("a later request resolved to %q / %v / scoped=%v", cred, scopes, scoped)
+	}
+}
+
+// A grant approved for nothing is still a scoped credential on a later
+// request. Read from the length of its scope list it looked like a bearer
+// with no scope model at all, which every scope gate admits.
+func TestRecordedEmptyGrantStaysScoped(t *testing.T) {
+	cache := NewTokenCache()
+	const bearer = "opaque-access-token"
+	if _, err := cache.AddValidated(bearer, "bbockelm", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("AddValidated: %v", err)
+	}
+	cache.SetCondorCredential(bearer, "minted-idtoken", []string{})
+
+	entry, ok := cache.Get(bearer)
+	if !ok {
+		t.Fatal("the bearer is not in the cache")
+	}
+	if _, scopes, scoped := resolveCachedBearer(entry, bearer); !scoped || len(scopes) != 0 {
+		t.Errorf("an empty grant resolved as scopes=%v scoped=%v; want none, scoped", scopes, scoped)
 	}
 }

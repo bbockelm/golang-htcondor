@@ -125,7 +125,7 @@ func (s *Handler) handleJobMatchAnalysis(w http.ResponseWriter, r *http.Request,
 	// analyzer doesn't care that the job no longer exists in the
 	// queue. Default behavior (no source param, or "live") still hits
 	// the live schedd query.
-	constraint, scopeErr := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, scopeErr := s.jobReadScope(ctx, r, cluster, proc)
 	if scopeErr != nil {
 		s.writeError(w, http.StatusBadRequest, scopeErr.Error())
 		return
@@ -135,12 +135,12 @@ func (s *Handler) handleJobMatchAnalysis(w http.ResponseWriter, r *http.Request,
 	var jobAds []*classad.ClassAd
 	switch source {
 	case "", "live":
-		jobAds, _, err = s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+		jobAds, _, err = s.scheddFor(ctx).QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 			Projection: projection,
 			Limit:      1,
 		})
 	case "archive":
-		jobAds, err = s.getSchedd().QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
+		jobAds, err = s.scheddFor(ctx).QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
 			Source:     htcondor.HistorySourceJobHistory,
 			Projection: projection,
 			Limit:      1,

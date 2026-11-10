@@ -76,14 +76,14 @@ func runNormalMode() error {
 	// Create collector from COLLECTOR_HOST
 	var collector *htcondor.Collector
 	if collectorHost, ok := cfg.Get("COLLECTOR_HOST"); ok && collectorHost != "" {
-		collector = htcondor.NewCollector(collectorHost)
+		collector = htcondor.NewCollector(collectorHost).WithConfig(cfg)
 		logger.Info(logging.DestinationCollector, "Created collector", "host", collectorHost)
 	}
 
 	// Discover credd for credential management
 	var credd htcondor.CreddClient
 	if creddAddr := discoverCreddAddress(cfg, logger); creddAddr != "" {
-		credd = htcondor.NewCedarCredd(creddAddr)
+		credd = htcondor.NewCedarCredd(creddAddr).WithConfig(cfg)
 		logger.Info(logging.DestinationGeneral, "Discovered credd", "address", creddAddr)
 	} else {
 		logger.Info(logging.DestinationGeneral, "Credd not found, credential tools will be disabled")
@@ -253,14 +253,14 @@ func runDemoMode() error {
 	// Create collector for demo mode
 	var collector *htcondor.Collector
 	if collectorHost != "" {
-		collector = htcondor.NewCollector(collectorHost)
+		collector = htcondor.NewCollector(collectorHost).WithConfig(cfg)
 		logger.Info(logging.DestinationCollector, "Created collector for demo mode", "host", collectorHost)
 	}
 
 	// Discover credd for credential management
 	var credd htcondor.CreddClient
 	if creddAddr := discoverCreddAddress(cfg, logger); creddAddr != "" {
-		credd = htcondor.NewCedarCredd(creddAddr)
+		credd = htcondor.NewCedarCredd(creddAddr).WithConfig(cfg)
 		logger.Info(logging.DestinationGeneral, "Discovered credd for demo mode", "address", creddAddr)
 	}
 

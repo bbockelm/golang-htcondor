@@ -33,15 +33,20 @@ Install: `make pre-commit-install` or `pre-commit install`
 
 The project now has automated CI that runs on every push and pull request:
 
+### Go version
+`.go-version` names the Go minor version CI, release builds and the Docker
+images use (e.g. `1.27`). Each resolves it to that minor's newest patch.
+Moving to a new minor is a one-line change to that file.
+
 ### Test Job
-- Runs on Go 1.21, 1.22, and 1.23
+- Runs on the go.mod floor (`floor`) and on the `.go-version` toolchain (`build`)
 - Executes full test suite with race detector
 - Generates coverage reports
-- Uploads coverage to Codecov (on Go 1.23)
+- Uploads coverage to Codecov (from the `build` job)
 
 ### Lint Job
 - Runs golangci-lint with comprehensive checks
-- Uses Go 1.23
+- Builds golangci-lint from `.github/tools` with the `.go-version` toolchain
 - Configuration in `.golangci.yml`
 
 ### Build Job

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
@@ -15,12 +15,29 @@ import {
   type DisplayStatus,
 } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
+import { humanDuration } from '@/lib/duration';
+import { useMultiAPMode } from '@/lib/multiap';
 import { summarizeRequirements, standardLabels } from '@/lib/requirements';
+import { batchIDOfJob, batchPagePath, coresUsed, jobTiming } from '@/lib/batches';
+import { OwnerLink } from '@/components/OwnerLink';
+import { chatScopeForJob } from '@/lib/users';
 import { ResourceUsagePanel } from '@/components/ResourceUsagePanel';
+import { EVALUATED_KEY, gpusUsed, hasGpus, jobRequest } from '@/lib/jobRequests';
+import { ladderNote, ladderTitle, memoryLadder } from '@/lib/retryMemory';
+import { peakMemoryMiB } from '@/lib/similar';
+import { formatKiB, formatMiB } from '@/lib/utilization';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { LogViewerPanel } from '@/components/LogViewerPanel';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
+import { liveEstimateQuery, RuntimeEstimateField } from './RuntimeEstimate';
+import { MemoryEstimateField } from './MemoryEstimate';
+import { JobRelated } from '@/components/JobRelated';
+import { SimilarJobsSection } from '@/components/SimilarJobs';
+import { DagGraphPanel } from '@/components/DagGraphPanel';
+import { statusPillCls } from '@/lib/statusPill';
+import { useNowTick } from '@/lib/useNowTick';
+import { AttributesTable } from '@/components/AttributesTable';
 
 // xterm.js touches `window` at import time; load it client-only so the static
 // export doesn't try to render a terminal during build.
@@ -36,12 +53,18 @@ export default function JobDetailClient(_props: {
   // via useResolvedParams instead — see frontend/src/lib/useResolvedParams.ts.
 }) {
   const { id } = useResolvedParams<{ id: string }>('/jobs/[id]');
+  const mode = useMultiAPMode();
   const { data, isLoading, error } = useQuery({
     queryKey: ['job', id],
     queryFn: () => api.jobs.get(id),
     refetchInterval: 10_000,
     // id is "" briefly during initial client hydration if the pathname
     // hasn't been read yet; skip those calls.
+    //
+    // Not gated on the session: the route answers the bare id and the
+    // multi-AP text form alike, so the job is fetched while the mode is
+    // still being learned. MultiAPJobView reads the same cache entry
+    // (same key, same fetch), so multi-AP mode pays no second request.
     enabled: !!id && id !== '_',
     // A 404 is an answer, not a failure to get one. Retrying it three
     // times with backoff would spend seconds re-asking a question the
@@ -65,7 +88,7 @@ export default function JobDetailClient(_props: {
     // Existence is the whole question here; the archive page it
     // redirects to fetches the full ad for itself.
     queryFn: () => api.jobs.archiveOne(id, 'ClusterId,ProcId'),
-    enabled: goneFromQueue && !!id && id !== '_',
+    enabled: goneFromQueue && !!id && id !== '_' && mode === false,
     staleTime: Infinity,
     retry: false,
   });
@@ -82,6 +105,11 @@ export default function JobDetailClient(_props: {
   // Status 3 = Removed, 4 = Completed. Don't offer Remove for those.
   const status = data ? num(data.JobStatus) : undefined;
   const isTerminal = status === 3 || status === 4;
+  // A job that finished is still here because it was told to wait for
+  // its output to be collected. Archive is how the reader says they
+  // have it: the job retires into history as the success it was, where
+  // removing it would record it as removed.
+  const isFinished = status === 4;
   // Status 5 = Held. Surface a Release button so the user doesn't
   // have to drop to the CLI to un-hold a job.
   const isHeld = status === 5;
@@ -91,6 +119,14 @@ export default function JobDetailClient(_props: {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
       router.push('/jobs');
+    },
+  });
+
+  const archiveMut = useMutation({
+    mutationFn: () => api.jobs.retire(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      queryClient.invalidateQueries({ queryKey: ['job', id] });
     },
   });
 
@@ -118,6 +154,13 @@ export default function JobDetailClient(_props: {
   // Split "<batch>.<job>" — id is e.g. "3.0" where 3 is the batch
   // (cluster) id and 0 is the job (proc) index inside it.
   const [batchID, jobIdx] = id.split('.');
+
+  if (mode === undefined) {
+    return <p className="text-gray-400">Loading...</p>;
+  }
+  if (mode) {
+    return <MultiAPJobView id={id} archivedView={false} />;
+  }
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -154,6 +197,14 @@ export default function JobDetailClient(_props: {
               {holdMut.isPending ? 'Holding…' : 'Hold'}
             </button>
           )}
+          {isFinished && data && !archiveMut.isSuccess && (
+            <ConfirmButton
+              label="Archive"
+              onConfirm={() => archiveMut.mutate()}
+              pending={archiveMut.isPending}
+              title={`Archive job ${id} — move it to history and delete the files kept for it here`}
+            />
+          )}
           {!isTerminal && data && (
             <ConfirmButton
               onConfirm={() => removeMut.mutate()}
@@ -163,6 +214,29 @@ export default function JobDetailClient(_props: {
           )}
         </div>
       </div>
+
+      {/* The schedd retires the job on its next sweep rather than on
+          this click, so the page cannot just navigate to the archive
+          record: it is not there yet. Say what will happen instead of
+          leaving the button to look like it did nothing. */}
+      {archiveMut.isSuccess && (
+        <div className="rounded-sm border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+          Archived. It moves to{' '}
+          <Link href={`/archive/${id}`} className="text-brand-700 hover:underline">
+            your job history
+          </Link>{' '}
+          shortly, and its files here are removed with it.
+        </div>
+      )}
+
+      {archiveMut.error && (
+        <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          Archive failed:{' '}
+          {archiveMut.error instanceof ApiError
+            ? archiveMut.error.message
+            : String(archiveMut.error)}
+        </div>
+      )}
 
       {holdMut.error && (
         <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
@@ -221,6 +295,150 @@ export default function JobDetailClient(_props: {
   );
 }
 
+// MultiAPJobView is the job page in multi-AP mode, for both /jobs/[id]
+// and /archive/[id]. The id segment is the server's job_id ("12.0@ap1");
+// an incomplete "12.0" is resolved by the server, and the URL is then
+// completed. The server serves reads only here, so the page shows the
+// job's ad and nothing that acts on the job or reaches into it.
+export function MultiAPJobView({ id, archivedView }: { id: string; archivedView: boolean }) {
+  const router = useRouter();
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['job', id],
+    queryFn: () => api.jobs.get(id),
+    refetchInterval: archivedView ? false : 10_000,
+    enabled: !!id && id !== '_',
+    // On /jobs/[id] the page has already fetched this key while it was
+    // learning the mode; take that answer, including a 404 or 409,
+    // rather than asking again on mount.
+    refetchOnMount: false,
+    retryOnMount: false,
+    retry: (count, err) =>
+      !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 3,
+  });
+  const jobID = typeof data?.job_id === 'string' ? data.job_id : id;
+  const archived = data?.archived === true;
+
+  // A queued job belongs on /jobs and a finished one on /archive; either
+  // way the URL carries the complete id.
+  useEffect(() => {
+    if (!data) return;
+    const want = archived ? '/archive' : '/jobs';
+    if (archived !== archivedView || jobID !== id) {
+      router.replace(`${want}/${encodeURIComponent(jobID)}`);
+    }
+  }, [data, archived, archivedView, jobID, id, router]);
+
+  const now = useNowTick(60_000);
+  const candidates = error instanceof ApiError ? error.candidates : undefined;
+  const schedd = typeof data?.schedd === 'string' ? data.schedd : undefined;
+  const degraded = data?.degraded as { state?: string; staleness_seconds?: number } | undefined;
+
+  return (
+    <div className="space-y-6 max-w-4xl">
+      <div className="flex items-center gap-3 flex-wrap">
+        <Link
+          href={archivedView ? '/archive' : '/jobs'}
+          className="text-sm text-gray-500 hover:text-gray-700"
+        >
+          {archivedView ? '← Archive' : '← All batches'}
+        </Link>
+        <h1 className="text-2xl font-bold text-gray-900">
+          Job {data ? String(data.proc) : '…'}
+          <span className="ml-2 text-base font-normal text-gray-500">
+            in batch {data ? String(data.cluster) : '…'}
+            {schedd && <> on {schedd}</>}
+          </span>
+        </h1>
+        {archived && (
+          <span className="ml-2 inline-flex items-center rounded-full bg-gray-200 px-2 py-0.5 text-xs font-medium text-gray-700">
+            archived
+          </span>
+        )}
+      </div>
+
+      {isLoading && <p className="text-gray-400">Loading...</p>}
+
+      {candidates && candidates.length > 0 ? (
+        <div className="rounded-sm border border-gray-200 bg-white p-3 text-sm text-gray-700">
+          <p>Job {id} exists on more than one access point:</p>
+          <ul className="mt-2 list-disc pl-5">
+            {candidates.map((c) => (
+              <li key={c.job_id}>
+                <Link
+                  href={`/${c.archived ? 'archive' : 'jobs'}/${encodeURIComponent(c.job_id)}`}
+                  className="font-mono text-brand-700 hover:underline"
+                >
+                  {c.job_id}
+                </Link>
+                {c.archived && <span className="ml-2 text-gray-500">archived</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        error && (
+          <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {(error as Error).message}
+          </div>
+        )
+      )}
+
+      {degraded && (
+        <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          Data from {schedd} may be out of date ({degraded.state}
+          {degraded.staleness_seconds !== undefined && `, ${degraded.staleness_seconds} s behind`}).
+        </div>
+      )}
+
+      {data && (
+        <>
+          <div className="rounded-sm border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
+            <Field
+              label="Status"
+              value={
+                <StatusBadge
+                  display={displayJobStatus({
+                    status: data.JobStatus as number | string | null | undefined,
+                    holdReasonCode: data.HoldReasonCode as number | string | null | undefined,
+                  })}
+                />
+              }
+            />
+            <Field label="Access point" value={schedd ?? '—'} mono />
+            <Field label="Owner" value={<OwnerLink owner={str(data.Owner)} />} />
+            <Field
+              label="Submitted"
+              value={num(data.QDate) ? new Date(num(data.QDate)! * 1000).toLocaleString() : '—'}
+              sub={num(data.QDate) ? `${humanDuration(now - num(data.QDate)!)} ago` : undefined}
+            />
+            <Field
+              label="Completed"
+              value={
+                num(data.CompletionDate)
+                  ? new Date(num(data.CompletionDate)! * 1000).toLocaleString()
+                  : '—'
+              }
+            />
+            <Field label="Command" value={str(data.Cmd) ?? '—'} mono full />
+            {str(data.Args) && <Field label="Arguments" value={str(data.Args)!} mono full />}
+            {str(data.HoldReason) && <Field label="Hold Reason" value={str(data.HoldReason)!} full warn />}
+          </div>
+          <RequirementsSection job={data} />
+          {/* The id is the server's complete one here: samples are kept
+              per access point, and a bare cluster.proc may be on two. */}
+          <ResourceUsagePanel
+            jobID={jobID}
+            status={num(data.JobStatus)}
+            job={data}
+            multiAP
+          />
+          <JobDetailsSection jobID={jobID} job={data} editable={false} />
+        </>
+      )}
+    </div>
+  );
+}
+
 function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
   const status = num(job.JobStatus);
   const owner = str(job.Owner);
@@ -240,6 +458,8 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
   // useNowTick re-renders the relative-time strings every minute even
   // if the underlying job ad hasn't changed.
   const now = useNowTick(60_000);
+  // How long the current run, or the current wait, has lasted.
+  const timing = jobTiming(job);
 
   const display = displayJobStatus({
     status: job.JobStatus as number | string | null | undefined,
@@ -259,8 +479,53 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
   const exitBySignal = job.ExitBySignal === true || job.ExitBySignal === 'true';
   const showExitCode = exitCodeNum !== undefined || exitBySignal;
 
+  // Asks from the run time card to open the live tail or the terminal
+  // further down: each click bumps a count the panel watches.
+  const [tailRequest, setTailRequest] = useState(0);
+  const [shellRequest, setShellRequest] = useState(0);
+  const remote = supportsRemoteAccess(job);
+  const canTail = status === 2 && remote;
+  const canShell = (status === 2 || status === 6) && remote;
+
+  // The similar-jobs section, opened from the Related row or the run
+  // time card's basis line, both of which bring it into view.
+  const [similarOpen, setSimilarOpen] = useState(false);
+  const showSimilar = () => {
+    setSimilarOpen(true);
+    // After the section has rendered open.
+    setTimeout(() => document.getElementById('similar-jobs')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }), 0);
+  };
+  // This job on the group's spread: how long it has been running.
+  // Amber where the cards call it unusual: the same estimate they read.
+  const { data: estimate } = useQuery(liveEstimateQuery(jobID, status));
+  const similarMark =
+    status === 2 && startDate
+      ? {
+          seconds: Math.max(0, now - startDate),
+          label: 'This job so far',
+          unusual: !!(estimate?.available && estimate.exceeded_history),
+        }
+      : undefined;
+  // And on the group's memory: its peak so far, and its request.
+  const peakSoFar = status === 2 ? peakMemoryMiB(job) : undefined;
+  const similarMemory = {
+    mark:
+      peakSoFar !== undefined
+        ? { mib: peakSoFar, label: 'This job so far', unusual: !!(estimate?.available && estimate.memory?.above_usual) }
+        : undefined,
+    requestedMiB: jobRequest(job, 'RequestMemory').value,
+  };
+
   return (
     <div className="space-y-6">
+      <JobRelated
+        jobID={jobID}
+        cluster={num(job.ClusterId)}
+        batchID={batchIDOfJob(job)}
+        archived={false}
+        onSimilar={showSimilar}
+      />
+
       {/* Chat sits at the top: it's the primary affordance for
           investigation ("why is this held?", "tail my stderr") and
           users don't scroll past two screens of panels to find a
@@ -268,8 +533,16 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
       <JobDetailChat jobID={jobID} job={job} />
 
       <div className="rounded-sm border border-gray-200 bg-white p-4 grid grid-cols-2 gap-3 text-sm">
-        <Field label="Status" value={<StatusBadge display={display} />} />
-        <Field label="Owner" value={owner ?? '—'} />
+        <Field
+          label="Status"
+          value={<StatusBadge display={display} />}
+          sub={
+            timing
+              ? `${timing.kind === 'running' ? 'running' : 'waiting'} for ${humanDuration(now - timing.since)}`
+              : undefined
+          }
+        />
+        <Field label="Owner" value={<OwnerLink owner={owner} />} />
         <Field
           label="Submitted"
           value={qdate ? new Date(qdate * 1000).toLocaleString() : '—'}
@@ -317,7 +590,30 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
         )}
       </div>
 
-      <ResourceUsagePanel jobID={jobID} status={status} />
+      {/* Straight under the summary, which already names the job and how
+          long it has run or waited: the card answers the next question,
+          "when will it be done?". Nothing at all without an estimate.
+          A job running longer than usual offers the page's own live
+          output and shell, which open below. */}
+      <RuntimeEstimateField
+        jobID={jobID}
+        status={status}
+        onViewOutput={canTail ? () => setTailRequest((n) => n + 1) : undefined}
+        onOpenShell={canShell ? () => setShellRequest((n) => n + 1) : undefined}
+        onShowSimilar={showSimilar}
+      />
+
+      <MemoryEstimateField jobID={jobID} status={status} job={job} />
+
+      <SimilarJobsSection
+        jobID={jobID}
+        open={similarOpen}
+        onToggle={() => setSimilarOpen((v) => !v)}
+        mark={similarMark}
+        memory={similarMemory}
+      />
+
+      <ResourceUsagePanel jobID={jobID} status={status} job={job} />
 
       <OutputFilesPanel jobID={jobID} status={status} job={job} />
 
@@ -325,9 +621,9 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
 
       <WorkflowGraphPanel jobID={jobID} job={job} />
 
-      <LiveTailPanel jobID={jobID} status={status} job={job} />
+      <LiveTailPanel jobID={jobID} status={status} job={job} openRequest={tailRequest} />
 
-      <TerminalPanel jobID={jobID} status={status} job={job} />
+      <TerminalPanel jobID={jobID} status={status} job={job} openRequest={shellRequest} />
 
       <LogViewerPanel jobID={jobID} />
 
@@ -365,7 +661,9 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
 // notable clause plus a single "standard resource requirements" summary,
 // so the interesting constraint (a machine/pool pin) isn't buried in
 // boilerplate. The full expression stays available behind a disclosure.
-function RequirementsSection({ job }: { job: ClassAd }) {
+// Shared with the archive page: a finished job's Requirements reads the
+// same way.
+export function RequirementsSection({ job }: { job: ClassAd }) {
   const summary = summarizeRequirements(str(job.Requirements));
   if (summary.empty) return null;
   const labels = standardLabels(summary.standard);
@@ -454,6 +752,104 @@ function buildJobChatContext(jobID: string, job: ClassAd): string {
   return parts.join('\n');
 }
 
+// jobAttributesTool is the get_job_attributes chat tool over a job ad the
+// page already holds. Shared by this page and the archived-job page.
+export function jobAttributesTool(job: ClassAd): ToolHandler {
+  return (input) => {
+    const names = Array.isArray(input.names)
+      ? (input.names as unknown[]).filter(
+          (n): n is string => typeof n === 'string',
+        )
+      : null;
+    if (!names || names.length === 0) {
+      // Full-ad request. Cap on size to protect the LLM context.
+      // Was 64 KiB; tightened to 24 KiB (~6k tokens) in 2026-05.
+      // Common interesting projections are well under 1 KiB, so
+      // 24 KiB leaves plenty of room for "the full ad" on
+      // ordinary jobs while keeping a chirp-spam'd ad from
+      // single-handedly consuming a turn.
+      const text = JSON.stringify(job);
+      if (text.length > 24 * 1024) {
+        return {
+          ok: false,
+          error:
+            'job ClassAd exceeds 24 KiB; pass `names` with the specific attributes you need (typical interesting set: JobStatus, HoldReason, RemoteHost, RequestMemory, NumShadowStarts, ExitCode).',
+        };
+      }
+      return { ok: true, attributes: job };
+    }
+    // Case-insensitive lookup against the ad's keys. ClassAds are
+    // case-insensitive on the wire; the JSON marshaling preserves
+    // whatever cap the schedd handed back, so the LLM might ask for
+    // "holdReason" while the ad has "HoldReason".
+    const lc: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(job)) {
+      lc[k.toLowerCase()] = v;
+    }
+    const out: Record<string, unknown> = {};
+    for (const n of names) {
+      const v = lc[n.toLowerCase()];
+      if (v !== undefined) out[n] = v;
+    }
+    return { ok: true, attributes: out, missing: names.filter((n) => lc[n.toLowerCase()] === undefined) };
+  };
+}
+
+// matchAnalysisTool is the get_match_analysis chat tool. source "archive"
+// analyses a job from history (the archived-job page). Shared by this
+// page and the archived-job page.
+export function matchAnalysisTool(
+  queryClient: QueryClient,
+  jobID: string,
+  source?: 'archive',
+): ToolHandler {
+  return async () => {
+    try {
+      const data = await queryClient.fetchQuery({
+        queryKey: ['job-match-analysis', jobID, source ?? 'live'],
+        queryFn: () => api.jobs.matchAnalysis(jobID, source ? { source } : undefined),
+        staleTime: 30_000,
+      });
+      // Project the analyzer's full Result down to the fields
+      // the LLM can act on, dropping the heavy ones (per-predicate
+      // attribute distributions, long sample-host arrays). The
+      // SPA panel keeps the full response in its own cache; this
+      // trimming applies only to what we forward to the model.
+      const result = data.result;
+      const trimmedPredicates = (result.predicates ?? []).map((p) => ({
+        index: p.index,
+        source: p.source,
+        matched: p.matched,
+        not_matched: p.not_matched,
+        undefined: p.undefined,
+        error: p.error,
+        narrowing_score: p.narrowing_score,
+        sample_matched_hosts: (p.sample_matched_hosts ?? []).slice(0, 5),
+        sample_not_matched_hosts: (p.sample_not_matched_hosts ?? []).slice(
+          0,
+          5,
+        ),
+        // attribute_distributions deliberately omitted — useful
+        // for the GUI's histogram, useless for the chat LLM and
+        // can be tens of KB on big pools.
+      }));
+      return {
+        ok: true,
+        job_id: data.job_id,
+        requirements: data.requirements,
+        result: {
+          total_slots: result.total_slots,
+          full_matches: result.full_matches,
+          narrowing_predicate_index: result.narrowing_predicate_index,
+          predicates: trimmedPredicates,
+        },
+      };
+    } catch (e) {
+      return { ok: false, error: errMsg(e) };
+    }
+  };
+}
+
 // JobDetailChat hosts the per-job ChatPanel. Builds the per-request
 // page-context string and the client-side tool dispatch hooks. The
 // hooks operate against the React Query cache where possible (so a
@@ -462,7 +858,7 @@ function buildJobChatContext(jobID: string, job: ClassAd): string {
 //
 // === KEEP IN SYNC WITH jobDetailPageInstructions IN
 // httpserver/handlers_chat_tools.go ===
-function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
+export function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
   const queryClient = useQueryClient();
   const { data: chatInfo } = useQuery({
     queryKey: ['chat-info'],
@@ -471,6 +867,10 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
     retry: false,
   });
   const chatVisible = !!chatInfo?.enabled;
+  const { data: session } = useQuery({
+    queryKey: ['session'],
+    queryFn: api.auth.me,
+  });
 
   const pageContext = useMemo(
     () => buildJobChatContext(jobID, job),
@@ -479,44 +879,7 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
 
   const hooks = useMemo<Record<string, ToolHandler>>(
     () => ({
-      get_job_attributes: (input) => {
-        const names = Array.isArray(input.names)
-          ? (input.names as unknown[]).filter(
-              (n): n is string => typeof n === 'string',
-            )
-          : null;
-        if (!names || names.length === 0) {
-          // Full-ad request. Cap on size to protect the LLM context.
-          // Was 64 KiB; tightened to 24 KiB (~6k tokens) in 2026-05.
-          // Common interesting projections are well under 1 KiB, so
-          // 24 KiB leaves plenty of room for "the full ad" on
-          // ordinary jobs while keeping a chirp-spam'd ad from
-          // single-handedly consuming a turn.
-          const text = JSON.stringify(job);
-          if (text.length > 24 * 1024) {
-            return {
-              ok: false,
-              error:
-                'job ClassAd exceeds 24 KiB; pass `names` with the specific attributes you need (typical interesting set: JobStatus, HoldReason, RemoteHost, RequestMemory, NumShadowStarts, ExitCode).',
-            };
-          }
-          return { ok: true, attributes: job };
-        }
-        // Case-insensitive lookup against the ad's keys. ClassAds are
-        // case-insensitive on the wire; the JSON marshaling preserves
-        // whatever cap the schedd handed back, so the LLM might ask for
-        // "holdReason" while the ad has "HoldReason".
-        const lc: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(job)) {
-          lc[k.toLowerCase()] = v;
-        }
-        const out: Record<string, unknown> = {};
-        for (const n of names) {
-          const v = lc[n.toLowerCase()];
-          if (v !== undefined) out[n] = v;
-        }
-        return { ok: true, attributes: out, missing: names.filter((n) => lc[n.toLowerCase()] === undefined) };
-      },
+      get_job_attributes: jobAttributesTool(job),
 
       get_job_log: async (input) => {
         try {
@@ -548,51 +911,7 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
         }
       },
 
-      get_match_analysis: async () => {
-        try {
-          const data = await queryClient.fetchQuery({
-            queryKey: ['job-match-analysis', jobID],
-            queryFn: () => api.jobs.matchAnalysis(jobID),
-            staleTime: 30_000,
-          });
-          // Project the analyzer's full Result down to the fields
-          // the LLM can act on, dropping the heavy ones (per-predicate
-          // attribute distributions, long sample-host arrays). The
-          // SPA panel keeps the full response in its own cache; this
-          // trimming applies only to what we forward to the model.
-          const result = data.result;
-          const trimmedPredicates = (result.predicates ?? []).map((p) => ({
-            index: p.index,
-            source: p.source,
-            matched: p.matched,
-            not_matched: p.not_matched,
-            undefined: p.undefined,
-            error: p.error,
-            narrowing_score: p.narrowing_score,
-            sample_matched_hosts: (p.sample_matched_hosts ?? []).slice(0, 5),
-            sample_not_matched_hosts: (p.sample_not_matched_hosts ?? []).slice(
-              0,
-              5,
-            ),
-            // attribute_distributions deliberately omitted — useful
-            // for the GUI's histogram, useless for the chat LLM and
-            // can be tens of KB on big pools.
-          }));
-          return {
-            ok: true,
-            job_id: data.job_id,
-            requirements: data.requirements,
-            result: {
-              total_slots: result.total_slots,
-              full_matches: result.full_matches,
-              narrowing_predicate_index: result.narrowing_predicate_index,
-              predicates: trimmedPredicates,
-            },
-          };
-        } catch (e) {
-          return { ok: false, error: errMsg(e) };
-        }
-      },
+      get_match_analysis: matchAnalysisTool(queryClient, jobID),
 
       read_job_output: async (input) => {
         const stream = String(input.stream ?? '');
@@ -732,6 +1051,11 @@ function JobDetailChat({ jobID, job }: { jobID: string; job: ClassAd }) {
     <ChatPanel
       visible={chatVisible}
       page="job-detail"
+      // Another user's job (an administrator or project lead viewing
+      // it) asks for everyone's scope, so the assistant can work on the
+      // job the page shows; the server grants it only to whom it grants
+      // reading the job.
+      scope={chatScopeForJob(str(job.Owner), session?.username)}
       pageContext={pageContext}
       hooks={hooks}
       headerLabel="Job assistant"
@@ -764,16 +1088,37 @@ function clampInt(
   return Math.floor(n);
 }
 
+// bringIntoView scrolls a panel opened from elsewhere on the page into
+// view and moves focus to it, so a keyboard user lands where the
+// output appears.
+function bringIntoView(el: HTMLElement | null) {
+  if (!el) return;
+  el.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  el.focus({ preventScroll: true });
+}
+
 function TerminalPanel({
   jobID,
   status,
   job,
+  openRequest = 0,
 }: {
   jobID: string;
   status: number | undefined;
   job: ClassAd;
+  // Bumped to open the shell from elsewhere on the page.
+  openRequest?: number;
 }) {
   const [open, setOpen] = useState(false);
+  const [seenRequest, setSeenRequest] = useState(openRequest);
+  if (openRequest !== seenRequest) {
+    setSeenRequest(openRequest);
+    setOpen(true);
+  }
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (openRequest > 0) bringIntoView(rootRef.current);
+  }, [openRequest]);
 
   // condor_ssh_to_job only works while the job is Running (2) or
   // Transferring Output (6). Anything else, surface a hint and don't even
@@ -787,7 +1132,11 @@ function TerminalPanel({
   if (!supportsRemoteAccess(job)) return null;
 
   return (
-    <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-3">
+    <div
+      ref={rootRef}
+      tabIndex={-1}
+      className="rounded-sm border border-gray-200 bg-white p-4 space-y-3 focus:outline-none"
+    >
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-gray-900">Terminal</h2>
         {!canSSH && (
@@ -878,8 +1227,8 @@ function OutputFilesPanel({
         ready ? '' : 'opacity-60'
       }`}
     >
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium text-gray-900">Output Files</h2>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <h2 className="shrink-0 text-sm font-medium text-gray-900">Output Files</h2>
         {hint && <span className="text-xs text-gray-400">{hint}</span>}
       </div>
 
@@ -974,10 +1323,13 @@ function LiveTailPanel({
   jobID,
   status,
   job,
+  openRequest = 0,
 }: {
   jobID: string;
   status: number | undefined;
   job: ClassAd;
+  // Bumped to start the tail from elsewhere on the page.
+  openRequest?: number;
 }) {
   const isRunning = status === 2;
 
@@ -1000,6 +1352,19 @@ function LiveTailPanel({
   const [active, setActive] = useState(false); // polling on?
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+
+  // A request from elsewhere on the page does what the "Live tail"
+  // button does, then brings the panel into view.
+  const [seenRequest, setSeenRequest] = useState(openRequest);
+  if (openRequest !== seenRequest) {
+    setSeenRequest(openRequest);
+    setEngaged(true);
+    setActive(true);
+  }
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (openRequest > 0) bringIntoView(rootRef.current);
+  }, [openRequest]);
 
   // Auto-scroll the textarea so the latest output stays visible.
   // useRef keeps us out of React's render cycle for what's a pure
@@ -1111,8 +1476,12 @@ function LiveTailPanel({
   // render).
   if (!engaged) {
     return (
-      <div className="rounded-sm border border-gray-200 bg-white p-3 flex items-center gap-3">
-        <h2 className="text-sm font-medium text-gray-900">Live Tail</h2>
+      <div
+        ref={rootRef}
+        tabIndex={-1}
+        className="rounded-sm border border-gray-200 bg-white p-3 flex flex-wrap items-center gap-x-3 gap-y-1 focus:outline-none"
+      >
+        <h2 className="shrink-0 text-sm font-medium text-gray-900">Live Tail</h2>
         <span className="text-xs text-gray-500">
           Stream stdout / stderr from the running sandbox.
         </span>
@@ -1131,7 +1500,11 @@ function LiveTailPanel({
   }
 
   return (
-    <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-3">
+    <div
+      ref={rootRef}
+      tabIndex={-1}
+      className="rounded-sm border border-gray-200 bg-white p-4 space-y-3 focus:outline-none"
+    >
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-sm font-medium text-gray-900">Live Tail</h2>
         <div className="inline-flex rounded-sm border border-gray-300 bg-white p-0.5 text-xs">
@@ -1373,223 +1746,9 @@ function WorkflowLogPanel({ jobID, job }: { jobID: string; job: ClassAd }) {
 
 // --- Workflow graph -------------------------------------------------
 //
-// The panel below draws GET /api/v1/jobs/{id}/dag: the workflow's
-// structure, collapsed so that nodes doing the same job in the same
-// place are one shape. The collapse is what makes it drawable at all --
-// a 50,000-way fan-out is two boxes and one line here -- and it is also
-// the one thing a reader has to be told about, which is why the
-// some-to-some note below is rendered rather than left in a comment.
-//
-// Everything here is explicit-load. There is no single-file protocol
-// between this server and the schedd, so a cache miss re-transfers the
-// workflow's whole spool; a poll loop would be a poll loop over every
-// file the workflow has written.
-
-// Box geometry for the drawing. Fixed rather than measured: the
-// collapsed graph is small by construction, and measuring would buy a
-// layout pass for a picture that is usually five boxes.
-const DAG_BOX_W = 176;
-const DAG_BOX_H = 58;
-const DAG_H_GAP = 26;
-const DAG_V_GAP = 72;
-const DAG_PAD = 16;
-
-// Past these the drawing stops being a drawing. A layer wider than
-// DAG_MAX_LAYER is a wall of boxes nobody can trace an edge through,
-// and a graph with more than DAG_MAX_GROUPS shapes is not a summary of
-// anything. Rather than shrink the text to nothing (or attempt a real
-// layout, which is a graph library's job and not this panel's), the
-// panel says so and falls back to the group list.
-const DAG_MAX_LAYER = 40;
-const DAG_MAX_GROUPS = 150;
-
-// dagLayers assigns every group a layer and returns the layers in
-// drawing order, top to bottom. layer(g) is the longest path to g from
-// any root, which is the assignment that makes every edge point
-// strictly downwards -- the property that makes the picture readable.
-//
-// O(V+E): one pass to build the forward/reverse indexes, then a Kahn
-// sweep that relaxes each child's layer as its parents settle. Within a
-// layer the order is first appearance in `groups`, so the same response
-// always draws the same picture; keying off Map/Set iteration order
-// instead would reshuffle the row whenever the server reordered its
-// array.
-//
-// Two inputs must not break it, because both arrive from real (torn or
-// spliced) DAG files:
-//   - a parent_ids entry naming a group that is not in the list. It is
-//     dropped: treating a dangling reference as a real parent leaves
-//     its child permanently unsettled, i.e. invisible.
-//   - a cycle. The server flags that as approximate_layering; here the
-//     members Kahn could not settle are placed just under the deepest
-//     parent that did settle, rather than dropped.
-export function dagLayers(
-  groups: readonly { id: string; parent_ids?: string[] | null }[],
-): string[][] {
-  // Insertion order is first appearance, and every ordering below reads
-  // it back out of this Map.
-  const order = new Map<string, number>();
-  groups.forEach((g, i) => {
-    if (!order.has(g.id)) order.set(g.id, i);
-  });
-  if (order.size === 0) return [];
-
-  const parents = new Map<string, string[]>();
-  const children = new Map<string, string[]>();
-  const indegree = new Map<string, number>();
-  for (const id of order.keys()) {
-    parents.set(id, []);
-    children.set(id, []);
-    indegree.set(id, 0);
-  }
-  for (const g of groups) {
-    const seen = new Set<string>();
-    for (const p of g.parent_ids ?? []) {
-      // Self-edges and duplicates would each leave a permanent +1 on
-      // the indegree, which is the same failure as a dangling parent.
-      if (p === g.id || !order.has(p) || seen.has(p)) continue;
-      seen.add(p);
-      parents.get(g.id)!.push(p);
-      children.get(p)!.push(g.id);
-      indegree.set(g.id, indegree.get(g.id)! + 1);
-    }
-  }
-
-  const layer = new Map<string, number>();
-  const queue: string[] = [];
-  for (const id of order.keys()) {
-    if (indegree.get(id) === 0) {
-      layer.set(id, 0);
-      queue.push(id);
-    }
-  }
-  for (let i = 0; i < queue.length; i++) {
-    const id = queue[i];
-    const at = layer.get(id)!;
-    for (const c of children.get(id)!) {
-      // Longest path, not shortest: a node with parents at depth 1 and
-      // depth 3 belongs under the depth-3 one, or its edge points up.
-      layer.set(c, Math.max(layer.get(c) ?? 0, at + 1));
-      const left = indegree.get(c)! - 1;
-      indegree.set(c, left);
-      if (left === 0) queue.push(c);
-    }
-  }
-
-  // Anything Kahn left unsettled is in a cycle. Place it below whatever
-  // parent did settle, in input order so the result stays deterministic.
-  for (const id of order.keys()) {
-    if (layer.has(id)) continue;
-    let deepest = -1;
-    for (const p of parents.get(id)!) {
-      const pl = layer.get(p);
-      if (pl !== undefined) deepest = Math.max(deepest, pl);
-    }
-    layer.set(id, deepest + 1);
-  }
-
-  let depth = 0;
-  for (const l of layer.values()) depth = Math.max(depth, l);
-  const layers: string[][] = Array.from({ length: depth + 1 }, () => []);
-  for (const id of order.keys()) layers[layer.get(id)!].push(id);
-  return layers;
-}
-
-// DAG_STATE_STYLES is the one place a node state's urgency and its
-// colour are decided, MOST URGENT FIRST.
-//
-// The order is the answer to "where is my workflow stuck", which is the
-// question the panel exists for. A group holding one failed node among
-// ninety-nine done ones is a red box, because the ninety-nine are not
-// what the reader came to find; `done` sorts last for the same reason.
-//
-// Colours are the app's own job-status tokens (statusPillCls) rather
-// than a palette of this panel's, so red here means what red means in
-// the status pill at the top of the page. DAGMan has states JobStatus
-// does not -- failed, futile, ready, unready, prerun/postrun -- so this
-// is a superset, and those borrow the nearest token deliberately.
-//
-// `shape` is the SVG twin of `pill`: Tailwind's bg-/text- utilities do
-// nothing to a <rect>, so a drawn box needs fill-/stroke- equivalents
-// of the same colours.
-const DAG_STATE_STYLES: readonly {
-  state: string;
-  pill: string;
-  shape: string;
-}[] = [
-  // Stopped, and not on purpose. These two are why anyone opens this.
-  { state: 'failed', pill: statusPillCls('held'), shape: 'fill-red-100 stroke-red-400' },
-  { state: 'held', pill: statusPillCls('held'), shape: 'fill-red-100 stroke-red-400' },
-  // Futile: an ancestor failed, so this node can never run. Not itself
-  // broken, but it is the blast radius of the thing that is.
-  { state: 'futile', pill: 'bg-orange-100 text-orange-800', shape: 'fill-orange-100 stroke-orange-400' },
-  { state: 'removed', pill: statusPillCls('removed'), shape: 'fill-amber-100 stroke-amber-400' },
-  { state: 'suspended', pill: statusPillCls('suspended'), shape: 'fill-amber-100 stroke-amber-400' },
-  { state: 'running', pill: statusPillCls('running'), shape: 'fill-green-100 stroke-green-500' },
-  // PRE and POST scripts run on the access point, not in the pool; they
-  // are progress, so they share the "in flight" amber.
-  { state: 'prerun', pill: statusPillCls('transferring'), shape: 'fill-amber-100 stroke-amber-400' },
-  { state: 'postrun', pill: statusPillCls('transferring'), shape: 'fill-amber-100 stroke-amber-400' },
-  { state: 'transferring', pill: statusPillCls('transferring'), shape: 'fill-amber-100 stroke-amber-400' },
-  { state: 'submitted', pill: statusPillCls('idle'), shape: 'fill-blue-100 stroke-blue-400' },
-  { state: 'idle', pill: statusPillCls('idle'), shape: 'fill-blue-100 stroke-blue-400' },
-  { state: 'ready', pill: statusPillCls('idle'), shape: 'fill-blue-50 stroke-blue-300' },
-  { state: 'unready', pill: statusPillCls('unknown'), shape: 'fill-white stroke-gray-300' },
-  { state: 'done', pill: statusPillCls('completed'), shape: 'fill-gray-200 stroke-gray-400' },
-];
-
-const DAG_STATE_INDEX = new Map(DAG_STATE_STYLES.map((s, i) => [s.state, i]));
-
-// dagStateRank orders node states by urgency, lowest number first.
-//
-// An unrecognised state ranks LAST -- below `done`. A state name this
-// UI has not seen is not evidence of trouble, and ranking the unknown
-// above `failed` would let a server-side rename silently recolour every
-// group in every workflow red.
-export function dagStateRank(state: string): number {
-  const i = DAG_STATE_INDEX.get(state);
-  return i === undefined ? DAG_STATE_STYLES.length : i;
-}
-
-// dagStatePill / dagStateShape: the badge and the drawn-box classes for
-// a node state. Unknown states fall back to the app's "unknown" grey
-// rather than to nothing, so an unrecognised state still renders.
-export function dagStatePill(state: string): string {
-  const i = DAG_STATE_INDEX.get(state);
-  return i === undefined ? statusPillCls('unknown') : DAG_STATE_STYLES[i].pill;
-}
-
-export function dagStateShape(state: string): string {
-  const i = DAG_STATE_INDEX.get(state);
-  return i === undefined ? 'fill-gray-100 stroke-gray-400' : DAG_STATE_STYLES[i].shape;
-}
-
-// dagStatusEntries turns a group's histogram into a most-urgent-first
-// list. Zero counts are dropped -- a server that emits every state with
-// a count would otherwise fill the box with "0 held, 0 failed" -- and
-// ties break on the name so the row is stable.
-export function dagStatusEntries(
-  status: Record<string, number> | null | undefined,
-): { state: string; count: number }[] {
-  return Object.entries(status ?? {})
-    .filter(([, n]) => typeof n === 'number' && n > 0)
-    .map(([state, count]) => ({ state, count }))
-    .sort(
-      (a, b) =>
-        dagStateRank(a.state) - dagStateRank(b.state) ||
-        a.state.localeCompare(b.state),
-    );
-}
-
-// dominantDagState is the state a group's box is coloured by: the most
-// URGENT state present, not the most numerous. One failed node among a
-// thousand done ones is the fact the picture has to carry; averaging it
-// away would make the panel answer a question nobody asked.
-export function dominantDagState(
-  status: Record<string, number> | null | undefined,
-): string | undefined {
-  return dagStatusEntries(status)[0]?.state;
-}
+// The panel itself is components/DagGraphPanel.tsx, shared with the batch
+// page. What stays here is the job page's question: does this job have a
+// graph to draw at all.
 
 // workflowGraphAvailability decides whether the Workflow graph panel
 // renders at all, and what it says when it cannot draw.
@@ -1622,813 +1781,33 @@ export function workflowGraphAvailability(job: ClassAd): {
   return { applicable: true, available: true };
 }
 
-// WorkflowGraphPanel draws the collapsed workflow. Explicit load, one
-// Refresh button, no timer: see the block comment above for why.
+// WorkflowGraphPanel is the job page's workflow graph: the shared panel,
+// for a DAGMan manager job whose files are in the spool.
 function WorkflowGraphPanel({ jobID, job }: { jobID: string; job: ClassAd }) {
-  const { applicable, available, reason } = workflowGraphAvailability(job);
-  const [data, setData] = useState<DagGraphResponse | null>(null);
-  // notice vs error: a 409 is the server telling us this workflow has
-  // nothing to show and why, in a sentence already written for a human.
-  // It is prose, not a failure.
-  const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [selected, setSelected] = useState<string | null>(null);
-
-  const load = useCallback(
-    (refresh: boolean) => {
-      setLoading(true);
-      setError(null);
-      setNotice(null);
-      api.jobs
-        .dagGraph(jobID, refresh ? { refresh: true } : undefined)
-        .then((res) => {
-          setData(res);
-          // Keep the open group open across a refresh, but only if it
-          // still exists -- a vanished group would leave the detail box
-          // showing an empty member list with no explanation.
-          setSelected((prev) =>
-            prev && (res.groups ?? []).some((g) => g.id === prev) ? prev : null,
-          );
-        })
-        .catch((e: unknown) => {
-          if (e instanceof ApiError && e.status === 409) {
-            setNotice(e.message);
-            setData(null);
-            setSelected(null);
-            return;
-          }
-          setError(e instanceof Error ? e.message : String(e));
-        })
-        .finally(() => setLoading(false));
-    },
-    [jobID],
-  );
-
+  const { applicable } = workflowGraphAvailability(job);
   if (!applicable) return null;
-
-  const loaded = data !== null || notice !== null;
+  // Batch pages serve a single access point (no cluster.proc@schedd).
+  const batch = jobID.includes('@') ? undefined : batchIDOfJob(job);
   return (
-    // The test id is load-bearing: a smoke test asserts that NOTHING in
-    // this panel explains how the server works, and "the innermost div
-    // holding the heading" is the button row, not the panel.
-    <div
-      data-testid="workflow-graph-panel"
-      className="rounded-sm border border-gray-200 bg-white p-4 space-y-3"
-    >
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm font-medium text-gray-900">Workflow graph</h2>
-        {available && (
-          <button
-            type="button"
-            onClick={() => load(loaded)}
-            disabled={loading}
-            // A hint, not body text: the panel is explicit-load, and the
-            // only thing worth saying about Refresh is that it is the
-            // slow one.
-            title={loaded ? 'Re-read this workflow (slow)' : undefined}
-            className="rounded-sm border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-          >
-            {loading
-              ? loaded
-                ? 'Refreshing…'
-                : 'Loading…'
-              : loaded
-                ? 'Refresh'
-                : 'Load graph'}
-          </button>
-        )}
-      </div>
-
-      {!available ? (
-        // Not hidden, for the same reason the workflow log is not: the
-        // panel's job is to answer "what does my workflow look like",
-        // and a path is a better answer than an empty space.
-        <p className="text-xs text-gray-600">{reason}</p>
-      ) : (
-        <>
-          <p className="text-xs text-gray-500">
-            The workflow&apos;s structure, with nodes that run the same thing
-            in the same place drawn as one box.
-          </p>
-
-          {error && (
-            <div className="rounded-sm border border-red-200 bg-red-50 p-3 text-xs text-red-700">
-              Could not load the workflow graph: {error}
-            </div>
-          )}
-          {notice && <p className="text-xs text-gray-600">{notice}</p>}
-          {loading && !data && (
-            <p className="text-xs text-gray-500">Loading…</p>
-          )}
-
-          {data && (
-            <WorkflowGraphBody
-              data={data}
-              selected={selected}
-              onSelect={setSelected}
-              onRefresh={() => load(true)}
-              refreshing={loading}
-            />
-          )}
-        </>
-      )}
-    </div>
+    <DagGraphPanel
+      jobId={jobID}
+      batchHref={batch === undefined ? undefined : batchPagePath({ batchID: batch })}
+    />
   );
 }
 
-// WorkflowGraphBody is everything below the Load button once there is a
-// response: the honesty banners, the drawing, the caveat the drawing
-// cannot state for itself, and the per-group detail.
-function WorkflowGraphBody({
-  data,
-  selected,
-  onSelect,
-  onRefresh,
-  refreshing,
-}: {
-  data: DagGraphResponse;
-  selected: string | null;
-  onSelect: (id: string | null) => void;
-  onRefresh: () => void;
-  refreshing: boolean;
-}) {
-  const groups = useMemo(() => data.groups ?? [], [data]);
-  const layers = useMemo(() => dagLayers(groups), [groups]);
-  const widest = layers.reduce((m, l) => Math.max(m, l.length), 0);
-  const drawable =
-    groups.length > 0 &&
-    groups.length <= DAG_MAX_GROUPS &&
-    widest <= DAG_MAX_LAYER;
-  const open = selected ? groups.find((g) => g.id === selected) : undefined;
-
-  return (
-    <div className="space-y-3">
-      <DagBanners data={data} onRefresh={onRefresh} refreshing={refreshing} />
-
-      <p className="text-xs text-gray-500">
-        <span className="tabular-nums">{data.node_count.toLocaleString()}</span>{' '}
-        nodes and{' '}
-        <span className="tabular-nums">{data.edge_count.toLocaleString()}</span>{' '}
-        dependencies, collapsed into{' '}
-        <span className="tabular-nums">{groups.length.toLocaleString()}</span>{' '}
-        groups
-        {/* link_count is one of the fields not every server version
-            copies into the response; show it only when it is there. */}
-        {data.link_count !== undefined && (
-          <>
-            {' '}
-            joined by{' '}
-            <span className="tabular-nums">
-              {data.link_count.toLocaleString()}
-            </span>{' '}
-            links
-          </>
-        )}
-        .
-      </p>
-
-      {groups.length === 0 ? (
-        <p className="text-xs text-gray-600">
-          This workflow has no nodes to draw.
-        </p>
-      ) : drawable ? (
-        <DagDrawing
-          groups={groups}
-          layers={layers}
-          selected={selected}
-          onSelect={onSelect}
-        />
-      ) : (
-        <DagTooWide groups={groups} widest={widest} />
-      )}
-
-      {/* The one piece of explanation that earns its place: it is how to
-          READ the drawing, not how the server made it. A reader who takes
-          a group link for "every node in A feeds every node in B" will
-          misread a fan-out of independent chains as a synchronisation
-          point, which is the opposite of what it is. One sentence. */}
-      <p className="rounded-sm border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-        <strong className="font-medium text-gray-800">
-          A line means &ldquo;some&rdquo;, not &ldquo;every&rdquo;.
-        </strong>{' '}
-        An arrow says that <em>some</em> node in the first is a parent of{' '}
-        <em>some</em> node in the second.
-      </p>
-
-      {groups.length > 0 && !drawable && (
-        <DagGroupList groups={groups} selected={selected} onSelect={onSelect} />
-      )}
-
-      {open && <DagGroupDetail data={data} group={open} />}
-
-      <DagProvenance data={data} />
-    </div>
-  );
-}
-
-// DagNote is the shared shell for the banners below. amber for "this
-// picture may be wrong", grey for "here is where it came from".
-function DagNote({
-  tone = 'amber',
-  children,
-}: {
-  tone?: 'amber' | 'gray';
-  children: React.ReactNode;
-}) {
-  const cls =
-    tone === 'amber'
-      ? 'border-amber-200 bg-amber-50 text-amber-900'
-      : 'border-gray-200 bg-gray-50 text-gray-600';
-  return (
-    <div className={`rounded-sm border px-3 py-2 text-xs ${cls}`}>{children}</div>
-  );
-}
-
-// DagBanners renders, for each way this picture can be wrong, a
-// sentence saying so -- and nothing at all when the field is absent.
-//
-// Absent matters: truncated / incomplete / dangling_edges are defined by
-// dagman.Grouping but not copied into the HTTP response by every server
-// version, so `undefined` here means "this server does not say", NOT
-// "no". Rendering a reassuring "not truncated" would be a claim the
-// response never made.
-function DagBanners({
-  data,
-  onRefresh,
-  refreshing,
-}: {
-  data: DagGraphResponse;
-  onRefresh: () => void;
-  refreshing: boolean;
-}) {
-  const dangling = data.dangling_edges ?? 0;
-  return (
-    <>
-      {data.truncated && (
-        <DagNote>
-          This drawing may be missing dependencies.{' '}
-          <button
-            type="button"
-            onClick={onRefresh}
-            disabled={refreshing}
-            className="underline underline-offset-2 disabled:opacity-50"
-          >
-            {refreshing ? 'Refreshing…' : 'Refresh to re-read it'}
-          </button>
-          .
-        </DagNote>
-      )}
-
-      {data.incomplete && (
-        <DagNote>Part of this workflow is missing from this drawing.</DagNote>
-      )}
-
-      {dangling > 0 && (
-        <DagNote>
-          <span className="tabular-nums">{dangling.toLocaleString()}</span>{' '}
-          {dangling === 1 ? 'dependency is' : 'dependencies are'} missing from
-          this drawing.
-        </DagNote>
-      )}
-
-      {data.approximate_layering && (
-        <DagNote>
-          This grouping is coarser than the workflow&apos;s real structure, so
-          boxes may sit at a depth the dependencies do not justify.
-          {data.approximate_reason === 'cycle' && (
-            <> This workflow has a cycle.</>
-          )}
-          {data.approximate_reason === 'refinement-bound' && (
-            <> Distinct nodes are sharing a box.</>
-          )}
-        </DagNote>
-      )}
-
-      {(data.warnings ?? []).map((w, i) => (
-        // Verbatim: these say what could NOT be consulted, and a missing
-        // archive has to read as "not available" rather than as "nothing
-        // ran". Paraphrasing is how that flips.
-        <DagNote key={i}>{w}</DagNote>
-      ))}
-    </>
-  );
-}
-
-// dagStateAsOf is the unix time the state in this response is good as
-// of: the older of when the workflow's spool was read and when DAGMan
-// last wrote its node states, because the answer is only as fresh as
-// whichever of those is further behind.
-//
-// An unparseable or absent fetched_at falls back to the status file's
-// own time, and a response carrying neither returns 0, which the caller
-// renders as nothing rather than as 1970.
-export function dagStateAsOf(data: {
-  fetched_at?: string;
-  status_file_time?: number;
-}): number {
-  const parsed = data.fetched_at ? Date.parse(data.fetched_at) : NaN;
-  const fetched = Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
-  const status =
-    typeof data.status_file_time === 'number' && data.status_file_time > 0
-      ? data.status_file_time
-      : 0;
-  if (fetched && status) return Math.min(fetched, status);
-  return fetched || status;
-}
-
-// formatTookMs renders a server-reported duration the way a reader reads
-// one: sub-second in milliseconds, past that in seconds with one
-// decimal. It is the number the panel shows beside the state's age.
-export function formatTookMs(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return '';
-  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
-}
-
-// DagProvenance is one line: how old the state is, and how long the load
-// took.
-//
-// It used to be three paragraphs naming the .dot and .status files, the
-// spool, the queue and DAGMan's write cycle. None of that is a fact
-// about the reader's workflow -- it is a description of this server --
-// and the project owner asked for it gone. What a reader needs is
-// whether they are looking at something current, which is the age, and
-// whether the panel is slow, which is the duration.
-function DagProvenance({ data }: { data: DagGraphResponse }) {
-  // The same minute-resolution clock the rest of the page ages its
-  // timestamps against: the age has to keep growing while the panel sits
-  // open, which a value frozen at render would not.
-  const now = useNowTick(60_000);
-  const at = dagStateAsOf(data);
-  const took =
-    typeof data.took_ms === 'number' ? formatTookMs(data.took_ms) : '';
-  if (!at && !took) return null;
-  return (
-    <p className="text-xs text-gray-500">
-      {at > 0 && (
-        <>
-          State as of {new Date(at * 1000).toLocaleTimeString()} (
-          {humanDuration(Math.max(0, now - at))} ago)
-        </>
-      )}
-      {at > 0 && took && ' · '}
-      {took && <>loaded in {took}</>}
-    </p>
-  );
-}
-
-// truncateLabel keeps a label inside its box. The full text is in the
-// box's <title> and in the detail panel, so nothing is lost -- only
-// shortened.
-function truncateLabel(s: string, max: number): string {
-  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
-}
-
-// dagStatusSummary renders a histogram as "9 done · 1 failed", most
-// urgent first.
-function dagStatusSummary(
-  status: Record<string, number> | null | undefined,
-): string {
-  return dagStatusEntries(status)
-    .map((e) => `${e.count} ${e.state}`)
-    .join(' · ');
-}
-
-// DagDrawing is the layered picture: one row per layer, one box per
-// group, one line per parent_ids entry.
-//
-// It deliberately does NOT try to be a layout engine -- no crossing
-// minimisation, no edge routing, no port assignment. Groups sit in
-// first-appearance order within their row and edges are drawn straight
-// through. On the graphs this endpoint produces (small by construction,
-// which is the whole point of collapsing) that reads fine; on one where
-// it would not, DagTooWide takes over rather than this degrading.
-//
-// The SVG is drawn at its natural size inside a scrolling box. Scaling
-// it to fit would shrink an 11px label to unreadable exactly on the
-// wide graphs that most need reading.
-function DagDrawing({
-  groups,
-  layers,
-  selected,
-  onSelect,
-}: {
-  groups: DagGraphGroup[];
-  layers: string[][];
-  selected: string | null;
-  onSelect: (id: string | null) => void;
-}) {
-  const widest = layers.reduce((m, l) => Math.max(m, l.length), 0);
-  const contentW = widest * (DAG_BOX_W + DAG_H_GAP) - DAG_H_GAP;
-  const width = contentW + DAG_PAD * 2;
-  const height =
-    layers.length * (DAG_BOX_H + DAG_V_GAP) - DAG_V_GAP + DAG_PAD * 2;
-
-  const pos = new Map<string, { x: number; y: number }>();
-  layers.forEach((ids, li) => {
-    const rowW = ids.length * (DAG_BOX_W + DAG_H_GAP) - DAG_H_GAP;
-    const x0 = DAG_PAD + (contentW - rowW) / 2;
-    ids.forEach((id, i) => {
-      pos.set(id, {
-        x: x0 + i * (DAG_BOX_W + DAG_H_GAP),
-        y: DAG_PAD + li * (DAG_BOX_H + DAG_V_GAP),
-      });
-    });
-  });
-
-  return (
-    <div
-      className="overflow-auto rounded-sm border border-gray-200 bg-white"
-      style={{ maxHeight: 520 }}
-    >
-      <svg
-        width={width}
-        height={height}
-        viewBox={`0 0 ${width} ${height}`}
-        role="img"
-        aria-label={`Workflow graph: ${groups.length} groups in ${layers.length} layers`}
-        className="block"
-      >
-        <defs>
-          <marker
-            id="dag-arrow"
-            viewBox="0 0 8 8"
-            refX="7"
-            refY="4"
-            markerWidth="7"
-            markerHeight="7"
-            orient="auto-start-reverse"
-          >
-            <path d="M0,1 L7,4 L0,7 z" className="fill-gray-400" />
-          </marker>
-        </defs>
-
-        {groups.flatMap((g) =>
-          (g.parent_ids ?? []).map((p) => {
-            const from = pos.get(p);
-            const to = pos.get(g.id);
-            // A dangling or self parent has no box to start from; the
-            // banner above already counts those.
-            if (!from || !to || p === g.id) return null;
-            const x1 = from.x + DAG_BOX_W / 2;
-            const y1 = from.y + DAG_BOX_H;
-            const x2 = to.x + DAG_BOX_W / 2;
-            const y2 = to.y;
-            // Bow the curve out far enough that a line between adjacent
-            // rows still reads as a direction. Clamped, because a cycle
-            // can put the child ABOVE the parent.
-            const dy = Math.max(18, (y2 - y1) / 2);
-            return (
-              <path
-                key={`${p}->${g.id}`}
-                d={`M${x1},${y1} C${x1},${y1 + dy} ${x2},${y2 - dy} ${x2},${y2}`}
-                className="fill-none stroke-gray-400"
-                strokeWidth={1.25}
-                markerEnd="url(#dag-arrow)"
-              />
-            );
-          }),
-        )}
-
-        {groups.map((g) => {
-          const p = pos.get(g.id);
-          if (!p) return null;
-          const entries = dagStatusEntries(g.status);
-          const dominant = entries[0]?.state;
-          const total = entries.reduce((s, e) => s + e.count, 0);
-          const summary = dagStatusSummary(g.status);
-          const isSelected = selected === g.id;
-          const toggle = () => onSelect(isSelected ? null : g.id);
-          let barX = p.x + 10;
-          let barLeft = DAG_BOX_W - 20;
-          return (
-            <g
-              key={g.id}
-              data-group-id={g.id}
-              role="button"
-              tabIndex={0}
-              aria-pressed={isSelected}
-              aria-label={`${g.label}${g.count > 1 ? `, ${g.count} nodes` : ''}${summary ? `: ${summary}` : ''}`}
-              className="cursor-pointer"
-              onClick={toggle}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  toggle();
-                }
-              }}
-            >
-              <title>
-                {g.label}
-                {g.count > 1 ? ` (${g.count} nodes)` : ''}
-                {g.description ? ` — ${g.description}` : ''}
-                {summary ? `\n${summary}` : ''}
-              </title>
-              <rect
-                x={p.x}
-                y={p.y}
-                width={DAG_BOX_W}
-                height={DAG_BOX_H}
-                rx={4}
-                strokeWidth={isSelected ? 2.5 : 1}
-                className={
-                  dominant ? dagStateShape(dominant) : 'fill-white stroke-gray-300'
-                }
-              />
-              <text
-                x={p.x + 10}
-                y={p.y + 19}
-                className="fill-gray-900 text-[11px] font-medium"
-              >
-                {truncateLabel(g.label, 20)}
-              </text>
-              {g.count > 1 && (
-                <text
-                  x={p.x + DAG_BOX_W - 10}
-                  y={p.y + 19}
-                  textAnchor="end"
-                  className="fill-gray-600 text-[11px] tabular-nums"
-                >
-                  ×{g.count}
-                </text>
-              )}
-              <text
-                x={p.x + 10}
-                y={p.y + 34}
-                className="fill-gray-600 text-[10px]"
-              >
-                {truncateLabel(summary, 28)}
-              </text>
-              {total > 0 &&
-                entries.map((e) => {
-                  // Clamp each slice to a visible minimum so a single
-                  // failed node among a thousand does not round away,
-                  // and to whatever width is left so the clamping
-                  // cannot push the bar out of its box.
-                  const w = Math.min(
-                    barLeft,
-                    Math.max(2, (e.count / total) * (DAG_BOX_W - 20)),
-                  );
-                  const x = barX;
-                  barX += w;
-                  barLeft -= w;
-                  if (w <= 0) return null;
-                  return (
-                    <rect
-                      key={e.state}
-                      x={x}
-                      y={p.y + 42}
-                      width={w}
-                      height={5}
-                      rx={1}
-                      strokeWidth={0.5}
-                      className={dagStateShape(e.state)}
-                    />
-                  );
-                })}
-            </g>
-          );
-        })}
-      </svg>
-    </div>
-  );
-}
-
-// DagTooWide is what happens instead of a drawing nobody could read.
-// Saying "too wide" and handing over the list is more useful than a
-// picture scaled until its labels are grey smears -- and a general
-// layout that would fix it is a graph library, which this panel
-// deliberately is not.
-function DagTooWide({
-  groups,
-  widest,
-}: {
-  groups: DagGraphGroup[];
-  widest: number;
-}) {
-  return (
-    <DagNote>
-      This workflow collapsed to{' '}
-      <span className="tabular-nums">{groups.length.toLocaleString()}</span>{' '}
-      groups, {widest > DAG_MAX_LAYER ? 'with ' : ''}
-      {widest > DAG_MAX_LAYER && (
-        <>
-          <span className="tabular-nums">{widest.toLocaleString()}</span> of them
-          side by side in one layer,{' '}
-        </>
-      )}
-      which is wider than a readable drawing. The group list is below
-      instead.
-    </DagNote>
-  );
-}
-
-// DagGroupList is the drawing's fallback: the same groups, same colours,
-// same click target, no geometry.
-function DagGroupList({
-  groups,
-  selected,
-  onSelect,
-}: {
-  groups: DagGraphGroup[];
-  selected: string | null;
-  onSelect: (id: string | null) => void;
-}) {
-  return (
-    <ul className="max-h-96 space-y-1 overflow-auto rounded-sm border border-gray-200 bg-white p-2">
-      {groups.map((g) => {
-        const dominant = dominantDagState(g.status);
-        const isSelected = selected === g.id;
-        return (
-          <li key={g.id}>
-            <button
-              type="button"
-              onClick={() => onSelect(isSelected ? null : g.id)}
-              className={`flex w-full items-center gap-2 rounded-sm px-2 py-1 text-left text-xs hover:bg-gray-50 ${
-                isSelected ? 'bg-gray-100' : ''
-              }`}
-            >
-              <span
-                className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${dagStatePill(dominant ?? 'unready')}`}
-              >
-                {dominant ?? '—'}
-              </span>
-              <span className="font-mono text-gray-900">{g.label}</span>
-              {g.count > 1 && (
-                <span className="tabular-nums text-gray-500">×{g.count}</span>
-              )}
-              <span className="ml-auto text-gray-500">
-                {dagStatusSummary(g.status)}
-              </span>
-            </button>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-// How many members to list before we stop. The server already caps what
-// it sends (nodes_omitted / nodes_omitted_reason); this is the second
-// cap, for a group that is under the server's limit but still far past
-// what anyone scrolls.
-const DAG_MAX_MEMBERS_SHOWN = 300;
-
-// DagGroupDetail shows what a group actually contains. This is where
-// the some-to-some collapse is undone: the box says "10 nodes, 1
-// failed", and the answer to "which one" is only here.
-function DagGroupDetail({
-  data,
-  group,
-}: {
-  data: DagGraphResponse;
-  group: DagGraphGroup;
-}) {
-  const members = useMemo(
-    () =>
-      (data.nodes ?? [])
-        .filter((n) => n.group_id === group.id)
-        .sort(
-          (a, b) =>
-            dagStateRank(a.state) - dagStateRank(b.state) ||
-            a.name.localeCompare(b.name),
-        ),
-    [data, group.id],
-  );
-  const shown = members.slice(0, DAG_MAX_MEMBERS_SHOWN);
-
-  return (
-    <div className="space-y-2 rounded-sm border border-gray-300 bg-gray-50 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="font-mono text-sm font-medium text-gray-900">
-          {group.label}
-        </h3>
-        {group.count > 1 && (
-          <span className="tabular-nums text-xs text-gray-500">
-            {group.count.toLocaleString()} nodes
-          </span>
-        )}
-        <span className="ml-auto flex flex-wrap gap-1">
-          {dagStatusEntries(group.status).map((e) => (
-            <span
-              key={e.state}
-              className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${dagStatePill(e.state)}`}
-            >
-              {e.count} {e.state}
-            </span>
-          ))}
-        </span>
-      </div>
-
-      {group.description && (
-        <p className="font-mono text-xs break-all text-gray-600">
-          {group.description}
-        </p>
-      )}
-
-      {data.nodes_omitted ? (
-        // The server dropped the per-node overlay for size. Say its
-        // reason rather than rendering an empty list, which would read
-        // as "this group has no members".
-        <p className="text-xs text-gray-600">
-          {data.nodes_omitted_reason ??
-            'This workflow is too large to list node by node.'}
-        </p>
-      ) : members.length === 0 ? (
-        <p className="text-xs text-gray-600">
-          No individual nodes are listed for this group.
-        </p>
-      ) : (
-        <>
-          <ul className="max-h-96 space-y-1 overflow-auto">
-            {shown.map((n) => (
-              <li
-                key={n.name}
-                className="space-y-1 rounded-sm border border-gray-200 bg-white p-2 text-xs"
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <span
-                    className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${dagStatePill(n.state)}`}
-                  >
-                    {n.state}
-                  </span>
-                  <span className="font-mono break-all text-gray-900">
-                    {n.name}
-                  </span>
-                  {n.job_id && (
-                    <Link
-                      href={`/jobs/${n.job_id}`}
-                      className="text-brand-700 hover:underline"
-                    >
-                      job {n.job_id}
-                    </Link>
-                  )}
-                  {n.exit_code !== undefined && (
-                    <span className="tabular-nums text-gray-600">
-                      exit {n.exit_code}
-                    </span>
-                  )}
-                </div>
-                {n.detail && <p className="text-gray-600">{n.detail}</p>}
-                {n.hold_reason && (
-                  <p className="text-red-700">{n.hold_reason}</p>
-                )}
-              </li>
-            ))}
-          </ul>
-          {members.length > shown.length && (
-            <p className="text-xs text-gray-500">
-              Showing{' '}
-              <span className="tabular-nums">{shown.length.toLocaleString()}</span>{' '}
-              of{' '}
-              <span className="tabular-nums">
-                {members.length.toLocaleString()}
-              </span>{' '}
-              members.
-            </p>
-          )}
-        </>
-      )}
-
-      <DagNodeConstraint cluster={data.cluster} />
-    </div>
-  );
-}
-
-// DagNodeConstraint hands over the ClassAd constraint that finds the
-// workflow's node jobs in the queue. It is the answer to "where are
-// these in the jobs list", and it is not guessable: DAGMan stamps
-// DAGManJobId on every node job it submits, and nothing on this page
-// spells that attribute out otherwise.
-function DagNodeConstraint({ cluster }: { cluster: number }) {
-  const constraint = `DAGManJobId == ${cluster}`;
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="flex flex-wrap items-center gap-2 border-t border-gray-200 pt-2 text-xs">
-      <span className="text-gray-500">Node jobs in the queue:</span>
-      <code className="rounded-sm border border-gray-300 bg-white px-2 py-0.5 font-mono text-gray-800">
-        {constraint}
-      </code>
-      <button
-        type="button"
-        onClick={() => {
-          navigator.clipboard?.writeText(constraint);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 2000);
-        }}
-        className="rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50"
-      >
-        {copied ? 'Copied' : 'Copy'}
-      </button>
-      <Link
-        href={`/jobs?constraint=${encodeURIComponent(constraint)}`}
-        className="text-brand-700 hover:underline"
-      >
-        Open in jobs
-      </Link>
-    </div>
-  );
-}
+// The graph's pure helpers, for the tests that have always imported them
+// from here.
+export {
+  dagLayers,
+  dagStateAsOf,
+  formatTookMs,
+  dagStatePill,
+  dagStateRank,
+  dagStateShape,
+  dagStatusEntries,
+  dominantDagState,
+} from '@/components/DagGraphPanel';
 
 // JobDetailsSection collects the schedd-side facts users want to see
 // once they've opened a job: requested vs. used resources, environment
@@ -2464,452 +1843,6 @@ export function JobDetailsSection({
   );
 }
 
-// AttributeType is what the user picks (or what we infer from the
-// existing value) to decide how to encode the new value into a
-// ClassAd literal at write time. "raw" lets the user supply any
-// expression — useful for references like `Memory * 2` or for
-// resetting an attribute to UNDEFINED.
-type AttributeType = 'string' | 'integer' | 'real' | 'boolean' | 'raw';
-
-interface AttributeRow {
-  name: string;
-  value: string;        // human-readable rendering of the current value
-  type: AttributeType;  // best-guess type from the JSON shape
-}
-
-// inferAttributeType picks a reasonable default editor type from a
-// JSON-decoded ClassAd attribute value. The user can override in the
-// edit row; we just want the dropdown to land on the most common
-// answer for each kind of value. Numbers split int/real; everything
-// else falls back to 'raw' (objects, arrays, expressions decoded as
-// strings that already look like ClassAd code, etc.).
-function inferAttributeType(v: unknown): AttributeType {
-  if (typeof v === 'boolean') return 'boolean';
-  if (typeof v === 'number') {
-    return Number.isInteger(v) ? 'integer' : 'real';
-  }
-  if (typeof v === 'string') return 'string';
-  return 'raw';
-}
-
-// formatAttributeForEdit renders the *editable* default text for the
-// edit-row's value input given the existing value. For strings we
-// surface the text *unquoted* — quotes are an encoding concern, the
-// user shouldn't have to type them. Everything else round-trips
-// through stringifyAdValue.
-function formatAttributeForEdit(v: unknown): string {
-  if (typeof v === 'string') return v;
-  return stringifyAdValue(v);
-}
-
-// validateAttributeInput runs the same checks the server will run, so
-// the user gets fast inline feedback ("not a valid integer") instead
-// of a 400 round-trip. We deliberately do NOT do the string quoting
-// here — that lives on the Go side using classad.Quote, which has the
-// authoritative escape table for ClassAd literals (\, ", \n, \t,
-// control chars, …). Mirroring it in JS would just recreate the
-// hand-rolled-quote-loop bug we hit the first time around.
-//
-// Returns null if valid, or an error message string if not.
-function validateAttributeInput(
-  type: AttributeType,
-  raw: string,
-): string | null {
-  switch (type) {
-    case 'string':
-      // Any text is a valid string; the empty string is meaningful
-      // (`""` after server quoting), so don't reject.
-      return null;
-    case 'integer': {
-      const trimmed = raw.trim();
-      const n = Number.parseInt(trimmed, 10);
-      if (!Number.isFinite(n) || String(n) !== trimmed) {
-        return `"${raw}" is not a valid integer`;
-      }
-      return null;
-    }
-    case 'real': {
-      const n = Number.parseFloat(raw.trim());
-      if (!Number.isFinite(n)) return `"${raw}" is not a valid real number`;
-      return null;
-    }
-    case 'boolean': {
-      const v = raw.trim().toLowerCase();
-      if (v === 'true' || v === 'false') return null;
-      return `boolean must be "true" or "false", not "${raw}"`;
-    }
-    case 'raw':
-      // Trust the user but reject empty / whitespace-only — too easy
-      // to "set X to nothing" silently.
-      if (raw.trim() === '') return 'expression must not be empty';
-      return null;
-  }
-}
-
-// AttributesTable surfaces the entire ClassAd as a searchable list,
-// in between the curated Resource/Execution rollups and the raw JSON
-// drop-down. Power users routinely need to peek at attributes that
-// don't have first-class UI (RemoteSysCpu, JobCurrentStartDate,
-// custom site-specific tags, …) without scrolling through 200 lines
-// of ClassAd JSON.
-//
-// Rows are also editable in place — click "edit" or double-click the
-// row to expand it into a value+type form. The (value, type) tuple
-// is encoded into a ClassAd expression (encodeAttributeForWire) and
-// PATCHed at /api/v1/jobs/{id}; the schedd refuses immutable /
-// protected attributes with a 403, surfaced inline.
-//
-// The table caps its visible rows at MAX_VISIBLE so it doesn't push
-// the rest of the page off-screen on a busy job; the rest scrolls
-// inside the body. A filter input matches case-insensitively against
-// either the attribute name or the rendered value.
-export function AttributesTable({
-  jobID,
-  job,
-  editable = true,
-}: {
-  jobID: string;
-  job: ClassAd;
-  // editable=false renders the table in pure read-only mode: no edit
-  // button column, no double-click-to-edit, no AttributeEditRow path.
-  // Used by the archive detail page since history records are
-  // immutable. Defaults to true so the live-job detail page (the
-  // first / canonical caller) doesn't have to opt in.
-  editable?: boolean;
-}) {
-  const [filter, setFilter] = useState('');
-
-  // Which row, if any, is currently in edit mode. Stored as the
-  // attribute name so it survives reorders / re-renders that might
-  // change row indices in the filtered list. null = nobody editing.
-  const [editingName, setEditingName] = useState<string | null>(null);
-
-  const queryClient = useQueryClient();
-
-  const rows = useMemo<AttributeRow[]>(() => {
-    const all = Object.entries(job).map(([name, raw]) => ({
-      name,
-      value: stringifyAdValue(raw),
-      type: inferAttributeType(raw),
-    }));
-    all.sort((a, b) => a.name.localeCompare(b.name));
-    return all;
-  }, [job]);
-
-  const filtered = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter(
-      (r) =>
-        r.name.toLowerCase().includes(q) ||
-        r.value.toLowerCase().includes(q),
-    );
-  }, [rows, filter]);
-
-  // 7 rows of ~28px (py-1.5 + line-height) plus a header. Keeping
-  // this in line-height-units rather than a fixed px height means
-  // the cap stays right if the row padding ever shifts. The edit
-  // row blows the cap when active (it has form fields), but that's
-  // intentional — once you're editing, you want to see the controls
-  // without scrolling.
-  const MAX_VISIBLE = 7;
-  const ROW_HEIGHT_PX = 28;
-
-  return (
-    <div>
-      <div className="flex items-baseline justify-between gap-3 mb-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-          All Attributes
-        </h3>
-        <span className="text-[11px] text-gray-400 tabular-nums">
-          {filter ? `${filtered.length} / ${rows.length}` : `${rows.length}`}
-        </span>
-      </div>
-      <input
-        type="text"
-        value={filter}
-        onChange={(e) => setFilter(e.target.value)}
-        placeholder="Filter by attribute name or value…"
-        className="mb-2 w-full rounded-sm border border-gray-300 px-2 py-1 text-xs"
-        aria-label="Filter ClassAd attributes"
-      />
-      <div className="overflow-hidden rounded-sm border border-gray-200">
-        <table className="min-w-full text-xs table-fixed">
-          <thead className="bg-gray-50 text-left text-[10px] uppercase tracking-wide text-gray-500">
-            <tr>
-              <th className="px-3 py-1.5 w-56">Attribute</th>
-              <th className="px-3 py-1.5 w-20">Type</th>
-              <th className="px-3 py-1.5">Value</th>
-              {editable && <th className="px-3 py-1.5 w-16 text-right" />}
-            </tr>
-          </thead>
-        </table>
-        {filtered.length === 0 ? (
-          <p className="px-3 py-2 text-xs text-gray-500">
-            No matches.
-          </p>
-        ) : (
-          <div
-            className="overflow-y-auto"
-            // Don't cap height while editing — the form needs room.
-            style={
-              editingName
-                ? undefined
-                : { maxHeight: ROW_HEIGHT_PX * MAX_VISIBLE }
-            }
-          >
-            <table className="min-w-full text-xs table-fixed">
-              <tbody className="divide-y divide-gray-100">
-                {filtered.map((r) =>
-                  editable && editingName === r.name ? (
-                    <AttributeEditRow
-                      key={r.name}
-                      jobID={jobID}
-                      row={r}
-                      onCancel={() => setEditingName(null)}
-                      onSaved={() => {
-                        // Refresh the job ad so the row reflects the
-                        // schedd's authoritative value (it may have
-                        // canonicalised our expression).
-                        queryClient.invalidateQueries({ queryKey: ['job', jobID] });
-                        setEditingName(null);
-                      }}
-                    />
-                  ) : (
-                    <AttributeViewRow
-                      key={r.name}
-                      row={r}
-                      onEdit={editable ? () => setEditingName(r.name) : undefined}
-                    />
-                  ),
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// AttributeViewRow is the read-only display for one attribute. The
-// whole row is a click target — double-clicking enters edit mode
-// (handy on laptops where the inline icon button is fiddly), and
-// the explicit "edit" button at the right covers the discoverability
-// case. The hover background highlights the row the cursor is on,
-// which is the difference between "I'll click this" and "I think
-// I'm clicking this".
-function AttributeViewRow({
-  row,
-  onEdit,
-}: {
-  row: AttributeRow;
-  // onEdit=undefined puts the row into pure read-only mode (no edit
-  // button, no double-click handler, no "double-click to edit"
-  // tooltip). Archive detail page passes undefined since history
-  // records are immutable.
-  onEdit?: () => void;
-}) {
-  return (
-    <tr
-      className="hover:bg-gray-50 cursor-default"
-      onDoubleClick={onEdit}
-      title={onEdit ? 'Double-click to edit' : undefined}
-    >
-      <td className="px-3 py-1.5 w-56 font-mono text-gray-700 align-top break-all">
-        {row.name}
-      </td>
-      <td className="px-3 py-1.5 w-20 text-gray-500 align-top">
-        {row.type}
-      </td>
-      <td className="px-3 py-1.5 font-mono text-gray-900 break-all align-top">
-        {row.value}
-      </td>
-      {onEdit && (
-        <td className="px-3 py-1.5 w-16 text-right align-top">
-          <button
-            type="button"
-            onClick={onEdit}
-            className="text-[11px] rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50"
-          >
-            edit
-          </button>
-        </td>
-      )}
-    </tr>
-  );
-}
-
-// AttributeEditRow swaps the value cell for a (type, value) pair of
-// inputs and turns the trailing button into a Save / Cancel pair.
-// Submission goes through api.jobs.edit; the parent invalidates the
-// job query on success so the row re-renders with the persisted
-// value (which may differ from what we sent — e.g. integer truncated,
-// expression evaluated server-side).
-function AttributeEditRow({
-  jobID,
-  row,
-  onCancel,
-  onSaved,
-}: {
-  jobID: string;
-  row: AttributeRow;
-  onCancel: () => void;
-  onSaved: () => void;
-}) {
-  const [type, setType] = useState<AttributeType>(row.type);
-  // Initial text mirrors the displayed value. Strings come out
-  // un-quoted (the user types raw text — server quotes via
-  // classad.Quote); booleans default to the lowercase string form so
-  // the dropdown lands on the right option.
-  const [text, setText] = useState(() => {
-    if (row.type === 'boolean') {
-      const v = row.value.trim().toLowerCase();
-      return v === 'true' || v === 'false' ? v : 'true';
-    }
-    return formatAttributeForEdit(row.value);
-  });
-  const [error, setError] = useState<string | null>(null);
-
-  // When the user changes the type dropdown, keep the value field
-  // sane: switching INTO boolean snaps to "true" so the dropdown has
-  // a valid selection; switching OUT preserves what they typed.
-  const changeType = (next: AttributeType) => {
-    setType(next);
-    setError(null);
-    if (next === 'boolean') {
-      const v = text.trim().toLowerCase();
-      if (v !== 'true' && v !== 'false') setText('true');
-    }
-  };
-
-  const editMut = useMutation({
-    mutationFn: async () => {
-      // Send the typed shape — server does the encoding via
-      // classad.Quote so we don't have to mirror Go's full string
-      // escape table on the SPA side.
-      return api.jobs.edit(jobID, {
-        [row.name]: { type, value: text },
-      });
-    },
-    onSuccess: () => onSaved(),
-    onError: (e) =>
-      setError(e instanceof Error ? e.message : String(e)),
-  });
-
-  const submit = () => {
-    setError(null);
-    const validation = validateAttributeInput(type, text);
-    if (validation) {
-      setError(validation);
-      return;
-    }
-    editMut.mutate();
-  };
-
-  return (
-    <tr className="bg-amber-50/50">
-      <td className="px-3 py-1.5 w-56 font-mono text-gray-700 align-top break-all">
-        {row.name}
-      </td>
-      <td className="px-3 py-1.5 w-20 align-top">
-        <select
-          value={type}
-          onChange={(e) => changeType(e.target.value as AttributeType)}
-          className="w-full rounded-sm border border-gray-300 bg-white px-1 py-0.5 text-[11px]"
-          aria-label="Attribute type"
-        >
-          <option value="string">string</option>
-          <option value="integer">integer</option>
-          <option value="real">real</option>
-          <option value="boolean">boolean</option>
-          <option value="raw">raw</option>
-        </select>
-      </td>
-      <td className="px-3 py-1.5 align-top">
-        {type === 'boolean' ? (
-          // Booleans get a dropdown: free text just invites typos
-          // ("True"/"yes"/"1") that fail validation, and there are
-          // only two valid values anyway.
-          <select
-            value={text === 'false' ? 'false' : 'true'}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submit();
-              if (e.key === 'Escape') onCancel();
-            }}
-            autoFocus
-            className="w-full rounded-sm border border-gray-300 bg-white px-2 py-0.5 font-mono text-xs"
-            aria-label="Boolean value"
-          >
-            <option value="true">true</option>
-            <option value="false">false</option>
-          </select>
-        ) : (
-          <input
-            type="text"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submit();
-              if (e.key === 'Escape') onCancel();
-            }}
-            autoFocus
-            spellCheck={false}
-            className="w-full rounded-sm border border-gray-300 bg-white px-2 py-0.5 font-mono text-xs"
-            placeholder={
-              type === 'string'
-                ? 'value (typed verbatim, no quotes)'
-                : type === 'raw'
-                  ? 'classad expression (e.g. Memory * 2)'
-                  : `${type} value`
-            }
-          />
-        )}
-        {error && (
-          <p className="mt-1 text-[11px] text-red-700">{error}</p>
-        )}
-      </td>
-      <td className="px-3 py-1.5 w-16 text-right align-top whitespace-nowrap">
-        <div className="inline-flex items-center gap-1">
-          <button
-            type="button"
-            onClick={submit}
-            disabled={editMut.isPending}
-            className="text-[11px] rounded-sm border border-brand-600 bg-brand-600 px-2 py-0.5 font-medium text-white hover:bg-brand-700 disabled:opacity-50"
-          >
-            {editMut.isPending ? '…' : 'save'}
-          </button>
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={editMut.isPending}
-            className="text-[11px] rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-          >
-            cancel
-          </button>
-        </div>
-      </td>
-    </tr>
-  );
-}
-
-// stringifyAdValue collapses any JSON-shaped attribute value to a
-// short readable string. For nested objects / arrays we fall back to
-// JSON.stringify so the user can still see the structure inline; the
-// Raw ClassAd panel below has the pretty-printed version when they
-// need it.
-function stringifyAdValue(v: unknown): string {
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
-}
-
 export function ResourceTable({ job }: { job: ClassAd }) {
   // Each row pulls a "requested" attribute and an "actual usage"
   // attribute. Most usage attributes are present only after the job
@@ -2917,9 +1850,27 @@ export function ResourceTable({ job }: { job: ClassAd }) {
   // Each row carries the formatted strings AND the two raw numbers, so
   // the bar can be drawn from the same values the text reports rather
   // than from a second reading of the ad.
+  //
+  // The requested side is jobRequest's: the value each Request* evaluates
+  // to in this ad, so a request written as an expression shows the number
+  // the usage graphs draw as their "requested" line, not a dash.
+  const cpus = jobRequest(job, 'RequestCpus');
+  const memory = jobRequest(job, 'RequestMemory');
+  const disk = jobRequest(job, 'RequestDisk');
+  const gpus = jobRequest(job, 'RequestGPUs');
+  // A job submitted with retry_request_memory asks for one size and runs
+  // at another: RequestMemory is the rung it is on now, not the one it
+  // started at. The number alone reads as the whole story, so say so.
+  const ladder = memoryLadder(job);
   const rows: {
     label: string;
     requested: string;
+    // The request's expression, when it was written as one.
+    requestedExpr?: string;
+    // A line under the request, and its longer reading on hover: what
+    // else shapes the number, such as a memory retry ladder.
+    requestedNote?: string;
+    requestedTitle?: string;
     used: string;
     // Raw numbers in one unit, for the proportion. Undefined where the
     // ad does not say, which draws no bar.
@@ -2928,68 +1879,84 @@ export function ResourceTable({ job }: { job: ClassAd }) {
   }[] = [
     {
       label: 'CPUs',
-      requested: fmtRequested(job.RequestCpus),
-      used: fmtUsage(job.CpusUsage ?? job.CumulativeRemoteSysCpu),
-      reqN: num(job.RequestCpus),
-      usedN: num(job.CpusUsage),
+      requested: fmtRequested(cpus.value),
+      requestedExpr: cpus.expr,
+      // Not CpusUsage, which is wrong while a job runs; see coresUsed.
+      used: fmtUsage(coresUsed(job)),
+      reqN: cpus.value,
+      usedN: coresUsed(job),
     },
     {
       label: 'Memory',
-      requested: fmtMiB(job.RequestMemory),
+      requested: fmtMiB(memory.value),
+      requestedExpr: memory.expr,
+      requestedNote: ladderNote(ladder),
+      requestedTitle: ladderTitle(ladder),
       used: fmtMemoryUsed(job),
-      reqN: num(job.RequestMemory),
+      reqN: memory.value,
       usedN: memoryUsedMiB(job),
     },
     {
       label: 'Disk',
-      requested: fmtKiBAsMiB(job.RequestDisk),
-      used: fmtKiBAsMiB(job.DiskUsage ?? job.DiskUsage_RAW),
+      requested: fmtKiB(disk.value),
+      requestedExpr: disk.expr,
+      used: fmtKiB(job.DiskUsage ?? job.DiskUsage_RAW),
       // Both sides are KiB on the wire, so the ratio needs no
       // conversion -- only the display does.
-      reqN: num(job.RequestDisk),
+      reqN: disk.value,
       usedN: num(job.DiskUsage ?? job.DiskUsage_RAW),
     },
     {
       // HTCondor capitalises this acronym: the attributes are
-      // RequestGPUs and GPUsUsage, not RequestGpus/GpusUsage. ClassAd
-      // attribute names are case-insensitive, a JSON object's keys are
-      // not, so the misspelled lookups were always undefined and the
-      // row was dropped from every job -- including the GPU ones.
+      // RequestGPUs and GPUsAverageUsage/GPUsUsage, not RequestGpus/
+      // GpusUsage. A finished job has only GPUsAverageUsage; see
+      // gpusUsed.
       label: 'GPUs',
-      requested: fmtRequested(job.RequestGPUs),
-      used: fmtUsage(job.GPUsUsage),
-      reqN: num(job.RequestGPUs),
-      usedN: num(job.GPUsUsage),
+      requested: fmtRequested(gpus.value),
+      requestedExpr: gpus.expr,
+      used: fmtUsage(gpusUsed(job)),
+      reqN: gpus.value,
+      usedN: gpusUsed(job),
     },
   ];
 
-  // Drop GPUs row when both columns are empty (most jobs).
-  const visible = rows.filter(
-    (r) => !(r.label === 'GPUs' && r.requested === '—' && r.used === '—'),
-  );
+  // A GPU row only for a job with GPUs: one it asked for, or has assigned,
+  // provisioned or in use. RequestGPUs = 0 is not a GPU job.
+  const showGpus = hasGpus(job);
+  const visible = rows.filter((r) => r.label !== 'GPUs' || showGpus);
 
   return (
     <div>
       <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
         Resources
       </h3>
-      <div className="overflow-hidden rounded-sm border border-gray-200">
+      <div className="overflow-x-auto rounded-sm border border-gray-200">
         <table className="min-w-full text-sm">
-          <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
+          <thead className="bg-gray-50 text-left text-xs uppercase tracking-normal text-gray-500 sm:tracking-wide">
             <tr>
-              <th className="px-3 py-1.5 w-32">Resource</th>
-              <th className="px-3 py-1.5">Requested</th>
-              <th className="px-3 py-1.5">Used</th>
-              <th className="px-3 py-1.5 w-40">Used of requested</th>
+              <th className="px-1.5 py-1.5 sm:px-3 sm:w-32">Resource</th>
+              <th className="px-1.5 py-1.5 sm:px-3">Requested</th>
+              <th className="px-1.5 py-1.5 sm:px-3">Used</th>
+              <th className="px-1.5 py-1.5 sm:px-3 sm:w-40">Used of requested</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {visible.map((r) => (
               <tr key={r.label}>
-                <td className="px-3 py-1.5 font-medium text-gray-700">{r.label}</td>
-                <td className="px-3 py-1.5 text-gray-900 tabular-nums">{r.requested}</td>
-                <td className="px-3 py-1.5 text-gray-900 tabular-nums">{r.used}</td>
-                <td className="px-3 py-1.5">
+                <td className="px-1.5 py-1.5 sm:px-3 font-medium text-gray-700">{r.label}</td>
+                <td className="px-1.5 py-1.5 sm:px-3 text-gray-900 tabular-nums">
+                  <span title={[r.requestedExpr, r.requestedTitle].filter(Boolean).join(' ') || undefined}>
+                    {r.requested}
+                    {r.requestedExpr && (
+                      <span className="block text-[11px] font-normal text-gray-400">from expression</span>
+                    )}
+                    {r.requestedNote && (
+                      <span className="block text-[11px] font-normal text-gray-400">{r.requestedNote}</span>
+                    )}
+                  </span>
+                </td>
+                <td className="px-1.5 py-1.5 sm:px-3 text-gray-900 tabular-nums">{r.used}</td>
+                <td className="px-1.5 py-1.5 sm:px-3">
                   <UsageBar requested={r.reqN} used={r.usedN} />
                 </td>
               </tr>
@@ -3053,7 +2020,7 @@ export function UsageBar({
   return (
     <div className="flex items-center gap-2" title={`${label} of requested`}>
       <div
-        className="h-1.5 w-20 shrink-0 overflow-hidden rounded-full bg-gray-200"
+        className="h-1.5 w-12 shrink-0 overflow-hidden rounded-full bg-gray-200 sm:w-20"
         role="img"
         aria-label={`${label} of requested`}
       >
@@ -3115,7 +2082,12 @@ export function ExecutionTable({ job }: { job: ClassAd }) {
 
 export function RawClassAd({ job }: { job: ClassAd }) {
   const [copied, setCopied] = useState(false);
-  const text = JSON.stringify(job, null, 2);
+  // The ad as the schedd holds it, without the server's evaluated requests.
+  const text = JSON.stringify(
+    Object.fromEntries(Object.entries(job).filter(([name]) => name !== EVALUATED_KEY)),
+    null,
+    2,
+  );
   const handleCopy = () => {
     navigator.clipboard?.writeText(text);
     setCopied(true);
@@ -3350,24 +2322,24 @@ function fmtUsage(v: unknown): string {
 // pass it straight to fmtMiB.
 function fmtMemoryUsed(job: ClassAd): string {
   const direct = num(job.MemoryUsage);
-  if (direct !== undefined) return `${direct.toLocaleString()} MiB`;
-  return fmtKiBAsMiB(job.ResidentSetSize ?? job.ResidentSetSize_RAW);
+  if (direct !== undefined) return formatMiB(direct);
+  return fmtKiB(job.ResidentSetSize ?? job.ResidentSetSize_RAW);
 }
 
+// Memory (MiB) and disk (KiB) read through the app's one byte formatter,
+// lib/utilization's formatMiB/formatKiB -- the one the usage graphs use for
+// their captions, tooltips and axes -- so a request reads the same in the
+// table as in the graph above it.
 function fmtMiB(v: unknown): string {
   const n = num(v);
-  if (n === undefined) return '—';
-  return `${n.toLocaleString()} MiB`;
+  return n === undefined ? '—' : formatMiB(n);
 }
 
 // Disk request lands in KiB on HTCondor's wire (yes, really —
-// RequestDisk and DiskUsage are kilobytes). Display as MiB for sane
-// reading.
-function fmtKiBAsMiB(v: unknown): string {
+// RequestDisk and DiskUsage are kilobytes).
+function fmtKiB(v: unknown): string {
   const n = num(v);
-  if (n === undefined) return '—';
-  const mib = n / 1024;
-  return `${mib.toLocaleString(undefined, { maximumFractionDigits: 1 })} MiB`;
+  return n === undefined ? '—' : formatKiB(n);
 }
 
 function numOrDash(v: unknown): React.ReactNode {
@@ -3462,32 +2434,9 @@ export function Field({
   );
 }
 
-// statusPillCls maps a DisplayStatus key to a Tailwind class for the
-// pill badge. Kept colocated with StatusBadge so the listing page can
-// re-export the same lookup.
-export function statusPillCls(key: DisplayStatus): string {
-  switch (key) {
-    case 'running':
-      return 'bg-green-100 text-green-800';
-    case 'idle':
-      return 'bg-blue-100 text-blue-800';
-    case 'held':
-      return 'bg-red-100 text-red-800';
-    case 'completed':
-      return 'bg-gray-100 text-gray-700';
-    case 'uploading':
-      // Uploading is genuinely "in progress" from the user's POV;
-      // amber matches the "transferring output" mood.
-      return 'bg-amber-100 text-amber-800';
-    case 'transferring':
-    case 'suspended':
-    case 'removed':
-      return 'bg-amber-100 text-amber-800';
-    case 'unknown':
-    default:
-      return 'bg-gray-100 text-gray-500';
-  }
-}
+// statusPillCls lives in lib/statusPill.ts; re-exported for the pages
+// and components that have always imported it from here.
+export { statusPillCls } from '@/lib/statusPill';
 
 export function StatusBadge({
   display,
@@ -3503,42 +2452,12 @@ export function StatusBadge({
   );
 }
 
-// useNowTick returns the current Unix-epoch *seconds* and re-renders
-// the calling component every `intervalMs`. Used to keep the
-// "12h3m ago"-style relative-time strings on the detail page roughly
-// accurate without an explicit refetch.
-export function useNowTick(intervalMs: number): number {
-  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
-  useEffect(() => {
-    const id = setInterval(
-      () => setNow(Math.floor(Date.now() / 1000)),
-      intervalMs,
-    );
-    return () => clearInterval(id);
-  }, [intervalMs]);
-  return now;
-}
+// useNowTick lives in lib/useNowTick; re-exported for its older importers.
+export { useNowTick } from '@/lib/useNowTick';
 
-// humanDuration renders a non-negative number of seconds as a compact
-// "1d2h", "5h3m", "12m4s", or "30s" string. Negative inputs are
-// clamped to 0 so a slight clock skew between the client and the
-// schedd's wallclock doesn't produce nonsense like "-3s ago".
-export function humanDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
-  const s = Math.floor(seconds);
-  if (s < 60) return `${s}s`;
-
-  const days = Math.floor(s / 86400);
-  const hrs = Math.floor((s % 86400) / 3600);
-  const mins = Math.floor((s % 3600) / 60);
-  const secs = s % 60;
-
-  // Two most-significant non-zero units. Pick the right pair so a
-  // 3-day-2-hour-old job doesn't display "3d0h2h" or drop the hours.
-  if (days > 0) return hrs > 0 ? `${days}d${hrs}h` : `${days}d`;
-  if (hrs > 0) return mins > 0 ? `${hrs}h${mins}m` : `${hrs}h`;
-  return secs > 0 ? `${mins}m${secs}s` : `${mins}m`;
-}
+// humanDuration lives in lib/duration so components the page imports can
+// use it too; re-exported here for the importers that predate the move.
+export { humanDuration };
 
 function num(v: unknown): number | undefined {
   if (typeof v === 'number') return v;

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 // fakeTarget records what a reconfigure applied to the running server.
@@ -33,9 +34,23 @@ func (f *fakeTarget) SetMCPAdminGroups(v string)     { f.record("mcp_admin", v) 
 func (f *fakeTarget) SetMCPSuperuserGroups(v string) { f.record("mcp_superuser", v) }
 func (f *fakeTarget) SetWebUIAccessGroups(v string)  { f.record("webui_access", v) }
 func (f *fakeTarget) SetWebUIAdminGroups(v string)   { f.record("webui_admin", v) }
+func (f *fakeTarget) SetWebUISiteName(v string)      { f.record("webui_site_name", v) }
+func (f *fakeTarget) SetWebUISiteTagline(v string)   { f.record("webui_site_tagline", v) }
+func (f *fakeTarget) SetWebUIFooterLogos(v string)   { f.record("webui_footer_logos", v) }
+func (f *fakeTarget) SetWebUIBrandingDir(v string)   { f.record("webui_branding_dir", v) }
+func (f *fakeTarget) SetWebUICustomCSS(v string)     { f.record("webui_custom_css", v) }
+func (f *fakeTarget) SetWebUIFavicon(v string)       { f.record("webui_favicon", v) }
 func (f *fakeTarget) SetSuperuserGroups(v string)    { f.record("superuser", v) }
 func (f *fakeTarget) SetMCPSkillsDir(v string)       { f.record("skills_dir", v) }
 func (f *fakeTarget) SetMCPDisabledTools(v string)   { f.record("disabled_tools", v) }
+
+func (f *fakeTarget) SetMCPRedactSecrets(v string)       { f.record("redact_secrets", v) }
+func (f *fakeTarget) SetMCPRedactDisabledRules(v string) { f.record("redact_disabled_rules", v) }
+
+func (f *fakeTarget) SetChatInstructions(v string)  { f.record("chat_instructions", v) }
+func (f *fakeTarget) ReloadAPAssignment()           { f.record("ap_assignment_reload", "") }
+func (f *fakeTarget) SetProjectLeadsFile(v string)  { f.record("project_leads_file", v) }
+func (f *fakeTarget) SetProjectLeadsGroup(v string) { f.record("project_leads_group", v) }
 
 // configFrom builds a Config from literal file contents, the way the daemon
 // builds one from CONDOR_CONFIG on reconfigure.
@@ -230,5 +245,52 @@ func TestReconfigAppliesDisabledTools(t *testing.T) {
 	}
 	if want := []string{"exec_in_job interactive_session_*"}; !reflect.DeepEqual(target.groups["disabled_tools"], want) {
 		t.Errorf("server received %v, want %v", target.groups["disabled_tools"], want)
+	}
+}
+
+// TestReconfigRereadsProjectLeadsFile: editing the leads file is the usual
+// reason to reconfigure, and the path itself does not change when it is
+// edited, so the file must be re-read on every reconfigure -- and a changed
+// pattern must reach the server too.
+func TestReconfigRereadsProjectLeadsFile(t *testing.T) {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	body := "HTTP_API_PROJECT_LEADS_FILE = /etc/condor/project-leads\n"
+	target := &fakeTarget{}
+	w := newReconfigWatcher(configFrom(t, body), target, logger)
+
+	w.reconfigure(configFrom(t, body+"HTTP_API_PROJECT_LEADS_GROUP = {project}-leads\n"))
+
+	if got, want := target.groups["project_leads_file"], []string{"/etc/condor/project-leads"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("leads file reloads = %v, want %v", got, want)
+	}
+	if got, want := target.groups["project_leads_group"], []string{"{project}-leads"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("leads pattern = %v, want %v", got, want)
+	}
+}
+
+// A reconfigure of a multi-AP server re-reads the access point
+// assignment's files whether or not any knob changed: editing the mapfile
+// is the usual reason to send one.
+func TestReconfigReloadsAPAssignment(t *testing.T) {
+	logger, err := logging.New(&logging.Config{OutputPath: "stderr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "HTTP_API_SCHEDD_CONSTRAINT = regexp(\"^ap\", Name)\nHTTP_API_AP_ASSIGNMENT_MAPFILE = /etc/condor/assign.map\n"
+	target := &fakeTarget{}
+	w := newReconfigWatcher(configFrom(t, body), target, logger)
+	w.reconfigure(configFrom(t, body))
+	if n := len(target.groups["ap_assignment_reload"]); n != 1 {
+		t.Errorf("reconfigure reloaded the assignment %d times, want 1", n)
+	}
+	// Single-AP mode has no assignment to reload.
+	single := &fakeTarget{}
+	w = newReconfigWatcher(configFrom(t, ""), single, logger)
+	w.reconfigure(configFrom(t, ""))
+	if n := len(single.groups["ap_assignment_reload"]); n != 0 {
+		t.Errorf("single-AP reconfigure reloaded the assignment %d times", n)
 	}
 }

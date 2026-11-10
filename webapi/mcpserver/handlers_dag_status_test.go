@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
+
+	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
 )
 
 // dagAd builds a job ad from attribute values, so the decisions below
@@ -191,10 +193,10 @@ func TestDagFileFromAdParsesRealArguments(t *testing.T) {
 // on whitespace alone would make the token after -Dag right by accident
 // and everything after it wrong.
 func TestSplitV2ArgsGroupsQuotedRuns(t *testing.T) {
-	got := splitV2Args(`-Dag wf.dag -CsdVersion '$CondorVersion: 25.4.0 BuildID: test $' -MaxIdle 5`)
+	got := jobargs.SplitV2(`-Dag wf.dag -CsdVersion '$CondorVersion: 25.4.0 BuildID: test $' -MaxIdle 5`)
 	want := []string{"-Dag", "wf.dag", "-CsdVersion", "$CondorVersion: 25.4.0 BuildID: test $", "-MaxIdle", "5"}
 	if len(got) != len(want) {
-		t.Fatalf("splitV2Args = %q, want %q", got, want)
+		t.Fatalf("jobargs.SplitV2 = %q, want %q", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {

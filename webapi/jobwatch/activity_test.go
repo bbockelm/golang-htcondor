@@ -21,7 +21,10 @@ func activityFixture(t *testing.T) (*Feed, <-chan ActivityEvent, time.Time) {
 	now := time.Unix(1_700_000_000, 0)
 	f := NewFeed(nil)
 	f.now = func() time.Time { return now }
-	ch, cancel := f.SubscribeActivity("", 16)
+	ch, cancel, err := f.SubscribeActivity("", true, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(cancel)
 	return f, ch, now
 }
@@ -210,9 +213,15 @@ func TestSubscribersOnlySeeTheirOwnJobs(t *testing.T) {
 	f := NewFeed(nil)
 	f.now = func() time.Time { return now }
 
-	mine, cancelMine := f.SubscribeActivity("alice", 16)
+	mine, cancelMine, err := f.SubscribeActivity("alice", false, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cancelMine()
-	all, cancelAll := f.SubscribeActivity("", 16)
+	all, cancelAll, err := f.SubscribeActivity("", true, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cancelAll()
 
 	fresh := fmt.Sprintf("QDate = %d", now.Add(-time.Second).Unix())
@@ -228,6 +237,24 @@ func TestSubscribersOnlySeeTheirOwnJobs(t *testing.T) {
 	}
 }
 
+// An empty owner is a caller nobody identified, not a request for
+// everyone. Only an explicit all reaches every owner's jobs.
+func TestAnEmptyOwnerIsNotEveryOwner(t *testing.T) {
+	f := NewFeed(nil)
+	if _, _, err := f.SubscribeActivity("", false, 4); err == nil {
+		t.Error("an empty owner was accepted without all")
+	}
+	if _, _, err := f.SubscribeActivity("alice", true, 4); err == nil {
+		t.Error("an owner and all together were accepted")
+	}
+	f.mu.Lock()
+	n := len(f.activitySubs)
+	f.mu.Unlock()
+	if n != 0 {
+		t.Errorf("%d subscriptions registered by refused calls", n)
+	}
+}
+
 // A browser tab that stops reading must not be able to stall the feed --
 // this is the same stream the MCP watch evaluator reads from. It loses
 // events instead, and is told how many.
@@ -235,7 +262,10 @@ func TestASlowSubscriberLosesEventsRatherThanStallingTheFeed(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	f := NewFeed(nil)
 	f.now = func() time.Time { return now }
-	ch, cancel := f.SubscribeActivity("", 2)
+	ch, cancel, err := f.SubscribeActivity("", true, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cancel()
 
 	fresh := fmt.Sprintf("QDate = %d", now.Add(-time.Second).Unix())
@@ -265,7 +295,10 @@ func TestASlowSubscriberLosesEventsRatherThanStallingTheFeed(t *testing.T) {
 // accumulates a subscriber per page load.
 func TestCancellingRemovesTheSubscription(t *testing.T) {
 	f := NewFeed(nil)
-	_, cancel := f.SubscribeActivity("", 4)
+	_, cancel, err := f.SubscribeActivity("", true, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cancel()
 	cancel() // must be safe twice
 

@@ -70,6 +70,24 @@ func TestImpersonationIdentityPrefersTheActor(t *testing.T) {
 	})
 }
 
+// TestImpersonationIdentityBareFormSplitsAtTheLastAt: the bare form of an
+// actor is the user part before its LAST "@", as HTCondor splits a
+// fully-qualified user, so a user name that itself contains an "@" matches
+// its own QUEUE_SUPER_USERS entry and not the entry for its prefix.
+func TestImpersonationIdentityBareFormSplitsAtTheLastAt(t *testing.T) {
+	src := &fakeSuperUsers{users: []string{"root", "svc@ops", "condor", "condor@example.org"}}
+	p := newTestPolicy(t, src)
+	if err := p.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if id, isSuper := p.ImpersonationIdentity("svc@ops@example.org"); id != "svc@ops@example.org" || !isSuper {
+		t.Errorf("svc@ops@example.org: got (%q, %v), want (svc@ops@example.org, true)", id, isSuper)
+	}
+	if id, isSuper := p.ImpersonationIdentity("root@evil@example.org"); id != "condor@example.org" || isSuper {
+		t.Errorf("root@evil@example.org: got (%q, %v), want the fallback; root@evil is not root", id, isSuper)
+	}
+}
+
 // TestImpersonationIdentityNeverPollsPerAction pins the requirement that the
 // schedd is not consulted on the path of an action.
 func TestImpersonationIdentityNeverPollsPerAction(t *testing.T) {

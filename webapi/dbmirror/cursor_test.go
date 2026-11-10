@@ -1,6 +1,9 @@
 package dbmirror
 
 import (
+	"errors"
+	"fmt"
+	"net/http"
 	"testing"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
@@ -85,5 +88,30 @@ func TestJobsDecisionOwnsItsOwnTokens(t *testing.T) {
 	}
 	if d.Reason != ReasonPageToken {
 		t.Errorf("Reason = %q, want %q", d.Reason, ReasonPageToken)
+	}
+}
+
+// TestCursorExpired recognizes the mirror's refusal to resume a cursor,
+// wrapped or not, and nothing else -- and the decline it becomes is the
+// caller's to fix, so a mandatory mirror answers it with a 400.
+func TestCursorExpired(t *testing.T) {
+	refusal := &dbrpc.ServerError{Msg: "cursor expired: collections: the cursor's snapshot has been reclaimed"}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"refusal", refusal, true},
+		{"wrapped", fmt.Errorf("page 3: %w", refusal), true},
+		{"other server error", &dbrpc.ServerError{Msg: "no such table: jobs"}, false},
+		{"transport", errors.New("cursor expired: but not from the server"), false},
+		{"nil", nil, false},
+	} {
+		if got := CursorExpired(tc.err); got != tc.want {
+			t.Errorf("%s: CursorExpired = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if d := decline(ReasonPageTokenExpired, ""); d.Status() != http.StatusBadRequest {
+		t.Errorf("an expired page token as a mandatory-mirror decline: %d, want 400", d.Status())
 	}
 }

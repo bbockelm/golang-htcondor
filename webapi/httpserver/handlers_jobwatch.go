@@ -11,6 +11,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
 )
 
 // GET /api/v1/jobs/{id}/watch -- Server-Sent Events for one job.
@@ -63,6 +64,12 @@ const (
 	// keeps one for the life of the process. The browser's EventSource
 	// reconnects on its own, so ending is cheap and bounds the leak.
 	jobWatchMaxAge = 30 * time.Minute
+	// jobWatchRecheckInterval is how often a watch opened through a
+	// project lead's read scope re-checks that the lead may still read
+	// the job. The stream otherwise outlives the decision that admitted
+	// it: the poller keeps the constraint it started with, and the mirror
+	// feed is keyed by job id alone.
+	jobWatchRecheckInterval = 60 * time.Second
 )
 
 func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID string) {
@@ -70,15 +77,13 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	ctx, needsRedirect, err := s.requireAuthentication(r)
-	if err != nil {
-		if needsRedirect {
-			s.redirectToLogin(w, r)
-			return
-		}
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+	// Admitted before the first read: a refused stream should cost the
+	// schedd nothing.
+	ctx, release, ok := s.authenticateStream(w, r)
+	if !ok {
 		return
 	}
+	defer release()
 	cluster, proc, err := parseJobID(jobID)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
@@ -87,8 +92,9 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 
 	// The same owner scope a plain GET of this job gets. A watch reads
 	// job state continuously, so it is the last place to be laxer than
-	// the one-shot read.
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	// the one-shot read -- or stricter, which would break the detail
+	// page for a project lead the GET lets in.
+	constraint, err := s.jobReadScope(ctx, r, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -101,6 +107,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 
 	ctx, cancel := context.WithTimeout(ctx, jobWatchMaxAge)
 	defer cancel()
+	ctx = s.watchLeadAccess(ctx, r, cluster, proc)
 
 	// Subscribe before the first read, not after.
 	//
@@ -112,7 +119,10 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 		feedCh  <-chan jobWatchUpdateSource
 		feedOff func()
 	)
-	if s.jobWatchFeed != nil && s.jobWatchFeed.Warm() {
+	// Not in multi-AP mode: the feed there follows every AP's jobs, and
+	// a subscription by cluster.proc would carry another AP's job of the
+	// same number. The poll below reads the job's own AP.
+	if s.multi == nil && s.jobWatchFeed != nil && s.jobWatchFeed.Warm() {
 		feedCh, feedOff = subscribeFeed(s, int64(cluster), int64(proc))
 		defer feedOff()
 	}
@@ -139,6 +149,9 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 	}
 	defer s.streamOpened()()
 
+	// This request's own ad, read by this goroutine alone: projecting it
+	// directly is safe. Updates from either source arrive already
+	// rendered, because those are shared with other watchers.
 	last := projectAttrs(ad, attrs)
 	writeSSE(w, rc, "snapshot", last)
 
@@ -155,7 +168,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 
 	for {
 		var (
-			next  *classad.ClassAd
+			next  jobwatch.AdView
 			gone  bool
 			stale bool
 		)
@@ -177,12 +190,12 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 			if !open {
 				return
 			}
-			next, gone, stale = u.Ad, u.Gone, u.Stale
+			next, gone, stale = u.View, u.Gone, u.Stale
 		case u, open := <-pollChan(pollSrc):
 			if !open {
 				return
 			}
-			next, gone = u.Ad, u.Ad == nil
+			next, gone = u.View, u.View == nil
 		}
 
 		if stale {
@@ -206,7 +219,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 				pollSrc = s.jobPolls.Subscribe(ctx, constraint)
 				defer pollSrc.Close()
 			}
-			next, gone = fresh, fresh == nil
+			next, gone = jobwatch.NewAdView(fresh), fresh == nil
 		}
 
 		if gone {
@@ -216,7 +229,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 		if next == nil {
 			continue
 		}
-		cur := projectAttrs(next, attrs)
+		cur := next.Project(attrs)
 		changed := diffAttrs(last, cur)
 		if len(changed) == 0 {
 			// Most writes to a job ad touch nothing this client asked
@@ -232,7 +245,7 @@ func (s *Handler) handleJobWatch(w http.ResponseWriter, r *http.Request, jobID s
 
 // jobWatchUpdateSource is the shape both sources deliver in.
 type jobWatchUpdateSource struct {
-	Ad    *classad.ClassAd
+	View  jobwatch.AdView
 	Gone  bool
 	Stale bool
 }
@@ -269,32 +282,12 @@ func splitAttrs(v string) []string {
 //
 // Attributes the ad does not carry are omitted rather than recorded
 // empty, so one appearing for the first time reads as a change.
+//
+// ad must be the caller's alone. Marshalling a ClassAd writes to it, so an
+// ad another goroutine can see -- anything a poll or the feed delivered --
+// is rendered once by its owner and projected with AdView.Project.
 func projectAttrs(ad *classad.ClassAd, attrs []string) map[string]any {
-	out := make(map[string]any, len(attrs))
-	if ad == nil {
-		return out
-	}
-	b, err := json.Marshal(ad)
-	if err != nil {
-		return out
-	}
-	var all map[string]any
-	if err := json.Unmarshal(b, &all); err != nil {
-		return out
-	}
-	// ClassAd attribute names are case-insensitive; the JSON carries
-	// whatever case the ad stored, which is not necessarily the case the
-	// caller asked in.
-	lower := make(map[string]string, len(all))
-	for k := range all {
-		lower[strings.ToLower(k)] = k
-	}
-	for _, a := range attrs {
-		if k, ok := lower[strings.ToLower(a)]; ok {
-			out[a] = all[k]
-		}
-	}
-	return out
+	return jobwatch.NewAdView(ad).Project(attrs)
 }
 
 // diffAttrs returns what changed between two projections, including
@@ -334,8 +327,66 @@ func subscribeFeed(s *Handler, cluster, proc int64) (<-chan jobWatchUpdateSource
 	go func() {
 		defer close(out)
 		for c := range in {
-			out <- jobWatchUpdateSource{Ad: c.Ad, Gone: c.Gone, Stale: c.Stale}
+			out <- jobWatchUpdateSource{View: c.View, Gone: c.Gone, Stale: c.Stale}
 		}
 	}()
 	return out, cancel
+}
+
+// watchLeadAccess returns a context that is cancelled when the caller can no
+// longer read the job, for a watch admitted through a project lead's read
+// scope. Only a lead's access can lapse while the stream is open -- the leads
+// file is edited, or the job leaves the project -- so other callers get ctx
+// back unchanged and pay nothing. Cancelling is how the stream ends: its loop
+// already returns on ctx.Done.
+func (s *Handler) watchLeadAccess(ctx context.Context, r *http.Request, cluster, proc int) context.Context {
+	if len(s.projectLeadReadProjects(ctx, r)) == 0 {
+		return ctx
+	}
+	interval := s.jobWatchRecheck
+	if interval <= 0 {
+		interval = jobWatchRecheckInterval
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		defer cancel()
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if !s.jobWatchStillReadable(ctx, r, cluster, proc) {
+					s.logger.Info(logging.DestinationSecurity,
+						"Ending a job watch: the caller may no longer read the job",
+						"job", fmt.Sprintf("%d.%d", cluster, proc), "remote_addr", r.RemoteAddr)
+					return
+				}
+			}
+		}
+	}()
+	return ctx
+}
+
+// jobWatchStillReadable re-runs the read scope that admitted a watch and asks
+// whether the job still falls inside it. A query error keeps the stream:
+// a schedd blip is not lost access, and the next recheck will ask again.
+//
+// A session that has gone -- logged out, expired, deleted -- is lost access.
+// It has to be checked here rather than left to jobReadScope, which would
+// answer for whatever identity the request context still carries.
+func (s *Handler) jobWatchStillReadable(ctx context.Context, r *http.Request, cluster, proc int) bool {
+	if _, ok := s.getSessionFromRequest(r); !ok {
+		return false
+	}
+	constraint, err := s.jobReadScope(ctx, r, cluster, proc)
+	if err != nil {
+		return false
+	}
+	ad, err := s.scheddJobQuery(ctx, constraint)
+	if err != nil {
+		return true
+	}
+	return ad != nil
 }

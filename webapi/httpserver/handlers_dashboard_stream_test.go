@@ -19,22 +19,30 @@ import (
 func TestActivityStreamScope(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
+		actor     string
 		requested string
 		isAdmin   bool
-		want      string
+		wantOwner string
+		wantAll   bool
 	}{
-		{"default is your own jobs", "", false, "alice"},
-		{"an admin also defaults to their own", "", true, "alice"},
-		{"an admin may ask for the whole access point", "false", true, ""},
+		{"default is your own jobs", "alice", "", false, "alice", false},
+		{"an admin also defaults to their own", "alice", "", true, "alice", false},
+		{"an admin may ask for the whole access point", "alice", "false", true, "", true},
 		// The important one. A non-admin who sends owned_by_me=false is
 		// given their own jobs, not everyone's.
-		{"a non-admin asking for everything gets themselves", "false", false, "alice"},
-		{"asking for your own explicitly", "true", true, "alice"},
-		{"nonsense falls back to your own", "banana", true, "alice"},
+		{"a non-admin asking for everything gets themselves", "alice", "false", false, "alice", false},
+		{"asking for your own explicitly", "alice", "true", true, "alice", false},
+		{"nonsense falls back to your own", "alice", "banana", true, "alice", false},
+		// A bearer's actor is qualified; a job's Owner is not.
+		{"a qualified actor scopes to the bare owner", "alice@uid.domain", "", false, "alice", false},
+		// Nobody is not everybody, however the request is dressed.
+		{"an unnamed caller is not everyone", "", "", false, "", false},
+		{"an unnamed caller asking for everything is not everyone", "", "false", true, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := activityStreamScope("alice", tc.requested, tc.isAdmin); got != tc.want {
-				t.Errorf("scope = %q, want %q", got, tc.want)
+			owner, all := activityStreamScope(tc.actor, tc.requested, tc.isAdmin)
+			if owner != tc.wantOwner || all != tc.wantAll {
+				t.Errorf("scope = (%q, %t), want (%q, %t)", owner, all, tc.wantOwner, tc.wantAll)
 			}
 		})
 	}

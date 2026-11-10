@@ -115,12 +115,16 @@ func (s *Server) toolSkillsList(_ context.Context, args map[string]interface{}) 
 		out = append(out, entry{ID: sk.ID, Name: sk.Name, Description: sk.Description, Path: sk.Path})
 	}
 
-	return map[string]interface{}{
-		"skills":            out,
-		"count":             len(out),
-		"hint":              "Read one in full with skills_get.",
-		"structuredContent": map[string]interface{}{"skills": out, "count": len(out)},
-	}, nil
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d skill(s). Read one in full with skills_get.\n", len(out))
+	for _, e := range out {
+		fmt.Fprintf(&sb, "\n- %s: %s", e.ID, e.Name)
+		if e.Description != "" {
+			fmt.Fprintf(&sb, " -- %s", e.Description)
+		}
+	}
+	return structuredTextResult(sb.String(),
+		map[string]interface{}{"skills": out, "count": len(out)}), nil
 }
 
 // toolSkillsGet answers skills_get.
@@ -148,18 +152,17 @@ func (s *Server) toolSkillsGet(_ context.Context, args map[string]interface{}) (
 		return nil, fmt.Errorf("no skill %q; available ids include: %s", id, strings.Join(available, ", "))
 	}
 
-	return map[string]interface{}{
+	// The Markdown goes in a text block. "content" at the top level of a
+	// tool result is MCP's content-block array, so the body cannot be
+	// filed there as a string; the structured copy is where a field
+	// named content belongs.
+	return structuredTextResult(sk.Body, map[string]interface{}{
 		"id":          sk.ID,
+		"path":        sk.Path,
 		"name":        sk.Name,
 		"description": sk.Description,
-		"path":        sk.Path,
 		"content":     sk.Body,
-		"structuredContent": map[string]interface{}{
-			"name":        sk.Name,
-			"description": sk.Description,
-			"content":     sk.Body,
-		},
-	}, nil
+	}), nil
 }
 
 // skillResources lists the library as MCP resources.
@@ -244,43 +247,15 @@ func (s *Server) readSkillResource(uri string) (interface{}, error) {
 // skillsInstructions is the section added to the initialize response when
 // a deployment publishes skills.
 //
-// It names them inline rather than only pointing at a tool. An agent reads
-// the instructions before deciding anything, so the catalogue is what makes
-// it recognise that a task is covered here; a bare "call skills_list" is
-// advice it has no reason to take until after it has already guessed.
+// The catalogue itself lives in the skills package, because the browser
+// chat assistant publishes the same skills to the same site's users and
+// has to describe them the same way. Only the sentence about how to read
+// one is written here: skills_get and skill://<id> exist on this surface
+// and nowhere else.
 func skillsInstructions(lib *skills.Library) string {
-	if lib.Len() == 0 {
-		return ""
-	}
-
-	var b strings.Builder
-	b.WriteString("\n## Site skills\n\n")
-	fmt.Fprintf(&b, "This access point publishes %d site-authored skill(s): its own "+
-		"documentation for how work is done here -- local conventions, queue policy, "+
-		"which resources to request, worked procedures.\n\n", lib.Len())
-	b.WriteString("**Consult the relevant skill before using other tools** when a task " +
-		"touches any of the subjects below. They describe choices specific to this site " +
-		"that general HTCondor knowledge will contradict or omit. Read one with the " +
-		"`skills_get` tool, or the resource `skill://<id>`; the full catalogue is " +
-		"`skills_list` and the resource `skill://index.json`.\n\n")
-
-	const maxListed = 60
-	listed := lib.List()
-	truncated := false
-	if len(listed) > maxListed {
-		listed, truncated = listed[:maxListed], true
-	}
-	for _, sk := range listed {
-		if d := strings.TrimSpace(sk.Description); d != "" {
-			fmt.Fprintf(&b, "- `%s` -- %s: %s\n", sk.ID, sk.Name, d)
-		} else {
-			fmt.Fprintf(&b, "- `%s` -- %s\n", sk.ID, sk.Name)
-		}
-	}
-	if truncated {
-		fmt.Fprintf(&b, "\n(%d more; call `skills_list` for the rest.)\n", lib.Len()-maxListed)
-	}
-	return b.String()
+	return lib.Instructions(
+		"Read one with the `skills_get` tool, or the resource `skill://<id>`; " +
+			"the full catalogue is `skills_list` and the resource `skill://index.json`.")
 }
 
 // SetSkillsDir loads (or reloads) the skill library from disk.
@@ -410,7 +385,9 @@ func (s *Server) startSkillsReload(interval time.Duration) bool {
 	}
 
 	s.skillsStop = make(chan struct{})
+	s.skillsDone = make(chan struct{})
 	go func() {
+		defer close(s.skillsDone)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -425,10 +402,32 @@ func (s *Server) startSkillsReload(interval time.Duration) bool {
 	return true
 }
 
-// stopSkillsReload halts the poll. Idempotent, because Close is.
+// stopSkillsReload halts the poll and waits for it to be over.
+//
+// Waiting is the point: signalling alone leaves a reload that was
+// already reading the directory free to install its result afterwards,
+// so a caller that stops the poll and then changes the directory can
+// still have the old poll overwrite the library. The wait is bounded by
+// one directory read. Idempotent, because Close is.
 func (s *Server) stopSkillsReload() {
 	if s.skillsStop == nil {
 		return
 	}
 	s.skillsStopOnce.Do(func() { close(s.skillsStop) })
+	<-s.skillsDone
+}
+
+// Skills is the site skill library this server currently serves, for
+// another surface on the same deployment to publish the same skills.
+//
+// A getter, not a snapshot: the library is replaced on a reconfigure and
+// by the reload poll, and a caller holding the pointer from startup would
+// keep serving a checkout the operator has already replaced. Never nil in
+// the sense that matters -- every Library method is nil-safe, so an
+// unconfigured deployment reads as an empty library rather than a panic.
+func (s *Server) Skills() *skills.Library {
+	if s == nil {
+		return nil
+	}
+	return s.skillsLibrary()
 }

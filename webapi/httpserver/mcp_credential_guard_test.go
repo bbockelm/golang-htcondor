@@ -37,7 +37,7 @@ func TestOAuth2CallerIsRefusedWithoutASigningKey(t *testing.T) {
 				signingKeyPath: tc.signingKey,
 				trustDomain:    tc.trust,
 			}
-			_, err := h.withCondorCredential(context.Background(), "bbockelm", []string{"condor:/WRITE"})
+			_, err := h.withCondorCredential(context.Background(), "bbockelm", []string{"condor:/WRITE"}, nil)
 			if err == nil {
 				t.Fatal("a caller with no mintable credential was handed a context anyway; " +
 					"every CEDAR call it made would authenticate as this daemon")

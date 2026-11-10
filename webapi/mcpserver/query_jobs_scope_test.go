@@ -72,7 +72,7 @@ func TestQueryJobsRunsForTheLocalUserWhenNotDelegated(t *testing.T) {
 // only evaluate it. Asserting on QueryOptions alone would not catch the
 // bug — FetchMyJobs was already set throughout the fail-open.
 func TestQueryJobsScopesByConstraintNotJustFetchOpts(t *testing.T) {
-	scoped, err := ownerScopedConstraint(ownerFromActor("alice@example.org"), "JobStatus == 1")
+	scoped, err := ownerScopedConstraint(ownerOnlyScope(ownerFromActor("alice@example.org")), "JobStatus == 1")
 	if err != nil {
 		t.Fatalf("ownerScopedConstraint: %v", err)
 	}

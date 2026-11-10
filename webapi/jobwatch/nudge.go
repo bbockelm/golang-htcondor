@@ -88,7 +88,12 @@ func (n *Nudger) Run(ctx context.Context) {
 	if n.feed == nil || n.check == nil {
 		return
 	}
-	events, cancel := n.feed.SubscribeActivity("", nudgeBuffer)
+	// Every owner: a transition of anybody's job may fire somebody's
+	// watch.
+	events, cancel, err := n.feed.SubscribeActivity("", true, nudgeBuffer)
+	if err != nil {
+		return
+	}
 	defer cancel()
 
 	tick := time.NewTicker(n.Delay)

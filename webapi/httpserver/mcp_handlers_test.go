@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -403,12 +402,6 @@ func TestOAuth2MetadataScopes(t *testing.T) {
 	if regEndpoint, ok := metadata["registration_endpoint"].(string); !ok || regEndpoint == "" {
 		t.Error("registration_endpoint not found or empty in metadata")
 	}
-}
-
-// TestMain ensures cleanup of temporary files
-func TestMain(m *testing.M) {
-	code := m.Run()
-	os.Exit(code)
 }
 
 // TestOAuth2ProtectedResourceMetadata tests the OAuth 2.0 Protected Resource metadata endpoint

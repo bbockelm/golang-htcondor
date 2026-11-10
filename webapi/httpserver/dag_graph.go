@@ -21,6 +21,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/dagman"
+	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
 )
 
 // GET /api/v1/jobs/{cluster}.{proc}/dag returns a DAGMan workflow's
@@ -340,7 +341,7 @@ func (s *Handler) handleJobDag(w http.ResponseWriter, r *http.Request, cluster, 
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
 		return
 	}
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeRead)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -349,7 +350,7 @@ func (s *Handler) handleJobDag(w http.ResponseWriter, r *http.Request, cluster, 
 	started := time.Now()
 	timings := &dagTimings{}
 	phase := time.Now()
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint,
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint,
 		&htcondor.QueryOptions{Projection: dagManagerProjection})
 	timings.manager = time.Since(phase)
 	if err != nil {
@@ -430,7 +431,7 @@ func dagPrecondition(ad *classad.ClassAd, cluster, proc int) (dagFile string, st
 // ad carries whichever the submit file used, so both have to work.
 func dagFileFromAd(ad *classad.ClassAd) string {
 	if raw, ok := ad.EvaluateAttrString("Arguments"); ok && strings.TrimSpace(raw) != "" {
-		if f := dagArgFromArgv(splitArgsV2(raw)); f != "" {
+		if f := dagArgFromArgv(jobargs.SplitV2(raw)); f != "" {
 			return f
 		}
 	}
@@ -454,45 +455,6 @@ func dagArgFromArgv(argv []string) string {
 		}
 	}
 	return ""
-}
-
-// splitArgsV2 splits an Arguments value written in submit "new syntax":
-// space separated, with a run that contains whitespace wrapped in single
-// quotes and a literal single quote doubled inside it. The surrounding
-// double quotes belong to the submit file, not to the job ad, so the
-// value here starts straight into the arguments.
-func splitArgsV2(raw string) []string {
-	var (
-		out    []string
-		cur    strings.Builder
-		inQ    bool
-		inWord bool
-	)
-	flush := func() {
-		if inWord {
-			out = append(out, cur.String())
-			cur.Reset()
-			inWord = false
-		}
-	}
-	for i := 0; i < len(raw); i++ {
-		c := raw[i]
-		switch {
-		case c == '\'' && inQ && i+1 < len(raw) && raw[i+1] == '\'':
-			cur.WriteByte('\'')
-			i++
-		case c == '\'':
-			inQ = !inQ
-			inWord = true
-		case !inQ && (c == ' ' || c == '\t' || c == '\n'):
-			flush()
-		default:
-			cur.WriteByte(c)
-			inWord = true
-		}
-	}
-	flush()
-	return out
 }
 
 // ---------------------------------------------------------------------
@@ -563,14 +525,12 @@ func (st *dagStructure) stateIsFinal() bool {
 // The key is not enough to make a hit SAFE, and an earlier version of
 // this comment claimed that it was -- that "nothing reaches the cache
 // before the caller has passed the same owner-scoped ad lookup the rest
-// of the per-job endpoints use". The ad lookup is not that check. For a
-// bearer-token, API-key or UserHeader caller, bulkOwnerScope returns the
-// constraint UNSCOPED (it only scopes a browser session), deliberately,
-// because the schedd is supposed to be the backstop -- and the schedd
+// of the per-job endpoints use". The ad lookup is not that check. For an
+// administrator the lookup is UNSCOPED (seesAllJobs), and the schedd
 // backstops a SANDBOX TRANSFER (UserCheck2, per job, on a
 // WRITE-registered command), not an ad read. A cache hit skips the
-// transfer, so a hit does not merely save work: it removes the only
-// authorization check on the path, and hands one user's node names,
+// transfer, so a hit does not merely save work: it can remove the only
+// authorization check on the path, and hand one user's node names,
 // edges and DAGMan status details to another.
 //
 // So every entry records the manager job's owner, and dagCacheAccess
@@ -614,8 +574,8 @@ type dagCacheAccess struct {
 	// caller is the authenticated actor reduced to the bare username
 	// that Owner is stored as (ownerFromActor).
 	caller string
-	// admin is the Web UI admin path the neighbouring handlers define
-	// (isWebUIAdmin). An admin may read any user's job, so an admin may
+	// admin is the read-tier administrator the neighbouring handlers
+	// define (seesAllJobs). An admin may read any user's job, so an admin may
 	// be served any user's entry -- the cache must not be the one place
 	// that breaks the admin view.
 	admin bool
@@ -679,8 +639,11 @@ func (c *dagStructureCache) put(e dagCacheEntry) {
 	}
 }
 
-func dagCacheKey(cluster, proc int, dotFile string) string {
-	return fmt.Sprintf("%d.%d|%s", cluster, proc, dotFile)
+// dagCacheKey names a workflow's cached structure. The access point is
+// part of it: in multi-AP mode the same cluster.proc on two APs is two
+// workflows. Empty in single-AP mode.
+func dagCacheKey(schedd string, cluster, proc int, dotFile string) string {
+	return fmt.Sprintf("%s|%d.%d|%s", strings.ToLower(schedd), cluster, proc, dotFile)
 }
 
 // dagSandboxSem caps concurrent whole-sandbox transfers process-wide.
@@ -783,9 +746,9 @@ func (s *Handler) dagStructureFor(ctx context.Context, r *http.Request, constrai
 	access := dagCacheAccess{
 		owner:  strings.TrimSpace(owner),
 		caller: ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx)),
-		admin:  s.isWebUIAdmin(r),
+		admin:  s.seesAllJobs(ctx, r, jobScopeRead),
 	}
-	structure, err := cachedDagStructure(dagStructures, dagCacheKey(cluster, proc, dotFile),
+	structure, err := cachedDagStructure(dagStructures, dagCacheKey(routedSchedd(ctx), cluster, proc, dotFile),
 		access, refresh,
 		func() (*dagStructure, error) {
 			fetchCtx, cancel := context.WithTimeout(ctx, dagSandboxTimeout)
@@ -1117,7 +1080,7 @@ func (s *Handler) fetchSandboxTextFiles(ctx context.Context, constraint string,
 	big func(string) bool) (map[string]string, error) {
 
 	return sandboxTextFiles(big, defaultDagFileLimits(), func(w io.Writer) <-chan error {
-		return s.getSchedd().ReceiveJobSandbox(ctx, constraint, w)
+		return s.scheddFor(ctx).ReceiveJobSandbox(ctx, constraint, w)
 	})
 }
 
@@ -1772,11 +1735,11 @@ var dagNodeProjection = []string{"ClusterId", "ProcId", "JobStatus", "DAGNodeNam
 func (s *Handler) dagQueueStates(ctx context.Context, r *http.Request, cluster int,
 	out map[string]dagNodeState) (int, error) {
 
-	constraint, err := s.bulkOwnerScope(ctx, r, fmt.Sprintf("DAGManJobId == %d", cluster))
+	constraint, err := s.jobsOwnerScope(ctx, r, fmt.Sprintf("DAGManJobId == %d", cluster), jobScopeRead)
 	if err != nil {
 		return 0, err
 	}
-	ads, _, err := s.getSchedd().QueryWithOptions(ctx, constraint,
+	ads, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint,
 		&htcondor.QueryOptions{Projection: dagNodeProjection})
 	if err != nil {
 		return 0, err
@@ -1788,7 +1751,7 @@ func (s *Handler) dagQueueStates(ctx context.Context, r *http.Request, cluster i
 			continue
 		}
 		status, _ := ad.EvaluateAttrInt("JobStatus")
-		st := dagNodeState{state: queueJobState(status), jobID: adJobID(ad), source: dagSourceQueue}
+		st := dagNodeState{state: queueJobState(status), jobID: s.nodeJobID(ctx, ad), source: dagSourceQueue}
 		if status == 5 {
 			st.holdReason, _ = ad.EvaluateAttrString("HoldReason")
 		}
@@ -1810,12 +1773,12 @@ func (s *Handler) dagQueueStates(ctx context.Context, r *http.Request, cluster i
 func (s *Handler) dagArchiveStates(ctx context.Context, r *http.Request, cluster, nodeCount int,
 	out map[string]dagNodeState) (n, scanned int, err error) {
 
-	constraint, err := s.bulkOwnerScope(ctx, r, fmt.Sprintf("DAGManJobId == %d", cluster))
+	constraint, err := s.jobsOwnerScope(ctx, r, fmt.Sprintf("DAGManJobId == %d", cluster), jobScopeRead)
 	if err != nil {
 		return 0, 0, err
 	}
 	limit, scanLimit := dagArchiveBounds(nodeCount)
-	ads, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
+	ads, err := s.scheddFor(ctx).QueryHistoryWithOptions(ctx, constraint, &htcondor.HistoryQueryOptions{
 		Source:     htcondor.HistorySourceJobHistory,
 		Projection: append(append([]string{}, dagNodeProjection...), "ExitCode", "ExitBySignal"),
 		// A workflow's nodes are contiguous and recent in the history
@@ -1840,7 +1803,7 @@ func (s *Handler) dagArchiveStates(ctx context.Context, r *http.Request, cluster
 			// has already spoken for this node.
 			continue
 		}
-		st := dagNodeState{state: archiveJobState(ad), jobID: adJobID(ad), source: dagSourceArchive}
+		st := dagNodeState{state: archiveJobState(ad), jobID: s.nodeJobID(ctx, ad), source: dagSourceArchive}
 		if code, ok := ad.EvaluateAttrInt("ExitCode"); ok {
 			c := int(code)
 			st.exitCode = &c
@@ -1935,13 +1898,15 @@ const (
 	dagArchiveScanFloor   = 5000
 )
 
-func adJobID(ad *classad.ClassAd) string {
+// nodeJobID is a node job's id as the response carries it: complete in
+// multi-AP mode, where a node runs on its DAGMan job's access point.
+func (s *Handler) nodeJobID(ctx context.Context, ad *classad.ClassAd) string {
 	cluster, ok := ad.EvaluateAttrInt("ClusterId")
 	if !ok {
 		return ""
 	}
 	proc, _ := ad.EvaluateAttrInt("ProcId")
-	return fmt.Sprintf("%d.%d", cluster, proc)
+	return s.jobPathID(ctx, int(cluster), int(proc))
 }
 
 // queueJobState maps JobStatus to the response's vocabulary.

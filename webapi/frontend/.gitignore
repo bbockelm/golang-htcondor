@@ -7,5 +7,7 @@ next-env.d.ts
 # Playwright
 /test-results/
 /playwright-report/
+/test-results-placement/
+/playwright-report-placement/
 /blob-report/
 /playwright/.cache/

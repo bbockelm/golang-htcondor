@@ -582,7 +582,7 @@ func TestHandleVersionUptime(t *testing.T) {
 	getVersion := func(t *testing.T, s *Server) VersionResponse {
 		t.Helper()
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/version", nil)
-		req.Header.Set("Authorization", "Bearer "+createTestJWTToken(3600))
+		req.Header.Set("Authorization", "Bearer "+identifiedBearer(t, s.Handler))
 		w := httptest.NewRecorder()
 		s.handleVersion(w, req)
 

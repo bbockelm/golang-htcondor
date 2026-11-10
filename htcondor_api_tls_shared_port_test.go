@@ -76,6 +76,7 @@ func writeSelfSignedCert(t *testing.T, dir string) (certPath, keyPath string, po
 // inherited shared-port endpoint, and that htcondor-api terminated TLS (with our
 // cert) and answered /healthz.
 func TestHTCondorAPIServesTLSOverSharedPort(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping condor_master integration test in -short mode")
 	}

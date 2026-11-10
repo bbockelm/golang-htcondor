@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -72,19 +73,40 @@ func CreateInputSandboxTar(ctx context.Context, jobAd *classad.ClassAd, w io.Wri
 		}
 	}()
 
-	// Get TransferExecutable flag
-	transferExec, ok := classad.GetAs[bool](jobAd, "TransferExecutable")
+	// TransferExecutable: ABSENT MEANS TRUE.
+	//
+	// condor_submit writes the attribute only to turn the transfer off --
+	// SetExecutable assigns false for a `transfer_executable` whose first
+	// character is `f`, and for the universes where the executable is only
+	// the job's name -- so an ordinary job's ad does not carry it at all,
+	// and every other reader in this repository defaults it to true
+	// (schedd.go's configureRemoteJobAd, schedd_transfer.go's allow-set).
+	//
+	// Requiring the attribute to be PRESENT silently left the executable
+	// out of the sandbox. It was invisible for as long as this library's
+	// own submit parser wrote `TransferExecutable = true` on every job,
+	// which it no longer does; an ad from condor_submit, or from anything
+	// else, would always have hit it.
+	transferExec, saidSo := true, false
+	if v, ok := classad.GetAs[bool](jobAd, "TransferExecutable"); ok {
+		transferExec, saidSo = v, true
+	}
 
 	// Add executable if needed
-	if ok && transferExec {
+	if transferExec {
 		execPath, ok := classad.GetAs[string](jobAd, "Cmd")
-		if !ok {
+		switch {
+		case ok:
+			if err := addFileToTar(tw, execPath, iwd, userName, mgr); err != nil {
+				return fmt.Errorf("failed to add executable %s: %w", execPath, err)
+			}
+		case saidSo:
+			// The ad asked for the executable and did not say which:
+			// a contradiction worth reporting.
 			return fmt.Errorf("TransferExecutable is true but Cmd is missing")
 		}
-
-		if err := addFileToTar(tw, execPath, iwd, userName, mgr); err != nil {
-			return fmt.Errorf("failed to add executable %s: %w", execPath, err)
-		}
+		// An ad with neither attribute names no executable to send, which
+		// is not a contradiction -- there is simply nothing to add.
 	}
 
 	// Add stdin file if specified.
@@ -212,6 +234,12 @@ func addFileToTar(tw *tar.Writer, filePath string, baseDir string, userName stri
 //   - Out: Standard output file path (the null file means discard)
 //   - Err: Standard error file path (the null file means discard)
 //
+// Every destination must resolve under Iwd unless the write is made as
+// the job's owner -- under an enabled droppriv manager, or by a process
+// already running as that account. Otherwise the write would be made
+// with this process's own authority to a path the job ad chose, so a
+// remap target, Out or Err outside Iwd is skipped.
+//
 // Parameters:
 //   - ctx: Context for cancellation
 //   - jobAd: Job ClassAd containing output transfer attributes
@@ -233,6 +261,7 @@ func ExtractOutputSandbox(ctx context.Context, jobAd *classad.ClassAd, r io.Read
 		return err
 	}
 	mgr := droppriv.DefaultManager()
+	anywhere := writesAsOwner(mgr, userName)
 
 	// Get TransferOutput list (optional - if empty, extract all files)
 	transferOutput, ok := classad.GetAs[string](jobAd, "TransferOutput")
@@ -345,6 +374,15 @@ func ExtractOutputSandbox(ctx context.Context, jobAd *classad.ClassAd, r io.Read
 			continue
 		}
 
+		// The checks above vet the tar entry's name; this one vets
+		// where the job ad sent it. A remap target, Out or Err is the
+		// ad's choice, and "../../x" or an absolute path there is a
+		// write outside the job's directory with whatever authority
+		// this process has.
+		if !anywhere && !underDir(iwd, destPath) {
+			continue
+		}
+
 		// Extract the file
 		if err := extractFile(mgr, userName, tr, destPath, header); err != nil {
 			return fmt.Errorf("failed to extract file %s to %s: %w", header.Name, destPath, err)
@@ -419,6 +457,33 @@ func stdioDestination(path string, has bool, iwd string) (string, bool) {
 		return path, true
 	}
 	return filepath.Join(iwd, path), true
+}
+
+// underDir reports whether path resolves to dir or somewhere beneath
+// it, lexically. Both must be absolute or both relative; a mix is not
+// under.
+func underDir(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return !escapesIwd(rel)
+}
+
+// writesAsOwner reports whether extracting for userName writes as that
+// account. An enabled manager switches to it for every write; a
+// disabled one writes as this process, which is the owner only when the
+// process already runs as that account (a personal condor, or a tool
+// the user runs). Only then may the job ad place output outside Iwd.
+func writesAsOwner(mgr *droppriv.Manager, userName string) bool {
+	if userName == "" {
+		return false
+	}
+	if mgr.Enabled() {
+		return true
+	}
+	u, err := user.Current()
+	return err == nil && u.Username == userName
 }
 
 // escapesIwd reports whether a relative tar entry name would resolve

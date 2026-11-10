@@ -22,17 +22,21 @@ on:
 
 jobs:
   test:
-    name: Test
+    name: Test (${{ matrix.label }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # First entry is the floor named in every go.mod (currently
-        # 1.26) -- testing there is what makes that floor a real claim
-        # rather than an aspiration, since it catches accidental use of
-        # newer language features. Last entry is the toolchain we build
-        # and release with. Shift both when Go drops a release: the
-        # floor tracks the oldest version upstream still supports.
-        go-version: ['1.26', '1.27']
+        # "floor" is the minimum named in every go.mod (currently 1.26) --
+        # testing there is what makes that floor a real claim rather than
+        # an aspiration, since it catches accidental use of newer language
+        # features. It tracks the oldest Go upstream still supports, so it
+        # moves with the go.mod `go` lines, not with .go-version.
+        #
+        # "build" is the toolchain we build and release with: the minor in
+        # .go-version, latest patch, like every other job.
+        include:
+          - {label: floor, go-version: '1.26'}
+          - {label: build, go-version-file: .go-version}
 
     steps:
     - name: Checkout code
@@ -41,7 +45,9 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
+        check-latest: true
         go-version: ${{ matrix.go-version }}
+        go-version-file: ${{ matrix.go-version-file }}
         cache: true
 
     - name: Install HTCondor
@@ -75,8 +81,6 @@ jobs:
         (cd .github/tools && GOWORK=off go build -o "$RUNNER_TEMP/bin/gotestsum" gotest.tools/gotestsum)
         echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-    - name: Run go vet
-      run: make vet
 
     - name: Run tests
       # Not `make test`: CI needs gotestsum's JUnit output and a coverage profile
@@ -90,12 +94,52 @@ jobs:
         (cd localcredmon && gotestsum --junitfile="$GITHUB_WORKSPACE/test-results-localcredmon.xml" -- -race ./...)
 
     - name: Upload coverage to Codecov
-      if: matrix.go-version == '1.27'
+      if: matrix.label == 'build'
       uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
       with:
         files: ./coverage.out
         flags: unittests
         fail_ci_if_error: false
+
+  # Everything this repo ships is built with CGO_ENABLED=0: the release
+  # binaries, the container, and `make build`. The job above cannot be,
+  # because `-race` requires cgo on linux/amd64 ("go: -race requires cgo"),
+  # so it tests the one configuration that is never shipped. On darwin the
+  # race detector works without cgo, which is why this is easy to miss
+  # locally.
+  #
+  # droppriv is the whole of the difference -- it holds every
+  # cgo-conditional file in all three modules -- and the two sides are
+  # near-inverses rather than variants. With cgo, selectBestGroupLookup is
+  # one line, because glibc walks nsswitch.conf itself. Without it, this
+  # package does that walk: the nsswitch-ordered chain, the SSSD protocol
+  # client, and the degraded-group handling, none of which the job above
+  # ever compiles. Testing that package here is enough; narrowing to it is
+  # what lets this job skip the HTCondor install and finish in a minute.
+  #
+  # No -race, for the reason above. Adding it would silently turn cgo back
+  # on and this job back into a duplicate of the one above.
+  test-nocgo:
+    name: Test (nocgo)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        check-latest: true
+        go-version-file: .go-version
+        cache: true
+        cache-dependency-path: go.sum
+
+    - name: Run droppriv tests without cgo
+      env:
+        CGO_ENABLED: '0'
+        GOWORK: off
+      run: go test -count=1 -v ./droppriv/...
 
   lint:
     # The label keeps these names stable ("Lint (.)", "Lint (webapi)") rather
@@ -129,9 +173,25 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.27'
+        check-latest: true
+        go-version-file: .go-version
         cache: true
-        cache-dependency-path: ${{ matrix.module }}/go.sum
+        cache-dependency-path: |
+          ${{ matrix.module }}/go.sum
+          .github/tools/go.sum
+
+    # Built from .github/tools rather than downloaded prebuilt. golangci-lint
+    # reads the standard library's export data through golang.org/x/tools,
+    # and a binary whose x/tools predates the Go release in use cannot decode
+    # it ("export data version 5 is greater than maximum supported version
+    # 4", on Go 1.27.2 with the v2.13.2 release binary). The tools module
+    # pins both golangci-lint and a new enough x/tools, and Dependabot bumps
+    # them there.
+    - name: Build golangci-lint (version pinned in .github/tools)
+      run: |
+        mkdir -p "$RUNNER_TEMP/bin"
+        (cd .github/tools && GOWORK=off go build -o "$RUNNER_TEMP/bin/golangci-lint" github.com/golangci/golangci-lint/v2/cmd/golangci-lint)
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
     - name: Run golangci-lint (${{ matrix.label }})
       uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
@@ -140,11 +200,7 @@ jobs:
         # therefore linted.
         CGO_ENABLED: ${{ matrix.cgo }}
       with:
-        # Must be built with a Go at least as new as the modules target:
-        # golangci-lint refuses to run otherwise ("the Go language version
-        # used to build golangci-lint is lower than the targeted Go
-        # version"). v2.13.2 is built with go1.27.0.
-        version: v2.13.2
+        install-mode: none
         working-directory: ${{ matrix.module }}
         args: --timeout=5m
         # Skip `golangci-lint config verify`, which fetches a JSON schema from
@@ -163,7 +219,8 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.27'
+        check-latest: true
+        go-version-file: .go-version
         cache: true
 
     - name: Build
@@ -183,7 +240,8 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.27'
+        check-latest: true
+        go-version-file: .go-version
         cache: true
 
     # Fails when a PR leaves any module's go.mod/go.sum stale — notably the
@@ -205,7 +263,7 @@ jobs:
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Set up Node
-      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         # Match the version Dockerfile.release and release-binaries.yml
         # build with, so a green PR means the release build is green too.
@@ -235,6 +293,24 @@ jobs:
       run: npm run build
       env:
         NODE_ENV: production
+
+    # For the embedded-assets tests below. In this job rather than its own
+    # so they test the export the step above just built, not a second
+    # build of the frontend handed over as an artifact.
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        check-latest: true
+        go-version-file: .go-version
+        cache: true
+        cache-dependency-path: webapi/go.sum
+
+    # TestIconIsServed skips and the condordocs TestEmbedded_* tests do not
+    # compile unless the frontend export and HTCondor's RST docs are staged
+    # and the release build tags are set, so no other job ran them. The
+    # script stages both as the release build does and fails on any skip.
+    - name: Test embedded assets
+      run: bash .github/scripts/embedded-assets-tests.sh
 
     # A gate as of #240, which cleared the 10 errors main used to carry
     # (eight of them react-hooks "setState synchronously within an effect").

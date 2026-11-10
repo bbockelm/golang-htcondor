@@ -77,10 +77,16 @@ func TestForgedTokenResolvesToNobody(t *testing.T) {
 	if whoami.User != "" {
 		t.Errorf("a token with a garbage signature resolved to %q", whoami.User)
 	}
+	// Nobody named is nobody authenticated. This used to answer
+	// authenticated=true with an empty user, which told a client it was
+	// signed in when every identity-gated endpoint would refuse it.
+	if whoami.Authenticated {
+		t.Error("a token with a garbage signature reported authenticated=true")
+	}
 }
 
-// The cache must not promote an identity on its own -- only a
-// successful schedd op does that, through MarkValidated.
+// The cache must not promote an identity on its own -- only an
+// identity a CEDAR handshake reported does that, through MarkValidated.
 func TestTokenCacheDoesNotValidateOnAdd(t *testing.T) {
 	tc := NewTokenCache()
 
@@ -93,7 +99,7 @@ func TestTokenCacheDoesNotValidateOnAdd(t *testing.T) {
 		t.Errorf("ValidatedUsername = %q straight after Add; the sub was never verified by anyone", got)
 	}
 
-	// What a successful schedd op does.
+	// What a CEDAR-reported identity does.
 	tc.MarkValidated(token, "alice@test.domain")
 	if got := tc.ValidatedUsername(token); got != "alice@test.domain" {
 		t.Errorf("ValidatedUsername = %q after MarkValidated, want alice@test.domain", got)

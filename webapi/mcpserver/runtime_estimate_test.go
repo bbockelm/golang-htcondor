@@ -1,0 +1,248 @@
+package mcpserver
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
+	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+)
+
+// loadedEstimator has read five 100-second jobs of alice's and five
+// 5000-second jobs of bob's.
+func loadedEstimator() *runtimeest.Estimator {
+	est := runtimeest.New(runtimeest.Config{})
+	b := runtimeest.NewBatch()
+	for i := range 5 {
+		at := time.Unix(1_000_000+int64(i), 0)
+		b.Add(runtimeest.Completion{Features: runtimeest.Features{Owner: "alice", ClusterID: int64(100 + i), Cmd: "sim"}, Runtime: 100, Completed: at})
+		b.Add(runtimeest.Completion{Features: runtimeest.Features{Owner: "bob", ClusterID: int64(200 + i), Cmd: "sim"}, Runtime: 5000, Completed: at})
+	}
+	est.Ingest(b)
+	return est
+}
+
+func getJobStructured(t *testing.T, result interface{}) map[string]interface{} {
+	t.Helper()
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("result is %T", result)
+	}
+	sc, ok := m["structuredContent"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("structuredContent is %T", m["structuredContent"])
+	}
+	return sc
+}
+
+func resultText(t *testing.T, result interface{}) string {
+	t.Helper()
+	content := result.(map[string]interface{})["content"].([]map[string]interface{})
+	return content[0]["text"].(string)
+}
+
+// get_job carries the caller's job's estimate, built from that owner's
+// history, when the server runs the estimator -- and nothing when it
+// does not.
+func TestGetJobRuntimeEstimate(t *testing.T) {
+	f := newActionScopeFixture(t)
+	alice := f.as(t, "alice", "mcp:read")
+
+	out, err := f.server.toolGetJob(alice, map[string]interface{}{"job_id": "1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := getJobStructured(t, out)["runtime_estimate"]; ok {
+		t.Error("runtime_estimate present with no estimator")
+	}
+
+	f.server.runtimeEst = loadedEstimator()
+	// A running job of alice's, with a start time.
+	running := fakeschedd.JobAd(3, 0, "alice", 2)
+	running.InsertAttr("JobCurrentStartDate", time.Now().Unix()-30)
+	f.schedd.AddJobs(running)
+
+	out, err = f.server.toolGetJob(alice, map[string]interface{}{"job_id": "3.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := getJobStructured(t, out)
+	est, ok := sc["runtime_estimate"].(runtimeest.Result)
+	if !ok {
+		t.Fatalf("runtime_estimate is %T", sc["runtime_estimate"])
+	}
+	if !est.Available || est.EstimateSeconds != 100 || est.RemainingSeconds == nil {
+		t.Errorf("estimate = %+v; want alice's 100s with time remaining", est)
+	}
+	// The job carries no command, so only alice's jobs in general answer:
+	// a rough guess.
+	if !est.Rough {
+		t.Errorf("an owner-level estimate is not marked rough: %+v", est)
+	}
+	text := resultText(t, out)
+	if !strings.Contains(text, "Runtime estimate: roughly 1m") || !strings.Contains(text, "remaining") {
+		t.Errorf("text does not carry the estimate:\n%s", text)
+	}
+	validateStructured(t, "get_job", sc)
+
+	// Bob's job is still not found for alice.
+	if _, err := f.server.toolGetJob(alice, map[string]interface{}{"job_id": "2.0"}); err == nil {
+		t.Error("alice read bob's job")
+	}
+}
+
+// Every shape the field takes satisfies the published schema.
+func TestRuntimeEstimateValidatesAgainstTheSchema(t *testing.T) {
+	s := contractServer(t)
+	elapsed, remaining := 30.0, 70.0
+	for name, r := range map[string]runtimeest.Result{
+		"unavailable":   {Reason: runtimeest.ReasonWarmingUp},
+		"not estimated": {Reason: runtimeest.ReasonNotEstimated},
+		"idle": {Available: true, EstimateSeconds: 100, P10Seconds: 60, P90Seconds: 300,
+			Basis: &runtimeest.Basis{Level: "template", SampleCount: 9},
+			Model: runtimeest.Model{TrainedThrough: "2026-10-10T00:00:00Z", JobsIngested: 50}},
+		"running": {Available: true, EstimateSeconds: 100, P10Seconds: 60, P90Seconds: 300,
+			Basis: &runtimeest.Basis{Level: "owner", SampleCount: 3, NewCommand: true}, Rough: true,
+			ElapsedSeconds: &elapsed, RemainingSeconds: &remaining},
+		"exceeded": {Available: true, EstimateSeconds: 100, P10Seconds: 60, P90Seconds: 300,
+			Basis: &runtimeest.Basis{Level: "cmd", SampleCount: 3}, ElapsedSeconds: &elapsed, ExceededHistory: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := map[string]interface{}{"job_id": "1.0", "job": map[string]interface{}{}, "runtime_estimate": r}
+			validateStructured(t, "get_job", finalized(t, s, "get_job", structuredTextResult("", payload)))
+		})
+	}
+}
+
+func TestRenderRuntimeEstimate(t *testing.T) {
+	elapsed, remaining := 600.0, 3000.0
+	got := renderRuntimeEstimate(runtimeest.Result{
+		Available: true, EstimateSeconds: 3600, P10Seconds: 1800, P90Seconds: 7200,
+		Basis:          &runtimeest.Basis{Level: "template", SampleCount: 12},
+		ElapsedSeconds: &elapsed, RemainingSeconds: &remaining,
+	})
+	for _, want := range []string{"about 1h0m", "between 30m and 2h0m", "based on 12 of your finished jobs with the same command and argument pattern",
+		"Running 10m so far; about 50m remaining."} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	got = renderRuntimeEstimate(runtimeest.Result{
+		Available: true, EstimateSeconds: 100, P10Seconds: 50, P90Seconds: 200,
+		Basis: &runtimeest.Basis{Level: "cmd", SampleCount: 3}, ElapsedSeconds: &elapsed, ExceededHistory: true,
+	})
+	if !strings.Contains(got, "no estimate of the time remaining") {
+		t.Errorf("exceeded: %q", got)
+	}
+	got = renderRuntimeEstimate(runtimeest.Result{
+		Available: true, EstimateSeconds: 7200, P10Seconds: 900, P90Seconds: 21600, Rough: true,
+		Basis: &runtimeest.Basis{Level: "owner", SampleCount: 40, NewCommand: true},
+	})
+	for _, want := range []string{"roughly 2h0m, a rough guess", "none of your recently finished jobs ran this program"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rough: missing %q in %q", want, got)
+		}
+	}
+	if got := renderRuntimeEstimate(runtimeest.Result{Reason: runtimeest.ReasonInsufficientHistory}); !strings.Contains(got, "too few") {
+		t.Errorf("insufficient: %q", got)
+	}
+	if got := renderRuntimeEstimate(runtimeest.Result{Reason: runtimeest.ReasonNotEstimated}); !strings.Contains(got, "workflow manager, are not estimated") {
+		t.Errorf("not estimated: %q", got)
+	}
+}
+
+// A DAGMan job's get_job says it is not estimated, and gives no figure,
+// however much history its owner has.
+func TestGetJobRuntimeEstimateDAGMan(t *testing.T) {
+	f := newActionScopeFixture(t)
+	alice := f.as(t, "alice", "mcp:read")
+	f.server.runtimeEst = loadedEstimator()
+	dagman := fakeschedd.JobAd(3, 0, "alice", 2)
+	dagman.InsertAttr("JobUniverse", 7)
+	dagman.InsertAttrString("Cmd", "/usr/bin/condor_dagman")
+	dagman.InsertAttr("JobCurrentStartDate", time.Now().Unix()-30)
+	f.schedd.AddJobs(dagman)
+
+	out, err := f.server.toolGetJob(alice, map[string]interface{}{"job_id": "3.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := getJobStructured(t, out)
+	est, ok := sc["runtime_estimate"].(runtimeest.Result)
+	if !ok || est.Available || est.Reason != runtimeest.ReasonNotEstimated {
+		t.Errorf("runtime_estimate = %+v", sc["runtime_estimate"])
+	}
+	text := resultText(t, out)
+	if !strings.Contains(text, "Runtime estimate: none") || strings.Contains(text, "roughly") {
+		t.Errorf("text:\n%s", text)
+	}
+	validateStructured(t, "get_job", sc)
+}
+
+// Every level the estimator can answer from has words, and no other
+// level does.
+func TestRuntimeLevelTextCoversLevels(t *testing.T) {
+	levels := runtimeest.Levels()
+	for _, l := range levels {
+		if runtimeLevelText[l.String()] == "" {
+			t.Errorf("no text for level %s", l)
+		}
+	}
+	if len(runtimeLevelText) != len(levels) {
+		t.Errorf("%d level texts for %d levels", len(runtimeLevelText), len(levels))
+	}
+}
+
+// The memory block satisfies the schema in each shape it takes.
+func TestRuntimeEstimateMemoryValidatesAgainstTheSchema(t *testing.T) {
+	s := contractServer(t)
+	peak, req, above := 6200.0, 2048.0, 3
+	for name, m := range map[string]*runtimeest.MemoryEstimate{
+		"group only": {SampleCount: 9, P10MiB: 900, P25MiB: 1000, P50MiB: 1200, P75MiB: 1500, P90MiB: 2000},
+		"everything": {SampleCount: 9, P10MiB: 900, P25MiB: 1000, P50MiB: 1200, P75MiB: 1500, P90MiB: 2000,
+			PeakMiB: &peak, RequestedMiB: &req, AboveRequested: &above, AboveUsual: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := runtimeest.Result{Available: true, EstimateSeconds: 100, P10Seconds: 60, P90Seconds: 300,
+				Basis: &runtimeest.Basis{Level: "template", SampleCount: 9}, Memory: m}
+			payload := map[string]interface{}{"job_id": "1.0", "job": map[string]interface{}{}, "runtime_estimate": r}
+			validateStructured(t, "get_job", finalized(t, s, "get_job", structuredTextResult("", payload)))
+		})
+	}
+}
+
+func TestRenderMemoryEstimate(t *testing.T) {
+	elapsed, remaining := 600.0, 3000.0
+	peak, req, above := 6246.0, 2048.0, 3
+	got := renderRuntimeEstimate(runtimeest.Result{
+		Available: true, EstimateSeconds: 3600, P10Seconds: 1800, P90Seconds: 7200,
+		Basis:          &runtimeest.Basis{Level: "template", SampleCount: 12},
+		ElapsedSeconds: &elapsed, RemainingSeconds: &remaining,
+		Memory: &runtimeest.MemoryEstimate{SampleCount: 9, P10MiB: 900, P25MiB: 1000, P50MiB: 1229, P75MiB: 1500, P90MiB: 2000,
+			PeakMiB: &peak, RequestedMiB: &req, AboveRequested: &above, AboveUsual: true},
+	})
+	for _, want := range []string{
+		"Peak memory of those jobs: about 1.2 GiB (usually 900 MiB to 2.0 GiB; 9 with a recorded peak).",
+		"This job's peak so far: 6.1 GiB, well above nearly all of them.",
+		"3 of 9 peaked above the 2.0 GiB requested.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	got = renderRuntimeEstimate(runtimeest.Result{
+		Available: true, EstimateSeconds: 3600, P10Seconds: 1800, P90Seconds: 7200, Rough: true,
+		Basis:  &runtimeest.Basis{Level: "owner", SampleCount: 40},
+		Memory: &runtimeest.MemoryEstimate{SampleCount: 40, P10MiB: 100, P50MiB: 500, P90MiB: 4096, Rough: true},
+	})
+	if want := "Peak memory of those jobs: roughly 500 MiB (anywhere from 100 MiB to 4.0 GiB; 40 with a recorded peak)."; !strings.Contains(got, want) {
+		t.Errorf("rough: missing %q in %q", want, got)
+	}
+	if strings.Contains(got, "This job") || strings.Contains(got, "requested") {
+		t.Errorf("rough, no peak or request: %q", got)
+	}
+	if got := renderRuntimeEstimate(runtimeest.Result{Available: true, EstimateSeconds: 60, P10Seconds: 60, P90Seconds: 60}); strings.Contains(got, "memory") {
+		t.Errorf("no memory block: %q", got)
+	}
+}

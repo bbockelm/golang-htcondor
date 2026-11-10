@@ -19,8 +19,6 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 )
 
@@ -56,6 +54,7 @@ import (
 // asserts the property the tool documents — a caller sees only their own
 // jobs — under that configuration.
 func TestMCPQueryJobsOwnerScopeUnderFSAuth(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
 	}
@@ -123,14 +122,7 @@ SCHEDD_DEBUG = D_COMMAND D_VERBOSE
 	cf.Close()
 	t.Logf("daemon runs as %q; PERSONAL_CONDOR_IS_SUPER_USER makes that a queue superuser", me.Username)
 
-	os.Setenv("CONDOR_CONFIG", configFile)
-	// Bind the process-global rate limiter to this test's config, so a
-	// limiter cached by an earlier test cannot fail these queries for a
-	// reason unrelated to owner scoping. Reload defer registered first
-	// so LIFO runs it after the environment is restored.
-	defer htcondor.ReloadDefaultConfig()
-	defer os.Unsetenv("CONDOR_CONFIG")
-	htcondor.ReloadDefaultConfig()
+	htcCfg := loadPoolConfig(t, configFile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -151,6 +143,7 @@ SCHEDD_DEBUG = D_COMMAND D_VERBOSE
 
 	listener, baseURL := listenLocal(t)
 	server, err := NewServer(Config{
+		ClientConfig:   htcCfg,
 		ListenAddr:     listener.Addr().String(),
 		ScheddName:     "local",
 		ScheddAddr:     scheddAddr,
@@ -225,6 +218,34 @@ SCHEDD_DEBUG = D_COMMAND D_VERBOSE
 		}
 		if !strings.Contains(listing, fmt.Sprintf(`"ClusterId":%d`, aliceCluster)) {
 			t.Errorf("FAIL-CLOSED: alice's query_jobs did not return her own cluster %d.\n%s", aliceCluster, listing)
+		}
+	})
+
+	// The web UI's chat tools receive the actor as authenticated, which
+	// for a bearer is qualified ("alice@domain") while Owner is bare.
+	// Scoped by the qualified name the clause matches nothing; scoped by
+	// the bare one it is still only alice's.
+	t.Run("chat query_jobs scopes a qualified actor to the bare owner", func(t *testing.T) {
+		var tool interface {
+			Execute(context.Context, string, json.RawMessage) (string, error)
+		}
+		for _, tl := range server.buildChatTools() {
+			if tl.Name() == "query_jobs" {
+				tool = tl
+			}
+		}
+		if tool == nil {
+			t.Fatal("no query_jobs chat tool")
+		}
+		out, err := tool.Execute(context.Background(), "alice@"+trustDomain, json.RawMessage(`{"constraint":"true"}`))
+		if err != nil {
+			t.Fatalf("query_jobs: %v", err)
+		}
+		if strings.Contains(out, fmt.Sprintf(`"cluster_id":%d`, bobCluster)) {
+			t.Errorf("FAIL-OPEN: alice's chat query_jobs returned bob's cluster %d.\n%s", bobCluster, out)
+		}
+		if !strings.Contains(out, fmt.Sprintf(`"cluster_id":%d`, aliceCluster)) {
+			t.Errorf("FAIL-CLOSED: alice's chat query_jobs did not return her own cluster %d.\n%s", aliceCluster, out)
 		}
 	})
 

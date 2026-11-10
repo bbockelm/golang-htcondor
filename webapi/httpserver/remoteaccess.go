@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
@@ -88,7 +89,7 @@ const jobUniverseLookupTimeout = 10 * time.Second
 // exists to improve an error message, and a queue hiccup must not
 // become a refusal of an operation that would have worked.
 func (s *Handler) jobUniverse(ctx context.Context, cluster, proc int) (int64, bool) {
-	schedd := s.getSchedd()
+	schedd := s.scheddFor(ctx)
 	if schedd == nil {
 		return 0, false
 	}
@@ -119,5 +120,10 @@ func (s *Handler) refuseRemoteAccessByUniverse(ctx context.Context, op string, c
 	if !known || !jobUniverseRefusesRemoteAccess(universe) {
 		return "", false
 	}
-	return remoteAccessRefusalMessage(op, cluster, proc, universe), true
+	msg := remoteAccessRefusalMessage(op, cluster, proc, universe)
+	// The advice names a URL; in multi-AP mode it must carry the job's
+	// complete id or it is refused.
+	local := fmt.Sprintf("/api/v1/jobs/%d.%d/", cluster, proc)
+	msg = strings.ReplaceAll(msg, local, "/api/v1/jobs/"+s.jobPathID(ctx, cluster, proc)+"/")
+	return msg, true
 }

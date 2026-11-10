@@ -2,6 +2,8 @@ package httpserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -234,15 +236,21 @@ func TestIDPRefreshTokenFlow(t *testing.T) {
 	}
 
 	// Create a test client
-	redirectURI := "http://localhost:8080/callback"
-	if err := server.initializeIDPClient(ctx, redirectURI); err != nil {
-		t.Fatalf("Failed to initialize IDP client: %v", err)
+	if err := server.idpProvider.storage.CreateClient(ctx, &fosite.DefaultClient{
+		ID:            "refresh-test-client",
+		RedirectURIs:  []string{"http://localhost:8080/callback"},
+		GrantTypes:    []string{"authorization_code", "refresh_token"},
+		ResponseTypes: []string{"code"},
+		Scopes:        []string{"openid", "profile", "email"},
+		Public:        true,
+	}); err != nil {
+		t.Fatalf("Failed to create IDP client: %v", err)
 	}
 
 	// Simulate the full flow to get a refresh token
 	// 1. Create an authorization code session manually
 	session := DefaultIDPSession("testuser")
-	client, err := server.idpProvider.storage.GetClient(ctx, "htcondor-server")
+	client, err := server.idpProvider.storage.GetClient(ctx, "refresh-test-client")
 	if err != nil {
 		t.Fatalf("Failed to get client: %v", err)
 	}
@@ -282,7 +290,7 @@ func TestIDPRefreshTokenFlow(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(context.Background(), "POST", "/idp/token", strings.NewReader(tokenForm.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.SetBasicAuth("htcondor-server", "")
+	req.SetBasicAuth("refresh-test-client", "")
 
 	w := httptest.NewRecorder()
 	server.handleIDPToken(w, req)
@@ -445,5 +453,70 @@ func TestIDPUserAuthentication(t *testing.T) {
 	// Test non-existent user
 	if err := server.idpProvider.storage.AuthenticateUser(ctx, "nonexistent", "password"); err == nil {
 		t.Error("Expected authentication to fail with non-existent user")
+	}
+}
+
+// TestIDPSessionStoredAsHash verifies idp_sessions.session_id holds the
+// SHA-256 of the idp_session cookie set by /idp/login, not the cookie
+// value: the cookie still resolves through the IdP session lookup, and
+// the stored value presented as a cookie does not.
+func TestIDPSessionStoredAsHash(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.EnableIDP = true
+	cfg.IDPIssuer = "http://localhost:8080"
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() { _ = server.idpProvider.Close() }()
+	ctx := context.Background()
+	if err := server.idpProvider.storage.CreateUser(ctx, "idpuser", "idppassword", "active"); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	form := url.Values{"username": {"idpuser"}, "password": {"idppassword"}}
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/idp/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	server.handleIDPLogin(w, req)
+	var cookie string
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "idp_session" {
+			cookie = c.Value
+		}
+	}
+	if cookie == "" {
+		t.Fatalf("no idp_session cookie after login (status %d)", w.Code)
+	}
+
+	var stored []string
+	rows, err := server.idpProvider.storage.db.QueryContext(ctx, `SELECT session_id FROM idp_sessions`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		stored = append(stored, id)
+	}
+	_ = rows.Close()
+	sum := sha256.Sum256([]byte(cookie))
+	if want := hex.EncodeToString(sum[:]); len(stored) != 1 || stored[0] != want {
+		t.Fatalf("stored session_id = %q, want [sha256(cookie)] = [%q]", stored, want)
+	}
+
+	lookup := func(value string) string {
+		r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/mcp/oauth2/device/verify", nil)
+		r.AddCookie(&http.Cookie{Name: "idp_session", Value: value}) //nolint:gosec // client-side cookie
+		user, _ := server.deviceApprovalIdentity(ctx, r)
+		return user
+	}
+	if got := lookup(cookie); got != "idpuser" {
+		t.Fatalf("idp_session cookie resolved to %q, want idpuser", got)
+	}
+	if got := lookup(stored[0]); got != "" {
+		t.Fatalf("stored session_id was accepted as an idp_session cookie (resolved to %q)", got)
 	}
 }

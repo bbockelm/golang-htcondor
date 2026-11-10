@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/bbockelm/golang-htcondor/internal/privatefile"
 	_ "github.com/glebarez/sqlite" // SQLite driver (pure Go, no CGO)
 	"github.com/pressly/goose/v3"
 )
@@ -44,8 +45,30 @@ var migrationFS embed.FS
 // allocator problem but is really a filesystem ACL issue. By
 // probing here we surface a real "directory not writable" error
 // before sql.Open lazily tries to write.
+//
+// The database holds browser session keys, OAuth2/IDP signing keys and
+// upstream refresh tokens (in plaintext unless HTTP_API_KEK_FILE is
+// set), so Open also makes the file and any existing sidecars mode
+// 0600 before SQLite sees them; see restrictFileMode.
 func Open(path string) (*sql.DB, error) {
+	return OpenWithWarnings(path, nil)
+}
+
+// WarnFunc receives a message and slog-style key/value pairs.
+type WarnFunc func(msg string, args ...any)
+
+// OpenWithWarnings is Open, reporting permission problems that do not
+// prevent startup -- a database file that had to be tightened, a
+// world-writable parent directory -- through warn. A nil warn drops
+// them.
+func OpenWithWarnings(path string, warn WarnFunc) (*sql.DB, error) {
+	if warn == nil {
+		warn = func(string, ...any) {}
+	}
 	if err := checkPathWritable(path); err != nil {
+		return nil, fmt.Errorf("appdb: open %s: %w", path, err)
+	}
+	if err := restrictFileMode(path, warn); err != nil {
 		return nil, fmt.Errorf("appdb: open %s: %w", path, err)
 	}
 	db, err := sql.Open("sqlite", path)
@@ -96,6 +119,60 @@ func checkPathWritable(path string) error {
 			return fmt.Errorf("existing database file %s is not writable by the daemon user: %w", path, err)
 		}
 		_ = f.Close()
+	}
+	return nil
+}
+
+// restrictFileMode makes the database file and its existing sidecars
+// mode 0600. SQLite creates sidecars with the database file's own
+// permissions, so creating the file 0600 here keeps the ones it creates
+// later private too; without this SQLite creates the file under the
+// process umask (0644 under condor_master).
+//
+// A file that was group- or world-accessible is tightened with a
+// warning, since its contents may already have been read. Open refuses
+// only when a file is still world-accessible afterwards (the chmod
+// failed, e.g. a file owned by another uid), matching the KEK and SSH
+// host-key loaders' refusal of world-accessible secrets; a failure that
+// leaves only group bits is a warning.
+//
+// A world-writable parent directory is a warning, not a refusal: it is
+// not the default layout, and refusing would turn an operator's
+// unusual-but-working setup into an outage. World-readable directories
+// (the default 0755 LOCAL_DIR/lib/condor) are not flagged; with the
+// file 0600 they expose only its name.
+func restrictFileMode(path string, warn WarnFunc) error {
+	files := privatefile.SQLiteFiles(path)
+	loose := map[string]os.FileMode{}
+	for _, p := range files {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().Perm()&0o077 != 0 {
+			loose[p] = fi.Mode().Perm()
+		}
+	}
+
+	if chmodErr := privatefile.EnsureSQLite(path, 0o600); chmodErr != nil {
+		for _, p := range files {
+			if fi, err := os.Stat(p); err == nil && fi.Mode().Perm()&0o007 != 0 {
+				return fmt.Errorf("database file %s is world-accessible (mode %#o) and could not be restricted to 0600: %w; chown it to the daemon user or chmod 0600 it", p, fi.Mode().Perm(), chmodErr)
+			}
+		}
+		warn("could not restrict application database permissions to 0600", "path", path, "err", chmodErr)
+	}
+	for _, p := range files {
+		perm, ok := loose[p]
+		if !ok {
+			continue
+		}
+		if fi, err := os.Stat(p); err == nil && fi.Mode().Perm()&0o077 == 0 {
+			warn("tightened application database file mode to 0600; it was readable by other local users, so consider rotating the keys it holds",
+				"path", p, "previous_mode", fmt.Sprintf("%#o", perm))
+		}
+	}
+
+	parent := filepath.Dir(path)
+	if fi, err := os.Stat(parent); err == nil && fi.Mode().Perm()&0o002 != 0 {
+		warn("application database directory is world-writable; other local users can replace or remove the database",
+			"dir", parent, "mode", fmt.Sprintf("%#o", fi.Mode().Perm()))
 	}
 	return nil
 }

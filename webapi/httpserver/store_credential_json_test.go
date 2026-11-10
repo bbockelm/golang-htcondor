@@ -43,7 +43,7 @@ func storeServiceCred(t *testing.T, s *Server, service, credential string) *http
 	}
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 		"/api/v1/creds/service/"+service, bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+createTestJWTToken(3600))
+	req.Header.Set("Authorization", "Bearer "+identifiedBearer(t, s.Handler))
 	w := httptest.NewRecorder()
 	s.handleServiceCredentialItem(w, req)
 	return w
@@ -120,7 +120,7 @@ func TestStoreServiceCredentialJSONRuleIsOAuthOnly(t *testing.T) {
 	}
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 		"/api/v1/creds/service/krb", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+createTestJWTToken(3600))
+	req.Header.Set("Authorization", "Bearer "+identifiedBearer(t, s.Handler))
 	w := httptest.NewRecorder()
 	s.handleServiceCredentialItem(w, req)
 

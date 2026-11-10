@@ -39,6 +39,13 @@ func structuredTextResult(text string, structured interface{}) interface{} {
 
 // --- JSON Schema construction helpers -----------------------------------
 
+// assignmentSchema is a multi-AP submit's AP assignment.
+var assignmentSchema = obj(map[string]interface{}{
+	"schedd":     strSchema,
+	"alternates": arr(strSchema),
+	"source":     strSchema,
+})
+
 func obj(props map[string]interface{}, required ...string) map[string]interface{} {
 	s := map[string]interface{}{
 		"type":                 "object",
@@ -59,6 +66,11 @@ var (
 	strSchema  = map[string]interface{}{"type": "string"}
 	intSchema  = map[string]interface{}{"type": "integer"}
 	boolSchema = map[string]interface{}{"type": "boolean"}
+	// numberSchema is a total that may not be an integer.
+	numberSchema = map[string]interface{}{"type": "number"}
+	// numberMapSchema / intMapSchema are objects keyed by attribute name.
+	numberMapSchema = map[string]interface{}{"type": "object", "additionalProperties": numberSchema}
+	intMapSchema    = map[string]interface{}{"type": "object", "additionalProperties": intSchema}
 	// adSchema is a single ClassAd: an object with an open attribute set.
 	adSchema = map[string]interface{}{"type": "object", "additionalProperties": true}
 	// anySchema is used where the payload is a nested structure this file
@@ -100,18 +112,42 @@ func jobListSchema(itemsKey string) map[string]interface{} {
 	}, "count")
 }
 
+// historyListSchema is jobListSchema for the history tools, which also say
+// how far the schedd searched. scan_limit_reached is true when the schedd
+// stopped at its scan limit before finding as many records as asked for:
+// older records were not searched, so a short or empty answer is not a
+// complete one. records_scanned is how many records it examined.
+func historyListSchema() map[string]interface{} {
+	s := jobListSchema("records")
+	props := s["properties"].(map[string]interface{})
+	props["scan_limit_reached"] = boolSchema
+	props["records_scanned"] = intSchema
+	props["type"] = strSchema
+	return s
+}
+
 // outputSchemas publishes an output schema for each tool. A tool absent from
 // this map is served without an outputSchema, which is valid -- structured
 // output is recommended, not required. toolsFor stamps these onto the
 // catalogue.
+// utilizationResourceSchema is one resource's used-of-reserved summary.
+var utilizationResourceSchema = obj(map[string]interface{}{
+	"resource":                 strSchema,
+	"allocated_hours":          numberSchema,
+	"allocated_hours_measured": numberSchema,
+	"used_hours":               numberSchema,
+	"used_fraction":            numberSchema,
+	"jobs_measured":            intSchema,
+})
+
 var outputSchemas = map[string]map[string]interface{}{
 	// --- job-query family: sets of ads -------------------------------
 	"query_jobs":             jobListSchema("jobs"),
 	"query_history_db":       jobListSchema("records"),
 	"query_jobs_as_of":       jobListSchema("records"),
-	"query_job_archive":      jobListSchema("records"),
-	"query_job_epochs":       jobListSchema("records"),
-	"query_transfer_history": jobListSchema("records"),
+	"query_job_archive":      historyListSchema(),
+	"query_job_epochs":       historyListSchema(),
+	"query_transfer_history": historyListSchema(),
 	"get_job": obj(map[string]interface{}{
 		"job":    adSchema,
 		"job_id": strSchema,
@@ -121,6 +157,8 @@ var outputSchemas = map[string]map[string]interface{}{
 		// releases, and a client that rejected a result carrying a new
 		// one would break on a pool upgrade.
 		"dag": dagSchema,
+		// Present only when this server runs the runtime estimator.
+		"runtime_estimate": runtimeEstimateSchema,
 	}, "job_id"),
 
 	// --- aggregate ----------------------------------------------------
@@ -133,6 +171,64 @@ var outputSchemas = map[string]map[string]interface{}{
 		"table":     strSchema,
 		"source":    strSchema,
 		"truncated": boolSchema,
+	}),
+
+	// analyze_utilization: the headline per resource, the workflows the
+	// time went to, and every suggestion with its submit lines -- the
+	// numbers an agent acts on without re-reading the prose.
+	"analyze_utilization": obj(map[string]interface{}{
+		"days":            intSchema,
+		"since":           intSchema,
+		"until":           intSchema,
+		"jobs_considered": intSchema,
+		"truncated":       boolSchema,
+		"limit":           intSchema,
+		"text_limit":      intSchema,
+		"notes":           arr(strSchema),
+		"overall": obj(map[string]interface{}{
+			"jobs":            intSchema,
+			"wall_hours":      numberSchema,
+			"badput_hours":    numberSchema,
+			"throughput_gain": numberSchema,
+			"resources":       arr(utilizationResourceSchema),
+		}),
+		"workflows_total": intSchema,
+		"workflows": arr(obj(map[string]interface{}{
+			"key":           strSchema,
+			"name":          strSchema,
+			"executable":    strSchema,
+			"owner":         strSchema,
+			"is_dag":        boolSchema,
+			"jobs":          intSchema,
+			"succeeded":     intSchema,
+			"failed":        intSchema,
+			"removed":       intSchema,
+			"wall_hours":    numberSchema,
+			"held_memory":   intSchema,
+			"held_disk":     intSchema,
+			"advice":        intSchema,
+			"used":          anySchema,
+			"request":       anySchema,
+			"gain":          numberSchema,
+			"resources":     arr(utilizationResourceSchema),
+			"throughput":    anySchema,
+			"distributions": anySchema,
+		})),
+		"advice_total": intSchema,
+		"advice": arr(obj(map[string]interface{}{
+			"workflow":   strSchema,
+			"id":         strSchema,
+			"resource":   strSchema,
+			"severity":   strSchema,
+			"title":      strSchema,
+			"detail":     strSchema,
+			"submit":     arr(strSchema),
+			"confidence": strSchema,
+			"saves": obj(map[string]interface{}{
+				"unit":   strSchema,
+				"amount": numberSchema,
+			}),
+		})),
 	}),
 
 	// analyze_issues answers in clusters, and the shape is what makes it
@@ -202,6 +298,69 @@ var outputSchemas = map[string]map[string]interface{}{
 		"slot_cache":   anySchema,
 	}, "job_id"),
 
+	// --- access point policy ------------------------------------------
+	// One entry per knob, grouped. value is "" when the knob is unset;
+	// the per-kind fields (a requirement's reason, a hold policy's
+	// subcode, a DAGMan throttle this server overrides) appear only on
+	// the entries they belong to.
+	"get_access_point_policy": obj(map[string]interface{}{
+		"access_point": strSchema,
+		"fetched_at":   strSchema,
+		"schedd":       strSchema,
+		"groups": arr(obj(map[string]interface{}{
+			"name":  strSchema,
+			"title": strSchema,
+			"entries": arr(obj(map[string]interface{}{
+				"name":        strSchema,
+				"value":       strSchema,
+				"set":         boolSchema,
+				"non_default": boolSchema,
+				"description": strSchema,
+				"unknown":     boolSchema,
+				"effective":   strSchema,
+				"reason":      strSchema,
+				"is_warning":  boolSchema,
+				"subcode":     strSchema,
+			}, "name", "value", "set", "non_default", "description")),
+		}, "name", "entries")),
+	}, "access_point", "fetched_at", "groups"),
+
+	// --- pool --------------------------------------------------------
+	// query_pool answers in one of two shapes, so the schema is their
+	// union: a listing carries ads/has_more, a summary carries the
+	// counts and totals. The totals are keyed by attribute name, which
+	// depends on the ad type, so those objects stay open.
+	"query_pool": obj(map[string]interface{}{
+		"ad_type":    strSchema,
+		"mode":       strSchema,
+		"constraint": strSchema,
+		"count":      intSchema,
+		"ads":        arr(adSchema),
+		"has_more":   boolSchema,
+		"machines":   intSchema,
+		"group_by":   arr(strSchema),
+		"groups": arr(obj(map[string]interface{}{
+			"key":    arr(strSchema),
+			"count":  intSchema,
+			"totals": numberMapSchema,
+		}, "key", "count")),
+		"groups_total":     intSchema,
+		"groups_truncated": boolSchema,
+		"totals":           numberMapSchema,
+		"missing":          intMapSchema,
+		"resources": map[string]interface{}{
+			"type": "object",
+			"additionalProperties": obj(map[string]interface{}{
+				"total":     numberSchema,
+				"claimed":   numberSchema,
+				"unclaimed": numberSchema,
+				"other":     numberSchema,
+			}, "total", "claimed", "unclaimed", "other"),
+		},
+		"slot_types": intMapSchema,
+		"truncated":  boolSchema,
+	}, "ad_type", "mode", "count"),
+
 	// --- submit / mutate ---------------------------------------------
 	// submit_dag reports what it staged and what the caller still owes,
 	// so an agent can act on the outstanding work without re-reading prose.
@@ -222,6 +381,9 @@ var outputSchemas = map[string]map[string]interface{}{
 		// refusing it, so it needs somewhere to say so.
 		"fatal":  boolSchema,
 		"errors": arr(strSchema),
+		// Multi-AP mode only.
+		"schedd":     strSchema,
+		"assignment": assignmentSchema,
 	}),
 	"submit_job": obj(map[string]interface{}{
 		"cluster_id":   intSchema,
@@ -229,6 +391,9 @@ var outputSchemas = map[string]map[string]interface{}{
 		"proc_count":   intSchema,
 		"needs_upload": boolSchema,
 		"warnings":     arr(strSchema),
+		// Multi-AP mode only: where the job went, and why.
+		"schedd":     strSchema,
+		"assignment": assignmentSchema,
 	}, "cluster_id"),
 	// build_container returns the submitted job plus the resolved
 	// destination and resources, so a caller can see what the site
@@ -242,6 +407,8 @@ var outputSchemas = map[string]map[string]interface{}{
 		"cpus":        intSchema,
 		"memory_mb":   intSchema,
 		"disk_mb":     intSchema,
+		"schedd":      strSchema,
+		"assignment":  assignmentSchema,
 	}, "cluster_id", "job_id", "destination"),
 	"remove_job":  jobActionSchema(),
 	"hold_job":    jobActionSchema(),
@@ -253,6 +420,8 @@ var outputSchemas = map[string]map[string]interface{}{
 		"success":           intSchema,
 		"permission_denied": intSchema,
 		"not_found":         intSchema,
+		"already_done":      intSchema,
+		"bad_status":        intSchema,
 	}, "action"),
 	"edit_job": obj(map[string]interface{}{
 		"job_id":     strSchema,
@@ -355,6 +524,7 @@ var outputSchemas = map[string]map[string]interface{}{
 		"service":    strSchema,
 		"handle":     strSchema,
 		"exists":     boolSchema,
+		"pending":    boolSchema,
 		"updated_at": strSchema,
 	}, "service", "exists"),
 	"store_service_credential": obj(map[string]interface{}{
@@ -369,13 +539,21 @@ var outputSchemas = map[string]map[string]interface{}{
 	}, "service", "deleted"),
 
 	// --- documentation & skills --------------------------------------
-	// Every condor_doc_* tool funnels through toolCondorDocSearch and
+	// Every doc_* tool funnels through toolCondorDocSearch and
 	// returns the same snippet-search shape.
-	"condor_doc_search":             docSearchSchema(),
-	"condor_doc_job_attributes":     docSearchSchema(),
-	"condor_doc_machine_attributes": docSearchSchema(),
-	"condor_doc_submit_syntax":      docSearchSchema(),
-	"condor_doc_config_variables":   docSearchSchema(),
+	"doc_search":             docSearchSchema(),
+	"doc_job_attributes":     docSearchSchema(),
+	"doc_machine_attributes": docSearchSchema(),
+	"doc_submit_syntax":      docSearchSchema(),
+	"doc_config_variables":   docSearchSchema(),
+	"doc_guide": obj(map[string]interface{}{
+		"topic":   strSchema,
+		"content": strSchema,
+		"topics": arr(obj(map[string]interface{}{
+			"name":    strSchema,
+			"summary": strSchema,
+		})),
+	}, "content"),
 	"skills_list": obj(map[string]interface{}{
 		"skills": arr(obj(map[string]interface{}{
 			"name":        strSchema,
@@ -476,6 +654,12 @@ var outputSchemas = map[string]map[string]interface{}{
 		"confined_to_owner":  strSchema,
 		"access_point":       strSchema,
 		"oauth_scopes":       arr(strSchema),
+		// Multi-AP mode only.
+		"access_points":           intSchema,
+		"home_access_point":       strSchema,
+		"alternate_access_points": arr(strSchema),
+		"assignment_source":       strSchema,
+		"assignment_error":        strSchema,
 	}),
 }
 
@@ -501,7 +685,7 @@ func jobOutputStreamSchema() map[string]interface{} {
 	}, "job_id", "output_type")
 }
 
-// docSearchSchema is the result shape shared by every condor_doc_* tool:
+// docSearchSchema is the result shape shared by every doc_* tool:
 // a set of snippet hits, each carrying page/source/line provenance.
 func docSearchSchema() map[string]interface{} {
 	return obj(map[string]interface{}{

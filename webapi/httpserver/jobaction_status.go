@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -28,7 +29,9 @@ func jobActionRefusal(results *htcondor.JobActionResults, actionVerb string) (in
 		return 0, "", false
 	}
 	switch {
-	case results.NotFound > 0:
+	case results.Attempted() == 0 || results.NotFound > 0:
+		// A constraint that matches nothing comes back with every count
+		// zero: the schedd reports "not found" only for an ID it was named.
 		return http.StatusNotFound,
 			fmt.Sprintf("Cannot %s: no such job, or it has already left the queue", actionVerb), true
 	case results.PermissionDenied > 0:
@@ -47,4 +50,14 @@ func jobActionRefusal(results *htcondor.JobActionResults, actionVerb string) (in
 			fmt.Sprintf("Cannot %s: a schedd limit was exceeded", actionVerb), true
 	}
 	return 0, "", false
+}
+
+// refusedResults returns the per-job outcomes of an action the schedd carried
+// out on nothing, when err is that refusal rather than a failure to reach it.
+func refusedResults(err error) (*htcondor.JobActionResults, bool) {
+	var refused *htcondor.JobActionRefusedError
+	if errors.As(err, &refused) && refused.Results != nil {
+		return refused.Results, true
+	}
+	return nil, false
 }

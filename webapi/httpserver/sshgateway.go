@@ -21,14 +21,18 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/cedar/security"
 	"github.com/ory/fosite"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/jobid"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
@@ -64,7 +68,19 @@ var sshGatewayScopes = []string{"openid", "condor:/READ", "condor:/WRITE"}
 // is keyed {SecurityTag, address, command}, so with an empty tag one
 // caller's request resumes a session another caller authenticated and
 // runs as them.
-func (h *Handler) withCondorCredential(ctx context.Context, username string, scopes []string) (context.Context, error) {
+//
+// stillValid re-checks whatever authorized the caller -- for MCP, the
+// OAuth2 access token behind the call -- and is consulted before every
+// renewal of the minted credential. Nil means there is nothing revocable to
+// re-check, and the credential is not renewed: it lasts the one token
+// lifetime it was minted with.
+func (h *Handler) withCondorCredential(ctx context.Context, username string, scopes []string, stillValid func(context.Context) error) (context.Context, error) {
+	return h.withGrantCondorCredential(ctx, username, "", scopes, stillValid)
+}
+
+// withGrantCondorCredential is withCondorCredential for an OAuth2 grant
+// that identity approved (see generateGrantHTCondorToken).
+func (h *Handler) withGrantCondorCredential(ctx context.Context, username, identity string, scopes []string, stillValid func(context.Context) error) (context.Context, error) {
 	if h.signingKeyPath == "" || h.trustDomain == "" {
 		// Nothing to mint with, so there is nothing safe to return.
 		//
@@ -80,16 +96,56 @@ func (h *Handler) withCondorCredential(ctx context.Context, username string, sco
 		return ctx, errors.New("no signing key or trust domain is configured, so no HTCondor " +
 			"credential can be minted for this caller; set HTTP_API_SIGNING_KEY and a trust domain")
 	}
-	htcToken, err := h.generateHTCondorTokenWithScopes(username, scopes)
+	htcToken, err := h.generateGrantHTCondorToken(username, identity, scopes)
 	if err != nil {
 		return ctx, fmt.Errorf("minting an HTCondor token for %q: %w", username, err)
 	}
-	secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
-	if err != nil {
-		return ctx, fmt.Errorf("building a security config for %q: %w", username, err)
+	// Keyed by the grant, not the person: the token is minted afresh for
+	// every call, and two grants of one user can carry different
+	// authorization -- the session a READ+WRITE grant negotiates must not
+	// carry a READ-only grant's request.
+	tag := mintedCredentialSessionTag("user", htcToken)
+	cache := h.credentialSessions.sessionCacheFor(tag)
+	build := func(tok string) (*security.SecurityConfig, error) {
+		sc, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, tok, "", 0, "CLIENT", cache)
+		if err != nil {
+			return nil, fmt.Errorf("building a security config for %q: %w", username, err)
+		}
+		sc.SecurityTag = tag
+		return sc, nil
 	}
-	secConfig.SecurityTag = username
-	return htcondor.WithSecurityConfig(ctx, secConfig), nil
+	secConfig, err := build(htcToken)
+	if err != nil {
+		return ctx, err
+	}
+	if stillValid == nil {
+		return htcondor.WithSecurityConfig(ctx, secConfig), nil
+	}
+	// Minted again from the same grant when work this call starts -- an
+	// interactive session's lease, say -- outlasts the token, and only
+	// while that grant is still good.
+	scopes = slices.Clone(scopes)
+	renew := func(rctx context.Context) (*security.SecurityConfig, error) {
+		if err := stillValid(rctx); err != nil {
+			return nil, err
+		}
+		tok, err := h.generateGrantHTCondorToken(username, identity, scopes)
+		if err != nil {
+			return nil, fmt.Errorf("minting an HTCondor token for %q: %w", username, err)
+		}
+		return build(tok)
+	}
+	return htcondor.WithRenewableSecurityConfig(ctx, secConfig, renew), nil
+}
+
+// gatewayJobIDCodec is how the gateway reads a username as a job on one
+// of several APs: the server's job id codec in multi-AP mode, nil with
+// one schedd.
+func (h *Handler) gatewayJobIDCodec() jobid.Codec {
+	if h.multi == nil {
+		return nil
+	}
+	return h.multi.codec
 }
 
 // startSSHGateway brings up the SSH gateway when one is configured.
@@ -176,10 +232,16 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 			Issuer:   gatewayIssuer,
 			ClientID: sshGatewayClientID,
 			Scopes:   sshGatewayScopes,
+			// The gateway's issuer is this server under another name,
+			// so it routes what this server routes: /mcp/oauth2/
+			// wherever MCP is on, as it always was, and only /oauth2/
+			// where it is not.
+			EndpointPrefix: h.gatewayOAuth2Path(""),
 		},
-		Identity: h.sshGatewayIdentity,
-		Logger:   h.logger,
-		Prompt:   h.sshGatewayPromptName(issuer),
+		Identity:   h.sshGatewayIdentity,
+		Logger:     h.logger,
+		Prompt:     h.sshGatewayPromptName(issuer),
+		JobIDCodec: h.gatewayJobIDCodec(),
 	})
 	if err != nil {
 		return err
@@ -234,6 +296,7 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 			Resolve:    h.sshGatewayResolve,
 			Credential: h.sshGatewayCredential,
 			Diagnose:   h.sshGatewayDiagnose,
+			JobIDCodec: h.gatewayJobIDCodec(),
 			Logger:     h.logger,
 		},
 		Bans:   bans,
@@ -285,6 +348,15 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 	return nil
 }
 
+// gatewayOAuth2Path is the path of the named OAuth2 endpoint the SSH
+// gateway drives. Not oauth2EndpointPath: that one is what clients are
+// told, and the gateway's issuer may be a proxy in front of this server,
+// so the gateway keeps the path it has always used wherever that is
+// still routed.
+func (h *Handler) gatewayOAuth2Path(name string) string {
+	return oauth2EndpointPathFor(!h.mcpEnabled, name)
+}
+
 // probeSSHGatewayIssuer checks, once, that the device endpoint the
 // gateway will drive is actually reachable from this process.
 //
@@ -306,7 +378,7 @@ func (h *Handler) probeSSHGatewayIssuer(ctx context.Context, issuer string) {
 	case <-time.After(2 * time.Second):
 	}
 
-	endpoint := strings.TrimSuffix(issuer, "/") + "/mcp/oauth2/device/authorize"
+	endpoint := strings.TrimSuffix(issuer, "/") + h.gatewayOAuth2Path("device/authorize")
 	form := url.Values{}
 	form.Set("client_id", sshGatewayClientID)
 
@@ -403,6 +475,10 @@ type sshGatewaySessionSize struct {
 // and bounded because the caller is sitting at a terminal.
 const sshGatewaySessionWait = 3 * time.Minute
 
+// sshGatewaySessionPoll is how often that wait re-reads the session. A
+// variable for tests.
+var sshGatewaySessionPoll = 2 * time.Second
+
 // sshGatewayCredential mints the caller's HTCondor credential.
 //
 // Called per channel rather than per connection: the IDTOKEN lasts five
@@ -416,7 +492,10 @@ func (h *Handler) sshGatewayCredential(ctx context.Context, account string, scop
 	if account == "" {
 		return nil, errors.New("no account to mint a credential for")
 	}
-	cctx, err := h.withCondorCredential(ctx, account, scopes)
+	// Not renewable: the session keeps no handle on the device-flow grant
+	// (or, for a certificate, has none), so there is nothing to re-check.
+	// It is minted per channel instead.
+	cctx, err := h.withCondorCredential(ctx, account, scopes, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -438,11 +517,51 @@ func (h *Handler) sshGatewayCredential(ctx context.Context, account string, scop
 // and it is the only thing whose answer is authoritative. Repeating the
 // check here would add a second opinion that can only ever be wrong in
 // the direction of letting somebody in.
+//
+// The key's credential is the one ctx carries, minted for this channel
+// by sshGatewayCredential; with none the cache refuses the key.
 func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshgateway.Target, report func(string)) (jobssh.Key, error) {
+	if h.multi != nil {
+		return h.sshGatewayResolveMultiAP(ctx, account, t, report)
+	}
 	if t.IsJob() {
-		return jobssh.Key{Owner: account, Cluster: t.Cluster, Proc: t.Proc}, nil
+		return jobssh.Key{Owner: account, Credential: jobTransportCredential(ctx, ""), Cluster: t.Cluster, Proc: t.Proc}, nil
 	}
 	return h.sshGatewaySession(ctx, account, t, report)
+}
+
+// sshGatewayResolveMultiAP is sshGatewayResolve for a gateway in front
+// of several access points. The username must name the job's AP in the
+// codec's form -- ssh 123.0@ap1.example.org@gateway -- and the key
+// carries it, so the transport is opened through that AP's schedd.
+// A bare job id is refused with the caller's candidates rather than
+// guessed, as every other action is.
+//
+// A session target (+name, or a bare username) resolves through the
+// session manager, which knows which AP each of the caller's sessions is
+// on and places a new one by AP assignment (kind "interactive"); the key
+// names the session's AP.
+func (h *Handler) sshGatewayResolveMultiAP(ctx context.Context, account string, t sshgateway.Target, report func(string)) (jobssh.Key, error) {
+	if !t.IsJob() {
+		// The gateway knows the caller only by their account: an
+		// assignment rule on the user or the subject applies to them, one
+		// on a group does not.
+		if _, ok := apassign.CallerFrom(ctx); !ok {
+			ctx = apassign.WithCaller(ctx, apassign.Caller{Subject: account})
+		}
+		return h.sshGatewaySession(ctx, account, t, report)
+	}
+	user, err := h.multi.svc.UserFor(account)
+	if err != nil {
+		return jobssh.Key{}, err
+	}
+	id := jobid.ID{Schedd: t.Schedd, Cluster: int64(t.Cluster), Proc: int64(t.Proc)}
+	m, err := h.multi.svc.Route(ctx, user, id)
+	if err != nil {
+		return jobssh.Key{}, err
+	}
+	return jobssh.Key{Owner: account, Credential: jobTransportCredential(ctx, ""), Schedd: m.Name,
+		Cluster: t.Cluster, Proc: t.Proc}, nil
 }
 
 // sshGatewaySession attaches to the caller's named interactive session,
@@ -460,7 +579,10 @@ func (h *Handler) sshGatewayResolve(ctx context.Context, account string, t sshga
 // the next piece of work.
 func (h *Handler) sshGatewaySession(ctx context.Context, account string, t sshgateway.Target, report func(string)) (jobssh.Key, error) {
 	name := t.Name
-	mgr := h.mcpServer.InteractiveManager()
+	if report == nil {
+		report = func(string) {}
+	}
+	mgr := h.interactiveManagerOrNil()
 	if mgr == nil {
 		return jobssh.Key{}, fmt.Errorf(
 			"interactive sessions are not available on this server, so %q cannot be started; "+
@@ -514,18 +636,17 @@ func (h *Handler) sshGatewaySession(ctx context.Context, account string, t sshga
 }
 
 // findInteractiveSession returns the caller's session called name, or
-// nil when they have none.
+// nil when they have none. By name, not by listing every session: with
+// several access points a name on two of them is refused
+// (interactive.AmbiguousSessionError) rather than resolved to whichever
+// sorts first, and a session this process already knows is found on its
+// own access point without the federation hub.
 func findInteractiveSession(ctx context.Context, mgr *interactive.Manager, caller interactive.Caller, name string) (*interactive.Info, error) {
-	sessions, err := mgr.List(ctx, caller)
+	info, err := mgr.Find(ctx, caller, name)
 	if err != nil {
 		return nil, fmt.Errorf("looking for session %q: %w", name, err)
 	}
-	for i := range sessions {
-		if sessions[i].Name == name {
-			return &sessions[i], nil
-		}
-	}
-	return nil, nil
+	return info, nil
 }
 
 // sshGatewayAwaitRunning waits for a session's job to start.
@@ -545,9 +666,19 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 
 	deadline := time.Now().Add(sshGatewaySessionWait)
 	for {
+		if info.APError != "" {
+			// Multi-AP mode, and the session's AP could not be asked:
+			// what is known of it is the hub's copy. Not waited on, and
+			// never looked for anywhere else.
+			return jobssh.Key{}, fmt.Errorf("session %q (job %s) is on access point %s, which cannot be reached now: %s",
+				name, info.JobID, info.Schedd, info.APError)
+		}
 		switch info.JobStatus {
 		case jobStatusRunning:
-			return jobssh.Key{Owner: caller.Owner, Cluster: info.ClusterID, Proc: info.ProcID}, nil
+			// Schedd is the session's AP in multi-AP mode, so the
+			// transport is opened through it; "" with one schedd.
+			return jobssh.Key{Owner: caller.Owner, Credential: jobTransportCredential(ctx, ""), Schedd: info.Schedd,
+				Cluster: info.ClusterID, Proc: info.ProcID}, nil
 		case jobStatusHeld:
 			reason := info.HoldReason
 			if reason == "" {
@@ -575,12 +706,14 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 			return jobssh.Key{}, fmt.Errorf(
 				"stopped waiting for session %q (job %s). It is still starting -- reconnect to pick it up: %w",
 				name, info.JobID, ctx.Err())
-		case <-time.After(2 * time.Second):
+		case <-time.After(sshGatewaySessionPoll):
 		}
 
-		found, err := findInteractiveSession(ctx, mgr, caller, name)
+		// The session is known now: only its own access point is
+		// asked, not the hub and every other access point each tick.
+		found, err := mgr.FindOn(ctx, caller, info.Schedd, name)
 		if err != nil {
-			return jobssh.Key{}, err
+			return jobssh.Key{}, fmt.Errorf("re-reading session %q (job %s): %w", name, info.JobID, err)
 		}
 		if found == nil {
 			return jobssh.Key{}, fmt.Errorf("session %q disappeared while waiting for it to start", name)
@@ -613,7 +746,13 @@ func (h *Handler) sshGatewayAwaitRunning(ctx context.Context, mgr *interactive.M
 // one worth showing) and a query that could not be answered.
 func (h *Handler) sshGatewayDiagnose(ctx context.Context, key jobssh.Key, _ error) error {
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", key.Cluster, key.Proc)
-	ads, _, err := h.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
+	// The schedd the transport was opened through: the one schedd, or
+	// the AP the key names.
+	schedd := h.scheddForTransport(key)
+	if schedd == nil {
+		return nil
+	}
+	ads, _, err := schedd.QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{
 		Limit:      1,
 		Projection: []string{"ClusterId", "ProcId", "JobStatus", "HoldReason", "HoldReasonCode"},
 		// Confined to the caller the same way every other query on this

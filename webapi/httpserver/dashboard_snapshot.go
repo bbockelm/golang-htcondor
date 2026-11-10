@@ -56,6 +56,10 @@ type RecentJob struct {
 	ClusterID int64  `json:"cluster_id"`
 	ProcID    int64  `json:"proc_id"`
 	Owner     string `json:"owner,omitempty"`
+	// Schedd and JobID name the job's access point and its complete id,
+	// in multi-AP mode.
+	Schedd string `json:"schedd,omitempty"`
+	JobID  string `json:"job_id,omitempty"`
 	// At is when the event this list is about happened, unix seconds.
 	At int64 `json:"at"`
 	// Detail is the one fact worth showing beside it: a hold reason, the
@@ -433,12 +437,27 @@ func dashboardCacheKey(owner string, ownedByMe bool) string {
 // both, the archive's copy being the one with the outcome attributes.
 //
 // A failure here leaves the queue's answer in place rather than emptying
-// the list: partial and labelled beats absent.
+// the list: partial and labelled beats absent. Callers only get this far
+// on a read that succeeded, so reaching it at all is the archive
+// answering -- including when it answers with no rows. "Nothing finished
+// in the window" is a real answer, and a common one: an idle access
+// point has none, and so does one whose finished jobs are all still
+// sitting in the queue. Marking that case partial told the viewer the
+// mirror was broken when it had just told us the truth.
 func (act *DashboardActivity) mergeArchivedCompletions(archived []RecentJob) {
+	act.CompletedAvailable = true
+	act.CompletedPartial = false
 	if len(archived) == 0 {
 		return
 	}
-	seen := make(map[[2]int64]struct{}, len(archived)+len(act.RecentlyCompleted))
+	// Keyed by access point too: in multi-AP mode two APs' 7.0 are two
+	// jobs. Schedd is set only there (mirrorRecent's perAP), so with one
+	// schedd the key is cluster.proc.
+	type key struct {
+		schedd string
+		c, p   int64
+	}
+	seen := make(map[key]struct{}, len(archived)+len(act.RecentlyCompleted))
 	merged := make([]RecentJob, 0, len(archived)+len(act.RecentlyCompleted))
 	// Archive first, so its row wins the deduplication: it is the
 	// durable record and carries the exit status, where the queue's copy
@@ -448,12 +467,12 @@ func (act *DashboardActivity) mergeArchivedCompletions(archived []RecentJob) {
 	for i := range archived {
 		archived[i].Archived = true
 	}
-	inQueue := make(map[[2]int64]struct{}, len(act.RecentlyCompleted))
+	inQueue := make(map[key]struct{}, len(act.RecentlyCompleted))
 	for _, e := range act.RecentlyCompleted {
-		inQueue[[2]int64{e.ClusterID, e.ProcID}] = struct{}{}
+		inQueue[key{e.Schedd, e.ClusterID, e.ProcID}] = struct{}{}
 	}
 	for _, e := range append(archived, act.RecentlyCompleted...) {
-		k := [2]int64{e.ClusterID, e.ProcID}
+		k := key{e.Schedd, e.ClusterID, e.ProcID}
 		if _, dup := seen[k]; dup {
 			continue
 		}
@@ -470,8 +489,4 @@ func (act *DashboardActivity) mergeArchivedCompletions(archived []RecentJob) {
 		merged = merged[:recentPerList]
 	}
 	act.RecentlyCompleted = merged
-	act.CompletedAvailable = true
-	// The archive answered, so this is no longer just the last few
-	// seconds the queue happened to be holding.
-	act.CompletedPartial = false
 }

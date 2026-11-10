@@ -33,6 +33,7 @@ import { useJupyterReadyProbe } from '@/lib/useJupyterReadyProbe';
 import { useJobWatch } from '@/lib/useJobWatch';
 import { MatchAnalysisPanel } from '@/components/MatchAnalysisPanel';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { AppsBlockedNotice, useAppsBlockedBySuperuser } from '@/components/AppsBlockedNotice';
 
 // Status interpretation lives in lib/jobStatus.ts so list + detail
 // views render the same labels for the same conditions. This page
@@ -113,6 +114,7 @@ export default function JupyterDetailClient() {
   // survive subsequent polls. Everything else is derived below.
   const [closed, setClosed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const blocked = useAppsBlockedBySuperuser();
 
   // jupyterReady = "we've successfully reached jupyter-lab through the
   // proxy". Helper-connected just means the websocket tunnel is up;
@@ -124,7 +126,8 @@ export default function JupyterDetailClient() {
   const jupyterReady = useJupyterReadyProbe({
     proxyPath: data?.proxy_path,
     instanceID: data?.instance_id,
-    helperConnected: data?.connected === true,
+    // The proxy refuses while superuser mode is on; nothing to probe.
+    helperConnected: data?.connected === true && !blocked,
   });
 
   // Derived during render rather than assigned from an effect. Every
@@ -225,9 +228,12 @@ export default function JupyterDetailClient() {
         <Header
           instance={data}
           status={status}
+          blocked={blocked}
           onReload={() => setReloadKey((k) => k + 1)}
         />
       )}
+
+      {blocked && <AppsBlockedNotice />}
 
       {status === 'loading' && <Banner kind="info">Loading session…</Banner>}
 
@@ -253,8 +259,14 @@ export default function JupyterDetailClient() {
 
       {status === 'executing' && (
         <Banner kind="info">
-          The executable is running on the worker; waiting for the helper
-          to dial back over the websocket tunnel…
+          {data?.reconnecting ? (
+            <>Connection to the session was lost. Reconnecting…</>
+          ) : (
+            <>
+              The executable is running on the worker; waiting for the helper
+              to dial back over the websocket tunnel…
+            </>
+          )}
         </Banner>
       )}
 
@@ -338,7 +350,7 @@ export default function JupyterDetailClient() {
         />
       ) : null}
 
-      {status === 'ready' && data && (
+      {status === 'ready' && data && !blocked && (
         // Only mount once the probe loop has confirmed jupyter-lab is
         // serving (/api/status returned 200). Mounting at "launching"
         // — i.e. the moment the helper dials back — used to produce a
@@ -371,8 +383,7 @@ export default function JupyterDetailClient() {
 
       {status === 'gone' && (
         <Banner kind="info">
-          No such session. It may have been closed or the API server may
-          have restarted (sessions don&apos;t survive restarts).{' '}
+          No such session. It may have ended or been closed.{' '}
           <Link href="/interactive" className="underline">
             Back to sessions
           </Link>
@@ -416,10 +427,12 @@ function numAttr(v: unknown): number | undefined {
 function Header({
   instance,
   status,
+  blocked,
   onReload,
 }: {
   instance: JupyterInstanceSummary;
   status: Status;
+  blocked: boolean;
   onReload: () => void;
 }) {
   return (
@@ -448,7 +461,7 @@ function Header({
           {instance.image}
         </span>
       )}
-      {(status === 'ready' || status === 'launching') && (
+      {(status === 'ready' || status === 'launching') && !blocked && (
         <>
           <button
             onClick={onReload}

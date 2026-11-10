@@ -68,3 +68,22 @@ func IsRejection(err error) bool {
 	}
 	return websocket.IsCloseError(err, rejectionCloseCodes...)
 }
+
+// ErrBusy is a dial refused because the session's connection slot is taken:
+// another dial is in flight, or the old tunnel has not yet been seen to die.
+// Not a rejection -- the helper is the right one, and is told to try again.
+var ErrBusy = errors.New("jupytertunnel: the session is busy")
+
+// RefusalCloseCode is the websocket close code for a refused dial.
+//
+// Only a bad token is final. Everything else -- a busy slot, a database that
+// could not record the roll -- is a moment the helper waits out. Sending the
+// policy-violation code for those, as every refusal once did, made a helper
+// whose connection dropped before this side noticed end its own job: its
+// redial met the old tunnel, still looking alive, and was "rejected".
+func RefusalCloseCode(err error) int {
+	if errors.Is(err, ErrTokenInvalid) {
+		return websocket.ClosePolicyViolation
+	}
+	return websocket.CloseTryAgainLater
+}

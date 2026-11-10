@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/PelicanPlatform/classad/db"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
@@ -89,6 +90,7 @@ func mirrorFeed(t *testing.T, ctx context.Context) (*Handler, *jobwatch.Feed, fu
 }
 
 func TestMirrorFeedDeliversAJobsChanges(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -115,11 +117,11 @@ func TestMirrorFeedDeliversAJobsChanges(t *testing.T) {
 		w.newJob("42.0", 42, 0, 1)
 	})
 	got := recvChange(t, ch, 30*time.Second)
-	if got.Ad == nil {
+	if got.View == nil {
 		t.Fatalf("expected an ad for 42.0, got %+v", got)
 	}
-	if v, _ := got.Ad.EvaluateAttrInt("JobStatus"); v != 1 {
-		t.Errorf("JobStatus = %d, want 1", v)
+	if v, _ := got.View.Get("JobStatus"); v != float64(1) {
+		t.Errorf("JobStatus = %v, want 1", v)
 	}
 
 	// An attribute edit is what the session pages are waiting on.
@@ -127,12 +129,13 @@ func TestMirrorFeedDeliversAJobsChanges(t *testing.T) {
 		w.set("42.0", "JobStatus", "2")
 	})
 	got = recvChange(t, ch, 30*time.Second)
-	if v, _ := got.Ad.EvaluateAttrInt("JobStatus"); v != 2 {
-		t.Errorf("after the edit JobStatus = %d, want 2", v)
+	if v, _ := got.View.Get("JobStatus"); v != float64(2) {
+		t.Errorf("after the edit JobStatus = %v, want 2", v)
 	}
 }
 
 func TestMirrorFeedReportsAJobLeavingTheQueue(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -145,7 +148,7 @@ func TestMirrorFeedReportsAJobLeavingTheQueue(t *testing.T) {
 	defer unsub()
 
 	write(ctx, func(w *txWriter) { w.newJob("43.0", 43, 0, 1) })
-	if got := recvChange(t, ch, 30*time.Second); got.Ad == nil {
+	if got := recvChange(t, ch, 30*time.Second); got.View == nil {
 		t.Fatalf("expected the initial ad, got %+v", got)
 	}
 
@@ -220,6 +223,7 @@ func (w *txWriter) destroy(key string) {
 // channel rather than going through the Feed, so a failure says which
 // side is at fault.
 func TestMirrorRawWatchDelivers(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -263,8 +267,13 @@ func TestMirrorRawWatchDelivers(t *testing.T) {
 	defer stop()
 
 	// Write on a second connection, the way the feed and the sync are
-	// separate processes in production.
+	// separate processes in production. The watch can deliver the upsert
+	// before Commit returns, so wait for the writer before the deferred
+	// cancel and closes run under it.
+	writerDone := make(chan struct{})
+	defer func() { <-writerDone }()
 	go func() {
+		defer close(writerDone)
 		time.Sleep(2 * time.Second)
 		wc, wcloser, _, werr := locator.Client(ctx)
 		if werr != nil {
@@ -318,6 +327,7 @@ func TestMirrorRawWatchDelivers(t *testing.T) {
 // proves the source actually feeds it one the way the live mirror does, which is
 // the coverage that was missing when the bug shipped.
 func TestWatchDoneFiresForCompletedJobStillInQueue(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("integration test (forks a real htcondordb)")
 	}
@@ -326,14 +336,18 @@ func TestWatchDoneFiresForCompletedJobStillInQueue(t *testing.T) {
 
 	h, feed, write := mirrorFeed(t, ctx)
 
-	// An empty history table, so the archive read returns cleanly with zero
-	// rows: this job is only ever in the jobs table, as it is on AP40.
+	// An empty history archive, so the archive read returns cleanly with zero
+	// rows: this job is only ever in the jobs table, as it is on AP40. An
+	// archive and not a plain table, because that is what htcondordb creates
+	// and some ops reach one kind but not the other.
 	dbc, closer, _, err := h.dbMirror.Client(ctx)
 	if err != nil {
 		t.Fatalf("connecting to the mirror: %v", err)
 	}
-	if err := dbc.CreateTable(ctx, "history"); err != nil {
-		t.Fatalf("creating the history table: %v", err)
+	if err := dbc.CreateArchiveTable(ctx, "history", db.ArchiveConfig{
+		ZoneAttrs: []string{"CompletionDate", "EnteredHistoryTime"},
+	}); err != nil {
+		t.Fatalf("creating the history archive: %v", err)
 	}
 	closer()
 

@@ -218,6 +218,11 @@ func renderMatched(w *jobwatch.Watch) string {
 	}
 	for _, m := range w.Matched {
 		fmt.Fprintf(&b, "  %d.%d", m.Cluster, m.Proc)
+		if m.Schedd != "" {
+			// The access point, in the default job_id form: the same
+			// cluster.proc on another AP is another job.
+			fmt.Fprintf(&b, "@%s", m.Schedd)
+		}
 		for _, attr := range []string{"JobStatus", "ExitCode", "HoldReason", "RemoveReason"} {
 			if v := m.Attrs[attr]; v != "" {
 				fmt.Fprintf(&b, "  %s=%s", attr, v)

@@ -49,7 +49,7 @@ func (s *IDPStorage) CreateUser(ctx context.Context, username, password, state s
 		return fmt.Errorf("invalid user state: must be 'pending', 'active', or 'admin'")
 	}
 
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), secretHashCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
@@ -193,6 +193,20 @@ func (s *IDPStorage) CreateClient(ctx context.Context, client *fosite.DefaultCli
 	return err
 }
 
+// UpdateClientSecret replaces a client's stored secret, which must
+// already be hashed.
+func (s *IDPStorage) UpdateClientSecret(ctx context.Context, clientID string, hashedSecret []byte) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE idp_clients SET client_secret = ? WHERE id = ?`,
+		string(hashedSecret), clientID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fosite.ErrNotFound
+	}
+	return nil
+}
+
 // GetClient retrieves a client by ID
 //
 //nolint:dupl // This method is similar to OAuth2Storage.GetClient but uses a different table
@@ -295,7 +309,9 @@ func (s *IDPStorage) InvalidateAuthorizeCodeSession(ctx context.Context, signatu
 	return err
 }
 
-// CreateSession creates a new session for the given username
+// CreateSession creates a new session for the given username. The
+// returned ID is the idp_session cookie value; idp_sessions stores its
+// sessionKey, as http_sessions does.
 func (s *IDPStorage) CreateSession(ctx context.Context, username string) (string, error) {
 	// Generate random session ID
 	b := make([]byte, 32)
@@ -309,7 +325,7 @@ func (s *IDPStorage) CreateSession(ctx context.Context, username string) (string
 
 	_, err := s.db.ExecContext(ctx,
 		"INSERT INTO idp_sessions (session_id, username, created_at, expires_at) VALUES (?, ?, ?, ?)",
-		sessionID, username, now, expiresAt)
+		sessionKey(sessionID), username, now, expiresAt)
 	if err != nil {
 		return "", fmt.Errorf("failed to store session: %w", err)
 	}
@@ -324,7 +340,7 @@ func (s *IDPStorage) GetSession(ctx context.Context, sessionID string) (string, 
 
 	err := s.db.QueryRowContext(ctx,
 		"SELECT username, expires_at FROM idp_sessions WHERE session_id = ?",
-		sessionID).Scan(&username, &expiresAt)
+		sessionKey(sessionID)).Scan(&username, &expiresAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil // Not found
@@ -343,7 +359,7 @@ func (s *IDPStorage) GetSession(ctx context.Context, sessionID string) (string, 
 
 // DeleteSession deletes a session
 func (s *IDPStorage) DeleteSession(ctx context.Context, sessionID string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM idp_sessions WHERE session_id = ?", sessionID)
+	_, err := s.db.ExecContext(ctx, "DELETE FROM idp_sessions WHERE session_id = ?", sessionKey(sessionID))
 	return err
 }
 

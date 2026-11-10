@@ -13,7 +13,7 @@ import (
 // `if $INT(HOSTCHECK)`.
 func TestINTMacroEvaluatesExpression(t *testing.T) {
 	newCfg := func(vals map[string]string) *Config {
-		return &Config{values: vals, evaluating: make(map[string]bool)}
+		return &Config{values: vals}
 	}
 
 	cases := []struct {

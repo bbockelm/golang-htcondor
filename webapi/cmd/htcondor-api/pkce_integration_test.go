@@ -21,12 +21,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
 // TestPKCEFlow tests the Authorization Code Flow with PKCE using the swagger-client
 func TestPKCEFlow(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -64,10 +66,6 @@ SEC_PASSWORD_DIRECTORY = %s
 		t.Fatalf("Failed to write config file: %v", err)
 	}
 
-	// Set CONDOR_CONFIG environment variable
-	os.Setenv("CONDOR_CONFIG", configFile)
-	defer os.Unsetenv("CONDOR_CONFIG")
-
 	// Step 1: Build the htcondor-api CLI tool
 	t.Log("Step 1: Building htcondor-api CLI tool...")
 	cliBinary := filepath.Join(tempDir, "htcondor-api")
@@ -86,6 +84,11 @@ SEC_PASSWORD_DIRECTORY = %s
 	serverAddr := "127.0.0.1:0"
 	serverCmd := exec.CommandContext(ctx, cliBinary, "--demo", "--listen", serverAddr)
 	serverCmd.Env = append(os.Environ(), "CONDOR_CONFIG="+configFile)
+	// Cancel with SIGTERM, not the default SIGKILL: the demo server stops
+	// its condor_master on SIGTERM, and a SIGKILLed server leaves the
+	// master and its daemons running with no parent.
+	serverCmd.Cancel = func() error { return serverCmd.Process.Signal(syscall.SIGTERM) }
+	serverCmd.WaitDelay = 30 * time.Second
 
 	// Capture stdout and stderr
 	serverStdout, err := serverCmd.StdoutPipe()

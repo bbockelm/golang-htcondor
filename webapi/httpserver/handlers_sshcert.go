@@ -139,6 +139,9 @@ func (s *Handler) handleSSHCertificate(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	if s.refuseForPlacementdSession(w, r, "SSH certificates") {
+		return
+	}
 
 	ctx, _, err := s.requireAuthentication(r)
 	if err != nil {
@@ -191,7 +194,7 @@ func (s *Handler) handleSSHCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req sshCertRequest
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	setBodyLimit(w, r, 1<<16)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Could not read the request body")
 		return

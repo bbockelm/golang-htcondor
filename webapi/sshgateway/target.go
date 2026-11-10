@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/bbockelm/golang-htcondor/jobid"
 )
 
 // Target is what the SSH username asked to connect to.
@@ -33,6 +35,9 @@ import (
 //
 //	ssh 12345.0@gateway    the job with that cluster and proc
 //	ssh 12345@gateway      proc 0 of that cluster
+//	ssh 12345.0@ap1@gateway  that job on access point ap1, for a gateway
+//	                         fronting several (the job id codec's text
+//	                         form; OpenSSH splits at the LAST "@")
 //	ssh +work@gateway      the interactive session called "work"
 //	ssh gateway            your default session
 //
@@ -59,6 +64,10 @@ type Target struct {
 
 	// Cluster and Proc are set when Raw named a job.
 	Cluster, Proc int
+	// Schedd is the access point Raw named along with the job, when the
+	// gateway reads job ids through a codec (ParseTargetWith). Empty for
+	// a bare cluster.proc.
+	Schedd string
 	// Name is set when Raw named an interactive session, explicitly or
 	// by default.
 	Name string
@@ -74,6 +83,9 @@ func (t Target) IsJob() bool { return t.Name == "" }
 
 func (t Target) String() string {
 	if t.IsJob() {
+		if t.Schedd != "" {
+			return fmt.Sprintf("job %d.%d on %s", t.Cluster, t.Proc, t.Schedd)
+		}
 		return fmt.Sprintf("job %d.%d", t.Cluster, t.Proc)
 	}
 	return fmt.Sprintf("session %q", t.Name)
@@ -87,6 +99,22 @@ const SessionPrefix = "+"
 // A fixed name rather than a derived one, so `ssh gateway` means the
 // same session from every machine.
 const DefaultSessionName = "default"
+
+// ParseTargetWith is ParseTarget for a gateway that reads job ids
+// through codec: a username the codec parses as a complete id names that
+// job on that access point. Everything else -- a bare job id, a session
+// -- is read as ParseTarget reads it. A nil codec is ParseTarget.
+func ParseTargetWith(codec jobid.Codec, user string) (Target, error) {
+	if codec != nil && user != "" {
+		if id, err := codec.Parse(user); err == nil && id.Complete() && id.Cluster <= maxInt && id.Proc <= maxInt {
+			return Target{Raw: user, Cluster: int(id.Cluster), Proc: int(id.Proc), Schedd: id.Schedd}, nil
+		}
+	}
+	return ParseTarget(user)
+}
+
+// maxInt bounds a parsed id to what Target holds.
+const maxInt = int64(^uint(0) >> 1)
 
 // ParseTarget reads an SSH username.
 //

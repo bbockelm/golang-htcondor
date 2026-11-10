@@ -13,12 +13,13 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
-	"os"
 	"sync"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/internal/privatefile"
 	"github.com/bbockelm/golang-htcondor/sessioncache"
 	"github.com/pressly/goose/v3"
+
 	// glebarez/go-sqlite is the modernc.org/sqlite-derived pure-Go engine that
 	// registers the "sqlite" database/sql driver. We use it (rather than modernc
 	// directly) because the webapi module's GORM driver links glebarez too --
@@ -64,10 +65,11 @@ func Open(path string, keys []SigningKey, log *slog.Logger) (sessioncache.Sessio
 	// The database holds encrypted session records, but its metadata (and its
 	// -wal/-shm sidecars, which SQLite creates with the database file's own
 	// permissions) should not be world-readable. Create the file 0600 up front,
-	// and tighten an existing one that predates this -- SQLite would otherwise
-	// create it honoring the process umask (typically 0644). Best-effort: a chmod
-	// failure is logged, not fatal, so an unusual filesystem does not block startup.
-	if err := ensureFileMode(path, 0o600); err != nil {
+	// and tighten an existing one (and its sidecars) that predates this -- SQLite
+	// would otherwise create it honoring the process umask (typically 0644).
+	// Best-effort: a chmod failure is logged, not fatal, so an unusual filesystem
+	// does not block startup.
+	if err := privatefile.EnsureSQLite(path, 0o600); err != nil {
 		log.Warn("could not restrict session database permissions", "path", path, "err", err)
 	}
 	dsn := fmt.Sprintf("file:%s?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)", path)
@@ -87,25 +89,6 @@ func Open(path string, keys []SigningKey, log *slog.Logger) (sessioncache.Sessio
 		return nil, err
 	}
 	return s, nil
-}
-
-// ensureFileMode makes path exist with exactly mode, creating it if absent and
-// tightening it if it already exists with looser bits. Creating the file here
-// (rather than letting SQLite create it under the umask) means SQLite opens an
-// existing file and propagates its permissions to the -wal/-shm sidecars.
-func ensureFileMode(path string, mode os.FileMode) error {
-	// path is the configured session-database location, not attacker-controlled.
-	f, err := os.OpenFile(path, os.O_CREATE, mode) //nolint:gosec // G304: path is operator-configured
-
-	if err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	// O_CREATE's mode applies only on creation; chmod covers a pre-existing file
-	// (and corrects for the umask, which masks the create mode too).
-	return os.Chmod(path, mode)
 }
 
 // migrate applies the embedded goose migrations, creating/evolving the schema.

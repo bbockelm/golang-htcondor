@@ -8,12 +8,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bbockelm/cedar/security"
 	"github.com/gorilla/websocket"
 
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -249,6 +251,128 @@ func TestJobProxyCarriesWebSocketUpgrade(t *testing.T) {
 	}
 	if string(msg) != "echo:ping" {
 		t.Errorf("got %q, want %q", msg, "echo:ping")
+	}
+}
+
+// setProxyCredentialHeaders makes a request carry every credential this
+// server accepts, plus things that belong to the job's server. The bearer
+// is a real one, since it is what authenticates the request; it is
+// pre-validated so that resolving its owner does not ask a schedd.
+func setProxyCredentialHeaders(t *testing.T, h *Handler, hdr http.Header) {
+	t.Helper()
+	now := time.Now().Unix()
+	tok, err := security.GenerateJWT(filepath.Dir(h.signingKeyPath), filepath.Base(h.signingKeyPath),
+		"alice@test.htcondor.org", h.trustDomain, now, now+300, nil)
+	if err != nil {
+		t.Fatalf("GenerateJWT: %v", err)
+	}
+	if _, err := h.tokenCache.Add(tok); err != nil {
+		t.Fatalf("tokenCache.Add: %v", err)
+	}
+	h.tokenCache.MarkValidated(tok, "alice@test.htcondor.org")
+	hdr.Set("Cookie", "htcondor_session=secret; other=x; idp_session=idp; htcondor_api_last_account=acct")
+	hdr.Set("Authorization", "Bearer "+tok)
+	hdr.Set("Proxy-Authorization", "Basic dTpw")
+	hdr.Set("X-Test-User", "alice") // the configured user header
+	hdr.Set("X-Forwarded-User", "alice")
+	hdr.Set("X-Forwarded-For", "192.0.2.1")
+	hdr.Set("Forwarded", "for=192.0.2.1")
+	hdr.Set("X-Forwarded-Proto", "https")
+}
+
+// checkProxyCredentialHeaders asserts the job's server saw none of this
+// server's credentials and all of its own.
+func checkProxyCredentialHeaders(t *testing.T, got http.Header) {
+	t.Helper()
+	for _, name := range []string{
+		"Authorization", "Proxy-Authorization", "X-Test-User",
+		"X-Forwarded-User", "X-Forwarded-For", "Forwarded",
+	} {
+		if v := got.Values(name); len(v) > 0 {
+			t.Errorf("the job saw %s: %q", name, v)
+		}
+	}
+	if c := got.Get("Cookie"); c != "other=x" {
+		t.Errorf("the job saw Cookie %q, want only its own other=x", c)
+	}
+	if p := got.Get("X-Forwarded-Proto"); p != "https" {
+		t.Errorf("the job saw X-Forwarded-Proto %q, want https passed through", p)
+	}
+}
+
+// TestJobProxyStripsCallerCredentials: whatever runs in the job can read
+// what the proxy sends it, so the session cookie or bearer that got the
+// caller here must not go along. The job's own cookies must, and it must
+// not be able to set ours.
+func TestJobProxyStripsCallerCredentials(t *testing.T) {
+	var got http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Add("Set-Cookie", "htcondor_session=fixed; Path=/")
+		w.Header().Add("Set-Cookie", "_xsrf=abc; Path=/")
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	h := newProxyTestHandler(t, strings.TrimPrefix(backend.URL, "http://"))
+
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/api/v1/jobs/12.0/proxy/8080/", nil)
+	setProxyCredentialHeaders(t, h, r.Header)
+	w := httptest.NewRecorder()
+
+	h.handleJobProxy(w, r, 12, 0, jobProxyTarget{Port: 8080}, "/")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	if got == nil {
+		t.Fatal("the request never reached the job")
+	}
+	checkProxyCredentialHeaders(t, got)
+	if sc := w.Header().Values("Set-Cookie"); len(sc) != 1 || sc[0] != "_xsrf=abc; Path=/" {
+		t.Errorf("browser got Set-Cookie %q, want only the job's _xsrf", sc)
+	}
+}
+
+// TestJobProxyStripsCredentialsOnWebSocketUpgrade: an editor's real
+// traffic is the WebSocket, whose handshake carries the same cookie.
+func TestJobProxyStripsCredentialsOnWebSocketUpgrade(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	gotCh := make(chan http.Header, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCh <- r.Header.Clone()
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+	}))
+	defer backend.Close()
+
+	h := newProxyTestHandler(t, strings.TrimPrefix(backend.URL, "http://"))
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.handleJobProxy(w, r, 12, 0, jobProxyTarget{Port: 8080}, "/socket")
+	}))
+	defer front.Close()
+
+	hdr := http.Header{}
+	setProxyCredentialHeaders(t, h, hdr)
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	ws, resp, err := dialer.Dial("ws"+strings.TrimPrefix(front.URL, "http")+"/socket", hdr)
+	if resp != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
+	if err != nil {
+		t.Fatalf("WebSocket through the proxy failed: %v", err)
+	}
+	_ = ws.Close()
+
+	select {
+	case got := <-gotCh:
+		checkProxyCredentialHeaders(t, got)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the handshake never reached the job")
 	}
 }
 

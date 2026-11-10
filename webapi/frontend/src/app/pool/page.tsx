@@ -6,12 +6,18 @@
 // click-through to a per-slot page, and a filter that runs either as a
 // free-text substring match (client-side) or a raw ClassAd expression
 // (sent to the collector query).
+//
+// The chat panel is wired up the way /archive's is: read-only tools on
+// the server, and hooks that move this page's filter and open a node's
+// row. Nothing the assistant can do here changes a machine.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
 import { FilterControls, type FilterMode } from '@/components/FilterControls';
+import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
+import { usePoolIdentityRestricted } from '@/lib/usePoolIdentity';
 import {
   parseSlot,
   groupByMachine,
@@ -21,11 +27,28 @@ import {
   gibNum,
   pct,
   textHaystack,
-  SLOT_PROJECTION,
+  slotProjection,
   type Slot,
   type NodeGroup,
   type PoolSummary,
 } from '@/lib/pool';
+import {
+  byMachine,
+  clockTime,
+  drainTotals,
+  TIMELINE_SECONDS,
+  type DrainSlot,
+  type MachineDrain,
+} from '@/lib/drain';
+import {
+  DrainCards,
+  DrainCellView,
+  DrainingBadge,
+  SlotDrainCells,
+  Timeline,
+  TimelineLegend,
+  type DrainView,
+} from '@/components/PoolDrain';
 
 export default function PoolPage() {
   const router = useRouter();
@@ -46,12 +69,17 @@ export default function PoolPage() {
     ? `(${excludeDynamic}) && (${constraint})`
     : excludeDynamic;
 
+  // Whether this session may be told who is running on a slot. It
+  // changes the projection, not just the rendering: an attribute the
+  // caller may not read is refused rather than trimmed.
+  const identityRestricted = usePoolIdentityRestricted();
+
   const { data, isLoading, error, isFetching } = useQuery({
-    queryKey: ['pool-slots', effectiveConstraint],
+    queryKey: ['pool-slots', effectiveConstraint, identityRestricted],
     queryFn: () =>
       api.collector.list({
         adType: 'startd',
-        projection: SLOT_PROJECTION,
+        projection: slotProjection(identityRestricted),
         limit: '*',
         constraint: effectiveConstraint,
       }),
@@ -60,6 +88,28 @@ export default function PoolPage() {
   });
 
   const slots = useMemo(() => (data?.ads ?? []).map(parseSlot), [data]);
+
+  // When each node would be empty if drained now. One shared answer on
+  // the server, refreshed with the page; a server without a collector
+  // (or in multi-AP mode) answers 501 and the column is not shown.
+  const drainQuery = useQuery({
+    queryKey: ['pool-drain'],
+    queryFn: () => api.pool.drainEstimates(),
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const drainUnsupported =
+    drainQuery.error instanceof ApiError && drainQuery.error.status === 501;
+  const drain = useMemo<DrainView | null>(() => {
+    const d = drainQuery.data;
+    if (!d) return null;
+    return {
+      index: byMachine(d.machines),
+      age: d.age_seconds,
+      now: new Date(),
+      available: d.estimates_available,
+    };
+  }, [drainQuery.data]);
 
   const textFilter = mode === 'text' ? input.trim().toLowerCase() : '';
   const filtered = useMemo(() => {
@@ -73,6 +123,16 @@ export default function PoolPage() {
 
   const summary = useMemo(() => summarize(filtered), [filtered]);
   const nodes = useMemo(() => groupByMachine(filtered), [filtered]);
+  // The cards follow the filter: they add up the nodes in view.
+  const drainTotalsInView = useMemo(() => {
+    if (!drain) return null;
+    const inView: MachineDrain[] = [];
+    for (const n of nodes) {
+      const m = drain.index.get(n.machine.toLowerCase());
+      if (m) inView.push(m);
+    }
+    return drainTotals(inView, drain.age);
+  }, [drain, nodes]);
 
   const [sort, setSort] = useState<SortState>({ key: 'machine', dir: 'asc' });
   const sortedNodes = useMemo(() => sortNodes(nodes, sort), [nodes, sort]);
@@ -98,6 +158,69 @@ export default function PoolPage() {
       ? error.message
       : null;
 
+  // expand_machine opens a row of the table as it is now; the hooks are
+  // handed to the panel once, so they read the rows through a ref.
+  const nodesRef = useRef(nodes);
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+  // === KEEP IN SYNC WITH webapi/httpserver/handlers_chat_tools.go (poolPageInstructions) ===
+  // The server's instructions tell the assistant what this page shows and
+  // which of these hooks exist. Adding or removing a hook, a control or a
+  // filter here means updating that text.
+  const chatHooks = useMemo<Record<string, ToolHandler>>(
+    () => ({
+      set_filter: (input) => {
+        const q = typeof input.query === 'string' ? input.query : '';
+        setMode('text');
+        setAppliedExpr('');
+        setInput(q);
+        return { ok: true, applied_query: q };
+      },
+      set_constraint: (input) => {
+        const c = typeof input.constraint === 'string' ? input.constraint.trim() : '';
+        setMode(c ? 'expr' : 'text');
+        setInput(c);
+        setAppliedExpr(c);
+        return { ok: true, applied_constraint: c };
+      },
+      expand_machine: (input) => {
+        const want = typeof input.machine === 'string' ? input.machine.trim().toLowerCase() : '';
+        const node = nodesRef.current.find((n) => n.machine.toLowerCase() === want);
+        if (!node) {
+          return {
+            ok: false,
+            error: `no node named "${input.machine}" is in the table as it is filtered now`,
+          };
+        }
+        setExpanded((prev) => new Set(prev).add(node.machine));
+        return { ok: true, expanded: node.machine };
+      },
+    }),
+    [],
+  );
+  const { data: chatInfo } = useQuery({
+    queryKey: ['chat-info'],
+    queryFn: api.chat.info,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const chatVisible = !!chatInfo?.enabled;
+  const u = summary.usage;
+  const pageContext = [
+    mode === 'expr'
+      ? `Filter: ClassAd expression ${appliedExpr ? `"${appliedExpr}"` : '(none applied)'}.`
+      : `Filter: text ${input.trim() ? `"${input.trim()}"` : '(none)'}.`,
+    exprError ? `The expression was rejected: ${exprError}` : '',
+    notConfigured ? 'This server has no collector configured, so the page shows no pool.' : '',
+    isLoading
+      ? 'The page is still loading.'
+      : `In view: ${summary.machines} execute nodes, ${summary.runningJobs} running jobs; CPUs ${u.usedCpus}/${u.totalCpus} in use, memory ${Math.round(u.usedMemoryMB / 1024)}/${Math.round(u.totalMemoryMB / 1024)} GiB, GPUs ${u.usedGpus}/${u.totalGpus}.`,
+    expanded.size ? `Expanded nodes: ${[...expanded].slice(0, 10).join(', ')}.` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
@@ -109,6 +232,17 @@ export default function PoolPage() {
           <span className="text-xs text-gray-400">refreshing…</span>
         )}
       </div>
+
+      <ChatPanel
+        visible={chatVisible}
+        page="pool"
+        pageContext={pageContext}
+        hooks={chatHooks}
+        confirmableTools={[]}
+        headerLabel="Pool assistant"
+        togglerLabel="Ask about the pool"
+        pageHelp={`Ask things like "which nodes have a free GPU?", "show only slots with GPUs", or "why is this node not running anything?".`}
+      />
 
       {notConfigured ? (
         <p className="rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-600">
@@ -155,6 +289,21 @@ export default function PoolPage() {
           ) : (
             <>
               <SummaryPanel summary={summary} />
+              {drain && drainTotalsInView && (
+                <DrainCards totals={drainTotalsInView} available={drain.available} />
+              )}
+              {drainQuery.data?.error && (
+                <p className="rounded-sm border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  {drainQuery.data.stale
+                    ? `Drain estimates are from ${Math.round(drainQuery.data.age_seconds / 60)} minutes ago; the latest refresh failed.`
+                    : 'Running jobs on this access point could not be read, so no node has a run-time estimate.'}
+                </p>
+              )}
+              {drainQuery.error && !drainUnsupported && (
+                <p className="text-xs text-gray-400">
+                  Drain estimates are unavailable: {(drainQuery.error as Error).message}
+                </p>
+              )}
               {nodes.length === 0 ? (
                 <p className="text-sm text-gray-500">
                   No slots match this {mode === 'expr' ? 'expression' : 'filter'}.
@@ -166,6 +315,7 @@ export default function PoolPage() {
                   onSort={onSort}
                   expanded={expanded}
                   onToggle={toggle}
+                  drain={drainUnsupported ? undefined : drain}
                   onSlot={(name) =>
                     router.push(`/pool/slots/${encodeURIComponent(name)}`)
                   }
@@ -361,6 +511,7 @@ function NodeTable({
   expanded,
   onToggle,
   onSlot,
+  drain,
 }: {
   nodes: NodeGroup[];
   sort: SortState;
@@ -368,9 +519,14 @@ function NodeTable({
   expanded: Set<string>;
   onToggle: (machine: string) => void;
   onSlot: (name: string) => void;
+  // undefined: the server has no drain estimates; null: not loaded yet.
+  drain?: DrainView | null;
 }) {
+  const showDrain = drain !== undefined;
+  const windowEnd = drain ? clockTime(new Date(drain.now.getTime() + TIMELINE_SECONDS * 1000), drain.now) : '';
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+      {drain && <TimelineLegend />}
       <table className="min-w-full text-sm tabular-nums">
         <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
           <tr>
@@ -380,6 +536,13 @@ function NodeTable({
             <SortHeader label="CPUs" col="cpus" align="right" sort={sort} onSort={onSort} />
             <SortHeader label="Memory (GiB)" col="memory" align="right" sort={sort} onSort={onSort} />
             <SortHeader label="GPUs" col="gpus" align="right" sort={sort} onSort={onSort} />
+            {showDrain && <th className="px-3 py-2 text-left">Empty if drained now</th>}
+            {showDrain && (
+              <th className="px-3 py-2 text-left normal-case tracking-normal">
+                <span className="uppercase tracking-wide">Next 6h</span>
+                {windowEnd && <span className="ml-1 text-gray-400">(now → {windowEnd})</span>}
+              </th>
+            )}
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
@@ -390,6 +553,7 @@ function NodeTable({
               open={expanded.has(node.machine)}
               onToggle={() => onToggle(node.machine)}
               onSlot={onSlot}
+              drain={drain}
             />
           ))}
         </tbody>
@@ -420,24 +584,46 @@ function NodeRow({
   open,
   onToggle,
   onSlot,
+  drain,
 }: {
   node: NodeGroup;
   open: boolean;
   onToggle: () => void;
   onSlot: (name: string) => void;
+  drain?: DrainView | null;
 }) {
   const u = node.usage;
+  const showDrain = drain !== undefined;
+  const md = drain?.index.get(node.machine.toLowerCase());
+
+  // The node's running jobs, one per slot, only while the row is open.
+  const { data: drainDetail } = useQuery({
+    queryKey: ['pool-drain-node', node.machine],
+    queryFn: () => api.pool.drainEstimates(node.machine),
+    enabled: open && showDrain,
+    refetchInterval: open ? 30_000 : false,
+    retry: false,
+  });
+  const drainSlots = useMemo(() => {
+    if (!showDrain) return undefined;
+    const bySlot = new Map<string, DrainSlot>();
+    for (const m of drainDetail?.machines ?? []) {
+      for (const s of m.slots ?? []) bySlot.set(s.name, s);
+    }
+    return bySlot;
+  }, [drainDetail, showDrain]);
 
   // The overview query excludes per-job (dynamic) slots to keep the payload
   // small, so node.slots has none. When a node is expanded, fetch its full
   // slot list — dynamic slots included — for just that machine. This is a
   // narrow query and only runs while the row is open.
+  const identityRestricted = usePoolIdentityRestricted();
   const { data: detail, isFetching: detailFetching } = useQuery({
-    queryKey: ['pool-node-slots', node.machine],
+    queryKey: ['pool-node-slots', node.machine, identityRestricted],
     queryFn: () =>
       api.collector.list({
         adType: 'startd',
-        projection: SLOT_PROJECTION,
+        projection: slotProjection(identityRestricted),
         limit: '*',
         constraint: `Machine == ${JSON.stringify(node.machine)}`,
       }),
@@ -464,6 +650,7 @@ function NodeRow({
           <span className="inline-flex items-center gap-2">
             {node.machine}
             {node.owner && <OwnerBadge />}
+            {md?.draining && <DrainingBadge />}
           </span>
         </td>
         <td className="px-3 py-2 text-right text-gray-600">{node.runningJobs}</td>
@@ -476,14 +663,24 @@ function NodeRow({
         <td className="px-3 py-2 text-right">
           <UsagePair used={String(u.usedGpus)} total={String(u.totalGpus)} />
         </td>
+        {showDrain && (
+          <td className="px-3 py-2" data-testid="drain-cell">
+            {drain ? <DrainCellView m={md} drain={drain} running={node.runningJobs} /> : <span className="text-gray-300">…</span>}
+          </td>
+        )}
+        {showDrain && (
+          <td className="px-3 py-2">{drain && <Timeline m={md} age={drain.age} />}</td>
+        )}
       </tr>
       {open && (
         <tr>
-          <td colSpan={6} className="bg-gray-50 px-3 py-2">
+          <td colSpan={showDrain ? 8 : 6} className="bg-gray-50 px-3 py-2">
             <SlotSubTable
               slots={detailSlots}
               loading={detailFetching && !detail}
               onSlot={onSlot}
+              drainSlots={drainSlots}
+              now={drain?.now}
             />
           </td>
         </tr>
@@ -496,11 +693,18 @@ function SlotSubTable({
   slots,
   loading,
   onSlot,
+  drainSlots,
+  now,
 }: {
   slots: Slot[];
   loading?: boolean;
   onSlot: (name: string) => void;
+  // Each running job's drain detail by slot name; undefined hides the
+  // columns.
+  drainSlots?: Map<string, DrainSlot>;
+  now?: Date;
 }) {
+  const identityRestricted = usePoolIdentityRestricted();
   const ordered = [...slots].sort((a, b) => a.name.localeCompare(b.name));
   return (
     <table className="min-w-full text-xs tabular-nums">
@@ -514,7 +718,19 @@ function SlotSubTable({
           <th className="px-2 py-1 text-right">CPUs</th>
           <th className="px-2 py-1 text-right">Memory</th>
           <th className="px-2 py-1 text-right">GPUs</th>
-          <th className="px-2 py-1 text-left">Owner</th>
+          <th className="px-2 py-1 text-left">
+            Owner
+            {identityRestricted && (
+              <span
+                className="ml-1 font-normal text-gray-400"
+                title="This site does not show which user is running on a slot."
+              >
+                (not shown)
+              </span>
+            )}
+          </th>
+          {drainSlots && <th className="px-2 py-1 text-left">Submitted from</th>}
+          {drainSlots && <th className="px-2 py-1 text-left">Expected end</th>}
         </tr>
       </thead>
       <tbody>
@@ -550,6 +766,7 @@ function SlotSubTable({
             <td className="px-2 py-1 text-right">{gib(s.memoryMB)}</td>
             <td className="px-2 py-1 text-right">{s.gpus ?? '—'}</td>
             <td className="px-2 py-1 text-gray-600">{s.remoteOwner ?? '—'}</td>
+            {drainSlots && <SlotDrainCells d={drainSlots.get(s.name)} now={now ?? new Date()} />}
           </tr>
         ))}
       </tbody>

@@ -1,0 +1,2 @@
+`transfer_output = true` with no `output` keyword: C++ writes false on proc 0 and true on every proc after it, from the same stale-state path as streamout. Go writes false throughout. Compared directly in TestStdFileTransferMatchesOracle.
+Sweep cannot prove this: as streamout -- reached by the generator on one oracle version and not another, and compared directly by TestStdFileTransferMatchesOracle.

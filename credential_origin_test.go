@@ -57,11 +57,18 @@ func TestUserRequestCannotBecomeTheDaemon(t *testing.T) {
 	if !IsDaemonFallbackRefused(err) {
 		t.Fatalf("refused, but not as a daemon-fallback refusal, so no transport can map it to 401: %v", err)
 	}
-	// The refusal has to say which door the context came in through and how
-	// to fix it, or it is just a 401 with no lead.
-	for _, want := range []string{"HTTP request GET /api/v1/jobs", "WithSecurityConfig", "WithDaemonCredential"} {
+	// The refusal has to say which door the context came in through and
+	// which daemon it was headed for, or it is just a 401 with no lead.
+	for _, want := range []string{"HTTP request GET /api/v1/jobs", "<127.0.0.1:9618>"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal message does not mention %q: %v", want, err)
+		}
+	}
+	// And it says nothing a reader of the message could not act on. The
+	// handlers put it in front of users, who cannot attach a context value.
+	for _, unwanted := range []string{"WithSecurityConfig", "WithDaemonCredential", "htcondor."} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("refusal message names Go API %q, which only a developer can use: %v", unwanted, err)
 		}
 	}
 }
@@ -238,5 +245,16 @@ func withNoReachableConfig(t *testing.T) {
 	t.Cleanup(func() { globalDefaultConfig.Store(nil) })
 	if cfg := getDefaultConfig(); cfg != nil {
 		t.Skip("this environment still resolves a configuration; the defaults branch is unreachable here")
+	}
+}
+
+// A command to condor_master is this daemon speaking whatever context it
+// started from, so it is never refused as unclassified.
+func TestMasterCommandsAreDaemonWork(t *testing.T) {
+	cfg := daemonPoolConfig(t)
+	t.Cleanup(func() { SetUnmarkedOriginPolicy(UnmarkedAllow) })
+	SetUnmarkedOriginPolicy(UnmarkedDeny)
+	if _, err := secConfigForMasterCommand(context.Background(), cfg, 60008, "<127.0.0.1:1>"); err != nil {
+		t.Fatalf("a master command on an unclassified context: %v", err)
 	}
 }

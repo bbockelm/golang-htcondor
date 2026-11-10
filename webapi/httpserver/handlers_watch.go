@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/collections"
 	"github.com/PelicanPlatform/classad/collections/vm"
+
+	htcondor "github.com/bbockelm/golang-htcondor"
 )
 
 // handleCollectorWatch streams collector ad changes to the client as Server-Sent
@@ -32,15 +35,11 @@ func (h *Handler) handleCollectorWatch(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	ctx, needsRedirect, err := h.requireAuthentication(r)
-	if err != nil {
-		if needsRedirect {
-			h.redirectToLogin(w, r)
-			return
-		}
-		h.writeError(w, http.StatusUnauthorized, fmt.Sprintf("authentication failed: %v", err))
+	ctx, release, ok := h.authenticateStream(w, r)
+	if !ok {
 		return
 	}
+	defer release()
 	col := h.getCollector()
 	if col == nil {
 		h.writeError(w, http.StatusServiceUnavailable, "no collector configured")
@@ -53,6 +52,23 @@ func (h *Handler) handleCollectorWatch(w http.ResponseWriter, r *http.Request) {
 	}
 	constraint := r.URL.Query().Get("constraint")
 	cursor := cursorFromRequest(r)
+
+	// This stream sends whole ads -- there is no projection to clamp --
+	// so under a restricted policy each one is filtered on the way out.
+	privileged := h.seesAllJobs(ctx, r, jobScopeRead)
+	if h.poolQueryPolicy.Refuses(privileged) {
+		h.writeError(w, http.StatusForbidden,
+			"Pool queries are restricted to administrators at this site")
+		return
+	}
+	if err := h.poolQueryPolicy.CheckAdType(privileged, adType); err != nil {
+		h.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if err := h.poolQueryPolicy.CheckConstraint(privileged, adType, constraint); err != nil {
+		h.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 
 	flusher, ok := sseSetup(w)
 	if !ok {
@@ -85,7 +101,8 @@ func (h *Handler) handleCollectorWatch(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if err := writeWatchSSE(w, flusher, sseKind(ev.Kind.String()), watchKeyString(ev.Key), ev.Ad, ev.Cursor, ""); err != nil {
+			ad := h.poolQueryPolicy.FilterClassAd(privileged, adType, ev.Ad)
+			if err := writeWatchSSE(w, flusher, sseKind(ev.Kind.String()), watchKeyString(ev.Key), ad, ev.Cursor, ""); err != nil {
 				return
 			}
 		}
@@ -205,23 +222,49 @@ func (h *Handler) handleJobsWatch(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	ctx, needsRedirect, err := h.requireAuthentication(r)
-	if err != nil {
-		if needsRedirect {
-			h.redirectToLogin(w, r)
-			return
-		}
-		h.writeError(w, http.StatusUnauthorized, fmt.Sprintf("authentication failed: %v", err))
+	// Both branches below hold a stream.
+	ctx, release, ok := h.authenticateStream(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	if h.multi != nil {
+		// The hub's jobs stream, the caller's own jobs on every AP.
+		h.streamJobsWatchFromMirror(ctx, w, r)
 		return
 	}
 	if h.jobMirror == nil {
-		h.writeError(w, http.StatusServiceUnavailable, "job queue mirror not configured")
+		// No local job_queue.log to tail, but this access point may
+		// still be following its queue through the htcondordb mirror.
+		// That mirror is the one most deployments actually have -- an
+		// API server in its own container cannot read the schedd's
+		// spool -- and following the queue is a large part of what it
+		// is for. Refusing here while it sits there healthy was the
+		// endpoint ignoring the answer it already had.
+		if h.jobWatchFeed != nil && h.dbMirror.Enabled() {
+			h.streamJobsWatchFromMirror(ctx, w, r)
+			return
+		}
+		h.writeError(w, http.StatusServiceUnavailable,
+			"this access point is not following its job queue: it has neither a readable job_queue.log "+
+				"(HTTP_API_JOB_QUEUE_LOG) nor an htcondordb mirror")
 		return
 	}
+	// This branch reads job_queue.log itself: no schedd sees the
+	// request, so nothing but this clause keeps one user's ads from
+	// another. Own jobs unless an administrator asks for everyone's,
+	// as on the mirror branch.
+	_, all := activityStreamScope(htcondor.GetAuthenticatedUserFromContext(ctx),
+		r.URL.Query().Get("owned_by_me"), h.seesAllJobs(ctx, r, jobScopeRead))
+	constraint, scopeErr := localReadOwnerScope(ctx, r.URL.Query().Get("constraint"), all)
+	if errors.Is(scopeErr, errUnidentifiedCaller) {
+		h.writeError(w, http.StatusUnauthorized, "authentication failed: "+scopeErr.Error())
+		return
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // stop the watch iterator when the handler returns
 
-	constraint := r.URL.Query().Get("constraint")
 	cursor := cursorFromRequest(r)
 
 	flusher, ok := sseSetup(w)
@@ -231,6 +274,10 @@ func (h *Handler) handleJobsWatch(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.streamOpened()()
 
+	if scopeErr != nil {
+		_ = writeWatchSSE(w, flusher, "error", "", nil, nil, fmt.Sprintf("bad constraint: %v", scopeErr))
+		return
+	}
 	seq, err := h.jobMirror.Collection().Watch(ctx, cursor)
 	if err != nil {
 		_ = writeWatchSSE(w, flusher, "error", "", nil, nil, err.Error())

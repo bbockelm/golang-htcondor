@@ -9,6 +9,7 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -30,13 +31,13 @@ import (
 // transport answered by the name.
 var sdkImplementation = &mcp.Implementation{Name: "htcondor-mcp", Version: "0.1.0"}
 
-// sdkServerFor builds a server whose catalogue is what these scopes may see.
+// sdkServerFor builds a server whose catalogue is what this grant may see.
 //
 // Registering the filtered catalogue rather than everything is what makes the
 // catalogue and the call gate the same fact: a tool this caller may not see is
 // not registered, so the SDK answers "unknown tool" rather than the server
 // consulting a second allowlist that can disagree with the first.
-func (s *Server) sdkServerFor(scopes []string) *mcp.Server {
+func (s *Server) sdkServerFor(g scopeGrant) *mcp.Server {
 	instructions := ""
 	if v := s.instructions.Load(); v != nil {
 		instructions = *v
@@ -46,7 +47,7 @@ func (s *Server) sdkServerFor(scopes []string) *mcp.Server {
 		SetCacheable: privateToTheCaller,
 	})
 	srv.AddReceivingMiddleware(s.logMCPRequest)
-	for _, t := range s.toolsFor(WithGrantedScopes(context.Background(), scopes)) {
+	for _, t := range s.toolsFor(withGrant(context.Background(), g)) {
 		srv.AddTool(
 			&mcp.Tool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema, Annotations: t.Annotations, OutputSchema: t.OutputSchema},
 			s.sdkToolHandler(t.Name),
@@ -230,9 +231,18 @@ func withClientGoneCancel(ctx context.Context) (context.Context, context.CancelF
 	return ctx, cancel
 }
 
-// sdkHTTPMiddleware carries the request's cancellation into the tool handlers.
+// sdkHTTPMiddleware carries the request's cancellation and the caller's
+// grant into the tool handlers.
+//
+// The grant comes from the same TokenInfo the catalogue was chosen by, so a
+// tool's own scope checks -- handleCallTool's, and the owner-scope tiers --
+// cannot read a different answer from the one that built the server.
 func sdkHTTPMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(withClientGone(r.Context(), r.Context().Done())))
+		ctx := withClientGone(r.Context(), r.Context().Done())
+		if info := auth.TokenInfoFromContext(ctx); info != nil {
+			ctx = withGrant(ctx, grantFromTokenInfo(info))
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

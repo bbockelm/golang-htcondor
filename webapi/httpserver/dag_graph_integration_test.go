@@ -48,6 +48,7 @@ import (
 //
 //	go test -tags=integration -run TestJobDag -timeout 20m -v ./httpserver/
 func TestJobDagIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -276,7 +277,7 @@ queue
 			if time.Now().After(deadline) {
 				t.Fatalf("DAGMan never got past startup; files present: %v", sortedKeys(files))
 			}
-			time.Sleep(5 * time.Second)
+			time.Sleep(1 * time.Second)
 		}
 
 		// ...and an uninstrumented workflow therefore has no graph to
@@ -318,7 +319,7 @@ queue
 				t.Fatalf("the dag endpoint never succeeded: status %d, body %s", status, body)
 			}
 			t.Logf("dag endpoint not ready yet (status %d): %s", status, body)
-			time.Sleep(5 * time.Second)
+			time.Sleep(1 * time.Second)
 		}
 
 		// The name is pinned by the OVERWRITE argument, but the reader
@@ -385,7 +386,7 @@ queue
 				t.Fatalf("no node ever left the ready state according to the status file: sources %v, "+
 					"status_file %q, %+v", resp.StateSources, resp.StatusFile, resp.Nodes)
 			}
-			time.Sleep(5 * time.Second)
+			time.Sleep(1 * time.Second)
 		}
 
 		// The status file is the authoritative source and it is the one
@@ -475,8 +476,9 @@ queue
 		// It used to go stale after 45 seconds and re-pay a whole-sandbox
 		// transfer, which is what made an ordinary page view slow -- and
 		// almost every real page view is more than 45 seconds after the
-		// last one.
-		time.Sleep(50 * time.Second)
+		// last one. Age the cached entry past that window rather than
+		// waiting it out.
+		ageDagCache(t, 50*time.Second)
 		aged := dagSandboxFetches.Load()
 		if status, later, body := get(t, visible, ""); status != http.StatusOK {
 			t.Fatalf("the load after the old staleness window failed: %d %s", status, body)
@@ -496,12 +498,13 @@ queue
 
 	// The authorization regression. A cache hit skips the sandbox
 	// transfer, and the transfer is where the schedd checks the job's
-	// owner (UserCheck2, per job, on a WRITE-registered command); the ad
-	// read in front of it is NOT owner-checked for a token or
-	// UserHeader caller, because bulkOwnerScope only scopes a browser
-	// session. So before this was fixed, the second user here was handed
-	// the first user's node names, edges, group labels and DAGMan status
-	// details straight out of the cache, for up to the full hour.
+	// owner (UserCheck2, per job, on a WRITE-registered command). Before
+	// this was fixed, the second user here was handed the first user's
+	// node names, edges, group labels and DAGMan status details straight
+	// out of the cache, for up to the full hour. The ad read in front of
+	// the cache is now owner-scoped for a UserHeader caller too, so the
+	// second user is refused there; failing that, it must reach the
+	// schedd rather than the cache.
 	t.Run("AnotherUserIsNotServedTheCachedWorkflow", func(t *testing.T) {
 		if got.NodeCount == 0 {
 			t.Skip("the structure never came back")
@@ -520,9 +523,18 @@ queue
 		status, resp, body := getAs(t, other, visible, "")
 		spent := dagSandboxFetches.Load() - before
 
-		// The assertion is that the second user REACHED the schedd. A
-		// cache hit is the whole bug: it answers without a transfer, and
-		// the transfer is the only owner check on this path.
+		if status == http.StatusNotFound {
+			for _, name := range []string{"produce_1", "produce_2", "COMBINE"} {
+				if strings.Contains(body, name) {
+					t.Errorf("the refusal leaks the workflow's node names (%q): %s", name, body)
+				}
+			}
+			return
+		}
+
+		// Otherwise the assertion is that the second user REACHED the
+		// schedd. A cache hit is the whole bug: it answers without a
+		// transfer, and the transfer is an owner check on this path.
 		if spent == 0 {
 			t.Fatalf("a second user was served the first user's workflow out of the cache, with no "+
 				"sandbox transfer and therefore no owner check: %d nodes, %d groups, dot file %q",
@@ -606,4 +618,23 @@ func firstLines(s string, n int) string {
 		lines = lines[:n]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// ageDagCache makes every cached DAG entry, and the structure it holds,
+// look d older, as if d had passed since the sandbox was read. The cache
+// and the structure are the only things that keep time on this path.
+func ageDagCache(t *testing.T, d time.Duration) {
+	t.Helper()
+	dagStructures.mu.Lock()
+	defer dagStructures.mu.Unlock()
+	if len(dagStructures.entries) == 0 {
+		t.Fatalf("the DAG cache is empty; there is nothing to age")
+	}
+	for i := range dagStructures.entries {
+		e := &dagStructures.entries[i]
+		e.at = e.at.Add(-d)
+		if e.value != nil {
+			e.value.fetchedAt = e.value.fetchedAt.Add(-d)
+		}
+	}
 }

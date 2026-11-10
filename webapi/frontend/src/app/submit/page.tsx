@@ -27,16 +27,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useRouter } from 'next/navigation';
 import {
   api,
   ApiError,
   MAX_TEMPLATE_INPUT_FILE_BYTES,
+  submitTargets,
+  type SubmitResponse,
   type Template,
   type TemplateColumn,
   type TemplateInputFile,
 } from '@/lib/api';
 import { ChatPanel, type ToolHandler } from '@/components/ChatPanel';
+import { SubmitTarget } from '@/components/SubmitTarget';
+import { SubmittedDialog } from '@/components/SubmittedDialog';
 import { Dropzone, type DroppedFile } from '@/components/Dropzone';
 import {
   ResourceRequestPanel,
@@ -173,7 +176,6 @@ echo "Hello from job $1@$(hostname)"
 };
 
 export default function SubmitPage() {
-  const router = useRouter();
   const queryClient = useQueryClient();
 
   // --- Template section state ---------------------------------------
@@ -206,6 +208,13 @@ export default function SubmitPage() {
     retry: false,
   });
   const currentUser = meQuery.data?.username ?? '';
+  // Multi-AP mode: the access point a submission goes to -- the home
+  // access point unless the user picks one of its alternates.
+  const multiAP = !!meQuery.data?.multi_ap;
+  const assignment = meQuery.data?.assignment;
+  const [pickedTarget, setPickedTarget] = useState('');
+  const targets = submitTargets(assignment);
+  const submitTarget = targets.includes(pickedTarget) ? pickedTarget : targets[0];
 
   const tplQuery = useQuery({
     queryKey: ['templates'],
@@ -535,6 +544,12 @@ export default function SubmitPage() {
   }, [mode, tableSource, uploadFiles.length, firstColumnName, active.contents]);
 
   // --- Submit -------------------------------------------------------
+  // The post-submit dialog's subject: the response of the submission
+  // just made, or null when there is none to report. The dialog is
+  // modal, so this clears on dismissal and nowhere else -- the draft
+  // cannot have changed underneath it.
+  const [submitted, setSubmitted] = useState<SubmitResponse | null>(null);
+
   const submit = useMutation({
     mutationFn: async () => {
       // If the user filled in (or kept) the resources widget, those
@@ -579,7 +594,7 @@ export default function SubmitPage() {
           effectiveRows,
         );
       }
-      const submitted = await api.jobs.submit(body);
+      const submitted = await api.jobs.submit(body, multiAP ? submitTarget : undefined);
 
       // Common files: template default attachments + the user's
       // dropzone uploads + any inline executable script. These go to
@@ -622,7 +637,14 @@ export default function SubmitPage() {
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
-      router.push(`/jobs/${res.job_ids[0]}`);
+      // Ask rather than navigate. Submitting used to send the user
+      // straight to the first job's page, which threw the draft away:
+      // the next iteration of a template meant walking back here and
+      // rebuilding it from nothing. The two things people do after a
+      // submit are look at what they sent and send another, and only
+      // one of them wants this page gone -- so the batch opens in its
+      // own tab and this one keeps the draft either way.
+      setSubmitted(res);
     },
   });
 
@@ -770,7 +792,8 @@ export default function SubmitPage() {
     effectiveRowsForGate,
     tableSource,
   ]);
-  const submitDisabled = submit.isPending || submitBlockedReason !== null;
+  const submitDisabled =
+    submit.isPending || submitBlockedReason !== null || (multiAP && !submitTarget);
 
   // Chat surface gating. Same /api/v1/chat/info probe the jobs page
   // uses; the server returns enabled=false when the LLM key isn't
@@ -1436,6 +1459,12 @@ export default function SubmitPage() {
 
       <ChatHighlight active={recentlyChanged.has('submit')}>
         <div className="space-y-2">
+          <SubmitTarget
+            multiAP={multiAP}
+            assignment={assignment}
+            value={pickedTarget}
+            onChange={setPickedTarget}
+          />
           <div className="flex items-center gap-3">
             <button
               onClick={() => submit.mutate()}
@@ -1476,6 +1505,12 @@ export default function SubmitPage() {
         </div>
       </ChatHighlight>
 
+      {submitted && (
+        <SubmittedDialog
+          result={submitted}
+          onDismiss={() => setSubmitted(null)}
+        />
+      )}
       {saveDialog && (
         <SaveTemplateDialog
           initial={saveDialog.initial}
@@ -2749,6 +2784,21 @@ async function mergeTemplateAndUserFiles(
   return out;
 }
 
+// emptyTable is what "no rows filled in" looks like: the one blank row
+// the table always keeps, because a table with zero rows would submit
+// zero jobs and offer nowhere to type.
+function emptyTable(columns: TemplateColumn[]): string[][] {
+  return [columns.map(() => '')];
+}
+
+// isEmptyTable reports whether the table is back to that state. It
+// decides both whether Clear has anything to do and whether Undo is
+// still safe to offer -- once the user has typed anything, restoring
+// the cleared rows would throw away the new work instead of the old.
+function isEmptyTable(rows: string[][]): boolean {
+  return rows.length === 1 && rows[0].every((cell) => cell.trim() === '');
+}
+
 // ----------------------------------------------------------------------
 // Table section: one row per job. Column headers come from the active
 // template; the user fills cells.
@@ -2776,6 +2826,12 @@ function TableSection({
   setCount: (n: number) => void;
 }) {
   const columnNames = columns.map((c) => c.name);
+  // The rows Clear discarded, kept so one misclick is not the end of a
+  // hand-typed parameter sweep. Undo is offered only while the table is
+  // still untouched (see isEmptyTable), so it expires on its own the
+  // moment the user starts typing again -- no timer, and no way for it
+  // to overwrite work done after the clear.
+  const [cleared, setCleared] = useState<string[][] | null>(null);
   // Count mode is always available even when the template has no
   // columns — that's the single-job fallback the page used to render
   // hardcoded; we now expose it as the explicit "Run N copies" option.
@@ -2916,7 +2972,40 @@ function TableSection({
             >
               × Duplicate all
             </button>
+            {/* Clearing row by row is the per-row × , which stops at the
+                last row and cannot empty it -- so a 50-row sweep took 49
+                clicks and still left a filled row behind. */}
+            <button
+              type="button"
+              onClick={() => {
+                setCleared(rows);
+                setRows(emptyTable(columns));
+              }}
+              disabled={isEmptyTable(rows)}
+              className="rounded-sm border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:hover:bg-white"
+              title="Empty every row and start the table over"
+            >
+              Clear table
+            </button>
           </div>
+          {/* Also gated on the column count: switching template between
+              the clear and the undo would otherwise restore values under
+              headers they were never typed for. */}
+          {cleared && cleared[0]?.length === columns.length && isEmptyTable(rows) && (
+            <p className="text-xs text-gray-500">
+              Cleared {cleared.length} row{cleared.length === 1 ? '' : 's'}.{' '}
+              <button
+                type="button"
+                onClick={() => {
+                  setRows(cleared);
+                  setCleared(null);
+                }}
+                className="font-medium text-brand-700 underline hover:text-brand-800"
+              >
+                Undo
+              </button>
+            </p>
+          )}
         </div>
       )}
     </SectionCard>

@@ -12,18 +12,21 @@ import type { BatchUsage, BatchUsageRow, ResourceUnit } from '@/lib/batches';
 export function BatchUsagePanel({
   usage,
   loading,
+  embedded,
 }: {
   usage: BatchUsage;
   loading?: boolean;
+  // Inside a section that has its own heading and frame (/batches/<id>).
+  embedded?: boolean;
 }) {
   const nothingToSay =
     usage.running === 0 && usage.idle === 0 && !loading;
   if (nothingToSay) return null;
 
   return (
-    <div className="border-t border-gray-200 bg-white px-3 py-2">
+    <div className={embedded ? '' : 'border-t border-gray-200 bg-white px-3 py-2'}>
       <div className="mb-1.5 flex flex-wrap items-baseline gap-2 text-[11px] text-gray-500">
-        <span className="font-medium uppercase tracking-wide">Resources</span>
+        {!embedded && <span className="font-medium uppercase tracking-wide">Resources</span>}
         <span>
           {usage.running.toLocaleString()} running, {usage.idle.toLocaleString()} idle
         </span>

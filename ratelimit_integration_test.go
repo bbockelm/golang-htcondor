@@ -78,13 +78,11 @@ func TestScheddQueryRateLimit(t *testing.T) {
 	// Create rate limiter manager
 	manager := ratelimit.ConfigFromHTCondor(cfg)
 
-	// Store old manager and restore after test
-	oldManager := getRateLimitManager()
-	defer func() {
-		if oldManager != nil {
-			globalRateLimitManager.Store(oldManager)
-		}
-	}()
+	// Restore whatever was installed before, nil included: a nil manager
+	// means "unlimited", and skipping its restore would leave these limits
+	// in place for every later test in the binary.
+	oldManager := globalRateLimitManager.Load()
+	t.Cleanup(func() { globalRateLimitManager.Store(oldManager) })
 	globalRateLimitManager.Store(manager)
 
 	constraint := "true"
@@ -218,13 +216,11 @@ func TestCollectorQueryRateLimit(t *testing.T) {
 	// Create rate limiter manager
 	manager := ratelimit.ConfigFromHTCondor(cfg)
 
-	// Store old manager and restore after test
-	oldManager := getRateLimitManager()
-	defer func() {
-		if oldManager != nil {
-			globalRateLimitManager.Store(oldManager)
-		}
-	}()
+	// Restore whatever was installed before, nil included: a nil manager
+	// means "unlimited", and skipping its restore would leave these limits
+	// in place for every later test in the binary.
+	oldManager := globalRateLimitManager.Load()
+	t.Cleanup(func() { globalRateLimitManager.Store(oldManager) })
 	globalRateLimitManager.Store(manager)
 
 	ctx := context.Background()

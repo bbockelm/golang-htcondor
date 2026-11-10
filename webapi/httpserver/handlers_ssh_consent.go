@@ -33,7 +33,9 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 )
 
@@ -117,8 +119,13 @@ type sshConsentView struct {
 	Exists bool `json:"session_exists"`
 	// CanCreate is false where this server runs no interactive
 	// manager, which makes the resource form pointless to show.
-	CanCreate      bool   `json:"can_create"`
-	JobID          string `json:"job_id,omitempty"`
+	CanCreate bool   `json:"can_create"`
+	JobID     string `json:"job_id,omitempty"`
+	// Schedd is, in multi-AP mode, the access point the existing
+	// session is on -- or, when there is none, the one a new session
+	// would be created on (the caller's assignment for interactive
+	// work).
+	Schedd         string `json:"schedd,omitempty"`
 	Status         string `json:"status,omitempty"`
 	HoldReason     string `json:"hold_reason,omitempty"`
 	HoldReasonCode int    `json:"hold_reason_code,omitempty"`
@@ -150,6 +157,8 @@ type sshConsentResult struct {
 	Approved bool   `json:"approved"`
 	Session  string `json:"session,omitempty"`
 	JobID    string `json:"job_id,omitempty"`
+	// Schedd is the access point the workspace is on, in multi-AP mode.
+	Schedd string `json:"schedd,omitempty"`
 	// Created distinguishes "your workspace was submitted" from "the
 	// one you already had is being used", which is the difference
 	// between waiting for the queue and not.
@@ -175,10 +184,16 @@ func (h *Handler) handleSSHConsentRead(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	if h.refuseForPlacementdSession(w, r, "The SSH gateway") {
+		return
+	}
 	ctx := r.Context()
 
-	username, _, ok := h.sshConsentIdentity(w, r)
+	username, groups, ok := h.sshConsentIdentity(w, r)
 	if !ok {
+		return
+	}
+	if !h.sshConsentInDomain(w, username) {
 		return
 	}
 	userCode, request, ok := h.sshConsentLookup(w, r, username, r.URL.Query().Get("user_code"))
@@ -201,7 +216,7 @@ func (h *Handler) handleSSHConsentRead(w http.ResponseWriter, r *http.Request) {
 	view.CanCreate = mgr != nil
 	if mgr != nil {
 		owner := ownerFromActor(username)
-		cctx, err := h.withCondorCredential(ctx, owner, sshGatewayScopes)
+		cctx, err := h.withCondorCredential(ctx, owner, sshGatewayScopes, nil)
 		if err != nil {
 			// Not fatal to the page. The login half of this screen
 			// works without ever reaching the queue, and refusing to
@@ -210,16 +225,27 @@ func (h *Handler) handleSSHConsentRead(w http.ResponseWriter, r *http.Request) {
 			h.logger.Warn(logging.DestinationHTTP,
 				"Could not look up interactive sessions for an SSH approval screen",
 				"username", owner, "error", err)
-		} else if info, err := findInteractiveSession(cctx, mgr, interactive.Caller{Actor: owner, Owner: owner}, session); err != nil {
+		} else if info, err := findInteractiveSession(cctx, mgr, interactive.Caller{Actor: username, Owner: owner}, session); err != nil {
 			h.logger.Warn(logging.DestinationHTTP,
 				"Could not look up interactive sessions for an SSH approval screen",
 				"username", owner, "error", err)
 		} else if info != nil {
 			view.Exists = true
 			view.JobID = info.JobID
+			view.Schedd = info.Schedd
 			view.Status = info.Status
 			view.HoldReason = info.HoldReason
 			view.HoldReasonCode = info.HoldReasonCode
+		}
+	}
+	if h.multi != nil && view.CanCreate && !view.Exists && session != "" {
+		// Where a new session would go, so the screen can say so.
+		if user, err := h.multi.svc.UserFor(username); err == nil {
+			a := h.assignmentInfo(ctx, apassign.Request{User: user, Subject: username,
+				Groups: append([]string(nil), groups...), Kind: apassign.KindInteractive})
+			if a != nil {
+				view.Schedd = a.Schedd
+			}
 		}
 	}
 
@@ -238,6 +264,9 @@ func (h *Handler) handleSSHConsentRead(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleSSHConsentApprove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if h.refuseForPlacementdSession(w, r, "The SSH gateway") {
 		return
 	}
 	ctx := r.Context()
@@ -259,9 +288,12 @@ func (h *Handler) handleSSHConsentApprove(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	if !h.sshConsentInDomain(w, username) {
+		return
+	}
 
 	var decision sshConsentDecision
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	setBodyLimit(w, r, 1<<16)
 	if err := json.NewDecoder(r.Body).Decode(&decision); err != nil {
 		h.writeError(w, http.StatusBadRequest, "Could not read the request body")
 		return
@@ -304,14 +336,23 @@ func (h *Handler) handleSSHConsentApprove(w http.ResponseWriter, r *http.Request
 	result := sshConsentResult{Approved: true, Session: session}
 
 	if decision.Create != nil {
-		info, created, err := h.sshConsentCreateSession(ctx, username, session, *decision.Create)
+		// The groups the browser session recorded, so an assignment
+		// rule on a group places the session as it places the user's
+		// other work (multi-AP mode).
+		cctx := apassign.WithCaller(ctx, apassign.Caller{Subject: username, Groups: append([]string(nil), groups...)})
+		info, created, err := h.sshConsentCreateSession(cctx, username, session, *decision.Create)
 		if err != nil {
+			if h.multi != nil && multiap.StatusOf(err) != http.StatusInternalServerError {
+				h.multiAPError(w, err)
+				return
+			}
 			h.writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		result.Created = created
 		if info != nil {
 			result.JobID = info.JobID
+			result.Schedd = info.Schedd
 		}
 	}
 
@@ -368,14 +409,23 @@ func (h *Handler) sshConsentCreateSession(ctx context.Context, username, session
 		return nil, false, err
 	}
 
+	// An identity in another UID domain is somebody else, not the
+	// same-named user here: refused, as REST and MCP refuse it, before
+	// the domain is stripped below.
+	if h.multi != nil {
+		if _, err := h.multi.svc.UserFor(username); err != nil {
+			return nil, false, err
+		}
+	}
+
 	mgr := h.interactiveManagerOrNil()
 	if mgr == nil {
 		return nil, false, errors.New("this access point does not run interactive sessions")
 	}
 
 	owner := ownerFromActor(username)
-	caller := interactive.Caller{Actor: owner, Owner: owner}
-	cctx, err := h.withCondorCredential(ctx, owner, sshGatewayScopes)
+	caller := interactive.Caller{Actor: username, Owner: owner}
+	cctx, err := h.withCondorCredential(ctx, owner, sshGatewayScopes, nil)
 	if err != nil {
 		return nil, false, fmt.Errorf("could not act as %s: %w", owner, err)
 	}
@@ -409,6 +459,21 @@ func (h *Handler) sshConsentCreateSession(ctx context.Context, username, session
 	}
 }
 
+// sshConsentInDomain refuses, in multi-AP mode, a browser identity in
+// another UID domain, or answers true. The approval screen strips the
+// domain to reach a session's owner; without this, alice@elsewhere
+// would read and create alice@UID_DOMAIN's workspaces.
+func (h *Handler) sshConsentInDomain(w http.ResponseWriter, username string) bool {
+	if h.multi == nil {
+		return true
+	}
+	if _, err := h.multi.svc.UserFor(username); err != nil {
+		h.multiAPError(w, err)
+		return false
+	}
+	return true
+}
+
 // sshConsentDefaults is what the approval form opens with.
 //
 // The operator's HTTP_API_SSH_GATEWAY_SESSION_* numbers where they set
@@ -425,6 +490,9 @@ func (h *Handler) sshConsentDefaults() InteractiveCreateTerminalRequest {
 	return req
 }
 
+// interactiveManagerOrNil is the session manager, or nil where this
+// server runs none. In multi-AP mode it places a new session by AP
+// assignment and reaches an existing one on the AP its record names.
 func (h *Handler) interactiveManagerOrNil() *interactive.Manager {
 	if h.mcpServer == nil {
 		return nil
@@ -510,7 +578,8 @@ func (h *Handler) sshConsentLookup(w http.ResponseWriter, r *http.Request, usern
 // account could sweep from a botnet. A user code is eight characters
 // of a 32-symbol alphabet and lives ten minutes, so the space is far
 // too large to walk at these rates -- the limits exist so that stays
-// true however many codes are outstanding.
+// true however many codes are outstanding. The server-rendered device
+// verification page spends the same budgets.
 const (
 	sshConsentAttemptsPerMinute = 20
 	sshConsentBurst             = 20
@@ -684,14 +753,20 @@ func csrfSafeMethod(method string) bool {
 	}
 }
 
-// hasBearerCredential reports whether the request carries an
-// Authorization header, which exempts it from the cross-site check.
+// hasBearerCredential reports whether the request carries a Bearer
+// token, which exempts it from the cross-site check.
 //
 // Not "is it valid" -- that is the handler's job and happens later.
 // The question here is only whether a browser could have attached this
-// by itself, and it could not: cookies and proxy-set headers ride along
-// automatically, an Authorization header is put there by whoever built
-// the request. A forged one simply fails to authenticate.
+// by itself, and for a Bearer token it could not: cookies and proxy-set
+// headers ride along automatically, a Bearer token is put there by
+// whoever built the request. A forged one simply fails to authenticate.
+//
+// Any other Authorization scheme is not exempt. A browser does attach
+// Basic credentials by itself once the user has entered them, cross-site
+// included, and a reverse proxy that authenticates with Basic and sets
+// the trusted user header is exactly the deployment this check protects.
 func hasBearerCredential(r *http.Request) bool {
-	return r.Header.Get("Authorization") != ""
+	token, err := extractBearerToken(r)
+	return err == nil && token != ""
 }

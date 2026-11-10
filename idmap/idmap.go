@@ -151,6 +151,11 @@ const (
 	// if such an account exists. Useful where most accounts carry their
 	// own name in GECOS anyway, and some carry nothing.
 	StrategyUsername Strategy = "username"
+	// StrategyPlacementd asks condor_placementd which access-point account
+	// the sign-in identity maps to. The resolver here does not implement
+	// it: the web server does, because it holds the placementd client. A
+	// Resolver given it ignores it.
+	StrategyPlacementd Strategy = "placementd"
 )
 
 // ParseStrategies reads an ordered, comma-separated list such as
@@ -164,11 +169,11 @@ func ParseStrategies(spec string) ([]Strategy, error) {
 			continue
 		}
 		switch name {
-		case StrategyGecos, StrategyUsername:
+		case StrategyGecos, StrategyUsername, StrategyPlacementd:
 			out = append(out, name)
 		default:
-			return nil, fmt.Errorf("unknown identity-map strategy %q (want %q or %q)",
-				raw, StrategyGecos, StrategyUsername)
+			return nil, fmt.Errorf("unknown identity-map strategy %q (want %q, %q or %q)",
+				raw, StrategyGecos, StrategyUsername, StrategyPlacementd)
 		}
 	}
 	if len(out) == 0 {

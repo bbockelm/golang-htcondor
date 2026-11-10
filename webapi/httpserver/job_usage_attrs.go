@@ -49,6 +49,11 @@ var usageAttrsToEvaluate = []string{
 // honest result is the visible "/Expr(...)/", not a silently invented number.
 // The integer/real distinction is preserved so a byte count does not acquire
 // a decimal point on its way through.
+//
+// GPU usage is served as recorded, even when more GPUs than the job held
+// could not have produced it: the ad is what HTCondor wrote. Pages that
+// derive a usage figure from it apply utilization.PlausibleGPUUsage's
+// rule themselves.
 func evaluateUsageAttrs(ad *classad.ClassAd) {
 	if ad == nil {
 		return

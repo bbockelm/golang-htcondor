@@ -54,6 +54,23 @@ type QueryOptions struct {
 	// Owner specifies the job owner for FetchMyJobs queries
 	// If empty and FetchMyJobs is set, uses authenticated username from context
 	Owner string
+
+	// PrivateAttributes asks a collector query to return each ad's
+	// private attributes -- the ones HTCondor moves into a separate ad,
+	// which is every attribute whose name begins with "_condor_Priv"
+	// plus a fixed list (claim ids, capabilities).
+	//
+	// Since HTCondor 10.0 the collector sends them only when the query
+	// asks AND the caller verifies at NEGOTIATOR or ADMINISTRATOR level
+	// to the collector. Asking without that authorization is not
+	// refused: the reply simply comes back filtered. A caller therefore
+	// has to check that the attribute it wanted is present rather than
+	// treat a successful query as proof it was sent.
+	//
+	// These attributes are bearer credentials. Anything that reaches a
+	// user -- an API response, a log line, an error message -- has to
+	// drop them again.
+	PrivateAttributes bool
 }
 
 // DefaultJobProjection returns the default list of job attributes to include in query results

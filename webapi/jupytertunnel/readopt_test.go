@@ -73,7 +73,7 @@ func TestSessionSurvivesARestart(t *testing.T) {
 		t.Fatal("the new registry already knows the session; the test is not exercising adoption")
 	}
 
-	inst, err := second.AdoptInstance(id, "alice", time.Now(), nil)
+	inst, err := second.AdoptInstance(id, "alice", time.Now(), nil, false)
 	if err != nil {
 		t.Fatalf("AdoptInstance: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestSessionSurvivesARestart(t *testing.T) {
 func TestAdoptionMintsNoToken(t *testing.T) {
 	secret := make([]byte, 32)
 	reg, _ := NewRegistryWithSecret(secret, newMemRoller())
-	inst, err := reg.AdoptInstance("deadbeef", "alice", time.Now(), nil)
+	inst, err := reg.AdoptInstance("deadbeef", "alice", time.Now(), nil, false)
 	if err != nil {
 		t.Fatalf("AdoptInstance: %v", err)
 	}
@@ -102,10 +102,10 @@ func TestAdoptionMintsNoToken(t *testing.T) {
 
 func TestAdoptionNeedsIdentity(t *testing.T) {
 	reg, _ := NewRegistryWithSecret(make([]byte, 32), newMemRoller())
-	if _, err := reg.AdoptInstance("", "alice", time.Now(), nil); err == nil {
+	if _, err := reg.AdoptInstance("", "alice", time.Now(), nil, false); err == nil {
 		t.Error("adopted a session with no id")
 	}
-	if _, err := reg.AdoptInstance("x", "", time.Now(), nil); err == nil {
+	if _, err := reg.AdoptInstance("x", "", time.Now(), nil, false); err == nil {
 		t.Error("adopted a session with no owner; the proxy authorizes on owner")
 	}
 }
@@ -114,8 +114,8 @@ func TestAdoptionNeedsIdentity(t *testing.T) {
 // helper has already attached does not drop its tunnel.
 func TestAdoptionIsIdempotent(t *testing.T) {
 	reg, _ := NewRegistryWithSecret(make([]byte, 32), newMemRoller())
-	a, _ := reg.AdoptInstance("id1", "alice", time.Now(), nil)
-	b, _ := reg.AdoptInstance("id1", "alice", time.Now(), nil)
+	a, _ := reg.AdoptInstance("id1", "alice", time.Now(), nil, false)
+	b, _ := reg.AdoptInstance("id1", "alice", time.Now(), nil, false)
 	if a != b {
 		t.Error("a second adoption replaced the instance, discarding any attached tunnel")
 	}

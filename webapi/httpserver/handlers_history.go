@@ -12,16 +12,24 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 )
 
 // HistoryListResponse represents a history listing response. Source and
 // SourceNote name the backend that answered ("htcondordb" when a
 // synchronized mirror served it, absent for the schedd) so a caller can
 // tell how fresh the records are.
+//
+// ScanLimitReached is set when the schedd stopped at its scan limit
+// before finding as many records as asked for: it examined only the
+// RecordsScanned most recent history records, so older matches are not
+// in the answer -- even an empty one.
 type HistoryListResponse struct {
-	Ads        []*classad.ClassAd `json:"ads"`
-	Source     string             `json:"source,omitempty"`
-	SourceNote string             `json:"source_note,omitempty"`
+	Ads              []*classad.ClassAd `json:"ads"`
+	Source           string             `json:"source,omitempty"`
+	SourceNote       string             `json:"source_note,omitempty"`
+	ScanLimitReached bool               `json:"scan_limit_reached,omitempty"`
+	RecordsScanned   int                `json:"records_scanned,omitempty"`
 }
 
 // handleJobHistory handles GET /api/v1/jobs/archive
@@ -32,6 +40,10 @@ func (s *Handler) handleJobHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.multi != nil {
+		s.handleMultiHistory(w, r)
+		return
+	}
 	opts := &htcondor.HistoryQueryOptions{
 		Source: htcondor.HistorySourceJobHistory,
 	}
@@ -49,6 +61,10 @@ func (s *Handler) handleJobEpochs(w http.ResponseWriter, r *http.Request) {
 	opts := &htcondor.HistoryQueryOptions{
 		Source: htcondor.HistorySourceJobEpoch,
 	}
+	if s.multi != nil {
+		s.handleMultiEpochs(w, r, opts)
+		return
+	}
 	s.handleHistoryQuery(w, r, opts)
 }
 
@@ -63,7 +79,31 @@ func (s *Handler) handleJobTransfers(w http.ResponseWriter, r *http.Request) {
 	opts := &htcondor.HistoryQueryOptions{
 		Source: htcondor.HistorySourceTransfer,
 	}
+	if s.multi != nil {
+		s.handleMultiEpochs(w, r, opts)
+		return
+	}
 	s.handleHistoryQuery(w, r, opts)
+}
+
+// historyCursorPredicate selects the records strictly before
+// (cluster, proc) in (ClusterId, ProcId) order.
+//
+// It is the textbook keyset predicate
+//
+//	ClusterId < C || (ClusterId == C && ProcId < P)
+//
+// with "ClusterId <= C" hoisted out as a conjunct of its own. The two
+// evaluate to the same value for every ClusterId and ProcId -- undefined,
+// error, a string, a real, absent -- because ClusterId <= C is the
+// disjunction of the other two comparisons and each of the three is
+// undefined or an error exactly when the others are. The hoisted form is
+// the one the htcondordb archive can use: its planner turns a top-level
+// "ClusterId <= C" into an index or zone-map probe, and gets nothing from
+// a top-level ||, so the textbook form reads the whole archive to find
+// each page. The schedd evaluates either form the same way.
+func historyCursorPredicate(cluster, proc int) string {
+	return fmt.Sprintf("ClusterId <= %d && (ClusterId < %d || ProcId < %d)", cluster, cluster, proc)
 }
 
 // handleHistoryQuery is the common handler for all history query types
@@ -92,9 +132,8 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 	// history by ANDing in a "strictly older than the last record I
 	// saw" predicate. The (ClusterId, ProcId) tuple is the natural
 	// sort key — schedd-assigned, monotonically increasing per
-	// cluster, and each cluster/proc is unique. The OR-of-pairs form
-	// is the standard SQL keyset pagination idiom and is parseable
-	// by the schedd's classad expression evaluator.
+	// cluster, and each cluster/proc is unique. See
+	// historyCursorPredicate for its form.
 	//
 	// HistoryQueryOptions.Since is NOT what we want here — that's
 	// "stop scanning when matched" (newer-than semantics). For
@@ -117,10 +156,7 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 				return
 			}
 		}
-		cursorPredicate := fmt.Sprintf(
-			"(ClusterId < %d || (ClusterId == %d && ProcId < %d))",
-			beforeCluster, beforeCluster, beforeProc,
-		)
+		cursorPredicate := historyCursorPredicate(beforeCluster, beforeProc)
 		// AND the cursor with the user-supplied constraint. Wrap
 		// both in parens so operator precedence in the user's
 		// expression doesn't accidentally break the cursor predicate.
@@ -253,8 +289,8 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 	// job-history source is mirrored. An unscoped read routes as readily
 	// as a scoped one -- QUERY_SCHEDD_HISTORY is READ-level on the schedd
 	// and applies no owner filter of its own -- but only for a caller the
-	// schedd has identified, since routing is what skips asking it. Any
-	// miss falls through to the schedd.
+	// schedd has accepted at READ, since routing is what skips asking it.
+	// Any miss falls through to the schedd.
 	if baseOpts.Source == htcondor.HistorySourceJobHistory {
 		// scan_limit is a budget for the schedd's backwards scan of the
 		// history FILE; the archive prunes by zone map and has no
@@ -266,7 +302,7 @@ func (s *Handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request, bas
 		if !scanLimitExplicit {
 			mirrorOpts.ScanLimit = 0
 		}
-		served, decision := s.historyFromMirror(ctx, w, constraint, &mirrorOpts,
+		served, decision := s.historyFromMirror(ctx, w, r, constraint, &mirrorOpts,
 			htcondor.GetAuthenticatedUserFromContext(ctx))
 		if served {
 			return
@@ -293,7 +329,15 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh, err := s.getSchedd().QueryHistoryStream(ctx, constraint, opts, streamOpts)
+	// The stats are written before the channel closes, so they are read
+	// only after the loop below has drained it.
+	var stats htcondor.HistoryScanStats
+	streamQueryOpts := *opts
+	streamQueryOpts.Stats = &stats
+	// The routed AP's schedd in multi-AP mode (multiap_epochs.go).
+	resultCh, err := s.scheddFor(ctx).QueryHistoryStream(ctx, constraint, &streamQueryOpts, streamOpts)
+	// A whole ad's requests can be evaluated; a projected one's cannot.
+	wholeAd := isWholeAdProjection(opts.Projection)
 	if err != nil {
 		// Pre-request error - check type and set appropriate status
 		switch {
@@ -320,6 +364,9 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 	// Stream history ads as they arrive
 	adCount := 0
 	var errorMsg string
+	// stoppedEarly: the loop quit with the channel still open, so the
+	// query may still be running and its stats are not ready to read.
+	stoppedEarly := false
 	for result := range resultCh {
 		if result.Err != nil {
 			// Check if it's a rate limit error
@@ -336,15 +383,26 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 			}
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
-			errorMsg = result.Err.Error()
+			errorMsg = streamErrorMessage(result.Err)
 			break
 		}
 
 		// Check limit
 		if opts.Limit > 0 && adCount >= opts.Limit {
+			stoppedEarly = true
 			break
 		}
 
+		// Usage attributes go out as numbers, as on the live paths.
+		evaluateUsageAttrs(result.Ad)
+		if wholeAd {
+			annotateEvaluatedRequests(result.Ad)
+		}
+		if sch := routedSchedd(ctx); sch != "" && result.Ad != nil {
+			// The access point it came from: the same cluster.proc on
+			// another AP is another job.
+			_ = result.Ad.Set(multiap.AttrScheddName, sch)
+		}
 		// Marshal the ad
 		adJSON, err := json.Marshal(result.Ad)
 		if err != nil {
@@ -377,16 +435,33 @@ func (s *Handler) streamHistoryQuery(ctx context.Context, w http.ResponseWriter,
 			s.logger.Error(logging.DestinationHTTP, "Failed to write response footer with error", "error", err)
 		}
 	} else {
-		if _, err := w.Write([]byte(`]}`)); err != nil {
+		footer := ""
+		if !stoppedEarly {
+			footer = scanLimitFooter(stats)
+		}
+		if _, err := w.Write([]byte(`]` + footer + `}`)); err != nil {
 			s.logger.Error(logging.DestinationHTTP, "Failed to write response footer", "error", err)
 		}
 	}
 }
 
+// scanLimitFooter renders a cut-off scan's fields for the end of a streamed
+// response object (see HistoryListResponse), or "" when the scan was not cut
+// off.
+func scanLimitFooter(stats htcondor.HistoryScanStats) string {
+	if !stats.ScanLimitReached {
+		return ""
+	}
+	return fmt.Sprintf(`,"scan_limit_reached":true,"records_scanned":%d`, stats.RecordsScanned)
+}
+
 // bufferHistoryQuery performs a buffered history query
 func (s *Handler) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter, _ *http.Request, constraint string, opts *htcondor.HistoryQueryOptions) {
 	// Query history with buffering
-	ads, err := s.getSchedd().QueryHistoryWithOptions(ctx, constraint, opts)
+	var stats htcondor.HistoryScanStats
+	bufferedOpts := *opts
+	bufferedOpts.Stats = &stats
+	ads, err := s.scheddFor(ctx).QueryHistoryWithOptions(ctx, constraint, &bufferedOpts)
 	if err != nil {
 		// Check error type and set appropriate status
 		switch {
@@ -400,10 +475,25 @@ func (s *Handler) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter,
 		return
 	}
 
+	wholeAd := isWholeAdProjection(opts.Projection)
+	sch := routedSchedd(ctx)
+	for _, ad := range ads {
+		evaluateUsageAttrs(ad)
+		if wholeAd {
+			annotateEvaluatedRequests(ad)
+		}
+		if sch != "" {
+			_ = ad.Set(multiap.AttrScheddName, sch)
+		}
+	}
 	// Return results as JSON
 	response := HistoryListResponse{
-		Ads:    ads,
-		Source: "schedd",
+		Ads:              ads,
+		Source:           "schedd",
+		ScanLimitReached: stats.ScanLimitReached,
+	}
+	if stats.ScanLimitReached {
+		response.RecordsScanned = stats.RecordsScanned
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }
@@ -412,12 +502,11 @@ func (s *Handler) bufferHistoryQuery(ctx context.Context, w http.ResponseWriter,
 // when it must be, returning the constraint to use and whether it ended
 // up scoped.
 //
-// A browser session that is not in the admin group must not be able to
-// read every user's history — the same enforcement /api/v1/jobs applies
-// to the live queue, which the archive endpoint was missing. The default
-// is unscoped, which preserves the behavior bearer-token API callers
-// have today; they can opt in with owned_by_me=true. A non-admin browser
-// session is scoped regardless of the parameter.
+// A caller that is not an administrator (seesAllJobs), bearer or browser
+// session, must not be able to read every user's history — the same
+// enforcement /api/v1/jobs applies to the live queue. It is scoped
+// regardless of the parameter. An administrator is unscoped by default
+// and can opt in with owned_by_me=true.
 //
 // Whether the result may come from the htcondordb mirror is a separate
 // question, decided on the caller's identity rather than on scoping;
@@ -431,7 +520,13 @@ func (s *Handler) historyOwnerScope(ctx context.Context, r *http.Request, constr
 		}
 		ownedByMe = parsed
 	}
-	if !s.resolveOwnerScope(r, ownedByMe) {
+	if s.multi != nil {
+		// The caller's User on the AP the read was routed to, unless the
+		// caller is a queue superuser there.
+		scoped, err := s.jobsOwnerScope(ctx, r, constraint, jobScopeRead)
+		return scoped, true, err
+	}
+	if !s.resolveOwnerScope(ctx, r, ownedByMe) {
 		return constraint, false, nil
 	}
 
@@ -442,7 +537,7 @@ func (s *Handler) historyOwnerScope(ctx context.Context, r *http.Request, constr
 	// scopeToOwner re-serializes the caller's constraint so it cannot
 	// escape the enclosing AND; an unparseable one is rejected rather
 	// than widened.
-	scoped, err := scopeToOwner(ownerFromActor(actor), constraint)
+	scoped, err := scopeToActor(ctx, actor, constraint)
 	if err != nil {
 		return "", false, fmt.Errorf("invalid constraint: %w", err)
 	}

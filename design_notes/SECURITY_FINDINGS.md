@@ -80,10 +80,13 @@ detail. Listed here so this doc is complete:
   `condor:/*` scopes narrow rather than expand schedd authz, and
   `mapCondorScopesToAuthz` already drops ADMINISTRATOR / CONFIG /
   DAEMON / NEGOTIATOR.
-- Auth H3 (JWT signature trust): tokens now have a `Validated`
-  flag set by a 2xx-response middleware (lazy validation).
-  Identity reads use `ValidatedUsername` which returns "" until
-  the schedd handshake has accepted the token at least once.
+- Auth H3 (JWT signature trust): an unverified JWT `sub` is never
+  an identity. Identity reads use `ValidatedUsername`, which returns
+  "" unless this server verified the bearer itself (`AddValidated`);
+  a JWT bearer's identity otherwise comes only from asking the
+  schedd who the connection is (`actorForSession`). A successful
+  HTTP response is not evidence the token was accepted: many
+  endpoints answer 2xx without presenting it to a daemon.
 - Auth H4 (`extractUsernameFromToken` confused logic): comment
   updated to reflect actual behavior.
 - Frontend C1 (XSS via /files/): `Content-Disposition: attachment`

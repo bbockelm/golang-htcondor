@@ -19,6 +19,8 @@ package httpserver
 // exist, or this server is too old to aggregate archives) the endpoint
 // answers 200 {enabled:false} rather than an error, so a caller can hide
 // the feature without special-casing a failure.
+//
+// Multi-AP mode reads the federation hub instead (multiap_metrics.go).
 
 import (
 	"context"
@@ -31,6 +33,10 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
+
+	"github.com/bbockelm/golang-htcondor/webapi/aggregate"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/bbockelm/golang-htcondor/webapi/utilization"
 )
 
 // metricsTableDef is an allowlisted archive table and the attribute its
@@ -57,7 +63,7 @@ var metricsAggFuncs = map[string]dbrpc.AggFunc{
 
 // metricsIdent guards attribute names before they go into a group column or
 // an aggregate arg. Constraints are re-serialized by the ClassAd parser
-// (bulkOwnerScope), but group/agg attrs are passed as names, so keep them
+// (localReadOwnerScope), but group/agg attrs are passed as names, so keep them
 // to plain ClassAd identifiers.
 var metricsIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -82,6 +88,11 @@ type metricsResponse struct {
 	Columns       []metricsColumn `json:"columns,omitempty"`
 	Rows          [][]string      `json:"rows,omitempty"`
 	Truncated     bool            `json:"truncated,omitempty"`
+	// Sources and Job are multi-AP mode's (multiap_metrics.go): the
+	// sources block every multi-AP read carries, and the complete id of
+	// the job a per-job read was for. Single-AP responses carry neither.
+	Sources *multiap.Sources `json:"sources,omitempty"`
+	Job     *metricsJob      `json:"job,omitempty"`
 }
 
 func (s *Handler) handleMetricsQuery(w http.ResponseWriter, r *http.Request) {
@@ -94,6 +105,10 @@ func (s *Handler) handleMetricsQuery(w http.ResponseWriter, r *http.Request) {
 	def, ok := metricsTables[table]
 	if !ok {
 		s.writeError(w, http.StatusNotFound, fmt.Sprintf("unknown metrics table %q", table))
+		return
+	}
+	if s.multi != nil {
+		s.handleMultiMetricsQuery(w, r, table, def)
 		return
 	}
 
@@ -139,16 +154,27 @@ func (s *Handler) handleMetricsQuery(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Owner-scope exactly as the bulk job endpoints do: a non-admin browser
-	// session is confined to its own Owner, an admin or API-token caller is
-	// left as-is. Archive reads are not ownership-checked downstream, so
-	// this clause is what keeps one user out of another's samples.
-	constraint, err = s.bulkOwnerScope(ctx, r, constraint)
+	// Every caller but an administrator is confined to its own Owner,
+	// bearer or browser alike. The mirror is read with this daemon's
+	// credential and nothing downstream checks ownership, so this clause
+	// is what keeps one user out of another's samples.
+	constraint, err = localReadOwnerScope(ctx, constraint, s.seesAllJobs(ctx, r, jobScopeRead))
+	if errors.Is(err, errUnidentifiedCaller) {
+		s.writeError(w, http.StatusUnauthorized, "Authentication failed: "+err.Error())
+		return
+	}
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	// The mirror is read with this daemon's credential, so it answers
+	// only a caller the schedd accepts at READ. There is no schedd to
+	// fall back to here.
+	if !s.mirrorReadVerified(ctx, r) {
+		s.writeError(w, http.StatusForbidden, errMirrorNotVerified.Error())
+		return
+	}
 	dbc, closer, _, err := s.dbMirror.Client(ctx)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("mirror unavailable: %v", err))
@@ -156,7 +182,7 @@ func (s *Handler) handleMetricsQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	defer closer()
 
-	qctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	qctx, cancel := context.WithTimeout(ctx, multiap.MetricsTimeout)
 	defer cancel()
 
 	rows, err := dbc.ArchiveAggregateBucketed(qctx, table, constraint, groupCols, aggs)
@@ -172,11 +198,17 @@ func (s *Handler) handleMetricsQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.writeJSON(w, http.StatusOK, metricsResult(table, def, bucket, append(groups, aggCols...), rows))
+}
+
+// metricsResult is the enabled response: the columns, and the rows up to
+// metricsMaxRows.
+func metricsResult(table string, def metricsTableDef, bucket int64, cols []metricsColumn, rows []dbrpc.AggRow) metricsResponse {
 	resp := metricsResponse{
 		Enabled:  true,
 		Table:    table,
 		TimeAttr: def.timeAttr,
-		Columns:  append(groups, aggCols...),
+		Columns:  cols,
 	}
 	if bucket > 0 {
 		resp.BucketSeconds = bucket
@@ -187,11 +219,11 @@ func (s *Handler) handleMetricsQuery(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		out := make([]string, 0, len(row.Group)+len(row.Values))
-		out = append(out, row.Group...)
+		out = append(out, aggregate.GroupLabels(row)...)
 		out = append(out, row.Values...)
 		resp.Rows = append(resp.Rows, out)
 	}
-	s.writeJSON(w, http.StatusOK, resp)
+	return resp
 }
 
 // metricsUnavailable reports whether the error means "this server cannot
@@ -269,13 +301,27 @@ func parseMetricsAggs(spec string) ([]dbrpc.AggSpec, []metricsColumn, error) {
 		if arg == "*" && f != dbrpc.AggCount {
 			return nil, nil, fmt.Errorf("%s requires an attribute, not *", fn)
 		}
-		aggs = append(aggs, dbrpc.AggSpec{Func: f, Arg: arg})
+		spec := dbrpc.AggSpec{Func: f, Arg: arg}
+		if metricsGPUUsageAttr(arg) {
+			spec.Filter = utilization.GPUUsageSampleFilter(arg)
+		}
+		aggs = append(aggs, spec)
 		cols = append(cols, metricsColumn{Name: fn + "_" + arg, Kind: "metric", Func: fn, Attr: arg})
 	}
 	if len(aggs) == 0 {
 		return nil, nil, fmt.Errorf("at least one agg is required, e.g. agg=max:MemoryUsage")
 	}
 	return aggs, cols, nil
+}
+
+// metricsGPUUsageAttr reports whether a sample attribute is GPU usage in
+// GPUs kept busy. An aggregate over one counts only the samples whose
+// usage the job's GPUs could have produced: an execute point sometimes
+// reports thousands of GPUs busy on a two-GPU job, and one such sample
+// would swamp every other in its bucket. The filter narrows only that
+// aggregate, so the bucket's other columns still see every sample.
+func metricsGPUUsageAttr(attr string) bool {
+	return strings.EqualFold(attr, "GpuUtil") || strings.EqualFold(attr, "GPUsAverageUsage")
 }
 
 // metricsConstraint ANDs the optional time window onto the caller's
@@ -285,24 +331,34 @@ func metricsConstraint(constraint, timeAttr, since, until string) (string, error
 	if constraint == "" {
 		constraint = "true"
 	}
-	add := func(base, clause string) string {
-		return fmt.Sprintf("(%s) && (%s)", base, clause)
+	window, err := metricsWindow(timeAttr, since, until)
+	if err != nil {
+		return "", err
 	}
+	for _, clause := range window {
+		constraint = fmt.Sprintf("(%s) && (%s)", constraint, clause)
+	}
+	return constraint, nil
+}
+
+// metricsWindow is the optional time window on timeAttr, as clauses.
+func metricsWindow(timeAttr, since, until string) ([]string, error) {
+	var out []string
 	if since = strings.TrimSpace(since); since != "" {
 		n, err := strconv.ParseInt(since, 10, 64)
 		if err != nil {
-			return "", fmt.Errorf("invalid since (want unix seconds): %w", err)
+			return nil, fmt.Errorf("invalid since (want unix seconds): %w", err)
 		}
-		constraint = add(constraint, fmt.Sprintf("%s >= %d", timeAttr, n))
+		out = append(out, fmt.Sprintf("%s >= %d", timeAttr, n))
 	}
 	if until = strings.TrimSpace(until); until != "" {
 		n, err := strconv.ParseInt(until, 10, 64)
 		if err != nil {
-			return "", fmt.Errorf("invalid until (want unix seconds): %w", err)
+			return nil, fmt.Errorf("invalid until (want unix seconds): %w", err)
 		}
-		constraint = add(constraint, fmt.Sprintf("%s <= %d", timeAttr, n))
+		out = append(out, fmt.Sprintf("%s <= %d", timeAttr, n))
 	}
-	return constraint, nil
+	return out, nil
 }
 
 func splitCSV(s string) []string {

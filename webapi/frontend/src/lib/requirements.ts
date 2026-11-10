@@ -12,6 +12,17 @@
 // Machine) plus a single "standard resource requirements" summary, so the
 // UI can render a line per real requirement.
 
+// unwrapExpr returns the expression inside the "/Expr(...)/" form the API
+// uses to send an attribute whose value is an unevaluated expression (see
+// ClassAd.marshalValue on the server). Requirements always arrives that
+// way, so without this the whole expression reads as one opaque string
+// and nothing below can split it. Anything else is returned trimmed.
+export function unwrapExpr(value: string | undefined | null): string {
+  const s = (value ?? '').trim();
+  const m = /^\/Expr\(([\s\S]*)\)\/$/.exec(s);
+  return m ? m[1].trim() : s;
+}
+
 // splitTopLevel splits s on the given operator ("&&" / "||") only where it
 // sits at parenthesis depth 0 and outside a string literal. Returns the
 // parts (length 1 when the operator does not appear at the top level).
@@ -126,6 +137,11 @@ function standardMatch(normalized: string): keyof StandardReqs | null {
   if (geRequest('memory', 'requestmemory')) return 'memory';
   if (geRequest('disk', 'requestdisk')) return 'disk';
   if (geRequest('gpus', 'requestgpus')) return 'gpus';
+  // The form condor_submit emits once request_gpus is set: the slot's
+  // GPUs that satisfy the job's RequireGPUs, counted against the request.
+  if (/^countmatches\((my\.)?requiregpus, ?(target\.)?availablegpus\) >= requestgpus$/.test(n)) {
+    return 'gpus';
+  }
   if (presence('arch')) return 'arch';
   if (presence('opsys')) return 'opsys';
   if (truthy('hasfiletransfer')) return 'fileTransfer';
@@ -136,14 +152,14 @@ export interface RequirementsSummary {
   notable: string[]; // cleaned, human-readable notable clauses
   standard: StandardReqs;
   hasStandard: boolean;
-  raw: string; // the original expression, trimmed
+  raw: string; // the expression, unwrapped from "/Expr(...)/" and trimmed
   empty: boolean; // no requirements at all
 }
 
 export function summarizeRequirements(
   expr: string | undefined | null,
 ): RequirementsSummary {
-  const raw = (expr ?? '').trim();
+  const raw = unwrapExpr(expr);
   const standard: StandardReqs = {
     cpus: false,
     memory: false,

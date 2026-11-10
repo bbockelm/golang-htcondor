@@ -16,6 +16,10 @@ A Model Context Protocol (MCP) server for managing HTCondor jobs. This server ex
 
 The Model Context Protocol (MCP) is an open standard that enables AI assistants to securely interact with external data sources and tools. MCP servers expose specific capabilities (called "tools" and "resources") that AI assistants can discover and use.
 
+## What this server is not
+
+This server is not a sandbox. An agent reaching it holds the privileges of whoever authenticated, which are the privileges HTCondor already grants that person. Submitting a DAG runs its PRE/POST scripts on the access point as that user, the interactive session tools hand back a shell, and pool queries describe other users' running jobs. Before enabling MCP for a site, read [MCP is not a sandbox](../../docs/server-agents.md#mcp-is-not-a-sandbox), which covers what that means in practice and which controls actually constrain it.
+
 ## Installation
 
 ```bash
@@ -176,6 +180,73 @@ commit it was built from (and whether that tree was dirty), and the
 versions of the golang-htcondor, ClassAd, and CEDAR libraries linked in.
 Read-only, no arguments. Use it to confirm which code is actually
 deployed — for example, after a redeploy.
+
+### query_pool
+
+Describe the pool, as `condor_status` does: execute slots and their
+state, CPUs/GPUs/memory claimed and unclaimed, machines, and the pool's
+schedds, submitters, negotiator and collector. Read-only; offered when the
+server has a collector.
+
+**Input:**
+- `ad_type` (string, optional): `slots` (default), `schedd`, `submitter`, `negotiator` or `collector`
+- `mode` (string, optional): `summary` (default) or `list`
+- `constraint` (string, optional): ClassAd expression selecting ads
+- `group_by` (array, optional): summary only; attributes to count by (default for slots: `State`, `Activity`)
+- `projection` (array, optional): list only; attributes to return (default: a working set per ad type; `["*"]` for all)
+- `limit` (integer, optional): list only; default 50, ceiling 500
+
+A summary covers every matching ad. For slots it reports slot types and,
+for `Cpus`, `Memory` and `GPUs`, the total and how much is in claimed,
+unclaimed and other-state slots. Each slot contributes its own value: a
+partitionable slot advertises what it has left and each dynamic slot what
+it holds, so the totals are the matched machines' capacity unless the
+constraint excludes dynamic slots. Slots that do not advertise an
+attribute are counted under `missing`, not added as zero. Claim ids and
+other private attributes are never returned and cannot be named in any
+argument.
+
+Slot and submitter ads describe other users: who is running where, their
+project, and their jobs' resource use. `HTTP_API_POOL_QUERY_IDENTITY` confines a caller without the cross-user read privilege to attributes describing machines rather than people, and refuses submitter ads outright; `admin` requires that privilege for any pool query. See [Pool queries and other users' identities](../../docs/server-agents.md#pool-queries-and-other-users-identities).
+
+### get_access_point_policy
+
+Report the access point's configuration that decides how a user's jobs are
+submitted and treated, one sentence per setting, each marked when the site
+changed it from HTCondor's default. Read-only, no arguments (in multi-AP
+mode, `schedd` names an access point other than the caller's home one).
+
+The values are asked of the schedd (`DC_CONFIG_VAL`, READ-level), never
+taken from this server's own configuration, and only from an allowlist:
+
+- **Submission limits**: `MAX_JOBS_PER_SUBMISSION`, `MAX_JOBS_PER_OWNER`,
+  `MAX_JOBS_SUBMITTED`, `MAX_RUNNING_SCHEDULER_JOBS_PER_OWNER` (which caps
+  concurrent DAGs per user).
+- **Submit requirements**: `SUBMIT_REQUIREMENT_NAMES` and, per name, the
+  expression, its `_REASON` and `_IS_WARNING`.
+- **Job transforms**: `JOB_TRANSFORM_NAMES` and, per name, a summary --
+  its `REQUIREMENTS` and the attributes it sets, defaults, copies, renames
+  or deletes -- never the transform text.
+- **Request defaults**: `JOB_DEFAULT_REQUEST{CPUS,MEMORY,DISK,GPUS}`.
+- **Hold, remove and release policy**: `SYSTEM_PERIODIC_{HOLD,REMOVE,RELEASE}`,
+  their `_NAMES` lists and named forms, each with its `_REASON` (and
+  `_SUBCODE` for holds), and `SYSTEM_MAX_RELEASES`.
+- **File transfer**: `MAX_TRANSFER_INPUT_MB`, `MAX_TRANSFER_OUTPUT_MB`,
+  `MAX_CONCURRENT_UPLOADS`, `MAX_CONCURRENT_DOWNLOADS`.
+- **DAGMan**: `DAGMAN_MAX_JOBS_IDLE`, `DAGMAN_MAX_JOBS_SUBMITTED`,
+  `DAGMAN_MAX_PRE_SCRIPTS`, `DAGMAN_MAX_POST_SCRIPTS`, with the effective
+  value when `HTTP_API_DAGMAN_ENVIRONMENT` overrides one.
+- **Features**: `SCHEDD_ALLOW_LATE_MATERIALIZE`, `SCHEDD_ENABLE_SSH_TO_JOB`,
+  `START_SCHEDULER_UNIVERSE`, `JOB_EPOCH_HISTORY` (whether it is set, never
+  the path), `LOCAL_CREDMON_PROVIDER_NAMES`, `CLIENT_CREDMON_PROVIDER_NAMES`,
+  `SUBMIT_ADD_LOCAL_CREDMON_PROVIDERS`, `SUBMIT_ADD_LOCAL_CREDMON_PROVIDER_NAMES`,
+  `SUBMIT_TEMPLATE_NAMES`.
+
+Each access point is read at most once every 10 minutes. A setting the
+schedd cannot report is shown as unknown; the call fails only when the
+schedd cannot be reached at all. Every submission through this server
+takes its `JOB_DEFAULT_REQUEST*` values from the same reading, falling
+back to the server's own configuration when the schedd cannot be asked.
 
 ## Interactive Sessions
 

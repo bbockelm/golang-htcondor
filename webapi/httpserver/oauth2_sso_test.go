@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"encoding/json"
 	"net/url"
 	"testing"
 )
@@ -31,6 +32,26 @@ func TestOpenIDIsGrantedOnlyWhenRequested(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("openid was requested and not granted; granted = %v", granted)
+	}
+}
+
+// A grant the groups refused entirely is an empty list, not nil, so it is
+// stored as [] rather than JSON null; and a member still gets what they
+// asked for.
+func TestRefusedGrantIsEmptyNotNil(t *testing.T) {
+	h := &Handler{mcpAccessGroups: newGroupSet("ap2001-login")}
+	requested := []string{"mcp:read", "mcp:write"}
+
+	granted := h.getScopesForGroups([]string{"someone-else"}, requested)
+	if granted == nil || len(granted) != 0 {
+		t.Fatalf("a refused grant = %#v, want an empty non-nil list", granted)
+	}
+	if raw, err := json.Marshal(granted); err != nil || string(raw) != "[]" {
+		t.Errorf("a refused grant is stored as %s (err %v), want []", raw, err)
+	}
+
+	if got := h.getScopesForGroups([]string{"ap2001-login"}, requested); len(got) != 2 {
+		t.Errorf("a member of the access group was granted %v, want %v", got, requested)
 	}
 }
 

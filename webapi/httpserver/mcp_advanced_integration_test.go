@@ -29,6 +29,7 @@ import (
 
 // TestDynamicClientRegistration tests OAuth2 dynamic client registration
 func TestDynamicClientRegistration(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -107,6 +108,7 @@ func TestDynamicClientRegistration(t *testing.T) {
 
 // TestMCPWithSSO tests MCP access via SSO (mock SSO server with authorization code flow)
 func TestMCPWithSSO(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -138,7 +140,9 @@ func TestMCPWithSSO(t *testing.T) {
 		t.Fatalf("Failed to create test client in MCP: %v", err)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	// A jar, as a browser has: the callback requires the login cookie
+	// set when the flow began.
+	client := &http.Client{Jar: secureCookieJar(t), Timeout: 30 * time.Second}
 	testUser := "ssouser"
 	testPassword := "ssopassword"
 
@@ -303,6 +307,7 @@ func TestMCPWithSSO(t *testing.T) {
 
 // TestMCPGroupMembership tests various group membership scenarios
 func TestMCPGroupMembership(t *testing.T) {
+	t.Parallel()
 	// Skip if condor_master is not available
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
@@ -440,7 +445,7 @@ func TestMCPGroupMembership(t *testing.T) {
 				t.Fatalf("Failed to create test client: %v", err)
 			}
 
-			client := &http.Client{Timeout: 30 * time.Second}
+			client := &http.Client{Jar: secureCookieJar(t), Timeout: 30 * time.Second}
 
 			t.Logf("Testing: %s", tc.description)
 
@@ -620,8 +625,7 @@ func setupTestServerWithSSOAndGroups(t *testing.T, ssoBaseURL, accessGroup, read
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	os.Setenv("CONDOR_CONFIG", configFile)
-	t.Cleanup(func() { os.Unsetenv("CONDOR_CONFIG") })
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	ctx, cancel := context.WithCancel(context.Background())
@@ -648,6 +652,7 @@ func setupTestServerWithSSOAndGroups(t *testing.T, ssoBaseURL, accessGroup, read
 
 	// Create server with SSO integration and group configuration
 	server, err := NewServer(Config{
+		ClientConfig:       htcCfg,
 		ListenAddr:         serverAddr,
 		ScheddName:         "local",
 		ScheddAddr:         "127.0.0.1:9618",
@@ -748,8 +753,7 @@ func setupTestServerWithSSO(t *testing.T, ssoBaseURL string) (string, *Server, s
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	os.Setenv("CONDOR_CONFIG", configFile)
-	t.Cleanup(func() { os.Unsetenv("CONDOR_CONFIG") })
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	ctx, cancel := context.WithCancel(context.Background())
@@ -778,6 +782,7 @@ func setupTestServerWithSSO(t *testing.T, ssoBaseURL string) (string, *Server, s
 	// The actual baseURL is computed after server starts
 	placeholderBaseURL := "http://127.0.0.1:0"
 	server, err := NewServer(Config{
+		ClientConfig:       htcCfg,
 		ListenAddr:         serverAddr,
 		ScheddName:         "local",
 		ScheddAddr:         "127.0.0.1:9618",
@@ -880,8 +885,7 @@ func setupTestServer(t *testing.T) (string, *Server, string) {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	os.Setenv("CONDOR_CONFIG", configFile)
-	t.Cleanup(func() { os.Unsetenv("CONDOR_CONFIG") })
+	htcCfg := loadPoolConfig(t, configFile)
 
 	// Start condor_master
 	ctx, cancel := context.WithCancel(context.Background())
@@ -906,6 +910,7 @@ func setupTestServer(t *testing.T) (string, *Server, string) {
 	// OAuth2Issuer will use placeholder, actual baseURL computed after server starts
 	placeholderBaseURL := "http://127.0.0.1:0"
 	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
 		ListenAddr:               serverAddr,
 		ScheddName:               "local",
 		ScheddAddr:               "127.0.0.1:9618",
@@ -1389,7 +1394,13 @@ func (s *mockSSOStorage) GetClient(ctx context.Context, clientID string) (fosite
 		RedirectURIs:  redirectURIs,
 		GrantTypes:    []string{"authorization_code"},
 		ResponseTypes: []string{"code"},
-		Scopes:        []string{"openid", "profile", "email"},
+		// offline_access because this server asks for it on every
+		// sign-in unless HTTP_API_UPSTREAM_REFRESH is off, and a
+		// provider refuses an authorization naming a scope its client
+		// is not registered for. A provider that approves it is what
+		// these tests are about; one that refuses it is covered by the
+		// offline_access tests instead.
+		Scopes: []string{"openid", "profile", "email", "offline_access"},
 	}, nil
 }
 

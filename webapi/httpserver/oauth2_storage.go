@@ -453,7 +453,64 @@ func (s *OAuth2Storage) getTokenSession(ctx context.Context, table string, signa
 		return request, fosite.ErrInactiveToken
 	}
 
+	// A token obtained by exchange is bound to the grant it came from.
+	// Checked here, where every introspection, bearer check and
+	// revocation lands, so revoking, narrowing or outliving that grant
+	// reaches the exchanged token too.
+	if table == "oauth2_access_tokens" {
+		var link struct {
+			ParentGrant string `json:"parentGrant"`
+		}
+		if sessionData != "" {
+			if err := json.Unmarshal([]byte(sessionData), &link); err != nil {
+				return nil, err
+			}
+		}
+		if link.ParentGrant != "" {
+			parentScopes, live, err := s.parentGrantScopes(ctx, link.ParentGrant)
+			if err != nil {
+				return nil, err
+			}
+			if !live {
+				return request, fosite.ErrInactiveToken
+			}
+			request.GrantedScope = intersectScopes(request.GrantedScope, parentScopes)
+		}
+	}
+
 	return request, nil
+}
+
+// parentGrantScopes reports whether a grant still has a live token -- an
+// active, unexpired refresh or access token under requestID -- and the
+// scopes it currently carries.
+//
+// Every way a grant ends deactivates its rows by request id (refresh-token
+// reuse, RFC 7009 revocation, reauthorization, the admin pages) or lets
+// them expire, so "no live row" is exactly "this grant is over". The scopes
+// are read from the live row because an operator narrowing the grant
+// rewrites them there.
+func (s *OAuth2Storage) parentGrantScopes(ctx context.Context, requestID string) ([]string, bool, error) {
+	now := time.Now().UTC()
+	for _, table := range []string{"oauth2_refresh_tokens", "oauth2_access_tokens"} {
+		var raw string
+		err := s.db.QueryRowContext(ctx,
+			"SELECT granted_scopes FROM "+table+ //nolint:gosec // G202: table is from a fixed literal list
+				" WHERE request_id = ? AND active = 1 AND (expires_at IS NULL OR expires_at > ?) LIMIT 1",
+			requestID, now).Scan(&raw)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("reading parent grant %s from %s: %w", requestID, table, err)
+		}
+		var scopes []string
+		if err := json.Unmarshal([]byte(raw), &scopes); err != nil {
+			return nil, false, fmt.Errorf("decoding scopes of parent grant %s: %w", requestID, err)
+		}
+		return scopes, true, nil
+	}
+	return nil, false, nil
 }
 
 func (s *OAuth2Storage) deleteTokenSession(ctx context.Context, table string, signature string) error {
@@ -631,7 +688,10 @@ func (s *OAuth2Storage) DeleteOpenIDConnectSession(ctx context.Context, signatur
 
 // Device Code Flow Storage Methods
 
-// CreateDeviceCodeSession creates a new device code session
+// CreateDeviceCodeSession creates a new device code session. The device
+// code is what the client presents to the token endpoint, so
+// oauth2_device_codes.device_code stores its sessionKey, not the code;
+// every query on that column hashes first.
 func (s *OAuth2Storage) CreateDeviceCodeSession(ctx context.Context, deviceCode string, userCode string, request fosite.Requester, expiresAt time.Time) error {
 	scopes, err := json.Marshal(request.GetRequestedScopes())
 	if err != nil {
@@ -649,7 +709,7 @@ func (s *OAuth2Storage) CreateDeviceCodeSession(ctx context.Context, deviceCode 
 		INSERT INTO oauth2_device_codes (device_code, user_code, request_id, requested_at, client_id,
 			scopes, granted_scopes, form_data, expires_at, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-	`, deviceCode, userCode, request.GetID(), request.GetRequestedAt(), request.GetClient().GetID(),
+	`, sessionKey(deviceCode), userCode, request.GetID(), request.GetRequestedAt(), request.GetClient().GetID(),
 		string(scopes), string(grantedScopes), string(formData), expiresAt)
 
 	return err
@@ -675,7 +735,7 @@ func (s *OAuth2Storage) GetDeviceCodeSession(ctx context.Context, deviceCode str
 		SELECT user_code, request_id, requested_at, client_id, scopes, granted_scopes,
 			form_data, session_data, subject, status, expires_at
 		FROM oauth2_device_codes WHERE device_code = ?
-	`, deviceCode).Scan(&userCode, &requestID, &requestedAt, &clientID, &scopes, &grantedScopes,
+	`, sessionKey(deviceCode)).Scan(&userCode, &requestID, &requestedAt, &clientID, &scopes, &grantedScopes,
 		&formData, &sessionData, &subject, &status, &expiresAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -734,7 +794,9 @@ func (s *OAuth2Storage) GetDeviceCodeSession(ctx context.Context, deviceCode str
 	return request, nil
 }
 
-// GetDeviceCodeSessionByUserCode retrieves a device code session by user code
+// GetDeviceCodeSessionByUserCode retrieves a device code session by user
+// code. The string it returns is the stored key (sessionKey of the device
+// code), not the device code itself.
 func (s *OAuth2Storage) GetDeviceCodeSessionByUserCode(ctx context.Context, userCode string) (string, fosite.Requester, error) {
 	var (
 		deviceCode    string
@@ -921,14 +983,41 @@ func (s *OAuth2Storage) DenyDeviceCodeSession(ctx context.Context, userCode stri
 	return nil
 }
 
-// UpdateDeviceCodePolling updates the last polled timestamp for rate limiting
-func (s *OAuth2Storage) UpdateDeviceCodePolling(ctx context.Context, deviceCode string) error {
-	_, err := s.db.ExecContext(ctx, `
+// MarkDeviceCodePolled records a poll of deviceCode at now, unless the
+// previous recorded poll was less than minGap before it, and reports
+// whether it did. One test-and-set, so two polls racing each other
+// cannot both pass. A device code that does not exist reports true: the
+// lookup that follows answers for it.
+//
+// Times are compared with julianday rather than as text, since the
+// driver writes each one in the zone it carries.
+func (s *OAuth2Storage) MarkDeviceCodePolled(ctx context.Context, deviceCode string, now time.Time, minGap time.Duration) (bool, error) {
+	key := sessionKey(deviceCode)
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE oauth2_device_codes
 		SET last_polled_at = ?
 		WHERE device_code = ?
-	`, time.Now(), deviceCode)
-	return err
+			AND (last_polled_at IS NULL OR julianday(last_polled_at) <= julianday(?))
+	`, now.UTC(), key, now.Add(-minGap).UTC())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return true, nil
+	}
+	var one int
+	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM oauth2_device_codes WHERE device_code = ?`, key).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // InvalidateDeviceCodeSession invalidates a device code after it's been used
@@ -937,7 +1026,7 @@ func (s *OAuth2Storage) InvalidateDeviceCodeSession(ctx context.Context, deviceC
 		UPDATE oauth2_device_codes
 		SET status = 'used'
 		WHERE device_code = ?
-	`, deviceCode)
+	`, sessionKey(deviceCode))
 	return err
 }
 

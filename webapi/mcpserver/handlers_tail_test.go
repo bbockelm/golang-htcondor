@@ -175,16 +175,17 @@ func TestSchedulerUniverseIsInTheToolDescriptions(t *testing.T) {
 	}
 }
 
-// The instructions steer a model to tail "while it RUNS", which is
-// exactly the sentence that sends it at a DAGMan manager.
-func TestInstructionsCarryTheSchedulerUniverseCaveat(t *testing.T) {
-	instructions := defaultInstructions("test_schedd")
-	for _, want := range []string{
-		"Not for a scheduler-universe job",
-		"To read a running workflow's DAGMan log",
+// The guidance steers a model to tail "while it RUNS", which is exactly
+// the sentence that sends it at a DAGMan manager.
+func TestGuideCarriesTheSchedulerUniverseCaveat(t *testing.T) {
+	monitoring, _ := guideText("monitoring")
+	dag, _ := guideText("dag")
+	for _, c := range []struct{ topic, text, want string }{
+		{"monitoring", monitoring, "does not work on a scheduler-universe job"},
+		{"dag", dag, "To read a running workflow's DAGMan log"},
 	} {
-		if !strings.Contains(instructions, want) {
-			t.Errorf("the instructions do not say %q", want)
+		if !strings.Contains(c.text, c.want) {
+			t.Errorf("guide topic %q does not say %q", c.topic, c.want)
 		}
 	}
 }

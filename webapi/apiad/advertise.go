@@ -39,9 +39,13 @@ type Input struct {
 	// Endpoint is the externally reachable base URL (HTTP_API_BASE_URL / the
 	// OAuth issuer) -- the user-facing address, not the bind address, which
 	// behind a proxy or ingress is not reachable.
-	Endpoint         string
-	ScheddName       string
-	ScheddAddress    string
+	Endpoint      string
+	ScheddName    string
+	ScheddAddress string
+	// ScheddConstraint and ScheddCount describe the AP set of a multi-AP
+	// server, which advertises them instead of one ScheddName.
+	ScheddConstraint string
+	ScheddCount      int
 	TrustDomain      string
 	MCPEnabled       bool
 	SuperuserEnabled bool
@@ -59,6 +63,10 @@ func AddAttrs(ad *classad.ClassAd, in Input) {
 	}
 	if in.ScheddAddress != "" {
 		ad.InsertAttrString("ScheddAddress", ensureAngle(in.ScheddAddress))
+	}
+	if in.ScheddConstraint != "" {
+		ad.InsertAttrString("ScheddConstraint", in.ScheddConstraint)
+		ad.InsertAttr("ScheddCount", int64(in.ScheddCount))
 	}
 	if in.TrustDomain != "" {
 		ad.InsertAttrString("TrustDomain", in.TrustDomain)

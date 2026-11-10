@@ -12,7 +12,8 @@
 # without running any of them.
 set -euo pipefail
 
-# Build the htcondordb the mirror integration test runs against. The
+# Build the htcondordb the mirror and multi-AP integration tests run
+# against (the multi-AP test runs two spokes and a federation hub). The
 # version comes from .github/tools, an isolated module that exists so
 # Dependabot has something to bump -- a pin in a shell script here would
 # age silently, and the test would go on passing against a release
@@ -58,7 +59,7 @@ set -euo pipefail
 # caches under the bind-mounted workspace.
 cd webapi
 
-PACKAGES=(./httpserver/ ./mcpserver/ ./cmd/htcondor-api/ ./jupytertunnel/ ./interactive/)
+PACKAGES=(./httpserver/ ./mcpserver/ ./cmd/htcondor-api/ ./jupytertunnel/ ./interactive/ ./reservation/)
 
 # The list above is hand-maintained, so check it against the tree rather
 # than trusting it. A package whose tests are all behind the integration
@@ -81,4 +82,24 @@ if [ ${#missing[@]} -gt 0 ]; then
   exit 1
 fi
 
+# Left at the default -parallel, which is GOMAXPROCS -- 4 on this runner.
+#
+# Raising it is tempting, because these tests are not CPU-bound: each
+# one starts a pool and then waits on daemon startup, negotiator cycles
+# and job execution. Measured on httpserver alone at a 4-CPU limit, 8
+# ran it in 601-689s against 1346s at the default. It is not safe,
+# though: of five runs at 8, two failed, and 16 was worse still at 851s
+# with four failures.
+#
+# The failures are starvation rather than any shared state -- every pool
+# is per-test with its own directory and dynamic ports. Past roughly two
+# pools per core they fight for CPU, and a starved pool does not simply
+# run slow: one run timed out talking to its own daemons, and another
+# had a job it expected to sit Idle go Running and another Held, so the
+# aggregate counts came out wrong. Oversubscribing this suite trades a
+# green run for a plausible-looking wrong answer.
+#
+# What made the package faster without that risk was giving the serial
+# integration tests t.Parallel, so they share the gate instead of each
+# holding it alone.
 GOWORK=off gotestsum -- -tags=integration -timeout=25m "${PACKAGES[@]}"

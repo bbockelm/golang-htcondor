@@ -11,7 +11,9 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/dagman"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 )
 
@@ -276,6 +278,50 @@ func TestSubmitDagDryRunSubmitsNothingAndShowsTheJob(t *testing.T) {
 	}
 }
 
+// A node description, a staged .sub file or the `append` lines that set,
+// as a custom attribute, an attribute the site overrides control would
+// beat the override in the job DAGMan submits, so the workflow is
+// refused; without that line it is accepted.
+func TestSubmitDagRefusesCustomAttributeAnOverrideControls(t *testing.T) {
+	s := &Server{submitPolicy: submitpolicy.Policy{Overrides: "accounting_group = grp_site"}}
+	for name, args := range map[string]map[string]interface{}{
+		"inline": submitDagArgs("JOB A {\n  executable = /bin/true\n  +AccountingGroup = \"evil\"\n}\n"),
+		"staged": {"dag": "JOB A a.sub\n", "dry_run": true,
+			"files": map[string]interface{}{"a.sub": "executable = /bin/true\nMY.AccountingGroup = \"evil\"\nqueue\n"}},
+		"append": {"dag": "JOB A {\n  executable = /bin/true\n}\n", "dry_run": true,
+			"append": "+AccountingGroup = \"evil\""},
+	} {
+		if _, _, err := dryRun(t, s, args); err == nil || !strings.Contains(err.Error(), "AccountingGroup") {
+			t.Errorf("%s: dry run = %v, want a refusal naming AccountingGroup", name, err)
+		}
+	}
+	if _, _, err := dryRun(t, s, submitDagArgs("JOB A {\n  executable = /bin/true\n  +ProjectName = \"mine\"\n}\n")); err != nil {
+		t.Errorf("an unrelated custom attribute was refused: %v", err)
+	}
+}
+
+// batch_name is written inside a quoted string on one submit-file line;
+// a line break would start a command of the caller's choosing.
+func TestSubmitDagRefusesBatchNameThatBreaksTheLine(t *testing.T) {
+	s := &Server{}
+	for _, name := range []string{"wf\nrequirements = false", "wf\r+Foo = 1", `wf" + "x`} {
+		args := submitDagArgs("JOB A {\n  executable = /bin/true\n}\n")
+		args["batch_name"] = name
+		if _, _, err := dryRun(t, s, args); err == nil {
+			t.Errorf("batch_name %q was accepted", name)
+		}
+	}
+	args := submitDagArgs("JOB A {\n  executable = /bin/true\n}\n")
+	args["batch_name"] = "nightly run"
+	_, structured, err := dryRun(t, s, args)
+	if err != nil {
+		t.Fatalf("an ordinary batch_name was refused: %v", err)
+	}
+	if sub, _ := structured["submit_file"].(string); !strings.Contains(sub, `My.JobBatchName = "nightly run"`) {
+		t.Errorf("the batch name is not on the manager job:\n%s", sub)
+	}
+}
+
 // TestSubmitDagDryRunShowsTheSitePolicy: a dry run that showed a submit
 // file the site would then rewrite is showing the wrong job. The point
 // of the mode is to see what would be submitted.
@@ -297,7 +343,10 @@ func TestSubmitDagAppliesSitePolicyToNodeSubmitFiles(t *testing.T) {
 	// reach them. Without it an operator's mandatory directive would cover
 	// the one job that does no work and none of the ones that do.
 	s := &Server{submitPolicy: submitpolicy.Policy{Overrides: "+ProjectName = \"site\""}}
-	got := s.policyForStagedFile("a.sub", "executable = /bin/true\nqueue\n")
+	got, err := s.policyForStagedFile("a.sub", "executable = /bin/true\nqueue\n")
+	if err != nil {
+		t.Fatalf("policyForStagedFile: %v", err)
+	}
 	if !strings.Contains(got, "ProjectName") {
 		t.Errorf("site policy did not reach the node submit description:\n%s", got)
 	}
@@ -305,7 +354,7 @@ func TestSubmitDagAppliesSitePolicyToNodeSubmitFiles(t *testing.T) {
 	// A script is not a submit file. Splicing submit-file text into it
 	// would corrupt it, so the narrow extension test is deliberate.
 	script := "#!/bin/sh\necho hi\n"
-	if out := s.policyForStagedFile("tidy.sh", script); out != script {
+	if out, err := s.policyForStagedFile("tidy.sh", script); err != nil || out != script {
 		t.Errorf("site policy was spliced into a shell script:\n%s", out)
 	}
 }
@@ -714,6 +763,23 @@ func TestDagmanLayoutPrecedence(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("the schedd was asked %d times; it should be asked once", calls)
+	}
+
+	// Once per access point: two APs' layouts are two discoveries, each
+	// memoised on its own.
+	asked := map[string]int{}
+	perAP := &Server{dagmanLayoutFn: func(ctx context.Context) (string, bool) {
+		asked[routedSchedd(ctx)]++
+		return "/bin/" + routedSchedd(ctx), false
+	}}
+	for _, ap := range []string{"ap1", "ap2", "ap1", "ap2"} {
+		ctx := multiap.WithTarget(context.Background(), multiap.Target{Member: apregistry.Member{Name: ap}})
+		if bin, _ := perAP.dagmanLayout(ctx); bin != "/bin/"+ap {
+			t.Errorf("%s's layout = %q", ap, bin)
+		}
+	}
+	if asked["ap1"] != 1 || asked["ap2"] != 1 {
+		t.Errorf("per-AP discovery counts = %v, want once each", asked)
 	}
 }
 

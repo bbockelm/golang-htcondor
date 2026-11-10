@@ -48,8 +48,9 @@ type HistoryQueryOptions struct {
 	Limit int
 
 	// ScanLimit specifies the maximum number of ads to scan.
-	// Use 0 or negative value for unlimited scanning.
-	// Default is 10000 if not specified to prevent timeouts on large pools.
+	// Use a negative value for unlimited scanning.
+	// Default (0) is DefaultHistoryScanLimit, to prevent timeouts on large
+	// pools. Set Stats to learn whether a query stopped at this limit.
 	ScanLimit int
 
 	// Projection is a list of attributes to include in results.
@@ -87,6 +88,44 @@ type HistoryQueryOptions struct {
 	// DaemonSubsystem specifies which daemon subsystem to query
 	// when Source is HistorySourceDaemon (e.g., "SCHEDD").
 	DaemonSubsystem string
+
+	// Stats, when non-nil, is filled in from the daemon's closing ad once
+	// the query completes successfully: how many records it examined and
+	// whether it stopped because of ScanLimit. It is not sent to the
+	// daemon. For a streaming query it is written before the result
+	// channel is closed, so it is safe to read after draining the channel.
+	Stats *HistoryScanStats
+}
+
+// DefaultHistoryScanLimit is the ScanLimit a history query uses when the
+// caller sets none: the daemon examines at most this many records, newest
+// first, before it stops looking for matches.
+const DefaultHistoryScanLimit = 10000
+
+// HistoryScanStats is the daemon's own account of a history query, taken
+// from the closing ad of the response. A query whose matches lie further
+// back than the scan limit returns fewer records than asked for -- often
+// none -- and this is the only place that says the search was cut short
+// rather than exhausted.
+type HistoryScanStats struct {
+	// Reported is true when the daemon's closing ad carried AdCount.
+	// Without it the other counts are zero and ScanLimitReached is false
+	// because nothing can be concluded, not because the scan finished.
+	Reported bool
+	// RecordsScanned is the number of history records the daemon examined
+	// (AdCount).
+	RecordsScanned int
+	// Matches is the number of records that matched (NumMatches).
+	Matches int
+	// MalformedAds is the number of matching records the daemon could not
+	// send.
+	MalformedAds int
+	// ScanLimit is the scan limit the query was sent with; 0 means none.
+	ScanLimit int
+	// ScanLimitReached reports that the daemon stopped because it had
+	// examined ScanLimit records before finding Limit matches: older
+	// records were not searched, and more matches may exist there.
+	ScanLimitReached bool
 }
 
 // DefaultHistoryProjection returns the default list of attributes for job history
@@ -146,6 +185,7 @@ func (opts *HistoryQueryOptions) ApplyDefaults() HistoryQueryOptions {
 		AdTypeFilter:      opts.AdTypeFilter,
 		ReadFromDirectory: opts.ReadFromDirectory,
 		DaemonSubsystem:   opts.DaemonSubsystem,
+		Stats:             opts.Stats,
 	}
 
 	// Apply default source if not set
@@ -161,7 +201,7 @@ func (opts *HistoryQueryOptions) ApplyDefaults() HistoryQueryOptions {
 	// Apply default scan limit if not set
 	// Default to 10k to prevent timeouts on large pools
 	if result.ScanLimit == 0 {
-		result.ScanLimit = 10000
+		result.ScanLimit = DefaultHistoryScanLimit
 	}
 
 	// Default to backwards scanning

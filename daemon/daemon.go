@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/addresses"
+	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
@@ -79,9 +80,11 @@ type Daemon struct {
 	shutdownOnce sync.Once
 
 	mu                   sync.Mutex
-	sharedPortName       string // shared-port "sock" id, set by Listener when adopted or self-registered
-	sharedPortAdvertised string // advertised sinful when self-registered (master address unavailable)
-	adoptedInherited     bool   // Listener returned an inherited socket (shared-port or #119), not the fallback
+	sharedPortName       string       // shared-port "sock" id, set by Listener when adopted or self-registered
+	sharedPortAdvertised string       // advertised sinful when self-registered (master address unavailable)
+	adoptedInherited     bool         // Listener returned an inherited socket (shared-port or #119), not the fallback
+	boundFallback        bool         // Listener returned the caller's fallback bind, not a shared-port/inherited socket
+	commandListener      net.Listener // the socket Listener returned, whatever its provenance
 	stopAlive            func()
 	onReconfig           []func(*config.Config)
 
@@ -257,6 +260,20 @@ func (d *Daemon) OnReconfig(fn func(*config.Config)) {
 // Otherwise (or when no shared-port token was passed) it calls fallback to bind
 // a normal listener.
 func (d *Daemon) Listener(fallback func() (net.Listener, error)) (net.Listener, error) {
+	ln, err := d.listen(fallback)
+	if err != nil {
+		return nil, err
+	}
+	// Remembered so AdvertisedAddress can answer for a daemon that is not behind a
+	// shared port, where the listener's own address is the only reachable one.
+	d.mu.Lock()
+	d.commandListener = ln
+	d.mu.Unlock()
+	return ln, nil
+}
+
+// listen is Listener's body: it picks the command socket but records nothing.
+func (d *Daemon) listen(fallback func() (net.Listener, error)) (net.Listener, error) {
 	spln, endpoint, err := resolveSharedPortListener(d.log)
 	if err != nil {
 		return nil, err
@@ -296,20 +313,45 @@ func (d *Daemon) Listener(fallback func() (net.Listener, error)) (net.Listener, 
 	if fallback == nil {
 		return nil, fmt.Errorf("daemon: no shared-port listener inherited and no fallback provided")
 	}
-	return fallback()
+	ln, err := fallback()
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	d.boundFallback = true
+	d.mu.Unlock()
+	return ln, nil
 }
 
 // AdoptedInheritedListener reports whether Listener returned a socket inherited from
 // condor_master (a shared-port endpoint or a pre-created command socket, issue #119)
-// rather than the caller's fallback bind. It lets a daemon that also wants its own
-// directly-dialable port (e.g. a CCB advertising a public address) decide whether to bind
-// that extra listener: under the master the inherited socket is the managed command port,
-// so the explicit -listen port is an *additional* listener; standalone, the fallback already
-// bound -listen, so binding it again would collide. Valid only after Listener has been called.
+// rather than one it bound itself. Valid only after Listener has been called.
+//
+// A daemon deciding whether to bind its own directly-dialable port wants
+// BoundFallbackListener instead: a self-registered shared-port socket is not inherited,
+// yet it leaves that port unbound just the same.
 func (d *Daemon) AdoptedInheritedListener() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.adoptedInherited
+}
+
+// BoundFallbackListener reports whether Listener bound the caller's fallback -- the
+// daemon's own directly-dialable address -- rather than returning a socket it got from
+// elsewhere: an inherited one (shared-port endpoint or pre-created command socket) or a
+// shared-port socket it self-registered.
+//
+// This is the question a daemon that also wants its own port has to ask. Only the
+// fallback binds that address; every other outcome leaves it unbound, and both of the
+// others hand back a socket that carries CEDAR through condor_shared_port, which no
+// browser can be pointed at. AdoptedInheritedListener answers a narrower question (was
+// it inherited) and says nothing about self-registration, so a daemon that used it to
+// decide skipped its own port whenever shared port was on but no socket was inherited.
+// Valid only after Listener has been called.
+func (d *Daemon) BoundFallbackListener() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.boundFallback
 }
 
 // SharedPortName returns the shared-port "sock" id this daemon listens on (the
@@ -319,6 +361,32 @@ func (d *Daemon) SharedPortName() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.sharedPortName
+}
+
+// ServerSecurityConfig builds the server-side security config for commands
+// served on this daemon's command socket: htcondor.GetServerSecurityConfig
+// from the daemon's current config, plus what only the daemon knows. Behind a
+// shared port that is its sock id (SecurityConfig.SharedPortID), which FS
+// authentication requires an HTCondor 25.14+ client's channel binding to name,
+// as a C++ daemon checks it against its own command sinful; without it any id
+// the client reports is accepted on the ip:port check alone.
+//
+// Its SciTokensMapper reads CERTIFICATE_MAPFILE from the daemon's config at
+// each mapping rather than when the config is built.
+//
+// Call it after Listener, once for the base config and once for each
+// per-command config (cedar/server's SecurityConfigForCommand).
+func (d *Daemon) ServerSecurityConfig(command int, secContext string) (*security.SecurityConfig, error) {
+	sc, err := htcondor.GetServerSecurityConfig(d.Config(), command, secContext)
+	if err != nil {
+		return nil, err
+	}
+	sc.SharedPortID = d.SharedPortName()
+	// Map SciTokens through the CERTIFICATE_MAPFILE of the daemon's current
+	// config, so a reconfig that sets or moves it applies to configs built
+	// before it.
+	sc.SciTokensMapper = htcondor.SciTokensMapper(d.Config)
+	return sc, nil
 }
 
 // AdvertisedSinful derives this daemon's externally reachable command address
@@ -343,18 +411,59 @@ func (d *Daemon) AdvertisedSinful() (string, bool) {
 	d.mu.Lock()
 	advertised := d.sharedPortAdvertised
 	d.mu.Unlock()
-	if advertised != "" {
-		return advertised, true
+	if advertised == "" {
+		if d.master == nil {
+			return "", false
+		}
+		var ok bool
+		if advertised, ok = deriveAdvertisedSinful(d.master.Address(), sock); !ok {
+			return "", false
+		}
 	}
-	if d.master == nil {
-		return "", false
-	}
-	return deriveAdvertisedSinful(d.master.Address(), sock)
+	// Both paths, not just the master-derived one: a self-registered daemon takes its
+	// address from the shared_port server's ad file, which needs the alias just as much.
+	return withHostAlias(advertised, d.Config()), true
 }
 
-// deriveAdvertisedSinful builds "<host:port?sock=sock>" from a shared-port
-// server command address and a sock id. Returns ("", false) if serverAddr has no
-// usable host:port or sock is empty.
+// AdvertisedAddress is this daemon's externally reachable command address, unbracketed:
+// the shared-port sinful (AdvertisedSinful) when behind a shared port, otherwise the
+// address of the command socket Listener returned. It is "" only when Listener has not
+// run or produced nothing to advertise.
+//
+// Every Go daemon needs this, and before it existed every Go daemon wrote it out
+// longhand -- the same six-line "shared-port sinful, else ln.Addr()" helper copied into
+// the collector, the negotiator, the schedd, the startd, htcondordb and the pelican
+// manager. PublishAd could not do it for them because it had only AdvertisedSinful,
+// which is empty off the shared port, so a daemon with a plain bind advertised no
+// MyAddress at all and each one patched that up in its own augment callback. One copy
+// here is one place to be right about the alias, and one place to fix next time.
+func (d *Daemon) AdvertisedAddress() string {
+	if sinful, ok := d.AdvertisedSinful(); ok && sinful != "" {
+		return sinful
+	}
+	d.mu.Lock()
+	ln := d.commandListener
+	d.mu.Unlock()
+	if ln == nil || ln.Addr() == nil {
+		return ""
+	}
+	return withHostAlias(ln.Addr().String(), d.Config())
+}
+
+// deriveAdvertisedSinful builds this daemon's reachable address from the command address
+// of the shared-port server fronting us and our own sock id. Returns ("", false) if
+// serverAddr has no usable host:port or sock is empty.
+//
+// The result is the server's address with sock= replaced, NOT a fresh host:port+sock:
+// everything else the server published is how it is reached, and rebuilding from the
+// parsed host and port silently dropped all of it -- alias= (the name an SSL client
+// checks the certificate against), addrs= (the IPv6 address, so an IPv6-only peer had
+// nothing to dial), noUDP, PrivNet= and CCBID=. That is golang-htcondor#896, and
+// inheriting the parameters is also what C++ does: SharedPortEndpoint derives a
+// daemon's address from the shared-port server's own, adding only the sock id.
+//
+// The address comes back unbracketed, as it always has: callers write it into ad
+// attributes and address files that bracket it themselves.
 func deriveAdvertisedSinful(serverAddr, sock string) (string, bool) {
 	if sock == "" {
 		return "", false
@@ -363,7 +472,51 @@ func deriveAdvertisedSinful(serverAddr, sock string) (string, bool) {
 	if err != nil || info.Host == "" || info.Port == "" {
 		return "", false
 	}
-	return fmt.Sprintf("%s:%s?sock=%s", info.Host, info.Port, sock), true
+	return trimAngle(addresses.WithParam(serverAddr, "sock", sock)), true
+}
+
+// withHostAlias attaches the sinful "alias" parameter -- the host an SSL client checks
+// the daemon's certificate against -- when addr does not already name one.
+//
+// Behind a shared port the address host is the shared-port server's IP, and HTCondor
+// host certificates carry DNS names and no IP SANs, so without an alias every SSL
+// authentication from off the machine fails the certificate check. Inheriting the
+// shared-port server's parameters usually supplies one already; this covers what that
+// cannot -- a daemon with a plain bind, and a shared-port server whose own address
+// carries no alias.
+//
+// The value is HOST_ALIAS, which parameter defaults make $(FULL_HOSTNAME), the same
+// knob and default the C++ daemons use (Sock::get_sinful and SharedPortEndpoint set the
+// alias from HOST_ALIAS and nothing else). An operator serving a certificate under some
+// other name -- a load balancer, a CNAME -- sets HOST_ALIAS and is believed, exactly as
+// in C++. WithParam applies HTCondor's own %XX escaping, so a value holding '?', '&' or
+// '=' cannot make the rest of the address parse as something else.
+func withHostAlias(addr string, cfg *config.Config) string {
+	if cfg == nil || strings.TrimSpace(addr) == "" {
+		return addr
+	}
+	if info, err := addresses.ParseSinful(addr); err == nil && info.Alias != "" {
+		return addr
+	}
+	alias := configGet(cfg, "HOST_ALIAS")
+	// '#' is the one character that must be rejected rather than escaped: cedar's
+	// encoder treats it as safe (it is legal in a sinful), but a CCB contact string is
+	// this address followed by "#<id>" and is split on the LAST '#', so an alias
+	// carrying one would silently redirect the hop. No host name contains '#'.
+	if alias == "" || strings.ContainsRune(alias, '#') {
+		return addr
+	}
+	return trimAngle(addresses.WithParam(addr, "alias", alias))
+}
+
+// trimAngle is ensureAngle's inverse: the unbracketed form these addresses are passed
+// around in.
+func trimAngle(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if strings.HasPrefix(addr, "<") && strings.HasSuffix(addr, ">") {
+		return addr[1 : len(addr)-1]
+	}
+	return addr
 }
 
 // Serve runs the daemon lifecycle. It starts serve(ctx, ln) in the background,
@@ -561,6 +714,8 @@ func (d *Daemon) reconfigure() {
 	}
 	d.cfg.Store(cfg)
 	d.lastReconfig.Store(time.Now().Unix())
+	// HTCondor re-reads CERTIFICATE_MAPFILE after every reconfig.
+	htcondor.ReloadCertificateMapFile()
 	// Re-apply per-destination log levels from the reloaded config, so condor_reconfig
 	// changes log verbosity on the running daemon (the levels are held in a live atomic
 	// snapshot the installed handlers read).

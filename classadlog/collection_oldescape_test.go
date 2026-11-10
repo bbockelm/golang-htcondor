@@ -1,27 +1,38 @@
 package classadlog
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
 )
 
-// TestSetAttributeKeepsOldClassAdEscapes is the regression for dropped job_queue.log
+// TestSetAttributeKeepsOldClassAdEscapes is the regression for corrupted job_queue.log
 // attributes: a TransferInput value whose filename contains an escaped comma and space (so it
-// does not split the transfer list) is old-ClassAd text. Strict ParseExpr rejects the escapes
-// and SetAttribute would drop the whole attribute; the old-ClassAd (lenient) parse preserves it.
+// does not split the transfer list) is old-ClassAd text, where a backslash is a backslash.
+// Reading it as new ClassAd interprets the escapes away and the filename silently becomes two
+// transfer-list entries; the old-ClassAd parse keeps the value as the schedd wrote it.
 func TestSetAttributeKeepsOldClassAdEscapes(t *testing.T) {
 	val := `"osdf:///chtc/staging/c/ckoch5/tests/space-comma/testing\,\ more"`
+	const kept = `osdf:///chtc/staging/c/ckoch5/tests/space-comma/testing\,\ more`
 
-	// Precondition: strict parsing rejects it, which is why the old default dropped it.
-	if _, err := classad.ParseExpr(val); err == nil {
-		t.Fatal("precondition: strict ParseExpr should reject the unknown escapes")
+	// Strict parsing accepts this value and answers a DIFFERENT string: it reads \, and \
+	// as escapes and drops the backslashes. That is the corruption, so pin it here rather
+	// than assume it -- it is the whole reason SetAttribute does not use this parser.
+	strict, err := classad.ParseExpr(val)
+	if err != nil {
+		t.Fatalf("strict ParseExpr: %v", err)
+	}
+	loose, err := strict.Eval(classad.New()).StringValue()
+	if err != nil {
+		t.Fatalf("strict parse did not evaluate to a string: %v", err)
+	}
+	if loose == kept {
+		t.Fatal("precondition: strict parsing no longer changes the value, so this test proves nothing")
 	}
 
 	c := NewCollection()
 	if err := c.SetAttribute("1.0", "TransferInput", val); err != nil {
-		t.Fatalf("SetAttribute dropped a valid old-ClassAd value: %v", err)
+		t.Fatalf("SetAttribute rejected a valid old-ClassAd value: %v", err)
 	}
 	ad := c.Get("1.0")
 	if ad == nil {
@@ -31,7 +42,7 @@ func TestSetAttributeKeepsOldClassAdEscapes(t *testing.T) {
 	if !ok {
 		t.Fatal("TransferInput not retrievable after SetAttribute")
 	}
-	if !strings.Contains(s, "space-comma") {
-		t.Errorf("value not preserved: %q", s)
+	if s != kept {
+		t.Errorf("TransferInput = %q, want %q (strict parsing would give %q)", s, kept, loose)
 	}
 }

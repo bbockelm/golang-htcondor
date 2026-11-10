@@ -47,6 +47,9 @@ const (
 	// consentCSRFInfo derives the key behind the OAuth2 consent and
 	// device verification forms' CSRF token.
 	consentCSRFInfo = "htcondor-api-consent-csrf-v1"
+	// idpInternalClientInfo derives the secret the server's own SSO
+	// presents to the built-in IdP.
+	idpInternalClientInfo = "htcondor-api-idp-internal-client-v1"
 )
 
 // signingKEKs reads the pool signing keys as key-encryption keys.

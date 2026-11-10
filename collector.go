@@ -13,6 +13,7 @@ import (
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 const (
@@ -60,6 +61,10 @@ type Collector struct {
 	// raceStagger overrides the default per-attempt delay between
 	// concurrent connects. Zero = use DefaultCollectorRaceStagger.
 	raceStagger time.Duration
+
+	// cfg is the HTCondor configuration this client authenticates and
+	// rate-limits with; nil means the process-wide default. See WithConfig.
+	cfg *config.Config
 
 	// mu guards the sticky-winner state below. dialAndAuthenticate
 	// reads `preferred` while building the per-attempt order and
@@ -249,21 +254,29 @@ type StreamOptions struct {
 	BufferSize int
 	// WriteTimeout is the maximum cumulative time spent blocking on channel writes (default: 5s)
 	WriteTimeout time.Duration
+	// PrivateAttributes asks the collector to send each ad's private
+	// attributes. See QueryOptions.PrivateAttributes.
+	PrivateAttributes bool
 }
 
-// ApplyStreamDefaults returns StreamOptions with defaults applied
+// ApplyStreamDefaults returns StreamOptions with defaults applied.
+//
+// It starts from the caller's struct and overwrites only what is unset,
+// rather than naming each field to carry across. Rebuilding a defaults
+// struct field by field means a field added later is silently dropped
+// here -- which is how QueryOptions.ApplyDefaults came to discard
+// FetchOpts and Owner, and the same shape would have dropped
+// PrivateAttributes.
 func (o *StreamOptions) ApplyStreamDefaults() StreamOptions {
-	opts := StreamOptions{
-		BufferSize:   100,
-		WriteTimeout: 5 * time.Second,
-	}
+	var opts StreamOptions
 	if o != nil {
-		if o.BufferSize > 0 {
-			opts.BufferSize = o.BufferSize
-		}
-		if o.WriteTimeout > 0 {
-			opts.WriteTimeout = o.WriteTimeout
-		}
+		opts = *o
+	}
+	if opts.BufferSize <= 0 {
+		opts.BufferSize = 100
+	}
+	if opts.WriteTimeout <= 0 {
+		opts.WriteTimeout = 5 * time.Second
 	}
 	return opts
 }
@@ -286,7 +299,7 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 
 	// Apply rate limiting if configured
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(c.cfg)
 	if rateLimitManager != nil {
 		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
 			return nil, fmt.Errorf("rate limit exceeded: %w", err)
@@ -333,7 +346,7 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 		}
 
 		// Create query ClassAd with limit
-		queryAd := createQueryAd(adType, constraintExpr, projection, limit)
+		queryAd := createQueryAd(adType, constraintExpr, projection, limit, streamOptsApplied.PrivateAttributes)
 
 		// Send query
 		queryMsg := message.NewMessageForStream(cedarStream)
@@ -442,7 +455,7 @@ func (c *Collector) QueryAdsStream(ctx context.Context, adType string, constrain
 func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constraint string, projection []string, opts *QueryOptions) ([]*classad.ClassAd, error) {
 	// Apply rate limiting if configured
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(c.cfg)
 	if rateLimitManager != nil {
 		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
 			return nil, fmt.Errorf("rate limit exceeded: %w", err)
@@ -485,7 +498,7 @@ func (c *Collector) queryAdsInternal(ctx context.Context, adType string, constra
 	if opts != nil && !opts.IsUnlimited() {
 		limit = opts.Limit
 	}
-	queryAd := createQueryAd(adType, constraintExpr, projection, limit)
+	queryAd := createQueryAd(adType, constraintExpr, projection, limit, opts != nil && opts.PrivateAttributes)
 
 	// Create message and send query
 	queryMsg := message.NewMessageForStream(cedarStream)
@@ -582,8 +595,12 @@ func getCommandForAdType(adType string) commands.CommandType {
 	}
 }
 
-// createQueryAd creates a ClassAd for querying ads
-func createQueryAd(adType string, constraint *classad.Expr, projection []string, limit int) *classad.ClassAd {
+// createQueryAd creates a ClassAd for querying ads.
+//
+// privateAttrs asks the collector not to filter the daemon's private
+// attributes out of the reply. See QueryOptions.PrivateAttributes for
+// what that means and what it costs.
+func createQueryAd(adType string, constraint *classad.Expr, projection []string, limit int, privateAttrs bool) *classad.ClassAd {
 	ad := classad.New()
 
 	// Set MyType and TargetType as required by HTCondor query protocol
@@ -615,6 +632,16 @@ func createQueryAd(adType string, constraint *classad.Expr, projection []string,
 	// Set LimitResults for server-side limit enforcement
 	if limit > 0 {
 		_ = ad.Set("LimitResults", int64(limit))
+	}
+
+	// Ask for the private attributes. Since HTCondor 10.0 the collector
+	// filters them out unless the query asks (SendPrivateAttributes) and
+	// the caller verifies at NEGOTIATOR or ADMINISTRATOR level; asking
+	// without that authorization is not an error, it just comes back
+	// filtered, so a caller has to check for the attribute it wanted
+	// rather than trust the request.
+	if privateAttrs {
+		_ = ad.Set("SendPrivateAttributes", true)
 	}
 
 	return ad
@@ -729,7 +756,7 @@ func (c *Collector) Advertise(ctx context.Context, ad *classad.ClassAd, opts *Ad
 
 	// Apply rate limiting if configured
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(c.cfg)
 	if rateLimitManager != nil {
 		if err := rateLimitManager.WaitCollector(ctx, username); err != nil {
 			return fmt.Errorf("rate limit exceeded: %w", err)
@@ -936,7 +963,7 @@ func (c *Collector) advertiseMultipleTo(ctx context.Context, addr string, ads []
 		return errs
 	}
 
-	rlm := getRateLimitManager()
+	rlm := rateLimitManagerFor(c.cfg)
 	username := GetAuthenticatedUserFromContext(ctx)
 
 	var conn *client.HTCondorClient

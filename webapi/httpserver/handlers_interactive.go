@@ -36,6 +36,8 @@ import (
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
+	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
@@ -145,8 +147,11 @@ type InteractiveCreateTerminalResponse struct {
 	InstanceID string `json:"instance_id"`
 	ClusterID  int    `json:"cluster_id"`
 	ProcID     int    `json:"proc_id"`
-	JobID      string `json:"job_id"` // "cluster.proc" — convenience for the SPA
+	JobID      string `json:"job_id"` // "cluster.proc" (the complete id in multi-AP mode) — convenience for the SPA
 	BatchName  string `json:"batch_name"`
+	// Schedd is the access point the terminal was placed on, in
+	// multi-AP mode.
+	Schedd string `json:"schedd,omitempty"`
 }
 
 // InteractiveTerminalSummary is the SPA-facing shape of one terminal
@@ -157,8 +162,11 @@ type InteractiveCreateTerminalResponse struct {
 // shared status module distinguishes "queued" from "transferring
 // input" from "executing".
 type InteractiveTerminalSummary struct {
-	InstanceID                   string `json:"instance_id"`
-	JobID                        string `json:"job_id"`
+	InstanceID string `json:"instance_id"`
+	JobID      string `json:"job_id"`
+	// Schedd is the access point the job is on, in multi-AP mode, where
+	// JobID is the complete id.
+	Schedd                       string `json:"schedd,omitempty"`
 	ClusterID                    int    `json:"cluster_id"`
 	ProcID                       int    `json:"proc_id"`
 	BatchName                    string `json:"batch_name"`
@@ -281,6 +289,19 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 		return
 	}
 
+	// In multi-AP mode the terminal goes to the AP the caller's
+	// assignment names for interactive work (or the alternate ?schedd=
+	// names). Everything after this -- the spool below, the /ssh bridge
+	// and its disconnect cleanup -- addresses it by its complete id.
+	if s.multi != nil {
+		var m apregistry.Member
+		var ok bool
+		if ctx, m, ok = s.multiAssign(ctx, w, r, username, apassign.KindInteractive); !ok {
+			return
+		}
+		defer s.multi.svc.NoteWrite(m.Name)
+	}
+
 	instanceID, err := generateInteractiveInstanceID()
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("gen id: %v", err))
@@ -319,7 +340,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 			Mode: 0o755,
 		},
 	}
-	if err := s.getSchedd().SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
+	if err := s.scheddFor(ctx).SpoolJobFilesFromFS(ctx, procAds, stage); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "interactive spool failed",
 			"owner", username, "cluster", clusterID, "error", err)
 		s.writeError(w, http.StatusBadGateway,
@@ -333,11 +354,11 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 			procID = int(v)
 		}
 	}
-	jobID := fmt.Sprintf("%d.%d", clusterID, procID)
+	jobID := s.jobPathID(ctx, clusterID, procID)
 
 	s.logger.Info(logging.DestinationHTTP, "interactive terminal created",
 		"instance", instanceID, "owner", username, "cluster", clusterID, "proc", procID,
-		"batch_name", batchName)
+		"batch_name", batchName, "access_point", routedSchedd(ctx))
 
 	s.writeJSON(w, http.StatusCreated, InteractiveCreateTerminalResponse{
 		InstanceID: instanceID,
@@ -345,6 +366,7 @@ func (s *Handler) handleInteractiveCreateTerminal(w http.ResponseWriter, r *http
 		ProcID:     procID,
 		JobID:      jobID,
 		BatchName:  batchName,
+		Schedd:     routedSchedd(ctx),
 	})
 }
 
@@ -412,6 +434,10 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 		s.writeError(w, http.StatusUnauthorized, "no authenticated user")
 		return
 	}
+	if s.multi != nil {
+		s.multiListInteractiveTerminals(ctx, w, owner)
+		return
+	}
 	// FetchMyJobs feeds opts.Owner into the schedd's MyJobs constraint
 	// as `Owner == Me`. The schedd stores the job's Owner attribute with
 	// whatever string the negotiation surfaced (typically the full
@@ -421,14 +447,10 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 	// keep this in sync with the dashboard handler, which is the
 	// canonical example.
 	opts := &htcondor.QueryOptions{
-		Limit: 500,
-		Projection: []string{
-			"ClusterId", "ProcId", "JobStatus", "JobBatchName",
-			"HoldReason", "HoldReasonCode", "QDate",
-			"JobCurrentStartExecutingDate",
-		},
-		FetchOpts: htcondor.FetchMyJobs,
-		Owner:     owner,
+		Limit:      500,
+		Projection: interactiveTerminalAttrs,
+		FetchOpts:  htcondor.FetchMyJobs,
+		Owner:      owner,
 	}
 	ads, _, err := s.getSchedd().QueryWithOptions(ctx, "true", opts)
 	if err != nil {
@@ -440,40 +462,9 @@ func (s *Handler) handleInteractiveListTerminals(w http.ResponseWriter, r *http.
 
 	out := make([]InteractiveTerminalSummary, 0, len(ads))
 	for _, ad := range ads {
-		batchName, ok := ad.EvaluateAttrString("JobBatchName")
-		if !ok {
-			continue
+		if summary, ok := s.interactiveTerminalSummary(ad, ""); ok {
+			out = append(out, summary)
 		}
-		kind, sessionName, ok := classifyInteractiveBatchName(batchName)
-		if !ok {
-			continue
-		}
-		clusterID, _ := ad.EvaluateAttrInt("ClusterId")
-		procID, _ := ad.EvaluateAttrInt("ProcId")
-		jobStatus, _ := ad.EvaluateAttrInt("JobStatus")
-		holdCode, _ := ad.EvaluateAttrInt("HoldReasonCode")
-		holdReason, _ := ad.EvaluateAttrString("HoldReason")
-		qdate, _ := ad.EvaluateAttrInt("QDate")
-		startExec, _ := ad.EvaluateAttrInt("JobCurrentStartExecutingDate")
-
-		summary := InteractiveTerminalSummary{
-			Kind:                         kind,
-			Name:                         sessionName,
-			SSHCommand:                   s.sshCommandForSession(kind, sessionName),
-			InstanceID:                   strings.TrimPrefix(batchName, interactiveTerminalBatchPrefix),
-			JobID:                        fmt.Sprintf("%d.%d", clusterID, procID),
-			ClusterID:                    int(clusterID),
-			ProcID:                       int(procID),
-			BatchName:                    batchName,
-			JobStatus:                    int(jobStatus),
-			JobCurrentStartExecutingDate: startExec,
-			HoldReasonCode:               int(holdCode),
-			HoldReason:                   holdReason,
-		}
-		if qdate > 0 {
-			summary.SubmittedAt = time.Unix(qdate, 0).UTC().Format(time.RFC3339)
-		}
-		out = append(out, summary)
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]any{"terminals": out})
@@ -546,6 +537,19 @@ func (s *Handler) startInteractiveHeartbeat(
 	return func() { close(stopCh) }
 }
 
+// disconnectJobID reads a terminal's job id: cluster.proc, or the
+// codec's complete form in multi-AP mode.
+func (s *Handler) disconnectJobID(text string) (int, int, error) {
+	if s.multi == nil {
+		return parseJobID(text)
+	}
+	id, err := s.multi.codec.Parse(text)
+	if err != nil {
+		return 0, 0, err
+	}
+	return int(id.Cluster), int(id.Proc), nil
+}
+
 // removeJobOnDisconnect issues a condor_rm for the given cluster.proc
 // after the SSH bridge tears down. Used for interactive terminal
 // sessions: when the user closes the browser tab (or clicks "End
@@ -553,28 +557,45 @@ func (s *Handler) startInteractiveHeartbeat(
 // expect immediate slot release. Best-effort: errors are logged and
 // swallowed since the bridge is already gone.
 //
-// Uses a fresh background context with a short timeout — the bridge's
-// own ctx is being canceled when this runs.
-func (s *Handler) removeJobOnDisconnect(jobIDStr string) {
-	cluster, proc, err := parseJobID(jobIDStr)
+// ctx is the bridge's request context, which is being cancelled when this
+// runs: its values are kept and its cancellation is not.
+func (s *Handler) removeJobOnDisconnect(ctx context.Context, jobIDStr string) {
+	cluster, proc, err := s.disconnectJobID(jobIDStr)
 	if err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "interactive disconnect: bad job id",
 			"job_id", jobIDStr, "error", err)
 		return
 	}
 
-	// Use the server's own token (if available) so this works even
-	// after the user's session has expired. The schedd verifies that
-	// the requester owns the job; the API server token is daemon-level
-	// so it can act on any job.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if s.token != "" {
-		ctx = WithToken(ctx, s.token)
+	// Confined to the caller's own job whichever credential carries it.
+	// The job id came from a shell the schedd authorized, but the daemon
+	// credential below can act on any job, and the constraint is what
+	// keeps it to this caller's.
+	owner := ownerFromActor(htcondor.GetAuthenticatedUserFromContext(ctx))
+	if owner == "" {
+		s.logger.Warn(logging.DestinationHTTP, "interactive disconnect: no caller identity; leaving the job to its watchdog",
+			"job_id", jobIDStr)
+		return
 	}
 
-	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc)
-	results, err := s.getSchedd().RemoveJobs(ctx, constraint, "Interactive session ended")
+	// As the caller, when the request carried their credential: it is
+	// their job, and the credential renews itself where it was minted
+	// here. Otherwise as this daemon, which still works after the
+	// caller's own credential has lapsed, said out loud so an audit can
+	// tell the choice from an accident.
+	rmCtx := context.WithoutCancel(ctx)
+	if _, ok := htcondor.GetSecurityConfigFromContext(ctx); !ok {
+		rmCtx = htcondor.WithDaemonCredential(rmCtx,
+			"interactive session cleanup: the caller's request carried no credential; confined to their jobs")
+	}
+	rmCtx, cancel := context.WithTimeout(rmCtx, 10*time.Second)
+	defer cancel()
+
+	constraint := fmt.Sprintf("ClusterId == %d && ProcId == %d && %s", cluster, proc, s.ownerClause(owner))
+	// The schedd of the AP the terminal was routed to, in multi-AP mode
+	// (rmCtx keeps the route); there a context with no caller credential
+	// gets no schedd at all rather than this daemon's.
+	results, err := s.scheddFor(rmCtx).RemoveJobs(rmCtx, constraint, "Interactive session ended")
 	if err != nil {
 		s.logger.Warn(logging.DestinationHTTP, "interactive disconnect: condor_rm failed",
 			"job_id", jobIDStr, "error", err)
@@ -655,7 +676,7 @@ const requirementsProbeAttr = "HtcondorApiRequirementsProbe"
 // whether the probe came out the other end.
 func verifyInteractiveRequirementsSurvive(extraSubmit string, policy submitpolicy.Policy) error {
 	probe := fmt.Sprintf("%s =!= undefined", requirementsProbeAttr)
-	submitText := policy.Apply(buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
+	submitText, err := policy.Apply(buildInteractiveTerminalSubmitFile(interactive.SubmitArgs{
 		InstanceID:       "probe",
 		BatchName:        "probe",
 		Cpus:             1,
@@ -664,6 +685,9 @@ func verifyInteractiveRequirementsSurvive(extraSubmit string, policy submitpolic
 		Requirements:     probe,
 		ExtraSubmitLines: extraSubmit,
 	}))
+	if err != nil {
+		return fmt.Errorf("the generated interactive submit file conflicts with HTTP_API_SUBMIT_FILE_OVERRIDES: %w", err)
+	}
 
 	sf, err := htcondor.ParseSubmitFile(strings.NewReader(submitText))
 	if err != nil {

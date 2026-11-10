@@ -23,11 +23,17 @@ import (
 
 // KeyChange is one change to a subscribed job.
 //
-// Exactly one of the three states holds: Ad is set for an update, Gone is
-// true when the job left the queue, and Stale is true when the feed lost
-// continuity and the subscriber must re-read the job for itself.
+// Exactly one of the three states holds: View is set for an update, Gone
+// is true when the job left the queue, and Stale is true when the feed
+// lost continuity and the subscriber must re-read the job for itself.
+//
+// An update carries the ad rendered, not the ad. The feed keeps the ad
+// and reads it again under its lock, and every subscriber of the job
+// would be handed the same one; a ClassAd's reads are not safe to run
+// concurrently (see AdView), so the feed renders it once and the
+// subscribers share the rendering.
 type KeyChange struct {
-	Ad    *classad.ClassAd
+	View  AdView
 	Gone  bool
 	Stale bool
 }
@@ -94,6 +100,17 @@ func (f *Feed) Subscribe(cluster, proc int64) (<-chan KeyChange, func()) {
 			close(s.ch)
 		})
 	}
+}
+
+// notifyAdLocked delivers a new ad for id to its subscribers, rendered
+// once for all of them. The caller holds f.mu and owns ad, so nothing
+// else reads it while it renders. A job nobody follows -- nearly every
+// job the feed sees -- costs nothing.
+func (f *Feed) notifyAdLocked(id jobIdent, ad *classad.ClassAd) {
+	if len(f.subs[id]) == 0 {
+		return
+	}
+	f.notifyLocked(id, KeyChange{View: NewAdView(ad)})
 }
 
 // notifyLocked delivers one change to the subscribers of id. The caller

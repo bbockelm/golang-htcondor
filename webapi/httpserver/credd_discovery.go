@@ -52,6 +52,9 @@ const (
 // when the schedd is this host's -- the local address file. There is no
 // "any credd in the pool" fallback on purpose; see the note above.
 func discoverCredd(ctx context.Context, cfg creddLookup, logger *logging.Logger) (string, error) {
+	// Which credd this server uses is its own question, asked with its
+	// own credential.
+	ctx = htcondor.WithDaemonCredential(ctx, "credd discovery")
 	if addr := strings.TrimSpace(cfg.configured); addr != "" {
 		logger.Info(logging.DestinationHTTP, "using the configured credd",
 			"address", addr, "source", string(creddFromConfig))
@@ -108,6 +111,9 @@ type creddLookup struct {
 	// the seam the "never use the local credd for a remote schedd" test
 	// passes on any machine that simply has no credd installed.
 	localCredd func(*logging.Logger) string
+	// htcondorConfig is the server's HTCondor configuration, which names
+	// the local credd address file; nil loads it from $CONDOR_CONFIG.
+	htcondorConfig *config.Config
 }
 
 // localCreddFunc is cfg.localCredd, or the real lookup.
@@ -115,7 +121,9 @@ func (c creddLookup) localCreddFunc() func(*logging.Logger) string {
 	if c.localCredd != nil {
 		return c.localCredd
 	}
-	return localCreddAddress
+	return func(logger *logging.Logger) string {
+		return localCreddAddress(c.htcondorConfig, logger)
+	}
 }
 
 // creddFromSchedd reads CredDIpAddr from the schedd's address file, else from
@@ -198,8 +206,8 @@ func creddFromAddressFileMetadata(path string) (string, error) {
 }
 
 // localCreddAddress reads this host's credd address file, if it has one.
-func localCreddAddress(logger *logging.Logger) string {
-	path := findCreddAddressFile(logger)
+func localCreddAddress(htcConfig *config.Config, logger *logging.Logger) string {
+	path := findCreddAddressFile(htcConfig, logger)
 	if path == "" {
 		return ""
 	}
@@ -277,5 +285,6 @@ func (h *Handler) creddLookupFor(scheddAddr string) creddLookup {
 		scheddIsLocal:     scheddIsOnThisHost(addressFile, scheddAddr),
 		collector:         h.collector,
 		scheddAddressFile: addressFile,
+		htcondorConfig:    h.htcondorConfig,
 	}
 }

@@ -7,12 +7,14 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/google/jsonschema-go/jsonschema"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/appolicy"
 )
 
 // These tests exist because the published outputSchema is enforced by the
@@ -450,13 +452,15 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"query_job_archive", structuredOf(historyResult(nil, "job history", "true", "JOB_HISTORY", ""))},
 		{"query_job_epochs", structuredOf(historyResult(nil, "epoch", "true", "JOB_EPOCH_HISTORY", ""))},
 		{"query_transfer_history", structuredOf(historyResult(nil, "transfer", "true", "JOB_EPOCH_HISTORY", ""))},
-		{"query_history_db", structuredOf(dbTextResult("records", nil, 50, nil, OwnerScope{}))},
-		{"query_jobs_as_of", structuredOf(dbTextResult("records", nil, 50, nil, OwnerScope{}))},
+		{"query_history_db", structuredOf(dbTextResult("records", nil, 50, false, "", nil, OwnerScope{}))},
+		{"query_jobs_as_of", structuredOf(dbTextResult("records", nil, 50, false, "", nil, OwnerScope{}))},
 		{"aggregate_jobs", aggregateStructured(nil, nil, "jobs", "schedd", false)},
 		// An access point with nothing wrong is the normal case, and the
 		// one where a client's schema check would otherwise first run on
 		// a live call: sections is an empty array, never null.
 		{"analyze_issues", structuredOf(emptyIssuesResult())},
+		// No finished jobs in the window: every list is an empty array.
+		{"analyze_utilization", structuredOf(emptyUtilizationResult())},
 		// The dag object is absent here on purpose: it is present only
 		// for a DAGMan manager job, and the emptiest get_job result is
 		// an ordinary job's. The shape it takes when it IS present --
@@ -466,6 +470,9 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"get_job", map[string]interface{}{"job_id": "1.0", "job": map[string]interface{}{}}},
 		{"analyze_job_match", map[string]interface{}{
 			"job_id": "1.0", "requirements": "", "result": nil, "slot_cache": nil}},
+		// A pool summary that matched nothing. The listing's empty shape
+		// is checked in TestPoolEmptyAnswers, through the dispatcher.
+		{"query_pool", newPoolAggregator(&poolAdKinds[0], nil).structured("true")},
 
 		{"submit_job", map[string]interface{}{
 			"cluster_id": 0, "job_ids": []string(nil), "proc_count": 0,
@@ -523,11 +530,12 @@ func emptyCases(t *testing.T) []emptyCase {
 		{"delete_service_credential", map[string]interface{}{
 			"service": "s", "handle": "", "deleted": true}},
 
-		{"condor_doc_search", docEmpty()},
-		{"condor_doc_job_attributes", docEmpty()},
-		{"condor_doc_machine_attributes", docEmpty()},
-		{"condor_doc_submit_syntax", docEmpty()},
-		{"condor_doc_config_variables", docEmpty()},
+		{"doc_search", docEmpty()},
+		{"doc_job_attributes", docEmpty()},
+		{"doc_machine_attributes", docEmpty()},
+		{"doc_submit_syntax", docEmpty()},
+		{"doc_config_variables", docEmpty()},
+		{"doc_guide", map[string]interface{}{"topic": "", "content": "", "topics": []interface{}(nil)}},
 		{"skills_list", map[string]interface{}{"skills": []interface{}(nil), "count": 0}},
 		{"skills_get", map[string]interface{}{"name": "n", "description": "", "content": ""}},
 
@@ -554,10 +562,13 @@ func emptyCases(t *testing.T) []emptyCase {
 
 		{"get_version", map[string]interface{}{"Module": "", "Revision": "", "Dirty": false}},
 		{"whoami", whoamiReport{}},
+		// An access point whose schedd reported nothing set at all.
+		{"get_access_point_policy", appolicy.Render(appolicy.NewSnapshot("ap", time.Time{}, nil),
+			appolicy.RenderOptions{}).Structured()},
 	}
 }
 
-// docEmpty is the no-hits payload every condor_doc_* tool shares.
+// docEmpty is the no-hits payload every doc_* tool shares.
 func docEmpty() map[string]interface{} {
 	return map[string]interface{}{"query": "x", "results": []interface{}{}, "count": 0}
 }

@@ -35,9 +35,12 @@ import (
 	"github.com/bbockelm/golang-htcondor/idmap"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/version"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/apiad"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/poolpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/sharedportrouter"
 )
 
@@ -142,10 +145,14 @@ func die(earlyBuf *logging.EarlyBuffer, what string, err error) {
 
 // mcpConfig holds MCP-related configuration
 type mcpConfig struct {
-	enabled                bool
-	skillsDir              string
-	skillsReloadInterval   time.Duration
-	disabledTools          string
+	enabled              bool
+	skillsDir            string
+	skillsReloadInterval time.Duration
+	disabledTools        string
+	// disableSecretRedaction is HTTP_API_MCP_REDACT_SECRETS = false.
+	// Negative so the zero value is the protective one.
+	disableSecretRedaction bool
+	redactDisabledRules    string
 	oauth2DBPath           string
 	oauth2Issuer           string
 	oauth2ClientID         string
@@ -187,6 +194,10 @@ type mcpConfig struct {
 	mcpSuperuserGroup string
 	instructions      string
 	adminUsers        []string
+	// Which collector attributes an unprivileged caller may read, and
+	// the attributes this site has declared safe on top of the defaults.
+	poolQueryMode       poolpolicy.Mode
+	poolQueryExtraAttrs []string
 	// Token lifespans for the embedded MCP issuer. Zero means "use the package
 	// default" (1h access, 30d refresh).
 	oauth2AccessTokenLifespan  time.Duration
@@ -406,7 +417,8 @@ func discoverSchedd(cfg *config.Config, collector *htcondor.Collector, logger *l
 // not-found log line; an empty want means "any schedd", which is not an
 // error worth logging as one.
 func scheddFromCollector(collector *htcondor.Collector, logger *logging.Logger, constraint, want string) (addr, name string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(
+		htcondor.WithDaemonCredential(context.Background(), "schedd discovery"), 10*time.Second)
 	defer cancel()
 
 	schedds, _, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", constraint, nil)
@@ -480,13 +492,16 @@ func discoverOIDCEndpoints(issuerURL string) (authURL, tokenURL, userInfoURL str
 //     inline bytes — same rationale as KEK).
 //   - url: optional URL override (for proxy/cache deployments).
 //   - model: optional model id override.
+//   - authScheme: "x-api-key" (default) or "bearer"; how the key is
+//     presented to the upstream, which differs between Anthropic's API
+//     and a gateway fronting it.
 //   - operatorInstructionsFile: optional file with site-specific extra
 //     system-prompt rules appended to every chat turn.
 //
-// All four are zero-valued when unset; the chat package treats an
+// All five are zero-valued when unset; the chat package treats an
 // empty apiKeyFile as "feature disabled" and the others have safe
 // defaults.
-func loadLLMConfig(cfg *config.Config) (apiKeyFile, url, model, operatorInstructionsFile string) {
+func loadLLMConfig(cfg *config.Config) (apiKeyFile, url, model, authScheme, operatorInstructionsFile string) {
 	if v, ok := cfg.Get("HTTP_API_LLM_API_KEY_FILE"); ok {
 		apiKeyFile = strings.TrimSpace(v)
 	}
@@ -495,6 +510,9 @@ func loadLLMConfig(cfg *config.Config) (apiKeyFile, url, model, operatorInstruct
 	}
 	if v, ok := cfg.Get("HTTP_API_LLM_MODEL"); ok {
 		model = strings.TrimSpace(v)
+	}
+	if v, ok := cfg.Get("HTTP_API_LLM_AUTH_SCHEME"); ok {
+		authScheme = strings.TrimSpace(v)
 	}
 	if v, ok := cfg.Get("HTTP_API_LLM_OPERATOR_INSTRUCTIONS_FILE"); ok {
 		operatorInstructionsFile = strings.TrimSpace(v)
@@ -623,6 +641,38 @@ func loadJupyterLimitSec(cfg *config.Config, logger *logging.Logger, name string
 				"parameter", name, "value", v, "default_seconds", def)
 		}
 		return def
+	}
+	return n
+}
+
+// loadJupyterGraceSec reads one of the JupyterLab grace periods, in seconds.
+//
+// Unlike the limits above these cannot be turned off: an unbounded start
+// grace is a token for an unstarted job that never expires, and an
+// unbounded reconnect grace a session nobody can reach that never leaves
+// the list. Zero, negative or unreadable falls back to the default and a
+// value past the ceiling is clamped, each with a warning.
+func loadJupyterGraceSec(cfg *config.Config, logger *logging.Logger, name string, def, ceiling int) int {
+	v, ok := cfg.Get(name)
+	if !ok || strings.TrimSpace(v) == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		if logger != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"Ignoring a JupyterLab grace period that is not a positive number of seconds; using the default",
+				"parameter", name, "value", v, "default_seconds", def)
+		}
+		return def
+	}
+	if n > ceiling {
+		if logger != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"Clamping a JupyterLab grace period to its maximum",
+				"parameter", name, "value", n, "max_seconds", ceiling)
+		}
+		return ceiling
 	}
 	return n
 }
@@ -814,6 +864,72 @@ func loadInteractiveRequirements(cfg *config.Config, logger *logging.Logger) str
 }
 
 // firstConfigValue returns a config value, or "" when unset.
+// resolveJobQueueLog finds the schedd's job_queue.log for the job
+// change stream, or returns "" to leave the stream switched off.
+//
+// /api/v1/jobs/watch needs to tail that file. The field carrying its
+// path existed and was plumbed all the way to the handler, but nothing
+// ever set it -- so the mirror was nil everywhere, and the endpoint
+// answered 503 "job queue mirror not configured" on every deployment
+// there has ever been. Nothing said so: the message reads like a
+// missing setting, and the setting it names did not exist.
+//
+// HTTP_API_JOB_QUEUE_LOG is the explicit knob, and "none" switches the
+// stream off. Without it, JOB_QUEUE_LOG is used when the file is
+// actually there, which is the case where this server shares a host
+// with its schedd. Where it does not -- an API server in its own
+// container, which is the usual deployment -- there is nothing to
+// tail, and that is not a misconfiguration to warn about on every
+// start.
+func resolveJobQueueLog(cfg *config.Config, logger *logging.Logger) string {
+	if configured := strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_JOB_QUEUE_LOG")); configured != "" {
+		if strings.EqualFold(configured, "none") {
+			logger.Info(logging.DestinationHTTP, "The job change stream is switched off by configuration")
+			return ""
+		}
+		// Named explicitly, so a path that is not there is an operator
+		// error and worth saying out loud rather than passing over.
+		if _, err := os.Stat(configured); err != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"HTTP_API_JOB_QUEUE_LOG names a file that cannot be read; the job change stream will be unavailable",
+				"path", configured, "error", err)
+			return ""
+		}
+		return configured
+	}
+
+	fallback := strings.TrimSpace(firstConfigValue(cfg, "JOB_QUEUE_LOG"))
+	if fallback == "" {
+		return ""
+	}
+	if _, err := os.Stat(fallback); err != nil {
+		// The ordinary case for an API server that does not share a
+		// host with its schedd. Logged at debug: it is a fact about
+		// the deployment, not a fault in it.
+		logger.Debug(logging.DestinationHTTP,
+			"No readable job_queue.log, so the job change stream is unavailable",
+			"path", fallback, "error", err)
+		return ""
+	}
+	logger.Info(logging.DestinationHTTP, "Following the job queue for the change stream", "path", fallback)
+	return fallback
+}
+
+// loadPlacementdName is the placementd an operator chose, by its ad's Name
+// or a sinful string: HTTP_API_PLACEMENTD_NAME, else PLACEMENTD_HOST, which
+// is how HTCondor's own tools on this host find a placementd (and the Name
+// a placementd on this host advertises). Empty means this access point's
+// own placementd, which is the only one discovery otherwise accepts.
+func loadPlacementdName(cfg *config.Config, logger *logging.Logger) string {
+	for _, knob := range []string{"HTTP_API_PLACEMENTD_NAME", "PLACEMENTD_HOST"} {
+		if v := strings.TrimSpace(firstConfigValue(cfg, knob)); v != "" {
+			logger.Info(logging.DestinationHTTP, "Using the configured placementd", "knob", knob, "placementd", v)
+			return v
+		}
+	}
+	return ""
+}
+
 func firstConfigValue(cfg *config.Config, knob string) string {
 	if v, ok := cfg.Get(knob); ok {
 		return v
@@ -965,14 +1081,16 @@ func loadOAuth2Endpoints(cfg *config.Config, logger *logging.Logger) (authURL, t
 	return authURL, tokenURL, userInfoURL
 }
 
-// loadOAuth2RedirectURL loads or derives OAuth2 redirect URL
-func loadOAuth2RedirectURL(cfg *config.Config, issuer string, logger *logging.Logger) string {
+// loadOAuth2RedirectURL loads or derives OAuth2 redirect URL.
+// callbackPath is the path this server advertises for its callback
+// (httpserver.OAuth2CallbackPath).
+func loadOAuth2RedirectURL(cfg *config.Config, issuer, callbackPath string, logger *logging.Logger) string {
 	if redirectURL, ok := cfg.Get("HTTP_API_OAUTH2_REDIRECT_URL"); ok && redirectURL != "" {
 		return redirectURL
 	}
 
 	if issuer != "" {
-		url := issuer + httpserver.OAuth2CallbackPath()
+		url := issuer + callbackPath
 		logger.Info(logging.DestinationHTTP, "OAuth2 redirect URL derived from issuer", "url", url)
 		return url
 	}
@@ -1255,30 +1373,126 @@ func loadIdentityMapping(cfg *config.Config, mcpCfg *mcpConfig, logger *logging.
 
 }
 
-// loadMCPConfig loads MCP configuration from HTCondor config
-func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logging.Logger) mcpConfig {
-	config := mcpConfig{}
-
-	// Check if MCP should be enabled from config
-	if mcpEnable, ok := cfg.Get("HTTP_API_ENABLE_MCP"); ok && mcpEnable == "true" {
-		config.enabled = true
-		logger.Info(logging.DestinationHTTP, "MCP enabled via configuration")
+// mcpEnabled reports whether HTTP_API_ENABLE_MCP turns MCP on. Off unless
+// set.
+//
+// Read as a boolean, not compared against the single spelling "true":
+// HTCondor configuration is conventionally written `HTTP_API_ENABLE_MCP =
+// True`, and that spelling used to mean off -- which, while the OAuth2
+// settings were read only with MCP, also meant nobody could log in, with
+// nothing in the log to say why.
+func mcpEnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_ENABLE_MCP")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false
 	}
-
-	// Resolve the unified application database path. This is the shared
-	// application DB (sessions, OAuth2, IDP, API keys) — NOT MCP-specific —
-	// so it must be resolved whether or not MCP is enabled; otherwise an
-	// operator's HTTP_API_DB_PATH is silently ignored and the server falls
-	// back to the default location. The OAuth2DBPath alias on the Config
-	// struct is no longer a silent fallback (see loadDBPath); a deprecation
-	// warning is logged when the legacy HTTP_API_OAUTH2_DB_PATH is set
-	// without HTTP_API_DB_PATH.
-	config.oauth2DBPath = loadDBPath(cfg, logger)
-	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
-
-	if !config.enabled {
-		return config
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_ENABLE_MCP=%q: must be a boolean", raw)
 	}
+	return v
+}
+
+// reservationsEnabled reports whether HTTP_API_RESERVATIONS turns the
+// reservation subsystem on. Off unless set: a reservation holds pool
+// capacity by evicting other people's jobs, which no site should start
+// doing because it upgraded.
+//
+// Read as a boolean rather than compared against "true", since HTCondor
+// configuration is conventionally written `HTTP_API_RESERVATIONS = True`.
+func reservationsEnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_RESERVATIONS")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_RESERVATIONS=%q: must be a boolean", raw)
+	}
+	return v
+}
+
+// reservationEPConstraint is the ClassAd expression limiting which
+// execute points reservations may draw seats from. Empty means all of
+// them.
+//
+// A site will usually want this: a class should take the teaching nodes,
+// not whatever the collector happens to report.
+func reservationEPConstraint(cfg *config.Config) string {
+	raw, _ := cfg.Get("HTTP_API_RESERVATION_EP_CONSTRAINT")
+	return strings.TrimSpace(raw)
+}
+
+// reservationStampBudget caps how many cluster ads one stamping pass
+// writes. Zero takes the package default.
+//
+// The write is per cluster, not per job, so the default covers an idle
+// queue far larger than most access points have. It exists for a queue
+// that is pathological rather than merely large.
+func reservationStampBudget(cfg *config.Config) int {
+	raw, ok := cfg.Get("HTTP_API_RESERVATION_STAMP_BUDGET")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		log.Fatalf("invalid HTTP_API_RESERVATION_STAMP_BUDGET=%q: must be a non-negative integer", raw)
+	}
+	return n
+}
+
+// oauth2SettingNames are the settings whose presence means an operator
+// meant this server to log people in through an identity provider.
+var oauth2SettingNames = []string{
+	"HTTP_API_OAUTH2_ISSUER",
+	"HTTP_API_OAUTH2_IDP",
+	"HTTP_API_OAUTH2_CLIENT_ID",
+	"HTTP_API_OAUTH2_AUTH_URL",
+	"HTTP_API_OAUTH2_TOKEN_URL",
+}
+
+// configuredOAuth2Settings returns the OAuth2 settings this configuration
+// gives a value, in the order of oauth2SettingNames.
+func configuredOAuth2Settings(cfg *config.Config) []string {
+	var configured []string
+	for _, name := range oauth2SettingNames {
+		if v, ok := cfg.Get(name); ok && strings.TrimSpace(v) != "" {
+			configured = append(configured, name)
+		}
+	}
+	return configured
+}
+
+// warnUnservedOAuth2 says so when OAuth2 is configured on a server that
+// serves neither the web UI nor MCP, the two surfaces that use it.
+//
+// The settings are read only for those surfaces, so without them an
+// operator's issuer, client and identity provider go nowhere: the first
+// sign of it is a browser login answered with "no OAuth2 provider
+// configured" by a server whose configuration plainly names one. Naming
+// the two conditions here puts the reason in the log at startup, where it
+// can be acted on.
+func warnUnservedOAuth2(cfg *config.Config, logger *logging.Logger) {
+	configured := configuredOAuth2Settings(cfg)
+	if len(configured) == 0 {
+		return
+	}
+	logger.Warn(logging.DestinationHTTP,
+		"OAuth2 is configured but this server serves neither the web UI nor MCP, "+
+			"so the OAuth2 settings are ignored and logins will be refused. "+
+			"Set HTTP_API_ENABLE_MCP = true, or run a build that embeds the web UI "+
+			"(built with -tags embed_frontend).",
+		"configured", strings.Join(configured, ", "))
+}
+
+// loadOAuth2Config reads the OAuth2 settings into config.
+//
+// They are split out from loadMCPConfig because they answer a different
+// question: these are read whenever the web UI or MCP is served, since the
+// web UI logs people in through OAuth2 either way, while the MCP settings
+// proper are read only when MCP is on. loadMCPConfig returns between the two
+// for a server that serves neither.
+func loadOAuth2Config(cfg *config.Config, config *mcpConfig, listenAddrFromConfig string, webUIEnabled bool, logger *logging.Logger) {
 
 	// Load OAuth2 issuer
 	config.oauth2Issuer = loadOAuth2Issuer(cfg, listenAddrFromConfig)
@@ -1297,7 +1511,8 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	config.oauth2AuthURL, config.oauth2TokenURL, config.oauth2UserInfoURL = loadOAuth2Endpoints(cfg, logger)
 
 	// Load OAuth2 redirect URL
-	config.oauth2RedirectURL = loadOAuth2RedirectURL(cfg, config.oauth2Issuer, logger)
+	config.oauth2RedirectURL = loadOAuth2RedirectURL(cfg, config.oauth2Issuer,
+		httpserver.OAuth2CallbackPath(webUIEnabled, config.enabled), logger)
 
 	// Log the user info URL if set
 	if config.oauth2UserInfoURL != "" {
@@ -1317,7 +1532,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	// Identity mapping: the provider's subject is not always the name of
 	// the account that owns the jobs, and what a person may do is not
 	// always in the token. Off unless asked for.
-	loadIdentityMapping(cfg, &config, logger)
+	loadIdentityMapping(cfg, config, logger)
 
 	// Load username claim name (default: "sub")
 	// Login policy as a ClassAd expression over the token's claims. Parsed
@@ -1335,7 +1550,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	}
 
 	// Load access control groups
-	loadAccessControlGroups(cfg, &config, logger)
+	loadAccessControlGroups(cfg, config, logger)
 
 	// Load token lifespans (zero means "use the httpserver-package default")
 	config.oauth2AccessTokenLifespan = loadTokenLifespan(cfg, "HTTP_API_OAUTH2_ACCESS_TOKEN_LIFESPAN", logger)
@@ -1351,6 +1566,47 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 		logger.Info(logging.DestinationHTTP, "OAuth2 maximum grant lifetime", "duration", config.oauth2MaxGrantLifetime)
 	}
 	config.oauth2RevocationOracles = loadRevocationOracles(cfg, logger)
+}
+
+// loadMCPConfig loads the MCP and OAuth2 configuration from HTCondor
+// config.
+//
+// The OAuth2 settings are read whenever the web UI or MCP is served,
+// because the web UI logs people in through OAuth2 whether or not MCP is
+// on. They used to be read only with HTTP_API_ENABLE_MCP, so a web UI
+// with MCP off silently ignored its issuer, its identity provider, its
+// access groups and its identity mapping. Only the MCP settings proper
+// still wait for MCP.
+func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled bool, logger *logging.Logger) mcpConfig {
+	config := mcpConfig{}
+
+	// Check if MCP should be enabled from config
+	if mcpEnabled(cfg) {
+		config.enabled = true
+		logger.Info(logging.DestinationHTTP, "MCP enabled via configuration")
+	}
+
+	// Resolve the unified application database path. This is the shared
+	// application DB (sessions, OAuth2, IDP, API keys) — NOT MCP-specific —
+	// so it must be resolved whether or not MCP is enabled; otherwise an
+	// operator's HTTP_API_DB_PATH is silently ignored and the server falls
+	// back to the default location. The OAuth2DBPath alias on the Config
+	// struct is no longer a silent fallback (see loadDBPath); a deprecation
+	// warning is logged when the legacy HTTP_API_OAUTH2_DB_PATH is set
+	// without HTTP_API_DB_PATH.
+	config.oauth2DBPath = loadDBPath(cfg, logger)
+	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
+
+	if !config.enabled && !webUIEnabled {
+		warnUnservedOAuth2(cfg, logger)
+		return config
+	}
+
+	loadOAuth2Config(cfg, &config, listenAddrFromConfig, webUIEnabled, logger)
+
+	if !config.enabled {
+		return config
+	}
 
 	// Load the MCP admin list. These subjects skip the owner-scope
 	// wrapper on MCP tools, so they can query and act on other users'
@@ -1359,6 +1615,27 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 	if admins, ok := cfg.Get("MCP_ADMIN_USERS"); ok && admins != "" {
 		config.adminUsers = splitCommaList(admins)
 		logger.Info(logging.DestinationMCP, "MCP admin users configured", "count", len(config.adminUsers))
+	}
+
+	// Which collector attributes an unprivileged caller may read.
+	//
+	// A bad value fails CLOSED. This setting exists to withhold data, so
+	// a typo that left the pool open would be the one failure that
+	// matters; refusing pool queries outright is noticed and fixed in
+	// minutes, while quietly publishing identities is not noticed at all.
+	if v, ok := cfg.Get("HTTP_API_POOL_QUERY_IDENTITY"); ok && strings.TrimSpace(v) != "" {
+		mode, err := poolpolicy.ParseMode(v)
+		if err != nil {
+			mode = poolpolicy.ModeAdmin
+			logger.Error(logging.DestinationHTTP,
+				"HTTP_API_POOL_QUERY_IDENTITY is not a value this server understands; "+
+					"pool queries are restricted to administrators until it is corrected",
+				"value", v, "error", err)
+		}
+		config.poolQueryMode = mode
+	}
+	if v, ok := cfg.Get("HTTP_API_POOL_QUERY_EXTRA_ATTRS"); ok && strings.TrimSpace(v) != "" {
+		config.poolQueryExtraAttrs = splitCommaList(v)
 	}
 
 	// Load server-level instructions for MCP agents
@@ -1381,6 +1658,8 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, logger *logg
 		config.disabledTools = disabled
 		logger.Info(logging.DestinationMCP, "MCP tools disabled by configuration", "patterns", disabled)
 	}
+
+	loadMCPRedaction(cfg, &config)
 
 	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
 		config.instructions = instructions
@@ -1477,11 +1756,11 @@ func reportStartupFailureToLog(startupErr error) {
 // has already dropped to condor before exec'ing us, so euid is non-
 // zero on entry and this is a no-op.
 //
-// We honor CONDOR_USER / CONDOR_IDS / DROP_PRIVILEGES from the loaded
-// config (same knobs HTCondor's own daemons read), and tolerate the
-// condor user not existing — in that case we leave the binary
-// running as root with a warning, matching what HTCondor does in
-// containers where the user is missing.
+// We honor CONDOR_USER / CONDOR_IDS from the loaded config (same knobs
+// HTCondor's own daemons read). A drop target that cannot be resolved
+// is fatal, as it is for the core daemons: the server refuses to start
+// rather than run as root. Where there is no condor account (a dev
+// container), start the binary as an unprivileged user instead.
 //
 // Must be called before opening the log file, the unified app DB, or
 // any other persistent resource the daemon will own — otherwise
@@ -1506,12 +1785,9 @@ func dropPrivilegesIfRoot(cfg *config.Config) error {
 
 	mgr, err := droppriv.NewManager(conf)
 	if err != nil {
-		// Most likely cause: condor user doesn't exist in the
-		// host's nsswitch chain (dev containers, CI). Log loud
-		// and continue as root rather than refusing to start —
-		// the operator may be doing local testing.
-		log.Printf("WARNING: cannot resolve condor user identity (%v); continuing as root", err)
-		return nil //nolint:nilerr // intentional: log + continue
+		return fmt.Errorf("cannot resolve the user to drop privileges to "+
+			"(set CONDOR_USER or CONDOR_IDS, or create the condor user); "+
+			"refusing to run as root: %w", err)
 	}
 	if err := mgr.Start(); err != nil {
 		return fmt.Errorf("droppriv.Start: %w", err)
@@ -1541,11 +1817,133 @@ func getScheddConfig(cfg *config.Config) (scheddNameValue, scheddAddrValue, sche
 	return scheddNameValue, scheddAddrValue, scheddHostValue
 }
 
+// loadMultiAPConfig reads the multi-AP knobs. HTTP_API_SCHEDD_CONSTRAINT
+// set selects multi-AP mode, in which naming one schedd is a
+// contradiction: it is refused rather than silently winning.
+func loadMultiAPConfig(cfg *config.Config, scheddName, scheddAddr string) (httpserver.MultiAPConfig, error) {
+	mc := httpserver.MultiAPConfig{
+		ScheddConstraint: strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_SCHEDD_CONSTRAINT")),
+		HubName:          strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_HUB_NAME")),
+		HubAddress:       strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_HUB_ADDRESS")),
+		Stale:            strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_MULTI_AP_STALE")),
+		JobIDCodec:       strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_JOB_ID_CODEC")),
+	}
+	if !mc.Enabled() {
+		return mc, nil
+	}
+	if v := strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_BULK_FRESH_SECONDS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return mc, fmt.Errorf("HTTP_API_BULK_FRESH_SECONDS must be a whole number of seconds, not %q", v)
+		}
+		// Zero, like unset, never skips an AP on the hub's word.
+		mc.BulkFresh = time.Duration(n) * time.Second
+	}
+	// Hub selection among several federation hubs; unset or zero takes
+	// multiap's defaults.
+	for _, k := range []struct {
+		name string
+		into func(n int)
+	}{
+		{"HTTP_API_HUB_SWITCH_SECONDS", func(n int) { mc.HubSwitchAfter = time.Duration(n) * time.Second }},
+		{"HTTP_API_HUB_SWITCH_MARGIN", func(n int) { mc.HubSwitchMargin = n }},
+		{"HTTP_API_HUB_FAIL_AFTER", func(n int) { mc.HubFailAfter = n }},
+		{"HTTP_API_HUB_SETTLE_SECONDS", func(n int) { mc.HubSettle = time.Duration(n) * time.Second }},
+	} {
+		v := strings.TrimSpace(firstConfigValue(cfg, k.name))
+		if v == "" {
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return mc, fmt.Errorf("%s must be a whole number, not %q", k.name, v)
+		}
+		k.into(n)
+	}
+	asg, err := loadAPAssignmentConfig(cfg)
+	if err != nil {
+		return mc, err
+	}
+	mc.Assignment = asg
+	if scheddName != "" || scheddAddr != "" {
+		return mc, fmt.Errorf("HTTP_API_SCHEDD_CONSTRAINT selects multi-AP mode, which serves many schedds; "+
+			"it cannot be combined with one named schedd (-schedd/SCHEDD_NAME %q, -schedd-addr %q)", scheddName, scheddAddr)
+	}
+	return mc, nil
+}
+
+// loadAPAssignmentConfig reads HTTP_API_AP_ASSIGNMENT and its knobs: which
+// access point a user's new work goes to in multi-AP mode. An unknown
+// backend name refuses to start the server; so does a backend whose own
+// knobs are missing or wrong, which apassign.Build reports.
+func loadAPAssignmentConfig(cfg *config.Config) (apassign.Config, error) {
+	var out apassign.Config
+	backends, err := apassign.ParseBackends(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT"))
+	if err != nil {
+		return out, err
+	}
+	out.Backends = backends
+	out.Default = strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT_DEFAULT"))
+	out.Mapfile = strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT_MAPFILE"))
+	out.RESTURL = strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT_REST_URL"))
+	out.RESTTokenFile = strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT_REST_TOKEN_FILE"))
+	if v := strings.TrimSpace(firstConfigValue(cfg, "HTTP_API_AP_ASSIGNMENT_STALE_SECONDS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return out, fmt.Errorf("HTTP_API_AP_ASSIGNMENT_STALE_SECONDS must be a whole number of seconds, not %q", v)
+		}
+		out.Stale = time.Duration(n) * time.Second
+		if n == 0 {
+			// Zero means what it says: a failing backend is never
+			// covered by an earlier answer.
+			out.Stale = -1
+		}
+	}
+	return out, nil
+}
+
+// flagWasSet reports whether the named flag was given on the command line,
+// as opposed to carrying its compiled-in default.
+func flagWasSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
 // getHTTPConfig extracts HTTP API configuration from config
-func getHTTPConfig(cfg *config.Config) (listenAddrResult, mcpListenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile string) {
+//
+// An explicit -listen outranks HTTP_API_LISTEN_ADDR. Typing a flag is the
+// more deliberate of the two and the one an operator reaches for to
+// override what the config files say -- usually to try a port while the
+// config is being worked out -- so config winning meant the flag did
+// nothing at all, with nothing said about why. HTTP_API_LISTEN_ADDR still
+// beats the flag's default, which is how the config sets the address in
+// the ordinary case.
+//
+// HTTP_API_LISTEN is honored as well, because this documentation named it
+// for months while nothing read it: an operator who set it got a server
+// on the default port and no indication of why. The setting is
+// HTTP_API_LISTEN_ADDR, which wins if both are present, and the other
+// spelling says so in the log.
+func getHTTPConfig(cfg *config.Config, logger *logging.Logger) (listenAddrResult, mcpListenAddrResult, tlsCertFile, tlsKeyFile, tlsCACertFile string) {
 	listenAddrResult = *listenAddr
-	if addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR"); ok && addr != "" {
-		listenAddrResult = addr
+	if !flagWasSet("listen") {
+		addr, ok := cfg.Get("HTTP_API_LISTEN_ADDR")
+		if !ok || strings.TrimSpace(addr) == "" {
+			if alias, aliasOK := cfg.Get("HTTP_API_LISTEN"); aliasOK && strings.TrimSpace(alias) != "" {
+				addr, ok = alias, true
+				logger.Warn(logging.DestinationHTTP,
+					"HTTP_API_LISTEN is an alias; the setting is named HTTP_API_LISTEN_ADDR",
+					"address", strings.TrimSpace(alias))
+			}
+		}
+		if ok && strings.TrimSpace(addr) != "" {
+			listenAddrResult = strings.TrimSpace(addr)
+		}
 	}
 	mcpListenAddrResult, _ = cfg.Get("HTTP_API_MCP_LISTEN_ADDR")
 	tlsCertFile, _ = cfg.Get("HTTP_API_TLS_CERT")
@@ -1720,8 +2118,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// Credentials that need root to read (pool signing key, KEK,
 	// TLS cert/key) are expected to be condor-readable per HTCondor
 	// convention (mode 0600 condor:condor or 0640 root:condor).
-	// dropPrivilegesIfRoot is a no-op when we're already non-root
-	// or when the condor user doesn't exist (dev/CI containers).
+	// dropPrivilegesIfRoot is a no-op when we're already non-root.
 	if err := dropPrivilegesIfRoot(cfg); err != nil {
 		return fmt.Errorf("failed to drop privileges: %w", err)
 	}
@@ -1730,7 +2127,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	scheddNameValue, scheddAddrValue, scheddHostValue := getScheddConfig(cfg)
 
 	// Get HTTP API configuration
-	listenAddrFromConfig, mcpListenAddrFromConfig, tlsCertFile, tlsKeyFile, tlsCACertFile := getHTTPConfig(cfg)
+	listenAddrFromConfig, mcpListenAddrFromConfig, tlsCertFile, tlsKeyFile, tlsCACertFile := getHTTPConfig(cfg, logger)
 
 	// Get timeout configuration
 	readTimeout, writeTimeout, idleTimeout := getTimeoutConfig(cfg)
@@ -1750,6 +2147,14 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// HTTP_API_MCP_ACCESS_GROUP, which is what gated the browser before
 	// these were separate knobs.
 	webuiAccessGroup, _ := cfg.Get("HTTP_API_WEBUI_ACCESS_GROUP")
+	// Site branding. Every one of these is optional; unset leaves the
+	// web UI exactly as it ships. See webapi/httpserver/branding.go.
+	webuiSiteName, _ := cfg.Get("HTTP_API_WEBUI_SITE_NAME")
+	webuiSiteTagline, _ := cfg.Get("HTTP_API_WEBUI_SITE_TAGLINE")
+	webuiFooterLogos, _ := cfg.Get("HTTP_API_WEBUI_FOOTER_LOGOS")
+	webuiBrandingDir, _ := cfg.Get("HTTP_API_WEBUI_BRANDING_DIR")
+	webuiCustomCSS, _ := cfg.Get("HTTP_API_WEBUI_CUSTOM_CSS")
+	webuiFavicon, _ := cfg.Get("HTTP_API_WEBUI_FAVICON")
 
 	// Superuser mode is gated on its own group, not on the admin-UI group:
 	// reading the admin pages and acting as any user on the access point are
@@ -1761,6 +2166,11 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	if strings.TrimSpace(superuserGroup) != "" {
 		log.Printf("Superuser mode gated on group %q", strings.TrimSpace(superuserGroup))
 	}
+	// Project leads: superuser mode confined to the jobs of the projects a
+	// session leads. Either may be set without the other, and without
+	// HTTP_API_SUPERUSER_GROUP.
+	projectLeadsFile, _ := cfg.Get("HTTP_API_PROJECT_LEADS_FILE")
+	projectLeadsGroup, _ := cfg.Get("HTTP_API_PROJECT_LEADS_GROUP")
 
 	// Create logger with reasonable defaults for unprivileged operation.
 	// Assigning to the OUTER `logger` (declared at the top of the
@@ -1771,6 +2181,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
+	reportUnmarkedOrigins(logger)
 	// Drain everything stdlib log emitted before this point into the
 	// structured logger (so the early daemon-core diagnostic, the
 	// UID_DOMAIN/TRUST_DOMAIN trace, etc. show up in
@@ -1793,7 +2204,18 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// to a new one. They are indistinguishable by the time the server
 	// sees them, so say which it was.
 	scheddAddrDiscovered := false
-	if scheddAddrValue == "" {
+	multiAP, err := loadMultiAPConfig(cfg, scheddNameValue, scheddAddrValue)
+	if err != nil {
+		return err
+	}
+	if multiAP.Enabled() {
+		logger.Info(logging.DestinationSchedd, "Multi-AP mode: serving every schedd matching HTTP_API_SCHEDD_CONSTRAINT",
+			"constraint", multiAP.ScheddConstraint)
+		if scheddHostValue != "" {
+			logger.Warn(logging.DestinationSchedd, "SCHEDD_HOST is ignored in multi-AP mode", "schedd_host", scheddHostValue)
+			scheddHostValue = ""
+		}
+	} else if scheddAddrValue == "" {
 		if scheddNameValue != "" {
 			logger.Info(logging.DestinationSchedd, "ScheddAddr not provided, discovering schedd from collector...", "name", scheddNameValue)
 		}
@@ -1806,8 +2228,14 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		}
 	}
 
+	// The web UI is served when it is compiled in. A development build
+	// behind `next dev` is not: that binary serves no UI of its own, and
+	// the dev server proxies only /mcp/ of the OAuth2 paths, so it keeps
+	// the MCP-only paths and needs HTTP_API_ENABLE_MCP for a login.
+	webUIEnabled := webui.IsEmbedded()
+
 	// Load MCP configuration
-	mcpCfg := loadMCPConfig(cfg, listenAddrFromConfig, logger)
+	mcpCfg := loadMCPConfig(cfg, listenAddrFromConfig, webUIEnabled, logger)
 
 	// Check if IDP should be enabled
 	enableIDP := false
@@ -1840,7 +2268,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	log.Printf("HTTP base URL: %s (public: %q)", httpBaseURL, publicBaseURL(cfg))
 
 	// LLM / chat-feature config. Zero-strings = chat disabled.
-	llmAPIKeyFile, llmAPIURL, llmModel, llmOperatorInstructions := loadLLMConfig(cfg)
+	llmAPIKeyFile, llmAPIURL, llmModel, llmAuthScheme, llmOperatorInstructions := loadLLMConfig(cfg)
 
 	// Metrics-endpoint exposure. Default: false (auth required). Set
 	// HTTP_API_METRICS_PUBLIC=true to skip the API-key gate when the
@@ -1851,9 +2279,10 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			strings.TrimSpace(v) == "1"
 	}
 
-	// MCP tool-call statistics. Both knobs have working defaults; they
-	// exist for an operator who has measured a reason to change them.
-	toolStatsFlush := time.Duration(0)
+	// Usage statistics -- MCP tool calls and REST API requests. The
+	// knobs have working defaults and govern both kinds; they exist
+	// for an operator who has measured a reason to change them.
+	usageStatsFlush := time.Duration(0)
 	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_FLUSH_INTERVAL"); ok {
 		d, err := time.ParseDuration(strings.TrimSpace(v))
 		if err != nil || d <= 0 {
@@ -1861,15 +2290,15 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 				"Ignoring HTTP_API_TOOL_STATS_FLUSH_INTERVAL; expected a positive duration like 5m",
 				"value", v, "error", err)
 		} else {
-			toolStatsFlush = d
+			usageStatsFlush = d
 		}
 	}
-	toolStatsOmitUser := false
+	usageStatsOmitUser := false
 	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_OMIT_USER"); ok {
-		toolStatsOmitUser = strings.EqualFold(strings.TrimSpace(v), "true") ||
+		usageStatsOmitUser = strings.EqualFold(strings.TrimSpace(v), "true") ||
 			strings.TrimSpace(v) == "1"
 	}
-	toolStatsMaxSeries := 0
+	usageStatsMaxSeries := 0
 	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_MAX_SERIES"); ok {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err != nil || n <= 0 {
@@ -1877,10 +2306,29 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 				"Ignoring HTTP_API_TOOL_STATS_MAX_SERIES; expected a positive integer",
 				"value", v, "error", err)
 		} else {
-			toolStatsMaxSeries = n
+			usageStatsMaxSeries = n
 		}
 	}
-	toolStatsMaxLabels := 0
+	utilizationMaxJobs := 0
+	if v, ok := cfg.Get("HTTP_API_UTILIZATION_MAX_JOBS"); ok {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n <= 0 {
+			logger.Warn(logging.DestinationHTTP,
+				"Ignoring HTTP_API_UTILIZATION_MAX_JOBS; expected a positive integer",
+				"value", v, "error", err)
+		} else {
+			utilizationMaxJobs = n
+		}
+	}
+	// REST counting is on by default. It is separable because the web
+	// UI polls: an operator who finds the volume not worth the rows
+	// can turn it off and keep the MCP counting.
+	restStatsEnabled := true
+	if v, ok := cfg.Get("HTTP_API_REST_STATS"); ok {
+		t := strings.TrimSpace(v)
+		restStatsEnabled = !strings.EqualFold(t, "false") && t != "0"
+	}
+	usageStatsMaxLabels := 0
 	if v, ok := cfg.Get("HTTP_API_TOOL_STATS_MAX_LABEL_VALUES"); ok {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err != nil || n <= 0 {
@@ -1888,7 +2336,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 				"Ignoring HTTP_API_TOOL_STATS_MAX_LABEL_VALUES; expected a positive integer",
 				"value", v, "error", err)
 		} else {
-			toolStatsMaxLabels = n
+			usageStatsMaxLabels = n
 		}
 	}
 
@@ -1906,16 +2354,21 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 
 	dbMirrorName, dbMirrorAddress, dbMirrorRequired := loadDBMirrorConfig(cfg, logger)
 	pingInterval := loadPingInterval(cfg, logger)
+	runtimeEstimateInterval, runtimeEstimateBackfill := loadRuntimeEstimateConfig(cfg, logger)
 	mcpWatchMaxWait := loadMCPWatchMaxWait(cfg, logger)
 	mcpMaxRequestDuration := loadMCPMaxRequestDuration(cfg, logger)
 	upstreamRefresh := loadUpstreamRefresh(cfg, logger)
 	tokenRetention := loadTokenRetention(cfg, logger)
+	apiKeyEntitlementTTL := loadPositiveDuration(cfg, "HTTP_API_API_KEY_ENTITLEMENT_TTL", logger)
+	serviceKeyMaxLifetime := loadPositiveDuration(cfg, "HTTP_API_SERVICE_KEY_MAX_LIFETIME", logger)
 	mcpUseSDKTransport := loadMCPUseSDKTransport(cfg, logger)
 	requiredCredentials := loadRequiredCredentials(cfg, logger)
+	jobQueueLogPath := resolveJobQueueLog(cfg, logger)
 	creddAddress := firstConfigValue(cfg, "HTTP_API_CREDD_ADDRESS")
 	if creddAddress != "" {
 		logger.Info(logging.DestinationHTTP, "HTTP_API_CREDD_ADDRESS configured", "address", creddAddress)
 	}
+	placementdName := loadPlacementdName(cfg, logger)
 
 	server, err := httpserver.NewServer(httpserver.Config{
 		ListenAddr:               listenAddrFromConfig,
@@ -1924,6 +2377,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		CCB:                      ccbDialer,
 		ScheddName:               scheddNameValue,
 		ScheddAddr:               scheddAddrValue,
+		MultiAP:                  multiAP,
 		ScheddAddrDiscovered:     scheddAddrDiscovered,
 		ScheddHost:               scheddHostValue,
 		UserHeader:               userHeaderFromConfig,
@@ -1943,6 +2397,10 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		Collector:                collector,
 		Logger:                   logger,
 		EnableMCP:                mcpCfg.enabled,
+		Reservations:             reservationsEnabled(cfg),
+		ReservationEPConstraint:  reservationEPConstraint(cfg),
+		ReservationStampBudget:   reservationStampBudget(cfg),
+		WebUIEnabled:             webUIEnabled,
 		// DBPath is the canonical name; OAuth2DBPath kept for back-compat.
 		DBPath:                     mcpCfg.oauth2DBPath,
 		KEKFilePath:                loadKEKFilePath(cfg, logger),
@@ -1950,6 +2408,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2Issuer:               mcpCfg.oauth2Issuer,
 		MCPCIMDEnabled:             mcpCIMDEnabled(cfg),
 		MCPCIMDAllowedHosts:        config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_MCP_CIMD_ALLOWED_HOSTS")),
+		MCPDCRDisabled:             !mcpDCREnabled(cfg),
 		MCPTokenExchangeIssuers:    firstConfigValue(cfg, "HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS"),
 		OAuth2ClientID:             mcpCfg.oauth2ClientID,
 		OAuth2ClientSecret:         mcpCfg.oauth2ClientSecret,
@@ -1959,6 +2418,14 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		OAuth2UserInfoURL:          mcpCfg.oauth2UserInfoURL,
 		OAuth2Scopes:               mcpCfg.oauth2Scopes,
 		OAuth2UsernameClaim:        mcpCfg.oauth2UsernameClaim,
+		PlacementIdentityClaims:    config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_PLACEMENT_IDENTITY_CLAIMS")),
+		PlacementDisplayNameClaims: config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_PLACEMENT_DISPLAY_NAME_CLAIMS")),
+		PlacementDeviceClients:     placementDeviceClients(cfg),
+		PlacementScheddHost:        firstConfigValue(cfg, "HTTP_API_PLACEMENT_SCHEDD_HOST"),
+		PlacementCollectorHost:     firstConfigValue(cfg, "HTTP_API_PLACEMENT_COLLECTOR_HOST"),
+		PlacementPrefillDomains:    config.SplitConfigList(firstConfigValue(cfg, "HTTP_API_PLACEMENT_PREFILL_DOMAINS")),
+		PlacementRequestRetention:  configDurationSetting(cfg, "HTTP_API_PLACEMENT_REQUEST_RETENTION", logger),
+		PlacementdName:             placementdName,
 		OAuth2Requirements:         mcpCfg.oauth2Requirements,
 		OAuth2GroupsClaim:          mcpCfg.oauth2GroupsClaim,
 		IdentityMapStrategies:      mcpCfg.identityMapStrategies,
@@ -1986,12 +2453,23 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPSuperuserGroup:          mcpCfg.mcpSuperuserGroup,
 		MCPInstructions:            mcpCfg.instructions,
 		MCPDisabledTools:           mcpCfg.disabledTools,
+		MCPDisableSecretRedaction:  mcpCfg.disableSecretRedaction,
+		MCPRedactDisabledRules:     mcpCfg.redactDisabledRules,
 		MCPSkillsDir:               mcpCfg.skillsDir,
 		MCPSkillsReloadInterval:    mcpCfg.skillsReloadInterval,
 		MCPAdminUsers:              mcpCfg.adminUsers,
+		PoolQueryPolicy:            poolpolicy.New(mcpCfg.poolQueryMode, mcpCfg.poolQueryExtraAttrs),
 		WebUIAdminGroup:            webuiAdminGroup,
 		WebUIAccessGroup:           webuiAccessGroup,
+		WebUISiteName:              webuiSiteName,
+		WebUISiteTagline:           webuiSiteTagline,
+		WebUIFooterLogos:           webuiFooterLogos,
+		WebUIBrandingDir:           webuiBrandingDir,
+		WebUICustomCSS:             webuiCustomCSS,
+		WebUIFavicon:               webuiFavicon,
 		SuperuserGroup:             strings.TrimSpace(superuserGroup),
+		ProjectLeadsFile:           strings.TrimSpace(projectLeadsFile),
+		ProjectLeadsGroup:          strings.TrimSpace(projectLeadsGroup),
 		SuperuserFallbackIdentity:  strings.TrimSpace(superuserFallback),
 		EnableIDP:                  enableIDP,
 		IDPIssuer:                  idpIssuer,
@@ -2000,17 +2478,22 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		JupyterWorkDir:             loadJupyterWorkDir(cfg),
 		JupyterMaxLifetimeSec:      loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_MAX_LIFETIME_SEC", defaultJupyterMaxLifetimeSec),
 		JupyterKernelIdleSec:       loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_KERNEL_IDLE_SEC", defaultJupyterKernelIdleSec),
-		InteractiveExtraSubmit:     loadInteractiveExtraSubmit(cfg),
-		DagmanPath:                 firstConfigValue(cfg, "HTTP_API_DAGMAN_PATH"),
-		DagmanEnvironment:          loadDagmanEnvironment(cfg, logger),
-		InteractiveRequirements:    loadInteractiveRequirements(cfg, logger),
-		VSCodeImage:                firstConfigValue(cfg, "HTTP_API_VSCODE_IMAGE"),
-		Build:                      loadBuildConfig(cfg, logger),
-		DBMirrorTokenSubject:       firstConfigValue(cfg, "HTTP_API_DBMIRROR_TOKEN_SUBJECT"),
-		SubmitFileDefaults:         loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_DEFAULTS"),
-		SubmitFileOverrides:        loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_OVERRIDES"),
-		TemplateGlobalPath:         loadTemplateGlobalPath(cfg),
-		HTCondorConfig:             cfg,
+		JupyterStartGraceSec: loadJupyterGraceSec(cfg, logger, "HTTP_API_JUPYTER_START_GRACE_SEC",
+			httpserver.DefaultJupyterStartGraceSec, httpserver.MaxJupyterStartGraceSec),
+		JupyterReconnectGraceSec: loadJupyterGraceSec(cfg, logger, "HTTP_API_JUPYTER_RECONNECT_GRACE_SEC",
+			httpserver.DefaultJupyterReconnectGraceSec, httpserver.MaxJupyterReconnectGraceSec),
+		InteractiveExtraSubmit:  loadInteractiveExtraSubmit(cfg),
+		DagmanPath:              firstConfigValue(cfg, "HTTP_API_DAGMAN_PATH"),
+		JobQueueLogPath:         jobQueueLogPath,
+		DagmanEnvironment:       loadDagmanEnvironment(cfg, logger),
+		InteractiveRequirements: loadInteractiveRequirements(cfg, logger),
+		VSCodeImage:             firstConfigValue(cfg, "HTTP_API_VSCODE_IMAGE"),
+		Build:                   loadBuildConfig(cfg, logger),
+		DBMirrorTokenSubject:    firstConfigValue(cfg, "HTTP_API_DBMIRROR_TOKEN_SUBJECT"),
+		SubmitFileDefaults:      loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_DEFAULTS"),
+		SubmitFileOverrides:     loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_OVERRIDES"),
+		TemplateGlobalPath:      loadTemplateGlobalPath(cfg),
+		HTCondorConfig:          cfg,
 		// LLM/chat configuration. Optional; the chat endpoint
 		// returns 503 unless all three (key file, MCP enabled, key
 		// readable) line up. The values are zero-strings when
@@ -2018,12 +2501,17 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		LLMAPIKeyFile:               llmAPIKeyFile,
 		LLMAPIURL:                   llmAPIURL,
 		LLMModel:                    llmModel,
+		LLMAuthScheme:               llmAuthScheme,
 		LLMOperatorInstructionsFile: llmOperatorInstructions,
 		MetricsPublic:               metricsPublic,
-		ToolStatsFlushInterval:      toolStatsFlush,
-		ToolStatsMaxLabelValues:     toolStatsMaxLabels,
-		ToolStatsOmitUser:           toolStatsOmitUser,
-		ToolStatsMaxSeries:          toolStatsMaxSeries,
+		UsageStatsFlushInterval:     usageStatsFlush,
+		UsageStatsMaxLabelValues:    usageStatsMaxLabels,
+		UsageStatsOmitUser:          usageStatsOmitUser,
+		UsageStatsMaxSeries:         usageStatsMaxSeries,
+		RESTStatsEnabled:            restStatsEnabled,
+		UtilizationMaxJobs:          utilizationMaxJobs,
+		RuntimeEstimateInterval:     runtimeEstimateInterval,
+		RuntimeEstimateBackfill:     runtimeEstimateBackfill,
 		DBMirrorName:                dbMirrorName,
 		DBMirrorAddress:             dbMirrorAddress,
 		DBMirrorRequired:            dbMirrorRequired,
@@ -2032,6 +2520,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPMaxRequestDuration:       mcpMaxRequestDuration,
 		UpstreamRefresh:             upstreamRefresh,
 		TokenRetention:              tokenRetention,
+		APIKeyEntitlementTTL:        apiKeyEntitlementTTL,
+		ServiceKeyMaxLifetime:       serviceKeyMaxLifetime,
 		MCPUseSDKTransport:          mcpUseSDKTransport,
 		RequiredCredentials:         requiredCredentials,
 		CreddAddress:                creddAddress,
@@ -2112,22 +2602,34 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 			}()
 		}
 
-		// Under condor_master the listener above is the master's socket,
-		// which carries CEDAR commands. It is not a port a browser can be
-		// pointed at, and the master cannot be asked to hand one down, so
-		// a configured HTTP_API_LISTEN_ADDR has to be bound here as well --
-		// including 443, which is why this may need to re-raise.
+		// Behind shared port the listener above is a CEDAR socket: the
+		// endpoint condor_master handed down, or one this daemon
+		// registered with condor_shared_port itself when no socket was
+		// inherited. Neither is a port a browser can be pointed at, and
+		// neither can be asked to become one, so the configured HTTP
+		// address has to be bound here as well -- including 443, which is
+		// why this may need to re-raise.
+		//
+		// The test is "did we bind that address ourselves", not "was the
+		// socket inherited": a self-registered shared-port endpoint is
+		// not inherited either, and asking the narrower question left the
+		// HTTP port unbound whenever USE_SHARED_PORT was on and no socket
+		// came down from the master -- the server came up serving nothing
+		// anyone could reach, and turning shared port off "fixed" it.
 		//
 		// Started before the primary listener so a failure to bind is
 		// reported at startup rather than after the server is already
 		// serving. It serves nothing until the handler is started, which
 		// is what ServeListenerWithCert does below.
-		if d.AdoptedInheritedListener() && strings.TrimSpace(listenAddrFromConfig) != "" {
+		if !d.BoundFallbackListener() && strings.TrimSpace(listenAddrFromConfig) != "" {
 			extra, lerr := listenMaybePrivileged(listenAddrFromConfig, logger)
 			if lerr != nil {
-				return fmt.Errorf("binding HTTP_API_LISTEN_ADDR %s: %w", listenAddrFromConfig, lerr)
+				return fmt.Errorf("binding the HTTP listen address %s: %w", listenAddrFromConfig, lerr)
 			}
 			defer func() { _ = extra.Close() }()
+			logger.Info(logging.DestinationHTTP,
+				"serving HTTP on its own address alongside the shared-port endpoint",
+				"address", extra.Addr().String())
 			go func() {
 				if err := server.ServeAdditionalListener(extra, cert, key); err != nil &&
 					!errors.Is(err, http.ErrServerClosed) {
@@ -2148,6 +2650,20 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 }
 
 // runDemoMode runs the server with a mini condor setup
+// reportUnmarkedOrigins reports, rather than silently allows, a context
+// that reaches CEDAR as this daemon without saying whether it is a caller's
+// request or this daemon's own work. Each of this server's daemon paths is
+// marked; one that is not is a path nobody has classified, and the log line
+// names the command and peer so it can be found. The step after this one
+// refuses them (UnmarkedDeny), which the test suite already runs under.
+func reportUnmarkedOrigins(logger *logging.Logger) {
+	htcondor.SetUnmarkedOriginReporter(func(command int, secContext, peerName string) {
+		logger.Warn(logging.DestinationSecurity, "An unclassified context authenticated as this daemon",
+			"command", command, "context", secContext, "peer", peerName)
+	})
+	htcondor.SetUnmarkedOriginPolicy(htcondor.UnmarkedWarn)
+}
+
 func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	// Create logger for demo mode (stdout for access logs)
 	logger, err := logging.New(&logging.Config{
@@ -2162,6 +2678,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
+	reportUnmarkedOrigins(logger)
 
 	// Same as runNormalMode: drain anything stdlib log captured
 	// before the structured logger existed.
@@ -2192,18 +2709,10 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 
 	logger.Info(logging.DestinationGeneral, "Using temporary directory", "path", tempDir)
 
-	// Create required directories for HTCondor
-	logDir := filepath.Join(tempDir, "log")
-	if err := os.MkdirAll(logDir, 0750); err != nil {
-		return fmt.Errorf("failed to create log directory: %w", err)
-	}
-	spoolDir := filepath.Join(tempDir, "spool")
-	if err := os.MkdirAll(spoolDir, 0750); err != nil {
-		return fmt.Errorf("failed to create spool directory: %w", err)
-	}
-	executeDir := filepath.Join(tempDir, "execute")
-	if err := os.MkdirAll(executeDir, 0750); err != nil {
-		return fmt.Errorf("failed to create execute directory: %w", err)
+	// Create required directories for HTCondor, and -- when this is a root
+	// demo -- arrange them for the accounts that will use them.
+	if err := createDemoTree(tempDir, logger); err != nil {
+		return err
 	}
 
 	// Find condor_master to determine release directory
@@ -2217,10 +2726,13 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	releaseDir := filepath.Dir(filepath.Dir(condorMasterPath))
 	log.Printf("Detected HTCondor release directory: %s", releaseDir)
 
+	// A condor_placementd, when this HTCondor has one; see demo_placementd.go.
+	placement := setUpDemoPlacement(tempDir, logger)
+
 	// Write mini condor configuration
 	// Note: HTCondor will auto-generate signing keys when condor_master starts
 	configFile := filepath.Join(tempDir, "condor_config")
-	if err := writeMiniCondorConfig(configFile, tempDir, releaseDir); err != nil {
+	if err := writeMiniCondorConfig(configFile, tempDir, releaseDir, placement); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 	if err := os.Setenv("CONDOR_CONFIG", configFile); err != nil {
@@ -2252,6 +2764,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	}
 
 	log.Printf("HTCondor is ready! Collector address: %s", collectorAddr)
+	placement.waitForAddressFile(tempDir, 30*time.Second, logger)
 
 	uidDomain := ""
 	trustDomain := ""
@@ -2336,8 +2849,11 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	httpBaseURL := loadHTTPBaseURL(cfg, *listenAddr, useTLS)
 	log.Printf("HTTP base URL: %s (public: %q)", httpBaseURL, publicBaseURL(cfg))
 
+	placement.printBanner(os.Stdout, httpBaseURL)
+	demoIdentityMap, demoPasswdFile := placement.identityMap()
+
 	// LLM / chat-feature config. Zero-strings = chat disabled.
-	demoLLMKeyFile, demoLLMURL, demoLLMModel, demoLLMOperatorInstructions := loadLLMConfig(cfg)
+	demoLLMKeyFile, demoLLMURL, demoLLMModel, demoLLMAuthScheme, demoLLMOperatorInstructions := loadLLMConfig(cfg)
 
 	// Create and start HTTP server with MCP and IDP enabled
 	server, err := httpserver.NewServer(httpserver.Config{
@@ -2361,7 +2877,10 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		Logger:                   logger,
 		Token:                    serverToken, // Token for daemon authentication
 		EnableMCP:                true,        // Enable MCP in demo mode
-		DBPath:                   appDBPath,
+		// As in normal mode: whether the UI is compiled in. Demo has MCP
+		// on, so this only chooses which OAuth2 paths are advertised.
+		WebUIEnabled: webui.IsEmbedded(),
+		DBPath:       appDBPath,
 		// All OAuth2/IDP URLs derive from httpBaseURL so a `:8080` listen
 		// addr gets a real host (localhost) instead of producing
 		// browser-invalid URLs like "https://:8080/".
@@ -2370,16 +2889,25 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		OAuth2ClientSecret: "demo-secret",
 		OAuth2AuthURL:      httpBaseURL + "/mcp/oauth2/authorize",
 		OAuth2TokenURL:     httpBaseURL + "/mcp/oauth2/token",
-		OAuth2RedirectURL:  httpBaseURL + httpserver.OAuth2CallbackPath(),
+		OAuth2RedirectURL:  httpBaseURL + httpserver.OAuth2CallbackPath(webui.IsEmbedded(), true),
 		OAuth2Scopes:       []string{"openid", "profile", "email"},
 		EnableIDP:          true,
 		// Demo mode only: gives the browser tests a non-admin identity
 		// to check authorization boundaries against.
-		SeedDemoUser:           true,
-		IDPIssuer:              httpBaseURL,
-		JupyterWorkDir:         loadJupyterWorkDir(cfg),
-		JupyterMaxLifetimeSec:  loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_MAX_LIFETIME_SEC", defaultJupyterMaxLifetimeSec),
-		JupyterKernelIdleSec:   loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_KERNEL_IDLE_SEC", defaultJupyterKernelIdleSec),
+		SeedDemoUser: true,
+		// With a placementd: an account with no access, to show the
+		// request-access flow, and the identity map that sends it there.
+		SeedDemoPlacementUser: placement != nil,
+		IdentityMapStrategies: demoIdentityMap,
+		IdentityMapPasswdFile: demoPasswdFile,
+		IDPIssuer:             httpBaseURL,
+		JupyterWorkDir:        loadJupyterWorkDir(cfg),
+		JupyterMaxLifetimeSec: loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_MAX_LIFETIME_SEC", defaultJupyterMaxLifetimeSec),
+		JupyterKernelIdleSec:  loadJupyterLimitSec(cfg, logger, "HTTP_API_JUPYTER_KERNEL_IDLE_SEC", defaultJupyterKernelIdleSec),
+		JupyterStartGraceSec: loadJupyterGraceSec(cfg, logger, "HTTP_API_JUPYTER_START_GRACE_SEC",
+			httpserver.DefaultJupyterStartGraceSec, httpserver.MaxJupyterStartGraceSec),
+		JupyterReconnectGraceSec: loadJupyterGraceSec(cfg, logger, "HTTP_API_JUPYTER_RECONNECT_GRACE_SEC",
+			httpserver.DefaultJupyterReconnectGraceSec, httpserver.MaxJupyterReconnectGraceSec),
 		InteractiveExtraSubmit: loadInteractiveExtraSubmit(cfg),
 		TemplateGlobalPath:     loadTemplateGlobalPath(cfg),
 		HTCondorConfig:         cfg,
@@ -2413,6 +2941,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		LLMAPIKeyFile:               demoLLMKeyFile,
 		LLMAPIURL:                   demoLLMURL,
 		LLMModel:                    demoLLMModel,
+		LLMAuthScheme:               demoLLMAuthScheme,
 		LLMOperatorInstructionsFile: demoLLMOperatorInstructions,
 	})
 	if err != nil {
@@ -2527,7 +3056,9 @@ func sshToJobTemplate() string {
 }
 
 // writeMiniCondorConfig writes a minimal HTCondor configuration for a personal condor
-func writeMiniCondorConfig(configFile, localDir, releaseDir string) error {
+//
+// placement, when not nil, adds the demo's condor_placementd.
+func writeMiniCondorConfig(configFile, localDir, releaseDir string, placement *demoPlacement) error {
 	// Determine LIBEXEC directory by looking for condor_shared_port
 	var libexecDir string
 	sharedPortPath, err := exec.LookPath("condor_shared_port")
@@ -2594,7 +3125,7 @@ LIB = $(RELEASE_DIR)/lib
 %s%s
 
 # Run all daemons locally
-DAEMON_LIST = MASTER, COLLECTOR, NEGOTIATOR, SCHEDD, STARTD
+DAEMON_LIST = MASTER, COLLECTOR, NEGOTIATOR, SCHEDD, STARTD%s
 
 # Use only local system resources
 START = TRUE
@@ -2653,7 +3184,8 @@ MEMORY = 2048
 # Logging
 MAX_DEFAULT_LOG = 10000000
 MAX_NUM_DEFAULT_LOG = 3
-`, localDir, releaseDir, sbinLine, libexecLine, sshTemplateLine)
+%s%s`, localDir, releaseDir, sbinLine, libexecLine, placement.daemonListEntry(), sshTemplateLine, placement.condorConfig(),
+		demoGenericOSUsersConfig(os.Geteuid()))
 
 	//nolint:gosec // Config file needs to be readable by condor daemons
 	return os.WriteFile(configFile, []byte(config), 0644)
@@ -3006,6 +3538,58 @@ func mcpCIMDEnabled(cfg *config.Config) bool {
 	return v
 }
 
+// loadMCPRedaction reads the two credential-masking settings.
+//
+// Its own function rather than four lines in loadMCPConfig because
+// loadMCPConfig is at the cyclomatic-complexity limit the linter
+// enforces, and these were the branches that crossed it. Every setting
+// added to that function from now on needs the same treatment; it is a
+// long sequence of independent reads and there is nothing to be gained
+// by having them all in one body.
+func loadMCPRedaction(cfg *config.Config, into *mcpConfig) {
+	into.disableSecretRedaction = !mcpRedactSecretsEnabled(cfg)
+	if rules, ok := cfg.Get("HTTP_API_MCP_REDACT_DISABLED_RULES"); ok {
+		into.redactDisabledRules = rules
+	}
+}
+
+// mcpRedactSecretsEnabled reports whether MCP tool results have
+// credential-shaped text masked before they are returned.
+//
+// Default true. The tools that return a job's own output are the one
+// place this server hands a caller bytes nobody here wrote, and the
+// caller is usually a model, so a job that prints its credential puts it
+// in a context window and from there in a transcript. Masking it is not
+// a security boundary -- a job can encode its way past any pattern --
+// and defaults on for the same reason a build log's masking does: the
+// common case is not an attacker.
+func mcpRedactSecretsEnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_MCP_REDACT_SECRETS")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return true
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_MCP_REDACT_SECRETS=%q: must be a boolean", raw)
+	}
+	return v
+}
+
+// mcpDCREnabled reports whether dynamic client registration (RFC 7591) is
+// on. Default true; HTTP_API_MCP_DCR=false refuses it, for a deployment
+// whose clients are all seeded, operator-provisioned or CIMD.
+func mcpDCREnabled(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_MCP_DCR")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return true
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_MCP_DCR=%q: must be a boolean", raw)
+	}
+	return v
+}
+
 func loadCCBStreaming(cfg *config.Config, logger *logging.Logger) bool {
 	streaming := !daemon.UnderCondorMaster()
 	source := "standalone default"
@@ -3193,6 +3777,40 @@ func loadDBMirrorConfig(cfg *config.Config, logger *logging.Logger) (name, addre
 // not set. Passed explicitly rather than left to the library so the
 // library's zero value can mean "disabled", as its field documents.
 const defaultPingInterval = 1 * time.Minute
+
+// defaultRuntimeEstimateInterval and defaultRuntimeEstimateBackfill
+// apply when HTTP_API_RUNTIME_ESTIMATE_INTERVAL and _BACKFILL are unset.
+const (
+	defaultRuntimeEstimateInterval = 5 * time.Minute
+	defaultRuntimeEstimateBackfill = 168 * time.Hour
+)
+
+// loadRuntimeEstimateConfig reads HTTP_API_RUNTIME_ESTIMATE_INTERVAL,
+// how often the runtime estimator reads newly finished jobs from the
+// htcondordb mirror, and HTTP_API_RUNTIME_ESTIMATE_BACKFILL, how much
+// history it reads at startup.
+//
+//	interval unset   the default, 5m
+//	interval 0       runtime estimates off entirely
+//	backfill unset   the default, 168h
+//
+// A malformed value refuses to start, as HTTP_API_PING_INTERVAL does: a
+// bare number is ambiguous by a factor of sixty.
+func loadRuntimeEstimateConfig(cfg *config.Config, logger *logging.Logger) (interval, backfill time.Duration) {
+	interval = defaultRuntimeEstimateInterval
+	if raw, ok := cfg.Get("HTTP_API_RUNTIME_ESTIMATE_INTERVAL"); ok && strings.TrimSpace(raw) != "" {
+		if strings.TrimSpace(raw) == "0" {
+			interval = 0
+		} else {
+			interval = configDurationSetting(cfg, "HTTP_API_RUNTIME_ESTIMATE_INTERVAL", logger)
+		}
+	}
+	backfill = configDurationSetting(cfg, "HTTP_API_RUNTIME_ESTIMATE_BACKFILL", logger)
+	if backfill == 0 {
+		backfill = defaultRuntimeEstimateBackfill
+	}
+	return interval, backfill
+}
 
 // loadRequiredCredentials reads HTTP_API_REQUIRED_CREDENTIALS, the OAuth
 // service credentials that must be on file before a job may be submitted.
@@ -3560,4 +4178,48 @@ func positiveConfigInt(cfg *config.Config, name string, logger *logging.Logger) 
 		return 0
 	}
 	return v
+}
+
+// placementDeviceClients is HTTP_API_PLACEMENT_DEVICE_CLIENTS as written, or
+// nil when unset so the server applies its default. Set to empty, it admits
+// no client.
+func placementDeviceClients(cfg *config.Config) *string {
+	v, ok := cfg.Get("HTTP_API_PLACEMENT_DEVICE_CLIENTS")
+	if !ok {
+		return nil
+	}
+	return &v
+}
+
+// loadPositiveDuration reads a duration setting that must carry a unit
+// and must be positive, or is absent and leaves the built-in default in
+// place (returning zero).
+//
+// Refusing to start on a bad value rather than falling back: these
+// settings bound how long a credential keeps a power it can no longer
+// prove, and a typo that silently reverts to the default is the kind of
+// thing nobody notices until it matters.
+func loadPositiveDuration(cfg *config.Config, name string, logger *logging.Logger) time.Duration {
+	raw, ok := cfg.Get(name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	raw = strings.TrimSpace(raw)
+	if err := validateDurationHasUnit(raw); err != nil {
+		logger.Error(logging.DestinationHTTP, "Invalid duration: refusing to start",
+			"setting", name, "value", raw, "error", err)
+		log.Fatalf("invalid %s=%q: %v", name, raw, err)
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		logger.Error(logging.DestinationHTTP, "Failed to parse duration: refusing to start",
+			"setting", name, "value", raw, "error", err)
+		log.Fatalf("invalid %s=%q: %v", name, raw, err)
+	}
+	if d <= 0 {
+		logger.Error(logging.DestinationHTTP, "Duration must be positive: refusing to start",
+			"setting", name, "value", raw)
+		log.Fatalf("invalid %s=%q: must be positive", name, raw)
+	}
+	return d
 }

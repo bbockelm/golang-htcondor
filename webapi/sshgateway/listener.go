@@ -19,7 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -34,6 +36,21 @@ const DefaultMaxConnections = 256
 // device-flow login. It is generous because a human is reading a code
 // off their terminal and typing it into a browser.
 const HandshakeTimeout = 6 * time.Minute
+
+// Bounds on connections that have not yet begun authenticating: the
+// version exchange, the key exchange and the first authentication
+// request, none of which waits for a human.
+const (
+	// DefaultPreAuthTimeout is how long a connection has to ask to
+	// authenticate. Only once it has does HandshakeTimeout apply.
+	DefaultPreAuthTimeout = 20 * time.Second
+	// DefaultMaxPreAuthPerHost caps such connections from one host (an
+	// IPv4 address, an IPv6 /64), as sshd's MaxStartups does.
+	DefaultMaxPreAuthPerHost = 4
+	// DefaultMaxPreAuthPerNetwork caps them from one network (an IPv4
+	// /24, an IPv6 /48), the same two granularities the Banlist counts.
+	DefaultMaxPreAuthPerNetwork = DefaultNetThresholdRatio * DefaultMaxPreAuthPerHost
+)
 
 // Listener accepts SSH connections, authenticates them and hands them
 // to a Server.
@@ -81,9 +98,28 @@ type Listener struct {
 	// with it.
 	MaxConnections int
 
+	// PreAuthTimeout bounds how long a connection may take to send its
+	// first authentication request. Zero means DefaultPreAuthTimeout.
+	//
+	// Separate from HandshakeTimeout because only authentication waits
+	// for a human. Without it, a socket that never speaks held its
+	// connection slot for the whole six minutes.
+	PreAuthTimeout time.Duration
+
+	// MaxPreAuthPerHost and MaxPreAuthPerNetwork cap connections from
+	// one source that have not yet begun authenticating; past them a
+	// new connection is closed at accept. Zero means the defaults.
+	//
+	// MaxConnections alone let one address hold every slot with idle
+	// sockets. Authentication in flight has its own per-source cap in
+	// the Authenticator.
+	MaxPreAuthPerHost    int
+	MaxPreAuthPerNetwork int
+
 	Logger *logging.Logger
 
 	connSlots chan struct{}
+	preAuth   *preAuthCounter
 
 	mu       sync.Mutex
 	ln       net.Listener
@@ -142,6 +178,16 @@ func (l *Listener) Listen(ctx context.Context) error {
 		l.MaxConnections = DefaultMaxConnections
 	}
 	l.connSlots = make(chan struct{}, l.MaxConnections)
+	if l.PreAuthTimeout <= 0 {
+		l.PreAuthTimeout = DefaultPreAuthTimeout
+	}
+	if l.MaxPreAuthPerHost <= 0 {
+		l.MaxPreAuthPerHost = DefaultMaxPreAuthPerHost
+	}
+	if l.MaxPreAuthPerNetwork <= 0 {
+		l.MaxPreAuthPerNetwork = DefaultMaxPreAuthPerNetwork
+	}
+	l.preAuth = newPreAuthCounter(l.MaxPreAuthPerHost, l.MaxPreAuthPerNetwork)
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", l.Addr)
@@ -209,6 +255,16 @@ func (l *Listener) Serve(ctx context.Context) error {
 			continue
 		}
 
+		// Also before a connection slot: the per-source cap is what
+		// keeps one source from holding all of them.
+		releasePreAuth, ok := l.preAuth.take(nc.RemoteAddr())
+		if !ok {
+			l.debugf("SSH gateway refused a connection: too many unauthenticated connections from its source",
+				"remote", nc.RemoteAddr().String())
+			_ = nc.Close()
+			continue
+		}
+
 		select {
 		case l.connSlots <- struct{}{}:
 		default:
@@ -217,6 +273,7 @@ func (l *Listener) Serve(ctx context.Context) error {
 			// is broken rather than busy.
 			l.debugf("SSH gateway refused a connection: at the concurrency limit",
 				"remote", nc.RemoteAddr().String(), "limit", l.MaxConnections)
+			releasePreAuth()
 			_ = nc.Close()
 			continue
 		}
@@ -226,7 +283,7 @@ func (l *Listener) Serve(ctx context.Context) error {
 				<-l.connSlots
 				l.conns.Done()
 			}()
-			l.serveConn(ctx, nc, cfg)
+			l.serveConn(ctx, nc, cfg, releasePreAuth)
 		}()
 	}
 }
@@ -296,14 +353,38 @@ func (l *Listener) Close() error {
 // restart.
 const ShutdownGrace = 10 * time.Second
 
-func (l *Listener) serveConn(ctx context.Context, nc net.Conn, cfg *ssh.ServerConfig) {
-	// The handshake carries the whole login, so the deadline has to
-	// outlast a human. Cleared once the connection is up, or a long
-	// terminal session would die on it.
-	_ = nc.SetDeadline(time.Now().Add(HandshakeTimeout))
+func (l *Listener) serveConn(ctx context.Context, nc net.Conn, cfg *ssh.ServerConfig, releasePreAuth func()) {
+	// Until the client asks to authenticate, nothing waits for a human:
+	// the short deadline. The first authentication request -- where
+	// x/crypto calls BannerCallback -- moves the connection out of the
+	// source's pre-auth count and onto HandshakeTimeout, which carries
+	// the whole login and so has to outlast a human. Cleared once the
+	// connection is up, or a long terminal session would die on it.
+	_ = nc.SetDeadline(time.Now().Add(l.PreAuthTimeout))
+	var authStarted atomic.Bool
+	connCfg := *cfg
+	banner := cfg.BannerCallback
+	connCfg.BannerCallback = func(md ssh.ConnMetadata) string {
+		if !authStarted.Swap(true) {
+			_ = nc.SetDeadline(time.Now().Add(HandshakeTimeout))
+			releasePreAuth()
+		}
+		if banner != nil {
+			return banner(md)
+		}
+		return ""
+	}
 
-	conn, chans, reqs, err := ssh.NewServerConn(nc, cfg)
+	conn, chans, reqs, err := ssh.NewServerConn(nc, &connCfg)
+	releasePreAuth()
 	if err != nil {
+		// A source whose connections sit silent until the short
+		// deadline is charged for it: that is how the slots were
+		// held, and nothing legitimate does it. A client that hangs up
+		// -- one refusing the host key, say -- is not.
+		if !authStarted.Load() && isTimeout(err) {
+			l.Bans.Fail(nc.RemoteAddr(), WeightStalled, "did not begin authenticating")
+		}
 		// Includes every refused login, which is ordinary traffic on a
 		// public port and not worth an error-level line each.
 		l.debugf("SSH gateway handshake did not complete",
@@ -346,4 +427,63 @@ func (l *Listener) debugf(msg string, args ...any) {
 	if l.Logger != nil {
 		l.Logger.Debug(logging.DestinationHTTP, msg, args...)
 	}
+}
+
+// isTimeout reports whether err is a deadline expiring.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// preAuthCounter counts connections that have not yet begun
+// authenticating, per host and per network (see banKeys).
+type preAuthCounter struct {
+	maxHost, maxNet int
+
+	mu    sync.Mutex
+	hosts map[netip.Prefix]int
+	nets  map[netip.Prefix]int
+}
+
+func newPreAuthCounter(maxHost, maxNet int) *preAuthCounter {
+	return &preAuthCounter{
+		maxHost: maxHost,
+		maxNet:  maxNet,
+		hosts:   map[netip.Prefix]int{},
+		nets:    map[netip.Prefix]int{},
+	}
+}
+
+// take claims a slot for addr and returns its release, which may be
+// called more than once; or reports false when addr's host or network is
+// at its cap. An address that is not an IP is not counted.
+func (c *preAuthCounter) take(addr net.Addr) (func(), bool) {
+	host, network, ok := banKeys(addr)
+	if !ok {
+		return func() {}, true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hosts[host] >= c.maxHost || c.nets[network] >= c.maxNet {
+		return nil, false
+	}
+	c.hosts[host]++
+	c.nets[network]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			decrement(c.hosts, host)
+			decrement(c.nets, network)
+		})
+	}, true
+}
+
+func decrement(m map[netip.Prefix]int, k netip.Prefix) {
+	if m[k] <= 1 {
+		delete(m, k)
+		return
+	}
+	m[k]--
 }

@@ -90,7 +90,7 @@ func (s *Schedd) RescheduleWithOptions(ctx context.Context, opts *RescheduleOpti
 		}
 	}
 
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil,
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg,
 		int(commands.RESCHEDULE), "CLIENT", s.address)
 	if err != nil {
 		return fmt.Errorf("reschedule: build security config: %w", err)

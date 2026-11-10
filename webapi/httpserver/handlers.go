@@ -20,8 +20,13 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 	"github.com/bbockelm/golang-htcondor/version"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
+	"github.com/bbockelm/golang-htcondor/webapi/multiap"
 	"github.com/bbockelm/golang-htcondor/webapi/spool"
+	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
+	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -79,8 +84,14 @@ func isSafeLocalRedirect(u string) bool {
 	return true
 }
 
+// errUnidentifiedCaller is a request that presented a credential but
+// could not be resolved to an identity: a bearer the schedd did not
+// accept, or one that could not be checked at all.
+var errUnidentifiedCaller = errors.New("the credential presented could not be resolved to a user identity")
+
 // requireAuthentication wraps the createAuthenticatedContext call and handles
-// browser redirects for unauthenticated requests
+// browser redirects for unauthenticated requests. A context it returns
+// always names its caller.
 func (s *Handler) requireAuthentication(r *http.Request) (context.Context, bool, error) {
 	ctx, err := s.createAuthenticatedContext(r)
 	if err != nil {
@@ -91,6 +102,22 @@ func (s *Handler) requireAuthentication(r *http.Request) (context.Context, bool,
 		return nil, false, err // no redirect
 	}
 	return ctx, false, nil
+}
+
+// streamErrorMessage is what a streamed query puts in its "error" field,
+// which the web UI shows as is.
+//
+// A refused daemon fallback is reported by its own message, not under the
+// wrappers that every connection layer adds on the way out ("failed to
+// connect and authenticate ...: failed to create security config: ..."):
+// those describe where in this server the refusal surfaced, which is for the
+// log line, not for the person looking at the page.
+func streamErrorMessage(err error) string {
+	var refusal *htcondor.ErrDaemonFallbackRefused
+	if errors.As(err, &refusal) {
+		return refusal.Error()
+	}
+	return err.Error()
 }
 
 // isAuthenticationError checks if an error is a genuine authentication/authorization error
@@ -139,8 +166,26 @@ type JobSubmitRequest struct {
 
 // JobSubmitResponse represents a job submission response
 type JobSubmitResponse struct {
-	ClusterID int      `json:"cluster_id"`
-	JobIDs    []string `json:"job_ids"` // Array of "cluster.proc" strings
+	ClusterID int `json:"cluster_id"`
+	// JobIDs are "cluster.proc"; in multi-AP mode, complete ids
+	// ("cluster.proc@schedd"), the form every later step takes.
+	JobIDs []string `json:"job_ids"`
+	// Schedd is the access point the job was submitted to (multi-AP
+	// mode only).
+	Schedd string `json:"schedd,omitempty"`
+	// Jobs names each job by its separate parts (multi-AP mode only).
+	Jobs []multiap.JobRef `json:"jobs,omitempty"`
+	// Assignment is the caller's AP assignment the submission followed
+	// (multi-AP mode only).
+	Assignment *apassign.Assignment `json:"assignment,omitempty"`
+	// Warnings are submitlint diagnostics about the submit file: things
+	// that parsed and submitted fine but almost certainly do not do what
+	// the submitter meant, most importantly output the job is about to
+	// throw away. The job is already in the queue by the time these are
+	// known, so they are advice about whether to remove and resubmit it,
+	// not an error -- which is why they ride on a 201 rather than
+	// replacing it with a 400.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // JobEditRequest represents a job edit request
@@ -161,8 +206,16 @@ func (s *Handler) handleJobs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleSubmitJob(w, r)
 	case http.MethodDelete:
+		if s.multi != nil {
+			s.handleMultiBulkDelete(w, r)
+			return
+		}
 		s.handleBulkDeleteJobs(w, r)
 	case http.MethodPatch:
+		if s.multi != nil {
+			s.handleMultiBulkEdit(w, r)
+			return
+		}
 		s.handleBulkEditJobs(w, r)
 	default:
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -173,6 +226,10 @@ func (s *Handler) handleJobs(w http.ResponseWriter, r *http.Request) {
 //
 //nolint:gocyclo // Complex function for handling job streaming with error cases
 func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	if s.multi != nil {
+		s.handleMultiListJobs(w, r)
+		return
+	}
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -229,10 +286,10 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// listing from the top (handlers_dbroute.go returns the 400).
 
 	// Parse owned_by_me parameter (defaults to true).
-	// Server-side enforcement: a browser session that isn't in the
-	// admin group cannot escape the my-jobs filter — overriding any
-	// client param. Bearer-token API callers (no session cookie)
-	// are trusted; the schedd's own ACLs are the backstop there.
+	// Server-side enforcement: a caller that is not an administrator
+	// (seesAllJobs), bearer or browser session alike, cannot escape the
+	// my-jobs filter — overriding any client param. The schedd is no
+	// backstop: it does not filter job-ad reads by owner.
 	ownedByMe := true
 	if ownedByMeStr := r.URL.Query().Get("owned_by_me"); ownedByMeStr != "" {
 		ownedByMe, err = strconv.ParseBool(ownedByMeStr)
@@ -241,7 +298,15 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ownedByMe = s.resolveOwnerScope(r, ownedByMe)
+	requestedEveryone := !ownedByMe
+	ownedByMe = s.resolveOwnerScope(ctx, r, ownedByMe)
+
+	// A project lead asking for everyone's jobs gets their own plus their
+	// projects'. See projectLeadReadProjects.
+	var leadProjects []string
+	if requestedEveryone && ownedByMe {
+		leadProjects = s.projectLeadReadProjects(ctx, r)
+	}
 
 	// The identity the schedd attributes to this caller. Needed for the
 	// scoping below when the listing is confined, and for the mirror
@@ -252,7 +317,28 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Build fetch options
 	fetchOpts := htcondor.FetchNormal
 	owner := ""
-	if ownedByMe {
+	if len(leadProjects) > 0 {
+		if actor == "" {
+			s.writeError(w, http.StatusUnauthorized,
+				"Authentication required: the caller's identity could not be established")
+			return
+		}
+		// The constraint is the whole of the enforcement here: the
+		// schedd does not filter reads. scopeToOwnerOrProjects ANDs the
+		// caller's constraint in after re-serializing it, so it can
+		// narrow this set but never widen it. FetchMyJobs is NOT set --
+		// a schedd honoring it would drop every job but the caller's
+		// own -- so the listing is unscoped as far as the mirror and the
+		// schedd's own MyJobs filter are concerned, and confined by
+		// this constraint alone.
+		scoped, serr := scopeToActorOrProjects(ctx, actor, leadProjects, constraint)
+		if serr != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid constraint: %v", serr))
+			return
+		}
+		constraint = scoped
+		ownedByMe = false
+	} else if ownedByMe {
 		fetchOpts |= htcondor.FetchMyJobs
 		owner = actor
 
@@ -276,7 +362,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		// constraint is the one thing the schedd can only evaluate, so
 		// the restriction goes there; FetchMyJobs stays as defense in
 		// depth.
-		scoped, serr := scopeToOwner(ownerFromActor(owner), constraint)
+		scoped, serr := scopeToActor(ctx, owner, constraint)
 		if serr != nil {
 			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid constraint: %v", serr))
 			return
@@ -298,15 +384,15 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// qualifies as readily as a scoped one: reading the queue is
 	// READ-level on the schedd with no owner filter of its own, so the
 	// mirror returns what the schedd would have. What jobsFromMirror
-	// insists on is that the schedd has identified this caller, since
-	// routing is what skips asking it. Any miss falls through to the
+	// insists on is that the schedd has accepted this caller at READ,
+	// since routing is what skips asking it. Any miss falls through to the
 	// schedd below with no visible difference beyond the "source" field.
 	//
 	// Pagination stays with whichever backend started the walk: each
 	// issues a page token only it can read, and each declines the
 	// other's, so a resumed page is never silently restarted from the
 	// beginning of a different scan.
-	served, decision := s.jobsFromMirror(ctx, w, constraint, projection, limit, pageToken, actor, ownedByMe)
+	served, decision := s.jobsFromMirror(ctx, w, r, constraint, projection, limit, pageToken, actor, ownedByMe)
 	if served {
 		return
 	}
@@ -333,7 +419,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		BufferSize:   s.streamBufferSize,
 		WriteTimeout: s.streamWriteTimeout,
 	}
-	resultCh, err := s.getSchedd().QueryStreamWithOptions(ctx, constraint, opts, streamOpts)
+	resultCh, err := s.streamJobs(ctx, constraint, opts, streamOpts)
 	if err != nil {
 		// Pre-request error - check type and set appropriate status
 		switch {
@@ -376,7 +462,7 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			}
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
-			errorMsg = result.Err.Error()
+			errorMsg = streamErrorMessage(result.Err)
 			break
 		}
 
@@ -432,6 +518,10 @@ func (s *Handler) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 // handleSubmitJob handles POST /api/v1/jobs
 func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
+	if s.multi != nil {
+		s.handleMultiSubmitJob(w, r)
+		return
+	}
 	// Create authenticated context
 	ctx, needsRedirect, err := s.requireAuthentication(r)
 	if err != nil {
@@ -455,24 +545,26 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the submit file before handing it over, and report what it
+	// says rather than acting on it. The MCP server has run these checks
+	// since the macro-expansion footgun was found; this path had none at
+	// all, which is how the web assistant came to submit jobs whose
+	// output went nowhere.
+	//
+	// Everything is advisory here, including the class submit_job refuses
+	// outright. The two surfaces differ because their callers do: an MCP
+	// agent cannot populate a spool directory it has no filesystem
+	// access to, so `executable = /bin/sleep` with the default
+	// transfer_executable has no working outcome for it. A REST caller
+	// may well be on the submit host, and this endpoint has accepted
+	// that submit file since it existed. Turning an accepted request
+	// into a 400 would break working clients to prevent a hold they may
+	// not even get.
+	warnings := submitlint.Inspect(req.SubmitFile).Advisory()
+
 	clusterID, procAds, err := s.submitJob(ctx, req.SubmitFile)
 	if err != nil {
-		// Check if it's an authentication error
-		if isAuthenticationError(err) {
-			s.logger.Warn(logging.DestinationHTTP, "Job submission auth failed",
-				"user", htcondor.GetAuthenticatedUserFromContext(ctx),
-				"error", err)
-			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
-			return
-		}
-		// Surface submission failures explicitly. Without this the only
-		// trace was the generic 500 in the access log; the Web UI would
-		// then show "500 Internal Server Error" with no detail because
-		// the error string was only ever in the response body.
-		s.logger.Error(logging.DestinationHTTP, "Job submission failed",
-			"user", htcondor.GetAuthenticatedUserFromContext(ctx),
-			"error", err)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job submission failed: %v", err))
+		s.writeSubmitFailure(ctx, w, err)
 		return
 	}
 
@@ -484,15 +576,47 @@ func (s *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		jobIDs[i] = fmt.Sprintf("%d.%d", cluster, proc)
 	}
 
+	if len(warnings) > 0 {
+		s.logger.Info(logging.DestinationHTTP, "Submit file warnings",
+			"user", htcondor.GetAuthenticatedUserFromContext(ctx),
+			"cluster", clusterID,
+			"warnings", strings.Join(warnings, "; "))
+	}
+
 	s.writeJSON(w, http.StatusCreated, JobSubmitResponse{
 		ClusterID: clusterID,
 		JobIDs:    jobIDs,
+		Warnings:  warnings,
 	})
 }
 
+// writeSubmitFailure writes the response for a failed submission.
+func (s *Handler) writeSubmitFailure(ctx context.Context, w http.ResponseWriter, err error) {
+	// Check if it's an authentication error
+	if isAuthenticationError(err) {
+		s.logger.Warn(logging.DestinationHTTP, "Job submission auth failed",
+			"user", htcondor.GetAuthenticatedUserFromContext(ctx),
+			"error", err)
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
+	var controlled *submitpolicy.ControlledAttributeError
+	if errors.As(err, &controlled) {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Surface submission failures explicitly. Without this the only
+	// trace was the generic 500 in the access log; the Web UI would
+	// then show "500 Internal Server Error" with no detail because
+	// the error string was only ever in the response body.
+	s.logger.Error(logging.DestinationHTTP, "Job submission failed",
+		"user", htcondor.GetAuthenticatedUserFromContext(ctx),
+		"access_point", routedSchedd(ctx),
+		"error", err)
+	s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job submission failed: %v", err))
+}
+
 // handleJobByID handles /api/v1/jobs/{id} endpoint
-//
-//nolint:gocyclo // dispatches GET/PUT/DELETE plus several action sub-paths; splitting hides routing
 func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	// Extract job ID from path
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
@@ -502,6 +626,21 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.multi != nil {
+		// Routed to the job's own access point, then served below.
+		s.handleMultiJobByID(w, r, parts)
+		return
+	}
+	s.serveJobByID(w, r)
+}
+
+// serveJobByID is handleJobByID against one schedd: the only one in
+// single-AP mode, or the one handleMultiJobByID routed the request to.
+//
+//nolint:gocyclo // dispatches GET/PUT/DELETE plus several action sub-paths; splitting hides routing
+func (s *Handler) serveJobByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
+	parts := strings.Split(path, "/")
 	jobID := parts[0]
 
 	// Check for bulk operations at /api/v1/jobs/hold or /api/v1/jobs/release
@@ -520,6 +659,11 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 			} else {
 				s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 			}
+			return
+		case "runtime-estimates":
+			// POST /api/v1/jobs/runtime-estimates — many jobs' runtime
+			// estimates at once, for the jobs listing.
+			s.handleBulkRuntimeEstimates(w, r)
 			return
 		}
 	}
@@ -591,6 +735,26 @@ func (s *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.handleJobMatchAnalysis(w, r, cluster, proc)
+			return
+		case "similar":
+			// GET /api/v1/jobs/{id}/similar — the finished jobs behind
+			// the job's runtime estimate, at one level of grouping.
+			cluster, proc, err := parseJobID(jobID)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+				return
+			}
+			s.handleJobSimilar(w, r, cluster, proc)
+			return
+		case "runtime-estimate":
+			// GET /api/v1/jobs/{id}/runtime-estimate — how long the job
+			// is likely to run, from its owner's similar finished jobs.
+			cluster, proc, err := parseJobID(jobID)
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
+				return
+			}
+			s.handleJobRuntimeEstimate(w, r, cluster, proc)
 			return
 		case "hold":
 			s.handleJobHold(w, r, jobID)
@@ -712,10 +876,11 @@ func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID str
 	}
 
 	// Build constraint for specific job, confined to the caller's own
-	// unless they are an API-token caller or a Web UI admin. Job ad
-	// reads are gated only by the pool's READ policy, which is broad on
-	// most pools, so the schedd is not a backstop here.
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	// unless they are an administrator (seesAllJobs) (or, for a
+	// project lead, their projects' jobs too). Job ad reads are gated
+	// only by the pool's READ policy, which is broad on most pools, so
+	// the schedd is not a backstop here.
+	constraint, err := s.jobReadScope(ctx, r, cluster, proc)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -733,7 +898,7 @@ func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID str
 	// directly used to send Projection="*" on the wire — the schedd
 	// then looked for an attribute named "*" and returned only
 	// ServerTime, breaking the detail page.
-	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{})
+	jobAds, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, &htcondor.QueryOptions{})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
 			s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
@@ -756,6 +921,8 @@ func (s *Handler) handleGetJob(w http.ResponseWriter, r *http.Request, jobID str
 	// out. MemoryUsage in particular is an expression over ResidentSetSize,
 	// and would otherwise reach the client as "/Expr(...)/".
 	evaluateUsageAttrs(jobAds[0])
+	// The whole ad is here, so its requests evaluate as the schedd would.
+	annotateEvaluatedRequests(jobAds[0])
 
 	// Return the job ClassAd as JSON - uses MarshalJSON method
 	s.writeJSON(w, http.StatusOK, jobAds[0])
@@ -782,7 +949,7 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 	}
 
 	// Build constraint for specific job, confined to the caller's own.
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeMutate)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -807,7 +974,7 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 
 	// Remove the job using the schedd RemoveJobs method
 	reason := superuserReason(imp, "Removed", "Removed via HTTP API")
-	results, err := s.getSchedd().RemoveJobs(ctx, constraint, reason)
+	results, err := s.scheddFor(ctx).RemoveJobs(ctx, constraint, reason)
 	if imp != nil {
 		s.auditSuperuserAction(r, imp, "remove", fmt.Sprintf("%d.%d", cluster, proc), err)
 	}
@@ -815,6 +982,12 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+			return
+		}
+		// The schedd says why it removed nothing; say that instead of
+		// blaming the server. See jobActionRefusal.
+		if code, msg, ok := jobActionRefusal(results, "remove"); ok {
+			s.writeError(w, code, msg)
 			return
 		}
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Job removal failed: %v", err))
@@ -845,7 +1018,7 @@ func (s *Handler) handleDeleteJob(w http.ResponseWriter, r *http.Request, jobID 
 	// Success
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message": "Job removed successfully",
-		"job_id":  jobID,
+		"job_id":  s.routedJobID(ctx, jobID),
 		"results": map[string]int{
 			"total":   results.TotalJobs,
 			"success": results.Success,
@@ -1004,6 +1177,16 @@ func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID st
 		attributes[key] = encoded
 	}
 
+	// Confine the edit to the caller's own job. The schedd checks
+	// ownership on SetAttribute too, but an edit is applied to whatever
+	// the constraint matches, and another user's job should be "not
+	// found" here rather than left to a queue superuser's credential.
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeMutate)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Edit the job attributes
 	opts := &htcondor.EditJobOptions{
 		// Don't allow protected attributes by default - user would need superuser privileges
@@ -1011,7 +1194,12 @@ func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID st
 		Force:               false,
 	}
 
-	if err := s.getSchedd().EditJob(ctx, cluster, proc, attributes, opts); err != nil {
+	edited, err := s.scheddFor(ctx).EditJobs(ctx, constraint, attributes, opts)
+	if err == nil && edited == 0 {
+		s.writeError(w, http.StatusNotFound, "Job not found")
+		return
+	}
+	if err != nil {
 		// Check if it's a validation error (immutable/protected attribute)
 		if strings.Contains(err.Error(), "immutable") || strings.Contains(err.Error(), "protected") {
 			s.writeError(w, http.StatusForbidden, fmt.Sprintf("Cannot edit job: %v", err))
@@ -1037,35 +1225,44 @@ func (s *Handler) handleEditJob(w http.ResponseWriter, r *http.Request, jobID st
 	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "success",
 		"message": fmt.Sprintf("Successfully edited job %s", jobID),
-		"job_id":  jobID,
+		"job_id":  s.routedJobID(ctx, jobID),
 	}); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to encode response", "error", err, "job_id", jobID)
 	}
 }
 
 // handleBulkDeleteJobs handles DELETE /api/v1/jobs with constraint-based bulk removal
-// bulkOwnerScope owner-scopes a destructive bulk operation's constraint so a
-// caller can only remove/edit their OWN jobs, unless they are a Web UI admin
-// (who may operate cross-user). This mirrors the read path's ownedByMe logic
-// (a Web UI session that is not an admin is confined to its own jobs), and uses
-// the same injection-safe wrapper as the chat tools (scopeToOwner: the untrusted
-// constraint is parsed and re-serialized before being AND-ed with the owner
-// clause, and rejected if it will not parse). The schedd ACL is still the
-// ultimate backstop; this just removes the footgun of a bulk delete/edit that
-// silently trusts an arbitrary caller-supplied constraint.
+// jobsOwnerScope owner-scopes a job request's constraint so a caller reads
+// or acts on only their OWN jobs, unless seesAllJobs grants them the tier
+// the request needs. It uses the same injection-safe wrapper as the chat
+// tools (scopeToOwner: the untrusted constraint is parsed and
+// re-serialized before being AND-ed with the owner clause, and rejected if
+// it will not parse).
 //
-// Non-session (API-token) callers are left to the schedd ACL exactly as the read
-// path leaves them, so existing service integrations are unaffected.
-func (s *Handler) bulkOwnerScope(ctx context.Context, r *http.Request, raw string) (string, error) {
-	_, hasSession := s.getSessionFromRequest(r)
-	if !hasSession || s.isWebUIAdmin(r) {
+// Every caller is scoped this way, bearer or session. Job-ad reads are
+// governed only by the pool's READ policy, so for them this clause is the
+// whole of the confinement; for actions and sandbox transfers the schedd
+// also checks ownership, and the clause turns an attempt on somebody
+// else's job into "not found" before it gets there.
+func (s *Handler) jobsOwnerScope(ctx context.Context, r *http.Request, raw string, tier jobScopeTier) (string, error) {
+	if s.seesAllJobs(ctx, r, tier) {
 		return raw, nil
 	}
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	owner := ownerFromActor(actor)
 	if owner == "" {
 		return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")
 	}
-	return scopeToOwner(ownerFromActor(owner), raw)
+	if s.multi != nil {
+		// Domain-aware: the caller's User, not a bare Owner. An actor
+		// in another domain is refused, never rewritten.
+		user, err := s.multi.svc.UserFor(actor)
+		if err != nil {
+			return "", err
+		}
+		return andScope(fmt.Sprintf("User == %s", classadStringLit(user)), raw)
+	}
+	return scopeToActor(ctx, actor, raw)
 }
 
 // ownerFromActor maps an authenticated actor to the value HTCondor
@@ -1084,11 +1281,33 @@ func ownerFromActor(actor string) string {
 	return actor[:i]
 }
 
+// localReadOwnerScope confines a read this server answers from its own
+// copy of the queue -- the tailed job_queue.log, the htcondordb mirror
+// -- to the caller's own jobs.
+//
+// No schedd sees these reads, which this daemon makes on its own
+// authority, so this clause is all there is. Every caller, bearer or
+// session, is confined to its own Owner unless all is set, which a
+// handler sets only for an administrator (seesAllJobs).
+//
+// A context that names nobody is an error even with all set: an owner
+// clause built from it would be Owner == "", and leaving it off would be
+// the whole queue.
+func localReadOwnerScope(ctx context.Context, raw string, all bool) (string, error) {
+	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if actor == "" {
+		return "", errUnidentifiedCaller
+	}
+	if all {
+		return raw, nil
+	}
+	return scopeToActor(ctx, actor, raw)
+}
+
 // jobOwnerScope confines a single-job request to the caller's own job,
-// under the same rule bulkOwnerScope applies to the bulk endpoints: a
-// browser session that is not a Web UI admin is scoped, an API-token
-// caller is left to the schedd's ACL, and an unparseable owner is an
-// error rather than a widening.
+// under the rule jobsOwnerScope applies: a caller that seesAllJobs at
+// tier is left alone, everyone else is scoped, and an unparseable owner
+// is an error rather than a widening.
 //
 // How much this is doing depends on the endpoint, and it is worth being
 // precise because "we scope it" reads like a guarantee:
@@ -1100,12 +1319,34 @@ func ownerFromActor(actor string) string {
 //   - Job-ad reads are NOT ownership-checked by the schedd — READ
 //     authz governs them and most pools allow anyone — so for those
 //     this clause, plus FetchMyJobs where the caller uses it, is what
-//     keeps a non-admin session out of another user's ad.
+//     keeps a non-admin caller out of another user's ad.
 //
 // Either way the by-id endpoints now match the listing endpoint, which
 // has always applied the filter.
-func (s *Handler) jobOwnerScope(ctx context.Context, r *http.Request, cluster, proc int) (string, error) {
-	return s.bulkOwnerScope(ctx, r, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
+func (s *Handler) jobOwnerScope(ctx context.Context, r *http.Request, cluster, proc int, tier jobScopeTier) (string, error) {
+	return s.jobsOwnerScope(ctx, r, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc), tier)
+}
+
+// jobReadScope is jobOwnerScope for endpoints that only READ a job ad, widened
+// for a project lead to the jobs of the projects they lead -- the by-id
+// counterpart of the listing's lead scope, so a job a lead can see in the
+// list also opens. Write and sandbox endpoints keep jobOwnerScope: a lead
+// acts on other users' jobs only through armed superuser mode, which
+// re-scopes the constraint itself (scopeForImpersonation).
+func (s *Handler) jobReadScope(ctx context.Context, r *http.Request, cluster, proc int) (string, error) {
+	return s.jobsReadScope(ctx, r, fmt.Sprintf("ClusterId == %d && ProcId == %d", cluster, proc))
+}
+
+// jobsReadScope is jobReadScope for a constraint naming any set of jobs.
+func (s *Handler) jobsReadScope(ctx context.Context, r *http.Request, jobs string) (string, error) {
+	if projects := s.projectLeadReadProjects(ctx, r); len(projects) > 0 {
+		owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+		if owner == "" {
+			return "", fmt.Errorf("cannot determine the authenticated user for owner scoping")
+		}
+		return scopeToActorOrProjects(ctx, owner, projects, jobs)
+	}
+	return s.jobsOwnerScope(ctx, r, jobs, jobScopeRead)
 }
 
 func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
@@ -1142,7 +1383,7 @@ func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 
 	// Owner-scope the constraint (non-admin Web UI callers can only remove their
 	// own jobs); rejects a constraint that will not parse.
-	constraint, err := s.bulkOwnerScope(ctx, r, req.Constraint)
+	constraint, err := s.jobsOwnerScope(ctx, r, req.Constraint, jobScopeMutate)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1150,6 +1391,11 @@ func (s *Handler) handleBulkDeleteJobs(w http.ResponseWriter, r *http.Request) {
 
 	// Remove jobs by constraint
 	results, err := s.getSchedd().RemoveJobs(ctx, constraint, req.Reason)
+	if refused, ok := refusedResults(err); ok {
+		// Removed nothing, and the schedd said why: nothing matched (404
+		// below), or every match was refused (reported in the counts).
+		results, err = refused, nil
+	}
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
@@ -1231,19 +1477,26 @@ func (s *Handler) handleBulkEditJobs(w http.ResponseWriter, r *http.Request) {
 		attributes[key] = encoded
 	}
 
-	// Set up options
+	// Set up options. Lifting the protected-attribute check is an
+	// administrator's call, not the request body's: for anyone else it
+	// is refused, as MCP edit_job never offers it.
 	opts := &htcondor.EditJobOptions{
 		AllowProtectedAttrs: false,
 		Force:               false,
 	}
-	if req.Options != nil {
+	if req.Options != nil && (req.Options.AllowProtectedAttrs || req.Options.Force) {
+		if !s.seesAllJobs(ctx, r, jobScopeMutate) {
+			s.writeError(w, http.StatusForbidden,
+				"options.allow_protected_attrs and options.force are available only to administrators")
+			return
+		}
 		opts.AllowProtectedAttrs = req.Options.AllowProtectedAttrs
 		opts.Force = req.Options.Force
 	}
 
 	// Owner-scope the constraint (non-admin Web UI callers can only edit their
 	// own jobs); rejects a constraint that will not parse.
-	constraint, err := s.bulkOwnerScope(ctx, r, req.Constraint)
+	constraint, err := s.jobsOwnerScope(ctx, r, req.Constraint, jobScopeMutate)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1450,6 +1703,11 @@ func (s *Handler) handleBulkJobAction(w http.ResponseWriter, r *http.Request, ac
 				s.auditSuperuserAction(r, plan.Imp, actionVerb,
 					fmt.Sprintf("%d job(s) matching %s", plan.Jobs, plan.Constraint), actErr)
 			}
+			// One owner's jobs all already held, or gone since the plan was
+			// made, is an outcome to count, not a failure to stop on.
+			if refused, ok := refusedResults(actErr); ok {
+				res, actErr = refused, nil
+			}
 			if actErr != nil {
 				// Report the failure rather than continuing: a partially
 				// applied bulk action across several people's jobs is
@@ -1475,8 +1733,23 @@ func (s *Handler) handleBulkJobAction(w http.ResponseWriter, r *http.Request, ac
 		return
 	}
 
+	// Not in superuser mode: confine the action to the caller's own jobs
+	// unless they are an administrator. The plans above carry their own
+	// per-owner constraints.
+	constraint, err = s.jobsOwnerScope(ctx, r, constraint, jobScopeMutate)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Perform action
 	results, err := actionFunc(ctx, constraint, reason)
+	if refused, ok := refusedResults(err); ok {
+		// Acted on nothing, and the schedd said why: nothing matched (404
+		// in handleBulkActionResults), or every match was refused
+		// (reported in the counts).
+		results, err = refused, nil
+	}
 	if err != nil {
 		// Check if it's an authentication error
 		if isAuthenticationError(err) {
@@ -1540,7 +1813,7 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 	// and release the jobs with files missing. Today spool's own,
 	// smaller per-proc ceiling always fires first, but that is an
 	// accident of the two numbers and not something to rely on.
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	setBodyLimit(w, r, maxUploadBytes)
 	limitedReader := r.Body
 
 	if target.AllProcs {
@@ -1551,13 +1824,13 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 		}
 		s.writeJSON(w, http.StatusOK, fanOutResponse(fanOut, target.Cluster,
 			"Cluster input files uploaded successfully",
-			fmt.Sprintf("PUT again to /api/v1/jobs/%d/input", target.Cluster)))
+			fmt.Sprintf("PUT again to /api/v1/jobs/%s/input", s.clusterPathID(ctx, target.Cluster))))
 		return
 	}
 
-	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), target.Cluster, target.Proc,
+	procAd, err := fetchProcAdForSpool(ctx, s.scheddFor(ctx), target.Cluster, target.Proc,
 		func(c string) (string, error) {
-			return s.bulkOwnerScope(ctx, r, c)
+			return s.jobsOwnerScope(ctx, r, c, jobScopeMutate)
 		})
 	if err != nil {
 		s.writeSpoolError(w, err)
@@ -1570,9 +1843,13 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 	jobAds := []*classad.ClassAd{procAd}
 
 	// Spool job files from tar
-	if err := s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, limitedReader); err != nil {
+	if err := s.scheddFor(ctx).SpoolJobFilesFromTar(ctx, jobAds, limitedReader); err != nil {
 		if isAuthenticationError(err) {
 			s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+			return
+		}
+		if errors.Is(err, htcondor.ErrInvalidTarEntry) {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid upload: %v", err))
 			return
 		}
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to spool job files: %v", err))
@@ -1581,7 +1858,7 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 
 	s.writeJSON(w, http.StatusOK, map[string]string{
 		"message": "Job input files uploaded successfully",
-		"job_id":  jobID,
+		"job_id":  s.routedJobID(ctx, jobID),
 	})
 }
 
@@ -1594,6 +1871,8 @@ func (s *Handler) writeSpoolError(w http.ResponseWriter, err error) {
 		s.writeError(w, http.StatusTooManyRequests, fmt.Sprintf("Rate limit exceeded: %v", err))
 	case isAuthenticationError(err):
 		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+	case errors.Is(err, htcondor.ErrInvalidTarEntry):
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid upload: %v", err))
 	default:
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Query failed: %v", err))
 	}
@@ -1727,8 +2006,8 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	// fetchProcAdForSpool for why this is necessary (Cmd /
 	// TransferExecutable live on the cluster ad and the proc-only
 	// query strips them).
-	procAd, err := fetchProcAdForSpool(ctx, s.getSchedd(), cluster, proc, func(c string) (string, error) {
-		return s.bulkOwnerScope(ctx, r, c)
+	procAd, err := fetchProcAdForSpool(ctx, s.scheddFor(ctx), cluster, proc, func(c string) (string, error) {
+		return s.jobsOwnerScope(ctx, r, c, jobScopeMutate)
 	})
 	if err != nil {
 		if ratelimit.IsRateLimitError(err) {
@@ -1749,15 +2028,15 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	jobAds := []*classad.ClassAd{procAd}
 
 	// Bound the request body before parsing so a hostile client can't
-	// stream gigabytes through ParseMultipartForm. MaxBytesReader caps
+	// stream gigabytes through ParseMultipartForm. setBodyLimit caps
 	// the total request size; ParseMultipartForm's argument is the
 	// in-memory threshold above which parts spill to temp files.
 	// gosec G120 still flags the ParseMultipartForm call because its
-	// taint tracker doesn't see through MaxBytesReader's wrapping;
+	// taint tracker doesn't see through setBodyLimit;
 	// the cap above is the real defense.
 	const maxInputBytes = 100 * 1024 * 1024 // 100 MiB
-	r.Body = http.MaxBytesReader(w, r.Body, maxInputBytes)
-	err = r.ParseMultipartForm(maxInputBytes) //nolint:gosec // body bounded by MaxBytesReader above
+	setBodyLimit(w, r, maxInputBytes)
+	err = r.ParseMultipartForm(maxInputBytes) //nolint:gosec // body bounded by setBodyLimit above
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse multipart form: %v", err))
 		return
@@ -1810,7 +2089,7 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	if target.AllProcs {
 		fanOut, spoolErr = s.spoolClusterFromStream(ctx, r, target.Cluster, pr)
 	} else {
-		spoolErr = s.getSchedd().SpoolJobFilesFromTar(ctx, jobAds, pr)
+		spoolErr = s.scheddFor(ctx).SpoolJobFilesFromTar(ctx, jobAds, pr)
 	}
 
 	// Wait for tar conversion to complete
@@ -1834,13 +2113,13 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	if fanOut != nil {
 		s.writeJSON(w, http.StatusOK, fanOutResponse(fanOut, target.Cluster,
 			"Cluster input files uploaded via multipart",
-			fmt.Sprintf("POST again to /api/v1/jobs/%d/input/multipart", target.Cluster)))
+			fmt.Sprintf("POST again to /api/v1/jobs/%s/input/multipart", s.clusterPathID(ctx, target.Cluster))))
 		return
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]string{
 		"message": "Job input files uploaded successfully via multipart",
-		"job_id":  jobID,
+		"job_id":  s.routedJobID(ctx, jobID),
 	})
 }
 
@@ -1872,7 +2151,7 @@ func (s *Handler) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID 
 	// Build constraint for specific job, confined to the caller's own.
 	// The schedd refuses a sandbox transfer to anyone but the owner;
 	// this keeps us from asking on someone else's behalf.
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeRead)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1884,7 +2163,7 @@ func (s *Handler) handleJobOutput(w http.ResponseWriter, r *http.Request, jobID 
 	w.WriteHeader(http.StatusOK)
 
 	// Start receiving job sandbox
-	errChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, w)
+	errChan := s.scheddFor(ctx).ReceiveJobSandbox(ctx, constraint, w)
 
 	// Wait for transfer to complete
 	if err := <-errChan; err != nil {
@@ -1923,7 +2202,7 @@ func (s *Handler) streamFileFromTar(ctx context.Context, constraint, filename st
 
 	// Start receiving the job sandbox in the background
 	// We need to ensure pipeWriter is closed when transfer finishes
-	sandboxErrChan := s.getSchedd().ReceiveJobSandbox(ctx, constraint, pipeWriter)
+	sandboxErrChan := s.scheddFor(ctx).ReceiveJobSandbox(ctx, constraint, pipeWriter)
 
 	// Channel to capture the final error from ReceiveJobSandbox
 	finalErrChan := make(chan error, 1)
@@ -2071,15 +2350,24 @@ func (s *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	//      pre-API-key behavior for environments where the metrics
 	//      endpoint is already isolated by network ACLs.
 	//   2. Bearer token presented (and a chat-style API key is
-	//      detected). The shared createAuthenticatedContext path
-	//      handles parsing + scope attachment; we then check that
-	//      the `metrics` scope is present.
+	//      detected). authenticateAPIKey handles parsing + scope
+	//      attachment; we then check that the `metrics` scope is
+	//      present.
 	//   3. Anything else: 401. Unlike most endpoints, /metrics does
 	//      NOT support cookie-based browser sessions — Prometheus
 	//      doesn't have a cookie jar, and admin browser users have
 	//      no business hitting /metrics directly.
 	if !s.metricsPublic {
-		ctx, err := s.createAuthenticatedContext(r)
+		// An API key is authenticated directly: createAuthenticatedContext
+		// refuses one that cannot act as its creator, and a metrics-only
+		// key, which is what this endpoint is for, cannot.
+		var ctx context.Context
+		var err error
+		if raw, berr := extractBearerToken(r); berr == nil && apikey.LooksLikeKey(raw) {
+			ctx, err = s.authenticateAPIKey(r, raw)
+		} else {
+			ctx, err = s.createAuthenticatedContext(r)
+		}
 		if err != nil {
 			s.writeError(w, http.StatusUnauthorized,
 				"Metrics endpoint requires an API key with the 'metrics' scope. "+
@@ -2147,11 +2435,26 @@ func (s *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // Returning 200 for "warning" rather than 503 is a deliberate choice: a stale
 // collector ping shouldn't pull the MCP out of load-balancer rotation when
 // the actual user-facing schedd connections might still work. The body
-// always carries the structured snapshot so callers (or kubectl get pods)
-// can see exactly which daemon is in trouble.
+// always carries each daemon's status so callers (or kubectl get pods)
+// can see which daemon is in trouble; the details behind it -- names,
+// addresses, error text -- only when readyzDetail admits the caller.
 func (s *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	detail := s.readyzDetail(r)
+
+	if s.multi != nil {
+		ready, body := s.multiAPReadiness()
+		status := http.StatusOK
+		if !ready {
+			status = http.StatusServiceUnavailable
+		}
+		if !detail {
+			body = publicMultiAPReadiness(body)
+		}
+		s.writeJSON(w, status, body)
 		return
 	}
 
@@ -2198,7 +2501,55 @@ func (s *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusServiceUnavailable
 	}
 
+	if !detail {
+		s.writeJSON(w, statusCode, snap.public())
+		return
+	}
 	s.writeJSON(w, statusCode, snap)
+}
+
+// readyzDetail reports whether the caller may see /readyz in full.
+//
+// /readyz answers anybody, because a load balancer or a kubelet asks it
+// with no credential. What it answers them is a status per daemon. The
+// detail behind those -- the mirror's name and address, the configured
+// pins, the error text of a failed dial, which names auth methods and
+// the trust domain -- describes this deployment's internals to whoever
+// asks, so it goes to the two callers that are meant to see it: an admin
+// session, as on /api/v1/dbmirror/status, and an API key with the
+// metrics scope, the monitoring credential.
+func (s *Handler) readyzDetail(r *http.Request) bool {
+	if s.webuiAdminGroups.configured() {
+		if session, ok := s.getSessionFromRequest(r); ok && s.webuiAdminGroups.allows(session.Groups) {
+			return true
+		}
+	}
+	raw, err := extractBearerToken(r)
+	if err != nil || !apikey.LooksLikeKey(raw) {
+		return false
+	}
+	ctx, err := s.authenticateAPIKey(r, raw)
+	return err == nil && ContainsScope(ctx, "metrics")
+}
+
+// publicMultiAPReadiness is multi-AP /readyz without the per-AP names
+// and the hub's error text: whether the hub answers, how many access
+// points there are, and why the server is not ready when it is not.
+func publicMultiAPReadiness(body map[string]any) map[string]any {
+	out := map[string]any{
+		"mode":     body["mode"],
+		"ap_count": body["ap_count"],
+	}
+	if hub, ok := body["hub"].(map[string]any); ok {
+		out["hub"] = map[string]any{"reachable": hub["reachable"]}
+	}
+	if n, ok := body["hubs_reachable"]; ok {
+		out["hubs_reachable"] = n
+	}
+	if reason, ok := body["reason"]; ok {
+		out["reason"] = reason
+	}
+	return out
 }
 
 // handleLogout handles POST /logout endpoint to clear session cookies.
@@ -2233,7 +2584,7 @@ func (s *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 				s.superuserArmed.Disarm(sessionID)
 			}
 			if s.logger != nil {
-				s.logger.Info(logging.DestinationHTTP, "Session deleted on logout", "session_id", sessionID[:8]+"...")
+				s.logger.Info(logging.DestinationHTTP, "Session deleted on logout", "session_key", sessionLogID(sessionID))
 			}
 		}
 	}
@@ -2374,7 +2725,7 @@ func (s *Handler) handleSingleJobAction(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Build constraint for specific job
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeMutate)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -2424,17 +2775,24 @@ func (s *Handler) handleSingleJobAction(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	s.handleJobActionResults(w, results, jobID, actionVerb)
+	s.handleJobActionResults(w, results, s.routedJobID(ctx, jobID), actionVerb)
 }
 
 // handleJobHold handles POST /api/v1/jobs/{id}/hold
 func (s *Handler) handleJobHold(w http.ResponseWriter, r *http.Request, jobID string) {
-	s.handleSingleJobAction(w, r, jobID, "Held", "hold", s.getSchedd().HoldJobs)
+	// Resolved when the action runs, on the authenticated context: the
+	// schedd is chosen from the routed AP and needs the caller's
+	// credential, neither of which r's own context carries yet.
+	s.handleSingleJobAction(w, r, jobID, "Held", "hold", func(ctx context.Context, constraint, reason string) (*htcondor.JobActionResults, error) {
+		return s.scheddFor(ctx).HoldJobs(ctx, constraint, reason)
+	})
 }
 
 // handleJobRelease handles POST /api/v1/jobs/{id}/release
 func (s *Handler) handleJobRelease(w http.ResponseWriter, r *http.Request, jobID string) {
-	s.handleSingleJobAction(w, r, jobID, "Released", "release", s.getSchedd().ReleaseJobs)
+	s.handleSingleJobAction(w, r, jobID, "Released", "release", func(ctx context.Context, constraint, reason string) (*htcondor.JobActionResults, error) {
+		return s.scheddFor(ctx).ReleaseJobs(ctx, constraint, reason)
+	})
 }
 
 // CollectorAdsResponse represents collector ads listing response
@@ -2454,7 +2812,18 @@ func (s *Handler) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
+	// The query goes out under the caller's credential, as ping and watch
+	// do. A collector read is not this server's own work, and the bare
+	// request context carries no credential at all.
+	ctx, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
 
 	// Get query parameters
 	constraint := r.URL.Query().Get("constraint")
@@ -2534,7 +2903,7 @@ func (s *Handler) handleCollectorAds(w http.ResponseWriter, r *http.Request) {
 		if result.Err != nil {
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err)
-			errorMsg = result.Err.Error()
+			errorMsg = streamErrorMessage(result.Err)
 			break
 		}
 
@@ -2612,7 +2981,15 @@ func (s *Handler) handleCollectorAdsByType(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	ctx := r.Context()
+	ctx, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
 
 	// Get query parameters
 	constraint := r.URL.Query().Get("constraint")
@@ -2650,11 +3027,10 @@ func (s *Handler) handleCollectorAdsByType(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Get effective projection if none specified
-	if len(projection) == 0 {
-		projection = htcondor.DefaultCollectorProjection()
-	} else if len(projection) == 1 && projection[0] == "*" {
-		projection = nil // nil means all attributes
-	}
+	// What the caller actually asked for, kept before the defaults
+	// below overwrite it: the site's attribute policy judges the
+	// request, not what this handler filled in on its behalf.
+	requestedProjection := append([]string(nil), projection...)
 
 	// Map common ad type names
 	var queryAdType string
@@ -2678,6 +3054,42 @@ func (s *Handler) handleCollectorAdsByType(w http.ResponseWriter, r *http.Reques
 	default:
 		// Try to use the ad type as-is
 		queryAdType = adType
+	}
+
+	// The site's restriction on reading other users' details out of
+	// collector ads. Enforced here rather than only in the MCP tool
+	// because this endpoint answers the same question with the same
+	// credentials: a tool refused by one and served by the other would
+	// be no restriction at all.
+	privileged := s.seesAllJobs(ctx, r, jobScopeRead)
+	if s.poolQueryPolicy.Refuses(privileged) {
+		s.writeError(w, http.StatusForbidden,
+			"Pool queries are restricted to administrators at this site")
+		return
+	}
+	if err := s.poolQueryPolicy.CheckAdType(privileged, queryAdType); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if err := s.poolQueryPolicy.CheckProjection(privileged, queryAdType, requestedProjection); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if err := s.poolQueryPolicy.CheckConstraint(privileged, queryAdType, constraint); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	if len(projection) == 0 {
+		// A restricted caller's default cannot be the library's, which
+		// would be narrowed later by nothing: it becomes the allowlist.
+		if s.poolQueryPolicy.Restricts(privileged) {
+			projection = s.poolQueryPolicy.AllowedAttrs(queryAdType)
+		} else {
+			projection = htcondor.DefaultCollectorProjection()
+		}
+	} else if len(projection) == 1 && projection[0] == "*" {
+		projection = nil // nil means all attributes
 	}
 
 	// Start streaming query
@@ -2716,7 +3128,7 @@ func (s *Handler) handleCollectorAdsByType(w http.ResponseWriter, r *http.Reques
 		if result.Err != nil {
 			// Error occurred - log it and close the response
 			s.logger.Error(logging.DestinationHTTP, "Query streaming error", "error", result.Err, "adType", adType)
-			errorMsg = result.Err.Error()
+			errorMsg = streamErrorMessage(result.Err)
 			break
 		}
 
@@ -2792,7 +3204,15 @@ func (s *Handler) handleCollectorAdByName(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	ctx := r.Context()
+	ctx, needsRedirect, err := s.requireAuthentication(r)
+	if err != nil {
+		if needsRedirect {
+			s.redirectToLogin(w, r)
+			return
+		}
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
+	}
 
 	// Map ad type
 	var queryAdType string
@@ -2830,6 +3250,26 @@ func (s *Handler) handleCollectorAdByName(w http.ResponseWriter, r *http.Request
 			projection[i] = strings.TrimSpace(projection[i])
 		}
 	}
+
+	// The site's restriction on reading other users' details. An empty
+	// projection here means the ad's full contents, which is the widest
+	// read this endpoint offers, so a restricted caller gets the
+	// allowlist as their default rather than everything.
+	privileged := s.seesAllJobs(ctx, r, jobScopeRead)
+	if s.poolQueryPolicy.Refuses(privileged) {
+		s.writeError(w, http.StatusForbidden,
+			"Pool queries are restricted to administrators at this site")
+		return
+	}
+	if err := s.poolQueryPolicy.CheckAdType(privileged, queryAdType); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if err := s.poolQueryPolicy.CheckProjection(privileged, queryAdType, projection); err != nil {
+		s.writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	projection = s.poolQueryPolicy.ClampProjection(privileged, queryAdType, projection)
 
 	// Build constraint for specific ad by name
 	constraint := fmt.Sprintf("%s == %q", nameAttr, name)
@@ -2906,7 +3346,7 @@ func (s *Handler) handleJobFile(w http.ResponseWriter, r *http.Request, cluster,
 	// As with the whole-sandbox download, the schedd is what refuses a
 	// non-owner; this is the layer in front of it. Needs the actor, so
 	// it follows authentication.
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeRead)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -2948,7 +3388,7 @@ func (s *Handler) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cl
 	}
 
 	// Query the job to get the output filename
-	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc)
+	constraint, err := s.jobOwnerScope(ctx, r, cluster, proc, jobScopeRead)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -2958,7 +3398,7 @@ func (s *Handler) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cl
 	opts := &htcondor.QueryOptions{
 		Projection: projection,
 	}
-	jobAds, _, err := s.getSchedd().QueryWithOptions(ctx, constraint, opts)
+	jobAds, _, err := s.scheddFor(ctx).QueryWithOptions(ctx, constraint, opts)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "Failed to query job", "error", err)
 		s.writeError(w, http.StatusInternalServerError, "Failed to query job")
@@ -3006,6 +3446,8 @@ func (s *Handler) handleJobOutputFile(w http.ResponseWriter, r *http.Request, cl
 type WhoAmIResponse struct {
 	Authenticated bool   `json:"authenticated"`
 	User          string `json:"user,omitempty"` // Omit if not authenticated
+	// Assignment is where the caller's new work goes (multi-AP mode).
+	Assignment *APAssignmentInfo `json:"assignment,omitempty"`
 }
 
 // handleWhoAmI handles GET /api/v1/whoami endpoint
@@ -3026,15 +3468,18 @@ func (s *Handler) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get authenticated username from context
-	// If createAuthenticatedContext succeeded, authentication is valid
+	// Authenticated means somebody was named. A credential that was
+	// accepted as well-formed but resolved to nobody is not an
+	// authenticated caller, whatever got it this far.
 	username := htcondor.GetAuthenticatedUserFromContext(ctx)
-
-	// Authentication succeeded - always return authenticated=true
-	// Username should always be non-empty but handle edge case gracefully
 	response := WhoAmIResponse{
-		Authenticated: true,
+		Authenticated: username != "",
 		User:          username,
+	}
+	if s.multi != nil && username != "" {
+		if user, err := s.multi.svc.UserFor(username); err == nil {
+			response.Assignment = s.assignmentInfo(ctx, s.jobAssignRequest(ctx, r, user))
+		}
 	}
 
 	s.writeJSON(w, http.StatusOK, response)
@@ -3621,15 +4066,15 @@ func (s *Handler) handleCollectorAdvertise(w http.ResponseWriter, r *http.Reques
 // parseAdvertiseMultipart parses multipart form data containing ClassAds
 // Returns ads, withAck flag, command, and error.
 //
-// Bounds the request body via http.MaxBytesReader before parsing so a
+// Bounds the request body via setBodyLimit before parsing so a
 // hostile client can't stream gigabytes through ParseMultipartForm.
 // The argument to ParseMultipartForm is the in-memory threshold; the
-// MaxBytesReader cap is the absolute body-size ceiling. We use the
+// setBodyLimit cap is the absolute body-size ceiling. We use the
 // same value for both: 10 MiB is the documented ceiling.
 func (s *Handler) parseAdvertiseMultipart(r *http.Request) ([]*classad.ClassAd, bool, string, error) {
 	const maxMultipartFormSize = 10 * 1024 * 1024
-	r.Body = http.MaxBytesReader(nil, r.Body, maxMultipartFormSize)
-	// gosec G120: body is bounded by MaxBytesReader above; the
+	setBodyLimit(nil, r, maxMultipartFormSize)
+	// gosec G120: body is bounded by setBodyLimit above; the
 	// taint tracker doesn't see through the wrapping.
 	err := r.ParseMultipartForm(maxMultipartFormSize) //nolint:gosec
 	if err != nil {
@@ -3745,8 +4190,8 @@ func (s *Handler) spoolClusterFromStream(
 ) (*spool.Result, error) {
 	lim := spool.DefaultLimits()
 
-	ads, err := fetchProcAdsAwaitingInput(ctx, s.getSchedd(), cluster, lim.MaxProcs,
-		func(c string) (string, error) { return s.bulkOwnerScope(ctx, r, c) })
+	ads, err := fetchProcAdsAwaitingInput(ctx, s.scheddFor(ctx), cluster, lim.MaxProcs,
+		func(c string) (string, error) { return s.jobsOwnerScope(ctx, r, c, jobScopeMutate) })
 	if err != nil {
 		return nil, err
 	}
@@ -3792,7 +4237,7 @@ func (s *Handler) spoolClusterFromStream(
 		}
 	}()
 
-	res := spool.FanOut(ctx, attempt, src, lim, s.getSchedd().SpoolJobFilesFromTar)
+	res := spool.FanOut(ctx, attempt, src, lim, s.scheddFor(ctx).SpoolJobFilesFromTar)
 
 	// A failed receive is the call's error, not a per-proc one: every
 	// reader saw it, so res is a list of procs that failed for the same

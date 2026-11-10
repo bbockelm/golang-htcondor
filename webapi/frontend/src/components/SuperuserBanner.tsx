@@ -17,6 +17,10 @@ export function SuperuserBanner({ session }: { session: Session | undefined }) {
   const [now, setNow] = useState(() => Date.now());
 
   const active = !!session?.superuser_active;
+  // A project lead's reach is the projects they lead, not every job; say
+  // which, since that is the whole of what the mode lets them touch.
+  const projects =
+    session?.superuser_scope === 'project' ? (session.superuser_projects ?? []) : null;
 
   // Tick once a second so the remaining time counts down. Only while armed —
   // there is nothing to animate otherwise, and a permanent interval on every
@@ -52,12 +56,20 @@ export function SuperuserBanner({ session }: { session: Session | undefined }) {
         ⚠
       </span>
       <span className="font-semibold uppercase tracking-wide">
-        Superuser mode
+        {projects ? 'Project lead mode' : 'Superuser mode'}
       </span>
-      <span className="font-normal">
-        Actions you take may apply to <strong>other users&apos; jobs</strong>,
-        and are recorded against your name.
-      </span>
+      {projects ? (
+        <span className="font-normal">
+          Actions you take may apply to <strong>other users&apos; jobs</strong>{' '}
+          in {projects.length === 1 ? 'project' : 'projects'}{' '}
+          <strong>{projects.join(', ')}</strong>, and are recorded against your name.
+        </span>
+      ) : (
+        <span className="font-normal">
+          Actions you take may apply to <strong>other users&apos; jobs</strong>,
+          and are recorded against your name.
+        </span>
+      )}
       {session?.superuser_note && (
         // Shown because the note always describes a downgrade in how well
         // the action can be attributed, and each one has a concrete fix.

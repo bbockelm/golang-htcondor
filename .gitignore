@@ -96,3 +96,7 @@ examples/classadlog_reader/classadlog_reader
 /dist/
 /artifacts/
 /packaging/staging/
+
+# goyacc writes this beside the generated parser when regenerating the
+# grammar (see config/README.md); it is a debug listing, not a build input.
+config/y.output

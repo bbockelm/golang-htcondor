@@ -26,11 +26,15 @@ type fakeSchedd struct {
 	nextCluster int
 	jobs        []*fakeJob
 
-	submitted   []string // submit files, in order
-	lastScript  string   // the watchdog script from the latest spool
+	submitted []string // submit files, in order
+	// submitCtx is the context of the latest submission.
+	submitCtx   context.Context
+	lastScript  string // the watchdog script from the latest spool
 	spooled     [][]string
 	constraints []string // constraints the manager queried with
 	removed     []string
+	// removedWith is the token each removal would have presented.
+	removedWith []string
 
 	// onQuery runs before each query answer, so a test can make the
 	// queue change underneath a polling loop.
@@ -44,6 +48,11 @@ type fakeSchedd struct {
 	// not own, standing in for a schedd whose authenticated-query
 	// filter did not apply. The manager is expected to drop it.
 	leakOtherOwners bool
+
+	// stampOwner, when set, is the owner every submission gets, the way
+	// a schedd stamps the authenticated identity. Without it a test
+	// calls setOwner after each submit.
+	stampOwner string
 }
 
 type fakeJob struct {
@@ -59,17 +68,18 @@ type fakeJob struct {
 
 func newFakeSchedd() *fakeSchedd { return &fakeSchedd{nextCluster: 100} }
 
-func (f *fakeSchedd) SubmitRemote(_ context.Context, submitFile string) (int, []*classad.ClassAd, error) {
+func (f *fakeSchedd) SubmitRemote(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.submitErr != nil {
 		return 0, nil, f.submitErr
 	}
+	f.submitCtx = ctx
 	f.submitted = append(f.submitted, submitFile)
 	cluster := f.nextCluster
 	f.nextCluster++
 
-	job := &fakeJob{cluster: cluster, proc: 0, status: jobStatusIdle}
+	job := &fakeJob{cluster: cluster, proc: 0, status: jobStatusIdle, owner: f.stampOwner}
 	for _, line := range strings.Split(submitFile, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "batch_name = ") {
@@ -159,10 +169,20 @@ func (f *fakeSchedd) QueryWithOptions(_ context.Context, constraint string, opts
 	return ads, nil, nil
 }
 
-func (f *fakeSchedd) RemoveJobs(_ context.Context, constraint string, _ string) (*htcondor.JobActionResults, error) {
+func (f *fakeSchedd) RemoveJobs(ctx context.Context, constraint string, _ string) (*htcondor.JobActionResults, error) {
+	token := ""
+	if _, ok := htcondor.GetSecurityConfigFromContext(ctx); ok {
+		// What a real schedd connection would present, renewal included.
+		resolved, err := htcondor.GetSecurityConfigOrDefault(ctx, nil, 0, "CLIENT", "<127.0.0.1:1>")
+		if err != nil {
+			return nil, err
+		}
+		token = resolved.Token
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, constraint)
+	f.removedWith = append(f.removedWith, token)
 	return &htcondor.JobActionResults{}, nil
 }
 
@@ -199,6 +219,13 @@ func (f *fakeSchedd) spooledScript() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastScript
+}
+
+// removedWithTokens returns the token each removal would have presented.
+func (f *fakeSchedd) removedWithTokens() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.removedWith...)
 }
 
 func (f *fakeSchedd) removedJobs() []string {

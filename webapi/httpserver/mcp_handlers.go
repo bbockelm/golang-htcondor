@@ -13,14 +13,17 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/ory/fosite"
@@ -96,16 +99,17 @@ const maxMCPBody = 16 << 20 // 16 MB
 // request never reaches withCondorCredential at all: mcpAuthContext's
 // forwarded-token branch builds its own security config from the bearer and
 // lets the schedd validate it. Refusing to start would break that deployment
-// over a setting none of its requests touch -- and /mcp is only registered
-// when an OAuth2 provider exists, so it cannot be told apart by configuration
-// alone.
+// over a setting none of its requests touch -- and nothing in the
+// configuration tells that deployment apart.
 //
 // The hazard itself is closed per request instead: withCondorCredential now
 // returns an error rather than a credential-less context, so an OAuth2 caller
 // gets a 500 and no CEDAR call is made. This exists so the reason appears in
 // the log at startup rather than only in the first failed request.
 func (h *Handler) warnIfMCPCannotMintCredentials() {
-	if h.oauth2Provider == nil || h.mcpServer == nil {
+	// mcpEnabled, not mcpServer: the server is built whether or not MCP
+	// is served, because the web UI's interactive sessions use it.
+	if !h.mcpEnabled || h.oauth2Provider == nil {
 		return
 	}
 	if h.signingKeyPath != "" && h.trustDomain != "" {
@@ -157,7 +161,8 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 		// is offered alongside TOKEN when the pool's auth methods include
 		// it). HTCondor still validates the token itself; we just don't lock
 		// the wire to TOKEN-only.
-		secConfig, err := htcondor.NewClientSecurityConfig(ctx, htcToken, "", 0, "CLIENT", nil)
+		tag := mcpActorKey(htcToken)
+		secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, h.clientConfig, htcToken, "", 0, "CLIENT", h.credentialSessions.sessionCacheFor(tag))
 		if err != nil {
 			h.logger.Error(logging.DestinationHTTP, "Failed to build security config", "error", err)
 			h.writeError(w, http.StatusInternalServerError, "Failed to build security config")
@@ -171,16 +176,24 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 		// session another user authenticated, and runs as them. The tag is a
 		// digest of the bearer rather than a claim out of it: a claim is
 		// attacker-chosen, so a forged `sub` would let an attacker land on a
-		// victim's session, which is the very thing being prevented.
-		secConfig.SecurityTag = mcpActorKey(htcToken)
+		// victim's session, which is the very thing being prevented. The
+		// bearer carries its own authorization limits, so its digest also
+		// changes whenever they do.
+		secConfig.SecurityTag = tag
 		ctx = htcondor.WithSecurityConfig(ctx, secConfig)
 
 		// Owner-scoped tools need to know who the caller is. Ask the schedd
 		// rather than the token: this branch forwards the token precisely
 		// because the schedd is what verifies it, so the identity it maps the
 		// caller to is the only trustworthy answer available here.
-		if actor := h.actorForSession(ctx, htcToken); actor != "" {
+		actor, err := h.resolveActor(ctx, r, htcToken)
+		if err != nil {
+			h.writeActorThrottled(w, err)
+			return nil, nil, false
+		}
+		if actor != "" {
 			ctx = htcondor.WithAuthenticatedUser(ctx, actor)
+			ctx = h.withPlacementOwnerScope(ctx, nil, actor)
 		}
 		return ctx, nil, true
 	}
@@ -192,10 +205,35 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	}
 	h.logger.Info(logging.DestinationHTTP, "Received MCP message with OAuth2 token", "username", username)
 
+	// A token granted neither MCP scope may do nothing here, on either
+	// transport. Refused before a credential is minted for it, and here
+	// rather than in each transport's gate: the SDK transport's gate is its
+	// catalogue, and a check that lives in only one of the two is a check
+	// the other can lose.
+	if !grantsMCPScope(token.GetGrantedScopes()) {
+		h.logger.Warn(logging.DestinationHTTP, "MCP request refused: token grants no MCP scope",
+			"username", username, "scopes", token.GetGrantedScopes())
+		h.writeOAuthError(w, http.StatusForbidden, "insufficient_scope", "Token grants no MCP scope")
+		return nil, nil, false
+	}
+
 	// Shared with the SSH gateway, which needs exactly this and must
 	// not grow its own copy -- see withCondorCredential for what a
 	// second copy would be free to forget.
-	ctx, err = h.withCondorCredential(ctx, username, token.GetGrantedScopes())
+	// Renewable while the access token behind this call is still active.
+	bearer, granted := bearerFromRequest(r), token.GetGrantedScopes()
+	ctx, err = h.withGrantCondorCredential(ctx, username, grantIdentity(token), granted, func(rctx context.Context) error {
+		return h.checkOAuth2Grant(rctx, bearer, granted)
+	})
+	if errors.Is(err, errNoAuthorizationLimits) {
+		// The grant's condor:/* scopes map to no authorization this
+		// server issues. That is the token's doing, not the server's.
+		h.logger.Warn(logging.DestinationHTTP, "MCP request refused: token grants no HTCondor authorization",
+			"username", username, "scopes", token.GetGrantedScopes())
+		h.writeOAuthError(w, http.StatusForbidden, "insufficient_scope",
+			"Token grants no HTCondor authorization this server issues")
+		return nil, nil, false
+	}
 	if err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Failed to prepare the caller's HTCondor credential",
 			"error", err, "username", username)
@@ -206,14 +244,23 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	// The caller's granted scopes, so the catalogue can be filtered and every
 	// other tool can consult them.
 	ctx = mcpserver.WithGrantedScopes(ctx, token.GetGrantedScopes())
+	// The subject and groups the grant was issued with: access point
+	// assignment may place work by them.
+	ctx = apassign.WithCaller(ctx, claimsFromSession(token.GetSession()))
 
 	// Owner-scoping needs the identity the SCHEDD attributes this connection
 	// to, which is not always the username claim we authenticated: a pool that
 	// prefers FS over TOKEN attributes it to the process user. Ask the schedd,
 	// keyed by this bearer. Falling back to the claim would scope queries by a
 	// name the schedd never uses, hiding the caller's own jobs.
-	if actor := h.actorForSession(ctx, bearerFromRequest(r)); actor != "" {
+	actor, err := h.resolveActor(ctx, r, bearerFromRequest(r))
+	if err != nil {
+		h.writeActorThrottled(w, err)
+		return nil, nil, false
+	}
+	if actor != "" {
 		ctx = htcondor.WithAuthenticatedUser(ctx, actor)
+		ctx = h.withPlacementOwnerScope(ctx, nil, actor)
 	} else {
 		h.logger.Warn(logging.DestinationHTTP, "Could not resolve the caller's schedd identity; owner-scoped tools will refuse this call", "oauth2_user", username)
 	}
@@ -224,7 +271,7 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	// Before anything reads it. The body is consumed whole below, and on
 	// the OAuth path it is read, buffered and re-read, so the limit has
 	// to be in place ahead of the first read rather than at each.
-	r.Body = http.MaxBytesReader(w, r.Body, maxMCPBody)
+	setBodyLimit(w, r, maxMCPBody)
 
 	ctx, token, ok := h.mcpAuthContext(w, r)
 	if !ok {
@@ -595,6 +642,22 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 		filteredReq = r
 	}
 
+	// The placement scope is granted through the device flow only, where
+	// the approving identity is recorded.
+	//
+	// Checked after the scope filter, not before it. A client that may not
+	// hold placement at all has it dropped here like any other scope it is
+	// not allowed, and the rest of its request proceeds; only a client whose
+	// own scope list carries placement -- placement_client -- is told it
+	// came through the wrong flow. Refusing on the raw request instead meant
+	// any client that merely named the scope was refused outright, which is
+	// what every client does when the server advertises it.
+	if isPlacementGrant(strings.Fields(filteredReq.FormValue("scope"))) {
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_scope",
+			"The placement scope is granted through the device authorization flow only")
+		return
+	}
+
 	// Parse authorization request
 	ar, err := h.oauth2Provider.GetProvider().NewAuthorizeRequest(ctx, filteredReq)
 	if err != nil {
@@ -610,6 +673,8 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 
 	username := ""
 	var userGroups []string
+	// The identity of a placementd-mapped session, recorded on the grant.
+	placementIdentity := ""
 
 	// Method 1: User header (demo mode).
 	// Only honored from configured trusted-proxy CIDRs (or in
@@ -628,6 +693,9 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 		if session, ok := h.getSessionFromRequest(r); ok {
 			username = session.Username
 			userGroups = session.Groups
+			if session.IsPlacementd() {
+				placementIdentity = session.PlacementIdentity
+			}
 			h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
 		}
 	}
@@ -644,11 +712,18 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 
+			binding, err := h.bindLoginToBrowser(w, r)
+			if err != nil {
+				h.logger.Error(logging.DestinationHTTP, "Failed to bind login to browser", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authorization")
+				return
+			}
+
 			// Store authorize request for later retrieval
-			h.oauth2StateStore.Store(state, ar)
+			h.oauth2StateStore.StoreForBrowser(state, ar, "", binding)
 
 			// Build authorization URL
-			authURL := h.oauth2Config.AuthCodeURL(state)
+			authURL := h.authCodeURL(state)
 
 			h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for authentication",
 				"client_id", ar.GetClient().GetID(), "state", state, "auth_url", authURL)
@@ -679,12 +754,12 @@ func (h *Handler) handleOAuth2Authorize(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Store authorize request and username for consent page
-	h.oauth2StateStore.StoreWithUsername(state, ar, "", username, userGroups)
+	h.oauth2StateStore.StoreForConsent(state, ar, username, userGroups, placementIdentity)
 
 	// Redirect to consent page
 	// The path a person sees in the address bar while deciding
 	// whether to approve, so it follows what this server advertises.
-	consentURL := fmt.Sprintf("%s?state=%s", OAuth2EndpointPath("consent"), state)
+	consentURL := fmt.Sprintf("%s?state=%s", h.oauth2EndpointPath("consent"), state)
 	http.Redirect(w, r, consentURL, http.StatusFound)
 }
 
@@ -723,6 +798,11 @@ func (h *Handler) grantableScopes(userGroups, requested []string) []string {
 // weigh a line that means nothing -- and re-granting it would keep it
 // alive for another refresh cycle. Dropped here, a deprecated scope
 // disappears from the grant the moment its client authorizes again.
+//
+// So does every other condor level but READ and WRITE, for the same
+// reason: mapCondorScopesToAuthz grants none of them, and a client
+// registered before registration refused them could still ask, and have
+// them shown pre-ticked.
 func withoutDeprecatedScopes(requested []string) []string {
 	deprecated := make(map[string]bool, len(oauth2DeprecatedScopes))
 	for _, scope := range oauth2DeprecatedScopes {
@@ -730,9 +810,13 @@ func withoutDeprecatedScopes(requested []string) []string {
 	}
 	out := make([]string, 0, len(requested))
 	for _, scope := range requested {
-		if !deprecated[scope] {
-			out = append(out, scope)
+		if deprecated[scope] {
+			continue
 		}
+		if strings.HasPrefix(scope, "condor:/") && len(mapCondorScopesToAuthz([]string{scope})) == 0 {
+			continue
+		}
+		out = append(out, scope)
 	}
 	return out
 }
@@ -759,6 +843,14 @@ var signInScopes = map[string]bool{
 var privilegedScopes = map[string]bool{
 	"mcp:admin":     true,
 	"mcp:superuser": true,
+	// The same two powers under the names that say what they grant.
+	// Listed here before they can be requested through OAuth2 at all --
+	// today they are mintable only on an API key -- because the cost of
+	// listing a scope that never reaches a consent page is nothing, and
+	// the cost of the reverse is a client granted power over everyone's
+	// jobs by a box that was ticked for it.
+	scopeAnyUserRead:  true,
+	scopeAnyUserWrite: true,
 }
 
 func getScopeDescription(scope string) string {
@@ -771,6 +863,8 @@ func getScopeDescription(scope string) string {
 		"mcp:write":             "Full access to submit and manage HTCondor jobs via MCP protocol",
 		"mcp:admin":             "Read every user's jobs, not only your own",
 		"mcp:superuser":         "Change any user's jobs: remove, hold, release, edit",
+		scopeAnyUserRead:        "Read every user's jobs, not only your own",
+		scopeAnyUserWrite:       "Change any user's jobs: remove, hold, release, edit",
 		"condor:/READ":          "HTCondor READ authorization - allows reading job and daemon information",
 		"condor:/WRITE":         "HTCondor WRITE authorization - allows submitting and managing jobs",
 		"condor:/ADMINISTRATOR": "HTCondor ADMINISTRATOR authorization - full administrative access",
@@ -801,7 +895,7 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Limit request body size for form parsing
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 
 	ctx := r.Context()
 
@@ -826,6 +920,8 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "Invalid or expired consent request")
 		return
 	}
+	placementIdentity := h.oauth2StateStore.PlacementIdentity(state)
+	ctx = withGrantIdentityContext(ctx, placementIdentity)
 
 	if r.Method == http.MethodGet {
 		// Display consent form
@@ -834,7 +930,7 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 			Username:        username,
 			ClientID:        ar.GetClient().GetID(),
 			RequestedScopes: ar.GetRequestedScopes(),
-			FormAction:      OAuth2EndpointPath("consent"),
+			FormAction:      h.oauth2EndpointPath("consent"),
 			HiddenFields: map[string]string{
 				"state":          state,
 				consentCSRFField: h.consentCSRFToken(username, state),
@@ -864,6 +960,7 @@ func (h *Handler) handleOAuth2Consent(w http.ResponseWriter, r *http.Request) {
 			// the grant is later refreshed; they are otherwise read once
 			// here and discarded.
 			session := DefaultOpenIDConnectSession(username).WithGroups(groups)
+			session.PlacementIdentity = placementIdentity
 
 			// Per-scope consent: a v1 consent page (rendered by
 			// renderConsentPage) carries `consent_form_version=1`
@@ -987,7 +1084,7 @@ func (h *Handler) handleOAuth2Token(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Limit request body size for form parsing
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 
 	// The token request repeats redirect_uri, and fosite resolves the
 	// client again to validate it, so the same loopback allowance the
@@ -1150,6 +1247,10 @@ func (h *Handler) handleDeviceCodeTokenRequest(w http.ResponseWriter, r *http.Re
 			h.writeOAuthError(w, http.StatusBadRequest, "authorization_pending", "Authorization pending")
 			return
 		}
+		if errors.Is(err, ErrSlowDown) {
+			h.writeOAuthError(w, http.StatusBadRequest, "slow_down", "Polling too frequently; increase the interval by 5 seconds")
+			return
+		}
 		if errors.Is(err, fosite.ErrAccessDenied) {
 			h.writeOAuthError(w, http.StatusBadRequest, "access_denied", "Authorization denied by user")
 			return
@@ -1274,6 +1375,18 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.mcpDCRDisabled {
+		h.writeError(w, http.StatusForbidden, "Dynamic client registration is disabled on this server")
+		return
+	}
+	// Each registration is a row that lasts until the retention sweep
+	// finds it unused, and a bcrypt hash; see oauth2_rate_limits.go.
+	if !h.allowRegistration(r) {
+		h.writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable",
+			"Too many client registrations from this address; try again later")
+		return
+	}
+
 	ctx := r.Context()
 
 	// Parse registration request
@@ -1287,6 +1400,9 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		ClientName    string          `json:"client_name"`
 	}
 
+	// Unauthenticated, so smaller than the default: a registration is a
+	// handful of URIs and names.
+	setBodyLimit(w, r, 64<<10)
 	if err := json.NewDecoder(r.Body).Decode(&rawReq); err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid registration request")
 		return
@@ -1327,12 +1443,13 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate client ID and secret
-	clientID := fmt.Sprintf("client_%d", time.Now().UnixNano())
+	// Generate client ID and secret. The id is random rather than a
+	// timestamp, so one client's id says nothing about another's.
+	clientID := "client_" + generateRandomString(16)
 	clientSecret := generateRandomString(32)
 
 	// Hash the client secret with bcrypt (fosite expects bcrypt-hashed secrets)
-	hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+	hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), secretHashCost)
 	if err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Failed to hash client secret", "error", err)
 		h.writeError(w, http.StatusInternalServerError, "Failed to register client")
@@ -1349,6 +1466,10 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 	if len(regReq.Scopes) == 0 {
 		regReq.Scopes = []string{"openid", "profile", "email", "offline_access", "mcp:read", "mcp:write"}
 	}
+	if err := validateRegistrationMetadata(regReq.GrantTypes, regReq.ResponseTypes); err != nil {
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", err.Error())
+		return
+	}
 
 	// Validate requested scopes against supported scopes. offline_access
 	// must be accepted and registered on the client; without it in the
@@ -1364,14 +1485,18 @@ func (h *Handler) handleOAuth2Register(w http.ResponseWriter, r *http.Request) {
 		// Requestable, but only granted to members of the configured
 		// group -- see getScopesForGroups. A client asking for them
 		// without the group membership simply does not receive them.
-		"mcp:admin":     true,
-		"mcp:superuser": true,
+		"mcp:admin":       true,
+		"mcp:superuser":   true,
+		scopeAnyUserRead:  true,
+		scopeAnyUserWrite: true,
+		// READ and WRITE only: they are the condor levels a token from
+		// this server can carry (mapCondorScopesToAuthz). Any other was
+		// accepted here, shown pre-ticked on the consent page, and
+		// granted nothing.
+		condorScopeRead:  true,
+		condorScopeWrite: true,
 	}
 	for _, scope := range regReq.Scopes {
-		// Allow condor:/* scopes
-		if strings.HasPrefix(scope, "condor:/") {
-			continue
-		}
 		if !supportedScopes[scope] {
 			h.writeError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported scope: %s", scope))
 			return
@@ -1441,6 +1566,15 @@ func generateRandomString(length int) string {
 // only request the scopes the server advertises, so without it here they
 // never ask for a refresh token and silently end up with access-token-
 // only sessions that force a full re-auth on every expiry.
+//
+// The placement scope is deliberately absent. It is not a scope a user
+// authorizes: placement_client obtains it through the device grant alone,
+// and that client carries it in its own stored scope list
+// (seedPlacementClient), which is what the device endpoint filters
+// against. Advertising it had no client to serve and broke every other
+// one -- a client asks for each scope the server advertises, so claude.ai
+// and Claude Code began sending "placement" to /authorize, which refuses
+// it, and every browser authorization failed with invalid_scope.
 var oauth2AdvertisedScopes = []string{
 	"openid", "profile", "email",
 	"offline_access",
@@ -1458,12 +1592,42 @@ var oauth2AdvertisedScopes = []string{
 	// can be given an access point to look after without being given its
 	// owner's ability to remove anybody's jobs.
 	"mcp:admin", "mcp:superuser",
+	// The same two powers named for what they grant. Advertised so an
+	// OAuth2 client can request them at all -- a client asks only for
+	// what the server advertises -- and granted on exactly the group
+	// policy their older spellings answer to, so advertising them adds
+	// a name rather than a privilege. The consent page renders them
+	// unchecked, as it does any privileged scope.
+	scopeAnyUserRead, scopeAnyUserWrite,
 	// READ and WRITE only. The ADVERTISE_* levels were advertised as
-	// scopes but nothing in this server ever consulted them:
-	// advertise_to_collector publishes with the server's own collector
-	// client, not the caller's credential, so the scopes granted nothing
-	// and only lengthened the consent page.
+	// scopes and no tool checked them. advertise_to_collector sends the
+	// ad with the caller's own per-request credential, so whether that
+	// identity may advertise is the collector's ALLOW_ADVERTISE_*
+	// decision; the scopes only lengthened the consent page, and
+	// mapCondorScopesToAuthz no longer puts them in a minted token.
 	"condor:/READ", "condor:/WRITE",
+}
+
+// mcpOnlyScopes are the scopes advertised only where MCP is served.
+// mcp:admin and mcp:superuser are not among them: the REST API honours
+// those too (seesAllJobsByPolicy), so they mean something without MCP.
+var mcpOnlyScopes = []string{"mcp:read", "mcp:write"}
+
+// advertisedScopes is the scope set this server publishes in its
+// discovery documents: oauth2AdvertisedScopes, less mcp:read and
+// mcp:write where MCP is off.
+//
+// Only the advertisement narrows. What a client may request
+// (cimdClientScopes, client registration) is unchanged, so a grant
+// already carrying mcp:* still refreshes, and switching MCP off and on
+// again strands nobody.
+func (h *Handler) advertisedScopes() []string {
+	if h.mcpEnabled {
+		return oauth2AdvertisedScopes
+	}
+	return slices.DeleteFunc(slices.Clone(oauth2AdvertisedScopes), func(s string) bool {
+		return slices.Contains(mcpOnlyScopes, s)
+	})
 }
 
 // oauth2DeprecatedScopes were advertised once and are not any more. They
@@ -1499,16 +1663,15 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		// identity rather than a location, every token already issued
 		// carries it, and changing it would invalidate all of them.
 		"issuer": issuer,
-		// The endpoints are advertised at the plain path where the web
-		// UI is compiled in. Both remain routed -- see
-		// OAuth2EndpointPath -- because a client discovers these once
+		// The endpoints are advertised at the plain path except where
+		// MCP is all there is. Both remain routed wherever MCP is -- see
+		// oauth2EndpointPath -- because a client discovers these once
 		// and keeps them.
-		"authorization_endpoint":        issuer + OAuth2EndpointPath("authorize"),
-		"token_endpoint":                issuer + OAuth2EndpointPath("token"),
-		"registration_endpoint":         issuer + OAuth2EndpointPath("register"),
-		"introspection_endpoint":        issuer + OAuth2EndpointPath("introspect"),
-		"revocation_endpoint":           issuer + OAuth2EndpointPath("revoke"),
-		"device_authorization_endpoint": issuer + OAuth2EndpointPath("device/authorize"),
+		"authorization_endpoint":        issuer + h.oauth2EndpointPath("authorize"),
+		"token_endpoint":                issuer + h.oauth2EndpointPath("token"),
+		"introspection_endpoint":        issuer + h.oauth2EndpointPath("introspect"),
+		"revocation_endpoint":           issuer + h.oauth2EndpointPath("revoke"),
+		"device_authorization_endpoint": issuer + h.oauth2EndpointPath("device/authorize"),
 		// This is an OAuth2 authorization server (RFC 8414), not an
 		// OpenID Connect provider. It used to advertise otherwise --
 		// id_token response types, subject_types_supported and
@@ -1526,9 +1689,13 @@ func (h *Handler) handleOAuth2Metadata(w http.ResponseWriter, _ *http.Request) {
 		// fosite composition in oauth2_provider.go.
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials", "urn:ietf:params:oauth:grant-type:device_code", tokenExchangeGrantType},
-		"scopes_supported":                      oauth2AdvertisedScopes,
+		"scopes_supported":                      h.advertisedScopes(),
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"code_challenge_methods_supported":      []string{"plain", "S256"},
+	}
+
+	if !h.mcpDCRDisabled {
+		metadata["registration_endpoint"] = issuer + h.oauth2EndpointPath("register")
 	}
 
 	// Advertise Client ID Metadata Document support (an https:// client_id is
@@ -1610,8 +1777,12 @@ func (h *Handler) handleOAuth2ProtectedResourceMetadata(w http.ResponseWriter, r
 		"authorization_servers":                 []string{issuer},
 		"bearer_methods_supported":              []string{"header"},
 		"resource_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":                      oauth2AdvertisedScopes,
+		"scopes_supported":                      h.advertisedScopes(),
 		"resource_documentation":                issuer + "/mcp",
+	}
+	if !h.mcpEnabled {
+		// No /mcp to document; the REST API's reference is /docs.
+		metadata["resource_documentation"] = issuer + "/docs"
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1634,7 +1805,15 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 	}
 
 	// Limit request body size for form parsing
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
+
+	// Every authorization stores a device-code row, and this endpoint
+	// authenticates no client; see oauth2_rate_limits.go.
+	if !h.allowDeviceAuthorization(r) {
+		h.writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable",
+			"Too many device authorizations from this address; try again later")
+		return
+	}
 
 	ctx := r.Context()
 
@@ -1652,6 +1831,14 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "Client not found")
 		return
 	}
+	// RFC 8628 section 3.1: the client must be one allowed this grant.
+	// The token endpoint never checks it for this flow, so a client
+	// registered for the browser flow alone could otherwise start one.
+	if !slices.Contains(client.GetGrantTypes(), deviceCodeGrant) {
+		h.writeOAuthError(w, http.StatusBadRequest, "unauthorized_client",
+			"This client is not permitted to use the device authorization grant")
+		return
+	}
 
 	// Parse requested scopes
 	scopeStr := r.FormValue("scope")
@@ -1661,6 +1848,13 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 	} else {
 		// Default scopes
 		scopes = []string{"openid", "mcp:read", "mcp:write"}
+	}
+
+	// A placement grant is for placement and nothing else.
+	if placementScopeMixError(scopes) {
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_scope",
+			"The placement scope cannot be combined with other scopes")
+		return
 	}
 
 	// Filter scopes to only those allowed for the client
@@ -1705,6 +1899,7 @@ func (h *Handler) handleOAuth2DeviceAuthorize(w http.ResponseWriter, r *http.Req
 
 	// Create device code handler
 	deviceHandler := NewDeviceCodeHandler(h.oauth2Provider.GetStorage(), h.oauth2Provider.config)
+	deviceHandler.verifyPath = h.deviceVerifyPath()
 
 	// Handle device authorization
 	resp, err := deviceHandler.HandleDeviceAuthorizationRequest(ctx, client, scopes, sshSession)
@@ -1771,7 +1966,7 @@ func (h *Handler) deviceApprovalIdentity(ctx context.Context, r *http.Request) (
 	if h.idpProvider == nil {
 		return "", nil
 	}
-	cookie, err := r.Cookie("idp_session")
+	cookie, err := r.Cookie(proxyscrub.IDPSessionCookie)
 	if err != nil || cookie.Value == "" {
 		return "", nil
 	}
@@ -1798,96 +1993,149 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Limit request body size for form parsing
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 
+	switch r.Method {
+	case http.MethodGet:
+		h.deviceVerifyGet(w, r)
+	case http.MethodPost:
+		h.deviceVerifyPost(w, r)
+	default:
+		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+// deviceVerifyGet shows the code entry form, or the consent page for a code.
+func (h *Handler) deviceVerifyGet(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	// Check authentication before showing the form (same as handleOAuth2Authorize)
+	username := ""
 
-	if r.Method == http.MethodGet {
-		// Check authentication before showing the form (same as handleOAuth2Authorize)
-		username := ""
+	// Method 1: User header (demo mode) — trusted-proxy gated.
+	if h.isUserHeaderTrustedSource(r) {
+		username = r.Header.Get(h.userHeader)
+		if username != "" {
+			h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
+				"username", username, "header", h.userHeader)
+		}
+	}
 
-		// Method 1: User header (demo mode) — trusted-proxy gated.
-		if h.isUserHeaderTrustedSource(r) {
-			username = r.Header.Get(h.userHeader)
-			if username != "" {
-				h.logger.Info(logging.DestinationHTTP, "User authenticated via header",
-					"username", username, "header", h.userHeader)
-			}
+	// Method 2: Check for session
+	if username == "" {
+		if session, ok := h.getSessionFromRequest(r); ok {
+			username = session.Username
+			h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
+		}
+	}
+
+	// A session with no local account may approve placement
+	// requests, so it is not sent back to sign in again.
+	approver, hasApprover := h.placementDeviceApprover(r)
+	placementOnlySession := username == "" && hasApprover && approver.IsPlacementOnly()
+
+	// If no authentication and OAuth2 SSO is configured, redirect to upstream IDP
+	if username == "" && !placementOnlySession && h.oauth2Config != nil {
+		// Generate state parameter
+		state, err := h.oauth2StateStore.GenerateState()
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+			return
 		}
 
-		// Method 2: Check for session
+		binding, err := h.bindLoginToBrowser(w, r)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to bind login to browser", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
+			return
+		}
+
+		// Store the return URL (current device verification URL)
+		returnURL := r.URL.String()
+		h.oauth2StateStore.StoreForBrowser(state, nil, returnURL, binding)
+
+		// Build authorization URL
+		authURL := h.authCodeURL(state)
+
+		h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for device verification authentication",
+			"state", state, "auth_url", authURL, "return_url", returnURL)
+
+		// Redirect to IDP
+		http.Redirect(w, r, authURL, http.StatusFound)
+		return
+	}
+
+	// If still no username, authentication is required
+	if username == "" && !placementOnlySession {
+		h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
+		h.writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	rateKey := username
+	if rateKey == "" {
+		rateKey = placementApproverBinding(approver.PlacementIdentity)
+	}
+
+	// Get user code from query parameter
+	userCode := r.URL.Query().Get("user_code")
+
+	// If user code is provided, look up the device code session and show consent page
+	if userCode != "" {
+		userCode = strings.ToUpper(strings.TrimSpace(userCode))
+
+		// Each lookup is a guess at a user code, so it spends the
+		// same budgets as the SSH approval screen's.
+		if !h.sshConsentAllow(r, rateKey) {
+			h.logger.Warn(logging.DestinationSecurity,
+				"Rate-limiting device code lookups", "username", username)
+			h.writeError(w, http.StatusTooManyRequests,
+				"Too many attempts. Wait a moment and try again.")
+			return
+		}
+
+		// Get device code session by user code
+		_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+		if err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+			h.writeHTMLError(w, "Invalid or expired user code")
+			return
+		}
+
+		// A placement request is approved by identity.
+		if placementOnlyScopes(request.GetRequestedScopes()) {
+			if !hasApprover {
+				h.writeHTMLError(w, "This request needs a sign-in the placement service knows")
+				return
+			}
+			h.renderPlacementDeviceConsent(w, approver, userCode, request)
+			return
+		}
 		if username == "" {
-			if session, ok := h.getSessionFromRequest(r); ok {
-				username = session.Username
-				h.logger.Info(logging.DestinationHTTP, "User authenticated via session", "username", username)
-			}
+			h.writeHTMLError(w, "This sign-in can only approve placement token requests")
+			return
 		}
-
-		// If no authentication and OAuth2 SSO is configured, redirect to upstream IDP
-		if username == "" && h.oauth2Config != nil {
-			// Generate state parameter
-			state, err := h.oauth2StateStore.GenerateState()
-			if err != nil {
-				h.logger.Error(logging.DestinationHTTP, "Failed to generate OAuth2 state", "error", err)
-				h.writeError(w, http.StatusInternalServerError, "Failed to initiate authentication")
-				return
-			}
-
-			// Store the return URL (current device verification URL)
-			returnURL := r.URL.String()
-			h.oauth2StateStore.StoreWithUsername(state, nil, returnURL, "")
-
-			// Build authorization URL
-			authURL := h.oauth2Config.AuthCodeURL(state)
-
-			h.logger.Info(logging.DestinationHTTP, "Redirecting to IDP for device verification authentication",
-				"state", state, "auth_url", authURL, "return_url", returnURL)
-
-			// Redirect to IDP
-			http.Redirect(w, r, authURL, http.StatusFound)
+		if h.refusePlacementdDeviceClient(w, r, request) {
 			return
 		}
 
-		// If still no username, authentication is required
-		if username == "" {
-			h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
-			h.writeError(w, http.StatusUnauthorized, "Authentication required")
+		// An SSH login gets the workspace screen instead, where
+		// the person can consent to what the session will ask
+		// for as well as to the login itself. The redirect goes
+		// out only where the SPA is compiled in, because
+		// otherwise it would point at a 404 and leave a user with
+		// no way to approve at all.
+		if to := sshConsentRedirect(sshSessionFromRequester(request), userCode, webui.IsEmbedded()); to != "" {
+			http.Redirect(w, r, to, http.StatusFound)
 			return
 		}
 
-		// Get user code from query parameter
-		userCode := r.URL.Query().Get("user_code")
+		// Show consent page with scopes
+		h.renderDeviceConsentPage(w, r, username, userCode, request)
+		return
+	}
 
-		// If user code is provided, look up the device code session and show consent page
-		if userCode != "" {
-			userCode = strings.ToUpper(strings.TrimSpace(userCode))
-
-			// Get device code session by user code
-			_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
-			if err != nil {
-				h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
-				h.writeHTMLError(w, "Invalid or expired user code")
-				return
-			}
-
-			// An SSH login gets the workspace screen instead, where
-			// the person can consent to what the session will ask
-			// for as well as to the login itself. The redirect goes
-			// out only where the SPA is compiled in, because
-			// otherwise it would point at a 404 and leave a user with
-			// no way to approve at all.
-			if to := sshConsentRedirect(sshSessionFromRequester(request), userCode, webui.IsEmbedded()); to != "" {
-				http.Redirect(w, r, to, http.StatusFound)
-				return
-			}
-
-			// Show consent page with scopes
-			h.renderDeviceConsentPage(w, r, username, userCode, request)
-			return
-		}
-
-		// Display verification form (for entering user code)
-		html := `<!DOCTYPE html>
+	// Display verification form (for entering user code)
+	html := `<!DOCTYPE html>
 <html>
 <head>
     <title>Device Authorization</title>
@@ -1933,117 +2181,153 @@ func (h *Handler) handleOAuth2DeviceVerify(w http.ResponseWriter, r *http.Reques
     <div class="container">
         <h1>Device Authorization</h1>
         <p>Enter the code displayed on your device:</p>
-        <form method="GET" action="/mcp/oauth2/device/verify">
+        <form method="GET" action="` + h.deviceVerifyPath() + `">
             <input type="text" name="user_code" placeholder="XXXX-XXXX" required pattern="[A-Za-z0-9-]+" />
             <button type="submit">Continue</button>
         </form>
     </div>
 </body>
 </html>`
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(html))
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(html))
+}
+
+// deviceVerifyPost applies an approval or denial.
+func (h *Handler) deviceVerifyPost(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	// Handle approval/denial
+	userCode := strings.ToUpper(strings.TrimSpace(r.FormValue("user_code")))
+	action := r.FormValue("action")
+
+	if userCode == "" {
+		h.writeHTMLError(w, "User code is required")
 		return
 	}
 
-	if r.Method == http.MethodPost {
-		// Handle approval/denial
-		userCode := strings.ToUpper(strings.TrimSpace(r.FormValue("user_code")))
-		action := r.FormValue("action")
+	// Who is approving comes first: looking the code up before
+	// that would tell anybody at all whether a code exists.
+	username, userGroups := h.deviceApprovalIdentity(ctx, r)
+	approver, hasApprover := h.placementDeviceApprover(r)
 
-		if userCode == "" {
-			h.writeHTMLError(w, "User code is required")
-			return
-		}
+	// If still no username, authentication is required
+	if username == "" && !hasApprover {
+		h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
+		h.writeHTMLError(w, "Authentication required")
+		return
+	}
+	rateKey := username
+	if rateKey == "" {
+		rateKey = placementApproverBinding(approver.PlacementIdentity)
+	}
 
-		// Get device code session by user code
-		_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
-		if err != nil {
-			h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
-			h.writeHTMLError(w, "Invalid or expired user code")
-			return
-		}
-
-		username, userGroups := h.deviceApprovalIdentity(ctx, r)
-
-		// If still no username, authentication is required
-		if username == "" {
-			h.logger.Error(logging.DestinationHTTP, "No authentication method available for device verification")
-			h.writeHTMLError(w, "Authentication required")
-			return
-		}
-
-		// Checked once the username is known, because the token is
-		// bound to it: a token minted for one person's form must not
-		// approve another's. Before the action is read, because this
-		// page is what turns a code printed in somebody's terminal
-		// into a credential.
-		if !h.checkConsentCSRF(r, username, userCode) {
-			h.refuseStaleConsent(w, r, username, "device verification")
-			return
-		}
-
-		switch action {
-		case "approve":
-			// Create session for user. See the consent handler for why
-			// the group list is persisted with the grant.
-			session := DefaultOpenIDConnectSession(username).WithGroups(userGroups)
-
-			// The same two steps the authorization-code consent handler
-			// performs: narrow what was requested to what the user ticked,
-			// then intersect that with what their groups allow. The device
-			// flow previously narrowed against the session's GRANTED scopes
-			// instead -- a set nothing in this flow ever populates, so the
-			// intersection was always empty and every device login came back
-			// with "openid" alone.
-			acceptedScopes := narrowConsentScopes(request.GetRequestedScopes(), r.Form)
-			acceptedScopes = h.getScopesForGroups(userGroups, acceptedScopes)
-			acceptedScopes = h.scopesAllowedByScheddACL(ctx, username, acceptedScopes)
-			// The set an operator may later restore this grant to. Same
-			// reasoning as the consent handler: recorded where what the
-			// user agreed to is known.
-			session.WithAuthorizedScopes(acceptedScopes)
-
-			// Approve the device code with the user-narrowed scope set.
-			if err := h.oauth2Provider.GetStorage().ApproveDeviceCodeSessionWithScopes(ctx, userCode, username, session, acceptedScopes); err != nil {
-				h.logger.Error(logging.DestinationHTTP, "Failed to approve device code", "error", err)
-				h.writeHTMLError(w, "Failed to approve device")
-				return
-			}
-
-			h.logger.Info(logging.DestinationHTTP, "Device code approved",
-				"user_code", userCode, "username", username,
-				"client_id", request.GetClient().GetID(),
-				"requested_scopes", request.GetRequestedScopes(),
-				"accepted_scopes", acceptedScopes)
-
-			// Return success page
-			h.renderResultPage(w, http.StatusOK, "Authorization Complete", "#4CAF50",
-				"&#10003; Authorization Complete",
-				"You have successfully authorized the device.",
-				"You can close this window now.")
-		case "deny":
-			// Deny the device code
-			if err := h.oauth2Provider.GetStorage().DenyDeviceCodeSession(ctx, userCode); err != nil {
-				h.logger.Error(logging.DestinationHTTP, "Failed to deny device code", "error", err)
-				h.writeHTMLError(w, "Failed to deny device")
-				return
-			}
-
-			h.logger.Info(logging.DestinationHTTP, "Device code denied", "user_code", userCode, "username", username)
-
-			// Return denial page
-			h.renderResultPage(w, http.StatusOK, "Authorization Denied", "#f44336",
-				"&#10007; Authorization Denied",
-				"You have denied authorization for this device.",
-				"You can close this window now.")
-		default:
-			h.writeHTMLError(w, "Invalid action")
-		}
+	if !h.sshConsentAllow(r, rateKey) {
+		h.logger.Warn(logging.DestinationSecurity,
+			"Rate-limiting device code lookups", "username", username)
+		h.writeError(w, http.StatusTooManyRequests,
+			"Too many attempts. Wait a moment and try again.")
 		return
 	}
 
-	h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	// Get device code session by user code
+	_, request, err := h.oauth2Provider.GetStorage().GetDeviceCodeSessionByUserCode(ctx, userCode)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP, "Failed to get device code session", "error", err, "user_code", userCode)
+		h.writeHTMLError(w, "Invalid or expired user code")
+		return
+	}
+
+	// A placement request is approved by identity, with the
+	// form's token bound to that identity.
+	if placementOnlyScopes(request.GetRequestedScopes()) {
+		if !hasApprover {
+			h.writeHTMLError(w, "This request needs a sign-in the placement service knows")
+			return
+		}
+		if !h.checkConsentCSRF(r, placementApproverBinding(approver.PlacementIdentity), userCode) {
+			h.refuseStaleConsent(w, r, placementApproverBinding(approver.PlacementIdentity), "placement device verification")
+			return
+		}
+		h.decidePlacementDevice(w, r, approver, userCode, request)
+		return
+	}
+	if username == "" {
+		h.writeHTMLError(w, "This sign-in can only approve placement token requests")
+		return
+	}
+	if h.refusePlacementdDeviceClient(w, r, request) {
+		return
+	}
+
+	// Checked once the username is known, because the token is
+	// bound to it: a token minted for one person's form must not
+	// approve another's. Before the action is read, because this
+	// page is what turns a code printed in somebody's terminal
+	// into a credential.
+	if !h.checkConsentCSRF(r, username, userCode) {
+		h.refuseStaleConsent(w, r, username, "device verification")
+		return
+	}
+
+	switch action {
+	case "approve":
+		// Create session for user. See the consent handler for why
+		// the group list is persisted with the grant.
+		session := DefaultOpenIDConnectSession(username).WithGroups(userGroups)
+		session.PlacementIdentity = h.approvingPlacementIdentity(r, username)
+		ctx := withGrantIdentityContext(ctx, session.PlacementIdentity)
+
+		// The same two steps the authorization-code consent handler
+		// performs: narrow what was requested to what the user ticked,
+		// then intersect that with what their groups allow. The device
+		// flow previously narrowed against the session's GRANTED scopes
+		// instead -- a set nothing in this flow ever populates, so the
+		// intersection was always empty and every device login came back
+		// with "openid" alone.
+		acceptedScopes := narrowConsentScopes(request.GetRequestedScopes(), r.Form)
+		acceptedScopes = h.getScopesForGroups(userGroups, acceptedScopes)
+		acceptedScopes = h.scopesAllowedByScheddACL(ctx, username, acceptedScopes)
+		// The set an operator may later restore this grant to. Same
+		// reasoning as the consent handler: recorded where what the
+		// user agreed to is known.
+		session.WithAuthorizedScopes(acceptedScopes)
+
+		// Approve the device code with the user-narrowed scope set.
+		if err := h.oauth2Provider.GetStorage().ApproveDeviceCodeSessionWithScopes(ctx, userCode, username, session, acceptedScopes); err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to approve device code", "error", err)
+			h.writeHTMLError(w, "Failed to approve device")
+			return
+		}
+
+		h.logger.Info(logging.DestinationHTTP, "Device code approved",
+			"user_code", userCode, "username", username,
+			"client_id", request.GetClient().GetID(),
+			"requested_scopes", request.GetRequestedScopes(),
+			"accepted_scopes", acceptedScopes)
+
+		// Return success page
+		h.renderResultPage(w, http.StatusOK, "Authorization Complete", "#4CAF50",
+			"&#10003; Authorization Complete",
+			"You have successfully authorized the device.",
+			"You can close this window now.")
+	case "deny":
+		// Deny the device code
+		if err := h.oauth2Provider.GetStorage().DenyDeviceCodeSession(ctx, userCode); err != nil {
+			h.logger.Error(logging.DestinationHTTP, "Failed to deny device code", "error", err)
+			h.writeHTMLError(w, "Failed to deny device")
+			return
+		}
+
+		h.logger.Info(logging.DestinationHTTP, "Device code denied", "user_code", userCode, "username", username)
+
+		// Return denial page
+		h.renderResultPage(w, http.StatusOK, "Authorization Denied", "#f44336",
+			"&#10007; Authorization Denied",
+			"You have denied authorization for this device.",
+			"You can close this window now.")
+	default:
+		h.writeHTMLError(w, "Invalid action")
+	}
 }
 
 // consentPageParams defines the parameters for rendering a consent page.
@@ -2517,7 +2801,7 @@ func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, r *http.Request
 	ctx := context.Background()
 	var groups []string
 	if r != nil {
-		ctx = r.Context()
+		ctx = withGrantIdentityContext(r.Context(), h.approvingPlacementIdentity(r, username))
 		_, groups = h.deviceApprovalIdentity(ctx, r)
 	}
 	h.renderConsentPage(ctx, w, groups, consentPageParams{
@@ -2525,7 +2809,7 @@ func (h *Handler) renderDeviceConsentPage(w http.ResponseWriter, r *http.Request
 		Username:        username,
 		ClientID:        request.GetClient().GetID(),
 		RequestedScopes: request.GetRequestedScopes(),
-		FormAction:      "/mcp/oauth2/device/verify",
+		FormAction:      h.deviceVerifyPath(),
 		HiddenFields: map[string]string{
 			"user_code":      userCode,
 			consentCSRFField: h.consentCSRFToken(username, userCode),
@@ -2591,6 +2875,17 @@ func (h *Handler) writeHTMLError(w http.ResponseWriter, message string) {
 		"Error",
 		message,
 		"")
+}
+
+// grantsMCPScope reports whether a token's scopes include mcp:read or
+// mcp:write, without which no MCP method is permitted.
+func grantsMCPScope(scopes []string) bool {
+	for _, scope := range scopes {
+		if scope == "mcp:read" || scope == "mcp:write" {
+			return true
+		}
+	}
+	return false
 }
 
 // isMethodAllowedByScopes checks if an MCP method is allowed based on OAuth2 scopes
@@ -2794,8 +3089,18 @@ func mapCondorScopesToAuthz(scopes []string) []string {
 // keeps subsequent requests from re-handshaking.
 const condorIDTokenLifetime = 5 * time.Minute
 
-// generateHTCondorTokenWithScopes generates an HTCondor token with scope-based permissions
+// generateHTCondorTokenWithScopes generates an HTCondor token with
+// scope-based permissions for a caller that names no sign-in identity. A
+// subject that is a placementd account is refused: its tokens are minted
+// only for a grant, within the bound of the identity that approved it.
 func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []string) (string, error) {
+	return h.generateGrantHTCondorToken(username, "", scopes)
+}
+
+// generateGrantHTCondorToken is generateHTCondorTokenWithScopes for a grant
+// that identity approved; identity is the grant's own (grantIdentity),
+// never one read from the request or from the stored bounds.
+func (h *Handler) generateGrantHTCondorToken(username, identity string, scopes []string) (string, error) {
 	if h.signingKeyPath == "" {
 		return "", fmt.Errorf("signing key path not configured")
 	}
@@ -2836,7 +3141,11 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 	// Check if condor:/* scopes are present
 	var authz []string
 	if hasCondorScopes(scopes) {
-		// Map condor:/* scopes to HTCondor authorization levels
+		// Map condor:/* scopes to HTCondor authorization levels. When
+		// none of them maps -- only deprecated or dropped levels, with
+		// or without mcp:* beside them -- authz is empty and
+		// generateMCPAccessJWT refuses, rather than this falling back
+		// to the mcp:* mapping or minting a token with no limits.
 		authz = mapCondorScopesToAuthz(scopes)
 	} else {
 		// Map MCP scopes to HTCondor authorization levels (legacy behavior)
@@ -2860,6 +3169,23 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 		}
 	}
 
+	// A subject a placementd-mapped session authorized is held to what
+	// the identity that approved this grant holds on the account, and its
+	// tokens carry that identity's project.
+	bound, err := h.placementSubjectBound(context.Background(), username, identity)
+	if err != nil {
+		return "", err
+	}
+	var extra map[string]any
+	if bound != nil {
+		authz = boundPlacementAuthz(authz, bound)
+		if len(authz) == 0 {
+			return "", fmt.Errorf("account %s holds none of the permissions this grant asks for: %w",
+				username, errNoAuthorizationLimits)
+		}
+		extra = placementProjectClaim(bound.Project)
+	}
+
 	h.logger.Info(logging.DestinationHTTP, "Generating HTCondor token",
 		"username", username,
 		"trust_domain", h.trustDomain,
@@ -2867,13 +3193,12 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 		"exp", exp,
 		"authz", authz,
 		"scopes", scopes,
-		"signing_key_path", h.signingKeyPath,
 	)
 	// Mint via the local generator (NOT cedar's security.GenerateJWT)
 	// so we can backdate the `nbf` claim to absorb clock skew between
 	// this server and the schedd (we've seen even 1s of skew cause
 	// rejections). The token is otherwise a standard HTCondor IDTOKEN.
-	token, err := generateMCPAccessJWT(
+	token, err := generateMCPAccessJWTWithClaims(
 		filepath.Dir(h.signingKeyPath),
 		filepath.Base(h.signingKeyPath),
 		username,
@@ -2881,6 +3206,7 @@ func (h *Handler) generateHTCondorTokenWithScopes(username string, scopes []stri
 		iat,
 		exp,
 		authz,
+		extra,
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate JWT: %w", err)

@@ -329,7 +329,10 @@ func TestApplyDefaultsOnlyDefaultsTheLimit(t *testing.T) {
 func TestFetchMyJobsSurvivesIntoTheQueryAd(t *testing.T) {
 	opts := (&QueryOptions{FetchOpts: FetchMyJobs, Owner: "alice"}).ApplyDefaults()
 
-	ad := createJobQueryAd("true", &opts)
+	ad, err := createJobQueryAd("true", &opts)
+	if err != nil {
+		t.Fatalf("createJobQueryAd: %v", err)
+	}
 	me, ok := ad.EvaluateAttrString("Me")
 	if !ok || me != "alice" {
 		t.Errorf("query ad Me = %q (present=%v), want alice", me, ok)

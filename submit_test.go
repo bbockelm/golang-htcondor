@@ -420,7 +420,20 @@ concurrency_limits = DATABASE:2
 		t.Fatal("Expected non-nil job ad")
 	}
 
-	// Verify the job ad was created successfully with job status/control settings
+	// max_retries is the one setting here with a generated expression
+	// behind it: it names JobMaxRetries, not MaxRetries, and rewrites
+	// OnExitRemove so the job survives a failure to be retried.
+	if expr, ok := ad.Lookup("JobMaxRetries"); !ok {
+		t.Error("JobMaxRetries is missing")
+	} else if got := expr.String(); got != "3" {
+		t.Errorf("JobMaxRetries = %s; want 3", got)
+	}
+	if _, ok := ad.Lookup("MaxRetries"); ok {
+		t.Error("MaxRetries is set; HTCondor reads JobMaxRetries")
+	}
+	if _, ok := ad.Lookup("OnExitRemove"); !ok {
+		t.Error("OnExitRemove is missing; a job with max_retries never retries without it")
+	}
 }
 
 func TestImprovedRequirements(t *testing.T) {

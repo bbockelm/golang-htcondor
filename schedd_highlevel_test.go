@@ -41,6 +41,7 @@ func setupScheddForTest(t *testing.T) *Schedd {
 
 // TestScheddSubmitHighLevel tests the high-level Schedd.Submit API
 func TestScheddSubmitHighLevel(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -72,6 +73,7 @@ queue
 
 // TestScheddSubmitMultiProc tests submitting multiple procs
 func TestScheddSubmitMultiProc(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -103,6 +105,7 @@ queue 3
 
 // TestScheddSubmitWithVariables tests queue with variables
 func TestScheddSubmitWithVariables(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -134,6 +137,7 @@ queue name in (Alice, Bob, Charlie)
 
 // TestScheddQueryIntegration tests the Schedd.Query API with a real schedd
 func TestScheddQueryIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

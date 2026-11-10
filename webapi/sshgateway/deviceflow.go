@@ -183,6 +183,10 @@ type HTTPFlow struct {
 	Scopes []string
 	// HTTP is optional; http.DefaultClient is used when nil.
 	HTTP *http.Client
+	// EndpointPrefix is the path the issuer serves its OAuth2 endpoints
+	// under, ending in a slash. Empty means /mcp/oauth2/, which a server
+	// serving MCP routes; one without MCP serves only /oauth2/.
+	EndpointPrefix string
 }
 
 const deviceGrantType = "urn:ietf:params:oauth:grant-type:device_code"
@@ -203,8 +207,13 @@ func (f *HTTPFlow) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
-func (f *HTTPFlow) endpoint(path string) string {
-	return strings.TrimSuffix(f.Issuer, "/") + path
+// endpoint is the URL of the named OAuth2 endpoint ("token", ...).
+func (f *HTTPFlow) endpoint(name string) string {
+	prefix := f.EndpointPrefix
+	if prefix == "" {
+		prefix = "/mcp/oauth2/"
+	}
+	return strings.TrimSuffix(f.Issuer, "/") + "/" + strings.Trim(prefix, "/") + "/" + name
 }
 
 // Authorize implements DeviceFlow.
@@ -222,7 +231,7 @@ func (f *HTTPFlow) Authorize(ctx context.Context, target Target) (*DeviceAuth, e
 		form.Set(SessionFormField, target.Name)
 	}
 
-	body, status, err := f.post(ctx, f.endpoint("/mcp/oauth2/device/authorize"), form)
+	body, status, err := f.post(ctx, f.endpoint("device/authorize"), form)
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +270,7 @@ func (f *HTTPFlow) Poll(ctx context.Context, deviceCode string) (*Grant, error) 
 	form.Set("device_code", deviceCode)
 	form.Set("client_id", f.ClientID)
 
-	body, status, err := f.post(ctx, f.endpoint("/mcp/oauth2/token"), form)
+	body, status, err := f.post(ctx, f.endpoint("token"), form)
 	if err != nil {
 		return nil, err
 	}

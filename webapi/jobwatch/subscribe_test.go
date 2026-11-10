@@ -46,11 +46,11 @@ func TestSubscribeDeliversOnlyTheSubscribedJob(t *testing.T) {
 
 	f.Apply(subUpsert(7, 0, 2))
 	got := recv(t, ch)
-	if got.Ad == nil {
+	if got.View == nil {
 		t.Fatalf("expected an ad, got %+v", got)
 	}
-	if v, _ := got.Ad.EvaluateAttrInt("JobStatus"); v != 2 {
-		t.Errorf("JobStatus = %d, want 2", v)
+	if v, _ := got.View.Get("JobStatus"); v != float64(2) {
+		t.Errorf("JobStatus = %v, want 2", v)
 	}
 }
 
@@ -85,7 +85,7 @@ func TestSubscribeDistinguishesProcsOfOneCluster(t *testing.T) {
 	expectQuiet(t, ch)
 
 	f.Apply(subUpsert(7, 1, 2))
-	if got := recv(t, ch); got.Ad == nil {
+	if got := recv(t, ch); got.View == nil {
 		t.Fatalf("expected the ad for 7.1, got %+v", got)
 	}
 }
@@ -200,11 +200,11 @@ func TestFeedAcceptsTheFormatTheWireSends(t *testing.T) {
 			defer cancel()
 			f.Apply(WatchEvent{Kind: WatchUpsert, Key: "9.0", AdText: tc.text})
 			got := recv(t, ch)
-			if got.Ad == nil {
+			if got.View == nil {
 				t.Fatal("the upsert was dropped as unreadable")
 			}
-			if v, _ := got.Ad.EvaluateAttrInt("JobStatus"); v != 2 {
-				t.Errorf("JobStatus = %d, want 2", v)
+			if v, _ := got.View.Get("JobStatus"); v != float64(2) {
+				t.Errorf("JobStatus = %v, want 2", v)
 			}
 		})
 	}

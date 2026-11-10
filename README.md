@@ -52,7 +52,8 @@ ads, _, err := collector.QueryAdsWithOptions(ctx, "ScheddAd", "",
 
 More: [docs/library.md](docs/library.md).
 
-**HTTP server** — start a demo (no HTCondor required):
+**HTTP server** — start a demo pool and the API in a temp directory
+(needs HTCondor on `PATH`, but no configured pool):
 
 ```bash
 ./htcondor-api -demo
@@ -68,9 +69,9 @@ More: [docs/server.md](docs/server.md).
 
 - [docs/library.md](docs/library.md) — using the Go library
 - [docs/server.md](docs/server.md) — running the HTTP API + MCP server
-- [httpserver/README.md](httpserver/README.md) — full HTTP API reference
-- [mcpserver/README.md](mcpserver/README.md) — MCP tool catalog
-- [SECURITY_CONFIG.md](SECURITY_CONFIG.md) — operator security guide
+- [webapi/httpserver/README.md](webapi/httpserver/README.md) — full HTTP API reference
+- [webapi/mcpserver/README.md](webapi/mcpserver/README.md) — MCP tool catalog
+- [design_notes/SECURITY_CONFIG.md](design_notes/SECURITY_CONFIG.md) — operator security guide
 - [design_notes/](design_notes/) — design rationale for major features
 
 ## Contributing

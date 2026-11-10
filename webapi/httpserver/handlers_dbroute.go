@@ -40,14 +40,16 @@ import (
 //
 // The one thing the mirror path does bypass is the schedd handshake
 // itself, and that is the invariant these functions enforce: a read is
-// routed only when the caller's identity is established, which here
-// means the schedd accepted their credential — either a prior request
-// got a 2xx with it (tokenCache.MarkValidated) or actorForSession
-// pinged the schedd with that very credential and was told who they
-// are. Without that, a caller the schedd would have refused outright
-// could read the queue out of the mirror instead. An unauthenticated
-// request therefore falls back to the schedd, which is exactly where it
-// gets refused.
+// routed only when the schedd has accepted the caller's credential at
+// READ, the level of the query the mirror is standing in for
+// (mirrorReadVerified). Being identified is not enough -- a credential
+// can authenticate to the schedd and still be refused every READ
+// command, and an opaque access token verified by this server's own
+// authorization server (tokenCache.AddValidated) has not been shown to
+// the schedd at all. Without that check, a caller the schedd would have
+// refused could read the queue out of the mirror instead. A request that
+// cannot be verified therefore falls back to the schedd, which is
+// exactly where it gets refused.
 //
 // Scoping is a separate matter and rides along: when the request was
 // confined to one owner, the mirror read is confined the same way.
@@ -55,8 +57,9 @@ import (
 // jobsFromMirror tries to serve a live job listing from the mirror's
 // "jobs" table (the mirrored job_queue.log), writing the response
 // itself. owner is the identity the schedd attributes to this caller,
-// and scoped says whether the listing is confined to their own jobs (see
-// the package comment).
+// scoped says whether the listing is confined to their own jobs, and r
+// is the request, whose credential must pass mirrorReadVerified (see the
+// package comment).
 //
 // Returns handled=false only while nothing has been written, so the
 // caller can still fall back to the schedd; the returned Decision says
@@ -76,17 +79,17 @@ import (
 // consistent snapshot. Only a token the mirror itself issued is
 // accepted (JobsDecision); a schedd-issued one belongs to the schedd's
 // walk and is left to it.
-func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, constraint string, projection []string, limit int, pageToken, owner string, scoped bool) (bool, dbmirror.Decision) {
+func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, r *http.Request, constraint string, projection []string, limit int, pageToken, owner string, scoped bool) (bool, dbmirror.Decision) {
 	if !s.dbMirror.Enabled() {
 		return false, s.recordMirror("jobs", dbmirror.Decision{
 			Reason: dbmirror.ReasonNotConfigured,
 			Note:   "htcondordb routing is not configured",
 		})
 	}
-	if owner == "" {
+	if owner == "" || !s.mirrorReadVerified(ctx, r) {
 		return false, s.recordMirror("jobs", dbmirror.Decision{
 			Reason: dbmirror.ReasonNoOwnerScope,
-			Note:   "the schedd has not identified this caller, so the mirror must not answer on its behalf",
+			Note:   "the schedd has not accepted this caller for reading, so the mirror must not answer on its behalf",
 		})
 	}
 	info, err := s.dbMirror.Discover(ctx)
@@ -116,7 +119,7 @@ func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, con
 	mirrorConstraint := constraint
 	if scoped {
 		var err error
-		if mirrorConstraint, err = scopeToOwner(ownerFromActor(owner), constraint); err != nil {
+		if mirrorConstraint, err = scopeToActor(ctx, owner, constraint); err != nil {
 			return false, s.recordMirror("jobs", dbmirror.Decision{
 				Reason: dbmirror.ReasonUnsupportedQuery,
 				Note:   fmt.Sprintf("constraint cannot be owner-scoped for the mirror: %v", err),
@@ -149,8 +152,9 @@ func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, con
 // historyFromMirror tries to serve a completed-job listing from the
 // mirror's "history" archive, writing the response itself. constraint
 // arrives already confined if the request was confined; actor is the
-// identity the schedd attributes to this caller, and an empty one keeps
-// the read on the schedd (see the package comment).
+// identity the schedd attributes to this caller. An empty one, or a
+// request whose credential fails mirrorReadVerified, keeps the read on
+// the schedd (see the package comment).
 //
 // The archive returns matches newest first with the limit pushed down
 // (ArchiveTable.QueryRawProjected), which is exactly condor_history's
@@ -158,17 +162,17 @@ func (s *Handler) jobsFromMirror(ctx context.Context, w http.ResponseWriter, con
 // the keyset cursor the endpoint already accepts (before_cluster /
 // before_proc) rides in the constraint. A paginated archive request is
 // therefore one the mirror serves rather than declines.
-func (s *Handler) historyFromMirror(ctx context.Context, w http.ResponseWriter, constraint string, opts *htcondor.HistoryQueryOptions, actor string) (bool, dbmirror.Decision) {
+func (s *Handler) historyFromMirror(ctx context.Context, w http.ResponseWriter, r *http.Request, constraint string, opts *htcondor.HistoryQueryOptions, actor string) (bool, dbmirror.Decision) {
 	if !s.dbMirror.Enabled() {
 		return false, s.recordMirror("history", dbmirror.Decision{
 			Reason: dbmirror.ReasonNotConfigured,
 			Note:   "htcondordb routing is not configured",
 		})
 	}
-	if actor == "" {
+	if actor == "" || !s.mirrorReadVerified(ctx, r) {
 		return false, s.recordMirror("history", dbmirror.Decision{
 			Reason: dbmirror.ReasonNoOwnerScope,
-			Note:   "the schedd has not identified this caller, so the mirror must not answer on its behalf",
+			Note:   "the schedd has not accepted this caller for reading, so the mirror must not answer on its behalf",
 		})
 	}
 	info, err := s.dbMirror.Discover(ctx)
@@ -186,8 +190,9 @@ func (s *Handler) historyFromMirror(ctx context.Context, w http.ResponseWriter, 
 
 	// No cursor: an archive answers "the newest K" in one shot, and the
 	// endpoint's own before_cluster/before_proc cursor rides in the
-	// constraint.
-	return s.streamMirrorRows(ctx, w, "history", constraint, opts.Projection, opts.Limit,
+	// constraint. A window on QDate or another job time is restated on
+	// EnteredHistoryTime, which the archive can prune on.
+	return s.streamMirrorRows(ctx, w, "history", dbmirror.WithHistoryFloor(constraint), opts.Projection, opts.Limit,
 		"ads", dbmirror.Provenance(info, d.Note), nil)
 }
 
@@ -220,7 +225,9 @@ func (s *Handler) streamMirrorRows(ctx context.Context, w http.ResponseWriter, t
 	}
 	defer closer()
 
-	rows := &mirrorRowStream{h: s, w: w, table: table, key: key, limit: effLimit, note: note}
+	rows := &mirrorRowStream{h: s, w: w, table: table, key: key, limit: effLimit, note: note,
+		// After normalizing, an empty projection is every attribute.
+		wholeAd: len(projection) == 0}
 
 	if cursor != nil {
 		// The paginated read: the server resumes its own ordered scan and
@@ -324,6 +331,9 @@ type mirrorRowStream struct {
 	key   string
 	limit int
 	note  string
+	// wholeAd: rows carry every attribute, so their requests can be
+	// evaluated (see annotateEvaluatedRequests).
+	wholeAd bool
 
 	written   int
 	streamed  bool
@@ -343,6 +353,11 @@ func (m *mirrorRowStream) write(row string) bool {
 		m.failure = "unparseable row from the htcondordb mirror"
 		m.h.logger.Warn(logging.DestinationHTTP, m.failure, "table", m.table, "error", perr)
 		return false
+	}
+	// The same treatment the schedd-served rows get.
+	evaluateUsageAttrs(ad)
+	if m.wholeAd {
+		annotateEvaluatedRequests(ad)
 	}
 	adJSON, jerr := json.Marshal(ad)
 	if jerr != nil {
@@ -394,7 +409,12 @@ func (m *mirrorRowStream) readFailed(err error) *dbmirror.Decision {
 	m.h.logger.Debug(logging.DestinationHTTP, "htcondordb mirror query failed before any row; using the schedd",
 		"table", m.table, "error", err, "failure", m.failure)
 	note, reason := m.failure, dbmirror.ReasonBadRow
-	if err != nil {
+	switch {
+	case dbmirror.CursorExpired(err):
+		// Not a failing mirror: the page token outlived the walk it continues.
+		// Retrying it fails the same way, so it is the caller's to restart.
+		note, reason = "the page token has expired; retry the query without a page token", dbmirror.ReasonPageTokenExpired
+	case err != nil:
 		note, reason = err.Error(), dbmirror.ReasonQueryFailed
 	}
 	return &dbmirror.Decision{Reason: reason, Note: note}

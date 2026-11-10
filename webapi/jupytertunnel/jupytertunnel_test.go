@@ -126,7 +126,7 @@ func TestEndToEnd(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		reg.Proxy(inst, upstream, w, r)
+		reg.Proxy(inst, upstream, w, r, nil)
 	})
 
 	srv := httptest.NewServer(mux)
@@ -400,7 +400,7 @@ func TestProxyWebSocketUpgrade(t *testing.T) {
 		if upstreamPath == "" {
 			upstreamPath = "/"
 		}
-		reg.Proxy(inst, upstreamPath, w, r)
+		reg.Proxy(inst, upstreamPath, w, r, nil)
 	})
 
 	srv := httptest.NewServer(mux)

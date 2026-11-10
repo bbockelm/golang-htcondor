@@ -42,6 +42,7 @@ import (
 // stale in another, which is exactly how MCP kept a schedd handle the REST
 // side had already replaced.
 func TestScheddRestartIsDiscoveredAndBothAPIsRecover(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("condor_master"); err != nil {
 		t.Skip("condor_master not found in PATH, skipping integration test")
 	}
@@ -82,8 +83,7 @@ func TestScheddRestartIsDiscoveredAndBothAPIsRecover(t *testing.T) {
 	if err := writeMiniCondorConfig(configFile, tempDir, socketDir, passwordsDir, trustDomain, t); err != nil {
 		t.Fatalf("Failed to write config: %v", err)
 	}
-	os.Setenv("CONDOR_CONFIG", configFile)
-	defer os.Unsetenv("CONDOR_CONFIG")
+	htcCfg := loadPoolConfig(t, configFile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -100,7 +100,7 @@ func TestScheddRestartIsDiscoveredAndBothAPIsRecover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get collector address: %v", err)
 	}
-	collector := htcondor.NewCollector(collectorAddr)
+	collector := htcondor.NewCollector(collectorAddr).WithConfig(htcCfg)
 
 	// Discover the schedd exactly as the daemon's main() does: ask the
 	// collector, then hand the answer to the server as ScheddAddr. That
@@ -111,6 +111,7 @@ func TestScheddRestartIsDiscoveredAndBothAPIsRecover(t *testing.T) {
 
 	listener, baseURL := listenLocal(t)
 	server, err := NewServer(Config{
+		ClientConfig:   htcCfg,
 		ListenAddr:     listener.Addr().String(),
 		ScheddName:     scheddName,
 		ScheddAddr:     scheddAddr,
@@ -174,8 +175,8 @@ func TestScheddRestartIsDiscoveredAndBothAPIsRecover(t *testing.T) {
 	newSock := fmt.Sprintf("schedd_moved_%d", time.Now().UnixNano()%100000)
 	t.Logf("restarting the schedd onto sock=%s", newSock)
 	appendCondorConfig(t, configFile, fmt.Sprintf("\nSCHEDD_ARGS = -sock %s\n", newSock))
-	runCondorTool(t, "condor_reconfig", "-master")
-	runCondorTool(t, "condor_restart", "-fast", "-schedd")
+	runCondorTool(t, configFile, "condor_reconfig", "-master")
+	runCondorTool(t, configFile, "condor_restart", "-fast", "-schedd")
 
 	afterSock := waitForNewScheddSock(t, tempDir, beforeSock, 150*time.Second)
 	t.Logf("after:  sock=%s", afterSock)
@@ -378,10 +379,9 @@ func appendCondorConfig(t *testing.T, configFile, extra string) {
 }
 
 // runCondorTool runs an HTCondor CLI against the test pool.
-func runCondorTool(t *testing.T, name string, args ...string) {
+func runCondorTool(t *testing.T, configFile, name string, args ...string) {
 	t.Helper()
-	cmd := exec.Command(name, args...)
-	cmd.Env = os.Environ() // CONDOR_CONFIG is already set for this process
+	cmd := condorToolCommand(context.Background(), configFile, name, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s %v: %v: %s", name, args, err, out)

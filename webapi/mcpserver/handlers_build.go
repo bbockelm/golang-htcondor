@@ -288,7 +288,7 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 	// unidentifiable caller is fatal for a template and harmless for a
 	// fixed base, which buildDestination decides.
 	var owner string
-	if caller, err := s.liveJobCaller(ctx); err == nil {
+	if caller, err := s.localJobCaller(ctx); err == nil {
 		owner = caller.Owner
 	}
 
@@ -305,7 +305,8 @@ func (s *Server) toolBuildContainer(ctx context.Context, args map[string]interfa
 
 	submitFile := buildSubmitFile(cfg, name, destination, cpus, memoryMB, diskMB, verify != "", dockerfile != "")
 
-	schedd := s.getSchedd()
+	// The routed AP in multi-AP mode: the spool goes where the job went.
+	schedd := s.scheddFor(ctx)
 	clusterID, procAds, err := s.submitRemote(ctx, submitFile)
 	if err != nil {
 		return nil, fmt.Errorf("build job submission failed: %w", err)
@@ -384,7 +385,7 @@ func buildContainerResult(clusterID int, name, destination, verify string, cpus,
 // the caller is already returning an error, and a leftover held job is a
 // smaller problem than masking that error with this one.
 func (s *Server) removeBuildJob(ctx context.Context, clusterID int, reason string) {
-	if _, err := s.getSchedd().RemoveJobs(ctx, fmt.Sprintf("ClusterId == %d", clusterID), reason); err != nil {
+	if _, err := s.scheddFor(ctx).RemoveJobs(ctx, fmt.Sprintf("ClusterId == %d", clusterID), reason); err != nil {
 		s.logger.Warn(logging.DestinationMCP, "could not remove a build job after a spooling failure",
 			"cluster_id", clusterID, "error", err)
 	}
@@ -405,9 +406,17 @@ func validateBuildName(name string) error {
 		return fmt.Errorf("name must not start with a dash, which shells and tools read as an option: got %q", name)
 	case !strings.HasSuffix(name, ".sif"):
 		return fmt.Errorf("name must end in .sif, which is what apptainer writes: got %q", name)
+	case strings.ContainsAny(name, submitValueBreakers):
+		return fmt.Errorf("name must not contain a line break, a double quote or a semicolon: got %q", name)
 	}
 	return nil
 }
+
+// submitValueBreakers are the characters that would change the meaning
+// of the generated submit file rather than name a file: a line break
+// starts a new submit command, a double quote ends the quoted
+// transfer_output_remaps value, and a semicolon starts another remap.
+const submitValueBreakers = "\n\r\";"
 
 // buildDestination resolves where the finished image goes.
 //
@@ -420,6 +429,9 @@ func buildDestination(destination, stagingBase, name, owner string) (string, err
 	if destination != "" {
 		if !strings.Contains(destination, "://") {
 			return "", fmt.Errorf("destination must be a URL with a transfer scheme such as osdf:// or pelican://, got %q", destination)
+		}
+		if strings.ContainsAny(destination, submitValueBreakers) {
+			return "", fmt.Errorf("destination must not contain a line break, a double quote or a semicolon, got %q", destination)
 		}
 		return destination, nil
 	}

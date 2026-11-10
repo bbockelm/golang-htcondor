@@ -2,11 +2,14 @@ package dbmirror
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"testing"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/PelicanPlatform/classad/dbrpc"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/config"
@@ -144,6 +147,16 @@ func TestRecencyKey(t *testing.T) {
 
 	if got := RecencyKey(classad.New()); got != 0 {
 		t.Errorf("no timestamps: got %d, want 0", got)
+	}
+
+	// The mirror's own stamp outranks both: it is what the archive is
+	// ordered by server-side, so the client-side sort must agree with it.
+	stamped := classad.New()
+	stamped.InsertAttr(HistoryOrderAttr, 3000)
+	stamped.InsertAttr("EnteredCurrentStatus", 2000)
+	stamped.InsertAttr("CompletionDate", 1000)
+	if got := RecencyKey(stamped); got != 3000 {
+		t.Errorf("%s should win: got %d, want 3000", HistoryOrderAttr, got)
 	}
 }
 
@@ -316,5 +329,33 @@ func TestPollIsANoOpWhenRoutingIsOff(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Poll blocked on a locator that cannot route")
+	}
+}
+
+func TestHistoryNewestDecision(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		rows   int
+		use    bool
+		reason Reason
+	}{
+		{"ordered read filled", nil, 6, true, ReasonServed},
+		{"mirror predates TopK", dbrpc.ErrTopKUnsupported, 0, false, ReasonOversized},
+		{"query error", errors.New("boom"), 0, false, ReasonQueryFailed},
+		{"rows lack the order key", nil, 5, false, ReasonOversized},
+		{"nothing ranked", nil, 0, false, ReasonOversized},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := HistoryNewestDecision(c.err, c.rows, 5)
+			if d.Use != c.use || d.Reason != c.reason {
+				t.Errorf("got Use=%v Reason=%q, want Use=%v Reason=%q (%s)", d.Use, d.Reason, c.use, c.reason, d.Note)
+			}
+		})
+	}
+	// A TopK refusal wrapped by a caller is still recognized.
+	if d := HistoryNewestDecision(fmt.Errorf("mirror: %w", dbrpc.ErrTopKUnsupported), 0, 5); d.Reason != ReasonOversized {
+		t.Errorf("wrapped ErrTopKUnsupported: Reason = %q, want %q", d.Reason, ReasonOversized)
 	}
 }

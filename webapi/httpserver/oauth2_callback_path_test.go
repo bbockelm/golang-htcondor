@@ -5,28 +5,27 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
 )
 
 // TestAdvertisedCallbackMatchesTheSurface: an MCP-only server keeps the
-// MCP-scoped callback, and a server that also serves the web UI uses the plain
-// one, so a person logging in to the UI is not bounced through a URL naming a
-// protocol they are not using.
-//
-// Which branch runs depends on the embed_frontend build tag, so this asserts
-// against IsEmbedded rather than picking one: the untagged build covers the
-// MCP-only case and `-tags embed_frontend` covers the other.
+// MCP-scoped callback, and every other server uses the plain one -- with a
+// web UI so a person logging in to it is not bounced through a URL naming a
+// protocol they are not using, and without MCP because the /mcp/ spelling
+// is not routed there.
 func TestAdvertisedCallbackMatchesTheSurface(t *testing.T) {
-	got := OAuth2CallbackPath()
-	want := mcpCallbackPath
-	if webui.IsEmbedded() {
-		want = webUICallbackPath
+	for _, tc := range []struct {
+		webUI, mcp bool
+		want       string
+	}{
+		{webUI: false, mcp: true, want: mcpCallbackPath},
+		{webUI: true, mcp: true, want: webUICallbackPath},
+		{webUI: true, mcp: false, want: webUICallbackPath},
+		{webUI: false, mcp: false, want: webUICallbackPath},
+	} {
+		if got := OAuth2CallbackPath(tc.webUI, tc.mcp); got != tc.want {
+			t.Errorf("OAuth2CallbackPath(web UI %v, MCP %v) = %q, want %q", tc.webUI, tc.mcp, got, tc.want)
+		}
 	}
-	if got != want {
-		t.Errorf("OAuth2CallbackPath() = %q, want %q (web UI embedded: %v)", got, want, webui.IsEmbedded())
-	}
-	t.Logf("web UI embedded: %v; advertised callback: %s", webui.IsEmbedded(), got)
 }
 
 // TestBothCallbackPathsAreServed is the invariant that keeps an upgrade from
@@ -58,16 +57,7 @@ func TestBothCallbackPathsAreServed(t *testing.T) {
 	}
 }
 
-// TestAdvertisedCallbackIsServed ties the two together: whatever is advertised
-// must be one of the paths actually routed.
-func TestAdvertisedCallbackIsServed(t *testing.T) {
-	advertised := OAuth2CallbackPath()
-	if advertised != mcpCallbackPath && advertised != webUICallbackPath {
-		t.Fatalf("advertised callback %q is neither of the served paths", advertised)
-	}
-}
-
-// Every OAuth2 endpoint has to answer on both prefixes.
+// Every OAuth2 endpoint has to answer on both prefixes where MCP is on.
 //
 // The /mcp/ one is what every client registered before this change
 // discovered, and a dynamically registered client may hold it for as
@@ -109,7 +99,7 @@ func TestEveryOAuth2EndpointIsServedOnBothPaths(t *testing.T) {
 // verify path was caught by mutation.
 func TestOAuth2EndpointPathFollowsTheSurface(t *testing.T) {
 	if got, want := oauth2EndpointPathFor(true, "authorize"), "/oauth2/authorize"; got != want {
-		t.Errorf("with the web UI embedded: %q, want %q", got, want)
+		t.Errorf("plain: %q, want %q", got, want)
 	}
 	if got, want := oauth2EndpointPathFor(false, "authorize"), "/mcp/oauth2/authorize"; got != want {
 		t.Errorf("without it: %q, want %q", got, want)
@@ -117,15 +107,5 @@ func TestOAuth2EndpointPathFollowsTheSurface(t *testing.T) {
 	// A nested name keeps its shape under both.
 	if got, want := oauth2EndpointPathFor(true, "device/authorize"), "/oauth2/device/authorize"; got != want {
 		t.Errorf("nested name: %q, want %q", got, want)
-	}
-}
-
-// Whatever is advertised has to be one of the paths actually routed.
-func TestAdvertisedOAuth2EndpointsAreServed(t *testing.T) {
-	for _, name := range oauth2EndpointNames {
-		advertised := OAuth2EndpointPath(name)
-		if advertised != oauth2EndpointPathFor(true, name) && advertised != oauth2EndpointPathFor(false, name) {
-			t.Errorf("advertised %q for %q is neither served path", advertised, name)
-		}
 	}
 }

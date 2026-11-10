@@ -34,9 +34,16 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import {
   api,
   ApiError,
+  jobIdOf,
+  scheddOf,
   type ClassAd,
   type HistoryListResponse,
+  type JobListResponse,
+  type Sources,
 } from '@/lib/api';
+import { useMultiAP } from '@/lib/multiap';
+import { ScheddFilter } from '@/components/ScheddFilter';
+import { SourcesBanner } from '@/components/SourcesBanner';
 import { ChatPanel } from '@/components/ChatPanel';
 import { ScopeToggle, useScope } from '@/components/ScopeToggle';
 import { FilterControls, type FilterMode } from '@/components/FilterControls';
@@ -73,6 +80,9 @@ const PAGE_SIZE = LISTING_PAGE_SIZE;
 interface PageCursor {
   beforeCluster?: number;
   beforeProc?: number;
+  // Multi-AP mode: the server's page token. A cluster.proc keyset does
+  // not identify a position across access points.
+  pageToken?: string;
 }
 
 // PageData: what each useInfiniteQuery page returns. Carries the
@@ -81,6 +91,7 @@ interface PageCursor {
 interface PageData {
   ads: ClassAd[];
   nextCursor: PageCursor | null;
+  sources?: Sources;
 }
 
 export default function ArchivePage() {
@@ -110,6 +121,7 @@ export default function ArchivePage() {
     queryFn: api.auth.me,
   });
   const isAdmin = !!session?.is_admin;
+  const multiAP = useMultiAP();
   const [scope] = useScope();
   const ownedByMe = scope === 'mine';
 
@@ -120,6 +132,11 @@ export default function ArchivePage() {
   const searchParams = useSearchParams();
   const urlConstraint = searchParams.get('constraint') ?? undefined;
   const why = searchParams.get('why') ?? undefined;
+  const [schedd, setSchedd] = useState(searchParams.get('schedd') ?? '');
+  // Finished jobs that have not left the queue are not history records
+  // and are not in the table below. Off by default: this page answers
+  // "what did I run", and most of the time nothing is waiting.
+  const [showWaiting, setShowWaiting] = useState(false);
 
   // The drill-in constraint and a user expression both narrow; ANDing
   // them keeps the banner's promise true while the user refines inside
@@ -139,10 +156,24 @@ export default function ArchivePage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery<PageData, Error>({
-    queryKey: ['jobs', 'archive', scope, constraint],
+    queryKey: ['jobs', 'archive', scope, constraint, multiAP, schedd],
     initialPageParam: { beforeCluster: undefined, beforeProc: undefined } as PageCursor,
     queryFn: async ({ pageParam }) => {
       const cursor = pageParam as PageCursor;
+      if (multiAP) {
+        const resp: HistoryListResponse = await api.jobs.archive({
+          constraint,
+          projection: PROJECTION,
+          limit: PAGE_SIZE,
+          page_token: cursor.pageToken,
+          schedd: schedd || undefined,
+        });
+        return {
+          ads: resp.ads ?? [],
+          nextCursor: resp.next_page_token ? { pageToken: resp.next_page_token } : null,
+          sources: resp.sources,
+        };
+      }
       const resp: HistoryListResponse = await api.jobs.archive({
         constraint,
         projection: PROJECTION,
@@ -219,6 +250,15 @@ export default function ArchivePage() {
         setMode('text');
         return { ok: true, applied_query: q };
       },
+      set_constraint: (input) => {
+        // The expression the user would type into the filter's
+        // expression box and Apply; the server evaluates it.
+        const c = typeof input.constraint === 'string' ? input.constraint.trim() : '';
+        setExprInput(c);
+        setAppliedExpr(c);
+        setMode(c ? 'expr' : 'text');
+        return { ok: true, applied_constraint: c };
+      },
     }),
     [],
   );
@@ -273,7 +313,8 @@ export default function ArchivePage() {
         <span className="text-sm text-gray-500">
           Completed and removed jobs from the schedd&apos;s history.
         </span>
-        {isAdmin && <ScopeToggle />}
+        {isAdmin && !multiAP && <ScopeToggle />}
+        {multiAP && <ScheddFilter value={schedd} onChange={setSchedd} />}
         <Link
           href="/jobs"
           className="ml-auto text-sm text-brand-700 hover:underline"
@@ -282,14 +323,28 @@ export default function ArchivePage() {
         </Link>
       </div>
 
+      <SourcesBanner sources={data?.pages[data.pages.length - 1]?.sources} />
+
       <ChatPanel
         visible={chatVisible}
         page="archive"
+        scope={ownedByMe ? 'mine' : 'everyone'}
         hooks={chatHooks}
         headerLabel="Archive assistant"
-        togglerLabel="Ask about your job history"
-        pageHelp={`Ask things like "show my failed jobs from yesterday", "how long did the training-run batch take?", or "find that python job I ran on Tuesday".`}
+        togglerLabel={ownedByMe ? 'Ask about your job history' : 'Ask about job history'}
+        pageHelp={
+          ownedByMe
+            ? `Ask things like "show my failed jobs from yesterday", "how long did the training-run batch take?", or "find that python job I ran on Tuesday".`
+            : `Ask things like "show failed jobs from yesterday", "how long did the training-run batch take?", or "who ran the most jobs this week?".`
+        }
         onServerToolComplete={handleServerToolComplete}
+      />
+
+      <WaitingToArchive
+        show={showWaiting}
+        onShow={setShowWaiting}
+        ownedByMe={ownedByMe}
+        schedd={schedd || undefined}
       />
 
       {urlConstraint && (
@@ -374,7 +429,7 @@ export default function ArchivePage() {
 
       {ads.length > 0 && (
         <>
-          <ArchiveTable ads={filteredAds} onOwner={setOwner} />
+          <ArchiveTable ads={filteredAds} onOwner={setOwner} multiAP={multiAP} />
           <div className="flex items-center justify-between gap-3 text-xs text-gray-500">
             <span>
               Showing {filteredAds.length.toLocaleString()}
@@ -415,9 +470,11 @@ export default function ArchivePage() {
 function ArchiveTable({
   ads,
   onOwner,
+  multiAP,
 }: {
   ads: ClassAd[];
   onOwner: (owner: string) => void;
+  multiAP?: boolean;
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
@@ -425,6 +482,7 @@ function ArchiveTable({
         <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
           <tr>
             <th className="px-3 py-2">Job</th>
+            {multiAP && <th className="px-3 py-2">Access point</th>}
             <th className="px-3 py-2">Status</th>
             <th className="px-3 py-2">Owner</th>
             <th className="px-3 py-2">Batch</th>
@@ -438,7 +496,7 @@ function ArchiveTable({
           {ads.length === 0 ? (
             <tr>
               <td
-                colSpan={8}
+                colSpan={multiAP ? 9 : 8}
                 className="px-3 py-4 text-center text-xs text-gray-500"
               >
                 No matches.
@@ -446,7 +504,7 @@ function ArchiveTable({
             </tr>
           ) : (
             ads.map((ad) => (
-              <ArchiveRow key={archiveKey(ad)} ad={ad} onOwner={onOwner} />
+              <ArchiveRow key={archiveKey(ad)} ad={ad} onOwner={onOwner} multiAP={multiAP} />
             ))
           )}
         </tbody>
@@ -458,14 +516,17 @@ function ArchiveTable({
 function ArchiveRow({
   ad,
   onOwner,
+  multiAP,
 }: {
   ad: ClassAd;
   onOwner: (owner: string) => void;
+  multiAP?: boolean;
 }) {
   const router = useRouter();
   const cluster = num(ad.ClusterId);
   const proc = num(ad.ProcId);
-  const id = `${cluster ?? '?'}.${proc ?? 0}`;
+  // Multi-AP rows carry the complete id the server rendered.
+  const id = jobIdOf(ad) ?? `${cluster ?? '?'}.${proc ?? 0}`;
   const status = archiveStatus(ad);
   const owner = str(ad.Owner);
   const batch = str(ad.JobBatchName);
@@ -479,7 +540,7 @@ function ArchiveRow({
   // expanded-batch row pattern: clicking anywhere outside a nested
   // link opens the detail page.
   const navigable = cluster !== undefined;
-  const href = `/archive/${id}`;
+  const href = `/archive/${encodeURIComponent(id)}`;
 
   return (
     <tr
@@ -502,6 +563,9 @@ function ArchiveRow({
           id
         )}
       </td>
+      {multiAP && (
+        <td className="px-3 py-2 font-mono text-xs text-gray-700">{scheddOf(ad) ?? '—'}</td>
+      )}
       <td className="px-3 py-2">
         <span
           className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${status.cls}`}
@@ -578,7 +642,9 @@ function humanRuntime(secs: number | undefined): string {
 // is stable across reorders, AND a job that ran twice (epoch
 // re-entry) shows two rows with distinct keys.
 function archiveKey(ad: ClassAd): string {
-  return `${num(ad.ClusterId) ?? '?'}.${num(ad.ProcId) ?? '?'}@${num(ad.CompletionDate) ?? 0}`;
+  const base = `${num(ad.ClusterId) ?? '?'}.${num(ad.ProcId) ?? '?'}@${num(ad.CompletionDate) ?? 0}`;
+  const schedd = scheddOf(ad);
+  return schedd ? `${schedd}\u0000${base}` : base;
 }
 
 function num(v: unknown): number | undefined {
@@ -595,4 +661,151 @@ function str(v: unknown): string | undefined {
   if (v === undefined || v === null) return undefined;
   if (typeof v === 'string') return undefined;
   return String(v);
+}
+
+
+// WaitingToArchive lists the finished jobs that are still in the queue.
+//
+// They are the one thing a reader of this page can be looking for and
+// not find: a job submitted here is kept after it finishes so its
+// output can still be fetched, and until it is archived there is no
+// history record of it to list. Opt-in, because it is a second query
+// and on most visits the answer is empty.
+function WaitingToArchive({
+  show,
+  onShow,
+  ownedByMe,
+  schedd,
+}: {
+  show: boolean;
+  onShow: (v: boolean) => void;
+  ownedByMe: boolean;
+  schedd?: string;
+}) {
+  const { data, isLoading, error } = useQuery<JobListResponse, Error>({
+    queryKey: ['jobs', 'waiting-to-archive', ownedByMe, schedd],
+    queryFn: () =>
+      api.jobs.list({
+        constraint: 'JobStatus == 4',
+        owned_by_me: ownedByMe,
+        schedd,
+        // Narrow on purpose: this is a sidebar to the page, not the
+        // page. Everything it shows is one click from its job page.
+        projection: 'ClusterId,ProcId,Owner,Cmd,Args,CompletionDate,ExitCode',
+        limit: 200,
+      }),
+    enabled: show,
+  });
+  const jobs = data?.jobs ?? [];
+
+  return (
+    <div className="rounded border border-gray-200 bg-gray-50 px-3 py-2">
+      <label className="flex items-center gap-2 text-sm text-gray-700">
+        <input
+          type="checkbox"
+          checked={show}
+          onChange={(e) => onShow(e.target.checked)}
+          className="h-4 w-4 rounded-sm border-gray-300"
+        />
+        Also show finished jobs still in the queue
+      </label>
+      {show && (
+        <>
+          <p className="mt-1.5 text-xs text-gray-500">
+            A job submitted through this interface is kept after it finishes so
+            its output can still be fetched, and it has no history record until
+            it is archived. These are those jobs; archiving one from its job
+            page moves it into the table below.
+          </p>
+          {isLoading && <p className="mt-2 text-xs text-gray-400">Loading…</p>}
+          {error && (
+            <p className="mt-2 text-xs text-red-700">
+              Could not read the queue: {error.message}
+            </p>
+          )}
+          {!isLoading && !error && jobs.length === 0 && (
+            <p className="mt-2 text-xs text-gray-500">
+              None — every finished job is in the history below.
+            </p>
+          )}
+          {jobs.length > 0 && (
+            <table className="mt-2 w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-wide text-gray-500">
+                  <th className="px-2 py-1 font-medium">Job</th>
+                  {!ownedByMe && <th className="px-2 py-1 font-medium">User</th>}
+                  <th className="px-2 py-1 font-medium">Finished</th>
+                  <th className="px-2 py-1 font-medium">Command</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {jobs.map((ad) => {
+                  const id = waitingJobID(ad);
+                  const finished = numAttr(ad.CompletionDate);
+                  const cmd = typeof ad.Cmd === 'string' ? ad.Cmd : undefined;
+                  const args = typeof ad.Args === 'string' ? ad.Args : undefined;
+                  const owner = typeof ad.Owner === 'string' ? ad.Owner : undefined;
+                  return (
+                    <tr key={id ?? JSON.stringify(ad)}>
+                      <td className="px-2 py-1 font-mono text-xs">
+                        {id ? (
+                          <Link href={`/jobs/${id}`} className="text-brand-700 hover:underline">
+                            {id}
+                          </Link>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                      {!ownedByMe && (
+                        <td className="px-2 py-1 text-xs text-gray-700">{owner ?? '—'}</td>
+                      )}
+                      <td className="px-2 py-1 whitespace-nowrap text-xs text-gray-500">
+                        {finished ? new Date(finished * 1000).toLocaleString() : '—'}
+                      </td>
+                      <td className="max-w-md truncate px-2 py-1 text-xs text-gray-700">
+                        {cmd ? (
+                          <span className="font-mono">
+                            {cmd}
+                            {args ? ' ' + args : ''}
+                          </span>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          {data?.has_more && (
+            <p className="mt-1.5 text-xs text-gray-500">
+              Showing the first {jobs.length.toLocaleString()}; more are waiting.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// waitingJobID: the queue's own job_id when it sent one, else built
+// from the ad. The archive's jobIdOf only knows the first form.
+function waitingJobID(ad: ClassAd): string | undefined {
+  const given = jobIdOf(ad);
+  if (given) return given;
+  const cluster = numAttr(ad.ClusterId);
+  const proc = numAttr(ad.ProcId);
+  if (cluster === undefined || proc === undefined) return undefined;
+  return `${cluster}.${proc}`;
+}
+
+// numAttr reads a ClassAd attribute that should be a number, whichever
+// of the two shapes the API used for it.
+function numAttr(v: unknown): number | undefined {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) {
+    return Number(v);
+  }
+  return undefined;
 }

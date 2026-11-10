@@ -1,9 +1,10 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
+import { DEFAULT_BRANDING, useBranding } from '@/lib/branding';
 import { Sidebar } from './Sidebar';
 import { SuperuserBanner } from './SuperuserBanner';
 import { Footer } from './Footer';
@@ -14,6 +15,7 @@ import { Footer } from './Footer';
 const publicPaths = ['/'];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  useBrandedDocument();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -31,6 +33,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setSidebarOpen((prev) => (prev ? false : prev));
   }, [pathname]);
 
+  const queryClient = useQueryClient();
   const { data: session, isLoading } = useQuery({
     queryKey: ['session'],
     queryFn: api.auth.me,
@@ -50,9 +53,41 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
   }, [isLoading, isAuthenticated, isPublic, fullPath, router]);
 
+  // A session with no local account reaches only the placement pages, in
+  // a shell without the access point's navigation.
+  const placementOnly = !!session?.placement_only;
+  const onPlacementPage = pathname === '/placement' || pathname.startsWith('/placement/');
+  useEffect(() => {
+    if (placementOnly && !onPlacementPage) router.replace('/placement');
+  }, [placementOnly, onPlacementPage, router]);
+
+  // The session became a full one (the person was onboarded while signed
+  // in): the normal shell renders from the same answer, and everything read
+  // under the placement-only session is read again.
+  const wasPlacementOnly = useRef(false);
+  useEffect(() => {
+    if (placementOnly) {
+      wasPlacementOnly.current = true;
+    } else if (wasPlacementOnly.current && isAuthenticated) {
+      wasPlacementOnly.current = false;
+      void queryClient.invalidateQueries({ predicate: (q) => q.queryKey[0] !== 'session' });
+    }
+  }, [placementOnly, isAuthenticated, queryClient]);
+
   if (!isPublic && !isAuthenticated) {
     // While the redirect is in flight, render nothing.
     return null;
+  }
+
+  if (placementOnly) {
+    if (!onPlacementPage) return null;
+    return (
+      <PlacementShell
+        name={session?.placement?.display_name || session?.placement?.identity}
+      >
+        {children}
+      </PlacementShell>
+    );
   }
 
   return (
@@ -62,6 +97,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         isAdmin={session?.is_admin}
         superuserAllowed={session?.superuser_allowed}
         superuserActive={session?.superuser_active}
+        multiAP={session?.multi_ap}
+        reservations={session?.reservations}
+        placement={!!session?.placement}
+        placementProjects={session?.placement?.projects}
+        placementProject={session?.placement?.project}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
@@ -81,10 +121,46 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
 }
 
+// useBrandedDocument keeps the tab's title and icon on the site's own.
+//
+// The server writes both into the HTML it serves. A client-side
+// navigation then re-applies the root layout's metadata over them --
+// the title goes back to "HTCondor Access Point" the moment somebody
+// clicks a nav link -- and it does so after React has committed, so
+// setting them once per render loses the race. Watching the head and
+// putting them back is what actually holds. Writing the same value
+// changes nothing, so the observer does not retrigger itself.
+//
+// Only for a deployment that renamed itself: an unconfigured one wants
+// exactly what the metadata says, and no observer.
+function useBrandedDocument() {
+  const { page_title: title, favicon } = useBranding();
+  const branded = (!!title && title !== DEFAULT_BRANDING.page_title) || !!favicon;
+  useEffect(() => {
+    if (!branded) return;
+    const apply = () => {
+      if (title && document.title !== title) document.title = title;
+      if (!favicon) return;
+      let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+      if (!link) {
+        link = document.createElement('link');
+        link.rel = 'icon';
+        document.head.appendChild(link);
+      }
+      if (link.getAttribute('href') !== favicon) link.setAttribute('href', favicon);
+    };
+    apply();
+    const observer = new MutationObserver(apply);
+    observer.observe(document.head, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+  }, [branded, title, favicon]);
+}
+
 // MobileTopBar shows a hamburger button and the app title on screens
 // narrower than `lg`, where the sidebar is hidden by default. It's
 // hidden entirely on lg+ since the sidebar is always visible there.
 function MobileTopBar({ onOpen }: { onOpen: () => void }) {
+  const branding = useBranding();
   return (
     <div className="sticky top-0 z-20 flex items-center gap-3 border-b border-white/10 bg-ink-950 px-3 py-2 text-gray-100 lg:hidden">
       <button
@@ -108,7 +184,41 @@ function MobileTopBar({ onOpen }: { onOpen: () => void }) {
           <line x1="3" y1="18" x2="21" y2="18" />
         </svg>
       </button>
-      <div className="text-sm font-semibold">HTCondor Access Point</div>
+      <div className="truncate text-sm font-semibold">{branding.page_title}</div>
+    </div>
+  );
+}
+
+// PlacementShell is the reduced frame for a placement-only session: a title
+// bar with the person's name and Sign out, and nothing to navigate to.
+function PlacementShell({ name, children }: { name?: string; children: React.ReactNode }) {
+  const branding = useBranding();
+  return (
+    <div className="flex min-h-screen flex-col">
+      <header className="flex items-center justify-between gap-3 bg-ink-950 px-4 py-3 text-gray-100">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold">{branding.page_title}</div>
+        </div>
+        <div className="flex items-center gap-3 text-xs">
+          {name && <span className="truncate text-gray-300">{name}</span>}
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await api.auth.logout();
+              } catch {
+                // Leaving anyway; the next /auth/me says signed out.
+              }
+              window.location.href = '/';
+            }}
+            className="text-gray-400 hover:text-white"
+          >
+            Sign out
+          </button>
+        </div>
+      </header>
+      <main className="flex-1 px-4 py-6 lg:px-8 lg:py-8">{children}</main>
+      <Footer />
     </div>
   );
 }

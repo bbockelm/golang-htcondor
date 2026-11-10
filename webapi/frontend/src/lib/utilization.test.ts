@@ -1,0 +1,455 @@
+import { describe, expect, it } from 'vitest';
+import {
+  compareAdvice,
+  formatCores,
+  formatKiB,
+  formatMiB,
+  formatPercent,
+  formatResourceHours,
+  formatSaves,
+  idleHours,
+  parseDays,
+  rankAdvice,
+  stripGeometry,
+  requestPhrase,
+  requestMarkerLabel,
+  memoryHistogramNote,
+  usedFraction,
+  throughputStatement,
+  throughputAdviceId,
+  filterWorkflows,
+  moreOptions,
+  parseLimit,
+  parseOwners,
+  sortResources,
+  splitSingles,
+  formatDuration,
+  normalizeUtilization,
+  type UtilAdvice,
+  type UtilThroughput,
+  type UtilDistribution,
+  type UtilWorkflow,
+} from './utilization';
+import { fullWorkflows, utilizationFixture } from './utilization.fixture';
+
+function dist(over: Partial<UtilDistribution>): UtilDistribution {
+  return {
+    n: 100,
+    min: 0,
+    p10: 0,
+    p25: 0,
+    p50: 0,
+    p75: 0,
+    p90: 0,
+    p95: 0,
+    p99: 0,
+    max: 0,
+    histogram: [],
+    ...over,
+  };
+}
+
+function advice(over: Partial<UtilAdvice>): UtilAdvice {
+  return {
+    id: 'x',
+    resource: 'memory',
+    severity: 'suggest',
+    title: 't',
+    detail: 'd',
+    submit: [],
+    saves: null,
+    confidence: 'high',
+    ...over,
+  };
+}
+
+describe('formatting', () => {
+  it('renders memory in the scale a submit file uses', () => {
+    expect(formatMiB(512)).toBe('512 MB');
+    expect(formatMiB(1536)).toBe('1.5 GB');
+    expect(formatMiB(2048)).toBe('2 GB');
+    expect(formatMiB(32 * 1024)).toBe('32 GB');
+    expect(formatMiB(13824)).toBe('13.5 GB');
+    // Big enough that a decimal is noise.
+    expect(formatMiB(250.4 * 1024)).toBe('250 GB');
+    expect(formatMiB(3 * 1024 * 1024)).toBe('3 TB');
+  });
+
+  it('renders disk from KiB through the same scale', () => {
+    expect(formatKiB(1024 * 1024)).toBe('1 GB');
+    expect(formatKiB(512 * 1024)).toBe('512 MB');
+    expect(formatKiB(300)).toBe('300 KB');
+  });
+
+  it('keeps fractional cores readable', () => {
+    expect(formatCores(4)).toBe('4');
+    expect(formatCores(0.966)).toBe('0.97');
+    expect(formatCores(2.14)).toBe('2.1');
+  });
+
+  it('never rounds a small share down to a 0% that reads as none', () => {
+    expect(formatPercent(0.237)).toBe('24%');
+    expect(formatPercent(0.001)).toBe('<1%');
+    expect(formatPercent(0)).toBe('0%');
+    expect(formatPercent(null)).toBe('—');
+  });
+
+  it('converts time-weighted figures to the unit the page names', () => {
+    expect(formatResourceHours('cpu', 1234.4)).toBe('1,234 core-hours');
+    expect(formatResourceHours('memory', 2048 * 10)).toBe('20 GB-hours');
+    expect(formatResourceHours('disk', 1024 * 1024 * 3)).toBe('3 GB-hours');
+    expect(formatResourceHours('gpu', 2.5)).toBe('2.5 GPU-hours');
+  });
+
+  it('says what a saving is in', () => {
+    expect(formatSaves({ unit: 'gib_hours', amount: 5190.2 })).toBe('5,190 GB-hours of memory');
+    expect(formatSaves({ unit: 'core_hours', amount: 12 })).toBe('12 core-hours');
+    expect(formatSaves(null)).toBeNull();
+    expect(formatSaves({ unit: 'gpu_hours', amount: 0 })).toBeNull();
+  });
+
+  it('falls back to the default window for anything the server would reject', () => {
+    expect(parseDays('30')).toBe(30);
+    expect(parseDays('1')).toBe(1);
+    expect(parseDays('14')).toBe(7);
+    expect(parseDays(null)).toBe(7);
+  });
+});
+
+describe('usedFraction', () => {
+  it('divides by the reservation of measured jobs only', () => {
+    // Half the reservation belongs to jobs nobody measured. Counting it
+    // would report 25% used; what is known is that measured jobs used half.
+    const s = {
+      resource: 'cpu' as const,
+      allocated_hours: 400,
+      allocated_hours_measured: 200,
+      used_hours: 100,
+      jobs_measured: 10,
+    };
+    expect(usedFraction(s)).toBe(0.5);
+    expect(idleHours(s)).toBe(100);
+  });
+
+  it('has no answer when nothing was measured', () => {
+    expect(
+      usedFraction({ resource: 'gpu', allocated_hours: 5, allocated_hours_measured: 0, used_hours: null, jobs_measured: 0 }),
+    ).toBeNull();
+  });
+});
+
+describe('rankAdvice', () => {
+  const wf = (key: string, a: UtilAdvice[]) => ({ ...fullWorkflows[0], key, advice: a }) as UtilWorkflow;
+
+  it('puts warnings first, then the biggest saving, and leaves notes out', () => {
+    const ranked = rankAdvice([
+      wf('a', [
+        advice({ id: 'small', saves: { unit: 'core_hours', amount: 10 } }),
+        advice({ id: 'note', severity: 'info', saves: { unit: 'core_hours', amount: 1e6 } }),
+      ]),
+      wf('b', [
+        advice({ id: 'big', saves: { unit: 'gib_hours', amount: 900 } }),
+        advice({ id: 'warn', severity: 'warn' }),
+        advice({ id: 'none' }),
+      ]),
+    ]);
+    expect(ranked.map((r) => r.advice.id)).toEqual(['warn', 'big', 'small', 'none']);
+    expect(ranked[1].workflow.key).toBe('b');
+  });
+
+  it('breaks a tie on confidence', () => {
+    expect(compareAdvice(advice({ confidence: 'low' }), advice({ confidence: 'high' }))).toBeGreaterThan(0);
+  });
+});
+
+describe('stripGeometry', () => {
+  const request = { typical: 4096, min: 4096, max: 4096, distinct: 1 };
+
+  it('spans zero to the request when every job fits under it', () => {
+    const g = stripGeometry(request, dist({ p10: 1024, p25: 1500, p75: 2048, p90: 2500, max: 3000 }))!;
+    expect(g.trackMax).toBe(4096);
+    expect(g.request).toBe(1);
+    expect(g.over).toBe(false);
+  });
+
+  it('flags a workflow whose largest job went over its request', () => {
+    const g = stripGeometry(request, dist({ p25: 3000, p75: 3500, max: 5000 }))!;
+    expect(g.over).toBe(true);
+    // The track stretches to the largest job so the request is inside it.
+    expect(g.trackMax).toBe(5000);
+    expect(g.request).toBeCloseTo(4096 / 5000);
+  });
+
+  it('draws nothing without a distribution', () => {
+    expect(stripGeometry(request, null)).toBeNull();
+  });
+
+  // A workflow with retry_request_memory asks for the first rung and
+  // retries higher. Its jobs going over the first rung is the ladder
+  // working, not a job that did not fit, and the strip has to tell the
+  // two apart -- otherwise the fix that made `typical` the first rung
+  // paints every such workflow critical.
+  const laddered = { typical: 1024, min: 1024, max: 1024, distinct: 1, retry: true, retry_mib: 4096 };
+
+  it('marks a peak the retry ladder covers as covered, not over', () => {
+    const g = stripGeometry(laddered, dist({ p25: 800, p75: 900, max: 3500 }))!;
+    expect(g.over).toBe(true);
+    expect(g.overCovered).toBe(true);
+  });
+
+  it('still flags a peak that went past the whole ladder', () => {
+    const g = stripGeometry(laddered, dist({ p25: 800, p75: 900, max: 5000 }))!;
+    expect(g.over).toBe(true);
+    expect(g.overCovered).toBe(false);
+  });
+
+  it('leaves a workflow with no ladder alone', () => {
+    const g = stripGeometry(request, dist({ p25: 3000, p75: 3500, max: 5000 }))!;
+    expect(g.over).toBe(true);
+    expect(g.overCovered).toBe(false);
+  });
+
+  // A request written as a formula over the job's own usage names no
+  // ceiling: it grows to whatever the job was measured using. So every
+  // peak above where it starts is one it grew past, however high.
+  const formula = { typical: 2048, min: 2048, max: 2048, distinct: 1, adaptive: true };
+
+  it('covers any peak above the start of a formula request', () => {
+    for (const max of [2600, 40000]) {
+      const g = stripGeometry(formula, dist({ p25: 800, p75: 900, max }))!;
+      expect(g.over).toBe(true);
+      expect(g.overCovered).toBe(true);
+    }
+  });
+
+  it('leaves a formula request alone below its start', () => {
+    const g = stripGeometry(formula, dist({ p25: 800, p75: 900, max: 1500 }))!;
+    expect(g.over).toBe(false);
+    expect(g.overCovered).toBe(false);
+  });
+});
+
+describe('requestPhrase and requestMarkerLabel', () => {
+  const plain = { typical: 4096, min: 4096, max: 4096, distinct: 1 };
+  const laddered = { typical: 1024, min: 1024, max: 1024, distinct: 1, retry: true, retry_mib: 4096 };
+  const formula = { typical: 2048, min: 2048, max: 2048, distinct: 1, adaptive: true };
+
+  it('says a plain request plainly', () => {
+    expect(requestPhrase('memory', '4 GB', plain)).toBe('4 GB');
+    expect(requestMarkerLabel('4 GB', plain)).toBe('requested 4 GB');
+  });
+
+  it('names the rung a ladder retries at', () => {
+    expect(requestPhrase('memory', '1 GB', laddered)).toBe('1 GB, retried at 4 GB');
+    expect(requestMarkerLabel('1 GB', laddered)).toBe('requested 1 GB, retries at 4 GB');
+  });
+
+  it('keeps saying a formula grows', () => {
+    expect(requestPhrase('memory', '2 GB', formula)).toBe('starts at 2 GB, grows after a memory hold');
+    expect(requestMarkerLabel('2 GB', formula)).toBe('requested 2 GB, grows');
+  });
+
+  it('still takes a bare flag, for a caller that has only that', () => {
+    expect(requestPhrase('memory', '2 GB', true)).toBe('starts at 2 GB, grows after a memory hold');
+    expect(requestMarkerLabel('2 GB', undefined)).toBe('requested 2 GB');
+  });
+
+  it('ignores a ladder whose rung is not above the request', () => {
+    const odd = { ...laddered, retry_mib: 1024 };
+    expect(requestMarkerLabel('1 GB', odd)).toBe('requested 1 GB');
+  });
+});
+
+describe('memoryHistogramNote', () => {
+  it('says a ladder line is the first request, not the retry', () => {
+    const note = memoryHistogramNote({ typical: 1024, min: 1024, max: 1024, distinct: 1, retry: true, retry_mib: 4096 });
+    expect(note).toContain('retried at 4 GB');
+    expect(note).toContain('the first request, not the retry');
+  });
+
+  it('still says a formula line is where the request starts', () => {
+    const note = memoryHistogramNote({ typical: 2048, min: 2048, max: 2048, distinct: 1, adaptive: true });
+    expect(note).toContain('where it starts');
+  });
+
+  it('falls back to the spread when requests varied', () => {
+    expect(memoryHistogramNote({ typical: 2048, min: 1024, max: 4096, distinct: 3 })).toContain('ranged from');
+  });
+
+  it('says nothing about a single plain request', () => {
+    expect(memoryHistogramNote({ typical: 2048, min: 2048, max: 2048, distinct: 1 })).toBeUndefined();
+    expect(memoryHistogramNote(null)).toBeUndefined();
+  });
+});
+
+describe('fixture', () => {
+  // The fixture stands in for the server in the component tests and the
+  // smoke suite; if it stops agreeing with itself it tests nothing.
+  it('has histograms that account for every job', () => {
+    for (const w of fullWorkflows) {
+      const d = w.memory.peak_mib!;
+      expect(d.histogram.reduce((a, b) => a + b.count, 0)).toBe(d.n);
+    }
+  });
+
+  it('marks exactly one recommended request per curve', () => {
+    for (const w of fullWorkflows) {
+      if (w.memory_curve.length === 0) continue;
+      expect(w.memory_curve.filter((p) => p.is_recommended)).toHaveLength(1);
+    }
+  });
+});
+
+describe('throughputStatement', () => {
+  const base: UtilThroughput = {
+    current: { cpus: 1, memory_mib: 8192, disk_kib: 10 * 1024 * 1024, gpus: 0 },
+    suggested: { cpus: 1, memory_mib: 2048, disk_kib: 10 * 1024 * 1024, gpus: 0 },
+    retry_memory_mib: 6144,
+    fit_current: 16,
+    fit_suggested: 32,
+    gain: 2.13,
+    limited_by: 'memory',
+    wait_p50: 3 * 3600,
+    slots_limited: true,
+    last_batch: { id: 81291, jobs: 300, elapsed: 14 * 3600, estimated: 6.2 * 3600 },
+  };
+
+  it('claims the multiplier, and the batch time, when slots held the jobs back', () => {
+    const st = throughputStatement(base)!;
+    expect(st.kind).toBe('gain');
+    expect(st.line).toBe('Up to 2.1× as many of these jobs could run at once.');
+    expect(st.batch).toBe(
+      'Your last batch of 300 jobs took 14 h from submission to the last result; with these settings, about 6.2 h.',
+    );
+  });
+
+  it('claims no multiplier for jobs that started within minutes', () => {
+    const st = throughputStatement({ ...base, slots_limited: false, wait_p50: 240 })!;
+    expect(st.kind).toBe('unlimited');
+    expect(st.line).toBe('Your jobs started within 4 minutes, so this mainly frees the pool for others.');
+    expect(st.line).not.toMatch(/×/);
+    expect(st.batch).toBeUndefined();
+  });
+
+  it('says plainly when the change means fewer at once', () => {
+    const st = throughputStatement({
+      ...base,
+      suggested: { ...base.current, cpus: 4 },
+      gain: 0.6,
+    })!;
+    expect(st.kind).toBe('loss');
+    expect(st.line).toBe(
+      "Requesting the cores your jobs use means fewer run at once (0.6×), but each job stops competing for cores it didn't ask for.",
+    );
+  });
+
+  it('says nothing for a gain inside the noise, or no estimate', () => {
+    expect(throughputStatement({ ...base, gain: 1.04 })).toBeNull();
+    expect(throughputStatement(null)).toBeNull();
+  });
+
+  it('leaves out the batch sentence when there is no batch to measure', () => {
+    expect(throughputStatement({ ...base, last_batch: null })!.batch).toBeUndefined();
+  });
+});
+
+describe('formatDuration', () => {
+  it('rounds to what a reader plans with', () => {
+    expect(formatDuration(45 * 60)).toBe('45 min');
+    expect(formatDuration(6.24 * 3600)).toBe('6.2 h');
+    expect(formatDuration(14.4 * 3600)).toBe('14 h');
+    expect(formatDuration(3.5 * 86400)).toBe('3.5 days');
+  });
+});
+
+describe('throughputAdviceId', () => {
+  const w = fullWorkflows.find((x) => x.key === 'wf-blast')!;
+  const assemble = fullWorkflows.find((x) => x.key === 'wf-assemble')!;
+
+  it('puts a gain on the change to the resource that caps the jobs now', () => {
+    // Memory caps blast at 8 GB per job; the disk change rides along.
+    expect(w.throughput!.limited_by).toBe('memory');
+    expect(throughputAdviceId(w)).toMatch(/^memory-/);
+  });
+
+  it('puts a loss on the change that raises a request', () => {
+    expect(assemble.throughput!.gain).toBeLessThan(1);
+    expect(throughputAdviceId(assemble)).toBe('memory-raise');
+  });
+
+  it('has no card without an estimate', () => {
+    expect(throughputAdviceId({ ...w, throughput: null })).toBeNull();
+  });
+});
+
+describe('filters', () => {
+  const ws = fullWorkflows;
+
+  it('matches name, executable and owner, ignoring case', () => {
+    expect(filterWorkflows(ws, 'BLAST').map((w) => w.key)).toEqual(['wf-blast']);
+    expect(filterWorkflows(ws, 'train.py').map((w) => w.key)).toEqual(['wf-train']);
+    // bob owns two: the owner filter matches both, in fixture order.
+    expect(filterWorkflows(ws, 'bob').map((w) => w.key)).toEqual(['wf-assemble', 'wf-sieve']);
+    expect(filterWorkflows(ws, '  ')).toBe(ws);
+  });
+
+  it('reads owners and the limit from the URL forgivingly', () => {
+    expect(parseOwners('alice, bob,,alice')).toEqual(['alice', 'bob']);
+    expect(parseOwners(null)).toEqual([]);
+    expect(parseLimit('250000')).toBe(250000);
+    expect(parseLimit('lots')).toBeUndefined();
+    expect(parseLimit('-5')).toBeUndefined();
+  });
+
+  it('offers five times as many jobs, then everything', () => {
+    expect(moreOptions(50000, 1000000).map((o) => o.label)).toEqual([
+      'Analyze up to 250,000 jobs',
+      'all, up to 1,000,000',
+    ]);
+    expect(moreOptions(250000, 1000000).map((o) => o.limit)).toEqual([1000000]);
+    expect(moreOptions(1000000, 1000000)).toEqual([]);
+  });
+
+  it('folds two or more single-job workflows, but not one', () => {
+    const { multi, singles } = splitSingles(ws);
+    expect(singles.map((w) => w.name).sort()).toEqual(['check-env', 'debug-run', 'probe-node']);
+    expect(multi.every((w) => w.jobs > 1)).toBe(true);
+    const one = ws.filter((w) => w.jobs > 1 || w.name === 'debug-run');
+    expect(splitSingles(one).singles).toEqual([]);
+  });
+
+  it('leads with GPUs only when a GPU was reserved', () => {
+    expect(sortResources(utilizationFixture.overall.resources)[0].resource).toBe('gpu');
+    const noGpu = utilizationFixture.overall.resources.map((r) => (r.resource === 'gpu' ? { ...r, allocated_hours: 0 } : r));
+    expect(sortResources(noGpu)[0].resource).toBe('cpu');
+  });
+});
+
+describe('normalizeUtilization', () => {
+  it('fills in what the list leaves out', () => {
+    const r = normalizeUtilization({
+      ...utilizationFixture,
+      workflows: [
+        {
+          key: 'k',
+          executable: 'run.sh',
+          jobs: 3,
+          succeeded: 3,
+          wall_hours: 1.5,
+          request: { memory_mib: 1024, cpus: 1, disk_kib: 1024 },
+          used: { cpu: 0.5, memory: 0.4, disk: 0.1 },
+          advice: [{ id: 'memory-lower', severity: 'suggest' }],
+        },
+      ],
+    });
+    expect(r.workflows[0]).toMatchObject({
+      name: 'run.sh',
+      is_dag: false,
+      failed: 0,
+      removed: 0,
+      request: { gpus: null },
+      used: { gpu: null },
+      advice: [{ id: 'memory-lower', saves: null }],
+    });
+  });
+});

@@ -11,6 +11,7 @@ import (
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // securityConfigContextKey is the type for the security configuration context key
@@ -78,6 +79,22 @@ func GetAuthenticatedUserFromContext(ctx context.Context) string {
 type Schedd struct {
 	name    string
 	address string
+	// cfg is the HTCondor configuration this client authenticates and
+	// rate-limits with; nil means the process-wide default. See WithConfig.
+	cfg *config.Config
+	// rateLimitKey partitions the query rate limiter; see WithRateLimitKey.
+	rateLimitKey string
+}
+
+// WithRateLimitKey gives this client its own partition of the schedd
+// query rate limiter: a global budget of its own and per-user budgets of
+// its own, at the configured rates, instead of the budget every client
+// sharing its configuration draws on. A server talking to many schedds
+// keys each by the schedd's name, so one busy schedd cannot starve the
+// others. Empty (the default) is the shared budget.
+func (s *Schedd) WithRateLimitKey(key string) *Schedd {
+	s.rateLimitKey = key
+	return s
 }
 
 // NewSchedd creates a new Schedd instance
@@ -189,11 +206,11 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 
 	// Apply rate limiting if configured
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(s.cfg)
 	if rateLimitManager != nil {
 		rateLimitCtx, cancelRateLimit := context.WithTimeout(ctx, 1000*time.Millisecond)
 		defer cancelRateLimit()
-		if err := rateLimitManager.WaitSchedd(rateLimitCtx, username); err != nil {
+		if err := rateLimitManager.WaitScheddFor(rateLimitCtx, s.rateLimitKey, username); err != nil {
 			return nil, fmt.Errorf("rate limit exceeded: %w", err)
 		}
 	}
@@ -209,6 +226,13 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 	// See QueryWithOptions: there is no cursor the schedd can honor.
 	if effectiveOpts.PageToken != "" {
 		return nil, ErrPaginationUnsupported
+	}
+
+	// Built before the goroutine so a constraint that does not parse is
+	// this call's error, not a result on the channel after a connection.
+	requestAd, err := createJobQueryAd(constraint, effectiveOpts)
+	if err != nil {
+		return nil, err
 	}
 
 	// Create channel for results
@@ -233,7 +257,7 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 		}
 
 		// Get security config
-		secConfig, err := GetSecurityConfigOrDefault(ctx, nil, cmd, "CLIENT", s.address)
+		secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, cmd, "CLIENT", s.address)
 		if err != nil {
 			ch <- JobAdResult{Err: fmt.Errorf("failed to create security config: %w", err)}
 			return
@@ -257,9 +281,6 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 		if username == "" && negotiation != nil && negotiation.User != "" {
 			ctx = WithAuthenticatedUser(ctx, negotiation.User)
 		}
-
-		// Create query request ClassAd with options
-		requestAd := createJobQueryAd(constraint, effectiveOpts)
 
 		// Send query
 		queryMsg := message.NewMessageForStream(cedarStream)
@@ -348,15 +369,22 @@ func (s *Schedd) QueryStreamWithOptions(ctx context.Context, constraint string, 
 
 // queryWithAuth performs the actual query with optional authentication and query options
 func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, useAuth bool, opts *QueryOptions) ([]*classad.ClassAd, error) {
+	// Built first so a constraint that does not parse is refused before
+	// anything is sent.
+	requestAd, err := createJobQueryAd(constraint, opts)
+	if err != nil {
+		return nil, err
+	}
+
 	// Apply rate limiting if configured
 	// Use a short timeout context for rate limiting to avoid blocking HTTP requests
 	// If rate limit is exceeded, we want to return 429 immediately, not block
 	username := GetAuthenticatedUserFromContext(ctx)
-	rateLimitManager := getRateLimitManager()
+	rateLimitManager := rateLimitManagerFor(s.cfg)
 	if rateLimitManager != nil {
 		rateLimitCtx, cancelRateLimit := context.WithTimeout(ctx, 1000*time.Millisecond)
 		defer cancelRateLimit()
-		if err := rateLimitManager.WaitSchedd(rateLimitCtx, username); err != nil {
+		if err := rateLimitManager.WaitScheddFor(rateLimitCtx, s.rateLimitKey, username); err != nil {
 			return nil, fmt.Errorf("rate limit exceeded: %w", err)
 		}
 	}
@@ -368,7 +396,7 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, useAuth b
 	}
 
 	// Get SecurityConfig from context, HTCondor config, or defaults
-	secConfig, err := GetSecurityConfigOrDefault(ctx, nil, cmd, "CLIENT", s.address)
+	secConfig, err := GetSecurityConfigOrDefault(ctx, s.cfg, cmd, "CLIENT", s.address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create security config: %w", err)
 	}
@@ -390,9 +418,6 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, useAuth b
 
 	// Note: ConnectAndAuthenticate doesn't expose negotiation details, so we can't get
 	// the authenticated user here. Username should be provided in the context if needed.
-
-	// Create query request ClassAd with options
-	requestAd := createJobQueryAd(constraint, opts)
 
 	// Send query
 	queryMsg := message.NewMessageForStream(cedarStream)
@@ -458,19 +483,21 @@ func (s *Schedd) queryWithAuth(ctx context.Context, constraint string, useAuth b
 	return jobAds, nil
 }
 
-// createJobQueryAd creates a request ClassAd for querying jobs with options
-func createJobQueryAd(constraint string, opts *QueryOptions) *classad.ClassAd {
+// createJobQueryAd creates a request ClassAd for querying jobs with options.
+//
+// A constraint that does not parse is an error, as it is for actions and
+// history. Substituting `true` would turn a typo into "every job the
+// schedd lets the caller read" -- and, through EditJobs, edit.
+func createJobQueryAd(constraint string, opts *QueryOptions) (*classad.ClassAd, error) {
 	ad := classad.New()
 
 	// Set constraint (use "true" if empty)
 	if constraint == "" {
 		constraint = "true"
 	}
-	// Parse constraint as an expression
 	constraintExpr, err := classad.ParseExpr(constraint)
 	if err != nil {
-		// If parsing fails, use a simple "true" expression
-		constraintExpr, _ = classad.ParseExpr("true")
+		return nil, fmt.Errorf("invalid constraint expression: %w", err)
 	}
 	ad.InsertExpr("Requirements", constraintExpr)
 
@@ -530,15 +557,20 @@ func createJobQueryAd(constraint string, opts *QueryOptions) *classad.ClassAd {
 		}
 	}
 
-	return ad
+	return ad, nil
 }
 
 // Submit submits a job to the schedd using an HTCondor submit file
 // submitFileContent is the content of an HTCondor submit file
 // Returns the cluster ID as a string
+//
+// A job that omits a request_* command gets the JOB_DEFAULT_REQUEST*
+// default from the params WithSubmitParams attached to ctx, or HTCondor's
+// built-in one.
 func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, error) {
 	// Parse the submit file
-	submitFile, err := ParseSubmitFile(strings.NewReader(submitFileContent))
+	submitFile, err := ParseSubmitFileWithOptions(strings.NewReader(submitFileContent),
+		SubmitParseOptions{Params: SubmitParamsFromContext(ctx)})
 	if err != nil {
 		return "", fmt.Errorf("failed to parse submit file: %w", err)
 	}
@@ -548,7 +580,7 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 	// authenticate to schedd at <addr>: …", so re-wrapping with
 	// "failed to connect to schedd at <addr>: …" here just produces
 	// the same address in two adjacent prefixes of the chain.
-	qmgmt, err := NewQmgmtConnection(ctx, s.address)
+	qmgmt, err := newQmgmtConnection(ctx, s.cfg, s.address)
 	if err != nil {
 		return "", err
 	}
@@ -586,14 +618,47 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 		return "", submissionErr
 	}
 
-	// Generate job ads from the submit file
-	submitResult, err := submitFile.Submit(clusterID)
+	// Generate job ads from the submit file.
+	//
+	// A file asking for late materialization is submitted as a job factory
+	// when the schedd accepts one: the schedd gets the cluster ad, the
+	// itemdata and a submit digest, and materializes the procs itself. When
+	// the schedd refuses or is too old to know about factories, the
+	// submission falls back to materializing every proc here, which is what
+	// condor_submit does -- max_materialize and max_idle ask for a factory,
+	// they do not insist on one.
+	generate := submitFile.Submit
+	if qmgmt.AllowsLateMaterialize() {
+		generate = submitFile.SubmitLate
+	}
+	submitResult, err := generate(clusterID)
 	if err != nil {
 		submissionErr = fmt.Errorf("failed to generate job ads: %w", err)
 		return "", submissionErr
 	}
 
-	// Submit each proc
+	if factory := submitResult.Factory; factory != nil {
+		// The itemdata goes first, because the digest's queue statement
+		// names the file the schedd spooled it to.
+		if err := qmgmt.sendFactory(ctx, factory); err != nil {
+			submissionErr = fmt.Errorf("failed to submit job factory for cluster %d: %w", clusterID, err)
+			return "", submissionErr
+		}
+		if err := qmgmt.SendClusterAttributes(ctx, clusterID, submitResult.ClusterAd); err != nil {
+			submissionErr = fmt.Errorf("failed to set attributes for cluster %d: %w", clusterID, err)
+			return "", submissionErr
+		}
+		if err := qmgmt.CommitTransaction(ctx); err != nil {
+			submissionErr = fmt.Errorf("failed to commit transaction: %w", err)
+			return "", submissionErr
+		}
+		return fmt.Sprintf("%d", clusterID), nil
+	}
+
+	// Submit each proc. The first proc's ad becomes the cluster ad: it is
+	// sent in full at proc id -1, and from then on each proc ad carries only
+	// what differs from it. See SendClusterAttributes for why.
+	var clusterAd *classad.ClassAd
 	for i, procAd := range submitResult.ProcAds {
 		procID, err := qmgmt.NewProc(ctx, clusterID)
 		if err != nil {
@@ -601,8 +666,17 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 			return "", submissionErr
 		}
 
+		// Send the cluster ad before the first proc ad, as condor_submit does.
+		if procID == 0 {
+			if err := qmgmt.SendClusterAttributes(ctx, clusterID, procAd); err != nil {
+				submissionErr = fmt.Errorf("failed to set attributes for cluster %d: %w", clusterID, err)
+				return "", submissionErr
+			}
+			clusterAd = procAd
+		}
+
 		// Send job attributes
-		if err := qmgmt.SendJobAttributes(ctx, clusterID, procID, procAd); err != nil {
+		if err := qmgmt.SendProcAttributes(ctx, clusterID, procID, procAd, clusterAd); err != nil {
 			submissionErr = fmt.Errorf("failed to set attributes for proc %d: %w", i, err)
 			return "", submissionErr
 		}
@@ -629,9 +703,13 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 // 6. Returns the cluster ID and proc ads for subsequent file spooling
 //
 // The caller should then use SpoolJobFilesFromFS or SpoolJobFilesFromTar to upload input files.
+//
+// As with Submit, request_* defaults come from the params WithSubmitParams
+// attached to ctx.
 func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (clusterID int, procAds []*classad.ClassAd, err error) {
 	// Parse the submit file
-	submitFile, err := ParseSubmitFile(strings.NewReader(submitFileContent))
+	submitFile, err := ParseSubmitFileWithOptions(strings.NewReader(submitFileContent),
+		SubmitParseOptions{Params: SubmitParamsFromContext(ctx)})
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to parse submit file: %w", err)
 	}
@@ -640,7 +718,7 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 	// inner error verbatim; see the comment in Submit for why we
 	// don't re-wrap with another "failed to connect to schedd at ..."
 	// prefix.
-	qmgmt, err := NewQmgmtConnection(ctx, s.address)
+	qmgmt, err := newQmgmtConnection(ctx, s.cfg, s.address)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -685,18 +763,33 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 		return 0, nil, submissionErr
 	}
 
+	// Whether the submit FILE named leave_in_queue, under either spelling.
+	// The parser's default for it is a local submission's, which a spooling
+	// submission has to replace; see configureRemoteJobAd.
+	_, submitterSetLeaveInQueue := submitFile.Command("leave_in_queue")
+	if !submitterSetLeaveInQueue {
+		_, submitterSetLeaveInQueue = submitFile.Command("LeaveJobInQueue")
+	}
+
 	var jobsWithoutSpooling []*classad.ClassAd
 
 	// For remote submission, configure job attributes similar to HTCondor's behavior
 	// This mimics what condor_submit does when using the -name option (remote submission)
 	for _, procAd := range submitResult.ProcAds {
-		needsSpooling := configureRemoteJobAd(procAd)
+		needsSpooling := configureRemoteJobAd(procAd, submitterSetLeaveInQueue)
 		if !needsSpooling {
 			jobsWithoutSpooling = append(jobsWithoutSpooling, procAd)
 		}
 	}
 
-	// Submit each proc
+	// Submit each proc. The first proc's ad becomes the cluster ad: it is
+	// sent in full at proc id -1, and from then on each proc ad carries only
+	// what differs from it. See SendClusterAttributes for why.
+	//
+	// The ads themselves are left whole -- deduplication decides what to send,
+	// not what the ad holds -- because resultProcAds goes back to the caller
+	// for file spooling, which reads Cmd and the transfer lists off them.
+	var clusterAd *classad.ClassAd
 	resultProcAds := make([]*classad.ClassAd, len(submitResult.ProcAds))
 	for i, procAd := range submitResult.ProcAds {
 		procID, err := qmgmt.NewProc(ctx, clusterIDInt)
@@ -709,8 +802,17 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 		_ = procAd.Set("ClusterId", int64(clusterIDInt))
 		_ = procAd.Set("ProcId", int64(procID))
 
+		// Send the cluster ad before the first proc ad, as condor_submit does.
+		if procID == 0 {
+			if err := qmgmt.SendClusterAttributes(ctx, clusterIDInt, procAd); err != nil {
+				submissionErr = fmt.Errorf("failed to set attributes for cluster %d: %w", clusterIDInt, err)
+				return 0, nil, submissionErr
+			}
+			clusterAd = procAd
+		}
+
 		// Send job attributes
-		if err := qmgmt.SendJobAttributes(ctx, clusterIDInt, procID, procAd); err != nil {
+		if err := qmgmt.SendProcAttributes(ctx, clusterIDInt, procID, procAd, clusterAd); err != nil {
 			submissionErr = fmt.Errorf("failed to set attributes for proc %d: %w", i, err)
 			return 0, nil, submissionErr
 		}
@@ -745,14 +847,29 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 }
 
 // configureRemoteJobAd sets up job attributes for remote submission and determines if spooling is needed.
-func configureRemoteJobAd(procAd *classad.ClassAd) bool {
+//
+// submitterSetLeaveInQueue says whether the submit file named leave_in_queue
+// itself. It has to be asked rather than read off the ad: the parser writes
+// the default condor_submit writes for a LOCAL submission (false -- the job
+// leaves the queue when it finishes), and a spooling submission needs the
+// opposite, because the job has to stay long enough for its output to be
+// fetched. Only the submitter's own value outranks that.
+func configureRemoteJobAd(procAd *classad.ClassAd, submitterSetLeaveInQueue bool) bool {
 	// Set ShouldTransferFiles to YES if not already set
 	if expr, ok := procAd.Lookup("ShouldTransferFiles"); !ok || expr == nil {
 		_ = procAd.Set("ShouldTransferFiles", "YES")
 	}
 
-	// Ensure WhenToTransferOutput is set
-	if expr, ok := procAd.Lookup("WhenToTransferOutput"); !ok || expr == nil {
+	// Ensure WhenToTransferOutput is set -- unless the job turned file
+	// transfer off, where the two attributes together would say both
+	// that the job does not transfer files and that it transfers them on
+	// exit. condor_submit refuses that combination outright rather than
+	// pick one, so a job that reaches here with ShouldTransferFiles = NO
+	// keeps the shape condor_submit would have given it: no
+	// WhenToTransferOutput at all.
+	stf, _ := procAd.EvaluateAttrString("ShouldTransferFiles")
+	transfers := !strings.EqualFold(stf, "NO") && !strings.EqualFold(stf, "NEVER") && !strings.EqualFold(stf, "FALSE")
+	if expr, ok := procAd.Lookup("WhenToTransferOutput"); transfers && (!ok || expr == nil) {
 		_ = procAd.Set("WhenToTransferOutput", "ON_EXIT")
 	}
 
@@ -782,19 +899,96 @@ func configureRemoteJobAd(procAd *classad.ClassAd) bool {
 		}
 	}
 
+	// A submitter who asked for `hold = true` has to still have a held
+	// job at the end of this, and the next three lines are about to
+	// overwrite the hold that says so.
+	//
+	// A spooling submission cannot simply keep the submitter's hold: the
+	// schedd creates the job's spool directory only for a job committed
+	// HELD with hold code 16, and rewrites Iwd to point at it when that
+	// hold is released. Submit with any other hold and the job has
+	// nowhere for its files to go.
+	//
+	// JobStatusOnRelease is what reconciles the two. The schedd reads it
+	// in releaseJobRaw and sends the job to that status instead of IDLE,
+	// in the same transaction that ends the spooling hold -- so the job
+	// goes from the spooling hold straight to held, and is never idle
+	// for an instant in between. Holding the job ourselves after the
+	// release cannot do that: the release and the hold would be two
+	// transactions with matchmaking free to run between them, and a job
+	// that matched in that window would start, which is the bug.
+	if status, ok := procAd.EvaluateAttrInt("JobStatus"); ok && status == jobStatusHeld {
+		_ = procAd.Set(attrJobStatusOnRelease, int64(jobStatusHeld))
+		// What the hold is for, carried across the release, which moves
+		// HoldReason aside along with the rest of the spooling hold.
+		// Restoring it afterwards is the one part of this a client
+		// cannot do by writing attributes -- HoldReason is protected --
+		// so it is done with a hold action; see restoreSubmitHolds.
+		if _, already := procAd.Lookup(attrSubmitHoldReason); !already {
+			reason, ok := procAd.EvaluateAttrString("HoldReason")
+			if !ok || reason == "" {
+				reason = defaultSubmitHoldReason
+			}
+			_ = procAd.Set(attrSubmitHoldReason, reason)
+		}
+	}
+
 	// Remote jobs start in HELD status with SpoolingInput hold reason
 	// JobStatus: 5 = HELD
-	_ = procAd.Set("JobStatus", int64(5))
+	_ = procAd.Set("JobStatus", int64(jobStatusHeld))
 	// HoldReasonCode: 16 = SpoolingInput
-	_ = procAd.Set("HoldReasonCode", int64(16))
+	_ = procAd.Set("HoldReasonCode", int64(holdCodeSpoolingInput))
 	_ = procAd.Set("HoldReason", "Spooling input data files")
 
 	// Set LeaveJobInQueue expression for remote jobs
 	// Keep job in queue for 10 days after completion to allow output retrieval
-	if expr, ok := procAd.Lookup("LeaveJobInQueue"); !ok || expr == nil {
+	if !submitterSetLeaveInQueue {
 		leaveInQueueExpr, _ := classad.ParseExpr("JobStatus == 4 && (CompletionDate =?= UNDEFINED || CompletionDate == 0 || ((time() - CompletionDate) < 864000))")
 		_ = procAd.Set("LeaveJobInQueue", leaveInQueueExpr)
 	}
 
 	return needsSpooling
 }
+
+// Submitting a job that is meant to stay held.
+//
+// `hold = true` in a submit file means the job must not start until
+// somebody releases it. A spooling submission -- which is every
+// submission through SubmitRemote -- has its own hold to contend with,
+// and until this existed the submitter's hold was simply overwritten:
+// the job went to the schedd held for spooling, the schedd released that
+// hold when the files arrived, and the job ran. Nothing reported it.
+//
+// Upstream condor_submit refuses the combination outright ("Cannot set
+// hold to 'true' when using -remote or -spool"). That is a defensible
+// answer for a CLI and a poor one here, where "submit it held so I can
+// look at it before it runs" is a thing agents and users genuinely want
+// and no other submit path offers: holding a job right after submitting
+// it is a race, and a job can match in under two seconds.
+const (
+	// holdCodeSpoolingInput is CONDOR_HOLD_CODE::SpoolingInput. The
+	// schedd keys the creation of a job's spool directory on this exact
+	// code, so a spooling submission has to use it whatever else it
+	// wants the job's hold to say.
+	holdCodeSpoolingInput = 16
+
+	// attrJobStatusOnRelease is the schedd's own attribute for "when
+	// this hold ends, go to this status rather than idle". Read in
+	// releaseJobRaw and deleted by the release, so it fires once.
+	attrJobStatusOnRelease = "JobStatusOnRelease"
+
+	// attrSubmitHoldReason records why the submitter wanted the job
+	// held, because the hold that would have said so is overwritten by
+	// the spooling hold and then moved aside by its release.
+	//
+	// Durable, and on the job rather than in this process, so that the
+	// reason survives for whichever call spools the job -- SubmitRemote
+	// does it itself for a job with no input files, and the caller does
+	// it for every other job.
+	attrSubmitHoldReason = "SubmitHoldReason"
+
+	// defaultSubmitHoldReason matches what condor_submit writes for a
+	// local `hold = true`, so a job held this way reads the same in
+	// condor_q however it was submitted.
+	defaultSubmitHoldReason = "submitted on hold at user's request"
+)

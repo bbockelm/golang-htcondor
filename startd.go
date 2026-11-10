@@ -5,6 +5,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/commands"
+	"github.com/bbockelm/golang-htcondor/config"
 )
 
 // Startd is a client for one execution point's condor_startd. Today it speaks only the startd's
@@ -15,6 +16,9 @@ import (
 type Startd struct {
 	name    string
 	address string
+	// cfg is the HTCondor configuration this client authenticates and
+	// rate-limits with; nil means the process-wide default. See WithConfig.
+	cfg *config.Config
 }
 
 // NewStartd creates a new Startd instance.
@@ -33,7 +37,7 @@ func (s *Startd) Address() string { return s.address }
 // there is no startd limiter, and the schedd's would throttle a fan-out across a pool's execution
 // points on a knob that means something else.
 func (s *Startd) historyEndpoint() historyEndpoint {
-	return historyEndpoint{address: s.address, command: commands.GET_HISTORY, daemon: "startd"}
+	return historyEndpoint{address: s.address, cfg: s.cfg, command: commands.GET_HISTORY, daemon: "startd"}
 }
 
 // startdOptions forces the startd record source, which is the only thing this daemon serves: the

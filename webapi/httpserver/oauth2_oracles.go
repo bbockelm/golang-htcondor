@@ -7,6 +7,7 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/logging"
 )
 
@@ -124,6 +125,15 @@ func (o *UserRecordOracle) Check(ctx context.Context, username string, _ []strin
 	return ReauthDecision{Status: UserStatusActive}, nil
 }
 
+// CheckAccount is Check for a fully qualified account -- one the placementd
+// assigned, whose domain need not be UID_DOMAIN -- used as given.
+func (o *UserRecordOracle) CheckAccount(ctx context.Context, account string, _ ...string) (ReauthDecision, error) {
+	if !strings.Contains(account, "@") {
+		return ReauthDecision{}, fmt.Errorf("account %q is not fully qualified", account)
+	}
+	return o.Check(ctx, account, nil)
+}
+
 func (o *UserRecordOracle) schedd() UserRecordLookup {
 	if o.Lookup == nil {
 		return nil
@@ -163,9 +173,16 @@ type ScheddACLOracle struct {
 	Logger    *logging.Logger
 	// MintToken produces an HTCondor IDTOKEN asserting username, used as
 	// the probe credential. The scopes argument is passed through to the
-	// handler's minter; Check passes nil so the probe token carries no
-	// limit_authz narrowing (see Check for why).
-	MintToken func(username string, scopes []string) (string, error)
+	// handler's minter; Check asks for every level it probes (see Check
+	// for why). ctx is Check's, which carries the sign-in identity of the
+	// grant being checked, if any (withGrantIdentityContext).
+	MintToken func(ctx context.Context, username string, scopes []string) (string, error)
+	// Config is the HTCondor configuration the probe's security config is
+	// built from; nil is the process-wide default.
+	Config *config.Config
+	// Sessions holds the probe's cedar session caches. Nil gives each
+	// probe a fresh cache; it never uses the process-global one.
+	Sessions *TokenCache
 }
 
 // Name implements RevocationOracle.
@@ -196,22 +213,27 @@ func (o *ScheddACLOracle) Check(ctx context.Context, username string, scopes []s
 	// carrying the server's own credentials would answer a question about
 	// the server. Mint the same kind of IDTOKEN the MCP data path uses.
 	//
-	// The authz levels are deliberately left off the minted token: a token
-	// narrowed with limit_authz would fail the probe because we asked for a
-	// narrower token, not because the ACL refuses the user, which is the
-	// opposite of what is being measured.
-	probeToken, err := o.MintToken(username, nil)
+	// The token carries every level probed. One narrowed below a probe
+	// fails that probe because we asked for a narrower token, not because
+	// the ACL refuses the user, which is the opposite of what is being
+	// measured. Asking for no scopes is not "no narrowing": the minter
+	// refuses an unlimited token and maps an empty request to READ, so a
+	// probe minted that way failed every WRITE check and stripped
+	// mcp:write and condor:/WRITE from every grant the ACL allowed them.
+	probeToken, err := o.MintToken(ctx, username, []string{condorScopeRead, condorScopeWrite})
 	if err != nil {
 		return ReauthDecision{}, fmt.Errorf("minting probe token for %s: %w", username, err)
 	}
-	secConfig, err := htcondor.NewClientSecurityConfig(ctx, probeToken, "", 0, "CLIENT", nil)
+	// Keep probe sessions out of the MCP data path's session cache: these
+	// are negotiated with an AuthCommand set and should not be resumed for
+	// ordinary schedd traffic. The tag is derived from the probe token's
+	// grant, not the bare username, and the cache is private.
+	tag := mintedCredentialSessionTag("authz-probe", probeToken)
+	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(ctx, o.Config, probeToken, "", 0, "CLIENT", o.Sessions.sessionCacheFor(tag))
 	if err != nil {
 		return ReauthDecision{}, fmt.Errorf("building probe security config: %w", err)
 	}
-	// Keep probe sessions out of the MCP data path's session cache: these
-	// are negotiated with an AuthCommand set and should not be resumed for
-	// ordinary schedd traffic.
-	secConfig.SecurityTag = "authz-probe:" + username
+	secConfig.SecurityTag = tag
 
 	ctx, cancel := context.WithTimeout(ctx, oracleTimeout)
 	defer cancel()
@@ -228,6 +250,15 @@ func (o *ScheddACLOracle) Check(ctx context.Context, username string, scopes []s
 			// let a transient error strip a scope.
 			return ReauthDecision{}, fmt.Errorf("probing %s for %s: %w", probe.name, username, err)
 		}
+		if result.CommandNotFound {
+			// The schedd cannot say: it has no command at the level.
+			return ReauthDecision{}, fmt.Errorf("probing %s for %s: %s", probe.name, username, result.Reason)
+		}
+		// A schedd refuses the probe's handshake outright (DENIED) for an
+		// identity its ACL denies at that level, which PingWithOptions
+		// reports as Authorized false. That refusal is the answer, not a
+		// failed probe: read as one, the oracle failed open on exactly
+		// the users it exists to catch.
 		if !result.Authorized {
 			denied = append(denied, probe.scopes...)
 		}
@@ -385,10 +416,12 @@ func (h *Handler) buildRevocationOracles(names []string) []RevocationOracle {
 			})
 		case OracleScheddACL:
 			oracles = append(oracles, &ScheddACLOracle{
-				Schedd:    h.getSchedd,
+				Schedd:    h.identitySchedd,
 				UIDDomain: h.uidDomain,
 				Logger:    h.logger,
-				MintToken: h.generateHTCondorTokenWithScopes,
+				MintToken: h.mintGrantProbeToken,
+				Config:    h.clientConfig,
+				Sessions:  h.credentialSessions,
 			})
 		default:
 			h.logger.Warn(logging.DestinationHTTP,
@@ -415,7 +448,7 @@ func (h *Handler) buildRevocationOracles(names []string) []RevocationOracle {
 }
 
 // userRecordLookup adapts the handler's schedd accessor to UserRecordLookup.
-func (h *Handler) userRecordLookup() UserRecordLookup { return h.getSchedd() }
+func (h *Handler) userRecordLookup() UserRecordLookup { return h.identitySchedd() }
 
 // scheddACLOracle returns the configured schedd-ACL oracle, or nil.
 //
@@ -452,6 +485,9 @@ func (h *Handler) scheddACLOracle() RevocationOracle {
 // daemon was briefly unreachable would be the worse failure, and unlike
 // the refresh path there is a person watching who cannot tell the
 // difference between "you may not have this" and "we could not ask".
+//
+// The probe is minted for the sign-in identity of the grant being approved,
+// when ctx carries one (withGrantIdentityContext).
 func (h *Handler) scopesAllowedByScheddACL(ctx context.Context, username string, scopes []string) []string {
 	return h.filterScopesByOracle(ctx, h.scheddACLOracle(), username, scopes)
 }

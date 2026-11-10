@@ -2,6 +2,7 @@
 package httpserver
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/config"
 	jwt "github.com/golang-jwt/jwt/v5"
 )
 
@@ -81,6 +83,13 @@ func ConfigureSecurityForTokenWithCache(token string, sessionCache *security.Ses
 // allowFSFallback knob lives here so we don't drag it into the root
 // package's API.
 func ConfigureSecurityForTokenWithCacheAndFallback(token string, sessionCache *security.SessionCache, allowFSFallback bool) (*security.SecurityConfig, error) {
+	return configureSecurityForToken(nil, token, sessionCache, allowFSFallback)
+}
+
+// configureSecurityForToken is ConfigureSecurityForTokenWithCacheAndFallback
+// reading the configured base from cfg (nil: the process-wide default). The
+// Handler calls it with its ClientConfig.
+func configureSecurityForToken(cfg *config.Config, token string, sessionCache *security.SessionCache, allowFSFallback bool) (*security.SecurityConfig, error) {
 	if token == "" {
 		return nil, fmt.Errorf("empty token provided")
 	}
@@ -89,7 +98,7 @@ func ConfigureSecurityForTokenWithCacheAndFallback(token string, sessionCache *s
 	// generic builder used to seed a request ctx; the actual command
 	// and peer are filled in by GetSecurityConfigOrDefault on the
 	// down-stream call site.
-	secConfig, err := htcondor.NewClientSecurityConfig(context.Background(), token, "", 0, "CLIENT", sessionCache)
+	secConfig, err := htcondor.NewClientSecurityConfigWithConfig(context.Background(), cfg, token, "", 0, "CLIENT", sessionCache)
 	if err != nil {
 		return nil, err
 	}
@@ -155,53 +164,77 @@ func stripAuthMethod(list []security.AuthMethod, m security.AuthMethod) []securi
 }
 
 // ConfigureSecurityForCollectorPing builds a SecurityConfig used solely
-// by the periodic collector ping. The collector ping is read-only —
-// we just need *some* mutually agreeable handshake — so this offers
-// both TOKEN and SSL. That's useful when the daemon's token does not
-// match the collector's IssuerKeys (an issuer rotation, a misconfigured
-// TrustDomain, etc.): SSL keeps /readyz green via a path that has
-// nothing to do with JWT signing. The schedd path — which DOES need
-// the token's identity for authz — keeps using TOKEN only.
+// by the periodic collector ping. The ping is this daemon's own health
+// check, so it starts from the configured CLIENT security settings --
+// SEC_CLIENT_AUTHENTICATION_METHODS and the credentials those methods
+// need -- exactly as any other daemon-credential call to the collector
+// does. A pool that authenticates with FS or IDTOKENS is pinged with FS
+// or IDTOKENS.
 //
-// SSL is always offered (even with no client cert/key on disk) because
-// many collectors permit anonymous SSL: the client only verifies the
-// server's cert and connects as ANONYMOUS@…, which is enough for a
-// read-only ping. Cedar's SSL auth handles empty CertFile/KeyFile as
-// "no client cert presented" and empty CAFile as "use the system trust
-// store" — see cedar/security/ssl_auth.go and cmd/ssl-test/main.go.
+// On top of that base, two methods are always offered, because the ping
+// is read-only and needs only *some* handshake the collector accepts:
+//
+//   - TOKEN, first, with token as the credential, when token is
+//     non-empty. Token auth gives the collector a real identity to log.
+//   - SSL, last, when the configuration does not already offer it. That
+//     keeps /readyz green when the daemon's token does not match the
+//     collector's IssuerKeys (an issuer rotation, a misconfigured
+//     TrustDomain, etc.) but the collector accepts SSL. SSL is offered
+//     even with no client cert/key on disk because many collectors
+//     permit anonymous SSL: the client only verifies the server's cert
+//     and connects as ANONYMOUS@..., which is enough for a ping. Cedar
+//     handles empty CertFile/KeyFile as "no client cert presented", and
+//     trusts the system store alongside AUTH_SSL_CLIENT_CAFILE/CADIR
+//     unless AUTH_SSL_CLIENT_USE_DEFAULT_CAS is false -- see
+//     cedar/security/ssl_trust.go.
 //
 // serverName is used by cedar's SSL handshake for hostname/SAN
 // verification. Without it, cedar falls back to the literal string
 // "unknown" and verification fails ("certificate is valid for
 // host.example.com, ..., not unknown"). Pass the bare hostname of the
-// collector address — see hostFromCondorAddress in handler.go.
-//
-// `token` may be empty; in that case only SSL is offered.
+// collector address -- see hostFromCondorAddress in handler.go.
 func ConfigureSecurityForCollectorPing(token, serverName string) (*security.SecurityConfig, error) {
-	methods := []security.AuthMethod{security.AuthSSL}
-	if token != "" {
-		// TOKEN first so cedar prefers it when both work — token
-		// auth gives us a real identity in the schedd's logs vs.
-		// the anonymous-SSL session.
-		methods = []security.AuthMethod{security.AuthToken, security.AuthSSL}
+	return configureSecurityForCollectorPing(nil, token, serverName)
+}
+
+// configureSecurityForCollectorPing is ConfigureSecurityForCollectorPing
+// reading the security configuration from cfg (nil: the process-wide
+// default).
+func configureSecurityForCollectorPing(cfg *config.Config, token, serverName string) (*security.SecurityConfig, error) {
+	// The configured base, as the daemon itself: a fresh context carries
+	// no caller's SecurityConfig, and is marked as daemon work so the
+	// fallback to the daemon's own credentials is a declared one.
+	ctx := htcondor.WithDaemonCredential(context.Background(), "periodic health ping")
+	sc, err := htcondor.GetSecurityConfigOrDefault(ctx, cfg, 0, "CLIENT", "")
+	if err != nil {
+		return nil, err
 	}
 
-	// Best-effort credential lookup. Empty values are fine: cedar
-	// treats them as "no client cert" / "system trust store".
-	certFile, keyFile, caFile, _ := htcondor.LookupSSLClientCredentials()
+	if token != "" {
+		sc.Token = token
+		sc.AuthMethods = append([]security.AuthMethod{security.AuthToken}, stripAuthMethod(sc.AuthMethods, security.AuthToken)...)
+	}
+	if !containsAuthMethod(sc.AuthMethods, security.AuthSSL) {
+		// The configured base loads SSL credentials only when SSL is
+		// configured; load them for the SSL added here. Best effort:
+		// empty values mean "no client cert" / "system trust store".
+		sc.AuthMethods = append(sc.AuthMethods, security.AuthSSL)
+		sc.CertFile, sc.KeyFile, _, _ = htcondor.LookupSSLClientCredentialsWithConfig(cfg)
+		htcondor.ApplySSLClientTrust(cfg, sc)
+	}
 
-	return &security.SecurityConfig{
-		AuthMethods:    methods,
-		Authentication: security.SecurityRequired,
-		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
-		Encryption:     security.SecurityOptional,
-		Integrity:      security.SecurityOptional,
-		Token:          token,
-		CertFile:       certFile,
-		KeyFile:        keyFile,
-		CAFile:         caFile,
-		ServerName:     serverName,
-	}, nil
+	sc.Authentication = security.SecurityRequired
+	if len(sc.CryptoMethods) == 0 {
+		sc.CryptoMethods = []security.CryptoMethod{security.CryptoAES}
+	}
+	if sc.Encryption == "" {
+		sc.Encryption = security.SecurityOptional
+	}
+	if sc.Integrity == "" {
+		sc.Integrity = security.SecurityOptional
+	}
+	sc.ServerName = serverName
+	return sc, nil
 }
 
 // GetSecurityConfigFromToken retrieves the token from context and creates a SecurityConfig
@@ -239,14 +272,16 @@ func GetScheddWithToken(ctx context.Context, schedd *htcondor.Schedd) (*htcondor
 // (e.g. for filtering jobs to "owned by me", recording the Owner
 // when minting a share URL, or any other authorization decision).
 //
-// Validated reports whether at least one schedd op has succeeded with
-// this token. Code paths that need authoritative identity should
-// gate on Validated; code paths that only need a stable bucket key
-// (rate-limit per-token / per-username) can use Username directly.
+// Validated reports whether the identity has been established by
+// something other than the token's own claims: this server verified
+// the bearer itself (AddValidated), or a CEDAR handshake reported who
+// it is (MarkValidated). Code paths that need authoritative identity
+// should gate on Validated; code paths that only need a stable bucket
+// key (rate-limit per-token / per-username) can use Username directly.
 type TokenCacheEntry struct {
 	Token     string
 	Username  string // sub from the JWT — unverified until Validated == true
-	Validated bool   // true once a schedd op authenticated successfully with this token
+	Validated bool   // true once the identity was established other than from the token's claims
 
 	// CondorCredential is what CEDAR should authenticate with for this
 	// bearer, when that is not the bearer itself.
@@ -269,16 +304,26 @@ type TokenCacheEntry struct {
 	// that could not see them would read an approved-for-less grant as
 	// carrying no restriction at all.
 	Scopes []string
+	// Scoped is whether the bearer is a scoped credential at all, which
+	// Scopes cannot say by itself: a grant approved for nothing has no
+	// scopes, and is still not a bearer with no scope model.
+	Scoped bool
 
-	Expiration    time.Time
-	SessionCache  *security.SessionCache
-	expiryTimer   *time.Timer
-	cancelCleanup func()
+	Expiration   time.Time
+	SessionCache *security.SessionCache
+
+	// evictAt is when the cache drops the entry: Expiration, or sooner
+	// (see tokenCacheUnvalidatedResidency).
+	evictAt time.Time
+	// elem is the entry's place in its recency list, lru the list.
+	elem *list.Element
+	lru  *list.List
 }
 
 // SetCondorCredential records the credential and scopes resolved for a
 // bearer, so later requests for it do not have to resolve them again --
-// and, more to the point, do not proceed without them.
+// and, more to the point, do not proceed without them. The bearer is
+// recorded as scoped whatever scopes says, empty included.
 func (tc *TokenCache) SetCondorCredential(token, credential string, scopes []string) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
@@ -288,84 +333,153 @@ func (tc *TokenCache) SetCondorCredential(token, credential string, scopes []str
 	}
 	entry.CondorCredential = credential
 	entry.Scopes = append([]string(nil), scopes...)
+	entry.Scoped = true
 }
 
-// TokenCache manages validated tokens and their associated session caches
+const (
+	// tokenCacheMaxEntries bounds the cache. Add accepts any
+	// well-formed JWT with a sub and a future exp -- the schedd, not
+	// this server, checks the signature -- so the number of entries is
+	// chosen by whoever sends requests, not by how many users there are.
+	tokenCacheMaxEntries = 4096
+
+	// tokenCacheUnvalidatedResidency is the longest an entry nobody has
+	// verified stays, whatever exp the token claims; that exp is the
+	// sender's choice. Dropping a legitimate bearer's entry costs it a
+	// new CEDAR handshake on its next request and nothing else: the
+	// entry holds the sessions it can resume, not its identity.
+	tokenCacheUnvalidatedResidency = 10 * time.Minute
+
+	// tokenCacheValidatedResidency is the longest a verified entry
+	// stays. Adding the bearer again repeats the verification that
+	// produced it (introspection, for an opaque access token).
+	tokenCacheValidatedResidency = time.Hour
+
+	// tokenCacheSweepInterval is how often an insert also drops every
+	// entry past its time. Lookups ignore such entries regardless.
+	tokenCacheSweepInterval = time.Minute
+)
+
+// TokenCache manages validated tokens and their associated session caches.
+//
+// Bounded: at most maxEntries, with entries nobody has verified evicted
+// first (least recently used) and kept at most
+// tokenCacheUnvalidatedResidency. A flood of unverified bearers
+// therefore displaces other unverified bearers -- each of which just
+// re-handshakes -- and not a verified one.
 type TokenCache struct {
-	mu      sync.RWMutex
+	mu      sync.Mutex
 	entries map[string]*TokenCacheEntry // key is the token string
+
+	// unvalidated and validated order the entries by last use, most
+	// recent at the front.
+	unvalidated *list.List
+	validated   *list.List
+
+	// trustDomain, when set, is the only issuer Add accepts. See
+	// checkIssuer.
+	trustDomain string
+
+	maxEntries int
+	now        func() time.Time
+	lastSweep  time.Time
 }
 
-// NewTokenCache creates a new token cache
+// NewTokenCache creates a new token cache that accepts a token from
+// any issuer.
 func NewTokenCache() *TokenCache {
+	return newTokenCache("")
+}
+
+// newTokenCache creates a token cache whose Add refuses a token
+// issued by anything but trustDomain ("" accepts any issuer).
+func newTokenCache(trustDomain string) *TokenCache {
 	return &TokenCache{
-		entries: make(map[string]*TokenCacheEntry),
+		entries:     make(map[string]*TokenCacheEntry),
+		unvalidated: list.New(),
+		validated:   list.New(),
+		trustDomain: trustDomain,
+		maxEntries:  tokenCacheMaxEntries,
+		now:         time.Now,
 	}
 }
 
-// parseJWTClaims extracts username and expiration from a JWT token using the JWT library
-// Returns the username, expiration time, or an error if parsing fails
-func parseJWTClaims(token string) (username string, expiration time.Time, err error) {
+// parseJWTClaims parses token without verifying it and returns its
+// registered claims, requiring sub and exp.
+func parseJWTClaims(token string) (*jwt.RegisteredClaims, error) {
 	// Parse the token without verification (we just need to read claims)
 	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
 	parsedToken, _, parseErr := parser.ParseUnverified(token, &jwt.RegisteredClaims{})
 	if parseErr != nil {
-		return "", time.Time{}, fmt.Errorf("failed to parse JWT: %w", parseErr)
+		return nil, fmt.Errorf("failed to parse JWT: %w", parseErr)
 	}
 
 	// Extract standard claims
 	claims, ok := parsedToken.Claims.(*jwt.RegisteredClaims)
 	if !ok {
-		return "", time.Time{}, fmt.Errorf("failed to extract JWT claims")
+		return nil, fmt.Errorf("failed to extract JWT claims")
 	}
 
 	// Check if subject is set
 	if claims.Subject == "" {
-		return "", time.Time{}, fmt.Errorf("JWT missing sub claim")
+		return nil, fmt.Errorf("JWT missing sub claim")
 	}
 
 	// Check if expiration is set
 	if claims.ExpiresAt == nil {
-		return "", time.Time{}, fmt.Errorf("JWT missing exp claim")
+		return nil, fmt.Errorf("JWT missing exp claim")
 	}
 
-	return claims.Subject, claims.ExpiresAt.Time, nil
+	return claims, nil
 }
 
-// Add adds a validated token to the cache with a session cache
-// If the token is already in the cache, returns the existing entry
-// Automatically schedules cleanup when the token expires
+// checkIssuer refuses a token issued outside this pool's trust domain.
+//
+// HTCondor presents an IDTOKEN only to a daemon whose trust domain is
+// the token's iss, so such a token can never authenticate the caller
+// here; handing it to CEDAR leaves CEDAR to look for some other
+// credential to present instead. It is refused before it is cached or
+// used.
+//
+// A SciToken (asymmetric signature) is exempt: its iss is an external
+// issuer by design, and the schedd checks it against its own SciTokens
+// configuration rather than TRUST_DOMAIN. With no trust domain
+// configured there is nothing to compare against.
+func (tc *TokenCache) checkIssuer(token, issuer string) error {
+	if tc.trustDomain == "" || issuer == tc.trustDomain {
+		return nil
+	}
+	if security.IsSciToken(token) {
+		return nil
+	}
+	return fmt.Errorf("token issuer %q is not this pool's trust domain", issuer)
+}
+
+// Add caches a token, with a session cache of its own, without
+// validating it. If the token is already cached, returns the existing
+// entry.
 func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
+	now := tc.now()
 
-	// Check if already cached
-	if entry, exists := tc.entries[token]; exists {
-		// Check if expired
-		if time.Now().After(entry.Expiration) {
-			// Remove expired entry
-			delete(tc.entries, token)
-		} else {
-			return entry, nil
-		}
+	if entry, ok := tc.lookupLocked(token, now); ok {
+		return entry, nil
 	}
 
-	// Parse token to get username and expiration
-	username, expiration, err := parseJWTClaims(token)
+	claims, err := parseJWTClaims(token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse token claims: %w", err)
 	}
+	expiration := claims.ExpiresAt.Time
 
 	// Check if already expired
-	if time.Now().After(expiration) {
+	if now.After(expiration) {
 		return nil, fmt.Errorf("token is already expired")
 	}
-
-	// Create a new session cache for this token
-	sessionCache := security.NewSessionCache()
-
-	//nolint:gosec // G118: cancel is stored in entry.cancelCleanup and called during Remove()
-	_, cancel := context.WithCancel(context.Background())
+	if err := tc.checkIssuer(token, claims.Issuer); err != nil {
+		return nil, err
+	}
 
 	entry := &TokenCacheEntry{
 		Token: token,
@@ -375,12 +489,10 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 		// authenticates the forwarded token over CEDAR.
 		//
 		// So Validated stays false here, and the entry's Username is
-		// not an identity yet: ValidatedUsername returns "" until
-		// MarkValidated records that a schedd op succeeded with this
-		// token, and createAuthenticatedContext falls back to asking
-		// the schedd who the caller is. That costs one round trip on a
-		// token's first request and is what makes a forged token
-		// resolve to nobody instead of to whatever it claims.
+		// not an identity: ValidatedUsername returns "" for it, and
+		// createAuthenticatedContext asks the schedd who the caller
+		// is instead. That is what makes a forged token resolve to
+		// nobody instead of to whatever it claims.
 		//
 		// This field carried Validated: true until 2026-09, which made
 		// an unverified sub the request identity from the first
@@ -391,73 +503,28 @@ func (tc *TokenCache) Add(token string) (*TokenCacheEntry, error) {
 		// identity alone, without a schedd round trip to re-check it
 		// (saved templates, Jupyter sessions, chat history), answered
 		// for that user.
-		Username:      username,
-		Expiration:    expiration,
-		SessionCache:  sessionCache,
-		cancelCleanup: cancel,
+		Username:     claims.Subject,
+		Expiration:   expiration,
+		SessionCache: security.NewSessionCache(),
 	}
-
-	// Schedule automatic cleanup when token expires
-	duration := time.Until(expiration)
-	entry.expiryTimer = time.AfterFunc(duration, func() {
-		tc.Remove(token)
-	})
-
-	tc.entries[token] = entry
-
+	tc.insertLocked(entry, now, tokenCacheUnvalidatedResidency)
 	return entry, nil
-}
-
-// requestTokenContextKey carries the bearer token through the request
-// so the response-wrapping middleware in ServeHTTP can mark it
-// validated after a successful (2xx) response. See markValidatedOnSuccess
-// for the rationale.
-type requestTokenContextKey struct{}
-
-// withRequestToken stashes the token on the context so the
-// response-status middleware can find it.
-func withRequestToken(ctx context.Context, token string) context.Context {
-	if token == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, requestTokenContextKey{}, token)
-}
-
-// requestTokenFromContext retrieves the token previously stashed via
-// withRequestToken. Returns "" if none is set.
-func requestTokenFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(requestTokenContextKey{}).(string); ok {
-		return v
-	}
-	return ""
 }
 
 // AddValidated adds a pre-validated token (e.g. opaque token) to the cache
 func (tc *TokenCache) AddValidated(token, username string, expiration time.Time) (*TokenCacheEntry, error) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
+	now := tc.now()
 
-	// Check if already cached
-	if entry, exists := tc.entries[token]; exists {
-		// Check if expired
-		if time.Now().After(entry.Expiration) {
-			// Remove expired entry
-			delete(tc.entries, token)
-		} else {
-			return entry, nil
-		}
+	if entry, ok := tc.lookupLocked(token, now); ok {
+		return entry, nil
 	}
 
 	// Check if already expired
-	if time.Now().After(expiration) {
+	if now.After(expiration) {
 		return nil, fmt.Errorf("token is already expired")
 	}
-
-	// Create a new session cache for this token
-	sessionCache := security.NewSessionCache()
-
-	//nolint:gosec // G118: cancel is stored in entry.cancelCleanup and called during Remove()
-	_, cancel := context.WithCancel(context.Background())
 
 	entry := &TokenCacheEntry{
 		Token: token,
@@ -470,112 +537,171 @@ func (tc *TokenCache) AddValidated(token, username string, expiration time.Time)
 		// access token authenticated as nobody -- /api/v1/whoami
 		// answered {"authenticated":true,"user":""} and owner-scoped
 		// MCP tools refused the call.
-		Username:      username,
-		Validated:     true,
-		Expiration:    expiration,
-		SessionCache:  sessionCache,
-		cancelCleanup: cancel,
+		Username:     username,
+		Validated:    true,
+		Expiration:   expiration,
+		SessionCache: security.NewSessionCache(),
+	}
+	tc.insertLocked(entry, now, tokenCacheValidatedResidency)
+	return entry, nil
+}
+
+// sessionCacheFor returns the session cache kept for user, creating it
+// if there is none. user names a private partition this server chose --
+// a user it authenticated itself (a session cookie), or a credential's
+// session tag (see mintedCredentialSessionTag) -- on a TokenCache used
+// for that keyspace alone: the key is not a token and must not share a
+// keyspace with bearers. The entry is bounded and expires like a
+// verified one; a new one only means new CEDAR handshakes.
+func (tc *TokenCache) sessionCacheFor(user string) *security.SessionCache {
+	if tc == nil {
+		return security.NewSessionCache()
+	}
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	now := tc.now()
+	key := "session:" + user
+	if entry, ok := tc.lookupLocked(key, now); ok {
+		return entry.SessionCache
+	}
+	entry := &TokenCacheEntry{
+		Token:        key,
+		Username:     user,
+		Validated:    true,
+		Expiration:   now.Add(tokenCacheValidatedResidency),
+		SessionCache: security.NewSessionCache(),
+	}
+	tc.insertLocked(entry, now, tokenCacheValidatedResidency)
+	return entry.SessionCache
+}
+
+// lookupLocked returns the live entry for token, marking it used, and
+// drops one that is past its time. tc.mu must be held.
+func (tc *TokenCache) lookupLocked(token string, now time.Time) (*TokenCacheEntry, bool) {
+	entry, ok := tc.entries[token]
+	if !ok {
+		return nil, false
+	}
+	if now.After(entry.evictAt) {
+		tc.removeLocked(entry)
+		return nil, false
+	}
+	entry.lru.MoveToFront(entry.elem)
+	return entry, true
+}
+
+// insertLocked adds entry, to stay at most residency (and never past
+// its Expiration), making room first if the cache is full. tc.mu must
+// be held.
+func (tc *TokenCache) insertLocked(entry *TokenCacheEntry, now time.Time, residency time.Duration) {
+	if now.Sub(tc.lastSweep) >= tokenCacheSweepInterval || len(tc.entries) >= tc.maxEntries {
+		tc.sweepLocked(now)
+	}
+	for len(tc.entries) >= tc.maxEntries {
+		// Least recently used, unverified first.
+		victim := tc.unvalidated.Back()
+		if victim == nil {
+			victim = tc.validated.Back()
+		}
+		if victim == nil {
+			break
+		}
+		tc.removeLocked(victim.Value.(*TokenCacheEntry))
 	}
 
-	// Schedule automatic cleanup when token expires
-	duration := time.Until(expiration)
-	entry.expiryTimer = time.AfterFunc(duration, func() {
-		tc.Remove(token)
-	})
+	entry.evictAt = now.Add(residency)
+	if entry.Expiration.Before(entry.evictAt) {
+		entry.evictAt = entry.Expiration
+	}
+	entry.lru = tc.unvalidated
+	if entry.Validated {
+		entry.lru = tc.validated
+	}
+	entry.elem = entry.lru.PushFront(entry)
+	tc.entries[entry.Token] = entry
+}
 
-	tc.entries[token] = entry
+// sweepLocked drops every entry past its time. tc.mu must be held.
+func (tc *TokenCache) sweepLocked(now time.Time) {
+	tc.lastSweep = now
+	for _, entry := range tc.entries {
+		if now.After(entry.evictAt) {
+			tc.removeLocked(entry)
+		}
+	}
+}
 
-	return entry, nil
+// removeLocked drops entry. tc.mu must be held.
+func (tc *TokenCache) removeLocked(entry *TokenCacheEntry) {
+	entry.lru.Remove(entry.elem)
+	delete(tc.entries, entry.Token)
 }
 
 // Get retrieves a token cache entry if it exists and is not expired
 func (tc *TokenCache) Get(token string) (*TokenCacheEntry, bool) {
-	tc.mu.RLock()
-	defer tc.mu.RUnlock()
-
-	entry, exists := tc.entries[token]
-	if !exists {
-		return nil, false
-	}
-
-	// Check if expired
-	if time.Now().After(entry.Expiration) {
-		return nil, false
-	}
-
-	return entry, true
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.lookupLocked(token, tc.now())
 }
 
-// Remove removes a token from the cache and cancels its cleanup timer
+// Remove removes a token from the cache
 func (tc *TokenCache) Remove(token string) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-
-	entry, exists := tc.entries[token]
-	if !exists {
-		return
+	if entry, ok := tc.entries[token]; ok {
+		tc.removeLocked(entry)
 	}
-
-	// Cancel the expiry timer
-	if entry.expiryTimer != nil {
-		entry.expiryTimer.Stop()
-	}
-
-	// Cancel the cleanup goroutine context
-	if entry.cancelCleanup != nil {
-		entry.cancelCleanup()
-	}
-
-	delete(tc.entries, token)
 }
 
-// Size returns the number of cached tokens
+// Size returns the number of cached tokens that have not expired
 func (tc *TokenCache) Size() int {
-	tc.mu.RLock()
-	defer tc.mu.RUnlock()
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.sweepLocked(tc.now())
 	return len(tc.entries)
 }
 
-// MarkValidated promotes a cached token to "validated" status, meaning
-// a schedd op has authenticated successfully with it. Callers may
-// optionally pass an authoritativeUsername observed from the schedd
-// handshake — if non-empty and different from the JWT-claimed
-// username, the entry is updated to the schedd-authoritative value
-// (this protects against any case where the unverified sub claim
-// disagreed with the schedd's interpretation).
+// MarkValidated promotes a cached token to "validated" status, with
+// authoritativeUsername (if non-empty) replacing the JWT-claimed
+// username.
+//
+// The only acceptable evidence is an identity a CEDAR handshake
+// reported for a connection that authenticated with this token. A
+// successful HTTP response is not evidence: plenty of endpoints answer
+// 2xx without ever presenting the token to a daemon.
 //
 // Idempotent: safe to call repeatedly per request.
 func (tc *TokenCache) MarkValidated(token, authoritativeUsername string) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	entry, ok := tc.entries[token]
+	now := tc.now()
+	entry, ok := tc.lookupLocked(token, now)
 	if !ok {
 		return
 	}
 	if authoritativeUsername != "" && entry.Username != authoritativeUsername {
 		entry.Username = authoritativeUsername
 	}
+	if entry.Validated {
+		return
+	}
+	tc.removeLocked(entry)
 	entry.Validated = true
+	tc.insertLocked(entry, now, tokenCacheValidatedResidency)
 }
 
 // ValidatedUsername returns the username for a token only if it has
-// been marked validated via a successful schedd handshake. Use this
+// been validated (see TokenCacheEntry.Validated). Use this
 // in code paths that must rely on authoritative identity (job-owner
 // filtering, share-URL minting, audit logs). For loose use cases
 // (rate-limit bucket key) the Get-and-read-Username pattern is fine.
 //
 // Returns "" if the token is unknown, expired, or not yet validated.
 func (tc *TokenCache) ValidatedUsername(token string) string {
-	tc.mu.RLock()
-	defer tc.mu.RUnlock()
-	entry, ok := tc.entries[token]
-	if !ok {
-		return ""
-	}
-	if time.Now().After(entry.Expiration) {
-		return ""
-	}
-	if !entry.Validated {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	entry, ok := tc.lookupLocked(token, tc.now())
+	if !ok || !entry.Validated {
 		return ""
 	}
 	return entry.Username
@@ -583,7 +709,7 @@ func (tc *TokenCache) ValidatedUsername(token string) string {
 
 // resolveCachedBearer reports the credential and scopes a request
 // should use for a bearer the cache already knows, given the bearer
-// itself as the fallback.
+// itself as the fallback, and whether the bearer is a scoped credential.
 //
 // Separated from createAuthenticatedContext so it can be tested:
 // that function cannot be driven through this branch in a unit test,
@@ -596,13 +722,13 @@ func (tc *TokenCache) ValidatedUsername(token string) string {
 // IS already a usable credential, and was wrong for every opaque one,
 // because CEDAR then had nothing to present and fell through to
 // whatever credential the daemon itself has.
-func resolveCachedBearer(entry *TokenCacheEntry, bearer string) (credential string, scopes []string) {
+func resolveCachedBearer(entry *TokenCacheEntry, bearer string) (credential string, scopes []string, scoped bool) {
 	if entry == nil {
-		return bearer, nil
+		return bearer, nil, false
 	}
 	credential = bearer
 	if entry.CondorCredential != "" {
 		credential = entry.CondorCredential
 	}
-	return credential, entry.Scopes
+	return credential, entry.Scopes, entry.Scoped
 }

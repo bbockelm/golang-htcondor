@@ -159,7 +159,28 @@ func (s *Server) liveJobCaller(ctx context.Context) (interactive.Caller, error) 
 		}
 		return interactive.Caller{Actor: me.Username, Owner: me.Username}, nil
 	}
-	return interactive.Caller{Actor: actor, Owner: ownerFromActor(actor)}, nil
+	owner := ownerFromActor(actor)
+	if owner == "" {
+		// An actor such as "@domain" names nobody, and an Owner == ""
+		// clause is not a confinement anybody should rely on.
+		return interactive.Caller{}, fmt.Errorf("authentication required")
+	}
+	return interactive.Caller{Actor: actor, Owner: owner}, nil
+}
+
+// localJobCaller is liveJobCaller for what is filed under the caller's
+// bare name -- interactive sessions, share URLs redeemed as that name in
+// UID_DOMAIN, a per-user staging directory -- and so is refused to a
+// placementd account in another domain (placementOutsideUIDDomain).
+func (s *Server) localJobCaller(ctx context.Context) (interactive.Caller, error) {
+	caller, err := s.liveJobCaller(ctx)
+	if err != nil {
+		return caller, err
+	}
+	if s.placementOutsideUIDDomain(ctx, caller.Actor) {
+		return interactive.Caller{}, errOutsideUIDDomain
+	}
+	return caller, nil
 }
 
 // interactiveManager returns the session manager, or an error naming
@@ -176,7 +197,7 @@ func (s *Server) toolInteractiveSessionStart(ctx context.Context, args map[strin
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.liveJobCaller(ctx)
+	caller, err := s.localJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +212,7 @@ func (s *Server) toolInteractiveSessionStart(ctx context.Context, args map[strin
 		Lease:        time.Duration(intArg(args, "lease_seconds", 0)) * time.Second,
 		Requirements: strings.TrimSpace(stringArg(args, "requirements")),
 		SubmitLines:  stringArg(args, "submit_lines"),
+		Schedd:       strings.TrimSpace(stringArg(args, "schedd")),
 	}
 	info, err := mgr.Create(ctx, caller, spec)
 	if err != nil {
@@ -202,10 +224,10 @@ func (s *Server) toolInteractiveSessionStart(ctx context.Context, args map[strin
 			{
 				"type": "text",
 				"text": fmt.Sprintf(
-					"Started interactive session %q (job %s). It is queued and will be ready once it matches a slot.\n"+
+					"Started interactive session %q (job %s%s). It is queued and will be ready once it matches a slot.\n"+
 						"Run commands with interactive_session_exec using session=%q — that call waits for the job to start.\n"+
 						"The session holds its slot until you call interactive_session_stop, or until %s with no calls on it.",
-					info.Name, info.JobID, info.Name, leaseDescription(info.LeaseExpires)),
+					info.Name, info.JobID, onAccessPoint(info.Schedd), info.Name, leaseDescription(info.LeaseExpires)),
 			},
 		},
 		"metadata":          interactiveInfoMetadata(*info),
@@ -218,7 +240,7 @@ func (s *Server) toolInteractiveSessionExec(ctx context.Context, args map[string
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.liveJobCaller(ctx)
+	caller, err := s.localJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +286,7 @@ func (s *Server) toolInteractiveSessionList(ctx context.Context, _ map[string]in
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.liveJobCaller(ctx)
+	caller, err := s.localJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +301,10 @@ func (s *Server) toolInteractiveSessionList(ctx context.Context, _ map[string]in
 	} else {
 		fmt.Fprintf(&sb, "%d interactive session(s):\n", len(infos))
 		for _, info := range infos {
-			fmt.Fprintf(&sb, "- %s: %s (job %s)", info.Name, info.Status, info.JobID)
+			fmt.Fprintf(&sb, "- %s: %s (job %s%s)", info.Name, info.Status, info.JobID, onAccessPoint(info.Schedd))
+			if info.APError != "" {
+				fmt.Fprintf(&sb, " — its access point cannot be reached now (%s); this is the last known state", info.APError)
+			}
 			if info.HoldReason != "" {
 				fmt.Fprintf(&sb, " — held: %s", info.HoldReason)
 			}
@@ -306,7 +331,7 @@ func (s *Server) toolInteractiveSessionStop(ctx context.Context, args map[string
 	if err != nil {
 		return nil, err
 	}
-	caller, err := s.liveJobCaller(ctx)
+	caller, err := s.localJobCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -337,6 +362,12 @@ func interactiveInfoMetadata(info interactive.Info) map[string]interface{} {
 	if info.HoldReason != "" {
 		m["hold_reason"] = info.HoldReason
 	}
+	if info.Schedd != "" {
+		m["schedd"] = info.Schedd
+	}
+	if info.APError != "" {
+		m["access_point_error"] = info.APError
+	}
 	if !info.LeaseExpires.IsZero() {
 		m["lease_expires"] = info.LeaseExpires.UTC().Format(time.RFC3339)
 	}
@@ -344,6 +375,15 @@ func interactiveInfoMetadata(info interactive.Info) map[string]interface{} {
 		m["submitted_at"] = info.SubmittedAt.UTC().Format(time.RFC3339)
 	}
 	return m
+}
+
+// onAccessPoint names the access point a session is on, in multi-AP
+// mode, for a tool's text.
+func onAccessPoint(schedd string) string {
+	if schedd == "" {
+		return ""
+	}
+	return ", on access point " + schedd
 }
 
 // formatExecResult renders a command's outcome for a model to read.

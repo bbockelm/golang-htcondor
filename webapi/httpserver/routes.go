@@ -42,8 +42,26 @@ const (
 	wellKnownProtectedResource = "/.well-known/oauth-protected-resource"
 )
 
+// recordingMux registers on the handler's ServeMux and remembers each
+// pattern, so a test can walk every route that exists rather than a list
+// someone remembered to update.
+type recordingMux struct {
+	*http.ServeMux
+	patterns *[]string
+}
+
+func (m recordingMux) Handle(pattern string, handler http.Handler) {
+	*m.patterns = append(*m.patterns, pattern)
+	m.ServeMux.Handle(pattern, handler)
+}
+
+func (m recordingMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	*m.patterns = append(*m.patterns, pattern)
+	m.ServeMux.HandleFunc(pattern, handler)
+}
+
 func (h *Handler) setupRoutes() {
-	mux := h.mux
+	mux := recordingMux{ServeMux: h.mux, patterns: &h.routePatterns}
 	cors := func(handler http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
@@ -65,11 +83,21 @@ func (h *Handler) setupRoutes() {
 	// Root handler: serve the embedded SPA when the frontend is compiled in,
 	// otherwise fall back to the legacy welcome page.
 	if webui.IsEmbedded() {
-		spa := webui.NewSPAHandler()
+		spa := webui.NewSPAHandler(webui.WithBranding(h.branding.current))
 		mux.Handle("/", spa)
 	} else {
 		mux.HandleFunc("/", h.handleWelcome)
 	}
+
+	// Site branding. Registered whether or not anything is configured:
+	// the endpoint answers with the defaults, and the two asset routes
+	// 404 -- which is a clearer answer to an operator checking their
+	// paths than a route that is not there at all. None of the three
+	// authenticates; they are the chrome of the login page as much as
+	// of the pages behind it.
+	mux.Handle(brandingPath, cors(http.HandlerFunc(h.handleWebUIBranding)))
+	mux.HandleFunc(webui.CSSPath, h.handleBrandingCSS)
+	mux.HandleFunc(brandingAssetPrefix, h.handleBrandingAsset)
 
 	// /.well-known/ is discovery space, never SPA content. Without this
 	// the root handler above answers every unregistered probe under it
@@ -91,6 +119,11 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/openapi.json", cors(http.HandlerFunc(h.handleOpenAPISchema)))
 	mux.HandleFunc("/docs", h.handleSwaggerUI)
 	mux.HandleFunc("/docs/oauth2-redirect", h.handleSwaggerOAuth2Redirect)
+
+	// The access points this server fronts, in multi-AP mode only.
+	if h.multi != nil {
+		mux.Handle("/api/v1/aps", cors(h.requireCondorScope(http.HandlerFunc(h.handleAPs))))
+	}
 
 	// Job management endpoints
 	mux.Handle("/api/v1/jobs/watch", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobsWatch)))) // SSE job-ad change stream (more specific than /api/v1/jobs/ below)
@@ -115,6 +148,15 @@ func (h *Handler) setupRoutes() {
 	// prefix so handlePlacementPath can route on the last segment; all
 	// of them are admin-gated inside the handlers.
 	mux.Handle("/api/v1/placement/", cors(http.HandlerFunc(h.handlePlacementPath)))
+	// Directory CRUD (handlers_placement_admin.go); admin-gated inside.
+	mux.Handle(placementAdminPrefix+"/", cors(http.HandlerFunc(h.handlePlacementAdmin)))
+
+	// placement-webapp's device flow, at its own paths, for
+	// placement-client (placement_device.go). No CORS: these are for
+	// command-line clients and the browser that follows /auth/code.
+	mux.HandleFunc("/auth/device_authorization", h.handlePlacementDeviceAuthorization)
+	mux.HandleFunc("/auth/code", h.handlePlacementDeviceCode)
+	mux.HandleFunc("/auth/cancel_device", h.handlePlacementDeviceCancel)
 
 	// Authentication endpoint
 	mux.Handle("/api/v1/whoami", cors(http.HandlerFunc(h.handleWhoAmI)))
@@ -147,6 +189,21 @@ func (h *Handler) setupRoutes() {
 
 	mux.Handle("/api/v1/dashboard", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboard))))
 	mux.Handle("/api/v1/issues", cors(h.requireCondorScope(http.HandlerFunc(h.handleIssues))))
+	// How well finished jobs used what they reserved, with submit-file
+	// advice. Owner-scoped like the archive it reads.
+	mux.Handle("/api/v1/utilization", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilization))))
+	// One workflow's jobs, a page at a time.
+	mux.Handle("/api/v1/utilization/jobs", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationJobs))))
+	// The Utilization workflow a job belongs to, for a link from its page.
+	mux.Handle("/api/v1/utilization/for-job/", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationForJob))))
+	// One workflow's full detail, and applying its advice to its waiting jobs.
+	mux.Handle("/api/v1/utilization/workflow", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationWorkflow))))
+	mux.Handle("/api/v1/batches/", cors(h.requireCondorScope(http.HandlerFunc(h.handleBatch)))) // /api/v1/batches/{id}[/jobs]: one /jobs row over its whole life
+	mux.Handle("/api/v1/utilization/apply", cors(h.requireCondorScope(http.HandlerFunc(h.handleUtilizationApply))))
+	// Per-day submitted / completed / removed / in-queue counts over
+	// months, from the mirror's history archive. Owner-scoped like
+	// everything else that reads it.
+	mux.Handle("/api/v1/calendar", cors(h.requireCondorScope(http.HandlerFunc(h.handleCalendar))))
 	mux.Handle("/api/v1/dashboard/activity", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboardActivity))))
 	mux.Handle("/api/v1/dashboard/activity/stream", cors(h.requireCondorScope(http.HandlerFunc(h.handleDashboardActivityStream))))
 
@@ -168,6 +225,15 @@ func (h *Handler) setupRoutes() {
 	// can return appropriate status codes (503 when the admin UI is
 	// not configured, 403 when the user lacks the group, 401 when
 	// no session is present).
+	// Reservations: recurring holds of pool capacity for a project.
+	// Admin-gated inside the handlers like the rest of /api/v1/admin.
+	mux.Handle("/api/v1/admin/reservations", cors(http.HandlerFunc(h.handleAdminReservations)))
+	// Exact paths first: neither "health" nor "windows" is a
+	// reservation ID. The draft preview sits here rather than under an
+	// ID because the draft has not been saved and so has none.
+	mux.Handle("/api/v1/admin/reservations/health", cors(http.HandlerFunc(h.handleAdminReservationHealth)))
+	mux.Handle("/api/v1/admin/reservations/windows", cors(http.HandlerFunc(h.handleAdminReservationWindowsPreview)))
+	mux.Handle("/api/v1/admin/reservations/", cors(http.HandlerFunc(h.handleAdminReservation)))
 	mux.Handle("/api/v1/admin/oauth2/clients", cors(http.HandlerFunc(h.handleAdminListClients)))
 	// The per-client path carries both the delete and the notes edit;
 	// split here so each handler can stay about one verb.
@@ -185,6 +251,7 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/admin/oauth2/tokens/revoke", cors(http.HandlerFunc(h.handleAdminRevokeToken)))
 	mux.Handle("/api/v1/admin/oauth2/tokens/scopes", cors(http.HandlerFunc(h.handleAdminSetTokenScopes)))
 	mux.Handle("/api/v1/admin/logs", cors(http.HandlerFunc(h.handleAdminLogs)))
+	mux.Handle("/api/v1/admin/usage", cors(http.HandlerFunc(h.handleAdminUsage)))
 	mux.Handle("/api/v1/admin/condor-config", cors(http.HandlerFunc(h.handleAdminCondorConfig)))
 	// API key management (admin-only). The collection path covers
 	// list (GET) and create (POST); the per-key path is for soft-
@@ -247,11 +314,15 @@ func (h *Handler) setupRoutes() {
 	// /chat/info answers a feature probe and touches nothing.
 	mux.Handle("/api/v1/chat", cors(h.requireCondorScope(http.HandlerFunc(h.handleChat))))
 	mux.Handle("/api/v1/chat/info", cors(http.HandlerFunc(h.handleChatInfo)))
+	// Which jobs the chat's tools would cover for this caller on a page.
+	mux.Handle("/api/v1/chat/scope", cors(h.requireCondorScope(http.HandlerFunc(h.handleChatScope))))
 
 	// Collector endpoints
 	mux.Handle("/api/v1/collector/pool-summary", cors(h.requireCondorScope(http.HandlerFunc(h.handlePoolSummary)))) // aggregated /pool overview (more specific than the dispatcher below)
 	mux.Handle("/api/v1/collector/watch", cors(h.requireCondorScope(http.HandlerFunc(h.handleCollectorWatch))))     // SSE ad-change stream (more specific than the dispatcher below)
 	mux.Handle("/api/v1/collector/", h.requireCondorScope(http.HandlerFunc(h.handleCollectorPath)))                 // Pattern with trailing slash catches /api/v1/collector/* paths
+	// When each execute node would be empty if drained now (pool_drain.go).
+	mux.Handle("/api/v1/pool/drain-estimates", cors(h.requireCondorScope(http.HandlerFunc(h.handlePoolDrainEstimates))))
 
 	// htcondordb mirror status (admin-gated inside the handler). The
 	// data is on /readyz and /metrics too, but both of those answer a
@@ -267,26 +338,27 @@ func (h *Handler) setupRoutes() {
 	mux.HandleFunc("/api/v1/schedd/ping", h.handleScheddPing) // Ping schedd only
 	// Collector ping is handled via /api/v1/collector/ping in handleCollectorPath
 
-	// MCP endpoints (OAuth2 protected)
+	// OAuth2: served whenever the provider exists, which is whenever the
+	// web UI or MCP is (HandlerConfig.OAuth2Enabled). MCP gates only the
+	// MCP-specific routes inside: the protocol endpoint, the /mcp/
+	// spelling of the OAuth2 endpoints, and the protected-resource
+	// documents that describe /mcp.
 	if h.oauth2Provider != nil {
 		// OAuth2 metadata discovery (RFC 8414 and RFC 9068)
 		mux.HandleFunc("/.well-known/oauth-authorization-server", h.handleOAuth2Metadata)
+		// RFC 9728 for the REST API, which accepts these bearer tokens
+		// whether or not MCP is on.
 		mux.HandleFunc(wellKnownProtectedResource, h.handleOAuth2ProtectedResourceMetadata)
-		// RFC 9728 section 3.1: a resource with a path is described at
-		// that path appended to the well-known one. MCP clients derive
-		// this URL from the server URL they were configured with, so
-		// without it they fetch a document that does not exist -- see
-		// handleOAuth2ProtectedResourceMetadata.
-		mux.HandleFunc(wellKnownProtectedResource+mcpPath, h.handleOAuth2ProtectedResourceMetadata)
-		mux.HandleFunc(wellKnownProtectedResource+mcpMessagePath, h.handleOAuth2ProtectedResourceMetadata)
 
-		// OAuth2 endpoints, each served under both prefixes.
+		// OAuth2 endpoints. The plain /oauth2/ path always; the /mcp/
+		// one where MCP is on.
 		//
 		// The /mcp/ prefix is historical: MCP is what first needed
 		// these, and they now serve the web UI, editor extensions and
-		// anything else that speaks OAuth2. The plain path is what gets
-		// advertised where the web UI is compiled in; the old one stays
-		// routed because a client discovers these once and keeps them.
+		// anything else that speaks OAuth2. It stays routed wherever MCP
+		// is, because a client discovers these once and keeps them. A
+		// server without MCP never served OAuth2 under it, so nothing
+		// holds that spelling there.
 		oauth2Handlers := map[string]http.HandlerFunc{
 			"authorize":        h.handleOAuth2Authorize,
 			"consent":          h.handleOAuth2Consent,
@@ -301,22 +373,39 @@ func (h *Handler) setupRoutes() {
 			if !ok {
 				continue
 			}
-			mux.HandleFunc(oauth2EndpointPathFor(false, name), handler)
+			// Any of these can name a client_id that is a metadata
+			// document URL, so each charges the fetch to its caller.
+			handler = h.withCIMDSource(handler)
 			mux.HandleFunc(oauth2EndpointPathFor(true, name), handler)
+			if h.mcpEnabled {
+				mux.HandleFunc(oauth2EndpointPathFor(false, name), handler)
+			}
 		}
-		// The SSO callback is served at both paths whatever the server
-		// advertises (OAuth2CallbackPath): an authorization started before
-		// an upgrade comes back to the path it began with.
-		mux.HandleFunc(mcpCallbackPath, h.handleOAuth2Callback)
+		// The SSO callback and the device verification page (RFC 8628).
+		// Where MCP is on, both spellings are served whatever the server
+		// advertises: an authorization or a device code issued before an
+		// upgrade comes back to the path it began with, and a device
+		// code's user has minutes to open it.
 		mux.HandleFunc(webUICallbackPath, h.handleOAuth2Callback)
-
-		// Device code flow endpoints (RFC 8628)
-		// Served at both paths whatever this server advertises
-		// (OAuth2DeviceVerifyPath): a device code issued before an
-		// upgrade carries the URL it was issued with, and its user has
-		// minutes to open it.
-		mux.HandleFunc(mcpDeviceVerifyPath, h.handleOAuth2DeviceVerify)
 		mux.HandleFunc(webUIDeviceVerifyPath, h.handleOAuth2DeviceVerify)
+		if h.mcpEnabled {
+			mux.HandleFunc(mcpCallbackPath, h.handleOAuth2Callback)
+			mux.HandleFunc(mcpDeviceVerifyPath, h.handleOAuth2DeviceVerify)
+		}
+		h.logger.Info(logging.DestinationHTTP, "OAuth2 endpoints enabled",
+			"path_prefix", oauth2EndpointPathFor(h.plainOAuth2Paths(), ""))
+	}
+
+	// MCP: the protocol endpoint and the documents describing it. Needs
+	// the provider too, since every MCP request is authenticated by it.
+	if h.mcpEnabled && h.oauth2Provider != nil {
+		// RFC 9728 section 3.1: a resource with a path is described at
+		// that path appended to the well-known one. MCP clients derive
+		// this URL from the server URL they were configured with, so
+		// without it they fetch a document that does not exist -- see
+		// handleOAuth2ProtectedResourceMetadata.
+		mux.HandleFunc(wellKnownProtectedResource+mcpPath, h.handleOAuth2ProtectedResourceMetadata)
+		mux.HandleFunc(wellKnownProtectedResource+mcpMessagePath, h.handleOAuth2ProtectedResourceMetadata)
 
 		// MCP protocol endpoint. "/mcp" is an exact-match pattern --
 		// it does not shadow /mcp/oauth2/... -- and /mcp/message stays

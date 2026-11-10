@@ -15,6 +15,8 @@ package httpserver
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -27,6 +29,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
+	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
 )
 
 // jobProxyDialTimeout bounds establishing the transport plus the
@@ -51,7 +54,7 @@ func (s *Handler) getOrCreateJobSSHCache() (*jobssh.Cache, error) {
 		return s.jobSSHCache, nil
 	}
 	cache, err := jobssh.NewCache(jobssh.Options{
-		Dial:   jobssh.ScheddDialer(s.getSchedd, s.ccbDialer),
+		Dial:   jobssh.ScheddDialer(s.scheddForTransport, s.ccbDialer),
 		Logger: s.logger,
 	})
 	if err != nil {
@@ -59,6 +62,24 @@ func (s *Handler) getOrCreateJobSSHCache() (*jobssh.Cache, error) {
 	}
 	s.jobSSHCache = cache
 	return cache, nil
+}
+
+// scheddForTransport is the schedd a cached job transport is opened
+// through: the one schedd, or in multi-AP mode the member key.Schedd
+// names. A transport keyed to no AP has no schedd in multi-AP mode --
+// the dial fails rather than going anywhere.
+func (s *Handler) scheddForTransport(key jobssh.Key) *htcondor.Schedd {
+	if s.multi == nil {
+		return s.getSchedd()
+	}
+	if key.Schedd == "" {
+		return nil
+	}
+	m, err := s.multi.svc.Member(key.Schedd)
+	if err != nil {
+		return nil
+	}
+	return m.Schedd
 }
 
 // closeJobSSHCache releases every cached transport. Called from the
@@ -71,6 +92,111 @@ func (s *Handler) closeJobSSHCache() {
 	if cache != nil {
 		cache.Close()
 	}
+}
+
+// Credential descriptors for jobssh.Key.Credential. See
+// jobTransportCredential.
+const (
+	jobTransportMintedWrite   = "minted:write"
+	jobTransportMintedLimited = "minted:limited"
+)
+
+// jobTransportKey is the cache key for a transport into cluster.proc
+// opened under ctx, or an error saying why there is none.
+//
+// The owner is the identity ctx was resolved to, unchanged: it is not
+// reduced to an HTCondor Owner here, so two actors that differ only in
+// realm do not share a slot. bearer is the request's own bearer, ""
+// for none; imp is the superuser impersonation ctx carries, if any.
+//
+// Under superuser impersonation ctx still names the caller --
+// impersonate swaps only the credential -- so the impersonation goes
+// into the key as well: a transport opened as the fallback identity on
+// bob's behalf must never be returned to a plain lookup by the same
+// caller, such as the SSH gateway's, where it would outlive the arm and
+// the leads file with no superuser check and no audit. Two operators
+// impersonating the same owner differ by Owner, so they do not share
+// one either.
+func jobTransportKey(ctx context.Context, bearer string, imp *Impersonation, cluster, proc int) (jobssh.Key, error) {
+	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
+	if owner == "" {
+		return jobssh.Key{}, fmt.Errorf("no authenticated identity")
+	}
+	cred := jobTransportCredential(ctx, bearer)
+	if cred == "" {
+		return jobssh.Key{}, fmt.Errorf("no HTCondor credential to reach the job with")
+	}
+	// The access point the request was routed to: "" in single-AP mode.
+	key := jobssh.Key{Owner: owner, Credential: cred, Schedd: routedSchedd(ctx), Cluster: cluster, Proc: proc}
+	if imp != nil {
+		key.Impersonation = imp.transportTag()
+	}
+	return key, nil
+}
+
+// jobTransportCredential describes the credential ctx would open a job
+// transport with, for jobssh.Key.Credential. "" when it carries none.
+//
+// Two kinds, kept apart (an impersonation is told apart by
+// jobssh.Key.Impersonation, not here):
+//
+//   - A bearer handed straight to cedar -- a forwarded IDTOKEN -- is
+//     described by a digest of itself. Its identity was resolved by
+//     asking the schedd, and only that one credential has been shown
+//     to be good for it.
+//   - A credential this server minted for an identity it established
+//     itself (a session, a trusted header, an OAuth2 grant, an API key,
+//     the SSH gateway) is re-minted per request or per channel, so a
+//     digest would never match twice. It is described by what matters
+//     for a transport instead: whether it carries WRITE, which is what
+//     the schedd requires to open one. Every minted credential with
+//     WRITE for this owner could open the transport itself, so sharing
+//     among them grants nothing; one without WRITE gets a slot of its
+//     own and cannot borrow a transport it could not have opened.
+func jobTransportCredential(ctx context.Context, bearer string) string {
+	sec, ok := htcondor.GetSecurityConfigFromContext(ctx)
+	if !ok || sec.Token == "" {
+		return ""
+	}
+	if bearer != "" && sec.Token == bearer {
+		return "bearer:" + mcpActorKey(bearer)
+	}
+	if mintedCredentialMayWrite(sec.Token) {
+		return jobTransportMintedWrite
+	}
+	return jobTransportMintedLimited
+}
+
+// mintedCredentialMayWrite reports whether an IDTOKEN this server
+// minted carries WRITE: no scope claim at all is unrestricted.
+//
+// Read without verifying the signature, which is sound only because
+// the token is this server's own: it is never applied to a bearer a
+// caller supplied. A token that cannot be read is treated as limited.
+func mintedCredentialMayWrite(token string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Scope *string `json:"scope"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return false
+	}
+	if claims.Scope == nil {
+		return true
+	}
+	for _, sc := range strings.Fields(*claims.Scope) {
+		if sc == "condor:/WRITE" {
+			return true
+		}
+	}
+	return false
 }
 
 // parseProxyPort accepts only what can be a TCP port a job listens on.
@@ -133,17 +259,20 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		return
 	}
 	username := htcondor.GetAuthenticatedUserFromContext(ctx)
-
-	// Superuser reach, on the same terms as the terminal: the session
-	// is the grant, and what travels inside it is between the operator
-	// and the job. Audited at the point the transport is opened.
-	ctx, imp, err := s.superuserActionContext(ctx, r, cluster, proc)
-	if err != nil {
-		s.writeError(w, http.StatusForbidden, err.Error())
+	if username == "" {
+		// A transport is keyed by who is asking; with nobody to key it
+		// by there is nothing this request may use.
+		s.writeError(w, http.StatusUnauthorized, "Authentication failed: no authenticated identity")
 		return
 	}
-	if imp != nil {
-		s.auditSuperuserAction(r, imp, "job-proxy", fmt.Sprintf("%d.%d", cluster, proc), nil)
+
+	// Never while superuser mode is armed: the app is served on this
+	// origin, so it would run job-controlled code in an elevated
+	// session. See refuseJobAppWhileArmed. With that refused there is
+	// no impersonation here: the proxy always runs as the caller.
+	if refusal := s.refuseJobAppWhileArmed(r, "job-proxy"); refusal != nil {
+		s.writeError(w, http.StatusForbidden, refusal.Error())
+		return
 	}
 
 	// A universe with no starter can never be reached, however long we
@@ -181,7 +310,7 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		// Every part below is ours: cluster and proc are ints, the port
 		// is an int, and the socket name was held to [A-Za-z0-9._-] in
 		// parseProxyTarget.
-		redirect := url.URL{Path: jobProxyPrefix(cluster, proc, target), RawQuery: r.URL.RawQuery}
+		redirect := url.URL{Path: jobProxyPrefix(s.jobPathID(ctx, cluster, proc), target), RawQuery: r.URL.RawQuery}
 		http.Redirect(w, r, redirect.String(), http.StatusTemporaryRedirect)
 		return
 	}
@@ -192,16 +321,13 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		return
 	}
 
-	// The transport is keyed by the identity it will authenticate as,
-	// never by the job alone -- see jobssh.Key. Under superuser
-	// impersonation that is the job's owner, which is who the schedd
-	// builds the starter session as, so keying by the operator's own
-	// name would hand a second operator the first one's transport.
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
-	if owner == "" {
-		owner = username
+	// Keyed by caller and credential, never by the job alone -- see
+	// jobTransportKey.
+	key, err := jobTransportKey(ctx, bearerFromRequest(r), nil, cluster, proc)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		return
 	}
-	key := jobssh.Key{Owner: owner, Cluster: cluster, Proc: proc}
 
 	// Preserve the browser's Host. Our dialer ignores it -- the
 	// destination is decided by key and target, not by routing -- but
@@ -220,6 +346,7 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		outURL.Path = "/"
 	}
 
+	scrub := s.jobProxyScrubber()
 	proxy := &httputil.ReverseProxy{
 		// Director rather than Rewrite, matching the Jupyter proxy.
 		// Rewrite is not a drop-in: ReverseProxy strips
@@ -232,6 +359,9 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 		Director: func(req *http.Request) {
 			req.URL = &outURL
 			req.Host = outURL.Host
+			// The caller's session and bearer stop here: whatever the
+			// job runs could read them and act as the caller.
+			scrub.Request(req)
 			// Do NOT delete Connection here. ReverseProxy inspects it
 			// AFTER the Director runs to decide whether this is a
 			// protocol upgrade (upgradeType() in
@@ -240,6 +370,7 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 			// answers with 400 -- which for an editor means it loads
 			// and then never connects.
 		},
+		ModifyResponse: scrub.Response,
 		Transport: &http.Transport{
 			DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
 				dialCtx, cancel := context.WithTimeout(dialCtx, jobProxyDialTimeout)
@@ -273,17 +404,28 @@ func (s *Handler) handleJobProxy(w http.ResponseWriter, r *http.Request, cluster
 	s.logger.Debug(logging.DestinationHTTP, "proxying into job",
 		"user", username, "cluster", cluster, "proc", proc,
 		"target", target.describe(), "path", upstreamPath)
+	removeBodyLimit(r)
 	proxy.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// jobProxyScrubber removes this server's credentials from requests
+// proxied into a job, including the header it reads a username from.
+func (s *Handler) jobProxyScrubber() *proxyscrub.Scrubber {
+	return proxyscrub.New(s.userHeader)
 }
 
 // jobProxyPrefix is the canonical, trailing-slash URL for a target
 // inside a job: what a browser must be at for the app's relative URLs
 // to resolve.
-func jobProxyPrefix(cluster, proc int, t jobProxyTarget) string {
+//
+// job is the id as the browser addresses it: cluster.proc, or in
+// multi-AP mode the codec's complete form, which the codec keeps free of
+// anything a path segment would have to escape.
+func jobProxyPrefix(job string, t jobProxyTarget) string {
 	if t.Socket != "" {
-		return fmt.Sprintf("/api/v1/jobs/%d.%d/proxy/unix/%s/", cluster, proc, t.Socket)
+		return fmt.Sprintf("/api/v1/jobs/%s/proxy/unix/%s/", job, t.Socket)
 	}
-	return fmt.Sprintf("/api/v1/jobs/%d.%d/proxy/%d/", cluster, proc, t.Port)
+	return fmt.Sprintf("/api/v1/jobs/%s/proxy/%d/", job, t.Port)
 }
 
 // parseProxyTarget reads the segment after /proxy/ as either the

@@ -1,6 +1,7 @@
 package jobwatch
 
 import (
+	"errors"
 	"path"
 	"strconv"
 	"sync"
@@ -49,7 +50,10 @@ type ActivityEvent struct {
 	Kind    ActivityKind
 	Cluster int64
 	Proc    int64
-	Owner   string
+	// Schedd is the job's access point, from ScheddName, on a feed that
+	// follows several; empty with one schedd.
+	Schedd string
+	Owner  string
 	// At is when the transition was observed, not when the job says it
 	// happened. The two differ by the mirror's lag, and the observed
 	// time is the honest one for a live ticker.
@@ -77,10 +81,12 @@ type ActivityEvent struct {
 const firstSightingWindow = 2 * time.Minute
 
 type activitySub struct {
-	// owner is the identity this subscriber may see, or "" for all of
-	// them. Filtering here rather than in the caller keeps an
-	// unprivileged browser from ever receiving another user's job.
+	// owner is the identity this subscriber may see, and all says it
+	// may see every owner instead. Filtering here rather than in the
+	// caller keeps an unprivileged browser from ever receiving another
+	// user's job.
 	owner string
+	all   bool
 	ch    chan ActivityEvent
 	mu    sync.Mutex
 	// skipped counts events dropped because ch was full, to be reported
@@ -89,19 +95,31 @@ type activitySub struct {
 	once    sync.Once
 }
 
-// SubscribeActivity follows every transition, optionally filtered to one
-// owner. Pass "" for all owners, which is for an administrator only.
+// ErrActivityScope is returned by SubscribeActivity for a subscription
+// that names neither one owner nor every owner.
+var ErrActivityScope = errors.New("activity subscription needs exactly one of an owner or all")
+
+// SubscribeActivity follows the transitions of one owner's jobs, or with
+// all set, of every owner's -- which is for an administrator or this
+// daemon's own use only.
+//
+// An empty owner is refused rather than read as "everyone": it is what
+// a caller nobody could identify has, and that caller must get nothing,
+// not the whole access point. Every owner is asked for by name.
 //
 // The returned cancel must be called or the subscription leaks for the
 // life of the process. buf is how many events may queue for a slow
 // reader; beyond that the oldest are dropped and counted, because a
 // browser tab must never be able to stall the feed the MCP watch
 // evaluator reads from.
-func (f *Feed) SubscribeActivity(owner string, buf int) (<-chan ActivityEvent, func()) {
+func (f *Feed) SubscribeActivity(owner string, all bool, buf int) (<-chan ActivityEvent, func(), error) {
+	if (owner == "") != all {
+		return nil, nil, ErrActivityScope
+	}
 	if buf <= 0 {
 		buf = 64
 	}
-	s := &activitySub{owner: owner, ch: make(chan ActivityEvent, buf)}
+	s := &activitySub{owner: owner, all: all, ch: make(chan ActivityEvent, buf)}
 
 	f.mu.Lock()
 	if f.activitySubs == nil {
@@ -117,14 +135,14 @@ func (f *Feed) SubscribeActivity(owner string, buf int) (<-chan ActivityEvent, f
 			f.mu.Unlock()
 			close(s.ch)
 		})
-	}
+	}, nil
 }
 
 // publishActivityLocked fans one transition out. The caller holds f.mu;
 // sends never block, so no subscriber can hold up the feed.
 func (f *Feed) publishActivityLocked(ev ActivityEvent) {
 	for s := range f.activitySubs {
-		if s.owner != "" && s.owner != ev.Owner {
+		if !s.all && s.owner != ev.Owner {
 			continue
 		}
 		s.deliver(ev)
@@ -163,7 +181,8 @@ func (f *Feed) activityFor(prev, next *classad.ClassAd) (ActivityEvent, bool) {
 	}
 	now := f.now()
 	ev := ActivityEvent{Cluster: id.cluster, Proc: id.proc, At: now.Unix()}
-	ev.Owner, _ = next.EvaluateAttrString("Owner")
+	ev.Owner = f.ownerOf(next)
+	ev.Schedd, _ = next.EvaluateAttrString("ScheddName")
 
 	recent := func(attr string) bool {
 		at, ok := next.EvaluateAttrInt(attr)
@@ -235,7 +254,8 @@ func (f *Feed) activityForDelete(last *classad.ClassAd) (ActivityEvent, bool) {
 		return ActivityEvent{}, false
 	}
 	ev := ActivityEvent{Cluster: id.cluster, Proc: id.proc, At: f.now().Unix()}
-	ev.Owner, _ = last.EvaluateAttrString("Owner")
+	ev.Owner = f.ownerOf(last)
+	ev.Schedd, _ = last.EvaluateAttrString("ScheddName")
 	switch status {
 	case 4:
 		ev.Kind, ev.Detail = ActivityCompleted, outcome(last)

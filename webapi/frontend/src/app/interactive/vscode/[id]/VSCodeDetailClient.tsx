@@ -16,6 +16,7 @@ import { useRouter } from 'next/navigation';
 import { api, type AppSummary } from '@/lib/api';
 import { useResolvedParams } from '@/lib/useResolvedParams';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { AppsBlockedNotice, useAppsBlockedBySuperuser } from '@/components/AppsBlockedNotice';
 
 export default function VSCodeDetailClient() {
   const { id } = useResolvedParams<{ id: string }>('/interactive/vscode/[id]');
@@ -38,6 +39,7 @@ export default function VSCodeDetailClient() {
   // stays that way -- the same failure the Jupyter client documents,
   // where React reconciled the element and it never recovered.
   const [reloads, setReloads] = useState(0);
+  const blocked = useAppsBlockedBySuperuser();
 
   const remove = useMutation({
     mutationFn: () => api.apps.remove(id),
@@ -60,7 +62,7 @@ export default function VSCodeDetailClient() {
           </Link>
         )}
         <div className="ml-auto flex items-center gap-3">
-          {data?.url && (
+          {data?.url && !blocked && (
             <>
               <button
                 onClick={() => setReloads((n) => n + 1)}
@@ -100,7 +102,9 @@ export default function VSCodeDetailClient() {
 
       {data && !data.url && <Waiting app={data} />}
 
-      {data?.url && (
+      {data?.url && blocked && <AppsBlockedNotice />}
+
+      {data?.url && !blocked && (
         <iframe
           // Keyed by the URL so React replaces the element rather than
           // reusing one that loaded an error page while the server was

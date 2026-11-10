@@ -86,3 +86,21 @@ func TestFromCarriesTheOutcomeOnlyWhenFired(t *testing.T) {
 		t.Fatalf("an unfired watch reported an outcome it does not have: %+v", pending)
 	}
 }
+
+// A watch on a job that is still running has selected it and nothing has
+// reached the event. With matched_total alone that read as 0 -- the same as
+// a constraint with a typo in the cluster id (issue #576).
+func TestSelectedIsDistinctFromMatched(t *testing.T) {
+	now := time.Now()
+	running := From(&jobwatch.Watch{
+		ID: "w1", CreatedAt: now.Add(-time.Minute),
+		Tracked: []jobwatch.JobID{{Cluster: 12089220, Proc: 0}},
+	}, 0, now)
+	if running.Selected != 1 || running.MatchedTotal != 0 {
+		t.Errorf("running job: selected=%d matched_total=%d, want 1 and 0", running.Selected, running.MatchedTotal)
+	}
+	typo := From(&jobwatch.Watch{ID: "w2", CreatedAt: now.Add(-time.Minute)}, 0, now)
+	if typo.Selected != 0 {
+		t.Errorf("a watch that selected nothing reports selected=%d", typo.Selected)
+	}
+}

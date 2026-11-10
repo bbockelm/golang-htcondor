@@ -1,7 +1,8 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import {
+  RequirementsSection,
   ResourceTable,
   UsageBar,
   dagLayers,
@@ -21,6 +22,9 @@ import {
   workflowLogAvailability,
 } from './JobDetailClient';
 import type { ClassAd } from '@/lib/api';
+import { exprRequestJob } from '@/lib/jobRequests.fixture';
+import { formatMetric } from '@/lib/metrics';
+import { CONTAINER_GPU_NOTABLE, CONTAINER_GPU_REQUIREMENTS } from '@/lib/requirements.fixture';
 
 describe('everRan', () => {
   // The Output Files panel gates on this. A job that ran and went back
@@ -250,9 +254,58 @@ describe('ResourceTable', () => {
     expect(screen.getByText('2')).toBeInTheDocument();
   });
 
+  // A finished job's record has GPUsAverageUsage and never GPUsUsage.
+  it('shows a finished job\'s GPU use from GPUsAverageUsage', () => {
+    render(<ResourceTable job={{ RequestGPUs: 2, GPUsProvisioned: 2, GPUsAverageUsage: 1.25 } as ClassAd} />);
+    expect(screen.getByText('GPUs')).toBeInTheDocument();
+    expect(screen.getByText('1.3')).toBeInTheDocument();
+  });
+
+  // Usage no job's GPUs could produce shows as unknown, judged against the
+  // GPUs it held -- which can be more than it asked for.
+  it.each([
+    ['req 2, prov 2, avg 12973.47', { RequestGPUs: 2, GPUsProvisioned: 2, AssignedGPUs: 'GPU-0a,GPU-0b', GPUsAverageUsage: 12973.47 }, '—'],
+    ['req 1, prov 2, two ids, avg 1.8', { RequestGPUs: 1, GPUsProvisioned: 2, AssignedGPUs: 'GPU-1a,GPU-1b', GPUsAverageUsage: 1.8 }, '1.8'],
+    ['req 4, prov 4, avg 3.2', { RequestGPUs: 4, GPUsProvisioned: 4, GPUsAverageUsage: 3.2 }, '3.2'],
+  ])('GPU use for %s', (_name, job, used) => {
+    render(<ResourceTable job={job as ClassAd} />);
+    const row = screen.getByText('GPUs').closest('tr')!;
+    expect(within(row).getAllByRole('cell')[2]).toHaveTextContent(used);
+  });
+
   it('still hides the GPU row for a job that asked for none', () => {
     render(<ResourceTable job={{ RequestCpus: 1 } as ClassAd} />);
     expect(screen.queryByText('GPUs')).toBeNull();
+  });
+
+  // The reported case: a running job with RequestGPUs = 0 and
+  // GPUsProvisioned = 0 got a GPU row reading "0".
+  it('hides the GPU row for a job that requested zero GPUs', () => {
+    render(<ResourceTable job={{ RequestCpus: 1, RequestGPUs: 0, GPUsProvisioned: 0 } as ClassAd} />);
+    expect(screen.queryByText('GPUs')).toBeNull();
+  });
+
+  it('shows the GPU row for a job holding a GPU it did not count in its request', () => {
+    render(<ResourceTable job={{ RequestGPUs: 0, AssignedGPUs: 'GPU-0000aaaa' } as ClassAd} />);
+    expect(screen.getByText('GPUs')).toBeInTheDocument();
+  });
+
+  // The reported case: RequestMemory is a rule over MemoryUsage, the graph
+  // drew its value (10.7 GB) and the table a dash. Both now read the value
+  // the server evaluated in the job's own ad.
+  it('shows a request written as an expression as the number it comes to', () => {
+    render(<ResourceTable job={exprRequestJob} />);
+    // The same words the graph's caption uses (formatMetric, via formatMiB).
+    expect(formatMetric(10987, 'MB')).toBe('10.7 GB');
+    const cell = screen.getByText('10.7 GB');
+    expect(cell).toBeInTheDocument();
+    expect(cell.closest('[title]')?.getAttribute('title')).toMatch(/^ifthenelse\(MemoryUsage/);
+    expect(screen.getByText('from expression')).toBeInTheDocument();
+    // 7325 used of 10987 requested.
+    expect(screen.getByText('7.2 GB')).toBeInTheDocument();
+    expect(screen.getByText('67%')).toBeInTheDocument();
+    // Disk, KiB on the wire, through the same formatter.
+    expect(screen.getByText('6 GB')).toBeInTheDocument();
   });
 
   // Memory is the one with two units in play: MemoryUsage is MiB and
@@ -265,6 +318,63 @@ describe('ResourceTable', () => {
       />,
     );
     expect(screen.getByText('50%')).toBeInTheDocument();
+  });
+
+  // The reported case: a job submitted with retry_request_memory shows
+  // the rung it is on now, which reads as the size it asked for all
+  // along. 12428255.40559 had climbed three of six rungs and the table
+  // said only "8 GB".
+  it('says a memory request is a rung the job climbed to', () => {
+    render(
+      <ResourceTable
+        job={
+          {
+            RequestMemory: 8192,
+            MemoryUsage: 7000,
+            RetryRequestMemory: [2048, 4096, 8192, 16384, 32768, 65536],
+            RetryRequestMemoryIndex: 3,
+            TransformOnEvict: 'RequestMemory RetryRequestMemoryIndex',
+          } as unknown as ClassAd
+        }
+      />,
+    );
+    const cell = screen.getByText('8 GB');
+    expect(screen.getByText('after 3 restarts at more memory')).toBeInTheDocument();
+    expect(cell.closest('[title]')?.getAttribute('title')).toBe(
+      'Runs out of memory and starts again at the next of 2 GB, 4 GB, 8 GB, 16 GB, 32 GB, 64 GB. It has done so 3 times.',
+    );
+  });
+
+  it('says a ladder the job has not had to climb is there', () => {
+    render(
+      <ResourceTable
+        job={
+          {
+            RequestMemory: 2048,
+            MemoryUsage: 1024,
+            RetryRequestMemory: [4096, 8192],
+            TransformOnEvict: 'RequestMemory RetryRequestMemoryIndex',
+          } as unknown as ClassAd
+        }
+      />,
+    );
+    expect(screen.getByText('retries up to 8 GB')).toBeInTheDocument();
+  });
+
+  it('leaves a job without a ladder as it was', () => {
+    render(<ResourceTable job={{ RequestMemory: 2048, MemoryUsage: 1024 } as ClassAd} />);
+    expect(screen.queryByText(/restarts at more memory|retries up to/)).toBeNull();
+  });
+});
+
+describe('RequirementsSection', () => {
+  it('breaks down a container GPU job\'s Requirements a clause per line', () => {
+    const { container } = render(<RequirementsSection job={{ Requirements: CONTAINER_GPU_REQUIREMENTS } as ClassAd} />);
+    const clauses = [...container.querySelectorAll('li code')].map((c) => c.textContent);
+    expect(clauses).toEqual(CONTAINER_GPU_NOTABLE);
+    expect(screen.getByText(/Standard resource requirements/)).toHaveTextContent(
+      'Standard resource requirements (CPUs, memory, GPUs)',
+    );
   });
 });
 

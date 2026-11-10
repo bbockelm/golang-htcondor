@@ -104,7 +104,15 @@ func (q *QueueStatement) statement() {}
 %token <str> IF ELIF ELSE ENDIF DEFINED VERSION
 %token <str> INCLUDE USE TRUE FALSE YES NO ERROR WARNING IFEXIST COMMAND INTO
 %token <str> QUEUE FROM IN MATCHING
-%token COLON LPAREN RPAREN LBRACK RBRACK COMMA PLUS
+// ITEMS is a whole queue item list, already split by the lexer. HTCondor's
+// rules for that split are character-level rather than token-level -- the
+// parentheses are optional, a bracketed list ends at the last ')' on the
+// line, a ')' elsewhere is an ordinary character, and quotes are not special
+// -- so the grammar takes the result rather than the punctuation. The same
+// goes for the item file after `from`, which arrives as a STRING holding the
+// whole remainder of the line.
+%token <strlist> ITEMS
+%token COLON LPAREN RPAREN LBRACK RBRACK COMMA PLUS MINUS
 %token EOF ILLEGAL COMMENT
 
 %type <stmts> config_file statement_list
@@ -113,7 +121,7 @@ func (q *QueueStatement) statement() {}
 %type <elseif> elif_clause
 %type <str> condition include_type identifier path_or_command
 %type <intval> queue_count
-%type <strlist> var_list item_list item_list_items
+%type <strlist> var_list item_list
 
 %%
 
@@ -179,6 +187,20 @@ assignment:
 		$$ = &Assignment{
 			Name:        $2,
 			Value:       $3,
+			ClassAdExpr: true,
+		}
+	}
+	| MINUS identifier ASSIGN
+	{
+		// -Attribute = expr, submit's other job-attribute form. It is not
+		// the inverse of +Attribute and it does not remove anything: the
+		// right-hand side is read and thrown away, and the attribute is
+		// stored with an empty value, which reaches the job ad as
+		// `Attribute = undefined`. A later -Attribute therefore overrides
+		// an earlier +Attribute.
+		$$ = &Assignment{
+			Name:        $2,
+			Value:       "",
 			ClassAdExpr: true,
 		}
 	}
@@ -381,6 +403,44 @@ queue_statement:
 			Count: $2,
 		}
 	}
+	| QUEUE FROM item_list
+	{
+		// "queue from ( ... )" -- an inline item list rather than a file.
+		// Unlike "in", "from" does not split a line into fields, so each
+		// line of the list is one item.
+		$$ = &QueueStatement{
+			Count:    0, // Determined by item count
+			VarNames: []string{"Item"},
+			Items:    $3,
+		}
+	}
+	| QUEUE var_list FROM item_list
+	{
+		// "queue var1, var2 from ( ... )"
+		$$ = &QueueStatement{
+			Count:    0, // Determined by item count
+			VarNames: $2,
+			Items:    $4,
+		}
+	}
+	| QUEUE queue_count FROM item_list
+	{
+		// "queue N from ( ... )"
+		$$ = &QueueStatement{
+			Count:    $2,
+			VarNames: []string{"Item"},
+			Items:    $4,
+		}
+	}
+	| QUEUE queue_count var_list FROM item_list
+	{
+		// "queue N var1, var2 from ( ... )"
+		$$ = &QueueStatement{
+			Count:    $2,
+			VarNames: $3,
+			Items:    $5,
+		}
+	}
 	| QUEUE var_list FROM IDENT
 	{
 		// "queue var1, var2 from file"
@@ -415,6 +475,61 @@ queue_statement:
 			Count:    $2,
 			VarNames: $3,
 			File:     $5,
+		}
+	}
+	| QUEUE IN item_list
+	{
+		// "queue in (item1, item2)" -- the loop variable may be omitted, and
+		// then it is Item, the same default HTCondor uses.
+		$$ = &QueueStatement{
+			Count:    0, // Determined by item count
+			VarNames: []string{"Item"},
+			Items:    $3,
+		}
+	}
+	| QUEUE queue_count IN item_list
+	{
+		// "queue N in (item1, item2)" -- N jobs per item.
+		$$ = &QueueStatement{
+			Count:    $2,
+			VarNames: []string{"Item"},
+			Items:    $4,
+		}
+	}
+	| QUEUE FROM IDENT
+	{
+		// "queue from file" -- loop variable omitted, so Item.
+		$$ = &QueueStatement{
+			Count:    0, // Determined by file
+			VarNames: []string{"Item"},
+			File:     $3,
+		}
+	}
+	| QUEUE FROM STRING
+	{
+		// "queue from file" (quoted path)
+		$$ = &QueueStatement{
+			Count:    0,
+			VarNames: []string{"Item"},
+			File:     $3,
+		}
+	}
+	| QUEUE queue_count FROM IDENT
+	{
+		// "queue N from file"
+		$$ = &QueueStatement{
+			Count:    $2,
+			VarNames: []string{"Item"},
+			File:     $4,
+		}
+	}
+	| QUEUE queue_count FROM STRING
+	{
+		// "queue N from file" (quoted path)
+		$$ = &QueueStatement{
+			Count:    $2,
+			VarNames: []string{"Item"},
+			File:     $4,
 		}
 	}
 	| QUEUE var_list IN item_list
@@ -488,31 +603,9 @@ var_list:
 	}
 
 item_list:
-	LPAREN RPAREN
+	ITEMS
 	{
-		$$ = []string{}
-	}
-	| LPAREN item_list_items RPAREN
-	{
-		$$ = $2
-	}
-
-item_list_items:
-	IDENT
-	{
-		$$ = []string{$1}
-	}
-	| STRING
-	{
-		$$ = []string{$1}
-	}
-	| item_list_items COMMA IDENT
-	{
-		$$ = append($1, $3)
-	}
-	| item_list_items COMMA STRING
-	{
-		$$ = append($1, $3)
+		$$ = $1
 	}
 
 %%
@@ -556,6 +649,8 @@ func (p *parser) Lex(lval *yySymType) int {
 	switch tok.Token {
 	case IDENT, STRING, NUMBER, ASSIGN:
 		lval.str = tok.Lit
+	case ITEMS:
+		lval.strlist = tok.Items
 	}
 
 	return int(tok.Token)
@@ -587,9 +682,9 @@ func Parse(lexer *Lexer) ([]Statement, error) {
 }
 
 // ParseStrict is like Parse but surfaces any syntax error even when a partial
-// result was produced. HTCondor rejects a config source outright if any line is
-// invalid (e.g. a bare "0" with no assignment operator, which the lenient Parse
-// silently drops), so the HTCondor-compat path uses this.
+// result was produced (e.g. a bare "0" with no assignment operator, which the
+// lenient Parse silently drops). Config files do not go through this grammar;
+// see reader.go.
 func ParseStrict(lexer *Lexer) ([]Statement, error) {
 	return parseInternal(lexer, true)
 }

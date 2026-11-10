@@ -10,16 +10,16 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 )
 
-// isCondorDocTool reports whether name is one of the condor_doc_*
+// isCondorDocTool reports whether name is one of the doc_*
 // reference tools. Used by handleCallTool's default arm so a new doc
 // tool doesn't bump the dispatch switch's cyclomatic complexity.
 func isCondorDocTool(name string) bool {
 	switch name {
-	case "condor_doc_job_attributes",
-		"condor_doc_machine_attributes",
-		"condor_doc_submit_syntax",
-		"condor_doc_config_variables",
-		"condor_doc_search":
+	case "doc_job_attributes",
+		"doc_machine_attributes",
+		"doc_submit_syntax",
+		"doc_config_variables",
+		"doc_search":
 		return true
 	}
 	return false
@@ -70,27 +70,27 @@ func condorDocTools() []Tool {
 
 	return []Tool{
 		{
-			Name:        "condor_doc_job_attributes",
+			Name:        "doc_job_attributes",
 			Description: "Look up a job ClassAd attribute (e.g. ClusterId, JobStatus, RequestMemory, HoldReason, NumJobStarts) in the HTCondor 'Job ClassAd Attributes' reference page. " + condordocs.PageDescription(condordocs.PageJobAttributes) + commonNote,
 			InputSchema: docInputSchema(nil),
 		},
 		{
-			Name:        "condor_doc_machine_attributes",
+			Name:        "doc_machine_attributes",
 			Description: "Look up a machine/slot ClassAd attribute (e.g. Cpus, Memory, OpSys, Arch, START expression context) in the HTCondor 'Machine ClassAd Attributes' reference page. " + condordocs.PageDescription(condordocs.PageMachineAttributes) + commonNote,
 			InputSchema: docInputSchema(nil),
 		},
 		{
-			Name:        "condor_doc_submit_syntax",
+			Name:        "doc_submit_syntax",
 			Description: "Look up a condor_submit submit-file command or CLI flag (e.g. executable, arguments, transfer_input_files, queue, +CustomAttr, request_cpus). " + condordocs.PageDescription(condordocs.PageSubmitSyntax) + commonNote,
 			InputSchema: docInputSchema(nil),
 		},
 		{
-			Name:        "condor_doc_config_variables",
+			Name:        "doc_config_variables",
 			Description: "Look up an HTCondor configuration macro (e.g. CONDOR_HOST, COLLECTOR_HOST, START, MAX_JOBS_RUNNING, NEGOTIATOR_INTERVAL). " + condordocs.PageDescription(condordocs.PageConfigVariables) + commonNote,
 			InputSchema: docInputSchema(nil),
 		},
 		{
-			Name: "condor_doc_search",
+			Name: "doc_search",
 			Description: "Generic full-text search across all four embedded HTCondor reference pages: job attributes, machine attributes, condor_submit syntax, and configuration macros. Use when you don't know which page a term lives in, or when you want hits from multiple pages at once. Each result is tagged with the page it came from so the agent can disambiguate. " +
 				commonNote,
 			InputSchema: docInputSchema(map[string]interface{}{
@@ -112,7 +112,7 @@ func condorDocTools() []Tool {
 	}
 }
 
-// toolCondorDocSearch dispatches every condor_doc_* tool. Per-page
+// toolCondorDocSearch dispatches every doc_* tool. Per-page
 // tools pin the `pages` filter to a single Page; the generic search
 // tool honors whatever subset (or all) the caller passed in.
 func (s *Server) toolCondorDocSearch(_ context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
@@ -128,15 +128,15 @@ func (s *Server) toolCondorDocSearch(_ context.Context, toolName string, args ma
 
 	var pages []condordocs.Page
 	switch toolName {
-	case "condor_doc_job_attributes":
+	case "doc_job_attributes":
 		pages = []condordocs.Page{condordocs.PageJobAttributes}
-	case "condor_doc_machine_attributes":
+	case "doc_machine_attributes":
 		pages = []condordocs.Page{condordocs.PageMachineAttributes}
-	case "condor_doc_submit_syntax":
+	case "doc_submit_syntax":
 		pages = []condordocs.Page{condordocs.PageSubmitSyntax}
-	case "condor_doc_config_variables":
+	case "doc_config_variables":
 		pages = []condordocs.Page{condordocs.PageConfigVariables}
-	case "condor_doc_search":
+	case "doc_search":
 		// Honor a caller-supplied subset; nil/empty = all pages.
 		if raw, ok := args["pages"].([]interface{}); ok {
 			for _, item := range raw {

@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	htcondor "github.com/bbockelm/golang-htcondor"
+	"github.com/bbockelm/golang-htcondor/logging"
 )
 
 // The placement endpoints are a thin, JSON-shaped view of condor_placementd.
@@ -23,7 +25,7 @@ import (
 // placementUserResponse is one row of the users view.
 type placementUserResponse struct {
 	UserName string `json:"username"`
-	// APUserID is the local AP account the foreign identity maps to.
+	// APUserID is the local AP account the sign-in identity maps to.
 	APUserID string `json:"ap_user_id,omitempty"`
 	// TokenExpiration is when this user's newest live token runs out.
 	// Absent when they hold no unexpired token.
@@ -65,7 +67,7 @@ type placementAuthorizationResponse struct {
 
 // placementLoginRequest is the POST body for minting a token.
 type placementLoginRequest struct {
-	// Username is the foreign identity to log in. Required.
+	// Username is the sign-in identity to log in. Required.
 	Username string `json:"username"`
 	// Authorizations narrows the token's bounding set. Every entry must be
 	// one the user is entitled to or the whole request is refused. Empty
@@ -93,12 +95,26 @@ type placementStatusResponse struct {
 	// Reason explains an Available=false, so an operator sees why in the
 	// UI rather than only in the server log.
 	Reason string `json:"reason,omitempty"`
+	// APIVersion is the placementd's PlacementdApiVersion; 2 or more
+	// means the directory endpoints under /placement/admin work.
+	APIVersion int `json:"api_version,omitempty"`
 }
 
 // handlePlacementPath dispatches /api/v1/placement/* to the handler for each
 // sub-resource.
 func (s *Handler) handlePlacementPath(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/placement"), "/")
+
+	// The user-facing endpoints (handlers_placement_me.go) and the admin
+	// record views (handlers_placement_records.go).
+	if path == "me" || strings.HasPrefix(path, "me/") {
+		s.handlePlacementMePath(w, r, strings.TrimPrefix(strings.TrimPrefix(path, "me"), "/"))
+		return
+	}
+	if rest, ok := strings.CutPrefix(path, "records/"); ok {
+		s.handlePlacementRecordsPath(w, r, rest)
+		return
+	}
 
 	switch path {
 	case "status":
@@ -129,16 +145,28 @@ func (s *Handler) handlePlacementStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	resp := placementStatusResponse{Available: s.placementdAvailable.Load()}
+	resp := placementStatusResponse{Available: s.placementdReady(r.Context())}
 	if resp.Available {
 		if p, ok := s.placementd.(*htcondor.Placementd); ok {
 			resp.Address = p.Address()
 		}
+		resp.APIVersion = s.placementAPIVersion(r.Context())
 	} else {
-		resp.Reason = "No condor_placementd was found. Set PLACEMENTD_ADDRESS_FILE, " +
-			"or run one and let it advertise to the collector."
+		resp.Reason = "No condor_placementd was found on this access point. Set PLACEMENTD_ADDRESS_FILE, " +
+			"run one here and let it advertise to the collector, or name one with HTTP_API_PLACEMENTD_NAME."
+		if err := s.placementdLocator.lastError(); err != nil {
+			resp.Reason += " Last lookup: " + err.Error()
+		}
 	}
 	s.writeJSON(w, http.StatusOK, resp)
+}
+
+// placementContext is the context the placementd is called under: this
+// access point's own credential. The placementd registers its commands at
+// ADMINISTRATOR and authorizes the access point, not the person asking; the
+// admin gate in requirePlacementd is what stands for them here.
+func placementContext(r *http.Request) context.Context {
+	return htcondor.WithDaemonCredential(r.Context(), "placementd: admin-gated, authorizes this access point")
 }
 
 // requirePlacementd runs the admin gate and reports whether a placementd is
@@ -147,9 +175,10 @@ func (s *Handler) requirePlacementd(w http.ResponseWriter, r *http.Request) bool
 	if !s.requireAdmin(w, r) {
 		return false
 	}
-	if s.placementd == nil || !s.placementdAvailable.Load() {
+	if !s.placementdReady(r.Context()) {
 		s.writeError(w, http.StatusServiceUnavailable,
-			"No condor_placementd is available. Set PLACEMENTD_ADDRESS_FILE or run one in the pool.")
+			"No condor_placementd is available on this access point. Set PLACEMENTD_ADDRESS_FILE, "+
+				"run one here, or name one with HTTP_API_PLACEMENTD_NAME.")
 		return false
 	}
 	return true
@@ -164,7 +193,7 @@ func (s *Handler) handlePlacementUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	users, err := s.placementd.QueryUsers(r.Context(), r.URL.Query().Get("username"))
+	users, err := s.placementd.QueryUsers(placementContext(r), r.URL.Query().Get("username"))
 	if err != nil {
 		s.writePlacementError(w, "query users", err)
 		return
@@ -206,7 +235,7 @@ func (s *Handler) handlePlacementTokens(w http.ResponseWriter, r *http.Request) 
 		query.ValidOnly = true
 	}
 
-	tokens, err := s.placementd.QueryTokens(r.Context(), query)
+	tokens, err := s.placementd.QueryTokens(placementContext(r), query)
 	if err != nil {
 		s.writePlacementError(w, "query tokens", err)
 		return
@@ -240,7 +269,7 @@ func (s *Handler) handlePlacementAuthorizations(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	authz, err := s.placementd.QueryAuthorizations(r.Context(), r.URL.Query().Get("username"))
+	authz, err := s.placementd.QueryAuthorizations(placementContext(r), r.URL.Query().Get("username"))
 	if err != nil {
 		s.writePlacementError(w, "query authorizations", err)
 		return
@@ -277,7 +306,7 @@ func (s *Handler) handlePlacementLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.placementd.Login(r.Context(), htcondor.PlacementLoginRequest{
+	result, err := s.placementd.Login(placementContext(r), htcondor.PlacementLoginRequest{
 		UserName:       req.Username,
 		Authorizations: req.Authorizations,
 		Project:        req.Project,
@@ -306,6 +335,28 @@ func (s *Handler) writePlacementError(w http.ResponseWriter, op string, err erro
 		return
 	}
 	s.writeError(w, placementErrorStatus(perr.Code), perr.Message)
+}
+
+// placementUnavailableMessage is what a person sees when the placementd
+// cannot answer for them. The detail is in the server log.
+const placementUnavailableMessage = "Placement tokens are not available on this access point right now. Please try again later."
+
+// writePlacementUserError is writePlacementError for the endpoints any
+// signed-in person reaches. The placementd's own refusals (a mapping that
+// expired, a project not granted) are about them and pass through. Every
+// other failure is the server's problem, not theirs, and its detail (the
+// daemon's address, the identity this server authenticated as, how) is for
+// the log: the response says only that placement is unavailable.
+func (s *Handler) writePlacementUserError(w http.ResponseWriter, op string, err error) {
+	var perr *htcondor.PlacementError
+	if errors.As(err, &perr) {
+		if status := placementErrorStatus(perr.Code); status < http.StatusInternalServerError {
+			s.writeError(w, status, perr.Message)
+			return
+		}
+	}
+	s.logger.Warn(logging.DestinationHTTP, "Placement request failed", "operation", op, "error", err)
+	s.writeError(w, http.StatusServiceUnavailable, placementUnavailableMessage)
 }
 
 // placementErrorStatus maps a placementd error code to an HTTP status.

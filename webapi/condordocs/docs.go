@@ -31,7 +31,7 @@ var ErrNotEmbedded = errors.New("htcondor docs are not embedded in this binary (
 type Page string
 
 // Page constants — exported because they show up in MCP tool input
-// schemas (the `pages` enum on condor_doc_search) and in the JSON the
+// schemas (the `pages` enum on doc_search) and in the JSON the
 // search tool returns. The string values are the contract; don't
 // rename without bumping the tool schema in lockstep.
 const (

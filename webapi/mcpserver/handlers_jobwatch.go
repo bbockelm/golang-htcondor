@@ -222,10 +222,25 @@ func jobWatchTools(maxWait int) []Tool {
 // confining a watch to its registrant.
 func (s *Server) watchActor(ctx context.Context) (string, error) {
 	actor := htcondor.GetAuthenticatedUserFromContext(ctx)
-	if actor == "" {
+	owner := ownerFromActor(actor)
+	if owner == "" {
 		return "", fmt.Errorf("authentication required: a watch is registered against your identity, and the caller's could not be established")
 	}
-	return ownerFromActor(actor), nil
+	if s.multi != nil {
+		// The watch reads the hub as owner@UID_DOMAIN: an identity in
+		// another domain is not that user, and is refused rather than
+		// narrowed to the local part.
+		if _, err := s.multi.UserFor(actor); err != nil {
+			return "", err
+		}
+	}
+	// A watch is filed under the bare name and follows jobs by Owner, so
+	// a placementd account in another domain would watch the local
+	// user's of that name.
+	if s.placementOutsideUIDDomain(ctx, actor) {
+		return "", errOutsideUIDDomain
+	}
+	return owner, nil
 }
 
 func (s *Server) toolWatchJobs(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -348,10 +363,15 @@ func (s *Server) toolCheckWatches(ctx context.Context, args map[string]interface
 	}
 	watchEntry := func(w *jobwatch.Watch, fired bool) map[string]interface{} {
 		e := map[string]interface{}{
-			"watch_id":      w.ID,
-			"event":         string(w.Event),
-			"constraint":    w.Constraint,
-			"fired":         fired,
+			"watch_id":   w.ID,
+			"event":      string(w.Event),
+			"constraint": w.Constraint,
+			"fired":      fired,
+			// selected is the jobs the watch is following; matched_total
+			// is how many of them reached the event. A watch on a running
+			// job reads selected=1, matched_total=0. With matched_total
+			// alone, 0 looked like a constraint that matched nothing.
+			"selected":      len(w.Tracked),
 			"matched_total": w.MatchedTotal,
 		}
 		// Age for a watch still waiting, time-to-answer for one that

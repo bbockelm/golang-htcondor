@@ -41,7 +41,7 @@ func setupTestOAuth2Server(t *testing.T) (*Server, *OAuth2Provider, string, cont
 	ctx := context.Background()
 	clientID := "test-client"
 	clientSecret := "test-secret"
-	hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+	hashedSecret, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.MinCost)
 	if err != nil {
 		t.Fatalf("Failed to hash client secret: %v", err)
 	}

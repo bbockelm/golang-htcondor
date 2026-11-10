@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
 	"github.com/ory/fosite"
 )
 
@@ -128,12 +129,14 @@ func (h *Handler) serveIDPLoginForm(w http.ResponseWriter, r *http.Request) {
 // handleIDPLoginSubmit handles login form submission
 func (h *Handler) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	// Limit request body size for form parsing
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 
-	// Rate limit login attempts by IP address
-	ip := r.RemoteAddr
-	if !h.idpLoginLimiter.Allow(ip) {
-		h.logger.Warn(logging.DestinationHTTP, "IDP login rate limit exceeded", "ip", ip)
+	// Failed logins are limited by the client's address, not the
+	// connection's: RemoteAddr carries the source port, so every new
+	// connection would otherwise start with a fresh budget.
+	source := actorResolveSource(r, h.trustedProxies)
+	if h.idpLoginLimiter.Exhausted(source) {
+		h.logger.Warn(logging.DestinationHTTP, "IDP login rate limit exceeded", "source", source)
 		h.writeError(w, http.StatusTooManyRequests, "Too many login attempts. Please try again later.")
 		return
 	}
@@ -154,10 +157,22 @@ func (h *Handler) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "Username and password required")
 		return
 	}
+	// And by username, so guesses spread across addresses still meet a
+	// limit. Only failures are charged: a site whose users all sign in
+	// from behind one address must not be limited to a few logins a
+	// minute between them.
+	userKey := strings.ToLower(username)
+	if h.idpLoginByUser.Exhausted(userKey) {
+		h.logger.Warn(logging.DestinationHTTP, "IDP login rate limit exceeded", "username", username)
+		h.writeError(w, http.StatusTooManyRequests, "Too many login attempts. Please try again later.")
+		return
+	}
 
 	// Authenticate user
 	ctx := r.Context()
 	if err := h.idpProvider.storage.AuthenticateUser(ctx, username, password); err != nil {
+		h.idpLoginLimiter.Allow(source)
+		h.idpLoginByUser.Allow(userKey)
 		h.logger.Warn(logging.DestinationHTTP, "IDP authentication failed", "username", username)
 		h.writeError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
@@ -175,7 +190,7 @@ func (h *Handler) handleIDPLoginSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Store session ID in cookie
 	http.SetCookie(w, &http.Cookie{
-		Name:     "idp_session",
+		Name:     proxyscrub.IDPSessionCookie,
 		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
@@ -214,7 +229,7 @@ func (h *Handler) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Check if user is authenticated via session cookie
-	cookie, err := r.Cookie("idp_session")
+	cookie, err := r.Cookie(proxyscrub.IDPSessionCookie)
 	if err != nil || cookie.Value == "" {
 		// User not authenticated, redirect to login with return URL
 		loginURL := "/idp/login?redirect_uri=" + url.QueryEscape(r.URL.String())
@@ -235,7 +250,7 @@ func (h *Handler) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 		// Session not found or expired
 		// Clear invalid cookie
 		http.SetCookie(w, &http.Cookie{
-			Name:     "idp_session",
+			Name:     proxyscrub.IDPSessionCookie,
 			Value:    "",
 			Path:     "/",
 			MaxAge:   -1,
@@ -261,7 +276,7 @@ func (h *Handler) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn(logging.DestinationHTTP, "User from session cookie not found in DB", "username", username)
 		// Clear invalid cookie
 		http.SetCookie(w, &http.Cookie{
-			Name:     "idp_session",
+			Name:     proxyscrub.IDPSessionCookie,
 			Value:    "",
 			Path:     "/",
 			MaxAge:   -1,
@@ -320,7 +335,7 @@ func (h *Handler) handleIDPAuthorize(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleIDPToken(w http.ResponseWriter, r *http.Request) {
 	// Bound the request body before anything parses the form, matching
 	// handleOAuth2Token. fosite parses it inside NewAccessRequest below.
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	setBodyLimit(w, r, 1<<20)
 
 	ctx := r.Context()
 

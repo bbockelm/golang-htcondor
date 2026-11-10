@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -107,6 +108,9 @@ SCHEDD_INTERVAL = 5
 # Negotiator configuration - run frequently for testing
 NEGOTIATOR_INTERVAL = 2
 NEGOTIATOR_MIN_INTERVAL = 1
+# HTCondor's default NEGOTIATOR_CYCLE_DELAY (20s) is a floor between
+# cycles that RESCHEDULE does not bypass.
+NEGOTIATOR_CYCLE_DELAY = 1
 
 # Startd configuration
 STARTD_NAME = test_startd@$(FULL_HOSTNAME)
@@ -153,7 +157,6 @@ MAX_SCHEDD_LOG = 10000000
 
 # Fast polling for testing
 POLLING_INTERVAL = 5
-NEGOTIATOR_INTERVAL = 10
 UPDATE_INTERVAL = 5
 
 # Disable unwanted features for testing
@@ -263,20 +266,21 @@ func (h *condorTestHarness) Shutdown() {
 	if h.masterCmd != nil && h.masterCmd.Process != nil {
 		h.t.Log("Shutting down HTCondor master")
 
-		// Try graceful shutdown first
-		if err := h.masterCmd.Process.Signal(os.Interrupt); err != nil {
-			h.t.Logf("Failed to send interrupt to master: %v", err)
+		// SIGQUIT is DaemonCore's fast shutdown: the master stops its daemons
+		// and exits once they are gone. The master does not handle SIGINT, so
+		// SIGINT ends it at once and leaves its daemons (each in its own
+		// session) running with no parent.
+		if err := h.masterCmd.Process.Signal(syscall.SIGQUIT); err != nil {
+			h.t.Logf("Failed to send SIGQUIT to master: %v", err)
 		}
 
-		// Wait a bit for graceful shutdown
 		done := make(chan error, 1)
 		go func() {
 			done <- h.masterCmd.Wait()
 		}()
 
 		select {
-		case <-time.After(5 * time.Second):
-			// Force kill if graceful shutdown times out
+		case <-time.After(30 * time.Second):
 			if err := h.masterCmd.Process.Kill(); err != nil {
 				h.t.Logf("Failed to kill master: %v", err)
 			}
@@ -294,6 +298,7 @@ func (h *condorTestHarness) GetCollectorAddr() string {
 
 // TestPoolCollectorIntegration tests the PoolCollector against a real HTCondor instance
 func TestPoolCollectorIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

@@ -4,11 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"weak"
 
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/golang-htcondor/authz"
 	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/ratelimit"
 )
@@ -66,12 +70,16 @@ func getDefaultConfig() *config.Config {
 //     the context already carries -- when none was.
 //   - When a non-empty token is supplied, guarantees TOKEN appears in
 //     the method list — prepended if absent — so the supplied token is
-//     actually offered to the peer. AuthIDTokens already counts as
-//     TOKEN at the wire level, so we don't duplicate.
+//     actually offered to the peer, and drops every method that would
+//     identify this process instead (FS, KERBEROS, PASSWORD) or no one
+//     (ANONYMOUS). AuthIDTokens already counts as TOKEN at the wire
+//     level, so we don't duplicate.
 //
 // Field overlays:
 //
-//   - Token: set when token != "".
+//   - Token: set when token != "". TokenFile, TokenDir, CertFile and
+//     KeyFile are then cleared and Authentication is REQUIRED, so the
+//     token is the only credential the connection can present.
 //   - SessionCache: set when sessionCache != nil; otherwise cedar uses
 //     its global cache.
 //   - PeerName: populated from the argument, used for session-cache
@@ -91,6 +99,23 @@ func getDefaultConfig() *config.Config {
 // "CLIENT".
 func NewClientSecurityConfig(
 	ctx context.Context,
+	token string,
+	peerName string,
+	command int,
+	secContext string,
+	sessionCache *security.SessionCache,
+) (*security.SecurityConfig, error) {
+	return NewClientSecurityConfigWithConfig(ctx, nil, token, peerName, command, secContext, sessionCache)
+}
+
+// NewClientSecurityConfigWithConfig is NewClientSecurityConfig reading the
+// SEC_* settings from cfg instead of the process-wide default configuration.
+// A nil cfg is exactly NewClientSecurityConfig. cfg decides only where the
+// configuration comes from; which credential is presented is decided the same
+// way for either.
+func NewClientSecurityConfigWithConfig(
+	ctx context.Context,
+	cfg *config.Config,
 	token string,
 	peerName string,
 	command int,
@@ -119,9 +144,9 @@ func NewClientSecurityConfig(
 	var secConfig *security.SecurityConfig
 	var err error
 	if token != "" {
-		secConfig, err = loadClientSecurityDefaults(nil, command, secContext, peerName)
+		secConfig, err = loadClientSecurityDefaults(cfg, command, secContext, peerName)
 	} else {
-		secConfig, err = GetSecurityConfigOrDefault(ctx, nil, command, secContext, peerName)
+		secConfig, err = GetSecurityConfigOrDefault(ctx, cfg, command, secContext, peerName)
 	}
 	if err != nil {
 		return nil, err
@@ -144,11 +169,16 @@ func NewClientSecurityConfig(
 		// the schedd drops owner filtering entirely and a "my jobs"
 		// query returns every user's jobs.
 		//
-		// So FS — the method that identifies us by the OS process — is
-		// removed outright, and TOKEN moved to the front of what is
-		// left. SSL stays: some pools need it alongside IDTOKENS (a
-		// collector query whose token kid does not match), and unlike
-		// FS it is not a silent same-host shortcut.
+		// So the offered list keeps only methods that present the
+		// caller's token or nothing of ours: TOKEN, moved to the front,
+		// then SCITOKENS and SSL if configured. Everything else
+		// identifies the process -- FS and CLAIMTOBE by its OS user,
+		// KERBEROS by its credential cache, PASSWORD by the pool
+		// password -- and ANONYMOUS (AuthNone) would let the connection
+		// complete with no identity at all. SSL stays because some pools
+		// need it alongside IDTOKENS (a collector query whose token kid
+		// does not match), but only as an anonymous client that checks
+		// the server's certificate: the client cert is cleared below.
 		//
 		// webapi/httpserver has carried this same rule for its session
 		// path since jobs submitted through a session cookie came out
@@ -158,17 +188,39 @@ func NewClientSecurityConfig(
 		filtered := make([]security.AuthMethod, 0, len(secConfig.AuthMethods)+1)
 		filtered = append(filtered, security.AuthToken)
 		for _, m := range secConfig.AuthMethods {
-			if m != security.AuthToken && m != security.AuthFS {
+			if m == security.AuthSciTokens || m == security.AuthSSL {
 				filtered = append(filtered, m)
 			}
 		}
 		secConfig.AuthMethods = filtered
 		secConfig.Token = token
+		// The configuration's own credentials belong to this process.
+		// Cedar treats Token as the first candidate, not the only one:
+		// when it is incompatible with the peer (another issuer, an
+		// unknown kid) or expired, it goes on to TokenFile and TokenDir
+		// -- for a daemon, SEC_TOKEN_SYSTEM_DIRECTORY -- and sends
+		// whatever compatible token it finds there, and the SSL
+		// handshake presents CertFile/KeyFile. Either way the peer would
+		// see this process rather than the caller.
+		secConfig.TokenFile = ""
+		secConfig.TokenDir = ""
+		secConfig.CertFile = ""
+		secConfig.KeyFile = ""
+		// The caller brought a credential to be identified by, so the
+		// connection must authenticate; at the configured default of
+		// OPTIONAL a peer that also says OPTIONAL skips authentication.
+		secConfig.Authentication = security.SecurityRequired
 	}
 	if sessionCache != nil {
 		secConfig.SessionCache = sessionCache
 	}
 	return secConfig, nil
+}
+
+// usesTLS reports whether list offers a method that runs a TLS handshake,
+// SSL or SCITOKENS, and so needs the AUTH_SSL_* trust anchors.
+func usesTLS(list []security.AuthMethod) bool {
+	return hasAuthMethod(list, security.AuthSSL) || hasAuthMethod(list, security.AuthSciTokens)
 }
 
 // hasAuthMethod reports whether m is in list. Small helper so callers
@@ -206,9 +258,20 @@ func GetDefaultConfig() *config.Config {
 // Intended for callers that want to add SSL as a secondary auth method
 // to a hand-built SecurityConfig without going through the full
 // GetSecurityConfig path (which only loads SSL credentials when the
-// configured AuthenticationMethods list already names SSL).
+// configured AuthenticationMethods list already names SSL). Such callers
+// should also call ApplySSLClientTrust, which adds AUTH_SSL_CLIENT_CADIR
+// and AUTH_SSL_CLIENT_USE_DEFAULT_CAS.
 func LookupSSLClientCredentials() (certFile, keyFile, caFile string, ok bool) {
-	cfg := getDefaultConfig()
+	return LookupSSLClientCredentialsWithConfig(nil)
+}
+
+// LookupSSLClientCredentialsWithConfig is LookupSSLClientCredentials reading
+// cfg instead of the process-wide default configuration. A nil cfg is exactly
+// LookupSSLClientCredentials.
+func LookupSSLClientCredentialsWithConfig(cfg *config.Config) (certFile, keyFile, caFile string, ok bool) {
+	if cfg == nil {
+		cfg = getDefaultConfig()
+	}
 	if cfg == nil {
 		return "", "", "", false
 	}
@@ -222,6 +285,33 @@ func LookupSSLClientCredentials() (certFile, keyFile, caFile string, ok bool) {
 		caFile = v
 	}
 	return certFile, keyFile, caFile, certFile != "" && keyFile != ""
+}
+
+// ApplySSLClientTrust sets the trust anchors sc verifies an SSL server with
+// from AUTH_SSL_CLIENT_CAFILE, AUTH_SSL_CLIENT_CADIR and
+// AUTH_SSL_CLIENT_USE_DEFAULT_CAS, for callers that build a SecurityConfig by
+// hand around LookupSSLClientCredentials. A nil cfg is the process-wide
+// default configuration; when there is none, sc is left unchanged.
+func ApplySSLClientTrust(cfg *config.Config, sc *security.SecurityConfig) {
+	if cfg == nil {
+		cfg = getDefaultConfig()
+	}
+	if cfg == nil {
+		return
+	}
+	applySSLTrust(cfg, sc, "CLIENT")
+}
+
+// applySSLTrust sets sc's SSL trust anchors from AUTH_SSL_<side>_CAFILE,
+// AUTH_SSL_<side>_CADIR and AUTH_SSL_<side>_USE_DEFAULT_CAS, side being CLIENT
+// or SERVER, as HTCondor reads them for that side of the handshake. All three
+// are replaced rather than merged, so a server never trusts the client CAs.
+// USE_DEFAULT_CAS is read as param_boolean does, defaulting to true.
+func applySSLTrust(cfg *config.Config, sc *security.SecurityConfig, side string) {
+	sc.CAFile, _ = cfg.Get("AUTH_SSL_" + side + "_CAFILE")
+	sc.CADir, _ = cfg.Get("AUTH_SSL_" + side + "_CADIR")
+	useDefault := cfg.GetBool("AUTH_SSL_"+side+"_USE_DEFAULT_CAS", true)
+	sc.UseDefaultCAs = &useDefault
 }
 
 // ReloadDefaultConfig reloads the global default HTCondor configuration.
@@ -253,6 +343,36 @@ func getRateLimitManager() *ratelimit.Manager {
 		}
 	}
 	return manager
+}
+
+// configRateLimitManagers holds the rate limiter built for each explicit
+// configuration a client object was given (see rateLimitManagerFor), keyed by
+// a weak pointer so that an entry goes away with its configuration.
+var configRateLimitManagers sync.Map // weak.Pointer[config.Config] -> *ratelimit.Manager
+
+// rateLimitManagerFor returns the rate limiter for a client object whose
+// configuration is cfg. A nil cfg is the process-wide limiter
+// (getRateLimitManager). An explicit cfg gets a limiter built from that
+// configuration's *_QUERY_RATE_LIMIT knobs, never the global one, and shared by
+// every object carrying the same *config.Config, so that -- like the global
+// limiter -- it limits the traffic of everything using that configuration
+// rather than of one object (a Schedd recreated after a restart keeps its
+// budget).
+func rateLimitManagerFor(cfg *config.Config) *ratelimit.Manager {
+	if cfg == nil {
+		return getRateLimitManager()
+	}
+	key := weak.Make(cfg)
+	if m, ok := configRateLimitManagers.Load(key); ok {
+		return m.(*ratelimit.Manager)
+	}
+	m, loaded := configRateLimitManagers.LoadOrStore(key, ratelimit.ConfigFromHTCondor(cfg))
+	if !loaded {
+		runtime.AddCleanup(cfg, func(k weak.Pointer[config.Config]) {
+			configRateLimitManagers.Delete(k)
+		}, key)
+	}
+	return m.(*ratelimit.Manager)
 }
 
 // daemonCredentialCache is the process-wide privileged credential reader shared by every
@@ -310,6 +430,16 @@ func fsAuthDir(cfg *config.Config, key string) string {
 	return ""
 }
 
+// configUIDDomain reads UID_DOMAIN, trimmed, or "" when unset.
+func configUIDDomain(cfg *config.Config) string {
+	if cfg != nil {
+		if v, ok := cfg.Get("UID_DOMAIN"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
 // fsRootToCondor reads FS_ROOT_TO_CONDOR as a tri-state: nil (unset) leaves cedar's
 // default (enabled, matching HTCondor); an explicit value overrides it.
 func fsRootToCondor(cfg *config.Config) *bool {
@@ -342,7 +472,10 @@ func fsRootToCondor(cfg *config.Config) *bool {
 //
 // The function follows HTCondor's security configuration pattern:
 //   - SEC_<context>_<feature> where context is CLIENT, READ, WRITE, etc.
-//   - Falls back to SEC_DEFAULT_* if context-specific settings are not found
+//   - Each setting falls back along the context's chain to SEC_DEFAULT_*, as
+//     HTCondor's SecMan::getSecSetting: an ADVERTISE_* context takes
+//     SEC_DAEMON_* first (and DAEMON takes SEC_WRITE_* under
+//     LEGACY_ALLOW_SEMANTICS)
 //   - Supports REQUIRED, PREFERRED, OPTIONAL, NEVER security levels
 //   - Supports multiple authentication methods (SSL, KERBEROS, TOKEN, etc.)
 //   - Supports multiple encryption methods (AES, BLOWFISH, 3DES)
@@ -358,7 +491,6 @@ func fsRootToCondor(cfg *config.Config) *bool {
 //
 // Deficiencies (to be addressed in follow-up):
 //   - Authorization settings (ALLOW_READ, DENY_WRITE, etc.) are separate from SecurityConfig
-//   - Context-specific overrides beyond CLIENT not yet fully implemented
 //   - NEGOTIATION security level not yet mapped
 func GetSecurityConfig(cfg *config.Config, command int, context string) (*security.SecurityConfig, error) {
 	if context == "" {
@@ -387,6 +519,11 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 		// path and the client rejects anything not under /tmp.
 		FSLocalDir:  fsAuthDir(cfg, "FS_LOCAL_DIR"),
 		FSRemoteDir: fsAuthDir(cfg, "FS_REMOTE_DIR"),
+		// UID_DOMAIN: the domain of an FS or CLAIMTOBE identity (user@UID_DOMAIN),
+		// on the server for the peer it authenticates and on the client for the
+		// name CLAIMTOBE claims, and of a mapped name without one. Empty leaves
+		// cedar's fallback, the host name, which is what UID_DOMAIN defaults to.
+		UIDDomain: configUIDDomain(cfg),
 	}
 
 	// Get authentication level
@@ -409,20 +546,19 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 	cryptoMethods := getSecurityMethods(cfg, context, "CRYPTO_METHODS")
 	secConfig.CryptoMethods = mapCryptoMethods(cryptoMethods)
 
-	// Get SSL certificate/key paths if SSL authentication is enabled
-	for _, method := range secConfig.AuthMethods {
-		if method == security.AuthSSL {
-			if certFile, ok := cfg.Get("AUTH_SSL_CLIENT_CERTFILE"); ok {
-				secConfig.CertFile = certFile
-			}
-			if keyFile, ok := cfg.Get("AUTH_SSL_CLIENT_KEYFILE"); ok {
-				secConfig.KeyFile = keyFile
-			}
-			if caFile, ok := cfg.Get("AUTH_SSL_CLIENT_CAFILE"); ok {
-				secConfig.CAFile = caFile
-			}
-			break
+	// The client certificate is presented only by SSL. The trust anchors
+	// verify the server's certificate in both SSL and SCITOKENS, which runs
+	// over the same TLS handshake (setup_ssl_ctx in HTCondor).
+	if hasAuthMethod(secConfig.AuthMethods, security.AuthSSL) {
+		if certFile, ok := cfg.Get("AUTH_SSL_CLIENT_CERTFILE"); ok {
+			secConfig.CertFile = certFile
 		}
+		if keyFile, ok := cfg.Get("AUTH_SSL_CLIENT_KEYFILE"); ok {
+			secConfig.KeyFile = keyFile
+		}
+	}
+	if usesTLS(secConfig.AuthMethods) {
+		applySSLTrust(cfg, secConfig, "CLIENT")
 	}
 
 	// Get token file/directory if token authentication is enabled.
@@ -458,12 +594,27 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 // and additionally loads the credentials a server needs to *verify* incoming
 // authentications rather than to present its own:
 //
-//   - SSL: the server certificate/key/CA (AUTH_SSL_SERVER_CERTFILE / KEYFILE /
-//     CAFILE) instead of the client ones.
+//   - SSL and SCITOKENS: the server certificate/key and trust anchors
+//     (AUTH_SSL_SERVER_CERTFILE / KEYFILE / CAFILE / CADIR / USE_DEFAULT_CAS)
+//     instead of the client ones.
 //   - TOKEN/IDTOKENS: the signing keys used to validate presented tokens
 //     (SEC_TOKEN_POOL_SIGNING_KEY_FILE for the pool key, SEC_PASSWORD_DIRECTORY
 //     for named issuer keys), the trust domain (TRUST_DOMAIN, defaulting to
 //     UID_DOMAIN), and the maximum token age (SEC_TOKEN_MAX_AGE).
+//   - SCITOKENS: the SCITOKENS lines of CERTIFICATE_MAPFILE (SciTokensMapper),
+//     SCITOKENS_SERVER_AUDIENCE, and SEC_SCITOKENS_FOREIGN_TOKEN_ISSUERS when
+//     SEC_SCITOKENS_ALLOW_FOREIGN_TOKEN_TYPES is true.
+//
+// secContext is the authorization level whose SEC_<level>_* policy applies;
+// each setting falls back as GetSecurityConfig describes, so an unset
+// SEC_ADVERTISE_STARTD_AUTHENTICATION takes SEC_DAEMON_AUTHENTICATION before
+// SEC_DEFAULT_AUTHENTICATION. A daemon negotiates each command under the
+// policy of the level it is registered at with
+// daemon.Daemon.InstallSecurityLevels.
+//
+// UID_DOMAIN (set by GetSecurityConfig) is the domain of an FS peer's identity,
+// user@UID_DOMAIN. A daemon behind a shared port should build its configs with
+// daemon.Daemon.ServerSecurityConfig, which also sets the shared-port id.
 //
 // This is what a Go HTCondor daemon (e.g. a CCB server) should use so it
 // authenticates clients with the same policy and keys as the C++ daemons.
@@ -485,18 +636,17 @@ func GetServerSecurityConfig(cfg *config.Config, command int, secContext string)
 		return false
 	}
 
-	// SSL: replace the client cert/key/CA (loaded by GetSecurityConfig) with the
-	// server's own.
-	if hasMethod(security.AuthSSL) {
+	// SSL and SCITOKENS: replace the client cert/key/trust anchors (loaded by
+	// GetSecurityConfig) with the server's own. Both run a TLS handshake in
+	// which the server presents its certificate.
+	if usesTLS(sc.AuthMethods) {
 		if v, ok := cfg.Get("AUTH_SSL_SERVER_CERTFILE"); ok {
 			sc.CertFile = v
 		}
 		if v, ok := cfg.Get("AUTH_SSL_SERVER_KEYFILE"); ok {
 			sc.KeyFile = v
 		}
-		if v, ok := cfg.Get("AUTH_SSL_SERVER_CAFILE"); ok {
-			sc.CAFile = v
-		}
+		applySSLTrust(cfg, sc, "SERVER")
 	}
 
 	// TOKEN/IDTOKENS: the keys and trust domain used to verify presented tokens.
@@ -521,6 +671,16 @@ func GetServerSecurityConfig(cfg *config.Config, command int, secContext string)
 		}
 	}
 
+	// SCITOKENS: a token is accepted only when the SCITOKENS lines of
+	// CERTIFICATE_MAPFILE map its "issuer,subject", and the peer is the mapped
+	// user. With no map file the mapper stays nil and cedar refuses every
+	// SciToken.
+	if _, ok := certificateMapFileKey(cfg); ok {
+		sc.SciTokensMapper = SciTokensMapper(func() *config.Config { return cfg })
+	}
+	sc.SciTokensServerAudience = sciTokensServerAudience(cfg)
+	sc.SciTokensForeignTokenIssuers = sciTokensForeignTokenIssuers(cfg)
+
 	// The server's credential files (SSL key/cert, token signing keys) are read as
 	// root via droppriv, so they remain readable after the daemon drops to the
 	// condor account. GetSecurityConfig already wired the shared, reload-aware
@@ -538,18 +698,27 @@ type CredentialReloader interface {
 	Reload()
 }
 
-// getSecurityLevel retrieves a security level setting with context and default fallback
-// For example: SEC_CLIENT_AUTHENTICATION, falling back to SEC_DEFAULT_AUTHENTICATION
-func getSecurityLevel(cfg *config.Config, context, feature string) string {
-	// Try context-specific setting first
-	contextKey := fmt.Sprintf("SEC_%s_%s", context, feature)
-	if value, ok := cfg.Get(contextKey); ok {
-		return value
+// secSetting returns SEC_<level>_<feature> for the first level in secContext's
+// config-fallback chain that sets it (authz.ConfigChain: an ADVERTISE_* level
+// falls back to DAEMON, every level to DEFAULT), and the level that set it. As
+// SecMan::getSecSetting, it walks the chain one setting at a time, honours
+// LEGACY_ALLOW_SEMANTICS, and treats an empty value as unset.
+func secSetting(cfg authz.ConfigGetter, secContext, feature string) (value string, level authz.Perm, ok bool) {
+	legacyVal, _ := cfg.Get("LEGACY_ALLOW_SEMANTICS")
+	legacy := parseBool(legacyVal, false)
+	for _, lvl := range authz.ConfigChain(authz.Perm(strings.ToUpper(secContext)), legacy) {
+		if v, ok := cfg.Get(fmt.Sprintf("SEC_%s_%s", lvl, feature)); ok && strings.TrimSpace(v) != "" {
+			return v, lvl, true
+		}
 	}
+	return "", "", false
+}
 
-	// Fall back to DEFAULT setting
-	defaultKey := fmt.Sprintf("SEC_DEFAULT_%s", feature)
-	if value, ok := cfg.Get(defaultKey); ok {
+// getSecurityLevel retrieves a security level setting along secContext's
+// config-fallback chain (secSetting). For example: SEC_ADVERTISE_STARTD_AUTHENTICATION,
+// falling back to SEC_DAEMON_AUTHENTICATION, then to SEC_DEFAULT_AUTHENTICATION.
+func getSecurityLevel(cfg *config.Config, context, feature string) string {
+	if value, _, ok := secSetting(cfg, context, feature); ok {
 		return value
 	}
 
@@ -571,8 +740,9 @@ func getSecurityLevel(cfg *config.Config, context, feature string) string {
 // getSecurityMethods retrieves a comma-separated list of security methods
 // For example: SEC_CLIENT_AUTHENTICATION_METHODS, falling back to SEC_DEFAULT_AUTHENTICATION_METHODS
 func getSecurityMethods(cfg *config.Config, context, feature string) string {
-	// An operator's context-specific setting always wins.
-	if value, ok := cfg.Get(fmt.Sprintf("SEC_%s_%s", context, feature)); ok && value != "" {
+	// An operator's setting for the context, or a level it falls back to
+	// before DEFAULT (an ADVERTISE_* level's DAEMON), always wins.
+	if value, lvl, ok := secSetting(cfg, context, feature); ok && lvl != authz.PermDefault {
 		return value
 	}
 
@@ -679,17 +849,15 @@ func mapSecurityLevel(level string) security.SecurityLevel {
 //
 // Note on IDTOKENS vs TOKEN: in HTCondor's *config language* IDTOKENS
 // is the modern name for the same authentication mechanism whose
-// *wire-protocol name* is TOKEN. We want both config strings to
-// produce cedar's AuthToken, which serializes on the wire as "TOKEN"
-// — that's what every HTCondor schedd / collector recognizes. Mapping
-// IDTOKENS to cedar's AuthIDTokens (which serializes as the literal
-// "IDTOKENS") makes the schedd's SECMAN drop the offer and fall
-// through to whatever is left, typically SSL — see
-// cedar/security/auth.go where AuthIDTokens has the comment
-// `IDTokens not defined in HTCondor's condor_auth.h, map to
-// SciTokens for compatibility`. The C++ HTCondor client always
-// sends "TOKEN" regardless of what's in the config; this matches
-// that behavior.
+// *wire-protocol name* is TOKEN (SecMan::sec_char_to_auth_method maps
+// IDTOKENS, IDTOKEN and TOKENS to CAUTH_TOKEN). Every spelling maps to
+// cedar's AuthToken, which serializes on the wire as "TOKEN" -- what
+// every HTCondor schedd / collector recognizes, and what the C++
+// client sends whatever its config says. Since cedar v0.7.5,
+// AuthIDTokens is the same method too (the TOKEN bit, sent as
+// "TOKEN"); before it, cedar mapped AuthIDTokens to the SciTokens bit
+// and sent the literal "IDTOKENS", which an HTCondor peer does not
+// recognize. Mapping to AuthToken keeps one name for the method.
 func mapAuthMethods(methods string) []security.AuthMethod {
 	if methods == "" {
 		return []security.AuthMethod{}
@@ -783,6 +951,17 @@ func mapCryptoMethods(methods string) []security.CryptoMethod {
 func GetSecurityConfigOrDefault(ctx context.Context, cfg *config.Config, command int, secContext string, peerName string) (*security.SecurityConfig, error) {
 	// 1. Check if SecurityConfig is provided in context
 	if ctxSecConfig, ok := GetSecurityConfigFromContext(ctx); ok {
+		// A credential minted for the caller and about to expire is
+		// minted again rather than presented; see
+		// WithRenewableSecurityConfig. A refused renewal is the end of
+		// the caller's grant, and fails the connection.
+		fresh, err := renewSecurityConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if fresh != nil {
+			ctxSecConfig = *fresh
+		}
 		// Make a copy to avoid modifying the original
 		secConfig := &ctxSecConfig
 		// Update command for the specific operation
@@ -790,6 +969,25 @@ func GetSecurityConfigOrDefault(ctx context.Context, cfg *config.Config, command
 		// Set PeerName for session cache lookups if not already set
 		if secConfig.PeerName == "" {
 			secConfig.PeerName = peerName
+		}
+		// A credential carried for somebody else is the only one this
+		// connection may present. Without this, CEDAR treats the
+		// caller's token as the first candidate in a search: if the
+		// peer will not accept it -- an issuer that does not match its
+		// trust domain, a key it does not know, an expiry -- discovery
+		// moves on to this host's own token files and the handshake
+		// succeeds as this daemon. The caller's request then runs with
+		// an identity they never had.
+		//
+		// Decided here, from how the context was already classified at
+		// the transport, rather than asked of each place that builds a
+		// config. That is the whole point: a per-config field is a
+		// thing to remember at every call site and every new route,
+		// and the evidence is that it does not get remembered. There
+		// is nothing to forget if the answer is derived from the
+		// origin that is already marked.
+		if origin, _ := CredentialOriginFromContext(ctx); origin == OriginUser {
+			secConfig.DelegatedCredential = true
 		}
 		return secConfig, nil
 	}

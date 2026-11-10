@@ -24,7 +24,7 @@ func TestEveryToolAgreesOnScope(t *testing.T) {
 		t.Fatalf("an admin should be unconfined: %+v ok=%v", scope, ok)
 	}
 	// And the same policy the other tools reach through scopeToOwner.
-	if got, ok := admin.scopeToOwner(adminCtx, "JobStatus == 5", tierRead); !ok || got != "JobStatus == 5" {
+	if got, ok := okScope(admin.scopeToOwner(adminCtx, "JobStatus == 5", tierRead)); !ok || got != "JobStatus == 5" {
 		t.Errorf("scopeToOwner confined an admin (%q); the two helpers must agree", got)
 	}
 
@@ -32,7 +32,7 @@ func TestEveryToolAgreesOnScope(t *testing.T) {
 	if !ok || scope.AllUsers || scope.Owner != "alice" {
 		t.Fatalf("a normal user must be confined to their own jobs: %+v", scope)
 	}
-	if got, _ := admin.scopeToOwner(userCtx, "", tierRead); !strings.Contains(got, `Owner == "alice"`) {
+	if got, _ := okScope(admin.scopeToOwner(userCtx, "", tierRead)); !strings.Contains(got, `Owner == "alice"`) {
 		t.Errorf("scopeToOwner did not confine a normal user: %q", got)
 	}
 

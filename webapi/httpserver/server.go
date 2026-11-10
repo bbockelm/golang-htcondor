@@ -23,6 +23,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/bbockelm/golang-htcondor/webapi/poolpolicy"
 	"github.com/ory/fosite"
 )
 
@@ -57,6 +58,9 @@ type Config struct {
 	MCPListenAddr string
 	ScheddName    string // Schedd name
 	ScheddAddr    string // Schedd address (e.g., "127.0.0.1:9618"). If empty, discovered from collector.
+	// MultiAP serves every access point matching a ScheddAd constraint;
+	// see HandlerConfig.MultiAP.
+	MultiAP MultiAPConfig
 
 	// ScheddAddrDiscovered says ScheddAddr was resolved from the collector
 	// rather than set by an operator.
@@ -84,7 +88,7 @@ type Config struct {
 	// HTTP_API_USER_HEADER_TRUST_ANY.
 	UserHeaderTrustAnyUnsafe bool
 	SigningKeyPath           string // Path to token signing key (optional, for token generation)
-	TrustDomain              string // Trust domain for token issuer (optional; only used if UserHeader is set)
+	TrustDomain              string // Trust domain: issuer of minted tokens, and the only issuer accepted for a bearer IDTOKEN (optional)
 	UIDDomain                string // UID domain for generated token username (optional; only used if UserHeader is set)
 	HTTPBaseURL              string // Base URL for HTTP API (e.g., "http://localhost:8080") for generating file download links in MCP responses
 
@@ -118,20 +122,32 @@ type Config struct {
 	// /api/v1/jobs/watch (SSE) from it. Empty disables the jobs watch endpoint.
 	JobQueueLogPath string
 	EnableMetrics   bool // Enable /metrics endpoint (default: true if Collector is set)
-	// ToolStatsFlushInterval is how often MCP tool-call counters are
-	// written to the application database. Zero means the default.
-	ToolStatsFlushInterval time.Duration
-	// ToolStatsMaxLabelValues caps distinct values per /metrics label
-	// for tool statistics. Zero means the default.
-	ToolStatsMaxLabelValues int
-	// ToolStatsOmitUser renders every /metrics user label as a single
+	// UsageStatsFlushInterval is how often the call counters -- MCP
+	// tool calls and REST API requests alike -- are written to the
+	// application database. Zero means the default.
+	UsageStatsFlushInterval time.Duration
+	// UsageStatsMaxLabelValues caps distinct values per /metrics label
+	// for usage statistics. Zero means the default.
+	UsageStatsMaxLabelValues int
+	// UsageStatsOmitUser renders every /metrics user label as a single
 	// placeholder, for a site that does not want usernames on a
 	// potentially public endpoint. The durable table is unaffected.
-	ToolStatsOmitUser bool
-	// ToolStatsMaxSeries caps how many distinct tool-call series are
-	// held at all. Zero means the default.
-	ToolStatsMaxSeries int
-	MetricsCacheTTL    time.Duration // Metrics cache TTL (default: 10s)
+	UsageStatsOmitUser bool
+	// UsageStatsMaxSeries caps how many distinct series each kind
+	// holds at all. Zero means the default.
+	UsageStatsMaxSeries int
+	// RESTStatsEnabled counts REST API requests the same way MCP tool
+	// calls are counted (HTTP_API_REST_STATS).
+	RESTStatsEnabled bool
+	// UtilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS: the most jobs
+	// one /api/v1/utilization analysis may read. Zero means the default.
+	UtilizationMaxJobs int
+	// RuntimeEstimateInterval and RuntimeEstimateBackfill are
+	// HTTP_API_RUNTIME_ESTIMATE_INTERVAL and _BACKFILL. See the
+	// HandlerConfig fields of the same names.
+	RuntimeEstimateInterval time.Duration
+	RuntimeEstimateBackfill time.Duration
+	MetricsCacheTTL         time.Duration // Metrics cache TTL (default: 10s)
 	// MetricsPublic disables the API-key auth gate on /metrics.
 	// Configurable via HTTP_API_METRICS_PUBLIC; see HandlerConfig.
 	MetricsPublic bool
@@ -147,6 +163,12 @@ type Config struct {
 	// which JupyterLab culls and shuts down. Zero disables either.
 	JupyterMaxLifetimeSec int
 	JupyterKernelIdleSec  int
+	// JupyterStartGraceSec is how long a JupyterLab job may wait in the
+	// queue before the schedd removes it (and its token expires), and
+	// JupyterReconnectGraceSec how long a session whose tunnel dropped is
+	// kept for its helper to dial back. Zero means the default.
+	JupyterStartGraceSec     int
+	JupyterReconnectGraceSec int
 
 	// InteractiveExtraSubmit is an optional verbatim block of extra
 	// HTCondor submit-file directives merged into every
@@ -195,7 +217,21 @@ type Config struct {
 	// TemplateUserStoreDBPath is deprecated; the templates store
 	// shares the unified DBPath. Kept so existing callers compile.
 	TemplateUserStoreDBPath string //nolint:unused // back-compat; ignored.
-	EnableMCP               bool   // Enable MCP endpoints with OAuth2 (default: false)
+	EnableMCP               bool   // Serve MCP at /mcp. See HandlerConfig.EnableMCP.
+	// Reservations turns the reservation subsystem on: the admin API,
+	// the admin page and the controller that holds pool capacity. Off
+	// unless configured, because it evicts other people's jobs.
+	Reservations bool
+	// ReservationEPConstraint limits which execute points a reservation
+	// may draw seats from, as a ClassAd expression over the slot ad.
+	// Empty means every startd the collector reports.
+	ReservationEPConstraint string
+	// ReservationStampBudget caps how many cluster ads one stamping
+	// pass writes. Zero takes the package default.
+	ReservationStampBudget int
+	// WebUIEnabled says this server serves the web UI, which needs
+	// OAuth2 whether or not MCP is on. See HandlerConfig.WebUIEnabled.
+	WebUIEnabled bool
 	// DBPath is the unified SQLite database file. See HandlerConfig.DBPath.
 	DBPath string
 	// KEKFilePath enables envelope encryption for long-lived secrets
@@ -208,6 +244,8 @@ type Config struct {
 	// Document (public client); MCPCIMDAllowedHosts optionally restricts it.
 	MCPCIMDEnabled      bool
 	MCPCIMDAllowedHosts []string
+	// MCPDCRDisabled turns off dynamic client registration (HTTP_API_MCP_DCR).
+	MCPDCRDisabled bool
 	// MCPTokenExchangeIssuers: JSON list of trusted external issuers for token
 	// exchange (HTTP_API_MCP_TOKEN_EXCHANGE_ISSUERS).
 	MCPTokenExchangeIssuers string
@@ -301,6 +339,15 @@ type Config struct {
 	// "off" keeps them forever. See oauth2_retention.go.
 	TokenRetention string
 
+	// APIKeyEntitlementTTL is HTTP_API_API_KEY_ENTITLEMENT_TTL: how long
+	// an API key that is not a service key may keep an entitlement that
+	// nothing has been able to confirm. Zero takes the default.
+	APIKeyEntitlementTTL time.Duration
+	// ServiceKeyMaxLifetime is HTTP_API_SERVICE_KEY_MAX_LIFETIME: the
+	// furthest out a service key's expiry may be set. Zero takes the
+	// default.
+	ServiceKeyMaxLifetime time.Duration
+
 	// MCPAdminGroup / MCPSuperuserGroup gate the two cross-user MCP
 	// privileges. Empty means NOBODY, not everybody -- see
 	// HandlerConfig for why these invert the default above.
@@ -311,18 +358,38 @@ type Config struct {
 	// MCPDisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
 	// offer, as path.Match patterns separated by commas or whitespace.
 	MCPDisabledTools string
+	// MCPDisableSecretRedaction turns off credential masking on MCP tool
+	// results (HTTP_API_MCP_REDACT_SECRETS = false).
+	MCPDisableSecretRedaction bool
+	// MCPRedactDisabledRules (HTTP_API_MCP_REDACT_DISABLED_RULES) names
+	// masking rules to turn off, as globs over rule ids.
+	MCPRedactDisabledRules string
 	// MCPSkillsReloadInterval is how often that directory is re-read so a
 	// checkout updated underneath this process is noticed without a
 	// reconfigure. Zero disables the poll.
 	MCPSkillsReloadInterval time.Duration
 	// MCPSkillsDir publishes a directory of site-authored Markdown skills
 	// to agents. Empty disables the feature.
-	MCPSkillsDir    string
-	MCPAdminUsers   []string // Authenticated subjects exempt from the MCP owner-scope wrapper
-	WebUIAdminGroup string   // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
+	MCPSkillsDir  string
+	MCPAdminUsers []string // Authenticated subjects exempt from the MCP owner-scope wrapper
+
+	// PoolQueryPolicy restricts which collector attributes a caller
+	// without the cross-user read privilege may read. Nil means no
+	// restriction. See webapi/poolpolicy.
+	PoolQueryPolicy *poolpolicy.Policy
+	WebUIAdminGroup string // Group required for Web UI admin pages (empty disables admin UI). Configurable via HTTP_API_WEBUI_ADMIN_GROUP.
 	// WebUIAccessGroup gates web interface login; empty falls back to
 	// MCPAccessGroup. Comma-separated.
 	WebUIAccessGroup string
+	// Web UI branding: the site's own name, footer logos, images,
+	// stylesheet and tab icon. All optional; unset leaves the pages as
+	// they ship. See HandlerConfig and httpserver/branding.go.
+	WebUISiteName    string
+	WebUISiteTagline string
+	WebUIFooterLogos string
+	WebUIBrandingDir string
+	WebUICustomCSS   string
+	WebUIFavicon     string
 	// SpoolBufferDir is where a cluster-wide upload buffers its tar
 	// before fanning it out to each proc. Empty selects the system temp
 	// directory.
@@ -330,6 +397,10 @@ type Config struct {
 	// SuperuserGroup gates superuser mode. Empty disables it. See
 	// HandlerConfig.SuperuserGroup -- notably, it is NOT WebUIAdminGroup.
 	SuperuserGroup string
+	// ProjectLeadsFile and ProjectLeadsGroup configure project leads. See
+	// HandlerConfig.
+	ProjectLeadsFile  string
+	ProjectLeadsGroup string
 	// SuperuserFallbackIdentity overrides the identity used when the
 	// operator is not themselves a usable queue superuser. Empty selects
 	// condor@$(UID_DOMAIN). See HandlerConfig.
@@ -338,6 +409,10 @@ type Config struct {
 	// SeedDemoUser seeds a second, non-admin IDP account. Demo mode only;
 	// see HandlerConfig.SeedDemoUser for why it is not keyed on EnableIDP.
 	SeedDemoUser bool
+	// SeedDemoPlacementUser seeds "newbie", an IDP account with no access.
+	// Demo mode sets it when it runs a condor_placementd; see
+	// HandlerConfig.SeedDemoPlacementUser.
+	SeedDemoPlacementUser bool
 	// IDPDBPath is deprecated; the IDP shares the unified DBPath.
 	IDPDBPath string //nolint:unused // back-compat; ignored.
 	IDPIssuer string // IDP issuer URL (default: listen address)
@@ -346,6 +421,18 @@ type Config struct {
 	IDPRefreshTokenLifespan time.Duration
 	SessionTTL              time.Duration  // HTTP session TTL (default: 24h)
 	HTCondorConfig          *config.Config // HTCondor configuration (optional, used for LOCAL_DIR default)
+	// ClientConfig is the HTCondor configuration this server's own
+	// connections to HTCondor daemons are built from: the schedd, credd
+	// and placementd clients it creates, and the security configs it
+	// builds around callers' tokens (SEC_* methods and levels, token and
+	// SSL client credential locations, query rate limits). nil means the
+	// process-wide default that htcondor.GetDefaultConfig loads from
+	// $CONDOR_CONFIG, which is what htcondor-api uses. It is separate from
+	// HTCondorConfig because htcondor-api loads that one with HTTP_API
+	// subsystem and local-name scoping, so pointing the clients at it would
+	// change which SEC_* values an existing deployment authenticates with.
+	// A Collector passed in above is the caller's to configure.
+	ClientConfig *config.Config
 	// PingInterval is the periodic collector/schedd ping cadence; zero
 	// or negative disables it. See HandlerConfig.PingInterval.
 	PingInterval time.Duration
@@ -372,6 +459,16 @@ type Config struct {
 	// Placementd is an optional condor_placementd client; nil means
 	// "discover one". See HandlerConfig.
 	Placementd htcondor.PlacementdClient
+	// Placement onboarding; see the HandlerConfig fields of the same
+	// names.
+	PlacementIdentityClaims    []string
+	PlacementDisplayNameClaims []string
+	PlacementDeviceClients     *string
+	PlacementScheddHost        string
+	PlacementCollectorHost     string
+	PlacementdName             string
+	PlacementPrefillDomains    []string
+	PlacementRequestRetention  time.Duration
 
 	// LLMAPIKeyFile is the path to a file holding the Anthropic API
 	// key. Empty disables the chat endpoint. See HandlerConfig.
@@ -382,6 +479,9 @@ type Config struct {
 	LLMAPIURL string
 	// LLMModel overrides the default model id. Empty = package default.
 	LLMModel string
+	// LLMAuthScheme is how the key is sent upstream: "x-api-key"
+	// (default) or "bearer". See HandlerConfig.
+	LLMAuthScheme string
 	// LLMOperatorInstructionsFile is the path to a file with extra
 	// system-prompt rules the operator wants the chat assistant to
 	// follow on every turn. Empty disables. See HandlerConfig for
@@ -411,6 +511,7 @@ func NewServer(cfg Config) (*Server, error) {
 		ScheddHost:                  cfg.ScheddHost,
 		ScheddAddr:                  cfg.ScheddAddr,
 		ScheddAddrDiscovered:        cfg.ScheddAddrDiscovered,
+		MultiAP:                     cfg.MultiAP,
 		UserHeader:                  cfg.UserHeader,
 		UserHeaderTrustedProxies:    cfg.UserHeaderTrustedProxies,
 		TrustedProxies:              cfg.TrustedProxies,
@@ -426,22 +527,32 @@ func NewServer(cfg Config) (*Server, error) {
 		JobQueueLogPath:             cfg.JobQueueLogPath,
 		EnableMetrics:               cfg.EnableMetrics,
 		MetricsPublic:               cfg.MetricsPublic,
-		ToolStatsFlushInterval:      cfg.ToolStatsFlushInterval,
-		ToolStatsMaxLabelValues:     cfg.ToolStatsMaxLabelValues,
-		ToolStatsOmitUser:           cfg.ToolStatsOmitUser,
-		ToolStatsMaxSeries:          cfg.ToolStatsMaxSeries,
+		UsageStatsFlushInterval:     cfg.UsageStatsFlushInterval,
+		UsageStatsMaxLabelValues:    cfg.UsageStatsMaxLabelValues,
+		UsageStatsOmitUser:          cfg.UsageStatsOmitUser,
+		UsageStatsMaxSeries:         cfg.UsageStatsMaxSeries,
+		RESTStatsEnabled:            cfg.RESTStatsEnabled,
+		UtilizationMaxJobs:          cfg.UtilizationMaxJobs,
+		RuntimeEstimateInterval:     cfg.RuntimeEstimateInterval,
+		RuntimeEstimateBackfill:     cfg.RuntimeEstimateBackfill,
 		DBMirrorName:                cfg.DBMirrorName,
 		DBMirrorAddress:             cfg.DBMirrorAddress,
 		DBMirrorRequired:            cfg.DBMirrorRequired,
 		MetricsCacheTTL:             cfg.MetricsCacheTTL,
 		Logger:                      cfg.Logger,
 		EnableMCP:                   cfg.EnableMCP,
+		Reservations:                cfg.Reservations,
+		ReservationEPConstraint:     cfg.ReservationEPConstraint,
+		ReservationStampBudget:      cfg.ReservationStampBudget,
+		WebUIEnabled:                cfg.WebUIEnabled,
 		DBPath:                      cfg.DBPath,
 		KEKFilePath:                 cfg.KEKFilePath,
 		OAuth2DBPath:                cfg.OAuth2DBPath,
 		JupyterWorkDir:              cfg.JupyterWorkDir,
 		JupyterMaxLifetimeSec:       cfg.JupyterMaxLifetimeSec,
 		JupyterKernelIdleSec:        cfg.JupyterKernelIdleSec,
+		JupyterStartGraceSec:        cfg.JupyterStartGraceSec,
+		JupyterReconnectGraceSec:    cfg.JupyterReconnectGraceSec,
 		InteractiveExtraSubmit:      cfg.InteractiveExtraSubmit,
 		DagmanPath:                  cfg.DagmanPath,
 		DagmanEnvironment:           cfg.DagmanEnvironment,
@@ -455,6 +566,7 @@ func NewServer(cfg Config) (*Server, error) {
 		OAuth2Issuer:                cfg.OAuth2Issuer,
 		MCPCIMDEnabled:              cfg.MCPCIMDEnabled,
 		MCPCIMDAllowedHosts:         cfg.MCPCIMDAllowedHosts,
+		MCPDCRDisabled:              cfg.MCPDCRDisabled,
 		MCPTokenExchangeIssuers:     cfg.MCPTokenExchangeIssuers,
 		OAuth2ClientID:              cfg.OAuth2ClientID,
 		OAuth2ClientSecret:          cfg.OAuth2ClientSecret,
@@ -491,27 +603,42 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPSuperuserGroup:           cfg.MCPSuperuserGroup,
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPDisabledTools:            cfg.MCPDisabledTools,
+		MCPDisableSecretRedaction:   cfg.MCPDisableSecretRedaction,
+		MCPRedactDisabledRules:      cfg.MCPRedactDisabledRules,
 		MCPSkillsDir:                cfg.MCPSkillsDir,
 		MCPSkillsReloadInterval:     cfg.MCPSkillsReloadInterval,
 		UpstreamRefresh:             cfg.UpstreamRefresh,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,
 		TokenRetention:              cfg.TokenRetention,
+		APIKeyEntitlementTTL:        cfg.APIKeyEntitlementTTL,
+		ServiceKeyMaxLifetime:       cfg.ServiceKeyMaxLifetime,
 		MCPUseSDKTransport:          cfg.MCPUseSDKTransport,
 		RequiredCredentials:         cfg.RequiredCredentials,
 		CreddAddress:                cfg.CreddAddress,
 		MCPAdminUsers:               cfg.MCPAdminUsers,
+		PoolQueryPolicy:             cfg.PoolQueryPolicy,
 		WebUIAdminGroup:             cfg.WebUIAdminGroup,
+		WebUISiteName:               cfg.WebUISiteName,
+		WebUISiteTagline:            cfg.WebUISiteTagline,
+		WebUIFooterLogos:            cfg.WebUIFooterLogos,
+		WebUIBrandingDir:            cfg.WebUIBrandingDir,
+		WebUICustomCSS:              cfg.WebUICustomCSS,
+		WebUIFavicon:                cfg.WebUIFavicon,
 		WebUIAccessGroup:            cfg.WebUIAccessGroup,
 		SpoolBufferDir:              cfg.SpoolBufferDir,
 		SuperuserGroup:              cfg.SuperuserGroup,
+		ProjectLeadsFile:            cfg.ProjectLeadsFile,
+		ProjectLeadsGroup:           cfg.ProjectLeadsGroup,
 		SuperuserFallbackIdentity:   cfg.SuperuserFallbackIdentity,
 		EnableIDP:                   cfg.EnableIDP,
 		SeedDemoUser:                cfg.SeedDemoUser,
+		SeedDemoPlacementUser:       cfg.SeedDemoPlacementUser,
 		IDPIssuer:                   cfg.IDPIssuer,
 		IDPAccessTokenLifespan:      cfg.IDPAccessTokenLifespan,
 		IDPRefreshTokenLifespan:     cfg.IDPRefreshTokenLifespan,
 		SessionTTL:                  cfg.SessionTTL,
 		HTCondorConfig:              cfg.HTCondorConfig,
+		ClientConfig:                cfg.ClientConfig,
 		PingInterval:                cfg.PingInterval,
 		MCPWatchMaxWait:             cfg.MCPWatchMaxWait,
 		StreamBufferSize:            cfg.StreamBufferSize,
@@ -519,9 +646,18 @@ func NewServer(cfg Config) (*Server, error) {
 		Token:                       cfg.Token,
 		Credd:                       cfg.Credd,
 		Placementd:                  cfg.Placementd,
+		PlacementIdentityClaims:     cfg.PlacementIdentityClaims,
+		PlacementDisplayNameClaims:  cfg.PlacementDisplayNameClaims,
+		PlacementDeviceClients:      cfg.PlacementDeviceClients,
+		PlacementScheddHost:         cfg.PlacementScheddHost,
+		PlacementCollectorHost:      cfg.PlacementCollectorHost,
+		PlacementdName:              cfg.PlacementdName,
+		PlacementPrefillDomains:     cfg.PlacementPrefillDomains,
+		PlacementRequestRetention:   cfg.PlacementRequestRetention,
 		LLMAPIKeyFile:               cfg.LLMAPIKeyFile,
 		LLMAPIURL:                   cfg.LLMAPIURL,
 		LLMModel:                    cfg.LLMModel,
+		LLMAuthScheme:               cfg.LLMAuthScheme,
 		LLMOperatorInstructionsFile: cfg.LLMOperatorInstructionsFile,
 	}
 
@@ -1102,52 +1238,31 @@ func extractBearerToken(r *http.Request) (string, error) {
 // checks for a session cookie, or if userHeader is set and no auth token is present,
 // generates a token for the username from the specified header.
 // Priority: Bearer token → Session cookie → User header
-func (s *Handler) extractOrGenerateToken(r *http.Request) (string, error) {
+//
+// mintedFor is the subject a token was minted for, and empty for a bearer
+// the caller presented.
+func (s *Handler) extractOrGenerateToken(r *http.Request) (token, mintedFor string, err error) {
 	// Try to extract bearer token first
-	token, err := extractBearerToken(r)
+	token, err = extractBearerToken(r)
 	if err == nil {
-		return token, nil
+		return token, "", nil
 	}
 
 	// Try to get username from session cookie
 	if sessionData, ok := s.getSessionFromRequest(r); ok {
-		username := sessionData.Username
 		// SessionData no longer carries a per-session HTCondor token —
 		// the http_sessions.token column was dropped in migration
 		// 0002 (it was reserved but never written). Tokens are
 		// generated below from the signing key on each call.
-
-		// Generate a token for the session username if signing key is available
-		if s.signingKeyPath != "" {
-			iat := time.Now().Unix()
-			exp := time.Now().Add(1 * time.Minute).Unix()
-			issuer := s.trustDomain
-			if issuer == "" {
-				return "", fmt.Errorf("TRUST_DOMAIN not configured for server; cannot generate token")
-			}
-			if !strings.Contains(username, "@") {
-				if s.uidDomain == "" {
-					return "", fmt.Errorf("UID_DOMAIN not configured for server; cannot create username %s", username)
-				}
-				username = username + "@" + s.uidDomain
-			}
-			kid := filepath.Base(s.signingKeyPath)
-			// Logged at Info so demo failures surface the iss/kid the
-			// schedd will see, without needing the operator to flip on
-			// debug logging first. The "trust domain mismatch" class of
-			// errors is otherwise opaque from the server log alone.
-			s.logger.Info(logging.DestinationSecurity, "Minted JWT for session user",
-				"subject", username, "issuer", issuer, "kid", kid,
-				"signing_key_path", s.signingKeyPath)
-			token, err := security.GenerateJWT(filepath.Dir(s.signingKeyPath), kid, username, issuer, iat, exp, nil)
-			if err != nil {
-				return "", fmt.Errorf("failed to generate token for session user %s: %w", username, err)
-			}
-			return token, nil
+		if s.signingKeyPath == "" {
+			// No signing key configured, cannot generate token from session
+			return "", "", fmt.Errorf("session cookie found but token generation not configured")
 		}
-
-		// No signing key configured, cannot generate token from session
-		return "", fmt.Errorf("session cookie found but token generation not configured")
+		if sessionData.IsPlacementd() {
+			sid, _ := getSessionCookie(r)
+			return s.mintPlacementSessionToken(r.Context(), sid, sessionData)
+		}
+		return s.mintRequestToken(sessionData.Username, "session")
 	}
 
 	// If userHeader is configured and signing key is available, try to generate token.
@@ -1161,38 +1276,72 @@ func (s *Handler) extractOrGenerateToken(r *http.Request) (string, error) {
 			s.logger.Warn(logging.DestinationSecurity,
 				"Refusing user-header authentication from untrusted source",
 				"remote_addr", r.RemoteAddr, "header", s.userHeader)
-			return "", fmt.Errorf("user header authentication not permitted from this source")
+			return "", "", fmt.Errorf("user header authentication not permitted from this source")
 		}
 		username := r.Header.Get(s.userHeader)
 		if username == "" {
-			return "", fmt.Errorf("no authorization token and %s header is empty", s.userHeader)
+			return "", "", fmt.Errorf("no authorization token and %s header is empty", s.userHeader)
 		}
-
-		// Generate token for this user
-		iat := time.Now().Unix()
-		exp := time.Now().Add(1 * time.Minute).Unix()
-		issuer := s.trustDomain
-		if issuer == "" {
-			return "", fmt.Errorf("TRUST_DOMAIN not configured for server; cannot generate token")
-		}
-		if !strings.Contains(username, "@") {
-			if s.uidDomain == "" {
-				return "", fmt.Errorf("UID_DOMAIN not configured for server; cannot create username %s", username)
-			}
-			username = username + "@" + s.uidDomain
-		}
-		kid := filepath.Base(s.signingKeyPath)
-		s.logger.Debug(logging.DestinationSecurity, "Generating token for user", "username", username, "header", s.userHeader, "issuer", issuer, "key", kid)
-		token, err := security.GenerateJWT(filepath.Dir(s.signingKeyPath), kid, username, issuer, iat, exp, nil)
-		if err != nil {
-			return "", fmt.Errorf("failed to generate token for user %s: %w", username, err)
-		}
-
-		return token, nil
+		return s.mintRequestToken(username, "header")
 	}
 
 	// No token and can't generate one
-	return "", fmt.Errorf("no authorization token and user header not configured")
+	return "", "", fmt.Errorf("no authorization token and user header not configured")
+}
+
+// requestTokenLifetime is how long a token minted for one request from a
+// session cookie or a trusted user header is valid. Work that outlives the
+// request renews it (see createAuthenticatedContext) rather than holding
+// on to this one.
+const requestTokenLifetime = 1 * time.Minute
+
+// mintRequestToken mints the IDTOKEN a session-cookie or user-header
+// request presents to HTCondor, for username qualified with UID_DOMAIN.
+// source names where the identity came from, for the log.
+func (s *Handler) mintRequestToken(username, source string) (token, subject string, err error) {
+	issuer := s.trustDomain
+	if issuer == "" {
+		return "", "", fmt.Errorf("TRUST_DOMAIN not configured for server; cannot generate token")
+	}
+	if !strings.Contains(username, "@") {
+		if s.uidDomain == "" {
+			return "", "", fmt.Errorf("UID_DOMAIN not configured for server; cannot create username %s", username)
+		}
+		username = username + "@" + s.uidDomain
+	}
+	now := time.Now()
+	kid := filepath.Base(s.signingKeyPath)
+	if source == "session" {
+		// Logged at Info so demo failures surface the iss/kid the
+		// schedd will see, without needing the operator to flip on
+		// debug logging first. The "trust domain mismatch" class of
+		// errors is otherwise opaque from the server log alone.
+		s.logger.Info(logging.DestinationSecurity, "Minted JWT for session user",
+			"subject", username, "issuer", issuer, "kid", kid)
+	} else {
+		s.logger.Debug(logging.DestinationSecurity, "Generating token for user", "username", username,
+			"source", source, "issuer", issuer, "key", kid)
+	}
+	token, err = security.GenerateJWT(filepath.Dir(s.signingKeyPath), kid, username, issuer,
+		now.Unix(), now.Add(requestTokenLifetime).Unix(), nil)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate token for %s user %s: %w", source, username, err)
+	}
+	return token, username, nil
+}
+
+// sessionCookieUser reports the session user extractOrGenerateToken
+// minted this request's token for: the request carries no bearer token
+// and does carry a session cookie.
+func (s *Handler) sessionCookieUser(r *http.Request) (string, bool) {
+	if _, err := extractBearerToken(r); err == nil {
+		return "", false
+	}
+	sessionData, ok := s.getSessionFromRequest(r)
+	if !ok || sessionData.Username == "" {
+		return "", false
+	}
+	return sessionData.Username, true
 }
 
 // createAuthenticatedContext creates a context with both token and SecurityConfig set
@@ -1211,21 +1360,32 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 		if kerr != nil {
 			return nil, kerr
 		}
+		// A key acts as its creator only where one of its scopes says
+		// it may act at all. Without this a metrics-only key -- the
+		// scrape credential handed to a monitoring system -- was its
+		// creator on every route that needs nothing but an identity:
+		// it could read, overwrite and delete the creator's templates.
+		// /metrics, the one route such a key is for, authenticates it
+		// with authenticateAPIKey directly.
+		if !apiKeyGrantsIdentity(ctx) {
+			return nil, errAPIKeyNoIdentity
+		}
 		return ctx, nil
 	}
 
 	// Extract bearer token or generate from user header
-	token, err := s.extractOrGenerateToken(r)
+	token, mintedFor, err := s.extractOrGenerateToken(r)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create context with token. Stash the bearer token where the
-	// markValidatedOnSuccess middleware can find it after the
-	// handler returns — so a 2xx response promotes the token to
-	// validated and subsequent requests get authoritative identity.
-	ctx := withRequestToken(r.Context(), token)
-	ctx = WithToken(ctx, token)
+	// Create context with token
+	ctx := WithToken(r.Context(), token)
+
+	// remint mints condorCredential again, when this server minted it:
+	// work this request starts may outlast it. Nil for a bearer the
+	// caller presented, which lasts exactly as long as it says it does.
+	remint := s.requestReminter(r, mintedFor)
 
 	// condorCredential is what cedar authenticates with, which is not
 	// always the bearer we were handed. For a HTCondor IDTOKEN the two
@@ -1240,23 +1400,26 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// the process-wide cache. Left empty for a per-token cache, which is
 	// private to one credential already.
 	var sessionTag string
+	// privateUserCache is set when sessionCache belongs to one user
+	// rather than one credential (session-cookie mode).
+	var privateUserCache bool
 
 	// Check if we're using user header mode (generated token)
 	if s.userHeader != "" {
 		// Try to extract bearer token to see if this is a real JWT
 		_, bearerErr := extractBearerToken(r)
 		if bearerErr != nil {
-			// No bearer token, so we generated one from user header.
-			// In user header mode, tokens are regenerated per request
-			// (new jti, iat), so the token cannot be the cache key: use
-			// the global cache, tagged with the user so one caller's
-			// sessions are not reachable by another's request. cedar
-			// keys the global cache by {SecurityTag, address, command}
-			// and, with no tag, by {address, command} alone — which
-			// every user of this mode would share.
-			sessionTag = r.Header.Get(s.userHeader)
-			sessionCache = nil // nil means use global cache
-			s.logger.Debug(logging.DestinationSecurity, "Using global session cache for user header mode", "username", sessionTag)
+			// No bearer token, so extractOrGenerateToken minted one --
+			// for the session cookie's user if there is one, otherwise
+			// the header's. Tokens are regenerated per request (new jti,
+			// iat), so the token itself cannot be the key. Key on what
+			// it was minted for, read back from the token: the header
+			// names the wrong user whenever a cookie supplied the
+			// identity. The cache is private to that key, never the
+			// global one, which also holds this daemon's own sessions.
+			sessionTag = mintedCredentialSessionTag("rest", token)
+			sessionCache = s.credentialSessions.sessionCacheFor(sessionTag)
+			s.logger.Debug(logging.DestinationSecurity, "Using private session cache for user header mode", "security_tag", shortTag(sessionTag))
 		} else {
 			// Real bearer token provided even though user header is configured
 			// Use per-token cache
@@ -1273,6 +1436,16 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 				s.logger.Debug(logging.DestinationSecurity, "Created new session cache for bearer token", "expiration", entry.Expiration)
 			}
 		}
+	} else if sessionUser, ok := s.sessionCookieUser(r); ok {
+		// Session-cookie mode: extractOrGenerateToken minted this token
+		// for the session's user, afresh on every request (new iat), so
+		// as a cache key it would add an entry per request that is never
+		// seen again. Key the session cache on the user this server
+		// authenticated instead: one private cache per user, never the
+		// global one, which also holds sessions other identities
+		// (this daemon's own among them) would resume.
+		sessionCache = s.cookieSessionCaches.sessionCacheFor(sessionUser)
+		privateUserCache = true
 	} else {
 		// Not using user header mode - this is a real JWT token
 		// Check if token is already in cache
@@ -1288,11 +1461,13 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 			// the first request after a sign-in behaved differently
 			// from every one after it.
 			var cachedScopes []string
-			condorCredential, cachedScopes = resolveCachedBearer(entry, token)
-			if len(cachedScopes) > 0 {
+			var scoped bool
+			condorCredential, cachedScopes, scoped = resolveCachedBearer(entry, token)
+			remint = s.cachedGrantReminter(entry, token, condorCredential)
+			if scoped {
 				// Same reasoning: a handler that gates on scopes would
-				// otherwise see an approved-for-less grant as carrying
-				// no restriction at all.
+				// otherwise see an approved-for-less grant -- or one
+				// approved for nothing -- as carrying no restriction.
 				ctx = withAPIKeyScopes(ctx, cachedScopes)
 			}
 			s.logger.Debug(logging.DestinationSecurity, "Using cached session cache for token")
@@ -1340,8 +1515,15 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 						// Mint the IDTOKEN the schedd can verify, the
 						// same way the MCP data path does, bounded by
 						// the scopes this grant actually carries.
-						condorCredential, err = s.generateHTCondorTokenWithScopes(username, ar.GetGrantedScopes())
+						remint = s.grantReminter(token, username, ar.GetGrantedScopes(), expiration)
+						condorCredential, err = s.generateGrantHTCondorToken(username, grantIdentity(ar), ar.GetGrantedScopes())
 						if err != nil {
+							// Drop the entry AddValidated just made.
+							// Left in place, the next request with this
+							// bearer takes the cached branch above and
+							// proceeds with the opaque bearer as its
+							// credential instead of being refused again.
+							s.tokenCache.Remove(token)
 							return nil, fmt.Errorf("failed to mint HTCondor token for %s: %w", username, err)
 						}
 						// Carry the grant's scopes so a handler can gate
@@ -1349,6 +1531,11 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 						// scope-checkable, and an OAuth2 grant approved
 						// for less than it asks for looks unscoped.
 						ctx = withAPIKeyScopes(ctx, ar.GetGrantedScopes())
+						// The grant names the integration that sent
+						// this request, which is the one place a REST
+						// call says what it is rather than leaving us
+						// to guess from a User-Agent.
+						noteRESTClient(ctx, oauthClientLabel(ar))
 						// Remember both, so the next request for this
 						// bearer resolves the same way this one did.
 						s.tokenCache.SetCondorCredential(token, condorCredential, ar.GetGrantedScopes())
@@ -1382,7 +1569,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// instead of the header identity. A caller then could not see, hold
 	// or remove the job they had just submitted, because every
 	// owner-scoped query filters on an Owner that is not theirs.
-	secConfig, err := ConfigureSecurityForTokenWithCacheAndFallback(condorCredential, sessionCache, false)
+	secConfig, err := configureSecurityForToken(s.clientConfig, condorCredential, sessionCache, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure security: %w", err)
 	}
@@ -1396,15 +1583,24 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// has tagged for this reason for a while; this is the same tag on
 	// the same cache.
 	//
-	// In user-header mode the tag is the username, because the token is
-	// regenerated per request -- new jti, new iat -- so a digest of it
-	// would differ every time and no session would ever be reused.
-	// Everywhere else the tag is a digest of the credential rather than
-	// a claim read out of it: a claim is attacker-chosen, and a forged
-	// one would select somebody else's session, which is the thing
-	// being prevented.
+	// In user-header mode the token is regenerated per request -- new
+	// jti, new iat -- so a digest of it would differ every time and no
+	// session would ever be reused; the tag is derived instead from the
+	// identity and authorization this server minted it with. Everywhere
+	// else the tag is a digest of the credential rather than a claim read
+	// out of it: a claim is attacker-chosen, and a forged one would
+	// select somebody else's session, which is the thing being
+	// prevented.
 	secConfig.SecurityTag = sessionTagFor(sessionTag, condorCredential)
-	ctx = htcondor.WithSecurityConfig(ctx, secConfig)
+	if privateUserCache {
+		// The cache holds only this user's sessions, so there is nothing
+		// to isolate them from, and the untagged slot of a cache the
+		// caller supplied is the caller's own: every request of this user
+		// resumes the session another set up. A digest of the credential
+		// would differ every request, and no session would be reused.
+		secConfig.SecurityTag = ""
+	}
+	ctx = htcondor.WithRenewableSecurityConfig(ctx, secConfig, renewWith(s.clientConfig, secConfig, remint))
 
 	// What this request will present to HTCondor, for correlating a
 	// refusal with the credential that caused it. Debug level: it is
@@ -1414,7 +1610,7 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 			"path", r.URL.Path,
 			"credential", describeCredentialSubject(condorCredential),
 			"security_tag", shortTag(secConfig.SecurityTag),
-			"session_cache", map[bool]string{true: "per-token", false: "global"}[sessionCache != nil])
+			"session_cache", map[bool]string{true: "private", false: "global"}[sessionCache != nil])
 	}
 
 	// Extract username for rate limiting - only use from tokens that have been cached (validated)
@@ -1460,15 +1656,29 @@ func (s *Handler) createAuthenticatedContext(r *http.Request) (context.Context, 
 	// Validated by a 2xx) and widening it.
 	if username == "" {
 		if bearer, err := extractBearerToken(r); err == nil && bearer != "" {
-			username = s.actorForSession(ctx, bearer)
+			// A throttled resolution fails the request. Carrying on
+			// would serve a caller who did present a credential as one
+			// who presented none.
+			if username, err = s.resolveActor(ctx, r, bearer); err != nil {
+				return nil, err
+			}
 		}
 	}
 
-	// Set username in context for rate limiting only if from validated token
-	// Otherwise treated as "unauthenticated"
-	if username != "" {
-		ctx = htcondor.WithAuthenticatedUser(ctx, username)
+	// A request nobody could name is refused here, once, rather than
+	// passed on as "unauthenticated" for each handler to remember to
+	// check. Several handlers answer from this daemon's own copy of
+	// the queue with no schedd behind them to refuse the caller, and
+	// to an owner scope an empty owner means everyone.
+	if username == "" {
+		return nil, errUnidentifiedCaller
 	}
+	ctx = htcondor.WithAuthenticatedUser(ctx, username)
+	ctx = s.withPlacementOwnerScope(ctx, r, username)
+	// Every credential kind that is not the API key short-circuit
+	// above lands here, so this is the one place REST usage counting
+	// has to learn who the caller is.
+	noteRESTActor(ctx, username)
 
 	return ctx, nil
 }
@@ -1488,7 +1698,8 @@ func discoverSchedd(collector *htcondor.Collector, scheddName, scheddHost string
 	pollInterval := 1 * time.Second
 
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(
+			htcondor.WithDaemonCredential(context.Background(), "schedd discovery"), 5*time.Second)
 
 		// Query collector for schedd ads
 		constraint := ""
@@ -1579,9 +1790,17 @@ func discoverSchedd(collector *htcondor.Collector, scheddName, scheddHost string
 	return "", fmt.Errorf("timeout after %v: no schedds found in collector", timeout)
 }
 
-func findCreddAddressFile(logger *logging.Logger) string {
+// findCreddAddressFile locates this host's credd address file. htcConfig is
+// the server's HTCondor configuration; when it is nil the configuration is
+// loaded from $CONDOR_CONFIG.
+func findCreddAddressFile(htcConfig *config.Config, logger *logging.Logger) string {
 	// First, try to get the configured path from HTCondor config
-	if htcConfig, err := config.New(); err == nil {
+	if htcConfig == nil {
+		if loaded, err := config.New(); err == nil {
+			htcConfig = loaded
+		}
+	}
+	if htcConfig != nil {
 		if creddAddressFile, ok := htcConfig.Get("CREDD_ADDRESS_FILE"); ok {
 			if _, err := os.Stat(creddAddressFile); err == nil {
 				logger.Info(logging.DestinationHTTP, "Found credd address file from config", "path", creddAddressFile)

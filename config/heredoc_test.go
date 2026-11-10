@@ -180,8 +180,10 @@ OUTPUT = value2
 	}
 
 	script, _ := cfg.Get("SCRIPT")
-	// Macros are expanded when we Get(), so $(SIMPLE) becomes "value1"
-	expected := "#!/bin/bash\necho \"value1\""
+	// Macros are expanded when we Get(), so $(SIMPLE) becomes "value1". A
+	// '#' line inside @= is a comment, as anywhere in a config file: condor
+	// 25.14.1 drops the #! line too.
+	expected := "echo \"value1\""
 	if script != expected {
 		t.Errorf("SCRIPT: expected %q, got %q", expected, script)
 	}
@@ -209,7 +211,8 @@ exec "$@"
 	wrapper, _ := cfg.Get("WRAPPER")
 	// Note: $(BASE) in the heredoc should be preserved as-is in the stored value,
 	// but when we Get() it, macro expansion happens
-	expected := "#!/bin/bash\nCONDOR_HOME=/opt/condor\nexport PATH=$CONDOR_HOME/bin:$PATH\nexec \"$@\""
+	// The #! line is a comment and is dropped, as in condor 25.14.1.
+	expected := "CONDOR_HOME=/opt/condor\nexport PATH=$CONDOR_HOME/bin:$PATH\nexec \"$@\""
 	if wrapper != expected {
 		t.Errorf("WRAPPER: expected %q, got %q", expected, wrapper)
 	}

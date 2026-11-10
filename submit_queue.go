@@ -49,6 +49,15 @@ type listIterator struct {
 	current  int
 	itemIdx  int
 	started  bool
+
+	// live holds the loop variables' current values. It is updated in
+	// place as rows are consumed rather than rebuilt per row, because a
+	// row that supplies no value for a variable leaves that variable
+	// alone -- see splitItemColumns.
+	live map[string]string
+	// liveIdx is the item index live reflects, so asking for the same
+	// row's values twice does not advance anything.
+	liveIdx int
 }
 
 func newListIterator(varNames []string, items []string, count int) *listIterator {
@@ -58,12 +67,18 @@ func newListIterator(varNames []string, items []string, count int) *listIterator
 	if len(varNames) == 0 {
 		varNames = []string{"ITEM"}
 	}
+	live := make(map[string]string, len(varNames))
+	for _, name := range varNames {
+		live[name] = ""
+	}
 	return &listIterator{
 		varNames: varNames,
 		items:    items,
 		count:    count,
 		itemIdx:  -1, // Start at -1 so first Next() moves to 0
 		current:  -1,
+		live:     live,
+		liveIdx:  -1,
 	}
 }
 
@@ -95,22 +110,61 @@ func (l *listIterator) Values() map[string]string {
 		"Step":      fmt.Sprintf("%d", l.current),
 	}
 
-	// Set the variable(s) to the current item
-	item := l.items[l.itemIdx]
-	if len(l.varNames) == 1 {
-		values[l.varNames[0]] = item
-	} else {
-		// Split item by whitespace for multiple variables
-		parts := strings.Fields(item)
-		for i, varName := range l.varNames {
-			if i < len(parts) {
-				values[varName] = parts[i]
-			} else {
-				values[varName] = ""
-			}
+	// Set the variable(s) to the current item.
+	if l.liveIdx != l.itemIdx {
+		for i, col := range splitItemColumns(l.items[l.itemIdx], len(l.varNames)) {
+			l.live[l.varNames[i]] = col
 		}
+		l.liveIdx = l.itemIdx
+	}
+	for name, v := range l.live {
+		values[name] = v
 	}
 
+	return values
+}
+
+// splitItemColumns splits one item into the values of numCols loop variables,
+// matching HTCondor's own split.
+//
+// Commas and whitespace are both column separators, the last variable takes
+// everything that is left rather than just the next field, and a row with
+// fewer fields than variables pads the rest with empty strings. An item that
+// is empty once trimmed yields NO columns at all, which is how HTCondor
+// leaves every loop variable holding the previous row's value: see the note
+// on SubmitStepFromQArgs::select_rowdata.
+func splitItemColumns(item string, numCols int) []string {
+	const (
+		tokenSeps = ", \t"
+		tokenWS   = " \t"
+		// maxColumns is HTCondor's cutoff for padding: at or above it, a
+		// row splits only where there are separators instead of being
+		// padded out to numCols.
+		maxColumns = 1000
+	)
+
+	item = strings.TrimSuffix(item, "\n")
+	item = strings.TrimSuffix(item, "\r")
+	item = strings.Trim(item, tokenWS)
+	if item == "" {
+		return nil
+	}
+
+	values := make([]string, 0, numCols)
+	values = append(values, item)
+	for len(values) < numCols {
+		prev := values[len(values)-1]
+		end := strings.IndexAny(prev, tokenSeps)
+		if end < 0 {
+			if numCols >= maxColumns {
+				break
+			}
+			values = append(values, "")
+			continue
+		}
+		values[len(values)-1] = strings.TrimRight(prev[:end], tokenWS)
+		values = append(values, strings.TrimLeft(prev[end+1:], tokenWS))
+	}
 	return values
 }
 
@@ -345,12 +399,14 @@ func createIteratorFromQueue(qs *config.QueueStatement, access queueFileAccess) 
 	}
 
 	// Determine which type of queue statement this is
-	hasVars := len(qs.VarNames) > 0
 	hasItems := len(qs.Items) > 0
 	hasFile := qs.File != ""
 
-	if !hasVars && !hasItems && !hasFile {
-		// Simple: queue [N]
+	if !hasItems && !hasFile {
+		// Simple: queue [N]. Loop variables with no items behind them --
+		// `queue x in ()` -- are this case too: HTCondor queues the count
+		// and leaves every loop variable expanding to nothing, rather than
+		// queueing nothing at all.
 		return newSimpleIterator(count), nil
 	}
 
@@ -382,3 +438,15 @@ func createIteratorFromQueue(qs *config.QueueStatement, access queueFileAccess) 
 
 	return nil, fmt.Errorf("invalid queue statement: cannot determine iterator type")
 }
+
+// rawItemSource is implemented by the iterators that read a list of rows, so
+// a late-materialization submission can send those rows to the schedd
+// untouched rather than the loop-variable values they split into. The schedd
+// does its own splitting when it materializes a proc.
+type rawItemSource interface {
+	rawItems() []string
+}
+
+func (l *listIterator) rawItems() []string     { return l.items }
+func (f *fileIterator) rawItems() []string     { return f.lines }
+func (m *matchingIterator) rawItems() []string { return m.files }

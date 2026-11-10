@@ -17,16 +17,32 @@ queue 5        # Queue 5 jobs
 ### 2. Queue from List
 ```
 queue item in (apple, banana, cherry)                    # 3 jobs
-queue 2 fruit in (apple, banana)                        # 4 jobs (2 per item)
-queue var1, var2 in (a b, c d, e f)                     # 3 jobs with 2 variables
+queue in (apple banana)                                  # 2 jobs, loop variable Item
+queue 2 fruit in (apple, banana)                         # 4 jobs (2 per item)
+queue var1, var2 in (a b, c d, e f)                      # 6 jobs; var2 is never set
 ```
+
+Whitespace separates items exactly as a comma does, so an `in` list never
+produces an item with more than one field and a second loop variable has
+nothing to take. Quotes carry no meaning, and the list ends at the last `)`
+on the line, which leaves any earlier `)` as an ordinary character inside an
+item. Items with several fields come from `from`, below.
 
 ### 3. Queue from File
 ```
 queue color from "data.txt"                              # 1 job per line
 queue 3 name from "items.txt"                           # 3 jobs per line
 queue var1, var2 from "params.csv"                      # Parse each line into variables
+queue var1, var2 from (                                  # The same, inline
+1 2
+3 4
+)
 ```
+
+`from` takes each line whole, so a line does fill several loop variables. The
+last variable takes everything left on the line rather than just the next
+field, a short line pads the rest with empty strings, and a line that is empty
+once trimmed leaves every variable holding the previous line's value.
 
 File format:
 - One item per line

@@ -45,8 +45,10 @@ type activityStreamEvent struct {
 	Cluster int64  `json:"cluster_id"`
 	Proc    int64  `json:"proc_id"`
 	Owner   string `json:"owner,omitempty"`
-	At      int64  `json:"at"`
-	Detail  string `json:"detail,omitempty"`
+	// Schedd is the job's access point, in multi-AP mode.
+	Schedd string `json:"schedd,omitempty"`
+	At     int64  `json:"at"`
+	Detail string `json:"detail,omitempty"`
 	// Skipped says how many events were lost before this one because
 	// this browser was not reading fast enough. Reporting it keeps a
 	// gap from looking like a quiet minute.
@@ -59,15 +61,11 @@ func (s *Handler) handleDashboardActivityStream(w http.ResponseWriter, r *http.R
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	ctx, needsRedirect, err := s.requireAuthentication(r)
-	if err != nil {
-		if needsRedirect {
-			s.redirectToLogin(w, r)
-			return
-		}
-		s.writeError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+	ctx, release, ok := s.authenticateStream(w, r)
+	if !ok {
 		return
 	}
+	defer release()
 
 	if s.jobWatchFeed == nil {
 		// Not an error the caller can fix, and not a failure: this
@@ -77,23 +75,30 @@ func (s *Handler) handleDashboardActivityStream(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	owner := htcondor.GetAuthenticatedUserFromContext(ctx)
-
 	// Same scoping rule as the dashboard itself: everyone sees their own
 	// by default, an administrator may ask for the whole access point.
 	// The filter is applied inside the feed rather than here -- see
 	// SubscribeActivity -- so there is no path on which a wider stream
-	// is opened and narrowed afterwards.
-	scope := activityStreamScope(owner, r.URL.Query().Get("owned_by_me"), s.isWebUIAdmin(r))
+	// is opened and narrowed afterwards. A caller nobody named gets no
+	// stream at all; the feed refuses an empty owner too.
+	if !s.streamCallerInDomain(ctx, w) {
+		return
+	}
+	owner, all := activityStreamScope(htcondor.GetAuthenticatedUserFromContext(ctx),
+		r.URL.Query().Get("owned_by_me"), s.seesAllJobs(ctx, r, jobScopeRead))
+	events, cancel, err := s.jobWatchFeed.SubscribeActivity(owner, all, activityStreamBuffer)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "Authentication failed: "+errUnidentifiedCaller.Error())
+		return
+	}
+	defer cancel()
 
 	flusher, ok := sseSetup(w)
 	if !ok {
 		s.writeError(w, http.StatusInternalServerError, "Streaming unsupported")
 		return
 	}
-
-	events, cancel := s.jobWatchFeed.SubscribeActivity(scope, activityStreamBuffer)
-	defer cancel()
+	defer s.streamOpened()()
 
 	// The feed goes cold across a reconnect to the mirror, and warm once
 	// it is following again. Saying which lets the page show that the
@@ -107,22 +112,28 @@ func (s *Handler) handleDashboardActivityStream(w http.ResponseWriter, r *http.R
 	streamActivity(r.Context(), w, flusher, events, activityStreamHeartbeat)
 }
 
-// activityStreamScope decides which jobs this connection may see.
+// activityStreamScope decides which jobs this connection may see: the
+// Owner value of the caller's own jobs, or with all set, every job.
 //
 // Own jobs by default, for everyone. The pool-wide stream is an explicit
 // ask and only an administrator gets it: a non-admin who sends
 // owned_by_me=false is quietly given their own jobs rather than an
 // error, which is the same rule the dashboard and the jobs list already
 // apply to the same parameter.
-func activityStreamScope(owner, requested string, isAdmin bool) string {
-	if requested == "" || !isAdmin {
-		return owner
+//
+// actor is the authenticated identity, which may be qualified
+// ("alice@domain") where a job's Owner never is. An empty actor yields
+// an empty owner and all unset -- never everyone.
+func activityStreamScope(actor, requested string, isAdmin bool) (owner string, all bool) {
+	owner = ownerFromActor(actor)
+	if requested == "" || !isAdmin || actor == "" {
+		return owner, false
 	}
 	ownedByMe, err := strconv.ParseBool(requested)
 	if err != nil || ownedByMe {
-		return owner
+		return owner, false
 	}
-	return ""
+	return "", true
 }
 
 // streamActivity is the response loop: events out as they arrive, a
@@ -158,6 +169,7 @@ func writeActivityEvent(w http.ResponseWriter, flusher *http.ResponseController,
 		Cluster: ev.Cluster,
 		Proc:    ev.Proc,
 		Owner:   ev.Owner,
+		Schedd:  ev.Schedd,
 		At:      ev.At,
 		Detail:  ev.Detail,
 		Skipped: ev.Skipped,

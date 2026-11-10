@@ -18,6 +18,7 @@ import (
 // own teardown.
 func newTestDB(t *testing.T, dbPath string) *sql.DB {
 	t.Helper()
+	seedMigratedAppDB(dbPath)
 	db, err := appdb.Open(dbPath)
 	if err != nil {
 		t.Fatalf("appdb.Open: %v", err)

@@ -44,8 +44,8 @@ func TestJupyterMaxLifetimeIsEnforcedBySchedd(t *testing.T) {
 // Zero is how an operator turns the ceiling off, and must not emit a
 // malformed expression that removes the job immediately.
 func TestJupyterMaxLifetimeOffEmitsNothing(t *testing.T) {
-	if got := jupyterPeriodicRemove(0); got != "" {
-		t.Errorf("jupyterPeriodicRemove(0) = %q, want no expression", got)
+	if got := jupyterPeriodicRemove(0, 0); got != "" {
+		t.Errorf("jupyterPeriodicRemove(0, 0) = %q, want no expression", got)
 	}
 	if got := buildJupyterSubmitFile(jupyterSubmitArgs{InstanceID: "x"}); strings.Contains(got, "periodic_remove") {
 		t.Errorf("a ceiling was emitted with none configured:\n%s", got)

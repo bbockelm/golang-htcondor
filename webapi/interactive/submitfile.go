@@ -489,7 +489,22 @@ var sessionOwnedCommands = map[string]string{
 	"universe":                "a session is a vanilla-universe job",
 	"should_transfer_files":   "file transfer delivers the watchdog",
 	"when_to_transfer_output": "file transfer delivers the watchdog",
+
+	// The schedd-side limits. JupyterLab and VS Code sessions are bounded
+	// by a generated periodic_remove; a later line replaces it, so one
+	// "periodic_remove = false" made a session unbounded. The ad attribute
+	// is reachable under its own name too (+Attr and MY.Attr both set it).
+	"periodic_remove":         periodicRemoveOwned,
+	"+periodicremove":         periodicRemoveOwned,
+	"my.periodicremove":       periodicRemoveOwned,
+	"+periodicremovereason":   periodicRemoveReasonOwned,
+	"my.periodicremovereason": periodicRemoveReasonOwned,
 }
+
+const (
+	periodicRemoveOwned       = "the session's time limits are enforced through it"
+	periodicRemoveReasonOwned = "it says which of the session's time limits removed the job"
+)
 
 // ValidateCallerSubmitLines checks caller-supplied submit commands,
 // rejecting the ones the session itself depends on.

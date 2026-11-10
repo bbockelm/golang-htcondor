@@ -23,6 +23,13 @@ export interface StatusChip<K extends string> {
   count: number;
 }
 
+// STATUS_CHIP is the shape every status chip shares, wherever it appears.
+// Exported so the dashboard's navigating strip and this filtering one cannot
+// drift into two chips that look almost alike -- the same concept has to look
+// the same on every page.
+export const STATUS_CHIP =
+  'inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium tabular-nums transition';
+
 export function StatusStrip<K extends string>({
   chips,
   selected,
@@ -55,7 +62,7 @@ export function StatusStrip<K extends string>({
         // Spelled out rather than left to the two adjacent spans, which
         // the accessibility tree would run together as "All6".
         aria-label={`All statuses, ${total} ${total === 1 ? noun.replace(/s$/, '') : noun}`}
-        className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium tabular-nums transition ${
+        className={`${STATUS_CHIP} ${
           filtering
             ? 'bg-white text-gray-500 ring-1 ring-gray-300 hover:bg-gray-50'
             : 'bg-gray-800 text-white'
@@ -83,7 +90,7 @@ export function StatusStrip<K extends string>({
                 ? `Stop showing ${chip.label} ${noun}`
                 : `Show only ${chip.label} ${noun}`
             }
-            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium tabular-nums transition ${chip.cls} ${
+            className={`${STATUS_CHIP} ${chip.cls} ${
               on
                 ? 'ring-2 ring-gray-800 ring-offset-1'
                 : filtering

@@ -17,7 +17,11 @@ const userPw = userPassword(log);
 // Paths the admin UI actually calls. Worth naming carefully: an
 // endpoint that does not exist is served the SPA shell with a 200, so a
 // typo here turns "refuses a non-admin" into a test of nothing.
-const ADMIN_ENDPOINTS = ['/api/v1/admin/oauth2/clients', '/api/v1/admin/api-keys'];
+const ADMIN_ENDPOINTS = [
+  '/api/v1/admin/oauth2/clients',
+  '/api/v1/admin/api-keys',
+  '/api/v1/admin/usage',
+];
 
 test('the two demo accounts are actually different identities', async ({ browser }) => {
   // Guards the rest of this file. If both logins resolved to the same

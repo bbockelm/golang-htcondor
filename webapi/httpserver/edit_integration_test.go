@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ import (
 
 // TestHTTPEditJobIntegration tests editing a job via HTTP API
 func TestHTTPEditJobIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -54,8 +56,9 @@ func TestHTTPEditJobIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// Test user for authentication
-	testUser := "testuser"
+	// Test user for authentication: the owner of the jobs the harness
+	// submits below over FS, because REST edits are owner-scoped.
+	testUser := localOwner(t)
 
 	// Setup signing key for user header authentication
 	passwordsDir := filepath.Join(harness.GetSpoolDir(), "passwords.d")
@@ -274,6 +277,7 @@ queue
 
 // TestHTTPBulkEditJobsIntegration tests bulk editing jobs via HTTP API
 func TestHTTPBulkEditJobsIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -312,8 +316,9 @@ func TestHTTPBulkEditJobsIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// Test user for authentication
-	testUser := "testuser"
+	// Test user for authentication: the owner of the jobs the harness
+	// submits below over FS, because REST edits are owner-scoped.
+	testUser := localOwner(t)
 
 	// Setup signing key for user header authentication
 	passwordsDir := filepath.Join(harness.GetSpoolDir(), "passwords.d")
@@ -486,4 +491,15 @@ queue 3
 			}
 		}
 	})
+}
+
+// localOwner is the OS user this process runs as, which is the Owner of a
+// job the harness schedd accepts over FS.
+func localOwner(t *testing.T) string {
+	t.Helper()
+	me, err := user.Current()
+	if err != nil || me.Username == "" {
+		t.Fatalf("cannot determine the local user: %v", err)
+	}
+	return me.Username
 }

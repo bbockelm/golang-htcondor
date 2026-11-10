@@ -14,6 +14,7 @@ import (
 // back out of the startd's own history (GET_HISTORY), which is a different daemon, command and
 // file from the schedd history the other integration tests cover.
 func TestStartdQueryHistoryIntegration(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

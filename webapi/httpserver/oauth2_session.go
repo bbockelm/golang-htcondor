@@ -61,6 +61,22 @@ type Session struct {
 	// the `act.sub` an exchanged token records, and is surfaced for audit and
 	// on the HTCondor IDTOKEN minted downstream.
 	Actor string `json:"actor,omitempty"`
+
+	// ParentGrant is the request id of the grant whose access token was
+	// exchanged for this one. An exchanged token is only as good as that
+	// grant: storage reports it inactive once no live token remains under
+	// ParentGrant, and never grants it a scope the parent no longer holds
+	// (see OAuth2Storage.parentGrantScopes). Empty for tokens obtained
+	// directly and for those exchanged from an external issuer's token.
+	ParentGrant string `json:"parentGrant,omitempty"`
+
+	// PlacementIdentity is the sign-in identity that approved the grant:
+	// for a grant holding the placement scope, the identity the placement
+	// endpoints act for, and only for; for any other grant a placementd-
+	// mapped session approved, the identity whose bound on the account
+	// every token minted for the grant stays within. It is never taken
+	// from a request.
+	PlacementIdentity string `json:"placementIdentity,omitempty"`
 }
 
 // Clone deep-copies the session, including the fields declared above.
@@ -80,7 +96,8 @@ func (s *Session) Clone() fosite.Session {
 	if s == nil {
 		return nil
 	}
-	clone := &Session{AuthTime: s.AuthTime, Actor: s.Actor}
+	clone := &Session{AuthTime: s.AuthTime, Actor: s.Actor, ParentGrant: s.ParentGrant,
+		PlacementIdentity: s.PlacementIdentity}
 	if s.DefaultSession != nil {
 		// DefaultSession.Clone returns a fosite.Session whose concrete
 		// type is *openid.DefaultSession.
@@ -192,4 +209,12 @@ func sessionFrom(r fosite.Requester) (*Session, bool) {
 	}
 	s, ok := r.GetSession().(*Session)
 	return s, ok
+}
+
+// grantIdentity is the sign-in identity recorded on r's session, or "".
+func grantIdentity(r fosite.Requester) string {
+	if s, ok := sessionFrom(r); ok {
+		return s.PlacementIdentity
+	}
+	return ""
 }

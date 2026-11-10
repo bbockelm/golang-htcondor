@@ -4,6 +4,12 @@
 # Stage 2: Build the Go binary with the frontend embedded via go:embed.
 # Stage 3: Copy just the binary into a minimal runtime image.
 
+# The Go minor for the builder stage: the contents of .go-version, which
+# release-container.yml passes in. golang:<minor>-alpine tracks that minor's
+# newest patch. Building by hand:
+#   docker build --build-arg GO_VERSION=$(cat .go-version) -f Dockerfile.release .
+ARG GO_VERSION
+
 # --- Stage 1: frontend ---
 FROM --platform=$BUILDPLATFORM node:24-alpine AS frontend-builder
 
@@ -33,7 +39,7 @@ ARG HTCONDOR_GIT_REF=main
 RUN git clone --depth 1 --branch ${HTCONDOR_GIT_REF} ${HTCONDOR_GIT_URL} /htcondor
 
 # --- Stage 2: Go binary ---
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH

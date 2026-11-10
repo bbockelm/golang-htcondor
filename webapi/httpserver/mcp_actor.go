@@ -6,6 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -35,11 +38,35 @@ const (
 	// of the schedd: a forged JWT with the pool's issuer classifies as
 	// a forwarded IDTOKEN, and each distinct one is a cache miss. The
 	// limit means a flood of them costs the schedd a bounded trickle of
-	// handshakes instead of one per request; callers whose identity
-	// cannot be resolved are simply treated as unauthenticated, which
-	// owner-scoped tools already refuse.
+	// handshakes instead of one per request.
+	//
+	// The budget is per source address. One budget for the whole
+	// process let a single client sending unknown bearers use up every
+	// other caller's resolutions, and a caller refused resolution has
+	// no identity at all.
 	mcpActorResolveRate = 5
+
+	// mcpActorResolveGlobalRate is the ceiling over every source
+	// together, with a burst of twice that. The per-source budget
+	// keeps one client from starving the rest; this keeps many of them
+	// from turning into an unbounded number of schedd handshakes.
+	mcpActorResolveGlobalRate = 25
+
+	// mcpActorMaxSources bounds the per-source table. A source idle for
+	// mcpActorSourceIdle has a full bucket again, so forgetting it
+	// changes nothing; when the table is full of sources that are not
+	// idle it is cleared, which hands every source a fresh budget and
+	// leaves the global ceiling to bound the cost.
+	mcpActorMaxSources = 10000
+	mcpActorSourceIdle = time.Minute
 )
+
+// errActorResolveThrottled is returned when an identity could not be
+// resolved because the request's source, or every source together, has
+// used its resolution budget. It is
+// a refusal of the request, not an answer: proceeding with no identity
+// would treat a caller who did authenticate as one who did not.
+var errActorResolveThrottled = errors.New("too many new credentials are waiting to be verified; retry shortly")
 
 // mcpActorCache maps a forwarded HTCondor IDTOKEN to the identity the
 // schedd said it authenticates as. Keyed by a digest of the token so
@@ -47,9 +74,29 @@ const (
 type mcpActorCache struct {
 	mu      sync.Mutex
 	entries map[string]mcpActorEntry
-	// limiter throttles resolutions that miss the cache. Created on
-	// first use so a zero-value cache works.
+	// limiter is the global ceiling on resolutions that miss the cache,
+	// and sources the per-source budgets under it. Created on first use
+	// so a zero-value cache works.
+	limiter   *rate.Limiter
+	sources   map[string]*mcpActorSource
+	lastSweep time.Time
+	// now replaces the clock, for tests: the budgets refill with time, so a
+	// test that drains one must hold time still. Nil is time.Now.
+	now func() time.Time
+}
+
+// clock is the cache's current time.
+func (c *mcpActorCache) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+// mcpActorSource is one source address's resolution budget.
+type mcpActorSource struct {
 	limiter *rate.Limiter
+	lastUse time.Time
 }
 
 type mcpActorEntry struct {
@@ -59,15 +106,64 @@ type mcpActorEntry struct {
 	expires time.Time
 }
 
-// allowResolve reports whether a cache miss may spend a schedd handshake
-// resolving an identity now.
-func (c *mcpActorCache) allowResolve() bool {
+// allowResolve reports whether a cache miss from source may spend a
+// schedd handshake resolving an identity now.
+//
+// The source's own budget is charged first, so a source that is over
+// it does not also drain the global ceiling everybody else shares.
+func (c *mcpActorCache) allowResolve(source string) bool {
+	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.limiter == nil {
-		c.limiter = rate.NewLimiter(rate.Limit(mcpActorResolveRate), mcpActorResolveRate*2)
+		c.limiter = rate.NewLimiter(rate.Limit(mcpActorResolveGlobalRate), mcpActorResolveGlobalRate*2)
 	}
-	return c.limiter.Allow()
+	src, ok := c.sources[source]
+	if !ok {
+		c.sweepSourcesLocked(now)
+		src = &mcpActorSource{limiter: rate.NewLimiter(rate.Limit(mcpActorResolveRate), mcpActorResolveRate*2)}
+		c.sources[source] = src
+	}
+	src.lastUse = now
+	if !src.limiter.AllowN(now, 1) {
+		return false
+	}
+	return c.limiter.AllowN(now, 1)
+}
+
+// sweepSourcesLocked makes room for a new source. Called with c.mu held.
+func (c *mcpActorCache) sweepSourcesLocked(now time.Time) {
+	if c.sources == nil {
+		c.sources = make(map[string]*mcpActorSource)
+		c.lastSweep = now
+		return
+	}
+	if len(c.sources) < mcpActorMaxSources && now.Sub(c.lastSweep) < mcpActorSourceIdle {
+		return
+	}
+	c.lastSweep = now
+	for k, src := range c.sources {
+		if now.Sub(src.lastUse) >= mcpActorSourceIdle {
+			delete(c.sources, k)
+		}
+	}
+	if len(c.sources) >= mcpActorMaxSources {
+		clear(c.sources)
+	}
+}
+
+// actorResolveSource is the address a resolution is charged to: the
+// client as clientIP resolves it, with an IPv6 address reduced to its
+// /64, since one host commonly holds a whole /64 and would otherwise
+// have a budget per address. The other per-source limits on
+// unauthenticated endpoints key on it for the same reason.
+func actorResolveSource(r *http.Request, trusted []*net.IPNet) string {
+	addr := clientIP(r, trusted)
+	ip := net.ParseIP(addr)
+	if ip == nil || ip.To4() != nil {
+		return addr
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 // get returns the cached actor for a token. The second result reports
@@ -82,7 +178,7 @@ func (c *mcpActorCache) get(token string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if time.Now().After(entry.expires) {
+	if c.clock().After(entry.expires) {
 		delete(c.entries, key)
 		return "", false
 	}
@@ -91,7 +187,7 @@ func (c *mcpActorCache) get(token string) (string, bool) {
 
 func (c *mcpActorCache) put(token, actor string, ttl time.Duration) {
 	key := mcpActorKey(token)
-	now := time.Now()
+	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
@@ -118,9 +214,12 @@ func mcpActorKey(token string) string {
 // caller's bearer, used only to key the answer.
 //
 // The answer comes from the schedd, not from any token claim: ctx
-// already carries the request's SecurityConfig, so a DC_NOP ping
+// already carries the request's SecurityConfig, so the ping
 // authenticates exactly as the subsequent tool call will and the schedd
-// reports back the identity it mapped the caller to. That matters for
+// reports back the identity it mapped the caller to. The ping is
+// DC_NOP_READ rather than DC_NOP, which is registered at ALLOW: an
+// identity is only resolved for a credential the schedd accepts at
+// READ, the level of every query it stands in for. That matters for
 // both kinds of bearer. For a forwarded IDTOKEN, the claim is unverified
 // here — trusting it would be the mistake the REST path's token cache
 // exists to avoid. For an OAuth2 bearer the username claim is verified,
@@ -132,18 +231,16 @@ func mcpActorKey(token string) string {
 // Returns "" when the identity cannot be established, which leaves the
 // request unauthenticated: owner-scoped tools then refuse it, the
 // correct outcome for a bearer the schedd will not accept anyway. Both
-// outcomes are cached, and a miss is rate-limited, so resolution cannot
-// be used to amplify unauthenticated requests into schedd handshakes.
+// outcomes are cached.
+//
+// Not rate-limited itself: callers go through resolveActor, which
+// charges a miss to the request's source first.
 func (h *Handler) actorForSession(ctx context.Context, cacheKey string) string {
 	if actor, ok := h.mcpActors.get(cacheKey); ok {
 		return actor
 	}
-	if !h.mcpActors.allowResolve() {
-		h.logger.Warn(logging.DestinationHTTP, "Skipping identity resolution: too many unresolved bearers; owner-scoped MCP tools will refuse this call")
-		return ""
-	}
 
-	result, err := h.getSchedd().Ping(ctx)
+	result, err := h.pingAsCaller(ctx)
 	if err != nil {
 		h.logger.Warn(logging.DestinationHTTP, "Could not resolve the caller's identity with the schedd; owner-scoped MCP tools will refuse this call", "error", err)
 		h.mcpActors.put(cacheKey, "", mcpActorFailTTL)
@@ -158,6 +255,32 @@ func (h *Handler) actorForSession(ctx context.Context, cacheKey string) string {
 	h.mcpActors.put(cacheKey, result.User, mcpActorTTL)
 	h.logger.Info(logging.DestinationHTTP, "Resolved caller identity with the schedd", "actor", result.User)
 	return result.User
+}
+
+// resolveActor is actorForSession behind the per-source limiter: a
+// cache miss is charged to the source r came from, so resolution
+// cannot be used to amplify unauthenticated requests into schedd
+// handshakes, and one source sending unknown bearers cannot use up
+// the resolutions of every other.
+//
+// A refusal is errActorResolveThrottled, never "": the caller must fail
+// the request rather than carry on with no identity.
+func (h *Handler) resolveActor(ctx context.Context, r *http.Request, cacheKey string) (string, error) {
+	// A request routed to an AP is identified by that AP (pingAsCaller),
+	// and its answer is that AP's: cached apart from every other AP's.
+	if ap := routedSchedd(ctx); ap != "" {
+		cacheKey = cacheKey + "\x00" + strings.ToLower(ap)
+	}
+	if actor, ok := h.mcpActors.get(cacheKey); ok {
+		return actor, nil
+	}
+	source := actorResolveSource(r, h.trustedProxies)
+	if !h.mcpActors.allowResolve(source) {
+		h.logger.Warn(logging.DestinationHTTP, "Refusing request: too many unverified credentials from this source",
+			"source", source)
+		return "", errActorResolveThrottled
+	}
+	return h.actorForSession(ctx, cacheKey), nil
 }
 
 // describeCredentialSubject reports the `sub` a credential carries, for
@@ -211,14 +334,24 @@ func shortTag(tag string) string {
 // Every REST caller reaches the same schedd with the same commands, so
 // an untagged config shares one cache entry across callers.
 //
-// userTag is the username, and is set only in user-header mode: there
-// the token is regenerated per request -- new jti, new iat -- so a
-// digest of it would differ every time and no session would ever be
-// reused. Everywhere else the tag is a digest of the credential rather
-// than a claim read out of it, because a claim is attacker-chosen.
+// userTag is set only in user-header mode, where the token is
+// regenerated per request -- new jti, new iat -- so a digest of it
+// would differ every time and no session would ever be reused; it is
+// derived from what this server minted the token for (see
+// mintedCredentialSessionTag). Everywhere else the tag is a digest of
+// the credential rather than a claim read out of it, because a claim
+// is attacker-chosen.
 func sessionTagFor(userTag, credential string) string {
 	if userTag != "" {
 		return userTag
 	}
 	return mcpActorKey(credential)
+}
+
+// writeActorThrottled answers a request refused by resolveActor: 429,
+// because the credential may be perfectly good and a 401 would tell the
+// client to discard it.
+func (h *Handler) writeActorThrottled(w http.ResponseWriter, err error) {
+	w.Header().Set("Retry-After", "1")
+	h.writeError(w, http.StatusTooManyRequests, err.Error())
 }

@@ -199,7 +199,7 @@ func TestTruncatedQueueDoesNotReportRunningJobsAsDone(t *testing.T) {
 	// still-running job would block the fire for an unrelated reason and
 	// the test would pass whether or not truncation was honoured.
 	w := register(t, s, "alice", EventDone, ModeAny)
-	if err := s.SaveProgress(ctx, w, Outcome{Tracked: []JobID{{42, 0}}}); err != nil {
+	if err := s.SaveProgress(ctx, w, Outcome{Tracked: []JobID{{42, 0, ""}}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -364,7 +364,7 @@ func TestSingleJobWatchFiresAcrossPasses(t *testing.T) {
 	if len(live) != 1 {
 		t.Fatalf("live watches = %d, want 1", len(live))
 	}
-	if len(live[0].Tracked) != 1 || live[0].Tracked[0] != (JobID{42, 0}) {
+	if len(live[0].Tracked) != 1 || live[0].Tracked[0] != (JobID{42, 0, ""}) {
 		t.Fatalf("the watch remembers %v, not the job it selected", live[0].Tracked)
 	}
 

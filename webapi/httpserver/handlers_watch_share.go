@@ -66,9 +66,9 @@ func (h *Handler) handleWatchShare(w http.ResponseWriter, r *http.Request, watch
 		return
 	}
 
-	owner := strings.SplitN(htcondor.GetAuthenticatedUserFromContext(ctx), "@", 2)[0]
-	if owner == "" {
-		h.writeError(w, http.StatusUnauthorized, "Could not determine authenticated user")
+	owner, err := h.watchOwner(htcondor.GetAuthenticatedUserFromContext(ctx))
+	if err != nil {
+		h.writeError(w, http.StatusUnauthorized, "Could not determine authenticated user: "+err.Error())
 		return
 	}
 	watchID = strings.TrimSpace(watchID)
@@ -95,10 +95,13 @@ func (h *Handler) handleWatchShare(w http.ResponseWriter, r *http.Request, watch
 	ttl := shareurl.ClampTTL(shareurl.KindWatch, watchShareTTL(r))
 	exp := time.Now().Add(ttl)
 	tok, err := h.signShareToken(shareurl.Payload{
-		Owner: owner,
-		Exp:   exp.Unix(),
-		Kind:  shareurl.KindWatch,
-		Watch: watchID,
+		// Every AP in multi-AP mode: a watch is the owner's, wherever its
+		// jobs are.
+		Schedd: h.watchShareSchedd(),
+		Owner:  owner,
+		Exp:    exp.Unix(),
+		Kind:   shareurl.KindWatch,
+		Watch:  watchID,
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to sign token: %v", err))
@@ -179,10 +182,24 @@ func (h *Handler) handleSharedWatch(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusUnauthorized, "Invalid or expired token")
 		return
 	}
+	if err := h.checkWatchShareScope(payload); err != nil {
+		h.logger.Info(logging.DestinationHTTP, "Watch share token refused", "schedd", payload.Schedd, "error", err)
+		h.writeError(w, http.StatusForbidden, "This URL cannot be redeemed on this server: "+err.Error()+"; ask for a new one")
+		return
+	}
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+
+	// Either form holds the connection for the whole wait. Counted
+	// against the watch's owner, apart from their own sessions, since
+	// whoever holds the URL is not necessarily them.
+	release, ok := h.admitStream(w, "share:"+payload.Owner)
+	if !ok {
+		return
+	}
+	defer release()
 
 	wait := watchpoll.ClampWait(r.URL.Query().Get("wait"))
 	start := time.Now()
@@ -202,7 +219,7 @@ func (h *Handler) handleSharedWatch(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) awaitWatchAnswer(ctx context.Context, p *shareurl.Payload, start, deadline time.Time) watchpoll.Answer {
 	var found *jobwatch.Watch
 	var missing bool
-	err := jobwatch.Await(ctx, h.jobWatchEval, p.Owner, deadline, watchpoll.Refresh,
+	err := jobwatch.Await(ctx, h.jobWatchEval, p.Owner, deadline, h.watchRefresh(),
 		func(err error) {
 			h.logger.Warn(logging.DestinationHTTP, "evaluating job watches failed", "error", err)
 		},
@@ -303,6 +320,15 @@ func (h *Handler) watchHeartbeat() time.Duration {
 		return h.watchHeartbeatEvery
 	}
 	return watchpoll.HeartbeatInterval
+}
+
+// watchRefresh is how often a waiting poll re-reads the watch: the
+// package default unless a test has shortened it.
+func (h *Handler) watchRefresh() time.Duration {
+	if h.watchRefreshEvery > 0 {
+		return h.watchRefreshEvery
+	}
+	return watchpoll.Refresh
 }
 
 // writeWatchPollSSE writes one frame.

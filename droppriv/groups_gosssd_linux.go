@@ -62,21 +62,37 @@ type sssdGroupNameEntry struct {
 // Name identifies this lookup in logs.
 func (s *SSSDGroups) Name() string { return "sssd" }
 
+// socketPath is the socket this lookup talks to, for error messages.
+func (s *SSSDGroups) socketPath() string {
+	if s.SocketPath != "" {
+		return s.SocketPath
+	}
+	return gosssd.DefaultNSSSocketPath
+}
+
 // connect returns a connected client, dialling on first use.
-func (s *SSSDGroups) connect(ctx context.Context) (*gosssd.Client, error) {
+//
+// The client outlives the caller, so it is deliberately NOT bound to the
+// caller's context. gosssd closes the socket when the context it was
+// built with is done, and refuses to redial through a context that is
+// already done -- so handing it a request context would wedge the cached
+// client the moment that one request finished, and every later lookup
+// would fail with "context canceled" while `id` on the same host kept
+// working. The dial is bounded by the client's own timeout instead.
+func (s *SSSDGroups) connect(_ context.Context) (*gosssd.Client, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.client != nil {
 		return s.client, nil
 	}
 
-	opts := []gosssd.ClientOption{gosssd.WithContext(ctx)}
+	var opts []gosssd.ClientOption
 	if s.SocketPath != "" {
 		opts = append(opts, gosssd.WithSocketPath(s.SocketPath))
 	}
 	client := gosssd.NewClient(opts...)
-	if err := client.ConnectContext(ctx); err != nil {
-		return nil, fmt.Errorf("SSSD not available: %w", err)
+	if err := client.Connect(); err != nil {
+		return nil, fmt.Errorf("SSSD not available at %s: %w", s.socketPath(), err)
 	}
 	s.client = client
 	return client, nil
@@ -125,7 +141,12 @@ func (s *SSSDGroups) LookupGroups(ctx context.Context, username string) ([]strin
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "No such") {
 			return nil, fmt.Errorf("%w: SSSD has no account %q", ErrUnknownUser, username)
 		}
-		return nil, fmt.Errorf("SSSD group lookup for %q: %w", username, err)
+		// Anything else is the link, not the answer. Name the socket:
+		// this speaks the SSSD protocol directly rather than going
+		// through NSS, so an operator who has just watched `id` succeed
+		// knows which door was tried. gosssd redials a dropped socket by
+		// itself, so the cached client is kept.
+		return nil, fmt.Errorf("SSSD group lookup for %q over %s: %w", username, s.socketPath(), err)
 	}
 	if len(gids) == 0 {
 		return nil, fmt.Errorf("%w: SSSD returned no groups for %q", ErrUnknownUser, username)
