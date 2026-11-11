@@ -236,8 +236,13 @@ func TestMaxRetriesEvaluatesItsValue(t *testing.T) {
 }
 
 // TestSubmitterSetOnExitRemoveStands: an OnExitRemove set directly with
-// +Attr or MY.Attr is left alone unless success_exit_code or retry_until
-// asked for a change -- but JobMaxRetries and OnExitHold are still written.
+// +Attr or MY.Attr is what the job carries, whatever the retry commands
+// would otherwise have built -- but JobMaxRetries and OnExitHold are still
+// written.
+//
+// The retry expression IS still built; it just does not reach the ad,
+// because SetForcedAttributes runs after SetJobRetries and overwrites it.
+// See TestForcedAttributeBeatsTheSubmitCommand.
 func TestSubmitterSetOnExitRemoveStands(t *testing.T) {
 	get := cronRetryAd(t, "executable = /bin/sleep\nMY.OnExitRemove = ExitCode == 9\nmax_retries = 3\n")
 	wantAttrs(t, get, map[string]string{
@@ -246,10 +251,13 @@ func TestSubmitterSetOnExitRemoveStands(t *testing.T) {
 		"OnExitHold":    "false",
 	})
 
-	// retry_until is a change, so the expression is rebuilt.
+	// retry_until rebuilds the expression, and the forced attribute still
+	// wins. This asserted the rebuilt expression until the ad was compared
+	// against condor_submit, which carries the submitter's expression here.
 	changed := cronRetryAd(t, "executable = /bin/sleep\nMY.OnExitRemove = ExitCode == 9\nmax_retries = 3\nretry_until = 42\n")
 	wantAttrs(t, changed, map[string]string{
-		"OnExitRemove": "(((NumJobCompletions > JobMaxRetries) || (ExitCode is 0)) || (ExitCode is 42))",
+		"OnExitRemove":  "(ExitCode == 9)",
+		"JobMaxRetries": "3",
 	})
 }
 
