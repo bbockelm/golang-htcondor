@@ -101,7 +101,11 @@ func TestVMBooleanDefaults(t *testing.T) {
 	// refuses vm_checkpoint together with vm_networking unless the file
 	// asks for ON_EXIT_OR_EVICT itself, so without it this fixture is a
 	// submit file condor_submit would not accept.
-	ad = vmAd(t, vmKVMPrelude+"vm_networking = true\nvm_networking_type = bridge\nvm_checkpoint = yes\nvm_vnc = 1\nvm_no_output_vm = true\nwhen_to_transfer_output = ON_EXIT_OR_EVICT\nqueue\n")
+	//
+	// Neither is the spelling of vm_checkpoint: `yes` is not a boolean
+	// HTCondor's string_is_boolean_param accepts, so condor_submit
+	// refuses that too.
+	ad = vmAd(t, vmKVMPrelude+"vm_networking = true\nvm_networking_type = bridge\nvm_checkpoint = true\nvm_vnc = 1\nvm_no_output_vm = true\nwhen_to_transfer_output = ON_EXIT_OR_EVICT\nqueue\n")
 	vmWantBool(t, ad, "JobVMCheckpoint", true)
 	vmWantBool(t, ad, "JobVMNetworking", true)
 	vmWantBool(t, ad, "JobVMVNCConsole", true)
