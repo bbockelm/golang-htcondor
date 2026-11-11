@@ -358,6 +358,64 @@ const openAPISchema = `{
           }
         }
       },
+      "AuthMeResponse": {
+        "type": "object",
+        "description": "The browser session's identity, as the web interface sees it. Resolves the session COOKIE only: a bearer token or an API key on this endpoint reports unauthenticated, because this describes a signed-in browser rather than an API caller. Use /whoami for the latter.",
+        "required": ["authenticated", "is_admin"],
+        "properties": {
+          "authenticated": {
+            "type": "boolean",
+            "description": "Whether a browser session cookie resolved"
+          },
+          "username": {
+            "type": "string",
+            "description": "The signed-in user (absent when not authenticated)"
+          },
+          "groups": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Authorization groups resolved for this session, from HTTP_API_GROUP_SOURCE"
+          },
+          "is_admin": {
+            "type": "boolean",
+            "description": "Member of HTTP_API_WEBUI_ADMIN_GROUP, so the admin pages are offered"
+          },
+          "superuser_allowed": {
+            "type": "boolean",
+            "description": "This session MAY arm superuser mode. Says nothing about whether it is armed."
+          },
+          "superuser_active": {
+            "type": "boolean",
+            "description": "Superuser mode is armed right now, so actions may land on other users' jobs"
+          },
+          "site_apps": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/SiteApp"},
+            "description": "Operator-deployed web apps this session may see, already filtered by group. This is the only place app visibility is computed for the UI."
+          },
+          "app_only": {
+            "type": "boolean",
+            "description": "This session is normally sent to its site app instead of the dashboard, with the console navigation collapsed. Presentation only: it restricts nothing, and every page remains reachable."
+          },
+          "expert_active": {
+            "type": "boolean",
+            "description": "An app-only session stepped through the expert door and is viewing the full console deliberately"
+          }
+        }
+      },
+      "SiteApp": {
+        "type": "object",
+        "description": "A static web app an operator deployed, served under /site/{id}/.",
+        "required": ["id", "name", "url"],
+        "properties": {
+          "id": {"type": "string", "description": "The bundle's file name without its extension, and the path segment it is served under"},
+          "name": {"type": "string", "description": "Display name, from the bundle manifest or the site's override"},
+          "url": {"type": "string", "description": "Where to open it, with a trailing slash"},
+          "home": {"type": "boolean", "description": "Members of an app-only group land here instead of the dashboard. More than one app may say so for the same caller."},
+          "description": {"type": "string"},
+          "icon": {"type": "string"}
+        }
+      },
       "VersionResponse": {
         "type": "object",
         "required": ["version", "commit", "start_time", "uptime_seconds"],
@@ -3729,6 +3787,35 @@ const openAPISchema = `{
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "summary": "Get the browser session's identity",
+        "description": "Who is signed in to the web interface, which groups they hold, and which site apps they may see.\n\nResolves the browser session cookie ONLY. A bearer token or an API key presented here reports unauthenticated -- deliberately, because this answers \"what should this browser see?\" rather than \"who is calling?\". Programmatic callers want /whoami.\n\nSite apps served under /site/ call this to greet the user and to discover their other apps; it is the one place app visibility is computed for the interface, so nothing else can disagree with the gate on /site/{id}/ about who sees what.",
+        "operationId": "authMe",
+        "responses": {
+          "200": {
+            "description": "Session identity. Returns 200 with authenticated=false when there is no session, rather than 401, so a page can render a signed-out state without treating it as an error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthMeResponse"
+                },
+                "example": {
+                  "authenticated": true,
+                  "username": "jsmith",
+                  "groups": ["smith_lab"],
+                  "is_admin": false,
+                  "site_apps": [
+                    {"id": "cryoem", "name": "CryoEM Pipeline", "url": "/site/cryoem/", "home": true}
+                  ],
+                  "app_only": true
                 }
               }
             }
