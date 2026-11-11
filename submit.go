@@ -301,11 +301,18 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 
 	for _, stmt := range stmts {
 		if qs, ok := stmt.(*config.QueueStatement); ok {
-			if queueStmt == nil {
-				queueStmt = qs
-			}
-			// Don't include queue statements in config execution
-			continue
+			queueStmt = qs
+			// Stop here rather than skipping the statement and carrying
+			// on. condor_submit reads a submit file only as far as the
+			// queue line (parse_up_to_q_line): the queue statement ends
+			// the cluster, and whatever follows describes the next one.
+			//
+			// Carrying on put a `+Attr` written below `queue` onto this
+			// job's ad, where condor_submit leaves it off. It was the
+			// only kind of line that got that far: an ordinary submit
+			// command after `queue` is read as a queue argument and
+			// fails the parse, so nothing else reached here to notice.
+			break
 		}
 		configStmts = append(configStmts, stmt)
 	}
