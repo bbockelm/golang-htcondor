@@ -31,6 +31,12 @@ type AuthMeResponse struct {
 	Username      string   `json:"username,omitempty"`
 	Groups        []string `json:"groups,omitempty"`
 	IsAdmin       bool     `json:"is_admin"`
+	// SiteApps are the operator-deployed web apps this session may see,
+	// already filtered by group. This is the one place app visibility
+	// is computed for the UI, so the sidebar, the switcher and the
+	// app-only redirect cannot disagree with the gate on /site/ about
+	// who sees what.
+	SiteApps []SiteAppSummary `json:"site_apps,omitempty"`
 	// SuperuserAllowed reports that this session MAY arm superuser mode --
 	// the feature is configured and the session is in the superuser group.
 	// It says nothing about whether the mode is currently on.
@@ -139,6 +145,7 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		if s.webuiAdminGroups.configured() {
 			resp.IsAdmin = s.webuiAdminGroups.allows(session.Groups)
 		}
+		resp.SiteApps = s.siteAppsFor(session.Groups)
 		resp.ProjectLeadOf = s.projectLeads.LedProjects(session.Username, session.Groups)
 		resp.Assignment = s.sessionAssignment(r, session)
 		resp.SuperuserAllowed = s.mayUseSuperuserMode(r)

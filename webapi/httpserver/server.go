@@ -368,6 +368,11 @@ type Config struct {
 	// MCPRedactDisabledRules (HTTP_API_MCP_REDACT_DISABLED_RULES) names
 	// masking rules to turn off, as globs over rule ids.
 	MCPRedactDisabledRules string
+	// SiteAppsDir holds the <id>.zip bundles and <id>.yaml policy files
+	// for operator-deployed static web apps. Empty disables the feature.
+	SiteAppsDir string
+	// SiteAppsReloadInterval is how often that directory is rescanned.
+	SiteAppsReloadInterval time.Duration
 	// MCPSkillsReloadInterval is how often that directory is re-read so a
 	// checkout updated underneath this process is noticed without a
 	// reconfigure. Zero disables the poll.
@@ -614,6 +619,8 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPDisableSecretRedaction:   cfg.MCPDisableSecretRedaction,
 		MCPRedactDisabledRules:      cfg.MCPRedactDisabledRules,
 		MCPSkillsDir:                cfg.MCPSkillsDir,
+		SiteAppsDir:                 cfg.SiteAppsDir,
+		SiteAppsReloadInterval:      cfg.SiteAppsReloadInterval,
 		MCPSkillsReloadInterval:     cfg.MCPSkillsReloadInterval,
 		UpstreamRefresh:             cfg.UpstreamRefresh,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,

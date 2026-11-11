@@ -2187,6 +2187,28 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// HTTP_API_MCP_ACCESS_GROUP, which is what gated the browser before
 	// these were separate knobs.
 	webuiAccessGroup, _ := cfg.Get("HTTP_API_WEBUI_ACCESS_GROUP")
+
+	// Site apps: a directory of <id>.zip bundles, each with an
+	// <id>.yaml policy file beside it naming the groups that may see
+	// it. Unset leaves the feature out of the server entirely.
+	siteAppsDir := ""
+	if dir, ok := cfg.Get("HTTP_API_SITE_APPS_DIR"); ok && strings.TrimSpace(dir) != "" {
+		siteAppsDir = strings.TrimSpace(dir)
+		logger.Info(logging.DestinationHTTP, "Site apps directory configured", "dir", siteAppsDir)
+	}
+	// How often that directory is rescanned. Deploying a bundle is an
+	// scp by somebody who is about to reload the page, and nothing
+	// outside this process can signal the daemon, so the daemon looks.
+	siteAppsReload := time.Duration(0)
+	if raw, ok := cfg.Get("HTTP_API_SITE_APPS_RELOAD_INTERVAL"); ok && strings.TrimSpace(raw) != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(raw)); err == nil && d > 0 {
+			siteAppsReload = d
+		} else {
+			logger.Error(logging.DestinationHTTP,
+				"HTTP_API_SITE_APPS_RELOAD_INTERVAL is not a positive duration; using the default",
+				"value", raw)
+		}
+	}
 	// Site branding. Every one of these is optional; unset leaves the
 	// web UI exactly as it ships. See webapi/httpserver/branding.go.
 	webuiSiteName, _ := cfg.Get("HTTP_API_WEBUI_SITE_NAME")
@@ -2502,6 +2524,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		PoolQueryPolicy:            poolpolicy.New(mcpCfg.poolQueryMode, mcpCfg.poolQueryExtraAttrs),
 		WebUIAdminGroup:            webuiAdminGroup,
 		WebUIAccessGroup:           webuiAccessGroup,
+		SiteAppsDir:                siteAppsDir,
+		SiteAppsReloadInterval:     siteAppsReload,
 		WebUISiteName:              webuiSiteName,
 		WebUISiteTagline:           webuiSiteTagline,
 		WebUIFooterLogos:           webuiFooterLogos,
