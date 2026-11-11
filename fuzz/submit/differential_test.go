@@ -546,6 +546,22 @@ var seeds = []seedCase{
 	// of them a file carries.
 	{input: "executable = /bin/sleep\ngpus_minimum_capability = 7.5\ngpus_maximum_capability = 8.0\ngpus_minimum_memory = 4G\ngpus_minimum_runtime = 12.1\nrequire_gpus = Capability > 5\nqueue\n"},
 	{input: "executable = /bin/sleep\nrequest_gpus = undefined\ngpus_minimum_capability = 7.5\nqueue\n"},
+	// condor_submit EVALUATES a request_<tag> and switches on the type of
+	// the result, not on what the file wrote. Only a number or undefined
+	// asks for a count, and only a string asks for a pattern; a boolean,
+	// a list, a nested ad or an error constrains nothing at all.
+	{input: "executable = /bin/sleep\nrequest_gpus = !0\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = {1}\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = [a=1]\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1/0\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_abc = true\nqueue\n"},
+	// Evaluated, so an expression that works out to zero or less asks for
+	// nothing just as the literal does, and one that works out to a
+	// string gets the pattern clause.
+	{input: "executable = /bin/sleep\nrequest_gpus = 1 - 1\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1 + 1\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = strcat(\"a\",\"b\")\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = RequestCpus\nqueue\n"},
 	// One at a time, so each clause of the derived expression is pinned on
 	// its own.
 	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_capability = 7.5\nqueue\n"},
