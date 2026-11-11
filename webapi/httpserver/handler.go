@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -521,6 +522,7 @@ type Handler struct {
 	idpLoginLimiter     *LoginRateLimiter // IDP login attempts per source address
 	idpLoginByUser      *LoginRateLimiter // IDP login attempts per username
 	seedDemoUser        bool              // Seed the non-admin "user" account (demo mode only)
+	demoCredentialsFile string            // Where to write seeded demo credentials (demo mode only)
 	seedDemoNewbie      bool              // Seed the "newbie" account with no access (demo mode with a placementd)
 	streamBufferSize    int               // Buffer size for streaming queries (default: 100)
 	streamWriteTimeout  time.Duration     // Write timeout for streaming queries (default: 5s)
@@ -1185,6 +1187,21 @@ type HandlerConfig struct {
 	// It exists so tests have two identities to check authorization
 	// boundaries with: an admin, and someone who is not.
 	SeedDemoUser bool
+	// DemoCredentialsFile is where the passwords generated for the
+	// seeded IDP accounts are written, as JSON, mode 0600.
+	//
+	// Demo mode's state lives in a fresh os.MkdirTemp directory whose
+	// name nobody outside the process knows, so stdout was the only way
+	// to learn the generated passwords. That makes every automated
+	// consumer a log scraper, and a log scraper breaks the next time
+	// somebody reformats a banner -- in CI belonging to people who have
+	// never read this file. A fixed path is a contract those callers can
+	// hold us to.
+	//
+	// Empty disables the write. Only -demo sets it, for the same reason
+	// SeedDemoUser is demo-only: a real deployment that enables the
+	// built-in IdP has not asked us to put a password on its disk.
+	DemoCredentialsFile string
 	// SeedDemoPlacementUser additionally seeds "newbie", an IDP account
 	// that maps to no local account and that the placementd does not
 	// map: signing in as it shows the placement access-request flow.
@@ -2250,6 +2267,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"refresh_token_lifespan", idpRefreshLifespan)
 		h.idpProvider = idpProvider
 		h.seedDemoUser = cfg.SeedDemoUser
+		h.demoCredentialsFile = cfg.DemoCredentialsFile
 		h.seedDemoNewbie = cfg.SeedDemoPlacementUser
 		// Failed logins: 5 a minute per source address, and 10 per
 		// username so a guesser spreading attempts across many
@@ -4253,8 +4271,105 @@ func (h *Handler) initializeOAuth2(ln net.Listener, protocol string) {
 	}
 }
 
+// demoCredential is one seeded IDP account, as written to the demo
+// credentials file.
+type demoCredential struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	// State is the IDP account state, which decides what the account
+	// resolves to: "admin" emits groups=["admin"] from the userinfo
+	// endpoint, "active" emits none. A caller choosing an account to
+	// test an authorization boundary with needs to know which is which
+	// without hardcoding that "user" is the unprivileged one.
+	State string `json:"state"`
+	// Note says what the account is FOR, when its state does not.
+	// "user" and "newbie" are both state "active" and differ only in
+	// what the deployment around them grants: newbie maps to no local
+	// account and no placement, so it lands on the access-request flow.
+	// Without this a harness picking an identity has to know that from
+	// somewhere else.
+	Note string `json:"note,omitempty"`
+}
+
+// demoCredentialsDoc is the demo credentials file's contents.
+type demoCredentialsDoc struct {
+	// Version is here so a consumer can fail loudly on a format it does
+	// not understand, rather than silently reading a missing field as
+	// an empty password and reporting a login failure instead.
+	Version     int              `json:"version"`
+	GeneratedAt time.Time        `json:"generated_at"`
+	Users       []demoCredential `json:"users"`
+}
+
+// demoCredentialsVersion is the current format version.
+const demoCredentialsVersion = 1
+
+// writeDemoCredentials writes the seeded accounts to h.demoCredentialsFile.
+//
+// The file is created with O_EXCL after an unlink, never opened for
+// truncation. The default path lives in a world-writable directory, so
+// an open that followed a pre-planted symlink would write a password
+// wherever the link pointed; O_EXCL cannot follow one, and a race that
+// recreates the path between the unlink and the create fails the open
+// rather than winning it.
+//
+// A failure here is fatal to startup. The caller that asked for this
+// file is a test harness that cannot proceed without it, and a demo
+// server that silently came up without writing it would fail later, in
+// a login, as a wrong password.
+func (h *Handler) writeDemoCredentials(creds []demoCredential) error {
+	if h.demoCredentialsFile == "" || len(creds) == 0 {
+		return nil
+	}
+
+	doc := demoCredentialsDoc{
+		Version:     demoCredentialsVersion,
+		GeneratedAt: time.Now().UTC(),
+		Users:       creds,
+	}
+	body, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal demo credentials: %w", err)
+	}
+	body = append(body, '\n')
+
+	if err := os.MkdirAll(filepath.Dir(h.demoCredentialsFile), 0o755); err != nil {
+		return fmt.Errorf("create demo credentials directory: %w", err)
+	}
+	// Ignore the unlink error: "not there" is the outcome we want, and
+	// any other failure surfaces on the create below with a better
+	// message than a bare ENOENT from here.
+	_ = os.Remove(h.demoCredentialsFile)
+
+	f, err := os.OpenFile(h.demoCredentialsFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create demo credentials file %s: %w", h.demoCredentialsFile, err)
+	}
+	if _, err := f.Write(body); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write demo credentials file %s: %w", h.demoCredentialsFile, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close demo credentials file %s: %w", h.demoCredentialsFile, err)
+	}
+
+	names := make([]string, 0, len(creds))
+	for _, c := range creds {
+		names = append(names, c.Username)
+	}
+	h.logger.Info(logging.DestinationHTTP, "Wrote demo credentials",
+		"path", h.demoCredentialsFile, "users", strings.Join(names, ","))
+	return nil
+}
+
 // initializeIDPUsers initializes default users in the IDP provider
 func (h *Handler) initializeIDPUsers(ctx context.Context) error {
+	// Accumulated across every seeded account so the credentials file is
+	// written once, whole. Writing it per-account would leave a window
+	// where a harness reads a file holding only "admin" and concludes
+	// the others were not seeded.
+	var seeded []demoCredential
+
 	// Check if admin user exists
 	exists, err := h.idpProvider.storage.UserExists(ctx, "admin")
 	if err != nil {
@@ -4284,20 +4399,35 @@ func (h *Handler) initializeIDPUsers(ctx context.Context) error {
 		fmt.Printf("\n")
 
 		h.logger.Info(logging.DestinationHTTP, "Created IDP admin user", "username", "admin")
+		seeded = append(seeded, demoCredential{Username: "admin", Password: password, State: "admin"})
 	}
 
 	if h.seedDemoUser {
-		if err := h.initializeDemoUser(ctx); err != nil {
+		password, err := h.initializeDemoUser(ctx)
+		if err != nil {
 			return err
+		}
+		if password != "" {
+			seeded = append(seeded, demoCredential{
+				Username: "user", Password: password, State: "active",
+				Note: "ordinary user: authenticated, not an admin",
+			})
 		}
 	}
 	if h.seedDemoNewbie {
-		if err := h.initializeDemoNewbie(ctx); err != nil {
+		password, err := h.initializeDemoNewbie(ctx)
+		if err != nil {
 			return err
+		}
+		if password != "" {
+			seeded = append(seeded, demoCredential{
+				Username: "newbie", Password: password, State: "active",
+				Note: "no local account and no placement: lands on the access-request flow",
+			})
 		}
 	}
 
-	return nil
+	return h.writeDemoCredentials(seeded)
 }
 
 // initializeDemoNewbie seeds "newbie", an account nobody has granted
@@ -4306,21 +4436,23 @@ func (h *Handler) initializeIDPUsers(ctx context.Context) error {
 // placement-only session with the access-request form. Its password is
 // printed under its own label, NewbiePassword, for the same reason the
 // non-admin user's is.
-func (h *Handler) initializeDemoNewbie(ctx context.Context) error {
+// It returns the generated password, or "" when the account already
+// existed and nothing was generated.
+func (h *Handler) initializeDemoNewbie(ctx context.Context) (string, error) {
 	const name = "newbie"
 	exists, err := h.idpProvider.storage.UserExists(ctx, name)
 	if err != nil {
-		return fmt.Errorf("failed to check if demo user %s exists: %w", name, err)
+		return "", fmt.Errorf("failed to check if demo user %s exists: %w", name, err)
 	}
 	if exists {
-		return nil
+		return "", nil
 	}
 	password, err := generateRandomPassword(16)
 	if err != nil {
-		return fmt.Errorf("failed to generate demo user %s password: %w", name, err)
+		return "", fmt.Errorf("failed to generate demo user %s password: %w", name, err)
 	}
 	if err := h.idpProvider.storage.CreateUser(ctx, name, password, "active"); err != nil {
-		return fmt.Errorf("failed to create demo user %s: %w", name, err)
+		return "", fmt.Errorf("failed to create demo user %s: %w", name, err)
 	}
 
 	fmt.Printf("\n")
@@ -4333,7 +4465,7 @@ func (h *Handler) initializeDemoNewbie(ctx context.Context) error {
 	fmt.Printf("\n")
 
 	h.logger.Info(logging.DestinationHTTP, "Created IDP demo user", "username", name)
-	return nil
+	return password, nil
 }
 
 // initializeDemoUser seeds the non-admin "user" account used to exercise
@@ -4341,21 +4473,24 @@ func (h *Handler) initializeDemoNewbie(ctx context.Context) error {
 // whole point: handleIDPUserInfo emits groups=["admin"] only for admin
 // users, so this account resolves with no groups and is therefore not a
 // WebUI admin.
-func (h *Handler) initializeDemoUser(ctx context.Context) error {
+// It returns the generated password, or "" when the account already
+// existed and nothing was generated -- which is the caller's signal
+// that there is no credential to record for it.
+func (h *Handler) initializeDemoUser(ctx context.Context) (string, error) {
 	exists, err := h.idpProvider.storage.UserExists(ctx, "user")
 	if err != nil {
-		return fmt.Errorf("failed to check if demo user exists: %w", err)
+		return "", fmt.Errorf("failed to check if demo user exists: %w", err)
 	}
 	if exists {
-		return nil
+		return "", nil
 	}
 
 	password, err := generateRandomPassword(16)
 	if err != nil {
-		return fmt.Errorf("failed to generate demo user password: %w", err)
+		return "", fmt.Errorf("failed to generate demo user password: %w", err)
 	}
 	if err := h.idpProvider.storage.CreateUser(ctx, "user", password, "active"); err != nil {
-		return fmt.Errorf("failed to create demo user: %w", err)
+		return "", fmt.Errorf("failed to create demo user: %w", err)
 	}
 
 	fmt.Printf("\n")
@@ -4368,7 +4503,7 @@ func (h *Handler) initializeDemoUser(ctx context.Context) error {
 	fmt.Printf("\n")
 
 	h.logger.Info(logging.DestinationHTTP, "Created IDP demo user", "username", "user")
-	return nil
+	return password, nil
 }
 
 // idpInternalClientID is the client the server's own SSO presents to the
