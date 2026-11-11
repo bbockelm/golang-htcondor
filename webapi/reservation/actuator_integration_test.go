@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,32 @@ func running(t *testing.T, h *htcondor.CondorTestHarness, cluster string) bool {
 		}
 	}
 	return false
+}
+
+// lastVacate is the latest LastVacateTime across a cluster: when the
+// schedd last had a run of one of its jobs cut short. Zero while no job
+// of it has ever been vacated, which is how condor_q prints the
+// attribute before there is one ("undefined").
+func lastVacate(t *testing.T, h *htcondor.CondorTestHarness, cluster string) int64 {
+	t.Helper()
+	//nolint:gosec,noctx // G204: fixed command in a test
+	cmd := exec.Command("condor_q", cluster, "-af", "LastVacateTime")
+	cmd.Env = append(os.Environ(), "CONDOR_CONFIG="+h.GetConfigFile())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("condor_q: %v\n%s", err, out)
+	}
+	var latest int64
+	for _, f := range strings.Fields(string(out)) {
+		n, err := strconv.ParseInt(f, 10, 64)
+		if err != nil {
+			continue // "undefined" before the first vacate
+		}
+		if n > latest {
+			latest = n
+		}
+	}
+	return latest
 }
 
 // waitRunning waits for a cluster to start, and reports whether it did.
@@ -305,19 +332,34 @@ func TestEvictVacatesByName(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	act := actuatorFor(t, coll)
+	// Read before the vacate, because the vacate is what has to change it.
+	vacated := lastVacate(t, h, cluster)
 	if err := act.Evict(ctx, reservation.EvictRequest{Machine: machine, Slot: slot}); err != nil {
 		t.Fatalf("Evict %s: %v", slot, err)
 	}
 
-	// The startd answers a vacate with nothing, so the only evidence is
-	// the job leaving the slot.
-	stopped := time.Now().Add(120 * time.Second)
+	// The startd answers a vacate with nothing, so the evidence is the
+	// schedd recording that a run was cut short.
+	//
+	// Not "the job is no longer running", which this used to ask. The
+	// pool negotiates every five seconds and the job asked for 300, so
+	// it is back on a slot before a 2-second poll can reliably see it
+	// gone -- measured against this harness, JobStatus reads 2 at every
+	// sample from five seconds after the vacate onward, and the job came
+	// back on the slot it was vacated from. So neither "is it running"
+	// nor "is it still on that slot" can see this happen; only the
+	// schedd's own record of the vacate can.
+	began := time.Now()
+	stopped := began.Add(120 * time.Second)
 	for {
-		if !running(t, h, cluster) {
+		if now := lastVacate(t, h, cluster); now > vacated {
+			t.Logf("the schedd recorded the vacate %s after it was asked for",
+				time.Since(began).Round(time.Second))
 			return
 		}
 		if time.Now().After(stopped) {
-			t.Fatalf("the job on %s was still running two minutes after it was vacated", slot)
+			t.Fatalf("LastVacateTime on the job on %s is still %d two minutes after it was vacated",
+				slot, vacated)
 		}
 		time.Sleep(2 * time.Second)
 	}

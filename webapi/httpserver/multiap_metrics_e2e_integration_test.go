@@ -301,10 +301,28 @@ func e2eMetricsArrive(t *testing.T, m *e2eMetrics, jobs [2]apJob) {
 }
 
 func e2eMetricsOneJob(t *testing.T, m *e2eMetrics, jobs [2]apJob) {
-	all := perJob(m.ok(t, m.s.me, e2eByJob))
 	for _, k := range jobs {
+		// A job's sample count climbs while this phase reads it. The
+		// phase before returns as soon as both counts are non-zero,
+		// which is exactly when they are still arriving: sampled every
+		// 250ms, the hub's counts step in batches for about four
+		// seconds from there (one run went 3 -> 5 at 300ms) and then
+		// sit still. A loaded runner reads inside that window.
+		//
+		// So bracket the per-job answer between a federation-wide count
+		// taken before it and one taken after, rather than comparing it
+		// to a single earlier reading. Counts only grow, so a correct
+		// answer is always in the bracket; asserting equality across a
+		// batch reported the batch as a defect.
+		//
+		// The bracket still says what the phase is about. Contamination
+		// by the other AP's job -- same cluster.proc, different AP --
+		// would roughly double the count, which no amount of arriving
+		// lands inside the bracket.
+		before := perJob(m.ok(t, m.s.me, e2eByJob))
 		r := m.ok(t, m.s.me, url.Values{"job_id": {k.String()}, "group_by": {"RunInstanceID"},
 			"bucket": {"900"}, "agg": {"count:*,max:MemoryUsage"}})
+		after := perJob(m.ok(t, m.s.me, e2eByJob))
 		if r.Job == nil || r.Job.Schedd != k.schedd || r.Job.Cluster != k.cluster || r.Job.Proc != k.proc {
 			t.Errorf("%s: job = %+v", k, r.Job)
 		}
@@ -314,8 +332,23 @@ func e2eMetricsOneJob(t *testing.T, m *e2eMetrics, jobs [2]apJob) {
 			_, _ = fmt.Sscan(row[2], &c)
 			n += c
 		}
-		if n != all[k] {
-			t.Errorf("%s: %d samples, want that AP's %d (the other AP's %d are not its)", k, n, all[k], all[jobs[0]]+all[jobs[1]]-all[k])
+		// Logged on the way through, because a bracket that never
+		// widens is an equality check wearing a disguise: this says in
+		// the run's own output whether samples really do land between
+		// two reads here, and how many.
+		t.Logf("%s: per-job %d, federation-wide %d before and %d after", k, n, before[k], after[k])
+		// Reported either side of the bracket so a failure says which
+		// of the two it was: a count above the bracket is the other
+		// AP's samples leaking in, one below it is this AP's going
+		// missing. Neither is arriving-in-between.
+		if n < before[k] || n > after[k] {
+			other := jobs[0]
+			if k == other {
+				other = jobs[1]
+			}
+			t.Errorf("%s: %d samples, want that AP's %d to %d (read either side of it); "+
+				"the other AP's %s had %d, and none of those are its",
+				k, n, before[k], after[k], other, after[other])
 		}
 	}
 }
