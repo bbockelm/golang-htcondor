@@ -2,6 +2,12 @@
 
 Serving site-authored static web apps from the HTCondor API server, scoped to authorization groups.
 
+## Status
+
+Phases 1 to 3 are implemented and under review. What exists: the bundle loader, the group gate, mount-point injection, the switcher at `/site/`, the sidebar entries, and app-only mode with the expert door. The starter app repository (phase 5) exists but is not published.
+
+Where this document and the code disagree, the code is right and this document should be corrected; the sections below were written before implementation and have been revised where implementation changed the answer.
+
 ## Motivation
 
 A researcher wants a submission interface for her lab: drag and drop some input files, set two or three knobs, pick a pipeline, submit, watch it run. Her grad student will build it. The pipelines are specific to her science and have no business in an HTCondor release.
@@ -76,7 +82,7 @@ The nesting is load-bearing: the handler serves `fs.Sub(bundle, "web")`, so `app
 
 `cryoem.zip` is the app `cryoem`, served at `/site/cryoem/`, configured by `cryoem.yaml`. The in-zip manifest carries no id at all.
 
-Ids beginning with `_` are reserved for the server (`/site/_shell.js`, `/site/_switch`), so a bundle named `_shell.zip` is refused at load. Ids are otherwise restricted to the characters that are unambiguous in a URL path segment and a file name both.
+Ids beginning with `_` are reserved for the server (`/site/_shell.js`, `/site/expert`), so a bundle named `_shell.zip` is refused at load. Ids are otherwise lowercase letters, digits, hyphen and underscore, and must **begin and end** with a letter or digit — which is also what keeps a dot-prefixed scratch or editor-backup file from ever being offered to the loader as a bundle.
 
 Deriving the id from the file name instead of from the manifest removes an entire class of confusion. Upgrading is replacing `cryoem.zip`. Staging a candidate alongside production is copying it to `cryoem-next.zip`, which is a different app at a different URL with its own policy file, with no risk of the new bundle's manifest claiming the running app's id. Two bundles can never fight over one id, because the filesystem already settled it.
 
@@ -181,13 +187,31 @@ func NewSPAHandler() http.Handler
 
 The path-safety logic is unchanged and now matters more. `embed.FS` could not reach anything outside the binary; a directory bundle can reach the real filesystem. `isSafeEmbeddedPath` already rejects `..`, absolute paths, `//` and anything `path.Clean` would alter, and `os.DirFS` refuses escaping paths independently. The comment in that file calling this defense in depth should be updated to say it is now load-bearing.
 
-### Entries must be materialized
+### Entries are served from an uncompressed copy, not from memory
 
-Zip entries are neither seekable nor cheap to re-read: each `Open` starts a fresh `flate` stream. `http.ServeFileFS` wants an `io.ReadSeeker` to answer range requests and to compute content length, and a zip entry is not one.
+Zip entries are neither seekable nor cheap to re-read: each `Open` starts a fresh `flate` stream. `http.ServeFileFS` wants an `io.ReadSeeker` to answer range requests, and a deflated entry is not one.
 
-So the zip-backed handler reads an entry fully into memory and serves it from a `bytes.Reader`, behind a small size-bounded cache keyed on entry name. SPA bundles are a few megabytes of assets that every user fetches, so the cache hit rate is approximately one; the cap exists to bound a pathological bundle, not to manage pressure. Range requests, `ETag` and `If-None-Match` all work normally off the materialized bytes.
+The first design here held decompressed bytes in a bounded cache. That fixes the seeking and trades it for a resident copy of every asset every app ships, which is the wrong trade for a daemon that may serve several bundles for years.
 
-This is the one place where zip and directory bundles genuinely differ, and the only reason the handler needs to know which it has.
+Instead a compressed bundle is rewritten **once, at load**, into a scratch file in the same directory as the bundle, with every entry `STORED`. Serving is then `zip.File.DataOffset` plus an `io.SectionReader`: seekable, `Range` works, and the only memory involved is the copy buffer.
+
+Same directory, not `/tmp`: it is the one place an operator has already provisioned for bundles, and `/tmp` may be a small tmpfs that a 512 MiB bundle will not fit.
+
+**The scratch file is unlinked the moment it is created.** Cleanup is then a property of the process rather than a code path that has to run — a crash, a SIGKILL or a forgotten `Close` all end with the kernel freeing the blocks. There is no reaper, nothing to tidy on shutdown, and no stale file after a restart.
+
+A bundle that is already stored — which is what a reproducible `zip -0` produces, and therefore what the starter app should emit — is served straight from the original file and nothing is written at all.
+
+Three independent things stop that scratch file being loaded as a bundle in the window before the unlink: the directory scan skips names beginning with a dot and names ending in `.tmp`, and an app id must begin and end with a lowercase letter or digit, which rules out the leading dot every scratch and editor-backup file carries.
+
+This is the one place where zip and directory bundles genuinely differ.
+
+### Directory bundles must not follow symlinks out
+
+`os.DirFS` rejects a path that escapes lexically but still follows a symlink pointing out of the tree. An unpacked bundle containing `web/data/ref.fa -> /etc/shadow` therefore served it to everyone in the app's groups; this was found and fixed during implementation, with a test that reads the file through the served filesystem before the fix.
+
+`os.OpenRoot` refuses to traverse out of the root at all, which is the property this needs: a bundle directory is site content, and site content includes whatever was lying in the directory an operator pointed at. A symlink that stays inside the bundle is ordinary content and still resolves.
+
+Zip bundles never had this and cannot acquire it — they are a name-to-offset map over one unlinked descriptor, with no filesystem underneath to traverse.
 
 ### The bundle does not know where it is mounted
 
@@ -425,6 +449,18 @@ Nothing in the bundle is secret. It is static files served to every member of it
 **CORS allows exactly one origin.** `HTTP_API_BASE_URL` configures the single origin echoed back with credentials ([webapi/httpserver/routes.go:47](webapi/httpserver/routes.go#L47)). This does not affect site apps, which are same-origin, but it does constrain the standalone-app fallback to one browser-side client unless the app proxies server-side. Worth knowing before recommending that path to a second group.
 
 **`apps` is already taken.** `/api/v1/apps` is long-lived servers running inside a job — code-server and its eventual siblings ([webapi/httpserver/handlers_apps.go](webapi/httpserver/handlers_apps.go)). That file's own header records choosing "apps" over "sessions" because `interactive` had already spent that word twice. `/site/` keeps this design clear of a third collision, and "site app" is the term to use in documentation and code.
+
+## Serving bundle files as job inputs
+
+A bundle may hold files that should become job inputs — reference data, wrapper scripts, pipeline configs. Fetching those to the browser so the browser can send them back is a pointless round trip: the bytes are already on the access point, in a file the server has open.
+
+**Decision: splice them into the spooled sandbox on the access point. No signed URLs.**
+
+The alternative analysed was to rewrite a `siteapp://<id>/<path>` reference into a short-lived signed URL and let the execute node fetch it with the stock `https` plugin. That is cheaper at `queue N` — an AP-side splice copies the file once per proc — but it puts a bearer credential for group-gated content into the job ad, where pool admins, the EP, the shadow log and `condor_q -l` can all read it, redeemed days later when the job finally starts. That is a worse thing to own than a transfer bill.
+
+The per-proc cost is accepted, and the two existing answers are the escape hatch for anyone it hurts: fetch the data with Pelican, or use a DAG, where the input is spooled once for the DAG rather than once per proc.
+
+Note that a bundle entry is capped at 128 MiB, so the large-reference-dataset case is refused at deploy time regardless.
 
 ## Implementation outline
 
