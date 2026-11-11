@@ -369,3 +369,28 @@ func TestSwitcherEscapesAppNames(t *testing.T) {
 		t.Errorf("the name was not escaped into the page at all: %s", body)
 	}
 }
+
+// The clearance rule, asserted on the script the server actually
+// serves. A browser proves the behaviour (see the e2e suite); this
+// catches the two ways the earlier version was wrong without needing
+// one.
+func TestShellClearsItselfFromTheComputedPadding(t *testing.T) {
+	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	js := get(h, "/site/_shell.js").Body.String()
+
+	// It must read the COMPUTED padding. Checking only the inline
+	// value skipped any app that set one of its own, leaving less
+	// clearance than the bar's height.
+	if !strings.Contains(js, "getComputedStyle(document.body).paddingTop") {
+		t.Error("the shell does not measure the computed body padding, so an app with its own inline padding keeps too little clearance")
+	}
+	// And it must only ever increase it: an app whose stylesheet
+	// already clears the bar had its value overridden downwards.
+	if !strings.Contains(js, "if (pad < H)") {
+		t.Error("the shell does not guard on pad < H, so a page that already clears the bar can have its padding reduced")
+	}
+	// One height, not three literals that can drift apart.
+	if n := strings.Count(js, "36"); n != 1 {
+		t.Errorf("the bar height appears %d times; it should be defined once and referenced", n)
+	}
+}

@@ -61,6 +61,10 @@ const shellJS = `(function () {
   "use strict";
   if (window.__HTCONDOR_SHELL__) return;
   window.__HTCONDOR_SHELL__ = true;
+  // The bar's height, in one place: the CSS, the custom property the
+  // page reads, and the clearance calculation all have to agree, and
+  // three literals drift.
+  var H = 36;
 
   var meta = document.querySelector('meta[` + shellMeta + `]');
   if (meta && meta.content === "none") return;
@@ -93,7 +97,7 @@ const shellJS = `(function () {
       var style = document.createElement("style");
       style.textContent =
         ":host{all:initial}" +
-        ".bar{position:fixed;top:0;left:0;right:0;height:36px;z-index:2147483000;" +
+        ".bar{position:fixed;top:0;left:0;right:0;height:" + H + "px;z-index:2147483000;" +
         "display:flex;align-items:center;gap:.75rem;padding:0 .75rem;box-sizing:border-box;" +
         "font:13px/1.4 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;" +
         "background:#15181c;color:#e6e9ec;border-bottom:1px solid #2b3137}" +
@@ -115,11 +119,23 @@ const shellJS = `(function () {
       document.body.appendChild(host);
       // Tell the page how much room the bar took, and nudge it clear.
       // An app that cares reads the variable; one that does not still
-      // gets its first 36px back.
+      // gets that much of its first screen back.
       var de = document.documentElement;
-      de.style.setProperty("--htcondor-shell-height", "36px");
-      de.style.setProperty("scroll-padding-top", "36px");
-      if (!document.body.style.paddingTop) document.body.style.paddingTop = "36px";
+      de.style.setProperty("--htcondor-shell-height", H + "px");
+      de.style.setProperty("scroll-padding-top", H + "px");
+      // Ensure at least the bar's height of clearance, measured from
+      // the COMPUTED padding rather than the inline one.
+      //
+      // The first version checked document.body.style.paddingTop,
+      // which is only the inline value, and got both directions
+      // wrong: an app with an inline padding of its own was skipped
+      // entirely and left with less clearance than the bar needs,
+      // while an app whose stylesheet set a generous padding had it
+      // overridden down to the bar's height. Reading the computed
+      // value fixes both -- a page that already clears the bar is
+      // left alone.
+      var pad = parseFloat(getComputedStyle(document.body).paddingTop) || 0;
+      if (pad < H) document.body.style.paddingTop = H + "px";
     })
     .catch(function () { /* no bar is better than a broken page */ });
 })();
