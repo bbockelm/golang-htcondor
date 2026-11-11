@@ -188,41 +188,56 @@ func hasTripleQuote(s string) bool {
 var unaryMinusFold = divergenceClass{
 	name: "Go folds a unary minus onto a numeric literal, C++ keeps the operator",
 	match: func(goTable, cppTable string) bool {
-		return goTable != cppTable && foldUnaryMinus(cppTable) == goTable
+		return goTable != cppTable && cppKeepsSomeUnaryMinus(goTable, cppTable)
 	},
 }
 
-// foldUnaryMinus rewrites C++'s rendering of a unary minus on a numeric
-// literal into Go's: the leading space of the `" -"` operator goes, and an
-// INTEGER -0 becomes 0. A real keeps its sign, because Go keeps it too
-// (`{- 0.0}` is `{ -0.0 }` on both sides but for the space).
+// cppKeepsSomeUnaryMinus reports whether the C++ table is the Go table with
+// SOME of its numeric literals written as C++ writes the unary-minus
+// operator instead: an EXTRA space, then the sign, then the digits -- and an
+// integer zero that Go writes unsigned where C++ keeps the sign.
 //
-// It rewrites only a space that sits immediately before a '-' that is
-// immediately followed by a digit, which is the one shape the operator
-// produces. `a - b` has a space after the minus and `a -b` has no digit, so
-// neither is touched: a real disagreement about either is still reported.
-func foldUnaryMinus(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] != ' ' || i+2 >= len(s) || s[i+1] != '-' || !isASCIIDigit(s[i+2]) {
-			b.WriteByte(s[i])
+// Some rather than all is the point, as it is in cppDropsSpaceBeforeDot.
+// A NEGATIVE LITERAL is spelled `-10` by both sides, and inside a list it
+// sits after the `{ ` that both sides write, so `{ -10 }` is identical on
+// both. Rewriting every space-before-a-signed-number -- which is what the
+// first form of this class did -- deleted that structural space too and the
+// class stopped recognizing its own family as soon as a list held both, as
+// `0=$EVAL({-10%- 0})` does.
+//
+// A real disagreement is still reported: `a - b` has a space after the minus
+// and `a -b` has no digit after it, so neither is a shape this accepts.
+func cppKeepsSomeUnaryMinus(goTable, cppTable string) bool {
+	folded := false
+	i, j := 0, 0
+	for i < len(goTable) && j < len(cppTable) {
+		if goTable[i] == cppTable[j] {
+			i++
+			j++
 			continue
 		}
-		j := i + 2
-		for j < len(s) && isASCIIDigit(s[j]) {
-			j++
+		// C++ must have the operator here: a space, the sign, a digit.
+		if j+2 >= len(cppTable) || cppTable[j] != ' ' || cppTable[j+1] != '-' || !isASCIIDigit(cppTable[j+2]) {
+			return false
 		}
+		end := j + 2
+		for end < len(cppTable) && isASCIIDigit(cppTable[end]) {
+			end++
+		}
+		want := "-" + cppTable[j+2:end]
 		// A bare -0 is the integer zero, which Go writes unsigned. -0.
 		// or -0E is the start of a real, whose sign Go keeps.
-		if s[i+2:j] == "0" && (j >= len(s) || (s[j] != '.' && s[j] != 'E' && s[j] != 'e')) {
-			b.WriteByte('0')
-		} else {
-			b.WriteByte('-')
-			b.WriteString(s[i+2 : j])
+		if cppTable[j+2:end] == "0" && (end >= len(cppTable) || (cppTable[end] != '.' && cppTable[end] != 'E' && cppTable[end] != 'e')) {
+			want = "0"
 		}
-		i = j - 1
+		if !strings.HasPrefix(goTable[i:], want) {
+			return false
+		}
+		folded = true
+		i += len(want)
+		j = end
 	}
-	return b.String()
+	return folded && i == len(goTable) && j == len(cppTable)
 }
 
 func isASCIIDigit(c byte) bool { return c >= '0' && c <= '9' }
@@ -405,6 +420,15 @@ var seeds = []seedCase{
 			"where a unary-minus node is an expression to evaluate on every " +
 			"read.",
 		class: &unaryMinusFold,
+	},
+	{
+		// Found by FuzzConfigParseExpand after the class was recorded: a
+		// negative LITERAL beside the operator, which both sides spell the
+		// same way. Kept as a seed so the class is pinned against the shape
+		// where only one of the two signs is C++'s operator.
+		input:  "0=$EVAL({-10%- 0})",
+		reason: "unaryMinusFold, reached beside a negative literal",
+		class:  &unaryMinusFold,
 	},
 	{
 		// Found by FuzzConfigParseExpand. Not drift: it reproduces against
