@@ -63,7 +63,17 @@ const memoryOverRequestRequirements = "(VacateReasonCode==21 || VacateReasonCode
 // `request_memory = MY.VM_Memory`, `request_memory = ifThenElse(...)` --
 // takes the whole family out of play, since the transform has no number
 // to grow from.
-func (sf *SubmitFile) setRequestMemory(ad *classad.ClassAd, raw string) error {
+//
+// clusterPass is false when condor_submit would not have run any of this:
+// it is building a proc ad after the first, the submit file names no
+// request_memory, and the value came from JOB_DEFAULT_REQUESTMEMORY. Such
+// a proc ad is CHAINED to proc 0's, so SetRequestMem finds RequestMemory
+// already there and takes the branch that reads neither the default nor
+// the retry commands. The proc ad still READS as though it had them,
+// through the chain, so Go writes the same attributes -- all but the one
+// condor_submit appends to rather than assigns, TransformOnEvict, which
+// on such a proc keeps whatever on_evict_checks last wrote.
+func (sf *SubmitFile) setRequestMemory(ad *classad.ClassAd, raw string, clusterPass bool) error {
 	mb, rest, ok := splitLeadingSize(raw, unitMiB)
 	if !ok {
 		return setRequestSize(ad, attrRequestMemory, raw, unitMiB)
@@ -75,7 +85,7 @@ func (sf *SubmitFile) setRequestMemory(ad *classad.ClassAd, raw string) error {
 	// retry_request_memory commands because condor_submit never looks at
 	// them in that case.
 	if rest != "" {
-		return sf.setBuiltInOnEvictCheck(ad, attrRequestMemory, commandRequestMemory, unitMiB, rest, "")
+		return sf.setBuiltInOnEvictCheck(ad, attrRequestMemory, commandRequestMemory, unitMiB, rest, "", clusterPass)
 	}
 
 	// submit_param treats a command whose value expands to nothing as
@@ -99,9 +109,9 @@ func (sf *SubmitFile) setRequestMemory(ad *classad.ClassAd, raw string) error {
 		// that retry_request_memory_increase is ignored here; the Go
 		// parser has nowhere to put a warning, so it is silently
 		// ignored, as it is on the C++ side once the warning is read.
-		return sf.setBuiltInOnEvictCheck(ad, attrRequestMemory, commandRetryMemory, unitMiB, list, "")
+		return sf.setBuiltInOnEvictCheck(ad, attrRequestMemory, commandRetryMemory, unitMiB, list, "", clusterPass)
 	case maxValue != "" || increase != "":
-		return sf.setBuiltInOnEvictCheck(ad, attrRequestMemory, commandRetryMemoryMax, unitMiB, maxValue, increase)
+		return sf.setBuiltInOnEvictCheck(ad, attrRequestMemory, commandRetryMemoryMax, unitMiB, maxValue, increase, clusterPass)
 	}
 	return nil
 }
@@ -125,7 +135,7 @@ func (sf *SubmitFile) setRequestMemory(ad *classad.ClassAd, raw string) error {
 //
 // Only the first two keep anything on the job ad. Everything else lives
 // in the transform body, which is text the schedd runs later.
-func (sf *SubmitFile) setBuiltInOnEvictCheck(ad *classad.ClassAd, attr, command string, base int64, line, increase string) error {
+func (sf *SubmitFile) setBuiltInOnEvictCheck(ad *classad.ClassAd, attr, command string, base int64, line, increase string, clusterPass bool) error {
 	seq, tail := parseSizeSequence(line, base)
 
 	// The tail is whatever followed the numbers: an expression, which
@@ -236,7 +246,18 @@ func (sf *SubmitFile) setBuiltInOnEvictCheck(ad *classad.ClassAd, attr, command 
 	}
 	_ = ad.Set(attrTransformBodyPrefix+attr, "REQUIREMENTS "+requirements+onEvictBodySeparator+body)
 
-	addTransformOnEvict(ad, attr)
+	// On a proc after the cluster pass, condor_submit ran none of this:
+	// the name the cluster pass appended is what the proc ad reads,
+	// through the chain. What the proc pass does run is on_evict_checks,
+	// which ASSIGNS TransformOnEvict rather than appending to it -- so
+	// where it has, the name is gone for this proc and must not be put
+	// back, and where it has not, the inherited name is still there and
+	// appending reproduces it.
+	if clusterPass {
+		addTransformOnEvict(ad, attr)
+	} else if _, assigned := ad.Lookup(attrTransformOnEvict); !assigned {
+		addTransformOnEvict(ad, attr)
+	}
 	return nil
 }
 

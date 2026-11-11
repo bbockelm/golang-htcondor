@@ -296,6 +296,14 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_increase = RequestMemory * 2\nqueue\n"},
 	// A ceiling on its own is a single retry value, NOT a MaxRequestMemory.
 	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_max = 4096\nqueue\n"},
+	// With no request_memory of its own, the family is reached through
+	// JOB_DEFAULT_REQUESTMEMORY -- and only while the cluster ad is being
+	// built, since every later proc ad chains to proc 0's and so already
+	// has RequestMemory. on_evict_checks is what makes that visible: it
+	// overwrites TransformOnEvict on every proc, just before the resource
+	// requests are set, so a later proc keeps what it wrote.
+	{input: "executable = /bin/sleep\non_evict_checks = nosuch\nretry_request_memory_max = 2048\nqueue 3\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\non_evict_checks = nosuch\nretry_request_memory_max = 2048\nqueue 3\n"},
 	// `request_memory = a, b` is the short spelling of the same thing, and
 	// it supersedes the retry_ commands because condor_submit never reads
 	// them in that case.

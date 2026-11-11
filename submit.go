@@ -746,7 +746,7 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	sf.setOnEvictChecks(ad)
 
 	// Set request_* resources
-	if err := sf.setResourceRequests(ad); err != nil {
+	if err := sf.setResourceRequests(ad, jobID.Proc); err != nil {
 		return nil, err
 	}
 
@@ -1979,7 +1979,9 @@ func canonicalConcurrencyLimits(value string) string {
 // materializing jobs from a cluster ad, because the materialized jobs
 // inherit them from that ad; this engine builds every job ad in full,
 // SubmitLate included, so each one gets them.
-func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
+// proc is the proc id of the ad being built. It decides whether the
+// retry_request_memory family is read; see setRequestMemory.
+func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd, proc int) error {
 	sf.defaultDisk = ""
 
 	// CPUs: a count, so no units -- but it may be an expression, which
@@ -2009,13 +2011,18 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 	// size to grow from. The VM branch deliberately does not: its
 	// request is an expression, so there is nothing to grow.
 	if v, ok := sf.simpleKeywordParam("request_memory", "RequestMemory"); ok {
-		if err := sf.setRequestMemory(ad, v); err != nil {
+		if err := sf.setRequestMemory(ad, v, true); err != nil {
 			return err
 		}
 	} else if _, vm := sf.submitCommand("vm_memory"); vm && sf.universe == UniverseVM {
 		_ = setExprAttr(ad, "RequestMemory", "request_memory", "MY.JobVMMemory")
 	} else if v, ok := sf.requestDefault("request_memory"); ok {
-		if err := sf.setRequestMemory(ad, v); err != nil {
+		// The configured default reaches the retry family on the first
+		// proc only. condor_submit chains every later proc's ad to proc
+		// 0's, so RequestMemory is already there and SetRequestMem takes
+		// its "we already have a value" branch, which reads neither the
+		// default nor the retry commands.
+		if err := sf.setRequestMemory(ad, v, proc == 0); err != nil {
 			return fmt.Errorf("JOB_DEFAULT_REQUESTMEMORY: %w", err)
 		}
 	}

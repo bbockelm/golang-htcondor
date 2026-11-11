@@ -81,3 +81,91 @@ func TestOnEvictChecks(t *testing.T) {
 		}
 	})
 }
+
+// TestRetryRequestMemoryIsReadOncePerCluster pins where the
+// retry_request_memory family is read when the submit file names no
+// request_memory of its own.
+//
+// condor_submit chains every proc ad after the first to proc 0's, so
+// SetRequestMem finds RequestMemory already there and takes the branch
+// that reads neither JOB_DEFAULT_REQUESTMEMORY nor the retry commands.
+// The built-in transform therefore names itself in TransformOnEvict on
+// proc 0 only -- which is visible because on_evict_checks overwrites that
+// attribute outright on every proc, just before the resource requests are
+// set, so a later proc is left with whatever on_evict_checks wrote.
+//
+// Building every proc ad from scratch instead put RequestMemory in
+// TransformOnEvict on all of them, and the schedd would have run the
+// grow-the-request transform for procs condor_submit does not.
+func TestRetryRequestMemoryIsReadOncePerCluster(t *testing.T) {
+	const src = "executable = /bin/true\n" +
+		"on_evict_checks = nosuch\n" +
+		"retry_request_memory_max = 2048\n" +
+		"queue 3\n"
+
+	sf, err := ParseSubmitFile(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	sub, err := sf.Submit(1)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if len(sub.ProcAds) != 3 {
+		t.Fatalf("got %d proc ads, want 3", len(sub.ProcAds))
+	}
+
+	// Without on_evict_checks every proc would read "RequestMemory"
+	// through the chain, so this file names a tag with no body: that
+	// assigns the attribute on every proc, and a later proc keeps the
+	// empty string it wrote.
+	want := []string{"RequestMemory", "", ""}
+	for proc, w := range want {
+		got, _ := sub.ProcAds[proc].EvaluateAttrString("TransformOnEvict")
+		if got != w {
+			t.Errorf("proc %d: TransformOnEvict = %q, want %q", proc, got, w)
+		}
+		// A later proc reads the body through the chain in
+		// condor_submit, so Go writes it on every proc. Only the
+		// append to TransformOnEvict is held back.
+		if _, ok := sub.ProcAds[proc].Lookup("TransformBody_RequestMemory"); !ok {
+			t.Errorf("proc %d: TransformBody_RequestMemory is missing", proc)
+		}
+	}
+
+	// With no on_evict_checks nothing assigns the attribute on a later
+	// proc, so every proc reads the name the cluster pass appended.
+	sfPlain, err := ParseSubmitFile(strings.NewReader(
+		"executable = /bin/true\nretry_request_memory_max = 2048\nqueue 3\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	subPlain, err := sfPlain.Submit(1)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	for proc := range subPlain.ProcAds {
+		got, _ := subPlain.ProcAds[proc].EvaluateAttrString("TransformOnEvict")
+		if got != "RequestMemory" {
+			t.Errorf("proc %d with no on_evict_checks: TransformOnEvict = %q, want RequestMemory", proc, got)
+		}
+	}
+
+	// With request_memory in the file, submit_param answers on every
+	// proc, so the family is read on every proc.
+	sf2, err := ParseSubmitFile(strings.NewReader("executable = /bin/true\nrequest_memory = 128\n" +
+		"on_evict_checks = nosuch\nretry_request_memory_max = 2048\nqueue 3\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	sub2, err := sf2.Submit(1)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	for proc := range sub2.ProcAds {
+		got, _ := sub2.ProcAds[proc].EvaluateAttrString("TransformOnEvict")
+		if got != "RequestMemory" {
+			t.Errorf("proc %d with request_memory: TransformOnEvict = %q, want RequestMemory", proc, got)
+		}
+	}
+}
