@@ -209,16 +209,15 @@ func escapeLenFor(b byte, cpp string) int {
 // hasNonPrintableByte reports whether s holds a byte C's isprint() rejects in
 // the C locale, which is the test C++ escapes on.
 //
-// The bytes the canonical table is BUILT from -- the unit separator between a
-// name and its value, and the newline between rows -- are not part of any
-// value and are skipped, or every table would answer yes.
+// It is asked only about the INPUT. Asking it about a table would need the
+// bytes the table is BUILT from excluded -- the unit separator between a name
+// and its value, and the newline between rows -- and that exclusion is wrong
+// for a value that holds one of those bytes itself, which
+// `0=$EVAL({'<0x1f>'})` does. The tables are compared byte by byte instead,
+// by cppEscapesSomeNonPrintables.
 func hasNonPrintableByte(s string) bool {
 	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '\x1f' || c == '\x1e' || c == '\n' {
-			continue
-		}
-		if c < 0x20 || c > 0x7e {
+		if c := s[i]; c < 0x20 || c > 0x7e {
 			return true
 		}
 	}
@@ -488,6 +487,14 @@ var seeds = []seedCase{
 		// shape where C++ escapes one occurrence and leaves another.
 		input:  "0=\xde$EVAL({'\xde'})",
 		reason: "attrNameEscaping, reached with the same byte outside the expression",
+		class:  &attrNameEscaping,
+	},
+	{
+		// Found by FuzzConfigParseExpand: the byte is the canonical table's
+		// own unit separator, which an earlier form of this class excluded
+		// from its input test and so did not recognize.
+		input:  "0=$EVAL({'\x1f'})",
+		reason: "attrNameEscaping, reached with the table's own separator byte",
 		class:  &attrNameEscaping,
 	},
 
