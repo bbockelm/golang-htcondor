@@ -375,7 +375,7 @@ func evalBoolParam(value string) (bool, bool) {
 		return result, true
 	}
 
-	expr, err := classad.ParseExpr(strings.TrimSpace(value))
+	expr, err := classad.ParseExprOld(strings.TrimSpace(value))
 	if err != nil {
 		return false, false
 	}

@@ -1939,7 +1939,7 @@ func setExprAttr(ad *classad.ClassAd, attr, command, value string) error {
 	if value == "" {
 		return nil
 	}
-	expr, err := classad.ParseExpr(value)
+	expr, err := classad.ParseExprOld(value)
 	if err != nil {
 		return fmt.Errorf("%s: %q is not a valid ClassAd expression: %w", command, value, err)
 	}
@@ -2167,7 +2167,7 @@ func (sf *SubmitFile) setCustomResourceRequests(ad *classad.ClassAd) error {
 			continue
 		}
 		attr := "Request" + name[len(requestKeywordPrefix):]
-		expr, err := classad.ParseExpr(strings.TrimSpace(value))
+		expr, err := classad.ParseExprOld(strings.TrimSpace(value))
 		if err != nil {
 			return fmt.Errorf("%s: %q is not a valid ClassAd expression: %w", name, value, err)
 		}
@@ -2200,7 +2200,7 @@ func (sf *SubmitFile) setRank(ad *classad.ClassAd) error {
 		_ = ad.Set("Rank", 0.0)
 		return nil
 	}
-	expr, err := classad.ParseExpr(rank)
+	expr, err := classad.ParseExprOld(rank)
 	if err != nil {
 		return fmt.Errorf("rank: %q is not a valid ClassAd expression: %w", rank, err)
 	}
@@ -2449,7 +2449,7 @@ func (sf *SubmitFile) setCustomAttributes(ad *classad.ClassAd) error {
 			value = "undefined"
 		}
 
-		expr, err := classad.ParseExpr(value)
+		expr, err := classad.ParseExprOld(value)
 		if err != nil {
 			return fmt.Errorf("custom attribute %s: %q is not a valid ClassAd expression: %w", attrName, value, err)
 		}
@@ -2605,7 +2605,7 @@ func setSizeAttr(ad *classad.ClassAd, attr, raw string, base int64) error {
 		_ = ad.Set(attr, n)
 		return nil
 	}
-	expr, err := classad.ParseExpr(raw)
+	expr, err := classad.ParseExprOld(raw)
 	if err != nil {
 		return fmt.Errorf("%s: %q is neither a size nor a valid expression: %w", attr, raw, err)
 	}
@@ -2628,7 +2628,7 @@ func setCountAttr(ad *classad.ClassAd, attr, raw string) error {
 		_ = ad.Set(attr, n)
 		return nil
 	}
-	expr, err := classad.ParseExpr(raw)
+	expr, err := classad.ParseExprOld(raw)
 	if err != nil {
 		return fmt.Errorf("%s: %q is neither an integer nor a valid expression: %w", attr, raw, err)
 	}
@@ -3767,7 +3767,7 @@ func (sf *SubmitFile) setCronAndDeferral(ad *classad.ClassAd) error {
 // be a non-negative integer. A non-literal expression is stored unchecked,
 // since only the starter can evaluate it.
 func setDeferralExpr(ad *classad.ClassAd, attr, command, value string) error {
-	expr, err := classad.ParseExpr(value)
+	expr, err := classad.ParseExprOld(value)
 	if err != nil {
 		return fmt.Errorf("%s = %s is invalid, must eval to a non-negative integer", command, value)
 	}
@@ -3910,7 +3910,7 @@ func (sf *SubmitFile) setJobRetries(ad *classad.ClassAd) error {
 func foldRetryUntil(value string) (string, error) {
 	invalid := fmt.Errorf("retry_until = %s is invalid, it must be an integer or boolean expression", value)
 
-	expr, err := classad.ParseExpr(value)
+	expr, err := classad.ParseExprOld(value)
 	if err != nil {
 		return "", invalid
 	}
@@ -3939,7 +3939,7 @@ func foldRetryUntil(value string) (string, error) {
 // them anywhere else would change the expression TREE (`a || (b || c)` rather
 // than `(a || b) || c`) even though the value is the same.
 func wrapExprForOr(value string) (string, error) {
-	expr, err := classad.ParseExpr(value)
+	expr, err := classad.ParseExprOld(value)
 	if err != nil {
 		return "", err
 	}
@@ -3990,7 +3990,7 @@ func evalLongParam(value string) (int64, bool) {
 		// n already holds the saturated value.
 		return n, true
 	}
-	expr, perr := classad.ParseExpr(s)
+	expr, perr := classad.ParseExprOld(s)
 	if perr != nil {
 		return 0, false
 	}
