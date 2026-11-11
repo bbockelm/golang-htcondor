@@ -44,9 +44,29 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/sharedportrouter"
 )
 
+// defaultDemoCredentialsFile is where -demo writes the passwords it
+// generates for the seeded IDP accounts.
+//
+// It is a fixed path on purpose. Demo mode keeps its state in a fresh
+// os.MkdirTemp directory, so there is no stable place a caller could
+// derive, and the only published way to learn the generated passwords
+// has been to scrape them off stdout. That works until a banner is
+// reworded, at which point it breaks in other people's CI. A path they
+// can `cat` is a contract; a log line is not.
+//
+// /tmp rather than a state directory because the callers are a test
+// harness and a container, both of which want it readable without
+// knowing where this server chose to keep its database. The file is
+// written 0600 after an unlink, so sharing the directory with other
+// users is not the exposure it looks like -- see writeDemoCredentials.
+// gosec G101 flags this on the name alone: it is where credentials are
+// written, not a credential.
+const defaultDemoCredentialsFile = "/tmp/htcondor-demo-credentials.json" //nolint:gosec
+
 var (
 	demoMode          = flag.Bool("demo", false, "Run in demo mode with mini condor")
 	demoShutdownAfter = flag.Duration("demo-shutdown-after", 0, "Shutdown demo mode after specified duration (e.g., 30s, 5m, 1h). 0 = run indefinitely")
+	demoCredsFile     = flag.String("demo-credentials-file", defaultDemoCredentialsFile, "Where demo mode writes the generated IDP passwords as JSON (mode 0600). Empty disables the write.")
 	listenAddr        = flag.String("listen", ":8080", "Address to listen on")
 	userHeader        = flag.String("user-header", "", "HTTP header to read username from (e.g., X-Remote-User). Only used in demo mode with token generation.")
 	collectorHost     = flag.String("collector", "", "Collector host:port (overrides COLLECTOR_HOST from config)")
@@ -2915,7 +2935,8 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		EnableIDP:          true,
 		// Demo mode only: gives the browser tests a non-admin identity
 		// to check authorization boundaries against.
-		SeedDemoUser: true,
+		SeedDemoUser:        true,
+		DemoCredentialsFile: *demoCredsFile,
 		// With a placementd: an account with no access, to show the
 		// request-access flow, and the identity map that sends it there.
 		SeedDemoPlacementUser: placement != nil,
