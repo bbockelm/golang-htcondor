@@ -21,11 +21,25 @@ func WithBranding(f func() Branding) Option {
 	return func(h *spaHandler) { h.branding = f }
 }
 
-// spaHandler serves the embedded export, with the site's branding
-// spliced into the HTML.
+// WithHeadHTML splices a fixed block into the head of every HTML page
+// this handler serves.
+//
+// Unlike branding, which an operator can change at runtime, this block
+// is constant for the life of the handler: a site app is told its id
+// and mount point, and those are properties of the bundle that was
+// loaded. A reloaded bundle gets a new handler.
+func WithHeadHTML(html []byte) Option {
+	return func(h *spaHandler) { h.headHTML = html }
+}
+
+// spaHandler serves a static export, with the site's branding and any
+// fixed head block spliced into the HTML.
 type spaHandler struct {
 	fsys     fs.FS
 	branding func() Branding
+	// headHTML is spliced into every page's head. Immutable, so it
+	// does not participate in the cache's revision.
+	headHTML []byte
 
 	// Branded HTML, keyed by path. Rebuilt whenever the branding's
 	// revision changes, which is only at startup and on a reconfigure.
@@ -48,6 +62,19 @@ func NewSPAHandler(opts ...Option) http.Handler {
 			http.Error(w, "Frontend not embedded in this build", http.StatusNotFound)
 		})
 	}
+	return NewSPAHandlerFS(fsys, opts...)
+}
+
+// NewSPAHandlerFS serves a static export from an arbitrary fs.FS, with
+// the same route resolution NewSPAHandler applies to the embedded
+// frontend.
+//
+// Site apps are served through this, from a zip bundle or from a
+// directory rather than from embed.FS. That is what makes the path
+// validation in serveFile load-bearing rather than belt-and-braces:
+// embed.FS cannot reach anything outside the binary, and these
+// filesystems can reach the real one.
+func NewSPAHandlerFS(fsys fs.FS, opts ...Option) http.Handler {
 	h := &spaHandler{fsys: fsys, rendered: map[string][]byte{}}
 	for _, o := range opts {
 		o(h)
@@ -89,12 +116,18 @@ func (h *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serve hands one export file to the client, branded if it is a page and
 // the site configured any branding.
 func (h *spaHandler) serve(w http.ResponseWriter, r *http.Request, name string) {
-	if h.branding == nil || !strings.HasSuffix(name, ".html") {
+	if !strings.HasSuffix(name, ".html") {
 		serveFile(w, r, h.fsys, name)
 		return
 	}
-	b := h.branding()
-	if b.IsDefault() {
+	b := DefaultBranding()
+	if h.branding != nil {
+		b = h.branding()
+	}
+	// The fast path: nothing to splice, so the bytes go out of the
+	// filesystem untouched and a Range request is answered by the file
+	// itself rather than by a rendered copy.
+	if b.IsDefault() && len(h.headHTML) == 0 {
 		serveFile(w, r, h.fsys, name)
 		return
 	}
@@ -129,6 +162,12 @@ func (h *spaHandler) branded(name string, b Branding) ([]byte, bool) {
 		return nil, false
 	}
 	page := b.Inject(raw)
+	// Only splice into something that is actually a document. A
+	// bundle may ship a .html file that is a fragment or a template
+	// for its own use; prepending a <base> to one would corrupt it.
+	if len(h.headHTML) > 0 && looksLikeHTML(page) {
+		page = injectHead(page, h.headHTML)
+	}
 	h.rendered[name] = page
 	return page, true
 }
