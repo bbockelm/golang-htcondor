@@ -81,6 +81,40 @@ cat > "$SITE_APPS_DIR/e2eapp/web/assets/app.js" <<'JS'
 document.querySelector('[data-testid="app-base"]').textContent =
   (window.__HTCONDOR_APP__ && window.__HTCONDOR_APP__.base) || 'MISSING';
 JS
+# A second app, so the overlay bar has somewhere to point. With only
+# one app and no app-only mode the shell deliberately renders nothing,
+# which would make "the bar is absent" indistinguishable from "the bar
+# is broken".
+mkdir -p "$SITE_APPS_DIR/e2eother/web"
+cat > "$SITE_APPS_DIR/e2eother/app.yaml" <<'YAML'
+name: E2E Other App
+description: A second app, so the overlay has a destination
+YAML
+cat > "$SITE_APPS_DIR/e2eother.yaml" <<'YAML'
+groups: ["*"]
+YAML
+cat > "$SITE_APPS_DIR/e2eother/web/index.html" <<'HTML'
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>E2E Other App</title></head>
+<body><h1 data-testid="other-heading">E2E Other App</h1></body></html>
+HTML
+
+# A third that declines the overlay, so the opt-out is covered by
+# something other than reading the code.
+mkdir -p "$SITE_APPS_DIR/e2ebare/web"
+cat > "$SITE_APPS_DIR/e2ebare/app.yaml" <<'YAML'
+name: E2E Bare App
+YAML
+cat > "$SITE_APPS_DIR/e2ebare.yaml" <<'YAML'
+groups: ["*"]
+YAML
+cat > "$SITE_APPS_DIR/e2ebare/web/index.html" <<'HTML'
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="htcondor-shell" content="none">
+<title>E2E Bare App</title></head>
+<body><h1 data-testid="bare-heading">E2E Bare App</h1></body></html>
+HTML
+
 export _CONDOR_HTTP_API_SITE_APPS_DIR="$SITE_APPS_DIR"
 # Short, so a test can redeploy a bundle and see it without waiting a
 # minute. Production defaults to a minute.

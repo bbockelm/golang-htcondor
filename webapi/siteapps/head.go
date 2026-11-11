@@ -24,6 +24,9 @@ type appGlobal struct {
 // and a base path baked in at build time would be wrong for one of
 // them.
 //
+// It also pulls in the overlay script, which is a separate concern
+// riding the same injection: see shell.go.
+//
 // Two mechanisms, because they serve different consumers. <base href>
 // resolves relative asset URLs, which is what lets a bundle build with
 // base: './' and work anywhere. window.__HTCONDOR_APP__ gives the
@@ -54,6 +57,11 @@ func HeadHTML(app App) ([]byte, error) {
 	// is not a hostile input, but it is an input.
 	b.WriteString(escapeScriptJSON(string(payload)))
 	b.WriteString(`;</script>`)
+	// The overlay goes last, deferred, so it never blocks the page it
+	// is decorating. An app that declines it with the meta tag still
+	// gets the two lines above: a bundle that never learns its base
+	// path is broken, and that must not depend on site code opting in.
+	b.WriteString(`<script src="` + shellPath + `" defer></script>`)
 	return []byte(b.String()), nil
 }
 

@@ -89,3 +89,93 @@ test('a signed-out browser is sent to log in, and gets nothing', async ({ browse
     await ctx.close();
   }
 });
+
+// The overlay bar. Only a real browser can show whether a shadow root
+// actually isolates the bar from the page's own CSS, which is the
+// whole reason it is built that way.
+test.describe('the shell overlay', () => {
+  // The bar lives in a shadow root, so page-level selectors cannot see
+  // into it. Reach it the way the browser does.
+  async function barLinks(page: import('@playwright/test').Page) {
+    return page.evaluate(() => {
+      const host = document.querySelector('[data-htcondor-shell]');
+      if (!host || !host.shadowRoot) return null;
+      return Array.from(host.shadowRoot.querySelectorAll('a')).map((a) => ({
+        text: (a.textContent ?? '').trim(),
+        href: a.getAttribute('href') ?? '',
+      }));
+    });
+  }
+
+  test('renders in a shadow root and points at the other app', async ({ page }) => {
+    await page.goto(APP_URL);
+
+    await page.waitForFunction(
+      () => !!document.querySelector('[data-htcondor-shell]')?.shadowRoot,
+      undefined,
+      { timeout: 15_000 },
+    );
+
+    const links = await barLinks(page);
+    expect(links).not.toBeNull();
+    // It must offer the OTHER app, not the one we are standing in: a
+    // bar that only names where you already are is clutter.
+    expect(links!.some((l) => l.href === '/site/e2eother/')).toBe(true);
+    expect(links!.some((l) => l.href === APP_URL)).toBe(false);
+  });
+
+  test('the page cannot restyle the bar', async ({ page }) => {
+    await page.goto(APP_URL);
+    await page.waitForFunction(
+      () => !!document.querySelector('[data-htcondor-shell]')?.shadowRoot,
+      undefined,
+      { timeout: 15_000 },
+    );
+
+    // Inject a page-level rule that would wreck an un-isolated bar.
+    // Shadow DOM is the reason this is a no-op; without it the bar is
+    // at the mercy of whatever CSS the app happens to ship.
+    await page.addStyleTag({ content: 'a, div, span { display: none !important; }' });
+
+    const visible = await page.evaluate(() => {
+      const root = document.querySelector('[data-htcondor-shell]')?.shadowRoot;
+      const bar = root?.querySelector('.bar') as HTMLElement | null;
+      if (!bar) return false;
+      return getComputedStyle(bar).display !== 'none';
+    });
+    expect(visible).toBe(true);
+  });
+
+  test('navigating the bar reaches the other app', async ({ page }) => {
+    await page.goto(APP_URL);
+    await page.waitForFunction(
+      () => !!document.querySelector('[data-htcondor-shell]')?.shadowRoot,
+      undefined,
+      { timeout: 15_000 },
+    );
+
+    await page.evaluate(() => {
+      const root = document.querySelector('[data-htcondor-shell]')!.shadowRoot!;
+      const link = Array.from(root.querySelectorAll('a')).find(
+        (a) => a.getAttribute('href') === '/site/e2eother/',
+      ) as HTMLAnchorElement;
+      link.click();
+    });
+
+    await page.waitForURL((u) => u.pathname.startsWith('/site/e2eother/'));
+    await expect(page.getByTestId('other-heading')).toBeVisible();
+  });
+
+  test('an app that declines the overlay does not get one', async ({ page }) => {
+    await page.goto('/site/e2ebare/');
+    await expect(page.getByTestId('bare-heading')).toBeVisible();
+
+    // Give the script the same chance it gets elsewhere before
+    // concluding it stayed away.
+    await page.waitForTimeout(2000);
+    const host = await page.evaluate(
+      () => !!document.querySelector('[data-htcondor-shell]'),
+    );
+    expect(host).toBe(false);
+  });
+})

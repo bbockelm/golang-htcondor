@@ -204,12 +204,71 @@ func TestMultipleGroupsReachMultipleApps(t *testing.T) {
 	}
 }
 
-// Reserved ids answer 404 rather than falling through to an app.
+// Reserved paths are the server's own. An unrecognised one answers
+// 404 rather than falling through to an app, and no bundle can claim
+// one because ValidateID refuses an id beginning with "_".
 func TestReservedPrefixIsNotAnApp(t *testing.T) {
 	h := testHandler(t, twoAppDir(t), true, "smith_lab")
-	for _, path := range []string{"/site/_shell.js", "/site/_switch"} {
+	for _, path := range []string{"/site/_switch", "/site/_nothing/here"} {
 		if rec := get(h, path); rec.Code != http.StatusNotFound {
 			t.Errorf("GET %s = %d, want 404", path, rec.Code)
+		}
+	}
+}
+
+func TestShellScriptIsServed(t *testing.T) {
+	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+
+	rec := get(h, "/site/_shell.js")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	// It must carry no site content: it is served to every
+	// authenticated caller, and does its own filtering by asking
+	// auth/me.
+	body := rec.Body.String()
+	for _, leak := range []string{"CryoEM", "SeqQC", "smith_lab", "jones_lab"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("the shell script carries site content: %q", leak)
+		}
+	}
+	if !strings.Contains(body, "/api/v1/auth/me") {
+		t.Error("the shell does not ask auth/me, so it cannot be filtering anything")
+	}
+	if v := rec.Header().Get("Cache-Control"); !strings.Contains(v, "private") {
+		t.Errorf("Cache-Control = %q, want private", v)
+	}
+}
+
+// A subresource must not be answered with a redirect to a login page:
+// the browser would parse HTML as JavaScript.
+func TestShellScriptWithoutASessionIsNotARedirect(t *testing.T) {
+	h := testHandler(t, twoAppDir(t), false)
+
+	rec := get(h, "/site/_shell.js")
+	if rec.Code == http.StatusFound || rec.Code == http.StatusMovedPermanently {
+		t.Fatalf("status %d: a script request was answered with a redirect", rec.Code)
+	}
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("status %d, want 204", rec.Code)
+	}
+}
+
+// Every page carries the overlay tag, so a user is never stranded in
+// an app with no way across or out.
+func TestPagesCarryTheShellTag(t *testing.T) {
+	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+
+	for _, path := range []string{"/site/cryoem/", "/site/cryoem/some/client/route"} {
+		body := get(h, path).Body.String()
+		if !strings.Contains(body, `src="/site/_shell.js"`) {
+			t.Errorf("GET %s has no shell tag: %s", path, body)
+		}
+		if !strings.Contains(body, "defer") {
+			t.Errorf("GET %s loads the shell without defer", path)
 		}
 	}
 }

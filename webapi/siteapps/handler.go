@@ -63,7 +63,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(id, "_") {
-		// Reserved for the server's own paths; none are registered yet.
+		// Reserved for the server's own paths. ValidateID refuses an id
+		// beginning with "_", so no bundle can ever claim one of these.
+		if r.URL.Path == shellPath {
+			h.serveShell(w, r)
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
