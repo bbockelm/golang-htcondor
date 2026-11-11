@@ -413,6 +413,9 @@ type Config struct {
 	// SeedDemoUser seeds a second, non-admin IDP account. Demo mode only;
 	// see HandlerConfig.SeedDemoUser for why it is not keyed on EnableIDP.
 	SeedDemoUser bool
+	// DemoCredentialsFile is where seeded demo passwords are written as
+	// JSON. Demo mode only; see HandlerConfig.DemoCredentialsFile.
+	DemoCredentialsFile string
 	// SeedDemoPlacementUser seeds "newbie", an IDP account with no access.
 	// Demo mode sets it when it runs a condor_placementd; see
 	// HandlerConfig.SeedDemoPlacementUser.
@@ -637,6 +640,7 @@ func NewServer(cfg Config) (*Server, error) {
 		SuperuserFallbackIdentity:   cfg.SuperuserFallbackIdentity,
 		EnableIDP:                   cfg.EnableIDP,
 		SeedDemoUser:                cfg.SeedDemoUser,
+		DemoCredentialsFile:         cfg.DemoCredentialsFile,
 		SeedDemoPlacementUser:       cfg.SeedDemoPlacementUser,
 		IDPIssuer:                   cfg.IDPIssuer,
 		IDPAccessTokenLifespan:      cfg.IDPAccessTokenLifespan,

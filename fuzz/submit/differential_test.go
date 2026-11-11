@@ -296,6 +296,28 @@ var seeds = []seedCase{
 	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_increase = RequestMemory * 2\nqueue\n"},
 	// A ceiling on its own is a single retry value, NOT a MaxRequestMemory.
 	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory_max = 4096\nqueue\n"},
+	// With no request_memory of its own, the family is reached through
+	// JOB_DEFAULT_REQUESTMEMORY -- and only while the cluster ad is being
+	// built, since every later proc ad chains to proc 0's and so already
+	// has RequestMemory. on_evict_checks is what makes that visible: it
+	// overwrites TransformOnEvict on every proc, just before the resource
+	// requests are set, so a later proc keeps what it wrote.
+	{input: "executable = /bin/sleep\non_evict_checks = nosuch\nretry_request_memory_max = 2048\nqueue 3\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\non_evict_checks = nosuch\nretry_request_memory_max = 2048\nqueue 3\n"},
+	// Disk has one retry command rather than three, and its transform
+	// carries the vacate sub-code for disk (104) rather than memory (102).
+	// With both families in one file the tags come out in the order
+	// condor_submit reaches them, which is the sorted macro set's:
+	// RequestDisk before RequestMemory.
+	{input: "executable = /bin/sleep\nrequest_disk = 512\nretry_request_disk = 1024\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_disk = 512\nretry_request_disk = 1024, 2048\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_disk = 512\nretry_request_disk = 1M, 2G\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_disk = 512, 1024\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_disk = 512\nretry_request_disk = RequestDisk * 2\nqueue\n"},
+	// An expression request takes the family out of play, as it does
+	// for memory: there is no number to grow from.
+	{input: "executable = /bin/sleep\nrequest_disk = MY.Foo\nretry_request_disk = 1024\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_memory = 100\nretry_request_memory = 2048\nrequest_disk = 512\nretry_request_disk = 1024\nqueue\n"},
 	// `request_memory = a, b` is the short spelling of the same thing, and
 	// it supersedes the retry_ commands because condor_submit never reads
 	// them in that case.
@@ -524,6 +546,22 @@ var seeds = []seedCase{
 	// of them a file carries.
 	{input: "executable = /bin/sleep\ngpus_minimum_capability = 7.5\ngpus_maximum_capability = 8.0\ngpus_minimum_memory = 4G\ngpus_minimum_runtime = 12.1\nrequire_gpus = Capability > 5\nqueue\n"},
 	{input: "executable = /bin/sleep\nrequest_gpus = undefined\ngpus_minimum_capability = 7.5\nqueue\n"},
+	// condor_submit EVALUATES a request_<tag> and switches on the type of
+	// the result, not on what the file wrote. Only a number or undefined
+	// asks for a count, and only a string asks for a pattern; a boolean,
+	// a list, a nested ad or an error constrains nothing at all.
+	{input: "executable = /bin/sleep\nrequest_gpus = !0\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = {1}\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = [a=1]\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1/0\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_abc = true\nqueue\n"},
+	// Evaluated, so an expression that works out to zero or less asks for
+	// nothing just as the literal does, and one that works out to a
+	// string gets the pattern clause.
+	{input: "executable = /bin/sleep\nrequest_gpus = 1 - 1\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = 1 + 1\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = strcat(\"a\",\"b\")\nqueue\n"},
+	{input: "executable = /bin/sleep\nrequest_gpus = RequestCpus\nqueue\n"},
 	// One at a time, so each clause of the derived expression is pinned on
 	// its own.
 	{input: "executable = /bin/sleep\nrequest_gpus = 1\ngpus_minimum_capability = 7.5\nqueue\n"},

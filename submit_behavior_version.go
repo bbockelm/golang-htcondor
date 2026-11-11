@@ -90,6 +90,7 @@ var submitBehaviorReleases = []struct {
 		apply: func(b *SubmitBehavior) {
 			b.OmitVanillaDiskClause = true
 			b.OmitTransferVersionCheck = true
+			b.ContainerSourceIsATransferMethod = true
 		},
 	},
 	{

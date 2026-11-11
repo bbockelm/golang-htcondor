@@ -212,7 +212,7 @@ func submitValueAsLong(key, value string) (int64, error) {
 	trimmed := strings.TrimRight(value, " \t\n\v\f\r")
 	n, err := strconv.ParseInt(trimmed, 10, 64)
 	if err != nil {
-		expr, parseErr := classad.ParseExpr(value)
+		expr, parseErr := classad.ParseExprOld(value)
 		if parseErr != nil {
 			return 0, fmt.Errorf("%s=%s is invalid, must eval to an integer", key, value)
 		}

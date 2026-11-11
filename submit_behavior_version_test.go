@@ -12,10 +12,11 @@ func TestSubmitBehaviorForKnownReleases(t *testing.T) {
 		OmitTransferVersionCheck: true, OmitLocalAndSchedulerMachineChecks: true,
 		OmitLocalAndSchedulerResourceDefaults: true,
 		OmitRemoteIOKeywords:                  true, OmitContainerIsCommonAttr: true,
-		CommonContainerVanillaOnly: true,
+		CommonContainerVanillaOnly: true, ContainerSourceIsATransferMethod: true,
 	}
-	// The backported changes: HTCONDOR-3932, which covers both the
-	// Requirements clauses and container_is_common's attribute,
+	// The backported changes: HTCONDOR-3932, which covers the
+	// Requirements clauses, the container image's source as a transfer
+	// method, and container_is_common's attribute,
 	// HTCONDOR-3926, and HTCONDOR-4003. They reached the 25.x feature
 	// line and the 26.0 LTS line. HTCONDOR-4020 and the two halves of
 	// HTCONDOR-3998 went to the 26.x feature line alone, which is what
@@ -24,6 +25,7 @@ func TestSubmitBehaviorForKnownReleases(t *testing.T) {
 		OmitVanillaDiskClause: true, OmitTransferVersionCheck: true,
 		OmitLocalAndSchedulerMachineChecks: true, OmitLocalAndSchedulerResourceDefaults: true,
 		OmitContainerIsCommonAttr: true, CommonContainerVanillaOnly: true,
+		ContainerSourceIsATransferMethod: true,
 	}
 
 	cases := map[string]SubmitBehavior{

@@ -75,6 +75,18 @@ type SubmitFile struct {
 	// by every setResourceRequests; see defaultDiskEvaluates.
 	defaultDisk string
 
+	// wantTransferMethods is the set of file transfer plugin methods the
+	// job ad being built needs and does not supply itself, in the order
+	// SetRequirements writes its clauses. Reset by every
+	// setTransferPluginMethods.
+	//
+	// It is kept here rather than read back from
+	// WantTransferPluginMethods, because the two are not the same list: a
+	// method whose name is empty gets a Requirements clause but is left
+	// out of the attribute, and a `+WantTransferPluginMethods` the
+	// submitter forced on names no clause at all.
+	wantTransferMethods []string
+
 	// boolErr is the first boolean submit command whose value is not a
 	// boolean, mirroring condor_submit's abort_code: the submission is
 	// refused over it. Reset by every MakeJobAd.
@@ -756,7 +768,7 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	sf.setOnEvictChecks(ad)
 
 	// Set request_* resources
-	if err := sf.setResourceRequests(ad); err != nil {
+	if err := sf.setResourceRequests(ad, jobID.Proc); err != nil {
 		return nil, err
 	}
 
@@ -1075,7 +1087,10 @@ func (sf *SubmitFile) executableIsAFile() bool {
 	if sf.universe != UniverseGrid {
 		return true
 	}
-	res, _ := sf.submitCommand("grid_resource")
+	// Through the attribute name as well: condor_submit reads it as
+	// submit_param(SUBMIT_KEY_GridResource, ATTR_GRID_RESOURCE), so
+	// `GridResource = ec2 ...` names the same thing as `grid_resource`.
+	res, _ := sf.submitCommandAlt("grid_resource", "GridResource")
 	gridType, _, _ := strings.Cut(strings.TrimSpace(res), " ")
 	switch strings.ToLower(gridType) {
 	case "ec2", "gce", "azure":
@@ -1968,7 +1983,7 @@ func setExprAttr(ad *classad.ClassAd, attr, command, value string) error {
 	if value == "" {
 		return nil
 	}
-	expr, err := classad.ParseExpr(value)
+	expr, err := classad.ParseExprOld(value)
 	if err != nil {
 		return fmt.Errorf("%s: %q is not a valid ClassAd expression: %w", command, value, err)
 	}
@@ -2008,7 +2023,9 @@ func canonicalConcurrencyLimits(value string) string {
 // materializing jobs from a cluster ad, because the materialized jobs
 // inherit them from that ad; this engine builds every job ad in full,
 // SubmitLate included, so each one gets them.
-func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
+// proc is the proc id of the ad being built. It decides whether the
+// retry_request_memory family is read; see setRequestMemory.
+func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd, proc int) error {
 	sf.defaultDisk = ""
 
 	// CPUs: a count, so no units -- but it may be an expression, which
@@ -2028,6 +2045,30 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 		}
 	}
 
+	// Disk before memory, which is the order condor_submit reaches them
+	// in: SetRequestResources walks the submit macro set, and that table
+	// is kept sorted, so request_disk is seen before request_memory
+	// whatever order the file writes them in. The fallback pass for
+	// keywords the file does not name has them in that relative order
+	// too. It shows in TransformOnEvict, which both can append to.
+	// Disk in KiB. Same rule with a KiB base: request_disk = 10GB is
+	// RequestDisk = 10485760.
+	if v, ok := sf.simpleKeywordParam("request_disk", "RequestDisk"); ok {
+		if err := sf.setRequestDisk(ad, v, true); err != nil {
+			return err
+		}
+	} else if v, ok := sf.requestDefault("request_disk"); ok {
+		// Same cluster-pass rule as memory: a later proc ad chains to
+		// proc 0's, so RequestDisk is already there and condor_submit
+		// reads neither the default nor retry_request_disk.
+		if err := sf.setRequestDisk(ad, v, proc == 0); err != nil {
+			return fmt.Errorf("JOB_DEFAULT_REQUESTDISK: %w", err)
+		}
+		if e, ok := ad.Lookup("RequestDisk"); ok {
+			sf.defaultDisk = e.String()
+		}
+	}
+
 	// Memory in MiB. A bare number is already in MiB; a K/M/G/T suffix
 	// scales from bytes, so request_memory = 4GB is RequestMemory = 4096.
 	// A VM job with no request_memory asks for the memory its VM is
@@ -2038,29 +2079,19 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd) error {
 	// size to grow from. The VM branch deliberately does not: its
 	// request is an expression, so there is nothing to grow.
 	if v, ok := sf.simpleKeywordParam("request_memory", "RequestMemory"); ok {
-		if err := sf.setRequestMemory(ad, v); err != nil {
+		if err := sf.setRequestMemory(ad, v, true); err != nil {
 			return err
 		}
 	} else if _, vm := sf.submitCommand("vm_memory"); vm && sf.universe == UniverseVM {
 		_ = setExprAttr(ad, "RequestMemory", "request_memory", "MY.JobVMMemory")
 	} else if v, ok := sf.requestDefault("request_memory"); ok {
-		if err := sf.setRequestMemory(ad, v); err != nil {
+		// The configured default reaches the retry family on the first
+		// proc only. condor_submit chains every later proc's ad to proc
+		// 0's, so RequestMemory is already there and SetRequestMem takes
+		// its "we already have a value" branch, which reads neither the
+		// default nor the retry commands.
+		if err := sf.setRequestMemory(ad, v, proc == 0); err != nil {
 			return fmt.Errorf("JOB_DEFAULT_REQUESTMEMORY: %w", err)
-		}
-	}
-
-	// Disk in KiB. Same rule with a KiB base: request_disk = 10GB is
-	// RequestDisk = 10485760.
-	if v, ok := sf.simpleKeywordParam("request_disk", "RequestDisk"); ok {
-		if err := setRequestSize(ad, "RequestDisk", v, unitKiB); err != nil {
-			return err
-		}
-	} else if v, ok := sf.requestDefault("request_disk"); ok {
-		if err := setRequestSize(ad, "RequestDisk", v, unitKiB); err != nil {
-			return fmt.Errorf("JOB_DEFAULT_REQUESTDISK: %w", err)
-		}
-		if e, ok := ad.Lookup("RequestDisk"); ok {
-			sf.defaultDisk = e.String()
 		}
 	}
 
@@ -2196,7 +2227,7 @@ func (sf *SubmitFile) setCustomResourceRequests(ad *classad.ClassAd) error {
 			continue
 		}
 		attr := "Request" + name[len(requestKeywordPrefix):]
-		expr, err := classad.ParseExpr(strings.TrimSpace(value))
+		expr, err := classad.ParseExprOld(strings.TrimSpace(value))
 		if err != nil {
 			return fmt.Errorf("%s: %q is not a valid ClassAd expression: %w", name, value, err)
 		}
@@ -2229,7 +2260,7 @@ func (sf *SubmitFile) setRank(ad *classad.ClassAd) error {
 		_ = ad.Set("Rank", 0.0)
 		return nil
 	}
-	expr, err := classad.ParseExpr(rank)
+	expr, err := classad.ParseExprOld(rank)
 	if err != nil {
 		return fmt.Errorf("rank: %q is not a valid ClassAd expression: %w", rank, err)
 	}
@@ -2488,7 +2519,7 @@ func (sf *SubmitFile) setCustomAttributes(ad *classad.ClassAd) error {
 			value = "undefined"
 		}
 
-		expr, err := classad.ParseExpr(value)
+		expr, err := classad.ParseExprOld(value)
 		if err != nil {
 			return fmt.Errorf("custom attribute %s: %q is not a valid ClassAd expression: %w", attrName, value, err)
 		}
@@ -2718,7 +2749,7 @@ func setSizeAttr(ad *classad.ClassAd, attr, raw string, base int64) error {
 		_ = ad.Set(attr, n)
 		return nil
 	}
-	expr, err := classad.ParseExpr(raw)
+	expr, err := classad.ParseExprOld(raw)
 	if err != nil {
 		return fmt.Errorf("%s: %q is neither a size nor a valid expression: %w", attr, raw, err)
 	}
@@ -2741,7 +2772,7 @@ func setCountAttr(ad *classad.ClassAd, attr, raw string) error {
 		_ = ad.Set(attr, n)
 		return nil
 	}
-	expr, err := classad.ParseExpr(raw)
+	expr, err := classad.ParseExprOld(raw)
 	if err != nil {
 		return fmt.Errorf("%s: %q is neither an integer nor a valid expression: %w", attr, raw, err)
 	}
@@ -3880,7 +3911,7 @@ func (sf *SubmitFile) setCronAndDeferral(ad *classad.ClassAd) error {
 // be a non-negative integer. A non-literal expression is stored unchecked,
 // since only the starter can evaluate it.
 func setDeferralExpr(ad *classad.ClassAd, attr, command, value string) error {
-	expr, err := classad.ParseExpr(value)
+	expr, err := classad.ParseExprOld(value)
 	if err != nil {
 		return fmt.Errorf("%s = %s is invalid, must eval to a non-negative integer", command, value)
 	}
@@ -4023,7 +4054,7 @@ func (sf *SubmitFile) setJobRetries(ad *classad.ClassAd) error {
 func foldRetryUntil(value string) (string, error) {
 	invalid := fmt.Errorf("retry_until = %s is invalid, it must be an integer or boolean expression", value)
 
-	expr, err := classad.ParseExpr(value)
+	expr, err := classad.ParseExprOld(value)
 	if err != nil {
 		return "", invalid
 	}
@@ -4052,7 +4083,7 @@ func foldRetryUntil(value string) (string, error) {
 // them anywhere else would change the expression TREE (`a || (b || c)` rather
 // than `(a || b) || c`) even though the value is the same.
 func wrapExprForOr(value string) (string, error) {
-	expr, err := classad.ParseExpr(value)
+	expr, err := classad.ParseExprOld(value)
 	if err != nil {
 		return "", err
 	}
@@ -4103,7 +4134,7 @@ func evalLongParam(value string) (int64, bool) {
 		// n already holds the saturated value.
 		return n, true
 	}
-	expr, perr := classad.ParseExpr(s)
+	expr, perr := classad.ParseExprOld(s)
 	if perr != nil {
 		return 0, false
 	}
@@ -4334,6 +4365,7 @@ func namesIdentifier(expr, name string) bool {
 // does: `+TransferInput = "http://..."` names a URL the job will fetch
 // just as much as transfer_input_files does.
 func (sf *SubmitFile) setTransferPluginMethods(ad *classad.ClassAd) {
+	sf.wantTransferMethods = nil
 	if !sf.transferPluginGate(ad) {
 		return
 	}
@@ -4360,13 +4392,19 @@ func (sf *SubmitFile) setTransferPluginMethods(ad *classad.ClassAd) {
 	// set is case-insensitive and keeps the first spelling it saw.
 	var wanted []string
 	seen := map[string]bool{}
-	add := func(s string) {
-		scheme, ok := submitURLScheme(s)
-		if !ok || supplied[strings.ToLower(scheme)] || seen[strings.ToLower(scheme)] {
+	addMethod := func(method string) {
+		if supplied[strings.ToLower(method)] || seen[strings.ToLower(method)] {
 			return
 		}
-		seen[strings.ToLower(scheme)] = true
-		wanted = append(wanted, scheme)
+		seen[strings.ToLower(method)] = true
+		wanted = append(wanted, method)
+	}
+	add := func(s string) {
+		scheme, ok := submitURLScheme(s)
+		if !ok {
+			return
+		}
+		addMethod(scheme)
 	}
 
 	if files, ok := ad.EvaluateAttrString("TransferInput"); ok {
@@ -4374,6 +4412,23 @@ func (sf *SubmitFile) setTransferPluginMethods(ad *classad.ClassAd) {
 			add(f)
 		}
 	}
+
+	// The container image's own source, which is NOT a URL the loop above
+	// sees: a common-catalog image never reaches TransferInput at all, and
+	// a transferred one is in there under the full path it was found at.
+	// The four sources that need no plugin are left out -- cedar is
+	// HTCondor's own transfer, docker and oras are pulled by the runtime
+	// on the execute node, and local means the image is already there.
+	if sf.behavior.ContainerSourceIsATransferMethod {
+		if src, ok := ad.EvaluateAttrString("ContainerImageSource"); ok {
+			switch strings.ToLower(src) {
+			case "cedar", "docker", "local", "oras":
+			default:
+				addMethod(src)
+			}
+		}
+	}
+
 	if dest, ok := ad.EvaluateAttrString("OutputDestination"); ok {
 		add(dest)
 	}
@@ -4385,13 +4440,26 @@ func (sf *SubmitFile) setTransferPluginMethods(ad *classad.ClassAd) {
 		}
 	}
 
-	if len(wanted) == 0 {
-		return
-	}
 	sort.Slice(wanted, func(i, j int) bool {
 		return strings.ToLower(wanted[i]) < strings.ToLower(wanted[j])
 	})
-	_ = ad.Set("WantTransferPluginMethods", strings.Join(wanted, ","))
+	sf.wantTransferMethods = wanted
+
+	// condor_submit joins the set by appending a comma only when it
+	// already has something, so a method whose name is EMPTY -- which is
+	// what a container_image of "x:" leaves behind -- contributes nothing
+	// to the attribute even though it still gets a Requirements clause of
+	// its own. The attribute is written only when the join is non-empty.
+	var attr string
+	for _, m := range wanted {
+		if attr != "" {
+			attr += ","
+		}
+		attr += m
+	}
+	if attr != "" {
+		_ = ad.Set("WantTransferPluginMethods", attr)
+	}
 }
 
 // submitURLScheme mirrors IsUrl() and getURLType(url, true) from
