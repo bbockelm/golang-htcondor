@@ -19,6 +19,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/bbockelm/golang-htcondor/webapi/appolicy"
+	"github.com/bbockelm/golang-htcondor/webapi/dagman"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/interactive"
 	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
@@ -131,17 +132,16 @@ type Server struct {
 	// dagmanEnv is extra environment for the DAGMan manager job. See
 	// Config.DagmanEnvironment.
 	dagmanEnv map[string]string
-	// dagmanLayoutOnce memoises what the schedd's own configuration says
-	// about its DAGMan installation, so a workflow submission costs at
-	// most one extra DC_CONFIG_VAL round trip per process. It is never
-	// refreshed: an access point that moves its binaries is restarting
-	// its daemons anyway. See Server.dagmanLayout.
+	// dagmanLayouts memoises what each access point's own configuration
+	// says about its DAGMan installation, so a workflow submission costs
+	// at most one extra DC_CONFIG_VAL round trip per AP per process. It
+	// is never refreshed: an access point that moves its binaries is
+	// restarting its daemons anyway. See Server.dagmanLayout.
 	//
 	// Kept per access point: a multi-AP server's DAGMan jobs run on the
 	// AP they are submitted to, whose BIN may differ from any other's.
 	// The key is the routed AP, "" with one schedd.
-	dagmanLayoutMu sync.Mutex
-	dagmanLayouts  map[string]*dagmanLayoutEntry
+	dagmanLayouts dagman.LayoutCache
 	// apPolicy holds each access point's policy as its schedd reports it:
 	// what get_access_point_policy renders, and where every submission
 	// takes its JOB_DEFAULT_REQUEST* values from, so that the two agree.
@@ -158,8 +158,8 @@ type Server struct {
 	policySourceFn func(context.Context) (appolicy.ConfigSource, string)
 	// dagmanLayoutFn replaces that discovery, so the precedence between
 	// configuration, discovery and the package default can be tested
-	// without a schedd. nil uses discoverDagmanLayout.
-	dagmanLayoutFn func(context.Context) (string, bool)
+	// without a schedd. nil asks the schedd (dagman.DiscoverLayout).
+	dagmanLayoutFn func(context.Context) dagman.Layout
 	// dbClientFn replaces dialing the mirror through dbMirror, so the
 	// htcondordb tools can be tested against an in-process dbrpc server
 	// with production's table kinds. nil dials through dbMirror.
@@ -254,10 +254,29 @@ func (s *Server) submitRemote(ctx context.Context, submitFile string) (int, []*c
 	if err != nil {
 		return 0, nil, err
 	}
+	return s.submitApplied(ctx, applied)
+}
+
+// submitApplied is submitRemote for a submit file site policy has
+// ALREADY been applied to.
+//
+// It exists for workflows. dagman.Prepare applies the policy itself, so
+// that a dry run can show the submit file that would really be sent, and
+// so that the manager job and the node descriptions are policed in one
+// place. Handing that file to submitRemote would apply the policy a
+// SECOND time, and that is not merely redundant: Policy.Apply checks the
+// file first, the first pass left the overrides block's own custom
+// attributes in it, and the second pass refuses the submission with
+// "this access point's site policy sets that for every job".
+//
+// It is the inner half of the one door rather than a second door: the
+// credential bootstrap that submitRemote exists to guarantee is here,
+// not above it, so neither path can skip it.
+func (s *Server) submitApplied(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
 	s.ensureCredentials(ctx)
 	// scheddFor: the one schedd, or in multi-AP mode the AP the call
 	// was assigned and routed to.
-	return s.scheddFor(ctx).SubmitRemote(s.withSubmitDefaults(ctx), applied)
+	return s.scheddFor(ctx).SubmitRemote(s.withSubmitDefaults(ctx), submitFile)
 }
 
 // Config holds server configuration

@@ -4,50 +4,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
-	"path"
-	"regexp"
-	"sort"
 	"strings"
-	"sync"
-	"testing/fstest"
-	"unicode"
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/dagman"
 	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
-	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
 )
 
 // A DAGMan workflow submitted from here is an ordinary scheduler-universe
-// job whose spooled sandbox happens to contain a graph.
+// job whose spooled sandbox happens to contain a graph. How that works,
+// and why a workflow's sandbox can never be added to afterwards, is in
+// webapi/dagman/prepare.go -- which is also where everything between
+// "the caller handed us a DAG" and "the schedd has a submit file and a
+// sandbox" now lives, because the REST API submits workflows too and the
+// two surfaces must not drift.
 //
-// The mechanism is worth stating once, because nothing about it is
-// obvious from the tool's surface. SubmitRemote commits the job HELD with
-// HoldReasonCode 16, which is what makes the schedd rewrite the job ad
-// for spooling: Iwd becomes the job's SPOOL directory and the file lists
-// collapse to basenames. condor_dagman itself is exempt from that rewrite
-// because transfer_executable is false, so it keeps its absolute path
-// while the workflow lands in the directory it will run in. DAGMan then
-// finds the .dag in its working directory, submits node jobs from there,
-// and those node jobs inherit the same Iwd -- which is why a node's own
-// input files have to be staged with the DAG rather than with the node.
-//
-// The second thing worth stating: a file that is not in the job ad's
-// TransferInput is SKIPPED at spool time, not rejected. So the input list
-// is computed from the parsed DAG rather than asked for, and a file the
-// caller sends that the DAG never mentions is reported back as a probable
-// typo instead of vanishing.
-//
-// The third: the spool is written ONCE. SpoolJobFilesFromFS stats every
-// name in TransferInput and fails on the first one missing, and the
-// transfer's completion is what releases the hold -- after which the
-// schedd refuses a second spool for the same job. There is therefore no
-// "upload the big file afterwards" path for a workflow, which is why
-// bulk data has to arrive by URL at the execute node instead.
+// What is left here is the MCP tool: the schema a model reads, the
+// argument coercion a model needs, and the prose the result is rendered
+// as.
 
 // submitDagDescription is what the model reads before it calls.
 //
@@ -155,62 +131,34 @@ func dagTools() []Tool {
 }
 
 // toolSubmitDag submits a DAGMan workflow.
+//
+// It is argument coercion, one call to dagman.Prepare, and the submit
+// plus spool pair. Everything a workflow is checked for lives in
+// Prepare, so the REST endpoint checks it the same way.
 func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	dagText := stringArg(args, "dag")
-	if strings.TrimSpace(dagText) == "" {
-		return nil, fmt.Errorf("dag is required: the contents of a DAG description file")
-	}
-	dagName := strings.TrimSpace(stringArg(args, "dag_name"))
-	if dagName == "" {
-		dagName = "workflow.dag"
-	}
-	if strings.ContainsAny(dagName, `/\`) {
-		return nil, fmt.Errorf("dag_name %q must be a bare file name: a spooled sandbox is one flat directory", dagName)
-	}
-	if err := checkDagNameLexes(dagName); err != nil {
-		return nil, err
-	}
-
 	files, err := stringMapArg(args, "files")
 	if err != nil {
 		return nil, err
 	}
-	for name := range files {
-		if strings.ContainsAny(name, `/\`) {
-			return nil, fmt.Errorf("file %q: names must be bare, with no directories -- "+
-				"the schedd flattens a spooled sandbox to basenames in one directory", name)
-		}
-		if name == dagName {
-			return nil, fmt.Errorf("file %q collides with dag_name; pass the DAG description as `dag`, not in `files`", name)
-		}
-	}
-	if err := checkDagSubmissionSize(dagText, files); err != nil {
-		return nil, err
-	}
-
-	// The analysis reads what the CALLER wrote. Site policy is spliced
-	// into the text that gets staged (below), but a finding has to point
-	// at a line the caller can see.
-	report := dagman.Analyze(dagman.Input{
-		DagName: dagName,
-		Dag:     dagText,
-		Files:   files,
-		// Nothing can be added to a workflow's spool after submission,
-		// so there is no set of names to promise for later.
-		Declared: nil,
+	layout := s.dagmanLayout(ctx)
+	prep, err := dagman.Prepare(dagman.Submission{
+		DagName:    strings.TrimSpace(stringArg(args, "dag_name")),
+		Dag:        stringArg(args, "dag"),
+		Files:      files,
+		BatchName:  stringArg(args, "batch_name"),
+		MaxIdle:    intArg(args, "max_idle", 0),
+		MaxJobs:    intArg(args, "max_jobs", 0),
+		MaxPre:     intArg(args, "max_pre", 0),
+		MaxPost:    intArg(args, "max_post", 0),
+		Append:     stringArg(args, "append"),
+		Instrument: instrumentRequested(args),
+		MaxBytes:   maxDagSubmissionBytes,
+		DagmanPath: s.dagmanPath,
+		Layout:     layout,
+		ExtraEnv:   s.dagmanEnv,
+		Policy:     s.submitPolicy,
 	})
-	parsed := dagman.Parse(dagText)
-	notes := append(findingStrings(report), lintNodeDescriptions(parsed, files)...)
-
-	submitFile, err := s.dagmanSubmitFile(ctx, dagName, parsed, report, args)
 	if err != nil {
-		return nil, err
-	}
-	appliedSubmitFile, err := s.submitPolicy.Apply(submitFile)
-	if err != nil {
-		return nil, fmt.Errorf("the DAGMan job: %w", err)
-	}
-	if err := s.checkNodePolicy(parsed, files); err != nil {
 		return nil, err
 	}
 
@@ -218,63 +166,22 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 		// A dry run reports rather than refuses, fatal findings
 		// included: the caller asked what is wrong with this workflow,
 		// and answering with one error hides the other four.
-		return dagDryRunResult(dagName, appliedSubmitFile, report, notes), nil
+		return dagDryRunResult(prep), nil
 	}
-	if report.Fatal() {
+	if prep.Report.Fatal() {
 		return nil, fmt.Errorf("this workflow cannot start:\n  - %s",
-			strings.Join(report.Errors(), "\n  - "))
-	}
-
-	// The staged DAG is instrumented: two commands appended so DAGMan
-	// writes its own structure and per-node status into the spool, which
-	// is the only way to read either back out of a spooled workflow (see
-	// dagman.Instrument). The analysis above ran on the CALLER's text, so
-	// every finding still points at a line they wrote.
-	//
-	// instrument=false is the escape hatch, and it exists because the
-	// NODE_STATUS_FILE half can kill a workflow that would otherwise run:
-	// Dag::DumpNodeStatus calls check_warning_strictness(DAG_STRICT_1)
-	// when the write fails (dag.cpp:2435-2441), and DAGMAN_USE_STRICT
-	// defaults to 1, so a full or read-only spool aborts the DAG instead
-	// of merely degrading it. DumpDotFile only warns.
-	instrumentedDag := s.policyForInlineDescriptions(dagText)
-	var instr dagman.Instrumentation
-	if instrumentRequested(args) {
-		instrumentedDag, instr = dagman.Instrument(instrumentedDag, dagName, files)
-	} else {
-		instr.Skipped = "instrument=false: nothing was appended to the DAG, so its structure and " +
-			"per-node status cannot be read while it runs."
-	}
-	if instr.Skipped != "" {
-		notes = append(notes, instr.Skipped)
-	}
-	staged := fstest.MapFS{
-		// Site submit policy reaches the node jobs only here. DAGMan
-		// submits those itself, on the access point, long after this
-		// call returns, so the descriptions we are handed now are the
-		// last chance -- inline blocks in the DAG included, which is the
-		// shape this tool recommends.
-		dagName: &fstest.MapFile{Data: []byte(instrumentedDag), Mode: 0o644},
-	}
-	execSet := executableStagedNames(parsed, files)
-	for name, body := range files {
-		data, err := s.policyForStagedFile(name, body)
-		if err != nil {
-			return nil, fmt.Errorf("file %q: %w", name, err)
-		}
-		staged[name] = &fstest.MapFile{
-			Data: []byte(data),
-			Mode: stagedMode(name, execSet),
-		}
+			strings.Join(prep.Report.Errors(), "\n  - "))
 	}
 
 	// The routed AP in multi-AP mode: the spool goes where the job went.
 	schedd := s.scheddFor(ctx)
-	clusterID, procAds, err := s.submitRemote(ctx, submitFile)
+	// submitApplied, not submitRemote: Prepare already applied the site's
+	// submit policy to this file, and applying it twice is refused.
+	clusterID, procAds, err := s.submitApplied(ctx, prep.SubmitFile)
 	if err != nil {
 		return nil, fmt.Errorf("submitting the DAGMan job failed: %w", err)
 	}
-	if err := schedd.SpoolJobFilesFromFS(ctx, procAds, staged); err != nil {
+	if err := schedd.SpoolJobFilesFromFS(ctx, procAds, prep.FS()); err != nil {
 		jobID := fmt.Sprintf("%d.0", clusterID)
 		res, rmErr := schedd.RemoveJobsByID(ctx, []string{jobID}, "spooling the workflow failed")
 		removed := rmErr == nil && res != nil && res.Success > 0
@@ -285,287 +192,11 @@ func (s *Server) toolSubmitDag(ctx context.Context, args map[string]interface{})
 		return nil, errors.New(spoolFailureMessage(clusterID, removed, err))
 	}
 
+	notes := prep.Notes
 	if note := s.checkOAuthServicesNeeded(ctx, clusterID); note != "" {
 		notes = append(notes, strings.TrimSpace(note))
 	}
-	return dagSubmitResult(clusterID, dagName, report, notes, instr), nil
-}
-
-// dagmanSubmitFile builds the manager job's submit file, filling in what
-// the access point's own configuration says about its DAGMan
-// installation.
-func (s *Server) dagmanSubmitFile(ctx context.Context, dagName string,
-	parsed *dagman.DAG, report *dagman.Report, args map[string]interface{}) (string, error) {
-	binDir, disablePort := s.dagmanLayout(ctx)
-	return dagman.SubmitFile(dagman.SubmitOptions{
-		DagName: dagName,
-		// Explicit configuration wins; otherwise the schedd's own BIN
-		// decides, and only then the package default.
-		DagmanPath:  s.dagmanPath,
-		BinDir:      binDir,
-		DisablePort: disablePort,
-		// Deliberately empty: -CsdVersion describes the condor_submit
-		// that wrote the file, and this server is not one. DAGMan uses
-		// its own version when the argument is absent, which is the
-		// only version that is true of the access point.
-		CondorVersion: "",
-		ConfigFile:    soleConfigFile(parsed),
-		InputFiles:    report.Required,
-		BatchName:     stringArg(args, "batch_name"),
-		MaxIdle:       intArg(args, "max_idle", 0),
-		MaxJobs:       intArg(args, "max_jobs", 0),
-		MaxPre:        intArg(args, "max_pre", 0),
-		MaxPost:       intArg(args, "max_post", 0),
-		// Straight from the analysis rather than from a second parse: the
-		// report already dropped the attributes this tool owns and told
-		// the caller which ones those were, and re-deriving them here
-		// would be a second answer to the same question.
-		JobAttrs: report.JobAttrs,
-		EnvSet:   report.EnvSet,
-		ExtraEnv: s.dagmanEnv,
-		Append:   stringArg(args, "append"),
-	})
-}
-
-// soleConfigFile returns the DAG's CONFIG file when it names exactly
-// one. DAGMan reads it through _CONDOR_DAGMAN_CONFIG_FILE rather than
-// from the DAG, because the -Config argument and the DAG's own CONFIG
-// command are mutually exclusive; more than one CONFIG is a workflow
-// that already disagrees with itself, and guessing which to honour would
-// be worse than letting DAGMan report it.
-func soleConfigFile(parsed *dagman.DAG) string {
-	if parsed == nil || len(parsed.Configs) != 1 {
-		return ""
-	}
-	return parsed.Configs[0].Path
-}
-
-// checkDagSubmissionSize refuses a workflow whose inline bytes are past
-// what this path is for. Everything here is copied into a job ad's spool
-// through one MCP call, so the ceiling is the conversation's, not the
-// schedd's.
-func checkDagSubmissionSize(dagText string, files map[string]string) error {
-	total := len(dagText)
-	for _, body := range files {
-		total += len(body)
-	}
-	if total <= maxDagSubmissionBytes {
-		return nil
-	}
-	return fmt.Errorf("this workflow is %d bytes of dag + files, over the %d byte limit for one submit_dag call. "+
-		"Only the workflow's own description belongs here -- the DAG, the node submit descriptions and the "+
-		"PRE/POST scripts. Bulk data goes to the execute machines directly: put HTTP/HTTPS/OSDF URLs in the "+
-		"node jobs' transfer_input_files instead of staging the bytes through this call",
-		total, maxDagSubmissionBytes)
-}
-
-// stagedMode makes scripts executable. A PRE/POST script spooled 0644
-// fails with EACCES the moment DAGMan tries to run it, and the error
-// surfaces as a node failure with no obvious cause.
-//
-// exec is the set of staged names the DAG itself runs, computed from the
-// parse. The extension test that remains is a fallback for a file the
-// parse could not attribute -- a script named only in a node's
-// arguments, say -- and is why "setup" with no extension used to arrive
-// unrunnable.
-func stagedMode(name string, exec map[string]bool) fs.FileMode {
-	if exec[name] {
-		return 0o755
-	}
-	if strings.HasSuffix(name, ".sh") || strings.HasSuffix(name, ".py") || strings.HasSuffix(name, ".pl") {
-		return 0o755
-	}
-	return 0o644
-}
-
-// executableStagedNames is every staged file the workflow will try to
-// execute: a PRE/POST/HOLD script, or a submit description's executable
-// naming a file staged alongside it.
-func executableStagedNames(parsed *dagman.DAG, files map[string]string) map[string]bool {
-	out := map[string]bool{}
-	if parsed == nil {
-		return out
-	}
-	mark := func(name string) {
-		// "./setup" and "setup" are the same staged file; a DAG written
-		// either way has to arrive runnable.
-		name = strings.TrimPrefix(strings.TrimSpace(name), "./")
-		if name == "" || strings.ContainsAny(name, `/\`) {
-			return
-		}
-		if _, ok := files[name]; ok {
-			out[name] = true
-		}
-	}
-	for _, sc := range parsed.Scripts {
-		mark(sc.Executable)
-	}
-	for _, d := range namedSubmitDescriptions(parsed, files) {
-		mark(submitExecutable(d.body))
-	}
-	return out
-}
-
-// submitDescription is one submit description this call was handed,
-// named so a diagnostic about it can say which one.
-type submitDescription struct {
-	name string
-	body string
-}
-
-// namedSubmitDescriptions collects every submit description in the
-// submission: the inline node bodies, the named SUBMIT-DESCRIPTION
-// blocks, and the staged .sub files.
-func namedSubmitDescriptions(parsed *dagman.DAG, files map[string]string) []submitDescription {
-	var out []submitDescription
-	if parsed != nil {
-		for _, n := range parsed.Nodes {
-			if n.Inline && strings.TrimSpace(n.InlineBody) != "" {
-				out = append(out, submitDescription{name: "node " + n.Name, body: n.InlineBody})
-			}
-		}
-		names := make([]string, 0, len(parsed.Descriptions))
-		for k := range parsed.Descriptions {
-			names = append(names, k)
-		}
-		sort.Strings(names)
-		for _, k := range names {
-			d := parsed.Descriptions[k]
-			out = append(out, submitDescription{name: "SUBMIT-DESCRIPTION " + d.Name, body: d.Body})
-		}
-	}
-	staged := make([]string, 0, len(files))
-	for name := range files {
-		if strings.HasSuffix(name, ".sub") {
-			staged = append(staged, name)
-		}
-	}
-	sort.Strings(staged)
-	for _, name := range staged {
-		out = append(out, submitDescription{name: name, body: files[name]})
-	}
-	return out
-}
-
-// lintNodeDescriptions runs the submit_job lint over every node
-// description in the workflow.
-//
-// The node jobs are the ones that do the work, and until now nothing
-// looked at them: submit_job refuses `executable = /bin/true` with no
-// transfer_executable, while the same description inside a DAG reached
-// the queue and held every node. DAGMan submits those jobs hours later,
-// so the hold arrives with nothing to connect it to this call.
-//
-// A fatal finding is reported as a warning rather than refusing the
-// workflow: site policy is spliced into these descriptions after the
-// lint runs and may well set the very directive the lint wants, and a
-// remote submission that refused a description the schedd would have
-// accepted is worse than one that says so and submits.
-func lintNodeDescriptions(parsed *dagman.DAG, files map[string]string) []string {
-	var notes []string
-	prelude := dagSuppliedMacros(parsed)
-	for _, d := range namedSubmitDescriptions(parsed, files) {
-		insp := submitlint.Inspect(prelude + submitBodyForLint(d.body))
-		if insp.Fatal != nil {
-			notes = append(notes, fmt.Sprintf("warning: %s: %s", d.name, insp.Fatal.Error()))
-		}
-		for _, w := range insp.Warnings {
-			notes = append(notes, fmt.Sprintf("warning: %s: %s", d.name, w))
-		}
-	}
-	if oauthNodes := oauthServiceNodes(parsed, files); len(oauthNodes) > 0 {
-		notes = append([]string{fmt.Sprintf("note: %s ask for OAuth credentials (use_oauth_services). "+
-			"DAGMan submits node jobs itself, long after this call, so nothing here can check them: the "+
-			"credentials must already be stored when the node runs, or that node holds. Check them now with "+
-			"get_credential_status and store what is missing with store_service_credential",
-			strings.Join(oauthNodes, ", "))}, notes...)
-	}
-	return notes
-}
-
-// dagVarAssignment matches the left-hand side of one VARS assignment,
-// `Name="value"`.
-var dagVarAssignment = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)[ \t]*=`)
-
-// dagmanSuppliedMacros are the submit macros DAGMan defines for every
-// node it submits (dagman_submit.cpp), which a node description may
-// reference without defining.
-var dagmanSuppliedMacros = []string{
-	"JOB", "RETRY", "MAX_RETRIES", "DAG_STATUS", "FAILED_COUNT",
-	"DAGManJobId", "DAG_PARENT_NAMES", "NODE_NAME",
-}
-
-// dagSuppliedMacros renders, as submit-file assignments, every macro a
-// node description may use without defining: the DAG's own VARS and
-// DAGMan's built-ins.
-//
-// Without them the lint's undefined-macro check fires on $(NodeName) in
-// the standard VARS idiom -- a warning on the most ordinary DAG there
-// is, which teaches a caller to ignore the notes.
-func dagSuppliedMacros(parsed *dagman.DAG) string {
-	names := map[string]bool{}
-	if parsed != nil {
-		for _, vals := range parsed.Vars {
-			for _, v := range vals {
-				for _, m := range dagVarAssignment.FindAllStringSubmatch(v, -1) {
-					names[m[1]] = true
-				}
-			}
-		}
-	}
-	for _, n := range dagmanSuppliedMacros {
-		names[n] = true
-	}
-	sorted := make([]string, 0, len(names))
-	for n := range names {
-		sorted = append(sorted, n)
-	}
-	sort.Strings(sorted)
-	var b strings.Builder
-	for _, n := range sorted {
-		fmt.Fprintf(&b, "%s = \n", n)
-	}
-	return b.String()
-}
-
-// submitBodyForLint makes an inline description parseable on its own. An
-// inline body has no queue statement -- DAGMan supplies it -- and
-// without one the submit parser produces no job ad and the lint sees
-// nothing at all.
-func submitBodyForLint(body string) string {
-	for _, line := range strings.Split(body, "\n") {
-		if f := strings.Fields(line); len(f) > 0 && strings.EqualFold(f[0], "queue") {
-			return body
-		}
-	}
-	return body + "\nqueue\n"
-}
-
-// submitExecutable returns a submit description's executable, which is
-// the last assignment of it: submit commands are macro assignments and
-// the last one before queue is the effective one.
-var submitExecutableLine = regexp.MustCompile(`(?im)^[ \t]*executable[ \t]*=[ \t]*(.*?)[ \t]*$`)
-
-func submitExecutable(body string) string {
-	m := submitExecutableLine.FindAllStringSubmatch(body, -1)
-	if len(m) == 0 {
-		return ""
-	}
-	return strings.Trim(m[len(m)-1][1], `"'`)
-}
-
-// useOAuthServices matches the submit command that makes a job wait for
-// a credential.
-var useOAuthServices = regexp.MustCompile(`(?im)^[ \t]*use_oauth_services[ \t]*=`)
-
-func oauthServiceNodes(parsed *dagman.DAG, files map[string]string) []string {
-	var out []string
-	for _, d := range namedSubmitDescriptions(parsed, files) {
-		if useOAuthServices.MatchString(d.body) {
-			out = append(out, d.name)
-		}
-	}
-	return out
+	return dagSubmitResult(clusterID, prep, notes), nil
 }
 
 // spoolFailureMessage explains a workflow that reached the queue and then
@@ -584,162 +215,22 @@ func spoolFailureMessage(clusterID int, removed bool, cause error) string {
 		"held and unable to run; remove it with remove_job.", clusterID)
 }
 
-// policyForStagedFile applies the site's submit policy to a staged node
-// submit description, and leaves everything else alone.
-//
-// Deciding what is a submit description by extension is a heuristic, and
-// a wrong guess would splice submit-file text into a shell script. So the
-// test is deliberately narrow: the name ends in .sub, which is the
-// convention DAGMan itself assumes (DAG_SUBMIT_FILE_SUFFIX).
-func (s *Server) policyForStagedFile(name, body string) (string, error) {
-	if s.submitPolicy.IsZero() || !strings.HasSuffix(name, ".sub") {
-		return body, nil
-	}
-	return s.submitPolicy.Apply(body)
-}
-
-// checkNodePolicy refuses a workflow whose node descriptions set, as a
-// custom attribute, a job attribute the site's overrides control. The
-// inline descriptions get the overrides from policyForInlineDescriptions,
-// which splices rather than calling Apply, so they are checked here; the
-// staged .sub files are checked here too so the refusal names the first
-// offending description whichever kind it is.
-func (s *Server) checkNodePolicy(parsed *dagman.DAG, files map[string]string) error {
-	if s.submitPolicy.IsZero() {
-		return nil
-	}
-	for _, d := range namedSubmitDescriptions(parsed, files) {
-		if err := s.submitPolicy.Check(d.body); err != nil {
-			return fmt.Errorf("%s: %w", d.name, err)
-		}
-	}
-	return nil
-}
-
-// policyForInlineDescriptions splices the site's submit policy into every
-// inline submit description in a DAG.
-//
-// Without this the tool's own recommended shape -- everything inline,
-// nothing to stage -- is the one shape site policy does not reach, since
-// policyForStagedFile only ever sees a separate .sub file.
-//
-// The insertion is by line rather than by parse, because the output has
-// to be the caller's DAG with lines added: reprinting a parsed graph
-// would silently drop every command the parser does not model. Defaults
-// go directly after the opening delimiter and overrides directly before
-// the closing one, which is the same last-assignment-wins rule
-// submitpolicy uses -- an inline body has no queue statement, so the end
-// of the block IS "before queue".
-func (s *Server) policyForInlineDescriptions(dagText string) string {
-	if s.submitPolicy.IsZero() {
-		return dagText
-	}
-	defaults := policyBlock(s.submitPolicy.Defaults)
-	overrides := policyBlock(s.submitPolicy.Overrides)
-	if len(defaults) == 0 && len(overrides) == 0 {
-		return dagText
-	}
-
-	lines := strings.Split(dagText, "\n")
-	out := make([]string, 0, len(lines)+len(defaults)+len(overrides))
-	end := ""
-	for i := 0; i < len(lines); i++ {
-		if end != "" {
-			if isInlineClose(lines[i], end) {
-				out = append(out, overrides...)
-				out = append(out, lines[i])
-				end = ""
-				continue
-			}
-			out = append(out, lines[i])
-			continue
-		}
-		// A DAG command may be continued with a trailing backslash, so
-		// the opening delimiter can sit several physical lines below the
-		// keyword. Emit them all, then decide from the joined form.
-		start := i
-		logical := trimContinuation(lines[i])
-		for isContinued(lines[i]) && i+1 < len(lines) {
-			i++
-			logical += " " + trimContinuation(lines[i])
-		}
-		out = append(out, lines[start:i+1]...)
-		if e, ok := inlineDescOpen(logical); ok {
-			end = e
-			out = append(out, defaults...)
-		}
-	}
-	return strings.Join(out, "\n")
-}
-
-// policyBlock renders one half of the policy as submit-file lines,
-// marked so someone reading the staged DAG can see where they came from.
-func policyBlock(content string) []string {
-	if strings.TrimSpace(content) == "" {
-		return nil
-	}
-	out := []string{"  # --- site submit policy (applied by the HTCondor API server) ---"}
-	for _, line := range strings.Split(strings.Trim(content, "\n"), "\n") {
-		out = append(out, "  "+strings.TrimRight(line, "\r"))
-	}
-	return append(out, "  # --- end site submit policy ---")
-}
-
-func isContinued(line string) bool {
-	return strings.HasSuffix(strings.TrimSpace(line), `\`)
-}
-
-func trimContinuation(line string) string {
-	return strings.TrimSuffix(strings.TrimSpace(line), `\`)
-}
-
-// inlineDescOpen reports whether a DAG command opens an inline submit
-// description, and what closes it. Mirrors get_inline_desc_end in
-// condor_dagman/parse.cpp: the description token is the third field of
-// JOB/FINAL/SERVICE/PROVISIONER and of SUBMIT-DESCRIPTION alike, "{"
-// closes with "}", and "@=tag" closes with "@tag".
-func inlineDescOpen(line string) (string, bool) {
-	fields := strings.Fields(line)
-	if len(fields) < 3 {
-		return "", false
-	}
-	switch strings.ToUpper(strings.ReplaceAll(fields[0], "-", "_")) {
-	case "JOB", "FINAL", "SERVICE", "PROVISIONER", "SUBMIT_DESCRIPTION":
-	default:
-		return "", false
-	}
-	switch tok := fields[2]; {
-	case strings.HasPrefix(tok, "{"):
-		return "}", true
-	case strings.HasPrefix(tok, "@="):
-		return "@" + tok[2:], true
-	}
-	return "", false
-}
-
-// isInlineClose reports whether a line closes an inline description.
-// DAGMan re-lexes whatever follows the delimiter as further node
-// options, so "} DIR sub" closes the block too.
-func isInlineClose(line, end string) bool {
-	t := strings.TrimSpace(line)
-	return t == end || strings.HasPrefix(t, end+" ") || strings.HasPrefix(t, end+"\t")
-}
-
-func dagDryRunResult(dagName, submitFile string, report *dagman.Report, notes []string) map[string]interface{} {
+func dagDryRunResult(prep *dagman.Prepared) map[string]interface{} {
+	report := prep.Report
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Dry run: nothing was submitted.\n\nDAG file: %s\n", dagName)
+	fmt.Fprintf(&sb, "Dry run: nothing was submitted.\n\nDAG file: %s\n", prep.DagName)
 	if report.Fatal() {
 		fmt.Fprintf(&sb, "\nThis workflow CANNOT be submitted as written:\n  - %s\n",
 			strings.Join(report.Errors(), "\n  - "))
 	}
-	writeDagNotes(&sb, report, notes)
-	fmt.Fprintf(&sb, "\nThe DAGMan manager job would be submitted as:\n\n%s", submitFile)
+	writeDagNotes(&sb, report, prep.Notes)
+	fmt.Fprintf(&sb, "\nThe DAGMan manager job would be submitted as:\n\n%s", prep.SubmitFile)
 	structured := map[string]interface{}{
 		"dry_run":     true,
-		"dag_name":    dagName,
-		"submit_file": submitFile,
+		"dag_name":    prep.DagName,
+		"submit_file": prep.SubmitFile,
 		"input_files": report.Required,
-		"notes":       notes,
+		"notes":       prep.Notes,
 		"fatal":       report.Fatal(),
 		"errors":      report.Errors(),
 		"deferred":    report.Deferred,
@@ -750,14 +241,15 @@ func dagDryRunResult(dagName, submitFile string, report *dagman.Report, notes []
 	}, structured)
 }
 
-func dagSubmitResult(clusterID int, dagName string, report *dagman.Report, notes []string,
-	instr dagman.Instrumentation) map[string]interface{} {
+func dagSubmitResult(clusterID int, prep *dagman.Prepared, notes []string) map[string]interface{} {
+	report := prep.Report
+	instr := prep.Instrumentation
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Submitted DAGMan workflow %s as cluster %d.\n", dagName, clusterID)
+	fmt.Fprintf(&sb, "Submitted DAGMan workflow %s as cluster %d.\n", prep.DagName, clusterID)
 	fmt.Fprintf(&sb, "Staged into the workflow's spool directory: %s\n", strings.Join(report.Required, ", "))
 	writeDagNotes(&sb, report, notes)
 	fmt.Fprintf(&sb, "\n%s\n", dagWaitAdvice(clusterID))
-	fmt.Fprintf(&sb, "%s\n", dagOutputAdvice(clusterID, dagName))
+	fmt.Fprintf(&sb, "%s\n", dagOutputAdvice(clusterID, prep.DagName))
 	fmt.Fprintf(&sb, "%s\n", dagNodeJobAdvice(clusterID))
 	fmt.Fprintf(&sb, "Removing job %d.0 removes the whole workflow, including node jobs already running.\n", clusterID)
 	switch {
@@ -776,7 +268,7 @@ func dagSubmitResult(clusterID int, dagName string, report *dagman.Report, notes
 	structured := map[string]interface{}{
 		"cluster_id":  clusterID,
 		"job_id":      fmt.Sprintf("%d.0", clusterID),
-		"dag_name":    dagName,
+		"dag_name":    prep.DagName,
 		"input_files": report.Required,
 		"notes":       notes,
 		"deferred":    report.Deferred,
@@ -817,7 +309,7 @@ func dagWaitAdvice(clusterID int) string {
 // manager's cluster id has nothing that matches them: DAGManJobId is the
 // only link, and it carries the manager's CLUSTER, not its job id.
 func dagNodeConstraint(cluster int) string {
-	return fmt.Sprintf("DAGManJobId == %d", cluster)
+	return dagman.NodeConstraint(cluster)
 }
 
 // dagNodeJobAdvice is how to look at the work itself rather than at the
@@ -848,10 +340,7 @@ func dagOutputAdvice(clusterID int, dagFile string) string {
 // sets _CONDOR_DAGMAN_LOG to the DAG name minus ".dag" plus
 // ".dagman.out". Empty in, placeholder out.
 func dagmanOutName(dagFile string) string {
-	if dagFile == "" {
-		return "<dag>.dagman.out"
-	}
-	return strings.TrimSuffix(dagFile, ".dag") + ".dagman.out"
+	return dagman.OutName(dagFile)
 }
 
 // dagRescueName is the rescue DAG DAGMan writes when nodes fail:
@@ -859,10 +348,7 @@ func dagmanOutName(dagFile string) string {
 // to the PRIMARY DAG FILE NAME -- "diamond.dag.rescue001", not
 // "diamond.rescue001".
 func dagRescueName(dagFile string) string {
-	if dagFile == "" {
-		return "<dag>.dag.rescue001"
-	}
-	return dagFile + ".rescue001"
+	return dagman.RescueName(dagFile)
 }
 
 // dagFileFromAd recovers the workflow's .dag file name from the manager
@@ -902,18 +388,6 @@ func writeDagNotes(sb *strings.Builder, report *dagman.Report, notes []string) {
 		fmt.Fprintf(sb, "\nExpected to be produced while the workflow runs: %s\n",
 			strings.Join(report.Deferred, ", "))
 	}
-}
-
-func findingStrings(report *dagman.Report) []string {
-	out := make([]string, 0, len(report.Findings))
-	for _, f := range report.Findings {
-		if f.Line > 0 {
-			out = append(out, fmt.Sprintf("%s (line %d): %s", f.Severity, f.Line, f.Message))
-		} else {
-			out = append(out, fmt.Sprintf("%s: %s", f.Severity, f.Message))
-		}
-	}
-	return out
 }
 
 // dagStatusNames maps DAG_Status to the enum in dagman_utils.h.
@@ -1178,133 +652,32 @@ func instrumentRequested(args map[string]interface{}) bool {
 	return true
 }
 
-// checkDagNameLexes refuses a DAG file name that DAGMan's own lexer
-// would not read back intact.
-//
-// dag_name becomes a file name in the spool AND an argument to the
-// commands instrumentation appends, and the DAG lexer
-// (src/condor_utils/dag_parser.cpp:30-77) splits on whitespace and
-// treats " and ' as quote characters. An unbalanced quote is a fatal
-// "Invalid quoting: no ending quote found"; a newline ends the command
-// and makes the rest an unknown one; a balanced pair parses but is
-// stripped, so DAGMan writes a file under a name nobody reported. A
-// control character in a spooled file name is a problem well beyond
-// instrumentation, so this is refused at the boundary rather than
-// mangled quietly.
-func checkDagNameLexes(dagName string) error {
-	for _, r := range dagName {
-		switch {
-		case r == '"' || r == '\'':
-			return fmt.Errorf("dag_name %q contains a quote character, which DAGMan's parser reads as "+
-				"quoting and which kills the workflow with a parse error; use only letters, digits, "+
-				"and . _ + -", dagName)
-		case unicode.IsSpace(r):
-			return fmt.Errorf("dag_name %q contains whitespace, which DAGMan's parser splits on; "+
-				"use only letters, digits, and . _ + -", dagName)
-		case r < 0x20 || r == 0x7f:
-			return fmt.Errorf("dag_name %q contains a control character; use only letters, digits, "+
-				"and . _ + -", dagName)
-		}
-	}
-	return nil
-}
-
 // dagmanLayout is what the access point's own configuration says about
-// its DAGMan installation: the directory its binaries are in, and
-// whether DAGMan is configured to run without a command port.
+// its DAGMan installation, asked of the SCHEDD once per access point.
 //
-// Both are asked of the SCHEDD, once, because both are properties of the
-// machine this server submits to and not of the machine it runs on --
-// which is exactly why HTTP_API_DAGMAN_PATH had to be configured by hand
-// before. DC_CONFIG_VAL is a READ-level command, so this needs no
-// privilege.
-//
-// Everything about it fails soft. An error, an unset knob, or an empty
-// value all mean "unknown", and unknown means the previous behaviour:
-// the package default path and a command port. An empty BIN in
-// particular must not become "/condor_dagman" -- the "Not defined" reply
-// daemon core sends is matched by content, and a reply that does not
-// match it exactly would otherwise be treated as a real directory.
-func (s *Server) dagmanLayout(ctx context.Context) (binDir string, disablePort bool) {
-	key := strings.ToLower(routedSchedd(ctx))
-	s.dagmanLayoutMu.Lock()
-	if s.dagmanLayouts == nil {
-		s.dagmanLayouts = map[string]*dagmanLayoutEntry{}
-	}
-	e, ok := s.dagmanLayouts[key]
-	if !ok {
-		e = &dagmanLayoutEntry{}
-		s.dagmanLayouts[key] = e
-	}
-	s.dagmanLayoutMu.Unlock()
-	e.once.Do(func() {
-		discover := s.dagmanLayoutFn
-		if discover == nil {
-			discover = s.discoverDagmanLayout
+// Asked of the schedd because both halves are properties of the machine
+// this server submits TO and not of the machine it runs on -- which is
+// exactly why HTTP_API_DAGMAN_PATH had to be configured by hand before.
+// Everything about it fails soft: an error, an unset knob or an empty
+// value all mean "unknown", and unknown means the package defaults.
+func (s *Server) dagmanLayout(ctx context.Context) dagman.Layout {
+	return s.dagmanLayouts.Get(ctx, routedSchedd(ctx), func(ctx context.Context) dagman.Layout {
+		if s.dagmanLayoutFn != nil {
+			return s.dagmanLayoutFn(ctx)
 		}
-		e.bin, e.noPort = discover(ctx)
-	})
-	return e.bin, e.noPort
-}
-
-// dagmanLayoutEntry is one access point's memoised DAGMan layout.
-type dagmanLayoutEntry struct {
-	once   sync.Once
-	bin    string
-	noPort bool
-}
-
-// discoverDagmanLayout asks the schedd -- the routed AP's in multi-AP
-// mode. Never fails a submission: a refusal here costs the defaults, not
-// the workflow.
-func (s *Server) discoverDagmanLayout(ctx context.Context) (string, bool) {
-	schedd := s.scheddFor(ctx)
-	if schedd == nil {
-		return "", false
-	}
-	binDir := s.scheddConfigVal(ctx, schedd, "BIN")
-	if binDir != "" && !path.IsAbs(binDir) {
-		// A relative BIN cannot be joined onto anything meaningful from
-		// here: this process is not in the access point's filesystem.
-		binDir = ""
-	}
-	disable := isConfigTrue(s.scheddConfigVal(ctx, schedd, "DAGMAN_DISABLE_PORT"))
-	if s.logger != nil {
-		s.logger.Debug(logging.DestinationMCP, "DAGMan layout discovered from the schedd",
-			"bin", binDir, "disable_port", disable)
-	}
-	return binDir, disable
-}
-
-// scheddConfigVal reads one knob, treating every kind of "no answer" the
-// same. daemon core reports an unset parameter as the literal string
-// "Not defined", which ConfigVal recognizes -- but a daemon that phrases
-// it differently would hand back that sentence as a value, so the prefix
-// is checked here too.
-func (s *Server) scheddConfigVal(ctx context.Context, schedd *htcondor.Schedd, name string) string {
-	value, ok, err := schedd.ConfigVal(ctx, name)
-	if err != nil {
+		// A nil *Schedd must not reach DiscoverLayout as an interface:
+		// a typed nil is not nil, and the method call would panic
+		// instead of falling back to the defaults.
+		schedd := s.scheddFor(ctx)
+		if schedd == nil {
+			return dagman.Layout{}
+		}
+		var debug func(string, ...any)
 		if s.logger != nil {
-			s.logger.Debug(logging.DestinationMCP, "could not read a config value from the schedd",
-				"knob", name, "error", err)
+			debug = func(msg string, args ...any) {
+				s.logger.Debug(logging.DestinationMCP, msg, args...)
+			}
 		}
-		return ""
-	}
-	if !ok {
-		return ""
-	}
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, "Not defined") {
-		return ""
-	}
-	return value
-}
-
-// isConfigTrue reads HTCondor's boolean spelling.
-func isConfigTrue(v string) bool {
-	switch strings.ToUpper(strings.TrimSpace(v)) {
-	case "TRUE", "T", "YES", "Y", "1":
-		return true
-	}
-	return false
+		return dagman.DiscoverLayout(ctx, schedd, debug)
+	})
 }

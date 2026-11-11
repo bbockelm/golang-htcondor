@@ -135,6 +135,15 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/jobs/epochs", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobEpochs))))
 	mux.Handle("/api/v1/jobs/transfers", cors(h.requireCondorScope(http.HandlerFunc(h.handleJobTransfers))))
 
+	// POST /api/v1/jobs/dag submits a DAGMan workflow: the graph, the
+	// node descriptions and everything the workflow will ever need, in
+	// ONE request, because a workflow's spooled sandbox is written once
+	// and can never be added to. Registered as its own exact pattern, in
+	// front of the /api/v1/jobs/ subtree, for the same reason
+	// /jobs/watch and /jobs/archive are: "dag" is not a job id, and the
+	// subtree's dispatcher would try to route it as one.
+	mux.Handle("/api/v1/jobs/dag", cors(h.requireCondorScope(http.HandlerFunc(h.handleSubmitDag))))
+
 	// Credential management endpoints (credd)
 	// Watch share URLs. Only the {id}/share form is served; watches
 	// themselves are registered through MCP.

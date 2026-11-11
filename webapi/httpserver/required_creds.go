@@ -290,11 +290,30 @@ func (s *Handler) submitJob(ctx context.Context, submitFile string) (int, []*cla
 	if err != nil {
 		return 0, nil, err
 	}
+	return s.submitApplied(ctx, applied)
+}
+
+// submitApplied is submitJob for a submit file site policy has ALREADY
+// been applied to.
+//
+// It exists for workflows. dagman.Prepare applies the policy itself, so
+// that a dry run can show the submit file that would really be sent and
+// so that the manager job and every node description are policed in one
+// place. Handing that file to submitJob would apply the policy a SECOND
+// time, and that is not merely redundant: Policy.Apply checks the file
+// first, the first pass left the overrides block's own custom attributes
+// in it, and the second pass refuses the submission with "this access
+// point's site policy sets that for every job".
+//
+// It is the inner half of the one door rather than a second door: the
+// credential bootstrap submitJob exists to guarantee is here, not above
+// it, so neither path can skip it.
+func (s *Handler) submitApplied(ctx context.Context, submitFile string) (int, []*classad.ClassAd, error) {
 	s.ensureRequiredCredentials(ctx)
 	// scheddFor: the one schedd, or in multi-AP mode the AP the
 	// submission was assigned and routed to.
 	schedd := s.scheddFor(ctx)
-	return schedd.SubmitRemote(s.withSubmitDefaults(ctx, schedd), applied)
+	return schedd.SubmitRemote(s.withSubmitDefaults(ctx, schedd), submitFile)
 }
 
 // withSubmitDefaults returns ctx carrying the JOB_DEFAULT_REQUEST* values

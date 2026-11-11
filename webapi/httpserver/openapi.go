@@ -315,6 +315,109 @@ const openAPISchema = `{
           }
         }
       },
+      "DagSubmitRequest": {
+        "type": "object",
+        "required": ["dag"],
+        "description": "A workflow, as JSON. The multipart/form-data form carries the same fields under the same names, one per form value, with the files as file parts instead of a map.",
+        "properties": {
+          "dag": {
+            "type": "string",
+            "description": "DAG description file contents (JOB, PARENT/CHILD, SCRIPT, RETRY, SUBMIT-DESCRIPTION, ...). Prefer inline SUBMIT-DESCRIPTION blocks, so the whole workflow is one self-contained file with nothing else to stage; one description serves every node of a stage, and VARS gives each node its own values. Node outputs land in the workflow's own directory, so a downstream node picks one up by name in transfer_input_files -- declare it in the producer's transfer_output_files so the pre-submit check can see who produces it."
+          },
+          "files": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": "Files the DAG references, as name -> contents: node submit files, PRE/POST scripts, small inputs. Names must be bare, with no directories: the spool directory is flat. This is the only chance to supply them -- nothing can be added to a workflow's spool after submission. Files named in a SCRIPT line, or as a node's executable, are staged executable; other files are not. Binary or large files cannot go here; use multipart/form-data."
+          },
+          "dag_name": {"type": "string", "description": "File name to write the DAG as in the spool (default workflow.dag). Bare, no directories, and no quotes or whitespace: DAGMan's own parser reads this name back."},
+          "batch_name": {"type": "string", "description": "JobBatchName for the workflow, as condor_q -batch shows it"},
+          "max_idle": {"type": "integer", "description": "Throttle: maximum idle node jobs"},
+          "max_jobs": {"type": "integer", "description": "Throttle: maximum node jobs submitted at once"},
+          "max_pre": {"type": "integer", "description": "Throttle: maximum concurrent PRE scripts"},
+          "max_post": {"type": "integer", "description": "Throttle: maximum concurrent POST scripts"},
+          "append": {"type": "string", "description": "Extra submit-file lines for the DAGMan manager job itself"},
+          "instrument": {
+            "type": "boolean",
+            "description": "Default true: append DOT and NODE_STATUS_FILE commands so the workflow's structure and per-node progress can be read while it runs, which is what GET /jobs/{jobId}/dag reads. Set false only if the workflow must run even when its spool cannot be written -- DAGMan ABORTS a DAG whose node status file cannot be written (DAGMAN_USE_STRICT defaults to 1), so on a full or read-only spool instrumentation turns a degraded run into a dead one. With it off there is no graph and no per-node state for this workflow."
+          },
+          "dry_run": {"type": "boolean", "description": "Parse and check the workflow, report what would be submitted, and submit nothing"}
+        }
+      },
+      "DagFinding": {
+        "type": "object",
+        "description": "One thing the pre-submit analysis noticed, about a line of the DAG as the caller wrote it (site policy is spliced into the staged copy, not into this).",
+        "properties": {
+          "severity": {"type": "string", "enum": ["error", "warning", "note"], "description": "error: DAGMan provably cannot start this workflow, and it was refused. warning: probably a mistake, but there are arrangements where it is not. note: worth knowing, not evidence of a mistake."},
+          "message": {"type": "string"},
+          "line": {"type": "integer", "description": "Line of the DAG, omitted when the finding is about the workflow as a whole"},
+          "source": {"type": "string", "description": "The INCLUDE'd or SPLICE'd file the line belongs to, omitted for the top-level DAG"}
+        }
+      },
+      "DagSubmitResponse": {
+        "type": "object",
+        "description": "A submitted workflow: the DAGMan manager job, and how to follow it. The workflow's node jobs are NOT in this cluster -- DAGMan submits each as its own -- so node_constraint and links.nodes are the only things that select them.",
+        "properties": {
+          "cluster_id": {"type": "integer", "description": "The DAGMan manager job's cluster"},
+          "job_id": {"type": "string", "description": "The manager job, cluster.proc; in multi-AP mode a complete id (cluster.proc@schedd). Removing it removes the whole workflow, including node jobs already running."},
+          "dag_name": {"type": "string", "description": "The name the DAG was staged under"},
+          "schedd": {"type": "string", "description": "Multi-AP mode only: the access point the workflow was submitted to"},
+          "assignment": {
+            "type": "object",
+            "description": "Multi-AP mode only: the caller's access point assignment the submission followed",
+            "properties": {
+              "schedd": {"type": "string"},
+              "alternates": {"type": "array", "items": {"type": "string"}},
+              "source": {"type": "string"},
+              "stale": {"type": "boolean"}
+            }
+          },
+          "input_files": {"type": "array", "items": {"type": "string"}, "description": "What was staged into the workflow's spool directory, which is also what the manager job declared. Nothing can be added to it."},
+          "deferred": {"type": "array", "items": {"type": "string"}, "description": "Files the DAG will read once it is running and that are not staged now -- a sub-DAG an earlier node writes, a submit file a script generates. Expected, not missing."},
+          "notes": {"type": "array", "items": {"type": "string"}, "description": "The analysis and the per-node submit lint, rendered as lines to show"},
+          "findings": {"type": "array", "items": {"$ref": "#/components/schemas/DagFinding"}, "description": "The same analysis, structured"},
+          "node_constraint": {"type": "string", "description": "The constraint selecting this workflow's node jobs, e.g. \"DAGManJobId == 42\". Node jobs also carry DAGNodeName."},
+          "dot_file": {"type": "string", "description": "The file DAGMan will write the workflow's structure to, inside the spool. Absent when instrument was false, in which case there is no graph to read."},
+          "status_file": {"type": "string", "description": "The file DAGMan will rewrite with per-node status every 30 seconds, inside the spool. Absent when instrument was false."},
+          "dagman_log": {"type": "string", "description": "DAGMan's own log, by name, inside the spool that links.output returns"},
+          "links": {
+            "type": "object",
+            "description": "Where to go next, ready to use",
+            "properties": {
+              "job": {"type": "string", "description": "The manager job's ad, where DAGMan publishes its node counts: how far along the workflow is"},
+              "watch": {"type": "string", "description": "The manager job's SSE stream, so a page waiting on the workflow does not poll"},
+              "dag": {"type": "string", "description": "The workflow's structure and per-node state. Absent when instrument was false, because nothing will write what it reads."},
+              "nodes": {"type": "string", "description": "The node jobs in the queue"},
+              "output": {"type": "string", "description": "The whole spool, including dagman_log and whatever the nodes produced: node outputs come back to the DAG's own directory, not to a node job's sandbox, which is gone"}
+            }
+          }
+        }
+      },
+      "DagDryRunResponse": {
+        "type": "object",
+        "description": "A workflow that was checked and not submitted.",
+        "properties": {
+          "dry_run": {"type": "boolean"},
+          "dag_name": {"type": "string"},
+          "submit_file": {"type": "string", "description": "The DAGMan manager job's submit file as it would be sent, with the site's submit policy already in it"},
+          "input_files": {"type": "array", "items": {"type": "string"}},
+          "deferred": {"type": "array", "items": {"type": "string"}},
+          "notes": {"type": "array", "items": {"type": "string"}},
+          "findings": {"type": "array", "items": {"$ref": "#/components/schemas/DagFinding"}},
+          "fatal": {"type": "boolean", "description": "Whether this workflow would be refused. A dry run reports EVERY fatal finding rather than stopping at the first."},
+          "errors": {"type": "array", "items": {"type": "string"}, "description": "The fatal findings' messages"}
+        }
+      },
+      "DagError": {
+        "type": "object",
+        "description": "The ordinary error body with the analysis added, so a caller can show which line of their DAG is wrong. A client that reads only error/message/code is unaffected.",
+        "properties": {
+          "error": {"type": "string"},
+          "message": {"type": "string"},
+          "code": {"type": "integer"},
+          "findings": {"type": "array", "items": {"$ref": "#/components/schemas/DagFinding"}},
+          "notes": {"type": "array", "items": {"type": "string"}}
+        }
+      },
       "JobListResponse": {
         "type": "object",
         "properties": {
@@ -2103,6 +2206,119 @@ const openAPISchema = `{
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/jobs/dag": {
+      "post": {
+        "summary": "Submit a DAGMan workflow",
+        "description": "Submit a workflow -- a graph of jobs with dependencies, retries and PRE/POST scripts -- as a single DAGMan manager job. In ONE request, because a workflow's spooled sandbox is written once and can never be added to afterwards: the spool transfer's completion is what releases the manager job's hold, and the schedd refuses a second spool for the same job. So unlike POST /jobs, there is no submit-then-upload step; everything the workflow will ever need must be in this call. Send application/json when the workflow is only text, or multipart/form-data when it has files to upload. The sandbox is ONE FLAT DIRECTORY (the schedd collapses it to basenames), so every file name must be bare, with no directories. A large shared input belongs here: a reference database, a genome or a calibration uploaded once is named by basename from every node job, instead of being uploaded once per job. Bulk data that the execute machines can fetch for themselves should instead be an HTTP/HTTPS/OSDF URL in a node job's transfer_input_files. The DAG is parsed and cross-checked against the supplied files before anything is submitted: a workflow that cannot start (a cycle, a PARENT naming an undeclared node, a missing SPLICE or INCLUDE, a node using DIR) is refused with 400 and the findings; anything more doubtful comes back as a note on the 201. Use dry_run to get that analysis, and the manager job's submit file, without submitting. The response is the manager job plus the links that follow the workflow -- its node jobs are NOT in its cluster, and node_constraint is the only thing that selects them.",
+        "operationId": "submitDag",
+        "parameters": [
+          {
+            "name": "schedd",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string"},
+            "description": "Multi-AP mode only: submit to this access point, which must be your home access point or one of its alternates (default: your home access point)"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/DagSubmitRequest"},
+              "examples": {
+                "inline": {
+                  "summary": "A two-stage workflow, entirely inline",
+                  "description": "The recommended shape: one SUBMIT-DESCRIPTION serves every node of a stage, VARS gives each node its own values, and there is nothing to upload.",
+                  "value": {
+                    "dag": "SUBMIT-DESCRIPTION work {\n  executable = /bin/sh\n  transfer_executable = false\n  arguments = \"-c 'echo hi > out_$(sample).txt'\"\n  transfer_output_files = out_$(sample).txt\n}\nJOB A work\nJOB B work\nVARS A sample=\"1\"\nVARS B sample=\"2\"\nJOB GATHER {\n  executable = /bin/sh\n  transfer_executable = false\n  arguments = \"-c 'cat out_1.txt out_2.txt > all.txt'\"\n  transfer_input_files = out_1.txt, out_2.txt\n  transfer_output_files = all.txt\n}\nPARENT A B CHILD GATHER\n",
+                    "batch_name": "demo"
+                  }
+                },
+                "with_files": {
+                  "summary": "A workflow with a separate submit file and a PRE script",
+                  "description": "Anything the DAG names by file name goes in files, in this same call. Names are bare: the spool directory is flat.",
+                  "value": {
+                    "dag": "JOB A a.sub\nSCRIPT PRE A setup.sh\n",
+                    "files": {
+                      "a.sub": "executable = /bin/true\ntransfer_executable = false\nqueue\n",
+                      "setup.sh": "#!/bin/sh\necho preparing\n"
+                    }
+                  }
+                },
+                "dry_run": {
+                  "summary": "Check a workflow without submitting it",
+                  "value": {"dag": "JOB A a.sub\nPARENT A CHILD B\n", "dry_run": true}
+                }
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["dag"],
+                "properties": {
+                  "dag": {"type": "string", "description": "DAG description file contents (JOB, PARENT/CHILD, SCRIPT, RETRY, SUBMIT-DESCRIPTION, ...)"},
+                  "dag_name": {"type": "string", "description": "File name to write the DAG as in the spool (default workflow.dag). Bare, no directories."},
+                  "batch_name": {"type": "string", "description": "JobBatchName for the workflow, as condor_q -batch shows it"},
+                  "max_idle": {"type": "integer", "description": "Throttle: maximum idle node jobs"},
+                  "max_jobs": {"type": "integer", "description": "Throttle: maximum node jobs submitted at once"},
+                  "max_pre": {"type": "integer", "description": "Throttle: maximum concurrent PRE scripts"},
+                  "max_post": {"type": "integer", "description": "Throttle: maximum concurrent POST scripts"},
+                  "append": {"type": "string", "description": "Extra submit-file lines for the DAGMan manager job itself"},
+                  "instrument": {"type": "boolean", "description": "Default true; see the JSON schema's instrument"},
+                  "dry_run": {"type": "boolean", "description": "Check the workflow and submit nothing"},
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "A file to stage, under the part's own filename. Any field name other than 'executable' may be used, and any number of parts may be sent. A small UTF-8 part is read, so the analysis, the submit lint and the site's submit policy all see it; anything larger or binary is streamed straight to the schedd without being held in memory, which is how a reference database or a genome rides along with the workflow that uses it."
+                  },
+                  "executable": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "A file to stage with mode 0755. Only needed for a file the DAG does not name as a script or a node's executable -- those are made runnable automatically, whatever field name they arrived under."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Workflow submitted",
+            "content": {
+              "application/json": {"schema": {"$ref": "#/components/schemas/DagSubmitResponse"}}
+            }
+          },
+          "200": {
+            "description": "dry_run was set: the workflow was checked and nothing was submitted",
+            "content": {
+              "application/json": {"schema": {"$ref": "#/components/schemas/DagDryRunResponse"}}
+            }
+          },
+          "400": {
+            "description": "The workflow was refused: a file name the flat spool directory cannot carry, more inline text than this endpoint accepts, a node description that sets a job attribute the site's submit policy controls, or a DAG DAGMan provably cannot start. The body is the ordinary error with the analysis added.",
+            "content": {
+              "application/json": {"schema": {"$ref": "#/components/schemas/DagError"}}
+            }
+          },
+          "401": {
+            "description": "Authentication failed",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "413": {
+            "description": "The request body is larger than this endpoint accepts (4 MiB of JSON, 100 MiB of multipart)",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "502": {
+            "description": "The schedd accepted the DAGMan job but spooling the workflow failed. The message says whether the manager job was removed; if it was not, it is still in the queue, held and unable to run, and must be removed with DELETE /jobs/{jobId}.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "500": {
+            "description": "Submission failed",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
           }
         }
       }

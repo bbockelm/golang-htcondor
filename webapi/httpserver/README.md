@@ -108,6 +108,90 @@ Response:
 }
 ```
 
+#### Submit a DAGMan Workflow
+
+```bash
+POST /api/v1/jobs/dag
+Authorization: Bearer <TOKEN>
+Content-Type: application/json
+
+{
+  "dag": "JOB A {\n  executable = /bin/sh\n  transfer_executable = false\n}\nJOB B {\n  executable = /bin/sh\n  transfer_executable = false\n}\nPARENT A CHILD B\n",
+  "batch_name": "demo"
+}
+```
+
+**One request, not two.** Every other submission here is submit-then-upload
+(`POST /jobs`, then `POST /jobs/{id}/input/multipart`). A workflow cannot
+work that way: its spooled sandbox is written **once** — the transfer's
+completion is what releases the manager job's hold, and the schedd refuses
+a second spool for the same job — so everything the workflow will ever
+need has to be in this call. A file the manager job did not declare is
+*skipped* at spool time rather than rejected, so the two-step shape would
+not even fail loudly.
+
+The sandbox is **one flat directory** (the schedd collapses it to
+basenames), so every file name must be bare.
+
+Send `multipart/form-data` when the workflow has files to upload: the DAG
+and the options as form values, each file as its own part, named by the
+part's filename. A small UTF-8 part is read, so the analysis, the submit
+lint and the site's submit policy all see it; anything larger or binary is
+streamed straight to the schedd without being held in memory. That is how
+a **large shared input** reaches a workflow — a reference database, a
+genome, an instrument calibration uploaded once and then named by basename
+from every node job, instead of once per job. Bulk data the execute
+machines can fetch for themselves belongs in a node job's
+`transfer_input_files` as an HTTP/HTTPS/OSDF URL instead.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  -F dag=@workflow.dag.txt \
+  -F file=@a.sub -F file=@reference.db \
+  -F batch_name=demo \
+  https://ap.example.edu/api/v1/jobs/dag
+```
+
+The DAG is parsed and cross-checked against the supplied files first. A
+workflow DAGMan provably cannot start (a cycle, a `PARENT` naming an
+undeclared node, a missing `SPLICE` or `INCLUDE`, a node using `DIR`) is
+refused with 400 and the findings, each with the line of the caller's own
+DAG; anything more doubtful comes back as a note on the 201. `dry_run`
+returns that analysis, and the manager job's submit file, without
+submitting.
+
+The response is the manager job plus the links that follow the workflow.
+The workflow's node jobs are **not** in its cluster — DAGMan submits each
+as its own — so `node_constraint` (`DAGManJobId == <cluster>`) is the only
+thing that selects them:
+
+```json
+{
+  "cluster_id": 42,
+  "job_id": "42.0",
+  "dag_name": "workflow.dag",
+  "input_files": ["workflow.dag"],
+  "node_constraint": "DAGManJobId == 42",
+  "dagman_log": "workflow.dagman.out",
+  "links": {
+    "job": "/api/v1/jobs/42.0",
+    "watch": "/api/v1/jobs/42.0/watch",
+    "dag": "/api/v1/jobs/42.0/dag",
+    "nodes": "/api/v1/jobs?constraint=DAGManJobId+%3D%3D+42",
+    "output": "/api/v1/jobs/42.0/output"
+  }
+}
+```
+
+`links.dag` is the workflow's structure and per-node state, which is
+readable because submissions through this server append `DOT` and
+`NODE_STATUS_FILE` to the staged DAG. `instrument: false` turns that off
+and the link is then absent, because nothing will write what it reads.
+
+This is the same path as the MCP `submit_dag` tool: both call
+`webapi/dagman`'s `Prepare`, so a workflow is checked, policed and staged
+identically whichever surface submits it.
+
 #### List Jobs
 ```bash
 GET /api/v1/jobs?constraint=Owner=="user"&projection=ClusterId,ProcId,JobStatus
@@ -209,6 +293,11 @@ user, and every template, to get it right:
 
 Both apply to **every** submission — `POST /api/v1/jobs`, the templates
 and submit pages, interactive terminals, Jupyter, and MCP `submit_job`.
+A workflow submitted through `POST /api/v1/jobs/dag` or MCP `submit_dag`
+gets them on the DAGMan manager job **and** on every node description it
+carries, inline blocks included: DAGMan submits the node jobs itself, on
+the access point, long after the request returns, so the submission is the
+last chance site policy has to reach them.
 
 ```
 HTTP_API_SUBMIT_FILE_OVERRIDES = @=end
