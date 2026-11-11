@@ -45,6 +45,48 @@ GOWORK=off go build -buildvcs=false -tags embed_frontend -o "$API_BIN" ./cmd/htc
 # directory beneath the working directory and must not write into the
 # bind-mounted workspace.
 cd "$RUNDIR"
+# A site app, so the browser tests can exercise the whole path a lab's
+# app takes: the group gate, the mount-point injection, the switcher at
+# /site/ and the link in the sidebar.
+#
+# Deployed as a DIRECTORY bundle rather than a zip because the container
+# is not guaranteed to have a zip tool, and nothing here needs one: the
+# zip-specific half (decompress-to-unlinked-file, seekable entries) is
+# covered by Go tests that build archives in process. What the browser
+# needs to reach is the same either way.
+#
+# groups: ["*"] -- every authenticated user -- because demo mode's two
+# accounts have different groups ("admin" and none) and this app is not
+# what the authorization tests are for.
+SITE_APPS_DIR="$RUNDIR/webapps"
+mkdir -p "$SITE_APPS_DIR/e2eapp/web/assets"
+cat > "$SITE_APPS_DIR/e2eapp/app.yaml" <<'YAML'
+name: E2E Example App
+description: A site app deployed by the browser-test harness
+YAML
+cat > "$SITE_APPS_DIR/e2eapp.yaml" <<'YAML'
+groups: ["*"]
+home: false
+YAML
+cat > "$SITE_APPS_DIR/e2eapp/web/index.html" <<'HTML'
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>E2E Example App</title></head>
+<body><h1 data-testid="app-heading">E2E Example App</h1>
+<p data-testid="app-base"></p>
+<script src="./assets/app.js"></script></body></html>
+HTML
+cat > "$SITE_APPS_DIR/e2eapp/web/assets/app.js" <<'JS'
+// Proves the bundle learned where it is mounted, and that a nested
+// asset resolves against the injected <base> rather than the site root.
+document.querySelector('[data-testid="app-base"]').textContent =
+  (window.__HTCONDOR_APP__ && window.__HTCONDOR_APP__.base) || 'MISSING';
+JS
+export _CONDOR_HTTP_API_SITE_APPS_DIR="$SITE_APPS_DIR"
+# Short, so a test can redeploy a bundle and see it without waiting a
+# minute. Production defaults to a minute.
+export _CONDOR_HTTP_API_SITE_APPS_RELOAD_INTERVAL="2s"
+echo "site apps directory: $SITE_APPS_DIR"
+
 echo "starting htcondor-api -demo on :$PORT"
 "$API_BIN" -demo -listen ":$PORT" &
 API_PID=$!
