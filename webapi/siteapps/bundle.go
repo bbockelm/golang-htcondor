@@ -101,20 +101,41 @@ func OpenBundle(path string, expectedDigest string) (*Bundle, error) {
 	return openZipBundle(path, info, expectedDigest)
 }
 
+// openDirBundle opens an unpacked bundle.
+//
+// os.OpenRoot, not os.DirFS. os.DirFS rejects a path that escapes
+// lexically but still follows a symlink that points out of the tree, so
+// a bundle containing web/data/ref.fa -> /etc/shadow would serve it to
+// anyone in the app's groups. os.Root refuses to traverse out of the
+// root at all, which is the property this needs: a bundle is site
+// content, and "site content" includes whatever was in the directory
+// an operator pointed at.
+//
+// Zip bundles have never had this problem and cannot acquire it: they
+// are served from a name-to-offset map over one unlinked descriptor,
+// with no filesystem underneath to traverse.
 func openDirBundle(path string, info os.FileInfo) (*Bundle, error) {
-	root := os.DirFS(path)
+	rootDir, err := os.OpenRoot(path)
+	if err != nil {
+		return nil, fmt.Errorf("open bundle directory: %w", err)
+	}
+	root := rootDir.FS()
+
 	manifest, err := readManifestFS(root)
 	if err != nil {
+		_ = rootDir.Close()
 		return nil, err
 	}
 	web, err := fs.Sub(root, webRoot)
 	if err != nil {
+		_ = rootDir.Close()
 		return nil, fmt.Errorf("bundle has no %s/ directory: %w", webRoot, err)
 	}
 	if _, err := fs.Stat(web, "index.html"); err != nil {
+		_ = rootDir.Close()
 		return nil, fmt.Errorf("bundle has no %s/index.html", webRoot)
 	}
-	return &Bundle{FS: web, Manifest: manifest, stamp: stampOf(info)}, nil
+	return &Bundle{FS: web, Manifest: manifest, closer: rootDir, stamp: stampOf(info)}, nil
 }
 
 func openZipBundle(path string, info os.FileInfo, expectedDigest string) (*Bundle, error) {

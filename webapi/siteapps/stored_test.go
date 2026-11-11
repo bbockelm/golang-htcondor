@@ -254,3 +254,78 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// writeDirBundle builds an UNPACKED bundle and returns its path.
+func writeDirBundle(t *testing.T, dir, id string, files map[string]string) string {
+	t.Helper()
+	root := filepath.Join(dir, id)
+	for name, body := range files {
+		full := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return root
+}
+
+// A directory bundle must not follow a symlink out of itself.
+//
+// os.DirFS, which this used at first, rejects a lexically escaping path
+// but happily follows a symlink that points outside the tree -- so a
+// bundle containing web/escape.txt -> /etc/shadow served it to everyone
+// in the app's groups. A bundle directory is site content, and site
+// content includes whatever was lying in the directory an operator
+// pointed at.
+func TestDirBundleDoesNotFollowSymlinksOut(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	root := writeDirBundle(t, dir, "cryoem", map[string]string{
+		"app.yaml":       defaultManifest,
+		"web/index.html": "<html></html>",
+	})
+	if err := os.Symlink(secret, filepath.Join(root, "web", "escape.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+
+	entry := loadOneApp(t, dir, "cryoem")
+
+	data, err := fs.ReadFile(entry.FS(), "escape.txt")
+	if err == nil {
+		t.Fatalf("a symlink out of the bundle was followed; read %q", data)
+	}
+	// The app itself must still work: this refuses an escape, not
+	// directory bundles.
+	if got := readFS(t, entry.FS(), "index.html"); got == "" {
+		t.Error("the bundle serves nothing after the fix")
+	}
+}
+
+// A symlink that stays inside the bundle is ordinary content and must
+// keep working, or unpacking a build output with internal links breaks.
+func TestDirBundleAllowsInternalSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	root := writeDirBundle(t, dir, "cryoem", map[string]string{
+		"app.yaml":           defaultManifest,
+		"web/index.html":     "<html></html>",
+		"web/assets/real.js": "console.log(1)",
+	})
+	if err := os.Symlink("real.js", filepath.Join(root, "web", "assets", "link.js")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+
+	entry := loadOneApp(t, dir, "cryoem")
+	if got, err := fs.ReadFile(entry.FS(), "assets/link.js"); err != nil {
+		t.Errorf("an internal symlink was refused: %v", err)
+	} else if string(got) != "console.log(1)" {
+		t.Errorf("link.js = %q", got)
+	}
+}
