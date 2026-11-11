@@ -72,7 +72,14 @@ func TestDagSubmitInstrumentDefaultsOn(t *testing.T) {
 }
 
 // multipartBody builds a form the way a browser's FormData would.
-func multipartBody(t *testing.T, fields map[string]string, files []struct{ field, name, body string }) (string, io.Reader) {
+// dagMultipartBody builds a DAG submission's multipart body.
+//
+// NOT named multipartBody: bulkupload_integration_test.go already has
+// one of those with a different signature, behind the `integration`
+// build tag. A plain `go test ./httpserver/` does not compile that
+// file, so the redeclaration is invisible locally and only appears in
+// the tagged CI run.
+func dagMultipartBody(t *testing.T, fields map[string]string, files []struct{ field, name, body string }) (string, io.Reader) {
 	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -101,7 +108,7 @@ func multipartBody(t *testing.T, fields map[string]string, files []struct{ field
 // workflow's sandbox cannot be added to after submission.
 func TestDagSubmitReadsMultipart(t *testing.T) {
 	binary := string([]byte{0xff, 0xfe, 0x00, 0x01, 0x80})
-	ct, body := multipartBody(t,
+	ct, body := dagMultipartBody(t,
 		map[string]string{
 			"dag":        "JOB A a.sub\n",
 			"dag_name":   "w.dag",
@@ -161,7 +168,7 @@ func TestDagSubmitStreamsUploadsToPrepare(t *testing.T) {
 	const genome = "ACGT\x00\xffACGT"
 	dag := "JOB A {\n  executable = /bin/sh\n  transfer_executable = false\n" +
 		"  transfer_input_files = genome.fa\n}\n"
-	ct, body := multipartBody(t, map[string]string{"dag": dag},
+	ct, body := dagMultipartBody(t, map[string]string{"dag": dag},
 		[]struct{ field, name, body string }{{"file", "genome.fa", genome}})
 	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/jobs/dag", body)
 	r.Header.Set("Content-Type", ct)
@@ -202,7 +209,7 @@ func TestDagSubmitStreamsUploadsToPrepare(t *testing.T) {
 // names basename-ing produces and does not fix.
 func TestDagSubmitUploadNamesCannotEscapeTheSandbox(t *testing.T) {
 	t.Run("a traversal is reduced to a plain name", func(t *testing.T) {
-		ct, body := multipartBody(t, map[string]string{"dag": "JOB A a.sub\n"},
+		ct, body := dagMultipartBody(t, map[string]string{"dag": "JOB A a.sub\n"},
 			[]struct{ field, name, body string }{{"file", "../../etc/passwd", "x"}})
 		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/jobs/dag", body)
 		r.Header.Set("Content-Type", ct)
@@ -217,7 +224,7 @@ func TestDagSubmitUploadNamesCannotEscapeTheSandbox(t *testing.T) {
 	// VALUE rather than a file, so it never reaches the sandbox at all.
 	for _, name := range []string{"..", "a b", `a"b`} {
 		t.Run("refuses "+name, func(t *testing.T) {
-			ct, body := multipartBody(t, map[string]string{"dag": "JOB A a.sub\n"},
+			ct, body := dagMultipartBody(t, map[string]string{"dag": "JOB A a.sub\n"},
 				[]struct{ field, name, body string }{{"file", name, "x"}})
 			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/jobs/dag", body)
 			r.Header.Set("Content-Type", ct)
