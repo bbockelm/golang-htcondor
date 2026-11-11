@@ -1,6 +1,7 @@
 package siteapps
 
 import (
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -198,10 +199,98 @@ func TestReloadPicksUpAReplacedBundle(t *testing.T) {
 	if second.App.Name != "Second" {
 		t.Errorf("Name = %q, want Second: the replacement was not picked up", second.App.Name)
 	}
-	// The retired bundle must be closed, or every redeploy leaks a file
-	// descriptor until the daemon runs out.
-	if err := first.bundle.Close(); err == nil {
-		t.Error("the retired bundle was still open; Reload leaked its handle")
+	// The retired bundle stays OPEN for its grace period: a request
+	// already reading from it must be allowed to finish. Closing it
+	// here is what used to give a visitor "file already closed" on an
+	// asset when somebody redeployed mid-page-load.
+	if _, err := fs.ReadFile(first.FS(), "index.html"); err != nil {
+		t.Errorf("the retired bundle was closed out from under a live reader: %v", err)
+	}
+}
+
+// A reader that was already going when a redeploy landed must finish
+// intact, not get a truncated body or "file already closed".
+func TestInFlightReadSurvivesARedeploy(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Repeat("x", 200_000)
+	writeBundle(t, dir, "cryoem", defaultManifest, map[string]string{
+		"web/index.html":    "<html></html>",
+		"web/assets/big.js": body,
+	})
+	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+
+	lib := NewLibrary(dir)
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, problems := lib.Reload(); len(problems) != 0 {
+		t.Fatalf("problems: %v", problems)
+	}
+	entry, _ := lib.Get("cryoem")
+
+	f, err := entry.FS().Open("assets/big.js")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	one := make([]byte, 1)
+	if _, err := f.Read(one); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+
+	// Redeploy underneath it.
+	time.Sleep(10 * time.Millisecond)
+	path := writeBundle(t, dir, "cryoem", "name: Second\n", map[string]string{
+		"web/index.html": "<html>2</html>",
+	})
+	future := time.Now().Add(time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if _, problems := lib.Reload(); len(problems) != 0 {
+		t.Fatalf("reload problems: %v", problems)
+	}
+
+	rest, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("the in-flight read failed after a redeploy: %v", err)
+	}
+	if len(rest) != len(body)-1 {
+		t.Fatalf("the in-flight read was truncated: %d bytes, want %d", len(rest), len(body)-1)
+	}
+}
+
+// The grace period must actually end, or a server that redeploys often
+// accumulates descriptors on unlinked files until it runs out.
+func TestRetiredBundlesAreClosedAfterTheGracePeriod(t *testing.T) {
+	dir := t.TempDir()
+	writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
+	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+
+	lib := NewLibrary(dir)
+	t.Cleanup(func() { _ = lib.Close() })
+	lib.retireGrace = time.Nanosecond // expire immediately
+	if _, problems := lib.Reload(); len(problems) != 0 {
+		t.Fatalf("problems: %v", problems)
+	}
+	first, _ := lib.Get("cryoem")
+
+	// Redeploy twice: the first retires `first`, the second sweeps it.
+	for i, name := range []string{"Second", "Third"} {
+		time.Sleep(10 * time.Millisecond)
+		path := writeBundle(t, dir, "cryoem", "name: "+name+"\n", defaultFiles())
+		future := time.Now().Add(time.Duration(i+1) * time.Second)
+		if err := os.Chtimes(path, future, future); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+		if _, problems := lib.Reload(); len(problems) != 0 {
+			t.Fatalf("reload problems: %v", problems)
+		}
+	}
+
+	if _, err := fs.ReadFile(first.FS(), "index.html"); err == nil {
+		t.Error("a bundle past its grace period is still open; descriptors would accumulate")
+	}
+	if len(lib.retired) != 1 {
+		t.Errorf("retired list holds %d bundles, want just the most recent", len(lib.retired))
 	}
 }
 

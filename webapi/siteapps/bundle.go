@@ -73,6 +73,11 @@ func (b *Bundle) Close() error {
 // Not the digest, which would mean hashing every bundle on every
 // rescan. A bundle whose stamp is unchanged is assumed unchanged; one
 // whose stamp moved is re-verified in full.
+//
+// A replaced bundle is not closed at once -- see Library.retire. A
+// request already reading it has to be allowed to finish, and the
+// cost of waiting is one descriptor on a file that is already
+// unlinked.
 type fileStamp struct {
 	size    int64
 	modTime int64

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Entry is one published app: its metadata and its opened content.
@@ -32,7 +33,40 @@ type Library struct {
 
 	mu   sync.Mutex // serializes rescans, not reads
 	snap atomicSnapshot
+
+	// retired holds bundles a reload replaced, kept open for a grace
+	// period before their descriptors are closed.
+	//
+	// Closing one the moment it leaves the published set breaks any
+	// request already reading from it: a redeploy mid-page-load gives
+	// that visitor "file already closed" on an asset. The requests in
+	// question last milliseconds and the cost of waiting is one file
+	// descriptor on a file that is already unlinked, so the grace
+	// period is the cheap side of that trade.
+	//
+	// Swept on the next reload rather than by a timer per bundle: a
+	// reload is already happening on an interval, and a goroutine per
+	// retired bundle would be a lot of machinery for a deadline nobody
+	// needs to hit precisely.
+	retired []retiredBundle
+	// retireGrace is how long a replaced bundle stays open. Settable
+	// for tests; see defaultRetireGrace.
+	retireGrace time.Duration
 }
+
+// retiredBundle is a bundle waiting to be closed.
+type retiredBundle struct {
+	bundle *Bundle
+	at     time.Time
+}
+
+// defaultRetireGrace is how long a replaced bundle keeps serving the
+// requests that were already reading it.
+//
+// Two minutes rather than seconds because the thing being waited on is
+// a browser finishing a page load over whatever network it has, and the
+// cost of being generous is one descriptor on an unlinked file.
+const defaultRetireGrace = 2 * time.Minute
 
 // snapshot is an immutable published set.
 type snapshot struct {
@@ -43,7 +77,7 @@ type snapshot struct {
 // NewLibrary creates a library over dir. It does not scan; call
 // Reload.
 func NewLibrary(dir string) *Library {
-	l := &Library{dir: dir}
+	l := &Library{dir: dir, retireGrace: defaultRetireGrace}
 	l.snap.store(&snapshot{byID: map[string]*Entry{}})
 	return l
 }
@@ -155,7 +189,7 @@ func (l *Library) Reload() (published int, problems []error) {
 	sort.Strings(next.order)
 
 	l.snap.store(next)
-	l.closeRetired(old, next)
+	l.retire(old, next, time.Now())
 	return len(next.byID), problems
 }
 
@@ -237,22 +271,39 @@ func (l *Library) expectedDigest(id string) (string, error) {
 	return parseDigestSidecar(data)
 }
 
-// closeRetired closes bundles the new snapshot no longer holds.
+// retire moves bundles the new snapshot no longer holds onto the
+// retirement list, and closes anything whose grace period has expired.
 //
 // A bundle still referenced by the new snapshot is the SAME *Bundle
 // (loadOne reuses it), so identity comparison is what decides, not the
 // id: an app that was reloaded has a new bundle and its old one must
-// be closed even though the id survives.
-func (l *Library) closeRetired(old, next *snapshot) {
+// be retired even though the id survives.
+//
+// Called with l.mu held.
+func (l *Library) retire(old, next *snapshot, now time.Time) {
 	live := make(map[*Bundle]struct{}, len(next.byID))
 	for _, e := range next.byID {
 		live[e.bundle] = struct{}{}
 	}
 	for _, e := range old.byID {
 		if _, stillUsed := live[e.bundle]; !stillUsed {
-			_ = e.bundle.Close()
+			l.retired = append(l.retired, retiredBundle{bundle: e.bundle, at: now})
 		}
 	}
+
+	grace := l.retireGrace
+	if grace <= 0 {
+		grace = defaultRetireGrace
+	}
+	kept := l.retired[:0]
+	for _, r := range l.retired {
+		if now.Sub(r.at) >= grace {
+			_ = r.bundle.Close()
+			continue
+		}
+		kept = append(kept, r)
+	}
+	l.retired = kept
 }
 
 // Close releases every open bundle.
@@ -265,6 +316,14 @@ func (l *Library) Close() error {
 			firstErr = err
 		}
 	}
+	// Retired bundles too: shutdown is the one time there is nothing
+	// left to be in flight.
+	for _, r := range l.retired {
+		if err := r.bundle.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	l.retired = nil
 	l.snap.store(&snapshot{byID: map[string]*Entry{}})
 	return firstErr
 }
