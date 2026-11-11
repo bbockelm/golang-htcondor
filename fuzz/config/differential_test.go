@@ -146,8 +146,64 @@ var attrNameEscaping = divergenceClass{
 		return strings.Contains(in, "'") && hasNonPrintableByte(in)
 	},
 	match: func(goTable, cppTable string) bool {
-		return goTable != cppTable && hasNonPrintableByte(goTable) && !hasNonPrintableByte(cppTable)
+		return goTable != cppTable && cppEscapesSomeNonPrintables(goTable, cppTable)
 	},
+}
+
+// cppEscapesSomeNonPrintables reports whether the C++ table is the Go table
+// with SOME of its non-printable bytes replaced by the escape C++ writes for
+// them. Some rather than all is the point, exactly as in
+// cppDropsSpaceBeforeDot: a byte outside the expression reaches both tables
+// untouched, as `0=\xde$EVAL({'\xde'})` does, where only the one inside the
+// quoted name is escaped.
+//
+// Nothing else may differ, and the escapes may only appear on the C++ side.
+func cppEscapesSomeNonPrintables(goTable, cppTable string) bool {
+	escaped := false
+	i, j := 0, 0
+	for i < len(goTable) && j < len(cppTable) {
+		if goTable[i] == cppTable[j] {
+			i++
+			j++
+			continue
+		}
+		n := escapeLenFor(goTable[i], cppTable[j:])
+		if n == 0 {
+			return false
+		}
+		escaped = true
+		i++
+		j += n
+	}
+	return escaped && i == len(goTable) && j == len(cppTable)
+}
+
+// escapeLenFor returns the length of the escape C++ writes for b when cpp
+// starts with it, and 0 when it does not. The named escapes come from
+// ClassAdUnParser::UnparseString; everything else isprint() rejects is three
+// octal digits.
+func escapeLenFor(b byte, cpp string) int {
+	if b >= 0x20 && b <= 0x7e {
+		return 0
+	}
+	if len(cpp) < 2 || cpp[0] != '\\' {
+		return 0
+	}
+	named := map[byte]byte{'\a': 'a', '\b': 'b', '\f': 'f', '\n': 'n', '\r': 'r', '\t': 't', '\v': 'v'}
+	if c, ok := named[b]; ok {
+		if cpp[1] == c {
+			return 2
+		}
+		return 0
+	}
+	if len(cpp) < 4 {
+		return 0
+	}
+	want := [3]byte{'0' + (b >> 6), '0' + ((b >> 3) & 7), '0' + (b & 7)}
+	if cpp[1] == want[0] && cpp[2] == want[1] && cpp[3] == want[2] {
+		return 4
+	}
+	return 0
 }
 
 // hasNonPrintableByte reports whether s holds a byte C's isprint() rejects in
@@ -423,6 +479,15 @@ var seeds = []seedCase{
 		// quoted name comes out as \t.
 		input:  "0=$EVAL({'a\tb'})",
 		reason: "attrNameEscaping, reached with a control byte",
+		class:  &attrNameEscaping,
+	},
+	{
+		// Found by FuzzConfigParseExpand after the class was recorded: the
+		// same byte OUTSIDE the expression as well, where neither side
+		// escapes it. Kept as a seed so the class is pinned against the
+		// shape where C++ escapes one occurrence and leaves another.
+		input:  "0=\xde$EVAL({'\xde'})",
+		reason: "attrNameEscaping, reached with the same byte outside the expression",
 		class:  &attrNameEscaping,
 	},
 
