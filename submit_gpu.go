@@ -196,7 +196,7 @@ func scanInt32(s string) (value int, rest string, got bool) {
 // because adding parentheses changes the expression TREE even where it does
 // not change the value.
 func wrapExprForAnd(value string) (string, error) {
-	expr, err := classad.ParseExpr(value)
+	expr, err := classad.ParseExprOld(value)
 	if err != nil {
 		return "", err
 	}

@@ -626,7 +626,11 @@ func (sf *SubmitFile) assignRequirements(ad *classad.ClassAd, answer string) err
 	if strings.TrimSpace(answer) == "" {
 		answer = "true"
 	}
-	expr, err := classad.ParseExpr(answer)
+	// Old mode: `answer` is the submitter's own `requirements` text with
+	// the generated clauses concatenated onto it, so it carries submit-file
+	// string literals and has to be read the way condor_submit reads them.
+	// The generated half is plain ASCII, which both modes read alike.
+	expr, err := classad.ParseExprOld(answer)
 	if err != nil {
 		return fmt.Errorf("failed to parse requirements expression %q: %w", answer, err)
 	}

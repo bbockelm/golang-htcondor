@@ -182,7 +182,7 @@ func (sf *SubmitFile) setBuiltInOnEvictCheck(ad *classad.ClassAd, attr, command 
 	// submit time.
 	var tailExpr *classad.Expr
 	if tail != "" {
-		e, err := classad.ParseExpr(tail)
+		e, err := classad.ParseExprOld(tail)
 		if err != nil {
 			return fmt.Errorf("%s = %s is invalid, must be an expression or number", command, tail)
 		}
@@ -322,7 +322,7 @@ func retryIncrement(attr string, base int64, increase string) (string, error) {
 		return fmt.Sprintf("%s + %d", attr, n), nil
 	}
 
-	expr, err := classad.ParseExpr(increase)
+	expr, err := classad.ParseExprOld(increase)
 	if err != nil {
 		return "", notAnIncrement
 	}
