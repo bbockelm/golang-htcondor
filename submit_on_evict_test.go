@@ -169,3 +169,66 @@ func TestRetryRequestMemoryIsReadOncePerCluster(t *testing.T) {
 		}
 	}
 }
+
+// TestRetryRequestDisk covers the disk half of the built-in on-evict
+// transforms. Disk has one retry command rather than three -- there is no
+// retry_request_disk_max or _increase -- and its transform is limited to
+// the vacate sub-code that means the job went over its DISK request, 104,
+// where memory's is 102.
+//
+// None of it was implemented, so a job asking to be retried with more disk
+// was submitted with no transform at all.
+func TestRetryRequestDisk(t *testing.T) {
+	t.Run("a single retry value", func(t *testing.T) {
+		ad := adFor(t, "executable = /bin/true\nrequest_disk = 512\nretry_request_disk = 1024\nqueue\n")
+		if got := ad["TransformOnEvict"]; got != `"RequestDisk"` {
+			t.Errorf("TransformOnEvict = %s, want \"RequestDisk\"", got)
+		}
+		want := `"REQUIREMENTS (VacateReasonCode==21 || VacateReasonCode == 34) && VacateReasonSubCode == 104\036SET RequestDisk 1024"`
+		if got := ad["TransformBody_RequestDisk"]; got != want {
+			t.Errorf("TransformBody_RequestDisk = %s,\nwant %s", got, want)
+		}
+	})
+
+	t.Run("a sequence", func(t *testing.T) {
+		ad := adFor(t, "executable = /bin/true\nrequest_disk = 512\nretry_request_disk = 1024, 2048\nqueue\n")
+		// adFor renders with String, which spaces a list differently
+		// from the sink form the ad is stored and compared in.
+		if got := ad["RetryRequestDisk"]; got != "{1024, 2048}" {
+			t.Errorf("RetryRequestDisk = %s, want the two sizes as a list", got)
+		}
+		if !strings.Contains(ad["TransformBody_RequestDisk"], "RetryRequestDiskIndex") {
+			t.Errorf("TransformBody_RequestDisk = %s, want it to walk the sequence", ad["TransformBody_RequestDisk"])
+		}
+	})
+
+	t.Run("the short spelling supersedes it", func(t *testing.T) {
+		// `request_disk = a, b` is read instead of retry_request_disk,
+		// which condor_submit never looks at in that case.
+		ad := adFor(t, "executable = /bin/true\nrequest_disk = 512, 4096\nretry_request_disk = 1024\nqueue\n")
+		if got := ad["RequestDisk"]; got != "512" {
+			t.Errorf("RequestDisk = %s, want 512", got)
+		}
+		if !strings.Contains(ad["TransformBody_RequestDisk"], "SET RequestDisk 4096") {
+			t.Errorf("TransformBody_RequestDisk = %s, want the second value of request_disk", ad["TransformBody_RequestDisk"])
+		}
+	})
+
+	t.Run("an expression request takes it out of play", func(t *testing.T) {
+		ad := adFor(t, "executable = /bin/true\nrequest_disk = MY.Foo\nretry_request_disk = 1024\nqueue\n")
+		if _, ok := ad["TransformBody_RequestDisk"]; ok {
+			t.Errorf("TransformBody_RequestDisk = %s, want it absent", ad["TransformBody_RequestDisk"])
+		}
+	})
+
+	t.Run("disk is named before memory", func(t *testing.T) {
+		// SetRequestResources walks the submit macro set, which is kept
+		// sorted, so request_disk is reached before request_memory
+		// whatever order the file writes them in.
+		ad := adFor(t, "executable = /bin/true\nrequest_memory = 100\nretry_request_memory = 2048\n"+
+			"request_disk = 512\nretry_request_disk = 1024\nqueue\n")
+		if got := ad["TransformOnEvict"]; got != `"RequestDisk RequestMemory"` {
+			t.Errorf("TransformOnEvict = %s, want \"RequestDisk RequestMemory\"", got)
+		}
+	})
+}

@@ -35,10 +35,13 @@ const (
 	attrTransformOnEvict     = "TransformOnEvict"
 	attrTransformBodyPrefix  = "TransformBody_"
 	attrRequestMemory        = "RequestMemory"
+	attrRequestDisk          = "RequestDisk"
 	commandRequestMemory     = "request_memory"
+	commandRequestDisk       = "request_disk"
 	commandRetryMemory       = "retry_request_memory"
 	commandRetryMemoryMax    = "retry_request_memory_max"
 	commandRetryMemoryIncrBy = "retry_request_memory_increase"
+	commandRetryDisk         = "retry_request_disk"
 )
 
 // onEvictBodySeparator separates the lines of a transform body. The body
@@ -46,13 +49,19 @@ const (
 // oriented, so the lines are joined with RS (0x1e) rather than newlines.
 const onEvictBodySeparator = "\x1e"
 
-// memoryOverRequestRequirements is the REQUIREMENTS line of the memory
-// transform: the vacate reasons the startd and the starter use when they
-// take a job away, narrowed by the sub-code that means the job went over
-// its memory request. Without this clause the transform would raise the
-// request after every eviction, including a drained machine or a
-// preempting job.
-const memoryOverRequestRequirements = "(VacateReasonCode==21 || VacateReasonCode == 34) && VacateReasonSubCode == 102"
+// overRequestRequirements is the REQUIREMENTS line of a transform, by
+// the attribute it grows: the vacate reasons the startd and the starter
+// use when they take a job away, narrowed by the sub-code that means the
+// job went over that particular request. Without this clause the
+// transform would raise the request after every eviction, including a
+// drained machine or a preempting job.
+//
+// An attribute that is not in here gets no REQUIREMENTS line at all, as
+// condor_submit's `lines.clear()` branch does.
+var overRequestRequirements = map[string]string{
+	attrRequestMemory: "(VacateReasonCode==21 || VacateReasonCode == 34) && VacateReasonSubCode == 102",
+	attrRequestDisk:   "(VacateReasonCode==21 || VacateReasonCode == 34) && VacateReasonSubCode == 104",
+}
 
 // setRequestMemory stores RequestMemory and, when the value is a plain
 // size, whatever automatic retry the submit file asked for.
@@ -112,6 +121,36 @@ func (sf *SubmitFile) setRequestMemory(ad *classad.ClassAd, raw string, clusterP
 		return sf.setBuiltInOnEvictCheck(ad, attrRequestMemory, commandRetryMemory, unitMiB, list, "", clusterPass)
 	case maxValue != "" || increase != "":
 		return sf.setBuiltInOnEvictCheck(ad, attrRequestMemory, commandRetryMemoryMax, unitMiB, maxValue, increase, clusterPass)
+	}
+	return nil
+}
+
+// setRequestDisk stores RequestDisk and, when the value is a plain size,
+// the retry the submit file asked for.
+//
+// Disk has one retry command rather than three: `retry_request_disk` is a
+// sequence of sizes, with no _max or _increase. Everything else matches
+// setRequestMemory -- an expression request takes the family out of play,
+// `request_disk = a, b` is the short spelling that supersedes the retry
+// command, and clusterPass says whether condor_submit would have read any
+// of it on this proc.
+func (sf *SubmitFile) setRequestDisk(ad *classad.ClassAd, raw string, clusterPass bool) error {
+	if isUndefinedRequest(raw) {
+		return nil
+	}
+	kb, rest, ok := splitLeadingSize(raw, unitKiB)
+	if !ok {
+		return setRequestSize(ad, attrRequestDisk, raw, unitKiB)
+	}
+	_ = ad.Set(attrRequestDisk, kb)
+
+	if rest != "" {
+		return sf.setBuiltInOnEvictCheck(ad, attrRequestDisk, commandRequestDisk, unitKiB, rest, "", clusterPass)
+	}
+	if v, ok := sf.submitCommand(commandRetryDisk); ok {
+		if list := strings.TrimSpace(v); list != "" {
+			return sf.setBuiltInOnEvictCheck(ad, attrRequestDisk, commandRequestDisk, unitKiB, list, "", clusterPass)
+		}
 	}
 	return nil
 }
@@ -240,11 +279,14 @@ func (sf *SubmitFile) setBuiltInOnEvictCheck(ad *classad.ClassAd, attr, command 
 		body = fmt.Sprintf("%s %s %s", verb, attr, ceiling)
 	}
 
-	requirements := memoryOverRequestRequirements
+	requirements, haveRequirements := overRequestRequirements[attr]
 	if v, ok := sf.param("ON_EVICT_CHECK_" + attr + "_REQUIREMENTS"); ok && strings.TrimSpace(v) != "" {
-		requirements = v
+		requirements, haveRequirements = v, true
 	}
-	_ = ad.Set(attrTransformBodyPrefix+attr, "REQUIREMENTS "+requirements+onEvictBodySeparator+body)
+	if haveRequirements {
+		body = "REQUIREMENTS " + requirements + onEvictBodySeparator + body
+	}
+	_ = ad.Set(attrTransformBodyPrefix+attr, body)
 
 	// On a proc after the cluster pass, condor_submit ran none of this:
 	// the name the cluster pass appended is what the proc ad reads,

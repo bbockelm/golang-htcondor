@@ -2001,6 +2001,30 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd, proc int) error {
 		}
 	}
 
+	// Disk before memory, which is the order condor_submit reaches them
+	// in: SetRequestResources walks the submit macro set, and that table
+	// is kept sorted, so request_disk is seen before request_memory
+	// whatever order the file writes them in. The fallback pass for
+	// keywords the file does not name has them in that relative order
+	// too. It shows in TransformOnEvict, which both can append to.
+	// Disk in KiB. Same rule with a KiB base: request_disk = 10GB is
+	// RequestDisk = 10485760.
+	if v, ok := sf.simpleKeywordParam("request_disk", "RequestDisk"); ok {
+		if err := sf.setRequestDisk(ad, v, true); err != nil {
+			return err
+		}
+	} else if v, ok := sf.requestDefault("request_disk"); ok {
+		// Same cluster-pass rule as memory: a later proc ad chains to
+		// proc 0's, so RequestDisk is already there and condor_submit
+		// reads neither the default nor retry_request_disk.
+		if err := sf.setRequestDisk(ad, v, proc == 0); err != nil {
+			return fmt.Errorf("JOB_DEFAULT_REQUESTDISK: %w", err)
+		}
+		if e, ok := ad.Lookup("RequestDisk"); ok {
+			sf.defaultDisk = e.String()
+		}
+	}
+
 	// Memory in MiB. A bare number is already in MiB; a K/M/G/T suffix
 	// scales from bytes, so request_memory = 4GB is RequestMemory = 4096.
 	// A VM job with no request_memory asks for the memory its VM is
@@ -2024,21 +2048,6 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd, proc int) error {
 		// default nor the retry commands.
 		if err := sf.setRequestMemory(ad, v, proc == 0); err != nil {
 			return fmt.Errorf("JOB_DEFAULT_REQUESTMEMORY: %w", err)
-		}
-	}
-
-	// Disk in KiB. Same rule with a KiB base: request_disk = 10GB is
-	// RequestDisk = 10485760.
-	if v, ok := sf.simpleKeywordParam("request_disk", "RequestDisk"); ok {
-		if err := setRequestSize(ad, "RequestDisk", v, unitKiB); err != nil {
-			return err
-		}
-	} else if v, ok := sf.requestDefault("request_disk"); ok {
-		if err := setRequestSize(ad, "RequestDisk", v, unitKiB); err != nil {
-			return fmt.Errorf("JOB_DEFAULT_REQUESTDISK: %w", err)
-		}
-		if e, ok := ad.Lookup("RequestDisk"); ok {
-			sf.defaultDisk = e.String()
 		}
 	}
 
