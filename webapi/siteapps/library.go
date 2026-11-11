@@ -106,7 +106,13 @@ func (l *Library) Reload() (published int, problems []error) {
 
 	for _, de := range dirEntries {
 		name := de.Name()
-		if strings.HasPrefix(name, ".") {
+		// Skip anything hidden or scratch outright, before the id is
+		// even derived. normalizeToStored writes a decompressed copy
+		// into this very directory and unlinks it immediately; this
+		// closes the window where a rescan could catch it, and it also
+		// keeps editor backups and partial uploads from being offered
+		// to the loader at all.
+		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, tempSuffix) {
 			continue
 		}
 		// Only .zip files and directories are bundles. The policy and

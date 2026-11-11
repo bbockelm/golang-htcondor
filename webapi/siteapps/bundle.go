@@ -144,21 +144,36 @@ func openZipBundle(path string, info os.FileInfo, expectedDigest string) (*Bundl
 		return nil, err
 	}
 
+	// Read the manifest off the original archive, before normalization:
+	// it lives outside web/ and so is not carried into the served
+	// filesystem at all.
 	manifest, err := readManifestFS(zr)
 	if err != nil {
 		_ = f.Close()
 		return nil, err
 	}
-	web, err := fs.Sub(zr, webRoot)
+
+	// Decompress into an unlinked scratch file, unless the bundle is
+	// already stored. After this, backing is the file every entry is a
+	// seekable section of -- which may still be f, or may be the
+	// scratch copy, in which case f has been closed.
+	backing, storedReader, err := normalizeToStored(f, zr, path)
 	if err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("bundle has no %s/ directory: %w", webRoot, err)
+		return nil, err
 	}
+	entries, err := collectEntries(storedReader)
+	if err != nil {
+		_ = backing.Close()
+		return nil, err
+	}
+
+	web := newStoredFS(backing, entries, webRoot)
 	// Fail here rather than on the first request: a bundle with no
 	// entry point is broken, and the operator who just deployed it is
 	// the person who can fix it.
 	if _, err := fs.Stat(web, "index.html"); err != nil {
-		_ = f.Close()
+		_ = backing.Close()
 		return nil, fmt.Errorf("bundle has no %s/index.html", webRoot)
 	}
 
@@ -166,7 +181,7 @@ func openZipBundle(path string, info os.FileInfo, expectedDigest string) (*Bundl
 		FS:       web,
 		Manifest: manifest,
 		Digest:   expectedDigest,
-		closer:   f,
+		closer:   backing,
 		stamp:    stampOf(info),
 	}, nil
 }

@@ -31,15 +31,25 @@ func ValidateID(id string) error {
 		return fmt.Errorf("site app id %q begins with an underscore, which is reserved "+
 			"for this server's own paths under /site/", id)
 	}
+	// Must begin and end with a letter or digit. This rules out the
+	// leading dot that every scratch and editor-backup file in the
+	// bundle directory carries, so a name that is not meant to be a
+	// bundle cannot become one even if something manages to offer it
+	// to the loader. It also keeps ids from looking like flags or
+	// relative paths to whatever reads a log line containing one.
+	if !isIDAlnum(rune(id[0])) || !isIDAlnum(rune(id[len(id)-1])) {
+		return fmt.Errorf("site app id %q must begin and end with a lowercase letter or digit", id)
+	}
 	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= '0' && r <= '9':
-		case r == '-' || r == '_':
-		default:
-			return fmt.Errorf("site app id %q contains %q; ids may use only "+
-				"lowercase letters, digits, hyphen and underscore", id, r)
+		if isIDAlnum(r) || r == '-' || r == '_' {
+			continue
 		}
+		return fmt.Errorf("site app id %q contains %q; ids may use only "+
+			"lowercase letters, digits, hyphen and underscore", id, r)
 	}
 	return nil
+}
+
+func isIDAlnum(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
 }
