@@ -1055,7 +1055,10 @@ func (sf *SubmitFile) executableIsAFile() bool {
 	if sf.universe != UniverseGrid {
 		return true
 	}
-	res, _ := sf.submitCommand("grid_resource")
+	// Through the attribute name as well: condor_submit reads it as
+	// submit_param(SUBMIT_KEY_GridResource, ATTR_GRID_RESOURCE), so
+	// `GridResource = ec2 ...` names the same thing as `grid_resource`.
+	res, _ := sf.submitCommandAlt("grid_resource", "GridResource")
 	gridType, _, _ := strings.Cut(strings.TrimSpace(res), " ")
 	switch strings.ToLower(gridType) {
 	case "ec2", "gce", "azure":
