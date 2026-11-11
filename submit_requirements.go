@@ -450,27 +450,34 @@ func addCustomResourceRequirements(ad *classad.ClassAd, refs map[string]bool, ad
 		if refs[strings.ToLower(tag)] {
 			continue
 		}
-		expr, ok := ad.Lookup(name)
-		if !ok {
+		if _, ok := ad.Lookup(name); !ok {
 			continue
 		}
-		if s, isString := literalString(expr); isString {
+		// condor_submit EVALUATES the request and switches on the TYPE of
+		// the result (SubmitHash::SetRequirements, LookupType), not on
+		// what the submit file wrote. Only a number, or undefined, asks
+		// for a count; only a string asks for a pattern. Anything else --
+		// a boolean, a list, a nested ad, an error -- gets no clause at
+		// all, so `request_gpus = !0` constrains nothing.
+		v := ad.EvaluateAttr(name)
+		switch {
+		case v.IsString():
 			// An empty string requests nothing.
-			if s != "" {
+			if s, _ := v.StringValue(); s != "" {
 				add(fmt.Sprintf("regexp(%s, TARGET.%s)", name, tag))
 			}
-			continue
+		case v.IsInteger() || v.IsReal() || v.IsUndefined():
+			// A number at or below zero requests nothing. Undefined is
+			// not a number, so it keeps its clause.
+			if n, err := v.NumberValue(); err == nil && n <= 0 {
+				continue
+			}
+			if _, ok := ad.Lookup("Require" + tag); ok {
+				add(fmt.Sprintf("(countMatches(MY.Require%s,TARGET.Available%s) >= %s)", tag, tag, name))
+				continue
+			}
+			add(fmt.Sprintf("(TARGET.%s >= %s)", tag, name))
 		}
-		// A number at or below zero requests nothing. An expression, which
-		// has no number to test, always gets its clause.
-		if n, literal := literalNumber(expr); literal && n <= 0 {
-			continue
-		}
-		if _, ok := ad.Lookup("Require" + tag); ok {
-			add(fmt.Sprintf("(countMatches(MY.Require%s,TARGET.Available%s) >= %s)", tag, tag, name))
-			continue
-		}
-		add(fmt.Sprintf("(TARGET.%s >= %s)", tag, name))
 	}
 }
 
@@ -737,22 +744,6 @@ func literalNumber(expr *classad.Expr) (float64, bool) {
 		return 0, false
 	}
 	return n, true
-}
-
-// literalString reports the value of an expression that is a quoted string.
-func literalString(expr *classad.Expr) (string, bool) {
-	if expr == nil {
-		return "", false
-	}
-	text := strings.TrimSpace(expr.String())
-	if len(text) < 2 || text[0] != '"' || text[len(text)-1] != '"' {
-		return "", false
-	}
-	s, err := strconv.Unquote(text)
-	if err != nil {
-		return text[1 : len(text)-1], true
-	}
-	return s, true
 }
 
 // boolAttr reports whether an attribute is on the ad and evaluates true.
