@@ -59,9 +59,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	id, _, _ := strings.Cut(rest, "/")
 	if id == "" {
-		// /site/ itself is the switcher, which lists the caller's apps.
-		// Not served yet: until it is, there is nothing here to show.
-		http.NotFound(w, r)
+		h.serveSwitcher(w, r)
 		return
 	}
 	if strings.HasPrefix(id, "_") {

@@ -220,3 +220,84 @@ func TestPathEscapesAreRefused(t *testing.T) {
 		}
 	}
 }
+
+// The switcher is what resolves the multiple-homes case and what a PI
+// can paste into a lab wiki: the same URL sends each person to their
+// own set.
+func TestSwitcherListsOnlyTheCallersApps(t *testing.T) {
+	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+
+	rec := get(h, "/site/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "CryoEM Pipeline") {
+		t.Errorf("the caller's own app is missing: %s", body)
+	}
+	// Listing an app the caller cannot open would leak which apps
+	// exist, which is the same thing the 404-not-403 rule protects.
+	if strings.Contains(body, "SeqQC") {
+		t.Error("the switcher lists an app the caller cannot open")
+	}
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Errorf("Cache-Control = %q", cc)
+	}
+}
+
+// Somebody in two labs sees both, which is the state the switcher
+// exists for.
+func TestSwitcherShowsEveryVisibleApp(t *testing.T) {
+	h := testHandler(t, twoAppDir(t), true, "smith_lab", "jones_lab")
+
+	body := get(h, "/site/").Body.String()
+	for _, want := range []string{"CryoEM Pipeline", "SeqQC"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("%q missing from the switcher: %s", want, body)
+		}
+	}
+}
+
+// A caller with no apps gets a page that says so and offers a way
+// onward, not a 404 and not a blank list.
+func TestSwitcherWithNoAppsStillOffersAWayOnward(t *testing.T) {
+	h := testHandler(t, twoAppDir(t), true, "nobody")
+
+	rec := get(h, "/site/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want a readable page", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "CryoEM") || strings.Contains(body, "SeqQC") {
+		t.Error("an app leaked to a caller in neither group")
+	}
+	if !strings.Contains(body, `href="/"`) {
+		t.Errorf("no link back to the console: %s", body)
+	}
+}
+
+func TestSwitcherRequiresASession(t *testing.T) {
+	h := testHandler(t, twoAppDir(t), false)
+
+	rec := get(h, "/site/")
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status %d, want a login redirect", rec.Code)
+	}
+}
+
+// App names come from manifests an operator deployed: trusted input,
+// not safe input. A name carrying markup must not become markup.
+func TestSwitcherEscapesAppNames(t *testing.T) {
+	dir := t.TempDir()
+	writeBundle(t, dir, "evil", "name: \"<script>alert(1)</script>\"\n", defaultFiles())
+	writePolicy(t, dir, "evil", "groups: [\"*\"]\n")
+	h := testHandler(t, dir, true, "anyone")
+
+	body := get(h, "/site/").Body.String()
+	if strings.Contains(body, "<script>alert(1)</script>") {
+		t.Errorf("an app name was rendered as markup: %s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Errorf("the name was not escaped into the page at all: %s", body)
+	}
+}
