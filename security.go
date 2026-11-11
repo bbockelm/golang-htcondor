@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -466,6 +467,23 @@ func fsRootToCondor(cfg *config.Config) *bool {
 	}
 }
 
+// userTokenDir returns the per-user token directory, ~/.condor/tokens.d, or ""
+// when the home directory cannot be resolved. It mirrors the C++ tool path:
+// condor_auth_passwd.cpp findTokens() reaches find_user_file(..., "tokens.d"),
+// which builds the path under the user's home and does not require it to exist,
+// and only falls back to SEC_TOKEN_SYSTEM_DIRECTORY for a process that can
+// switch ids. Callers gate on runningAsDaemon() for that half.
+//
+// It is a var so tests can supply a directory without depending on the
+// environment the test process happens to run in.
+var userTokenDir = func() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".condor", "tokens.d")
+}
+
 // GetSecurityConfig creates a SecurityConfig from HTCondor configuration.
 // It reads security-related parameters like SEC_CLIENT_AUTHENTICATION, SEC_DEFAULT_AUTHENTICATION,
 // SEC_CLIENT_AUTHENTICATION_METHODS, etc., and maps them to the cedar SecurityConfig struct.
@@ -578,6 +596,13 @@ func GetSecurityConfig(cfg *config.Config, command int, context string) (*securi
 				if sysDir, ok := cfg.Get("SEC_TOKEN_SYSTEM_DIRECTORY"); ok && strings.TrimSpace(sysDir) != "" {
 					secConfig.TokenDir = strings.TrimSpace(sysDir)
 				}
+			} else if userDir := userTokenDir(); userDir != "" {
+				// A tool run by an ordinary user reads that user's token
+				// directory, ~/.condor/tokens.d. Without this an IDTOKEN issued
+				// by condor_token_fetch is invisible to every Go client, which
+				// then authenticates anonymously and is refused by any
+				// ALLOW_READ that names identities.
+				secConfig.TokenDir = userDir
 			}
 			// Note: TokenFile is typically used for single-token scenarios
 			// In practice, HTCondor usually uses TokenDir with multiple tokens

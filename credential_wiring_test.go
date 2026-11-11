@@ -98,13 +98,47 @@ func TestGetSecurityConfigDaemonTokenDir(t *testing.T) {
 		t.Errorf("explicit TokenDir = %q, want /custom/tokens.d", sc.TokenDir)
 	}
 
-	// Non-daemon, no explicit dir -> do NOT use the root-only system dir.
+	// Non-daemon, no explicit dir -> the user's own token directory, never the
+	// root-only system dir.
+	const homeDir = "/home/someuser/.condor/tokens.d"
+	restoreHome := userTokenDir
+	t.Cleanup(func() { userTokenDir = restoreHome })
+	userTokenDir = func() string { return homeDir }
+
 	runningAsDaemon = func() bool { return false }
 	sc, err = GetSecurityConfig(mustConfig(t, base), 60000, "CLIENT")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if sc.TokenDir != homeDir {
+		t.Errorf("non-daemon TokenDir = %q, want %q", sc.TokenDir, homeDir)
+	}
+
+	// An explicit SEC_TOKEN_DIRECTORY still wins for a tool.
+	sc, err = GetSecurityConfig(mustConfig(t, base+"SEC_TOKEN_DIRECTORY = /custom/tokens.d\n"), 60000, "CLIENT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.TokenDir != "/custom/tokens.d" {
+		t.Errorf("explicit TokenDir = %q, want /custom/tokens.d", sc.TokenDir)
+	}
+
+	// No resolvable home directory -> empty, not the root-only system dir.
+	userTokenDir = func() string { return "" }
+	sc, err = GetSecurityConfig(mustConfig(t, base), 60000, "CLIENT")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if sc.TokenDir != "" {
-		t.Errorf("non-daemon TokenDir = %q, want empty (system dir is root-only)", sc.TokenDir)
+		t.Errorf("TokenDir = %q with no home directory, want empty", sc.TokenDir)
+	}
+}
+
+// TestUserTokenDirUsesHome pins the default userTokenDir to ~/.condor/tokens.d,
+// the path condor_token_fetch writes and the C++ tools read.
+func TestUserTokenDirUsesHome(t *testing.T) {
+	t.Setenv("HOME", "/home/testuser")
+	if got, want := userTokenDir(), "/home/testuser/.condor/tokens.d"; got != want {
+		t.Errorf("userTokenDir() = %q, want %q", got, want)
 	}
 }
