@@ -373,6 +373,10 @@ func goBehaviorFor(have map[string]bool) htcondor.SubmitBehavior {
 
 		OmitVanillaDiskClause:    have["HTCONDOR-3932"],
 		OmitTransferVersionCheck: have["HTCONDOR-3932"],
+		// Same commit as the two above (2d2ff41e30): it removed the
+		// versioned disk clause and added the container-source method in
+		// one change, so the probe for one answers for the other.
+		ContainerSourceIsATransferMethod: have["HTCONDOR-3932"],
 
 		OmitLocalAndSchedulerMachineChecks:    have["HTCONDOR-3926"],
 		OmitLocalAndSchedulerResourceDefaults: have["HTCONDOR-3926"],

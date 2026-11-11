@@ -75,6 +75,18 @@ type SubmitFile struct {
 	// by every setResourceRequests; see defaultDiskEvaluates.
 	defaultDisk string
 
+	// wantTransferMethods is the set of file transfer plugin methods the
+	// job ad being built needs and does not supply itself, in the order
+	// SetRequirements writes its clauses. Reset by every
+	// setTransferPluginMethods.
+	//
+	// It is kept here rather than read back from
+	// WantTransferPluginMethods, because the two are not the same list: a
+	// method whose name is empty gets a Requirements clause but is left
+	// out of the attribute, and a `+WantTransferPluginMethods` the
+	// submitter forced on names no clause at all.
+	wantTransferMethods []string
+
 	// cudaClause records that finalizeCUDAVersion converted a cuda_version
 	// into the integer the startd compares against, which is the same
 	// condition under which SetRequirements adds the CUDAVersion clause to
@@ -4221,6 +4233,7 @@ func namesIdentifier(expr, name string) bool {
 // does: `+TransferInput = "http://..."` names a URL the job will fetch
 // just as much as transfer_input_files does.
 func (sf *SubmitFile) setTransferPluginMethods(ad *classad.ClassAd) {
+	sf.wantTransferMethods = nil
 	if !sf.transferPluginGate(ad) {
 		return
 	}
@@ -4247,13 +4260,19 @@ func (sf *SubmitFile) setTransferPluginMethods(ad *classad.ClassAd) {
 	// set is case-insensitive and keeps the first spelling it saw.
 	var wanted []string
 	seen := map[string]bool{}
-	add := func(s string) {
-		scheme, ok := submitURLScheme(s)
-		if !ok || supplied[strings.ToLower(scheme)] || seen[strings.ToLower(scheme)] {
+	addMethod := func(method string) {
+		if supplied[strings.ToLower(method)] || seen[strings.ToLower(method)] {
 			return
 		}
-		seen[strings.ToLower(scheme)] = true
-		wanted = append(wanted, scheme)
+		seen[strings.ToLower(method)] = true
+		wanted = append(wanted, method)
+	}
+	add := func(s string) {
+		scheme, ok := submitURLScheme(s)
+		if !ok {
+			return
+		}
+		addMethod(scheme)
 	}
 
 	if files, ok := ad.EvaluateAttrString("TransferInput"); ok {
@@ -4261,6 +4280,23 @@ func (sf *SubmitFile) setTransferPluginMethods(ad *classad.ClassAd) {
 			add(f)
 		}
 	}
+
+	// The container image's own source, which is NOT a URL the loop above
+	// sees: a common-catalog image never reaches TransferInput at all, and
+	// a transferred one is in there under the full path it was found at.
+	// The four sources that need no plugin are left out -- cedar is
+	// HTCondor's own transfer, docker and oras are pulled by the runtime
+	// on the execute node, and local means the image is already there.
+	if sf.behavior.ContainerSourceIsATransferMethod {
+		if src, ok := ad.EvaluateAttrString("ContainerImageSource"); ok {
+			switch strings.ToLower(src) {
+			case "cedar", "docker", "local", "oras":
+			default:
+				addMethod(src)
+			}
+		}
+	}
+
 	if dest, ok := ad.EvaluateAttrString("OutputDestination"); ok {
 		add(dest)
 	}
@@ -4272,13 +4308,26 @@ func (sf *SubmitFile) setTransferPluginMethods(ad *classad.ClassAd) {
 		}
 	}
 
-	if len(wanted) == 0 {
-		return
-	}
 	sort.Slice(wanted, func(i, j int) bool {
 		return strings.ToLower(wanted[i]) < strings.ToLower(wanted[j])
 	})
-	_ = ad.Set("WantTransferPluginMethods", strings.Join(wanted, ","))
+	sf.wantTransferMethods = wanted
+
+	// condor_submit joins the set by appending a comma only when it
+	// already has something, so a method whose name is EMPTY -- which is
+	// what a container_image of "x:" leaves behind -- contributes nothing
+	// to the attribute even though it still gets a Requirements clause of
+	// its own. The attribute is written only when the join is non-empty.
+	var attr string
+	for _, m := range wanted {
+		if attr != "" {
+			attr += ","
+		}
+		attr += m
+	}
+	if attr != "" {
+		_ = ad.Set("WantTransferPluginMethods", attr)
+	}
 }
 
 // submitURLScheme mirrors IsUrl() and getURLType(url, true) from
