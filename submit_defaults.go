@@ -118,7 +118,8 @@ func (sf *SubmitFile) usesDefaultResourceParams() bool {
 	if sf.universe != UniverseGrid {
 		return true
 	}
-	gr, _ := sf.submitCommand("grid_resource")
+	// Through the attribute name as well; see executableIsAFile.
+	gr, _ := sf.submitCommandAlt("grid_resource", "GridResource")
 	fields := strings.Fields(gr)
 	return len(fields) == 0 || !strings.EqualFold(fields[0], "batch")
 }
