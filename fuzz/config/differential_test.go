@@ -126,6 +126,49 @@ func cppDropsSpaceBeforeDot(goTable, cppTable string) bool {
 	return i == len(goTable) && j == len(cppTable)
 }
 
+// attrNameEscaping is the unparser difference recorded against
+// `0=$EVAL({'<0xFA>'})`: C++ renders a quoted attribute name through its
+// STRING escaper, so a byte isprint() rejects comes out as \NNN octal
+// (and a tab as \t), while Go writes the byte.
+//
+// C++'s own lexer does not undo it. Lexer::tokenizeStringOrIdentifier copies
+// a quoted identifier's bytes verbatim, backslashes and all, so `'\372'`
+// reads back as the FOUR characters, not the one byte -- and the two
+// different names therefore unparse to the same text. `0=$EVAL({'\372'})`
+// written with a literal backslash AGREES with Go, which is that collision
+// seen from the other side.
+//
+// Go's output round-trips and C++'s does not, so this is recorded rather
+// than matched, for the same reason as selectorSpacing above.
+var attrNameEscaping = divergenceClass{
+	name: "C++ octal-escapes a non-printable byte in a quoted attribute name",
+	input: func(in string) bool {
+		return strings.Contains(in, "'") && hasNonPrintableByte(in)
+	},
+	match: func(goTable, cppTable string) bool {
+		return goTable != cppTable && hasNonPrintableByte(goTable) && !hasNonPrintableByte(cppTable)
+	},
+}
+
+// hasNonPrintableByte reports whether s holds a byte C's isprint() rejects in
+// the C locale, which is the test C++ escapes on.
+//
+// The bytes the canonical table is BUILT from -- the unit separator between a
+// name and its value, and the newline between rows -- are not part of any
+// value and are skipped, or every table would answer yes.
+func hasNonPrintableByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\x1f' || c == '\x1e' || c == '\n' {
+			continue
+		}
+		if c < 0x20 || c > 0x7e {
+			return true
+		}
+	}
+	return false
+}
+
 // tripleQuote is the language change HTCONDOR-3993 made: three quotes in a
 // row now switch classic ClassAd parsing to new-ClassAd quoting rules. An
 // HTCondor that knows the marker reads `""""` as a quote opening a new-style
@@ -356,6 +399,31 @@ var seeds = []seedCase{
 		input:  "0=0 .$EVAL({0 .A})",
 		reason: "selectorSpacing, reached with a dot outside the expression",
 		class:  &selectorSpacing,
+	},
+	{
+		// Found by FuzzConfigParseExpand.
+		input: "0=$EVAL({'\xfa'})",
+		reason: "a non-printable byte in a quoted attribute name: HTCondor's " +
+			"unparser writes text its own parser reads as something else. " +
+			"ClassAdUnParser::UnparseAux runs an identifier through the STRING " +
+			"escaper with `'` as the delimiter, so a byte isprint() rejects " +
+			"comes out as \\NNN octal -- but Lexer::tokenizeStringOrIdentifier " +
+			"copies a quoted identifier's bytes verbatim, backslashes and all. " +
+			"`'\\372'` therefore reads back as the FOUR characters, not the one " +
+			"byte, and the two different names unparse to the same text: the " +
+			"literal-backslash spelling of this seed AGREES with Go, which is " +
+			"that collision seen from the other side. Go writes the byte, which " +
+			"round-trips, so this is recorded rather than matched -- the same " +
+			"trade as selectorSpacing above.",
+		class: &attrNameEscaping,
+	},
+	{
+		// The same class reached by a control byte rather than a high one:
+		// C++ escapes on isprint(), not on the top bit, so a tab in a
+		// quoted name comes out as \t.
+		input:  "0=$EVAL({'a\tb'})",
+		reason: "attrNameEscaping, reached with a control byte",
+		class:  &attrNameEscaping,
 	},
 
 	{
