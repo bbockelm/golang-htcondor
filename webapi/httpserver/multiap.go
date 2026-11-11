@@ -451,22 +451,7 @@ func multiAPAllowed(method, path string) bool {
 		return true
 	}
 	if seg, ok := strings.CutPrefix(path, "/api/v1/jobs/"); ok {
-		first, rest, sub := strings.Cut(seg, "/")
-		switch {
-		case first == "":
-			return false
-		case sub:
-			// /api/v1/jobs/{id}/...: an action on one job.
-			return !multiAPJobSubroutes[first] && first != "hold" && first != "release" &&
-				multiAPJobActionAllowed(method, rest)
-		case first == "hold" || first == "release":
-			// Bulk hold and release.
-			return method == http.MethodPost
-		case multiAPJobSubroutes[first]:
-			return false
-		}
-		// One job: read, remove, edit.
-		return read || method == http.MethodDelete || method == http.MethodPatch
+		return multiAPJobPathAllowed(method, seg)
 	}
 	if multiAPSSHPaths[path] {
 		return true
@@ -491,6 +476,40 @@ func multiAPAllowed(method, path string) bool {
 		}
 	}
 	return false
+}
+
+// multiAPJobPathAllowed decides everything under /api/v1/jobs/, where
+// seg is the path with that prefix removed.
+//
+// Split out of multiAPAllowed because this one prefix carries four
+// different shapes -- a bulk action, a workflow submission, a
+// not-a-job-id sub-route, and one job with or without an action -- and
+// folding them back into the caller is what made it unreadable.
+func multiAPJobPathAllowed(method, seg string) bool {
+	read := method == http.MethodGet || method == http.MethodHead
+	first, rest, sub := strings.Cut(seg, "/")
+	switch {
+	case first == "":
+		return false
+	case sub:
+		// /api/v1/jobs/{id}/...: an action on one job.
+		return !multiAPJobSubroutes[first] && first != "hold" && first != "release" &&
+			multiAPJobActionAllowed(method, rest)
+	case first == "hold" || first == "release":
+		// Bulk hold and release.
+		return method == http.MethodPost
+	case first == "dag":
+		// POST /api/v1/jobs/dag: a workflow submission, which goes to
+		// the AP the caller's assignment names, exactly as a job
+		// submission does. Here rather than in multiAPJobSubroutes
+		// because that map is the routes that are NOT served, and this
+		// one is.
+		return method == http.MethodPost
+	case multiAPJobSubroutes[first]:
+		return false
+	}
+	// One job: read, remove, edit.
+	return read || method == http.MethodDelete || method == http.MethodPatch
 }
 
 // multiAPCredentialPath reports whether path is a credential endpoint.

@@ -123,6 +123,22 @@ type Input struct {
 	Dag string
 	// Files are the other files supplied inline, by name.
 	Files map[string]string
+	// Opaque are names supplied WITH this submission whose bytes the
+	// analysis cannot read: an upload large enough that holding it in
+	// memory would be a mistake, or one that is not text at all.
+	//
+	// They are present for every purpose that only needs a name -- the
+	// spool allow-set, the required-file list, a reference satisfied,
+	// a basename collision -- and absent for every purpose that needs
+	// contents, so a workflow that names one as a submit description or
+	// a SPLICE is reported exactly as if it had not been supplied. That
+	// is the honest answer: nothing here read it.
+	//
+	// This is what lets a REST caller ship a reference database or a
+	// genome in the same request as the workflow that uses it, which is
+	// the one way a large shared input reaches many node jobs without
+	// being uploaded once per job.
+	Opaque []string
 	// Declared are names the caller promised to upload separately, after
 	// submission. They count as satisfying a reference -- the bytes are
 	// not here yet, but the name will be in the spool allow-set, which is
@@ -174,6 +190,9 @@ func Analyze(in Input) *Report {
 
 	a := &analysis{r: r, d: d, in: in, have: map[string]bool{}, referenced: map[string]bool{}}
 	for name := range in.Files {
+		a.have[name] = true
+	}
+	for _, name := range in.Opaque {
 		a.have[name] = true
 	}
 	for _, name := range in.Declared {
@@ -254,7 +273,7 @@ func Analyze(in Input) *Report {
 		r.add(Fatal, e.Line, e.Source, e.Why+": "+e.Text)
 	}
 
-	r.Staged = sortedKeys(in.Files)
+	r.Staged = in.supplied()
 	r.Required = buildRequired(in)
 	sort.SliceStable(r.Findings, func(i, j int) bool {
 		if r.Findings[i].Severity != r.Findings[j].Severity {
@@ -312,7 +331,7 @@ func (a *analysis) checkUnreferenced() {
 		blind = append(blind, "files referenced through VARS macros cannot be checked")
 	}
 
-	for _, name := range sortedKeys(a.in.Files) {
+	for _, name := range a.in.supplied() {
 		if name == a.in.DagName || a.referenced[name] || outputs[name] || rescueName.MatchString(name) {
 			continue
 		}
@@ -647,7 +666,7 @@ func checkCollisions(r *Report, d *DAG, in Input) {
 		}
 		byBase[b][p] = true
 	}
-	for name := range in.Files {
+	for _, name := range in.supplied() {
 		note(name)
 	}
 	for _, s := range d.Scripts {
@@ -701,6 +720,9 @@ func buildRequired(in Input) []string {
 		set[in.DagName] = true
 	}
 	for name := range in.Files {
+		set[name] = true
+	}
+	for _, name := range in.Opaque {
 		set[name] = true
 	}
 	for _, name := range in.Declared {
@@ -853,6 +875,26 @@ func asDeclared(d *DAG, path []string) []string {
 func isURL(p string) bool {
 	i := strings.Index(p, "://")
 	return i > 0 && !strings.ContainsAny(p[:i], "/ \t")
+}
+
+// supplied is every name this submission carries bytes for, sorted:
+// the inline Files plus the Opaque uploads. Declared names are NOT here
+// -- they are promised, not supplied, and the distinction is the whole
+// point of the field.
+func (in Input) supplied() []string {
+	out := make([]string, 0, len(in.Files)+len(in.Opaque))
+	seen := make(map[string]bool, len(in.Files)+len(in.Opaque))
+	for _, group := range [][]string{sortedKeys(in.Files), in.Opaque} {
+		for _, name := range group {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func sortedKeys(m map[string]string) []string {

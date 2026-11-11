@@ -343,9 +343,9 @@ func TestSubmitDagAppliesSitePolicyToNodeSubmitFiles(t *testing.T) {
 	// reach them. Without it an operator's mandatory directive would cover
 	// the one job that does no work and none of the ones that do.
 	s := &Server{submitPolicy: submitpolicy.Policy{Overrides: "+ProjectName = \"site\""}}
-	got, err := s.policyForStagedFile("a.sub", "executable = /bin/true\nqueue\n")
+	got, err := dagman.PolicyForStagedFile(s.submitPolicy, "a.sub", "executable = /bin/true\nqueue\n")
 	if err != nil {
-		t.Fatalf("policyForStagedFile: %v", err)
+		t.Fatalf("PolicyForStagedFile: %v", err)
 	}
 	if !strings.Contains(got, "ProjectName") {
 		t.Errorf("site policy did not reach the node submit description:\n%s", got)
@@ -354,7 +354,7 @@ func TestSubmitDagAppliesSitePolicyToNodeSubmitFiles(t *testing.T) {
 	// A script is not a submit file. Splicing submit-file text into it
 	// would corrupt it, so the narrow extension test is deliberate.
 	script := "#!/bin/sh\necho hi\n"
-	if out, err := s.policyForStagedFile("tidy.sh", script); err != nil || out != script {
+	if out, err := dagman.PolicyForStagedFile(s.submitPolicy, "tidy.sh", script); err != nil || out != script {
 		t.Errorf("site policy was spliced into a shell script:\n%s", out)
 	}
 }
@@ -362,7 +362,7 @@ func TestSubmitDagAppliesSitePolicyToNodeSubmitFiles(t *testing.T) {
 // TestSubmitDagAppliesSitePolicyToInlineDescriptions is the same rule for
 // the shape the tool actually recommends.
 //
-// Every inline block bypassed site policy, because policyForStagedFile
+// Every inline block bypassed site policy, because PolicyForStagedFile
 // only ever sees a separate .sub file -- so following the tool's own
 // advice was the way to escape the operator's mandatory directives.
 func TestSubmitDagAppliesSitePolicyToInlineDescriptions(t *testing.T) {
@@ -379,7 +379,7 @@ FINAL cleanup {
   executable = /bin/true
 }
 `
-	staged := s.policyForInlineDescriptions(dag)
+	staged := dagman.PolicyForInlineDescriptions(s.submitPolicy, dag)
 	if n := strings.Count(staged, "ProjectName"); n != 3 {
 		t.Errorf("site policy reached %d of the 3 inline descriptions:\n%s", n, staged)
 	}
@@ -413,7 +413,7 @@ FINAL cleanup {
 	}
 	// A DAG with no policy configured comes through byte for byte.
 	plain := &Server{}
-	if out := plain.policyForInlineDescriptions(dag); out != dag {
+	if out := dagman.PolicyForInlineDescriptions(plain.submitPolicy, dag); out != dag {
 		t.Error("an unconfigured policy still rewrote the DAG")
 	}
 }
@@ -583,19 +583,19 @@ func TestStagedModeFollowsTheParseNotTheExtension(t *testing.T) {
 		"a.sub":   "executable = run\nqueue\n",
 		"data.in": "x\n",
 	}
-	exec := executableStagedNames(dagman.Parse("JOB A a.sub\nSCRIPT PRE A setup\n"), files)
-	if mode := stagedMode("setup", exec); mode != 0o755 {
+	exec := dagman.ExecutableStagedNames(dagman.Parse("JOB A a.sub\nSCRIPT PRE A setup\n"), files)
+	if mode := dagman.StagedMode("setup", exec); mode != 0o755 {
 		t.Errorf("a PRE script with no extension was staged %o; DAGMan cannot run it", mode)
 	}
-	if mode := stagedMode("run", exec); mode != 0o755 {
+	if mode := dagman.StagedMode("run", exec); mode != 0o755 {
 		t.Errorf("a node's own executable was staged %o", mode)
 	}
-	if mode := stagedMode("data.in", exec); mode != 0o644 {
+	if mode := dagman.StagedMode("data.in", exec); mode != 0o644 {
 		t.Errorf("an input file was made executable (%o)", mode)
 	}
 	// The extension rule stays as a fallback for a file the parse cannot
 	// attribute -- a script named only in a node's arguments, say.
-	if mode := stagedMode("helper.sh", map[string]bool{}); mode != 0o755 {
+	if mode := dagman.StagedMode("helper.sh", map[string]bool{}); mode != 0o755 {
 		t.Errorf("the extension fallback is gone: helper.sh staged %o", mode)
 	}
 }
@@ -605,8 +605,8 @@ func TestStagedModeFollowsTheParseNotTheExtension(t *testing.T) {
 // could not carry out; what it did instead was poll in a loop.
 func TestDagFollowUpAdviceNamesToolsThatExist(t *testing.T) {
 	report := &dagman.Report{Required: []string{"workflow.dag"}}
-	res := dagSubmitResult(42, "workflow.dag", report, nil, dagman.Instrumentation{
-		DotFile: "workflow.dot", StatusFile: "workflow.status"})
+	res := dagSubmitResult(42, &dagman.Prepared{DagName: "workflow.dag", Report: report,
+		Instrumentation: dagman.Instrumentation{DotFile: "workflow.dot", StatusFile: "workflow.status"}}, nil)
 	text := res["content"].([]map[string]interface{})[0]["text"].(string)
 
 	want := `To wait for the whole workflow, register watch_jobs(constraint="ClusterId == 42", event="done") ` +
@@ -627,8 +627,9 @@ func TestDagFollowUpAdviceNamesToolsThatExist(t *testing.T) {
 // ready-made is the difference between querying the nodes and querying
 // the manager job again and concluding the workflow has no jobs.
 func TestSubmitDagResultHandsOverTheNodeConstraint(t *testing.T) {
-	res := dagSubmitResult(42, "workflow.dag", &dagman.Report{Required: []string{"workflow.dag"}}, nil,
-		dagman.Instrumentation{DotFile: "workflow.dot", StatusFile: "workflow.status"})
+	res := dagSubmitResult(42, &dagman.Prepared{DagName: "workflow.dag",
+		Report:          &dagman.Report{Required: []string{"workflow.dag"}},
+		Instrumentation: dagman.Instrumentation{DotFile: "workflow.dot", StatusFile: "workflow.status"}}, nil)
 	structured, _ := res["structuredContent"].(map[string]interface{})
 	got, _ := structured["node_constraint"].(string)
 	if got != "DAGManJobId == 42" {
@@ -714,8 +715,10 @@ func TestSpoolFailureAlwaysNamesTheCluster(t *testing.T) {
 // is the last resort. Discovery must never turn an empty BIN into
 // "/condor_dagman".
 func TestDagmanLayoutPrecedence(t *testing.T) {
-	layout := func(bin string, noPort bool) func(context.Context) (string, bool) {
-		return func(context.Context) (string, bool) { return bin, noPort }
+	layout := func(bin string, noPort bool) func(context.Context) dagman.Layout {
+		return func(context.Context) dagman.Layout {
+			return dagman.Layout{BinDir: bin, DisablePort: noPort}
+		}
 	}
 	for _, tc := range []struct {
 		name       string
@@ -754,9 +757,9 @@ func TestDagmanLayoutPrecedence(t *testing.T) {
 
 	// Discovery runs once per server, whatever it is asked.
 	calls := 0
-	counted := &Server{dagmanLayoutFn: func(context.Context) (string, bool) {
+	counted := &Server{dagmanLayoutFn: func(context.Context) dagman.Layout {
 		calls++
-		return "/usr/bin", false
+		return dagman.Layout{BinDir: "/usr/bin"}
 	}}
 	for i := 0; i < 3; i++ {
 		counted.dagmanLayout(context.Background())
@@ -768,14 +771,14 @@ func TestDagmanLayoutPrecedence(t *testing.T) {
 	// Once per access point: two APs' layouts are two discoveries, each
 	// memoised on its own.
 	asked := map[string]int{}
-	perAP := &Server{dagmanLayoutFn: func(ctx context.Context) (string, bool) {
+	perAP := &Server{dagmanLayoutFn: func(ctx context.Context) dagman.Layout {
 		asked[routedSchedd(ctx)]++
-		return "/bin/" + routedSchedd(ctx), false
+		return dagman.Layout{BinDir: "/bin/" + routedSchedd(ctx)}
 	}}
 	for _, ap := range []string{"ap1", "ap2", "ap1", "ap2"} {
 		ctx := multiap.WithTarget(context.Background(), multiap.Target{Member: apregistry.Member{Name: ap}})
-		if bin, _ := perAP.dagmanLayout(ctx); bin != "/bin/"+ap {
-			t.Errorf("%s's layout = %q", ap, bin)
+		if got := perAP.dagmanLayout(ctx); got.BinDir != "/bin/"+ap {
+			t.Errorf("%s's layout = %q", ap, got.BinDir)
 		}
 	}
 	if asked["ap1"] != 1 || asked["ap2"] != 1 {
@@ -805,7 +808,7 @@ func TestSubmitDagPassesTheDagsOwnConfig(t *testing.T) {
 	}
 	// Two of them is a workflow that disagrees with itself; DAGMan is a
 	// better judge of that than a guess here would be.
-	if got := soleConfigFile(dagman.Parse("CONFIG a\nCONFIG b\n")); got != "" {
+	if got := dagman.SoleConfigFile(dagman.Parse("CONFIG a\nCONFIG b\n")); got != "" {
 		t.Errorf("two CONFIG files produced a choice between them: %q", got)
 	}
 }
@@ -949,7 +952,8 @@ func TestSubmitDagOffersAnInstrumentationEscapeHatch(t *testing.T) {
 func TestSubmitDagResultSaysWhenThereIsNoGraph(t *testing.T) {
 	report := &dagman.Report{Required: []string{"workflow.dag"}}
 	skipped := dagman.Instrumentation{Skipped: "the workflow was not instrumented: because of reasons."}
-	res := dagSubmitResult(7, "workflow.dag", report, []string{skipped.Skipped}, skipped)
+	res := dagSubmitResult(7, &dagman.Prepared{DagName: "workflow.dag", Report: report,
+		Instrumentation: skipped}, []string{skipped.Skipped})
 	text := res["content"].([]map[string]interface{})[0]["text"].(string)
 	if strings.Contains(text, "DAGMan writes this workflow's structure") {
 		t.Errorf("the result promises a graph that will not be written:\n%s", text)
@@ -963,8 +967,9 @@ func TestSubmitDagResultSaysWhenThereIsNoGraph(t *testing.T) {
 	}
 
 	// The instrumented case still names both files.
-	res = dagSubmitResult(7, "workflow.dag", report, nil,
-		dagman.Instrumentation{DotFile: "workflow.dot", StatusFile: "workflow.status", AddedDot: true, AddedStatus: true})
+	res = dagSubmitResult(7, &dagman.Prepared{DagName: "workflow.dag", Report: report,
+		Instrumentation: dagman.Instrumentation{DotFile: "workflow.dot", StatusFile: "workflow.status",
+			AddedDot: true, AddedStatus: true}}, nil)
 	text = res["content"].([]map[string]interface{})[0]["text"].(string)
 	if !strings.Contains(text, "workflow.dot") || !strings.Contains(text, "workflow.status") {
 		t.Errorf("an instrumented workflow's result does not name its files:\n%s", text)

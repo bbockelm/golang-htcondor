@@ -33,6 +33,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/metricsd"
 	"github.com/bbockelm/golang-htcondor/webapi/appolicy"
+	"github.com/bbockelm/golang-htcondor/webapi/dagman"
 	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
@@ -143,6 +144,13 @@ type Handler struct {
 	// dagmanEnv is extra environment for DAGMan
 	// (HTTP_API_DAGMAN_ENVIRONMENT).
 	dagmanEnv map[string]string
+	// dagmanLayouts memoises what each access point's own configuration
+	// says about its DAGMan installation, so submitting a workflow costs
+	// at most one extra DC_CONFIG_VAL round trip per AP per process. The
+	// MCP server keeps its own of these: the two ask the same question
+	// of the same schedd and must get the same answer, which is why they
+	// share the type rather than each discovering it their own way.
+	dagmanLayouts dagman.LayoutCache
 
 	// interactiveRequirements is an operator-supplied ClassAd expression
 	// ANDed into the interactive terminal job's Requirements, to keep
