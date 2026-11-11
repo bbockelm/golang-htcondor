@@ -447,6 +447,68 @@ const openAPISchema = `{
           }
         }
       },
+      "DagGraphResponse": {
+        "type": "object",
+        "description": "A submitted workflow's structure and node states, read from the files DAGMan writes into its spool.",
+        "properties": {
+          "cluster": {"type": "integer", "description": "The DAGMan manager job's cluster"},
+          "dag_file": {"type": "string"},
+          "dot_file": {"type": "string"},
+          "status_file": {"type": "string"},
+          "node_count": {"type": "integer"},
+          "edge_count": {"type": "integer"},
+          "group_count": {"type": "integer"},
+          "groups": {
+            "type": "array",
+            "description": "Nodes collapsed into groups, for drawing a workflow too large to show node by node.",
+            "items": {"$ref": "#/components/schemas/DagGraphGroup"}
+          },
+          "nodes": {"type": "array", "items": {"$ref": "#/components/schemas/DagGraphNode"}},
+          "nodes_omitted": {
+            "type": "boolean",
+            "description": "The node list was left out because the workflow is too large; groups still describe it. Draw from groups when this is set, rather than showing an empty graph."
+          },
+          "nodes_omitted_reason": {"type": "string"},
+          "approximate_layering": {"type": "boolean"},
+          "state_sources": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Which spool files the states came from. A workflow submitted with instrument:false has none."
+          },
+          "status_file_time": {"type": "integer", "format": "int64"},
+          "warnings": {"type": "array", "items": {"type": "string"}},
+          "fetched_at": {"type": "string", "format": "date-time"},
+          "took_ms": {"type": "integer", "format": "int64"}
+        }
+      },
+      "DagGraphGroup": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "label": {"type": "string"},
+          "description": {"type": "string"},
+          "count": {"type": "integer"},
+          "parent_ids": {"type": "array", "items": {"type": "string"}},
+          "status": {
+            "type": "object",
+            "additionalProperties": {"type": "integer"},
+            "description": "Node states in this group, counted by state name."
+          }
+        }
+      },
+      "DagGraphNode": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "group_id": {"type": "string"},
+          "state": {"type": "string"},
+          "job_id": {"type": "string", "description": "The node's own job, in cluster.proc format. Absent until DAGMan submits it."},
+          "hold_reason": {"type": "string"},
+          "exit_code": {"type": "integer"},
+          "detail": {"type": "string"},
+          "source": {"type": "string"}
+        }
+      },
       "WhoAmIResponse": {
         "type": "object",
         "required": ["authenticated"],
@@ -2206,6 +2268,43 @@ const openAPISchema = `{
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/jobs/{jobId}/dag": {
+      "get": {
+        "summary": "Read a submitted workflow's structure and node states",
+        "description": "The shape of a DAG that was already submitted, plus where each node has got to.\n\nRead from the files DAGMan writes into the workflow's spool, so it answers for a running or finished workflow without re-parsing what was submitted. A workflow submitted with instrument:false writes neither file and has nothing to report here.\n\nNode jobs are NOT in the manager's cluster -- DAGMan submits each one separately -- so this is how a caller sees the workflow as a whole. To query the node jobs themselves, use the constraint POST /jobs/dag returns as node_constraint.",
+        "operationId": "getJobDag",
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string"},
+            "description": "The DAGMan manager job, in cluster.proc format (e.g. 23.0). This is the job POST /jobs/dag created, not a node job."
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string", "enum": ["1"]},
+            "description": "Bypass the cached read and re-read the spool files. The structure is cached because it changes only when DAGMan rewrites it; pass this when a user explicitly asked for fresh state."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The workflow's structure and per-node state",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/DagGraphResponse"}
+              }
+            }
+          },
+          "404": {
+            "description": "No such job, or the job is not a DAGMan workflow",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
           }
         }
       }
