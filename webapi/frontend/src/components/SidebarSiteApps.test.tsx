@@ -95,3 +95,62 @@ describe('site apps in the sidebar', () => {
     await waitFor(() => expect(link.getAttribute('href')).toBe('/site/cryoem/'));
   });
 });
+
+describe('app-only sessions and the expert door', () => {
+  beforeEach(() => {
+    me.mockReset();
+  });
+
+  it('collapses the general-purpose navigation and offers the door', async () => {
+    await renderShell({
+      authenticated: true,
+      is_admin: false,
+      username: 'zoe',
+      site_apps: [cryoem],
+      app_only: true,
+    });
+
+    expect(await screen.findByTestId('site-app-cryoem')).toBeInTheDocument();
+    expect(screen.getByTestId('expert-mode')).toHaveAttribute('href', '/site/expert');
+    // The console pages are not offered. They are not forbidden --
+    // typing the URL still works -- they are just not put in front of
+    // somebody who did not ask for them.
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument();
+    expect(screen.queryByText('Pool')).not.toBeInTheDocument();
+  });
+
+  it('restores the navigation and offers the way back once expert mode is on', async () => {
+    await renderShell({
+      authenticated: true,
+      is_admin: false,
+      username: 'zoe',
+      site_apps: [cryoem],
+      app_only: true,
+      expert_active: true,
+    });
+
+    expect(await screen.findByText('Dashboard')).toBeInTheDocument();
+    expect(screen.getByTestId('leave-expert-mode')).toHaveAttribute(
+      'href',
+      '/site/expert?close=1',
+    );
+    expect(screen.queryByTestId('expert-mode')).not.toBeInTheDocument();
+  });
+
+  it('leaves an ordinary session alone', async () => {
+    // Somebody who is also staff keeps the full console and is never
+    // shown a door they do not need.
+    await renderShell({
+      authenticated: true,
+      is_admin: false,
+      username: 'zoe',
+      site_apps: [cryoem],
+    });
+
+    expect(await screen.findByText('Dashboard')).toBeInTheDocument();
+    expect(screen.queryByTestId('expert-mode')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('leave-expert-mode')).not.toBeInTheDocument();
+    // ...and still sees their app.
+    expect(screen.getByTestId('site-app-cryoem')).toBeInTheDocument();
+  });
+});

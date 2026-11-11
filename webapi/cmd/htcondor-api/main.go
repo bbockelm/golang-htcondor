@@ -2191,6 +2191,10 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// Site apps: a directory of <id>.zip bundles, each with an
 	// <id>.yaml policy file beside it naming the groups that may see
 	// it. Unset leaves the feature out of the server entirely.
+	// Groups whose members land in their site app rather than the
+	// dashboard. Presentation only -- it restricts nothing.
+	webuiAppOnlyGroup, _ := cfg.Get("HTTP_API_WEBUI_APP_ONLY_GROUP")
+
 	siteAppsDir := ""
 	if dir, ok := cfg.Get("HTTP_API_SITE_APPS_DIR"); ok && strings.TrimSpace(dir) != "" {
 		siteAppsDir = strings.TrimSpace(dir)
@@ -2524,6 +2528,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		PoolQueryPolicy:            poolpolicy.New(mcpCfg.poolQueryMode, mcpCfg.poolQueryExtraAttrs),
 		WebUIAdminGroup:            webuiAdminGroup,
 		WebUIAccessGroup:           webuiAccessGroup,
+		WebUIAppOnlyGroup:          webuiAppOnlyGroup,
 		SiteAppsDir:                siteAppsDir,
 		SiteAppsReloadInterval:     siteAppsReload,
 		WebUISiteName:              webuiSiteName,

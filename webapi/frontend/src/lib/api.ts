@@ -162,6 +162,14 @@ export interface Session {
   // the same list drives the sidebar, the switcher at /site/ and the gate
   // on /site/{id}/, so none of them can disagree about who sees what.
   site_apps?: SiteApp[];
+  // This session is normally sent to its app instead of the dashboard,
+  // so the navigation collapses to the apps plus a way back. It
+  // restricts nothing: every page is still reachable by typing its URL,
+  // and the API is untouched.
+  app_only?: boolean;
+  // The session stepped through the expert door and is looking at the
+  // full console on purpose, so offer the way back to the app.
+  expert_active?: boolean;
   // May this session arm superuser mode? Configured feature + membership in
   // HTTP_API_SUPERUSER_GROUP, which is deliberately not the admin-UI group.
   superuser_allowed?: boolean;

@@ -100,6 +100,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         multiAP={session?.multi_ap}
         reservations={session?.reservations}
         siteApps={session?.site_apps}
+        appOnly={session?.app_only}
+        expertActive={session?.expert_active}
         placement={!!session?.placement}
         placementProjects={session?.placement?.projects}
         placementProject={session?.placement?.project}

@@ -85,7 +85,11 @@ func (h *Handler) setupRoutes() {
 	// otherwise fall back to the legacy welcome page.
 	if webui.IsEmbedded() {
 		spa := webui.NewSPAHandler(webui.WithBranding(h.branding.current))
-		mux.Handle("/", spa)
+		// An app-only session lands on its app rather than the
+		// dashboard. Presentation, not authorization: the wrapper only
+		// redirects page navigations, and the expert door below turns
+		// it off for the session.
+		mux.Handle("/", h.appOnlyRedirect(spa))
 	} else {
 		mux.HandleFunc("/", h.handleWelcome)
 	}
@@ -109,6 +113,9 @@ func (h *Handler) setupRoutes() {
 	// ServeMux prefers the longer pattern, so this wins over "/"
 	// regardless of registration order.
 	if h.siteApps != nil {
+		// The expert door, registered before the subtree so it wins:
+		// ServeMux prefers the longer, more specific pattern.
+		mux.HandleFunc("/site/expert", h.handleExpertMode)
 		mux.Handle("/site/", siteapps.NewHandler(h.siteApps, h.siteAppCaller, h.siteAppLogin))
 	}
 

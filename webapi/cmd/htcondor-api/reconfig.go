@@ -45,6 +45,7 @@ type reconfigTarget interface {
 	SetMCPAdminGroups(string)
 	SetMCPSuperuserGroups(string)
 	SetWebUIAccessGroups(string)
+	SetWebUIAppOnlyGroups(string)
 	SetWebUIAdminGroups(string)
 	SetWebUISiteName(string)
 	SetWebUISiteTagline(string)
@@ -167,6 +168,10 @@ var reconfigParams = []reconfigParam{
 	{
 		name:  "HTTP_API_WEBUI_ACCESS_GROUP",
 		apply: func(s reconfigTarget, v string) { s.SetWebUIAccessGroups(v) },
+	},
+	{
+		name:  "HTTP_API_WEBUI_APP_ONLY_GROUP",
+		apply: func(s reconfigTarget, v string) { s.SetWebUIAppOnlyGroups(v) },
 	},
 	{
 		name:  "HTTP_API_WEBUI_ADMIN_GROUP",

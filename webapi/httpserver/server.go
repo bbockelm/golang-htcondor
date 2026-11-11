@@ -368,6 +368,9 @@ type Config struct {
 	// MCPRedactDisabledRules (HTTP_API_MCP_REDACT_DISABLED_RULES) names
 	// masking rules to turn off, as globs over rule ids.
 	MCPRedactDisabledRules string
+	// WebUIAppOnlyGroup names groups whose members land in their site app
+	// instead of the dashboard. Presentation only; see HandlerConfig.
+	WebUIAppOnlyGroup string
 	// SiteAppsDir holds the <id>.zip bundles and <id>.yaml policy files
 	// for operator-deployed static web apps. Empty disables the feature.
 	SiteAppsDir string
@@ -619,6 +622,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPDisableSecretRedaction:   cfg.MCPDisableSecretRedaction,
 		MCPRedactDisabledRules:      cfg.MCPRedactDisabledRules,
 		MCPSkillsDir:                cfg.MCPSkillsDir,
+		WebUIAppOnlyGroup:           cfg.WebUIAppOnlyGroup,
 		SiteAppsDir:                 cfg.SiteAppsDir,
 		SiteAppsReloadInterval:      cfg.SiteAppsReloadInterval,
 		MCPSkillsReloadInterval:     cfg.MCPSkillsReloadInterval,

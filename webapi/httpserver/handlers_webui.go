@@ -37,6 +37,15 @@ type AuthMeResponse struct {
 	// app-only redirect cannot disagree with the gate on /site/ about
 	// who sees what.
 	SiteApps []SiteAppSummary `json:"site_apps,omitempty"`
+	// AppOnly reports that this session is normally sent to its app
+	// instead of the dashboard, so the SPA can collapse its navigation
+	// and offer the way back. Presentation only: it restricts nothing,
+	// and every page remains reachable.
+	AppOnly bool `json:"app_only,omitempty"`
+	// ExpertActive reports that the session has stepped through the
+	// expert door and is seeing the full console on purpose. The SPA
+	// shows the way back to the app on this.
+	ExpertActive bool `json:"expert_active,omitempty"`
 	// SuperuserAllowed reports that this session MAY arm superuser mode --
 	// the feature is configured and the session is in the superuser group.
 	// It says nothing about whether the mode is currently on.
@@ -146,6 +155,8 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 			resp.IsAdmin = s.webuiAdminGroups.allows(session.Groups)
 		}
 		resp.SiteApps = s.siteAppsFor(session.Groups)
+		resp.AppOnly = s.isAppOnly(session.Groups)
+		resp.ExpertActive = resp.AppOnly && expertModeArmed(r)
 		resp.ProjectLeadOf = s.projectLeads.LedProjects(session.Username, session.Groups)
 		resp.Assignment = s.sessionAssignment(r, session)
 		resp.SuperuserAllowed = s.mayUseSuperuserMode(r)

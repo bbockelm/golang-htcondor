@@ -417,6 +417,10 @@ type Handler struct {
 	// How often that directory is re-read; zero leaves reloads to reconfigure.
 	mcpSkillsReloadInterval time.Duration
 	siteAppsReloadInterval  time.Duration
+	// webuiAppOnlyGroups are the groups whose members land in their site
+	// app rather than the dashboard, with the stock navigation
+	// collapsed. Presentation, never authorization.
+	webuiAppOnlyGroups *groupSet
 	// siteApps serves operator-deployed static web apps under /site/.
 	// nil when HTTP_API_SITE_APPS_DIR is unset, which leaves the whole
 	// feature -- routes included -- out of the server.
@@ -1136,6 +1140,19 @@ type HandlerConfig struct {
 	// MCPRedactDisabledRules (HTTP_API_MCP_REDACT_DISABLED_RULES) names
 	// masking rules to turn off, as globs over rule ids.
 	MCPRedactDisabledRules string
+	// WebUIAppOnlyGroup names the groups whose members are sent to their
+	// site app instead of the dashboard, and whose stock navigation
+	// collapses to their apps. Comma-separated;
+	// HTTP_API_WEBUI_APP_ONLY_GROUP.
+	//
+	// This is presentation and NOT authorization. The API is unchanged,
+	// every page stays reachable by typing its URL, and the expert-mode
+	// link opens the full console for the session. It exists so a
+	// non-technical user does not meet a general-purpose batch console
+	// they did not ask for -- not to stop a determined one reaching it.
+	// Documentation must never describe it as a restriction, or someone
+	// will eventually rely on it as one.
+	WebUIAppOnlyGroup string
 	// SiteAppsDir holds <id>.zip bundles and their <id>.yaml policy
 	// files. Empty disables site apps entirely: no library is built and
 	// no /site/ route is registered.
@@ -2060,6 +2077,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// Built here rather than in Start because setupRoutes decides
 	// whether to register /site/ on whether this is non-nil, and that
 	// runs before there is a context for the rescan goroutine.
+	h.webuiAppOnlyGroups = newGroupSet(cfg.WebUIAppOnlyGroup)
 	h.siteAppsReloadInterval = cfg.SiteAppsReloadInterval
 	h.siteApps = h.newSiteAppLibrary(cfg.SiteAppsDir)
 	h.branding = newBrandingState(logger, brandingOptions{

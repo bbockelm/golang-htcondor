@@ -34,6 +34,7 @@ func (f *fakeTarget) SetMCPAdminGroups(v string)     { f.record("mcp_admin", v) 
 func (f *fakeTarget) SetMCPSuperuserGroups(v string) { f.record("mcp_superuser", v) }
 func (f *fakeTarget) SetWebUIAccessGroups(v string)  { f.record("webui_access", v) }
 func (f *fakeTarget) SetWebUIAdminGroups(v string)   { f.record("webui_admin", v) }
+func (f *fakeTarget) SetWebUIAppOnlyGroups(v string) { f.record("webui_app_only", v) }
 func (f *fakeTarget) SetWebUISiteName(v string)      { f.record("webui_site_name", v) }
 func (f *fakeTarget) SetWebUISiteTagline(v string)   { f.record("webui_site_tagline", v) }
 func (f *fakeTarget) SetWebUIFooterLogos(v string)   { f.record("webui_footer_logos", v) }
