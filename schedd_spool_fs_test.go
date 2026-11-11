@@ -2,6 +2,7 @@ package htcondor
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -189,15 +190,10 @@ func TestSpoolJobFilesFromFS_AcceptsExecutableOnly(t *testing.T) {
 // equalStringSlices is a small helper since the helper-returned map
 // has nondeterministic iteration order; we sort and compare.
 func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	// slices.Equal rather than an index loop: gosec's G602 cannot see
+	// that the length check above bounds b[i], and reports an
+	// out-of-range index on every caller that reaches here.
+	return slices.Equal(a, b)
 }
 
 func keysSorted(m map[string]bool) []string {

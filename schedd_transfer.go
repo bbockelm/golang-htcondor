@@ -420,8 +420,18 @@ func (s *Schedd) spoolJobFilesFromFS(ctx context.Context, jobAds []*classad.Clas
 		// the executable's basename is added when transfer_executable is
 		// true (the default). This lets minimal jobs — those whose only
 		// transferable file is the executable itself — spool successfully.
-		fileSet := getInputFilesFromJobAd(ad)
+		fileSet, skippedURLs := inputFilesAndURLs(ad)
 		if len(fileSet) == 0 {
+			// Distinguish the two ways of having nothing to spool. A
+			// job whose inputs are all URLs is not misconfigured --
+			// the execute node fetches them -- so an error saying
+			// "TransferInput is empty" would send whoever reads it
+			// looking for the wrong thing.
+			if len(skippedURLs) > 0 {
+				return fmt.Errorf("job ad %d (job %d.%d): nothing to spool: every entry in TransferInput is a URL (%s), "+
+					"which the execute node fetches itself, and the executable is not being transferred",
+					i, clusterInt, procInt, strings.Join(skippedURLs, ", "))
+			}
 			return fmt.Errorf("job ad %d (job %d.%d): no files to spool (TransferInput is empty and TransferExecutable is false or Cmd is unset)", i, clusterInt, procInt)
 		}
 		fileLists[i] = make([]string, 0, len(fileSet))
@@ -739,6 +749,29 @@ func IsSystemExecutablePath(cmd string) bool {
 // getInputFilesFromJobAd extracts the set of files that need to be transferred for a job.
 // This includes TransferInput and the executable if TransferExecutable is true.
 func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
+	set, _ := inputFilesAndURLs(ad)
+	return set
+}
+
+// inputFilesAndURLs splits TransferInput into the files this access
+// point has to spool and the URLs it must not try to.
+//
+// A URL in transfer_input_files is fetched by the execute node's
+// transfer plugin, not uploaded from here, so it is not a file the
+// spooler can open. The C++ does the same thing for the same reason --
+// file_transfer.cpp erases URLs from InputFiles when spooling "so the
+// file transfer plugin [is] invoked at the starter, not the schedd" --
+// and this side did not, which made a URL fatal rather than ignored:
+// SpoolJobFilesFromFS stats every name in the allow-set and fails the
+// whole job on the first one that is not a real path. That took out
+// every surface built on the FS spool path, interactive sessions and
+// DAGs among them, for a submit file that is perfectly legal.
+//
+// The URLs are returned rather than dropped so a caller left with
+// nothing to spool can say which it was: "TransferInput was empty" and
+// "TransferInput was nothing but URLs" need different answers from
+// whoever reads the error.
+func inputFilesAndURLs(ad *classad.ClassAd) (map[string]bool, []string) {
 	var inputFiles []string
 
 	transferInputRaw, _ := ad.EvaluateAttrString("TransferInput")
@@ -748,7 +781,12 @@ func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 
 	// Create set of input files for fast lookup
 	inputFileSet := make(map[string]bool)
+	var urls []string
 	for _, f := range inputFiles {
+		if isURL(f) {
+			urls = append(urls, f)
+			continue
+		}
 		inputFileSet[f] = true
 	}
 
@@ -792,10 +830,10 @@ func getInputFilesFromJobAd(ad *classad.ClassAd) map[string]bool {
 	// therefore (intentionally) excluded. The cluster.proc isn't on
 	// the ad at this point, but the caller's logging usually carries
 	// it via the surrounding context.
-	log.Printf("spool allow-set source: TransferInput=%q Cmd=%q (present=%v) TransferExecutable=%v (present=%v) → set=%v",
-		transferInputRaw, cmdValue, cmdPresent, transferExe, transferExePresent, inputFileSet)
+	log.Printf("spool allow-set source: TransferInput=%q Cmd=%q (present=%v) TransferExecutable=%v (present=%v) urls_skipped=%v → set=%v",
+		transferInputRaw, cmdValue, cmdPresent, transferExe, transferExePresent, urls, inputFileSet)
 
-	return inputFileSet
+	return inputFileSet, urls
 }
 
 // SpoolInputAllowSet returns, sorted, the filenames the schedd will
