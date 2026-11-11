@@ -59,7 +59,9 @@ import (
 // knowing where this server chose to keep its database. The file is
 // written 0600 after an unlink, so sharing the directory with other
 // users is not the exposure it looks like -- see writeDemoCredentials.
-const defaultDemoCredentialsFile = "/tmp/htcondor-demo-credentials.json"
+// gosec G101 flags this on the name alone: it is where credentials are
+// written, not a credential.
+const defaultDemoCredentialsFile = "/tmp/htcondor-demo-credentials.json" //nolint:gosec
 
 var (
 	demoMode          = flag.Bool("demo", false, "Run in demo mode with mini condor")

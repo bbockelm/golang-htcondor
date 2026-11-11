@@ -4333,7 +4333,9 @@ func (h *Handler) writeDemoCredentials(creds []demoCredential) error {
 	}
 	body = append(body, '\n')
 
-	if err := os.MkdirAll(filepath.Dir(h.demoCredentialsFile), 0o755); err != nil {
+	// 0750, not 0755: the directory holds a 0600 credentials file and
+	// nothing outside the owner and group has business listing it.
+	if err := os.MkdirAll(filepath.Dir(h.demoCredentialsFile), 0o750); err != nil {
 		return fmt.Errorf("create demo credentials directory: %w", err)
 	}
 	// Ignore the unlink error: "not there" is the outcome we want, and
