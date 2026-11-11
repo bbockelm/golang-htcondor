@@ -104,6 +104,19 @@ type SubmitBehavior struct {
 	// attribute.
 	OmitRemoteIOKeywords bool
 
+	// ContainerSourceIsATransferMethod makes the container image's source
+	// one of the file transfer plugin methods the job requires of a
+	// machine.
+	//
+	// HTCONDOR-3932 added it. A container image in a common catalog never
+	// reaches TransferInput, so the scheme it is fetched with was invisible
+	// to the loop that derives the methods from the input files, and a job
+	// could match a machine with no plugin for it. The four sources that
+	// need no plugin are left out: cedar is HTCondor's own transfer, docker
+	// and oras are pulled by the runtime on the execute node, and local
+	// means the image is already there.
+	ContainerSourceIsATransferMethod bool
+
 	// OmitContainerIsCommonAttr stops container_is_common from writing the
 	// ContainerIsCommon job attribute.
 	//

@@ -549,14 +549,10 @@ func (sf *SubmitFile) appendTransferRequirements(ad *classad.ClassAd, refs map[s
 	}
 
 	// One clause per transfer method the job needs and does not supply
-	// itself. WantTransferPluginMethods already holds exactly that set.
+	// itself, as setTransferPluginMethods worked them out.
 	if !refs["hasfiletransferpluginmethods"] {
-		if methods, ok := ad.EvaluateAttrString("WantTransferPluginMethods"); ok && methods != "" {
-			for _, m := range strings.Split(methods, ",") {
-				if m = strings.TrimSpace(m); m != "" {
-					answer += fmt.Sprintf(" && stringListIMember(%q,TARGET.HasFileTransferPluginMethods)", m)
-				}
-			}
+		for _, m := range sf.wantTransferMethods {
+			answer += fmt.Sprintf(" && stringListIMember(%q,TARGET.HasFileTransferPluginMethods)", m)
 		}
 	}
 
