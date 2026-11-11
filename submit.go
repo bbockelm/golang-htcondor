@@ -878,25 +878,46 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
-	// Requirements last, as SetRequirements is last in condor_submit's own
-	// sequence. Almost every clause it generates is about an attribute
-	// something above has just written -- the resource requests, the
-	// transfer mode, the deferral schedule, a +Attr the submitter forced on,
-	// the GPU constraint -- so it has to read the finished ad rather than the
-	// submit commands. Running it early is what left it reading
-	// `request_memory` out of the submit file and missing the same request
-	// made any other way.
-	if err := sf.setRequirements(ad); err != nil {
-		return nil, err
-	}
-
 	return sf.finishJobAd(ad)
 }
 
-// finishJobAd is condor_submit's RETURN_IF_ABORT, read once at the end: a
-// boolean submit command whose value is not a boolean refuses the
-// submission, however far the ad got.
+// finishJobAd is the tail of condor_submit's sequence: the forced
+// attributes, then Requirements, then RETURN_IF_ABORT.
+//
+// SetForcedAttributes runs here rather than where the submit file's `+Attr`
+// lines are first read, because condor_submit runs it last on purpose --
+// "SetForcedAttributes should be last so that it trumps values" in
+// submit_utils.cpp. A `+Attr` is the submitter overriding what submit would
+// otherwise work out, so it has to be written after everything that works
+// anything out.
+//
+// MakeJobAd also applies the forced attributes early, and the pair is not a
+// redundancy. In condor_submit a forced attribute sits in the submit MACRO
+// set from the moment it is parsed, so a pass that looks it up sees it
+// however late the ad itself is written. The passes here read the ad
+// instead, so the attribute has to be on the ad before they run. The early
+// call is what makes a forced attribute visible; this one is what makes it
+// win. Without it `+JobBatchName` lost to `batch_name`, and `+PeriodicHold`,
+// `+KillSig`, `+WantCheckpoint` and every other attribute written after the
+// early call lost the same way.
+//
+// Requirements is last, as SetRequirements is last in condor_submit. Almost
+// every clause it generates is about an attribute something above has just
+// written -- the resource requests, the transfer mode, the deferral
+// schedule, a +Attr the submitter forced on, the GPU constraint -- so it has
+// to read the finished ad rather than the submit commands. Running it early
+// is what left it reading `request_memory` out of the submit file and
+// missing the same request made any other way.
+//
+// RETURN_IF_ABORT is read once at the end: a boolean submit command whose
+// value is not a boolean refuses the submission, however far the ad got.
 func (sf *SubmitFile) finishJobAd(ad *classad.ClassAd) (*classad.ClassAd, error) {
+	if err := sf.setCustomAttributes(ad); err != nil {
+		return nil, err
+	}
+	if err := sf.setRequirements(ad); err != nil {
+		return nil, err
+	}
 	if sf.boolErr != nil {
 		return nil, sf.boolErr
 	}
