@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -80,7 +81,7 @@ func TestNewSPAHandlerFSServesAndInjects(t *testing.T) {
 
 	t.Run("root gets the block", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status %d", rec.Code)
 		}
@@ -91,7 +92,7 @@ func TestNewSPAHandlerFSServesAndInjects(t *testing.T) {
 
 	t.Run("extensionless route resolves and gets the block", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/jobs", nil))
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/jobs", nil))
 		if !strings.Contains(rec.Body.String(), "jobs") ||
 			!strings.Contains(rec.Body.String(), headBlock) {
 			t.Errorf("jobs page wrong: %s", rec.Body.String())
@@ -100,7 +101,7 @@ func TestNewSPAHandlerFSServesAndInjects(t *testing.T) {
 
 	t.Run("unknown route falls back to index, injected", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/deep/client/route", nil))
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/deep/client/route", nil))
 		if !strings.Contains(rec.Body.String(), headBlock) {
 			t.Errorf("SPA fallback was not injected: %s", rec.Body.String())
 		}
@@ -108,7 +109,7 @@ func TestNewSPAHandlerFSServesAndInjects(t *testing.T) {
 
 	t.Run("assets are untouched", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/assets/app.js", nil))
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/assets/app.js", nil))
 		if body := rec.Body.String(); body != "console.log(1)" {
 			t.Errorf("asset was modified: %q", body)
 		}
@@ -123,7 +124,7 @@ func TestNewSPAHandlerFSWithoutInjectionIsByteExact(t *testing.T) {
 	h := NewSPAHandlerFS(fstest.MapFS{"index.html": {Data: []byte(page)}})
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 	if rec.Body.String() != page {
 		t.Errorf("body = %q, want the file unchanged", rec.Body.String())
 	}
@@ -138,7 +139,7 @@ func TestNewSPAHandlerFSRefusesEscapes(t *testing.T) {
 	h := NewSPAHandlerFS(fsys)
 	for _, bad := range []string{"/../secret", "/..%2fsecret", "//etc/passwd"} {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "http://example.com"+bad, nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com"+bad, nil)
 		h.ServeHTTP(rec, req)
 		if body := rec.Body.String(); strings.Contains(body, "secret") || strings.Contains(body, "root:") {
 			t.Errorf("%q escaped the filesystem: %s", bad, body)

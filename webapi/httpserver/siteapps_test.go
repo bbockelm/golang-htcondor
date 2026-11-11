@@ -3,6 +3,7 @@ package httpserver
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -82,7 +83,7 @@ func TestSiteAppRouteIsRegisteredAndGated(t *testing.T) {
 	// No session: the gate must send the browser to log in rather than
 	// let the SPA catch-all answer with the stock UI.
 	rec := httptest.NewRecorder()
-	h.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/site/cryoem/", nil))
+	h.mux.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/site/cryoem/", nil))
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status %d, want a redirect to login; body: %s", rec.Code, rec.Body.String())
 	}
@@ -103,7 +104,7 @@ func TestSiteAppAssetsAreGatedToo(t *testing.T) {
 	h := siteAppServer(t, dir)
 
 	rec := httptest.NewRecorder()
-	h.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/site/cryoem/assets/app.js", nil))
+	h.mux.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/site/cryoem/assets/app.js", nil))
 	if rec.Code == http.StatusOK {
 		t.Fatalf("an asset was served without a session: %s", rec.Body.String())
 	}

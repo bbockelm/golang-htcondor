@@ -93,7 +93,9 @@ func createUnlinked(dir string) (*os.File, error) {
 
 	// O_EXCL so this cannot open something another process put there,
 	// and 0600 because for the moment it has a name.
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	// G304: the path is built here from the operator-configured
+	// directory and a random nonce, never from a request.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec
 	if err != nil {
 		return nil, fmt.Errorf("create a scratch file in %s: %w", dir, err)
 	}
@@ -133,13 +135,23 @@ func rewriteStored(w io.Writer, zr *zip.Reader) (int64, error) {
 		// Bounded by the entry's declared size plus one byte, so a
 		// header that lies about how much it holds cannot make this
 		// write until the disk fills.
-		limit := int64(entry.UncompressedSize64) + 1
-		n, err := io.Copy(dst, io.LimitReader(src, limit))
+		//
+		// declaredSize converts under a cap rather than silencing the
+		// overflow check: a header claiming more than maxEntryBytes is
+		// precisely the input this is defending against, and
+		// checkZipBounds has already refused it, so reaching here with
+		// one means the two disagree and the bundle should be rejected
+		// rather than trusted.
+		declared, err := declaredSize(entry)
+		if err != nil {
+			return 0, err
+		}
+		n, err := io.Copy(dst, io.LimitReader(src, declared+1))
 		_ = src.Close()
 		if err != nil {
 			return 0, fmt.Errorf("decompress entry %q: %w", entry.Name, err)
 		}
-		if n > int64(entry.UncompressedSize64) {
+		if n > declared {
 			return 0, fmt.Errorf("entry %q holds more data than its header declares", entry.Name)
 		}
 	}
@@ -148,6 +160,19 @@ func rewriteStored(w io.Writer, zr *zip.Reader) (int64, error) {
 		return 0, fmt.Errorf("finish the decompressed bundle: %w", err)
 	}
 	return counter.n, nil
+}
+
+// declaredSize is an entry's uncompressed size as a bounded int64.
+//
+// maxEntryBytes is far below math.MaxInt64, so anything above it is
+// either a corrupt header or a bundle checkZipBounds should already
+// have refused; either way it is not something to allocate against.
+func declaredSize(entry *zip.File) (int64, error) {
+	if entry.UncompressedSize64 > maxEntryBytes {
+		return 0, fmt.Errorf("entry %q declares %d bytes, more than the %d allowed",
+			entry.Name, entry.UncompressedSize64, maxEntryBytes)
+	}
+	return int64(entry.UncompressedSize64), nil
 }
 
 // countingWriter counts what passes through it, so the rewritten
@@ -180,10 +205,14 @@ func collectEntries(zr *zip.Reader) ([]storedEntry, error) {
 				return nil, fmt.Errorf("locate entry %q: %w", f.Name, err)
 			}
 		}
+		size, err := declaredSize(f)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, storedEntry{
 			name:    f.Name,
 			offset:  offset,
-			size:    int64(f.UncompressedSize64),
+			size:    size,
 			modTime: f.Modified,
 			isDir:   isDir,
 		})

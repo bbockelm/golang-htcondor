@@ -138,7 +138,7 @@ func Merge(id string, bundle BundleManifest, site SiteManifest) (App, error) {
 	return app, nil
 }
 
-// Enabled reports whether the site manifest publishes the app. Absent
+// IsEnabled reports whether the site manifest publishes the app. Absent
 // means enabled: an operator who wrote a policy file at all meant to
 // publish the app, and should not have to say so twice.
 func (s SiteManifest) IsEnabled() bool { return s.Enabled == nil || *s.Enabled }

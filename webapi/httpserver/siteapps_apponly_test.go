@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"net/http"
 	"testing"
 )
@@ -64,19 +65,21 @@ func TestIsAppOnlyOffWhenUnconfigured(t *testing.T) {
 }
 
 func TestExpertModeArmedReadsTheCookie(t *testing.T) {
-	r, _ := http.NewRequest(http.MethodGet, "/", nil)
+	r, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	if expertModeArmed(r) {
 		t.Error("armed with no cookie")
 	}
-	r.AddCookie(&http.Cookie{Name: expertCookieName, Value: "1"})
+	// G124: attributes are set by the handler, not here; this
+	// only has to parse back out of the request.
+	r.AddCookie(&http.Cookie{Name: expertCookieName, Value: "1", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	if !expertModeArmed(r) {
 		t.Error("not armed with the cookie set")
 	}
 
 	// An empty value is not armed: that is what clearing it looks like
 	// on a client that keeps the name around.
-	r2, _ := http.NewRequest(http.MethodGet, "/", nil)
-	r2.AddCookie(&http.Cookie{Name: expertCookieName, Value: ""})
+	r2, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+	r2.AddCookie(&http.Cookie{Name: expertCookieName, Value: "", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	if expertModeArmed(r2) {
 		t.Error("an empty cookie counted as armed")
 	}
@@ -129,7 +132,7 @@ func TestAppOnlyRedirectIsNotAuthorization(t *testing.T) {
 	wrapped := h.appOnlyRedirect(inner)
 	for _, p := range []string{"/", "/jobs", "/api/v1/jobs"} {
 		reached = false
-		req, _ := http.NewRequest(http.MethodGet, p, nil)
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, p, nil)
 		wrapped.ServeHTTP(discardWriter{}, req)
 		if !reached {
 			t.Errorf("GET %q was intercepted with no app-only groups configured", p)
@@ -140,7 +143,7 @@ func TestAppOnlyRedirectIsNotAuthorization(t *testing.T) {
 	h2 := &Handler{webuiAppOnlyGroups: newGroupSet("smith_lab")}
 	wrapped2 := h2.appOnlyRedirect(inner)
 	reached = false
-	req, _ := http.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/jobs", nil)
 	wrapped2.ServeHTTP(discardWriter{}, req)
 	if !reached {
 		t.Error("an API request was intercepted by the app-only wrapper")

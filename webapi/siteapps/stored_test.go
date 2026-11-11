@@ -26,8 +26,10 @@ func dirNames(t *testing.T, dir string) []string {
 	return out
 }
 
-func loadOneApp(t *testing.T, dir, id string) *Entry {
+// loadOneApp publishes the single bundle in dir and returns it.
+func loadOneApp(t *testing.T, dir string) *Entry {
 	t.Helper()
+	const id = "cryoem"
 	lib := NewLibrary(dir)
 	t.Cleanup(func() { _ = lib.Close() })
 	published, problems := lib.Reload()
@@ -56,7 +58,7 @@ func TestServedFilesAreSeekable(t *testing.T) {
 	})
 	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
 
-	entry := loadOneApp(t, dir, "cryoem")
+	entry := loadOneApp(t, dir)
 
 	f, err := entry.FS().Open("assets/big.js")
 	if err != nil {
@@ -106,7 +108,7 @@ func TestScratchFileIsNotLeftBehind(t *testing.T) {
 	})
 	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
 
-	entry := loadOneApp(t, dir, "cryoem")
+	entry := loadOneApp(t, dir)
 
 	for _, name := range dirNames(t, dir) {
 		if strings.HasPrefix(name, tempPrefix) || strings.HasSuffix(name, tempSuffix) {
@@ -117,7 +119,7 @@ func TestScratchFileIsNotLeftBehind(t *testing.T) {
 	// And the content is still served, which is the point of holding
 	// the descriptor open across the unlink.
 	if got := readFS(t, entry.FS(), "index.html"); !strings.Contains(got, "compress me") {
-		t.Errorf("the unlinked scratch file is not serving: %q", got[:min(40, len(got))])
+		t.Errorf("the unlinked scratch file is not serving: %q", truncate(got, 40))
 	}
 }
 
@@ -149,7 +151,7 @@ func TestStoredBundleIsNotRewritten(t *testing.T) {
 	}
 	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
 
-	entry := loadOneApp(t, dir, "cryoem")
+	entry := loadOneApp(t, dir)
 	if got := readFS(t, entry.FS(), "index.html"); !strings.Contains(got, "stored") {
 		t.Errorf("index.html = %q", got)
 	}
@@ -167,7 +169,7 @@ func TestParentDirectoriesAreSynthesized(t *testing.T) {
 	})
 	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
 
-	entry := loadOneApp(t, dir, "cryoem")
+	entry := loadOneApp(t, dir)
 	for _, d := range []string{".", "jobs", "jobs/_"} {
 		f, err := entry.FS().Open(d)
 		if err != nil {
@@ -191,7 +193,7 @@ func TestStoredFSRejectsInvalidPaths(t *testing.T) {
 	writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
 	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
 
-	entry := loadOneApp(t, dir, "cryoem")
+	entry := loadOneApp(t, dir)
 	for _, bad := range []string{"../app.yaml", "/index.html", "./index.html", ""} {
 		if _, err := entry.FS().Open(bad); err == nil {
 			t.Errorf("Open(%q) succeeded", bad)
@@ -248,20 +250,13 @@ func TestValidateIDBoundaryCharacters(t *testing.T) {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // writeDirBundle builds an UNPACKED bundle and returns its path.
 func writeDirBundle(t *testing.T, dir, id string, files map[string]string) string {
 	t.Helper()
 	root := filepath.Join(dir, id)
 	for name, body := range files {
 		full := filepath.Join(root, name)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
 		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
@@ -295,7 +290,7 @@ func TestDirBundleDoesNotFollowSymlinksOut(t *testing.T) {
 	}
 	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
 
-	entry := loadOneApp(t, dir, "cryoem")
+	entry := loadOneApp(t, dir)
 
 	data, err := fs.ReadFile(entry.FS(), "escape.txt")
 	if err == nil {
@@ -322,10 +317,18 @@ func TestDirBundleAllowsInternalSymlinks(t *testing.T) {
 	}
 	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
 
-	entry := loadOneApp(t, dir, "cryoem")
+	entry := loadOneApp(t, dir)
 	if got, err := fs.ReadFile(entry.FS(), "assets/link.js"); err != nil {
 		t.Errorf("an internal symlink was refused: %v", err)
 	} else if string(got) != "console.log(1)" {
 		t.Errorf("link.js = %q", got)
 	}
+}
+
+// truncate shortens a string for an error message.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }

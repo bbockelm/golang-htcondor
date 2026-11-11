@@ -40,7 +40,8 @@ func writeBundle(t *testing.T, dir, id, manifest string, files map[string]string
 		t.Fatalf("zip close: %v", err)
 	}
 
-	path := filepath.Join(dir, id+".zip")
+	// G703: dir is t.TempDir() and id is a literal from the test.
+	path := filepath.Join(dir, id+".zip") //nolint:gosec
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
@@ -76,7 +77,9 @@ func writeDigest(t *testing.T, bundlePath string) {
 	}
 	sum := sha256.Sum256(data)
 	line := hex.EncodeToString(sum[:]) + "  " + filepath.Base(bundlePath) + "\n"
-	if err := os.WriteFile(bundlePath+".sha256", []byte(line), 0o600); err != nil {
+	// G703: bundlePath came from writeBundle, which built it under
+	// t.TempDir() from a literal id.
+	if err := os.WriteFile(bundlePath+".sha256", []byte(line), 0o600); err != nil { //nolint:gosec
 		t.Fatalf("write digest: %v", err)
 	}
 }

@@ -1,9 +1,11 @@
 package siteapps
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -21,14 +23,17 @@ func testHandler(t *testing.T, dir string, authenticated bool, groups ...string)
 		return Caller{Authenticated: authenticated, Groups: groups}
 	}
 	login := func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/login?return_to="+r.URL.Path, http.StatusFound)
+		// G710: the destination is a fixed local path with the request
+		// path appended as a query value; nothing here is attacker
+		// controlled in a way that could leave the origin.
+		http.Redirect(w, r, "/login?return_to="+url.QueryEscape(r.URL.Path), http.StatusFound) //nolint:gosec
 	}
 	return NewHandler(lib, identify, login)
 }
 
 func get(h http.Handler, path string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil))
 	return rec
 }
 
@@ -87,14 +92,14 @@ func TestNonMemberIsRefusedOnNestedAssetsToo(t *testing.T) {
 func TestNonMemberCannotDistinguishMissingFromForbidden(t *testing.T) {
 	h := testHandler(t, twoAppDir(t), true, "nobody")
 
-	real := get(h, "/site/cryoem/")
-	fake := get(h, "/site/doesnotexist/")
-	if real.Code != fake.Code {
+	existing := get(h, "/site/cryoem/")
+	missing := get(h, "/site/doesnotexist/")
+	if existing.Code != missing.Code {
 		t.Errorf("an existing app answers %d and a missing one %d; the difference says which exist",
-			real.Code, fake.Code)
+			existing.Code, missing.Code)
 	}
-	if real.Code != http.StatusNotFound {
-		t.Errorf("status %d, want 404", real.Code)
+	if existing.Code != http.StatusNotFound {
+		t.Errorf("status %d, want 404", existing.Code)
 	}
 }
 
@@ -147,7 +152,11 @@ func TestPagesAreToldTheirMountPoint(t *testing.T) {
 		t.Fatalf("no app global: %s", body)
 	}
 	raw := body[start+len("window.__HTCONDOR_APP__="):]
-	raw = raw[:strings.Index(raw, ";</script>")]
+	end := strings.Index(raw, ";</script>")
+	if end < 0 {
+		t.Fatalf("the app global is not terminated: %s", raw)
+	}
+	raw = raw[:end]
 
 	var got appGlobal
 	if err := json.Unmarshal([]byte(raw), &got); err != nil {
