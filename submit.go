@@ -87,6 +87,11 @@ type SubmitFile struct {
 	// submitter forced on names no clause at all.
 	wantTransferMethods []string
 
+	// boolErr is the first boolean submit command whose value is not a
+	// boolean, mirroring condor_submit's abort_code: the submission is
+	// refused over it. Reset by every MakeJobAd.
+	boolErr error
+
 	// cudaClause records that finalizeCUDAVersion converted a cuda_version
 	// into the integer the startd compares against, which is the same
 	// condition under which SetRequirements adds the CUDAVersion clause to
@@ -674,6 +679,11 @@ func (sf *SubmitFile) stampSubmitTime() int64 {
 func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*classad.ClassAd, error) {
 	ad := classad.New()
 
+	// condor_submit's abort_code: a boolean submit command whose value is
+	// not a boolean refuses the whole submission, so the record is cleared
+	// here and read at the end.
+	sf.boolErr = nil
+
 	// Set basic job identifiers
 	_ = ad.Set("ClusterId", jobID.Cluster)
 	_ = ad.Set("ProcId", jobID.Proc)
@@ -880,6 +890,16 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
+	return sf.finishJobAd(ad)
+}
+
+// finishJobAd is condor_submit's RETURN_IF_ABORT, read once at the end: a
+// boolean submit command whose value is not a boolean refuses the
+// submission, however far the ad got.
+func (sf *SubmitFile) finishJobAd(ad *classad.ClassAd) (*classad.ClassAd, error) {
+	if sf.boolErr != nil {
+		return nil, sf.boolErr
+	}
 	return ad, nil
 }
 
@@ -1102,7 +1122,7 @@ func (sf *SubmitFile) setArguments(ad *classad.ClassAd) error {
 	// attribute as ATTR_JOB_ARGUMENTS1's alternate, which would make the
 	// two keywords indistinguishable.
 	args2, hasArgs2 := sf.submitCommand("arguments2")
-	if hasArgs1 && hasArgs2 && !parseBool(sf.submitParam("allow_arguments_v1", ""), false) {
+	if hasArgs1 && hasArgs2 && !sf.submitBool("allow_arguments_v1", sf.submitParam("allow_arguments_v1", ""), false) {
 		return fmt.Errorf("if you wish to specify both arguments and arguments2, " +
 			"you must also specify allow_arguments_v1 = true")
 	}
@@ -1449,7 +1469,7 @@ func (sf *SubmitFile) stdioTransferIt(transferCmd string) bool {
 	if !ok {
 		return true
 	}
-	return parseBool(value, true)
+	return sf.submitBool(transferCmd, value, true)
 }
 
 // shouldTransferFiles is ShouldTransferFiles_t from
@@ -1557,12 +1577,12 @@ func fileTransferOutputName(v fileTransferOutput) string {
 // ad records can never disagree.
 func (sf *SubmitFile) vmCheckpoint() bool {
 	v, ok := sf.submitCommandAlt("vm_checkpoint", "JobVMCheckpoint")
-	return ok && parseBool(v, false)
+	return ok && sf.submitBool("vm_checkpoint", v, false)
 }
 
 func (sf *SubmitFile) vmNetworking() bool {
 	v, ok := sf.submitCommandAlt("vm_networking", "JobVMNetworking")
-	return ok && parseBool(v, false)
+	return ok && sf.submitBool("vm_networking", v, false)
 }
 
 // resolveVMTransferMode applies the file transfer settings SetUniverse
@@ -1822,9 +1842,18 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 		_ = ad.Set("TransferExecutable", false)
 	}
 
-	// skip_filechecks - don't check if input files exist
-	if sfc, ok := sf.submitCommand("skip_filechecks"); ok {
-		_ = ad.Set("SkipFileChecks", parseBool(sfc, false))
+	// skip_filechecks turns off condor_submit's own checks that the
+	// files a job names exist and can be opened. It writes NO job
+	// attribute: it steers the submission, and the job ad carries no
+	// trace of it. Writing SkipFileChecks put an attribute on the job
+	// that nothing in HTCondor reads.
+	//
+	// This library does not open the files it is given, so there is
+	// nothing here to switch off. The value is still read, because
+	// condor_submit refuses a value that is neither "warn" nor a
+	// boolean.
+	if sfc, ok := sf.submitCommand("skip_filechecks"); ok && !strings.EqualFold(strings.TrimSpace(sfc), "warn") {
+		sf.submitBool("skip_filechecks", sfc, false)
 	}
 
 	return nil
@@ -2277,7 +2306,7 @@ func (sf *SubmitFile) setOwnership(ad *classad.ClassAd) error {
 	// of its own is charged to that group, which is what makes it
 	// preemptable; one that names a group keeps its group and the
 	// nice_user flag is ignored.
-	if nu, ok := sf.simpleKeywordParam("nice_user", "NiceUser"); ok && parseBool(nu, false) {
+	if nu, ok := sf.simpleKeywordParam("nice_user", "NiceUser"); ok && sf.submitBool("nice_user", nu, false) {
 		if !hasGroup {
 			group, hasGroup = sf.niceUserGroup(), true
 		}
@@ -2339,12 +2368,22 @@ var localSubmitUser = sync.OnceValue(func() string {
 	return os.Getenv("USER")
 })
 
+// holdCodeSubmittedOnHold is CONDOR_HOLD_CODE::SubmittedOnHold: the
+// reason a job that asked to be submitted held is held.
+const holdCodeSubmittedOnHold = 15
+
 // setJobStatusControl sets job status and control attributes
 func (sf *SubmitFile) setJobStatusControl(ad *classad.ClassAd) error {
-	// hold - initial hold state
+	// hold - initial hold state. A held job carries the REASON it is
+	// held as well as the status: SetJobStatus writes HoldReasonCode 15
+	// (SubmittedOnHold, condor_utils/condor_holdcodes.h) and the text
+	// beside it. Without them condor_q shows a held job with no reason
+	// and condor_release has no code to match on.
 	if hold, ok := sf.submitCommand("hold"); ok {
-		if parseBool(hold, false) {
+		if sf.submitBool("hold", hold, false) {
 			_ = ad.Set("JobStatus", 5) // 5 = HELD
+			_ = ad.Set("HoldReasonCode", int64(holdCodeSubmittedOnHold))
+			_ = ad.Set("HoldReason", "submitted on hold at user's request")
 		}
 	}
 
@@ -2511,6 +2550,80 @@ func customAttrName(key string) (string, bool) {
 }
 
 // Helper functions
+
+// stringIsBooleanParam is HTCondor's string_is_boolean_param
+// (condor_utils/condor_config.cpp), which is how condor_submit reads every
+// boolean submit command.
+//
+// It is NOT a fixed vocabulary. A value beginning with "true", "1", "false"
+// or "0" and then nothing but whitespace is that literal; anything else is
+// parsed as a ClassAd EXPRESSION and evaluated to a boolean, so
+// `nice_user = 2`, `= 1.5`, `= 1 + 1` and `= true || false` are all true, and
+// `= 10` is true while `= 01` is not a value at all.
+//
+// ok is false when neither path produces a boolean -- `yes`, `t`, `x`,
+// `"true"`, `undefined` -- which is what condor_submit reports as
+// "must eval to a boolean" and refuses the submission over.
+func stringIsBooleanParam(s string) (value bool, ok bool) {
+	literal, rest := false, ""
+	switch {
+	case len(s) >= 4 && strings.EqualFold(s[:4], "true"):
+		value, literal, rest = true, true, s[4:]
+	case len(s) >= 1 && s[0] == '1':
+		value, literal, rest = true, true, s[1:]
+	case len(s) >= 5 && strings.EqualFold(s[:5], "false"):
+		value, literal, rest = false, true, s[5:]
+	case len(s) >= 1 && s[0] == '0':
+		value, literal, rest = false, true, s[1:]
+	}
+	if literal && strings.TrimLeft(rest, " \t\n\v\f\r") == "" {
+		return value, true
+	}
+
+	// The expression path. condor_submit evaluates against an EMPTY ad with
+	// no target, so an attribute reference is undefined and the value is
+	// not a boolean.
+	expr, err := classad.ParseExpr(s)
+	if err != nil {
+		return false, false
+	}
+	v := expr.Eval(classad.New())
+	switch {
+	case v.IsBool():
+		b, _ := v.BoolValue()
+		return b, true
+	case v.IsInteger() || v.IsReal():
+		n, _ := v.NumberValue()
+		return n != 0, true
+	}
+	return false, false
+}
+
+// submitBool reads a boolean submit command the way
+// SubmitHash::submit_param_bool does: the value through
+// stringIsBooleanParam, and a value that is not a boolean recorded as the
+// error that refuses the submission (condor_submit's abort_code).
+//
+// Use it wherever condor_submit calls submit_param_bool. The keywords that
+// reach a boolean some other way -- want_graceful_removal, which is stored
+// as an expression, or transfer_executable, which SetExecutable tests by
+// its first letter -- are NOT these, and keep their own reading.
+func (sf *SubmitFile) submitBool(key, raw string, def bool) bool {
+	// submit_param answers NULL for a command that expands to nothing, so
+	// `stream_output =` is the command being absent rather than an empty
+	// value to judge.
+	if raw == "" {
+		return def
+	}
+	v, ok := stringIsBooleanParam(raw)
+	if !ok {
+		if sf.boolErr == nil {
+			sf.boolErr = fmt.Errorf("%s=%s is invalid, must eval to a boolean", key, raw)
+		}
+		return def
+	}
+	return v
+}
 
 func parseBool(s string, def bool) bool {
 	s = strings.ToLower(strings.TrimSpace(s))
@@ -3039,7 +3152,7 @@ func (sf *SubmitFile) setGridAVPairs(ad *classad.ClassAd, submitPrefix, attrPref
 	}
 
 	if gridType == "ec2" && !containsNameFold(names, "Name") {
-		if parseBool(sf.submitParam("WantNameTag", ""), true) {
+		if sf.submitBool("want_name_tag", sf.submitParam("WantNameTag", ""), true) {
 			if cmd, ok := ad.EvaluateAttrString("Cmd"); ok {
 				_ = ad.Set(attrPrefix+"Name", cmd)
 			}
@@ -3078,7 +3191,7 @@ func (sf *SubmitFile) setGCEParams(ad *classad.ClassAd, iwd string) {
 		_ = ad.Set("GceMetadata", strings.Join(splitOnCommas(metadata), ","))
 	}
 	if preemptible, ok := sf.submitCommandAlt("gce_preemptible", "GcePreemptible"); ok {
-		_ = ad.Set("GcePreemptible", parseBool(preemptible, false))
+		_ = ad.Set("GcePreemptible", sf.submitBool("gce_preemptible", preemptible, false))
 	}
 }
 
@@ -3207,7 +3320,7 @@ func (sf *SubmitFile) setVMParams(ad *classad.ClassAd) error {
 	// vm_vnc - Attach a VNC console
 	vnc := false
 	if v, ok := sf.submitCommand("vm_vnc"); ok {
-		vnc = parseBool(v, false)
+		vnc = sf.submitBool("vm_vnc", v, false)
 	}
 	_ = ad.Set("JobVMVNCConsole", vnc)
 
@@ -3237,7 +3350,7 @@ func (sf *SubmitFile) setVMParams(ad *classad.ClassAd) error {
 
 	// vm_no_output_vm - Do not transfer the VM files back
 	if v, ok := sf.submitCommand("vm_no_output_vm"); ok {
-		_ = ad.Set("VMPARAM_No_Output_VM", parseBool(v, false))
+		_ = ad.Set("VMPARAM_No_Output_VM", sf.submitBool("vm_no_output_vm", v, false))
 	}
 
 	if vmType == vmTypeXen {
@@ -3588,7 +3701,7 @@ func (sf *SubmitFile) setToolDaemon(ad *classad.ClassAd) error {
 	// suspend_job_at_exec has no other reader: condor_submit records it only
 	// here, alongside the daemon that is meant to attach to the stopped job.
 	if v := sf.submitParam("suspend_job_at_exec", "SuspendJobAtExec"); v != "" {
-		_ = ad.Set("SuspendJobAtExec", parseBool(v, false))
+		_ = ad.Set("SuspendJobAtExec", sf.submitBool("suspend_job_at_exec", v, false))
 	}
 
 	return sf.setArgListAttrs(ad, argListKeywords{
@@ -3634,7 +3747,7 @@ func (sf *SubmitFile) setArgListAttrs(ad *classad.ClassAd, kw argListKeywords) e
 	if v1Ext != "" {
 		v1 = v1Ext
 	}
-	if v2 != "" && v1 != "" && !parseBool(sf.submitParam("allow_arguments_v1", ""), false) {
+	if v2 != "" && v1 != "" && !sf.submitBool("allow_arguments_v1", sf.submitParam("allow_arguments_v1", ""), false) {
 		return fmt.Errorf("if you wish to specify both %s and %s, you must also specify allow_arguments_v1 = true",
 			kw.v1Ext, kw.v2)
 	}
@@ -4765,6 +4878,14 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 	// transferred is a property of the stream, not of which of the two
 	// accepted spellings the submit file used to name it.
 	for _, std := range stdioStreams {
+		// The stream command is READ whether or not its attribute is
+		// written: SetStdin/SetStdout/SetStderr call submit_param_bool
+		// on it before they look at anything else, so a value that is
+		// not a boolean refuses the submission even for a stream that
+		// is not transferred.
+		streamValue, _ := sf.submitCommand(std.streamCmd)
+		stream := sf.submitBool(std.streamCmd, streamValue, false)
+
 		fileValue, _ := sf.submitCommandAlt(std.fileCmd, std.altFileCmd)
 		if _, transferIt := checkStdFile(fileValue); !transferIt {
 			continue
@@ -4772,8 +4893,7 @@ func (sf *SubmitFile) setSimpleJobExprs(ad *classad.ClassAd) error {
 		if !sf.stdioTransferIt(std.transferCmd) {
 			continue
 		}
-		stream, _ := sf.submitCommand(std.streamCmd)
-		_ = ad.Set(std.streamAttr, parseBool(stream, false))
+		_ = ad.Set(std.streamAttr, stream)
 	}
 
 	// copy_to_spool - copy files to spool directory
