@@ -34,6 +34,9 @@ otherwise switch it on for deployments that never asked.
 | `HTTP_API_WEBUI_BRANDING_DIR` | Directory of the site's images, served read-only under `/branding/`. Reloaded on SIGHUP. |
 | `HTTP_API_WEBUI_CUSTOM_CSS` | Stylesheet served at `/branding.css` and loaded after the app's own, so `--color-brand-*` can be redefined. Reloaded on SIGHUP. |
 | `HTTP_API_WEBUI_FAVICON` | URL for the browser tab icon. Reloaded on SIGHUP. |
+| `HTTP_API_SITE_APPS_DIR` | Directory of `<id>.zip` site-app bundles and their `<id>.yaml` policy files. Unset disables site apps entirely. See [Site apps](server-site-apps.md). |
+| `HTTP_API_SITE_APPS_RELOAD_INTERVAL` | How often that directory is rescanned, as a Go duration. Default one minute. |
+| `HTTP_API_WEBUI_APP_ONLY_GROUP` | Comma-separated group(s) whose members land in their site app rather than the dashboard, with the console navigation collapsed. Presentation only; it restricts nothing. Reloaded on SIGHUP. See [Site apps](server-site-apps.md#app-only-sessions). |
 | `HTTP_API_PROJECT_LEADS_FILE` | File naming each project's leads, who may use superuser mode on jobs whose `ProjectName` they lead. Re-read when it changes and on SIGHUP. See [Project leads](server-auth.md#project-leads). |
 | `HTTP_API_PROJECT_LEADS_GROUP` | Group-name pattern containing `{project}`, e.g. `{project}-leads`; members of the group it names for a project lead that project. Reloaded on SIGHUP. See [Project leads](server-auth.md#project-leads). |
 | `HTTP_API_METRICS_PUBLIC` | `true` to disable the API-key gate on `/metrics`. Default off — Prometheus must present an API key with the `metrics` scope. |
