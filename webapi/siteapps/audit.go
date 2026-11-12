@@ -183,3 +183,56 @@ func boolToInt(b bool) int {
 	}
 	return 0
 }
+
+// Record is one incarnation as the audit trail holds it.
+type Record struct {
+	Incarnation
+	FirstSeen time.Time
+	LastSeen  time.Time
+}
+
+// History returns an app's incarnations, most recent first.
+//
+// A free function over *sql.DB rather than a method on SQLRecorder:
+// reading the trail is something the administrator's pages do, and
+// they have the database without having the recorder the scan writes
+// through.
+func History(ctx context.Context, db *sql.DB, appID string) ([]Record, error) {
+	if db == nil {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT digest, bundle_kind, size_bytes, digest_declared,
+		       version, revision, name, description, icon,
+		       app_groups, home, policy_origin, first_seen, last_seen
+		  FROM site_app_incarnations
+		 WHERE app_id = ?
+		 ORDER BY first_seen DESC, id DESC`, appID)
+	if err != nil {
+		return nil, fmt.Errorf("site app history %q: %w", appID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Record
+	for rows.Next() {
+		var (
+			r              Record
+			groups         string
+			home, declared int
+			first, last    int64
+		)
+		if err := rows.Scan(&r.Digest, &r.BundleKind, &r.SizeBytes, &declared,
+			&r.Version, &r.Revision, &r.Name, &r.Description, &r.Icon,
+			&groups, &home, &r.Origin, &first, &last); err != nil {
+			return nil, fmt.Errorf("site app history %q: %w", appID, err)
+		}
+		r.AppID, r.Home, r.DigestKnown = appID, home != 0, declared != 0
+		r.Groups = ParseGroupList(groups)
+		r.FirstSeen, r.LastSeen = time.Unix(first, 0), time.Unix(last, 0)
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("site app history %q: %w", appID, err)
+	}
+	return out, nil
+}

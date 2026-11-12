@@ -371,11 +371,14 @@ type Config struct {
 	// WebUIAppOnlyGroup names groups whose members land in their site app
 	// instead of the dashboard. Presentation only; see HandlerConfig.
 	WebUIAppOnlyGroup string
-	// SiteAppsDir holds the <id>.zip bundles and <id>.yaml policy files
+	// SiteAppsDir holds the <id>.zip bundles; policy is configuration
 	// for operator-deployed static web apps. Empty disables the feature.
 	SiteAppsDir string
 	// SiteAppsReloadInterval is how often that directory is rescanned.
 	SiteAppsReloadInterval time.Duration
+	// SiteAppsUpload is whether administrators may publish a bundle
+	// through the web interface (HTTP_API_SITE_APPS_UPLOAD).
+	SiteAppsUpload bool
 	// MCPSkillsReloadInterval is how often that directory is re-read so a
 	// checkout updated underneath this process is noticed without a
 	// reconfigure. Zero disables the poll.
@@ -625,6 +628,7 @@ func NewServer(cfg Config) (*Server, error) {
 		WebUIAppOnlyGroup:           cfg.WebUIAppOnlyGroup,
 		SiteAppsDir:                 cfg.SiteAppsDir,
 		SiteAppsReloadInterval:      cfg.SiteAppsReloadInterval,
+		SiteAppsUpload:              cfg.SiteAppsUpload,
 		MCPSkillsReloadInterval:     cfg.MCPSkillsReloadInterval,
 		UpstreamRefresh:             cfg.UpstreamRefresh,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,

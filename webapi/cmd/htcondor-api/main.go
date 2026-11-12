@@ -1726,7 +1726,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 // read only in the normal path is silently absent there -- which is how
 // the browser harness came to deploy a bundle the demo server never
 // looked at.
-func loadSiteAppsConfig(cfg *config.Config, logger *logging.Logger) (string, time.Duration) {
+func loadSiteAppsConfig(cfg *config.Config, logger *logging.Logger) (string, time.Duration, bool) {
 	// A directory of <id>.zip bundles, each with an <id>.yaml policy
 	// file beside it naming the groups that may see it. Unset leaves
 	// the feature out of the server entirely.
@@ -1748,7 +1748,16 @@ func loadSiteAppsConfig(cfg *config.Config, logger *logging.Logger) (string, tim
 				"value", raw)
 		}
 	}
-	return dir, reload
+	// Whether an administrator may publish a bundle through the web
+	// interface. Off unless the site says otherwise: an uploaded app is
+	// served same-origin and can do anything its visitor can, so this
+	// is a grant separate from administering the server.
+	upload := cfg.GetBool("HTTP_API_SITE_APPS_UPLOAD", false)
+	if upload && dir != "" {
+		logger.Info(logging.DestinationHTTP,
+			"Site app upload is enabled; administrators may publish bundles through the web interface", "dir", dir)
+	}
+	return dir, reload, upload
 }
 
 func loadConfigWithDefaults() (*config.Config, error) {
@@ -2228,7 +2237,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// dashboard. Presentation only -- it restricts nothing.
 	webuiAppOnlyGroup, _ := cfg.Get("HTTP_API_WEBUI_APP_ONLY_GROUP")
 
-	siteAppsDir, siteAppsReload := loadSiteAppsConfig(cfg, logger)
+	siteAppsDir, siteAppsReload, siteAppsUpload := loadSiteAppsConfig(cfg, logger)
 	// Site branding. Every one of these is optional; unset leaves the
 	// web UI exactly as it ships. See webapi/httpserver/branding.go.
 	webuiSiteName, _ := cfg.Get("HTTP_API_WEBUI_SITE_NAME")
@@ -2547,6 +2556,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		WebUIAppOnlyGroup:          webuiAppOnlyGroup,
 		SiteAppsDir:                siteAppsDir,
 		SiteAppsReloadInterval:     siteAppsReload,
+		SiteAppsUpload:             siteAppsUpload,
 		WebUISiteName:              webuiSiteName,
 		WebUISiteTagline:           webuiSiteTagline,
 		WebUIFooterLogos:           webuiFooterLogos,
@@ -2833,7 +2843,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	// _CONDOR_<PARAM> environment overrides last, so a harness can
 	// point a throwaway demo server at a bundle directory without
 	// writing a configuration file.
-	demoSiteAppsDir, demoSiteAppsReload := loadSiteAppsConfig(cfg, logger)
+	demoSiteAppsDir, demoSiteAppsReload, demoSiteAppsUpload := loadSiteAppsConfig(cfg, logger)
 	demoAppOnlyGroup, _ := cfg.Get("HTTP_API_WEBUI_APP_ONLY_GROUP")
 
 	// Start condor_master
@@ -2994,6 +3004,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		// have something to drive.
 		SiteAppsDir:            demoSiteAppsDir,
 		SiteAppsReloadInterval: demoSiteAppsReload,
+		SiteAppsUpload:         demoSiteAppsUpload,
 		WebUIAppOnlyGroup:      demoAppOnlyGroup,
 		// With a placementd: an account with no access, to show the
 		// request-access flow, and the identity map that sends it there.

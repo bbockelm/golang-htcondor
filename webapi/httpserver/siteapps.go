@@ -37,7 +37,16 @@ func (h *Handler) newSiteAppLibrary(dir string, params *config.Config) *siteapps
 	if dir == "" {
 		return nil
 	}
-	lib := siteapps.NewLibrary(dir, siteAppPolicy(params))
+	// The configuration decides first; what an administrator uploaded
+	// fills in the rest. Kept in that order deliberately -- see
+	// siteapps.Chain.
+	h.siteAppConfig = configPolicyFor(params)
+	h.siteAppUploads = siteapps.NewUploadStore(h.db)
+	var uploads siteapps.PolicySource
+	if p := siteapps.NewDBPolicy(h.db); p != nil {
+		uploads = p
+	}
+	lib := siteapps.NewLibrary(dir, siteapps.Chain{h.siteAppConfig, uploads})
 	// What was served, and when. Absent a database -- the demo server,
 	// most tests -- nothing is recorded and everything else works the
 	// same.
@@ -46,14 +55,14 @@ func (h *Handler) newSiteAppLibrary(dir string, params *config.Config) *siteapps
 	return lib
 }
 
-// siteAppPolicy builds the policy source for a configuration.
+// configPolicyFor builds the configuration-backed policy source.
 //
 // The nil check is load-bearing: a *config.Config that is nil put into
 // a PolicySource interface makes an interface that is NOT nil, so
 // every lookup would call a method on a nil pointer rather than
 // finding no policy. A server with no HTCondor configuration -- demo
 // mode, tests -- declares no apps instead.
-func siteAppPolicy(params *config.Config) siteapps.PolicySource {
+func configPolicyFor(params *config.Config) *siteapps.ConfigPolicy {
 	if params == nil {
 		return siteapps.NewConfigPolicy(nil)
 	}
@@ -73,7 +82,12 @@ func (h *Handler) SetSiteAppPolicy(params *config.Config) {
 	if h.siteApps == nil {
 		return
 	}
-	h.siteApps.SetPolicySource(siteAppPolicy(params))
+	h.siteAppConfig = configPolicyFor(params)
+	var uploads siteapps.PolicySource
+	if p := siteapps.NewDBPolicy(h.db); p != nil {
+		uploads = p
+	}
+	h.siteApps.SetPolicySource(siteapps.Chain{h.siteAppConfig, uploads})
 	h.logSiteAppReload(h.siteApps.Reload())
 }
 

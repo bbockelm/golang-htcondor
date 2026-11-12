@@ -140,6 +140,24 @@ func (l *Library) Get(id string) (*Entry, bool) {
 	return e, ok
 }
 
+// All returns every published app, by id. For the administrator's
+// view, which shows what is served regardless of who is asking.
+func (l *Library) All() []*Entry {
+	snap := l.snap.load()
+	out := make([]*Entry, 0, len(snap.order))
+	for _, id := range snap.order {
+		out = append(out, snap.byID[id])
+	}
+	return out
+}
+
+// ContentDigest is the SHA-256 of the bundle this entry was loaded
+// from, attested or not. Empty for a directory bundle.
+func (e *Entry) ContentDigest() string { return e.bundle.ContentDigest }
+
+// SizeBytes is the bundle file's size; 0 for a directory bundle.
+func (e *Entry) SizeBytes() int64 { return e.bundle.SizeBytes }
+
 // VisibleTo returns the apps these groups may see, in a stable order.
 //
 // The returned slice is freshly built, so a caller may sort or filter
@@ -182,6 +200,23 @@ func (l *Library) Reload() (published int, problems []error) {
 	dirEntries, err := os.ReadDir(l.dir)
 	if err != nil {
 		return 0, []error{fmt.Errorf("read site apps directory %s: %w", l.dir, err)}
+	}
+
+	// A source backed by a database re-reads it here, once, rather
+	// than on every lookup: the scan below asks about each bundle in
+	// turn, and a query apiece would put the database on a path that
+	// is otherwise all local file work.
+	if r, ok := l.policy().(interface {
+		Refresh(context.Context) error
+	}); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), recordTimeout)
+		if err := r.Refresh(ctx); err != nil {
+			// Reported, not fatal: the source keeps its previous
+			// answers, so a transient fault does not withdraw every
+			// app it publishes.
+			problems = append(problems, err)
+		}
+		cancel()
 	}
 
 	old := l.snap.load()
