@@ -551,8 +551,31 @@ func (sf *SubmitFile) appendTransferRequirements(ad *classad.ClassAd, refs map[s
 		answer += " && versioncmp( split(TARGET.CondorVersion)[1], \"8.9.7\" ) >= 0"
 	}
 
-	if boolAttr(ad, "RequireCommonFilesTransfer") {
-		answer += " && TARGET.HasCommonFilesTransfer >= 2"
+	// A job whose input files are transferred once for the whole cluster
+	// needs a machine that can do that, but only if it asked to insist on
+	// one. Both halves are required: require_common_files alone describes
+	// nothing to transfer in common, and common files alone still run on a
+	// machine that transfers them per job.
+	//
+	// The default for the flag comes from configuration, so a pool can turn
+	// the insistence on for every job it accepts.
+	//
+	// This read the ad attribute RequireCommonFilesTransfer until it was
+	// compared against a current condor_submit. No such attribute exists
+	// anywhere in HTCondor, so the clause could never be reached by a submit
+	// file -- only by forcing the attribute on by hand -- and a job that did
+	// ask for common files got a Requirements expression that let it match a
+	// machine unable to honour them.
+	if !refs["hascommonfilestransfer"] {
+		_, hasCommonFiles := ad.Lookup("CommonInputFiles")
+		_, hasCommonCatalogs := ad.Lookup("CommonInputCatalogs")
+		usesCommonFiles := hasCommonFiles || hasCommonCatalogs
+		cfgDefault, _ := sf.cfg.Get("SUBMIT_DEFAULT_REQUIRE_COMMON_FILES")
+		requireCommon := parseBool(cfgDefault, false)
+		requireCommon = sf.submitBool("require_common_files", sf.submitParam("require_common_files", ""), requireCommon)
+		if requireCommon && usesCommonFiles {
+			answer += " && TARGET.HasCommonFilesTransfer >= 2"
+		}
 	}
 
 	// One clause per transfer method the job needs and does not supply

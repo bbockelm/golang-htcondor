@@ -1740,6 +1740,43 @@ func (sf *SubmitFile) resolveTransferMode(inFilesSpecified, outFilesSpecified bo
 	return should, when, nil
 }
 
+// setCommonInputFiles writes CommonInputFiles, the list of input files the
+// schedd may transfer once for a whole cluster rather than once per job.
+//
+// Two spellings reach it. common_input_files is read first and, like any
+// simple keyword, also answers to its own attribute name; transfer_common_input
+// is the newer spelling and has no alternate. A command that expands to nothing
+// counts as unset, so an empty common_input_files falls through to the newer
+// spelling rather than suppressing it.
+//
+// The value is canonicalized rather than stored as written: split on commas
+// with each token trimmed and empties dropped, then rejoined with bare commas.
+// The schedd matches these lists between jobs to decide what it can transfer
+// once, so "a.txt, b.txt" and "a.txt,b.txt" have to come out identical or two
+// jobs asking for the same files look like they asked for different ones.
+//
+// condor_submit writes this only for the cluster ad, and only while
+// AllowCommonInputFiles holds. That flag now starts true and is cleared when
+// the schedd is known to predate 25.14, which is the release that understands
+// the attribute. Nothing here knows a schedd version -- it is settled by the
+// CEDAR session Submit opens, long after the ad is built -- so this matches the
+// default and writes the attribute. Suppressing it for an older schedd is the
+// part that still needs the version plumbed through to ad construction.
+func (sf *SubmitFile) setCommonInputFiles(ad *classad.ClassAd) {
+	raw := sf.submitParam("common_input_files", "CommonInputFiles")
+	if raw == "" {
+		raw = sf.submitParam("transfer_common_input", "")
+	}
+	if raw == "" {
+		return
+	}
+	files := splitSubmitTokens(trimAndStripSubmitQuotes(raw), ",")
+	if len(files) == 0 {
+		return
+	}
+	_ = ad.Set("CommonInputFiles", strings.Join(files, ","))
+}
+
 // setFileTransfer sets file transfer related attributes
 func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	// transfer_input_files - parse comma-separated list.
@@ -1775,6 +1812,8 @@ func (sf *SubmitFile) setFileTransfer(ad *classad.ClassAd) error {
 	if should != stfNo {
 		_ = ad.Set("WhenToTransferOutput", fileTransferOutputName(when))
 	}
+
+	sf.setCommonInputFiles(ad)
 
 	// A container job's image is an input file like any other: once
 	// condor_submit decides to transfer it, it goes on the end of this
