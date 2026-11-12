@@ -3071,6 +3071,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 			httpserver.DefaultJupyterReconnectGraceSec, httpserver.MaxJupyterReconnectGraceSec),
 		InteractiveExtraSubmit: loadInteractiveExtraSubmit(cfg),
 		TemplateGlobalPath:     loadTemplateGlobalPath(cfg),
+		DagmanEnvironment:      demoDagmanEnvironment(configFile),
 		HTCondorConfig:         cfg,
 		// In demo mode, the auto-created `admin` IDP user is a real
 		// admin: the IDP userinfo endpoint emits groups=["admin"]
@@ -3345,11 +3346,44 @@ MEMORY = 2048
 # Logging
 MAX_DEFAULT_LOG = 10000000
 MAX_NUM_DEFAULT_LOG = 3
+
+# A demo lives entirely under a temporary directory, which on Linux is
+# /tmp, and DAGMan treats a default node log under /tmp as a fatal
+# error -- so that location alone aborts every workflow in its first
+# second, before a node is submitted. The knob turns off that one
+# check and nothing else.
+#
+# DAGMan only reads this file at all because the manager job is given
+# CONDOR_CONFIG; see DagmanEnvironment where the server is built.
+DAGMAN_AVOID_SLASH_TMP = FALSE
 %s%s`, localDir, releaseDir, sbinLine, libexecLine, placement.daemonListEntry(), sshTemplateLine, placement.condorConfig(),
 		demoGenericOSUsersConfig(os.Geteuid()))
 
 	//nolint:gosec // Config file needs to be readable by condor daemons
 	return os.WriteFile(configFile, []byte(config), 0644)
+}
+
+// demoDagmanEnvironment is the environment a demo's DAGMan manager job
+// needs, which is this demo's own configuration.
+//
+// DAGMan runs as a scheduler-universe job, and the schedd gives such a
+// job only the environment its own ad carries -- it does not inherit
+// this process's. A demo's configuration lives in a generated temporary
+// directory that nothing finds by default, so without this
+// condor_dagman reads the SYSTEM configuration instead: a different
+// pool, different directories, and it refuses the workflow over a node
+// log computed from them. Every DAG submitted to a demo failed in its
+// first second, with the reason only in the manager job's own log.
+//
+// Set from here rather than through HTTP_API_DAGMAN_ENVIRONMENT in the
+// generated config, which is the operator's way to do the same thing:
+// this server parsed its own configuration long before that file was
+// written, so a line in it would never be read.
+func demoDagmanEnvironment(configFile string) map[string]string {
+	if configFile == "" {
+		return nil
+	}
+	return map[string]string{"CONDOR_CONFIG": configFile}
 }
 
 // startCondorMaster starts the condor_master process
