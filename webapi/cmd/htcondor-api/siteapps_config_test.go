@@ -32,7 +32,7 @@ func TestSiteAppsConfigReadsEnvironmentOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.New: %v", err)
 	}
-	gotDir, gotReload := loadSiteAppsConfig(cfg, siteAppsTestLogger(t))
+	gotDir, gotReload, _ := loadSiteAppsConfig(cfg, siteAppsTestLogger(t))
 
 	if gotDir != dir {
 		t.Errorf("dir = %q, want %q", gotDir, dir)
@@ -49,7 +49,7 @@ func TestSiteAppsConfigUnsetIsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.New: %v", err)
 	}
-	if gotDir, _ := loadSiteAppsConfig(cfg, siteAppsTestLogger(t)); gotDir != "" {
+	if gotDir, _, _ := loadSiteAppsConfig(cfg, siteAppsTestLogger(t)); gotDir != "" {
 		t.Errorf("dir = %q, want empty", gotDir)
 	}
 }
@@ -66,9 +66,33 @@ func TestSiteAppsConfigRejectsBadInterval(t *testing.T) {
 		if err != nil {
 			t.Fatalf("config.New: %v", err)
 		}
-		_, gotReload := loadSiteAppsConfig(cfg, siteAppsTestLogger(t))
+		_, gotReload, _ := loadSiteAppsConfig(cfg, siteAppsTestLogger(t))
 		if gotReload != 0 {
 			t.Errorf("interval %q produced %v, want 0 so the default applies", bad, gotReload)
 		}
+	}
+}
+
+// Upload is off unless the site turns it on. An uploaded app runs with
+// the rights of everyone who opens it, so the default has to be the
+// safe one -- and a default that drifted to true would be invisible
+// until somebody used it.
+func TestSiteAppUploadIsOffByDefault(t *testing.T) {
+	t.Setenv("_CONDOR_HTTP_API_SITE_APPS_DIR", t.TempDir())
+	cfg, err := config.New()
+	if err != nil {
+		t.Fatalf("config.New: %v", err)
+	}
+	if _, _, upload := loadSiteAppsConfig(cfg, siteAppsTestLogger(t)); upload {
+		t.Error("upload is enabled without HTTP_API_SITE_APPS_UPLOAD")
+	}
+
+	t.Setenv("_CONDOR_HTTP_API_SITE_APPS_UPLOAD", "true")
+	cfg, err = config.New()
+	if err != nil {
+		t.Fatalf("config.New: %v", err)
+	}
+	if _, _, upload := loadSiteAppsConfig(cfg, siteAppsTestLogger(t)); !upload {
+		t.Error("HTTP_API_SITE_APPS_UPLOAD = true did not enable upload")
 	}
 }

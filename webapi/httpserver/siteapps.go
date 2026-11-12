@@ -37,7 +37,16 @@ func (h *Handler) newSiteAppLibrary(dir string, params *config.Config) *siteapps
 	if dir == "" {
 		return nil
 	}
-	lib := siteapps.NewLibrary(dir, siteAppPolicy(params))
+	// The configuration decides first; what an administrator uploaded
+	// fills in the rest. Kept in that order deliberately -- see
+	// siteapps.Chain.
+	h.siteAppConfig = configPolicyFor(params)
+	h.siteAppUploads = siteapps.NewUploadStore(h.db)
+	var uploads siteapps.PolicySource
+	if p := siteapps.NewDBPolicy(h.db); p != nil {
+		uploads = p
+	}
+	lib := siteapps.NewLibrary(dir, siteapps.Chain{h.siteAppConfig, uploads})
 	// What was served, and when. Absent a database -- the demo server,
 	// most tests -- nothing is recorded and everything else works the
 	// same.
@@ -54,6 +63,12 @@ func (h *Handler) newSiteAppLibrary(dir string, params *config.Config) *siteapps
 // finding no policy. A server with no HTCondor configuration -- demo
 // mode, tests -- declares no apps instead.
 func siteAppPolicy(params *config.Config) siteapps.PolicySource {
+	return configPolicyFor(params)
+}
+
+// configPolicyFor is siteAppPolicy's concrete answer, for the places
+// that need the configuration source by itself.
+func configPolicyFor(params *config.Config) *siteapps.ConfigPolicy {
 	if params == nil {
 		return siteapps.NewConfigPolicy(nil)
 	}
@@ -73,7 +88,12 @@ func (h *Handler) SetSiteAppPolicy(params *config.Config) {
 	if h.siteApps == nil {
 		return
 	}
-	h.siteApps.SetPolicySource(siteAppPolicy(params))
+	h.siteAppConfig = configPolicyFor(params)
+	var uploads siteapps.PolicySource
+	if p := siteapps.NewDBPolicy(h.db); p != nil {
+		uploads = p
+	}
+	h.siteApps.SetPolicySource(siteapps.Chain{h.siteAppConfig, uploads})
 	h.logSiteAppReload(h.siteApps.Reload())
 }
 

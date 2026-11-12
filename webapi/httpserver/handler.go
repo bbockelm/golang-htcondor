@@ -432,7 +432,19 @@ type Handler struct {
 	// siteApps serves operator-deployed static web apps under /site/.
 	// nil when HTTP_API_SITE_APPS_DIR is unset, which leaves the whole
 	// feature -- routes included -- out of the server.
-	siteApps      *siteapps.Library
+	siteApps *siteapps.Library
+	// siteAppConfig is the configuration-backed policy alone. Kept
+	// apart from the library's chained source so the upload path can
+	// ask whether the configuration has already decided an id.
+	siteAppConfig *siteapps.ConfigPolicy
+	// siteAppUploads is the store behind administrator-published
+	// apps; nil without a database.
+	siteAppUploads *siteapps.UploadStore
+	// siteAppUpload is HTTP_API_SITE_APPS_UPLOAD: whether this server
+	// accepts bundles through the web interface at all. Off by
+	// default -- an uploaded app runs with the rights of everyone who
+	// opens it, so it is not implied by administering the server.
+	siteAppUpload bool
 	mcpAdminUsers []string // Authenticated subjects exempt from the MCP owner-scope wrapper
 	// poolQueryPolicy restricts which collector attributes an
 	// unprivileged caller reads. Never nil after NewHandler; an
@@ -1166,6 +1178,10 @@ type HandlerConfig struct {
 	// the directory. Empty disables site apps entirely: no library is
 	// built and no /site/ route is registered.
 	SiteAppsDir string
+	// SiteAppsUpload is HTTP_API_SITE_APPS_UPLOAD: whether
+	// administrators may publish a bundle through the web interface.
+	// False unless the site says otherwise; see siteapps_admin.go.
+	SiteAppsUpload bool
 	// SiteAppsReloadInterval is how often that directory is rescanned,
 	// so dropping a new bundle in place needs no restart and no signal.
 	// Zero selects defaultSiteAppsReload.
@@ -2088,6 +2104,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// runs before there is a context for the rescan goroutine.
 	h.webuiAppOnlyGroups = newGroupSet(cfg.WebUIAppOnlyGroup)
 	h.siteAppsReloadInterval = cfg.SiteAppsReloadInterval
+	h.siteAppUpload = cfg.SiteAppsUpload
 	h.siteApps = h.newSiteAppLibrary(cfg.SiteAppsDir, cfg.HTCondorConfig)
 	h.branding = newBrandingState(logger, brandingOptions{
 		SiteName:    cfg.WebUISiteName,
